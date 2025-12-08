@@ -33,3 +33,6 @@
 # WebAssembly build artifacts
 *.wasm
 !crates/eryx-runtime/python.wasm
+
+# Scratch directory for random experiments
+/scratch
