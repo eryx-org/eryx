@@ -5,7 +5,6 @@
 
 use std::sync::Arc;
 
-use serde_json::Value;
 use tokio::sync::{mpsc, oneshot};
 use wasmtime::component::{Accessor, Component, HasSelf, Linker, ResourceTable};
 use wasmtime::{Config, Engine, Store};
@@ -321,11 +320,6 @@ pub fn parse_trace_event(request: &TraceRequest) -> std::result::Result<TraceEve
         .and_then(|v| v.as_str())
         .unwrap_or("unknown");
 
-    let is_preamble = event_data
-        .get("is_preamble")
-        .and_then(Value::as_bool)
-        .unwrap_or(false);
-
     let context: Option<serde_json::Value> = if request.context_json.is_empty() {
         None
     } else {
@@ -386,7 +380,6 @@ pub fn parse_trace_event(request: &TraceRequest) -> std::result::Result<TraceEve
         lineno: request.lineno,
         event: kind,
         context,
-        is_preamble,
     })
 }
 
@@ -399,13 +392,12 @@ mod tests {
     fn test_parse_trace_event_line() {
         let request = TraceRequest {
             lineno: 42,
-            event_json: r#"{"type": "line", "is_preamble": false}"#.to_string(),
+            event_json: r#"{"type": "line"}"#.to_string(),
             context_json: String::new(),
         };
 
         let event = parse_trace_event(&request).unwrap();
         assert_eq!(event.lineno, 42);
-        assert!(!event.is_preamble);
         assert!(matches!(event.event, crate::trace::TraceEventKind::Line));
     }
 
@@ -413,14 +405,12 @@ mod tests {
     fn test_parse_trace_event_call() {
         let request = TraceRequest {
             lineno: 10,
-            event_json: r#"{"type": "call", "function": "my_func", "is_preamble": true}"#
-                .to_string(),
+            event_json: r#"{"type": "call", "function": "my_func"}"#.to_string(),
             context_json: String::new(),
         };
 
         let event = parse_trace_event(&request).unwrap();
         assert_eq!(event.lineno, 10);
-        assert!(event.is_preamble);
         if let crate::trace::TraceEventKind::Call { function } = &event.event {
             assert_eq!(function, "my_func");
         } else {

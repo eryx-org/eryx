@@ -16,8 +16,12 @@ authors = ["Ben Sully <ben.sully88@gmail.com>"]
 [workspace.dependencies]
 # Async runtime
 tokio = { version = "1", features = ["full"] }
+tokio-stream = "0.1"
 async-trait = "0.1"
 futures = "0.3"
+futures-concurrency = "7.6"
+futures-lite = "2.6"
+lending-stream = "1.0"
 
 # Serialization
 serde = { version = "1.0", features = ["derive"] }

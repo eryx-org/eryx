@@ -14,8 +14,6 @@ pub struct TraceEvent {
     pub event: TraceEventKind,
     /// Optional context data (e.g., locals snapshot).
     pub context: Option<serde_json::Value>,
-    /// Whether this event is from injected preamble code, not user code.
-    pub is_preamble: bool,
 }
 
 /// The kind of trace event.
@@ -80,7 +78,6 @@ mod tests {
             lineno: 42,
             event: TraceEventKind::Line,
             context: None,
-            is_preamble: false,
         };
 
         let json = serde_json::to_string(&event).unwrap_or_default();

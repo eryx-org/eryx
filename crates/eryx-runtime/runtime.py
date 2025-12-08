@@ -41,9 +41,6 @@ class WitWorld(wit_world.WitWorld):
         old_stdout = sys.stdout
         old_stderr = sys.stderr
 
-        # Track current line for tracing
-        current_preamble_lines = 0
-
         try:
             # Capture stdout
             sys.stdout = StringIO()
@@ -118,45 +115,48 @@ class WitWorld(wit_world.WitWorld):
             # Trace function for sys.settrace
             def trace_func(frame, event, arg):
                 """Trace function called by Python for each execution event."""
-                lineno = frame.f_lineno
+                filename = frame.f_code.co_filename
 
-                # Determine if we're in preamble code
-                is_preamble = frame.f_code.co_filename != "<string>"
+                # Only trace user code (compiled as "<string>")
+                # Skip all internal library code, asyncio internals, etc.
+                if filename != "<string>":
+                    # Return trace_func to continue tracing (needed to catch
+                    # when execution returns to user code), but don't report
+                    return trace_func
+
+                lineno = frame.f_lineno
+                func_name = frame.f_code.co_name
+
+                # Skip internal functions that start with underscore
+                # (except <module> which is the main code block)
+                if func_name.startswith("_") and func_name != "<module>":
+                    return trace_func
 
                 if event == "line":
                     wit_world.report_trace(
                         lineno,
-                        json.dumps({"type": "line", "is_preamble": is_preamble}),
+                        json.dumps({"type": "line"}),
                         "",
                     )
                 elif event == "call":
-                    func_name = frame.f_code.co_name
                     wit_world.report_trace(
                         lineno,
-                        json.dumps(
-                            {
-                                "type": "call",
-                                "function": func_name,
-                                "is_preamble": is_preamble,
-                            }
-                        ),
+                        json.dumps({"type": "call", "function": func_name}),
                         "",
                     )
                 elif event == "return":
-                    func_name = frame.f_code.co_name
                     wit_world.report_trace(
                         lineno,
-                        json.dumps(
-                            {
-                                "type": "return",
-                                "function": func_name,
-                                "is_preamble": is_preamble,
-                            }
-                        ),
+                        json.dumps({"type": "return", "function": func_name}),
                         "",
                     )
                 elif event == "exception":
                     exc_type, exc_value, _ = arg
+                    # Filter out StopIteration - it's normal async control flow,
+                    # not a real exception. When an awaited value returns, Python
+                    # internally "throws" a StopIteration with the result.
+                    if exc_type is StopIteration:
+                        return trace_func
                     wit_world.report_trace(
                         lineno,
                         json.dumps(
@@ -166,7 +166,6 @@ class WitWorld(wit_world.WitWorld):
                                 if exc_type
                                 else "Unknown",
                                 "message": str(exc_value) if exc_value else "",
-                                "is_preamble": is_preamble,
                             }
                         ),
                         "",
@@ -208,8 +207,7 @@ class WitWorld(wit_world.WitWorld):
             # Enable tracing
             # Note: sys.settrace doesn't work well with async code, so we only
             # trace synchronous portions. Callback start/end is traced explicitly.
-            # Uncomment if sync tracing is desired:
-            # sys.settrace(trace_func)
+            sys.settrace(trace_func)
 
             try:
                 # CO_COROUTINE flag (0x80) indicates code contains top-level await

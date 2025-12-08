@@ -31,8 +31,12 @@
 /criterion/
 
 # WebAssembly build artifacts
-*.wasm
-!crates/eryx-runtime/python.wasm
+crates/eryx-runtime/runtime.wasm
+crates/eryx-runtime/guest_bindings/
+crates/eryx-runtime/__pycache__/
+
+# Python virtual environments (componentize-py)
+crates/eryx-runtime/.venv/
 
 # Scratch directory for random experiments
 /scratch
