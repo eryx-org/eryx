@@ -1,0 +1,62 @@
+[workspace]
+resolver = "2"
+members = ["crates/*"]
+
+# Dev tools (install via cargo or mise):
+# - cargo-nextest: Fast test runner (`cargo nextest run`)
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/sd2k/eryx"
+authors = ["Ben Sully <ben.sully88@gmail.com>"]
+
+[workspace.dependencies]
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+async-trait = "0.1"
+futures = "0.3"
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# Error handling
+thiserror = "2.0"
+anyhow = "1.0"
+
+# WebAssembly runtime
+wasmtime = { version = "33", features = ["component-model", "async"] }
+
+# Utilities
+tracing = "0.1"
+
+# Internal crates
+eryx = { path = "crates/eryx" }
+
+[workspace.lints.rust]
+missing_debug_implementations = "warn"
+missing_docs = "warn"
+# Priority -1 ensures this lint group is applied before individual lints,
+# avoiding clippy::lint_groups_priority warning about ambiguous ordering.
+rust_2018_idioms = { level = "warn", priority = -1 }
+unreachable_pub = "warn"
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+all = "warn"
+pedantic = "warn"
+nursery = "warn"
+unwrap_used = "warn"
+expect_used = "warn"
+
+# See https://nnethercote.github.io/perf-book/build-configuration.html
+[profile.release]
+codegen-units = 1
+lto = false
+
+[profile.profiling]
+inherits = "release"
+debug = true

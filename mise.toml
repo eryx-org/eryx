@@ -1,0 +1,48 @@
+[tools]
+# Profile "default" includes rustc, rust-std, cargo, rust-docs, rustfmt, and clippy
+rust = { version = "1.85", profile = "default" }
+"cargo:cargo-nextest" = "latest"
+
+[tasks.check]
+description = "Run cargo check"
+run = "cargo check --workspace"
+
+[tasks.build]
+description = "Build all crates"
+run = "cargo build --workspace"
+
+[tasks.test]
+description = "Run tests with nextest"
+run = "cargo nextest run --workspace"
+
+[tasks.test-all]
+description = "Run tests with all features"
+run = "cargo nextest run --workspace --all-features"
+
+[tasks.lint]
+description = "Run clippy lints"
+run = "cargo clippy --workspace --all-targets --all-features -- -D warnings"
+
+[tasks.fmt]
+description = "Format code"
+run = "cargo fmt --all"
+
+[tasks.fmt-check]
+description = "Check code formatting"
+run = "cargo fmt --all -- --check"
+
+[tasks.doc]
+description = "Generate documentation"
+run = "cargo doc --workspace --no-deps"
+
+[tasks.doc-open]
+description = "Generate and open documentation"
+run = "cargo doc --workspace --no-deps --open"
+
+[tasks.ci]
+description = "Run all CI checks"
+depends = ["fmt-check", "lint", "test"]
+
+[tasks.clean]
+description = "Clean build artifacts"
+run = "cargo clean"
