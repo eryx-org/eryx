@@ -1,0 +1,61 @@
+package eryx:sandbox@0.1.0;
+
+/// The eryx sandbox runtime world.
+///
+/// This defines the interface between the host (Rust) and the guest (Python WASM).
+/// The guest can invoke callbacks on the host, list available callbacks, and report
+/// trace events. The host calls the guest's execute function to run Python code.
+world sandbox {
+    /// Invoke a callback by name with JSON arguments.
+    ///
+    /// This is an async function that Python code can await:
+    ///   result = await invoke("callback_name", '{"arg": "value"}')
+    ///
+    /// Multiple invocations can run in parallel via asyncio.gather():
+    ///   results = await asyncio.gather(
+    ///       invoke("query", '{"q": "a"}'),
+    ///       invoke("query", '{"q": "b"}'),
+    ///   )
+    ///
+    /// Returns the callback result as a JSON string on success,
+    /// or an error message on failure.
+    import invoke: async func(name: string, arguments-json: string) -> result<string, string>;
+
+    /// List all available callbacks for introspection.
+    ///
+    /// Python code can discover what callbacks are available:
+    ///   callbacks = list_callbacks()
+    ///   for cb in callbacks:
+    ///       print(f"{cb['name']}: {cb['description']}")
+    import list-callbacks: func() -> list<callback-info>;
+
+    /// Report a trace event to the host.
+    ///
+    /// Called by the Python runtime's sys.settrace hook to report
+    /// execution progress. The host can use this for visualization,
+    /// debugging, or progress tracking.
+    ///
+    /// - lineno: Line number in the source code
+    /// - event: Event type as JSON (e.g., {"type": "line"} or {"type": "call", "function": "foo"})
+    /// - context-json: Optional context data (e.g., local variables snapshot)
+    import report-trace: func(lineno: u32, event-json: string, context-json: string);
+
+    /// Callback metadata returned by list-callbacks.
+    record callback-info {
+        /// Unique name for this callback (e.g., "http.get", "grafana.prometheus").
+        name: string,
+        /// Human-readable description of what this callback does.
+        description: string,
+        /// JSON Schema for expected arguments.
+        parameters-schema-json: string,
+    }
+
+    /// Execute Python code in the sandbox.
+    ///
+    /// The code can use top-level await directly:
+    ///   result = await invoke("get_time", "{}")
+    ///   print(result)
+    ///
+    /// Returns captured stdout on success, or an error message on failure.
+    export execute: async func(code: string) -> result<string, string>;
+}

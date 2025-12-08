@@ -27,8 +27,9 @@ serde_json = "1.0"
 thiserror = "2.0"
 anyhow = "1.0"
 
-# WebAssembly runtime
-wasmtime = { version = "33", features = ["component-model", "async"] }
+# WebAssembly runtime (v39+ required for async component model)
+wasmtime = { version = "39", features = ["component-model", "async"] }
+wasmtime-wasi = "39"
 
 # Utilities
 tracing = "0.1"
@@ -42,7 +43,6 @@ missing_docs = "warn"
 # Priority -1 ensures this lint group is applied before individual lints,
 # avoiding clippy::lint_groups_priority warning about ambiguous ordering.
 rust_2018_idioms = { level = "warn", priority = -1 }
-unreachable_pub = "warn"
 unsafe_code = "forbid"
 
 [workspace.lints.clippy]

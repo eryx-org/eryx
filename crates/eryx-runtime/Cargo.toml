@@ -1,0 +1,21 @@
+[package]
+name = "eryx-runtime"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Python WASM runtime component for the eryx sandbox"
+readme = "README.md"
+
+# This crate primarily contains the WIT definition and Python runtime source.
+# The actual WASM component is built externally using componentize-py.
+# This crate provides build utilities and embeds the pre-built component.
+
+[dependencies]
+
+[build-dependencies]
+
+[lints]
+workspace = true

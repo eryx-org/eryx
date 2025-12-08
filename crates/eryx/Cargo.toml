@@ -12,13 +12,14 @@ keywords = ["python", "sandbox", "wasm", "webassembly", "async"]
 categories = ["development-tools", "wasm"]
 
 [dependencies]
-tokio.workspace = true
+tokio = { workspace = true, features = ["sync"] }
 async-trait.workspace = true
 futures.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 wasmtime.workspace = true
+wasmtime-wasi.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
