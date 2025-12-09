@@ -40,6 +40,7 @@ wasmtime-wasi = "39"
 
 # Utilities
 tracing = "0.1"
+crossterm = "0.28"
 
 # Benchmarking
 criterion = { version = "0.5", features = ["async_tokio"] }

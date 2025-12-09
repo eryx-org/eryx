@@ -23,6 +23,10 @@ required-features = ["embedded-runtime"]
 name = "precompile"
 required-features = ["precompiled"]
 
+[[example]]
+name = "trace_events"
+required-features = ["embedded-runtime"]
+
 [features]
 default = []
 # Enable loading pre-compiled WASM components. This feature enables unsafe code paths
@@ -51,6 +55,7 @@ tracing.workspace = true
 async-trait.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 criterion.workspace = true
+crossterm.workspace = true
 
 [build-dependencies]
 wasmtime = { workspace = true, optional = true }

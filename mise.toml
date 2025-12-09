@@ -101,6 +101,11 @@ depends = ["build-wasm", "build"]
 description = "Check compilation on minimum supported Rust version"
 run = "cargo +1.89 check --workspace"
 
+[tasks.example-demo]
+description = "Run the demo example"
+depends = ["build-wasm"]
+run = "cargo run --example trace_events --features embedded-runtime"
+
 [tasks.examples]
 description = "Run all examples"
 depends = ["build-wasm"]
