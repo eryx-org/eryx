@@ -13,11 +13,7 @@ description = "Build all crates"
 run = "cargo build --workspace"
 
 [tasks.test]
-description = "Run tests with nextest"
-run = "cargo nextest run --workspace"
-
-[tasks.test-fast]
-description = "Run tests with precompiled WASM (much faster)"
+description = "Run tests with precompiled WASM"
 depends = ["precompile-wasm"]
 run = "cargo nextest run --workspace --features precompiled"
 
@@ -47,7 +43,7 @@ run = "cargo doc --workspace --no-deps --open"
 
 [tasks.ci]
 description = "Run all CI checks"
-depends = ["fmt-check", "lint", "test-fast"]
+depends = ["fmt-check", "lint", "test"]
 
 [tasks.clean]
 description = "Clean build artifacts"
@@ -88,8 +84,7 @@ run = """
 echo "✓ Development environment ready!"
 echo ""
 echo "Available commands:"
-echo "  mise run test-fast  - Run tests with precompiled WASM (~0.1s)"
-echo "  mise run test       - Run tests without precompilation (~50s)"
+echo "  mise run test       - Run tests (~0.1s with precompiled WASM)"
 echo "  mise run ci         - Run all CI checks"
 echo "  mise run build-all  - Build WASM and Rust crates"
 """

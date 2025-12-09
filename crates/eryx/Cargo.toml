@@ -39,6 +39,7 @@ tokio = { workspace = true, features = ["sync"] }
 anyhow.workspace = true
 async-trait.workspace = true
 futures.workspace = true
+schemars.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true

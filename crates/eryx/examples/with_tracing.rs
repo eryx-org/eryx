@@ -10,17 +10,28 @@ use std::pin::Pin;
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use async_trait::async_trait;
+use eryx::schemars::JsonSchema;
 use eryx::{
-    Callback, CallbackError, OutputHandler, Sandbox, TraceEvent, TraceEventKind, TraceHandler,
+    CallbackError, OutputHandler, Sandbox, TraceEvent, TraceEventKind, TraceHandler, TypedCallback,
 };
+use serde::Deserialize;
 use serde_json::{Value, json};
+
+/// Arguments for the slow operation callback.
+#[derive(Deserialize, JsonSchema)]
+struct SlowOperationArgs {
+    /// A value to process
+    value: i64,
+}
 
 /// A callback that simulates some work with a delay.
 struct SlowCallback {
     delay_ms: u64,
 }
 
-impl Callback for SlowCallback {
+impl TypedCallback for SlowCallback {
+    type Args = SlowOperationArgs;
+
     fn name(&self) -> &str {
         "slow_operation"
     }
@@ -29,34 +40,16 @@ impl Callback for SlowCallback {
         "Simulates a slow operation that takes time to complete"
     }
 
-    fn parameters_schema(&self) -> Value {
-        json!({
-            "type": "object",
-            "properties": {
-                "value": {
-                    "type": "integer",
-                    "description": "A value to process"
-                }
-            },
-            "required": ["value"]
-        })
-    }
-
-    fn invoke(
+    fn invoke_typed(
         &self,
-        args: Value,
+        args: SlowOperationArgs,
     ) -> Pin<Box<dyn Future<Output = Result<Value, CallbackError>> + Send + '_>> {
         let delay_ms = self.delay_ms;
         Box::pin(async move {
-            let value = args
-                .get("value")
-                .and_then(serde_json::Value::as_i64)
-                .ok_or_else(|| CallbackError::InvalidArguments("missing 'value' field".into()))?;
-
             // Simulate work
             tokio::time::sleep(tokio::time::Duration::from_millis(delay_ms)).await;
 
-            Ok(json!({ "result": value * 2 }))
+            Ok(json!({ "result": args.value * 2 }))
         })
     }
 }

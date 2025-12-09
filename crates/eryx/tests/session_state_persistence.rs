@@ -5,35 +5,24 @@
 //!
 //! ## Running Tests
 //!
-//! For **fastest execution** (~3s), use precompiled WASM:
+//! Use `mise run test` which automatically handles precompilation:
 //! ```sh
-//! # First, generate the precompiled WASM (one-time setup)
-//! cargo run --example precompile --features precompiled
-//!
-//! # Then run tests with precompiled feature
-//! cargo nextest run --test session_state_persistence --features precompiled
+//! mise run setup  # One-time: build WASM + precompile
+//! mise run test   # Run tests with precompiled WASM (~0.1s)
 //! ```
 //!
-//! Alternatively, use `cargo test` with single-threaded mode (~10s):
+//! Or manually with cargo:
 //! ```sh
-//! cargo test --test session_state_persistence -- --test-threads=1
+//! cargo nextest run --workspace --features precompiled
 //! ```
-//!
-//! This shares the compiled WASM across all tests via `OnceLock`.
-//!
-//! With `cargo nextest` without precompiled feature, each test runs in a
-//! separate process, so WASM is compiled once per test (~5s each), making
-//! the total ~50s. This is expected behavior due to nextest's process-per-test
-//! isolation model.
 
 use std::path::PathBuf;
 use std::sync::{Arc, OnceLock};
 
 use eryx::{PythonExecutor, PythonStateSnapshot, SessionExecutor};
 
-/// Shared executor to avoid repeated WASM compilation across tests.
-/// WASM compilation takes ~4-5 seconds, so sharing it speeds up tests significantly.
-/// With precompiled WASM, loading takes ~50ms instead.
+/// Shared executor to avoid repeated WASM loading across tests.
+/// With precompiled WASM (the default), loading takes ~50ms.
 static SHARED_EXECUTOR: OnceLock<Arc<PythonExecutor>> = OnceLock::new();
 
 fn get_shared_executor() -> Arc<PythonExecutor> {

@@ -14,16 +14,20 @@
 
 use std::future::Future;
 use std::pin::Pin;
+use std::time::Duration;
 
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
-use eryx::{Callback, CallbackError, Sandbox};
+use eryx::schemars::JsonSchema;
+use eryx::{CallbackError, Sandbox, TypedCallback};
+use serde::Deserialize;
 use serde_json::{Value, json};
-use std::time::Duration;
 
 /// A no-op callback that returns immediately.
 struct NoopCallback;
 
-impl Callback for NoopCallback {
+impl TypedCallback for NoopCallback {
+    type Args = ();
+
     fn name(&self) -> &str {
         "noop"
     }
@@ -32,26 +36,27 @@ impl Callback for NoopCallback {
         "A no-op callback that returns immediately"
     }
 
-    fn parameters_schema(&self) -> Value {
-        json!({
-            "type": "object",
-            "properties": {},
-            "required": []
-        })
-    }
-
-    fn invoke(
+    fn invoke_typed(
         &self,
-        _args: Value,
+        _args: (),
     ) -> Pin<Box<dyn Future<Output = Result<Value, CallbackError>> + Send + '_>> {
         Box::pin(async move { Ok(json!({"ok": true})) })
     }
 }
 
+/// Arguments for the echo callback.
+#[derive(Deserialize, JsonSchema)]
+struct EchoArgs {
+    /// Data to echo back
+    data: Value,
+}
+
 /// A callback that echoes back its input.
 struct EchoCallback;
 
-impl Callback for EchoCallback {
+impl TypedCallback for EchoCallback {
+    type Args = EchoArgs;
+
     fn name(&self) -> &str {
         "echo"
     }
@@ -60,31 +65,27 @@ impl Callback for EchoCallback {
         "Echoes back the input"
     }
 
-    fn parameters_schema(&self) -> Value {
-        json!({
-            "type": "object",
-            "properties": {
-                "data": { "description": "Data to echo back" }
-            },
-            "required": ["data"]
-        })
-    }
-
-    fn invoke(
+    fn invoke_typed(
         &self,
-        args: Value,
+        args: EchoArgs,
     ) -> Pin<Box<dyn Future<Output = Result<Value, CallbackError>> + Send + '_>> {
-        Box::pin(async move {
-            let data = args.get("data").cloned().unwrap_or_default();
-            Ok(data)
-        })
+        Box::pin(async move { Ok(args.data) })
     }
+}
+
+/// Arguments for the work callback.
+#[derive(Deserialize, JsonSchema)]
+struct WorkArgs {
+    /// Milliseconds to sleep
+    ms: u64,
 }
 
 /// A callback that simulates work with a small delay.
 struct WorkCallback;
 
-impl Callback for WorkCallback {
+impl TypedCallback for WorkCallback {
+    type Args = WorkArgs;
+
     fn name(&self) -> &str {
         "work"
     }
@@ -93,24 +94,13 @@ impl Callback for WorkCallback {
         "Simulates async work"
     }
 
-    fn parameters_schema(&self) -> Value {
-        json!({
-            "type": "object",
-            "properties": {
-                "ms": { "type": "number", "description": "Milliseconds to sleep" }
-            },
-            "required": ["ms"]
-        })
-    }
-
-    fn invoke(
+    fn invoke_typed(
         &self,
-        args: Value,
+        args: WorkArgs,
     ) -> Pin<Box<dyn Future<Output = Result<Value, CallbackError>> + Send + '_>> {
         Box::pin(async move {
-            let ms = args.get("ms").and_then(|v| v.as_u64()).unwrap_or(1);
-            tokio::time::sleep(tokio::time::Duration::from_millis(ms)).await;
-            Ok(json!({"slept_ms": ms}))
+            tokio::time::sleep(tokio::time::Duration::from_millis(args.ms)).await;
+            Ok(json!({"slept_ms": args.ms}))
         })
     }
 }

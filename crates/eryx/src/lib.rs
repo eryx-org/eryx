@@ -49,7 +49,9 @@ pub mod session;
 mod trace;
 mod wasm;
 
-pub use callback::{Callback, CallbackError};
+pub use callback::{
+    Callback, CallbackError, DynamicCallback, DynamicCallbackBuilder, TypedCallback, empty_schema,
+};
 pub use error::Error;
 pub use library::RuntimeLibrary;
 pub use sandbox::{ExecuteResult, ExecuteStats, ResourceLimits, Sandbox, SandboxBuilder};
@@ -61,3 +63,6 @@ pub use trace::{OutputHandler, TraceEvent, TraceEventKind, TraceHandler};
 
 // Re-export precompilation utilities and internal types
 pub use wasm::{ExecutionOutput, PythonExecutor};
+
+// Re-export schemars for users to derive JsonSchema on their argument types
+pub use schemars;

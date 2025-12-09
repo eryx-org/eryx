@@ -563,7 +563,8 @@ impl PythonExecutor {
             .map(|cb| HostCallbackInfo {
                 name: cb.name().to_string(),
                 description: cb.description().to_string(),
-                parameters_schema_json: cb.parameters_schema().to_string(),
+                parameters_schema_json: serde_json::to_string(&cb.parameters_schema())
+                    .unwrap_or_else(|_| "{}".to_string()),
             })
             .collect();
 

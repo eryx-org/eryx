@@ -12,8 +12,17 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Instant;
 
-use eryx::{Callback, CallbackError, Sandbox};
+use eryx::schemars::JsonSchema;
+use eryx::{CallbackError, Sandbox, TypedCallback};
+use serde::Deserialize;
 use serde_json::{Value, json};
+
+/// Arguments for the sleep callback.
+#[derive(Deserialize, JsonSchema)]
+struct SleepArgs {
+    /// Duration to sleep in milliseconds
+    ms: u64,
+}
 
 /// A callback that sleeps for a specified duration.
 struct SleepCallback {
@@ -32,7 +41,9 @@ impl SleepCallback {
     }
 }
 
-impl Callback for SleepCallback {
+impl TypedCallback for SleepCallback {
+    type Args = SleepArgs;
+
     fn name(&self) -> &str {
         "sleep"
     }
@@ -41,22 +52,9 @@ impl Callback for SleepCallback {
         "Sleeps for the specified number of milliseconds"
     }
 
-    fn parameters_schema(&self) -> Value {
-        json!({
-            "type": "object",
-            "properties": {
-                "ms": {
-                    "type": "integer",
-                    "description": "Duration to sleep in milliseconds"
-                }
-            },
-            "required": ["ms"]
-        })
-    }
-
-    fn invoke(
+    fn invoke_typed(
         &self,
-        args: Value,
+        args: SleepArgs,
     ) -> Pin<Box<dyn Future<Output = Result<Value, CallbackError>> + Send + '_>> {
         // Increment concurrent count at start
         let current = self.concurrent_count.fetch_add(1, Ordering::SeqCst) + 1;
@@ -67,18 +65,13 @@ impl Callback for SleepCallback {
         let concurrent_count = self.concurrent_count.clone();
 
         Box::pin(async move {
-            let ms = args
-                .get("ms")
-                .and_then(serde_json::Value::as_u64)
-                .ok_or_else(|| CallbackError::InvalidArguments("missing 'ms' field".into()))?;
-
             // Sleep for the specified duration
-            tokio::time::sleep(tokio::time::Duration::from_millis(ms)).await;
+            tokio::time::sleep(tokio::time::Duration::from_millis(args.ms)).await;
 
             // Decrement concurrent count at end
             concurrent_count.fetch_sub(1, Ordering::SeqCst);
 
-            Ok(json!({ "slept_ms": ms }))
+            Ok(json!({ "slept_ms": args.ms }))
         })
     }
 }

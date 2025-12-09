@@ -11,13 +11,24 @@ use std::future::Future;
 use std::pin::Pin;
 use std::time::Duration;
 
-use eryx::{Callback, CallbackError, ResourceLimits, Sandbox};
+use eryx::schemars::JsonSchema;
+use eryx::{CallbackError, ResourceLimits, Sandbox, TypedCallback};
+use serde::Deserialize;
 use serde_json::{Value, json};
+
+/// Arguments for the sleep callback.
+#[derive(Deserialize, JsonSchema)]
+struct SleepArgs {
+    /// Milliseconds to sleep
+    ms: u64,
+}
 
 /// A callback that sleeps for a specified duration.
 struct Sleep;
 
-impl Callback for Sleep {
+impl TypedCallback for Sleep {
+    type Args = SleepArgs;
+
     fn name(&self) -> &str {
         "sleep"
     }
@@ -26,39 +37,30 @@ impl Callback for Sleep {
         "Sleeps for the specified number of milliseconds"
     }
 
-    fn parameters_schema(&self) -> Value {
-        json!({
-            "type": "object",
-            "properties": {
-                "ms": {
-                    "type": "integer",
-                    "description": "Milliseconds to sleep"
-                }
-            },
-            "required": ["ms"]
-        })
-    }
-
-    fn invoke(
+    fn invoke_typed(
         &self,
-        args: Value,
+        args: SleepArgs,
     ) -> Pin<Box<dyn Future<Output = Result<Value, CallbackError>> + Send + '_>> {
         Box::pin(async move {
-            let ms = args
-                .get("ms")
-                .and_then(|v| v.as_u64())
-                .ok_or_else(|| CallbackError::InvalidArguments("missing 'ms' field".into()))?;
-
-            tokio::time::sleep(Duration::from_millis(ms)).await;
-            Ok(json!({"slept_ms": ms}))
+            tokio::time::sleep(Duration::from_millis(args.ms)).await;
+            Ok(json!({"slept_ms": args.ms}))
         })
     }
+}
+
+/// Arguments for the counter callback.
+#[derive(Deserialize, JsonSchema)]
+struct CountArgs {
+    /// The count value to echo back
+    n: i64,
 }
 
 /// A simple counter callback for demonstrating invocation limits.
 struct Counter;
 
-impl Callback for Counter {
+impl TypedCallback for Counter {
+    type Args = CountArgs;
+
     fn name(&self) -> &str {
         "count"
     }
@@ -67,27 +69,11 @@ impl Callback for Counter {
         "Returns an incrementing count (stateless, just returns the input)"
     }
 
-    fn parameters_schema(&self) -> Value {
-        json!({
-            "type": "object",
-            "properties": {
-                "n": {
-                    "type": "integer",
-                    "description": "The count value to echo back"
-                }
-            },
-            "required": ["n"]
-        })
-    }
-
-    fn invoke(
+    fn invoke_typed(
         &self,
-        args: Value,
+        args: CountArgs,
     ) -> Pin<Box<dyn Future<Output = Result<Value, CallbackError>> + Send + '_>> {
-        Box::pin(async move {
-            let n = args.get("n").and_then(|v| v.as_i64()).unwrap_or(0);
-            Ok(json!({"count": n}))
-        })
+        Box::pin(async move { Ok(json!({"count": args.n})) })
     }
 }
 

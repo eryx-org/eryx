@@ -8,13 +8,24 @@
 use std::future::Future;
 use std::pin::Pin;
 
-use eryx::{Callback, CallbackError, Sandbox};
+use eryx::schemars::JsonSchema;
+use eryx::{CallbackError, Sandbox, TypedCallback};
+use serde::Deserialize;
 use serde_json::{Value, json};
+
+/// Arguments for the failing callback.
+#[derive(Deserialize, JsonSchema)]
+struct FailArgs {
+    /// Error message to return
+    message: String,
+}
 
 /// A callback that always fails.
 struct FailingCallback;
 
-impl Callback for FailingCallback {
+impl TypedCallback for FailingCallback {
+    type Args = FailArgs;
+
     fn name(&self) -> &str {
         "fail"
     }
@@ -23,38 +34,27 @@ impl Callback for FailingCallback {
         "A callback that always returns an error"
     }
 
-    fn parameters_schema(&self) -> Value {
-        json!({
-            "type": "object",
-            "properties": {
-                "message": {
-                    "type": "string",
-                    "description": "Error message to return"
-                }
-            },
-            "required": ["message"]
-        })
-    }
-
-    fn invoke(
+    fn invoke_typed(
         &self,
-        args: Value,
+        args: FailArgs,
     ) -> Pin<Box<dyn Future<Output = Result<Value, CallbackError>> + Send + '_>> {
-        Box::pin(async move {
-            let message = args
-                .get("message")
-                .and_then(Value::as_str)
-                .unwrap_or("Unknown error");
-
-            Err(CallbackError::ExecutionFailed(message.to_string()))
-        })
+        Box::pin(async move { Err(CallbackError::ExecutionFailed(args.message)) })
     }
+}
+
+/// Arguments for the validating callback.
+#[derive(Deserialize, JsonSchema)]
+struct ValidateArgs {
+    /// A value between 0 and 100
+    value: i64,
 }
 
 /// A callback that validates its arguments.
 struct ValidatingCallback;
 
-impl Callback for ValidatingCallback {
+impl TypedCallback for ValidatingCallback {
+    type Args = ValidateArgs;
+
     fn name(&self) -> &str {
         "validate"
     }
@@ -63,47 +63,24 @@ impl Callback for ValidatingCallback {
         "A callback that validates its arguments strictly"
     }
 
-    fn parameters_schema(&self) -> Value {
-        json!({
-            "type": "object",
-            "properties": {
-                "value": {
-                    "type": "integer",
-                    "minimum": 0,
-                    "maximum": 100,
-                    "description": "A value between 0 and 100"
-                }
-            },
-            "required": ["value"]
-        })
-    }
-
-    fn invoke(
+    fn invoke_typed(
         &self,
-        args: Value,
+        args: ValidateArgs,
     ) -> Pin<Box<dyn Future<Output = Result<Value, CallbackError>> + Send + '_>> {
         Box::pin(async move {
-            let value = args
-                .get("value")
-                .ok_or_else(|| CallbackError::InvalidArguments("missing 'value' field".into()))?
-                .as_i64()
-                .ok_or_else(|| {
-                    CallbackError::InvalidArguments("'value' must be an integer".into())
-                })?;
-
-            if value < 0 {
+            if args.value < 0 {
                 return Err(CallbackError::InvalidArguments(
                     "value must be non-negative".into(),
                 ));
             }
 
-            if value > 100 {
+            if args.value > 100 {
                 return Err(CallbackError::InvalidArguments(
                     "value must not exceed 100".into(),
                 ));
             }
 
-            Ok(json!({ "validated": value }))
+            Ok(json!({ "validated": args.value }))
         })
     }
 }

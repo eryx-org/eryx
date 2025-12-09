@@ -1,17 +1,28 @@
 //! Simple example demonstrating basic Python execution in the sandbox.
 //!
+//! This example shows two ways to define callbacks:
+//! - `GetTime`: Uses `TypedCallback` for strongly-typed, zero-argument callbacks
+//! - `Echo`: Uses `TypedCallback` with a typed argument struct
+//!
 //! Run with: `cargo run --example simple`
 
 use std::future::Future;
 use std::pin::Pin;
 
-use eryx::{Callback, CallbackError, Sandbox};
+use eryx::schemars::JsonSchema;
+use eryx::{CallbackError, Sandbox, TypedCallback};
+use serde::Deserialize;
 use serde_json::{Value, json};
 
 /// A simple callback that returns the current Unix timestamp.
+///
+/// This demonstrates `TypedCallback` with no arguments (using `()` as the Args type).
 struct GetTime;
 
-impl Callback for GetTime {
+impl TypedCallback for GetTime {
+    // Unit type for callbacks that take no arguments
+    type Args = ();
+
     fn name(&self) -> &str {
         "get_time"
     }
@@ -20,17 +31,9 @@ impl Callback for GetTime {
         "Returns the current Unix timestamp in seconds"
     }
 
-    fn parameters_schema(&self) -> Value {
-        json!({
-            "type": "object",
-            "properties": {},
-            "required": []
-        })
-    }
-
-    fn invoke(
+    fn invoke_typed(
         &self,
-        _args: Value,
+        _args: (),
     ) -> Pin<Box<dyn Future<Output = Result<Value, CallbackError>> + Send + '_>> {
         Box::pin(async move {
             let now = std::time::SystemTime::now()
@@ -42,10 +45,25 @@ impl Callback for GetTime {
     }
 }
 
+/// Strongly-typed arguments for the Echo callback.
+///
+/// The `JsonSchema` derive automatically generates the JSON Schema
+/// that will be exposed to Python and LLMs for introspection.
+#[derive(Deserialize, JsonSchema)]
+struct EchoArgs {
+    /// The message to echo back
+    message: String,
+}
+
 /// A callback that echoes back the input arguments.
+///
+/// This demonstrates `TypedCallback` with a typed argument struct.
+/// The schema is automatically generated from `EchoArgs`.
 struct Echo;
 
-impl Callback for Echo {
+impl TypedCallback for Echo {
+    type Args = EchoArgs;
+
     fn name(&self) -> &str {
         "echo"
     }
@@ -54,30 +72,13 @@ impl Callback for Echo {
         "Echoes back the provided message"
     }
 
-    fn parameters_schema(&self) -> Value {
-        json!({
-            "type": "object",
-            "properties": {
-                "message": {
-                    "type": "string",
-                    "description": "The message to echo"
-                }
-            },
-            "required": ["message"]
-        })
-    }
-
-    fn invoke(
+    fn invoke_typed(
         &self,
-        args: Value,
+        args: EchoArgs,
     ) -> Pin<Box<dyn Future<Output = Result<Value, CallbackError>> + Send + '_>> {
         Box::pin(async move {
-            let message = args
-                .get("message")
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| CallbackError::InvalidArguments("missing 'message' field".into()))?;
-
-            Ok(json!({ "echoed": message }))
+            // No manual JSON parsing needed - args is already typed!
+            Ok(json!({ "echoed": args.message }))
         })
     }
 }
@@ -91,6 +92,7 @@ async fn main() -> anyhow::Result<()> {
     println!("Loading WASM component from: {wasm_path}");
 
     // Build the sandbox with callbacks
+    // Both GetTime and Echo implement Callback via the TypedCallback blanket impl
     let sandbox = Sandbox::builder()
         .with_wasm_file(&wasm_path)
         .with_callback(GetTime)

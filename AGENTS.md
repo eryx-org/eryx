@@ -11,15 +11,14 @@ This project uses [mise](https://mise.jdx.dev/) for tooling and task management,
 ```bash
 mise install           # Install Rust, cargo-nextest, uv
 mise run setup         # Build WASM + precompile (one-time)
-mise run test-fast     # Run tests with precompiled WASM (~0.1s)
+mise run test          # Run tests with precompiled WASM (~0.1s)
 mise run ci            # Run all CI checks
 ```
 
 ### Key mise Tasks
 
 ```bash
-mise run test-fast     # Fast tests with precompiled WASM (preferred)
-mise run test          # Tests without precompilation (slow, ~50s)
+mise run test          # Run tests with precompiled WASM (~0.1s)
 mise run lint          # cargo clippy with all warnings
 mise run fmt           # cargo fmt
 mise run build-wasm    # Build Python WASM component

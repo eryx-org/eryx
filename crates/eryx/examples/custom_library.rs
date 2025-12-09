@@ -10,20 +10,44 @@
 //!
 //! Run with: `cargo run --example custom_library`
 
+use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::{Arc, Mutex};
 
-use eryx::{Callback, CallbackError, RuntimeLibrary, Sandbox};
+use eryx::schemars::JsonSchema;
+use eryx::{CallbackError, RuntimeLibrary, Sandbox, TypedCallback};
+use serde::Deserialize;
 use serde_json::{Value, json};
 
 // =============================================================================
 // Math Library - A collection of mathematical operations
 // =============================================================================
 
+/// Arguments for binary math operations (add, multiply).
+#[derive(Deserialize, JsonSchema)]
+struct BinaryMathArgs {
+    /// First operand
+    a: f64,
+    /// Second operand
+    b: f64,
+}
+
+/// Arguments for power operation.
+#[derive(Deserialize, JsonSchema)]
+struct PowerArgs {
+    /// The base number
+    base: f64,
+    /// The exponent
+    exponent: f64,
+}
+
 /// Callback that adds two numbers.
 struct MathAdd;
 
-impl Callback for MathAdd {
+impl TypedCallback for MathAdd {
+    type Args = BinaryMathArgs;
+
     fn name(&self) -> &str {
         "math.add"
     }
@@ -32,40 +56,20 @@ impl Callback for MathAdd {
         "Add two numbers together"
     }
 
-    fn parameters_schema(&self) -> Value {
-        json!({
-            "type": "object",
-            "properties": {
-                "a": { "type": "number", "description": "First operand" },
-                "b": { "type": "number", "description": "Second operand" }
-            },
-            "required": ["a", "b"]
-        })
-    }
-
-    fn invoke(
+    fn invoke_typed(
         &self,
-        args: Value,
+        args: BinaryMathArgs,
     ) -> Pin<Box<dyn Future<Output = Result<Value, CallbackError>> + Send + '_>> {
-        Box::pin(async move {
-            let a = args
-                .get("a")
-                .and_then(Value::as_f64)
-                .ok_or_else(|| CallbackError::InvalidArguments("missing 'a' field".into()))?;
-            let b = args
-                .get("b")
-                .and_then(Value::as_f64)
-                .ok_or_else(|| CallbackError::InvalidArguments("missing 'b' field".into()))?;
-
-            Ok(json!(a + b))
-        })
+        Box::pin(async move { Ok(json!(args.a + args.b)) })
     }
 }
 
 /// Callback that multiplies two numbers.
 struct MathMultiply;
 
-impl Callback for MathMultiply {
+impl TypedCallback for MathMultiply {
+    type Args = BinaryMathArgs;
+
     fn name(&self) -> &str {
         "math.multiply"
     }
@@ -74,40 +78,20 @@ impl Callback for MathMultiply {
         "Multiply two numbers together"
     }
 
-    fn parameters_schema(&self) -> Value {
-        json!({
-            "type": "object",
-            "properties": {
-                "a": { "type": "number", "description": "First operand" },
-                "b": { "type": "number", "description": "Second operand" }
-            },
-            "required": ["a", "b"]
-        })
-    }
-
-    fn invoke(
+    fn invoke_typed(
         &self,
-        args: Value,
+        args: BinaryMathArgs,
     ) -> Pin<Box<dyn Future<Output = Result<Value, CallbackError>> + Send + '_>> {
-        Box::pin(async move {
-            let a = args
-                .get("a")
-                .and_then(Value::as_f64)
-                .ok_or_else(|| CallbackError::InvalidArguments("missing 'a' field".into()))?;
-            let b = args
-                .get("b")
-                .and_then(Value::as_f64)
-                .ok_or_else(|| CallbackError::InvalidArguments("missing 'b' field".into()))?;
-
-            Ok(json!(a * b))
-        })
+        Box::pin(async move { Ok(json!(args.a * args.b)) })
     }
 }
 
 /// Callback that computes the power of a number.
 struct MathPower;
 
-impl Callback for MathPower {
+impl TypedCallback for MathPower {
+    type Args = PowerArgs;
+
     fn name(&self) -> &str {
         "math.power"
     }
@@ -116,35 +100,11 @@ impl Callback for MathPower {
         "Raise a number to a power"
     }
 
-    fn parameters_schema(&self) -> Value {
-        json!({
-            "type": "object",
-            "properties": {
-                "base": { "type": "number", "description": "The base number" },
-                "exponent": { "type": "number", "description": "The exponent" }
-            },
-            "required": ["base", "exponent"]
-        })
-    }
-
-    fn invoke(
+    fn invoke_typed(
         &self,
-        args: Value,
+        args: PowerArgs,
     ) -> Pin<Box<dyn Future<Output = Result<Value, CallbackError>> + Send + '_>> {
-        Box::pin(async move {
-            let base = args
-                .get("base")
-                .and_then(Value::as_f64)
-                .ok_or_else(|| CallbackError::InvalidArguments("missing 'base' field".into()))?;
-            let exponent = args
-                .get("exponent")
-                .and_then(Value::as_f64)
-                .ok_or_else(|| {
-                    CallbackError::InvalidArguments("missing 'exponent' field".into())
-                })?;
-
-            Ok(json!(base.powf(exponent)))
-        })
+        Box::pin(async move { Ok(json!(args.base.powf(args.exponent))) })
     }
 }
 
@@ -207,18 +167,33 @@ class Math:
 // Storage Library - Simple key-value storage
 // =============================================================================
 
-use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
-
 /// Shared storage state for the key-value store.
 type Storage = Arc<Mutex<HashMap<String, Value>>>;
+
+/// Arguments for storage.set operation.
+#[derive(Deserialize, JsonSchema)]
+struct StorageSetArgs {
+    /// The storage key
+    key: String,
+    /// The value to store (any JSON value)
+    value: Value,
+}
+
+/// Arguments for storage.get operation.
+#[derive(Deserialize, JsonSchema)]
+struct StorageGetArgs {
+    /// The storage key
+    key: String,
+}
 
 /// Callback that stores a value.
 struct StorageSet {
     storage: Storage,
 }
 
-impl Callback for StorageSet {
+impl TypedCallback for StorageSet {
+    type Args = StorageSetArgs;
+
     fn name(&self) -> &str {
         "storage.set"
     }
@@ -227,37 +202,16 @@ impl Callback for StorageSet {
         "Store a value with the given key"
     }
 
-    fn parameters_schema(&self) -> Value {
-        json!({
-            "type": "object",
-            "properties": {
-                "key": { "type": "string", "description": "The storage key" },
-                "value": { "description": "The value to store (any JSON value)" }
-            },
-            "required": ["key", "value"]
-        })
-    }
-
-    fn invoke(
+    fn invoke_typed(
         &self,
-        args: Value,
+        args: StorageSetArgs,
     ) -> Pin<Box<dyn Future<Output = Result<Value, CallbackError>> + Send + '_>> {
         let storage = self.storage.clone();
         Box::pin(async move {
-            let key = args
-                .get("key")
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| CallbackError::InvalidArguments("missing 'key' field".into()))?
-                .to_string();
-            let value = args
-                .get("value")
-                .cloned()
-                .ok_or_else(|| CallbackError::InvalidArguments("missing 'value' field".into()))?;
-
             storage
                 .lock()
                 .map_err(|e| CallbackError::ExecutionFailed(e.to_string()))?
-                .insert(key, value);
+                .insert(args.key, args.value);
 
             Ok(json!({"success": true}))
         })
@@ -269,7 +223,9 @@ struct StorageGet {
     storage: Storage,
 }
 
-impl Callback for StorageGet {
+impl TypedCallback for StorageGet {
+    type Args = StorageGetArgs;
+
     fn name(&self) -> &str {
         "storage.get"
     }
@@ -278,31 +234,16 @@ impl Callback for StorageGet {
         "Retrieve a value by key"
     }
 
-    fn parameters_schema(&self) -> Value {
-        json!({
-            "type": "object",
-            "properties": {
-                "key": { "type": "string", "description": "The storage key" }
-            },
-            "required": ["key"]
-        })
-    }
-
-    fn invoke(
+    fn invoke_typed(
         &self,
-        args: Value,
+        args: StorageGetArgs,
     ) -> Pin<Box<dyn Future<Output = Result<Value, CallbackError>> + Send + '_>> {
         let storage = self.storage.clone();
         Box::pin(async move {
-            let key = args
-                .get("key")
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| CallbackError::InvalidArguments("missing 'key' field".into()))?;
-
             let value = storage
                 .lock()
                 .map_err(|e| CallbackError::ExecutionFailed(e.to_string()))?
-                .get(key)
+                .get(&args.key)
                 .cloned();
 
             Ok(value.unwrap_or(Value::Null))
@@ -315,7 +256,9 @@ struct StorageKeys {
     storage: Storage,
 }
 
-impl Callback for StorageKeys {
+impl TypedCallback for StorageKeys {
+    type Args = ();
+
     fn name(&self) -> &str {
         "storage.keys"
     }
@@ -324,17 +267,9 @@ impl Callback for StorageKeys {
         "List all storage keys"
     }
 
-    fn parameters_schema(&self) -> Value {
-        json!({
-            "type": "object",
-            "properties": {},
-            "required": []
-        })
-    }
-
-    fn invoke(
+    fn invoke_typed(
         &self,
-        _args: Value,
+        _args: (),
     ) -> Pin<Box<dyn Future<Output = Result<Value, CallbackError>> + Send + '_>> {
         let storage = self.storage.clone();
         Box::pin(async move {

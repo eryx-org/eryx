@@ -34,23 +34,50 @@ async fn main() -> Result<(), eryx::Error> {
 }
 ```
 
-## With Callbacks
+## With Callbacks (TypedCallback)
+
+Use `TypedCallback` for strongly-typed callbacks with automatic schema generation:
 
 ```rust
-use eryx::{Callback, CallbackError, Sandbox};
+use eryx::{TypedCallback, CallbackError, Sandbox};
+use eryx::schemars::JsonSchema;
+use serde::Deserialize;
 use serde_json::{json, Value};
 use std::future::Future;
 use std::pin::Pin;
 
+// Arguments struct - schema is auto-generated from this
+#[derive(Deserialize, JsonSchema)]
+struct EchoArgs {
+    /// The message to echo back
+    message: String,
+}
+
+struct Echo;
+
+impl TypedCallback for Echo {
+    type Args = EchoArgs;
+
+    fn name(&self) -> &str { "echo" }
+    fn description(&self) -> &str { "Echoes back the message" }
+
+    fn invoke_typed(&self, args: EchoArgs) -> Pin<Box<dyn Future<Output = Result<Value, CallbackError>> + Send + '_>> {
+        Box::pin(async move {
+            Ok(json!({ "echoed": args.message }))
+        })
+    }
+}
+
+// For no-argument callbacks, use `()` as the Args type
 struct GetTime;
 
-impl Callback for GetTime {
+impl TypedCallback for GetTime {
+    type Args = ();
+
     fn name(&self) -> &str { "get_time" }
     fn description(&self) -> &str { "Returns the current Unix timestamp" }
-    fn parameters_schema(&self) -> Value {
-        json!({ "type": "object", "properties": {}, "required": [] })
-    }
-    fn invoke(&self, _args: Value) -> Pin<Box<dyn Future<Output = Result<Value, CallbackError>> + Send + '_>> {
+
+    fn invoke_typed(&self, _args: ()) -> Pin<Box<dyn Future<Output = Result<Value, CallbackError>> + Send + '_>> {
         Box::pin(async move {
             let now = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -65,18 +92,25 @@ impl Callback for GetTime {
 async fn main() -> Result<(), eryx::Error> {
     let sandbox = Sandbox::builder()
         .with_callback(GetTime)
+        .with_callback(Echo)
         .build()?;
 
     let result = sandbox.execute(r#"
 # Callbacks are available as direct async functions
 timestamp = await get_time()
 print(f"Current time: {timestamp}")
+
+response = await echo(message="Hello!")
+print(f"Echo: {response}")
     "#).await?;
 
     println!("{}", result.stdout);
     Ok(())
 }
 ```
+
+For runtime-defined callbacks (plugin systems, dynamic APIs), implement the `Callback` trait directly.
+See the `runtime_callbacks` example.
 
 ## Session State Persistence
 
@@ -193,7 +227,8 @@ cargo bench --package eryx                       # Run benchmarks
 ## Examples
 
 ```bash
-cargo run --example simple              # Basic usage with callbacks
+cargo run --example simple              # Basic usage with TypedCallback
+cargo run --example runtime_callbacks   # Runtime-defined callbacks (DynamicCallback)
 cargo run --example with_tracing        # Execution tracing and output handling
 cargo run --example error_handling      # Error handling scenarios
 cargo run --example parallel_callbacks  # Parallel execution verification
