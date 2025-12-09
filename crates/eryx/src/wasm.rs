@@ -8,7 +8,8 @@
 //!
 //! # Pre-compiled Components
 //!
-//! For faster startup, you can pre-compile the WASM component to native code:
+//! When the `precompiled` feature is enabled, you can pre-compile the WASM
+//! component to native code for faster startup (~50x faster sandbox creation):
 //!
 //! ```rust,ignore
 //! // At build time - compile once:
@@ -18,6 +19,9 @@
 //! // At runtime - load quickly (unsafe, must trust the file):
 //! let executor = unsafe { PythonExecutor::from_precompiled_file("runtime.cwasm")? };
 //! ```
+//!
+//! Alternatively, enable the `embedded-runtime` feature for a safe API that
+//! pre-compiles at build time and embeds the result in the binary.
 
 use std::sync::Arc;
 
@@ -258,6 +262,7 @@ impl PythonExecutor {
     ///
     /// Returns an error if the pre-compiled bytes are invalid or incompatible
     /// with the current engine configuration.
+    #[cfg(feature = "precompiled")]
     #[allow(unsafe_code)]
     pub unsafe fn from_precompiled(precompiled_bytes: &[u8]) -> std::result::Result<Self, Error> {
         let engine = Self::create_engine()?;
@@ -290,6 +295,7 @@ impl PythonExecutor {
     ///
     /// Returns an error if the file cannot be read or the pre-compiled component
     /// is invalid or incompatible with the current engine configuration.
+    #[cfg(feature = "precompiled")]
     #[allow(unsafe_code)]
     pub unsafe fn from_precompiled_file(
         path: impl AsRef<std::path::Path>,
@@ -322,6 +328,7 @@ impl PythonExecutor {
     /// # Errors
     ///
     /// Returns an error if pre-compilation fails.
+    #[cfg(feature = "precompiled")]
     pub fn precompile(wasm_bytes: &[u8]) -> std::result::Result<Vec<u8>, Error> {
         let engine = Self::create_engine()?;
         engine
@@ -336,6 +343,7 @@ impl PythonExecutor {
     /// # Errors
     ///
     /// Returns an error if the file cannot be read or pre-compilation fails.
+    #[cfg(feature = "precompiled")]
     pub fn precompile_file(
         path: impl AsRef<std::path::Path>,
     ) -> std::result::Result<Vec<u8>, Error> {

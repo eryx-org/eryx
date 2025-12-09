@@ -2,6 +2,12 @@
 //!
 //! A Python sandbox with async callbacks powered by WebAssembly.
 //!
+//! ## Safety
+//!
+//! By default, this crate uses `#![forbid(unsafe_code)]` for maximum safety.
+//! When the `precompiled` feature is enabled, this is relaxed to `#![deny(unsafe_code)]`
+//! to allow the unsafe wasmtime deserialization APIs needed for pre-compiled components.
+//!
 //! Eryx executes Python code in a secure WebAssembly sandbox with:
 //!
 //! - **Async callback mechanism** - Python can `await invoke("callback_name", ...)` to call host-provided functions
@@ -27,6 +33,13 @@
 //!     Ok(())
 //! }
 //! ```
+
+// Safety lint configuration:
+// - Default: forbid unsafe code entirely
+// - With `precompiled` feature: deny unsafe code, but allow it on specific items
+//   that need wasmtime's unsafe deserialization APIs
+#![cfg_attr(not(feature = "precompiled"), forbid(unsafe_code))]
+#![cfg_attr(feature = "precompiled", deny(unsafe_code))]
 
 mod callback;
 mod error;

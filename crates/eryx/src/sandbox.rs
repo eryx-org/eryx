@@ -284,13 +284,35 @@ impl Sandbox {
     }
 }
 
+/// Source of the WASM component for the sandbox.
+#[derive(Debug, Clone)]
+enum WasmSource {
+    /// No source specified yet.
+    None,
+    /// WASM component bytes (will be compiled at load time).
+    Bytes(Vec<u8>),
+    /// Path to a WASM component file (will be compiled at load time).
+    File(std::path::PathBuf),
+    /// Pre-compiled component bytes (skip compilation, unsafe).
+    #[cfg(feature = "precompiled")]
+    PrecompiledBytes(Vec<u8>),
+    /// Path to a pre-compiled component file (skip compilation, unsafe).
+    #[cfg(feature = "precompiled")]
+    PrecompiledFile(std::path::PathBuf),
+    /// Use the embedded pre-compiled runtime (safe, fast).
+    #[cfg(feature = "embedded-runtime")]
+    EmbeddedRuntime,
+}
+
+impl Default for WasmSource {
+    fn default() -> Self {
+        Self::None
+    }
+}
+
 /// Builder for constructing a [`Sandbox`].
 pub struct SandboxBuilder {
-    wasm_bytes: Option<Vec<u8>>,
-    wasm_path: Option<std::path::PathBuf>,
-    precompiled_bytes: Option<Vec<u8>>,
-    precompiled_path: Option<std::path::PathBuf>,
-    use_embedded_runtime: bool,
+    wasm_source: WasmSource,
     callbacks: HashMap<String, Arc<dyn Callback>>,
     preamble: String,
     type_stubs: String,
@@ -317,8 +339,7 @@ impl std::fmt::Debug for SandboxBuilder {
             .field("has_trace_handler", &self.trace_handler.is_some())
             .field("has_output_handler", &self.output_handler.is_some())
             .field("resource_limits", &self.resource_limits)
-            .field("has_wasm_bytes", &self.wasm_bytes.is_some())
-            .field("wasm_path", &self.wasm_path)
+            .field("wasm_source", &self.wasm_source)
             .finish()
     }
 }
@@ -328,11 +349,7 @@ impl SandboxBuilder {
     #[must_use]
     pub fn new() -> Self {
         Self {
-            wasm_bytes: None,
-            wasm_path: None,
-            precompiled_bytes: None,
-            precompiled_path: None,
-            use_embedded_runtime: false,
+            wasm_source: WasmSource::None,
             callbacks: HashMap::new(),
             preamble: String::new(),
             type_stubs: String::new(),
@@ -364,11 +381,7 @@ impl SandboxBuilder {
     #[cfg(feature = "embedded-runtime")]
     #[must_use]
     pub fn with_embedded_runtime(mut self) -> Self {
-        self.use_embedded_runtime = true;
-        self.wasm_bytes = None;
-        self.wasm_path = None;
-        self.precompiled_bytes = None;
-        self.precompiled_path = None;
+        self.wasm_source = WasmSource::EmbeddedRuntime;
         self
     }
 
@@ -377,29 +390,21 @@ impl SandboxBuilder {
     /// Use this to embed the WASM component in your binary.
     #[must_use]
     pub fn with_wasm_bytes(mut self, bytes: impl Into<Vec<u8>>) -> Self {
-        self.wasm_bytes = Some(bytes.into());
-        self.wasm_path = None;
-        self.precompiled_bytes = None;
-        self.precompiled_path = None;
-        self.use_embedded_runtime = false;
+        self.wasm_source = WasmSource::Bytes(bytes.into());
         self
     }
 
     /// Set the WASM component from a file path.
     #[must_use]
     pub fn with_wasm_file(mut self, path: impl Into<std::path::PathBuf>) -> Self {
-        self.wasm_path = Some(path.into());
-        self.wasm_bytes = None;
-        self.precompiled_bytes = None;
-        self.precompiled_path = None;
-        self.use_embedded_runtime = false;
+        self.wasm_source = WasmSource::File(path.into());
         self
     }
 
     /// Set the WASM component from pre-compiled bytes.
     ///
     /// Pre-compiled components load much faster because they skip compilation
-    /// (~40x faster sandbox creation). Create pre-compiled bytes using
+    /// (~50x faster sandbox creation). Create pre-compiled bytes using
     /// `PythonExecutor::precompile()`.
     ///
     /// # Safety
@@ -426,21 +431,18 @@ impl SandboxBuilder {
     ///         .build()?
     /// };
     /// ```
+    #[cfg(feature = "precompiled")]
     #[must_use]
     #[allow(unsafe_code)]
     pub unsafe fn with_precompiled_bytes(mut self, bytes: impl Into<Vec<u8>>) -> Self {
-        self.precompiled_bytes = Some(bytes.into());
-        self.precompiled_path = None;
-        self.wasm_bytes = None;
-        self.wasm_path = None;
-        self.use_embedded_runtime = false;
+        self.wasm_source = WasmSource::PrecompiledBytes(bytes.into());
         self
     }
 
     /// Set the WASM component from a pre-compiled file path.
     ///
     /// Pre-compiled components load much faster because they skip compilation
-    /// (~40x faster sandbox creation). Create pre-compiled files using
+    /// (~50x faster sandbox creation). Create pre-compiled files using
     /// `PythonExecutor::precompile_file()`.
     ///
     /// # Safety
@@ -468,14 +470,11 @@ impl SandboxBuilder {
     ///         .build()?
     /// };
     /// ```
+    #[cfg(feature = "precompiled")]
     #[must_use]
     #[allow(unsafe_code)]
     pub unsafe fn with_precompiled_file(mut self, path: impl Into<std::path::PathBuf>) -> Self {
-        self.precompiled_path = Some(path.into());
-        self.precompiled_bytes = None;
-        self.wasm_bytes = None;
-        self.wasm_path = None;
-        self.use_embedded_runtime = false;
+        self.wasm_source = WasmSource::PrecompiledFile(path.into());
         self
     }
 
@@ -556,70 +555,58 @@ impl SandboxBuilder {
     /// - The WASM component cannot be loaded
     /// - The WebAssembly runtime fails to initialize
     pub fn build(self) -> Result<Sandbox, Error> {
-        #[cfg(feature = "embedded-runtime")]
-        let executor = if self.use_embedded_runtime {
-            // SAFETY: The embedded runtime was pre-compiled at build time from our own
-            // trusted runtime.wasm, so we know it's safe to deserialize.
-            const EMBEDDED_RUNTIME: &[u8] =
-                include_bytes!(concat!(env!("OUT_DIR"), "/runtime.cwasm"));
-            #[allow(unsafe_code)]
-            unsafe {
-                PythonExecutor::from_precompiled(EMBEDDED_RUNTIME)?
-            }
-        } else if let Some(bytes) = self.precompiled_bytes {
-            // SAFETY: User is responsible for only using trusted pre-compiled bytes.
-            // The `with_precompiled_bytes` method is already marked unsafe, so the
-            // caller has acknowledged this responsibility.
-            #[allow(unsafe_code)]
-            unsafe {
-                PythonExecutor::from_precompiled(&bytes)?
-            }
-        } else if let Some(path) = self.precompiled_path {
-            // SAFETY: User is responsible for only using trusted pre-compiled files.
-            // The `with_precompiled_file` method is already marked unsafe, so the
-            // caller has acknowledged this responsibility.
-            #[allow(unsafe_code)]
-            unsafe {
-                PythonExecutor::from_precompiled_file(&path)?
-            }
-        } else if let Some(bytes) = self.wasm_bytes {
-            PythonExecutor::from_binary(&bytes)?
-        } else if let Some(path) = self.wasm_path {
-            PythonExecutor::from_file(&path)?
-        } else {
-            return Err(Error::Initialization(
-                "No WASM component specified. Use with_embedded_runtime(), with_wasm_bytes(), with_wasm_file(), with_precompiled_bytes(), or with_precompiled_file()."
-                    .to_string(),
-            ));
-        };
+        let executor = match self.wasm_source {
+            WasmSource::Bytes(bytes) => PythonExecutor::from_binary(&bytes)?,
+            WasmSource::File(path) => PythonExecutor::from_file(&path)?,
 
-        #[cfg(not(feature = "embedded-runtime"))]
-        let executor = if let Some(bytes) = self.precompiled_bytes {
-            // SAFETY: User is responsible for only using trusted pre-compiled bytes.
-            // The `with_precompiled_bytes` method is already marked unsafe, so the
-            // caller has acknowledged this responsibility.
-            #[allow(unsafe_code)]
-            unsafe {
-                PythonExecutor::from_precompiled(&bytes)?
+            #[cfg(feature = "precompiled")]
+            WasmSource::PrecompiledBytes(bytes) => {
+                // SAFETY: User is responsible for only using trusted pre-compiled bytes.
+                // The `with_precompiled_bytes` method is already marked unsafe, so the
+                // caller has acknowledged this responsibility.
+                #[allow(unsafe_code)]
+                unsafe {
+                    PythonExecutor::from_precompiled(&bytes)?
+                }
             }
-        } else if let Some(path) = self.precompiled_path {
-            // SAFETY: User is responsible for only using trusted pre-compiled files.
-            // The `with_precompiled_file` method is already marked unsafe, so the
-            // caller has acknowledged this responsibility.
-            #[allow(unsafe_code)]
-            unsafe {
-                PythonExecutor::from_precompiled_file(&path)?
+
+            #[cfg(feature = "precompiled")]
+            WasmSource::PrecompiledFile(path) => {
+                // SAFETY: User is responsible for only using trusted pre-compiled files.
+                // The `with_precompiled_file` method is already marked unsafe, so the
+                // caller has acknowledged this responsibility.
+                #[allow(unsafe_code)]
+                unsafe {
+                    PythonExecutor::from_precompiled_file(&path)?
+                }
             }
-        } else if let Some(bytes) = self.wasm_bytes {
-            PythonExecutor::from_binary(&bytes)?
-        } else if let Some(path) = self.wasm_path {
-            PythonExecutor::from_file(&path)?
-        } else {
-            return Err(Error::Initialization(
-                "No WASM component specified. Use with_wasm_bytes(), with_wasm_file(), with_precompiled_bytes(), or with_precompiled_file(). \
-                 Or enable the `embedded-runtime` feature and use with_embedded_runtime()."
-                    .to_string(),
-            ));
+
+            #[cfg(feature = "embedded-runtime")]
+            WasmSource::EmbeddedRuntime => {
+                // SAFETY: The embedded runtime was pre-compiled at build time from our own
+                // trusted runtime.wasm, so we know it's safe to deserialize.
+                const EMBEDDED_RUNTIME: &[u8] =
+                    include_bytes!(concat!(env!("OUT_DIR"), "/runtime.cwasm"));
+                #[allow(unsafe_code)]
+                unsafe {
+                    PythonExecutor::from_precompiled(EMBEDDED_RUNTIME)?
+                }
+            }
+
+            WasmSource::None => {
+                #[cfg(feature = "embedded-runtime")]
+                let msg = "No WASM component specified. Use with_embedded_runtime(), with_wasm_bytes(), with_wasm_file(), with_precompiled_bytes(), or with_precompiled_file().";
+
+                #[cfg(all(feature = "precompiled", not(feature = "embedded-runtime")))]
+                let msg = "No WASM component specified. Use with_wasm_bytes(), with_wasm_file(), with_precompiled_bytes(), or with_precompiled_file(). \
+                           Or enable the `embedded-runtime` feature and use with_embedded_runtime().";
+
+                #[cfg(not(feature = "precompiled"))]
+                let msg = "No WASM component specified. Use with_wasm_bytes() or with_wasm_file(). \
+                           Or enable the `precompiled` or `embedded-runtime` feature for faster loading options.";
+
+                return Err(Error::Initialization(msg.to_string()));
+            }
         };
 
         Ok(Sandbox {

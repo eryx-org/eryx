@@ -50,7 +50,9 @@ missing_docs = "warn"
 # Priority -1 ensures this lint group is applied before individual lints,
 # avoiding clippy::lint_groups_priority warning about ambiguous ordering.
 rust_2018_idioms = { level = "warn", priority = -1 }
-unsafe_code = "deny"
+# Note: unsafe_code lint is handled per-crate in lib.rs, not at workspace level.
+# The eryx crate uses `forbid(unsafe_code)` by default, relaxed to `deny` when
+# the `precompiled` feature is enabled.
 
 [workspace.lints.clippy]
 all = "warn"
