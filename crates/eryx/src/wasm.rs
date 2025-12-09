@@ -24,10 +24,11 @@
 //! pre-compiles at build time and embeds the result in the binary.
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use tokio::sync::{mpsc, oneshot};
 use wasmtime::component::{Accessor, Component, HasSelf, Linker, ResourceTable};
-use wasmtime::{Config, Engine, InstanceAllocationStrategy, PoolingAllocationConfig, Store};
+use wasmtime::{Config, Engine, ResourceLimiter, Store};
 use wasmtime_wasi::{WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView};
 
 use crate::callback::Callback;
@@ -67,6 +68,104 @@ pub struct HostCallbackInfo {
     pub parameters_schema_json: String,
 }
 
+/// Output from executing Python code in the WASM sandbox.
+///
+/// This struct is `#[non_exhaustive]` to allow adding new fields in the future
+/// without breaking semver compatibility.
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub struct ExecutionOutput {
+    /// Captured stdout from the Python execution.
+    pub stdout: String,
+    /// Peak memory usage in bytes during execution.
+    pub peak_memory_bytes: u64,
+}
+
+impl ExecutionOutput {
+    /// Create a new execution output.
+    #[must_use]
+    pub fn new(stdout: String, peak_memory_bytes: u64) -> Self {
+        Self {
+            stdout,
+            peak_memory_bytes,
+        }
+    }
+}
+
+/// Tracks memory usage during WASM execution.
+///
+/// This struct implements `ResourceLimiter` to intercept memory growth
+/// requests and track the peak memory usage. It can optionally enforce
+/// a memory limit.
+#[derive(Debug)]
+pub struct MemoryTracker {
+    /// Peak memory usage observed (in bytes).
+    peak_memory_bytes: AtomicU64,
+    /// Optional memory limit (in bytes). If set, memory growth beyond this limit will fail.
+    memory_limit: Option<u64>,
+}
+
+impl MemoryTracker {
+    /// Create a new memory tracker with an optional limit.
+    #[must_use]
+    pub fn new(memory_limit: Option<u64>) -> Self {
+        Self {
+            peak_memory_bytes: AtomicU64::new(0),
+            memory_limit,
+        }
+    }
+
+    /// Get the peak memory usage observed so far (in bytes).
+    #[must_use]
+    pub fn peak_memory_bytes(&self) -> u64 {
+        self.peak_memory_bytes.load(Ordering::Relaxed)
+    }
+
+    /// Reset the peak memory tracker to zero.
+    pub fn reset(&self) {
+        self.peak_memory_bytes.store(0, Ordering::Relaxed);
+    }
+}
+
+impl ResourceLimiter for MemoryTracker {
+    fn memory_growing(
+        &mut self,
+        _current: usize,
+        desired: usize,
+        maximum: Option<usize>,
+    ) -> anyhow::Result<bool> {
+        // Track peak memory usage
+        let desired_u64 = desired as u64;
+        self.peak_memory_bytes
+            .fetch_max(desired_u64, Ordering::Relaxed);
+
+        // Check against our configured limit
+        if self.memory_limit.is_some_and(|limit| desired_u64 > limit) {
+            return Ok(false);
+        }
+
+        // Check against WASM-declared maximum
+        if maximum.is_some_and(|max| desired > max) {
+            return Ok(false);
+        }
+
+        Ok(true)
+    }
+
+    fn table_growing(
+        &mut self,
+        _current: usize,
+        desired: usize,
+        maximum: Option<usize>,
+    ) -> anyhow::Result<bool> {
+        // Allow table growth up to the declared maximum
+        if maximum.is_some_and(|max| desired > max) {
+            return Ok(false);
+        }
+        Ok(true)
+    }
+}
+
 // Generate bindings from the WIT file
 // The WIT already declares `invoke` and `execute` as async, wasmtime handles it
 // Note: async functions in WIT get prefixed with "[async]" in the component model
@@ -89,6 +188,8 @@ pub struct ExecutorState {
     pub(crate) trace_tx: Option<mpsc::UnboundedSender<TraceRequest>>,
     /// Available callbacks for introspection.
     pub(crate) callbacks: Vec<HostCallbackInfo>,
+    /// Memory usage tracker.
+    pub(crate) memory_tracker: MemoryTracker,
 }
 
 impl std::fmt::Debug for ExecutorState {
@@ -99,6 +200,10 @@ impl std::fmt::Debug for ExecutorState {
             .field("callback_tx", &self.callback_tx.is_some())
             .field("trace_tx", &self.trace_tx.is_some())
             .field("callbacks", &self.callbacks.len())
+            .field(
+                "peak_memory_bytes",
+                &self.memory_tracker.peak_memory_bytes(),
+            )
             .finish()
     }
 }
@@ -380,11 +485,10 @@ impl PythonExecutor {
         Self::precompile(&wasm_bytes)
     }
 
-    /// Create a configured wasmtime engine with pooling allocator for fast instantiation.
+    /// Create a configured wasmtime engine.
     ///
-    /// Uses several optimizations:
-    /// - Pooling allocator: Pre-allocates memory/tables so instantiation doesn't allocate
-    /// - Copy-on-write heap images: Defers memory initialization to first write
+    /// Uses copy-on-write heap images to defer memory initialization
+    /// from instantiation time to first write, improving startup performance.
     fn create_engine() -> std::result::Result<Engine, Error> {
         let mut config = Config::new();
         config.wasm_component_model(true);
@@ -394,22 +498,6 @@ impl PythonExecutor {
         // Enable copy-on-write heap images for faster instantiation
         // This defers memory initialization from instantiation time to first write
         config.memory_init_cow(true);
-
-        // Configure pooling allocator for fast instantiation
-        // Pre-allocates resources so instantiation just takes from the pool
-        let mut pool = PoolingAllocationConfig::new();
-        // Allow up to 10 concurrent instances (sandboxes)
-        pool.total_component_instances(10);
-        // Memory configuration for Python WASM runtime
-        pool.total_memories(10);
-        pool.max_memory_size(256 * 1024 * 1024); // 256 MiB per memory
-        // Table configuration
-        pool.total_tables(10);
-        pool.table_elements(20_000);
-        // Core instances (internal to component model)
-        pool.total_core_instances(100);
-
-        config.allocation_strategy(InstanceAllocationStrategy::Pooling(pool));
 
         Engine::new(&config).map_err(|e| Error::WasmEngine(e.to_string()))
     }
@@ -460,14 +548,15 @@ impl PythonExecutor {
     ///
     /// # Returns
     ///
-    /// Returns the captured stdout on success, or an error message on failure.
+    /// Returns an [`ExecutionOutput`] on success, or an error message on failure.
     pub async fn execute(
         &self,
         code: &str,
         callbacks: &[Arc<dyn Callback>],
         callback_tx: Option<mpsc::Sender<CallbackRequest>>,
         trace_tx: Option<mpsc::UnboundedSender<TraceRequest>>,
-    ) -> std::result::Result<String, String> {
+        memory_limit: Option<u64>,
+    ) -> std::result::Result<ExecutionOutput, String> {
         // Build callback info for introspection
         let callback_infos: Vec<HostCallbackInfo> = callbacks
             .iter()
@@ -490,10 +579,14 @@ impl PythonExecutor {
             callback_tx,
             trace_tx,
             callbacks: callback_infos,
+            memory_tracker: MemoryTracker::new(memory_limit),
         };
 
         // Create store for this execution
         let mut store = Store::new(&self.engine, state);
+
+        // Register the memory tracker as a resource limiter
+        store.limiter(|state| &mut state.memory_tracker);
 
         // Instantiate from the pre-compiled template (fast!)
         let bindings = self
@@ -514,7 +607,12 @@ impl PythonExecutor {
             .map_err(|e| format!("WASM execution error: {e:?}"))?;
 
         // wasmtime_result is wasmtime::Result<Result<String, String>>
-        wasmtime_result.map_err(|e| format!("WASM execution error: {e:?}"))?
+        let stdout = wasmtime_result.map_err(|e| format!("WASM execution error: {e:?}"))??;
+
+        // Get peak memory from the store before it's dropped
+        let peak_memory_bytes = store.data().memory_tracker.peak_memory_bytes();
+
+        Ok(ExecutionOutput::new(stdout, peak_memory_bytes))
     }
 }
 

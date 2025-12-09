@@ -116,6 +116,10 @@ print(f"2 + 2 = {2 + 2}")
 
     println!("Output: {}", result.stdout);
     println!("Duration: {:?}", result.stats.duration);
+    println!(
+        "Peak memory: {} bytes",
+        result.stats.peak_memory_bytes.unwrap_or(0)
+    );
     println!();
 
     // Example 2: Using a callback
@@ -131,6 +135,10 @@ print(f"Current Unix timestamp: {timestamp}")
 
     println!("Output: {}", result.stdout);
     println!("Callbacks invoked: {}", result.stats.callback_invocations);
+    println!(
+        "Peak memory: {} bytes",
+        result.stats.peak_memory_bytes.unwrap_or(0)
+    );
     println!();
 
     // Example 3: Echo callback with arguments

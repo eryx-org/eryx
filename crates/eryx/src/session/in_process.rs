@@ -167,19 +167,19 @@ impl<'a> InProcessSession<'a> {
         let duration = start.elapsed();
 
         match execution_result {
-            Ok(stdout) => {
+            Ok(output) => {
                 // Stream output if handler is configured
                 if let Some(handler) = self.sandbox.output_handler() {
-                    handler.on_output(&stdout).await;
+                    handler.on_output(&output.stdout).await;
                 }
 
                 Ok(ExecuteResult {
-                    stdout,
+                    stdout: output.stdout,
                     trace: trace_events,
                     stats: ExecuteStats {
                         duration,
                         callback_invocations,
-                        peak_memory_bytes: None,
+                        peak_memory_bytes: Some(output.peak_memory_bytes),
                     },
                 })
             }

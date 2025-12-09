@@ -59,5 +59,5 @@ pub use session::{
 };
 pub use trace::{OutputHandler, TraceEvent, TraceEventKind, TraceHandler};
 
-// Re-export precompilation utilities
-pub use wasm::PythonExecutor;
+// Re-export precompilation utilities and internal types
+pub use wasm::{ExecutionOutput, PythonExecutor};

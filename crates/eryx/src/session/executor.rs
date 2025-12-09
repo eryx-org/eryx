@@ -45,8 +45,8 @@ use wasmtime_wasi::{WasiCtx, WasiCtxBuilder};
 use crate::callback::Callback;
 use crate::error::Error;
 use crate::wasm::{
-    CallbackRequest, ExecutorState, HostCallbackInfo, PythonExecutor, Sandbox as SandboxBindings,
-    TraceRequest,
+    CallbackRequest, ExecutionOutput, ExecutorState, HostCallbackInfo, MemoryTracker,
+    PythonExecutor, Sandbox as SandboxBindings, TraceRequest,
 };
 
 /// Maximum snapshot size in bytes (10 MB).
@@ -244,10 +244,20 @@ impl SessionExecutor {
             .inherit_stderr()
             .build();
 
-        let state = ExecutorState::new(wasi, ResourceTable::new(), None, None, callback_infos);
+        let state = ExecutorState::new(
+            wasi,
+            ResourceTable::new(),
+            None,
+            None,
+            callback_infos,
+            MemoryTracker::new(None),
+        );
 
         // Create store
         let mut store = Store::new(executor.engine(), state);
+
+        // Register the memory tracker as a resource limiter
+        store.limiter(|state| &mut state.memory_tracker);
 
         // Instantiate the component
         let bindings = executor
@@ -285,13 +295,14 @@ impl SessionExecutor {
     /// Currently, this creates fresh channels for each execution. The callback
     /// and trace channels need to be refreshed because the previous execution's
     /// channels may have been closed.
+    /// Returns an [`ExecutionOutput`] on success.
     pub async fn execute(
         &mut self,
         code: &str,
         callbacks: &[Arc<dyn Callback>],
         callback_tx: Option<mpsc::Sender<CallbackRequest>>,
         trace_tx: Option<mpsc::UnboundedSender<TraceRequest>>,
-    ) -> Result<String, String> {
+    ) -> Result<ExecutionOutput, String> {
         // Take ownership of store and bindings for async execution
         let mut store = self
             .store
@@ -312,12 +323,13 @@ impl SessionExecutor {
             })
             .collect();
 
-        // Update state for this execution
+        // Update state for this execution and reset memory tracker
         {
             let state = store.data_mut();
             state.set_callback_tx(callback_tx);
             state.set_trace_tx(trace_tx);
             state.set_callbacks(callback_infos);
+            state.reset_memory_tracker();
         }
 
         self.execution_count += 1;
@@ -334,13 +346,13 @@ impl SessionExecutor {
             .run_concurrent(async |accessor| bindings.call_execute(accessor, code_owned).await)
             .await;
 
-        // Clear channels after execution so handler tasks can complete
-        // (dropping the Sender signals the Receiver that no more messages are coming)
-        {
+        // Clear channels after execution and capture peak memory
+        let peak_memory = {
             let state = store.data_mut();
             state.set_callback_tx(None);
             state.set_trace_tx(None);
-        }
+            state.peak_memory_bytes()
+        };
 
         // Restore store and bindings before handling result
         self.store = Some(store);
@@ -348,7 +360,8 @@ impl SessionExecutor {
 
         // Process result
         let wasmtime_result = result.map_err(|e| format!("WASM execution error: {e:?}"))?;
-        wasmtime_result.map_err(|e| format!("WASM execution error: {e:?}"))?
+        let stdout = wasmtime_result.map_err(|e| format!("WASM execution error: {e:?}"))??;
+        Ok(ExecutionOutput::new(stdout, peak_memory))
     }
 
     /// Get the number of executions performed in this session.
@@ -385,10 +398,20 @@ impl SessionExecutor {
             .inherit_stderr()
             .build();
 
-        let state = ExecutorState::new(wasi, ResourceTable::new(), None, None, callback_infos);
+        let state = ExecutorState::new(
+            wasi,
+            ResourceTable::new(),
+            None,
+            None,
+            callback_infos,
+            MemoryTracker::new(None),
+        );
 
         // Create new store
         let mut store = Store::new(self.executor.engine(), state);
+
+        // Register the memory tracker as a resource limiter
+        store.limiter(|state| &mut state.memory_tracker);
 
         // Re-instantiate the component
         let bindings = self
@@ -637,6 +660,7 @@ impl ExecutorState {
         callback_tx: Option<mpsc::Sender<CallbackRequest>>,
         trace_tx: Option<mpsc::UnboundedSender<TraceRequest>>,
         callbacks: Vec<HostCallbackInfo>,
+        memory_tracker: MemoryTracker,
     ) -> Self {
         Self {
             wasi,
@@ -644,6 +668,7 @@ impl ExecutorState {
             callback_tx,
             trace_tx,
             callbacks,
+            memory_tracker,
         }
     }
 
@@ -660,6 +685,16 @@ impl ExecutorState {
     /// Update the available callbacks for a new execution.
     pub(crate) fn set_callbacks(&mut self, callbacks: Vec<HostCallbackInfo>) {
         self.callbacks = callbacks;
+    }
+
+    /// Get the peak memory usage from the tracker.
+    pub(crate) fn peak_memory_bytes(&self) -> u64 {
+        self.memory_tracker.peak_memory_bytes()
+    }
+
+    /// Reset the memory tracker for a new execution.
+    pub(crate) fn reset_memory_tracker(&self) {
+        self.memory_tracker.reset();
     }
 }
 

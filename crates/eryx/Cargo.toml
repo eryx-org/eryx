@@ -36,6 +36,7 @@ embedded-runtime = ["precompiled", "dep:wasmtime"]
 
 [dependencies]
 tokio = { workspace = true, features = ["sync"] }
+anyhow.workspace = true
 async-trait.workspace = true
 futures.workspace = true
 serde.workspace = true
@@ -46,7 +47,6 @@ wasmtime-wasi.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
-anyhow.workspace = true
 async-trait.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 criterion.workspace = true

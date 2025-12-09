@@ -100,9 +100,14 @@ impl Sandbox {
             tokio::spawn(async move { Self::run_trace_collector(trace_rx, trace_handler).await });
 
         // Execute the Python code with optional timeout
-        let execute_future =
-            self.executor
-                .execute(&full_code, &callbacks, Some(callback_tx), Some(trace_tx));
+        let memory_limit = self.resource_limits.max_memory_bytes;
+        let execute_future = self.executor.execute(
+            &full_code,
+            &callbacks,
+            Some(callback_tx),
+            Some(trace_tx),
+            memory_limit,
+        );
 
         let execution_result = if let Some(timeout) = self.resource_limits.execution_timeout {
             tokio::time::timeout(timeout, execute_future)
@@ -120,19 +125,19 @@ impl Sandbox {
         let duration = start.elapsed();
 
         match execution_result {
-            Ok(stdout) => {
+            Ok(output) => {
                 // Stream output if handler is configured
                 if let Some(handler) = &self.output_handler {
-                    handler.on_output(&stdout).await;
+                    handler.on_output(&output.stdout).await;
                 }
 
                 Ok(ExecuteResult {
-                    stdout,
+                    stdout: output.stdout,
                     trace: trace_events,
                     stats: ExecuteStats {
                         duration,
                         callback_invocations,
-                        peak_memory_bytes: None, // TODO: Track memory usage
+                        peak_memory_bytes: Some(output.peak_memory_bytes),
                     },
                 })
             }

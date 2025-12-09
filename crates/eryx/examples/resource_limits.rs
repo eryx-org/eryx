@@ -121,7 +121,7 @@ import json
 results = []
 for i in range(5):  # Try to invoke 5 times, but limit is 3
     try:
-        result = await invoke("count", {"n": i})
+        result = await invoke("count", json.dumps({"n": i}))
         results.append(f"Success: {result}")
     except Exception as e:
         results.append(f"Error: {e}")
@@ -156,8 +156,9 @@ print("\n".join(results))
         sandbox
             .execute(
                 r#"
+import json
 # This should complete - only 500ms sleep
-result = await invoke("sleep", {"ms": 500})
+result = await invoke("sleep", json.dumps({"ms": 500}))
 print(f"First sleep completed: {result}")
 "#,
             )
@@ -191,14 +192,14 @@ import json
 
 # First call: 100ms - should succeed
 try:
-    result = await invoke("sleep", {"ms": 100})
+    result = await invoke("sleep", json.dumps({"ms": 100}))
     print(f"100ms sleep: Success - {result}")
 except Exception as e:
     print(f"100ms sleep: Error - {e}")
 
 # Second call: 1000ms - should timeout (limit is 500ms)
 try:
-    result = await invoke("sleep", {"ms": 1000})
+    result = await invoke("sleep", json.dumps({"ms": 1000}))
     print(f"1000ms sleep: Success - {result}")
 except Exception as e:
     print(f"1000ms sleep: Error - {e}")
@@ -247,9 +248,10 @@ except Exception as e:
         sandbox
             .execute(
                 r#"
+import json
 # Simple trusted code running with restrictive limits
 for i in range(5):
-    result = await invoke("count", {"n": i})
+    result = await invoke("count", json.dumps({"n": i}))
     print(f"Count {i}: {result}")
 "#,
             )
@@ -289,7 +291,7 @@ for i in range(5):
     println!("ResourceLimits fields:");
     println!("  - execution_timeout: Maximum time for entire script execution");
     println!("  - callback_timeout: Maximum time for a single callback invocation");
-    println!("  - max_memory_bytes: Maximum WASM memory usage (not yet implemented)");
+    println!("  - max_memory_bytes: Maximum WASM memory usage (enforced via ResourceLimiter)");
     println!("  - max_callback_invocations: Maximum number of callback calls");
     println!("\nDefault limits provide reasonable protection for most use cases.");
 

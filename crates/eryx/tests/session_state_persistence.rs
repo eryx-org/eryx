@@ -110,32 +110,38 @@ async fn test_variable_persistence() {
     let mut session = create_session().await;
 
     // Define a variable
-    let result = session
+    let output = session
         .execute("x = 42", &[], None, None)
         .await
         .unwrap_or_else(|e| panic!("Failed to execute x = 42: {}", e));
-    assert_eq!(result, "", "Assignment should produce no output");
+    assert_eq!(output.stdout, "", "Assignment should produce no output");
 
     // Access the variable in a subsequent call
-    let result = session
+    let output = session
         .execute("print(x)", &[], None, None)
         .await
         .unwrap_or_else(|e| panic!("Failed to execute print(x): {}", e));
-    assert_eq!(result, "42", "Variable x should persist and equal 42");
+    assert_eq!(
+        output.stdout, "42",
+        "Variable x should persist and equal 42"
+    );
 
     // Modify the variable
-    let result = session
+    let output = session
         .execute("x = x + 1", &[], None, None)
         .await
         .unwrap_or_else(|e| panic!("Failed to execute x = x + 1: {}", e));
-    assert_eq!(result, "", "Assignment should produce no output");
+    assert_eq!(output.stdout, "", "Assignment should produce no output");
 
     // Verify the modification persisted
-    let result = session
+    let output = session
         .execute("print(x)", &[], None, None)
         .await
         .unwrap_or_else(|e| panic!("Failed to execute print(x) after modification: {}", e));
-    assert_eq!(result, "43", "Variable x should be 43 after increment");
+    assert_eq!(
+        output.stdout, "43",
+        "Variable x should be 43 after increment"
+    );
 }
 
 /// Test that functions persist between execute() calls.
@@ -144,7 +150,7 @@ async fn test_function_persistence() {
     let mut session = create_session().await;
 
     // Define a function
-    let result = session
+    let output = session
         .execute(
             r#"
 def greet(name):
@@ -156,14 +162,20 @@ def greet(name):
         )
         .await
         .unwrap_or_else(|e| panic!("Failed to define function: {}", e));
-    assert_eq!(result, "", "Function definition should produce no output");
+    assert_eq!(
+        output.stdout, "",
+        "Function definition should produce no output"
+    );
 
     // Call the function in a subsequent execution
-    let result = session
+    let output = session
         .execute("print(greet('World'))", &[], None, None)
         .await
         .unwrap_or_else(|e| panic!("Failed to call greet function: {}", e));
-    assert_eq!(result, "Hello, World!", "Function should be callable");
+    assert_eq!(
+        output.stdout, "Hello, World!",
+        "Function should be callable"
+    );
 }
 
 /// Test that classes persist between execute() calls.
@@ -172,7 +184,7 @@ async fn test_class_persistence() {
     let mut session = create_session().await;
 
     // Define a class (use MyCounter to avoid conflict with collections.Counter)
-    let result = session
+    let output = session
         .execute(
             r#"
 class MyCounter:
@@ -189,27 +201,33 @@ class MyCounter:
         )
         .await
         .unwrap_or_else(|e| panic!("Failed to define class: {}", e));
-    assert_eq!(result, "", "Class definition should produce no output");
+    assert_eq!(
+        output.stdout, "",
+        "Class definition should produce no output"
+    );
 
     // Create an instance
-    let result = session
+    let output = session
         .execute("counter = MyCounter(10)", &[], None, None)
         .await
         .unwrap_or_else(|e| panic!("Failed to create instance: {}", e));
-    assert_eq!(result, "", "Instance creation should produce no output");
+    assert_eq!(
+        output.stdout, "",
+        "Instance creation should produce no output"
+    );
 
-    // Use the instance across multiple calls
-    let result = session
+    // Call methods on the instance
+    let output = session
         .execute("print(counter.increment())", &[], None, None)
         .await
         .unwrap_or_else(|e| panic!("Failed to call increment: {}", e));
-    assert_eq!(result, "11", "First increment should return 11");
+    assert_eq!(output.stdout, "11", "First increment should return 11");
 
-    let result = session
+    let output = session
         .execute("print(counter.increment())", &[], None, None)
         .await
-        .unwrap_or_else(|e| panic!("Failed to call increment again: {}", e));
-    assert_eq!(result, "12", "Second increment should return 12");
+        .unwrap_or_else(|e| panic!("Failed to call second increment: {}", e));
+    assert_eq!(output.stdout, "12", "Second increment should return 12");
 }
 
 /// Test that clear_state() clears persistent variables.
@@ -224,11 +242,11 @@ async fn test_clear_state() {
         .unwrap_or_else(|e| panic!("Failed to set x: {}", e));
 
     // Verify it exists
-    let result = session
+    let output = session
         .execute("print(x)", &[], None, None)
         .await
         .unwrap_or_else(|e| panic!("Failed to print x: {}", e));
-    assert_eq!(result, "100");
+    assert_eq!(output.stdout, "100");
 
     // Clear the state
     session
@@ -257,11 +275,11 @@ async fn test_reset_clears_state() {
         .unwrap_or_else(|e| panic!("Failed to set x: {}", e));
 
     // Verify it exists
-    let result = session
+    let output = session
         .execute("print(x)", &[], None, None)
         .await
         .unwrap_or_else(|e| panic!("Failed to print x: {}", e));
-    assert_eq!(result, "100");
+    assert_eq!(output.stdout, "100");
 
     // Reset the session
     session
@@ -305,17 +323,17 @@ async fn test_complex_state_persistence() {
         .unwrap_or_else(|e| panic!("Failed to append 3: {}", e));
 
     // Verify the accumulated state
-    let result = session
+    let output = session
         .execute("print(sum(data))", &[], None, None)
         .await
         .unwrap_or_else(|e| panic!("Failed to sum data: {}", e));
-    assert_eq!(result, "6", "Sum of [1, 2, 3] should be 6");
+    assert_eq!(output.stdout, "6", "Sum of [1, 2, 3] should be 6");
 
-    let result = session
+    let output = session
         .execute("print(len(data))", &[], None, None)
         .await
         .unwrap_or_else(|e| panic!("Failed to get len: {}", e));
-    assert_eq!(result, "3", "Length should be 3");
+    assert_eq!(output.stdout, "3", "Length should be 3");
 }
 
 /// Test execution count tracking.
@@ -389,11 +407,11 @@ async fn test_snapshot_and_restore() {
         .unwrap_or_else(|e| panic!("Failed to modify x: {}", e));
 
     // Verify modification
-    let result = session
+    let output = session
         .execute("print(x)", &[], None, None)
         .await
         .unwrap_or_else(|e| panic!("Failed to print x: {}", e));
-    assert_eq!(result, "999");
+    assert_eq!(output.stdout, "999");
 
     // Restore the snapshot
     session
@@ -402,23 +420,23 @@ async fn test_snapshot_and_restore() {
         .unwrap_or_else(|e| panic!("Failed to restore: {}", e));
 
     // Verify original values are back
-    let result = session
+    let output = session
         .execute("print(x)", &[], None, None)
         .await
-        .unwrap_or_else(|e| panic!("Failed to print x after restore: {}", e));
-    assert_eq!(result, "10", "x should be restored to 10");
+        .expect("Failed to read x");
+    assert_eq!(output.stdout, "10", "x should be restored to 10");
 
-    let result = session
+    let output = session
         .execute("print(y)", &[], None, None)
         .await
-        .unwrap_or_else(|e| panic!("Failed to print y after restore: {}", e));
-    assert_eq!(result, "20", "y should be restored to 20");
+        .expect("Failed to read y");
+    assert_eq!(output.stdout, "20", "y should be restored to 20");
 
-    let result = session
+    let output = session
         .execute("print(data)", &[], None, None)
         .await
-        .unwrap_or_else(|e| panic!("Failed to print data after restore: {}", e));
-    assert_eq!(result, "[1, 2, 3]", "data should be restored");
+        .expect("Failed to read data");
+    assert_eq!(output.stdout, "[1, 2, 3]", "data should be restored");
 }
 
 /// Test snapshot serialization roundtrip.
@@ -467,11 +485,11 @@ async fn test_snapshot_serialization() {
         .unwrap_or_else(|e| panic!("Failed to restore from deserialized: {}", e));
 
     // Verify the value is back
-    let result = session
+    let output = session
         .execute("print(value)", &[], None, None)
         .await
         .unwrap_or_else(|e| panic!("Failed to print value: {}", e));
-    assert_eq!(result, "42");
+    assert_eq!(output.stdout, "42");
 }
 
 /// Test that unpicklable objects are handled gracefully.
@@ -504,6 +522,8 @@ async fn test_snapshot_with_unpicklable() {
         // num should be restored
         let result = session.execute("print(num)", &[], None, None).await;
         assert!(result.is_ok(), "num should be restored");
+        let output = result.unwrap();
+        assert_eq!(output.stdout, "100", "num should equal 100");
     }
     // If snapshot failed, that's also acceptable behavior
 }
