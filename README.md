@@ -9,9 +9,12 @@ A Rust library that executes Python code in a WebAssembly sandbox with async cal
 
 - **Async callback mechanism** — Python can `await invoke("callback_name", ...)` to call host-provided functions
 - **Parallel execution** — Multiple callbacks can run concurrently via `asyncio.gather()`
+- **Session state persistence** — Variables, functions, and classes persist between executions for REPL-style usage
+- **State snapshots** — Capture and restore Python state with pickle-based serialization
 - **Execution tracing** — Line-level progress reporting via `sys.settrace`
 - **Introspection** — Python can discover available callbacks at runtime
 - **Composable runtime libraries** — Pre-built APIs with Python wrappers and type stubs
+- **Pre-compiled WASM** — 41x faster sandbox creation with ahead-of-time compilation
 
 ## Quick Start
 
@@ -75,6 +78,62 @@ print(f"Current time: {timestamp}")
 }
 ```
 
+## Session State Persistence
+
+For REPL-style usage where state persists between executions:
+
+```rust
+use eryx::session::InProcessSession;
+
+#[tokio::main]
+async fn main() -> Result<(), eryx::Error> {
+    let session = InProcessSession::builder().build()?;
+
+    // First execution defines a variable
+    session.execute("x = 42").await?;
+
+    // Second execution can access it
+    let result = session.execute("print(x * 2)").await?;
+    println!("{}", result.stdout); // "84"
+
+    // Snapshot and restore state
+    let snapshot = session.snapshot_state().await?;
+    session.clear_state().await?;
+    session.restore_state(&snapshot).await?;
+
+    Ok(())
+}
+```
+
+## Feature Flags
+
+| Feature | Description |
+|---------|-------------|
+| `precompiled` | Enables `with_precompiled_bytes()` and `with_precompiled_file()` for loading pre-compiled WASM (unsafe APIs) |
+| `embedded-runtime` | Embeds pre-compiled WASM in the binary; enables safe `with_embedded_runtime()` API for ~41x faster sandbox creation |
+
+```rust
+// With embedded-runtime feature (safe, recommended)
+let sandbox = Sandbox::builder()
+    .with_embedded_runtime()
+    .build()?;
+
+// With precompiled feature (unsafe, for custom WASM)
+let sandbox = unsafe {
+    Sandbox::builder()
+        .with_precompiled_file("runtime.cwasm")?
+        .build()?
+};
+```
+
+## Performance
+
+| Metric | Normal WASM | Pre-compiled | Speedup |
+|--------|-------------|--------------|---------|
+| Sandbox creation | ~650ms | ~16ms | **41x faster** |
+| Per-execution overhead | ~1.8ms | ~1.6ms | 14% faster |
+| Session (5 executions) | ~70ms | ~3ms | **23x faster** |
+
 ## Development
 
 This project uses [mise](https://mise.jdx.dev/) for tooling and task management.
@@ -83,26 +142,66 @@ This project uses [mise](https://mise.jdx.dev/) for tooling and task management.
 
 ```bash
 mise install
+mise run setup  # Build WASM + precompile (one-time)
 ```
 
 ### Tasks
 
 ```bash
-mise run test       # Run tests with nextest
-mise run lint       # Run clippy lints
-mise run fmt        # Format code
-mise run ci         # Run all CI checks (fmt-check, lint, test)
-mise run doc        # Generate documentation
-mise run doc-open   # Generate and open documentation
+# Development
+mise run check          # Run cargo check
+mise run build          # Build all crates
+mise run test           # Run tests with nextest
+mise run test-fast      # Run tests with precompiled WASM (~0.1s)
+mise run test-all       # Run tests with all features
+mise run lint           # Run clippy lints
+mise run fmt            # Format code
+mise run fmt-check      # Check code formatting
+
+# WASM
+mise run build-wasm     # Build the Python WASM component
+mise run build-all      # Build WASM + Rust crates
+mise run precompile-wasm # Pre-compile WASM to native code
+
+# CI & Quality
+mise run ci             # Run all CI checks (fmt-check, lint, test-fast)
+mise run msrv           # Check compilation on minimum supported Rust version
+
+# Documentation
+mise run doc            # Generate documentation
+mise run doc-open       # Generate and open documentation
+
+# Benchmarks
+mise run bench          # Run benchmarks
+mise run bench-save     # Run benchmarks and save baseline
+
+# Integration
+mise run integration    # Run all examples
 ```
 
 ### Manual Commands
 
 ```bash
-cargo nextest run --workspace           # Run tests
-cargo clippy --workspace --all-targets  # Run lints
-cargo fmt --all                         # Format code
-cargo doc --workspace --no-deps --open  # Generate docs
+cargo nextest run --workspace                    # Run tests
+cargo nextest run --workspace --features precompiled  # Fast tests
+cargo clippy --workspace --all-targets --all-features # Run lints
+cargo fmt --all                                  # Format code
+cargo doc --workspace --no-deps --open           # Generate docs
+cargo bench --package eryx                       # Run benchmarks
+```
+
+## Examples
+
+```bash
+cargo run --example simple              # Basic usage with callbacks
+cargo run --example with_tracing        # Execution tracing and output handling
+cargo run --example error_handling      # Error handling scenarios
+cargo run --example parallel_callbacks  # Parallel execution verification
+cargo run --example custom_library      # Using RuntimeLibrary
+cargo run --example session_reuse       # Session state persistence
+cargo run --example resource_limits     # ResourceLimits usage
+cargo run --example precompile --features precompiled      # Pre-compilation demo
+cargo run --example embedded_runtime --features embedded-runtime  # Embedded runtime
 ```
 
 ## Project Structure
@@ -110,21 +209,44 @@ cargo doc --workspace --no-deps --open  # Generate docs
 ```
 eryx/
 ├── Cargo.toml              # Workspace root
+├── Cargo.lock              # Dependency lock file
 ├── mise.toml               # mise configuration and tasks
+├── rustfmt.toml            # Formatting configuration
 ├── .config/
 │   └── nextest.toml        # nextest configuration
+├── .github/
+│   └── workflows/          # CI workflows
 ├── crates/
-│   └── eryx/               # Core library crate
+│   ├── eryx/               # Core library crate
+│   │   ├── Cargo.toml
+│   │   ├── build.rs        # Pre-compilation for embedded-runtime
+│   │   ├── benches/        # Criterion benchmarks
+│   │   ├── examples/       # 9 example programs
+│   │   ├── tests/          # Integration tests
+│   │   └── src/
+│   │       ├── lib.rs      # Public API exports
+│   │       ├── sandbox.rs  # Sandbox struct, execute()
+│   │       ├── callback.rs # Callback trait, CallbackError
+│   │       ├── library.rs  # RuntimeLibrary struct
+│   │       ├── trace.rs    # TraceEvent, TraceHandler
+│   │       ├── wasm.rs     # wasmtime setup, PythonExecutor
+│   │       ├── error.rs    # Error types
+│   │       └── session/    # Session state persistence
+│   │           ├── mod.rs
+│   │           ├── executor.rs   # SessionExecutor
+│   │           └── in_process.rs # InProcessSession
+│   └── eryx-runtime/       # Python WASM runtime
 │       ├── Cargo.toml
-│       └── src/
-│           ├── lib.rs      # Public API exports
-│           ├── sandbox.rs  # Sandbox struct, execute()
-│           ├── callback.rs # Callback trait, CallbackError
-│           ├── library.rs  # RuntimeLibrary struct
-│           ├── trace.rs    # TraceEvent, TraceHandler
-│           ├── wasm.rs     # wasmtime setup
-│           └── error.rs    # Error types
+│       ├── runtime.wit     # WIT interface definition
+│       ├── runtime.py      # Python runtime implementation
+│       ├── runtime.wasm    # Built WASM component (~43MB)
+│       ├── runtime.cwasm   # Pre-compiled native code (~44MB)
+│       └── src/lib.rs      # Exports WIT and Python source
 └── plans/                  # Design documents
+    ├── PROGRESS.md         # Development progress
+    ├── PYTHON_LIBRARIES.md # Python library research
+    ├── SANDBOX_REUSE.md    # Session persistence design
+    └── STRUCTURED_CONCURRENCY.md
 ```
 
 ## License

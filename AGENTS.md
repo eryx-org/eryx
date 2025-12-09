@@ -2,6 +2,32 @@
 
 This document outlines best practices for AI agents (and humans) working on this Rust codebase.
 
+## Eryx-Specific Tooling
+
+This project uses [mise](https://mise.jdx.dev/) for tooling and task management, and [uv](https://docs.astral.sh/uv/) for Python environment management (used to build the WASM runtime).
+
+### Quick Start
+
+```bash
+mise install           # Install Rust, cargo-nextest, uv
+mise run setup         # Build WASM + precompile (one-time)
+mise run test-fast     # Run tests with precompiled WASM (~0.1s)
+mise run ci            # Run all CI checks
+```
+
+### Key mise Tasks
+
+```bash
+mise run test-fast     # Fast tests with precompiled WASM (preferred)
+mise run test          # Tests without precompilation (slow, ~50s)
+mise run lint          # cargo clippy with all warnings
+mise run fmt           # cargo fmt
+mise run build-wasm    # Build Python WASM component
+mise run precompile-wasm # Pre-compile WASM to native code
+```
+
+See `mise.toml` for all available tasks.
+
 ## Cargo Workspace Configuration
 
 ### Dependency Management
@@ -40,18 +66,17 @@ In the root `Cargo.toml`:
 
 ```toml
 [workspace.lints.rust]
-unsafe_code = "forbid"
 missing_docs = "warn"
-rust_2018_idioms = "warn"
+# Use priority -1 to ensure lint groups are applied before individual lints
+rust_2018_idioms = { level = "warn", priority = -1 }
 
 [workspace.lints.clippy]
 all = "warn"
-pedantic = "warn"
-nursery = "warn"
 unwrap_used = "warn"
 expect_used = "warn"
-panic = "warn"
 ```
+
+**Note**: The `unsafe_code` lint is handled per-crate rather than at workspace level when some crates need conditional unsafe (e.g., for optional features like pre-compiled WASM loading).
 
 In subcrate `Cargo.toml` files:
 
@@ -115,6 +140,7 @@ members = ["crates/*"]
 ### Testing
 
 - **Use `cargo nextest run --workspace`** for running tests (faster and better output than `cargo test`)
+- **Prefer `mise run test-fast`** which uses precompiled WASM for ~500x faster test runs
 - Use `#[cfg(test)]` modules for unit tests
 - Place integration tests in `tests/` directories
 - Run `cargo nextest run --workspace --all-features` to test all feature combinations
@@ -237,6 +263,14 @@ cargo nextest run --workspace --all-features
 cargo doc --workspace --no-deps
 cargo audit
 ```
+
+For this project specifically, use:
+
+```bash
+mise run ci  # Runs fmt-check, lint, test-fast
+```
+
+The `test-fast` task uses precompiled WASM which reduces test time from ~50s to ~0.1s.
 
 ## Common Gotchas
 
