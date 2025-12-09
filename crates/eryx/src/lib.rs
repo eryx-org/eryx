@@ -45,6 +45,7 @@ mod callback;
 mod error;
 mod library;
 mod sandbox;
+pub mod session;
 mod trace;
 mod wasm;
 
@@ -52,6 +53,10 @@ pub use callback::{Callback, CallbackError};
 pub use error::Error;
 pub use library::RuntimeLibrary;
 pub use sandbox::{ExecuteResult, ExecuteStats, ResourceLimits, Sandbox, SandboxBuilder};
+pub use session::{
+    InProcessSession, PythonStateSnapshot, Session, SessionExecutor, SnapshotMetadata,
+    SnapshotSession,
+};
 pub use trace::{OutputHandler, TraceEvent, TraceEventKind, TraceHandler};
 
 // Re-export precompilation utilities

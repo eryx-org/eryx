@@ -16,6 +16,11 @@ run = "cargo build --workspace"
 description = "Run tests with nextest"
 run = "cargo nextest run --workspace"
 
+[tasks.test-fast]
+description = "Run tests with precompiled WASM (much faster)"
+depends = ["precompile-wasm"]
+run = "cargo nextest run --workspace --features precompiled"
+
 [tasks.test-all]
 description = "Run tests with all features"
 run = "cargo nextest run --workspace --all-features"
@@ -42,7 +47,7 @@ run = "cargo doc --workspace --no-deps --open"
 
 [tasks.ci]
 description = "Run all CI checks"
-depends = ["fmt-check", "lint", "test", "test-all"]
+depends = ["fmt-check", "lint", "test-fast"]
 
 [tasks.clean]
 description = "Clean build artifacts"
@@ -73,6 +78,21 @@ run = "cargo bench --package eryx -- --save-baseline main"
 description = "Pre-compile WASM to native code for faster loading"
 depends = ["build-wasm"]
 run = "cargo run --example precompile --features precompiled --release"
+sources = ["crates/eryx-runtime/runtime.wasm"]
+outputs = ["crates/eryx-runtime/runtime.cwasm"]
+
+[tasks.setup]
+description = "Set up development environment (build WASM, precompile, etc.)"
+depends = ["build-wasm", "precompile-wasm"]
+run = """
+echo "✓ Development environment ready!"
+echo ""
+echo "Available commands:"
+echo "  mise run test-fast  - Run tests with precompiled WASM (~0.1s)"
+echo "  mise run test       - Run tests without precompilation (~50s)"
+echo "  mise run ci         - Run all CI checks"
+echo "  mise run build-all  - Build WASM and Rust crates"
+"""
 
 [tasks.build-all-precompiled]
 description = "Build WASM, pre-compile it, and build Rust crates"

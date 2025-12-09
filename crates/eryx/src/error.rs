@@ -37,6 +37,10 @@ pub enum Error {
     #[error("serialization error: {0}")]
     Serialization(String),
 
+    /// State snapshot error.
+    #[error("snapshot error: {0}")]
+    Snapshot(String),
+
     /// I/O error.
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),

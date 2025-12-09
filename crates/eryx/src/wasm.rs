@@ -80,15 +80,27 @@ wasmtime::component::bindgen!({
 /// State for a single execution, implementing WASI and callback channels.
 pub struct ExecutorState {
     /// WASI context for the execution.
-    wasi: WasiCtx,
+    pub(crate) wasi: WasiCtx,
     /// Resource table for WASI.
-    table: ResourceTable,
+    pub(crate) table: ResourceTable,
     /// Channel to send callback requests to the host.
-    callback_tx: Option<mpsc::Sender<CallbackRequest>>,
+    pub(crate) callback_tx: Option<mpsc::Sender<CallbackRequest>>,
     /// Channel to send trace events to the host.
-    trace_tx: Option<mpsc::UnboundedSender<TraceRequest>>,
+    pub(crate) trace_tx: Option<mpsc::UnboundedSender<TraceRequest>>,
     /// Available callbacks for introspection.
-    callbacks: Vec<HostCallbackInfo>,
+    pub(crate) callbacks: Vec<HostCallbackInfo>,
+}
+
+impl std::fmt::Debug for ExecutorState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ExecutorState")
+            .field("wasi", &"<WasiCtx>")
+            .field("table", &"<ResourceTable>")
+            .field("callback_tx", &self.callback_tx.is_some())
+            .field("trace_tx", &self.trace_tx.is_some())
+            .field("callbacks", &self.callbacks.len())
+            .finish()
+    }
 }
 
 impl WasiView for ExecutorState {
@@ -199,6 +211,22 @@ impl std::fmt::Debug for PythonExecutor {
 }
 
 impl PythonExecutor {
+    /// Get a reference to the wasmtime engine.
+    #[must_use]
+    pub fn engine(&self) -> &Engine {
+        &self.engine
+    }
+
+    /// Get a reference to the pre-instantiated component.
+    #[must_use]
+    pub fn instance_pre(&self) -> &SandboxPre<ExecutorState> {
+        &self.instance_pre
+    }
+}
+
+impl PythonExecutor {
+    // Note: engine() and instance_pre() accessors are defined above
+
     /// Create a new executor by loading a WASM component from bytes.
     ///
     /// This performs all expensive operations upfront:

@@ -1,13 +1,22 @@
-"""Eryx Python WASM runtime with async callback support.
+"""Eryx Python WASM runtime with async callback support and state persistence.
 
 This module provides the WIT world implementation for executing Python code
 in a WebAssembly sandbox with access to async callbacks via the host.
+
+State Persistence:
+    The runtime maintains a `_persistent_globals` dict that preserves user-defined
+    variables between execute() calls. This enables REPL-style interactive sessions
+    where variables, functions, and classes persist across executions.
+
+    State can be serialized via snapshot_state() and restored via restore_state(),
+    enabling state transfer between processes or persistence to storage.
 """
 
 import ast
 import asyncio
 import json
 import math
+import pickle
 import re
 import sys
 import traceback
@@ -20,10 +29,175 @@ from itertools import chain, groupby
 import wit_world
 from componentize_py_types import Err
 
+# Module-level persistent state storage.
+# This dict holds user-defined variables between execute() calls.
+_persistent_globals: dict = {}
+
+# Maximum snapshot size (10 MB) to prevent abuse
+MAX_SNAPSHOT_SIZE = 10 * 1024 * 1024
+
+# Keys that should never be persisted (internal/security-sensitive)
+_EXCLUDED_KEYS = frozenset(
+    {
+        "__builtins__",
+        "invoke",
+        "list_callbacks",
+        "asyncio",
+        "json",
+        "math",
+        "re",
+        "defaultdict",
+        "Counter",
+        "datetime",
+        "timedelta",
+        "groupby",
+        "chain",
+        "os",
+        "subprocess",
+        "socket",
+        "__import__",
+        # Internal Python keys
+        "__name__",
+        "__doc__",
+        "__package__",
+        "__loader__",
+        "__spec__",
+        "__annotations__",
+        "__builtins__",
+        "__file__",
+        "__cached__",
+    }
+)
+
+
+def _get_base_globals() -> dict:
+    """Get the base execution globals with pre-imported modules and blocked items."""
+    return {
+        "__builtins__": __builtins__,
+        # Async support
+        "asyncio": asyncio,
+        # Common utilities
+        "json": json,
+        "math": math,
+        "re": re,
+        "defaultdict": defaultdict,
+        "Counter": Counter,
+        "datetime": datetime,
+        "timedelta": timedelta,
+        "groupby": groupby,
+        "chain": chain,
+        # Blocked for security
+        "os": None,
+        "subprocess": None,
+        "socket": None,
+        "__import__": None,  # Prevent dynamic imports
+    }
+
+
+def _get_exec_globals(invoke_func, list_callbacks_func) -> dict:
+    """Get the execution globals including persistent state and API functions.
+
+    Args:
+        invoke_func: The async invoke function for callbacks
+        list_callbacks_func: The list_callbacks introspection function
+
+    Returns:
+        A dict suitable for use as globals in exec()
+    """
+    globals_dict = _get_base_globals()
+
+    # Add Eryx API functions
+    globals_dict["invoke"] = invoke_func
+    globals_dict["list_callbacks"] = list_callbacks_func
+
+    # Merge in persistent user state
+    globals_dict.update(_persistent_globals)
+
+    return globals_dict
+
+
+def _extract_user_globals(exec_globals: dict) -> dict:
+    """Extract user-defined globals from execution globals.
+
+    Filters out base modules, API functions, and internal keys to get
+    only the user-defined variables, functions, and classes.
+
+    Args:
+        exec_globals: The globals dict after code execution
+
+    Returns:
+        A dict containing only user-defined items
+    """
+    user_globals = {}
+    base_keys = (
+        set(_get_base_globals().keys()) | _EXCLUDED_KEYS | {"invoke", "list_callbacks"}
+    )
+
+    for key, value in exec_globals.items():
+        # Skip excluded keys
+        if key in base_keys:
+            continue
+        # Skip private/dunder names
+        if key.startswith("_"):
+            continue
+        # Skip None values (blocked modules)
+        if value is None:
+            continue
+        # Skip module objects (we don't want to persist imported modules)
+        if isinstance(value, types.ModuleType):
+            continue
+
+        user_globals[key] = value
+
+    return user_globals
+
+
+def _is_picklable(obj) -> bool:
+    """Check if an object can be pickled.
+
+    Args:
+        obj: The object to check
+
+    Returns:
+        True if the object can be pickled, False otherwise
+    """
+    try:
+        pickle.dumps(obj)
+        return True
+    except (pickle.PicklingError, TypeError, AttributeError):
+        return False
+
+
+def _filter_picklable(globals_dict: dict) -> tuple[dict, list[str]]:
+    """Filter a globals dict to only picklable items.
+
+    Args:
+        globals_dict: Dict of global variables
+
+    Returns:
+        Tuple of (picklable_dict, list of skipped key names)
+    """
+    picklable = {}
+    skipped = []
+
+    for key, value in globals_dict.items():
+        if _is_picklable(value):
+            picklable[key] = value
+        else:
+            skipped.append(key)
+
+    return picklable, skipped
+
 
 class WitWorld(wit_world.WitWorld):
     async def execute(self, code: str) -> str:
-        """Execute Python code with top-level await support.
+        """Execute Python code with top-level await support and state persistence.
+
+        Variables, functions, and classes defined in one execute() call will
+        be available in subsequent calls. For example:
+
+            execute("x = 1")
+            execute("print(x)")  # prints "1"
 
         Supports direct top-level await syntax:
             result = await invoke("get_time", "{}")
@@ -38,6 +212,8 @@ class WitWorld(wit_world.WitWorld):
         Returns:
             Captured stdout. Use print() to output the result.
         """
+        global _persistent_globals
+
         old_stdout = sys.stdout
         old_stderr = sys.stderr
 
@@ -173,30 +349,8 @@ class WitWorld(wit_world.WitWorld):
 
                 return trace_func
 
-            # Execution environment with pre-imported modules
-            exec_globals = {
-                "__builtins__": __builtins__,
-                # Eryx API
-                "invoke": invoke,
-                "list_callbacks": list_callbacks,
-                # Async support
-                "asyncio": asyncio,
-                # Common utilities
-                "json": json,
-                "math": math,
-                "re": re,
-                "defaultdict": defaultdict,
-                "Counter": Counter,
-                "datetime": datetime,
-                "timedelta": timedelta,
-                "groupby": groupby,
-                "chain": chain,
-                # Blocked for security
-                "os": None,
-                "subprocess": None,
-                "socket": None,
-                "__import__": None,  # Prevent dynamic imports
-            }
+            # Get execution globals with persistent state
+            exec_globals = _get_exec_globals(invoke, list_callbacks)
             exec_locals = {}
 
             # Compile with top-level await support
@@ -222,6 +376,15 @@ class WitWorld(wit_world.WitWorld):
                 # Disable tracing
                 sys.settrace(None)
 
+            # Extract and persist user-defined globals
+            # For async code, variables are in exec_globals; for sync, in exec_locals
+            user_globals = _extract_user_globals(exec_globals)
+            user_locals = _extract_user_globals(exec_locals)
+
+            # Merge locals into persistent globals (locals take precedence)
+            _persistent_globals.update(user_globals)
+            _persistent_globals.update(user_locals)
+
             output = sys.stdout.getvalue()
             sys.stdout = old_stdout
             sys.stderr = old_stderr
@@ -235,3 +398,82 @@ class WitWorld(wit_world.WitWorld):
             sys.settrace(None)
             tb = traceback.format_exc()
             raise Err(f"{type(e).__name__}: {e}\n\nTraceback:\n{tb}")
+
+    async def snapshot_state(self) -> bytes:
+        """Capture a snapshot of the current Python session state.
+
+        Returns the serialized state as bytes using pickle. This captures
+        all user-defined variables from previous execute() calls.
+
+        Returns:
+            Pickled state bytes
+
+        Raises:
+            Err: If serialization fails or snapshot is too large
+        """
+        global _persistent_globals
+
+        try:
+            # Filter to only picklable items
+            picklable, skipped = _filter_picklable(_persistent_globals)
+
+            # Serialize with pickle
+            data = pickle.dumps(picklable, protocol=pickle.HIGHEST_PROTOCOL)
+
+            # Check size limit
+            if len(data) > MAX_SNAPSHOT_SIZE:
+                raise Err(
+                    f"Snapshot too large: {len(data)} bytes "
+                    f"(max {MAX_SNAPSHOT_SIZE} bytes)"
+                )
+
+            # If some items were skipped, we could log this but still succeed
+            # For now, we silently skip unpicklable items
+
+            return data
+
+        except Err:
+            raise
+        except Exception as e:
+            raise Err(f"Failed to snapshot state: {type(e).__name__}: {e}")
+
+    async def restore_state(self, data: bytes) -> None:
+        """Restore Python session state from a previously captured snapshot.
+
+        After restore, subsequent execute() calls will have access to all
+        variables that were present when the snapshot was taken.
+
+        Args:
+            data: Pickled state bytes from snapshot_state()
+
+        Raises:
+            Err: If deserialization fails
+        """
+        global _persistent_globals
+
+        try:
+            # Deserialize with pickle
+            restored = pickle.loads(data)
+
+            if not isinstance(restored, dict):
+                raise Err(
+                    f"Invalid snapshot: expected dict, got {type(restored).__name__}"
+                )
+
+            # Replace persistent globals with restored state
+            _persistent_globals.clear()
+            _persistent_globals.update(restored)
+
+        except Err:
+            raise
+        except Exception as e:
+            raise Err(f"Failed to restore state: {type(e).__name__}: {e}")
+
+    async def clear_state(self) -> None:
+        """Clear all persistent state from the session.
+
+        After clear, subsequent execute() calls will start with a fresh
+        namespace (no user-defined variables from previous calls).
+        """
+        global _persistent_globals
+        _persistent_globals.clear()

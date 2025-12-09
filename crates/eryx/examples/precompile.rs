@@ -115,20 +115,18 @@ fn main() -> anyhow::Result<()> {
     println!("  Pre-compile cost:      {precompile_time:?}");
     println!("  Per-load cost:         {avg_time:?}");
 
-    // Show how to save/load from disk
-    println!("\n=== Saving to Disk Example ===");
-    println!("To save pre-compiled WASM for later use:");
-    println!();
-    println!("  // Pre-compile and save (safe)");
-    println!("  let precompiled = PythonExecutor::precompile_file(\"runtime.wasm\")?;");
-    println!("  std::fs::write(\"runtime.cwasm\", &precompiled)?;");
-    println!();
-    println!("  // Load later (unsafe - must trust the file)");
-    println!("  let sandbox = unsafe {{");
-    println!("      Sandbox::builder()");
-    println!("          .with_precompiled_file(\"runtime.cwasm\")");
-    println!("          .build()?");
-    println!("  }};");
+    // Save pre-compiled WASM to disk for faster test runs
+    let cwasm_path = "crates/eryx-runtime/runtime.cwasm";
+    println!("\n=== Saving Pre-compiled WASM ===");
+    println!("Saving to: {cwasm_path}");
+    std::fs::write(cwasm_path, &precompiled)?;
+    println!(
+        "Saved {} bytes ({:.1} MB)",
+        precompiled.len(),
+        precompiled.len() as f64 / 1_000_000.0
+    );
+    println!("\nTo run tests with precompiled WASM:");
+    println!("  cargo nextest run --test session_state_persistence --features precompiled");
 
     Ok(())
 }

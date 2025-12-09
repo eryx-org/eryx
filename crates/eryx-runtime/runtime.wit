@@ -58,4 +58,29 @@ world sandbox {
     ///
     /// Returns captured stdout on success, or an error message on failure.
     export execute: async func(code: string) -> result<string, string>;
+
+    /// Capture a snapshot of the current Python session state.
+    ///
+    /// Returns the serialized state as bytes (using pickle internally).
+    /// This captures all user-defined variables from previous execute() calls.
+    ///
+    /// The snapshot can be restored later using restore-state to continue
+    /// execution with the same variables available.
+    ///
+    /// Returns an error if serialization fails (e.g., unpicklable objects).
+    export snapshot-state: async func() -> result<list<u8>, string>;
+
+    /// Restore Python session state from a previously captured snapshot.
+    ///
+    /// After restore, subsequent execute() calls will have access to all
+    /// variables that were present when the snapshot was taken.
+    ///
+    /// Returns an error if deserialization fails (e.g., corrupted data).
+    export restore-state: async func(data: list<u8>) -> result<_, string>;
+
+    /// Clear all persistent state from the session.
+    ///
+    /// After clear, subsequent execute() calls will start with a fresh
+    /// namespace (no user-defined variables from previous calls).
+    export clear-state: async func();
 }

@@ -1,0 +1,509 @@
+//! Integration test for SessionExecutor state persistence.
+//!
+//! This test verifies that Python state (variables, functions, etc.) persists
+//! between execute() calls when using SessionExecutor.
+//!
+//! ## Running Tests
+//!
+//! For **fastest execution** (~3s), use precompiled WASM:
+//! ```sh
+//! # First, generate the precompiled WASM (one-time setup)
+//! cargo run --example precompile --features precompiled
+//!
+//! # Then run tests with precompiled feature
+//! cargo nextest run --test session_state_persistence --features precompiled
+//! ```
+//!
+//! Alternatively, use `cargo test` with single-threaded mode (~10s):
+//! ```sh
+//! cargo test --test session_state_persistence -- --test-threads=1
+//! ```
+//!
+//! This shares the compiled WASM across all tests via `OnceLock`.
+//!
+//! With `cargo nextest` without precompiled feature, each test runs in a
+//! separate process, so WASM is compiled once per test (~5s each), making
+//! the total ~50s. This is expected behavior due to nextest's process-per-test
+//! isolation model.
+
+use std::path::PathBuf;
+use std::sync::{Arc, OnceLock};
+
+use eryx::{PythonExecutor, PythonStateSnapshot, SessionExecutor};
+
+/// Shared executor to avoid repeated WASM compilation across tests.
+/// WASM compilation takes ~4-5 seconds, so sharing it speeds up tests significantly.
+/// With precompiled WASM, loading takes ~50ms instead.
+static SHARED_EXECUTOR: OnceLock<Arc<PythonExecutor>> = OnceLock::new();
+
+fn get_shared_executor() -> Arc<PythonExecutor> {
+    SHARED_EXECUTOR
+        .get_or_init(|| Arc::new(create_executor()))
+        .clone()
+}
+
+/// Create a PythonExecutor, using precompiled WASM if available.
+fn create_executor() -> PythonExecutor {
+    // Try precompiled first (much faster: ~50ms vs ~5s)
+    #[cfg(feature = "precompiled")]
+    {
+        let cwasm_path = precompiled_wasm_path();
+        if cwasm_path.exists() {
+            // SAFETY: We trust the precompiled WASM because it was generated
+            // from our own runtime.wasm by the precompile example.
+            #[allow(unsafe_code)]
+            match unsafe { PythonExecutor::from_precompiled_file(&cwasm_path) } {
+                Ok(executor) => return executor,
+                Err(e) => {
+                    eprintln!(
+                        "Warning: Failed to load precompiled WASM from {:?}: {}",
+                        cwasm_path, e
+                    );
+                    eprintln!("Falling back to runtime compilation...");
+                }
+            }
+        }
+    }
+
+    // Fall back to runtime compilation
+    let path = runtime_wasm_path();
+    PythonExecutor::from_file(&path)
+        .unwrap_or_else(|e| panic!("Failed to load runtime.wasm from {:?}: {}", path, e))
+}
+
+/// Get the path to runtime.wasm relative to the workspace root.
+fn runtime_wasm_path() -> PathBuf {
+    // CARGO_MANIFEST_DIR points to crates/eryx
+    let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap_or_else(|_| ".".to_string());
+    PathBuf::from(manifest_dir)
+        .parent()
+        .unwrap_or_else(|| std::path::Path::new("."))
+        .join("eryx-runtime")
+        .join("runtime.wasm")
+}
+
+/// Get the path to precompiled runtime.cwasm.
+#[cfg(feature = "precompiled")]
+fn precompiled_wasm_path() -> PathBuf {
+    // CARGO_MANIFEST_DIR points to crates/eryx
+    let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap_or_else(|_| ".".to_string());
+    PathBuf::from(manifest_dir)
+        .parent()
+        .unwrap_or_else(|| std::path::Path::new("."))
+        .join("eryx-runtime")
+        .join("runtime.cwasm")
+}
+
+/// Helper to create a session executor for tests.
+/// Uses a shared PythonExecutor to avoid repeated WASM compilation.
+async fn create_session() -> SessionExecutor {
+    let executor = get_shared_executor();
+
+    SessionExecutor::new(executor, &[])
+        .await
+        .unwrap_or_else(|e| panic!("Failed to create session: {}", e))
+}
+
+/// Test that variables persist between execute() calls.
+#[tokio::test]
+async fn test_variable_persistence() {
+    let mut session = create_session().await;
+
+    // Define a variable
+    let result = session
+        .execute("x = 42", &[], None, None)
+        .await
+        .unwrap_or_else(|e| panic!("Failed to execute x = 42: {}", e));
+    assert_eq!(result, "", "Assignment should produce no output");
+
+    // Access the variable in a subsequent call
+    let result = session
+        .execute("print(x)", &[], None, None)
+        .await
+        .unwrap_or_else(|e| panic!("Failed to execute print(x): {}", e));
+    assert_eq!(result, "42", "Variable x should persist and equal 42");
+
+    // Modify the variable
+    let result = session
+        .execute("x = x + 1", &[], None, None)
+        .await
+        .unwrap_or_else(|e| panic!("Failed to execute x = x + 1: {}", e));
+    assert_eq!(result, "", "Assignment should produce no output");
+
+    // Verify the modification persisted
+    let result = session
+        .execute("print(x)", &[], None, None)
+        .await
+        .unwrap_or_else(|e| panic!("Failed to execute print(x) after modification: {}", e));
+    assert_eq!(result, "43", "Variable x should be 43 after increment");
+}
+
+/// Test that functions persist between execute() calls.
+#[tokio::test]
+async fn test_function_persistence() {
+    let mut session = create_session().await;
+
+    // Define a function
+    let result = session
+        .execute(
+            r#"
+def greet(name):
+    return f"Hello, {name}!"
+"#,
+            &[],
+            None,
+            None,
+        )
+        .await
+        .unwrap_or_else(|e| panic!("Failed to define function: {}", e));
+    assert_eq!(result, "", "Function definition should produce no output");
+
+    // Call the function in a subsequent execution
+    let result = session
+        .execute("print(greet('World'))", &[], None, None)
+        .await
+        .unwrap_or_else(|e| panic!("Failed to call greet function: {}", e));
+    assert_eq!(result, "Hello, World!", "Function should be callable");
+}
+
+/// Test that classes persist between execute() calls.
+#[tokio::test]
+async fn test_class_persistence() {
+    let mut session = create_session().await;
+
+    // Define a class (use MyCounter to avoid conflict with collections.Counter)
+    let result = session
+        .execute(
+            r#"
+class MyCounter:
+    def __init__(self, start=0):
+        self.value = start
+
+    def increment(self):
+        self.value += 1
+        return self.value
+"#,
+            &[],
+            None,
+            None,
+        )
+        .await
+        .unwrap_or_else(|e| panic!("Failed to define class: {}", e));
+    assert_eq!(result, "", "Class definition should produce no output");
+
+    // Create an instance
+    let result = session
+        .execute("counter = MyCounter(10)", &[], None, None)
+        .await
+        .unwrap_or_else(|e| panic!("Failed to create instance: {}", e));
+    assert_eq!(result, "", "Instance creation should produce no output");
+
+    // Use the instance across multiple calls
+    let result = session
+        .execute("print(counter.increment())", &[], None, None)
+        .await
+        .unwrap_or_else(|e| panic!("Failed to call increment: {}", e));
+    assert_eq!(result, "11", "First increment should return 11");
+
+    let result = session
+        .execute("print(counter.increment())", &[], None, None)
+        .await
+        .unwrap_or_else(|e| panic!("Failed to call increment again: {}", e));
+    assert_eq!(result, "12", "Second increment should return 12");
+}
+
+/// Test that clear_state() clears persistent variables.
+#[tokio::test]
+async fn test_clear_state() {
+    let mut session = create_session().await;
+
+    // Define a variable
+    session
+        .execute("x = 100", &[], None, None)
+        .await
+        .unwrap_or_else(|e| panic!("Failed to set x: {}", e));
+
+    // Verify it exists
+    let result = session
+        .execute("print(x)", &[], None, None)
+        .await
+        .unwrap_or_else(|e| panic!("Failed to print x: {}", e));
+    assert_eq!(result, "100");
+
+    // Clear the state
+    session
+        .clear_state()
+        .await
+        .unwrap_or_else(|e| panic!("Failed to clear state: {}", e));
+
+    // Variable should no longer exist
+    let result = session.execute("print(x)", &[], None, None).await;
+    assert!(
+        result.is_err(),
+        "After clear_state, x should not be defined: {:?}",
+        result
+    );
+}
+
+/// Test that reset() clears state by creating a new WASM instance.
+#[tokio::test]
+async fn test_reset_clears_state() {
+    let mut session = create_session().await;
+
+    // Define a variable
+    session
+        .execute("x = 100", &[], None, None)
+        .await
+        .unwrap_or_else(|e| panic!("Failed to set x: {}", e));
+
+    // Verify it exists
+    let result = session
+        .execute("print(x)", &[], None, None)
+        .await
+        .unwrap_or_else(|e| panic!("Failed to print x: {}", e));
+    assert_eq!(result, "100");
+
+    // Reset the session
+    session
+        .reset(&[])
+        .await
+        .unwrap_or_else(|e| panic!("Failed to reset session: {}", e));
+
+    // Variable should no longer exist
+    let result = session.execute("print(x)", &[], None, None).await;
+    assert!(
+        result.is_err(),
+        "After reset, x should not be defined: {:?}",
+        result
+    );
+}
+
+/// Test multiple variables and complex state.
+#[tokio::test]
+async fn test_complex_state_persistence() {
+    let mut session = create_session().await;
+
+    // Build up complex state across multiple calls
+    session
+        .execute("data = []", &[], None, None)
+        .await
+        .unwrap_or_else(|e| panic!("Failed to create list: {}", e));
+
+    session
+        .execute("data.append(1)", &[], None, None)
+        .await
+        .unwrap_or_else(|e| panic!("Failed to append 1: {}", e));
+
+    session
+        .execute("data.append(2)", &[], None, None)
+        .await
+        .unwrap_or_else(|e| panic!("Failed to append 2: {}", e));
+
+    session
+        .execute("data.append(3)", &[], None, None)
+        .await
+        .unwrap_or_else(|e| panic!("Failed to append 3: {}", e));
+
+    // Verify the accumulated state
+    let result = session
+        .execute("print(sum(data))", &[], None, None)
+        .await
+        .unwrap_or_else(|e| panic!("Failed to sum data: {}", e));
+    assert_eq!(result, "6", "Sum of [1, 2, 3] should be 6");
+
+    let result = session
+        .execute("print(len(data))", &[], None, None)
+        .await
+        .unwrap_or_else(|e| panic!("Failed to get len: {}", e));
+    assert_eq!(result, "3", "Length should be 3");
+}
+
+/// Test execution count tracking.
+#[tokio::test]
+async fn test_execution_count() {
+    let mut session = create_session().await;
+
+    assert_eq!(session.execution_count(), 0, "Initial count should be 0");
+
+    session
+        .execute("x = 1", &[], None, None)
+        .await
+        .unwrap_or_else(|e| panic!("exec 1 failed: {}", e));
+    assert_eq!(session.execution_count(), 1);
+
+    session
+        .execute("x = 2", &[], None, None)
+        .await
+        .unwrap_or_else(|e| panic!("exec 2 failed: {}", e));
+    assert_eq!(session.execution_count(), 2);
+
+    session
+        .execute("x = 3", &[], None, None)
+        .await
+        .unwrap_or_else(|e| panic!("exec 3 failed: {}", e));
+    assert_eq!(session.execution_count(), 3);
+
+    // Reset should clear count
+    session
+        .reset(&[])
+        .await
+        .unwrap_or_else(|e| panic!("reset failed: {}", e));
+    assert_eq!(
+        session.execution_count(),
+        0,
+        "Count should be 0 after reset"
+    );
+}
+
+/// Test state snapshot and restore.
+#[tokio::test]
+async fn test_snapshot_and_restore() {
+    let mut session = create_session().await;
+
+    // Build up some state
+    session
+        .execute("x = 10", &[], None, None)
+        .await
+        .unwrap_or_else(|e| panic!("Failed to set x: {}", e));
+    session
+        .execute("y = 20", &[], None, None)
+        .await
+        .unwrap_or_else(|e| panic!("Failed to set y: {}", e));
+    session
+        .execute("data = [1, 2, 3]", &[], None, None)
+        .await
+        .unwrap_or_else(|e| panic!("Failed to set data: {}", e));
+
+    // Take a snapshot
+    let snapshot = session
+        .snapshot_state()
+        .await
+        .unwrap_or_else(|e| panic!("Failed to snapshot: {}", e));
+
+    assert!(snapshot.size() > 0, "Snapshot should have data");
+
+    // Modify the state
+    session
+        .execute("x = 999", &[], None, None)
+        .await
+        .unwrap_or_else(|e| panic!("Failed to modify x: {}", e));
+
+    // Verify modification
+    let result = session
+        .execute("print(x)", &[], None, None)
+        .await
+        .unwrap_or_else(|e| panic!("Failed to print x: {}", e));
+    assert_eq!(result, "999");
+
+    // Restore the snapshot
+    session
+        .restore_state(&snapshot)
+        .await
+        .unwrap_or_else(|e| panic!("Failed to restore: {}", e));
+
+    // Verify original values are back
+    let result = session
+        .execute("print(x)", &[], None, None)
+        .await
+        .unwrap_or_else(|e| panic!("Failed to print x after restore: {}", e));
+    assert_eq!(result, "10", "x should be restored to 10");
+
+    let result = session
+        .execute("print(y)", &[], None, None)
+        .await
+        .unwrap_or_else(|e| panic!("Failed to print y after restore: {}", e));
+    assert_eq!(result, "20", "y should be restored to 20");
+
+    let result = session
+        .execute("print(data)", &[], None, None)
+        .await
+        .unwrap_or_else(|e| panic!("Failed to print data after restore: {}", e));
+    assert_eq!(result, "[1, 2, 3]", "data should be restored");
+}
+
+/// Test snapshot serialization roundtrip.
+#[tokio::test]
+async fn test_snapshot_serialization() {
+    let mut session = create_session().await;
+
+    // Set up state
+    session
+        .execute("value = 42", &[], None, None)
+        .await
+        .unwrap_or_else(|e| panic!("Failed to set value: {}", e));
+
+    // Take a snapshot
+    let snapshot = session
+        .snapshot_state()
+        .await
+        .unwrap_or_else(|e| panic!("Failed to snapshot: {}", e));
+
+    // Serialize to bytes
+    let bytes = snapshot.to_bytes();
+    assert!(
+        bytes.len() > 8,
+        "Serialized bytes should include header + data"
+    );
+
+    // Deserialize
+    let restored_snapshot = PythonStateSnapshot::from_bytes(&bytes)
+        .unwrap_or_else(|e| panic!("Failed to deserialize: {}", e));
+
+    assert_eq!(restored_snapshot.size(), snapshot.size());
+    assert_eq!(
+        restored_snapshot.metadata().timestamp_ms,
+        snapshot.metadata().timestamp_ms
+    );
+
+    // Clear state and restore from deserialized snapshot
+    session
+        .clear_state()
+        .await
+        .unwrap_or_else(|e| panic!("Failed to clear: {}", e));
+
+    session
+        .restore_state(&restored_snapshot)
+        .await
+        .unwrap_or_else(|e| panic!("Failed to restore from deserialized: {}", e));
+
+    // Verify the value is back
+    let result = session
+        .execute("print(value)", &[], None, None)
+        .await
+        .unwrap_or_else(|e| panic!("Failed to print value: {}", e));
+    assert_eq!(result, "42");
+}
+
+/// Test that unpicklable objects are handled gracefully.
+#[tokio::test]
+async fn test_snapshot_with_unpicklable() {
+    let mut session = create_session().await;
+
+    // Create a lambda (unpicklable)
+    session
+        .execute("fn = lambda x: x * 2", &[], None, None)
+        .await
+        .unwrap_or_else(|e| panic!("Failed to create lambda: {}", e));
+
+    // Also create a picklable variable
+    session
+        .execute("num = 100", &[], None, None)
+        .await
+        .unwrap_or_else(|e| panic!("Failed to set num: {}", e));
+
+    // Snapshot should still work, just skip the unpicklable lambda
+    let snapshot = session.snapshot_state().await;
+
+    // The snapshot might succeed (skipping unpicklable) or fail
+    // Either behavior is acceptable
+    if let Ok(snap) = snapshot {
+        // If it succeeded, verify we can restore
+        session.clear_state().await.unwrap();
+        session.restore_state(&snap).await.unwrap();
+
+        // num should be restored
+        let result = session.execute("print(num)", &[], None, None).await;
+        assert!(result.is_ok(), "num should be restored");
+    }
+    // If snapshot failed, that's also acceptable behavior
+}

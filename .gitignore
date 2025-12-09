@@ -40,3 +40,4 @@ crates/eryx-runtime/.venv/
 
 # Scratch directory for random experiments
 /scratch
+*.cwasm

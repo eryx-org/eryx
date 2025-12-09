@@ -21,8 +21,8 @@ use crate::wasm::{CallbackRequest, PythonExecutor, TraceRequest, parse_trace_eve
 
 /// A sandboxed Python execution environment.
 pub struct Sandbox {
-    /// The Python WASM executor.
-    executor: PythonExecutor,
+    /// The Python WASM executor (wrapped in Arc for sharing with sessions).
+    executor: Arc<PythonExecutor>,
     /// Registered callbacks that Python code can invoke.
     callbacks: HashMap<String, Arc<dyn Callback>>,
     /// Python preamble code injected before user code.
@@ -281,6 +281,38 @@ impl Sandbox {
     #[must_use]
     pub fn callbacks(&self) -> &HashMap<String, Arc<dyn Callback>> {
         &self.callbacks
+    }
+
+    /// Get the Python preamble code.
+    #[must_use]
+    pub fn preamble(&self) -> &str {
+        &self.preamble
+    }
+
+    /// Get a reference to the trace handler.
+    #[must_use]
+    pub fn trace_handler(&self) -> &Option<Arc<dyn TraceHandler>> {
+        &self.trace_handler
+    }
+
+    /// Get a reference to the output handler.
+    #[must_use]
+    pub fn output_handler(&self) -> &Option<Arc<dyn OutputHandler>> {
+        &self.output_handler
+    }
+
+    /// Get a reference to the resource limits.
+    #[must_use]
+    pub fn resource_limits(&self) -> &ResourceLimits {
+        &self.resource_limits
+    }
+
+    /// Get a reference to the Python executor.
+    ///
+    /// This is primarily for internal use by session implementations.
+    #[must_use]
+    pub(crate) fn executor(&self) -> Arc<PythonExecutor> {
+        self.executor.clone()
     }
 }
 
@@ -610,7 +642,7 @@ impl SandboxBuilder {
         };
 
         Ok(Sandbox {
-            executor,
+            executor: Arc::new(executor),
             callbacks: self.callbacks,
             preamble: self.preamble,
             type_stubs: self.type_stubs,
