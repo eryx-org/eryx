@@ -20,6 +20,7 @@ mise run ci            # Run all CI checks
 ```bash
 mise run test          # Run tests with precompiled WASM (~0.1s)
 mise run lint          # cargo clippy with all warnings
+mise run lint-fix      # Auto-fix clippy warnings
 mise run fmt           # cargo fmt
 mise run build-wasm    # Build Python WASM component
 mise run precompile-wasm # Pre-compile WASM to native code
@@ -133,7 +134,8 @@ members = ["crates/*"]
 
 - Run `cargo clippy --workspace --all-targets --all-features` regularly
 - Fix or explicitly allow all clippy warnings
-- Use `#[allow(clippy::...)]` sparingly and with justification comments
+- **Prefer auto-fixing over allow attributes**: Use `mise run lint-fix` (or `cargo clippy --fix --allow-dirty --workspace`) to automatically fix warnings when possible
+- Use `#[allow(clippy::...)]` sparingly and with justification comments - only when auto-fix isn't applicable
 - All clippy configuration belongs in `Cargo.toml` under `[workspace.lints.clippy]`
 
 ### Testing

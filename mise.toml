@@ -25,6 +25,10 @@ run = "cargo nextest run --workspace --all-features"
 description = "Run clippy lints"
 run = "cargo clippy --workspace --all-targets --all-features -- -D warnings"
 
+[tasks.lint-fix]
+description = "Auto-fix clippy warnings"
+run = "cargo clippy --fix --allow-dirty --workspace --all-targets --all-features"
+
 [tasks.fmt]
 description = "Format code"
 run = "cargo fmt --all"

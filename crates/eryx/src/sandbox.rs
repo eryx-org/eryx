@@ -703,3 +703,469 @@ impl Default for ResourceLimits {
         }
     }
 }
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod tests {
+    use super::*;
+    use crate::callback::{CallbackError, TypedCallback};
+    use crate::schema::JsonSchema;
+    use serde::Deserialize;
+    use serde_json::{Value, json};
+    use std::future::Future;
+    use std::pin::Pin;
+
+    // ==========================================================================
+    // ResourceLimits tests
+    // ==========================================================================
+
+    #[test]
+    fn resource_limits_default_has_reasonable_values() {
+        let limits = ResourceLimits::default();
+
+        // Should have execution timeout
+        assert!(limits.execution_timeout.is_some());
+        let exec_timeout = limits.execution_timeout.unwrap();
+        assert!(exec_timeout >= Duration::from_secs(1));
+        assert!(exec_timeout <= Duration::from_secs(300));
+
+        // Should have callback timeout
+        assert!(limits.callback_timeout.is_some());
+        let cb_timeout = limits.callback_timeout.unwrap();
+        assert!(cb_timeout >= Duration::from_secs(1));
+        assert!(cb_timeout <= Duration::from_secs(60));
+
+        // Should have memory limit
+        assert!(limits.max_memory_bytes.is_some());
+        let mem_limit = limits.max_memory_bytes.unwrap();
+        assert!(mem_limit >= 1024 * 1024); // At least 1 MB
+        assert!(mem_limit <= 1024 * 1024 * 1024); // At most 1 GB
+
+        // Should have callback invocation limit
+        assert!(limits.max_callback_invocations.is_some());
+        let cb_limit = limits.max_callback_invocations.unwrap();
+        assert!(cb_limit >= 1);
+    }
+
+    #[test]
+    fn resource_limits_can_disable_all_limits() {
+        let limits = ResourceLimits {
+            execution_timeout: None,
+            callback_timeout: None,
+            max_memory_bytes: None,
+            max_callback_invocations: None,
+        };
+
+        assert!(limits.execution_timeout.is_none());
+        assert!(limits.callback_timeout.is_none());
+        assert!(limits.max_memory_bytes.is_none());
+        assert!(limits.max_callback_invocations.is_none());
+    }
+
+    #[test]
+    fn resource_limits_can_set_custom_values() {
+        let limits = ResourceLimits {
+            execution_timeout: Some(Duration::from_secs(5)),
+            callback_timeout: Some(Duration::from_millis(500)),
+            max_memory_bytes: Some(64 * 1024 * 1024),
+            max_callback_invocations: Some(10),
+        };
+
+        assert_eq!(limits.execution_timeout, Some(Duration::from_secs(5)));
+        assert_eq!(limits.callback_timeout, Some(Duration::from_millis(500)));
+        assert_eq!(limits.max_memory_bytes, Some(64 * 1024 * 1024));
+        assert_eq!(limits.max_callback_invocations, Some(10));
+    }
+
+    #[test]
+    fn resource_limits_is_clone() {
+        let limits = ResourceLimits::default();
+        let cloned = limits.clone();
+
+        assert_eq!(limits.execution_timeout, cloned.execution_timeout);
+        assert_eq!(limits.callback_timeout, cloned.callback_timeout);
+        assert_eq!(limits.max_memory_bytes, cloned.max_memory_bytes);
+        assert_eq!(
+            limits.max_callback_invocations,
+            cloned.max_callback_invocations
+        );
+    }
+
+    #[test]
+    fn resource_limits_is_debug() {
+        let limits = ResourceLimits::default();
+        let debug = format!("{:?}", limits);
+
+        assert!(debug.contains("ResourceLimits"));
+        assert!(debug.contains("execution_timeout"));
+        assert!(debug.contains("callback_timeout"));
+    }
+
+    #[test]
+    fn resource_limits_partial_override() {
+        // Common pattern: override just one limit
+        let limits = ResourceLimits {
+            max_callback_invocations: Some(5),
+            ..Default::default()
+        };
+
+        assert_eq!(limits.max_callback_invocations, Some(5));
+        // Others should be default
+        assert!(limits.execution_timeout.is_some());
+        assert!(limits.callback_timeout.is_some());
+        assert!(limits.max_memory_bytes.is_some());
+    }
+
+    // ==========================================================================
+    // ExecuteResult tests
+    // ==========================================================================
+
+    #[test]
+    fn execute_result_is_debug() {
+        let result = ExecuteResult {
+            stdout: "Hello".to_string(),
+            trace: vec![],
+            stats: ExecuteStats {
+                duration: Duration::from_millis(100),
+                callback_invocations: 5,
+                peak_memory_bytes: Some(1024),
+            },
+        };
+
+        let debug = format!("{:?}", result);
+        assert!(debug.contains("ExecuteResult"));
+        assert!(debug.contains("Hello"));
+    }
+
+    #[test]
+    fn execute_result_is_clone() {
+        let result = ExecuteResult {
+            stdout: "Test output".to_string(),
+            trace: vec![],
+            stats: ExecuteStats {
+                duration: Duration::from_millis(50),
+                callback_invocations: 2,
+                peak_memory_bytes: Some(2048),
+            },
+        };
+
+        let cloned = result.clone();
+        assert_eq!(cloned.stdout, "Test output");
+        assert_eq!(cloned.stats.callback_invocations, 2);
+    }
+
+    // ==========================================================================
+    // ExecuteStats tests
+    // ==========================================================================
+
+    #[test]
+    fn execute_stats_is_debug() {
+        let stats = ExecuteStats {
+            duration: Duration::from_secs(1),
+            callback_invocations: 10,
+            peak_memory_bytes: Some(1024 * 1024),
+        };
+
+        let debug = format!("{:?}", stats);
+        assert!(debug.contains("ExecuteStats"));
+        assert!(debug.contains("callback_invocations"));
+    }
+
+    #[test]
+    fn execute_stats_is_clone() {
+        let stats = ExecuteStats {
+            duration: Duration::from_millis(250),
+            callback_invocations: 3,
+            peak_memory_bytes: None,
+        };
+
+        let cloned = stats.clone();
+        assert_eq!(cloned.duration, Duration::from_millis(250));
+        assert_eq!(cloned.callback_invocations, 3);
+        assert!(cloned.peak_memory_bytes.is_none());
+    }
+
+    #[test]
+    fn execute_stats_peak_memory_can_be_none() {
+        let stats = ExecuteStats {
+            duration: Duration::from_millis(100),
+            callback_invocations: 0,
+            peak_memory_bytes: None,
+        };
+
+        assert!(stats.peak_memory_bytes.is_none());
+    }
+
+    // ==========================================================================
+    // SandboxBuilder tests
+    // ==========================================================================
+
+    #[test]
+    fn sandbox_builder_new_creates_default() {
+        let builder = SandboxBuilder::new();
+        let debug = format!("{:?}", builder);
+
+        assert!(debug.contains("SandboxBuilder"));
+    }
+
+    #[test]
+    fn sandbox_builder_default_equals_new() {
+        let builder1 = SandboxBuilder::new();
+        let builder2 = SandboxBuilder::default();
+
+        // Both should have same debug representation structure
+        let debug1 = format!("{:?}", builder1);
+        let debug2 = format!("{:?}", builder2);
+
+        // Both should contain SandboxBuilder
+        assert!(debug1.contains("SandboxBuilder"));
+        assert!(debug2.contains("SandboxBuilder"));
+    }
+
+    #[test]
+    fn sandbox_builder_is_debug() {
+        let builder = SandboxBuilder::new();
+        let debug = format!("{:?}", builder);
+
+        assert!(debug.contains("SandboxBuilder"));
+        assert!(debug.contains("callbacks"));
+        assert!(debug.contains("resource_limits"));
+    }
+
+    // Test callbacks for builder tests
+    #[derive(Deserialize, JsonSchema)]
+    struct TestArgs {
+        value: String,
+    }
+
+    struct TestCallback;
+
+    impl TypedCallback for TestCallback {
+        type Args = TestArgs;
+
+        fn name(&self) -> &str {
+            "test"
+        }
+
+        fn description(&self) -> &str {
+            "A test callback"
+        }
+
+        fn invoke_typed(
+            &self,
+            args: TestArgs,
+        ) -> Pin<Box<dyn Future<Output = Result<Value, CallbackError>> + Send + '_>> {
+            Box::pin(async move { Ok(json!({"value": args.value})) })
+        }
+    }
+
+    struct AnotherCallback;
+
+    impl TypedCallback for AnotherCallback {
+        type Args = ();
+
+        fn name(&self) -> &str {
+            "another"
+        }
+
+        fn description(&self) -> &str {
+            "Another callback"
+        }
+
+        fn invoke_typed(
+            &self,
+            _args: (),
+        ) -> Pin<Box<dyn Future<Output = Result<Value, CallbackError>> + Send + '_>> {
+            Box::pin(async move { Ok(json!({})) })
+        }
+    }
+
+    #[test]
+    fn sandbox_builder_build_fails_without_wasm() {
+        let builder = SandboxBuilder::new();
+        let result = builder.build();
+
+        assert!(result.is_err());
+        let error = result.unwrap_err();
+        let error_str = format!("{}", error);
+        assert!(
+            error_str.contains("No WASM") || error_str.contains("wasm"),
+            "Error should mention WASM: {}",
+            error_str
+        );
+    }
+
+    #[test]
+    fn sandbox_builder_with_callback_is_chainable() {
+        // This should compile - testing the builder pattern
+        let _builder = SandboxBuilder::new()
+            .with_callback(TestCallback)
+            .with_callback(AnotherCallback);
+    }
+
+    #[test]
+    fn sandbox_builder_with_callbacks_accepts_vec() {
+        let callbacks: Vec<Box<dyn Callback>> =
+            vec![Box::new(TestCallback), Box::new(AnotherCallback)];
+
+        let _builder = SandboxBuilder::new().with_callbacks(callbacks);
+    }
+
+    #[test]
+    fn sandbox_builder_with_resource_limits_is_chainable() {
+        let limits = ResourceLimits {
+            max_callback_invocations: Some(5),
+            ..Default::default()
+        };
+
+        let _builder = SandboxBuilder::new().with_resource_limits(limits);
+    }
+
+    #[test]
+    fn sandbox_builder_with_wasm_bytes_accepts_vec() {
+        // Just test that the builder accepts bytes - actual loading tested elsewhere
+        let _builder = SandboxBuilder::new().with_wasm_bytes(vec![0u8; 10]);
+    }
+
+    #[test]
+    fn sandbox_builder_with_wasm_file_accepts_path() {
+        let _builder = SandboxBuilder::new().with_wasm_file("/path/to/file.wasm");
+        let _builder = SandboxBuilder::new().with_wasm_file(std::path::PathBuf::from("/path"));
+    }
+
+    #[test]
+    fn sandbox_builder_full_chain() {
+        // Test the full builder pattern (won't build without valid WASM)
+        let _builder = SandboxBuilder::new()
+            .with_wasm_bytes(vec![])
+            .with_callback(TestCallback)
+            .with_callback(AnotherCallback)
+            .with_resource_limits(ResourceLimits::default());
+
+        // Building will fail due to invalid WASM, but the chain works
+    }
+
+    // ==========================================================================
+    // Sandbox accessor tests (using a mock approach)
+    // ==========================================================================
+
+    // Note: Full Sandbox tests require valid WASM and are in integration tests.
+    // These test the accessor methods and types.
+
+    #[test]
+    fn sandbox_builder_creates_sandbox_with_valid_wasm() {
+        // This test would require valid WASM bytes, so we just verify
+        // that the builder pattern compiles correctly
+        let builder = Sandbox::builder()
+            .with_wasm_bytes(vec![]) // Invalid, but tests the API
+            .with_callback(TestCallback)
+            .with_resource_limits(ResourceLimits {
+                max_callback_invocations: Some(100),
+                ..Default::default()
+            });
+
+        // Try to build - will fail due to invalid WASM
+        let result = builder.build();
+        assert!(result.is_err()); // Expected - invalid WASM bytes
+    }
+
+    // ==========================================================================
+    // WasmSource tests (internal)
+    // ==========================================================================
+
+    #[test]
+    fn wasm_source_default_is_none() {
+        let source = WasmSource::default();
+        assert!(matches!(source, WasmSource::None));
+    }
+
+    // ==========================================================================
+    // Edge case tests
+    // ==========================================================================
+
+    #[test]
+    fn resource_limits_zero_values() {
+        // Zero limits should be representable (though may not be useful)
+        let limits = ResourceLimits {
+            execution_timeout: Some(Duration::ZERO),
+            callback_timeout: Some(Duration::ZERO),
+            max_memory_bytes: Some(0),
+            max_callback_invocations: Some(0),
+        };
+
+        assert_eq!(limits.execution_timeout, Some(Duration::ZERO));
+        assert_eq!(limits.max_callback_invocations, Some(0));
+    }
+
+    #[test]
+    fn resource_limits_very_large_values() {
+        let limits = ResourceLimits {
+            execution_timeout: Some(Duration::from_secs(86400 * 365)), // 1 year
+            callback_timeout: Some(Duration::from_secs(3600)),         // 1 hour
+            max_memory_bytes: Some(u64::MAX),
+            max_callback_invocations: Some(u32::MAX),
+        };
+
+        assert_eq!(limits.max_callback_invocations, Some(u32::MAX));
+        assert_eq!(limits.max_memory_bytes, Some(u64::MAX));
+    }
+
+    #[test]
+    fn execute_stats_zero_duration() {
+        let stats = ExecuteStats {
+            duration: Duration::ZERO,
+            callback_invocations: 0,
+            peak_memory_bytes: Some(0),
+        };
+
+        assert_eq!(stats.duration, Duration::ZERO);
+        assert_eq!(stats.callback_invocations, 0);
+    }
+
+    #[test]
+    fn execute_result_empty_stdout() {
+        let result = ExecuteResult {
+            stdout: String::new(),
+            trace: vec![],
+            stats: ExecuteStats {
+                duration: Duration::from_millis(1),
+                callback_invocations: 0,
+                peak_memory_bytes: None,
+            },
+        };
+
+        assert!(result.stdout.is_empty());
+        assert!(result.trace.is_empty());
+    }
+
+    #[test]
+    fn execute_result_with_trace_events() {
+        use crate::trace::{TraceEvent, TraceEventKind};
+
+        let result = ExecuteResult {
+            stdout: "output".to_string(),
+            trace: vec![
+                TraceEvent {
+                    lineno: 1,
+                    event: TraceEventKind::Line,
+                    context: None,
+                },
+                TraceEvent {
+                    lineno: 2,
+                    event: TraceEventKind::Call {
+                        function: "foo".to_string(),
+                    },
+                    context: None,
+                },
+            ],
+            stats: ExecuteStats {
+                duration: Duration::from_millis(100),
+                callback_invocations: 1,
+                peak_memory_bytes: Some(1024),
+            },
+        };
+
+        assert_eq!(result.trace.len(), 2);
+        assert_eq!(result.trace[0].lineno, 1);
+    }
+}

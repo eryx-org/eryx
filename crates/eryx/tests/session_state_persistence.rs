@@ -2,6 +2,7 @@
 //!
 //! This test verifies that Python state (variables, functions, etc.) persists
 //! between execute() calls when using SessionExecutor.
+#![allow(clippy::unwrap_used, clippy::expect_used)]
 //!
 //! ## Running Tests
 //!

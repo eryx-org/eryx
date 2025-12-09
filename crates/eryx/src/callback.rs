@@ -262,6 +262,14 @@ impl<T: TypedCallback> Callback for T {
         &self,
         args: serde_json::Value,
     ) -> Pin<Box<dyn Future<Output = Result<serde_json::Value, CallbackError>> + Send + '_>> {
+        // Handle empty objects as null for unit type compatibility.
+        // Python sends {} for empty kwargs, but serde expects null for ().
+        let args = if args.is_object() && args.as_object().is_some_and(|m| m.is_empty()) {
+            serde_json::Value::Null
+        } else {
+            args
+        };
+
         // Deserialize the JSON value into the typed Args
         let typed_args: Result<T::Args, _> = serde_json::from_value(args);
 
@@ -663,5 +671,571 @@ impl DynamicCallbackBuilder {
             schema,
             handler: self.handler,
         }
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod tests {
+    use super::*;
+    use serde::Deserialize;
+    use serde_json::json;
+
+    // ==========================================================================
+    // CallbackError tests
+    // ==========================================================================
+
+    #[test]
+    fn callback_error_invalid_arguments_displays_message() {
+        let error = CallbackError::InvalidArguments("missing field 'name'".to_string());
+        let display = format!("{}", error);
+        assert!(display.contains("invalid arguments"));
+        assert!(display.contains("missing field 'name'"));
+    }
+
+    #[test]
+    fn callback_error_execution_failed_displays_message() {
+        let error = CallbackError::ExecutionFailed("connection timeout".to_string());
+        let display = format!("{}", error);
+        assert!(display.contains("execution failed"));
+        assert!(display.contains("connection timeout"));
+    }
+
+    #[test]
+    fn callback_error_not_found_displays_name() {
+        let error = CallbackError::NotFound("unknown_callback".to_string());
+        let display = format!("{}", error);
+        assert!(display.contains("not found"));
+        assert!(display.contains("unknown_callback"));
+    }
+
+    #[test]
+    fn callback_error_timeout_displays_correctly() {
+        let error = CallbackError::Timeout;
+        let display = format!("{}", error);
+        assert!(display.contains("timeout"));
+    }
+
+    #[test]
+    fn callback_error_is_debug() {
+        let error = CallbackError::InvalidArguments("test".to_string());
+        let debug = format!("{:?}", error);
+        assert!(debug.contains("InvalidArguments"));
+    }
+
+    // ==========================================================================
+    // TypedCallback tests
+    // ==========================================================================
+
+    #[derive(Deserialize, JsonSchema)]
+    struct EchoArgs {
+        message: String,
+    }
+
+    struct EchoCallback;
+
+    impl TypedCallback for EchoCallback {
+        type Args = EchoArgs;
+
+        fn name(&self) -> &str {
+            "echo"
+        }
+
+        fn description(&self) -> &str {
+            "Echoes the message back"
+        }
+
+        fn invoke_typed(
+            &self,
+            args: EchoArgs,
+        ) -> Pin<Box<dyn Future<Output = Result<serde_json::Value, CallbackError>> + Send + '_>>
+        {
+            Box::pin(async move { Ok(json!({ "echoed": args.message })) })
+        }
+    }
+
+    #[derive(Deserialize, JsonSchema)]
+    struct AddArgs {
+        a: i64,
+        b: i64,
+    }
+
+    struct AddCallback;
+
+    impl TypedCallback for AddCallback {
+        type Args = AddArgs;
+
+        fn name(&self) -> &str {
+            "add"
+        }
+
+        fn description(&self) -> &str {
+            "Adds two numbers"
+        }
+
+        fn invoke_typed(
+            &self,
+            args: AddArgs,
+        ) -> Pin<Box<dyn Future<Output = Result<serde_json::Value, CallbackError>> + Send + '_>>
+        {
+            Box::pin(async move { Ok(json!(args.a + args.b)) })
+        }
+    }
+
+    struct NoArgsCallback;
+
+    impl TypedCallback for NoArgsCallback {
+        type Args = ();
+
+        fn name(&self) -> &str {
+            "no_args"
+        }
+
+        fn description(&self) -> &str {
+            "A callback with no arguments"
+        }
+
+        fn invoke_typed(
+            &self,
+            _args: (),
+        ) -> Pin<Box<dyn Future<Output = Result<serde_json::Value, CallbackError>> + Send + '_>>
+        {
+            Box::pin(async move { Ok(json!("success")) })
+        }
+    }
+
+    struct FailingCallback;
+
+    impl TypedCallback for FailingCallback {
+        type Args = ();
+
+        fn name(&self) -> &str {
+            "fail"
+        }
+
+        fn description(&self) -> &str {
+            "Always fails"
+        }
+
+        fn invoke_typed(
+            &self,
+            _args: (),
+        ) -> Pin<Box<dyn Future<Output = Result<serde_json::Value, CallbackError>> + Send + '_>>
+        {
+            Box::pin(
+                async move { Err(CallbackError::ExecutionFailed("intentional failure".into())) },
+            )
+        }
+    }
+
+    #[test]
+    fn typed_callback_name_and_description() {
+        let callback = EchoCallback;
+        assert_eq!(TypedCallback::name(&callback), "echo");
+        assert_eq!(
+            TypedCallback::description(&callback),
+            "Echoes the message back"
+        );
+    }
+
+    #[test]
+    fn typed_callback_generates_schema() {
+        let callback = EchoCallback;
+        // Access via Callback trait (blanket impl)
+        let schema = Callback::parameters_schema(&callback);
+        let value = schema.to_value();
+
+        // Should have properties with message field
+        let properties = value.get("properties").expect("should have properties");
+        assert!(properties.get("message").is_some());
+    }
+
+    #[test]
+    fn typed_callback_no_args_generates_empty_schema() {
+        let callback = NoArgsCallback;
+        let schema = Callback::parameters_schema(&callback);
+        let value = schema.to_value();
+
+        // Unit type schema should be valid (either object or boolean in JSON Schema)
+        assert!(value.is_object() || value.is_boolean());
+    }
+
+    #[tokio::test]
+    async fn typed_callback_invoke_with_valid_args() {
+        let callback = EchoCallback;
+        let args = json!({ "message": "hello world" });
+
+        let result = Callback::invoke(&callback, args).await;
+        assert!(result.is_ok());
+
+        let value = result.unwrap();
+        assert_eq!(value["echoed"], "hello world");
+    }
+
+    #[tokio::test]
+    async fn typed_callback_invoke_with_numeric_args() {
+        let callback = AddCallback;
+        let args = json!({ "a": 10, "b": 32 });
+
+        let result = Callback::invoke(&callback, args).await;
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), json!(42));
+    }
+
+    #[tokio::test]
+    async fn typed_callback_invoke_with_null_for_unit() {
+        let callback = NoArgsCallback;
+        // Unit type deserializes from null
+        let args = serde_json::Value::Null;
+
+        let result = Callback::invoke(&callback, args).await;
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), json!("success"));
+    }
+
+    #[tokio::test]
+    async fn typed_callback_invoke_with_missing_required_field() {
+        let callback = EchoCallback;
+        let args = json!({}); // Missing "message" field
+
+        let result = Callback::invoke(&callback, args).await;
+        assert!(result.is_err());
+
+        let error = result.unwrap_err();
+        assert!(matches!(error, CallbackError::InvalidArguments(_)));
+    }
+
+    #[tokio::test]
+    async fn typed_callback_invoke_with_wrong_type() {
+        let callback = EchoCallback;
+        let args = json!({ "message": 12345 }); // Number instead of string
+
+        let result = Callback::invoke(&callback, args).await;
+        assert!(result.is_err());
+
+        let error = result.unwrap_err();
+        assert!(matches!(error, CallbackError::InvalidArguments(_)));
+    }
+
+    #[tokio::test]
+    async fn typed_callback_can_return_error() {
+        let callback = FailingCallback;
+        // Unit type needs null, not empty object
+        let args = serde_json::Value::Null;
+
+        let result = Callback::invoke(&callback, args).await;
+        assert!(result.is_err());
+
+        let error = result.unwrap_err();
+        assert!(matches!(error, CallbackError::ExecutionFailed(_)));
+    }
+
+    #[test]
+    fn typed_callback_is_send_sync() {
+        fn assert_send_sync<T: Send + Sync>() {}
+        assert_send_sync::<EchoCallback>();
+        assert_send_sync::<NoArgsCallback>();
+    }
+
+    // ==========================================================================
+    // DynamicCallback tests
+    // ==========================================================================
+
+    #[test]
+    fn dynamic_callback_builder_basic() {
+        let callback = DynamicCallback::builder("test", "A test callback", |_args| {
+            Box::pin(async move { Ok(json!({"ok": true})) })
+        })
+        .build();
+
+        assert_eq!(callback.name(), "test");
+        assert_eq!(callback.description(), "A test callback");
+    }
+
+    #[test]
+    fn dynamic_callback_builder_with_params() {
+        let callback = DynamicCallback::builder("greet", "Greets someone", |_args| {
+            Box::pin(async move { Ok(json!({})) })
+        })
+        .param("name", "string", "The person's name", true)
+        .param("formal", "boolean", "Use formal greeting", false)
+        .build();
+
+        let schema = callback.parameters_schema();
+        let value = schema.to_value();
+
+        // Check properties exist
+        let properties = value.get("properties").expect("should have properties");
+        assert!(properties.get("name").is_some());
+        assert!(properties.get("formal").is_some());
+
+        // Check required array
+        let required = value.get("required").expect("should have required");
+        let required_arr = required.as_array().expect("required should be array");
+        assert!(required_arr.contains(&json!("name")));
+        assert!(!required_arr.contains(&json!("formal")));
+    }
+
+    #[test]
+    fn dynamic_callback_builder_no_params_empty_schema() {
+        let callback = DynamicCallback::builder("simple", "No params", |_args| {
+            Box::pin(async move { Ok(json!(null)) })
+        })
+        .build();
+
+        let schema = callback.parameters_schema();
+        let value = schema.to_value();
+
+        // Empty schema should be valid
+        assert!(value.is_object() || value.is_boolean());
+    }
+
+    #[test]
+    fn dynamic_callback_builder_with_custom_schema() {
+        let custom_schema = Schema::try_from_value(json!({
+            "type": "object",
+            "properties": {
+                "mode": {
+                    "type": "string",
+                    "enum": ["fast", "slow"]
+                }
+            },
+            "required": ["mode"]
+        }))
+        .unwrap();
+
+        let callback = DynamicCallback::builder("custom", "Custom schema", |_args| {
+            Box::pin(async move { Ok(json!({})) })
+        })
+        .schema(custom_schema)
+        .build();
+
+        let schema = callback.parameters_schema();
+        let value = schema.to_value();
+
+        let properties = value.get("properties").unwrap();
+        let mode = properties.get("mode").unwrap();
+        assert!(mode.get("enum").is_some());
+    }
+
+    #[test]
+    fn dynamic_callback_custom_schema_overrides_params() {
+        let custom_schema = Schema::try_from_value(json!({
+            "type": "object",
+            "properties": {
+                "override": { "type": "string" }
+            }
+        }))
+        .unwrap();
+
+        let callback = DynamicCallback::builder("test", "Test", |_args| {
+            Box::pin(async move { Ok(json!({})) })
+        })
+        .param("ignored", "string", "This should be ignored", true)
+        .schema(custom_schema)
+        .build();
+
+        let schema = callback.parameters_schema();
+        let value = schema.to_value();
+
+        let properties = value.get("properties").unwrap();
+        assert!(properties.get("override").is_some());
+        assert!(properties.get("ignored").is_none());
+    }
+
+    #[tokio::test]
+    async fn dynamic_callback_invoke_success() {
+        let callback = DynamicCallback::builder("echo", "Echo", |args| {
+            Box::pin(async move {
+                let msg = args
+                    .get("message")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("default");
+                Ok(json!({ "echoed": msg }))
+            })
+        })
+        .param("message", "string", "Message to echo", true)
+        .build();
+
+        let result = callback.invoke(json!({ "message": "hello" })).await;
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap()["echoed"], "hello");
+    }
+
+    #[tokio::test]
+    async fn dynamic_callback_invoke_can_fail() {
+        let callback = DynamicCallback::builder("fail", "Always fails", |_args| {
+            Box::pin(async move { Err(CallbackError::ExecutionFailed("boom".into())) })
+        })
+        .build();
+
+        let result = callback.invoke(json!({})).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn dynamic_callback_invoke_with_validation() {
+        let callback = DynamicCallback::builder("validate", "Validates input", |args| {
+            Box::pin(async move {
+                let value = args
+                    .get("value")
+                    .and_then(|v| v.as_i64())
+                    .ok_or_else(|| CallbackError::InvalidArguments("missing 'value'".into()))?;
+
+                if value < 0 {
+                    return Err(CallbackError::InvalidArguments("value must be >= 0".into()));
+                }
+
+                Ok(json!({ "validated": value }))
+            })
+        })
+        .param("value", "integer", "Value to validate", true)
+        .build();
+
+        // Valid input
+        let result = callback.invoke(json!({ "value": 42 })).await;
+        assert!(result.is_ok());
+
+        // Invalid input (negative)
+        let result = callback.invoke(json!({ "value": -5 })).await;
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            CallbackError::InvalidArguments(_)
+        ));
+
+        // Missing input
+        let result = callback.invoke(json!({})).await;
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn dynamic_callback_is_clone() {
+        let callback = DynamicCallback::builder("test", "Test", |_args| {
+            Box::pin(async move { Ok(json!({})) })
+        })
+        .build();
+
+        let cloned = callback.clone();
+        assert_eq!(cloned.name(), callback.name());
+    }
+
+    #[test]
+    fn dynamic_callback_is_debug() {
+        let callback = DynamicCallback::builder("test", "Test callback", |_args| {
+            Box::pin(async move { Ok(json!({})) })
+        })
+        .build();
+
+        let debug = format!("{:?}", callback);
+        assert!(debug.contains("DynamicCallback"));
+        assert!(debug.contains("test"));
+    }
+
+    #[test]
+    fn dynamic_callback_builder_is_debug() {
+        let builder = DynamicCallback::builder("test", "Test", |_args| {
+            Box::pin(async move { Ok(json!({})) })
+        })
+        .param("x", "string", "A param", true);
+
+        let debug = format!("{:?}", builder);
+        assert!(debug.contains("DynamicCallbackBuilder"));
+    }
+
+    #[test]
+    fn dynamic_callback_new_direct_construction() {
+        let handler: DynamicHandler = Arc::new(|_args| Box::pin(async move { Ok(json!({})) }));
+
+        let callback =
+            DynamicCallback::new("direct", "Directly constructed", Schema::empty(), handler);
+
+        assert_eq!(callback.name(), "direct");
+        assert_eq!(callback.description(), "Directly constructed");
+    }
+
+    // ==========================================================================
+    // empty_schema helper tests
+    // ==========================================================================
+
+    #[test]
+    fn empty_schema_returns_valid_schema() {
+        let schema = empty_schema();
+        let value = schema.to_value();
+        assert!(value.is_object() || value.is_boolean());
+    }
+
+    // ==========================================================================
+    // Callback trait object tests
+    // ==========================================================================
+
+    #[test]
+    fn callbacks_can_be_boxed_as_trait_objects() {
+        let typed: Box<dyn Callback> = Box::new(EchoCallback);
+        let dynamic: Box<dyn Callback> = Box::new(
+            DynamicCallback::builder("dyn", "Dynamic", |_| Box::pin(async { Ok(json!({})) }))
+                .build(),
+        );
+
+        // Can put them in the same collection
+        let callbacks: Vec<Box<dyn Callback>> = vec![typed, dynamic];
+        assert_eq!(callbacks.len(), 2);
+        assert_eq!(callbacks[0].name(), "echo");
+        assert_eq!(callbacks[1].name(), "dyn");
+    }
+
+    #[tokio::test]
+    async fn callback_trait_object_invoke() {
+        let callback: Box<dyn Callback> = Box::new(AddCallback);
+
+        let result = callback.invoke(json!({ "a": 5, "b": 7 })).await;
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), json!(12));
+    }
+
+    // ==========================================================================
+    // Parameter type tests for DynamicCallback
+    // ==========================================================================
+
+    #[test]
+    fn dynamic_callback_supports_all_json_types() {
+        let callback =
+            DynamicCallback::builder("types", "All types", |_| Box::pin(async { Ok(json!({})) }))
+                .param("str_param", "string", "A string", true)
+                .param("num_param", "number", "A number", true)
+                .param("int_param", "integer", "An integer", true)
+                .param("bool_param", "boolean", "A boolean", true)
+                .param("obj_param", "object", "An object", false)
+                .param("arr_param", "array", "An array", false)
+                .build();
+
+        let schema = callback.parameters_schema();
+        let value = schema.to_value();
+        let properties = value.get("properties").unwrap();
+
+        assert_eq!(properties["str_param"]["type"], "string");
+        assert_eq!(properties["num_param"]["type"], "number");
+        assert_eq!(properties["int_param"]["type"], "integer");
+        assert_eq!(properties["bool_param"]["type"], "boolean");
+        assert_eq!(properties["obj_param"]["type"], "object");
+        assert_eq!(properties["arr_param"]["type"], "array");
+    }
+
+    #[test]
+    fn dynamic_callback_param_descriptions_preserved() {
+        let callback = DynamicCallback::builder("desc", "Test descriptions", |_| {
+            Box::pin(async { Ok(json!({})) })
+        })
+        .param("field", "string", "This is a detailed description", true)
+        .build();
+
+        let schema = callback.parameters_schema();
+        let value = schema.to_value();
+        let properties = value.get("properties").unwrap();
+
+        assert_eq!(
+            properties["field"]["description"],
+            "This is a detailed description"
+        );
     }
 }
