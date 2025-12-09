@@ -166,18 +166,15 @@ class Math:
 
     async def add(self, a: float, b: float) -> float:
         """Add two numbers together."""
-        result = await invoke("math.add", json.dumps({"a": a, "b": b}))
-        return result
+        return await invoke("math.add", a=a, b=b)
 
     async def multiply(self, a: float, b: float) -> float:
         """Multiply two numbers together."""
-        result = await invoke("math.multiply", json.dumps({"a": a, "b": b}))
-        return result
+        return await invoke("math.multiply", a=a, b=b)
 
     async def power(self, base: float, exponent: float) -> float:
         """Raise a number to a power."""
-        result = await invoke("math.power", json.dumps({"base": base, "exponent": exponent}))
-        return result
+        return await invoke("math.power", base=base, exponent=exponent)
 "#;
 
     // Type stubs for IDE support and LLM context
@@ -370,16 +367,16 @@ class Storage:
 
     async def set(self, key: str, value) -> bool:
         """Store a value with the given key."""
-        result = await invoke("storage.set", json.dumps({"key": key, "value": value}))
+        result = await invoke("storage.set", key=key, value=value)
         return result.get("success", False)
 
     async def get(self, key: str):
         """Retrieve a value by key. Returns None if not found."""
-        return await invoke("storage.get", json.dumps({"key": key}))
+        return await invoke("storage.get", key=key)
 
     async def keys(self) -> list:
         """List all storage keys."""
-        return await invoke("storage.keys", "{}")
+        return await invoke("storage.keys")
 "#;
 
     let stubs = r#"

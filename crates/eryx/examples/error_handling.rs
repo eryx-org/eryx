@@ -187,7 +187,7 @@ async fn run_callback_error_examples(sandbox: &Sandbox) -> anyhow::Result<()> {
         .execute(
             r#"
 try:
-    result = await invoke("fail", '{"message": "Something went wrong!"}')
+    result = await fail(message="Something went wrong!")
     print(f"Result: {result}")
 except Exception as e:
     print(f"Caught exception in Python: {e}")
@@ -207,26 +207,26 @@ except Exception as e:
         .execute(
             r#"
 # Try valid value
-result = await invoke("validate", '{"value": 50}')
+result = await validate(value=50)
 print(f"Valid (50): {result}")
 
 # Try boundary values
-result = await invoke("validate", '{"value": 0}')
+result = await validate(value=0)
 print(f"Valid (0): {result}")
 
-result = await invoke("validate", '{"value": 100}')
+result = await validate(value=100)
 print(f"Valid (100): {result}")
 
 # Try invalid value (will raise exception)
 try:
-    result = await invoke("validate", '{"value": 150}')
+    result = await validate(value=150)
     print(f"Invalid (150): {result}")
 except Exception as e:
     print(f"Validation error for 150: {e}")
 
 # Try missing argument
 try:
-    result = await invoke("validate", '{}')
+    result = await validate()
     print(f"Missing arg: {result}")
 except Exception as e:
     print(f"Validation error for missing arg: {e}")
@@ -251,7 +251,8 @@ except Exception as e:
         .execute(
             r#"
 try:
-    result = await invoke("nonexistent_callback", '{}')
+    # Use invoke() for dynamic/unknown callback names
+    result = await invoke("nonexistent_callback")
     print(f"Result: {result}")
 except Exception as e:
     print(f"Error calling nonexistent callback: {e}")
@@ -274,10 +275,10 @@ async fn run_graceful_error_handling_example(sandbox: &Sandbox) -> anyhow::Resul
     let result = sandbox
         .execute(
             r#"
-async def safe_invoke(name, args):
+async def safe_invoke(name, **kwargs):
     """Wrapper that catches callback errors and returns None."""
     try:
-        return await invoke(name, args)
+        return await invoke(name, **kwargs)
     except Exception as e:
         print(f"Warning: {name} failed with {e}")
         return None
@@ -285,7 +286,7 @@ async def safe_invoke(name, args):
 # This pattern allows code to continue even if some callbacks fail
 results = []
 for i, value in enumerate([50, 150, 75, -10, 25]):
-    result = await safe_invoke("validate", json.dumps({"value": value}))
+    result = await safe_invoke("validate", value=value)
     if result is not None:
         results.append(result)
         print(f"  Value {value}: OK")

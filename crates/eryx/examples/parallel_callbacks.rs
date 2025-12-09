@@ -104,9 +104,9 @@ async fn main() -> anyhow::Result<()> {
     let result = sandbox
         .execute(
             r#"
-result1 = await invoke("sleep", '{"ms": 100}')
-result2 = await invoke("sleep", '{"ms": 100}')
-result3 = await invoke("sleep", '{"ms": 100}')
+result1 = await sleep(ms=100)
+result2 = await sleep(ms=100)
+result3 = await sleep(ms=100)
 print(f"Results: {result1}, {result2}, {result3}")
 "#,
         )
@@ -126,9 +126,9 @@ print(f"Results: {result1}, {result2}, {result3}")
             r#"
 import asyncio
 results = await asyncio.gather(
-    invoke("sleep", '{"ms": 100}'),
-    invoke("sleep", '{"ms": 100}'),
-    invoke("sleep", '{"ms": 100}'),
+    sleep(ms=100),
+    sleep(ms=100),
+    sleep(ms=100),
 )
 print(f"Results: {results}")
 "#,

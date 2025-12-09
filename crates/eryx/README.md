@@ -7,7 +7,7 @@ A Python sandbox with async callbacks powered by WebAssembly.
 
 ## Features
 
-- **Async callback mechanism** - Python can `await invoke("callback_name", ...)` to call host-provided functions
+- **Async callback mechanism** - Callbacks are exposed as direct async functions (e.g., `await get_time()`)
 - **Parallel execution** - Multiple callbacks can run concurrently via `asyncio.gather()`
 - **Execution tracing** - Line-level progress reporting via `sys.settrace`
 - **Introspection** - Python can discover available callbacks at runtime
@@ -80,13 +80,9 @@ async fn main() -> Result<(), eryx::Error> {
         .build()?;
 
     let result = sandbox.execute(r#"
-import asyncio
-
-async def main():
-    timestamp = await invoke("get_time", {})
-    print(f"Current time: {timestamp}")
-
-asyncio.run(main())
+# Callbacks are available as direct async functions
+timestamp = await get_time()
+print(f"Current time: {timestamp}")
     "#).await?;
 
     println!("Output: {}", result.stdout);

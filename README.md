@@ -7,7 +7,7 @@ A Rust library that executes Python code in a WebAssembly sandbox with async cal
 
 ## Features
 
-- **Async callback mechanism** — Python can `await invoke("callback_name", ...)` to call host-provided functions
+- **Async callback mechanism** — Callbacks are exposed as direct async functions (e.g., `await get_time()`)
 - **Parallel execution** — Multiple callbacks can run concurrently via `asyncio.gather()`
 - **Session state persistence** — Variables, functions, and classes persist between executions for REPL-style usage
 - **State snapshots** — Capture and restore Python state with pickle-based serialization
@@ -68,8 +68,8 @@ async fn main() -> Result<(), eryx::Error> {
         .build()?;
 
     let result = sandbox.execute(r#"
-import asyncio
-timestamp = asyncio.run(invoke("get_time", {}))
+# Callbacks are available as direct async functions
+timestamp = await get_time()
 print(f"Current time: {timestamp}")
     "#).await?;
 

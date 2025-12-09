@@ -152,7 +152,7 @@ print(f'The result is: {result}')
         .execute(
             r#"
 print("Starting slow operation...")
-result = await invoke("slow_operation", '{"value": 21}')
+result = await slow_operation(value=21)
 print(f"Got result: {result}")
 "#,
         )
@@ -174,9 +174,9 @@ import asyncio
 
 print("Starting 3 parallel operations...")
 results = await asyncio.gather(
-    invoke("slow_operation", '{"value": 1}'),
-    invoke("slow_operation", '{"value": 2}'),
-    invoke("slow_operation", '{"value": 3}'),
+    slow_operation(value=1),
+    slow_operation(value=2),
+    slow_operation(value=3),
 )
 print(f"All done! Results: {results}")
 "#,

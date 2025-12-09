@@ -1,8 +1,8 @@
 //! Callback trait and error types for host-provided functions.
 //!
-//! Python code running in the sandbox can invoke callbacks using
-//! `await invoke("callback_name", args)`. The host provides these
-//! callbacks by implementing the [`Callback`] trait.
+//! Python code running in the sandbox can call callbacks as direct async
+//! functions (e.g., `await get_time()`). The host provides these callbacks
+//! by implementing the [`Callback`] trait.
 
 use std::{future::Future, pin::Pin};
 
@@ -54,12 +54,16 @@ use std::{future::Future, pin::Pin};
 /// }
 /// ```
 pub trait Callback: Send + Sync {
-    /// Unique name for this callback (e.g., "http.get", "grafana.prometheus").
+    /// Unique name for this callback (e.g., "get_time", "echo").
     ///
-    /// This name is used by Python code to invoke the callback:
+    /// This name becomes a direct async function in Python:
     /// ```python
-    /// result = await invoke("callback_name", {"arg": "value"})
+    /// result = await get_time()
+    /// result = await echo(message="hello")
     /// ```
+    ///
+    /// For dot-separated names like "http.get", a namespace is created
+    /// (unless it conflicts with Python builtins like `math`).
     fn name(&self) -> &str;
 
     /// Human-readable description of what this callback does.
@@ -70,8 +74,8 @@ pub trait Callback: Send + Sync {
 
     /// JSON Schema for expected arguments.
     ///
-    /// This schema describes the structure of arguments that should be
-    /// passed to `invoke()`. It's used for:
+    /// This schema describes the structure of keyword arguments that should be
+    /// passed to the callback. It's used for:
     /// - Runtime validation (optional)
     /// - Introspection via `list_callbacks()`
     /// - LLM context for generating correct invocations

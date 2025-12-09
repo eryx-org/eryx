@@ -116,12 +116,10 @@ fn main() -> anyhow::Result<()> {
         sandbox
             .execute(
                 r#"
-import json
-
 results = []
 for i in range(5):  # Try to invoke 5 times, but limit is 3
     try:
-        result = await invoke("count", json.dumps({"n": i}))
+        result = await count(n=i)
         results.append(f"Success: {result}")
     except Exception as e:
         results.append(f"Error: {e}")
@@ -156,9 +154,8 @@ print("\n".join(results))
         sandbox
             .execute(
                 r#"
-import json
 # This should complete - only 500ms sleep
-result = await invoke("sleep", json.dumps({"ms": 500}))
+result = await sleep(ms=500)
 print(f"First sleep completed: {result}")
 "#,
             )
@@ -188,18 +185,16 @@ print(f"First sleep completed: {result}")
         sandbox
             .execute(
                 r#"
-import json
-
 # First call: 100ms - should succeed
 try:
-    result = await invoke("sleep", json.dumps({"ms": 100}))
+    result = await sleep(ms=100)
     print(f"100ms sleep: Success - {result}")
 except Exception as e:
     print(f"100ms sleep: Error - {e}")
 
 # Second call: 1000ms - should timeout (limit is 500ms)
 try:
-    result = await invoke("sleep", json.dumps({"ms": 1000}))
+    result = await sleep(ms=1000)
     print(f"1000ms sleep: Success - {result}")
 except Exception as e:
     print(f"1000ms sleep: Error - {e}")
@@ -248,10 +243,9 @@ except Exception as e:
         sandbox
             .execute(
                 r#"
-import json
 # Simple trusted code running with restrictive limits
 for i in range(5):
-    result = await invoke("count", json.dumps({"n": i}))
+    result = await count(n=i)
     print(f"Count {i}: {result}")
 "#,
             )

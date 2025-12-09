@@ -37,12 +37,12 @@ pub enum TraceEventKind {
         /// Exception message.
         message: String,
     },
-    /// Callback invocation started (emitted by `invoke()`).
+    /// Callback invocation started (emitted when a callback is called).
     CallbackStart {
         /// Name of the callback being invoked.
         name: String,
     },
-    /// Callback invocation completed (emitted by `invoke()`).
+    /// Callback invocation completed (emitted when a callback returns).
     CallbackEnd {
         /// Name of the callback that completed.
         name: String,

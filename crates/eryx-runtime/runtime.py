@@ -70,6 +70,33 @@ _EXCLUDED_KEYS = frozenset(
 )
 
 
+# Names that should never be shadowed by callback wrappers.
+# Includes Python builtins and our base globals (pre-imported modules, etc.)
+_RESERVED_NAMES = frozenset(dir(__builtins__)) | frozenset(
+    {
+        # Pre-imported modules from _get_base_globals
+        "asyncio",
+        "json",
+        "math",
+        "re",
+        "defaultdict",
+        "Counter",
+        "datetime",
+        "timedelta",
+        "groupby",
+        "chain",
+        # Eryx API functions
+        "invoke",
+        "list_callbacks",
+        # Blocked modules (still reserved even though None)
+        "os",
+        "subprocess",
+        "socket",
+        "__import__",
+    }
+)
+
+
 def _get_base_globals() -> dict:
     """Get the base execution globals with pre-imported modules and blocked items."""
     return {
@@ -94,6 +121,123 @@ def _get_base_globals() -> dict:
     }
 
 
+class _CallbackNamespace:
+    """A namespace object that allows attribute access for nested callback names.
+
+    For callbacks like 'http.get', this allows calling them as:
+        http.get(url="https://example.com")
+    """
+
+    def __init__(self, invoke_func, prefix: str = ""):
+        self._invoke = invoke_func
+        self._prefix = prefix
+        self._children: dict[str, "_CallbackNamespace"] = {}
+
+    def _add_callback(self, name_parts: list[str]):
+        """Register a callback by its name parts (e.g., ['http', 'get'])."""
+        if len(name_parts) == 1:
+            # Leaf node - this is the actual callback
+            # The __call__ method will handle it via _prefix
+            pass
+        else:
+            # Intermediate node - create child namespace
+            child_name = name_parts[0]
+            if child_name not in self._children:
+                new_prefix = (
+                    f"{self._prefix}{child_name}." if self._prefix else f"{child_name}."
+                )
+                self._children[child_name] = _CallbackNamespace(
+                    self._invoke, new_prefix
+                )
+            self._children[child_name]._add_callback(name_parts[1:])
+
+    def __getattr__(self, name: str) -> "_CallbackNamespace":
+        if name.startswith("_"):
+            raise AttributeError(name)
+        if name in self._children:
+            return self._children[name]
+        # Return a new callable namespace for this callback
+        full_name = f"{self._prefix}{name}"
+        return _CallbackLeaf(self._invoke, full_name)
+
+    async def __call__(self, **kwargs):
+        # This namespace itself is callable if _prefix is a valid callback
+        if self._prefix:
+            # Remove trailing dot
+            callback_name = self._prefix.rstrip(".")
+            return await self._invoke(callback_name, **kwargs)
+        raise TypeError("Cannot call root namespace directly")
+
+
+class _CallbackLeaf:
+    """A leaf callback that can be awaited with kwargs."""
+
+    def __init__(self, invoke_func, name: str):
+        self._invoke = invoke_func
+        self._name = name
+
+    async def __call__(self, **kwargs):
+        return await self._invoke(self._name, **kwargs)
+
+
+def _make_callback_wrapper(invoke_func, name: str):
+    """Create an async wrapper function for a callback.
+
+    This allows calling `sleep(ms=100)` instead of `invoke('sleep', ms=100)`.
+    """
+
+    async def wrapper(**kwargs):
+        return await invoke_func(name, **kwargs)
+
+    wrapper.__name__ = name
+    wrapper.__doc__ = f"Invoke the '{name}' callback. Usage: await {name}(...)"
+    return wrapper
+
+
+def _generate_callback_functions(invoke_func, list_callbacks_func) -> dict:
+    """Generate direct function wrappers for all registered callbacks.
+
+    For simple names like 'sleep', generates: sleep(ms=100)
+    For dotted names like 'http.get', generates namespace: http.get(url=...)
+
+    Returns:
+        A dict of names to callable objects to add to globals
+    """
+    callbacks_dict = {}
+    namespaces: dict[str, _CallbackNamespace] = {}
+
+    try:
+        callbacks = list_callbacks_func()
+    except Exception:
+        # If we can't list callbacks, return empty dict
+        return {}
+
+    for cb in callbacks:
+        name = cb["name"] if isinstance(cb, dict) else cb.name
+
+        if "." in name:
+            # Dotted name like 'http.get' - create namespace
+            parts = name.split(".")
+            root = parts[0]
+
+            # Skip if root would shadow a reserved name
+            if root in _RESERVED_NAMES:
+                continue
+
+            if root not in namespaces:
+                namespaces[root] = _CallbackNamespace(invoke_func)
+            namespaces[root]._add_callback(parts)
+        else:
+            # Simple name - create direct wrapper if it won't shadow reserved names
+            if name not in _RESERVED_NAMES:
+                callbacks_dict[name] = _make_callback_wrapper(invoke_func, name)
+
+    # Add namespaces to callbacks dict
+    callbacks_dict.update(namespaces)
+
+    return callbacks_dict
+
+
 def _get_exec_globals(invoke_func, list_callbacks_func) -> dict:
     """Get the execution globals including persistent state and API functions.
 
@@ -110,7 +254,11 @@ def _get_exec_globals(invoke_func, list_callbacks_func) -> dict:
     globals_dict["invoke"] = invoke_func
     globals_dict["list_callbacks"] = list_callbacks_func
 
-    # Merge in persistent user state
+    # Generate direct callback wrappers (e.g., sleep(ms=100))
+    callback_wrappers = _generate_callback_functions(invoke_func, list_callbacks_func)
+    globals_dict.update(callback_wrappers)
+
+    # Merge in persistent user state (can override callback wrappers if user defines same name)
     globals_dict.update(_persistent_globals)
 
     return globals_dict
@@ -222,20 +370,23 @@ class WitWorld(wit_world.WitWorld):
             sys.stdout = StringIO()
             sys.stderr = StringIO()
 
-            async def invoke(name: str, arguments_json: str = "{}") -> any:
+            async def invoke(name: str, **kwargs) -> any:
                 """Invoke a callback asynchronously via the host.
 
                 Args:
                     name: Name of the callback to invoke (e.g., "http.get", "get_time")
-                    arguments_json: JSON-encoded arguments object
+                    **kwargs: Keyword arguments to pass to the callback
 
                 Returns:
                     Parsed JSON result as dict/list/primitive.
 
                 Example:
-                    result = await invoke("get_time", "{}")
-                    data = await invoke("http.get", '{"url": "https://example.com"}')
+                    result = await invoke("get_time")
+                    data = await invoke("http.get", url="https://example.com")
+                    count = await invoke("count", n=42)
                 """
+                arguments_json = json.dumps(kwargs)
+
                 # Report callback start trace event
                 wit_world.report_trace(
                     0,

@@ -102,12 +102,36 @@ depends = ["build-wasm", "build"]
 description = "Check compilation on minimum supported Rust version"
 run = "cargo +1.89 check --workspace"
 
-[tasks.integration]
-description = "Run integration tests (build WASM and run examples)"
+[tasks.examples]
+description = "Run all examples"
 depends = ["build-wasm"]
 run = """
+echo "=== simple ==="
 cargo run --example simple --release
+echo ""
+echo "=== parallel_callbacks ==="
 cargo run --example parallel_callbacks --release
+echo ""
+echo "=== with_tracing ==="
+cargo run --example with_tracing --release
+echo ""
+echo "=== error_handling ==="
+cargo run --example error_handling --release
+echo ""
+echo "=== resource_limits ==="
+cargo run --example resource_limits --release
+echo ""
+echo "=== custom_library ==="
+cargo run --example custom_library --release
+echo ""
+echo "=== session_reuse ==="
+cargo run --example session_reuse --release
+echo ""
+echo "=== precompile (requires precompiled feature) ==="
 cargo run --example precompile --features precompiled --release
+echo ""
+echo "=== embedded_runtime (requires embedded-runtime feature) ==="
 cargo run --example embedded_runtime --features embedded-runtime --release
+echo ""
+echo "✓ All examples completed!"
 """

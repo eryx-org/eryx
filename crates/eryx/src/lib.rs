@@ -10,7 +10,7 @@
 //!
 //! Eryx executes Python code in a secure WebAssembly sandbox with:
 //!
-//! - **Async callback mechanism** - Python can `await invoke("callback_name", ...)` to call host-provided functions
+//! - **Async callback mechanism** - Callbacks are exposed as direct async functions (e.g., `await get_time()`)
 //! - **Parallel execution** - Multiple callbacks can run concurrently via `asyncio.gather()`
 //! - **Execution tracing** - Line-level progress reporting via `sys.settrace`
 //! - **Introspection** - Python can discover available callbacks at runtime

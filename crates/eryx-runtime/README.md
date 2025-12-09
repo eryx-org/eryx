@@ -74,15 +74,21 @@ The runtime exposes the `eryx:sandbox` world with:
 ## Usage in Python
 
 ```python
-# Simple callback invocation
-result = await invoke("get_time", "{}")
-print(result)
+# Callbacks are available as direct async functions
+timestamp = await get_time()
+print(timestamp)
+
+# With keyword arguments
+result = await echo(message="hello")
 
 # Parallel execution
 results = await asyncio.gather(
-    invoke("query", '{"q": "a"}'),
-    invoke("query", '{"q": "b"}'),
+    query(q="a"),
+    query(q="b"),
 )
+
+# invoke() is still available for dynamic callback names
+result = await invoke("get_time")
 
 # Introspection
 callbacks = list_callbacks()

@@ -127,7 +127,7 @@ print(f"2 + 2 = {2 + 2}")
     let result = sandbox
         .execute(
             r#"
-timestamp = await invoke("get_time", "{}")
+timestamp = await get_time()
 print(f"Current Unix timestamp: {timestamp}")
 "#,
         )
@@ -146,7 +146,7 @@ print(f"Current Unix timestamp: {timestamp}")
     let result = sandbox
         .execute(
             r#"
-response = await invoke("echo", '{"message": "Hello from the sandbox!"}')
+response = await echo(message="Hello from the sandbox!")
 print(f"Echo response: {response}")
 "#,
         )
@@ -180,9 +180,9 @@ import asyncio
 
 # Execute multiple callbacks in parallel
 results = await asyncio.gather(
-    invoke("echo", '{"message": "first"}'),
-    invoke("echo", '{"message": "second"}'),
-    invoke("echo", '{"message": "third"}'),
+    echo(message="first"),
+    echo(message="second"),
+    echo(message="third"),
 )
 
 for i, result in enumerate(results):
