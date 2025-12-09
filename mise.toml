@@ -1,6 +1,6 @@
 [tools]
 # Profile "default" includes rustc, rust-std, cargo, rust-docs, rustfmt, and clippy
-rust = { version = "1.90", profile = "default" }
+rust = { version = "1.89", profile = "default" }
 "cargo:cargo-nextest" = "latest"
 uv = "latest"
 
@@ -34,7 +34,7 @@ run = "cargo fmt --all -- --check"
 
 [tasks.doc]
 description = "Generate documentation"
-run = "cargo doc --workspace --no-deps"
+run = "cargo doc --workspace --no-deps --all-features"
 
 [tasks.doc-open]
 description = "Generate and open documentation"
@@ -42,7 +42,7 @@ run = "cargo doc --workspace --no-deps --open"
 
 [tasks.ci]
 description = "Run all CI checks"
-depends = ["fmt-check", "lint", "test"]
+depends = ["fmt-check", "lint", "test", "test-all"]
 
 [tasks.clean]
 description = "Clean build artifacts"
@@ -52,10 +52,9 @@ run = "cargo clean"
 description = "Build the Python WASM component"
 dir = "crates/eryx-runtime"
 run = """
-uv venv --quiet 2>/dev/null || true
-uv pip install --quiet 'componentize-py>=0.19.0'
-.venv/bin/componentize-py -d runtime.wit -w sandbox bindings guest_bindings
-.venv/bin/componentize-py -d runtime.wit -w sandbox componentize runtime -o runtime.wasm
+uv sync
+uv run componentize-py -d runtime.wit -w sandbox bindings guest_bindings
+uv run componentize-py -d runtime.wit -w sandbox componentize runtime -o runtime.wasm
 """
 
 [tasks.build-all]
@@ -72,12 +71,23 @@ run = "cargo bench --package eryx -- --save-baseline main"
 
 [tasks.precompile-wasm]
 description = "Pre-compile WASM to native code for faster loading"
-dir = "crates/eryx-runtime"
-run = """
-cargo run --package eryx --example precompile_wasm 2>/dev/null || \
-  echo "Run 'cargo build --example precompile_wasm' first, then run this task"
-"""
+depends = ["build-wasm"]
+run = "cargo run --example precompile --features precompiled --release"
 
 [tasks.build-all-precompiled]
 description = "Build WASM, pre-compile it, and build Rust crates"
 depends = ["build-wasm", "build"]
+
+[tasks.msrv]
+description = "Check compilation on minimum supported Rust version"
+run = "cargo +1.89 check --workspace"
+
+[tasks.integration]
+description = "Run integration tests (build WASM and run examples)"
+depends = ["build-wasm"]
+run = """
+cargo run --example simple --release
+cargo run --example parallel_callbacks --release
+cargo run --example precompile --features precompiled --release
+cargo run --example embedded_runtime --features embedded-runtime --release
+"""

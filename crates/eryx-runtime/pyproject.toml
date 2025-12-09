@@ -1,0 +1,11 @@
+[project]
+name = "eryx-runtime"
+version = "0.1.0"
+description = "Python runtime for eryx sandbox"
+requires-python = ">=3.11"
+dependencies = [
+    "componentize-py>=0.19.0",
+]
+
+[dependency-groups]
+dev = []

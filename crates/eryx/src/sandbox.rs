@@ -197,13 +197,13 @@ impl Sandbox {
     ) -> Option<std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>> {
         // Check callback limit
         let current_count = invocation_count.fetch_add(1, Ordering::SeqCst);
-        if let Some(max) = resource_limits.max_callback_invocations {
-            if current_count >= max {
-                let _ = request
-                    .response_tx
-                    .send(Err(format!("Callback limit exceeded ({max} invocations)")));
-                return None;
-            }
+        if let Some(max) = resource_limits.max_callback_invocations
+            && current_count >= max
+        {
+            let _ = request
+                .response_tx
+                .send(Err(format!("Callback limit exceeded ({max} invocations)")));
+            return None;
         }
 
         // Find the callback
