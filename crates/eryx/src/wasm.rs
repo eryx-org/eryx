@@ -19,11 +19,6 @@
 //! let executor = unsafe { PythonExecutor::from_precompiled_file("runtime.cwasm")? };
 //! ```
 
-// Allow unsafe code for pre-compiled component loading.
-// The wasmtime API requires unsafe for deserializing pre-compiled components
-// because it cannot fully validate them for safety.
-#![allow(unsafe_code)]
-
 use std::sync::Arc;
 
 use tokio::sync::{mpsc, oneshot};
@@ -263,11 +258,14 @@ impl PythonExecutor {
     ///
     /// Returns an error if the pre-compiled bytes are invalid or incompatible
     /// with the current engine configuration.
+    #[allow(unsafe_code)]
     pub unsafe fn from_precompiled(precompiled_bytes: &[u8]) -> std::result::Result<Self, Error> {
         let engine = Self::create_engine()?;
-        let component = unsafe {
-            Component::deserialize(&engine, precompiled_bytes).map_err(Error::WasmComponent)?
-        };
+        // SAFETY: Caller guarantees the precompiled bytes are trusted and were
+        // created by `precompile()` with a compatible engine configuration.
+        #[allow(unsafe_code)]
+        let component = unsafe { Component::deserialize(&engine, precompiled_bytes) }
+            .map_err(Error::WasmComponent)?;
         let instance_pre = Self::create_instance_pre(&engine, &component)?;
 
         Ok(Self {
@@ -292,13 +290,16 @@ impl PythonExecutor {
     ///
     /// Returns an error if the file cannot be read or the pre-compiled component
     /// is invalid or incompatible with the current engine configuration.
+    #[allow(unsafe_code)]
     pub unsafe fn from_precompiled_file(
         path: impl AsRef<std::path::Path>,
     ) -> std::result::Result<Self, Error> {
         let engine = Self::create_engine()?;
-        let component = unsafe {
-            Component::deserialize_file(&engine, path.as_ref()).map_err(Error::WasmComponent)?
-        };
+        // SAFETY: Caller guarantees the precompiled file is trusted and was
+        // created by `precompile()` with a compatible engine configuration.
+        #[allow(unsafe_code)]
+        let component = unsafe { Component::deserialize_file(&engine, path.as_ref()) }
+            .map_err(Error::WasmComponent)?;
         let instance_pre = Self::create_instance_pre(&engine, &component)?;
 
         Ok(Self {

@@ -10,12 +10,7 @@
 //! - Parallel callback execution performance
 
 // Benchmarks use expect/unwrap for simplicity - failures should panic
-#![allow(clippy::expect_used)]
-#![allow(clippy::unwrap_used)]
-#![allow(clippy::needless_raw_string_hashes)]
-// Callback trait requires returning &str with lifetime tied to &self
-#![allow(clippy::needless_lifetimes)]
-#![allow(clippy::redundant_closure_for_method_calls)]
+#![allow(missing_docs, clippy::expect_used, clippy::unwrap_used)]
 
 use std::future::Future;
 use std::pin::Pin;
