@@ -1,13 +1,10 @@
-//! Test that verifies parallel callback execution via asyncio.gather.
+//! Example demonstrating parallel callback execution via asyncio.gather.
 //!
-//! This test proves that callbacks are executed concurrently, not sequentially.
+//! This example shows that callbacks are executed concurrently, not sequentially.
 //! If 3 callbacks each take 100ms and run in parallel, total time should be ~100ms.
 //! If they ran sequentially, it would take ~300ms.
 //!
-//! Run with: `cargo run --example parallel_test`
-
-#![allow(clippy::unnecessary_literal_bound)]
-#![allow(clippy::cast_precision_loss)]
+//! Run with: `cargo run --example parallel_callbacks`
 
 use std::future::Future;
 use std::pin::Pin;

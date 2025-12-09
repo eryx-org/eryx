@@ -2,8 +2,6 @@
 //!
 //! Run with: `cargo run --example simple`
 
-#![allow(clippy::unnecessary_literal_bound)]
-
 use std::future::Future;
 use std::pin::Pin;
 

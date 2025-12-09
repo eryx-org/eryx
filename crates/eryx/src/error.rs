@@ -47,7 +47,3 @@ impl From<serde_json::Error> for Error {
         Self::Serialization(err.to_string())
     }
 }
-
-/// A specialized `Result` type for Eryx operations.
-#[allow(unreachable_pub, dead_code)]
-pub type Result<T> = std::result::Result<T, Error>;

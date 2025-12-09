@@ -40,3 +40,6 @@ pub use error::Error;
 pub use library::RuntimeLibrary;
 pub use sandbox::{ExecuteResult, ExecuteStats, ResourceLimits, Sandbox, SandboxBuilder};
 pub use trace::{OutputHandler, TraceEvent, TraceEventKind, TraceHandler};
+
+// Re-export precompilation utilities
+pub use wasm::PythonExecutor;

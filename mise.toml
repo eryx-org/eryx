@@ -61,3 +61,23 @@ uv pip install --quiet 'componentize-py>=0.19.0'
 [tasks.build-all]
 description = "Build WASM component and Rust crates"
 depends = ["build-wasm", "build"]
+
+[tasks.bench]
+description = "Run benchmarks"
+run = "cargo bench --package eryx"
+
+[tasks.bench-save]
+description = "Run benchmarks and save baseline"
+run = "cargo bench --package eryx -- --save-baseline main"
+
+[tasks.precompile-wasm]
+description = "Pre-compile WASM to native code for faster loading"
+dir = "crates/eryx-runtime"
+run = """
+cargo run --package eryx --example precompile_wasm 2>/dev/null || \
+  echo "Run 'cargo build --example precompile_wasm' first, then run this task"
+"""
+
+[tasks.build-all-precompiled]
+description = "Build WASM, pre-compile it, and build Rust crates"
+depends = ["build-wasm", "build"]

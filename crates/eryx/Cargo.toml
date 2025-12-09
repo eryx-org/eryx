@@ -11,6 +11,10 @@ readme = "README.md"
 keywords = ["python", "sandbox", "wasm", "webassembly", "async"]
 categories = ["development-tools", "wasm"]
 
+[[bench]]
+name = "execution"
+harness = false
+
 [dependencies]
 tokio = { workspace = true, features = ["sync"] }
 async-trait.workspace = true
@@ -26,6 +30,7 @@ tracing.workspace = true
 anyhow.workspace = true
 async-trait.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+criterion.workspace = true
 
 [lints]
 workspace = true

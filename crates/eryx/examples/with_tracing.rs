@@ -5,9 +5,6 @@
 //!
 //! Run with: `cargo run --example with_tracing`
 
-#![allow(clippy::unnecessary_literal_bound)]
-#![allow(clippy::literal_string_with_formatting_args)]
-
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicU32, Ordering};

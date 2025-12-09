@@ -2,12 +2,33 @@
 //!
 //! This module handles the wasmtime engine configuration, component loading,
 //! and host import implementations for running Python code in the sandbox.
+//!
+//! The `PythonExecutor` uses pre-instantiation (`SandboxPre`) to avoid
+//! re-linking on every execution, significantly improving performance.
+//!
+//! # Pre-compiled Components
+//!
+//! For faster startup, you can pre-compile the WASM component to native code:
+//!
+//! ```rust,ignore
+//! // At build time - compile once:
+//! let precompiled = PythonExecutor::precompile_file("runtime.wasm")?;
+//! std::fs::write("runtime.cwasm", precompiled)?;
+//!
+//! // At runtime - load quickly (unsafe, must trust the file):
+//! let executor = unsafe { PythonExecutor::from_precompiled_file("runtime.cwasm")? };
+//! ```
+
+// Allow unsafe code for pre-compiled component loading.
+// The wasmtime API requires unsafe for deserializing pre-compiled components
+// because it cannot fully validate them for safety.
+#![allow(unsafe_code)]
 
 use std::sync::Arc;
 
 use tokio::sync::{mpsc, oneshot};
 use wasmtime::component::{Accessor, Component, HasSelf, Linker, ResourceTable};
-use wasmtime::{Config, Engine, Store};
+use wasmtime::{Config, Engine, InstanceAllocationStrategy, PoolingAllocationConfig, Store};
 use wasmtime_wasi::{WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView};
 
 use crate::callback::Callback;
@@ -156,23 +177,39 @@ impl SandboxImports for ExecutorState {
 }
 
 /// The Python executor that manages the WASM runtime.
+///
+/// This struct uses pre-instantiation (`SandboxPre`) to perform as much
+/// work as possible upfront. The expensive operations (parsing WASM,
+/// compiling, linking) happen once during construction. Each `execute()`
+/// call only needs to create a new store and instantiate from the
+/// pre-compiled template, which is much faster.
 pub struct PythonExecutor {
+    /// The wasmtime engine (shared configuration).
     engine: Engine,
-    component: Component,
-    linker: Linker<ExecutorState>,
+    /// Pre-instantiated component - linking is already done.
+    instance_pre: SandboxPre<ExecutorState>,
 }
 
 impl std::fmt::Debug for PythonExecutor {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("PythonExecutor")
             .field("engine", &"<wasmtime::Engine>")
-            .field("component", &"<wasmtime::Component>")
+            .field("instance_pre", &"<SandboxPre>")
             .finish_non_exhaustive()
     }
 }
 
 impl PythonExecutor {
     /// Create a new executor by loading a WASM component from bytes.
+    ///
+    /// This performs all expensive operations upfront:
+    /// - Parsing and validating the WASM component
+    /// - Compiling to native code
+    /// - Linking WASI and sandbox imports
+    /// - Creating a pre-instantiated template
+    ///
+    /// Subsequent calls to `execute()` will be fast because they only
+    /// need to instantiate from the pre-compiled template.
     ///
     /// # Errors
     ///
@@ -182,16 +219,17 @@ impl PythonExecutor {
         let engine = Self::create_engine()?;
         let component =
             Component::from_binary(&engine, wasm_bytes).map_err(Error::WasmComponent)?;
-        let linker = Self::create_linker(&engine)?;
+        let instance_pre = Self::create_instance_pre(&engine, &component)?;
 
         Ok(Self {
             engine,
-            component,
-            linker,
+            instance_pre,
         })
     }
 
     /// Create a new executor by loading a WASM component from a file.
+    ///
+    /// This performs all expensive operations upfront (see `from_binary`).
     ///
     /// # Errors
     ///
@@ -201,27 +239,152 @@ impl PythonExecutor {
         let engine = Self::create_engine()?;
         let component =
             Component::from_file(&engine, path.as_ref()).map_err(Error::WasmComponent)?;
-        let linker = Self::create_linker(&engine)?;
+        let instance_pre = Self::create_instance_pre(&engine, &component)?;
 
         Ok(Self {
             engine,
-            component,
-            linker,
+            instance_pre,
         })
     }
 
-    /// Create a configured wasmtime engine.
+    /// Create a new executor by loading a pre-compiled component from bytes.
+    ///
+    /// This is much faster than `from_binary` because it skips compilation.
+    /// The pre-compiled bytes must have been created by `precompile()` with
+    /// a compatible engine configuration.
+    ///
+    /// # Safety
+    ///
+    /// This function is unsafe because Wasmtime cannot fully validate pre-compiled
+    /// components for safety. Only use this with pre-compiled bytes you control
+    /// and trust. Using untrusted bytes can lead to arbitrary code execution.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the pre-compiled bytes are invalid or incompatible
+    /// with the current engine configuration.
+    pub unsafe fn from_precompiled(precompiled_bytes: &[u8]) -> std::result::Result<Self, Error> {
+        let engine = Self::create_engine()?;
+        let component = unsafe {
+            Component::deserialize(&engine, precompiled_bytes).map_err(Error::WasmComponent)?
+        };
+        let instance_pre = Self::create_instance_pre(&engine, &component)?;
+
+        Ok(Self {
+            engine,
+            instance_pre,
+        })
+    }
+
+    /// Create a new executor by loading a pre-compiled component from a file.
+    ///
+    /// This is much faster than `from_file` because it skips compilation.
+    /// The file must have been created by `precompile()` with a compatible
+    /// engine configuration.
+    ///
+    /// # Safety
+    ///
+    /// This function is unsafe because Wasmtime cannot fully validate pre-compiled
+    /// components for safety. Only use this with files you control and trust.
+    /// Using untrusted files can lead to arbitrary code execution.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the file cannot be read or the pre-compiled component
+    /// is invalid or incompatible with the current engine configuration.
+    pub unsafe fn from_precompiled_file(
+        path: impl AsRef<std::path::Path>,
+    ) -> std::result::Result<Self, Error> {
+        let engine = Self::create_engine()?;
+        let component = unsafe {
+            Component::deserialize_file(&engine, path.as_ref()).map_err(Error::WasmComponent)?
+        };
+        let instance_pre = Self::create_instance_pre(&engine, &component)?;
+
+        Ok(Self {
+            engine,
+            instance_pre,
+        })
+    }
+
+    /// Pre-compile the WASM component to native code for faster loading.
+    ///
+    /// The returned bytes can be saved to a file (conventionally with `.cwasm`
+    /// extension) and later loaded with `from_precompiled` or `from_precompiled_file`.
+    ///
+    /// # Benefits
+    ///
+    /// - Faster startup: Skip compilation when loading
+    /// - Lower memory: Pre-compiled code can be lazily mmap'd from disk
+    /// - Smaller runtime: Can build without compiler for production
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if pre-compilation fails.
+    pub fn precompile(wasm_bytes: &[u8]) -> std::result::Result<Vec<u8>, Error> {
+        let engine = Self::create_engine()?;
+        engine
+            .precompile_component(wasm_bytes)
+            .map_err(|e| Error::WasmEngine(format!("Failed to precompile component: {e}")))
+    }
+
+    /// Pre-compile a WASM component file to native code.
+    ///
+    /// Convenience method that reads the file and calls `precompile`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the file cannot be read or pre-compilation fails.
+    pub fn precompile_file(
+        path: impl AsRef<std::path::Path>,
+    ) -> std::result::Result<Vec<u8>, Error> {
+        let wasm_bytes = std::fs::read(path.as_ref())
+            .map_err(|e| Error::WasmEngine(format!("Failed to read WASM file: {e}")))?;
+        Self::precompile(&wasm_bytes)
+    }
+
+    /// Create a configured wasmtime engine with pooling allocator for fast instantiation.
+    ///
+    /// Uses several optimizations:
+    /// - Pooling allocator: Pre-allocates memory/tables so instantiation doesn't allocate
+    /// - Copy-on-write heap images: Defers memory initialization to first write
     fn create_engine() -> std::result::Result<Engine, Error> {
         let mut config = Config::new();
         config.wasm_component_model(true);
         config.wasm_component_model_async(true);
         config.async_support(true);
 
+        // Enable copy-on-write heap images for faster instantiation
+        // This defers memory initialization from instantiation time to first write
+        config.memory_init_cow(true);
+
+        // Configure pooling allocator for fast instantiation
+        // Pre-allocates resources so instantiation just takes from the pool
+        let mut pool = PoolingAllocationConfig::new();
+        // Allow up to 10 concurrent instances (sandboxes)
+        pool.total_component_instances(10);
+        // Memory configuration for Python WASM runtime
+        pool.total_memories(10);
+        pool.max_memory_size(256 * 1024 * 1024); // 256 MiB per memory
+        // Table configuration
+        pool.total_tables(10);
+        pool.table_elements(20_000);
+        // Core instances (internal to component model)
+        pool.total_core_instances(100);
+
+        config.allocation_strategy(InstanceAllocationStrategy::Pooling(pool));
+
         Engine::new(&config).map_err(|e| Error::WasmEngine(e.to_string()))
     }
 
-    /// Create a linker with WASI and sandbox bindings.
-    fn create_linker(engine: &Engine) -> std::result::Result<Linker<ExecutorState>, Error> {
+    /// Create a pre-instantiated component with all imports linked.
+    ///
+    /// This does the expensive linking work once, so that `execute()` can
+    /// quickly instantiate from the template.
+    fn create_instance_pre(
+        engine: &Engine,
+        component: &Component,
+    ) -> std::result::Result<SandboxPre<ExecutorState>, Error> {
         let mut linker = Linker::<ExecutorState>::new(engine);
 
         // Add WASI support (p2 = preview 2)
@@ -232,10 +395,24 @@ impl PythonExecutor {
         Sandbox::add_to_linker::<_, HasSelf<ExecutorState>>(&mut linker, |state| state)
             .map_err(|e| Error::WasmEngine(format!("Failed to add sandbox to linker: {e}")))?;
 
-        Ok(linker)
+        // Create pre-instantiated component
+        // This validates that all imports are satisfied and prepares for fast instantiation
+        let instance_pre = linker
+            .instantiate_pre(component)
+            .map_err(|e| Error::WasmEngine(format!("Failed to create instance_pre: {e}")))?;
+
+        // Wrap in SandboxPre for typed access to exports
+        SandboxPre::new(instance_pre)
+            .map_err(|e| Error::WasmEngine(format!("Failed to create SandboxPre: {e}")))
     }
 
     /// Execute Python code with the given callbacks and trace channel.
+    ///
+    /// This is fast because the expensive linking work was done during
+    /// construction. Each call only needs to:
+    /// 1. Create a new store with fresh state
+    /// 2. Instantiate from the pre-compiled template
+    /// 3. Call the execute export
     ///
     /// # Arguments
     ///
@@ -281,27 +458,25 @@ impl PythonExecutor {
         // Create store for this execution
         let mut store = Store::new(&self.engine, state);
 
-        // Instantiate the component
-        let bindings = Sandbox::instantiate_async(&mut store, &self.component, &self.linker)
+        // Instantiate from the pre-compiled template (fast!)
+        let bindings = self
+            .instance_pre
+            .instantiate_async(&mut store)
             .await
             .map_err(|e| format!("Failed to instantiate component: {e}"))?;
 
         tracing::debug!(code_len = code.len(), "Executing Python code");
 
-        // Call the async execute export using run_concurrent to get an Accessor
+        // Call the async execute export
         let code_owned = code.to_string();
 
-        // Call the async execute export
         // run_concurrent returns Result<R, Error> where R is the closure's return type
-        // The closure returns wasmtime::Result<Result<String, String>>
         let wasmtime_result = store
             .run_concurrent(async |accessor| bindings.call_execute(accessor, code_owned).await)
             .await
             .map_err(|e| format!("WASM execution error: {e:?}"))?;
 
         // wasmtime_result is wasmtime::Result<Result<String, String>>
-        // Unwrap the outer wasmtime Result
-
         wasmtime_result.map_err(|e| format!("WASM execution error: {e:?}"))?
     }
 }
@@ -327,7 +502,6 @@ pub fn parse_trace_event(request: &TraceRequest) -> std::result::Result<TraceEve
     };
 
     let kind = match event_type {
-        #[allow(clippy::match_same_arms)]
         "line" => crate::trace::TraceEventKind::Line,
         "call" => {
             let function = event_data

@@ -5,9 +5,6 @@
 //!
 //! Run with: `cargo run --example error_handling`
 
-#![allow(clippy::unnecessary_literal_bound)]
-#![allow(clippy::literal_string_with_formatting_args)]
-
 use std::future::Future;
 use std::pin::Pin;
 

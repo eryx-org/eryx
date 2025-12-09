@@ -288,6 +288,8 @@ impl Sandbox {
 pub struct SandboxBuilder {
     wasm_bytes: Option<Vec<u8>>,
     wasm_path: Option<std::path::PathBuf>,
+    precompiled_bytes: Option<Vec<u8>>,
+    precompiled_path: Option<std::path::PathBuf>,
     callbacks: HashMap<String, Arc<dyn Callback>>,
     preamble: String,
     type_stubs: String,
@@ -327,6 +329,8 @@ impl SandboxBuilder {
         Self {
             wasm_bytes: None,
             wasm_path: None,
+            precompiled_bytes: None,
+            precompiled_path: None,
             callbacks: HashMap::new(),
             preamble: String::new(),
             type_stubs: String::new(),
@@ -343,6 +347,8 @@ impl SandboxBuilder {
     pub fn with_wasm_bytes(mut self, bytes: impl Into<Vec<u8>>) -> Self {
         self.wasm_bytes = Some(bytes.into());
         self.wasm_path = None;
+        self.precompiled_bytes = None;
+        self.precompiled_path = None;
         self
     }
 
@@ -351,6 +357,46 @@ impl SandboxBuilder {
     pub fn with_wasm_file(mut self, path: impl Into<std::path::PathBuf>) -> Self {
         self.wasm_path = Some(path.into());
         self.wasm_bytes = None;
+        self.precompiled_bytes = None;
+        self.precompiled_path = None;
+        self
+    }
+
+    /// Set the WASM component from pre-compiled bytes.
+    ///
+    /// Pre-compiled components load much faster because they skip compilation.
+    /// Create pre-compiled bytes using `PythonExecutor::precompile()`.
+    ///
+    /// # Safety
+    ///
+    /// This is safe to call, but the resulting `build()` will use unsafe
+    /// deserialization internally. Only use pre-compiled bytes you control
+    /// and trust.
+    #[must_use]
+    pub fn with_precompiled_bytes(mut self, bytes: impl Into<Vec<u8>>) -> Self {
+        self.precompiled_bytes = Some(bytes.into());
+        self.precompiled_path = None;
+        self.wasm_bytes = None;
+        self.wasm_path = None;
+        self
+    }
+
+    /// Set the WASM component from a pre-compiled file path.
+    ///
+    /// Pre-compiled components load much faster because they skip compilation.
+    /// Create pre-compiled files using `PythonExecutor::precompile_file()`.
+    ///
+    /// # Safety
+    ///
+    /// This is safe to call, but the resulting `build()` will use unsafe
+    /// deserialization internally. Only use pre-compiled files you control
+    /// and trust.
+    #[must_use]
+    pub fn with_precompiled_file(mut self, path: impl Into<std::path::PathBuf>) -> Self {
+        self.precompiled_path = Some(path.into());
+        self.precompiled_bytes = None;
+        self.wasm_bytes = None;
+        self.wasm_path = None;
         self
     }
 
@@ -431,13 +477,25 @@ impl SandboxBuilder {
     /// - The WASM component cannot be loaded
     /// - The WebAssembly runtime fails to initialize
     pub fn build(self) -> Result<Sandbox, Error> {
-        let executor = if let Some(bytes) = self.wasm_bytes {
+        let executor = if let Some(bytes) = self.precompiled_bytes {
+            #[allow(unsafe_code)]
+            // Safety: User is responsible for only using trusted pre-compiled bytes
+            unsafe {
+                PythonExecutor::from_precompiled(&bytes)?
+            }
+        } else if let Some(path) = self.precompiled_path {
+            // Safety: User is responsible for only using trusted pre-compiled files
+            #[allow(unsafe_code)]
+            unsafe {
+                PythonExecutor::from_precompiled_file(&path)?
+            }
+        } else if let Some(bytes) = self.wasm_bytes {
             PythonExecutor::from_binary(&bytes)?
         } else if let Some(path) = self.wasm_path {
             PythonExecutor::from_file(&path)?
         } else {
             return Err(Error::Initialization(
-                "No WASM component specified. Use with_wasm_bytes() or with_wasm_file()."
+                "No WASM component specified. Use with_wasm_bytes(), with_wasm_file(), with_precompiled_bytes(), or with_precompiled_file()."
                     .to_string(),
             ));
         };

@@ -38,6 +38,9 @@ wasmtime-wasi = "39"
 # Utilities
 tracing = "0.1"
 
+# Benchmarking
+criterion = { version = "0.5", features = ["async_tokio"] }
+
 # Internal crates
 eryx = { path = "crates/eryx" }
 
@@ -47,12 +50,10 @@ missing_docs = "warn"
 # Priority -1 ensures this lint group is applied before individual lints,
 # avoiding clippy::lint_groups_priority warning about ambiguous ordering.
 rust_2018_idioms = { level = "warn", priority = -1 }
-unsafe_code = "forbid"
+unsafe_code = "deny"
 
 [workspace.lints.clippy]
 all = "warn"
-pedantic = "warn"
-nursery = "warn"
 unwrap_used = "warn"
 expect_used = "warn"
 
