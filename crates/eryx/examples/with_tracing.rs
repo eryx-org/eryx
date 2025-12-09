@@ -10,7 +10,7 @@ use std::pin::Pin;
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use async_trait::async_trait;
-use eryx::schemars::JsonSchema;
+use eryx::JsonSchema;
 use eryx::{
     CallbackError, OutputHandler, Sandbox, TraceEvent, TraceEventKind, TraceHandler, TypedCallback,
 };

@@ -44,9 +44,10 @@
 //! ```
 use std::{future::Future, pin::Pin, sync::Arc};
 
-use schemars::{JsonSchema, Schema, SchemaGenerator, json_schema, schema_for};
 use serde::de::DeserializeOwned;
 use serde_json::json;
+
+use crate::schema::{JsonSchema, Schema};
 
 /// A callback that Python code can invoke.
 ///
@@ -82,7 +83,7 @@ use serde_json::json;
 ///     }
 ///
 ///     fn parameters_schema(&self) -> Schema {
-///         schemars::schema_for!(())
+///         Schema::empty()
 ///     }
 ///
 ///     fn invoke(
@@ -127,8 +128,8 @@ pub trait Callback: Send + Sync {
     /// - LLM context for generating correct invocations
     ///
     /// Returns a [`Schema`] which provides a strongly-typed
-    /// representation of JSON Schema. Use [`schemars::schema_for!`] to generate
-    /// schemas from Rust types, or construct schemas programmatically for
+    /// representation of JSON Schema. Use [`Schema::for_type`] to generate
+    /// schemas from Rust types, or [`Schema::try_from_value`] for
     /// runtime-defined callbacks.
     fn parameters_schema(&self) -> Schema;
 
@@ -254,7 +255,7 @@ impl<T: TypedCallback> Callback for T {
     }
 
     fn parameters_schema(&self) -> Schema {
-        SchemaGenerator::default().into_root_schema_for::<T::Args>()
+        Schema::for_type::<T::Args>()
     }
 
     fn invoke(
@@ -304,7 +305,7 @@ pub enum CallbackError {
 /// ```
 #[must_use]
 pub fn empty_schema() -> Schema {
-    schema_for!(())
+    Schema::empty()
 }
 
 // =============================================================================
@@ -596,8 +597,8 @@ impl DynamicCallbackBuilder {
     /// ```rust,ignore
     /// use eryx::schemars::json_schema;
     ///
-    /// DynamicCallback::builder("complex", "A callback with complex schema")
-    ///     .schema(json_schema!({
+    /// DynamicCallback::builder("complex", "A callback with complex schema", handler)
+    ///     .schema(Schema::try_from_value(json!({
     ///         "type": "object",
     ///         "properties": {
     ///             "mode": {
@@ -610,8 +611,7 @@ impl DynamicCallbackBuilder {
     ///             }
     ///         },
     ///         "required": ["mode"]
-    ///     }))
-    ///     .handler(...)
+    ///     })).unwrap())
     /// ```
     #[must_use]
     pub fn schema(mut self, schema: Schema) -> Self {
@@ -628,11 +628,7 @@ impl DynamicCallbackBuilder {
             None => {
                 // Build from parameters
                 if self.parameters.is_empty() {
-                    json_schema!({
-                        "type": "object",
-                        "properties": {},
-                        "required": []
-                    })
+                    Schema::empty()
                 } else {
                     let mut properties = serde_json::Map::new();
                     let mut required = Vec::new();
@@ -656,7 +652,7 @@ impl DynamicCallbackBuilder {
                         "required": required
                     });
 
-                    Schema::try_from(schema_json).unwrap_or_else(|_| json_schema!({}))
+                    Schema::try_from_value(schema_json).unwrap_or_default()
                 }
             }
         };

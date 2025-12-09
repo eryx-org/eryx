@@ -45,6 +45,7 @@ mod callback;
 mod error;
 mod library;
 mod sandbox;
+mod schema;
 pub mod session;
 mod trace;
 mod wasm;
@@ -64,5 +65,5 @@ pub use trace::{OutputHandler, TraceEvent, TraceEventKind, TraceHandler};
 // Re-export precompilation utilities and internal types
 pub use wasm::{ExecutionOutput, PythonExecutor};
 
-// Re-export schemars for users to derive JsonSchema on their argument types
-pub use schemars;
+// Re-export schema types at top level for convenience
+pub use schema::{JsonSchema, Schema};

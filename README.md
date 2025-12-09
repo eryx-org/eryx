@@ -39,12 +39,11 @@ async fn main() -> Result<(), eryx::Error> {
 Use `TypedCallback` for strongly-typed callbacks with automatic schema generation:
 
 ```rust
-use eryx::{TypedCallback, CallbackError, Sandbox};
-use eryx::schemars::JsonSchema;
+use std::{future::Future, pin::Pin};
+
+use eryx::{TypedCallback, CallbackError, Sandbox, JsonSchema};
 use serde::Deserialize;
 use serde_json::{json, Value};
-use std::future::Future;
-use std::pin::Pin;
 
 // Arguments struct - schema is auto-generated from this
 #[derive(Deserialize, JsonSchema)]

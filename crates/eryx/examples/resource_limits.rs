@@ -11,7 +11,7 @@ use std::future::Future;
 use std::pin::Pin;
 use std::time::Duration;
 
-use eryx::schemars::JsonSchema;
+use eryx::JsonSchema;
 use eryx::{CallbackError, ResourceLimits, Sandbox, TypedCallback};
 use serde::Deserialize;
 use serde_json::{Value, json};

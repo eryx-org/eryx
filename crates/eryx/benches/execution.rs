@@ -17,7 +17,7 @@ use std::pin::Pin;
 use std::time::Duration;
 
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
-use eryx::schemars::JsonSchema;
+use eryx::JsonSchema;
 use eryx::{CallbackError, Sandbox, TypedCallback};
 use serde::Deserialize;
 use serde_json::{Value, json};

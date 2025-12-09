@@ -15,7 +15,7 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 
-use eryx::schemars::JsonSchema;
+use eryx::JsonSchema;
 use eryx::{CallbackError, RuntimeLibrary, Sandbox, TypedCallback};
 use serde::Deserialize;
 use serde_json::{Value, json};

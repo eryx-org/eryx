@@ -12,7 +12,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Instant;
 
-use eryx::schemars::JsonSchema;
+use eryx::JsonSchema;
 use eryx::{CallbackError, Sandbox, TypedCallback};
 use serde::Deserialize;
 use serde_json::{Value, json};

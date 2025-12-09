@@ -8,7 +8,7 @@
 use std::future::Future;
 use std::pin::Pin;
 
-use eryx::schemars::JsonSchema;
+use eryx::JsonSchema;
 use eryx::{CallbackError, Sandbox, TypedCallback};
 use serde::Deserialize;
 use serde_json::{Value, json};
