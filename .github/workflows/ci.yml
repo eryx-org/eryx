@@ -34,8 +34,8 @@ jobs:
       - name: Run CI checks
         run: mise run ci
 
-  integration:
-    name: Integration Tests
+  test-all:
+    name: Test (all features)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -50,12 +50,12 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: ${{ runner.os }}-cargo-integration-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ runner.os }}-cargo-test-all-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
-            ${{ runner.os }}-cargo-integration-
+            ${{ runner.os }}-cargo-test-all-
 
-      - name: Run integration tests
-        run: mise run integration
+      - name: Run tests
+        run: mise run test-all
 
   msrv:
     name: MSRV

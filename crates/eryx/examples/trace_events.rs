@@ -5,6 +5,8 @@
 //!
 //! Run with: `cargo run --example trace_events --features embedded-runtime`
 
+#![allow(clippy::expect_used)]
+
 use std::future::Future;
 use std::io::{Write, stdout};
 use std::pin::Pin;
