@@ -366,10 +366,8 @@ impl TraceHandler for VisualTraceHandler {
             }
 
             // Mark new current line
-            if line_idx < states.len() {
-                if let TraceEventKind::Line = event.event {
-                    states[line_idx] = LineState::Current;
-                }
+            if line_idx < states.len() && matches!(event.event, TraceEventKind::Line) {
+                states[line_idx] = LineState::Current;
             }
         }
 
