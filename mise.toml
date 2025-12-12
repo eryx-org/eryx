@@ -20,14 +20,17 @@ run = "cargo nextest run --workspace --features precompiled"
 
 [tasks.test-all]
 description = "Run tests with all features"
+depends = ["build-wasm"]
 run = "cargo nextest run --workspace --all-features"
 
 [tasks.lint]
 description = "Run clippy lints"
+depends = ["build-wasm"]
 run = "cargo clippy --workspace --all-targets --all-features -- -D warnings"
 
 [tasks.lint-fix]
 description = "Auto-fix clippy warnings"
+depends = ["build-wasm"]
 run = "cargo clippy --fix --allow-dirty --workspace --all-targets --all-features"
 
 [tasks.fmt]
@@ -40,6 +43,7 @@ run = "cargo fmt --all -- --check"
 
 [tasks.doc]
 description = "Generate documentation"
+depends = ["build-wasm"]
 run = "cargo doc --workspace --no-deps --all-features"
 
 [tasks.doc-open]
