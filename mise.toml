@@ -3,6 +3,7 @@
 rust = { version = "1.89", profile = "default" }
 "cargo:cargo-nextest" = "latest"
 uv = "latest"
+"cargo:wasm-tools" = "latest"
 
 [tasks.check]
 description = "Run cargo check"
@@ -60,6 +61,7 @@ run = """
 uv sync
 uv run componentize-py -d runtime.wit -w sandbox bindings guest_bindings
 uv run componentize-py -d runtime.wit -w sandbox componentize runtime -o runtime.wasm
+wasm-tools strip -a runtime.wasm -o runtime.wasm
 """
 
 [tasks.build-all]
