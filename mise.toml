@@ -20,7 +20,7 @@ run = "cargo nextest run --workspace --features precompiled"
 
 [tasks.test-all]
 description = "Run tests with all features"
-depends = ["build-wasm"]
+depends = ["precompile-wasm"]
 run = "cargo nextest run --workspace --all-features"
 
 [tasks.lint]
@@ -43,7 +43,7 @@ run = "cargo fmt --all -- --check"
 
 [tasks.doc]
 description = "Generate documentation"
-depends = ["build-wasm"]
+depends = ["precompile-wasm"]
 run = "cargo doc --workspace --no-deps --all-features"
 
 [tasks.doc-open]
