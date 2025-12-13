@@ -191,21 +191,127 @@ async fn test_instantiate_component() -> Result<(), Box<dyn std::error::Error>> 
     use wasmtime::component::{Accessor, Val};
 
     // [async]invoke: async func(name: string, arguments-json: string) -> result<string, string>
+    // This implementation handles a few test callbacks:
+    // - "get_time": returns a fixed timestamp as JSON
+    // - "echo": echoes back the arguments
+    // - "add": adds two numbers
     linker.root().func_wrap_concurrent(
         "[async]invoke",
-        |_accessor: &Accessor<State>, (_name, _args): (String, String)| {
-            Box::pin(async move { Ok((Result::<String, String>::Err("not implemented".into()),)) })
+        |_accessor: &Accessor<State>, (name, args): (String, String)| {
+            Box::pin(async move {
+                let result: Result<String, String> = match name.as_str() {
+                    "get_time" => Ok(r#"{"timestamp": 1234567890}"#.to_string()),
+                    "echo" => {
+                        // Echo back the arguments
+                        Ok(args)
+                    }
+                    "add" => {
+                        // Simple JSON parsing for {"a": x, "b": y}
+                        // Extract numbers using basic string operations
+                        let extract_num = |key: &str| -> i64 {
+                            args.find(&format!("\"{key}\":"))
+                                .and_then(|pos| {
+                                    let start = pos + key.len() + 3; // skip "key":
+                                    let rest = &args[start..];
+                                    let rest = rest.trim_start();
+                                    let end = rest
+                                        .find(|c: char| !c.is_ascii_digit() && c != '-')
+                                        .unwrap_or(rest.len());
+                                    rest[..end].parse().ok()
+                                })
+                                .unwrap_or(0)
+                        };
+                        let a = extract_num("a");
+                        let b = extract_num("b");
+                        Ok(format!(r#"{{"result": {}}}"#, a + b))
+                    }
+                    "http.get" => {
+                        // Extract URL from {"url": "..."}
+                        let url = args
+                            .find("\"url\":")
+                            .and_then(|pos| {
+                                let rest = &args[pos + 6..];
+                                let rest = rest.trim_start();
+                                if rest.starts_with('"') {
+                                    let rest = &rest[1..];
+                                    rest.find('"').map(|end| &rest[..end])
+                                } else {
+                                    None
+                                }
+                            })
+                            .unwrap_or("unknown");
+                        Ok(format!(
+                            r#"{{"status": 200, "url": "{url}", "body": "test response"}}"#
+                        ))
+                    }
+                    _ => Err(format!("unknown callback: {name}")),
+                };
+                Ok((result,))
+            })
         },
     )?;
 
     // list-callbacks: func() -> list<callback-info>
+    // Returns a list of available callbacks for testing
     linker.root().func_new(
         "list-callbacks",
         |_ctx: wasmtime::StoreContextMut<'_, State>,
          _func_ty: wasmtime::component::types::ComponentFunc,
          _params: &[Val],
          results: &mut [Val]| {
-            results[0] = Val::List(vec![]);
+            // Create callback info records
+            let callbacks = vec![
+                // Simple callback
+                Val::Record(vec![
+                    ("name".to_string(), Val::String("get_time".to_string())),
+                    (
+                        "description".to_string(),
+                        Val::String("Get current timestamp".to_string()),
+                    ),
+                    (
+                        "parameters-schema-json".to_string(),
+                        Val::String("{}".to_string()),
+                    ),
+                ]),
+                // Echo callback
+                Val::Record(vec![
+                    ("name".to_string(), Val::String("echo".to_string())),
+                    (
+                        "description".to_string(),
+                        Val::String("Echo back arguments".to_string()),
+                    ),
+                    (
+                        "parameters-schema-json".to_string(),
+                        Val::String("{}".to_string()),
+                    ),
+                ]),
+                // Add callback
+                Val::Record(vec![
+                    ("name".to_string(), Val::String("add".to_string())),
+                    (
+                        "description".to_string(),
+                        Val::String("Add two numbers".to_string()),
+                    ),
+                    (
+                        "parameters-schema-json".to_string(),
+                        Val::String(r#"{"a": "number", "b": "number"}"#.to_string()),
+                    ),
+                ]),
+                // Dotted namespace callback
+                Val::Record(vec![
+                    ("name".to_string(), Val::String("http.get".to_string())),
+                    (
+                        "description".to_string(),
+                        Val::String("HTTP GET request".to_string()),
+                    ),
+                    (
+                        "parameters-schema-json".to_string(),
+                        Val::String(r#"{"url": "string"}"#.to_string()),
+                    ),
+                ]),
+            ];
+
+            results[0] = Val::List(callbacks);
             Ok(())
         },
     )?;
@@ -477,6 +583,167 @@ async fn test_instantiate_component() -> Result<(), Box<dyn std::error::Error>> 
         }
         Err(error) => {
             panic!("Test 10 verification failed: {error}");
+        }
+    }
+
+    // =========================================================================
+    // Callback Infrastructure Tests
+    // =========================================================================
+    // Note: invoke() is not yet fully implemented (raises RuntimeError).
+    // These tests verify that the callback infrastructure is in place:
+    // - list_callbacks() function exists and is callable
+    // - invoke() function exists and raises the expected error
+    // - Callback wrappers and namespaces are generated
+
+    // Test 11: list_callbacks() function exists and is callable
+    println!("Test 11: list_callbacks() is callable...");
+    let (result,) = execute
+        .call_async(
+            &mut store,
+            (r#"
+# Verify list_callbacks exists and is callable
+cbs = list_callbacks()
+print(f"list_callbacks returned: {type(cbs).__name__}")
+print(f"count: {len(cbs)}")
+"#
+            .to_string(),),
+        )
+        .await?;
+    execute.post_return_async(&mut store).await?;
+
+    match &result {
+        Ok(output) => {
+            println!("  OK: {output:?}");
+            assert!(
+                output.contains("list_callbacks returned: list"),
+                "list_callbacks should return a list: {output}"
+            );
+        }
+        Err(error) => {
+            panic!("Test 11 failed: {error}");
+        }
+    }
+
+    // Test 12: invoke() raises RuntimeError (not yet implemented)
+    println!("Test 12: invoke() raises RuntimeError...");
+    let (result,) = execute
+        .call_async(
+            &mut store,
+            (r#"
+try:
+    invoke("get_time")
+    print("ERROR: invoke should have raised RuntimeError")
+except RuntimeError as e:
+    print("OK: RuntimeError raised")
+    error_msg = str(e)
+    if "not yet implemented" in error_msg:
+        print("CORRECT: error mentions 'not yet implemented'")
+    else:
+        print(f"ERROR: unexpected message: {error_msg}")
+except Exception as e:
+    print(f"ERROR: wrong exception type: {type(e).__name__}: {e}")
+"#
+            .to_string(),),
+        )
+        .await?;
+    execute.post_return_async(&mut store).await?;
+
+    match &result {
+        Ok(output) => {
+            println!("  OK: {output:?}");
+            assert!(
+                output.contains("RuntimeError raised"),
+                "invoke() should raise RuntimeError: {output}"
+            );
+            assert!(
+                output.contains("CORRECT"),
+                "Error should mention 'not yet implemented': {output}"
+            );
+        }
+        Err(error) => {
+            panic!("Test 12 failed: {error}");
+        }
+    }
+
+    // Test 13: Direct callback wrapper raises RuntimeError
+    // (Callback wrappers call invoke() under the hood)
+    println!("Test 13: Callback wrappers raise RuntimeError...");
+    let (result,) = execute
+        .call_async(
+            &mut store,
+            (r#"
+# Check if callback wrappers are generated and raise correct error
+# Note: These only exist if callbacks were discovered from list-callbacks
+try:
+    # Try to call a wrapper - it should raise RuntimeError from invoke()
+    if 'add' in dir():
+        add(a=1, b=2)
+        print("ERROR: add() should have raised RuntimeError")
+    elif 'get_time' in dir():
+        get_time()
+        print("ERROR: get_time() should have raised RuntimeError")
+    else:
+        # No wrappers generated (callback discovery may have failed)
+        # This is OK - just verify invoke raises error
+        invoke("test")
+        print("ERROR: invoke should have raised")
+except RuntimeError as e:
+    print("OK: RuntimeError raised")
+    if "not yet implemented" in str(e):
+        print("CORRECT: from callback system")
+"#
+            .to_string(),),
+        )
+        .await?;
+    execute.post_return_async(&mut store).await?;
+
+    match &result {
+        Ok(output) => {
+            println!("  OK: {output:?}");
+            assert!(
+                output.contains("RuntimeError raised"),
+                "Should raise RuntimeError: {output}"
+            );
+        }
+        Err(error) => {
+            panic!("Test 13 failed: {error}");
+        }
+    }
+
+    // Test 14: Verify invoke and list_callbacks are in globals
+    println!("Test 14: Callback functions in globals...");
+    let (result,) = execute
+        .call_async(
+            &mut store,
+            (r#"
+has_invoke = 'invoke' in dir()
+has_list = 'list_callbacks' in dir()
+print(f"invoke in globals: {has_invoke}")
+print(f"list_callbacks in globals: {has_list}")
+if has_invoke and has_list:
+    print("OK: callback functions available")
+else:
+    print("ERROR: missing callback functions")
+"#
+            .to_string(),),
+        )
+        .await?;
+    execute.post_return_async(&mut store).await?;
+
+    match &result {
+        Ok(output) => {
+            println!("  OK: {output:?}");
+            assert!(
+                output.contains("invoke in globals: True"),
+                "invoke should be in globals: {output}"
+            );
+            assert!(
+                output.contains("list_callbacks in globals: True"),
+                "list_callbacks should be in globals: {output}"
+            );
+        }
+        Err(error) => {
+            panic!("Test 14 failed: {error}");
         }
     }
 

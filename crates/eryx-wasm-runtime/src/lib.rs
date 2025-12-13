@@ -381,6 +381,114 @@ const EXPORT_SNAPSHOT_STATE: usize = 1;
 const EXPORT_RESTORE_STATE: usize = 2;
 const EXPORT_CLEAR_STATE: usize = 3;
 
+/// Track whether we've set up callbacks in Python
+static CALLBACKS_INITIALIZED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+// =============================================================================
+// Invoke callback mechanism (DISABLED)
+// =============================================================================
+//
+// The invoke callback mechanism is currently disabled. The _eryx C extension
+// module approach caused crashes in WASM due to memory initialization issues.
+// Python's invoke() function raises RuntimeError instead of actually calling
+// the host.
+//
+// TODO: Re-enable when we have a working approach:
+// 1. Fix the C extension module memory issues in WASM
+// 2. Use Python's ctypes to call a Rust function
+// 3. Implement proper async support in wit-dylib
+//
+// The with_wit() wrapper and call_invoke() functions are preserved but unused
+// until we implement a working solution.
+
+/// Call list-callbacks import to get available callbacks from the host.
+fn call_list_callbacks(wit: Wit) -> Vec<python::CallbackInfo> {
+    // Get the list-callbacks import function
+    let import_func = match wit.get_import(None, "list-callbacks") {
+        Some(f) => f,
+        None => {
+            eprintln!("eryx-wasm-runtime: list-callbacks import not found");
+            return Vec::new();
+        }
+    };
+
+    // Create a call context to receive the result
+    let mut cx = EryxCall::new();
+
+    // Call the import (synchronous)
+    import_func.call_import_sync(&mut cx);
+
+    // Debug: print stack contents
+    eprintln!(
+        "eryx-wasm-runtime: list-callbacks returned, stack has {} items",
+        cx.stack.len()
+    );
+    for (i, v) in cx.stack.iter().enumerate() {
+        eprintln!("  stack[{i}]: {v:?}");
+    }
+
+    // The result is a list<callback-info> on the stack
+    // Each callback-info is a record with: name, description, parameters-schema-json
+    // First we get the list length
+    let len = match cx.stack.pop() {
+        Some(Value::U32(n)) => n as usize,
+        other => {
+            eprintln!("eryx-wasm-runtime: unexpected list length type: {other:?}");
+            return Vec::new();
+        }
+    };
+
+    let mut callbacks = Vec::with_capacity(len);
+
+    // Pop each callback record (in reverse order since stack is LIFO)
+    for _ in 0..len {
+        // Each record has 3 string fields: name, description, parameters_schema_json
+        // They should be pushed in order, so we pop in reverse
+        let parameters_schema_json = match cx.stack.pop() {
+            Some(Value::String(s)) => s,
+            _ => String::new(),
+        };
+        let description = match cx.stack.pop() {
+            Some(Value::String(s)) => s,
+            _ => String::new(),
+        };
+        let name = match cx.stack.pop() {
+            Some(Value::String(s)) => s,
+            _ => continue,
+        };
+
+        callbacks.push(python::CallbackInfo {
+            name,
+            description,
+            parameters_schema_json,
+        });
+    }
+
+    // Reverse to get original order
+    callbacks.reverse();
+    callbacks
+}
+
+/// Initialize callbacks in Python if not already done.
+fn ensure_callbacks_initialized(wit: Wit) {
+    use std::sync::atomic::Ordering;
+
+    if CALLBACKS_INITIALIZED.swap(true, Ordering::SeqCst) {
+        return; // Already initialized
+    }
+
+    let callbacks = call_list_callbacks(wit);
+    eprintln!(
+        "eryx-wasm-runtime: setting up {} callbacks",
+        callbacks.len()
+    );
+
+    if let Err(e) = python::setup_callbacks(&callbacks) {
+        eprintln!("eryx-wasm-runtime: failed to setup callbacks: {e}");
+    }
+}
+
 impl Interpreter for EryxInterpreter {
     type CallCx<'a> = EryxCall;
 
@@ -394,7 +502,7 @@ impl Interpreter for EryxInterpreter {
         Box::new(EryxCall::new())
     }
 
-    fn export_call(_wit: Wit, func: ExportFunction, cx: &mut Self::CallCx<'_>) {
+    fn export_call(wit: Wit, func: ExportFunction, cx: &mut Self::CallCx<'_>) {
         eprintln!("eryx-wasm-runtime: export_call for func {}", func.index());
 
         match func.index() {
@@ -403,7 +511,14 @@ impl Interpreter for EryxInterpreter {
                 let code = cx.pop_string().to_string();
                 eprintln!("eryx-wasm-runtime: execute called with code: {code}");
 
-                match python::execute_python(&code) {
+                // Ensure callbacks are set up before first execute
+                ensure_callbacks_initialized(wit);
+
+                // Execute Python code
+                // Note: invoke() currently raises RuntimeError - see TODO above
+                let result = python::execute_python(&code);
+
+                match result {
                     Ok(output) => {
                         cx.push_string(output);
                         cx.stack.push(Value::ResultDiscriminant(true)); // is_ok = true
@@ -462,7 +577,7 @@ impl Interpreter for EryxInterpreter {
     }
 
     fn export_async_start(
-        _wit: Wit,
+        wit: Wit,
         func: ExportFunction,
         mut cx: Box<Self::CallCx<'static>>,
     ) -> u32 {
@@ -478,7 +593,14 @@ impl Interpreter for EryxInterpreter {
                 let code = cx.pop_string().to_string();
                 eprintln!("eryx-wasm-runtime: async execute called with code: {code}");
 
-                match python::execute_python(&code) {
+                // Ensure callbacks are set up before first execute
+                ensure_callbacks_initialized(wit);
+
+                // Execute Python code
+                // Note: invoke() currently raises RuntimeError - see TODO above
+                let result = python::execute_python(&code);
+
+                match result {
                     Ok(output) => {
                         cx.push_string(output);
                         cx.stack.push(Value::ResultDiscriminant(true));

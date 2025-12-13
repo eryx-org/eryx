@@ -14,7 +14,7 @@
 #![allow(missing_docs)]
 #![allow(missing_debug_implementations)]
 
-use std::ffi::{c_char, c_int, c_long};
+use std::ffi::{c_char, c_int, c_long, c_void};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 /// Opaque Python object pointer.
@@ -342,6 +342,132 @@ unsafe extern "C" {
     pub static mut PyExc_AttributeError: *mut PyObject;
     pub static mut PyExc_MemoryError: *mut PyObject;
     pub static mut PyExc_SystemExit: *mut PyObject;
+
+    // -------------------------------------------------------------------------
+    // Built-in module creation
+    // -------------------------------------------------------------------------
+
+    /// Register a built-in module before Py_Initialize.
+    /// Must be called BEFORE Py_Initialize.
+    /// Returns 0 on success, -1 on error.
+    pub fn PyImport_AppendInittab(
+        name: *const c_char,
+        initfunc: Option<unsafe extern "C" fn() -> *mut PyObject>,
+    ) -> c_int;
+
+    /// Create a new module object.
+    /// Returns new reference.
+    pub fn PyModule_Create2(module: *mut PyModuleDef, apiver: c_int) -> *mut PyObject;
+
+    /// Add an object to a module with the given name.
+    /// Returns 0 on success, -1 on error.
+    /// Steals a reference to value on success.
+    pub fn PyModule_AddObject(
+        module: *mut PyObject,
+        name: *const c_char,
+        value: *mut PyObject,
+    ) -> c_int;
+
+    /// Add an object to a module (newer API, doesn't steal reference).
+    /// Returns 0 on success, -1 on error.
+    pub fn PyModule_AddObjectRef(
+        module: *mut PyObject,
+        name: *const c_char,
+        value: *mut PyObject,
+    ) -> c_int;
+
+    /// Get the size of a tuple.
+    pub fn PyTuple_Size(tuple: *mut PyObject) -> isize;
+
+    /// Get an item from a tuple (borrowed reference).
+    pub fn PyTuple_GetItem(tuple: *mut PyObject, pos: isize) -> *mut PyObject;
+}
+
+// =============================================================================
+// Module definition structures (for PyModule_Create)
+// =============================================================================
+
+/// Python method definition for module functions.
+#[repr(C)]
+pub struct PyMethodDef {
+    /// Method name (null-terminated).
+    pub ml_name: *const c_char,
+    /// C function pointer.
+    pub ml_meth: Option<PyCFunction>,
+    /// Flags indicating calling convention.
+    pub ml_flags: c_int,
+    /// Docstring (null-terminated, or NULL).
+    pub ml_doc: *const c_char,
+}
+
+/// C function signature for METH_VARARGS | METH_KEYWORDS.
+pub type PyCFunction =
+    unsafe extern "C" fn(self_: *mut PyObject, args: *mut PyObject) -> *mut PyObject;
+
+/// C function signature for METH_VARARGS | METH_KEYWORDS.
+pub type PyCFunctionWithKeywords = unsafe extern "C" fn(
+    self_: *mut PyObject,
+    args: *mut PyObject,
+    kwargs: *mut PyObject,
+) -> *mut PyObject;
+
+/// Method flags.
+pub const METH_VARARGS: c_int = 0x0001;
+pub const METH_KEYWORDS: c_int = 0x0002;
+pub const METH_NOARGS: c_int = 0x0004;
+pub const METH_O: c_int = 0x0008;
+
+/// Sentinel for end of method definitions array.
+pub const fn PyMethodDef_SENTINEL() -> PyMethodDef {
+    PyMethodDef {
+        ml_name: std::ptr::null(),
+        ml_meth: None,
+        ml_flags: 0,
+        ml_doc: std::ptr::null(),
+    }
+}
+
+/// Python module definition structure.
+#[repr(C)]
+pub struct PyModuleDef {
+    pub m_base: PyModuleDef_Base,
+    pub m_name: *const c_char,
+    pub m_doc: *const c_char,
+    pub m_size: isize,
+    pub m_methods: *mut PyMethodDef,
+    pub m_slots: *mut PyModuleDef_Slot,
+    pub m_traverse: Option<unsafe extern "C" fn(*mut PyObject, *mut c_void, *mut c_void) -> c_int>,
+    pub m_clear: Option<unsafe extern "C" fn(*mut PyObject) -> c_int>,
+    pub m_free: Option<unsafe extern "C" fn(*mut c_void)>,
+}
+
+/// Module definition base (opaque).
+#[repr(C)]
+pub struct PyModuleDef_Base {
+    pub ob_base: PyObject,
+    pub m_init: Option<unsafe extern "C" fn() -> *mut PyObject>,
+    pub m_index: isize,
+    pub m_copy: *mut PyObject,
+}
+
+/// Module definition slot (for multi-phase init).
+#[repr(C)]
+pub struct PyModuleDef_Slot {
+    pub slot: c_int,
+    pub value: *mut c_void,
+}
+
+/// Module API version constant.
+pub const PYTHON_API_VERSION: c_int = 1013;
+
+/// Helper to create PyModuleDef_Base with zeroed values.
+pub const fn PyModuleDef_HEAD_INIT() -> PyModuleDef_Base {
+    PyModuleDef_Base {
+        ob_base: PyObject { _private: [] },
+        m_init: None,
+        m_index: 0,
+        m_copy: std::ptr::null_mut(),
+    }
 }
 
 // =============================================================================
@@ -429,6 +555,35 @@ pub unsafe fn Py_XINCREF(op: *mut PyObject) {
 }
 
 // =============================================================================
+// Invoke callback mechanism (DISABLED)
+// =============================================================================
+//
+// The invoke callback mechanism is currently disabled because the _eryx C
+// extension module that would use it causes crashes in WASM. The pure Python
+// invoke() function raises RuntimeError instead.
+//
+// TODO: Re-enable when we have a working approach for callback invocation.
+// See the _eryx module comment below for potential approaches.
+
+// =============================================================================
+// _eryx built-in module (DISABLED)
+// =============================================================================
+//
+// NOTE: The C extension module approach for invoke() is currently disabled.
+// Python finds the PyInit__eryx symbol via its import machinery even without
+// explicit registration, causing crashes in WASM due to memory initialization
+// issues with static strings.
+//
+// The current approach uses a pure Python invoke() function that raises
+// RuntimeError, allowing code to be written against the API while we work
+// on a proper solution for callback invocation.
+//
+// TODO: Implement callback invocation using one of these approaches:
+// 1. Fix the C extension module memory issues in WASM
+// 2. Use Python's ctypes to call a Rust function
+// 3. Implement async callback support in wit-dylib
+
+// =============================================================================
 // Python interpreter state
 // =============================================================================
 
@@ -453,6 +608,10 @@ pub fn initialize_python() {
         // Already initialized
         return;
     }
+
+    // Note: The _eryx built-in module for invoke() support is not yet implemented.
+    // Callback discovery via list_callbacks() works, but invoke() will raise an error.
+    // TODO: Implement C extension module for invoke() support
 
     unsafe {
         // Initialize Python without registering signal handlers.
@@ -822,7 +981,26 @@ import __main__ as _eryx_main
 _eryx_exclude = {
     '__builtins__', '__name__', '__doc__', '__package__',
     '__loader__', '__spec__', '__cached__', '__file__',
+    # Exclude callback infrastructure (set up fresh on each run)
+    'invoke', 'list_callbacks', '_EryxNamespace', '_EryxCallbackLeaf',
+    '_eryx_make_callback', '_eryx_reserved',
 }
+
+# Check if an object is part of the callback infrastructure
+def _eryx_is_callback_obj(obj):
+    # Check for callback wrapper functions (created by _eryx_make_callback)
+    if callable(obj) and hasattr(obj, '__closure__') and obj.__closure__:
+        for cell in obj.__closure__:
+            try:
+                if cell.cell_contents == invoke:
+                    return True
+            except (ValueError, NameError):
+                pass
+    # Check for namespace objects
+    obj_type = type(obj).__name__
+    if obj_type in ('_EryxNamespace', '_EryxCallbackLeaf'):
+        return True
+    return False
 
 # Take a snapshot of the keys first to avoid 'dictionary changed size during iteration'
 _eryx_keys = list(_eryx_main.__dict__.keys())
@@ -833,6 +1011,9 @@ for _k in _eryx_keys:
     if _k not in _eryx_exclude and not _k.startswith('_eryx_'):
         _v = _eryx_main.__dict__.get(_k)
         if _v is not None:
+            # Skip callback infrastructure objects
+            if _eryx_is_callback_obj(_v):
+                continue
             try:
                 # Test if item is picklable
                 _eryx_pickle.dumps(_v)
@@ -848,7 +1029,7 @@ _eryx_state_bytes = _eryx_pickle.dumps(_eryx_state_dict)
         if PyRun_SimpleString(pickle_code.as_ptr()) != 0 {
             let err = get_last_error_message();
             let _ = PyRun_SimpleString(
-                c"del _eryx_pickle, _eryx_main, _eryx_exclude, _eryx_keys, _eryx_state_dict"
+                c"del _eryx_pickle, _eryx_main, _eryx_exclude, _eryx_is_callback_obj, _eryx_keys, _eryx_state_dict"
                     .as_ptr(),
             );
             return Err(format!("Failed to snapshot state: {err}"));
@@ -859,7 +1040,7 @@ _eryx_state_bytes = _eryx_pickle.dumps(_eryx_state_dict)
 
         // Clean up
         let _ = PyRun_SimpleString(
-            c"del _eryx_pickle, _eryx_main, _eryx_exclude, _eryx_keys, _eryx_state_dict, _eryx_state_bytes"
+            c"del _eryx_pickle, _eryx_main, _eryx_exclude, _eryx_is_callback_obj, _eryx_keys, _eryx_state_dict, _eryx_state_bytes"
                 .as_ptr(),
         );
 
@@ -927,18 +1108,40 @@ import __main__ as _eryx_main
 _eryx_keep = {
     '__builtins__', '__name__', '__doc__', '__package__',
     '__loader__', '__spec__', '__cached__', '__file__',
-    '_eryx_main', '_eryx_keep', '_eryx_to_delete'
+    '_eryx_main', '_eryx_keep', '_eryx_to_delete',
+    # Preserve callback infrastructure
+    'invoke', 'list_callbacks', '_EryxNamespace', '_EryxCallbackLeaf',
+    '_eryx_make_callback', '_eryx_reserved', '_eryx_callbacks',
 }
 
+# Also keep callback wrappers and namespace objects
+def _eryx_should_keep(k, v):
+    if k in _eryx_keep:
+        return True
+    if k.startswith('_eryx_'):
+        return True
+    # Keep callback wrapper functions
+    if callable(v) and hasattr(v, '__closure__') and v.__closure__:
+        for cell in v.__closure__:
+            try:
+                if 'invoke' in dir() and cell.cell_contents == invoke:
+                    return True
+            except (ValueError, NameError):
+                pass
+    # Keep namespace objects
+    if type(v).__name__ in ('_EryxNamespace', '_EryxCallbackLeaf'):
+        return True
+    return False
+
 # Collect keys to delete (can't modify dict during iteration)
-_eryx_to_delete = [k for k in _eryx_main.__dict__.keys() if k not in _eryx_keep]
+_eryx_to_delete = [k for k, v in list(_eryx_main.__dict__.items()) if not _eryx_should_keep(k, v)]
 
 # Delete the keys
 for _k in _eryx_to_delete:
     del _eryx_main.__dict__[_k]
 
 # Clean up our temporaries
-del _eryx_main, _eryx_keep, _eryx_to_delete, _k
+del _eryx_main, _eryx_keep, _eryx_should_keep, _eryx_to_delete, _k
 ";
 
         if PyRun_SimpleString(clear_code.as_ptr()) != 0 {
@@ -946,6 +1149,214 @@ del _eryx_main, _eryx_keep, _eryx_to_delete, _k
             PyErr_Clear();
         }
     }
+}
+
+// =============================================================================
+// Callback support
+// =============================================================================
+
+/// Information about a callback available from the host.
+#[derive(Debug, Clone)]
+pub struct CallbackInfo {
+    pub name: String,
+    pub description: String,
+    pub parameters_schema_json: String,
+}
+
+/// Set up callback wrapper functions in Python.
+///
+/// This injects:
+/// 1. An `invoke(name, **kwargs)` function (raises error - not yet implemented)
+/// 2. A `list_callbacks()` function for introspection
+/// 3. Direct wrapper functions for each callback (e.g., `sleep(ms=100)`)
+/// 4. Namespace objects for dotted callbacks (e.g., `http.get(url="...")`)
+///
+/// Note: Currently, `invoke()` and callback wrappers raise RuntimeError because
+/// Python cannot yield back to the WASM runtime mid-execution. The functions
+/// are defined so code can be written against the API, but they won't work
+/// until async callback support is implemented.
+pub fn setup_callbacks(callbacks: &[CallbackInfo]) -> Result<(), String> {
+    if !is_python_initialized() {
+        return Err("Python not initialized".to_string());
+    }
+
+    unsafe {
+        // Serialize callbacks to JSON for Python to parse
+        let callbacks_json = serde_json_mini_serialize_callbacks(callbacks);
+
+        // Inject the callback setup code
+        let setup_code = format!(
+            r#"
+import json as _json
+
+# Callbacks metadata from host
+_eryx_callbacks_json = '''{}'''
+_eryx_callbacks = _json.loads(_eryx_callbacks_json)
+
+def invoke(name, **kwargs):
+    """Invoke a host callback by name with keyword arguments.
+
+    Args:
+        name: Name of the callback (e.g., "sleep", "http.get")
+        **kwargs: Arguments to pass to the callback
+
+    Returns:
+        The callback result (parsed from JSON)
+
+    Example:
+        result = invoke("get_time")
+        data = invoke("http.get", url="https://example.com")
+
+    Note: Callback invocation is not yet implemented in eryx-wasm-runtime.
+    Use list_callbacks() to see available callbacks.
+    """
+    raise RuntimeError(
+        f"invoke('{{name}}', ...) cannot be called: "
+        "callback invocation is not yet implemented in eryx-wasm-runtime. "
+        "Use list_callbacks() to see available callbacks."
+    )
+
+def list_callbacks():
+    """List all available callbacks for introspection.
+
+    Returns:
+        List of callback info dicts with 'name', 'description',
+        and 'parameters_schema' keys.
+    """
+    return [
+        {{
+            'name': cb['name'],
+            'description': cb['description'],
+            'parameters_schema': _json.loads(cb['parameters_schema_json']) if cb['parameters_schema_json'] else None
+        }}
+        for cb in _eryx_callbacks
+    ]
+
+# Reserved names that shouldn't be shadowed by callbacks
+_eryx_reserved = set(dir(__builtins__)) | {{
+    'invoke', 'list_callbacks', 'asyncio', 'json', 'math', 're',
+    'os', 'subprocess', 'socket', '__import__'
+}}
+
+# Helper to create callback wrappers
+def _eryx_make_callback(name):
+    def callback(**kwargs):
+        return invoke(name, **kwargs)
+    callback.__name__ = name
+    callback.__doc__ = f"Invoke the '{{name}}' callback."
+    return callback
+
+# Namespace class for dotted callbacks like http.get
+class _EryxNamespace:
+    def __init__(self, invoke_fn, prefix=''):
+        self._invoke = invoke_fn
+        self._prefix = prefix
+        self._children = {{}}
+
+    def _add_callback(self, parts):
+        if len(parts) == 1:
+            pass  # Leaf - handled by __getattr__
+        else:
+            child = parts[0]
+            if child not in self._children:
+                new_prefix = f"{{self._prefix}}{{child}}." if self._prefix else f"{{child}}."
+                self._children[child] = _EryxNamespace(self._invoke, new_prefix)
+            self._children[child]._add_callback(parts[1:])
+
+    def __getattr__(self, name):
+        if name.startswith('_'):
+            raise AttributeError(name)
+        if name in self._children:
+            return self._children[name]
+        full_name = f"{{self._prefix}}{{name}}"
+        return _EryxCallbackLeaf(self._invoke, full_name)
+
+    def __call__(self, **kwargs):
+        if self._prefix:
+            return self._invoke(self._prefix.rstrip('.'), **kwargs)
+        raise TypeError("Cannot call root namespace")
+
+class _EryxCallbackLeaf:
+    def __init__(self, invoke_fn, name):
+        self._invoke = invoke_fn
+        self._name = name
+
+    def __call__(self, **kwargs):
+        return self._invoke(self._name, **kwargs)
+
+# Generate callback wrappers
+_eryx_namespaces = {{}}
+for _cb in _eryx_callbacks:
+    _name = _cb['name']
+    if '.' in _name:
+        _parts = _name.split('.')
+        _root = _parts[0]
+        if _root not in _eryx_reserved:
+            if _root not in _eryx_namespaces:
+                _eryx_namespaces[_root] = _EryxNamespace(invoke)
+            _eryx_namespaces[_root]._add_callback(_parts)
+    else:
+        if _name not in _eryx_reserved:
+            globals()[_name] = _eryx_make_callback(_name)
+
+# Add namespaces to globals
+globals().update(_eryx_namespaces)
+
+# Clean up temporary variables
+del _eryx_callbacks_json, _eryx_namespaces, _cb, _name
+try:
+    del _parts, _root
+except NameError:
+    pass
+"#,
+            callbacks_json.replace('\\', "\\\\").replace('\'', "\\'")
+        );
+
+        // Run the setup code
+        let setup_cstr =
+            std::ffi::CString::new(setup_code).map_err(|e| format!("Invalid setup code: {e}"))?;
+        if PyRun_SimpleString(setup_cstr.as_ptr()) != 0 {
+            let err = get_last_error_message();
+            return Err(format!("Failed to set up callbacks: {err}"));
+        }
+
+        Ok(())
+    }
+}
+
+/// Simple JSON serialization for callbacks (avoiding serde dependency in WASM)
+fn serde_json_mini_serialize_callbacks(callbacks: &[CallbackInfo]) -> String {
+    let items: Vec<String> = callbacks
+        .iter()
+        .map(|cb| {
+            format!(
+                r#"{{"name": "{}", "description": "{}", "parameters_schema_json": "{}"}}"#,
+                escape_json_string(&cb.name),
+                escape_json_string(&cb.description),
+                escape_json_string(&cb.parameters_schema_json)
+            )
+        })
+        .collect();
+    format!("[{}]", items.join(", "))
+}
+
+/// Escape a string for JSON
+fn escape_json_string(s: &str) -> String {
+    let mut result = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '"' => result.push_str("\\\""),
+            '\\' => result.push_str("\\\\"),
+            '\n' => result.push_str("\\n"),
+            '\r' => result.push_str("\\r"),
+            '\t' => result.push_str("\\t"),
+            c if c.is_control() => {
+                result.push_str(&format!("\\u{:04x}", c as u32));
+            }
+            c => result.push(c),
+        }
+    }
+    result
 }
 
 #[cfg(test)]
