@@ -614,6 +614,95 @@ pub unsafe fn get_python_variable_string(name: &str) -> Result<String, String> {
     }
 }
 
+// =============================================================================
+// Execute Python code with output capture
+// =============================================================================
+
+/// Execute Python code and capture stdout.
+///
+/// This is the main entry point for the `execute` WIT export.
+/// It runs the provided code in `__main__` and returns captured stdout,
+/// or an error message if execution fails.
+///
+/// # Returns
+/// - `Ok(stdout)` - The captured stdout output (may be empty)
+/// - `Err(error)` - Error message if execution failed
+pub fn execute_python(code: &str) -> Result<String, String> {
+    use std::ffi::CString;
+
+    if !is_python_initialized() {
+        return Err("Python not initialized".to_string());
+    }
+
+    let code_cstr = CString::new(code).map_err(|e| format!("Invalid code string: {e}"))?;
+
+    unsafe {
+        // Set up stdout/stderr capture using StringIO
+        let capture_setup = c"
+import sys as _sys
+from io import StringIO as _StringIO
+_eryx_stdout = _StringIO()
+_eryx_stderr = _StringIO()
+_eryx_old_stdout = _sys.stdout
+_eryx_old_stderr = _sys.stderr
+_sys.stdout = _eryx_stdout
+_sys.stderr = _eryx_stderr
+";
+        if PyRun_SimpleString(capture_setup.as_ptr()) != 0 {
+            PyErr_Clear();
+            return Err("Failed to set up output capture".to_string());
+        }
+
+        // Run the user's code
+        let exec_result = PyRun_SimpleString(code_cstr.as_ptr());
+
+        // Restore stdout/stderr and get captured output
+        let capture_teardown = c"
+_sys.stdout = _eryx_old_stdout
+_sys.stderr = _eryx_old_stderr
+_eryx_output = _eryx_stdout.getvalue()
+_eryx_errors = _eryx_stderr.getvalue()
+# Clean up our temporary variables
+del _eryx_stdout, _eryx_stderr, _eryx_old_stdout, _eryx_old_stderr
+";
+        if PyRun_SimpleString(capture_teardown.as_ptr()) != 0 {
+            PyErr_Clear();
+            // Even if teardown fails, try to continue
+        }
+
+        if exec_result != 0 {
+            // Execution failed - get the error message
+            // First check if there's stderr output
+            let stderr_output = get_python_variable_string("_eryx_errors").unwrap_or_default();
+
+            // Also get the actual Python exception if one occurred
+            let exception_msg = get_last_error_message();
+
+            // Combine stderr and exception info
+            let error = if !stderr_output.is_empty() && exception_msg != "Unknown error" {
+                format!("{stderr_output}\n{exception_msg}")
+            } else if !stderr_output.is_empty() {
+                stderr_output
+            } else {
+                exception_msg
+            };
+
+            // Clean up the temporary variable
+            let _ = PyRun_SimpleString(c"del _eryx_output, _eryx_errors".as_ptr());
+
+            return Err(error);
+        }
+
+        // Get the captured stdout
+        let output = get_python_variable_string("_eryx_output").unwrap_or_default();
+
+        // Clean up the temporary variables
+        let _ = PyRun_SimpleString(c"del _eryx_output, _eryx_errors".as_ptr());
+
+        Ok(output)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     // Tests will be added when we can actually run Python

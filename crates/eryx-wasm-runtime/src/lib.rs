@@ -403,13 +403,16 @@ impl Interpreter for EryxInterpreter {
                 let code = cx.pop_string().to_string();
                 eprintln!("eryx-wasm-runtime: execute called with code: {code}");
 
-                // TODO: Actually execute Python code
-                // For now, return a stub result
-                let result = format!("executed: {code}");
-
-                // Push result: ok(string)
-                cx.push_string(result);
-                cx.stack.push(Value::ResultDiscriminant(true)); // is_ok = true
+                match python::execute_python(&code) {
+                    Ok(output) => {
+                        cx.push_string(output);
+                        cx.stack.push(Value::ResultDiscriminant(true)); // is_ok = true
+                    }
+                    Err(error) => {
+                        cx.push_string(error);
+                        cx.stack.push(Value::ResultDiscriminant(false)); // is_ok = false
+                    }
+                }
             }
             EXPORT_SNAPSHOT_STATE => {
                 // snapshot-state() -> result<list<u8>, string>
@@ -457,11 +460,16 @@ impl Interpreter for EryxInterpreter {
                 let code = cx.pop_string().to_string();
                 eprintln!("eryx-wasm-runtime: async execute called with code: {code}");
 
-                // TODO: Actually execute Python code with async support
-                let result = format!("executed: {code}");
-
-                cx.push_string(result);
-                cx.stack.push(Value::ResultDiscriminant(true));
+                match python::execute_python(&code) {
+                    Ok(output) => {
+                        cx.push_string(output);
+                        cx.stack.push(Value::ResultDiscriminant(true));
+                    }
+                    Err(error) => {
+                        cx.push_string(error);
+                        cx.stack.push(Value::ResultDiscriminant(false));
+                    }
+                }
             }
             EXPORT_SNAPSHOT_STATE => {
                 eprintln!("eryx-wasm-runtime: async snapshot_state called");
