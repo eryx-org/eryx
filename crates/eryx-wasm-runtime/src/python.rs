@@ -698,6 +698,256 @@ del _eryx_stdout, _eryx_stderr, _eryx_old_stdout, _eryx_old_stderr
     }
 }
 
+// =============================================================================
+// State management functions
+// =============================================================================
+
+/// Get a Python variable's bytes value from __main__.
+///
+/// # Safety
+///
+/// Python must be initialized.
+unsafe fn get_python_variable_bytes(name: &str) -> Result<Vec<u8>, String> {
+    use std::ffi::CString;
+
+    let name_cstr = CString::new(name).map_err(|e| format!("Invalid variable name: {e}"))?;
+    let main_cstr = CString::new("__main__").unwrap();
+
+    unsafe {
+        // Get __main__ module
+        let main_module = PyImport_AddModule(main_cstr.as_ptr());
+        if main_module.is_null() {
+            return Err("Failed to get __main__ module".to_string());
+        }
+
+        // Get __main__.__dict__
+        let main_dict = PyModule_GetDict(main_module);
+        if main_dict.is_null() {
+            return Err("Failed to get __main__.__dict__".to_string());
+        }
+
+        // Get the variable
+        let var = PyDict_GetItemString(main_dict, name_cstr.as_ptr());
+        if var.is_null() {
+            return Err(format!("Variable '{name}' not found"));
+        }
+
+        // Get bytes from the bytes object
+        let ptr = PyBytes_AsString(var);
+        if ptr.is_null() {
+            let err = get_last_error_message();
+            return Err(format!("Failed to get bytes from '{name}': {err}"));
+        }
+
+        let size = PyBytes_Size(var);
+        if size < 0 {
+            return Err("Failed to get bytes size".to_string());
+        }
+
+        // Copy bytes to a Vec
+        let slice = std::slice::from_raw_parts(ptr as *const u8, size as usize);
+        Ok(slice.to_vec())
+    }
+}
+
+/// Set a Python bytes variable in __main__.
+///
+/// # Safety
+///
+/// Python must be initialized.
+unsafe fn set_python_variable_bytes(name: &str, data: &[u8]) -> Result<(), String> {
+    use std::ffi::CString;
+
+    let name_cstr = CString::new(name).map_err(|e| format!("Invalid variable name: {e}"))?;
+    let main_cstr = CString::new("__main__").unwrap();
+
+    unsafe {
+        // Get __main__ module
+        let main_module = PyImport_AddModule(main_cstr.as_ptr());
+        if main_module.is_null() {
+            return Err("Failed to get __main__ module".to_string());
+        }
+
+        // Get __main__.__dict__
+        let main_dict = PyModule_GetDict(main_module);
+        if main_dict.is_null() {
+            return Err("Failed to get __main__.__dict__".to_string());
+        }
+
+        // Create a bytes object
+        let bytes_obj = PyBytes_FromStringAndSize(data.as_ptr() as *const i8, data.len() as isize);
+        if bytes_obj.is_null() {
+            let err = get_last_error_message();
+            return Err(format!("Failed to create bytes object: {err}"));
+        }
+
+        // Set the variable in __main__
+        let result = PyDict_SetItemString(main_dict, name_cstr.as_ptr(), bytes_obj);
+        Py_DECREF(bytes_obj); // SetItem increments ref, so we decrement ours
+
+        if result != 0 {
+            let err = get_last_error_message();
+            return Err(format!("Failed to set variable '{name}': {err}"));
+        }
+
+        Ok(())
+    }
+}
+
+/// Snapshot the current Python state by pickling `__main__.__dict__`.
+///
+/// Returns the pickled state as bytes, which can be restored later with `restore_state`.
+///
+/// # What is preserved
+/// - All user-defined variables in `__main__`
+/// - Simple types (int, float, str, list, dict, tuple, set, etc.)
+/// - Most standard library objects
+///
+/// # What is NOT preserved
+/// - Open file handles, sockets, etc.
+/// - Imported modules (they remain, but aren't pickled)
+/// - Objects with unpicklable state
+pub fn snapshot_state() -> Result<Vec<u8>, String> {
+    if !is_python_initialized() {
+        return Err("Python not initialized".to_string());
+    }
+
+    unsafe {
+        // Pickle __main__.__dict__, excluding unpicklable items
+        let pickle_code = c"
+import pickle as _eryx_pickle
+import __main__ as _eryx_main
+
+# Items to exclude from snapshot (builtins and our temp vars)
+_eryx_exclude = {
+    '__builtins__', '__name__', '__doc__', '__package__',
+    '__loader__', '__spec__', '__cached__', '__file__',
+}
+
+# Take a snapshot of the keys first to avoid 'dictionary changed size during iteration'
+_eryx_keys = list(_eryx_main.__dict__.keys())
+
+# Build dict of picklable items
+_eryx_state_dict = {}
+for _k in _eryx_keys:
+    if _k not in _eryx_exclude and not _k.startswith('_eryx_'):
+        _v = _eryx_main.__dict__.get(_k)
+        if _v is not None:
+            try:
+                # Test if item is picklable
+                _eryx_pickle.dumps(_v)
+                _eryx_state_dict[_k] = _v
+            except (TypeError, _eryx_pickle.PicklingError, AttributeError):
+                # Skip unpicklable items (modules, functions with closures, etc.)
+                pass
+
+# Pickle the filtered dict
+_eryx_state_bytes = _eryx_pickle.dumps(_eryx_state_dict)
+";
+
+        if PyRun_SimpleString(pickle_code.as_ptr()) != 0 {
+            let err = get_last_error_message();
+            let _ = PyRun_SimpleString(
+                c"del _eryx_pickle, _eryx_main, _eryx_exclude, _eryx_keys, _eryx_state_dict"
+                    .as_ptr(),
+            );
+            return Err(format!("Failed to snapshot state: {err}"));
+        }
+
+        // Get the pickled bytes
+        let state_bytes = get_python_variable_bytes("_eryx_state_bytes")?;
+
+        // Clean up
+        let _ = PyRun_SimpleString(
+            c"del _eryx_pickle, _eryx_main, _eryx_exclude, _eryx_keys, _eryx_state_dict, _eryx_state_bytes"
+                .as_ptr(),
+        );
+
+        Ok(state_bytes)
+    }
+}
+
+/// Restore Python state from a previous snapshot.
+///
+/// This unpickles the data and updates `__main__.__dict__` with the restored values.
+/// Existing variables that aren't in the snapshot are preserved.
+pub fn restore_state(data: &[u8]) -> Result<(), String> {
+    if !is_python_initialized() {
+        return Err("Python not initialized".to_string());
+    }
+
+    if data.is_empty() {
+        // Empty snapshot = nothing to restore
+        return Ok(());
+    }
+
+    unsafe {
+        // Set the bytes in Python
+        set_python_variable_bytes("_eryx_restore_bytes", data)?;
+
+        // Unpickle and update __main__.__dict__
+        let restore_code = c"
+import pickle as _eryx_pickle
+import __main__ as _eryx_main
+
+# Unpickle the state
+_eryx_restored_dict = _eryx_pickle.loads(_eryx_restore_bytes)
+
+# Update __main__ with restored values
+_eryx_main.__dict__.update(_eryx_restored_dict)
+
+# Clean up
+del _eryx_restore_bytes, _eryx_restored_dict, _eryx_pickle, _eryx_main
+";
+
+        if PyRun_SimpleString(restore_code.as_ptr()) != 0 {
+            let err = get_last_error_message();
+            let _ = PyRun_SimpleString(c"del _eryx_restore_bytes".as_ptr());
+            return Err(format!("Failed to restore state: {err}"));
+        }
+
+        Ok(())
+    }
+}
+
+/// Clear all user-defined state from `__main__`.
+///
+/// This removes all variables except Python builtins and module metadata,
+/// effectively resetting to a fresh interpreter state.
+pub fn clear_state() {
+    if !is_python_initialized() {
+        return;
+    }
+
+    unsafe {
+        let clear_code = c"
+import __main__ as _eryx_main
+
+# Items to keep (builtins and module metadata)
+_eryx_keep = {
+    '__builtins__', '__name__', '__doc__', '__package__',
+    '__loader__', '__spec__', '__cached__', '__file__',
+    '_eryx_main', '_eryx_keep', '_eryx_to_delete'
+}
+
+# Collect keys to delete (can't modify dict during iteration)
+_eryx_to_delete = [k for k in _eryx_main.__dict__.keys() if k not in _eryx_keep]
+
+# Delete the keys
+for _k in _eryx_to_delete:
+    del _eryx_main.__dict__[_k]
+
+# Clean up our temporaries
+del _eryx_main, _eryx_keep, _eryx_to_delete, _k
+";
+
+        if PyRun_SimpleString(clear_code.as_ptr()) != 0 {
+            // Best effort - clear errors and continue
+            PyErr_Clear();
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     // Tests will be added when we can actually run Python

@@ -372,6 +372,114 @@ async fn test_instantiate_component() -> Result<(), Box<dyn std::error::Error>> 
         }
     }
 
+    // =========================================================================
+    // State Management Tests
+    // =========================================================================
+
+    // Get the state management functions
+    let snapshot_state = instance
+        .get_typed_func::<(), (Result<Vec<u8>, String>,)>(&mut store, "[async]snapshot-state")
+        .or_else(|_| {
+            instance.get_typed_func::<(), (Result<Vec<u8>, String>,)>(&mut store, "snapshot-state")
+        })?;
+
+    let restore_state = instance
+        .get_typed_func::<(Vec<u8>,), (Result<(), String>,)>(&mut store, "[async]restore-state")
+        .or_else(|_| {
+            instance
+                .get_typed_func::<(Vec<u8>,), (Result<(), String>,)>(&mut store, "restore-state")
+        })?;
+
+    let clear_state = instance
+        .get_typed_func::<(), ()>(&mut store, "[async]clear-state")
+        .or_else(|_| instance.get_typed_func::<(), ()>(&mut store, "clear-state"))?;
+
+    // Test 8: Snapshot state
+    println!("Test 8: Snapshot state...");
+    // First set some variables
+    let (result,) = execute
+        .call_async(
+            &mut store,
+            ("x = 42\ny = 'hello'\nz = [1, 2, 3]".to_string(),),
+        )
+        .await?;
+    execute.post_return_async(&mut store).await?;
+    assert!(result.is_ok(), "Setting variables should succeed");
+
+    // Take a snapshot
+    let (snapshot_result,) = snapshot_state.call_async(&mut store, ()).await?;
+    snapshot_state.post_return_async(&mut store).await?;
+
+    let snapshot_data = match snapshot_result {
+        Ok(data) => {
+            println!("  OK: Snapshot taken, {} bytes", data.len());
+            assert!(!data.is_empty(), "Snapshot should not be empty");
+            data
+        }
+        Err(error) => {
+            panic!("Test 8 failed: {error}");
+        }
+    };
+
+    // Test 9: Clear state
+    println!("Test 9: Clear state...");
+    clear_state.call_async(&mut store, ()).await?;
+    clear_state.post_return_async(&mut store).await?;
+
+    // Verify variables are gone
+    let (result,) = execute
+        .call_async(&mut store, ("print(x)".to_string(),))
+        .await?;
+    execute.post_return_async(&mut store).await?;
+
+    match &result {
+        Ok(output) => {
+            panic!("Test 9 should have failed (x should be cleared), but got: {output:?}");
+        }
+        Err(error) => {
+            println!("  OK: Variable x is cleared (error: {error})");
+            assert!(
+                error.contains("NameError") || error.contains("not defined"),
+                "Error should indicate x is not defined: {error}"
+            );
+        }
+    }
+
+    // Test 10: Restore state
+    println!("Test 10: Restore state...");
+    let (restore_result,) = restore_state
+        .call_async(&mut store, (snapshot_data,))
+        .await?;
+    restore_state.post_return_async(&mut store).await?;
+
+    match &restore_result {
+        Ok(()) => {
+            println!("  OK: State restored");
+        }
+        Err(error) => {
+            panic!("Test 10 failed: {error}");
+        }
+    }
+
+    // Verify variables are restored
+    let (result,) = execute
+        .call_async(&mut store, ("print(x, y, z)".to_string(),))
+        .await?;
+    execute.post_return_async(&mut store).await?;
+
+    match &result {
+        Ok(output) => {
+            println!("  OK: Restored values: {output:?}");
+            assert!(
+                output.contains("42") && output.contains("hello") && output.contains("[1, 2, 3]"),
+                "Restored values should match: {output}"
+            );
+        }
+        Err(error) => {
+            panic!("Test 10 verification failed: {error}");
+        }
+    }
+
     println!("\nAll tests passed!");
     Ok(())
 }

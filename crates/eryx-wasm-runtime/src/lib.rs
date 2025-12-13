@@ -418,24 +418,42 @@ impl Interpreter for EryxInterpreter {
                 // snapshot-state() -> result<list<u8>, string>
                 eprintln!("eryx-wasm-runtime: snapshot_state called");
 
-                // TODO: Actually pickle Python globals
-                let state = vec![0u8; 0]; // Empty state for now
-
-                cx.stack.push(Value::Bytes(state));
-                cx.stack.push(Value::ResultDiscriminant(true));
+                match python::snapshot_state() {
+                    Ok(state) => {
+                        cx.stack.push(Value::Bytes(state));
+                        cx.stack.push(Value::ResultDiscriminant(true)); // is_ok = true
+                    }
+                    Err(error) => {
+                        cx.push_string(error);
+                        cx.stack.push(Value::ResultDiscriminant(false)); // is_ok = false
+                    }
+                }
             }
             EXPORT_RESTORE_STATE => {
                 // restore-state(data: list<u8>) -> result<_, string>
                 eprintln!("eryx-wasm-runtime: restore_state called");
 
-                // TODO: Actually restore Python globals
-                cx.stack.push(Value::ResultDiscriminant(true));
+                // Pop the list<u8> - it comes as Value::Bytes on our stack
+                let data = match cx.stack.pop() {
+                    Some(Value::Bytes(bytes)) => bytes,
+                    other => panic!("expected Bytes for restore_state data, got {other:?}"),
+                };
+
+                match python::restore_state(&data) {
+                    Ok(()) => {
+                        cx.stack.push(Value::ResultDiscriminant(true)); // is_ok = true
+                    }
+                    Err(error) => {
+                        cx.push_string(error);
+                        cx.stack.push(Value::ResultDiscriminant(false)); // is_ok = false
+                    }
+                }
             }
             EXPORT_CLEAR_STATE => {
                 // clear-state()
                 eprintln!("eryx-wasm-runtime: clear_state called");
 
-                // TODO: Actually clear Python globals
+                python::clear_state();
             }
             _ => {
                 panic!("unknown export function index: {}", func.index());
@@ -473,16 +491,37 @@ impl Interpreter for EryxInterpreter {
             }
             EXPORT_SNAPSHOT_STATE => {
                 eprintln!("eryx-wasm-runtime: async snapshot_state called");
-                let state = vec![0u8; 0];
-                cx.stack.push(Value::Bytes(state));
-                cx.stack.push(Value::ResultDiscriminant(true));
+                match python::snapshot_state() {
+                    Ok(state) => {
+                        cx.stack.push(Value::Bytes(state));
+                        cx.stack.push(Value::ResultDiscriminant(true));
+                    }
+                    Err(error) => {
+                        cx.push_string(error);
+                        cx.stack.push(Value::ResultDiscriminant(false));
+                    }
+                }
             }
             EXPORT_RESTORE_STATE => {
                 eprintln!("eryx-wasm-runtime: async restore_state called");
-                cx.stack.push(Value::ResultDiscriminant(true));
+                let data = match cx.stack.pop() {
+                    Some(Value::Bytes(bytes)) => bytes,
+                    other => panic!("expected Bytes for restore_state data, got {other:?}"),
+                };
+
+                match python::restore_state(&data) {
+                    Ok(()) => {
+                        cx.stack.push(Value::ResultDiscriminant(true));
+                    }
+                    Err(error) => {
+                        cx.push_string(error);
+                        cx.stack.push(Value::ResultDiscriminant(false));
+                    }
+                }
             }
             EXPORT_CLEAR_STATE => {
                 eprintln!("eryx-wasm-runtime: async clear_state called");
+                python::clear_state();
             }
             _ => {
                 panic!("unknown export function index: {}", func.index());
