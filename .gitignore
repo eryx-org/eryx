@@ -51,5 +51,9 @@ runtime-*.wasm
 # eryx-wasm-runtime build artifacts
 crates/eryx-wasm-runtime/target/
 
+# eryx-wasm-runtime test artifacts (extracted from componentize-py)
+crates/eryx-wasm-runtime/tests/python-stdlib/
+crates/eryx-wasm-runtime/tests/site-packages/
+
 # Decompressed library files (regenerated from .zst)
 crates/eryx-runtime/libs/decompressed/

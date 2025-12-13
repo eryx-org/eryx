@@ -440,9 +440,14 @@ static PYTHON_INITIALIZED: AtomicBool = AtomicBool::new(false);
 /// This should be called once during `wit_dylib_initialize`.
 /// Subsequent calls are no-ops.
 ///
+/// Prerequisites:
+/// - PYTHONPATH environment variable must be set to include stdlib paths
+///   (e.g., "/python-stdlib:/site-packages")
+/// - WASI preopened directories must be configured for those paths
+///
 /// Sets up:
 /// - Python interpreter (without signal handlers - not useful in WASM)
-/// - sys.path to include /python-stdlib and /site-packages
+/// - Ensures __main__ module exists for code execution
 pub fn initialize_python() {
     if PYTHON_INITIALIZED.swap(true, Ordering::SeqCst) {
         // Already initialized
@@ -452,26 +457,16 @@ pub fn initialize_python() {
     unsafe {
         // Initialize Python without registering signal handlers.
         // Signal handlers don't make sense in a WASM sandbox.
+        // Note: PYTHONPATH must be set before this call for Python to find stdlib.
         Py_InitializeEx(0);
 
-        // Set up sys.path to include bundled stdlib and site-packages.
-        // These paths match where componentize-py mounts the Python files
-        // in the WASM filesystem.
-        let setup_code = c"
-import sys
-
-# Clear default paths and set up our sandbox paths
-sys.path.clear()
-sys.path.append('/python-stdlib')
-sys.path.append('/site-packages')
-
-# Also ensure __main__ module exists for code execution
-import __main__
-";
+        // Ensure __main__ module exists for code execution.
+        // sys.path is already configured via PYTHONPATH environment variable.
+        let setup_code = c"import __main__";
         let result = PyRun_SimpleString(setup_code.as_ptr());
         if result != 0 {
             // If this fails, Python is in a bad state - not much we can do
-            eprintln!("eryx-wasm-runtime: WARNING: Failed to set up sys.path");
+            eprintln!("eryx-wasm-runtime: WARNING: Failed to import __main__");
             PyErr_Clear();
         }
     }

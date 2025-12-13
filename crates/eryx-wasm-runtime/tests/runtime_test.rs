@@ -1,6 +1,21 @@
 //! Test to verify the runtime component can be instantiated and called.
 //!
-//! Run with: cargo test --package eryx-wasm-runtime --test runtime_test
+//! # Prerequisites
+//!
+//! Before running tests, you need to extract the Python stdlib from componentize-py:
+//!
+//! ```bash
+//! # From the eryx-wasm-runtime crate directory:
+//! mkdir -p tests/python-stdlib tests/site-packages
+//! tar -xf ../eryx-runtime/.venv/lib/python3.12/site-packages/componentize_py/python-lib.tar.zst \
+//!     -C tests/python-stdlib
+//! ```
+//!
+//! # Running
+//!
+//! ```bash
+//! cargo test --package eryx-wasm-runtime --test runtime_test
+//! ```
 
 use std::io::Cursor;
 use std::path::PathBuf;
@@ -27,6 +42,21 @@ impl WasiView for State {
     }
 }
 
+/// Load a library from decompressed dir, or decompress from .zst if needed
+fn load_lib(libs_dir: &std::path::Path, name: &str) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+    let decompressed = libs_dir.join("decompressed").join(name);
+    if decompressed.exists() {
+        return Ok(std::fs::read(&decompressed)?);
+    }
+
+    let compressed = libs_dir.join(format!("{name}.zst"));
+    if compressed.exists() {
+        return Ok(decompress_zstd(&std::fs::read(&compressed)?));
+    }
+
+    Err(format!("Library not found: {name} (checked {decompressed:?} and {compressed:?})").into())
+}
+
 fn build_component() -> Result<Vec<u8>, Box<dyn std::error::Error>> {
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let project_root = manifest_dir.parent().unwrap().parent().unwrap();
@@ -43,14 +73,16 @@ fn build_component() -> Result<Vec<u8>, Box<dyn std::error::Error>> {
 
     let runtime = std::fs::read(&runtime_path)?;
 
-    // Load base libraries (zstd compressed)
-    let libc = decompress_zstd(&std::fs::read(libs_dir.join("libc.so.zst"))?);
-    let wasi_clocks = decompress_zstd(&std::fs::read(
-        libs_dir.join("libwasi-emulated-process-clocks.so.zst"),
-    )?);
-    let adapter = decompress_zstd(&std::fs::read(
-        libs_dir.join("wasi_snapshot_preview1.reactor.wasm.zst"),
-    )?);
+    // Load base libraries
+    let libc = load_lib(&libs_dir, "libc.so")?;
+    let libcxx = load_lib(&libs_dir, "libc++.so")?;
+    let libcxxabi = load_lib(&libs_dir, "libc++abi.so")?;
+    let wasi_clocks = load_lib(&libs_dir, "libwasi-emulated-process-clocks.so")?;
+    let wasi_signal = load_lib(&libs_dir, "libwasi-emulated-signal.so")?;
+    let wasi_mman = load_lib(&libs_dir, "libwasi-emulated-mman.so")?;
+    let wasi_getpid = load_lib(&libs_dir, "libwasi-emulated-getpid.so")?;
+    let libpython = load_lib(&libs_dir, "libpython3.14.so")?;
+    let adapter = load_lib(&libs_dir, "wasi_snapshot_preview1.reactor.wasm")?;
 
     // Parse the runtime.wit file
     let wit_path = project_root.join("crates/eryx-runtime/runtime.wit");
@@ -67,14 +99,25 @@ fn build_component() -> Result<Vec<u8>, Box<dyn std::error::Error>> {
     let mut bindings = wit_dylib::create(&resolve, world_id, Some(&mut opts));
     embed_component_metadata(&mut bindings, &resolve, world_id, StringEncoding::UTF8)?;
 
-    // Link
+    // Link - order matters! Dependencies must come before dependents
     let linker = wit_component::Linker::default()
         .validate(true)
         .use_built_in_libdl(true)
-        .library("libc.so", &libc, false)?
+        // WASI emulation libs
         .library("libwasi-emulated-process-clocks.so", &wasi_clocks, false)?
+        .library("libwasi-emulated-signal.so", &wasi_signal, false)?
+        .library("libwasi-emulated-mman.so", &wasi_mman, false)?
+        .library("libwasi-emulated-getpid.so", &wasi_getpid, false)?
+        // C/C++ runtime
+        .library("libc.so", &libc, false)?
+        .library("libc++abi.so", &libcxxabi, false)?
+        .library("libc++.so", &libcxx, false)?
+        // Python
+        .library("libpython3.14.so", &libpython, false)?
+        // Our runtime and bindings
         .library("liberyx_runtime.so", &runtime, false)?
         .library("liberyx_bindings.so", &bindings, false)?
+        // WASI adapter
         .adapter("wasi_snapshot_preview1", &adapter)?;
 
     Ok(linker.encode()?)
@@ -97,8 +140,41 @@ async fn test_instantiate_component() -> Result<(), Box<dyn std::error::Error>> 
     println!("Loading component into wasmtime...");
     let component = Component::new(&engine, &component_bytes)?;
 
-    // Create WASI context
-    let wasi = WasiCtxBuilder::new().inherit_stdio().inherit_env().build();
+    // Set up paths for Python stdlib
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let stdlib_path = manifest_dir.join("tests/python-stdlib");
+    let site_packages_path = manifest_dir.join("tests/site-packages");
+
+    if !stdlib_path.exists() {
+        panic!(
+            "Python stdlib not found at {}. Extract python-lib.tar.zst first.",
+            stdlib_path.display()
+        );
+    }
+
+    // Create site-packages if it doesn't exist
+    std::fs::create_dir_all(&site_packages_path)?;
+
+    // Create WASI context with preopened directories for Python
+    let wasi = WasiCtxBuilder::new()
+        .inherit_stdio()
+        // Set PYTHONPATH so Python can find stdlib during initialization
+        .env("PYTHONPATH", "/python-stdlib:/site-packages")
+        // Mount stdlib at /python-stdlib (matches what initialize_python expects)
+        .preopened_dir(
+            &stdlib_path,
+            "/python-stdlib",
+            wasmtime_wasi::DirPerms::READ,
+            wasmtime_wasi::FilePerms::READ,
+        )?
+        // Mount site-packages
+        .preopened_dir(
+            &site_packages_path,
+            "/site-packages",
+            wasmtime_wasi::DirPerms::READ,
+            wasmtime_wasi::FilePerms::READ,
+        )?
+        .build();
 
     let state = State {
         ctx: wasi,
@@ -148,7 +224,7 @@ async fn test_instantiate_component() -> Result<(), Box<dyn std::error::Error>> 
 
     println!("SUCCESS! Component instantiated");
 
-    // Try calling the execute export
+    // Get the execute function
     // execute: async func(code: string) -> result<string, string>
     println!("Looking for execute function...");
 
@@ -158,16 +234,144 @@ async fn test_instantiate_component() -> Result<(), Box<dyn std::error::Error>> 
             instance.get_typed_func::<(String,), (Result<String, String>,)>(&mut store, "execute")
         })?;
 
-    println!("Calling execute('print(1+1)')...");
+    // Test 1: Simple print statement
+    println!("Test 1: execute('print(1+1)')...");
     let (result,) = execute
         .call_async(&mut store, ("print(1+1)".to_string(),))
         .await?;
     execute.post_return_async(&mut store).await?;
 
-    match result {
-        Ok(output) => println!("Execute returned OK: {output}"),
-        Err(error) => println!("Execute returned Err: {error}"),
+    match &result {
+        Ok(output) => {
+            println!("  OK: {output:?}");
+            assert_eq!(output.trim(), "2", "print(1+1) should output '2'");
+        }
+        Err(error) => {
+            panic!("Test 1 failed with error: {error}");
+        }
     }
 
+    // Test 2: Multiple prints
+    println!("Test 2: Multiple print statements...");
+    let (result,) = execute
+        .call_async(&mut store, ("print('hello')\nprint('world')".to_string(),))
+        .await?;
+    execute.post_return_async(&mut store).await?;
+
+    match &result {
+        Ok(output) => {
+            println!("  OK: {output:?}");
+            assert_eq!(output, "hello\nworld\n", "Should have two lines of output");
+        }
+        Err(error) => {
+            panic!("Test 2 failed with error: {error}");
+        }
+    }
+
+    // Test 3: Variable assignment (no output)
+    println!("Test 3: Variable assignment with no output...");
+    let (result,) = execute
+        .call_async(&mut store, ("x = 42".to_string(),))
+        .await?;
+    execute.post_return_async(&mut store).await?;
+
+    match &result {
+        Ok(output) => {
+            println!("  OK: {output:?}");
+            assert_eq!(output, "", "Assignment should produce no output");
+        }
+        Err(error) => {
+            panic!("Test 3 failed with error: {error}");
+        }
+    }
+
+    // Test 4: Syntax error should return Err
+    println!("Test 4: Syntax error...");
+    let (result,) = execute
+        .call_async(&mut store, ("def broken(".to_string(),))
+        .await?;
+    execute.post_return_async(&mut store).await?;
+
+    match &result {
+        Ok(output) => {
+            panic!("Test 4 should have failed, but got: {output:?}");
+        }
+        Err(error) => {
+            println!("  Expected error: {error}");
+            assert!(
+                error.contains("SyntaxError") || error.contains("syntax"),
+                "Error should mention syntax: {error}"
+            );
+        }
+    }
+
+    // Test 5: Runtime error should return Err
+    println!("Test 5: Runtime error (NameError)...");
+    let (result,) = execute
+        .call_async(&mut store, ("print(undefined_variable)".to_string(),))
+        .await?;
+    execute.post_return_async(&mut store).await?;
+
+    match &result {
+        Ok(output) => {
+            panic!("Test 5 should have failed, but got: {output:?}");
+        }
+        Err(error) => {
+            println!("  Expected error: {error}");
+            assert!(
+                error.contains("NameError") || error.contains("undefined"),
+                "Error should mention NameError: {error}"
+            );
+        }
+    }
+
+    // Test 6: State persists between calls
+    println!("Test 6: State persistence...");
+    let (result,) = execute
+        .call_async(&mut store, ("my_var = 'persisted'".to_string(),))
+        .await?;
+    execute.post_return_async(&mut store).await?;
+    assert!(result.is_ok(), "Assignment should succeed");
+
+    let (result,) = execute
+        .call_async(&mut store, ("print(my_var)".to_string(),))
+        .await?;
+    execute.post_return_async(&mut store).await?;
+
+    match &result {
+        Ok(output) => {
+            println!("  OK: {output:?}");
+            assert_eq!(
+                output.trim(),
+                "persisted",
+                "Variable should persist between calls"
+            );
+        }
+        Err(error) => {
+            panic!("Test 6 failed with error: {error}");
+        }
+    }
+
+    // Test 7: Import stdlib module
+    println!("Test 7: Import stdlib (math)...");
+    let (result,) = execute
+        .call_async(&mut store, ("import math; print(math.pi)".to_string(),))
+        .await?;
+    execute.post_return_async(&mut store).await?;
+
+    match &result {
+        Ok(output) => {
+            println!("  OK: {output:?}");
+            assert!(
+                output.starts_with("3.14"),
+                "math.pi should start with 3.14: {output}"
+            );
+        }
+        Err(error) => {
+            panic!("Test 7 failed with error: {error}");
+        }
+    }
+
+    println!("\nAll tests passed!");
     Ok(())
 }
