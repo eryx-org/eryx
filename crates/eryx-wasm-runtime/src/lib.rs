@@ -385,8 +385,8 @@ impl Interpreter for EryxInterpreter {
     type CallCx<'a> = EryxCall;
 
     fn initialize(_wit: Wit) {
-        // TODO: Initialize Python here
         eprintln!("eryx-wasm-runtime: initialize called");
+        python::initialize_python();
     }
 
     fn export_start<'a>(_wit: Wit, func: ExportFunction) -> Box<Self::CallCx<'a>> {

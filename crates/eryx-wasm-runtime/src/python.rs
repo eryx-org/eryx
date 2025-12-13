@@ -435,14 +435,14 @@ pub unsafe fn Py_XINCREF(op: *mut PyObject) {
 /// Track whether we've initialized Python.
 static PYTHON_INITIALIZED: AtomicBool = AtomicBool::new(false);
 
-/// Initialize Python interpreter (safe wrapper).
+/// Initialize Python interpreter.
 ///
 /// This should be called once during `wit_dylib_initialize`.
 /// Subsequent calls are no-ops.
 ///
-/// # Safety
-///
-/// Must be called from the main thread before any other Python operations.
+/// Sets up:
+/// - Python interpreter (without signal handlers - not useful in WASM)
+/// - sys.path to include /python-stdlib and /site-packages
 pub fn initialize_python() {
     if PYTHON_INITIALIZED.swap(true, Ordering::SeqCst) {
         // Already initialized
@@ -454,8 +454,26 @@ pub fn initialize_python() {
         // Signal handlers don't make sense in a WASM sandbox.
         Py_InitializeEx(0);
 
-        // TODO: Set up sys.path to include bundled stdlib and site-packages
-        // This will be implemented in a future step.
+        // Set up sys.path to include bundled stdlib and site-packages.
+        // These paths match where componentize-py mounts the Python files
+        // in the WASM filesystem.
+        let setup_code = c"
+import sys
+
+# Clear default paths and set up our sandbox paths
+sys.path.clear()
+sys.path.append('/python-stdlib')
+sys.path.append('/site-packages')
+
+# Also ensure __main__ module exists for code execution
+import __main__
+";
+        let result = PyRun_SimpleString(setup_code.as_ptr());
+        if result != 0 {
+            // If this fails, Python is in a bad state - not much we can do
+            eprintln!("eryx-wasm-runtime: WARNING: Failed to set up sys.path");
+            PyErr_Clear();
+        }
     }
 }
 
