@@ -24,6 +24,8 @@
 #![allow(clippy::unwrap_used)]
 #![allow(clippy::expect_used)]
 
+pub mod python;
+
 use std::alloc::Layout;
 use wit_dylib_ffi::{
     Call, Enum, ExportFunction, Flags, Future, Interpreter, List, Record, Resource, Stream, Tuple,
@@ -31,6 +33,7 @@ use wit_dylib_ffi::{
 };
 
 /// Our call context - holds a stack for passing values between wit-dylib and our code.
+#[derive(Debug)]
 pub struct EryxCall {
     /// Stack of values being passed.
     /// For simplicity, we use a Vec<Value> where Value is an enum of possible types.
@@ -360,15 +363,16 @@ impl Call for EryxCall {
     fn list_append(&mut self, _ty: List) {
         // Pop the element and append to the list
         let elem = self.stack.pop();
-        if let Some(Value::Bytes(bytes)) = self.stack.last_mut() {
-            if let Some(Value::U8(b)) = elem {
-                bytes.push(b);
-            }
+        if let Some(Value::Bytes(bytes)) = self.stack.last_mut()
+            && let Some(Value::U8(b)) = elem
+        {
+            bytes.push(b);
         }
     }
 }
 
 /// Our interpreter implementation.
+#[derive(Debug)]
 pub struct EryxInterpreter;
 
 /// Export function indices (must match the order in runtime.wit)
@@ -509,4 +513,9 @@ impl Interpreter for EryxInterpreter {
 }
 
 // Export the interpreter interface
-wit_dylib_ffi::export!(EryxInterpreter);
+mod export {
+    #![allow(missing_docs)]
+    #![allow(clippy::not_unsafe_ptr_arg_deref)]
+    use super::EryxInterpreter;
+    wit_dylib_ffi::export!(EryxInterpreter);
+}
