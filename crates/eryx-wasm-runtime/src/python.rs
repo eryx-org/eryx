@@ -4,8 +4,8 @@
 //! These symbols are resolved at component link time when we link against libpython3.14.so.
 //!
 //! We declare them as `extern "C"` rather than using pyo3-ffi because:
-//! 1. We're compiling for wasm32-wasip1, not the host platform
-//! 2. The Python symbols come from the WASM libpython, not the host Python
+//! 1. We're compiling to a wasm32-wasip1 core module, not the host platform
+//! 2. The Python symbols come from the WASM-compiled libpython, not the host Python
 //! 3. We don't need the full pyo3 machinery, just a few core functions
 
 #![allow(non_camel_case_types)]

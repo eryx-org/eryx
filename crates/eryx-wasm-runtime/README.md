@@ -26,10 +26,18 @@ combination. By using a custom runtime that knows exactly what exports we have
 ```
 wit-dylib bindings (generated from runtime.wit)
        ↓
-liberyx_runtime.so (this crate, compiled to wasm32-wasip2)
+liberyx_runtime.so (this crate, compiled to wasm32-wasip1 core module)
        ↓
 libpython3.14.so + native extensions
+       ↓
+wit-component link → final Component (WASI Preview 2)
 ```
+
+Note: We compile to `wasm32-wasip1` to produce a core WASM module with dynamic
+linking support (`@dylink.0`). The final component uses WASI Preview 2 interfaces,
+but that's handled by `wit-component` when linking everything together. There is
+no `wasm32-wasip2` clang target - Preview 2 is about the Component Model wrapper,
+not a different core module ABI.
 
 ## Interface
 
