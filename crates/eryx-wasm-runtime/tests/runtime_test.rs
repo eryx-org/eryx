@@ -587,21 +587,17 @@ async fn test_instantiate_component() -> Result<(), Box<dyn std::error::Error>> 
     }
 
     // =========================================================================
-    // Callback Infrastructure Tests
+    // Callback Tests
     // =========================================================================
-    // Note: invoke() is not yet fully implemented (raises RuntimeError).
-    // These tests verify that the callback infrastructure is in place:
-    // - list_callbacks() function exists and is callable
-    // - invoke() function exists and raises the expected error
-    // - Callback wrappers and namespaces are generated
+    // These tests verify that Python can call host functions via invoke()
+    // and the callback wrapper functions.
 
-    // Test 11: list_callbacks() function exists and is callable
-    println!("Test 11: list_callbacks() is callable...");
+    // Test 11: list_callbacks() returns available callbacks
+    println!("Test 11: list_callbacks()...");
     let (result,) = execute
         .call_async(
             &mut store,
             (r#"
-# Verify list_callbacks exists and is callable
 cbs = list_callbacks()
 print(f"list_callbacks returned: {type(cbs).__name__}")
 print(f"count: {len(cbs)}")
@@ -624,24 +620,15 @@ print(f"count: {len(cbs)}")
         }
     }
 
-    // Test 12: invoke() raises RuntimeError (not yet implemented)
-    println!("Test 12: invoke() raises RuntimeError...");
+    // Test 12: invoke() calls host callback and returns result
+    println!("Test 12: invoke() calls get_time callback...");
     let (result,) = execute
         .call_async(
             &mut store,
             (r#"
-try:
-    invoke("get_time")
-    print("ERROR: invoke should have raised RuntimeError")
-except RuntimeError as e:
-    print("OK: RuntimeError raised")
-    error_msg = str(e)
-    if "not yet implemented" in error_msg:
-        print("CORRECT: error mentions 'not yet implemented'")
-    else:
-        print(f"ERROR: unexpected message: {error_msg}")
-except Exception as e:
-    print(f"ERROR: wrong exception type: {type(e).__name__}: {e}")
+result = invoke("get_time")
+print(f"result type: {type(result).__name__}")
+print(f"timestamp: {result.get('timestamp', 'missing')}")
 "#
             .to_string(),),
         )
@@ -652,12 +639,12 @@ except Exception as e:
         Ok(output) => {
             println!("  OK: {output:?}");
             assert!(
-                output.contains("RuntimeError raised"),
-                "invoke() should raise RuntimeError: {output}"
+                output.contains("result type: dict"),
+                "invoke should return a dict: {output}"
             );
             assert!(
-                output.contains("CORRECT"),
-                "Error should mention 'not yet implemented': {output}"
+                output.contains("timestamp: 1234567890"),
+                "invoke should return correct timestamp: {output}"
             );
         }
         Err(error) => {
@@ -665,32 +652,106 @@ except Exception as e:
         }
     }
 
-    // Test 13: Direct callback wrapper raises RuntimeError
-    // (Callback wrappers call invoke() under the hood)
-    println!("Test 13: Callback wrappers raise RuntimeError...");
+    // Test 13: Verify list_callbacks() still works (introspection is available)
+    println!("Test 13: list_callbacks() provides callback info...");
     let (result,) = execute
         .call_async(
             &mut store,
             (r#"
-# Check if callback wrappers are generated and raise correct error
-# Note: These only exist if callbacks were discovered from list-callbacks
+cbs = list_callbacks()
+names = [cb['name'] for cb in cbs]
+print(f"callbacks: {names}")
+"#
+            .to_string(),),
+        )
+        .await?;
+    execute.post_return_async(&mut store).await?;
+
+    match &result {
+        Ok(output) => {
+            println!("  OK: {output:?}");
+            assert!(
+                output.contains("get_time"),
+                "Should list get_time callback: {output}"
+            );
+        }
+        Err(error) => {
+            panic!("Test 13 failed: {error}");
+        }
+    }
+
+    // Test 14: invoke() with arguments (add callback)
+    println!("Test 14: invoke() with arguments...");
+    let (result,) = execute
+        .call_async(
+            &mut store,
+            (r#"
+result = invoke("add", a=10, b=32)
+print(f"add result: {result.get('result', 'missing')}")
+"#
+            .to_string(),),
+        )
+        .await?;
+    execute.post_return_async(&mut store).await?;
+
+    match &result {
+        Ok(output) => {
+            println!("  OK: {output:?}");
+            assert!(
+                output.contains("add result: 42"),
+                "invoke('add', a=10, b=32) should return 42: {output}"
+            );
+        }
+        Err(error) => {
+            panic!("Test 14 failed: {error}");
+        }
+    }
+
+    // Test 15: Callback wrappers work (http.get via namespace)
+    println!("Test 15: Namespace callback (http.get)...");
+    let (result,) = execute
+        .call_async(
+            &mut store,
+            (r#"
+result = http.get(url="https://example.com")
+print(f"status: {result.get('status', 'missing')}")
+print(f"url: {result.get('url', 'missing')}")
+"#
+            .to_string(),),
+        )
+        .await?;
+    execute.post_return_async(&mut store).await?;
+
+    match &result {
+        Ok(output) => {
+            println!("  OK: {output:?}");
+            assert!(
+                output.contains("status: 200"),
+                "http.get should return status 200: {output}"
+            );
+            assert!(
+                output.contains("url: https://example.com"),
+                "http.get should return correct url: {output}"
+            );
+        }
+        Err(error) => {
+            panic!("Test 15 failed: {error}");
+        }
+    }
+
+    // Test 16: Error handling for unknown callback
+    println!("Test 16: invoke() error handling for unknown callback...");
+    let (result,) = execute
+        .call_async(
+            &mut store,
+            (r#"
 try:
-    # Try to call a wrapper - it should raise RuntimeError from invoke()
-    if 'add' in dir():
-        add(a=1, b=2)
-        print("ERROR: add() should have raised RuntimeError")
-    elif 'get_time' in dir():
-        get_time()
-        print("ERROR: get_time() should have raised RuntimeError")
-    else:
-        # No wrappers generated (callback discovery may have failed)
-        # This is OK - just verify invoke raises error
-        invoke("test")
-        print("ERROR: invoke should have raised")
+    invoke("nonexistent_callback")
+    print("ERROR: should have raised")
 except RuntimeError as e:
-    print("OK: RuntimeError raised")
-    if "not yet implemented" in str(e):
-        print("CORRECT: from callback system")
+    print(f"OK: RuntimeError raised")
+    if "unknown callback" in str(e):
+        print("CORRECT: error message")
 "#
             .to_string(),),
         )
@@ -702,48 +763,11 @@ except RuntimeError as e:
             println!("  OK: {output:?}");
             assert!(
                 output.contains("RuntimeError raised"),
-                "Should raise RuntimeError: {output}"
+                "invoke('nonexistent') should raise RuntimeError: {output}"
             );
         }
         Err(error) => {
-            panic!("Test 13 failed: {error}");
-        }
-    }
-
-    // Test 14: Verify invoke and list_callbacks are in globals
-    println!("Test 14: Callback functions in globals...");
-    let (result,) = execute
-        .call_async(
-            &mut store,
-            (r#"
-has_invoke = 'invoke' in dir()
-has_list = 'list_callbacks' in dir()
-print(f"invoke in globals: {has_invoke}")
-print(f"list_callbacks in globals: {has_list}")
-if has_invoke and has_list:
-    print("OK: callback functions available")
-else:
-    print("ERROR: missing callback functions")
-"#
-            .to_string(),),
-        )
-        .await?;
-    execute.post_return_async(&mut store).await?;
-
-    match &result {
-        Ok(output) => {
-            println!("  OK: {output:?}");
-            assert!(
-                output.contains("invoke in globals: True"),
-                "invoke should be in globals: {output}"
-            );
-            assert!(
-                output.contains("list_callbacks in globals: True"),
-                "list_callbacks should be in globals: {output}"
-            );
-        }
-        Err(error) => {
-            panic!("Test 14 failed: {error}");
+            panic!("Test 16 failed: {error}");
         }
     }
 

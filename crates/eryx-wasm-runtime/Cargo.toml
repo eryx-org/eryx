@@ -17,8 +17,9 @@ crate-type = ["staticlib"]
 [dependencies]
 wit-dylib-ffi.workspace = true
 
-# Note: We'll need pyo3 or raw CPython FFI for calling Python
-# For now, start with stubs to verify the interface works
+# PyO3 for Python C extension module (like componentize-py uses)
+# abi3-py312 = stable ABI compatible with Python 3.12+
+pyo3 = { version = "0.24", features = ["abi3-py312"] }
 
 [dev-dependencies]
 wit-component.workspace = true

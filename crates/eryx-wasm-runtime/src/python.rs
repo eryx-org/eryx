@@ -555,33 +555,72 @@ pub unsafe fn Py_XINCREF(op: *mut PyObject) {
 }
 
 // =============================================================================
-// Invoke callback mechanism (DISABLED)
+// Invoke callback mechanism
 // =============================================================================
-//
-// The invoke callback mechanism is currently disabled because the _eryx C
-// extension module that would use it causes crashes in WASM. The pure Python
-// invoke() function raises RuntimeError instead.
-//
-// TODO: Re-enable when we have a working approach for callback invocation.
-// See the _eryx module comment below for potential approaches.
+
+/// Type for the invoke callback function.
+/// Takes (name, args_json) and returns Result<result_json, error_message>.
+pub type InvokeCallback = fn(&str, &str) -> Result<String, String>;
+
+/// Global storage for the invoke callback.
+/// This is set by lib.rs during export execution.
+static INVOKE_CALLBACK: std::sync::RwLock<Option<InvokeCallback>> = std::sync::RwLock::new(None);
+
+/// Set the invoke callback function.
+/// This should be called by lib.rs before executing Python code.
+pub fn set_invoke_callback(callback: Option<InvokeCallback>) {
+    if let Ok(mut guard) = INVOKE_CALLBACK.write() {
+        *guard = callback;
+    }
+}
+
+/// Call the registered invoke callback.
+/// Returns Err if no callback is registered or if the callback fails.
+pub fn do_invoke(name: &str, args_json: &str) -> Result<String, String> {
+    let guard = INVOKE_CALLBACK
+        .read()
+        .map_err(|_| "Failed to acquire invoke callback lock".to_string())?;
+
+    let callback = guard.as_ref().ok_or_else(|| {
+        "invoke() called outside of execute context - callbacks can only be called during code execution".to_string()
+    })?;
+
+    callback(name, args_json)
+}
 
 // =============================================================================
-// _eryx built-in module (DISABLED)
+// _eryx built-in module (PyO3-based)
 // =============================================================================
 //
-// NOTE: The C extension module approach for invoke() is currently disabled.
-// Python finds the PyInit__eryx symbol via its import machinery even without
-// explicit registration, causing crashes in WASM due to memory initialization
-// issues with static strings.
+// This module provides the low-level `_eryx_invoke` function that Python code
+// uses to call host callbacks. It uses PyO3 macros to generate a proper C
+// extension module that works correctly in WASM.
 //
-// The current approach uses a pure Python invoke() function that raises
-// RuntimeError, allowing code to be written against the API while we work
-// on a proper solution for callback invocation.
-//
-// TODO: Implement callback invocation using one of these approaches:
-// 1. Fix the C extension module memory issues in WASM
-// 2. Use Python's ctypes to call a Rust function
-// 3. Implement async callback support in wit-dylib
+// Note: We use PyO3 instead of manual CPython FFI because manual PyModuleDef
+// structures have WASM memory compatibility issues - Python can't read memory
+// allocated by our .so module.
+
+use pyo3::prelude::*;
+
+/// Low-level invoke function exposed to Python.
+/// Python signature: _eryx_invoke(name: str, args_json: str) -> str
+#[pyfunction]
+fn _eryx_invoke(name: String, args_json: String) -> PyResult<String> {
+    match do_invoke(&name, &args_json) {
+        Ok(result) => Ok(result),
+        Err(e) => Err(pyo3::exceptions::PyRuntimeError::new_err(e)),
+    }
+}
+
+/// The _eryx module definition.
+/// This generates a `PyInit__eryx` function that can be registered with Python.
+#[pymodule]
+#[pyo3(name = "_eryx")]
+fn eryx_module(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    m.add_function(wrap_pyfunction!(_eryx_invoke, m)?)?;
+    Ok(())
+}
+
 
 // =============================================================================
 // Python interpreter state
@@ -601,6 +640,7 @@ static PYTHON_INITIALIZED: AtomicBool = AtomicBool::new(false);
 /// - WASI preopened directories must be configured for those paths
 ///
 /// Sets up:
+/// - The _eryx built-in module (for invoke() callback support)
 /// - Python interpreter (without signal handlers - not useful in WASM)
 /// - Ensures __main__ module exists for code execution
 pub fn initialize_python() {
@@ -609,9 +649,9 @@ pub fn initialize_python() {
         return;
     }
 
-    // Note: The _eryx built-in module for invoke() support is not yet implemented.
-    // Callback discovery via list_callbacks() works, but invoke() will raise an error.
-    // TODO: Implement C extension module for invoke() support
+    // Register the PyO3-generated _eryx module BEFORE Py_Initialize.
+    // This is how componentize-py does it - using the pyo3 macro.
+    pyo3::append_to_inittab!(eryx_module);
 
     unsafe {
         // Initialize Python without registering signal handlers.
@@ -1112,6 +1152,8 @@ _eryx_keep = {
     # Preserve callback infrastructure
     'invoke', 'list_callbacks', '_EryxNamespace', '_EryxCallbackLeaf',
     '_eryx_make_callback', '_eryx_reserved', '_eryx_callbacks',
+    # Preserve json module alias used by list_callbacks and _eryx module for invoke()
+    '_json', '_eryx',
 }
 
 # Also keep callback wrappers and namespace objects
@@ -1166,15 +1208,10 @@ pub struct CallbackInfo {
 /// Set up callback wrapper functions in Python.
 ///
 /// This injects:
-/// 1. An `invoke(name, **kwargs)` function (raises error - not yet implemented)
+/// 1. An `invoke(name, **kwargs)` function that calls host callbacks via `_eryx`
 /// 2. A `list_callbacks()` function for introspection
 /// 3. Direct wrapper functions for each callback (e.g., `sleep(ms=100)`)
 /// 4. Namespace objects for dotted callbacks (e.g., `http.get(url="...")`)
-///
-/// Note: Currently, `invoke()` and callback wrappers raise RuntimeError because
-/// Python cannot yield back to the WASM runtime mid-execution. The functions
-/// are defined so code can be written against the API, but they won't work
-/// until async callback support is implemented.
 pub fn setup_callbacks(callbacks: &[CallbackInfo]) -> Result<(), String> {
     if !is_python_initialized() {
         return Err("Python not initialized".to_string());
@@ -1188,6 +1225,7 @@ pub fn setup_callbacks(callbacks: &[CallbackInfo]) -> Result<(), String> {
         let setup_code = format!(
             r#"
 import json as _json
+import _eryx
 
 # Callbacks metadata from host
 _eryx_callbacks_json = '''{}'''
@@ -1206,15 +1244,14 @@ def invoke(name, **kwargs):
     Example:
         result = invoke("get_time")
         data = invoke("http.get", url="https://example.com")
-
-    Note: Callback invocation is not yet implemented in eryx-wasm-runtime.
-    Use list_callbacks() to see available callbacks.
     """
-    raise RuntimeError(
-        f"invoke('{{name}}', ...) cannot be called: "
-        "callback invocation is not yet implemented in eryx-wasm-runtime. "
-        "Use list_callbacks() to see available callbacks."
-    )
+    # Serialize kwargs to JSON and call the Rust implementation
+    args_json = _json.dumps(kwargs)
+    result_json = _eryx._eryx_invoke(name, args_json)
+    # Parse result JSON (may be empty string for void callbacks)
+    if result_json:
+        return _json.loads(result_json)
+    return None
 
 def list_callbacks():
     """List all available callbacks for introspection.
@@ -1293,8 +1330,10 @@ for _cb in _eryx_callbacks:
         _root = _parts[0]
         if _root not in _eryx_reserved:
             if _root not in _eryx_namespaces:
-                _eryx_namespaces[_root] = _EryxNamespace(invoke)
-            _eryx_namespaces[_root]._add_callback(_parts)
+                # Create root namespace with prefix=root+'.' so children get full path
+                _eryx_namespaces[_root] = _EryxNamespace(invoke, _root + '.')
+            # Skip the root part since we've already accounted for it in the prefix
+            _eryx_namespaces[_root]._add_callback(_parts[1:])
     else:
         if _name not in _eryx_reserved:
             globals()[_name] = _eryx_make_callback(_name)
@@ -1303,9 +1342,9 @@ for _cb in _eryx_callbacks:
 globals().update(_eryx_namespaces)
 
 # Clean up temporary variables
-del _eryx_callbacks_json, _eryx_namespaces, _cb, _name
+del _eryx_callbacks_json, _eryx_namespaces
 try:
-    del _parts, _root
+    del _cb, _name, _parts, _root
 except NameError:
     pass
 "#,

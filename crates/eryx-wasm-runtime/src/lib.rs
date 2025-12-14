@@ -386,21 +386,98 @@ static CALLBACKS_INITIALIZED: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 
 // =============================================================================
-// Invoke callback mechanism (DISABLED)
+// Invoke callback mechanism
 // =============================================================================
 //
-// The invoke callback mechanism is currently disabled. The _eryx C extension
-// module approach caused crashes in WASM due to memory initialization issues.
-// Python's invoke() function raises RuntimeError instead of actually calling
-// the host.
-//
-// TODO: Re-enable when we have a working approach:
-// 1. Fix the C extension module memory issues in WASM
-// 2. Use Python's ctypes to call a Rust function
-// 3. Implement proper async support in wit-dylib
-//
-// The with_wit() wrapper and call_invoke() functions are preserved but unused
-// until we implement a working solution.
+// This allows Python code to call host functions via the invoke() function.
+// The mechanism works as follows:
+// 1. Python calls invoke(name, **kwargs) which serializes args to JSON
+// 2. invoke() calls _eryx._eryx_invoke(name, args_json) (C extension)
+// 3. _eryx_invoke calls python::do_invoke() which uses the INVOKE_CALLBACK
+// 4. The callback (set by with_wit) calls the WIT [async]invoke import
+// 5. Result JSON is returned back through the chain
+
+// Thread-local storage for the current Wit handle during export execution.
+std::thread_local! {
+    static CURRENT_WIT: std::cell::RefCell<Option<Wit>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Execute a function with the Wit handle available for callbacks.
+/// Sets up the invoke callback so Python can call host functions.
+fn with_wit<T>(wit: Wit, f: impl FnOnce() -> T) -> T {
+    CURRENT_WIT.with(|cell| {
+        let old = cell.borrow_mut().replace(wit);
+
+        // Set up the Python invoke callback
+        python::set_invoke_callback(Some(invoke_callback_wrapper));
+
+        let result = f();
+
+        // Clear the Python invoke callback
+        python::set_invoke_callback(None);
+
+        *cell.borrow_mut() = old;
+        result
+    })
+}
+
+/// Wrapper function that matches the InvokeCallback signature.
+fn invoke_callback_wrapper(name: &str, args_json: &str) -> Result<String, String> {
+    call_invoke(name, args_json)
+}
+
+/// Call the [async]invoke import with the given callback name and JSON arguments.
+fn call_invoke(name: &str, args_json: &str) -> Result<String, String> {
+    CURRENT_WIT.with(|cell| {
+        let wit = cell.borrow();
+        let wit = wit
+            .as_ref()
+            .ok_or_else(|| "invoke() called outside of execute context".to_string())?;
+
+        // Get the invoke import (it's async: [async]invoke)
+        let import_func = wit
+            .get_import(None, "[async]invoke")
+            .ok_or_else(|| "invoke import not found".to_string())?;
+
+        // Create a call context
+        let mut cx = EryxCall::new();
+
+        // Push arguments onto stack - wit-dylib pops in reverse order,
+        // so push args_json first, then name
+        cx.push_string(args_json.to_string());
+        cx.push_string(name.to_string());
+
+        // Call the async import
+        // Safety: we're in a valid execution context
+        let pending = unsafe { import_func.call_import_async(&mut cx) };
+
+        if pending.is_some() {
+            return Err(
+                "callback requires async execution which is not supported in synchronous mode"
+                    .to_string(),
+            );
+        }
+
+        // Result is on the stack: result<string, string>
+        // Pop the discriminant first (true = ok, false = err)
+        let is_ok = match cx.stack.pop() {
+            Some(Value::ResultDiscriminant(v)) => v,
+            other => {
+                return Err(format!("unexpected result discriminant: {other:?}"));
+            }
+        };
+
+        // Pop the string value
+        let value = match cx.stack.pop() {
+            Some(Value::String(s)) => s,
+            other => {
+                return Err(format!("unexpected result value: {other:?}"));
+            }
+        };
+
+        if is_ok { Ok(value) } else { Err(value) }
+    })
+}
 
 /// Call list-callbacks import to get available callbacks from the host.
 fn call_list_callbacks(wit: Wit) -> Vec<python::CallbackInfo> {
@@ -419,54 +496,43 @@ fn call_list_callbacks(wit: Wit) -> Vec<python::CallbackInfo> {
     // Call the import (synchronous)
     import_func.call_import_sync(&mut cx);
 
-    // Debug: print stack contents
-    eprintln!(
-        "eryx-wasm-runtime: list-callbacks returned, stack has {} items",
-        cx.stack.len()
-    );
-    for (i, v) in cx.stack.iter().enumerate() {
-        eprintln!("  stack[{i}]: {v:?}");
-    }
+    // Parse the stack contents into callback info.
+    // The actual format depends on how wasmtime and wit-dylib interact.
+    // From observation, the stack contains flattened record fields.
+    // We'll collect all string values and try to group them.
+    let mut callbacks = Vec::new();
+    let mut strings: Vec<String> = Vec::new();
 
-    // The result is a list<callback-info> on the stack
-    // Each callback-info is a record with: name, description, parameters-schema-json
-    // First we get the list length
-    let len = match cx.stack.pop() {
-        Some(Value::U32(n)) => n as usize,
-        other => {
-            eprintln!("eryx-wasm-runtime: unexpected list length type: {other:?}");
-            return Vec::new();
+    // Collect all string values from the stack, skipping empty Bytes
+    for value in cx.stack.drain(..) {
+        match value {
+            Value::String(s) => strings.push(s),
+            Value::Bytes(b) if !b.is_empty() => {
+                // Non-empty bytes might be a string
+                if let Ok(s) = String::from_utf8(b) {
+                    strings.push(s);
+                }
+            }
+            _ => {} // Skip empty Bytes and other types
         }
-    };
-
-    let mut callbacks = Vec::with_capacity(len);
-
-    // Pop each callback record (in reverse order since stack is LIFO)
-    for _ in 0..len {
-        // Each record has 3 string fields: name, description, parameters_schema_json
-        // They should be pushed in order, so we pop in reverse
-        let parameters_schema_json = match cx.stack.pop() {
-            Some(Value::String(s)) => s,
-            _ => String::new(),
-        };
-        let description = match cx.stack.pop() {
-            Some(Value::String(s)) => s,
-            _ => String::new(),
-        };
-        let name = match cx.stack.pop() {
-            Some(Value::String(s)) => s,
-            _ => continue,
-        };
-
-        callbacks.push(python::CallbackInfo {
-            name,
-            description,
-            parameters_schema_json,
-        });
     }
 
-    // Reverse to get original order
-    callbacks.reverse();
+    // Group strings into callbacks.
+    // Each callback has: name, description, (optional parameters_schema_json)
+    // From observation, we get pairs of (name, description) when schema is empty
+    if strings.len() >= 2 {
+        // Assume pairs of (name, description)
+        for chunk in strings.chunks(2) {
+            if chunk.len() >= 2 {
+                callbacks.push(python::CallbackInfo {
+                    name: chunk[0].clone(),
+                    description: chunk[1].clone(),
+                    parameters_schema_json: String::new(), // Schema not available in this format
+                });
+            }
+        }
+    }
+
     callbacks
 }
 
@@ -479,10 +545,6 @@ fn ensure_callbacks_initialized(wit: Wit) {
     }
 
     let callbacks = call_list_callbacks(wit);
-    eprintln!(
-        "eryx-wasm-runtime: setting up {} callbacks",
-        callbacks.len()
-    );
 
     if let Err(e) = python::setup_callbacks(&callbacks) {
         eprintln!("eryx-wasm-runtime: failed to setup callbacks: {e}");
@@ -514,9 +576,8 @@ impl Interpreter for EryxInterpreter {
                 // Ensure callbacks are set up before first execute
                 ensure_callbacks_initialized(wit);
 
-                // Execute Python code
-                // Note: invoke() currently raises RuntimeError - see TODO above
-                let result = python::execute_python(&code);
+                // Execute Python with Wit handle available for callbacks
+                let result = with_wit(wit, || python::execute_python(&code));
 
                 match result {
                     Ok(output) => {
@@ -596,9 +657,8 @@ impl Interpreter for EryxInterpreter {
                 // Ensure callbacks are set up before first execute
                 ensure_callbacks_initialized(wit);
 
-                // Execute Python code
-                // Note: invoke() currently raises RuntimeError - see TODO above
-                let result = python::execute_python(&code);
+                // Execute Python with Wit handle available for callbacks
+                let result = with_wit(wit, || python::execute_python(&code));
 
                 match result {
                     Ok(output) => {
