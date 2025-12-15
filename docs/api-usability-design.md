@@ -457,24 +457,30 @@ Implemented in `embedded.rs`:
 - Auto-extracted on first sandbox creation
 - Automatically used when `embedded-stdlib` feature enabled
 
-### Phase 2: Local Wheel Support (Next)
+### ~~Phase 2: Package Support~~ ✅ DONE
+
+Implemented via `packages` feature with `with_package()`:
 
 ```rust
-// New module: eryx/src/wheel.rs
-pub struct Wheel {
-    pub metadata: WheelMetadata,
-    pub python_files: Vec<(String, Vec<u8>)>,
-    pub native_extensions: Vec<NativeExtension>,
-}
+// Auto-detects format: .whl, .tar.gz, directory
+let sandbox = Sandbox::builder()
+    .with_package("/path/to/numpy-wasi.tar.gz")?  // tar.gz (wasi-wheels)
+    .with_cache_dir("/tmp/cache")?
+    .build()?;
 
-impl Wheel {
-    pub fn from_file(path: &Path) -> Result<Self, Error>;
-    pub fn from_bytes(bytes: &[u8]) -> Result<Self, Error>;
-}
-
-// Add to builder
-pub fn with_wheel(self, path: impl AsRef<Path>) -> Result<Self, Error>;
+// Or with wheel
+let sandbox = Sandbox::builder()
+    .with_embedded_runtime()
+    .with_package("/path/to/requests.whl")?  // standard wheel
+    .build()?;
 ```
+
+Features:
+- Auto-detects format from extension
+- Extracts to temp directory
+- Scans for native extensions (.so) and auto-registers them
+- Detects package name from `__init__.py`
+- Works with embedded runtime for pure-Python packages
 
 ### Phase 3: wasi-wheels Integration (Future)
 
@@ -702,6 +708,6 @@ let sandbox = Sandbox::builder()
 |-----------|--------|
 | 1. Mmap-cached embedded runtime | ✅ Done |
 | 2. Embedded stdlib | ✅ Done |
-| 3. Wheel extraction | 🔄 Next |
+| 3. Package extraction (`with_package()`) | ✅ Done |
 | 4. wasi-wheels integration | 📋 Future |
 | 5. Python SDK | 📋 Future |
