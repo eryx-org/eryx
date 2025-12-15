@@ -45,7 +45,9 @@ fn main() {
 
     // Only build when explicitly requested or in release mode
     let profile = env::var("PROFILE").unwrap_or_default();
-    if env::var("BUILD_ERYX_RUNTIME").is_ok() || profile == "release" {
+    let late_linking = env::var("CARGO_FEATURE_LATE_LINKING").is_ok();
+
+    if env::var("BUILD_ERYX_RUNTIME").is_ok() || profile == "release" || late_linking {
         let runtime_so = build_wasm_runtime(&wasm_runtime_dir);
         build_component(&manifest_dir, &runtime_so);
     }
@@ -87,11 +89,10 @@ fn build_wasm_runtime(wasm_runtime_dir: &PathBuf) -> PathBuf {
 
     // Strip inherited Rust/Cargo env vars to prevent lock contention
     for (key, _) in env::vars_os() {
-        if let Some(key_str) = key.to_str() {
-            if key_str.starts_with("RUST") || key_str.starts_with("CARGO") {
+        if let Some(key_str) = key.to_str()
+            && (key_str.starts_with("RUST") || key_str.starts_with("CARGO")) {
                 cmd.env_remove(&key);
             }
-        }
     }
 
     // Set the env vars we need
@@ -161,6 +162,17 @@ fn build_wasm_runtime(wasm_runtime_dir: &PathBuf) -> PathBuf {
     // Export the path for downstream use
     println!("cargo::rustc-env=ERYX_RUNTIME_SO={}", runtime_so.display());
 
+    // Also compress for late-linking support
+    let runtime_bytes = std::fs::read(&runtime_so).expect("failed to read runtime.so");
+    let compressed = zstd::encode_all(runtime_bytes.as_slice(), 19).expect("compress failed");
+    let compressed_path = out_dir.join("liberyx_runtime.so.zst");
+    std::fs::write(&compressed_path, &compressed).expect("failed to write compressed runtime");
+    eprintln!(
+        "Compressed runtime: {} bytes -> {} bytes",
+        runtime_bytes.len(),
+        compressed.len()
+    );
+
     runtime_so
 }
 
@@ -208,6 +220,17 @@ fn build_component(manifest_dir: &PathBuf, runtime_so: &PathBuf) {
     let mut bindings = wit_dylib::create(&resolve, world_id, Some(&mut opts));
     embed_component_metadata(&mut bindings, &resolve, world_id, StringEncoding::UTF8)
         .expect("failed to embed component metadata");
+
+    // Also compress bindings for late-linking support
+    let out_dir = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR not set"));
+    let bindings_compressed = zstd::encode_all(bindings.as_slice(), 19).expect("compress failed");
+    let bindings_path = out_dir.join("liberyx_bindings.so.zst");
+    std::fs::write(&bindings_path, &bindings_compressed).expect("failed to write bindings");
+    eprintln!(
+        "Compressed bindings: {} bytes -> {} bytes",
+        bindings.len(),
+        bindings_compressed.len()
+    );
 
     // Link all libraries together
     // Order matters! Dependencies must come before dependents
@@ -278,14 +301,12 @@ fn find_wasi_sdk() -> Option<PathBuf> {
     if let Ok(output) = Command::new("mise")
         .args(["where", "github:WebAssembly/wasi-sdk"])
         .output()
-    {
-        if output.status.success() {
+        && output.status.success() {
             let path = PathBuf::from(String::from_utf8_lossy(&output.stdout).trim());
             if path.join("bin/clang").exists() {
                 return Some(path);
             }
         }
-    }
 
     // Try local project installation
     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").ok()?);

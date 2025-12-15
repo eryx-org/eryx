@@ -27,6 +27,10 @@ required-features = ["precompiled"]
 name = "trace_events"
 required-features = ["embedded-runtime"]
 
+[[example]]
+name = "numpy_native"
+required-features = ["native-extensions"]
+
 [features]
 default = []
 # Enable loading pre-compiled WASM components. This feature enables unsafe code paths
@@ -37,6 +41,9 @@ precompiled = []
 # Requires runtime.wasm to be built before compiling this crate.
 # Implies `precompiled` feature.
 embedded-runtime = ["precompiled", "dep:wasmtime"]
+# Enable native Python extension support via late-linking.
+# This allows adding extensions like numpy at sandbox creation time.
+native-extensions = ["dep:eryx-runtime"]
 
 [dependencies]
 tokio = { workspace = true, features = ["sync"] }
@@ -50,12 +57,15 @@ thiserror.workspace = true
 wasmtime.workspace = true
 wasmtime-wasi.workspace = true
 tracing.workspace = true
+# Native extension support (optional)
+eryx-runtime = { path = "../eryx-runtime", features = ["late-linking"], optional = true }
 
 [dev-dependencies]
 async-trait.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 criterion.workspace = true
 crossterm.workspace = true
+walkdir = "2.5"
 
 [build-dependencies]
 wasmtime = { workspace = true, optional = true }

@@ -1,33 +1,27 @@
 //! Eryx Python WASM Runtime
 //!
-//! This crate contains the WIT definition and Python source for the eryx
-//! sandbox runtime. The actual WASM component is built using `componentize-py`.
+//! This crate contains the WIT definition and builds the eryx sandbox WASM component.
+//! The component uses our custom eryx-wasm-runtime (liberyx_runtime.so) for Python
+//! execution via CPython FFI.
+//!
+//! ## Features
+//!
+//! - `late-linking` - Enable late-linking support for native Python extensions.
+//!   This allows adding extensions like numpy at sandbox creation time without
+//!   rebuilding the entire component.
 //!
 //! ## Contents
 //!
 //! - `runtime.wit` - WIT interface definition
-//! - `runtime.py` - Python runtime implementation
+//! - `linker` - Late-linking support for native extensions (feature-gated)
 //!
-//! ## Building the WASM Component
+//! ## See Also
 //!
-//! ```bash
-//! cd crates/eryx-runtime
-//!
-//! # Generate bindings
-//! componentize-py -d runtime.wit -w sandbox bindings guest_bindings
-//!
-//! # Build the component
-//! componentize-py -d runtime.wit -w sandbox componentize runtime -o runtime.wasm
-//! ```
-//!
-//! See the crate README for more details.
+//! - `eryx-wasm-runtime` - The custom runtime that implements the WIT exports
 
 /// The WIT definition as a string constant.
-///
-/// This can be used for documentation or tooling purposes.
 pub const WIT_DEFINITION: &str = include_str!("../runtime.wit");
 
-/// The Python runtime source as a string constant.
-///
-/// This can be used for documentation or tooling purposes.
-pub const PYTHON_RUNTIME: &str = include_str!("../runtime.py");
+/// Late-linking support for native Python extensions.
+#[cfg(feature = "late-linking")]
+pub mod linker;

@@ -323,8 +323,10 @@ impl Sandbox {
 
 /// Source of the WASM component for the sandbox.
 #[derive(Debug, Clone)]
+#[derive(Default)]
 enum WasmSource {
     /// No source specified yet.
+    #[default]
     None,
     /// WASM component bytes (will be compiled at load time).
     Bytes(Vec<u8>),
@@ -341,11 +343,6 @@ enum WasmSource {
     EmbeddedRuntime,
 }
 
-impl Default for WasmSource {
-    fn default() -> Self {
-        Self::None
-    }
-}
 
 /// Builder for constructing a [`Sandbox`].
 pub struct SandboxBuilder {
@@ -360,6 +357,9 @@ pub struct SandboxBuilder {
     python_stdlib_path: Option<std::path::PathBuf>,
     /// Path to Python site-packages for eryx-wasm-runtime.
     python_site_packages_path: Option<std::path::PathBuf>,
+    /// Native Python extensions to link into the component.
+    #[cfg(feature = "native-extensions")]
+    native_extensions: Vec<eryx_runtime::linker::NativeExtension>,
 }
 
 impl Default for SandboxBuilder {
@@ -399,6 +399,8 @@ impl SandboxBuilder {
             resource_limits: ResourceLimits::default(),
             python_stdlib_path: None,
             python_site_packages_path: None,
+            #[cfg(feature = "native-extensions")]
+            native_extensions: Vec::new(),
         }
     }
 
@@ -521,6 +523,49 @@ impl SandboxBuilder {
         self
     }
 
+    /// Add a native Python extension (.so file) to be linked into the component.
+    ///
+    /// Native extensions allow Python packages with compiled code (like numpy)
+    /// to work in the sandbox. The extension is linked into the WASM component
+    /// at sandbox creation time using late-linking.
+    ///
+    /// # Arguments
+    ///
+    /// * `name` - The name of the .so file (e.g., "numpy/core/_multiarray_umath.cpython-314-wasm32-wasi.so")
+    /// * `bytes` - The raw WASM bytes of the compiled extension
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// // Load numpy native extension
+    /// let numpy_core = std::fs::read("numpy/core/_multiarray_umath.cpython-314-wasm32-wasi.so")?;
+    ///
+    /// let sandbox = Sandbox::builder()
+    ///     .with_native_extension("numpy/core/_multiarray_umath.cpython-314-wasm32-wasi.so", numpy_core)
+    ///     .with_site_packages("path/to/site-packages")  // For Python files
+    ///     .build()?;
+    ///
+    /// // Now numpy can be imported!
+    /// let result = sandbox.execute("import numpy as np; print(np.array([1,2,3]).sum())").await?;
+    /// ```
+    ///
+    /// # Note
+    ///
+    /// When native extensions are added, the sandbox creation is slower because
+    /// the component needs to be re-linked. Consider caching the linked component
+    /// for repeated use with the same extensions.
+    #[cfg(feature = "native-extensions")]
+    #[must_use]
+    pub fn with_native_extension(
+        mut self,
+        name: impl Into<String>,
+        bytes: impl Into<Vec<u8>>,
+    ) -> Self {
+        self.native_extensions
+            .push(eryx_runtime::linker::NativeExtension::new(name, bytes.into()));
+        self
+    }
+
     /// Add a runtime library (callbacks + preamble + stubs).
     #[must_use]
     pub fn with_library(mut self, library: RuntimeLibrary) -> Self {
@@ -621,9 +666,45 @@ impl SandboxBuilder {
     /// - The WASM component cannot be loaded
     /// - The WebAssembly runtime fails to initialize
     pub fn build(self) -> Result<Sandbox, Error> {
-        let executor = match self.wasm_source {
-            WasmSource::Bytes(bytes) => PythonExecutor::from_binary(&bytes)?,
-            WasmSource::File(path) => PythonExecutor::from_file(&path)?,
+        // If native extensions are specified, use late-linking to create the component
+        #[cfg(feature = "native-extensions")]
+        let executor = if !self.native_extensions.is_empty() {
+            let component_bytes = eryx_runtime::linker::link_with_extensions(&self.native_extensions)
+                .map_err(|e| Error::Initialization(format!("late-linking failed: {e}")))?;
+            PythonExecutor::from_binary(&component_bytes)?
+        } else {
+            self.build_executor_from_source()?
+        };
+
+        #[cfg(not(feature = "native-extensions"))]
+        let executor = self.build_executor_from_source()?;
+
+        // Apply Python stdlib and site-packages paths if configured
+        let executor = match (self.python_stdlib_path.clone(), self.python_site_packages_path.clone()) {
+            (Some(stdlib), Some(site)) => executor
+                .with_python_stdlib(&stdlib)
+                .with_site_packages(&site),
+            (Some(stdlib), None) => executor.with_python_stdlib(&stdlib),
+            (None, Some(site)) => executor.with_site_packages(&site),
+            (None, None) => executor,
+        };
+
+        Ok(Sandbox {
+            executor: Arc::new(executor),
+            callbacks: self.callbacks,
+            preamble: self.preamble,
+            type_stubs: self.type_stubs,
+            trace_handler: self.trace_handler,
+            output_handler: self.output_handler,
+            resource_limits: self.resource_limits,
+        })
+    }
+
+    /// Build executor from the configured WASM source.
+    fn build_executor_from_source(&self) -> Result<PythonExecutor, Error> {
+        let executor = match &self.wasm_source {
+            WasmSource::Bytes(bytes) => PythonExecutor::from_binary(bytes)?,
+            WasmSource::File(path) => PythonExecutor::from_file(path)?,
 
             #[cfg(feature = "precompiled")]
             WasmSource::PrecompiledBytes(bytes) => {
@@ -675,25 +756,7 @@ impl SandboxBuilder {
             }
         };
 
-        // Apply Python stdlib and site-packages paths if configured
-        let executor = match (self.python_stdlib_path, self.python_site_packages_path) {
-            (Some(stdlib), Some(site_packages)) => {
-                executor.with_python_stdlib(stdlib).with_site_packages(site_packages)
-            }
-            (Some(stdlib), None) => executor.with_python_stdlib(stdlib),
-            (None, Some(site_packages)) => executor.with_site_packages(site_packages),
-            (None, None) => executor,
-        };
-
-        Ok(Sandbox {
-            executor: Arc::new(executor),
-            callbacks: self.callbacks,
-            preamble: self.preamble,
-            type_stubs: self.type_stubs,
-            trace_handler: self.trace_handler,
-            output_handler: self.output_handler,
-            resource_limits: self.resource_limits,
-        })
+        Ok(executor)
     }
 }
 

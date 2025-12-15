@@ -13,12 +13,22 @@ readme = "README.md"
 # The component uses our custom eryx-wasm-runtime (liberyx_runtime.so)
 # instead of componentize-py's runtime.
 
+[features]
+default = []
+# Enable late-linking support for native extensions
+late-linking = ["dep:wit-component", "dep:zstd", "dep:sha2", "dep:zip"]
+
 [dependencies]
+wit-component = { workspace = true, optional = true }
+zstd = { workspace = true, optional = true }
+sha2 = { workspace = true, optional = true }
+zip = { workspace = true, optional = true }
 
 [build-dependencies]
 wit-dylib.workspace = true
 wit-component.workspace = true
 wit-parser.workspace = true
+zstd.workspace = true
 
 [lints]
 workspace = true
