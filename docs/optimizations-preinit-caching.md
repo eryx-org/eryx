@@ -2,7 +2,7 @@
 
 **Goal:** Reduce sandbox creation time from ~1500-2000ms (with numpy) to <100ms while maintaining late-linking flexibility.
 
-**Status:** Pre-compilation caching implemented ✅, pre-initialization planned
+**Status:** ✅ Both optimizations implemented and working!
 
 ---
 
@@ -27,11 +27,19 @@ This document covers three **distinct** optimizations that work together:
   - `SandboxBuilder::with_cache()` and `with_cache_dir()` methods
   - Benchmark: `cargo bench -p eryx --features native-extensions,precompiled -- caching`
 
-### 3. Pre-Initialization (Need to Implement)
+### 3. Pre-Initialization ✅ IMPLEMENTED
 - **What:** Run Python init + imports, capture memory state into component
 - **Saves:** Python initialization + first imports (50-100ms → <1ms per execution)
-- **Status:** ❌ Not implemented (but `preinit.rs` exists in `feat/late-linking-exploration`)
-- **Complexity:** Medium-High (3-4 days)
+- **Status:** ✅ Implemented in `crates/eryx-runtime/src/preinit.rs`
+- **Implementation:**
+  - Uses `component-init-transform` to capture memory state
+  - `pre_initialize()` function takes linked component + import list
+  - Example: `cargo run --example numpy_preinit --features pre-init,precompiled --release`
+- **Measured results (numpy):**
+  - Pre-init time: ~2s (one-time cost)
+  - Pre-compile time: ~740ms (one-time cost)
+  - Sandbox creation from cache: ~18ms
+  - Execution with numpy: ~11ms
 
 **Key distinction:** Pre-compilation saves JIT time. Pre-initialization saves Python startup time. They're complementary.
 
