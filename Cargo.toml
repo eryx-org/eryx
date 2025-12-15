@@ -52,6 +52,9 @@ zip = "2.0"
 # Hashing
 sha2 = "0.10"
 
+# Archive extraction
+tar = "0.4"
+
 # WebAssembly component linking and WIT parsing
 wit-component = { git = "https://github.com/bytecodealliance/wasm-tools", rev = "e2bb0a24" }
 wit-dylib = { git = "https://github.com/bytecodealliance/wasm-tools", rev = "e2bb0a24" }

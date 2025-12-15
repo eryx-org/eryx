@@ -13,6 +13,7 @@ use futures::StreamExt;
 use futures::stream::FuturesUnordered;
 use tokio::sync::mpsc;
 
+#[cfg(feature = "native-extensions")]
 use crate::cache::ComponentCache;
 use crate::callback::Callback;
 use crate::error::Error;
@@ -750,8 +751,22 @@ impl SandboxBuilder {
         #[cfg(not(feature = "native-extensions"))]
         let executor = self.build_executor_from_source()?;
 
-        // Apply Python stdlib and site-packages paths if configured
-        let executor = match (self.python_stdlib_path.clone(), self.python_site_packages_path.clone()) {
+        // Determine stdlib path: explicit > embedded > none
+        let stdlib_path = self.python_stdlib_path.clone().or_else(|| {
+            #[cfg(feature = "embedded-stdlib")]
+            {
+                crate::embedded::EmbeddedResources::get()
+                    .ok()
+                    .map(|r| r.stdlib_path.clone())
+            }
+            #[cfg(not(feature = "embedded-stdlib"))]
+            {
+                None
+            }
+        });
+
+        // Apply Python stdlib and site-packages paths if available
+        let executor = match (stdlib_path, self.python_site_packages_path.clone()) {
             (Some(stdlib), Some(site)) => executor
                 .with_python_stdlib(&stdlib)
                 .with_site_packages(&site),
@@ -801,13 +816,13 @@ impl SandboxBuilder {
 
             #[cfg(feature = "embedded-runtime")]
             WasmSource::EmbeddedRuntime => {
+                // Extract embedded runtime to disk and load via mmap for better memory efficiency.
                 // SAFETY: The embedded runtime was pre-compiled at build time from our own
                 // trusted runtime.wasm, so we know it's safe to deserialize.
-                const EMBEDDED_RUNTIME: &[u8] =
-                    include_bytes!(concat!(env!("OUT_DIR"), "/runtime.cwasm"));
+                let resources = crate::embedded::EmbeddedResources::get()?;
                 #[allow(unsafe_code)]
                 unsafe {
-                    PythonExecutor::from_precompiled(EMBEDDED_RUNTIME)?
+                    PythonExecutor::from_precompiled_file(&resources.runtime_path)?
                 }
             }
 

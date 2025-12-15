@@ -43,6 +43,8 @@
 
 pub mod cache;
 mod callback;
+#[cfg(any(feature = "embedded-stdlib", feature = "embedded-runtime"))]
+pub mod embedded;
 mod error;
 mod library;
 mod sandbox;

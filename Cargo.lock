@@ -807,12 +807,15 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "tar",
+ "tempfile",
  "thiserror 2.0.17",
  "tokio",
  "tracing",
  "walkdir",
  "wasmtime",
  "wasmtime-wasi",
+ "zstd",
 ]
 
 [[package]]
@@ -871,6 +874,18 @@ dependencies = [
  "cfg-if",
  "rustix 1.1.2",
  "windows-sys 0.59.0",
+]
+
+[[package]]
+name = "filetime"
+version = "0.2.26"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bc0505cd1b6fa6580283f6bdf70a73fcf4aba1184038c90902b92b3dd0df63ed"
+dependencies = [
+ "cfg-if",
+ "libc",
+ "libredox",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -1429,6 +1444,7 @@ checksum = "416f7e718bdb06000964960ffa43b4335ad4012ae8b99060261aa4a8088d5ccb"
 dependencies = [
  "bitflags",
  "libc",
+ "redox_syscall",
 ]
 
 [[package]]
@@ -2316,6 +2332,17 @@ dependencies = [
  "rustix 0.38.44",
  "windows-sys 0.59.0",
  "winx",
+]
+
+[[package]]
+name = "tar"
+version = "0.4.44"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1d863878d212c87a19c1a610eb53bb01fe12951c0501cf5a0d65f724914a667a"
+dependencies = [
+ "filetime",
+ "libc",
+ "xattr",
 ]
 
 [[package]]
@@ -3576,6 +3603,16 @@ name = "writeable"
 version = "0.6.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9edde0db4769d2dc68579893f2306b26c6ecfbe0ef499b013d731b7b9247e0b9"
+
+[[package]]
+name = "xattr"
+version = "1.6.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "32e45ad4206f6d2479085147f02bc2ef834ac85886624a23575ae137c8aa8156"
+dependencies = [
+ "libc",
+ "rustix 1.1.2",
+]
 
 [[package]]
 name = "xz2"

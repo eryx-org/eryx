@@ -48,6 +48,10 @@ wasmtime.workspace = true
 wasmtime-wasi.workspace = true
 tracing.workspace = true
 sha2.workspace = true
+# Compression and archive extraction (for embedded stdlib)
+zstd = { workspace = true, optional = true }
+tar = { workspace = true, optional = true }
+tempfile = { workspace = true, optional = true }
 # Native extension support (optional)
 eryx-runtime = { path = "../eryx-runtime", optional = true }
 
@@ -61,6 +65,9 @@ precompiled = []
 # Requires runtime.wasm to be built before compiling this crate.
 # Implies `precompiled` feature.
 embedded-runtime = ["precompiled", "dep:wasmtime"]
+# Embed Python standard library in the binary for zero-configuration sandboxes.
+# The stdlib is compressed (~2MB) and extracted to a temp directory on first use.
+embedded-stdlib = ["dep:zstd", "dep:tar", "dep:tempfile"]
 # Enable native Python extension support via late-linking.
 # This allows adding extensions like numpy at sandbox creation time.
 native-extensions = ["dep:eryx-runtime", "eryx-runtime/late-linking"]
