@@ -20,11 +20,9 @@
 //! ```
 
 use std::path::Path;
-use std::sync::Arc;
 use std::time::Instant;
 
 use eryx::Sandbox;
-use eryx::cache::FilesystemCache;
 
 /// Load native extensions from a numpy directory.
 fn load_numpy_extensions(
@@ -88,10 +86,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let extensions = load_numpy_extensions(numpy_dir)?;
     println!("  Loaded {} extensions in {:?}", extensions.len(), start.elapsed());
 
-    // Create cache directory
+    // Create cache directory (using with_cache_dir for mmap-based loading)
     let cache_dir = Path::new("/tmp/eryx-cache");
     let _ = std::fs::remove_dir_all(cache_dir); // Clean for demo
-    let cache = Arc::new(FilesystemCache::new(cache_dir)?);
     println!("  Cache directory: {}", cache_dir.display());
 
     // First sandbox creation (cold - no cache)
@@ -105,7 +102,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     builder = builder
         .with_python_stdlib(&python_stdlib)
         .with_site_packages(site_packages)
-        .with_cache(cache.clone());
+        .with_cache_dir(cache_dir)?;
 
     let sandbox1 = builder.build()?;
     let cold_time = start.elapsed();
@@ -115,7 +112,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let result = sandbox1.execute("import numpy as np; print(np.array([1,2,3]).sum())").await?;
     println!("  Test: {}", result.stdout.trim());
 
-    // Second sandbox creation (warm - cache hit)
+    // Second sandbox creation (warm - cache hit with mmap)
     println!("\n--- Second sandbox (cache hit) ---\n");
     let start = Instant::now();
 
@@ -126,7 +123,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     builder = builder
         .with_python_stdlib(&python_stdlib)
         .with_site_packages(site_packages)
-        .with_cache(cache.clone());
+        .with_cache_dir(cache_dir)?;
 
     let sandbox2 = builder.build()?;
     let warm_time = start.elapsed();
@@ -136,7 +133,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let result = sandbox2.execute("import numpy as np; print(np.array([4,5,6]).sum())").await?;
     println!("  Test: {}", result.stdout.trim());
 
-    // Third sandbox (also warm)
+    // Third sandbox (also warm with mmap)
     println!("\n--- Third sandbox (cache hit) ---\n");
     let start = Instant::now();
 
@@ -147,7 +144,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     builder = builder
         .with_python_stdlib(&python_stdlib)
         .with_site_packages(site_packages)
-        .with_cache(cache.clone());
+        .with_cache_dir(cache_dir)?;
 
     let sandbox3 = builder.build()?;
     let warm_time2 = start.elapsed();

@@ -364,6 +364,9 @@ pub struct SandboxBuilder {
     /// Component cache for faster sandbox creation with native extensions.
     #[cfg(feature = "native-extensions")]
     cache: Option<Arc<dyn ComponentCache>>,
+    /// Filesystem cache directory for mmap-based loading (faster than bytes).
+    #[cfg(feature = "native-extensions")]
+    filesystem_cache: Option<crate::cache::FilesystemCache>,
 }
 
 impl Default for SandboxBuilder {
@@ -407,6 +410,8 @@ impl SandboxBuilder {
             native_extensions: Vec::new(),
             #[cfg(feature = "native-extensions")]
             cache: None,
+            #[cfg(feature = "native-extensions")]
+            filesystem_cache: None,
         }
     }
 
@@ -626,9 +631,11 @@ impl SandboxBuilder {
     ///
     /// [`FilesystemCache`]: crate::cache::FilesystemCache
     #[cfg(feature = "native-extensions")]
-    pub fn with_cache_dir(self, path: impl AsRef<std::path::Path>) -> Result<Self, Error> {
+    pub fn with_cache_dir(mut self, path: impl AsRef<std::path::Path>) -> Result<Self, Error> {
         let cache = crate::cache::FilesystemCache::new(path)
             .map_err(|e| Error::Initialization(format!("failed to create cache directory: {e}")))?;
+        // Store filesystem cache for mmap-based loading (3x faster than bytes)
+        self.filesystem_cache = Some(cache.clone());
         Ok(self.with_cache(Arc::new(cache)))
     }
 
@@ -836,18 +843,32 @@ impl SandboxBuilder {
 
         let cache_key = CacheKey::from_extensions(&self.native_extensions);
 
-        // Try cache first (only works with precompiled feature)
+        // Try filesystem cache first (mmap-based, 3x faster than bytes)
+        #[cfg(feature = "precompiled")]
+        if let Some(fs_cache) = &self.filesystem_cache {
+            if let Some(path) = fs_cache.get_path(&cache_key) {
+                tracing::debug!(
+                    key = %cache_key.to_hex(),
+                    path = %path.display(),
+                    "component cache hit - loading via mmap"
+                );
+                // SAFETY: The cached pre-compiled file was created by us (from
+                // `PythonExecutor::precompile()`) in a previous call. We trust our
+                // own cache directory. If the cache is corrupted or tampered with,
+                // wasmtime will detect it during deserialization.
+                #[allow(unsafe_code)]
+                return unsafe { PythonExecutor::from_precompiled_file(&path) };
+            }
+        }
+
+        // Fall back to in-memory cache (for InMemoryCache users)
         #[cfg(feature = "precompiled")]
         if let Some(cache) = &self.cache {
             if let Some(precompiled) = cache.get(&cache_key) {
                 tracing::debug!(
                     key = %cache_key.to_hex(),
-                    "component cache hit - loading precompiled component"
+                    "component cache hit - loading from bytes"
                 );
-                // SAFETY: The cached pre-compiled bytes were created by us (from
-                // `PythonExecutor::precompile()`) in a previous call. We trust our
-                // own cache directory. If the cache is corrupted or tampered with,
-                // wasmtime will detect it during deserialization.
                 #[allow(unsafe_code)]
                 return unsafe { PythonExecutor::from_precompiled(&precompiled) };
             }

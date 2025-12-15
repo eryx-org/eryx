@@ -176,6 +176,21 @@ impl FilesystemCache {
         Ok(Self { cache_dir })
     }
 
+    /// Get the file path for a cache entry (for mmap-based loading).
+    ///
+    /// Returns `Some(path)` if the cache entry exists, `None` otherwise.
+    /// Using the file path directly with `Component::deserialize_file`
+    /// enables memory-mapped loading which is faster for large components.
+    #[must_use]
+    pub fn get_path(&self, key: &CacheKey) -> Option<PathBuf> {
+        let path = self.cache_path(key);
+        if path.exists() {
+            Some(path)
+        } else {
+            None
+        }
+    }
+
     /// Get the path for a cache entry.
     fn cache_path(&self, key: &CacheKey) -> PathBuf {
         self.cache_dir.join(format!("{}.cwasm", key.to_hex()))

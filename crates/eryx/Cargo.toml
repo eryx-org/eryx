@@ -80,3 +80,7 @@ wasmtime = { workspace = true, optional = true }
 
 [lints]
 workspace = true
+
+[[example]]
+name = "session_bench"
+required-features = ["pre-init", "precompiled"]
