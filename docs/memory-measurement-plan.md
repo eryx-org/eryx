@@ -198,12 +198,14 @@ Sandbox Count  RSS (MB)  Per-Sandbox (MB)
    | 8 GB          | ~900                | ~95                  |
    | 16 GB         | ~1800               | ~190                 |
 
+### Implemented Optimizations (December 2024)
+
+1. **Shared Engine** (DONE): All `PythonExecutor` instances now share a global wasmtime `Engine` via `OnceLock`. This saves memory and startup time since the JIT compiler configuration and compiled code cache are shared. Engine is thread-safe.
+
+2. **Reduced Memory Limit** (DONE): Default `max_memory_bytes` reduced from 256 MB to 128 MB. This limits actual memory usage per sandbox while keeping the full 4GB virtual address space.
+
 ### Potential Future Optimizations
 
-1. **Shared Engine**: Currently each `PythonExecutor` creates its own wasmtime `Engine`. Sharing an Engine across sandboxes could reduce memory and improve startup time since Engine creation is expensive.
+1. **Instance Pooling**: Wasmtime supports instance pooling which can reuse memory allocations. This requires tuning based on workload patterns and has [many caveats](https://docs.wasmtime.dev/api/wasmtime/struct.PoolingAllocationConfig.html).
 
-2. **Instance Pooling**: Wasmtime supports instance pooling which can reuse memory allocations. This requires tuning based on workload patterns.
-
-3. **Memory Limits**: Configure smaller WASM linear memory limits if full 4GB virtual space isn't needed.
-
-4. **Pre-initialization Scope**: Pre-initialize with commonly used imports (like numpy) to amortize initialization cost across sandboxes.
+2. **Pre-initialization Scope**: Pre-initialize with commonly used imports (like numpy) to amortize initialization cost across sandboxes.

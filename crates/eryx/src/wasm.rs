@@ -375,6 +375,33 @@ impl PythonExecutor {
 impl PythonExecutor {
     // Note: engine() and instance_pre() accessors are defined above
 
+    /// Get or create the global shared wasmtime Engine.
+    ///
+    /// The Engine is thread-safe and automatically shared across all `PythonExecutor`
+    /// instances. Sharing an Engine saves memory and startup time since the JIT
+    /// compiler configuration and compiled code cache are shared.
+    ///
+    /// This is called automatically by `from_binary`, `from_file`, etc.
+    /// You typically don't need to call this directly.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if engine creation fails (only on first call).
+    pub fn shared_engine() -> std::result::Result<Engine, Error> {
+        use std::sync::OnceLock;
+        static SHARED_ENGINE: OnceLock<Engine> = OnceLock::new();
+
+        // Fast path: engine already initialized
+        if let Some(engine) = SHARED_ENGINE.get() {
+            return Ok(engine.clone());
+        }
+
+        // Slow path: create engine (may race with other threads)
+        let engine = Self::create_engine()?;
+        // get_or_init handles the race - only one engine is kept
+        Ok(SHARED_ENGINE.get_or_init(|| engine).clone())
+    }
+
     /// Create a new executor by loading a WASM component from bytes.
     ///
     /// This performs all expensive operations upfront:
@@ -382,6 +409,8 @@ impl PythonExecutor {
     /// - Compiling to native code
     /// - Linking WASI and sandbox imports
     /// - Creating a pre-instantiated template
+    ///
+    /// Uses the global shared Engine automatically for memory efficiency.
     ///
     /// Subsequent calls to `execute()` will be fast because they only
     /// need to instantiate from the pre-compiled template.
@@ -391,7 +420,7 @@ impl PythonExecutor {
     /// Returns an error if the WASM component cannot be loaded or the
     /// wasmtime engine cannot be configured.
     pub fn from_binary(wasm_bytes: &[u8]) -> std::result::Result<Self, Error> {
-        let engine = Self::create_engine()?;
+        let engine = Self::shared_engine()?;
         let component =
             Component::from_binary(&engine, wasm_bytes).map_err(Error::WasmComponent)?;
         let instance_pre = Self::create_instance_pre(&engine, &component)?;
@@ -407,13 +436,14 @@ impl PythonExecutor {
     /// Create a new executor by loading a WASM component from a file.
     ///
     /// This performs all expensive operations upfront (see `from_binary`).
+    /// Uses the global shared Engine automatically.
     ///
     /// # Errors
     ///
     /// Returns an error if the file cannot be read or the WASM component
     /// cannot be loaded.
     pub fn from_file(path: impl AsRef<std::path::Path>) -> std::result::Result<Self, Error> {
-        let engine = Self::create_engine()?;
+        let engine = Self::shared_engine()?;
         let component =
             Component::from_file(&engine, path.as_ref()).map_err(Error::WasmComponent)?;
         let instance_pre = Self::create_instance_pre(&engine, &component)?;
@@ -431,6 +461,7 @@ impl PythonExecutor {
     /// This is much faster than `from_binary` because it skips compilation.
     /// The pre-compiled bytes must have been created by `precompile()` with
     /// a compatible engine configuration.
+    /// Uses the global shared Engine automatically.
     ///
     /// # Safety
     ///
@@ -445,7 +476,7 @@ impl PythonExecutor {
     #[cfg(feature = "precompiled")]
     #[allow(unsafe_code)]
     pub unsafe fn from_precompiled(precompiled_bytes: &[u8]) -> std::result::Result<Self, Error> {
-        let engine = Self::create_engine()?;
+        let engine = Self::shared_engine()?;
         // SAFETY: Caller guarantees the precompiled bytes are trusted and were
         // created by `precompile()` with a compatible engine configuration.
         #[allow(unsafe_code)]
@@ -464,6 +495,7 @@ impl PythonExecutor {
     /// Create a new executor by loading a pre-compiled component from a file.
     ///
     /// This is much faster than `from_file` because it skips compilation.
+    /// Uses the global shared Engine automatically.
     /// The file must have been created by `precompile()` with a compatible
     /// engine configuration.
     ///
@@ -482,7 +514,7 @@ impl PythonExecutor {
     pub unsafe fn from_precompiled_file(
         path: impl AsRef<std::path::Path>,
     ) -> std::result::Result<Self, Error> {
-        let engine = Self::create_engine()?;
+        let engine = Self::shared_engine()?;
         // SAFETY: Caller guarantees the precompiled file is trusted and was
         // created by `precompile()` with a compatible engine configuration.
         #[allow(unsafe_code)]

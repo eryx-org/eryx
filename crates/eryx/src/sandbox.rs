@@ -952,7 +952,7 @@ impl Default for ResourceLimits {
         Self {
             execution_timeout: Some(Duration::from_secs(30)),
             callback_timeout: Some(Duration::from_secs(10)),
-            max_memory_bytes: Some(256 * 1024 * 1024), // 256 MB
+            max_memory_bytes: Some(128 * 1024 * 1024), // 128 MB
             max_callback_invocations: Some(1000),
         }
     }
