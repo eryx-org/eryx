@@ -2,7 +2,7 @@
 
 **Goal:** Reduce sandbox creation time from ~1500-2000ms (with numpy) to <100ms while maintaining late-linking flexibility.
 
-**Status:** Planning (existing preinit.rs implementation available in feat/late-linking-exploration)
+**Status:** Pre-compilation caching implemented ✅, pre-initialization planned
 
 ---
 
@@ -16,11 +16,16 @@ This document covers three **distinct** optimizations that work together:
 - **Status:** ✅ Working today via `embedded-runtime` feature
 - **Implementation:** `PythonExecutor::precompile()` uses `wasmtime::Module::serialize()`
 
-### 2. Pre-Compilation Caching (Need to Implement)
+### 2. Pre-Compilation Caching ✅ IMPLEMENTED
 - **What:** Cache pre-compiled components by extension hash
-- **Saves:** Linking + compilation on repeated builds (991ms → 10ms)
-- **Status:** ❌ Not implemented
-- **Complexity:** Low (1-2 days)
+- **Saves:** Linking + compilation on repeated builds (1.07s → 61ms)
+- **Status:** ✅ Implemented in `crates/eryx/src/cache.rs`
+- **Speedup:** ~18x (benchmark measured)
+- **Implementation:**
+  - `ComponentCache` trait with `FilesystemCache` and `InMemoryCache` implementations
+  - `CacheKey` computed from SHA256 of extension bytes + eryx/wasmtime versions
+  - `SandboxBuilder::with_cache()` and `with_cache_dir()` methods
+  - Benchmark: `cargo bench -p eryx --features native-extensions,precompiled -- caching`
 
 ### 3. Pre-Initialization (Need to Implement)
 - **What:** Run Python init + imports, capture memory state into component
@@ -210,10 +215,13 @@ let sandbox2 = Sandbox::builder()
     .build()?;
 ```
 
-**Actual measurements:**
-- Embedded runtime (pre-compiled): **10.1ms** (measured via embedded_runtime example)
-- Late-linking with numpy (release): **991ms** (measured via numpy_native example)
-- From-file loading (dev): **514ms** (measured via criterion benchmark)
+**Actual measurements (criterion benchmarks, release mode):**
+- Cold (no cache): **1.07s** (link + compile each time)
+- Warm (filesystem cache): **61ms** (load from cache + deserialize)
+- Warm (memory cache): **62ms** (load from cache + deserialize)
+- Speedup: **~18x** on cache hit
+
+Run benchmarks with: `cargo bench -p eryx --features native-extensions,precompiled -- caching`
 
 ### Cache Invalidation
 

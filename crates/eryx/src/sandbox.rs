@@ -13,6 +13,7 @@ use futures::StreamExt;
 use futures::stream::FuturesUnordered;
 use tokio::sync::mpsc;
 
+use crate::cache::ComponentCache;
 use crate::callback::Callback;
 use crate::error::Error;
 use crate::library::RuntimeLibrary;
@@ -360,6 +361,9 @@ pub struct SandboxBuilder {
     /// Native Python extensions to link into the component.
     #[cfg(feature = "native-extensions")]
     native_extensions: Vec<eryx_runtime::linker::NativeExtension>,
+    /// Component cache for faster sandbox creation with native extensions.
+    #[cfg(feature = "native-extensions")]
+    cache: Option<Arc<dyn ComponentCache>>,
 }
 
 impl Default for SandboxBuilder {
@@ -401,6 +405,8 @@ impl SandboxBuilder {
             python_site_packages_path: None,
             #[cfg(feature = "native-extensions")]
             native_extensions: Vec::new(),
+            #[cfg(feature = "native-extensions")]
+            cache: None,
         }
     }
 
@@ -566,6 +572,66 @@ impl SandboxBuilder {
         self
     }
 
+    /// Set a component cache for faster sandbox creation with native extensions.
+    ///
+    /// When native extensions are used, the sandbox must link them into the base
+    /// component and then JIT compile the result. This can take 500-1000ms.
+    ///
+    /// With caching enabled, the linked and pre-compiled component is stored and
+    /// reused on subsequent calls, reducing creation time to ~10ms.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// use eryx::{Sandbox, cache::InMemoryCache};
+    ///
+    /// let cache = InMemoryCache::new();
+    ///
+    /// // First call: ~1000ms (link + compile + cache)
+    /// let sandbox1 = Sandbox::builder()
+    ///     .with_native_extension("numpy/core/*.so", bytes)
+    ///     .with_cache(Arc::new(cache.clone()))
+    ///     .build()?;
+    ///
+    /// // Second call: ~10ms (cache hit)
+    /// let sandbox2 = Sandbox::builder()
+    ///     .with_native_extension("numpy/core/*.so", bytes)
+    ///     .with_cache(Arc::new(cache))
+    ///     .build()?;
+    /// ```
+    #[cfg(feature = "native-extensions")]
+    #[must_use]
+    pub fn with_cache(mut self, cache: Arc<dyn ComponentCache>) -> Self {
+        self.cache = Some(cache);
+        self
+    }
+
+    /// Set a filesystem-based component cache for faster sandbox creation.
+    ///
+    /// This is a convenience method that creates a [`FilesystemCache`] at the
+    /// given directory path.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the cache directory cannot be created.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// let sandbox = Sandbox::builder()
+    ///     .with_native_extension("numpy/core/*.so", bytes)
+    ///     .with_cache_dir("/tmp/eryx-cache")?
+    ///     .build()?;
+    /// ```
+    ///
+    /// [`FilesystemCache`]: crate::cache::FilesystemCache
+    #[cfg(feature = "native-extensions")]
+    pub fn with_cache_dir(self, path: impl AsRef<std::path::Path>) -> Result<Self, Error> {
+        let cache = crate::cache::FilesystemCache::new(path)
+            .map_err(|e| Error::Initialization(format!("failed to create cache directory: {e}")))?;
+        Ok(self.with_cache(Arc::new(cache)))
+    }
+
     /// Add a runtime library (callbacks + preamble + stubs).
     #[must_use]
     pub fn with_library(mut self, library: RuntimeLibrary) -> Self {
@@ -669,9 +735,7 @@ impl SandboxBuilder {
         // If native extensions are specified, use late-linking to create the component
         #[cfg(feature = "native-extensions")]
         let executor = if !self.native_extensions.is_empty() {
-            let component_bytes = eryx_runtime::linker::link_with_extensions(&self.native_extensions)
-                .map_err(|e| Error::Initialization(format!("late-linking failed: {e}")))?;
-            PythonExecutor::from_binary(&component_bytes)?
+            self.build_executor_with_extensions()?
         } else {
             self.build_executor_from_source()?
         };
@@ -713,7 +777,7 @@ impl SandboxBuilder {
                 // caller has acknowledged this responsibility.
                 #[allow(unsafe_code)]
                 unsafe {
-                    PythonExecutor::from_precompiled(&bytes)?
+                    PythonExecutor::from_precompiled(bytes)?
                 }
             }
 
@@ -724,7 +788,7 @@ impl SandboxBuilder {
                 // caller has acknowledged this responsibility.
                 #[allow(unsafe_code)]
                 unsafe {
-                    PythonExecutor::from_precompiled_file(&path)?
+                    PythonExecutor::from_precompiled_file(path)?
                 }
             }
 
@@ -757,6 +821,73 @@ impl SandboxBuilder {
         };
 
         Ok(executor)
+    }
+
+    /// Build executor with native extensions, using cache if available.
+    ///
+    /// When a cache is configured and the `precompiled` feature is enabled,
+    /// this will:
+    /// 1. Check the cache for a pre-compiled component
+    /// 2. If found, load from cache (fast path)
+    /// 3. If not found, link extensions, pre-compile, cache, and return
+    #[cfg(feature = "native-extensions")]
+    fn build_executor_with_extensions(&self) -> Result<PythonExecutor, Error> {
+        use crate::cache::CacheKey;
+
+        let cache_key = CacheKey::from_extensions(&self.native_extensions);
+
+        // Try cache first (only works with precompiled feature)
+        #[cfg(feature = "precompiled")]
+        if let Some(cache) = &self.cache {
+            if let Some(precompiled) = cache.get(&cache_key) {
+                tracing::debug!(
+                    key = %cache_key.to_hex(),
+                    "component cache hit - loading precompiled component"
+                );
+                // SAFETY: The cached pre-compiled bytes were created by us (from
+                // `PythonExecutor::precompile()`) in a previous call. We trust our
+                // own cache directory. If the cache is corrupted or tampered with,
+                // wasmtime will detect it during deserialization.
+                #[allow(unsafe_code)]
+                return unsafe { PythonExecutor::from_precompiled(&precompiled) };
+            }
+            tracing::debug!(
+                key = %cache_key.to_hex(),
+                "component cache miss - will link and compile"
+            );
+        }
+
+        // Cache miss or no cache - link the component
+        let component_bytes = eryx_runtime::linker::link_with_extensions(&self.native_extensions)
+            .map_err(|e| Error::Initialization(format!("late-linking failed: {e}")))?;
+
+        // Pre-compile and cache if available
+        #[cfg(feature = "precompiled")]
+        if let Some(cache) = &self.cache {
+            let precompiled = PythonExecutor::precompile(&component_bytes)?;
+
+            // Cache the pre-compiled bytes
+            if let Err(e) = cache.put(&cache_key, precompiled.clone()) {
+                tracing::warn!(
+                    error = %e,
+                    "failed to cache pre-compiled component"
+                );
+            } else {
+                tracing::debug!(
+                    key = %cache_key.to_hex(),
+                    size = precompiled.len(),
+                    "cached pre-compiled component"
+                );
+            }
+
+            // Load from pre-compiled bytes
+            // SAFETY: We just created these bytes from `precompile()` above.
+            #[allow(unsafe_code)]
+            return unsafe { PythonExecutor::from_precompiled(&precompiled) };
+        }
+
+        // No cache or precompiled feature - create executor directly from linked bytes
+        PythonExecutor::from_binary(&component_bytes)
     }
 }
 

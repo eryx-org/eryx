@@ -41,6 +41,7 @@
 #![cfg_attr(not(feature = "precompiled"), forbid(unsafe_code))]
 #![cfg_attr(feature = "precompiled", deny(unsafe_code))]
 
+pub mod cache;
 mod callback;
 mod error;
 mod library;

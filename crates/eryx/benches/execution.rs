@@ -416,6 +416,159 @@ fn bench_introspection(c: &mut Criterion) {
     });
 }
 
+/// Benchmark sandbox creation with native extension caching.
+///
+/// Requires:
+/// - `native-extensions` and `precompiled` features enabled
+/// - numpy extracted at /tmp/numpy
+///
+/// Run with:
+/// ```bash
+/// cargo bench --package eryx --features native-extensions,precompiled -- caching
+/// ```
+#[cfg(all(feature = "native-extensions", feature = "precompiled"))]
+fn bench_native_extension_caching(c: &mut Criterion) {
+    use std::sync::Arc;
+    use eryx::cache::{FilesystemCache, InMemoryCache};
+
+    let numpy_dir = std::path::Path::new("/tmp/numpy");
+    if !numpy_dir.exists() {
+        eprintln!("Skipping caching benchmarks: numpy not found at /tmp/numpy");
+        eprintln!("Download it with:");
+        eprintln!("  curl -sL https://github.com/dicej/wasi-wheels/releases/download/v0.0.2/numpy-wasi.tar.gz -o /tmp/numpy-wasi.tar.gz");
+        eprintln!("  tar -xzf /tmp/numpy-wasi.tar.gz -C /tmp/");
+        return;
+    }
+
+    // Load extensions once
+    let extensions: Vec<(String, Vec<u8>)> = walkdir::WalkDir::new(numpy_dir)
+        .into_iter()
+        .filter_map(|e| e.ok())
+        .filter(|e| e.path().extension().map_or(false, |ext| ext == "so"))
+        .filter_map(|e| {
+            let path = e.path();
+            let numpy_parent = numpy_dir.parent()?;
+            let relative_path = path.strip_prefix(numpy_parent).ok()?;
+            let dlopen_path = format!("/site-packages/{}", relative_path.to_string_lossy());
+            let bytes = std::fs::read(path).ok()?;
+            Some((dlopen_path, bytes))
+        })
+        .collect();
+
+    if extensions.is_empty() {
+        eprintln!("No .so files found in /tmp/numpy");
+        return;
+    }
+
+    // Get Python stdlib path
+    let manifest_dir = env!("CARGO_MANIFEST_DIR");
+    let python_stdlib = std::path::Path::new(manifest_dir)
+        .parent()
+        .and_then(|p| p.parent())
+        .expect("Could not find workspace root")
+        .join("crates/eryx-wasm-runtime/tests/python-stdlib");
+
+    let site_packages = numpy_dir.parent().expect("numpy parent");
+
+    // Create cache
+    let cache_dir = std::path::Path::new("/tmp/eryx-bench-cache");
+    let _ = std::fs::remove_dir_all(cache_dir); // Clean for accurate benchmarks
+    let filesystem_cache = Arc::new(FilesystemCache::new(cache_dir).expect("create cache"));
+    let memory_cache = Arc::new(InMemoryCache::new());
+
+    let mut group = c.benchmark_group("native_extension_caching");
+    group.sample_size(10); // Slower operations need fewer samples
+    group.measurement_time(Duration::from_secs(30));
+
+    // Cold start (no cache)
+    group.bench_function("cold_no_cache", |b| {
+        b.iter(|| {
+            let mut builder = Sandbox::builder();
+            for (name, bytes) in &extensions {
+                builder = builder.with_native_extension(name.clone(), bytes.clone());
+            }
+            builder = builder
+                .with_python_stdlib(&python_stdlib)
+                .with_site_packages(site_packages);
+            builder.build().expect("build sandbox")
+        });
+    });
+
+    // Warm (filesystem cache hit)
+    // First, populate the cache
+    {
+        let mut builder = Sandbox::builder();
+        for (name, bytes) in &extensions {
+            builder = builder.with_native_extension(name.clone(), bytes.clone());
+        }
+        builder = builder
+            .with_python_stdlib(&python_stdlib)
+            .with_site_packages(site_packages)
+            .with_cache(filesystem_cache.clone());
+        let _ = builder.build().expect("populate cache");
+    }
+
+    group.bench_function("warm_filesystem_cache", |b| {
+        b.iter(|| {
+            let mut builder = Sandbox::builder();
+            for (name, bytes) in &extensions {
+                builder = builder.with_native_extension(name.clone(), bytes.clone());
+            }
+            builder = builder
+                .with_python_stdlib(&python_stdlib)
+                .with_site_packages(site_packages)
+                .with_cache(filesystem_cache.clone());
+            builder.build().expect("build sandbox")
+        });
+    });
+
+    // Warm (in-memory cache hit)
+    // First, populate the cache
+    {
+        let mut builder = Sandbox::builder();
+        for (name, bytes) in &extensions {
+            builder = builder.with_native_extension(name.clone(), bytes.clone());
+        }
+        builder = builder
+            .with_python_stdlib(&python_stdlib)
+            .with_site_packages(site_packages)
+            .with_cache(memory_cache.clone());
+        let _ = builder.build().expect("populate cache");
+    }
+
+    group.bench_function("warm_memory_cache", |b| {
+        b.iter(|| {
+            let mut builder = Sandbox::builder();
+            for (name, bytes) in &extensions {
+                builder = builder.with_native_extension(name.clone(), bytes.clone());
+            }
+            builder = builder
+                .with_python_stdlib(&python_stdlib)
+                .with_site_packages(site_packages)
+                .with_cache(memory_cache.clone());
+            builder.build().expect("build sandbox")
+        });
+    });
+
+    group.finish();
+
+    // Clean up
+    let _ = std::fs::remove_dir_all(cache_dir);
+}
+
+#[cfg(all(feature = "native-extensions", feature = "precompiled"))]
+criterion_group!(
+    benches,
+    bench_sandbox_init,
+    bench_wasm_instantiation,
+    bench_simple_execution,
+    bench_callback_invocation,
+    bench_parallel_callbacks,
+    bench_introspection,
+    bench_native_extension_caching,
+);
+
+#[cfg(not(all(feature = "native-extensions", feature = "precompiled")))]
 criterion_group!(
     benches,
     bench_sandbox_init,

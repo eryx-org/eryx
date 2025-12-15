@@ -1,7 +1,8 @@
 //! Example demonstrating native Python extension support with numpy.
 //!
 //! This example shows how to use late-linking to add numpy's native extensions
-//! to the sandbox at creation time.
+//! to the sandbox at creation time, and how caching dramatically improves
+//! subsequent sandbox creation.
 //!
 //! # Prerequisites
 //!
@@ -15,12 +16,41 @@
 //! # Running
 //!
 //! ```bash
-//! cargo run --example numpy_native --features native-extensions
+//! cargo run --example numpy_native --features native-extensions,precompiled --release
 //! ```
 
 use std::path::Path;
+use std::sync::Arc;
+use std::time::Instant;
 
 use eryx::Sandbox;
+use eryx::cache::FilesystemCache;
+
+/// Load native extensions from a numpy directory.
+fn load_numpy_extensions(
+    numpy_dir: &Path,
+) -> Result<Vec<(String, Vec<u8>)>, Box<dyn std::error::Error>> {
+    let mut extensions = Vec::new();
+
+    for entry in walkdir::WalkDir::new(numpy_dir) {
+        let entry = entry?;
+        let path = entry.path();
+
+        if let Some(ext) = path.extension()
+            && ext == "so"
+        {
+            let numpy_parent = numpy_dir
+                .parent()
+                .ok_or("Cannot find numpy parent directory")?;
+            let relative_path = path.strip_prefix(numpy_parent)?;
+            let dlopen_path = format!("/site-packages/{}", relative_path.to_string_lossy());
+            let bytes = std::fs::read(path)?;
+            extensions.push((dlopen_path, bytes));
+        }
+    }
+
+    Ok(extensions)
+}
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -45,50 +75,109 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .join("tests")
         .join("python-stdlib");
 
-    println!("Loading numpy native extensions...");
-
-    // Find all .so files in the numpy directory
-    let mut builder = Sandbox::builder();
-    let mut extension_count = 0;
-
-    for entry in walkdir::WalkDir::new(numpy_dir) {
-        let entry = entry?;
-        let path = entry.path();
-
-        if let Some(ext) = path.extension()
-            && ext == "so"
-        {
-            // Python will dlopen with the full path from the mounted filesystem.
-            // Since we mount /tmp at /site-packages, the path will be
-            // /site-packages/numpy/core/foo.so
-            let numpy_parent = numpy_dir
-                .parent()
-                .ok_or("Cannot find numpy parent directory")?;
-            let relative_path = path.strip_prefix(numpy_parent)?;
-            let dlopen_path = format!("/site-packages/{}", relative_path.to_string_lossy());
-            let bytes = std::fs::read(path)?;
-
-            println!("  Adding: {} ({} bytes)", dlopen_path, bytes.len());
-            builder = builder.with_native_extension(dlopen_path, bytes);
-            extension_count += 1;
-        }
-    }
-
-    println!("Added {} native extensions", extension_count);
-
-    // Mount Python stdlib and numpy's Python files via site-packages
+    // Site packages directory (contains numpy Python files)
     let site_packages = numpy_dir
         .parent()
         .ok_or("Cannot find site-packages directory")?;
+
+    println!("=== Numpy Native Extensions with Caching ===\n");
+
+    // Load extensions once
+    println!("Loading numpy native extensions...");
+    let start = Instant::now();
+    let extensions = load_numpy_extensions(numpy_dir)?;
+    println!("  Loaded {} extensions in {:?}", extensions.len(), start.elapsed());
+
+    // Create cache directory
+    let cache_dir = Path::new("/tmp/eryx-cache");
+    let _ = std::fs::remove_dir_all(cache_dir); // Clean for demo
+    let cache = Arc::new(FilesystemCache::new(cache_dir)?);
+    println!("  Cache directory: {}", cache_dir.display());
+
+    // First sandbox creation (cold - no cache)
+    println!("\n--- First sandbox (cache miss) ---\n");
+    let start = Instant::now();
+
+    let mut builder = Sandbox::builder();
+    for (name, bytes) in &extensions {
+        builder = builder.with_native_extension(name.clone(), bytes.clone());
+    }
     builder = builder
         .with_python_stdlib(&python_stdlib)
-        .with_site_packages(site_packages);
+        .with_site_packages(site_packages)
+        .with_cache(cache.clone());
 
-    println!("Building sandbox with late-linked numpy...");
-    let sandbox = builder.build()?;
+    let sandbox1 = builder.build()?;
+    let cold_time = start.elapsed();
+    println!("  Created in {:?} (cache miss - linked + compiled + cached)", cold_time);
 
-    // Test basic numpy operations
-    println!("\n--- Running numpy tests ---\n");
+    // Verify it works
+    let result = sandbox1.execute("import numpy as np; print(np.array([1,2,3]).sum())").await?;
+    println!("  Test: {}", result.stdout.trim());
+
+    // Second sandbox creation (warm - cache hit)
+    println!("\n--- Second sandbox (cache hit) ---\n");
+    let start = Instant::now();
+
+    let mut builder = Sandbox::builder();
+    for (name, bytes) in &extensions {
+        builder = builder.with_native_extension(name.clone(), bytes.clone());
+    }
+    builder = builder
+        .with_python_stdlib(&python_stdlib)
+        .with_site_packages(site_packages)
+        .with_cache(cache.clone());
+
+    let sandbox2 = builder.build()?;
+    let warm_time = start.elapsed();
+    println!("  Created in {:?} (cache hit - loaded precompiled)", warm_time);
+
+    // Verify it works
+    let result = sandbox2.execute("import numpy as np; print(np.array([4,5,6]).sum())").await?;
+    println!("  Test: {}", result.stdout.trim());
+
+    // Third sandbox (also warm)
+    println!("\n--- Third sandbox (cache hit) ---\n");
+    let start = Instant::now();
+
+    let mut builder = Sandbox::builder();
+    for (name, bytes) in &extensions {
+        builder = builder.with_native_extension(name.clone(), bytes.clone());
+    }
+    builder = builder
+        .with_python_stdlib(&python_stdlib)
+        .with_site_packages(site_packages)
+        .with_cache(cache.clone());
+
+    let sandbox3 = builder.build()?;
+    let warm_time2 = start.elapsed();
+    println!("  Created in {:?} (cache hit)", warm_time2);
+
+    // Verify it works
+    let result = sandbox3.execute("import numpy as np; print(np.linalg.det([[1,2],[3,4]]))").await?;
+    println!("  Test: det([[1,2],[3,4]]) = {}", result.stdout.trim());
+
+    // Summary
+    println!("\n=== Summary ===\n");
+    println!("  Cold (cache miss): {:?}", cold_time);
+    println!("  Warm (cache hit):  {:?}", warm_time);
+    println!("  Speedup: {:.1}x", cold_time.as_secs_f64() / warm_time.as_secs_f64());
+
+    // Check cache file
+    let cache_files: Vec<_> = std::fs::read_dir(cache_dir)?
+        .filter_map(|e| e.ok())
+        .filter(|e| e.path().extension().map_or(false, |ext| ext == "cwasm"))
+        .collect();
+
+    if let Some(entry) = cache_files.first() {
+        let metadata = entry.metadata()?;
+        println!("  Cache file: {} ({:.1} MB)",
+            entry.file_name().to_string_lossy(),
+            metadata.len() as f64 / 1_000_000.0
+        );
+    }
+
+    println!("\n=== Full numpy test ===\n");
 
     let code = r#"
 import numpy as np
@@ -117,15 +206,8 @@ print(f"\nsin values: {np.sin(x)}")
 print("\nNumpy is working!")
 "#;
 
-    let result = sandbox.execute(code).await?;
-
+    let result = sandbox3.execute(code).await?;
     println!("{}", result.stdout);
-
-    if result.stdout.contains("Numpy is working!") {
-        println!("\n--- SUCCESS: numpy native extensions work! ---");
-    } else {
-        eprintln!("\n--- FAILED: numpy test did not complete ---");
-    }
 
     Ok(())
 }
