@@ -51,6 +51,16 @@ pub mod session;
 mod trace;
 mod wasm;
 
+/// Pre-initialization support for native extensions.
+///
+/// Pre-initialization runs Python's init + imports during build time and
+/// captures the memory state into the component. This avoids the 50-100ms
+/// startup cost on each sandbox creation.
+#[cfg(feature = "pre-init")]
+pub mod preinit {
+    pub use eryx_runtime::preinit::{pre_initialize, PreInitError};
+}
+
 pub use callback::{
     Callback, CallbackError, DynamicCallback, DynamicCallbackBuilder, TypedCallback, empty_schema,
 };

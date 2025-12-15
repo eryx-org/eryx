@@ -17,12 +17,22 @@ readme = "README.md"
 default = []
 # Enable late-linking support for native extensions
 late-linking = ["dep:wit-component", "dep:zstd", "dep:sha2", "dep:zip"]
+# Enable pre-initialization support for capturing Python memory state
+pre-init = ["dep:component-init-transform", "dep:wasmtime", "dep:wasmtime-wasi", "dep:async-trait", "dep:futures", "dep:tempfile", "dep:anyhow", "dep:tracing", "late-linking"]
 
 [dependencies]
 wit-component = { workspace = true, optional = true }
 zstd = { workspace = true, optional = true }
 sha2 = { workspace = true, optional = true }
 zip = { workspace = true, optional = true }
+component-init-transform = { workspace = true, optional = true }
+wasmtime = { workspace = true, optional = true }
+wasmtime-wasi = { workspace = true, optional = true }
+async-trait = { workspace = true, optional = true }
+futures = { workspace = true, optional = true }
+tempfile = { workspace = true, optional = true }
+anyhow = { workspace = true, optional = true }
+tracing = { workspace = true, optional = true }
 
 [build-dependencies]
 wit-dylib.workspace = true

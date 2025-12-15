@@ -60,6 +60,10 @@ wit-parser = { git = "https://github.com/bytecodealliance/wasm-tools", rev = "e2
 # wit-dylib FFI for implementing interpreter interface (from dicej's fork)
 wit-dylib-ffi = { git = "https://github.com/dicej/wasm-tools", rev = "b072b0ca", features = ["async-raw"] }
 
+# Pre-initialization for capturing Python memory state
+component-init-transform = { git = "https://github.com/dicej/component-init", rev = "2d965957" }
+tempfile = "3.20"
+
 # Internal crates
 eryx = { path = "crates/eryx" }
 

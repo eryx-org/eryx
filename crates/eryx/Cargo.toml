@@ -31,19 +31,9 @@ required-features = ["embedded-runtime"]
 name = "numpy_native"
 required-features = ["native-extensions"]
 
-[features]
-default = []
-# Enable loading pre-compiled WASM components. This feature enables unsafe code paths
-# because wasmtime cannot fully validate pre-compiled components for safety.
-# Without this feature, the crate uses `forbid(unsafe_code)`.
-precompiled = []
-# Pre-compile and embed the runtime WASM at build time for ~50x faster sandbox creation.
-# Requires runtime.wasm to be built before compiling this crate.
-# Implies `precompiled` feature.
-embedded-runtime = ["precompiled", "dep:wasmtime"]
-# Enable native Python extension support via late-linking.
-# This allows adding extensions like numpy at sandbox creation time.
-native-extensions = ["dep:eryx-runtime"]
+[[example]]
+name = "numpy_preinit"
+required-features = ["pre-init", "precompiled"]
 
 [dependencies]
 tokio = { workspace = true, features = ["sync"] }
@@ -59,7 +49,24 @@ wasmtime-wasi.workspace = true
 tracing.workspace = true
 sha2.workspace = true
 # Native extension support (optional)
-eryx-runtime = { path = "../eryx-runtime", features = ["late-linking"], optional = true }
+eryx-runtime = { path = "../eryx-runtime", optional = true }
+
+[features]
+default = []
+# Enable loading pre-compiled WASM components. This feature enables unsafe code paths
+# because wasmtime cannot fully validate pre-compiled components for safety.
+# Without this feature, the crate uses `forbid(unsafe_code)`.
+precompiled = []
+# Pre-compile and embed the runtime WASM at build time for ~50x faster sandbox creation.
+# Requires runtime.wasm to be built before compiling this crate.
+# Implies `precompiled` feature.
+embedded-runtime = ["precompiled", "dep:wasmtime"]
+# Enable native Python extension support via late-linking.
+# This allows adding extensions like numpy at sandbox creation time.
+native-extensions = ["dep:eryx-runtime", "eryx-runtime/late-linking"]
+# Enable pre-initialization support for native extensions.
+# This captures Python's initialized memory state for faster startup.
+pre-init = ["native-extensions", "eryx-runtime/pre-init"]
 
 [dev-dependencies]
 async-trait.workspace = true

@@ -25,3 +25,7 @@ pub const WIT_DEFINITION: &str = include_str!("../runtime.wit");
 /// Late-linking support for native Python extensions.
 #[cfg(feature = "late-linking")]
 pub mod linker;
+
+/// Pre-initialization support for capturing Python memory state.
+#[cfg(feature = "pre-init")]
+pub mod preinit;
