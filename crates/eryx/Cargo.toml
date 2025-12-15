@@ -48,10 +48,13 @@ wasmtime.workspace = true
 wasmtime-wasi.workspace = true
 tracing.workspace = true
 sha2.workspace = true
-# Compression and archive extraction (for embedded stdlib)
+# Compression and archive extraction (for embedded stdlib and packages)
 zstd = { workspace = true, optional = true }
 tar = { workspace = true, optional = true }
 tempfile = { workspace = true, optional = true }
+zip = { workspace = true, optional = true }
+flate2 = { workspace = true, optional = true }
+walkdir = { workspace = true, optional = true }
 # Native extension support (optional)
 eryx-runtime = { path = "../eryx-runtime", optional = true }
 
@@ -68,6 +71,8 @@ embedded-runtime = ["precompiled", "dep:wasmtime"]
 # Embed Python standard library in the binary for zero-configuration sandboxes.
 # The stdlib is compressed (~2MB) and extracted to a temp directory on first use.
 embedded-stdlib = ["dep:zstd", "dep:tar", "dep:tempfile"]
+# Enable package support (with_package() for wheels and tar.gz archives).
+packages = ["dep:zip", "dep:flate2", "dep:tar", "dep:tempfile", "dep:walkdir"]
 # Enable native Python extension support via late-linking.
 # This allows adding extensions like numpy at sandbox creation time.
 native-extensions = ["dep:eryx-runtime", "eryx-runtime/late-linking"]
@@ -91,3 +96,7 @@ workspace = true
 [[example]]
 name = "session_bench"
 required-features = ["pre-init", "precompiled"]
+
+[[example]]
+name = "package_loading"
+required-features = ["packages", "native-extensions", "embedded-stdlib"]

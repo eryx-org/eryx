@@ -802,6 +802,7 @@ dependencies = [
  "criterion",
  "crossterm",
  "eryx-runtime",
+ "flate2",
  "futures",
  "schemars",
  "serde",
@@ -815,6 +816,7 @@ dependencies = [
  "walkdir",
  "wasmtime",
  "wasmtime-wasi",
+ "zip",
  "zstd",
 ]
 

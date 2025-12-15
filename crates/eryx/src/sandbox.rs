@@ -37,6 +37,9 @@ pub struct Sandbox {
     output_handler: Option<Arc<dyn OutputHandler>>,
     /// Resource limits for execution.
     resource_limits: ResourceLimits,
+    /// Extracted packages (kept alive to prevent temp directory cleanup).
+    #[cfg(feature = "packages")]
+    _packages: Vec<crate::package::ExtractedPackage>,
 }
 
 impl std::fmt::Debug for Sandbox {
@@ -368,6 +371,9 @@ pub struct SandboxBuilder {
     /// Filesystem cache directory for mmap-based loading (faster than bytes).
     #[cfg(feature = "native-extensions")]
     filesystem_cache: Option<crate::cache::FilesystemCache>,
+    /// Extracted packages (kept alive for sandbox lifetime).
+    #[cfg(feature = "packages")]
+    packages: Vec<crate::package::ExtractedPackage>,
 }
 
 impl Default for SandboxBuilder {
@@ -413,6 +419,8 @@ impl SandboxBuilder {
             cache: None,
             #[cfg(feature = "native-extensions")]
             filesystem_cache: None,
+            #[cfg(feature = "packages")]
+            packages: Vec::new(),
         }
     }
 
@@ -731,6 +739,78 @@ impl SandboxBuilder {
         self
     }
 
+    /// Add a Python package from a wheel (.whl) or tar.gz archive.
+    ///
+    /// The package format is auto-detected from the file extension:
+    /// - `.whl` - Standard Python wheel (zip archive)
+    /// - `.tar.gz`, `.tgz` - Tarball (used by wasi-wheels)
+    /// - Directory - Used directly without extraction
+    ///
+    /// # Pure Python packages
+    ///
+    /// For pure-Python packages (no `.so` files), you can use `with_embedded_runtime()`:
+    ///
+    /// ```rust,ignore
+    /// let sandbox = Sandbox::builder()
+    ///     .with_embedded_runtime()
+    ///     .with_package("/path/to/requests-2.31.0-py3-none-any.whl")?
+    ///     .build()?;
+    /// ```
+    ///
+    /// # Packages with native extensions
+    ///
+    /// For packages containing native extensions (like numpy), the extensions are
+    /// automatically registered for late-linking. You'll need a cache for best performance:
+    ///
+    /// ```rust,ignore
+    /// let sandbox = Sandbox::builder()
+    ///     .with_package("/path/to/numpy-wasi.tar.gz")?
+    ///     .with_cache_dir("/tmp/cache")?
+    ///     .build()?;
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - The package format cannot be detected
+    /// - The archive cannot be read or extracted
+    #[cfg(feature = "packages")]
+    pub fn with_package(mut self, path: impl AsRef<std::path::Path>) -> Result<Self, Error> {
+        let package = crate::package::ExtractedPackage::from_path(path)?;
+
+        tracing::info!(
+            name = %package.name,
+            has_native_extensions = package.has_native_extensions,
+            "Loaded package"
+        );
+
+        // If the package has native extensions, register them
+        #[cfg(feature = "native-extensions")]
+        for ext in &package.native_extensions {
+            self.native_extensions.push(
+                eryx_runtime::linker::NativeExtension::new(
+                    ext.dlopen_path.clone(),
+                    ext.bytes.clone(),
+                )
+            );
+        }
+
+        // Check for incompatible configuration
+        #[cfg(not(feature = "native-extensions"))]
+        if package.has_native_extensions {
+            return Err(Error::Initialization(format!(
+                "Package '{}' contains native extensions but the 'native-extensions' feature is not enabled. \
+                 Either use a pure-Python package or enable the 'native-extensions' feature.",
+                package.name
+            )));
+        }
+
+        // Store the extracted package to keep it alive
+        self.packages.push(package);
+
+        Ok(self)
+    }
+
     /// Build the sandbox.
     ///
     /// # Errors
@@ -765,8 +845,22 @@ impl SandboxBuilder {
             }
         });
 
+        // Determine site-packages path: explicit > first package > none
+        let site_packages_path = self.python_site_packages_path.clone().or_else(|| {
+            #[cfg(feature = "packages")]
+            {
+                // Use the first package's Python path as site-packages
+                // TODO: Support multiple packages by creating a merged view
+                self.packages.first().map(|p| p.python_path.clone())
+            }
+            #[cfg(not(feature = "packages"))]
+            {
+                None
+            }
+        });
+
         // Apply Python stdlib and site-packages paths if available
-        let executor = match (stdlib_path, self.python_site_packages_path.clone()) {
+        let executor = match (stdlib_path, site_packages_path) {
             (Some(stdlib), Some(site)) => executor
                 .with_python_stdlib(&stdlib)
                 .with_site_packages(&site),
@@ -783,6 +877,8 @@ impl SandboxBuilder {
             trace_handler: self.trace_handler,
             output_handler: self.output_handler,
             resource_limits: self.resource_limits,
+            #[cfg(feature = "packages")]
+            _packages: self.packages,
         })
     }
 
@@ -854,8 +950,10 @@ impl SandboxBuilder {
     /// 3. If not found, link extensions, pre-compile, cache, and return
     #[cfg(feature = "native-extensions")]
     fn build_executor_with_extensions(&self) -> Result<PythonExecutor, Error> {
+        #[cfg(feature = "precompiled")]
         use crate::cache::CacheKey;
 
+        #[cfg(feature = "precompiled")]
         let cache_key = CacheKey::from_extensions(&self.native_extensions);
 
         // Try filesystem cache first (mmap-based, 3x faster than bytes)

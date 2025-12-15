@@ -24,9 +24,11 @@
 //!     .build()?;
 //! ```
 
-use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
+
+#[cfg(feature = "embedded-runtime")]
+use std::io::Write;
 
 use crate::error::Error;
 

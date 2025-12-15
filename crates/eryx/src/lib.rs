@@ -46,6 +46,8 @@ mod callback;
 #[cfg(any(feature = "embedded-stdlib", feature = "embedded-runtime"))]
 pub mod embedded;
 mod error;
+#[cfg(feature = "packages")]
+pub mod package;
 mod library;
 mod sandbox;
 mod schema;

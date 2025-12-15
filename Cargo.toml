@@ -48,6 +48,10 @@ criterion = { version = "0.5", features = ["async_tokio"] }
 # Compression
 zstd = "0.13"
 zip = "2.0"
+flate2 = "1.0"
+
+# Directory walking
+walkdir = "2.5"
 
 # Hashing
 sha2 = "0.10"
