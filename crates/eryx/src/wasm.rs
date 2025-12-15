@@ -582,6 +582,14 @@ impl PythonExecutor {
         // This defers memory initialization from instantiation time to first write
         config.memory_init_cow(true);
 
+        // Optimize for smaller generated code (slight runtime perf tradeoff)
+        // This reduces .cwasm file sizes and memory footprint
+        config.cranelift_opt_level(wasmtime::OptLevel::SpeedAndSize);
+
+        // Reduce async stack size from default 2 MiB to 512 KiB
+        // Python scripts don't need deep call stacks
+        config.async_stack_size(512 * 1024);
+
         Engine::new(&config).map_err(|e| Error::WasmEngine(e.to_string()))
     }
 
