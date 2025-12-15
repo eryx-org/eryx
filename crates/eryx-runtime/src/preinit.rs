@@ -335,7 +335,7 @@ async fn call_execute_for_imports(
             .ok_or_else(|| anyhow!("No 'execute' in exports interface"))?;
 
         instance
-            .get_func(&mut *store, &execute_idx)
+            .get_func(&mut *store, execute_idx)
             .ok_or_else(|| anyhow!("Could not get execute func from index"))?
     };
 
@@ -347,7 +347,7 @@ async fn call_execute_for_imports(
         .join("\n");
 
     // Call execute with the import code
-    let args = [Val::String(import_code.into())];
+    let args = [Val::String(import_code)];
     let mut results = vec![Val::Bool(false)]; // Placeholder for result<string, string>
 
     execute_func

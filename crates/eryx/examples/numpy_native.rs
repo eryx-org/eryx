@@ -1,3 +1,6 @@
+// Examples use expect/unwrap for simplicity
+#![allow(clippy::expect_used, clippy::unwrap_used, clippy::type_complexity)]
+
 //! Example demonstrating native Python extension support with numpy.
 //!
 //! This example shows how to use late-linking to add numpy's native extensions
@@ -163,7 +166,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Check cache file
     let cache_files: Vec<_> = std::fs::read_dir(cache_dir)?
         .filter_map(|e| e.ok())
-        .filter(|e| e.path().extension().map_or(false, |ext| ext == "cwasm"))
+        .filter(|e| e.path().extension().is_some_and(|ext| ext == "cwasm"))
         .collect();
 
     if let Some(entry) = cache_files.first() {

@@ -444,7 +444,7 @@ fn bench_native_extension_caching(c: &mut Criterion) {
     let extensions: Vec<(String, Vec<u8>)> = walkdir::WalkDir::new(numpy_dir)
         .into_iter()
         .filter_map(|e| e.ok())
-        .filter(|e| e.path().extension().map_or(false, |ext| ext == "so"))
+        .filter(|e| e.path().extension().is_some_and(|ext| ext == "so"))
         .filter_map(|e| {
             let path = e.path();
             let numpy_parent = numpy_dir.parent()?;

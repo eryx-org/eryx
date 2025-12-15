@@ -10,43 +10,86 @@
 #![allow(non_upper_case_globals)]
 #![allow(missing_docs)]
 #![allow(missing_debug_implementations)]
+// TODO: Update to PyErr_GetRaisedException when pyo3 exposes it in stable ABI
+#![allow(deprecated)]
 
 use std::ffi::{c_char, c_int};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 // Re-export pyo3::ffi types and functions available in the stable ABI
 pub use pyo3::ffi::{
+    // Reference counting
+    Py_DecRef,
+    // Interpreter lifecycle
+    Py_FinalizeEx,
+    Py_IncRef,
+    Py_Initialize,
+    Py_InitializeEx,
+    Py_IsInitialized,
+    // Bytes operations
+    PyBytes_AsString,
+    PyBytes_AsStringAndSize,
+    PyBytes_FromStringAndSize,
+    PyBytes_Size,
+    // Dict operations
+    PyDict_Clear,
+    PyDict_Copy,
+    PyDict_GetItem,
+    PyDict_GetItemString,
+    PyDict_New,
+    PyDict_SetItem,
+    PyDict_SetItemString,
+    PyDict_Update,
+    // Exception handling
+    PyErr_Clear,
+    PyErr_Fetch,
+    PyErr_NormalizeException,
+    PyErr_Occurred,
+    PyErr_Print,
+    PyErr_PrintEx,
+    PyErr_SetString,
+    // Exception types
+    PyExc_AttributeError,
+    PyExc_BaseException,
+    PyExc_Exception,
+    PyExc_IndexError,
+    PyExc_KeyError,
+    PyExc_MemoryError,
+    PyExc_RuntimeError,
+    PyExc_SystemExit,
+    PyExc_TypeError,
+    PyExc_ValueError,
+    // Module operations
+    PyImport_AddModule,
+    PyImport_AppendInittab,
+    PyImport_ImportModule,
+    // List operations
+    PyList_Append,
+    PyList_New,
+    // Long (int) operations
+    PyLong_AsLong,
+    PyLong_FromLong,
+    PyModule_AddObject,
+    PyModule_AddObjectRef,
+    PyModule_GetDict,
     // Core type
     PyObject,
-    // Interpreter lifecycle
-    Py_FinalizeEx, Py_Initialize, Py_InitializeEx, Py_IsInitialized,
-    // Exception handling
-    PyErr_Clear, PyErr_Fetch, PyErr_NormalizeException, PyErr_Occurred, PyErr_Print, PyErr_PrintEx,
-    PyErr_SetString,
     // Object protocol
-    PyObject_Call, PyObject_CallNoArgs, PyObject_GetAttrString, PyObject_Repr,
-    PyObject_SetAttrString, PyObject_Str,
-    // Reference counting
-    Py_DecRef, Py_IncRef,
-    // Module operations
-    PyImport_AddModule, PyImport_AppendInittab, PyImport_ImportModule, PyModule_AddObject,
-    PyModule_AddObjectRef, PyModule_GetDict,
-    // String/Unicode operations
-    PyUnicode_AsUTF8AndSize, PyUnicode_FromString, PyUnicode_FromStringAndSize,
-    // Bytes operations
-    PyBytes_AsString, PyBytes_AsStringAndSize, PyBytes_FromStringAndSize, PyBytes_Size,
-    // Dict operations
-    PyDict_Clear, PyDict_Copy, PyDict_GetItem, PyDict_GetItemString, PyDict_New, PyDict_SetItem,
-    PyDict_SetItemString, PyDict_Update,
+    PyObject_Call,
+    PyObject_CallNoArgs,
+    PyObject_GetAttrString,
+    PyObject_Repr,
+    PyObject_SetAttrString,
+    PyObject_Str,
     // Tuple operations
-    PyTuple_GetItem, PyTuple_New, PyTuple_SetItem, PyTuple_Size,
-    // List operations
-    PyList_Append, PyList_New,
-    // Long (int) operations
-    PyLong_AsLong, PyLong_FromLong,
-    // Exception types
-    PyExc_AttributeError, PyExc_BaseException, PyExc_Exception, PyExc_IndexError, PyExc_KeyError,
-    PyExc_MemoryError, PyExc_RuntimeError, PyExc_SystemExit, PyExc_TypeError, PyExc_ValueError,
+    PyTuple_GetItem,
+    PyTuple_New,
+    PyTuple_SetItem,
+    PyTuple_Size,
+    // String/Unicode operations
+    PyUnicode_AsUTF8AndSize,
+    PyUnicode_FromString,
+    PyUnicode_FromStringAndSize,
 };
 
 // =============================================================================
@@ -723,7 +766,10 @@ fn python_string_literal(s: &str) -> String {
     // A trailing backslash would escape the closing quotes, so add a space and strip it later
     // Actually, the double-escaping handles this - a trailing \\ becomes \\\\
     // But we need to handle the case where user has """
-    escaped = escaped.replace('\n', "\\n").replace('\r', "\\r").replace('\t', "\\t");
+    escaped = escaped
+        .replace('\n', "\\n")
+        .replace('\r', "\\r")
+        .replace('\t', "\\t");
     format!("\"\"\"{}\"\"\"", escaped)
 }
 

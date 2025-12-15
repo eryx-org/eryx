@@ -1,3 +1,6 @@
+// Examples use expect/unwrap for simplicity
+#![allow(clippy::expect_used, clippy::unwrap_used, clippy::type_complexity)]
+
 //! Quick benchmark of session per-execution time with numpy
 //!
 //! Also compares bytes-based vs mmap-based component loading.

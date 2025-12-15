@@ -1,3 +1,6 @@
+// Tests use expect/unwrap for simplicity
+#![allow(clippy::expect_used, clippy::unwrap_used)]
+
 //! Test to verify wit-dylib linking works with our runtime.
 //!
 //! Run with: cargo test --package eryx-wasm-runtime --test link_test

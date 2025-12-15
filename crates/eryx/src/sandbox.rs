@@ -845,8 +845,8 @@ impl SandboxBuilder {
 
         // Try filesystem cache first (mmap-based, 3x faster than bytes)
         #[cfg(feature = "precompiled")]
-        if let Some(fs_cache) = &self.filesystem_cache {
-            if let Some(path) = fs_cache.get_path(&cache_key) {
+        if let Some(fs_cache) = &self.filesystem_cache
+            && let Some(path) = fs_cache.get_path(&cache_key) {
                 tracing::debug!(
                     key = %cache_key.to_hex(),
                     path = %path.display(),
@@ -859,7 +859,6 @@ impl SandboxBuilder {
                 #[allow(unsafe_code)]
                 return unsafe { PythonExecutor::from_precompiled_file(&path) };
             }
-        }
 
         // Fall back to in-memory cache (for InMemoryCache users)
         #[cfg(feature = "precompiled")]

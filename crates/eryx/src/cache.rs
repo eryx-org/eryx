@@ -135,6 +135,7 @@ impl CacheKey {
 }
 
 /// Get the wasmtime version string.
+#[cfg(feature = "native-extensions")]
 fn wasmtime_version() -> &'static str {
     // Get from wasmtime crate version
     "39.0.0" // TODO: Use actual wasmtime version from Cargo
@@ -287,6 +288,7 @@ impl ComponentCache for NoCache {
 }
 
 #[cfg(test)]
+#[allow(clippy::expect_used, clippy::unwrap_used)]
 mod tests {
     use super::*;
 

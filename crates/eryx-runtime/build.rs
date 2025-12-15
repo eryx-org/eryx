@@ -1,3 +1,6 @@
+// Build scripts should panic on failure, so expect/unwrap are appropriate
+#![allow(clippy::expect_used, clippy::unwrap_used)]
+
 //! Build script for eryx-runtime.
 //!
 //! This builds:
@@ -177,7 +180,7 @@ fn build_wasm_runtime(wasm_runtime_dir: &PathBuf) -> PathBuf {
 }
 
 /// Build the WASM component by linking all libraries together.
-fn build_component(manifest_dir: &PathBuf, runtime_so: &PathBuf) {
+fn build_component(manifest_dir: &std::path::Path, runtime_so: &std::path::Path) {
     eprintln!("Building WASM component...");
 
     let libs_dir = manifest_dir.join("libs/decompressed");

@@ -1,3 +1,6 @@
+// Examples use expect/unwrap for simplicity
+#![allow(clippy::expect_used, clippy::unwrap_used, clippy::type_complexity)]
+
 //! Example demonstrating pre-initialization with numpy.
 //!
 //! This example shows how to use pre-initialization to capture Python's

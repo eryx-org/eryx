@@ -1,3 +1,6 @@
+// Examples use expect/unwrap for simplicity
+#![allow(clippy::expect_used, clippy::unwrap_used, clippy::type_complexity)]
+
 //! Memory usage benchmark for multiple concurrent sandboxes.
 //!
 //! This benchmark measures RSS (Resident Set Size) to understand:

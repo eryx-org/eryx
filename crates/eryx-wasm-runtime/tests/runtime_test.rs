@@ -1,3 +1,6 @@
+// Tests use expect/unwrap for simplicity
+#![allow(clippy::expect_used, clippy::unwrap_used, clippy::manual_strip)]
+
 //! Test to verify the runtime component can be instantiated and called.
 //!
 //! # Prerequisites
