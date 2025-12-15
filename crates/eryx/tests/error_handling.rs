@@ -32,13 +32,15 @@ fn get_shared_executor() -> Arc<PythonExecutor> {
 
 /// Create a PythonExecutor, using precompiled WASM if available.
 fn create_executor() -> PythonExecutor {
+    let stdlib_path = python_stdlib_path();
+
     #[cfg(feature = "precompiled")]
     {
         let cwasm_path = precompiled_wasm_path();
         if cwasm_path.exists() {
             #[allow(unsafe_code)]
             match unsafe { PythonExecutor::from_precompiled_file(&cwasm_path) } {
-                Ok(executor) => return executor,
+                Ok(executor) => return executor.with_python_stdlib(&stdlib_path),
                 Err(e) => {
                     eprintln!(
                         "Warning: Failed to load precompiled WASM from {:?}: {}",
@@ -52,6 +54,7 @@ fn create_executor() -> PythonExecutor {
     let path = runtime_wasm_path();
     PythonExecutor::from_file(&path)
         .unwrap_or_else(|e| panic!("Failed to load runtime.wasm from {:?}: {}", path, e))
+        .with_python_stdlib(&stdlib_path)
 }
 
 fn runtime_wasm_path() -> PathBuf {
@@ -61,6 +64,16 @@ fn runtime_wasm_path() -> PathBuf {
         .unwrap_or_else(|| std::path::Path::new("."))
         .join("eryx-runtime")
         .join("runtime.wasm")
+}
+
+fn python_stdlib_path() -> PathBuf {
+    let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap_or_else(|_| ".".to_string());
+    PathBuf::from(manifest_dir)
+        .parent()
+        .unwrap_or_else(|| std::path::Path::new("."))
+        .join("eryx-wasm-runtime")
+        .join("tests")
+        .join("python-stdlib")
 }
 
 #[cfg(feature = "precompiled")]

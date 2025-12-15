@@ -687,6 +687,11 @@ dependencies = [
 [[package]]
 name = "eryx-runtime"
 version = "0.1.0"
+dependencies = [
+ "wit-component",
+ "wit-dylib",
+ "wit-parser 0.240.0 (git+https://github.com/bytecodealliance/wasm-tools?rev=e2bb0a24)",
+]
 
 [[package]]
 name = "eryx-wasm-runtime"

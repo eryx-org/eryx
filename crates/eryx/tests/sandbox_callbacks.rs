@@ -186,6 +186,16 @@ fn runtime_wasm_path() -> PathBuf {
         .join("runtime.wasm")
 }
 
+fn python_stdlib_path() -> PathBuf {
+    let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap_or_else(|_| ".".to_string());
+    PathBuf::from(manifest_dir)
+        .parent()
+        .unwrap_or_else(|| std::path::Path::new("."))
+        .join("eryx-wasm-runtime")
+        .join("tests")
+        .join("python-stdlib")
+}
+
 #[cfg(feature = "precompiled")]
 fn precompiled_wasm_path() -> PathBuf {
     let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap_or_else(|_| ".".to_string());
@@ -198,17 +208,25 @@ fn precompiled_wasm_path() -> PathBuf {
 
 /// Create a sandbox builder with the appropriate WASM source.
 fn sandbox_builder() -> eryx::SandboxBuilder {
+    let stdlib_path = python_stdlib_path();
+
     #[cfg(feature = "precompiled")]
     {
         let cwasm_path = precompiled_wasm_path();
         if cwasm_path.exists() {
             // SAFETY: We trust the precompiled WASM from our own build
             #[allow(unsafe_code)]
-            return unsafe { Sandbox::builder().with_precompiled_file(&cwasm_path) };
+            return unsafe {
+                Sandbox::builder()
+                    .with_precompiled_file(&cwasm_path)
+                    .with_python_stdlib(&stdlib_path)
+            };
         }
     }
 
-    Sandbox::builder().with_wasm_file(runtime_wasm_path())
+    Sandbox::builder()
+        .with_wasm_file(runtime_wasm_path())
+        .with_python_stdlib(&stdlib_path)
 }
 
 // =============================================================================
@@ -810,11 +828,11 @@ async fn test_callback_returns_complex_json() {
         type Args = ();
 
         fn name(&self) -> &str {
-            "complex"
+            "complex_json"
         }
 
         fn description(&self) -> &str {
-            "Returns complex JSON"
+            "Returns complex JSON structure"
         }
 
         fn invoke_typed(
@@ -846,7 +864,7 @@ async fn test_callback_returns_complex_json() {
     let result = sandbox
         .execute(
             r#"
-result = await complex()
+result = await complex_json()
 print(f"string: {result['string']}")
 print(f"number: {result['number']}")
 print(f"array: {result['array']}")

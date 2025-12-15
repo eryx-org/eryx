@@ -9,13 +9,16 @@ authors.workspace = true
 description = "Python WASM runtime component for the eryx sandbox"
 readme = "README.md"
 
-# This crate primarily contains the WIT definition and Python runtime source.
-# The actual WASM component is built externally using componentize-py.
-# This crate provides build utilities and embeds the pre-built component.
+# This crate contains the WIT definition and builds the WASM component.
+# The component uses our custom eryx-wasm-runtime (liberyx_runtime.so)
+# instead of componentize-py's runtime.
 
 [dependencies]
 
 [build-dependencies]
+wit-dylib.workspace = true
+wit-component.workspace = true
+wit-parser.workspace = true
 
 [lints]
 workspace = true

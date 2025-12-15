@@ -23,13 +23,14 @@
 //! Alternatively, enable the `embedded-runtime` feature for a safe API that
 //! pre-compiles at build time and embeds the result in the binary.
 
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use tokio::sync::{mpsc, oneshot};
 use wasmtime::component::{Accessor, Component, HasSelf, Linker, ResourceTable};
 use wasmtime::{Config, Engine, ResourceLimiter, Store};
-use wasmtime_wasi::{WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView};
+use wasmtime_wasi::{DirPerms, FilePerms, WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView};
 
 use crate::callback::Callback;
 use crate::error::Error;
@@ -304,6 +305,11 @@ pub struct PythonExecutor {
     engine: Engine,
     /// Pre-instantiated component - linking is already done.
     instance_pre: SandboxPre<ExecutorState>,
+    /// Path to the Python standard library directory.
+    /// Required for the eryx-wasm-runtime to initialize Python.
+    python_stdlib_path: Option<PathBuf>,
+    /// Path to additional site-packages directory.
+    python_site_packages_path: Option<PathBuf>,
 }
 
 impl std::fmt::Debug for PythonExecutor {
@@ -311,6 +317,8 @@ impl std::fmt::Debug for PythonExecutor {
         f.debug_struct("PythonExecutor")
             .field("engine", &"<wasmtime::Engine>")
             .field("instance_pre", &"<SandboxPre>")
+            .field("python_stdlib_path", &self.python_stdlib_path)
+            .field("python_site_packages_path", &self.python_site_packages_path)
             .finish_non_exhaustive()
     }
 }
@@ -326,6 +334,41 @@ impl PythonExecutor {
     #[must_use]
     pub fn instance_pre(&self) -> &SandboxPre<ExecutorState> {
         &self.instance_pre
+    }
+
+    /// Get the Python stdlib path if configured.
+    #[must_use]
+    pub fn python_stdlib_path(&self) -> Option<&PathBuf> {
+        self.python_stdlib_path.as_ref()
+    }
+
+    /// Get the Python site-packages path if configured.
+    #[must_use]
+    pub fn python_site_packages_path(&self) -> Option<&PathBuf> {
+        self.python_site_packages_path.as_ref()
+    }
+
+    /// Set the path to the Python standard library directory.
+    ///
+    /// This is required when using the eryx-wasm-runtime (Rust/CPython FFI based).
+    /// The directory should contain the extracted Python stdlib (e.g., from
+    /// componentize-py's python-lib.tar.zst).
+    ///
+    /// The stdlib will be mounted at `/python-stdlib` inside the WASM sandbox.
+    #[must_use]
+    pub fn with_python_stdlib(mut self, path: impl Into<PathBuf>) -> Self {
+        self.python_stdlib_path = Some(path.into());
+        self
+    }
+
+    /// Set the path to additional Python packages directory.
+    ///
+    /// The directory will be mounted at `/site-packages` inside the WASM sandbox
+    /// and added to Python's import path.
+    #[must_use]
+    pub fn with_site_packages(mut self, path: impl Into<PathBuf>) -> Self {
+        self.python_site_packages_path = Some(path.into());
+        self
     }
 }
 
@@ -356,6 +399,8 @@ impl PythonExecutor {
         Ok(Self {
             engine,
             instance_pre,
+            python_stdlib_path: None,
+            python_site_packages_path: None,
         })
     }
 
@@ -376,6 +421,8 @@ impl PythonExecutor {
         Ok(Self {
             engine,
             instance_pre,
+            python_stdlib_path: None,
+            python_site_packages_path: None,
         })
     }
 
@@ -409,6 +456,8 @@ impl PythonExecutor {
         Ok(Self {
             engine,
             instance_pre,
+            python_stdlib_path: None,
+            python_site_packages_path: None,
         })
     }
 
@@ -444,6 +493,8 @@ impl PythonExecutor {
         Ok(Self {
             engine,
             instance_pre,
+            python_stdlib_path: None,
+            python_site_packages_path: None,
         })
     }
 
@@ -568,11 +619,31 @@ impl PythonExecutor {
             })
             .collect();
 
-        // Create WASI context
-        let wasi = WasiCtxBuilder::new()
-            .inherit_stdout()
-            .inherit_stderr()
-            .build();
+        // Create WASI context with Python stdlib mounts if configured
+        let mut wasi_builder = WasiCtxBuilder::new();
+        wasi_builder.inherit_stdout().inherit_stderr();
+
+        // Mount Python stdlib if configured (required for eryx-wasm-runtime)
+        if let Some(ref stdlib_path) = self.python_stdlib_path {
+            wasi_builder
+                .env("PYTHONPATH", "/python-stdlib:/site-packages")
+                .preopened_dir(stdlib_path, "/python-stdlib", DirPerms::READ, FilePerms::READ)
+                .map_err(|e| format!("Failed to mount Python stdlib: {e}"))?;
+        }
+
+        // Mount site-packages if configured
+        if let Some(ref site_packages_path) = self.python_site_packages_path {
+            wasi_builder
+                .preopened_dir(
+                    site_packages_path,
+                    "/site-packages",
+                    DirPerms::READ,
+                    FilePerms::READ,
+                )
+                .map_err(|e| format!("Failed to mount site-packages: {e}"))?;
+        }
+
+        let wasi = wasi_builder.build();
 
         let state = ExecutorState {
             wasi,

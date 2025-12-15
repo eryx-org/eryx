@@ -1,12 +1,9 @@
 //! CPython FFI bindings for eryx-wasm-runtime.
 //!
-//! This module declares the minimal CPython C API surface needed for the eryx sandbox.
-//! These symbols are resolved at component link time when we link against libpython3.14.so.
+//! This module uses pyo3::ffi for CPython C API bindings where available in the
+//! stable ABI (abi3), with manual declarations for functions not exposed there.
 //!
-//! We declare them as `extern "C"` rather than using pyo3-ffi because:
-//! 1. We're compiling to a wasm32-wasip1 core module, not the host platform
-//! 2. The Python symbols come from the WASM-compiled libpython, not the host Python
-//! 3. We don't need the full pyo3 machinery, just a few core functions
+//! These symbols are resolved at component link time when we link against libpython3.14.so.
 
 #![allow(non_camel_case_types)]
 #![allow(non_snake_case)]
@@ -14,81 +11,65 @@
 #![allow(missing_docs)]
 #![allow(missing_debug_implementations)]
 
-use std::ffi::{c_char, c_int, c_long, c_void};
+use std::ffi::{c_char, c_int};
 use std::sync::atomic::{AtomicBool, Ordering};
 
-/// Opaque Python object pointer.
-/// All Python objects are represented as pointers to this type.
-#[repr(C)]
-pub struct PyObject {
-    _private: [u8; 0],
-}
+// Re-export pyo3::ffi types and functions available in the stable ABI
+pub use pyo3::ffi::{
+    // Core type
+    PyObject,
+    // Interpreter lifecycle
+    Py_FinalizeEx, Py_Initialize, Py_InitializeEx, Py_IsInitialized,
+    // Exception handling
+    PyErr_Clear, PyErr_Fetch, PyErr_NormalizeException, PyErr_Occurred, PyErr_Print, PyErr_PrintEx,
+    PyErr_SetString,
+    // Object protocol
+    PyObject_Call, PyObject_CallNoArgs, PyObject_GetAttrString, PyObject_Repr,
+    PyObject_SetAttrString, PyObject_Str,
+    // Reference counting
+    Py_DecRef, Py_IncRef,
+    // Module operations
+    PyImport_AddModule, PyImport_AppendInittab, PyImport_ImportModule, PyModule_AddObject,
+    PyModule_AddObjectRef, PyModule_GetDict,
+    // String/Unicode operations
+    PyUnicode_AsUTF8AndSize, PyUnicode_FromString, PyUnicode_FromStringAndSize,
+    // Bytes operations
+    PyBytes_AsString, PyBytes_AsStringAndSize, PyBytes_FromStringAndSize, PyBytes_Size,
+    // Dict operations
+    PyDict_Clear, PyDict_Copy, PyDict_GetItem, PyDict_GetItemString, PyDict_New, PyDict_SetItem,
+    PyDict_SetItemString, PyDict_Update,
+    // Tuple operations
+    PyTuple_GetItem, PyTuple_New, PyTuple_SetItem, PyTuple_Size,
+    // List operations
+    PyList_Append, PyList_New,
+    // Long (int) operations
+    PyLong_AsLong, PyLong_FromLong,
+    // Exception types
+    PyExc_AttributeError, PyExc_BaseException, PyExc_Exception, PyExc_IndexError, PyExc_KeyError,
+    PyExc_MemoryError, PyExc_RuntimeError, PyExc_SystemExit, PyExc_TypeError, PyExc_ValueError,
+};
+
+// =============================================================================
+// Additional CPython FFI declarations not in pyo3::ffi stable ABI
+// =============================================================================
 
 /// Python compiler flags structure.
-/// Used by PyRun_StringFlags and similar functions.
 #[repr(C)]
 pub struct PyCompilerFlags {
     pub cf_flags: c_int,
     pub cf_feature_version: c_int,
 }
 
-// =============================================================================
-// CPython C API declarations
-// =============================================================================
-//
-// These symbols are provided by libpython3.14.so at component link time.
-// They follow the Python Stable ABI where possible.
-
 unsafe extern "C" {
-    // -------------------------------------------------------------------------
-    // Interpreter lifecycle
-    // -------------------------------------------------------------------------
-
-    /// Initialize the Python interpreter.
-    /// Must be called before using any other Python/C API functions.
-    pub fn Py_Initialize();
-
-    /// Initialize the Python interpreter with optional signal handler setup.
-    /// - initsigs = 0: Skip signal handler initialization (recommended for embedding)
-    /// - initsigs = 1: Register signal handlers (like Py_Initialize)
-    pub fn Py_InitializeEx(initsigs: c_int);
-
-    /// Check if the Python interpreter is initialized.
-    /// Returns non-zero if initialized, zero otherwise.
-    pub fn Py_IsInitialized() -> c_int;
-
-    /// Finalize the Python interpreter.
-    /// Returns 0 on success, -1 if errors occurred during finalization.
-    pub fn Py_FinalizeEx() -> c_int;
-
-    // -------------------------------------------------------------------------
-    // Code execution
-    // -------------------------------------------------------------------------
-
-    /// Execute Python source code in the __main__ module.
-    /// Returns 0 on success, -1 if an exception was raised.
+    // Code execution (not in stable ABI)
     pub fn PyRun_SimpleString(command: *const c_char) -> c_int;
-
-    /// Execute Python source code with compiler flags.
-    /// Returns 0 on success, -1 if an exception was raised.
     pub fn PyRun_SimpleStringFlags(command: *const c_char, flags: *mut PyCompilerFlags) -> c_int;
-
-    /// Execute Python source code and return the result.
-    ///
-    /// - str: Python source code
-    /// - start: Start symbol (Py_eval_input, Py_file_input, Py_single_input)
-    /// - globals: Global namespace (must be a dict)
-    /// - locals: Local namespace (any mapping)
-    ///
-    /// Returns new reference to result, or NULL on error.
     pub fn PyRun_String(
         str: *const c_char,
         start: c_int,
         globals: *mut PyObject,
         locals: *mut PyObject,
     ) -> *mut PyObject;
-
-    /// Execute Python source code with compiler flags.
     pub fn PyRun_StringFlags(
         str: *const c_char,
         start: c_int,
@@ -97,390 +78,18 @@ unsafe extern "C" {
         flags: *mut PyCompilerFlags,
     ) -> *mut PyObject;
 
-    // -------------------------------------------------------------------------
-    // Exception handling
-    // -------------------------------------------------------------------------
-
-    /// Test whether the error indicator is set.
-    /// Returns borrowed reference to exception type, or NULL if no error.
-    pub fn PyErr_Occurred() -> *mut PyObject;
-
-    /// Clear the error indicator.
-    pub fn PyErr_Clear();
-
-    /// Print standard traceback to sys.stderr and clear error indicator.
-    pub fn PyErr_Print();
-
-    /// Print traceback and optionally set sys.last_* variables.
-    pub fn PyErr_PrintEx(set_sys_last_vars: c_int);
-
-    /// Set the error indicator with a string message.
-    pub fn PyErr_SetString(type_: *mut PyObject, message: *const c_char);
-
-    /// Retrieve the error indicator (deprecated in 3.12, but still available).
-    /// Clears the error indicator and returns references via output parameters.
-    pub fn PyErr_Fetch(
-        ptype: *mut *mut PyObject,
-        pvalue: *mut *mut PyObject,
-        ptraceback: *mut *mut PyObject,
-    );
-
-    /// Normalize a fetched exception (prepares it for use).
-    pub fn PyErr_NormalizeException(
-        exc: *mut *mut PyObject,
-        val: *mut *mut PyObject,
-        tb: *mut *mut PyObject,
-    );
-
-    // -------------------------------------------------------------------------
-    // Object protocol
-    // -------------------------------------------------------------------------
-
-    /// Get string representation of object (like str(o)).
-    /// Returns new reference.
-    pub fn PyObject_Str(o: *mut PyObject) -> *mut PyObject;
-
-    /// Get repr representation of object (like repr(o)).
-    /// Returns new reference.
-    pub fn PyObject_Repr(o: *mut PyObject) -> *mut PyObject;
-
-    /// Get attribute by name (like o.attr_name).
-    /// Returns new reference, or NULL on error.
-    pub fn PyObject_GetAttrString(o: *mut PyObject, attr_name: *const c_char) -> *mut PyObject;
-
-    /// Set attribute by name (like o.attr_name = v).
-    /// Returns 0 on success, -1 on error.
-    pub fn PyObject_SetAttrString(
-        o: *mut PyObject,
-        attr_name: *const c_char,
-        v: *mut PyObject,
-    ) -> c_int;
-
-    /// Call a callable object with arguments.
-    /// args should be a tuple, kwargs a dict (or NULL).
-    /// Returns new reference.
-    pub fn PyObject_Call(
-        callable: *mut PyObject,
-        args: *mut PyObject,
-        kwargs: *mut PyObject,
-    ) -> *mut PyObject;
-
-    /// Call a callable with no arguments.
-    /// Returns new reference.
-    pub fn PyObject_CallNoArgs(callable: *mut PyObject) -> *mut PyObject;
-
-    // -------------------------------------------------------------------------
-    // Reference counting
-    // -------------------------------------------------------------------------
-
-    /// Increment reference count.
-    pub fn Py_IncRef(o: *mut PyObject);
-
-    /// Decrement reference count.
-    pub fn Py_DecRef(o: *mut PyObject);
-
-    // -------------------------------------------------------------------------
-    // Module operations
-    // -------------------------------------------------------------------------
-
-    /// Import a module by name.
-    /// Returns new reference to the module, or NULL on error.
-    pub fn PyImport_ImportModule(name: *const c_char) -> *mut PyObject;
-
-    /// Get the __main__ module.
-    /// Returns borrowed reference.
-    pub fn PyImport_AddModule(name: *const c_char) -> *mut PyObject;
-
-    /// Get a module's __dict__.
-    /// Returns borrowed reference.
-    pub fn PyModule_GetDict(module: *mut PyObject) -> *mut PyObject;
-
-    // -------------------------------------------------------------------------
-    // String/Unicode operations
-    // -------------------------------------------------------------------------
-
-    /// Create a Unicode string from a UTF-8 encoded C string.
-    /// Returns new reference.
-    pub fn PyUnicode_FromString(str: *const c_char) -> *mut PyObject;
-
-    /// Create a Unicode string from a UTF-8 encoded buffer with length.
-    /// Returns new reference.
-    pub fn PyUnicode_FromStringAndSize(str: *const c_char, size: isize) -> *mut PyObject;
-
-    /// Get UTF-8 encoded content of a Unicode string.
-    /// Returns pointer to internal buffer (do not modify or free).
-    /// The pointer is valid as long as the PyObject exists.
+    // PyUnicode_AsUTF8 (not in stable ABI, use PyUnicode_AsUTF8AndSize instead if possible)
     pub fn PyUnicode_AsUTF8(unicode: *mut PyObject) -> *const c_char;
 
-    /// Get UTF-8 encoded content with length.
-    /// Returns pointer and sets size.
-    pub fn PyUnicode_AsUTF8AndSize(unicode: *mut PyObject, size: *mut isize) -> *const c_char;
-
-    // -------------------------------------------------------------------------
-    // Bytes operations
-    // -------------------------------------------------------------------------
-
-    /// Create a bytes object from a buffer.
-    /// Returns new reference.
-    pub fn PyBytes_FromStringAndSize(str: *const c_char, size: isize) -> *mut PyObject;
-
-    /// Get pointer to the internal buffer of a bytes object.
-    /// Returns pointer to internal buffer (do not modify or free).
-    pub fn PyBytes_AsString(o: *mut PyObject) -> *mut c_char;
-
-    /// Get the size of a bytes object.
-    pub fn PyBytes_Size(o: *mut PyObject) -> isize;
-
-    /// Get both pointer and size of a bytes object.
-    /// Returns 0 on success, -1 on error.
-    pub fn PyBytes_AsStringAndSize(
-        o: *mut PyObject,
-        buffer: *mut *mut c_char,
-        length: *mut isize,
-    ) -> c_int;
-
-    // -------------------------------------------------------------------------
-    // Dict operations
-    // -------------------------------------------------------------------------
-
-    /// Create a new empty dictionary.
-    /// Returns new reference.
-    pub fn PyDict_New() -> *mut PyObject;
-
-    /// Get item from dictionary by key.
-    /// Returns borrowed reference, or NULL if not found (no exception set).
-    pub fn PyDict_GetItem(dict: *mut PyObject, key: *mut PyObject) -> *mut PyObject;
-
-    /// Get item from dictionary by string key.
-    /// Returns borrowed reference, or NULL if not found.
-    pub fn PyDict_GetItemString(dict: *mut PyObject, key: *const c_char) -> *mut PyObject;
-
-    /// Set item in dictionary.
-    /// Returns 0 on success, -1 on error.
-    pub fn PyDict_SetItem(dict: *mut PyObject, key: *mut PyObject, val: *mut PyObject) -> c_int;
-
-    /// Set item in dictionary by string key.
-    /// Returns 0 on success, -1 on error.
-    pub fn PyDict_SetItemString(
-        dict: *mut PyObject,
-        key: *const c_char,
-        val: *mut PyObject,
-    ) -> c_int;
-
-    /// Copy a dictionary (shallow copy).
-    /// Returns new reference.
-    pub fn PyDict_Copy(dict: *mut PyObject) -> *mut PyObject;
-
-    /// Clear all items from dictionary.
-    pub fn PyDict_Clear(dict: *mut PyObject);
-
-    /// Update dictionary with items from another mapping.
-    /// Returns 0 on success, -1 on error.
-    pub fn PyDict_Update(dict: *mut PyObject, other: *mut PyObject) -> c_int;
-
-    // -------------------------------------------------------------------------
-    // Tuple operations
-    // -------------------------------------------------------------------------
-
-    /// Create a new tuple of given size.
-    /// Returns new reference.
-    pub fn PyTuple_New(size: isize) -> *mut PyObject;
-
-    /// Set item in tuple (steals reference to v).
-    /// Returns 0 on success, -1 on error.
-    /// Only use on newly created tuples!
-    pub fn PyTuple_SetItem(tuple: *mut PyObject, pos: isize, v: *mut PyObject) -> c_int;
-
-    // -------------------------------------------------------------------------
-    // List operations
-    // -------------------------------------------------------------------------
-
-    /// Create a new list of given size.
-    /// Returns new reference.
-    pub fn PyList_New(size: isize) -> *mut PyObject;
-
-    /// Append an item to a list.
-    /// Returns 0 on success, -1 on error.
-    pub fn PyList_Append(list: *mut PyObject, item: *mut PyObject) -> c_int;
-
-    // -------------------------------------------------------------------------
-    // Long (int) operations
-    // -------------------------------------------------------------------------
-
-    /// Create a Python int from a C long.
-    /// Returns new reference.
-    pub fn PyLong_FromLong(v: c_long) -> *mut PyObject;
-
-    /// Convert a Python int to a C long.
-    /// Returns -1 on error (check PyErr_Occurred).
-    pub fn PyLong_AsLong(o: *mut PyObject) -> c_long;
-
-    // -------------------------------------------------------------------------
-    // None and boolean singletons
-    // -------------------------------------------------------------------------
-
-    /// The None singleton (borrowed reference).
+    // Singletons (not exposed as statics in pyo3::ffi stable ABI)
     pub static mut _Py_NoneStruct: PyObject;
-
-    /// The True singleton (borrowed reference).
     pub static mut _Py_TrueStruct: PyObject;
-
-    /// The False singleton (borrowed reference).
     pub static mut _Py_FalseStruct: PyObject;
-
-    // -------------------------------------------------------------------------
-    // Exception types
-    // -------------------------------------------------------------------------
-
-    pub static mut PyExc_BaseException: *mut PyObject;
-    pub static mut PyExc_Exception: *mut PyObject;
-    pub static mut PyExc_RuntimeError: *mut PyObject;
-    pub static mut PyExc_TypeError: *mut PyObject;
-    pub static mut PyExc_ValueError: *mut PyObject;
-    pub static mut PyExc_KeyError: *mut PyObject;
-    pub static mut PyExc_IndexError: *mut PyObject;
-    pub static mut PyExc_AttributeError: *mut PyObject;
-    pub static mut PyExc_MemoryError: *mut PyObject;
-    pub static mut PyExc_SystemExit: *mut PyObject;
-
-    // -------------------------------------------------------------------------
-    // Built-in module creation
-    // -------------------------------------------------------------------------
-
-    /// Register a built-in module before Py_Initialize.
-    /// Must be called BEFORE Py_Initialize.
-    /// Returns 0 on success, -1 on error.
-    pub fn PyImport_AppendInittab(
-        name: *const c_char,
-        initfunc: Option<unsafe extern "C" fn() -> *mut PyObject>,
-    ) -> c_int;
-
-    /// Create a new module object.
-    /// Returns new reference.
-    pub fn PyModule_Create2(module: *mut PyModuleDef, apiver: c_int) -> *mut PyObject;
-
-    /// Add an object to a module with the given name.
-    /// Returns 0 on success, -1 on error.
-    /// Steals a reference to value on success.
-    pub fn PyModule_AddObject(
-        module: *mut PyObject,
-        name: *const c_char,
-        value: *mut PyObject,
-    ) -> c_int;
-
-    /// Add an object to a module (newer API, doesn't steal reference).
-    /// Returns 0 on success, -1 on error.
-    pub fn PyModule_AddObjectRef(
-        module: *mut PyObject,
-        name: *const c_char,
-        value: *mut PyObject,
-    ) -> c_int;
-
-    /// Get the size of a tuple.
-    pub fn PyTuple_Size(tuple: *mut PyObject) -> isize;
-
-    /// Get an item from a tuple (borrowed reference).
-    pub fn PyTuple_GetItem(tuple: *mut PyObject, pos: isize) -> *mut PyObject;
 }
 
-// =============================================================================
-// Module definition structures (for PyModule_Create)
-// =============================================================================
-
-/// Python method definition for module functions.
-#[repr(C)]
-pub struct PyMethodDef {
-    /// Method name (null-terminated).
-    pub ml_name: *const c_char,
-    /// C function pointer.
-    pub ml_meth: Option<PyCFunction>,
-    /// Flags indicating calling convention.
-    pub ml_flags: c_int,
-    /// Docstring (null-terminated, or NULL).
-    pub ml_doc: *const c_char,
-}
-
-/// C function signature for METH_VARARGS | METH_KEYWORDS.
-pub type PyCFunction =
-    unsafe extern "C" fn(self_: *mut PyObject, args: *mut PyObject) -> *mut PyObject;
-
-/// C function signature for METH_VARARGS | METH_KEYWORDS.
-pub type PyCFunctionWithKeywords = unsafe extern "C" fn(
-    self_: *mut PyObject,
-    args: *mut PyObject,
-    kwargs: *mut PyObject,
-) -> *mut PyObject;
-
-/// Method flags.
-pub const METH_VARARGS: c_int = 0x0001;
-pub const METH_KEYWORDS: c_int = 0x0002;
-pub const METH_NOARGS: c_int = 0x0004;
-pub const METH_O: c_int = 0x0008;
-
-/// Sentinel for end of method definitions array.
-pub const fn PyMethodDef_SENTINEL() -> PyMethodDef {
-    PyMethodDef {
-        ml_name: std::ptr::null(),
-        ml_meth: None,
-        ml_flags: 0,
-        ml_doc: std::ptr::null(),
-    }
-}
-
-/// Python module definition structure.
-#[repr(C)]
-pub struct PyModuleDef {
-    pub m_base: PyModuleDef_Base,
-    pub m_name: *const c_char,
-    pub m_doc: *const c_char,
-    pub m_size: isize,
-    pub m_methods: *mut PyMethodDef,
-    pub m_slots: *mut PyModuleDef_Slot,
-    pub m_traverse: Option<unsafe extern "C" fn(*mut PyObject, *mut c_void, *mut c_void) -> c_int>,
-    pub m_clear: Option<unsafe extern "C" fn(*mut PyObject) -> c_int>,
-    pub m_free: Option<unsafe extern "C" fn(*mut c_void)>,
-}
-
-/// Module definition base (opaque).
-#[repr(C)]
-pub struct PyModuleDef_Base {
-    pub ob_base: PyObject,
-    pub m_init: Option<unsafe extern "C" fn() -> *mut PyObject>,
-    pub m_index: isize,
-    pub m_copy: *mut PyObject,
-}
-
-/// Module definition slot (for multi-phase init).
-#[repr(C)]
-pub struct PyModuleDef_Slot {
-    pub slot: c_int,
-    pub value: *mut c_void,
-}
-
-/// Module API version constant.
-pub const PYTHON_API_VERSION: c_int = 1013;
-
-/// Helper to create PyModuleDef_Base with zeroed values.
-pub const fn PyModuleDef_HEAD_INIT() -> PyModuleDef_Base {
-    PyModuleDef_Base {
-        ob_base: PyObject { _private: [] },
-        m_init: None,
-        m_index: 0,
-        m_copy: std::ptr::null_mut(),
-    }
-}
-
-// =============================================================================
 // Start symbols for PyRun_String
-// =============================================================================
-
-/// For PyRun_String: evaluate a single expression (like eval())
 pub const Py_eval_input: c_int = 258;
-
-/// For PyRun_String: execute a sequence of statements (like exec())
 pub const Py_file_input: c_int = 257;
-
-/// For PyRun_String: execute a single interactive statement
 pub const Py_single_input: c_int = 256;
 
 // =============================================================================
@@ -562,30 +171,223 @@ pub unsafe fn Py_XINCREF(op: *mut PyObject) {
 /// Takes (name, args_json) and returns Result<result_json, error_message>.
 pub type InvokeCallback = fn(&str, &str) -> Result<String, String>;
 
-/// Global storage for the invoke callback.
-/// This is set by lib.rs during export execution.
-static INVOKE_CALLBACK: std::sync::RwLock<Option<InvokeCallback>> = std::sync::RwLock::new(None);
+/// Type for the async invoke callback function.
+/// Takes (name, args_json) and returns InvokeResult (Ok/Err/Pending).
+pub type InvokeAsyncCallback = fn(&str, &str) -> Result<crate::InvokeResult, String>;
+
+use std::cell::RefCell;
+
+// Thread-local storage for the invoke callbacks.
+// These are set by lib.rs during export execution.
+// Note: WASM is single-threaded, so RefCell is sufficient and avoids lock overhead.
+thread_local! {
+    static INVOKE_CALLBACK: RefCell<Option<InvokeCallback>> = const { RefCell::new(None) };
+    static INVOKE_ASYNC_CALLBACK: RefCell<Option<InvokeAsyncCallback>> = const { RefCell::new(None) };
+    /// Stores the last callback error if Python callback execution failed.
+    /// This allows export_async_callback to detect uncaught exceptions.
+    static LAST_CALLBACK_ERROR: RefCell<Option<String>> = const { RefCell::new(None) };
+}
 
 /// Set the invoke callback function.
 /// This should be called by lib.rs before executing Python code.
 pub fn set_invoke_callback(callback: Option<InvokeCallback>) {
-    if let Ok(mut guard) = INVOKE_CALLBACK.write() {
-        *guard = callback;
-    }
+    INVOKE_CALLBACK.with(|cell| *cell.borrow_mut() = callback);
+}
+
+/// Set the async invoke callback function.
+/// This should be called by lib.rs before executing Python code.
+pub fn set_invoke_async_callback(callback: Option<InvokeAsyncCallback>) {
+    INVOKE_ASYNC_CALLBACK.with(|cell| *cell.borrow_mut() = callback);
+}
+
+/// Get and clear the last callback error, if any.
+/// This is called by export_async_callback to detect uncaught Python exceptions.
+pub fn take_last_callback_error() -> Option<String> {
+    LAST_CALLBACK_ERROR.with(|cell| cell.borrow_mut().take())
+}
+
+/// Store a callback error.
+fn set_last_callback_error(error: String) {
+    LAST_CALLBACK_ERROR.with(|cell| *cell.borrow_mut() = Some(error));
 }
 
 /// Call the registered invoke callback.
 /// Returns Err if no callback is registered or if the callback fails.
 pub fn do_invoke(name: &str, args_json: &str) -> Result<String, String> {
-    let guard = INVOKE_CALLBACK
-        .read()
-        .map_err(|_| "Failed to acquire invoke callback lock".to_string())?;
+    INVOKE_CALLBACK.with(|cell| {
+        let callback = cell.borrow();
+        let callback = callback.as_ref().ok_or_else(|| {
+            "invoke() called outside of execute context - callbacks can only be called during code execution".to_string()
+        })?;
+        callback(name, args_json)
+    })
+}
 
-    let callback = guard.as_ref().ok_or_else(|| {
-        "invoke() called outside of execute context - callbacks can only be called during code execution".to_string()
-    })?;
+/// Call the registered async invoke callback.
+/// Returns the InvokeResult (Ok/Err/Pending) or an error if no callback is registered.
+pub fn do_invoke_async(name: &str, args_json: &str) -> Result<crate::InvokeResult, String> {
+    INVOKE_ASYNC_CALLBACK.with(|cell| {
+        let callback = cell.borrow();
+        let callback = callback.as_ref().ok_or_else(|| {
+            "invoke() called outside of execute context - callbacks can only be called during code execution".to_string()
+        })?;
+        callback(name, args_json)
+    })
+}
 
-    callback(name, args_json)
+// =============================================================================
+// Execute result type for async support
+// =============================================================================
+
+/// Callback codes from componentize_py_async_support
+pub mod callback_code {
+    pub const EXIT: u32 = 0;
+    pub const YIELD: u32 = 1;
+    pub const WAIT: u32 = 2;
+    pub const POLL: u32 = 3;
+
+    /// Extract the callback code from a first_poll/callback return value.
+    pub fn get_code(value: u32) -> u32 {
+        value & 0xF
+    }
+
+    /// Extract the waitable_set handle from a WAIT return value.
+    pub fn get_waitable_set(value: u32) -> u32 {
+        value >> 4
+    }
+}
+
+/// Result of executing Python code.
+#[derive(Debug)]
+pub enum ExecuteResult {
+    /// Execution completed successfully with output.
+    Complete(String),
+    /// Execution completed with an error.
+    Error(String),
+    /// Execution is pending, waiting for async callback.
+    /// Contains the raw callback code from first_poll (WAIT | waitable_set << 4).
+    Pending(u32),
+}
+
+/// Read the `_eryx_callback_code` global variable from Python.
+///
+/// This is set by `_eryx_run_async` after calling `first_poll`.
+/// Returns 0 (EXIT) if the variable doesn't exist or can't be read.
+fn get_python_callback_code() -> u32 {
+    unsafe {
+        let main_module = PyImport_AddModule(c"__main__".as_ptr());
+        if main_module.is_null() {
+            return 0;
+        }
+
+        let main_dict = PyModule_GetDict(main_module);
+        if main_dict.is_null() {
+            return 0;
+        }
+
+        let var_name = c"_eryx_callback_code";
+        let var = PyDict_GetItemString(main_dict, var_name.as_ptr());
+        if var.is_null() {
+            return 0;
+        }
+
+        // Get the integer value
+        let value = PyLong_AsLong(var);
+        if value < 0 && !PyErr_Occurred().is_null() {
+            PyErr_Clear();
+            return 0;
+        }
+
+        value as u32
+    }
+}
+
+/// Call Python's `componentize_py_async_support.callback(event0, event1, event2)`.
+///
+/// This is called from `export_async_callback` to resume a suspended async operation.
+/// Returns the callback code (EXIT or WAIT | waitable_set).
+///
+/// If Python raises an uncaught exception, the error is stored and can be retrieved
+/// with `take_last_callback_error()`.
+pub fn call_python_callback(event0: u32, event1: u32, event2: u32) -> u32 {
+    use std::ffi::CString;
+
+    let code = format!(
+        r#"
+import componentize_py_async_support as _cpas
+_eryx_callback_code = _cpas.callback({event0}, {event1}, {event2})
+"#
+    );
+
+    let code_cstr = match CString::new(code) {
+        Ok(s) => s,
+        Err(_) => return callback_code::EXIT,
+    };
+
+    unsafe {
+        if PyRun_SimpleString(code_cstr.as_ptr()) != 0 {
+            // Python callback raised an uncaught exception.
+            // Capture the error before clearing it.
+            let error = get_last_error_message();
+            set_last_callback_error(error);
+            PyErr_Clear();
+            return callback_code::EXIT;
+        }
+    }
+
+    get_python_callback_code()
+}
+
+/// Re-capture stdout after async execution completes.
+///
+/// This is called from `export_async_callback` when the async execution finishes.
+/// When execution returned Pending, we kept the capture variables (_eryx_stdout, etc.)
+/// with stdout still redirected so that async code could still print. Now we capture
+/// the final output and restore original stdout/stderr.
+pub fn recapture_stdout() {
+    use std::ffi::CString;
+
+    // Capture the output and restore original stdout/stderr
+    let code = r#"
+import sys as _sys
+if '_eryx_stdout' in dir():
+    _eryx_output = _eryx_stdout.getvalue()
+    _eryx_errors = _eryx_stderr.getvalue()
+    _sys.stdout = _eryx_old_stdout
+    _sys.stderr = _eryx_old_stderr
+    del _eryx_stdout, _eryx_stderr, _eryx_old_stdout, _eryx_old_stderr
+else:
+    _eryx_output = ''
+    _eryx_errors = ''
+"#;
+    if let Ok(code_cstr) = CString::new(code) {
+        unsafe {
+            if PyRun_SimpleString(code_cstr.as_ptr()) != 0 {
+                PyErr_Clear();
+            }
+        }
+    }
+}
+
+/// Store the result of an async import for Python's promise_get_result to read.
+///
+/// This is called from `export_async_callback` after lifting the result from the buffer.
+/// The result is stored in `_eryx_async_import_result` in Python.
+pub fn set_async_import_result(_subtask: u32, result_json: &str) {
+    use std::ffi::CString;
+
+    // Escape the JSON for embedding in Python
+    let escaped = result_json.replace('\\', "\\\\").replace('"', "\\\"");
+
+    let code = format!(r#"_eryx_async_import_result = "{escaped}""#);
+
+    if let Ok(code_cstr) = CString::new(code) {
+        unsafe {
+            if PyRun_SimpleString(code_cstr.as_ptr()) != 0 {
+                PyErr_Clear();
+            }
+        }
+    }
 }
 
 // =============================================================================
@@ -612,15 +414,116 @@ fn _eryx_invoke(name: String, args_json: String) -> PyResult<String> {
     }
 }
 
+/// Async-aware invoke function exposed to Python.
+/// Returns a tuple: (result_type, value)
+/// - result_type 0: Ok - value is the JSON result string
+/// - result_type 1: Err - value is the error message string
+/// - result_type 2: Pending - value is a tuple (waitable_id, promise_id)
+///
+/// Python signature: _eryx_invoke_async(name: str, args_json: str) -> tuple[int, Any]
+#[pyfunction]
+fn _eryx_invoke_async(
+    py: Python<'_>,
+    name: String,
+    args_json: String,
+) -> PyResult<(i32, Py<PyAny>)> {
+    match do_invoke_async(&name, &args_json) {
+        Ok(crate::InvokeResult::Ok(result)) => {
+            Ok((0, result.into_pyobject(py)?.into_any().unbind()))
+        }
+        Ok(crate::InvokeResult::Err(error)) => {
+            Ok((1, error.into_pyobject(py)?.into_any().unbind()))
+        }
+        Ok(crate::InvokeResult::Pending(waitable, promise)) => {
+            let tuple = (waitable, promise);
+            Ok((2, tuple.into_pyobject(py)?.into_any().unbind()))
+        }
+        Err(e) => Err(pyo3::exceptions::PyRuntimeError::new_err(e)),
+    }
+}
+
+// =============================================================================
+// Async support FFI functions
+// =============================================================================
+//
+// These functions expose Component Model async intrinsics to Python.
+// They match the interface expected by componentize_py_async_support.
+
+/// Create a new waitable set for tracking pending async operations.
+/// Returns the waitable set handle.
+#[pyfunction]
+fn waitable_set_new_() -> u32 {
+    unsafe { crate::waitable_set_new() }
+}
+
+/// Drop a waitable set when no longer needed.
+#[pyfunction]
+fn waitable_set_drop_(set: u32) {
+    unsafe { crate::waitable_set_drop(set) }
+}
+
+/// Add a waitable (subtask) to a waitable set for polling.
+#[pyfunction]
+fn waitable_join_(waitable: u32, set: u32) {
+    unsafe { crate::waitable_join(waitable, set) }
+}
+
+/// Store a context value (Python object) for async resumption.
+/// The object reference count is incremented to keep it alive.
+#[pyfunction]
+fn context_set_(value: Option<Py<PyAny>>) {
+    let ptr = match value {
+        Some(obj) => {
+            // Increment ref count so it stays alive while stored
+            let ptr = obj.as_ptr();
+            unsafe {
+                pyo3::ffi::Py_IncRef(ptr);
+            }
+            ptr as u32
+        }
+        None => 0,
+    };
+    unsafe { crate::context_set(ptr) }
+}
+
+/// Retrieve the stored context value.
+/// Returns None if no context was stored (ptr was 0).
+#[pyfunction]
+fn context_get_(py: Python<'_>) -> Option<Py<PyAny>> {
+    let ptr = unsafe { crate::context_get() };
+    if ptr == 0 {
+        None
+    } else {
+        // Convert raw pointer back to PyObject
+        // The object was incref'd when stored, so we borrow it here
+        let obj_ptr = ptr as *mut pyo3::ffi::PyObject;
+        // Create a Py<PyAny> from the raw pointer (steals reference)
+        Some(unsafe { Py::from_borrowed_ptr(py, obj_ptr) })
+    }
+}
+
+/// Drop a completed subtask to release resources.
+#[pyfunction]
+fn subtask_drop_(task: u32) {
+    unsafe { crate::subtask_drop(task) }
+}
+
 /// The _eryx module definition.
 /// This generates a `PyInit__eryx` function that can be registered with Python.
 #[pymodule]
 #[pyo3(name = "_eryx")]
 fn eryx_module(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(_eryx_invoke, m)?)?;
+    m.add_function(wrap_pyfunction!(_eryx_invoke_async, m)?)?;
+    // Async support functions (matching componentize_py_runtime interface)
+    m.add_function(wrap_pyfunction!(waitable_set_new_, m)?)?;
+    m.add_function(wrap_pyfunction!(waitable_set_drop_, m)?)?;
+    m.add_function(wrap_pyfunction!(waitable_join_, m)?)?;
+    m.add_function(wrap_pyfunction!(context_set_, m)?)?;
+    m.add_function(wrap_pyfunction!(context_get_, m)?)?;
+    m.add_function(wrap_pyfunction!(subtask_drop_, m)?)?;
     Ok(())
 }
-
 
 // =============================================================================
 // Python interpreter state
@@ -665,7 +568,6 @@ pub fn initialize_python() {
         let result = PyRun_SimpleString(setup_code.as_ptr());
         if result != 0 {
             // If this fails, Python is in a bad state - not much we can do
-            eprintln!("eryx-wasm-runtime: WARNING: Failed to import __main__");
             PyErr_Clear();
         }
     }
@@ -812,29 +714,88 @@ pub unsafe fn get_python_variable_string(name: &str) -> Result<String, String> {
 // Execute Python code with output capture
 // =============================================================================
 
+/// Escape a string for use as a Python string literal (triple-quoted).
+fn python_string_literal(s: &str) -> String {
+    // Use triple double-quotes. We need to escape any triple-quote sequences
+    // and trailing backslashes (which would escape the closing quotes).
+    // Don't use raw strings so that escape sequences like \n work.
+    let mut escaped = s.replace('\\', "\\\\").replace("\"\"\"", r#"\"\"\""#);
+    // A trailing backslash would escape the closing quotes, so add a space and strip it later
+    // Actually, the double-escaping handles this - a trailing \\ becomes \\\\
+    // But we need to handle the case where user has """
+    escaped = escaped.replace('\n', "\\n").replace('\r', "\\r").replace('\t', "\\t");
+    format!("\"\"\"{}\"\"\"", escaped)
+}
+
 /// Execute Python code and capture stdout.
 ///
 /// This is the main entry point for the `execute` WIT export.
 /// It runs the provided code in `__main__` and returns captured stdout,
 /// or an error message if execution fails.
 ///
+/// Supports top-level `await` by detecting async code and wrapping it
+/// in an async function executed via `asyncio.run()`.
+///
 /// # Returns
-/// - `Ok(stdout)` - The captured stdout output (may be empty)
-/// - `Err(error)` - Error message if execution failed
-pub fn execute_python(code: &str) -> Result<String, String> {
+/// - `Complete(stdout)` - The captured stdout output (may be empty)
+/// - `Error(message)` - Error message if execution failed
+/// - `Pending(waitable_set)` - Execution suspended, waiting for async callback
+pub fn execute_python(code: &str) -> ExecuteResult {
     use std::ffi::CString;
 
     if !is_python_initialized() {
-        return Err("Python not initialized".to_string());
+        return ExecuteResult::Error("Python not initialized".to_string());
     }
 
-    let code_cstr = CString::new(code).map_err(|e| format!("Invalid code string: {e}"))?;
+    // Validate that code is valid UTF-8 (CString requires this)
+    if CString::new(code).is_err() {
+        return ExecuteResult::Error("Invalid code string: contains null bytes".to_string());
+    }
 
     unsafe {
-        // Set up stdout/stderr capture using StringIO
+        // Set up stdout/stderr capture and async execution infrastructure
+        // Also patch socket.socketpair to work in WASI (needed for asyncio)
         let capture_setup = c"
 import sys as _sys
 from io import StringIO as _StringIO
+import ast as _ast
+import types as _types
+
+# Patch socket.socketpair before importing asyncio
+# WASI doesn't support socketpair, so we create a dummy that works for asyncio's self-pipe
+import socket as _socket
+_socket_original_socketpair = getattr(_socket, 'socketpair', None)
+
+class _DummySocket:
+    '''Dummy socket for asyncio self-pipe in WASI.'''
+    def __init__(self):
+        self._buffer = []
+        self._closed = False
+    def fileno(self):
+        return -1  # Invalid fd, but asyncio might not check
+    def setblocking(self, flag):
+        pass
+    def send(self, data):
+        self._buffer.append(data)
+        return len(data)
+    def recv(self, n):
+        if self._buffer:
+            return self._buffer.pop(0)
+        return b''
+    def close(self):
+        self._closed = True
+    def __enter__(self):
+        return self
+    def __exit__(self, *args):
+        self.close()
+
+def _dummy_socketpair(family=None, type=None, proto=0):
+    '''Dummy socketpair for WASI asyncio compatibility.'''
+    return (_DummySocket(), _DummySocket())
+
+# Always patch socketpair in WASI environment
+_socket.socketpair = _dummy_socketpair
+
 _eryx_stdout = _StringIO()
 _eryx_stderr = _StringIO()
 _eryx_old_stdout = _sys.stdout
@@ -844,35 +805,103 @@ _sys.stderr = _eryx_stderr
 ";
         if PyRun_SimpleString(capture_setup.as_ptr()) != 0 {
             PyErr_Clear();
-            return Err("Failed to set up output capture".to_string());
+            return ExecuteResult::Error("Failed to set up output capture".to_string());
         }
 
-        // Run the user's code
-        let exec_result = PyRun_SimpleString(code_cstr.as_ptr());
+        // Build the execution code - compile with TLA support and run with async support
+        // We try to use componentize_py_async_support for proper async handling,
+        // falling back to a simple coroutine runner if not available
+        let exec_wrapper = format!(
+            r#"
+# Try to import async support for proper pending handling
+try:
+    import componentize_py_async_support as _cpas
+    import asyncio as _asyncio
+    _CPAS_AVAILABLE = True
+except ImportError:
+    _CPAS_AVAILABLE = False
 
-        // Restore stdout/stderr and get captured output
-        let capture_teardown = c"
+# Global to store the callback code from first_poll
+_eryx_callback_code = 0  # 0 = EXIT (complete), 2 = WAIT (pending), etc.
+
+def _eryx_run_async(coro):
+    '''Coroutine runner with componentize_py_async_support integration.
+
+    Uses the custom event loop from componentize_py_async_support when available,
+    which properly handles pending async operations and the Component Model callback protocol.
+
+    Stores the callback code in _eryx_callback_code global:
+    - 0 (EXIT): Execution complete
+    - 2 (WAIT) | (waitable_set << 4): Execution pending, need to wait
+    '''
+    global _eryx_callback_code
+
+    if _CPAS_AVAILABLE:
+        # The module already initializes _loop at import time
+        # Just set it as the current asyncio event loop
+        _asyncio.set_event_loop(_cpas._loop)
+
+        # Run the coroutine using first_poll which sets up the async context
+        # export_index=0, borrows=0 - these are for async export tracking
+        # which we don't need for execute()
+        async def _wrapper():
+            return await coro
+
+        _eryx_callback_code = _cpas.first_poll(0, 0, _wrapper())
+        return None
+    else:
+        _eryx_callback_code = 0  # No async support, always complete
+        # Fallback: Simple coroutine runner for WASI
+        try:
+            result = coro.send(None)
+            while True:
+                if hasattr(result, 'send'):
+                    inner_result = _eryx_run_async(result)
+                    result = coro.send(inner_result)
+                elif hasattr(result, '__await__'):
+                    inner_result = _eryx_run_async(result.__await__())
+                    result = coro.send(inner_result)
+                else:
+                    result = coro.send(result)
+        except StopIteration as e:
+            return e.value
+
+_eryx_user_code = {}
+_eryx_compiled = compile(_eryx_user_code, '<user>', 'exec', flags=_ast.PyCF_ALLOW_TOP_LEVEL_AWAIT)
+
+# Check if the compiled code is a coroutine (has top-level await)
+if _eryx_compiled.co_flags & 0x80:  # CO_COROUTINE
+    # Create a function from the code and run it as a coroutine
+    _eryx_fn = _types.FunctionType(_eryx_compiled, globals())
+    _eryx_coro = _eryx_fn()
+    _eryx_run_async(_eryx_coro)
+else:
+    # Regular synchronous code
+    exec(_eryx_compiled, globals())
+"#,
+            python_string_literal(code)
+        );
+
+        let exec_code_cstr = match CString::new(exec_wrapper) {
+            Ok(s) => s,
+            Err(e) => return ExecuteResult::Error(format!("Invalid exec code: {e}")),
+        };
+        let exec_result = PyRun_SimpleString(exec_code_cstr.as_ptr());
+
+        if exec_result != 0 {
+            // Execution failed - teardown and get error
+            let capture_teardown = c"
 _sys.stdout = _eryx_old_stdout
 _sys.stderr = _eryx_old_stderr
 _eryx_output = _eryx_stdout.getvalue()
 _eryx_errors = _eryx_stderr.getvalue()
-# Clean up our temporary variables
 del _eryx_stdout, _eryx_stderr, _eryx_old_stdout, _eryx_old_stderr
 ";
-        if PyRun_SimpleString(capture_teardown.as_ptr()) != 0 {
-            PyErr_Clear();
-            // Even if teardown fails, try to continue
-        }
+            let _ = PyRun_SimpleString(capture_teardown.as_ptr());
 
-        if exec_result != 0 {
-            // Execution failed - get the error message
-            // First check if there's stderr output
             let stderr_output = get_python_variable_string("_eryx_errors").unwrap_or_default();
-
-            // Also get the actual Python exception if one occurred
             let exception_msg = get_last_error_message();
 
-            // Combine stderr and exception info
             let error = if !stderr_output.is_empty() && exception_msg != "Unknown error" {
                 format!("{stderr_output}\n{exception_msg}")
             } else if !stderr_output.is_empty() {
@@ -881,19 +910,36 @@ del _eryx_stdout, _eryx_stderr, _eryx_old_stdout, _eryx_old_stderr
                 exception_msg
             };
 
-            // Clean up the temporary variable
             let _ = PyRun_SimpleString(c"del _eryx_output, _eryx_errors".as_ptr());
-
-            return Err(error);
+            return ExecuteResult::Error(error);
         }
 
-        // Get the captured stdout
-        let output = get_python_variable_string("_eryx_output").unwrap_or_default();
+        // Check the callback code BEFORE teardown to see if execution is pending
+        let callback_code_value = get_python_callback_code();
+        let code = callback_code::get_code(callback_code_value);
 
-        // Clean up the temporary variables
+        if code == callback_code::WAIT {
+            // Execution is pending - keep capture variables including stdout redirection
+            // so that async code can still print and we'll capture it later
+            return ExecuteResult::Pending(callback_code_value);
+        }
+
+        // Execution complete - full teardown
+        let capture_teardown = c"
+_sys.stdout = _eryx_old_stdout
+_sys.stderr = _eryx_old_stderr
+_eryx_output = _eryx_stdout.getvalue()
+_eryx_errors = _eryx_stderr.getvalue()
+del _eryx_stdout, _eryx_stderr, _eryx_old_stdout, _eryx_old_stderr
+";
+        if PyRun_SimpleString(capture_teardown.as_ptr()) != 0 {
+            PyErr_Clear();
+        }
+
+        let output = get_python_variable_string("_eryx_output").unwrap_or_default();
         let _ = PyRun_SimpleString(c"del _eryx_output, _eryx_errors".as_ptr());
 
-        Ok(output)
+        ExecuteResult::Complete(output.trim_end_matches('\n').to_string())
     }
 }
 
@@ -1154,6 +1200,8 @@ _eryx_keep = {
     '_eryx_make_callback', '_eryx_reserved', '_eryx_callbacks',
     # Preserve json module alias used by list_callbacks and _eryx module for invoke()
     '_json', '_eryx',
+    # Preserve async support modules
+    '_cpr', '_cpas', '_Ok', '_Err', '_ASYNC_SUPPORT',
 }
 
 # Also keep callback wrappers and namespace objects
@@ -1227,12 +1275,21 @@ pub fn setup_callbacks(callbacks: &[CallbackInfo]) -> Result<(), String> {
 import json as _json
 import _eryx
 
+# Try to import async support, but don't fail if unavailable
+try:
+    import componentize_py_runtime as _cpr
+    import componentize_py_async_support as _cpas
+    from componentize_py_types import Ok as _Ok, Err as _Err
+    _ASYNC_SUPPORT = True
+except ImportError:
+    _ASYNC_SUPPORT = False
+
 # Callbacks metadata from host
 _eryx_callbacks_json = '''{}'''
 _eryx_callbacks = _json.loads(_eryx_callbacks_json)
 
-def invoke(name, **kwargs):
-    """Invoke a host callback by name with keyword arguments.
+async def invoke(name, **kwargs):
+    """Invoke a host callback by name with keyword arguments (async).
 
     Args:
         name: Name of the callback (e.g., "sleep", "http.get")
@@ -1242,16 +1299,34 @@ def invoke(name, **kwargs):
         The callback result (parsed from JSON)
 
     Example:
-        result = invoke("get_time")
-        data = invoke("http.get", url="https://example.com")
+        result = await invoke("get_time")
+        data = await invoke("http.get", url="https://example.com")
     """
-    # Serialize kwargs to JSON and call the Rust implementation
+    # Serialize kwargs to JSON
     args_json = _json.dumps(kwargs)
-    result_json = _eryx._eryx_invoke(name, args_json)
-    # Parse result JSON (may be empty string for void callbacks)
-    if result_json:
-        return _json.loads(result_json)
-    return None
+
+    if _ASYNC_SUPPORT:
+        # Use async-aware invoke that can handle pending operations
+        result = _cpr.invoke_async(name, args_json)
+        if isinstance(result, _Ok):
+            result_json = result.value
+        elif isinstance(result, _Err):
+            # Check if this is a pending tuple or an error string
+            if isinstance(result.value, tuple):
+                # Pending - wait for it using await_result
+                result_json = await _cpas.await_result(result)
+            else:
+                # Actual error
+                raise RuntimeError(result.value)
+        if result_json:
+            return _json.loads(result_json)
+        return None
+    else:
+        # Fallback to synchronous invoke
+        result_json = _eryx._eryx_invoke(name, args_json)
+        if result_json:
+            return _json.loads(result_json)
+        return None
 
 def list_callbacks():
     """List all available callbacks for introspection.
@@ -1275,12 +1350,13 @@ _eryx_reserved = set(dir(__builtins__)) | {{
     'os', 'subprocess', 'socket', '__import__'
 }}
 
-# Helper to create callback wrappers
+# Helper to create async callback wrappers
 def _eryx_make_callback(name):
-    def callback(**kwargs):
-        return invoke(name, **kwargs)
+    async def callback(**kwargs):
+        # invoke() is now async, so await it
+        return await invoke(name, **kwargs)
     callback.__name__ = name
-    callback.__doc__ = f"Invoke the '{{name}}' callback."
+    callback.__doc__ = f"Invoke the '{{name}}' callback (async)."
     return callback
 
 # Namespace class for dotted callbacks like http.get
@@ -1308,9 +1384,9 @@ class _EryxNamespace:
         full_name = f"{{self._prefix}}{{name}}"
         return _EryxCallbackLeaf(self._invoke, full_name)
 
-    def __call__(self, **kwargs):
+    async def __call__(self, **kwargs):
         if self._prefix:
-            return self._invoke(self._prefix.rstrip('.'), **kwargs)
+            return await self._invoke(self._prefix.rstrip('.'), **kwargs)
         raise TypeError("Cannot call root namespace")
 
 class _EryxCallbackLeaf:
@@ -1318,8 +1394,8 @@ class _EryxCallbackLeaf:
         self._invoke = invoke_fn
         self._name = name
 
-    def __call__(self, **kwargs):
-        return self._invoke(self._name, **kwargs)
+    async def __call__(self, **kwargs):
+        return await self._invoke(self._name, **kwargs)
 
 # Generate callback wrappers
 _eryx_namespaces = {{}}

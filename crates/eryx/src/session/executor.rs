@@ -40,7 +40,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::mpsc;
 use wasmtime::Store;
 use wasmtime::component::ResourceTable;
-use wasmtime_wasi::{WasiCtx, WasiCtxBuilder};
+use wasmtime_wasi::{DirPerms, FilePerms, WasiCtx, WasiCtxBuilder};
 
 use crate::callback::Callback;
 use crate::error::Error;
@@ -239,11 +239,31 @@ impl SessionExecutor {
             })
             .collect();
 
-        // Create WASI context
-        let wasi = WasiCtxBuilder::new()
-            .inherit_stdout()
-            .inherit_stderr()
-            .build();
+        // Create WASI context with Python stdlib mounts if configured
+        let mut wasi_builder = WasiCtxBuilder::new();
+        wasi_builder.inherit_stdout().inherit_stderr();
+
+        // Mount Python stdlib if configured (required for eryx-wasm-runtime)
+        if let Some(stdlib_path) = executor.python_stdlib_path() {
+            wasi_builder
+                .env("PYTHONPATH", "/python-stdlib:/site-packages")
+                .preopened_dir(stdlib_path, "/python-stdlib", DirPerms::READ, FilePerms::READ)
+                .map_err(|e| Error::WasmEngine(format!("Failed to mount Python stdlib: {e}")))?;
+        }
+
+        // Mount site-packages if configured
+        if let Some(site_packages_path) = executor.python_site_packages_path() {
+            wasi_builder
+                .preopened_dir(
+                    site_packages_path,
+                    "/site-packages",
+                    DirPerms::READ,
+                    FilePerms::READ,
+                )
+                .map_err(|e| Error::WasmEngine(format!("Failed to mount site-packages: {e}")))?;
+        }
+
+        let wasi = wasi_builder.build();
 
         let state = ExecutorState::new(
             wasi,

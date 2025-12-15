@@ -50,6 +50,8 @@ runtime-*.wasm
 
 # eryx-wasm-runtime build artifacts
 crates/eryx-wasm-runtime/target/
+crates/eryx-wasm-runtime/async_intrinsics.wasm
+crates/eryx-wasm-runtime/async_intrinsics.wat
 
 # eryx-wasm-runtime test artifacts (extracted from componentize-py)
 crates/eryx-wasm-runtime/tests/python-stdlib/

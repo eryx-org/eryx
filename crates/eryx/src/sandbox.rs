@@ -356,6 +356,10 @@ pub struct SandboxBuilder {
     trace_handler: Option<Arc<dyn TraceHandler>>,
     output_handler: Option<Arc<dyn OutputHandler>>,
     resource_limits: ResourceLimits,
+    /// Path to Python stdlib for eryx-wasm-runtime.
+    python_stdlib_path: Option<std::path::PathBuf>,
+    /// Path to Python site-packages for eryx-wasm-runtime.
+    python_site_packages_path: Option<std::path::PathBuf>,
 }
 
 impl Default for SandboxBuilder {
@@ -393,6 +397,8 @@ impl SandboxBuilder {
             trace_handler: None,
             output_handler: None,
             resource_limits: ResourceLimits::default(),
+            python_stdlib_path: None,
+            python_site_packages_path: None,
         }
     }
 
@@ -583,6 +589,29 @@ impl SandboxBuilder {
         self
     }
 
+    /// Set the path to the Python standard library directory.
+    ///
+    /// This is required when using the eryx-wasm-runtime (Rust/CPython FFI based).
+    /// The directory should contain the extracted Python stdlib (e.g., from
+    /// componentize-py's python-lib.tar.zst).
+    ///
+    /// The stdlib will be mounted at `/python-stdlib` inside the WASM sandbox.
+    #[must_use]
+    pub fn with_python_stdlib(mut self, path: impl Into<std::path::PathBuf>) -> Self {
+        self.python_stdlib_path = Some(path.into());
+        self
+    }
+
+    /// Set the path to additional Python packages directory.
+    ///
+    /// The directory will be mounted at `/site-packages` inside the WASM sandbox
+    /// and added to Python's import path.
+    #[must_use]
+    pub fn with_site_packages(mut self, path: impl Into<std::path::PathBuf>) -> Self {
+        self.python_site_packages_path = Some(path.into());
+        self
+    }
+
     /// Build the sandbox.
     ///
     /// # Errors
@@ -644,6 +673,16 @@ impl SandboxBuilder {
 
                 return Err(Error::Initialization(msg.to_string()));
             }
+        };
+
+        // Apply Python stdlib and site-packages paths if configured
+        let executor = match (self.python_stdlib_path, self.python_site_packages_path) {
+            (Some(stdlib), Some(site_packages)) => {
+                executor.with_python_stdlib(stdlib).with_site_packages(site_packages)
+            }
+            (Some(stdlib), None) => executor.with_python_stdlib(stdlib),
+            (None, Some(site_packages)) => executor.with_site_packages(site_packages),
+            (None, None) => executor,
         };
 
         Ok(Sandbox {

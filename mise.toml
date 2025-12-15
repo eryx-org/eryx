@@ -5,6 +5,11 @@ rust = { version = "1.92", profile = "default" }
 uv = "latest"
 "cargo:wasm-tools" = "latest"
 
+# Note: WASI SDK is intentionally NOT in [tools] because adding it to PATH
+# breaks host compilation (Rust picks up wasm clang for proc-macro builds).
+# Instead, we install it on-demand via the ensure-wasi-sdk task.
+# The build.sh script finds it via `mise where`.
+
 [tasks.check]
 description = "Run cargo check"
 run = "cargo check --workspace"
@@ -59,14 +64,11 @@ description = "Clean build artifacts"
 run = "cargo clean"
 
 [tasks.build-wasm]
-description = "Build the Python WASM component"
-dir = "crates/eryx-runtime"
-run = """
-uv sync
-uv run componentize-py -d runtime.wit -w sandbox bindings guest_bindings
-uv run componentize-py -d runtime.wit -w sandbox componentize runtime -o runtime.wasm
-wasm-tools strip -a runtime.wasm -o runtime.wasm
-"""
+description = "Build the Python WASM component using eryx-wasm-runtime"
+depends = ["ensure-wasi-sdk"]
+run = "BUILD_ERYX_RUNTIME=1 cargo build --package eryx-runtime"
+sources = ["crates/eryx-wasm-runtime/src/**/*.rs", "crates/eryx-wasm-runtime/clock_stubs.c", "crates/eryx-runtime/runtime.wit"]
+outputs = ["crates/eryx-runtime/runtime.wasm"]
 
 [tasks.build-all]
 description = "Build WASM component and Rust crates"
@@ -145,3 +147,46 @@ cargo run --example embedded_runtime --features embedded-runtime --release
 echo ""
 echo "✓ All examples completed!"
 """
+
+# =============================================================================
+# eryx-wasm-runtime tasks
+# =============================================================================
+
+[tasks.ensure-wasi-sdk]
+description = "Install WASI SDK if not present (does not add to PATH)"
+run = """
+if mise where github:WebAssembly/wasi-sdk 2>/dev/null; then
+    echo "WASI SDK already installed"
+else
+    echo "Installing WASI SDK..."
+    mise install github:WebAssembly/wasi-sdk@wasi-sdk-27
+fi
+"""
+
+[tasks.build-eryx-runtime]
+description = "Build liberyx_runtime.so and runtime.wasm via eryx-runtime build.rs"
+depends = ["ensure-wasi-sdk"]
+run = "BUILD_ERYX_RUNTIME=1 cargo build --package eryx-runtime"
+sources = ["crates/eryx-wasm-runtime/src/**/*.rs", "crates/eryx-wasm-runtime/clock_stubs.c", "crates/eryx-wasm-runtime/Cargo.toml", "crates/eryx-runtime/runtime.wit"]
+outputs = ["crates/eryx-wasm-runtime/target/liberyx_runtime.so", "crates/eryx-runtime/runtime.wasm"]
+
+[tasks.setup-eryx-runtime-tests]
+description = "Extract Python stdlib for eryx-wasm-runtime tests"
+dir = "crates/eryx-wasm-runtime"
+run = """
+mkdir -p tests/python-stdlib tests/site-packages
+# Find the python-lib.tar.zst from componentize-py build output
+PYTHON_LIB=$(find ../../target -name 'python-lib.tar.zst' -path '*/componentize-py-*/out/*' 2>/dev/null | head -1)
+if [[ -z "$PYTHON_LIB" ]]; then
+    echo "Error: python-lib.tar.zst not found. Run 'cargo build' first to build componentize-py."
+    exit 1
+fi
+echo "Extracting $PYTHON_LIB"
+tar -xf "$PYTHON_LIB" -C tests/python-stdlib
+"""
+outputs = ["tests/python-stdlib/encodings/__init__.py"]
+
+[tasks.test-eryx-runtime]
+description = "Run eryx-wasm-runtime integration tests"
+depends = ["build-eryx-runtime", "setup-eryx-runtime-tests"]
+run = "cargo test --package eryx-wasm-runtime --test runtime_test -- --nocapture"

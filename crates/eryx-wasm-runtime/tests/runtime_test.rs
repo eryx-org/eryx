@@ -367,7 +367,7 @@ async fn test_instantiate_component() -> Result<(), Box<dyn std::error::Error>> 
     match &result {
         Ok(output) => {
             println!("  OK: {output:?}");
-            assert_eq!(output, "hello\nworld\n", "Should have two lines of output");
+            assert_eq!(output, "hello\nworld", "Should have two lines of output");
         }
         Err(error) => {
             panic!("Test 2 failed with error: {error}");
@@ -437,7 +437,10 @@ async fn test_instantiate_component() -> Result<(), Box<dyn std::error::Error>> 
         .call_async(&mut store, ("my_var = 'persisted'".to_string(),))
         .await?;
     execute.post_return_async(&mut store).await?;
-    assert!(result.is_ok(), "Assignment should succeed");
+    match &result {
+        Ok(_) => println!("  Assignment OK"),
+        Err(e) => panic!("Assignment failed with: {e}"),
+    }
 
     let (result,) = execute
         .call_async(&mut store, ("print(my_var)".to_string(),))
@@ -626,7 +629,7 @@ print(f"count: {len(cbs)}")
         .call_async(
             &mut store,
             (r#"
-result = invoke("get_time")
+result = await invoke("get_time")
 print(f"result type: {type(result).__name__}")
 print(f"timestamp: {result.get('timestamp', 'missing')}")
 "#
@@ -686,7 +689,7 @@ print(f"callbacks: {names}")
         .call_async(
             &mut store,
             (r#"
-result = invoke("add", a=10, b=32)
+result = await invoke("add", a=10, b=32)
 print(f"add result: {result.get('result', 'missing')}")
 "#
             .to_string(),),
@@ -713,7 +716,7 @@ print(f"add result: {result.get('result', 'missing')}")
         .call_async(
             &mut store,
             (r#"
-result = http.get(url="https://example.com")
+result = await http.get(url="https://example.com")
 print(f"status: {result.get('status', 'missing')}")
 print(f"url: {result.get('url', 'missing')}")
 "#
@@ -746,7 +749,7 @@ print(f"url: {result.get('url', 'missing')}")
             &mut store,
             (r#"
 try:
-    invoke("nonexistent_callback")
+    await invoke("nonexistent_callback")
     print("ERROR: should have raised")
 except RuntimeError as e:
     print(f"OK: RuntimeError raised")
