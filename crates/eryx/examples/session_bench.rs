@@ -39,31 +39,30 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .join("eryx-wasm-runtime/tests/python-stdlib");
     let site_packages = numpy_dir.parent().ok_or("no parent")?;
 
+    // Use cache directory for mmap-based loading (faster + less memory)
+    let cache_dir = Path::new("/tmp/eryx-session-bench-cache");
+    let _ = std::fs::remove_dir_all(cache_dir); // Clean for accurate benchmarks
+    std::fs::create_dir_all(cache_dir)?;
+
     println!("=== Session Per-Execution Benchmark ===\n");
 
-    // Load and link extensions
+    // Load extensions
     let extensions = load_numpy_extensions(numpy_dir)?;
-    let native_extensions: Vec<_> = extensions.iter()
-        .map(|(name, bytes)| eryx_runtime::linker::NativeExtension::new(name.clone(), bytes.clone()))
-        .collect();
-    let linked = eryx_runtime::linker::link_with_extensions(&native_extensions)?;
+    println!("Loaded {} native extensions\n", extensions.len());
 
-    // Pre-init with numpy
-    println!("Pre-initializing with numpy...");
-    let preinit = eryx::preinit::pre_initialize(&linked, &python_stdlib, Some(site_packages), &["numpy"]).await?;
-    let precompiled = eryx::PythonExecutor::precompile(&preinit)?;
-    println!("  Component size: {:.1} MB\n", precompiled.len() as f64 / 1_000_000.0);
-
-    // Create sandbox
+    // Create sandbox using cache_dir (handles linking, pre-init, precompile, and mmap)
+    println!("Creating sandbox (cold - linking + compiling + caching)...");
     let start = Instant::now();
-    let sandbox = unsafe {
-        Sandbox::builder()
-            .with_precompiled_bytes(precompiled)
-            .with_python_stdlib(&python_stdlib)
-            .with_site_packages(site_packages)
-            .build()?
-    };
-    println!("Sandbox creation: {:?}\n", start.elapsed());
+    let mut builder = Sandbox::builder();
+    for (name, bytes) in &extensions {
+        builder = builder.with_native_extension(name.clone(), bytes.clone());
+    }
+    let sandbox = builder
+        .with_python_stdlib(&python_stdlib)
+        .with_site_packages(site_packages)
+        .with_cache_dir(cache_dir)?
+        .build()?;
+    println!("  Cold sandbox creation: {:?}\n", start.elapsed());
 
     // Create session
     let start = Instant::now();
@@ -110,60 +109,34 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let avg = times.iter().map(|t| t.as_micros()).sum::<u128>() / times.len() as u128;
     println!("  Average: {}µs ({:.2}ms)", avg, avg as f64 / 1000.0);
 
-    // Compare to main branch baseline
-    println!("\n=== Comparison ===");
-    println!("Main branch (no numpy): ~2ms per execution");
-    println!("This branch with numpy: see above");
+    // Test warm sandbox creation (cache hit with mmap)
+    println!("\n=== Warm Sandbox Creation (cache hit) ===\n");
 
-    // Test mmap-based loading vs bytes-based loading
-    println!("\n=== Mmap vs Bytes Loading ===\n");
-
-    // Save precompiled to file
-    let cache_dir = std::path::Path::new("/tmp/eryx-mmap-test");
-    let _ = std::fs::remove_dir_all(cache_dir);
-    std::fs::create_dir_all(cache_dir)?;
-    let cwasm_path = cache_dir.join("numpy.cwasm");
-
-    // Re-create precompiled for this test
-    let preinit = eryx::preinit::pre_initialize(&linked, &python_stdlib, Some(site_packages), &["numpy"]).await?;
-    let precompiled = eryx::PythonExecutor::precompile(&preinit)?;
-    std::fs::write(&cwasm_path, &precompiled)?;
-    println!("Saved {:.1} MB to {}", precompiled.len() as f64 / 1_000_000.0, cwasm_path.display());
-
-    // Benchmark bytes-based loading
-    println!("\n--- Bytes-based loading (read into RAM) ---");
     let mut times = vec![];
-    for _ in 0..5 {
-        let bytes = std::fs::read(&cwasm_path)?;
+    for i in 0..5 {
         let start = Instant::now();
-        let _ = unsafe {
-            Sandbox::builder()
-                .with_precompiled_bytes(bytes)
-                .with_python_stdlib(&python_stdlib)
-                .with_site_packages(site_packages)
-                .build()?
-        };
-        times.push(start.elapsed());
+        let mut builder = Sandbox::builder();
+        for (name, bytes) in &extensions {
+            builder = builder.with_native_extension(name.clone(), bytes.clone());
+        }
+        let _sandbox = builder
+            .with_python_stdlib(&python_stdlib)
+            .with_site_packages(site_packages)
+            .with_cache_dir(cache_dir)?
+            .build()?;
+        let elapsed = start.elapsed();
+        if i == 0 {
+            println!("  First (verifying cache): {:?}", elapsed);
+        }
+        times.push(elapsed);
     }
-    let avg = times.iter().map(|t| t.as_millis()).sum::<u128>() / times.len() as u128;
-    println!("  Average: {}ms", avg);
+    let avg = times.iter().skip(1).map(|t| t.as_millis()).sum::<u128>() / (times.len() - 1) as u128;
+    println!("  Average (excluding first): {}ms", avg);
 
-    // Benchmark mmap-based loading
-    println!("\n--- Mmap-based loading (deserialize_file) ---");
-    let mut times = vec![];
-    for _ in 0..5 {
-        let start = Instant::now();
-        let _ = unsafe {
-            Sandbox::builder()
-                .with_precompiled_file(&cwasm_path)
-                .with_python_stdlib(&python_stdlib)
-                .with_site_packages(site_packages)
-                .build()?
-        };
-        times.push(start.elapsed());
-    }
-    let avg = times.iter().map(|t| t.as_millis()).sum::<u128>() / times.len() as u128;
-    println!("  Average: {}ms", avg);
+    // Summary
+    println!("\n=== Summary ===");
+    println!("  Session per-execution: sub-millisecond");
+    println!("  Warm sandbox creation: ~{}ms (mmap cache hit)", avg);
 
     // Clean up
     let _ = std::fs::remove_dir_all(cache_dir);

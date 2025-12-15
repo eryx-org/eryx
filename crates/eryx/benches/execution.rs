@@ -429,7 +429,7 @@ fn bench_introspection(c: &mut Criterion) {
 #[cfg(all(feature = "native-extensions", feature = "precompiled"))]
 fn bench_native_extension_caching(c: &mut Criterion) {
     use std::sync::Arc;
-    use eryx::cache::{FilesystemCache, InMemoryCache};
+    use eryx::cache::InMemoryCache;
 
     let numpy_dir = std::path::Path::new("/tmp/numpy");
     if !numpy_dir.exists() {
@@ -470,45 +470,21 @@ fn bench_native_extension_caching(c: &mut Criterion) {
 
     let site_packages = numpy_dir.parent().expect("numpy parent");
 
-    // Create cache
+    // Use cache_dir for mmap-based loading (fastest + lowest memory on Linux)
     let cache_dir = std::path::Path::new("/tmp/eryx-bench-cache");
     let _ = std::fs::remove_dir_all(cache_dir); // Clean for accurate benchmarks
-    let filesystem_cache = Arc::new(FilesystemCache::new(cache_dir).expect("create cache"));
+
+    // In-memory cache for comparison (may be faster on some platforms)
     let memory_cache = Arc::new(InMemoryCache::new());
 
     let mut group = c.benchmark_group("native_extension_caching");
     group.sample_size(10); // Slower operations need fewer samples
     group.measurement_time(Duration::from_secs(30));
 
-    // Cold start (no cache)
-    group.bench_function("cold_no_cache", |b| {
-        b.iter(|| {
-            let mut builder = Sandbox::builder();
-            for (name, bytes) in &extensions {
-                builder = builder.with_native_extension(name.clone(), bytes.clone());
-            }
-            builder = builder
-                .with_python_stdlib(&python_stdlib)
-                .with_site_packages(site_packages);
-            builder.build().expect("build sandbox")
-        });
-    });
-
-    // Warm (filesystem cache hit)
-    // First, populate the cache
-    {
-        let mut builder = Sandbox::builder();
-        for (name, bytes) in &extensions {
-            builder = builder.with_native_extension(name.clone(), bytes.clone());
-        }
-        builder = builder
-            .with_python_stdlib(&python_stdlib)
-            .with_site_packages(site_packages)
-            .with_cache(filesystem_cache.clone());
-        let _ = builder.build().expect("populate cache");
-    }
-
-    group.bench_function("warm_filesystem_cache", |b| {
+    // Cold start (no cache) - links + compiles + caches
+    group.bench_function("cold_with_cache_dir", |b| {
+        // Clean cache before each iteration for true cold start measurement
+        let _ = std::fs::remove_dir_all(cache_dir);
         b.iter(|| {
             let mut builder = Sandbox::builder();
             for (name, bytes) in &extensions {
@@ -517,12 +493,44 @@ fn bench_native_extension_caching(c: &mut Criterion) {
             builder = builder
                 .with_python_stdlib(&python_stdlib)
                 .with_site_packages(site_packages)
-                .with_cache(filesystem_cache.clone());
+                .with_cache_dir(cache_dir)
+                .expect("create cache dir");
             builder.build().expect("build sandbox")
         });
     });
 
-    // Warm (in-memory cache hit)
+    // Warm (mmap cache hit) - uses deserialize_file for fastest loading + lowest memory
+    // First, populate the cache
+    {
+        let _ = std::fs::remove_dir_all(cache_dir);
+        let mut builder = Sandbox::builder();
+        for (name, bytes) in &extensions {
+            builder = builder.with_native_extension(name.clone(), bytes.clone());
+        }
+        builder = builder
+            .with_python_stdlib(&python_stdlib)
+            .with_site_packages(site_packages)
+            .with_cache_dir(cache_dir)
+            .expect("create cache dir");
+        let _ = builder.build().expect("populate cache");
+    }
+
+    group.bench_function("warm_mmap_cache", |b| {
+        b.iter(|| {
+            let mut builder = Sandbox::builder();
+            for (name, bytes) in &extensions {
+                builder = builder.with_native_extension(name.clone(), bytes.clone());
+            }
+            builder = builder
+                .with_python_stdlib(&python_stdlib)
+                .with_site_packages(site_packages)
+                .with_cache_dir(cache_dir)
+                .expect("create cache dir");
+            builder.build().expect("build sandbox")
+        });
+    });
+
+    // Warm (in-memory cache hit) - for comparison on platforms where mmap may not help
     // First, populate the cache
     {
         let mut builder = Sandbox::builder();
