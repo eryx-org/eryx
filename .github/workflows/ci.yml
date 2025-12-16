@@ -11,24 +11,12 @@ env:
   RUST_BACKTRACE: 1
 
 jobs:
-  ci:
-    name: CI
+  # Build WASM runtime and precompile it - other jobs depend on this
+  build-wasm:
+    name: Build WASM
     runs-on: ubuntu-latest
     steps:
-      - name: Free disk space
-        run: |
-          sudo rm -rf /usr/share/dotnet
-          sudo rm -rf /usr/local/lib/android
-          sudo rm -rf /opt/ghc
-          sudo rm -rf /opt/hostedtoolcache/CodeQL
-          df -h
-
       - uses: actions/checkout@v6
-
-      - name: Install mold linker
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y mold
 
       - name: Install mise
         uses: jdx/mise-action@v3
@@ -45,9 +33,88 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ runner.os }}-cargo-wasm-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
-            ${{ runner.os }}-cargo-
+            ${{ runner.os }}-cargo-wasm-
+
+      - name: Build WASM runtime
+        run: mise run build-wasm
+
+      - name: Precompile WASM
+        run: mise run precompile-wasm
+
+      - name: Upload WASM artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: wasm-runtime
+          path: |
+            crates/eryx-runtime/runtime.wasm
+            crates/eryx-runtime/runtime.cwasm
+          retention-days: 1
+
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    needs: build-wasm
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Download WASM artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: wasm-runtime
+          path: crates/eryx-runtime/
+
+      - name: Install mise
+        uses: jdx/mise-action@v3
+
+      - name: Install required Rust toolchains
+        run: |
+          rustup toolchain install 1.92.0 --profile default
+          rustup toolchain install nightly --component rust-src
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-lint-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-lint-
+
+      - name: Check formatting
+        run: mise run fmt-check
+
+      - name: Run clippy
+        run: mise run lint
+
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    needs: build-wasm
+    steps:
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet
+          sudo rm -rf /usr/local/lib/android
+          sudo rm -rf /opt/ghc
+          sudo rm -rf /opt/hostedtoolcache/CodeQL
+          df -h
+
+      - uses: actions/checkout@v6
+
+      - name: Download WASM artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: wasm-runtime
+          path: crates/eryx-runtime/
+
+      - name: Install mold linker
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y mold
 
       - name: Configure mold linker
         run: |
@@ -58,8 +125,29 @@ jobs:
           rustflags = ["-C", "link-arg=-fuse-ld=mold"]
           EOF
 
-      - name: Run CI checks
-        run: mise run ci
+      - name: Install mise
+        uses: jdx/mise-action@v3
+
+      - name: Install required Rust toolchains
+        run: |
+          rustup toolchain install 1.92.0 --profile default
+          rustup toolchain install nightly --component rust-src
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-test-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-test-
+
+      - name: Run tests
+        run: |
+          export WASI_SDK_PATH=$(mise where github:WebAssembly/wasi-sdk@wasi-sdk-27)
+          cargo nextest run --workspace --features precompiled
 
   msrv:
     name: MSRV
@@ -91,8 +179,15 @@ jobs:
   doc:
     name: Documentation
     runs-on: ubuntu-latest
+    needs: build-wasm
     steps:
       - uses: actions/checkout@v6
+
+      - name: Download WASM artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: wasm-runtime
+          path: crates/eryx-runtime/
 
       - name: Install mise
         uses: jdx/mise-action@v3
@@ -114,6 +209,8 @@ jobs:
             ${{ runner.os }}-cargo-doc-
 
       - name: Build documentation
-        run: mise run doc
+        run: |
+          export WASI_SDK_PATH=$(mise where github:WebAssembly/wasi-sdk@wasi-sdk-27)
+          cargo doc --workspace --no-deps --all-features
         env:
           RUSTDOCFLAGS: -D warnings
