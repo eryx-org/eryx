@@ -140,18 +140,33 @@ async fn main() -> Result<(), eryx::Error> {
 
 ## Feature Flags
 
-| Feature | Description |
-|---------|-------------|
-| `precompiled` | Enables `with_precompiled_bytes()` and `with_precompiled_file()` for loading pre-compiled WASM (unsafe APIs) |
-| `embedded-runtime` | Embeds pre-compiled WASM in the binary; enables safe `with_embedded_runtime()` API for ~41x faster sandbox creation |
+| Feature | Description | Enables |
+|---------|-------------|---------|
+| `precompiled` | Load pre-compiled WASM via `with_precompiled_bytes()` / `with_precompiled_file()` (unsafe APIs) | — |
+| `embedded-runtime` | Embed pre-compiled WASM in binary; enables `with_embedded_runtime()` for ~41x faster sandbox creation | `precompiled` |
+| `embedded-stdlib` | Embed Python stdlib (~2MB compressed) for zero-config sandboxes; extracted to temp dir on first use | — |
+| `packages` | Enable `with_package()` for loading Python wheels (`.whl`) and source archives (`.tar.gz`) | — |
+| `native-extensions` | Enable native Python extension support (e.g., numpy) via late-linking at sandbox creation | — |
+| `pre-init` | Capture Python's initialized memory state for faster startup with native extensions | `native-extensions` |
+
+### Recommended Configurations
 
 ```rust
-// With embedded-runtime feature (safe, recommended)
+// Fastest startup, zero configuration (recommended for most users)
+// Features: embedded-runtime, embedded-stdlib
 let sandbox = Sandbox::builder()
     .with_embedded_runtime()
     .build()?;
 
-// With precompiled feature (unsafe, for custom WASM)
+// With package support for third-party libraries
+// Features: embedded-runtime, embedded-stdlib, packages
+let sandbox = Sandbox::builder()
+    .with_embedded_runtime()
+    .with_package("requests-2.31.0-py3-none-any.whl")?
+    .build()?;
+
+// Custom pre-compiled WASM (advanced)
+// Features: precompiled
 let sandbox = unsafe {
     Sandbox::builder()
         .with_precompiled_file("runtime.cwasm")?
@@ -184,8 +199,7 @@ mise run setup  # Build WASM + precompile (one-time)
 # Development
 mise run check          # Run cargo check
 mise run build          # Build all crates
-mise run test           # Run tests with nextest
-mise run test-fast      # Run tests with precompiled WASM (~0.1s)
+mise run test           # Run tests with precompiled WASM
 mise run test-all       # Run tests with all features
 mise run lint           # Run clippy lints
 mise run fmt            # Format code
@@ -197,7 +211,7 @@ mise run build-all      # Build WASM + Rust crates
 mise run precompile-wasm # Pre-compile WASM to native code
 
 # CI & Quality
-mise run ci             # Run all CI checks (fmt-check, lint, test-fast)
+mise run ci             # Run all CI checks (fmt-check, lint, test)
 mise run msrv           # Check compilation on minimum supported Rust version
 
 # Documentation
@@ -208,8 +222,8 @@ mise run doc-open       # Generate and open documentation
 mise run bench          # Run benchmarks
 mise run bench-save     # Run benchmarks and save baseline
 
-# Integration
-mise run integration    # Run all examples
+# Examples
+mise run examples       # Run all examples
 ```
 
 ### Manual Commands
@@ -255,7 +269,7 @@ eryx/
 │   │   ├── Cargo.toml
 │   │   ├── build.rs        # Pre-compilation for embedded-runtime
 │   │   ├── benches/        # Criterion benchmarks
-│   │   ├── examples/       # 9 example programs
+│   │   ├── examples/       # Example programs
 │   │   ├── tests/          # Integration tests
 │   │   └── src/
 │   │       ├── lib.rs      # Public API exports
@@ -269,18 +283,19 @@ eryx/
 │   │           ├── mod.rs
 │   │           ├── executor.rs   # SessionExecutor
 │   │           └── in_process.rs # InProcessSession
-│   └── eryx-runtime/       # Python WASM runtime
+│   ├── eryx-runtime/       # Python WASM runtime packaging
+│   │   ├── Cargo.toml
+│   │   ├── build.rs        # Links eryx-wasm-runtime + libpython + WASI libs
+│   │   ├── runtime.wit     # WIT interface definition
+│   │   ├── runtime.wasm    # Built WASM component (~47MB)
+│   │   ├── runtime.cwasm   # Pre-compiled native code (~52MB)
+│   │   └── libs/           # WASI libraries (zstd compressed)
+│   └── eryx-wasm-runtime/  # Rust runtime implementation (compiled to WASM)
 │       ├── Cargo.toml
-│       ├── runtime.wit     # WIT interface definition
-│       ├── runtime.py      # Python runtime implementation
-│       ├── runtime.wasm    # Built WASM component (~43MB)
-│       ├── runtime.cwasm   # Pre-compiled native code (~44MB)
-│       └── src/lib.rs      # Exports WIT and Python source
-└── plans/                  # Design documents
-    ├── PROGRESS.md         # Development progress
-    ├── PYTHON_LIBRARIES.md # Python library research
-    ├── SANDBOX_REUSE.md    # Session persistence design
-    └── STRUCTURED_CONCURRENCY.md
+│       └── src/
+│           ├── lib.rs      # WIT export implementations
+│           └── python.rs   # Python interpreter FFI, tracing
+└── docs/plans/             # Design documents
 ```
 
 ## License
