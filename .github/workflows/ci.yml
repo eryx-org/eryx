@@ -23,16 +23,18 @@ jobs:
       - name: Install nightly toolchain
         run: rustup toolchain install nightly --component rust-src
 
-      - name: Cache cargo
+      - name: Cache Rust toolchain and cargo
         uses: actions/cache@v4
         with:
           path: |
+            ~/.rustup/toolchains
+            ~/.rustup/update-hashes
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: ${{ runner.os }}-cargo-wasm-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ runner.os }}-rust-wasm-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
-            ${{ runner.os }}-cargo-wasm-
+            ${{ runner.os }}-rust-wasm-
 
       - name: Build WASM runtime
         run: mise run build-wasm
@@ -68,16 +70,18 @@ jobs:
 
       - uses: ./.github/actions/setup-rust
 
-      - name: Cache cargo
+      - name: Cache Rust toolchain and cargo
         uses: actions/cache@v4
         with:
           path: |
+            ~/.rustup/toolchains
+            ~/.rustup/update-hashes
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: ${{ runner.os }}-cargo-lint-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ runner.os }}-rust-lint-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
-            ${{ runner.os }}-cargo-lint-
+            ${{ runner.os }}-rust-lint-
 
       - name: Check formatting
         run: mise run fmt-check
@@ -126,16 +130,18 @@ jobs:
 
       - uses: ./.github/actions/setup-rust
 
-      - name: Cache cargo
+      - name: Cache Rust toolchain and cargo
         uses: actions/cache@v4
         with:
           path: |
+            ~/.rustup/toolchains
+            ~/.rustup/update-hashes
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: ${{ runner.os }}-cargo-test-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ runner.os }}-rust-test-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
-            ${{ runner.os }}-cargo-test-
+            ${{ runner.os }}-rust-test-
 
       - name: Run tests
         run: cargo nextest run --workspace --features precompiled
@@ -153,16 +159,18 @@ jobs:
             [tools]
             rust = "1.89"
 
-      - name: Cache cargo
+      - name: Cache Rust toolchain and cargo
         uses: actions/cache@v4
         with:
           path: |
+            ~/.rustup/toolchains
+            ~/.rustup/update-hashes
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: ${{ runner.os }}-cargo-msrv-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ runner.os }}-rust-msrv-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
-            ${{ runner.os }}-cargo-msrv-
+            ${{ runner.os }}-rust-msrv-
 
       - name: Check MSRV
         run: cargo check --workspace
@@ -186,16 +194,18 @@ jobs:
 
       - uses: ./.github/actions/setup-rust
 
-      - name: Cache cargo
+      - name: Cache Rust toolchain and cargo
         uses: actions/cache@v4
         with:
           path: |
+            ~/.rustup/toolchains
+            ~/.rustup/update-hashes
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: ${{ runner.os }}-cargo-doc-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ runner.os }}-rust-doc-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
-            ${{ runner.os }}-cargo-doc-
+            ${{ runner.os }}-rust-doc-
 
       - name: Build documentation
         run: cargo doc --workspace --no-deps --all-features
