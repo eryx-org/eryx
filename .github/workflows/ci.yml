@@ -18,11 +18,6 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      - uses: ./.github/actions/setup-rust
-
-      - name: Install nightly toolchain
-        run: rustup toolchain install nightly --component rust-src
-
       - name: Cache Rust toolchain and cargo
         uses: actions/cache@v4
         with:
@@ -35,6 +30,11 @@ jobs:
           key: ${{ runner.os }}-rust-wasm-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
             ${{ runner.os }}-rust-wasm-
+
+      - uses: ./.github/actions/setup-rust
+
+      - name: Install nightly toolchain
+        run: rustup toolchain install nightly --component rust-src
 
       - name: Build WASM runtime
         run: mise run build-wasm
@@ -68,8 +68,6 @@ jobs:
       - name: Mark WASM as up-to-date
         run: touch crates/eryx-runtime/runtime.wasm crates/eryx-runtime/runtime.cwasm
 
-      - uses: ./.github/actions/setup-rust
-
       - name: Cache Rust toolchain and cargo
         uses: actions/cache@v4
         with:
@@ -82,6 +80,8 @@ jobs:
           key: ${{ runner.os }}-rust-lint-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
             ${{ runner.os }}-rust-lint-
+
+      - uses: ./.github/actions/setup-rust
 
       - name: Check formatting
         run: mise run fmt-check
@@ -128,8 +128,6 @@ jobs:
           rustflags = ["-C", "link-arg=-fuse-ld=mold"]
           EOF
 
-      - uses: ./.github/actions/setup-rust
-
       - name: Cache Rust toolchain and cargo
         uses: actions/cache@v4
         with:
@@ -143,6 +141,8 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-rust-test-
 
+      - uses: ./.github/actions/setup-rust
+
       - name: Run tests
         run: cargo nextest run --workspace --features precompiled
 
@@ -151,13 +151,6 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
-
-      - name: Install mise
-        uses: jdx/mise-action@v3
-        with:
-          mise_toml: |
-            [tools]
-            rust = "1.89"
 
       - name: Cache Rust toolchain and cargo
         uses: actions/cache@v4
@@ -171,6 +164,13 @@ jobs:
           key: ${{ runner.os }}-rust-msrv-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
             ${{ runner.os }}-rust-msrv-
+
+      - name: Install mise
+        uses: jdx/mise-action@v3
+        with:
+          mise_toml: |
+            [tools]
+            rust = "1.89"
 
       - name: Check MSRV
         run: cargo check --workspace
@@ -192,8 +192,6 @@ jobs:
       - name: Mark WASM as up-to-date
         run: touch crates/eryx-runtime/runtime.wasm crates/eryx-runtime/runtime.cwasm
 
-      - uses: ./.github/actions/setup-rust
-
       - name: Cache Rust toolchain and cargo
         uses: actions/cache@v4
         with:
@@ -206,6 +204,8 @@ jobs:
           key: ${{ runner.os }}-rust-doc-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
             ${{ runner.os }}-rust-doc-
+
+      - uses: ./.github/actions/setup-rust
 
       - name: Build documentation
         run: cargo doc --workspace --no-deps --all-features
