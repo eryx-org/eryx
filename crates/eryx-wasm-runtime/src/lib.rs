@@ -70,7 +70,7 @@ unsafe extern "C" {
 #[derive(Debug)]
 pub struct EryxCall {
     /// Stack of values being passed.
-    /// For simplicity, we use a Vec<Value> where Value is an enum of possible types.
+    /// For simplicity, we use a `Vec<Value>` where `Value` is an enum of possible types.
     stack: Vec<Value>,
     /// Deferred deallocations
     deferred: Vec<(*mut u8, Layout)>,
