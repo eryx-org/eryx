@@ -146,7 +146,9 @@ jobs:
       - uses: ./.github/actions/setup-rust
 
       - name: Run tests
-        run: cargo nextest run --workspace --features precompiled
+        # Exclude eryx-wasm-runtime tests as they require build artifacts (liberyx_runtime.so)
+        # that are only generated during WASM build
+        run: cargo nextest run --workspace --features precompiled --exclude eryx-wasm-runtime
 
   msrv:
     name: MSRV
