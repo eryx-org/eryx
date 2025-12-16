@@ -442,9 +442,7 @@ pub fn set_async_import_result(_subtask: u32, result_json: &str) {
     // Escape the JSON for embedding in Python triple-quoted string.
     // We need to escape backslashes first, then single quotes, then handle
     // potential triple-quote sequences.
-    let escaped = result_json
-        .replace('\\', "\\\\")
-        .replace("'''", "\\'''");
+    let escaped = result_json.replace('\\', "\\\\").replace("'''", "\\'''");
 
     let code = format!("_eryx_async_import_result = '''{escaped}'''");
 

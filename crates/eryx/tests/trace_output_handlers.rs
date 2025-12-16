@@ -5,6 +5,7 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use std::future::Future;
+#[cfg(not(all(feature = "embedded-runtime", feature = "embedded-stdlib")))]
 use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
@@ -161,6 +162,7 @@ impl OutputHandler for CollectingOutputHandler {
 // Helper Functions
 // =============================================================================
 
+#[cfg(not(all(feature = "embedded-runtime", feature = "embedded-stdlib")))]
 fn runtime_wasm_path() -> PathBuf {
     let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap_or_else(|_| ".".to_string());
     PathBuf::from(manifest_dir)
@@ -170,6 +172,7 @@ fn runtime_wasm_path() -> PathBuf {
         .join("runtime.wasm")
 }
 
+#[cfg(not(all(feature = "embedded-runtime", feature = "embedded-stdlib")))]
 fn python_stdlib_path() -> PathBuf {
     let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap_or_else(|_| ".".to_string());
     PathBuf::from(manifest_dir)
@@ -180,7 +183,7 @@ fn python_stdlib_path() -> PathBuf {
         .join("python-stdlib")
 }
 
-#[cfg(feature = "precompiled")]
+#[cfg(all(feature = "precompiled", not(all(feature = "embedded-runtime", feature = "embedded-stdlib"))))]
 fn precompiled_wasm_path() -> PathBuf {
     let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap_or_else(|_| ".".to_string());
     PathBuf::from(manifest_dir)

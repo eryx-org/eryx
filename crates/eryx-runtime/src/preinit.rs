@@ -375,11 +375,9 @@ async fn call_execute_for_imports(
                 "Pre-init import execution failed: {error_msg}\nImport code:\n{import_code}"
             ))
         }
-        Val::Result(Err(None)) => {
-            Err(anyhow!(
-                "Pre-init import execution failed with unknown error\nImport code:\n{import_code}"
-            ))
-        }
+        Val::Result(Err(None)) => Err(anyhow!(
+            "Pre-init import execution failed with unknown error\nImport code:\n{import_code}"
+        )),
         other => {
             // Unexpected result type - log warning but don't fail
             // This shouldn't happen, but be defensive

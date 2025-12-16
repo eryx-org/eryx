@@ -209,13 +209,11 @@ fn decompress_libs(manifest_dir: &std::path::Path) {
             let compressed_meta = std::fs::metadata(&compressed_path).ok();
             let decompressed_meta = std::fs::metadata(&decompressed_path).ok();
 
-            if let (Some(c), Some(d)) = (compressed_meta, decompressed_meta) {
-                if let (Ok(c_time), Ok(d_time)) = (c.modified(), d.modified()) {
-                    if d_time >= c_time {
+            if let (Some(c), Some(d)) = (compressed_meta, decompressed_meta)
+                && let (Ok(c_time), Ok(d_time)) = (c.modified(), d.modified())
+                    && d_time >= c_time {
                         continue;
                     }
-                }
-            }
         }
 
         eprintln!("Decompressing {}...", file);

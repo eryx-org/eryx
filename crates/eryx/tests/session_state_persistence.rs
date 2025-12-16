@@ -17,6 +17,7 @@
 //! cargo nextest run --workspace --features precompiled
 //! ```
 
+#[cfg(not(all(feature = "embedded-runtime", feature = "embedded-stdlib")))]
 use std::path::PathBuf;
 use std::sync::{Arc, OnceLock};
 
@@ -83,6 +84,7 @@ fn create_executor() -> PythonExecutor {
 }
 
 /// Get the path to runtime.wasm relative to the workspace root.
+#[cfg(not(all(feature = "embedded-runtime", feature = "embedded-stdlib")))]
 fn runtime_wasm_path() -> PathBuf {
     // CARGO_MANIFEST_DIR points to crates/eryx
     let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap_or_else(|_| ".".to_string());
@@ -93,6 +95,7 @@ fn runtime_wasm_path() -> PathBuf {
         .join("runtime.wasm")
 }
 
+#[cfg(not(all(feature = "embedded-runtime", feature = "embedded-stdlib")))]
 fn python_stdlib_path() -> PathBuf {
     let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap_or_else(|_| ".".to_string());
     PathBuf::from(manifest_dir)
@@ -104,7 +107,7 @@ fn python_stdlib_path() -> PathBuf {
 }
 
 /// Get the path to precompiled runtime.cwasm.
-#[cfg(feature = "precompiled")]
+#[cfg(all(feature = "precompiled", not(all(feature = "embedded-runtime", feature = "embedded-stdlib"))))]
 fn precompiled_wasm_path() -> PathBuf {
     // CARGO_MANIFEST_DIR points to crates/eryx
     let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap_or_else(|_| ".".to_string());
