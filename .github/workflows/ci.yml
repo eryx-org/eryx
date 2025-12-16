@@ -84,10 +84,10 @@ jobs:
       - uses: ./.github/actions/setup-rust
 
       - name: Check formatting
-        run: mise run fmt-check
+        run: cargo fmt --all -- --check
 
       - name: Run clippy
-        run: mise run lint
+        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
 
   test:
     name: Test
