@@ -308,8 +308,9 @@ pub struct PythonExecutor {
     /// Path to the Python standard library directory.
     /// Required for the eryx-wasm-runtime to initialize Python.
     python_stdlib_path: Option<PathBuf>,
-    /// Path to additional site-packages directory.
-    python_site_packages_path: Option<PathBuf>,
+    /// Paths to Python package directories.
+    /// Each will be mounted at `/site-packages-N` and added to PYTHONPATH.
+    python_site_packages_paths: Vec<PathBuf>,
 }
 
 impl std::fmt::Debug for PythonExecutor {
@@ -318,7 +319,7 @@ impl std::fmt::Debug for PythonExecutor {
             .field("engine", &"<wasmtime::Engine>")
             .field("instance_pre", &"<SandboxPre>")
             .field("python_stdlib_path", &self.python_stdlib_path)
-            .field("python_site_packages_path", &self.python_site_packages_path)
+            .field("python_site_packages_paths", &self.python_site_packages_paths)
             .finish_non_exhaustive()
     }
 }
@@ -342,10 +343,10 @@ impl PythonExecutor {
         self.python_stdlib_path.as_ref()
     }
 
-    /// Get the Python site-packages path if configured.
+    /// Get the Python site-packages paths.
     #[must_use]
-    pub fn python_site_packages_path(&self) -> Option<&PathBuf> {
-        self.python_site_packages_path.as_ref()
+    pub fn python_site_packages_paths(&self) -> &[PathBuf] {
+        &self.python_site_packages_paths
     }
 
     /// Set the path to the Python standard library directory.
@@ -361,13 +362,13 @@ impl PythonExecutor {
         self
     }
 
-    /// Set the path to additional Python packages directory.
+    /// Add a path to Python packages directory.
     ///
-    /// The directory will be mounted at `/site-packages` inside the WASM sandbox
-    /// and added to Python's import path.
+    /// Each directory will be mounted at `/site-packages-N` inside the WASM sandbox
+    /// and added to Python's import path. Can be called multiple times.
     #[must_use]
     pub fn with_site_packages(mut self, path: impl Into<PathBuf>) -> Self {
-        self.python_site_packages_path = Some(path.into());
+        self.python_site_packages_paths.push(path.into());
         self
     }
 }
@@ -429,7 +430,7 @@ impl PythonExecutor {
             engine,
             instance_pre,
             python_stdlib_path: None,
-            python_site_packages_path: None,
+            python_site_packages_paths: Vec::new(),
         })
     }
 
@@ -452,7 +453,7 @@ impl PythonExecutor {
             engine,
             instance_pre,
             python_stdlib_path: None,
-            python_site_packages_path: None,
+            python_site_packages_paths: Vec::new(),
         })
     }
 
@@ -488,7 +489,7 @@ impl PythonExecutor {
             engine,
             instance_pre,
             python_stdlib_path: None,
-            python_site_packages_path: None,
+            python_site_packages_paths: Vec::new(),
         })
     }
 
@@ -526,7 +527,7 @@ impl PythonExecutor {
             engine,
             instance_pre,
             python_stdlib_path: None,
-            python_site_packages_path: None,
+            python_site_packages_paths: Vec::new(),
         })
     }
 
@@ -663,24 +664,36 @@ impl PythonExecutor {
         let mut wasi_builder = WasiCtxBuilder::new();
         wasi_builder.inherit_stdout().inherit_stderr();
 
+        // Build PYTHONPATH from stdlib and all site-packages directories
+        let mut pythonpath_parts = Vec::new();
+        if self.python_stdlib_path.is_some() {
+            pythonpath_parts.push("/python-stdlib".to_string());
+        }
+        for i in 0..self.python_site_packages_paths.len() {
+            pythonpath_parts.push(format!("/site-packages-{i}"));
+        }
+
         // Mount Python stdlib if configured (required for eryx-wasm-runtime)
         if let Some(ref stdlib_path) = self.python_stdlib_path {
+            if !pythonpath_parts.is_empty() {
+                wasi_builder.env("PYTHONPATH", pythonpath_parts.join(":"));
+            }
             wasi_builder
-                .env("PYTHONPATH", "/python-stdlib:/site-packages")
                 .preopened_dir(stdlib_path, "/python-stdlib", DirPerms::READ, FilePerms::READ)
                 .map_err(|e| format!("Failed to mount Python stdlib: {e}"))?;
         }
 
-        // Mount site-packages if configured
-        if let Some(ref site_packages_path) = self.python_site_packages_path {
+        // Mount each site-packages directory at a unique path
+        for (i, site_packages_path) in self.python_site_packages_paths.iter().enumerate() {
+            let mount_path = format!("/site-packages-{i}");
             wasi_builder
                 .preopened_dir(
                     site_packages_path,
-                    "/site-packages",
+                    &mount_path,
                     DirPerms::READ,
                     FilePerms::READ,
                 )
-                .map_err(|e| format!("Failed to mount site-packages: {e}"))?;
+                .map_err(|e| format!("Failed to mount {mount_path}: {e}"))?;
         }
 
         let wasi = wasi_builder.build();

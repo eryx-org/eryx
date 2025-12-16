@@ -426,14 +426,23 @@ impl SandboxBuilder {
 
     /// Use the embedded pre-compiled runtime for ~50x faster sandbox creation.
     ///
-    /// This is the recommended way to create sandboxes for production use.
+    /// This is the recommended way to create sandboxes for pure-Python code.
     /// The runtime is pre-compiled at build time when the `embedded-runtime`
     /// feature is enabled.
     ///
-    /// # Panics
+    /// # Native Extensions
     ///
-    /// Panics at build time if the `embedded-runtime` feature is enabled but
-    /// `runtime.wasm` is not found.
+    /// If you add packages with native extensions (e.g., numpy), late-linking
+    /// is used automatically and this setting is overridden. This is expected
+    /// behavior - native extensions must be linked into the runtime.
+    ///
+    /// ```rust,ignore
+    /// // This works - late-linking happens automatically
+    /// let sandbox = Sandbox::builder()
+    ///     .with_embedded_runtime()  // Will be overridden by late-linking
+    ///     .with_package("/path/to/numpy-wasi.tar.gz")?
+    ///     .build()?;
+    /// ```
     ///
     /// # Example
     ///
@@ -784,17 +793,6 @@ impl SandboxBuilder {
             "Loaded package"
         );
 
-        // If the package has native extensions, register them
-        #[cfg(feature = "native-extensions")]
-        for ext in &package.native_extensions {
-            self.native_extensions.push(
-                eryx_runtime::linker::NativeExtension::new(
-                    ext.dlopen_path.clone(),
-                    ext.bytes.clone(),
-                )
-            );
-        }
-
         // Check for incompatible configuration
         #[cfg(not(feature = "native-extensions"))]
         if package.has_native_extensions {
@@ -805,7 +803,8 @@ impl SandboxBuilder {
             )));
         }
 
-        // Store the extracted package to keep it alive
+        // Store the extracted package - native extensions will be registered at build()
+        // time when we know the mount index for computing dlopen paths
         self.packages.push(package);
 
         Ok(self)
@@ -816,13 +815,48 @@ impl SandboxBuilder {
     /// # Errors
     ///
     /// Returns an error if:
-    /// - No WASM component was specified (use `with_embedded_runtime()`, `with_wasm_bytes()`, or `with_wasm_file()`)
+    /// - No WASM component was specified and no default is available
     /// - The WASM component cannot be loaded
     /// - The WebAssembly runtime fails to initialize
-    pub fn build(self) -> Result<Sandbox, Error> {
-        // If native extensions are specified, use late-linking to create the component
+    ///
+    /// # Native Extensions
+    ///
+    /// If native extensions are registered (via `with_native_extension()` or
+    /// `with_package()` with `.so` files), late-linking is used automatically.
+    /// This overrides any `with_embedded_runtime()` setting since native
+    /// extensions must be linked into the runtime.
+    pub fn build(mut self) -> Result<Sandbox, Error> {
+        // First, compute mount indices and register native extensions from packages
+        // with correct dlopen paths. Mount index 0 is reserved for explicit site-packages.
+        #[cfg(all(feature = "packages", feature = "native-extensions"))]
+        {
+            let start_index = if self.python_site_packages_path.is_some() { 1 } else { 0 };
+            for (pkg_idx, package) in self.packages.iter().enumerate() {
+                let mount_index = start_index + pkg_idx;
+                for ext in &package.native_extensions {
+                    let dlopen_path = format!("/site-packages-{}/{}", mount_index, ext.relative_path);
+                    self.native_extensions.push(
+                        eryx_runtime::linker::NativeExtension::new(
+                            dlopen_path,
+                            ext.bytes.clone(),
+                        )
+                    );
+                }
+            }
+        }
+
+        // If native extensions are specified, use late-linking to create the component.
+        // This OVERRIDES any wasm_source setting (including embedded runtime) because
+        // native extensions must be linked into the runtime at this point.
         #[cfg(feature = "native-extensions")]
         let executor = if !self.native_extensions.is_empty() {
+            // Warn if user explicitly set embedded runtime - it will be ignored
+            #[cfg(feature = "embedded-runtime")]
+            if matches!(self.wasm_source, WasmSource::EmbeddedRuntime) {
+                tracing::info!(
+                    "Native extensions detected - using late-linking instead of embedded runtime"
+                );
+            }
             self.build_executor_with_extensions()?
         } else {
             self.build_executor_from_source()?
@@ -845,29 +879,27 @@ impl SandboxBuilder {
             }
         });
 
-        // Determine site-packages path: explicit > first package > none
-        let site_packages_path = self.python_site_packages_path.clone().or_else(|| {
-            #[cfg(feature = "packages")]
-            {
-                // Use the first package's Python path as site-packages
-                // TODO: Support multiple packages by creating a merged view
-                self.packages.first().map(|p| p.python_path.clone())
-            }
-            #[cfg(not(feature = "packages"))]
-            {
-                None
-            }
-        });
+        // Collect all site-packages paths: explicit path first, then package paths
+        let mut site_packages_paths = Vec::new();
+        if let Some(explicit_path) = self.python_site_packages_path.clone() {
+            site_packages_paths.push(explicit_path);
+        }
+        #[cfg(feature = "packages")]
+        for package in &self.packages {
+            site_packages_paths.push(package.python_path.clone());
+        }
 
-        // Apply Python stdlib and site-packages paths if available
-        let executor = match (stdlib_path, site_packages_path) {
-            (Some(stdlib), Some(site)) => executor
-                .with_python_stdlib(&stdlib)
-                .with_site_packages(&site),
-            (Some(stdlib), None) => executor.with_python_stdlib(&stdlib),
-            (None, Some(site)) => executor.with_site_packages(&site),
-            (None, None) => executor,
+        // Apply Python stdlib path if available
+        let executor = if let Some(stdlib) = stdlib_path {
+            executor.with_python_stdlib(&stdlib)
+        } else {
+            executor
         };
+
+        // Apply all site-packages paths
+        let executor = site_packages_paths
+            .into_iter()
+            .fold(executor, |exec, path| exec.with_site_packages(&path));
 
         Ok(Sandbox {
             executor: Arc::new(executor),

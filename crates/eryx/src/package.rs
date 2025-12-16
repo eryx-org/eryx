@@ -79,8 +79,9 @@ pub struct ExtractedPackage {
 /// A native extension (.so file) found in a package.
 #[derive(Debug, Clone)]
 pub struct NativeExtension {
-    /// The dlopen path (e.g., "/site-packages/numpy/core/_multiarray_umath.cpython-314-wasm32-wasi.so").
-    pub dlopen_path: String,
+    /// Relative path within the package (e.g., "numpy/core/_multiarray_umath.cpython-314-wasm32-wasi.so").
+    /// This will be prefixed with the mount path when building the sandbox.
+    pub relative_path: String,
     /// The raw bytes of the .so file.
     pub bytes: Vec<u8>,
 }
@@ -272,18 +273,18 @@ impl ExtractedPackage {
 
             // Look for .so files (native extensions)
             if path.extension().is_some_and(|ext| ext == "so") {
-                // Compute the dlopen path relative to site-packages
+                // Compute the relative path within the package directory
                 let relative = path.strip_prefix(dir).map_err(|e| {
                     Error::Initialization(format!("Failed to compute relative path: {e}"))
                 })?;
 
-                let dlopen_path = format!("/site-packages/{}", relative.display());
+                let relative_path = relative.display().to_string();
 
                 let bytes = std::fs::read(path).map_err(|e| {
                     Error::Initialization(format!("Failed to read .so file: {e}"))
                 })?;
 
-                extensions.push(NativeExtension { dlopen_path, bytes });
+                extensions.push(NativeExtension { relative_path, bytes });
             }
 
             // Try to detect package name from __init__.py in top-level directories

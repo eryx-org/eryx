@@ -243,24 +243,37 @@ impl SessionExecutor {
         let mut wasi_builder = WasiCtxBuilder::new();
         wasi_builder.inherit_stdout().inherit_stderr();
 
+        // Build PYTHONPATH from stdlib and all site-packages directories
+        let site_packages_paths = executor.python_site_packages_paths();
+        let mut pythonpath_parts = Vec::new();
+        if executor.python_stdlib_path().is_some() {
+            pythonpath_parts.push("/python-stdlib".to_string());
+        }
+        for i in 0..site_packages_paths.len() {
+            pythonpath_parts.push(format!("/site-packages-{i}"));
+        }
+
         // Mount Python stdlib if configured (required for eryx-wasm-runtime)
         if let Some(stdlib_path) = executor.python_stdlib_path() {
+            if !pythonpath_parts.is_empty() {
+                wasi_builder.env("PYTHONPATH", pythonpath_parts.join(":"));
+            }
             wasi_builder
-                .env("PYTHONPATH", "/python-stdlib:/site-packages")
                 .preopened_dir(stdlib_path, "/python-stdlib", DirPerms::READ, FilePerms::READ)
                 .map_err(|e| Error::WasmEngine(format!("Failed to mount Python stdlib: {e}")))?;
         }
 
-        // Mount site-packages if configured
-        if let Some(site_packages_path) = executor.python_site_packages_path() {
+        // Mount each site-packages directory at a unique path
+        for (i, site_packages_path) in site_packages_paths.iter().enumerate() {
+            let mount_path = format!("/site-packages-{i}");
             wasi_builder
                 .preopened_dir(
                     site_packages_path,
-                    "/site-packages",
+                    &mount_path,
                     DirPerms::READ,
                     FilePerms::READ,
                 )
-                .map_err(|e| Error::WasmEngine(format!("Failed to mount site-packages: {e}")))?;
+                .map_err(|e| Error::WasmEngine(format!("Failed to mount {mount_path}: {e}")))?;
         }
 
         let wasi = wasi_builder.build();
