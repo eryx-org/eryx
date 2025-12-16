@@ -893,18 +893,14 @@ impl SandboxBuilder {
         let executor = self.build_executor_from_source()?;
 
         // Determine stdlib path: explicit > embedded > none
+        #[cfg(feature = "embedded-stdlib")]
         let stdlib_path = self.python_stdlib_path.clone().or_else(|| {
-            #[cfg(feature = "embedded-stdlib")]
-            {
-                crate::embedded::EmbeddedResources::get()
-                    .ok()
-                    .map(|r| r.stdlib_path.clone())
-            }
-            #[cfg(not(feature = "embedded-stdlib"))]
-            {
-                None
-            }
+            crate::embedded::EmbeddedResources::get()
+                .ok()
+                .map(|r| r.stdlib_path.clone())
         });
+        #[cfg(not(feature = "embedded-stdlib"))]
+        let stdlib_path = self.python_stdlib_path.clone();
 
         // Collect all site-packages paths: explicit path first, then package paths
         let mut site_packages_paths = Vec::new();
