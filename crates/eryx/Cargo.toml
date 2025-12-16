@@ -99,4 +99,4 @@ required-features = ["pre-init", "precompiled"]
 
 [[example]]
 name = "package_loading"
-required-features = ["packages", "native-extensions", "embedded-stdlib"]
+required-features = ["packages", "native-extensions", "embedded-stdlib", "precompiled"]

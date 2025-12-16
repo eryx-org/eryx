@@ -625,10 +625,14 @@ impl SandboxBuilder {
         self
     }
 
-    /// Set a filesystem-based component cache for faster sandbox creation.
+    /// Set a custom filesystem cache directory for late-linked components.
     ///
-    /// This is a convenience method that creates a [`FilesystemCache`] at the
-    /// given directory path.
+    /// **Note:** You usually don't need to call this. A default cache at
+    /// `$TMPDIR/eryx-cache` is used automatically when native extensions are present.
+    /// Use this method only if you need a specific cache location.
+    ///
+    /// The cache stores pre-compiled WASM components to avoid expensive
+    /// re-linking on subsequent sandbox creations with the same extensions.
     ///
     /// # Errors
     ///
@@ -637,9 +641,15 @@ impl SandboxBuilder {
     /// # Example
     ///
     /// ```rust,ignore
+    /// // Usually not needed - default cache is automatic
     /// let sandbox = Sandbox::builder()
-    ///     .with_native_extension("numpy/core/*.so", bytes)
-    ///     .with_cache_dir("/tmp/eryx-cache")?
+    ///     .with_package("/path/to/numpy.tar.gz")?
+    ///     .build()?;  // Uses $TMPDIR/eryx-cache automatically
+    ///
+    /// // Only if you need a specific location:
+    /// let sandbox = Sandbox::builder()
+    ///     .with_package("/path/to/numpy.tar.gz")?
+    ///     .with_cache_dir("/custom/cache/path")?
     ///     .build()?;
     /// ```
     ///
@@ -765,13 +775,13 @@ impl SandboxBuilder {
     /// # Packages with native extensions
     ///
     /// For packages containing native extensions (like numpy), the extensions are
-    /// automatically registered for late-linking. You'll need a cache for best performance:
+    /// automatically registered for late-linking. A cache is set up automatically
+    /// at `$TMPDIR/eryx-cache` for fast subsequent sandbox creations:
     ///
     /// ```rust,ignore
     /// let sandbox = Sandbox::builder()
     ///     .with_package("/path/to/numpy-wasi.tar.gz")?
-    ///     .with_cache_dir("/tmp/cache")?
-    ///     .build()?;
+    ///     .build()?;  // Caching is automatic!
     /// ```
     ///
     /// # Errors
@@ -839,6 +849,18 @@ impl SandboxBuilder {
                         )
                     );
                 }
+            }
+        }
+
+        // Set up default cache for native extensions if none specified
+        // This avoids re-linking on every sandbox creation
+        #[cfg(all(feature = "native-extensions", feature = "precompiled"))]
+        if !self.native_extensions.is_empty() && self.filesystem_cache.is_none() && self.cache.is_none() {
+            let default_cache_dir = std::env::temp_dir().join("eryx-cache");
+            if let Ok(cache) = crate::cache::FilesystemCache::new(&default_cache_dir) {
+                tracing::debug!(path = %default_cache_dir.display(), "Using default cache directory");
+                self.filesystem_cache = Some(cache.clone());
+                self.cache = Some(Arc::new(cache));
             }
         }
 

@@ -39,17 +39,12 @@ async fn main() -> anyhow::Result<()> {
         return Ok(());
     }
 
-    // Create cache directory
-    let cache_dir = Path::new("/tmp/eryx-package-cache");
-    let _ = std::fs::remove_dir_all(cache_dir); // Clean for demo
-    std::fs::create_dir_all(cache_dir)?;
-
     println!("--- Loading numpy from tar.gz ---\n");
 
+    // No need to specify cache_dir - it's automatic!
     let start = Instant::now();
     let sandbox = eryx::Sandbox::builder()
         .with_package(numpy_tarball)?
-        .with_cache_dir(cache_dir)?
         .build()?;
 
     println!("  Sandbox created in {:?}", start.elapsed());
@@ -82,16 +77,15 @@ print("\nNumpy loaded via with_package()!")
     println!("  Executed in {:?}", start.elapsed());
     println!("\nOutput:\n{}", result.stdout);
 
-    // Test warm cache
+    // Test warm cache (automatic at $TMPDIR/eryx-cache)
     println!("--- Second sandbox (cache hit) ---\n");
 
     let start = Instant::now();
     let sandbox2 = eryx::Sandbox::builder()
         .with_package(numpy_tarball)?
-        .with_cache_dir(cache_dir)?
         .build()?;
 
-    println!("  Created in {:?} (includes tar.gz extraction)", start.elapsed());
+    println!("  Created in {:?} (cache hit for linked runtime)", start.elapsed());
 
     let result = sandbox2.execute("import numpy; print(numpy.__version__)").await?;
     println!("  numpy version: {}", result.stdout.trim());
@@ -100,7 +94,7 @@ print("\nNumpy loaded via with_package()!")
     println!("\n=== Summary ===");
     println!("  with_package() auto-detects format (tar.gz, whl, directory)");
     println!("  Native extensions are auto-registered for late-linking");
-    println!("  Use with_cache_dir() for fast subsequent loads");
+    println!("  Caching is automatic at $TMPDIR/eryx-cache");
 
     Ok(())
 }
