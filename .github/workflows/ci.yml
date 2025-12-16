@@ -39,6 +39,9 @@ jobs:
       - name: Build WASM runtime
         run: mise run build-wasm
 
+      - name: Run eryx-wasm-runtime tests
+        run: mise run test-eryx-runtime
+
       - name: Precompile WASM
         run: mise run precompile-wasm
 
