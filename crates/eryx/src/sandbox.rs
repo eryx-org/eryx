@@ -424,33 +424,29 @@ impl SandboxBuilder {
         }
     }
 
-    /// Use the embedded pre-compiled runtime for ~50x faster sandbox creation.
+    /// Explicitly use the embedded pre-compiled runtime.
     ///
-    /// This is the recommended way to create sandboxes for pure-Python code.
-    /// The runtime is pre-compiled at build time when the `embedded-runtime`
-    /// feature is enabled.
+    /// **Note:** You usually don't need to call this. When the `embedded-runtime`
+    /// feature is enabled, the embedded runtime is used automatically for
+    /// sandboxes without native extensions. This method exists for explicit
+    /// control in advanced use cases.
     ///
-    /// # Native Extensions
+    /// # Automatic Runtime Selection
     ///
-    /// If you add packages with native extensions (e.g., numpy), late-linking
-    /// is used automatically and this setting is overridden. This is expected
-    /// behavior - native extensions must be linked into the runtime.
+    /// The runtime is selected automatically based on your configuration:
     ///
-    /// ```rust,ignore
-    /// // This works - late-linking happens automatically
-    /// let sandbox = Sandbox::builder()
-    ///     .with_embedded_runtime()  // Will be overridden by late-linking
-    ///     .with_package("/path/to/numpy-wasi.tar.gz")?
-    ///     .build()?;
-    /// ```
-    ///
-    /// # Example
+    /// - **No native extensions** → Embedded runtime (fast, ~2ms)
+    /// - **Has native extensions** → Late-linking (required for .so files)
     ///
     /// ```rust,ignore
-    /// // Fast and safe - no unsafe code needed!
+    /// // These are equivalent when embedded-runtime feature is enabled:
+    /// let sandbox = Sandbox::builder().build()?;
+    /// let sandbox = Sandbox::builder().with_embedded_runtime().build()?;
+    ///
+    /// // With native extensions, late-linking happens automatically:
     /// let sandbox = Sandbox::builder()
-    ///     .with_embedded_runtime()
-    ///     .build()?;
+    ///     .with_package("/path/to/numpy-wasi.tar.gz")?  // Has .so files
+    ///     .build()?;  // Uses late-linking, not embedded runtime
     /// ```
     #[cfg(feature = "embedded-runtime")]
     #[must_use]
@@ -825,6 +821,7 @@ impl SandboxBuilder {
     /// `with_package()` with `.so` files), late-linking is used automatically.
     /// This overrides any `with_embedded_runtime()` setting since native
     /// extensions must be linked into the runtime.
+    #[allow(unused_mut)] // mut needed when packages + native-extensions features are enabled
     pub fn build(mut self) -> Result<Sandbox, Error> {
         // First, compute mount indices and register native extensions from packages
         // with correct dlopen paths. Mount index 0 is reserved for explicit site-packages.
@@ -955,18 +952,29 @@ impl SandboxBuilder {
             }
 
             WasmSource::None => {
+                // If embedded-runtime feature is enabled, use it automatically as the default
                 #[cfg(feature = "embedded-runtime")]
-                let msg = "No WASM component specified. Use with_embedded_runtime(), with_wasm_bytes(), with_wasm_file(), with_precompiled_bytes(), or with_precompiled_file().";
+                {
+                    tracing::debug!("No WASM source specified, using embedded runtime");
+                    let resources = crate::embedded::EmbeddedResources::get()?;
+                    #[allow(unsafe_code)]
+                    unsafe {
+                        PythonExecutor::from_precompiled_file(&resources.runtime_path)?
+                    }
+                }
 
-                #[cfg(all(feature = "precompiled", not(feature = "embedded-runtime")))]
-                let msg = "No WASM component specified. Use with_wasm_bytes(), with_wasm_file(), with_precompiled_bytes(), or with_precompiled_file(). \
-                           Or enable the `embedded-runtime` feature and use with_embedded_runtime().";
+                #[cfg(not(feature = "embedded-runtime"))]
+                {
+                    #[cfg(feature = "precompiled")]
+                    let msg = "No WASM component specified. Use with_wasm_bytes(), with_wasm_file(), with_precompiled_bytes(), or with_precompiled_file(). \
+                               Or enable the `embedded-runtime` feature for automatic runtime loading.";
 
-                #[cfg(not(feature = "precompiled"))]
-                let msg = "No WASM component specified. Use with_wasm_bytes() or with_wasm_file(). \
-                           Or enable the `precompiled` or `embedded-runtime` feature for faster loading options.";
+                    #[cfg(not(feature = "precompiled"))]
+                    let msg = "No WASM component specified. Use with_wasm_bytes() or with_wasm_file(). \
+                               Or enable the `embedded-runtime` feature for automatic runtime loading.";
 
-                return Err(Error::Initialization(msg.to_string()));
+                    return Err(Error::Initialization(msg.to_string()));
+                }
             }
         };
 
