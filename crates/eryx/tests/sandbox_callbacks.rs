@@ -211,7 +211,7 @@ fn sandbox_builder() -> eryx::SandboxBuilder {
     // When embedded features are available, use them (more reliable)
     #[cfg(all(feature = "embedded-runtime", feature = "embedded-stdlib"))]
     {
-        return Sandbox::builder();
+        Sandbox::builder()
     }
 
     // Fallback to explicit paths for testing without embedded features

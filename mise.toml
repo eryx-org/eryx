@@ -66,7 +66,12 @@ run = "cargo clean"
 [tasks.build-wasm]
 description = "Build the Python WASM component using eryx-wasm-runtime"
 depends = ["ensure-wasi-sdk"]
-run = "BUILD_ERYX_RUNTIME=1 cargo build --package eryx-runtime"
+run = """
+# Get WASI SDK path and export it for build.rs
+export WASI_SDK_PATH=$(mise where github:WebAssembly/wasi-sdk)
+echo "Using WASI SDK at: $WASI_SDK_PATH"
+BUILD_ERYX_RUNTIME=1 cargo build --package eryx-runtime
+"""
 sources = ["crates/eryx-wasm-runtime/src/**/*.rs", "crates/eryx-wasm-runtime/clock_stubs.c", "crates/eryx-runtime/runtime.wit"]
 outputs = ["crates/eryx-runtime/runtime.wasm"]
 
@@ -153,20 +158,33 @@ echo "✓ All examples completed!"
 # =============================================================================
 
 [tasks.ensure-wasi-sdk]
-description = "Install WASI SDK if not present (does not add to PATH)"
+description = "Install WASI SDK if not present"
 run = """
-if mise where github:WebAssembly/wasi-sdk 2>/dev/null; then
-    echo "WASI SDK already installed"
-else
+# Install WASI SDK if not present
+if ! mise where github:WebAssembly/wasi-sdk 2>/dev/null; then
     echo "Installing WASI SDK..."
     mise install github:WebAssembly/wasi-sdk@wasi-sdk-27
+fi
+
+# Verify installation
+WASI_SDK_PATH=$(mise where github:WebAssembly/wasi-sdk)
+echo "WASI SDK at: $WASI_SDK_PATH"
+
+if [[ ! -f "$WASI_SDK_PATH/bin/clang" ]]; then
+    echo "ERROR: WASI SDK installation incomplete - clang not found"
+    exit 1
 fi
 """
 
 [tasks.build-eryx-runtime]
 description = "Build liberyx_runtime.so and runtime.wasm via eryx-runtime build.rs"
 depends = ["ensure-wasi-sdk"]
-run = "BUILD_ERYX_RUNTIME=1 cargo build --package eryx-runtime"
+run = """
+# Get WASI SDK path and export it for build.rs
+export WASI_SDK_PATH=$(mise where github:WebAssembly/wasi-sdk)
+echo "Using WASI SDK at: $WASI_SDK_PATH"
+BUILD_ERYX_RUNTIME=1 cargo build --package eryx-runtime
+"""
 sources = ["crates/eryx-wasm-runtime/src/**/*.rs", "crates/eryx-wasm-runtime/clock_stubs.c", "crates/eryx-wasm-runtime/Cargo.toml", "crates/eryx-runtime/runtime.wit"]
 outputs = ["crates/eryx-wasm-runtime/target/liberyx_runtime.so", "crates/eryx-runtime/runtime.wasm"]
 
