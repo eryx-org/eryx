@@ -498,9 +498,6 @@ The path must match because:
 | `libwasi-emulated-*` | ~21KB total | - | WASI polyfills |
 | **Total base libraries** | **~36MB** | **→ ~9MB compressed** | |
 
-> **Note:** The `libs/` directory also contains `libcomponentize_py_runtime_*.so` files
-> (vestigial from componentize-py). These are NOT used—eryx uses `liberyx_runtime.so` instead.
-
 ### Runtime Components
 
 | Component | Size | Notes |
