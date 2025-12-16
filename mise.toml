@@ -1,9 +1,15 @@
 [tools]
 # Profile "default" includes rustc, rust-std, cargo, rust-docs, rustfmt, and clippy
 rust = { version = "1.92", profile = "default" }
-"cargo:cargo-nextest" = "latest"
 uv = "latest"
-"cargo:wasm-tools" = "latest"
+
+[tools."cargo:cargo-nextest"]
+version = "latest"
+binstall = true
+
+[tools."cargo:wasm-tools"]
+version = "latest"
+binstall = true
 
 # Note: WASI SDK is intentionally NOT in [tools] because adding it to PATH
 # breaks host compilation (Rust picks up wasm clang for proc-macro builds).
