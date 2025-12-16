@@ -46,11 +46,17 @@ fn main() {
     // Rerun if the build flag changes
     println!("cargo::rerun-if-env-changed=BUILD_ERYX_RUNTIME");
 
-    // Only build when explicitly requested or in release mode
-    let profile = env::var("PROFILE").unwrap_or_default();
+    // Check if runtime.wasm already exists - if so, skip building unless explicitly requested
+    let runtime_wasm = manifest_dir.join("runtime.wasm");
+    let wasm_exists = runtime_wasm.exists();
+
+    // Only build when explicitly requested via BUILD_ERYX_RUNTIME env var
+    // Previously we also built in release mode, but that causes issues in CI where
+    // we pre-build the WASM and don't want clippy/doc to try rebuilding it
+    let build_requested = env::var("BUILD_ERYX_RUNTIME").is_ok();
     let late_linking = env::var("CARGO_FEATURE_LATE_LINKING").is_ok();
 
-    if env::var("BUILD_ERYX_RUNTIME").is_ok() || profile == "release" || late_linking {
+    if build_requested || (late_linking && !wasm_exists) {
         let runtime_so = build_wasm_runtime(&wasm_runtime_dir);
         build_component(&manifest_dir, &runtime_so);
     }
