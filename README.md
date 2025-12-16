@@ -140,14 +140,14 @@ async fn main() -> Result<(), eryx::Error> {
 
 ## Feature Flags
 
-| Feature | Description | Enables | Trade-offs |
-|---------|-------------|---------|------------|
-| `precompiled` | Load pre-compiled WASM via `with_precompiled_bytes()` / `with_precompiled_file()` | — | Enables `unsafe` code paths |
-| `embedded-runtime` | Embed pre-compiled WASM in binary; enables `with_embedded_runtime()` for ~41x faster sandbox creation | `precompiled` | +30MB binary size |
-| `embedded-stdlib` | Embed Python stdlib for zero-config sandboxes; extracted to temp dir on first use | — | +2.2MB binary size |
-| `packages` | Enable `with_package()` for loading Python wheels (`.whl`) and source archives (`.tar.gz`) | — | Adds `zip`, `flate2`, `tar`, `walkdir` deps |
-| `native-extensions` | Enable native Python extension support (e.g., numpy) via late-linking | — | Adds `eryx-runtime` dep; experimental |
-| `pre-init` | Capture Python's initialized memory state for faster startup with native extensions | `native-extensions` | Experimental |
+| Feature              | Description                                                                         | Enables            | Trade-offs                               |
+|----------------------|-------------------------------------------------------------------------------------|--------------------|------------------------------------------|
+| `precompiled`        | Load pre-compiled WASM via `with_precompiled_bytes()` / `with_precompiled_file()`   | —                  | Enables `unsafe` code paths              |
+| `embedded-runtime`   | Embed pre-compiled WASM; enables `with_embedded_runtime()` for ~41x faster startup  | `precompiled`      | +30MB binary size                        |
+| `embedded-stdlib`    | Embed Python stdlib for zero-config sandboxes; extracted to temp dir on first use   | —                  | +2.2MB binary size                       |
+| `packages`           | Enable `with_package()` for loading wheels (`.whl`) and source archives (`.tar.gz`) | —                  | Adds `zip`, `flate2`, `tar`, `walkdir`   |
+| `native-extensions`  | Enable native Python extension support (e.g., numpy) via late-linking               | —                  | Adds `eryx-runtime` dep; experimental    |
+| `pre-init`           | Capture Python's initialized memory state for faster startup with native extensions | `native-extensions`| Experimental                             |
 
 ### Recommended Configurations
 
