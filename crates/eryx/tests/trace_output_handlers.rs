@@ -183,7 +183,10 @@ fn python_stdlib_path() -> PathBuf {
         .join("python-stdlib")
 }
 
-#[cfg(all(feature = "precompiled", not(all(feature = "embedded-runtime", feature = "embedded-stdlib"))))]
+#[cfg(all(
+    feature = "precompiled",
+    not(all(feature = "embedded-runtime", feature = "embedded-stdlib"))
+))]
 fn precompiled_wasm_path() -> PathBuf {
     let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap_or_else(|_| ".".to_string());
     PathBuf::from(manifest_dir)

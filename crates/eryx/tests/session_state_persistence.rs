@@ -107,7 +107,10 @@ fn python_stdlib_path() -> PathBuf {
 }
 
 /// Get the path to precompiled runtime.cwasm.
-#[cfg(all(feature = "precompiled", not(all(feature = "embedded-runtime", feature = "embedded-stdlib"))))]
+#[cfg(all(
+    feature = "precompiled",
+    not(all(feature = "embedded-runtime", feature = "embedded-stdlib"))
+))]
 fn precompiled_wasm_path() -> PathBuf {
     // CARGO_MANIFEST_DIR points to crates/eryx
     let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap_or_else(|_| ".".to_string());
