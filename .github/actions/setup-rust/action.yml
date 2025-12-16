@@ -10,3 +10,5 @@ runs:
 
     - name: Install mise
       uses: jdx/mise-action@v3
+      with:
+        cache: false # We handle caching ourselves to include ~/.rustup
