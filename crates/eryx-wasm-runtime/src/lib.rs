@@ -462,12 +462,14 @@ fn with_wit<T>(wit: Wit, f: impl FnOnce() -> T) -> T {
         // Set up the Python invoke callbacks (both sync and async)
         python::set_invoke_callback(Some(invoke_callback_wrapper));
         python::set_invoke_async_callback(Some(invoke_async_callback_wrapper));
+        python::set_report_trace_callback(Some(report_trace_callback_wrapper));
 
         let result = f();
 
-        // Clear the Python invoke callbacks
+        // Clear the Python callbacks
         python::set_invoke_callback(None);
         python::set_invoke_async_callback(None);
+        python::set_report_trace_callback(None);
 
         *cell.borrow_mut() = old;
         result
@@ -664,6 +666,39 @@ fn call_list_callbacks(wit: Wit) -> Vec<python::CallbackInfo> {
     }
 
     callbacks
+}
+
+/// Call report-trace import to send a trace event to the host.
+/// This is a synchronous call with no return value.
+fn call_report_trace(lineno: u32, event_json: &str, context_json: &str) {
+    CURRENT_WIT.with(|cell| {
+        let wit = cell.borrow();
+        let Some(wit) = wit.as_ref() else {
+            return; // No WIT context - tracing not available
+        };
+
+        // Get the report-trace import function
+        let import_func = match wit.get_import(None, "report-trace") {
+            Some(f) => f,
+            None => return, // Tracing not available
+        };
+
+        // Create a call context and push arguments
+        let mut cx = EryxCall::new();
+
+        // Push arguments in reverse order (wit-dylib pops in reverse)
+        cx.push_string(context_json.to_string());
+        cx.push_string(event_json.to_string());
+        cx.push_u32(lineno);
+
+        // Call the import (synchronous, no return value)
+        import_func.call_import_sync(&mut cx);
+    });
+}
+
+/// Wrapper function that matches the ReportTraceCallback signature.
+fn report_trace_callback_wrapper(lineno: u32, event_json: &str, context_json: &str) {
+    call_report_trace(lineno, event_json, context_json);
 }
 
 /// Initialize callbacks in Python if not already done.

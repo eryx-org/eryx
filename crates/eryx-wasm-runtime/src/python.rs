@@ -218,14 +218,19 @@ pub type InvokeCallback = fn(&str, &str) -> Result<String, String>;
 /// Takes (name, args_json) and returns InvokeResult (Ok/Err/Pending).
 pub type InvokeAsyncCallback = fn(&str, &str) -> Result<crate::InvokeResult, String>;
 
+/// Type for the report_trace callback function.
+/// Takes (lineno, event_json, context_json) and sends to host.
+pub type ReportTraceCallback = fn(u32, &str, &str);
+
 use std::cell::RefCell;
 
-// Thread-local storage for the invoke callbacks.
+// Thread-local storage for the callbacks.
 // These are set by lib.rs during export execution.
 // Note: WASM is single-threaded, so RefCell is sufficient and avoids lock overhead.
 thread_local! {
     static INVOKE_CALLBACK: RefCell<Option<InvokeCallback>> = const { RefCell::new(None) };
     static INVOKE_ASYNC_CALLBACK: RefCell<Option<InvokeAsyncCallback>> = const { RefCell::new(None) };
+    static REPORT_TRACE_CALLBACK: RefCell<Option<ReportTraceCallback>> = const { RefCell::new(None) };
     /// Stores the last callback error if Python callback execution failed.
     /// This allows export_async_callback to detect uncaught exceptions.
     static LAST_CALLBACK_ERROR: RefCell<Option<String>> = const { RefCell::new(None) };
@@ -241,6 +246,12 @@ pub fn set_invoke_callback(callback: Option<InvokeCallback>) {
 /// This should be called by lib.rs before executing Python code.
 pub fn set_invoke_async_callback(callback: Option<InvokeAsyncCallback>) {
     INVOKE_ASYNC_CALLBACK.with(|cell| *cell.borrow_mut() = callback);
+}
+
+/// Set the report_trace callback function.
+/// This should be called by lib.rs before executing Python code.
+pub fn set_report_trace_callback(callback: Option<ReportTraceCallback>) {
+    REPORT_TRACE_CALLBACK.with(|cell| *cell.borrow_mut() = callback);
 }
 
 /// Get and clear the last callback error, if any.
@@ -276,6 +287,18 @@ pub fn do_invoke_async(name: &str, args_json: &str) -> Result<crate::InvokeResul
         })?;
         callback(name, args_json)
     })
+}
+
+/// Call the registered report_trace callback.
+/// Silently does nothing if no callback is registered (tracing disabled).
+pub fn do_report_trace(lineno: u32, event_json: &str, context_json: &str) {
+    REPORT_TRACE_CALLBACK.with(|cell| {
+        let callback = cell.borrow();
+        if let Some(cb) = callback.as_ref() {
+            cb(lineno, event_json, context_json);
+        }
+        // If no callback registered, tracing is simply disabled - not an error
+    });
 }
 
 // =============================================================================
@@ -457,6 +480,14 @@ fn _eryx_invoke(name: String, args_json: String) -> PyResult<String> {
     }
 }
 
+/// Report a trace event to the host.
+/// This is called by sys.settrace to report line/call/return/exception events.
+/// Python signature: _eryx_report_trace(lineno: int, event_json: str, context_json: str) -> None
+#[pyfunction]
+fn _eryx_report_trace(lineno: u32, event_json: String, context_json: String) {
+    do_report_trace(lineno, &event_json, &context_json);
+}
+
 /// Async-aware invoke function exposed to Python.
 /// Returns a tuple: (result_type, value)
 /// - result_type 0: Ok - value is the JSON result string
@@ -558,6 +589,7 @@ fn subtask_drop_(task: u32) {
 fn eryx_module(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(_eryx_invoke, m)?)?;
     m.add_function(wrap_pyfunction!(_eryx_invoke_async, m)?)?;
+    m.add_function(wrap_pyfunction!(_eryx_report_trace, m)?)?;
     // Async support functions (matching componentize_py_runtime interface)
     m.add_function(wrap_pyfunction!(waitable_set_new_, m)?)?;
     m.add_function(wrap_pyfunction!(waitable_set_drop_, m)?)?;
@@ -912,18 +944,72 @@ def _eryx_run_async(coro):
         except StopIteration as e:
             return e.value
 
+# Import the _eryx module for trace reporting
+import _eryx as _eryx_mod
+import json as _json
+
+# Trace function for sys.settrace
+def _eryx_trace_func(frame, event, arg):
+    '''Trace function called by Python for each execution event.'''
+    filename = frame.f_code.co_filename
+
+    # Only trace user code (compiled as '<user>')
+    # Skip all internal library code, asyncio internals, etc.
+    if filename != '<user>':
+        # Return trace_func to continue tracing (needed to catch
+        # when execution returns to user code), but don't report
+        return _eryx_trace_func
+
+    lineno = frame.f_lineno
+    func_name = frame.f_code.co_name
+
+    # Skip internal functions that start with underscore
+    # (except <module> which is the main code block)
+    if func_name.startswith('_') and func_name != '<module>':
+        return _eryx_trace_func
+
+    if event == 'line':
+        _eryx_mod._eryx_report_trace(lineno, _json.dumps({{"type": "line"}}), "")
+    elif event == 'call':
+        _eryx_mod._eryx_report_trace(lineno, _json.dumps({{"type": "call", "function": func_name}}), "")
+    elif event == 'return':
+        _eryx_mod._eryx_report_trace(lineno, _json.dumps({{"type": "return", "function": func_name}}), "")
+    elif event == 'exception':
+        exc_type, exc_value, _ = arg
+        # Filter out StopIteration - it's normal async control flow,
+        # not a real exception. When an awaited value returns, Python
+        # internally "throws" a StopIteration with the result.
+        if exc_type is StopIteration:
+            return _eryx_trace_func
+        _eryx_mod._eryx_report_trace(lineno, _json.dumps({{
+            "type": "exception",
+            "exception_type": exc_type.__name__ if exc_type else "Unknown",
+            "message": str(exc_value) if exc_value else ""
+        }}), "")
+
+    return _eryx_trace_func
+
 _eryx_user_code = {}
 _eryx_compiled = compile(_eryx_user_code, '<user>', 'exec', flags=_ast.PyCF_ALLOW_TOP_LEVEL_AWAIT)
 
-# Check if the compiled code is a coroutine (has top-level await)
-if _eryx_compiled.co_flags & 0x80:  # CO_COROUTINE
-    # Create a function from the code and run it as a coroutine
-    _eryx_fn = _types.FunctionType(_eryx_compiled, globals())
-    _eryx_coro = _eryx_fn()
-    _eryx_run_async(_eryx_coro)
-else:
-    # Regular synchronous code
-    exec(_eryx_compiled, globals())
+# Enable tracing before execution
+# Note: sys.settrace doesn't work well with async code, so we only
+# trace synchronous portions. Callback start/end should be traced explicitly.
+_sys.settrace(_eryx_trace_func)
+
+try:
+    # Check if the compiled code is a coroutine (has top-level await)
+    if _eryx_compiled.co_flags & 0x80:  # CO_COROUTINE
+        # Create a function from the code and run it as a coroutine
+        _eryx_fn = _types.FunctionType(_eryx_compiled, globals())
+        _eryx_coro = _eryx_fn()
+        _eryx_run_async(_eryx_coro)
+    else:
+        # Regular synchronous code
+        exec(_eryx_compiled, globals())
+finally:
+    # Disable tracing
+    _sys.settrace(None)
 "#,
             python_string_literal(code)
         );
@@ -1121,6 +1207,8 @@ _eryx_exclude = {
     '_socket_original_socketpair', '_DummySocket', '_dummy_socketpair',
     '_CPAS_AVAILABLE', '_asyncio', '_cpas', '_cpr',
     '_Ok', '_Err', '_ASYNC_SUPPORT',
+    # Exclude tracing infrastructure
+    '_json', '_eryx_mod', '_eryx_trace_func',
 }
 
 # Check if an object is part of the callback infrastructure
@@ -1257,6 +1345,8 @@ _eryx_keep = {
     '_sys', '_StringIO', '_ast', '_types', '_socket',
     '_socket_original_socketpair', '_DummySocket', '_dummy_socketpair',
     '_CPAS_AVAILABLE', '_asyncio',
+    # Preserve tracing infrastructure
+    '_eryx_mod', '_eryx_trace_func',
 }
 
 # Also keep callback wrappers and namespace objects
@@ -1360,28 +1450,40 @@ async def invoke(name, **kwargs):
     # Serialize kwargs to JSON
     args_json = _json.dumps(kwargs)
 
-    if _ASYNC_SUPPORT:
-        # Use async-aware invoke that can handle pending operations
-        result = _cpr.invoke_async(name, args_json)
-        if isinstance(result, _Ok):
-            result_json = result.value
-        elif isinstance(result, _Err):
-            # Check if this is a pending tuple or an error string
-            if isinstance(result.value, tuple):
-                # Pending - wait for it using await_result
-                result_json = await _cpas.await_result(result)
-            else:
-                # Actual error
-                raise RuntimeError(result.value)
-        if result_json:
-            return _json.loads(result_json)
-        return None
-    else:
-        # Fallback to synchronous invoke
-        result_json = _eryx._eryx_invoke(name, args_json)
-        if result_json:
-            return _json.loads(result_json)
-        return None
+    # Report callback start trace event
+    _eryx._eryx_report_trace(0, _json.dumps({{"type": "callback_start", "name": name}}), args_json)
+
+    try:
+        if _ASYNC_SUPPORT:
+            # Use async-aware invoke that can handle pending operations
+            result = _cpr.invoke_async(name, args_json)
+            if isinstance(result, _Ok):
+                result_json = result.value
+            elif isinstance(result, _Err):
+                # Check if this is a pending tuple or an error string
+                if isinstance(result.value, tuple):
+                    # Pending - wait for it using await_result
+                    result_json = await _cpas.await_result(result)
+                else:
+                    # Actual error
+                    raise RuntimeError(result.value)
+            # Report callback end trace event
+            _eryx._eryx_report_trace(0, _json.dumps({{"type": "callback_end", "name": name}}), "")
+            if result_json:
+                return _json.loads(result_json)
+            return None
+        else:
+            # Fallback to synchronous invoke
+            result_json = _eryx._eryx_invoke(name, args_json)
+            # Report callback end trace event
+            _eryx._eryx_report_trace(0, _json.dumps({{"type": "callback_end", "name": name}}), "")
+            if result_json:
+                return _json.loads(result_json)
+            return None
+    except Exception as e:
+        # Report callback error trace event
+        _eryx._eryx_report_trace(0, _json.dumps({{"type": "callback_end", "name": name, "error": str(e)}}), "")
+        raise
 
 def list_callbacks():
     """List all available callbacks for introspection.

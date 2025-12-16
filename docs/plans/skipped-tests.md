@@ -4,10 +4,14 @@ This document tracks tests that are currently skipped and what needs to be done 
 
 ## Summary
 
-| Category | Tests Skipped | Tracking |
-|----------|---------------|----------|
-| Tracing | 24 | [tracing-implementation.md](./tracing-implementation.md) |
-| **Total** | **24** | |
+| Category | Tests Skipped | Status |
+|----------|---------------|--------|
+| Session State | 0 | ✅ Fixed |
+| Link Test | 0 | ✅ Fixed |
+| Tracing | 0 | ✅ Implemented |
+| **Total** | **0** | |
+
+All previously skipped tests are now passing!
 
 ---
 
@@ -25,44 +29,14 @@ The `test_link_runtime` test now includes all required libraries (libpython, lib
 
 ---
 
-## Tracing Tests (24 tests)
+## ~~Tracing Tests (24 tests)~~ ✅ IMPLEMENTED
 
-See [tracing-implementation.md](./tracing-implementation.md) for the full implementation plan.
+Tracing is now implemented in `eryx-wasm-runtime`. The implementation:
 
-### Quick Summary
+1. Added `call_report_trace()` in `lib.rs` to call the WIT `report-trace` import
+2. Added callback infrastructure in `python.rs` (`ReportTraceCallback`, `do_report_trace()`)
+3. Added `_eryx_report_trace` function to the `_eryx` Python module
+4. Set up `sys.settrace()` in the execute wrapper to capture line/call/return/exception events
+5. Added callback_start/callback_end tracing in the `invoke()` function
 
-Tracing is not implemented in `eryx-wasm-runtime`. The old componentize-py runtime had tracing via `sys.settrace()` and `wit_world.report_trace()`, but this was never ported to the new Rust-based runtime.
-
-### Affected Tests
-
-**trace_events_precise.rs** (13 tests):
-- `test_trace_simple_assignment`
-- `test_trace_multiple_statements`
-- `test_trace_function_call`
-- `test_trace_two_function_calls`
-- `test_trace_callback_invocation`
-- `test_trace_multiple_callbacks`
-- `test_trace_callback_with_args`
-- `test_trace_loop`
-- `test_trace_conditional_true_branch`
-- `test_trace_conditional_false_branch`
-- `test_trace_function_multiple_statements`
-- `test_trace_print`
-- `test_trace_events_in_result`
-
-**trace_output_handlers.rs** (11 tests):
-- `test_trace_handler_receives_line_events`
-- `test_trace_handler_receives_call_and_return_events`
-- `test_trace_handler_receives_callback_events`
-- `test_trace_handler_callback_duration_tracked`
-- `test_trace_events_in_result`
-- `test_trace_handler_exception_event`
-- `test_both_handlers_together`
-- `test_handlers_with_error`
-- `test_sandbox_reuse_with_handlers`
-- `test_trace_event_line_numbers`
-- `test_trace_events_order`
-
-### Fix Required
-
-Implement tracing in `eryx-wasm-runtime` as described in [tracing-implementation.md](./tracing-implementation.md).
+All 24 tracing tests now pass (13 in `trace_events_precise.rs`, 11 in `trace_output_handlers.rs`).

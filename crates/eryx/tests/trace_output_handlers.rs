@@ -2,10 +2,6 @@
 //!
 //! These tests verify that trace events and output streaming work correctly
 //! through the Sandbox API.
-//!
-//! **NOTE**: Trace-related tests are currently ignored because tracing is not yet
-//! implemented in eryx-wasm-runtime. See docs/plans/tracing-implementation.md
-//! for the implementation plan.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use std::future::Future;
@@ -230,7 +226,6 @@ fn sandbox_builder() -> eryx::SandboxBuilder {
 // =============================================================================
 
 #[tokio::test]
-#[ignore = "tracing not yet implemented in eryx-wasm-runtime"]
 async fn test_trace_handler_receives_line_events() {
     let trace_handler = CollectingTraceHandler::new();
 
@@ -272,7 +267,6 @@ z = x + y
 }
 
 #[tokio::test]
-#[ignore = "tracing not yet implemented in eryx-wasm-runtime"]
 async fn test_trace_handler_receives_call_and_return_events() {
     let trace_handler = CollectingTraceHandler::new();
 
@@ -324,7 +318,6 @@ result = my_function()
 }
 
 #[tokio::test]
-#[ignore = "tracing not yet implemented in eryx-wasm-runtime"]
 async fn test_trace_handler_receives_callback_events() {
     let trace_handler = CollectingTraceHandler::new();
 
@@ -375,7 +368,6 @@ print(result)
 }
 
 #[tokio::test]
-#[ignore = "tracing not yet implemented in eryx-wasm-runtime"]
 async fn test_trace_handler_callback_duration_tracked() {
     let trace_handler = CollectingTraceHandler::new();
 
@@ -423,7 +415,6 @@ result = await sleep(ms=50)
 }
 
 #[tokio::test]
-#[ignore = "tracing not yet implemented in eryx-wasm-runtime"]
 async fn test_trace_events_in_result() {
     let sandbox = sandbox_builder().build().expect("Failed to build sandbox");
 
@@ -454,7 +445,6 @@ y = 2
 }
 
 #[tokio::test]
-#[ignore = "tracing not yet implemented in eryx-wasm-runtime"]
 async fn test_trace_handler_exception_event() {
     let trace_handler = CollectingTraceHandler::new();
 
@@ -644,7 +634,6 @@ for i in range(100):
 // =============================================================================
 
 #[tokio::test]
-#[ignore = "tracing not yet implemented in eryx-wasm-runtime"]
 async fn test_both_handlers_together() {
     let trace_handler = CollectingTraceHandler::new();
     let output_handler = CollectingOutputHandler::new();
@@ -696,7 +685,6 @@ print(f"Got: {result}")
 }
 
 #[tokio::test]
-#[ignore = "tracing not yet implemented in eryx-wasm-runtime"]
 async fn test_handlers_with_error() {
     let trace_handler = CollectingTraceHandler::new();
     let output_handler = CollectingOutputHandler::new();
@@ -736,7 +724,6 @@ print("After error")  # Never reached
 }
 
 #[tokio::test]
-#[ignore = "tracing not yet implemented in eryx-wasm-runtime"]
 async fn test_sandbox_reuse_with_handlers() {
     let trace_handler = CollectingTraceHandler::new();
     let output_handler = CollectingOutputHandler::new();
@@ -778,7 +765,6 @@ async fn test_sandbox_reuse_with_handlers() {
 // =============================================================================
 
 #[tokio::test]
-#[ignore = "tracing not yet implemented in eryx-wasm-runtime"]
 async fn test_trace_event_line_numbers() {
     let trace_handler = CollectingTraceHandler::new();
 
@@ -814,7 +800,6 @@ z = 3"#,
 }
 
 #[tokio::test]
-#[ignore = "tracing not yet implemented in eryx-wasm-runtime"]
 async fn test_trace_events_order() {
     let trace_handler = CollectingTraceHandler::new();
 
