@@ -347,8 +347,9 @@ async fn call_execute_for_imports(
         .join("\n");
 
     // Call execute with the import code
-    let args = [Val::String(import_code)];
-    let mut results = vec![Val::Bool(false)]; // Placeholder for result<string, string>
+    let args = [Val::String(import_code.clone())];
+    // Result placeholder - wasmtime will fill this with Val::Result
+    let mut results = vec![Val::Bool(false)];
 
     execute_func
         .call_async(&mut *store, &args, &mut results)
@@ -358,13 +359,34 @@ async fn call_execute_for_imports(
     execute_func.post_return_async(&mut *store).await?;
 
     // Check if the result was an error
-    // The result type is result<string, string>, which is represented as a variant
-    // For now, we just assume success - errors during pre-init are rare and will
-    // manifest as runtime failures anyway.
-    // TODO: Properly parse the result<string, string> type
-    let _ = &results[0]; // Acknowledge we're ignoring the result for now
-
-    Ok(())
+    // result<string, string> is represented as Val::Result(Result<Option<Box<Val>>, Option<Box<Val>>>)
+    match &results[0] {
+        Val::Result(Ok(_)) => {
+            // Success - imports completed
+            Ok(())
+        }
+        Val::Result(Err(Some(error_val))) => {
+            // Error - extract the error message
+            let error_msg = match error_val.as_ref() {
+                Val::String(s) => s.clone(),
+                other => format!("unexpected error value: {other:?}"),
+            };
+            Err(anyhow!(
+                "Pre-init import execution failed: {error_msg}\nImport code:\n{import_code}"
+            ))
+        }
+        Val::Result(Err(None)) => {
+            Err(anyhow!(
+                "Pre-init import execution failed with unknown error\nImport code:\n{import_code}"
+            ))
+        }
+        other => {
+            // Unexpected result type - log warning but don't fail
+            // This shouldn't happen, but be defensive
+            tracing::warn!("Unexpected result type from execute during pre-init: {other:?}");
+            Ok(())
+        }
+    }
 }
 
 /// Errors that can occur during pre-initialization.

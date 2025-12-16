@@ -180,9 +180,60 @@ fn build_wasm_runtime(wasm_runtime_dir: &PathBuf) -> PathBuf {
     runtime_so
 }
 
+/// Decompress .zst files in libs/ to libs/decompressed/
+fn decompress_libs(manifest_dir: &std::path::Path) {
+    let libs_dir = manifest_dir.join("libs");
+    let decompressed_dir = libs_dir.join("decompressed");
+
+    std::fs::create_dir_all(&decompressed_dir).expect("failed to create decompressed dir");
+
+    // List of files to decompress
+    let files = [
+        "libc.so",
+        "libc++.so",
+        "libc++abi.so",
+        "libpython3.14.so",
+        "libwasi-emulated-process-clocks.so",
+        "libwasi-emulated-signal.so",
+        "libwasi-emulated-mman.so",
+        "libwasi-emulated-getpid.so",
+        "wasi_snapshot_preview1.reactor.wasm",
+    ];
+
+    for file in &files {
+        let compressed_path = libs_dir.join(format!("{}.zst", file));
+        let decompressed_path = decompressed_dir.join(file);
+
+        // Skip if already decompressed and newer than compressed
+        if decompressed_path.exists() {
+            let compressed_meta = std::fs::metadata(&compressed_path).ok();
+            let decompressed_meta = std::fs::metadata(&decompressed_path).ok();
+
+            if let (Some(c), Some(d)) = (compressed_meta, decompressed_meta) {
+                if let (Ok(c_time), Ok(d_time)) = (c.modified(), d.modified()) {
+                    if d_time >= c_time {
+                        continue;
+                    }
+                }
+            }
+        }
+
+        eprintln!("Decompressing {}...", file);
+        let compressed = std::fs::read(&compressed_path)
+            .unwrap_or_else(|e| panic!("failed to read {}: {}", compressed_path.display(), e));
+        let decompressed = zstd::decode_all(compressed.as_slice())
+            .unwrap_or_else(|e| panic!("failed to decompress {}: {}", file, e));
+        std::fs::write(&decompressed_path, &decompressed)
+            .unwrap_or_else(|e| panic!("failed to write {}: {}", decompressed_path.display(), e));
+    }
+}
+
 /// Build the WASM component by linking all libraries together.
 fn build_component(manifest_dir: &std::path::Path, runtime_so: &std::path::Path) {
     eprintln!("Building WASM component...");
+
+    // Ensure libs are decompressed
+    decompress_libs(manifest_dir);
 
     let libs_dir = manifest_dir.join("libs/decompressed");
 

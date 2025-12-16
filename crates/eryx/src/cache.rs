@@ -135,10 +135,14 @@ impl CacheKey {
 }
 
 /// Get the wasmtime version string.
+///
+/// This must match the wasmtime version in Cargo.toml to ensure cache
+/// invalidation when wasmtime is upgraded. Pre-compiled components are
+/// not compatible across wasmtime versions.
 #[cfg(feature = "native-extensions")]
 fn wasmtime_version() -> &'static str {
-    // Get from wasmtime crate version
-    "39.0.0" // TODO: Use actual wasmtime version from Cargo
+    // Keep in sync with workspace wasmtime version in Cargo.toml
+    "39"
 }
 
 /// Encode bytes as hex string.
