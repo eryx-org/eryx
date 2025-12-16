@@ -20,11 +20,10 @@ jobs:
       - name: Install mise
         uses: jdx/mise-action@v3
 
-      - name: Install nightly toolchain for WASM build
-        run: rustup toolchain install nightly --component rust-src
-
-      - name: Ensure stable toolchain is ready
-        run: rustup run 1.92.0 cargo --version
+      - name: Install required Rust toolchains
+        run: |
+          rustup toolchain install 1.92.0 --profile default
+          rustup toolchain install nightly --component rust-src
 
       - name: Cache cargo
         uses: actions/cache@v4
@@ -49,11 +48,10 @@ jobs:
       - name: Install mise
         uses: jdx/mise-action@v3
 
-      - name: Install nightly toolchain for WASM build
-        run: rustup toolchain install nightly --component rust-src
-
-      - name: Ensure stable toolchain is ready
-        run: rustup run 1.92.0 cargo --version
+      - name: Install required Rust toolchains
+        run: |
+          rustup toolchain install 1.92.0 --profile default
+          rustup toolchain install nightly --component rust-src
 
       - name: Cache cargo
         uses: actions/cache@v4
@@ -105,11 +103,10 @@ jobs:
       - name: Install mise
         uses: jdx/mise-action@v3
 
-      - name: Install nightly toolchain for WASM build
-        run: rustup toolchain install nightly --component rust-src
-
-      - name: Ensure stable toolchain is ready
-        run: rustup run 1.92.0 cargo --version
+      - name: Install required Rust toolchains
+        run: |
+          rustup toolchain install 1.92.0 --profile default
+          rustup toolchain install nightly --component rust-src
 
       - name: Cache cargo
         uses: actions/cache@v4
