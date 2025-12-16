@@ -69,7 +69,7 @@ fn build_component() -> Result<Vec<u8>, Box<dyn std::error::Error>> {
     let runtime_path = manifest_dir.join("target/liberyx_runtime.so");
     if !runtime_path.exists() {
         panic!(
-            "Runtime not found at {}. Run ./build.sh first",
+            "Runtime not found at {}. Run `BUILD_ERYX_RUNTIME=1 cargo build -p eryx-runtime` first",
             runtime_path.display()
         );
     }

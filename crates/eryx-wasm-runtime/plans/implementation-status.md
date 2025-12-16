@@ -1,10 +1,11 @@
 # Eryx WASM Runtime - Implementation Status
 
-> **Note:** This document supersedes:
+> **Note:** This is a historical planning document. The implementation is complete.
+> Build is now handled by `crates/eryx-runtime/build.rs` (not `build.sh`).
+>
+> This document supersedes:
 > - `docs/eryx-wasm-runtime-implementation.md` (original plan)
 > - `plans/code-cleanup-and-safety.md` (cleanup suggestions)
->
-> Those documents are retained for historical reference but this is the authoritative status.
 
 This document consolidates the original implementation plan with actual progress, documenting what's complete and what remains.
 

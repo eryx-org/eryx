@@ -1,5 +1,8 @@
 # Eryx WASM Runtime Implementation Plan
 
+> **Note**: This is a historical planning document. The implementation is now complete.
+> Build is now handled by `crates/eryx-runtime/build.rs` (not `build.sh`).
+
 This document describes the chosen approach for native Python extension support and the detailed next steps for implementation.
 
 ## Chosen Approach: Custom wit-dylib Runtime

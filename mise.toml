@@ -8,7 +8,7 @@ uv = "latest"
 # Note: WASI SDK is intentionally NOT in [tools] because adding it to PATH
 # breaks host compilation (Rust picks up wasm clang for proc-macro builds).
 # Instead, we install it on-demand via the ensure-wasi-sdk task.
-# The build.sh script finds it via `mise where`.
+# The build.rs script finds it via `mise where`.
 
 [tasks.check]
 description = "Run cargo check"
