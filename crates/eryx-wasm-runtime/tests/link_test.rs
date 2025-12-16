@@ -45,12 +45,15 @@ fn test_link_runtime() -> Result<(), Box<dyn std::error::Error>> {
     let wasi_clocks = decompress_zstd(&std::fs::read(
         libs_dir.join("libwasi-emulated-process-clocks.so.zst"),
     )?);
-    let wasi_signal =
-        decompress_zstd(&std::fs::read(libs_dir.join("libwasi-emulated-signal.so.zst"))?);
-    let wasi_mman =
-        decompress_zstd(&std::fs::read(libs_dir.join("libwasi-emulated-mman.so.zst"))?);
-    let wasi_getpid =
-        decompress_zstd(&std::fs::read(libs_dir.join("libwasi-emulated-getpid.so.zst"))?);
+    let wasi_signal = decompress_zstd(&std::fs::read(
+        libs_dir.join("libwasi-emulated-signal.so.zst"),
+    )?);
+    let wasi_mman = decompress_zstd(&std::fs::read(
+        libs_dir.join("libwasi-emulated-mman.so.zst"),
+    )?);
+    let wasi_getpid = decompress_zstd(&std::fs::read(
+        libs_dir.join("libwasi-emulated-getpid.so.zst"),
+    )?);
     let adapter = decompress_zstd(&std::fs::read(
         libs_dir.join("wasi_snapshot_preview1.reactor.wasm.zst"),
     )?);

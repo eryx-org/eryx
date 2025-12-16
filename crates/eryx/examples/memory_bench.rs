@@ -98,7 +98,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         #[cfg(not(feature = "native-extensions"))]
         {
             eprintln!("Error: --numpy requires native-extensions feature");
-            eprintln!("Run with: cargo run --example memory_bench --features native-extensions,precompiled --release -- --numpy");
+            eprintln!(
+                "Run with: cargo run --example memory_bench --features native-extensions,precompiled --release -- --numpy"
+            );
         }
     } else {
         run_base_benchmark().await?;
@@ -146,8 +148,17 @@ async fn run_base_benchmark() -> Result<(), Box<dyn std::error::Error>> {
 
         let snap = MemorySnapshot::now();
         let delta = snap.rss_mb - prev_rss;
-        let added = target - if target == 1 { 0 } else { sandbox_counts[sandbox_counts.iter().position(|&x| x == target).unwrap() - 1] };
-        let per_sandbox = if added > 0 { delta / added as f64 } else { delta };
+        let added = target
+            - if target == 1 {
+                0
+            } else {
+                sandbox_counts[sandbox_counts.iter().position(|&x| x == target).unwrap() - 1]
+            };
+        let per_sandbox = if added > 0 {
+            delta / added as f64
+        } else {
+            delta
+        };
 
         println!(
             "{:>8} {:>10.1} {:>12.1} {:>12.2} {:>10.1?}",
@@ -182,7 +193,9 @@ async fn run_base_benchmark() -> Result<(), Box<dyn std::error::Error>> {
 #[cfg(not(feature = "embedded-runtime"))]
 async fn run_base_benchmark() -> Result<(), Box<dyn std::error::Error>> {
     eprintln!("Error: base benchmark requires embedded-runtime feature");
-    eprintln!("Run with: cargo run --example memory_bench --features precompiled,embedded-runtime --release");
+    eprintln!(
+        "Run with: cargo run --example memory_bench --features precompiled,embedded-runtime --release"
+    );
     Ok(())
 }
 
@@ -203,7 +216,9 @@ async fn run_numpy_benchmark() -> Result<(), Box<dyn std::error::Error>> {
     if !numpy_dir.exists() {
         eprintln!("numpy not found at /tmp/numpy");
         eprintln!("Download with:");
-        eprintln!("  curl -sL https://github.com/dicej/wasi-wheels/releases/download/v0.0.2/numpy-wasi.tar.gz -o /tmp/numpy-wasi.tar.gz");
+        eprintln!(
+            "  curl -sL https://github.com/dicej/wasi-wheels/releases/download/v0.0.2/numpy-wasi.tar.gz -o /tmp/numpy-wasi.tar.gz"
+        );
         eprintln!("  tar -xzf /tmp/numpy-wasi.tar.gz -C /tmp/");
         return Ok(());
     }
@@ -225,12 +240,18 @@ async fn run_numpy_benchmark() -> Result<(), Box<dyn std::error::Error>> {
     let extensions = load_numpy_extensions(numpy_dir)?;
     let native_extensions: Vec<_> = extensions
         .iter()
-        .map(|(name, bytes)| eryx_runtime::linker::NativeExtension::new(name.clone(), bytes.clone()))
+        .map(|(name, bytes)| {
+            eryx_runtime::linker::NativeExtension::new(name.clone(), bytes.clone())
+        })
         .collect();
 
     let after_load = MemorySnapshot::now();
     println!("  Loaded {} extensions", extensions.len());
-    println!("  RSS: {:.1} MB (+{:.1} MB)\n", after_load.rss_mb, after_load.rss_mb - baseline.rss_mb);
+    println!(
+        "  RSS: {:.1} MB (+{:.1} MB)\n",
+        after_load.rss_mb,
+        after_load.rss_mb - baseline.rss_mb
+    );
 
     // Link extensions
     println!("Linking extensions...");
@@ -239,27 +260,47 @@ async fn run_numpy_benchmark() -> Result<(), Box<dyn std::error::Error>> {
     println!("  Linked in {:?}", start.elapsed());
 
     let after_link = MemorySnapshot::now();
-    println!("  RSS: {:.1} MB (+{:.1} MB)\n", after_link.rss_mb, after_link.rss_mb - after_load.rss_mb);
+    println!(
+        "  RSS: {:.1} MB (+{:.1} MB)\n",
+        after_link.rss_mb,
+        after_link.rss_mb - after_load.rss_mb
+    );
 
     // Pre-initialize with numpy
     println!("Pre-initializing with numpy...");
     let start = Instant::now();
-    let preinit = eryx::preinit::pre_initialize(&linked, &python_stdlib, Some(site_packages), &["numpy"]).await?;
+    let preinit =
+        eryx::preinit::pre_initialize(&linked, &python_stdlib, Some(site_packages), &["numpy"])
+            .await?;
     println!("  Pre-init in {:?}", start.elapsed());
 
     let after_preinit = MemorySnapshot::now();
-    println!("  Preinit component: {:.1} MB", preinit.len() as f64 / 1_000_000.0);
-    println!("  RSS: {:.1} MB (+{:.1} MB)\n", after_preinit.rss_mb, after_preinit.rss_mb - after_link.rss_mb);
+    println!(
+        "  Preinit component: {:.1} MB",
+        preinit.len() as f64 / 1_000_000.0
+    );
+    println!(
+        "  RSS: {:.1} MB (+{:.1} MB)\n",
+        after_preinit.rss_mb,
+        after_preinit.rss_mb - after_link.rss_mb
+    );
 
     // Precompile
     println!("Precompiling...");
     let start = Instant::now();
     let precompiled = eryx::PythonExecutor::precompile(&preinit)?;
     println!("  Precompiled in {:?}", start.elapsed());
-    println!("  Precompiled size: {:.1} MB", precompiled.len() as f64 / 1_000_000.0);
+    println!(
+        "  Precompiled size: {:.1} MB",
+        precompiled.len() as f64 / 1_000_000.0
+    );
 
     let after_precompile = MemorySnapshot::now();
-    println!("  RSS: {:.1} MB (+{:.1} MB)\n", after_precompile.rss_mb, after_precompile.rss_mb - after_preinit.rss_mb);
+    println!(
+        "  RSS: {:.1} MB (+{:.1} MB)\n",
+        after_precompile.rss_mb,
+        after_precompile.rss_mb - after_preinit.rss_mb
+    );
 
     // For mmap test, save to file and drop from RAM
     let cwasm_path = Path::new("/tmp/eryx-memory-bench.cwasm");
@@ -331,8 +372,7 @@ async fn run_numpy_benchmark() -> Result<(), Box<dyn std::error::Error>> {
             - if target == 1 {
                 0
             } else {
-                sandbox_counts
-                    [sandbox_counts.iter().position(|&x| x == target).unwrap() - 1]
+                sandbox_counts[sandbox_counts.iter().position(|&x| x == target).unwrap() - 1]
             };
         let per_sandbox = if added > 0 {
             delta / added as f64

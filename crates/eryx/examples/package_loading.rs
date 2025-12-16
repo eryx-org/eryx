@@ -35,7 +35,9 @@ async fn main() -> anyhow::Result<()> {
         eprintln!("numpy-wasi.tar.gz not found at /tmp/numpy-wasi.tar.gz");
         eprintln!();
         eprintln!("Download it with:");
-        eprintln!("  curl -sL https://github.com/dicej/wasi-wheels/releases/download/v0.0.2/numpy-wasi.tar.gz -o /tmp/numpy-wasi.tar.gz");
+        eprintln!(
+            "  curl -sL https://github.com/dicej/wasi-wheels/releases/download/v0.0.2/numpy-wasi.tar.gz -o /tmp/numpy-wasi.tar.gz"
+        );
         return Ok(());
     }
 
@@ -85,9 +87,14 @@ print("\nNumpy loaded via with_package()!")
         .with_package(numpy_tarball)?
         .build()?;
 
-    println!("  Created in {:?} (cache hit for linked runtime)", start.elapsed());
+    println!(
+        "  Created in {:?} (cache hit for linked runtime)",
+        start.elapsed()
+    );
 
-    let result = sandbox2.execute("import numpy; print(numpy.__version__)").await?;
+    let result = sandbox2
+        .execute("import numpy; print(numpy.__version__)")
+        .await?;
     println!("  numpy version: {}", result.stdout.trim());
 
     // Summary

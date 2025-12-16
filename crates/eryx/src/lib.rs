@@ -46,9 +46,9 @@ mod callback;
 #[cfg(any(feature = "embedded-stdlib", feature = "embedded-runtime"))]
 pub mod embedded;
 mod error;
+mod library;
 #[cfg(feature = "packages")]
 pub mod package;
-mod library;
 mod sandbox;
 mod schema;
 pub mod session;
@@ -62,7 +62,7 @@ mod wasm;
 /// startup cost on each sandbox creation.
 #[cfg(feature = "pre-init")]
 pub mod preinit {
-    pub use eryx_runtime::preinit::{pre_initialize, PreInitError};
+    pub use eryx_runtime::preinit::{PreInitError, pre_initialize};
 }
 
 pub use callback::{

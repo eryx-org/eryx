@@ -171,19 +171,24 @@ impl std::error::Error for WheelParseError {}
 /// Base libraries embedded in the crate (compressed with zstd).
 pub mod base_libraries {
     /// libc.so - C standard library
-    pub const LIBC: &[u8] = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/libs/libc.so.zst"));
+    pub const LIBC: &[u8] =
+        include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/libs/libc.so.zst"));
 
     /// libc++.so - C++ standard library
     pub const LIBCXX: &[u8] =
         include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/libs/libc++.so.zst"));
 
     /// libc++abi.so - C++ ABI library
-    pub const LIBCXXABI: &[u8] =
-        include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/libs/libc++abi.so.zst"));
+    pub const LIBCXXABI: &[u8] = include_bytes!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/libs/libc++abi.so.zst"
+    ));
 
     /// libpython3.14.so - Python interpreter
-    pub const LIBPYTHON: &[u8] =
-        include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/libs/libpython3.14.so.zst"));
+    pub const LIBPYTHON: &[u8] = include_bytes!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/libs/libpython3.14.so.zst"
+    ));
 
     /// libwasi-emulated-mman.so - WASI memory management emulation
     pub const LIBWASI_EMULATED_MMAN: &[u8] = include_bytes!(concat!(
@@ -282,7 +287,9 @@ pub fn link_with_extensions(extensions: &[NativeExtension]) -> Result<Vec<u8>, L
     linker = linker
         // WASI emulation libraries
         .library("libwasi-emulated-process-clocks.so", &wasi_clocks, false)
-        .map_err(|e| LinkError::Library("libwasi-emulated-process-clocks.so".into(), e.to_string()))?
+        .map_err(|e| {
+            LinkError::Library("libwasi-emulated-process-clocks.so".into(), e.to_string())
+        })?
         .library("libwasi-emulated-signal.so", &wasi_signal, false)
         .map_err(|e| LinkError::Library("libwasi-emulated-signal.so".into(), e.to_string()))?
         .library("libwasi-emulated-mman.so", &wasi_mman, false)

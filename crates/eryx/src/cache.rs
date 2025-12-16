@@ -185,11 +185,7 @@ impl FilesystemCache {
     #[must_use]
     pub fn get_path(&self, key: &CacheKey) -> Option<PathBuf> {
         let path = self.cache_path(key);
-        if path.exists() {
-            Some(path)
-        } else {
-            None
-        }
+        if path.exists() { Some(path) } else { None }
     }
 
     /// Get the path for a cache entry.
@@ -256,9 +252,10 @@ impl ComponentCache for InMemoryCache {
     }
 
     fn put(&self, key: &CacheKey, precompiled: Vec<u8>) -> Result<(), CacheError> {
-        let mut cache = self.cache.lock().map_err(|e| {
-            CacheError::Corrupted(format!("Cache lock poisoned: {e}"))
-        })?;
+        let mut cache = self
+            .cache
+            .lock()
+            .map_err(|e| CacheError::Corrupted(format!("Cache lock poisoned: {e}")))?;
 
         let mut hasher = Sha256::new();
         hasher.update(key.extensions_hash);

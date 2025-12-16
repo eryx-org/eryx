@@ -151,13 +151,11 @@ impl ExtractedPackage {
                     })?;
                 }
 
-                let mut outfile = std::fs::File::create(&outpath).map_err(|e| {
-                    Error::Initialization(format!("Failed to create file: {e}"))
-                })?;
+                let mut outfile = std::fs::File::create(&outpath)
+                    .map_err(|e| Error::Initialization(format!("Failed to create file: {e}")))?;
 
-                std::io::copy(&mut file, &mut outfile).map_err(|e| {
-                    Error::Initialization(format!("Failed to extract file: {e}"))
-                })?;
+                std::io::copy(&mut file, &mut outfile)
+                    .map_err(|e| Error::Initialization(format!("Failed to extract file: {e}")))?;
             }
         }
 
@@ -198,9 +196,9 @@ impl ExtractedPackage {
 
         let extract_path = temp_dir.path();
 
-        archive.unpack(extract_path).map_err(|e| {
-            Error::Initialization(format!("Failed to extract tar.gz: {e}"))
-        })?;
+        archive
+            .unpack(extract_path)
+            .map_err(|e| Error::Initialization(format!("Failed to extract tar.gz: {e}")))?;
 
         // Find native extensions and package name
         let (native_extensions, name) = Self::scan_for_extensions(extract_path)?;
@@ -265,9 +263,8 @@ impl ExtractedPackage {
 
         // Walk the directory tree
         for entry in walkdir::WalkDir::new(dir) {
-            let entry = entry.map_err(|e| {
-                Error::Initialization(format!("Failed to walk directory: {e}"))
-            })?;
+            let entry = entry
+                .map_err(|e| Error::Initialization(format!("Failed to walk directory: {e}")))?;
 
             let path = entry.path();
 
@@ -280,11 +277,13 @@ impl ExtractedPackage {
 
                 let relative_path = relative.display().to_string();
 
-                let bytes = std::fs::read(path).map_err(|e| {
-                    Error::Initialization(format!("Failed to read .so file: {e}"))
-                })?;
+                let bytes = std::fs::read(path)
+                    .map_err(|e| Error::Initialization(format!("Failed to read .so file: {e}")))?;
 
-                extensions.push(NativeExtension { relative_path, bytes });
+                extensions.push(NativeExtension {
+                    relative_path,
+                    bytes,
+                });
             }
 
             // Try to detect package name from __init__.py in top-level directories

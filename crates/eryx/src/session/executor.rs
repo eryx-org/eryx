@@ -259,7 +259,12 @@ impl SessionExecutor {
                 wasi_builder.env("PYTHONPATH", pythonpath_parts.join(":"));
             }
             wasi_builder
-                .preopened_dir(stdlib_path, "/python-stdlib", DirPerms::READ, FilePerms::READ)
+                .preopened_dir(
+                    stdlib_path,
+                    "/python-stdlib",
+                    DirPerms::READ,
+                    FilePerms::READ,
+                )
                 .map_err(|e| Error::WasmEngine(format!("Failed to mount Python stdlib: {e}")))?;
         }
 
@@ -448,7 +453,12 @@ impl SessionExecutor {
                 wasi_builder.env("PYTHONPATH", pythonpath_parts.join(":"));
             }
             wasi_builder
-                .preopened_dir(stdlib_path, "/python-stdlib", DirPerms::READ, FilePerms::READ)
+                .preopened_dir(
+                    stdlib_path,
+                    "/python-stdlib",
+                    DirPerms::READ,
+                    FilePerms::READ,
+                )
                 .map_err(|e| Error::WasmEngine(format!("Failed to mount Python stdlib: {e}")))?;
         }
 

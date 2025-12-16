@@ -79,9 +79,8 @@ impl EmbeddedResources {
         // Create a persistent temp directory
         // We use a fixed name under the system temp dir so it persists across runs
         let temp_base = std::env::temp_dir().join("eryx-embedded");
-        std::fs::create_dir_all(&temp_base).map_err(|e| {
-            Error::Initialization(format!("Failed to create temp directory: {e}"))
-        })?;
+        std::fs::create_dir_all(&temp_base)
+            .map_err(|e| Error::Initialization(format!("Failed to create temp directory: {e}")))?;
 
         #[cfg(feature = "embedded-stdlib")]
         let stdlib_path = Self::extract_stdlib(&temp_base)?;
@@ -122,9 +121,9 @@ impl EmbeddedResources {
 
         // Extract tar archive
         let mut archive = tar::Archive::new(decoder);
-        archive.unpack(temp_dir).map_err(|e| {
-            Error::Initialization(format!("Failed to extract stdlib archive: {e}"))
-        })?;
+        archive
+            .unpack(temp_dir)
+            .map_err(|e| Error::Initialization(format!("Failed to extract stdlib archive: {e}")))?;
 
         // Verify extraction
         if !stdlib_path.join("encodings").exists() {

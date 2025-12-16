@@ -67,7 +67,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         eprintln!("numpy not found at /tmp/numpy");
         eprintln!();
         eprintln!("Download it with:");
-        eprintln!("  curl -sL https://github.com/dicej/wasi-wheels/releases/download/v0.0.2/numpy-wasi.tar.gz -o /tmp/numpy-wasi.tar.gz");
+        eprintln!(
+            "  curl -sL https://github.com/dicej/wasi-wheels/releases/download/v0.0.2/numpy-wasi.tar.gz -o /tmp/numpy-wasi.tar.gz"
+        );
         eprintln!("  tar -xzf /tmp/numpy-wasi.tar.gz -C /tmp/");
         return Ok(());
     }
@@ -91,7 +93,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Loading numpy native extensions...");
     let start = Instant::now();
     let extensions = load_numpy_extensions(numpy_dir)?;
-    println!("  Loaded {} extensions in {:?}\n", extensions.len(), start.elapsed());
+    println!(
+        "  Loaded {} extensions in {:?}\n",
+        extensions.len(),
+        start.elapsed()
+    );
 
     // Step 1: Link the component with native extensions
     println!("Step 1: Linking component with native extensions...");
@@ -99,11 +105,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let native_extensions: Vec<_> = extensions
         .iter()
-        .map(|(name, bytes)| eryx_runtime::linker::NativeExtension::new(name.clone(), bytes.clone()))
+        .map(|(name, bytes)| {
+            eryx_runtime::linker::NativeExtension::new(name.clone(), bytes.clone())
+        })
         .collect();
 
     let linked_component = eryx_runtime::linker::link_with_extensions(&native_extensions)?;
-    println!("  Linked in {:?} ({:.1} MB)", start.elapsed(), linked_component.len() as f64 / 1_000_000.0);
+    println!(
+        "  Linked in {:?} ({:.1} MB)",
+        start.elapsed(),
+        linked_component.len() as f64 / 1_000_000.0
+    );
 
     // Step 2: Pre-initialize the component (run Python init + import numpy)
     println!("\nStep 2: Pre-initializing component (importing numpy)...");
@@ -113,18 +125,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         &linked_component,
         &python_stdlib,
         Some(site_packages),
-        &["numpy"],  // Pre-import numpy during init
+        &["numpy"], // Pre-import numpy during init
     )
     .await?;
 
-    println!("  Pre-initialized in {:?} ({:.1} MB)", start.elapsed(), preinit_component.len() as f64 / 1_000_000.0);
+    println!(
+        "  Pre-initialized in {:?} ({:.1} MB)",
+        start.elapsed(),
+        preinit_component.len() as f64 / 1_000_000.0
+    );
 
     // Step 3: Pre-compile the pre-initialized component
     println!("\nStep 3: Pre-compiling component...");
     let start = Instant::now();
 
     let precompiled = eryx::PythonExecutor::precompile(&preinit_component)?;
-    println!("  Pre-compiled in {:?} ({:.1} MB)", start.elapsed(), precompiled.len() as f64 / 1_000_000.0);
+    println!(
+        "  Pre-compiled in {:?} ({:.1} MB)",
+        start.elapsed(),
+        precompiled.len() as f64 / 1_000_000.0
+    );
 
     // Step 4: Cache the pre-compiled component
     let cache_dir = Path::new("/tmp/eryx-preinit-cache");
@@ -132,7 +152,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     std::fs::create_dir_all(cache_dir)?;
     let cache_file = cache_dir.join("numpy-preinit.cwasm");
     std::fs::write(&cache_file, &precompiled)?;
-    println!("\nCached pre-initialized component at: {}", cache_file.display());
+    println!(
+        "\nCached pre-initialized component at: {}",
+        cache_file.display()
+    );
 
     // Step 5: Create sandboxes using the pre-initialized, pre-compiled component
     println!("\n=== Creating Sandboxes ===\n");
@@ -185,7 +208,9 @@ print(f"Mean: {a.mean()}")
         times.push(elapsed);
 
         // Quick test
-        let result = sandbox.execute("import numpy as np; print(np.sum([1,2,3]))").await?;
+        let result = sandbox
+            .execute("import numpy as np; print(np.sum([1,2,3]))")
+            .await?;
         assert!(result.stdout.contains("6"));
 
         println!("  Sandbox {}: {:?}", i + 1, elapsed);

@@ -319,7 +319,10 @@ impl std::fmt::Debug for PythonExecutor {
             .field("engine", &"<wasmtime::Engine>")
             .field("instance_pre", &"<SandboxPre>")
             .field("python_stdlib_path", &self.python_stdlib_path)
-            .field("python_site_packages_paths", &self.python_site_packages_paths)
+            .field(
+                "python_site_packages_paths",
+                &self.python_site_packages_paths,
+            )
             .finish_non_exhaustive()
     }
 }
@@ -679,7 +682,12 @@ impl PythonExecutor {
                 wasi_builder.env("PYTHONPATH", pythonpath_parts.join(":"));
             }
             wasi_builder
-                .preopened_dir(stdlib_path, "/python-stdlib", DirPerms::READ, FilePerms::READ)
+                .preopened_dir(
+                    stdlib_path,
+                    "/python-stdlib",
+                    DirPerms::READ,
+                    FilePerms::READ,
+                )
                 .map_err(|e| format!("Failed to mount Python stdlib: {e}"))?;
         }
 

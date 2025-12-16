@@ -327,8 +327,7 @@ impl Sandbox {
 }
 
 /// Source of the WASM component for the sandbox.
-#[derive(Debug, Clone)]
-#[derive(Default)]
+#[derive(Debug, Clone, Default)]
 enum WasmSource {
     /// No source specified yet.
     #[default]
@@ -347,7 +346,6 @@ enum WasmSource {
     #[cfg(feature = "embedded-runtime")]
     EmbeddedRuntime,
 }
-
 
 /// Builder for constructing a [`Sandbox`].
 pub struct SandboxBuilder {
@@ -587,7 +585,10 @@ impl SandboxBuilder {
         bytes: impl Into<Vec<u8>>,
     ) -> Self {
         self.native_extensions
-            .push(eryx_runtime::linker::NativeExtension::new(name, bytes.into()));
+            .push(eryx_runtime::linker::NativeExtension::new(
+                name,
+                bytes.into(),
+            ));
         self
     }
 
@@ -837,17 +838,21 @@ impl SandboxBuilder {
         // with correct dlopen paths. Mount index 0 is reserved for explicit site-packages.
         #[cfg(all(feature = "packages", feature = "native-extensions"))]
         {
-            let start_index = if self.python_site_packages_path.is_some() { 1 } else { 0 };
+            let start_index = if self.python_site_packages_path.is_some() {
+                1
+            } else {
+                0
+            };
             for (pkg_idx, package) in self.packages.iter().enumerate() {
                 let mount_index = start_index + pkg_idx;
                 for ext in &package.native_extensions {
-                    let dlopen_path = format!("/site-packages-{}/{}", mount_index, ext.relative_path);
-                    self.native_extensions.push(
-                        eryx_runtime::linker::NativeExtension::new(
+                    let dlopen_path =
+                        format!("/site-packages-{}/{}", mount_index, ext.relative_path);
+                    self.native_extensions
+                        .push(eryx_runtime::linker::NativeExtension::new(
                             dlopen_path,
                             ext.bytes.clone(),
-                        )
-                    );
+                        ));
                 }
             }
         }
@@ -855,7 +860,10 @@ impl SandboxBuilder {
         // Set up default cache for native extensions if none specified
         // This avoids re-linking on every sandbox creation
         #[cfg(all(feature = "native-extensions", feature = "precompiled"))]
-        if !self.native_extensions.is_empty() && self.filesystem_cache.is_none() && self.cache.is_none() {
+        if !self.native_extensions.is_empty()
+            && self.filesystem_cache.is_none()
+            && self.cache.is_none()
+        {
             let default_cache_dir = std::env::temp_dir().join("eryx-cache");
             if let Ok(cache) = crate::cache::FilesystemCache::new(&default_cache_dir) {
                 tracing::debug!(path = %default_cache_dir.display(), "Using default cache directory");
@@ -1021,19 +1029,20 @@ impl SandboxBuilder {
         // Try filesystem cache first (mmap-based, 3x faster than bytes)
         #[cfg(feature = "precompiled")]
         if let Some(fs_cache) = &self.filesystem_cache
-            && let Some(path) = fs_cache.get_path(&cache_key) {
-                tracing::debug!(
-                    key = %cache_key.to_hex(),
-                    path = %path.display(),
-                    "component cache hit - loading via mmap"
-                );
-                // SAFETY: The cached pre-compiled file was created by us (from
-                // `PythonExecutor::precompile()`) in a previous call. We trust our
-                // own cache directory. If the cache is corrupted or tampered with,
-                // wasmtime will detect it during deserialization.
-                #[allow(unsafe_code)]
-                return unsafe { PythonExecutor::from_precompiled_file(&path) };
-            }
+            && let Some(path) = fs_cache.get_path(&cache_key)
+        {
+            tracing::debug!(
+                key = %cache_key.to_hex(),
+                path = %path.display(),
+                "component cache hit - loading via mmap"
+            );
+            // SAFETY: The cached pre-compiled file was created by us (from
+            // `PythonExecutor::precompile()`) in a previous call. We trust our
+            // own cache directory. If the cache is corrupted or tampered with,
+            // wasmtime will detect it during deserialization.
+            #[allow(unsafe_code)]
+            return unsafe { PythonExecutor::from_precompiled_file(&path) };
+        }
 
         // Fall back to in-memory cache (for InMemoryCache users)
         #[cfg(feature = "precompiled")]
@@ -1053,8 +1062,9 @@ impl SandboxBuilder {
         }
 
         // Cache miss or no cache - link the component
-        let component_bytes = eryx_runtime::linker::link_with_extensions(&self.native_extensions)
-            .map_err(|e| Error::Initialization(format!("late-linking failed: {e}")))?;
+        let component_bytes =
+            eryx_runtime::linker::link_with_extensions(&self.native_extensions)
+                .map_err(|e| Error::Initialization(format!("late-linking failed: {e}")))?;
 
         // Pre-compile and cache if available
         #[cfg(feature = "precompiled")]

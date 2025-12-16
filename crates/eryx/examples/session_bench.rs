@@ -12,12 +12,16 @@ use eryx::Sandbox;
 use eryx::Session;
 use eryx::session::InProcessSession;
 
-fn load_numpy_extensions(numpy_dir: &Path) -> Result<Vec<(String, Vec<u8>)>, Box<dyn std::error::Error>> {
+fn load_numpy_extensions(
+    numpy_dir: &Path,
+) -> Result<Vec<(String, Vec<u8>)>, Box<dyn std::error::Error>> {
     let mut extensions = Vec::new();
     for entry in walkdir::WalkDir::new(numpy_dir) {
         let entry = entry?;
         let path = entry.path();
-        if let Some(ext) = path.extension() && ext == "so" {
+        if let Some(ext) = path.extension()
+            && ext == "so"
+        {
             let numpy_parent = numpy_dir.parent().ok_or("no parent")?;
             let relative_path = path.strip_prefix(numpy_parent)?;
             let dlopen_path = format!("/site-packages/{}", relative_path.to_string_lossy());
@@ -38,7 +42,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap_or_else(|_| ".".to_string());
     let python_stdlib = std::path::PathBuf::from(&manifest_dir)
-        .parent().ok_or("no parent")?
+        .parent()
+        .ok_or("no parent")?
         .join("eryx-wasm-runtime/tests/python-stdlib");
     let site_packages = numpy_dir.parent().ok_or("no parent")?;
 

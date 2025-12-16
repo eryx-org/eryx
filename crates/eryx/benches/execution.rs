@@ -428,14 +428,16 @@ fn bench_introspection(c: &mut Criterion) {
 /// ```
 #[cfg(all(feature = "native-extensions", feature = "precompiled"))]
 fn bench_native_extension_caching(c: &mut Criterion) {
-    use std::sync::Arc;
     use eryx::cache::InMemoryCache;
+    use std::sync::Arc;
 
     let numpy_dir = std::path::Path::new("/tmp/numpy");
     if !numpy_dir.exists() {
         eprintln!("Skipping caching benchmarks: numpy not found at /tmp/numpy");
         eprintln!("Download it with:");
-        eprintln!("  curl -sL https://github.com/dicej/wasi-wheels/releases/download/v0.0.2/numpy-wasi.tar.gz -o /tmp/numpy-wasi.tar.gz");
+        eprintln!(
+            "  curl -sL https://github.com/dicej/wasi-wheels/releases/download/v0.0.2/numpy-wasi.tar.gz -o /tmp/numpy-wasi.tar.gz"
+        );
         eprintln!("  tar -xzf /tmp/numpy-wasi.tar.gz -C /tmp/");
         return;
     }

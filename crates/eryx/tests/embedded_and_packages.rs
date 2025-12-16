@@ -14,9 +14,14 @@ use eryx::Sandbox;
 #[tokio::test]
 #[cfg(feature = "embedded-runtime")]
 async fn embedded_runtime_is_automatic() {
-    let sandbox = Sandbox::builder().build().expect("should use embedded runtime automatically");
+    let sandbox = Sandbox::builder()
+        .build()
+        .expect("should use embedded runtime automatically");
 
-    let result = sandbox.execute("print('hello')").await.expect("execution should work");
+    let result = sandbox
+        .execute("print('hello')")
+        .await
+        .expect("execution should work");
     assert!(result.stdout.contains("hello"));
 }
 
@@ -26,7 +31,9 @@ async fn embedded_runtime_is_automatic() {
 async fn embedded_runtime_multiple_sandboxes() {
     // Create 5 sandboxes - should be fast after first extraction
     for i in 0..5 {
-        let sandbox = Sandbox::builder().build().expect("sandbox creation should work");
+        let sandbox = Sandbox::builder()
+            .build()
+            .expect("sandbox creation should work");
         let result = sandbox
             .execute(&format!("print('sandbox {i}')"))
             .await
@@ -43,7 +50,9 @@ async fn embedded_runtime_multiple_sandboxes() {
 #[tokio::test]
 #[cfg(all(feature = "embedded-runtime", feature = "embedded-stdlib"))]
 async fn embedded_stdlib_is_automatic() {
-    let sandbox = Sandbox::builder().build().expect("should work without explicit stdlib path");
+    let sandbox = Sandbox::builder()
+        .build()
+        .expect("should work without explicit stdlib path");
 
     // Test that stdlib modules are available
     let result = sandbox
@@ -256,9 +265,15 @@ fn embedded_resources_extraction() {
 
     #[cfg(feature = "embedded-runtime")]
     {
-        assert!(resources.runtime_path.exists(), "runtime should be extracted");
         assert!(
-            resources.runtime_path.extension().is_some_and(|e| e == "cwasm"),
+            resources.runtime_path.exists(),
+            "runtime should be extracted"
+        );
+        assert!(
+            resources
+                .runtime_path
+                .extension()
+                .is_some_and(|e| e == "cwasm"),
             "runtime should be .cwasm file"
         );
     }

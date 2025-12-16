@@ -19,7 +19,7 @@ use std::env;
 use std::path::PathBuf;
 use std::process::Command;
 
-use wit_component::{embed_component_metadata, StringEncoding};
+use wit_component::{StringEncoding, embed_component_metadata};
 
 fn main() {
     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
@@ -93,9 +93,10 @@ fn build_wasm_runtime(wasm_runtime_dir: &PathBuf) -> PathBuf {
     // Strip inherited Rust/Cargo env vars to prevent lock contention
     for (key, _) in env::vars_os() {
         if let Some(key_str) = key.to_str()
-            && (key_str.starts_with("RUST") || key_str.starts_with("CARGO")) {
-                cmd.env_remove(&key);
-            }
+            && (key_str.starts_with("RUST") || key_str.starts_with("CARGO"))
+        {
+            cmd.env_remove(&key);
+        }
     }
 
     // Set the env vars we need
@@ -304,12 +305,13 @@ fn find_wasi_sdk() -> Option<PathBuf> {
     if let Ok(output) = Command::new("mise")
         .args(["where", "github:WebAssembly/wasi-sdk"])
         .output()
-        && output.status.success() {
-            let path = PathBuf::from(String::from_utf8_lossy(&output.stdout).trim());
-            if path.join("bin/clang").exists() {
-                return Some(path);
-            }
+        && output.status.success()
+    {
+        let path = PathBuf::from(String::from_utf8_lossy(&output.stdout).trim());
+        if path.join("bin/clang").exists() {
+            return Some(path);
         }
+    }
 
     // Try local project installation
     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").ok()?);

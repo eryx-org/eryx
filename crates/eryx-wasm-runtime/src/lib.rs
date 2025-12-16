@@ -114,7 +114,9 @@ impl Drop for EryxCall {
         for (ptr, layout) in self.deferred.drain(..) {
             if !ptr.is_null() && layout.size() > 0 {
                 // Safety: ptr and layout were created together via Box::into_raw
-                unsafe { std::alloc::dealloc(ptr, layout); }
+                unsafe {
+                    std::alloc::dealloc(ptr, layout);
+                }
             }
         }
     }
@@ -885,9 +887,7 @@ impl Interpreter for EryxInterpreter {
 
         // Get the Wit handle from pending state (without taking ownership yet).
         // We need this to restore CURRENT_WIT and callbacks so subsequent invoke() calls work.
-        let wit = PENDING_ASYNC_STATE.with(|cell| {
-            cell.borrow().as_ref().map(|s| s.wit)
-        });
+        let wit = PENDING_ASYNC_STATE.with(|cell| cell.borrow().as_ref().map(|s| s.wit));
         let wit = match wit {
             Some(w) => w,
             None => return 0, // No pending state - shouldn't happen
@@ -897,7 +897,9 @@ impl Interpreter for EryxInterpreter {
         // before calling Python's callback so promise_get_result can access it
         if event0 == EVENT_SUBTASK && event2 == STATUS_RETURNED {
             let subtask = event1;
-            if let Some(pending_state) = PENDING_IMPORTS.with(|cell| cell.borrow_mut().remove(&subtask)) {
+            if let Some(pending_state) =
+                PENDING_IMPORTS.with(|cell| cell.borrow_mut().remove(&subtask))
+            {
                 // Create a call context to receive the lifted result
                 let mut cx = EryxCall::new();
 
@@ -934,9 +936,7 @@ impl Interpreter for EryxInterpreter {
 
         // Call Python's callback function to resume execution.
         // Restore CURRENT_WIT and callbacks so any subsequent invoke() calls work.
-        let callback_code = with_wit(wit, || {
-            python::call_python_callback(event0, event1, event2)
-        });
+        let callback_code = with_wit(wit, || python::call_python_callback(event0, event1, event2));
         let code = python::callback_code::get_code(callback_code);
 
         if code == python::callback_code::WAIT {

@@ -62,7 +62,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         eprintln!("numpy not found at /tmp/numpy");
         eprintln!();
         eprintln!("Download it with:");
-        eprintln!("  curl -sL https://github.com/dicej/wasi-wheels/releases/download/v0.0.2/numpy-wasi.tar.gz -o /tmp/numpy-wasi.tar.gz");
+        eprintln!(
+            "  curl -sL https://github.com/dicej/wasi-wheels/releases/download/v0.0.2/numpy-wasi.tar.gz -o /tmp/numpy-wasi.tar.gz"
+        );
         eprintln!("  tar -xzf /tmp/numpy-wasi.tar.gz -C /tmp/");
         return Ok(());
     }
@@ -87,7 +89,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Loading numpy native extensions...");
     let start = Instant::now();
     let extensions = load_numpy_extensions(numpy_dir)?;
-    println!("  Loaded {} extensions in {:?}", extensions.len(), start.elapsed());
+    println!(
+        "  Loaded {} extensions in {:?}",
+        extensions.len(),
+        start.elapsed()
+    );
 
     // Create cache directory (using with_cache_dir for mmap-based loading)
     let cache_dir = Path::new("/tmp/eryx-cache");
@@ -109,10 +115,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let sandbox1 = builder.build()?;
     let cold_time = start.elapsed();
-    println!("  Created in {:?} (cache miss - linked + compiled + cached)", cold_time);
+    println!(
+        "  Created in {:?} (cache miss - linked + compiled + cached)",
+        cold_time
+    );
 
     // Verify it works
-    let result = sandbox1.execute("import numpy as np; print(np.array([1,2,3]).sum())").await?;
+    let result = sandbox1
+        .execute("import numpy as np; print(np.array([1,2,3]).sum())")
+        .await?;
     println!("  Test: {}", result.stdout.trim());
 
     // Second sandbox creation (warm - cache hit with mmap)
@@ -130,10 +141,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let sandbox2 = builder.build()?;
     let warm_time = start.elapsed();
-    println!("  Created in {:?} (cache hit - loaded precompiled)", warm_time);
+    println!(
+        "  Created in {:?} (cache hit - loaded precompiled)",
+        warm_time
+    );
 
     // Verify it works
-    let result = sandbox2.execute("import numpy as np; print(np.array([4,5,6]).sum())").await?;
+    let result = sandbox2
+        .execute("import numpy as np; print(np.array([4,5,6]).sum())")
+        .await?;
     println!("  Test: {}", result.stdout.trim());
 
     // Third sandbox (also warm with mmap)
@@ -154,14 +170,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("  Created in {:?} (cache hit)", warm_time2);
 
     // Verify it works
-    let result = sandbox3.execute("import numpy as np; print(np.linalg.det([[1,2],[3,4]]))").await?;
+    let result = sandbox3
+        .execute("import numpy as np; print(np.linalg.det([[1,2],[3,4]]))")
+        .await?;
     println!("  Test: det([[1,2],[3,4]]) = {}", result.stdout.trim());
 
     // Summary
     println!("\n=== Summary ===\n");
     println!("  Cold (cache miss): {:?}", cold_time);
     println!("  Warm (cache hit):  {:?}", warm_time);
-    println!("  Speedup: {:.1}x", cold_time.as_secs_f64() / warm_time.as_secs_f64());
+    println!(
+        "  Speedup: {:.1}x",
+        cold_time.as_secs_f64() / warm_time.as_secs_f64()
+    );
 
     // Check cache file
     let cache_files: Vec<_> = std::fs::read_dir(cache_dir)?
@@ -171,7 +192,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     if let Some(entry) = cache_files.first() {
         let metadata = entry.metadata()?;
-        println!("  Cache file: {} ({:.1} MB)",
+        println!(
+            "  Cache file: {} ({:.1} MB)",
             entry.file_name().to_string_lossy(),
             metadata.len() as f64 / 1_000_000.0
         );
