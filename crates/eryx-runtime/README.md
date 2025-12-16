@@ -55,7 +55,7 @@ The runtime exposes the `eryx:sandbox` world with:
 
 - `invoke(name, arguments-json) -> result<string, string>` - Async callback invocation
 - `list-callbacks() -> list<callback-info>` - Introspection of available callbacks
-- `report-trace(lineno, event-json, context-json)` - Execution tracing (not yet implemented)
+- `report-trace(lineno, event-json, context-json)` - Execution tracing via `sys.settrace`
 
 ### Exports (Guest → Host)
 

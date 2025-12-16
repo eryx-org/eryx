@@ -493,11 +493,13 @@ The path must match because:
 | `libpython3.14.so` | 28MB | 25.6% → 7.1MB | Python interpreter |
 | `libc++.so` | 5.2MB | 21.1% → 1.1MB | C++ standard library |
 | `libc.so` | 2.1MB | 33.0% → 699KB | C standard library |
-| `libcomponentize_py_runtime_async.so` | 1.6MB | 22.5% → 356KB | componentize-py runtime |
 | `libc++abi.so` | 1.1MB | 21.7% → 225KB | C++ ABI |
 | `wasi_snapshot_preview1.reactor.wasm` | 95KB | 20.9% → 20KB | WASI adapter |
 | `libwasi-emulated-*` | ~21KB total | - | WASI polyfills |
-| **Total base libraries** | **~38MB** | **→ ~9.5MB compressed** | |
+| **Total base libraries** | **~36MB** | **→ ~9MB compressed** | |
+
+> **Note:** The `libs/` directory also contains `libcomponentize_py_runtime_*.so` files
+> (vestigial from componentize-py). These are NOT used—eryx uses `liberyx_runtime.so` instead.
 
 ### Runtime Components
 

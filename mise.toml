@@ -159,7 +159,6 @@ echo "✓ All examples completed!"
 
 [tasks.ensure-wasi-sdk]
 description = "Install WASI SDK if not present"
-shell = "bash"
 run = """
 # Install WASI SDK if not present (use explicit version in all commands)
 WASI_SDK_VERSION="wasi-sdk-27"
@@ -172,7 +171,7 @@ fi
 WASI_SDK_PATH=$(mise where "github:WebAssembly/wasi-sdk@$WASI_SDK_VERSION")
 echo "WASI SDK at: $WASI_SDK_PATH"
 
-if [[ ! -f "$WASI_SDK_PATH/bin/clang" ]]; then
+if [ ! -f "$WASI_SDK_PATH/bin/clang" ]; then
     echo "ERROR: WASI SDK installation incomplete - clang not found"
     exit 1
 fi

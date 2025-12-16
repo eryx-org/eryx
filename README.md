@@ -116,11 +116,12 @@ See the `runtime_callbacks` example.
 For REPL-style usage where state persists between executions:
 
 ```rust
-use eryx::session::InProcessSession;
+use eryx::{Sandbox, session::InProcessSession};
 
 #[tokio::main]
 async fn main() -> Result<(), eryx::Error> {
-    let session = InProcessSession::builder().build()?;
+    let sandbox = Sandbox::builder().build()?;
+    let mut session = InProcessSession::new(&sandbox).await?;
 
     // First execution defines a variable
     session.execute("x = 42").await?;
