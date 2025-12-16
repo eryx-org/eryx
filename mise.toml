@@ -67,8 +67,8 @@ run = "cargo clean"
 description = "Build the Python WASM component using eryx-wasm-runtime"
 depends = ["ensure-wasi-sdk"]
 run = """
-# Get WASI SDK path and export it for build.rs
-export WASI_SDK_PATH=$(mise where github:WebAssembly/wasi-sdk)
+# Get WASI SDK path and export it for build.rs (use explicit version)
+export WASI_SDK_PATH=$(mise where github:WebAssembly/wasi-sdk@wasi-sdk-27)
 echo "Using WASI SDK at: $WASI_SDK_PATH"
 BUILD_ERYX_RUNTIME=1 cargo build --package eryx-runtime
 """
@@ -160,14 +160,15 @@ echo "✓ All examples completed!"
 [tasks.ensure-wasi-sdk]
 description = "Install WASI SDK if not present"
 run = """
-# Install WASI SDK if not present
-if ! mise where github:WebAssembly/wasi-sdk 2>/dev/null; then
-    echo "Installing WASI SDK..."
-    mise install github:WebAssembly/wasi-sdk@wasi-sdk-27
+# Install WASI SDK if not present (use explicit version in all commands)
+WASI_SDK_VERSION="wasi-sdk-27"
+if ! mise where "github:WebAssembly/wasi-sdk@$WASI_SDK_VERSION" 2>/dev/null; then
+    echo "Installing WASI SDK ($WASI_SDK_VERSION)..."
+    mise install "github:WebAssembly/wasi-sdk@$WASI_SDK_VERSION"
 fi
 
 # Verify installation
-WASI_SDK_PATH=$(mise where github:WebAssembly/wasi-sdk)
+WASI_SDK_PATH=$(mise where "github:WebAssembly/wasi-sdk@$WASI_SDK_VERSION")
 echo "WASI SDK at: $WASI_SDK_PATH"
 
 if [[ ! -f "$WASI_SDK_PATH/bin/clang" ]]; then
@@ -180,8 +181,8 @@ fi
 description = "Build liberyx_runtime.so and runtime.wasm via eryx-runtime build.rs"
 depends = ["ensure-wasi-sdk"]
 run = """
-# Get WASI SDK path and export it for build.rs
-export WASI_SDK_PATH=$(mise where github:WebAssembly/wasi-sdk)
+# Get WASI SDK path and export it for build.rs (use explicit version)
+export WASI_SDK_PATH=$(mise where github:WebAssembly/wasi-sdk@wasi-sdk-27)
 echo "Using WASI SDK at: $WASI_SDK_PATH"
 BUILD_ERYX_RUNTIME=1 cargo build --package eryx-runtime
 """
