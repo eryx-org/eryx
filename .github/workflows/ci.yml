@@ -65,6 +65,10 @@ jobs:
           name: wasm-runtime
           path: crates/eryx-runtime/
 
+      # Touch artifacts to be newer than sources so mise skips rebuild
+      - name: Mark WASM as up-to-date
+        run: touch crates/eryx-runtime/runtime.wasm crates/eryx-runtime/runtime.cwasm
+
       - name: Install mise
         uses: jdx/mise-action@v3
 
@@ -110,6 +114,10 @@ jobs:
         with:
           name: wasm-runtime
           path: crates/eryx-runtime/
+
+      # Touch artifacts to be newer than sources so mise skips rebuild
+      - name: Mark WASM as up-to-date
+        run: touch crates/eryx-runtime/runtime.wasm crates/eryx-runtime/runtime.cwasm
 
       - name: Install mold linker
         run: |
@@ -188,6 +196,10 @@ jobs:
         with:
           name: wasm-runtime
           path: crates/eryx-runtime/
+
+      # Touch artifacts to be newer than sources so mise skips rebuild
+      - name: Mark WASM as up-to-date
+        run: touch crates/eryx-runtime/runtime.wasm crates/eryx-runtime/runtime.cwasm
 
       - name: Install mise
         uses: jdx/mise-action@v3
