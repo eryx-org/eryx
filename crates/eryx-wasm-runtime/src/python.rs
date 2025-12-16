@@ -1116,6 +1116,11 @@ _eryx_exclude = {
     # Exclude callback infrastructure (set up fresh on each run)
     'invoke', 'list_callbacks', '_EryxNamespace', '_EryxCallbackLeaf',
     '_eryx_make_callback', '_eryx_reserved',
+    # Exclude internal runtime infrastructure (WASI patches, IO capture, etc.)
+    '_sys', '_StringIO', '_ast', '_types', '_socket',
+    '_socket_original_socketpair', '_DummySocket', '_dummy_socketpair',
+    '_CPAS_AVAILABLE', '_asyncio', '_cpas', '_cpr',
+    '_Ok', '_Err', '_ASYNC_SUPPORT',
 }
 
 # Check if an object is part of the callback infrastructure
@@ -1248,6 +1253,10 @@ _eryx_keep = {
     '_json', '_eryx',
     # Preserve async support modules
     '_cpr', '_cpas', '_Ok', '_Err', '_ASYNC_SUPPORT',
+    # Preserve internal runtime infrastructure (WASI patches, IO capture, etc.)
+    '_sys', '_StringIO', '_ast', '_types', '_socket',
+    '_socket_original_socketpair', '_DummySocket', '_dummy_socketpair',
+    '_CPAS_AVAILABLE', '_asyncio',
 }
 
 # Also keep callback wrappers and namespace objects

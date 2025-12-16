@@ -208,25 +208,35 @@ fn precompiled_wasm_path() -> PathBuf {
 
 /// Create a sandbox builder with the appropriate WASM source.
 fn sandbox_builder() -> eryx::SandboxBuilder {
-    let stdlib_path = python_stdlib_path();
-
-    #[cfg(feature = "precompiled")]
+    // When embedded features are available, use them (more reliable)
+    #[cfg(all(feature = "embedded-runtime", feature = "embedded-stdlib"))]
     {
-        let cwasm_path = precompiled_wasm_path();
-        if cwasm_path.exists() {
-            // SAFETY: We trust the precompiled WASM from our own build
-            #[allow(unsafe_code)]
-            return unsafe {
-                Sandbox::builder()
-                    .with_precompiled_file(&cwasm_path)
-                    .with_python_stdlib(&stdlib_path)
-            };
-        }
+        return Sandbox::builder();
     }
 
-    Sandbox::builder()
-        .with_wasm_file(runtime_wasm_path())
-        .with_python_stdlib(&stdlib_path)
+    // Fallback to explicit paths for testing without embedded features
+    #[cfg(not(all(feature = "embedded-runtime", feature = "embedded-stdlib")))]
+    {
+        let stdlib_path = python_stdlib_path();
+
+        #[cfg(feature = "precompiled")]
+        {
+            let cwasm_path = precompiled_wasm_path();
+            if cwasm_path.exists() {
+                // SAFETY: We trust the precompiled WASM from our own build
+                #[allow(unsafe_code)]
+                return unsafe {
+                    Sandbox::builder()
+                        .with_precompiled_file(&cwasm_path)
+                        .with_python_stdlib(&stdlib_path)
+                };
+            }
+        }
+
+        Sandbox::builder()
+            .with_wasm_file(runtime_wasm_path())
+            .with_python_stdlib(&stdlib_path)
+    }
 }
 
 // =============================================================================

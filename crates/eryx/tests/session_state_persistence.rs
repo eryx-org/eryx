@@ -34,34 +34,52 @@ fn get_shared_executor() -> Arc<PythonExecutor> {
 
 /// Create a PythonExecutor, using precompiled WASM if available.
 fn create_executor() -> PythonExecutor {
-    let stdlib_path = python_stdlib_path();
-
-    // Try precompiled first (much faster: ~50ms vs ~5s)
-    #[cfg(feature = "precompiled")]
+    // When embedded features are available, use them (more reliable)
+    #[cfg(all(feature = "embedded-runtime", feature = "embedded-stdlib"))]
     {
-        let cwasm_path = precompiled_wasm_path();
-        if cwasm_path.exists() {
-            // SAFETY: We trust the precompiled WASM because it was generated
-            // from our own runtime.wasm by the precompile example.
-            #[allow(unsafe_code)]
-            match unsafe { PythonExecutor::from_precompiled_file(&cwasm_path) } {
-                Ok(executor) => return executor.with_python_stdlib(&stdlib_path),
-                Err(e) => {
-                    eprintln!(
-                        "Warning: Failed to load precompiled WASM from {:?}: {}",
-                        cwasm_path, e
-                    );
-                    eprintln!("Falling back to runtime compilation...");
+        use eryx::embedded::EmbeddedResources;
+        let resources = EmbeddedResources::get().expect("Failed to extract embedded resources");
+        // SAFETY: We trust the embedded precompiled runtime
+        #[allow(unsafe_code)]
+        return unsafe {
+            PythonExecutor::from_precompiled_file(&resources.runtime_path)
+                .expect("Failed to load embedded runtime")
+                .with_python_stdlib(&resources.stdlib_path)
+        };
+    }
+
+    // Fallback for when embedded features are not available
+    #[cfg(not(all(feature = "embedded-runtime", feature = "embedded-stdlib")))]
+    {
+        let stdlib_path = python_stdlib_path();
+
+        // Try precompiled first (much faster: ~50ms vs ~5s)
+        #[cfg(feature = "precompiled")]
+        {
+            let cwasm_path = precompiled_wasm_path();
+            if cwasm_path.exists() {
+                // SAFETY: We trust the precompiled WASM because it was generated
+                // from our own runtime.wasm by the precompile example.
+                #[allow(unsafe_code)]
+                match unsafe { PythonExecutor::from_precompiled_file(&cwasm_path) } {
+                    Ok(executor) => return executor.with_python_stdlib(&stdlib_path),
+                    Err(e) => {
+                        eprintln!(
+                            "Warning: Failed to load precompiled WASM from {:?}: {}",
+                            cwasm_path, e
+                        );
+                        eprintln!("Falling back to runtime compilation...");
+                    }
                 }
             }
         }
-    }
 
-    // Fall back to runtime compilation
-    let path = runtime_wasm_path();
-    PythonExecutor::from_file(&path)
-        .unwrap_or_else(|e| panic!("Failed to load runtime.wasm from {:?}: {}", path, e))
-        .with_python_stdlib(&stdlib_path)
+        // Fall back to runtime compilation
+        let path = runtime_wasm_path();
+        PythonExecutor::from_file(&path)
+            .unwrap_or_else(|e| panic!("Failed to load runtime.wasm from {:?}: {}", path, e))
+            .with_python_stdlib(&stdlib_path)
+    }
 }
 
 /// Get the path to runtime.wasm relative to the workspace root.

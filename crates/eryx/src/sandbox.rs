@@ -1408,7 +1408,9 @@ mod tests {
         }
     }
 
+    /// Test that sandbox creation fails without WASM when embedded-runtime is not available.
     #[test]
+    #[cfg(not(feature = "embedded-runtime"))]
     fn sandbox_builder_build_fails_without_wasm() {
         let builder = SandboxBuilder::new();
         let result = builder.build();
@@ -1421,6 +1423,16 @@ mod tests {
             "Error should mention WASM: {}",
             error_str
         );
+    }
+
+    /// Test that sandbox creation succeeds automatically with embedded-runtime.
+    #[test]
+    #[cfg(feature = "embedded-runtime")]
+    fn sandbox_builder_build_uses_embedded_runtime_automatically() {
+        let builder = SandboxBuilder::new();
+        let result = builder.build();
+
+        assert!(result.is_ok(), "Should use embedded runtime automatically");
     }
 
     #[test]
