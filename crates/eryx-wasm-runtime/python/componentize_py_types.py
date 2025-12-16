@@ -1,16 +1,18 @@
-# Compatibility shim: provides componentize_py_types
+# Result types compatible with componentize-py's async support.
 #
-# These are simple Result types used by componentize_py_async_support.
+# These Result types (Ok/Err) provide the interface expected by
+# componentize_py_async_support from componentize-py.
 # Note: Err uses .value (not .error) to match componentize_py's expectations.
 
-from typing import TypeVar, Generic
+from typing import Generic, TypeVar
 
-T = TypeVar('T')
-E = TypeVar('E')
+T = TypeVar("T")
+E = TypeVar("E")
 
 
 class Result(Generic[T, E]):
     """A Result type that can be Ok or Err."""
+
     pass
 
 
