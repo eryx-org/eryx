@@ -87,7 +87,9 @@ jobs:
         run: cargo fmt --all -- --check
 
       - name: Run clippy
-        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+        # Note: we use --features precompiled instead of --all-features because
+        # late-linking requires .so files that are only built during WASM build
+        run: cargo clippy --workspace --all-targets --features precompiled -- -D warnings
 
   test:
     name: Test
@@ -208,6 +210,8 @@ jobs:
       - uses: ./.github/actions/setup-rust
 
       - name: Build documentation
-        run: cargo doc --workspace --no-deps --all-features
+        # Note: we use --features precompiled instead of --all-features because
+        # late-linking requires .so files that are only built during WASM build
+        run: cargo doc --workspace --no-deps --features precompiled
         env:
           RUSTDOCFLAGS: -D warnings
