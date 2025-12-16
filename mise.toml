@@ -89,7 +89,7 @@ run = """
 # Get WASI SDK path and export it for build.rs (use explicit version)
 export WASI_SDK_PATH=$(mise where github:WebAssembly/wasi-sdk@wasi-sdk-27)
 echo "Using WASI SDK at: $WASI_SDK_PATH"
-BUILD_ERYX_RUNTIME=1 cargo build --package eryx-runtime
+BUILD_ERYX_RUNTIME=1 cargo build --package eryx-runtime --release
 """
 sources = ["crates/eryx-wasm-runtime/src/**/*.rs", "crates/eryx-wasm-runtime/clock_stubs.c", "crates/eryx-runtime/runtime.wit"]
 outputs = ["crates/eryx-runtime/runtime.wasm"]
@@ -203,7 +203,7 @@ run = """
 # Get WASI SDK path and export it for build.rs (use explicit version)
 export WASI_SDK_PATH=$(mise where github:WebAssembly/wasi-sdk@wasi-sdk-27)
 echo "Using WASI SDK at: $WASI_SDK_PATH"
-BUILD_ERYX_RUNTIME=1 cargo build --package eryx-runtime
+BUILD_ERYX_RUNTIME=1 cargo build --package eryx-runtime --release
 """
 sources = ["crates/eryx-wasm-runtime/src/**/*.rs", "crates/eryx-wasm-runtime/clock_stubs.c", "crates/eryx-wasm-runtime/Cargo.toml", "crates/eryx-runtime/runtime.wit"]
 outputs = ["crates/eryx-wasm-runtime/target/liberyx_runtime.so", "crates/eryx-runtime/runtime.wasm"]
