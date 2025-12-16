@@ -21,17 +21,26 @@ run = "cargo build --workspace"
 [tasks.test]
 description = "Run tests with precompiled WASM"
 depends = ["precompile-wasm"]
-run = "cargo nextest run --workspace --features precompiled"
+run = """
+export WASI_SDK_PATH=$(mise where github:WebAssembly/wasi-sdk@wasi-sdk-27)
+cargo nextest run --workspace --features precompiled
+"""
 
 [tasks.test-all]
 description = "Run tests with all features"
 depends = ["precompile-wasm"]
-run = "cargo nextest run --workspace --all-features"
+run = """
+export WASI_SDK_PATH=$(mise where github:WebAssembly/wasi-sdk@wasi-sdk-27)
+cargo nextest run --workspace --all-features
+"""
 
 [tasks.lint]
 description = "Run clippy lints"
 depends = ["build-wasm"]
-run = "cargo clippy --workspace --all-targets --all-features -- -D warnings"
+run = """
+export WASI_SDK_PATH=$(mise where github:WebAssembly/wasi-sdk@wasi-sdk-27)
+cargo clippy --workspace --all-targets --all-features -- -D warnings
+"""
 
 [tasks.lint-fix]
 description = "Auto-fix clippy warnings"
@@ -49,7 +58,11 @@ run = "cargo fmt --all -- --check"
 [tasks.doc]
 description = "Generate documentation"
 depends = ["precompile-wasm"]
-run = "cargo doc --workspace --no-deps --all-features"
+run = """
+# Set WASI_SDK_PATH for build.rs if triggered during doc generation
+export WASI_SDK_PATH=$(mise where github:WebAssembly/wasi-sdk@wasi-sdk-27)
+cargo doc --workspace --no-deps --all-features
+"""
 
 [tasks.doc-open]
 description = "Generate and open documentation"
