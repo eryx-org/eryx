@@ -302,7 +302,7 @@ pub fn do_report_trace(lineno: u32, event_json: &str, context_json: &str) {
 // Execute result type for async support
 // =============================================================================
 
-/// Callback codes from componentize_py_async_support
+/// Callback codes from the Component Model async protocol (used by _eryx_async)
 pub mod callback_code {
     pub const EXIT: u32 = 0;
     pub const YIELD: u32 = 1;
@@ -365,7 +365,7 @@ fn get_python_callback_code() -> u32 {
     }
 }
 
-/// Call Python's `componentize_py_async_support.callback(event0, event1, event2)`.
+/// Call Python's `_eryx_async.resume(event0, event1, event2)`.
 ///
 /// This is called from `export_async_callback` to resume a suspended async operation.
 /// Returns the callback code (EXIT or WAIT | waitable_set).
@@ -377,8 +377,8 @@ pub fn call_python_callback(event0: u32, event1: u32, event2: u32) -> u32 {
 
     let code = format!(
         r#"
-import componentize_py_async_support as _cpas
-_eryx_callback_code = _cpas.callback({event0}, {event1}, {event2})
+import _eryx_async
+_eryx_callback_code = _eryx_async.resume({event0}, {event1}, {event2})
 "#
     );
 
@@ -439,10 +439,14 @@ else:
 pub fn set_async_import_result(_subtask: u32, result_json: &str) {
     use std::ffi::CString;
 
-    // Escape the JSON for embedding in Python
-    let escaped = result_json.replace('\\', "\\\\").replace('"', "\\\"");
+    // Escape the JSON for embedding in Python triple-quoted string.
+    // We need to escape backslashes first, then single quotes, then handle
+    // potential triple-quote sequences.
+    let escaped = result_json
+        .replace('\\', "\\\\")
+        .replace("'''", "\\'''");
 
-    let code = format!(r#"_eryx_async_import_result = "{escaped}""#);
+    let code = format!("_eryx_async_import_result = '''{escaped}'''");
 
     if let Ok(code_cstr) = CString::new(code) {
         unsafe {
@@ -518,7 +522,7 @@ fn _eryx_invoke_async(
 // =============================================================================
 //
 // These functions expose Component Model async intrinsics to Python.
-// They match the interface expected by componentize_py_async_support.
+// They are used by the embedded _eryx_async module.
 
 /// Create a new waitable set for tracking pending async operations.
 /// Returns the waitable set handle.
@@ -579,6 +583,29 @@ fn subtask_drop_(task: u32) {
     unsafe { crate::subtask_drop(task) }
 }
 
+/// Get result from a completed async promise.
+///
+/// This retrieves the result JSON stored in `__main__._eryx_async_import_result`
+/// when the Rust layer completed an async import callback.
+#[pyfunction]
+fn promise_get_result_(py: Python<'_>, _promise: u32) -> PyResult<String> {
+    // Get the result from __main__._eryx_async_import_result
+    let main_module = py.import("__main__")?;
+    match main_module.getattr("_eryx_async_import_result") {
+        Ok(attr) => {
+            let result: String = attr.extract()?;
+            Ok(result)
+        }
+        Err(_) => {
+            // Attribute not found - this means set_async_import_result wasn't called
+            // or the PyRun_SimpleString failed
+            Err(pyo3::exceptions::PyRuntimeError::new_err(
+                "Async import result not available - callback may have failed",
+            ))
+        }
+    }
+}
+
 /// The _eryx module definition.
 /// This generates a `PyInit__eryx` function that can be registered with Python.
 #[pymodule]
@@ -587,15 +614,231 @@ fn eryx_module(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(_eryx_invoke, m)?)?;
     m.add_function(wrap_pyfunction!(_eryx_invoke_async, m)?)?;
     m.add_function(wrap_pyfunction!(_eryx_report_trace, m)?)?;
-    // Async support functions (matching componentize_py_runtime interface)
+    // Async support functions
     m.add_function(wrap_pyfunction!(waitable_set_new_, m)?)?;
     m.add_function(wrap_pyfunction!(waitable_set_drop_, m)?)?;
     m.add_function(wrap_pyfunction!(waitable_join_, m)?)?;
     m.add_function(wrap_pyfunction!(context_set_, m)?)?;
     m.add_function(wrap_pyfunction!(context_get_, m)?)?;
     m.add_function(wrap_pyfunction!(subtask_drop_, m)?)?;
+    m.add_function(wrap_pyfunction!(promise_get_result_, m)?)?;
     Ok(())
 }
+
+// =============================================================================
+// Embedded _eryx_async module
+// =============================================================================
+//
+// This is eryx's native async runtime for Python. It provides a minimal
+// asyncio event loop implementation for the Component Model's async callback
+// protocol.
+
+/// Python code to inject the _eryx_async module into sys.modules.
+///
+/// This creates a new module object and executes the module code in its
+/// namespace, then registers it so `import _eryx_async` works.
+///
+/// The module provides:
+/// - `_EryxLoop`: Minimal asyncio event loop for Component Model async
+/// - `run_async(coro)`: Entry point for async execution, returns callback code
+/// - `resume(e0, e1, e2)`: Resume suspended execution after callback completes
+/// - `await_invoke(name, args_json)`: Invoke a callback and await its result
+const ERYX_ASYNC_INJECT_CODE: &str = r#"
+import sys, types
+
+_eryx_async = types.ModuleType('_eryx_async')
+_eryx_async.__doc__ = 'Eryx async runtime - minimal asyncio event loop for Component Model async.'
+
+exec(compile(r'''
+"""Eryx async runtime - minimal asyncio event loop for Component Model async."""
+
+import asyncio
+import _eryx
+from contextvars import ContextVar, Context
+from dataclasses import dataclass
+from typing import Any, Optional
+
+# Callback codes (returned from run_async/resume)
+EXIT = 0   # Execution complete
+WAIT = 2   # Execution pending, need to wait
+
+# Event types (from Component Model)
+_EVENT_NONE = 0
+_EVENT_SUBTASK = 1
+
+# Status codes (for subtask events)
+_STATUS_RETURNED = 2
+
+@dataclass
+class _AsyncState:
+    """State for tracking pending async operations."""
+    waitable_set: Optional[int]
+    futures: dict[int, asyncio.Future]
+    handles: list[asyncio.Handle]
+    pending_count: int
+
+
+class _EryxLoop(asyncio.AbstractEventLoop):
+    """Minimal event loop for Component Model async.
+
+    Only implements the methods actually needed by asyncio.Task and our
+    async runtime. All other methods raise NotImplementedError.
+    """
+
+    def __init__(self):
+        self.running = True
+        self.exception = None
+
+    def poll(self, state: _AsyncState):
+        """Run pending callbacks until none remain."""
+        while True:
+            handles, state.handles = state.handles, []
+            for h in handles:
+                if not h._cancelled:
+                    h._run()
+            if self.exception is not None:
+                raise self.exception
+            if not handles and not state.handles:
+                return
+
+    # Required methods for asyncio.Task to work
+    def call_soon(self, callback, *args, context=None):
+        if context is None:
+            raise AssertionError("context required for call_soon")
+        handle = asyncio.Handle(callback, args, self, context)
+        context[_async_state].handles.append(handle)
+        return handle
+
+    def create_task(self, coro, *, name=None, context=None):
+        return asyncio.Task(coro, loop=self, context=context)
+
+    def create_future(self):
+        return asyncio.Future(loop=self)
+
+    def is_running(self):
+        return self.running
+
+    def is_closed(self):
+        return not self.running
+
+    def get_debug(self):
+        return False
+
+    def call_exception_handler(self, context):
+        self.exception = context.get('exception')
+
+    # Stub methods required by AbstractEventLoop
+    def time(self): raise NotImplementedError
+    def run_forever(self): raise NotImplementedError
+    def run_until_complete(self, future): raise NotImplementedError
+    def stop(self): self.running = False
+    def close(self): self.running = False
+    def shutdown_asyncgens(self): return _noop()
+
+
+async def _noop():
+    pass
+
+
+# Module-level state
+_async_state: ContextVar[_AsyncState] = ContextVar("_async_state")
+_loop = _EryxLoop()
+asyncio.set_event_loop(_loop)
+_loop.running = True
+asyncio.events._set_running_loop(_loop)
+
+
+def _set_async_state(state: _AsyncState) -> None:
+    _async_state.set(state)
+
+
+async def _return_result(coroutine: Any) -> None:
+    """Wrapper that decrements pending_count when coroutine completes."""
+    global _async_state
+    try:
+        await coroutine
+    except Exception as e:
+        _loop.exception = e
+    _async_state.get().pending_count -= 1
+
+
+def run_async(coro) -> int:
+    """Run a coroutine, return callback code (EXIT or WAIT|waitable_set<<4)."""
+    ctx = Context()
+    state = _AsyncState(None, {}, [], 1)
+    ctx.run(_set_async_state, state)
+    asyncio.create_task(_return_result(coro), context=ctx)
+    return _poll(state)
+
+
+def resume(event0: int, event1: int, event2: int) -> int:
+    """Resume suspended execution after callback completes."""
+    state = _eryx.context_get_()
+    _eryx.context_set_(None)
+
+    # Handle subtask completion
+    if event0 == _EVENT_SUBTASK and event2 == _STATUS_RETURNED:
+        _eryx.waitable_join_(event1, 0)
+        _eryx.subtask_drop_(event1)
+        state.futures.pop(event1).set_result(event2)
+    elif event0 == _EVENT_NONE:
+        pass  # Just poll again
+    # Other events (streams, futures) would go here if we supported them
+
+    return _poll(state)
+
+
+def _poll(state: _AsyncState) -> int:
+    """Poll the event loop and return callback code."""
+    _loop.poll(state)
+    if state.pending_count == 0:
+        if state.waitable_set is not None:
+            _eryx.waitable_set_drop_(state.waitable_set)
+        return EXIT
+    else:
+        assert state.waitable_set is not None, "pending but no waitable_set"
+        _eryx.context_set_(state)
+        return WAIT | (state.waitable_set << 4)
+
+
+async def await_invoke(name: str, args_json: str) -> str:
+    """Invoke a callback and await its result. Returns result JSON."""
+    import json
+
+    result_type, value = _eryx._eryx_invoke_async(name, args_json)
+
+    if result_type == 0:  # Ok - immediate completion
+        return value
+    elif result_type == 1:  # Err - immediate error
+        raise RuntimeError(value)
+    else:  # Pending - need to wait
+        waitable, promise = value
+        future = _loop.create_future()
+        state = _async_state.get()
+        state.futures[waitable] = future
+
+        if state.waitable_set is None:
+            state.waitable_set = _eryx.waitable_set_new_()
+        _eryx.waitable_join_(waitable, state.waitable_set)
+
+        await future
+
+        # Get the result wrapper and parse it
+        result_json = _eryx.promise_get_result_(promise)
+        result = json.loads(result_json)
+        if result.get('ok', False):
+            # Return the value as a JSON string
+            value = result.get('value', '')
+            if isinstance(value, str):
+                return value
+            else:
+                return json.dumps(value)
+        else:
+            raise RuntimeError(result.get('error', 'Unknown error'))
+''', '_eryx_async', 'exec'), _eryx_async.__dict__)
+
+sys.modules['_eryx_async'] = _eryx_async
+"#;
 
 // =============================================================================
 // Python interpreter state
@@ -617,6 +860,7 @@ static PYTHON_INITIALIZED: AtomicBool = AtomicBool::new(false);
 /// Sets up:
 /// - The _eryx built-in module (for invoke() callback support)
 /// - Python interpreter (without signal handlers - not useful in WASM)
+/// - The _eryx_async module (embedded async runtime)
 /// - Ensures __main__ module exists for code execution
 pub fn initialize_python() {
     if PYTHON_INITIALIZED.swap(true, Ordering::SeqCst) {
@@ -640,6 +884,16 @@ pub fn initialize_python() {
         let result = PyRun_SimpleString(setup_code.as_ptr());
         if result != 0 {
             // If this fails, Python is in a bad state - not much we can do
+            PyErr_Clear();
+        }
+
+        // Inject the _eryx_async module into sys.modules.
+        // This provides our embedded async runtime without needing external files.
+        let inject_cstr = std::ffi::CString::new(ERYX_ASYNC_INJECT_CODE).unwrap();
+        let result = PyRun_SimpleString(inject_cstr.as_ptr());
+        if result != 0 {
+            // _eryx_async injection failed - this is critical for async support
+            // Log the error but continue (sync code will still work)
             PyErr_Clear();
         }
     }
@@ -874,62 +1128,26 @@ _sys.stderr = _eryx_stderr
         }
 
         // Build the execution code - compile with TLA support and run with async support
-        // We try to use componentize_py_async_support for proper async handling,
-        // falling back to a simple coroutine runner if not available
         let exec_wrapper = format!(
             r#"
-# Try to import async support for proper pending handling
-try:
-    import componentize_py_async_support as _cpas
-    import asyncio as _asyncio
-    _CPAS_AVAILABLE = True
-except ImportError:
-    _CPAS_AVAILABLE = False
+import _eryx_async
 
-# Global to store the callback code from first_poll
+# Global to store the callback code from run_async
 _eryx_callback_code = 0  # 0 = EXIT (complete), 2 = WAIT (pending), etc.
 
 def _eryx_run_async(coro):
-    '''Coroutine runner with componentize_py_async_support integration.
+    '''Run a coroutine using _eryx_async runtime.
 
-    Uses the custom event loop from componentize_py_async_support when available,
-    which properly handles pending async operations and the Component Model callback protocol.
+    Uses the embedded async runtime which properly handles pending async
+    operations and the Component Model callback protocol.
 
     Stores the callback code in _eryx_callback_code global:
     - 0 (EXIT): Execution complete
     - 2 (WAIT) | (waitable_set << 4): Execution pending, need to wait
     '''
     global _eryx_callback_code
-
-    if _CPAS_AVAILABLE:
-        # The module already initializes _loop at import time
-        # Just set it as the current asyncio event loop
-        _asyncio.set_event_loop(_cpas._loop)
-
-        # Run the coroutine using first_poll which sets up the async context
-        # export_index=0, borrows=0 - these are for async export tracking
-        # which we don't need for execute()
-        async def _wrapper():
-            return await coro
-
-        _eryx_callback_code = _cpas.first_poll(0, 0, _wrapper())
-        return None
-    else:
-        _eryx_callback_code = 0  # No async support, always complete
-        # Fallback: Simple coroutine runner for WASI
-        try:
-            result = coro.send(None)
-            while True:
-                if hasattr(result, 'send'):
-                    inner_result = _eryx_run_async(result)
-                    result = coro.send(inner_result)
-                elif hasattr(result, '__await__'):
-                    inner_result = _eryx_run_async(result.__await__())
-                    result = coro.send(inner_result)
-                else:
-                    result = coro.send(result)
-        except StopIteration as e:
-            return e.value
+    _eryx_callback_code = _eryx_async.run_async(coro)
+    return None
 
 # Import the _eryx module for trace reporting
 import _eryx as _eryx_mod
@@ -1406,15 +1624,7 @@ pub fn setup_callbacks(callbacks: &[CallbackInfo]) -> Result<(), String> {
             r#"
 import json as _json
 import _eryx
-
-# Try to import async support, but don't fail if unavailable
-try:
-    import componentize_py_runtime as _cpr
-    import componentize_py_async_support as _cpas
-    from componentize_py_types import Ok as _Ok, Err as _Err
-    _ASYNC_SUPPORT = True
-except ImportError:
-    _ASYNC_SUPPORT = False
+import _eryx_async
 
 # Callbacks metadata from host
 _eryx_callbacks_json = '''{}'''
@@ -1441,32 +1651,13 @@ async def invoke(name, **kwargs):
     _eryx._eryx_report_trace(0, _json.dumps({{"type": "callback_start", "name": name}}), args_json)
 
     try:
-        if _ASYNC_SUPPORT:
-            # Use async-aware invoke that can handle pending operations
-            result = _cpr.invoke_async(name, args_json)
-            if isinstance(result, _Ok):
-                result_json = result.value
-            elif isinstance(result, _Err):
-                # Check if this is a pending tuple or an error string
-                if isinstance(result.value, tuple):
-                    # Pending - wait for it using await_result
-                    result_json = await _cpas.await_result(result)
-                else:
-                    # Actual error
-                    raise RuntimeError(result.value)
-            # Report callback end trace event
-            _eryx._eryx_report_trace(0, _json.dumps({{"type": "callback_end", "name": name}}), "")
-            if result_json:
-                return _json.loads(result_json)
-            return None
-        else:
-            # Fallback to synchronous invoke
-            result_json = _eryx._eryx_invoke(name, args_json)
-            # Report callback end trace event
-            _eryx._eryx_report_trace(0, _json.dumps({{"type": "callback_end", "name": name}}), "")
-            if result_json:
-                return _json.loads(result_json)
-            return None
+        # Use _eryx_async.await_invoke for proper async handling
+        result_json = await _eryx_async.await_invoke(name, args_json)
+        # Report callback end trace event
+        _eryx._eryx_report_trace(0, _json.dumps({{"type": "callback_end", "name": name}}), "")
+        if result_json:
+            return _json.loads(result_json)
+        return None
     except Exception as e:
         # Report callback error trace event
         _eryx._eryx_report_trace(0, _json.dumps({{"type": "callback_end", "name": name, "error": str(e)}}), "")

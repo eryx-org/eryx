@@ -60,3 +60,30 @@ This crate must implement wit-dylib's interpreter interface:
 - `invoke(name, args) -> result<string, string>` - Call host callback (async)
 - `list-callbacks() -> list<callback-info>` - List available callbacks
 - `report-trace(lineno, event, context)` - Report execution trace
+
+## Async Runtime
+
+This crate includes an embedded async runtime (`_eryx_async`) that provides a minimal
+asyncio event loop for the Component Model's async callback protocol.
+
+### What works
+
+- `await` on host callbacks (`await get_time()`, `await echo(message="hi")`)
+- `asyncio.gather()` for parallel callback execution
+- `asyncio.create_task()` for concurrent tasks
+- `asyncio.Future` for basic promise patterns
+- Nested coroutines
+
+### Limitations
+
+The async runtime is intentionally minimal. The following do **not** work:
+
+- `asyncio.sleep()` - No timer support (use a host `sleep` callback instead)
+- `asyncio.wait_for()` with timeout - Requires timers
+- `loop.run_in_executor()` - No thread pool in WASI
+- `loop.time()` - Not implemented
+- Network/socket operations - Not available in WASI sandbox
+- Subprocess operations - Not available in WASI sandbox
+
+These limitations are acceptable because the WASI sandbox doesn't have filesystem
+or network access anyway. If you need delays, have the host provide a `sleep` callback.

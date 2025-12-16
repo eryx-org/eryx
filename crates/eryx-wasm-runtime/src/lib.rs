@@ -880,7 +880,7 @@ impl Interpreter for EryxInterpreter {
     }
 
     fn export_async_callback(event0: u32, event1: u32, event2: u32) -> u32 {
-        // Event types from componentize_py_async_support
+        // Event types from Component Model (used by _eryx_async)
         const EVENT_SUBTASK: u32 = 1;
         // Status types
         const STATUS_RETURNED: u32 = 2;
