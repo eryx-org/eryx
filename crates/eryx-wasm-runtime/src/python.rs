@@ -10,8 +10,6 @@
 #![allow(non_upper_case_globals)]
 #![allow(missing_docs)]
 #![allow(missing_debug_implementations)]
-// TODO: Update to PyErr_GetRaisedException when pyo3 exposes it in stable ABI
-#![allow(deprecated)]
 
 use std::ffi::{c_char, c_int};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -42,8 +40,7 @@ pub use pyo3::ffi::{
     PyDict_Update,
     // Exception handling
     PyErr_Clear,
-    PyErr_Fetch,
-    PyErr_NormalizeException,
+    PyErr_GetRaisedException,
     PyErr_Occurred,
     PyErr_Print,
     PyErr_PrintEx,
@@ -693,23 +690,15 @@ pub unsafe fn get_last_error_message() -> String {
             return "Unknown error".to_string();
         }
 
-        let mut ptype: *mut PyObject = std::ptr::null_mut();
-        let mut pvalue: *mut PyObject = std::ptr::null_mut();
-        let mut ptraceback: *mut PyObject = std::ptr::null_mut();
+        // Get the current exception (clears PyErr state)
+        let exc = PyErr_GetRaisedException();
 
-        PyErr_Fetch(&mut ptype, &mut pvalue, &mut ptraceback);
-
-        if pvalue.is_null() {
-            Py_XDECREF(ptype);
-            Py_XDECREF(ptraceback);
-            return "Unknown error (no value)".to_string();
+        if exc.is_null() {
+            return "Unknown error (no exception)".to_string();
         }
 
-        // Normalize the exception
-        PyErr_NormalizeException(&mut ptype, &mut pvalue, &mut ptraceback);
-
-        // Try to get string representation of the error value
-        let str_obj = PyObject_Str(pvalue);
+        // Try to get string representation of the exception
+        let str_obj = PyObject_Str(exc);
         let result = if str_obj.is_null() {
             "Error converting exception to string".to_string()
         } else {
@@ -725,9 +714,7 @@ pub unsafe fn get_last_error_message() -> String {
             msg
         };
 
-        Py_XDECREF(ptype);
-        Py_XDECREF(pvalue);
-        Py_XDECREF(ptraceback);
+        Py_DECREF(exc);
 
         result
     }
