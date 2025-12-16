@@ -17,6 +17,11 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
+      - name: Install mold linker
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y mold
+
       - name: Install mise
         uses: jdx/mise-action@v3
 
@@ -38,6 +43,8 @@ jobs:
 
       - name: Run CI checks
         run: mise run ci
+        env:
+          RUSTFLAGS: -C linker=clang -C link-arg=-fuse-ld=mold
 
   msrv:
     name: MSRV
