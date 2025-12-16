@@ -678,29 +678,31 @@ PyO3 async is tricky. Options:
 ### Current API (with embedded features)
 
 ```rust
-// Zero-config sandbox with embedded-runtime + embedded-stdlib features
-let sandbox = Sandbox::builder()
-    .with_embedded_runtime()  // Auto mmap, auto stdlib
-    .build()?;
-
+// Zero-config sandbox! Embedded runtime is automatic when feature is enabled.
+let sandbox = Sandbox::builder().build()?;
 sandbox.execute("print('Hello!')").await?;
-```
 
-### Target API (future)
-
-```rust
-// With wheel support (next milestone)
+// With packages - late-linking happens automatically for native extensions
 let sandbox = Sandbox::builder()
-    .with_embedded_runtime()
-    .with_wheel("/path/to/requests.whl")?  // Pure Python - works!
+    .with_package("/path/to/numpy-wasi.tar.gz")?  // Has .so files
+    .with_cache_dir("/tmp/cache")?                 // For caching linked runtime
     .build()?;
 
-// With native extensions
+sandbox.execute("import numpy; print(numpy.__version__)").await?;
+
+// Multiple packages work too
 let sandbox = Sandbox::builder()
-    .with_wheel("/path/to/numpy-wasi.whl")?  // Auto late-links
-    .with_cache_dir("/tmp/cache")?
+    .with_package("/path/to/numpy-wasi.tar.gz")?
+    .with_package("/path/to/scipy-wasi.tar.gz")?  // Hypothetical
     .build()?;
 ```
+
+### Key Features
+
+- **Automatic runtime selection**: Embedded runtime when no native extensions, late-linking when needed
+- **Multiple packages**: Each package mounted at unique path, PYTHONPATH configured automatically
+- **Mmap-based loading**: 10x memory reduction, 3x faster loading
+- **Zero config**: Just enable features, no method calls needed
 
 ### Progress
 
@@ -709,5 +711,7 @@ let sandbox = Sandbox::builder()
 | 1. Mmap-cached embedded runtime | ✅ Done |
 | 2. Embedded stdlib | ✅ Done |
 | 3. Package extraction (`with_package()`) | ✅ Done |
-| 4. wasi-wheels integration | 📋 Future |
-| 5. Python SDK | 📋 Future |
+| 4. Multiple packages support | ✅ Done |
+| 5. Automatic runtime selection | ✅ Done |
+| 6. wasi-wheels integration | 📋 Future |
+| 7. Python SDK | 📋 Future |
