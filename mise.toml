@@ -159,6 +159,7 @@ echo "✓ All examples completed!"
 
 [tasks.ensure-wasi-sdk]
 description = "Install WASI SDK if not present"
+shell = "bash"
 run = """
 # Install WASI SDK if not present (use explicit version in all commands)
 WASI_SDK_VERSION="wasi-sdk-27"
