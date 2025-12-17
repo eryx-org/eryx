@@ -18,16 +18,14 @@
 //!
 //! ## Quick Start
 //!
-//! ```rust,ignore
+//! ```rust
 //! use eryx::Sandbox;
 //!
 //! #[tokio::main]
 //! async fn main() -> Result<(), eryx::Error> {
 //!     let sandbox = Sandbox::builder().build()?;
 //!
-//!     let result = sandbox.execute(r#"
-//!         print("Hello from Python!")
-//!     "#).await?;
+//!     let result = sandbox.execute("print('Hello from Python!')").await?;
 //!
 //!     println!("Output: {}", result.stdout);
 //!     Ok(())

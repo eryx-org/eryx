@@ -100,3 +100,6 @@ required-features = ["pre-init", "precompiled"]
 [[example]]
 name = "package_loading"
 required-features = ["packages", "native-extensions", "embedded-stdlib", "precompiled"]
+
+[package.metadata."docs.rs"]
+all-features = true
