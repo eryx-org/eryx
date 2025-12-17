@@ -40,17 +40,17 @@ run = "cargo nextest run --workspace --features embedded"
 
 [tasks.test-all]
 description = "Run tests with all features"
-depends = ["precompile-eryx-runtime"]
+depends = ["precompile-eryx-runtime", "build-native-extensions"]
 run = "cargo nextest run --workspace --all-features"
 
 [tasks.lint]
 description = "Run clippy lints"
-depends = ["build-eryx-runtime"]
+depends = ["build-native-extensions"]
 run = "cargo clippy --workspace --all-targets --all-features -- -D warnings"
 
 [tasks.lint-fix]
 description = "Auto-fix clippy warnings"
-depends = ["build-eryx-runtime"]
+depends = ["build-native-extensions"]
 run = "cargo clippy --fix --allow-dirty --workspace --all-targets --all-features"
 
 [tasks.fmt]
@@ -63,9 +63,8 @@ run = "cargo fmt --all -- --check"
 
 [tasks.doc]
 description = "Generate documentation"
-depends = ["precompile-eryx-runtime"]
-# Use --features embedded instead of --all-features to avoid needing native-extensions artifacts
-run = "cargo doc --workspace --no-deps --features embedded"
+depends = ["build-native-extensions"]
+run = "cargo doc --workspace --no-deps --all-features"
 
 [tasks.doc-open]
 description = "Generate and open documentation"
@@ -109,6 +108,11 @@ BUILD_ERYX_RUNTIME=1 cargo build --package eryx-runtime --release
 """
 sources = ["crates/eryx-wasm-runtime/src/**/*.rs", "crates/eryx-wasm-runtime/clock_stubs.c", "crates/eryx-wasm-runtime/Cargo.toml", "crates/eryx-runtime/runtime.wit"]
 outputs = ["crates/eryx-runtime/runtime.wasm"]
+
+[tasks.build-native-extensions]
+description = "Build native-extensions artifacts (liberyx_runtime.so.zst, etc.)"
+depends = ["build-eryx-runtime"]
+run = "cargo build --package eryx-runtime --features native-extensions"
 
 [tasks.build-all]
 description = "Build WASM component and Rust crates"
