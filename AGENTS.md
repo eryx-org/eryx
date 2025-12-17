@@ -140,8 +140,8 @@ members = ["crates/*"]
 
 ### Testing
 
-- **Use `cargo nextest run --workspace`** for running tests (faster and better output than `cargo test`)
-- **Prefer `mise run test`** which uses embedded/precompiled WASM for ~500x faster test runs
+- **NEVER use `cargo test` directly** - it runs tests sequentially in debug mode and takes minutes (each test creates a full WASM Python runtime which takes 2-5s in debug)
+- **Always use `mise run test`** which uses nextest (parallel execution) with embedded/precompiled WASM
 - Use `#[cfg(test)]` modules for unit tests
 - Place integration tests in `tests/` directories
 - Run `cargo nextest run --workspace --all-features` to test all feature combinations
