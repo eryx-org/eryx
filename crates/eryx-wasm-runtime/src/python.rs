@@ -1,17 +1,14 @@
 //! CPython FFI bindings for eryx-wasm-runtime.
 //!
-//! This module uses pyo3::ffi for CPython C API bindings where available in the
-//! stable ABI (abi3), with manual declarations for functions not exposed there.
+//! This module re-exports pyo3::ffi for CPython C API bindings where available
+//! in the stable ABI (abi3), with manual declarations for functions not exposed there.
 //!
-//! These symbols are resolved at component link time when we link against libpython3.14.so.
+//! These symbols are resolved at component link time when we link against libpython.
 
-#![allow(non_camel_case_types)]
-#![allow(non_snake_case)]
-#![allow(non_upper_case_globals)]
 #![allow(missing_docs)]
 #![allow(missing_debug_implementations)]
 
-use std::ffi::{c_char, c_int};
+use std::ffi::c_char;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 // Re-export pyo3::ffi types and functions available in the stable ABI
@@ -89,118 +86,10 @@ pub use pyo3::ffi::{
     PyUnicode_FromStringAndSize,
 };
 
-// =============================================================================
-// Additional CPython FFI declarations not in pyo3::ffi stable ABI
-// =============================================================================
-
-/// Python compiler flags structure.
-#[repr(C)]
-pub struct PyCompilerFlags {
-    pub cf_flags: c_int,
-    pub cf_feature_version: c_int,
-}
-
+// Functions not available in pyo3-ffi stable ABI (abi3)
 unsafe extern "C" {
-    // Code execution (not in stable ABI)
-    pub fn PyRun_SimpleString(command: *const c_char) -> c_int;
-    pub fn PyRun_SimpleStringFlags(command: *const c_char, flags: *mut PyCompilerFlags) -> c_int;
-    pub fn PyRun_String(
-        str: *const c_char,
-        start: c_int,
-        globals: *mut PyObject,
-        locals: *mut PyObject,
-    ) -> *mut PyObject;
-    pub fn PyRun_StringFlags(
-        str: *const c_char,
-        start: c_int,
-        globals: *mut PyObject,
-        locals: *mut PyObject,
-        flags: *mut PyCompilerFlags,
-    ) -> *mut PyObject;
-
-    // PyUnicode_AsUTF8 (not in stable ABI, use PyUnicode_AsUTF8AndSize instead if possible)
+    pub fn PyRun_SimpleString(command: *const c_char) -> std::ffi::c_int;
     pub fn PyUnicode_AsUTF8(unicode: *mut PyObject) -> *const c_char;
-
-    // Singletons (not exposed as statics in pyo3::ffi stable ABI)
-    pub static mut _Py_NoneStruct: PyObject;
-    pub static mut _Py_TrueStruct: PyObject;
-    pub static mut _Py_FalseStruct: PyObject;
-}
-
-// Start symbols for PyRun_String
-pub const Py_eval_input: c_int = 258;
-pub const Py_file_input: c_int = 257;
-pub const Py_single_input: c_int = 256;
-
-// =============================================================================
-// Helper macros and inline functions
-// =============================================================================
-
-/// Get a pointer to Py_None.
-///
-/// # Safety
-/// Python must be initialized.
-#[inline]
-pub unsafe fn Py_None() -> *mut PyObject {
-    std::ptr::addr_of_mut!(_Py_NoneStruct)
-}
-
-/// Get a pointer to Py_True.
-///
-/// # Safety
-/// Python must be initialized.
-#[inline]
-pub unsafe fn Py_True() -> *mut PyObject {
-    std::ptr::addr_of_mut!(_Py_TrueStruct)
-}
-
-/// Get a pointer to Py_False.
-///
-/// # Safety
-/// Python must be initialized.
-#[inline]
-pub unsafe fn Py_False() -> *mut PyObject {
-    std::ptr::addr_of_mut!(_Py_FalseStruct)
-}
-
-/// Increment reference count.
-///
-/// # Safety
-/// `op` must be a valid Python object pointer.
-#[inline]
-pub unsafe fn Py_INCREF(op: *mut PyObject) {
-    unsafe { Py_IncRef(op) };
-}
-
-/// Decrement reference count.
-///
-/// # Safety
-/// `op` must be a valid Python object pointer.
-#[inline]
-pub unsafe fn Py_DECREF(op: *mut PyObject) {
-    unsafe { Py_DecRef(op) };
-}
-
-/// Decrement reference count, allowing NULL.
-///
-/// # Safety
-/// `op` must be either NULL or a valid Python object pointer.
-#[inline]
-pub unsafe fn Py_XDECREF(op: *mut PyObject) {
-    if !op.is_null() {
-        unsafe { Py_DecRef(op) };
-    }
-}
-
-/// Increment reference count, allowing NULL.
-///
-/// # Safety
-/// `op` must be either NULL or a valid Python object pointer.
-#[inline]
-pub unsafe fn Py_XINCREF(op: *mut PyObject) {
-    if !op.is_null() {
-        unsafe { Py_IncRef(op) };
-    }
 }
 
 // =============================================================================
@@ -962,11 +851,11 @@ pub unsafe fn get_last_error_message() -> String {
                     .to_string_lossy()
                     .into_owned()
             };
-            Py_DECREF(str_obj);
+            Py_DecRef(str_obj);
             msg
         };
 
-        Py_DECREF(exc);
+        Py_DecRef(exc);
 
         result
     }
@@ -1011,7 +900,7 @@ pub unsafe fn get_python_variable_string(name: &str) -> Result<String, String> {
 
         let utf8 = PyUnicode_AsUTF8(str_obj);
         let result = if utf8.is_null() {
-            Py_DECREF(str_obj);
+            Py_DecRef(str_obj);
             return Err("Failed to get UTF-8 from string".to_string());
         } else {
             std::ffi::CStr::from_ptr(utf8)
@@ -1019,7 +908,7 @@ pub unsafe fn get_python_variable_string(name: &str) -> Result<String, String> {
                 .into_owned()
         };
 
-        Py_DECREF(str_obj);
+        Py_DecRef(str_obj);
         Ok(result)
     }
 }
@@ -1363,7 +1252,7 @@ unsafe fn set_python_variable_bytes(name: &str, data: &[u8]) -> Result<(), Strin
 
         // Set the variable in __main__
         let result = PyDict_SetItemString(main_dict, name_cstr.as_ptr(), bytes_obj);
-        Py_DECREF(bytes_obj); // SetItem increments ref, so we decrement ours
+        Py_DecRef(bytes_obj); // SetItem increments ref, so we decrement ours
 
         if result != 0 {
             let err = get_last_error_message();

@@ -25,7 +25,7 @@ The WASM component is built automatically when needed:
 
 ```bash
 # Build with mise
-mise run build-wasm
+mise run build-eryx-runtime
 
 # Or directly with cargo (requires BUILD_ERYX_RUNTIME=1)
 BUILD_ERYX_RUNTIME=1 cargo build --package eryx-runtime
@@ -42,7 +42,7 @@ The build script will:
 For faster sandbox creation (~50x speedup), pre-compile the WASM:
 
 ```bash
-mise run precompile-wasm
+mise run precompile-eryx-runtime
 ```
 
 This produces `runtime.cwasm` which can be used with `Sandbox::builder().with_precompiled_file()`.

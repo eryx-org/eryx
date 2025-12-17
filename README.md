@@ -207,9 +207,9 @@ mise run fmt            # Format code
 mise run fmt-check      # Check code formatting
 
 # WASM
-mise run build-wasm     # Build the Python WASM component
+mise run build-eryx-runtime  # Build the Python WASM component
 mise run build-all      # Build WASM + Rust crates
-mise run precompile-wasm # Pre-compile WASM to native code
+mise run precompile-eryx-runtime # Pre-compile to native code
 
 # CI & Quality
 mise run ci             # Run all CI checks (fmt-check, lint, test)

@@ -17,9 +17,9 @@ crate-type = ["staticlib"]
 [dependencies]
 wit-dylib-ffi.workspace = true
 
-# PyO3 for Python C extension module (like componentize-py uses)
-# abi3-py312 = stable ABI compatible with Python 3.12+
-# extension-module prevents linking to libpython (we link to WASI Python at WASM link time)
+# PyO3 for Python C extension module
+# abi3-py312 is required for cross-compiling to WASM (tells pyo3 the target Python version)
+# extension-module prevents linking to libpython at build time (we link at WASM link time)
 pyo3 = { version = "0.24", features = ["abi3-py312", "extension-module"] }
 
 [dev-dependencies]

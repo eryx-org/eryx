@@ -11,9 +11,9 @@ env:
   RUST_BACKTRACE: 1
 
 jobs:
-  # Build WASM runtime and precompile it - other jobs depend on this
-  build-wasm:
-    name: Build WASM
+  # Build eryx-wasm-runtime and precompile it - other jobs depend on this
+  build-eryx-runtime:
+    name: Build eryx-runtime
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -36,11 +36,11 @@ jobs:
       - name: Install nightly toolchain
         run: rustup toolchain install nightly --component rust-src
 
-      - name: Build WASM runtime
-        run: mise run build-wasm
+      - name: Build eryx-runtime
+        run: mise run build-eryx-runtime
 
       - name: Precompile WASM
-        run: mise run precompile-wasm
+        run: mise run precompile-eryx-runtime
 
       - name: Copy prebuilt late-linking artifacts
         run: |
@@ -74,7 +74,7 @@ jobs:
   lint:
     name: Lint
     runs-on: ubuntu-latest
-    needs: build-wasm
+    needs: build-eryx-runtime
     steps:
       - uses: actions/checkout@v6
 
@@ -117,7 +117,7 @@ jobs:
   test:
     name: Test
     runs-on: ubuntu-latest
-    needs: build-wasm
+    needs: build-eryx-runtime
     steps:
       - name: Free disk space
         run: |
@@ -222,7 +222,7 @@ jobs:
   doc:
     name: Documentation
     runs-on: ubuntu-latest
-    needs: build-wasm
+    needs: build-eryx-runtime
     steps:
       - uses: actions/checkout@v6
 

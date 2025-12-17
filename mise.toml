@@ -13,7 +13,9 @@ binstall = true
 # Note: WASI SDK is intentionally NOT in [tools] because adding it to PATH
 # breaks host compilation (Rust picks up wasm clang for proc-macro builds).
 # Instead, we install it on-demand via the ensure-wasi-sdk task.
-# The build.rs script finds it via `mise where`.
+
+[vars]
+wasi_sdk_version = "wasi-sdk-27"
 
 [tasks.check]
 description = "Run cargo check"
@@ -25,31 +27,22 @@ run = "cargo build --workspace"
 
 [tasks.test]
 description = "Run tests with precompiled WASM"
-depends = ["precompile-wasm"]
-run = """
-export WASI_SDK_PATH=$(mise where github:WebAssembly/wasi-sdk@wasi-sdk-27)
-cargo nextest run --workspace --features precompiled
-"""
+depends = ["precompile-eryx-runtime"]
+run = "cargo nextest run --workspace --features precompiled"
 
 [tasks.test-all]
 description = "Run tests with all features"
-depends = ["precompile-wasm"]
-run = """
-export WASI_SDK_PATH=$(mise where github:WebAssembly/wasi-sdk@wasi-sdk-27)
-cargo nextest run --workspace --all-features
-"""
+depends = ["precompile-eryx-runtime"]
+run = "cargo nextest run --workspace --all-features"
 
 [tasks.lint]
 description = "Run clippy lints"
-depends = ["build-wasm"]
-run = """
-export WASI_SDK_PATH=$(mise where github:WebAssembly/wasi-sdk@wasi-sdk-27)
-cargo clippy --workspace --all-targets --all-features -- -D warnings
-"""
+depends = ["build-eryx-runtime"]
+run = "cargo clippy --workspace --all-targets --all-features -- -D warnings"
 
 [tasks.lint-fix]
 description = "Auto-fix clippy warnings"
-depends = ["build-wasm"]
+depends = ["build-eryx-runtime"]
 run = "cargo clippy --fix --allow-dirty --workspace --all-targets --all-features"
 
 [tasks.fmt]
@@ -62,12 +55,8 @@ run = "cargo fmt --all -- --check"
 
 [tasks.doc]
 description = "Generate documentation"
-depends = ["precompile-wasm"]
-run = """
-# Set WASI_SDK_PATH for build.rs if triggered during doc generation
-export WASI_SDK_PATH=$(mise where github:WebAssembly/wasi-sdk@wasi-sdk-27)
-cargo doc --workspace --no-deps --all-features
-"""
+depends = ["precompile-eryx-runtime"]
+run = "cargo doc --workspace --no-deps --all-features"
 
 [tasks.doc-open]
 description = "Generate and open documentation"
@@ -81,21 +70,19 @@ depends = ["fmt-check", "lint", "test"]
 description = "Clean build artifacts"
 run = "cargo clean"
 
-[tasks.build-wasm]
-description = "Build the Python WASM component using eryx-wasm-runtime"
+[tasks.build-eryx-runtime]
+description = "Build the eryx-wasm-runtime and runtime.wasm"
 depends = ["ensure-wasi-sdk"]
 run = """
-# Get WASI SDK path and export it for build.rs (use explicit version)
-export WASI_SDK_PATH=$(mise where github:WebAssembly/wasi-sdk@wasi-sdk-27)
-echo "Using WASI SDK at: $WASI_SDK_PATH"
+export WASI_SDK_PATH=$(mise where "github:WebAssembly/wasi-sdk@{{vars.wasi_sdk_version}}")
 BUILD_ERYX_RUNTIME=1 cargo build --package eryx-runtime --release
 """
-sources = ["crates/eryx-wasm-runtime/src/**/*.rs", "crates/eryx-wasm-runtime/clock_stubs.c", "crates/eryx-runtime/runtime.wit"]
+sources = ["crates/eryx-wasm-runtime/src/**/*.rs", "crates/eryx-wasm-runtime/clock_stubs.c", "crates/eryx-wasm-runtime/Cargo.toml", "crates/eryx-runtime/runtime.wit"]
 outputs = ["crates/eryx-runtime/runtime.wasm"]
 
 [tasks.build-all]
 description = "Build WASM component and Rust crates"
-depends = ["build-wasm", "build"]
+depends = ["build-eryx-runtime", "build"]
 
 [tasks.bench]
 description = "Run benchmarks"
@@ -105,16 +92,16 @@ run = "cargo bench --package eryx"
 description = "Run benchmarks and save baseline"
 run = "cargo bench --package eryx -- --save-baseline main"
 
-[tasks.precompile-wasm]
-description = "Pre-compile WASM to native code for faster loading"
-depends = ["build-wasm"]
+[tasks.precompile-eryx-runtime]
+description = "Pre-compile eryx-runtime WASM to native code for faster loading"
+depends = ["build-eryx-runtime"]
 run = "cargo run --example precompile --features precompiled --release"
 sources = ["crates/eryx-runtime/runtime.wasm"]
 outputs = ["crates/eryx-runtime/runtime.cwasm"]
 
 [tasks.setup]
 description = "Set up development environment (build WASM, precompile, etc.)"
-depends = ["build-wasm", "precompile-wasm"]
+depends = ["build-eryx-runtime", "precompile-eryx-runtime"]
 run = """
 echo "✓ Development environment ready!"
 echo ""
@@ -126,7 +113,7 @@ echo "  mise run build-all  - Build WASM and Rust crates"
 
 [tasks.build-all-precompiled]
 description = "Build WASM, pre-compile it, and build Rust crates"
-depends = ["build-wasm", "build"]
+depends = ["build-eryx-runtime", "build"]
 
 [tasks.msrv]
 description = "Check compilation on minimum supported Rust version"
@@ -134,12 +121,12 @@ run = "cargo +1.89 check --workspace"
 
 [tasks.example-demo]
 description = "Run the demo example"
-depends = ["build-wasm"]
+depends = ["build-eryx-runtime"]
 run = "cargo run --example trace_events --features embedded-runtime"
 
 [tasks.examples]
 description = "Run all examples"
-depends = ["build-wasm"]
+depends = ["build-eryx-runtime"]
 run = """
 echo "=== simple ==="
 cargo run --example simple --release
@@ -171,41 +158,22 @@ echo ""
 echo "✓ All examples completed!"
 """
 
-# =============================================================================
-# eryx-wasm-runtime tasks
-# =============================================================================
-
 [tasks.ensure-wasi-sdk]
 description = "Install WASI SDK if not present"
 run = """
-# Install WASI SDK if not present (use explicit version in all commands)
-WASI_SDK_VERSION="wasi-sdk-27"
-if ! mise where "github:WebAssembly/wasi-sdk@$WASI_SDK_VERSION" 2>/dev/null; then
-    echo "Installing WASI SDK ($WASI_SDK_VERSION)..."
-    mise install "github:WebAssembly/wasi-sdk@$WASI_SDK_VERSION"
+WASI_SDK_SPEC="github:WebAssembly/wasi-sdk@{{vars.wasi_sdk_version}}"
+if ! mise where "$WASI_SDK_SPEC" 2>/dev/null; then
+    echo "Installing WASI SDK ({{vars.wasi_sdk_version}})..."
+    mise install "$WASI_SDK_SPEC"
 fi
 
-# Verify installation
-WASI_SDK_PATH=$(mise where "github:WebAssembly/wasi-sdk@$WASI_SDK_VERSION")
-echo "WASI SDK at: $WASI_SDK_PATH"
-
+WASI_SDK_PATH=$(mise where "$WASI_SDK_SPEC")
 if [ ! -f "$WASI_SDK_PATH/bin/clang" ]; then
     echo "ERROR: WASI SDK installation incomplete - clang not found"
     exit 1
 fi
-"""
-
-[tasks.build-eryx-runtime]
-description = "Build liberyx_runtime.so and runtime.wasm via eryx-runtime build.rs"
-depends = ["ensure-wasi-sdk"]
-run = """
-# Get WASI SDK path and export it for build.rs (use explicit version)
-export WASI_SDK_PATH=$(mise where github:WebAssembly/wasi-sdk@wasi-sdk-27)
 echo "Using WASI SDK at: $WASI_SDK_PATH"
-BUILD_ERYX_RUNTIME=1 cargo build --package eryx-runtime --release
 """
-sources = ["crates/eryx-wasm-runtime/src/**/*.rs", "crates/eryx-wasm-runtime/clock_stubs.c", "crates/eryx-wasm-runtime/Cargo.toml", "crates/eryx-runtime/runtime.wit"]
-outputs = ["crates/eryx-wasm-runtime/target/liberyx_runtime.so", "crates/eryx-runtime/runtime.wasm"]
 
 [tasks.setup-eryx-runtime-tests]
 description = "Extract Python stdlib for eryx-wasm-runtime tests"

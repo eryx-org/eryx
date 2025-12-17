@@ -141,7 +141,7 @@ fn bench_sandbox_init(c: &mut Criterion) {
     // Skip if WASM file doesn't exist
     if !std::path::Path::new(&wasm_path).exists() {
         eprintln!("Skipping benchmarks: WASM file not found at {wasm_path}");
-        eprintln!("Run `mise run build-wasm` first or set ERYX_WASM_PATH");
+        eprintln!("Run `mise run build-eryx-runtime` first or set ERYX_WASM_PATH");
         return;
     }
 
