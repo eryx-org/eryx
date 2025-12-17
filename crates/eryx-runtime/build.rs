@@ -52,9 +52,6 @@ fn main() {
         manifest_dir.join("prebuilt").display()
     );
 
-    // Check if runtime.wasm already exists (not currently used, but kept for reference)
-    let _runtime_wasm = manifest_dir.join("runtime.wasm");
-
     // Only build when explicitly requested via BUILD_ERYX_RUNTIME env var
     // Previously we also built in release mode, but that causes issues in CI where
     // we pre-build the WASM and don't want clippy/doc to try rebuilding it

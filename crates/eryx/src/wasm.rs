@@ -218,11 +218,7 @@ impl WasiView for ExecutorState {
     }
 }
 
-// Implement the sync imports in SandboxImports
-// Host implementation of the sandbox imports
-// The generated trait requires implementing invoke (async), list_callbacks, and report_trace
-// The bindgen macro generates traits based on the WIT world name.
-// For world "sandbox" with package "eryx:sandbox", the Host trait is generated.
+// Host implementation of the WIT-generated sandbox imports trait.
 impl SandboxImportsWithStore for HasSelf<ExecutorState> {
     /// Invoke a callback by name with JSON arguments (async).
     fn invoke<T>(
@@ -375,8 +371,6 @@ impl PythonExecutor {
         self
     }
 
-    // Note: engine() and instance_pre() accessors are defined above
-
     /// Get or create the global shared wasmtime Engine.
     ///
     /// The Engine is thread-safe and automatically shared across all `PythonExecutor`
@@ -481,7 +475,6 @@ impl PythonExecutor {
         let engine = Self::shared_engine()?;
         // SAFETY: Caller guarantees the precompiled bytes are trusted and were
         // created by `precompile()` with a compatible engine configuration.
-        #[allow(unsafe_code)]
         let component = unsafe { Component::deserialize(&engine, precompiled_bytes) }
             .map_err(Error::WasmComponent)?;
         let instance_pre = Self::create_instance_pre(&engine, &component)?;
@@ -519,7 +512,6 @@ impl PythonExecutor {
         let engine = Self::shared_engine()?;
         // SAFETY: Caller guarantees the precompiled file is trusted and was
         // created by `precompile()` with a compatible engine configuration.
-        #[allow(unsafe_code)]
         let component = unsafe { Component::deserialize_file(&engine, path.as_ref()) }
             .map_err(Error::WasmComponent)?;
         let instance_pre = Self::create_instance_pre(&engine, &component)?;
@@ -678,9 +670,6 @@ impl PythonExecutor {
         if let Some(ref stdlib_path) = self.python_stdlib_path {
             // PYTHONHOME tells Python where to find the standard library
             wasi_builder.env("PYTHONHOME", "/python-stdlib");
-            if !pythonpath_parts.is_empty() {
-                wasi_builder.env("PYTHONPATH", pythonpath_parts.join(":"));
-            }
             wasi_builder
                 .preopened_dir(
                     stdlib_path,
@@ -689,6 +678,11 @@ impl PythonExecutor {
                     FilePerms::READ,
                 )
                 .map_err(|e| format!("Failed to mount Python stdlib: {e}"))?;
+        }
+
+        // Set PYTHONPATH for all configured paths (stdlib and/or site-packages)
+        if !pythonpath_parts.is_empty() {
+            wasi_builder.env("PYTHONPATH", pythonpath_parts.join(":"));
         }
 
         // Mount each site-packages directory at a unique path

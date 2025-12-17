@@ -43,19 +43,16 @@
 //! ```
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Instant;
 
 use async_trait::async_trait;
-use futures::StreamExt;
-use futures::stream::FuturesUnordered;
 use tokio::sync::mpsc;
 
-use crate::callback::{Callback, CallbackError};
+use crate::callback::Callback;
+use crate::callback_handler::{run_callback_handler, run_trace_collector};
 use crate::error::Error;
-use crate::sandbox::{ExecuteResult, ExecuteStats, ResourceLimits, Sandbox};
-use crate::trace::TraceEvent;
-use crate::wasm::{CallbackRequest, TraceRequest, parse_trace_event};
+use crate::sandbox::{ExecuteResult, ExecuteStats, Sandbox};
+use crate::wasm::{CallbackRequest, TraceRequest};
 
 use super::Session;
 use super::executor::{PythonStateSnapshot, SessionExecutor};
@@ -131,11 +128,11 @@ impl<'a> InProcessSession<'a> {
         let (callback_tx, callback_rx) = mpsc::channel::<CallbackRequest>(32);
         let (trace_tx, trace_rx) = mpsc::unbounded_channel::<TraceRequest>();
 
-        // Spawn task to handle callback requests concurrently
-        let callbacks_map = self.sandbox.callbacks().clone();
+        // Spawn task to handle callback requests concurrently (Arc clone is cheap)
+        let callbacks_arc = self.sandbox.callbacks_arc();
         let resource_limits = self.sandbox.resource_limits().clone();
         let callback_handler = tokio::spawn(async move {
-            run_callback_handler(callback_rx, callbacks_map, resource_limits).await
+            run_callback_handler(callback_rx, callbacks_arc, resource_limits).await
         });
 
         // Spawn task to handle trace events
@@ -246,115 +243,6 @@ impl Session for InProcessSession<'_> {
 
         Ok(())
     }
-}
-
-/// Handle callback requests with concurrent execution.
-async fn run_callback_handler(
-    mut callback_rx: mpsc::Receiver<CallbackRequest>,
-    callbacks_map: std::collections::HashMap<String, Arc<dyn Callback>>,
-    resource_limits: ResourceLimits,
-) -> u32 {
-    let invocation_count = Arc::new(AtomicU32::new(0));
-    let mut in_flight: FuturesUnordered<
-        std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>,
-    > = FuturesUnordered::new();
-
-    loop {
-        tokio::select! {
-            request = callback_rx.recv() => {
-                if let Some(req) = request {
-                    if let Some(fut) = create_callback_future(
-                        req,
-                        &callbacks_map,
-                        &resource_limits,
-                        &invocation_count,
-                    ) {
-                        in_flight.push(fut);
-                    }
-                } else {
-                    // Channel closed, drain remaining futures and exit
-                    while in_flight.next().await.is_some() {}
-                    break;
-                }
-            }
-
-            Some(()) = in_flight.next(), if !in_flight.is_empty() => {
-                // A callback completed, continue the loop
-            }
-        }
-    }
-
-    invocation_count.load(Ordering::SeqCst)
-}
-
-/// Create a future for executing a single callback.
-fn create_callback_future(
-    request: CallbackRequest,
-    callbacks_map: &std::collections::HashMap<String, Arc<dyn Callback>>,
-    resource_limits: &ResourceLimits,
-    invocation_count: &Arc<AtomicU32>,
-) -> Option<std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>> {
-    // Check callback limit
-    let current_count = invocation_count.fetch_add(1, Ordering::SeqCst);
-    if let Some(max) = resource_limits.max_callback_invocations
-        && current_count >= max
-    {
-        let _ = request
-            .response_tx
-            .send(Err("Callback limit exceeded".to_string()));
-        return None;
-    }
-
-    let callback = callbacks_map.get(&request.name).cloned();
-    let timeout = resource_limits.callback_timeout;
-
-    Some(Box::pin(async move {
-        let result: Result<String, String> = match callback {
-            Some(cb) => {
-                // Parse the JSON arguments
-                let args: serde_json::Value = serde_json::from_str(&request.arguments_json)
-                    .unwrap_or(serde_json::Value::Object(serde_json::Map::new()));
-
-                let invoke_future = cb.invoke(args);
-                let cb_result = if let Some(timeout_duration) = timeout {
-                    match tokio::time::timeout(timeout_duration, invoke_future).await {
-                        Ok(r) => r,
-                        Err(_) => Err(CallbackError::Timeout),
-                    }
-                } else {
-                    invoke_future.await
-                };
-
-                // Convert to Result<String, String> for the channel
-                cb_result
-                    .map(|v| serde_json::to_string(&v).unwrap_or_default())
-                    .map_err(|e| e.to_string())
-            }
-            None => Err(format!("Unknown callback: {}", request.name)),
-        };
-
-        let _ = request.response_tx.send(result);
-    }))
-}
-
-/// Collect trace events from the trace channel.
-async fn run_trace_collector(
-    mut trace_rx: mpsc::UnboundedReceiver<TraceRequest>,
-    trace_handler: Option<Arc<dyn crate::trace::TraceHandler>>,
-) -> Vec<TraceEvent> {
-    let mut events = Vec::new();
-
-    while let Some(request) = trace_rx.recv().await {
-        if let Ok(event) = parse_trace_event(&request) {
-            // Call trace handler if configured
-            if let Some(handler) = &trace_handler {
-                handler.on_trace(event.clone()).await;
-            }
-            events.push(event);
-        }
-    }
-
-    events
 }
 
 #[cfg(test)]

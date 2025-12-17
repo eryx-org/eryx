@@ -2,31 +2,27 @@
 
 use std::{
     collections::HashMap,
-    sync::{
-        Arc,
-        atomic::{AtomicU32, Ordering},
-    },
+    sync::Arc,
     time::{Duration, Instant},
 };
 
-use futures::StreamExt;
-use futures::stream::FuturesUnordered;
 use tokio::sync::mpsc;
 
 #[cfg(feature = "native-extensions")]
 use crate::cache::ComponentCache;
 use crate::callback::Callback;
+use crate::callback_handler::{run_callback_handler, run_trace_collector};
 use crate::error::Error;
 use crate::library::RuntimeLibrary;
 use crate::trace::{OutputHandler, TraceEvent, TraceHandler};
-use crate::wasm::{CallbackRequest, PythonExecutor, TraceRequest, parse_trace_event};
+use crate::wasm::{CallbackRequest, PythonExecutor, TraceRequest};
 
 /// A sandboxed Python execution environment.
 pub struct Sandbox {
     /// The Python WASM executor (wrapped in Arc for sharing with sessions).
     executor: Arc<PythonExecutor>,
-    /// Registered callbacks that Python code can invoke.
-    callbacks: HashMap<String, Arc<dyn Callback>>,
+    /// Registered callbacks that Python code can invoke (wrapped in Arc to avoid cloning the map on each execute).
+    callbacks: Arc<HashMap<String, Arc<dyn Callback>>>,
     /// Python preamble code injected before user code.
     preamble: String,
     /// Combined type stubs from all libraries.
@@ -91,17 +87,17 @@ impl Sandbox {
         // Collect callbacks as a Vec for the executor
         let callbacks: Vec<Arc<dyn Callback>> = self.callbacks.values().cloned().collect();
 
-        // Spawn task to handle callback requests concurrently
-        let callbacks_map = self.callbacks.clone();
+        // Spawn task to handle callback requests concurrently (Arc clone is cheap)
+        let callbacks_arc = Arc::clone(&self.callbacks);
         let resource_limits = self.resource_limits.clone();
         let callback_handler = tokio::spawn(async move {
-            Self::run_callback_handler(callback_rx, callbacks_map, resource_limits).await
+            run_callback_handler(callback_rx, callbacks_arc, resource_limits).await
         });
 
         // Spawn task to handle trace events
         let trace_handler = self.trace_handler.clone();
         let trace_collector =
-            tokio::spawn(async move { Self::run_trace_collector(trace_rx, trace_handler).await });
+            tokio::spawn(async move { run_trace_collector(trace_rx, trace_handler).await });
 
         // Execute the Python code with optional timeout
         let memory_limit = self.resource_limits.max_memory_bytes;
@@ -149,136 +145,6 @@ impl Sandbox {
         }
     }
 
-    /// Handle callback requests with concurrent execution.
-    ///
-    /// Uses `tokio::select!` to concurrently:
-    /// 1. Receive new callback requests from the channel
-    /// 2. Poll in-flight callback futures to completion
-    ///
-    /// This allows multiple callbacks to execute in parallel when Python code
-    /// uses `asyncio.gather()` or similar patterns.
-    async fn run_callback_handler(
-        mut callback_rx: mpsc::Receiver<CallbackRequest>,
-        callbacks_map: HashMap<String, Arc<dyn Callback>>,
-        resource_limits: ResourceLimits,
-    ) -> u32 {
-        let invocation_count = Arc::new(AtomicU32::new(0));
-        let mut in_flight: FuturesUnordered<
-            std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>,
-        > = FuturesUnordered::new();
-
-        loop {
-            tokio::select! {
-                // Receive new callback requests
-                request = callback_rx.recv() => {
-                    if let Some(req) = request {
-                        if let Some(fut) = Self::create_callback_future(
-                            req,
-                            &callbacks_map,
-                            &resource_limits,
-                            &invocation_count,
-                        ) {
-                            in_flight.push(fut);
-                        }
-                    } else {
-                        // Channel closed, drain remaining futures and exit
-                        while in_flight.next().await.is_some() {}
-                        break;
-                    }
-                }
-
-                // Poll in-flight callbacks
-                Some(()) = in_flight.next(), if !in_flight.is_empty() => {
-                    // A callback completed, continue the loop
-                }
-            }
-        }
-
-        invocation_count.load(Ordering::SeqCst)
-    }
-
-    /// Create a future for executing a single callback.
-    fn create_callback_future(
-        request: CallbackRequest,
-        callbacks_map: &HashMap<String, Arc<dyn Callback>>,
-        resource_limits: &ResourceLimits,
-        invocation_count: &Arc<AtomicU32>,
-    ) -> Option<std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>> {
-        // Check callback limit
-        let current_count = invocation_count.fetch_add(1, Ordering::SeqCst);
-        if let Some(max) = resource_limits.max_callback_invocations
-            && current_count >= max
-        {
-            let _ = request
-                .response_tx
-                .send(Err(format!("Callback limit exceeded ({max} invocations)")));
-            return None;
-        }
-
-        // Find the callback
-        let Some(callback) = callbacks_map.get(&request.name).cloned() else {
-            let _ = request
-                .response_tx
-                .send(Err(format!("Callback '{}' not found", request.name)));
-            return None;
-        };
-
-        // Parse arguments
-        let args: serde_json::Value = match serde_json::from_str(&request.arguments_json) {
-            Ok(v) => v,
-            Err(e) => {
-                let _ = request
-                    .response_tx
-                    .send(Err(format!("Invalid arguments JSON: {e}")));
-                return None;
-            }
-        };
-
-        // Create the future
-        let timeout = resource_limits.callback_timeout;
-        let fut = async move {
-            let invoke_future = callback.invoke(args);
-
-            let callback_result = if let Some(timeout) = timeout {
-                tokio::time::timeout(timeout, invoke_future)
-                    .await
-                    .map_or(Err(crate::callback::CallbackError::Timeout), |r| r)
-            } else {
-                invoke_future.await
-            };
-
-            let result = match callback_result {
-                Ok(value) => Ok(value.to_string()),
-                Err(e) => Err(e.to_string()),
-            };
-
-            // Send result back to the Python code
-            let _ = request.response_tx.send(result);
-        };
-
-        Some(Box::pin(fut))
-    }
-
-    /// Collect trace events from the Python runtime.
-    async fn run_trace_collector(
-        mut trace_rx: mpsc::UnboundedReceiver<TraceRequest>,
-        trace_handler: Option<Arc<dyn TraceHandler>>,
-    ) -> Vec<TraceEvent> {
-        let mut events = Vec::new();
-
-        while let Some(request) = trace_rx.recv().await {
-            if let Ok(event) = parse_trace_event(&request) {
-                // Send to trace handler if configured
-                if let Some(handler) = &trace_handler {
-                    handler.on_trace(event.clone()).await;
-                }
-                events.push(event);
-            }
-        }
-
-        events
-    }
-
     /// Get combined type stubs for all loaded libraries.
     /// Useful for including in LLM context windows.
     #[must_use]
@@ -290,6 +156,15 @@ impl Sandbox {
     #[must_use]
     pub fn callbacks(&self) -> &HashMap<String, Arc<dyn Callback>> {
         &self.callbacks
+    }
+
+    /// Get the callbacks as an Arc for efficient sharing.
+    ///
+    /// This is more efficient than `callbacks().clone()` when you need to
+    /// move callbacks into a spawned task, as it only clones the Arc pointer.
+    #[must_use]
+    pub(crate) fn callbacks_arc(&self) -> Arc<HashMap<String, Arc<dyn Callback>>> {
+        Arc::clone(&self.callbacks)
     }
 
     /// Get the Python preamble code.
@@ -921,7 +796,7 @@ impl SandboxBuilder {
 
         Ok(Sandbox {
             executor: Arc::new(executor),
-            callbacks: self.callbacks,
+            callbacks: Arc::new(self.callbacks),
             preamble: self.preamble,
             type_stubs: self.type_stubs,
             trace_handler: self.trace_handler,
