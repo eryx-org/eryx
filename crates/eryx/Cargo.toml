@@ -92,3 +92,13 @@ workspace = true
 
 [package.metadata."docs.rs"]
 all-features = true
+
+[package.metadata.cargo-all-features]
+# Skip feature combinations that require the WASM runtime to be built first.
+# native-extensions requires liberyx_runtime.so.zst which is only available
+# after running `mise run build-eryx-runtime`.
+skip_feature_sets = [
+    ["native-extensions"],
+]
+# With only 2 features, test all combinations (max 4)
+max_combination_size = 2

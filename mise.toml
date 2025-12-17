@@ -10,6 +10,14 @@ binstall = true
 version = "latest"
 binstall = true
 
+[tools."cargo:cargo-rail"]
+version = "latest"
+binstall = true
+
+[tools."cargo:cargo-all-features"]
+version = "latest"
+binstall = true
+
 # Note: WASI SDK is intentionally NOT in [tools] because adding it to PATH
 # breaks host compilation (Rust picks up wasm clang for proc-macro builds).
 # Instead, we install it on-demand via the ensure-wasi-sdk task.
@@ -65,6 +73,27 @@ run = "cargo doc --workspace --no-deps --open"
 [tasks.ci]
 description = "Run all CI checks"
 depends = ["fmt-check", "lint", "test"]
+
+[tasks.unify]
+description = "Unify workspace dependencies and prune dead features"
+run = "cargo rail unify"
+
+[tasks.unify-check]
+description = "Check for dependency drift (CI)"
+run = "cargo rail unify --check"
+
+[tasks.affected]
+description = "List affected crates"
+run = "cargo rail affected"
+
+[tasks.check-all-features]
+description = "Check all feature combinations compile"
+run = "cargo check-all-features"
+
+[tasks.test-all-features]
+description = "Test all feature combinations"
+depends = ["build-eryx-runtime"]
+run = "cargo test-all-features"
 
 [tasks.clean]
 description = "Clean build artifacts"

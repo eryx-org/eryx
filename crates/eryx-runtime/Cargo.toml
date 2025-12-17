@@ -55,3 +55,9 @@ zstd.workspace = true
 
 [lints]
 workspace = true
+
+[package.metadata.cargo-all-features]
+# Skip native-extensions feature as it requires the WASM runtime to be built first.
+# The build script embeds liberyx_runtime.so.zst which is only available after
+# running `mise run build-eryx-runtime`.
+denylist = ["native-extensions"]
