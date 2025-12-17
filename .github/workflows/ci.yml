@@ -119,14 +119,6 @@ jobs:
     runs-on: ubuntu-latest
     needs: build-eryx-runtime
     steps:
-      - name: Free disk space
-        run: |
-          sudo rm -rf /usr/share/dotnet
-          sudo rm -rf /usr/local/lib/android
-          sudo rm -rf /opt/ghc
-          sudo rm -rf /opt/hostedtoolcache/CodeQL
-          df -h
-
       - uses: actions/checkout@v6
 
       - name: Download WASM artifacts
