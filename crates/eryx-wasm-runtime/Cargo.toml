@@ -19,7 +19,8 @@ wit-dylib-ffi.workspace = true
 
 # PyO3 for Python C extension module (like componentize-py uses)
 # abi3-py312 = stable ABI compatible with Python 3.12+
-pyo3 = { version = "0.24", features = ["abi3-py312"] }
+# extension-module prevents linking to libpython (we link to WASI Python at WASM link time)
+pyo3 = { version = "0.24", features = ["abi3-py312", "extension-module"] }
 
 [dev-dependencies]
 wit-component.workspace = true

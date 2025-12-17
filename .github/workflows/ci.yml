@@ -52,6 +52,14 @@ jobs:
           cp "$OUT_DIR/liberyx_bindings.so.zst" crates/eryx-runtime/prebuilt/
           ls -la crates/eryx-runtime/prebuilt/
 
+      - name: Copy eryx-wasm-runtime test artifacts
+        run: |
+          # Copy liberyx_runtime.so for eryx-wasm-runtime tests
+          OUT_DIR=$(find target -path "*/eryx-runtime-*/out" -type d | head -1)
+          mkdir -p crates/eryx-wasm-runtime/target
+          cp "$OUT_DIR/liberyx_runtime.so" crates/eryx-wasm-runtime/target/
+          ls -la crates/eryx-wasm-runtime/target/
+
       - name: Upload WASM artifacts
         uses: actions/upload-artifact@v4
         with:
@@ -60,6 +68,7 @@ jobs:
             crates/eryx-runtime/runtime.wasm
             crates/eryx-runtime/runtime.cwasm
             crates/eryx-runtime/prebuilt/
+            crates/eryx-wasm-runtime/target/liberyx_runtime.so
           retention-days: 1
 
   lint:
@@ -73,7 +82,7 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: wasm-runtime
-          path: crates/eryx-runtime/
+          path: crates/
 
       # Touch artifacts to be newer than sources so mise skips rebuild
       - name: Mark WASM as up-to-date
@@ -124,7 +133,7 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: wasm-runtime
-          path: crates/eryx-runtime/
+          path: crates/
 
       # Touch artifacts to be newer than sources so mise skips rebuild
       - name: Mark WASM as up-to-date
@@ -134,6 +143,16 @@ jobs:
           if [ -d crates/eryx-runtime/prebuilt ]; then
             touch crates/eryx-runtime/prebuilt/*
           fi
+
+      - name: Set up eryx-wasm-runtime test artifacts
+        run: |
+          # Extract python stdlib for eryx-wasm-runtime tests (from checked-in archive)
+          mkdir -p crates/eryx-wasm-runtime/tests/python-stdlib
+          tar -xf crates/eryx/python-stdlib.tar.zst -C crates/eryx-wasm-runtime/tests/
+          # Create empty site-packages directory (tests expect it)
+          mkdir -p crates/eryx-wasm-runtime/tests/site-packages
+          ls -la crates/eryx-wasm-runtime/target/
+          ls crates/eryx-wasm-runtime/tests/python-stdlib/ | head -10
 
       - name: Install mold linker and clang
         run: |
@@ -168,8 +187,8 @@ jobs:
         # Use --all-features to test everything. This works because:
         # - runtime.wasm and runtime.cwasm are provided by artifacts
         # - prebuilt/liberyx_*.so.zst are provided for late-linking feature
-        # Exclude eryx-wasm-runtime tests as they require the full build environment
-        run: cargo nextest run --workspace --all-features --exclude eryx-wasm-runtime
+        # - liberyx_runtime.so and python-stdlib are provided for eryx-wasm-runtime tests
+        run: cargo nextest run --workspace --all-features
 
   msrv:
     name: MSRV
@@ -211,7 +230,7 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: wasm-runtime
-          path: crates/eryx-runtime/
+          path: crates/
 
       # Touch artifacts to be newer than sources so mise skips rebuild
       - name: Mark WASM as up-to-date
