@@ -18,3 +18,5 @@ retries = 0
 fail-fast = true
 retries = 2
 slow-timeout = { period = "60s", terminate-after = 3 }
+# Increase default timeout for slow WASM component tests
+default-timeout = "120s"
