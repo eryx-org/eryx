@@ -3,6 +3,7 @@
 //! These tests verify the "zero-config" API works correctly.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
+#[cfg(any(feature = "embedded-runtime", feature = "packages"))]
 use eryx::Sandbox;
 
 // =============================================================================

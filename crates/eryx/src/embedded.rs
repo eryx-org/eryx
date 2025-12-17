@@ -115,21 +115,47 @@ impl EmbeddedResources {
 
         tracing::info!(path = %stdlib_path.display(), "Extracting embedded Python stdlib");
 
+        // Use tempfile to create a unique temp directory for extraction.
+        // This avoids race conditions when multiple processes extract simultaneously.
+        let temp_extract_dir = tempfile::TempDir::with_prefix_in("python-stdlib-", temp_dir)
+            .map_err(|e| {
+                Error::Initialization(format!("Failed to create temp extract directory: {e}"))
+            })?;
+
         // Decompress zstd
         let decoder = zstd::Decoder::new(EMBEDDED_STDLIB)
             .map_err(|e| Error::Initialization(format!("Failed to create zstd decoder: {e}")))?;
 
-        // Extract tar archive
+        // Extract tar archive to temp directory
         let mut archive = tar::Archive::new(decoder);
         archive
-            .unpack(temp_dir)
+            .unpack(temp_extract_dir.path())
             .map_err(|e| Error::Initialization(format!("Failed to extract stdlib archive: {e}")))?;
 
+        // The archive extracts to python-stdlib/ inside the temp dir
+        let extracted_stdlib = temp_extract_dir.path().join("python-stdlib");
+
         // Verify extraction
-        if !stdlib_path.join("encodings").exists() {
+        if !extracted_stdlib.join("encodings").exists() {
             return Err(Error::Initialization(
                 "Stdlib extraction failed: encodings/ not found".to_string(),
             ));
+        }
+
+        // Atomically rename to final location
+        match std::fs::rename(&extracted_stdlib, &stdlib_path) {
+            Ok(()) => {
+                // TempDir will clean up the now-empty temp extract dir on drop
+            }
+            Err(_) if stdlib_path.join("encodings").exists() => {
+                // Another process won the race - that's fine, TempDir cleans up on drop
+                tracing::debug!("Stdlib extracted by another process");
+            }
+            Err(e) => {
+                return Err(Error::Initialization(format!(
+                    "Failed to rename stdlib directory: {e}"
+                )));
+            }
         }
 
         Ok(stdlib_path)
@@ -158,21 +184,38 @@ impl EmbeddedResources {
 
         tracing::info!(path = %runtime_path.display(), "Extracting embedded runtime");
 
-        // Write to a temp file first, then rename for atomicity
-        let temp_path = runtime_path.with_extension("cwasm.tmp");
-        let mut file = std::fs::File::create(&temp_path)
-            .map_err(|e| Error::Initialization(format!("Failed to create runtime file: {e}")))?;
+        // Use tempfile to create a unique temp file for writing.
+        // This avoids race conditions when multiple processes extract simultaneously.
+        // We use NamedTempFile so we can persist it after writing.
+        let mut temp_file = tempfile::NamedTempFile::with_prefix_in("runtime-", temp_dir)
+            .map_err(|e| Error::Initialization(format!("Failed to create temp file: {e}")))?;
 
-        file.write_all(EMBEDDED_RUNTIME)
+        temp_file
+            .write_all(EMBEDDED_RUNTIME)
             .map_err(|e| Error::Initialization(format!("Failed to write runtime file: {e}")))?;
 
-        file.sync_all()
+        temp_file
+            .as_file()
+            .sync_all()
             .map_err(|e| Error::Initialization(format!("Failed to sync runtime file: {e}")))?;
 
-        drop(file);
-
-        std::fs::rename(&temp_path, &runtime_path)
-            .map_err(|e| Error::Initialization(format!("Failed to rename runtime file: {e}")))?;
+        // Try to persist (rename) to the final location.
+        // persist() returns the temp file back on error so we can handle it.
+        match temp_file.persist(&runtime_path) {
+            Ok(_) => {}
+            Err(e) if runtime_path.exists() => {
+                // Another process won the race - that's fine, our temp file is cleaned up
+                tracing::debug!("Runtime extracted by another process");
+                // The PersistError contains the temp file, which will be cleaned up on drop
+                drop(e);
+            }
+            Err(e) => {
+                return Err(Error::Initialization(format!(
+                    "Failed to persist runtime file: {}",
+                    e.error
+                )));
+            }
+        }
 
         Ok(runtime_path)
     }

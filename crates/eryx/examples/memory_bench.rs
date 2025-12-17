@@ -20,11 +20,14 @@
 //! cargo run --example memory_bench --features native-extensions,precompiled --release -- --numpy
 //! ```
 
+#[cfg(any(feature = "embedded-runtime", feature = "native-extensions"))]
 use std::time::Instant;
 
+#[cfg(any(feature = "embedded-runtime", feature = "native-extensions"))]
 use eryx::Sandbox;
 
 /// Get current process RSS (Resident Set Size) in MB.
+#[cfg(any(feature = "embedded-runtime", feature = "native-extensions"))]
 fn get_rss_mb() -> f64 {
     let status = std::fs::read_to_string("/proc/self/status").unwrap();
     for line in status.lines() {
@@ -37,6 +40,7 @@ fn get_rss_mb() -> f64 {
 }
 
 /// Get current process virtual memory size in MB.
+#[cfg(any(feature = "embedded-runtime", feature = "native-extensions"))]
 fn get_vsz_mb() -> f64 {
     let status = std::fs::read_to_string("/proc/self/status").unwrap();
     for line in status.lines() {
@@ -69,11 +73,13 @@ fn load_numpy_extensions(
     Ok(extensions)
 }
 
+#[cfg(any(feature = "embedded-runtime", feature = "native-extensions"))]
 struct MemorySnapshot {
     rss_mb: f64,
     vsz_mb: f64,
 }
 
+#[cfg(any(feature = "embedded-runtime", feature = "native-extensions"))]
 impl MemorySnapshot {
     fn now() -> Self {
         Self {
@@ -409,11 +415,5 @@ async fn run_numpy_benchmark() -> Result<(), Box<dyn std::error::Error>> {
         .await?;
     println!("  Sandbox 0 (numpy sum): {}", result.stdout.trim());
 
-    Ok(())
-}
-
-#[cfg(not(feature = "native-extensions"))]
-async fn run_numpy_benchmark() -> Result<(), Box<dyn std::error::Error>> {
-    eprintln!("Error: numpy benchmark requires native-extensions feature");
     Ok(())
 }

@@ -24,6 +24,7 @@ use wit_component::{StringEncoding, embed_component_metadata};
 fn main() {
     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
     let wasm_runtime_dir = manifest_dir.parent().unwrap().join("eryx-wasm-runtime");
+    let out_dir = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR not set"));
 
     // Rerun if eryx-wasm-runtime sources change
     println!(
@@ -45,10 +46,14 @@ fn main() {
     );
     // Rerun if the build flag changes
     println!("cargo::rerun-if-env-changed=BUILD_ERYX_RUNTIME");
+    // Rerun if pre-built artifacts change
+    println!(
+        "cargo::rerun-if-changed={}",
+        manifest_dir.join("prebuilt").display()
+    );
 
-    // Check if runtime.wasm already exists - if so, skip building unless explicitly requested
-    let runtime_wasm = manifest_dir.join("runtime.wasm");
-    let wasm_exists = runtime_wasm.exists();
+    // Check if runtime.wasm already exists (not currently used, but kept for reference)
+    let _runtime_wasm = manifest_dir.join("runtime.wasm");
 
     // Only build when explicitly requested via BUILD_ERYX_RUNTIME env var
     // Previously we also built in release mode, but that causes issues in CI where
@@ -56,9 +61,39 @@ fn main() {
     let build_requested = env::var("BUILD_ERYX_RUNTIME").is_ok();
     let late_linking = env::var("CARGO_FEATURE_LATE_LINKING").is_ok();
 
-    if build_requested || (late_linking && !wasm_exists) {
+    // Check for pre-built late-linking artifacts (for CI)
+    let prebuilt_dir = manifest_dir.join("prebuilt");
+    let prebuilt_runtime = prebuilt_dir.join("liberyx_runtime.so.zst");
+    let prebuilt_bindings = prebuilt_dir.join("liberyx_bindings.so.zst");
+    let has_prebuilt = prebuilt_runtime.exists() && prebuilt_bindings.exists();
+
+    // Check if late-linking artifacts already exist in OUT_DIR (from previous build)
+    let out_runtime_zst = out_dir.join("liberyx_runtime.so.zst");
+    let out_bindings_zst = out_dir.join("liberyx_bindings.so.zst");
+    let has_out_artifacts = out_runtime_zst.exists() && out_bindings_zst.exists();
+
+    if build_requested {
+        // Full build requested - build everything from scratch
         let runtime_so = build_wasm_runtime(&wasm_runtime_dir);
         build_component(&manifest_dir, &runtime_so);
+    } else if late_linking {
+        // late-linking feature needs .so.zst files in OUT_DIR
+        if has_out_artifacts {
+            // Already have artifacts from a previous build - nothing to do
+            eprintln!("Using existing late-linking artifacts from OUT_DIR");
+        } else if has_prebuilt {
+            // Use pre-built artifacts from prebuilt/ directory (CI)
+            eprintln!("Using pre-built late-linking artifacts from prebuilt/");
+            std::fs::copy(&prebuilt_runtime, &out_runtime_zst)
+                .expect("failed to copy prebuilt runtime");
+            std::fs::copy(&prebuilt_bindings, &out_bindings_zst)
+                .expect("failed to copy prebuilt bindings");
+        } else {
+            // No artifacts anywhere, need to build from scratch
+            eprintln!("Building late-linking artifacts from scratch...");
+            let runtime_so = build_wasm_runtime(&wasm_runtime_dir);
+            build_component(&manifest_dir, &runtime_so);
+        }
     }
 }
 
