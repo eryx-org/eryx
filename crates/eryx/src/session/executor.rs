@@ -255,6 +255,7 @@ impl SessionExecutor {
 
         // Mount Python stdlib if configured (required for eryx-wasm-runtime)
         if let Some(stdlib_path) = executor.python_stdlib_path() {
+            wasi_builder.env("PYTHONHOME", "/python-stdlib");
             if !pythonpath_parts.is_empty() {
                 wasi_builder.env("PYTHONPATH", pythonpath_parts.join(":"));
             }
@@ -449,6 +450,7 @@ impl SessionExecutor {
 
         // Mount Python stdlib if configured (required for eryx-wasm-runtime)
         if let Some(stdlib_path) = self.executor.python_stdlib_path() {
+            wasi_builder.env("PYTHONHOME", "/python-stdlib");
             if !pythonpath_parts.is_empty() {
                 wasi_builder.env("PYTHONPATH", pythonpath_parts.join(":"));
             }

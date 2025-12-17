@@ -678,6 +678,8 @@ impl PythonExecutor {
 
         // Mount Python stdlib if configured (required for eryx-wasm-runtime)
         if let Some(ref stdlib_path) = self.python_stdlib_path {
+            // PYTHONHOME tells Python where to find the standard library
+            wasi_builder.env("PYTHONHOME", "/python-stdlib");
             if !pythonpath_parts.is_empty() {
                 wasi_builder.env("PYTHONPATH", pythonpath_parts.join(":"));
             }
