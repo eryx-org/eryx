@@ -679,8 +679,9 @@ async fn test_callback_timeout() {
     let sandbox = sandbox_builder()
         .with_callback(SleepCallback)
         .with_resource_limits(ResourceLimits {
-            callback_timeout: Some(Duration::from_millis(100)),
-            execution_timeout: Some(Duration::from_secs(5)),
+            // Use larger timeout margins to be robust on slow CI runners
+            callback_timeout: Some(Duration::from_millis(500)),
+            execution_timeout: Some(Duration::from_secs(10)),
             ..Default::default()
         })
         .build()
@@ -689,16 +690,16 @@ async fn test_callback_timeout() {
     let result = sandbox
         .execute(
             r#"
-# Short sleep should succeed
+# Short sleep should succeed (50ms sleep with 500ms timeout = plenty of headroom)
 try:
-    result = await sleep(ms=10)
+    result = await sleep(ms=50)
     print(f"Short sleep: {result}")
 except Exception as e:
     print(f"Short sleep error: {e}")
 
-# Long sleep should timeout
+# Long sleep should timeout (1000ms sleep with 500ms timeout = guaranteed timeout)
 try:
-    result = await sleep(ms=500)
+    result = await sleep(ms=1000)
     print(f"Long sleep: {result}")
 except Exception as e:
     print(f"Long sleep timeout: {e}")
