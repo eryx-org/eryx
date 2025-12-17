@@ -26,9 +26,9 @@ description = "Build all crates"
 run = "cargo build --workspace"
 
 [tasks.test]
-description = "Run tests with precompiled WASM"
+description = "Run tests with embedded WASM"
 depends = ["precompile-eryx-runtime"]
-run = "cargo nextest run --workspace --features precompiled"
+run = "cargo nextest run --workspace --features embedded"
 
 [tasks.test-all]
 description = "Run tests with all features"
@@ -95,7 +95,7 @@ run = "cargo bench --package eryx -- --save-baseline main"
 [tasks.precompile-eryx-runtime]
 description = "Pre-compile eryx-runtime WASM to native code for faster loading"
 depends = ["build-eryx-runtime"]
-run = "cargo run --example precompile --features precompiled --release"
+run = "cargo run --example precompile --features embedded --release"
 sources = ["crates/eryx-runtime/runtime.wasm"]
 outputs = ["crates/eryx-runtime/runtime.cwasm"]
 
@@ -122,7 +122,7 @@ run = "cargo +1.89 check --workspace"
 [tasks.example-demo]
 description = "Run the demo example"
 depends = ["build-eryx-runtime"]
-run = "cargo run --example trace_events --features embedded-runtime"
+run = "cargo run --example trace_events --features embedded"
 
 [tasks.examples]
 description = "Run all examples"
@@ -149,11 +149,11 @@ echo ""
 echo "=== session_reuse ==="
 cargo run --example session_reuse --release
 echo ""
-echo "=== precompile (requires precompiled feature) ==="
-cargo run --example precompile --features precompiled --release
+echo "=== precompile (requires embedded feature) ==="
+cargo run --example precompile --features embedded --release
 echo ""
-echo "=== embedded_runtime (requires embedded-runtime feature) ==="
-cargo run --example embedded_runtime --features embedded-runtime --release
+echo "=== embedded_runtime (requires embedded feature) ==="
+cargo run --example embedded_runtime --features embedded --release
 echo ""
 echo "✓ All examples completed!"
 """

@@ -6,14 +6,16 @@
 //!
 //! ## Features
 //!
-//! - `late-linking` - Enable late-linking support for native Python extensions.
-//!   This allows adding extensions like numpy at sandbox creation time without
-//!   rebuilding the entire component.
+//! - `native-extensions` - Enable native Python extension support via late-linking
+//!   and pre-initialization. This allows adding extensions like numpy at sandbox
+//!   creation time without rebuilding the entire component, and captures Python's
+//!   memory state for faster startup.
 //!
 //! ## Contents
 //!
 //! - `runtime.wit` - WIT interface definition
 //! - `linker` - Late-linking support for native extensions (feature-gated)
+//! - `preinit` - Pre-initialization support (feature-gated)
 //!
 //! ## See Also
 //!
@@ -23,9 +25,9 @@
 pub const WIT_DEFINITION: &str = include_str!("../runtime.wit");
 
 /// Late-linking support for native Python extensions.
-#[cfg(feature = "late-linking")]
+#[cfg(feature = "native-extensions")]
 pub mod linker;
 
 /// Pre-initialization support for capturing Python memory state.
-#[cfg(feature = "pre-init")]
+#[cfg(feature = "native-extensions")]
 pub mod preinit;

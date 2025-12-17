@@ -3,7 +3,6 @@
 //! These tests verify the "zero-config" API works correctly.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-#[cfg(any(feature = "embedded-runtime", feature = "packages"))]
 use eryx::Sandbox;
 
 // =============================================================================
@@ -11,9 +10,9 @@ use eryx::Sandbox;
 // =============================================================================
 
 /// Test that sandbox creation works without explicitly calling with_embedded_runtime().
-/// When embedded-runtime feature is enabled, it should be used automatically.
+/// When embedded feature is enabled, it should be used automatically.
 #[tokio::test]
-#[cfg(feature = "embedded-runtime")]
+#[cfg(feature = "embedded")]
 async fn embedded_runtime_is_automatic() {
     let sandbox = Sandbox::builder()
         .build()
@@ -28,7 +27,7 @@ async fn embedded_runtime_is_automatic() {
 
 /// Test that multiple sandboxes can be created quickly with embedded runtime.
 #[tokio::test]
-#[cfg(feature = "embedded-runtime")]
+#[cfg(feature = "embedded")]
 async fn embedded_runtime_multiple_sandboxes() {
     // Create 5 sandboxes - should be fast after first extraction
     for i in 0..5 {
@@ -49,7 +48,7 @@ async fn embedded_runtime_multiple_sandboxes() {
 
 /// Test that embedded stdlib is used automatically when no explicit path is set.
 #[tokio::test]
-#[cfg(all(feature = "embedded-runtime", feature = "embedded-stdlib"))]
+#[cfg(feature = "embedded")]
 async fn embedded_stdlib_is_automatic() {
     let sandbox = Sandbox::builder()
         .build()
@@ -65,7 +64,7 @@ async fn embedded_stdlib_is_automatic() {
 
 /// Test that various stdlib modules work with embedded stdlib.
 #[tokio::test]
-#[cfg(all(feature = "embedded-runtime", feature = "embedded-stdlib"))]
+#[cfg(feature = "embedded")]
 async fn embedded_stdlib_modules() {
     let sandbox = Sandbox::builder().build().unwrap();
 
@@ -102,7 +101,6 @@ print(re.match(r'\d+', '123abc').group())
 
 /// Test package format detection.
 #[test]
-#[cfg(feature = "packages")]
 fn package_format_detection() {
     use eryx::package::PackageFormat;
     use std::path::Path;
@@ -125,7 +123,6 @@ fn package_format_detection() {
 
 /// Test that with_package returns error for non-existent file.
 #[test]
-#[cfg(feature = "packages")]
 fn package_missing_file_error() {
     let result = Sandbox::builder().with_package("/nonexistent/package.whl");
     assert!(result.is_err());
@@ -135,7 +132,6 @@ fn package_missing_file_error() {
 
 /// Test that with_package returns error for unknown format.
 #[test]
-#[cfg(feature = "packages")]
 fn package_unknown_format_error() {
     // Create a temp file with unknown extension
     let temp_dir = std::env::temp_dir().join("eryx-test-unknown-format");
@@ -249,40 +245,34 @@ fn no_cache_never_stores() {
 
 /// Test that EmbeddedResources extracts to temp directory.
 #[test]
-#[cfg(any(feature = "embedded-stdlib", feature = "embedded-runtime"))]
+#[cfg(feature = "embedded")]
 fn embedded_resources_extraction() {
     use eryx::embedded::EmbeddedResources;
 
     let resources = EmbeddedResources::get().expect("should extract resources");
 
-    #[cfg(feature = "embedded-stdlib")]
-    {
-        assert!(resources.stdlib_path.exists(), "stdlib should be extracted");
-        assert!(
-            resources.stdlib_path.join("encodings").exists(),
-            "encodings module should exist"
-        );
-    }
+    assert!(resources.stdlib_path.exists(), "stdlib should be extracted");
+    assert!(
+        resources.stdlib_path.join("encodings").exists(),
+        "encodings module should exist"
+    );
 
-    #[cfg(feature = "embedded-runtime")]
-    {
-        assert!(
-            resources.runtime_path.exists(),
-            "runtime should be extracted"
-        );
-        assert!(
-            resources
-                .runtime_path
-                .extension()
-                .is_some_and(|e| e == "cwasm"),
-            "runtime should be .cwasm file"
-        );
-    }
+    assert!(
+        resources.runtime_path.exists(),
+        "runtime should be extracted"
+    );
+    assert!(
+        resources
+            .runtime_path
+            .extension()
+            .is_some_and(|e| e == "cwasm"),
+        "runtime should be .cwasm file"
+    );
 }
 
 /// Test that repeated calls to EmbeddedResources::get() return same paths.
 #[test]
-#[cfg(any(feature = "embedded-stdlib", feature = "embedded-runtime"))]
+#[cfg(feature = "embedded")]
 fn embedded_resources_cached() {
     use eryx::embedded::EmbeddedResources;
 
@@ -290,9 +280,6 @@ fn embedded_resources_cached() {
     let resources2 = EmbeddedResources::get().unwrap();
 
     // Should be the same instance (via OnceLock)
-    #[cfg(feature = "embedded-stdlib")]
     assert_eq!(resources1.stdlib_path, resources2.stdlib_path);
-
-    #[cfg(feature = "embedded-runtime")]
     assert_eq!(resources1.runtime_path, resources2.runtime_path);
 }

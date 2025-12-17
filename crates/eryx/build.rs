@@ -1,6 +1,6 @@
 //! Build script for the eryx crate.
 //!
-//! When the `embedded-runtime` feature is enabled, this pre-compiles the Python
+//! When the `embedded` feature is enabled, this pre-compiles the Python
 //! runtime WASM component to native code at build time, enabling the safe
 //! `with_embedded_runtime()` API that provides ~50x faster sandbox creation
 //! with zero configuration.
@@ -9,11 +9,11 @@
 #![allow(clippy::expect_used, clippy::unwrap_used)]
 
 fn main() {
-    #[cfg(feature = "embedded-runtime")]
+    #[cfg(feature = "embedded")]
     embedded_runtime::precompile();
 }
 
-#[cfg(feature = "embedded-runtime")]
+#[cfg(feature = "embedded")]
 mod embedded_runtime {
     use std::path::PathBuf;
 
@@ -28,7 +28,7 @@ mod embedded_runtime {
         if !wasm_path.exists() {
             panic!(
                 "runtime.wasm not found at {:?}. \
-                 Build the eryx-runtime crate first, or disable the `embedded-runtime` feature.",
+                 Build the eryx-runtime crate first, or disable the `embedded` feature.",
                 wasm_path.canonicalize().unwrap_or(wasm_path)
             );
         }

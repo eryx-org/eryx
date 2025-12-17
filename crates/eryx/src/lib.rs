@@ -5,7 +5,7 @@
 //! ## Safety
 //!
 //! By default, this crate uses `#![forbid(unsafe_code)]` for maximum safety.
-//! When the `precompiled` feature is enabled, this is relaxed to `#![deny(unsafe_code)]`
+//! When the `embedded` feature is enabled, this is relaxed to `#![deny(unsafe_code)]`
 //! to allow the unsafe wasmtime deserialization APIs needed for pre-compiled components.
 //!
 //! Eryx executes Python code in a secure WebAssembly sandbox with:
@@ -34,18 +34,17 @@
 
 // Safety lint configuration:
 // - Default: forbid unsafe code entirely
-// - With `precompiled` feature: deny unsafe code, but allow it on specific items
+// - With `embedded` feature: deny unsafe code, but allow it on specific items
 //   that need wasmtime's unsafe deserialization APIs
-#![cfg_attr(not(feature = "precompiled"), forbid(unsafe_code))]
-#![cfg_attr(feature = "precompiled", deny(unsafe_code))]
+#![cfg_attr(not(feature = "embedded"), forbid(unsafe_code))]
+#![cfg_attr(feature = "embedded", deny(unsafe_code))]
 
 pub mod cache;
 mod callback;
-#[cfg(any(feature = "embedded-stdlib", feature = "embedded-runtime"))]
+#[cfg(feature = "embedded")]
 pub mod embedded;
 mod error;
 mod library;
-#[cfg(feature = "packages")]
 pub mod package;
 mod sandbox;
 mod schema;
@@ -58,7 +57,7 @@ mod wasm;
 /// Pre-initialization runs Python's init + imports during build time and
 /// captures the memory state into the component. This avoids the 50-100ms
 /// startup cost on each sandbox creation.
-#[cfg(feature = "pre-init")]
+#[cfg(feature = "native-extensions")]
 pub mod preinit {
     pub use eryx_runtime::preinit::{PreInitError, pre_initialize};
 }

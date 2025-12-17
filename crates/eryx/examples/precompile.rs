@@ -74,7 +74,7 @@ fn main() -> anyhow::Result<()> {
     println!("Average per load: {avg_time:?}");
 
     // Step 5: Verify execution still works (only if embedded-stdlib is enabled)
-    #[cfg(feature = "embedded-stdlib")]
+    #[cfg(feature = "embedded")]
     {
         println!("\n--- Step 5: Verify execution works ---");
         // SAFETY: Same precompiled bytes we created above
@@ -103,10 +103,10 @@ fn main() -> anyhow::Result<()> {
         println!("Average per execution: {exec_avg:?}");
     }
 
-    #[cfg(not(feature = "embedded-stdlib"))]
+    #[cfg(not(feature = "embedded"))]
     {
         println!("\n--- Step 5 & 6: Skipped (no stdlib) ---");
-        println!("Enable embedded-stdlib feature to test execution");
+        println!("Enable embedded feature to test execution");
     }
 
     // Summary

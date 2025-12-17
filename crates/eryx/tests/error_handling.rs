@@ -16,7 +16,7 @@
 //! mise run test   # Run tests with precompiled WASM (~0.1s)
 //! ```
 
-#[cfg(not(all(feature = "embedded-runtime", feature = "embedded-stdlib")))]
+#[cfg(not(feature = "embedded"))]
 use std::path::PathBuf;
 use std::sync::{Arc, OnceLock};
 
@@ -33,8 +33,8 @@ fn get_shared_executor() -> Arc<PythonExecutor> {
 
 /// Create a PythonExecutor, using embedded resources if available.
 fn create_executor() -> PythonExecutor {
-    // When both embedded features are enabled, use them for zero-config setup
-    #[cfg(all(feature = "embedded-runtime", feature = "embedded-stdlib"))]
+    // When embedded feature is enabled, use it for zero-config setup
+    #[cfg(feature = "embedded")]
     {
         let resources =
             eryx::embedded::EmbeddedResources::get().expect("Failed to extract embedded resources");
@@ -46,27 +46,9 @@ fn create_executor() -> PythonExecutor {
     }
 
     // Fall back to file-based loading
-    #[cfg(not(all(feature = "embedded-runtime", feature = "embedded-stdlib")))]
+    #[cfg(not(feature = "embedded"))]
     {
         let stdlib_path = python_stdlib_path();
-
-        #[cfg(feature = "precompiled")]
-        {
-            let cwasm_path = precompiled_wasm_path();
-            if cwasm_path.exists() {
-                #[allow(unsafe_code)]
-                match unsafe { PythonExecutor::from_precompiled_file(&cwasm_path) } {
-                    Ok(executor) => return executor.with_python_stdlib(&stdlib_path),
-                    Err(e) => {
-                        eprintln!(
-                            "Warning: Failed to load precompiled WASM from {:?}: {}",
-                            cwasm_path, e
-                        );
-                    }
-                }
-            }
-        }
-
         let path = runtime_wasm_path();
         PythonExecutor::from_file(&path)
             .unwrap_or_else(|e| panic!("Failed to load runtime.wasm from {:?}: {}", path, e))
@@ -74,7 +56,7 @@ fn create_executor() -> PythonExecutor {
     }
 }
 
-#[cfg(not(all(feature = "embedded-runtime", feature = "embedded-stdlib")))]
+#[cfg(not(feature = "embedded"))]
 fn runtime_wasm_path() -> PathBuf {
     let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap_or_else(|_| ".".to_string());
     PathBuf::from(manifest_dir)
@@ -84,7 +66,7 @@ fn runtime_wasm_path() -> PathBuf {
         .join("runtime.wasm")
 }
 
-#[cfg(not(all(feature = "embedded-runtime", feature = "embedded-stdlib")))]
+#[cfg(not(feature = "embedded"))]
 fn python_stdlib_path() -> PathBuf {
     let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap_or_else(|_| ".".to_string());
     PathBuf::from(manifest_dir)
@@ -93,19 +75,6 @@ fn python_stdlib_path() -> PathBuf {
         .join("eryx-wasm-runtime")
         .join("tests")
         .join("python-stdlib")
-}
-
-#[cfg(all(
-    feature = "precompiled",
-    not(all(feature = "embedded-runtime", feature = "embedded-stdlib"))
-))]
-fn precompiled_wasm_path() -> PathBuf {
-    let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap_or_else(|_| ".".to_string());
-    PathBuf::from(manifest_dir)
-        .parent()
-        .unwrap_or_else(|| std::path::Path::new("."))
-        .join("eryx-runtime")
-        .join("runtime.cwasm")
 }
 
 /// Helper to create a session for testing.
