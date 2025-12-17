@@ -105,26 +105,36 @@ impl TypedCallback for WorkCallback {
     }
 }
 
+fn get_workspace_root() -> std::path::PathBuf {
+    // When running benchmarks, the working directory is the workspace root,
+    // but CARGO_MANIFEST_DIR points to the crate directory.
+    // We need to go up two levels from the crate to reach the workspace root.
+    let manifest_dir = env!("CARGO_MANIFEST_DIR");
+    std::path::Path::new(manifest_dir)
+        .parent()
+        .and_then(|p| p.parent())
+        .expect("Could not find workspace root")
+        .to_path_buf()
+}
+
 fn get_wasm_path() -> String {
     std::env::var("ERYX_WASM_PATH").unwrap_or_else(|_| {
-        // When running benchmarks, the working directory is the workspace root,
-        // but CARGO_MANIFEST_DIR points to the crate directory.
-        // We need to go up two levels from the crate to reach the workspace root.
-        let manifest_dir = env!("CARGO_MANIFEST_DIR");
-        let workspace_root = std::path::Path::new(manifest_dir)
-            .parent()
-            .and_then(|p| p.parent())
-            .expect("Could not find workspace root");
-        workspace_root
+        get_workspace_root()
             .join("crates/eryx-runtime/runtime.wasm")
             .to_string_lossy()
             .into_owned()
     })
 }
 
+fn get_python_stdlib_path() -> std::path::PathBuf {
+    get_workspace_root()
+        .join("crates/eryx-wasm-runtime/tests/python-stdlib")
+}
+
 fn create_sandbox() -> Sandbox {
     Sandbox::builder()
         .with_wasm_file(get_wasm_path())
+        .with_python_stdlib(get_python_stdlib_path())
         .with_callback(NoopCallback)
         .with_callback(EchoCallback)
         .with_callback(WorkCallback)
@@ -150,10 +160,12 @@ fn bench_sandbox_init(c: &mut Criterion) {
     group.sample_size(10); // Minimum allowed by criterion
     group.measurement_time(Duration::from_secs(20));
 
+    let stdlib_path = get_python_stdlib_path();
     group.bench_function("create", |b| {
         b.iter(|| {
             let _sandbox = Sandbox::builder()
                 .with_wasm_file(&wasm_path)
+                .with_python_stdlib(&stdlib_path)
                 .with_callback(NoopCallback)
                 .build()
                 .expect("Failed to create sandbox");
@@ -283,7 +295,7 @@ fn bench_callback_invocation(c: &mut Criterion) {
     group.bench_function("single_noop", |b| {
         b.to_async(&rt).iter(|| async {
             sandbox
-                .execute(r#"result = await invoke("noop", "{}")"#)
+                .execute(r#"result = await invoke("noop")"#)
                 .await
                 .expect("Execution failed")
         });
@@ -293,7 +305,7 @@ fn bench_callback_invocation(c: &mut Criterion) {
     group.bench_function("single_echo_small", |b| {
         b.to_async(&rt).iter(|| async {
             sandbox
-                .execute(r#"result = await invoke("echo", '{"data": "hello"}')"#)
+                .execute(r#"result = await invoke("echo", data="hello")"#)
                 .await
                 .expect("Execution failed")
         });
@@ -303,7 +315,7 @@ fn bench_callback_invocation(c: &mut Criterion) {
     group.bench_function("single_echo_large", |b| {
         b.to_async(&rt).iter(|| async {
             sandbox
-                .execute(r#"result = await invoke("echo", '{"data": "' + 'x' * 1000 + '"}')"#)
+                .execute(r#"result = await invoke("echo", data="x" * 1000)"#)
                 .await
                 .expect("Execution failed")
         });
@@ -318,7 +330,7 @@ fn bench_callback_invocation(c: &mut Criterion) {
                 let code = format!(
                     "
 for _ in range({count}):
-    await invoke(\"noop\", \"{{}}\")
+    await invoke(\"noop\")
 "
                 );
                 b.to_async(&rt)
@@ -352,7 +364,7 @@ fn bench_parallel_callbacks(c: &mut Criterion) {
             &count,
             |b, &count| {
                 let invokes = (0..count)
-                    .map(|_| "invoke(\"noop\", \"{}\")")
+                    .map(|_| "invoke(\"noop\")")
                     .collect::<Vec<_>>()
                     .join(", ");
                 let code = format!(
@@ -375,7 +387,7 @@ results = await asyncio.gather({invokes})
             &count,
             |b, &count| {
                 let invokes = (0..count)
-                    .map(|_| "invoke(\"work\", '{\"ms\": 10}')")
+                    .map(|_| "invoke(\"work\", ms=10)")
                     .collect::<Vec<_>>()
                     .join(", ");
                 let code = format!(

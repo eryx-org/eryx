@@ -716,10 +716,8 @@ async def await_invoke(name: str, args_json: str) -> str:
         if result.get('ok', False):
             # Return the value as a JSON string
             value = result.get('value', '')
-            if isinstance(value, str):
-                return value
-            else:
-                return json.dumps(value)
+            # Always JSON-encode so invoke() can call json.loads()
+            return json.dumps(value)
         else:
             raise RuntimeError(result.get('error', 'Unknown error'))
 ''', '_eryx_async', 'exec'), _eryx_async.__dict__)
