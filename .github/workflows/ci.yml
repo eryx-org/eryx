@@ -11,6 +11,30 @@ env:
   RUST_BACKTRACE: 1
 
 jobs:
+  # Fast check for dependency drift - runs in parallel with build
+  unify-check:
+    name: Dependency Check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Cache Rust toolchain and cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.rustup/toolchains
+            ~/.rustup/update-hashes
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ${{ runner.os }}-rust-unify-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-rust-unify-
+
+      - uses: ./.github/actions/setup-rust
+
+      - name: Check dependency unification
+        run: cargo rail unify --check
+
   # Build eryx-wasm-runtime and precompile it - other jobs depend on this
   build-eryx-runtime:
     name: Build eryx-runtime
