@@ -419,14 +419,14 @@ fn bench_introspection(c: &mut Criterion) {
 /// Benchmark sandbox creation with native extension caching.
 ///
 /// Requires:
-/// - `native-extensions` and `precompiled` features enabled
+/// - `native-extensions` and `embedded` features enabled
 /// - numpy extracted at /tmp/numpy
 ///
 /// Run with:
 /// ```bash
-/// cargo bench --package eryx --features native-extensions,precompiled -- caching
+/// cargo bench --package eryx --features native-extensions,embedded -- caching
 /// ```
-#[cfg(all(feature = "native-extensions", feature = "precompiled"))]
+#[cfg(all(feature = "native-extensions", feature = "embedded"))]
 fn bench_native_extension_caching(c: &mut Criterion) {
     use eryx::cache::InMemoryCache;
     use std::sync::Arc;
@@ -566,7 +566,7 @@ fn bench_native_extension_caching(c: &mut Criterion) {
     let _ = std::fs::remove_dir_all(cache_dir);
 }
 
-#[cfg(all(feature = "native-extensions", feature = "precompiled"))]
+#[cfg(all(feature = "native-extensions", feature = "embedded"))]
 criterion_group!(
     benches,
     bench_sandbox_init,
@@ -578,7 +578,7 @@ criterion_group!(
     bench_native_extension_caching,
 );
 
-#[cfg(not(all(feature = "native-extensions", feature = "precompiled")))]
+#[cfg(not(all(feature = "native-extensions", feature = "embedded")))]
 criterion_group!(
     benches,
     bench_sandbox_init,

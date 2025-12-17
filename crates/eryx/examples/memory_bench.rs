@@ -12,22 +12,22 @@
 //!
 //! Base runtime (no numpy):
 //! ```bash
-//! cargo run --example memory_bench --features precompiled --release
+//! cargo run --example memory_bench --features embedded --release
 //! ```
 //!
 //! With numpy (requires native-extensions feature and numpy download):
 //! ```bash
-//! cargo run --example memory_bench --features native-extensions,precompiled --release -- --numpy
+//! cargo run --example memory_bench --features native-extensions,embedded --release -- --numpy
 //! ```
 
-#[cfg(any(feature = "embedded-runtime", feature = "native-extensions"))]
+#[cfg(any(feature = "embedded", feature = "native-extensions"))]
 use std::time::Instant;
 
-#[cfg(any(feature = "embedded-runtime", feature = "native-extensions"))]
+#[cfg(any(feature = "embedded", feature = "native-extensions"))]
 use eryx::Sandbox;
 
 /// Get current process RSS (Resident Set Size) in MB.
-#[cfg(any(feature = "embedded-runtime", feature = "native-extensions"))]
+#[cfg(any(feature = "embedded", feature = "native-extensions"))]
 fn get_rss_mb() -> f64 {
     let status = std::fs::read_to_string("/proc/self/status").unwrap();
     for line in status.lines() {
@@ -40,7 +40,7 @@ fn get_rss_mb() -> f64 {
 }
 
 /// Get current process virtual memory size in MB.
-#[cfg(any(feature = "embedded-runtime", feature = "native-extensions"))]
+#[cfg(any(feature = "embedded", feature = "native-extensions"))]
 fn get_vsz_mb() -> f64 {
     let status = std::fs::read_to_string("/proc/self/status").unwrap();
     for line in status.lines() {
@@ -73,13 +73,13 @@ fn load_numpy_extensions(
     Ok(extensions)
 }
 
-#[cfg(any(feature = "embedded-runtime", feature = "native-extensions"))]
+#[cfg(any(feature = "embedded", feature = "native-extensions"))]
 struct MemorySnapshot {
     rss_mb: f64,
     vsz_mb: f64,
 }
 
-#[cfg(any(feature = "embedded-runtime", feature = "native-extensions"))]
+#[cfg(any(feature = "embedded", feature = "native-extensions"))]
 impl MemorySnapshot {
     fn now() -> Self {
         Self {
@@ -105,7 +105,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         {
             eprintln!("Error: --numpy requires native-extensions feature");
             eprintln!(
-                "Run with: cargo run --example memory_bench --features native-extensions,precompiled --release -- --numpy"
+                "Run with: cargo run --example memory_bench --features native-extensions,embedded --release -- --numpy"
             );
         }
     } else {
@@ -115,7 +115,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-#[cfg(feature = "embedded-runtime")]
+#[cfg(feature = "embedded")]
 async fn run_base_benchmark() -> Result<(), Box<dyn std::error::Error>> {
     println!("Mode: Base runtime (no numpy)\n");
 
@@ -196,12 +196,10 @@ async fn run_base_benchmark() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-#[cfg(not(feature = "embedded-runtime"))]
+#[cfg(not(feature = "embedded"))]
 async fn run_base_benchmark() -> Result<(), Box<dyn std::error::Error>> {
-    eprintln!("Error: base benchmark requires embedded-runtime feature");
-    eprintln!(
-        "Run with: cargo run --example memory_bench --features precompiled,embedded-runtime --release"
-    );
+    eprintln!("Error: base benchmark requires embedded feature");
+    eprintln!("Run with: cargo run --example memory_bench --features embedded --release");
     Ok(())
 }
 

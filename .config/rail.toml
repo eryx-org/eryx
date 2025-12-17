@@ -1,0 +1,65 @@
+# cargo-rail configuration
+# Documentation: https://github.com/loadingalias/cargo-rail
+
+# Targets for multi-platform validation
+# Include common host targets and WASM for the runtime
+targets = ["x86_64-unknown-linux-gnu", "aarch64-apple-darwin"]
+
+[unify]
+include_paths = true
+include_renamed = false
+
+pin_transitives = false  # we don't use workspace-hack crates
+transitive_host = "root"
+
+strict_version_compat = true
+exact_pin_handling = "warn"
+major_version_conflict = "warn"
+
+msrv = true
+msrv_source = "workspace"  # use rust-version from workspace Cargo.toml
+
+detect_unused = true
+remove_unused = true
+
+prune_dead_features = true
+preserve_features = []
+detect_undeclared_features = true
+fix_undeclared_features = true
+skip_undeclared_patterns = [
+  "default",
+  "std",
+  "alloc",
+  "*_backend",
+  "*_impl",
+]
+
+# Exclude eryx-wasm-runtime as it's a staticlib for WASM, not a normal crate
+exclude = ["eryx-wasm-runtime"]
+include = []
+max_backups = 3
+
+
+[release]
+tag_prefix = "v"
+tag_format = "{crate}-{prefix}{version}"
+require_clean = true
+publish_delay = 5
+create_github_release = false
+sign_tags = false
+changelog_path = "CHANGELOG.md"
+changelog_relative_to = "crate"
+skip_changelog_for = ["eryx-wasm-runtime"]
+require_changelog_entries = false
+
+
+[change-detection]
+# Paths that trigger full workspace rebuild
+infrastructure = [
+  ".github/**",
+  "scripts/**",
+  "mise.toml",
+  "*.sh",
+  "deny.toml",
+  ".config/rail.toml",
+]

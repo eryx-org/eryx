@@ -11,14 +11,14 @@ This project uses [mise](https://mise.jdx.dev/) for tooling and task management.
 ```bash
 mise install           # Install Rust, cargo-nextest
 mise run setup         # Build WASM + precompile (one-time)
-mise run test          # Run tests with precompiled WASM (~0.1s)
+mise run test          # Run tests with embedded WASM (~0.1s)
 mise run ci            # Run all CI checks
 ```
 
 ### Key mise Tasks
 
 ```bash
-mise run test          # Run tests with precompiled WASM (~0.1s)
+mise run test          # Run tests with embedded WASM (~0.1s)
 mise run lint          # cargo clippy with all warnings
 mise run lint-fix      # Auto-fix clippy warnings
 mise run fmt           # cargo fmt
@@ -141,7 +141,7 @@ members = ["crates/*"]
 ### Testing
 
 - **Use `cargo nextest run --workspace`** for running tests (faster and better output than `cargo test`)
-- **Prefer `mise run test-fast`** which uses precompiled WASM for ~500x faster test runs
+- **Prefer `mise run test`** which uses embedded/precompiled WASM for ~500x faster test runs
 - Use `#[cfg(test)]` modules for unit tests
 - Place integration tests in `tests/` directories
 - Run `cargo nextest run --workspace --all-features` to test all feature combinations
@@ -268,10 +268,10 @@ cargo audit
 For this project specifically, use:
 
 ```bash
-mise run ci  # Runs fmt-check, lint, test-fast
+mise run ci  # Runs fmt-check, lint, test
 ```
 
-The `test-fast` task uses precompiled WASM which reduces test time from ~50s to ~0.1s.
+The `test` task uses the `embedded` feature with precompiled WASM which reduces test time from ~50s to ~0.1s.
 
 ## Common Gotchas
 

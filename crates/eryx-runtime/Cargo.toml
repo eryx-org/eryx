@@ -15,10 +15,23 @@ readme = "README.md"
 
 [features]
 default = []
-# Enable late-linking support for native extensions
-late-linking = ["dep:wit-component", "dep:zstd", "dep:sha2", "dep:zip"]
-# Enable pre-initialization support for capturing Python memory state
-pre-init = ["dep:component-init-transform", "dep:wasmtime", "dep:wasmtime-wasi", "dep:async-trait", "dep:futures", "dep:tempfile", "dep:anyhow", "dep:tracing", "late-linking"]
+# Enable native Python extension support via late-linking and pre-initialization.
+# Late-linking allows adding extensions like numpy at sandbox creation time.
+# Pre-initialization captures Python's memory state for faster startup.
+native-extensions = [
+    "dep:wit-component",
+    "dep:zstd",
+    "dep:sha2",
+    "dep:zip",
+    "dep:component-init-transform",
+    "dep:wasmtime",
+    "dep:wasmtime-wasi",
+    "dep:async-trait",
+    "dep:futures",
+    "dep:tempfile",
+    "dep:anyhow",
+    "dep:tracing",
+]
 
 [dependencies]
 wit-component = { workspace = true, optional = true }
@@ -42,3 +55,9 @@ zstd.workspace = true
 
 [lints]
 workspace = true
+
+[package.metadata.cargo-all-features]
+# Skip native-extensions feature as it requires the WASM runtime to be built first.
+# The build script embeds liberyx_runtime.so.zst which is only available after
+# running `mise run build-eryx-runtime`.
+denylist = ["native-extensions"]

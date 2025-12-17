@@ -7,8 +7,7 @@
 //!
 //! # Features
 //!
-//! - `embedded-stdlib`: Embeds the Python standard library (~2MB compressed)
-//! - `embedded-runtime`: Embeds the pre-compiled WASM runtime (~XMB)
+//! This module is only available when the `embedded` feature is enabled.
 //!
 //! # Example
 //!
@@ -24,31 +23,25 @@
 //!     .build()?;
 //! ```
 
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
-
-#[cfg(feature = "embedded-runtime")]
-use std::io::Write;
 
 use crate::error::Error;
 
 /// Embedded Python standard library (zstd-compressed tar archive).
-#[cfg(feature = "embedded-stdlib")]
 const EMBEDDED_STDLIB: &[u8] = include_bytes!("../python-stdlib.tar.zst");
 
 /// Embedded pre-compiled runtime.
-#[cfg(feature = "embedded-runtime")]
 const EMBEDDED_RUNTIME: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/runtime.cwasm"));
 
 /// Paths to extracted embedded resources.
 #[derive(Debug, Clone)]
 pub struct EmbeddedResources {
     /// Path to the extracted Python standard library directory.
-    #[cfg(feature = "embedded-stdlib")]
     pub stdlib_path: PathBuf,
 
     /// Path to the pre-compiled runtime file (for mmap loading).
-    #[cfg(feature = "embedded-runtime")]
     pub runtime_path: PathBuf,
 
     /// The temp directory (kept alive to prevent cleanup).
@@ -82,23 +75,17 @@ impl EmbeddedResources {
         std::fs::create_dir_all(&temp_base)
             .map_err(|e| Error::Initialization(format!("Failed to create temp directory: {e}")))?;
 
-        #[cfg(feature = "embedded-stdlib")]
         let stdlib_path = Self::extract_stdlib(&temp_base)?;
-
-        #[cfg(feature = "embedded-runtime")]
         let runtime_path = Self::extract_runtime(&temp_base)?;
 
         Ok(Self {
-            #[cfg(feature = "embedded-stdlib")]
             stdlib_path,
-            #[cfg(feature = "embedded-runtime")]
             runtime_path,
             temp_dir: temp_base,
         })
     }
 
     /// Extract the embedded stdlib to the temp directory.
-    #[cfg(feature = "embedded-stdlib")]
     fn extract_stdlib(temp_dir: &Path) -> Result<PathBuf, Error> {
         let stdlib_path = temp_dir.join("python-stdlib");
 
@@ -162,7 +149,6 @@ impl EmbeddedResources {
     }
 
     /// Extract the embedded runtime to the temp directory.
-    #[cfg(feature = "embedded-runtime")]
     fn extract_runtime(temp_dir: &Path) -> Result<PathBuf, Error> {
         // Include version info in filename to handle upgrades
         let version = env!("CARGO_PKG_VERSION");
@@ -221,22 +207,12 @@ impl EmbeddedResources {
     }
 
     /// Get the path to the Python standard library.
-    ///
-    /// # Panics
-    ///
-    /// Panics if the `embedded-stdlib` feature is not enabled.
-    #[cfg(feature = "embedded-stdlib")]
     #[must_use]
     pub fn stdlib(&self) -> &Path {
         &self.stdlib_path
     }
 
     /// Get the path to the pre-compiled runtime.
-    ///
-    /// # Panics
-    ///
-    /// Panics if the `embedded-runtime` feature is not enabled.
-    #[cfg(feature = "embedded-runtime")]
     #[must_use]
     pub fn runtime(&self) -> &Path {
         &self.runtime_path
@@ -245,11 +221,9 @@ impl EmbeddedResources {
 
 #[cfg(test)]
 mod tests {
-    #[allow(unused_imports)]
     use super::*;
 
     #[test]
-    #[cfg(feature = "embedded-stdlib")]
     fn embedded_stdlib_is_included() {
         // Just verify the bytes are included
         assert!(
@@ -259,7 +233,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg(feature = "embedded-runtime")]
     fn embedded_runtime_is_included() {
         // Just verify the bytes are included
         assert!(

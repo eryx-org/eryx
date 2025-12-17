@@ -8,7 +8,7 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::approx_constant)]
 
 use std::future::Future;
-#[cfg(not(all(feature = "embedded-runtime", feature = "embedded-stdlib")))]
+#[cfg(not(feature = "embedded"))]
 use std::path::PathBuf;
 use std::pin::Pin;
 use std::time::Duration;
@@ -178,7 +178,7 @@ impl TypedCallback for SleepCallback {
 // Helper Functions
 // =============================================================================
 
-#[cfg(not(all(feature = "embedded-runtime", feature = "embedded-stdlib")))]
+#[cfg(not(feature = "embedded"))]
 fn runtime_wasm_path() -> PathBuf {
     let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap_or_else(|_| ".".to_string());
     PathBuf::from(manifest_dir)
@@ -188,7 +188,7 @@ fn runtime_wasm_path() -> PathBuf {
         .join("runtime.wasm")
 }
 
-#[cfg(not(all(feature = "embedded-runtime", feature = "embedded-stdlib")))]
+#[cfg(not(feature = "embedded"))]
 fn python_stdlib_path() -> PathBuf {
     let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap_or_else(|_| ".".to_string());
     PathBuf::from(manifest_dir)
@@ -199,46 +199,18 @@ fn python_stdlib_path() -> PathBuf {
         .join("python-stdlib")
 }
 
-#[cfg(all(
-    feature = "precompiled",
-    not(all(feature = "embedded-runtime", feature = "embedded-stdlib"))
-))]
-fn precompiled_wasm_path() -> PathBuf {
-    let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap_or_else(|_| ".".to_string());
-    PathBuf::from(manifest_dir)
-        .parent()
-        .unwrap_or_else(|| std::path::Path::new("."))
-        .join("eryx-runtime")
-        .join("runtime.cwasm")
-}
-
 /// Create a sandbox builder with the appropriate WASM source.
 fn sandbox_builder() -> eryx::SandboxBuilder {
-    // When embedded features are available, use them (more reliable)
-    #[cfg(all(feature = "embedded-runtime", feature = "embedded-stdlib"))]
+    // When embedded feature is available, use it (more reliable)
+    #[cfg(feature = "embedded")]
     {
         Sandbox::builder()
     }
 
-    // Fallback to explicit paths for testing without embedded features
-    #[cfg(not(all(feature = "embedded-runtime", feature = "embedded-stdlib")))]
+    // Fallback to explicit paths for testing without embedded feature
+    #[cfg(not(feature = "embedded"))]
     {
         let stdlib_path = python_stdlib_path();
-
-        #[cfg(feature = "precompiled")]
-        {
-            let cwasm_path = precompiled_wasm_path();
-            if cwasm_path.exists() {
-                // SAFETY: We trust the precompiled WASM from our own build
-                #[allow(unsafe_code)]
-                return unsafe {
-                    Sandbox::builder()
-                        .with_precompiled_file(&cwasm_path)
-                        .with_python_stdlib(&stdlib_path)
-                };
-            }
-        }
-
         Sandbox::builder()
             .with_wasm_file(runtime_wasm_path())
             .with_python_stdlib(&stdlib_path)

@@ -20,7 +20,7 @@
 //! let executor = unsafe { PythonExecutor::from_precompiled_file("runtime.cwasm")? };
 //! ```
 //!
-//! Alternatively, enable the `embedded-runtime` feature for a safe API that
+//! Alternatively, enable the `embedded` feature for a safe API that
 //! pre-compiles at build time and embeds the result in the binary.
 
 use std::path::PathBuf;
@@ -477,7 +477,7 @@ impl PythonExecutor {
     ///
     /// Returns an error if the pre-compiled bytes are invalid or incompatible
     /// with the current engine configuration.
-    #[cfg(feature = "precompiled")]
+    #[cfg(feature = "embedded")]
     #[allow(unsafe_code)]
     pub unsafe fn from_precompiled(precompiled_bytes: &[u8]) -> std::result::Result<Self, Error> {
         let engine = Self::shared_engine()?;
@@ -513,7 +513,7 @@ impl PythonExecutor {
     ///
     /// Returns an error if the file cannot be read or the pre-compiled component
     /// is invalid or incompatible with the current engine configuration.
-    #[cfg(feature = "precompiled")]
+    #[cfg(feature = "embedded")]
     #[allow(unsafe_code)]
     pub unsafe fn from_precompiled_file(
         path: impl AsRef<std::path::Path>,
@@ -548,7 +548,7 @@ impl PythonExecutor {
     /// # Errors
     ///
     /// Returns an error if pre-compilation fails.
-    #[cfg(feature = "precompiled")]
+    #[cfg(feature = "embedded")]
     pub fn precompile(wasm_bytes: &[u8]) -> std::result::Result<Vec<u8>, Error> {
         let engine = Self::create_engine()?;
         engine
@@ -563,7 +563,7 @@ impl PythonExecutor {
     /// # Errors
     ///
     /// Returns an error if the file cannot be read or pre-compilation fails.
-    #[cfg(feature = "precompiled")]
+    #[cfg(feature = "embedded")]
     pub fn precompile_file(
         path: impl AsRef<std::path::Path>,
     ) -> std::result::Result<Vec<u8>, Error> {

@@ -59,7 +59,7 @@ fn main() {
     // Previously we also built in release mode, but that causes issues in CI where
     // we pre-build the WASM and don't want clippy/doc to try rebuilding it
     let build_requested = env::var("BUILD_ERYX_RUNTIME").is_ok();
-    let late_linking = env::var("CARGO_FEATURE_LATE_LINKING").is_ok();
+    let native_extensions = env::var("CARGO_FEATURE_NATIVE_EXTENSIONS").is_ok();
 
     // Check for pre-built late-linking artifacts (for CI)
     let prebuilt_dir = manifest_dir.join("prebuilt");
@@ -76,8 +76,8 @@ fn main() {
         // Full build requested - build everything from scratch
         let runtime_so = build_wasm_runtime(&wasm_runtime_dir);
         build_component(&manifest_dir, &runtime_so);
-    } else if late_linking {
-        // late-linking feature needs .so.zst files in OUT_DIR
+    } else if native_extensions {
+        // native-extensions feature needs .so.zst files in OUT_DIR
         if has_out_artifacts {
             // Already have artifacts from a previous build - nothing to do
             eprintln!("Using existing late-linking artifacts from OUT_DIR");

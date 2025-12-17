@@ -141,38 +141,31 @@ async fn main() -> Result<(), eryx::Error> {
 
 ## Feature Flags
 
-| Feature              | Description                                                                         | Enables            | Trade-offs                               |
-|----------------------|-------------------------------------------------------------------------------------|--------------------|------------------------------------------|
-| `precompiled`        | Load pre-compiled WASM via `with_precompiled_bytes()` / `with_precompiled_file()`   | —                  | Enables `unsafe` code paths              |
-| `embedded-runtime`   | Embed pre-compiled WASM; enables `with_embedded_runtime()` for ~41x faster startup  | `precompiled`      | +30MB binary size                        |
-| `embedded-stdlib`    | Embed Python stdlib for zero-config sandboxes; extracted to temp dir on first use   | —                  | +2.2MB binary size                       |
-| `packages`           | Enable `with_package()` for loading wheels (`.whl`) and source archives (`.tar.gz`) | —                  | Adds `zip`, `flate2`, `tar`, `walkdir`   |
-| `native-extensions`  | Enable native Python extension support (e.g., numpy) via late-linking               | —                  | Adds `eryx-runtime` dep; experimental    |
-| `pre-init`           | Capture Python's initialized memory state for faster startup with native extensions | `native-extensions`| Experimental                             |
+| Feature              | Description                                                                         | Trade-offs                               |
+|----------------------|-------------------------------------------------------------------------------------|------------------------------------------|
+| `embedded`           | Zero-config sandboxes: embeds pre-compiled WASM runtime + Python stdlib             | +32MB binary size; enables `unsafe` code paths |
+| `native-extensions`  | Native Python extension support (e.g., numpy) via late-linking and pre-initialization | Adds `eryx-runtime` dep; experimental    |
+
+Package support (`with_package()` for `.whl` and `.tar.gz` files) is always available — no feature flag required.
 
 ### Recommended Configurations
 
 ```rust
 // Fastest startup, zero configuration (recommended for most users)
-// Features: embedded-runtime, embedded-stdlib
-let sandbox = Sandbox::builder()
-    .with_embedded_runtime()
-    .build()?;
+// Features: embedded
+let sandbox = Sandbox::builder().build()?;
 
 // With package support for third-party libraries
-// Features: embedded-runtime, embedded-stdlib, packages
+// Features: embedded (packages always available)
 let sandbox = Sandbox::builder()
-    .with_embedded_runtime()
     .with_package("requests-2.31.0-py3-none-any.whl")?
     .build()?;
 
-// Custom pre-compiled WASM (advanced)
-// Features: precompiled
-let sandbox = unsafe {
-    Sandbox::builder()
-        .with_precompiled_file("runtime.cwasm")?
-        .build()?
-};
+// With native extensions (numpy, etc.)
+// Features: embedded, native-extensions
+let sandbox = Sandbox::builder()
+    .with_package("numpy-wasi.tar.gz")?
+    .build()?;
 ```
 
 ## Performance
@@ -200,7 +193,7 @@ mise run setup  # Build WASM + precompile (one-time)
 # Development
 mise run check          # Run cargo check
 mise run build          # Build all crates
-mise run test           # Run tests with precompiled WASM
+mise run test           # Run tests with embedded WASM
 mise run test-all       # Run tests with all features
 mise run lint           # Run clippy lints
 mise run fmt            # Format code
@@ -231,7 +224,7 @@ mise run examples       # Run all examples
 
 ```bash
 cargo nextest run --workspace                    # Run tests
-cargo nextest run --workspace --features precompiled  # Fast tests
+cargo nextest run --workspace --features embedded     # Fast tests
 cargo clippy --workspace --all-targets --all-features # Run lints
 cargo fmt --all                                  # Format code
 cargo doc --workspace --no-deps --open           # Generate docs
@@ -249,8 +242,8 @@ cargo run --example parallel_callbacks  # Parallel execution verification
 cargo run --example custom_library      # Using RuntimeLibrary
 cargo run --example session_reuse       # Session state persistence
 cargo run --example resource_limits     # ResourceLimits usage
-cargo run --example precompile --features precompiled      # Pre-compilation demo
-cargo run --example embedded_runtime --features embedded-runtime  # Embedded runtime
+cargo run --example precompile --features embedded         # Pre-compilation demo
+cargo run --example embedded_runtime --features embedded   # Embedded runtime
 ```
 
 ## Project Structure

@@ -38,7 +38,6 @@ pub struct Sandbox {
     /// Resource limits for execution.
     resource_limits: ResourceLimits,
     /// Extracted packages (kept alive to prevent temp directory cleanup).
-    #[cfg(feature = "packages")]
     _packages: Vec<crate::package::ExtractedPackage>,
 }
 
@@ -337,13 +336,13 @@ enum WasmSource {
     /// Path to a WASM component file (will be compiled at load time).
     File(std::path::PathBuf),
     /// Pre-compiled component bytes (skip compilation, unsafe).
-    #[cfg(feature = "precompiled")]
+    #[cfg(feature = "embedded")]
     PrecompiledBytes(Vec<u8>),
     /// Path to a pre-compiled component file (skip compilation, unsafe).
-    #[cfg(feature = "precompiled")]
+    #[cfg(feature = "embedded")]
     PrecompiledFile(std::path::PathBuf),
     /// Use the embedded pre-compiled runtime (safe, fast).
-    #[cfg(feature = "embedded-runtime")]
+    #[cfg(feature = "embedded")]
     EmbeddedRuntime,
 }
 
@@ -370,7 +369,6 @@ pub struct SandboxBuilder {
     #[cfg(feature = "native-extensions")]
     filesystem_cache: Option<crate::cache::FilesystemCache>,
     /// Extracted packages (kept alive for sandbox lifetime).
-    #[cfg(feature = "packages")]
     packages: Vec<crate::package::ExtractedPackage>,
 }
 
@@ -417,14 +415,13 @@ impl SandboxBuilder {
             cache: None,
             #[cfg(feature = "native-extensions")]
             filesystem_cache: None,
-            #[cfg(feature = "packages")]
             packages: Vec::new(),
         }
     }
 
     /// Explicitly use the embedded pre-compiled runtime.
     ///
-    /// **Note:** You usually don't need to call this. When the `embedded-runtime`
+    /// **Note:** You usually don't need to call this. When the `embedded`
     /// feature is enabled, the embedded runtime is used automatically for
     /// sandboxes without native extensions. This method exists for explicit
     /// control in advanced use cases.
@@ -437,7 +434,7 @@ impl SandboxBuilder {
     /// - **Has native extensions** → Late-linking (required for .so files)
     ///
     /// ```rust,ignore
-    /// // These are equivalent when embedded-runtime feature is enabled:
+    /// // These are equivalent when embedded feature is enabled:
     /// let sandbox = Sandbox::builder().build()?;
     /// let sandbox = Sandbox::builder().with_embedded_runtime().build()?;
     ///
@@ -446,7 +443,7 @@ impl SandboxBuilder {
     ///     .with_package("/path/to/numpy-wasi.tar.gz")?  // Has .so files
     ///     .build()?;  // Uses late-linking, not embedded runtime
     /// ```
-    #[cfg(feature = "embedded-runtime")]
+    #[cfg(feature = "embedded")]
     #[must_use]
     pub fn with_embedded_runtime(mut self) -> Self {
         self.wasm_source = WasmSource::EmbeddedRuntime;
@@ -499,7 +496,7 @@ impl SandboxBuilder {
     ///         .build()?
     /// };
     /// ```
-    #[cfg(feature = "precompiled")]
+    #[cfg(feature = "embedded")]
     #[must_use]
     #[allow(unsafe_code)]
     pub unsafe fn with_precompiled_bytes(mut self, bytes: impl Into<Vec<u8>>) -> Self {
@@ -538,7 +535,7 @@ impl SandboxBuilder {
     ///         .build()?
     /// };
     /// ```
-    #[cfg(feature = "precompiled")]
+    #[cfg(feature = "embedded")]
     #[must_use]
     #[allow(unsafe_code)]
     pub unsafe fn with_precompiled_file(mut self, path: impl Into<std::path::PathBuf>) -> Self {
@@ -790,7 +787,6 @@ impl SandboxBuilder {
     /// Returns an error if:
     /// - The package format cannot be detected
     /// - The archive cannot be read or extracted
-    #[cfg(feature = "packages")]
     pub fn with_package(mut self, path: impl AsRef<std::path::Path>) -> Result<Self, Error> {
         let package = crate::package::ExtractedPackage::from_path(path)?;
 
@@ -832,11 +828,11 @@ impl SandboxBuilder {
     /// `with_package()` with `.so` files), late-linking is used automatically.
     /// This overrides any `with_embedded_runtime()` setting since native
     /// extensions must be linked into the runtime.
-    #[allow(unused_mut)] // mut needed when packages + native-extensions features are enabled
+    #[allow(unused_mut)] // mut needed when native-extensions feature is enabled
     pub fn build(mut self) -> Result<Sandbox, Error> {
         // First, compute mount indices and register native extensions from packages
         // with correct dlopen paths. Mount index 0 is reserved for explicit site-packages.
-        #[cfg(all(feature = "packages", feature = "native-extensions"))]
+        #[cfg(feature = "native-extensions")]
         {
             let start_index = if self.python_site_packages_path.is_some() {
                 1
@@ -859,7 +855,7 @@ impl SandboxBuilder {
 
         // Set up default cache for native extensions if none specified
         // This avoids re-linking on every sandbox creation
-        #[cfg(all(feature = "native-extensions", feature = "precompiled"))]
+        #[cfg(all(feature = "native-extensions", feature = "embedded"))]
         if !self.native_extensions.is_empty()
             && self.filesystem_cache.is_none()
             && self.cache.is_none()
@@ -878,7 +874,7 @@ impl SandboxBuilder {
         #[cfg(feature = "native-extensions")]
         let executor = if !self.native_extensions.is_empty() {
             // Warn if user explicitly set embedded runtime - it will be ignored
-            #[cfg(feature = "embedded-runtime")]
+            #[cfg(feature = "embedded")]
             if matches!(self.wasm_source, WasmSource::EmbeddedRuntime) {
                 tracing::info!(
                     "Native extensions detected - using late-linking instead of embedded runtime"
@@ -893,13 +889,13 @@ impl SandboxBuilder {
         let executor = self.build_executor_from_source()?;
 
         // Determine stdlib path: explicit > embedded > none
-        #[cfg(feature = "embedded-stdlib")]
+        #[cfg(feature = "embedded")]
         let stdlib_path = self.python_stdlib_path.clone().or_else(|| {
             crate::embedded::EmbeddedResources::get()
                 .ok()
                 .map(|r| r.stdlib_path.clone())
         });
-        #[cfg(not(feature = "embedded-stdlib"))]
+        #[cfg(not(feature = "embedded"))]
         let stdlib_path = self.python_stdlib_path.clone();
 
         // Collect all site-packages paths: explicit path first, then package paths
@@ -907,7 +903,6 @@ impl SandboxBuilder {
         if let Some(explicit_path) = self.python_site_packages_path.clone() {
             site_packages_paths.push(explicit_path);
         }
-        #[cfg(feature = "packages")]
         for package in &self.packages {
             site_packages_paths.push(package.python_path.clone());
         }
@@ -932,7 +927,6 @@ impl SandboxBuilder {
             trace_handler: self.trace_handler,
             output_handler: self.output_handler,
             resource_limits: self.resource_limits,
-            #[cfg(feature = "packages")]
             _packages: self.packages,
         })
     }
@@ -943,7 +937,7 @@ impl SandboxBuilder {
             WasmSource::Bytes(bytes) => PythonExecutor::from_binary(bytes)?,
             WasmSource::File(path) => PythonExecutor::from_file(path)?,
 
-            #[cfg(feature = "precompiled")]
+            #[cfg(feature = "embedded")]
             WasmSource::PrecompiledBytes(bytes) => {
                 // SAFETY: User is responsible for only using trusted pre-compiled bytes.
                 // The `with_precompiled_bytes` method is already marked unsafe, so the
@@ -954,7 +948,7 @@ impl SandboxBuilder {
                 }
             }
 
-            #[cfg(feature = "precompiled")]
+            #[cfg(feature = "embedded")]
             WasmSource::PrecompiledFile(path) => {
                 // SAFETY: User is responsible for only using trusted pre-compiled files.
                 // The `with_precompiled_file` method is already marked unsafe, so the
@@ -965,7 +959,7 @@ impl SandboxBuilder {
                 }
             }
 
-            #[cfg(feature = "embedded-runtime")]
+            #[cfg(feature = "embedded")]
             WasmSource::EmbeddedRuntime => {
                 // Extract embedded runtime to disk and load via mmap for better memory efficiency.
                 // SAFETY: The embedded runtime was pre-compiled at build time from our own
@@ -978,8 +972,8 @@ impl SandboxBuilder {
             }
 
             WasmSource::None => {
-                // If embedded-runtime feature is enabled, use it automatically as the default
-                #[cfg(feature = "embedded-runtime")]
+                // If embedded feature is enabled, use it automatically as the default
+                #[cfg(feature = "embedded")]
                 {
                     tracing::debug!("No WASM source specified, using embedded runtime");
                     let resources = crate::embedded::EmbeddedResources::get()?;
@@ -989,15 +983,10 @@ impl SandboxBuilder {
                     }
                 }
 
-                #[cfg(not(feature = "embedded-runtime"))]
+                #[cfg(not(feature = "embedded"))]
                 {
-                    #[cfg(feature = "precompiled")]
-                    let msg = "No WASM component specified. Use with_wasm_bytes(), with_wasm_file(), with_precompiled_bytes(), or with_precompiled_file(). \
-                               Or enable the `embedded-runtime` feature for automatic runtime loading.";
-
-                    #[cfg(not(feature = "precompiled"))]
                     let msg = "No WASM component specified. Use with_wasm_bytes() or with_wasm_file(). \
-                               Or enable the `embedded-runtime` feature for automatic runtime loading.";
+                               Or enable the `embedded` feature for automatic runtime loading.";
 
                     return Err(Error::Initialization(msg.to_string()));
                 }
@@ -1009,21 +998,21 @@ impl SandboxBuilder {
 
     /// Build executor with native extensions, using cache if available.
     ///
-    /// When a cache is configured and the `precompiled` feature is enabled,
+    /// When a cache is configured and the `embedded` feature is enabled,
     /// this will:
     /// 1. Check the cache for a pre-compiled component
     /// 2. If found, load from cache (fast path)
     /// 3. If not found, link extensions, pre-compile, cache, and return
     #[cfg(feature = "native-extensions")]
     fn build_executor_with_extensions(&self) -> Result<PythonExecutor, Error> {
-        #[cfg(feature = "precompiled")]
+        #[cfg(feature = "embedded")]
         use crate::cache::CacheKey;
 
-        #[cfg(feature = "precompiled")]
+        #[cfg(feature = "embedded")]
         let cache_key = CacheKey::from_extensions(&self.native_extensions);
 
         // Try filesystem cache first (mmap-based, 3x faster than bytes)
-        #[cfg(feature = "precompiled")]
+        #[cfg(feature = "embedded")]
         if let Some(fs_cache) = &self.filesystem_cache
             && let Some(path) = fs_cache.get_path(&cache_key)
         {
@@ -1041,7 +1030,7 @@ impl SandboxBuilder {
         }
 
         // Fall back to in-memory cache (for InMemoryCache users)
-        #[cfg(feature = "precompiled")]
+        #[cfg(feature = "embedded")]
         if let Some(cache) = &self.cache {
             if let Some(precompiled) = cache.get(&cache_key) {
                 tracing::debug!(
@@ -1063,7 +1052,7 @@ impl SandboxBuilder {
                 .map_err(|e| Error::Initialization(format!("late-linking failed: {e}")))?;
 
         // Pre-compile and cache if available
-        #[cfg(feature = "precompiled")]
+        #[cfg(feature = "embedded")]
         if let Some(cache) = &self.cache {
             let precompiled = PythonExecutor::precompile(&component_bytes)?;
 
@@ -1087,7 +1076,7 @@ impl SandboxBuilder {
             return unsafe { PythonExecutor::from_precompiled(&precompiled) };
         }
 
-        // No cache or precompiled feature - create executor directly from linked bytes
+        // No cache or embedded feature - create executor directly from linked bytes
         PythonExecutor::from_binary(&component_bytes)
     }
 }
@@ -1414,9 +1403,9 @@ mod tests {
         }
     }
 
-    /// Test that sandbox creation fails without WASM when embedded-runtime is not available.
+    /// Test that sandbox creation fails without WASM when embedded is not available.
     #[test]
-    #[cfg(not(feature = "embedded-runtime"))]
+    #[cfg(not(feature = "embedded"))]
     fn sandbox_builder_build_fails_without_wasm() {
         let builder = SandboxBuilder::new();
         let result = builder.build();
@@ -1431,9 +1420,9 @@ mod tests {
         );
     }
 
-    /// Test that sandbox creation succeeds automatically with embedded-runtime.
+    /// Test that sandbox creation succeeds automatically with embedded.
     #[test]
-    #[cfg(feature = "embedded-runtime")]
+    #[cfg(feature = "embedded")]
     fn sandbox_builder_build_uses_embedded_runtime_automatically() {
         let builder = SandboxBuilder::new();
         let result = builder.build();

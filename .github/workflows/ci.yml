@@ -11,6 +11,30 @@ env:
   RUST_BACKTRACE: 1
 
 jobs:
+  # Fast check for dependency drift - runs in parallel with build
+  unify-check:
+    name: Dependency Check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Cache Rust toolchain and cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.rustup/toolchains
+            ~/.rustup/update-hashes
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ${{ runner.os }}-rust-unify-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-rust-unify-
+
+      - uses: ./.github/actions/setup-rust
+
+      - name: Check dependency unification
+        run: cargo rail unify --check
+
   # Build eryx-wasm-runtime and precompile it - other jobs depend on this
   build-eryx-runtime:
     name: Build eryx-runtime
@@ -151,6 +175,16 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y mold clang
 
+      - name: Free disk space
+        uses: endersonmenezes/free-disk-space@v3
+        with:
+          remove_android: true
+          remove_dotnet: true
+          remove_haskell: true
+          remove_tool_cache: true
+          rm_cmd: "rmz" # Faster deletion (~3x faster)
+          rmz_version: "3.1.1"
+
       - name: Configure mold linker
         run: |
           mkdir -p .cargo
@@ -180,7 +214,8 @@ jobs:
         # - runtime.wasm and runtime.cwasm are provided by artifacts
         # - prebuilt/liberyx_*.so.zst are provided for late-linking feature
         # - liberyx_runtime.so and python-stdlib are provided for eryx-wasm-runtime tests
-        run: cargo nextest run --workspace --all-features
+        # Use --profile ci for longer timeouts on slow WASM component tests
+        run: cargo nextest run --workspace --all-features --profile ci
 
   msrv:
     name: MSRV

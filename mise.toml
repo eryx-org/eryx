@@ -10,6 +10,14 @@ binstall = true
 version = "latest"
 binstall = true
 
+[tools."cargo:cargo-rail"]
+version = "latest"
+binstall = true
+
+[tools."cargo:cargo-all-features"]
+version = "latest"
+binstall = true
+
 # Note: WASI SDK is intentionally NOT in [tools] because adding it to PATH
 # breaks host compilation (Rust picks up wasm clang for proc-macro builds).
 # Instead, we install it on-demand via the ensure-wasi-sdk task.
@@ -26,23 +34,23 @@ description = "Build all crates"
 run = "cargo build --workspace"
 
 [tasks.test]
-description = "Run tests with precompiled WASM"
+description = "Run tests with embedded WASM"
 depends = ["precompile-eryx-runtime"]
-run = "cargo nextest run --workspace --features precompiled"
+run = "cargo nextest run --workspace --features embedded"
 
 [tasks.test-all]
 description = "Run tests with all features"
-depends = ["precompile-eryx-runtime"]
+depends = ["precompile-eryx-runtime", "build-native-extensions"]
 run = "cargo nextest run --workspace --all-features"
 
 [tasks.lint]
 description = "Run clippy lints"
-depends = ["build-eryx-runtime"]
+depends = ["build-native-extensions"]
 run = "cargo clippy --workspace --all-targets --all-features -- -D warnings"
 
 [tasks.lint-fix]
 description = "Auto-fix clippy warnings"
-depends = ["build-eryx-runtime"]
+depends = ["build-native-extensions"]
 run = "cargo clippy --fix --allow-dirty --workspace --all-targets --all-features"
 
 [tasks.fmt]
@@ -55,7 +63,7 @@ run = "cargo fmt --all -- --check"
 
 [tasks.doc]
 description = "Generate documentation"
-depends = ["precompile-eryx-runtime"]
+depends = ["build-native-extensions"]
 run = "cargo doc --workspace --no-deps --all-features"
 
 [tasks.doc-open]
@@ -65,6 +73,27 @@ run = "cargo doc --workspace --no-deps --open"
 [tasks.ci]
 description = "Run all CI checks"
 depends = ["fmt-check", "lint", "test"]
+
+[tasks.unify]
+description = "Unify workspace dependencies and prune dead features"
+run = "cargo rail unify"
+
+[tasks.unify-check]
+description = "Check for dependency drift (CI)"
+run = "cargo rail unify --check"
+
+[tasks.affected]
+description = "List affected crates"
+run = "cargo rail affected"
+
+[tasks.check-all-features]
+description = "Check all feature combinations compile"
+run = "cargo check-all-features"
+
+[tasks.test-all-features]
+description = "Test all feature combinations"
+depends = ["build-eryx-runtime"]
+run = "cargo test-all-features"
 
 [tasks.clean]
 description = "Clean build artifacts"
@@ -79,6 +108,11 @@ BUILD_ERYX_RUNTIME=1 cargo build --package eryx-runtime --release
 """
 sources = ["crates/eryx-wasm-runtime/src/**/*.rs", "crates/eryx-wasm-runtime/clock_stubs.c", "crates/eryx-wasm-runtime/Cargo.toml", "crates/eryx-runtime/runtime.wit"]
 outputs = ["crates/eryx-runtime/runtime.wasm"]
+
+[tasks.build-native-extensions]
+description = "Build native-extensions artifacts (liberyx_runtime.so.zst, etc.)"
+depends = ["build-eryx-runtime"]
+run = "cargo build --package eryx-runtime --features native-extensions"
 
 [tasks.build-all]
 description = "Build WASM component and Rust crates"
@@ -95,7 +129,7 @@ run = "cargo bench --package eryx -- --save-baseline main"
 [tasks.precompile-eryx-runtime]
 description = "Pre-compile eryx-runtime WASM to native code for faster loading"
 depends = ["build-eryx-runtime"]
-run = "cargo run --example precompile --features precompiled --release"
+run = "cargo run --example precompile --features embedded --release"
 sources = ["crates/eryx-runtime/runtime.wasm"]
 outputs = ["crates/eryx-runtime/runtime.cwasm"]
 
@@ -122,7 +156,7 @@ run = "cargo +1.89 check --workspace"
 [tasks.example-demo]
 description = "Run the demo example"
 depends = ["build-eryx-runtime"]
-run = "cargo run --example trace_events --features embedded-runtime"
+run = "cargo run --example trace_events --features embedded"
 
 [tasks.examples]
 description = "Run all examples"
@@ -149,11 +183,11 @@ echo ""
 echo "=== session_reuse ==="
 cargo run --example session_reuse --release
 echo ""
-echo "=== precompile (requires precompiled feature) ==="
-cargo run --example precompile --features precompiled --release
+echo "=== precompile (requires embedded feature) ==="
+cargo run --example precompile --features embedded --release
 echo ""
-echo "=== embedded_runtime (requires embedded-runtime feature) ==="
-cargo run --example embedded_runtime --features embedded-runtime --release
+echo "=== embedded_runtime (requires embedded feature) ==="
+cargo run --example embedded_runtime --features embedded --release
 echo ""
 echo "✓ All examples completed!"
 """

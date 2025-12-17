@@ -17,15 +17,15 @@ harness = false
 
 [[example]]
 name = "embedded_runtime"
-required-features = ["embedded-runtime", "embedded-stdlib"]
+required-features = ["embedded"]
 
 [[example]]
 name = "precompile"
-required-features = ["precompiled"]
+required-features = ["embedded"]
 
 [[example]]
 name = "trace_events"
-required-features = ["embedded-runtime", "embedded-stdlib"]
+required-features = ["embedded"]
 
 [[example]]
 name = "numpy_native"
@@ -33,7 +33,15 @@ required-features = ["native-extensions"]
 
 [[example]]
 name = "numpy_preinit"
-required-features = ["pre-init", "precompiled"]
+required-features = ["native-extensions", "embedded"]
+
+[[example]]
+name = "session_bench"
+required-features = ["native-extensions", "embedded"]
+
+[[example]]
+name = "package_loading"
+required-features = ["native-extensions", "embedded"]
 
 [dependencies]
 tokio = { workspace = true, features = ["sync"] }
@@ -48,58 +56,49 @@ wasmtime.workspace = true
 wasmtime-wasi.workspace = true
 tracing.workspace = true
 sha2.workspace = true
-# Compression and archive extraction (for embedded stdlib and packages)
+# Package support (always enabled)
+zip.workspace = true
+flate2.workspace = true
+tar.workspace = true
+tempfile.workspace = true
+walkdir.workspace = true
+# Embedded runtime/stdlib (optional)
 zstd = { workspace = true, optional = true }
-tar = { workspace = true, optional = true }
-tempfile = { workspace = true, optional = true }
-zip = { workspace = true, optional = true }
-flate2 = { workspace = true, optional = true }
-walkdir = { workspace = true, optional = true }
 # Native extension support (optional)
 eryx-runtime = { path = "../eryx-runtime", optional = true }
 
 [features]
 default = []
-# Enable loading pre-compiled WASM components. This feature enables unsafe code paths
-# because wasmtime cannot fully validate pre-compiled components for safety.
+# Zero-config sandboxes: pre-compiled runtime + stdlib embedded in binary.
+# Enables unsafe code paths for wasmtime's pre-compiled component loading.
 # Without this feature, the crate uses `forbid(unsafe_code)`.
-precompiled = []
-# Pre-compile and embed the runtime WASM at build time for ~50x faster sandbox creation.
-# Requires runtime.wasm to be built before compiling this crate.
-# Implies `precompiled` feature.
-embedded-runtime = ["precompiled", "dep:wasmtime", "dep:tempfile"]
-# Embed Python standard library in the binary for zero-configuration sandboxes.
-# The stdlib is compressed (~2MB) and extracted to a temp directory on first use.
-embedded-stdlib = ["dep:zstd", "dep:tar", "dep:tempfile"]
-# Enable package support (with_package() for wheels and tar.gz archives).
-packages = ["dep:zip", "dep:flate2", "dep:tar", "dep:tempfile", "dep:walkdir"]
-# Enable native Python extension support via late-linking.
-# This allows adding extensions like numpy at sandbox creation time.
-native-extensions = ["dep:eryx-runtime", "eryx-runtime/late-linking"]
-# Enable pre-initialization support for native extensions.
-# This captures Python's initialized memory state for faster startup.
-pre-init = ["native-extensions", "eryx-runtime/pre-init"]
+embedded = ["dep:zstd"]
+# Native Python extension support via late-linking and pre-initialization.
+# Allows adding extensions like numpy at sandbox creation time.
+# Includes pre-init for capturing Python's memory state for faster startup.
+native-extensions = ["dep:eryx-runtime", "eryx-runtime/native-extensions"]
 
 [dev-dependencies]
 async-trait.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 criterion.workspace = true
 crossterm.workspace = true
-walkdir = "2.5"
 
 [build-dependencies]
-wasmtime = { workspace = true, optional = true }
+wasmtime.workspace = true
 
 [lints]
 workspace = true
 
-[[example]]
-name = "session_bench"
-required-features = ["pre-init", "precompiled"]
-
-[[example]]
-name = "package_loading"
-required-features = ["packages", "native-extensions", "embedded-stdlib", "precompiled"]
-
 [package.metadata."docs.rs"]
 all-features = true
+
+[package.metadata.cargo-all-features]
+# Skip feature combinations that require the WASM runtime to be built first.
+# native-extensions requires liberyx_runtime.so.zst which is only available
+# after running `mise run build-eryx-runtime`.
+skip_feature_sets = [
+    ["native-extensions"],
+]
+# With only 2 features, test all combinations (max 4)
+max_combination_size = 2
