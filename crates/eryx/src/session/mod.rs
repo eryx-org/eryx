@@ -44,7 +44,7 @@
 pub mod executor;
 pub mod in_process;
 
-use std::future::Future;
+use async_trait::async_trait;
 
 use crate::error::Error;
 use crate::sandbox::ExecuteResult;
@@ -56,7 +56,8 @@ pub use in_process::InProcessSession;
 ///
 /// A session maintains persistent state across multiple `execute()` calls,
 /// avoiding the ~1.5ms Python interpreter initialization overhead on each call.
-pub trait Session {
+#[async_trait]
+pub trait Session: Send {
     /// Execute Python code within this session.
     ///
     /// State from previous executions is preserved. For example:
@@ -65,7 +66,7 @@ pub trait Session {
     /// # Errors
     ///
     /// Returns an error if the Python code fails to execute or a resource limit is exceeded.
-    fn execute(&mut self, code: &str) -> impl Future<Output = Result<ExecuteResult, Error>> + Send;
+    async fn execute(&mut self, code: &str) -> Result<ExecuteResult, Error>;
 
     /// Reset the session to a fresh state.
     ///
@@ -74,7 +75,7 @@ pub trait Session {
     /// # Errors
     ///
     /// Returns an error if the reset fails.
-    fn reset(&mut self) -> impl Future<Output = Result<(), Error>> + Send;
+    async fn reset(&mut self) -> Result<(), Error>;
 }
 
 /// Trait for sessions that support state snapshots.
@@ -126,7 +127,8 @@ mod tests {
     #[test]
     fn test_session_trait_is_object_safe() {
         // Verify the Session trait can be used as a trait object
-        fn _assert_session_object_safe<T: Session>() {}
+        fn _assert_object_safe(_: &dyn Session) {}
+        fn _assert_boxed(_: Box<dyn Session>) {}
     }
 
     #[test]

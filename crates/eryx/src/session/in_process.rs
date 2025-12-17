@@ -46,6 +46,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Instant;
 
+use async_trait::async_trait;
 use futures::StreamExt;
 use futures::stream::FuturesUnordered;
 use tokio::sync::mpsc;
@@ -228,6 +229,7 @@ impl<'a> InProcessSession<'a> {
     }
 }
 
+#[async_trait]
 impl Session for InProcessSession<'_> {
     async fn execute(&mut self, code: &str) -> Result<ExecuteResult, Error> {
         self.execute_internal(code).await

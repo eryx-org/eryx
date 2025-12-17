@@ -374,9 +374,7 @@ impl PythonExecutor {
         self.python_site_packages_paths.push(path.into());
         self
     }
-}
 
-impl PythonExecutor {
     // Note: engine() and instance_pre() accessors are defined above
 
     /// Get or create the global shared wasmtime Engine.
