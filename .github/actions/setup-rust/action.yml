@@ -1,0 +1,14 @@
+name: "Setup Rust Environment"
+description: "Install cargo-binstall, mise, and Rust toolchain"
+
+runs:
+  using: "composite"
+  steps:
+    - name: Install cargo-binstall
+      shell: bash
+      run: curl -L --proto '=https' --tlsv1.2 -sSf https://raw.githubusercontent.com/cargo-bins/cargo-binstall/main/install-from-binstall-release.sh | bash
+
+    - name: Install mise
+      uses: jdx/mise-action@v3
+      with:
+        cache: false # We handle caching ourselves to include ~/.rustup

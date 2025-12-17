@@ -18,16 +18,14 @@
 //!
 //! ## Quick Start
 //!
-//! ```rust,ignore
+//! ```rust
 //! use eryx::Sandbox;
 //!
 //! #[tokio::main]
 //! async fn main() -> Result<(), eryx::Error> {
 //!     let sandbox = Sandbox::builder().build()?;
 //!
-//!     let result = sandbox.execute(r#"
-//!         print("Hello from Python!")
-//!     "#).await?;
+//!     let result = sandbox.execute("print('Hello from Python!')").await?;
 //!
 //!     println!("Output: {}", result.stdout);
 //!     Ok(())
@@ -41,14 +39,29 @@
 #![cfg_attr(not(feature = "precompiled"), forbid(unsafe_code))]
 #![cfg_attr(feature = "precompiled", deny(unsafe_code))]
 
+pub mod cache;
 mod callback;
+#[cfg(any(feature = "embedded-stdlib", feature = "embedded-runtime"))]
+pub mod embedded;
 mod error;
 mod library;
+#[cfg(feature = "packages")]
+pub mod package;
 mod sandbox;
 mod schema;
 pub mod session;
 mod trace;
 mod wasm;
+
+/// Pre-initialization support for native extensions.
+///
+/// Pre-initialization runs Python's init + imports during build time and
+/// captures the memory state into the component. This avoids the 50-100ms
+/// startup cost on each sandbox creation.
+#[cfg(feature = "pre-init")]
+pub mod preinit {
+    pub use eryx_runtime::preinit::{PreInitError, pre_initialize};
+}
 
 pub use callback::{
     Callback, CallbackError, DynamicCallback, DynamicCallbackBuilder, TypedCallback, empty_schema,

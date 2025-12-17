@@ -4,58 +4,48 @@ Python WASM runtime component for the eryx sandbox.
 
 ## Overview
 
-This crate contains the WIT (WebAssembly Interface Types) definition and Python runtime source that gets compiled to a WebAssembly component using `componentize-py`.
+This crate builds the runtime.wasm component by linking together:
+- `eryx-wasm-runtime` - Rust crate that provides the Python execution engine
+- `libpython3.14.so` - WASI-compiled CPython
+- WASI support libraries (libc, libc++, etc.)
+
+The build process uses `wit-dylib` and `wit-component` to create a fully linked WASM component.
 
 ## Files
 
 - `runtime.wit` - WIT interface definition (source of truth)
-- `runtime.py` - Python runtime implementation
-- `runtime.wasm` - Compiled WASM component (generated, not committed)
+- `runtime.wasm` - Compiled WASM component (generated)
+- `runtime.cwasm` - Pre-compiled WASM for faster loading (generated)
+- `libs/` - Compressed WASI libraries required for linking
+- `build.rs` - Build script that orchestrates the linking process
 
-## Prerequisites
+## Building
 
-You need `componentize-py` with async support (version >= 0.19.0):
-
-```bash
-# Create a virtual environment
-python3 -m venv .venv
-source .venv/bin/activate
-
-# Install componentize-py
-pip install 'componentize-py>=0.19.0'
-```
-
-Verify the version:
+The WASM component is built automatically when needed:
 
 ```bash
-componentize-py --version
-# Should be >= 0.19.0
+# Build with mise
+mise run build-eryx-runtime
+
+# Or directly with cargo (requires BUILD_ERYX_RUNTIME=1)
+BUILD_ERYX_RUNTIME=1 cargo build --package eryx-runtime
 ```
 
-## Building the WASM Component
+The build script will:
+1. Compile `eryx-wasm-runtime` for wasm32-wasip1
+2. Link it with libpython and WASI libraries
+3. Generate WIT bindings with `wit-dylib`
+4. Produce the final `runtime.wasm` component
 
-To build (or rebuild) the WASM component after modifying `runtime.wit` or `runtime.py`:
+## Pre-compilation
+
+For faster sandbox creation (~50x speedup), pre-compile the WASM:
 
 ```bash
-cd crates/eryx-runtime
-
-# First generate the bindings (required for async support)
-componentize-py -d runtime.wit -w sandbox bindings guest_bindings
-
-# Then build the component
-componentize-py -d runtime.wit -w sandbox componentize runtime -o runtime.wasm
+mise run precompile-eryx-runtime
 ```
 
-## Verifying Async Bindings
-
-After building, check that async bindings were generated:
-
-```bash
-grep "async def invoke" guest_bindings/wit_world/__init__.py
-grep "async def execute" guest_bindings/wit_world/__init__.py
-```
-
-Both should show `async def`.
+This produces `runtime.cwasm` which can be used with `Sandbox::builder().with_precompiled_file()`.
 
 ## WIT Interface
 
@@ -65,47 +55,33 @@ The runtime exposes the `eryx:sandbox` world with:
 
 - `invoke(name, arguments-json) -> result<string, string>` - Async callback invocation
 - `list-callbacks() -> list<callback-info>` - Introspection of available callbacks
-- `report-trace(lineno, event-json, context-json)` - Execution tracing
+- `report-trace(lineno, event-json, context-json)` - Execution tracing via `sys.settrace`
 
 ### Exports (Guest → Host)
 
 - `execute(code) -> result<string, string>` - Execute Python code with top-level await support
+- `snapshot-state() -> result<list<u8>, string>` - Capture session state
+- `restore-state(data) -> result<_, string>` - Restore session state
+- `clear-state()` - Clear all persistent state
 
-## Usage in Python
+## Architecture
 
-```python
-# Callbacks are available as direct async functions
-timestamp = await get_time()
-print(timestamp)
-
-# With keyword arguments
-result = await echo(message="hello")
-
-# Parallel execution
-results = await asyncio.gather(
-    query(q="a"),
-    query(q="b"),
-)
-
-# invoke() is still available for dynamic callback names
-result = await invoke("get_time")
-
-# Introspection
-callbacks = list_callbacks()
-for cb in callbacks:
-    print(f"{cb['name']}: {cb['description']}")
 ```
-
-## How Async Works
-
-1. **WIT declares `async func`**: Both `invoke` (import) and `execute` (export) are async
-2. **componentize-py generates async Python bindings**: Functions are async in the generated bindings
-3. **Top-level await support**: Code is compiled with `PyCF_ALLOW_TOP_LEVEL_AWAIT` flag
-4. **Coroutine handling**: When compiled code has top-level await, we create a function from the code object and await it
-5. **wasmtime 39+**: The Rust host uses async component model support
+┌─────────────────────────────────────────────────────────────┐
+│                     runtime.wasm                             │
+├─────────────────────────────────────────────────────────────┤
+│  liberyx_bindings.so (wit-dylib generated)                  │
+│    ↓ calls                                                  │
+│  liberyx_runtime.so (eryx-wasm-runtime crate)               │
+│    ↓ FFI                                                    │
+│  libpython3.14.so (CPython for WASI)                        │
+│    ↓ uses                                                   │
+│  libc.so, libc++.so, WASI emulation libs                    │
+└─────────────────────────────────────────────────────────────┘
+```
 
 ## References
 
-- [componentize-py](https://github.com/bytecodealliance/componentize-py)
-- [Component Model Async Proposal](https://github.com/WebAssembly/component-model/blob/main/design/mvp/Async.md)
-- [wasmtime component bindgen](https://docs.rs/wasmtime/latest/wasmtime/component/macro.bindgen.html)
+- [wit-dylib](https://github.com/aspect-build/rules_aspect/tree/main/aspect/wit-dylib)
+- [wit-component](https://github.com/bytecodealliance/wasm-tools)
+- [Component Model](https://github.com/WebAssembly/component-model)

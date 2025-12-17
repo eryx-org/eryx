@@ -3,7 +3,10 @@
 //! The `embedded-runtime` feature pre-compiles the Python runtime WASM at build time,
 //! providing ~50x faster sandbox creation with a safe API (no `unsafe` blocks needed!).
 //!
-//! Run with: `cargo run --example embedded_runtime --features embedded-runtime --release`
+//! When the feature is enabled, the embedded runtime is used **automatically** -
+//! you don't need to call `with_embedded_runtime()` explicitly.
+//!
+//! Run with: `cargo run --example embedded_runtime --features embedded-runtime,embedded-stdlib --release`
 //!
 //! Compare with the normal WASM loading:
 //!   `cargo run --example precompile --release`
@@ -13,10 +16,11 @@ use std::time::Instant;
 fn main() -> anyhow::Result<()> {
     println!("=== Embedded Runtime Example ===\n");
 
-    // Step 1: Create sandbox using embedded runtime (fast!)
-    println!("--- Creating sandbox with embedded runtime ---");
+    // Step 1: Create sandbox - embedded runtime is used automatically!
+    println!("--- Creating sandbox (embedded runtime is automatic) ---");
     let start = Instant::now();
-    let sandbox = eryx::Sandbox::builder().with_embedded_runtime().build()?;
+    // No need to call with_embedded_runtime() - it's the default when the feature is enabled
+    let sandbox = eryx::Sandbox::builder().build()?;
     let load_time = start.elapsed();
     println!("Sandbox creation time: {load_time:?}");
 
@@ -24,7 +28,7 @@ fn main() -> anyhow::Result<()> {
     println!("\n--- Multiple sandbox creations (10x) ---");
     let start = Instant::now();
     for _ in 0..10 {
-        let _sandbox = eryx::Sandbox::builder().with_embedded_runtime().build()?;
+        let _sandbox = eryx::Sandbox::builder().build()?;
     }
     let total_time = start.elapsed();
     let avg_time = total_time / 10;
@@ -62,8 +66,10 @@ fn main() -> anyhow::Result<()> {
     println!("\nBenefits of embedded-runtime feature:");
     println!("  ✓ ~50x faster sandbox creation");
     println!("  ✓ Safe API (no unsafe blocks needed)");
-    println!("  ✓ Zero configuration required");
+    println!("  ✓ Automatic - no configuration needed!");
     println!("  ✓ Pre-compiled at build time");
+    println!("\nNote: With native extensions (numpy, etc.), late-linking");
+    println!("is used automatically instead of embedded runtime.");
 
     Ok(())
 }

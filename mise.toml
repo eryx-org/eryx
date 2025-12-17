@@ -1,9 +1,21 @@
 [tools]
 # Profile "default" includes rustc, rust-std, cargo, rust-docs, rustfmt, and clippy
-rust = { version = "1.89", profile = "default" }
-"cargo:cargo-nextest" = "latest"
-uv = "latest"
-"cargo:wasm-tools" = "latest"
+rust = { version = "1.92", profile = "default" }
+
+[tools."cargo:cargo-nextest"]
+version = "latest"
+binstall = true
+
+[tools."cargo:wasm-tools"]
+version = "latest"
+binstall = true
+
+# Note: WASI SDK is intentionally NOT in [tools] because adding it to PATH
+# breaks host compilation (Rust picks up wasm clang for proc-macro builds).
+# Instead, we install it on-demand via the ensure-wasi-sdk task.
+
+[vars]
+wasi_sdk_version = "wasi-sdk-27"
 
 [tasks.check]
 description = "Run cargo check"
@@ -15,22 +27,22 @@ run = "cargo build --workspace"
 
 [tasks.test]
 description = "Run tests with precompiled WASM"
-depends = ["precompile-wasm"]
+depends = ["precompile-eryx-runtime"]
 run = "cargo nextest run --workspace --features precompiled"
 
 [tasks.test-all]
 description = "Run tests with all features"
-depends = ["precompile-wasm"]
+depends = ["precompile-eryx-runtime"]
 run = "cargo nextest run --workspace --all-features"
 
 [tasks.lint]
 description = "Run clippy lints"
-depends = ["build-wasm"]
+depends = ["build-eryx-runtime"]
 run = "cargo clippy --workspace --all-targets --all-features -- -D warnings"
 
 [tasks.lint-fix]
 description = "Auto-fix clippy warnings"
-depends = ["build-wasm"]
+depends = ["build-eryx-runtime"]
 run = "cargo clippy --fix --allow-dirty --workspace --all-targets --all-features"
 
 [tasks.fmt]
@@ -43,7 +55,7 @@ run = "cargo fmt --all -- --check"
 
 [tasks.doc]
 description = "Generate documentation"
-depends = ["precompile-wasm"]
+depends = ["precompile-eryx-runtime"]
 run = "cargo doc --workspace --no-deps --all-features"
 
 [tasks.doc-open]
@@ -58,19 +70,19 @@ depends = ["fmt-check", "lint", "test"]
 description = "Clean build artifacts"
 run = "cargo clean"
 
-[tasks.build-wasm]
-description = "Build the Python WASM component"
-dir = "crates/eryx-runtime"
+[tasks.build-eryx-runtime]
+description = "Build the eryx-wasm-runtime and runtime.wasm"
+depends = ["ensure-wasi-sdk"]
 run = """
-uv sync
-uv run componentize-py -d runtime.wit -w sandbox bindings guest_bindings
-uv run componentize-py -d runtime.wit -w sandbox componentize runtime -o runtime.wasm
-wasm-tools strip -a runtime.wasm -o runtime.wasm
+export WASI_SDK_PATH=$(mise where "github:WebAssembly/wasi-sdk@{{vars.wasi_sdk_version}}")
+BUILD_ERYX_RUNTIME=1 cargo build --package eryx-runtime --release
 """
+sources = ["crates/eryx-wasm-runtime/src/**/*.rs", "crates/eryx-wasm-runtime/clock_stubs.c", "crates/eryx-wasm-runtime/Cargo.toml", "crates/eryx-runtime/runtime.wit"]
+outputs = ["crates/eryx-runtime/runtime.wasm"]
 
 [tasks.build-all]
 description = "Build WASM component and Rust crates"
-depends = ["build-wasm", "build"]
+depends = ["build-eryx-runtime", "build"]
 
 [tasks.bench]
 description = "Run benchmarks"
@@ -80,16 +92,16 @@ run = "cargo bench --package eryx"
 description = "Run benchmarks and save baseline"
 run = "cargo bench --package eryx -- --save-baseline main"
 
-[tasks.precompile-wasm]
-description = "Pre-compile WASM to native code for faster loading"
-depends = ["build-wasm"]
+[tasks.precompile-eryx-runtime]
+description = "Pre-compile eryx-runtime WASM to native code for faster loading"
+depends = ["build-eryx-runtime"]
 run = "cargo run --example precompile --features precompiled --release"
 sources = ["crates/eryx-runtime/runtime.wasm"]
 outputs = ["crates/eryx-runtime/runtime.cwasm"]
 
 [tasks.setup]
 description = "Set up development environment (build WASM, precompile, etc.)"
-depends = ["build-wasm", "precompile-wasm"]
+depends = ["build-eryx-runtime", "precompile-eryx-runtime"]
 run = """
 echo "✓ Development environment ready!"
 echo ""
@@ -101,7 +113,7 @@ echo "  mise run build-all  - Build WASM and Rust crates"
 
 [tasks.build-all-precompiled]
 description = "Build WASM, pre-compile it, and build Rust crates"
-depends = ["build-wasm", "build"]
+depends = ["build-eryx-runtime", "build"]
 
 [tasks.msrv]
 description = "Check compilation on minimum supported Rust version"
@@ -109,12 +121,12 @@ run = "cargo +1.89 check --workspace"
 
 [tasks.example-demo]
 description = "Run the demo example"
-depends = ["build-wasm"]
+depends = ["build-eryx-runtime"]
 run = "cargo run --example trace_events --features embedded-runtime"
 
 [tasks.examples]
 description = "Run all examples"
-depends = ["build-wasm"]
+depends = ["build-eryx-runtime"]
 run = """
 echo "=== simple ==="
 cargo run --example simple --release
@@ -145,3 +157,41 @@ cargo run --example embedded_runtime --features embedded-runtime --release
 echo ""
 echo "✓ All examples completed!"
 """
+
+[tasks.ensure-wasi-sdk]
+description = "Install WASI SDK if not present"
+run = """
+WASI_SDK_SPEC="github:WebAssembly/wasi-sdk@{{vars.wasi_sdk_version}}"
+if ! mise where "$WASI_SDK_SPEC" 2>/dev/null; then
+    echo "Installing WASI SDK ({{vars.wasi_sdk_version}})..."
+    mise install "$WASI_SDK_SPEC"
+fi
+
+WASI_SDK_PATH=$(mise where "$WASI_SDK_SPEC")
+if [ ! -f "$WASI_SDK_PATH/bin/clang" ]; then
+    echo "ERROR: WASI SDK installation incomplete - clang not found"
+    exit 1
+fi
+echo "Using WASI SDK at: $WASI_SDK_PATH"
+"""
+
+[tasks.setup-eryx-runtime-tests]
+description = "Extract Python stdlib for eryx-wasm-runtime tests"
+dir = "crates/eryx-wasm-runtime"
+run = """
+mkdir -p tests/python-stdlib tests/site-packages
+# Find the python-lib.tar.zst from componentize-py build output
+PYTHON_LIB=$(find ../../target -name 'python-lib.tar.zst' -path '*/componentize-py-*/out/*' 2>/dev/null | head -1)
+if [[ -z "$PYTHON_LIB" ]]; then
+    echo "Error: python-lib.tar.zst not found. Run 'cargo build' first to build componentize-py."
+    exit 1
+fi
+echo "Extracting $PYTHON_LIB"
+tar -xf "$PYTHON_LIB" -C tests/python-stdlib
+"""
+outputs = ["tests/python-stdlib/encodings/__init__.py"]
+
+[tasks.test-eryx-runtime]
+description = "Run eryx-wasm-runtime integration tests"
+depends = ["build-eryx-runtime", "setup-eryx-runtime-tests"]
+run = "cargo test --package eryx-wasm-runtime --test runtime_test -- --nocapture"

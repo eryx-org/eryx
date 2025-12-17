@@ -17,7 +17,7 @@ harness = false
 
 [[example]]
 name = "embedded_runtime"
-required-features = ["embedded-runtime"]
+required-features = ["embedded-runtime", "embedded-stdlib"]
 
 [[example]]
 name = "precompile"
@@ -25,18 +25,15 @@ required-features = ["precompiled"]
 
 [[example]]
 name = "trace_events"
-required-features = ["embedded-runtime"]
+required-features = ["embedded-runtime", "embedded-stdlib"]
 
-[features]
-default = []
-# Enable loading pre-compiled WASM components. This feature enables unsafe code paths
-# because wasmtime cannot fully validate pre-compiled components for safety.
-# Without this feature, the crate uses `forbid(unsafe_code)`.
-precompiled = []
-# Pre-compile and embed the runtime WASM at build time for ~50x faster sandbox creation.
-# Requires runtime.wasm to be built before compiling this crate.
-# Implies `precompiled` feature.
-embedded-runtime = ["precompiled", "dep:wasmtime"]
+[[example]]
+name = "numpy_native"
+required-features = ["native-extensions"]
+
+[[example]]
+name = "numpy_preinit"
+required-features = ["pre-init", "precompiled"]
 
 [dependencies]
 tokio = { workspace = true, features = ["sync"] }
@@ -50,15 +47,59 @@ thiserror.workspace = true
 wasmtime.workspace = true
 wasmtime-wasi.workspace = true
 tracing.workspace = true
+sha2.workspace = true
+# Compression and archive extraction (for embedded stdlib and packages)
+zstd = { workspace = true, optional = true }
+tar = { workspace = true, optional = true }
+tempfile = { workspace = true, optional = true }
+zip = { workspace = true, optional = true }
+flate2 = { workspace = true, optional = true }
+walkdir = { workspace = true, optional = true }
+# Native extension support (optional)
+eryx-runtime = { path = "../eryx-runtime", optional = true }
+
+[features]
+default = []
+# Enable loading pre-compiled WASM components. This feature enables unsafe code paths
+# because wasmtime cannot fully validate pre-compiled components for safety.
+# Without this feature, the crate uses `forbid(unsafe_code)`.
+precompiled = []
+# Pre-compile and embed the runtime WASM at build time for ~50x faster sandbox creation.
+# Requires runtime.wasm to be built before compiling this crate.
+# Implies `precompiled` feature.
+embedded-runtime = ["precompiled", "dep:wasmtime", "dep:tempfile"]
+# Embed Python standard library in the binary for zero-configuration sandboxes.
+# The stdlib is compressed (~2MB) and extracted to a temp directory on first use.
+embedded-stdlib = ["dep:zstd", "dep:tar", "dep:tempfile"]
+# Enable package support (with_package() for wheels and tar.gz archives).
+packages = ["dep:zip", "dep:flate2", "dep:tar", "dep:tempfile", "dep:walkdir"]
+# Enable native Python extension support via late-linking.
+# This allows adding extensions like numpy at sandbox creation time.
+native-extensions = ["dep:eryx-runtime", "eryx-runtime/late-linking"]
+# Enable pre-initialization support for native extensions.
+# This captures Python's initialized memory state for faster startup.
+pre-init = ["native-extensions", "eryx-runtime/pre-init"]
 
 [dev-dependencies]
 async-trait.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 criterion.workspace = true
 crossterm.workspace = true
+walkdir = "2.5"
 
 [build-dependencies]
 wasmtime = { workspace = true, optional = true }
 
 [lints]
 workspace = true
+
+[[example]]
+name = "session_bench"
+required-features = ["pre-init", "precompiled"]
+
+[[example]]
+name = "package_loading"
+required-features = ["packages", "native-extensions", "embedded-stdlib", "precompiled"]
+
+[package.metadata."docs.rs"]
+all-features = true

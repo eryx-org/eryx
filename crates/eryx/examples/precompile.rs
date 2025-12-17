@@ -73,32 +73,41 @@ fn main() -> anyhow::Result<()> {
     println!("Total time for 10 loads: {total_time:?}");
     println!("Average per load: {avg_time:?}");
 
-    // Step 5: Verify execution still works
-    println!("\n--- Step 5: Verify execution works ---");
-    // SAFETY: Same precompiled bytes we created above
-    #[allow(unsafe_code)]
-    let sandbox = unsafe {
-        eryx::Sandbox::builder()
-            .with_precompiled_bytes(precompiled.clone())
-            .build()?
-    };
-    let rt = tokio::runtime::Runtime::new()?;
-    let result = rt.block_on(async {
-        sandbox
-            .execute("print('Hello from pre-compiled sandbox!')")
-            .await
-    })?;
-    println!("Output: {}", result.stdout);
+    // Step 5: Verify execution still works (only if embedded-stdlib is enabled)
+    #[cfg(feature = "embedded-stdlib")]
+    {
+        println!("\n--- Step 5: Verify execution works ---");
+        // SAFETY: Same precompiled bytes we created above
+        #[allow(unsafe_code)]
+        let sandbox = unsafe {
+            eryx::Sandbox::builder()
+                .with_precompiled_bytes(precompiled.clone())
+                .build()?
+        };
+        let rt = tokio::runtime::Runtime::new()?;
+        let result = rt.block_on(async {
+            sandbox
+                .execute("print('Hello from pre-compiled sandbox!')")
+                .await
+        })?;
+        println!("Output: {}", result.stdout);
 
-    // Step 6: Show per-execution overhead
-    println!("\n--- Step 6: Per-execution overhead ---");
-    let start = Instant::now();
-    for _ in 0..10 {
-        rt.block_on(async { sandbox.execute("pass").await })?;
+        // Step 6: Show per-execution overhead
+        println!("\n--- Step 6: Per-execution overhead ---");
+        let start = Instant::now();
+        for _ in 0..10 {
+            rt.block_on(async { sandbox.execute("pass").await })?;
+        }
+        let exec_total = start.elapsed();
+        let exec_avg = exec_total / 10;
+        println!("Average per execution: {exec_avg:?}");
     }
-    let exec_total = start.elapsed();
-    let exec_avg = exec_total / 10;
-    println!("Average per execution: {exec_avg:?}");
+
+    #[cfg(not(feature = "embedded-stdlib"))]
+    {
+        println!("\n--- Step 5 & 6: Skipped (no stdlib) ---");
+        println!("Enable embedded-stdlib feature to test execution");
+    }
 
     // Summary
     println!("\n=== Summary ===");
@@ -109,8 +118,6 @@ fn main() -> anyhow::Result<()> {
         "  Speedup:               {:.1}x faster",
         normal_load_time.as_secs_f64() / precompiled_load_time.as_secs_f64()
     );
-    println!("\nPer-Execution:");
-    println!("  Average overhead:      {exec_avg:?}");
     println!("\nPre-compile once, load many times:");
     println!("  Pre-compile cost:      {precompile_time:?}");
     println!("  Per-load cost:         {avg_time:?}");

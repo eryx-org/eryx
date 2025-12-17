@@ -13,6 +13,8 @@ use futures::StreamExt;
 use futures::stream::FuturesUnordered;
 use tokio::sync::mpsc;
 
+#[cfg(feature = "native-extensions")]
+use crate::cache::ComponentCache;
 use crate::callback::Callback;
 use crate::error::Error;
 use crate::library::RuntimeLibrary;
@@ -35,6 +37,9 @@ pub struct Sandbox {
     output_handler: Option<Arc<dyn OutputHandler>>,
     /// Resource limits for execution.
     resource_limits: ResourceLimits,
+    /// Extracted packages (kept alive to prevent temp directory cleanup).
+    #[cfg(feature = "packages")]
+    _packages: Vec<crate::package::ExtractedPackage>,
 }
 
 impl std::fmt::Debug for Sandbox {
@@ -322,9 +327,10 @@ impl Sandbox {
 }
 
 /// Source of the WASM component for the sandbox.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 enum WasmSource {
     /// No source specified yet.
+    #[default]
     None,
     /// WASM component bytes (will be compiled at load time).
     Bytes(Vec<u8>),
@@ -341,12 +347,6 @@ enum WasmSource {
     EmbeddedRuntime,
 }
 
-impl Default for WasmSource {
-    fn default() -> Self {
-        Self::None
-    }
-}
-
 /// Builder for constructing a [`Sandbox`].
 pub struct SandboxBuilder {
     wasm_source: WasmSource,
@@ -356,6 +356,22 @@ pub struct SandboxBuilder {
     trace_handler: Option<Arc<dyn TraceHandler>>,
     output_handler: Option<Arc<dyn OutputHandler>>,
     resource_limits: ResourceLimits,
+    /// Path to Python stdlib for eryx-wasm-runtime.
+    python_stdlib_path: Option<std::path::PathBuf>,
+    /// Path to Python site-packages for eryx-wasm-runtime.
+    python_site_packages_path: Option<std::path::PathBuf>,
+    /// Native Python extensions to link into the component.
+    #[cfg(feature = "native-extensions")]
+    native_extensions: Vec<eryx_runtime::linker::NativeExtension>,
+    /// Component cache for faster sandbox creation with native extensions.
+    #[cfg(feature = "native-extensions")]
+    cache: Option<Arc<dyn ComponentCache>>,
+    /// Filesystem cache directory for mmap-based loading (faster than bytes).
+    #[cfg(feature = "native-extensions")]
+    filesystem_cache: Option<crate::cache::FilesystemCache>,
+    /// Extracted packages (kept alive for sandbox lifetime).
+    #[cfg(feature = "packages")]
+    packages: Vec<crate::package::ExtractedPackage>,
 }
 
 impl Default for SandboxBuilder {
@@ -393,27 +409,42 @@ impl SandboxBuilder {
             trace_handler: None,
             output_handler: None,
             resource_limits: ResourceLimits::default(),
+            python_stdlib_path: None,
+            python_site_packages_path: None,
+            #[cfg(feature = "native-extensions")]
+            native_extensions: Vec::new(),
+            #[cfg(feature = "native-extensions")]
+            cache: None,
+            #[cfg(feature = "native-extensions")]
+            filesystem_cache: None,
+            #[cfg(feature = "packages")]
+            packages: Vec::new(),
         }
     }
 
-    /// Use the embedded pre-compiled runtime for ~50x faster sandbox creation.
+    /// Explicitly use the embedded pre-compiled runtime.
     ///
-    /// This is the recommended way to create sandboxes for production use.
-    /// The runtime is pre-compiled at build time when the `embedded-runtime`
-    /// feature is enabled.
+    /// **Note:** You usually don't need to call this. When the `embedded-runtime`
+    /// feature is enabled, the embedded runtime is used automatically for
+    /// sandboxes without native extensions. This method exists for explicit
+    /// control in advanced use cases.
     ///
-    /// # Panics
+    /// # Automatic Runtime Selection
     ///
-    /// Panics at build time if the `embedded-runtime` feature is enabled but
-    /// `runtime.wasm` is not found.
+    /// The runtime is selected automatically based on your configuration:
     ///
-    /// # Example
+    /// - **No native extensions** → Embedded runtime (fast, ~2ms)
+    /// - **Has native extensions** → Late-linking (required for .so files)
     ///
     /// ```rust,ignore
-    /// // Fast and safe - no unsafe code needed!
+    /// // These are equivalent when embedded-runtime feature is enabled:
+    /// let sandbox = Sandbox::builder().build()?;
+    /// let sandbox = Sandbox::builder().with_embedded_runtime().build()?;
+    ///
+    /// // With native extensions, late-linking happens automatically:
     /// let sandbox = Sandbox::builder()
-    ///     .with_embedded_runtime()
-    ///     .build()?;
+    ///     .with_package("/path/to/numpy-wasi.tar.gz")?  // Has .so files
+    ///     .build()?;  // Uses late-linking, not embedded runtime
     /// ```
     #[cfg(feature = "embedded-runtime")]
     #[must_use]
@@ -515,6 +546,124 @@ impl SandboxBuilder {
         self
     }
 
+    /// Add a native Python extension (.so file) to be linked into the component.
+    ///
+    /// Native extensions allow Python packages with compiled code (like numpy)
+    /// to work in the sandbox. The extension is linked into the WASM component
+    /// at sandbox creation time using late-linking.
+    ///
+    /// # Arguments
+    ///
+    /// * `name` - The name of the .so file (e.g., "numpy/core/_multiarray_umath.cpython-314-wasm32-wasi.so")
+    /// * `bytes` - The raw WASM bytes of the compiled extension
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// // Load numpy native extension
+    /// let numpy_core = std::fs::read("numpy/core/_multiarray_umath.cpython-314-wasm32-wasi.so")?;
+    ///
+    /// let sandbox = Sandbox::builder()
+    ///     .with_native_extension("numpy/core/_multiarray_umath.cpython-314-wasm32-wasi.so", numpy_core)
+    ///     .with_site_packages("path/to/site-packages")  // For Python files
+    ///     .build()?;
+    ///
+    /// // Now numpy can be imported!
+    /// let result = sandbox.execute("import numpy as np; print(np.array([1,2,3]).sum())").await?;
+    /// ```
+    ///
+    /// # Note
+    ///
+    /// When native extensions are added, the sandbox creation is slower because
+    /// the component needs to be re-linked. Consider caching the linked component
+    /// for repeated use with the same extensions.
+    #[cfg(feature = "native-extensions")]
+    #[must_use]
+    pub fn with_native_extension(
+        mut self,
+        name: impl Into<String>,
+        bytes: impl Into<Vec<u8>>,
+    ) -> Self {
+        self.native_extensions
+            .push(eryx_runtime::linker::NativeExtension::new(
+                name,
+                bytes.into(),
+            ));
+        self
+    }
+
+    /// Set a component cache for faster sandbox creation with native extensions.
+    ///
+    /// When native extensions are used, the sandbox must link them into the base
+    /// component and then JIT compile the result. This can take 500-1000ms.
+    ///
+    /// With caching enabled, the linked and pre-compiled component is stored and
+    /// reused on subsequent calls, reducing creation time to ~10ms.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// use eryx::{Sandbox, cache::InMemoryCache};
+    ///
+    /// let cache = InMemoryCache::new();
+    ///
+    /// // First call: ~1000ms (link + compile + cache)
+    /// let sandbox1 = Sandbox::builder()
+    ///     .with_native_extension("numpy/core/*.so", bytes)
+    ///     .with_cache(Arc::new(cache.clone()))
+    ///     .build()?;
+    ///
+    /// // Second call: ~10ms (cache hit)
+    /// let sandbox2 = Sandbox::builder()
+    ///     .with_native_extension("numpy/core/*.so", bytes)
+    ///     .with_cache(Arc::new(cache))
+    ///     .build()?;
+    /// ```
+    #[cfg(feature = "native-extensions")]
+    #[must_use]
+    pub fn with_cache(mut self, cache: Arc<dyn ComponentCache>) -> Self {
+        self.cache = Some(cache);
+        self
+    }
+
+    /// Set a custom filesystem cache directory for late-linked components.
+    ///
+    /// **Note:** You usually don't need to call this. A default cache at
+    /// `$TMPDIR/eryx-cache` is used automatically when native extensions are present.
+    /// Use this method only if you need a specific cache location.
+    ///
+    /// The cache stores pre-compiled WASM components to avoid expensive
+    /// re-linking on subsequent sandbox creations with the same extensions.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the cache directory cannot be created.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// // Usually not needed - default cache is automatic
+    /// let sandbox = Sandbox::builder()
+    ///     .with_package("/path/to/numpy.tar.gz")?
+    ///     .build()?;  // Uses $TMPDIR/eryx-cache automatically
+    ///
+    /// // Only if you need a specific location:
+    /// let sandbox = Sandbox::builder()
+    ///     .with_package("/path/to/numpy.tar.gz")?
+    ///     .with_cache_dir("/custom/cache/path")?
+    ///     .build()?;
+    /// ```
+    ///
+    /// [`FilesystemCache`]: crate::cache::FilesystemCache
+    #[cfg(feature = "native-extensions")]
+    pub fn with_cache_dir(mut self, path: impl AsRef<std::path::Path>) -> Result<Self, Error> {
+        let cache = crate::cache::FilesystemCache::new(path)
+            .map_err(|e| Error::Initialization(format!("failed to create cache directory: {e}")))?;
+        // Store filesystem cache for mmap-based loading (3x faster than bytes)
+        self.filesystem_cache = Some(cache.clone());
+        Ok(self.with_cache(Arc::new(cache)))
+    }
+
     /// Add a runtime library (callbacks + preamble + stubs).
     #[must_use]
     pub fn with_library(mut self, library: RuntimeLibrary) -> Self {
@@ -583,18 +732,216 @@ impl SandboxBuilder {
         self
     }
 
+    /// Set the path to the Python standard library directory.
+    ///
+    /// This is required when using the eryx-wasm-runtime (Rust/CPython FFI based).
+    /// The directory should contain the extracted Python stdlib (e.g., from
+    /// componentize-py's python-lib.tar.zst).
+    ///
+    /// The stdlib will be mounted at `/python-stdlib` inside the WASM sandbox.
+    #[must_use]
+    pub fn with_python_stdlib(mut self, path: impl Into<std::path::PathBuf>) -> Self {
+        self.python_stdlib_path = Some(path.into());
+        self
+    }
+
+    /// Set the path to additional Python packages directory.
+    ///
+    /// The directory will be mounted at `/site-packages` inside the WASM sandbox
+    /// and added to Python's import path.
+    #[must_use]
+    pub fn with_site_packages(mut self, path: impl Into<std::path::PathBuf>) -> Self {
+        self.python_site_packages_path = Some(path.into());
+        self
+    }
+
+    /// Add a Python package from a wheel (.whl) or tar.gz archive.
+    ///
+    /// The package format is auto-detected from the file extension:
+    /// - `.whl` - Standard Python wheel (zip archive)
+    /// - `.tar.gz`, `.tgz` - Tarball (used by wasi-wheels)
+    /// - Directory - Used directly without extraction
+    ///
+    /// # Pure Python packages
+    ///
+    /// For pure-Python packages (no `.so` files), you can use `with_embedded_runtime()`:
+    ///
+    /// ```rust,ignore
+    /// let sandbox = Sandbox::builder()
+    ///     .with_embedded_runtime()
+    ///     .with_package("/path/to/requests-2.31.0-py3-none-any.whl")?
+    ///     .build()?;
+    /// ```
+    ///
+    /// # Packages with native extensions
+    ///
+    /// For packages containing native extensions (like numpy), the extensions are
+    /// automatically registered for late-linking. A cache is set up automatically
+    /// at `$TMPDIR/eryx-cache` for fast subsequent sandbox creations:
+    ///
+    /// ```rust,ignore
+    /// let sandbox = Sandbox::builder()
+    ///     .with_package("/path/to/numpy-wasi.tar.gz")?
+    ///     .build()?;  // Caching is automatic!
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - The package format cannot be detected
+    /// - The archive cannot be read or extracted
+    #[cfg(feature = "packages")]
+    pub fn with_package(mut self, path: impl AsRef<std::path::Path>) -> Result<Self, Error> {
+        let package = crate::package::ExtractedPackage::from_path(path)?;
+
+        tracing::info!(
+            name = %package.name,
+            has_native_extensions = package.has_native_extensions,
+            "Loaded package"
+        );
+
+        // Check for incompatible configuration
+        #[cfg(not(feature = "native-extensions"))]
+        if package.has_native_extensions {
+            return Err(Error::Initialization(format!(
+                "Package '{}' contains native extensions but the 'native-extensions' feature is not enabled. \
+                 Either use a pure-Python package or enable the 'native-extensions' feature.",
+                package.name
+            )));
+        }
+
+        // Store the extracted package - native extensions will be registered at build()
+        // time when we know the mount index for computing dlopen paths
+        self.packages.push(package);
+
+        Ok(self)
+    }
+
     /// Build the sandbox.
     ///
     /// # Errors
     ///
     /// Returns an error if:
-    /// - No WASM component was specified (use `with_embedded_runtime()`, `with_wasm_bytes()`, or `with_wasm_file()`)
+    /// - No WASM component was specified and no default is available
     /// - The WASM component cannot be loaded
     /// - The WebAssembly runtime fails to initialize
-    pub fn build(self) -> Result<Sandbox, Error> {
-        let executor = match self.wasm_source {
-            WasmSource::Bytes(bytes) => PythonExecutor::from_binary(&bytes)?,
-            WasmSource::File(path) => PythonExecutor::from_file(&path)?,
+    ///
+    /// # Native Extensions
+    ///
+    /// If native extensions are registered (via `with_native_extension()` or
+    /// `with_package()` with `.so` files), late-linking is used automatically.
+    /// This overrides any `with_embedded_runtime()` setting since native
+    /// extensions must be linked into the runtime.
+    #[allow(unused_mut)] // mut needed when packages + native-extensions features are enabled
+    pub fn build(mut self) -> Result<Sandbox, Error> {
+        // First, compute mount indices and register native extensions from packages
+        // with correct dlopen paths. Mount index 0 is reserved for explicit site-packages.
+        #[cfg(all(feature = "packages", feature = "native-extensions"))]
+        {
+            let start_index = if self.python_site_packages_path.is_some() {
+                1
+            } else {
+                0
+            };
+            for (pkg_idx, package) in self.packages.iter().enumerate() {
+                let mount_index = start_index + pkg_idx;
+                for ext in &package.native_extensions {
+                    let dlopen_path =
+                        format!("/site-packages-{}/{}", mount_index, ext.relative_path);
+                    self.native_extensions
+                        .push(eryx_runtime::linker::NativeExtension::new(
+                            dlopen_path,
+                            ext.bytes.clone(),
+                        ));
+                }
+            }
+        }
+
+        // Set up default cache for native extensions if none specified
+        // This avoids re-linking on every sandbox creation
+        #[cfg(all(feature = "native-extensions", feature = "precompiled"))]
+        if !self.native_extensions.is_empty()
+            && self.filesystem_cache.is_none()
+            && self.cache.is_none()
+        {
+            let default_cache_dir = std::env::temp_dir().join("eryx-cache");
+            if let Ok(cache) = crate::cache::FilesystemCache::new(&default_cache_dir) {
+                tracing::debug!(path = %default_cache_dir.display(), "Using default cache directory");
+                self.filesystem_cache = Some(cache.clone());
+                self.cache = Some(Arc::new(cache));
+            }
+        }
+
+        // If native extensions are specified, use late-linking to create the component.
+        // This OVERRIDES any wasm_source setting (including embedded runtime) because
+        // native extensions must be linked into the runtime at this point.
+        #[cfg(feature = "native-extensions")]
+        let executor = if !self.native_extensions.is_empty() {
+            // Warn if user explicitly set embedded runtime - it will be ignored
+            #[cfg(feature = "embedded-runtime")]
+            if matches!(self.wasm_source, WasmSource::EmbeddedRuntime) {
+                tracing::info!(
+                    "Native extensions detected - using late-linking instead of embedded runtime"
+                );
+            }
+            self.build_executor_with_extensions()?
+        } else {
+            self.build_executor_from_source()?
+        };
+
+        #[cfg(not(feature = "native-extensions"))]
+        let executor = self.build_executor_from_source()?;
+
+        // Determine stdlib path: explicit > embedded > none
+        #[cfg(feature = "embedded-stdlib")]
+        let stdlib_path = self.python_stdlib_path.clone().or_else(|| {
+            crate::embedded::EmbeddedResources::get()
+                .ok()
+                .map(|r| r.stdlib_path.clone())
+        });
+        #[cfg(not(feature = "embedded-stdlib"))]
+        let stdlib_path = self.python_stdlib_path.clone();
+
+        // Collect all site-packages paths: explicit path first, then package paths
+        let mut site_packages_paths = Vec::new();
+        if let Some(explicit_path) = self.python_site_packages_path.clone() {
+            site_packages_paths.push(explicit_path);
+        }
+        #[cfg(feature = "packages")]
+        for package in &self.packages {
+            site_packages_paths.push(package.python_path.clone());
+        }
+
+        // Apply Python stdlib path if available
+        let executor = if let Some(stdlib) = stdlib_path {
+            executor.with_python_stdlib(&stdlib)
+        } else {
+            executor
+        };
+
+        // Apply all site-packages paths
+        let executor = site_packages_paths
+            .into_iter()
+            .fold(executor, |exec, path| exec.with_site_packages(&path));
+
+        Ok(Sandbox {
+            executor: Arc::new(executor),
+            callbacks: self.callbacks,
+            preamble: self.preamble,
+            type_stubs: self.type_stubs,
+            trace_handler: self.trace_handler,
+            output_handler: self.output_handler,
+            resource_limits: self.resource_limits,
+            #[cfg(feature = "packages")]
+            _packages: self.packages,
+        })
+    }
+
+    /// Build executor from the configured WASM source.
+    fn build_executor_from_source(&self) -> Result<PythonExecutor, Error> {
+        let executor = match &self.wasm_source {
+            WasmSource::Bytes(bytes) => PythonExecutor::from_binary(bytes)?,
+            WasmSource::File(path) => PythonExecutor::from_file(path)?,
 
             #[cfg(feature = "precompiled")]
             WasmSource::PrecompiledBytes(bytes) => {
@@ -603,7 +950,7 @@ impl SandboxBuilder {
                 // caller has acknowledged this responsibility.
                 #[allow(unsafe_code)]
                 unsafe {
-                    PythonExecutor::from_precompiled(&bytes)?
+                    PythonExecutor::from_precompiled(bytes)?
                 }
             }
 
@@ -614,47 +961,134 @@ impl SandboxBuilder {
                 // caller has acknowledged this responsibility.
                 #[allow(unsafe_code)]
                 unsafe {
-                    PythonExecutor::from_precompiled_file(&path)?
+                    PythonExecutor::from_precompiled_file(path)?
                 }
             }
 
             #[cfg(feature = "embedded-runtime")]
             WasmSource::EmbeddedRuntime => {
+                // Extract embedded runtime to disk and load via mmap for better memory efficiency.
                 // SAFETY: The embedded runtime was pre-compiled at build time from our own
                 // trusted runtime.wasm, so we know it's safe to deserialize.
-                const EMBEDDED_RUNTIME: &[u8] =
-                    include_bytes!(concat!(env!("OUT_DIR"), "/runtime.cwasm"));
+                let resources = crate::embedded::EmbeddedResources::get()?;
                 #[allow(unsafe_code)]
                 unsafe {
-                    PythonExecutor::from_precompiled(EMBEDDED_RUNTIME)?
+                    PythonExecutor::from_precompiled_file(&resources.runtime_path)?
                 }
             }
 
             WasmSource::None => {
+                // If embedded-runtime feature is enabled, use it automatically as the default
                 #[cfg(feature = "embedded-runtime")]
-                let msg = "No WASM component specified. Use with_embedded_runtime(), with_wasm_bytes(), with_wasm_file(), with_precompiled_bytes(), or with_precompiled_file().";
+                {
+                    tracing::debug!("No WASM source specified, using embedded runtime");
+                    let resources = crate::embedded::EmbeddedResources::get()?;
+                    #[allow(unsafe_code)]
+                    unsafe {
+                        PythonExecutor::from_precompiled_file(&resources.runtime_path)?
+                    }
+                }
 
-                #[cfg(all(feature = "precompiled", not(feature = "embedded-runtime")))]
-                let msg = "No WASM component specified. Use with_wasm_bytes(), with_wasm_file(), with_precompiled_bytes(), or with_precompiled_file(). \
-                           Or enable the `embedded-runtime` feature and use with_embedded_runtime().";
+                #[cfg(not(feature = "embedded-runtime"))]
+                {
+                    #[cfg(feature = "precompiled")]
+                    let msg = "No WASM component specified. Use with_wasm_bytes(), with_wasm_file(), with_precompiled_bytes(), or with_precompiled_file(). \
+                               Or enable the `embedded-runtime` feature for automatic runtime loading.";
 
-                #[cfg(not(feature = "precompiled"))]
-                let msg = "No WASM component specified. Use with_wasm_bytes() or with_wasm_file(). \
-                           Or enable the `precompiled` or `embedded-runtime` feature for faster loading options.";
+                    #[cfg(not(feature = "precompiled"))]
+                    let msg = "No WASM component specified. Use with_wasm_bytes() or with_wasm_file(). \
+                               Or enable the `embedded-runtime` feature for automatic runtime loading.";
 
-                return Err(Error::Initialization(msg.to_string()));
+                    return Err(Error::Initialization(msg.to_string()));
+                }
             }
         };
 
-        Ok(Sandbox {
-            executor: Arc::new(executor),
-            callbacks: self.callbacks,
-            preamble: self.preamble,
-            type_stubs: self.type_stubs,
-            trace_handler: self.trace_handler,
-            output_handler: self.output_handler,
-            resource_limits: self.resource_limits,
-        })
+        Ok(executor)
+    }
+
+    /// Build executor with native extensions, using cache if available.
+    ///
+    /// When a cache is configured and the `precompiled` feature is enabled,
+    /// this will:
+    /// 1. Check the cache for a pre-compiled component
+    /// 2. If found, load from cache (fast path)
+    /// 3. If not found, link extensions, pre-compile, cache, and return
+    #[cfg(feature = "native-extensions")]
+    fn build_executor_with_extensions(&self) -> Result<PythonExecutor, Error> {
+        #[cfg(feature = "precompiled")]
+        use crate::cache::CacheKey;
+
+        #[cfg(feature = "precompiled")]
+        let cache_key = CacheKey::from_extensions(&self.native_extensions);
+
+        // Try filesystem cache first (mmap-based, 3x faster than bytes)
+        #[cfg(feature = "precompiled")]
+        if let Some(fs_cache) = &self.filesystem_cache
+            && let Some(path) = fs_cache.get_path(&cache_key)
+        {
+            tracing::debug!(
+                key = %cache_key.to_hex(),
+                path = %path.display(),
+                "component cache hit - loading via mmap"
+            );
+            // SAFETY: The cached pre-compiled file was created by us (from
+            // `PythonExecutor::precompile()`) in a previous call. We trust our
+            // own cache directory. If the cache is corrupted or tampered with,
+            // wasmtime will detect it during deserialization.
+            #[allow(unsafe_code)]
+            return unsafe { PythonExecutor::from_precompiled_file(&path) };
+        }
+
+        // Fall back to in-memory cache (for InMemoryCache users)
+        #[cfg(feature = "precompiled")]
+        if let Some(cache) = &self.cache {
+            if let Some(precompiled) = cache.get(&cache_key) {
+                tracing::debug!(
+                    key = %cache_key.to_hex(),
+                    "component cache hit - loading from bytes"
+                );
+                #[allow(unsafe_code)]
+                return unsafe { PythonExecutor::from_precompiled(&precompiled) };
+            }
+            tracing::debug!(
+                key = %cache_key.to_hex(),
+                "component cache miss - will link and compile"
+            );
+        }
+
+        // Cache miss or no cache - link the component
+        let component_bytes =
+            eryx_runtime::linker::link_with_extensions(&self.native_extensions)
+                .map_err(|e| Error::Initialization(format!("late-linking failed: {e}")))?;
+
+        // Pre-compile and cache if available
+        #[cfg(feature = "precompiled")]
+        if let Some(cache) = &self.cache {
+            let precompiled = PythonExecutor::precompile(&component_bytes)?;
+
+            // Cache the pre-compiled bytes
+            if let Err(e) = cache.put(&cache_key, precompiled.clone()) {
+                tracing::warn!(
+                    error = %e,
+                    "failed to cache pre-compiled component"
+                );
+            } else {
+                tracing::debug!(
+                    key = %cache_key.to_hex(),
+                    size = precompiled.len(),
+                    "cached pre-compiled component"
+                );
+            }
+
+            // Load from pre-compiled bytes
+            // SAFETY: We just created these bytes from `precompile()` above.
+            #[allow(unsafe_code)]
+            return unsafe { PythonExecutor::from_precompiled(&precompiled) };
+        }
+
+        // No cache or precompiled feature - create executor directly from linked bytes
+        PythonExecutor::from_binary(&component_bytes)
     }
 }
 
@@ -698,7 +1132,7 @@ impl Default for ResourceLimits {
         Self {
             execution_timeout: Some(Duration::from_secs(30)),
             callback_timeout: Some(Duration::from_secs(10)),
-            max_memory_bytes: Some(256 * 1024 * 1024), // 256 MB
+            max_memory_bytes: Some(128 * 1024 * 1024), // 128 MB
             max_callback_invocations: Some(1000),
         }
     }
@@ -980,7 +1414,9 @@ mod tests {
         }
     }
 
+    /// Test that sandbox creation fails without WASM when embedded-runtime is not available.
     #[test]
+    #[cfg(not(feature = "embedded-runtime"))]
     fn sandbox_builder_build_fails_without_wasm() {
         let builder = SandboxBuilder::new();
         let result = builder.build();
@@ -993,6 +1429,16 @@ mod tests {
             "Error should mention WASM: {}",
             error_str
         );
+    }
+
+    /// Test that sandbox creation succeeds automatically with embedded-runtime.
+    #[test]
+    #[cfg(feature = "embedded-runtime")]
+    fn sandbox_builder_build_uses_embedded_runtime_automatically() {
+        let builder = SandboxBuilder::new();
+        let result = builder.build();
+
+        assert!(result.is_ok(), "Should use embedded runtime automatically");
     }
 
     #[test]

@@ -11,57 +11,195 @@ env:
   RUST_BACKTRACE: 1
 
 jobs:
-  ci:
-    name: CI
+  # Build eryx-wasm-runtime and precompile it - other jobs depend on this
+  build-eryx-runtime:
+    name: Build eryx-runtime
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
 
-      - name: Install mise
-        uses: jdx/mise-action@v3
-
-      - name: Cache cargo
+      - name: Cache Rust toolchain and cargo
         uses: actions/cache@v4
         with:
           path: |
+            ~/.rustup/toolchains
+            ~/.rustup/update-hashes
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ runner.os }}-rust-wasm-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
-            ${{ runner.os }}-cargo-
+            ${{ runner.os }}-rust-wasm-
 
-      - name: Run CI checks
-        run: mise run ci
+      - uses: ./.github/actions/setup-rust
 
-  test-all:
-    name: Test (all features)
+      - name: Install nightly toolchain
+        run: rustup toolchain install nightly --component rust-src
+
+      - name: Build eryx-runtime
+        run: mise run build-eryx-runtime
+
+      - name: Precompile WASM
+        run: mise run precompile-eryx-runtime
+
+      - name: Copy prebuilt late-linking artifacts
+        run: |
+          # Find the OUT_DIR with the compressed artifacts from the build
+          OUT_DIR=$(find target -path "*/eryx-runtime-*/out" -type d | head -1)
+          echo "Found OUT_DIR: $OUT_DIR"
+          mkdir -p crates/eryx-runtime/prebuilt
+          cp "$OUT_DIR/liberyx_runtime.so.zst" crates/eryx-runtime/prebuilt/
+          cp "$OUT_DIR/liberyx_bindings.so.zst" crates/eryx-runtime/prebuilt/
+          ls -la crates/eryx-runtime/prebuilt/
+
+      - name: Copy eryx-wasm-runtime test artifacts
+        run: |
+          # Copy liberyx_runtime.so for eryx-wasm-runtime tests
+          OUT_DIR=$(find target -path "*/eryx-runtime-*/out" -type d | head -1)
+          mkdir -p crates/eryx-wasm-runtime/target
+          cp "$OUT_DIR/liberyx_runtime.so" crates/eryx-wasm-runtime/target/
+          ls -la crates/eryx-wasm-runtime/target/
+
+      - name: Upload WASM artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: wasm-runtime
+          path: |
+            crates/eryx-runtime/runtime.wasm
+            crates/eryx-runtime/runtime.cwasm
+            crates/eryx-runtime/prebuilt/
+            crates/eryx-wasm-runtime/target/liberyx_runtime.so
+          retention-days: 1
+
+  lint:
+    name: Lint
     runs-on: ubuntu-latest
+    needs: build-eryx-runtime
     steps:
       - uses: actions/checkout@v6
 
-      - name: Install mise
-        uses: jdx/mise-action@v3
+      - name: Download WASM artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: wasm-runtime
+          path: crates/
 
-      - name: Cache cargo
+      # Touch artifacts to be newer than sources so mise skips rebuild
+      - name: Mark WASM as up-to-date
+        run: |
+          touch crates/eryx-runtime/runtime.wasm crates/eryx-runtime/runtime.cwasm
+          if [ -d crates/eryx-runtime/prebuilt ]; then
+            touch crates/eryx-runtime/prebuilt/*
+          fi
+
+      - name: Cache Rust toolchain and cargo
         uses: actions/cache@v4
         with:
           path: |
+            ~/.rustup/toolchains
+            ~/.rustup/update-hashes
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: ${{ runner.os }}-cargo-test-all-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ runner.os }}-rust-lint-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
-            ${{ runner.os }}-cargo-test-all-
+            ${{ runner.os }}-rust-lint-
+
+      - uses: ./.github/actions/setup-rust
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Run clippy
+        # Use --all-features now that prebuilt artifacts are available
+        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    needs: build-eryx-runtime
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Download WASM artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: wasm-runtime
+          path: crates/
+
+      # Touch artifacts to be newer than sources so mise skips rebuild
+      - name: Mark WASM as up-to-date
+        run: |
+          touch crates/eryx-runtime/runtime.wasm crates/eryx-runtime/runtime.cwasm
+          # Touch prebuilt artifacts if they exist
+          if [ -d crates/eryx-runtime/prebuilt ]; then
+            touch crates/eryx-runtime/prebuilt/*
+          fi
+
+      - name: Set up eryx-wasm-runtime test artifacts
+        run: |
+          # Extract python stdlib for eryx-wasm-runtime tests (from checked-in archive)
+          mkdir -p crates/eryx-wasm-runtime/tests/python-stdlib
+          tar -xf crates/eryx/python-stdlib.tar.zst -C crates/eryx-wasm-runtime/tests/
+          # Create empty site-packages directory (tests expect it)
+          mkdir -p crates/eryx-wasm-runtime/tests/site-packages
+          ls -la crates/eryx-wasm-runtime/target/
+          ls crates/eryx-wasm-runtime/tests/python-stdlib/ | head -10
+
+      - name: Install mold linker and clang
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y mold clang
+
+      - name: Configure mold linker
+        run: |
+          mkdir -p .cargo
+          cat >> .cargo/config.toml << 'EOF'
+          [target.x86_64-unknown-linux-gnu]
+          linker = "clang"
+          rustflags = ["-C", "link-arg=-fuse-ld=mold"]
+          EOF
+
+      - name: Cache Rust toolchain and cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.rustup/toolchains
+            ~/.rustup/update-hashes
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-rust-test-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-rust-test-
+
+      - uses: ./.github/actions/setup-rust
 
       - name: Run tests
-        run: mise run test-all
+        # Use --all-features to test everything. This works because:
+        # - runtime.wasm and runtime.cwasm are provided by artifacts
+        # - prebuilt/liberyx_*.so.zst are provided for late-linking feature
+        # - liberyx_runtime.so and python-stdlib are provided for eryx-wasm-runtime tests
+        run: cargo nextest run --workspace --all-features
 
   msrv:
     name: MSRV
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
+
+      - name: Cache Rust toolchain and cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.rustup/toolchains
+            ~/.rustup/update-hashes
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-rust-msrv-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-rust-msrv-
 
       - name: Install mise
         uses: jdx/mise-action@v3
@@ -70,41 +208,47 @@ jobs:
             [tools]
             rust = "1.89"
 
-      - name: Cache cargo
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-msrv-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-msrv-
-
       - name: Check MSRV
         run: cargo check --workspace
 
   doc:
     name: Documentation
     runs-on: ubuntu-latest
+    needs: build-eryx-runtime
     steps:
       - uses: actions/checkout@v6
 
-      - name: Install mise
-        uses: jdx/mise-action@v3
+      - name: Download WASM artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: wasm-runtime
+          path: crates/
 
-      - name: Cache cargo
+      # Touch artifacts to be newer than sources so mise skips rebuild
+      - name: Mark WASM as up-to-date
+        run: |
+          touch crates/eryx-runtime/runtime.wasm crates/eryx-runtime/runtime.cwasm
+          if [ -d crates/eryx-runtime/prebuilt ]; then
+            touch crates/eryx-runtime/prebuilt/*
+          fi
+
+      - name: Cache Rust toolchain and cargo
         uses: actions/cache@v4
         with:
           path: |
+            ~/.rustup/toolchains
+            ~/.rustup/update-hashes
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: ${{ runner.os }}-cargo-doc-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ runner.os }}-rust-doc-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
-            ${{ runner.os }}-cargo-doc-
+            ${{ runner.os }}-rust-doc-
+
+      - uses: ./.github/actions/setup-rust
 
       - name: Build documentation
-        run: mise run doc
+        # Use --all-features now that prebuilt artifacts are available
+        run: cargo doc --workspace --no-deps --all-features
         env:
           RUSTDOCFLAGS: -D warnings
