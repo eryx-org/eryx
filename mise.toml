@@ -1,7 +1,6 @@
 [tools]
 # Profile "default" includes rustc, rust-std, cargo, rust-docs, rustfmt, and clippy
 rust = { version = "1.92", profile = "default" }
-uv = "latest"
 
 [tools."cargo:cargo-nextest"]
 version = "latest"

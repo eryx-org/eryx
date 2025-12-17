@@ -4,12 +4,12 @@ This document outlines best practices for AI agents (and humans) working on this
 
 ## Eryx-Specific Tooling
 
-This project uses [mise](https://mise.jdx.dev/) for tooling and task management, and [uv](https://docs.astral.sh/uv/) for Python environment management (used to build the WASM runtime).
+This project uses [mise](https://mise.jdx.dev/) for tooling and task management.
 
 ### Quick Start
 
 ```bash
-mise install           # Install Rust, cargo-nextest, uv
+mise install           # Install Rust, cargo-nextest
 mise run setup         # Build WASM + precompile (one-time)
 mise run test          # Run tests with precompiled WASM (~0.1s)
 mise run ci            # Run all CI checks
