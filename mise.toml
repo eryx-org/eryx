@@ -120,11 +120,11 @@ depends = ["build-eryx-runtime", "build"]
 
 [tasks.bench]
 description = "Run benchmarks"
-run = "cargo bench --package eryx"
+run = "cargo bench --package eryx --all-features"
 
 [tasks.bench-save]
 description = "Run benchmarks and save baseline"
-run = "cargo bench --package eryx -- --save-baseline main"
+run = "cargo bench --package eryx --all-features -- --save-baseline main"
 
 [tasks.precompile-eryx-runtime]
 description = "Pre-compile eryx-runtime WASM to native code for faster loading"
