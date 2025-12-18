@@ -125,10 +125,12 @@ depends = ["build-eryx-runtime", "build"]
 
 [tasks.bench]
 description = "Run benchmarks"
+depends = ["precompile-eryx-runtime-preinit"]
 run = "cargo bench --package eryx --all-features"
 
 [tasks.bench-save]
 description = "Run benchmarks and save baseline"
+depends = ["precompile-eryx-runtime-preinit"]
 run = "cargo bench --package eryx --all-features -- --save-baseline main"
 
 [tasks.precompile-eryx-runtime]
