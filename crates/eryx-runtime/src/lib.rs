@@ -6,16 +6,19 @@
 //!
 //! ## Features
 //!
-//! - `native-extensions` - Enable native Python extension support via late-linking
-//!   and pre-initialization. This allows adding extensions like numpy at sandbox
-//!   creation time without rebuilding the entire component, and captures Python's
-//!   memory state for faster startup.
+//! - `preinit` - Pre-initialization support for capturing Python memory state.
+//!   Provides ~25x speedup for sandbox creation. Works with or without native
+//!   extensions - can pre-import stdlib modules only.
+//!
+//! - `native-extensions` - Native Python extension support via late-linking.
+//!   Allows adding extensions like numpy at sandbox creation time. Implies `preinit`.
 //!
 //! ## Contents
 //!
 //! - `runtime.wit` - WIT interface definition
-//! - `linker` - Late-linking support for native extensions (feature-gated)
-//! - `preinit` - Pre-initialization support (feature-gated)
+//! - `linker` - Late-linking support for native extensions (requires `preinit`)
+//! - `preinit` - Pre-initialization support (requires `preinit` feature)
+//! - `stubwasi` - Stub WASI adapters for pre-initialization (requires `preinit`)
 //!
 //! ## See Also
 //!
@@ -25,13 +28,13 @@
 pub const WIT_DEFINITION: &str = include_str!("../runtime.wit");
 
 /// Late-linking support for native Python extensions.
-#[cfg(feature = "native-extensions")]
+#[cfg(feature = "preinit")]
 pub mod linker;
 
 /// Pre-initialization support for capturing Python memory state.
-#[cfg(feature = "native-extensions")]
+#[cfg(feature = "preinit")]
 pub mod preinit;
 
 /// Stub WASI adapters for pre-initialization.
-#[cfg(feature = "native-extensions")]
+#[cfg(feature = "preinit")]
 pub mod stubwasi;

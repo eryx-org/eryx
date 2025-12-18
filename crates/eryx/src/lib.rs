@@ -53,12 +53,14 @@ pub mod session;
 mod trace;
 mod wasm;
 
-/// Pre-initialization support for native extensions.
+/// Pre-initialization support for capturing Python memory state.
 ///
 /// Pre-initialization runs Python's init + imports during build time and
-/// captures the memory state into the component. This avoids the ~450ms
-/// startup cost on each sandbox creation.
-#[cfg(feature = "native-extensions")]
+/// captures the memory state into the component. This provides ~25x speedup
+/// by avoiding the ~450ms startup cost on each sandbox creation.
+///
+/// Works with or without native extensions - can pre-import stdlib modules only.
+#[cfg(feature = "preinit")]
 pub mod preinit {
     pub use eryx_runtime::linker::NativeExtension;
     pub use eryx_runtime::preinit::{PreInitError, pre_initialize};

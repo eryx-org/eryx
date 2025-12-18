@@ -4,9 +4,9 @@
 //! arbitrary imports work after pre-init (i.e., the WASI reset doesn't
 //! break normal import functionality at runtime).
 //!
-//! These tests require the `native-extensions` feature.
+//! These tests require the `preinit` feature.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
-#![cfg(feature = "native-extensions")]
+#![cfg(feature = "preinit")]
 
 use eryx::Sandbox;
 use eryx::preinit::pre_initialize;

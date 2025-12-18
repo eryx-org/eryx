@@ -15,10 +15,11 @@ readme = "README.md"
 
 [features]
 default = []
-# Enable native Python extension support via late-linking and pre-initialization.
-# Late-linking allows adding extensions like numpy at sandbox creation time.
-# Pre-initialization captures Python's memory state for faster startup.
-native-extensions = [
+
+# Pre-initialization support for capturing Python memory state.
+# Provides ~25x speedup for sandbox creation by snapshotting initialized Python.
+# Works with or without native extensions - can pre-import stdlib modules only.
+preinit = [
     "dep:wit-component",
     "dep:zstd",
     "dep:sha2",
@@ -34,6 +35,11 @@ native-extensions = [
     "dep:wasm-encoder",
     "dep:wasmparser",
 ]
+
+# Native Python extension support via late-linking.
+# Allows adding extensions like numpy at sandbox creation time.
+# Implies preinit since the linker infrastructure is shared.
+native-extensions = ["preinit"]
 
 [dependencies]
 wit-component = { workspace = true, optional = true }

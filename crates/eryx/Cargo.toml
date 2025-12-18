@@ -73,10 +73,14 @@ default = []
 # Enables unsafe code paths for wasmtime's pre-compiled component loading.
 # Without this feature, the crate uses `forbid(unsafe_code)`.
 embedded = ["dep:zstd"]
-# Native Python extension support via late-linking and pre-initialization.
+# Pre-initialization support for capturing Python memory state.
+# Provides ~25x speedup for sandbox creation by snapshotting initialized Python.
+# Works with or without native extensions - can pre-import stdlib modules only.
+preinit = ["dep:eryx-runtime", "eryx-runtime/preinit"]
+# Native Python extension support via late-linking.
 # Allows adding extensions like numpy at sandbox creation time.
-# Includes pre-init for capturing Python's memory state for faster startup.
-native-extensions = ["dep:eryx-runtime", "eryx-runtime/native-extensions"]
+# Implies preinit since the linker infrastructure is shared.
+native-extensions = ["preinit", "eryx-runtime/native-extensions"]
 
 [dev-dependencies]
 async-trait.workspace = true
@@ -95,10 +99,11 @@ all-features = true
 
 [package.metadata.cargo-all-features]
 # Skip feature combinations that require the WASM runtime to be built first.
-# native-extensions requires liberyx_runtime.so.zst which is only available
-# after running `mise run build-eryx-runtime`.
+# preinit and native-extensions require liberyx_runtime.so.zst which is only
+# available after running `mise run build-eryx-runtime`.
 skip_feature_sets = [
+    ["preinit"],
     ["native-extensions"],
 ]
-# With only 2 features, test all combinations (max 4)
-max_combination_size = 2
+# With 3 features, test all combinations
+max_combination_size = 3
