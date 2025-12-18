@@ -440,16 +440,6 @@ fn bench_introspection(c: &mut Criterion) {
         });
     });
 
-    group.bench_function("get_callback_schema", |b| {
-        b.to_async(&rt).iter(|| async {
-            session
-                .borrow_mut()
-                .execute("schema = get_callback_schema('echo')")
-                .await
-                .expect("Execution failed")
-        });
-    });
-
     group.finish();
 }
 
