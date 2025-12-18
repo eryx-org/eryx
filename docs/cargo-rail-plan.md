@@ -152,4 +152,4 @@ After implementation:
 - [x] `cargo rail unify --check` passes
 - [x] `cargo check-all-features` passes (base features)
 - [x] `mise run check-all-features` works
-- [ ] CI integration (future work)
+- [x] CI integration (added check-features, test-base, and examples jobs)

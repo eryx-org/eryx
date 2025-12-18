@@ -23,6 +23,23 @@ jobs:
       - name: Check dependency unification
         run: cargo rail unify --check
 
+  # Test base functionality without any features (runs parallel to build-eryx-runtime)
+  test-base:
+    name: Test (no features)
+    runs-on: namespace-profile-eryx-light
+    steps:
+      - uses: namespacelabs/nscloud-checkout-action@v8
+
+      - name: Configure Rust cache
+        uses: namespacelabs/nscloud-cache-action@v1
+        with:
+          cache: rust
+
+      - uses: ./.github/actions/setup-rust
+
+      - name: Run tests without features
+        run: cargo nextest run --workspace --no-default-features
+
   # Build eryx-wasm-runtime and precompile it - other jobs depend on this
   build-eryx-runtime:
     name: Build eryx-runtime
@@ -225,3 +242,101 @@ jobs:
         run: cargo doc --workspace --no-deps --all-features
         env:
           RUSTDOCFLAGS: -D warnings
+
+  # Check that all feature combinations compile
+  check-features:
+    name: Check Feature Combinations
+    runs-on: namespace-profile-eryx-standard
+    needs: build-eryx-runtime
+    steps:
+      - uses: namespacelabs/nscloud-checkout-action@v8
+
+      - name: Download WASM artifacts
+        uses: namespace-actions/download-artifact@v1
+        with:
+          name: wasm-runtime
+          path: crates/
+
+      - name: Mark WASM as up-to-date
+        run: |
+          touch crates/eryx-runtime/runtime.wasm crates/eryx-runtime/runtime.cwasm
+          if [ -d crates/eryx-runtime/prebuilt ]; then
+            touch crates/eryx-runtime/prebuilt/*
+          fi
+
+      - name: Configure Rust cache
+        uses: namespacelabs/nscloud-cache-action@v1
+        with:
+          cache: rust
+
+      - uses: ./.github/actions/setup-rust
+
+      - name: Check all feature combinations
+        # cargo-all-features checks the powerset of feature combinations.
+        # The Cargo.toml config skips preinit/native-extensions for local dev (no artifacts),
+        # but in CI we have artifacts, so we check those separately.
+        run: |
+          echo "=== Checking feature powerset (excluding preinit/native-extensions) ==="
+          cargo check-all-features -- -p eryx
+
+          echo "=== Checking features that require runtime artifacts ==="
+          cargo check -p eryx --features preinit
+          cargo check -p eryx --features embedded,preinit
+          cargo check -p eryx --features native-extensions
+          cargo check -p eryx --features embedded,native-extensions
+
+  # Run examples to ensure they don't bitrot
+  examples:
+    name: Examples
+    runs-on: namespace-profile-eryx-standard
+    needs: build-eryx-runtime
+    steps:
+      - uses: namespacelabs/nscloud-checkout-action@v8
+
+      - name: Download WASM artifacts
+        uses: namespace-actions/download-artifact@v1
+        with:
+          name: wasm-runtime
+          path: crates/
+
+      - name: Mark WASM as up-to-date
+        run: |
+          touch crates/eryx-runtime/runtime.wasm crates/eryx-runtime/runtime.cwasm
+          if [ -d crates/eryx-runtime/prebuilt ]; then
+            touch crates/eryx-runtime/prebuilt/*
+          fi
+
+      - name: Configure Rust cache
+        uses: namespacelabs/nscloud-cache-action@v1
+        with:
+          cache: rust
+
+      - uses: ./.github/actions/setup-rust
+
+      - name: Run examples (no features required)
+        run: |
+          echo "=== simple ==="
+          cargo run --package eryx --example simple --release
+          echo "=== parallel_callbacks ==="
+          cargo run --package eryx --example parallel_callbacks --release
+          echo "=== with_tracing ==="
+          cargo run --package eryx --example with_tracing --release
+          echo "=== error_handling ==="
+          cargo run --package eryx --example error_handling --release
+          echo "=== resource_limits ==="
+          cargo run --package eryx --example resource_limits --release
+          echo "=== custom_library ==="
+          cargo run --package eryx --example custom_library --release
+          echo "=== session_reuse ==="
+          cargo run --package eryx --example session_reuse --release
+          echo "=== runtime_callbacks ==="
+          cargo run --package eryx --example runtime_callbacks --release
+
+      - name: Run examples (embedded feature)
+        run: |
+          echo "=== precompile ==="
+          cargo run --package eryx --example precompile --features embedded --release
+          echo "=== embedded_runtime ==="
+          cargo run --package eryx --example embedded_runtime --features embedded --release
+          echo "=== trace_events ==="
+          cargo run --package eryx --example trace_events --features embedded --release

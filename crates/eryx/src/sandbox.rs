@@ -2,6 +2,7 @@
 
 use std::{
     collections::HashMap,
+    path::PathBuf,
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -10,6 +11,69 @@ use tokio::sync::mpsc;
 
 #[cfg(feature = "native-extensions")]
 use crate::cache::ComponentCache;
+
+/// Try to automatically find the Python stdlib directory.
+///
+/// This function searches multiple locations in order:
+/// 1. `ERYX_PYTHON_STDLIB` environment variable
+/// 2. `./python-stdlib` (relative to current directory)
+/// 3. `<exe_dir>/python-stdlib` (relative to executable)
+/// 4. `<exe_dir>/../python-stdlib` (sibling of executable directory)
+///
+/// Returns `Some(path)` if a valid stdlib directory is found, `None` otherwise.
+/// A valid stdlib directory must exist and contain an `encodings` subdirectory
+/// (required for Python initialization).
+fn find_python_stdlib() -> Option<PathBuf> {
+    // Helper to validate a stdlib directory
+    fn is_valid_stdlib(path: &std::path::Path) -> bool {
+        path.is_dir() && path.join("encodings").is_dir()
+    }
+
+    // 1. Environment variable
+    if let Ok(path) = std::env::var("ERYX_PYTHON_STDLIB") {
+        let path = PathBuf::from(path);
+        if is_valid_stdlib(&path) {
+            tracing::debug!(path = %path.display(), "Found Python stdlib via ERYX_PYTHON_STDLIB");
+            return Some(path);
+        }
+        tracing::warn!(
+            path = %path.display(),
+            "ERYX_PYTHON_STDLIB is set but path is not a valid stdlib directory"
+        );
+    }
+
+    // 2. Current directory
+    let cwd_stdlib = PathBuf::from("python-stdlib");
+    if is_valid_stdlib(&cwd_stdlib)
+        && let Ok(abs_path) = cwd_stdlib.canonicalize()
+    {
+        tracing::debug!(path = %abs_path.display(), "Found Python stdlib in current directory");
+        return Some(abs_path);
+    }
+
+    // 3. Relative to executable
+    if let Ok(exe_path) = std::env::current_exe()
+        && let Some(exe_dir) = exe_path.parent()
+    {
+        // Try <exe_dir>/python-stdlib
+        let exe_stdlib = exe_dir.join("python-stdlib");
+        if is_valid_stdlib(&exe_stdlib) {
+            tracing::debug!(path = %exe_stdlib.display(), "Found Python stdlib relative to executable");
+            return Some(exe_stdlib);
+        }
+
+        // 4. Try <exe_dir>/../python-stdlib (common for installed binaries)
+        let parent_stdlib = exe_dir.join("..").join("python-stdlib");
+        if is_valid_stdlib(&parent_stdlib)
+            && let Ok(abs_path) = parent_stdlib.canonicalize()
+        {
+            tracing::debug!(path = %abs_path.display(), "Found Python stdlib in parent of executable");
+            return Some(abs_path);
+        }
+    }
+
+    None
+}
 use crate::callback::Callback;
 use crate::callback_handler::{run_callback_handler, run_trace_collector};
 use crate::error::Error;
@@ -763,15 +827,16 @@ impl SandboxBuilder {
         #[cfg(not(feature = "native-extensions"))]
         let executor = self.build_executor_from_source()?;
 
-        // Determine stdlib path: explicit > embedded > none
+        // Determine stdlib path: explicit > embedded > auto-detect > none
         #[cfg(feature = "embedded")]
         let stdlib_path = self.python_stdlib_path.clone().or_else(|| {
             crate::embedded::EmbeddedResources::get()
                 .ok()
                 .map(|r| r.stdlib_path.clone())
-        });
+        }).or_else(find_python_stdlib);
+
         #[cfg(not(feature = "embedded"))]
-        let stdlib_path = self.python_stdlib_path.clone();
+        let stdlib_path = self.python_stdlib_path.clone().or_else(find_python_stdlib);
 
         // Collect all site-packages paths: explicit path first, then package paths
         let mut site_packages_paths = Vec::new();
