@@ -297,26 +297,10 @@ _eryx_callback_code = _eryx_async.resume({event0}, {event1}, {event2})
 /// with stdout still redirected so that async code could still print. Now we capture
 /// the final output and restore original stdout/stderr.
 pub fn recapture_stdout() {
-    use std::ffi::CString;
-
-    // Capture the output and restore original stdout/stderr
-    let code = r#"
-import sys as _sys
-if '_eryx_stdout' in dir():
-    _eryx_output = _eryx_stdout.getvalue()
-    _eryx_errors = _eryx_stderr.getvalue()
-    _sys.stdout = _eryx_old_stdout
-    _sys.stderr = _eryx_old_stderr
-    del _eryx_stdout, _eryx_stderr, _eryx_old_stdout, _eryx_old_stderr
-else:
-    _eryx_output = ''
-    _eryx_errors = ''
-"#;
-    if let Ok(code_cstr) = CString::new(code) {
-        unsafe {
-            if PyRun_SimpleString(code_cstr.as_ptr()) != 0 {
-                PyErr_Clear();
-            }
+    // Capture the output and restore original stdout/stderr using our helper
+    unsafe {
+        if PyRun_SimpleString(c"_eryx_output, _eryx_errors = _eryx_get_output()".as_ptr()) != 0 {
+            PyErr_Clear();
         }
     }
 }
@@ -747,6 +731,154 @@ static PYTHON_INITIALIZED: AtomicBool = AtomicBool::new(false);
 /// - Python interpreter (without signal handlers - not useful in WASM)
 /// - The _eryx_async module (embedded async runtime)
 /// - Ensures __main__ module exists for code execution
+///
+/// # `ERYX_EXEC_INFRASTRUCTURE`
+///
+/// Python code to set up execution infrastructure.
+/// This is run ONCE during `initialize_python()` and sets up:
+/// - Persistent stdout/stderr capture (reused across executions)
+/// - Socket patching for asyncio compatibility
+/// - The _eryx_exec() function that runs user code efficiently
+/// - User globals namespace (isolated from infrastructure)
+const ERYX_EXEC_INFRASTRUCTURE: &str = r#"
+import sys as _sys
+from io import StringIO as _StringIO
+import ast as _ast
+import types as _types
+
+# Patch socket.socketpair before importing asyncio
+# WASI doesn't support socketpair, so we create a dummy that works for asyncio's self-pipe
+import socket as _socket
+
+class _DummySocket:
+    '''Dummy socket for asyncio self-pipe in WASI.'''
+    def __init__(self):
+        self._buffer = []
+        self._closed = False
+    def fileno(self):
+        return -1
+    def setblocking(self, flag):
+        pass
+    def send(self, data):
+        self._buffer.append(data)
+        return len(data)
+    def recv(self, n):
+        if self._buffer:
+            return self._buffer.pop(0)
+        return b''
+    def close(self):
+        self._closed = True
+    def __enter__(self):
+        return self
+    def __exit__(self, *args):
+        self.close()
+
+def _dummy_socketpair(family=None, type=None, proto=0):
+    return (_DummySocket(), _DummySocket())
+
+_socket.socketpair = _dummy_socketpair
+
+# Persistent stdout/stderr capture - created once, reused across executions
+_eryx_stdout = _StringIO()
+_eryx_stderr = _StringIO()
+_eryx_old_stdout = _sys.stdout
+_eryx_old_stderr = _sys.stderr
+
+# User globals namespace - isolated from infrastructure
+# User code cannot see _eryx_* variables because they're in module globals, not here
+_eryx_user_globals = {'__builtins__': __builtins__, '__name__': '__main__'}
+
+# Import async infrastructure
+import _eryx_async
+import _eryx as _eryx_mod
+import json as _json
+
+# Callback code storage
+_eryx_callback_code = 0
+
+def _eryx_run_async(coro):
+    '''Run a coroutine using _eryx_async runtime.'''
+    global _eryx_callback_code
+    _eryx_callback_code = _eryx_async.run_async(coro)
+    return None
+
+# Trace function for sys.settrace
+def _eryx_trace_func(frame, event, arg):
+    '''Trace function called by Python for each execution event.'''
+    filename = frame.f_code.co_filename
+    if filename != '<user>':
+        return _eryx_trace_func
+
+    lineno = frame.f_lineno
+    func_name = frame.f_code.co_name
+
+    if func_name.startswith('_') and func_name != '<module>':
+        return _eryx_trace_func
+
+    if event == 'line':
+        _eryx_mod._eryx_report_trace(lineno, _json.dumps({"type": "line"}), "")
+    elif event == 'call':
+        _eryx_mod._eryx_report_trace(lineno, _json.dumps({"type": "call", "function": func_name}), "")
+    elif event == 'return':
+        _eryx_mod._eryx_report_trace(lineno, _json.dumps({"type": "return", "function": func_name}), "")
+    elif event == 'exception':
+        exc_type, exc_value, _ = arg
+        if exc_type is StopIteration:
+            return _eryx_trace_func
+        _eryx_mod._eryx_report_trace(lineno, _json.dumps({
+            "type": "exception",
+            "exception_type": exc_type.__name__ if exc_type else "Unknown",
+            "message": str(exc_value) if exc_value else ""
+        }), "")
+
+    return _eryx_trace_func
+
+def _eryx_exec(code):
+    '''Execute user code efficiently. Called once per execute().
+
+    This function is pre-compiled and runs user code in an isolated namespace.
+    Infrastructure variables (_eryx_*) are not visible to user code.
+    '''
+    global _eryx_callback_code
+    _eryx_callback_code = 0
+
+    # Clear and redirect stdout/stderr
+    _eryx_stdout.seek(0)
+    _eryx_stdout.truncate(0)
+    _eryx_stderr.seek(0)
+    _eryx_stderr.truncate(0)
+    _sys.stdout = _eryx_stdout
+    _sys.stderr = _eryx_stderr
+
+    # Compile user code with top-level await support
+    compiled = compile(code, '<user>', 'exec', flags=_ast.PyCF_ALLOW_TOP_LEVEL_AWAIT)
+
+    # Enable tracing
+    _sys.settrace(_eryx_trace_func)
+
+    try:
+        # Check if the compiled code is a coroutine (has top-level await)
+        if compiled.co_flags & 0x80:  # CO_COROUTINE
+            fn = _types.FunctionType(compiled, _eryx_user_globals)
+            coro = fn()
+            _eryx_run_async(coro)
+        else:
+            # Regular synchronous code - execute in user namespace
+            exec(compiled, _eryx_user_globals, _eryx_user_globals)
+    finally:
+        _sys.settrace(None)
+
+def _eryx_get_output():
+    '''Get captured stdout and restore original streams.'''
+    _sys.stdout = _eryx_old_stdout
+    _sys.stderr = _eryx_old_stderr
+    return _eryx_stdout.getvalue(), _eryx_stderr.getvalue()
+
+def _eryx_get_output_keep_capture():
+    '''Get captured stdout without restoring streams (for pending async).'''
+    return _eryx_stdout.getvalue(), _eryx_stderr.getvalue()
+"#;
+
 pub fn initialize_python() {
     if PYTHON_INITIALIZED.swap(true, Ordering::SeqCst) {
         // Already initialized
@@ -779,6 +911,15 @@ pub fn initialize_python() {
         if result != 0 {
             // _eryx_async injection failed - this is critical for async support
             // Log the error but continue (sync code will still work)
+            PyErr_Clear();
+        }
+
+        // Set up execution infrastructure (stdout capture, _eryx_exec, etc.)
+        // This is done ONCE here, not on every execute() call.
+        let infra_cstr = std::ffi::CString::new(ERYX_EXEC_INFRASTRUCTURE).unwrap();
+        let result = PyRun_SimpleString(infra_cstr.as_ptr());
+        if result != 0 {
+            // Infrastructure setup failed - this is critical
             PyErr_Clear();
         }
 
@@ -1008,169 +1149,22 @@ pub fn execute_python(code: &str) -> ExecuteResult {
     }
 
     unsafe {
-        // Set up stdout/stderr capture and async execution infrastructure
-        // Also patch socket.socketpair to work in WASI (needed for asyncio)
-        let capture_setup = c"
-import sys as _sys
-from io import StringIO as _StringIO
-import ast as _ast
-import types as _types
+        // Call the pre-compiled _eryx_exec() function with the user code.
+        // This is MUCH faster than the old approach because:
+        // 1. All infrastructure (imports, trace func, etc.) is already set up
+        // 2. We only parse/compile the user code, not 100+ lines of wrapper
+        // 3. stdout/stderr capture reuses existing StringIO objects
+        let exec_call = format!("_eryx_exec({})", python_string_literal(code));
 
-# Patch socket.socketpair before importing asyncio
-# WASI doesn't support socketpair, so we create a dummy that works for asyncio's self-pipe
-import socket as _socket
-_socket_original_socketpair = getattr(_socket, 'socketpair', None)
-
-class _DummySocket:
-    '''Dummy socket for asyncio self-pipe in WASI.'''
-    def __init__(self):
-        self._buffer = []
-        self._closed = False
-    def fileno(self):
-        return -1  # Invalid fd, but asyncio might not check
-    def setblocking(self, flag):
-        pass
-    def send(self, data):
-        self._buffer.append(data)
-        return len(data)
-    def recv(self, n):
-        if self._buffer:
-            return self._buffer.pop(0)
-        return b''
-    def close(self):
-        self._closed = True
-    def __enter__(self):
-        return self
-    def __exit__(self, *args):
-        self.close()
-
-def _dummy_socketpair(family=None, type=None, proto=0):
-    '''Dummy socketpair for WASI asyncio compatibility.'''
-    return (_DummySocket(), _DummySocket())
-
-# Always patch socketpair in WASI environment
-_socket.socketpair = _dummy_socketpair
-
-_eryx_stdout = _StringIO()
-_eryx_stderr = _StringIO()
-_eryx_old_stdout = _sys.stdout
-_eryx_old_stderr = _sys.stderr
-_sys.stdout = _eryx_stdout
-_sys.stderr = _eryx_stderr
-";
-        if PyRun_SimpleString(capture_setup.as_ptr()) != 0 {
-            PyErr_Clear();
-            return ExecuteResult::Error("Failed to set up output capture".to_string());
-        }
-
-        // Build the execution code - compile with TLA support and run with async support
-        let exec_wrapper = format!(
-            r#"
-import _eryx_async
-
-# Global to store the callback code from run_async
-_eryx_callback_code = 0  # 0 = EXIT (complete), 2 = WAIT (pending), etc.
-
-def _eryx_run_async(coro):
-    '''Run a coroutine using _eryx_async runtime.
-
-    Uses the embedded async runtime which properly handles pending async
-    operations and the Component Model callback protocol.
-
-    Stores the callback code in _eryx_callback_code global:
-    - 0 (EXIT): Execution complete
-    - 2 (WAIT) | (waitable_set << 4): Execution pending, need to wait
-    '''
-    global _eryx_callback_code
-    _eryx_callback_code = _eryx_async.run_async(coro)
-    return None
-
-# Import the _eryx module for trace reporting
-import _eryx as _eryx_mod
-import json as _json
-
-# Trace function for sys.settrace
-def _eryx_trace_func(frame, event, arg):
-    '''Trace function called by Python for each execution event.'''
-    filename = frame.f_code.co_filename
-
-    # Only trace user code (compiled as '<user>')
-    # Skip all internal library code, asyncio internals, etc.
-    if filename != '<user>':
-        # Return trace_func to continue tracing (needed to catch
-        # when execution returns to user code), but don't report
-        return _eryx_trace_func
-
-    lineno = frame.f_lineno
-    func_name = frame.f_code.co_name
-
-    # Skip internal functions that start with underscore
-    # (except <module> which is the main code block)
-    if func_name.startswith('_') and func_name != '<module>':
-        return _eryx_trace_func
-
-    if event == 'line':
-        _eryx_mod._eryx_report_trace(lineno, _json.dumps({{"type": "line"}}), "")
-    elif event == 'call':
-        _eryx_mod._eryx_report_trace(lineno, _json.dumps({{"type": "call", "function": func_name}}), "")
-    elif event == 'return':
-        _eryx_mod._eryx_report_trace(lineno, _json.dumps({{"type": "return", "function": func_name}}), "")
-    elif event == 'exception':
-        exc_type, exc_value, _ = arg
-        # Filter out StopIteration - it's normal async control flow,
-        # not a real exception. When an awaited value returns, Python
-        # internally "throws" a StopIteration with the result.
-        if exc_type is StopIteration:
-            return _eryx_trace_func
-        _eryx_mod._eryx_report_trace(lineno, _json.dumps({{
-            "type": "exception",
-            "exception_type": exc_type.__name__ if exc_type else "Unknown",
-            "message": str(exc_value) if exc_value else ""
-        }}), "")
-
-    return _eryx_trace_func
-
-_eryx_user_code = {}
-_eryx_compiled = compile(_eryx_user_code, '<user>', 'exec', flags=_ast.PyCF_ALLOW_TOP_LEVEL_AWAIT)
-
-# Enable tracing before execution
-# Note: sys.settrace doesn't work well with async code, so we only
-# trace synchronous portions. Callback start/end should be traced explicitly.
-_sys.settrace(_eryx_trace_func)
-
-try:
-    # Check if the compiled code is a coroutine (has top-level await)
-    if _eryx_compiled.co_flags & 0x80:  # CO_COROUTINE
-        # Create a function from the code and run it as a coroutine
-        _eryx_fn = _types.FunctionType(_eryx_compiled, globals())
-        _eryx_coro = _eryx_fn()
-        _eryx_run_async(_eryx_coro)
-    else:
-        # Regular synchronous code
-        exec(_eryx_compiled, globals())
-finally:
-    # Disable tracing
-    _sys.settrace(None)
-"#,
-            python_string_literal(code)
-        );
-
-        let exec_code_cstr = match CString::new(exec_wrapper) {
+        let exec_code_cstr = match CString::new(exec_call) {
             Ok(s) => s,
             Err(e) => return ExecuteResult::Error(format!("Invalid exec code: {e}")),
         };
         let exec_result = PyRun_SimpleString(exec_code_cstr.as_ptr());
 
         if exec_result != 0 {
-            // Execution failed - teardown and get error
-            let capture_teardown = c"
-_sys.stdout = _eryx_old_stdout
-_sys.stderr = _eryx_old_stderr
-_eryx_output = _eryx_stdout.getvalue()
-_eryx_errors = _eryx_stderr.getvalue()
-del _eryx_stdout, _eryx_stderr, _eryx_old_stdout, _eryx_old_stderr
-";
-            let _ = PyRun_SimpleString(capture_teardown.as_ptr());
+            // Execution failed - get error and output
+            let _ = PyRun_SimpleString(c"_eryx_output, _eryx_errors = _eryx_get_output()".as_ptr());
 
             let stderr_output = get_python_variable_string("_eryx_errors").unwrap_or_default();
             let exception_msg = get_last_error_message();
@@ -1183,34 +1177,22 @@ del _eryx_stdout, _eryx_stderr, _eryx_old_stdout, _eryx_old_stderr
                 exception_msg
             };
 
-            let _ = PyRun_SimpleString(c"del _eryx_output, _eryx_errors".as_ptr());
             return ExecuteResult::Error(error);
         }
 
-        // Check the callback code BEFORE teardown to see if execution is pending
+        // Check the callback code to see if execution is pending
         let callback_code_value = get_python_callback_code();
         let code = callback_code::get_code(callback_code_value);
 
         if code == callback_code::WAIT {
-            // Execution is pending - keep capture variables including stdout redirection
-            // so that async code can still print and we'll capture it later
+            // Execution is pending - keep stdout/stderr redirected for async output
             return ExecuteResult::Pending(callback_code_value);
         }
 
-        // Execution complete - full teardown
-        let capture_teardown = c"
-_sys.stdout = _eryx_old_stdout
-_sys.stderr = _eryx_old_stderr
-_eryx_output = _eryx_stdout.getvalue()
-_eryx_errors = _eryx_stderr.getvalue()
-del _eryx_stdout, _eryx_stderr, _eryx_old_stdout, _eryx_old_stderr
-";
-        if PyRun_SimpleString(capture_teardown.as_ptr()) != 0 {
-            PyErr_Clear();
-        }
+        // Execution complete - get output and restore streams
+        let _ = PyRun_SimpleString(c"_eryx_output, _eryx_errors = _eryx_get_output()".as_ptr());
 
         let output = get_python_variable_string("_eryx_output").unwrap_or_default();
-        let _ = PyRun_SimpleString(c"del _eryx_output, _eryx_errors".as_ptr());
 
         ExecuteResult::Complete(output.trim_end_matches('\n').to_string())
     }
@@ -1312,12 +1294,12 @@ unsafe fn set_python_variable_bytes(name: &str, data: &[u8]) -> Result<(), Strin
     }
 }
 
-/// Snapshot the current Python state by pickling `__main__.__dict__`.
+/// Snapshot the current Python state by pickling `_eryx_user_globals`.
 ///
 /// Returns the pickled state as bytes, which can be restored later with `restore_state`.
 ///
 /// # What is preserved
-/// - All user-defined variables in `__main__`
+/// - All user-defined variables in the user namespace
 /// - Simple types (int, float, str, list, dict, tuple, set, etc.)
 /// - Most standard library objects
 ///
@@ -1331,25 +1313,17 @@ pub fn snapshot_state() -> Result<Vec<u8>, String> {
     }
 
     unsafe {
-        // Pickle __main__.__dict__, excluding unpicklable items
+        // Pickle _eryx_user_globals, excluding unpicklable items
         let pickle_code = c"
 import pickle as _eryx_pickle
-import __main__ as _eryx_main
 
-# Items to exclude from snapshot (builtins and our temp vars)
+# Items to exclude from snapshot (builtins and metadata)
 _eryx_exclude = {
     '__builtins__', '__name__', '__doc__', '__package__',
     '__loader__', '__spec__', '__cached__', '__file__',
     # Exclude callback infrastructure (set up fresh on each run)
     'invoke', 'list_callbacks', '_EryxNamespace', '_EryxCallbackLeaf',
     '_eryx_make_callback', '_eryx_reserved',
-    # Exclude internal runtime infrastructure (WASI patches, IO capture, etc.)
-    '_sys', '_StringIO', '_ast', '_types', '_socket',
-    '_socket_original_socketpair', '_DummySocket', '_dummy_socketpair',
-    '_CPAS_AVAILABLE', '_asyncio', '_cpas', '_cpr',
-    '_Ok', '_Err', '_ASYNC_SUPPORT',
-    # Exclude tracing infrastructure
-    '_json', '_eryx_mod', '_eryx_trace_func',
 }
 
 # Check if an object is part of the callback infrastructure
@@ -1358,7 +1332,7 @@ def _eryx_is_callback_obj(obj):
     if callable(obj) and hasattr(obj, '__closure__') and obj.__closure__:
         for cell in obj.__closure__:
             try:
-                if cell.cell_contents == invoke:
+                if 'invoke' in _eryx_user_globals and cell.cell_contents == _eryx_user_globals['invoke']:
                     return True
             except (ValueError, NameError):
                 pass
@@ -1369,13 +1343,13 @@ def _eryx_is_callback_obj(obj):
     return False
 
 # Take a snapshot of the keys first to avoid 'dictionary changed size during iteration'
-_eryx_keys = list(_eryx_main.__dict__.keys())
+_eryx_keys = list(_eryx_user_globals.keys())
 
 # Build dict of picklable items
 _eryx_state_dict = {}
 for _k in _eryx_keys:
     if _k not in _eryx_exclude and not _k.startswith('_eryx_'):
-        _v = _eryx_main.__dict__.get(_k)
+        _v = _eryx_user_globals.get(_k)
         if _v is not None:
             # Skip callback infrastructure objects
             if _eryx_is_callback_obj(_v):
@@ -1390,14 +1364,14 @@ for _k in _eryx_keys:
 
 # Pickle the filtered dict
 _eryx_state_bytes = _eryx_pickle.dumps(_eryx_state_dict)
+
+# Clean up local helpers
+del _eryx_exclude, _eryx_is_callback_obj, _eryx_keys, _eryx_state_dict, _eryx_pickle
 ";
 
         if PyRun_SimpleString(pickle_code.as_ptr()) != 0 {
             let err = get_last_error_message();
-            let _ = PyRun_SimpleString(
-                c"del _eryx_pickle, _eryx_main, _eryx_exclude, _eryx_is_callback_obj, _eryx_keys, _eryx_state_dict"
-                    .as_ptr(),
-            );
+            PyErr_Clear();
             return Err(format!("Failed to snapshot state: {err}"));
         }
 
@@ -1405,10 +1379,7 @@ _eryx_state_bytes = _eryx_pickle.dumps(_eryx_state_dict)
         let state_bytes = get_python_variable_bytes("_eryx_state_bytes")?;
 
         // Clean up
-        let _ = PyRun_SimpleString(
-            c"del _eryx_pickle, _eryx_main, _eryx_exclude, _eryx_is_callback_obj, _eryx_keys, _eryx_state_dict, _eryx_state_bytes"
-                .as_ptr(),
-        );
+        let _ = PyRun_SimpleString(c"del _eryx_state_bytes".as_ptr());
 
         Ok(state_bytes)
     }
@@ -1416,7 +1387,7 @@ _eryx_state_bytes = _eryx_pickle.dumps(_eryx_state_dict)
 
 /// Restore Python state from a previous snapshot.
 ///
-/// This unpickles the data and updates `__main__.__dict__` with the restored values.
+/// This unpickles the data and updates `_eryx_user_globals` with the restored values.
 /// Existing variables that aren't in the snapshot are preserved.
 pub fn restore_state(data: &[u8]) -> Result<(), String> {
     if !is_python_initialized() {
@@ -1432,19 +1403,18 @@ pub fn restore_state(data: &[u8]) -> Result<(), String> {
         // Set the bytes in Python
         set_python_variable_bytes("_eryx_restore_bytes", data)?;
 
-        // Unpickle and update __main__.__dict__
+        // Unpickle and update _eryx_user_globals
         let restore_code = c"
 import pickle as _eryx_pickle
-import __main__ as _eryx_main
 
 # Unpickle the state
 _eryx_restored_dict = _eryx_pickle.loads(_eryx_restore_bytes)
 
-# Update __main__ with restored values
-_eryx_main.__dict__.update(_eryx_restored_dict)
+# Update user globals with restored values
+_eryx_user_globals.update(_eryx_restored_dict)
 
 # Clean up
-del _eryx_restore_bytes, _eryx_restored_dict, _eryx_pickle, _eryx_main
+del _eryx_restore_bytes, _eryx_restored_dict, _eryx_pickle
 ";
 
         if PyRun_SimpleString(restore_code.as_ptr()) != 0 {
@@ -1457,7 +1427,7 @@ del _eryx_restore_bytes, _eryx_restored_dict, _eryx_pickle, _eryx_main
     }
 }
 
-/// Clear all user-defined state from `__main__`.
+/// Clear all user-defined state from `_eryx_user_globals`.
 ///
 /// This removes all variables except Python builtins and module metadata,
 /// effectively resetting to a fresh interpreter state.
@@ -1468,39 +1438,24 @@ pub fn clear_state() {
 
     unsafe {
         let clear_code = c"
-import __main__ as _eryx_main
-
-# Items to keep (builtins and module metadata)
+# Items to keep (builtins and metadata)
 _eryx_keep = {
     '__builtins__', '__name__', '__doc__', '__package__',
     '__loader__', '__spec__', '__cached__', '__file__',
-    '_eryx_main', '_eryx_keep', '_eryx_to_delete',
     # Preserve callback infrastructure
     'invoke', 'list_callbacks', '_EryxNamespace', '_EryxCallbackLeaf',
     '_eryx_make_callback', '_eryx_reserved', '_eryx_callbacks',
-    # Preserve json module alias used by list_callbacks and _eryx module for invoke()
-    '_json', '_eryx',
-    # Preserve async support modules
-    '_cpr', '_cpas', '_Ok', '_Err', '_ASYNC_SUPPORT',
-    # Preserve internal runtime infrastructure (WASI patches, IO capture, etc.)
-    '_sys', '_StringIO', '_ast', '_types', '_socket',
-    '_socket_original_socketpair', '_DummySocket', '_dummy_socketpair',
-    '_CPAS_AVAILABLE', '_asyncio',
-    # Preserve tracing infrastructure
-    '_eryx_mod', '_eryx_trace_func',
 }
 
 # Also keep callback wrappers and namespace objects
 def _eryx_should_keep(k, v):
     if k in _eryx_keep:
         return True
-    if k.startswith('_eryx_'):
-        return True
     # Keep callback wrapper functions
     if callable(v) and hasattr(v, '__closure__') and v.__closure__:
         for cell in v.__closure__:
             try:
-                if 'invoke' in dir() and cell.cell_contents == invoke:
+                if 'invoke' in _eryx_user_globals and cell.cell_contents == _eryx_user_globals['invoke']:
                     return True
             except (ValueError, NameError):
                 pass
@@ -1510,14 +1465,14 @@ def _eryx_should_keep(k, v):
     return False
 
 # Collect keys to delete (can't modify dict during iteration)
-_eryx_to_delete = [k for k, v in list(_eryx_main.__dict__.items()) if not _eryx_should_keep(k, v)]
+_eryx_to_delete = [k for k, v in list(_eryx_user_globals.items()) if not _eryx_should_keep(k, v)]
 
 # Delete the keys
 for _k in _eryx_to_delete:
-    del _eryx_main.__dict__[_k]
+    del _eryx_user_globals[_k]
 
 # Clean up our temporaries
-del _eryx_main, _eryx_keep, _eryx_should_keep, _eryx_to_delete, _k
+del _eryx_keep, _eryx_should_keep, _eryx_to_delete, _k
 ";
 
         if PyRun_SimpleString(clear_code.as_ptr()) != 0 {
@@ -1668,7 +1623,7 @@ class _EryxCallbackLeaf:
     async def __call__(self, **kwargs):
         return await self._invoke(self._name, **kwargs)
 
-# Generate callback wrappers
+# Generate callback wrappers - add to both module globals and user globals
 _eryx_namespaces = {{}}
 for _cb in _eryx_callbacks:
     _name = _cb['name']
@@ -1683,10 +1638,19 @@ for _cb in _eryx_callbacks:
             _eryx_namespaces[_root]._add_callback(_parts[1:])
     else:
         if _name not in _eryx_reserved:
-            globals()[_name] = _eryx_make_callback(_name)
+            _wrapper = _eryx_make_callback(_name)
+            globals()[_name] = _wrapper
+            _eryx_user_globals[_name] = _wrapper
 
-# Add namespaces to globals
+# Add namespaces to both module globals and user globals
 globals().update(_eryx_namespaces)
+_eryx_user_globals.update(_eryx_namespaces)
+
+# Inject core API into user globals so user code can access callbacks
+_eryx_user_globals['invoke'] = invoke
+_eryx_user_globals['list_callbacks'] = list_callbacks
+_eryx_user_globals['_EryxNamespace'] = _EryxNamespace
+_eryx_user_globals['_EryxCallbackLeaf'] = _EryxCallbackLeaf
 
 # Clean up temporary variables
 del _eryx_callbacks_json, _eryx_namespaces
