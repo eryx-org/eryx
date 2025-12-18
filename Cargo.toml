@@ -99,3 +99,11 @@ lto = false
 [profile.profiling]
 inherits = "release"
 debug = true
+
+# Optimize heavy deps in dev mode to speed up tests
+# (wasmtime/cranelift JIT is ~10-50x slower unoptimized)
+[profile.dev.package]
+cranelift-codegen.opt-level = 3
+regalloc2.opt-level = 3
+wasmtime.opt-level = 3
+wasmparser.opt-level = 3
