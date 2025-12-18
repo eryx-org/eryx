@@ -320,7 +320,7 @@ impl ComponentCache for NoCache {
 
 /// Global in-memory cache for pre-instantiated WASM components.
 ///
-/// This is Tier 1 of the two-tier caching system. It stores [`SandboxPre`]
+/// This is Tier 1 of the two-tier caching system. It stores pre-initialized
 /// instances keyed by [`CacheKey`], eliminating the need to re-link imports
 /// on repeated sandbox creations with the same component.
 ///
