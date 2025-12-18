@@ -892,11 +892,15 @@ impl SandboxBuilder {
 
         // Determine stdlib path: explicit > embedded > auto-detect > none
         #[cfg(feature = "embedded")]
-        let stdlib_path = self.python_stdlib_path.clone().or_else(|| {
-            crate::embedded::EmbeddedResources::get()
-                .ok()
-                .map(|r| r.stdlib_path.clone())
-        }).or_else(find_python_stdlib);
+        let stdlib_path = self
+            .python_stdlib_path
+            .clone()
+            .or_else(|| {
+                crate::embedded::EmbeddedResources::get()
+                    .ok()
+                    .map(|r| r.stdlib_path.clone())
+            })
+            .or_else(find_python_stdlib);
 
         #[cfg(not(feature = "embedded"))]
         let stdlib_path = self.python_stdlib_path.clone().or_else(find_python_stdlib);
