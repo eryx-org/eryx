@@ -13,9 +13,12 @@
 //! 3. Save for embedding in the binary
 //!
 //! Run with preinit (recommended for fastest sessions):
-//!   `cargo run --example precompile --features embedded,preinit --release`
+//!   `cargo run --example precompile --features preinit --release`
 //!
 //! Run without preinit (faster build, slower sessions):
+//!   `cargo run --example precompile --release`
+//!
+//! Run with verification (requires embedded feature, creates chicken-and-egg if .cwasm missing):
 //!   `cargo run --example precompile --features embedded --release`
 
 use std::time::Instant;
@@ -23,6 +26,7 @@ use std::time::Instant;
 #[cfg(feature = "preinit")]
 use std::path::Path;
 
+#[cfg(feature = "embedded")]
 use eryx::session::Session;
 
 fn main() -> anyhow::Result<()> {

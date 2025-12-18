@@ -21,7 +21,6 @@ required-features = ["embedded"]
 
 [[example]]
 name = "precompile"
-required-features = ["embedded"]
 
 [[example]]
 name = "trace_events"
