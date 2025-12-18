@@ -8,19 +8,19 @@
 //!
 //! This example shows how to:
 //!
-//! 1. Pre-initialize Python (runs interpreter init, captures memory state) [with native-extensions]
+//! 1. Pre-initialize Python (runs interpreter init, captures memory state) [with preinit]
 //! 2. Pre-compile to native code
 //! 3. Save for embedding in the binary
 //!
-//! Run with native-extensions (recommended for fastest sessions):
-//!   `cargo run --example precompile --features embedded,native-extensions --release`
+//! Run with preinit (recommended for fastest sessions):
+//!   `cargo run --example precompile --features embedded,preinit --release`
 //!
-//! Run without native-extensions (faster build, slower sessions):
+//! Run without preinit (faster build, slower sessions):
 //!   `cargo run --example precompile --features embedded --release`
 
 use std::time::Instant;
 
-#[cfg(feature = "native-extensions")]
+#[cfg(feature = "preinit")]
 use std::path::Path;
 
 use eryx::session::Session;
@@ -40,8 +40,8 @@ fn main() -> anyhow::Result<()> {
         wasm_bytes.len() as f64 / 1_000_000.0
     );
 
-    // With native-extensions: do pre-initialization for faster session creation
-    #[cfg(feature = "native-extensions")]
+    // With preinit: do pre-initialization for faster session creation
+    #[cfg(feature = "preinit")]
     let component_bytes = {
         let python_stdlib = find_python_stdlib()?;
         println!("Python stdlib: {}\n", python_stdlib.display());
@@ -72,11 +72,11 @@ fn main() -> anyhow::Result<()> {
         preinit_bytes
     };
 
-    // Without native-extensions: skip pre-initialization
-    #[cfg(not(feature = "native-extensions"))]
+    // Without preinit: skip pre-initialization
+    #[cfg(not(feature = "preinit"))]
     let component_bytes = {
         println!("\n--- Step 1: Skipping pre-initialization ---");
-        println!("Enable native-extensions feature for faster session creation.");
+        println!("Enable preinit feature for faster session creation.");
         println!("Without pre-init, session creation will take ~450ms instead of ~1-5ms.\n");
         wasm_bytes
     };
@@ -172,9 +172,9 @@ fn main() -> anyhow::Result<()> {
 
         // Summary
         println!("\n=== Summary ===");
-        #[cfg(feature = "native-extensions")]
+        #[cfg(feature = "preinit")]
         println!("Mode: Pre-initialized + Pre-compiled (fastest)");
-        #[cfg(not(feature = "native-extensions"))]
+        #[cfg(not(feature = "preinit"))]
         println!("Mode: Pre-compiled only (no pre-init)");
         println!();
         println!("Runtime performance:");
@@ -197,7 +197,7 @@ fn main() -> anyhow::Result<()> {
 }
 
 /// Find the Python stdlib directory.
-#[cfg(feature = "native-extensions")]
+#[cfg(feature = "preinit")]
 fn find_python_stdlib() -> anyhow::Result<std::path::PathBuf> {
     // Check common locations
     let candidates = [
