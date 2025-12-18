@@ -664,7 +664,6 @@ impl PythonExecutor {
     /// # Errors
     ///
     /// Returns an error if pre-compilation fails.
-    #[cfg(feature = "embedded")]
     pub fn precompile(wasm_bytes: &[u8]) -> std::result::Result<Vec<u8>, Error> {
         let engine = Self::create_engine()?;
         engine
@@ -679,7 +678,6 @@ impl PythonExecutor {
     /// # Errors
     ///
     /// Returns an error if the file cannot be read or pre-compilation fails.
-    #[cfg(feature = "embedded")]
     pub fn precompile_file(
         path: impl AsRef<std::path::Path>,
     ) -> std::result::Result<Vec<u8>, Error> {
