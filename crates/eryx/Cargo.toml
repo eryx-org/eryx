@@ -88,9 +88,6 @@ tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 criterion.workspace = true
 crossterm.workspace = true
 
-[build-dependencies]
-wasmtime.workspace = true
-
 [lints]
 workspace = true
 

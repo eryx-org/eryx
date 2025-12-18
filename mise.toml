@@ -221,15 +221,15 @@ description = "Extract Python stdlib for eryx-wasm-runtime tests"
 dir = "crates/eryx-wasm-runtime"
 run = """
 mkdir -p tests/python-stdlib tests/site-packages
-# Find the python-lib.tar.zst from componentize-py build output
-PYTHON_LIB=$(find ../../target -name 'python-lib.tar.zst' -path '*/componentize-py-*/out/*' 2>/dev/null | head -1)
-if [[ -z "$PYTHON_LIB" ]]; then
-    echo "Error: python-lib.tar.zst not found. Run 'cargo build' first to build componentize-py."
+PYTHON_LIB="../eryx/python-stdlib.tar.zst"
+if [[ ! -f "$PYTHON_LIB" ]]; then
+    echo "Error: python-stdlib.tar.zst not found at $PYTHON_LIB"
     exit 1
 fi
 echo "Extracting $PYTHON_LIB"
 tar -xf "$PYTHON_LIB" -C tests/python-stdlib
 """
+sources = ["../eryx/python-stdlib.tar.zst"]
 outputs = ["tests/python-stdlib/encodings/__init__.py"]
 
 [tasks.test-eryx-runtime]
