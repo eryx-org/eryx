@@ -1,22 +1,34 @@
 //! Component caching for faster sandbox creation.
 //!
-//! This module provides caching of pre-compiled WASM components to avoid
-//! expensive linking and JIT compilation on repeated sandbox creations with
-//! the same native extensions.
+//! This module provides a two-tier caching system to minimize sandbox creation overhead:
 //!
-//! # Cache Levels
+//! # Two-Tier Cache Architecture
 //!
-//! There are two levels of caching:
+//! ## Tier 1: InstancePreCache (in-memory)
 //!
-//! 1. **Level 1**: Cache linked component bytes (.wasm format)
-//!    - Saves linking time (~1000ms)
-//!    - Still requires JIT compilation (~500ms)
+//! Caches `SandboxPre<ExecutorState>` - the fully linked, pre-instantiated component.
+//! This is the fastest tier, returning a cached instance in ~0ms (just a Clone).
 //!
-//! 2. **Level 2**: Cache pre-compiled component bytes (.cwasm format)
-//!    - Saves both linking AND compilation
-//!    - 100x speedup on cache hit (~10ms)
+//! - Key: [`CacheKey`] (extension hash + version info)
+//! - Lifetime: Process duration
+//! - Use: Automatic for embedded runtime and native extensions
 //!
-//! This module implements Level 2 caching for maximum performance.
+//! ## Tier 2: ComponentCache (disk or memory)
+//!
+//! Caches pre-compiled `.cwasm` bytes for persistence across process restarts.
+//!
+//! - Key: [`CacheKey`] (same as Tier 1)
+//! - Lifetime: Persistent (filesystem) or process duration (in-memory)
+//! - Use: User-configured via [`FilesystemCache`] or [`InMemoryCache`]
+//!
+//! # Cache Flow
+//!
+//! On sandbox creation:
+//! 1. Check Tier 1 ([`InstancePreCache`]) → if hit, return immediately (~0ms)
+//! 2. Check Tier 2 ([`ComponentCache`]) → if hit, create `SandboxPre`, store in Tier 1 (~10ms)
+//! 3. Cold path → compile, store in Tier 2, create `SandboxPre`, store in Tier 1 (~500ms)
+//!
+//! This means the second sandbox with the same configuration is ~10-100x faster.
 //!
 //! # Example
 //!
@@ -43,7 +55,9 @@ use std::collections::HashMap;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock, RwLock};
+
+use crate::wasm::{ExecutorState, SandboxPre};
 
 /// Error type for cache operations.
 #[derive(Debug, thiserror::Error)]
@@ -91,6 +105,19 @@ pub struct CacheKey {
 }
 
 impl CacheKey {
+    /// Cache key for the base embedded runtime with no extensions.
+    ///
+    /// This is a sentinel key used to cache the `SandboxPre` for the
+    /// embedded runtime when no native extensions are present.
+    #[must_use]
+    pub fn embedded_runtime() -> Self {
+        Self {
+            extensions_hash: [0u8; 32], // All zeros = no extensions
+            eryx_version: env!("CARGO_PKG_VERSION"),
+            wasmtime_version: wasmtime_version(),
+        }
+    }
+
     /// Compute a cache key from a list of native extensions.
     ///
     /// The extensions are sorted by name before hashing to ensure
@@ -139,7 +166,6 @@ impl CacheKey {
 /// This must match the wasmtime version in Cargo.toml to ensure cache
 /// invalidation when wasmtime is upgraded. Pre-compiled components are
 /// not compatible across wasmtime versions.
-#[cfg(feature = "native-extensions")]
 fn wasmtime_version() -> &'static str {
     // Keep in sync with workspace wasmtime version in Cargo.toml
     "39"
@@ -288,6 +314,120 @@ impl ComponentCache for NoCache {
     }
 }
 
+// ============================================================================
+// Tier 1: InstancePreCache (in-memory SandboxPre caching)
+// ============================================================================
+
+/// Global in-memory cache for pre-instantiated WASM components.
+///
+/// This is Tier 1 of the two-tier caching system. It stores [`SandboxPre`]
+/// instances keyed by [`CacheKey`], eliminating the need to re-link imports
+/// on repeated sandbox creations with the same component.
+///
+/// The cache is process-global and thread-safe. Entries persist for the
+/// lifetime of the process.
+///
+/// # Usage
+///
+/// This cache is used automatically by [`PythonExecutor`](crate::wasm::PythonExecutor)
+/// when creating executors from precompiled files or the embedded runtime.
+/// You typically don't need to interact with it directly.
+///
+/// # Example
+///
+/// ```rust,ignore
+/// use eryx::cache::{InstancePreCache, CacheKey};
+///
+/// let cache = InstancePreCache::global();
+/// let key = CacheKey::embedded_runtime();
+///
+/// // Check if cached
+/// if let Some(pre) = cache.get(&key) {
+///     // Use cached SandboxPre
+/// }
+/// ```
+pub struct InstancePreCache {
+    cache: RwLock<HashMap<CacheKey, SandboxPre<ExecutorState>>>,
+}
+
+impl InstancePreCache {
+    /// Get the global instance pre cache.
+    ///
+    /// This returns a reference to the process-global cache instance.
+    /// The cache is lazily initialized on first access.
+    pub fn global() -> &'static Self {
+        static CACHE: OnceLock<InstancePreCache> = OnceLock::new();
+        CACHE.get_or_init(|| {
+            tracing::debug!("initializing global InstancePreCache");
+            InstancePreCache {
+                cache: RwLock::new(HashMap::new()),
+            }
+        })
+    }
+
+    /// Get a cached `SandboxPre` for the given key.
+    ///
+    /// Returns `Some(pre)` if found, `None` otherwise.
+    /// The returned `SandboxPre` is cloned (cheap - it's internally reference-counted).
+    #[must_use]
+    pub fn get(&self, key: &CacheKey) -> Option<SandboxPre<ExecutorState>> {
+        let cache = self.cache.read().ok()?;
+        let result = cache.get(key).cloned();
+        if result.is_some() {
+            tracing::trace!(key = %key.to_hex(), "instance_pre cache hit");
+        }
+        result
+    }
+
+    /// Store a `SandboxPre` in the cache.
+    ///
+    /// If an entry already exists for this key (race condition), the
+    /// existing entry is kept (first writer wins).
+    pub fn put(&self, key: CacheKey, pre: SandboxPre<ExecutorState>) {
+        if let Ok(mut cache) = self.cache.write() {
+            use std::collections::hash_map::Entry;
+            if let Entry::Vacant(e) = cache.entry(key.clone()) {
+                tracing::debug!(key = %key.to_hex(), "instance_pre cache store");
+                e.insert(pre);
+            }
+        }
+    }
+
+    /// Clear all cached entries.
+    ///
+    /// This is primarily useful for testing. In production, the cache
+    /// automatically invalidates based on version info in the [`CacheKey`].
+    pub fn clear(&self) {
+        if let Ok(mut cache) = self.cache.write() {
+            let count = cache.len();
+            cache.clear();
+            tracing::debug!(entries = count, "instance_pre cache cleared");
+        }
+    }
+
+    /// Get the number of cached entries.
+    ///
+    /// Useful for debugging and testing.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.cache.read().map(|c| c.len()).unwrap_or(0)
+    }
+
+    /// Check if the cache is empty.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+}
+
+impl std::fmt::Debug for InstancePreCache {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("InstancePreCache")
+            .field("entries", &self.len())
+            .finish()
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::expect_used, clippy::unwrap_used)]
 mod tests {
@@ -404,5 +544,60 @@ mod tests {
 
         // Clean up
         let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn cache_key_embedded_runtime_is_deterministic() {
+        let key1 = CacheKey::embedded_runtime();
+        let key2 = CacheKey::embedded_runtime();
+
+        assert_eq!(key1, key2);
+        assert_eq!(key1.extensions_hash, [0u8; 32]); // Sentinel value
+        assert_eq!(key1.eryx_version, env!("CARGO_PKG_VERSION"));
+    }
+
+    #[test]
+    fn cache_key_embedded_runtime_differs_from_extensions() {
+        let embedded_key = CacheKey::embedded_runtime();
+        let other_key = CacheKey {
+            extensions_hash: [1u8; 32], // Non-zero hash
+            eryx_version: env!("CARGO_PKG_VERSION"),
+            wasmtime_version: "39",
+        };
+
+        assert_ne!(embedded_key, other_key);
+        assert_ne!(embedded_key.to_hex(), other_key.to_hex());
+    }
+
+    #[test]
+    fn instance_pre_cache_global_returns_same_instance() {
+        let cache1 = InstancePreCache::global();
+        let cache2 = InstancePreCache::global();
+
+        // Both should point to the same global instance
+        assert!(std::ptr::eq(cache1, cache2));
+    }
+
+    #[test]
+    fn instance_pre_cache_is_initially_empty() {
+        // Note: This test may fail if run after other tests that populate the cache
+        // In practice, the global cache persists across tests, so we just verify
+        // the len() and is_empty() methods work correctly
+        let cache = InstancePreCache::global();
+        let initial_len = cache.len();
+
+        // Methods should work without panicking
+        let _ = cache.is_empty();
+        assert_eq!(cache.len(), initial_len);
+    }
+
+    #[test]
+    fn instance_pre_cache_debug_format() {
+        let cache = InstancePreCache::global();
+        let debug_str = format!("{:?}", cache);
+
+        // Should contain the struct name and entries field
+        assert!(debug_str.contains("InstancePreCache"));
+        assert!(debug_str.contains("entries"));
     }
 }

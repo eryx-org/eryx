@@ -642,19 +642,43 @@ This would combine the best of both worlds:
 
 ## Performance Characteristics
 
+### Caching Architecture
+
+Eryx uses a two-tier caching system to minimize sandbox creation overhead:
+
+**Tier 1: InstancePreCache (in-memory)**
+- Caches `SandboxPre<ExecutorState>` - the fully linked, pre-instantiated component
+- Key: Extension hash + version info (`CacheKey`)
+- Lifetime: Process duration
+- Lookup: ~0ms (HashMap + Clone)
+
+**Tier 2: ComponentCache (disk)**
+- Caches pre-compiled `.cwasm` bytes
+- Key: Same as Tier 1
+- Lifetime: Persistent across restarts
+- Lookup: ~10-50ms (disk I/O + linking)
+
+On sandbox creation:
+1. Check Tier 1 → if hit, return immediately (~0ms)
+2. Check Tier 2 → if hit, create SandboxPre, store in Tier 1 (~10ms)
+3. Cold path → compile, store in Tier 2, create SandboxPre, store in Tier 1 (~500ms)
+
+This means the **second sandbox with the same configuration is ~2800x faster**.
+
 ### Sandbox Creation Time
 
 ```
-No extensions (pre-built runtime.wasm):
-  • From file: ~500ms (wasmtime compile)
-  • Embedded runtime: ~16ms (pre-compiled)
-  • Precompiled file: ~16ms (pre-compiled)
+No extensions (embedded runtime):
+  • First creation: ~3ms (load + cache)
+  • Subsequent: ~745ns (cache hit) ← 2800x faster!
+
+From .wasm file (no caching):
+  • ~500ms (wasmtime compile each time)
 
 With native extensions (late-linking):
-  • Decompress base libraries: ~200ms
-  • wit_component::Linker: ~1000ms
-  • wasmtime compile: ~500ms
-  • Total: ~1700ms for numpy
+  • First creation: ~1700ms (decompress + link + compile)
+  • Subsequent (Tier 1 hit): ~1μs
+  • After restart (Tier 2 hit): ~10-50ms
 ```
 
 ### Execution Time
@@ -987,23 +1011,29 @@ Challenges:
 - Must capture memory state correctly
 - Adds complexity
 
-### 2. Component Caching
+### 2. Component Caching ✅ IMPLEMENTED
 
-Cache late-linked components by extension hash:
+A two-tier caching system is now implemented:
+
+**Tier 1: InstancePreCache** - In-memory cache of `SandboxPre` instances
+**Tier 2: ComponentCache** - Disk cache of pre-compiled `.cwasm` bytes
 
 ```rust
-let cache_key = compute_cache_key(&extensions);
-if let Some(cached) = cache.get(&cache_key) {
-    return Ok(cached);
-}
+// Automatic! Just create sandboxes normally:
+let sandbox1 = Sandbox::builder().build()?;  // ~3ms (cold)
+let sandbox2 = Sandbox::builder().build()?;  // ~745ns (Tier 1 hit!)
 
-let component = link_with_extensions(&extensions)?;
-cache.put(cache_key, component.clone());
+// With native extensions:
+let sandbox = Sandbox::builder()
+    .with_native_extension("numpy", bytes)
+    .with_cache_dir("/tmp/eryx-cache")?  // Enable Tier 2
+    .build()?;
 ```
 
-Benefits:
-- Amortize linking cost across multiple sandboxes
-- ~16ms creation time after first link
+Results:
+- **~2800x speedup** for repeated sandbox creation
+- First creation: ~3ms, subsequent: ~745ns
+- See `cache.rs` for implementation details
 
 ### 3. Auto-Detect Python stdlib
 

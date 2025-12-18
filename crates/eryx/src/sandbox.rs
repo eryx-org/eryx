@@ -836,14 +836,8 @@ impl SandboxBuilder {
 
             #[cfg(feature = "embedded")]
             WasmSource::EmbeddedRuntime => {
-                // Extract embedded runtime to disk and load via mmap for better memory efficiency.
-                // SAFETY: The embedded runtime was pre-compiled at build time from our own
-                // trusted runtime.wasm, so we know it's safe to deserialize.
-                let resources = crate::embedded::EmbeddedResources::get()?;
-                #[allow(unsafe_code)]
-                unsafe {
-                    PythonExecutor::from_precompiled_file(&resources.runtime_path)?
-                }
+                // Use the optimized path that leverages InstancePreCache
+                PythonExecutor::from_embedded_runtime()?
             }
 
             WasmSource::None => {
@@ -851,11 +845,8 @@ impl SandboxBuilder {
                 #[cfg(feature = "embedded")]
                 {
                     tracing::debug!("No WASM source specified, using embedded runtime");
-                    let resources = crate::embedded::EmbeddedResources::get()?;
-                    #[allow(unsafe_code)]
-                    unsafe {
-                        PythonExecutor::from_precompiled_file(&resources.runtime_path)?
-                    }
+                    // Use the optimized path that leverages InstancePreCache
+                    PythonExecutor::from_embedded_runtime()?
                 }
 
                 #[cfg(not(feature = "embedded"))]
@@ -881,12 +872,22 @@ impl SandboxBuilder {
     #[cfg(feature = "native-extensions")]
     fn build_executor_with_extensions(&self) -> Result<PythonExecutor, Error> {
         #[cfg(feature = "embedded")]
-        use crate::cache::CacheKey;
+        use crate::cache::{CacheKey, InstancePreCache};
 
         #[cfg(feature = "embedded")]
         let cache_key = CacheKey::from_extensions(&self.native_extensions);
 
-        // Try filesystem cache first (mmap-based, 3x faster than bytes)
+        // Tier 1: Check InstancePreCache first (fastest - just Clone)
+        #[cfg(feature = "embedded")]
+        if let Some(instance_pre) = InstancePreCache::global().get(&cache_key) {
+            tracing::debug!(
+                key = %cache_key.to_hex(),
+                "instance_pre cache hit - returning cached executor"
+            );
+            return PythonExecutor::from_cached_instance_pre(instance_pre);
+        }
+
+        // Tier 2: Try filesystem cache (mmap-based, faster than bytes)
         #[cfg(feature = "embedded")]
         if let Some(fs_cache) = &self.filesystem_cache
             && let Some(path) = fs_cache.get_path(&cache_key)
@@ -900,11 +901,12 @@ impl SandboxBuilder {
             // `PythonExecutor::precompile()`) in a previous call. We trust our
             // own cache directory. If the cache is corrupted or tampered with,
             // wasmtime will detect it during deserialization.
+            // Use with_key to populate InstancePreCache for future calls.
             #[allow(unsafe_code)]
-            return unsafe { PythonExecutor::from_precompiled_file(&path) };
+            return unsafe { PythonExecutor::from_precompiled_file_with_key(&path, cache_key) };
         }
 
-        // Fall back to in-memory cache (for InMemoryCache users)
+        // Tier 2 (continued): Fall back to in-memory byte cache (for InMemoryCache users)
         #[cfg(feature = "embedded")]
         if let Some(cache) = &self.cache {
             if let Some(precompiled) = cache.get(&cache_key) {
@@ -912,8 +914,11 @@ impl SandboxBuilder {
                     key = %cache_key.to_hex(),
                     "component cache hit - loading from bytes"
                 );
+                // Load and populate InstancePreCache for future calls
                 #[allow(unsafe_code)]
-                return unsafe { PythonExecutor::from_precompiled(&precompiled) };
+                let executor = unsafe { PythonExecutor::from_precompiled(&precompiled) }?;
+                InstancePreCache::global().put(cache_key, executor.instance_pre().clone());
+                return Ok(executor);
             }
             tracing::debug!(
                 key = %cache_key.to_hex(),
@@ -945,10 +950,12 @@ impl SandboxBuilder {
                 );
             }
 
-            // Load from pre-compiled bytes
+            // Load from pre-compiled bytes and populate InstancePreCache
             // SAFETY: We just created these bytes from `precompile()` above.
             #[allow(unsafe_code)]
-            return unsafe { PythonExecutor::from_precompiled(&precompiled) };
+            let executor = unsafe { PythonExecutor::from_precompiled(&precompiled) }?;
+            InstancePreCache::global().put(cache_key, executor.instance_pre().clone());
+            return Ok(executor);
         }
 
         // No cache or embedded feature - create executor directly from linked bytes

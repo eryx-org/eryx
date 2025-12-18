@@ -24,6 +24,8 @@
 //! pre-compiles at build time and embeds the result in the binary.
 
 use std::path::PathBuf;
+
+use crate::cache::{CacheKey, InstancePreCache};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -509,15 +511,138 @@ impl PythonExecutor {
     pub unsafe fn from_precompiled_file(
         path: impl AsRef<std::path::Path>,
     ) -> std::result::Result<Self, Error> {
+        // Delegate to the internal method without a cache key
+        // This means it won't use or populate the InstancePreCache
+        #[allow(unsafe_code)]
+        unsafe {
+            Self::from_precompiled_file_internal(path.as_ref(), None)
+        }
+    }
+
+    /// Create a new executor by loading a pre-compiled component from a file,
+    /// with optional caching via [`InstancePreCache`].
+    ///
+    /// When a `cache_key` is provided:
+    /// - First checks the global [`InstancePreCache`] for a cached `SandboxPre`
+    /// - On cache hit, returns immediately without disk I/O (~0ms)
+    /// - On cache miss, loads from file and stores in cache for future use
+    ///
+    /// This is the internal method used by [`Self::from_embedded_runtime`] and
+    /// the sandbox builder for cached executor creation.
+    ///
+    /// # Safety
+    ///
+    /// This function is unsafe because Wasmtime cannot fully validate pre-compiled
+    /// components for safety. Only use this with files you control and trust.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the file cannot be read or the pre-compiled component
+    /// is invalid or incompatible with the current engine configuration.
+    #[cfg(feature = "embedded")]
+    #[allow(unsafe_code)]
+    pub(crate) unsafe fn from_precompiled_file_with_key(
+        path: impl AsRef<std::path::Path>,
+        cache_key: CacheKey,
+    ) -> std::result::Result<Self, Error> {
+        #[allow(unsafe_code)]
+        unsafe {
+            Self::from_precompiled_file_internal(path.as_ref(), Some(cache_key))
+        }
+    }
+
+    /// Internal implementation for loading from precompiled file with optional caching.
+    #[cfg(feature = "embedded")]
+    #[allow(unsafe_code)]
+    unsafe fn from_precompiled_file_internal(
+        path: &std::path::Path,
+        cache_key: Option<CacheKey>,
+    ) -> std::result::Result<Self, Error> {
         let engine = Self::shared_engine()?;
+
+        // Check InstancePreCache if we have a cache key
+        if let Some(ref key) = cache_key
+            && let Some(instance_pre) = InstancePreCache::global().get(key)
+        {
+            return Ok(Self {
+                engine,
+                instance_pre,
+                python_stdlib_path: None,
+                python_site_packages_paths: Vec::new(),
+            });
+        }
+
+        // Cache miss - load from file and create instance_pre
         // SAFETY: Caller guarantees the precompiled file is trusted and was
         // created by `precompile()` with a compatible engine configuration.
-        let component = unsafe { Component::deserialize_file(&engine, path.as_ref()) }
-            .map_err(Error::WasmComponent)?;
+        #[allow(unsafe_code)]
+        let component =
+            unsafe { Component::deserialize_file(&engine, path) }.map_err(Error::WasmComponent)?;
         let instance_pre = Self::create_instance_pre(&engine, &component)?;
+
+        // Store in cache if we have a key
+        if let Some(key) = cache_key {
+            InstancePreCache::global().put(key, instance_pre.clone());
+        }
 
         Ok(Self {
             engine,
+            instance_pre,
+            python_stdlib_path: None,
+            python_site_packages_paths: Vec::new(),
+        })
+    }
+
+    /// Create a new executor from the embedded runtime.
+    ///
+    /// This is the fastest way to create an executor:
+    /// - Uses the global shared [`Engine`]
+    /// - Uses the global [`InstancePreCache`] with a sentinel key
+    /// - Only loads from disk on first call; subsequent calls return cached instance
+    ///
+    /// The executor is created without Python stdlib or site-packages paths.
+    /// Use [`Self::with_python_stdlib`] and [`Self::with_site_packages`] to
+    /// configure paths after creation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the embedded resources cannot be extracted or
+    /// the component cannot be loaded.
+    #[cfg(feature = "embedded")]
+    pub fn from_embedded_runtime() -> std::result::Result<Self, Error> {
+        let cache_key = CacheKey::embedded_runtime();
+
+        // Check InstancePreCache first (fast path)
+        if let Some(instance_pre) = InstancePreCache::global().get(&cache_key) {
+            return Ok(Self {
+                engine: Self::shared_engine()?,
+                instance_pre,
+                python_stdlib_path: None,
+                python_site_packages_paths: Vec::new(),
+            });
+        }
+
+        // Cache miss - load from embedded resources
+        let resources = crate::embedded::EmbeddedResources::get()?;
+
+        // SAFETY: The embedded runtime was pre-compiled at build time from our own
+        // trusted runtime.wasm, so we know it's safe to deserialize.
+        #[allow(unsafe_code)]
+        unsafe {
+            Self::from_precompiled_file_with_key(resources.runtime(), cache_key)
+        }
+    }
+
+    /// Create a new executor from a cached `SandboxPre`.
+    ///
+    /// This is used internally when an `InstancePreCache` hit occurs.
+    /// The `SandboxPre` must have been created with a compatible engine.
+    #[cfg(all(feature = "embedded", feature = "native-extensions"))]
+    pub(crate) fn from_cached_instance_pre(
+        instance_pre: SandboxPre<ExecutorState>,
+    ) -> std::result::Result<Self, Error> {
+        Ok(Self {
+            engine: Self::shared_engine()?,
             instance_pre,
             python_stdlib_path: None,
             python_site_packages_paths: Vec::new(),
