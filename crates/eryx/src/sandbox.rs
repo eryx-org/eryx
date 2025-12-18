@@ -752,6 +752,69 @@ impl SandboxBuilder {
         Ok(self)
     }
 
+    /// Load a Python package from raw bytes.
+    ///
+    /// This is useful when downloading packages from URLs. The format must be
+    /// specified explicitly since it cannot be detected from bytes alone.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// use eryx::{Sandbox, PackageFormat};
+    ///
+    /// // Download a package (using your preferred HTTP client)
+    /// let bytes = reqwest::get("https://example.com/numpy-wasi.tar.gz")
+    ///     .await?
+    ///     .bytes()
+    ///     .await?;
+    ///
+    /// let sandbox = Sandbox::builder()
+    ///     .with_package_bytes(&bytes, PackageFormat::TarGz, "numpy")?
+    ///     .build()?;
+    /// ```
+    ///
+    /// # Arguments
+    ///
+    /// * `bytes` - The raw package bytes
+    /// * `format` - The package format (Wheel or TarGz)
+    /// * `name_hint` - Package name hint used if detection fails (e.g., "numpy")
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - The format is `Directory` (not supported for bytes)
+    /// - The archive cannot be read or extracted
+    pub fn with_package_bytes(
+        mut self,
+        bytes: &[u8],
+        format: crate::package::PackageFormat,
+        name_hint: impl Into<String>,
+    ) -> Result<Self, Error> {
+        let package = crate::package::ExtractedPackage::from_bytes(bytes, format, name_hint)?;
+
+        tracing::info!(
+            name = %package.name,
+            has_native_extensions = package.has_native_extensions,
+            "Loaded package from bytes"
+        );
+
+        // Check for incompatible configuration
+        #[cfg(not(feature = "native-extensions"))]
+        if package.has_native_extensions {
+            return Err(Error::Initialization(format!(
+                "Package '{}' contains native extensions but the 'native-extensions' feature is not enabled. \
+                 Either use a pure-Python package or enable the 'native-extensions' feature.",
+                package.name
+            )));
+        }
+
+        // Store the extracted package - native extensions will be registered at build()
+        // time when we know the mount index for computing dlopen paths
+        self.packages.push(package);
+
+        Ok(self)
+    }
+
     /// Build the sandbox.
     ///
     /// # Errors

@@ -71,6 +71,7 @@ pub use callback::{
 };
 pub use error::Error;
 pub use library::RuntimeLibrary;
+pub use package::{ExtractedPackage, PackageFormat};
 pub use sandbox::{ExecuteResult, ExecuteStats, ResourceLimits, Sandbox, SandboxBuilder};
 pub use session::{
     InProcessSession, PythonStateSnapshot, Session, SessionExecutor, SnapshotMetadata,

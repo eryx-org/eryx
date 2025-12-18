@@ -113,16 +113,102 @@ impl ExtractedPackage {
         }
     }
 
+    /// Extract a package from raw bytes.
+    ///
+    /// The format is specified explicitly since it cannot be detected from bytes alone.
+    /// The `name_hint` is used for the package name if one cannot be detected from
+    /// the archive contents (e.g., "numpy" or "requests-2.31.0").
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// use eryx::package::{ExtractedPackage, PackageFormat};
+    ///
+    /// // Load from bytes (e.g., downloaded from a URL)
+    /// let bytes = download_package("https://example.com/numpy-wasi.tar.gz").await?;
+    /// let package = ExtractedPackage::from_bytes(&bytes, PackageFormat::TarGz, "numpy")?;
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - The format is `Directory` (directories cannot be loaded from bytes)
+    /// - The archive cannot be read or extracted
+    pub fn from_bytes(
+        bytes: &[u8],
+        format: PackageFormat,
+        name_hint: impl Into<String>,
+    ) -> Result<Self, Error> {
+        let name_hint = name_hint.into();
+
+        match format {
+            PackageFormat::Wheel => Self::from_wheel_bytes(bytes, &name_hint),
+            PackageFormat::TarGz => Self::from_tar_gz_bytes(bytes, &name_hint),
+            PackageFormat::Directory => Err(Error::Initialization(
+                "Cannot load directory package from bytes. Use from_path() instead.".to_string(),
+            )),
+        }
+    }
+
+    /// Extract a wheel from raw bytes.
+    fn from_wheel_bytes(bytes: &[u8], name_hint: &str) -> Result<Self, Error> {
+        let cursor = std::io::Cursor::new(bytes);
+        Self::from_wheel_reader(cursor, name_hint)
+    }
+
+    /// Extract a tar.gz from raw bytes.
+    fn from_tar_gz_bytes(bytes: &[u8], name_hint: &str) -> Result<Self, Error> {
+        let cursor = std::io::Cursor::new(bytes);
+        let decoder = flate2::read::GzDecoder::new(cursor);
+        let mut archive = tar::Archive::new(decoder);
+
+        // Create temp directory for extraction
+        let temp_dir = tempfile::TempDir::new()
+            .map_err(|e| Error::Initialization(format!("Failed to create temp dir: {e}")))?;
+
+        let extract_path = temp_dir.path();
+
+        archive
+            .unpack(extract_path)
+            .map_err(|e| Error::Initialization(format!("Failed to extract tar.gz: {e}")))?;
+
+        // Find native extensions and package name
+        let (native_extensions, name) = Self::scan_for_extensions(extract_path)?;
+
+        // Use name hint for package name if not found
+        let name = name.unwrap_or_else(|| {
+            // Handle names like "numpy-wasi" -> "numpy"
+            name_hint.split('-').next().unwrap_or(name_hint).to_string()
+        });
+
+        let has_native_extensions = !native_extensions.is_empty();
+
+        Ok(Self {
+            name,
+            python_path: extract_path.to_path_buf(),
+            native_extensions,
+            has_native_extensions,
+            temp_dir: Some(temp_dir),
+        })
+    }
+
     /// Extract a standard wheel (.whl) file.
     fn from_wheel(path: &Path) -> Result<Self, Error> {
         let file = std::fs::File::open(path)
             .map_err(|e| Error::Initialization(format!("Failed to open wheel: {e}")))?;
 
-        Self::from_wheel_reader(file, path)
+        // Extract name hint from path (e.g., "requests-2.31.0-py3-none-any.whl" -> "requests")
+        let name_hint = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .map(|s| s.split('-').next().unwrap_or(s))
+            .unwrap_or("unknown");
+
+        Self::from_wheel_reader(file, name_hint)
     }
 
     /// Extract a wheel from a reader.
-    fn from_wheel_reader<R: Read + Seek>(reader: R, source_path: &Path) -> Result<Self, Error> {
+    fn from_wheel_reader<R: Read + Seek>(reader: R, name_hint: &str) -> Result<Self, Error> {
         let mut archive = zip::ZipArchive::new(reader)
             .map_err(|e| Error::Initialization(format!("Failed to read wheel archive: {e}")))?;
 
@@ -162,13 +248,10 @@ impl ExtractedPackage {
         // Find native extensions and package name
         let (native_extensions, name) = Self::scan_for_extensions(extract_path)?;
 
-        // Use source filename for package name if not found
+        // Use name hint for package name if not found
         let name = name.unwrap_or_else(|| {
-            source_path
-                .file_stem()
-                .and_then(|s| s.to_str())
-                .map(|s| s.split('-').next().unwrap_or(s).to_string())
-                .unwrap_or_else(|| "unknown".to_string())
+            // Handle names like "requests-2.31.0" -> "requests"
+            name_hint.split('-').next().unwrap_or(name_hint).to_string()
         });
 
         let has_native_extensions = !native_extensions.is_empty();

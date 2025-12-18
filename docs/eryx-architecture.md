@@ -1157,56 +1157,44 @@ Results:
 - First creation: ~3ms, subsequent: ~745ns
 - See `cache.rs` for implementation details
 
-### 3. Auto-Detect Python stdlib
+### 3. Auto-Detect Python stdlib ✅ IMPLEMENTED
+
+The sandbox builder now automatically searches for Python stdlib in these locations:
+
+1. `ERYX_PYTHON_STDLIB` environment variable
+2. `./python-stdlib` (current directory)
+3. `<exe_dir>/python-stdlib` (relative to executable)
+4. `<exe_dir>/../python-stdlib` (parent of executable)
+5. Embedded stdlib (if `embedded` feature enabled)
 
 ```rust
-// Check multiple locations
-fn find_python_stdlib() -> Option<PathBuf> {
-    // 1. Environment variable
-    if let Ok(path) = env::var("ERYX_PYTHON_STDLIB") {
-        return Some(PathBuf::from(path));
-    }
-
-    // 2. Relative to runtime.wasm
-    // 3. Bundled in component (adds ~50MB)
-    // 4. Download from known location
-
-    None
-}
-
-// Simplify API
+// No explicit stdlib path needed - auto-detected!
 let sandbox = Sandbox::builder()
-    .build()?;  // Auto-finds stdlib
-```
-
-### 4. Wheel Integration
-
-```rust
-impl SandboxBuilder {
-    pub async fn with_wheel(
-        mut self,
-        url: &str
-    ) -> Result<Self, Error> {
-        let bytes = download_wheel(url).await?;
-        let wheel = eryx_runtime::linker::parse_wheel(&bytes)?;
-
-        for ext in wheel.native_extensions {
-            self = self.with_native_extension(&ext.name, ext.bytes);
-        }
-
-        // Extract Python files to temp dir and mount
-        let temp_dir = extract_python_files(&wheel)?;
-        self = self.with_site_packages(&temp_dir);
-
-        Ok(self)
-    }
-}
-
-// Usage
-let sandbox = Sandbox::builder()
-    .with_wheel("https://github.com/dicej/wasi-wheels/releases/download/v0.0.2/numpy-wasi.tar.gz").await?
     .build()?;
 ```
+
+A valid stdlib directory must contain an `encodings` subdirectory (required for Python init).
+
+### 4. Wheel Integration ✅ IMPLEMENTED
+
+Loading packages from bytes is now supported via `with_package_bytes()`:
+
+```rust
+use eryx::{Sandbox, PackageFormat};
+
+// Download using your preferred HTTP client
+let bytes = reqwest::get("https://github.com/dicej/wasi-wheels/releases/download/v0.0.2/numpy-wasi.tar.gz")
+    .await?
+    .bytes()
+    .await?;
+
+// Load the package from bytes
+let sandbox = Sandbox::builder()
+    .with_package_bytes(&bytes, PackageFormat::TarGz, "numpy")?
+    .build()?;
+```
+
+Also available: `ExtractedPackage::from_bytes()` for lower-level control.
 
 ### 5. Smaller Runtime Variant
 
