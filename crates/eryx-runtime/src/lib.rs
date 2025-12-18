@@ -31,3 +31,7 @@ pub mod linker;
 /// Pre-initialization support for capturing Python memory state.
 #[cfg(feature = "native-extensions")]
 pub mod preinit;
+
+/// Stub WASI adapters for pre-initialization.
+#[cfg(feature = "native-extensions")]
+pub mod stubwasi;

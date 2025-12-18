@@ -433,6 +433,7 @@ const EXPORT_EXECUTE: usize = 0;
 const EXPORT_SNAPSHOT_STATE: usize = 1;
 const EXPORT_RESTORE_STATE: usize = 2;
 const EXPORT_CLEAR_STATE: usize = 3;
+const EXPORT_FINALIZE_PREINIT: usize = 4;
 
 /// Track whether we've set up callbacks in Python
 static CALLBACKS_INITIALIZED: std::sync::atomic::AtomicBool =
@@ -820,6 +821,12 @@ fn handle_export(wit: Wit, func_index: usize, cx: &mut EryxCall) -> HandleExport
         EXPORT_CLEAR_STATE => {
             // clear-state() - no return value
             python::clear_state();
+            HandleExportResult::Complete
+        }
+        EXPORT_FINALIZE_PREINIT => {
+            // finalize-preinit() - no return value
+            // Reset WASI state after all imports are done during pre-init
+            python::finalize_preinit();
             HandleExportResult::Complete
         }
         _ => {

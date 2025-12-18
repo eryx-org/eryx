@@ -24,9 +24,10 @@
 //! pre-compiles at build time and embeds the result in the binary.
 
 use std::path::PathBuf;
-
-use crate::cache::{CacheKey, InstancePreCache};
 use std::sync::Arc;
+
+#[cfg(feature = "embedded")]
+use crate::cache::{CacheKey, InstancePreCache};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use tokio::sync::{mpsc, oneshot};

@@ -83,4 +83,16 @@ world sandbox {
     /// After clear, subsequent execute() calls will start with a fresh
     /// namespace (no user-defined variables from previous calls).
     export clear-state: async func();
+
+    /// Finalize pre-initialization by resetting WASI state.
+    ///
+    /// This MUST be called at the end of pre-initialization, after all
+    /// imports are done but before the memory snapshot is captured.
+    /// It clears file handles from the WASI adapter and wasi-libc so they
+    /// don't get captured in the snapshot (which would cause "unknown handle
+    /// index" errors at runtime).
+    ///
+    /// This is only meant to be called during component-init-transform
+    /// pre-initialization. Calling it at runtime has no useful effect.
+    export finalize-preinit: func();
 }

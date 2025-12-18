@@ -781,6 +781,57 @@ pub fn initialize_python() {
             // Log the error but continue (sync code will still work)
             PyErr_Clear();
         }
+
+        // Note: We do NOT call reset_wasi_state() here!
+        //
+        // The reset must happen AFTER all imports are done, not here during
+        // Python initialization. If we reset here, any file handles opened
+        // during `execute("import numpy")` etc. would still get captured.
+        //
+        // Instead, the host calls `finalize-preinit` export after imports
+        // are complete, which calls `finalize_preinit()` -> `reset_wasi_state()`.
+    }
+}
+
+/// Finalize pre-initialization by resetting WASI state.
+///
+/// This MUST be called at the end of pre-initialization, after all imports
+/// are done but before the memory snapshot is captured. It clears file handles
+/// from the WASI adapter and wasi-libc so they don't get captured in the
+/// snapshot (which would cause "unknown handle index" errors at runtime).
+///
+/// This is only meant to be called during component-init-transform
+/// pre-initialization. Calling it at runtime has no useful effect.
+pub fn finalize_preinit() {
+    reset_wasi_state();
+}
+
+/// Reset WASI adapter and wasi-libc state.
+///
+/// This clears any file handles that were opened during initialization,
+/// which is necessary for pre-initialization to work correctly.
+///
+/// - `reset_adapter_state`: Tells the WASI Preview 1 adapter to forget open handles
+/// - `__wasilibc_reset_preopens`: Tells wasi-libc to forget preopen state
+fn reset_wasi_state() {
+    // Import reset_adapter_state from the WASI adapter.
+    // This tells the WASI Preview 1 adapter to forget about any open handles.
+    #[link(wasm_import_module = "wasi_snapshot_preview1")]
+    unsafe extern "C" {
+        #[link_name = "reset_adapter_state"]
+        fn reset_adapter_state();
+    }
+
+    // __wasilibc_reset_preopens is in wasi-libc. When compiling as a dynamic library,
+    // it becomes an import from "env" which is resolved to libc.so during component linking.
+    #[link(wasm_import_module = "env")]
+    unsafe extern "C" {
+        fn __wasilibc_reset_preopens();
+    }
+
+    unsafe {
+        reset_adapter_state();
+        __wasilibc_reset_preopens();
     }
 }
 

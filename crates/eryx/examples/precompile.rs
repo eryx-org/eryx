@@ -53,10 +53,10 @@ fn main() -> anyhow::Result<()> {
         let rt = tokio::runtime::Runtime::new()?;
         let preinit_bytes = rt.block_on(async {
             eryx::preinit::pre_initialize(
-                &wasm_bytes,
                 &python_stdlib,
                 None, // No site-packages for base runtime
                 &[],  // No imports for base runtime
+                &[],  // No native extensions for base runtime
             )
             .await
         })?;

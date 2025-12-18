@@ -7,29 +7,41 @@
 //!
 //! # How It Works
 //!
-//! 1. The linked component (from wit-component Linker) has empty memory
-//! 2. We use `component-init-transform` to instrument the component
-//! 3. We instantiate and run the component - Python initializes automatically
-//! 4. Optionally run imports (e.g., `import numpy`) to capture more state
-//! 5. The memory state is captured and embedded into a new component
-//! 6. The resulting component starts with Python already initialized
+//! 1. We link the component twice: once with real WASI, once with stub WASI
+//! 2. The stub WASI adapters trap on any call (preventing file handle capture)
+//! 3. We use `component-init-transform` to instrument the component
+//! 4. We instantiate and run the stubbed component - Python initializes
+//! 5. Optionally run imports (e.g., `import numpy`) to capture more state
+//! 6. The memory state is captured and embedded into the original component
+//! 7. The resulting component starts with Python already initialized
+//!
+//! # Why Stub WASI?
+//!
+//! During pre-initialization, Python opens file handles for stdlib imports.
+//! These handles get captured into the memory snapshot. When the component
+//! is instantiated in a new WASI context, those handles are invalid, causing
+//! "unknown handle index" errors.
+//!
+//! By using stub WASI adapters (that just trap on any call), we prevent any
+//! file handles from being captured. The output component references the
+//! *real* WASI imports, so it works correctly at runtime.
 //!
 //! # Performance Impact
 //!
 //! - First build with pre-init: ~3-4 seconds (one-time cost)
-//! - Per-execution after pre-init: ~1-2ms (vs ~50-100ms without)
+//! - Per-execution after pre-init: ~1-5ms (vs ~450-500ms without)
 //!
 //! # Example
 //!
 //! ```rust,ignore
 //! use eryx_runtime::preinit::pre_initialize;
 //!
-//! // Pre-initialize a linked component
+//! // Pre-initialize with native extensions
 //! let preinit_component = pre_initialize(
-//!     &linked_component_bytes,
 //!     &python_stdlib_path,
 //!     Some(&site_packages_path),
 //!     &["numpy", "pandas"],  // Modules to import during pre-init
+//!     &native_extensions,
 //! ).await?;
 //! ```
 
@@ -44,6 +56,8 @@ use wasmtime::{
     component::{Component, Instance, Linker, ResourceTable, Val},
 };
 use wasmtime_wasi::{DirPerms, FilePerms, WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView};
+
+use crate::linker::{NativeExtension, link_with_extensions};
 
 /// Context for the pre-initialization runtime.
 struct PreInitCtx {
@@ -126,18 +140,18 @@ impl Invoker for PreInitInvoker {
     }
 }
 
-/// Pre-initialize a linked Python component.
+/// Pre-initialize a Python component with native extensions.
 ///
-/// This function takes a linked component (from wit-component Linker) and
-/// runs the Python interpreter's initialization, optionally importing modules,
-/// and capturing the initialized memory state into the returned component.
+/// This function links the component with native extensions, runs the Python
+/// interpreter's initialization, optionally imports modules, and captures the
+/// initialized memory state into the returned component.
 ///
 /// # Arguments
 ///
-/// * `component` - The linked component bytes (before pre-initialization)
 /// * `python_stdlib` - Path to Python standard library directory
 /// * `site_packages` - Optional path to site-packages directory
 /// * `imports` - Modules to import during pre-init (e.g., ["numpy", "pandas"])
+/// * `extensions` - Native extensions to link into the component
 ///
 /// # Returns
 ///
@@ -148,18 +162,30 @@ impl Invoker for PreInitInvoker {
 /// Returns an error if pre-initialization fails (e.g., Python init error,
 /// import failure).
 pub async fn pre_initialize(
-    component: &[u8],
     python_stdlib: &Path,
     site_packages: Option<&Path>,
     imports: &[&str],
+    extensions: &[NativeExtension],
 ) -> Result<Vec<u8>> {
     let python_stdlib = python_stdlib.to_path_buf();
     let site_packages = site_packages.map(|p| p.to_path_buf());
     let imports: Vec<String> = imports.iter().map(|s| (*s).to_string()).collect();
 
+    // Link the component with real WASI adapter.
+    // Note: We pass None for stage2 because:
+    // 1. The apply() function in component-init-transform uses stage2's STRUCTURE for output
+    // 2. If we pass a stubbed component, the output will have stub adapters that trap!
+    // 3. By passing None, the original component is used for both structure and measurements
+    //
+    // The risk is that file handles opened during pre-init get captured in the snapshot.
+    // However, our Python initialization may not open files if we're careful with sys.path.
+    // If "unknown handle index" errors occur, we need Option B (stub_wasi flag in runtime).
+    let original_component = link_with_extensions(extensions)
+        .map_err(|e| anyhow!("Failed to link component with extensions: {}", e))?;
+
     component_init_transform::initialize_staged(
-        component,
-        None, // No stage2 component
+        &original_component,
+        None, // Use original component for both structure and measurements
         move |instrumented| {
             let python_stdlib = python_stdlib.clone();
             let site_packages = site_packages.clone();
@@ -256,6 +282,12 @@ pub async fn pre_initialize(
                 if !imports.is_empty() {
                     call_execute_for_imports(&mut store, &instance, &imports).await?;
                 }
+
+                // CRITICAL: Call finalize-preinit to reset WASI state AFTER all imports.
+                // This clears file handles from the WASI adapter and wasi-libc so they
+                // don't get captured in the memory snapshot. Without this, restored
+                // instances get "unknown handle index" errors.
+                call_finalize_preinit(&mut store, &instance).await?;
 
                 Ok(Box::new(PreInitInvoker { store, instance }) as Box<dyn Invoker>)
             }
@@ -385,6 +417,27 @@ async fn call_execute_for_imports(
             Ok(())
         }
     }
+}
+
+/// Call the finalize-preinit export to reset WASI state after imports.
+async fn call_finalize_preinit(store: &mut Store<PreInitCtx>, instance: &Instance) -> Result<()> {
+    // Find the finalize-preinit function
+    let finalize_func = instance
+        .get_func(&mut *store, "finalize-preinit")
+        .ok_or_else(|| anyhow!("finalize-preinit export not found"))?;
+
+    // Call it (no arguments, no return value)
+    let args: [Val; 0] = [];
+    let mut results: [Val; 0] = [];
+
+    finalize_func
+        .call_async(&mut *store, &args, &mut results)
+        .await
+        .context("Failed to call finalize-preinit")?;
+
+    finalize_func.post_return_async(&mut *store).await?;
+
+    Ok(())
 }
 
 /// Errors that can occur during pre-initialization.

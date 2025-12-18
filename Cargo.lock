@@ -831,6 +831,8 @@ dependencies = [
  "sha2",
  "tempfile",
  "tracing",
+ "wasm-encoder 0.240.0 (git+https://github.com/bytecodealliance/wasm-tools?rev=e2bb0a24)",
+ "wasmparser 0.240.0 (git+https://github.com/bytecodealliance/wasm-tools?rev=e2bb0a24)",
  "wasmtime",
  "wasmtime-wasi",
  "wit-component",
@@ -2820,6 +2822,7 @@ dependencies = [
  "hashbrown 0.15.5",
  "indexmap",
  "semver",
+ "serde",
 ]
 
 [[package]]

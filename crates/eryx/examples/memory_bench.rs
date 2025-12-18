@@ -273,9 +273,13 @@ async fn run_numpy_benchmark() -> Result<(), Box<dyn std::error::Error>> {
     // Pre-initialize with numpy
     println!("Pre-initializing with numpy...");
     let start = Instant::now();
-    let preinit =
-        eryx::preinit::pre_initialize(&linked, &python_stdlib, Some(site_packages), &["numpy"])
-            .await?;
+    let preinit = eryx::preinit::pre_initialize(
+        &python_stdlib,
+        Some(site_packages),
+        &["numpy"],
+        &native_extensions,
+    )
+    .await?;
     println!("  Pre-init in {:?}", start.elapsed());
 
     let after_preinit = MemorySnapshot::now();

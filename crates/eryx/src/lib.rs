@@ -56,10 +56,11 @@ mod wasm;
 /// Pre-initialization support for native extensions.
 ///
 /// Pre-initialization runs Python's init + imports during build time and
-/// captures the memory state into the component. This avoids the 50-100ms
+/// captures the memory state into the component. This avoids the ~450ms
 /// startup cost on each sandbox creation.
 #[cfg(feature = "native-extensions")]
 pub mod preinit {
+    pub use eryx_runtime::linker::NativeExtension;
     pub use eryx_runtime::preinit::{PreInitError, pre_initialize};
 }
 

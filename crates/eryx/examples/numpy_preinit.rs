@@ -99,10 +99,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         start.elapsed()
     );
 
-    // Step 1: Link the component with native extensions
-    println!("Step 1: Linking component with native extensions...");
-    let start = Instant::now();
-
+    // Convert to NativeExtension structs
     let native_extensions: Vec<_> = extensions
         .iter()
         .map(|(name, bytes)| {
@@ -110,22 +107,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         })
         .collect();
 
-    let linked_component = eryx_runtime::linker::link_with_extensions(&native_extensions)?;
-    println!(
-        "  Linked in {:?} ({:.1} MB)",
-        start.elapsed(),
-        linked_component.len() as f64 / 1_000_000.0
-    );
-
-    // Step 2: Pre-initialize the component (run Python init + import numpy)
-    println!("\nStep 2: Pre-initializing component (importing numpy)...");
+    // Step 1: Pre-initialize the component (links + runs Python init + imports numpy)
+    // This internally creates both the original component (with real WASI) and a
+    // stubbed component (with trap-on-call WASI) to prevent file handles from being
+    // captured in the memory snapshot.
+    println!("Step 1: Pre-initializing component (linking + importing numpy)...");
     let start = Instant::now();
 
     let preinit_component = eryx::preinit::pre_initialize(
-        &linked_component,
         &python_stdlib,
         Some(site_packages),
         &["numpy"], // Pre-import numpy during init
+        &native_extensions,
     )
     .await?;
 
@@ -135,8 +128,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         preinit_component.len() as f64 / 1_000_000.0
     );
 
-    // Step 3: Pre-compile the pre-initialized component
-    println!("\nStep 3: Pre-compiling component...");
+    // Step 2: Pre-compile the pre-initialized component
+    println!("\nStep 2: Pre-compiling component...");
     let start = Instant::now();
 
     let precompiled = eryx::PythonExecutor::precompile(&preinit_component)?;
