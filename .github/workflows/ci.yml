@@ -14,21 +14,9 @@ jobs:
   # Fast check for dependency drift - runs in parallel with build
   unify-check:
     name: Dependency Check
-    runs-on: ubuntu-latest
+    runs-on: namespace-profile-eryx-light
     steps:
-      - uses: actions/checkout@v6
-
-      - name: Cache Rust toolchain and cargo
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.rustup/toolchains
-            ~/.rustup/update-hashes
-            ~/.cargo/registry
-            ~/.cargo/git
-          key: ${{ runner.os }}-rust-unify-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-rust-unify-
+      - uses: namespacelabs/nscloud-checkout-action@v8
 
       - uses: ./.github/actions/setup-rust
 
@@ -38,22 +26,14 @@ jobs:
   # Build eryx-wasm-runtime and precompile it - other jobs depend on this
   build-eryx-runtime:
     name: Build eryx-runtime
-    runs-on: ubuntu-latest
+    runs-on: namespace-profile-eryx-heavy
     steps:
-      - uses: actions/checkout@v6
+      - uses: namespacelabs/nscloud-checkout-action@v8
 
-      - name: Cache Rust toolchain and cargo
-        uses: actions/cache@v4
+      - name: Configure Rust cache
+        uses: namespacelabs/nscloud-cache-action@v1
         with:
-          path: |
-            ~/.rustup/toolchains
-            ~/.rustup/update-hashes
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-rust-wasm-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-rust-wasm-
+          cache: rust
 
       - uses: ./.github/actions/setup-rust
 
@@ -85,7 +65,7 @@ jobs:
           ls -la crates/eryx-wasm-runtime/target/
 
       - name: Upload WASM artifacts
-        uses: actions/upload-artifact@v4
+        uses: namespace-actions/upload-artifact@v1
         with:
           name: wasm-runtime
           path: |
@@ -97,13 +77,13 @@ jobs:
 
   lint:
     name: Lint
-    runs-on: ubuntu-latest
+    runs-on: namespace-profile-eryx-standard
     needs: build-eryx-runtime
     steps:
-      - uses: actions/checkout@v6
+      - uses: namespacelabs/nscloud-checkout-action@v8
 
       - name: Download WASM artifacts
-        uses: actions/download-artifact@v4
+        uses: namespace-actions/download-artifact@v1
         with:
           name: wasm-runtime
           path: crates/
@@ -116,18 +96,10 @@ jobs:
             touch crates/eryx-runtime/prebuilt/*
           fi
 
-      - name: Cache Rust toolchain and cargo
-        uses: actions/cache@v4
+      - name: Configure Rust cache
+        uses: namespacelabs/nscloud-cache-action@v1
         with:
-          path: |
-            ~/.rustup/toolchains
-            ~/.rustup/update-hashes
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-rust-lint-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-rust-lint-
+          cache: rust
 
       - uses: ./.github/actions/setup-rust
 
@@ -140,13 +112,13 @@ jobs:
 
   test:
     name: Test
-    runs-on: ubuntu-latest
+    runs-on: namespace-profile-eryx-heavy
     needs: build-eryx-runtime
     steps:
-      - uses: actions/checkout@v6
+      - uses: namespacelabs/nscloud-checkout-action@v8
 
       - name: Download WASM artifacts
-        uses: actions/download-artifact@v4
+        uses: namespace-actions/download-artifact@v1
         with:
           name: wasm-runtime
           path: crates/
@@ -175,16 +147,6 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y mold clang
 
-      - name: Free disk space
-        uses: endersonmenezes/free-disk-space@v3
-        with:
-          remove_android: true
-          remove_dotnet: true
-          remove_haskell: true
-          remove_tool_cache: true
-          rm_cmd: "rmz" # Faster deletion (~3x faster)
-          rmz_version: "3.1.1"
-
       - name: Configure mold linker
         run: |
           mkdir -p .cargo
@@ -194,18 +156,10 @@ jobs:
           rustflags = ["-C", "link-arg=-fuse-ld=mold"]
           EOF
 
-      - name: Cache Rust toolchain and cargo
-        uses: actions/cache@v4
+      - name: Configure Rust cache
+        uses: namespacelabs/nscloud-cache-action@v1
         with:
-          path: |
-            ~/.rustup/toolchains
-            ~/.rustup/update-hashes
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-rust-test-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-rust-test-
+          cache: rust
 
       - uses: ./.github/actions/setup-rust
 
@@ -219,22 +173,14 @@ jobs:
 
   msrv:
     name: MSRV
-    runs-on: ubuntu-latest
+    runs-on: namespace-profile-eryx-light
     steps:
-      - uses: actions/checkout@v6
+      - uses: namespacelabs/nscloud-checkout-action@v8
 
-      - name: Cache Rust toolchain and cargo
-        uses: actions/cache@v4
+      - name: Configure Rust cache
+        uses: namespacelabs/nscloud-cache-action@v1
         with:
-          path: |
-            ~/.rustup/toolchains
-            ~/.rustup/update-hashes
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-rust-msrv-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-rust-msrv-
+          cache: rust
 
       - name: Install mise
         uses: jdx/mise-action@v3
@@ -248,13 +194,13 @@ jobs:
 
   doc:
     name: Documentation
-    runs-on: ubuntu-latest
+    runs-on: namespace-profile-eryx-standard
     needs: build-eryx-runtime
     steps:
-      - uses: actions/checkout@v6
+      - uses: namespacelabs/nscloud-checkout-action@v8
 
       - name: Download WASM artifacts
-        uses: actions/download-artifact@v4
+        uses: namespace-actions/download-artifact@v1
         with:
           name: wasm-runtime
           path: crates/
@@ -267,18 +213,10 @@ jobs:
             touch crates/eryx-runtime/prebuilt/*
           fi
 
-      - name: Cache Rust toolchain and cargo
-        uses: actions/cache@v4
+      - name: Configure Rust cache
+        uses: namespacelabs/nscloud-cache-action@v1
         with:
-          path: |
-            ~/.rustup/toolchains
-            ~/.rustup/update-hashes
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-rust-doc-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-rust-doc-
+          cache: rust
 
       - uses: ./.github/actions/setup-rust
 
