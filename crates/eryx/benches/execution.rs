@@ -11,7 +11,13 @@
 //! - **parallel_callbacks**: Measures concurrent callback performance
 
 // Benchmarks use expect/unwrap for simplicity - failures should panic
-#![allow(missing_docs, clippy::expect_used, clippy::unwrap_used)]
+// RefCell across await is fine here - single-threaded benchmark code
+#![allow(
+    missing_docs,
+    clippy::expect_used,
+    clippy::unwrap_used,
+    clippy::await_holding_refcell_ref
+)]
 
 use std::future::Future;
 use std::pin::Pin;
@@ -387,6 +393,8 @@ for _ in range(5):
     });
 
     // Parallel work callbacks using asyncio
+    // Note: Use top-level await since Python is already in an async context
+    // The work() callback returns a coroutine, so we can gather them
     group.bench_function("parallel_5x10ms", |b| {
         b.to_async(&rt).iter(|| async {
             session
@@ -394,10 +402,8 @@ for _ in range(5):
                 .execute(
                     r#"
 import asyncio
-async def run_parallel():
-    tasks = [work_async(ms=10) for _ in range(5)]
-    await asyncio.gather(*tasks)
-asyncio.run(run_parallel())
+tasks = [work(ms=10) for _ in range(5)]
+await asyncio.gather(*tasks)
 "#,
                 )
                 .await

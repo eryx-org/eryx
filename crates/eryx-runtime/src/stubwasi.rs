@@ -269,6 +269,7 @@ fn decompress_zstd(data: &[u8]) -> Result<Vec<u8>, Error> {
 }
 
 #[cfg(test)]
+#[allow(clippy::expect_used)] // Tests use expect for simplicity
 mod tests {
     use super::*;
 
