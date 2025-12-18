@@ -144,9 +144,18 @@ async fn main() -> Result<(), eryx::Error> {
 | Feature              | Description                                                                         | Trade-offs                               |
 |----------------------|-------------------------------------------------------------------------------------|------------------------------------------|
 | `embedded`           | Zero-config sandboxes: embeds pre-compiled WASM runtime + Python stdlib             | +32MB binary size; enables `unsafe` code paths |
-| `native-extensions`  | Native Python extension support (e.g., numpy) via late-linking and pre-initialization | Adds `eryx-runtime` dep; experimental    |
+| `preinit`            | Pre-initialization support for ~25x faster sandbox creation                         | Adds `eryx-runtime` dep; requires build step |
+| `native-extensions`  | Native Python extension support (e.g., numpy) via late-linking                      | Implies `preinit`; experimental          |
 
 Package support (`with_package()` for `.whl` and `.tar.gz` files) is always available — no feature flag required.
+
+### Pre-initialization
+
+The `preinit` feature provides ~25x faster sandbox creation by capturing Python's initialized memory state at build time. This works with or without native extensions — you can pre-import stdlib modules like `json`, `asyncio`, `re`, etc.
+
+| Metric | Without Pre-init | With Pre-init | Speedup |
+|--------|-----------------|---------------|---------|
+| Sandbox creation | ~450ms | ~18ms | **25x faster** |
 
 ### Recommended Configurations
 
@@ -154,6 +163,13 @@ Package support (`with_package()` for `.whl` and `.tar.gz` files) is always avai
 // Fastest startup, zero configuration (recommended for most users)
 // Features: embedded
 let sandbox = Sandbox::builder().build()?;
+
+// With pre-initialization for faster sandbox creation
+// Features: embedded, preinit
+// Pre-import common stdlib modules during build for ~25x speedup
+let preinit_bytes = eryx::preinit::pre_initialize(
+    &stdlib_path, None, &["json", "asyncio", "re"], &[]
+).await?;
 
 // With package support for third-party libraries
 // Features: embedded (packages always available)

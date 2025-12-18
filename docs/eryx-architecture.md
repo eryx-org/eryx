@@ -1,7 +1,7 @@
 # Eryx Architecture: Complete Design Overview
 
 **Version:** December 2025
-**Status:** Production-ready with async callbacks and native extension support
+**Status:** Production-ready with async callbacks, native extension support, and pre-initialization
 
 ---
 
@@ -16,7 +16,8 @@
 7. [Late-Linking for Native Extensions](#late-linking-for-native-extensions)
 8. [File Sizes](#file-sizes)
 9. [Comparison with componentize-py](#comparison-with-componentize-py)
-10. [Performance Characteristics](#performance-characteristics)
+10. [Pre-Initialization](#pre-initialization)
+11. [Performance Characteristics](#performance-characteristics)
 
 ---
 
@@ -27,6 +28,7 @@ Eryx is a Python sandbox built on WebAssembly Component Model. It enables:
 - **Secure Python execution** with resource limits and isolated environments
 - **Async callbacks** between Python and host (Rust)
 - **Native extensions** (numpy, etc.) via runtime late-linking
+- **Pre-initialization** for ~25x faster sandbox creation
 - **State management** (snapshot/restore) for session persistence
 
 **Key innovation:** Custom wit-dylib runtime (`eryx-wasm-runtime`) that replaces componentize-py's runtime, enabling true late-linking of native extensions without requiring componentize-py's pre-build process.
@@ -76,6 +78,7 @@ Eryx is a Python sandbox built on WebAssembly Component Model. It enables:
 │  │    • snapshot-state() -> list<u8>                               │    │
 │  │    • restore-state(state: list<u8>)                             │    │
 │  │    • clear-state()                                              │    │
+│  │    • finalize-preinit()  [for pre-initialization]               │    │
 │  │                                                                  │    │
 │  │  Imports (from host):                                           │    │
 │  │    • invoke(name, args) -> result<string, string>  [async]      │    │
@@ -588,7 +591,7 @@ The path must match because:
 | **Async callbacks** | ✅ Yes | ✅ Yes |
 | **Native extensions** | ✅ Pre-build only | ✅ Late-linking |
 | **Runtime flexibility** | ❌ Must use componentize-py | ✅ Pure Rust, no Python toolchain |
-| **Cold start time** | ✅ ~50ms (pre-init) | ⚠️ ~500ms (no pre-init) |
+| **Cold start time** | ✅ ~50ms (pre-init) | ✅ ~18ms with pre-init, ~450ms without |
 | **Add extensions** | ❌ Rebuild required (5-10s) | ✅ At sandbox creation (~1.5s) |
 | **Component size** | ~40-50MB with numpy | ~57MB with numpy (late-linked) |
 | **Build complexity** | ⚠️ Requires componentize-py CLI | ✅ Just cargo + WASI SDK |
@@ -601,14 +604,14 @@ The path must match because:
 3. **Smaller runtime**: 206KB vs 364KB for the runtime itself
 4. **Full control**: We own the runtime implementation
 5. **True late-linking**: Achieved the original design goal
+6. **Fast cold starts with pre-init**: ~18ms with pre-initialization enabled
 
 ### Cons of Eryx Approach
 
-1. **Slower cold starts**: ~500ms vs ~50ms (no pre-initialization)
-2. **Linking overhead**: ~1.5s when adding native extensions
-3. **Larger embedded data**: ~10MB compressed base libraries in eryx-runtime crate
-4. **API verbosity**: Must explicitly call `with_python_stdlib()` and `with_site_packages()`
-5. **Less mature**: componentize-py is battle-tested in production
+1. **Linking overhead**: ~1.5s when adding native extensions
+2. **Larger embedded data**: ~10MB compressed base libraries in eryx-runtime crate
+3. **API verbosity**: Must explicitly call `with_python_stdlib()` and `with_site_packages()`
+4. **Less mature**: componentize-py is battle-tested in production
 
 ### When to Use Each
 
@@ -620,23 +623,137 @@ The path must match because:
 
 **Use componentize-py:**
 - Known fixed set of extensions
-- Cold start performance is critical (<100ms)
 - You're okay with 5-10s rebuild per combination
 - You want a mature, production-proven solution
 
-### Hybrid Approach (Future)
+### Pre-Initialization ✅ IMPLEMENTED
 
-We could add pre-initialization to late-linked components:
+Pre-initialization captures Python's initialized memory state at build time, enabling ~25x faster sandbox creation:
 
 ```rust
-let component = eryx_runtime::linker::link_with_extensions(&extensions)?;
-let preinit = eryx_runtime::preinit::pre_initialize(&component).await?;
-// Now preinit has ~50ms cold starts like componentize-py
+use eryx::preinit::SandboxPre;
+
+// Create a pre-initialized sandbox template (one-time cost)
+let pre = SandboxPre::new(
+    python_stdlib_path,
+    site_packages_path,
+    Some(vec!["numpy".to_string()]),  // Pre-import these modules
+).await?;
+
+// Create sandboxes from the template (~18ms vs ~450ms)
+let sandbox = pre.instantiate().await?;
 ```
 
-This would combine the best of both worlds:
+How it works:
+1. Runs Python initialization and imports once
+2. Calls `finalize-preinit` export to reset WASI file handle state
+3. Captures memory snapshot via `component-init-transform`
+4. New sandboxes restore from the snapshot instead of re-initializing
+
+This combines the best of both worlds:
 - Flexibility of late-linking
-- Performance of pre-initialization
+- Performance of pre-initialization (~25x speedup)
+
+---
+
+## Pre-Initialization
+
+Pre-initialization captures Python's initialized memory state, enabling ~25x faster sandbox creation by avoiding repeated Python interpreter initialization.
+
+### How It Works
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│  Build Time (SandboxPre::new)                                           │
+│                                                                          │
+│  1. Load component (runtime.wasm)                                       │
+│  2. Instantiate and run Python initialization                           │
+│  3. Execute pre-imports (e.g., "import numpy")                          │
+│  4. Call finalize-preinit export:                                       │
+│     • reset_adapter_state() - clears WASI Preview 1 adapter state       │
+│     • __wasilibc_reset_preopens() - clears preopened file handles       │
+│  5. Capture memory snapshot via component-init-transform                │
+│  6. Store as SandboxPre template                                        │
+└─────────────────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+┌─────────────────────────────────────────────────────────────────────────┐
+│  Runtime (SandboxPre::instantiate)                                      │
+│                                                                          │
+│  1. Restore memory from snapshot (~18ms)                                │
+│  2. Skip Python initialization (already done)                           │
+│  3. Fresh WASI context with new file handles                            │
+│  4. Ready to execute!                                                   │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+### The finalize-preinit Export
+
+The key innovation is the `finalize-preinit` export, which resets WASI state before the memory snapshot is captured:
+
+```rust
+// In eryx-wasm-runtime/src/python.rs
+pub fn finalize_preinit() {
+    reset_wasi_state();
+}
+
+fn reset_wasi_state() {
+    // Reset WASI Preview 1 adapter's internal state
+    extern "C" { fn reset_adapter_state(); }
+    
+    // Reset wasilibc's preopened directory table
+    extern "C" { fn __wasilibc_reset_preopens(); }
+    
+    unsafe {
+        reset_adapter_state();
+        __wasilibc_reset_preopens();
+    }
+}
+```
+
+**Why this is necessary:** During Python initialization, files are opened (e.g., for importing modules). These file handles are stored in:
+1. The WASI Preview 1 adapter's handle table
+2. wasilibc's preopened directory cache
+
+When the memory snapshot is restored in a new WASI context, those handle indices become invalid ("unknown handle index" errors). By resetting this state before the snapshot, each instantiated sandbox starts with a clean file handle table.
+
+### Usage
+
+```rust
+use eryx::preinit::SandboxPre;
+
+// Create pre-initialized template (one-time cost: ~450ms)
+let pre = SandboxPre::new(
+    "/path/to/python-stdlib",
+    Some("/path/to/site-packages"),
+    Some(vec!["numpy".to_string(), "json".to_string()]),  // Pre-import
+).await?;
+
+// Create sandboxes from template (~18ms each, ~25x faster)
+let sandbox1 = pre.instantiate().await?;
+let sandbox2 = pre.instantiate().await?;
+
+// Each sandbox is fully isolated
+sandbox1.execute("x = 1").await?;
+sandbox2.execute("print(x)").await?;  // NameError: x is not defined
+```
+
+### Feature Flags
+
+Pre-initialization requires the `preinit` feature:
+
+```toml
+[dependencies]
+eryx = { version = "0.1", features = ["preinit"] }
+```
+
+The `native-extensions` feature implies `preinit`, so if you're using native extensions, pre-initialization is automatically available.
+
+### Limitations
+
+- Pre-imported modules are shared across all sandboxes (read-only state)
+- File handles opened during pre-init are NOT preserved (by design)
+- Callbacks must be registered at instantiation time, not pre-init time
 
 ---
 
@@ -674,6 +791,10 @@ No extensions (embedded runtime):
 
 From .wasm file (no caching):
   • ~500ms (wasmtime compile each time)
+
+With pre-initialization (preinit feature):
+  • SandboxPre creation: ~450ms (one-time)
+  • Per-sandbox instantiation: ~18ms ← 25x faster than cold start!
 
 With native extensions (late-linking):
   • First creation: ~1700ms (decompress + link + compile)
@@ -988,28 +1109,29 @@ This is simpler than C ABI calling conventions and works well with WASM's linear
 
 ## Future Enhancements
 
-### 1. Pre-Initialization Support
+### 1. Pre-Initialization ✅ IMPLEMENTED
 
-Add optional pre-init like componentize-py:
+Pre-initialization is now available via the `preinit` feature flag:
 
 ```rust
-let component = eryx_runtime::linker::link_with_extensions(&exts)?;
-let preinit = eryx_runtime::preinit::pre_initialize(&component).await?;
+use eryx::preinit::SandboxPre;
 
-// Now has ~50ms cold starts
-let sandbox = Sandbox::builder()
-    .with_precompiled_bytes(preinit)
-    .build()?;
+// Create pre-initialized template (one-time ~450ms cost)
+let pre = SandboxPre::new(
+    python_stdlib_path,
+    site_packages_path,
+    Some(vec!["numpy".to_string()]),  // Optional: pre-import modules
+).await?;
+
+// Instantiate sandboxes from template (~18ms each)
+let sandbox = pre.instantiate().await?;
 ```
 
-Benefits:
-- 10x faster cold starts
-- Keep late-linking flexibility
-
-Challenges:
-- Need to run wasmtime in build/link process
-- Must capture memory state correctly
-- Adds complexity
+Results:
+- **~25x faster** sandbox creation (~18ms vs ~450ms)
+- Supports pre-importing modules (e.g., numpy) for even faster execution
+- Uses `finalize-preinit` export to reset WASI file handle state before snapshot
+- Memory snapshot captured via `component-init-transform`
 
 ### 2. Component Caching ✅ IMPLEMENTED
 
