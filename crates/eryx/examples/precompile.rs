@@ -20,7 +20,7 @@
 
 use std::time::Instant;
 
-#[cfg(any(feature = "preinit", feature = "embedded"))]
+#[cfg(feature = "preinit")]
 use std::path::Path;
 
 #[cfg(feature = "embedded")]
@@ -106,7 +106,8 @@ fn main() -> anyhow::Result<()> {
         println!("\n--- Step 4: Verification ---");
         println!("Loading freshly created {cwasm_path} to verify it works...");
 
-        let python_stdlib = find_python_stdlib()?;
+        // Use embedded resources for stdlib (already extracted by EmbeddedResources)
+        let resources = eryx::embedded::EmbeddedResources::get()?;
 
         let rt = tokio::runtime::Runtime::new()?;
 
@@ -116,7 +117,7 @@ fn main() -> anyhow::Result<()> {
         let sandbox = unsafe {
             eryx::Sandbox::builder()
                 .with_precompiled_file(cwasm_path)
-                .with_python_stdlib(&python_stdlib)
+                .with_python_stdlib(resources.stdlib())
                 .build()?
         };
 
@@ -128,7 +129,7 @@ fn main() -> anyhow::Result<()> {
             let _sandbox = unsafe {
                 eryx::Sandbox::builder()
                     .with_precompiled_file(cwasm_path)
-                    .with_python_stdlib(&python_stdlib)
+                    .with_python_stdlib(resources.stdlib())
                     .build()?
             };
         }
@@ -197,8 +198,18 @@ fn main() -> anyhow::Result<()> {
 }
 
 /// Find the Python stdlib directory.
-#[cfg(any(feature = "preinit", feature = "embedded"))]
+#[cfg(feature = "preinit")]
 fn find_python_stdlib() -> anyhow::Result<std::path::PathBuf> {
+    // Check env vars first (used in CI)
+    for var in ["ERYX_PYTHON_STDLIB", "PYTHON_STDLIB_PATH"] {
+        if let Ok(path) = std::env::var(var) {
+            let p = Path::new(&path);
+            if p.exists() && p.join("encodings").exists() {
+                return Ok(p.to_path_buf());
+            }
+        }
+    }
+
     // Check common locations
     let candidates = [
         // Relative to workspace root (when running from workspace)
@@ -206,14 +217,6 @@ fn find_python_stdlib() -> anyhow::Result<std::path::PathBuf> {
         // Relative to example directory
         "../eryx-wasm-runtime/tests/python-stdlib",
     ];
-
-    // Also check env var
-    if let Ok(path) = std::env::var("PYTHON_STDLIB_PATH") {
-        let p = Path::new(&path);
-        if p.exists() && p.join("encodings").exists() {
-            return Ok(p.to_path_buf());
-        }
-    }
 
     for candidate in &candidates {
         let path = Path::new(candidate);
@@ -225,7 +228,7 @@ fn find_python_stdlib() -> anyhow::Result<std::path::PathBuf> {
     anyhow::bail!(
         "Could not find Python stdlib. Tried: {:?}\n\
          Run `mise run setup-eryx-runtime-tests` to extract the stdlib, \
-         or set PYTHON_STDLIB_PATH environment variable.",
+         or set ERYX_PYTHON_STDLIB environment variable.",
         candidates
     )
 }
