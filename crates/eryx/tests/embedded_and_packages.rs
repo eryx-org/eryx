@@ -9,14 +9,13 @@ use eryx::Sandbox;
 // Embedded Runtime Tests
 // =============================================================================
 
-/// Test that sandbox creation works without explicitly calling with_embedded_runtime().
-/// When embedded feature is enabled, it should be used automatically.
+/// Test that sandbox creation works with Sandbox::embedded().
 #[tokio::test]
 #[cfg(feature = "embedded")]
 async fn embedded_runtime_is_automatic() {
-    let sandbox = Sandbox::builder()
+    let sandbox = Sandbox::embedded()
         .build()
-        .expect("should use embedded runtime automatically");
+        .expect("Sandbox::embedded() should build successfully");
 
     let result = sandbox
         .execute("print('hello')")
@@ -31,7 +30,7 @@ async fn embedded_runtime_is_automatic() {
 async fn embedded_runtime_multiple_sandboxes() {
     // Create 5 sandboxes - should be fast after first extraction
     for i in 0..5 {
-        let sandbox = Sandbox::builder()
+        let sandbox = Sandbox::embedded()
             .build()
             .expect("sandbox creation should work");
         let result = sandbox
@@ -50,9 +49,9 @@ async fn embedded_runtime_multiple_sandboxes() {
 #[tokio::test]
 #[cfg(feature = "embedded")]
 async fn embedded_stdlib_is_automatic() {
-    let sandbox = Sandbox::builder()
+    let sandbox = Sandbox::embedded()
         .build()
-        .expect("should work without explicit stdlib path");
+        .expect("Sandbox::embedded() includes stdlib");
 
     // Test that stdlib modules are available
     let result = sandbox
@@ -66,7 +65,7 @@ async fn embedded_stdlib_is_automatic() {
 #[tokio::test]
 #[cfg(feature = "embedded")]
 async fn embedded_stdlib_modules() {
-    let sandbox = Sandbox::builder().build().unwrap();
+    let sandbox = Sandbox::embedded().build().unwrap();
 
     // Test multiple stdlib modules
     let code = r#"

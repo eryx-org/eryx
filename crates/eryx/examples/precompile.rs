@@ -17,17 +17,14 @@
 //!
 //! Run without preinit (faster build, slower sessions):
 //!   `cargo run --example precompile --release`
-//!
-//! Run with verification (requires embedded feature, creates chicken-and-egg if .cwasm missing):
-//!   `cargo run --example precompile --features embedded --release`
 
 use std::time::Instant;
 
-#[cfg(feature = "preinit")]
+#[cfg(any(feature = "preinit", feature = "embedded"))]
 use std::path::Path;
 
 #[cfg(feature = "embedded")]
-use eryx::session::Session;
+use eryx::Session;
 
 fn main() -> anyhow::Result<()> {
     let wasm_path = std::env::var("ERYX_WASM_PATH")
@@ -103,29 +100,35 @@ fn main() -> anyhow::Result<()> {
     std::fs::write(cwasm_path, &precompiled)?;
     println!("Saved to: {cwasm_path}");
 
-    // Step 4: Verify it works (only with embedded feature for stdlib)
+    // Step 4: Verify the freshly created cwasm works (requires embedded feature for unsafe APIs)
     #[cfg(feature = "embedded")]
     {
         println!("\n--- Step 4: Verification ---");
+        println!("Loading freshly created {cwasm_path} to verify it works...");
+
+        let python_stdlib = find_python_stdlib()?;
 
         let rt = tokio::runtime::Runtime::new()?;
 
-        // Test sandbox creation (should be ~234ns with InstancePreCache after first)
-        println!("\nSandbox creation (10x):");
-        // First one warms the cache
+        // Load the precompiled file we just created
+        // SAFETY: We just created this file from PythonExecutor::precompile()
         #[allow(unsafe_code)]
-        let _sandbox = unsafe {
+        let sandbox = unsafe {
             eryx::Sandbox::builder()
-                .with_precompiled_bytes(precompiled.clone())
+                .with_precompiled_file(cwasm_path)
+                .with_python_stdlib(&python_stdlib)
                 .build()?
         };
 
+        // Test sandbox creation (should be fast with precompiled)
+        println!("\nSandbox creation (10x):");
         let start = Instant::now();
         for _ in 0..10 {
             #[allow(unsafe_code)]
             let _sandbox = unsafe {
                 eryx::Sandbox::builder()
-                    .with_precompiled_bytes(precompiled.clone())
+                    .with_precompiled_file(cwasm_path)
+                    .with_python_stdlib(&python_stdlib)
                     .build()?
             };
         }
@@ -138,13 +141,6 @@ fn main() -> anyhow::Result<()> {
 
         // Test session creation
         println!("\nSession creation (5x):");
-        #[allow(unsafe_code)]
-        let sandbox = unsafe {
-            eryx::Sandbox::builder()
-                .with_precompiled_bytes(precompiled.clone())
-                .build()?
-        };
-
         let start = Instant::now();
         for _ in 0..5 {
             let _session = rt.block_on(eryx::InProcessSession::new(&sandbox))?;
@@ -190,7 +186,7 @@ fn main() -> anyhow::Result<()> {
     #[cfg(not(feature = "embedded"))]
     {
         println!("\n--- Step 4: Verification skipped ---");
-        println!("Enable embedded feature to test execution.");
+        println!("Run with --features embedded to verify the pre-compiled file works.");
     }
 
     println!();
@@ -201,7 +197,7 @@ fn main() -> anyhow::Result<()> {
 }
 
 /// Find the Python stdlib directory.
-#[cfg(feature = "preinit")]
+#[cfg(any(feature = "preinit", feature = "embedded"))]
 fn find_python_stdlib() -> anyhow::Result<std::path::PathBuf> {
     // Check common locations
     let candidates = [

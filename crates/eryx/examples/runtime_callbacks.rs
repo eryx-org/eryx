@@ -18,9 +18,6 @@ use serde_json::{Value, json};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let wasm_path = std::env::var("ERYX_WASM_PATH")
-        .unwrap_or_else(|_| "crates/eryx-runtime/runtime.wasm".to_string());
-
     println!("=== Runtime-Defined Callbacks Example ===\n");
     println!("This example demonstrates creating callbacks dynamically at runtime,");
     println!("where names, schemas, and behavior are all determined at runtime.\n");
@@ -131,9 +128,8 @@ async fn main() -> anyhow::Result<()> {
 
     println!("Created 3 dynamic callbacks: greet, calculate, lookup\n");
 
-    // Build the sandbox with dynamically created callbacks
-    let sandbox = Sandbox::builder()
-        .with_wasm_file(&wasm_path)
+    // Build the sandbox with dynamically created callbacks using embedded runtime
+    let sandbox = Sandbox::embedded()
         .with_callback(greet)
         .with_callback(calculate)
         .with_callback(lookup)

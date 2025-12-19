@@ -78,18 +78,12 @@ impl TypedCallback for SleepCallback {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let wasm_path = std::env::var("ERYX_WASM_PATH")
-        .unwrap_or_else(|_| "crates/eryx-runtime/runtime.wasm".to_string());
-
     println!("=== Parallel Execution Test ===\n");
 
     let sleep_callback = SleepCallback::new();
     let peak_concurrent = sleep_callback.peak_concurrent.clone();
 
-    let sandbox = Sandbox::builder()
-        .with_wasm_file(&wasm_path)
-        .with_callback(sleep_callback)
-        .build()?;
+    let sandbox = Sandbox::embedded().with_callback(sleep_callback).build()?;
 
     // Test 1: Sequential execution (baseline)
     println!("Test 1: Sequential execution (3 x 100ms callbacks)");

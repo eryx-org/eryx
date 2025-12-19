@@ -23,7 +23,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     rt.block_on(async {
         eprintln!("Creating sandbox...");
-        let sandbox = Sandbox::builder().build()?;
+        let sandbox = Sandbox::embedded().build()?;
 
         eprintln!("Creating session...");
         let mut session = InProcessSession::new(&sandbox).await?;

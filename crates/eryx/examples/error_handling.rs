@@ -3,7 +3,7 @@
 //! This example shows how errors from Python code and callbacks
 //! are propagated back to the Rust host.
 //!
-//! Run with: `cargo run --example error_handling`
+//! Run with: `cargo run --example error_handling --features=embedded`
 
 use std::future::Future;
 use std::pin::Pin;
@@ -291,15 +291,8 @@ print(f"\nSuccessfully validated {len(results)} out of 5 values")
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    // Path to the WASM runtime component
-    let wasm_path = std::env::var("ERYX_WASM_PATH")
-        .unwrap_or_else(|_| "crates/eryx-runtime/runtime.wasm".to_string());
-
-    println!("Loading WASM component from: {wasm_path}");
-
-    // Build the sandbox with our error-prone callbacks
-    let sandbox = Sandbox::builder()
-        .with_wasm_file(&wasm_path)
+    // Build the sandbox with our error-prone callbacks using embedded runtime
+    let sandbox = Sandbox::embedded()
         .with_callback(FailingCallback)
         .with_callback(ValidatingCallback)
         .build()?;

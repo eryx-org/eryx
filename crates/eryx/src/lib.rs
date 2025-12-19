@@ -18,18 +18,22 @@
 //!
 //! ## Quick Start
 //!
-//! ```rust
+//! ```rust,no_run
 //! use eryx::Sandbox;
 //!
+//! # #[cfg(feature = "embedded")]
 //! #[tokio::main]
 //! async fn main() -> Result<(), eryx::Error> {
-//!     let sandbox = Sandbox::builder().build()?;
+//!     // Use Sandbox::embedded() for zero-config setup (requires `embedded` feature)
+//!     let sandbox = Sandbox::embedded().build()?;
 //!
 //!     let result = sandbox.execute("print('Hello from Python!')").await?;
 //!
 //!     println!("Output: {}", result.stdout);
 //!     Ok(())
 //! }
+//! # #[cfg(not(feature = "embedded"))]
+//! # fn main() {}
 //! ```
 
 // Safety lint configuration:
@@ -72,7 +76,7 @@ pub use callback::{
 pub use error::Error;
 pub use library::RuntimeLibrary;
 pub use package::{ExtractedPackage, PackageFormat};
-pub use sandbox::{ExecuteResult, ExecuteStats, ResourceLimits, Sandbox, SandboxBuilder};
+pub use sandbox::{ExecuteResult, ExecuteStats, ResourceLimits, Sandbox, SandboxBuilder, state};
 pub use session::{
     InProcessSession, PythonStateSnapshot, Session, SessionExecutor, SnapshotMetadata,
     SnapshotSession,

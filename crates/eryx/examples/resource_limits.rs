@@ -80,17 +80,13 @@ impl TypedCallback for Counter {
 fn main() -> anyhow::Result<()> {
     let rt = tokio::runtime::Runtime::new()?;
 
-    let wasm_path = std::env::var("ERYX_WASM_PATH")
-        .unwrap_or_else(|_| "crates/eryx-runtime/runtime.wasm".to_string());
-
     println!("=== Resource Limits Example ===\n");
 
     // Example 1: Callback invocation limit
     println!("--- Example 1: Callback Invocation Limit ---");
     println!("Limiting to 3 callback invocations...\n");
 
-    let sandbox = Sandbox::builder()
-        .with_wasm_file(&wasm_path)
+    let sandbox = Sandbox::embedded()
         .with_callback(Counter)
         .with_resource_limits(ResourceLimits {
             max_callback_invocations: Some(3),
@@ -126,8 +122,7 @@ print("\n".join(results))
     println!("--- Example 2: Execution Timeout ---");
     println!("Setting 2 second execution timeout...\n");
 
-    let sandbox = Sandbox::builder()
-        .with_wasm_file(&wasm_path)
+    let sandbox = Sandbox::embedded()
         .with_callback(Sleep)
         .with_resource_limits(ResourceLimits {
             execution_timeout: Some(Duration::from_secs(2)),
@@ -157,8 +152,7 @@ print(f"First sleep completed: {result}")
     println!("\n--- Example 3: Callback Timeout ---");
     println!("Setting 500ms callback timeout...\n");
 
-    let sandbox = Sandbox::builder()
-        .with_wasm_file(&wasm_path)
+    let sandbox = Sandbox::embedded()
         .with_callback(Sleep)
         .with_resource_limits(ResourceLimits {
             callback_timeout: Some(Duration::from_millis(500)),
@@ -219,8 +213,7 @@ except Exception as e:
         restrictive_limits.max_callback_invocations
     );
 
-    let sandbox = Sandbox::builder()
-        .with_wasm_file(&wasm_path)
+    let sandbox = Sandbox::embedded()
         .with_callback(Counter)
         .with_resource_limits(restrictive_limits)
         .build()?;

@@ -347,12 +347,7 @@ class Storage:
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    // Path to the WASM runtime component
-    let wasm_path = std::env::var("ERYX_WASM_PATH")
-        .unwrap_or_else(|_| "crates/eryx-runtime/runtime.wasm".to_string());
-
     println!("=== RuntimeLibrary Example ===\n");
-    println!("Loading WASM component from: {wasm_path}\n");
 
     // Create our libraries
     let math_lib = create_math_library();
@@ -364,9 +359,8 @@ async fn main() -> anyhow::Result<()> {
     println!("{combined_stubs}");
     println!();
 
-    // Build sandbox with both libraries merged
-    let sandbox = Sandbox::builder()
-        .with_wasm_file(&wasm_path)
+    // Build sandbox with both libraries merged using embedded runtime
+    let sandbox = Sandbox::embedded()
         .with_library(math_lib)
         .with_library(storage_lib)
         .build()?;

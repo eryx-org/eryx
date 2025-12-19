@@ -101,15 +101,8 @@ impl OutputHandler for StreamingOutputHandler {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    // Path to the WASM runtime component
-    let wasm_path = std::env::var("ERYX_WASM_PATH")
-        .unwrap_or_else(|_| "crates/eryx-runtime/runtime.wasm".to_string());
-
-    println!("Loading WASM component from: {wasm_path}");
-
-    // Build the sandbox with tracing enabled
-    let sandbox = Sandbox::builder()
-        .with_wasm_file(&wasm_path)
+    // Build the sandbox with tracing enabled using embedded runtime
+    let sandbox = Sandbox::embedded()
         .with_callback(SlowCallback { delay_ms: 50 })
         .with_trace_handler(PrintingTraceHandler::new())
         .with_output_handler(StreamingOutputHandler)

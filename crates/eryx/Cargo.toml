@@ -14,21 +14,63 @@ categories = ["development-tools", "wasm"]
 [[bench]]
 name = "execution"
 harness = false
+required-features = ["embedded"]
+
+[[example]]
+name = "simple"
+required-features = ["embedded"]
+
+[[example]]
+name = "custom_library"
+required-features = ["embedded"]
 
 [[example]]
 name = "embedded_runtime"
 required-features = ["embedded"]
 
 [[example]]
+name = "error_handling"
+required-features = ["embedded"]
+
+[[example]]
+name = "memory_bench"
+required-features = ["embedded"]
+
+[[example]]
+name = "parallel_callbacks"
+required-features = ["embedded"]
+
+[[example]]
 name = "precompile"
+# No required-features - precompile must work without embedded to bootstrap
+
+[[example]]
+name = "profile_execution"
+required-features = ["embedded"]
+
+[[example]]
+name = "resource_limits"
+required-features = ["embedded"]
+
+[[example]]
+name = "runtime_callbacks"
+required-features = ["embedded"]
+
+[[example]]
+name = "session_reuse"
+required-features = ["embedded"]
 
 [[example]]
 name = "trace_events"
 required-features = ["embedded"]
 
 [[example]]
+name = "with_tracing"
+required-features = ["embedded"]
+
+[[example]]
 name = "numpy_native"
-required-features = ["native-extensions"]
+required-features = ["native-extensions", "embedded"]
 
 [[example]]
 name = "numpy_preinit"

@@ -181,11 +181,11 @@ fn python_stdlib_path() -> PathBuf {
         .join("python-stdlib")
 }
 
-fn sandbox_builder() -> eryx::SandboxBuilder {
+fn sandbox_builder() -> eryx::SandboxBuilder<eryx::state::Has, eryx::state::Has> {
     // When embedded feature is available, use it (more reliable)
     #[cfg(feature = "embedded")]
     {
-        Sandbox::builder()
+        Sandbox::embedded()
     }
 
     // Fallback to explicit paths for testing without embedded feature

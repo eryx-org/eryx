@@ -437,12 +437,10 @@ async fn run_visual_example(
     handler.render()?;
 
     // Build sandbox with embedded runtime for fast loading
-    let builder = Sandbox::builder()
-        .with_embedded_runtime()
+    let sandbox = Sandbox::embedded()
         .with_trace_handler(handler.clone())
-        .with_callbacks(callbacks);
-
-    let sandbox = builder.build()?;
+        .with_callbacks(callbacks)
+        .build()?;
     let result = sandbox.execute(script).await?;
 
     // Mark all as executed and do final render

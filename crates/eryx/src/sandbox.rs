@@ -2,6 +2,7 @@
 
 use std::{
     collections::HashMap,
+    marker::PhantomData,
     path::PathBuf,
     sync::Arc,
     time::{Duration, Instant},
@@ -11,6 +12,20 @@ use tokio::sync::mpsc;
 
 #[cfg(feature = "native-extensions")]
 use crate::cache::ComponentCache;
+
+/// Marker types for compile-time builder state tracking.
+///
+/// These types are used with [`SandboxBuilder`] to ensure at compile time
+/// that all required configuration is provided before building a sandbox.
+pub mod state {
+    /// Marker indicating a required component has not been configured.
+    #[derive(Debug, Clone, Copy, Default)]
+    pub struct Needs;
+
+    /// Marker indicating a required component has been configured.
+    #[derive(Debug, Clone, Copy, Default)]
+    pub struct Has;
+}
 
 /// Try to automatically find the Python stdlib directory.
 ///
@@ -119,9 +134,41 @@ impl std::fmt::Debug for Sandbox {
 
 impl Sandbox {
     /// Create a sandbox builder.
+    ///
+    /// You must configure both a runtime source and Python stdlib before building.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// let sandbox = Sandbox::builder()
+    ///     .with_wasm_file("runtime.wasm")
+    ///     .with_python_stdlib("/path/to/stdlib")
+    ///     .build()?;
+    /// ```
+    ///
+    /// Or use [`Sandbox::embedded()`] for zero-config setup when the `embedded`
+    /// feature is enabled.
     #[must_use]
-    pub fn builder() -> SandboxBuilder {
+    pub fn builder() -> SandboxBuilder<state::Needs, state::Needs> {
         SandboxBuilder::new()
+    }
+
+    /// Create a sandbox builder with embedded runtime and stdlib.
+    ///
+    /// This is the simplest way to create a sandbox - no configuration required.
+    /// Only available when the `embedded` feature is enabled.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// let sandbox = Sandbox::embedded()
+    ///     .with_callback(MyCallback)
+    ///     .build()?;
+    /// ```
+    #[cfg(feature = "embedded")]
+    #[must_use]
+    pub fn embedded() -> SandboxBuilder<state::Has, state::Has> {
+        SandboxBuilder::new_embedded()
     }
 
     /// Execute Python code in the sandbox.
@@ -286,7 +333,28 @@ enum WasmSource {
 }
 
 /// Builder for constructing a [`Sandbox`].
-pub struct SandboxBuilder {
+///
+/// Type parameters track configuration state at compile time:
+/// - `Runtime`: Whether WASM runtime is configured ([`state::Needs`] or [`state::Has`])
+/// - `Stdlib`: Whether Python stdlib is configured ([`state::Needs`] or [`state::Has`])
+///
+/// The [`build()`](SandboxBuilder::build) method is only available when both are [`state::Has`].
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// // With embedded feature - simplest path
+/// let sandbox = Sandbox::embedded()
+///     .with_callback(MyCallback)
+///     .build()?;
+///
+/// // Without embedded - must specify both runtime and stdlib
+/// let sandbox = Sandbox::builder()
+///     .with_wasm_file("runtime.wasm")
+///     .with_python_stdlib("/path/to/stdlib")
+///     .build()?;
+/// ```
+pub struct SandboxBuilder<Runtime = state::Needs, Stdlib = state::Needs> {
     wasm_source: WasmSource,
     callbacks: HashMap<String, Arc<dyn Callback>>,
     preamble: String,
@@ -309,15 +377,19 @@ pub struct SandboxBuilder {
     filesystem_cache: Option<crate::cache::FilesystemCache>,
     /// Extracted packages (kept alive for sandbox lifetime).
     packages: Vec<crate::package::ExtractedPackage>,
+    /// Phantom data for Runtime type parameter.
+    _runtime: PhantomData<Runtime>,
+    /// Phantom data for Stdlib type parameter.
+    _stdlib: PhantomData<Stdlib>,
 }
 
-impl Default for SandboxBuilder {
+impl Default for SandboxBuilder<state::Needs, state::Needs> {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl std::fmt::Debug for SandboxBuilder {
+impl<R, S> std::fmt::Debug for SandboxBuilder<R, S> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("SandboxBuilder")
             .field(
@@ -334,8 +406,11 @@ impl std::fmt::Debug for SandboxBuilder {
     }
 }
 
-impl SandboxBuilder {
+impl SandboxBuilder<state::Needs, state::Needs> {
     /// Create a new sandbox builder with default settings.
+    ///
+    /// You must configure both a runtime source and Python stdlib before building.
+    /// Use [`Sandbox::embedded()`] for zero-config setup when the `embedded` feature is enabled.
     #[must_use]
     pub fn new() -> Self {
         Self {
@@ -355,9 +430,68 @@ impl SandboxBuilder {
             #[cfg(feature = "native-extensions")]
             filesystem_cache: None,
             packages: Vec::new(),
+            _runtime: PhantomData,
+            _stdlib: PhantomData,
         }
     }
+}
 
+/// Create a builder pre-configured with embedded runtime and stdlib.
+#[cfg(feature = "embedded")]
+impl SandboxBuilder<state::Needs, state::Needs> {
+    fn new_embedded() -> SandboxBuilder<state::Has, state::Has> {
+        SandboxBuilder {
+            wasm_source: WasmSource::EmbeddedRuntime,
+            callbacks: HashMap::new(),
+            preamble: String::new(),
+            type_stubs: String::new(),
+            trace_handler: None,
+            output_handler: None,
+            resource_limits: ResourceLimits::default(),
+            python_stdlib_path: None, // Will use embedded stdlib
+            python_site_packages_path: None,
+            #[cfg(feature = "native-extensions")]
+            native_extensions: Vec::new(),
+            #[cfg(feature = "native-extensions")]
+            cache: None,
+            #[cfg(feature = "native-extensions")]
+            filesystem_cache: None,
+            packages: Vec::new(),
+            _runtime: PhantomData,
+            _stdlib: PhantomData,
+        }
+    }
+}
+
+// Helper for state transitions
+impl<R, S> SandboxBuilder<R, S> {
+    /// Internal: transition to new state while preserving all fields.
+    fn transition<R2, S2>(self) -> SandboxBuilder<R2, S2> {
+        SandboxBuilder {
+            wasm_source: self.wasm_source,
+            callbacks: self.callbacks,
+            preamble: self.preamble,
+            type_stubs: self.type_stubs,
+            trace_handler: self.trace_handler,
+            output_handler: self.output_handler,
+            resource_limits: self.resource_limits,
+            python_stdlib_path: self.python_stdlib_path,
+            python_site_packages_path: self.python_site_packages_path,
+            #[cfg(feature = "native-extensions")]
+            native_extensions: self.native_extensions,
+            #[cfg(feature = "native-extensions")]
+            cache: self.cache,
+            #[cfg(feature = "native-extensions")]
+            filesystem_cache: self.filesystem_cache,
+            packages: self.packages,
+            _runtime: PhantomData,
+            _stdlib: PhantomData,
+        }
+    }
+}
+
+// Runtime transitions (Needs -> Has)
+impl<S> SandboxBuilder<state::Needs, S> {
     /// Explicitly use the embedded pre-compiled runtime.
     ///
     /// **Note:** You usually don't need to call this. When the `embedded`
@@ -382,27 +516,40 @@ impl SandboxBuilder {
     ///     .with_package("/path/to/numpy-wasi.tar.gz")?  // Has .so files
     ///     .build()?;  // Uses late-linking, not embedded runtime
     /// ```
+    /// Explicitly use the embedded pre-compiled runtime and stdlib.
+    ///
+    /// This transitions the builder to a fully-configured state, ready to build.
+    ///
+    /// **Note:** Consider using [`Sandbox::embedded()`] instead for cleaner code.
     #[cfg(feature = "embedded")]
     #[must_use]
-    pub fn with_embedded_runtime(mut self) -> Self {
+    pub fn with_embedded_runtime(mut self) -> SandboxBuilder<state::Has, state::Has> {
         self.wasm_source = WasmSource::EmbeddedRuntime;
-        self
+        self.transition()
     }
 
     /// Set the WASM component from bytes.
     ///
     /// Use this to embed the WASM component in your binary.
+    /// You still need to configure the Python stdlib with [`with_python_stdlib()`](SandboxBuilder::with_python_stdlib)
+    /// or [`with_auto_stdlib()`](SandboxBuilder::with_auto_stdlib).
     #[must_use]
-    pub fn with_wasm_bytes(mut self, bytes: impl Into<Vec<u8>>) -> Self {
+    pub fn with_wasm_bytes(mut self, bytes: impl Into<Vec<u8>>) -> SandboxBuilder<state::Has, S> {
         self.wasm_source = WasmSource::Bytes(bytes.into());
-        self
+        self.transition()
     }
 
     /// Set the WASM component from a file path.
+    ///
+    /// You still need to configure the Python stdlib with [`with_python_stdlib()`](SandboxBuilder::with_python_stdlib)
+    /// or [`with_auto_stdlib()`](SandboxBuilder::with_auto_stdlib).
     #[must_use]
-    pub fn with_wasm_file(mut self, path: impl Into<std::path::PathBuf>) -> Self {
+    pub fn with_wasm_file(
+        mut self,
+        path: impl Into<std::path::PathBuf>,
+    ) -> SandboxBuilder<state::Has, S> {
         self.wasm_source = WasmSource::File(path.into());
-        self
+        self.transition()
     }
 
     /// Set the WASM component from pre-compiled bytes.
@@ -432,15 +579,19 @@ impl SandboxBuilder {
     /// let sandbox = unsafe {
     ///     Sandbox::builder()
     ///         .with_precompiled_bytes(precompiled)
+    ///         .with_python_stdlib("/path/to/stdlib")
     ///         .build()?
     /// };
     /// ```
     #[cfg(feature = "embedded")]
     #[must_use]
     #[allow(unsafe_code)]
-    pub unsafe fn with_precompiled_bytes(mut self, bytes: impl Into<Vec<u8>>) -> Self {
+    pub unsafe fn with_precompiled_bytes(
+        mut self,
+        bytes: impl Into<Vec<u8>>,
+    ) -> SandboxBuilder<state::Has, S> {
         self.wasm_source = WasmSource::PrecompiledBytes(bytes.into());
-        self
+        self.transition()
     }
 
     /// Set the WASM component from a pre-compiled file path.
@@ -471,17 +622,68 @@ impl SandboxBuilder {
     /// let sandbox = unsafe {
     ///     Sandbox::builder()
     ///         .with_precompiled_file("runtime.cwasm")
+    ///         .with_python_stdlib("/path/to/stdlib")
     ///         .build()?
     /// };
     /// ```
     #[cfg(feature = "embedded")]
     #[must_use]
     #[allow(unsafe_code)]
-    pub unsafe fn with_precompiled_file(mut self, path: impl Into<std::path::PathBuf>) -> Self {
+    pub unsafe fn with_precompiled_file(
+        mut self,
+        path: impl Into<std::path::PathBuf>,
+    ) -> SandboxBuilder<state::Has, S> {
         self.wasm_source = WasmSource::PrecompiledFile(path.into());
-        self
+        self.transition()
+    }
+}
+
+// Stdlib transitions (Needs -> Has)
+impl<R> SandboxBuilder<R, state::Needs> {
+    /// Set the path to the Python standard library directory.
+    ///
+    /// This is required when not using the `embedded` feature.
+    /// The directory should contain the extracted Python stdlib (e.g., from
+    /// componentize-py's python-lib.tar.zst).
+    ///
+    /// The stdlib will be mounted at `/python-stdlib` inside the WASM sandbox.
+    #[must_use]
+    pub fn with_python_stdlib(
+        mut self,
+        path: impl Into<std::path::PathBuf>,
+    ) -> SandboxBuilder<R, state::Has> {
+        self.python_stdlib_path = Some(path.into());
+        self.transition()
     }
 
+    /// Auto-detect Python stdlib from common locations.
+    ///
+    /// Searches in order:
+    /// 1. `ERYX_PYTHON_STDLIB` environment variable
+    /// 2. `./python-stdlib` (relative to current directory)
+    /// 3. `<exe_dir>/python-stdlib` (relative to executable)
+    /// 4. `<exe_dir>/../python-stdlib` (sibling of executable directory)
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::MissingPythonStdlib`] if no valid stdlib directory is found.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// let sandbox = Sandbox::builder()
+    ///     .with_wasm_file("runtime.wasm")
+    ///     .with_auto_stdlib()?  // Explicit fallible auto-detection
+    ///     .build()?;
+    /// ```
+    pub fn with_auto_stdlib(self) -> Result<SandboxBuilder<R, state::Has>, Error> {
+        let path = find_python_stdlib().ok_or(Error::MissingPythonStdlib)?;
+        Ok(self.with_python_stdlib(path))
+    }
+}
+
+// Methods available in ANY state
+impl<R, S> SandboxBuilder<R, S> {
     /// Add a native Python extension (.so file) to be linked into the component.
     ///
     /// Native extensions allow Python packages with compiled code (like numpy)
@@ -668,19 +870,6 @@ impl SandboxBuilder {
         self
     }
 
-    /// Set the path to the Python standard library directory.
-    ///
-    /// This is required when using the eryx-wasm-runtime (Rust/CPython FFI based).
-    /// The directory should contain the extracted Python stdlib (e.g., from
-    /// componentize-py's python-lib.tar.zst).
-    ///
-    /// The stdlib will be mounted at `/python-stdlib` inside the WASM sandbox.
-    #[must_use]
-    pub fn with_python_stdlib(mut self, path: impl Into<std::path::PathBuf>) -> Self {
-        self.python_stdlib_path = Some(path.into());
-        self
-    }
-
     /// Set the path to additional Python packages directory.
     ///
     /// The directory will be mounted at `/site-packages` inside the WASM sandbox
@@ -814,7 +1003,10 @@ impl SandboxBuilder {
 
         Ok(self)
     }
+}
 
+// Build only available when BOTH runtime AND stdlib are configured
+impl SandboxBuilder<state::Has, state::Has> {
     /// Build the sandbox.
     ///
     /// # Errors
@@ -1417,31 +1609,50 @@ mod tests {
         }
     }
 
-    /// Test that sandbox creation fails without WASM when embedded is not available.
+    /// Test that typestate prevents building without configuration.
+    ///
+    /// With typestate pattern, calling `build()` without configuring runtime and stdlib
+    /// is a **compile-time error**, not a runtime error. This test documents the API design.
+    ///
+    /// The following code would NOT compile:
+    /// ```compile_fail
+    /// use eryx::Sandbox;
+    /// let sandbox = Sandbox::builder().build(); // ERROR: build() not available
+    /// ```
     #[test]
-    #[cfg(not(feature = "embedded"))]
-    fn sandbox_builder_build_fails_without_wasm() {
-        let builder = SandboxBuilder::new();
-        let result = builder.build();
+    fn sandbox_builder_typestate_prevents_unconfigured_build() {
+        // This test verifies that the typestate pattern is in place.
+        // The actual compile-time checking is documented above.
+        //
+        // We can verify that a fully-configured builder does have build():
+        let _builder = SandboxBuilder::new()
+            .with_wasm_bytes(vec![])
+            .with_python_stdlib("/fake/path");
+        // _builder.build() would work here (though fail at runtime due to invalid WASM)
+    }
 
-        assert!(result.is_err());
-        let error = result.unwrap_err();
-        let error_str = format!("{}", error);
+    /// Test that sandbox creation succeeds with Sandbox::embedded().
+    #[test]
+    #[cfg(feature = "embedded")]
+    fn sandbox_embedded_builds_successfully() {
+        let result = Sandbox::embedded().build();
+
         assert!(
-            error_str.contains("No WASM") || error_str.contains("wasm"),
-            "Error should mention WASM: {}",
-            error_str
+            result.is_ok(),
+            "Sandbox::embedded() should build successfully"
         );
     }
 
-    /// Test that sandbox creation succeeds automatically with embedded.
+    /// Test that with_embedded_runtime() transitions to fully-configured state.
     #[test]
     #[cfg(feature = "embedded")]
-    fn sandbox_builder_build_uses_embedded_runtime_automatically() {
-        let builder = SandboxBuilder::new();
-        let result = builder.build();
+    fn sandbox_builder_with_embedded_runtime_builds() {
+        let result = SandboxBuilder::new().with_embedded_runtime().build();
 
-        assert!(result.is_ok(), "Should use embedded runtime automatically");
+        assert!(
+            result.is_ok(),
+            "with_embedded_runtime() should provide both runtime and stdlib"
+        );
     }
 
     #[test]
@@ -1507,6 +1718,7 @@ mod tests {
         // that the builder pattern compiles correctly
         let builder = Sandbox::builder()
             .with_wasm_bytes(vec![]) // Invalid, but tests the API
+            .with_python_stdlib("/fake/stdlib") // Required for typestate
             .with_callback(TestCallback)
             .with_resource_limits(ResourceLimits {
                 max_callback_invocations: Some(100),
@@ -1616,5 +1828,110 @@ mod tests {
 
         assert_eq!(result.trace.len(), 2);
         assert_eq!(result.trace[0].lineno, 1);
+    }
+
+    // ==========================================================================
+    // Unhappy path tests (explicit configuration errors)
+    // ==========================================================================
+
+    #[test]
+    fn sandbox_builder_wasm_file_not_found() {
+        let result = Sandbox::builder()
+            .with_wasm_file("/nonexistent/path/to/runtime.wasm")
+            .with_python_stdlib("/fake/stdlib")
+            .build();
+
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("No such file")
+                || err.contains("not found")
+                || err.contains("failed to read"),
+            "Expected file not found error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn sandbox_builder_invalid_wasm_bytes() {
+        let result = Sandbox::builder()
+            .with_wasm_bytes(vec![0, 1, 2, 3]) // Invalid WASM magic bytes
+            .with_python_stdlib("/fake/stdlib")
+            .build();
+
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        // wasmtime returns various errors for invalid WASM
+        assert!(
+            err.contains("magic") || err.contains("invalid") || err.contains("failed"),
+            "Expected WASM parsing error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn sandbox_builder_empty_wasm_bytes() {
+        let result = Sandbox::builder()
+            .with_wasm_bytes(vec![])
+            .with_python_stdlib("/fake/stdlib")
+            .build();
+
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("unexpected end")
+                || err.contains("empty")
+                || err.contains("failed")
+                || err.contains("magic"),
+            "Expected empty WASM error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn sandbox_builder_with_auto_stdlib_returns_result() {
+        // with_auto_stdlib() returns a Result - it may succeed or fail depending
+        // on whether a stdlib is found in standard locations.
+        // We just verify the API works correctly.
+        let result = Sandbox::builder()
+            .with_wasm_bytes(vec![])
+            .with_auto_stdlib();
+
+        // Either Ok (stdlib found) or Err (MissingPythonStdlib)
+        match result {
+            Ok(builder) => {
+                // Stdlib was found, builder is now fully configured
+                // Build will fail due to invalid WASM, but typestate is satisfied
+                let build_result = builder.build();
+                assert!(build_result.is_err()); // Invalid WASM
+            }
+            Err(e) => {
+                // Stdlib not found - should be MissingPythonStdlib error
+                let err_str = e.to_string();
+                assert!(
+                    err_str.contains("stdlib") || err_str.contains("Python"),
+                    "Expected stdlib-related error, got: {err_str}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    #[cfg(not(feature = "embedded"))]
+    fn sandbox_builder_requires_explicit_config_without_embedded() {
+        // Without the embedded feature, Sandbox::builder() returns SandboxBuilder<Needs, Needs>
+        // and build() is not available until both are configured.
+        //
+        // This is a compile-time check, but we verify the types work correctly:
+        let builder = Sandbox::builder();
+
+        // Can add callbacks without configuring runtime/stdlib
+        let builder = builder.with_callback(TestCallback);
+
+        // Must configure both to get build()
+        let builder = builder
+            .with_wasm_bytes(vec![1, 2, 3])
+            .with_python_stdlib("/fake");
+
+        // Now build() is available (will fail due to invalid WASM, but that's expected)
+        let result = builder.build();
+        assert!(result.is_err()); // Invalid WASM
     }
 }

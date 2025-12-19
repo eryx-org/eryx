@@ -136,6 +136,7 @@ run = "cargo bench --package eryx --all-features -- --save-baseline main"
 [tasks.precompile-eryx-runtime]
 description = "Pre-compile eryx-runtime WASM to native code for faster loading"
 depends = ["build-eryx-runtime"]
+# Note: no --features embedded here - precompile must bootstrap without runtime.cwasm
 run = "cargo run --example precompile --release"
 sources = ["crates/eryx-runtime/runtime.wasm"]
 outputs = ["crates/eryx-runtime/runtime.cwasm"]
@@ -143,6 +144,7 @@ outputs = ["crates/eryx-runtime/runtime.cwasm"]
 [tasks.precompile-eryx-runtime-preinit]
 description = "Pre-initialize Python and pre-compile runtime (faster sessions, requires preinit)"
 depends = ["build-eryx-runtime", "build-preinit", "setup-eryx-runtime-tests"]
+# Note: no --features embedded here - precompile must bootstrap without runtime.cwasm
 run = "cargo run --example precompile --features preinit --release"
 sources = [
   "crates/eryx-runtime/runtime.wasm",

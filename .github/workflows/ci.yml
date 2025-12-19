@@ -313,27 +313,24 @@ jobs:
 
       - uses: ./.github/actions/setup-rust
 
-      - name: Run examples (no features required)
+      - name: Run examples
         run: |
           echo "=== simple ==="
-          cargo run --package eryx --example simple --release
+          cargo run --package eryx --example simple --features embedded --release
           echo "=== parallel_callbacks ==="
-          cargo run --package eryx --example parallel_callbacks --release
+          cargo run --package eryx --example parallel_callbacks --features embedded --release
           echo "=== with_tracing ==="
-          cargo run --package eryx --example with_tracing --release
+          cargo run --package eryx --example with_tracing --features embedded --release
           echo "=== error_handling ==="
-          cargo run --package eryx --example error_handling --release
+          cargo run --package eryx --example error_handling --features embedded --release
           echo "=== resource_limits ==="
-          cargo run --package eryx --example resource_limits --release
+          cargo run --package eryx --example resource_limits --features embedded --release
           echo "=== custom_library ==="
-          cargo run --package eryx --example custom_library --release
+          cargo run --package eryx --example custom_library --features embedded --release
           echo "=== session_reuse ==="
-          cargo run --package eryx --example session_reuse --release
+          cargo run --package eryx --example session_reuse --features embedded --release
           echo "=== runtime_callbacks ==="
-          cargo run --package eryx --example runtime_callbacks --release
-
-      - name: Run examples (embedded feature)
-        run: |
+          cargo run --package eryx --example runtime_callbacks --features embedded --release
           echo "=== precompile ==="
           cargo run --package eryx --example precompile --features embedded --release
           echo "=== embedded_runtime ==="
