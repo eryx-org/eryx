@@ -144,13 +144,22 @@ async fn test_instantiate_component() -> Result<(), Box<dyn std::error::Error>> 
     let component = Component::new(&engine, &component_bytes)?;
 
     // Set up paths for Python stdlib
+    // Check ERYX_PYTHON_STDLIB env var first (used in CI)
+    let stdlib_path = std::env::var("ERYX_PYTHON_STDLIB")
+        .ok()
+        .map(PathBuf::from)
+        .filter(|p| p.exists())
+        .unwrap_or_else(|| {
+            let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+            manifest_dir.join("tests/python-stdlib")
+        });
+
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let stdlib_path = manifest_dir.join("tests/python-stdlib");
     let site_packages_path = manifest_dir.join("tests/site-packages");
 
     if !stdlib_path.exists() {
         panic!(
-            "Python stdlib not found at {}. Extract python-lib.tar.zst first.",
+            "Python stdlib not found at {}. Set ERYX_PYTHON_STDLIB or extract python-lib.tar.zst first.",
             stdlib_path.display()
         );
     }
