@@ -3,20 +3,16 @@
 rust = { version = "1.92", profile = "default" }
 
 [tools."cargo:cargo-nextest"]
-version = "latest"
-binstall = true
+version = "0.9.114"
 
 [tools."cargo:wasm-tools"]
-version = "latest"
-binstall = true
+version = "1.243.0"
 
 [tools."cargo:cargo-rail"]
-version = "latest"
-binstall = true
+version = "0.8.1"
 
 [tools."cargo:cargo-all-features"]
-version = "latest"
-binstall = true
+version = "1.12.0"
 
 # Note: WASI SDK is intentionally NOT in [tools] because adding it to PATH
 # breaks host compilation (Rust picks up wasm clang for proc-macro builds).
@@ -35,12 +31,12 @@ run = "cargo build --workspace"
 
 [tasks.test]
 description = "Run tests with embedded WASM"
-depends = ["precompile-eryx-runtime"]
+depends = ["precompile-eryx-runtime", "setup-eryx-runtime-tests"]
 run = "cargo nextest run --workspace --features embedded"
 
 [tasks.test-all]
 description = "Run tests with all features"
-depends = ["precompile-eryx-runtime", "build-preinit"]
+depends = ["precompile-eryx-runtime", "build-preinit", "setup-eryx-runtime-tests"]
 run = "cargo nextest run --workspace --all-features"
 
 [tasks.lint]
@@ -99,6 +95,27 @@ run = "cargo test-all-features"
 description = "Clean build artifacts"
 run = "cargo clean"
 
+[tasks.clean-artifacts]
+description = "Clean WASM artifacts and extracted stdlibs (simulate CI fresh state)"
+run = """
+echo "Removing WASM artifacts..."
+rm -f crates/eryx-runtime/runtime.wasm
+rm -f crates/eryx-runtime/runtime.cwasm
+
+echo "Removing prebuilt artifacts..."
+rm -rf crates/eryx-runtime/prebuilt/
+
+echo "Removing extracted stdlib for eryx-wasm-runtime tests..."
+rm -rf crates/eryx-wasm-runtime/tests/python-stdlib
+rm -rf crates/eryx-wasm-runtime/tests/site-packages
+rm -f crates/eryx-wasm-runtime/target/liberyx_runtime.so
+
+echo "Removing system temp extracted resources..."
+rm -rf "${TMPDIR:-/tmp}/eryx-embedded"
+
+echo "✓ Artifacts cleaned. Run 'mise run setup' to rebuild."
+"""
+
 [tasks.build-eryx-runtime]
 description = "Build the eryx-wasm-runtime and runtime.wasm"
 depends = ["ensure-wasi-sdk"]
@@ -136,6 +153,7 @@ run = "cargo bench --package eryx --all-features -- --save-baseline main"
 [tasks.precompile-eryx-runtime]
 description = "Pre-compile eryx-runtime WASM to native code for faster loading"
 depends = ["build-eryx-runtime"]
+# Note: no --features embedded here - precompile must bootstrap without runtime.cwasm
 run = "cargo run --example precompile --release"
 sources = ["crates/eryx-runtime/runtime.wasm"]
 outputs = ["crates/eryx-runtime/runtime.cwasm"]
@@ -143,6 +161,7 @@ outputs = ["crates/eryx-runtime/runtime.cwasm"]
 [tasks.precompile-eryx-runtime-preinit]
 description = "Pre-initialize Python and pre-compile runtime (faster sessions, requires preinit)"
 depends = ["build-eryx-runtime", "build-preinit", "setup-eryx-runtime-tests"]
+# Note: no --features embedded here - precompile must bootstrap without runtime.cwasm
 run = "cargo run --example precompile --features preinit --release"
 sources = [
   "crates/eryx-runtime/runtime.wasm",
@@ -177,33 +196,39 @@ run = "cargo run --example trace_events --features embedded"
 
 [tasks.examples]
 description = "Run all examples"
-depends = ["build-eryx-runtime"]
+depends = ["precompile-eryx-runtime"]
 run = """
 echo "=== simple ==="
-cargo run --example simple --release
+cargo run --example simple --features embedded --release
 echo ""
 echo "=== parallel_callbacks ==="
-cargo run --example parallel_callbacks --release
+cargo run --example parallel_callbacks --features embedded --release
 echo ""
 echo "=== with_tracing ==="
-cargo run --example with_tracing --release
+cargo run --example with_tracing --features embedded --release
 echo ""
 echo "=== error_handling ==="
-cargo run --example error_handling --release
+cargo run --example error_handling --features embedded --release
 echo ""
 echo "=== resource_limits ==="
-cargo run --example resource_limits --release
+cargo run --example resource_limits --features embedded --release
 echo ""
 echo "=== custom_library ==="
-cargo run --example custom_library --release
+cargo run --example custom_library --features embedded --release
 echo ""
 echo "=== session_reuse ==="
-cargo run --example session_reuse --release
+cargo run --example session_reuse --features embedded --release
 echo ""
-echo "=== precompile (requires embedded feature) ==="
-cargo run --example precompile --features embedded --release
+echo "=== runtime_callbacks ==="
+cargo run --example runtime_callbacks --features embedded --release
 echo ""
-echo "=== embedded_runtime (requires embedded feature) ==="
+echo "=== trace_events ==="
+cargo run --example trace_events --features embedded --release
+echo ""
+echo "=== precompile ==="
+cargo run --example precompile --release
+echo ""
+echo "=== embedded_runtime ==="
 cargo run --example embedded_runtime --features embedded --release
 echo ""
 echo "✓ All examples completed!"
@@ -227,20 +252,42 @@ echo "Using WASI SDK at: $WASI_SDK_PATH"
 """
 
 [tasks.setup-eryx-runtime-tests]
-description = "Extract Python stdlib for eryx-wasm-runtime tests"
+description = "Extract Python stdlib and copy liberyx_runtime.so for eryx-wasm-runtime tests"
+depends = ["build-eryx-runtime"]
 dir = "crates/eryx-wasm-runtime"
 run = """
-mkdir -p tests/python-stdlib tests/site-packages
+mkdir -p tests/python-stdlib tests/site-packages target
+
+# Extract Python stdlib
 PYTHON_LIB="../eryx/python-stdlib.tar.zst"
 if [[ ! -f "$PYTHON_LIB" ]]; then
     echo "Error: python-stdlib.tar.zst not found at $PYTHON_LIB"
     exit 1
 fi
 echo "Extracting $PYTHON_LIB"
-tar -xf "$PYTHON_LIB" -C tests/python-stdlib
+# Extract to a temp location first, then move contents (archive has python-stdlib/ prefix)
+rm -rf tests/python-stdlib-tmp
+mkdir -p tests/python-stdlib-tmp
+tar -xf "$PYTHON_LIB" -C tests/python-stdlib-tmp
+# Move contents from nested directory to final location
+rm -rf tests/python-stdlib
+mv tests/python-stdlib-tmp/python-stdlib tests/python-stdlib
+rm -rf tests/python-stdlib-tmp
+
+# Copy liberyx_runtime.so from build output (skip if already exists, e.g. in CI)
+if [[ -f "target/liberyx_runtime.so" ]]; then
+    echo "liberyx_runtime.so already exists in target/, skipping copy"
+else
+    # Search in both release and debug build directories
+    OUT_DIR=$(find ../../target -path "*/eryx-runtime-*/out/liberyx_runtime.so" -type f 2>/dev/null | head -1)
+    if [[ -z "$OUT_DIR" ]]; then
+        echo "Error: liberyx_runtime.so not found in target. Run 'mise run build-eryx-runtime' first."
+        exit 1
+    fi
+    echo "Copying $OUT_DIR to target/"
+    cp "$OUT_DIR" target/liberyx_runtime.so
+fi
 """
-sources = ["../eryx/python-stdlib.tar.zst"]
-outputs = ["tests/python-stdlib/encodings/__init__.py"]
 
 [tasks.test-eryx-runtime]
 description = "Run eryx-wasm-runtime integration tests"

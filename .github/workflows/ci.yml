@@ -23,12 +23,31 @@ jobs:
       - name: Check dependency unification
         run: cargo rail unify --check
 
-  # Test base functionality without any features (runs parallel to build-eryx-runtime)
+  # Test base functionality without any features (needs runtime.wasm for sandbox tests)
   test-base:
     name: Test (no features)
     runs-on: namespace-profile-eryx-light
+    needs: build-eryx-runtime
     steps:
       - uses: namespacelabs/nscloud-checkout-action@v8
+
+      - name: Download WASM artifacts
+        uses: namespace-actions/download-artifact@v1
+        with:
+          name: wasm-runtime
+          path: crates/
+
+      - name: Mark WASM as up-to-date
+        run: touch crates/eryx-runtime/runtime.wasm crates/eryx-runtime/runtime.cwasm
+
+      - name: Extract Python stdlib
+        run: |
+          # Archive has python-stdlib/ prefix, so extract to temp then move contents
+          mkdir -p python-stdlib-tmp
+          tar -xf crates/eryx/python-stdlib.tar.zst -C python-stdlib-tmp
+          mv python-stdlib-tmp/python-stdlib python-stdlib
+          rm -rf python-stdlib-tmp
+          echo "ERYX_PYTHON_STDLIB=$PWD/python-stdlib" >> $GITHUB_ENV
 
       - name: Configure Rust cache
         uses: namespacelabs/nscloud-cache-action@v1
@@ -65,8 +84,8 @@ jobs:
 
       - name: Copy prebuilt late-linking artifacts
         run: |
-          # Find the OUT_DIR with the compressed artifacts from the build
-          OUT_DIR=$(find target -path "*/eryx-runtime-*/out" -type d | head -1)
+          # Find the OUT_DIR with the compressed artifacts from the release build
+          OUT_DIR=$(find target/release -path "*/eryx-runtime-*/out" -type d | head -1)
           echo "Found OUT_DIR: $OUT_DIR"
           mkdir -p crates/eryx-runtime/prebuilt
           cp "$OUT_DIR/liberyx_runtime.so.zst" crates/eryx-runtime/prebuilt/
@@ -75,8 +94,8 @@ jobs:
 
       - name: Copy eryx-wasm-runtime test artifacts
         run: |
-          # Copy liberyx_runtime.so for eryx-wasm-runtime tests
-          OUT_DIR=$(find target -path "*/eryx-runtime-*/out" -type d | head -1)
+          # Copy liberyx_runtime.so for eryx-wasm-runtime tests (from release build)
+          OUT_DIR=$(find target/release -path "*/eryx-runtime-*/out" -type d | head -1)
           mkdir -p crates/eryx-wasm-runtime/target
           cp "$OUT_DIR/liberyx_runtime.so" crates/eryx-wasm-runtime/target/
           ls -la crates/eryx-wasm-runtime/target/
@@ -313,27 +332,24 @@ jobs:
 
       - uses: ./.github/actions/setup-rust
 
-      - name: Run examples (no features required)
+      - name: Run examples
         run: |
           echo "=== simple ==="
-          cargo run --package eryx --example simple --release
+          cargo run --package eryx --example simple --features embedded --release
           echo "=== parallel_callbacks ==="
-          cargo run --package eryx --example parallel_callbacks --release
+          cargo run --package eryx --example parallel_callbacks --features embedded --release
           echo "=== with_tracing ==="
-          cargo run --package eryx --example with_tracing --release
+          cargo run --package eryx --example with_tracing --features embedded --release
           echo "=== error_handling ==="
-          cargo run --package eryx --example error_handling --release
+          cargo run --package eryx --example error_handling --features embedded --release
           echo "=== resource_limits ==="
-          cargo run --package eryx --example resource_limits --release
+          cargo run --package eryx --example resource_limits --features embedded --release
           echo "=== custom_library ==="
-          cargo run --package eryx --example custom_library --release
+          cargo run --package eryx --example custom_library --features embedded --release
           echo "=== session_reuse ==="
-          cargo run --package eryx --example session_reuse --release
+          cargo run --package eryx --example session_reuse --features embedded --release
           echo "=== runtime_callbacks ==="
-          cargo run --package eryx --example runtime_callbacks --release
-
-      - name: Run examples (embedded feature)
-        run: |
+          cargo run --package eryx --example runtime_callbacks --features embedded --release
           echo "=== precompile ==="
           cargo run --package eryx --example precompile --features embedded --release
           echo "=== embedded_runtime ==="

@@ -69,15 +69,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
 
-    // Get Python stdlib path (needed for core Python modules like encodings)
-    let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap_or_else(|_| ".".to_string());
-    let python_stdlib = std::path::PathBuf::from(&manifest_dir)
-        .parent()
-        .ok_or("Cannot find parent directory")?
-        .join("eryx-wasm-runtime")
-        .join("tests")
-        .join("python-stdlib");
-
     // Site packages directory (contains numpy Python files)
     let site_packages = numpy_dir
         .parent()
@@ -104,16 +95,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("\n--- First sandbox (cache miss) ---\n");
     let start = Instant::now();
 
-    let mut builder = Sandbox::builder();
+    // Use embedded() for runtime+stdlib, late-linking overrides when extensions present
+    let mut builder = Sandbox::embedded();
     for (name, bytes) in &extensions {
         builder = builder.with_native_extension(name.clone(), bytes.clone());
     }
-    builder = builder
-        .with_python_stdlib(&python_stdlib)
+    let sandbox1 = builder
         .with_site_packages(site_packages)
-        .with_cache_dir(cache_dir)?;
-
-    let sandbox1 = builder.build()?;
+        .with_cache_dir(cache_dir)?
+        .build()?;
     let cold_time = start.elapsed();
     println!(
         "  Created in {:?} (cache miss - linked + compiled + cached)",
@@ -130,16 +120,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("\n--- Second sandbox (cache hit) ---\n");
     let start = Instant::now();
 
-    let mut builder = Sandbox::builder();
+    let mut builder = Sandbox::embedded();
     for (name, bytes) in &extensions {
         builder = builder.with_native_extension(name.clone(), bytes.clone());
     }
-    builder = builder
-        .with_python_stdlib(&python_stdlib)
+    let sandbox2 = builder
         .with_site_packages(site_packages)
-        .with_cache_dir(cache_dir)?;
-
-    let sandbox2 = builder.build()?;
+        .with_cache_dir(cache_dir)?
+        .build()?;
     let warm_time = start.elapsed();
     println!(
         "  Created in {:?} (cache hit - loaded precompiled)",
@@ -156,16 +144,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("\n--- Third sandbox (cache hit) ---\n");
     let start = Instant::now();
 
-    let mut builder = Sandbox::builder();
+    let mut builder = Sandbox::embedded();
     for (name, bytes) in &extensions {
         builder = builder.with_native_extension(name.clone(), bytes.clone());
     }
-    builder = builder
-        .with_python_stdlib(&python_stdlib)
+    let sandbox3 = builder
         .with_site_packages(site_packages)
-        .with_cache_dir(cache_dir)?;
-
-    let sandbox3 = builder.build()?;
+        .with_cache_dir(cache_dir)?
+        .build()?;
     let warm_time2 = start.elapsed();
     println!("  Created in {:?} (cache hit)", warm_time2);
 

@@ -121,7 +121,7 @@ impl TypedCallback for WorkCallback {
 // ============================================================================
 
 fn create_sandbox() -> Sandbox {
-    Sandbox::builder()
+    Sandbox::embedded()
         .with_callback(NoopCallback)
         .with_callback(EchoCallback)
         .with_callback(WorkCallback)

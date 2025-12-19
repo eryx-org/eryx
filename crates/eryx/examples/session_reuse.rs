@@ -23,15 +23,11 @@ use eryx::{
 async fn main() -> anyhow::Result<()> {
     println!("=== Session Reuse Examples ===\n");
 
-    // Build the sandbox once - all sessions will share it
-    let sandbox = Sandbox::builder()
-        .with_wasm_file("crates/eryx-runtime/runtime.wasm")
-        .build()?;
+    // Build the sandbox once using embedded runtime - all sessions will share it
+    let sandbox = Sandbox::embedded().build()?;
 
     // Also create a PythonExecutor for SessionExecutor demo
-    let executor = Arc::new(PythonExecutor::from_file(
-        "crates/eryx-runtime/runtime.wasm",
-    )?);
+    let executor = Arc::new(PythonExecutor::from_embedded_runtime()?);
 
     // Run each demo
     demo_session_executor(&executor).await?;

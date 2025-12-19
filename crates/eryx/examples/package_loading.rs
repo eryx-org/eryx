@@ -44,8 +44,9 @@ async fn main() -> anyhow::Result<()> {
     println!("--- Loading numpy from tar.gz ---\n");
 
     // No need to specify cache_dir - it's automatic!
+    // Use embedded() for runtime+stdlib, late-linking overrides when package has .so files
     let start = Instant::now();
-    let sandbox = eryx::Sandbox::builder()
+    let sandbox = eryx::Sandbox::embedded()
         .with_package(numpy_tarball)?
         .build()?;
 
@@ -83,7 +84,7 @@ print("\nNumpy loaded via with_package()!")
     println!("--- Second sandbox (cache hit) ---\n");
 
     let start = Instant::now();
-    let sandbox2 = eryx::Sandbox::builder()
+    let sandbox2 = eryx::Sandbox::embedded()
         .with_package(numpy_tarball)?
         .build()?;
 

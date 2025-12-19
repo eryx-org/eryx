@@ -40,11 +40,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
 
-    let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap_or_else(|_| ".".to_string());
-    let python_stdlib = std::path::PathBuf::from(&manifest_dir)
-        .parent()
-        .ok_or("no parent")?
-        .join("eryx-wasm-runtime/tests/python-stdlib");
     let site_packages = numpy_dir.parent().ok_or("no parent")?;
 
     // Use cache directory for mmap-based loading (faster + less memory)
@@ -61,12 +56,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Create sandbox using cache_dir (handles linking, pre-init, precompile, and mmap)
     println!("Creating sandbox (cold - linking + compiling + caching)...");
     let start = Instant::now();
-    let mut builder = Sandbox::builder();
+    // Start with embedded() which provides runtime+stdlib, then late-linking
+    // overrides the runtime when native extensions are added
+    let mut builder = Sandbox::embedded();
     for (name, bytes) in &extensions {
         builder = builder.with_native_extension(name.clone(), bytes.clone());
     }
     let sandbox = builder
-        .with_python_stdlib(&python_stdlib)
         .with_site_packages(site_packages)
         .with_cache_dir(cache_dir)?
         .build()?;
@@ -123,12 +119,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut times = vec![];
     for i in 0..5 {
         let start = Instant::now();
-        let mut builder = Sandbox::builder();
+        let mut builder = Sandbox::embedded();
         for (name, bytes) in &extensions {
             builder = builder.with_native_extension(name.clone(), bytes.clone());
         }
         let _sandbox = builder
-            .with_python_stdlib(&python_stdlib)
             .with_site_packages(site_packages)
             .with_cache_dir(cache_dir)?
             .build()?;

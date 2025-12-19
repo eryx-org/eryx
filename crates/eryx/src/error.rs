@@ -37,6 +37,16 @@ pub enum Error {
     #[error("serialization error: {0}")]
     Serialization(String),
 
+    /// Python stdlib not found during auto-detection.
+    ///
+    /// Use [`SandboxBuilder::with_python_stdlib()`](crate::SandboxBuilder::with_python_stdlib)
+    /// to specify the stdlib path explicitly, or enable the `embedded` feature and use
+    /// [`Sandbox::embedded()`](crate::Sandbox::embedded).
+    #[error(
+        "Python stdlib not found. Set ERYX_PYTHON_STDLIB, use with_python_stdlib(), or use Sandbox::embedded()"
+    )]
+    MissingPythonStdlib,
+
     /// State snapshot error.
     #[error("snapshot error: {0}")]
     Snapshot(String),

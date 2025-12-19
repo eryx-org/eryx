@@ -74,6 +74,15 @@ fn runtime_wasm_path() -> PathBuf {
 
 #[cfg(not(feature = "embedded"))]
 fn python_stdlib_path() -> PathBuf {
+    // Check ERYX_PYTHON_STDLIB env var first (used in CI)
+    if let Ok(path) = std::env::var("ERYX_PYTHON_STDLIB") {
+        let path = PathBuf::from(path);
+        if path.exists() {
+            return path;
+        }
+    }
+
+    // Fall back to relative path from crate directory
     let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap_or_else(|_| ".".to_string());
     PathBuf::from(manifest_dir)
         .parent()

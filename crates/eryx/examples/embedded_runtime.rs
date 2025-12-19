@@ -16,11 +16,11 @@ use std::time::Instant;
 fn main() -> anyhow::Result<()> {
     println!("=== Embedded Runtime Example ===\n");
 
-    // Step 1: Create sandbox - embedded runtime is used automatically!
-    println!("--- Creating sandbox (embedded runtime is automatic) ---");
+    // Step 1: Create sandbox using Sandbox::embedded() for zero-config setup
+    println!("--- Creating sandbox with Sandbox::embedded() ---");
     let start = Instant::now();
-    // No need to call with_embedded_runtime() - it's the default when the feature is enabled
-    let sandbox = eryx::Sandbox::builder().build()?;
+    // Sandbox::embedded() provides both runtime and stdlib automatically
+    let sandbox = eryx::Sandbox::embedded().build()?;
     let load_time = start.elapsed();
     println!("Sandbox creation time: {load_time:?}");
 
@@ -28,7 +28,7 @@ fn main() -> anyhow::Result<()> {
     println!("\n--- Multiple sandbox creations (10x) ---");
     let start = Instant::now();
     for _ in 0..10 {
-        let _sandbox = eryx::Sandbox::builder().build()?;
+        let _sandbox = eryx::Sandbox::embedded().build()?;
     }
     let total_time = start.elapsed();
     let avg_time = total_time / 10;

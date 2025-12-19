@@ -613,25 +613,29 @@ impl PythonExecutor {
     pub fn from_embedded_runtime() -> std::result::Result<Self, Error> {
         let cache_key = CacheKey::embedded_runtime();
 
+        // Get embedded resources (extracts stdlib on first call)
+        let resources = crate::embedded::EmbeddedResources::get()?;
+        let stdlib_path = Some(resources.stdlib_path.clone());
+
         // Check InstancePreCache first (fast path)
         if let Some(instance_pre) = InstancePreCache::global().get(&cache_key) {
             return Ok(Self {
                 engine: Self::shared_engine()?,
                 instance_pre,
-                python_stdlib_path: None,
+                python_stdlib_path: stdlib_path,
                 python_site_packages_paths: Vec::new(),
             });
         }
 
         // Cache miss - load from embedded resources
-        let resources = crate::embedded::EmbeddedResources::get()?;
-
         // SAFETY: The embedded runtime was pre-compiled at build time from our own
         // trusted runtime.wasm, so we know it's safe to deserialize.
         #[allow(unsafe_code)]
-        unsafe {
-            Self::from_precompiled_file_with_key(resources.runtime(), cache_key)
-        }
+        let mut executor =
+            unsafe { Self::from_precompiled_file_with_key(resources.runtime(), cache_key)? };
+
+        executor.python_stdlib_path = stdlib_path;
+        Ok(executor)
     }
 
     /// Create a new executor from a cached `SandboxPre`.

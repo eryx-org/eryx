@@ -119,12 +119,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 async fn run_base_benchmark() -> Result<(), Box<dyn std::error::Error>> {
     println!("Mode: Base runtime (no numpy)\n");
 
-    let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap_or_else(|_| ".".to_string());
-    let python_stdlib = std::path::PathBuf::from(&manifest_dir)
-        .parent()
-        .ok_or("no parent")?
-        .join("eryx-wasm-runtime/tests/python-stdlib");
-
     let baseline = MemorySnapshot::now();
     println!("Baseline:");
     println!("  RSS: {:.1} MB", baseline.rss_mb);
@@ -144,10 +138,7 @@ async fn run_base_benchmark() -> Result<(), Box<dyn std::error::Error>> {
     for &target in &sandbox_counts {
         let start = Instant::now();
         while sandboxes.len() < target {
-            let sandbox = Sandbox::builder()
-                .with_embedded_runtime()
-                .with_python_stdlib(&python_stdlib)
-                .build()?;
+            let sandbox = Sandbox::embedded().build()?;
             sandboxes.push(sandbox);
         }
         let elapsed = start.elapsed();

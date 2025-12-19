@@ -85,16 +85,9 @@ impl TypedCallback for Echo {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    // Path to the WASM runtime component
-    let wasm_path = std::env::var("ERYX_WASM_PATH")
-        .unwrap_or_else(|_| "crates/eryx-runtime/runtime.wasm".to_string());
-
-    println!("Loading WASM component from: {wasm_path}");
-
-    // Build the sandbox with callbacks
+    // Build the sandbox with callbacks using the embedded runtime
     // Both GetTime and Echo implement Callback via the TypedCallback blanket impl
-    let sandbox = Sandbox::builder()
-        .with_wasm_file(&wasm_path)
+    let sandbox = Sandbox::embedded()
         .with_callback(GetTime)
         .with_callback(Echo)
         .build()?;

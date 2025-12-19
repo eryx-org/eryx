@@ -23,7 +23,8 @@ use eryx::Sandbox;
 
 #[tokio::main]
 async fn main() -> Result<(), eryx::Error> {
-    let sandbox = Sandbox::builder().build()?;
+    // Sandbox::embedded() provides zero-config setup (requires `embedded` feature)
+    let sandbox = Sandbox::embedded().build()?;
 
     let result = sandbox.execute(r#"
         print("Hello from Python!")
@@ -89,7 +90,7 @@ impl TypedCallback for GetTime {
 
 #[tokio::main]
 async fn main() -> Result<(), eryx::Error> {
-    let sandbox = Sandbox::builder()
+    let sandbox = Sandbox::embedded()
         .with_callback(GetTime)
         .with_callback(Echo)
         .build()?;
@@ -120,7 +121,7 @@ use eryx::{Sandbox, session::InProcessSession};
 
 #[tokio::main]
 async fn main() -> Result<(), eryx::Error> {
-    let sandbox = Sandbox::builder().build()?;
+    let sandbox = Sandbox::embedded().build()?;
     let mut session = InProcessSession::new(&sandbox).await?;
 
     // First execution defines a variable
@@ -162,7 +163,7 @@ The `preinit` feature provides ~25x faster sandbox creation by capturing Python'
 ```rust
 // Fastest startup, zero configuration (recommended for most users)
 // Features: embedded
-let sandbox = Sandbox::builder().build()?;
+let sandbox = Sandbox::embedded().build()?;
 
 // With pre-initialization for faster sandbox creation
 // Features: embedded, preinit
@@ -173,13 +174,13 @@ let preinit_bytes = eryx::preinit::pre_initialize(
 
 // With package support for third-party libraries
 // Features: embedded (packages always available)
-let sandbox = Sandbox::builder()
+let sandbox = Sandbox::embedded()
     .with_package("requests-2.31.0-py3-none-any.whl")?
     .build()?;
 
 // With native extensions (numpy, etc.)
 // Features: embedded, native-extensions
-let sandbox = Sandbox::builder()
+let sandbox = Sandbox::embedded()
     .with_package("numpy-wasi.tar.gz")?
     .build()?;
 ```
@@ -249,17 +250,19 @@ cargo bench --package eryx                       # Run benchmarks
 
 ## Examples
 
+All examples require the `embedded` feature:
+
 ```bash
-cargo run --example simple              # Basic usage with TypedCallback
-cargo run --example runtime_callbacks   # Runtime-defined callbacks (DynamicCallback)
-cargo run --example with_tracing        # Execution tracing and output handling
-cargo run --example error_handling      # Error handling scenarios
-cargo run --example parallel_callbacks  # Parallel execution verification
-cargo run --example custom_library      # Using RuntimeLibrary
-cargo run --example session_reuse       # Session state persistence
-cargo run --example resource_limits     # ResourceLimits usage
-cargo run --example precompile --features embedded         # Pre-compilation demo
-cargo run --example embedded_runtime --features embedded   # Embedded runtime
+cargo run --example simple --features embedded              # Basic usage with TypedCallback
+cargo run --example runtime_callbacks --features embedded   # Runtime-defined callbacks (DynamicCallback)
+cargo run --example with_tracing --features embedded        # Execution tracing and output handling
+cargo run --example error_handling --features embedded      # Error handling scenarios
+cargo run --example parallel_callbacks --features embedded  # Parallel execution verification
+cargo run --example custom_library --features embedded      # Using RuntimeLibrary
+cargo run --example session_reuse --features embedded       # Session state persistence
+cargo run --example resource_limits --features embedded     # ResourceLimits usage
+cargo run --example precompile --features embedded          # Pre-compilation demo
+cargo run --example embedded_runtime --features embedded    # Embedded runtime
 ```
 
 ## Project Structure
