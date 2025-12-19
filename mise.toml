@@ -219,6 +219,12 @@ echo ""
 echo "=== session_reuse ==="
 cargo run --example session_reuse --features embedded --release
 echo ""
+echo "=== runtime_callbacks ==="
+cargo run --example runtime_callbacks --features embedded --release
+echo ""
+echo "=== trace_events ==="
+cargo run --example trace_events --features embedded --release
+echo ""
 echo "=== precompile ==="
 cargo run --example precompile --release
 echo ""

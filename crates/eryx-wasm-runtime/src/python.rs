@@ -1521,11 +1521,11 @@ import _eryx_async
 _eryx_callbacks_json = '''{}'''
 _eryx_callbacks = _json.loads(_eryx_callbacks_json)
 
-async def invoke(name, **kwargs):
+async def invoke(_callback_name, **kwargs):
     """Invoke a host callback by name with keyword arguments (async).
 
     Args:
-        name: Name of the callback (e.g., "sleep", "http.get")
+        _callback_name: Name of the callback (e.g., "sleep", "http.get")
         **kwargs: Arguments to pass to the callback
 
     Returns:
@@ -1539,19 +1539,19 @@ async def invoke(name, **kwargs):
     args_json = _json.dumps(kwargs)
 
     # Report callback start trace event
-    _eryx._eryx_report_trace(0, _json.dumps({{"type": "callback_start", "name": name}}), args_json)
+    _eryx._eryx_report_trace(0, _json.dumps({{"type": "callback_start", "name": _callback_name}}), args_json)
 
     try:
         # Use _eryx_async.await_invoke for proper async handling
-        result_json = await _eryx_async.await_invoke(name, args_json)
+        result_json = await _eryx_async.await_invoke(_callback_name, args_json)
         # Report callback end trace event
-        _eryx._eryx_report_trace(0, _json.dumps({{"type": "callback_end", "name": name}}), "")
+        _eryx._eryx_report_trace(0, _json.dumps({{"type": "callback_end", "name": _callback_name}}), "")
         if result_json:
             return _json.loads(result_json)
         return None
     except Exception as e:
         # Report callback error trace event
-        _eryx._eryx_report_trace(0, _json.dumps({{"type": "callback_end", "name": name, "error": str(e)}}), "")
+        _eryx._eryx_report_trace(0, _json.dumps({{"type": "callback_end", "name": _callback_name, "error": str(e)}}), "")
         raise
 
 def list_callbacks():
@@ -1577,12 +1577,12 @@ _eryx_reserved = set(dir(__builtins__)) | {{
 }}
 
 # Helper to create async callback wrappers
-def _eryx_make_callback(name):
+def _eryx_make_callback(_cb_name):
     async def callback(**kwargs):
         # invoke() is now async, so await it
-        return await invoke(name, **kwargs)
-    callback.__name__ = name
-    callback.__doc__ = f"Invoke the '{{name}}' callback (async)."
+        return await invoke(_cb_name, **kwargs)
+    callback.__name__ = _cb_name
+    callback.__doc__ = f"Invoke the '{{_cb_name}}' callback (async)."
     return callback
 
 # Namespace class for dotted callbacks like http.get
