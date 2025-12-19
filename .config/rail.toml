@@ -21,6 +21,7 @@ msrv_source = "workspace"  # use rust-version from workspace Cargo.toml
 
 detect_unused = true
 remove_unused = true
+sort_dependencies = false
 
 prune_dead_features = true
 preserve_features = []
