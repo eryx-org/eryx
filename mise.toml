@@ -4,19 +4,15 @@ rust = { version = "1.92", profile = "default" }
 
 [tools."cargo:cargo-nextest"]
 version = "0.9.114"
-binstall = true
 
 [tools."cargo:wasm-tools"]
 version = "1.243.0"
-binstall = true
 
 [tools."cargo:cargo-rail"]
 version = "0.8.1"
-binstall = true
 
 [tools."cargo:cargo-all-features"]
-version = "0.1.11"
-binstall = true
+version = "1.12.0"
 
 # Note: WASI SDK is intentionally NOT in [tools] because adding it to PATH
 # breaks host compilation (Rust picks up wasm clang for proc-macro builds).
