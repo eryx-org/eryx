@@ -268,14 +268,19 @@ rm -rf tests/python-stdlib
 mv tests/python-stdlib-tmp/python-stdlib tests/python-stdlib
 rm -rf tests/python-stdlib-tmp
 
-# Copy liberyx_runtime.so from build output
-OUT_DIR=$(find ../../target -path "*/eryx-runtime-*/out/liberyx_runtime.so" -type f 2>/dev/null | head -1)
-if [[ -z "$OUT_DIR" ]]; then
-    echo "Error: liberyx_runtime.so not found in target. Run 'mise run build-eryx-runtime' first."
-    exit 1
+# Copy liberyx_runtime.so from build output (skip if already exists, e.g. in CI)
+if [[ -f "target/liberyx_runtime.so" ]]; then
+    echo "liberyx_runtime.so already exists in target/, skipping copy"
+else
+    # Search in both release and debug build directories
+    OUT_DIR=$(find ../../target -path "*/eryx-runtime-*/out/liberyx_runtime.so" -type f 2>/dev/null | head -1)
+    if [[ -z "$OUT_DIR" ]]; then
+        echo "Error: liberyx_runtime.so not found in target. Run 'mise run build-eryx-runtime' first."
+        exit 1
+    fi
+    echo "Copying $OUT_DIR to target/"
+    cp "$OUT_DIR" target/liberyx_runtime.so
 fi
-echo "Copying $OUT_DIR to target/"
-cp "$OUT_DIR" target/liberyx_runtime.so
 """
 
 [tasks.test-eryx-runtime]

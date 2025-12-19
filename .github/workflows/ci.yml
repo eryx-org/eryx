@@ -84,8 +84,8 @@ jobs:
 
       - name: Copy prebuilt late-linking artifacts
         run: |
-          # Find the OUT_DIR with the compressed artifacts from the build
-          OUT_DIR=$(find target -path "*/eryx-runtime-*/out" -type d | head -1)
+          # Find the OUT_DIR with the compressed artifacts from the release build
+          OUT_DIR=$(find target/release -path "*/eryx-runtime-*/out" -type d | head -1)
           echo "Found OUT_DIR: $OUT_DIR"
           mkdir -p crates/eryx-runtime/prebuilt
           cp "$OUT_DIR/liberyx_runtime.so.zst" crates/eryx-runtime/prebuilt/
@@ -94,8 +94,8 @@ jobs:
 
       - name: Copy eryx-wasm-runtime test artifacts
         run: |
-          # Copy liberyx_runtime.so for eryx-wasm-runtime tests
-          OUT_DIR=$(find target -path "*/eryx-runtime-*/out" -type d | head -1)
+          # Copy liberyx_runtime.so for eryx-wasm-runtime tests (from release build)
+          OUT_DIR=$(find target/release -path "*/eryx-runtime-*/out" -type d | head -1)
           mkdir -p crates/eryx-wasm-runtime/target
           cp "$OUT_DIR/liberyx_runtime.so" crates/eryx-wasm-runtime/target/
           ls -la crates/eryx-wasm-runtime/target/
