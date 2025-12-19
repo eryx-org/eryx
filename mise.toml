@@ -31,12 +31,12 @@ run = "cargo build --workspace"
 
 [tasks.test]
 description = "Run tests with embedded WASM"
-depends = ["precompile-eryx-runtime"]
+depends = ["precompile-eryx-runtime", "setup-eryx-runtime-tests"]
 run = "cargo nextest run --workspace --features embedded"
 
 [tasks.test-all]
 description = "Run tests with all features"
-depends = ["precompile-eryx-runtime", "build-preinit"]
+depends = ["precompile-eryx-runtime", "build-preinit", "setup-eryx-runtime-tests"]
 run = "cargo nextest run --workspace --all-features"
 
 [tasks.lint]
@@ -94,6 +94,27 @@ run = "cargo test-all-features"
 [tasks.clean]
 description = "Clean build artifacts"
 run = "cargo clean"
+
+[tasks.clean-artifacts]
+description = "Clean WASM artifacts and extracted stdlibs (simulate CI fresh state)"
+run = """
+echo "Removing WASM artifacts..."
+rm -f crates/eryx-runtime/runtime.wasm
+rm -f crates/eryx-runtime/runtime.cwasm
+
+echo "Removing prebuilt artifacts..."
+rm -rf crates/eryx-runtime/prebuilt/
+
+echo "Removing extracted stdlib for eryx-wasm-runtime tests..."
+rm -rf crates/eryx-wasm-runtime/tests/python-stdlib
+rm -rf crates/eryx-wasm-runtime/tests/site-packages
+rm -f crates/eryx-wasm-runtime/target/liberyx_runtime.so
+
+echo "Removing system temp extracted resources..."
+rm -rf "${TMPDIR:-/tmp}/eryx-embedded"
+
+echo "✓ Artifacts cleaned. Run 'mise run setup' to rebuild."
+"""
 
 [tasks.build-eryx-runtime]
 description = "Build the eryx-wasm-runtime and runtime.wasm"
@@ -225,20 +246,37 @@ echo "Using WASI SDK at: $WASI_SDK_PATH"
 """
 
 [tasks.setup-eryx-runtime-tests]
-description = "Extract Python stdlib for eryx-wasm-runtime tests"
+description = "Extract Python stdlib and copy liberyx_runtime.so for eryx-wasm-runtime tests"
+depends = ["build-eryx-runtime"]
 dir = "crates/eryx-wasm-runtime"
 run = """
-mkdir -p tests/python-stdlib tests/site-packages
+mkdir -p tests/python-stdlib tests/site-packages target
+
+# Extract Python stdlib
 PYTHON_LIB="../eryx/python-stdlib.tar.zst"
 if [[ ! -f "$PYTHON_LIB" ]]; then
     echo "Error: python-stdlib.tar.zst not found at $PYTHON_LIB"
     exit 1
 fi
 echo "Extracting $PYTHON_LIB"
-tar -xf "$PYTHON_LIB" -C tests/python-stdlib
+# Extract to a temp location first, then move contents (archive has python-stdlib/ prefix)
+rm -rf tests/python-stdlib-tmp
+mkdir -p tests/python-stdlib-tmp
+tar -xf "$PYTHON_LIB" -C tests/python-stdlib-tmp
+# Move contents from nested directory to final location
+rm -rf tests/python-stdlib
+mv tests/python-stdlib-tmp/python-stdlib tests/python-stdlib
+rm -rf tests/python-stdlib-tmp
+
+# Copy liberyx_runtime.so from build output
+OUT_DIR=$(find ../../target -path "*/eryx-runtime-*/out/liberyx_runtime.so" -type f 2>/dev/null | head -1)
+if [[ -z "$OUT_DIR" ]]; then
+    echo "Error: liberyx_runtime.so not found in target. Run 'mise run build-eryx-runtime' first."
+    exit 1
+fi
+echo "Copying $OUT_DIR to target/"
+cp "$OUT_DIR" target/liberyx_runtime.so
 """
-sources = ["../eryx/python-stdlib.tar.zst"]
-outputs = ["tests/python-stdlib/encodings/__init__.py"]
 
 [tasks.test-eryx-runtime]
 description = "Run eryx-wasm-runtime integration tests"
