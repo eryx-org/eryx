@@ -196,33 +196,33 @@ run = "cargo run --example trace_events --features embedded"
 
 [tasks.examples]
 description = "Run all examples"
-depends = ["build-eryx-runtime"]
+depends = ["precompile-eryx-runtime"]
 run = """
 echo "=== simple ==="
-cargo run --example simple --release
+cargo run --example simple --features embedded --release
 echo ""
 echo "=== parallel_callbacks ==="
-cargo run --example parallel_callbacks --release
+cargo run --example parallel_callbacks --features embedded --release
 echo ""
 echo "=== with_tracing ==="
-cargo run --example with_tracing --release
+cargo run --example with_tracing --features embedded --release
 echo ""
 echo "=== error_handling ==="
-cargo run --example error_handling --release
+cargo run --example error_handling --features embedded --release
 echo ""
 echo "=== resource_limits ==="
-cargo run --example resource_limits --release
+cargo run --example resource_limits --features embedded --release
 echo ""
 echo "=== custom_library ==="
-cargo run --example custom_library --release
+cargo run --example custom_library --features embedded --release
 echo ""
 echo "=== session_reuse ==="
-cargo run --example session_reuse --release
+cargo run --example session_reuse --features embedded --release
 echo ""
-echo "=== precompile (requires embedded feature) ==="
-cargo run --example precompile --features embedded --release
+echo "=== precompile ==="
+cargo run --example precompile --release
 echo ""
-echo "=== embedded_runtime (requires embedded feature) ==="
+echo "=== embedded_runtime ==="
 cargo run --example embedded_runtime --features embedded --release
 echo ""
 echo "✓ All examples completed!"
