@@ -23,12 +23,22 @@ jobs:
       - name: Check dependency unification
         run: cargo rail unify --check
 
-  # Test base functionality without any features (runs parallel to build-eryx-runtime)
+  # Test base functionality without any features (needs runtime.wasm for sandbox tests)
   test-base:
     name: Test (no features)
     runs-on: namespace-profile-eryx-light
+    needs: build-eryx-runtime
     steps:
       - uses: namespacelabs/nscloud-checkout-action@v8
+
+      - name: Download WASM artifacts
+        uses: namespace-actions/download-artifact@v1
+        with:
+          name: wasm-runtime
+          path: crates/
+
+      - name: Mark WASM as up-to-date
+        run: touch crates/eryx-runtime/runtime.wasm crates/eryx-runtime/runtime.cwasm
 
       - name: Configure Rust cache
         uses: namespacelabs/nscloud-cache-action@v1
