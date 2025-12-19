@@ -40,6 +40,12 @@ jobs:
       - name: Mark WASM as up-to-date
         run: touch crates/eryx-runtime/runtime.wasm crates/eryx-runtime/runtime.cwasm
 
+      - name: Extract Python stdlib
+        run: |
+          mkdir -p python-stdlib
+          tar -xf crates/eryx/python-stdlib.tar.zst -C .
+          echo "ERYX_PYTHON_STDLIB=$PWD/python-stdlib" >> $GITHUB_ENV
+
       - name: Configure Rust cache
         uses: namespacelabs/nscloud-cache-action@v1
         with:
