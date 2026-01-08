@@ -45,7 +45,7 @@ jobs:
         run: rustup toolchain install nightly --component rust-src
 
       - name: Install mise
-        uses: jdx/mise-action@v2
+        uses: jdx/mise-action@v3
 
       - name: Cache Rust
         uses: Swatinem/rust-cache@v2
@@ -54,7 +54,9 @@ jobs:
         run: mise run build-eryx-runtime
 
       - name: Precompile WASM
-        run: mise run precompile-eryx-runtime
+        # Use -p eryx to avoid building eryx-python (circular dependency:
+        # eryx-python enables 'embedded' which requires runtime.cwasm to exist)
+        run: cargo run -p eryx --example precompile --release
 
       - name: Copy prebuilt late-linking artifacts
         run: |
