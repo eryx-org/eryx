@@ -74,7 +74,7 @@ required-features = ["native-extensions", "embedded"]
 
 [[example]]
 name = "numpy_preinit"
-required-features = ["native-extensions", "embedded"]
+required-features = ["native-extensions", "embedded", "preinit"]
 
 [[example]]
 name = "session_bench"
@@ -82,6 +82,10 @@ required-features = ["native-extensions", "embedded"]
 
 [[example]]
 name = "package_loading"
+required-features = ["native-extensions", "embedded"]
+
+[[example]]
+name = "jinja2_sandbox"
 required-features = ["native-extensions", "embedded"]
 
 [dependencies]
