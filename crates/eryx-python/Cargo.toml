@@ -20,6 +20,7 @@ eryx = { path = "../eryx", features = ["embedded", "native-extensions"] }
 pyo3 = { version = "0.24", features = ["extension-module"] }
 tokio = { workspace = true, features = ["rt-multi-thread"] }
 serde_json.workspace = true
+walkdir.workspace = true
 
 [build-dependencies]
 pyo3-build-config = "0.24"

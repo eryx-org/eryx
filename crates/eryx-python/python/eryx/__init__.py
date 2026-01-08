@@ -31,6 +31,7 @@ from eryx._eryx import (
     ExecuteResult,
     ExecutionError,
     InitializationError,
+    PreInitializedRuntime,
     ResourceLimitError,
     ResourceLimits,
     # Classes
@@ -43,6 +44,7 @@ from eryx._eryx import (
 __all__ = [
     # Classes
     "Sandbox",
+    "PreInitializedRuntime",
     "ExecuteResult",
     "ResourceLimits",
     # Exceptions

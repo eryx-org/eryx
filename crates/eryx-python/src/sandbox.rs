@@ -3,6 +3,7 @@
 //! Provides the main `Sandbox` class that Python users interact with.
 
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use pyo3::prelude::*;
 
@@ -35,7 +36,8 @@ pub struct Sandbox {
     /// The underlying eryx Sandbox.
     inner: eryx::Sandbox,
     /// Tokio runtime for executing async code.
-    runtime: tokio::runtime::Runtime,
+    /// We use Arc<Runtime> to allow sharing with PreInitializedRuntime.
+    runtime: Arc<tokio::runtime::Runtime>,
 }
 
 #[pymethods]
@@ -84,10 +86,14 @@ impl Sandbox {
         resource_limits: Option<ResourceLimits>,
     ) -> PyResult<Self> {
         // Create a tokio runtime for async execution
-        let runtime = tokio::runtime::Builder::new_multi_thread()
-            .enable_all()
-            .build()
-            .map_err(|e| InitializationError::new_err(format!("failed to create runtime: {e}")))?;
+        let runtime = Arc::new(
+            tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()
+                .map_err(|e| {
+                    InitializationError::new_err(format!("failed to create runtime: {e}"))
+                })?,
+        );
 
         // Build the eryx sandbox with embedded runtime
         let mut builder = eryx::Sandbox::embedded();
@@ -140,8 +146,9 @@ impl Sandbox {
         // Release the GIL while executing in the sandbox
         // This allows other Python threads to run during sandbox execution
         let code = code.to_string();
+        let runtime = self.runtime.clone();
         py.allow_threads(|| {
-            self.runtime
+            runtime
                 .block_on(self.inner.execute(&code))
                 .map(ExecuteResult::from)
                 .map_err(eryx_error_to_py)
@@ -158,6 +165,27 @@ impl Sandbox {
 
 // Sandbox holds a tokio runtime which is Send + Sync
 unsafe impl Send for Sandbox {}
+
+impl Sandbox {
+    /// Create a Sandbox from an existing eryx::Sandbox.
+    ///
+    /// This is used internally by PreInitializedRuntime to create sandboxes.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the tokio runtime cannot be created.
+    pub(crate) fn from_inner(inner: eryx::Sandbox) -> PyResult<Self> {
+        let runtime = Arc::new(
+            tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()
+                .map_err(|e| {
+                    InitializationError::new_err(format!("failed to create runtime: {e}"))
+                })?,
+        );
+        Ok(Self { inner, runtime })
+    }
+}
 
 impl std::fmt::Debug for Sandbox {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {

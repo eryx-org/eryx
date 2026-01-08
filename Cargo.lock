@@ -829,6 +829,7 @@ dependencies = [
  "pyo3-build-config",
  "serde_json",
  "tokio",
+ "walkdir",
 ]
 
 [[package]]
