@@ -400,20 +400,28 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Install maturin and pytest
-        run: pip install maturin pytest
+      - name: Create virtualenv and install dependencies
+        run: |
+          python -m venv .venv
+          source .venv/bin/activate
+          pip install maturin pytest
 
       - name: Build and install eryx-python
         working-directory: crates/eryx-python
-        run: maturin develop --release
+        run: |
+          source ../../.venv/bin/activate
+          maturin develop --release
 
       - name: Run Python tests
         working-directory: crates/eryx-python
-        run: pytest tests/ -v
+        run: |
+          source ../../.venv/bin/activate
+          pytest tests/ -v
 
       - name: Run Python examples
         working-directory: crates/eryx-python
         run: |
+          source ../../.venv/bin/activate
           echo "=== simple.py ==="
           python examples/simple.py
           echo "=== error_handling.py ==="
