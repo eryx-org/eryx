@@ -34,7 +34,7 @@ jobs:
   # Build the WASM runtime first - required for all wheel builds
   build-runtime:
     name: Build Runtime
-    runs-on: ubuntu-latest
+    runs-on: namespace-profile-eryx-heavy
     steps:
       - uses: actions/checkout@v4
 
@@ -78,7 +78,7 @@ jobs:
   # Build wheels for Linux (manylinux)
   linux:
     name: Linux (${{ matrix.target }})
-    runs-on: ubuntu-latest
+    runs-on: namespace-profile-eryx-heavy
     needs: build-runtime
     strategy:
       fail-fast: false
@@ -223,7 +223,7 @@ jobs:
   # Build source distribution
   sdist:
     name: Source Distribution
-    runs-on: ubuntu-latest
+    runs-on: namespace-profile-eryx-heavy
     needs: build-runtime
     steps:
       - uses: actions/checkout@v4
@@ -249,7 +249,7 @@ jobs:
   # Publish to PyPI
   release:
     name: Publish to PyPI
-    runs-on: ubuntu-latest
+    runs-on: namespace-profile-eryx-light
     if: startsWith(github.ref, 'refs/tags/py-v') || (github.event_name == 'workflow_dispatch' && inputs.publish)
     needs: [linux, macos, windows, sdist]
     environment: pypi
