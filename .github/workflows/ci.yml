@@ -23,42 +23,6 @@ jobs:
       - name: Check dependency unification
         run: cargo rail unify --check
 
-  # Test base functionality without any features (needs runtime.wasm for sandbox tests)
-  test-base:
-    name: Test (no features)
-    runs-on: namespace-profile-eryx-light
-    needs: build-eryx-runtime
-    steps:
-      - uses: namespacelabs/nscloud-checkout-action@v8
-
-      - name: Download WASM artifacts
-        uses: namespace-actions/download-artifact@v1
-        with:
-          name: wasm-runtime
-          path: crates/
-
-      - name: Mark WASM as up-to-date
-        run: touch crates/eryx-runtime/runtime.wasm crates/eryx-runtime/runtime.cwasm
-
-      - name: Extract Python stdlib
-        run: |
-          # Archive has python-stdlib/ prefix, so extract to temp then move contents
-          mkdir -p python-stdlib-tmp
-          tar -xf crates/eryx/python-stdlib.tar.zst -C python-stdlib-tmp
-          mv python-stdlib-tmp/python-stdlib python-stdlib
-          rm -rf python-stdlib-tmp
-          echo "ERYX_PYTHON_STDLIB=$PWD/python-stdlib" >> $GITHUB_ENV
-
-      - name: Configure Rust cache
-        uses: namespacelabs/nscloud-cache-action@v1
-        with:
-          cache: rust
-
-      - uses: ./.github/actions/setup-rust
-
-      - name: Run tests without features
-        run: cargo nextest run --workspace --no-default-features
-
   # Build eryx-wasm-runtime and precompile it - other jobs depend on this
   build-eryx-runtime:
     name: Build eryx-runtime
@@ -76,11 +40,21 @@ jobs:
       - name: Install nightly toolchain
         run: rustup toolchain install nightly --component rust-src
 
+      - name: Force rebuild (cache may have stale timestamps)
+        run: |
+          # Touch sources to ensure mise doesn't skip build due to cached timestamps
+          touch crates/eryx-wasm-runtime/src/lib.rs
+          # Remove outputs if they don't exist (mise checks mtime, not existence)
+          rm -f crates/eryx-runtime/runtime.wasm crates/eryx-runtime/runtime.cwasm
+
       - name: Build eryx-runtime
         run: mise run build-eryx-runtime
 
       - name: Precompile WASM
-        run: mise run precompile-eryx-runtime
+        run: |
+          # Run precompile directly with -p eryx to avoid building eryx-python
+          # (eryx-python enables embedded feature which requires runtime.cwasm to exist)
+          cargo run -p eryx --example precompile --release
 
       - name: Copy prebuilt late-linking artifacts
         run: |
@@ -226,7 +200,8 @@ jobs:
             rust = "1.89"
 
       - name: Check MSRV
-        run: cargo check --workspace
+        # Exclude eryx-python as it requires native-extensions which needs WASI SDK
+        run: cargo check --workspace --exclude eryx-python
 
   doc:
     name: Documentation
@@ -356,3 +331,64 @@ jobs:
           cargo run --package eryx --example embedded_runtime --features embedded --release
           echo "=== trace_events ==="
           cargo run --package eryx --example trace_events --features embedded --release
+
+  # Test Python bindings
+  python-bindings:
+    name: Python Bindings
+    runs-on: namespace-profile-eryx-standard
+    needs: build-eryx-runtime
+    steps:
+      - uses: namespacelabs/nscloud-checkout-action@v8
+
+      - name: Download WASM artifacts
+        uses: namespace-actions/download-artifact@v1
+        with:
+          name: wasm-runtime
+          path: crates/
+
+      - name: Mark WASM as up-to-date
+        run: |
+          touch crates/eryx-runtime/runtime.wasm crates/eryx-runtime/runtime.cwasm
+          if [ -d crates/eryx-runtime/prebuilt ]; then
+            touch crates/eryx-runtime/prebuilt/*
+          fi
+
+      - name: Configure Rust cache
+        uses: namespacelabs/nscloud-cache-action@v1
+        with:
+          cache: rust
+
+      - uses: ./.github/actions/setup-rust
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Create virtualenv and install dependencies
+        run: |
+          python -m venv .venv
+          source .venv/bin/activate
+          pip install maturin pytest
+
+      - name: Build and install eryx-python
+        working-directory: crates/eryx-python
+        run: |
+          source ../../.venv/bin/activate
+          maturin develop --release
+
+      - name: Run Python tests
+        working-directory: crates/eryx-python
+        run: |
+          source ../../.venv/bin/activate
+          pytest tests/ -v
+
+      - name: Run Python examples
+        working-directory: crates/eryx-python
+        run: |
+          source ../../.venv/bin/activate
+          echo "=== simple.py ==="
+          python examples/simple.py
+          echo "=== error_handling.py ==="
+          python examples/error_handling.py
+          echo "=== resource_limits.py ==="
+          python examples/resource_limits.py

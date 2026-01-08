@@ -15,21 +15,17 @@ readme = "README.md"
 crate-type = ["staticlib"]
 
 [dependencies]
+pyo3 = { workspace = true, features = ["abi3-py312"] } #unified
 wit-dylib-ffi.workspace = true
 
-# PyO3 for Python C extension module
-# abi3-py312 is required for cross-compiling to WASM (tells pyo3 the target Python version)
-# extension-module prevents linking to libpython at build time (we link at WASM link time)
-pyo3 = { version = "0.24", features = ["abi3-py312", "extension-module"] }
-
 [dev-dependencies]
-wit-component.workspace = true
-wit-parser.workspace = true
-wit-dylib.workspace = true
-zstd.workspace = true
+tokio = { workspace = true, features = ["rt", "macros"] }
 wasmtime.workspace = true
 wasmtime-wasi.workspace = true
-tokio = { workspace = true, features = ["rt", "macros"] }
+wit-component.workspace = true
+wit-dylib.workspace = true
+wit-parser.workspace = true
+zstd.workspace = true
 
 [lints]
 workspace = true

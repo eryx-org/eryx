@@ -62,3 +62,10 @@ crates/eryx-runtime/libs/decompressed/
 
 # cargo-rail backup files
 .config/rail.toml.bak*
+
+# eryx-python build artifacts
+crates/eryx-python/.venv/
+crates/eryx-python/python/eryx/__pycache__/
+crates/eryx-python/python/eryx/_eryx*.so
+crates/eryx-python/tests/__pycache__/
+crates/eryx-python/.pytest_cache/
