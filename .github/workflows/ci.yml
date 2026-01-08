@@ -88,9 +88,9 @@ jobs:
 
       - name: Precompile WASM
         run: |
-          # Set WASI_SDK_PATH for eryx-runtime build.rs (eryx-python in workspace triggers it)
-          export WASI_SDK_PATH=$(mise where "github:WebAssembly/wasi-sdk@wasi-sdk-27")
-          mise run precompile-eryx-runtime
+          # Run precompile directly with -p eryx to avoid building eryx-python
+          # (eryx-python enables embedded feature which requires runtime.cwasm to exist)
+          cargo run -p eryx --example precompile --release
 
       - name: Copy prebuilt late-linking artifacts
         run: |
