@@ -821,6 +821,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "eryx-python"
+version = "0.1.0"
+dependencies = [
+ "eryx",
+ "pyo3",
+ "pyo3-build-config",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "eryx-runtime"
 version = "0.1.0"
 dependencies = [
