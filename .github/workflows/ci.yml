@@ -356,3 +356,56 @@ jobs:
           cargo run --package eryx --example embedded_runtime --features embedded --release
           echo "=== trace_events ==="
           cargo run --package eryx --example trace_events --features embedded --release
+
+  # Test Python bindings
+  python-bindings:
+    name: Python Bindings
+    runs-on: namespace-profile-eryx-standard
+    needs: build-eryx-runtime
+    steps:
+      - uses: namespacelabs/nscloud-checkout-action@v8
+
+      - name: Download WASM artifacts
+        uses: namespace-actions/download-artifact@v1
+        with:
+          name: wasm-runtime
+          path: crates/
+
+      - name: Mark WASM as up-to-date
+        run: |
+          touch crates/eryx-runtime/runtime.wasm crates/eryx-runtime/runtime.cwasm
+          if [ -d crates/eryx-runtime/prebuilt ]; then
+            touch crates/eryx-runtime/prebuilt/*
+          fi
+
+      - name: Configure Rust cache
+        uses: namespacelabs/nscloud-cache-action@v1
+        with:
+          cache: rust
+
+      - uses: ./.github/actions/setup-rust
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install maturin and pytest
+        run: pip install maturin pytest
+
+      - name: Build and install eryx-python
+        working-directory: crates/eryx-python
+        run: maturin develop --release
+
+      - name: Run Python tests
+        working-directory: crates/eryx-python
+        run: pytest tests/ -v
+
+      - name: Run Python examples
+        working-directory: crates/eryx-python
+        run: |
+          echo "=== simple.py ==="
+          python examples/simple.py
+          echo "=== error_handling.py ==="
+          python examples/error_handling.py
+          echo "=== resource_limits.py ==="
+          python examples/resource_limits.py
