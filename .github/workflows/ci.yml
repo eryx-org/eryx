@@ -76,6 +76,13 @@ jobs:
       - name: Install nightly toolchain
         run: rustup toolchain install nightly --component rust-src
 
+      - name: Force rebuild (cache may have stale timestamps)
+        run: |
+          # Touch sources to ensure mise doesn't skip build due to cached timestamps
+          touch crates/eryx-wasm-runtime/src/lib.rs
+          # Remove outputs if they don't exist (mise checks mtime, not existence)
+          rm -f crates/eryx-runtime/runtime.wasm crates/eryx-runtime/runtime.cwasm
+
       - name: Build eryx-runtime
         run: mise run build-eryx-runtime
 
@@ -226,7 +233,8 @@ jobs:
             rust = "1.89"
 
       - name: Check MSRV
-        run: cargo check --workspace
+        # Exclude eryx-python as it requires native-extensions which needs WASI SDK
+        run: cargo check --workspace --exclude eryx-python
 
   doc:
     name: Documentation
