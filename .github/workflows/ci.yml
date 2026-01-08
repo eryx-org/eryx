@@ -26,7 +26,7 @@ jobs:
   # Test base functionality without any features (needs runtime.wasm for sandbox tests)
   test-base:
     name: Test (no features)
-    runs-on: namespace-profile-eryx-light
+    runs-on: namespace-profile-eryx-standard
     needs: build-eryx-runtime
     steps:
       - uses: namespacelabs/nscloud-checkout-action@v8
