@@ -57,7 +57,9 @@ jobs:
       - uses: ./.github/actions/setup-rust
 
       - name: Run tests without features
-        run: cargo nextest run --workspace --no-default-features
+        # Exclude eryx-python as it enables native-extensions on eryx, which would
+        # enable preinit via Cargo's feature unification
+        run: cargo nextest run --workspace --no-default-features --exclude eryx-python
 
   # Build eryx-wasm-runtime and precompile it - other jobs depend on this
   build-eryx-runtime:
