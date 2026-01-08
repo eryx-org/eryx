@@ -43,6 +43,7 @@ print(f"Execution took {result.duration_ms:.2f}ms")
 - **Complete Isolation**: Sandboxed code cannot access files, network, or system resources
 - **Resource Limits**: Configure timeouts and memory limits
 - **Fast Startup**: Embedded pre-compiled runtime for minimal initialization overhead
+- **Package Support**: Load Python packages (.whl, .tar.gz) including native extensions
 - **Type Safe**: Full type stubs for IDE support and static analysis
 
 ## API Reference
@@ -60,6 +61,37 @@ sandbox = eryx.Sandbox(
 )
 
 result = sandbox.execute("print('Hello!')")
+```
+
+### Loading Packages
+
+You can load Python packages (wheels or tar.gz archives) into the sandbox:
+
+```python
+import eryx
+
+# Load packages from wheel files
+sandbox = eryx.Sandbox(
+    packages=[
+        "/path/to/jinja2-3.1.2-py3-none-any.whl",
+        "/path/to/markupsafe-2.1.3-wasi.tar.gz",  # WASI-compiled native extension
+    ]
+)
+
+result = sandbox.execute('''
+from jinja2 import Template
+template = Template("Hello, {{ name }}!")
+print(template.render(name="World"))
+''')
+```
+
+For packages with native extensions (like markupsafe), you need WASI-compiled
+versions. These are automatically late-linked into the WebAssembly component.
+
+You can also mount a pre-extracted site-packages directory:
+
+```python
+sandbox = eryx.Sandbox(site_packages="/path/to/site-packages")
 ```
 
 ### `ExecuteResult`
@@ -94,6 +126,23 @@ unlimited = eryx.ResourceLimits.unlimited()
 - `eryx.InitializationError` - Sandbox failed to initialize
 - `eryx.ResourceLimitError` - Resource limit exceeded
 - `eryx.TimeoutError` - Execution timed out
+
+## Package Loading
+
+### Supported Formats
+
+- `.whl` - Standard Python wheels (zip archives)
+- `.tar.gz` / `.tgz` - Tarballs (used by wasi-wheels project)
+- Directories - Pre-extracted package directories
+
+### Native Extensions
+
+Packages containing native Python extensions (`.so` files compiled for WASI)
+are automatically detected and late-linked into the WebAssembly component.
+This allows packages like numpy, markupsafe, and others to work in the sandbox.
+
+Note: You need WASI-compiled versions of native extensions, not regular
+Linux/macOS/Windows binaries.
 
 ## Error Handling
 

@@ -2,6 +2,8 @@
 //!
 //! Provides the main `Sandbox` class that Python users interact with.
 
+use std::path::PathBuf;
+
 use pyo3::prelude::*;
 
 use crate::error::{InitializationError, eryx_error_to_py};
@@ -15,9 +17,17 @@ use crate::result::ExecuteResult;
 /// or other system resources unless explicitly provided via callbacks.
 ///
 /// Example:
+///     # Basic sandbox
 ///     sandbox = Sandbox()
 ///     result = sandbox.execute('print("Hello from the sandbox!")')
-///     print(result.stdout)  # "Hello from the sandbox!\n"
+///     print(result.stdout)  # "Hello from the sandbox!"
+///
+///     # Sandbox with packages (e.g., jinja2)
+///     sandbox = Sandbox(
+///         packages=["/path/to/jinja2-3.1.2-py3-none-any.whl"],
+///         site_packages="/path/to/extracted/site-packages",
+///     )
+///     result = sandbox.execute('from jinja2 import Template; print(Template("{{ x }}").render(x=42))')
 #[pyclass(module = "eryx")]
 pub struct Sandbox {
     // Note: We don't derive Debug because tokio::runtime::Runtime doesn't implement it.
@@ -33,6 +43,13 @@ impl Sandbox {
     /// Create a new sandbox with the embedded Python runtime.
     ///
     /// Args:
+    ///     site_packages: Optional path to a directory containing Python packages.
+    ///         This directory will be mounted at `/site-packages` in the sandbox
+    ///         and added to Python's import path.
+    ///     packages: Optional list of paths to Python packages (.whl or .tar.gz files).
+    ///         Packages are extracted and their contents added to the sandbox.
+    ///         Packages with native extensions (.so files) are automatically
+    ///         late-linked into the WebAssembly component.
     ///     resource_limits: Optional resource limits for execution.
     ///
     /// Returns:
@@ -42,15 +59,30 @@ impl Sandbox {
     ///     InitializationError: If the sandbox fails to initialize.
     ///
     /// Example:
-    ///     # Default sandbox
+    ///     # Default sandbox (stdlib only)
     ///     sandbox = Sandbox()
     ///
     ///     # Sandbox with custom limits
     ///     limits = ResourceLimits(execution_timeout_ms=5000)
     ///     sandbox = Sandbox(resource_limits=limits)
+    ///
+    ///     # Sandbox with packages
+    ///     sandbox = Sandbox(
+    ///         packages=[
+    ///             "/path/to/jinja2-3.1.2-py3-none-any.whl",
+    ///             "/path/to/markupsafe-2.1.3-wasi.tar.gz",
+    ///         ]
+    ///     )
+    ///
+    ///     # Sandbox with pre-extracted site-packages
+    ///     sandbox = Sandbox(site_packages="/path/to/site-packages")
     #[new]
-    #[pyo3(signature = (*, resource_limits=None))]
-    fn new(resource_limits: Option<ResourceLimits>) -> PyResult<Self> {
+    #[pyo3(signature = (*, site_packages=None, packages=None, resource_limits=None))]
+    fn new(
+        site_packages: Option<PathBuf>,
+        packages: Option<Vec<PathBuf>>,
+        resource_limits: Option<ResourceLimits>,
+    ) -> PyResult<Self> {
         // Create a tokio runtime for async execution
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
@@ -60,6 +92,19 @@ impl Sandbox {
         // Build the eryx sandbox with embedded runtime
         let mut builder = eryx::Sandbox::embedded();
 
+        // Add site-packages directory if provided
+        if let Some(path) = site_packages {
+            builder = builder.with_site_packages(path);
+        }
+
+        // Add packages if provided
+        if let Some(package_paths) = packages {
+            for path in package_paths {
+                builder = builder.with_package(&path).map_err(eryx_error_to_py)?;
+            }
+        }
+
+        // Apply resource limits if provided
         if let Some(limits) = resource_limits {
             builder = builder.with_resource_limits(limits.into());
         }
@@ -90,7 +135,7 @@ impl Sandbox {
     ///     x = 2 + 2
     ///     print(f"2 + 2 = {x}")
     ///     ''')
-    ///     print(result.stdout)  # "2 + 2 = 4\n"
+    ///     print(result.stdout)  # "2 + 2 = 4"
     fn execute(&self, py: Python<'_>, code: &str) -> PyResult<ExecuteResult> {
         // Release the GIL while executing in the sandbox
         // This allows other Python threads to run during sandbox execution

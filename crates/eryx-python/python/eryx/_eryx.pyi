@@ -1,7 +1,8 @@
 """Type stubs for the eryx native module."""
 
 import builtins
-from typing import Optional
+from pathlib import Path
+from typing import Optional, Sequence, Union
 
 
 class ExecuteResult:
@@ -91,23 +92,54 @@ class Sandbox:
     or other system resources unless explicitly provided via callbacks.
 
     Example:
+        # Basic sandbox
         sandbox = Sandbox()
         result = sandbox.execute('print("Hello from the sandbox!")')
-        print(result.stdout)  # "Hello from the sandbox!\\n"
+        print(result.stdout)  # "Hello from the sandbox!"
+
+        # Sandbox with packages (e.g., jinja2)
+        sandbox = Sandbox(
+            packages=["/path/to/jinja2-3.1.2-py3-none-any.whl"],
+        )
+        result = sandbox.execute('from jinja2 import Template; print(Template("{{ x }}").render(x=42))')
     """
 
     def __init__(
         self,
         *,
+        site_packages: Optional[Union[str, Path]] = None,
+        packages: Optional[Sequence[Union[str, Path]]] = None,
         resource_limits: Optional[ResourceLimits] = None,
     ) -> None:
         """Create a new sandbox with the embedded Python runtime.
 
         Args:
+            site_packages: Optional path to a directory containing Python packages.
+                This directory will be mounted at `/site-packages` in the sandbox
+                and added to Python's import path.
+            packages: Optional list of paths to Python packages (.whl or .tar.gz files).
+                Packages are extracted and their contents added to the sandbox.
+                Packages with native extensions (.so files) are automatically
+                late-linked into the WebAssembly component.
             resource_limits: Optional resource limits for execution.
 
         Raises:
             InitializationError: If the sandbox fails to initialize.
+
+        Example:
+            # Default sandbox (stdlib only)
+            sandbox = Sandbox()
+
+            # Sandbox with packages
+            sandbox = Sandbox(
+                packages=[
+                    "/path/to/jinja2-3.1.2-py3-none-any.whl",
+                    "/path/to/markupsafe-2.1.3-wasi.tar.gz",
+                ]
+            )
+
+            # Sandbox with pre-extracted site-packages
+            sandbox = Sandbox(site_packages="/path/to/site-packages")
         """
         ...
 

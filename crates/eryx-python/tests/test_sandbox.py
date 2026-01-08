@@ -1,5 +1,7 @@
 """Tests for the eryx Python bindings."""
 
+from pathlib import Path
+
 import eryx
 import pytest
 
@@ -220,3 +222,79 @@ class TestModuleMetadata:
         """Test that all __all__ exports are accessible."""
         for name in eryx.__all__:
             assert hasattr(eryx, name), f"Missing export: {name}"
+
+
+class TestPackages:
+    """Tests for package loading (site_packages and packages parameters)."""
+
+    def test_sandbox_accepts_site_packages_path(self, tmp_path):
+        """Test that site_packages parameter is accepted."""
+        # Create a minimal site-packages directory
+        site_packages = tmp_path / "site-packages"
+        site_packages.mkdir()
+
+        # Create a simple module
+        (site_packages / "mymodule.py").write_text("VALUE = 42\n")
+
+        sandbox = eryx.Sandbox(site_packages=site_packages)
+        result = sandbox.execute("import mymodule; print(mymodule.VALUE)")
+        assert result.stdout == "42"
+
+    def test_sandbox_accepts_site_packages_string(self, tmp_path):
+        """Test that site_packages accepts string paths."""
+        site_packages = tmp_path / "site-packages"
+        site_packages.mkdir()
+        (site_packages / "testmod.py").write_text('X = "hello"\n')
+
+        # Pass as string instead of Path
+        sandbox = eryx.Sandbox(site_packages=str(site_packages))
+        result = sandbox.execute("import testmod; print(testmod.X)")
+        assert result.stdout == "hello"
+
+    def test_sandbox_accepts_packages_list(self):
+        """Test that packages parameter is accepted (empty list)."""
+        # Empty list should work fine
+        sandbox = eryx.Sandbox(packages=[])
+        result = sandbox.execute("print('ok')")
+        assert result.stdout == "ok"
+
+    def test_sandbox_with_nonexistent_package_raises(self):
+        """Test that nonexistent package path raises InitializationError."""
+        with pytest.raises(eryx.InitializationError):
+            eryx.Sandbox(packages=["/nonexistent/package.whl"])
+
+    def test_sandbox_with_invalid_package_format_raises(self, tmp_path):
+        """Test that invalid package format raises InitializationError."""
+        # Create a file with unsupported extension
+        invalid_file = tmp_path / "package.txt"
+        invalid_file.write_text("not a package")
+
+        with pytest.raises(eryx.InitializationError):
+            eryx.Sandbox(packages=[str(invalid_file)])
+
+    @pytest.mark.skipif(
+        not Path("/tmp/wheels/jinja2-3.1.6-py3-none-any.whl").exists(),
+        reason="jinja2 wheel not available",
+    )
+    def test_sandbox_with_jinja2_wheel(self):
+        """Test loading jinja2 wheel (if available)."""
+        jinja2_wheel = "/tmp/wheels/jinja2-3.1.6-py3-none-any.whl"
+        markupsafe_wheel = None
+
+        # Find markupsafe wheel
+        wheels_dir = Path("/tmp/wheels")
+        for f in wheels_dir.iterdir():
+            if f.name.lower().startswith("markupsafe") and f.suffix == ".whl":
+                markupsafe_wheel = str(f)
+                break
+
+        if not markupsafe_wheel:
+            pytest.skip("markupsafe wheel not available")
+
+        sandbox = eryx.Sandbox(packages=[jinja2_wheel, markupsafe_wheel])
+        result = sandbox.execute("""
+from jinja2 import Template
+t = Template("Hello {{ name }}")
+print(t.render(name="Test"))
+""")
+        assert result.stdout == "Hello Test"
