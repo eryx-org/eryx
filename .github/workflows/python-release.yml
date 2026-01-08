@@ -93,7 +93,7 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: wasm-runtime
-          path: crates/
+          path: .
 
       - name: Mark WASM as up-to-date
         run: |
@@ -146,7 +146,7 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: wasm-runtime
-          path: crates/
+          path: .
 
       - name: Mark WASM as up-to-date
         run: |
@@ -194,7 +194,7 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: wasm-runtime
-          path: crates/
+          path: .
 
       - uses: actions/setup-python@v5
         with:
@@ -232,7 +232,7 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: wasm-runtime
-          path: crates/
+          path: .
 
       - name: Build sdist
         uses: PyO3/maturin-action@v1
