@@ -234,6 +234,10 @@ jobs:
           name: wasm-runtime
           path: .
 
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
       - name: Build sdist
         uses: PyO3/maturin-action@v1
         with:
