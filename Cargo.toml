@@ -8,73 +8,74 @@ members = ["crates/*"]
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.89.0"
+rust-version = "1.89"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/sd2k/eryx"
 authors = ["Ben Sully <ben.sully88@gmail.com>"]
 
 [workspace.dependencies]
-# Async runtime
-tokio = { version = "1", features = ["full"] }
-tokio-stream = "0.1"
+anyhow = "1.0"
 async-trait = "0.1"
+
+# Pre-initialization for capturing Python memory state
+component-init-transform = { git = "https://github.com/dicej/component-init", rev = "2d965957" }
+
+# Benchmarking
+criterion = { version = "0.5", features = ["async_tokio"] }
+crossterm = "0.28"
+
+# Internal crates
+eryx = { path = "crates/eryx" }
+flate2 = "1.0"
 futures = "0.3"
 futures-concurrency = "7.6"
 futures-lite = "2.6"
 lending-stream = "1.0"
-
-# Serialization
-serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
-
-# Error handling
-thiserror = "2.0"
-anyhow = "1.0"
+pyo3 = { version = "^0.24.2", features = ["extension-module"] } #unified
 
 # JSON Schema
 schemars = "1.0.0-alpha.17"
 
-# WebAssembly runtime (v39+ required for async component model)
-wasmtime = { version = "39", features = ["component-model", "async"] }
-wasmtime-wasi = "39"
-
-# Utilities
-tracing = "0.1"
-crossterm = "0.28"
-
-# Benchmarking
-criterion = { version = "0.5", features = ["async_tokio"] }
-
-# Compression
-zstd = "0.13"
-zip = "2.0"
-flate2 = "1.0"
-
-# Directory walking
-walkdir = "2.5"
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
 
 # Hashing
 sha2 = "0.10"
 
 # Archive extraction
 tar = "0.4"
+tempfile = "3.20"
+
+# Error handling
+thiserror = "2.0"
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+tokio-stream = "0.1"
+
+# Utilities
+tracing = "0.1"
+
+# Directory walking
+walkdir = "2.5"
+wasm-encoder = { git = "https://github.com/bytecodealliance/wasm-tools", rev = "e2bb0a24" }
+wasmparser = { git = "https://github.com/bytecodealliance/wasm-tools", rev = "e2bb0a24" }
+
+# WebAssembly runtime (v39+ required for async component model)
+wasmtime = { version = "39", features = ["component-model", "async"] }
+wasmtime-wasi = "39"
 
 # WebAssembly component linking and WIT parsing
 wit-component = { git = "https://github.com/bytecodealliance/wasm-tools", rev = "e2bb0a24" }
 wit-dylib = { git = "https://github.com/bytecodealliance/wasm-tools", rev = "e2bb0a24" }
-wit-parser = { git = "https://github.com/bytecodealliance/wasm-tools", rev = "e2bb0a24" }
-wasm-encoder = { git = "https://github.com/bytecodealliance/wasm-tools", rev = "e2bb0a24" }
-wasmparser = { git = "https://github.com/bytecodealliance/wasm-tools", rev = "e2bb0a24" }
 
 # wit-dylib FFI for implementing interpreter interface (from dicej's fork)
 wit-dylib-ffi = { git = "https://github.com/dicej/wasm-tools", rev = "b072b0ca", features = ["async-raw"] }
+wit-parser = { git = "https://github.com/bytecodealliance/wasm-tools", rev = "e2bb0a24" }
+zip = "2.0"
 
-# Pre-initialization for capturing Python memory state
-component-init-transform = { git = "https://github.com/dicej/component-init", rev = "2d965957" }
-tempfile = "3.20"
-
-# Internal crates
-eryx = { path = "crates/eryx" }
+# Compression
+zstd = "0.13"
 
 [workspace.lints.rust]
 missing_debug_implementations = "warn"
