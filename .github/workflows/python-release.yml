@@ -95,12 +95,23 @@ jobs:
           name: wasm-runtime
           path: .
 
-      - name: Mark WASM as up-to-date
+      - name: Verify artifacts and mark as up-to-date
         run: |
+          echo "=== Checking downloaded artifacts ==="
+          ls -la crates/eryx-runtime/
+          ls -la crates/eryx-runtime/prebuilt/ || echo "prebuilt dir missing!"
+
+          # Verify required files exist
+          test -f crates/eryx-runtime/runtime.wasm || (echo "runtime.wasm missing!" && exit 1)
+          test -f crates/eryx-runtime/runtime.cwasm || (echo "runtime.cwasm missing!" && exit 1)
+          test -f crates/eryx-runtime/prebuilt/liberyx_runtime.so.zst || (echo "liberyx_runtime.so.zst missing!" && exit 1)
+          test -f crates/eryx-runtime/prebuilt/liberyx_bindings.so.zst || (echo "liberyx_bindings.so.zst missing!" && exit 1)
+
+          # Touch to mark as up-to-date
           touch crates/eryx-runtime/runtime.wasm crates/eryx-runtime/runtime.cwasm
-          if [ -d crates/eryx-runtime/prebuilt ]; then
-            touch crates/eryx-runtime/prebuilt/*
-          fi
+          touch crates/eryx-runtime/prebuilt/*
+
+          echo "=== All artifacts verified ==="
 
       - uses: actions/setup-python@v5
         with:
@@ -148,12 +159,23 @@ jobs:
           name: wasm-runtime
           path: .
 
-      - name: Mark WASM as up-to-date
+      - name: Verify artifacts and mark as up-to-date
         run: |
+          echo "=== Checking downloaded artifacts ==="
+          ls -la crates/eryx-runtime/
+          ls -la crates/eryx-runtime/prebuilt/ || echo "prebuilt dir missing!"
+
+          # Verify required files exist
+          test -f crates/eryx-runtime/runtime.wasm || (echo "runtime.wasm missing!" && exit 1)
+          test -f crates/eryx-runtime/runtime.cwasm || (echo "runtime.cwasm missing!" && exit 1)
+          test -f crates/eryx-runtime/prebuilt/liberyx_runtime.so.zst || (echo "liberyx_runtime.so.zst missing!" && exit 1)
+          test -f crates/eryx-runtime/prebuilt/liberyx_bindings.so.zst || (echo "liberyx_bindings.so.zst missing!" && exit 1)
+
+          # Touch to mark as up-to-date
           touch crates/eryx-runtime/runtime.wasm crates/eryx-runtime/runtime.cwasm
-          if [ -d crates/eryx-runtime/prebuilt ]; then
-            touch crates/eryx-runtime/prebuilt/*
-          fi
+          touch crates/eryx-runtime/prebuilt/*
+
+          echo "=== All artifacts verified ==="
 
       - uses: actions/setup-python@v5
         with:
@@ -195,6 +217,24 @@ jobs:
         with:
           name: wasm-runtime
           path: .
+
+      - name: Verify artifacts and mark as up-to-date
+        run: |
+          echo "=== Checking downloaded artifacts ==="
+          ls -la crates/eryx-runtime/
+          ls -la crates/eryx-runtime/prebuilt/ || echo "prebuilt dir missing!"
+
+          # Verify required files exist
+          test -f crates/eryx-runtime/runtime.wasm || (echo "runtime.wasm missing!" && exit 1)
+          test -f crates/eryx-runtime/runtime.cwasm || (echo "runtime.cwasm missing!" && exit 1)
+          test -f crates/eryx-runtime/prebuilt/liberyx_runtime.so.zst || (echo "liberyx_runtime.so.zst missing!" && exit 1)
+          test -f crates/eryx-runtime/prebuilt/liberyx_bindings.so.zst || (echo "liberyx_bindings.so.zst missing!" && exit 1)
+
+          # Touch to mark as up-to-date
+          touch crates/eryx-runtime/runtime.wasm crates/eryx-runtime/runtime.cwasm
+          touch crates/eryx-runtime/prebuilt/*
+
+          echo "=== All artifacts verified ==="
 
       - uses: actions/setup-python@v5
         with:
