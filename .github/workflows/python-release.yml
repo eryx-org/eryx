@@ -484,6 +484,10 @@ jobs:
         with:
           subject-path: "dist/*"
 
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
       - name: Publish to PyPI
         uses: PyO3/maturin-action@v1
         with:
