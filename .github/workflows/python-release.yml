@@ -134,7 +134,7 @@ jobs:
         if: matrix.target == 'x86_64'
         run: |
           pip install pytest
-          pip install eryx --find-links dist --force-reinstall
+          pip install dist/*.whl --force-reinstall
           cd crates/eryx-python && pytest tests/ -v
 
   # Build wheels for macOS
@@ -196,7 +196,7 @@ jobs:
       - name: Test wheel
         run: |
           pip install pytest
-          pip install eryx --find-links dist --force-reinstall
+          pip install dist/*.whl --force-reinstall
           cd crates/eryx-python && pytest tests/ -v
 
   # Build wheels for Windows
@@ -257,7 +257,7 @@ jobs:
         shell: bash
         run: |
           pip install pytest
-          pip install eryx --find-links dist --force-reinstall
+          pip install dist/*.whl --force-reinstall
           cd crates/eryx-python && pytest tests/ -v
 
   # Build source distribution
