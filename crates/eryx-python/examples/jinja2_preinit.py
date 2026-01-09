@@ -13,7 +13,7 @@ Prerequisites:
     pip download --only-binary=:all: --dest /tmp/wheels jinja2
 
     # Get markupsafe WASI wheel (compiled for WebAssembly)
-    # See: https://github.com/AustinMCrane/wasi-wheels or similar
+    # See: https://github.com/sd2k/wasi-wheels/tree/add-markupsafe or similar
     # Copy markupsafe-*-wasi*.whl to /tmp/wheels/
 
 Usage:
