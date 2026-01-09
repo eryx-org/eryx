@@ -1,12 +1,14 @@
-# Eryx Python Bindings
+# PyEryx - Python Bindings for Eryx
 
 Python bindings for the [Eryx](https://github.com/sd2k/eryx) sandbox - execute Python code securely inside WebAssembly.
 
 ## Installation
 
 ```bash
-pip install eryx
+pip install pyeryx
 ```
+
+> **Note:** The package is installed as `pyeryx` but imported as `eryx`.
 
 Or build from source using [maturin](https://github.com/PyO3/maturin):
 

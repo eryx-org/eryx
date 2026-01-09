@@ -3,7 +3,7 @@ requires = ["maturin>=1.5,<2.0"]
 build-backend = "maturin"
 
 [project]
-name = "eryx"
+name = "pyeryx"
 version = "0.1.0"
 description = "Python sandbox powered by WebAssembly"
 readme = "README.md"
