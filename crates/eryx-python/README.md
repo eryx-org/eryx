@@ -45,6 +45,7 @@ print(f"Execution took {result.duration_ms:.2f}ms")
 - **Complete Isolation**: Sandboxed code cannot access files, network, or system resources
 - **Resource Limits**: Configure timeouts and memory limits
 - **Fast Startup**: Embedded pre-compiled runtime for minimal initialization overhead
+- **Pre-initialization**: Snapshot Python state for ultra-fast sandbox creation (~10-20ms)
 - **Package Support**: Load Python packages (.whl, .tar.gz) including native extensions
 - **Type Safe**: Full type stubs for IDE support and static analysis
 
@@ -120,6 +121,57 @@ limits = eryx.ResourceLimits(
 # Or create unlimited (use with caution!)
 unlimited = eryx.ResourceLimits.unlimited()
 ```
+
+### `PreInitializedRuntime`
+
+For high-throughput use cases, `PreInitializedRuntime` lets you snapshot an initialized
+Python interpreter and create sandboxes from it in ~10-20ms instead of ~450ms.
+
+```python
+import eryx
+
+# One-time initialization (takes 3-5 seconds)
+preinit = eryx.PreInitializedRuntime(
+    packages=[
+        "/path/to/jinja2-3.1.2-py3-none-any.whl",
+        "/path/to/markupsafe-2.1.3-wasi.tar.gz",
+    ],
+    imports=["jinja2"],  # Pre-import modules for even faster startup
+)
+
+# Create sandboxes quickly (~10-20ms each)
+sandbox = preinit.create_sandbox()
+result = sandbox.execute('''
+from jinja2 import Template
+print(Template("Hello {{ name }}").render(name="World"))
+''')
+
+# Create many sandboxes from the same runtime
+for i in range(100):
+    sandbox = preinit.create_sandbox()
+    sandbox.execute(f"print('Sandbox {i}')")
+```
+
+#### Saving and Loading
+
+Save pre-initialized runtimes to disk for instant startup across process restarts:
+
+```python
+# Save the runtime (includes pre-compiled WASM state)
+preinit.save("/path/to/runtime.bin")
+
+# Later, in another process - loads in ~10ms
+preinit = eryx.PreInitializedRuntime.load("/path/to/runtime.bin")
+sandbox = preinit.create_sandbox()
+```
+
+#### Properties and Methods
+
+- `preinit.size_bytes` - Size of the pre-compiled runtime in bytes
+- `preinit.create_sandbox(resource_limits=...)` - Create a new sandbox
+- `preinit.save(path)` - Save runtime to a file
+- `preinit.to_bytes()` - Get runtime as bytes
+- `PreInitializedRuntime.load(path)` - Load runtime from a file
 
 ### Exceptions
 
