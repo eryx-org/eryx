@@ -1,7 +1,7 @@
-//! Pre-initialized runtime wrapper for Python.
+//! Sandbox factory for Python.
 //!
-//! Provides the `PreInitializedRuntime` class for fast sandbox creation
-//! by baking Python initialization and imports into the WASM component.
+//! Provides the `SandboxFactory` class for creating sandboxes with custom packages.
+//! The factory bundles packages and pre-imports into a reusable snapshot.
 
 use std::path::{Path, PathBuf};
 
@@ -12,31 +12,33 @@ use crate::error::{InitializationError, eryx_error_to_py};
 use crate::resource_limits::ResourceLimits;
 use crate::sandbox::Sandbox;
 
-/// A pre-initialized Python runtime for fast sandbox creation.
+/// A factory for creating sandboxes with custom packages.
 ///
-/// Pre-initialization runs Python's startup code and optionally imports
-/// specified modules, capturing the initialized state into a WASM component.
-/// This avoids the ~450ms Python initialization cost on each sandbox creation,
-/// reducing it to ~10-20ms.
+/// `SandboxFactory` bundles packages and pre-imports into a reusable snapshot,
+/// allowing fast creation of sandboxes with those packages already loaded.
+///
+/// Note: For basic usage without packages, `eryx.Sandbox()` is already fast
+/// because the base runtime ships pre-initialized. Use `SandboxFactory` when
+/// you need to bundle custom packages.
 ///
 /// Example:
-///     # Create pre-initialized runtime with jinja2
-///     preinit = PreInitializedRuntime(
-///         site_packages="/path/to/site-packages",
+///     # Create a factory with jinja2
+///     factory = SandboxFactory(
+///         packages=["/path/to/jinja2.whl", "/path/to/markupsafe.whl"],
 ///         imports=["jinja2"],
 ///     )
 ///
-///     # Create sandboxes quickly (~10-20ms each)
-///     sandbox = preinit.create_sandbox()
+///     # Create sandboxes with packages already loaded (~10-20ms each)
+///     sandbox = factory.create_sandbox()
 ///     result = sandbox.execute('from jinja2 import Template; print(Template("{{ x }}").render(x=42))')
 ///
 ///     # Save for reuse across processes
-///     preinit.save("/path/to/runtime.bin")
+///     factory.save("/path/to/jinja2-factory.bin")
 ///
 ///     # Load in another process
-///     preinit = PreInitializedRuntime.load("/path/to/runtime.bin")
+///     factory = SandboxFactory.load("/path/to/jinja2-factory.bin")
 #[pyclass(module = "eryx")]
-pub struct PreInitializedRuntime {
+pub struct SandboxFactory {
     /// Pre-compiled component bytes (native code, not WASM).
     precompiled: Vec<u8>,
     /// Path to Python stdlib.
@@ -49,8 +51,8 @@ pub struct PreInitializedRuntime {
 }
 
 #[pymethods]
-impl PreInitializedRuntime {
-    /// Create a new pre-initialized runtime.
+impl SandboxFactory {
+    /// Create a new sandbox factory with custom packages.
     ///
     /// This performs one-time initialization that can take 3-5 seconds,
     /// but subsequent sandbox creation will be very fast (~10-20ms).
@@ -63,14 +65,14 @@ impl PreInitializedRuntime {
     ///         Pre-imported modules are immediately available without import overhead.
     ///
     /// Returns:
-    ///     A PreInitializedRuntime ready to create fast sandboxes.
+    ///     A SandboxFactory ready to create sandboxes with packages.
     ///
     /// Raises:
-    ///     InitializationError: If pre-initialization fails.
+    ///     InitializationError: If initialization fails.
     ///
     /// Example:
-    ///     # Pre-initialize with jinja2 and markupsafe
-    ///     preinit = PreInitializedRuntime(
+    ///     # Create factory with jinja2 and markupsafe
+    ///     factory = SandboxFactory(
     ///         packages=[
     ///             "/path/to/jinja2-3.1.2-py3-none-any.whl",
     ///             "/path/to/markupsafe-2.1.3-wasi.tar.gz",
@@ -128,23 +130,23 @@ impl PreInitializedRuntime {
         })
     }
 
-    /// Load a pre-initialized runtime from a file.
+    /// Load a sandbox factory from a file.
     ///
-    /// This loads a previously saved runtime, which is much faster than
+    /// This loads a previously saved factory, which is much faster than
     /// creating a new one (~10ms vs ~3-5s).
     ///
     /// Args:
-    ///     path: Path to the saved runtime file.
+    ///     path: Path to the saved factory file.
     ///
     /// Returns:
-    ///     A PreInitializedRuntime loaded from the file.
+    ///     A SandboxFactory loaded from the file.
     ///
     /// Raises:
     ///     InitializationError: If loading fails.
     ///
     /// Example:
-    ///     preinit = PreInitializedRuntime.load("/path/to/runtime.bin")
-    ///     sandbox = preinit.create_sandbox()
+    ///     factory = SandboxFactory.load("/path/to/jinja2-factory.bin")
+    ///     sandbox = factory.create_sandbox()
     #[staticmethod]
     #[pyo3(signature = (path, *, site_packages=None))]
     fn load(path: PathBuf, site_packages: Option<PathBuf>) -> PyResult<Self> {
@@ -155,7 +157,7 @@ impl PreInitializedRuntime {
         // Load precompiled bytes from file
         let precompiled = std::fs::read(&path).map_err(|e| {
             InitializationError::new_err(format!(
-                "failed to load runtime from {}: {e}",
+                "failed to load factory from {}: {e}",
                 path.display()
             ))
         })?;
@@ -168,34 +170,34 @@ impl PreInitializedRuntime {
         })
     }
 
-    /// Save the pre-initialized runtime to a file.
+    /// Save the sandbox factory to a file.
     ///
-    /// The saved file can be loaded later with `PreInitializedRuntime.load()`,
-    /// which is much faster than creating a new runtime.
+    /// The saved file can be loaded later with `SandboxFactory.load()`,
+    /// which is much faster than creating a new factory.
     ///
     /// Args:
-    ///     path: Path where the runtime should be saved.
+    ///     path: Path where the factory should be saved.
     ///
     /// Raises:
     ///     InitializationError: If saving fails.
     ///
     /// Example:
-    ///     preinit = PreInitializedRuntime(imports=["json", "re"])
-    ///     preinit.save("/path/to/runtime.bin")
+    ///     factory = SandboxFactory(packages=[...], imports=["jinja2"])
+    ///     factory.save("/path/to/jinja2-factory.bin")
     fn save(&self, path: PathBuf) -> PyResult<()> {
         std::fs::write(&path, &self.precompiled).map_err(|e| {
             InitializationError::new_err(format!(
-                "failed to save runtime to {}: {e}",
+                "failed to save factory to {}: {e}",
                 path.display()
             ))
         })?;
         Ok(())
     }
 
-    /// Create a new sandbox from the pre-initialized runtime.
+    /// Create a new sandbox from this factory.
     ///
-    /// This is very fast (~10-20ms) because the Python interpreter is
-    /// already initialized in the WASM component.
+    /// This is fast (~10-20ms) because the packages are already bundled
+    /// into the factory's snapshot.
     ///
     /// Args:
     ///     site_packages: Optional path to additional site-packages.
@@ -257,16 +259,16 @@ impl PreInitializedRuntime {
 
     fn __repr__(&self) -> String {
         format!(
-            "PreInitializedRuntime(size_bytes={}, site_packages={:?})",
+            "SandboxFactory(size_bytes={}, site_packages={:?})",
             self.precompiled.len(),
             self.site_packages_path,
         )
     }
 }
 
-impl std::fmt::Debug for PreInitializedRuntime {
+impl std::fmt::Debug for SandboxFactory {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("PreInitializedRuntime")
+        f.debug_struct("SandboxFactory")
             .field("size_bytes", &self.precompiled.len())
             .field("stdlib_path", &self.stdlib_path)
             .field("site_packages_path", &self.site_packages_path)

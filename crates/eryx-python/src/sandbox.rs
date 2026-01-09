@@ -2,7 +2,6 @@
 //!
 //! Provides the main `Sandbox` class that Python users interact with.
 
-use std::path::PathBuf;
 use std::sync::Arc;
 
 use pyo3::prelude::*;
@@ -36,7 +35,7 @@ pub struct Sandbox {
     /// The underlying eryx Sandbox.
     inner: eryx::Sandbox,
     /// Tokio runtime for executing async code.
-    /// We use Arc<Runtime> to allow sharing with PreInitializedRuntime.
+    /// We use Arc<Runtime> to allow sharing with SandboxFactory.
     runtime: Arc<tokio::runtime::Runtime>,
 }
 
@@ -44,14 +43,12 @@ pub struct Sandbox {
 impl Sandbox {
     /// Create a new sandbox with the embedded Python runtime.
     ///
+    /// This creates a fast sandbox (~1-5ms) using the pre-initialized Python runtime.
+    /// The sandbox has access to Python's standard library but no third-party packages.
+    ///
+    /// For sandboxes with custom packages, use `SandboxFactory` instead.
+    ///
     /// Args:
-    ///     site_packages: Optional path to a directory containing Python packages.
-    ///         This directory will be mounted at `/site-packages` in the sandbox
-    ///         and added to Python's import path.
-    ///     packages: Optional list of paths to Python packages (.whl or .tar.gz files).
-    ///         Packages are extracted and their contents added to the sandbox.
-    ///         Packages with native extensions (.so files) are automatically
-    ///         late-linked into the WebAssembly component.
     ///     resource_limits: Optional resource limits for execution.
     ///
     /// Returns:
@@ -63,28 +60,21 @@ impl Sandbox {
     /// Example:
     ///     # Default sandbox (stdlib only)
     ///     sandbox = Sandbox()
+    ///     result = sandbox.execute('import json; print(json.dumps([1, 2, 3]))')
     ///
     ///     # Sandbox with custom limits
     ///     limits = ResourceLimits(execution_timeout_ms=5000)
     ///     sandbox = Sandbox(resource_limits=limits)
     ///
-    ///     # Sandbox with packages
-    ///     sandbox = Sandbox(
-    ///         packages=[
-    ///             "/path/to/jinja2-3.1.2-py3-none-any.whl",
-    ///             "/path/to/markupsafe-2.1.3-wasi.tar.gz",
-    ///         ]
+    ///     # For custom packages, use SandboxFactory instead:
+    ///     factory = SandboxFactory(
+    ///         packages=["/path/to/jinja2.whl", "/path/to/markupsafe.whl"],
+    ///         imports=["jinja2"],
     ///     )
-    ///
-    ///     # Sandbox with pre-extracted site-packages
-    ///     sandbox = Sandbox(site_packages="/path/to/site-packages")
+    ///     sandbox = factory.create_sandbox()
     #[new]
-    #[pyo3(signature = (*, site_packages=None, packages=None, resource_limits=None))]
-    fn new(
-        site_packages: Option<PathBuf>,
-        packages: Option<Vec<PathBuf>>,
-        resource_limits: Option<ResourceLimits>,
-    ) -> PyResult<Self> {
+    #[pyo3(signature = (*, resource_limits=None))]
+    fn new(resource_limits: Option<ResourceLimits>) -> PyResult<Self> {
         // Create a tokio runtime for async execution
         let runtime = Arc::new(
             tokio::runtime::Builder::new_multi_thread()
@@ -97,18 +87,6 @@ impl Sandbox {
 
         // Build the eryx sandbox with embedded runtime
         let mut builder = eryx::Sandbox::embedded();
-
-        // Add site-packages directory if provided
-        if let Some(path) = site_packages {
-            builder = builder.with_site_packages(path);
-        }
-
-        // Add packages if provided
-        if let Some(package_paths) = packages {
-            for path in package_paths {
-                builder = builder.with_package(&path).map_err(eryx_error_to_py)?;
-            }
-        }
 
         // Apply resource limits if provided
         if let Some(limits) = resource_limits {
@@ -169,7 +147,7 @@ unsafe impl Send for Sandbox {}
 impl Sandbox {
     /// Create a Sandbox from an existing eryx::Sandbox.
     ///
-    /// This is used internally by PreInitializedRuntime to create sandboxes.
+    /// This is used internally by SandboxFactory to create sandboxes.
     ///
     /// # Errors
     ///

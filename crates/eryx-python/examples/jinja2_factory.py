@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-Jinja2 Template Sandbox Example with Pre-Initialization
+Jinja2 Template Sandbox Example with SandboxFactory
 
 Demonstrates sandboxed Jinja2 template evaluation using eryx with
-pre-initialization for fast sandbox creation.
+SandboxFactory for fast sandbox creation with packages.
 
-This is similar to jinja2_sandbox.py but uses PreInitializedRuntime
+This is similar to jinja2_sandbox.py but uses SandboxFactory
 to achieve ~10-20ms sandbox creation instead of ~700ms.
 
 Prerequisites:
@@ -49,24 +49,24 @@ def main():
     print(f"  - {markupsafe_wheel}")
     print()
 
-    # Create pre-initialized runtime with jinja2 already imported
+    # Create sandbox factory with jinja2 already imported
     # This is slow (~3-5s) but only needs to be done once
-    print("Creating pre-initialized runtime...")
+    print("Creating sandbox factory...")
     print("  (This takes 3-5 seconds but only happens once)")
     start = time.perf_counter()
-    preinit = eryx.PreInitializedRuntime(
+    factory = eryx.SandboxFactory(
         packages=[str(jinja2_wheel), str(markupsafe_wheel)],
         imports=["jinja2"],  # Pre-import jinja2 during initialization
     )
-    preinit_time = time.perf_counter() - start
-    print(f"  Pre-initialized in {preinit_time:.2f}s")
-    print(f"  Runtime size: {preinit.size_bytes / 1_000_000:.1f} MB")
+    factory_time = time.perf_counter() - start
+    print(f"  Factory created in {factory_time:.2f}s")
+    print(f"  Factory size: {factory.size_bytes / 1_000_000:.1f} MB")
     print()
 
     # Example 1: Simple template - fast sandbox creation!
     print("--- Example 1: Simple template ---")
     start = time.perf_counter()
-    sandbox = preinit.create_sandbox()
+    sandbox = factory.create_sandbox()
     sandbox_time = time.perf_counter() - start
 
     start = time.perf_counter()
@@ -86,7 +86,7 @@ print(template.render(name="World"))
     times = []
     for i in range(5):
         start = time.perf_counter()
-        sandbox = preinit.create_sandbox()
+        sandbox = factory.create_sandbox()
         result = sandbox.execute(f"""
 from jinja2 import Template
 t = Template("Sandbox #{{{{ n }}}}: {{{{ msg }}}}")
@@ -128,7 +128,7 @@ Total Budget: ${{ "{:,.2f}".format(departments|sum(attribute='budget')) }}
     }
 
     start = time.perf_counter()
-    sandbox = preinit.create_sandbox()
+    sandbox = factory.create_sandbox()
     result = sandbox.execute(f"""
 import json
 from jinja2 import Template
@@ -144,26 +144,26 @@ print(output)
     print(f"  Total time: {total_time * 1000:.1f}ms")
     print(f"  Output:\n{result.stdout}")
 
-    # Example 4: Save and load runtime for even faster startup
-    print("--- Example 4: Save and load runtime ---")
-    runtime_path = Path("/tmp/eryx-jinja2-runtime.bin")
+    # Example 4: Save and load factory for even faster startup
+    print("--- Example 4: Save and load factory ---")
+    factory_path = Path("/tmp/eryx-jinja2-factory.bin")
 
-    # Save the pre-initialized runtime
+    # Save the factory
     start = time.perf_counter()
-    preinit.save(runtime_path)
+    factory.save(factory_path)
     save_time = time.perf_counter() - start
-    print(f"  Saved runtime to {runtime_path} in {save_time * 1000:.1f}ms")
-    print(f"  File size: {runtime_path.stat().st_size / 1_000_000:.1f} MB")
+    print(f"  Saved factory to {factory_path} in {save_time * 1000:.1f}ms")
+    print(f"  File size: {factory_path.stat().st_size / 1_000_000:.1f} MB")
 
-    # Load the runtime (simulating a new process)
+    # Load the factory (simulating a new process)
     start = time.perf_counter()
-    # Note: We need to provide site_packages when loading since the runtime
+    # Note: We need to provide site_packages when loading since the factory
     # doesn't embed the Python files, only the native code state
-    loaded_preinit = eryx.PreInitializedRuntime.load(runtime_path)
+    loaded_factory = eryx.SandboxFactory.load(factory_path)
     load_time = time.perf_counter() - start
-    print(f"  Loaded runtime in {load_time * 1000:.1f}ms")
+    print(f"  Loaded factory in {load_time * 1000:.1f}ms")
 
-    # Create sandbox from loaded runtime
+    # Create sandbox from loaded factory
     # Note: For jinja2 to work, we need site_packages with the Python files
     # In a real app, you'd either:
     # 1. Keep the extracted site-packages around
@@ -173,7 +173,7 @@ print(output)
 
     # Example 5: Security - sandbox isolation
     print("--- Example 5: Security - sandbox isolation ---")
-    sandbox = preinit.create_sandbox()
+    sandbox = factory.create_sandbox()
     result = sandbox.execute("""
 import os
 
@@ -191,14 +191,14 @@ print(f"HOME env var: {home}")
     print(f"  Output:\n{result.stdout}")
 
     print("=== Summary ===")
-    print(f"  Pre-initialization time: {preinit_time:.2f}s (one-time cost)")
+    print(f"  Factory creation time: {factory_time:.2f}s (one-time cost)")
     print(f"  Average sandbox+execute: {avg_time * 1000:.1f}ms")
-    print(f"  Speedup: ~{700 / (avg_time * 1000):.0f}x faster than without pre-init")
+    print(f"  Speedup: ~{700 / (avg_time * 1000):.0f}x faster than without factory")
     print()
     print("  Key benefits:")
     print("    - Pre-import expensive modules (jinja2) once")
     print("    - Create sandboxes in ~10-20ms instead of ~700ms")
-    print("    - Save/load runtime for fast startup across processes")
+    print("    - Save/load factory for fast startup across processes")
     print("    - Full isolation: each sandbox is independent")
 
 

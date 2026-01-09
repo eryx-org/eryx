@@ -34,6 +34,15 @@ description = "Run tests with embedded WASM"
 depends = ["precompile-eryx-runtime", "setup-eryx-runtime-tests"]
 run = "cargo nextest run --workspace --features embedded"
 
+[tasks.test-python]
+description = "Run Python binding tests"
+depends = ["precompile-eryx-runtime"]
+dir = "crates/eryx-python"
+run = """
+maturin develop --release
+.venv/bin/pytest tests/ -v
+"""
+
 [tasks.test-all]
 description = "Run tests with all features"
 depends = ["precompile-eryx-runtime", "build-preinit", "setup-eryx-runtime-tests"]

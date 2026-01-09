@@ -54,6 +54,11 @@ jobs:
       - name: Build eryx-runtime
         run: mise run build-eryx-runtime
 
+      # Extract Python stdlib for pre-initialization
+      # This is needed so each platform can pre-initialize Python when precompiling
+      - name: Extract Python stdlib
+        run: mise run setup-eryx-runtime-tests
+
       # NOTE: We do NOT precompile here - each platform job will precompile
       # for its target architecture. The .cwasm file is NOT portable across
       # platforms/architectures.
@@ -72,6 +77,7 @@ jobs:
           path: |
             crates/eryx-runtime/runtime.wasm
             crates/eryx-runtime/prebuilt/
+            crates/eryx-wasm-runtime/tests/python-stdlib/
           retention-days: 1
 
   # Build wheels for Linux x86_64 (native build with precompile)
@@ -111,10 +117,10 @@ jobs:
       - name: Cache Rust
         uses: Swatinem/rust-cache@v2
 
-      - name: Pre-compile WASM for this platform
+      - name: Pre-compile WASM for this platform (with Python pre-init)
         run: |
-          echo "Pre-compiling WASM for Linux x86_64..."
-          cargo run -p eryx --example precompile --release
+          echo "Pre-compiling WASM for Linux x86_64 with Python pre-initialization..."
+          cargo run -p eryx --example precompile --features preinit --release
           ls -la crates/eryx-runtime/runtime.cwasm
 
       - name: Mark cwasm as up-to-date
@@ -180,10 +186,10 @@ jobs:
       - name: Cache Rust
         uses: Swatinem/rust-cache@v2
 
-      - name: Pre-compile WASM for this platform
+      - name: Pre-compile WASM for this platform (with Python pre-init)
         run: |
-          echo "Pre-compiling WASM for Linux aarch64..."
-          cargo run -p eryx --example precompile --release
+          echo "Pre-compiling WASM for Linux aarch64 with Python pre-initialization..."
+          cargo run -p eryx --example precompile --features preinit --release
           ls -la crates/eryx-runtime/runtime.cwasm
 
       - name: Mark cwasm as up-to-date
@@ -249,10 +255,10 @@ jobs:
       - name: Cache Rust
         uses: Swatinem/rust-cache@v2
 
-      - name: Pre-compile WASM for this platform
+      - name: Pre-compile WASM for this platform (with Python pre-init)
         run: |
-          echo "Pre-compiling WASM for macOS aarch64..."
-          cargo run -p eryx --example precompile --release
+          echo "Pre-compiling WASM for macOS aarch64 with Python pre-initialization..."
+          cargo run -p eryx --example precompile --features preinit --release
           ls -la crates/eryx-runtime/runtime.cwasm
 
       - name: Mark cwasm as up-to-date
@@ -317,10 +323,10 @@ jobs:
       - name: Cache Rust
         uses: Swatinem/rust-cache@v2
 
-      - name: Pre-compile WASM for this platform
+      - name: Pre-compile WASM for this platform (with Python pre-init)
         run: |
-          echo "Pre-compiling WASM for macOS x86_64..."
-          cargo run -p eryx --example precompile --release
+          echo "Pre-compiling WASM for macOS x86_64 with Python pre-initialization..."
+          cargo run -p eryx --example precompile --features preinit --release
           ls -la crates/eryx-runtime/runtime.cwasm
 
       - name: Mark cwasm as up-to-date
@@ -391,11 +397,11 @@ jobs:
       - name: Cache Rust
         uses: Swatinem/rust-cache@v2
 
-      - name: Pre-compile WASM for this platform
+      - name: Pre-compile WASM for this platform (with Python pre-init)
         shell: bash
         run: |
-          echo "Pre-compiling WASM for Windows x64..."
-          cargo run -p eryx --example precompile --release
+          echo "Pre-compiling WASM for Windows x64 with Python pre-initialization..."
+          cargo run -p eryx --example precompile --features preinit --release
           ls -la crates/eryx-runtime/runtime.cwasm
 
       - name: Mark cwasm as up-to-date

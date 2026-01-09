@@ -93,36 +93,33 @@ class Sandbox:
     Each sandbox has its own memory space and cannot access files, network,
     or other system resources unless explicitly provided via callbacks.
 
+    This creates a fast sandbox (~1-5ms) using the pre-initialized Python runtime.
+    The sandbox has access to Python's standard library but no third-party packages.
+
+    For sandboxes with custom packages, use `SandboxFactory` instead.
+
     Example:
-        # Basic sandbox
+        # Basic sandbox (stdlib only)
         sandbox = Sandbox()
         result = sandbox.execute('print("Hello from the sandbox!")')
         print(result.stdout)  # "Hello from the sandbox!"
 
-        # Sandbox with packages (e.g., jinja2)
-        sandbox = Sandbox(
-            packages=["/path/to/jinja2-3.1.2-py3-none-any.whl"],
+        # For custom packages, use SandboxFactory:
+        factory = SandboxFactory(
+            packages=["/path/to/jinja2.whl", "/path/to/markupsafe.whl"],
+            imports=["jinja2"],
         )
-        result = sandbox.execute('from jinja2 import Template; print(Template("{{ x }}").render(x=42))')
+        sandbox = factory.create_sandbox()
     """
 
     def __init__(
         self,
         *,
-        site_packages: Optional[Union[str, Path]] = None,
-        packages: Optional[Sequence[Union[str, Path]]] = None,
         resource_limits: Optional[ResourceLimits] = None,
     ) -> None:
         """Create a new sandbox with the embedded Python runtime.
 
         Args:
-            site_packages: Optional path to a directory containing Python packages.
-                This directory will be mounted at `/site-packages` in the sandbox
-                and added to Python's import path.
-            packages: Optional list of paths to Python packages (.whl or .tar.gz files).
-                Packages are extracted and their contents added to the sandbox.
-                Packages with native extensions (.so files) are automatically
-                late-linked into the WebAssembly component.
             resource_limits: Optional resource limits for execution.
 
         Raises:
@@ -131,17 +128,12 @@ class Sandbox:
         Example:
             # Default sandbox (stdlib only)
             sandbox = Sandbox()
+            result = sandbox.execute('import json; print(json.dumps([1, 2, 3]))')
 
-            # Sandbox with packages
+            # Sandbox with resource limits
             sandbox = Sandbox(
-                packages=[
-                    "/path/to/jinja2-3.1.2-py3-none-any.whl",
-                    "/path/to/markupsafe-2.1.3-wasi.tar.gz",
-                ]
+                resource_limits=ResourceLimits(execution_timeout_ms=5000)
             )
-
-            # Sandbox with pre-extracted site-packages
-            sandbox = Sandbox(site_packages="/path/to/site-packages")
         """
         ...
 
@@ -206,30 +198,32 @@ class TimeoutError(builtins.TimeoutError, EryxError):
     ...
 
 
-class PreInitializedRuntime:
-    """A pre-initialized Python runtime for fast sandbox creation.
+class SandboxFactory:
+    """A factory for creating sandboxes with custom packages.
 
-    Pre-initialization runs Python's startup code and optionally imports
-    specified modules, capturing the initialized state into a WASM component.
-    This avoids the ~450ms Python initialization cost on each sandbox creation,
-    reducing it to ~10-20ms.
+    SandboxFactory bundles packages and pre-imports into a reusable snapshot,
+    allowing fast creation of sandboxes with those packages already loaded.
+
+    Note: For basic usage without packages, `eryx.Sandbox()` is already fast
+    because the base runtime ships pre-initialized. Use `SandboxFactory` when
+    you need to bundle custom packages.
 
     Example:
-        # Create pre-initialized runtime with jinja2
-        preinit = PreInitializedRuntime(
-            site_packages="/path/to/site-packages",
+        # Create a factory with jinja2
+        factory = SandboxFactory(
+            packages=["/path/to/jinja2.whl", "/path/to/markupsafe.whl"],
             imports=["jinja2"],
         )
 
-        # Create sandboxes quickly (~10-20ms each)
-        sandbox = preinit.create_sandbox()
+        # Create sandboxes with packages already loaded (~10-20ms each)
+        sandbox = factory.create_sandbox()
         result = sandbox.execute('from jinja2 import Template; ...')
 
         # Save for reuse across processes
-        preinit.save("/path/to/runtime.bin")
+        factory.save("/path/to/jinja2-factory.bin")
 
         # Load in another process
-        preinit = PreInitializedRuntime.load("/path/to/runtime.bin")
+        factory = SandboxFactory.load("/path/to/jinja2-factory.bin")
     """
 
     @property
@@ -244,7 +238,7 @@ class PreInitializedRuntime:
         packages: Optional[Sequence[PathLike]] = None,
         imports: Optional[Sequence[str]] = None,
     ) -> None:
-        """Create a new pre-initialized runtime.
+        """Create a new sandbox factory with custom packages.
 
         This performs one-time initialization that can take 3-5 seconds,
         but subsequent sandbox creation will be very fast (~10-20ms).
@@ -257,11 +251,11 @@ class PreInitializedRuntime:
                 Pre-imported modules are immediately available without import overhead.
 
         Raises:
-            InitializationError: If pre-initialization fails.
+            InitializationError: If initialization fails.
 
         Example:
-            # Pre-initialize with jinja2 and markupsafe
-            preinit = PreInitializedRuntime(
+            # Create factory with jinja2 and markupsafe
+            factory = SandboxFactory(
                 packages=[
                     "/path/to/jinja2-3.1.2-py3-none-any.whl",
                     "/path/to/markupsafe-2.1.3-wasi.tar.gz",
@@ -276,44 +270,44 @@ class PreInitializedRuntime:
         path: PathLike,
         *,
         site_packages: Optional[PathLike] = None,
-    ) -> PreInitializedRuntime:
-        """Load a pre-initialized runtime from a file.
+    ) -> SandboxFactory:
+        """Load a sandbox factory from a file.
 
-        This loads a previously saved runtime, which is much faster than
+        This loads a previously saved factory, which is much faster than
         creating a new one (~10ms vs ~3-5s).
 
         Args:
-            path: Path to the saved runtime file.
+            path: Path to the saved factory file.
             site_packages: Optional path to site-packages directory.
-                Required if the runtime was saved without embedded packages.
+                Required if the factory was saved without embedded packages.
 
         Returns:
-            A PreInitializedRuntime loaded from the file.
+            A SandboxFactory loaded from the file.
 
         Raises:
             InitializationError: If loading fails.
 
         Example:
-            preinit = PreInitializedRuntime.load("/path/to/runtime.bin")
-            sandbox = preinit.create_sandbox()
+            factory = SandboxFactory.load("/path/to/jinja2-factory.bin")
+            sandbox = factory.create_sandbox()
         """
         ...
 
     def save(self, path: PathLike) -> None:
-        """Save the pre-initialized runtime to a file.
+        """Save the sandbox factory to a file.
 
-        The saved file can be loaded later with `PreInitializedRuntime.load()`,
-        which is much faster than creating a new runtime.
+        The saved file can be loaded later with `SandboxFactory.load()`,
+        which is much faster than creating a new factory.
 
         Args:
-            path: Path where the runtime should be saved.
+            path: Path where the factory should be saved.
 
         Raises:
             InitializationError: If saving fails.
 
         Example:
-            preinit = PreInitializedRuntime(imports=["json", "re"])
-            preinit.save("/path/to/runtime.bin")
+            factory = SandboxFactory(packages=[...], imports=["jinja2"])
+            factory.save("/path/to/jinja2-factory.bin")
         """
         ...
 
@@ -323,10 +317,10 @@ class PreInitializedRuntime:
         site_packages: Optional[PathLike] = None,
         resource_limits: Optional[ResourceLimits] = None,
     ) -> Sandbox:
-        """Create a new sandbox from the pre-initialized runtime.
+        """Create a new sandbox from this factory.
 
-        This is very fast (~10-20ms) because the Python interpreter is
-        already initialized in the WASM component.
+        This is fast (~10-20ms) because the packages are already bundled
+        into the factory's snapshot.
 
         Args:
             site_packages: Optional path to additional site-packages.
@@ -354,4 +348,4 @@ class PreInitializedRuntime:
 
 
 __version__: str
-"""Version of the eryx package."""
+"""Version of the pyeryx package."""

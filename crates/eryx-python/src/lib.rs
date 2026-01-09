@@ -49,7 +49,7 @@ use pyo3::prelude::*;
 fn _eryx(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // Register classes
     m.add_class::<sandbox::Sandbox>()?;
-    m.add_class::<preinit::PreInitializedRuntime>()?;
+    m.add_class::<preinit::SandboxFactory>()?;
     m.add_class::<result::ExecuteResult>()?;
     m.add_class::<resource_limits::ResourceLimits>()?;
 

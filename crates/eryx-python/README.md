@@ -44,10 +44,34 @@ print(f"Execution took {result.duration_ms:.2f}ms")
 
 - **Complete Isolation**: Sandboxed code cannot access files, network, or system resources
 - **Resource Limits**: Configure timeouts and memory limits
-- **Fast Startup**: Embedded pre-compiled runtime for minimal initialization overhead
-- **Pre-initialization**: Snapshot Python state for ultra-fast sandbox creation (~10-20ms)
+- **Fast Startup**: Pre-initialized Python runtime embedded for ~1-5ms sandbox creation
+- **Pre-initialization**: Custom snapshots with packages for even faster specialized sandboxes
 - **Package Support**: Load Python packages (.whl, .tar.gz) including native extensions
 - **Type Safe**: Full type stubs for IDE support and static analysis
+
+## Performance
+
+The `pyeryx` package ships with a **pre-initialized Python runtime** embedded in the binary.
+This means Python's interpreter initialization (~450ms) has already been done at build time,
+so creating a sandbox is very fast:
+
+```python
+import eryx
+import time
+
+# First sandbox - fast! (~1-5ms)
+start = time.perf_counter()
+sandbox = eryx.Sandbox()
+print(f"Sandbox created in {(time.perf_counter() - start) * 1000:.1f}ms")
+
+# Execution is also fast
+start = time.perf_counter()
+result = sandbox.execute('print("Hello!")')
+print(f"Execution took {(time.perf_counter() - start) * 1000:.1f}ms")
+```
+
+For repeated sandbox creation with custom packages, see
+[`SandboxFactory`](#sandboxfactory) below.
 
 ## API Reference
 
@@ -68,19 +92,23 @@ result = sandbox.execute("print('Hello!')")
 
 ### Loading Packages
 
-You can load Python packages (wheels or tar.gz archives) into the sandbox:
+To use custom packages, use `SandboxFactory` which bundles packages into a reusable
+runtime snapshot:
 
 ```python
 import eryx
 
-# Load packages from wheel files
-sandbox = eryx.Sandbox(
+# Create a factory with your packages (one-time, takes 3-5 seconds)
+factory = eryx.SandboxFactory(
     packages=[
         "/path/to/jinja2-3.1.2-py3-none-any.whl",
         "/path/to/markupsafe-2.1.3-wasi.tar.gz",  # WASI-compiled native extension
-    ]
+    ],
+    imports=["jinja2"],  # Optional: pre-import for faster first execution
 )
 
+# Create sandboxes with packages already loaded (~10-20ms each)
+sandbox = factory.create_sandbox()
 result = sandbox.execute('''
 from jinja2 import Template
 template = Template("Hello, {{ name }}!")
@@ -90,12 +118,6 @@ print(template.render(name="World"))
 
 For packages with native extensions (like markupsafe), you need WASI-compiled
 versions. These are automatically late-linked into the WebAssembly component.
-
-You can also mount a pre-extracted site-packages directory:
-
-```python
-sandbox = eryx.Sandbox(site_packages="/path/to/site-packages")
-```
 
 ### `ExecuteResult`
 
@@ -122,56 +144,66 @@ limits = eryx.ResourceLimits(
 unlimited = eryx.ResourceLimits.unlimited()
 ```
 
-### `PreInitializedRuntime`
+### `SandboxFactory`
 
-For high-throughput use cases, `PreInitializedRuntime` lets you snapshot an initialized
-Python interpreter and create sandboxes from it in ~10-20ms instead of ~450ms.
+For use cases with **custom packages**, `SandboxFactory` lets you create a
+reusable factory with your packages pre-loaded and pre-imported.
+
+> **Note:** For basic usage without packages, `eryx.Sandbox()` is already fast (~1-5ms)
+> because the base runtime ships pre-initialized. Use `SandboxFactory` only when
+> you need to bundle custom packages.
+
+Use cases for `SandboxFactory`:
+
+- Load packages (jinja2, numpy, etc.) once and create many sandboxes from the factory
+- Pre-import modules to eliminate import overhead on first execution
+- Save/load factory state to disk for persistence across process restarts
 
 ```python
 import eryx
 
-# One-time initialization (takes 3-5 seconds)
-preinit = eryx.PreInitializedRuntime(
+# One-time factory creation with packages (takes 3-5 seconds)
+factory = eryx.SandboxFactory(
     packages=[
         "/path/to/jinja2-3.1.2-py3-none-any.whl",
         "/path/to/markupsafe-2.1.3-wasi.tar.gz",
     ],
-    imports=["jinja2"],  # Pre-import modules for even faster startup
+    imports=["jinja2"],  # Pre-import modules
 )
 
-# Create sandboxes quickly (~10-20ms each)
-sandbox = preinit.create_sandbox()
+# Create sandboxes with packages already loaded (~10-20ms each)
+sandbox = factory.create_sandbox()
 result = sandbox.execute('''
 from jinja2 import Template
 print(Template("Hello {{ name }}").render(name="World"))
 ''')
 
-# Create many sandboxes from the same runtime
+# Create many sandboxes from the same factory
 for i in range(100):
-    sandbox = preinit.create_sandbox()
+    sandbox = factory.create_sandbox()
     sandbox.execute(f"print('Sandbox {i}')")
 ```
 
 #### Saving and Loading
 
-Save pre-initialized runtimes to disk for instant startup across process restarts:
+Save factories to disk for instant startup across process restarts:
 
 ```python
-# Save the runtime (includes pre-compiled WASM state)
-preinit.save("/path/to/runtime.bin")
+# Save the factory (includes pre-compiled WASM state + package state)
+factory.save("/path/to/jinja2-factory.bin")
 
-# Later, in another process - loads in ~10ms
-preinit = eryx.PreInitializedRuntime.load("/path/to/runtime.bin")
-sandbox = preinit.create_sandbox()
+# Later, in another process - loads in ~10ms (vs 3-5s to recreate)
+factory = eryx.SandboxFactory.load("/path/to/jinja2-factory.bin")
+sandbox = factory.create_sandbox()
 ```
 
 #### Properties and Methods
 
-- `preinit.size_bytes` - Size of the pre-compiled runtime in bytes
-- `preinit.create_sandbox(resource_limits=...)` - Create a new sandbox
-- `preinit.save(path)` - Save runtime to a file
-- `preinit.to_bytes()` - Get runtime as bytes
-- `PreInitializedRuntime.load(path)` - Load runtime from a file
+- `factory.size_bytes` - Size of the pre-compiled factory in bytes
+- `factory.create_sandbox(resource_limits=...)` - Create a new sandbox
+- `factory.save(path)` - Save factory to a file
+- `factory.to_bytes()` - Get factory as bytes
+- `SandboxFactory.load(path)` - Load factory from a file
 
 ### Exceptions
 

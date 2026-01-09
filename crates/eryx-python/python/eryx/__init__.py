@@ -31,11 +31,11 @@ from eryx._eryx import (
     ExecuteResult,
     ExecutionError,
     InitializationError,
-    PreInitializedRuntime,
     ResourceLimitError,
     ResourceLimits,
     # Classes
     Sandbox,
+    SandboxFactory,
     TimeoutError,
     # Module metadata
     __version__,
@@ -44,7 +44,7 @@ from eryx._eryx import (
 __all__ = [
     # Classes
     "Sandbox",
-    "PreInitializedRuntime",
+    "SandboxFactory",
     "ExecuteResult",
     "ResourceLimits",
     # Exceptions
