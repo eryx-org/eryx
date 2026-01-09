@@ -484,12 +484,7 @@ jobs:
         with:
           subject-path: "dist/*"
 
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-
       - name: Publish to PyPI
-        uses: PyO3/maturin-action@v1
+        uses: pypa/gh-action-pypi-publish@release/v1
         with:
-          command: upload
-          args: --non-interactive --skip-existing dist/*
+          skip-existing: true
