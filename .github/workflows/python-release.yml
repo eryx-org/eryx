@@ -93,7 +93,7 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: wasm-runtime
-          path: .
+          path: crates/eryx-runtime
 
       - name: Verify artifacts and mark as up-to-date
         run: |
@@ -157,7 +157,7 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: wasm-runtime
-          path: .
+          path: crates/eryx-runtime
 
       - name: Verify artifacts and mark as up-to-date
         run: |
@@ -216,7 +216,7 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: wasm-runtime
-          path: .
+          path: crates/eryx-runtime
 
       - name: Verify artifacts and mark as up-to-date
         run: |
@@ -272,7 +272,7 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: wasm-runtime
-          path: .
+          path: crates/eryx-runtime
 
       - uses: actions/setup-python@v5
         with:
