@@ -32,9 +32,10 @@ env:
 
 jobs:
   # Build the WASM runtime first - required for all wheel builds
+  # This produces platform-independent artifacts only
   build-runtime:
     name: Build Runtime
-    runs-on: namespace-profile-eryx-heavy
+    runs-on: namespace-profile-eryx-heavy-linux-amd64
     steps:
       - uses: actions/checkout@v4
 
@@ -53,10 +54,9 @@ jobs:
       - name: Build eryx-runtime
         run: mise run build-eryx-runtime
 
-      - name: Precompile WASM
-        # Use -p eryx to avoid building eryx-python (circular dependency:
-        # eryx-python enables 'embedded' which requires runtime.cwasm to exist)
-        run: cargo run -p eryx --example precompile --release
+      # NOTE: We do NOT precompile here - each platform job will precompile
+      # for its target architecture. The .cwasm file is NOT portable across
+      # platforms/architectures.
 
       - name: Copy prebuilt late-linking artifacts
         run: |
@@ -71,21 +71,14 @@ jobs:
           name: wasm-runtime
           path: |
             crates/eryx-runtime/runtime.wasm
-            crates/eryx-runtime/runtime.cwasm
             crates/eryx-runtime/prebuilt/
           retention-days: 1
 
-  # Build wheels for Linux (manylinux)
-  linux:
-    name: Linux (${{ matrix.target }})
-    runs-on: namespace-profile-eryx-heavy
+  # Build wheels for Linux x86_64 (native build with precompile)
+  linux-x86_64:
+    name: Linux (x86_64)
+    runs-on: namespace-profile-eryx-heavy-linux-amd64
     needs: build-runtime
-    strategy:
-      fail-fast: false
-      matrix:
-        target:
-          - x86_64
-          - aarch64
     steps:
       - uses: actions/checkout@v4
 
@@ -95,7 +88,7 @@ jobs:
           name: wasm-runtime
           path: crates/eryx-runtime
 
-      - name: Verify artifacts and mark as up-to-date
+      - name: Verify artifacts
         run: |
           echo "=== Checking downloaded artifacts ==="
           ls -la crates/eryx-runtime/
@@ -103,15 +96,29 @@ jobs:
 
           # Verify required files exist
           test -f crates/eryx-runtime/runtime.wasm || (echo "runtime.wasm missing!" && exit 1)
-          test -f crates/eryx-runtime/runtime.cwasm || (echo "runtime.cwasm missing!" && exit 1)
           test -f crates/eryx-runtime/prebuilt/liberyx_runtime.so.zst || (echo "liberyx_runtime.so.zst missing!" && exit 1)
           test -f crates/eryx-runtime/prebuilt/liberyx_bindings.so.zst || (echo "liberyx_bindings.so.zst missing!" && exit 1)
 
           # Touch to mark as up-to-date
-          touch crates/eryx-runtime/runtime.wasm crates/eryx-runtime/runtime.cwasm
+          touch crates/eryx-runtime/runtime.wasm
           touch crates/eryx-runtime/prebuilt/*
 
           echo "=== All artifacts verified ==="
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust
+        uses: Swatinem/rust-cache@v2
+
+      - name: Pre-compile WASM for this platform
+        run: |
+          echo "Pre-compiling WASM for Linux x86_64..."
+          cargo run -p eryx --example precompile --release
+          ls -la crates/eryx-runtime/runtime.cwasm
+
+      - name: Mark cwasm as up-to-date
+        run: touch crates/eryx-runtime/runtime.cwasm
 
       - uses: actions/setup-python@v5
         with:
@@ -120,36 +127,27 @@ jobs:
       - name: Build wheels
         uses: PyO3/maturin-action@v1
         with:
-          target: ${{ matrix.target }}
+          target: x86_64
           args: --release --out dist --manifest-path crates/eryx-python/Cargo.toml
           manylinux: auto
 
       - name: Upload wheels
         uses: actions/upload-artifact@v4
         with:
-          name: wheels-linux-${{ matrix.target }}
+          name: wheels-linux-x86_64
           path: dist
 
-      - name: Test wheel (x86_64 only)
-        if: matrix.target == 'x86_64'
+      - name: Test wheel
         run: |
           pip install pytest
           pip install dist/*.whl --force-reinstall
           cd crates/eryx-python && pytest tests/ -v
 
-  # Build wheels for macOS
-  macos:
-    name: macOS (${{ matrix.target }})
-    runs-on: ${{ matrix.runner }}
+  # Build wheels for Linux aarch64 (native ARM build with precompile)
+  linux-aarch64:
+    name: Linux (aarch64)
+    runs-on: namespace-profile-eryx-heavy-linux-arm64
     needs: build-runtime
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - runner: macos-15
-            target: aarch64
-          - runner: macos-15-intel
-            target: x86_64
     steps:
       - uses: actions/checkout@v4
 
@@ -159,7 +157,7 @@ jobs:
           name: wasm-runtime
           path: crates/eryx-runtime
 
-      - name: Verify artifacts and mark as up-to-date
+      - name: Verify artifacts
         run: |
           echo "=== Checking downloaded artifacts ==="
           ls -la crates/eryx-runtime/
@@ -167,15 +165,29 @@ jobs:
 
           # Verify required files exist
           test -f crates/eryx-runtime/runtime.wasm || (echo "runtime.wasm missing!" && exit 1)
-          test -f crates/eryx-runtime/runtime.cwasm || (echo "runtime.cwasm missing!" && exit 1)
           test -f crates/eryx-runtime/prebuilt/liberyx_runtime.so.zst || (echo "liberyx_runtime.so.zst missing!" && exit 1)
           test -f crates/eryx-runtime/prebuilt/liberyx_bindings.so.zst || (echo "liberyx_bindings.so.zst missing!" && exit 1)
 
           # Touch to mark as up-to-date
-          touch crates/eryx-runtime/runtime.wasm crates/eryx-runtime/runtime.cwasm
+          touch crates/eryx-runtime/runtime.wasm
           touch crates/eryx-runtime/prebuilt/*
 
           echo "=== All artifacts verified ==="
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust
+        uses: Swatinem/rust-cache@v2
+
+      - name: Pre-compile WASM for this platform
+        run: |
+          echo "Pre-compiling WASM for Linux aarch64..."
+          cargo run -p eryx --example precompile --release
+          ls -la crates/eryx-runtime/runtime.cwasm
+
+      - name: Mark cwasm as up-to-date
+        run: touch crates/eryx-runtime/runtime.cwasm
 
       - uses: actions/setup-python@v5
         with:
@@ -184,13 +196,150 @@ jobs:
       - name: Build wheels
         uses: PyO3/maturin-action@v1
         with:
-          target: ${{ matrix.target }}
+          target: aarch64
+          args: --release --out dist --manifest-path crates/eryx-python/Cargo.toml
+          manylinux: auto
+
+      - name: Upload wheels
+        uses: actions/upload-artifact@v4
+        with:
+          name: wheels-linux-aarch64
+          path: dist
+
+      - name: Test wheel
+        run: |
+          pip install pytest
+          pip install dist/*.whl --force-reinstall
+          cd crates/eryx-python && pytest tests/ -v
+
+  # Build wheels for macOS ARM (native build with precompile)
+  macos-aarch64:
+    name: macOS (aarch64)
+    runs-on: namespace-profile-eryx-heavy-macos-arm64
+    needs: build-runtime
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download WASM artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: wasm-runtime
+          path: crates/eryx-runtime
+
+      - name: Verify artifacts
+        run: |
+          echo "=== Checking downloaded artifacts ==="
+          ls -la crates/eryx-runtime/
+          ls -la crates/eryx-runtime/prebuilt/ || echo "prebuilt dir missing!"
+
+          # Verify required files exist
+          test -f crates/eryx-runtime/runtime.wasm || (echo "runtime.wasm missing!" && exit 1)
+          test -f crates/eryx-runtime/prebuilt/liberyx_runtime.so.zst || (echo "liberyx_runtime.so.zst missing!" && exit 1)
+          test -f crates/eryx-runtime/prebuilt/liberyx_bindings.so.zst || (echo "liberyx_bindings.so.zst missing!" && exit 1)
+
+          # Touch to mark as up-to-date
+          touch crates/eryx-runtime/runtime.wasm
+          touch crates/eryx-runtime/prebuilt/*
+
+          echo "=== All artifacts verified ==="
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust
+        uses: Swatinem/rust-cache@v2
+
+      - name: Pre-compile WASM for this platform
+        run: |
+          echo "Pre-compiling WASM for macOS aarch64..."
+          cargo run -p eryx --example precompile --release
+          ls -la crates/eryx-runtime/runtime.cwasm
+
+      - name: Mark cwasm as up-to-date
+        run: touch crates/eryx-runtime/runtime.cwasm
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Build wheels
+        uses: PyO3/maturin-action@v1
+        with:
+          target: aarch64
           args: --release --out dist --manifest-path crates/eryx-python/Cargo.toml
 
       - name: Upload wheels
         uses: actions/upload-artifact@v4
         with:
-          name: wheels-macos-${{ matrix.target }}
+          name: wheels-macos-aarch64
+          path: dist
+
+      - name: Test wheel
+        run: |
+          pip install pytest
+          pip install dist/*.whl --force-reinstall
+          cd crates/eryx-python && pytest tests/ -v
+
+  # Build wheels for macOS Intel (GitHub runner)
+  macos-x86_64:
+    name: macOS (x86_64)
+    runs-on: macos-15-intel
+    needs: build-runtime
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download WASM artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: wasm-runtime
+          path: crates/eryx-runtime
+
+      - name: Verify artifacts
+        run: |
+          echo "=== Checking downloaded artifacts ==="
+          ls -la crates/eryx-runtime/
+          ls -la crates/eryx-runtime/prebuilt/ || echo "prebuilt dir missing!"
+
+          # Verify required files exist
+          test -f crates/eryx-runtime/runtime.wasm || (echo "runtime.wasm missing!" && exit 1)
+          test -f crates/eryx-runtime/prebuilt/liberyx_runtime.so.zst || (echo "liberyx_runtime.so.zst missing!" && exit 1)
+          test -f crates/eryx-runtime/prebuilt/liberyx_bindings.so.zst || (echo "liberyx_bindings.so.zst missing!" && exit 1)
+
+          # Touch to mark as up-to-date
+          touch crates/eryx-runtime/runtime.wasm
+          touch crates/eryx-runtime/prebuilt/*
+
+          echo "=== All artifacts verified ==="
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust
+        uses: Swatinem/rust-cache@v2
+
+      - name: Pre-compile WASM for this platform
+        run: |
+          echo "Pre-compiling WASM for macOS x86_64..."
+          cargo run -p eryx --example precompile --release
+          ls -la crates/eryx-runtime/runtime.cwasm
+
+      - name: Mark cwasm as up-to-date
+        run: touch crates/eryx-runtime/runtime.cwasm
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Build wheels
+        uses: PyO3/maturin-action@v1
+        with:
+          target: x86_64
+          args: --release --out dist --manifest-path crates/eryx-python/Cargo.toml
+
+      - name: Upload wheels
+        uses: actions/upload-artifact@v4
+        with:
+          name: wheels-macos-x86_64
           path: dist
 
       - name: Test wheel
@@ -218,7 +367,8 @@ jobs:
           name: wasm-runtime
           path: crates/eryx-runtime
 
-      - name: Verify artifacts and mark as up-to-date
+      - name: Verify artifacts
+        shell: bash
         run: |
           echo "=== Checking downloaded artifacts ==="
           ls -la crates/eryx-runtime/
@@ -226,15 +376,31 @@ jobs:
 
           # Verify required files exist
           test -f crates/eryx-runtime/runtime.wasm || (echo "runtime.wasm missing!" && exit 1)
-          test -f crates/eryx-runtime/runtime.cwasm || (echo "runtime.cwasm missing!" && exit 1)
           test -f crates/eryx-runtime/prebuilt/liberyx_runtime.so.zst || (echo "liberyx_runtime.so.zst missing!" && exit 1)
           test -f crates/eryx-runtime/prebuilt/liberyx_bindings.so.zst || (echo "liberyx_bindings.so.zst missing!" && exit 1)
 
           # Touch to mark as up-to-date
-          touch crates/eryx-runtime/runtime.wasm crates/eryx-runtime/runtime.cwasm
+          touch crates/eryx-runtime/runtime.wasm
           touch crates/eryx-runtime/prebuilt/*
 
           echo "=== All artifacts verified ==="
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust
+        uses: Swatinem/rust-cache@v2
+
+      - name: Pre-compile WASM for this platform
+        shell: bash
+        run: |
+          echo "Pre-compiling WASM for Windows x64..."
+          cargo run -p eryx --example precompile --release
+          ls -la crates/eryx-runtime/runtime.cwasm
+
+      - name: Mark cwasm as up-to-date
+        shell: bash
+        run: touch crates/eryx-runtime/runtime.cwasm
 
       - uses: actions/setup-python@v5
         with:
@@ -263,7 +429,7 @@ jobs:
   # Build source distribution
   sdist:
     name: Source Distribution
-    runs-on: namespace-profile-eryx-heavy
+    runs-on: namespace-profile-eryx-heavy-linux-amd64
     needs: build-runtime
     steps:
       - uses: actions/checkout@v4
@@ -295,7 +461,8 @@ jobs:
     name: Publish to PyPI
     runs-on: namespace-profile-eryx-light
     if: startsWith(github.ref, 'refs/tags/py-v') || (github.event_name == 'workflow_dispatch' && inputs.publish)
-    needs: [linux, macos, windows, sdist]
+    needs:
+      [linux-x86_64, linux-aarch64, macos-aarch64, macos-x86_64, windows, sdist]
     environment: pypi
     permissions:
       id-token: write
