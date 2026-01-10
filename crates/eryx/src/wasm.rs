@@ -986,12 +986,25 @@ impl PythonExecutor {
         // Register the memory tracker as a resource limiter
         store.limiter(|state| &mut state.memory_tracker);
 
-        // Set up epoch-based deadline if timeout is configured.
-        // This allows us to interrupt WASM execution even in tight loops.
+        // Set a high epoch deadline for instantiation - we don't want to timeout during
+        // Python initialization, only during user code execution.
+        store.set_epoch_deadline(u64::MAX / 2);
+
+        // Instantiate from the pre-compiled template (includes Python initialization)
+        let bindings = self
+            .instance_pre
+            .instantiate_async(&mut store)
+            .await
+            .map_err(|e| format!("Failed to instantiate component: {e}"))?;
+
+        tracing::debug!(code_len = code.len(), "Executing Python code");
+
+        // Now set up epoch-based deadline for execution timeout.
+        // This is done AFTER instantiation so the timeout only applies to user code execution,
+        // not Python initialization.
+        const EPOCH_TICK_MS: u64 = 10;
         let epoch_ticker = if let Some(timeout) = execution_timeout {
-            // Set deadline to 1 epoch tick from now (we'll increment epochs over time)
-            // We use a granularity of 10ms for epoch ticks
-            const EPOCH_TICK_MS: u64 = 10;
+            // Set deadline to N epoch ticks from now
             let ticks_until_timeout = timeout.as_millis() as u64 / EPOCH_TICK_MS;
             // Ensure at least 1 tick
             let ticks = ticks_until_timeout.max(1);
@@ -1021,15 +1034,6 @@ impl PythonExecutor {
             store.epoch_deadline_trap();
             None::<Arc<AtomicBool>>
         };
-
-        // Instantiate from the pre-compiled template (fast!)
-        let bindings = self
-            .instance_pre
-            .instantiate_async(&mut store)
-            .await
-            .map_err(|e| format!("Failed to instantiate component: {e}"))?;
-
-        tracing::debug!(code_len = code.len(), "Executing Python code");
 
         // Call the async execute export
         let code_owned = code.to_string();
