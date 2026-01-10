@@ -202,13 +202,13 @@ async fn test_instantiate_component() -> Result<(), Box<dyn std::error::Error>> 
     // Add stub implementations for sandbox imports
     use wasmtime::component::{Accessor, Val};
 
-    // [async]invoke: async func(name: string, arguments-json: string) -> result<string, string>
+    // invoke: async func(name: string, arguments-json: string) -> result<string, string>
     // This implementation handles a few test callbacks:
     // - "get_time": returns a fixed timestamp as JSON
     // - "echo": echoes back the arguments
     // - "add": adds two numbers
     linker.root().func_wrap_concurrent(
-        "[async]invoke",
+        "invoke",
         |_accessor: &Accessor<State>, (name, args): (String, String)| {
             Box::pin(async move {
                 let result: Result<String, String> = match name.as_str() {

@@ -448,7 +448,7 @@ static CALLBACKS_INITIALIZED: std::sync::atomic::AtomicBool =
 // 1. Python calls invoke(name, **kwargs) which serializes args to JSON
 // 2. invoke() calls _eryx._eryx_invoke(name, args_json) (C extension)
 // 3. _eryx_invoke calls python::do_invoke() which uses the INVOKE_CALLBACK
-// 4. The callback (set by with_wit) calls the WIT [async]invoke import
+// 4. The callback (set by with_wit) calls the WIT invoke import
 // 5. Result JSON is returned back through the chain
 
 // Thread-local storage for the current Wit handle during export execution.
@@ -529,7 +529,7 @@ std::thread_local! {
         std::cell::RefCell::new(std::collections::HashMap::new());
 }
 
-/// Call the [async]invoke import with the given callback name and JSON arguments.
+/// Call the invoke import with the given callback name and JSON arguments.
 /// Returns InvokeResult which can be immediate (Ok/Err) or Pending.
 fn call_invoke_async(name: &str, args_json: &str) -> Result<InvokeResult, String> {
     CURRENT_WIT.with(|cell| {
@@ -538,9 +538,9 @@ fn call_invoke_async(name: &str, args_json: &str) -> Result<InvokeResult, String
             .as_ref()
             .ok_or_else(|| "invoke() called outside of execute context".to_string())?;
 
-        // Get the invoke import (it's async: [async]invoke)
+        // Get the invoke import (async in WIT, but wasmtime 40+ uses plain name)
         let import_func = wit
-            .get_import(None, "[async]invoke")
+            .get_import(None, "invoke")
             .ok_or_else(|| "invoke import not found".to_string())?;
 
         // Create a boxed call context so we can store it if the call is pending.

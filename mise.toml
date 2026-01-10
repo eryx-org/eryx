@@ -163,7 +163,7 @@ run = "cargo bench --package eryx --all-features -- --save-baseline main"
 description = "Pre-compile eryx-runtime WASM to native code for faster loading"
 depends = ["build-eryx-runtime"]
 # Note: no --features embedded here - precompile must bootstrap without runtime.cwasm
-run = "cargo run --example precompile --release"
+run = "cargo run -p eryx --example precompile --release"
 sources = ["crates/eryx-runtime/runtime.wasm"]
 outputs = ["crates/eryx-runtime/runtime.cwasm"]
 
