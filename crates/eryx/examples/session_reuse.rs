@@ -57,7 +57,8 @@ async fn demo_session_executor(executor: &Arc<PythonExecutor>) -> anyhow::Result
     let start = Instant::now();
 
     let output = session
-        .execute("x = 1", &[], None, None)
+        .execute("x = 1")
+        .run()
         .await
         .map_err(|e| anyhow::anyhow!(e))?;
     println!(
@@ -67,7 +68,8 @@ async fn demo_session_executor(executor: &Arc<PythonExecutor>) -> anyhow::Result
     );
 
     let output = session
-        .execute("y = 2", &[], None, None)
+        .execute("y = 2")
+        .run()
         .await
         .map_err(|e| anyhow::anyhow!(e))?;
     println!(
@@ -79,7 +81,8 @@ async fn demo_session_executor(executor: &Arc<PythonExecutor>) -> anyhow::Result
     // This should see variables from previous executions once
     // runtime.py is modified to persist exec_globals
     let output = session
-        .execute("print(x + y)", &[], None, None)
+        .execute("print(x + y)")
+        .run()
         .await
         .map_err(|e| anyhow::anyhow!(e))?;
     println!(
@@ -158,15 +161,18 @@ async fn demo_state_snapshots(executor: &Arc<PythonExecutor>) -> anyhow::Result<
 
     // Build up some state
     session
-        .execute("x = 10", &[], None, None)
+        .execute("x = 10")
+        .run()
         .await
         .map_err(|e| anyhow::anyhow!(e))?;
     session
-        .execute("y = 20", &[], None, None)
+        .execute("y = 20")
+        .run()
         .await
         .map_err(|e| anyhow::anyhow!(e))?;
     session
-        .execute("data = [1, 2, 3, 4, 5]", &[], None, None)
+        .execute("data = [1, 2, 3, 4, 5]")
+        .run()
         .await
         .map_err(|e| anyhow::anyhow!(e))?;
 
@@ -188,11 +194,13 @@ async fn demo_state_snapshots(executor: &Arc<PythonExecutor>) -> anyhow::Result<
 
     // Modify the state
     session
-        .execute("x = 999", &[], None, None)
+        .execute("x = 999")
+        .run()
         .await
         .map_err(|e| anyhow::anyhow!(e))?;
     let output = session
-        .execute("print(f'x after modification: {x}')", &[], None, None)
+        .execute("print(f'x after modification: {x}')")
+        .run()
         .await
         .map_err(|e| anyhow::anyhow!(e))?;
     println!("\n{}", output.stdout);
@@ -203,7 +211,8 @@ async fn demo_state_snapshots(executor: &Arc<PythonExecutor>) -> anyhow::Result<
     let restore_duration = restore_start.elapsed();
 
     let output = session
-        .execute("print(f'x after restore: {x}')", &[], None, None)
+        .execute("print(f'x after restore: {x}')")
+        .run()
         .await
         .map_err(|e| anyhow::anyhow!(e))?;
     println!("{}", output.stdout);
@@ -224,12 +233,8 @@ async fn demo_state_snapshots(executor: &Arc<PythonExecutor>) -> anyhow::Result<
 
     session.restore_state(&restored_snapshot).await?;
     let output = session
-        .execute(
-            "print(f'After clear+restore: x={x}, y={y}, data={data}')",
-            &[],
-            None,
-            None,
-        )
+        .execute("print(f'After clear+restore: x={x}, y={y}, data={data}')")
+        .run()
         .await
         .map_err(|e| anyhow::anyhow!(e))?;
     println!("{}", output.stdout);
@@ -258,7 +263,8 @@ async fn benchmark_comparison(
     let start = Instant::now();
     for _ in 0..ITERATIONS {
         session_executor
-            .execute("x = 1", &[], None, None)
+            .execute("x = 1")
+            .run()
             .await
             .map_err(|e| anyhow::anyhow!(e))?;
     }

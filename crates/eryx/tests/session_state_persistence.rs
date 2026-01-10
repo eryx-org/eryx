@@ -109,14 +109,16 @@ async fn test_variable_persistence() {
 
     // Define a variable
     let output = session
-        .execute("x = 42", &[], None, None)
+        .execute("x = 42")
+        .run()
         .await
         .unwrap_or_else(|e| panic!("Failed to execute x = 42: {}", e));
     assert_eq!(output.stdout, "", "Assignment should produce no output");
 
     // Access the variable in a subsequent call
     let output = session
-        .execute("print(x)", &[], None, None)
+        .execute("print(x)")
+        .run()
         .await
         .unwrap_or_else(|e| panic!("Failed to execute print(x): {}", e));
     assert_eq!(
@@ -126,14 +128,16 @@ async fn test_variable_persistence() {
 
     // Modify the variable
     let output = session
-        .execute("x = x + 1", &[], None, None)
+        .execute("x = x + 1")
+        .run()
         .await
         .unwrap_or_else(|e| panic!("Failed to execute x = x + 1: {}", e));
     assert_eq!(output.stdout, "", "Assignment should produce no output");
 
     // Verify the modification persisted
     let output = session
-        .execute("print(x)", &[], None, None)
+        .execute("print(x)")
+        .run()
         .await
         .unwrap_or_else(|e| panic!("Failed to execute print(x) after modification: {}", e));
     assert_eq!(
@@ -153,11 +157,8 @@ async fn test_function_persistence() {
             r#"
 def greet(name):
     return f"Hello, {name}!"
-"#,
-            &[],
-            None,
-            None,
-        )
+"#)
+        .run()
         .await
         .unwrap_or_else(|e| panic!("Failed to define function: {}", e));
     assert_eq!(
@@ -167,7 +168,8 @@ def greet(name):
 
     // Call the function in a subsequent execution
     let output = session
-        .execute("print(greet('World'))", &[], None, None)
+        .execute("print(greet('World'))")
+        .run()
         .await
         .unwrap_or_else(|e| panic!("Failed to call greet function: {}", e));
     assert_eq!(
@@ -192,11 +194,8 @@ class MyCounter:
     def increment(self):
         self.value += 1
         return self.value
-"#,
-            &[],
-            None,
-            None,
-        )
+"#)
+        .run()
         .await
         .unwrap_or_else(|e| panic!("Failed to define class: {}", e));
     assert_eq!(
@@ -206,7 +205,8 @@ class MyCounter:
 
     // Create an instance
     let output = session
-        .execute("counter = MyCounter(10)", &[], None, None)
+        .execute("counter = MyCounter(10)")
+        .run()
         .await
         .unwrap_or_else(|e| panic!("Failed to create instance: {}", e));
     assert_eq!(
@@ -216,13 +216,15 @@ class MyCounter:
 
     // Call methods on the instance
     let output = session
-        .execute("print(counter.increment())", &[], None, None)
+        .execute("print(counter.increment())")
+        .run()
         .await
         .unwrap_or_else(|e| panic!("Failed to call increment: {}", e));
     assert_eq!(output.stdout, "11", "First increment should return 11");
 
     let output = session
-        .execute("print(counter.increment())", &[], None, None)
+        .execute("print(counter.increment())")
+        .run()
         .await
         .unwrap_or_else(|e| panic!("Failed to call second increment: {}", e));
     assert_eq!(output.stdout, "12", "Second increment should return 12");
@@ -235,13 +237,15 @@ async fn test_clear_state() {
 
     // Define a variable
     session
-        .execute("x = 100", &[], None, None)
+        .execute("x = 100")
+        .run()
         .await
         .unwrap_or_else(|e| panic!("Failed to set x: {}", e));
 
     // Verify it exists
     let output = session
-        .execute("print(x)", &[], None, None)
+        .execute("print(x)")
+        .run()
         .await
         .unwrap_or_else(|e| panic!("Failed to print x: {}", e));
     assert_eq!(output.stdout, "100");
@@ -253,7 +257,7 @@ async fn test_clear_state() {
         .unwrap_or_else(|e| panic!("Failed to clear state: {}", e));
 
     // Variable should no longer exist
-    let result = session.execute("print(x)", &[], None, None).await;
+    let result = session.execute("print(x)").run().await;
     assert!(
         result.is_err(),
         "After clear_state, x should not be defined: {:?}",
@@ -268,13 +272,15 @@ async fn test_reset_clears_state() {
 
     // Define a variable
     session
-        .execute("x = 100", &[], None, None)
+        .execute("x = 100")
+        .run()
         .await
         .unwrap_or_else(|e| panic!("Failed to set x: {}", e));
 
     // Verify it exists
     let output = session
-        .execute("print(x)", &[], None, None)
+        .execute("print(x)")
+        .run()
         .await
         .unwrap_or_else(|e| panic!("Failed to print x: {}", e));
     assert_eq!(output.stdout, "100");
@@ -286,7 +292,7 @@ async fn test_reset_clears_state() {
         .unwrap_or_else(|e| panic!("Failed to reset session: {}", e));
 
     // Variable should no longer exist
-    let result = session.execute("print(x)", &[], None, None).await;
+    let result = session.execute("print(x)").run().await;
     assert!(
         result.is_err(),
         "After reset, x should not be defined: {:?}",
@@ -301,34 +307,40 @@ async fn test_complex_state_persistence() {
 
     // Build up complex state across multiple calls
     session
-        .execute("data = []", &[], None, None)
+        .execute("data = []")
+        .run()
         .await
         .unwrap_or_else(|e| panic!("Failed to create list: {}", e));
 
     session
-        .execute("data.append(1)", &[], None, None)
+        .execute("data.append(1)")
+        .run()
         .await
         .unwrap_or_else(|e| panic!("Failed to append 1: {}", e));
 
     session
-        .execute("data.append(2)", &[], None, None)
+        .execute("data.append(2)")
+        .run()
         .await
         .unwrap_or_else(|e| panic!("Failed to append 2: {}", e));
 
     session
-        .execute("data.append(3)", &[], None, None)
+        .execute("data.append(3)")
+        .run()
         .await
         .unwrap_or_else(|e| panic!("Failed to append 3: {}", e));
 
     // Verify the accumulated state
     let output = session
-        .execute("print(sum(data))", &[], None, None)
+        .execute("print(sum(data))")
+        .run()
         .await
         .unwrap_or_else(|e| panic!("Failed to sum data: {}", e));
     assert_eq!(output.stdout, "6", "Sum of [1, 2, 3] should be 6");
 
     let output = session
-        .execute("print(len(data))", &[], None, None)
+        .execute("print(len(data))")
+        .run()
         .await
         .unwrap_or_else(|e| panic!("Failed to get len: {}", e));
     assert_eq!(output.stdout, "3", "Length should be 3");
@@ -342,19 +354,22 @@ async fn test_execution_count() {
     assert_eq!(session.execution_count(), 0, "Initial count should be 0");
 
     session
-        .execute("x = 1", &[], None, None)
+        .execute("x = 1")
+        .run()
         .await
         .unwrap_or_else(|e| panic!("exec 1 failed: {}", e));
     assert_eq!(session.execution_count(), 1);
 
     session
-        .execute("x = 2", &[], None, None)
+        .execute("x = 2")
+        .run()
         .await
         .unwrap_or_else(|e| panic!("exec 2 failed: {}", e));
     assert_eq!(session.execution_count(), 2);
 
     session
-        .execute("x = 3", &[], None, None)
+        .execute("x = 3")
+        .run()
         .await
         .unwrap_or_else(|e| panic!("exec 3 failed: {}", e));
     assert_eq!(session.execution_count(), 3);
@@ -378,15 +393,18 @@ async fn test_snapshot_and_restore() {
 
     // Build up some state
     session
-        .execute("x = 10", &[], None, None)
+        .execute("x = 10")
+        .run()
         .await
         .unwrap_or_else(|e| panic!("Failed to set x: {}", e));
     session
-        .execute("y = 20", &[], None, None)
+        .execute("y = 20")
+        .run()
         .await
         .unwrap_or_else(|e| panic!("Failed to set y: {}", e));
     session
-        .execute("data = [1, 2, 3]", &[], None, None)
+        .execute("data = [1, 2, 3]")
+        .run()
         .await
         .unwrap_or_else(|e| panic!("Failed to set data: {}", e));
 
@@ -400,13 +418,15 @@ async fn test_snapshot_and_restore() {
 
     // Modify the state
     session
-        .execute("x = 999", &[], None, None)
+        .execute("x = 999")
+        .run()
         .await
         .unwrap_or_else(|e| panic!("Failed to modify x: {}", e));
 
     // Verify modification
     let output = session
-        .execute("print(x)", &[], None, None)
+        .execute("print(x)")
+        .run()
         .await
         .unwrap_or_else(|e| panic!("Failed to print x: {}", e));
     assert_eq!(output.stdout, "999");
@@ -419,19 +439,22 @@ async fn test_snapshot_and_restore() {
 
     // Verify original values are back
     let output = session
-        .execute("print(x)", &[], None, None)
+        .execute("print(x)")
+        .run()
         .await
         .expect("Failed to read x");
     assert_eq!(output.stdout, "10", "x should be restored to 10");
 
     let output = session
-        .execute("print(y)", &[], None, None)
+        .execute("print(y)")
+        .run()
         .await
         .expect("Failed to read y");
     assert_eq!(output.stdout, "20", "y should be restored to 20");
 
     let output = session
-        .execute("print(data)", &[], None, None)
+        .execute("print(data)")
+        .run()
         .await
         .expect("Failed to read data");
     assert_eq!(output.stdout, "[1, 2, 3]", "data should be restored");
@@ -444,7 +467,8 @@ async fn test_snapshot_serialization() {
 
     // Set up state
     session
-        .execute("value = 42", &[], None, None)
+        .execute("value = 42")
+        .run()
         .await
         .unwrap_or_else(|e| panic!("Failed to set value: {}", e));
 
@@ -484,7 +508,8 @@ async fn test_snapshot_serialization() {
 
     // Verify the value is back
     let output = session
-        .execute("print(value)", &[], None, None)
+        .execute("print(value)")
+        .run()
         .await
         .unwrap_or_else(|e| panic!("Failed to print value: {}", e));
     assert_eq!(output.stdout, "42");
@@ -497,13 +522,15 @@ async fn test_snapshot_with_unpicklable() {
 
     // Create a lambda (unpicklable)
     session
-        .execute("fn = lambda x: x * 2", &[], None, None)
+        .execute("fn = lambda x: x * 2")
+        .run()
         .await
         .unwrap_or_else(|e| panic!("Failed to create lambda: {}", e));
 
     // Also create a picklable variable
     session
-        .execute("num = 100", &[], None, None)
+        .execute("num = 100")
+        .run()
         .await
         .unwrap_or_else(|e| panic!("Failed to set num: {}", e));
 
@@ -518,7 +545,7 @@ async fn test_snapshot_with_unpicklable() {
         session.restore_state(&snap).await.unwrap();
 
         // num should be restored
-        let result = session.execute("print(num)", &[], None, None).await;
+        let result = session.execute("print(num)").run().await;
         assert!(result.is_ok(), "num should be restored");
         let output = result.unwrap();
         assert_eq!(output.stdout, "100", "num should equal 100");

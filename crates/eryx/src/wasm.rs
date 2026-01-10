@@ -293,6 +293,118 @@ impl SandboxImports for ExecutorState {
     }
 }
 
+/// Builder for configuring and executing Python code.
+///
+/// Created by [`PythonExecutor::execute`]. Use the builder methods to
+/// configure callbacks, tracing, memory limits, and timeouts, then call
+/// [`run`](Self::run) to execute.
+///
+/// # Example
+///
+/// ```rust,ignore
+/// let output = executor
+///     .execute("print('hello')")
+///     .with_callbacks(&callbacks, callback_tx)
+///     .with_timeout(Duration::from_secs(5))
+///     .run()
+///     .await?;
+/// ```
+pub struct ExecuteBuilder<'a> {
+    executor: &'a PythonExecutor,
+    code: String,
+    callbacks: Vec<Arc<dyn Callback>>,
+    callback_tx: Option<mpsc::Sender<CallbackRequest>>,
+    trace_tx: Option<mpsc::UnboundedSender<TraceRequest>>,
+    memory_limit: Option<u64>,
+    execution_timeout: Option<Duration>,
+}
+
+impl std::fmt::Debug for ExecuteBuilder<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ExecuteBuilder")
+            .field("code_len", &self.code.len())
+            .field("callbacks_count", &self.callbacks.len())
+            .field("has_callback_tx", &self.callback_tx.is_some())
+            .field("has_trace_tx", &self.trace_tx.is_some())
+            .field("memory_limit", &self.memory_limit)
+            .field("execution_timeout", &self.execution_timeout)
+            .finish_non_exhaustive()
+    }
+}
+
+impl<'a> ExecuteBuilder<'a> {
+    /// Create a new execute builder.
+    fn new(executor: &'a PythonExecutor, code: impl Into<String>) -> Self {
+        Self {
+            executor,
+            code: code.into(),
+            callbacks: Vec::new(),
+            callback_tx: None,
+            trace_tx: None,
+            memory_limit: None,
+            execution_timeout: None,
+        }
+    }
+
+    /// Set callbacks that Python code can invoke.
+    ///
+    /// The `callback_tx` channel is used to send callback requests from
+    /// the WASM guest to the host for processing. Both the callbacks and
+    /// the channel are required together since they work in tandem.
+    #[must_use]
+    pub fn with_callbacks(
+        mut self,
+        callbacks: &[Arc<dyn Callback>],
+        callback_tx: mpsc::Sender<CallbackRequest>,
+    ) -> Self {
+        self.callbacks = callbacks.to_vec();
+        self.callback_tx = Some(callback_tx);
+        self
+    }
+
+    /// Set the trace channel for receiving execution trace events.
+    #[must_use]
+    pub fn with_tracing(mut self, trace_tx: mpsc::UnboundedSender<TraceRequest>) -> Self {
+        self.trace_tx = Some(trace_tx);
+        self
+    }
+
+    /// Set the maximum memory usage in bytes.
+    #[must_use]
+    pub fn with_memory_limit(mut self, limit: u64) -> Self {
+        self.memory_limit = Some(limit);
+        self
+    }
+
+    /// Set the execution timeout.
+    ///
+    /// Uses epoch-based interruption to interrupt even tight loops
+    /// like `while True: pass`.
+    #[must_use]
+    pub fn with_timeout(mut self, timeout: Duration) -> Self {
+        self.execution_timeout = Some(timeout);
+        self
+    }
+
+    /// Execute the Python code with the configured options.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if execution fails, times out, or exceeds memory limits.
+    pub async fn run(self) -> std::result::Result<ExecutionOutput, String> {
+        self.executor
+            .execute_internal(
+                &self.code,
+                &self.callbacks,
+                self.callback_tx,
+                self.trace_tx,
+                self.memory_limit,
+                self.execution_timeout,
+            )
+            .await
+    }
+}
+
 /// The Python executor that manages the WASM runtime.
 ///
 /// This struct uses pre-instantiation (`SandboxPre`) to perform as much
@@ -750,27 +862,36 @@ impl PythonExecutor {
             .map_err(|e| Error::WasmEngine(format!("Failed to create SandboxPre: {e}")))
     }
 
-    /// Execute Python code with the given callbacks and trace channel.
+    /// Execute Python code with a fluent builder API.
     ///
-    /// This is fast because the expensive linking work was done during
-    /// construction. Each call only needs to:
-    /// 1. Create a new store with fresh state
-    /// 2. Instantiate from the pre-compiled template
-    /// 3. Call the execute export
+    /// This is the primary way to execute code. Use the returned builder
+    /// to configure callbacks, tracing, memory limits, and timeouts.
     ///
-    /// # Arguments
+    /// # Example
     ///
-    /// * `code` - The Python code to execute
-    /// * `callbacks` - Available callbacks that Python code can invoke
-    /// * `callback_tx` - Channel for callback requests (None for no callbacks)
-    /// * `trace_tx` - Channel for trace events (None for no tracing)
-    /// * `memory_limit` - Optional memory limit in bytes
-    /// * `execution_timeout` - Optional timeout for the entire execution
+    /// ```rust,ignore
+    /// // Simple execution
+    /// let output = executor.execute("print('hello')").run().await?;
     ///
-    /// # Returns
+    /// // With all options
+    /// let output = executor
+    ///     .execute("result = await my_callback()")
+    ///     .with_callbacks(&callbacks, callback_tx)
+    ///     .with_tracing(trace_tx)
+    ///     .with_memory_limit(64 * 1024 * 1024)
+    ///     .with_timeout(Duration::from_secs(5))
+    ///     .run()
+    ///     .await?;
+    /// ```
+    #[must_use]
+    pub fn execute(&self, code: impl Into<String>) -> ExecuteBuilder<'_> {
+        ExecuteBuilder::new(self, code)
+    }
+
+    /// Internal execute implementation with all parameters.
     ///
-    /// Returns an [`ExecutionOutput`] on success, or an error message on failure.
-    pub async fn execute(
+    /// This is called by [`ExecuteBuilder::run`].
+    async fn execute_internal(
         &self,
         code: &str,
         callbacks: &[Arc<dyn Callback>],

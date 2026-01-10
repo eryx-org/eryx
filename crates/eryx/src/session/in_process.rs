@@ -151,7 +151,10 @@ impl<'a> InProcessSession<'a> {
         // Timeout is handled via epoch-based interruption inside the executor
         let execution_result = self
             .executor
-            .execute(&full_code, &callbacks, Some(callback_tx), Some(trace_tx))
+            .execute(&full_code)
+            .with_callbacks(&callbacks, callback_tx)
+            .with_tracing(trace_tx)
+            .run()
             .await;
 
         // Wait for the handler tasks to complete

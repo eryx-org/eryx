@@ -69,8 +69,8 @@ pub const MAX_SNAPSHOT_SIZE: usize = 10 * 1024 * 1024;
 ///
 /// ```rust,ignore
 /// // Capture state after some executions
-/// session.execute("x = 1", &[], None, None).await?;
-/// session.execute("y = 2", &[], None, None).await?;
+/// session.execute("x = 1").run().await?;
+/// session.execute("y = 2").run().await?;
 /// let snapshot = session.snapshot_state().await?;
 ///
 /// // Save to bytes for storage
@@ -79,7 +79,7 @@ pub const MAX_SNAPSHOT_SIZE: usize = 10 * 1024 * 1024;
 /// // Later, restore in a new session
 /// let snapshot = PythonStateSnapshot::from_bytes(&bytes)?;
 /// new_session.restore_state(&snapshot).await?;
-/// new_session.execute("print(x + y)", &[], None, None).await?; // prints "3"
+/// new_session.execute("print(x + y)").run().await?; // prints "3"
 /// ```
 #[derive(Debug, Clone)]
 pub struct PythonStateSnapshot {
@@ -174,6 +174,86 @@ impl PythonStateSnapshot {
                 size_bytes,
             },
         })
+    }
+}
+
+/// Builder for configuring and executing Python code in a session.
+///
+/// Created by [`SessionExecutor::execute`]. Use the builder methods to
+/// configure callbacks and tracing, then call [`run`](Self::run) to execute.
+///
+/// # Example
+///
+/// ```rust,ignore
+/// let output = session
+///     .execute("print('hello')")
+///     .with_callbacks(&callbacks, callback_tx)
+///     .run()
+///     .await?;
+/// ```
+pub struct SessionExecuteBuilder<'a> {
+    session: &'a mut SessionExecutor,
+    code: String,
+    callbacks: Vec<Arc<dyn Callback>>,
+    callback_tx: Option<mpsc::Sender<CallbackRequest>>,
+    trace_tx: Option<mpsc::UnboundedSender<TraceRequest>>,
+}
+
+impl std::fmt::Debug for SessionExecuteBuilder<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SessionExecuteBuilder")
+            .field("code_len", &self.code.len())
+            .field("callbacks_count", &self.callbacks.len())
+            .field("has_callback_tx", &self.callback_tx.is_some())
+            .field("has_trace_tx", &self.trace_tx.is_some())
+            .finish_non_exhaustive()
+    }
+}
+
+impl<'a> SessionExecuteBuilder<'a> {
+    /// Create a new session execute builder.
+    fn new(session: &'a mut SessionExecutor, code: impl Into<String>) -> Self {
+        Self {
+            session,
+            code: code.into(),
+            callbacks: Vec::new(),
+            callback_tx: None,
+            trace_tx: None,
+        }
+    }
+
+    /// Set callbacks that Python code can invoke.
+    ///
+    /// The `callback_tx` channel is used to send callback requests from
+    /// the WASM guest to the host for processing. Both the callbacks and
+    /// the channel are required together since they work in tandem.
+    #[must_use]
+    pub fn with_callbacks(
+        mut self,
+        callbacks: &[Arc<dyn Callback>],
+        callback_tx: mpsc::Sender<CallbackRequest>,
+    ) -> Self {
+        self.callbacks = callbacks.to_vec();
+        self.callback_tx = Some(callback_tx);
+        self
+    }
+
+    /// Set the trace channel for receiving execution trace events.
+    #[must_use]
+    pub fn with_tracing(mut self, trace_tx: mpsc::UnboundedSender<TraceRequest>) -> Self {
+        self.trace_tx = Some(trace_tx);
+        self
+    }
+
+    /// Execute the Python code with the configured options.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if execution fails, times out, or the session is in use.
+    pub async fn run(self) -> Result<ExecutionOutput, String> {
+        self.session
+            .execute_internal(&self.code, &self.callbacks, self.callback_tx, self.trace_tx)
+            .await
     }
 }
 
@@ -339,29 +419,34 @@ impl SessionExecutor {
         self.execution_timeout
     }
 
-    /// Execute Python code using the persistent instance.
+    /// Execute Python code with a fluent builder API.
     ///
     /// State from previous executions is preserved - variables defined in
     /// one call are accessible in subsequent calls.
     ///
-    /// # Arguments
+    /// # Example
     ///
-    /// * `code` - The Python code to execute
-    /// * `callbacks` - Callbacks available for this execution
-    /// * `callback_tx` - Channel for callback requests
-    /// * `trace_tx` - Channel for trace events
+    /// ```rust,ignore
+    /// // Simple execution
+    /// let output = session.execute("print('hello')").run().await?;
     ///
-    /// # Errors
+    /// // With callbacks
+    /// let output = session
+    ///     .execute("result = await my_callback()")
+    ///     .with_callbacks(&callbacks, callback_tx)
+    ///     .with_tracing(trace_tx)
+    ///     .run()
+    ///     .await?;
+    /// ```
+    #[must_use]
+    pub fn execute(&mut self, code: impl Into<String>) -> SessionExecuteBuilder<'_> {
+        SessionExecuteBuilder::new(self, code)
+    }
+
+    /// Internal execute implementation with all parameters.
     ///
-    /// Returns an error if execution fails.
-    ///
-    /// # Note
-    ///
-    /// Currently, this creates fresh channels for each execution. The callback
-    /// and trace channels need to be refreshed because the previous execution's
-    /// channels may have been closed.
-    /// Returns an [`ExecutionOutput`] on success.
-    pub async fn execute(
+    /// This is called by [`SessionExecuteBuilder::run`].
+    async fn execute_internal(
         &mut self,
         code: &str,
         callbacks: &[Arc<dyn Callback>],
@@ -638,7 +723,7 @@ impl SessionExecutor {
     /// # Example
     ///
     /// ```rust,ignore
-    /// session.execute("x = 1", &[], None, None).await?;
+    /// session.execute("x = 1").run().await?;
     /// let snapshot = session.snapshot_state().await?;
     /// println!("Snapshot size: {} bytes", snapshot.size());
     /// ```
@@ -767,10 +852,9 @@ impl SessionExecutor {
     /// # Example
     ///
     /// ```rust,ignore
-    /// session.execute("x = 1", &[], None, None).await?;
+    /// session.execute("x = 1").run().await?;
     /// session.clear_state().await?;
     /// // x is no longer defined
-    /// session.execute("print(x)", &[], None, None).await; // Error: x not defined
     /// ```
     pub async fn clear_state(&mut self) -> Result<(), Error> {
         // Take ownership of store and bindings

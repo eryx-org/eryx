@@ -109,10 +109,8 @@ async fn test_python_syntax_error_missing_colon() {
 def broken()  # Missing colon
     pass
 "#,
-            &[],
-            None,
-            None,
         )
+        .run()
         .await;
 
     assert!(result.is_err(), "Should fail with syntax error");
@@ -133,10 +131,8 @@ async fn test_python_syntax_error_unclosed_parenthesis() {
             r#"
 print("hello"
 "#,
-            &[],
-            None,
-            None,
         )
+        .run()
         .await;
 
     assert!(result.is_err(), "Should fail with syntax error");
@@ -152,10 +148,8 @@ async fn test_python_syntax_error_invalid_indentation() {
 def foo():
 pass  # Should be indented
 "#,
-            &[],
-            None,
-            None,
         )
+        .run()
         .await;
 
     assert!(result.is_err(), "Should fail with indentation error");
@@ -169,9 +163,7 @@ pass  # Should be indented
 async fn test_python_name_error_undefined_variable() {
     let mut session = create_session().await;
 
-    let result = session
-        .execute("x = undefined_variable + 1", &[], None, None)
-        .await;
+    let result = session.execute("x = undefined_variable + 1").run().await;
 
     assert!(result.is_err(), "Should fail with NameError");
     let error = result.unwrap_err().to_string();
@@ -186,9 +178,7 @@ async fn test_python_name_error_undefined_variable() {
 async fn test_python_type_error_string_plus_int() {
     let mut session = create_session().await;
 
-    let result = session
-        .execute(r#"result = "hello" + 42"#, &[], None, None)
-        .await;
+    let result = session.execute(r#"result = "hello" + 42"#).run().await;
 
     assert!(result.is_err(), "Should fail with TypeError");
     let error = result.unwrap_err().to_string();
@@ -203,7 +193,7 @@ async fn test_python_type_error_string_plus_int() {
 async fn test_python_zero_division_error() {
     let mut session = create_session().await;
 
-    let result = session.execute("x = 42 / 0", &[], None, None).await;
+    let result = session.execute("x = 42 / 0").run().await;
 
     assert!(result.is_err(), "Should fail with ZeroDivisionError");
     let error = result.unwrap_err().to_string();
@@ -224,10 +214,8 @@ async fn test_python_index_error() {
 items = [1, 2, 3]
 x = items[10]
 "#,
-            &[],
-            None,
-            None,
         )
+        .run()
         .await;
 
     assert!(result.is_err(), "Should fail with IndexError");
@@ -249,10 +237,8 @@ async fn test_python_key_error() {
 data = {"a": 1}
 x = data["nonexistent"]
 "#,
-            &[],
-            None,
-            None,
         )
+        .run()
         .await;
 
     assert!(result.is_err(), "Should fail with KeyError");
@@ -274,10 +260,8 @@ async fn test_python_attribute_error() {
 x = 42
 x.nonexistent_method()
 "#,
-            &[],
-            None,
-            None,
         )
+        .run()
         .await;
 
     assert!(result.is_err(), "Should fail with AttributeError");
@@ -293,9 +277,7 @@ x.nonexistent_method()
 async fn test_python_value_error() {
     let mut session = create_session().await;
 
-    let result = session
-        .execute(r#"x = int("not_a_number")"#, &[], None, None)
-        .await;
+    let result = session.execute(r#"x = int("not_a_number")"#).run().await;
 
     assert!(result.is_err(), "Should fail with ValueError");
     let error = result.unwrap_err().to_string();
@@ -314,7 +296,7 @@ async fn test_python_value_error() {
 async fn test_empty_code_executes_successfully() {
     let mut session = create_session().await;
 
-    let result = session.execute("", &[], None, None).await;
+    let result = session.execute("").run().await;
 
     assert!(result.is_ok(), "Empty code should execute successfully");
     let output = result.unwrap();
@@ -325,7 +307,7 @@ async fn test_empty_code_executes_successfully() {
 async fn test_whitespace_only_code() {
     let mut session = create_session().await;
 
-    let result = session.execute("   \n\n   \t\t\n", &[], None, None).await;
+    let result = session.execute("   \n\n   \t\t\n").run().await;
 
     assert!(
         result.is_ok(),
@@ -343,10 +325,8 @@ async fn test_comment_only_code() {
 # This is a comment
 # Another comment
 "#,
-            &[],
-            None,
-            None,
         )
+        .run()
         .await;
 
     assert!(result.is_ok(), "Comment-only code should succeed");
@@ -362,10 +342,8 @@ async fn test_unicode_in_code() {
 message = "Hello 世界 🌍 مرحبا"
 print(message)
 "#,
-            &[],
-            None,
-            None,
         )
+        .run()
         .await;
 
     assert!(result.is_ok(), "Unicode should work");
@@ -387,10 +365,8 @@ except:
     # Another error in the except block
     y = undefined_in_except
 "#,
-            &[],
-            None,
-            None,
         )
+        .run()
         .await;
 
     assert!(
@@ -404,22 +380,20 @@ async fn test_multiple_errors_in_sequence() {
     let mut session = create_session().await;
 
     // First error
-    let result1 = session.execute("x = 1 / 0", &[], None, None).await;
+    let result1 = session.execute("x = 1 / 0").run().await;
     assert!(result1.is_err());
 
     // Session should still work after error
-    let result2 = session.execute("print('recovered')", &[], None, None).await;
+    let result2 = session.execute("print('recovered')").run().await;
     assert!(result2.is_ok());
     assert!(result2.unwrap().stdout.contains("recovered"));
 
     // Another error
-    let result3 = session.execute("y = undefined_var", &[], None, None).await;
+    let result3 = session.execute("y = undefined_var").run().await;
     assert!(result3.is_err());
 
     // And recover again
-    let result4 = session
-        .execute("print('still working')", &[], None, None)
-        .await;
+    let result4 = session.execute("print('still working')").run().await;
     assert!(result4.is_ok());
 }
 
@@ -433,10 +407,8 @@ async fn test_large_output() {
 for i in range(1000):
     print(f"Line {i}: " + "x" * 100)
 "#,
-            &[],
-            None,
-            None,
         )
+        .run()
         .await;
 
     assert!(result.is_ok(), "Large output should work");
@@ -462,7 +434,7 @@ async fn test_execution_timeout_with_infinite_loop() {
 
     // This infinite loop should be interrupted by epoch-based timeout
     let start = std::time::Instant::now();
-    let result = session.execute("while True: pass", &[], None, None).await;
+    let result = session.execute("while True: pass").run().await;
     let elapsed = start.elapsed();
 
     assert!(result.is_err(), "Infinite loop should timeout");
@@ -495,7 +467,8 @@ async fn test_execution_timeout_allows_fast_code() {
 
     // Fast code should complete successfully
     let result = session
-        .execute("x = sum(range(1000))\nprint(x)", &[], None, None)
+        .execute("x = sum(range(1000))\nprint(x)")
+        .run()
         .await;
 
     assert!(result.is_ok(), "Fast code should succeed: {:?}", result);
@@ -515,7 +488,7 @@ async fn test_session_recovers_after_timeout() {
     session.set_execution_timeout(Some(Duration::from_millis(100)));
 
     // First execution times out
-    let result = session.execute("while True: pass", &[], None, None).await;
+    let result = session.execute("while True: pass").run().await;
     assert!(result.is_err(), "Should timeout");
 
     // Session should still be usable after timeout
@@ -523,7 +496,7 @@ async fn test_session_recovers_after_timeout() {
     session.reset(&[]).await.expect("Reset should work");
     session.set_execution_timeout(Some(Duration::from_secs(5)));
 
-    let result = session.execute("print('recovered')", &[], None, None).await;
+    let result = session.execute("print('recovered')").run().await;
     assert!(
         result.is_ok(),
         "Session should recover after timeout: {:?}",

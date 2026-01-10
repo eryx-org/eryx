@@ -210,20 +210,24 @@ impl Sandbox {
         let trace_collector =
             tokio::spawn(async move { run_trace_collector(trace_rx, trace_handler).await });
 
-        // Execute the Python code with epoch-based timeout (handled inside executor)
-        let memory_limit = self.resource_limits.max_memory_bytes;
-        let execution_timeout = self.resource_limits.execution_timeout;
-        let execution_result = self
+        // Execute the Python code using the builder API
+        let mut execute_builder = self
             .executor
-            .execute(
-                &full_code,
-                &callbacks,
-                Some(callback_tx),
-                Some(trace_tx),
-                memory_limit,
-                execution_timeout,
-            )
-            .await;
+            .execute(&full_code)
+            .with_callbacks(&callbacks, callback_tx)
+            .with_tracing(trace_tx);
+
+        // Add memory limit if configured
+        if let Some(limit) = self.resource_limits.max_memory_bytes {
+            execute_builder = execute_builder.with_memory_limit(limit);
+        }
+
+        // Add timeout if configured
+        if let Some(timeout) = self.resource_limits.execution_timeout {
+            execute_builder = execute_builder.with_timeout(timeout);
+        }
+
+        let execution_result = execute_builder.run().await;
 
         // Wait for the handler tasks to complete
         // The callback channel is closed when execute_future completes (callback_tx dropped)
