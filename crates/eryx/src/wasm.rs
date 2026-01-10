@@ -805,6 +805,19 @@ impl PythonExecutor {
 
     /// Create a configured wasmtime engine.
     ///
+    /// Version identifier for engine configuration.
+    ///
+    /// Bump this when making changes to `create_engine()` that affect
+    /// precompiled component compatibility (e.g., enabling epoch interruption).
+    /// This helps CI caches invalidate when the engine config changes.
+    ///
+    /// Version history:
+    /// - v1: Initial configuration
+    /// - v2: Added epoch_interruption(true) for execution timeouts
+    pub const ENGINE_CONFIG_VERSION: u32 = 2;
+
+    /// Create a configured wasmtime engine.
+    ///
     /// Uses copy-on-write heap images to defer memory initialization
     /// from instantiation time to first write, improving startup performance.
     fn create_engine() -> std::result::Result<Engine, Error> {

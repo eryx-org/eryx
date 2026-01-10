@@ -98,13 +98,7 @@ jobs:
           name: wasm-runtime
           path: crates/
 
-      # Touch artifacts to be newer than sources so mise skips rebuild
-      - name: Mark WASM as up-to-date
-        run: |
-          touch crates/eryx-runtime/runtime.wasm crates/eryx-runtime/runtime.cwasm
-          if [ -d crates/eryx-runtime/prebuilt ]; then
-            touch crates/eryx-runtime/prebuilt/*
-          fi
+      - uses: ./.github/actions/mark-wasm-current
 
       - name: Configure Rust cache
         uses: namespacelabs/nscloud-cache-action@v1
@@ -133,14 +127,7 @@ jobs:
           name: wasm-runtime
           path: crates/
 
-      # Touch artifacts to be newer than sources so mise skips rebuild
-      - name: Mark WASM as up-to-date
-        run: |
-          touch crates/eryx-runtime/runtime.wasm crates/eryx-runtime/runtime.cwasm
-          # Touch prebuilt artifacts if they exist
-          if [ -d crates/eryx-runtime/prebuilt ]; then
-            touch crates/eryx-runtime/prebuilt/*
-          fi
+      - uses: ./.github/actions/mark-wasm-current
 
       - name: Set up eryx-wasm-runtime test artifacts
         run: |
@@ -216,13 +203,7 @@ jobs:
           name: wasm-runtime
           path: crates/
 
-      # Touch artifacts to be newer than sources so mise skips rebuild
-      - name: Mark WASM as up-to-date
-        run: |
-          touch crates/eryx-runtime/runtime.wasm crates/eryx-runtime/runtime.cwasm
-          if [ -d crates/eryx-runtime/prebuilt ]; then
-            touch crates/eryx-runtime/prebuilt/*
-          fi
+      - uses: ./.github/actions/mark-wasm-current
 
       - name: Configure Rust cache
         uses: namespacelabs/nscloud-cache-action@v1
@@ -251,12 +232,7 @@ jobs:
           name: wasm-runtime
           path: crates/
 
-      - name: Mark WASM as up-to-date
-        run: |
-          touch crates/eryx-runtime/runtime.wasm crates/eryx-runtime/runtime.cwasm
-          if [ -d crates/eryx-runtime/prebuilt ]; then
-            touch crates/eryx-runtime/prebuilt/*
-          fi
+      - uses: ./.github/actions/mark-wasm-current
 
       - name: Configure Rust cache
         uses: namespacelabs/nscloud-cache-action@v1
@@ -293,12 +269,7 @@ jobs:
           name: wasm-runtime
           path: crates/
 
-      - name: Mark WASM as up-to-date
-        run: |
-          touch crates/eryx-runtime/runtime.wasm crates/eryx-runtime/runtime.cwasm
-          if [ -d crates/eryx-runtime/prebuilt ]; then
-            touch crates/eryx-runtime/prebuilt/*
-          fi
+      - uses: ./.github/actions/mark-wasm-current
 
       - name: Configure Rust cache
         uses: namespacelabs/nscloud-cache-action@v1
@@ -346,12 +317,7 @@ jobs:
           name: wasm-runtime
           path: crates/
 
-      - name: Mark WASM as up-to-date
-        run: |
-          touch crates/eryx-runtime/runtime.wasm crates/eryx-runtime/runtime.cwasm
-          if [ -d crates/eryx-runtime/prebuilt ]; then
-            touch crates/eryx-runtime/prebuilt/*
-          fi
+      - uses: ./.github/actions/mark-wasm-current
 
       - name: Configure Rust cache
         uses: namespacelabs/nscloud-cache-action@v1

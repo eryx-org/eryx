@@ -1,0 +1,33 @@
+name: "Mark WASM as Current"
+description: "Touch WASM artifacts to mark them as up-to-date and invalidate embedded.rs if cwasm changed"
+
+runs:
+  using: "composite"
+  steps:
+    - name: Mark WASM as up-to-date
+      shell: bash
+      run: |
+        # Touch WASM artifacts to be newer than sources so mise skips rebuild
+        touch crates/eryx-runtime/runtime.wasm crates/eryx-runtime/runtime.cwasm
+
+        # Touch prebuilt artifacts if they exist
+        if [ -d crates/eryx-runtime/prebuilt ]; then
+          touch crates/eryx-runtime/prebuilt/*
+        fi
+
+        # Check if cwasm changed by comparing checksums
+        # This invalidates cached binaries that have old cwasm embedded
+        CWASM_HASH=$(sha256sum crates/eryx-runtime/runtime.cwasm | cut -d' ' -f1)
+        CACHED_HASH=""
+        if [ -f target/.cwasm-hash ]; then
+          CACHED_HASH=$(cat target/.cwasm-hash)
+        fi
+
+        if [ "$CWASM_HASH" != "$CACHED_HASH" ]; then
+          echo "cwasm changed ($CACHED_HASH -> $CWASM_HASH), invalidating embedded.rs"
+          touch crates/eryx/src/embedded.rs
+          mkdir -p target
+          echo "$CWASM_HASH" > target/.cwasm-hash
+        else
+          echo "cwasm unchanged ($CWASM_HASH)"
+        fi
