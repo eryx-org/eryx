@@ -14,7 +14,7 @@ A Rust library that executes Python code in a WebAssembly sandbox with async cal
 - **Execution tracing** — Line-level progress reporting via `sys.settrace`
 - **Introspection** — Python can discover available callbacks at runtime
 - **Composable runtime libraries** — Pre-built APIs with Python wrappers and type stubs
-- **Pre-compiled WASM** — 41x faster sandbox creation with ahead-of-time compilation
+- **Pre-compiled Wasm** — 41x faster sandbox creation with ahead-of-time compilation
 
 ## Quick Start
 
@@ -144,7 +144,7 @@ async fn main() -> Result<(), eryx::Error> {
 
 | Feature              | Description                                                                         | Trade-offs                               |
 |----------------------|-------------------------------------------------------------------------------------|------------------------------------------|
-| `embedded`           | Zero-config sandboxes: embeds pre-compiled WASM runtime + Python stdlib             | +32MB binary size; enables `unsafe` code paths |
+| `embedded`           | Zero-config sandboxes: embeds pre-compiled Wasm runtime + Python stdlib             | +32MB binary size; enables `unsafe` code paths |
 | `preinit`            | Pre-initialization support for ~25x faster sandbox creation                         | Adds `eryx-runtime` dep; requires build step |
 | `native-extensions`  | Native Python extension support (e.g., numpy) via late-linking                      | Implies `preinit`; experimental          |
 
@@ -187,7 +187,7 @@ let sandbox = Sandbox::embedded()
 
 ## Performance
 
-| Metric | Normal WASM | Pre-compiled | Speedup |
+| Metric | Normal Wasm | Pre-compiled | Speedup |
 |--------|-------------|--------------|---------|
 | Sandbox creation | ~650ms | ~16ms | **41x faster** |
 | Per-execution overhead | ~1.8ms | ~1.6ms | 14% faster |
@@ -201,7 +201,7 @@ This project uses [mise](https://mise.jdx.dev/) for tooling and task management.
 
 ```bash
 mise install
-mise run setup  # Build WASM + precompile (one-time)
+mise run setup  # Build Wasm + precompile (one-time)
 ```
 
 ### Tasks
@@ -210,15 +210,15 @@ mise run setup  # Build WASM + precompile (one-time)
 # Development
 mise run check          # Run cargo check
 mise run build          # Build all crates
-mise run test           # Run tests with embedded WASM
+mise run test           # Run tests with embedded Wasm
 mise run test-all       # Run tests with all features
 mise run lint           # Run clippy lints
 mise run fmt            # Format code
 mise run fmt-check      # Check code formatting
 
-# WASM
-mise run build-eryx-runtime  # Build the Python WASM component
-mise run build-all      # Build WASM + Rust crates
+# Wasm
+mise run build-eryx-runtime  # Build the Python Wasm component
+mise run build-all      # Build Wasm + Rust crates
 mise run precompile-eryx-runtime # Pre-compile to native code
 
 # CI & Quality
@@ -296,20 +296,55 @@ eryx/
 │   │           ├── mod.rs
 │   │           ├── executor.rs   # SessionExecutor
 │   │           └── in_process.rs # InProcessSession
-│   ├── eryx-runtime/       # Python WASM runtime packaging
+│   ├── eryx-runtime/       # Python Wasm runtime packaging
 │   │   ├── Cargo.toml
 │   │   ├── build.rs        # Links eryx-wasm-runtime + libpython + WASI libs
 │   │   ├── runtime.wit     # WIT interface definition
-│   │   ├── runtime.wasm    # Built WASM component (~47MB)
+│   │   ├── runtime.wasm    # Built Wasm component (~47MB)
 │   │   ├── runtime.cwasm   # Pre-compiled native code (~52MB)
 │   │   └── libs/           # WASI libraries (zstd compressed)
-│   └── eryx-wasm-runtime/  # Rust runtime implementation (compiled to WASM)
+│   └── eryx-wasm-runtime/  # Rust runtime implementation (compiled to Wasm)
 │       ├── Cargo.toml
 │       └── src/
 │           ├── lib.rs      # WIT export implementations
 │           └── python.rs   # Python interpreter FFI, tracing
 └── docs/plans/             # Design documents
 ```
+
+## Inspiration & Acknowledgements
+
+Eryx is heavily inspired by and closely related to [**componentize-py**](https://github.com/bytecodealliance/componentize-py/), a Bytecode Alliance project that pioneered running Python in WebAssembly via the Component Model. Eryx builds on the same foundational work (CPython compiled to Wasm, WASI support) but takes a different architectural approach. Python bindings are also available, allowing you to run sandboxed Python from within a Python host.
+
+This project builds on excellent work from the [Bytecode Alliance](https://bytecodealliance.org/):
+
+- [**wasmtime**](https://github.com/bytecodealliance/wasmtime) — The WebAssembly runtime that powers eryx's sandboxed execution
+- [**wasm-tools**](https://github.com/bytecodealliance/wasm-tools) — WebAssembly tooling including `wit-component`, `wit-parser`, and component linking
+- [**componentize-py**](https://github.com/bytecodealliance/componentize-py) — The foundation for running CPython in Wasm, including the WASI-compatible Python build
+- [**component-init**](https://github.com/dicej/component-init) — Pre-initialization support for faster sandbox startup (by [@dicej](https://github.com/dicej))
+
+### Comparison with componentize-py
+
+| Aspect                     | componentize-py                                      | eryx                                                 |
+|----------------------------|------------------------------------------------------|------------------------------------------------------|
+| **Primary Use Case**       | Build Python *components* that export WIT interfaces | Embed Python as a *sandbox* within a Rust host       |
+| **Direction of Control**   | Python exports functions for hosts to call           | Rust host executes Python code and exposes callbacks |
+| **WIT Usage**              | Python implements WIT worlds (exports)               | Internal implementation detail (not user-facing)     |
+| **Output**                 | Standalone `.wasm` component files                   | In-process sandboxed execution                       |
+| **Async Model**            | Component Model async (if supported)                 | Python `asyncio` with Rust `async` callbacks         |
+| **Target Audience**        | Python developers building Wasm components           | Rust/Python developers embedding sandboxed scripting |
+| **State Management**       | Stateless component invocations                      | Session persistence, snapshots, REPL-style           |
+| **Package Loading**        | Build-time only (bundled into component)             | Dynamic at runtime via `with_package()`              |
+
+**When to use componentize-py:**
+- You're building a Python application to distribute as a Wasm component
+- You want Python to implement a WIT interface that other components/hosts consume
+- You're working in a component-model-native ecosystem (e.g., wasmCloud, Spin)
+
+**When to use eryx:**
+- You're building a Rust or Python application that needs to run user-provided Python code
+- You need a sandboxed scripting environment with controlled host callbacks
+- You want REPL-style sessions with state persistence between executions
+- You need fine-grained execution tracing and resource limits
 
 ## License
 
