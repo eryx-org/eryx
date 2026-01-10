@@ -35,7 +35,8 @@
 //! persistence to storage. The Python runtime uses pickle for serialization.
 
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use tokio::sync::mpsc;
 use wasmtime::Store;
@@ -199,6 +200,9 @@ pub struct SessionExecutor {
 
     /// Number of executions performed in this session.
     execution_count: u32,
+
+    /// Optional execution timeout for epoch-based interruption.
+    execution_timeout: Option<Duration>,
 }
 
 impl std::fmt::Debug for SessionExecutor {
@@ -207,6 +211,7 @@ impl std::fmt::Debug for SessionExecutor {
             .field("execution_count", &self.execution_count)
             .field("has_store", &self.store.is_some())
             .field("has_bindings", &self.bindings.is_some())
+            .field("execution_timeout", &self.execution_timeout)
             .finish_non_exhaustive()
     }
 }
@@ -311,7 +316,27 @@ impl SessionExecutor {
             store: Some(store),
             bindings: Some(bindings),
             execution_count: 0,
+            execution_timeout: None,
         })
+    }
+
+    /// Set the execution timeout for epoch-based interruption.
+    ///
+    /// When set, long-running Python code (including infinite loops like
+    /// `while True: pass`) will be interrupted after the specified duration.
+    /// This uses wasmtime's epoch-based interruption mechanism.
+    ///
+    /// # Arguments
+    ///
+    /// * `timeout` - Optional timeout duration. Pass `None` to disable.
+    pub fn set_execution_timeout(&mut self, timeout: Option<Duration>) {
+        self.execution_timeout = timeout;
+    }
+
+    /// Get the current execution timeout.
+    #[must_use]
+    pub fn execution_timeout(&self) -> Option<Duration> {
+        self.execution_timeout
     }
 
     /// Execute Python code using the persistent instance.
@@ -381,11 +406,52 @@ impl SessionExecutor {
             "SessionExecutor: executing Python code"
         );
 
+        // Set up epoch-based deadline if timeout is configured.
+        // This allows us to interrupt WASM execution even in tight loops.
+        let execution_timeout = self.execution_timeout;
+        let epoch_ticker = if let Some(timeout) = execution_timeout {
+            // Set deadline to N epoch ticks from now (we'll increment epochs over time)
+            // We use a granularity of 10ms for epoch ticks
+            const EPOCH_TICK_MS: u64 = 10;
+            let ticks_until_timeout = timeout.as_millis() as u64 / EPOCH_TICK_MS;
+            // Ensure at least 1 tick
+            let ticks = ticks_until_timeout.max(1);
+            store.set_epoch_deadline(ticks);
+
+            // Configure the store to trap when the epoch deadline is reached
+            store.epoch_deadline_trap();
+
+            // Spawn a thread to increment the engine's epoch periodically.
+            // We use a std::thread instead of tokio::spawn because the WASM
+            // execution may block the tokio runtime, preventing async tasks
+            // from running.
+            let engine = self.executor.engine().clone();
+            let stop_flag = Arc::new(AtomicBool::new(false));
+            let stop_flag_clone = Arc::clone(&stop_flag);
+            std::thread::spawn(move || {
+                while !stop_flag_clone.load(Ordering::Relaxed) {
+                    std::thread::sleep(Duration::from_millis(EPOCH_TICK_MS));
+                    engine.increment_epoch();
+                }
+            });
+            Some(stop_flag)
+        } else {
+            // No timeout - set a very high deadline that won't be reached
+            store.set_epoch_deadline(u64::MAX);
+            store.epoch_deadline_trap();
+            None::<Arc<AtomicBool>>
+        };
+
         // Execute the code
         let code_owned = code.to_string();
         let result = store
             .run_concurrent(async |accessor| bindings.call_execute(accessor, code_owned).await)
             .await;
+
+        // Stop the epoch ticker thread if it was running
+        if let Some(stop_flag) = epoch_ticker {
+            stop_flag.store(true, Ordering::Relaxed);
+        }
 
         // Clear channels after execution and capture peak memory
         let peak_memory = {
@@ -399,8 +465,18 @@ impl SessionExecutor {
         self.store = Some(store);
         self.bindings = Some(bindings);
 
-        // Process result
-        let wasmtime_result = result.map_err(|e| format!("WASM execution error: {e:?}"))?;
+        // Process result - check for epoch deadline exceeded (timeout)
+        let wasmtime_result = result.map_err(|e| {
+            let err_str = format!("{e:?}");
+            if err_str.contains("epoch deadline") || err_str.contains("wasm trap: interrupt") {
+                format!(
+                    "Execution timed out after {:?}",
+                    execution_timeout.unwrap_or_default()
+                )
+            } else {
+                format!("WASM execution error: {e:?}")
+            }
+        })?;
         let stdout = wasmtime_result.map_err(|e| format!("WASM execution error: {e:?}"))??;
         Ok(ExecutionOutput::new(stdout, peak_memory))
     }
@@ -494,7 +570,10 @@ impl SessionExecutor {
         // Register the memory tracker as a resource limiter
         store.limiter(|state| &mut state.memory_tracker);
 
-        // Re-instantiate the component
+        // Preserve execution timeout setting across reset
+        let execution_timeout = self.execution_timeout;
+
+        // Instantiate the component
         let bindings = self
             .executor
             .instance_pre()
@@ -505,6 +584,7 @@ impl SessionExecutor {
         self.store = Some(store);
         self.bindings = Some(bindings);
         self.execution_count = 0;
+        self.execution_timeout = execution_timeout;
 
         Ok(())
     }

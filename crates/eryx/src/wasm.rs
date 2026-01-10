@@ -25,10 +25,11 @@
 
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::time::Duration;
 
 #[cfg(feature = "embedded")]
 use crate::cache::{CacheKey, InstancePreCache};
-use std::sync::atomic::{AtomicU64, Ordering};
 
 use tokio::sync::{mpsc, oneshot};
 use wasmtime::component::{Accessor, Component, HasSelf, Linker, ResourceTable};
@@ -700,6 +701,11 @@ impl PythonExecutor {
         config.wasm_component_model_async(true);
         config.async_support(true);
 
+        // Enable epoch-based interruption for execution timeouts.
+        // This allows us to interrupt WASM execution even in tight loops
+        // that don't yield to the async runtime (e.g., `while True: pass`).
+        config.epoch_interruption(true);
+
         // Enable copy-on-write heap images for faster instantiation
         // This defers memory initialization from instantiation time to first write
         config.memory_init_cow(true);
@@ -758,6 +764,8 @@ impl PythonExecutor {
     /// * `callbacks` - Available callbacks that Python code can invoke
     /// * `callback_tx` - Channel for callback requests (None for no callbacks)
     /// * `trace_tx` - Channel for trace events (None for no tracing)
+    /// * `memory_limit` - Optional memory limit in bytes
+    /// * `execution_timeout` - Optional timeout for the entire execution
     ///
     /// # Returns
     ///
@@ -769,6 +777,7 @@ impl PythonExecutor {
         callback_tx: Option<mpsc::Sender<CallbackRequest>>,
         trace_tx: Option<mpsc::UnboundedSender<TraceRequest>>,
         memory_limit: Option<u64>,
+        execution_timeout: Option<Duration>,
     ) -> std::result::Result<ExecutionOutput, String> {
         // Build callback info for introspection
         let callback_infos: Vec<HostCallbackInfo> = callbacks
@@ -843,6 +852,41 @@ impl PythonExecutor {
         // Register the memory tracker as a resource limiter
         store.limiter(|state| &mut state.memory_tracker);
 
+        // Set up epoch-based deadline if timeout is configured.
+        // This allows us to interrupt WASM execution even in tight loops.
+        let epoch_ticker = if let Some(timeout) = execution_timeout {
+            // Set deadline to 1 epoch tick from now (we'll increment epochs over time)
+            // We use a granularity of 10ms for epoch ticks
+            const EPOCH_TICK_MS: u64 = 10;
+            let ticks_until_timeout = timeout.as_millis() as u64 / EPOCH_TICK_MS;
+            // Ensure at least 1 tick
+            let ticks = ticks_until_timeout.max(1);
+            store.set_epoch_deadline(ticks);
+
+            // Configure the store to trap when the epoch deadline is reached
+            store.epoch_deadline_trap();
+
+            // Spawn a thread to increment the engine's epoch periodically.
+            // We use a std::thread instead of tokio::spawn because the WASM
+            // execution may block the tokio runtime, preventing async tasks
+            // from running.
+            let engine = self.engine.clone();
+            let stop_flag = Arc::new(AtomicBool::new(false));
+            let stop_flag_clone = Arc::clone(&stop_flag);
+            std::thread::spawn(move || {
+                while !stop_flag_clone.load(Ordering::Relaxed) {
+                    std::thread::sleep(Duration::from_millis(EPOCH_TICK_MS));
+                    engine.increment_epoch();
+                }
+            });
+            Some(stop_flag)
+        } else {
+            // No timeout - set a very high deadline that won't be reached
+            store.set_epoch_deadline(u64::MAX);
+            store.epoch_deadline_trap();
+            None::<Arc<AtomicBool>>
+        };
+
         // Instantiate from the pre-compiled template (fast!)
         let bindings = self
             .instance_pre
@@ -858,8 +902,25 @@ impl PythonExecutor {
         // run_concurrent returns Result<R, Error> where R is the closure's return type
         let wasmtime_result = store
             .run_concurrent(async |accessor| bindings.call_execute(accessor, code_owned).await)
-            .await
-            .map_err(|e| format!("WASM execution error: {e:?}"))?;
+            .await;
+
+        // Stop the epoch ticker thread if it was running
+        if let Some(stop_flag) = epoch_ticker {
+            stop_flag.store(true, Ordering::Relaxed);
+        }
+
+        // Check for epoch deadline exceeded (timeout)
+        let wasmtime_result = wasmtime_result.map_err(|e| {
+            let err_str = format!("{e:?}");
+            if err_str.contains("epoch deadline") || err_str.contains("wasm trap: interrupt") {
+                format!(
+                    "Execution timed out after {:?}",
+                    execution_timeout.unwrap_or_default()
+                )
+            } else {
+                format!("WASM execution error: {e:?}")
+            }
+        })?;
 
         // wasmtime_result is wasmtime::Result<Result<String, String>>
         let stdout = wasmtime_result.map_err(|e| format!("WASM execution error: {e:?}"))??;

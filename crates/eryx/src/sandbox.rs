@@ -210,23 +210,20 @@ impl Sandbox {
         let trace_collector =
             tokio::spawn(async move { run_trace_collector(trace_rx, trace_handler).await });
 
-        // Execute the Python code with optional timeout
+        // Execute the Python code with epoch-based timeout (handled inside executor)
         let memory_limit = self.resource_limits.max_memory_bytes;
-        let execute_future = self.executor.execute(
-            &full_code,
-            &callbacks,
-            Some(callback_tx),
-            Some(trace_tx),
-            memory_limit,
-        );
-
-        let execution_result = if let Some(timeout) = self.resource_limits.execution_timeout {
-            tokio::time::timeout(timeout, execute_future)
-                .await
-                .unwrap_or_else(|_| Err(format!("Execution timed out after {timeout:?}")))
-        } else {
-            execute_future.await
-        };
+        let execution_timeout = self.resource_limits.execution_timeout;
+        let execution_result = self
+            .executor
+            .execute(
+                &full_code,
+                &callbacks,
+                Some(callback_tx),
+                Some(trace_tx),
+                memory_limit,
+                execution_timeout,
+            )
+            .await;
 
         // Wait for the handler tasks to complete
         // The callback channel is closed when execute_future completes (callback_tx dropped)

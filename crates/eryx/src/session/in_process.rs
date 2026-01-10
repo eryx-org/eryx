@@ -95,7 +95,10 @@ impl<'a> InProcessSession<'a> {
     pub async fn new(sandbox: &'a Sandbox) -> Result<Self, Error> {
         let callbacks: Vec<Arc<dyn Callback>> = sandbox.callbacks().values().cloned().collect();
 
-        let executor = SessionExecutor::new(sandbox.executor().clone(), &callbacks).await?;
+        let mut executor = SessionExecutor::new(sandbox.executor().clone(), &callbacks).await?;
+
+        // Set execution timeout from sandbox resource limits
+        executor.set_execution_timeout(sandbox.resource_limits().execution_timeout);
 
         Ok(Self {
             sandbox,
@@ -145,18 +148,11 @@ impl<'a> InProcessSession<'a> {
             self.sandbox.callbacks().values().cloned().collect();
 
         // Execute using the session executor (keeps instance alive!)
-        let execute_future =
-            self.executor
-                .execute(&full_code, &callbacks, Some(callback_tx), Some(trace_tx));
-
-        let execution_result =
-            if let Some(timeout) = self.sandbox.resource_limits().execution_timeout {
-                tokio::time::timeout(timeout, execute_future)
-                    .await
-                    .unwrap_or_else(|_| Err(format!("Execution timed out after {timeout:?}")))
-            } else {
-                execute_future.await
-            };
+        // Timeout is handled via epoch-based interruption inside the executor
+        let execution_result = self
+            .executor
+            .execute(&full_code, &callbacks, Some(callback_tx), Some(trace_tx))
+            .await;
 
         // Wait for the handler tasks to complete
         let callback_invocations = callback_handler.await.unwrap_or(0);

@@ -447,3 +447,87 @@ for i in range(1000):
     );
     assert!(output.stdout.contains("Line 999"), "Should have last line");
 }
+
+#[tokio::test]
+async fn test_execution_timeout_with_infinite_loop() {
+    use std::time::Duration;
+
+    let executor = get_shared_executor();
+    let mut session = SessionExecutor::new(executor, &[])
+        .await
+        .expect("Failed to create session");
+
+    // Set a 500ms timeout (longer to account for Python startup)
+    session.set_execution_timeout(Some(Duration::from_millis(500)));
+
+    // This infinite loop should be interrupted by epoch-based timeout
+    let start = std::time::Instant::now();
+    let result = session.execute("while True: pass", &[], None, None).await;
+    let elapsed = start.elapsed();
+
+    assert!(result.is_err(), "Infinite loop should timeout");
+    let error = result.unwrap_err();
+    assert!(
+        error.contains("timed out") || error.contains("epoch") || error.contains("interrupt"),
+        "Error should mention timeout/epoch/interrupt: {}",
+        error
+    );
+
+    // Should complete in roughly the timeout duration (with some margin)
+    assert!(
+        elapsed < Duration::from_secs(2),
+        "Should timeout quickly, not hang forever. Elapsed: {:?}",
+        elapsed
+    );
+}
+
+#[tokio::test]
+async fn test_execution_timeout_allows_fast_code() {
+    use std::time::Duration;
+
+    let executor = get_shared_executor();
+    let mut session = SessionExecutor::new(executor, &[])
+        .await
+        .expect("Failed to create session");
+
+    // Set a generous timeout
+    session.set_execution_timeout(Some(Duration::from_secs(5)));
+
+    // Fast code should complete successfully
+    let result = session
+        .execute("x = sum(range(1000))\nprint(x)", &[], None, None)
+        .await;
+
+    assert!(result.is_ok(), "Fast code should succeed: {:?}", result);
+    assert!(result.unwrap().stdout.contains("499500"));
+}
+
+#[tokio::test]
+async fn test_session_recovers_after_timeout() {
+    use std::time::Duration;
+
+    let executor = get_shared_executor();
+    let mut session = SessionExecutor::new(executor, &[])
+        .await
+        .expect("Failed to create session");
+
+    // Set a short timeout
+    session.set_execution_timeout(Some(Duration::from_millis(100)));
+
+    // First execution times out
+    let result = session.execute("while True: pass", &[], None, None).await;
+    assert!(result.is_err(), "Should timeout");
+
+    // Session should still be usable after timeout
+    // Need to reset since the store may be in a bad state after trap
+    session.reset(&[]).await.expect("Reset should work");
+    session.set_execution_timeout(Some(Duration::from_secs(5)));
+
+    let result = session.execute("print('recovered')", &[], None, None).await;
+    assert!(
+        result.is_ok(),
+        "Session should recover after timeout: {:?}",
+        result
+    );
+    assert!(result.unwrap().stdout.contains("recovered"));
+}

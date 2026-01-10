@@ -129,12 +129,9 @@ class TestResourceLimits:
         result = sandbox.execute('print("ok")')
         assert result.stdout == "ok"
 
-    @pytest.mark.skip(
-        reason="Timeout not working with pre-compiled components - known limitation"
-    )
     def test_execution_timeout(self):
         """Test that execution timeout works."""
-        limits = eryx.ResourceLimits(execution_timeout_ms=100)
+        limits = eryx.ResourceLimits(execution_timeout_ms=500)
         sandbox = eryx.Sandbox(resource_limits=limits)
 
         with pytest.raises(eryx.TimeoutError):
@@ -168,12 +165,9 @@ class TestExceptions:
         with pytest.raises(eryx.EryxError):
             sandbox.execute("raise RuntimeError('test')")
 
-    @pytest.mark.skip(
-        reason="Timeout not working with pre-compiled components - known limitation"
-    )
     def test_timeout_error_is_catchable_as_builtin(self):
         """Test that TimeoutError can be caught as Python's TimeoutError."""
-        limits = eryx.ResourceLimits(execution_timeout_ms=100)
+        limits = eryx.ResourceLimits(execution_timeout_ms=500)
         sandbox = eryx.Sandbox(resource_limits=limits)
 
         with pytest.raises(TimeoutError):  # Built-in TimeoutError
@@ -325,19 +319,14 @@ except NameError:
         assert "SandboxFactory" in repr_str
         assert "size_bytes" in repr_str
 
-    @pytest.mark.skip(
-        reason="Timeout not working with pre-compiled components - known limitation"
-    )
     def test_factory_with_resource_limits_timeout(self):
         """Test creating sandbox with resource limits from factory.
 
-        NOTE: This test is skipped because timeouts don't work correctly
-        with pre-compiled WASM components. The async timeout mechanism
-        requires the WASM execution to yield, which pre-compiled components
-        may not do properly. This is a known limitation.
+        Uses epoch-based interruption which works correctly with
+        pre-compiled WASM components.
         """
         factory = get_shared_factory()
-        limits = eryx.ResourceLimits(execution_timeout_ms=100)
+        limits = eryx.ResourceLimits(execution_timeout_ms=500)
         sandbox = factory.create_sandbox(resource_limits=limits)
 
         with pytest.raises(eryx.TimeoutError):
