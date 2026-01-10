@@ -384,6 +384,11 @@ impl SessionExecutor {
         // Register the memory tracker as a resource limiter
         store.limiter(|state| &mut state.memory_tracker);
 
+        // Set epoch deadline before instantiation - required when epoch_interruption is enabled
+        // in the engine config. We use a very large value (but not u64::MAX to avoid overflow
+        // when added to the current epoch).
+        store.set_epoch_deadline(u64::MAX / 2);
+
         // Instantiate the component
         let bindings = executor
             .instance_pre()
@@ -522,7 +527,8 @@ impl SessionExecutor {
             Some(stop_flag)
         } else {
             // No timeout - set a very high deadline that won't be reached
-            store.set_epoch_deadline(u64::MAX);
+            // (but not u64::MAX to avoid overflow when added to current epoch)
+            store.set_epoch_deadline(u64::MAX / 2);
             store.epoch_deadline_trap();
             None::<Arc<AtomicBool>>
         };
@@ -654,6 +660,11 @@ impl SessionExecutor {
 
         // Register the memory tracker as a resource limiter
         store.limiter(|state| &mut state.memory_tracker);
+
+        // Set epoch deadline before instantiation - required when epoch_interruption is enabled
+        // in the engine config. We use a very large value (but not u64::MAX to avoid overflow
+        // when added to the current epoch).
+        store.set_epoch_deadline(u64::MAX / 2);
 
         // Preserve execution timeout setting across reset
         let execution_timeout = self.execution_timeout;

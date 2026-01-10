@@ -1016,7 +1016,8 @@ impl PythonExecutor {
             Some(stop_flag)
         } else {
             // No timeout - set a very high deadline that won't be reached
-            store.set_epoch_deadline(u64::MAX);
+            // (but not u64::MAX to avoid overflow when added to current epoch)
+            store.set_epoch_deadline(u64::MAX / 2);
             store.epoch_deadline_trap();
             None::<Arc<AtomicBool>>
         };
