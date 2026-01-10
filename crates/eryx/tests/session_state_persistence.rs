@@ -157,7 +157,8 @@ async fn test_function_persistence() {
             r#"
 def greet(name):
     return f"Hello, {name}!"
-"#)
+"#,
+        )
         .run()
         .await
         .unwrap_or_else(|e| panic!("Failed to define function: {}", e));
@@ -194,7 +195,8 @@ class MyCounter:
     def increment(self):
         self.value += 1
         return self.value
-"#)
+"#,
+        )
         .run()
         .await
         .unwrap_or_else(|e| panic!("Failed to define class: {}", e));
