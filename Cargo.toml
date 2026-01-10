@@ -18,6 +18,7 @@ anyhow = "1.0"
 async-trait = "0.1"
 
 # Pre-initialization for capturing Python memory state
+# Note: crates.io version 0.1.0 uses wasm-tools 0.235, incompatible with 0.243
 component-init-transform = { git = "https://github.com/dicej/component-init", rev = "2d965957" }
 
 # Benchmarking
@@ -58,20 +59,20 @@ tracing = "0.1"
 
 # Directory walking
 walkdir = "2.5"
-wasm-encoder = { git = "https://github.com/bytecodealliance/wasm-tools", rev = "e2bb0a24" }
-wasmparser = { git = "https://github.com/bytecodealliance/wasm-tools", rev = "e2bb0a24" }
+wasm-encoder = "0.243"
+wasmparser = "0.243"
 
-# WebAssembly runtime (v39+ required for async component model)
-wasmtime = { version = "39", features = ["component-model", "async"] }
-wasmtime-wasi = "39"
+# WebAssembly runtime (v40+ required for async component model)
+wasmtime = { version = "40", features = ["component-model", "async"] }
+wasmtime-wasi = "40"
 
 # WebAssembly component linking and WIT parsing
-wit-component = { git = "https://github.com/bytecodealliance/wasm-tools", rev = "e2bb0a24" }
-wit-dylib = { git = "https://github.com/bytecodealliance/wasm-tools", rev = "e2bb0a24" }
+wit-component = "0.243"
+wit-dylib = "0.243"
 
-# wit-dylib FFI for implementing interpreter interface (from dicej's fork)
-wit-dylib-ffi = { git = "https://github.com/dicej/wasm-tools", rev = "b072b0ca", features = ["async-raw"] }
-wit-parser = { git = "https://github.com/bytecodealliance/wasm-tools", rev = "e2bb0a24" }
+# wit-dylib FFI for implementing interpreter interface (not published to crates.io)
+wit-dylib-ffi = { git = "https://github.com/bytecodealliance/wasm-tools.git", rev = "d05406062d031ae96146486f58a965d87eefea5e", features = ["async-raw"] }
+wit-parser = "0.243"
 zip = "2.0"
 
 # Compression

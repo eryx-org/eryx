@@ -173,12 +173,8 @@ impl ResourceLimiter for MemoryTracker {
 
 // Generate bindings from the WIT file
 // The WIT already declares `invoke` and `execute` as async, wasmtime handles it
-// Note: async functions in WIT get prefixed with "[async]" in the component model
 wasmtime::component::bindgen!({
     path: "../eryx-runtime/runtime.wit",
-    imports: {
-        "[async]invoke": async | exact | store | tracing | trappable
-    },
 });
 
 /// State for a single execution, implementing WASI and callback channels.
@@ -229,7 +225,7 @@ impl SandboxImportsWithStore for HasSelf<ExecutorState> {
         accessor: &Accessor<T, Self>,
         name: String,
         arguments_json: String,
-    ) -> impl ::core::future::Future<Output = wasmtime::Result<Result<String, String>>> + Send {
+    ) -> impl ::core::future::Future<Output = Result<String, String>> + Send {
         tracing::debug!(
             callback = %name,
             args_len = arguments_json.len(),
@@ -261,7 +257,7 @@ impl SandboxImportsWithStore for HasSelf<ExecutorState> {
                     // No callback channel - return error
                     Err(format!("Callback '{name}' not available (no handler)"))
                 };
-            Ok(result)
+            result
         }
     }
 }
