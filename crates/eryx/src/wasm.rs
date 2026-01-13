@@ -173,12 +173,8 @@ impl ResourceLimiter for MemoryTracker {
 
 // Generate bindings from the WIT file
 // The WIT already declares `invoke` and `execute` as async, wasmtime handles it
-// Note: async functions in WIT get prefixed with "[async]" in the component model
 wasmtime::component::bindgen!({
     path: "../eryx-runtime/runtime.wit",
-    imports: {
-        "[async]invoke": async | exact | store | tracing | trappable
-    },
 });
 
 /// State for a single execution, implementing WASI and callback channels.
@@ -229,7 +225,7 @@ impl SandboxImportsWithStore for HasSelf<ExecutorState> {
         accessor: &Accessor<T, Self>,
         name: String,
         arguments_json: String,
-    ) -> impl ::core::future::Future<Output = wasmtime::Result<Result<String, String>>> + Send {
+    ) -> impl ::core::future::Future<Output = Result<String, String>> + Send {
         tracing::debug!(
             callback = %name,
             args_len = arguments_json.len(),
@@ -237,31 +233,29 @@ impl SandboxImportsWithStore for HasSelf<ExecutorState> {
         );
 
         async move {
-            let result =
-                if let Some(tx) = accessor.with(|mut access| access.get().callback_tx.clone()) {
-                    // Create oneshot channel for receiving the response
-                    let (response_tx, response_rx) = oneshot::channel();
+            if let Some(tx) = accessor.with(|mut access| access.get().callback_tx.clone()) {
+                // Create oneshot channel for receiving the response
+                let (response_tx, response_rx) = oneshot::channel();
 
-                    let request = CallbackRequest {
-                        name: name.clone(),
-                        arguments_json,
-                        response_tx,
-                    };
-
-                    // Send request to the callback handler
-                    if tx.send(request).await.is_err() {
-                        Err("Callback channel closed".to_string())
-                    } else {
-                        // Wait for response
-                        response_rx
-                            .await
-                            .unwrap_or_else(|_| Err("Callback response channel closed".to_string()))
-                    }
-                } else {
-                    // No callback channel - return error
-                    Err(format!("Callback '{name}' not available (no handler)"))
+                let request = CallbackRequest {
+                    name: name.clone(),
+                    arguments_json,
+                    response_tx,
                 };
-            Ok(result)
+
+                // Send request to the callback handler
+                if tx.send(request).await.is_err() {
+                    Err("Callback channel closed".to_string())
+                } else {
+                    // Wait for response
+                    response_rx
+                        .await
+                        .unwrap_or_else(|_| Err("Callback response channel closed".to_string()))
+                }
+            } else {
+                // No callback channel - return error
+                Err(format!("Callback '{name}' not available (no handler)"))
+            }
         }
     }
 }

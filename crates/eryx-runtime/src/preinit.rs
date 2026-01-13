@@ -302,9 +302,9 @@ pub async fn pre_initialize(
 fn add_sandbox_stubs(linker: &mut Linker<PreInitCtx>) -> Result<()> {
     use wasmtime::component::Accessor;
 
-    // The component imports "[async]invoke" for callbacks
+    // The component imports "invoke" for callbacks (wasmtime 40+ uses plain name)
     linker.root().func_wrap_concurrent(
-        "[async]invoke",
+        "invoke",
         |_accessor: &Accessor<PreInitCtx>, (_name, _args): (String, String)| {
             Box::pin(async move {
                 Ok((Result::<String, String>::Err(
