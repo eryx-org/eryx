@@ -19,7 +19,7 @@ async-trait = "0.1"
 
 # Pre-initialization for capturing Python memory state
 # Note: crates.io version 0.1.0 uses wasm-tools 0.235, incompatible with 0.243
-component-init-transform = { git = "https://github.com/dicej/component-init", rev = "2d965957" }
+component-init-transform = { git = "https://github.com/sd2k/component-init", rev = "75be39bf2e9d8af57b9bc10888c3f2992fbca3df" }
 
 # Benchmarking
 criterion = { version = "0.5", features = ["async_tokio"] }
