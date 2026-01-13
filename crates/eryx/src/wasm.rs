@@ -233,31 +233,29 @@ impl SandboxImportsWithStore for HasSelf<ExecutorState> {
         );
 
         async move {
-            let result =
-                if let Some(tx) = accessor.with(|mut access| access.get().callback_tx.clone()) {
-                    // Create oneshot channel for receiving the response
-                    let (response_tx, response_rx) = oneshot::channel();
+            if let Some(tx) = accessor.with(|mut access| access.get().callback_tx.clone()) {
+                // Create oneshot channel for receiving the response
+                let (response_tx, response_rx) = oneshot::channel();
 
-                    let request = CallbackRequest {
-                        name: name.clone(),
-                        arguments_json,
-                        response_tx,
-                    };
-
-                    // Send request to the callback handler
-                    if tx.send(request).await.is_err() {
-                        Err("Callback channel closed".to_string())
-                    } else {
-                        // Wait for response
-                        response_rx
-                            .await
-                            .unwrap_or_else(|_| Err("Callback response channel closed".to_string()))
-                    }
-                } else {
-                    // No callback channel - return error
-                    Err(format!("Callback '{name}' not available (no handler)"))
+                let request = CallbackRequest {
+                    name: name.clone(),
+                    arguments_json,
+                    response_tx,
                 };
-            result
+
+                // Send request to the callback handler
+                if tx.send(request).await.is_err() {
+                    Err("Callback channel closed".to_string())
+                } else {
+                    // Wait for response
+                    response_rx
+                        .await
+                        .unwrap_or_else(|_| Err("Callback response channel closed".to_string()))
+                }
+            } else {
+                // No callback channel - return error
+                Err(format!("Callback '{name}' not available (no handler)"))
+            }
         }
     }
 }
