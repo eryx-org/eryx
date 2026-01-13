@@ -92,7 +92,7 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: wasm-runtime
-          path: crates/eryx-runtime
+          path: crates/
 
       - name: Verify artifacts
         run: |
@@ -161,7 +161,7 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: wasm-runtime
-          path: crates/eryx-runtime
+          path: crates/
 
       - name: Verify artifacts
         run: |
@@ -230,7 +230,7 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: wasm-runtime
-          path: crates/eryx-runtime
+          path: crates/
 
       - name: Verify artifacts
         run: |
@@ -298,7 +298,7 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: wasm-runtime
-          path: crates/eryx-runtime
+          path: crates/
 
       - name: Verify artifacts
         run: |
@@ -371,7 +371,7 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: wasm-runtime
-          path: crates/eryx-runtime
+          path: crates/
 
       - name: Verify artifacts
         shell: bash
@@ -444,7 +444,7 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: wasm-runtime
-          path: crates/eryx-runtime
+          path: crates/
 
       - uses: actions/setup-python@v5
         with:
