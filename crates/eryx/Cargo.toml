@@ -90,6 +90,7 @@ required-features = ["native-extensions", "embedded"]
 
 [dependencies]
 tokio = { workspace = true, features = ["sync", "net", "io-util", "time"] }
+tokio-util.workspace = true
 anyhow.workspace = true
 async-trait.workspace = true
 futures.workspace = true

@@ -8,7 +8,8 @@ use std::{
     time::{Duration, Instant},
 };
 
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
+use tokio_util::sync::CancellationToken;
 
 #[cfg(feature = "native-extensions")]
 use crate::cache::ComponentCache;
@@ -335,6 +336,239 @@ impl Sandbox {
     #[must_use]
     pub(crate) fn executor(&self) -> Arc<PythonExecutor> {
         self.executor.clone()
+    }
+
+    /// Execute Python code with cancellation support.
+    ///
+    /// Returns an [`ExecutionHandle`] that can be used to cancel the execution
+    /// or wait for its completion.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// let handle = sandbox.execute_cancellable("while True: pass").await?;
+    ///
+    /// // Cancel after 5 seconds from another task
+    /// let cancel_handle = handle.clone();
+    /// tokio::spawn(async move {
+    ///     tokio::time::sleep(Duration::from_secs(5)).await;
+    ///     cancel_handle.cancel();
+    /// });
+    ///
+    /// // Wait for result
+    /// match handle.wait().await {
+    ///     Ok(result) => println!("Completed: {}", result.stdout),
+    ///     Err(Error::Cancelled) => println!("Cancelled"),
+    ///     Err(e) => println!("Error: {e}"),
+    /// }
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the execution cannot be started.
+    pub fn execute_cancellable(&self, code: &str) -> ExecutionHandle {
+        let cancel_token = CancellationToken::new();
+        let (result_tx, result_rx) = oneshot::channel();
+
+        // Clone what we need for the spawned task
+        let executor = Arc::clone(&self.executor);
+        let callbacks = Arc::clone(&self.callbacks);
+        let preamble = self.preamble.clone();
+        let trace_handler = self.trace_handler.clone();
+        let output_handler = self.output_handler.clone();
+        let resource_limits = self.resource_limits.clone();
+        let code = code.to_string();
+        let token = cancel_token.clone();
+
+        // Spawn the execution task
+        tokio::spawn(async move {
+            let result = Self::execute_with_cancellation(
+                executor,
+                callbacks,
+                &preamble,
+                trace_handler,
+                output_handler,
+                resource_limits,
+                &code,
+                token,
+            )
+            .await;
+
+            // Send result back (ignore error if receiver dropped)
+            let _ = result_tx.send(result);
+        });
+
+        ExecutionHandle {
+            cancel_token,
+            result: result_rx,
+        }
+    }
+
+    /// Internal execution with cancellation support.
+    #[allow(clippy::too_many_arguments)]
+    async fn execute_with_cancellation(
+        executor: Arc<PythonExecutor>,
+        callbacks: Arc<HashMap<String, Arc<dyn Callback>>>,
+        preamble: &str,
+        trace_handler: Option<Arc<dyn TraceHandler>>,
+        output_handler: Option<Arc<dyn OutputHandler>>,
+        resource_limits: ResourceLimits,
+        code: &str,
+        cancel_token: CancellationToken,
+    ) -> Result<ExecuteResult, Error> {
+        let start = Instant::now();
+
+        // Prepend preamble to user code if present
+        let full_code = if preamble.is_empty() {
+            code.to_string()
+        } else {
+            format!("{}
+
+# User code
+{}", preamble, code)
+        };
+
+        // Create channels for callback requests and trace events
+        let (callback_tx, callback_rx) = mpsc::channel::<CallbackRequest>(32);
+        let (trace_tx, trace_rx) = mpsc::unbounded_channel::<TraceRequest>();
+
+        // Collect callbacks as a Vec for the executor
+        let callbacks_vec: Vec<Arc<dyn Callback>> = callbacks.values().cloned().collect();
+
+        // Spawn task to handle callback requests concurrently
+        let callbacks_arc = Arc::clone(&callbacks);
+        let resource_limits_clone = resource_limits.clone();
+        let callback_handler = tokio::spawn(async move {
+            run_callback_handler(callback_rx, callbacks_arc, resource_limits_clone).await
+        });
+
+        // Spawn task to handle trace events
+        let trace_handler_clone = trace_handler.clone();
+        let trace_collector =
+            tokio::spawn(async move { run_trace_collector(trace_rx, trace_handler_clone).await });
+
+        // Execute the Python code using the builder API with cancellation
+        let mut execute_builder = executor
+            .execute(&full_code)
+            .with_callbacks(&callbacks_vec, callback_tx)
+            .with_tracing(trace_tx)
+            .with_cancellation(cancel_token.clone());
+
+        // Add memory limit if configured
+        if let Some(limit) = resource_limits.max_memory_bytes {
+            execute_builder = execute_builder.with_memory_limit(limit);
+        }
+
+        // Add timeout if configured
+        if let Some(timeout) = resource_limits.execution_timeout {
+            execute_builder = execute_builder.with_timeout(timeout);
+        }
+
+        let execution_result = execute_builder.run().await;
+
+        // Wait for the handler tasks to complete
+        let callback_invocations = callback_handler.await.unwrap_or(0);
+        let trace_events = trace_collector.await.unwrap_or_default();
+
+        let duration = start.elapsed();
+
+        match execution_result {
+            Ok(output) => {
+                // Stream output if handler is configured
+                if let Some(handler) = &output_handler {
+                    handler.on_output(&output.stdout).await;
+                }
+
+                Ok(ExecuteResult {
+                    stdout: output.stdout,
+                    trace: trace_events,
+                    stats: ExecuteStats {
+                        duration,
+                        callback_invocations,
+                        peak_memory_bytes: Some(output.peak_memory_bytes),
+                    },
+                })
+            }
+            Err(error) => {
+                // Check if this was a cancellation
+                if error == "execution cancelled" || cancel_token.is_cancelled() {
+                    Err(Error::Cancelled)
+                } else {
+                    Err(Error::Execution(error))
+                }
+            }
+        }
+    }
+}
+
+/// Handle to a cancellable execution.
+///
+/// Created by [`Sandbox::execute_cancellable`]. Use this handle to cancel
+/// the execution or wait for its completion.
+///
+/// The handle can be cloned to share cancellation control across tasks.
+#[derive(Debug)]
+pub struct ExecutionHandle {
+    /// Token used to signal cancellation.
+    cancel_token: CancellationToken,
+    /// Receiver for the execution result.
+    result: oneshot::Receiver<Result<ExecuteResult, Error>>,
+}
+
+impl ExecutionHandle {
+    /// Cancel the execution.
+    ///
+    /// This signals the WASM runtime to interrupt execution. The cancellation
+    /// is asynchronous - the execution may not stop immediately, especially
+    /// if it's currently in a host callback.
+    ///
+    /// Calling cancel multiple times has no additional effect.
+    pub fn cancel(&self) {
+        self.cancel_token.cancel();
+    }
+
+    /// Check if the execution is still running.
+    ///
+    /// Returns `false` if the execution has completed (successfully or with error)
+    /// or if it has been cancelled.
+    #[must_use]
+    pub fn is_running(&self) -> bool {
+        !self.cancel_token.is_cancelled()
+    }
+
+    /// Get a clone of the cancellation token.
+    ///
+    /// This is useful for integrating with other cancellation-aware code.
+    #[must_use]
+    pub fn cancellation_token(&self) -> CancellationToken {
+        self.cancel_token.clone()
+    }
+
+    /// Wait for the execution to complete.
+    ///
+    /// Returns the execution result or an error. If the execution was cancelled,
+    /// returns [`Error::Cancelled`].
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - The execution was cancelled ([`Error::Cancelled`])
+    /// - The Python code raised an exception
+    /// - A resource limit was exceeded
+    /// - The execution timed out
+    pub async fn wait(self) -> Result<ExecuteResult, Error> {
+        match self.result.await {
+            Ok(result) => result,
+            Err(_) => {
+                // Channel closed without sending - execution was likely cancelled
+                // or the task panicked
+                if self.cancel_token.is_cancelled() {
+                    Err(Error::Cancelled)
+                } else {
+                    Err(Error::Execution("execution task failed".to_string()))
+                }
+            }
+        }
     }
 }
 
