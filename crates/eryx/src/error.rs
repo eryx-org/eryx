@@ -51,6 +51,10 @@ pub enum Error {
     #[error("snapshot error: {0}")]
     Snapshot(String),
 
+    /// Execution was cancelled.
+    #[error("execution cancelled")]
+    Cancelled,
+
     /// I/O error.
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
