@@ -12,12 +12,50 @@
 //! - **[`InProcessSession`]**: High-level session API wrapping the sandbox.
 //!   Provides a simple interface for REPL-style interactive execution.
 //!
-//! ## State Persistence (Coming Soon)
+//! ## Persistence
 //!
-//! The WIT export approach will enable Python-level state snapshots via
-//! `snapshot_state()` and `restore_state()` exports in the runtime. This
-//! provides serializable state with minimal overhead (~KB vs ~50MB for
-//! WASM-level snapshots).
+//! Sessions can be saved to and loaded from disk using the [`InProcessSession::save`]
+//! and [`InProcessSession::load`] methods. The [`SessionRegistry`] provides a
+//! higher-level interface for managing multiple named sessions.
+//!
+//! ### File Format
+//!
+//! Sessions are stored as JSON files containing:
+//! - Pickled Python state (base64-encoded)
+//! - Metadata (execution count, eryx version)
+//! - Timestamps (created_at, last_active)
+//!
+//! ### Example: Save and Load
+//!
+//! ```rust,ignore
+//! use eryx::session::{InProcessSession, Session};
+//!
+//! // Save a session
+//! session.execute("x = 42").await?;
+//! session.save("my_session.session").await?;
+//!
+//! // Load the session later
+//! let mut session = InProcessSession::load(&sandbox, "my_session.session").await?;
+//! let result = session.execute("print(x)").await?;  // prints "42"
+//! ```
+//!
+//! ### Example: Session Registry
+//!
+//! ```rust,ignore
+//! use eryx::session::{SessionRegistry, Session};
+//!
+//! let registry = SessionRegistry::new("/tmp/sessions");
+//!
+//! // Get or create a named session
+//! let mut session = registry.get_or_create("calculator", &sandbox).await?;
+//! session.execute("result = 1 + 1").await?;
+//!
+//! // Save and list sessions
+//! registry.save("calculator", &mut session).await?;
+//! for info in registry.list()? {
+//!     println!("{}: {} executions", info.name, info.execution_count);
+//! }
+//! ```
 //!
 //! # Example
 //!
@@ -43,6 +81,8 @@
 
 pub mod executor;
 pub mod in_process;
+pub mod persistence;
+pub mod registry;
 
 use async_trait::async_trait;
 
@@ -51,6 +91,8 @@ use crate::sandbox::ExecuteResult;
 
 pub use executor::{PythonStateSnapshot, SessionExecutor, SnapshotMetadata};
 pub use in_process::InProcessSession;
+pub use persistence::{PersistedSession, SessionMetadata};
+pub use registry::{SessionInfo, SessionRegistry};
 
 /// Common trait for all session implementations.
 ///

@@ -102,7 +102,7 @@ pub struct SnapshotMetadata {
 
 impl PythonStateSnapshot {
     /// Create a new snapshot from raw pickle data.
-    fn new(data: Vec<u8>) -> Self {
+    pub fn new(data: Vec<u8>) -> Self {
         let timestamp_ms = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map(|d| d.as_millis() as u64)

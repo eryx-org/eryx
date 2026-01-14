@@ -18,7 +18,7 @@
 //! - Simple high-level API
 //!
 //! **Cons:**
-//! - State cannot be persisted across process restarts (use `snapshot_state()` for that)
+//! - State cannot be persisted across process restarts (use `save()` for that)
 //! - Memory stays allocated until session is dropped
 //!
 //! ## Example
@@ -38,12 +38,16 @@
 //! let result = session.execute("print(x + y)").await?;
 //! assert_eq!(result.stdout, "3");
 //!
+//! // Save to disk for later
+//! session.save("my_session.session").await?;
+//!
 //! // Reset clears all state
 //! session.reset().await?;
 //! ```
 
+use std::path::Path;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Instant, SystemTime};
 
 use async_trait::async_trait;
 use tokio::sync::mpsc;
@@ -56,6 +60,7 @@ use crate::wasm::{CallbackRequest, TraceRequest};
 
 use super::Session;
 use super::executor::{PythonStateSnapshot, SessionExecutor};
+use super::persistence::PersistedSession;
 
 /// An in-process session that keeps the WASM instance alive between executions.
 ///
@@ -222,6 +227,113 @@ impl<'a> InProcessSession<'a> {
     /// Returns an error if the clear fails.
     pub async fn clear_state(&mut self) -> Result<(), Error> {
         self.executor.clear_state().await
+    }
+
+    // =========================================================================
+    // Persistence Methods
+    // =========================================================================
+
+    /// Save the session state to disk.
+    ///
+    /// This captures the current Python state (variables, functions, classes)
+    /// and writes it to a file that can be loaded later with [`load`](Self::load).
+    ///
+    /// # Arguments
+    ///
+    /// * `path` - The path to save the session to (should end in `.session`)
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - The state cannot be captured
+    /// - The file cannot be written
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// session.execute("x = 42").await?;
+    /// session.save("my_session.session").await?;
+    /// ```
+    pub async fn save(&mut self, path: impl AsRef<Path>) -> Result<(), Error> {
+        // Capture the current state
+        let snapshot = self.snapshot_state().await?;
+
+        // Create the persisted session
+        let persisted = PersistedSession::new(
+            snapshot.data().to_vec(),
+            self.execution_count(),
+            None, // New save, use current time as created_at
+        );
+
+        // Save to disk
+        persisted.save(path).await
+    }
+
+    /// Save the session state to disk, preserving the original creation time.
+    ///
+    /// This is useful when re-saving a session that was previously loaded,
+    /// to preserve the original creation timestamp.
+    ///
+    /// # Arguments
+    ///
+    /// * `path` - The path to save the session to
+    /// * `created_at` - The original creation time to preserve
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the state cannot be captured or the file cannot be written.
+    pub async fn save_with_created_at(
+        &mut self,
+        path: impl AsRef<Path>,
+        created_at: SystemTime,
+    ) -> Result<(), Error> {
+        let snapshot = self.snapshot_state().await?;
+
+        let persisted = PersistedSession::new(
+            snapshot.data().to_vec(),
+            self.execution_count(),
+            Some(created_at),
+        );
+
+        persisted.save(path).await
+    }
+
+    /// Load a session from disk.
+    ///
+    /// This creates a new session and restores the Python state from a
+    /// previously saved session file.
+    ///
+    /// # Arguments
+    ///
+    /// * `sandbox` - The sandbox to create the session in
+    /// * `path` - The path to load the session from
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - The file cannot be read
+    /// - The session format is incompatible
+    /// - The state cannot be restored
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// let mut session = InProcessSession::load(&sandbox, "my_session.session").await?;
+    /// let result = session.execute("print(x)").await?;  // prints "42"
+    /// ```
+    pub async fn load(sandbox: &'a Sandbox, path: impl AsRef<Path>) -> Result<Self, Error> {
+        // Load the persisted session from disk
+        let persisted = PersistedSession::load(path).await?;
+
+        // Create a new session
+        let mut session = Self::new(sandbox).await?;
+
+        // Restore the state using the internal snapshot format
+        // The persisted state is raw pickle bytes, we need to wrap it
+        let snapshot = PythonStateSnapshot::new(persisted.state);
+        session.restore_state(&snapshot).await?;
+
+        Ok(session)
     }
 }
 
