@@ -57,6 +57,16 @@ pub mod session;
 mod trace;
 mod wasm;
 
+/// Network callback module for making HTTP requests from Python.
+///
+/// Provides a `fetch` callback with configurable security controls:
+/// - Host allowlist with wildcard patterns
+/// - SSRF protection (blocks private IP ranges by default)
+/// - Request timeout and response size limits
+/// - HTTP method restrictions
+#[cfg(feature = "network")]
+pub mod network;
+
 /// Pre-initialization support for capturing Python memory state.
 ///
 /// Pre-initialization runs Python's init + imports during build time and
@@ -88,3 +98,7 @@ pub use wasm::{ExecutionOutput, PythonExecutor};
 
 // Re-export schema types at top level for convenience
 pub use schema::{JsonSchema, Schema};
+
+// Re-export network types when the feature is enabled
+#[cfg(feature = "network")]
+pub use network::{HttpMethod, NetworkConfig, NetworkConfigBuilder};

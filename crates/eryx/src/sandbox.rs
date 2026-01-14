@@ -850,6 +850,57 @@ impl<R, S> SandboxBuilder<R, S> {
         self
     }
 
+    /// Enable network access with the built-in `fetch` callback.
+    ///
+    /// This adds a `fetch` callback that Python code can use to make HTTP requests.
+    /// The callback includes security controls for host allowlists, SSRF protection,
+    /// timeouts, and response size limits.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// use eryx::{Sandbox, NetworkConfig, HttpMethod};
+    /// use std::time::Duration;
+    ///
+    /// let config = NetworkConfig::builder()
+    ///     .allowed_hosts(vec!["api.example.com", "*.trusted.org"])
+    ///     .timeout(Duration::from_secs(10))
+    ///     .max_response_bytes(1024 * 1024) // 1MB
+    ///     .allowed_methods(vec![HttpMethod::Get, HttpMethod::Post])
+    ///     .build();
+    ///
+    /// let sandbox = Sandbox::embedded()
+    ///     .with_network(config)
+    ///     .build()?;
+    ///
+    /// // Python can now use the fetch callback:
+    /// // response = await fetch("https://api.example.com/data", method="GET")
+    /// // print(response["status"])   # 200
+    /// // print(response["body"])     # Response body as string
+    /// // print(response["headers"])  # Response headers dict
+    /// ```
+    ///
+    /// # Security
+    ///
+    /// By default:
+    /// - All hosts are allowed (use `allowed_hosts` to restrict)
+    /// - Private IP ranges are blocked to prevent SSRF attacks
+    /// - Only GET and POST methods are allowed
+    /// - 30 second timeout
+    /// - 10MB max response size
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the HTTP client cannot be initialized.
+    #[cfg(feature = "network")]
+    pub fn with_network(self, config: crate::network::NetworkConfig) -> Result<Self, Error> {
+        let callback = crate::network::create_fetch_callback(config)
+            .map_err(|e| Error::Initialization(format!("failed to create network callback: {e}")))?;
+        let mut builder = self;
+        builder.callbacks.insert(callback.name().to_string(), callback);
+        Ok(builder)
+    }
+
     /// Set a trace handler for execution progress.
     #[must_use]
     pub fn with_trace_handler<H: TraceHandler + 'static>(mut self, handler: H) -> Self {

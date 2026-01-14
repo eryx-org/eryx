@@ -78,6 +78,11 @@ zip = "2.0"
 # Compression
 zstd = "0.13"
 
+# HTTP client for network callbacks
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+# Wildcard pattern matching for host allowlists
+wildmatch = "2.3"
+
 [workspace.lints.rust]
 missing_debug_implementations = "warn"
 missing_docs = "warn"
