@@ -291,9 +291,9 @@ jobs:
       # and GITHUB_PATH modifications don't reliably propagate to all steps.
       - name: Test wheel
         run: |
-          "${{ env.pythonLocation }}/bin/python" -m pip install pytest
-          "${{ env.pythonLocation }}/bin/python" -m pip install dist/*.whl --force-reinstall
-          cd crates/eryx-python && "${{ env.pythonLocation }}/bin/python" -m pytest tests/ -v
+          "${{ env.pythonLocation }}/bin/python3" -m pip install pytest
+          "${{ env.pythonLocation }}/bin/python3" -m pip install dist/*.whl --force-reinstall
+          cd crates/eryx-python && "${{ env.pythonLocation }}/bin/python3" -m pytest tests/ -v
 
   # Build wheels for macOS Intel (GitHub runner)
   macos-x86_64:
@@ -365,9 +365,9 @@ jobs:
       # Use explicit Python path for consistency with aarch64 runner workaround
       - name: Test wheel
         run: |
-          "${{ env.pythonLocation }}/bin/python" -m pip install pytest
-          "${{ env.pythonLocation }}/bin/python" -m pip install dist/*.whl --force-reinstall
-          cd crates/eryx-python && "${{ env.pythonLocation }}/bin/python" -m pytest tests/ -v
+          "${{ env.pythonLocation }}/bin/python3" -m pip install pytest
+          "${{ env.pythonLocation }}/bin/python3" -m pip install dist/*.whl --force-reinstall
+          cd crates/eryx-python && "${{ env.pythonLocation }}/bin/python3" -m pytest tests/ -v
 
   # Build wheels for Windows
   windows:
