@@ -145,8 +145,8 @@ jobs:
 
       - name: Test wheel
         run: |
-          pip install pytest
-          pip install dist/*.whl --force-reinstall
+          python -m pip install pytest
+          python -m pip install dist/*.whl --force-reinstall
           cd crates/eryx-python && pytest tests/ -v
 
   # Build wheels for Linux aarch64 (native ARM build with precompile)
@@ -214,8 +214,8 @@ jobs:
 
       - name: Test wheel
         run: |
-          pip install pytest
-          pip install dist/*.whl --force-reinstall
+          python -m pip install pytest
+          python -m pip install dist/*.whl --force-reinstall
           cd crates/eryx-python && pytest tests/ -v
 
   # Build wheels for macOS ARM (native build with precompile)
@@ -272,7 +272,7 @@ jobs:
         uses: PyO3/maturin-action@v1
         with:
           target: aarch64
-          args: --release --out dist --manifest-path crates/eryx-python/Cargo.toml
+          args: --release --out dist --manifest-path crates/eryx-python/Cargo.toml -i ${{ env.pythonLocation }}/bin/python
 
       - name: Upload wheels
         uses: actions/upload-artifact@v4
@@ -282,8 +282,8 @@ jobs:
 
       - name: Test wheel
         run: |
-          pip install pytest
-          pip install dist/*.whl --force-reinstall
+          python -m pip install pytest
+          python -m pip install dist/*.whl --force-reinstall
           cd crates/eryx-python && pytest tests/ -v
 
   # Build wheels for macOS Intel (GitHub runner)
@@ -340,7 +340,7 @@ jobs:
         uses: PyO3/maturin-action@v1
         with:
           target: x86_64
-          args: --release --out dist --manifest-path crates/eryx-python/Cargo.toml
+          args: --release --out dist --manifest-path crates/eryx-python/Cargo.toml -i ${{ env.pythonLocation }}/bin/python
 
       - name: Upload wheels
         uses: actions/upload-artifact@v4
@@ -350,8 +350,8 @@ jobs:
 
       - name: Test wheel
         run: |
-          pip install pytest
-          pip install dist/*.whl --force-reinstall
+          python -m pip install pytest
+          python -m pip install dist/*.whl --force-reinstall
           cd crates/eryx-python && pytest tests/ -v
 
   # Build wheels for Windows
@@ -428,8 +428,8 @@ jobs:
       - name: Test wheel
         shell: bash
         run: |
-          pip install pytest
-          pip install dist/*.whl --force-reinstall
+          python -m pip install pytest
+          python -m pip install dist/*.whl --force-reinstall
           cd crates/eryx-python && pytest tests/ -v
 
   # Build source distribution
