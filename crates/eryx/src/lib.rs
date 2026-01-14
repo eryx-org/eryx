@@ -51,6 +51,7 @@ pub mod embedded;
 mod error;
 mod library;
 pub mod package;
+pub mod pool;
 mod sandbox;
 mod schema;
 pub mod session;
@@ -76,6 +77,7 @@ pub use callback::{
 pub use error::Error;
 pub use library::RuntimeLibrary;
 pub use package::{ExtractedPackage, PackageFormat};
+pub use pool::{PoolConfig, PoolError, PoolStats, PooledSandbox, SandboxPool};
 pub use sandbox::{ExecuteResult, ExecuteStats, ResourceLimits, Sandbox, SandboxBuilder, state};
 pub use session::{
     InProcessSession, PythonStateSnapshot, Session, SessionExecutor, SnapshotMetadata,
