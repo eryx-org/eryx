@@ -168,10 +168,12 @@ impl<'a> InProcessSession<'a> {
                 // Stream output if handler is configured
                 if let Some(handler) = self.sandbox.output_handler() {
                     handler.on_output(&output.stdout).await;
+                    handler.on_stderr(&output.stderr).await;
                 }
 
                 Ok(ExecuteResult {
                     stdout: output.stdout,
+                    stderr: output.stderr,
                     trace: trace_events,
                     stats: ExecuteStats {
                         duration,
