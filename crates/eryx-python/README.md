@@ -49,6 +49,15 @@ print(f"Execution took {result.duration_ms:.2f}ms")
 - **Package Support**: Load Python packages (.whl, .tar.gz) including native extensions
 - **Type Safe**: Full type stubs for IDE support and static analysis
 
+## Python Version
+
+The sandbox runs **CPython 3.14** compiled to WebAssembly (WASI). This is the same
+Python build used by [componentize-py](https://github.com/bytecodealliance/componentize-py)
+from the Bytecode Alliance.
+
+> **Note:** Python 3.14 is currently in development. The sandbox tracks the latest
+> WASI-compatible CPython build from the componentize-py project.
+
 ## Performance
 
 The `pyeryx` package ships with a **pre-initialized Python runtime** embedded in the binary.

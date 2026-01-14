@@ -2,11 +2,19 @@
 
 Python WASM runtime component for the eryx sandbox.
 
+## CPython Version
+
+This runtime uses **CPython 3.14** compiled for WASI (WebAssembly System Interface).
+
+The WASI-compiled CPython and supporting libraries are sourced from
+[componentize-py](https://github.com/bytecodealliance/componentize-py), a Bytecode Alliance
+project that provides the foundational tooling for running Python in WebAssembly.
+
 ## Overview
 
 This crate builds the runtime.wasm component by linking together:
 - `eryx-wasm-runtime` - Rust crate that provides the Python execution engine
-- `libpython3.14.so` - WASI-compiled CPython
+- `libpython3.14.so` - WASI-compiled CPython 3.14
 - WASI support libraries (libc, libc++, etc.)
 
 The build process uses `wit-dylib` and `wit-component` to create a fully linked WASM component.
