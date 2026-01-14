@@ -310,6 +310,81 @@ impl Sandbox {
     pub(crate) fn executor(&self) -> Arc<PythonExecutor> {
         self.executor.clone()
     }
+
+    /// Export all registered callbacks as LLM tool schemas.
+    ///
+    /// This converts the sandbox's callbacks into tool definitions that can be
+    /// sent to LLM APIs like OpenAI or Anthropic for function/tool calling.
+    ///
+    /// # Arguments
+    ///
+    /// * `format` - The target LLM format (OpenAI, Anthropic, or Generic)
+    ///
+    /// # Returns
+    ///
+    /// A JSON array of tool definitions in the specified format.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// use eryx::llm::ToolFormat;
+    ///
+    /// let tools = sandbox.export_tool_schemas(ToolFormat::OpenAI);
+    /// // Send tools to OpenAI API
+    /// ```
+    #[must_use]
+    pub fn export_tool_schemas(&self, format: crate::llm::ToolFormat) -> serde_json::Value {
+        crate::llm::export_tool_schemas(self.callbacks.values(), format)
+    }
+
+    /// Execute a tool call from an LLM response.
+    ///
+    /// This parses a tool call from an LLM response and invokes the corresponding
+    /// callback, returning the result in a format suitable for sending back to the LLM.
+    ///
+    /// # Arguments
+    ///
+    /// * `tool_call` - The tool call JSON from the LLM response
+    /// * `format` - The LLM format used (must match the format of the tool_call)
+    ///
+    /// # Returns
+    ///
+    /// A JSON value containing the tool result, formatted for the specified LLM.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the tool call cannot be parsed or if the callback fails.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// use eryx::llm::ToolFormat;
+    ///
+    /// // Parse tool call from OpenAI response
+    /// let tool_call = response["choices"][0]["message"]["tool_calls"][0].clone();
+    /// let result = sandbox.execute_tool_call(&tool_call, ToolFormat::OpenAI).await?;
+    /// ```
+    pub async fn execute_tool_call(
+        &self,
+        tool_call: &serde_json::Value,
+        format: crate::llm::ToolFormat,
+    ) -> Result<serde_json::Value, crate::llm::ToolCallError> {
+        let parsed = crate::llm::parse_tool_call(tool_call, format)?;
+        
+        let callback = self
+            .callbacks
+            .get(&parsed.name)
+            .ok_or_else(|| crate::llm::ToolCallError::ToolNotFound(parsed.name.clone()))?;
+        
+        let result = callback.invoke(parsed.arguments.clone()).await;
+        
+        Ok(crate::llm::format_tool_result(
+            parsed.id.as_deref(),
+            &parsed.name,
+            result,
+            format,
+        ))
+    }
 }
 
 /// Source of the WASM component for the sandbox.

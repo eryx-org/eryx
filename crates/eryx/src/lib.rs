@@ -56,6 +56,7 @@ mod schema;
 pub mod session;
 mod trace;
 mod wasm;
+pub mod llm;
 
 /// Pre-initialization support for capturing Python memory state.
 ///
@@ -88,3 +89,6 @@ pub use wasm::{ExecutionOutput, PythonExecutor};
 
 // Re-export schema types at top level for convenience
 pub use schema::{JsonSchema, Schema};
+
+// Re-export LLM integration types at top level for convenience
+pub use llm::{ToolFormat, ToolCallError, ParsedToolCall};
