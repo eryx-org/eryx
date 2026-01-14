@@ -286,25 +286,8 @@ jobs:
           name: wheels-macos-aarch64
           path: dist
 
-      # Use explicit Python path because the namespace runner's PATH includes
-      # Homebrew's externally-managed Python before setup-python's Python,
-      # and GITHUB_PATH modifications don't reliably propagate to all steps.
-      - name: Debug Python environment
-        if: always()
-        run: |
-          echo "=== PATH ==="
-          echo "$PATH" | tr ':' '\n'
-          echo "=== pythonLocation ==="
-          echo "${{ env.pythonLocation }}"
-          echo "=== pythonLocation/bin contents ==="
-          ls -la "${{ env.pythonLocation }}/bin/" 2>/dev/null || echo "bin dir not found"
-          echo "=== pythonLocation root contents ==="
-          ls -la "${{ env.pythonLocation }}/" 2>/dev/null || echo "pythonLocation dir not found"
-          echo "=== which python/python3 ==="
-          which python python3 2>/dev/null || echo "neither found in PATH"
-          echo "=== GITHUB_PATH contents ==="
-          cat "$GITHUB_PATH" 2>/dev/null || echo "GITHUB_PATH file not found"
-
+      # Use explicit Python path because pythonLocation may not match actual install path
+      # on namespace runners, and GITHUB_PATH modifications don't reliably propagate.
       - name: Test wheel
         run: |
           "${{ env.pythonLocation }}/bin/python3" -m pip install pytest
