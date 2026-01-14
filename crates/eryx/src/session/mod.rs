@@ -44,6 +44,8 @@
 pub mod executor;
 pub mod in_process;
 
+use std::time::{Duration, Instant};
+
 use async_trait::async_trait;
 
 use crate::error::Error;
@@ -51,6 +53,77 @@ use crate::sandbox::ExecuteResult;
 
 pub use executor::{PythonStateSnapshot, SessionExecutor, SnapshotMetadata};
 pub use in_process::InProcessSession;
+
+/// Statistics about a session's activity and resource usage.
+///
+/// This struct tracks various metrics about a session's lifetime, including
+/// when it was created, when it was last active, and aggregate execution statistics.
+///
+/// # Example
+///
+/// ```rust,ignore
+/// let mut session = InProcessSession::new(&sandbox).await?;
+/// session.execute("x = 1").await?;
+/// session.execute("y = 2").await?;
+///
+/// let stats = session.stats();
+/// println!("Executions: {}", stats.execution_count);
+/// println!("Total time: {:?}", stats.total_execution_time);
+/// println!("Idle for: {:?}", session.idle_duration());
+/// ```
+#[derive(Debug, Clone)]
+pub struct SessionStats {
+    /// When the session was created.
+    pub created_at: Instant,
+
+    /// When the last execution completed (None if never executed).
+    pub last_activity: Option<Instant>,
+
+    /// Total number of executions performed.
+    pub execution_count: u64,
+
+    /// Total time spent executing code across all runs.
+    pub total_execution_time: Duration,
+
+    /// Total number of callback invocations across all executions.
+    pub total_callback_invocations: u64,
+
+    /// Peak memory usage observed across all executions (in bytes).
+    pub peak_memory_bytes: u64,
+}
+
+impl Default for SessionStats {
+    fn default() -> Self {
+        Self {
+            created_at: Instant::now(),
+            last_activity: None,
+            execution_count: 0,
+            total_execution_time: Duration::ZERO,
+            total_callback_invocations: 0,
+            peak_memory_bytes: 0,
+        }
+    }
+}
+
+impl SessionStats {
+    /// Create a new SessionStats with the current time as creation time.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Reset all statistics to their default values, preserving the original creation time.
+    pub fn reset(&mut self) {
+        let created_at = self.created_at;
+        *self = Self::default();
+        self.created_at = created_at;
+    }
+
+    /// Reset all statistics to their default values and update the creation time.
+    pub fn reset_full(&mut self) {
+        *self = Self::default();
+    }
+}
 
 /// Common trait for all session implementations.
 ///
@@ -135,5 +208,54 @@ mod tests {
     fn test_snapshot_session_trait_exists() {
         // Verify SnapshotSession trait is properly defined
         fn _assert_snapshot_session<T: SnapshotSession>() {}
+    }
+
+    #[test]
+    fn test_session_stats_default() {
+        let stats = SessionStats::default();
+        assert_eq!(stats.execution_count, 0);
+        assert_eq!(stats.total_execution_time, Duration::ZERO);
+        assert_eq!(stats.total_callback_invocations, 0);
+        assert_eq!(stats.peak_memory_bytes, 0);
+        assert!(stats.last_activity.is_none());
+    }
+
+    #[test]
+    fn test_session_stats_reset() {
+        let mut stats = SessionStats::default();
+        let original_created_at = stats.created_at;
+
+        // Modify stats
+        stats.execution_count = 10;
+        stats.total_execution_time = Duration::from_secs(5);
+        stats.total_callback_invocations = 20;
+        stats.peak_memory_bytes = 1024;
+        stats.last_activity = Some(Instant::now());
+
+        // Reset preserving created_at
+        stats.reset();
+
+        assert_eq!(stats.created_at, original_created_at);
+        assert_eq!(stats.execution_count, 0);
+        assert_eq!(stats.total_execution_time, Duration::ZERO);
+        assert_eq!(stats.total_callback_invocations, 0);
+        assert_eq!(stats.peak_memory_bytes, 0);
+        assert!(stats.last_activity.is_none());
+    }
+
+    #[test]
+    fn test_session_stats_reset_full() {
+        let mut stats = SessionStats::default();
+        let original_created_at = stats.created_at;
+
+        // Small delay to ensure new created_at differs
+        std::thread::sleep(Duration::from_millis(1));
+
+        // Full reset (updates created_at)
+        stats.reset_full();
+
+        // created_at should be updated (newer)
+        assert!(stats.created_at >= original_created_at);
+        assert_eq!(stats.execution_count, 0);
     }
 }
