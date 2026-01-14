@@ -209,11 +209,20 @@ pub mod callback_code {
     }
 }
 
+/// Output from executing Python code.
+#[derive(Debug, Clone)]
+pub struct ExecuteOutput {
+    /// Captured stdout from the Python execution.
+    pub stdout: String,
+    /// Captured stderr from the Python execution.
+    pub stderr: String,
+}
+
 /// Result of executing Python code.
 #[derive(Debug)]
 pub enum ExecuteResult {
-    /// Execution completed successfully with output.
-    Complete(String),
+    /// Execution completed successfully with output (stdout and stderr).
+    Complete(ExecuteOutput),
     /// Execution completed with an error.
     Error(String),
     /// Execution is pending, waiting for async callback.
@@ -2553,9 +2562,13 @@ pub fn execute_python(code: &str) -> ExecuteResult {
         // Execution complete - get output and restore streams
         let _ = PyRun_SimpleString(c"_eryx_output, _eryx_errors = _eryx_get_output()".as_ptr());
 
-        let output = get_python_variable_string("_eryx_output").unwrap_or_default();
+        let stdout = get_python_variable_string("_eryx_output").unwrap_or_default();
+        let stderr = get_python_variable_string("_eryx_errors").unwrap_or_default();
 
-        ExecuteResult::Complete(output.trim_end_matches('\n').to_string())
+        ExecuteResult::Complete(ExecuteOutput {
+            stdout: stdout.trim_end_matches('\n').to_string(),
+            stderr: stderr.trim_end_matches('\n').to_string(),
+        })
     }
 }
 

@@ -56,14 +56,22 @@ world sandbox {
         parameters-schema-json: string,
     }
 
+    /// Output from executing Python code.
+    record execute-output {
+        /// Captured stdout from the Python execution.
+        stdout: string,
+        /// Captured stderr from the Python execution.
+        stderr: string,
+    }
+
     /// Execute Python code in the sandbox.
     ///
     /// The code can use top-level await directly:
     ///   result = await invoke("get_time", "{}")
     ///   print(result)
     ///
-    /// Returns captured stdout on success, or an error message on failure.
-    export execute: async func(code: string) -> result<string, string>;
+    /// Returns captured stdout and stderr on success, or an error message on failure.
+    export execute: async func(code: string) -> result<execute-output, string>;
 
     /// Capture a snapshot of the current Python session state.
     ///
