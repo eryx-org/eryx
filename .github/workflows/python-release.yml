@@ -268,11 +268,14 @@ jobs:
         with:
           python-version: "3.12"
 
+      - name: Prepend setup-python to PATH
+        run: echo "${{ env.pythonLocation }}/bin" >> $GITHUB_PATH
+
       - name: Build wheels
         uses: PyO3/maturin-action@v1
         with:
           target: aarch64
-          args: --release --out dist --manifest-path crates/eryx-python/Cargo.toml -i ${{ env.pythonLocation }}/bin/python
+          args: --release --out dist --manifest-path crates/eryx-python/Cargo.toml
 
       - name: Upload wheels
         uses: actions/upload-artifact@v4
@@ -336,11 +339,14 @@ jobs:
         with:
           python-version: "3.12"
 
+      - name: Prepend setup-python to PATH
+        run: echo "${{ env.pythonLocation }}/bin" >> $GITHUB_PATH
+
       - name: Build wheels
         uses: PyO3/maturin-action@v1
         with:
           target: x86_64
-          args: --release --out dist --manifest-path crates/eryx-python/Cargo.toml -i ${{ env.pythonLocation }}/bin/python
+          args: --release --out dist --manifest-path crates/eryx-python/Cargo.toml
 
       - name: Upload wheels
         uses: actions/upload-artifact@v4
