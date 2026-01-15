@@ -7,6 +7,105 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## `eryx-wasm-runtime` - [0.2.1](https://github.com/eryx-org/eryx/compare/eryx-wasm-runtime-v0.2.0...eryx-wasm-runtime-v0.2.1) - 2026-01-15
+
+### Added
+- *(preinit)* add finalize-preinit export to fix WASI handle invalidation
+- *(eryx-wasm-runtime)* implement execution tracing
+- Add native Python extension support via late-linking
+- *(eryx-wasm-runtime)* complete async callback implementation
+- *(eryx-wasm-runtime)* implement callback infrastructure for host function access
+- Implement state management exports (snapshot/restore/clear)
+- *(eryx-wasm-runtime)* implement execute export with output capture
+- *(eryx-wasm-runtime)* wire up Python interpreter initialization
+- *(eryx-wasm-runtime)* add CPython FFI bindings module
+- Add eryx-wasm-runtime crate for native sandbox exports
+
+### Fixed
+- check ERYX_PYTHON_STDLIB env var in runtime_test.rs
+- rename invoke() parameter to avoid conflicts with callback kwargs
+- *(docs)* escape generic type in rustdoc comment
+- *(ci)* auto-decompress libs in build.rs
+- resolve session state and link test failures
+
+### Other
+- Update to wasmtime 40 and crates.io wasm-tools 0.243
+- Run mise unify
+- move Python execution infrastructure to init time
+- Fix callback return value bug and execution bench
+- Rename/improve mise tasks, remove some unnecessary Python code
+- Get all tests passing
+- Fix rustfmt and lint errors
+- Use our own async runtime
+- Improve docs of componentize-py shims
+- Fix another TODO
+- Run rustfmt
+- Remove some old docs
+- update build.sh references to build.rs
+- Fix clippy lints
+- WIP
+- Add comprehensive integration tests for Python execution
+- *(eryx-wasm-runtime)* clarify wasm32-wasip1 vs wasip2 in docs
+
+## `eryx-python` - [0.2.1](https://github.com/eryx-org/eryx/compare/eryx-python-v0.2.0...eryx-python-v0.2.1) - 2026-01-15
+
+### Added
+- add epoch-based execution timeout support
+- *(eryx-python)* add PreInitializedRuntime for fast sandbox creation
+- *(eryx-python)* add native extensions and package loading support
+- *(eryx-python)* add Phase 1 PyO3 Python bindings (MVP)
+
+### Other
+- Document sandbox Python version
+- *(pyeryx)* use version from Cargo.toml
+- *(pyeryx)* rename PreInitializedRuntime to SandboxFactory and simplify Sandbox API
+- Include notes on PreInitializedRuntime in Python README
+- Fix links to nonexistent github repo
+- Use 'pyeryx' for Python package
+- Run mise unify
+
+## `eryx` - [0.2.1](https://github.com/eryx-org/eryx/compare/eryx-v0.2.0...eryx-v0.2.1) - 2026-01-15
+
+### Other
+- update Cargo.toml dependencies
+
+## `eryx-runtime` - [0.2.1](https://github.com/eryx-org/eryx/compare/eryx-runtime-v0.2.0...eryx-runtime-v0.2.1) - 2026-01-15
+
+### Added
+- split preinit feature from native-extensions
+- *(preinit)* add finalize-preinit export to fix WASI handle invalidation
+- add cargo-rail and cargo-all-features support
+- simplify feature flags from 6 to 2
+- *(eryx)* add pre-initialization support for native extensions
+- Add native Python extension support via late-linking
+- *(eryx-wasm-runtime)* complete async callback implementation
+
+### Fixed
+- update preinit vs native-extensions feature handling
+- benchmark clippy lints and asyncio.run issue
+- add build-native-extensions task for --all-features commands
+- format code with cargo fmt
+- *(ci)* auto-decompress libs in build.rs
+- *(ci)* use POSIX-compatible test syntax in ensure-wasi-sdk
+- resolve session state and link test failures
+
+### Other
+- Document sandbox Python version
+- Fix preinit stub to use 'invoke' instead of '[async]invoke'
+- Deduplicate callback handler and clean up accumulated cruft
+- Rename/improve mise tasks, remove some unnecessary Python code
+- Maybe fix CI once and for all
+- only build WASM when BUILD_ERYX_RUNTIME is set or wasm missing
+- Fix rustfmt and lint errors
+- Remove unused runtime files; update architecture doc
+- Run rustfmt
+- Fix clippy lints
+- Improve API to use direct function calls instead of 'invoke'
+- Support session reuse
+- Add CI workflow and improve build configuration
+- Add examples and actual implementation
+- Second stage
+
 ## `eryx-wasm-runtime` - [0.2.0](https://github.com/eryx-org/eryx/compare/eryx-wasm-runtime-v0.1.0...eryx-wasm-runtime-v0.2.0) - 2026-01-13
 
 ### Added
