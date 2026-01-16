@@ -617,7 +617,7 @@ pub struct ExecuteBuilder<'a> {
     net_tx: Option<mpsc::Sender<NetRequest>>,
     memory_limit: Option<u64>,
     execution_timeout: Option<Duration>,
-        cancellation_token: Option<CancellationToken>,
+    cancellation_token: Option<CancellationToken>,
 }
 
 impl std::fmt::Debug for ExecuteBuilder<'_> {

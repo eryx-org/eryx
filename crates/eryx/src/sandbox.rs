@@ -422,10 +422,13 @@ impl Sandbox {
         let full_code = if preamble.is_empty() {
             code.to_string()
         } else {
-            format!("{}
+            format!(
+                "{}
 
 # User code
-{}", preamble, code)
+{}",
+                preamble, code
+            )
         };
 
         // Create channels for callback requests and trace events

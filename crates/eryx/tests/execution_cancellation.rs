@@ -68,9 +68,7 @@ fn sandbox_builder() -> eryx::SandboxBuilder<eryx::state::Has, eryx::state::Has>
 
 #[tokio::test]
 async fn test_execute_cancellable_completes_normally() {
-    let sandbox = sandbox_builder()
-        .build()
-        .expect("Failed to build sandbox");
+    let sandbox = sandbox_builder().build().expect("Failed to build sandbox");
 
     let handle = sandbox.execute_cancellable("print('Hello from cancellable!')");
 
@@ -82,9 +80,7 @@ async fn test_execute_cancellable_completes_normally() {
 
 #[tokio::test]
 async fn test_execute_cancellable_cancel_infinite_loop() {
-    let sandbox = sandbox_builder()
-        .build()
-        .expect("Failed to build sandbox");
+    let sandbox = sandbox_builder().build().expect("Failed to build sandbox");
 
     let handle = sandbox.execute_cancellable("while True: pass");
 
@@ -106,9 +102,7 @@ async fn test_execute_cancellable_cancel_infinite_loop() {
 
 #[tokio::test]
 async fn test_execute_cancellable_cancel_immediately() {
-    let sandbox = sandbox_builder()
-        .build()
-        .expect("Failed to build sandbox");
+    let sandbox = sandbox_builder().build().expect("Failed to build sandbox");
 
     let handle = sandbox.execute_cancellable(
         r#"
@@ -133,9 +127,7 @@ for i in range(1000):
 
 #[tokio::test]
 async fn test_is_running_before_and_after_completion() {
-    let sandbox = sandbox_builder()
-        .build()
-        .expect("Failed to build sandbox");
+    let sandbox = sandbox_builder().build().expect("Failed to build sandbox");
 
     let handle = sandbox.execute_cancellable("x = 1 + 1");
 
@@ -150,9 +142,7 @@ async fn test_is_running_before_and_after_completion() {
 
 #[tokio::test]
 async fn test_is_running_after_cancel() {
-    let sandbox = sandbox_builder()
-        .build()
-        .expect("Failed to build sandbox");
+    let sandbox = sandbox_builder().build().expect("Failed to build sandbox");
 
     let handle = sandbox.execute_cancellable("while True: pass");
 
@@ -169,9 +159,7 @@ async fn test_is_running_after_cancel() {
 
 #[tokio::test]
 async fn test_cancel_multiple_times_is_idempotent() {
-    let sandbox = sandbox_builder()
-        .build()
-        .expect("Failed to build sandbox");
+    let sandbox = sandbox_builder().build().expect("Failed to build sandbox");
 
     let handle = sandbox.execute_cancellable("while True: pass");
 
@@ -191,9 +179,7 @@ async fn test_cancel_multiple_times_is_idempotent() {
 
 #[tokio::test]
 async fn test_cancellation_token_can_be_shared() {
-    let sandbox = sandbox_builder()
-        .build()
-        .expect("Failed to build sandbox");
+    let sandbox = sandbox_builder().build().expect("Failed to build sandbox");
 
     let handle = sandbox.execute_cancellable("while True: pass");
 
@@ -220,9 +206,7 @@ async fn test_cancellation_token_can_be_shared() {
 
 #[tokio::test]
 async fn test_cancel_during_python_computation() {
-    let sandbox = sandbox_builder()
-        .build()
-        .expect("Failed to build sandbox");
+    let sandbox = sandbox_builder().build().expect("Failed to build sandbox");
 
     // Heavy computation that should be interruptible
     let handle = sandbox.execute_cancellable(
@@ -244,7 +228,7 @@ print(result)
     let result = handle.wait().await;
     // Should either complete or be cancelled
     match result {
-        Ok(_) => {} // Completed before cancellation
+        Ok(_) => {}                 // Completed before cancellation
         Err(Error::Cancelled) => {} // Cancelled as expected
         Err(e) => panic!("Unexpected error: {:?}", e),
     }
@@ -252,9 +236,7 @@ print(result)
 
 #[tokio::test]
 async fn test_fast_execution_completes_before_cancel() {
-    let sandbox = sandbox_builder()
-        .build()
-        .expect("Failed to build sandbox");
+    let sandbox = sandbox_builder().build().expect("Failed to build sandbox");
 
     let handle = sandbox.execute_cancellable("print('fast')");
 
@@ -266,7 +248,11 @@ async fn test_fast_execution_completes_before_cancel() {
     });
 
     let result = handle.wait().await;
-    assert!(result.is_ok(), "Fast execution should complete: {:?}", result);
+    assert!(
+        result.is_ok(),
+        "Fast execution should complete: {:?}",
+        result
+    );
     let output = result.unwrap();
     assert!(output.stdout.contains("fast"));
 }
@@ -277,9 +263,7 @@ async fn test_fast_execution_completes_before_cancel() {
 
 #[tokio::test]
 async fn test_python_error_not_confused_with_cancellation() {
-    let sandbox = sandbox_builder()
-        .build()
-        .expect("Failed to build sandbox");
+    let sandbox = sandbox_builder().build().expect("Failed to build sandbox");
 
     let handle = sandbox.execute_cancellable("raise ValueError('test error')");
 
@@ -301,9 +285,7 @@ async fn test_python_error_not_confused_with_cancellation() {
 
 #[tokio::test]
 async fn test_syntax_error_not_confused_with_cancellation() {
-    let sandbox = sandbox_builder()
-        .build()
-        .expect("Failed to build sandbox");
+    let sandbox = sandbox_builder().build().expect("Failed to build sandbox");
 
     let handle = sandbox.execute_cancellable("def broken(");
 
