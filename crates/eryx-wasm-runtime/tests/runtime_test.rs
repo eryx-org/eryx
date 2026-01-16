@@ -31,6 +31,16 @@ fn decompress_zstd(data: &[u8]) -> Vec<u8> {
     zstd::decode_all(Cursor::new(data)).expect("failed to decompress")
 }
 
+// Define a struct matching the WIT execute-output record
+#[derive(Debug, Clone, wasmtime::component::ComponentType, wasmtime::component::Lift)]
+#[component(record)]
+struct ExecuteOutput {
+    #[component(name = "stdout")]
+    stdout: String,
+    #[component(name = "stderr")]
+    stderr: String,
+}
+
 struct State {
     ctx: WasiCtx,
     table: ResourceTable,
@@ -347,13 +357,13 @@ async fn test_instantiate_component() -> Result<(), Box<dyn std::error::Error>> 
     println!("SUCCESS! Component instantiated");
 
     // Get the execute function
-    // execute: async func(code: string) -> result<string, string>
+    // execute: async func(code: string) -> result<execute-output, string>
     println!("Looking for execute function...");
 
     let execute = instance
-        .get_typed_func::<(String,), (Result<String, String>,)>(&mut store, "[async]execute")
+        .get_typed_func::<(String,), (Result<ExecuteOutput, String>,)>(&mut store, "[async]execute")
         .or_else(|_| {
-            instance.get_typed_func::<(String,), (Result<String, String>,)>(&mut store, "execute")
+            instance.get_typed_func::<(String,), (Result<ExecuteOutput, String>,)>(&mut store, "execute")
         })?;
 
     // Test 1: Simple print statement
@@ -366,7 +376,7 @@ async fn test_instantiate_component() -> Result<(), Box<dyn std::error::Error>> 
     match &result {
         Ok(output) => {
             println!("  OK: {output:?}");
-            assert_eq!(output.trim(), "2", "print(1+1) should output '2'");
+            assert_eq!(output.stdout.trim(), "2", "print(1+1) should output '2'");
         }
         Err(error) => {
             panic!("Test 1 failed with error: {error}");
@@ -383,7 +393,7 @@ async fn test_instantiate_component() -> Result<(), Box<dyn std::error::Error>> 
     match &result {
         Ok(output) => {
             println!("  OK: {output:?}");
-            assert_eq!(output, "hello\nworld", "Should have two lines of output");
+            assert_eq!(output.stdout, "hello\nworld", "Should have two lines of output");
         }
         Err(error) => {
             panic!("Test 2 failed with error: {error}");
@@ -400,7 +410,7 @@ async fn test_instantiate_component() -> Result<(), Box<dyn std::error::Error>> 
     match &result {
         Ok(output) => {
             println!("  OK: {output:?}");
-            assert_eq!(output, "", "Assignment should produce no output");
+            assert_eq!(output.stdout, "", "Assignment should produce no output");
         }
         Err(error) => {
             panic!("Test 3 failed with error: {error}");
@@ -467,7 +477,7 @@ async fn test_instantiate_component() -> Result<(), Box<dyn std::error::Error>> 
         Ok(output) => {
             println!("  OK: {output:?}");
             assert_eq!(
-                output.trim(),
+                output.stdout.trim(),
                 "persisted",
                 "Variable should persist between calls"
             );
@@ -488,8 +498,8 @@ async fn test_instantiate_component() -> Result<(), Box<dyn std::error::Error>> 
         Ok(output) => {
             println!("  OK: {output:?}");
             assert!(
-                output.starts_with("3.14"),
-                "math.pi should start with 3.14: {output}"
+                output.stdout.starts_with("3.14"),
+                "math.pi should start with 3.14: {output:?}"
             );
         }
         Err(error) => {
@@ -596,8 +606,8 @@ async fn test_instantiate_component() -> Result<(), Box<dyn std::error::Error>> 
         Ok(output) => {
             println!("  OK: Restored values: {output:?}");
             assert!(
-                output.contains("42") && output.contains("hello") && output.contains("[1, 2, 3]"),
-                "Restored values should match: {output}"
+                output.stdout.contains("42") && output.stdout.contains("hello") && output.stdout.contains("[1, 2, 3]"),
+                "Restored values should match: {output:?}"
             );
         }
         Err(error) => {
@@ -630,8 +640,8 @@ print(f"count: {len(cbs)}")
         Ok(output) => {
             println!("  OK: {output:?}");
             assert!(
-                output.contains("list_callbacks returned: list"),
-                "list_callbacks should return a list: {output}"
+                output.stdout.contains("list_callbacks returned: list"),
+                "list_callbacks should return a list: {output:?}"
             );
         }
         Err(error) => {
@@ -658,12 +668,12 @@ print(f"timestamp: {result.get('timestamp', 'missing')}")
         Ok(output) => {
             println!("  OK: {output:?}");
             assert!(
-                output.contains("result type: dict"),
-                "invoke should return a dict: {output}"
+                output.stdout.contains("result type: dict"),
+                "invoke should return a dict: {output:?}"
             );
             assert!(
-                output.contains("timestamp: 1234567890"),
-                "invoke should return correct timestamp: {output}"
+                output.stdout.contains("timestamp: 1234567890"),
+                "invoke should return correct timestamp: {output:?}"
             );
         }
         Err(error) => {
@@ -690,8 +700,8 @@ print(f"callbacks: {names}")
         Ok(output) => {
             println!("  OK: {output:?}");
             assert!(
-                output.contains("get_time"),
-                "Should list get_time callback: {output}"
+                output.stdout.contains("get_time"),
+                "Should list get_time callback: {output:?}"
             );
         }
         Err(error) => {
@@ -717,8 +727,8 @@ print(f"add result: {result.get('result', 'missing')}")
         Ok(output) => {
             println!("  OK: {output:?}");
             assert!(
-                output.contains("add result: 42"),
-                "invoke('add', a=10, b=32) should return 42: {output}"
+                output.stdout.contains("add result: 42"),
+                "invoke('add', a=10, b=32) should return 42: {output:?}"
             );
         }
         Err(error) => {
@@ -745,12 +755,12 @@ print(f"url: {result.get('url', 'missing')}")
         Ok(output) => {
             println!("  OK: {output:?}");
             assert!(
-                output.contains("status: 200"),
-                "http.get should return status 200: {output}"
+                output.stdout.contains("status: 200"),
+                "http.get should return status 200: {output:?}"
             );
             assert!(
-                output.contains("url: https://example.com"),
-                "http.get should return correct url: {output}"
+                output.stdout.contains("url: https://example.com"),
+                "http.get should return correct url: {output:?}"
             );
         }
         Err(error) => {
@@ -781,12 +791,39 @@ except RuntimeError as e:
         Ok(output) => {
             println!("  OK: {output:?}");
             assert!(
-                output.contains("RuntimeError raised"),
-                "invoke('nonexistent') should raise RuntimeError: {output}"
+                output.stdout.contains("RuntimeError raised"),
+                "invoke('nonexistent') should raise RuntimeError: {output:?}"
             );
         }
         Err(error) => {
             panic!("Test 16 failed: {error}");
+        }
+    }
+
+    // Test 17: stderr capture works
+    println!("Test 17: stderr capture...");
+    let (result,) = execute
+        .call_async(
+            &mut store,
+            (r#"
+import sys
+print("to stdout")
+print("to stderr", file=sys.stderr)
+"#
+            .to_string(),),
+        )
+        .await?;
+    execute.post_return_async(&mut store).await?;
+
+    match &result {
+        Ok(output) => {
+            println!("  stdout: {:?}", output.stdout);
+            println!("  stderr: {:?}", output.stderr);
+            assert_eq!(output.stdout.trim(), "to stdout", "stdout should capture print()");
+            assert_eq!(output.stderr.trim(), "to stderr", "stderr should capture print(..., file=sys.stderr)");
+        }
+        Err(error) => {
+            panic!("Test 17 failed: {error}");
         }
     }
 

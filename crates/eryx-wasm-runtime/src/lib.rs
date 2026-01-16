@@ -1319,10 +1319,11 @@ fn handle_export(wit: Wit, func_index: usize, cx: &mut EryxCall) -> HandleExport
 
             match result {
                 python::ExecuteResult::Complete(output) => {
-                    // Push record fields: execute-output { stdout, stderr }
-                    // wit-dylib expects record fields in order: first stdout, then stderr
-                    cx.push_string(output.stdout);
+                    // Push record fields in REVERSE order for LIFO stack
+                    // WIT defines: execute-output { stdout, stderr }
+                    // wit-dylib pops fields in definition order, so push stderr first, then stdout
                     cx.push_string(output.stderr);
+                    cx.push_string(output.stdout);
                     cx.stack.push(Value::ResultDiscriminant(true));
                     HandleExportResult::Complete
                 }
@@ -1529,9 +1530,9 @@ impl Interpreter for EryxInterpreter {
                         python::get_python_variable_string("_eryx_errors").unwrap_or_default()
                     };
 
-                    // Push success result - record fields in order: stdout, stderr
-                    cx.push_string(stdout.trim_end_matches('\n').to_string());
+                    // Push record fields in REVERSE order for LIFO stack (stderr first, then stdout)
                     cx.push_string(stderr.trim_end_matches('\n').to_string());
+                    cx.push_string(stdout.trim_end_matches('\n').to_string());
                     cx.stack.push(Value::ResultDiscriminant(true));
                 }
 
