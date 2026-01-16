@@ -312,7 +312,7 @@ pub struct ExecuteBuilder<'a> {
     trace_tx: Option<mpsc::UnboundedSender<TraceRequest>>,
     memory_limit: Option<u64>,
     execution_timeout: Option<Duration>,
-        cancellation_token: Option<CancellationToken>,
+    cancellation_token: Option<CancellationToken>,
 }
 
 impl std::fmt::Debug for ExecuteBuilder<'_> {
