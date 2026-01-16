@@ -248,8 +248,7 @@ mod tests {
         let json = serde_json::to_string(&session).expect("Failed to serialize");
 
         // Deserialize back
-        let loaded: PersistedSession =
-            serde_json::from_str(&json).expect("Failed to deserialize");
+        let loaded: PersistedSession = serde_json::from_str(&json).expect("Failed to deserialize");
 
         assert_eq!(loaded.state, state);
         assert_eq!(loaded.metadata.execution_count, 10);

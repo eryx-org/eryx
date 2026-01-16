@@ -214,10 +214,7 @@ async fn test_registry_save_and_list() {
     let mut session = InProcessSession::new(sandbox)
         .await
         .expect("Failed to create session");
-    session
-        .execute("x = 100")
-        .await
-        .expect("Failed to execute");
+    session.execute("x = 100").await.expect("Failed to execute");
 
     registry
         .save("test-session", &mut session)
@@ -248,10 +245,7 @@ async fn test_registry_get_or_create_new() {
         .expect("Failed to get_or_create");
 
     // Should be a fresh session
-    session
-        .execute("x = 1")
-        .await
-        .expect("Failed to execute");
+    session.execute("x = 1").await.expect("Failed to execute");
     let result = session.execute("print(x)").await.expect("Failed to print");
     assert_eq!(result.stdout, "1");
 }
@@ -388,10 +382,7 @@ async fn test_registry_multiple_sessions() {
 
     // Load each and verify values
     for (name, expected) in [("alpha", "1"), ("beta", "2"), ("gamma", "3")] {
-        let mut session = registry
-            .load(name, sandbox)
-            .await
-            .expect("Failed to load");
+        let mut session = registry.load(name, sandbox).await.expect("Failed to load");
         let result = session
             .execute("print(value)")
             .await
