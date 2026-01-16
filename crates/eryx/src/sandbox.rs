@@ -370,14 +370,14 @@ impl Sandbox {
         format: crate::llm::ToolFormat,
     ) -> Result<serde_json::Value, crate::llm::ToolCallError> {
         let parsed = crate::llm::parse_tool_call(tool_call, format)?;
-        
+
         let callback = self
             .callbacks
             .get(&parsed.name)
             .ok_or_else(|| crate::llm::ToolCallError::ToolNotFound(parsed.name.clone()))?;
-        
+
         let result = callback.invoke(parsed.arguments.clone()).await;
-        
+
         Ok(crate::llm::format_tool_result(
             parsed.id.as_deref(),
             &parsed.name,

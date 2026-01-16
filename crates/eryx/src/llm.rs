@@ -20,7 +20,7 @@
 
 use std::sync::Arc;
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::callback::{Callback, CallbackError};
 
@@ -115,7 +115,10 @@ pub struct ParsedToolCall {
 /// # Errors
 ///
 /// Returns an error if the tool call JSON does not match the expected format.
-pub fn parse_tool_call(tool_call: &Value, format: ToolFormat) -> Result<ParsedToolCall, ToolCallError> {
+pub fn parse_tool_call(
+    tool_call: &Value,
+    format: ToolFormat,
+) -> Result<ParsedToolCall, ToolCallError> {
     match format {
         ToolFormat::OpenAI => parse_openai_tool_call(tool_call),
         ToolFormat::Anthropic => parse_anthropic_tool_call(tool_call),
@@ -125,7 +128,10 @@ pub fn parse_tool_call(tool_call: &Value, format: ToolFormat) -> Result<ParsedTo
 
 /// Parse an OpenAI format tool call.
 fn parse_openai_tool_call(tool_call: &Value) -> Result<ParsedToolCall, ToolCallError> {
-    let id = tool_call.get("id").and_then(|v| v.as_str()).map(String::from);
+    let id = tool_call
+        .get("id")
+        .and_then(|v| v.as_str())
+        .map(String::from);
 
     let function = tool_call
         .get("function")
@@ -149,12 +155,19 @@ fn parse_openai_tool_call(tool_call: &Value) -> Result<ParsedToolCall, ToolCallE
         arguments_raw.clone()
     };
 
-    Ok(ParsedToolCall { id, name, arguments })
+    Ok(ParsedToolCall {
+        id,
+        name,
+        arguments,
+    })
 }
 
 /// Parse an Anthropic format tool call.
 fn parse_anthropic_tool_call(tool_call: &Value) -> Result<ParsedToolCall, ToolCallError> {
-    let id = tool_call.get("id").and_then(|v| v.as_str()).map(String::from);
+    let id = tool_call
+        .get("id")
+        .and_then(|v| v.as_str())
+        .map(String::from);
 
     let name = tool_call
         .get("name")
@@ -167,12 +180,19 @@ fn parse_anthropic_tool_call(tool_call: &Value) -> Result<ParsedToolCall, ToolCa
         .cloned()
         .unwrap_or(Value::Object(serde_json::Map::new()));
 
-    Ok(ParsedToolCall { id, name, arguments })
+    Ok(ParsedToolCall {
+        id,
+        name,
+        arguments,
+    })
 }
 
 /// Parse a generic format tool call.
 fn parse_generic_tool_call(tool_call: &Value) -> Result<ParsedToolCall, ToolCallError> {
-    let id = tool_call.get("id").and_then(|v| v.as_str()).map(String::from);
+    let id = tool_call
+        .get("id")
+        .and_then(|v| v.as_str())
+        .map(String::from);
 
     let name = tool_call
         .get("name")
@@ -185,7 +205,11 @@ fn parse_generic_tool_call(tool_call: &Value) -> Result<ParsedToolCall, ToolCall
         .cloned()
         .unwrap_or(Value::Object(serde_json::Map::new()));
 
-    Ok(ParsedToolCall { id, name, arguments })
+    Ok(ParsedToolCall {
+        id,
+        name,
+        arguments,
+    })
 }
 
 /// Format a tool call result for the specified LLM format.
@@ -219,18 +243,16 @@ pub fn format_tool_result(
                 "is_error": is_error
             })
         }
-        ToolFormat::Generic => {
-            match result {
-                Ok(value) => json!({
-                    "name": tool_name,
-                    "result": value
-                }),
-                Err(e) => json!({
-                    "name": tool_name,
-                    "error": e.to_string()
-                }),
-            }
-        }
+        ToolFormat::Generic => match result {
+            Ok(value) => json!({
+                "name": tool_name,
+                "result": value
+            }),
+            Err(e) => json!({
+                "name": tool_name,
+                "error": e.to_string()
+            }),
+        },
     }
 }
 
@@ -253,7 +275,6 @@ pub enum ToolCallError {
     #[error("execution failed: {0}")]
     ExecutionFailed(#[from] CallbackError),
 }
-
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
@@ -342,7 +363,10 @@ mod tests {
         let tool = &tools_arr[0];
         assert_eq!(tool["type"], "function");
         assert_eq!(tool["function"]["name"], "echo");
-        assert_eq!(tool["function"]["description"], "Echoes back the provided message");
+        assert_eq!(
+            tool["function"]["description"],
+            "Echoes back the provided message"
+        );
         assert!(tool["function"]["parameters"].is_object());
     }
 
@@ -438,7 +462,10 @@ mod tests {
 
         let result = parse_tool_call(&tool_call, ToolFormat::OpenAI);
         assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), ToolCallError::MissingField(_)));
+        assert!(matches!(
+            result.unwrap_err(),
+            ToolCallError::MissingField(_)
+        ));
     }
 
     #[test]
@@ -454,7 +481,10 @@ mod tests {
 
         let result = parse_tool_call(&tool_call, ToolFormat::OpenAI);
         assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), ToolCallError::InvalidArguments(_)));
+        assert!(matches!(
+            result.unwrap_err(),
+            ToolCallError::InvalidArguments(_)
+        ));
     }
 
     #[test]
@@ -556,7 +586,12 @@ mod tests {
 
         assert_eq!(result["type"], "tool_result");
         assert_eq!(result["is_error"], true);
-        assert!(result["content"]["error"].as_str().unwrap().contains("test error"));
+        assert!(
+            result["content"]["error"]
+                .as_str()
+                .unwrap()
+                .contains("test error")
+        );
     }
 
     #[test]

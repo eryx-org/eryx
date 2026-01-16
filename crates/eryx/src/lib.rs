@@ -50,13 +50,13 @@ mod callback_handler;
 pub mod embedded;
 mod error;
 mod library;
+pub mod llm;
 pub mod package;
 mod sandbox;
 mod schema;
 pub mod session;
 mod trace;
 mod wasm;
-pub mod llm;
 
 /// Pre-initialization support for capturing Python memory state.
 ///
@@ -91,4 +91,4 @@ pub use wasm::{ExecutionOutput, PythonExecutor};
 pub use schema::{JsonSchema, Schema};
 
 // Re-export LLM integration types at top level for convenience
-pub use llm::{ToolFormat, ToolCallError, ParsedToolCall};
+pub use llm::{ParsedToolCall, ToolCallError, ToolFormat};
