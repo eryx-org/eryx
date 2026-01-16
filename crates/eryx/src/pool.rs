@@ -56,8 +56,8 @@ use std::time::{Duration, Instant};
 use tokio::sync::Semaphore;
 use tokio::time::timeout;
 
-use crate::sandbox::{Sandbox, SandboxBuilder, state};
 use crate::Error;
+use crate::sandbox::{Sandbox, SandboxBuilder, state};
 
 /// Configuration for a sandbox pool.
 #[derive(Debug, Clone)]
@@ -454,7 +454,10 @@ impl SandboxPool {
     /// - The pool is closed
     /// - The specified timeout is reached
     /// - A new sandbox cannot be created when the pool is not at capacity
-    pub async fn acquire_timeout(&self, acquire_timeout: Duration) -> Result<PooledSandbox, PoolError> {
+    pub async fn acquire_timeout(
+        &self,
+        acquire_timeout: Duration,
+    ) -> Result<PooledSandbox, PoolError> {
         // Check if pool is closed
         if self.closed.load(Ordering::Relaxed) != 0 {
             return Err(PoolError::Closed);
@@ -913,12 +916,9 @@ mod tests {
                 ..Default::default()
             };
 
-            let pool = SandboxPool::with_builder(
-                || Sandbox::embedded().build(),
-                config,
-            )
-            .await
-            .expect("Failed to create pool");
+            let pool = SandboxPool::with_builder(|| Sandbox::embedded().build(), config)
+                .await
+                .expect("Failed to create pool");
 
             let sandbox = pool.acquire().await.expect("Failed to acquire sandbox");
             let result = sandbox.execute("print(2 + 2)").await;
@@ -1016,7 +1016,11 @@ mod tests {
             // Evict idle sandboxes
             let evicted = pool.evict_idle();
             // Should evict down to min_idle (1)
-            assert!(evicted >= 1, "Expected at least 1 eviction, got {}", evicted);
+            assert!(
+                evicted >= 1,
+                "Expected at least 1 eviction, got {}",
+                evicted
+            );
         }
     }
 }
