@@ -78,8 +78,8 @@ pub use library::RuntimeLibrary;
 pub use package::{ExtractedPackage, PackageFormat};
 pub use sandbox::{ExecuteResult, ExecuteStats, ResourceLimits, Sandbox, SandboxBuilder, state};
 pub use session::{
-    InProcessSession, PythonStateSnapshot, Session, SessionExecutor, SnapshotMetadata,
-    SnapshotSession,
+    InProcessSession, PersistedSession, PythonStateSnapshot, Session, SessionExecutor, SessionInfo,
+    SessionMetadata, SessionRegistry, SnapshotMetadata, SnapshotSession,
 };
 pub use trace::{OutputHandler, TraceEvent, TraceEventKind, TraceHandler};
 
