@@ -236,6 +236,7 @@ mod base64_bytes {
 }
 
 #[cfg(test)]
+#[allow(clippy::expect_used)]
 mod tests {
     use super::*;
 
