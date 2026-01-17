@@ -1365,9 +1365,10 @@ impl PythonExecutor {
                 let ticks = ticks_until_timeout.max(1);
                 store.set_epoch_deadline(ticks);
             } else {
-                // No timeout but we have cancellation - set a high deadline
-                // The cancellation will trigger immediate epoch bump
-                store.set_epoch_deadline(u64::MAX / 2);
+                // No timeout but we have cancellation - set a reachable deadline.
+                // When cancelled, we bump epoch by more than this to trigger interrupt.
+                const CANCELLATION_DEADLINE: u64 = 10000;
+                store.set_epoch_deadline(CANCELLATION_DEADLINE);
             }
 
             // Configure the store to trap when the epoch deadline is reached
@@ -1389,8 +1390,8 @@ impl PythonExecutor {
                         && token.is_cancelled()
                     {
                         was_cancelled_clone.store(true, Ordering::Relaxed);
-                        // Bump epoch massively to trigger immediate interrupt
-                        for _ in 0..1000 {
+                        // Bump epoch to exceed CANCELLATION_DEADLINE and trigger interrupt
+                        for _ in 0..10001 {
                             engine.increment_epoch();
                         }
                         break;
