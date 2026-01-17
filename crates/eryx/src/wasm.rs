@@ -1065,7 +1065,11 @@ impl PythonExecutor {
         // Get peak memory from the store before it's dropped
         let peak_memory_bytes = store.data().memory_tracker.peak_memory_bytes();
 
-        Ok(ExecutionOutput::new(wit_output.stdout, wit_output.stderr, peak_memory_bytes))
+        Ok(ExecutionOutput::new(
+            wit_output.stdout,
+            wit_output.stderr,
+            peak_memory_bytes,
+        ))
     }
 }
 
