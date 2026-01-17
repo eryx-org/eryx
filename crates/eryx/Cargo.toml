@@ -111,6 +111,9 @@ walkdir.workspace = true
 zstd = { workspace = true, optional = true }
 # Native extension support (optional)
 eryx-runtime = { path = "../eryx-runtime", optional = true }
+# Network callback support (optional)
+reqwest = { workspace = true, optional = true }
+wildmatch = { workspace = true, optional = true }
 
 [features]
 default = []
@@ -126,6 +129,8 @@ preinit = ["dep:eryx-runtime", "eryx-runtime/preinit"]
 # Allows adding extensions like numpy at sandbox creation time.
 # Implies preinit since the linker infrastructure is shared.
 native-extensions = ["preinit", "eryx-runtime/native-extensions"]
+# Built-in network callback with security controls (host allowlist, timeouts, etc.)
+network = ["dep:reqwest", "dep:wildmatch"]
 
 [dev-dependencies]
 async-trait.workspace = true
