@@ -61,11 +61,20 @@ pub trait TraceHandler: Send + Sync {
     async fn on_trace(&self, event: TraceEvent);
 }
 
-/// Handler for streaming stdout during execution.
+/// Handler for streaming output during execution.
 #[async_trait]
 pub trait OutputHandler: Send + Sync {
-    /// Called when output is produced.
+    /// Called when stdout output is produced.
     async fn on_output(&self, chunk: &str);
+
+    /// Called when stderr output is produced.
+    ///
+    /// The default implementation does nothing. Override this method
+    /// to handle stderr separately from stdout.
+    async fn on_stderr(&self, chunk: &str) {
+        // Default: ignore stderr
+        let _ = chunk;
+    }
 }
 
 #[cfg(test)]
