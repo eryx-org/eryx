@@ -894,10 +894,13 @@ impl<R, S> SandboxBuilder<R, S> {
     /// Returns an error if the HTTP client cannot be initialized.
     #[cfg(feature = "network")]
     pub fn with_network(self, config: crate::network::NetworkConfig) -> Result<Self, Error> {
-        let callback = crate::network::create_fetch_callback(config)
-            .map_err(|e| Error::Initialization(format!("failed to create network callback: {e}")))?;
+        let callback = crate::network::create_fetch_callback(config).map_err(|e| {
+            Error::Initialization(format!("failed to create network callback: {e}"))
+        })?;
         let mut builder = self;
-        builder.callbacks.insert(callback.name().to_string(), callback);
+        builder
+            .callbacks
+            .insert(callback.name().to_string(), callback);
         Ok(builder)
     }
 

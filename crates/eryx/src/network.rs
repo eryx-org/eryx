@@ -38,14 +38,7 @@
 //! By default, private IP ranges (10.x.x.x, 172.16-31.x.x, 192.168.x.x, 127.x.x.x, etc.)
 //! are blocked to prevent SSRF attacks. Use `allow_private_ips(true)` to override.
 
-use std::{
-    collections::HashMap,
-    future::Future,
-    net::IpAddr,
-    pin::Pin,
-    sync::Arc,
-    time::Duration,
-};
+use std::{collections::HashMap, future::Future, net::IpAddr, pin::Pin, sync::Arc, time::Duration};
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -215,7 +208,9 @@ impl NetworkConfigBuilder {
         NetworkConfig {
             allowed_hosts: self.allowed_hosts.unwrap_or(default.allowed_hosts),
             timeout: self.timeout.unwrap_or(default.timeout),
-            max_response_bytes: self.max_response_bytes.unwrap_or(default.max_response_bytes),
+            max_response_bytes: self
+                .max_response_bytes
+                .unwrap_or(default.max_response_bytes),
             allowed_methods: self.allowed_methods.unwrap_or(default.allowed_methods),
             allow_private_ips: self.allow_private_ips.unwrap_or(default.allow_private_ips),
         }
@@ -237,7 +232,9 @@ impl FetchCallback {
         let client = reqwest::Client::builder()
             .timeout(config.timeout)
             .build()
-            .map_err(|e| CallbackError::ExecutionFailed(format!("failed to create HTTP client: {e}")))?;
+            .map_err(|e| {
+                CallbackError::ExecutionFailed(format!("failed to create HTTP client: {e}"))
+            })?;
 
         Ok(Self { config, client })
     }
@@ -580,7 +577,10 @@ mod tests {
         assert_eq!(config.allowed_hosts, vec!["*"]);
         assert_eq!(config.timeout, Duration::from_secs(30));
         assert_eq!(config.max_response_bytes, 10 * 1024 * 1024);
-        assert_eq!(config.allowed_methods, vec![HttpMethod::Get, HttpMethod::Post]);
+        assert_eq!(
+            config.allowed_methods,
+            vec![HttpMethod::Get, HttpMethod::Post]
+        );
         assert!(!config.allow_private_ips);
     }
 
@@ -594,7 +594,10 @@ mod tests {
             .allow_private_ips(true)
             .build();
 
-        assert_eq!(config.allowed_hosts, vec!["api.example.com", "*.trusted.org"]);
+        assert_eq!(
+            config.allowed_hosts,
+            vec!["api.example.com", "*.trusted.org"]
+        );
         assert_eq!(config.timeout, Duration::from_secs(10));
         assert_eq!(config.max_response_bytes, 1024);
         assert_eq!(config.allowed_methods, vec![HttpMethod::Get]);
@@ -677,7 +680,9 @@ mod tests {
     #[test]
     fn is_private_ip_loopback() {
         assert!(FetchCallback::is_private_ip("127.0.0.1".parse().unwrap()));
-        assert!(FetchCallback::is_private_ip("127.255.255.255".parse().unwrap()));
+        assert!(FetchCallback::is_private_ip(
+            "127.255.255.255".parse().unwrap()
+        ));
         assert!(FetchCallback::is_private_ip("::1".parse().unwrap()));
     }
 
@@ -685,27 +690,39 @@ mod tests {
     fn is_private_ip_private_ranges() {
         // 10.0.0.0/8
         assert!(FetchCallback::is_private_ip("10.0.0.1".parse().unwrap()));
-        assert!(FetchCallback::is_private_ip("10.255.255.255".parse().unwrap()));
+        assert!(FetchCallback::is_private_ip(
+            "10.255.255.255".parse().unwrap()
+        ));
         // 172.16.0.0/12
         assert!(FetchCallback::is_private_ip("172.16.0.1".parse().unwrap()));
-        assert!(FetchCallback::is_private_ip("172.31.255.255".parse().unwrap()));
+        assert!(FetchCallback::is_private_ip(
+            "172.31.255.255".parse().unwrap()
+        ));
         // 192.168.0.0/16
         assert!(FetchCallback::is_private_ip("192.168.0.1".parse().unwrap()));
-        assert!(FetchCallback::is_private_ip("192.168.255.255".parse().unwrap()));
+        assert!(FetchCallback::is_private_ip(
+            "192.168.255.255".parse().unwrap()
+        ));
     }
 
     #[test]
     fn is_private_ip_link_local() {
         assert!(FetchCallback::is_private_ip("169.254.0.1".parse().unwrap()));
-        assert!(FetchCallback::is_private_ip("169.254.255.255".parse().unwrap()));
+        assert!(FetchCallback::is_private_ip(
+            "169.254.255.255".parse().unwrap()
+        ));
     }
 
     #[test]
     fn is_private_ip_public() {
         assert!(!FetchCallback::is_private_ip("8.8.8.8".parse().unwrap()));
         assert!(!FetchCallback::is_private_ip("1.1.1.1".parse().unwrap()));
-        assert!(!FetchCallback::is_private_ip("93.184.216.34".parse().unwrap()));
-        assert!(!FetchCallback::is_private_ip("2607:f8b0:4004:800::200e".parse().unwrap()));
+        assert!(!FetchCallback::is_private_ip(
+            "93.184.216.34".parse().unwrap()
+        ));
+        assert!(!FetchCallback::is_private_ip(
+            "2607:f8b0:4004:800::200e".parse().unwrap()
+        ));
     }
 
     #[test]
