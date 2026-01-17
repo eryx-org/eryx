@@ -570,7 +570,11 @@ impl SessionExecutor {
         })?;
         // wit_output is the WIT-generated ExecuteOutput record with stdout and stderr
         let wit_output = wasmtime_result.map_err(|e| format!("WASM execution error: {e:?}"))??;
-        Ok(ExecutionOutput::new(wit_output.stdout, wit_output.stderr, peak_memory))
+        Ok(ExecutionOutput::new(
+            wit_output.stdout,
+            wit_output.stderr,
+            peak_memory,
+        ))
     }
 
     /// Get the number of executions performed in this session.

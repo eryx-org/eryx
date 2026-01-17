@@ -363,7 +363,9 @@ async fn test_instantiate_component() -> Result<(), Box<dyn std::error::Error>> 
     let execute = instance
         .get_typed_func::<(String,), (Result<ExecuteOutput, String>,)>(&mut store, "[async]execute")
         .or_else(|_| {
-            instance.get_typed_func::<(String,), (Result<ExecuteOutput, String>,)>(&mut store, "execute")
+            instance.get_typed_func::<(String,), (Result<ExecuteOutput, String>,)>(
+                &mut store, "execute",
+            )
         })?;
 
     // Test 1: Simple print statement
@@ -393,7 +395,10 @@ async fn test_instantiate_component() -> Result<(), Box<dyn std::error::Error>> 
     match &result {
         Ok(output) => {
             println!("  OK: {output:?}");
-            assert_eq!(output.stdout, "hello\nworld", "Should have two lines of output");
+            assert_eq!(
+                output.stdout, "hello\nworld",
+                "Should have two lines of output"
+            );
         }
         Err(error) => {
             panic!("Test 2 failed with error: {error}");
@@ -606,7 +611,9 @@ async fn test_instantiate_component() -> Result<(), Box<dyn std::error::Error>> 
         Ok(output) => {
             println!("  OK: Restored values: {output:?}");
             assert!(
-                output.stdout.contains("42") && output.stdout.contains("hello") && output.stdout.contains("[1, 2, 3]"),
+                output.stdout.contains("42")
+                    && output.stdout.contains("hello")
+                    && output.stdout.contains("[1, 2, 3]"),
                 "Restored values should match: {output:?}"
             );
         }
@@ -819,8 +826,16 @@ print("to stderr", file=sys.stderr)
         Ok(output) => {
             println!("  stdout: {:?}", output.stdout);
             println!("  stderr: {:?}", output.stderr);
-            assert_eq!(output.stdout.trim(), "to stdout", "stdout should capture print()");
-            assert_eq!(output.stderr.trim(), "to stderr", "stderr should capture print(..., file=sys.stderr)");
+            assert_eq!(
+                output.stdout.trim(),
+                "to stdout",
+                "stdout should capture print()"
+            );
+            assert_eq!(
+                output.stderr.trim(),
+                "to stderr",
+                "stderr should capture print(..., file=sys.stderr)"
+            );
         }
         Err(error) => {
             panic!("Test 17 failed: {error}");
