@@ -38,6 +38,7 @@ use wasmtime_wasi::{DirPerms, FilePerms, WasiCtx, WasiCtxBuilder, WasiCtxView, W
 
 use crate::callback::Callback;
 use crate::error::Error;
+use crate::net::TlsConnectionManager;
 use crate::trace::TraceEvent;
 
 /// Request to invoke a callback from Python code.
@@ -191,6 +192,8 @@ pub struct ExecutorState {
     pub(crate) callbacks: Vec<HostCallbackInfo>,
     /// Memory usage tracker.
     pub(crate) memory_tracker: MemoryTracker,
+    /// TLS connection manager for network access.
+    pub(crate) tls_manager: Option<TlsConnectionManager>,
 }
 
 impl std::fmt::Debug for ExecutorState {
@@ -205,6 +208,7 @@ impl std::fmt::Debug for ExecutorState {
                 "peak_memory_bytes",
                 &self.memory_tracker.peak_memory_bytes(),
             )
+            .field("tls_manager", &self.tls_manager.is_some())
             .finish()
     }
 }
@@ -283,6 +287,103 @@ impl SandboxImports for ExecutorState {
             };
             // Fire-and-forget - trace events are not critical
             let _ = tx.send(request);
+        }
+    }
+}
+
+// Import the WIT-generated tls module types (use self:: to refer to the bindgen-generated module)
+use self::eryx::sandbox::tls;
+
+// Convert our TlsError to the WIT-generated TlsError type.
+fn to_wit_tls_error(e: crate::net::TlsError) -> tls::TlsError {
+    use crate::net::TlsError as E;
+    match e {
+        E::ConnectionRefused => tls::TlsError::ConnectionRefused,
+        E::ConnectionReset => tls::TlsError::ConnectionReset,
+        E::TimedOut => tls::TlsError::TimedOut,
+        E::HostNotFound => tls::TlsError::HostNotFound,
+        E::TlsHandshakeFailed(msg) => tls::TlsError::TlsHandshakeFailed(msg),
+        E::IoError(msg) => tls::TlsError::IoError(msg),
+        E::NotPermitted(msg) => tls::TlsError::NotPermitted(msg),
+        E::InvalidHandle => tls::TlsError::InvalidHandle,
+    }
+}
+
+// Host implementation of the TLS interface (async functions).
+impl tls::HostWithStore for HasSelf<ExecutorState> {
+    /// Connect to a host with TLS (async).
+    fn connect<T>(
+        accessor: &Accessor<T, Self>,
+        host: String,
+        port: u16,
+    ) -> impl ::core::future::Future<Output = Result<u32, tls::TlsError>> + Send {
+        tracing::debug!(host = %host, port, "TLS connect requested");
+
+        async move {
+            // Check if networking is enabled
+            accessor.with(|mut access| {
+                let state = access.get();
+                if state.tls_manager.is_none() {
+                    Err(tls::TlsError::NotPermitted(
+                        "networking not enabled for this sandbox".into(),
+                    ))
+                } else {
+                    Ok(())
+                }
+            })?;
+
+            // TODO: Implement async TLS connect
+            // The challenge is that accessor.with() gives us synchronous access
+            // but TlsConnectionManager::connect() is async.
+            // Looking at how invoke() does it - it clones a channel and uses it outside.
+            // For TLS, we need mutable access to the manager which is trickier.
+            // Proper implementation will need restructuring to use channels or Arc<Mutex>.
+            Err(tls::TlsError::NotPermitted(
+                "TLS connect not yet fully implemented".into(),
+            ))
+        }
+    }
+
+    /// Read from a TLS connection (async).
+    fn read<T>(
+        _accessor: &Accessor<T, Self>,
+        handle: u32,
+        len: u32,
+    ) -> impl ::core::future::Future<Output = Result<Vec<u8>, tls::TlsError>> + Send {
+        tracing::trace!(handle, len, "TLS read requested");
+
+        async move {
+            // TODO: Implement async TLS read (same challenge as connect)
+            Err(tls::TlsError::NotPermitted(
+                "TLS read not yet fully implemented".into(),
+            ))
+        }
+    }
+
+    /// Write to a TLS connection (async).
+    fn write<T>(
+        _accessor: &Accessor<T, Self>,
+        handle: u32,
+        data: Vec<u8>,
+    ) -> impl ::core::future::Future<Output = Result<u32, tls::TlsError>> + Send {
+        tracing::trace!(handle, len = data.len(), "TLS write requested");
+
+        async move {
+            // TODO: Implement async TLS write (same challenge as connect)
+            Err(tls::TlsError::NotPermitted(
+                "TLS write not yet fully implemented".into(),
+            ))
+        }
+    }
+}
+
+// Host implementation of the TLS interface (sync functions).
+impl tls::Host for ExecutorState {
+    /// Close a TLS connection.
+    fn close(&mut self, handle: u32) {
+        tracing::debug!(handle, "TLS close requested");
+        if let Some(ref mut manager) = self.tls_manager {
+            manager.close(handle);
         }
     }
 }
@@ -972,6 +1073,7 @@ impl PythonExecutor {
             trace_tx,
             callbacks: callback_infos,
             memory_tracker: MemoryTracker::new(memory_limit),
+            tls_manager: None, // TODO: wire up from SandboxBuilder
         };
 
         // Create store for this execution

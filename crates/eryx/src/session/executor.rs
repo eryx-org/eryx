@@ -925,6 +925,7 @@ impl ExecutorState {
             trace_tx,
             callbacks,
             memory_tracker,
+            tls_manager: None, // TODO: wire up from session config
         }
     }
 

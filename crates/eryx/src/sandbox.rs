@@ -378,6 +378,8 @@ pub struct SandboxBuilder<Runtime = state::Needs, Stdlib = state::Needs> {
     filesystem_cache: Option<crate::cache::FilesystemCache>,
     /// Extracted packages (kept alive for sandbox lifetime).
     packages: Vec<crate::package::ExtractedPackage>,
+    /// Network configuration for TLS connections.
+    net_config: Option<crate::net::NetConfig>,
     /// Phantom data for Runtime type parameter.
     _runtime: PhantomData<Runtime>,
     /// Phantom data for Stdlib type parameter.
@@ -431,6 +433,7 @@ impl SandboxBuilder<state::Needs, state::Needs> {
             #[cfg(feature = "native-extensions")]
             filesystem_cache: None,
             packages: Vec::new(),
+            net_config: None,
             _runtime: PhantomData,
             _stdlib: PhantomData,
         }
@@ -458,6 +461,7 @@ impl SandboxBuilder<state::Needs, state::Needs> {
             #[cfg(feature = "native-extensions")]
             filesystem_cache: None,
             packages: Vec::new(),
+            net_config: None,
             _runtime: PhantomData,
             _stdlib: PhantomData,
         }
@@ -485,6 +489,7 @@ impl<R, S> SandboxBuilder<R, S> {
             #[cfg(feature = "native-extensions")]
             filesystem_cache: self.filesystem_cache,
             packages: self.packages,
+            net_config: self.net_config,
             _runtime: PhantomData,
             _stdlib: PhantomData,
         }
@@ -868,6 +873,39 @@ impl<R, S> SandboxBuilder<R, S> {
     #[must_use]
     pub const fn with_resource_limits(mut self, limits: ResourceLimits) -> Self {
         self.resource_limits = limits;
+        self
+    }
+
+    /// Enable TLS networking with the given configuration.
+    ///
+    /// This allows Python code in the sandbox to make HTTPS requests using
+    /// libraries like `requests` or `httpx`. The configuration controls which
+    /// hosts are allowed, connection limits, and timeouts.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// use eryx::{Sandbox, NetConfig};
+    ///
+    /// let sandbox = Sandbox::embedded()
+    ///     .with_network(NetConfig::default())
+    ///     .build()?;
+    ///
+    /// // Python code can now use requests/httpx
+    /// sandbox.execute(r#"
+    /// import requests
+    /// r = requests.get("https://httpbin.org/get")
+    /// print(r.status_code)
+    /// "#).await?;
+    /// ```
+    ///
+    /// # Security
+    ///
+    /// By default, connections to localhost and private networks (RFC1918) are blocked.
+    /// Use [`NetConfig::allow_localhost`] or [`NetConfig::permissive`] for testing.
+    #[must_use]
+    pub fn with_network(mut self, config: crate::net::NetConfig) -> Self {
+        self.net_config = Some(config);
         self
     }
 

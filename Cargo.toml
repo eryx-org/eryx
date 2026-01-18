@@ -54,6 +54,11 @@ thiserror = "2.0"
 tokio = { version = "1", features = ["full"] }
 tokio-stream = "0.1"
 
+# TLS
+rustls = "0.23"
+tokio-rustls = "0.26"
+webpki-roots = "0.26"
+
 # Utilities
 tracing = "0.1"
 
