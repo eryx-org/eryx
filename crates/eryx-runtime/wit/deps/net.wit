@@ -6,14 +6,18 @@
 ///
 /// ## Design Notes
 ///
-/// This is a minimal, client-only networking interface using Component Model
-/// native async (`async func`). It differs from wasi-sockets in several ways:
+/// This is a minimal, client-only networking interface. It differs from
+/// wasi-sockets in several ways:
 ///
-/// - Uses native async instead of start-*/finish-* polling pattern
 /// - Includes TLS as a first-class interface (wasi-sockets doesn't have TLS)
 /// - Client-only (no bind/listen/accept for servers)
 /// - Host-controlled DNS resolution and network policy
 /// - Simple u32 handles instead of resource types with streams
+///
+/// The functions are declared as regular sync functions in WIT, but the host
+/// implements them with fiber-based async (wasmtime's `async` bindgen flag).
+/// This makes the functions appear blocking to the guest while the host can
+/// still perform async I/O.
 ///
 /// ## Future: wasi-sockets Migration
 ///
@@ -61,9 +65,8 @@ interface tcp {
     /// The hostname is used for DNS resolution. The host controls which
     /// connections are allowed via its network policy configuration.
     ///
-    /// This is an async function - Python code can await it:
-    ///   handle = await tcp_connect("localhost", 8080)
-    connect: async func(host: string, port: u16) -> result<tcp-handle, tcp-error>;
+    /// Blocks until the connection is established or fails.
+    connect: func(host: string, port: u16) -> result<tcp-handle, tcp-error>;
 
     /// Read up to `len` bytes from a TCP connection.
     ///
@@ -71,18 +74,16 @@ interface tcp {
     /// data is available. Returns empty list on EOF (connection closed
     /// gracefully by peer).
     ///
-    /// This is an async function that suspends until data is available:
-    ///   data = await tcp_read(handle, 4096)
-    read: async func(handle: tcp-handle, len: u32) -> result<list<u8>, tcp-error>;
+    /// Blocks until data is available or the connection is closed.
+    read: func(handle: tcp-handle, len: u32) -> result<list<u8>, tcp-error>;
 
     /// Write bytes to a TCP connection.
     ///
     /// Returns the number of bytes written. May be less than the input
     /// length if the connection buffer is full.
     ///
-    /// This is an async function:
-    ///   written = await tcp_write(handle, data)
-    write: async func(handle: tcp-handle, data: list<u8>) -> result<u32, tcp-error>;
+    /// Blocks until data is written.
+    write: func(handle: tcp-handle, data: list<u8>) -> result<u32, tcp-error>;
 
     /// Close a TCP connection.
     ///
@@ -122,9 +123,8 @@ interface tls {
     /// After upgrade, the original tcp-handle is invalid - use the returned
     /// tls-handle for all further operations.
     ///
-    /// This is an async function:
-    ///   tls_handle = await tls_upgrade(tcp_handle, "api.example.com")
-    upgrade: async func(tcp: tcp-handle, hostname: string) -> result<tls-handle, tls-error>;
+    /// Blocks until the TLS handshake completes.
+    upgrade: func(tcp: tcp-handle, hostname: string) -> result<tls-handle, tls-error>;
 
     /// Read up to `len` bytes from a TLS connection.
     ///
@@ -132,18 +132,16 @@ interface tls {
     /// data is available. Returns empty list on EOF (connection closed
     /// gracefully by peer after TLS close_notify).
     ///
-    /// This is an async function that suspends until data is available:
-    ///   data = await tls_read(handle, 4096)
-    read: async func(handle: tls-handle, len: u32) -> result<list<u8>, tls-error>;
+    /// Blocks until data is available or the connection is closed.
+    read: func(handle: tls-handle, len: u32) -> result<list<u8>, tls-error>;
 
     /// Write bytes to a TLS connection.
     ///
     /// Returns the number of bytes written. May be less than the input
     /// length if the connection buffer is full.
     ///
-    /// This is an async function:
-    ///   written = await tls_write(handle, data)
-    write: async func(handle: tls-handle, data: list<u8>) -> result<u32, tls-error>;
+    /// Blocks until data is written.
+    write: func(handle: tls-handle, data: list<u8>) -> result<u32, tls-error>;
 
     /// Close a TLS connection.
     ///

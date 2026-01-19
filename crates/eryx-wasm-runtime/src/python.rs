@@ -1422,25 +1422,22 @@ class SSLSocket:
         if not hostname:
             raise SSLError("No hostname available for TLS handshake")
 
-        # Upgrade the TCP connection to TLS
-        result = _eryx._eryx_tls_upgrade(self._sock._tcp_handle, hostname)
+        import _eryx
+        result_type, value = _eryx._eryx_tls_upgrade(self._sock._tcp_handle, hostname)
 
-        if isinstance(result, tuple):
-            status, value = result
-            if status == 0:  # Ok - value is TLS handle
-                self._sock._tls_handle = value
-                self._connected = True
-            elif status == 1:  # Error
-                error_str = str(value)
-                if 'handshake' in error_str.lower() or 'certificate' in error_str.lower():
-                    raise SSLCertVerificationError(error_str)
-                raise SSLError(error_str)
-            else:  # Pending - should not happen in sync context
-                raise SSLError("TLS upgrade returned pending in sync context")
-        else:
-            # Direct handle (shouldn't happen with current impl)
-            self._sock._tls_handle = result
+        if result_type == 0:
+            # Success - value is the TLS handle
+            self._sock._tls_handle = value
             self._connected = True
+        elif result_type == 1:
+            # Error - value is the error message
+            error_str = str(value)
+            if 'handshake' in error_str.lower() or 'certificate' in error_str.lower():
+                raise SSLCertVerificationError(error_str)
+            raise SSLError(error_str)
+        else:
+            # Pending should never happen with ignore_wit
+            raise SSLError("Unexpected pending result in sync context")
 
     def read(self, length=1024, buffer=None):
         if self._closed:
@@ -1891,22 +1888,22 @@ class socket:
         """Connect to address over TCP."""
         if self._closed:
             raise error("Socket is closed")
-        host, port = address
-        self._pending_address = (str(host), int(port))
+        if self._tcp_handle is not None:
+            raise error("Socket is already connected")
 
-        # Actually connect via TCP
+        host, port = address
         import _eryx
-        result = _eryx._eryx_tcp_connect(str(host), int(port))
-        if isinstance(result, tuple):
-            status, value = result
-            if status == 0:  # Ok - value is handle
-                self._tcp_handle = value
-            elif status == 1:  # Error
-                raise error(str(value))
-            else:  # Pending - should not happen in sync context
-                raise error("TCP connect returned pending in sync context")
+        result_type, value = _eryx._eryx_tcp_connect(host, port)
+
+        if result_type == 0:
+            # Success - value is the TCP handle
+            self._tcp_handle = value
+        elif result_type == 1:
+            # Error - value is the error message
+            raise error(value)
         else:
-            self._tcp_handle = result
+            # Pending should never happen with ignore_wit
+            raise error(f"Unexpected pending result in sync context")
 
     def connect_ex(self, address):
         """Connect and return error code instead of raising."""
@@ -1953,54 +1950,67 @@ class socket:
         return -1  # No real fd
 
     def recv(self, bufsize, flags=0):
+        """Receive data from the socket."""
         if self._closed:
             raise error("Socket is closed")
+
+        # Use TLS handle if upgraded, otherwise TCP handle
+        handle = self._tls_handle if self._tls_handle is not None else self._tcp_handle
+        if handle is None:
+            raise error("Socket is not connected")
+
         import _eryx
-
-        # Use TLS if upgraded, otherwise use TCP
         if self._tls_handle is not None:
-            result = _eryx._eryx_tls_read(self._tls_handle, bufsize)
-        elif self._tcp_handle is not None:
-            result = _eryx._eryx_tcp_read(self._tcp_handle, bufsize)
+            result_type, value = _eryx._eryx_tls_read(handle, bufsize)
         else:
-            raise error("Socket not connected")
+            result_type, value = _eryx._eryx_tcp_read(handle, bufsize)
 
-        if isinstance(result, tuple):
-            status, value = result
-            if status == 0:  # Ok
-                return bytes(value) if value else b''
-            else:  # Error
-                raise error(str(value))
-        return bytes(result) if result else b''
+        if result_type == 0:
+            # Success - value is the bytes read
+            return bytes(value) if value else b""
+        elif result_type == 1:
+            # Error - value is the error message
+            raise error(value)
+        else:
+            # Pending should never happen with ignore_wit
+            raise error(f"Unexpected pending result in sync context")
 
     def recv_into(self, buffer, nbytes=0, flags=0):
-        data = self.recv(nbytes or len(buffer), flags)
+        """Receive data into a buffer."""
+        length = nbytes if nbytes > 0 else len(buffer)
+        data = self.recv(length)
         n = len(data)
         buffer[:n] = data
         return n
 
     def send(self, data, flags=0):
+        """Send data to the socket."""
         if self._closed:
             raise error("Socket is closed")
-        import _eryx
+
+        # Use TLS handle if upgraded, otherwise TCP handle
+        handle = self._tls_handle if self._tls_handle is not None else self._tcp_handle
+        if handle is None:
+            raise error("Socket is not connected")
+
         if isinstance(data, memoryview):
             data = bytes(data)
 
-        # Use TLS if upgraded, otherwise use TCP
+        import _eryx
         if self._tls_handle is not None:
-            result = _eryx._eryx_tls_write(self._tls_handle, data)
-        elif self._tcp_handle is not None:
-            result = _eryx._eryx_tcp_write(self._tcp_handle, data)
+            result_type, value = _eryx._eryx_tls_write(handle, data)
         else:
-            raise error("Socket not connected")
+            result_type, value = _eryx._eryx_tcp_write(handle, data)
 
-        if isinstance(result, tuple):
-            status, value = result
-            if status == 0:
-                return value
-            else:
-                raise error(str(value))
-        return result
+        if result_type == 0:
+            # Success - value is the number of bytes written
+            return value
+        elif result_type == 1:
+            # Error - value is the error message
+            raise error(value)
+        else:
+            # Pending should never happen with ignore_wit
+            raise error(f"Unexpected pending result in sync context")
 
     def sendall(self, data, flags=0):
         if isinstance(data, memoryview):

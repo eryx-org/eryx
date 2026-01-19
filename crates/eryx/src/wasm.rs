@@ -220,9 +220,26 @@ impl ResourceLimiter for MemoryTracker {
 }
 
 // Generate bindings from the WIT file
-// The WIT already declares `invoke` and `execute` as async, wasmtime handles it
+//
+// Network functions are declared as regular sync `func` in WIT (not `async func`).
+// We use the `async` flag for network imports to generate `func_wrap_async` bindings.
+// This gives us fiber-based async: the host can await on async operations, but from
+// the guest's perspective the calls are blocking. This requires `Config::async_support`
+// but NOT `Config::wasm_component_model_async`.
 wasmtime::component::bindgen!({
     path: "../eryx-runtime/wit",
+    imports: {
+        // TCP network operations - fiber-based async (blocking to guest, async on host)
+        "eryx:net/tcp.connect": async,
+        "eryx:net/tcp.read": async,
+        "eryx:net/tcp.write": async,
+        "eryx:net/tcp.close": async,
+        // TLS network operations - fiber-based async (blocking to guest, async on host)
+        "eryx:net/tls.upgrade": async,
+        "eryx:net/tls.read": async,
+        "eryx:net/tls.write": async,
+        "eryx:net/tls.close": async,
+    },
 });
 
 /// State for a single execution, implementing WASI and callback channels.
@@ -368,253 +385,205 @@ fn to_wit_tls_error(e: crate::net::TlsError) -> tls::TlsError {
 }
 
 // ============================================================================
-// TCP Host Implementation
+// TCP Host Implementation (fiber-based async)
 // ============================================================================
-
-impl tcp::HostWithStore for HasSelf<ExecutorState> {
-    fn connect<T>(
-        accessor: &Accessor<T, Self>,
-        host: String,
-        port: u16,
-    ) -> impl ::core::future::Future<Output = Result<u32, tcp::TcpError>> + Send {
-        tracing::debug!(host = %host, port, "TCP connect requested");
-
-        async move {
-            let tx = accessor
-                .with(|mut access| access.get().net_tx.clone())
-                .ok_or_else(|| {
-                    tcp::TcpError::NotPermitted("networking not enabled for this sandbox".into())
-                })?;
-
-            let (response_tx, response_rx) = oneshot::channel();
-
-            let request = NetRequest::TcpConnect {
-                host,
-                port,
-                response_tx,
-            };
-
-            tx.send(request)
-                .await
-                .map_err(|_| tcp::TcpError::IoError("network handler channel closed".into()))?;
-
-            response_rx
-                .await
-                .map_err(|_| tcp::TcpError::IoError("network response channel closed".into()))?
-                .map_err(to_wit_tcp_error)
-        }
-    }
-
-    fn read<T>(
-        accessor: &Accessor<T, Self>,
-        handle: u32,
-        len: u32,
-    ) -> impl ::core::future::Future<Output = Result<Vec<u8>, tcp::TcpError>> + Send {
-        tracing::trace!(handle, len, "TCP read requested");
-
-        async move {
-            let tx = accessor
-                .with(|mut access| access.get().net_tx.clone())
-                .ok_or_else(|| {
-                    tcp::TcpError::NotPermitted("networking not enabled for this sandbox".into())
-                })?;
-
-            let (response_tx, response_rx) = oneshot::channel();
-
-            let request = NetRequest::TcpRead {
-                handle,
-                len,
-                response_tx,
-            };
-
-            tx.send(request)
-                .await
-                .map_err(|_| tcp::TcpError::IoError("network handler channel closed".into()))?;
-
-            response_rx
-                .await
-                .map_err(|_| tcp::TcpError::IoError("network response channel closed".into()))?
-                .map_err(to_wit_tcp_error)
-        }
-    }
-
-    fn write<T>(
-        accessor: &Accessor<T, Self>,
-        handle: u32,
-        data: Vec<u8>,
-    ) -> impl ::core::future::Future<Output = Result<u32, tcp::TcpError>> + Send {
-        tracing::trace!(handle, len = data.len(), "TCP write requested");
-
-        async move {
-            let tx = accessor
-                .with(|mut access| access.get().net_tx.clone())
-                .ok_or_else(|| {
-                    tcp::TcpError::NotPermitted("networking not enabled for this sandbox".into())
-                })?;
-
-            let (response_tx, response_rx) = oneshot::channel();
-
-            let request = NetRequest::TcpWrite {
-                handle,
-                data,
-                response_tx,
-            };
-
-            tx.send(request)
-                .await
-                .map_err(|_| tcp::TcpError::IoError("network handler channel closed".into()))?;
-
-            response_rx
-                .await
-                .map_err(|_| tcp::TcpError::IoError("network response channel closed".into()))?
-                .map_err(to_wit_tcp_error)
-        }
-    }
-}
 
 impl tcp::Host for ExecutorState {
-    fn close(&mut self, handle: u32) {
+    async fn connect(&mut self, host: String, port: u16) -> Result<u32, tcp::TcpError> {
+        tracing::debug!(host = %host, port, "TCP connect requested");
+
+        let tx = self.net_tx.clone().ok_or_else(|| {
+            tcp::TcpError::NotPermitted("networking not enabled for this sandbox".into())
+        })?;
+
+        let (response_tx, response_rx) = oneshot::channel();
+
+        let request = NetRequest::TcpConnect {
+            host,
+            port,
+            response_tx,
+        };
+
+        // Send request - fiber will suspend if channel is full
+        tx.send(request)
+            .await
+            .map_err(|_| tcp::TcpError::IoError("network handler channel closed".into()))?;
+
+        // Await response - fiber suspends until response arrives
+        response_rx
+            .await
+            .map_err(|_| tcp::TcpError::IoError("network response channel closed".into()))?
+            .map_err(to_wit_tcp_error)
+    }
+
+    async fn read(&mut self, handle: u32, len: u32) -> Result<Vec<u8>, tcp::TcpError> {
+        tracing::trace!(handle, len, "TCP read requested");
+
+        let tx = self.net_tx.clone().ok_or_else(|| {
+            tcp::TcpError::NotPermitted("networking not enabled for this sandbox".into())
+        })?;
+
+        let (response_tx, response_rx) = oneshot::channel();
+
+        let request = NetRequest::TcpRead {
+            handle,
+            len,
+            response_tx,
+        };
+
+        tx.send(request)
+            .await
+            .map_err(|_| tcp::TcpError::IoError("network handler channel closed".into()))?;
+
+        response_rx
+            .await
+            .map_err(|_| tcp::TcpError::IoError("network response channel closed".into()))?
+            .map_err(to_wit_tcp_error)
+    }
+
+    async fn write(&mut self, handle: u32, data: Vec<u8>) -> Result<u32, tcp::TcpError> {
+        tracing::trace!(handle, len = data.len(), "TCP write requested");
+
+        let tx = self.net_tx.clone().ok_or_else(|| {
+            tcp::TcpError::NotPermitted("networking not enabled for this sandbox".into())
+        })?;
+
+        let (response_tx, response_rx) = oneshot::channel();
+
+        let request = NetRequest::TcpWrite {
+            handle,
+            data,
+            response_tx,
+        };
+
+        tx.send(request)
+            .await
+            .map_err(|_| tcp::TcpError::IoError("network handler channel closed".into()))?;
+
+        response_rx
+            .await
+            .map_err(|_| tcp::TcpError::IoError("network response channel closed".into()))?
+            .map_err(to_wit_tcp_error)
+    }
+
+    async fn close(&mut self, handle: u32) {
         tracing::debug!(handle, "TCP close requested");
         if let Some(ref tx) = self.net_tx {
-            let _ = tx.try_send(NetRequest::TcpClose { handle });
+            // Fire-and-forget for close
+            let _ = tx.send(NetRequest::TcpClose { handle }).await;
         }
     }
 }
 
 // ============================================================================
-// TLS Host Implementation
+// TLS Host Implementation (fiber-based async)
 // ============================================================================
-
-impl tls::HostWithStore for HasSelf<ExecutorState> {
-    fn upgrade<T>(
-        accessor: &Accessor<T, Self>,
-        tcp_handle: u32,
-        hostname: String,
-    ) -> impl ::core::future::Future<Output = Result<u32, tls::TlsError>> + Send {
-        tracing::debug!(tcp_handle, hostname = %hostname, "TLS upgrade requested");
-
-        async move {
-            let tx = accessor
-                .with(|mut access| access.get().net_tx.clone())
-                .ok_or_else(|| {
-                    tls::TlsError::Tcp(tcp::TcpError::NotPermitted(
-                        "networking not enabled for this sandbox".into(),
-                    ))
-                })?;
-
-            let (response_tx, response_rx) = oneshot::channel();
-
-            let request = NetRequest::TlsUpgrade {
-                tcp_handle,
-                hostname,
-                response_tx,
-            };
-
-            tx.send(request).await.map_err(|_| {
-                tls::TlsError::Tcp(tcp::TcpError::IoError(
-                    "network handler channel closed".into(),
-                ))
-            })?;
-
-            response_rx
-                .await
-                .map_err(|_| {
-                    tls::TlsError::Tcp(tcp::TcpError::IoError(
-                        "network response channel closed".into(),
-                    ))
-                })?
-                .map_err(to_wit_tls_error)
-        }
-    }
-
-    fn read<T>(
-        accessor: &Accessor<T, Self>,
-        handle: u32,
-        len: u32,
-    ) -> impl ::core::future::Future<Output = Result<Vec<u8>, tls::TlsError>> + Send {
-        tracing::trace!(handle, len, "TLS read requested");
-
-        async move {
-            let tx = accessor
-                .with(|mut access| access.get().net_tx.clone())
-                .ok_or_else(|| {
-                    tls::TlsError::Tcp(tcp::TcpError::NotPermitted(
-                        "networking not enabled for this sandbox".into(),
-                    ))
-                })?;
-
-            let (response_tx, response_rx) = oneshot::channel();
-
-            let request = NetRequest::TlsRead {
-                handle,
-                len,
-                response_tx,
-            };
-
-            tx.send(request).await.map_err(|_| {
-                tls::TlsError::Tcp(tcp::TcpError::IoError(
-                    "network handler channel closed".into(),
-                ))
-            })?;
-
-            response_rx
-                .await
-                .map_err(|_| {
-                    tls::TlsError::Tcp(tcp::TcpError::IoError(
-                        "network response channel closed".into(),
-                    ))
-                })?
-                .map_err(to_wit_tls_error)
-        }
-    }
-
-    fn write<T>(
-        accessor: &Accessor<T, Self>,
-        handle: u32,
-        data: Vec<u8>,
-    ) -> impl ::core::future::Future<Output = Result<u32, tls::TlsError>> + Send {
-        tracing::trace!(handle, len = data.len(), "TLS write requested");
-
-        async move {
-            let tx = accessor
-                .with(|mut access| access.get().net_tx.clone())
-                .ok_or_else(|| {
-                    tls::TlsError::Tcp(tcp::TcpError::NotPermitted(
-                        "networking not enabled for this sandbox".into(),
-                    ))
-                })?;
-
-            let (response_tx, response_rx) = oneshot::channel();
-
-            let request = NetRequest::TlsWrite {
-                handle,
-                data,
-                response_tx,
-            };
-
-            tx.send(request).await.map_err(|_| {
-                tls::TlsError::Tcp(tcp::TcpError::IoError(
-                    "network handler channel closed".into(),
-                ))
-            })?;
-
-            response_rx
-                .await
-                .map_err(|_| {
-                    tls::TlsError::Tcp(tcp::TcpError::IoError(
-                        "network response channel closed".into(),
-                    ))
-                })?
-                .map_err(to_wit_tls_error)
-        }
-    }
-}
 
 impl tls::Host for ExecutorState {
-    fn close(&mut self, handle: u32) {
+    async fn upgrade(&mut self, tcp_handle: u32, hostname: String) -> Result<u32, tls::TlsError> {
+        tracing::debug!(tcp_handle, hostname = %hostname, "TLS upgrade requested");
+
+        let tx = self.net_tx.clone().ok_or_else(|| {
+            tls::TlsError::Tcp(tcp::TcpError::NotPermitted(
+                "networking not enabled for this sandbox".into(),
+            ))
+        })?;
+
+        let (response_tx, response_rx) = oneshot::channel();
+
+        let request = NetRequest::TlsUpgrade {
+            tcp_handle,
+            hostname,
+            response_tx,
+        };
+
+        tx.send(request).await.map_err(|_| {
+            tls::TlsError::Tcp(tcp::TcpError::IoError(
+                "network handler channel closed".into(),
+            ))
+        })?;
+
+        response_rx
+            .await
+            .map_err(|_| {
+                tls::TlsError::Tcp(tcp::TcpError::IoError(
+                    "network response channel closed".into(),
+                ))
+            })?
+            .map_err(to_wit_tls_error)
+    }
+
+    async fn read(&mut self, handle: u32, len: u32) -> Result<Vec<u8>, tls::TlsError> {
+        tracing::trace!(handle, len, "TLS read requested");
+
+        let tx = self.net_tx.clone().ok_or_else(|| {
+            tls::TlsError::Tcp(tcp::TcpError::NotPermitted(
+                "networking not enabled for this sandbox".into(),
+            ))
+        })?;
+
+        let (response_tx, response_rx) = oneshot::channel();
+
+        let request = NetRequest::TlsRead {
+            handle,
+            len,
+            response_tx,
+        };
+
+        tx.send(request).await.map_err(|_| {
+            tls::TlsError::Tcp(tcp::TcpError::IoError(
+                "network handler channel closed".into(),
+            ))
+        })?;
+
+        response_rx
+            .await
+            .map_err(|_| {
+                tls::TlsError::Tcp(tcp::TcpError::IoError(
+                    "network response channel closed".into(),
+                ))
+            })?
+            .map_err(to_wit_tls_error)
+    }
+
+    async fn write(&mut self, handle: u32, data: Vec<u8>) -> Result<u32, tls::TlsError> {
+        tracing::trace!(handle, len = data.len(), "TLS write requested");
+
+        let tx = self.net_tx.clone().ok_or_else(|| {
+            tls::TlsError::Tcp(tcp::TcpError::NotPermitted(
+                "networking not enabled for this sandbox".into(),
+            ))
+        })?;
+
+        let (response_tx, response_rx) = oneshot::channel();
+
+        let request = NetRequest::TlsWrite {
+            handle,
+            data,
+            response_tx,
+        };
+
+        tx.send(request).await.map_err(|_| {
+            tls::TlsError::Tcp(tcp::TcpError::IoError(
+                "network handler channel closed".into(),
+            ))
+        })?;
+
+        response_rx
+            .await
+            .map_err(|_| {
+                tls::TlsError::Tcp(tcp::TcpError::IoError(
+                    "network response channel closed".into(),
+                ))
+            })?
+            .map_err(to_wit_tls_error)
+    }
+
+    async fn close(&mut self, handle: u32) {
         tracing::debug!(handle, "TLS close requested");
         if let Some(ref tx) = self.net_tx {
-            let _ = tx.try_send(NetRequest::TlsClose { handle });
+            // Fire-and-forget for close
+            let _ = tx.send(NetRequest::TlsClose { handle }).await;
         }
     }
 }
@@ -1163,6 +1132,10 @@ impl PythonExecutor {
     fn create_engine() -> std::result::Result<Engine, Error> {
         let mut config = Config::new();
         config.wasm_component_model(true);
+        // Enable component model async for the `invoke` callback function.
+        // The invoke function is async because Python code awaits on it.
+        // TCP/TLS functions are sync `func` in WIT but use fiber-based async
+        // on the host (via `async` bindgen flag) - they appear blocking to guest.
         config.wasm_component_model_async(true);
         config.async_support(true);
 
@@ -1200,9 +1173,11 @@ impl PythonExecutor {
         wasmtime_wasi::p2::add_to_linker_async(&mut linker)
             .map_err(|e| Error::WasmEngine(format!("Failed to add WASI to linker: {e}")))?;
 
-        // Add sandbox bindings
+        // Add sandbox bindings (includes TCP/TLS interfaces)
+        tracing::debug!("Adding sandbox bindings to linker");
         Sandbox::add_to_linker::<_, HasSelf<ExecutorState>>(&mut linker, |state| state)
             .map_err(|e| Error::WasmEngine(format!("Failed to add sandbox to linker: {e}")))?;
+        tracing::debug!("Sandbox bindings added successfully");
 
         // Create pre-instantiated component
         // This validates that all imports are satisfied and prepares for fast instantiation

@@ -499,3 +499,224 @@ t = Template("Hello {{ name }}")
 print(t.render(name="PreInit"))
 """)
         assert result.stdout == "Hello PreInit"
+
+
+class TestNetworkIntegration:
+    """Integration tests for networking functionality.
+
+    These tests verify that the sync socket shim works correctly with
+    fiber-based async on the host. They require network access and use
+    real external services.
+    """
+
+    @pytest.fixture
+    def network_sandbox(self):
+        """Create a sandbox with permissive network config."""
+        try:
+            config = eryx.NetConfig.permissive()
+            return eryx.Sandbox(network=config)
+        except eryx.InitializationError as e:
+            if "eryx:net" in str(e):
+                pytest.skip("Embedded runtime does not include network support")
+            raise
+
+    def test_socket_module_imports(self, network_sandbox):
+        """Test that socket module can be imported."""
+        result = network_sandbox.execute("""
+import socket
+print(f"AF_INET={socket.AF_INET}")
+print(f"SOCK_STREAM={socket.SOCK_STREAM}")
+print("socket import ok")
+""")
+        assert "socket import ok" in result.stdout
+
+    def test_ssl_module_imports(self, network_sandbox):
+        """Test that ssl module can be imported."""
+        result = network_sandbox.execute("""
+import ssl
+ctx = ssl.create_default_context()
+print(f"SSLContext created: {type(ctx).__name__}")
+print("ssl import ok")
+""")
+        assert "ssl import ok" in result.stdout
+
+    def test_sync_socket_tcp_connect(self, network_sandbox):
+        """Test synchronous socket.connect() works via fiber-based async."""
+        result = network_sandbox.execute("""
+import socket
+
+# Create a socket and connect to a well-known service
+sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+sock.settimeout(10)
+
+try:
+    # Connect to example.com on port 80
+    sock.connect(("example.com", 80))
+    print("TCP connected")
+
+    # Send a simple HTTP request
+    request = b"GET / HTTP/1.1\\r\\nHost: example.com\\r\\nConnection: close\\r\\n\\r\\n"
+    sock.send(request)
+    print("Request sent")
+
+    # Read the response
+    response = sock.recv(1024)
+    if b"HTTP/1.1" in response or b"HTTP/1.0" in response:
+        print("HTTP response received")
+    else:
+        print(f"Unexpected response: {response[:100]}")
+
+    sock.close()
+    print("SUCCESS")
+except Exception as e:
+    print(f"Error: {e}")
+""")
+        assert "SUCCESS" in result.stdout, f"Test failed: {result.stdout}"
+
+    def test_sync_socket_https_with_ssl(self, network_sandbox):
+        """Test synchronous HTTPS via socket + ssl.wrap_socket()."""
+        result = network_sandbox.execute("""
+import socket
+import ssl
+
+sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+sock.settimeout(15)
+
+try:
+    # Connect to example.com on port 443
+    sock.connect(("example.com", 443))
+    print("TCP connected")
+
+    # Wrap with SSL
+    ctx = ssl.create_default_context()
+    ssl_sock = ctx.wrap_socket(sock, server_hostname="example.com")
+    print("TLS handshake complete")
+
+    # Send HTTPS request
+    request = b"GET / HTTP/1.1\\r\\nHost: example.com\\r\\nConnection: close\\r\\n\\r\\n"
+    ssl_sock.send(request)
+    print("Request sent")
+
+    # Read response
+    response = ssl_sock.recv(1024)
+    if b"HTTP/1.1" in response or b"HTTP/1.0" in response:
+        print("HTTPS response received")
+    else:
+        print(f"Unexpected response: {response[:100]}")
+
+    ssl_sock.close()
+    print("SUCCESS")
+except Exception as e:
+    print(f"Error: {type(e).__name__}: {e}")
+""")
+        assert "SUCCESS" in result.stdout, f"Test failed: {result.stdout}"
+
+    def test_async_tcp_api(self, network_sandbox):
+        """Test the async _eryx_async API for TCP."""
+        result = network_sandbox.execute("""
+import _eryx_async
+
+# Use top-level await with the async API
+tcp_handle = await _eryx_async.await_tcp_connect("example.com", 80)
+print(f"Connected with handle: {tcp_handle}")
+
+request = b"GET / HTTP/1.1\\r\\nHost: example.com\\r\\nConnection: close\\r\\n\\r\\n"
+written = await _eryx_async.await_tcp_write(tcp_handle, request)
+print(f"Wrote {written} bytes")
+
+response = await _eryx_async.await_tcp_read(tcp_handle, 1024)
+if b"HTTP" in response:
+    print("Got HTTP response")
+
+_eryx_async.tcp_close(tcp_handle)
+print("SUCCESS")
+""")
+        assert "SUCCESS" in result.stdout, f"Test failed: {result.stdout}"
+
+    def test_async_tls_api(self, network_sandbox):
+        """Test the async _eryx_async API for TLS."""
+        result = network_sandbox.execute("""
+import _eryx_async
+
+# Connect and upgrade to TLS
+tcp_handle = await _eryx_async.await_tcp_connect("example.com", 443)
+print("TCP connected")
+
+tls_handle = await _eryx_async.await_tls_upgrade(tcp_handle, "example.com")
+print("TLS upgraded")
+
+request = b"GET / HTTP/1.1\\r\\nHost: example.com\\r\\nConnection: close\\r\\n\\r\\n"
+written = await _eryx_async.await_tls_write(tls_handle, request)
+print(f"Wrote {written} bytes")
+
+response = await _eryx_async.await_tls_read(tls_handle, 1024)
+if b"HTTP" in response:
+    print("Got HTTPS response")
+
+_eryx_async.tls_close(tls_handle)
+print("SUCCESS")
+""")
+        assert "SUCCESS" in result.stdout, f"Test failed: {result.stdout}"
+
+    def test_network_blocked_host(self):
+        """Test that blocked hosts are rejected."""
+        # Default config blocks localhost
+        try:
+            config = eryx.NetConfig()
+            sandbox = eryx.Sandbox(network=config)
+        except eryx.InitializationError as e:
+            if "eryx:net" in str(e):
+                pytest.skip("Embedded runtime does not include network support")
+            raise
+
+        result = sandbox.execute("""
+import _eryx_async
+
+try:
+    tcp_handle = await _eryx_async.await_tcp_connect("localhost", 80)
+    print("UNEXPECTED: Connection succeeded")
+except OSError as e:
+    error_str = str(e).lower()
+    if "not permitted" in error_str or "blocked" in error_str:
+        print("EXPECTED: Connection blocked")
+    else:
+        print(f"Error: {e}")
+""")
+        assert "EXPECTED: Connection blocked" in result.stdout, (
+            f"Test failed: {result.stdout}"
+        )
+
+    def test_allowed_hosts_whitelist(self):
+        """Test that allowed_hosts whitelist works."""
+        try:
+            config = eryx.NetConfig(allowed_hosts=["example.com"])
+            sandbox = eryx.Sandbox(network=config)
+        except eryx.InitializationError as e:
+            if "eryx:net" in str(e):
+                pytest.skip("Embedded runtime does not include network support")
+            raise
+
+        # Should be able to connect to example.com
+        result = sandbox.execute("""
+import _eryx_async
+
+tcp_handle = await _eryx_async.await_tcp_connect("example.com", 80)
+print(f"Connected to example.com")
+_eryx_async.tcp_close(tcp_handle)
+print("SUCCESS")
+""")
+        assert "SUCCESS" in result.stdout, f"Test failed: {result.stdout}"
+
+        # Should NOT be able to connect to other hosts
+        result = sandbox.execute("""
+import _eryx_async
+
+try:
+    tcp_handle = await _eryx_async.await_tcp_connect("google.com", 80)
+    print("UNEXPECTED: Connection to google.com succeeded")
+except OSError as e:
+    print("EXPECTED: Connection to google.com blocked")
+""")
+        assert "EXPECTED: Connection to google.com blocked" in result.stdout, (
+            f"Test failed: {result.stdout}"
+        )

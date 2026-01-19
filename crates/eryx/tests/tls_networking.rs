@@ -328,6 +328,7 @@ for family, socktype, proto, canonname, sockaddr in info:
 // Network Policy Tests
 // =============================================================================
 
+/// Test that blocked hosts return proper errors via async API.
 #[tokio::test]
 async fn test_blocked_host_localhost() {
     let sandbox = sandbox_builder_with_network()
@@ -335,21 +336,23 @@ async fn test_blocked_host_localhost() {
         .build()
         .expect("Failed to build sandbox");
 
+    // Use async API directly since sync socket shim can't handle errors from
+    // async operations (Component Model async always returns pending, then
+    // completes via callback - sync code can't await the callback).
     let result = sandbox
         .execute(
             r#"
-import socket
-import ssl
+import _eryx_async
 
-sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-sock.connect(("localhost", 443))
-
-ctx = ssl.create_default_context()
 try:
-    ssl_sock = ctx.wrap_socket(sock, server_hostname="localhost")
+    tcp_handle = await _eryx_async.await_tcp_connect("localhost", 443)
     print("UNEXPECTED: Connection succeeded")
-except Exception as e:
-    print(f"EXPECTED: Connection blocked: {e}")
+except OSError as e:
+    error_str = str(e).lower()
+    if "not permitted" in error_str or "blocked" in error_str:
+        print(f"EXPECTED: Connection blocked: {e}")
+    else:
+        print(f"Error (acceptable): {e}")
 "#,
         )
         .await;
@@ -372,21 +375,21 @@ async fn test_blocked_host_private_network() {
         .build()
         .expect("Failed to build sandbox");
 
+    // Use async API directly for proper error handling
     let result = sandbox
         .execute(
             r#"
-import socket
-import ssl
+import _eryx_async
 
-sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-sock.connect(("192.168.1.1", 443))
-
-ctx = ssl.create_default_context()
 try:
-    ssl_sock = ctx.wrap_socket(sock, server_hostname="192.168.1.1")
+    tcp_handle = await _eryx_async.await_tcp_connect("192.168.1.1", 443)
     print("UNEXPECTED: Connection succeeded")
-except Exception as e:
-    print(f"EXPECTED: Connection blocked: {e}")
+except OSError as e:
+    error_str = str(e).lower()
+    if "not permitted" in error_str or "blocked" in error_str:
+        print(f"EXPECTED: Connection blocked: {e}")
+    else:
+        print(f"Error (acceptable): {e}")
 "#,
         )
         .await;
@@ -685,22 +688,16 @@ async fn test_connection_refused() {
         .build()
         .expect("Failed to build sandbox");
 
-    // Try to connect to a port that's not listening
+    // Try to connect to a port that's not listening using async API
     let result = sandbox
         .execute(
             r#"
-import socket
-import ssl
+import _eryx_async
 
-sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-sock.settimeout(5)
-sock.connect(("127.0.0.1", 59999))  # Unlikely to be listening
-
-ctx = ssl.create_default_context()
 try:
-    ssl_sock = ctx.wrap_socket(sock, server_hostname="localhost")
+    tcp_handle = await _eryx_async.await_tcp_connect("127.0.0.1", 59999)  # Unlikely to be listening
     print("UNEXPECTED: Connection succeeded")
-except Exception as e:
+except OSError as e:
     error_str = str(e).lower()
     if "refused" in error_str or "connect" in error_str or "reset" in error_str:
         print("EXPECTED: Connection refused/failed")
@@ -733,22 +730,16 @@ async fn test_connection_timeout() {
         .build()
         .expect("Failed to build sandbox");
 
-    // Try to connect to a non-routable IP that will timeout
+    // Try to connect to a non-routable IP that will timeout using async API
     let result = sandbox
         .execute(
             r#"
-import socket
-import ssl
+import _eryx_async
 
-sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-sock.settimeout(1)
-sock.connect(("10.255.255.1", 443))  # Non-routable IP
-
-ctx = ssl.create_default_context()
 try:
-    ssl_sock = ctx.wrap_socket(sock, server_hostname="test.invalid")
+    tcp_handle = await _eryx_async.await_tcp_connect("10.255.255.1", 443)  # Non-routable IP
     print("UNEXPECTED: Connection succeeded")
-except Exception as e:
+except OSError as e:
     error_str = str(e).lower()
     if "timeout" in error_str or "timed out" in error_str:
         print("EXPECTED: Connection timed out")
@@ -1025,6 +1016,9 @@ else:
 }
 
 /// Test socket shim works for plain TCP connections (no SSL).
+///
+/// The socket/ssl shims use sync WIT functions which appear blocking to guest
+/// but use fiber-based async on the host via wasmtime's `func_wrap_async`.
 #[tokio::test]
 async fn test_socket_shim_plain_tcp() {
     let server = PlainHttpServer::start().await;

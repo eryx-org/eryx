@@ -747,7 +747,7 @@ pub enum NetResult<T> {
 // TCP operations
 // -----------------------------------------------------------------------------
 
-/// Call the TCP connect import.
+/// Call the TCP connect import (synchronous - blocks until complete).
 fn call_tcp_connect(host: &str, port: u16) -> Result<NetResult<u32>, String> {
     CURRENT_WIT.with(|cell| {
         let wit = cell.borrow();
@@ -759,29 +759,14 @@ fn call_tcp_connect(host: &str, port: u16) -> Result<NetResult<u32>, String> {
             .get_import(Some("eryx:net/tcp@0.1.0"), "connect")
             .ok_or_else(|| "tcp.connect import not found - networking not enabled".to_string())?;
 
-        let mut cx = Box::new(EryxCall::new());
+        let mut cx = EryxCall::new();
 
         // Push arguments: port (u16), then host (string) - reverse order for wit-dylib
         cx.push_u16(port);
         cx.push_string(host.to_string());
 
-        let pending = unsafe { import_func.call_import_async(&mut *cx) };
-
-        if let Some(pending_call) = pending {
-            let async_lift_impl = import_func.async_import_lift_impl().unwrap();
-            PENDING_IMPORTS.with(|cell| {
-                cell.borrow_mut().insert(
-                    pending_call.subtask,
-                    PendingImportState {
-                        import_type: ImportType::TcpConnect,
-                        async_lift_impl,
-                        buffer: pending_call.buffer,
-                        _cx: cx,
-                    },
-                );
-            });
-            return Ok(NetResult::Pending(pending_call.subtask, 0));
-        }
+        // Synchronous call - blocks until the host completes the operation
+        import_func.call_import_sync(&mut cx);
 
         // Result: result<tcp-handle, tcp-error>
         let is_ok = match cx.stack.pop() {
@@ -809,7 +794,7 @@ fn call_tcp_connect(host: &str, port: u16) -> Result<NetResult<u32>, String> {
     })
 }
 
-/// Call the TCP read import.
+/// Call the TCP read import (synchronous - blocks until complete).
 fn call_tcp_read(handle: u32, len: u32) -> Result<NetResult<Vec<u8>>, String> {
     CURRENT_WIT.with(|cell| {
         let wit = cell.borrow();
@@ -821,28 +806,13 @@ fn call_tcp_read(handle: u32, len: u32) -> Result<NetResult<Vec<u8>>, String> {
             .get_import(Some("eryx:net/tcp@0.1.0"), "read")
             .ok_or_else(|| "tcp.read import not found - networking not enabled".to_string())?;
 
-        let mut cx = Box::new(EryxCall::new());
+        let mut cx = EryxCall::new();
 
         cx.push_u32(len);
         cx.push_u32(handle);
 
-        let pending = unsafe { import_func.call_import_async(&mut *cx) };
-
-        if let Some(pending_call) = pending {
-            let async_lift_impl = import_func.async_import_lift_impl().unwrap();
-            PENDING_IMPORTS.with(|cell| {
-                cell.borrow_mut().insert(
-                    pending_call.subtask,
-                    PendingImportState {
-                        import_type: ImportType::TcpRead,
-                        async_lift_impl,
-                        buffer: pending_call.buffer,
-                        _cx: cx,
-                    },
-                );
-            });
-            return Ok(NetResult::Pending(pending_call.subtask, 0));
-        }
+        // Synchronous call - blocks until the host completes the operation
+        import_func.call_import_sync(&mut cx);
 
         let is_ok = match cx.stack.pop() {
             Some(Value::ResultDiscriminant(v)) => v,
@@ -869,7 +839,7 @@ fn call_tcp_read(handle: u32, len: u32) -> Result<NetResult<Vec<u8>>, String> {
     })
 }
 
-/// Call the TCP write import.
+/// Call the TCP write import (synchronous - blocks until complete).
 fn call_tcp_write(handle: u32, data: &[u8]) -> Result<NetResult<u32>, String> {
     CURRENT_WIT.with(|cell| {
         let wit = cell.borrow();
@@ -881,28 +851,13 @@ fn call_tcp_write(handle: u32, data: &[u8]) -> Result<NetResult<u32>, String> {
             .get_import(Some("eryx:net/tcp@0.1.0"), "write")
             .ok_or_else(|| "tcp.write import not found - networking not enabled".to_string())?;
 
-        let mut cx = Box::new(EryxCall::new());
+        let mut cx = EryxCall::new();
 
         cx.stack.push(Value::Bytes(data.to_vec()));
         cx.push_u32(handle);
 
-        let pending = unsafe { import_func.call_import_async(&mut *cx) };
-
-        if let Some(pending_call) = pending {
-            let async_lift_impl = import_func.async_import_lift_impl().unwrap();
-            PENDING_IMPORTS.with(|cell| {
-                cell.borrow_mut().insert(
-                    pending_call.subtask,
-                    PendingImportState {
-                        import_type: ImportType::TcpWrite,
-                        async_lift_impl,
-                        buffer: pending_call.buffer,
-                        _cx: cx,
-                    },
-                );
-            });
-            return Ok(NetResult::Pending(pending_call.subtask, 0));
-        }
+        // Synchronous call - blocks until the host completes the operation
+        import_func.call_import_sync(&mut cx);
 
         let is_ok = match cx.stack.pop() {
             Some(Value::ResultDiscriminant(v)) => v,
@@ -966,7 +921,7 @@ fn tcp_error_name(discr: u32) -> &'static str {
 // TLS operations
 // -----------------------------------------------------------------------------
 
-/// Call the TLS upgrade import (upgrades a TCP connection to TLS).
+/// Call the TLS upgrade import (synchronous - blocks until complete).
 fn call_tls_upgrade(tcp_handle: u32, hostname: &str) -> Result<NetResult<u32>, String> {
     CURRENT_WIT.with(|cell| {
         let wit = cell.borrow();
@@ -978,29 +933,14 @@ fn call_tls_upgrade(tcp_handle: u32, hostname: &str) -> Result<NetResult<u32>, S
             .get_import(Some("eryx:net/tls@0.1.0"), "upgrade")
             .ok_or_else(|| "tls.upgrade import not found - networking not enabled".to_string())?;
 
-        let mut cx = Box::new(EryxCall::new());
+        let mut cx = EryxCall::new();
 
         // Push arguments: hostname (string), then tcp_handle (u32) - reverse order
         cx.push_string(hostname.to_string());
         cx.push_u32(tcp_handle);
 
-        let pending = unsafe { import_func.call_import_async(&mut *cx) };
-
-        if let Some(pending_call) = pending {
-            let async_lift_impl = import_func.async_import_lift_impl().unwrap();
-            PENDING_IMPORTS.with(|cell| {
-                cell.borrow_mut().insert(
-                    pending_call.subtask,
-                    PendingImportState {
-                        import_type: ImportType::TlsUpgrade,
-                        async_lift_impl,
-                        buffer: pending_call.buffer,
-                        _cx: cx,
-                    },
-                );
-            });
-            return Ok(NetResult::Pending(pending_call.subtask, 0));
-        }
+        // Synchronous call - blocks until the host completes the operation
+        import_func.call_import_sync(&mut cx);
 
         // Result: result<tls-handle, tls-error>
         let is_ok = match cx.stack.pop() {
@@ -1029,7 +969,7 @@ fn call_tls_upgrade(tcp_handle: u32, hostname: &str) -> Result<NetResult<u32>, S
     })
 }
 
-/// Call the TLS read import.
+/// Call the TLS read import (synchronous - blocks until complete).
 fn call_tls_read(handle: u32, len: u32) -> Result<NetResult<Vec<u8>>, String> {
     CURRENT_WIT.with(|cell| {
         let wit = cell.borrow();
@@ -1041,28 +981,13 @@ fn call_tls_read(handle: u32, len: u32) -> Result<NetResult<Vec<u8>>, String> {
             .get_import(Some("eryx:net/tls@0.1.0"), "read")
             .ok_or_else(|| "tls.read import not found - networking not enabled".to_string())?;
 
-        let mut cx = Box::new(EryxCall::new());
+        let mut cx = EryxCall::new();
 
         cx.push_u32(len);
         cx.push_u32(handle);
 
-        let pending = unsafe { import_func.call_import_async(&mut *cx) };
-
-        if let Some(pending_call) = pending {
-            let async_lift_impl = import_func.async_import_lift_impl().unwrap();
-            PENDING_IMPORTS.with(|cell| {
-                cell.borrow_mut().insert(
-                    pending_call.subtask,
-                    PendingImportState {
-                        import_type: ImportType::TlsRead,
-                        async_lift_impl,
-                        buffer: pending_call.buffer,
-                        _cx: cx,
-                    },
-                );
-            });
-            return Ok(NetResult::Pending(pending_call.subtask, 0));
-        }
+        // Synchronous call - blocks until the host completes the operation
+        import_func.call_import_sync(&mut cx);
 
         let is_ok = match cx.stack.pop() {
             Some(Value::ResultDiscriminant(v)) => v,
@@ -1089,7 +1014,7 @@ fn call_tls_read(handle: u32, len: u32) -> Result<NetResult<Vec<u8>>, String> {
     })
 }
 
-/// Call the TLS write import.
+/// Call the TLS write import (synchronous - blocks until complete).
 fn call_tls_write(handle: u32, data: &[u8]) -> Result<NetResult<u32>, String> {
     CURRENT_WIT.with(|cell| {
         let wit = cell.borrow();
@@ -1101,28 +1026,13 @@ fn call_tls_write(handle: u32, data: &[u8]) -> Result<NetResult<u32>, String> {
             .get_import(Some("eryx:net/tls@0.1.0"), "write")
             .ok_or_else(|| "tls.write import not found - networking not enabled".to_string())?;
 
-        let mut cx = Box::new(EryxCall::new());
+        let mut cx = EryxCall::new();
 
         cx.stack.push(Value::Bytes(data.to_vec()));
         cx.push_u32(handle);
 
-        let pending = unsafe { import_func.call_import_async(&mut *cx) };
-
-        if let Some(pending_call) = pending {
-            let async_lift_impl = import_func.async_import_lift_impl().unwrap();
-            PENDING_IMPORTS.with(|cell| {
-                cell.borrow_mut().insert(
-                    pending_call.subtask,
-                    PendingImportState {
-                        import_type: ImportType::TlsWrite,
-                        async_lift_impl,
-                        buffer: pending_call.buffer,
-                        _cx: cx,
-                    },
-                );
-            });
-            return Ok(NetResult::Pending(pending_call.subtask, 0));
-        }
+        // Synchronous call - blocks until the host completes the operation
+        import_func.call_import_sync(&mut cx);
 
         let is_ok = match cx.stack.pop() {
             Some(Value::ResultDiscriminant(v)) => v,
