@@ -1352,6 +1352,7 @@ class SSLContext:
         self.minimum_version = None
         self.maximum_version = None
         self.hostname_checks_common_name = False
+        self.post_handshake_auth = False  # Python 3.8+ attribute, ignored in sandbox
 
     @property
     def verify_flags(self):
@@ -1926,6 +1927,13 @@ class socket:
         if self._closed:
             return
         self._closed = True
+        # Note: We intentionally do NOT close the handles here immediately.
+        # This is because http.client and other libraries may call close() on
+        # the socket while still expecting to read data through a makefile() wrapper.
+        # The handles will be closed when the socket is garbage collected via __del__.
+
+    def _force_close(self):
+        """Actually close the underlying handles. Called by __del__."""
         import _eryx
         if self._tls_handle is not None:
             try:
@@ -1940,6 +1948,9 @@ class socket:
                 pass
             self._tcp_handle = None
 
+    def __del__(self):
+        self._force_close()
+
     def shutdown(self, how):
         pass  # Shutdown happens on close
 
@@ -1951,13 +1962,15 @@ class socket:
 
     def recv(self, bufsize, flags=0):
         """Receive data from the socket."""
-        if self._closed:
-            raise error("Socket is closed")
-
         # Use TLS handle if upgraded, otherwise TCP handle
         handle = self._tls_handle if self._tls_handle is not None else self._tcp_handle
+
+        # If no handle available, return empty bytes (EOF)
+        # Note: We allow reads even after close() because libraries like http.client
+        # may close the socket but still read through a makefile() wrapper.
+        # The handles are only closed in __del__, not in close().
         if handle is None:
-            raise error("Socket is not connected")
+            return b""
 
         import _eryx
         if self._tls_handle is not None:
