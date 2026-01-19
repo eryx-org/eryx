@@ -6,6 +6,12 @@ package eryx:sandbox@0.1.0;
 /// The guest can invoke callbacks on the host, list available callbacks, and report
 /// trace events. The host calls the guest's execute function to run Python code.
 world sandbox {
+    /// TCP networking for plain connections (http://localhost, internal services).
+    import eryx:net/tcp@0.1.0;
+
+    /// TLS networking for secure encrypted connections.
+    import eryx:net/tls@0.1.0;
+
     /// Invoke a callback by name with JSON arguments.
     ///
     /// This is an async function that Python code can await:

@@ -90,11 +90,12 @@ fn find_python_stdlib() -> Option<PathBuf> {
     None
 }
 use crate::callback::Callback;
-use crate::callback_handler::{run_callback_handler, run_trace_collector};
+use crate::callback_handler::{run_callback_handler, run_net_handler, run_trace_collector};
 use crate::error::Error;
 use crate::library::RuntimeLibrary;
+use crate::net::{ConnectionManager, NetConfig};
 use crate::trace::{OutputHandler, TraceEvent, TraceHandler};
-use crate::wasm::{CallbackRequest, PythonExecutor, TraceRequest};
+use crate::wasm::{CallbackRequest, NetRequest, PythonExecutor, TraceRequest};
 
 /// A sandboxed Python execution environment.
 pub struct Sandbox {
@@ -112,6 +113,8 @@ pub struct Sandbox {
     output_handler: Option<Arc<dyn OutputHandler>>,
     /// Resource limits for execution.
     resource_limits: ResourceLimits,
+    /// Network configuration for TLS connections.
+    net_config: Option<NetConfig>,
     /// Extracted packages (kept alive to prevent temp directory cleanup).
     _packages: Vec<crate::package::ExtractedPackage>,
 }
@@ -128,6 +131,7 @@ impl std::fmt::Debug for Sandbox {
             .field("has_trace_handler", &self.trace_handler.is_some())
             .field("has_output_handler", &self.output_handler.is_some())
             .field("resource_limits", &self.resource_limits)
+            .field("has_net_config", &self.net_config.is_some())
             .finish_non_exhaustive()
     }
 }
@@ -210,12 +214,27 @@ impl Sandbox {
         let trace_collector =
             tokio::spawn(async move { run_trace_collector(trace_rx, trace_handler).await });
 
+        // Spawn network handler if networking is enabled
+        let (net_tx, net_handler) = if let Some(ref config) = self.net_config {
+            let (tx, rx) = mpsc::channel::<NetRequest>(32);
+            let manager = ConnectionManager::new(config.clone());
+            let handler = tokio::spawn(async move { run_net_handler(rx, manager).await });
+            (Some(tx), Some(handler))
+        } else {
+            (None, None)
+        };
+
         // Execute the Python code using the builder API
         let mut execute_builder = self
             .executor
             .execute(&full_code)
             .with_callbacks(&callbacks, callback_tx)
             .with_tracing(trace_tx);
+
+        // Add network channel if networking is enabled
+        if let Some(tx) = net_tx {
+            execute_builder = execute_builder.with_network(tx);
+        }
 
         // Add memory limit if configured
         if let Some(limit) = self.resource_limits.max_memory_bytes {
@@ -233,6 +252,11 @@ impl Sandbox {
         // The callback channel is closed when execute_future completes (callback_tx dropped)
         let callback_invocations = callback_handler.await.unwrap_or(0);
         let trace_events = trace_collector.await.unwrap_or_default();
+
+        // Network handler completes when its channel is dropped (execute_builder dropped)
+        if let Some(handler) = net_handler {
+            let _ = handler.await;
+        }
 
         let duration = start.elapsed();
 
@@ -378,6 +402,8 @@ pub struct SandboxBuilder<Runtime = state::Needs, Stdlib = state::Needs> {
     filesystem_cache: Option<crate::cache::FilesystemCache>,
     /// Extracted packages (kept alive for sandbox lifetime).
     packages: Vec<crate::package::ExtractedPackage>,
+    /// Network configuration for TLS connections.
+    net_config: Option<crate::net::NetConfig>,
     /// Phantom data for Runtime type parameter.
     _runtime: PhantomData<Runtime>,
     /// Phantom data for Stdlib type parameter.
@@ -431,6 +457,7 @@ impl SandboxBuilder<state::Needs, state::Needs> {
             #[cfg(feature = "native-extensions")]
             filesystem_cache: None,
             packages: Vec::new(),
+            net_config: None,
             _runtime: PhantomData,
             _stdlib: PhantomData,
         }
@@ -458,6 +485,7 @@ impl SandboxBuilder<state::Needs, state::Needs> {
             #[cfg(feature = "native-extensions")]
             filesystem_cache: None,
             packages: Vec::new(),
+            net_config: None,
             _runtime: PhantomData,
             _stdlib: PhantomData,
         }
@@ -485,6 +513,7 @@ impl<R, S> SandboxBuilder<R, S> {
             #[cfg(feature = "native-extensions")]
             filesystem_cache: self.filesystem_cache,
             packages: self.packages,
+            net_config: self.net_config,
             _runtime: PhantomData,
             _stdlib: PhantomData,
         }
@@ -871,6 +900,39 @@ impl<R, S> SandboxBuilder<R, S> {
         self
     }
 
+    /// Enable TLS networking with the given configuration.
+    ///
+    /// This allows Python code in the sandbox to make HTTPS requests using
+    /// libraries like `requests` or `httpx`. The configuration controls which
+    /// hosts are allowed, connection limits, and timeouts.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// use eryx::{Sandbox, NetConfig};
+    ///
+    /// let sandbox = Sandbox::embedded()
+    ///     .with_network(NetConfig::default())
+    ///     .build()?;
+    ///
+    /// // Python code can now use requests/httpx
+    /// sandbox.execute(r#"
+    /// import requests
+    /// r = requests.get("https://httpbin.org/get")
+    /// print(r.status_code)
+    /// "#).await?;
+    /// ```
+    ///
+    /// # Security
+    ///
+    /// By default, connections to localhost and private networks (RFC1918) are blocked.
+    /// Use [`NetConfig::allow_localhost`] or [`NetConfig::permissive`] for testing.
+    #[must_use]
+    pub fn with_network(mut self, config: crate::net::NetConfig) -> Self {
+        self.net_config = Some(config);
+        self
+    }
+
     /// Set the path to additional Python packages directory.
     ///
     /// The directory will be mounted at `/site-packages` inside the WASM sandbox
@@ -1127,6 +1189,7 @@ impl SandboxBuilder<state::Has, state::Has> {
             trace_handler: self.trace_handler,
             output_handler: self.output_handler,
             resource_limits: self.resource_limits,
+            net_config: self.net_config,
             _packages: self.packages,
         })
     }

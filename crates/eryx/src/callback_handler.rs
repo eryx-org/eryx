@@ -1,7 +1,8 @@
-//! Shared callback and trace handling for sandbox execution.
+//! Shared callback, network, and trace handling for sandbox execution.
 //!
-//! This module provides the callback request handler and trace event collector
-//! used by both `Sandbox::execute` and `InProcessSession::execute`.
+//! This module provides the callback request handler, network request handler,
+//! and trace event collector used by both `Sandbox::execute` and
+//! `InProcessSession::execute`.
 
 use std::collections::HashMap;
 use std::future::Future;
@@ -14,9 +15,10 @@ use futures::stream::FuturesUnordered;
 use tokio::sync::mpsc;
 
 use crate::callback::{Callback, CallbackError};
+use crate::net::ConnectionManager;
 use crate::sandbox::ResourceLimits;
 use crate::trace::{TraceEvent, TraceHandler};
-use crate::wasm::{CallbackRequest, TraceRequest, parse_trace_event};
+use crate::wasm::{CallbackRequest, NetRequest, TraceRequest, parse_trace_event};
 
 /// Type alias for the in-flight callback futures collection.
 type InFlightCallbacks = FuturesUnordered<Pin<Box<dyn Future<Output = ()> + Send>>>;
@@ -156,4 +158,76 @@ pub(crate) async fn run_trace_collector(
     }
 
     events
+}
+
+/// Handle network requests (TCP and TLS) from Python code.
+///
+/// Owns a [`ConnectionManager`] and processes TCP/TLS requests received through
+/// the channel. This allows async network operations to work with wasmtime's
+/// synchronous accessor pattern.
+pub(crate) async fn run_net_handler(
+    mut net_rx: mpsc::Receiver<NetRequest>,
+    mut manager: ConnectionManager,
+) {
+    while let Some(request) = net_rx.recv().await {
+        match request {
+            // TCP operations
+            NetRequest::TcpConnect {
+                host,
+                port,
+                response_tx,
+            } => {
+                let result = manager.tcp_connect(&host, port).await;
+                let _ = response_tx.send(result);
+            }
+            NetRequest::TcpRead {
+                handle,
+                len,
+                response_tx,
+            } => {
+                let result = manager.tcp_read(handle, len).await;
+                let _ = response_tx.send(result);
+            }
+            NetRequest::TcpWrite {
+                handle,
+                data,
+                response_tx,
+            } => {
+                let result = manager.tcp_write(handle, &data).await;
+                let _ = response_tx.send(result);
+            }
+            NetRequest::TcpClose { handle } => {
+                manager.tcp_close(handle);
+            }
+
+            // TLS operations
+            NetRequest::TlsUpgrade {
+                tcp_handle,
+                hostname,
+                response_tx,
+            } => {
+                let result = manager.tls_upgrade(tcp_handle, &hostname).await;
+                let _ = response_tx.send(result);
+            }
+            NetRequest::TlsRead {
+                handle,
+                len,
+                response_tx,
+            } => {
+                let result = manager.tls_read(handle, len).await;
+                let _ = response_tx.send(result);
+            }
+            NetRequest::TlsWrite {
+                handle,
+                data,
+                response_tx,
+            } => {
+                let result = manager.tls_write(handle, &data).await;
+                let _ = response_tx.send(result);
+            }
+            NetRequest::TlsClose { handle } => {
+                manager.tls_close(handle);
+            }
+        }
+    }
 }

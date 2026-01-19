@@ -42,7 +42,7 @@ fn main() {
     // Rerun if WIT changes
     println!(
         "cargo::rerun-if-changed={}",
-        manifest_dir.join("runtime.wit").display()
+        manifest_dir.join("wit").display()
     );
     // Rerun if the build flag changes
     println!("cargo::rerun-if-env-changed=BUILD_ERYX_RUNTIME");
@@ -295,10 +295,13 @@ fn build_component(manifest_dir: &std::path::Path, runtime_so: &std::path::Path)
     // Load our runtime
     let runtime = std::fs::read(runtime_so).expect("failed to read liberyx_runtime.so");
 
-    // Parse the runtime.wit file
-    let wit_path = manifest_dir.join("runtime.wit");
+    // Parse WIT directory (includes deps/)
+    let wit_dir = manifest_dir.join("wit");
     let mut resolve = wit_parser::Resolve::default();
-    let (pkg_id, _) = resolve.push_path(&wit_path).expect("failed to parse WIT");
+    let (pkg_id, _) = resolve
+        .push_dir(&wit_dir)
+        .expect("failed to parse WIT directory");
+    // Select the sandbox world from the eryx:sandbox package
     let world_id = resolve
         .select_world(&[pkg_id], Some("sandbox"))
         .expect("failed to select world");

@@ -89,7 +89,7 @@ name = "jinja2_sandbox"
 required-features = ["native-extensions", "embedded"]
 
 [dependencies]
-tokio = { workspace = true, features = ["sync"] }
+tokio = { workspace = true, features = ["sync", "net", "io-util", "time"] }
 anyhow.workspace = true
 async-trait.workspace = true
 futures.workspace = true
@@ -107,6 +107,10 @@ flate2.workspace = true
 tar.workspace = true
 tempfile.workspace = true
 walkdir.workspace = true
+# TLS networking
+rustls.workspace = true
+tokio-rustls.workspace = true
+webpki-roots.workspace = true
 # Embedded runtime/stdlib (optional)
 zstd = { workspace = true, optional = true }
 # Native extension support (optional)
@@ -132,6 +136,8 @@ async-trait.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 criterion.workspace = true
 crossterm.workspace = true
+rcgen.workspace = true
+rustls-pemfile.workspace = true
 
 [lints]
 workspace = true

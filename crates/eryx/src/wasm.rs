@@ -62,6 +62,54 @@ pub struct TraceRequest {
     pub context_json: String,
 }
 
+/// Request for a network operation from Python code.
+#[derive(Debug)]
+pub enum NetRequest {
+    // TCP operations
+    /// Connect to a host over TCP.
+    TcpConnect {
+        host: String,
+        port: u16,
+        response_tx: oneshot::Sender<Result<u32, crate::net::TcpError>>,
+    },
+    /// Read from a TCP connection.
+    TcpRead {
+        handle: u32,
+        len: u32,
+        response_tx: oneshot::Sender<Result<Vec<u8>, crate::net::TcpError>>,
+    },
+    /// Write to a TCP connection.
+    TcpWrite {
+        handle: u32,
+        data: Vec<u8>,
+        response_tx: oneshot::Sender<Result<u32, crate::net::TcpError>>,
+    },
+    /// Close a TCP connection.
+    TcpClose { handle: u32 },
+
+    // TLS operations
+    /// Upgrade a TCP connection to TLS.
+    TlsUpgrade {
+        tcp_handle: u32,
+        hostname: String,
+        response_tx: oneshot::Sender<Result<u32, crate::net::TlsError>>,
+    },
+    /// Read from a TLS connection.
+    TlsRead {
+        handle: u32,
+        len: u32,
+        response_tx: oneshot::Sender<Result<Vec<u8>, crate::net::TlsError>>,
+    },
+    /// Write to a TLS connection.
+    TlsWrite {
+        handle: u32,
+        data: Vec<u8>,
+        response_tx: oneshot::Sender<Result<u32, crate::net::TlsError>>,
+    },
+    /// Close a TLS connection.
+    TlsClose { handle: u32 },
+}
+
 /// Callback info for introspection (internal type to avoid conflicts with generated code).
 #[derive(Debug, Clone)]
 pub struct HostCallbackInfo {
@@ -174,7 +222,7 @@ impl ResourceLimiter for MemoryTracker {
 // Generate bindings from the WIT file
 // The WIT already declares `invoke` and `execute` as async, wasmtime handles it
 wasmtime::component::bindgen!({
-    path: "../eryx-runtime/runtime.wit",
+    path: "../eryx-runtime/wit",
 });
 
 /// State for a single execution, implementing WASI and callback channels.
@@ -191,6 +239,8 @@ pub struct ExecutorState {
     pub(crate) callbacks: Vec<HostCallbackInfo>,
     /// Memory usage tracker.
     pub(crate) memory_tracker: MemoryTracker,
+    /// Channel to send network requests to the handler.
+    pub(crate) net_tx: Option<mpsc::Sender<NetRequest>>,
 }
 
 impl std::fmt::Debug for ExecutorState {
@@ -205,6 +255,7 @@ impl std::fmt::Debug for ExecutorState {
                 "peak_memory_bytes",
                 &self.memory_tracker.peak_memory_bytes(),
             )
+            .field("net_tx", &self.net_tx.is_some())
             .finish()
     }
 }
@@ -287,6 +338,287 @@ impl SandboxImports for ExecutorState {
     }
 }
 
+// Import the WIT-generated network module types
+use self::eryx::net::tcp;
+use self::eryx::net::tls;
+
+// Convert our TcpError to the WIT-generated TcpError type.
+fn to_wit_tcp_error(e: crate::net::TcpError) -> tcp::TcpError {
+    use crate::net::TcpError as E;
+    match e {
+        E::ConnectionRefused => tcp::TcpError::ConnectionRefused,
+        E::ConnectionReset => tcp::TcpError::ConnectionReset,
+        E::TimedOut => tcp::TcpError::TimedOut,
+        E::HostNotFound => tcp::TcpError::HostNotFound,
+        E::IoError(msg) => tcp::TcpError::IoError(msg),
+        E::NotPermitted(msg) => tcp::TcpError::NotPermitted(msg),
+        E::InvalidHandle => tcp::TcpError::InvalidHandle,
+    }
+}
+
+// Convert our TlsError to the WIT-generated TlsError type.
+fn to_wit_tls_error(e: crate::net::TlsError) -> tls::TlsError {
+    use crate::net::TlsError as E;
+    match e {
+        E::Tcp(tcp_err) => tls::TlsError::Tcp(to_wit_tcp_error(tcp_err)),
+        E::HandshakeFailed(msg) => tls::TlsError::HandshakeFailed(msg),
+        E::CertificateError(msg) => tls::TlsError::CertificateError(msg),
+        E::InvalidHandle => tls::TlsError::InvalidHandle,
+    }
+}
+
+// ============================================================================
+// TCP Host Implementation
+// ============================================================================
+
+impl tcp::HostWithStore for HasSelf<ExecutorState> {
+    fn connect<T>(
+        accessor: &Accessor<T, Self>,
+        host: String,
+        port: u16,
+    ) -> impl ::core::future::Future<Output = Result<u32, tcp::TcpError>> + Send {
+        tracing::debug!(host = %host, port, "TCP connect requested");
+
+        async move {
+            let tx = accessor
+                .with(|mut access| access.get().net_tx.clone())
+                .ok_or_else(|| {
+                    tcp::TcpError::NotPermitted("networking not enabled for this sandbox".into())
+                })?;
+
+            let (response_tx, response_rx) = oneshot::channel();
+
+            let request = NetRequest::TcpConnect {
+                host,
+                port,
+                response_tx,
+            };
+
+            tx.send(request)
+                .await
+                .map_err(|_| tcp::TcpError::IoError("network handler channel closed".into()))?;
+
+            response_rx
+                .await
+                .map_err(|_| tcp::TcpError::IoError("network response channel closed".into()))?
+                .map_err(to_wit_tcp_error)
+        }
+    }
+
+    fn read<T>(
+        accessor: &Accessor<T, Self>,
+        handle: u32,
+        len: u32,
+    ) -> impl ::core::future::Future<Output = Result<Vec<u8>, tcp::TcpError>> + Send {
+        tracing::trace!(handle, len, "TCP read requested");
+
+        async move {
+            let tx = accessor
+                .with(|mut access| access.get().net_tx.clone())
+                .ok_or_else(|| {
+                    tcp::TcpError::NotPermitted("networking not enabled for this sandbox".into())
+                })?;
+
+            let (response_tx, response_rx) = oneshot::channel();
+
+            let request = NetRequest::TcpRead {
+                handle,
+                len,
+                response_tx,
+            };
+
+            tx.send(request)
+                .await
+                .map_err(|_| tcp::TcpError::IoError("network handler channel closed".into()))?;
+
+            response_rx
+                .await
+                .map_err(|_| tcp::TcpError::IoError("network response channel closed".into()))?
+                .map_err(to_wit_tcp_error)
+        }
+    }
+
+    fn write<T>(
+        accessor: &Accessor<T, Self>,
+        handle: u32,
+        data: Vec<u8>,
+    ) -> impl ::core::future::Future<Output = Result<u32, tcp::TcpError>> + Send {
+        tracing::trace!(handle, len = data.len(), "TCP write requested");
+
+        async move {
+            let tx = accessor
+                .with(|mut access| access.get().net_tx.clone())
+                .ok_or_else(|| {
+                    tcp::TcpError::NotPermitted("networking not enabled for this sandbox".into())
+                })?;
+
+            let (response_tx, response_rx) = oneshot::channel();
+
+            let request = NetRequest::TcpWrite {
+                handle,
+                data,
+                response_tx,
+            };
+
+            tx.send(request)
+                .await
+                .map_err(|_| tcp::TcpError::IoError("network handler channel closed".into()))?;
+
+            response_rx
+                .await
+                .map_err(|_| tcp::TcpError::IoError("network response channel closed".into()))?
+                .map_err(to_wit_tcp_error)
+        }
+    }
+}
+
+impl tcp::Host for ExecutorState {
+    fn close(&mut self, handle: u32) {
+        tracing::debug!(handle, "TCP close requested");
+        if let Some(ref tx) = self.net_tx {
+            let _ = tx.try_send(NetRequest::TcpClose { handle });
+        }
+    }
+}
+
+// ============================================================================
+// TLS Host Implementation
+// ============================================================================
+
+impl tls::HostWithStore for HasSelf<ExecutorState> {
+    fn upgrade<T>(
+        accessor: &Accessor<T, Self>,
+        tcp_handle: u32,
+        hostname: String,
+    ) -> impl ::core::future::Future<Output = Result<u32, tls::TlsError>> + Send {
+        tracing::debug!(tcp_handle, hostname = %hostname, "TLS upgrade requested");
+
+        async move {
+            let tx = accessor
+                .with(|mut access| access.get().net_tx.clone())
+                .ok_or_else(|| {
+                    tls::TlsError::Tcp(tcp::TcpError::NotPermitted(
+                        "networking not enabled for this sandbox".into(),
+                    ))
+                })?;
+
+            let (response_tx, response_rx) = oneshot::channel();
+
+            let request = NetRequest::TlsUpgrade {
+                tcp_handle,
+                hostname,
+                response_tx,
+            };
+
+            tx.send(request).await.map_err(|_| {
+                tls::TlsError::Tcp(tcp::TcpError::IoError(
+                    "network handler channel closed".into(),
+                ))
+            })?;
+
+            response_rx
+                .await
+                .map_err(|_| {
+                    tls::TlsError::Tcp(tcp::TcpError::IoError(
+                        "network response channel closed".into(),
+                    ))
+                })?
+                .map_err(to_wit_tls_error)
+        }
+    }
+
+    fn read<T>(
+        accessor: &Accessor<T, Self>,
+        handle: u32,
+        len: u32,
+    ) -> impl ::core::future::Future<Output = Result<Vec<u8>, tls::TlsError>> + Send {
+        tracing::trace!(handle, len, "TLS read requested");
+
+        async move {
+            let tx = accessor
+                .with(|mut access| access.get().net_tx.clone())
+                .ok_or_else(|| {
+                    tls::TlsError::Tcp(tcp::TcpError::NotPermitted(
+                        "networking not enabled for this sandbox".into(),
+                    ))
+                })?;
+
+            let (response_tx, response_rx) = oneshot::channel();
+
+            let request = NetRequest::TlsRead {
+                handle,
+                len,
+                response_tx,
+            };
+
+            tx.send(request).await.map_err(|_| {
+                tls::TlsError::Tcp(tcp::TcpError::IoError(
+                    "network handler channel closed".into(),
+                ))
+            })?;
+
+            response_rx
+                .await
+                .map_err(|_| {
+                    tls::TlsError::Tcp(tcp::TcpError::IoError(
+                        "network response channel closed".into(),
+                    ))
+                })?
+                .map_err(to_wit_tls_error)
+        }
+    }
+
+    fn write<T>(
+        accessor: &Accessor<T, Self>,
+        handle: u32,
+        data: Vec<u8>,
+    ) -> impl ::core::future::Future<Output = Result<u32, tls::TlsError>> + Send {
+        tracing::trace!(handle, len = data.len(), "TLS write requested");
+
+        async move {
+            let tx = accessor
+                .with(|mut access| access.get().net_tx.clone())
+                .ok_or_else(|| {
+                    tls::TlsError::Tcp(tcp::TcpError::NotPermitted(
+                        "networking not enabled for this sandbox".into(),
+                    ))
+                })?;
+
+            let (response_tx, response_rx) = oneshot::channel();
+
+            let request = NetRequest::TlsWrite {
+                handle,
+                data,
+                response_tx,
+            };
+
+            tx.send(request).await.map_err(|_| {
+                tls::TlsError::Tcp(tcp::TcpError::IoError(
+                    "network handler channel closed".into(),
+                ))
+            })?;
+
+            response_rx
+                .await
+                .map_err(|_| {
+                    tls::TlsError::Tcp(tcp::TcpError::IoError(
+                        "network response channel closed".into(),
+                    ))
+                })?
+                .map_err(to_wit_tls_error)
+        }
+    }
+}
+
+impl tls::Host for ExecutorState {
+    fn close(&mut self, handle: u32) {
+        tracing::debug!(handle, "TLS close requested");
+        if let Some(ref tx) = self.net_tx {
+            let _ = tx.try_send(NetRequest::TlsClose { handle });
+        }
+    }
+}
+
 /// Builder for configuring and executing Python code.
 ///
 /// Created by [`PythonExecutor::execute`]. Use the builder methods to
@@ -309,6 +641,7 @@ pub struct ExecuteBuilder<'a> {
     callbacks: Vec<Arc<dyn Callback>>,
     callback_tx: Option<mpsc::Sender<CallbackRequest>>,
     trace_tx: Option<mpsc::UnboundedSender<TraceRequest>>,
+    net_tx: Option<mpsc::Sender<NetRequest>>,
     memory_limit: Option<u64>,
     execution_timeout: Option<Duration>,
 }
@@ -320,6 +653,7 @@ impl std::fmt::Debug for ExecuteBuilder<'_> {
             .field("callbacks_count", &self.callbacks.len())
             .field("has_callback_tx", &self.callback_tx.is_some())
             .field("has_trace_tx", &self.trace_tx.is_some())
+            .field("has_net_tx", &self.net_tx.is_some())
             .field("memory_limit", &self.memory_limit)
             .field("execution_timeout", &self.execution_timeout)
             .finish_non_exhaustive()
@@ -335,6 +669,7 @@ impl<'a> ExecuteBuilder<'a> {
             callbacks: Vec::new(),
             callback_tx: None,
             trace_tx: None,
+            net_tx: None,
             memory_limit: None,
             execution_timeout: None,
         }
@@ -360,6 +695,16 @@ impl<'a> ExecuteBuilder<'a> {
     #[must_use]
     pub fn with_tracing(mut self, trace_tx: mpsc::UnboundedSender<TraceRequest>) -> Self {
         self.trace_tx = Some(trace_tx);
+        self
+    }
+
+    /// Enable networking for this execution.
+    ///
+    /// The `net_tx` channel is used to send network requests (TCP/TLS) from
+    /// the WASM guest to the host for processing.
+    #[must_use]
+    pub fn with_network(mut self, net_tx: mpsc::Sender<NetRequest>) -> Self {
+        self.net_tx = Some(net_tx);
         self
     }
 
@@ -392,6 +737,7 @@ impl<'a> ExecuteBuilder<'a> {
                 &self.callbacks,
                 self.callback_tx,
                 self.trace_tx,
+                self.net_tx,
                 self.memory_limit,
                 self.execution_timeout,
             )
@@ -904,6 +1250,7 @@ impl PythonExecutor {
         callbacks: &[Arc<dyn Callback>],
         callback_tx: Option<mpsc::Sender<CallbackRequest>>,
         trace_tx: Option<mpsc::UnboundedSender<TraceRequest>>,
+        net_tx: Option<mpsc::Sender<NetRequest>>,
         memory_limit: Option<u64>,
         execution_timeout: Option<Duration>,
     ) -> std::result::Result<ExecutionOutput, String> {
@@ -972,6 +1319,7 @@ impl PythonExecutor {
             trace_tx,
             callbacks: callback_infos,
             memory_tracker: MemoryTracker::new(memory_limit),
+            net_tx,
         };
 
         // Create store for this execution
