@@ -27,6 +27,8 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
+use sha2::{Digest, Sha256};
+
 use crate::error::Error;
 
 /// Embedded Python standard library (zstd-compressed tar archive).
@@ -34,6 +36,20 @@ const EMBEDDED_STDLIB: &[u8] = include_bytes!("../python-stdlib.tar.zst");
 
 /// Embedded pre-compiled runtime.
 const EMBEDDED_RUNTIME: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/runtime.cwasm"));
+
+/// Compute a short hash of the embedded runtime for cache validation.
+/// Returns the first 16 hex characters of SHA-256.
+fn runtime_content_hash() -> String {
+    static HASH: OnceLock<String> = OnceLock::new();
+    HASH.get_or_init(|| {
+        let mut hasher = Sha256::new();
+        hasher.update(EMBEDDED_RUNTIME);
+        let result = hasher.finalize();
+        // Use first 8 bytes (16 hex chars) for a reasonably unique but short identifier
+        result[..8].iter().map(|b| format!("{b:02x}")).collect()
+    })
+    .clone()
+}
 
 /// Paths to extracted embedded resources.
 #[derive(Debug, Clone)]
@@ -150,22 +166,29 @@ impl EmbeddedResources {
 
     /// Extract the embedded runtime to the temp directory.
     fn extract_runtime(temp_dir: &Path) -> Result<PathBuf, Error> {
-        // Include version info in filename to handle upgrades
+        // Include version AND content hash in filename to handle both version upgrades
+        // and development rebuilds (where version stays the same but content changes)
         let version = env!("CARGO_PKG_VERSION");
-        let runtime_path = temp_dir.join(format!("runtime-{version}.cwasm"));
+        let content_hash = runtime_content_hash();
+        let runtime_path = temp_dir.join(format!("runtime-{version}-{content_hash}.cwasm"));
 
-        // Check if already extracted and valid (verify size matches as basic integrity check)
-        if runtime_path.exists()
-            && std::fs::metadata(&runtime_path)
-                .is_ok_and(|m| m.len() == EMBEDDED_RUNTIME.len() as u64)
-        {
+        // Check if already extracted - the hash in the filename guarantees content match
+        if runtime_path.exists() {
             tracing::debug!(path = %runtime_path.display(), "Using cached runtime");
             return Ok(runtime_path);
         }
 
-        // Invalid or doesn't exist, remove any stale file and extract
-        if runtime_path.exists() {
-            let _ = std::fs::remove_file(&runtime_path);
+        // Clean up old runtime files with different hashes (same version, stale content)
+        if let Ok(entries) = std::fs::read_dir(temp_dir) {
+            let prefix = format!("runtime-{version}-");
+            for entry in entries.flatten() {
+                let name = entry.file_name();
+                let name_str = name.to_string_lossy();
+                if name_str.starts_with(&prefix) && name_str.ends_with(".cwasm") {
+                    tracing::debug!(path = %entry.path().display(), "Removing stale runtime");
+                    let _ = std::fs::remove_file(entry.path());
+                }
+            }
         }
 
         tracing::info!(path = %runtime_path.display(), "Extracting embedded runtime");
