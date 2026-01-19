@@ -1175,10 +1175,11 @@ pub fn do_tcp_connect(host: &str, port: u16) -> Result<(i32, NetResultValue), St
 }
 
 /// Read from a TCP connection.
-/// Returns Ok((status, value)) where:
-/// - status 0: success, value is bytes (Vec<u8>)
-/// - status 1: error, value is error message (String)
-/// - status 2: pending, value is (waitable_id, promise_id)
+///
+/// Returns `Ok((status, value))` where:
+/// - status 0: success, value is bytes (`Vec<u8>`)
+/// - status 1: error, value is error message (`String`)
+/// - status 2: pending, value is (waitable_id, promise_id) (`(u32, u32)`)
 pub fn do_tcp_read(handle: u32, len: u32) -> Result<(i32, NetResultValue), String> {
     match call_tcp_read(handle, len)? {
         NetResult::Ok(bytes) => Ok((0, NetResultValue::Bytes(bytes))),
@@ -1250,10 +1251,11 @@ pub fn do_tls_upgrade(tcp_handle: u32, hostname: &str) -> Result<(i32, NetResult
 }
 
 /// Read from a TLS connection.
+///
 /// Returns Ok((status, value)) where:
-/// - status 0: success, value is bytes (Vec<u8>)
-/// - status 1: error, value is error message (String)
-/// - status 2: pending, value is (waitable_id, promise_id)
+/// - status 0: success, value is bytes (`Vec<u8>`)
+/// - status 1: error, value is error message (`String`)
+/// - status 2: pending, value is (waitable_id, promise_id) (`(u32, u32)`)
 pub fn do_tls_read(handle: u32, len: u32) -> Result<(i32, NetResultValue), String> {
     match call_tls_read(handle, len)? {
         NetResult::Ok(bytes) => Ok((0, NetResultValue::Bytes(bytes))),
