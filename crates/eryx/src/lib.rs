@@ -50,6 +50,7 @@ mod callback_handler;
 pub mod embedded;
 mod error;
 mod library;
+pub mod llm;
 pub mod package;
 mod sandbox;
 mod schema;
@@ -88,3 +89,6 @@ pub use wasm::{ExecutionOutput, PythonExecutor};
 
 // Re-export schema types at top level for convenience
 pub use schema::{JsonSchema, Schema};
+
+// Re-export LLM integration types at top level for convenience
+pub use llm::{ParsedToolCall, ToolCallError, ToolFormat};
