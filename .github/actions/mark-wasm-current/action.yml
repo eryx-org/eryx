@@ -34,8 +34,11 @@ runs:
           # Remove all cached .so.zst files from eryx-runtime OUT_DIRs
           # These live in target/*/build/eryx-runtime-*/out/
           find target -path "*/build/eryx-runtime-*/out/*.so.zst" -delete 2>/dev/null || true
-          # Also touch eryx-runtime's build.rs to force rebuild
+          # Touch build.rs to force build script to re-run
           touch crates/eryx-runtime/build.rs
+          # Touch linker.rs to force recompilation - it contains include_bytes! that
+          # bake the .so.zst content into the compiled rlib at compile time
+          touch crates/eryx-runtime/src/linker.rs
           mkdir -p target
           echo "$PREBUILT_HASH" > target/.prebuilt-hash
         else
