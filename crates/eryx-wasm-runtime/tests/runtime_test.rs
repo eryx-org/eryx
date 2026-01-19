@@ -31,6 +31,16 @@ fn decompress_zstd(data: &[u8]) -> Vec<u8> {
     zstd::decode_all(Cursor::new(data)).expect("failed to decompress")
 }
 
+// Define a struct matching the WIT execute-output record
+#[derive(Debug, Clone, wasmtime::component::ComponentType, wasmtime::component::Lift)]
+#[component(record)]
+struct ExecuteOutput {
+    #[component(name = "stdout")]
+    stdout: String,
+    #[component(name = "stderr")]
+    stderr: String,
+}
+
 struct State {
     ctx: WasiCtx,
     table: ResourceTable,
@@ -87,10 +97,10 @@ fn build_component() -> Result<Vec<u8>, Box<dyn std::error::Error>> {
     let libpython = load_lib(&libs_dir, "libpython3.14.so")?;
     let adapter = load_lib(&libs_dir, "wasi_snapshot_preview1.reactor.wasm")?;
 
-    // Parse the runtime.wit file
-    let wit_path = project_root.join("crates/eryx-runtime/runtime.wit");
+    // Parse the WIT files from the wit/ directory
+    let wit_path = project_root.join("crates/eryx-runtime/wit");
     let mut resolve = wit_parser::Resolve::default();
-    let (pkg_id, _) = resolve.push_path(&wit_path)?;
+    let (pkg_id, _) = resolve.push_dir(&wit_path)?;
     let world_id = resolve.select_world(&[pkg_id], Some("sandbox"))?;
 
     // Generate bindings pointing to our runtime
@@ -337,19 +347,25 @@ async fn test_instantiate_component() -> Result<(), Box<dyn std::error::Error>> 
          _results: &mut [Val]| { Ok(()) },
     )?;
 
+    // Add network stub implementations (TCP and TLS)
+    // These return "not-permitted" errors since networking is not available in this test.
+    add_network_stubs(&mut linker)?;
+
     println!("Instantiating component...");
     let instance = linker.instantiate_async(&mut store, &component).await?;
 
     println!("SUCCESS! Component instantiated");
 
     // Get the execute function
-    // execute: async func(code: string) -> result<string, string>
+    // execute: async func(code: string) -> result<execute-output, string>
     println!("Looking for execute function...");
 
     let execute = instance
-        .get_typed_func::<(String,), (Result<String, String>,)>(&mut store, "[async]execute")
+        .get_typed_func::<(String,), (Result<ExecuteOutput, String>,)>(&mut store, "[async]execute")
         .or_else(|_| {
-            instance.get_typed_func::<(String,), (Result<String, String>,)>(&mut store, "execute")
+            instance.get_typed_func::<(String,), (Result<ExecuteOutput, String>,)>(
+                &mut store, "execute",
+            )
         })?;
 
     // Test 1: Simple print statement
@@ -362,7 +378,7 @@ async fn test_instantiate_component() -> Result<(), Box<dyn std::error::Error>> 
     match &result {
         Ok(output) => {
             println!("  OK: {output:?}");
-            assert_eq!(output.trim(), "2", "print(1+1) should output '2'");
+            assert_eq!(output.stdout.trim(), "2", "print(1+1) should output '2'");
         }
         Err(error) => {
             panic!("Test 1 failed with error: {error}");
@@ -379,7 +395,10 @@ async fn test_instantiate_component() -> Result<(), Box<dyn std::error::Error>> 
     match &result {
         Ok(output) => {
             println!("  OK: {output:?}");
-            assert_eq!(output, "hello\nworld", "Should have two lines of output");
+            assert_eq!(
+                output.stdout, "hello\nworld",
+                "Should have two lines of output"
+            );
         }
         Err(error) => {
             panic!("Test 2 failed with error: {error}");
@@ -396,7 +415,7 @@ async fn test_instantiate_component() -> Result<(), Box<dyn std::error::Error>> 
     match &result {
         Ok(output) => {
             println!("  OK: {output:?}");
-            assert_eq!(output, "", "Assignment should produce no output");
+            assert_eq!(output.stdout, "", "Assignment should produce no output");
         }
         Err(error) => {
             panic!("Test 3 failed with error: {error}");
@@ -463,7 +482,7 @@ async fn test_instantiate_component() -> Result<(), Box<dyn std::error::Error>> 
         Ok(output) => {
             println!("  OK: {output:?}");
             assert_eq!(
-                output.trim(),
+                output.stdout.trim(),
                 "persisted",
                 "Variable should persist between calls"
             );
@@ -484,8 +503,8 @@ async fn test_instantiate_component() -> Result<(), Box<dyn std::error::Error>> 
         Ok(output) => {
             println!("  OK: {output:?}");
             assert!(
-                output.starts_with("3.14"),
-                "math.pi should start with 3.14: {output}"
+                output.stdout.starts_with("3.14"),
+                "math.pi should start with 3.14: {output:?}"
             );
         }
         Err(error) => {
@@ -592,8 +611,10 @@ async fn test_instantiate_component() -> Result<(), Box<dyn std::error::Error>> 
         Ok(output) => {
             println!("  OK: Restored values: {output:?}");
             assert!(
-                output.contains("42") && output.contains("hello") && output.contains("[1, 2, 3]"),
-                "Restored values should match: {output}"
+                output.stdout.contains("42")
+                    && output.stdout.contains("hello")
+                    && output.stdout.contains("[1, 2, 3]"),
+                "Restored values should match: {output:?}"
             );
         }
         Err(error) => {
@@ -626,8 +647,8 @@ print(f"count: {len(cbs)}")
         Ok(output) => {
             println!("  OK: {output:?}");
             assert!(
-                output.contains("list_callbacks returned: list"),
-                "list_callbacks should return a list: {output}"
+                output.stdout.contains("list_callbacks returned: list"),
+                "list_callbacks should return a list: {output:?}"
             );
         }
         Err(error) => {
@@ -654,12 +675,12 @@ print(f"timestamp: {result.get('timestamp', 'missing')}")
         Ok(output) => {
             println!("  OK: {output:?}");
             assert!(
-                output.contains("result type: dict"),
-                "invoke should return a dict: {output}"
+                output.stdout.contains("result type: dict"),
+                "invoke should return a dict: {output:?}"
             );
             assert!(
-                output.contains("timestamp: 1234567890"),
-                "invoke should return correct timestamp: {output}"
+                output.stdout.contains("timestamp: 1234567890"),
+                "invoke should return correct timestamp: {output:?}"
             );
         }
         Err(error) => {
@@ -686,8 +707,8 @@ print(f"callbacks: {names}")
         Ok(output) => {
             println!("  OK: {output:?}");
             assert!(
-                output.contains("get_time"),
-                "Should list get_time callback: {output}"
+                output.stdout.contains("get_time"),
+                "Should list get_time callback: {output:?}"
             );
         }
         Err(error) => {
@@ -713,8 +734,8 @@ print(f"add result: {result.get('result', 'missing')}")
         Ok(output) => {
             println!("  OK: {output:?}");
             assert!(
-                output.contains("add result: 42"),
-                "invoke('add', a=10, b=32) should return 42: {output}"
+                output.stdout.contains("add result: 42"),
+                "invoke('add', a=10, b=32) should return 42: {output:?}"
             );
         }
         Err(error) => {
@@ -741,12 +762,12 @@ print(f"url: {result.get('url', 'missing')}")
         Ok(output) => {
             println!("  OK: {output:?}");
             assert!(
-                output.contains("status: 200"),
-                "http.get should return status 200: {output}"
+                output.stdout.contains("status: 200"),
+                "http.get should return status 200: {output:?}"
             );
             assert!(
-                output.contains("url: https://example.com"),
-                "http.get should return correct url: {output}"
+                output.stdout.contains("url: https://example.com"),
+                "http.get should return correct url: {output:?}"
             );
         }
         Err(error) => {
@@ -777,8 +798,8 @@ except RuntimeError as e:
         Ok(output) => {
             println!("  OK: {output:?}");
             assert!(
-                output.contains("RuntimeError raised"),
-                "invoke('nonexistent') should raise RuntimeError: {output}"
+                output.stdout.contains("RuntimeError raised"),
+                "invoke('nonexistent') should raise RuntimeError: {output:?}"
             );
         }
         Err(error) => {
@@ -786,6 +807,175 @@ except RuntimeError as e:
         }
     }
 
+    // Test 17: stderr capture works
+    println!("Test 17: stderr capture...");
+    let (result,) = execute
+        .call_async(
+            &mut store,
+            (r#"
+import sys
+print("to stdout")
+print("to stderr", file=sys.stderr)
+"#
+            .to_string(),),
+        )
+        .await?;
+    execute.post_return_async(&mut store).await?;
+
+    match &result {
+        Ok(output) => {
+            println!("  stdout: {:?}", output.stdout);
+            println!("  stderr: {:?}", output.stderr);
+            assert_eq!(
+                output.stdout.trim(),
+                "to stdout",
+                "stdout should capture print()"
+            );
+            assert_eq!(
+                output.stderr.trim(),
+                "to stderr",
+                "stderr should capture print(..., file=sys.stderr)"
+            );
+        }
+        Err(error) => {
+            panic!("Test 17 failed: {error}");
+        }
+    }
+
     println!("\nAll tests passed!");
+    Ok(())
+}
+
+/// TCP error type for test stubs.
+#[derive(
+    wasmtime::component::ComponentType, wasmtime::component::Lift, wasmtime::component::Lower, Clone,
+)]
+#[component(variant)]
+enum TcpError {
+    #[component(name = "connection-refused")]
+    ConnectionRefused,
+    #[component(name = "connection-reset")]
+    ConnectionReset,
+    #[component(name = "timed-out")]
+    TimedOut,
+    #[component(name = "host-not-found")]
+    HostNotFound,
+    #[component(name = "io-error")]
+    IoError(String),
+    #[component(name = "not-permitted")]
+    NotPermitted(String),
+    #[component(name = "invalid-handle")]
+    InvalidHandle,
+}
+
+/// TLS error type for test stubs.
+#[derive(
+    wasmtime::component::ComponentType, wasmtime::component::Lift, wasmtime::component::Lower, Clone,
+)]
+#[component(variant)]
+enum TlsError {
+    #[component(name = "tcp")]
+    Tcp(TcpError),
+    #[component(name = "handshake-failed")]
+    HandshakeFailed(String),
+    #[component(name = "certificate-error")]
+    CertificateError(String),
+    #[component(name = "invalid-handle")]
+    InvalidHandle,
+}
+
+/// Add stub implementations for network imports (TCP and TLS).
+/// These return "not-permitted" errors since networking is not available in this test.
+fn add_network_stubs(linker: &mut Linker<State>) -> Result<(), Box<dyn std::error::Error>> {
+    // TCP interface stubs
+    let mut tcp = linker.instance("eryx:net/tcp@0.1.0")?;
+
+    // tcp.connect: func(host: string, port: u16) -> result<tcp-handle, tcp-error>
+    tcp.func_wrap_async(
+        "connect",
+        |_ctx: wasmtime::StoreContextMut<'_, State>, (_host, _port): (String, u16)| {
+            Box::new(async move {
+                Ok((Result::<u32, TcpError>::Err(TcpError::NotPermitted(
+                    "networking not available in test".into(),
+                )),))
+            })
+        },
+    )?;
+
+    // tcp.read: func(handle: tcp-handle, len: u32) -> result<list<u8>, tcp-error>
+    tcp.func_wrap_async(
+        "read",
+        |_ctx: wasmtime::StoreContextMut<'_, State>, (_handle, _len): (u32, u32)| {
+            Box::new(async move {
+                Ok((Result::<Vec<u8>, TcpError>::Err(TcpError::NotPermitted(
+                    "networking not available in test".into(),
+                )),))
+            })
+        },
+    )?;
+
+    // tcp.write: func(handle: tcp-handle, data: list<u8>) -> result<u32, tcp-error>
+    tcp.func_wrap_async(
+        "write",
+        |_ctx: wasmtime::StoreContextMut<'_, State>, (_handle, _data): (u32, Vec<u8>)| {
+            Box::new(async move {
+                Ok((Result::<u32, TcpError>::Err(TcpError::NotPermitted(
+                    "networking not available in test".into(),
+                )),))
+            })
+        },
+    )?;
+
+    // tcp.close: func(handle: tcp-handle)
+    tcp.func_wrap(
+        "close",
+        |_ctx: wasmtime::StoreContextMut<'_, State>, (_handle,): (u32,)| Ok(()),
+    )?;
+
+    // TLS interface stubs
+    let mut tls = linker.instance("eryx:net/tls@0.1.0")?;
+
+    // tls.upgrade: func(tcp: tcp-handle, hostname: string) -> result<tls-handle, tls-error>
+    tls.func_wrap_async(
+        "upgrade",
+        |_ctx: wasmtime::StoreContextMut<'_, State>, (_tcp_handle, _hostname): (u32, String)| {
+            Box::new(async move {
+                Ok((Result::<u32, TlsError>::Err(TlsError::HandshakeFailed(
+                    "networking not available in test".into(),
+                )),))
+            })
+        },
+    )?;
+
+    // tls.read: func(handle: tls-handle, len: u32) -> result<list<u8>, tls-error>
+    tls.func_wrap_async(
+        "read",
+        |_ctx: wasmtime::StoreContextMut<'_, State>, (_handle, _len): (u32, u32)| {
+            Box::new(async move {
+                Ok((Result::<Vec<u8>, TlsError>::Err(TlsError::HandshakeFailed(
+                    "networking not available in test".into(),
+                )),))
+            })
+        },
+    )?;
+
+    // tls.write: func(handle: tls-handle, data: list<u8>) -> result<u32, tls-error>
+    tls.func_wrap_async(
+        "write",
+        |_ctx: wasmtime::StoreContextMut<'_, State>, (_handle, _data): (u32, Vec<u8>)| {
+            Box::new(async move {
+                Ok((Result::<u32, TlsError>::Err(TlsError::HandshakeFailed(
+                    "networking not available in test".into(),
+                )),))
+            })
+        },
+    )?;
+
+    // tls.close: func(handle: tls-handle)
+    tls.func_wrap(
+        "close",
+        |_ctx: wasmtime::StoreContextMut<'_, State>, (_handle,): (u32,)| Ok(()),
+    )?;
+
     Ok(())
 }

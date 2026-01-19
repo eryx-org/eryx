@@ -8,7 +8,8 @@ use std::{
     time::{Duration, Instant},
 };
 
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
+use tokio_util::sync::CancellationToken;
 
 #[cfg(feature = "native-extensions")]
 use crate::cache::ComponentCache;
@@ -90,11 +91,12 @@ fn find_python_stdlib() -> Option<PathBuf> {
     None
 }
 use crate::callback::Callback;
-use crate::callback_handler::{run_callback_handler, run_trace_collector};
+use crate::callback_handler::{run_callback_handler, run_net_handler, run_trace_collector};
 use crate::error::Error;
 use crate::library::RuntimeLibrary;
+use crate::net::{ConnectionManager, NetConfig};
 use crate::trace::{OutputHandler, TraceEvent, TraceHandler};
-use crate::wasm::{CallbackRequest, PythonExecutor, TraceRequest};
+use crate::wasm::{CallbackRequest, NetRequest, PythonExecutor, TraceRequest};
 
 /// A sandboxed Python execution environment.
 pub struct Sandbox {
@@ -112,6 +114,8 @@ pub struct Sandbox {
     output_handler: Option<Arc<dyn OutputHandler>>,
     /// Resource limits for execution.
     resource_limits: ResourceLimits,
+    /// Network configuration for TLS connections.
+    net_config: Option<NetConfig>,
     /// Extracted packages (kept alive to prevent temp directory cleanup).
     _packages: Vec<crate::package::ExtractedPackage>,
 }
@@ -128,6 +132,7 @@ impl std::fmt::Debug for Sandbox {
             .field("has_trace_handler", &self.trace_handler.is_some())
             .field("has_output_handler", &self.output_handler.is_some())
             .field("resource_limits", &self.resource_limits)
+            .field("has_net_config", &self.net_config.is_some())
             .finish_non_exhaustive()
     }
 }
@@ -210,12 +215,27 @@ impl Sandbox {
         let trace_collector =
             tokio::spawn(async move { run_trace_collector(trace_rx, trace_handler).await });
 
+        // Spawn network handler if networking is enabled
+        let (net_tx, net_handler) = if let Some(ref config) = self.net_config {
+            let (tx, rx) = mpsc::channel::<NetRequest>(32);
+            let manager = ConnectionManager::new(config.clone());
+            let handler = tokio::spawn(async move { run_net_handler(rx, manager).await });
+            (Some(tx), Some(handler))
+        } else {
+            (None, None)
+        };
+
         // Execute the Python code using the builder API
         let mut execute_builder = self
             .executor
             .execute(&full_code)
             .with_callbacks(&callbacks, callback_tx)
             .with_tracing(trace_tx);
+
+        // Add network channel if networking is enabled
+        if let Some(tx) = net_tx {
+            execute_builder = execute_builder.with_network(tx);
+        }
 
         // Add memory limit if configured
         if let Some(limit) = self.resource_limits.max_memory_bytes {
@@ -234,6 +254,11 @@ impl Sandbox {
         let callback_invocations = callback_handler.await.unwrap_or(0);
         let trace_events = trace_collector.await.unwrap_or_default();
 
+        // Network handler completes when its channel is dropped (execute_builder dropped)
+        if let Some(handler) = net_handler {
+            let _ = handler.await;
+        }
+
         let duration = start.elapsed();
 
         match execution_result {
@@ -241,10 +266,12 @@ impl Sandbox {
                 // Stream output if handler is configured
                 if let Some(handler) = &self.output_handler {
                     handler.on_output(&output.stdout).await;
+                    handler.on_stderr(&output.stderr).await;
                 }
 
                 Ok(ExecuteResult {
                     stdout: output.stdout,
+                    stderr: output.stderr,
                     trace: trace_events,
                     stats: ExecuteStats {
                         duration,
@@ -309,6 +336,243 @@ impl Sandbox {
     #[must_use]
     pub(crate) fn executor(&self) -> Arc<PythonExecutor> {
         self.executor.clone()
+    }
+
+    /// Execute Python code with cancellation support.
+    ///
+    /// Returns an [`ExecutionHandle`] that can be used to cancel the execution
+    /// or wait for its completion.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// let handle = sandbox.execute_cancellable("while True: pass").await?;
+    ///
+    /// // Cancel after 5 seconds from another task
+    /// let cancel_handle = handle.clone();
+    /// tokio::spawn(async move {
+    ///     tokio::time::sleep(Duration::from_secs(5)).await;
+    ///     cancel_handle.cancel();
+    /// });
+    ///
+    /// // Wait for result
+    /// match handle.wait().await {
+    ///     Ok(result) => println!("Completed: {}", result.stdout),
+    ///     Err(Error::Cancelled) => println!("Cancelled"),
+    ///     Err(e) => println!("Error: {e}"),
+    /// }
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the execution cannot be started.
+    pub fn execute_cancellable(&self, code: &str) -> ExecutionHandle {
+        let cancel_token = CancellationToken::new();
+        let (result_tx, result_rx) = oneshot::channel();
+
+        // Clone what we need for the spawned task
+        let executor = Arc::clone(&self.executor);
+        let callbacks = Arc::clone(&self.callbacks);
+        let preamble = self.preamble.clone();
+        let trace_handler = self.trace_handler.clone();
+        let output_handler = self.output_handler.clone();
+        let resource_limits = self.resource_limits.clone();
+        let code = code.to_string();
+        let token = cancel_token.clone();
+
+        // Spawn the execution task
+        tokio::spawn(async move {
+            let result = Self::execute_with_cancellation(
+                executor,
+                callbacks,
+                &preamble,
+                trace_handler,
+                output_handler,
+                resource_limits,
+                &code,
+                token,
+            )
+            .await;
+
+            // Send result back (ignore error if receiver dropped)
+            let _ = result_tx.send(result);
+        });
+
+        ExecutionHandle {
+            cancel_token,
+            result: result_rx,
+        }
+    }
+
+    /// Internal execution with cancellation support.
+    #[allow(clippy::too_many_arguments)]
+    async fn execute_with_cancellation(
+        executor: Arc<PythonExecutor>,
+        callbacks: Arc<HashMap<String, Arc<dyn Callback>>>,
+        preamble: &str,
+        trace_handler: Option<Arc<dyn TraceHandler>>,
+        output_handler: Option<Arc<dyn OutputHandler>>,
+        resource_limits: ResourceLimits,
+        code: &str,
+        cancel_token: CancellationToken,
+    ) -> Result<ExecuteResult, Error> {
+        let start = Instant::now();
+
+        // Prepend preamble to user code if present
+        let full_code = if preamble.is_empty() {
+            code.to_string()
+        } else {
+            format!(
+                "{}
+
+# User code
+{}",
+                preamble, code
+            )
+        };
+
+        // Create channels for callback requests and trace events
+        let (callback_tx, callback_rx) = mpsc::channel::<CallbackRequest>(32);
+        let (trace_tx, trace_rx) = mpsc::unbounded_channel::<TraceRequest>();
+
+        // Collect callbacks as a Vec for the executor
+        let callbacks_vec: Vec<Arc<dyn Callback>> = callbacks.values().cloned().collect();
+
+        // Spawn task to handle callback requests concurrently
+        let callbacks_arc = Arc::clone(&callbacks);
+        let resource_limits_clone = resource_limits.clone();
+        let callback_handler = tokio::spawn(async move {
+            run_callback_handler(callback_rx, callbacks_arc, resource_limits_clone).await
+        });
+
+        // Spawn task to handle trace events
+        let trace_handler_clone = trace_handler.clone();
+        let trace_collector =
+            tokio::spawn(async move { run_trace_collector(trace_rx, trace_handler_clone).await });
+
+        // Execute the Python code using the builder API with cancellation
+        let mut execute_builder = executor
+            .execute(&full_code)
+            .with_callbacks(&callbacks_vec, callback_tx)
+            .with_tracing(trace_tx)
+            .with_cancellation(cancel_token.clone());
+
+        // Add memory limit if configured
+        if let Some(limit) = resource_limits.max_memory_bytes {
+            execute_builder = execute_builder.with_memory_limit(limit);
+        }
+
+        // Add timeout if configured
+        if let Some(timeout) = resource_limits.execution_timeout {
+            execute_builder = execute_builder.with_timeout(timeout);
+        }
+
+        let execution_result = execute_builder.run().await;
+
+        // Wait for the handler tasks to complete
+        let callback_invocations = callback_handler.await.unwrap_or(0);
+        let trace_events = trace_collector.await.unwrap_or_default();
+
+        let duration = start.elapsed();
+
+        match execution_result {
+            Ok(output) => {
+                // Stream output if handler is configured
+                if let Some(handler) = &output_handler {
+                    handler.on_output(&output.stdout).await;
+                }
+
+                Ok(ExecuteResult {
+                    stdout: output.stdout,
+                    stderr: output.stderr,
+                    trace: trace_events,
+                    stats: ExecuteStats {
+                        duration,
+                        callback_invocations,
+                        peak_memory_bytes: Some(output.peak_memory_bytes),
+                    },
+                })
+            }
+            Err(error) => {
+                // Check if this was a cancellation
+                if error == "execution cancelled" || cancel_token.is_cancelled() {
+                    Err(Error::Cancelled)
+                } else {
+                    Err(Error::Execution(error))
+                }
+            }
+        }
+    }
+}
+
+/// Handle to a cancellable execution.
+///
+/// Created by [`Sandbox::execute_cancellable`]. Use this handle to cancel
+/// the execution or wait for its completion.
+///
+/// The handle can be cloned to share cancellation control across tasks.
+#[derive(Debug)]
+pub struct ExecutionHandle {
+    /// Token used to signal cancellation.
+    cancel_token: CancellationToken,
+    /// Receiver for the execution result.
+    result: oneshot::Receiver<Result<ExecuteResult, Error>>,
+}
+
+impl ExecutionHandle {
+    /// Cancel the execution.
+    ///
+    /// This signals the WASM runtime to interrupt execution. The cancellation
+    /// is asynchronous - the execution may not stop immediately, especially
+    /// if it's currently in a host callback.
+    ///
+    /// Calling cancel multiple times has no additional effect.
+    pub fn cancel(&self) {
+        self.cancel_token.cancel();
+    }
+
+    /// Check if the execution is still running.
+    ///
+    /// Returns `false` if the execution has completed (successfully or with error)
+    /// or if it has been cancelled.
+    #[must_use]
+    pub fn is_running(&self) -> bool {
+        !self.cancel_token.is_cancelled()
+    }
+
+    /// Get a clone of the cancellation token.
+    ///
+    /// This is useful for integrating with other cancellation-aware code.
+    #[must_use]
+    pub fn cancellation_token(&self) -> CancellationToken {
+        self.cancel_token.clone()
+    }
+
+    /// Wait for the execution to complete.
+    ///
+    /// Returns the execution result or an error. If the execution was cancelled,
+    /// returns [`Error::Cancelled`].
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - The execution was cancelled ([`Error::Cancelled`])
+    /// - The Python code raised an exception
+    /// - A resource limit was exceeded
+    /// - The execution timed out
+    pub async fn wait(self) -> Result<ExecuteResult, Error> {
+        match self.result.await {
+            Ok(result) => result,
+            Err(_) => {
+                // Channel closed without sending - execution was likely cancelled
+                // or the task panicked
+                if self.cancel_token.is_cancelled() {
+                    Err(Error::Cancelled)
+                } else {
+                    Err(Error::Execution("execution task failed".to_string()))
+                }
+            }
+        }
     }
 }
 
@@ -378,6 +642,8 @@ pub struct SandboxBuilder<Runtime = state::Needs, Stdlib = state::Needs> {
     filesystem_cache: Option<crate::cache::FilesystemCache>,
     /// Extracted packages (kept alive for sandbox lifetime).
     packages: Vec<crate::package::ExtractedPackage>,
+    /// Network configuration for TLS connections.
+    net_config: Option<crate::net::NetConfig>,
     /// Phantom data for Runtime type parameter.
     _runtime: PhantomData<Runtime>,
     /// Phantom data for Stdlib type parameter.
@@ -431,6 +697,7 @@ impl SandboxBuilder<state::Needs, state::Needs> {
             #[cfg(feature = "native-extensions")]
             filesystem_cache: None,
             packages: Vec::new(),
+            net_config: None,
             _runtime: PhantomData,
             _stdlib: PhantomData,
         }
@@ -458,6 +725,7 @@ impl SandboxBuilder<state::Needs, state::Needs> {
             #[cfg(feature = "native-extensions")]
             filesystem_cache: None,
             packages: Vec::new(),
+            net_config: None,
             _runtime: PhantomData,
             _stdlib: PhantomData,
         }
@@ -485,6 +753,7 @@ impl<R, S> SandboxBuilder<R, S> {
             #[cfg(feature = "native-extensions")]
             filesystem_cache: self.filesystem_cache,
             packages: self.packages,
+            net_config: self.net_config,
             _runtime: PhantomData,
             _stdlib: PhantomData,
         }
@@ -871,6 +1140,39 @@ impl<R, S> SandboxBuilder<R, S> {
         self
     }
 
+    /// Enable TLS networking with the given configuration.
+    ///
+    /// This allows Python code in the sandbox to make HTTPS requests using
+    /// libraries like `requests` or `httpx`. The configuration controls which
+    /// hosts are allowed, connection limits, and timeouts.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// use eryx::{Sandbox, NetConfig};
+    ///
+    /// let sandbox = Sandbox::embedded()
+    ///     .with_network(NetConfig::default())
+    ///     .build()?;
+    ///
+    /// // Python code can now use requests/httpx
+    /// sandbox.execute(r#"
+    /// import requests
+    /// r = requests.get("https://httpbin.org/get")
+    /// print(r.status_code)
+    /// "#).await?;
+    /// ```
+    ///
+    /// # Security
+    ///
+    /// By default, connections to localhost and private networks (RFC1918) are blocked.
+    /// Use [`NetConfig::allow_localhost`] or [`NetConfig::permissive`] for testing.
+    #[must_use]
+    pub fn with_network(mut self, config: crate::net::NetConfig) -> Self {
+        self.net_config = Some(config);
+        self
+    }
+
     /// Set the path to additional Python packages directory.
     ///
     /// The directory will be mounted at `/site-packages` inside the WASM sandbox
@@ -1127,6 +1429,7 @@ impl SandboxBuilder<state::Has, state::Has> {
             trace_handler: self.trace_handler,
             output_handler: self.output_handler,
             resource_limits: self.resource_limits,
+            net_config: self.net_config,
             _packages: self.packages,
         })
     }
@@ -1293,6 +1596,8 @@ impl SandboxBuilder<state::Has, state::Has> {
 pub struct ExecuteResult {
     /// Complete stdout output (also streamed via `OutputHandler` if configured).
     pub stdout: String,
+    /// Complete stderr output (also streamed via `OutputHandler` if configured).
+    pub stderr: String,
     /// Collected trace events (also streamed via `TraceHandler` if configured).
     pub trace: Vec<TraceEvent>,
     /// Execution statistics.
@@ -1454,6 +1759,7 @@ mod tests {
     fn execute_result_is_debug() {
         let result = ExecuteResult {
             stdout: "Hello".to_string(),
+            stderr: String::new(),
             trace: vec![],
             stats: ExecuteStats {
                 duration: Duration::from_millis(100),
@@ -1471,6 +1777,7 @@ mod tests {
     fn execute_result_is_clone() {
         let result = ExecuteResult {
             stdout: "Test output".to_string(),
+            stderr: String::new(),
             trace: vec![],
             stats: ExecuteStats {
                 duration: Duration::from_millis(50),
@@ -1788,6 +2095,7 @@ mod tests {
     fn execute_result_empty_stdout() {
         let result = ExecuteResult {
             stdout: String::new(),
+            stderr: String::new(),
             trace: vec![],
             stats: ExecuteStats {
                 duration: Duration::from_millis(1),
@@ -1806,6 +2114,7 @@ mod tests {
 
         let result = ExecuteResult {
             stdout: "output".to_string(),
+            stderr: String::new(),
             trace: vec![
                 TraceEvent {
                     lineno: 1,

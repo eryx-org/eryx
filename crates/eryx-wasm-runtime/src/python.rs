@@ -209,11 +209,20 @@ pub mod callback_code {
     }
 }
 
+/// Output from executing Python code.
+#[derive(Debug, Clone)]
+pub struct ExecuteOutput {
+    /// Captured stdout from the Python execution.
+    pub stdout: String,
+    /// Captured stderr from the Python execution.
+    pub stderr: String,
+}
+
 /// Result of executing Python code.
 #[derive(Debug)]
 pub enum ExecuteResult {
-    /// Execution completed successfully with output.
-    Complete(String),
+    /// Execution completed successfully with output (stdout and stderr).
+    Complete(ExecuteOutput),
     /// Execution completed with an error.
     Error(String),
     /// Execution is pending, waiting for async callback.
@@ -318,6 +327,55 @@ pub fn set_async_import_result(_subtask: u32, result_json: &str) {
     let escaped = result_json.replace('\\', "\\\\").replace("'''", "\\'''");
 
     let code = format!("_eryx_async_import_result = '''{escaped}'''");
+
+    if let Ok(code_cstr) = CString::new(code) {
+        unsafe {
+            if PyRun_SimpleString(code_cstr.as_ptr()) != 0 {
+                PyErr_Clear();
+            }
+        }
+    }
+}
+
+/// Store the result of a TLS async operation for Python to retrieve.
+///
+/// - `subtask`: The subtask ID (used as key)
+/// - `status`: 0 = Ok, 1 = Error
+/// - `value`: For Ok: the handle/u32 value. For Error: error discriminant.
+/// - `message`: Optional error message for errors.
+pub fn set_net_result(subtask: u32, status: i32, value: i64, message: Option<String>) {
+    use std::ffi::CString;
+
+    let code = match (status, message) {
+        (0, _) => format!("_eryx_net_results[{subtask}] = (0, {value})"),
+        (1, Some(msg)) => {
+            let escaped = msg.replace('\\', "\\\\").replace("'''", "\\'''");
+            format!("_eryx_net_results[{subtask}] = (1, '''{escaped}''')")
+        }
+        (1, None) => format!("_eryx_net_results[{subtask}] = (1, 'unknown error')"),
+        _ => return,
+    };
+
+    if let Ok(code_cstr) = CString::new(code) {
+        unsafe {
+            if PyRun_SimpleString(code_cstr.as_ptr()) != 0 {
+                PyErr_Clear();
+            }
+        }
+    }
+}
+
+/// Store the result of a network read operation (bytes result).
+pub fn set_net_bytes_result(subtask: u32, status: i32, data: Vec<u8>) {
+    use std::ffi::CString;
+
+    let code = if status == 0 {
+        // Encode bytes as a Python bytes literal
+        let hex: String = data.iter().map(|b| format!("\\x{b:02x}")).collect();
+        format!("_eryx_net_results[{subtask}] = (0, b'{hex}')")
+    } else {
+        format!("_eryx_net_results[{subtask}] = (1, 'unknown error')")
+    };
 
     if let Ok(code_cstr) = CString::new(code) {
         unsafe {
@@ -477,6 +535,212 @@ fn promise_get_result_(py: Python<'_>, _promise: u32) -> PyResult<String> {
     }
 }
 
+// =============================================================================
+// TCP functions exposed to Python
+// =============================================================================
+//
+// These functions call the WIT TCP interface for networking.
+// They are used by the socket shim for plain HTTP connections.
+
+/// Connect to a host:port over TCP.
+/// Returns a tuple: (result_type, value)
+/// - result_type 0: Ok - value is the TCP handle (int)
+/// - result_type 1: Err - value is the error message (str)
+/// - result_type 2: Pending - value is a tuple (waitable_id, promise_id)
+///
+/// Python signature: _eryx_tcp_connect(host: str, port: int) -> tuple[int, Any]
+#[pyfunction]
+fn _eryx_tcp_connect(py: Python<'_>, host: String, port: u16) -> PyResult<(i32, Py<PyAny>)> {
+    match crate::do_tcp_connect(&host, port) {
+        Ok((status, value)) => match value {
+            crate::NetResultValue::Handle(h) => {
+                Ok((status, h.into_pyobject(py)?.into_any().unbind()))
+            }
+            crate::NetResultValue::Error(e) => {
+                Ok((status, e.into_pyobject(py)?.into_any().unbind()))
+            }
+            crate::NetResultValue::Pending(waitable, promise) => {
+                let tuple = (waitable, promise);
+                Ok((status, tuple.into_pyobject(py)?.into_any().unbind()))
+            }
+            crate::NetResultValue::Bytes(_) => Err(pyo3::exceptions::PyRuntimeError::new_err(
+                "unexpected bytes result from connect",
+            )),
+        },
+        Err(e) => Err(pyo3::exceptions::PyRuntimeError::new_err(e)),
+    }
+}
+
+/// Read from a TCP connection.
+/// Returns a tuple: (result_type, value)
+/// - result_type 0: Ok - value is the bytes read
+/// - result_type 1: Err - value is the error message (str)
+/// - result_type 2: Pending - value is a tuple (waitable_id, promise_id)
+///
+/// Python signature: _eryx_tcp_read(handle: int, length: int) -> tuple[int, Any]
+#[pyfunction]
+fn _eryx_tcp_read(py: Python<'_>, handle: u32, length: u32) -> PyResult<(i32, Py<PyAny>)> {
+    match crate::do_tcp_read(handle, length) {
+        Ok((status, value)) => match value {
+            crate::NetResultValue::Bytes(b) => {
+                Ok((status, b.into_pyobject(py)?.into_any().unbind()))
+            }
+            crate::NetResultValue::Error(e) => {
+                Ok((status, e.into_pyobject(py)?.into_any().unbind()))
+            }
+            crate::NetResultValue::Pending(waitable, promise) => {
+                let tuple = (waitable, promise);
+                Ok((status, tuple.into_pyobject(py)?.into_any().unbind()))
+            }
+            crate::NetResultValue::Handle(_) => Err(pyo3::exceptions::PyRuntimeError::new_err(
+                "unexpected handle result from read",
+            )),
+        },
+        Err(e) => Err(pyo3::exceptions::PyRuntimeError::new_err(e)),
+    }
+}
+
+/// Write to a TCP connection.
+/// Returns a tuple: (result_type, value)
+/// - result_type 0: Ok - value is the number of bytes written (int)
+/// - result_type 1: Err - value is the error message (str)
+/// - result_type 2: Pending - value is a tuple (waitable_id, promise_id)
+///
+/// Python signature: _eryx_tcp_write(handle: int, data: bytes) -> tuple[int, Any]
+#[pyfunction]
+fn _eryx_tcp_write(py: Python<'_>, handle: u32, data: Vec<u8>) -> PyResult<(i32, Py<PyAny>)> {
+    match crate::do_tcp_write(handle, &data) {
+        Ok((status, value)) => match value {
+            crate::NetResultValue::Handle(n) => {
+                Ok((status, n.into_pyobject(py)?.into_any().unbind()))
+            }
+            crate::NetResultValue::Error(e) => {
+                Ok((status, e.into_pyobject(py)?.into_any().unbind()))
+            }
+            crate::NetResultValue::Pending(waitable, promise) => {
+                let tuple = (waitable, promise);
+                Ok((status, tuple.into_pyobject(py)?.into_any().unbind()))
+            }
+            crate::NetResultValue::Bytes(_) => Err(pyo3::exceptions::PyRuntimeError::new_err(
+                "unexpected bytes result from write",
+            )),
+        },
+        Err(e) => Err(pyo3::exceptions::PyRuntimeError::new_err(e)),
+    }
+}
+
+/// Close a TCP connection.
+/// Python signature: _eryx_tcp_close(handle: int) -> None
+#[pyfunction]
+fn _eryx_tcp_close(handle: u32) {
+    crate::do_tcp_close(handle);
+}
+
+// =============================================================================
+// TLS functions exposed to Python
+// =============================================================================
+//
+// These functions call the WIT TLS interface for networking.
+// TLS upgrade takes a TCP handle and returns a TLS handle.
+
+/// Upgrade a TCP connection to TLS.
+/// Returns a tuple: (result_type, value)
+/// - result_type 0: Ok - value is the TLS handle (int)
+/// - result_type 1: Err - value is the error message (str)
+/// - result_type 2: Pending - value is a tuple (waitable_id, promise_id)
+///
+/// Python signature: _eryx_tls_upgrade(tcp_handle: int, hostname: str) -> tuple[int, Any]
+#[pyfunction]
+fn _eryx_tls_upgrade(
+    py: Python<'_>,
+    tcp_handle: u32,
+    hostname: String,
+) -> PyResult<(i32, Py<PyAny>)> {
+    match crate::do_tls_upgrade(tcp_handle, &hostname) {
+        Ok((status, value)) => match value {
+            crate::NetResultValue::Handle(h) => {
+                Ok((status, h.into_pyobject(py)?.into_any().unbind()))
+            }
+            crate::NetResultValue::Error(e) => {
+                Ok((status, e.into_pyobject(py)?.into_any().unbind()))
+            }
+            crate::NetResultValue::Pending(waitable, promise) => {
+                let tuple = (waitable, promise);
+                Ok((status, tuple.into_pyobject(py)?.into_any().unbind()))
+            }
+            crate::NetResultValue::Bytes(_) => Err(pyo3::exceptions::PyRuntimeError::new_err(
+                "unexpected bytes result from tls upgrade",
+            )),
+        },
+        Err(e) => Err(pyo3::exceptions::PyRuntimeError::new_err(e)),
+    }
+}
+
+/// Read from a TLS connection.
+/// Returns a tuple: (result_type, value)
+/// - result_type 0: Ok - value is the bytes read
+/// - result_type 1: Err - value is the error message (str)
+/// - result_type 2: Pending - value is a tuple (waitable_id, promise_id)
+///
+/// Python signature: _eryx_tls_read(handle: int, length: int) -> tuple[int, Any]
+#[pyfunction]
+fn _eryx_tls_read(py: Python<'_>, handle: u32, length: u32) -> PyResult<(i32, Py<PyAny>)> {
+    match crate::do_tls_read(handle, length) {
+        Ok((status, value)) => match value {
+            crate::NetResultValue::Bytes(b) => {
+                Ok((status, b.into_pyobject(py)?.into_any().unbind()))
+            }
+            crate::NetResultValue::Error(e) => {
+                Ok((status, e.into_pyobject(py)?.into_any().unbind()))
+            }
+            crate::NetResultValue::Pending(waitable, promise) => {
+                let tuple = (waitable, promise);
+                Ok((status, tuple.into_pyobject(py)?.into_any().unbind()))
+            }
+            crate::NetResultValue::Handle(_) => Err(pyo3::exceptions::PyRuntimeError::new_err(
+                "unexpected handle result from read",
+            )),
+        },
+        Err(e) => Err(pyo3::exceptions::PyRuntimeError::new_err(e)),
+    }
+}
+
+/// Write to a TLS connection.
+/// Returns a tuple: (result_type, value)
+/// - result_type 0: Ok - value is the number of bytes written (int)
+/// - result_type 1: Err - value is the error message (str)
+/// - result_type 2: Pending - value is a tuple (waitable_id, promise_id)
+///
+/// Python signature: _eryx_tls_write(handle: int, data: bytes) -> tuple[int, Any]
+#[pyfunction]
+fn _eryx_tls_write(py: Python<'_>, handle: u32, data: Vec<u8>) -> PyResult<(i32, Py<PyAny>)> {
+    match crate::do_tls_write(handle, &data) {
+        Ok((status, value)) => match value {
+            crate::NetResultValue::Handle(n) => {
+                Ok((status, n.into_pyobject(py)?.into_any().unbind()))
+            }
+            crate::NetResultValue::Error(e) => {
+                Ok((status, e.into_pyobject(py)?.into_any().unbind()))
+            }
+            crate::NetResultValue::Pending(waitable, promise) => {
+                let tuple = (waitable, promise);
+                Ok((status, tuple.into_pyobject(py)?.into_any().unbind()))
+            }
+            crate::NetResultValue::Bytes(_) => Err(pyo3::exceptions::PyRuntimeError::new_err(
+                "unexpected bytes result from write",
+            )),
+        },
+        Err(e) => Err(pyo3::exceptions::PyRuntimeError::new_err(e)),
+    }
+}
+
+/// Close a TLS connection.
+/// Python signature: _eryx_tls_close(handle: int) -> None
+#[pyfunction]
+fn _eryx_tls_close(handle: u32) {
+    crate::do_tls_close(handle);
+}
+
 /// The _eryx module definition.
 /// This generates a `PyInit__eryx` function that can be registered with Python.
 #[pymodule]
@@ -493,6 +757,16 @@ fn eryx_module(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(context_get_, m)?)?;
     m.add_function(wrap_pyfunction!(subtask_drop_, m)?)?;
     m.add_function(wrap_pyfunction!(promise_get_result_, m)?)?;
+    // TCP networking functions
+    m.add_function(wrap_pyfunction!(_eryx_tcp_connect, m)?)?;
+    m.add_function(wrap_pyfunction!(_eryx_tcp_read, m)?)?;
+    m.add_function(wrap_pyfunction!(_eryx_tcp_write, m)?)?;
+    m.add_function(wrap_pyfunction!(_eryx_tcp_close, m)?)?;
+    // TLS networking functions
+    m.add_function(wrap_pyfunction!(_eryx_tls_upgrade, m)?)?;
+    m.add_function(wrap_pyfunction!(_eryx_tls_read, m)?)?;
+    m.add_function(wrap_pyfunction!(_eryx_tls_write, m)?)?;
+    m.add_function(wrap_pyfunction!(_eryx_tls_close, m)?)?;
     Ok(())
 }
 
@@ -704,6 +978,85 @@ async def await_invoke(name: str, args_json: str) -> str:
             return json.dumps(value)
         else:
             raise RuntimeError(result.get('error', 'Unknown error'))
+
+
+async def _await_net_result(result_type: int, value: Any) -> Any:
+    """Helper to await a network (TCP or TLS) operation result."""
+    import __main__
+    if result_type == 0:  # Ok - immediate completion
+        return value
+    elif result_type == 1:  # Err - immediate error
+        raise OSError(value)
+    else:  # Pending - need to wait
+        waitable, _promise = value
+        future = _loop.create_future()
+        state = _async_state.get()
+        state.futures[waitable] = future
+
+        if state.waitable_set is None:
+            state.waitable_set = _eryx.waitable_set_new_()
+        _eryx.waitable_join_(waitable, state.waitable_set)
+
+        await future
+
+        # Get result from _eryx_net_results dict (set by Rust during resume)
+        net_results = getattr(__main__, '_eryx_net_results', {})
+        if waitable in net_results:
+            status, result_value = net_results.pop(waitable)
+            if status == 0:
+                return result_value
+            else:
+                raise OSError(result_value)
+        else:
+            raise OSError("Network result not found")
+
+
+# TCP functions
+async def await_tcp_connect(host: str, port: int) -> int:
+    """Connect to a host over TCP and return the handle."""
+    result_type, value = _eryx._eryx_tcp_connect(host, port)
+    return await _await_net_result(result_type, value)
+
+
+async def await_tcp_read(handle: int, length: int) -> bytes:
+    """Read from a TCP connection."""
+    result_type, value = _eryx._eryx_tcp_read(handle, length)
+    return await _await_net_result(result_type, value)
+
+
+async def await_tcp_write(handle: int, data: bytes) -> int:
+    """Write to a TCP connection, return bytes written."""
+    result_type, value = _eryx._eryx_tcp_write(handle, data)
+    return await _await_net_result(result_type, value)
+
+
+def tcp_close(handle: int):
+    """Close a TCP connection."""
+    _eryx._eryx_tcp_close(handle)
+
+
+# TLS functions (upgrade from TCP)
+async def await_tls_upgrade(tcp_handle: int, hostname: str) -> int:
+    """Upgrade a TCP connection to TLS and return the TLS handle."""
+    result_type, value = _eryx._eryx_tls_upgrade(tcp_handle, hostname)
+    return await _await_net_result(result_type, value)
+
+
+async def await_tls_read(handle: int, length: int) -> bytes:
+    """Read from a TLS connection."""
+    result_type, value = _eryx._eryx_tls_read(handle, length)
+    return await _await_net_result(result_type, value)
+
+
+async def await_tls_write(handle: int, data: bytes) -> int:
+    """Write to a TLS connection, return bytes written."""
+    result_type, value = _eryx._eryx_tls_write(handle, data)
+    return await _await_net_result(result_type, value)
+
+
+def tls_close(handle: int):
+    """Close a TLS connection."""
+    _eryx._eryx_tls_close(handle)
 ''', '_eryx_async', 'exec'), _eryx_async.__dict__)
 
 sys.modules['_eryx_async'] = _eryx_async
@@ -787,6 +1140,10 @@ _eryx_old_stderr = _sys.stderr
 # User globals namespace - isolated from infrastructure
 # User code cannot see _eryx_* variables because they're in module globals, not here
 _eryx_user_globals = {'__builtins__': __builtins__, '__name__': '__main__'}
+
+# Network async results storage - keyed by subtask ID
+# Used by set_net_result/set_net_bytes_result to store results for Python to retrieve
+_eryx_net_results = {}
 
 # Import async infrastructure
 import _eryx_async
@@ -879,6 +1236,999 @@ def _eryx_get_output_keep_capture():
     return _eryx_stdout.getvalue(), _eryx_stderr.getvalue()
 "#;
 
+// =============================================================================
+// Socket shim module for TLS networking
+// =============================================================================
+//
+// This provides a minimal socket module replacement that works with HTTP client
+// libraries like requests and httpx. The socket itself doesn't do networking -
+// it just holds connection parameters until ssl.wrap_socket() is called.
+
+// =============================================================================
+// SSL shim module for TLS networking
+// =============================================================================
+//
+// This provides a minimal ssl module replacement that performs TLS connections
+// via the WIT TLS interface. The ssl module is where actual networking happens -
+// ssl.wrap_socket() or SSLContext.wrap_socket() triggers the TLS connection.
+
+/// Python code to create and inject the ssl_eryx shim module.
+/// This replaces sys.modules['ssl'] with our TLS-backed implementation.
+pub const SSL_SHIM_CODE: &str = r#"
+import sys as _sys
+import types as _types
+
+# Create ssl_eryx module
+_ssl_eryx = _types.ModuleType('ssl')
+_ssl_eryx.__doc__ = 'Eryx ssl shim - minimal ssl module backed by eryx TLS imports.'
+
+exec(compile(r'''
+"""Eryx ssl shim - minimal ssl module backed by eryx TLS imports.
+
+This module provides the ssl API that HTTP client libraries need. Actual
+TLS connections are performed via the _eryx module's TLS functions which
+call the WIT TLS interface.
+"""
+
+import _eryx
+
+# Protocol constants (for compatibility checks)
+PROTOCOL_TLS = 2
+PROTOCOL_TLS_CLIENT = 16
+PROTOCOL_TLS_SERVER = 17
+PROTOCOL_SSLv23 = PROTOCOL_TLS  # Alias
+
+# Verification modes
+CERT_NONE = 0
+CERT_OPTIONAL = 1
+CERT_REQUIRED = 2
+
+# Feature flags that urllib3/httpx check
+HAS_SNI = True
+HAS_ALPN = True
+HAS_NPN = False
+HAS_NEVER_CHECK_COMMON_NAME = True
+HAS_SSLv2 = False
+HAS_SSLv3 = False
+HAS_TLSv1 = False
+HAS_TLSv1_1 = False
+HAS_TLSv1_2 = True
+HAS_TLSv1_3 = True
+
+# Options (ignored - host handles TLS config)
+OP_NO_SSLv2 = 0x01000000
+OP_NO_SSLv3 = 0x02000000
+OP_NO_TLSv1 = 0x04000000
+OP_NO_TLSv1_1 = 0x10000000
+OP_NO_TLSv1_2 = 0x08000000
+OP_NO_COMPRESSION = 0x00020000
+OP_NO_TICKET = 0x00004000
+OP_ALL = 0x80000FFF
+OP_SINGLE_DH_USE = 0x100000
+OP_SINGLE_ECDH_USE = 0x80000
+OP_CIPHER_SERVER_PREFERENCE = 0x400000
+
+# Alert descriptions
+ALERT_DESCRIPTION_HANDSHAKE_FAILURE = 40
+ALERT_DESCRIPTION_CERTIFICATE_UNKNOWN = 46
+
+# Verify flags
+VERIFY_DEFAULT = 0
+VERIFY_CRL_CHECK_LEAF = 4
+VERIFY_CRL_CHECK_CHAIN = 12
+VERIFY_X509_STRICT = 32
+VERIFY_X509_TRUSTED_FIRST = 64
+
+
+class SSLError(OSError):
+    """SSL/TLS error."""
+    pass
+
+
+class SSLCertVerificationError(SSLError):
+    """Certificate verification failed."""
+    pass
+
+
+class CertificateError(SSLError):
+    """Certificate error."""
+    pass
+
+
+class SSLWantReadError(SSLError):
+    """Non-blocking operation would block on read."""
+    pass
+
+
+class SSLWantWriteError(SSLError):
+    """Non-blocking operation would block on write."""
+    pass
+
+
+class SSLContext:
+    """SSL context for configuring TLS connections.
+
+    Most settings are ignored - the host controls actual TLS configuration.
+    This exists for API compatibility with urllib3/httpx.
+    """
+
+    def __init__(self, protocol=PROTOCOL_TLS_CLIENT):
+        self.protocol = protocol
+        self.verify_mode = CERT_REQUIRED
+        self.check_hostname = True
+        self.options = OP_ALL | OP_NO_SSLv2 | OP_NO_SSLv3
+        self._alpn_protocols = None
+        self.minimum_version = None
+        self.maximum_version = None
+        self.hostname_checks_common_name = False
+        self.post_handshake_auth = False  # Python 3.8+ attribute, ignored in sandbox
+
+    @property
+    def verify_flags(self):
+        return VERIFY_DEFAULT
+
+    @verify_flags.setter
+    def verify_flags(self, value):
+        pass  # Ignored
+
+    def set_alpn_protocols(self, protocols):
+        self._alpn_protocols = protocols
+
+    def set_ciphers(self, ciphers):
+        pass  # Host controls ciphers
+
+    def set_default_verify_paths(self):
+        pass  # Host uses system certs
+
+    def load_default_certs(self, purpose=None):
+        pass  # Host uses system certs
+
+    def load_cert_chain(self, certfile, keyfile=None, password=None):
+        pass  # Client certs not supported yet
+
+    def load_verify_locations(self, cafile=None, capath=None, cadata=None):
+        pass  # Host handles cert verification
+
+    def wrap_socket(self, sock, server_side=False, do_handshake_on_connect=True,
+                    suppress_ragged_eofs=True, server_hostname=None,
+                    session=None):
+        if server_side:
+            raise SSLError("Server-side TLS not supported in sandbox")
+        return SSLSocket(sock, self, server_hostname, do_handshake_on_connect)
+
+    def wrap_bio(self, incoming, outgoing, server_side=False,
+                 server_hostname=None, session=None):
+        raise SSLError("wrap_bio not supported in sandbox")
+
+
+class SSLSocket:
+    """TLS-wrapped socket.
+
+    Performs the actual TLS connection via _eryx TLS functions.
+    """
+
+    def __init__(self, sock, context, server_hostname, do_handshake_on_connect):
+        self._sock = sock
+        self._context = context
+        self._server_hostname = server_hostname
+        self._connected = False
+        self._closed = False
+
+        if do_handshake_on_connect and sock._tcp_handle is not None:
+            self.do_handshake()
+
+    def do_handshake(self):
+        """Perform TLS handshake by upgrading the TCP connection."""
+        if self._connected:
+            return
+
+        # Socket must already have a TCP connection
+        if self._sock._tcp_handle is None:
+            raise SSLError("Socket not connected - call connect() before wrap_socket()")
+
+        hostname = self._server_hostname
+        if not hostname and self._sock._pending_address:
+            hostname = self._sock._pending_address[0]
+        if not hostname:
+            raise SSLError("No hostname available for TLS handshake")
+
+        import _eryx
+        result_type, value = _eryx._eryx_tls_upgrade(self._sock._tcp_handle, hostname)
+
+        if result_type == 0:
+            # Success - value is the TLS handle
+            self._sock._tls_handle = value
+            self._connected = True
+        elif result_type == 1:
+            # Error - value is the error message
+            error_str = str(value)
+            if 'handshake' in error_str.lower() or 'certificate' in error_str.lower():
+                raise SSLCertVerificationError(error_str)
+            raise SSLError(error_str)
+        else:
+            # Pending should never happen with ignore_wit
+            raise SSLError("Unexpected pending result in sync context")
+
+    def read(self, length=1024, buffer=None):
+        if self._closed:
+            raise SSLError("SSL socket is closed")
+        if not self._connected:
+            raise SSLError("SSL socket not connected")
+        data = self._sock.recv(length)
+        if buffer is not None:
+            n = len(data)
+            buffer[:n] = data
+            return n
+        return data
+
+    def write(self, data):
+        if self._closed:
+            raise SSLError("SSL socket is closed")
+        if not self._connected:
+            raise SSLError("SSL socket not connected")
+        return self._sock.send(data)
+
+    def recv(self, bufsize, flags=0):
+        return self.read(bufsize)
+
+    def recv_into(self, buffer, nbytes=0, flags=0):
+        return self.read(nbytes or len(buffer), buffer)
+
+    def send(self, data, flags=0):
+        return self.write(data)
+
+    def sendall(self, data, flags=0):
+        self._sock.sendall(data)
+
+    def close(self):
+        if not self._closed:
+            self._closed = True
+            self._sock.close()
+            self._connected = False
+
+    def shutdown(self, how):
+        pass  # TLS shutdown happens on close
+
+    def unwrap(self):
+        """Remove the SSL layer and return the underlying socket."""
+        sock = self._sock
+        self._connected = False
+        return sock
+
+    def makefile(self, mode='r', buffering=-1, **kwargs):
+        return self._sock.makefile(mode, buffering, **kwargs)
+
+    def getpeercert(self, binary_form=False):
+        """Return peer certificate info.
+
+        Returns minimal info - actual cert verification happens on host.
+        """
+        if not self._connected:
+            return None
+        # Return empty dict/bytes - cert is verified by host
+        return b'' if binary_form else {}
+
+    def version(self):
+        return "TLSv1.3"
+
+    def cipher(self):
+        return ("TLS_AES_256_GCM_SHA384", "TLSv1.3", 256)
+
+    def selected_alpn_protocol(self):
+        return "http/1.1"  # Could expose from host if needed
+
+    def selected_npn_protocol(self):
+        return None
+
+    def compression(self):
+        return None
+
+    def pending(self):
+        return 0
+
+    @property
+    def server_hostname(self):
+        return self._server_hostname
+
+    @property
+    def context(self):
+        return self._context
+
+    @property
+    def server_side(self):
+        return False
+
+    def settimeout(self, timeout):
+        self._sock.settimeout(timeout)
+
+    def gettimeout(self):
+        return self._sock.gettimeout()
+
+    def setblocking(self, flag):
+        self._sock.setblocking(flag)
+
+    def fileno(self):
+        return self._sock.fileno()
+
+    def getpeername(self):
+        return self._sock.getpeername()
+
+    def getsockname(self):
+        return self._sock.getsockname()
+
+    def dup(self):
+        raise SSLError("dup() not supported in sandbox")
+
+    def detach(self):
+        return self._sock.detach()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        self.close()
+
+
+class Purpose:
+    """Purpose for certificate verification."""
+    SERVER_AUTH = "SERVER_AUTH"
+    CLIENT_AUTH = "CLIENT_AUTH"
+
+
+class TLSVersion:
+    """TLS version enumeration."""
+    SSLv3 = 0x0300
+    TLSv1 = 0x0301
+    TLSv1_1 = 0x0302
+    TLSv1_2 = 0x0303
+    TLSv1_3 = 0x0304
+    MINIMUM_SUPPORTED = TLSv1_2
+    MAXIMUM_SUPPORTED = TLSv1_3
+
+
+def create_default_context(purpose=Purpose.SERVER_AUTH, cafile=None, capath=None, cadata=None):
+    """Create a default SSL context (used by urllib3/httpx)."""
+    ctx = SSLContext(PROTOCOL_TLS_CLIENT)
+    ctx.verify_mode = CERT_REQUIRED
+    ctx.check_hostname = True
+    if purpose == Purpose.SERVER_AUTH:
+        ctx.verify_mode = CERT_REQUIRED
+        ctx.check_hostname = True
+    return ctx
+
+
+def _create_unverified_context(protocol=PROTOCOL_TLS_CLIENT, cert_reqs=None,
+                               check_hostname=False, purpose=None,
+                               certfile=None, keyfile=None, cafile=None,
+                               capath=None, cadata=None):
+    """Create an unverified context (verification still happens on host)."""
+    ctx = SSLContext(protocol)
+    ctx.verify_mode = cert_reqs if cert_reqs is not None else CERT_NONE
+    ctx.check_hostname = check_hostname
+    return ctx
+
+
+_create_default_https_context = create_default_context
+
+
+def wrap_socket(sock, keyfile=None, certfile=None, server_side=False,
+                cert_reqs=CERT_NONE, ssl_version=PROTOCOL_TLS,
+                ca_certs=None, do_handshake_on_connect=True,
+                suppress_ragged_eofs=True, ciphers=None,
+                server_hostname=None):
+    """Wrap a socket in SSL."""
+    ctx = SSLContext(ssl_version)
+    ctx.verify_mode = cert_reqs
+    return ctx.wrap_socket(sock, server_side=server_side,
+                           do_handshake_on_connect=do_handshake_on_connect,
+                           server_hostname=server_hostname)
+
+
+def match_hostname(cert, hostname):
+    """Match hostname (deprecated but some libs still use it)."""
+    pass  # Host already verified hostname
+
+
+def get_server_certificate(addr, ssl_version=PROTOCOL_TLS, ca_certs=None, timeout=None):
+    """Retrieve a server's certificate."""
+    raise SSLError("get_server_certificate not supported in sandbox")
+
+
+def DER_cert_to_PEM_cert(der_cert_bytes):
+    """Convert DER to PEM format."""
+    import base64
+    pem = base64.standard_b64encode(der_cert_bytes).decode('ascii')
+    return f"-----BEGIN CERTIFICATE-----\n{pem}\n-----END CERTIFICATE-----\n"
+
+
+def PEM_cert_to_DER_cert(pem_cert_string):
+    """Convert PEM to DER format."""
+    import base64
+    lines = pem_cert_string.strip().split('\n')
+    lines = [l for l in lines if not l.startswith('-----')]
+    return base64.standard_b64decode(''.join(lines))
+
+
+# RAND functions (no-op, host has good entropy)
+def RAND_status():
+    return 1
+
+def RAND_add(string, entropy):
+    pass
+
+def RAND_bytes(n):
+    import os
+    return os.urandom(n)
+
+def RAND_pseudo_bytes(n):
+    return (RAND_bytes(n), True)
+
+
+# OpenSSL version info (fake but compatible)
+OPENSSL_VERSION = "OpenSSL 3.0.0 (eryx TLS shim)"
+OPENSSL_VERSION_INFO = (3, 0, 0, 0, 0)
+OPENSSL_VERSION_NUMBER = 0x30000000
+
+def get_default_verify_paths():
+    """Return default certificate paths."""
+    class DefaultVerifyPaths:
+        cafile = None
+        capath = None
+        openssl_cafile_env = 'SSL_CERT_FILE'
+        openssl_cafile = None
+        openssl_capath_env = 'SSL_CERT_DIR'
+        openssl_capath = None
+    return DefaultVerifyPaths()
+
+def enum_certificates(store_name):
+    """Enumerate certificates (Windows only, not supported)."""
+    return []
+
+def enum_crls(store_name):
+    """Enumerate CRLs (Windows only, not supported)."""
+    return []
+
+''', '<ssl_eryx>', 'exec'), _ssl_eryx.__dict__)
+
+# Register the module
+_sys.modules['ssl'] = _ssl_eryx
+_sys.modules['_ssl'] = _ssl_eryx
+"#;
+
+/// Python code to create and inject the socket_eryx shim module.
+/// This replaces sys.modules['socket'] with our TLS-backed implementation.
+pub const SOCKET_SHIM_CODE: &str = r#"
+import sys as _sys
+import types as _types
+
+# Create socket_eryx module
+_socket_eryx = _types.ModuleType('socket')
+_socket_eryx.__doc__ = 'Eryx socket shim - minimal socket module for HTTP client compatibility.'
+
+exec(compile(r'''
+"""Eryx socket shim - minimal socket module for HTTP client compatibility.
+
+This module provides just enough socket API for HTTP client libraries (requests,
+httpx, urllib3) to work. Actual networking is deferred to the ssl module which
+uses eryx's TLS WIT imports.
+"""
+
+# Socket constants that libraries check for
+AF_INET = 2
+AF_INET6 = 10
+AF_UNIX = 1
+SOCK_STREAM = 1
+SOCK_DGRAM = 2
+IPPROTO_TCP = 6
+IPPROTO_UDP = 17
+SOL_SOCKET = 1
+SO_KEEPALIVE = 9
+SO_REUSEADDR = 2
+TCP_NODELAY = 1
+SHUT_RD = 0
+SHUT_WR = 1
+SHUT_RDWR = 2
+
+# Feature flags
+has_ipv6 = False
+has_dualstack_ipv6 = lambda: False
+
+# Global default timeout sentinel (used by http.client)
+_GLOBAL_DEFAULT_TIMEOUT = object()
+
+
+class timeout(OSError):
+    """Socket timeout exception."""
+    pass
+
+
+class error(OSError):
+    """Socket error exception."""
+    pass
+
+
+class herror(error):
+    """Host error exception."""
+    pass
+
+
+class gaierror(error):
+    """getaddrinfo error exception."""
+    pass
+
+
+class SocketIO:
+    """File-like wrapper for socket (used by http.client)."""
+
+    def __init__(self, sock, mode):
+        self._sock = sock
+        self._mode = mode
+        self._closed = False
+
+    def read(self, size=-1):
+        if self._closed:
+            raise ValueError("I/O operation on closed file")
+        if size < 0:
+            # Read all available data
+            chunks = []
+            while True:
+                chunk = self._sock.recv(8192)
+                if not chunk:
+                    break
+                chunks.append(chunk)
+            return b''.join(chunks)
+        return self._sock.recv(size)
+
+    def readinto(self, b):
+        data = self.read(len(b))
+        n = len(data)
+        b[:n] = data
+        return n
+
+    def readline(self, limit=-1):
+        # Simple line reading - HTTP headers are typically small
+        result = b''
+        while True:
+            c = self._sock.recv(1)
+            if not c:
+                break
+            result += c
+            if c == b'\n':
+                break
+            if limit > 0 and len(result) >= limit:
+                break
+        return result
+
+    def readlines(self, hint=-1):
+        lines = []
+        while True:
+            line = self.readline()
+            if not line:
+                break
+            lines.append(line)
+        return lines
+
+    def write(self, data):
+        if self._closed:
+            raise ValueError("I/O operation on closed file")
+        return self._sock.send(data)
+
+    def writelines(self, lines):
+        for line in lines:
+            self.write(line)
+
+    def flush(self):
+        pass
+
+    def close(self):
+        self._closed = True
+        # Don't close underlying socket - that's the caller's responsibility
+
+    def readable(self):
+        return 'r' in self._mode or '+' in self._mode
+
+    def writable(self):
+        return 'w' in self._mode or '+' in self._mode
+
+    def seekable(self):
+        return False
+
+    @property
+    def closed(self):
+        return self._closed
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        self.close()
+
+
+class socket:
+    """Minimal socket implementation for HTTP client compatibility.
+
+    Supports both plain TCP connections (for http://) and TLS connections
+    (for https:// via ssl.wrap_socket).
+    """
+
+    def __init__(self, family=AF_INET, type=SOCK_STREAM, proto=0, fileno=None):
+        self._family = family
+        self._type = type
+        self._proto = proto
+        self._timeout = None
+        self._blocking = True
+        self._pending_address = None
+        self._tcp_handle = None   # TCP connection handle
+        self._tls_handle = None   # TLS handle (set when upgraded via ssl.wrap_socket)
+        self._closed = False
+
+    @property
+    def family(self):
+        return self._family
+
+    @property
+    def type(self):
+        return self._type
+
+    @property
+    def proto(self):
+        return self._proto
+
+    def settimeout(self, timeout):
+        self._timeout = timeout
+        self._blocking = timeout is None
+
+    def gettimeout(self):
+        return self._timeout
+
+    def setblocking(self, flag):
+        self._blocking = bool(flag)
+        self._timeout = None if flag else 0.0
+
+    def getblocking(self):
+        return self._blocking
+
+    def setsockopt(self, level, optname, value, optlen=None):
+        pass  # Ignore socket options
+
+    def getsockopt(self, level, optname, buflen=None):
+        return 0  # Return dummy value
+
+    def connect(self, address):
+        """Connect to address over TCP."""
+        if self._closed:
+            raise error("Socket is closed")
+        if self._tcp_handle is not None:
+            raise error("Socket is already connected")
+
+        host, port = address
+        import _eryx
+        result_type, value = _eryx._eryx_tcp_connect(host, port)
+
+        if result_type == 0:
+            # Success - value is the TCP handle
+            self._tcp_handle = value
+        elif result_type == 1:
+            # Error - value is the error message
+            raise error(value)
+        else:
+            # Pending should never happen with ignore_wit
+            raise error(f"Unexpected pending result in sync context")
+
+    def connect_ex(self, address):
+        """Connect and return error code instead of raising."""
+        try:
+            self.connect(address)
+            return 0
+        except error:
+            return 1
+
+    def bind(self, address):
+        raise error("bind() not supported in sandbox")
+
+    def listen(self, backlog=None):
+        raise error("listen() not supported in sandbox")
+
+    def accept(self):
+        raise error("accept() not supported in sandbox")
+
+    def close(self):
+        if self._closed:
+            return
+        self._closed = True
+        # Note: We intentionally do NOT close the handles here immediately.
+        # This is because http.client and other libraries may call close() on
+        # the socket while still expecting to read data through a makefile() wrapper.
+        # The handles will be closed when the socket is garbage collected via __del__.
+
+    def _force_close(self):
+        """Actually close the underlying handles. Called by __del__."""
+        import _eryx
+        if self._tls_handle is not None:
+            try:
+                _eryx._eryx_tls_close(self._tls_handle)
+            except Exception:
+                pass
+            self._tls_handle = None
+        if self._tcp_handle is not None:
+            try:
+                _eryx._eryx_tcp_close(self._tcp_handle)
+            except Exception:
+                pass
+            self._tcp_handle = None
+
+    def __del__(self):
+        self._force_close()
+
+    def shutdown(self, how):
+        pass  # Shutdown happens on close
+
+    def detach(self):
+        tcp_handle = self._tcp_handle
+        self._tcp_handle = None
+        self._tls_handle = None
+        return -1  # No real fd
+
+    def recv(self, bufsize, flags=0):
+        """Receive data from the socket."""
+        # Use TLS handle if upgraded, otherwise TCP handle
+        handle = self._tls_handle if self._tls_handle is not None else self._tcp_handle
+
+        # If no handle available, return empty bytes (EOF)
+        # Note: We allow reads even after close() because libraries like http.client
+        # may close the socket but still read through a makefile() wrapper.
+        # The handles are only closed in __del__, not in close().
+        if handle is None:
+            return b""
+
+        import _eryx
+        if self._tls_handle is not None:
+            result_type, value = _eryx._eryx_tls_read(handle, bufsize)
+        else:
+            result_type, value = _eryx._eryx_tcp_read(handle, bufsize)
+
+        if result_type == 0:
+            # Success - value is the bytes read
+            return bytes(value) if value else b""
+        elif result_type == 1:
+            # Error - value is the error message
+            raise error(value)
+        else:
+            # Pending should never happen with ignore_wit
+            raise error(f"Unexpected pending result in sync context")
+
+    def recv_into(self, buffer, nbytes=0, flags=0):
+        """Receive data into a buffer."""
+        length = nbytes if nbytes > 0 else len(buffer)
+        data = self.recv(length)
+        n = len(data)
+        buffer[:n] = data
+        return n
+
+    def send(self, data, flags=0):
+        """Send data to the socket."""
+        if self._closed:
+            raise error("Socket is closed")
+
+        # Use TLS handle if upgraded, otherwise TCP handle
+        handle = self._tls_handle if self._tls_handle is not None else self._tcp_handle
+        if handle is None:
+            raise error("Socket is not connected")
+
+        if isinstance(data, memoryview):
+            data = bytes(data)
+
+        import _eryx
+        if self._tls_handle is not None:
+            result_type, value = _eryx._eryx_tls_write(handle, data)
+        else:
+            result_type, value = _eryx._eryx_tcp_write(handle, data)
+
+        if result_type == 0:
+            # Success - value is the number of bytes written
+            return value
+        elif result_type == 1:
+            # Error - value is the error message
+            raise error(value)
+        else:
+            # Pending should never happen with ignore_wit
+            raise error(f"Unexpected pending result in sync context")
+
+    def sendall(self, data, flags=0):
+        if isinstance(data, memoryview):
+            data = bytes(data)
+        sent = 0
+        while sent < len(data):
+            n = self.send(data[sent:], flags)
+            if n == 0:
+                raise error("Connection closed")
+            sent += n
+
+    def makefile(self, mode='r', buffering=-1, **kwargs):
+        """Return a file-like object for the socket."""
+        return SocketIO(self, mode)
+
+    def getpeername(self):
+        if self._pending_address:
+            return self._pending_address
+        raise error("Socket not connected")
+
+    def getsockname(self):
+        return ('0.0.0.0', 0)
+
+    def fileno(self):
+        return -1  # No real file descriptor
+
+    def dup(self):
+        raise error("dup() not supported in sandbox")
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        self.close()
+
+    def __repr__(self):
+        return f"<socket.socket fd={self.fileno()}, family={self._family}, type={self._type}>"
+
+
+def create_connection(address, timeout=None, source_address=None, *, all_errors=False):
+    """Create a connected socket (used by urllib3)."""
+    host, port = address
+    sock = socket(AF_INET, SOCK_STREAM)
+    if timeout is not None:
+        sock.settimeout(timeout)
+    sock.connect((host, port))
+    return sock
+
+
+def getaddrinfo(host, port, family=0, type=0, proto=0, flags=0):
+    """Minimal getaddrinfo for HTTP clients.
+
+    Returns fake results - actual DNS happens on host during TLS connect.
+    """
+    # Normalize port to int
+    if isinstance(port, str):
+        port = int(port) if port else 0
+    elif port is None:
+        port = 0
+
+    # Return IPv4 TCP result - this is what HTTP clients need
+    return [(AF_INET, SOCK_STREAM, IPPROTO_TCP, '', (str(host), port))]
+
+
+def gethostbyname(hostname):
+    """Return hostname as-is - DNS happens on host."""
+    return str(hostname)
+
+
+def gethostbyname_ex(hostname):
+    """Extended gethostbyname - return hostname as-is."""
+    return (str(hostname), [], [str(hostname)])
+
+
+def gethostbyaddr(ip_address):
+    """Reverse DNS lookup - not supported."""
+    return (str(ip_address), [], [str(ip_address)])
+
+
+def getfqdn(name=''):
+    """Get fully qualified domain name."""
+    return name if name else 'localhost'
+
+
+def gethostname():
+    """Get local hostname."""
+    return 'sandbox'
+
+
+def getservbyname(servicename, protocolname=None):
+    """Get port number for service name."""
+    services = {'http': 80, 'https': 443, 'ftp': 21, 'ssh': 22}
+    return services.get(servicename.lower(), 0)
+
+
+def getservbyport(port, protocolname=None):
+    """Get service name for port."""
+    services = {80: 'http', 443: 'https', 21: 'ftp', 22: 'ssh'}
+    return services.get(port, str(port))
+
+
+def getprotobyname(protocolname):
+    """Get protocol number by name."""
+    protocols = {'tcp': IPPROTO_TCP, 'udp': IPPROTO_UDP}
+    return protocols.get(protocolname.lower(), 0)
+
+
+def getdefaulttimeout():
+    """Get default socket timeout."""
+    return None
+
+
+def setdefaulttimeout(timeout):
+    """Set default socket timeout (ignored)."""
+    pass
+
+
+def socketpair(family=AF_UNIX, type=SOCK_STREAM, proto=0):
+    """Create a pair of connected sockets (dummy for asyncio)."""
+    # Return dummy sockets for asyncio's self-pipe trick
+    class _DummySocket:
+        def __init__(self):
+            self._buffer = []
+            self._closed = False
+        def fileno(self):
+            return -1
+        def setblocking(self, flag):
+            pass
+        def send(self, data):
+            self._buffer.append(data)
+            return len(data)
+        def recv(self, n):
+            if self._buffer:
+                return self._buffer.pop(0)
+            return b''
+        def close(self):
+            self._closed = True
+        def __enter__(self):
+            return self
+        def __exit__(self, *args):
+            self.close()
+    return (_DummySocket(), _DummySocket())
+
+
+def inet_aton(ip_string):
+    """Convert IPv4 address to packed binary."""
+    parts = ip_string.split('.')
+    return bytes(int(p) for p in parts)
+
+
+def inet_ntoa(packed_ip):
+    """Convert packed binary to IPv4 address string."""
+    return '.'.join(str(b) for b in packed_ip)
+
+
+def inet_pton(address_family, ip_string):
+    """Convert IP address to packed binary."""
+    if address_family == AF_INET:
+        return inet_aton(ip_string)
+    raise error(f"Address family {address_family} not supported")
+
+
+def inet_ntop(address_family, packed_ip):
+    """Convert packed binary to IP address string."""
+    if address_family == AF_INET:
+        return inet_ntoa(packed_ip)
+    raise error(f"Address family {address_family} not supported")
+
+
+def ntohs(x):
+    """Network to host short."""
+    return ((x & 0xff) << 8) | ((x >> 8) & 0xff)
+
+
+def ntohl(x):
+    """Network to host long."""
+    return (((x & 0xff) << 24) | ((x & 0xff00) << 8) |
+            ((x >> 8) & 0xff00) | ((x >> 24) & 0xff))
+
+
+def htons(x):
+    """Host to network short."""
+    return ntohs(x)
+
+
+def htonl(x):
+    """Host to network long."""
+    return ntohl(x)
+
+''', '<socket_eryx>', 'exec'), _socket_eryx.__dict__)
+
+# Register the module
+_sys.modules['socket'] = _socket_eryx
+_sys.modules['_socket'] = _socket_eryx
+"#;
+
 pub fn initialize_python() {
     if PYTHON_INITIALIZED.swap(true, Ordering::SeqCst) {
         // Already initialized
@@ -920,6 +2270,26 @@ pub fn initialize_python() {
         let result = PyRun_SimpleString(infra_cstr.as_ptr());
         if result != 0 {
             // Infrastructure setup failed - this is critical
+            PyErr_Clear();
+        }
+
+        // Inject the socket shim module.
+        // This replaces sys.modules['socket'] with our TLS-backed implementation.
+        let socket_cstr = std::ffi::CString::new(SOCKET_SHIM_CODE).unwrap();
+        let result = PyRun_SimpleString(socket_cstr.as_ptr());
+        if result != 0 {
+            // Socket shim injection failed - networking won't work
+            // Note: Can't use tracing here - this runs in WASM context
+            PyErr_Clear();
+        }
+
+        // Inject the ssl shim module.
+        // This replaces sys.modules['ssl'] with our TLS-backed implementation.
+        let ssl_cstr = std::ffi::CString::new(SSL_SHIM_CODE).unwrap();
+        let result = PyRun_SimpleString(ssl_cstr.as_ptr());
+        if result != 0 {
+            // SSL shim injection failed - TLS won't work
+            // Note: Can't use tracing here - this runs in WASM context
             PyErr_Clear();
         }
 
@@ -1192,9 +2562,13 @@ pub fn execute_python(code: &str) -> ExecuteResult {
         // Execution complete - get output and restore streams
         let _ = PyRun_SimpleString(c"_eryx_output, _eryx_errors = _eryx_get_output()".as_ptr());
 
-        let output = get_python_variable_string("_eryx_output").unwrap_or_default();
+        let stdout = get_python_variable_string("_eryx_output").unwrap_or_default();
+        let stderr = get_python_variable_string("_eryx_errors").unwrap_or_default();
 
-        ExecuteResult::Complete(output.trim_end_matches('\n').to_string())
+        ExecuteResult::Complete(ExecuteOutput {
+            stdout: stdout.trim_end_matches('\n').to_string(),
+            stderr: stderr.trim_end_matches('\n').to_string(),
+        })
     }
 }
 

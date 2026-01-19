@@ -42,7 +42,7 @@ fn main() {
     // Rerun if WIT changes
     println!(
         "cargo::rerun-if-changed={}",
-        manifest_dir.join("runtime.wit").display()
+        manifest_dir.join("wit").display()
     );
     // Rerun if the build flag changes
     println!("cargo::rerun-if-env-changed=BUILD_ERYX_RUNTIME");
@@ -75,16 +75,22 @@ fn main() {
         build_component(&manifest_dir, &runtime_so);
     } else if preinit {
         // preinit feature (and native-extensions which implies it) needs .so.zst files in OUT_DIR
-        if has_out_artifacts {
-            // Already have artifacts from a previous build - nothing to do
-            eprintln!("Using existing late-linking artifacts from OUT_DIR");
-        } else if has_prebuilt {
+        //
+        // IMPORTANT: Always prefer prebuilt/ artifacts over cached OUT_DIR artifacts!
+        // The Rust cache may contain stale OUT_DIR artifacts from a previous build
+        // (e.g., from main branch) that don't match the current branch's WIT.
+        // Since prebuilt/ comes from the same CI run's build-eryx-runtime job,
+        // it's guaranteed to match the current branch.
+        if has_prebuilt {
             // Use pre-built artifacts from prebuilt/ directory (CI)
             eprintln!("Using pre-built late-linking artifacts from prebuilt/");
             std::fs::copy(&prebuilt_runtime, &out_runtime_zst)
                 .expect("failed to copy prebuilt runtime");
             std::fs::copy(&prebuilt_bindings, &out_bindings_zst)
                 .expect("failed to copy prebuilt bindings");
+        } else if has_out_artifacts {
+            // No prebuilt available, use existing OUT_DIR artifacts (local dev)
+            eprintln!("Using existing late-linking artifacts from OUT_DIR");
         } else {
             // No artifacts anywhere, need to build from scratch
             eprintln!("Building late-linking artifacts from scratch...");
@@ -295,10 +301,13 @@ fn build_component(manifest_dir: &std::path::Path, runtime_so: &std::path::Path)
     // Load our runtime
     let runtime = std::fs::read(runtime_so).expect("failed to read liberyx_runtime.so");
 
-    // Parse the runtime.wit file
-    let wit_path = manifest_dir.join("runtime.wit");
+    // Parse WIT directory (includes deps/)
+    let wit_dir = manifest_dir.join("wit");
     let mut resolve = wit_parser::Resolve::default();
-    let (pkg_id, _) = resolve.push_path(&wit_path).expect("failed to parse WIT");
+    let (pkg_id, _) = resolve
+        .push_dir(&wit_dir)
+        .expect("failed to parse WIT directory");
+    // Select the sandbox world from the eryx:sandbox package
     let world_id = resolve
         .select_world(&[pkg_id], Some("sandbox"))
         .expect("failed to select world");

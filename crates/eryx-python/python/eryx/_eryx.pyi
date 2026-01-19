@@ -31,6 +31,130 @@ class ExecuteResult:
         ...
 
 
+class NetConfig:
+    """Network configuration for sandbox execution.
+
+    Use this class to configure which hosts Python code can connect to,
+    set timeouts, and add custom certificates.
+
+    By default, network access is **disabled**. To enable networking,
+    create a `NetConfig` and pass it to the Sandbox.
+
+    Example:
+        # Allow connections to external APIs only
+        net = NetConfig(
+            allowed_hosts=["api.example.com", "*.googleapis.com"],
+        )
+        sandbox = Sandbox(network=net)
+
+        # Allow localhost for local development
+        net = NetConfig.permissive()
+        sandbox = Sandbox(network=net)
+    """
+
+    max_connections: int
+    """Maximum concurrent connections."""
+
+    connect_timeout_ms: int
+    """Connection timeout in milliseconds."""
+
+    io_timeout_ms: int
+    """I/O timeout in milliseconds."""
+
+    allowed_hosts: list[str]
+    """Allowed host patterns (empty = allow all external hosts)."""
+
+    blocked_hosts: list[str]
+    """Blocked host patterns."""
+
+    def __init__(
+        self,
+        *,
+        max_connections: int = 10,
+        connect_timeout_ms: int = 30000,
+        io_timeout_ms: int = 60000,
+        allowed_hosts: Optional[Sequence[str]] = None,
+        blocked_hosts: Optional[Sequence[str]] = None,
+    ) -> None:
+        """Create new network configuration.
+
+        By default:
+        - max_connections: 10
+        - connect_timeout_ms: 30000 (30 seconds)
+        - io_timeout_ms: 60000 (60 seconds)
+        - allowed_hosts: [] (allow all external hosts)
+        - blocked_hosts: localhost and private networks
+
+        Args:
+            max_connections: Maximum number of concurrent connections.
+            connect_timeout_ms: Timeout for establishing connections.
+            io_timeout_ms: Timeout for read/write operations.
+            allowed_hosts: List of allowed host patterns (supports wildcards like "*.example.com").
+            blocked_hosts: List of blocked host patterns.
+
+        Example:
+            # Only allow specific APIs
+            net = NetConfig(allowed_hosts=["api.example.com", "*.openai.com"])
+
+            # Custom timeouts
+            net = NetConfig(connect_timeout_ms=5000, io_timeout_ms=10000)
+        """
+        ...
+
+    @staticmethod
+    def permissive() -> NetConfig:
+        """Create a permissive config that allows all hosts including localhost.
+
+        Warning: This allows sandbox code to access local services. Use with caution.
+
+        Example:
+            net = NetConfig.permissive()
+            sandbox = Sandbox(network=net)
+        """
+        ...
+
+    def allow_host(self, pattern: str) -> NetConfig:
+        """Add a host pattern to the allowed list.
+
+        Patterns support wildcards: `*.example.com`, `api.*.com`
+
+        Returns self for method chaining.
+
+        Example:
+            net = NetConfig().allow_host("api.example.com").allow_host("*.openai.com")
+        """
+        ...
+
+    def block_host(self, pattern: str) -> NetConfig:
+        """Add a host pattern to the blocked list.
+
+        Returns self for method chaining.
+        """
+        ...
+
+    def allow_localhost(self) -> NetConfig:
+        """Allow connections to localhost (disabled by default).
+
+        Returns self for method chaining.
+
+        Example:
+            net = NetConfig().allow_localhost()
+        """
+        ...
+
+    def with_root_cert(self, cert_der: bytes) -> NetConfig:
+        """Add a custom root certificate (DER-encoded bytes).
+
+        This is useful for testing with self-signed certificates.
+
+        Args:
+            cert_der: The certificate in DER format as bytes.
+
+        Returns self for method chaining.
+        """
+        ...
+
+
 class ResourceLimits:
     """Resource limits for sandbox execution.
 
@@ -116,17 +240,19 @@ class Sandbox:
         self,
         *,
         resource_limits: Optional[ResourceLimits] = None,
+        network: Optional[NetConfig] = None,
     ) -> None:
         """Create a new sandbox with the embedded Python runtime.
 
         Args:
             resource_limits: Optional resource limits for execution.
+            network: Optional network configuration. If provided, enables networking.
 
         Raises:
             InitializationError: If the sandbox fails to initialize.
 
         Example:
-            # Default sandbox (stdlib only)
+            # Default sandbox (stdlib only, no network)
             sandbox = Sandbox()
             result = sandbox.execute('import json; print(json.dumps([1, 2, 3]))')
 
@@ -134,6 +260,10 @@ class Sandbox:
             sandbox = Sandbox(
                 resource_limits=ResourceLimits(execution_timeout_ms=5000)
             )
+
+            # Sandbox with network access
+            net = NetConfig(allowed_hosts=["api.example.com"])
+            sandbox = Sandbox(network=net)
         """
         ...
 
@@ -316,6 +446,7 @@ class SandboxFactory:
         *,
         site_packages: Optional[PathLike] = None,
         resource_limits: Optional[ResourceLimits] = None,
+        network: Optional[NetConfig] = None,
     ) -> Sandbox:
         """Create a new sandbox from this factory.
 
@@ -326,6 +457,7 @@ class SandboxFactory:
             site_packages: Optional path to additional site-packages.
                 If not provided, uses the site-packages from initialization.
             resource_limits: Optional resource limits for the sandbox.
+            network: Optional network configuration. If provided, enables networking.
 
         Returns:
             A new Sandbox ready to execute Python code.
@@ -334,8 +466,12 @@ class SandboxFactory:
             InitializationError: If sandbox creation fails.
 
         Example:
-            sandbox = preinit.create_sandbox()
+            sandbox = factory.create_sandbox()
             result = sandbox.execute('print("Hello!")')
+
+            # With network access
+            net = NetConfig(allowed_hosts=["api.example.com"])
+            sandbox = factory.create_sandbox(network=net)
         """
         ...
 
