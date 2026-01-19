@@ -389,19 +389,20 @@ enum PreInitTlsError {
 ///
 /// These stubs return errors if called - networking isn't available during pre-init.
 /// The stubs are needed so the component can be instantiated.
+///
+/// Note: The WIT declares these as sync `func` but we use fiber-based async on the host
+/// (`func_wrap_async`), which appears blocking to the guest but allows async I/O on the host.
 fn add_network_stubs(linker: &mut Linker<PreInitCtx>) -> Result<()> {
-    use wasmtime::component::Accessor;
-
     // Get or create the eryx:net/tcp interface
     let mut tcp_instance = linker
         .instance("eryx:net/tcp@0.1.0")
         .context("Failed to get eryx:net/tcp instance")?;
 
-    // tcp.connect: async func(host: string, port: u16) -> result<tcp-handle, tcp-error>
-    tcp_instance.func_wrap_concurrent(
+    // tcp.connect: func(host: string, port: u16) -> result<tcp-handle, tcp-error>
+    tcp_instance.func_wrap_async(
         "connect",
-        |_accessor: &Accessor<PreInitCtx>, (_host, _port): (String, u16)| {
-            Box::pin(async move {
+        |_ctx: wasmtime::StoreContextMut<'_, PreInitCtx>, (_host, _port): (String, u16)| {
+            Box::new(async move {
                 Ok((Result::<u32, PreInitTcpError>::Err(
                     PreInitTcpError::NotPermitted(
                         "networking not available during pre-init".into(),
@@ -411,11 +412,11 @@ fn add_network_stubs(linker: &mut Linker<PreInitCtx>) -> Result<()> {
         },
     )?;
 
-    // tcp.read: async func(handle: tcp-handle, len: u32) -> result<list<u8>, tcp-error>
-    tcp_instance.func_wrap_concurrent(
+    // tcp.read: func(handle: tcp-handle, len: u32) -> result<list<u8>, tcp-error>
+    tcp_instance.func_wrap_async(
         "read",
-        |_accessor: &Accessor<PreInitCtx>, (_handle, _len): (u32, u32)| {
-            Box::pin(async move {
+        |_ctx: wasmtime::StoreContextMut<'_, PreInitCtx>, (_handle, _len): (u32, u32)| {
+            Box::new(async move {
                 Ok((Result::<Vec<u8>, PreInitTcpError>::Err(
                     PreInitTcpError::NotPermitted(
                         "networking not available during pre-init".into(),
@@ -425,11 +426,11 @@ fn add_network_stubs(linker: &mut Linker<PreInitCtx>) -> Result<()> {
         },
     )?;
 
-    // tcp.write: async func(handle: tcp-handle, data: list<u8>) -> result<u32, tcp-error>
-    tcp_instance.func_wrap_concurrent(
+    // tcp.write: func(handle: tcp-handle, data: list<u8>) -> result<u32, tcp-error>
+    tcp_instance.func_wrap_async(
         "write",
-        |_accessor: &Accessor<PreInitCtx>, (_handle, _data): (u32, Vec<u8>)| {
-            Box::pin(async move {
+        |_ctx: wasmtime::StoreContextMut<'_, PreInitCtx>, (_handle, _data): (u32, Vec<u8>)| {
+            Box::new(async move {
                 Ok((Result::<u32, PreInitTcpError>::Err(
                     PreInitTcpError::NotPermitted(
                         "networking not available during pre-init".into(),
@@ -453,11 +454,12 @@ fn add_network_stubs(linker: &mut Linker<PreInitCtx>) -> Result<()> {
         .instance("eryx:net/tls@0.1.0")
         .context("Failed to get eryx:net/tls instance")?;
 
-    // tls.upgrade: async func(tcp: tcp-handle, hostname: string) -> result<tls-handle, tls-error>
-    tls_instance.func_wrap_concurrent(
+    // tls.upgrade: func(tcp: tcp-handle, hostname: string) -> result<tls-handle, tls-error>
+    tls_instance.func_wrap_async(
         "upgrade",
-        |_accessor: &Accessor<PreInitCtx>, (_tcp_handle, _hostname): (u32, String)| {
-            Box::pin(async move {
+        |_ctx: wasmtime::StoreContextMut<'_, PreInitCtx>,
+         (_tcp_handle, _hostname): (u32, String)| {
+            Box::new(async move {
                 Ok((Result::<u32, PreInitTlsError>::Err(
                     PreInitTlsError::HandshakeFailed(
                         "networking not available during pre-init".into(),
@@ -467,11 +469,11 @@ fn add_network_stubs(linker: &mut Linker<PreInitCtx>) -> Result<()> {
         },
     )?;
 
-    // tls.read: async func(handle: tls-handle, len: u32) -> result<list<u8>, tls-error>
-    tls_instance.func_wrap_concurrent(
+    // tls.read: func(handle: tls-handle, len: u32) -> result<list<u8>, tls-error>
+    tls_instance.func_wrap_async(
         "read",
-        |_accessor: &Accessor<PreInitCtx>, (_handle, _len): (u32, u32)| {
-            Box::pin(async move {
+        |_ctx: wasmtime::StoreContextMut<'_, PreInitCtx>, (_handle, _len): (u32, u32)| {
+            Box::new(async move {
                 Ok((Result::<Vec<u8>, PreInitTlsError>::Err(
                     PreInitTlsError::HandshakeFailed(
                         "networking not available during pre-init".into(),
@@ -481,11 +483,11 @@ fn add_network_stubs(linker: &mut Linker<PreInitCtx>) -> Result<()> {
         },
     )?;
 
-    // tls.write: async func(handle: tls-handle, data: list<u8>) -> result<u32, tls-error>
-    tls_instance.func_wrap_concurrent(
+    // tls.write: func(handle: tls-handle, data: list<u8>) -> result<u32, tls-error>
+    tls_instance.func_wrap_async(
         "write",
-        |_accessor: &Accessor<PreInitCtx>, (_handle, _data): (u32, Vec<u8>)| {
-            Box::pin(async move {
+        |_ctx: wasmtime::StoreContextMut<'_, PreInitCtx>, (_handle, _data): (u32, Vec<u8>)| {
+            Box::new(async move {
                 Ok((Result::<u32, PreInitTlsError>::Err(
                     PreInitTlsError::HandshakeFailed(
                         "networking not available during pre-init".into(),

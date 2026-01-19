@@ -508,22 +508,14 @@ pub enum InvokeResult {
 // subtask completes, we can lift the result from the buffer.
 
 /// Type of async import, used to determine how to lift the result.
+///
+/// Note: TCP/TLS operations now use fiber-based async (`call_import_sync` with `func_wrap_async`
+/// on the host), so they complete synchronously from the guest's perspective and don't need
+/// to be tracked as pending imports. Only `invoke` remains async with Component Model async.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ImportType {
     /// invoke: result<string, string>
     Invoke,
-    /// tcp.connect: result<tcp-handle, tcp-error>
-    TcpConnect,
-    /// tcp.read: result<list<u8>, tcp-error>
-    TcpRead,
-    /// tcp.write: result<u32, tcp-error>
-    TcpWrite,
-    /// tls.upgrade: result<tls-handle, tls-error>
-    TlsUpgrade,
-    /// tls.read: result<list<u8>, tls-error>
-    TlsRead,
-    /// tls.write: result<u32, tls-error>
-    TlsWrite,
 }
 
 /// Stored state for a pending async import call.
@@ -1090,46 +1082,6 @@ fn tls_error_name(discr: u32) -> &'static str {
     }
 }
 
-/// Lift a TCP error from the call stack.
-/// Returns (discriminant, optional_message).
-fn lift_tcp_error(cx: &mut EryxCall) -> (u32, Option<String>) {
-    let discr = match cx.stack.pop() {
-        Some(Value::U32(d)) => d,
-        _ => 0,
-    };
-    // Some error variants have a string payload (io-error, not-permitted)
-    let payload = cx.stack.pop().and_then(|v| match v {
-        Value::String(s) => Some(s),
-        _ => None,
-    });
-    let error_name = tcp_error_name(discr);
-    let msg = match payload {
-        Some(p) => format!("{error_name}: {p}"),
-        None => error_name.to_string(),
-    };
-    (discr, Some(msg))
-}
-
-/// Lift a TLS error from the call stack.
-/// Returns (discriminant, optional_message).
-fn lift_tls_error(cx: &mut EryxCall) -> (u32, Option<String>) {
-    let discr = match cx.stack.pop() {
-        Some(Value::U32(d)) => d,
-        _ => 0,
-    };
-    // TLS errors: 0 = tcp(tcp-error), 1-3 have string payloads
-    let payload = cx.stack.pop().and_then(|v| match v {
-        Value::String(s) => Some(s),
-        _ => None,
-    });
-    let error_name = tls_error_name(discr);
-    let msg = match payload {
-        Some(p) => format!("{error_name}: {p}"),
-        None => error_name.to_string(),
-    };
-    (discr, Some(msg))
-}
-
 // Public network API used by python.rs pyfunction implementations
 
 /// Value type for network results returned to Python.
@@ -1515,7 +1467,10 @@ impl Interpreter for EryxInterpreter {
                     );
                 }
 
-                // Handle result based on import type
+                // Handle result based on import type.
+                // Note: Only `invoke` uses Component Model async. TCP/TLS operations
+                // now use fiber-based async and complete synchronously from the guest's
+                // perspective, so they don't appear as pending imports.
                 match pending_state.import_type {
                     ImportType::Invoke => {
                         // result<string, string>
@@ -1533,108 +1488,6 @@ impl Interpreter for EryxInterpreter {
                             format!(r#"{{"ok": false, "error": {}}}"#, result_value)
                         };
                         python::set_async_import_result(subtask, &result_json);
-                    }
-                    ImportType::TcpConnect => {
-                        // result<tcp-handle (u32), tcp-error>
-                        let is_ok = match cx.stack.pop() {
-                            Some(Value::ResultDiscriminant(v)) => v,
-                            _ => true,
-                        };
-                        if is_ok {
-                            let handle = match cx.stack.pop() {
-                                Some(Value::U32(h)) => h,
-                                _ => 0,
-                            };
-                            python::set_net_result(subtask, 0, handle as i64, None);
-                        } else {
-                            let (discr, msg) = lift_tcp_error(&mut cx);
-                            python::set_net_result(subtask, 1, discr as i64, msg);
-                        }
-                    }
-                    ImportType::TcpRead => {
-                        // result<list<u8>, tcp-error>
-                        let is_ok = match cx.stack.pop() {
-                            Some(Value::ResultDiscriminant(v)) => v,
-                            _ => true,
-                        };
-                        if is_ok {
-                            let bytes = match cx.stack.pop() {
-                                Some(Value::Bytes(b)) => b,
-                                _ => Vec::new(),
-                            };
-                            python::set_net_bytes_result(subtask, 0, bytes);
-                        } else {
-                            let (discr, msg) = lift_tcp_error(&mut cx);
-                            python::set_net_result(subtask, 1, discr as i64, msg);
-                        }
-                    }
-                    ImportType::TcpWrite => {
-                        // result<u32, tcp-error>
-                        let is_ok = match cx.stack.pop() {
-                            Some(Value::ResultDiscriminant(v)) => v,
-                            _ => true,
-                        };
-                        if is_ok {
-                            let written = match cx.stack.pop() {
-                                Some(Value::U32(n)) => n,
-                                _ => 0,
-                            };
-                            python::set_net_result(subtask, 0, written as i64, None);
-                        } else {
-                            let (discr, msg) = lift_tcp_error(&mut cx);
-                            python::set_net_result(subtask, 1, discr as i64, msg);
-                        }
-                    }
-                    ImportType::TlsUpgrade => {
-                        // result<tls-handle (u32), tls-error>
-                        let is_ok = match cx.stack.pop() {
-                            Some(Value::ResultDiscriminant(v)) => v,
-                            _ => true,
-                        };
-                        if is_ok {
-                            let handle = match cx.stack.pop() {
-                                Some(Value::U32(h)) => h,
-                                _ => 0,
-                            };
-                            python::set_net_result(subtask, 0, handle as i64, None);
-                        } else {
-                            let (discr, msg) = lift_tls_error(&mut cx);
-                            python::set_net_result(subtask, 1, discr as i64, msg);
-                        }
-                    }
-                    ImportType::TlsRead => {
-                        // result<list<u8>, tls-error>
-                        let is_ok = match cx.stack.pop() {
-                            Some(Value::ResultDiscriminant(v)) => v,
-                            _ => true,
-                        };
-                        if is_ok {
-                            let bytes = match cx.stack.pop() {
-                                Some(Value::Bytes(b)) => b,
-                                _ => Vec::new(),
-                            };
-                            python::set_net_bytes_result(subtask, 0, bytes);
-                        } else {
-                            let (discr, msg) = lift_tls_error(&mut cx);
-                            python::set_net_result(subtask, 1, discr as i64, msg);
-                        }
-                    }
-                    ImportType::TlsWrite => {
-                        // result<u32, tls-error>
-                        let is_ok = match cx.stack.pop() {
-                            Some(Value::ResultDiscriminant(v)) => v,
-                            _ => true,
-                        };
-                        if is_ok {
-                            let written = match cx.stack.pop() {
-                                Some(Value::U32(n)) => n,
-                                _ => 0,
-                            };
-                            python::set_net_result(subtask, 0, written as i64, None);
-                        } else {
-                            let (discr, msg) = lift_tls_error(&mut cx);
-                            python::set_net_result(subtask, 1, discr as i64, msg);
-                        }
                     }
                 }
             }
