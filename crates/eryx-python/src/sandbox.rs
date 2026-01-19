@@ -7,6 +7,7 @@ use std::sync::Arc;
 use pyo3::prelude::*;
 
 use crate::error::{InitializationError, eryx_error_to_py};
+use crate::net_config::NetConfig;
 use crate::resource_limits::ResourceLimits;
 use crate::result::ExecuteResult;
 
@@ -50,6 +51,7 @@ impl Sandbox {
     ///
     /// Args:
     ///     resource_limits: Optional resource limits for execution.
+    ///     network: Optional network configuration. If provided, enables networking.
     ///
     /// Returns:
     ///     A new Sandbox instance ready to execute Python code.
@@ -58,13 +60,17 @@ impl Sandbox {
     ///     InitializationError: If the sandbox fails to initialize.
     ///
     /// Example:
-    ///     # Default sandbox (stdlib only)
+    ///     # Default sandbox (stdlib only, no network)
     ///     sandbox = Sandbox()
     ///     result = sandbox.execute('import json; print(json.dumps([1, 2, 3]))')
     ///
     ///     # Sandbox with custom limits
     ///     limits = ResourceLimits(execution_timeout_ms=5000)
     ///     sandbox = Sandbox(resource_limits=limits)
+    ///
+    ///     # Sandbox with network access
+    ///     net = NetConfig(allowed_hosts=["api.example.com"])
+    ///     sandbox = Sandbox(network=net)
     ///
     ///     # For custom packages, use SandboxFactory instead:
     ///     factory = SandboxFactory(
@@ -73,8 +79,8 @@ impl Sandbox {
     ///     )
     ///     sandbox = factory.create_sandbox()
     #[new]
-    #[pyo3(signature = (*, resource_limits=None))]
-    fn new(resource_limits: Option<ResourceLimits>) -> PyResult<Self> {
+    #[pyo3(signature = (*, resource_limits=None, network=None))]
+    fn new(resource_limits: Option<ResourceLimits>, network: Option<NetConfig>) -> PyResult<Self> {
         // Create a tokio runtime for async execution
         let runtime = Arc::new(
             tokio::runtime::Builder::new_multi_thread()
@@ -91,6 +97,11 @@ impl Sandbox {
         // Apply resource limits if provided
         if let Some(limits) = resource_limits {
             builder = builder.with_resource_limits(limits.into());
+        }
+
+        // Apply network config if provided
+        if let Some(net) = network {
+            builder = builder.with_network(net.into());
         }
 
         let inner = builder.build().map_err(eryx_error_to_py)?;

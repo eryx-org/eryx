@@ -9,6 +9,7 @@ use pyo3::prelude::*;
 use pyo3::types::PyBytes;
 
 use crate::error::{InitializationError, eryx_error_to_py};
+use crate::net_config::NetConfig;
 use crate::resource_limits::ResourceLimits;
 use crate::sandbox::Sandbox;
 
@@ -203,6 +204,7 @@ impl SandboxFactory {
     ///     site_packages: Optional path to additional site-packages.
     ///         If not provided, uses the site-packages from initialization.
     ///     resource_limits: Optional resource limits for the sandbox.
+    ///     network: Optional network configuration. If provided, enables networking.
     ///
     /// Returns:
     ///     A new Sandbox ready to execute Python code.
@@ -211,13 +213,18 @@ impl SandboxFactory {
     ///     InitializationError: If sandbox creation fails.
     ///
     /// Example:
-    ///     sandbox = preinit.create_sandbox()
+    ///     sandbox = factory.create_sandbox()
     ///     result = sandbox.execute('print("Hello!")')
-    #[pyo3(signature = (*, site_packages=None, resource_limits=None))]
+    ///
+    ///     # With network access
+    ///     net = NetConfig(allowed_hosts=["api.example.com"])
+    ///     sandbox = factory.create_sandbox(network=net)
+    #[pyo3(signature = (*, site_packages=None, resource_limits=None, network=None))]
     fn create_sandbox(
         &self,
         site_packages: Option<PathBuf>,
         resource_limits: Option<ResourceLimits>,
+        network: Option<NetConfig>,
     ) -> PyResult<Sandbox> {
         // Use provided site_packages or fall back to the one from initialization
         let site_packages_path = site_packages.or_else(|| self.site_packages_path.clone());
@@ -237,6 +244,10 @@ impl SandboxFactory {
 
         if let Some(limits) = resource_limits {
             builder = builder.with_resource_limits(limits.into());
+        }
+
+        if let Some(net) = network {
+            builder = builder.with_network(net.into());
         }
 
         let inner = builder.build().map_err(eryx_error_to_py)?;

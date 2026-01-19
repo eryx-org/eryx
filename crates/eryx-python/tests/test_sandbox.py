@@ -94,6 +94,112 @@ except Exception as e:
         assert result2.stdout == "second"
 
 
+class TestNetConfig:
+    """Tests for NetConfig class."""
+
+    def test_default_config(self):
+        """Test default NetConfig values."""
+        config = eryx.NetConfig()
+        assert config.max_connections == 10
+        assert config.connect_timeout_ms == 30000
+        assert config.io_timeout_ms == 60000
+        assert config.allowed_hosts == []
+        # Blocked hosts should contain localhost and private networks
+        assert "localhost" in config.blocked_hosts
+        assert "127.*" in config.blocked_hosts
+
+    def test_custom_config(self):
+        """Test custom NetConfig values."""
+        config = eryx.NetConfig(
+            max_connections=5,
+            connect_timeout_ms=5000,
+            io_timeout_ms=10000,
+            allowed_hosts=["api.example.com"],
+            blocked_hosts=["*.local"],
+        )
+        assert config.max_connections == 5
+        assert config.connect_timeout_ms == 5000
+        assert config.io_timeout_ms == 10000
+        assert config.allowed_hosts == ["api.example.com"]
+        assert config.blocked_hosts == ["*.local"]
+
+    def test_permissive_config(self):
+        """Test permissive NetConfig."""
+        config = eryx.NetConfig.permissive()
+        assert config.max_connections == 100
+        assert config.blocked_hosts == []
+
+    def test_allow_host_chaining(self):
+        """Test allow_host method chaining."""
+        config = eryx.NetConfig()
+        result = config.allow_host("api.example.com").allow_host("*.openai.com")
+        assert "api.example.com" in result.allowed_hosts
+        assert "*.openai.com" in result.allowed_hosts
+
+    def test_block_host_chaining(self):
+        """Test block_host method chaining."""
+        config = eryx.NetConfig(blocked_hosts=[])
+        result = config.block_host("*.local").block_host("internal.*")
+        assert "*.local" in result.blocked_hosts
+        assert "internal.*" in result.blocked_hosts
+
+    def test_allow_localhost(self):
+        """Test allow_localhost removes localhost from blocked."""
+        config = eryx.NetConfig()
+        assert "localhost" in config.blocked_hosts
+
+        result = config.allow_localhost()
+        assert "localhost" not in result.blocked_hosts
+        assert "127.*" not in result.blocked_hosts
+
+    def test_with_root_cert(self):
+        """Test with_root_cert method."""
+        config = eryx.NetConfig()
+        # Just test it doesn't error - actual cert validation is in integration tests
+        cert_bytes = b"\x00\x01\x02\x03"
+        result = config.with_root_cert(cert_bytes)
+        assert result is not None
+
+    def test_sandbox_with_network(self):
+        """Test creating sandbox with network config.
+
+        Note: This may fail if the embedded runtime was built without network support.
+        In that case, full networking tests are in crates/eryx/tests/tls_networking.rs.
+        """
+        config = eryx.NetConfig(allowed_hosts=["api.example.com"])
+        try:
+            sandbox = eryx.Sandbox(network=config)
+            # Just verify sandbox is created - actual networking is tested in integration tests
+            result = sandbox.execute('print("ok")')
+            assert result.stdout == "ok"
+        except eryx.InitializationError as e:
+            if "eryx:sandbox/tls" in str(e) or "eryx:net" in str(e):
+                pytest.skip("Embedded runtime does not include network support")
+            raise
+
+    def test_sandbox_with_permissive_network(self):
+        """Test creating sandbox with permissive network config.
+
+        Note: This may fail if the embedded runtime was built without network support.
+        """
+        config = eryx.NetConfig.permissive()
+        try:
+            sandbox = eryx.Sandbox(network=config)
+            result = sandbox.execute('print("permissive ok")')
+            assert result.stdout == "permissive ok"
+        except eryx.InitializationError as e:
+            if "eryx:sandbox/tls" in str(e) or "eryx:net" in str(e):
+                pytest.skip("Embedded runtime does not include network support")
+            raise
+
+    def test_repr(self):
+        """Test NetConfig repr."""
+        config = eryx.NetConfig(allowed_hosts=["api.example.com"])
+        repr_str = repr(config)
+        assert "NetConfig" in repr_str
+        assert "api.example.com" in repr_str
+
+
 class TestResourceLimits:
     """Tests for ResourceLimits configuration."""
 

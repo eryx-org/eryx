@@ -14,6 +14,7 @@
 //! ```
 
 mod error;
+mod net_config;
 mod preinit;
 mod resource_limits;
 mod result;
@@ -52,6 +53,7 @@ fn _eryx(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<preinit::SandboxFactory>()?;
     m.add_class::<result::ExecuteResult>()?;
     m.add_class::<resource_limits::ResourceLimits>()?;
+    m.add_class::<net_config::NetConfig>()?;
 
     // Register exceptions
     error::register_exceptions(m)?;
