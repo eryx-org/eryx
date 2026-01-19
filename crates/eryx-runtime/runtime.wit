@@ -1,78 +1,11 @@
 package eryx:sandbox@0.1.0;
 
-/// TLS networking interface for the eryx sandbox.
-///
-/// Provides secure network connections for Python code running in the sandbox.
-/// All connections use TLS - no plaintext TCP is exposed.
-interface tls {
-    /// Errors that can occur during network operations.
-    variant tls-error {
-        /// Connection was refused by the remote host.
-        connection-refused,
-        /// Connection was reset by the remote host.
-        connection-reset,
-        /// Operation timed out.
-        timed-out,
-        /// DNS lookup failed.
-        host-not-found,
-        /// TLS handshake or certificate verification failed.
-        tls-handshake-failed(string),
-        /// Generic I/O error.
-        io-error(string),
-        /// Network access not permitted by sandbox policy.
-        not-permitted(string),
-        /// Invalid handle (connection was closed).
-        invalid-handle,
-    }
-
-    /// Opaque handle to a TLS connection (managed by host).
-    type tls-handle = u32;
-
-    /// Connect to a host:port with TLS.
-    ///
-    /// The hostname is used for DNS resolution, TLS SNI, and certificate
-    /// hostname verification. The host controls which connections are
-    /// allowed via its network policy configuration.
-    ///
-    /// This is an async function - Python code can await it:
-    ///   handle = await tls_connect("api.example.com", 443)
-    connect: async func(host: string, port: u16) -> result<tls-handle, tls-error>;
-
-    /// Read up to `len` bytes from a TLS connection.
-    ///
-    /// Returns the bytes read. May return fewer than `len` bytes if less
-    /// data is available. Returns empty list on EOF (connection closed
-    /// gracefully by peer).
-    ///
-    /// This is an async function that suspends until data is available:
-    ///   data = await tls_read(handle, 4096)
-    read: async func(handle: tls-handle, len: u32) -> result<list<u8>, tls-error>;
-
-    /// Write bytes to a TLS connection.
-    ///
-    /// Returns the number of bytes written. May be less than the input
-    /// length if the connection buffer is full.
-    ///
-    /// This is an async function:
-    ///   written = await tls_write(handle, data)
-    write: async func(handle: tls-handle, data: list<u8>) -> result<u32, tls-error>;
-
-    /// Close a TLS connection.
-    ///
-    /// Performs a graceful TLS shutdown and closes the underlying TCP
-    /// connection. After this call, the handle is invalid.
-    close: func(handle: tls-handle);
-}
-
 /// The eryx sandbox runtime world.
 ///
 /// This defines the interface between the host (Rust) and the guest (Python WASM).
 /// The guest can invoke callbacks on the host, list available callbacks, and report
 /// trace events. The host calls the guest's execute function to run Python code.
 world sandbox {
-    /// TLS networking for secure connections.
-    import tls;
-
     /// Invoke a callback by name with JSON arguments.
     ///
     /// This is an async function that Python code can await:
