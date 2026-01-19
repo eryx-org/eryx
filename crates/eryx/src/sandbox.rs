@@ -484,6 +484,7 @@ impl Sandbox {
 
                 Ok(ExecuteResult {
                     stdout: output.stdout,
+                    stderr: output.stderr,
                     trace: trace_events,
                     stats: ExecuteStats {
                         duration,
