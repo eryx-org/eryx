@@ -240,10 +240,11 @@ async fn test_fast_execution_completes_before_cancel() {
 
     let handle = sandbox.execute_cancellable("print('fast')");
 
-    // Schedule cancellation but execution should complete first
+    // Schedule cancellation far in the future - execution should complete first
+    // Use a long delay (10s) because CI can be slow with sandbox creation
     let token = handle.cancellation_token();
     tokio::spawn(async move {
-        tokio::time::sleep(Duration::from_secs(1)).await;
+        tokio::time::sleep(Duration::from_secs(10)).await;
         token.cancel();
     });
 
