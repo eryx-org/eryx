@@ -468,6 +468,38 @@ print("socket import ok")
 """)
         assert "socket import ok" in result.stdout
 
+    def test_ssl_shim_is_registered(self, network_sandbox):
+        """Test that the ssl shim is properly registered in sys.modules.
+
+        This is a diagnostic test to verify the ssl shim is injected
+        during Python initialization. If this fails, the shim injection
+        in eryx-wasm-runtime/src/python.rs is not working correctly.
+        """
+        result = network_sandbox.execute("""
+import sys
+
+# Check ssl is in sys.modules
+ssl_in_modules = 'ssl' in sys.modules
+_ssl_in_modules = '_ssl' in sys.modules
+print(f"ssl in sys.modules: {ssl_in_modules}")
+print(f"_ssl in sys.modules: {_ssl_in_modules}")
+
+if ssl_in_modules:
+    ssl_mod = sys.modules['ssl']
+    doc = ssl_mod.__doc__ or ""
+    is_eryx_shim = "Eryx" in doc
+    print(f"ssl module doc contains 'Eryx': {is_eryx_shim}")
+    if is_eryx_shim:
+        print("SSL_SHIM_OK")
+    else:
+        print(f"UNEXPECTED: ssl module doc: {doc[:100]}")
+else:
+    print("FAIL: ssl not in sys.modules")
+""")
+        assert "SSL_SHIM_OK" in result.stdout, (
+            f"SSL shim not properly registered: {result.stdout}"
+        )
+
     def test_ssl_module_imports(self, network_sandbox):
         """Test that ssl module can be imported."""
         result = network_sandbox.execute("""

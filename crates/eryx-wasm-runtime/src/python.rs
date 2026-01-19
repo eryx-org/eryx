@@ -2270,6 +2270,7 @@ pub fn initialize_python() {
         let result = PyRun_SimpleString(socket_cstr.as_ptr());
         if result != 0 {
             // Socket shim injection failed - networking won't work
+            // Note: Can't use tracing here - this runs in WASM context
             PyErr_Clear();
         }
 
@@ -2279,6 +2280,7 @@ pub fn initialize_python() {
         let result = PyRun_SimpleString(ssl_cstr.as_ptr());
         if result != 0 {
             // SSL shim injection failed - TLS won't work
+            // Note: Can't use tracing here - this runs in WASM context
             PyErr_Clear();
         }
 
