@@ -67,15 +67,12 @@ def _find_free_port():
 
 def _generate_self_signed_cert(cert_path: Path, key_path: Path):
     """Generate a self-signed certificate for testing."""
-    try:
-        import datetime
+    import datetime
 
-        from cryptography import x509
-        from cryptography.hazmat.primitives import hashes, serialization
-        from cryptography.hazmat.primitives.asymmetric import rsa
-        from cryptography.x509.oid import NameOID
-    except ImportError:
-        pytest.skip("cryptography package required for HTTPS tests")
+    from cryptography import x509
+    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.hazmat.primitives.asymmetric import rsa
+    from cryptography.x509.oid import NameOID
 
     # Generate private key
     key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
@@ -244,10 +241,7 @@ def wheels_dir(tmp_path_factory):
 
 @pytest.fixture(scope="session")
 def jinja2_wheel(wheels_dir):
-    """Get the jinja2 wheel path, downloading if necessary.
-
-    In CI, this should be pre-downloaded. For local testing, we download it.
-    """
+    """Get the jinja2 wheel path, downloading if necessary."""
     # Check common locations
     locations = [
         Path("/tmp/wheels/jinja2-3.1.6-py3-none-any.whl"),
@@ -258,46 +252,27 @@ def jinja2_wheel(wheels_dir):
         if loc.exists():
             return loc
 
-    # Try to download
-    try:
-        import urllib.request
-
-        url = "https://files.pythonhosted.org/packages/62/a1/3d680cbfd5f4b8f15abc1d571870c5fc3e594bb582bc3b64ea099db13e56/jinja2-3.1.6-py3-none-any.whl"
-        dest = wheels_dir / "jinja2-3.1.6-py3-none-any.whl"
-        urllib.request.urlretrieve(url, dest)
-        return dest
-    except Exception as e:
-        pytest.skip(f"Could not download jinja2 wheel: {e}")
+    # Download using pip
+    wheels = _download_packages(wheels_dir, ["jinja2"])
+    jinja2_wheels = [w for w in wheels if "jinja2" in w.name.lower()]
+    if not jinja2_wheels:
+        raise RuntimeError("Failed to download jinja2 wheel")
+    return jinja2_wheels[0]
 
 
 @pytest.fixture(scope="session")
-def markupsafe_wheel(wheels_dir):
-    """Get the markupsafe wheel path, downloading if necessary."""
-    # Check common locations
-    for f in (
-        Path("/tmp/wheels").glob("MarkupSafe*.whl")
-        if Path("/tmp/wheels").exists()
-        else []
-    ):
-        return f
+def markupsafe_wheel():
+    """Get the bundled WASI markupsafe wheel.
 
-    for f in wheels_dir.glob("MarkupSafe*.whl"):
-        return f
-
-    # Try to download (pure Python version for compatibility)
-    try:
-        import urllib.request
-
-        # Note: This is the pure Python version, platform-specific builds may be faster
-        url = "https://files.pythonhosted.org/packages/53/8f/f339c98a178f3c1e545622206b40986a4c3307fe39f70ccd3d9df9a9e425/MarkupSafe-3.0.2-cp312-cp312-manylinux_2_17_x86_64.manylinux2014_x86_64.whl"
-        dest = (
-            wheels_dir
-            / "MarkupSafe-3.0.2-cp312-cp312-manylinux_2_17_x86_64.manylinux2014_x86_64.whl"
-        )
-        urllib.request.urlretrieve(url, dest)
-        return dest
-    except Exception as e:
-        pytest.skip(f"Could not download markupsafe wheel: {e}")
+    We use a pre-built WASI wheel because markupsafe has native extensions
+    that need to be compiled for wasm32-wasi to work in the sandbox.
+    """
+    # Use the bundled WASI wheel
+    fixtures_dir = Path(__file__).parent / "fixtures"
+    wasi_wheel = fixtures_dir / "markupsafe-3.0.2-cp314-cp314-wasi_0_0_0_wasm32.whl"
+    if not wasi_wheel.exists():
+        raise RuntimeError(f"Bundled WASI wheel not found: {wasi_wheel}")
+    return wasi_wheel
 
 
 def _download_packages(wheels_dir: Path, packages: list[str]) -> list[Path]:
@@ -359,14 +334,11 @@ def httpx_wheels(wheels_dir):
     Returns a list of pure Python wheel paths needed for httpx.
     httpx requires httpcore for the transport layer.
     """
-    try:
-        # httpx needs httpcore, and both need several other deps
-        all_wheels = _download_packages(
-            wheels_dir, ["httpx", "httpcore", "h11", "certifi", "idna", "sniffio"]
-        )
-        return _filter_pure_python_wheels(all_wheels)
-    except Exception as e:
-        pytest.skip(f"Could not download httpx wheels: {e}")
+    # httpx needs httpcore, and both need several other deps
+    all_wheels = _download_packages(
+        wheels_dir, ["httpx", "httpcore", "h11", "certifi", "idna", "sniffio", "anyio"]
+    )
+    return _filter_pure_python_wheels(all_wheels)
 
 
 @pytest.fixture(scope="session")
@@ -378,11 +350,8 @@ def requests_wheels(wheels_dir):
 
     Returns a list of pure Python wheel paths needed for requests.
     """
-    try:
-        all_wheels = _download_packages(wheels_dir, ["requests"])
-        return _filter_pure_python_wheels(all_wheels)
-    except Exception as e:
-        pytest.skip(f"Could not download requests wheels: {e}")
+    all_wheels = _download_packages(wheels_dir, ["requests"])
+    return _filter_pure_python_wheels(all_wheels)
 
 
 @pytest.fixture(scope="session")

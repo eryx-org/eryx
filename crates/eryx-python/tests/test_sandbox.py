@@ -428,8 +428,11 @@ print(f"json: {data}, match: {match.group()}")
         assert "match: 1" in result.stdout
 
     def test_factory_with_packages(self, jinja2_wheel, markupsafe_wheel):
-        """Test factory with packages."""
-        # This creates a separate factory with packages
+        """Test factory with packages including native extensions.
+
+        Uses jinja2 (pure Python) and markupsafe (WASI-compiled native extension)
+        to verify that packages with native extensions work correctly.
+        """
         factory = eryx.SandboxFactory(
             packages=[str(jinja2_wheel), str(markupsafe_wheel)],
             imports=["jinja2"],

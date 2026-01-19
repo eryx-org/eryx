@@ -230,34 +230,17 @@ except Exception as e:
         assert "SUCCESS" in result.stdout, f"Test failed: {result.stdout}"
 
     def test_urllib_https_external(self, network_sandbox):
-        """Test urllib.request.urlopen() with HTTPS to external service.
-
-        Note: This test may fail if the sandbox's ssl module doesn't fully
-        support all features needed by urllib's HTTPS handling. This is a
-        known limitation - for full HTTPS support, use the raw socket+ssl
-        API or wait for future ssl shim improvements.
-        """
+        """Test urllib.request.urlopen() with HTTPS to external service."""
         result = network_sandbox.execute("""
 import urllib.request
 
-try:
-    with urllib.request.urlopen("https://example.com/", timeout=10) as response:
-        status = response.status
-        body = response.read().decode()
-        print(f"Status: {status}")
-        if status == 200 and "Example Domain" in body:
-            print("SUCCESS")
-        else:
-            print(f"Unexpected: status={status}, len={len(body)}")
-except AttributeError as e:
-    # Known limitation: SSLContext may not have all attributes
-    if "post_handshake_auth" in str(e) or "SSLContext" in str(e):
-        print("SKIP_SSL_LIMITATION")
+with urllib.request.urlopen("https://example.com/", timeout=10) as response:
+    status = response.status
+    body = response.read().decode()
+    print(f"Status: {status}")
+    if status == 200 and "Example Domain" in body:
+        print("SUCCESS")
     else:
-        print(f"Error: {type(e).__name__}: {e}")
-except Exception as e:
-    print(f"Error: {type(e).__name__}: {e}")
+        print(f"Unexpected: status={status}, len={len(body)}")
 """)
-        if "SKIP_SSL_LIMITATION" in result.stdout:
-            pytest.skip("SSL shim doesn't support all urllib HTTPS features")
         assert "SUCCESS" in result.stdout, f"Test failed: {result.stdout}"
