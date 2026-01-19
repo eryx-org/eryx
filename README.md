@@ -254,6 +254,28 @@ cargo doc --workspace --no-deps --open           # Generate docs
 cargo bench --package eryx                       # Run benchmarks
 ```
 
+### Troubleshooting: Stale Builds
+
+This project has multiple cache layers (cargo, mise, embedded runtime, WASM artifacts). If you experience unexpected behavior after changing code:
+
+```bash
+# Clean all caches and rebuild
+mise run clean-artifacts
+cargo clean
+rm -rf /tmp/eryx-embedded
+mise run setup
+
+# For Python binding work specifically
+cd crates/eryx-python && maturin develop --release
+```
+
+Common symptoms of stale caches:
+- Code changes don't seem to take effect
+- `SandboxFactory` behaves differently than `Sandbox`
+- Tests pass locally but fail in CI (or vice versa)
+
+See `AGENTS.md` for detailed documentation on cache layers.
+
 ## Examples
 
 All examples require the `embedded` feature:

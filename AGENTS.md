@@ -281,6 +281,57 @@ The `test` task uses the `embedded` feature with precompiled WASM which reduces 
 4. **Always commit `Cargo.lock`** to version control
 5. **Keep lint config in `Cargo.toml`** - avoid separate clippy.toml files
 
+## Build Caching & Staleness Issues
+
+This project has multiple layers of caching that can cause confusing "stale build" issues. Understanding these is critical for debugging.
+
+### Cache Layers
+
+| Cache | Location | Invalidation | When It Gets Stale |
+|-------|----------|--------------|-------------------|
+| **Cargo target/** | `target/` | Automatic (mtime) | After `git checkout`, cache restore, or clock skew |
+| **mise task cache** | Internal | mtime of sources vs outputs | When cargo cache has newer timestamps than sources |
+| **Embedded runtime** | `/tmp/eryx-embedded/` | Content hash in filename | Old versions accumulate; shouldn't cause staleness |
+| **Python extension** | `_eryx.abi3.so` | `maturin develop` | After changing `eryx-wasm-runtime` Rust code |
+| **WASM artifacts** | `crates/eryx-runtime/runtime.{wasm,cwasm}` | `mise run build-eryx-runtime` | After changing `eryx-wasm-runtime` code |
+
+### Symptoms of Stale Caches
+
+- **"Old code still running"** - You changed Rust code but behavior didn't change
+- **`SandboxFactory` behaves differently than `Sandbox`** - Factory uses preinit snapshot with old bytecode
+- **Tests pass locally but fail in CI** (or vice versa) - Different cache states
+- **`ModuleNotFoundError` for shim modules** - ssl/socket shims not in runtime.wasm
+
+### Recovery Commands
+
+```bash
+# Nuclear option - clean everything
+mise run clean-artifacts
+cargo clean
+rm -rf /tmp/eryx-embedded
+
+# Rebuild from scratch
+mise run setup
+
+# For Python binding development specifically
+cd crates/eryx-python
+maturin develop --release
+```
+
+### When to Suspect Cache Issues
+
+1. **After `git checkout`/`git pull`/`git rebase`** - File timestamps change
+2. **After restoring CI cache** - Cached artifacts may be newer than sources
+3. **When behavior doesn't match code** - Classic stale cache symptom
+4. **When `SandboxFactory` differs from `Sandbox`** - Preinit snapshot is stale
+
+### Prevention
+
+- Use `mise run --force <task>` to bypass mtime checks
+- The embedded runtime cache uses content hashes (`runtime-{version}-{hash}.cwasm`)
+- CI touches all source files before building to ensure fresh builds
+- When in doubt, run `mise run clean-artifacts && mise run setup`
+
 ## Landing the Plane (Session Completion)
 
 **When ending a work session**, you MUST complete ALL steps below. Work is NOT complete until `git push` succeeds.
