@@ -37,6 +37,7 @@ create_exception!(
     PyTimeoutError,
     "Execution timed out."
 );
+create_exception!(eryx, CancelledError, EryxError, "Execution was cancelled.");
 
 /// Convert an `eryx::Error` to a Python exception.
 ///
@@ -67,6 +68,7 @@ pub fn eryx_error_to_py(err: eryx::Error) -> PyErr {
             "Python stdlib not found. Use Sandbox() which includes embedded runtime.",
         ),
         eryx::Error::Snapshot(msg) => InitializationError::new_err(msg),
+        eryx::Error::Cancelled => CancelledError::new_err("execution was cancelled"),
         eryx::Error::Io(e) => PyRuntimeError::new_err(e.to_string()),
     }
 }
@@ -84,5 +86,6 @@ pub fn register_exceptions(m: &Bound<'_, PyModule>) -> PyResult<()> {
         m.py().get_type::<ResourceLimitError>(),
     )?;
     m.add("TimeoutError", m.py().get_type::<SandboxTimeoutError>())?;
+    m.add("CancelledError", m.py().get_type::<CancelledError>())?;
     Ok(())
 }

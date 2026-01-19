@@ -75,16 +75,22 @@ fn main() {
         build_component(&manifest_dir, &runtime_so);
     } else if preinit {
         // preinit feature (and native-extensions which implies it) needs .so.zst files in OUT_DIR
-        if has_out_artifacts {
-            // Already have artifacts from a previous build - nothing to do
-            eprintln!("Using existing late-linking artifacts from OUT_DIR");
-        } else if has_prebuilt {
+        //
+        // IMPORTANT: Always prefer prebuilt/ artifacts over cached OUT_DIR artifacts!
+        // The Rust cache may contain stale OUT_DIR artifacts from a previous build
+        // (e.g., from main branch) that don't match the current branch's WIT.
+        // Since prebuilt/ comes from the same CI run's build-eryx-runtime job,
+        // it's guaranteed to match the current branch.
+        if has_prebuilt {
             // Use pre-built artifacts from prebuilt/ directory (CI)
             eprintln!("Using pre-built late-linking artifacts from prebuilt/");
             std::fs::copy(&prebuilt_runtime, &out_runtime_zst)
                 .expect("failed to copy prebuilt runtime");
             std::fs::copy(&prebuilt_bindings, &out_bindings_zst)
                 .expect("failed to copy prebuilt bindings");
+        } else if has_out_artifacts {
+            // No prebuilt available, use existing OUT_DIR artifacts (local dev)
+            eprintln!("Using existing late-linking artifacts from OUT_DIR");
         } else {
             // No artifacts anywhere, need to build from scratch
             eprintln!("Building late-linking artifacts from scratch...");

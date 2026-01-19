@@ -53,6 +53,7 @@ thiserror = "2.0"
 # Async runtime
 tokio = { version = "1", features = ["full"] }
 tokio-stream = "0.1"
+tokio-util = "0.7"
 
 # TLS
 rustls = "0.23"

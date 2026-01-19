@@ -32,6 +32,7 @@ use std::time::Duration;
 use crate::cache::{CacheKey, InstancePreCache};
 
 use tokio::sync::{mpsc, oneshot};
+use tokio_util::sync::CancellationToken;
 use wasmtime::component::{Accessor, Component, HasSelf, Linker, ResourceTable};
 use wasmtime::{Config, Engine, ResourceLimiter, Store};
 use wasmtime_wasi::{DirPerms, FilePerms, WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView};
@@ -616,6 +617,7 @@ pub struct ExecuteBuilder<'a> {
     net_tx: Option<mpsc::Sender<NetRequest>>,
     memory_limit: Option<u64>,
     execution_timeout: Option<Duration>,
+    cancellation_token: Option<CancellationToken>,
 }
 
 impl std::fmt::Debug for ExecuteBuilder<'_> {
@@ -628,6 +630,7 @@ impl std::fmt::Debug for ExecuteBuilder<'_> {
             .field("has_net_tx", &self.net_tx.is_some())
             .field("memory_limit", &self.memory_limit)
             .field("execution_timeout", &self.execution_timeout)
+            .field("has_cancellation_token", &self.cancellation_token.is_some())
             .finish_non_exhaustive()
     }
 }
@@ -644,6 +647,7 @@ impl<'a> ExecuteBuilder<'a> {
             net_tx: None,
             memory_limit: None,
             execution_timeout: None,
+            cancellation_token: None,
         }
     }
 
@@ -697,6 +701,16 @@ impl<'a> ExecuteBuilder<'a> {
         self
     }
 
+    /// Set a cancellation token for external cancellation support.
+    ///
+    /// When the token is cancelled, the execution will be interrupted
+    /// using epoch-based interruption, similar to timeouts.
+    #[must_use]
+    pub fn with_cancellation(mut self, token: CancellationToken) -> Self {
+        self.cancellation_token = Some(token);
+        self
+    }
+
     /// Execute the Python code with the configured options.
     ///
     /// # Errors
@@ -712,6 +726,7 @@ impl<'a> ExecuteBuilder<'a> {
                 self.net_tx,
                 self.memory_limit,
                 self.execution_timeout,
+                self.cancellation_token,
             )
             .await
     }
@@ -1234,6 +1249,7 @@ impl PythonExecutor {
         net_tx: Option<mpsc::Sender<NetRequest>>,
         memory_limit: Option<u64>,
         execution_timeout: Option<Duration>,
+        cancellation_token: Option<CancellationToken>,
     ) -> std::result::Result<ExecutionOutput, String> {
         // Build callback info for introspection
         let callback_infos: Vec<HostCallbackInfo> = callbacks
@@ -1333,16 +1349,27 @@ impl PythonExecutor {
 
         tracing::debug!(code_len = code.len(), "Executing Python code");
 
-        // Now set up epoch-based deadline for execution timeout.
+        // Now set up epoch-based deadline for execution timeout and/or cancellation.
         // This is done AFTER instantiation so the timeout only applies to user code execution,
         // not Python initialization.
         const EPOCH_TICK_MS: u64 = 10;
-        let epoch_ticker = if let Some(timeout) = execution_timeout {
-            // Set deadline to N epoch ticks from now
-            let ticks_until_timeout = timeout.as_millis() as u64 / EPOCH_TICK_MS;
-            // Ensure at least 1 tick
-            let ticks = ticks_until_timeout.max(1);
-            store.set_epoch_deadline(ticks);
+
+        // Track whether execution was cancelled (vs timed out)
+        let was_cancelled = Arc::new(AtomicBool::new(false));
+
+        // Set up epoch ticker if we have a timeout or cancellation token
+        let epoch_ticker = if execution_timeout.is_some() || cancellation_token.is_some() {
+            // Set deadline based on timeout, or use a moderate value for cancellation-only
+            if let Some(timeout) = execution_timeout {
+                let ticks_until_timeout = timeout.as_millis() as u64 / EPOCH_TICK_MS;
+                let ticks = ticks_until_timeout.max(1);
+                store.set_epoch_deadline(ticks);
+            } else {
+                // No timeout but we have cancellation - set a reachable deadline.
+                // When cancelled, we bump epoch by more than this to trigger interrupt.
+                const CANCELLATION_DEADLINE: u64 = 10000;
+                store.set_epoch_deadline(CANCELLATION_DEADLINE);
+            }
 
             // Configure the store to trap when the epoch deadline is reached
             store.epoch_deadline_trap();
@@ -1354,15 +1381,28 @@ impl PythonExecutor {
             let engine = self.engine.clone();
             let stop_flag = Arc::new(AtomicBool::new(false));
             let stop_flag_clone = Arc::clone(&stop_flag);
+            let was_cancelled_clone = Arc::clone(&was_cancelled);
+            let cancel_token = cancellation_token.clone();
             std::thread::spawn(move || {
                 while !stop_flag_clone.load(Ordering::Relaxed) {
+                    // Check for cancellation
+                    if let Some(ref token) = cancel_token
+                        && token.is_cancelled()
+                    {
+                        was_cancelled_clone.store(true, Ordering::Relaxed);
+                        // Bump epoch to exceed CANCELLATION_DEADLINE and trigger interrupt
+                        for _ in 0..10001 {
+                            engine.increment_epoch();
+                        }
+                        break;
+                    }
                     std::thread::sleep(Duration::from_millis(EPOCH_TICK_MS));
                     engine.increment_epoch();
                 }
             });
             Some(stop_flag)
         } else {
-            // No timeout - set a very high deadline that won't be reached
+            // No timeout and no cancellation - set a very high deadline that won't be reached
             // (but not u64::MAX to avoid overflow when added to current epoch)
             store.set_epoch_deadline(u64::MAX / 2);
             store.epoch_deadline_trap();
@@ -1382,14 +1422,18 @@ impl PythonExecutor {
             stop_flag.store(true, Ordering::Relaxed);
         }
 
-        // Check for epoch deadline exceeded (timeout)
+        // Check for epoch deadline exceeded (timeout or cancellation)
         let wasmtime_result = wasmtime_result.map_err(|e| {
             let err_str = format!("{e:?}");
             if err_str.contains("epoch deadline") || err_str.contains("wasm trap: interrupt") {
-                format!(
-                    "Execution timed out after {:?}",
-                    execution_timeout.unwrap_or_default()
-                )
+                if was_cancelled.load(Ordering::Relaxed) {
+                    "execution cancelled".to_string()
+                } else {
+                    format!(
+                        "Execution timed out after {:?}",
+                        execution_timeout.unwrap_or_default()
+                    )
+                }
             } else {
                 format!("WASM execution error: {e:?}")
             }

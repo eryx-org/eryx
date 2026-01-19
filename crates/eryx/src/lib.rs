@@ -78,7 +78,9 @@ pub use error::Error;
 pub use library::RuntimeLibrary;
 pub use net::{ConnectionManager, NetConfig, TcpError, TlsError};
 pub use package::{ExtractedPackage, PackageFormat};
-pub use sandbox::{ExecuteResult, ExecuteStats, ResourceLimits, Sandbox, SandboxBuilder, state};
+pub use sandbox::{
+    ExecuteResult, ExecuteStats, ExecutionHandle, ResourceLimits, Sandbox, SandboxBuilder, state,
+};
 pub use session::{
     InProcessSession, PythonStateSnapshot, Session, SessionExecutor, SnapshotMetadata,
     SnapshotSession,
@@ -90,3 +92,6 @@ pub use wasm::{ExecutionOutput, PythonExecutor};
 
 // Re-export schema types at top level for convenience
 pub use schema::{JsonSchema, Schema};
+
+// Re-export CancellationToken for convenient use with execute_cancellable
+pub use tokio_util::sync::CancellationToken;
