@@ -551,10 +551,11 @@ fn host_matches_pattern(host: &str, pattern: &str) -> bool {
     }
 
     // If pattern ends with literal (not *), must match to end
-    if let Some(last) = parts.last() {
-        if !last.is_empty() && pos != host.len() {
-            return false;
-        }
+    if let Some(last) = parts.last()
+        && !last.is_empty()
+        && pos != host.len()
+    {
+        return false;
     }
 
     true

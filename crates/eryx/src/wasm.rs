@@ -1244,6 +1244,7 @@ impl PythonExecutor {
     /// Internal execute implementation with all parameters.
     ///
     /// This is called by [`ExecuteBuilder::run`].
+    #[allow(clippy::too_many_arguments)]
     async fn execute_internal(
         &self,
         code: &str,
