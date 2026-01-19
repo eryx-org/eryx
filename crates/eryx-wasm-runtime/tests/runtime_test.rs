@@ -87,10 +87,10 @@ fn build_component() -> Result<Vec<u8>, Box<dyn std::error::Error>> {
     let libpython = load_lib(&libs_dir, "libpython3.14.so")?;
     let adapter = load_lib(&libs_dir, "wasi_snapshot_preview1.reactor.wasm")?;
 
-    // Parse the runtime.wit file
-    let wit_path = project_root.join("crates/eryx-runtime/runtime.wit");
+    // Parse the WIT files from the wit/ directory
+    let wit_path = project_root.join("crates/eryx-runtime/wit");
     let mut resolve = wit_parser::Resolve::default();
-    let (pkg_id, _) = resolve.push_path(&wit_path)?;
+    let (pkg_id, _) = resolve.push_dir(&wit_path)?;
     let world_id = resolve.select_world(&[pkg_id], Some("sandbox"))?;
 
     // Generate bindings pointing to our runtime
@@ -336,6 +336,10 @@ async fn test_instantiate_component() -> Result<(), Box<dyn std::error::Error>> 
          _params: &[Val],
          _results: &mut [Val]| { Ok(()) },
     )?;
+
+    // Add network stub implementations (TCP and TLS)
+    // These return "not-permitted" errors since networking is not available in this test.
+    add_network_stubs(&mut linker)?;
 
     println!("Instantiating component...");
     let instance = linker.instantiate_async(&mut store, &component).await?;
@@ -787,5 +791,139 @@ except RuntimeError as e:
     }
 
     println!("\nAll tests passed!");
+    Ok(())
+}
+
+/// TCP error type for test stubs.
+#[derive(
+    wasmtime::component::ComponentType, wasmtime::component::Lift, wasmtime::component::Lower, Clone,
+)]
+#[component(variant)]
+enum TcpError {
+    #[component(name = "connection-refused")]
+    ConnectionRefused,
+    #[component(name = "connection-reset")]
+    ConnectionReset,
+    #[component(name = "timed-out")]
+    TimedOut,
+    #[component(name = "host-not-found")]
+    HostNotFound,
+    #[component(name = "io-error")]
+    IoError(String),
+    #[component(name = "not-permitted")]
+    NotPermitted(String),
+    #[component(name = "invalid-handle")]
+    InvalidHandle,
+}
+
+/// TLS error type for test stubs.
+#[derive(
+    wasmtime::component::ComponentType, wasmtime::component::Lift, wasmtime::component::Lower, Clone,
+)]
+#[component(variant)]
+enum TlsError {
+    #[component(name = "tcp")]
+    Tcp(TcpError),
+    #[component(name = "handshake-failed")]
+    HandshakeFailed(String),
+    #[component(name = "certificate-error")]
+    CertificateError(String),
+    #[component(name = "invalid-handle")]
+    InvalidHandle,
+}
+
+/// Add stub implementations for network imports (TCP and TLS).
+/// These return "not-permitted" errors since networking is not available in this test.
+fn add_network_stubs(linker: &mut Linker<State>) -> Result<(), Box<dyn std::error::Error>> {
+    // TCP interface stubs
+    let mut tcp = linker.instance("eryx:net/tcp@0.1.0")?;
+
+    // tcp.connect: func(host: string, port: u16) -> result<tcp-handle, tcp-error>
+    tcp.func_wrap_async(
+        "connect",
+        |_ctx: wasmtime::StoreContextMut<'_, State>, (_host, _port): (String, u16)| {
+            Box::new(async move {
+                Ok((Result::<u32, TcpError>::Err(TcpError::NotPermitted(
+                    "networking not available in test".into(),
+                )),))
+            })
+        },
+    )?;
+
+    // tcp.read: func(handle: tcp-handle, len: u32) -> result<list<u8>, tcp-error>
+    tcp.func_wrap_async(
+        "read",
+        |_ctx: wasmtime::StoreContextMut<'_, State>, (_handle, _len): (u32, u32)| {
+            Box::new(async move {
+                Ok((Result::<Vec<u8>, TcpError>::Err(TcpError::NotPermitted(
+                    "networking not available in test".into(),
+                )),))
+            })
+        },
+    )?;
+
+    // tcp.write: func(handle: tcp-handle, data: list<u8>) -> result<u32, tcp-error>
+    tcp.func_wrap_async(
+        "write",
+        |_ctx: wasmtime::StoreContextMut<'_, State>, (_handle, _data): (u32, Vec<u8>)| {
+            Box::new(async move {
+                Ok((Result::<u32, TcpError>::Err(TcpError::NotPermitted(
+                    "networking not available in test".into(),
+                )),))
+            })
+        },
+    )?;
+
+    // tcp.close: func(handle: tcp-handle)
+    tcp.func_wrap(
+        "close",
+        |_ctx: wasmtime::StoreContextMut<'_, State>, (_handle,): (u32,)| Ok(()),
+    )?;
+
+    // TLS interface stubs
+    let mut tls = linker.instance("eryx:net/tls@0.1.0")?;
+
+    // tls.upgrade: func(tcp: tcp-handle, hostname: string) -> result<tls-handle, tls-error>
+    tls.func_wrap_async(
+        "upgrade",
+        |_ctx: wasmtime::StoreContextMut<'_, State>, (_tcp_handle, _hostname): (u32, String)| {
+            Box::new(async move {
+                Ok((Result::<u32, TlsError>::Err(TlsError::HandshakeFailed(
+                    "networking not available in test".into(),
+                )),))
+            })
+        },
+    )?;
+
+    // tls.read: func(handle: tls-handle, len: u32) -> result<list<u8>, tls-error>
+    tls.func_wrap_async(
+        "read",
+        |_ctx: wasmtime::StoreContextMut<'_, State>, (_handle, _len): (u32, u32)| {
+            Box::new(async move {
+                Ok((Result::<Vec<u8>, TlsError>::Err(TlsError::HandshakeFailed(
+                    "networking not available in test".into(),
+                )),))
+            })
+        },
+    )?;
+
+    // tls.write: func(handle: tls-handle, data: list<u8>) -> result<u32, tls-error>
+    tls.func_wrap_async(
+        "write",
+        |_ctx: wasmtime::StoreContextMut<'_, State>, (_handle, _data): (u32, Vec<u8>)| {
+            Box::new(async move {
+                Ok((Result::<u32, TlsError>::Err(TlsError::HandshakeFailed(
+                    "networking not available in test".into(),
+                )),))
+            })
+        },
+    )?;
+
+    // tls.close: func(handle: tls-handle)
+    tls.func_wrap(
+        "close",
+        |_ctx: wasmtime::StoreContextMut<'_, State>, (_handle,): (u32,)| Ok(()),
+    )?;
+
     Ok(())
 }

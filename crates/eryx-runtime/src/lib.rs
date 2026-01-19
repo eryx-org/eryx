@@ -25,7 +25,7 @@
 //! - `eryx-wasm-runtime` - The custom runtime that implements the WIT exports
 
 /// The WIT definition as a string constant.
-pub const WIT_DEFINITION: &str = include_str!("../runtime.wit");
+pub const WIT_DEFINITION: &str = include_str!("../wit/runtime.wit");
 
 /// Late-linking support for native Python extensions.
 #[cfg(feature = "preinit")]

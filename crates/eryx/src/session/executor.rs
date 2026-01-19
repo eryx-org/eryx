@@ -925,6 +925,7 @@ impl ExecutorState {
             trace_tx,
             callbacks,
             memory_tracker,
+            net_tx: None, // Set via with_network() when network handler is running
         }
     }
 

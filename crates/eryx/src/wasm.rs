@@ -62,6 +62,54 @@ pub struct TraceRequest {
     pub context_json: String,
 }
 
+/// Request for a network operation from Python code.
+#[derive(Debug)]
+pub enum NetRequest {
+    // TCP operations
+    /// Connect to a host over TCP.
+    TcpConnect {
+        host: String,
+        port: u16,
+        response_tx: oneshot::Sender<Result<u32, crate::net::TcpError>>,
+    },
+    /// Read from a TCP connection.
+    TcpRead {
+        handle: u32,
+        len: u32,
+        response_tx: oneshot::Sender<Result<Vec<u8>, crate::net::TcpError>>,
+    },
+    /// Write to a TCP connection.
+    TcpWrite {
+        handle: u32,
+        data: Vec<u8>,
+        response_tx: oneshot::Sender<Result<u32, crate::net::TcpError>>,
+    },
+    /// Close a TCP connection.
+    TcpClose { handle: u32 },
+
+    // TLS operations
+    /// Upgrade a TCP connection to TLS.
+    TlsUpgrade {
+        tcp_handle: u32,
+        hostname: String,
+        response_tx: oneshot::Sender<Result<u32, crate::net::TlsError>>,
+    },
+    /// Read from a TLS connection.
+    TlsRead {
+        handle: u32,
+        len: u32,
+        response_tx: oneshot::Sender<Result<Vec<u8>, crate::net::TlsError>>,
+    },
+    /// Write to a TLS connection.
+    TlsWrite {
+        handle: u32,
+        data: Vec<u8>,
+        response_tx: oneshot::Sender<Result<u32, crate::net::TlsError>>,
+    },
+    /// Close a TLS connection.
+    TlsClose { handle: u32 },
+}
+
 /// Callback info for introspection (internal type to avoid conflicts with generated code).
 #[derive(Debug, Clone)]
 pub struct HostCallbackInfo {
@@ -172,9 +220,26 @@ impl ResourceLimiter for MemoryTracker {
 }
 
 // Generate bindings from the WIT file
-// The WIT already declares `invoke` and `execute` as async, wasmtime handles it
+//
+// Network functions are declared as regular sync `func` in WIT (not `async func`).
+// We use the `async` flag for network imports to generate `func_wrap_async` bindings.
+// This gives us fiber-based async: the host can await on async operations, but from
+// the guest's perspective the calls are blocking. This requires `Config::async_support`
+// but NOT `Config::wasm_component_model_async`.
 wasmtime::component::bindgen!({
-    path: "../eryx-runtime/runtime.wit",
+    path: "../eryx-runtime/wit",
+    imports: {
+        // TCP network operations - fiber-based async (blocking to guest, async on host)
+        "eryx:net/tcp.connect": async,
+        "eryx:net/tcp.read": async,
+        "eryx:net/tcp.write": async,
+        "eryx:net/tcp.close": async,
+        // TLS network operations - fiber-based async (blocking to guest, async on host)
+        "eryx:net/tls.upgrade": async,
+        "eryx:net/tls.read": async,
+        "eryx:net/tls.write": async,
+        "eryx:net/tls.close": async,
+    },
 });
 
 /// State for a single execution, implementing WASI and callback channels.
@@ -191,6 +256,8 @@ pub struct ExecutorState {
     pub(crate) callbacks: Vec<HostCallbackInfo>,
     /// Memory usage tracker.
     pub(crate) memory_tracker: MemoryTracker,
+    /// Channel to send network requests to the handler.
+    pub(crate) net_tx: Option<mpsc::Sender<NetRequest>>,
 }
 
 impl std::fmt::Debug for ExecutorState {
@@ -205,6 +272,7 @@ impl std::fmt::Debug for ExecutorState {
                 "peak_memory_bytes",
                 &self.memory_tracker.peak_memory_bytes(),
             )
+            .field("net_tx", &self.net_tx.is_some())
             .finish()
     }
 }
@@ -287,6 +355,239 @@ impl SandboxImports for ExecutorState {
     }
 }
 
+// Import the WIT-generated network module types
+use self::eryx::net::tcp;
+use self::eryx::net::tls;
+
+// Convert our TcpError to the WIT-generated TcpError type.
+fn to_wit_tcp_error(e: crate::net::TcpError) -> tcp::TcpError {
+    use crate::net::TcpError as E;
+    match e {
+        E::ConnectionRefused => tcp::TcpError::ConnectionRefused,
+        E::ConnectionReset => tcp::TcpError::ConnectionReset,
+        E::TimedOut => tcp::TcpError::TimedOut,
+        E::HostNotFound => tcp::TcpError::HostNotFound,
+        E::IoError(msg) => tcp::TcpError::IoError(msg),
+        E::NotPermitted(msg) => tcp::TcpError::NotPermitted(msg),
+        E::InvalidHandle => tcp::TcpError::InvalidHandle,
+    }
+}
+
+// Convert our TlsError to the WIT-generated TlsError type.
+fn to_wit_tls_error(e: crate::net::TlsError) -> tls::TlsError {
+    use crate::net::TlsError as E;
+    match e {
+        E::Tcp(tcp_err) => tls::TlsError::Tcp(to_wit_tcp_error(tcp_err)),
+        E::HandshakeFailed(msg) => tls::TlsError::HandshakeFailed(msg),
+        E::CertificateError(msg) => tls::TlsError::CertificateError(msg),
+        E::InvalidHandle => tls::TlsError::InvalidHandle,
+    }
+}
+
+// ============================================================================
+// TCP Host Implementation (fiber-based async)
+// ============================================================================
+
+impl tcp::Host for ExecutorState {
+    async fn connect(&mut self, host: String, port: u16) -> Result<u32, tcp::TcpError> {
+        tracing::debug!(host = %host, port, "TCP connect requested");
+
+        let tx = self.net_tx.clone().ok_or_else(|| {
+            tcp::TcpError::NotPermitted("networking not enabled for this sandbox".into())
+        })?;
+
+        let (response_tx, response_rx) = oneshot::channel();
+
+        let request = NetRequest::TcpConnect {
+            host,
+            port,
+            response_tx,
+        };
+
+        // Send request - fiber will suspend if channel is full
+        tx.send(request)
+            .await
+            .map_err(|_| tcp::TcpError::IoError("network handler channel closed".into()))?;
+
+        // Await response - fiber suspends until response arrives
+        response_rx
+            .await
+            .map_err(|_| tcp::TcpError::IoError("network response channel closed".into()))?
+            .map_err(to_wit_tcp_error)
+    }
+
+    async fn read(&mut self, handle: u32, len: u32) -> Result<Vec<u8>, tcp::TcpError> {
+        tracing::trace!(handle, len, "TCP read requested");
+
+        let tx = self.net_tx.clone().ok_or_else(|| {
+            tcp::TcpError::NotPermitted("networking not enabled for this sandbox".into())
+        })?;
+
+        let (response_tx, response_rx) = oneshot::channel();
+
+        let request = NetRequest::TcpRead {
+            handle,
+            len,
+            response_tx,
+        };
+
+        tx.send(request)
+            .await
+            .map_err(|_| tcp::TcpError::IoError("network handler channel closed".into()))?;
+
+        response_rx
+            .await
+            .map_err(|_| tcp::TcpError::IoError("network response channel closed".into()))?
+            .map_err(to_wit_tcp_error)
+    }
+
+    async fn write(&mut self, handle: u32, data: Vec<u8>) -> Result<u32, tcp::TcpError> {
+        tracing::trace!(handle, len = data.len(), "TCP write requested");
+
+        let tx = self.net_tx.clone().ok_or_else(|| {
+            tcp::TcpError::NotPermitted("networking not enabled for this sandbox".into())
+        })?;
+
+        let (response_tx, response_rx) = oneshot::channel();
+
+        let request = NetRequest::TcpWrite {
+            handle,
+            data,
+            response_tx,
+        };
+
+        tx.send(request)
+            .await
+            .map_err(|_| tcp::TcpError::IoError("network handler channel closed".into()))?;
+
+        response_rx
+            .await
+            .map_err(|_| tcp::TcpError::IoError("network response channel closed".into()))?
+            .map_err(to_wit_tcp_error)
+    }
+
+    async fn close(&mut self, handle: u32) {
+        tracing::debug!(handle, "TCP close requested");
+        if let Some(ref tx) = self.net_tx {
+            // Fire-and-forget for close
+            let _ = tx.send(NetRequest::TcpClose { handle }).await;
+        }
+    }
+}
+
+// ============================================================================
+// TLS Host Implementation (fiber-based async)
+// ============================================================================
+
+impl tls::Host for ExecutorState {
+    async fn upgrade(&mut self, tcp_handle: u32, hostname: String) -> Result<u32, tls::TlsError> {
+        tracing::debug!(tcp_handle, hostname = %hostname, "TLS upgrade requested");
+
+        let tx = self.net_tx.clone().ok_or_else(|| {
+            tls::TlsError::Tcp(tcp::TcpError::NotPermitted(
+                "networking not enabled for this sandbox".into(),
+            ))
+        })?;
+
+        let (response_tx, response_rx) = oneshot::channel();
+
+        let request = NetRequest::TlsUpgrade {
+            tcp_handle,
+            hostname,
+            response_tx,
+        };
+
+        tx.send(request).await.map_err(|_| {
+            tls::TlsError::Tcp(tcp::TcpError::IoError(
+                "network handler channel closed".into(),
+            ))
+        })?;
+
+        response_rx
+            .await
+            .map_err(|_| {
+                tls::TlsError::Tcp(tcp::TcpError::IoError(
+                    "network response channel closed".into(),
+                ))
+            })?
+            .map_err(to_wit_tls_error)
+    }
+
+    async fn read(&mut self, handle: u32, len: u32) -> Result<Vec<u8>, tls::TlsError> {
+        tracing::trace!(handle, len, "TLS read requested");
+
+        let tx = self.net_tx.clone().ok_or_else(|| {
+            tls::TlsError::Tcp(tcp::TcpError::NotPermitted(
+                "networking not enabled for this sandbox".into(),
+            ))
+        })?;
+
+        let (response_tx, response_rx) = oneshot::channel();
+
+        let request = NetRequest::TlsRead {
+            handle,
+            len,
+            response_tx,
+        };
+
+        tx.send(request).await.map_err(|_| {
+            tls::TlsError::Tcp(tcp::TcpError::IoError(
+                "network handler channel closed".into(),
+            ))
+        })?;
+
+        response_rx
+            .await
+            .map_err(|_| {
+                tls::TlsError::Tcp(tcp::TcpError::IoError(
+                    "network response channel closed".into(),
+                ))
+            })?
+            .map_err(to_wit_tls_error)
+    }
+
+    async fn write(&mut self, handle: u32, data: Vec<u8>) -> Result<u32, tls::TlsError> {
+        tracing::trace!(handle, len = data.len(), "TLS write requested");
+
+        let tx = self.net_tx.clone().ok_or_else(|| {
+            tls::TlsError::Tcp(tcp::TcpError::NotPermitted(
+                "networking not enabled for this sandbox".into(),
+            ))
+        })?;
+
+        let (response_tx, response_rx) = oneshot::channel();
+
+        let request = NetRequest::TlsWrite {
+            handle,
+            data,
+            response_tx,
+        };
+
+        tx.send(request).await.map_err(|_| {
+            tls::TlsError::Tcp(tcp::TcpError::IoError(
+                "network handler channel closed".into(),
+            ))
+        })?;
+
+        response_rx
+            .await
+            .map_err(|_| {
+                tls::TlsError::Tcp(tcp::TcpError::IoError(
+                    "network response channel closed".into(),
+                ))
+            })?
+            .map_err(to_wit_tls_error)
+    }
+
+    async fn close(&mut self, handle: u32) {
+        tracing::debug!(handle, "TLS close requested");
+        if let Some(ref tx) = self.net_tx {
+            // Fire-and-forget for close
+            let _ = tx.send(NetRequest::TlsClose { handle }).await;
+        }
+    }
+}
+
 /// Builder for configuring and executing Python code.
 ///
 /// Created by [`PythonExecutor::execute`]. Use the builder methods to
@@ -309,6 +610,7 @@ pub struct ExecuteBuilder<'a> {
     callbacks: Vec<Arc<dyn Callback>>,
     callback_tx: Option<mpsc::Sender<CallbackRequest>>,
     trace_tx: Option<mpsc::UnboundedSender<TraceRequest>>,
+    net_tx: Option<mpsc::Sender<NetRequest>>,
     memory_limit: Option<u64>,
     execution_timeout: Option<Duration>,
 }
@@ -320,6 +622,7 @@ impl std::fmt::Debug for ExecuteBuilder<'_> {
             .field("callbacks_count", &self.callbacks.len())
             .field("has_callback_tx", &self.callback_tx.is_some())
             .field("has_trace_tx", &self.trace_tx.is_some())
+            .field("has_net_tx", &self.net_tx.is_some())
             .field("memory_limit", &self.memory_limit)
             .field("execution_timeout", &self.execution_timeout)
             .finish_non_exhaustive()
@@ -335,6 +638,7 @@ impl<'a> ExecuteBuilder<'a> {
             callbacks: Vec::new(),
             callback_tx: None,
             trace_tx: None,
+            net_tx: None,
             memory_limit: None,
             execution_timeout: None,
         }
@@ -360,6 +664,16 @@ impl<'a> ExecuteBuilder<'a> {
     #[must_use]
     pub fn with_tracing(mut self, trace_tx: mpsc::UnboundedSender<TraceRequest>) -> Self {
         self.trace_tx = Some(trace_tx);
+        self
+    }
+
+    /// Enable networking for this execution.
+    ///
+    /// The `net_tx` channel is used to send network requests (TCP/TLS) from
+    /// the WASM guest to the host for processing.
+    #[must_use]
+    pub fn with_network(mut self, net_tx: mpsc::Sender<NetRequest>) -> Self {
+        self.net_tx = Some(net_tx);
         self
     }
 
@@ -392,6 +706,7 @@ impl<'a> ExecuteBuilder<'a> {
                 &self.callbacks,
                 self.callback_tx,
                 self.trace_tx,
+                self.net_tx,
                 self.memory_limit,
                 self.execution_timeout,
             )
@@ -473,8 +788,10 @@ impl PythonExecutor {
 
     /// Add a path to Python packages directory.
     ///
-    /// Each directory will be mounted at `/site-packages-N` inside the WASM sandbox
-    /// and added to Python's import path. Can be called multiple times.
+    /// The first directory will be mounted at `/site-packages` inside the WASM sandbox
+    /// (for compatibility with preinit). Additional directories are mounted at
+    /// `/site-packages-1`, `/site-packages-2`, etc. All paths are added to Python's
+    /// import path. Can be called multiple times.
     #[must_use]
     pub fn with_site_packages(mut self, path: impl Into<PathBuf>) -> Self {
         self.python_site_packages_paths.push(path.into());
@@ -817,6 +1134,10 @@ impl PythonExecutor {
     fn create_engine() -> std::result::Result<Engine, Error> {
         let mut config = Config::new();
         config.wasm_component_model(true);
+        // Enable component model async for the `invoke` callback function.
+        // The invoke function is async because Python code awaits on it.
+        // TCP/TLS functions are sync `func` in WIT but use fiber-based async
+        // on the host (via `async` bindgen flag) - they appear blocking to guest.
         config.wasm_component_model_async(true);
         config.async_support(true);
 
@@ -854,9 +1175,11 @@ impl PythonExecutor {
         wasmtime_wasi::p2::add_to_linker_async(&mut linker)
             .map_err(|e| Error::WasmEngine(format!("Failed to add WASI to linker: {e}")))?;
 
-        // Add sandbox bindings
+        // Add sandbox bindings (includes TCP/TLS interfaces)
+        tracing::debug!("Adding sandbox bindings to linker");
         Sandbox::add_to_linker::<_, HasSelf<ExecutorState>>(&mut linker, |state| state)
             .map_err(|e| Error::WasmEngine(format!("Failed to add sandbox to linker: {e}")))?;
+        tracing::debug!("Sandbox bindings added successfully");
 
         // Create pre-instantiated component
         // This validates that all imports are satisfied and prepares for fast instantiation
@@ -898,12 +1221,14 @@ impl PythonExecutor {
     /// Internal execute implementation with all parameters.
     ///
     /// This is called by [`ExecuteBuilder::run`].
+    #[allow(clippy::too_many_arguments)]
     async fn execute_internal(
         &self,
         code: &str,
         callbacks: &[Arc<dyn Callback>],
         callback_tx: Option<mpsc::Sender<CallbackRequest>>,
         trace_tx: Option<mpsc::UnboundedSender<TraceRequest>>,
+        net_tx: Option<mpsc::Sender<NetRequest>>,
         memory_limit: Option<u64>,
         execution_timeout: Option<Duration>,
     ) -> std::result::Result<ExecutionOutput, String> {
@@ -923,12 +1248,18 @@ impl PythonExecutor {
         wasi_builder.inherit_stdout().inherit_stderr();
 
         // Build PYTHONPATH from stdlib and all site-packages directories
+        // The first site-packages is mounted at /site-packages (for preinit compatibility)
+        // Additional ones are mounted at /site-packages-1, /site-packages-2, etc.
         let mut pythonpath_parts = Vec::new();
         if self.python_stdlib_path.is_some() {
             pythonpath_parts.push("/python-stdlib".to_string());
         }
         for i in 0..self.python_site_packages_paths.len() {
-            pythonpath_parts.push(format!("/site-packages-{i}"));
+            if i == 0 {
+                pythonpath_parts.push("/site-packages".to_string());
+            } else {
+                pythonpath_parts.push(format!("/site-packages-{i}"));
+            }
         }
 
         // Mount Python stdlib if configured (required for eryx-wasm-runtime)
@@ -950,9 +1281,14 @@ impl PythonExecutor {
             wasi_builder.env("PYTHONPATH", pythonpath_parts.join(":"));
         }
 
-        // Mount each site-packages directory at a unique path
+        // Mount each site-packages directory
+        // First one at /site-packages (for preinit compatibility), rest at /site-packages-N
         for (i, site_packages_path) in self.python_site_packages_paths.iter().enumerate() {
-            let mount_path = format!("/site-packages-{i}");
+            let mount_path = if i == 0 {
+                "/site-packages".to_string()
+            } else {
+                format!("/site-packages-{i}")
+            };
             wasi_builder
                 .preopened_dir(
                     site_packages_path,
@@ -972,6 +1308,7 @@ impl PythonExecutor {
             trace_tx,
             callbacks: callback_infos,
             memory_tracker: MemoryTracker::new(memory_limit),
+            net_tx,
         };
 
         // Create store for this execution

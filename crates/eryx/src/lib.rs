@@ -50,6 +50,7 @@ mod callback_handler;
 pub mod embedded;
 mod error;
 mod library;
+pub mod net;
 pub mod package;
 mod sandbox;
 mod schema;
@@ -75,6 +76,7 @@ pub use callback::{
 };
 pub use error::Error;
 pub use library::RuntimeLibrary;
+pub use net::{ConnectionManager, NetConfig, TcpError, TlsError};
 pub use package::{ExtractedPackage, PackageFormat};
 pub use sandbox::{ExecuteResult, ExecuteStats, ResourceLimits, Sandbox, SandboxBuilder, state};
 pub use session::{

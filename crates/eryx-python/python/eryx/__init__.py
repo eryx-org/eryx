@@ -16,6 +16,7 @@ Classes:
     Sandbox: The main sandbox class for executing Python code.
     ExecuteResult: Result of sandbox execution with stdout and stats.
     ResourceLimits: Configuration for execution limits.
+    NetConfig: Configuration for network access.
 
 Exceptions:
     EryxError: Base exception for all Eryx errors.
@@ -31,9 +32,10 @@ from eryx._eryx import (
     ExecuteResult,
     ExecutionError,
     InitializationError,
+    # Classes
+    NetConfig,
     ResourceLimitError,
     ResourceLimits,
-    # Classes
     Sandbox,
     SandboxFactory,
     TimeoutError,
@@ -47,6 +49,7 @@ __all__ = [
     "SandboxFactory",
     "ExecuteResult",
     "ResourceLimits",
+    "NetConfig",
     # Exceptions
     "EryxError",
     "ExecutionError",

@@ -507,8 +507,21 @@ pub enum InvokeResult {
 // When an async import is pending, we need to store state so that when the
 // subtask completes, we can lift the result from the buffer.
 
+/// Type of async import, used to determine how to lift the result.
+///
+/// Note: TCP/TLS operations now use fiber-based async (`call_import_sync` with `func_wrap_async`
+/// on the host), so they complete synchronously from the guest's perspective and don't need
+/// to be tracked as pending imports. Only `invoke` remains async with Component Model async.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ImportType {
+    /// invoke: result<string, string>
+    Invoke,
+}
+
 /// Stored state for a pending async import call.
 struct PendingImportState {
+    /// Type of import (determines result lifting logic)
+    import_type: ImportType,
     /// Function to lift the result from buffer onto call stack
     async_lift_impl: unsafe extern "C" fn(*mut std::ffi::c_void, *mut std::ffi::c_void),
     /// Buffer where the result is stored
@@ -566,6 +579,7 @@ fn call_invoke_async(name: &str, args_json: &str) -> Result<InvokeResult, String
                 cell.borrow_mut().insert(
                     pending_call.subtask,
                     PendingImportState {
+                        import_type: ImportType::Invoke,
                         async_lift_impl,
                         buffer: pending_call.buffer,
                         _cx: cx,
@@ -702,6 +716,540 @@ fn call_report_trace(lineno: u32, event_json: &str, context_json: &str) {
 /// Wrapper function that matches the ReportTraceCallback signature.
 fn report_trace_callback_wrapper(lineno: u32, event_json: &str, context_json: &str) {
     call_report_trace(lineno, event_json, context_json);
+}
+
+// =============================================================================
+// Network import wrappers (TCP and TLS)
+// =============================================================================
+//
+// These functions call the WIT network interface imports.
+
+/// Result of calling an async network operation.
+#[derive(Debug)]
+pub enum NetResult<T> {
+    /// Immediate success with value.
+    Ok(T),
+    /// Immediate error with error variant discriminant and optional message.
+    Err(u32, Option<String>),
+    /// Pending - need to wait for callback. Contains (waitable_id, promise_id).
+    Pending(u32, u32),
+}
+
+// -----------------------------------------------------------------------------
+// TCP operations
+// -----------------------------------------------------------------------------
+
+/// Call the TCP connect import (synchronous - blocks until complete).
+fn call_tcp_connect(host: &str, port: u16) -> Result<NetResult<u32>, String> {
+    CURRENT_WIT.with(|cell| {
+        let wit = cell.borrow();
+        let wit = wit
+            .as_ref()
+            .ok_or_else(|| "TCP connect called outside of execute context".to_string())?;
+
+        let import_func = wit
+            .get_import(Some("eryx:net/tcp@0.1.0"), "connect")
+            .ok_or_else(|| "tcp.connect import not found - networking not enabled".to_string())?;
+
+        let mut cx = EryxCall::new();
+
+        // Push arguments: port (u16), then host (string) - reverse order for wit-dylib
+        cx.push_u16(port);
+        cx.push_string(host.to_string());
+
+        // Synchronous call - blocks until the host completes the operation
+        import_func.call_import_sync(&mut cx);
+
+        // Result: result<tcp-handle, tcp-error>
+        let is_ok = match cx.stack.pop() {
+            Some(Value::ResultDiscriminant(v)) => v,
+            other => return Err(format!("unexpected result discriminant: {other:?}")),
+        };
+
+        if is_ok {
+            let handle = match cx.stack.pop() {
+                Some(Value::U32(h)) => h,
+                other => return Err(format!("unexpected handle value: {other:?}")),
+            };
+            Ok(NetResult::Ok(handle))
+        } else {
+            let discr = match cx.stack.pop() {
+                Some(Value::U32(d)) => d,
+                other => return Err(format!("unexpected error discriminant: {other:?}")),
+            };
+            let payload = cx.stack.pop().and_then(|v| match v {
+                Value::String(s) => Some(s),
+                _ => None,
+            });
+            Ok(NetResult::Err(discr, payload))
+        }
+    })
+}
+
+/// Call the TCP read import (synchronous - blocks until complete).
+fn call_tcp_read(handle: u32, len: u32) -> Result<NetResult<Vec<u8>>, String> {
+    CURRENT_WIT.with(|cell| {
+        let wit = cell.borrow();
+        let wit = wit
+            .as_ref()
+            .ok_or_else(|| "TCP read called outside of execute context".to_string())?;
+
+        let import_func = wit
+            .get_import(Some("eryx:net/tcp@0.1.0"), "read")
+            .ok_or_else(|| "tcp.read import not found - networking not enabled".to_string())?;
+
+        let mut cx = EryxCall::new();
+
+        cx.push_u32(len);
+        cx.push_u32(handle);
+
+        // Synchronous call - blocks until the host completes the operation
+        import_func.call_import_sync(&mut cx);
+
+        let is_ok = match cx.stack.pop() {
+            Some(Value::ResultDiscriminant(v)) => v,
+            other => return Err(format!("unexpected result discriminant: {other:?}")),
+        };
+
+        if is_ok {
+            let bytes = match cx.stack.pop() {
+                Some(Value::Bytes(b)) => b,
+                other => return Err(format!("unexpected bytes value: {other:?}")),
+            };
+            Ok(NetResult::Ok(bytes))
+        } else {
+            let discr = match cx.stack.pop() {
+                Some(Value::U32(d)) => d,
+                other => return Err(format!("unexpected error discriminant: {other:?}")),
+            };
+            let payload = cx.stack.pop().and_then(|v| match v {
+                Value::String(s) => Some(s),
+                _ => None,
+            });
+            Ok(NetResult::Err(discr, payload))
+        }
+    })
+}
+
+/// Call the TCP write import (synchronous - blocks until complete).
+fn call_tcp_write(handle: u32, data: &[u8]) -> Result<NetResult<u32>, String> {
+    CURRENT_WIT.with(|cell| {
+        let wit = cell.borrow();
+        let wit = wit
+            .as_ref()
+            .ok_or_else(|| "TCP write called outside of execute context".to_string())?;
+
+        let import_func = wit
+            .get_import(Some("eryx:net/tcp@0.1.0"), "write")
+            .ok_or_else(|| "tcp.write import not found - networking not enabled".to_string())?;
+
+        let mut cx = EryxCall::new();
+
+        cx.stack.push(Value::Bytes(data.to_vec()));
+        cx.push_u32(handle);
+
+        // Synchronous call - blocks until the host completes the operation
+        import_func.call_import_sync(&mut cx);
+
+        let is_ok = match cx.stack.pop() {
+            Some(Value::ResultDiscriminant(v)) => v,
+            other => return Err(format!("unexpected result discriminant: {other:?}")),
+        };
+
+        if is_ok {
+            let written = match cx.stack.pop() {
+                Some(Value::U32(n)) => n,
+                other => return Err(format!("unexpected written value: {other:?}")),
+            };
+            Ok(NetResult::Ok(written))
+        } else {
+            let discr = match cx.stack.pop() {
+                Some(Value::U32(d)) => d,
+                other => return Err(format!("unexpected error discriminant: {other:?}")),
+            };
+            let payload = cx.stack.pop().and_then(|v| match v {
+                Value::String(s) => Some(s),
+                _ => None,
+            });
+            Ok(NetResult::Err(discr, payload))
+        }
+    })
+}
+
+/// Call the TCP close import (synchronous).
+fn call_tcp_close(handle: u32) {
+    CURRENT_WIT.with(|cell| {
+        let wit = cell.borrow();
+        let Some(wit) = wit.as_ref() else {
+            return;
+        };
+
+        let import_func = match wit.get_import(Some("eryx:net/tcp@0.1.0"), "close") {
+            Some(f) => f,
+            None => return,
+        };
+
+        let mut cx = EryxCall::new();
+        cx.push_u32(handle);
+        import_func.call_import_sync(&mut cx);
+    });
+}
+
+/// TCP error discriminant to error name mapping.
+fn tcp_error_name(discr: u32) -> &'static str {
+    match discr {
+        0 => "connection-refused",
+        1 => "connection-reset",
+        2 => "timed-out",
+        3 => "host-not-found",
+        4 => "io-error",
+        5 => "not-permitted",
+        6 => "invalid-handle",
+        _ => "unknown-error",
+    }
+}
+
+// -----------------------------------------------------------------------------
+// TLS operations
+// -----------------------------------------------------------------------------
+
+/// Call the TLS upgrade import (synchronous - blocks until complete).
+fn call_tls_upgrade(tcp_handle: u32, hostname: &str) -> Result<NetResult<u32>, String> {
+    CURRENT_WIT.with(|cell| {
+        let wit = cell.borrow();
+        let wit = wit
+            .as_ref()
+            .ok_or_else(|| "TLS upgrade called outside of execute context".to_string())?;
+
+        let import_func = wit
+            .get_import(Some("eryx:net/tls@0.1.0"), "upgrade")
+            .ok_or_else(|| "tls.upgrade import not found - networking not enabled".to_string())?;
+
+        let mut cx = EryxCall::new();
+
+        // Push arguments: hostname (string), then tcp_handle (u32) - reverse order
+        cx.push_string(hostname.to_string());
+        cx.push_u32(tcp_handle);
+
+        // Synchronous call - blocks until the host completes the operation
+        import_func.call_import_sync(&mut cx);
+
+        // Result: result<tls-handle, tls-error>
+        let is_ok = match cx.stack.pop() {
+            Some(Value::ResultDiscriminant(v)) => v,
+            other => return Err(format!("unexpected result discriminant: {other:?}")),
+        };
+
+        if is_ok {
+            let handle = match cx.stack.pop() {
+                Some(Value::U32(h)) => h,
+                other => return Err(format!("unexpected handle value: {other:?}")),
+            };
+            Ok(NetResult::Ok(handle))
+        } else {
+            // TLS error is a variant - first discriminant tells us which
+            let discr = match cx.stack.pop() {
+                Some(Value::U32(d)) => d,
+                other => return Err(format!("unexpected error discriminant: {other:?}")),
+            };
+            let payload = cx.stack.pop().and_then(|v| match v {
+                Value::String(s) => Some(s),
+                _ => None,
+            });
+            Ok(NetResult::Err(discr, payload))
+        }
+    })
+}
+
+/// Call the TLS read import (synchronous - blocks until complete).
+fn call_tls_read(handle: u32, len: u32) -> Result<NetResult<Vec<u8>>, String> {
+    CURRENT_WIT.with(|cell| {
+        let wit = cell.borrow();
+        let wit = wit
+            .as_ref()
+            .ok_or_else(|| "TLS read called outside of execute context".to_string())?;
+
+        let import_func = wit
+            .get_import(Some("eryx:net/tls@0.1.0"), "read")
+            .ok_or_else(|| "tls.read import not found - networking not enabled".to_string())?;
+
+        let mut cx = EryxCall::new();
+
+        cx.push_u32(len);
+        cx.push_u32(handle);
+
+        // Synchronous call - blocks until the host completes the operation
+        import_func.call_import_sync(&mut cx);
+
+        let is_ok = match cx.stack.pop() {
+            Some(Value::ResultDiscriminant(v)) => v,
+            other => return Err(format!("unexpected result discriminant: {other:?}")),
+        };
+
+        if is_ok {
+            let bytes = match cx.stack.pop() {
+                Some(Value::Bytes(b)) => b,
+                other => return Err(format!("unexpected bytes value: {other:?}")),
+            };
+            Ok(NetResult::Ok(bytes))
+        } else {
+            let discr = match cx.stack.pop() {
+                Some(Value::U32(d)) => d,
+                other => return Err(format!("unexpected error discriminant: {other:?}")),
+            };
+            let payload = cx.stack.pop().and_then(|v| match v {
+                Value::String(s) => Some(s),
+                _ => None,
+            });
+            Ok(NetResult::Err(discr, payload))
+        }
+    })
+}
+
+/// Call the TLS write import (synchronous - blocks until complete).
+fn call_tls_write(handle: u32, data: &[u8]) -> Result<NetResult<u32>, String> {
+    CURRENT_WIT.with(|cell| {
+        let wit = cell.borrow();
+        let wit = wit
+            .as_ref()
+            .ok_or_else(|| "TLS write called outside of execute context".to_string())?;
+
+        let import_func = wit
+            .get_import(Some("eryx:net/tls@0.1.0"), "write")
+            .ok_or_else(|| "tls.write import not found - networking not enabled".to_string())?;
+
+        let mut cx = EryxCall::new();
+
+        cx.stack.push(Value::Bytes(data.to_vec()));
+        cx.push_u32(handle);
+
+        // Synchronous call - blocks until the host completes the operation
+        import_func.call_import_sync(&mut cx);
+
+        let is_ok = match cx.stack.pop() {
+            Some(Value::ResultDiscriminant(v)) => v,
+            other => return Err(format!("unexpected result discriminant: {other:?}")),
+        };
+
+        if is_ok {
+            let written = match cx.stack.pop() {
+                Some(Value::U32(n)) => n,
+                other => return Err(format!("unexpected written value: {other:?}")),
+            };
+            Ok(NetResult::Ok(written))
+        } else {
+            let discr = match cx.stack.pop() {
+                Some(Value::U32(d)) => d,
+                other => return Err(format!("unexpected error discriminant: {other:?}")),
+            };
+            let payload = cx.stack.pop().and_then(|v| match v {
+                Value::String(s) => Some(s),
+                _ => None,
+            });
+            Ok(NetResult::Err(discr, payload))
+        }
+    })
+}
+
+/// Call the TLS close import (synchronous).
+fn call_tls_close(handle: u32) {
+    CURRENT_WIT.with(|cell| {
+        let wit = cell.borrow();
+        let Some(wit) = wit.as_ref() else {
+            return;
+        };
+
+        let import_func = match wit.get_import(Some("eryx:net/tls@0.1.0"), "close") {
+            Some(f) => f,
+            None => return,
+        };
+
+        let mut cx = EryxCall::new();
+        cx.push_u32(handle);
+        import_func.call_import_sync(&mut cx);
+    });
+}
+
+/// TLS error discriminant to error name mapping.
+/// Note: TLS errors have different structure - 0 is tcp(tcp-error), others are TLS-specific.
+fn tls_error_name(discr: u32) -> &'static str {
+    match discr {
+        0 => "tcp-error", // Wraps a tcp-error
+        1 => "handshake-failed",
+        2 => "certificate-error",
+        3 => "invalid-handle",
+        _ => "unknown-error",
+    }
+}
+
+// Public network API used by python.rs pyfunction implementations
+
+/// Value type for network results returned to Python.
+#[derive(Debug)]
+pub enum NetResultValue {
+    /// Handle or bytes written count (u32).
+    Handle(u32),
+    /// Bytes read.
+    Bytes(Vec<u8>),
+    /// Error message.
+    Error(String),
+    /// Pending operation (waitable_id, promise_id).
+    Pending(u32, u32),
+}
+
+/// Alias for backwards compatibility with existing code.
+pub type TlsResultValue = NetResultValue;
+
+// -----------------------------------------------------------------------------
+// Public TCP API
+// -----------------------------------------------------------------------------
+
+/// Connect to a host:port over TCP.
+/// Returns Ok((status, value)) where:
+/// - status 0: success, value is handle (u32)
+/// - status 1: error, value is error message (String)
+/// - status 2: pending, value is (waitable_id, promise_id)
+pub fn do_tcp_connect(host: &str, port: u16) -> Result<(i32, NetResultValue), String> {
+    match call_tcp_connect(host, port)? {
+        NetResult::Ok(handle) => Ok((0, NetResultValue::Handle(handle))),
+        NetResult::Err(discr, payload) => {
+            let error_name = tcp_error_name(discr);
+            let msg = match payload {
+                Some(p) => format!("{error_name}: {p}"),
+                None => error_name.to_string(),
+            };
+            Ok((1, NetResultValue::Error(msg)))
+        }
+        NetResult::Pending(waitable, promise) => {
+            Ok((2, NetResultValue::Pending(waitable, promise)))
+        }
+    }
+}
+
+/// Read from a TCP connection.
+///
+/// Returns `Ok((status, value))` where:
+/// - status 0: success, value is bytes (`Vec<u8>`)
+/// - status 1: error, value is error message (`String`)
+/// - status 2: pending, value is (waitable_id, promise_id) (`(u32, u32)`)
+pub fn do_tcp_read(handle: u32, len: u32) -> Result<(i32, NetResultValue), String> {
+    match call_tcp_read(handle, len)? {
+        NetResult::Ok(bytes) => Ok((0, NetResultValue::Bytes(bytes))),
+        NetResult::Err(discr, payload) => {
+            let error_name = tcp_error_name(discr);
+            let msg = match payload {
+                Some(p) => format!("{error_name}: {p}"),
+                None => error_name.to_string(),
+            };
+            Ok((1, NetResultValue::Error(msg)))
+        }
+        NetResult::Pending(waitable, promise) => {
+            Ok((2, NetResultValue::Pending(waitable, promise)))
+        }
+    }
+}
+
+/// Write to a TCP connection.
+/// Returns Ok((status, value)) where:
+/// - status 0: success, value is bytes written (u32)
+/// - status 1: error, value is error message (String)
+/// - status 2: pending, value is (waitable_id, promise_id)
+pub fn do_tcp_write(handle: u32, data: &[u8]) -> Result<(i32, NetResultValue), String> {
+    match call_tcp_write(handle, data)? {
+        NetResult::Ok(written) => Ok((0, NetResultValue::Handle(written))),
+        NetResult::Err(discr, payload) => {
+            let error_name = tcp_error_name(discr);
+            let msg = match payload {
+                Some(p) => format!("{error_name}: {p}"),
+                None => error_name.to_string(),
+            };
+            Ok((1, NetResultValue::Error(msg)))
+        }
+        NetResult::Pending(waitable, promise) => {
+            Ok((2, NetResultValue::Pending(waitable, promise)))
+        }
+    }
+}
+
+/// Close a TCP connection (synchronous, no return value).
+pub fn do_tcp_close(handle: u32) {
+    call_tcp_close(handle);
+}
+
+// -----------------------------------------------------------------------------
+// Public TLS API
+// -----------------------------------------------------------------------------
+
+/// Upgrade a TCP connection to TLS.
+/// Returns Ok((status, value)) where:
+/// - status 0: success, value is TLS handle (u32)
+/// - status 1: error, value is error message (String)
+/// - status 2: pending, value is (waitable_id, promise_id)
+pub fn do_tls_upgrade(tcp_handle: u32, hostname: &str) -> Result<(i32, NetResultValue), String> {
+    match call_tls_upgrade(tcp_handle, hostname)? {
+        NetResult::Ok(handle) => Ok((0, NetResultValue::Handle(handle))),
+        NetResult::Err(discr, payload) => {
+            let error_name = tls_error_name(discr);
+            let msg = match payload {
+                Some(p) => format!("{error_name}: {p}"),
+                None => error_name.to_string(),
+            };
+            Ok((1, NetResultValue::Error(msg)))
+        }
+        NetResult::Pending(waitable, promise) => {
+            Ok((2, NetResultValue::Pending(waitable, promise)))
+        }
+    }
+}
+
+/// Read from a TLS connection.
+///
+/// Returns Ok((status, value)) where:
+/// - status 0: success, value is bytes (`Vec<u8>`)
+/// - status 1: error, value is error message (`String`)
+/// - status 2: pending, value is (waitable_id, promise_id) (`(u32, u32)`)
+pub fn do_tls_read(handle: u32, len: u32) -> Result<(i32, NetResultValue), String> {
+    match call_tls_read(handle, len)? {
+        NetResult::Ok(bytes) => Ok((0, NetResultValue::Bytes(bytes))),
+        NetResult::Err(discr, payload) => {
+            let error_name = tls_error_name(discr);
+            let msg = match payload {
+                Some(p) => format!("{error_name}: {p}"),
+                None => error_name.to_string(),
+            };
+            Ok((1, NetResultValue::Error(msg)))
+        }
+        NetResult::Pending(waitable, promise) => {
+            Ok((2, NetResultValue::Pending(waitable, promise)))
+        }
+    }
+}
+
+/// Write to a TLS connection.
+/// Returns Ok((status, value)) where:
+/// - status 0: success, value is bytes written (u32)
+/// - status 1: error, value is error message (String)
+/// - status 2: pending, value is (waitable_id, promise_id)
+pub fn do_tls_write(handle: u32, data: &[u8]) -> Result<(i32, NetResultValue), String> {
+    match call_tls_write(handle, data)? {
+        NetResult::Ok(written) => Ok((0, NetResultValue::Handle(written))),
+        NetResult::Err(discr, payload) => {
+            let error_name = tls_error_name(discr);
+            let msg = match payload {
+                Some(p) => format!("{error_name}: {p}"),
+                None => error_name.to_string(),
+            };
+            Ok((1, NetResultValue::Error(msg)))
+        }
+        NetResult::Pending(waitable, promise) => {
+            Ok((2, NetResultValue::Pending(waitable, promise)))
+        }
+    }
+}
+
+/// Close a TLS connection (synchronous, no return value).
+pub fn do_tls_close(handle: u32) {
+    call_tls_close(handle);
 }
 
 /// Initialize callbacks in Python if not already done.
@@ -919,25 +1467,29 @@ impl Interpreter for EryxInterpreter {
                     );
                 }
 
-                // Read the result from the stack (it's a result<string, string>)
-                // The result discriminant should be on top
-                let is_ok = match cx.stack.pop() {
-                    Some(Value::ResultDiscriminant(v)) => v,
-                    _ => true, // Default to ok if something goes wrong
-                };
-
-                let result_value = match cx.stack.pop() {
-                    Some(Value::String(s)) => s,
-                    _ => String::new(),
-                };
-
-                // Store the result in a Python global for promise_get_result to read
-                let result_json = if is_ok {
-                    format!(r#"{{"ok": true, "value": {}}}"#, result_value)
-                } else {
-                    format!(r#"{{"ok": false, "error": {}}}"#, result_value)
-                };
-                python::set_async_import_result(subtask, &result_json);
+                // Handle result based on import type.
+                // Note: Only `invoke` uses Component Model async. TCP/TLS operations
+                // now use fiber-based async and complete synchronously from the guest's
+                // perspective, so they don't appear as pending imports.
+                match pending_state.import_type {
+                    ImportType::Invoke => {
+                        // result<string, string>
+                        let is_ok = match cx.stack.pop() {
+                            Some(Value::ResultDiscriminant(v)) => v,
+                            _ => true,
+                        };
+                        let result_value = match cx.stack.pop() {
+                            Some(Value::String(s)) => s,
+                            _ => String::new(),
+                        };
+                        let result_json = if is_ok {
+                            format!(r#"{{"ok": true, "value": {}}}"#, result_value)
+                        } else {
+                            format!(r#"{{"ok": false, "error": {}}}"#, result_value)
+                        };
+                        python::set_async_import_result(subtask, &result_json);
+                    }
+                }
             }
         }
 

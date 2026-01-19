@@ -70,12 +70,12 @@ fn test_link_runtime() -> Result<(), Box<dyn std::error::Error>> {
     println!("  libwasi-emulated-mman.so: {} bytes", wasi_mman.len());
     println!("  libwasi-emulated-getpid.so: {} bytes", wasi_getpid.len());
 
-    // Parse the runtime.wit file
-    let wit_path = project_root.join("crates/eryx-runtime/runtime.wit");
+    // Parse the WIT files from the wit/ directory
+    let wit_path = project_root.join("crates/eryx-runtime/wit");
     println!("Loading WIT from: {}", wit_path.display());
 
     let mut resolve = wit_parser::Resolve::default();
-    let (pkg_id, _) = resolve.push_path(&wit_path)?;
+    let (pkg_id, _) = resolve.push_dir(&wit_path)?;
     let world_id = resolve.select_world(&[pkg_id], Some("sandbox"))?;
 
     println!("Parsed WIT world: sandbox");

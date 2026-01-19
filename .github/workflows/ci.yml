@@ -42,9 +42,12 @@ jobs:
 
       - name: Force rebuild (cache may have stale timestamps)
         run: |
-          # Touch sources to ensure mise doesn't skip build due to cached timestamps
-          touch crates/eryx-wasm-runtime/src/lib.rs
-          # Remove outputs if they don't exist (mise checks mtime, not existence)
+          # Touch ALL sources to ensure mise doesn't skip build due to cached timestamps
+          # The Rust cache may restore .rlib files with newer timestamps than sources
+          find crates/eryx-wasm-runtime/src -name "*.rs" -exec touch {} +
+          touch crates/eryx-wasm-runtime/clock_stubs.c
+          touch crates/eryx-wasm-runtime/Cargo.toml
+          # Remove outputs (mise checks mtime, not existence)
           rm -f crates/eryx-runtime/runtime.wasm crates/eryx-runtime/runtime.cwasm
 
       - name: Build eryx-runtime

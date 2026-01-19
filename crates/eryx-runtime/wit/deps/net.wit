@@ -1,0 +1,151 @@
+/// Networking interfaces for the eryx sandbox.
+///
+/// Provides TCP and TLS networking for Python code running in the sandbox.
+/// TCP enables plain connections (http://localhost), while TLS provides
+/// secure encrypted connections.
+///
+/// ## Design Notes
+///
+/// This is a minimal, client-only networking interface. It differs from
+/// wasi-sockets in several ways:
+///
+/// - Includes TLS as a first-class interface (wasi-sockets doesn't have TLS)
+/// - Client-only (no bind/listen/accept for servers)
+/// - Host-controlled DNS resolution and network policy
+/// - Simple u32 handles instead of resource types with streams
+///
+/// The functions are declared as regular sync functions in WIT, but the host
+/// implements them with fiber-based async (wasmtime's `async` bindgen flag).
+/// This makes the functions appear blocking to the guest while the host can
+/// still perform async I/O.
+///
+/// ## Future: wasi-sockets Migration
+///
+/// When WASI 0.3 adds native async support to wasi-sockets (expected ~2026),
+/// we may migrate to it for better standards compliance and portability.
+/// Key blockers for migration:
+///
+/// 1. wasi-sockets needs native async (not start-*/finish-*)
+/// 2. A wasi-tls proposal needs to mature (or we keep our tls interface)
+/// 3. We'd need to virtualize away server-side APIs we don't want to expose
+///
+/// See: https://github.com/WebAssembly/wasi-sockets
+/// See: https://wasi.dev/roadmap
+package eryx:net@0.1.0;
+
+/// Plain TCP connections.
+///
+/// Use this for unencrypted connections like HTTP to localhost or internal
+/// services. For secure connections, establish a TCP connection first then
+/// upgrade it using the tls interface.
+interface tcp {
+    /// Errors that can occur during TCP operations.
+    variant tcp-error {
+        /// Connection was refused by the remote host.
+        connection-refused,
+        /// Connection was reset by the remote host.
+        connection-reset,
+        /// Operation timed out.
+        timed-out,
+        /// DNS lookup failed.
+        host-not-found,
+        /// Generic I/O error.
+        io-error(string),
+        /// Network access not permitted by sandbox policy.
+        not-permitted(string),
+        /// Invalid handle (connection was closed).
+        invalid-handle,
+    }
+
+    /// Opaque handle to a TCP connection (managed by host).
+    type tcp-handle = u32;
+
+    /// Connect to a host:port over TCP.
+    ///
+    /// The hostname is used for DNS resolution. The host controls which
+    /// connections are allowed via its network policy configuration.
+    ///
+    /// Blocks until the connection is established or fails.
+    connect: func(host: string, port: u16) -> result<tcp-handle, tcp-error>;
+
+    /// Read up to `len` bytes from a TCP connection.
+    ///
+    /// Returns the bytes read. May return fewer than `len` bytes if less
+    /// data is available. Returns empty list on EOF (connection closed
+    /// gracefully by peer).
+    ///
+    /// Blocks until data is available or the connection is closed.
+    read: func(handle: tcp-handle, len: u32) -> result<list<u8>, tcp-error>;
+
+    /// Write bytes to a TCP connection.
+    ///
+    /// Returns the number of bytes written. May be less than the input
+    /// length if the connection buffer is full.
+    ///
+    /// Blocks until data is written.
+    write: func(handle: tcp-handle, data: list<u8>) -> result<u32, tcp-error>;
+
+    /// Close a TCP connection.
+    ///
+    /// Closes the underlying TCP connection. After this call, the handle
+    /// is invalid.
+    close: func(handle: tcp-handle);
+}
+
+/// TLS upgrade for TCP connections.
+///
+/// Provides TLS encryption by upgrading an existing TCP connection.
+/// This enables both direct HTTPS connections and STARTTLS-style upgrades.
+interface tls {
+    use tcp.{tcp-handle, tcp-error};
+
+    /// TLS-specific errors.
+    variant tls-error {
+        /// Error from the underlying TCP connection.
+        tcp(tcp-error),
+        /// TLS handshake failed (certificate verification, protocol error, etc).
+        handshake-failed(string),
+        /// Certificate verification failed.
+        certificate-error(string),
+        /// Invalid handle (connection was closed).
+        invalid-handle,
+    }
+
+    /// Opaque handle to a TLS connection (managed by host).
+    type tls-handle = u32;
+
+    /// Upgrade a TCP connection to TLS.
+    ///
+    /// Takes ownership of the TCP connection and performs a TLS handshake.
+    /// The hostname is used for SNI (Server Name Indication) and certificate
+    /// hostname verification.
+    ///
+    /// After upgrade, the original tcp-handle is invalid - use the returned
+    /// tls-handle for all further operations.
+    ///
+    /// Blocks until the TLS handshake completes.
+    upgrade: func(tcp: tcp-handle, hostname: string) -> result<tls-handle, tls-error>;
+
+    /// Read up to `len` bytes from a TLS connection.
+    ///
+    /// Returns the bytes read. May return fewer than `len` bytes if less
+    /// data is available. Returns empty list on EOF (connection closed
+    /// gracefully by peer after TLS close_notify).
+    ///
+    /// Blocks until data is available or the connection is closed.
+    read: func(handle: tls-handle, len: u32) -> result<list<u8>, tls-error>;
+
+    /// Write bytes to a TLS connection.
+    ///
+    /// Returns the number of bytes written. May be less than the input
+    /// length if the connection buffer is full.
+    ///
+    /// Blocks until data is written.
+    write: func(handle: tls-handle, data: list<u8>) -> result<u32, tls-error>;
+
+    /// Close a TLS connection.
+    ///
+    /// Performs a graceful TLS shutdown (sends close_notify) and closes
+    /// the underlying TCP connection. After this call, the handle is invalid.
+    close: func(handle: tls-handle);
+}
