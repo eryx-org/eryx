@@ -294,6 +294,7 @@ This project has multiple layers of caching that can cause confusing "stale buil
 | **Embedded runtime** | `/tmp/eryx-embedded/` | Content hash in filename | Old versions accumulate; shouldn't cause staleness |
 | **Python extension** | `_eryx.abi3.so` | `maturin develop` | After changing `eryx-wasm-runtime` Rust code |
 | **WASM artifacts** | `crates/eryx-runtime/runtime.{wasm,cwasm}` | `mise run build-eryx-runtime` | After changing `eryx-wasm-runtime` code |
+| **Late-linking artifacts** | `target/*/build/eryx-runtime-*/out/*.so.zst` | Rebuild eryx-runtime | WIT interface changes (e.g., TCP/TLS) not reflected |
 
 ### Symptoms of Stale Caches
 
@@ -301,6 +302,7 @@ This project has multiple layers of caching that can cause confusing "stale buil
 - **`SandboxFactory` behaves differently than `Sandbox`** - Factory uses preinit snapshot with old bytecode
 - **Tests pass locally but fail in CI** (or vice versa) - Different cache states
 - **`ModuleNotFoundError` for shim modules** - ssl/socket shims not in runtime.wasm
+- **`type-checking export func` errors in preinit** - Late-linking artifacts have old WIT interface
 
 ### Diagnosing Cache Issues
 
@@ -309,19 +311,22 @@ This project has multiple layers of caching that can cause confusing "stale buil
 mise run check-caches
 
 # Check individual layers
-mise run check-wasm-artifacts      # WASM/CWASM vs source timestamps
-mise run check-embedded-cache      # /tmp/eryx-embedded state
-mise run check-python-extension    # .so vs Rust source timestamps
-mise run check-cargo-timestamps    # .rlib vs source timestamps
+mise run check-wasm-artifacts        # WASM/CWASM vs source timestamps
+mise run check-embedded-cache        # /tmp/eryx-embedded state
+mise run check-python-extension      # .so vs Rust source timestamps
+mise run check-cargo-timestamps      # .rlib vs source timestamps
+mise run check-late-linking-cache    # OUT_DIR .so.zst vs prebuilt
 ```
 
 ### Recovery Commands
 
 ```bash
-# Nuclear option - clean everything
+# Nuclear option - clean everything (includes late-linking cache and /tmp/eryx-embedded)
 mise run clean-artifacts
 cargo clean
-rm -rf /tmp/eryx-embedded
+
+# Clear just the late-linking artifact cache (for preinit type-checking errors)
+mise run clean-late-linking-cache
 
 # Rebuild from scratch
 mise run setup

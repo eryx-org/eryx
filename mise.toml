@@ -112,12 +112,12 @@ run = "cargo clean"
 
 [tasks.check-caches]
 description = "Check all cache layers for potential staleness issues"
-depends = ["check-wasm-artifacts", "check-embedded-cache", "check-python-extension", "check-cargo-timestamps"]
+depends = ["check-wasm-artifacts", "check-embedded-cache", "check-python-extension", "check-cargo-timestamps", "check-late-linking-cache"]
 run = """
 echo ""
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo "Cache check complete. Review any warnings above."
-echo "To clean all caches: mise run clean-artifacts && cargo clean && rm -rf /tmp/eryx-embedded"
+echo "To clean all caches: mise run clean-artifacts && cargo clean"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 """
 
@@ -285,6 +285,63 @@ fi
 echo ""
 '''
 
+[tasks.check-late-linking-cache]
+description = "Check for stale late-linking artifacts in cargo OUT_DIR"
+run = '''
+echo "━━━ Late-Linking Artifacts ━━━"
+
+# Late-linking artifacts are cached in target/*/build/eryx-runtime-*/out/
+# If these are stale (e.g., old WIT interface without TCP/TLS), preinit fails
+# with "type-checking export func" errors
+
+CACHED_ARTIFACTS=$(find target -path "*/build/eryx-runtime-*/out/*.so.zst" 2>/dev/null)
+
+if [[ -z "$CACHED_ARTIFACTS" ]]; then
+    echo "✓ No cached late-linking artifacts found"
+else
+    echo "Found cached late-linking artifacts:"
+    echo "$CACHED_ARTIFACTS" | while read f; do
+        echo "  $(ls -lh "$f" | awk '{print $5, $6, $7, $8, $9}')"
+    done
+
+    # Check if prebuilt artifacts exist and compare
+    PREBUILT="crates/eryx-runtime/prebuilt/liberyx_runtime.so.zst"
+    if [[ -f "$PREBUILT" ]]; then
+        PREBUILT_TIME=$(stat -c '%Y' "$PREBUILT" 2>/dev/null || stat -f '%m' "$PREBUILT")
+        STALE=""
+        for cached in $CACHED_ARTIFACTS; do
+            CACHED_TIME=$(stat -c '%Y' "$cached" 2>/dev/null || stat -f '%m' "$cached")
+            if [[ "$PREBUILT_TIME" -gt "$CACHED_TIME" ]]; then
+                STALE="yes"
+                break
+            fi
+        done
+        if [[ -n "$STALE" ]]; then
+            echo "⚠️  Cached artifacts are older than prebuilt artifacts"
+            echo "   Run 'mise run clean-late-linking-cache' to clear them"
+        else
+            echo "✓ Cached artifacts appear up-to-date"
+        fi
+    else
+        echo "   (no prebuilt artifacts to compare against)"
+    fi
+fi
+echo ""
+'''
+
+[tasks.clean-late-linking-cache]
+description = "Clear stale late-linking artifacts from cargo OUT_DIR"
+run = """
+echo "Removing late-linking artifacts from cargo OUT_DIR..."
+FOUND=$(find target -path "*/build/eryx-runtime-*/out/*.so.zst" 2>/dev/null)
+if [[ -n "$FOUND" ]]; then
+    echo "$FOUND" | xargs rm -v
+    echo "✓ Late-linking cache cleared"
+else
+    echo "✓ No cached late-linking artifacts found"
+fi
+"""
+
 [tasks.clean-artifacts]
 description = "Clean WASM artifacts and extracted stdlibs (simulate CI fresh state)"
 run = """
@@ -302,6 +359,9 @@ rm -f crates/eryx-wasm-runtime/target/liberyx_runtime.so
 
 echo "Removing system temp extracted resources..."
 rm -rf "${TMPDIR:-/tmp}/eryx-embedded"
+
+echo "Removing late-linking artifacts from cargo OUT_DIR..."
+find target -path "*/build/eryx-runtime-*/out/*.so.zst" -delete 2>/dev/null || true
 
 echo "✓ Artifacts cleaned. Run 'mise run setup' to rebuild."
 """
