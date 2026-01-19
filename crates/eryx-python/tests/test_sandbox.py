@@ -163,34 +163,19 @@ class TestNetConfig:
     def test_sandbox_with_network(self):
         """Test creating sandbox with network config.
 
-        Note: This may fail if the embedded runtime was built without network support.
-        In that case, full networking tests are in crates/eryx/tests/tls_networking.rs.
+        Network support should always be available in CI builds.
         """
         config = eryx.NetConfig(allowed_hosts=["api.example.com"])
-        try:
-            sandbox = eryx.Sandbox(network=config)
-            # Just verify sandbox is created - actual networking is tested in integration tests
-            result = sandbox.execute('print("ok")')
-            assert result.stdout == "ok"
-        except eryx.InitializationError as e:
-            if "eryx:sandbox/tls" in str(e) or "eryx:net" in str(e):
-                pytest.skip("Embedded runtime does not include network support")
-            raise
+        sandbox = eryx.Sandbox(network=config)
+        result = sandbox.execute('print("ok")')
+        assert result.stdout == "ok"
 
     def test_sandbox_with_permissive_network(self):
-        """Test creating sandbox with permissive network config.
-
-        Note: This may fail if the embedded runtime was built without network support.
-        """
+        """Test creating sandbox with permissive network config."""
         config = eryx.NetConfig.permissive()
-        try:
-            sandbox = eryx.Sandbox(network=config)
-            result = sandbox.execute('print("permissive ok")')
-            assert result.stdout == "permissive ok"
-        except eryx.InitializationError as e:
-            if "eryx:sandbox/tls" in str(e) or "eryx:net" in str(e):
-                pytest.skip("Embedded runtime does not include network support")
-            raise
+        sandbox = eryx.Sandbox(network=config)
+        result = sandbox.execute('print("permissive ok")')
+        assert result.stdout == "permissive ok"
 
     def test_repr(self):
         """Test NetConfig repr."""
@@ -330,47 +315,30 @@ class TestModuleMetadata:
             assert hasattr(eryx, name), f"Missing export: {name}"
 
 
-# Module-level fixture for SandboxFactory tests
-# Factory creation is slow (~2s), so we share one instance across tests
-_shared_factory = None
-
-
-def get_shared_factory():
-    """Get or create a shared SandboxFactory for tests."""
-    global _shared_factory
-    if _shared_factory is None:
-        _shared_factory = eryx.SandboxFactory()
-    return _shared_factory
-
-
 class TestSandboxFactory:
     """Tests for SandboxFactory class.
 
-    Note: These tests share a single SandboxFactory instance
-    because factory creation takes ~2s each time.
+    Note: These tests share a single SandboxFactory instance via the
+    sandbox_factory fixture because factory creation takes ~2s each time.
     """
 
-    def test_factory_basic_creation(self):
+    def test_factory_basic_creation(self, sandbox_factory):
         """Test that a SandboxFactory can be created."""
-        factory = get_shared_factory()
-        assert factory is not None
-        assert factory.size_bytes > 0
+        assert sandbox_factory is not None
+        assert sandbox_factory.size_bytes > 0
 
-    def test_factory_create_sandbox(self):
+    def test_factory_create_sandbox(self, sandbox_factory):
         """Test creating a sandbox from factory."""
-        factory = get_shared_factory()
-        sandbox = factory.create_sandbox()
+        sandbox = sandbox_factory.create_sandbox()
         assert sandbox is not None
 
         result = sandbox.execute("print('hello')")
         assert result.stdout == "hello"
 
-    def test_factory_multiple_sandboxes(self):
+    def test_factory_multiple_sandboxes(self, sandbox_factory):
         """Test creating multiple sandboxes from same factory."""
-        factory = get_shared_factory()
-
-        sandbox1 = factory.create_sandbox()
-        sandbox2 = factory.create_sandbox()
+        sandbox1 = sandbox_factory.create_sandbox()
+        sandbox2 = sandbox_factory.create_sandbox()
 
         result1 = sandbox1.execute("print('sandbox1')")
         result2 = sandbox2.execute("print('sandbox2')")
@@ -378,14 +346,12 @@ class TestSandboxFactory:
         assert result1.stdout == "sandbox1"
         assert result2.stdout == "sandbox2"
 
-    def test_factory_sandboxes_isolated(self):
+    def test_factory_sandboxes_isolated(self, sandbox_factory):
         """Test that sandboxes from same factory are isolated."""
-        factory = get_shared_factory()
-
-        sandbox1 = factory.create_sandbox()
+        sandbox1 = sandbox_factory.create_sandbox()
         sandbox1.execute("shared_var = 42")
 
-        sandbox2 = factory.create_sandbox()
+        sandbox2 = sandbox_factory.create_sandbox()
         result = sandbox2.execute("""
 try:
     print(f"var={shared_var}")
@@ -394,67 +360,61 @@ except NameError:
 """)
         assert "isolated" in result.stdout
 
-    def test_factory_save_and_load(self, tmp_path):
+    def test_factory_save_and_load(self, sandbox_factory, tmp_path):
         """Test saving and loading a sandbox factory."""
-        factory = get_shared_factory()
         save_path = tmp_path / "factory.bin"
-        factory.save(save_path)
+        sandbox_factory.save(save_path)
 
         assert save_path.exists()
         assert save_path.stat().st_size > 0
 
         # Load and use
         loaded = eryx.SandboxFactory.load(save_path)
-        assert loaded.size_bytes == factory.size_bytes
+        assert loaded.size_bytes == sandbox_factory.size_bytes
 
         sandbox = loaded.create_sandbox()
         result = sandbox.execute("import json; print(json.dumps([1,2]))")
         assert result.stdout == "[1, 2]"
 
-    def test_factory_to_bytes(self):
+    def test_factory_to_bytes(self, sandbox_factory):
         """Test getting factory as bytes."""
-        factory = get_shared_factory()
-        data = factory.to_bytes()
+        data = sandbox_factory.to_bytes()
         assert isinstance(data, bytes)
-        assert len(data) == factory.size_bytes
+        assert len(data) == sandbox_factory.size_bytes
 
-    def test_factory_repr(self):
+    def test_factory_repr(self, sandbox_factory):
         """Test __repr__ is informative."""
-        factory = get_shared_factory()
-        repr_str = repr(factory)
+        repr_str = repr(sandbox_factory)
         assert "SandboxFactory" in repr_str
         assert "size_bytes" in repr_str
 
-    def test_factory_with_resource_limits_timeout(self):
+    def test_factory_with_resource_limits_timeout(self, sandbox_factory):
         """Test creating sandbox with resource limits from factory.
 
         Uses epoch-based interruption which works correctly with
         pre-compiled WASM components.
         """
-        factory = get_shared_factory()
         limits = eryx.ResourceLimits(execution_timeout_ms=500)
-        sandbox = factory.create_sandbox(resource_limits=limits)
+        sandbox = sandbox_factory.create_sandbox(resource_limits=limits)
 
         with pytest.raises(eryx.TimeoutError):
             sandbox.execute("while True: pass")
 
-    def test_factory_with_resource_limits_memory(self):
+    def test_factory_with_resource_limits_memory(self, sandbox_factory):
         """Test that resource limits can be set (without testing timeout)."""
-        factory = get_shared_factory()
         limits = eryx.ResourceLimits(
             execution_timeout_ms=30000,
             max_memory_bytes=100_000_000,
         )
-        sandbox = factory.create_sandbox(resource_limits=limits)
+        sandbox = sandbox_factory.create_sandbox(resource_limits=limits)
 
         # Just verify we can create and use the sandbox
         result = sandbox.execute("print('ok')")
         assert result.stdout == "ok"
 
-    def test_factory_stdlib_imports_work(self):
+    def test_factory_stdlib_imports_work(self, sandbox_factory):
         """Test that stdlib imports work with factory."""
-        factory = get_shared_factory()
-        sandbox = factory.create_sandbox()
+        sandbox = sandbox_factory.create_sandbox()
 
         # Various stdlib modules should be importable
         result = sandbox.execute("""
@@ -467,28 +427,11 @@ print(f"json: {data}, match: {match.group()}")
         assert "json:" in result.stdout
         assert "match: 1" in result.stdout
 
-    @pytest.mark.skipif(
-        not Path("/tmp/wheels/jinja2-3.1.6-py3-none-any.whl").exists(),
-        reason="jinja2 wheel not available",
-    )
-    def test_factory_with_packages(self):
-        """Test factory with packages (if available)."""
-        jinja2_wheel = "/tmp/wheels/jinja2-3.1.6-py3-none-any.whl"
-        markupsafe_wheel = None
-
-        # Find markupsafe wheel
-        wheels_dir = Path("/tmp/wheels")
-        for f in wheels_dir.iterdir():
-            if f.name.lower().startswith("markupsafe") and f.suffix == ".whl":
-                markupsafe_wheel = str(f)
-                break
-
-        if not markupsafe_wheel:
-            pytest.skip("markupsafe wheel not available")
-
+    def test_factory_with_packages(self, jinja2_wheel, markupsafe_wheel):
+        """Test factory with packages."""
         # This creates a separate factory with packages
         factory = eryx.SandboxFactory(
-            packages=[jinja2_wheel, markupsafe_wheel],
+            packages=[str(jinja2_wheel), str(markupsafe_wheel)],
             imports=["jinja2"],
         )
 
@@ -505,20 +448,12 @@ class TestNetworkIntegration:
     """Integration tests for networking functionality.
 
     These tests verify that the sync socket shim works correctly with
-    fiber-based async on the host. They require network access and use
-    real external services.
-    """
+    fiber-based async on the host. They use a local test server to avoid
+    external dependencies in CI.
 
-    @pytest.fixture
-    def network_sandbox(self):
-        """Create a sandbox with permissive network config."""
-        try:
-            config = eryx.NetConfig.permissive()
-            return eryx.Sandbox(network=config)
-        except eryx.InitializationError as e:
-            if "eryx:net" in str(e):
-                pytest.skip("Embedded runtime does not include network support")
-            raise
+    Note: These tests will FAIL (not skip) if network support is missing,
+    because network support should always be available in CI builds.
+    """
 
     def test_socket_module_imports(self, network_sandbox):
         """Test that socket module can be imported."""
@@ -540,31 +475,64 @@ print("ssl import ok")
 """)
         assert "ssl import ok" in result.stdout
 
-    def test_sync_socket_tcp_connect(self, network_sandbox):
-        """Test synchronous socket.connect() works via fiber-based async."""
+    def test_sync_socket_tcp_connect_local(self, network_sandbox, http_server):
+        """Test synchronous socket.connect() to local test server."""
+        host, port = http_server
+        result = network_sandbox.execute(f"""
+import socket
+
+sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+sock.settimeout(5)
+
+try:
+    sock.connect(("{host}", {port}))
+    print("TCP connected")
+
+    request = b"GET / HTTP/1.1\\r\\nHost: {host}:{port}\\r\\nConnection: close\\r\\n\\r\\n"
+    sock.send(request)
+    print("Request sent")
+
+    # Read all data until connection closes
+    chunks = []
+    while True:
+        chunk = sock.recv(4096)
+        if not chunk:
+            break
+        chunks.append(chunk)
+    response = b"".join(chunks)
+
+    if b"HTTP/1.1" in response or b"HTTP/1.0" in response:
+        print("HTTP response received")
+    if b"Hello from test server" in response:
+        print("Got expected body")
+
+    sock.close()
+    print("SUCCESS")
+except Exception as e:
+    print(f"Error: {{e}}")
+""")
+        assert "SUCCESS" in result.stdout, f"Test failed: {result.stdout}"
+        assert "Got expected body" in result.stdout, f"Test failed: {result.stdout}"
+
+    def test_sync_socket_tcp_connect_external(self, network_sandbox):
+        """Test synchronous socket.connect() to external service."""
         result = network_sandbox.execute("""
 import socket
 
-# Create a socket and connect to a well-known service
 sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 sock.settimeout(10)
 
 try:
-    # Connect to example.com on port 80
     sock.connect(("example.com", 80))
     print("TCP connected")
 
-    # Send a simple HTTP request
     request = b"GET / HTTP/1.1\\r\\nHost: example.com\\r\\nConnection: close\\r\\n\\r\\n"
     sock.send(request)
     print("Request sent")
 
-    # Read the response
     response = sock.recv(1024)
     if b"HTTP/1.1" in response or b"HTTP/1.0" in response:
         print("HTTP response received")
-    else:
-        print(f"Unexpected response: {response[:100]}")
 
     sock.close()
     print("SUCCESS")
@@ -573,7 +541,7 @@ except Exception as e:
 """)
         assert "SUCCESS" in result.stdout, f"Test failed: {result.stdout}"
 
-    def test_sync_socket_https_with_ssl(self, network_sandbox):
+    def test_sync_socket_https_external(self, network_sandbox):
         """Test synchronous HTTPS via socket + ssl.wrap_socket()."""
         result = network_sandbox.execute("""
 import socket
@@ -583,26 +551,20 @@ sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 sock.settimeout(15)
 
 try:
-    # Connect to example.com on port 443
     sock.connect(("example.com", 443))
     print("TCP connected")
 
-    # Wrap with SSL
     ctx = ssl.create_default_context()
     ssl_sock = ctx.wrap_socket(sock, server_hostname="example.com")
     print("TLS handshake complete")
 
-    # Send HTTPS request
     request = b"GET / HTTP/1.1\\r\\nHost: example.com\\r\\nConnection: close\\r\\n\\r\\n"
     ssl_sock.send(request)
     print("Request sent")
 
-    # Read response
     response = ssl_sock.recv(1024)
     if b"HTTP/1.1" in response or b"HTTP/1.0" in response:
         print("HTTPS response received")
-    else:
-        print(f"Unexpected response: {response[:100]}")
 
     ssl_sock.close()
     print("SUCCESS")
@@ -611,12 +573,43 @@ except Exception as e:
 """)
         assert "SUCCESS" in result.stdout, f"Test failed: {result.stdout}"
 
-    def test_async_tcp_api(self, network_sandbox):
-        """Test the async _eryx_async API for TCP."""
+    def test_async_tcp_api_local(self, network_sandbox, http_server):
+        """Test the async _eryx_async TCP API with local server."""
+        host, port = http_server
+        result = network_sandbox.execute(f"""
+import _eryx_async
+
+tcp_handle = await _eryx_async.await_tcp_connect("{host}", {port})
+print(f"Connected with handle: {{tcp_handle}}")
+
+request = b"GET / HTTP/1.1\\r\\nHost: {host}:{port}\\r\\nConnection: close\\r\\n\\r\\n"
+written = await _eryx_async.await_tcp_write(tcp_handle, request)
+print(f"Wrote {{written}} bytes")
+
+# Read until we get the full response (Connection: close means server closes after response)
+full_response = b""
+while True:
+    chunk = await _eryx_async.await_tcp_read(tcp_handle, 4096)
+    if not chunk:
+        break
+    full_response += chunk
+
+if b"HTTP" in full_response:
+    print("Got HTTP response")
+if b"Hello from test server" in full_response:
+    print("Got expected body")
+
+_eryx_async.tcp_close(tcp_handle)
+print("SUCCESS")
+""")
+        assert "SUCCESS" in result.stdout, f"Test failed: {result.stdout}"
+        assert "Got expected body" in result.stdout, f"Test failed: {result.stdout}"
+
+    def test_async_tcp_api_external(self, network_sandbox):
+        """Test the async _eryx_async TCP API with external service."""
         result = network_sandbox.execute("""
 import _eryx_async
 
-# Use top-level await with the async API
 tcp_handle = await _eryx_async.await_tcp_connect("example.com", 80)
 print(f"Connected with handle: {tcp_handle}")
 
@@ -633,12 +626,11 @@ print("SUCCESS")
 """)
         assert "SUCCESS" in result.stdout, f"Test failed: {result.stdout}"
 
-    def test_async_tls_api(self, network_sandbox):
-        """Test the async _eryx_async API for TLS."""
+    def test_async_tls_api_external(self, network_sandbox):
+        """Test the async _eryx_async TLS API with external service."""
         result = network_sandbox.execute("""
 import _eryx_async
 
-# Connect and upgrade to TLS
 tcp_handle = await _eryx_async.await_tcp_connect("example.com", 443)
 print("TCP connected")
 
@@ -661,13 +653,8 @@ print("SUCCESS")
     def test_network_blocked_host(self):
         """Test that blocked hosts are rejected."""
         # Default config blocks localhost
-        try:
-            config = eryx.NetConfig()
-            sandbox = eryx.Sandbox(network=config)
-        except eryx.InitializationError as e:
-            if "eryx:net" in str(e):
-                pytest.skip("Embedded runtime does not include network support")
-            raise
+        config = eryx.NetConfig()
+        sandbox = eryx.Sandbox(network=config)
 
         result = sandbox.execute("""
 import _eryx_async
@@ -688,13 +675,8 @@ except OSError as e:
 
     def test_allowed_hosts_whitelist(self):
         """Test that allowed_hosts whitelist works."""
-        try:
-            config = eryx.NetConfig(allowed_hosts=["example.com"])
-            sandbox = eryx.Sandbox(network=config)
-        except eryx.InitializationError as e:
-            if "eryx:net" in str(e):
-                pytest.skip("Embedded runtime does not include network support")
-            raise
+        config = eryx.NetConfig(allowed_hosts=["example.com"])
+        sandbox = eryx.Sandbox(network=config)
 
         # Should be able to connect to example.com
         result = sandbox.execute("""
