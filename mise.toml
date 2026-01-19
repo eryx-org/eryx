@@ -104,6 +104,187 @@ run = "cargo test-all-features"
 description = "Clean build artifacts"
 run = "cargo clean"
 
+# =============================================================================
+# Cache Detection Tasks
+# =============================================================================
+# These tasks help detect stale or problematic cached artifacts.
+# Run `mise run check-caches` to check all cache layers at once.
+
+[tasks.check-caches]
+description = "Check all cache layers for potential staleness issues"
+depends = ["check-wasm-artifacts", "check-embedded-cache", "check-python-extension", "check-cargo-timestamps"]
+run = """
+echo ""
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo "Cache check complete. Review any warnings above."
+echo "To clean all caches: mise run clean-artifacts && cargo clean && rm -rf /tmp/eryx-embedded"
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+"""
+
+[tasks.check-wasm-artifacts]
+description = "Check WASM/CWASM artifact timestamps vs source files"
+run = """
+echo "━━━ WASM Artifacts ━━━"
+
+WASM="crates/eryx-runtime/runtime.wasm"
+CWASM="crates/eryx-runtime/runtime.cwasm"
+
+if [[ ! -f "$WASM" ]]; then
+    echo "⚠️  runtime.wasm does not exist - run 'mise run build-eryx-runtime'"
+elif [[ ! -f "$CWASM" ]]; then
+    echo "⚠️  runtime.cwasm does not exist - run 'mise run precompile-eryx-runtime'"
+else
+    WASM_TIME=$(stat -c %Y "$WASM" 2>/dev/null || stat -f %m "$WASM")
+    CWASM_TIME=$(stat -c %Y "$CWASM" 2>/dev/null || stat -f %m "$CWASM")
+
+    echo "runtime.wasm:  $(ls -lh "$WASM" | awk '{print $5, $6, $7, $8}')"
+    echo "runtime.cwasm: $(ls -lh "$CWASM" | awk '{print $5, $6, $7, $8}')"
+
+    # Check if any source file is newer than wasm
+    NEWEST_SRC=$(find crates/eryx-wasm-runtime/src -name "*.rs" -newer "$WASM" 2>/dev/null | head -5)
+    if [[ -n "$NEWEST_SRC" ]]; then
+        echo "⚠️  Source files newer than runtime.wasm:"
+        echo "$NEWEST_SRC" | sed 's/^/    /'
+        echo "   Run 'mise run build-eryx-runtime' to rebuild"
+    else
+        echo "✓ runtime.wasm is up-to-date with sources"
+    fi
+
+    if [[ "$WASM_TIME" -gt "$CWASM_TIME" ]]; then
+        echo "⚠️  runtime.wasm is newer than runtime.cwasm - run 'mise run precompile-eryx-runtime'"
+    else
+        echo "✓ runtime.cwasm is up-to-date"
+    fi
+fi
+echo ""
+"""
+
+[tasks.check-embedded-cache]
+description = "Check embedded runtime cache in /tmp/eryx-embedded"
+run = """
+echo "━━━ Embedded Runtime Cache ━━━"
+
+CACHE_DIR="${TMPDIR:-/tmp}/eryx-embedded"
+
+if [[ ! -d "$CACHE_DIR" ]]; then
+    echo "✓ No embedded cache directory (will be created on first use)"
+else
+    echo "Cache directory: $CACHE_DIR"
+
+    # List runtime files
+    RUNTIME_FILES=$(ls -la "$CACHE_DIR"/runtime-*.cwasm 2>/dev/null)
+    if [[ -n "$RUNTIME_FILES" ]]; then
+        echo "Cached runtimes:"
+        ls -lh "$CACHE_DIR"/runtime-*.cwasm 2>/dev/null | while read line; do
+            echo "  $line"
+        done
+
+        # Count how many versions exist
+        COUNT=$(ls "$CACHE_DIR"/runtime-*.cwasm 2>/dev/null | wc -l)
+        if [[ "$COUNT" -gt 1 ]]; then
+            echo "⚠️  Multiple runtime versions cached ($COUNT files) - old versions can be cleaned"
+        fi
+    else
+        echo "  No runtime files cached"
+    fi
+
+    # Check stdlib
+    if [[ -d "$CACHE_DIR/python-stdlib" ]]; then
+        STDLIB_SIZE=$(du -sh "$CACHE_DIR/python-stdlib" 2>/dev/null | cut -f1)
+        echo "Python stdlib: $STDLIB_SIZE"
+    fi
+
+    # Total size
+    TOTAL_SIZE=$(du -sh "$CACHE_DIR" 2>/dev/null | cut -f1)
+    echo "Total cache size: $TOTAL_SIZE"
+fi
+echo ""
+"""
+
+[tasks.check-python-extension]
+description = "Check Python extension (.so) timestamps"
+run = """
+echo "━━━ Python Extension ━━━"
+
+EXTENSION="crates/eryx-python/target/release/liberyx_python.so"
+ABI3_EXT=$(find crates/eryx-python -name "_eryx*.so" -o -name "_eryx*.abi3.so" 2>/dev/null | head -1)
+
+if [[ -n "$ABI3_EXT" && -f "$ABI3_EXT" ]]; then
+    echo "Extension: $ABI3_EXT"
+    echo "  $(ls -lh "$ABI3_EXT" | awk '{print $5, $6, $7, $8}')"
+
+    # Check if eryx-wasm-runtime sources are newer
+    NEWEST_WASM_SRC=$(find crates/eryx-wasm-runtime/src -name "*.rs" -newer "$ABI3_EXT" 2>/dev/null | head -3)
+    NEWEST_ERYX_SRC=$(find crates/eryx/src -name "*.rs" -newer "$ABI3_EXT" 2>/dev/null | head -3)
+    NEWEST_PY_SRC=$(find crates/eryx-python/src -name "*.rs" -newer "$ABI3_EXT" 2>/dev/null | head -3)
+
+    if [[ -n "$NEWEST_WASM_SRC" ]]; then
+        echo "⚠️  eryx-wasm-runtime sources newer than extension:"
+        echo "$NEWEST_WASM_SRC" | sed 's/^/    /'
+        echo "   The WASM runtime code has changed. Run:"
+        echo "   1. mise run build-eryx-runtime"
+        echo "   2. cd crates/eryx-python && maturin develop --release"
+    elif [[ -n "$NEWEST_ERYX_SRC" || -n "$NEWEST_PY_SRC" ]]; then
+        echo "⚠️  Rust sources newer than extension - run 'cd crates/eryx-python && maturin develop --release'"
+    else
+        echo "✓ Python extension is up-to-date"
+    fi
+else
+    echo "⚠️  No Python extension found - run 'cd crates/eryx-python && maturin develop --release'"
+fi
+echo ""
+"""
+
+[tasks.check-cargo-timestamps]
+description = "Check for cargo cache timestamp anomalies"
+run = '''
+echo "━━━ Cargo Cache Timestamps ━━━"
+
+# Check if any .rlib files in target are newer than their source crates
+ANOMALIES=""
+
+for crate in eryx eryx-runtime eryx-wasm-runtime; do
+    CRATE_DIR="crates/$crate"
+    if [[ ! -d "$CRATE_DIR" ]]; then
+        continue
+    fi
+
+    # Find newest source file in crate (Linux stat syntax, fallback to macOS)
+    NEWEST_SRC=$(find "$CRATE_DIR/src" -name "*.rs" -type f -exec stat -c '%Y %n' {} \; 2>/dev/null | sort -rn | head -1)
+    if [[ -z "$NEWEST_SRC" ]]; then
+        NEWEST_SRC=$(find "$CRATE_DIR/src" -name "*.rs" -type f -exec stat -f '%m %N' {} \; 2>/dev/null | sort -rn | head -1)
+    fi
+
+    if [[ -z "$NEWEST_SRC" ]]; then
+        continue
+    fi
+
+    SRC_TIME=$(echo "$NEWEST_SRC" | cut -d' ' -f1)
+
+    # Find any .rlib for this crate that is newer than newest source
+    RLIB=$(find target -name "lib${crate//-/_}*.rlib" -type f 2>/dev/null | head -1)
+    if [[ -n "$RLIB" ]]; then
+        RLIB_TIME=$(stat -c '%Y' "$RLIB" 2>/dev/null || stat -f '%m' "$RLIB")
+        if [[ "$RLIB_TIME" -gt "$SRC_TIME" ]]; then
+            ANOMALIES="${ANOMALIES}
+  ${crate}: .rlib newer than sources (cache may be stale)"
+        fi
+    fi
+done
+
+if [[ -n "$ANOMALIES" ]]; then
+    echo "⚠️  Timestamp anomalies detected (cached artifacts newer than sources):"
+    echo "$ANOMALIES"
+    echo ""
+    echo "   This can happen after git checkout/pull or CI cache restore."
+    echo "   Cargo should handle this correctly, but if you see stale behavior:"
+    echo "   cargo clean -p eryx-wasm-runtime && mise run build-eryx-runtime"
+else
+    echo "✓ No timestamp anomalies detected"
+fi
+echo ""
+'''
+
 [tasks.clean-artifacts]
 description = "Clean WASM artifacts and extracted stdlibs (simulate CI fresh state)"
 run = """
