@@ -1319,7 +1319,11 @@ fn handle_export(wit: Wit, func_index: usize, cx: &mut EryxCall) -> HandleExport
 
             match result {
                 python::ExecuteResult::Complete(output) => {
-                    cx.push_string(output);
+                    // Push record fields in REVERSE order for LIFO stack
+                    // WIT defines: execute-output { stdout, stderr }
+                    // wit-dylib pops fields in definition order, so push stderr first, then stdout
+                    cx.push_string(output.stderr);
+                    cx.push_string(output.stdout);
                     cx.stack.push(Value::ResultDiscriminant(true));
                     HandleExportResult::Complete
                 }
@@ -1518,13 +1522,17 @@ impl Interpreter for EryxInterpreter {
                     cx.push_string(error);
                     cx.stack.push(Value::ResultDiscriminant(false));
                 } else {
-                    // Get the output from Python
-                    let output = unsafe {
+                    // Get the output from Python (both stdout and stderr)
+                    let stdout = unsafe {
                         python::get_python_variable_string("_eryx_output").unwrap_or_default()
                     };
+                    let stderr = unsafe {
+                        python::get_python_variable_string("_eryx_errors").unwrap_or_default()
+                    };
 
-                    // Push success result
-                    cx.push_string(output.trim_end_matches('\n').to_string());
+                    // Push record fields in REVERSE order for LIFO stack (stderr first, then stdout)
+                    cx.push_string(stderr.trim_end_matches('\n').to_string());
+                    cx.push_string(stdout.trim_end_matches('\n').to_string());
                     cx.stack.push(Value::ResultDiscriminant(true));
                 }
 

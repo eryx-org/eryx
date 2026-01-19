@@ -130,6 +130,8 @@ pub struct HostCallbackInfo {
 pub struct ExecutionOutput {
     /// Captured stdout from the Python execution.
     pub stdout: String,
+    /// Captured stderr from the Python execution.
+    pub stderr: String,
     /// Peak memory usage in bytes during execution.
     pub peak_memory_bytes: u64,
 }
@@ -137,9 +139,10 @@ pub struct ExecutionOutput {
 impl ExecutionOutput {
     /// Create a new execution output.
     #[must_use]
-    pub fn new(stdout: String, peak_memory_bytes: u64) -> Self {
+    pub fn new(stdout: String, stderr: String, peak_memory_bytes: u64) -> Self {
         Self {
             stdout,
+            stderr,
             peak_memory_bytes,
         }
     }
@@ -1392,13 +1395,18 @@ impl PythonExecutor {
             }
         })?;
 
-        // wasmtime_result is wasmtime::Result<Result<String, String>>
-        let stdout = wasmtime_result.map_err(|e| format!("WASM execution error: {e:?}"))??;
+        // wasmtime_result is wasmtime::Result<Result<ExecuteOutput, String>>
+        // where ExecuteOutput is the WIT-generated record with stdout and stderr
+        let wit_output = wasmtime_result.map_err(|e| format!("WASM execution error: {e:?}"))??;
 
         // Get peak memory from the store before it's dropped
         let peak_memory_bytes = store.data().memory_tracker.peak_memory_bytes();
 
-        Ok(ExecutionOutput::new(stdout, peak_memory_bytes))
+        Ok(ExecutionOutput::new(
+            wit_output.stdout,
+            wit_output.stderr,
+            peak_memory_bytes,
+        ))
     }
 }
 

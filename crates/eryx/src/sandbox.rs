@@ -265,10 +265,12 @@ impl Sandbox {
                 // Stream output if handler is configured
                 if let Some(handler) = &self.output_handler {
                     handler.on_output(&output.stdout).await;
+                    handler.on_stderr(&output.stderr).await;
                 }
 
                 Ok(ExecuteResult {
                     stdout: output.stdout,
+                    stderr: output.stderr,
                     trace: trace_events,
                     stats: ExecuteStats {
                         duration,
@@ -1356,6 +1358,8 @@ impl SandboxBuilder<state::Has, state::Has> {
 pub struct ExecuteResult {
     /// Complete stdout output (also streamed via `OutputHandler` if configured).
     pub stdout: String,
+    /// Complete stderr output (also streamed via `OutputHandler` if configured).
+    pub stderr: String,
     /// Collected trace events (also streamed via `TraceHandler` if configured).
     pub trace: Vec<TraceEvent>,
     /// Execution statistics.
@@ -1517,6 +1521,7 @@ mod tests {
     fn execute_result_is_debug() {
         let result = ExecuteResult {
             stdout: "Hello".to_string(),
+            stderr: String::new(),
             trace: vec![],
             stats: ExecuteStats {
                 duration: Duration::from_millis(100),
@@ -1534,6 +1539,7 @@ mod tests {
     fn execute_result_is_clone() {
         let result = ExecuteResult {
             stdout: "Test output".to_string(),
+            stderr: String::new(),
             trace: vec![],
             stats: ExecuteStats {
                 duration: Duration::from_millis(50),
@@ -1851,6 +1857,7 @@ mod tests {
     fn execute_result_empty_stdout() {
         let result = ExecuteResult {
             stdout: String::new(),
+            stderr: String::new(),
             trace: vec![],
             stats: ExecuteStats {
                 duration: Duration::from_millis(1),
@@ -1869,6 +1876,7 @@ mod tests {
 
         let result = ExecuteResult {
             stdout: "output".to_string(),
+            stderr: String::new(),
             trace: vec![
                 TraceEvent {
                     lineno: 1,
