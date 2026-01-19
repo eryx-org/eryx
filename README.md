@@ -259,6 +259,9 @@ cargo bench --package eryx                       # Run benchmarks
 This project has multiple cache layers (cargo, mise, embedded runtime, WASM artifacts). If you experience unexpected behavior after changing code:
 
 ```bash
+# Diagnose which cache layer is stale
+mise run check-caches
+
 # Clean all caches and rebuild
 mise run clean-artifacts
 cargo clean

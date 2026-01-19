@@ -302,6 +302,19 @@ This project has multiple layers of caching that can cause confusing "stale buil
 - **Tests pass locally but fail in CI** (or vice versa) - Different cache states
 - **`ModuleNotFoundError` for shim modules** - ssl/socket shims not in runtime.wasm
 
+### Diagnosing Cache Issues
+
+```bash
+# Check all cache layers for staleness
+mise run check-caches
+
+# Check individual layers
+mise run check-wasm-artifacts      # WASM/CWASM vs source timestamps
+mise run check-embedded-cache      # /tmp/eryx-embedded state
+mise run check-python-extension    # .so vs Rust source timestamps
+mise run check-cargo-timestamps    # .rlib vs source timestamps
+```
+
 ### Recovery Commands
 
 ```bash
