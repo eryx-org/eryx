@@ -788,8 +788,10 @@ impl PythonExecutor {
 
     /// Add a path to Python packages directory.
     ///
-    /// Each directory will be mounted at `/site-packages-N` inside the WASM sandbox
-    /// and added to Python's import path. Can be called multiple times.
+    /// The first directory will be mounted at `/site-packages` inside the WASM sandbox
+    /// (for compatibility with preinit). Additional directories are mounted at
+    /// `/site-packages-1`, `/site-packages-2`, etc. All paths are added to Python's
+    /// import path. Can be called multiple times.
     #[must_use]
     pub fn with_site_packages(mut self, path: impl Into<PathBuf>) -> Self {
         self.python_site_packages_paths.push(path.into());
@@ -1246,12 +1248,18 @@ impl PythonExecutor {
         wasi_builder.inherit_stdout().inherit_stderr();
 
         // Build PYTHONPATH from stdlib and all site-packages directories
+        // The first site-packages is mounted at /site-packages (for preinit compatibility)
+        // Additional ones are mounted at /site-packages-1, /site-packages-2, etc.
         let mut pythonpath_parts = Vec::new();
         if self.python_stdlib_path.is_some() {
             pythonpath_parts.push("/python-stdlib".to_string());
         }
         for i in 0..self.python_site_packages_paths.len() {
-            pythonpath_parts.push(format!("/site-packages-{i}"));
+            if i == 0 {
+                pythonpath_parts.push("/site-packages".to_string());
+            } else {
+                pythonpath_parts.push(format!("/site-packages-{i}"));
+            }
         }
 
         // Mount Python stdlib if configured (required for eryx-wasm-runtime)
@@ -1273,9 +1281,14 @@ impl PythonExecutor {
             wasi_builder.env("PYTHONPATH", pythonpath_parts.join(":"));
         }
 
-        // Mount each site-packages directory at a unique path
+        // Mount each site-packages directory
+        // First one at /site-packages (for preinit compatibility), rest at /site-packages-N
         for (i, site_packages_path) in self.python_site_packages_paths.iter().enumerate() {
-            let mount_path = format!("/site-packages-{i}");
+            let mount_path = if i == 0 {
+                "/site-packages".to_string()
+            } else {
+                format!("/site-packages-{i}")
+            };
             wasi_builder
                 .preopened_dir(
                     site_packages_path,
