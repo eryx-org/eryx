@@ -52,6 +52,7 @@ mod error;
 mod library;
 pub mod net;
 pub mod package;
+pub mod pool;
 mod sandbox;
 mod schema;
 pub mod session;
@@ -78,6 +79,7 @@ pub use error::Error;
 pub use library::RuntimeLibrary;
 pub use net::{ConnectionManager, NetConfig, TcpError, TlsError};
 pub use package::{ExtractedPackage, PackageFormat};
+pub use pool::{PoolConfig, PoolError, PoolStats, PooledSandbox, SandboxPool};
 pub use sandbox::{
     ExecuteResult, ExecuteStats, ExecutionHandle, ResourceLimits, Sandbox, SandboxBuilder, state,
 };
