@@ -12,9 +12,13 @@ A Rust library that executes Python code in a WebAssembly sandbox with async cal
 - **Session state persistence** — Variables, functions, and classes persist between executions for REPL-style usage
 - **State snapshots** — Capture and restore Python state with pickle-based serialization
 - **Execution tracing** — Line-level progress reporting via `sys.settrace`
+- **Stderr capture** — Separate stdout and stderr streams with optional streaming handlers
+- **Execution cancellation** — Cancel long-running executions via `ExecutionHandle`
+- **TCP/TLS networking** — Host-controlled network access with configurable policies
 - **Introspection** — Python can discover available callbacks at runtime
 - **Composable runtime libraries** — Pre-built APIs with Python wrappers and type stubs
 - **Pre-compiled Wasm** — 41x faster sandbox creation with ahead-of-time compilation
+- **Sandbox pooling** — Managed pool of warm sandbox instances for high-throughput scenarios
 
 ## Python Version
 
@@ -34,9 +38,12 @@ async fn main() -> Result<(), eryx::Error> {
 
     let result = sandbox.execute(r#"
         print("Hello from Python!")
+        import sys
+        print("This goes to stderr", file=sys.stderr)
     "#).await?;
 
-    println!("Output: {}", result.stdout);
+    println!("stdout: {}", result.stdout);
+    println!("stderr: {}", result.stderr);
     Ok(())
 }
 ```
@@ -118,6 +125,68 @@ print(f"Echo: {response}")
 For runtime-defined callbacks (plugin systems, dynamic APIs), implement the `Callback` trait directly.
 See the `runtime_callbacks` example.
 
+## Sandbox Pooling
+
+For high-throughput scenarios where you need to execute many Python scripts concurrently, use `SandboxPool` to maintain a pool of warm sandbox instances:
+
+```rust
+use eryx::{Sandbox, SandboxPool, PoolConfig};
+use std::time::Duration;
+
+#[tokio::main]
+async fn main() -> Result<(), eryx::Error> {
+    // Create a pool with custom configuration
+    let config = PoolConfig {
+        max_size: 10,              // Maximum concurrent sandboxes
+        min_idle: 2,               // Pre-warm 2 instances
+        idle_timeout: Duration::from_secs(300),  // Evict after 5 min idle
+        acquire_timeout: Duration::from_secs(30), // Wait up to 30s for sandbox
+        ..Default::default()
+    };
+
+    let pool = SandboxPool::new(Sandbox::embedded(), config).await?;
+
+    // Acquire a sandbox from the pool
+    let sandbox = pool.acquire().await?;
+
+    // Use the sandbox normally
+    let result = sandbox.execute("print('Hello from pool!')").await?;
+    println!("{}", result.stdout);
+
+    // Sandbox automatically returns to pool when dropped
+    drop(sandbox);
+
+    // Check pool statistics
+    let stats = pool.stats();
+    println!("Acquisitions: {}, Creations: {}",
+             stats.total_acquisitions, stats.total_creations);
+
+    Ok(())
+}
+```
+
+For custom sandbox configurations with callbacks:
+
+```rust
+use eryx::{Sandbox, SandboxPool, PoolConfig};
+
+let pool = SandboxPool::with_builder(
+    || {
+        Sandbox::embedded()
+            .with_callback(MyCallback)
+            .build()
+    },
+    PoolConfig::default(),
+).await?;
+```
+
+Key features:
+- **Pre-warming**: Pool creates `min_idle` sandboxes upfront for immediate availability
+- **Bounded concurrency**: `max_size` limits concurrent sandbox usage via semaphore
+- **Statistics tracking**: Monitor acquisitions, creations, and wait times
+- **Idle eviction**: Sandboxes idle longer than `idle_timeout` are automatically evicted
+- **Non-blocking acquire**: Use `try_acquire()` to get a sandbox without waiting
+
 ## Session State Persistence
 
 For REPL-style usage where state persists between executions:
@@ -145,6 +214,78 @@ async fn main() -> Result<(), eryx::Error> {
     Ok(())
 }
 ```
+
+## Execution Cancellation
+
+Cancel long-running or infinite executions using `ExecutionHandle`:
+
+```rust
+use std::time::Duration;
+use eryx::{Sandbox, Error};
+
+#[tokio::main]
+async fn main() -> Result<(), Error> {
+    let sandbox = Sandbox::embedded().build()?;
+
+    // Start a cancellable execution
+    let handle = sandbox.execute_cancellable("while True: pass");
+
+    // Cancel from another task after a delay
+    let token = handle.cancellation_token();
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        token.cancel();
+    });
+
+    // Wait for result
+    match handle.wait().await {
+        Ok(result) => println!("Completed: {}", result.stdout),
+        Err(Error::Cancelled) => println!("Execution was cancelled"),
+        Err(e) => println!("Error: {e}"),
+    }
+
+    Ok(())
+}
+```
+
+The cancellation uses Wasmtime's epoch-based interruption for prompt termination.
+
+## Networking
+
+Enable TCP and TLS networking with host-controlled policies using `NetConfig`:
+
+```rust
+use std::time::Duration;
+use eryx::{Sandbox, NetConfig};
+
+#[tokio::main]
+async fn main() -> Result<(), eryx::Error> {
+    let net_config = NetConfig::default()
+        .allow_host("api.example.com")
+        .allow_host("*.trusted.org")
+        .with_connect_timeout(Duration::from_secs(10))
+        .with_max_connections(5);
+
+    let sandbox = Sandbox::embedded()
+        .with_network(net_config)
+        .build()?;
+
+    let result = sandbox.execute(r#"
+import urllib.request
+response = urllib.request.urlopen("https://api.example.com/data")
+print(response.read().decode())
+    "#).await?;
+
+    println!("{}", result.stdout);
+    Ok(())
+}
+```
+
+By default, networking is disabled. When enabled via `with_network()`:
+- Localhost and private networks are blocked by default
+- Use `allowed_hosts` patterns with wildcards (e.g., `*.example.com`)
+- The host handles DNS resolution and connection management
+- TLS connections use the system certificate store (with optional custom certs)
 
 ## Feature Flags
 
