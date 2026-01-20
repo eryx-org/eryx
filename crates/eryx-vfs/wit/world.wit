@@ -1,0 +1,7 @@
+// Virtual filesystem - imports WASI filesystem interfaces for custom implementation
+package eryx:vfs;
+
+world virtual-filesystem {
+  import wasi:filesystem/types@0.2.6;
+  import wasi:filesystem/preopens@0.2.6;
+}

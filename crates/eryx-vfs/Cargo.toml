@@ -1,0 +1,30 @@
+[package]
+name = "eryx-vfs"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Virtual filesystem implementation for eryx sandbox"
+
+[dependencies]
+anyhow.workspace = true
+async-trait.workspace = true
+bytes = "1"
+cap-fs-ext = "4"
+cap-std = "4"
+fs-set-times = "0.20"
+system-interface = "0.27"
+thiserror.workspace = true
+tokio = { workspace = true, features = ["sync"] }
+tracing.workspace = true
+wasmtime.workspace = true
+wasmtime-wasi.workspace = true
+wasmtime-wasi-io = "40"
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+
+[lints]
+workspace = true

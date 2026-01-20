@@ -122,7 +122,8 @@ pub struct Sandbox {
 
 impl std::fmt::Debug for Sandbox {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Sandbox")
+        let mut debug = f.debug_struct("Sandbox");
+        debug
             .field(
                 "callbacks",
                 &format!("[{} callbacks]", self.callbacks.len()),
@@ -132,8 +133,8 @@ impl std::fmt::Debug for Sandbox {
             .field("has_trace_handler", &self.trace_handler.is_some())
             .field("has_output_handler", &self.output_handler.is_some())
             .field("resource_limits", &self.resource_limits)
-            .field("has_net_config", &self.net_config.is_some())
-            .finish_non_exhaustive()
+            .field("has_net_config", &self.net_config.is_some());
+        debug.finish_non_exhaustive()
     }
 }
 

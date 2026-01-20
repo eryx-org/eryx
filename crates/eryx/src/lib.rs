@@ -97,3 +97,37 @@ pub use schema::{JsonSchema, Schema};
 
 // Re-export CancellationToken for convenient use with execute_cancellable
 pub use tokio_util::sync::CancellationToken;
+
+/// Virtual filesystem support for sandboxed file operations.
+///
+/// When the `vfs` feature is enabled, sandboxes can use an in-memory filesystem
+/// that persists across executions. This is useful for:
+///
+/// - Allowing Python code to read/write files without host filesystem access
+/// - Persisting files across multiple executions
+/// - Testing file operations in isolation
+///
+/// Virtual filesystem types for sandboxed file I/O.
+///
+/// VFS is available on `SessionExecutor` for persistent file storage across
+/// multiple executions within a session.
+///
+/// # Example
+///
+/// ```rust,ignore
+/// use eryx::vfs::InMemoryStorage;
+/// use std::sync::Arc;
+///
+/// let storage = Arc::new(InMemoryStorage::new());
+/// let session = SessionExecutor::new_with_vfs(executor, &[], storage).await?;
+///
+/// session.execute("open('/data/test.txt', 'w').write('hello')").run().await?;
+/// session.execute("print(open('/data/test.txt').read())").run().await?;  // prints "hello"
+/// ```
+#[cfg(feature = "vfs")]
+pub mod vfs {
+    pub use eryx_vfs::{
+        DirEntry, DirPerms, FilePerms, InMemoryStorage, Metadata, VfsCtx, VfsError, VfsResult,
+        VfsState, VfsStorage, VfsView,
+    };
+}

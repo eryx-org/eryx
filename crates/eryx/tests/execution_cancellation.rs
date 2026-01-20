@@ -8,7 +8,7 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
-use eryx::{Error, Sandbox};
+use eryx::{Error, ResourceLimits, Sandbox};
 
 // =============================================================================
 // Helper Functions
@@ -62,6 +62,16 @@ fn sandbox_builder() -> eryx::SandboxBuilder<eryx::state::Has, eryx::state::Has>
     }
 }
 
+/// Create a sandbox builder with a short execution timeout for cancellation tests.
+/// This ensures tests don't hang for 30s if cancellation fails.
+fn sandbox_builder_with_short_timeout() -> eryx::SandboxBuilder<eryx::state::Has, eryx::state::Has>
+{
+    sandbox_builder().with_resource_limits(ResourceLimits {
+        execution_timeout: Some(Duration::from_secs(3)),
+        ..Default::default()
+    })
+}
+
 // =============================================================================
 // Basic Cancellation Tests
 // =============================================================================
@@ -80,7 +90,9 @@ async fn test_execute_cancellable_completes_normally() {
 
 #[tokio::test]
 async fn test_execute_cancellable_cancel_infinite_loop() {
-    let sandbox = sandbox_builder().build().expect("Failed to build sandbox");
+    let sandbox = sandbox_builder_with_short_timeout()
+        .build()
+        .expect("Failed to build sandbox");
 
     let handle = sandbox.execute_cancellable("while True: pass");
 
@@ -102,7 +114,9 @@ async fn test_execute_cancellable_cancel_infinite_loop() {
 
 #[tokio::test]
 async fn test_execute_cancellable_cancel_immediately() {
-    let sandbox = sandbox_builder().build().expect("Failed to build sandbox");
+    let sandbox = sandbox_builder_with_short_timeout()
+        .build()
+        .expect("Failed to build sandbox");
 
     let handle = sandbox.execute_cancellable(
         r#"
@@ -142,7 +156,9 @@ async fn test_is_running_before_and_after_completion() {
 
 #[tokio::test]
 async fn test_is_running_after_cancel() {
-    let sandbox = sandbox_builder().build().expect("Failed to build sandbox");
+    let sandbox = sandbox_builder_with_short_timeout()
+        .build()
+        .expect("Failed to build sandbox");
 
     let handle = sandbox.execute_cancellable("while True: pass");
 
@@ -159,7 +175,9 @@ async fn test_is_running_after_cancel() {
 
 #[tokio::test]
 async fn test_cancel_multiple_times_is_idempotent() {
-    let sandbox = sandbox_builder().build().expect("Failed to build sandbox");
+    let sandbox = sandbox_builder_with_short_timeout()
+        .build()
+        .expect("Failed to build sandbox");
 
     let handle = sandbox.execute_cancellable("while True: pass");
 
@@ -179,7 +197,9 @@ async fn test_cancel_multiple_times_is_idempotent() {
 
 #[tokio::test]
 async fn test_cancellation_token_can_be_shared() {
-    let sandbox = sandbox_builder().build().expect("Failed to build sandbox");
+    let sandbox = sandbox_builder_with_short_timeout()
+        .build()
+        .expect("Failed to build sandbox");
 
     let handle = sandbox.execute_cancellable("while True: pass");
 
@@ -206,7 +226,9 @@ async fn test_cancellation_token_can_be_shared() {
 
 #[tokio::test]
 async fn test_cancel_during_python_computation() {
-    let sandbox = sandbox_builder().build().expect("Failed to build sandbox");
+    let sandbox = sandbox_builder_with_short_timeout()
+        .build()
+        .expect("Failed to build sandbox");
 
     // Heavy computation that should be interruptible
     let handle = sandbox.execute_cancellable(
