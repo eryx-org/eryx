@@ -357,6 +357,7 @@ impl<'a, S: VfsStorage> HybridVfsState<'a, S> {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
     use crate::InMemoryStorage;

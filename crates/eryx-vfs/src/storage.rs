@@ -630,6 +630,7 @@ impl VfsStorage for InMemoryStorage {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
 

@@ -136,6 +136,7 @@ impl VfsReaddirIterator {
     }
 
     /// Get the next entry.
+    #[allow(clippy::should_implement_trait)]
     pub fn next(&mut self) -> Option<types::DirectoryEntry> {
         if self.index < self.entries.len() {
             let entry = self.entries[self.index].clone();

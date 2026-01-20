@@ -58,6 +58,7 @@ impl HybridReaddirIterator {
     }
 
     /// Get the next directory entry.
+    #[allow(clippy::should_implement_trait)]
     pub fn next(&mut self) -> Option<types::DirectoryEntry> {
         self.entries.next()
     }

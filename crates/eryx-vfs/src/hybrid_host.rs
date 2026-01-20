@@ -868,7 +868,7 @@ impl<S: VfsStorage + 'static> types::HostDescriptor for HybridVfsState<'_, S> {
                 }
                 old_dir
                     .dir
-                    .rename(&old_path, &*new_dir.dir, &new_path)
+                    .rename(&old_path, &new_dir.dir, &new_path)
                     .map_err(|e| {
                         crate::VfsError::Io(format!(
                             "rename {}/{} -> {}/{}: {}",

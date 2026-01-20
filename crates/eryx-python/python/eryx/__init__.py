@@ -39,6 +39,7 @@ from eryx._eryx import (
     Sandbox,
     SandboxFactory,
     TimeoutError,
+    VfsStorage,
     # Module metadata
     __version__,
 )
@@ -50,6 +51,7 @@ __all__ = [
     "ExecuteResult",
     "ResourceLimits",
     "NetConfig",
+    "VfsStorage",
     # Exceptions
     "EryxError",
     "ExecutionError",
