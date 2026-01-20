@@ -424,12 +424,11 @@ impl SessionExecutor {
             );
 
             // Add real filesystem preopens that mirror the WASI preopens
-            if let Some(stdlib_path) = executor.python_stdlib_path() {
-                if let Ok(real_dir) =
+            if let Some(stdlib_path) = executor.python_stdlib_path()
+                && let Ok(real_dir) =
                     eryx_vfs::RealDir::open_ambient(stdlib_path, DirPerms::READ, FilePerms::READ)
-                {
-                    ctx.add_real_preopen("/python-stdlib", real_dir);
-                }
+            {
+                ctx.add_real_preopen("/python-stdlib", real_dir);
             }
             for (i, site_packages_path) in site_packages_paths.iter().enumerate() {
                 let mount_path = format!("/site-packages-{i}");
@@ -839,12 +838,11 @@ impl SessionExecutor {
             );
 
             // Add real filesystem preopens that mirror the WASI preopens
-            if let Some(stdlib_path) = self.executor.python_stdlib_path() {
-                if let Ok(real_dir) =
+            if let Some(stdlib_path) = self.executor.python_stdlib_path()
+                && let Ok(real_dir) =
                     eryx_vfs::RealDir::open_ambient(stdlib_path, DirPerms::READ, FilePerms::READ)
-                {
-                    ctx.add_real_preopen("/python-stdlib", real_dir);
-                }
+            {
+                ctx.add_real_preopen("/python-stdlib", real_dir);
             }
             for (i, site_packages_path) in site_packages_paths.iter().enumerate() {
                 let mount_path = format!("/site-packages-{i}");

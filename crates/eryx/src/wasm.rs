@@ -301,6 +301,7 @@ impl WasiView for ExecutorState {
 impl eryx_vfs::HybridVfsView for ExecutorState {
     type Storage = eryx_vfs::InMemoryStorage;
 
+    #[allow(clippy::expect_used)]
     fn hybrid_vfs(&mut self) -> eryx_vfs::HybridVfsState<'_, Self::Storage> {
         eryx_vfs::HybridVfsState::new(
             self.hybrid_vfs_ctx
@@ -1379,15 +1380,15 @@ impl PythonExecutor {
             );
 
             // Add Python stdlib as read-only real filesystem preopen
-            if let Some(ref stdlib_path) = self.python_stdlib_path {
-                if let Err(e) = ctx.add_real_preopen_path(
+            if let Some(ref stdlib_path) = self.python_stdlib_path
+                && let Err(e) = ctx.add_real_preopen_path(
                     "/python-stdlib",
                     stdlib_path,
                     eryx_vfs::DirPerms::READ,
                     eryx_vfs::FilePerms::READ,
-                ) {
-                    tracing::warn!("Failed to add Python stdlib to hybrid VFS: {e}");
-                }
+                )
+            {
+                tracing::warn!("Failed to add Python stdlib to hybrid VFS: {e}");
             }
 
             // Add site-packages directories as read-only real filesystem preopens
