@@ -1032,14 +1032,10 @@ impl<S: VfsStorage + 'static> types::HostDescriptor for HybridVfsState<'_, S> {
                 if !vfs_desc.file_perms.contains(FilePerms::WRITE) {
                     return Err(crate::VfsError::PermissionDenied("write".to_string()).into());
                 }
-                // For append, we need to get the current file size first
-                // We'll use a large offset to trigger append behavior
-                // TODO: Implement proper append stream for VFS
+                // For append, use the append-specific constructor
                 let path = vfs_desc.path.clone();
                 let storage = Arc::clone(&self.ctx.storage);
-                // Use u64::MAX as position to indicate append mode
-                // The VfsOutputStream will need to handle this
-                let stream = VfsOutputStream::write_at(storage, path, u64::MAX);
+                let stream = VfsOutputStream::append(storage, path);
                 let stream: DynOutputStream = Box::new(stream);
                 let resource = self.table.push(stream)?;
                 Ok(resource)

@@ -169,6 +169,66 @@ print("VFS basic operations work")
     );
 }
 
+/// Test that VFS append mode works correctly
+#[tokio::test]
+async fn test_vfs_append_mode() {
+    let storage = Arc::new(InMemoryStorage::new());
+    let executor = create_executor().await;
+    let mut session = SessionExecutor::new_with_vfs(executor, &[], storage)
+        .await
+        .expect("Failed to create session");
+
+    // First: write initial content
+    let result1 = session
+        .execute(
+            r#"
+with open('/data/append.txt', 'w') as f:
+    f.write('first')
+print("Wrote initial content")
+"#,
+        )
+        .run()
+        .await;
+    assert!(
+        result1.is_ok(),
+        "Initial write should succeed: {:?}",
+        result1
+    );
+
+    // Second: append to the file
+    let result2 = session
+        .execute(
+            r#"
+with open('/data/append.txt', 'a') as f:
+    f.write(' second')
+print("Appended content")
+"#,
+        )
+        .run()
+        .await;
+    assert!(result2.is_ok(), "Append should succeed: {:?}", result2);
+
+    // Third: read back and verify
+    let result3 = session
+        .execute(
+            r#"
+with open('/data/append.txt', 'r') as f:
+    content = f.read()
+print(f"Content: {content}")
+"#,
+        )
+        .run()
+        .await;
+
+    assert!(result3.is_ok(), "Read should succeed: {:?}", result3);
+    let output = result3.unwrap();
+    assert!(
+        output.stdout.contains("Content: first second"),
+        "Append mode should work correctly: {}",
+        output.stdout
+    );
+}
+
 /// Test that VFS data persists across executions within a session
 #[tokio::test]
 async fn test_vfs_persistence_across_executions() {
