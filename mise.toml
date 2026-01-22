@@ -45,7 +45,11 @@ maturin develop --release
 
 [tasks.test-all]
 description = "Run tests with all features"
-depends = ["precompile-eryx-runtime", "build-preinit", "setup-eryx-runtime-tests"]
+depends = [
+  "precompile-eryx-runtime",
+  "build-preinit",
+  "setup-eryx-runtime-tests",
+]
 run = "cargo nextest run --workspace --all-features"
 
 [tasks.lint]
@@ -112,7 +116,13 @@ run = "cargo clean"
 
 [tasks.check-caches]
 description = "Check all cache layers for potential staleness issues"
-depends = ["check-wasm-artifacts", "check-embedded-cache", "check-python-extension", "check-cargo-timestamps", "check-late-linking-cache"]
+depends = [
+  "check-wasm-artifacts",
+  "check-embedded-cache",
+  "check-python-extension",
+  "check-cargo-timestamps",
+  "check-late-linking-cache",
+]
 run = """
 echo ""
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
