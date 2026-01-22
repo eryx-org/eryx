@@ -90,23 +90,36 @@ pub trait VfsStorage: Send + Sync {
     /// Synchronously create a directory.
     ///
     /// This is useful for setup code that runs before the async runtime
-    /// is available. The default implementation panics - implementors should
-    /// override this if they support sync directory creation.
+    /// is available. The default implementation returns an error - implementors
+    /// should override this if they support sync directory creation.
     fn mkdir_sync(&self, _path: &str) -> VfsResult<()> {
-        panic!("mkdir_sync not implemented for this storage backend")
+        Err(VfsError::Storage(
+            "mkdir_sync not implemented for this storage backend".to_string(),
+        ))
     }
+}
+
+/// Internal state for in-memory storage.
+///
+/// Combining files and directories into a single struct allows us to use
+/// a single `RwLock`, avoiding potential deadlock issues from acquiring
+/// multiple locks.
+#[derive(Debug, Default)]
+struct StorageState {
+    /// File contents: path -> data
+    files: HashMap<String, FileData>,
+    /// Directory markers: set of directory paths
+    directories: HashSet<String>,
 }
 
 /// In-memory VFS storage implementation.
 ///
 /// Stores files and directories in memory using `HashMap` and `HashSet`.
-/// Thread-safe via `RwLock`.
+/// Thread-safe via a single `RwLock` over the combined state.
 #[derive(Debug)]
 pub struct InMemoryStorage {
-    /// File contents: path -> data
-    files: RwLock<HashMap<String, FileData>>,
-    /// Directory markers: set of directory paths
-    directories: RwLock<HashSet<String>>,
+    /// Combined state under a single lock to prevent deadlocks.
+    state: RwLock<StorageState>,
 }
 
 #[derive(Debug, Clone)]
@@ -127,11 +140,13 @@ impl InMemoryStorage {
     /// Create a new empty in-memory storage with root directory.
     #[must_use]
     pub fn new() -> Self {
-        let mut dirs = HashSet::new();
-        dirs.insert("/".to_string());
+        let mut directories = HashSet::new();
+        directories.insert("/".to_string());
         Self {
-            files: RwLock::new(HashMap::new()),
-            directories: RwLock::new(dirs),
+            state: RwLock::new(StorageState {
+                files: HashMap::new(),
+                directories,
+            }),
         }
     }
 
@@ -180,13 +195,12 @@ impl InMemoryStorage {
         }
     }
 
-    /// Check if parent directory exists.
-    async fn check_parent_exists(&self, path: &str) -> VfsResult<()> {
-        if let Some(parent) = Self::parent_path(path) {
-            let dirs = self.directories.read().await;
-            if !dirs.contains(&parent) {
-                return Err(VfsError::NotFound(format!("parent directory: {parent}")));
-            }
+    /// Check if parent directory exists (requires state to already be borrowed).
+    fn check_parent_exists_with_state(state: &StorageState, path: &str) -> VfsResult<()> {
+        if let Some(parent) = Self::parent_path(path)
+            && !state.directories.contains(&parent)
+        {
+            return Err(VfsError::NotFound(format!("parent directory: {parent}")));
         }
         Ok(())
     }
@@ -196,12 +210,11 @@ impl InMemoryStorage {
 impl VfsStorage for InMemoryStorage {
     async fn read(&self, path: &str) -> VfsResult<Vec<u8>> {
         let path = Self::normalize_path(path)?;
-        let files = self.files.read().await;
-        match files.get(&path) {
+        let state = self.state.read().await;
+        match state.files.get(&path) {
             Some(data) => Ok(data.content.clone()),
             None => {
-                let dirs = self.directories.read().await;
-                if dirs.contains(&path) {
+                if state.directories.contains(&path) {
                     Err(VfsError::NotFile(path))
                 } else {
                     Err(VfsError::NotFound(path))
@@ -212,8 +225,8 @@ impl VfsStorage for InMemoryStorage {
 
     async fn read_at(&self, path: &str, offset: u64, len: u64) -> VfsResult<Vec<u8>> {
         let path = Self::normalize_path(path)?;
-        let files = self.files.read().await;
-        match files.get(&path) {
+        let state = self.state.read().await;
+        match state.files.get(&path) {
             Some(data) => {
                 let offset = offset as usize;
                 let len = len as usize;
@@ -225,8 +238,7 @@ impl VfsStorage for InMemoryStorage {
                 }
             }
             None => {
-                let dirs = self.directories.read().await;
-                if dirs.contains(&path) {
+                if state.directories.contains(&path) {
                     Err(VfsError::NotFile(path))
                 } else {
                     Err(VfsError::NotFound(path))
@@ -237,19 +249,17 @@ impl VfsStorage for InMemoryStorage {
 
     async fn write(&self, path: &str, data: &[u8]) -> VfsResult<()> {
         let path = Self::normalize_path(path)?;
-        self.check_parent_exists(&path).await?;
+        let mut state = self.state.write().await;
+
+        Self::check_parent_exists_with_state(&state, &path)?;
 
         // Check it's not a directory
-        {
-            let dirs = self.directories.read().await;
-            if dirs.contains(&path) {
-                return Err(VfsError::NotFile(path));
-            }
+        if state.directories.contains(&path) {
+            return Err(VfsError::NotFile(path));
         }
 
         let now = SystemTime::now();
-        let mut files = self.files.write().await;
-        let file_data = files.entry(path).or_insert_with(|| FileData {
+        let file_data = state.files.entry(path).or_insert_with(|| FileData {
             content: Vec::new(),
             created: now,
             modified: now,
@@ -262,20 +272,18 @@ impl VfsStorage for InMemoryStorage {
 
     async fn write_at(&self, path: &str, offset: u64, data: &[u8]) -> VfsResult<()> {
         let path = Self::normalize_path(path)?;
-        self.check_parent_exists(&path).await?;
+        let mut state = self.state.write().await;
+
+        Self::check_parent_exists_with_state(&state, &path)?;
 
         // Check it's not a directory
-        {
-            let dirs = self.directories.read().await;
-            if dirs.contains(&path) {
-                return Err(VfsError::NotFile(path));
-            }
+        if state.directories.contains(&path) {
+            return Err(VfsError::NotFile(path));
         }
 
         let now = SystemTime::now();
         let offset = offset as usize;
-        let mut files = self.files.write().await;
-        let file_data = files.entry(path).or_insert_with(|| FileData {
+        let file_data = state.files.entry(path).or_insert_with(|| FileData {
             content: Vec::new(),
             created: now,
             modified: now,
@@ -295,8 +303,8 @@ impl VfsStorage for InMemoryStorage {
     async fn set_size(&self, path: &str, size: u64) -> VfsResult<()> {
         let path = Self::normalize_path(path)?;
         let now = SystemTime::now();
-        let mut files = self.files.write().await;
-        match files.get_mut(&path) {
+        let mut state = self.state.write().await;
+        match state.files.get_mut(&path) {
             Some(data) => {
                 data.content.resize(size as usize, 0);
                 data.modified = now;
@@ -308,42 +316,32 @@ impl VfsStorage for InMemoryStorage {
 
     async fn delete(&self, path: &str) -> VfsResult<()> {
         let path = Self::normalize_path(path)?;
-        let mut files = self.files.write().await;
-        if files.remove(&path).is_some() {
+        let mut state = self.state.write().await;
+        if state.files.remove(&path).is_some() {
             Ok(())
+        } else if state.directories.contains(&path) {
+            Err(VfsError::NotFile(path))
         } else {
-            let dirs = self.directories.read().await;
-            if dirs.contains(&path) {
-                Err(VfsError::NotFile(path))
-            } else {
-                Err(VfsError::NotFound(path))
-            }
+            Err(VfsError::NotFound(path))
         }
     }
 
     async fn exists(&self, path: &str) -> VfsResult<bool> {
         let path = Self::normalize_path(path)?;
-        let files = self.files.read().await;
-        if files.contains_key(&path) {
-            return Ok(true);
-        }
-        let dirs = self.directories.read().await;
-        Ok(dirs.contains(&path))
+        let state = self.state.read().await;
+        Ok(state.files.contains_key(&path) || state.directories.contains(&path))
     }
 
     async fn list(&self, path: &str) -> VfsResult<Vec<DirEntry>> {
         let path = Self::normalize_path(path)?;
+        let state = self.state.read().await;
 
         // Check it's a directory
-        {
-            let dirs = self.directories.read().await;
-            if !dirs.contains(&path) {
-                let files = self.files.read().await;
-                if files.contains_key(&path) {
-                    return Err(VfsError::NotDirectory(path));
-                } else {
-                    return Err(VfsError::NotFound(path));
-                }
+        if !state.directories.contains(&path) {
+            if state.files.contains_key(&path) {
+                return Err(VfsError::NotDirectory(path));
+            } else {
+                return Err(VfsError::NotFound(path));
             }
         }
 
@@ -357,47 +355,41 @@ impl VfsStorage for InMemoryStorage {
         let mut seen_names = HashSet::new();
 
         // List files
-        {
-            let files = self.files.read().await;
-            for (file_path, data) in files.iter() {
-                if let Some(rest) = file_path.strip_prefix(&prefix) {
-                    // Only include direct children (no more slashes)
-                    if !rest.contains('/') && !rest.is_empty() {
-                        seen_names.insert(rest.to_string());
-                        entries.push(DirEntry {
-                            name: rest.to_string(),
-                            metadata: Metadata {
-                                is_dir: false,
-                                size: data.content.len() as u64,
-                                created: data.created,
-                                modified: data.modified,
-                                accessed: data.accessed,
-                            },
-                        });
-                    }
+        for (file_path, data) in &state.files {
+            if let Some(rest) = file_path.strip_prefix(&prefix) {
+                // Only include direct children (no more slashes)
+                if !rest.contains('/') && !rest.is_empty() {
+                    seen_names.insert(rest.to_string());
+                    entries.push(DirEntry {
+                        name: rest.to_string(),
+                        metadata: Metadata {
+                            is_dir: false,
+                            size: data.content.len() as u64,
+                            created: data.created,
+                            modified: data.modified,
+                            accessed: data.accessed,
+                        },
+                    });
                 }
             }
         }
 
         // List subdirectories
-        {
-            let dirs = self.directories.read().await;
-            for dir_path in dirs.iter() {
-                if let Some(rest) = dir_path.strip_prefix(&prefix) {
-                    // Only include direct children
-                    if !rest.contains('/') && !rest.is_empty() && !seen_names.contains(rest) {
-                        let now = SystemTime::now();
-                        entries.push(DirEntry {
-                            name: rest.to_string(),
-                            metadata: Metadata {
-                                is_dir: true,
-                                size: 0,
-                                created: now,
-                                modified: now,
-                                accessed: now,
-                            },
-                        });
-                    }
+        for dir_path in &state.directories {
+            if let Some(rest) = dir_path.strip_prefix(&prefix) {
+                // Only include direct children
+                if !rest.contains('/') && !rest.is_empty() && !seen_names.contains(rest) {
+                    let now = SystemTime::now();
+                    entries.push(DirEntry {
+                        name: rest.to_string(),
+                        metadata: Metadata {
+                            is_dir: true,
+                            size: 0,
+                            created: now,
+                            modified: now,
+                            accessed: now,
+                        },
+                    });
                 }
             }
         }
@@ -408,34 +400,29 @@ impl VfsStorage for InMemoryStorage {
 
     async fn stat(&self, path: &str) -> VfsResult<Metadata> {
         let path = Self::normalize_path(path)?;
+        let state = self.state.read().await;
 
         // Check files first
-        {
-            let files = self.files.read().await;
-            if let Some(data) = files.get(&path) {
-                return Ok(Metadata {
-                    is_dir: false,
-                    size: data.content.len() as u64,
-                    created: data.created,
-                    modified: data.modified,
-                    accessed: data.accessed,
-                });
-            }
+        if let Some(data) = state.files.get(&path) {
+            return Ok(Metadata {
+                is_dir: false,
+                size: data.content.len() as u64,
+                created: data.created,
+                modified: data.modified,
+                accessed: data.accessed,
+            });
         }
 
         // Check directories
-        {
-            let dirs = self.directories.read().await;
-            if dirs.contains(&path) {
-                let now = SystemTime::now();
-                return Ok(Metadata {
-                    is_dir: true,
-                    size: 0,
-                    created: now,
-                    modified: now,
-                    accessed: now,
-                });
-            }
+        if state.directories.contains(&path) {
+            let now = SystemTime::now();
+            return Ok(Metadata {
+                is_dir: true,
+                size: 0,
+                created: now,
+                modified: now,
+                accessed: now,
+            });
         }
 
         Err(VfsError::NotFound(path))
@@ -443,21 +430,19 @@ impl VfsStorage for InMemoryStorage {
 
     async fn mkdir(&self, path: &str) -> VfsResult<()> {
         let path = Self::normalize_path(path)?;
-        self.check_parent_exists(&path).await?;
+        let mut state = self.state.write().await;
+
+        Self::check_parent_exists_with_state(&state, &path)?;
 
         // Check if already exists
-        {
-            let files = self.files.read().await;
-            if files.contains_key(&path) {
-                return Err(VfsError::AlreadyExists(path));
-            }
-        }
-
-        let mut dirs = self.directories.write().await;
-        if dirs.contains(&path) {
+        if state.files.contains_key(&path) {
             return Err(VfsError::AlreadyExists(path));
         }
-        dirs.insert(path);
+        if state.directories.contains(&path) {
+            return Err(VfsError::AlreadyExists(path));
+        }
+
+        state.directories.insert(path);
         Ok(())
     }
 
@@ -470,40 +455,31 @@ impl VfsStorage for InMemoryStorage {
             ));
         }
 
+        let mut state = self.state.write().await;
+
         // Check if it's a directory
-        {
-            let dirs = self.directories.read().await;
-            if !dirs.contains(&path) {
-                let files = self.files.read().await;
-                if files.contains_key(&path) {
-                    return Err(VfsError::NotDirectory(path));
-                } else {
-                    return Err(VfsError::NotFound(path));
-                }
+        if !state.directories.contains(&path) {
+            if state.files.contains_key(&path) {
+                return Err(VfsError::NotDirectory(path));
+            } else {
+                return Err(VfsError::NotFound(path));
             }
         }
 
         // Check if empty
         let prefix = format!("{path}/");
-        {
-            let files = self.files.read().await;
-            for file_path in files.keys() {
-                if file_path.starts_with(&prefix) {
-                    return Err(VfsError::DirectoryNotEmpty(path));
-                }
+        for file_path in state.files.keys() {
+            if file_path.starts_with(&prefix) {
+                return Err(VfsError::DirectoryNotEmpty(path));
             }
         }
-        {
-            let dirs = self.directories.read().await;
-            for dir_path in dirs.iter() {
-                if dir_path.starts_with(&prefix) {
-                    return Err(VfsError::DirectoryNotEmpty(path));
-                }
+        for dir_path in &state.directories {
+            if dir_path.starts_with(&prefix) {
+                return Err(VfsError::DirectoryNotEmpty(path));
             }
         }
 
-        let mut dirs = self.directories.write().await;
-        dirs.remove(&path);
+        state.directories.remove(&path);
         Ok(())
     }
 
@@ -515,85 +491,66 @@ impl VfsStorage for InMemoryStorage {
             return Ok(());
         }
 
-        self.check_parent_exists(&to).await?;
+        let mut state = self.state.write().await;
+
+        Self::check_parent_exists_with_state(&state, &to)?;
 
         // Handle file rename
-        {
-            let files = self.files.read().await;
-            if files.contains_key(&from) {
-                drop(files);
+        if state.files.contains_key(&from) {
+            // Check destination doesn't exist as directory
+            if state.directories.contains(&to) {
+                return Err(VfsError::AlreadyExists(to));
+            }
 
-                // Check destination doesn't exist as directory
-                {
-                    let dirs = self.directories.read().await;
-                    if dirs.contains(&to) {
-                        return Err(VfsError::AlreadyExists(to));
-                    }
-                }
-
-                let mut files = self.files.write().await;
-                if let Some(data) = files.remove(&from) {
-                    files.insert(to, data);
-                    return Ok(());
-                }
+            if let Some(data) = state.files.remove(&from) {
+                state.files.insert(to, data);
+                return Ok(());
             }
         }
 
         // Handle directory rename
-        {
-            let dirs = self.directories.read().await;
-            if dirs.contains(&from) {
-                drop(dirs);
-
-                // Check destination doesn't exist as file
-                {
-                    let files = self.files.read().await;
-                    if files.contains_key(&to) {
-                        return Err(VfsError::AlreadyExists(to));
-                    }
-                }
-
-                // Rename directory and all contents
-                let from_prefix = format!("{from}/");
-                let to_prefix = format!("{to}/");
-
-                // Rename files under the directory
-                {
-                    let mut files = self.files.write().await;
-                    let to_rename: Vec<_> = files
-                        .keys()
-                        .filter(|p| p.starts_with(&from_prefix))
-                        .cloned()
-                        .collect();
-                    for old_path in to_rename {
-                        if let Some(data) = files.remove(&old_path) {
-                            let new_path = old_path.replacen(&from_prefix, &to_prefix, 1);
-                            files.insert(new_path, data);
-                        }
-                    }
-                }
-
-                // Rename subdirectories
-                {
-                    let mut dirs = self.directories.write().await;
-                    let to_rename: Vec<_> = dirs
-                        .iter()
-                        .filter(|p| *p == &from || p.starts_with(&from_prefix))
-                        .cloned()
-                        .collect();
-                    for old_path in to_rename {
-                        dirs.remove(&old_path);
-                        let new_path = if old_path == from {
-                            to.clone()
-                        } else {
-                            old_path.replacen(&from_prefix, &to_prefix, 1)
-                        };
-                        dirs.insert(new_path);
-                    }
-                }
-
-                return Ok(());
+        if state.directories.contains(&from) {
+            // Check destination doesn't exist as file
+            if state.files.contains_key(&to) {
+                return Err(VfsError::AlreadyExists(to));
             }
+
+            // Rename directory and all contents
+            let from_prefix = format!("{from}/");
+            let to_prefix = format!("{to}/");
+
+            // Rename files under the directory
+            let files_to_rename: Vec<_> = state
+                .files
+                .keys()
+                .filter(|p| p.starts_with(&from_prefix))
+                .cloned()
+                .collect();
+            for old_path in files_to_rename {
+                if let Some(data) = state.files.remove(&old_path) {
+                    let new_path = old_path.replacen(&from_prefix, &to_prefix, 1);
+                    state.files.insert(new_path, data);
+                }
+            }
+
+            // Rename subdirectories
+            let dirs_to_rename: Vec<_> = state
+                .directories
+                .iter()
+                .filter(|p| *p == &from || p.starts_with(&from_prefix))
+                .cloned()
+                .collect();
+            for old_path in dirs_to_rename {
+                state.directories.remove(&old_path);
+                let new_path = if old_path == from {
+                    to.clone()
+                } else {
+                    old_path.replacen(&from_prefix, &to_prefix, 1)
+                };
+                state.directories.insert(new_path);
+            }
+
+            return Ok(());
         }
 
         Err(VfsError::NotFound(from))
@@ -607,20 +564,20 @@ impl VfsStorage for InMemoryStorage {
         for component in path.split('/').filter(|s| !s.is_empty()) {
             current = format!("{}/{}", current, component);
             // Use try_write to avoid blocking issues
-            if let Ok(mut dirs) = self.directories.try_write() {
-                dirs.insert(current.clone());
+            if let Ok(mut state) = self.state.try_write() {
+                state.directories.insert(current.clone());
             } else {
                 // If we can't get the lock, try blocking
                 let rt = tokio::runtime::Handle::try_current();
                 if let Ok(handle) = rt {
                     handle.block_on(async {
-                        let mut dirs = self.directories.write().await;
-                        dirs.insert(current.clone());
+                        let mut state = self.state.write().await;
+                        state.directories.insert(current.clone());
                     });
                 } else {
                     // No runtime, use blocking approach
-                    let mut dirs = self.directories.blocking_write();
-                    dirs.insert(current.clone());
+                    let mut state = self.state.blocking_write();
+                    state.directories.insert(current.clone());
                 }
             }
         }
@@ -747,5 +704,31 @@ mod tests {
         storage.write_at("/file.txt", 0, b"hello").await.unwrap();
         let content = storage.read("/file.txt").await.unwrap();
         assert_eq!(&content, b"helloworld");
+    }
+
+    #[test]
+    fn test_mkdir_sync() {
+        let storage = InMemoryStorage::new();
+
+        // Create a directory synchronously
+        storage.mkdir_sync("/data").unwrap();
+
+        // Verify using blocking read
+        let state = storage.state.blocking_read();
+        assert!(state.directories.contains("/data"));
+    }
+
+    #[test]
+    fn test_mkdir_sync_nested() {
+        let storage = InMemoryStorage::new();
+
+        // Create nested directories synchronously
+        storage.mkdir_sync("/data/subdir/nested").unwrap();
+
+        // Verify all intermediate directories were created
+        let state = storage.state.blocking_read();
+        assert!(state.directories.contains("/data"));
+        assert!(state.directories.contains("/data/subdir"));
+        assert!(state.directories.contains("/data/subdir/nested"));
     }
 }

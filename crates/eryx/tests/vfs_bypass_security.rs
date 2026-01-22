@@ -111,12 +111,10 @@ async fn create_executor() -> Arc<PythonExecutor> {
     #[cfg(not(feature = "embedded"))]
     {
         let stdlib_path = python_stdlib_path();
-        Arc::new(
-            PythonExecutor::from_file(runtime_wasm_path())
-                .expect("Failed to load runtime")
-                .with_python_stdlib(&stdlib_path)
-                .expect("Failed to set stdlib"),
-        )
+        let executor = PythonExecutor::from_file(runtime_wasm_path())
+            .expect("Failed to load runtime")
+            .with_python_stdlib(&stdlib_path);
+        Arc::new(executor)
     }
 }
 

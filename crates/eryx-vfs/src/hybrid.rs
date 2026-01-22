@@ -276,7 +276,7 @@ impl<S: VfsStorage> HybridVfsCtx<S> {
         // the async runtime might be fully available.
         if let Err(e) = self.storage.mkdir_sync(&guest_path) {
             tracing::warn!(
-                "Failed to create VFS preopen directory {}: {:?}",
+                "Failed to create VFS preopen directory {}: {}",
                 guest_path,
                 e
             );

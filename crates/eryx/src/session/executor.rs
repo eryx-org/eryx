@@ -296,6 +296,102 @@ impl std::fmt::Debug for SessionExecutor {
     }
 }
 
+/// Build callback info for introspection from a slice of callbacks.
+fn build_callback_infos(callbacks: &[Arc<dyn Callback>]) -> Vec<HostCallbackInfo> {
+    callbacks
+        .iter()
+        .map(|cb| HostCallbackInfo {
+            name: cb.name().to_string(),
+            description: cb.description().to_string(),
+            parameters_schema_json: serde_json::to_string(&cb.parameters_schema())
+                .unwrap_or_else(|_| "{}".to_string()),
+        })
+        .collect()
+}
+
+/// Build WASI context with Python stdlib and site-packages mounts.
+fn build_wasi_context(executor: &PythonExecutor) -> Result<WasiCtx, Error> {
+    let mut wasi_builder = WasiCtxBuilder::new();
+    wasi_builder.inherit_stdout().inherit_stderr();
+
+    // Build PYTHONPATH from stdlib and all site-packages directories
+    let site_packages_paths = executor.python_site_packages_paths();
+    let mut pythonpath_parts = Vec::new();
+    if executor.python_stdlib_path().is_some() {
+        pythonpath_parts.push("/python-stdlib".to_string());
+    }
+    for i in 0..site_packages_paths.len() {
+        pythonpath_parts.push(format!("/site-packages-{i}"));
+    }
+
+    // Mount Python stdlib if configured (required for eryx-wasm-runtime)
+    if let Some(stdlib_path) = executor.python_stdlib_path() {
+        wasi_builder.env("PYTHONHOME", "/python-stdlib");
+        if !pythonpath_parts.is_empty() {
+            wasi_builder.env("PYTHONPATH", pythonpath_parts.join(":"));
+        }
+        wasi_builder
+            .preopened_dir(
+                stdlib_path,
+                "/python-stdlib",
+                DirPerms::READ,
+                FilePerms::READ,
+            )
+            .map_err(|e| Error::WasmEngine(format!("Failed to mount Python stdlib: {e}")))?;
+    }
+
+    // Mount each site-packages directory at a unique path
+    for (i, site_packages_path) in site_packages_paths.iter().enumerate() {
+        let mount_path = format!("/site-packages-{i}");
+        wasi_builder
+            .preopened_dir(
+                site_packages_path,
+                &mount_path,
+                DirPerms::READ,
+                FilePerms::READ,
+            )
+            .map_err(|e| Error::WasmEngine(format!("Failed to mount {mount_path}: {e}")))?;
+    }
+
+    Ok(wasi_builder.build())
+}
+
+/// Build hybrid VFS context with VFS storage and real filesystem preopens.
+#[cfg(feature = "vfs")]
+fn build_hybrid_vfs_context(
+    executor: &PythonExecutor,
+    vfs_storage: Option<std::sync::Arc<eryx_vfs::InMemoryStorage>>,
+) -> eryx_vfs::HybridVfsCtx<eryx_vfs::InMemoryStorage> {
+    let storage =
+        vfs_storage.unwrap_or_else(|| std::sync::Arc::new(eryx_vfs::InMemoryStorage::new()));
+    let mut ctx = eryx_vfs::HybridVfsCtx::new(storage);
+
+    // Add a writable /data directory backed by VFS storage
+    ctx.add_vfs_preopen(
+        "/data",
+        eryx_vfs::DirPerms::all(),
+        eryx_vfs::FilePerms::all(),
+    );
+
+    // Add real filesystem preopens that mirror the WASI preopens
+    if let Some(stdlib_path) = executor.python_stdlib_path()
+        && let Ok(real_dir) =
+            eryx_vfs::RealDir::open_ambient(stdlib_path, DirPerms::READ, FilePerms::READ)
+    {
+        ctx.add_real_preopen("/python-stdlib", real_dir);
+    }
+    for (i, site_packages_path) in executor.python_site_packages_paths().iter().enumerate() {
+        let mount_path = format!("/site-packages-{i}");
+        if let Ok(real_dir) =
+            eryx_vfs::RealDir::open_ambient(site_packages_path, DirPerms::READ, FilePerms::READ)
+        {
+            ctx.add_real_preopen(&mount_path, real_dir);
+        }
+    }
+
+    ctx
+}
+
 impl SessionExecutor {
     /// Create a new session executor from a `PythonExecutor`.
     ///
@@ -354,95 +450,9 @@ impl SessionExecutor {
         callbacks: &[Arc<dyn Callback>],
         vfs_storage: Option<std::sync::Arc<eryx_vfs::InMemoryStorage>>,
     ) -> Result<Self, Error> {
-        // Build callback info for introspection
-        let callback_infos: Vec<HostCallbackInfo> = callbacks
-            .iter()
-            .map(|cb| HostCallbackInfo {
-                name: cb.name().to_string(),
-                description: cb.description().to_string(),
-                parameters_schema_json: serde_json::to_string(&cb.parameters_schema())
-                    .unwrap_or_else(|_| "{}".to_string()),
-            })
-            .collect();
-
-        // Create WASI context with Python stdlib mounts if configured
-        let mut wasi_builder = WasiCtxBuilder::new();
-        wasi_builder.inherit_stdout().inherit_stderr();
-
-        // Build PYTHONPATH from stdlib and all site-packages directories
-        let site_packages_paths = executor.python_site_packages_paths();
-        let mut pythonpath_parts = Vec::new();
-        if executor.python_stdlib_path().is_some() {
-            pythonpath_parts.push("/python-stdlib".to_string());
-        }
-        for i in 0..site_packages_paths.len() {
-            pythonpath_parts.push(format!("/site-packages-{i}"));
-        }
-
-        // Mount Python stdlib if configured (required for eryx-wasm-runtime)
-        if let Some(stdlib_path) = executor.python_stdlib_path() {
-            wasi_builder.env("PYTHONHOME", "/python-stdlib");
-            if !pythonpath_parts.is_empty() {
-                wasi_builder.env("PYTHONPATH", pythonpath_parts.join(":"));
-            }
-            wasi_builder
-                .preopened_dir(
-                    stdlib_path,
-                    "/python-stdlib",
-                    DirPerms::READ,
-                    FilePerms::READ,
-                )
-                .map_err(|e| Error::WasmEngine(format!("Failed to mount Python stdlib: {e}")))?;
-        }
-
-        // Mount each site-packages directory at a unique path
-        for (i, site_packages_path) in site_packages_paths.iter().enumerate() {
-            let mount_path = format!("/site-packages-{i}");
-            wasi_builder
-                .preopened_dir(
-                    site_packages_path,
-                    &mount_path,
-                    DirPerms::READ,
-                    FilePerms::READ,
-                )
-                .map_err(|e| Error::WasmEngine(format!("Failed to mount {mount_path}: {e}")))?;
-        }
-
-        let wasi = wasi_builder.build();
-
-        // Build hybrid VFS context - use provided storage or create a new one
-        let hybrid_vfs_ctx = {
-            let storage = vfs_storage
-                .unwrap_or_else(|| std::sync::Arc::new(eryx_vfs::InMemoryStorage::new()));
-            let mut ctx = eryx_vfs::HybridVfsCtx::new(storage);
-
-            // Add a writable /data directory backed by VFS storage
-            ctx.add_vfs_preopen(
-                "/data",
-                eryx_vfs::DirPerms::all(),
-                eryx_vfs::FilePerms::all(),
-            );
-
-            // Add real filesystem preopens that mirror the WASI preopens
-            if let Some(stdlib_path) = executor.python_stdlib_path()
-                && let Ok(real_dir) =
-                    eryx_vfs::RealDir::open_ambient(stdlib_path, DirPerms::READ, FilePerms::READ)
-            {
-                ctx.add_real_preopen("/python-stdlib", real_dir);
-            }
-            for (i, site_packages_path) in site_packages_paths.iter().enumerate() {
-                let mount_path = format!("/site-packages-{i}");
-                if let Ok(real_dir) = eryx_vfs::RealDir::open_ambient(
-                    site_packages_path,
-                    DirPerms::READ,
-                    FilePerms::READ,
-                ) {
-                    ctx.add_real_preopen(&mount_path, real_dir);
-                }
-            }
-
-            Some(ctx)
-        };
+        let callback_infos = build_callback_infos(callbacks);
+        let wasi = build_wasi_context(&executor)?;
+        let hybrid_vfs_ctx = Some(build_hybrid_vfs_context(&executor, vfs_storage));
 
         let state = ExecutorState::new(
             wasi,
@@ -487,61 +497,8 @@ impl SessionExecutor {
         executor: Arc<PythonExecutor>,
         callbacks: &[Arc<dyn Callback>],
     ) -> Result<Self, Error> {
-        // Build callback info for introspection
-        let callback_infos: Vec<HostCallbackInfo> = callbacks
-            .iter()
-            .map(|cb| HostCallbackInfo {
-                name: cb.name().to_string(),
-                description: cb.description().to_string(),
-                parameters_schema_json: serde_json::to_string(&cb.parameters_schema())
-                    .unwrap_or_else(|_| "{}".to_string()),
-            })
-            .collect();
-
-        // Create WASI context with Python stdlib mounts if configured
-        let mut wasi_builder = WasiCtxBuilder::new();
-        wasi_builder.inherit_stdout().inherit_stderr();
-
-        // Build PYTHONPATH from stdlib and all site-packages directories
-        let site_packages_paths = executor.python_site_packages_paths();
-        let mut pythonpath_parts = Vec::new();
-        if executor.python_stdlib_path().is_some() {
-            pythonpath_parts.push("/python-stdlib".to_string());
-        }
-        for i in 0..site_packages_paths.len() {
-            pythonpath_parts.push(format!("/site-packages-{i}"));
-        }
-
-        // Mount Python stdlib if configured (required for eryx-wasm-runtime)
-        if let Some(stdlib_path) = executor.python_stdlib_path() {
-            wasi_builder.env("PYTHONHOME", "/python-stdlib");
-            if !pythonpath_parts.is_empty() {
-                wasi_builder.env("PYTHONPATH", pythonpath_parts.join(":"));
-            }
-            wasi_builder
-                .preopened_dir(
-                    stdlib_path,
-                    "/python-stdlib",
-                    DirPerms::READ,
-                    FilePerms::READ,
-                )
-                .map_err(|e| Error::WasmEngine(format!("Failed to mount Python stdlib: {e}")))?;
-        }
-
-        // Mount each site-packages directory at a unique path
-        for (i, site_packages_path) in site_packages_paths.iter().enumerate() {
-            let mount_path = format!("/site-packages-{i}");
-            wasi_builder
-                .preopened_dir(
-                    site_packages_path,
-                    &mount_path,
-                    DirPerms::READ,
-                    FilePerms::READ,
-                )
-                .map_err(|e| Error::WasmEngine(format!("Failed to mount {mount_path}: {e}")))?;
-        }
-
-        let wasi = wasi_builder.build();
+        let callback_infos = build_callback_infos(callbacks);
+        let wasi = build_wasi_context(&executor)?;
 
         let state = ExecutorState::new(
             wasi,
@@ -767,96 +724,8 @@ impl SessionExecutor {
     ///
     /// Returns an error if re-instantiation fails.
     pub async fn reset(&mut self, callbacks: &[Arc<dyn Callback>]) -> Result<(), Error> {
-        // Build callback info
-        let callback_infos: Vec<HostCallbackInfo> = callbacks
-            .iter()
-            .map(|cb| HostCallbackInfo {
-                name: cb.name().to_string(),
-                description: cb.description().to_string(),
-                parameters_schema_json: serde_json::to_string(&cb.parameters_schema())
-                    .unwrap_or_else(|_| "{}".to_string()),
-            })
-            .collect();
-
-        // Create WASI context with Python stdlib mounts if configured (same as new())
-        let mut wasi_builder = WasiCtxBuilder::new();
-        wasi_builder.inherit_stdout().inherit_stderr();
-
-        // Build PYTHONPATH from stdlib and all site-packages directories
-        let site_packages_paths = self.executor.python_site_packages_paths();
-        let mut pythonpath_parts = Vec::new();
-        if self.executor.python_stdlib_path().is_some() {
-            pythonpath_parts.push("/python-stdlib".to_string());
-        }
-        for i in 0..site_packages_paths.len() {
-            pythonpath_parts.push(format!("/site-packages-{i}"));
-        }
-
-        // Mount Python stdlib if configured (required for eryx-wasm-runtime)
-        if let Some(stdlib_path) = self.executor.python_stdlib_path() {
-            wasi_builder.env("PYTHONHOME", "/python-stdlib");
-            if !pythonpath_parts.is_empty() {
-                wasi_builder.env("PYTHONPATH", pythonpath_parts.join(":"));
-            }
-            wasi_builder
-                .preopened_dir(
-                    stdlib_path,
-                    "/python-stdlib",
-                    DirPerms::READ,
-                    FilePerms::READ,
-                )
-                .map_err(|e| Error::WasmEngine(format!("Failed to mount Python stdlib: {e}")))?;
-        }
-
-        // Mount each site-packages directory at a unique path
-        for (i, site_packages_path) in site_packages_paths.iter().enumerate() {
-            let mount_path = format!("/site-packages-{i}");
-            wasi_builder
-                .preopened_dir(
-                    site_packages_path,
-                    &mount_path,
-                    DirPerms::READ,
-                    FilePerms::READ,
-                )
-                .map_err(|e| Error::WasmEngine(format!("Failed to mount {mount_path}: {e}")))?;
-        }
-
-        let wasi = wasi_builder.build();
-
-        // Build hybrid VFS context when vfs feature is enabled
-        #[cfg(feature = "vfs")]
-        let hybrid_vfs_ctx = {
-            use std::sync::Arc;
-            let storage = Arc::new(eryx_vfs::InMemoryStorage::new());
-            let mut ctx = eryx_vfs::HybridVfsCtx::new(storage);
-
-            // Add a writable /data directory backed by VFS storage
-            ctx.add_vfs_preopen(
-                "/data",
-                eryx_vfs::DirPerms::all(),
-                eryx_vfs::FilePerms::all(),
-            );
-
-            // Add real filesystem preopens that mirror the WASI preopens
-            if let Some(stdlib_path) = self.executor.python_stdlib_path()
-                && let Ok(real_dir) =
-                    eryx_vfs::RealDir::open_ambient(stdlib_path, DirPerms::READ, FilePerms::READ)
-            {
-                ctx.add_real_preopen("/python-stdlib", real_dir);
-            }
-            for (i, site_packages_path) in site_packages_paths.iter().enumerate() {
-                let mount_path = format!("/site-packages-{i}");
-                if let Ok(real_dir) = eryx_vfs::RealDir::open_ambient(
-                    site_packages_path,
-                    DirPerms::READ,
-                    FilePerms::READ,
-                ) {
-                    ctx.add_real_preopen(&mount_path, real_dir);
-                }
-            }
-
-            Some(ctx)
-        };
+        let callback_infos = build_callback_infos(callbacks);
+        let wasi = build_wasi_context(&self.executor)?;
 
         #[cfg(not(feature = "vfs"))]
         let state = ExecutorState::new(
@@ -876,7 +745,7 @@ impl SessionExecutor {
             None,
             callback_infos,
             MemoryTracker::new(None),
-            hybrid_vfs_ctx,
+            Some(build_hybrid_vfs_context(&self.executor, None)),
         );
 
         // Create new store
