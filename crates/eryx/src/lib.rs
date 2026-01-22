@@ -83,6 +83,8 @@ pub use pool::{PoolConfig, PoolError, PoolStats, PooledSandbox, SandboxPool};
 pub use sandbox::{
     ExecuteResult, ExecuteStats, ExecutionHandle, ResourceLimits, Sandbox, SandboxBuilder, state,
 };
+#[cfg(feature = "vfs")]
+pub use session::VfsConfig;
 pub use session::{
     InProcessSession, PythonStateSnapshot, Session, SessionExecutor, SnapshotMetadata,
     SnapshotSession,

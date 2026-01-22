@@ -257,6 +257,59 @@ impl<'a> SessionExecuteBuilder<'a> {
     }
 }
 
+/// Configuration for the virtual filesystem (VFS) in a session.
+///
+/// This allows customizing the VFS mount path and permissions.
+#[cfg(feature = "vfs")]
+#[derive(Debug, Clone)]
+pub struct VfsConfig {
+    /// The guest path where VFS storage is mounted (default: "/data").
+    pub mount_path: String,
+    /// Directory permissions for the VFS mount.
+    pub dir_perms: eryx_vfs::DirPerms,
+    /// File permissions for files in the VFS mount.
+    pub file_perms: eryx_vfs::FilePerms,
+}
+
+#[cfg(feature = "vfs")]
+impl Default for VfsConfig {
+    fn default() -> Self {
+        Self {
+            mount_path: "/data".to_string(),
+            dir_perms: eryx_vfs::DirPerms::all(),
+            file_perms: eryx_vfs::FilePerms::all(),
+        }
+    }
+}
+
+#[cfg(feature = "vfs")]
+impl VfsConfig {
+    /// Create a new VFS config with the given mount path.
+    ///
+    /// Uses full read/write permissions by default.
+    #[must_use]
+    pub fn new(mount_path: impl Into<String>) -> Self {
+        Self {
+            mount_path: mount_path.into(),
+            ..Default::default()
+        }
+    }
+
+    /// Set directory permissions.
+    #[must_use]
+    pub fn with_dir_perms(mut self, perms: eryx_vfs::DirPerms) -> Self {
+        self.dir_perms = perms;
+        self
+    }
+
+    /// Set file permissions.
+    #[must_use]
+    pub fn with_file_perms(mut self, perms: eryx_vfs::FilePerms) -> Self {
+        self.file_perms = perms;
+        self
+    }
+}
+
 /// A session-aware executor that keeps WASM instances alive between executions.
 ///
 /// Unlike `PythonExecutor` which creates a fresh instance for each execution,
@@ -283,6 +336,14 @@ pub struct SessionExecutor {
 
     /// Optional execution timeout for epoch-based interruption.
     execution_timeout: Option<Duration>,
+
+    /// VFS storage that persists across resets.
+    #[cfg(feature = "vfs")]
+    vfs_storage: Option<std::sync::Arc<eryx_vfs::InMemoryStorage>>,
+
+    /// VFS configuration that persists across resets.
+    #[cfg(feature = "vfs")]
+    vfs_config: Option<VfsConfig>,
 }
 
 impl std::fmt::Debug for SessionExecutor {
@@ -360,17 +421,16 @@ fn build_wasi_context(executor: &PythonExecutor) -> Result<WasiCtx, Error> {
 #[cfg(feature = "vfs")]
 fn build_hybrid_vfs_context(
     executor: &PythonExecutor,
-    vfs_storage: Option<std::sync::Arc<eryx_vfs::InMemoryStorage>>,
+    vfs_storage: std::sync::Arc<eryx_vfs::InMemoryStorage>,
+    vfs_config: &VfsConfig,
 ) -> eryx_vfs::HybridVfsCtx<eryx_vfs::InMemoryStorage> {
-    let storage =
-        vfs_storage.unwrap_or_else(|| std::sync::Arc::new(eryx_vfs::InMemoryStorage::new()));
-    let mut ctx = eryx_vfs::HybridVfsCtx::new(storage);
+    let mut ctx = eryx_vfs::HybridVfsCtx::new(vfs_storage);
 
-    // Add a writable /data directory backed by VFS storage
+    // Add a writable VFS directory backed by VFS storage
     ctx.add_vfs_preopen(
-        "/data",
-        eryx_vfs::DirPerms::all(),
-        eryx_vfs::FilePerms::all(),
+        &vfs_config.mount_path,
+        vfs_config.dir_perms,
+        vfs_config.file_perms,
     );
 
     // Add real filesystem preopens that mirror the WASI preopens
@@ -411,7 +471,7 @@ impl SessionExecutor {
     ) -> Result<Self, Error> {
         #[cfg(feature = "vfs")]
         {
-            Self::new_internal(executor, callbacks, None).await
+            Self::new_internal(executor, callbacks, None, None).await
         }
         #[cfg(not(feature = "vfs"))]
         {
@@ -422,14 +482,14 @@ impl SessionExecutor {
     /// Create a new session executor with a custom VFS storage.
     ///
     /// This allows providing an external `InMemoryStorage` that persists
-    /// across session resets. Files written to `/data/*` paths will be
-    /// stored in the provided storage.
+    /// across session resets. Files written to the VFS mount path (default: `/data/*`)
+    /// will be stored in the provided storage.
     ///
     /// # Arguments
     ///
     /// * `executor` - The parent executor providing engine and instance_pre
     /// * `callbacks` - Callbacks available for this session
-    /// * `vfs_storage` - The VFS storage to use for `/data/*` paths
+    /// * `vfs_storage` - The VFS storage to use for the VFS mount
     ///
     /// # Errors
     ///
@@ -440,19 +500,71 @@ impl SessionExecutor {
         callbacks: &[Arc<dyn Callback>],
         vfs_storage: std::sync::Arc<eryx_vfs::InMemoryStorage>,
     ) -> Result<Self, Error> {
-        Self::new_internal(executor, callbacks, Some(vfs_storage)).await
+        Self::new_internal(executor, callbacks, Some(vfs_storage), None).await
     }
 
-    /// Internal constructor with optional VFS storage.
+    /// Create a new session executor with custom VFS storage and configuration.
+    ///
+    /// This allows full control over VFS mount path and permissions.
+    ///
+    /// # Arguments
+    ///
+    /// * `executor` - The parent executor providing engine and instance_pre
+    /// * `callbacks` - Callbacks available for this session
+    /// * `vfs_storage` - The VFS storage to use
+    /// * `vfs_config` - Configuration for the VFS mount (path, permissions)
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// use eryx::{PythonExecutor, SessionExecutor, VfsConfig};
+    /// use eryx::vfs::InMemoryStorage;
+    /// use std::sync::Arc;
+    ///
+    /// let storage = Arc::new(InMemoryStorage::new());
+    /// let config = VfsConfig::new("/workspace");  // Custom mount path
+    /// let session = SessionExecutor::new_with_vfs_config(
+    ///     executor,
+    ///     &[],
+    ///     storage,
+    ///     config,
+    /// ).await?;
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the WASM component cannot be instantiated.
+    #[cfg(feature = "vfs")]
+    pub async fn new_with_vfs_config(
+        executor: Arc<PythonExecutor>,
+        callbacks: &[Arc<dyn Callback>],
+        vfs_storage: std::sync::Arc<eryx_vfs::InMemoryStorage>,
+        vfs_config: VfsConfig,
+    ) -> Result<Self, Error> {
+        Self::new_internal(executor, callbacks, Some(vfs_storage), Some(vfs_config)).await
+    }
+
+    /// Internal constructor with optional VFS storage and config.
     #[cfg(feature = "vfs")]
     async fn new_internal(
         executor: Arc<PythonExecutor>,
         callbacks: &[Arc<dyn Callback>],
         vfs_storage: Option<std::sync::Arc<eryx_vfs::InMemoryStorage>>,
+        vfs_config: Option<VfsConfig>,
     ) -> Result<Self, Error> {
         let callback_infos = build_callback_infos(callbacks);
         let wasi = build_wasi_context(&executor)?;
-        let hybrid_vfs_ctx = Some(build_hybrid_vfs_context(&executor, vfs_storage));
+
+        // Use provided storage/config or create defaults
+        let vfs_storage =
+            vfs_storage.unwrap_or_else(|| std::sync::Arc::new(eryx_vfs::InMemoryStorage::new()));
+        let vfs_config = vfs_config.unwrap_or_default();
+
+        let hybrid_vfs_ctx = Some(build_hybrid_vfs_context(
+            &executor,
+            Arc::clone(&vfs_storage),
+            &vfs_config,
+        ));
 
         let state = ExecutorState::new(
             wasi,
@@ -488,6 +600,8 @@ impl SessionExecutor {
             bindings: Some(bindings),
             execution_count: 0,
             execution_timeout: None,
+            vfs_storage: Some(vfs_storage),
+            vfs_config: Some(vfs_config),
         })
     }
 
@@ -714,7 +828,8 @@ impl SessionExecutor {
 
     /// Reset the session to a fresh state.
     ///
-    /// This creates a new WASM instance, discarding all previous state.
+    /// This creates a new WASM instance, discarding all previous Python state.
+    /// However, VFS storage persists across resets if it was provided at construction.
     ///
     /// # Arguments
     ///
@@ -738,15 +853,28 @@ impl SessionExecutor {
         );
 
         #[cfg(feature = "vfs")]
-        let state = ExecutorState::new(
-            wasi,
-            ResourceTable::new(),
-            None,
-            None,
-            callback_infos,
-            MemoryTracker::new(None),
-            Some(build_hybrid_vfs_context(&self.executor, None)),
-        );
+        let state = {
+            // Reuse existing VFS storage and config so files persist across resets
+            let vfs_storage = self
+                .vfs_storage
+                .clone()
+                .unwrap_or_else(|| std::sync::Arc::new(eryx_vfs::InMemoryStorage::new()));
+            let vfs_config = self.vfs_config.clone().unwrap_or_default();
+
+            ExecutorState::new(
+                wasi,
+                ResourceTable::new(),
+                None,
+                None,
+                callback_infos,
+                MemoryTracker::new(None),
+                Some(build_hybrid_vfs_context(
+                    &self.executor,
+                    vfs_storage,
+                    &vfs_config,
+                )),
+            )
+        };
 
         // Create new store
         let mut store = Store::new(self.executor.engine(), state);

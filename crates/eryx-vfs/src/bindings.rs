@@ -1,7 +1,18 @@
-//! WASI filesystem bindings for VFS.
+//! WASI filesystem bindings for pure VFS.
 //!
 //! This module generates bindings for the `wasi:filesystem` interfaces with
 //! our custom VFS types instead of the default wasmtime-wasi types.
+//!
+//! ## When to use this vs `hybrid_bindings`
+//!
+//! - Use **this module** (`bindings`) when you want a pure in-memory VFS with no
+//!   real filesystem access. All paths are handled by the `VfsStorage` backend.
+//!   Good for fully sandboxed environments where no host filesystem access is needed.
+//!
+//! - Use **`hybrid_bindings`** when you need to mix VFS storage with real filesystem
+//!   passthrough (e.g., `/data/*` goes to VFS, `/python-stdlib/*` goes to real FS).
+//!   This is what `SessionExecutor` uses to allow Python stdlib access while
+//!   keeping user data sandboxed.
 
 // Import our types that will be used by bindgen
 pub use crate::wasi_impl::{VfsDescriptor, VfsReaddirIterator};

@@ -2,6 +2,19 @@
 //!
 //! This module generates bindings for the `wasi:filesystem` interfaces with
 //! our hybrid descriptor type that can route to either VFS or real filesystem.
+//!
+//! ## When to use this vs `bindings`
+//!
+//! - Use **this module** (`hybrid_bindings`) when you need to mix VFS storage with
+//!   real filesystem passthrough. Paths are routed based on prefix:
+//!   - VFS paths (e.g., `/data/*`) go to in-memory `VfsStorage`
+//!   - Real paths (e.g., `/python-stdlib/*`) pass through to the host filesystem
+//!
+//!   This is what `SessionExecutor` uses to allow Python stdlib access while
+//!   keeping user data sandboxed in the VFS.
+//!
+//! - Use **`bindings`** when you want a pure in-memory VFS with no real filesystem
+//!   access at all. Good for fully sandboxed environments.
 
 // Re-export the HybridDescriptor from the hybrid module
 pub use crate::hybrid::HybridDescriptor;

@@ -559,26 +559,40 @@ impl VfsStorage for InMemoryStorage {
     fn mkdir_sync(&self, path: &str) -> VfsResult<()> {
         let path = Self::normalize_path(path)?;
 
-        // Create all parent directories and the target directory
+        // Collect all directories to create first.
+        let mut dirs_to_create = Vec::new();
         let mut current = String::new();
         for component in path.split('/').filter(|s| !s.is_empty()) {
             current = format!("{}/{}", current, component);
-            // Use try_write to avoid blocking issues
-            if let Ok(mut state) = self.state.try_write() {
-                state.directories.insert(current.clone());
-            } else {
-                // If we can't get the lock, try blocking
-                let rt = tokio::runtime::Handle::try_current();
-                if let Ok(handle) = rt {
-                    handle.block_on(async {
-                        let mut state = self.state.write().await;
-                        state.directories.insert(current.clone());
-                    });
-                } else {
-                    // No runtime, use blocking approach
-                    let mut state = self.state.blocking_write();
-                    state.directories.insert(current.clone());
+            dirs_to_create.push(current.clone());
+        }
+
+        // Try to acquire the lock without blocking first.
+        // This handles the common case where no contention exists.
+        if let Ok(mut state) = self.state.try_write() {
+            for dir in dirs_to_create {
+                state.directories.insert(dir);
+            }
+            return Ok(());
+        }
+
+        // If try_write fails, we need to use a blocking approach.
+        // Check if we're in an async runtime context.
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            // We're in an async runtime - use block_on with async write.
+            // This is safe because mkdir_sync is only called during setup,
+            // before the store starts processing async WASM calls.
+            handle.block_on(async {
+                let mut state = self.state.write().await;
+                for dir in dirs_to_create {
+                    state.directories.insert(dir);
                 }
+            });
+        } else {
+            // Not in an async runtime - safe to use blocking_write.
+            let mut state = self.state.blocking_write();
+            for dir in dirs_to_create {
+                state.directories.insert(dir);
             }
         }
 

@@ -1169,3 +1169,245 @@ except Exception as e:
     .await;
     assert!(safe, "mmap should not access host files: {}", output);
 }
+
+// =============================================================================
+// VFS Storage Isolation Tests
+// =============================================================================
+
+/// Test that two sessions with different storage are isolated from each other
+#[tokio::test]
+async fn test_vfs_storage_isolation_between_sessions() {
+    let executor = create_executor().await;
+
+    // Create two sessions with different storage instances
+    let storage1 = Arc::new(InMemoryStorage::new());
+    let storage2 = Arc::new(InMemoryStorage::new());
+
+    let mut session1 = SessionExecutor::new_with_vfs(Arc::clone(&executor), &[], storage1)
+        .await
+        .expect("Failed to create session1");
+    let mut session2 = SessionExecutor::new_with_vfs(Arc::clone(&executor), &[], storage2)
+        .await
+        .expect("Failed to create session2");
+
+    // Write a file in session1
+    let result1 = session1
+        .execute(
+            r#"
+with open('/data/secret.txt', 'w') as f:
+    f.write('session1 secret data')
+print("Session 1: wrote secret.txt")
+"#,
+        )
+        .run()
+        .await;
+    assert!(result1.is_ok(), "Session1 write should succeed");
+
+    // Try to read the file in session2 - should NOT exist
+    let result2 = session2
+        .execute(
+            r#"
+import os
+try:
+    with open('/data/secret.txt', 'r') as f:
+        content = f.read()
+    print(f"ISOLATION FAILURE: session2 read session1's file: {content}")
+except FileNotFoundError:
+    print("EXPECTED: File not found in session2 (storage is isolated)")
+"#,
+        )
+        .run()
+        .await;
+
+    assert!(result2.is_ok(), "Session2 read should execute");
+    let output2 = result2.unwrap();
+    assert!(
+        output2.stdout.contains("EXPECTED: File not found"),
+        "Session2 should NOT see session1's files: {}",
+        output2.stdout
+    );
+    assert!(
+        !output2.stdout.contains("ISOLATION FAILURE"),
+        "Storage should be isolated: {}",
+        output2.stdout
+    );
+}
+
+/// Test that sessions sharing the same storage CAN see each other's files
+#[tokio::test]
+async fn test_vfs_storage_sharing_between_sessions() {
+    let executor = create_executor().await;
+
+    // Create two sessions with the SAME storage instance
+    let shared_storage = Arc::new(InMemoryStorage::new());
+
+    let mut session1 =
+        SessionExecutor::new_with_vfs(Arc::clone(&executor), &[], Arc::clone(&shared_storage))
+            .await
+            .expect("Failed to create session1");
+    let mut session2 =
+        SessionExecutor::new_with_vfs(Arc::clone(&executor), &[], Arc::clone(&shared_storage))
+            .await
+            .expect("Failed to create session2");
+
+    // Write a file in session1
+    let result1 = session1
+        .execute(
+            r#"
+with open('/data/shared.txt', 'w') as f:
+    f.write('shared data from session1')
+print("Session 1: wrote shared.txt")
+"#,
+        )
+        .run()
+        .await;
+    assert!(result1.is_ok(), "Session1 write should succeed");
+
+    // Read the file in session2 - SHOULD exist since storage is shared
+    let result2 = session2
+        .execute(
+            r#"
+try:
+    with open('/data/shared.txt', 'r') as f:
+        content = f.read()
+    print(f"SUCCESS: session2 read shared file: {content}")
+except FileNotFoundError:
+    print("UNEXPECTED: File not found (storage should be shared)")
+"#,
+        )
+        .run()
+        .await;
+
+    assert!(result2.is_ok(), "Session2 read should execute");
+    let output2 = result2.unwrap();
+    assert!(
+        output2
+            .stdout
+            .contains("SUCCESS: session2 read shared file"),
+        "Session2 should see session1's files when storage is shared: {}",
+        output2.stdout
+    );
+}
+
+/// Test that VFS storage persists across session reset
+#[tokio::test]
+async fn test_vfs_storage_persists_across_reset() {
+    let executor = create_executor().await;
+    let storage = Arc::new(InMemoryStorage::new());
+
+    let mut session = SessionExecutor::new_with_vfs(Arc::clone(&executor), &[], storage)
+        .await
+        .expect("Failed to create session");
+
+    // Write a file
+    let result1 = session
+        .execute(
+            r#"
+with open('/data/persist.txt', 'w') as f:
+    f.write('data before reset')
+print("Wrote file before reset")
+"#,
+        )
+        .run()
+        .await;
+    assert!(result1.is_ok(), "Write before reset should succeed");
+
+    // Reset the session (Python state cleared, but VFS should persist)
+    session.reset(&[]).await.expect("Reset should succeed");
+
+    // Read the file after reset - SHOULD still exist
+    let result2 = session
+        .execute(
+            r#"
+try:
+    with open('/data/persist.txt', 'r') as f:
+        content = f.read()
+    print(f"SUCCESS: File persisted across reset: {content}")
+except FileNotFoundError:
+    print("UNEXPECTED: File not found after reset")
+"#,
+        )
+        .run()
+        .await;
+
+    assert!(result2.is_ok(), "Read after reset should execute");
+    let output2 = result2.unwrap();
+    assert!(
+        output2
+            .stdout
+            .contains("SUCCESS: File persisted across reset"),
+        "VFS storage should persist across reset: {}",
+        output2.stdout
+    );
+}
+
+/// Test custom VFS mount path configuration
+#[tokio::test]
+async fn test_vfs_custom_mount_path() {
+    use eryx::VfsConfig;
+
+    let executor = create_executor().await;
+    let storage = Arc::new(InMemoryStorage::new());
+    let config = VfsConfig::new("/workspace"); // Custom mount path instead of /data
+
+    let mut session =
+        SessionExecutor::new_with_vfs_config(Arc::clone(&executor), &[], storage, config)
+            .await
+            .expect("Failed to create session");
+
+    // Write to custom mount path
+    let result1 = session
+        .execute(
+            r#"
+with open('/workspace/test.txt', 'w') as f:
+    f.write('custom path works')
+print("Wrote to /workspace")
+"#,
+        )
+        .run()
+        .await;
+    assert!(result1.is_ok(), "Write to custom path should succeed");
+
+    // Read back from custom mount path
+    let result2 = session
+        .execute(
+            r#"
+with open('/workspace/test.txt', 'r') as f:
+    content = f.read()
+print(f"Read from /workspace: {content}")
+"#,
+        )
+        .run()
+        .await;
+
+    assert!(result2.is_ok(), "Read from custom path should succeed");
+    let output2 = result2.unwrap();
+    assert!(
+        output2.stdout.contains("custom path works"),
+        "Custom mount path should work: {}",
+        output2.stdout
+    );
+
+    // Verify default /data path doesn't work with custom config
+    let result3 = session
+        .execute(
+            r#"
+try:
+    with open('/data/test.txt', 'w') as f:
+        f.write('should fail')
+    print("UNEXPECTED: /data worked with custom config")
+except (FileNotFoundError, OSError) as e:
+    print(f"EXPECTED: /data not available: {type(e).__name__}")
+"#,
+        )
+        .run()
+        .await;
+
+    assert!(result3.is_ok(), "Check /data should execute");
+    let output3 = result3.unwrap();
+    assert!(
+        output3.stdout.contains("EXPECTED: /data not available"),
+        "/data should not be available when using custom mount path: {}",
+        output3.stdout
+    );
+}
