@@ -16,7 +16,7 @@ name = "_eryx"
 crate-type = ["cdylib"]
 
 [dependencies]
-eryx = { path = "../eryx", features = ["embedded", "native-extensions"] }
+eryx = { path = "../eryx", features = ["embedded", "native-extensions", "vfs"] }
 pyo3 = { workspace = true, features = ["abi3-py312"] } #unified
 serde_json.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread"] }

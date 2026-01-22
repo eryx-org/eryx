@@ -116,6 +116,8 @@ webpki-roots.workspace = true
 zstd = { workspace = true, optional = true }
 # Native extension support (optional)
 eryx-runtime = { path = "../eryx-runtime", optional = true }
+# Virtual filesystem support (optional)
+eryx-vfs = { path = "../eryx-vfs", optional = true }
 
 [features]
 default = []
@@ -131,6 +133,9 @@ preinit = ["dep:eryx-runtime", "eryx-runtime/preinit"]
 # Allows adding extensions like numpy at sandbox creation time.
 # Implies preinit since the linker infrastructure is shared.
 native-extensions = ["preinit", "eryx-runtime/native-extensions"]
+# Virtual filesystem support.
+# Provides a sandboxed in-memory filesystem that can be persisted.
+vfs = ["dep:eryx-vfs"]
 
 [dev-dependencies]
 async-trait.workspace = true

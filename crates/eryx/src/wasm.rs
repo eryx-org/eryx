@@ -262,11 +262,16 @@ pub struct ExecutorState {
     pub(crate) memory_tracker: MemoryTracker,
     /// Channel to send network requests to the handler.
     pub(crate) net_tx: Option<mpsc::Sender<NetRequest>>,
+    /// Hybrid virtual filesystem context (when vfs feature is enabled).
+    /// Routes /data/* to VFS storage, other paths to real filesystem.
+    #[cfg(feature = "vfs")]
+    pub(crate) hybrid_vfs_ctx: Option<eryx_vfs::HybridVfsCtx<eryx_vfs::InMemoryStorage>>,
 }
 
 impl std::fmt::Debug for ExecutorState {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("ExecutorState")
+        let mut debug = f.debug_struct("ExecutorState");
+        debug
             .field("wasi", &"<WasiCtx>")
             .field("table", &"<ResourceTable>")
             .field("callback_tx", &self.callback_tx.is_some())
@@ -276,8 +281,10 @@ impl std::fmt::Debug for ExecutorState {
                 "peak_memory_bytes",
                 &self.memory_tracker.peak_memory_bytes(),
             )
-            .field("net_tx", &self.net_tx.is_some())
-            .finish()
+            .field("net_tx", &self.net_tx.is_some());
+        #[cfg(feature = "vfs")]
+        debug.field("hybrid_vfs_ctx", &self.hybrid_vfs_ctx.is_some());
+        debug.finish()
     }
 }
 
@@ -287,6 +294,21 @@ impl WasiView for ExecutorState {
             ctx: &mut self.wasi,
             table: &mut self.table,
         }
+    }
+}
+
+#[cfg(feature = "vfs")]
+impl eryx_vfs::HybridVfsView for ExecutorState {
+    type Storage = eryx_vfs::InMemoryStorage;
+
+    #[allow(clippy::expect_used)]
+    fn hybrid_vfs(&mut self) -> eryx_vfs::HybridVfsState<'_, Self::Storage> {
+        eryx_vfs::HybridVfsState::new(
+            self.hybrid_vfs_ctx
+                .as_mut()
+                .expect("Hybrid VFS not configured for this executor"),
+            &mut self.table,
+        )
     }
 }
 
@@ -727,6 +749,8 @@ impl<'a> ExecuteBuilder<'a> {
                 self.memory_limit,
                 self.execution_timeout,
                 self.cancellation_token,
+                #[cfg(feature = "vfs")]
+                None,
             )
             .await
     }
@@ -1193,6 +1217,21 @@ impl PythonExecutor {
         wasmtime_wasi::p2::add_to_linker_async(&mut linker)
             .map_err(|e| Error::WasmEngine(format!("Failed to add WASI to linker: {e}")))?;
 
+        // Add hybrid VFS filesystem support (overrides WASI filesystem bindings)
+        // The hybrid VFS routes:
+        // - /data/* paths to VFS storage (sandboxed in-memory/KV store)
+        // - Other paths (like /python-stdlib/*) to real filesystem via WASI
+        // This allows Python to access its stdlib while providing sandboxed storage.
+        #[cfg(feature = "vfs")]
+        {
+            // Allow shadowing to override WASI filesystem bindings
+            linker.allow_shadowing(true);
+            eryx_vfs::add_hybrid_vfs_to_linker(&mut linker).map_err(|e| {
+                Error::WasmEngine(format!("Failed to add hybrid VFS to linker: {e}"))
+            })?;
+            linker.allow_shadowing(false);
+        }
+
         // Add sandbox bindings (includes TCP/TLS interfaces)
         tracing::debug!("Adding sandbox bindings to linker");
         Sandbox::add_to_linker::<_, HasSelf<ExecutorState>>(&mut linker, |state| state)
@@ -1250,6 +1289,7 @@ impl PythonExecutor {
         memory_limit: Option<u64>,
         execution_timeout: Option<Duration>,
         cancellation_token: Option<CancellationToken>,
+        #[cfg(feature = "vfs")] vfs_storage: Option<std::sync::Arc<eryx_vfs::InMemoryStorage>>,
     ) -> std::result::Result<ExecutionOutput, String> {
         // Build callback info for introspection
         let callback_infos: Vec<HostCallbackInfo> = callbacks
@@ -1320,6 +1360,57 @@ impl PythonExecutor {
 
         let wasi = wasi_builder.build();
 
+        // Build hybrid VFS context when vfs feature is enabled.
+        // The hybrid VFS routes /data/* to VFS storage while passing through
+        // other paths (like /python-stdlib/*) to the real filesystem.
+        // When no VFS storage is provided, we still configure the hybrid VFS
+        // with real filesystem preopens to satisfy the linker bindings.
+        #[cfg(feature = "vfs")]
+        let hybrid_vfs_ctx = {
+            // Use provided storage or create an empty in-memory storage
+            let storage = vfs_storage
+                .unwrap_or_else(|| std::sync::Arc::new(eryx_vfs::InMemoryStorage::new()));
+            let mut ctx = eryx_vfs::HybridVfsCtx::new(storage);
+
+            // Add a writable /data directory backed by VFS storage
+            ctx.add_vfs_preopen(
+                "/data",
+                eryx_vfs::DirPerms::all(),
+                eryx_vfs::FilePerms::all(),
+            );
+
+            // Add Python stdlib as read-only real filesystem preopen
+            if let Some(ref stdlib_path) = self.python_stdlib_path
+                && let Err(e) = ctx.add_real_preopen_path(
+                    "/python-stdlib",
+                    stdlib_path,
+                    eryx_vfs::DirPerms::READ,
+                    eryx_vfs::FilePerms::READ,
+                )
+            {
+                tracing::warn!("Failed to add Python stdlib to hybrid VFS: {e}");
+            }
+
+            // Add site-packages directories as read-only real filesystem preopens
+            for (i, site_packages_path) in self.python_site_packages_paths.iter().enumerate() {
+                let mount_path = if i == 0 {
+                    "/site-packages".to_string()
+                } else {
+                    format!("/site-packages-{i}")
+                };
+                if let Err(e) = ctx.add_real_preopen_path(
+                    &mount_path,
+                    site_packages_path,
+                    eryx_vfs::DirPerms::READ,
+                    eryx_vfs::FilePerms::READ,
+                ) {
+                    tracing::warn!("Failed to add {mount_path} to hybrid VFS: {e}");
+                }
+            }
+
+            Some(ctx)
+        };
+
         let state = ExecutorState {
             wasi,
             table: ResourceTable::new(),
@@ -1328,6 +1419,8 @@ impl PythonExecutor {
             callbacks: callback_infos,
             memory_tracker: MemoryTracker::new(memory_limit),
             net_tx,
+            #[cfg(feature = "vfs")]
+            hybrid_vfs_ctx,
         };
 
         // Create store for this execution

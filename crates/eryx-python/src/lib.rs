@@ -19,6 +19,7 @@ mod preinit;
 mod resource_limits;
 mod result;
 mod sandbox;
+mod vfs;
 
 use pyo3::prelude::*;
 
@@ -54,6 +55,7 @@ fn _eryx(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<result::ExecuteResult>()?;
     m.add_class::<resource_limits::ResourceLimits>()?;
     m.add_class::<net_config::NetConfig>()?;
+    m.add_class::<vfs::VfsStorage>()?;
 
     // Register exceptions
     error::register_exceptions(m)?;

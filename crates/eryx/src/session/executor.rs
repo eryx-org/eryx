@@ -257,6 +257,59 @@ impl<'a> SessionExecuteBuilder<'a> {
     }
 }
 
+/// Configuration for the virtual filesystem (VFS) in a session.
+///
+/// This allows customizing the VFS mount path and permissions.
+#[cfg(feature = "vfs")]
+#[derive(Debug, Clone)]
+pub struct VfsConfig {
+    /// The guest path where VFS storage is mounted (default: "/data").
+    pub mount_path: String,
+    /// Directory permissions for the VFS mount.
+    pub dir_perms: eryx_vfs::DirPerms,
+    /// File permissions for files in the VFS mount.
+    pub file_perms: eryx_vfs::FilePerms,
+}
+
+#[cfg(feature = "vfs")]
+impl Default for VfsConfig {
+    fn default() -> Self {
+        Self {
+            mount_path: "/data".to_string(),
+            dir_perms: eryx_vfs::DirPerms::all(),
+            file_perms: eryx_vfs::FilePerms::all(),
+        }
+    }
+}
+
+#[cfg(feature = "vfs")]
+impl VfsConfig {
+    /// Create a new VFS config with the given mount path.
+    ///
+    /// Uses full read/write permissions by default.
+    #[must_use]
+    pub fn new(mount_path: impl Into<String>) -> Self {
+        Self {
+            mount_path: mount_path.into(),
+            ..Default::default()
+        }
+    }
+
+    /// Set directory permissions.
+    #[must_use]
+    pub fn with_dir_perms(mut self, perms: eryx_vfs::DirPerms) -> Self {
+        self.dir_perms = perms;
+        self
+    }
+
+    /// Set file permissions.
+    #[must_use]
+    pub fn with_file_perms(mut self, perms: eryx_vfs::FilePerms) -> Self {
+        self.file_perms = perms;
+        self
+    }
+}
+
 /// A session-aware executor that keeps WASM instances alive between executions.
 ///
 /// Unlike `PythonExecutor` which creates a fresh instance for each execution,
@@ -283,6 +336,14 @@ pub struct SessionExecutor {
 
     /// Optional execution timeout for epoch-based interruption.
     execution_timeout: Option<Duration>,
+
+    /// VFS storage that persists across resets.
+    #[cfg(feature = "vfs")]
+    vfs_storage: Option<std::sync::Arc<eryx_vfs::InMemoryStorage>>,
+
+    /// VFS configuration that persists across resets.
+    #[cfg(feature = "vfs")]
+    vfs_config: Option<VfsConfig>,
 }
 
 impl std::fmt::Debug for SessionExecutor {
@@ -294,6 +355,101 @@ impl std::fmt::Debug for SessionExecutor {
             .field("execution_timeout", &self.execution_timeout)
             .finish_non_exhaustive()
     }
+}
+
+/// Build callback info for introspection from a slice of callbacks.
+fn build_callback_infos(callbacks: &[Arc<dyn Callback>]) -> Vec<HostCallbackInfo> {
+    callbacks
+        .iter()
+        .map(|cb| HostCallbackInfo {
+            name: cb.name().to_string(),
+            description: cb.description().to_string(),
+            parameters_schema_json: serde_json::to_string(&cb.parameters_schema())
+                .unwrap_or_else(|_| "{}".to_string()),
+        })
+        .collect()
+}
+
+/// Build WASI context with Python stdlib and site-packages mounts.
+fn build_wasi_context(executor: &PythonExecutor) -> Result<WasiCtx, Error> {
+    let mut wasi_builder = WasiCtxBuilder::new();
+    wasi_builder.inherit_stdout().inherit_stderr();
+
+    // Build PYTHONPATH from stdlib and all site-packages directories
+    let site_packages_paths = executor.python_site_packages_paths();
+    let mut pythonpath_parts = Vec::new();
+    if executor.python_stdlib_path().is_some() {
+        pythonpath_parts.push("/python-stdlib".to_string());
+    }
+    for i in 0..site_packages_paths.len() {
+        pythonpath_parts.push(format!("/site-packages-{i}"));
+    }
+
+    // Mount Python stdlib if configured (required for eryx-wasm-runtime)
+    if let Some(stdlib_path) = executor.python_stdlib_path() {
+        wasi_builder.env("PYTHONHOME", "/python-stdlib");
+        if !pythonpath_parts.is_empty() {
+            wasi_builder.env("PYTHONPATH", pythonpath_parts.join(":"));
+        }
+        wasi_builder
+            .preopened_dir(
+                stdlib_path,
+                "/python-stdlib",
+                DirPerms::READ,
+                FilePerms::READ,
+            )
+            .map_err(|e| Error::WasmEngine(format!("Failed to mount Python stdlib: {e}")))?;
+    }
+
+    // Mount each site-packages directory at a unique path
+    for (i, site_packages_path) in site_packages_paths.iter().enumerate() {
+        let mount_path = format!("/site-packages-{i}");
+        wasi_builder
+            .preopened_dir(
+                site_packages_path,
+                &mount_path,
+                DirPerms::READ,
+                FilePerms::READ,
+            )
+            .map_err(|e| Error::WasmEngine(format!("Failed to mount {mount_path}: {e}")))?;
+    }
+
+    Ok(wasi_builder.build())
+}
+
+/// Build hybrid VFS context with VFS storage and real filesystem preopens.
+#[cfg(feature = "vfs")]
+fn build_hybrid_vfs_context(
+    executor: &PythonExecutor,
+    vfs_storage: std::sync::Arc<eryx_vfs::InMemoryStorage>,
+    vfs_config: &VfsConfig,
+) -> eryx_vfs::HybridVfsCtx<eryx_vfs::InMemoryStorage> {
+    let mut ctx = eryx_vfs::HybridVfsCtx::new(vfs_storage);
+
+    // Add a writable VFS directory backed by VFS storage
+    ctx.add_vfs_preopen(
+        &vfs_config.mount_path,
+        vfs_config.dir_perms,
+        vfs_config.file_perms,
+    );
+
+    // Add real filesystem preopens that mirror the WASI preopens
+    if let Some(stdlib_path) = executor.python_stdlib_path()
+        && let Ok(real_dir) =
+            eryx_vfs::RealDir::open_ambient(stdlib_path, DirPerms::READ, FilePerms::READ)
+    {
+        ctx.add_real_preopen("/python-stdlib", real_dir);
+    }
+    for (i, site_packages_path) in executor.python_site_packages_paths().iter().enumerate() {
+        let mount_path = format!("/site-packages-{i}");
+        if let Ok(real_dir) =
+            eryx_vfs::RealDir::open_ambient(site_packages_path, DirPerms::READ, FilePerms::READ)
+        {
+            ctx.add_real_preopen(&mount_path, real_dir);
+        }
+    }
+
+    ctx
 }
 
 impl SessionExecutor {
@@ -313,61 +469,150 @@ impl SessionExecutor {
         executor: Arc<PythonExecutor>,
         callbacks: &[Arc<dyn Callback>],
     ) -> Result<Self, Error> {
-        // Build callback info for introspection
-        let callback_infos: Vec<HostCallbackInfo> = callbacks
-            .iter()
-            .map(|cb| HostCallbackInfo {
-                name: cb.name().to_string(),
-                description: cb.description().to_string(),
-                parameters_schema_json: serde_json::to_string(&cb.parameters_schema())
-                    .unwrap_or_else(|_| "{}".to_string()),
-            })
-            .collect();
-
-        // Create WASI context with Python stdlib mounts if configured
-        let mut wasi_builder = WasiCtxBuilder::new();
-        wasi_builder.inherit_stdout().inherit_stderr();
-
-        // Build PYTHONPATH from stdlib and all site-packages directories
-        let site_packages_paths = executor.python_site_packages_paths();
-        let mut pythonpath_parts = Vec::new();
-        if executor.python_stdlib_path().is_some() {
-            pythonpath_parts.push("/python-stdlib".to_string());
+        #[cfg(feature = "vfs")]
+        {
+            Self::new_internal(executor, callbacks, None, None).await
         }
-        for i in 0..site_packages_paths.len() {
-            pythonpath_parts.push(format!("/site-packages-{i}"));
+        #[cfg(not(feature = "vfs"))]
+        {
+            Self::new_internal(executor, callbacks).await
         }
+    }
 
-        // Mount Python stdlib if configured (required for eryx-wasm-runtime)
-        if let Some(stdlib_path) = executor.python_stdlib_path() {
-            wasi_builder.env("PYTHONHOME", "/python-stdlib");
-            if !pythonpath_parts.is_empty() {
-                wasi_builder.env("PYTHONPATH", pythonpath_parts.join(":"));
-            }
-            wasi_builder
-                .preopened_dir(
-                    stdlib_path,
-                    "/python-stdlib",
-                    DirPerms::READ,
-                    FilePerms::READ,
-                )
-                .map_err(|e| Error::WasmEngine(format!("Failed to mount Python stdlib: {e}")))?;
-        }
+    /// Create a new session executor with a custom VFS storage.
+    ///
+    /// This allows providing an external `InMemoryStorage` that persists
+    /// across session resets. Files written to the VFS mount path (default: `/data/*`)
+    /// will be stored in the provided storage.
+    ///
+    /// # Arguments
+    ///
+    /// * `executor` - The parent executor providing engine and instance_pre
+    /// * `callbacks` - Callbacks available for this session
+    /// * `vfs_storage` - The VFS storage to use for the VFS mount
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the WASM component cannot be instantiated.
+    #[cfg(feature = "vfs")]
+    pub async fn new_with_vfs(
+        executor: Arc<PythonExecutor>,
+        callbacks: &[Arc<dyn Callback>],
+        vfs_storage: std::sync::Arc<eryx_vfs::InMemoryStorage>,
+    ) -> Result<Self, Error> {
+        Self::new_internal(executor, callbacks, Some(vfs_storage), None).await
+    }
 
-        // Mount each site-packages directory at a unique path
-        for (i, site_packages_path) in site_packages_paths.iter().enumerate() {
-            let mount_path = format!("/site-packages-{i}");
-            wasi_builder
-                .preopened_dir(
-                    site_packages_path,
-                    &mount_path,
-                    DirPerms::READ,
-                    FilePerms::READ,
-                )
-                .map_err(|e| Error::WasmEngine(format!("Failed to mount {mount_path}: {e}")))?;
-        }
+    /// Create a new session executor with custom VFS storage and configuration.
+    ///
+    /// This allows full control over VFS mount path and permissions.
+    ///
+    /// # Arguments
+    ///
+    /// * `executor` - The parent executor providing engine and instance_pre
+    /// * `callbacks` - Callbacks available for this session
+    /// * `vfs_storage` - The VFS storage to use
+    /// * `vfs_config` - Configuration for the VFS mount (path, permissions)
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// use eryx::{PythonExecutor, SessionExecutor, VfsConfig};
+    /// use eryx::vfs::InMemoryStorage;
+    /// use std::sync::Arc;
+    ///
+    /// let storage = Arc::new(InMemoryStorage::new());
+    /// let config = VfsConfig::new("/workspace");  // Custom mount path
+    /// let session = SessionExecutor::new_with_vfs_config(
+    ///     executor,
+    ///     &[],
+    ///     storage,
+    ///     config,
+    /// ).await?;
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the WASM component cannot be instantiated.
+    #[cfg(feature = "vfs")]
+    pub async fn new_with_vfs_config(
+        executor: Arc<PythonExecutor>,
+        callbacks: &[Arc<dyn Callback>],
+        vfs_storage: std::sync::Arc<eryx_vfs::InMemoryStorage>,
+        vfs_config: VfsConfig,
+    ) -> Result<Self, Error> {
+        Self::new_internal(executor, callbacks, Some(vfs_storage), Some(vfs_config)).await
+    }
 
-        let wasi = wasi_builder.build();
+    /// Internal constructor with optional VFS storage and config.
+    #[cfg(feature = "vfs")]
+    async fn new_internal(
+        executor: Arc<PythonExecutor>,
+        callbacks: &[Arc<dyn Callback>],
+        vfs_storage: Option<std::sync::Arc<eryx_vfs::InMemoryStorage>>,
+        vfs_config: Option<VfsConfig>,
+    ) -> Result<Self, Error> {
+        let callback_infos = build_callback_infos(callbacks);
+        let wasi = build_wasi_context(&executor)?;
+
+        // Use provided storage/config or create defaults
+        let vfs_storage =
+            vfs_storage.unwrap_or_else(|| std::sync::Arc::new(eryx_vfs::InMemoryStorage::new()));
+        let vfs_config = vfs_config.unwrap_or_default();
+
+        let hybrid_vfs_ctx = Some(build_hybrid_vfs_context(
+            &executor,
+            Arc::clone(&vfs_storage),
+            &vfs_config,
+        ));
+
+        let state = ExecutorState::new(
+            wasi,
+            ResourceTable::new(),
+            None,
+            None,
+            callback_infos,
+            MemoryTracker::new(None),
+            hybrid_vfs_ctx,
+        );
+
+        // Create store
+        let mut store = Store::new(executor.engine(), state);
+
+        // Register the memory tracker as a resource limiter
+        store.limiter(|state| &mut state.memory_tracker);
+
+        // Set epoch deadline before instantiation - required when epoch_interruption is enabled
+        // in the engine config. We use a very large value (but not u64::MAX to avoid overflow
+        // when added to the current epoch).
+        store.set_epoch_deadline(u64::MAX / 2);
+
+        // Instantiate the component
+        let bindings = executor
+            .instance_pre()
+            .instantiate_async(&mut store)
+            .await
+            .map_err(|e| Error::WasmEngine(format!("Failed to instantiate component: {e}")))?;
+
+        Ok(Self {
+            executor,
+            store: Some(store),
+            bindings: Some(bindings),
+            execution_count: 0,
+            execution_timeout: None,
+            vfs_storage: Some(vfs_storage),
+            vfs_config: Some(vfs_config),
+        })
+    }
+
+    /// Internal constructor without VFS.
+    #[cfg(not(feature = "vfs"))]
+    async fn new_internal(
+        executor: Arc<PythonExecutor>,
+        callbacks: &[Arc<dyn Callback>],
+    ) -> Result<Self, Error> {
+        let callback_infos = build_callback_infos(callbacks);
+        let wasi = build_wasi_context(&executor)?;
 
         let state = ExecutorState::new(
             wasi,
@@ -384,9 +629,7 @@ impl SessionExecutor {
         // Register the memory tracker as a resource limiter
         store.limiter(|state| &mut state.memory_tracker);
 
-        // Set epoch deadline before instantiation - required when epoch_interruption is enabled
-        // in the engine config. We use a very large value (but not u64::MAX to avoid overflow
-        // when added to the current epoch).
+        // Set epoch deadline before instantiation
         store.set_epoch_deadline(u64::MAX / 2);
 
         // Instantiate the component
@@ -585,7 +828,8 @@ impl SessionExecutor {
 
     /// Reset the session to a fresh state.
     ///
-    /// This creates a new WASM instance, discarding all previous state.
+    /// This creates a new WASM instance, discarding all previous Python state.
+    /// However, VFS storage persists across resets if it was provided at construction.
     ///
     /// # Arguments
     ///
@@ -595,62 +839,10 @@ impl SessionExecutor {
     ///
     /// Returns an error if re-instantiation fails.
     pub async fn reset(&mut self, callbacks: &[Arc<dyn Callback>]) -> Result<(), Error> {
-        // Build callback info
-        let callback_infos: Vec<HostCallbackInfo> = callbacks
-            .iter()
-            .map(|cb| HostCallbackInfo {
-                name: cb.name().to_string(),
-                description: cb.description().to_string(),
-                parameters_schema_json: serde_json::to_string(&cb.parameters_schema())
-                    .unwrap_or_else(|_| "{}".to_string()),
-            })
-            .collect();
+        let callback_infos = build_callback_infos(callbacks);
+        let wasi = build_wasi_context(&self.executor)?;
 
-        // Create WASI context with Python stdlib mounts if configured (same as new())
-        let mut wasi_builder = WasiCtxBuilder::new();
-        wasi_builder.inherit_stdout().inherit_stderr();
-
-        // Build PYTHONPATH from stdlib and all site-packages directories
-        let site_packages_paths = self.executor.python_site_packages_paths();
-        let mut pythonpath_parts = Vec::new();
-        if self.executor.python_stdlib_path().is_some() {
-            pythonpath_parts.push("/python-stdlib".to_string());
-        }
-        for i in 0..site_packages_paths.len() {
-            pythonpath_parts.push(format!("/site-packages-{i}"));
-        }
-
-        // Mount Python stdlib if configured (required for eryx-wasm-runtime)
-        if let Some(stdlib_path) = self.executor.python_stdlib_path() {
-            wasi_builder.env("PYTHONHOME", "/python-stdlib");
-            if !pythonpath_parts.is_empty() {
-                wasi_builder.env("PYTHONPATH", pythonpath_parts.join(":"));
-            }
-            wasi_builder
-                .preopened_dir(
-                    stdlib_path,
-                    "/python-stdlib",
-                    DirPerms::READ,
-                    FilePerms::READ,
-                )
-                .map_err(|e| Error::WasmEngine(format!("Failed to mount Python stdlib: {e}")))?;
-        }
-
-        // Mount each site-packages directory at a unique path
-        for (i, site_packages_path) in site_packages_paths.iter().enumerate() {
-            let mount_path = format!("/site-packages-{i}");
-            wasi_builder
-                .preopened_dir(
-                    site_packages_path,
-                    &mount_path,
-                    DirPerms::READ,
-                    FilePerms::READ,
-                )
-                .map_err(|e| Error::WasmEngine(format!("Failed to mount {mount_path}: {e}")))?;
-        }
-
-        let wasi = wasi_builder.build();
-
+        #[cfg(not(feature = "vfs"))]
         let state = ExecutorState::new(
             wasi,
             ResourceTable::new(),
@@ -659,6 +851,30 @@ impl SessionExecutor {
             callback_infos,
             MemoryTracker::new(None),
         );
+
+        #[cfg(feature = "vfs")]
+        let state = {
+            // Reuse existing VFS storage and config so files persist across resets
+            let vfs_storage = self
+                .vfs_storage
+                .clone()
+                .unwrap_or_else(|| std::sync::Arc::new(eryx_vfs::InMemoryStorage::new()));
+            let vfs_config = self.vfs_config.clone().unwrap_or_default();
+
+            ExecutorState::new(
+                wasi,
+                ResourceTable::new(),
+                None,
+                None,
+                callback_infos,
+                MemoryTracker::new(None),
+                Some(build_hybrid_vfs_context(
+                    &self.executor,
+                    vfs_storage,
+                    &vfs_config,
+                )),
+            )
+        };
 
         // Create new store
         let mut store = Store::new(self.executor.engine(), state);
@@ -915,6 +1131,7 @@ impl SessionExecutor {
 
 impl ExecutorState {
     /// Create a new ExecutorState with the given configuration.
+    #[cfg(not(feature = "vfs"))]
     pub(crate) fn new(
         wasi: WasiCtx,
         table: ResourceTable,
@@ -931,6 +1148,29 @@ impl ExecutorState {
             callbacks,
             memory_tracker,
             net_tx: None, // Set via with_network() when network handler is running
+        }
+    }
+
+    /// Create a new ExecutorState with the given configuration.
+    #[cfg(feature = "vfs")]
+    pub(crate) fn new(
+        wasi: WasiCtx,
+        table: ResourceTable,
+        callback_tx: Option<mpsc::Sender<CallbackRequest>>,
+        trace_tx: Option<mpsc::UnboundedSender<TraceRequest>>,
+        callbacks: Vec<HostCallbackInfo>,
+        memory_tracker: MemoryTracker,
+        hybrid_vfs_ctx: Option<eryx_vfs::HybridVfsCtx<eryx_vfs::InMemoryStorage>>,
+    ) -> Self {
+        Self {
+            wasi,
+            table,
+            callback_tx,
+            trace_tx,
+            callbacks,
+            memory_tracker,
+            net_tx: None, // Set via with_network() when network handler is running
+            hybrid_vfs_ctx,
         }
     }
 

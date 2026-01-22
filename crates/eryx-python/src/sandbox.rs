@@ -47,6 +47,10 @@ impl Sandbox {
     /// This creates a fast sandbox (~1-5ms) using the pre-initialized Python runtime.
     /// The sandbox has access to Python's standard library but no third-party packages.
     ///
+    /// Each call to `execute()` runs in complete isolation - Python state is not
+    /// preserved between calls. For persistent state (including file storage),
+    /// use `Session` instead.
+    ///
     /// For sandboxes with custom packages, use `SandboxFactory` instead.
     ///
     /// Args:
@@ -152,8 +156,11 @@ impl Sandbox {
     }
 }
 
-// Sandbox holds a tokio runtime which is Send + Sync
-unsafe impl Send for Sandbox {}
+// Static assertions that Sandbox is Send + Sync (required for PyO3 thread safety)
+const _: () = {
+    const fn assert_send_sync<T: Send + Sync>() {}
+    assert_send_sync::<Sandbox>();
+};
 
 impl Sandbox {
     /// Create a Sandbox from an existing eryx::Sandbox.
