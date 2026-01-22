@@ -276,6 +276,8 @@ pub struct VfsOutputStream<S: VfsStorage + 'static> {
     buffer: Arc<RwLock<Vec<u8>>>,
     /// Current write position in the file.
     position: u64,
+    /// Whether the stream is in append mode.
+    append: bool,
     /// Whether the stream has been closed.
     closed: bool,
 }
@@ -288,6 +290,19 @@ impl<S: VfsStorage + 'static> VfsOutputStream<S> {
             path,
             buffer: Arc::new(RwLock::new(Vec::new())),
             position: offset,
+            append: false,
+            closed: false,
+        }
+    }
+
+    /// Create a new VFS output stream for appending.
+    pub fn append(storage: Arc<S>, path: String) -> Self {
+        Self {
+            storage,
+            path,
+            buffer: Arc::new(RwLock::new(Vec::new())),
+            position: 0, // Will be set to file size on first write
+            append: true,
             closed: false,
         }
     }
@@ -314,6 +329,7 @@ impl<S: VfsStorage + 'static> VfsOutputStream<S> {
         // We spawn a blocking thread to handle the async operation
         let storage = Arc::clone(&self.storage);
         let path = self.path.clone();
+        let append = self.append;
         let position = self.position;
         let data_len = buffer_data.len() as u64;
 
@@ -324,15 +340,30 @@ impl<S: VfsStorage + 'static> VfsOutputStream<S> {
                 .build()
                 .map_err(|e| format!("Failed to create runtime: {e}"))?;
 
-            rt.block_on(async { storage.write_at(&path, position, &buffer_data).await })
-                .map_err(|e| format!("VFS write failed: {:?}", e))
+            rt.block_on(async {
+                let write_position = if append {
+                    // For append mode, get the current file size
+                    match storage.stat(&path).await {
+                        Ok(meta) => meta.size,
+                        // File doesn't exist yet, start at 0
+                        Err(_) => 0,
+                    }
+                } else {
+                    position
+                };
+
+                storage.write_at(&path, write_position, &buffer_data).await
+            })
+            .map_err(|e| format!("VFS write failed: {:?}", e))
         })
         .join()
         .map_err(|_| StreamError::trap("Thread panicked during VFS write"))?;
 
         match result {
             Ok(()) => {
-                self.position += data_len;
+                if !self.append {
+                    self.position += data_len;
+                }
                 Ok(())
             }
             Err(e) => Err(StreamError::LastOperationFailed(anyhow::anyhow!("{}", e))),

@@ -47,6 +47,8 @@ print(f"Execution took {result.duration_ms:.2f}ms")
 - **Fast Startup**: Pre-initialized Python runtime embedded for ~1-5ms sandbox creation
 - **Pre-initialization**: Custom snapshots with packages for even faster specialized sandboxes
 - **Package Support**: Load Python packages (.whl, .tar.gz) including native extensions
+- **Persistent Sessions**: Maintain Python state across executions with `Session`
+- **Virtual Filesystem**: Sandboxed file storage with `VfsStorage`
 - **Type Safe**: Full type stubs for IDE support and static analysis
 
 ## Python Version
@@ -83,6 +85,26 @@ For repeated sandbox creation with custom packages, see
 [`SandboxFactory`](#sandboxfactory) below.
 
 ## API Reference
+
+### Sandbox vs Session
+
+| Feature | `Sandbox` | `Session` |
+|---------|-----------|-----------|
+| State persistence | No - fresh each execute() | Yes - variables persist |
+| Virtual filesystem | No | Yes (optional) |
+| Use case | One-off execution | REPL, multi-step workflows |
+| Isolation | Complete per-call | Complete from host |
+
+**Use `Sandbox` when:**
+- Running untrusted code that should start fresh each time
+- Each execution is independent
+- You want maximum isolation between executions
+
+**Use `Session` when:**
+- Building up state across multiple executions
+- You need file persistence (VFS)
+- Implementing a REPL or notebook-like experience
+- Performance matters (no re-initialization per call)
 
 ### `Sandbox`
 
@@ -213,6 +235,157 @@ sandbox = factory.create_sandbox()
 - `factory.save(path)` - Save factory to a file
 - `factory.to_bytes()` - Get factory as bytes
 - `SandboxFactory.load(path)` - Load factory from a file
+
+### `Session`
+
+Unlike `Sandbox` which runs each execution in isolation, `Session` maintains
+persistent Python state across multiple `execute()` calls. This is useful for:
+
+- Interactive REPL-style execution
+- Building up state incrementally
+- Faster subsequent executions (no Python initialization overhead per call)
+
+```python
+import eryx
+
+session = eryx.Session()
+
+# State persists across executions
+session.execute("x = 42")
+session.execute("y = x * 2")
+result = session.execute("print(f'{x} * 2 = {y}')")
+print(result.stdout)  # "42 * 2 = 84"
+
+# Functions and classes persist too
+session.execute("""
+def greet(name):
+    return f"Hello, {name}!"
+""")
+result = session.execute("print(greet('World'))")
+print(result.stdout)  # "Hello, World!"
+```
+
+#### Session with Virtual Filesystem
+
+Sessions can optionally use a virtual filesystem (VFS) for persistent file
+storage that survives across executions and even session resets:
+
+```python
+import eryx
+
+# Create shared storage
+storage = eryx.VfsStorage()
+
+# Create session with VFS enabled
+session = eryx.Session(vfs=storage)
+
+# Write files to the virtual filesystem
+session.execute("""
+with open('/data/config.json', 'w') as f:
+    f.write('{"setting": "value"}')
+""")
+
+# Files persist across executions
+result = session.execute("""
+import json
+with open('/data/config.json') as f:
+    config = json.load(f)
+print(config['setting'])
+""")
+print(result.stdout)  # "value"
+
+# Files even persist across session.reset()
+session.reset()
+result = session.execute("print(open('/data/config.json').read())")
+# File still exists!
+```
+
+#### Sharing Storage Between Sessions
+
+Multiple sessions can share the same `VfsStorage` for inter-session communication:
+
+```python
+import eryx
+
+# Shared storage instance
+storage = eryx.VfsStorage()
+
+# Session 1 writes data
+session1 = eryx.Session(vfs=storage)
+session1.execute("open('/data/shared.txt', 'w').write('from session 1')")
+
+# Session 2 reads it
+session2 = eryx.Session(vfs=storage)
+result = session2.execute("print(open('/data/shared.txt').read())")
+print(result.stdout)  # "from session 1"
+```
+
+#### Custom Mount Path
+
+By default, VFS files are accessible under `/data`. You can customize this:
+
+```python
+session = eryx.Session(vfs=storage, vfs_mount_path="/workspace")
+session.execute("open('/workspace/file.txt', 'w').write('custom path')")
+```
+
+#### State Snapshots
+
+Capture and restore Python state for checkpointing:
+
+```python
+session = eryx.Session()
+session.execute("x = 42")
+session.execute("data = [1, 2, 3]")
+
+# Capture state as bytes (uses pickle internally)
+snapshot = session.snapshot_state()
+
+# Clear state
+session.clear_state()
+
+# Restore from snapshot
+session.restore_state(snapshot)
+result = session.execute("print(x, data)")
+print(result.stdout)  # "42 [1, 2, 3]"
+
+# Snapshots can be saved to disk and restored in new sessions
+with open("state.bin", "wb") as f:
+    f.write(snapshot)
+```
+
+#### Session Properties and Methods
+
+- `session.execute(code)` - Execute code, returns `ExecuteResult`
+- `session.reset()` - Reset Python state (VFS persists)
+- `session.clear_state()` - Clear variables without full reset
+- `session.snapshot_state()` - Capture state as bytes
+- `session.restore_state(snapshot)` - Restore from snapshot
+- `session.execution_count` - Number of executions performed
+- `session.execution_timeout_ms` - Get/set timeout in milliseconds
+- `session.vfs` - Get the `VfsStorage` (if enabled)
+- `session.vfs_mount_path` - Get the VFS mount path (if enabled)
+
+### `VfsStorage`
+
+In-memory virtual filesystem storage. Files written to the VFS are completely
+isolated from the host filesystem - sandboxed code cannot access real files.
+
+```python
+import eryx
+
+# Create storage (can be shared across sessions)
+storage = eryx.VfsStorage()
+
+# Use with Session
+session = eryx.Session(vfs=storage)
+```
+
+The VFS supports standard Python file operations:
+- `open()`, `read()`, `write()` - File I/O
+- `os.makedirs()`, `os.listdir()`, `os.remove()` - Directory operations
+- `os.path.exists()`, `os.path.isfile()` - Path checks
+- `pathlib.Path` - Full pathlib support
 
 ### Exceptions
 

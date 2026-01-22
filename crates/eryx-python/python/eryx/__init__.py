@@ -38,6 +38,7 @@ from eryx._eryx import (
     ResourceLimits,
     Sandbox,
     SandboxFactory,
+    Session,
     TimeoutError,
     VfsStorage,
     # Module metadata
@@ -47,6 +48,7 @@ from eryx._eryx import (
 __all__ = [
     # Classes
     "Sandbox",
+    "Session",
     "SandboxFactory",
     "ExecuteResult",
     "ResourceLimits",

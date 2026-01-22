@@ -169,6 +169,66 @@ print("VFS basic operations work")
     );
 }
 
+/// Test that VFS append mode works correctly
+#[tokio::test]
+async fn test_vfs_append_mode() {
+    let storage = Arc::new(InMemoryStorage::new());
+    let executor = create_executor().await;
+    let mut session = SessionExecutor::new_with_vfs(executor, &[], storage)
+        .await
+        .expect("Failed to create session");
+
+    // First: write initial content
+    let result1 = session
+        .execute(
+            r#"
+with open('/data/append.txt', 'w') as f:
+    f.write('first')
+print("Wrote initial content")
+"#,
+        )
+        .run()
+        .await;
+    assert!(
+        result1.is_ok(),
+        "Initial write should succeed: {:?}",
+        result1
+    );
+
+    // Second: append to the file
+    let result2 = session
+        .execute(
+            r#"
+with open('/data/append.txt', 'a') as f:
+    f.write(' second')
+print("Appended content")
+"#,
+        )
+        .run()
+        .await;
+    assert!(result2.is_ok(), "Append should succeed: {:?}", result2);
+
+    // Third: read back and verify
+    let result3 = session
+        .execute(
+            r#"
+with open('/data/append.txt', 'r') as f:
+    content = f.read()
+print(f"Content: {content}")
+"#,
+        )
+        .run()
+        .await;
+
+    assert!(result3.is_ok(), "Read should succeed: {:?}", result3);
+    let output = result3.unwrap();
+    assert!(
+        output.stdout.contains("Content: first second"),
+        "Append mode should work correctly: {}",
+        output.stdout
+    );
+}
+
 /// Test that VFS data persists across executions within a session
 #[tokio::test]
 async fn test_vfs_persistence_across_executions() {
@@ -1410,4 +1470,574 @@ except (FileNotFoundError, OSError) as e:
         "/data should not be available when using custom mount path: {}",
         output3.stdout
     );
+}
+
+// =============================================================================
+// Additional Security Tests
+// =============================================================================
+
+/// Test that rename cannot be used to escape the sandbox
+#[tokio::test]
+async fn test_rename_escape_attack() {
+    let (safe, output) = run_adversarial_test(
+        r#"
+import os
+
+# Create a file in the VFS
+with open('/data/myfile.txt', 'w') as f:
+    f.write('sensitive data')
+
+# Attack: Try to rename/move file outside the sandbox
+escape_targets = [
+    '/etc/cron.d/evil',
+    '/tmp/escaped.txt',
+    '/data/../tmp/escaped.txt',
+    '/data/../../../tmp/escaped.txt',
+    '../../../tmp/escaped.txt',
+]
+
+for target in escape_targets:
+    try:
+        os.rename('/data/myfile.txt', target)
+        print(f"SECURITY ISSUE: Renamed file to {target}")
+        # Try to recreate for next iteration
+        try:
+            with open('/data/myfile.txt', 'w') as f:
+                f.write('sensitive data')
+        except:
+            pass
+    except (OSError, PermissionError, FileNotFoundError) as e:
+        print(f"EXPECTED: Cannot rename to {target}: {type(e).__name__}")
+    except Exception as e:
+        print(f"EXPECTED: Blocked: {type(e).__name__}: {e}")
+
+# Also try shutil.move
+import shutil
+try:
+    with open('/data/moveme.txt', 'w') as f:
+        f.write('data')
+    shutil.move('/data/moveme.txt', '/tmp/escaped.txt')
+    print("SECURITY ISSUE: shutil.move escaped sandbox")
+except (OSError, PermissionError, FileNotFoundError) as e:
+    print(f"EXPECTED: shutil.move blocked: {type(e).__name__}")
+except Exception as e:
+    print(f"EXPECTED: shutil.move blocked: {type(e).__name__}: {e}")
+"#,
+        "rename_escape_attack",
+    )
+    .await;
+    assert!(safe, "Rename should not escape sandbox: {}", output);
+}
+
+/// Test that special/malicious filenames are handled safely
+#[tokio::test]
+async fn test_special_filenames() {
+    let (safe, output) = run_adversarial_test(
+        r#"
+import os
+
+# Attack: Try various special/malicious filenames
+special_names = [
+    '.',
+    '..',
+    '',
+    '\x00',
+    '\x00evil.txt',
+    'file\x00.txt',
+    '...',
+    '....',
+    '. ',
+    ' .',
+    '.hidden',
+    '-',
+    '--',
+    '-rf',
+    '~',
+    '~root',
+    '*',
+    '?',
+    '|',
+    ';',
+    '$(whoami)',
+    '`whoami`',
+    'a' * 1000,  # Very long filename
+    'a' * 10000,  # Extremely long filename
+]
+
+for name in special_names:
+    path = f'/data/{name}'
+    try:
+        with open(path, 'w') as f:
+            f.write('test')
+        # If we could write, try to read back
+        try:
+            with open(path, 'r') as f:
+                content = f.read()
+            # This is fine as long as we're still in /data
+            if name in ['', '.', '..']:
+                # These should not create files with these exact names
+                print(f"WARNING: Created file with name {repr(name)}")
+            else:
+                print(f"OK: Created file with special name {repr(name)[:50]}")
+        except:
+            print(f"OK: Write succeeded but read failed for {repr(name)[:50]}")
+    except (OSError, ValueError, FileNotFoundError) as e:
+        print(f"EXPECTED: Cannot use filename {repr(name)[:50]}: {type(e).__name__}")
+    except Exception as e:
+        print(f"EXPECTED: Blocked {repr(name)[:50]}: {type(e).__name__}: {str(e)[:50]}")
+
+# Check that . and .. didn't do anything dangerous
+try:
+    # If /data/.. was created as a file, this is concerning
+    if os.path.isfile('/data/..'):
+        print("WARNING: /data/.. exists as a file")
+    else:
+        print("OK: /data/.. is not a file")
+except:
+    print("OK: Cannot check /data/..")
+"#,
+        "special_filenames",
+    )
+    .await;
+    assert!(
+        safe,
+        "Special filenames should be handled safely: {}",
+        output
+    );
+}
+
+/// Test that extremely long paths don't cause issues
+#[tokio::test]
+async fn test_long_path_attack() {
+    let (safe, output) = run_adversarial_test(
+        r#"
+import os
+
+# Attack: Try to create extremely deep nested paths or long filenames
+# This could cause stack overflow, memory exhaustion, or buffer overflow
+
+# Very deep path
+deep_path = '/data' + '/a' * 500  # 500 levels deep
+try:
+    os.makedirs(deep_path, exist_ok=True)
+    print(f"WARNING: Created path {len(deep_path)} chars deep")
+except (OSError, ValueError) as e:
+    print(f"EXPECTED: Deep path rejected: {type(e).__name__}")
+except RecursionError:
+    print(f"EXPECTED: Recursion limit hit for deep path")
+except Exception as e:
+    print(f"EXPECTED: Blocked: {type(e).__name__}: {e}")
+
+# Very long single component
+long_name = 'a' * 100000
+try:
+    with open(f'/data/{long_name}', 'w') as f:
+        f.write('test')
+    print("WARNING: Created file with 100k char name")
+except (OSError, ValueError) as e:
+    print(f"EXPECTED: Long filename rejected: {type(e).__name__}")
+except MemoryError:
+    print(f"EXPECTED: Memory error for long filename")
+except Exception as e:
+    print(f"EXPECTED: Blocked: {type(e).__name__}: {e}")
+
+# Many path components
+many_components = '/data/' + '/'.join(['a'] * 10000)
+try:
+    os.makedirs(many_components, exist_ok=True)
+    print("WARNING: Created path with 10k components")
+except (OSError, ValueError) as e:
+    print(f"EXPECTED: Many components rejected: {type(e).__name__}")
+except Exception as e:
+    print(f"EXPECTED: Blocked: {type(e).__name__}: {e}")
+
+print("Long path tests completed without crash")
+"#,
+        "long_path_attack",
+    )
+    .await;
+    assert!(safe, "Long paths should be handled safely: {}", output);
+}
+
+/// Test that seeking/reading at extreme offsets doesn't cause issues
+#[tokio::test]
+async fn test_extreme_offset_attack() {
+    let (safe, output) = run_adversarial_test(
+        r#"
+import os
+
+# Create a small file
+with open('/data/small.txt', 'w') as f:
+    f.write('small content')
+
+# Attack: Try to read/write at extreme offsets
+extreme_offsets = [
+    2**31 - 1,      # Max signed 32-bit
+    2**31,          # Overflow signed 32-bit
+    2**32 - 1,      # Max unsigned 32-bit
+    2**32,          # Overflow unsigned 32-bit
+    2**63 - 1,      # Max signed 64-bit
+    2**62,          # Large but not max
+]
+
+for offset in extreme_offsets:
+    # Try seek and read
+    try:
+        with open('/data/small.txt', 'rb') as f:
+            f.seek(offset)
+            data = f.read(10)
+            if data:
+                print(f"WARNING: Read data at offset {offset}: {data}")
+            else:
+                print(f"OK: No data at offset {offset}")
+    except (OSError, OverflowError, ValueError) as e:
+        print(f"EXPECTED: Cannot seek to {offset}: {type(e).__name__}")
+    except Exception as e:
+        print(f"EXPECTED: Blocked seek to {offset}: {type(e).__name__}")
+
+    # Try seek and write
+    try:
+        with open('/data/sparse.bin', 'wb') as f:
+            f.seek(offset)
+            f.write(b'X')
+        # Check file size
+        size = os.path.getsize('/data/sparse.bin')
+        if size > 10 * 1024 * 1024 * 1024:  # 10GB
+            print(f"SECURITY ISSUE: Created sparse file of {size} bytes")
+        else:
+            print(f"OK: Sparse file size: {size}")
+        os.remove('/data/sparse.bin')
+    except (OSError, OverflowError, ValueError, MemoryError) as e:
+        print(f"EXPECTED: Cannot write at {offset}: {type(e).__name__}")
+    except Exception as e:
+        print(f"EXPECTED: Blocked write at {offset}: {type(e).__name__}")
+
+print("Extreme offset tests completed without crash")
+"#,
+        "extreme_offset_attack",
+    )
+    .await;
+    assert!(safe, "Extreme offsets should be handled safely: {}", output);
+}
+
+/// Test that pickle/marshal deserialization from VFS files is sandboxed
+#[tokio::test]
+async fn test_pickle_deserialization_attack() {
+    let (safe, output) = run_adversarial_test(
+        r#"
+import pickle
+import os
+
+# Attack: Create a malicious pickle that executes code when loaded
+# This tests if VFS file content can lead to code execution
+
+class MaliciousPickle:
+    def __reduce__(self):
+        import os
+        return (os.system, ('echo PICKLE_CODE_EXECUTION > /tmp/pwned',))
+
+# Write malicious pickle to VFS
+try:
+    payload = pickle.dumps(MaliciousPickle())
+    with open('/data/malicious.pkl', 'wb') as f:
+        f.write(payload)
+    print("Wrote malicious pickle")
+except Exception as e:
+    print(f"Could not write pickle: {e}")
+
+# Load the pickle - this should not execute code on the HOST
+try:
+    with open('/data/malicious.pkl', 'rb') as f:
+        obj = pickle.load(f)
+    # If we get here, pickle loaded (might have "executed" in sandbox)
+    print("Pickle loaded")
+except Exception as e:
+    print(f"Pickle load failed: {type(e).__name__}: {e}")
+
+# Check if the attack escaped to host
+try:
+    with open('/tmp/pwned', 'r') as f:
+        content = f.read()
+    print(f"SECURITY ISSUE: Pickle attack created /tmp/pwned: {content}")
+except FileNotFoundError:
+    print("EXPECTED: /tmp/pwned does not exist (pickle didn't escape)")
+except PermissionError:
+    print("EXPECTED: Cannot check /tmp/pwned (sandboxed)")
+except Exception as e:
+    print(f"EXPECTED: Check blocked: {type(e).__name__}")
+
+# Also test marshal which can embed code objects
+try:
+    import marshal
+    # Try to create a code object that would execute malicious code
+    code = compile('import os; os.system("touch /tmp/marshal_pwned")', '<string>', 'exec')
+    payload = marshal.dumps(code)
+    with open('/data/malicious.marshal', 'wb') as f:
+        f.write(payload)
+
+    with open('/data/malicious.marshal', 'rb') as f:
+        loaded_code = marshal.load(f)
+    exec(loaded_code)
+    print("Marshal code executed")
+except Exception as e:
+    print(f"Marshal test result: {type(e).__name__}: {str(e)[:50]}")
+
+# Check marshal escape
+try:
+    with open('/tmp/marshal_pwned', 'r') as f:
+        print("SECURITY ISSUE: Marshal attack created /tmp/marshal_pwned")
+except FileNotFoundError:
+    print("EXPECTED: /tmp/marshal_pwned does not exist")
+except Exception as e:
+    print(f"EXPECTED: Check blocked: {type(e).__name__}")
+"#,
+        "pickle_deserialization_attack",
+    )
+    .await;
+    assert!(safe, "Pickle/marshal should not escape sandbox: {}", output);
+}
+
+/// Test that double/URL encoding in paths doesn't bypass checks
+#[tokio::test]
+async fn test_double_encoding_attack() {
+    let (safe, output) = run_adversarial_test(
+        r#"
+import urllib.parse
+import os
+
+# Attack: Try double/triple URL encoding to bypass path validation
+encoded_paths = [
+    # URL encoded
+    '/data/%2e%2e/etc/passwd',         # ..
+    '/data/%2e%2e%2f%2e%2e/etc/passwd', # ../..
+    '/data/..%2f..%2fetc/passwd',       # mixed
+    '/data/%2e%2e%2fetc%2fpasswd',      # fully encoded
+
+    # Double encoded
+    '/data/%252e%252e/etc/passwd',      # %2e -> .
+    '/data/%25%32%65%25%32%65/etc/passwd',  # double encoded ..
+
+    # Overlong UTF-8 sequences (should be rejected)
+    '/data/\xc0\xae\xc0\xae/etc/passwd',  # Overlong . encoding
+]
+
+for path in encoded_paths:
+    # Try both raw and decoded versions
+    for p in [path, urllib.parse.unquote(path), urllib.parse.unquote(urllib.parse.unquote(path))]:
+        try:
+            with open(p, 'r') as f:
+                content = f.read(100)
+            if 'root:' in content:
+                print(f"SECURITY ISSUE: Read /etc/passwd via {repr(path)[:50]}")
+            else:
+                print(f"Read something via {repr(path)[:50]}: {content[:20]}")
+        except (FileNotFoundError, PermissionError, OSError, ValueError) as e:
+            pass  # Expected
+        except Exception as e:
+            pass  # Expected
+
+print("EXPECTED: All encoded path attacks blocked")
+"#,
+        "double_encoding_attack",
+    )
+    .await;
+    assert!(
+        safe,
+        "Double encoding should not bypass path checks: {}",
+        output
+    );
+}
+
+/// Test that null byte injection in paths is blocked
+#[tokio::test]
+async fn test_null_byte_injection() {
+    let (safe, output) = run_adversarial_test(
+        r#"
+import os
+
+# Attack: Null byte injection to truncate paths
+# This was a classic attack in C-based systems
+
+null_paths = [
+    '/data/safe.txt\x00/etc/passwd',
+    '/data/../etc/passwd\x00.txt',
+    '/data/\x00../etc/passwd',
+    '/etc/passwd\x00',
+    '\x00/etc/passwd',
+]
+
+for path in null_paths:
+    try:
+        # Try to read
+        with open(path, 'r') as f:
+            content = f.read(100)
+        if 'root:' in content:
+            print(f"SECURITY ISSUE: Null byte attack read passwd via {repr(path)[:50]}")
+        else:
+            print(f"Read content via null path: {content[:20]}")
+    except (ValueError, TypeError) as e:
+        print(f"EXPECTED: Null byte rejected: {type(e).__name__}")
+    except (FileNotFoundError, PermissionError, OSError) as e:
+        print(f"EXPECTED: Path blocked: {type(e).__name__}")
+    except Exception as e:
+        print(f"EXPECTED: Blocked: {type(e).__name__}")
+
+    try:
+        # Try to write
+        with open(path, 'w') as f:
+            f.write('evil')
+        print(f"WARNING: Wrote via null path: {repr(path)[:50]}")
+    except (ValueError, TypeError) as e:
+        print(f"EXPECTED: Null byte rejected for write: {type(e).__name__}")
+    except (FileNotFoundError, PermissionError, OSError) as e:
+        print(f"EXPECTED: Write blocked: {type(e).__name__}")
+    except Exception as e:
+        print(f"EXPECTED: Blocked: {type(e).__name__}")
+"#,
+        "null_byte_injection",
+    )
+    .await;
+    assert!(safe, "Null byte injection should be blocked: {}", output);
+}
+
+/// Test that VFS handles concurrent access safely
+#[tokio::test]
+async fn test_concurrent_vfs_access() {
+    let (safe, output) = run_adversarial_test(
+        r#"
+import threading
+import os
+import time
+
+# Attack: Try to cause race conditions or corruption via concurrent access
+errors = []
+success_count = 0
+
+def writer(thread_id):
+    global success_count
+    for i in range(20):
+        try:
+            with open(f'/data/concurrent_{thread_id}.txt', 'w') as f:
+                f.write(f'thread {thread_id} iteration {i}' * 100)
+            success_count += 1
+        except Exception as e:
+            errors.append(f"writer {thread_id}: {e}")
+
+def reader(thread_id):
+    global success_count
+    for i in range(20):
+        try:
+            path = f'/data/concurrent_{thread_id % 3}.txt'
+            if os.path.exists(path):
+                with open(path, 'r') as f:
+                    data = f.read()
+                success_count += 1
+        except FileNotFoundError:
+            pass  # Expected sometimes
+        except Exception as e:
+            errors.append(f"reader {thread_id}: {e}")
+
+def deleter():
+    for i in range(20):
+        try:
+            for tid in range(3):
+                path = f'/data/concurrent_{tid}.txt'
+                if os.path.exists(path):
+                    os.remove(path)
+        except FileNotFoundError:
+            pass
+        except Exception as e:
+            errors.append(f"deleter: {e}")
+        time.sleep(0.01)
+
+# Start threads
+threads = []
+for i in range(3):
+    threads.append(threading.Thread(target=writer, args=(i,)))
+    threads.append(threading.Thread(target=reader, args=(i,)))
+threads.append(threading.Thread(target=deleter))
+
+for t in threads:
+    t.start()
+for t in threads:
+    t.join(timeout=10)
+
+if errors:
+    print(f"Errors during concurrent access: {errors[:5]}")
+else:
+    print(f"EXPECTED: Concurrent access handled safely, {success_count} operations")
+
+# Check for any corruption
+for tid in range(3):
+    try:
+        path = f'/data/concurrent_{tid}.txt'
+        if os.path.exists(path):
+            with open(path, 'r') as f:
+                data = f.read()
+            if 'thread' not in data:
+                print(f"WARNING: Possible corruption in {path}")
+    except:
+        pass
+
+print("Concurrent access test completed")
+"#,
+        "concurrent_vfs_access",
+    )
+    .await;
+    assert!(safe, "Concurrent VFS access should be safe: {}", output);
+}
+
+/// Test that hardlink attacks are blocked
+#[tokio::test]
+async fn test_hardlink_attack() {
+    let (safe, output) = run_adversarial_test(
+        r#"
+import os
+
+# Attack: Try to create hard links to escape sandbox or access host files
+hardlink_attacks = [
+    ('/etc/passwd', '/data/passwd_hardlink'),
+    ('/etc/shadow', '/data/shadow_hardlink'),
+    ('/data/../etc/passwd', '/data/escape_hardlink'),
+]
+
+for src, dst in hardlink_attacks:
+    try:
+        os.link(src, dst)
+        print(f"WARNING: Created hardlink {src} -> {dst}")
+
+        # Try to read through the hardlink
+        try:
+            with open(dst, 'r') as f:
+                content = f.read(100)
+            if 'root:' in content:
+                print(f"SECURITY ISSUE: Read {src} via hardlink: {content[:50]}")
+        except Exception as e:
+            print(f"Hardlink exists but unreadable: {e}")
+    except (OSError, PermissionError) as e:
+        print(f"EXPECTED: Cannot create hardlink to {src}: {type(e).__name__}")
+    except Exception as e:
+        print(f"EXPECTED: Hardlink blocked: {type(e).__name__}: {e}")
+
+# Try creating hardlinks within VFS (should work)
+try:
+    with open('/data/original.txt', 'w') as f:
+        f.write('original content')
+    os.link('/data/original.txt', '/data/linked.txt')
+
+    with open('/data/linked.txt', 'r') as f:
+        content = f.read()
+    if content == 'original content':
+        print("OK: Hardlinks within VFS work correctly")
+    else:
+        print(f"WARNING: Hardlink content mismatch: {content}")
+except OSError as e:
+    print(f"NOTE: Hardlinks within VFS not supported: {e}")
+except Exception as e:
+    print(f"NOTE: Hardlink test result: {type(e).__name__}: {e}")
+"#,
+        "hardlink_attack",
+    )
+    .await;
+    assert!(safe, "Hardlink attacks should be blocked: {}", output);
 }
