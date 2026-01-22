@@ -86,8 +86,8 @@ pub use sandbox::{
 #[cfg(feature = "vfs")]
 pub use session::VfsConfig;
 pub use session::{
-    InProcessSession, PythonStateSnapshot, Session, SessionExecutor, SnapshotMetadata,
-    SnapshotSession,
+    InProcessSession, PersistedSession, PythonStateSnapshot, Session, SessionExecutor, SessionInfo,
+    SessionMetadata, SessionRegistry, SnapshotMetadata, SnapshotSession,
 };
 pub use trace::{OutputHandler, TraceEvent, TraceEventKind, TraceHandler};
 
