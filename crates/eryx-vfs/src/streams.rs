@@ -274,10 +274,8 @@ pub struct VfsOutputStream<S: VfsStorage + 'static> {
     path: String,
     /// Write buffer.
     buffer: Arc<RwLock<Vec<u8>>>,
-    /// Current write position in the file.
-    position: u64,
-    /// Whether the stream is in append mode.
-    append: bool,
+    /// Current write position in the file, or None for append mode.
+    position: Option<u64>,
     /// Whether the stream has been closed.
     closed: bool,
 }
@@ -289,20 +287,18 @@ impl<S: VfsStorage + 'static> VfsOutputStream<S> {
             storage,
             path,
             buffer: Arc::new(RwLock::new(Vec::new())),
-            position: offset,
-            append: false,
+            position: Some(offset),
             closed: false,
         }
     }
 
-    /// Create a new VFS output stream for appending.
+    /// Create a new VFS output stream for appending to a file.
     pub fn append(storage: Arc<S>, path: String) -> Self {
         Self {
             storage,
             path,
             buffer: Arc::new(RwLock::new(Vec::new())),
-            position: 0, // Will be set to file size on first write
-            append: true,
+            position: None, // None indicates append mode
             closed: false,
         }
     }
@@ -329,7 +325,7 @@ impl<S: VfsStorage + 'static> VfsOutputStream<S> {
         // We spawn a blocking thread to handle the async operation
         let storage = Arc::clone(&self.storage);
         let path = self.path.clone();
-        let append = self.append;
+
         let position = self.position;
         let data_len = buffer_data.len() as u64;
 
@@ -341,18 +337,22 @@ impl<S: VfsStorage + 'static> VfsOutputStream<S> {
                 .map_err(|e| format!("Failed to create runtime: {e}"))?;
 
             rt.block_on(async {
-                let write_position = if append {
-                    // For append mode, get the current file size
-                    match storage.stat(&path).await {
-                        Ok(meta) => meta.size,
-                        // File doesn't exist yet, start at 0
-                        Err(_) => 0,
+                // For append mode (position is None), get file size first
+                let write_position = match position {
+                    Some(pos) => pos,
+                    None => {
+                        // Get current file size to append at the end
+                        match storage.stat(&path).await {
+                            Ok(meta) => meta.size,
+                            // If file doesn't exist, start at 0
+                            Err(_) => 0,
+                        }
                     }
-                } else {
-                    position
                 };
-
-                storage.write_at(&path, write_position, &buffer_data).await
+                storage
+                    .write_at(&path, write_position, &buffer_data)
+                    .await
+                    .map(|()| write_position)
             })
             .map_err(|e| format!("VFS write failed: {:?}", e))
         })
@@ -360,10 +360,9 @@ impl<S: VfsStorage + 'static> VfsOutputStream<S> {
         .map_err(|_| StreamError::trap("Thread panicked during VFS write"))?;
 
         match result {
-            Ok(()) => {
-                if !self.append {
-                    self.position += data_len;
-                }
+            Ok(write_position) => {
+                // Update position for next write (converts append to positional after first write)
+                self.position = Some(write_position + data_len);
                 Ok(())
             }
             Err(e) => Err(StreamError::LastOperationFailed(anyhow::anyhow!("{}", e))),
@@ -437,5 +436,171 @@ impl<S: VfsStorage + 'static> Drop for VfsOutputStream<S> {
     fn drop(&mut self) {
         // Try to flush any remaining buffered data
         let _ = self.flush_sync();
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+    use crate::storage::InMemoryStorage;
+
+    #[tokio::test]
+    async fn test_vfs_input_stream_read() {
+        let storage = Arc::new(InMemoryStorage::new());
+        storage.write("/test.txt", b"hello world").await.unwrap();
+
+        let mut stream = VfsInputStream::new(Arc::clone(&storage), "/test.txt".to_string(), 0);
+
+        // Read all content
+        let result = stream.read(100).unwrap();
+        assert_eq!(&*result, b"hello world");
+
+        // Reading again should return Closed (EOF)
+        let err = stream.read(100).unwrap_err();
+        assert!(matches!(err, StreamError::Closed));
+    }
+
+    #[tokio::test]
+    async fn test_vfs_input_stream_read_at_offset() {
+        let storage = Arc::new(InMemoryStorage::new());
+        storage.write("/test.txt", b"hello world").await.unwrap();
+
+        // Start reading from offset 6
+        let mut stream = VfsInputStream::new(Arc::clone(&storage), "/test.txt".to_string(), 6);
+
+        let result = stream.read(100).unwrap();
+        assert_eq!(&*result, b"world");
+    }
+
+    #[tokio::test]
+    async fn test_vfs_input_stream_partial_read() {
+        let storage = Arc::new(InMemoryStorage::new());
+        storage.write("/test.txt", b"hello world").await.unwrap();
+
+        let mut stream = VfsInputStream::new(Arc::clone(&storage), "/test.txt".to_string(), 0);
+
+        // Read only 5 bytes
+        let result = stream.read(5).unwrap();
+        assert_eq!(&*result, b"hello");
+
+        // Read remaining
+        let result = stream.read(100).unwrap();
+        assert_eq!(&*result, b" world");
+    }
+
+    #[tokio::test]
+    async fn test_vfs_output_stream_write() {
+        let storage = Arc::new(InMemoryStorage::new());
+        // Create empty file first
+        storage.write("/test.txt", b"").await.unwrap();
+
+        let mut stream =
+            VfsOutputStream::write_at(Arc::clone(&storage), "/test.txt".to_string(), 0);
+
+        stream.write(Bytes::from("hello")).unwrap();
+        stream.flush().unwrap();
+
+        // Verify content
+        let content = storage.read("/test.txt").await.unwrap();
+        assert_eq!(&content, b"hello");
+    }
+
+    #[tokio::test]
+    async fn test_vfs_output_stream_write_at_offset() {
+        let storage = Arc::new(InMemoryStorage::new());
+        storage.write("/test.txt", b"XXXXX world").await.unwrap();
+
+        // Write at offset 0
+        let mut stream =
+            VfsOutputStream::write_at(Arc::clone(&storage), "/test.txt".to_string(), 0);
+
+        stream.write(Bytes::from("hello")).unwrap();
+        stream.flush().unwrap();
+
+        // Verify content - should overwrite first 5 chars
+        let content = storage.read("/test.txt").await.unwrap();
+        assert_eq!(&content, b"hello world");
+    }
+
+    #[tokio::test]
+    async fn test_vfs_output_stream_append() {
+        let storage = Arc::new(InMemoryStorage::new());
+        storage.write("/test.txt", b"hello").await.unwrap();
+
+        // Append to file
+        let mut stream = VfsOutputStream::append(Arc::clone(&storage), "/test.txt".to_string());
+
+        stream.write(Bytes::from(" world")).unwrap();
+        stream.flush().unwrap();
+
+        // Verify content
+        let content = storage.read("/test.txt").await.unwrap();
+        assert_eq!(&content, b"hello world");
+    }
+
+    #[tokio::test]
+    async fn test_vfs_output_stream_append_to_nonexistent() {
+        let storage = Arc::new(InMemoryStorage::new());
+
+        // Append to non-existent file (should start at offset 0)
+        let mut stream = VfsOutputStream::append(Arc::clone(&storage), "/new.txt".to_string());
+
+        stream.write(Bytes::from("new content")).unwrap();
+        stream.flush().unwrap();
+
+        // Verify content
+        let content = storage.read("/new.txt").await.unwrap();
+        assert_eq!(&content, b"new content");
+    }
+
+    #[tokio::test]
+    async fn test_vfs_output_stream_multiple_appends() {
+        let storage = Arc::new(InMemoryStorage::new());
+        storage.write("/test.txt", b"").await.unwrap();
+
+        let mut stream = VfsOutputStream::append(Arc::clone(&storage), "/test.txt".to_string());
+
+        stream.write(Bytes::from("one")).unwrap();
+        stream.flush().unwrap();
+        stream.write(Bytes::from("two")).unwrap();
+        stream.flush().unwrap();
+        stream.write(Bytes::from("three")).unwrap();
+        stream.flush().unwrap();
+
+        let content = storage.read("/test.txt").await.unwrap();
+        assert_eq!(&content, b"onetwothree");
+    }
+
+    #[tokio::test]
+    async fn test_vfs_output_stream_drop_flushes() {
+        let storage = Arc::new(InMemoryStorage::new());
+        storage.write("/test.txt", b"").await.unwrap();
+
+        {
+            let mut stream =
+                VfsOutputStream::write_at(Arc::clone(&storage), "/test.txt".to_string(), 0);
+            stream.write(Bytes::from("hello")).unwrap();
+            // Don't explicitly flush - drop should flush
+        }
+
+        // Verify content was flushed on drop
+        let content = storage.read("/test.txt").await.unwrap();
+        assert_eq!(&content, b"hello");
+    }
+
+    #[tokio::test]
+    async fn test_vfs_streams_closed_error() {
+        let storage = Arc::new(InMemoryStorage::new());
+        storage.write("/test.txt", b"hello").await.unwrap();
+
+        // Read until closed
+        let mut input = VfsInputStream::new(Arc::clone(&storage), "/test.txt".to_string(), 0);
+        let _ = input.read(100).unwrap(); // Read all
+        let _ = input.read(100); // Triggers closed
+
+        // Subsequent reads should return Closed
+        let err = input.read(100).unwrap_err();
+        assert!(matches!(err, StreamError::Closed));
     }
 }
