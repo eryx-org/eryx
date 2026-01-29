@@ -187,7 +187,7 @@ jobs:
         with:
           mise_toml: |
             [tools]
-            rust = "1.89"
+            rust = "1.90"
 
       - name: Check MSRV
         # Exclude eryx-python as it requires native-extensions which needs WASI SDK
