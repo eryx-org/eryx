@@ -8,7 +8,7 @@ members = ["crates/*"]
 [workspace.package]
 version = "0.2.0"
 edition = "2024"
-rust-version = "1.89.0"
+rust-version = "1.90.0"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/sd2k/eryx"
 authors = ["Ben Sully <ben.sully88@gmail.com>"]
@@ -71,8 +71,8 @@ wasm-encoder = "0.243"
 wasmparser = "0.243"
 
 # WebAssembly runtime (v40+ required for async component model)
-wasmtime = { version = "40", features = ["component-model", "async"] }
-wasmtime-wasi = "40"
+wasmtime = { version = "41", features = ["component-model", "async"] }
+wasmtime-wasi = "41"
 
 # WebAssembly component linking and WIT parsing
 wit-component = "0.243"

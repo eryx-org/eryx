@@ -1032,7 +1032,7 @@ impl<S: VfsStorage + 'static> types::HostDescriptor for HybridVfsState<'_, S> {
                 if !vfs_desc.file_perms.contains(FilePerms::WRITE) {
                     return Err(crate::VfsError::PermissionDenied("write".to_string()).into());
                 }
-                // For append, use the append-specific constructor
+
                 let path = vfs_desc.path.clone();
                 let storage = Arc::clone(&self.ctx.storage);
                 let stream = VfsOutputStream::append(storage, path);

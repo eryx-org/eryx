@@ -2,10 +2,14 @@
 //!
 //! This module implements the WASI filesystem Host traits for our VFS.
 
+use std::sync::Arc;
+
 use wasmtime::component::Resource;
+use wasmtime_wasi_io::streams::{DynInputStream, DynOutputStream};
 
 use crate::bindings::{DirPerms, FilePerms, VfsFsError, VfsFsResult, preopens, types};
 use crate::storage::VfsStorage;
+use crate::streams::{VfsInputStream, VfsOutputStream};
 use crate::wasi_impl::{
     VfsDescriptor, VfsReaddirIterator, VfsState, metadata_to_stat, vfs_error_to_error_code,
 };
@@ -439,29 +443,61 @@ impl<S: VfsStorage + 'static> types::HostDescriptor for VfsState<'_, S> {
 
     fn read_via_stream(
         &mut self,
-        _fd: Resource<VfsDescriptor>,
-        _offset: types::Filesize,
-    ) -> VfsFsResult<Resource<wasmtime_wasi_io::streams::DynInputStream>> {
-        // Stream-based I/O not yet implemented for VFS
-        // Python's file I/O uses read/write directly, not streams
-        Err(crate::VfsError::PermissionDenied("streams not yet supported".to_string()).into())
+        fd: Resource<VfsDescriptor>,
+        offset: types::Filesize,
+    ) -> VfsFsResult<Resource<DynInputStream>> {
+        let descriptor = self.table.get(&fd)?;
+        if descriptor.is_dir {
+            return Err(crate::VfsError::NotFile(descriptor.path.clone()).into());
+        }
+        if !descriptor.file_perms.contains(FilePerms::READ) {
+            return Err(crate::VfsError::PermissionDenied("read".to_string()).into());
+        }
+        let path = descriptor.path.clone();
+        let storage = Arc::clone(&self.ctx.storage);
+        let stream = VfsInputStream::new(storage, path, offset);
+        let stream: DynInputStream = Box::new(stream);
+        let resource = self.table.push(stream)?;
+        Ok(resource)
     }
 
     fn write_via_stream(
         &mut self,
-        _fd: Resource<VfsDescriptor>,
-        _offset: types::Filesize,
-    ) -> VfsFsResult<Resource<wasmtime_wasi_io::streams::DynOutputStream>> {
-        // Stream-based I/O not yet implemented for VFS
-        Err(crate::VfsError::PermissionDenied("streams not yet supported".to_string()).into())
+        fd: Resource<VfsDescriptor>,
+        offset: types::Filesize,
+    ) -> VfsFsResult<Resource<DynOutputStream>> {
+        let descriptor = self.table.get(&fd)?;
+        if descriptor.is_dir {
+            return Err(crate::VfsError::NotFile(descriptor.path.clone()).into());
+        }
+        if !descriptor.file_perms.contains(FilePerms::WRITE) {
+            return Err(crate::VfsError::PermissionDenied("write".to_string()).into());
+        }
+        let path = descriptor.path.clone();
+        let storage = Arc::clone(&self.ctx.storage);
+        let stream = VfsOutputStream::write_at(storage, path, offset);
+        let stream: DynOutputStream = Box::new(stream);
+        let resource = self.table.push(stream)?;
+        Ok(resource)
     }
 
     fn append_via_stream(
         &mut self,
-        _fd: Resource<VfsDescriptor>,
-    ) -> VfsFsResult<Resource<wasmtime_wasi_io::streams::DynOutputStream>> {
-        // Stream-based I/O not yet implemented for VFS
-        Err(crate::VfsError::PermissionDenied("streams not yet supported".to_string()).into())
+        fd: Resource<VfsDescriptor>,
+    ) -> VfsFsResult<Resource<DynOutputStream>> {
+        let descriptor = self.table.get(&fd)?;
+        if descriptor.is_dir {
+            return Err(crate::VfsError::NotFile(descriptor.path.clone()).into());
+        }
+        if !descriptor.file_perms.contains(FilePerms::WRITE) {
+            return Err(crate::VfsError::PermissionDenied("write".to_string()).into());
+        }
+        let path = descriptor.path.clone();
+        let storage = Arc::clone(&self.ctx.storage);
+        let stream = VfsOutputStream::append(storage, path);
+        let stream: DynOutputStream = Box::new(stream);
+        let resource = self.table.push(stream)?;
+        Ok(resource)
     }
 
     async fn is_same_object(
