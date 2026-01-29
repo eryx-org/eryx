@@ -64,15 +64,12 @@ impl From<eryx::ExecuteResult> for ExecuteResult {
 
 impl ExecuteResult {
     /// Create an ExecuteResult from ExecutionOutput (used by Session).
-    ///
-    /// This doesn't have timing/callback stats since SessionExecutor
-    /// doesn't track those at the session level.
     pub(crate) fn from_execution_output(output: eryx::ExecutionOutput) -> Self {
         Self {
             stdout: output.stdout,
             stderr: output.stderr,
-            duration_ms: 0.0,        // Not tracked by SessionExecutor
-            callback_invocations: 0, // Not tracked by SessionExecutor
+            duration_ms: output.duration.as_secs_f64() * 1000.0,
+            callback_invocations: output.callback_invocations,
             peak_memory_bytes: Some(output.peak_memory_bytes),
         }
     }
