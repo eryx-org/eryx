@@ -135,16 +135,28 @@ pub struct ExecutionOutput {
     pub stderr: String,
     /// Peak memory usage in bytes during execution.
     pub peak_memory_bytes: u64,
+    /// Execution duration.
+    pub duration: Duration,
+    /// Number of callback invocations during execution.
+    pub callback_invocations: u32,
 }
 
 impl ExecutionOutput {
     /// Create a new execution output.
     #[must_use]
-    pub fn new(stdout: String, stderr: String, peak_memory_bytes: u64) -> Self {
+    pub fn new(
+        stdout: String,
+        stderr: String,
+        peak_memory_bytes: u64,
+        duration: Duration,
+        callback_invocations: u32,
+    ) -> Self {
         Self {
             stdout,
             stderr,
             peak_memory_bytes,
+            duration,
+            callback_invocations,
         }
     }
 }
@@ -1539,10 +1551,16 @@ impl PythonExecutor {
         // Get peak memory from the store before it's dropped
         let peak_memory_bytes = store.data().memory_tracker.peak_memory_bytes();
 
+        // Note: callback_invocations is 0 here because PythonExecutor doesn't
+        // handle callbacks internally - it just passes the channel to the WASM state.
+        // Higher-level APIs like Sandbox track callback invocations in their own
+        // callback handler tasks.
         Ok(ExecutionOutput::new(
             wit_output.stdout,
             wit_output.stderr,
             peak_memory_bytes,
+            Duration::ZERO, // Duration tracked by higher-level APIs (Sandbox, Session)
+            0,              // Callback invocations tracked by higher-level APIs
         ))
     }
 }

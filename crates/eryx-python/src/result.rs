@@ -62,6 +62,19 @@ impl From<eryx::ExecuteResult> for ExecuteResult {
     }
 }
 
+impl ExecuteResult {
+    /// Create an ExecuteResult from ExecutionOutput (used by Session).
+    pub(crate) fn from_execution_output(output: eryx::ExecutionOutput) -> Self {
+        Self {
+            stdout: output.stdout,
+            stderr: output.stderr,
+            duration_ms: output.duration.as_secs_f64() * 1000.0,
+            callback_invocations: output.callback_invocations,
+            peak_memory_bytes: Some(output.peak_memory_bytes),
+        }
+    }
+}
+
 /// Truncate a string for display, adding "..." if truncated.
 fn truncate_string(s: &str, max_len: usize) -> String {
     if s.len() <= max_len {

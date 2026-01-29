@@ -36,7 +36,7 @@
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use tokio::sync::mpsc;
 use wasmtime::Store;
@@ -701,6 +701,8 @@ impl SessionExecutor {
         callback_tx: Option<mpsc::Sender<CallbackRequest>>,
         trace_tx: Option<mpsc::UnboundedSender<TraceRequest>>,
     ) -> Result<ExecutionOutput, String> {
+        let start = Instant::now();
+
         // Take ownership of store and bindings for async execution
         let mut store = self
             .store
@@ -813,10 +815,19 @@ impl SessionExecutor {
         })?;
         // wit_output is the WIT-generated ExecuteOutput record with stdout and stderr
         let wit_output = wasmtime_result.map_err(|e| format!("WASM execution error: {e:?}"))??;
+
+        let duration = start.elapsed();
+
+        // Note: callback_invocations is 0 here because SessionExecutor doesn't
+        // handle callbacks internally - it just passes the channel to the WASM state.
+        // Callers that use with_callbacks() should spawn their own callback handler
+        // task to count invocations if needed.
         Ok(ExecutionOutput::new(
             wit_output.stdout,
             wit_output.stderr,
             peak_memory,
+            duration,
+            0, // Callback invocations tracked by caller's callback handler
         ))
     }
 
