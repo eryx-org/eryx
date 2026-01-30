@@ -53,21 +53,25 @@ jobs:
       - name: Build eryx-runtime
         run: mise run build-eryx-runtime
 
-      - name: Precompile WASM
-        run: |
-          # Run precompile directly with -p eryx to avoid building eryx-python
-          # (eryx-python enables embedded feature which requires runtime.cwasm to exist)
-          cargo run -p eryx --example precompile --release
-
       - name: Copy prebuilt late-linking artifacts
         run: |
           # Find the OUT_DIR with the compressed artifacts from the release build
+          # This must happen before precompile so build.rs can find them
           OUT_DIR=$(find target/release -path "*/eryx-runtime-*/out" -type d | head -1)
           echo "Found OUT_DIR: $OUT_DIR"
           mkdir -p crates/eryx-runtime/prebuilt
           cp "$OUT_DIR/liberyx_runtime.so.zst" crates/eryx-runtime/prebuilt/
           cp "$OUT_DIR/liberyx_bindings.so.zst" crates/eryx-runtime/prebuilt/
           ls -la crates/eryx-runtime/prebuilt/
+
+      - name: Set up python-stdlib for preinit
+        run: mise run setup-eryx-runtime-tests
+
+      - name: Precompile WASM with preinit
+        run: |
+          # Use preinit feature for faster sandbox instantiation in downstream jobs
+          # (pre-initializes Python interpreter in the snapshot)
+          cargo run -p eryx --example precompile --features preinit --release
 
       - name: Copy eryx-wasm-runtime test artifacts
         run: |
