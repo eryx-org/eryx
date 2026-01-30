@@ -31,12 +31,12 @@ run = "cargo build --workspace"
 
 [tasks.test]
 description = "Run tests with embedded WASM"
-depends = ["precompile-eryx-runtime", "setup-eryx-runtime-tests"]
+depends = ["precompile-eryx-runtime-preinit"]
 run = "cargo nextest run --workspace --features embedded"
 
 [tasks.test-python]
 description = "Run Python binding tests"
-depends = ["precompile-eryx-runtime"]
+depends = ["precompile-eryx-runtime-preinit"]
 dir = "crates/eryx-python"
 run = """
 maturin develop --release
@@ -45,11 +45,7 @@ maturin develop --release
 
 [tasks.test-all]
 description = "Run tests with all features"
-depends = [
-  "precompile-eryx-runtime",
-  "build-preinit",
-  "setup-eryx-runtime-tests",
-]
+depends = ["precompile-eryx-runtime-preinit"]
 run = "cargo nextest run --workspace --all-features"
 
 [tasks.lint]
@@ -431,7 +427,7 @@ outputs = ["crates/eryx-runtime/runtime.cwasm"]
 
 [tasks.setup]
 description = "Set up development environment (build WASM, precompile, etc.)"
-depends = ["build-eryx-runtime", "precompile-eryx-runtime"]
+depends = ["precompile-eryx-runtime-preinit"]
 run = """
 echo "✓ Development environment ready!"
 echo ""
@@ -456,7 +452,7 @@ run = "cargo run --example trace_events --features embedded"
 
 [tasks.examples]
 description = "Run all examples"
-depends = ["precompile-eryx-runtime"]
+depends = ["precompile-eryx-runtime-preinit"]
 run = """
 echo "=== simple ==="
 cargo run --example simple --features embedded --release
