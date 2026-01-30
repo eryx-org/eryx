@@ -769,3 +769,273 @@ print(r3['count'])
 """
         )
         assert "3" in result.stdout
+
+
+class TestAsyncCallbackIsolation:
+    """Tests for async callback behavior.
+
+    Async callbacks run in isolated event loops (via asyncio.run()). This means
+    callbacks cannot share event-loop-bound resources (asyncio.Queue, asyncio.Lock,
+    asyncio.Semaphore, etc.) with the parent application or each other.
+
+    This is a fundamental limitation because:
+    1. Callbacks run on tokio's blocking thread pool, not the caller's thread
+    2. asyncio event loops are thread-specific
+    3. Each callback invocation creates its own isolated event loop
+
+    For shared state, use thread-safe primitives (threading.Lock, queue.Queue)
+    or design callbacks to be stateless.
+    """
+
+    def test_async_callback_from_sync_context(self):
+        """Test async callbacks work when called from sync context."""
+        import asyncio
+
+        async def async_double(value: int):
+            await asyncio.sleep(0.001)
+            return {"result": value * 2}
+
+        sandbox = eryx.Sandbox(
+            callbacks=[
+                {"name": "double", "fn": async_double, "description": "Doubles a value"}
+            ]
+        )
+
+        result = sandbox.execute("r = await double(value=21); print(r['result'])")
+        assert "42" in result.stdout
+
+    def test_async_callback_from_async_context(self):
+        """Test async callbacks work when called from async context."""
+        import asyncio
+
+        async def async_triple(value: int):
+            await asyncio.sleep(0.001)
+            return {"result": value * 3}
+
+        async def main():
+            sandbox = eryx.Sandbox(
+                callbacks=[
+                    {
+                        "name": "triple",
+                        "fn": async_triple,
+                        "description": "Triples a value",
+                    }
+                ]
+            )
+            result = sandbox.execute("r = await triple(value=10); print(r['result'])")
+            assert "30" in result.stdout
+
+        asyncio.run(main())
+
+    def test_async_callback_with_thread_safe_queue(self):
+        """Test that async callbacks can use thread-safe queue.Queue for shared state."""
+        import asyncio
+        import queue
+
+        # Use thread-safe queue.Queue instead of asyncio.Queue
+        shared_queue = queue.Queue()
+
+        async def enqueue_item(item: str):
+            """Callback that puts items in a thread-safe queue."""
+            shared_queue.put(item)
+            return {"queued": item, "queue_size": shared_queue.qsize()}
+
+        sandbox = eryx.Sandbox(
+            callbacks=[
+                {
+                    "name": "enqueue",
+                    "fn": enqueue_item,
+                    "description": "Enqueues an item",
+                }
+            ]
+        )
+
+        result = sandbox.execute("""
+r1 = await enqueue(item="first")
+r2 = await enqueue(item="second")
+r3 = await enqueue(item="third")
+print(f"queued {r3['queue_size']} items")
+""")
+        assert "queued 3 items" in result.stdout
+
+        # Verify items were actually put in the queue
+        items = []
+        while not shared_queue.empty():
+            items.append(shared_queue.get_nowait())
+
+        assert items == ["first", "second", "third"]
+
+    def test_async_callback_with_threading_lock(self):
+        """Test that async callbacks can use threading.Lock for thread-safe shared state."""
+        import asyncio
+        import threading
+
+        lock = threading.Lock()
+        counter = {"value": 0}
+
+        async def increment_with_lock():
+            """Callback that increments a counter while holding a thread lock."""
+            with lock:
+                counter["value"] += 1
+                await asyncio.sleep(0.001)  # Simulate some async work
+                return {"count": counter["value"]}
+
+        sandbox = eryx.Sandbox(
+            callbacks=[
+                {
+                    "name": "increment",
+                    "fn": increment_with_lock,
+                    "description": "Increments with lock",
+                }
+            ]
+        )
+
+        result = sandbox.execute("""
+r1 = await increment()
+r2 = await increment()
+r3 = await increment()
+print(f"final count: {r3['count']}")
+""")
+        assert "final count: 3" in result.stdout
+        assert counter["value"] == 3
+
+    def test_async_callback_parallel_execution(self):
+        """Test that multiple async callbacks can run in parallel via tokio."""
+        import asyncio
+        import time
+
+        call_times = []
+        lock = __import__("threading").Lock()
+
+        async def timed_work(task_id: int):
+            """Callback that records when it runs."""
+            start = time.time()
+            await asyncio.sleep(0.05)
+            end = time.time()
+            with lock:
+                call_times.append((task_id, start, end))
+            return {"task_id": task_id}
+
+        sandbox = eryx.Sandbox(
+            callbacks=[
+                {
+                    "name": "timed_work",
+                    "fn": timed_work,
+                    "description": "Timed work",
+                }
+            ]
+        )
+
+        result = sandbox.execute("""
+import asyncio
+results = await asyncio.gather(
+    timed_work(task_id=1),
+    timed_work(task_id=2),
+    timed_work(task_id=3),
+)
+print(f"completed {len(results)} tasks")
+""")
+        assert "completed 3 tasks" in result.stdout
+        assert len(call_times) == 3
+
+        # Verify callbacks ran in parallel (overlapping time ranges)
+        # If sequential, total time would be ~150ms; parallel should be ~50ms
+        starts = [t[1] for t in call_times]
+        ends = [t[2] for t in call_times]
+        total_time = max(ends) - min(starts)
+        # Should complete in roughly 50-100ms if parallel, not 150ms+
+        assert total_time < 0.12, f"Callbacks appear sequential: {total_time}s"
+
+    def test_sync_callback_from_async_context(self):
+        """Test that sync callbacks work when called from async context."""
+        import asyncio
+
+        def sync_callback(value: int):
+            return {"doubled": value * 2}
+
+        async def main():
+            sandbox = eryx.Sandbox(
+                callbacks=[
+                    {
+                        "name": "sync_double",
+                        "fn": sync_callback,
+                        "description": "Sync double",
+                    }
+                ]
+            )
+            result = sandbox.execute(
+                "r = await sync_double(value=21); print(r['doubled'])"
+            )
+            assert "42" in result.stdout
+
+        asyncio.run(main())
+
+    def test_mixed_sync_async_callbacks(self):
+        """Test mixing sync and async callbacks."""
+        import asyncio
+
+        results_order = []
+        lock = __import__("threading").Lock()
+
+        def sync_cb(name: str):
+            with lock:
+                results_order.append(f"sync-{name}")
+            return {"type": "sync", "name": name}
+
+        async def async_cb(name: str):
+            await asyncio.sleep(0.001)
+            with lock:
+                results_order.append(f"async-{name}")
+            return {"type": "async", "name": name}
+
+        sandbox = eryx.Sandbox(
+            callbacks=[
+                {"name": "sync_cb", "fn": sync_cb, "description": ""},
+                {"name": "async_cb", "fn": async_cb, "description": ""},
+            ]
+        )
+
+        result = sandbox.execute("""
+s = await sync_cb(name="first")
+a = await async_cb(name="second")
+print(f"{s['type']}-{a['type']}")
+""")
+        assert "sync-async" in result.stdout
+        assert results_order == ["sync-first", "async-second"]
+
+    def test_async_callback_error_propagation(self):
+        """Test that async callback errors are properly propagated."""
+        import asyncio
+
+        async def async_fail(message: str):
+            await asyncio.sleep(0.001)
+            raise ValueError(message)
+
+        sandbox = eryx.Sandbox(
+            callbacks=[{"name": "async_fail", "fn": async_fail, "description": "Fails"}]
+        )
+        with pytest.raises(eryx.ExecutionError):
+            sandbox.execute('await async_fail(message="test error")')
+
+    def test_async_callback_error_message_preserved(self):
+        """Test that error messages are preserved in async callbacks."""
+        import asyncio
+
+        async def async_fail_with_message():
+            await asyncio.sleep(0.001)
+            raise ValueError("Specific error message for testing")
+
+        sandbox = eryx.Sandbox(
+            callbacks=[
+                {"name": "fail", "fn": async_fail_with_message, "description": ""}
+            ]
+        )
+        result = sandbox.execute("""
+try:
+    await fail()
+except Exception as e:
+    print(f"caught: {type(e).__name__}")
+    print(f"has_message: {'Specific error message' in str(e)}")
+""")
+        assert "caught: RuntimeError" in result.stdout
+        assert "has_message: True" in result.stdout

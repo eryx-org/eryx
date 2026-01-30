@@ -970,14 +970,20 @@ async def await_invoke(name: str, args_json: str) -> str:
 
         # Get the result wrapper and parse it
         result_json = _eryx.promise_get_result_(promise)
-        result = json.loads(result_json)
+        try:
+            result = json.loads(result_json)
+        except json.JSONDecodeError as e:
+            raise RuntimeError(f"Failed to parse callback result JSON: {e}. Raw: {result_json[:200]}") from e
         if result.get('ok', False):
             # Return the value as a JSON string
             value = result.get('value', '')
             # Always JSON-encode so invoke() can call json.loads()
             return json.dumps(value)
         else:
-            raise RuntimeError(result.get('error', 'Unknown error'))
+            error = result.get('error')
+            if error is None:
+                raise RuntimeError(f"Callback failed with no error message. Result: {result}")
+            raise RuntimeError(error)
 
 
 async def _await_net_result(result_type: int, value: Any) -> Any:
@@ -3065,7 +3071,7 @@ fn serde_json_mini_serialize_callbacks(callbacks: &[CallbackInfo]) -> String {
 }
 
 /// Escape a string for JSON
-fn escape_json_string(s: &str) -> String {
+pub fn escape_json_string(s: &str) -> String {
     let mut result = String::with_capacity(s.len());
     for c in s.chars() {
         match c {
@@ -3085,6 +3091,245 @@ fn escape_json_string(s: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    // Tests will be added when we can actually run Python
-    // For now, just verify the module compiles
+    use super::escape_json_string;
+
+    #[test]
+    fn test_escape_json_string_basic() {
+        assert_eq!(escape_json_string("hello"), "hello");
+        assert_eq!(escape_json_string(""), "");
+        assert_eq!(escape_json_string(" "), " ");
+    }
+
+    #[test]
+    fn test_escape_json_string_quotes() {
+        assert_eq!(escape_json_string(r#"say "hello""#), r#"say \"hello\""#);
+        // Three quotes -> three escaped quotes
+        assert_eq!(escape_json_string("\"\"\""), r#"\"\"\""#);
+        // Single quotes don't need escaping in JSON
+        assert_eq!(escape_json_string("it's"), "it's");
+    }
+
+    #[test]
+    fn test_escape_json_string_backslash() {
+        assert_eq!(escape_json_string(r"path\to\file"), r"path\\to\\file");
+        assert_eq!(escape_json_string(r"\\"), r"\\\\");
+        assert_eq!(escape_json_string(r"\"), r"\\");
+    }
+
+    #[test]
+    fn test_escape_json_string_control_chars() {
+        assert_eq!(escape_json_string("line1\nline2"), r"line1\nline2");
+        assert_eq!(escape_json_string("col1\tcol2"), r"col1\tcol2");
+        assert_eq!(escape_json_string("text\r\n"), r"text\r\n");
+        // Multiple in a row
+        assert_eq!(escape_json_string("\n\n\n"), r"\n\n\n");
+        assert_eq!(escape_json_string("\t\t"), r"\t\t");
+    }
+
+    #[test]
+    fn test_escape_json_string_all_control_chars() {
+        // Null byte and other control characters should be \uXXXX escaped
+        assert_eq!(escape_json_string("a\x00b"), r"a\u0000b");
+        assert_eq!(escape_json_string("\x1f"), r"\u001f");
+        // Test all ASCII control characters (0x00-0x1F except \t, \n, \r)
+        assert_eq!(escape_json_string("\x01"), r"\u0001");
+        assert_eq!(escape_json_string("\x02"), r"\u0002");
+        assert_eq!(escape_json_string("\x07"), r"\u0007"); // bell
+        assert_eq!(escape_json_string("\x08"), r"\u0008"); // backspace
+        assert_eq!(escape_json_string("\x0b"), r"\u000b"); // vertical tab
+        assert_eq!(escape_json_string("\x0c"), r"\u000c"); // form feed
+        assert_eq!(escape_json_string("\x1b"), r"\u001b"); // escape
+        assert_eq!(escape_json_string("\x7f"), r"\u007f"); // DEL
+    }
+
+    #[test]
+    fn test_escape_json_string_combined() {
+        // A realistic error message with quotes and newlines
+        let input = "ValueError: \"bad input\"\n  at line 5";
+        let expected = r#"ValueError: \"bad input\"\n  at line 5"#;
+        assert_eq!(escape_json_string(input), expected);
+    }
+
+    #[test]
+    fn test_escape_json_string_unicode() {
+        // Unicode should pass through unchanged
+        assert_eq!(escape_json_string("héllo wörld 你好"), "héllo wörld 你好");
+        assert_eq!(escape_json_string("emoji: 🎉"), "emoji: 🎉");
+        // Various unicode categories
+        assert_eq!(escape_json_string("αβγδ"), "αβγδ"); // Greek
+        assert_eq!(escape_json_string("日本語"), "日本語"); // Japanese
+        assert_eq!(escape_json_string("🎉🎊🎁"), "🎉🎊🎁"); // Emoji
+        assert_eq!(escape_json_string("→←↑↓"), "→←↑↓"); // Arrows
+    }
+
+    // === Security-relevant edge cases ===
+
+    #[test]
+    fn test_escape_json_string_injection_attempts() {
+        // Attempt to break out of JSON string with unescaped quote
+        // Input: foo", "injected": "bar
+        // Output: foo\", \"injected\": \"bar
+        assert_eq!(
+            escape_json_string("foo\", \"injected\": \"bar"),
+            r#"foo\", \"injected\": \"bar"#
+        );
+
+        // Attempt to inject via backslash-quote sequence
+        // Input: foo\", "x": "y  (backslash then quote then rest)
+        // Output: foo\\\", \"x\": \"y
+        assert_eq!(
+            escape_json_string("foo\\\", \"x\": \"y"),
+            r#"foo\\\", \"x\": \"y"#
+        );
+
+        // Nested escaping attempts
+        // Input: \\" (two backslashes and a quote) -> \\\\" (four backslashes, escaped quote)
+        assert_eq!(escape_json_string("\\\\\""), "\\\\\\\\\\\"");
+        // Input: \\\" (three backslashes and a quote) -> \\\\\\" (six backslashes, escaped quote)
+        assert_eq!(escape_json_string("\\\\\\\""), "\\\\\\\\\\\\\\\"");
+    }
+
+    #[test]
+    fn test_escape_json_string_newline_injection() {
+        // Attempt to inject via newlines (could break JSON parsers)
+        assert_eq!(
+            escape_json_string("line1\n\"injected\": true"),
+            r#"line1\n\"injected\": true"#
+        );
+
+        // CRLF injection
+        assert_eq!(
+            escape_json_string("line1\r\n\"injected\": true"),
+            r#"line1\r\n\"injected\": true"#
+        );
+    }
+
+    #[test]
+    fn test_escape_json_string_null_byte_injection() {
+        // Null bytes could cause issues with C-style string handling
+        assert_eq!(escape_json_string("before\x00after"), r"before\u0000after");
+        assert_eq!(escape_json_string("\x00\x00\x00"), r"\u0000\u0000\u0000");
+        assert_eq!(escape_json_string("data\x00"), r"data\u0000");
+    }
+
+    #[test]
+    fn test_escape_json_string_unicode_escapes() {
+        // Literal \uXXXX in input (should escape the backslash)
+        assert_eq!(escape_json_string(r"\u0000"), r"\\u0000");
+        assert_eq!(escape_json_string(r"\u003c"), r"\\u003c");
+
+        // This prevents attackers from using literal \uXXXX to bypass escaping
+        assert_eq!(escape_json_string(r#"\u0022"#), r#"\\u0022"#); // \u0022 = "
+    }
+
+    #[test]
+    fn test_escape_json_string_html_in_json() {
+        // HTML/script injection (JSON inside HTML context)
+        // Note: JSON spec doesn't require escaping < > & but we pass them through
+        // The consumer should HTML-escape if needed
+        assert_eq!(
+            escape_json_string("<script>alert(1)</script>"),
+            "<script>alert(1)</script>"
+        );
+        assert_eq!(escape_json_string("</script><script>"), "</script><script>");
+
+        // But quotes are still escaped
+        assert_eq!(
+            escape_json_string(r#"<img onerror="alert(1)">"#),
+            r#"<img onerror=\"alert(1)\">"#
+        );
+    }
+
+    #[test]
+    fn test_escape_json_string_long_strings() {
+        // Very long string
+        let long_input = "a".repeat(10000);
+        let result = escape_json_string(&long_input);
+        assert_eq!(result.len(), 10000);
+        assert_eq!(result, long_input);
+
+        // Long string with characters that need escaping
+        let long_with_escapes = "a\nb".repeat(1000);
+        let result = escape_json_string(&long_with_escapes);
+        assert_eq!(result, r"a\nb".repeat(1000));
+    }
+
+    #[test]
+    fn test_escape_json_string_only_special_chars() {
+        // String of only special characters
+        assert_eq!(escape_json_string("\"\"\"\n\n\n"), r#"\"\"\"\n\n\n"#);
+        assert_eq!(escape_json_string("\\\\\\\t\t\t"), r"\\\\\\\t\t\t");
+    }
+
+    #[test]
+    fn test_escape_json_string_realistic_error_messages() {
+        // Python traceback
+        let traceback = r#"Traceback (most recent call last):
+  File "test.py", line 10, in <module>
+    raise ValueError("invalid \"input\"")
+ValueError: invalid "input""#;
+        let escaped = escape_json_string(traceback);
+        assert!(escaped.contains(r#"\"input\""#));
+        assert!(escaped.contains(r"\n"));
+        assert!(!escaped.contains('\n')); // No literal newlines
+
+        // Error with file paths (Windows-style)
+        let win_path = r#"Error: Cannot open "C:\Users\test\file.txt""#;
+        let escaped = escape_json_string(win_path);
+        assert_eq!(
+            escaped,
+            r#"Error: Cannot open \"C:\\Users\\test\\file.txt\""#
+        );
+    }
+
+    #[test]
+    fn test_escape_json_string_result_is_valid_json() {
+        // Verify that wrapping the result in quotes produces valid JSON
+        let test_cases = [
+            "hello",
+            "with \"quotes\"",
+            "with\nnewlines",
+            "with\ttabs",
+            "with\\backslashes",
+            "\x00null\x00bytes",
+            "unicode: 🎉",
+            r#"complex: "foo\nbar""#,
+        ];
+
+        for input in test_cases {
+            let escaped = escape_json_string(input);
+            let json_string = format!("\"{}\"", escaped);
+
+            // This should be valid JSON that parses back to the original
+            // We can't use serde_json here (not a dependency), but we can
+            // at least verify basic structure
+            assert!(json_string.starts_with('"'));
+            assert!(json_string.ends_with('"'));
+            // No unescaped quotes in the middle
+            let inner = &json_string[1..json_string.len() - 1];
+            let mut chars = inner.chars().peekable();
+            while let Some(c) = chars.next() {
+                if c == '"' {
+                    panic!("Unescaped quote in JSON string: {}", json_string);
+                }
+                if c == '\\' {
+                    // Must be followed by a valid escape character
+                    let next = chars.next().expect("Trailing backslash");
+                    assert!(
+                        matches!(next, '"' | '\\' | '/' | 'b' | 'f' | 'n' | 'r' | 't' | 'u'),
+                        "Invalid escape sequence: \\{} in {}",
+                        next,
+                        json_string
+                    );
+                    if next == 'u' {
+                        // Must be followed by 4 hex digits
+                        for _ in 0..4 {
+                            let hex = chars.next().expect("Incomplete \\uXXXX");
+                            assert!(hex.is_ascii_hexdigit(), "Invalid hex in \\uXXXX");
+                        }
+                    }
+                }
+            }
+        }
+    }
 }

@@ -1489,7 +1489,9 @@ impl Interpreter for EryxInterpreter {
                         let result_json = if is_ok {
                             format!(r#"{{"ok": true, "value": {}}}"#, result_value)
                         } else {
-                            format!(r#"{{"ok": false, "error": {}}}"#, result_value)
+                            // Error message needs to be JSON-encoded (with quotes and escaping)
+                            let escaped = python::escape_json_string(&result_value);
+                            format!(r#"{{"ok": false, "error": "{}"}}"#, escaped)
                         };
                         python::set_async_import_result(subtask, &result_json);
                     }

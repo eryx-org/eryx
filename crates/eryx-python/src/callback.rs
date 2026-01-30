@@ -29,6 +29,73 @@
 //!
 //! sandbox = eryx.Sandbox(callbacks=registry)
 //! ```
+//!
+//! # Async Callback Limitations
+//!
+//! Async callbacks are supported, but they run in **isolated event loops**. This means:
+//!
+//! - Each callback invocation creates its own `asyncio` event loop via `asyncio.run()`
+//! - Callbacks **cannot** share `asyncio`-bound resources with the parent application
+//!   (e.g., `asyncio.Queue`, `asyncio.Lock`, `asyncio.Semaphore`, `aiohttp.ClientSession`)
+//! - Multiple concurrent callbacks run in parallel via tokio, but each has its own event loop
+//!
+//! ## Why This Limitation Exists
+//!
+//! This is a fundamental architectural constraint:
+//!
+//! 1. **Thread isolation**: Callbacks execute on tokio's blocking thread pool, not the
+//!    caller's thread. Python's `asyncio` event loops are thread-specific.
+//!
+//! 2. **GIL constraints**: Even with `pyo3-async-runtimes`, coordinating multiple Rust
+//!    futures that share a Python event loop is complex due to GIL acquisition timing.
+//!
+//! 3. **Cross-thread asyncio**: `asyncio.run_coroutine_threadsafe()` can schedule work
+//!    on another thread's event loop, but primitives like `Semaphore` that require
+//!    waiters and releasers to coordinate still fail when callbacks wait on each other.
+//!
+//! ## Workarounds
+//!
+//! For shared state between callbacks, use **thread-safe** primitives:
+//!
+//! ```python
+//! import threading
+//! import queue
+//!
+//! # ✅ Thread-safe - works across callbacks
+//! shared_queue = queue.Queue()
+//! shared_lock = threading.Lock()
+//! shared_counter = {"value": 0}
+//!
+//! async def my_callback(item: str):
+//!     with shared_lock:
+//!         shared_counter["value"] += 1
+//!     shared_queue.put(item)
+//!     return {"count": shared_counter["value"]}
+//!
+//! # ❌ NOT thread-safe - will fail or deadlock
+//! async_queue = asyncio.Queue()  # Bound to wrong event loop
+//! async_lock = asyncio.Lock()    # Bound to wrong event loop
+//! ```
+//!
+//! ## Potential Future Improvements
+//!
+//! We may address this limitation in the future through one of these approaches:
+//!
+//! 1. **Thread pinning**: Run all callbacks on a dedicated Python thread with a
+//!    long-lived event loop, using a channel to dispatch work from tokio.
+//!
+//! 2. **`LocalSet` integration**: Use tokio's `LocalSet` to run callbacks on the
+//!    same thread as a shared Python event loop.
+//!
+//! 3. **User-provided event loop**: Allow users to pass an existing event loop
+//!    reference that callbacks should integrate with.
+//!
+//! 4. **Explicit opt-in**: Provide a `shared_loop=True` option on `CallbackRegistry`
+//!    that enables event loop sharing for users who need it, with clear documentation
+//!    of the additional complexity and potential pitfalls.
+//!
+//! If you have a use case that requires shared event loop resources, please open an
+//! issue at <https://github.com/eryx-org/eryx/issues>.
 
 use std::collections::HashMap;
 use std::future::Future;
@@ -110,7 +177,20 @@ impl Callback for PythonCallback {
         let is_async = self.is_async;
 
         Box::pin(async move {
-            // Use spawn_blocking to avoid blocking the tokio runtime while holding the GIL
+            // Use spawn_blocking to avoid blocking the tokio runtime while holding the GIL.
+            // This applies to both sync and async callbacks.
+            //
+            // For async callbacks, we use asyncio.run() which creates an isolated event loop.
+            // This means callbacks cannot share event-loop-bound resources (like asyncio.Queue,
+            // asyncio.Semaphore, etc.) with the parent application. This is a fundamental
+            // limitation because:
+            // 1. Callbacks run on tokio's blocking thread pool, not the caller's thread
+            // 2. asyncio event loops are thread-specific
+            // 3. pyo3-async-runtimes' into_future() uses run_coroutine_threadsafe which
+            //    still creates coordination issues for cross-callback synchronization
+            //
+            // For use cases requiring shared async state, users should use thread-safe
+            // primitives (threading.Lock, queue.Queue) or design callbacks to be stateless.
             tokio::task::spawn_blocking(move || {
                 Python::attach(|py| {
                     // Convert JSON args to Python kwargs dict
@@ -143,6 +223,10 @@ impl Callback for PythonCallback {
 }
 
 /// Run a Python coroutine to completion using asyncio.run().
+///
+/// This creates an isolated event loop for the coroutine. Each callback
+/// invocation gets its own event loop, which means callbacks cannot share
+/// event-loop-bound resources with each other or the parent application.
 fn run_coroutine(py: Python<'_>, coro: &Bound<'_, PyAny>) -> Result<Py<PyAny>, CallbackError> {
     let asyncio = py
         .import("asyncio")
@@ -202,6 +286,9 @@ fn format_python_error(py: Python<'_>, err: PyErr) -> CallbackError {
 
 /// A registry for collecting callbacks using the decorator pattern.
 ///
+/// Callbacks are Python functions that can be invoked from sandboxed code.
+/// Both sync and async functions are supported.
+///
 /// Example:
 ///     registry = eryx.CallbackRegistry()
 ///
@@ -210,7 +297,48 @@ fn format_python_error(py: Python<'_>, err: PyErr) -> CallbackError {
 ///         import time
 ///         return {"timestamp": time.time()}
 ///
+///     @registry.callback(description="Async greeting")
+///     async def greet(name: str):
+///         return {"greeting": f"Hello, {name}!"}
+///
 ///     sandbox = eryx.Sandbox(callbacks=registry)
+///
+/// Important - Async Callback Limitations:
+///     Async callbacks run in **isolated event loops**. Each callback invocation
+///     creates its own event loop via `asyncio.run()`. This means:
+///
+///     - Callbacks CANNOT share asyncio-bound resources with the parent application
+///       (e.g., `asyncio.Queue`, `asyncio.Lock`, `asyncio.Semaphore`, `aiohttp.ClientSession`)
+///     - Multiple concurrent callbacks run in parallel via tokio, but each has its own loop
+///
+///     This is a fundamental constraint because callbacks execute on tokio's blocking
+///     thread pool, and Python's asyncio event loops are thread-specific.
+///
+///     Workaround - use thread-safe primitives for shared state:
+///
+///         import threading
+///         import queue
+///
+///         # ✅ Thread-safe - works across callbacks
+///         shared_queue = queue.Queue()
+///         shared_lock = threading.Lock()
+///
+///         @registry.callback()
+///         async def my_callback(item: str):
+///             with shared_lock:
+///                 shared_queue.put(item)
+///             return {"queued": item}
+///
+///         # ❌ Will NOT work - bound to wrong event loop
+///         async_queue = asyncio.Queue()
+///
+///     Future improvements under consideration:
+///         - Thread pinning with a dedicated Python event loop thread
+///         - tokio LocalSet integration for same-thread execution
+///         - User-provided event loop reference
+///         - Opt-in `shared_loop=True` mode
+///
+///     See: https://github.com/eryx-org/eryx/issues for updates.
 #[pyclass(module = "eryx")]
 #[derive(Debug, Default)]
 pub struct CallbackRegistry {
@@ -251,6 +379,11 @@ impl CallbackRegistry {
 
     /// Decorator to register a callback function.
     ///
+    /// Both sync and async functions are supported. Async functions will be
+    /// executed using `asyncio.run()`, which creates an isolated event loop
+    /// for each invocation. See the class docstring for important limitations
+    /// regarding async callbacks and shared state.
+    ///
     /// Args:
     ///     name: Optional name for the callback. Defaults to the function's __name__.
     ///     description: Optional description. Defaults to the function's __doc__ or empty string.
@@ -263,6 +396,13 @@ impl CallbackRegistry {
     ///     @registry.callback(description="Echoes the message")
     ///     def echo(message: str, repeat: int = 1):
     ///         return {"echoed": message * repeat}
+    ///
+    ///     @registry.callback(description="Async fetch")
+    ///     async def fetch_data(url: str):
+    ///         # Note: Cannot share aiohttp.ClientSession with parent app
+    ///         async with aiohttp.ClientSession() as session:
+    ///             async with session.get(url) as resp:
+    ///                 return {"status": resp.status}
     #[pyo3(signature = (name=None, description=None, schema=None))]
     fn callback(
         &mut self,
@@ -293,6 +433,9 @@ impl CallbackRegistry {
     }
 
     /// Add a callback directly without using the decorator pattern.
+    ///
+    /// Both sync and async functions are supported. See the class docstring for
+    /// important limitations regarding async callbacks and shared state.
     ///
     /// Args:
     ///     fn: The callable to register.
