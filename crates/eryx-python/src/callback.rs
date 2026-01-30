@@ -42,12 +42,14 @@ use serde_json::Value;
 /// A Python callable wrapped as a Rust `Callback`.
 ///
 /// This struct implements the `eryx::Callback` trait, allowing Python functions
-/// to be invoked from sandboxed code.
+/// to be invoked from sandboxed code. Supports both sync and async Python functions.
 pub struct PythonCallback {
     name: String,
     description: String,
     callable: Py<PyAny>,
     schema: Schema,
+    /// Whether this is an async Python function (coroutine function).
+    is_async: bool,
 }
 
 impl std::fmt::Debug for PythonCallback {
@@ -56,6 +58,7 @@ impl std::fmt::Debug for PythonCallback {
             .field("name", &self.name)
             .field("description", &self.description)
             .field("schema", &self.schema)
+            .field("is_async", &self.is_async)
             .field("callable", &"<Python callable>")
             .finish()
     }
@@ -63,12 +66,19 @@ impl std::fmt::Debug for PythonCallback {
 
 impl PythonCallback {
     /// Create a new `PythonCallback` from components.
-    pub fn new(name: String, description: String, callable: Py<PyAny>, schema: Schema) -> Self {
+    pub fn new(
+        name: String,
+        description: String,
+        callable: Py<PyAny>,
+        schema: Schema,
+        is_async: bool,
+    ) -> Self {
         Self {
             name,
             description,
             callable,
             schema,
+            is_async,
         }
     }
 }
@@ -97,6 +107,7 @@ impl Callback for PythonCallback {
     ) -> Pin<Box<dyn Future<Output = Result<Value, CallbackError>> + Send + '_>> {
         // Clone the Py<PyAny> by acquiring the GIL briefly
         let callable = Python::with_gil(|py| self.callable.clone_ref(py));
+        let is_async = self.is_async;
 
         Box::pin(async move {
             // Use spawn_blocking to avoid blocking the tokio runtime while holding the GIL
@@ -110,6 +121,13 @@ impl Callback for PythonCallback {
                         .call(py, (), Some(&kwargs))
                         .map_err(|e| format_python_error(py, e))?;
 
+                    // If this is an async function, the result is a coroutine - run it
+                    let result = if is_async {
+                        run_coroutine(py, result.bind(py))?
+                    } else {
+                        result
+                    };
+
                     // Convert the result back to JSON
                     pythonize::depythonize(result.bind(py)).map_err(|e| {
                         CallbackError::ExecutionFailed(format!(
@@ -122,6 +140,18 @@ impl Callback for PythonCallback {
             .map_err(|e| CallbackError::ExecutionFailed(format!("Callback task failed: {e}")))?
         })
     }
+}
+
+/// Run a Python coroutine to completion using asyncio.run().
+fn run_coroutine(py: Python<'_>, coro: &Bound<'_, PyAny>) -> Result<PyObject, CallbackError> {
+    let asyncio = py
+        .import("asyncio")
+        .map_err(|e| CallbackError::ExecutionFailed(format!("Failed to import asyncio: {e}")))?;
+
+    asyncio
+        .call_method1("run", (coro,))
+        .map(|r| r.unbind())
+        .map_err(|e| format_python_error(py, e))
 }
 
 /// Convert a JSON Value to a Python kwargs dict.
@@ -195,6 +225,8 @@ struct CallbackDef {
     description: String,
     callable: Py<PyAny>,
     schema: Option<Value>,
+    /// Whether this is an async Python function.
+    is_async: bool,
 }
 
 impl Clone for CallbackDef {
@@ -204,6 +236,7 @@ impl Clone for CallbackDef {
             description: self.description.clone(),
             callable: self.callable.clone_ref(py),
             schema: self.schema.clone(),
+            is_async: self.is_async,
         })
     }
 }
@@ -407,12 +440,23 @@ fn create_callback_def(
             .and_then(|m| serde_json::to_value(m).ok()),
     };
 
+    // Detect if this is an async function
+    let is_async = detect_async_function(py, &callable)?;
+
     Ok(CallbackDef {
         name,
         description,
         callable,
         schema,
+        is_async,
     })
+}
+
+/// Detect if a Python callable is an async function (coroutine function).
+fn detect_async_function(py: Python<'_>, callable: &PyObject) -> PyResult<bool> {
+    let inspect = py.import("inspect")?;
+    let is_coro_func = inspect.call_method1("iscoroutinefunction", (callable,))?;
+    is_coro_func.extract::<bool>()
 }
 
 /// Infer a JSON Schema from a Python callable's signature.
@@ -589,6 +633,7 @@ fn callback_def_to_python_callback(py: Python<'_>, def: &CallbackDef) -> PyResul
         def.description.clone(),
         def.callable.clone_ref(py),
         schema,
+        def.is_async,
     ))
 }
 
@@ -635,5 +680,14 @@ fn dict_to_python_callback(py: Python<'_>, dict: &Bound<'_, PyDict>) -> PyResult
         eryx::empty_schema()
     };
 
-    Ok(PythonCallback::new(name, description, callable, schema))
+    // Detect if this is an async function
+    let is_async = detect_async_function(py, &callable)?;
+
+    Ok(PythonCallback::new(
+        name,
+        description,
+        callable,
+        schema,
+        is_async,
+    ))
 }

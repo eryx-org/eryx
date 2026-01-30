@@ -467,6 +467,162 @@ class TestSessionWithCallbacks:
         assert counter["value"] == 3
 
 
+class TestAsyncCallbacks:
+    """Tests for async Python callbacks."""
+
+    def test_async_callback_simple(self):
+        """Test a simple async callback."""
+
+        async def async_hello():
+            return {"message": "hello from async"}
+
+        sandbox = eryx.Sandbox(
+            callbacks=[
+                {"name": "async_hello", "fn": async_hello, "description": "Async hello"}
+            ]
+        )
+        result = sandbox.execute("r = await async_hello(); print(r['message'])")
+        assert "hello from async" in result.stdout
+
+    def test_async_callback_with_await(self):
+        """Test async callback that actually awaits something."""
+        import asyncio
+
+        async def async_delay(ms: int):
+            await asyncio.sleep(ms / 1000)
+            return {"delayed_ms": ms}
+
+        sandbox = eryx.Sandbox(
+            callbacks=[
+                {"name": "async_delay", "fn": async_delay, "description": "Async delay"}
+            ]
+        )
+        result = sandbox.execute("r = await async_delay(ms=10); print(r['delayed_ms'])")
+        assert "10" in result.stdout
+
+    def test_async_callback_with_args(self):
+        """Test async callback with multiple arguments."""
+
+        async def async_add(a: int, b: int):
+            return {"sum": a + b}
+
+        sandbox = eryx.Sandbox(
+            callbacks=[{"name": "async_add", "fn": async_add, "description": ""}]
+        )
+        result = sandbox.execute("r = await async_add(a=3, b=7); print(r['sum'])")
+        assert "10" in result.stdout
+
+    def test_async_callback_exception(self):
+        """Test that async exceptions are propagated."""
+
+        async def async_fail():
+            raise ValueError("Async error!")
+
+        sandbox = eryx.Sandbox(
+            callbacks=[{"name": "async_fail", "fn": async_fail, "description": ""}]
+        )
+        with pytest.raises(eryx.ExecutionError):
+            sandbox.execute("await async_fail()")
+
+    def test_mixed_sync_and_async_callbacks(self):
+        """Test mixing sync and async callbacks in the same sandbox."""
+
+        def sync_cb():
+            return {"type": "sync"}
+
+        async def async_cb():
+            return {"type": "async"}
+
+        sandbox = eryx.Sandbox(
+            callbacks=[
+                {"name": "sync_cb", "fn": sync_cb, "description": ""},
+                {"name": "async_cb", "fn": async_cb, "description": ""},
+            ]
+        )
+        result = sandbox.execute(
+            """
+s = await sync_cb()
+a = await async_cb()
+print(f"{s['type']}-{a['type']}")
+"""
+        )
+        assert "sync-async" in result.stdout
+
+    def test_async_callback_with_registry(self):
+        """Test async callbacks with the decorator API."""
+        registry = eryx.CallbackRegistry()
+
+        @registry.callback(description="Async greeting")
+        async def async_greet(name: str):
+            return {"greeting": f"Hello, {name}!"}
+
+        sandbox = eryx.Sandbox(callbacks=registry)
+        result = sandbox.execute(
+            'r = await async_greet(name="Async World"); print(r["greeting"])'
+        )
+        assert "Hello, Async World!" in result.stdout
+
+    def test_async_callback_returns_various_types(self):
+        """Test async callbacks returning different types."""
+
+        async def return_string():
+            return "async string"
+
+        async def return_list():
+            return [1, 2, 3]
+
+        async def return_none():
+            return None
+
+        sandbox = eryx.Sandbox(
+            callbacks=[
+                {"name": "return_string", "fn": return_string, "description": ""},
+                {"name": "return_list", "fn": return_list, "description": ""},
+                {"name": "return_none", "fn": return_none, "description": ""},
+            ]
+        )
+        result = sandbox.execute(
+            """
+s = await return_string()
+print(f"string: {s}")
+l = await return_list()
+print(f"list: {l}")
+n = await return_none()
+print(f"none: {n}")
+"""
+        )
+        assert "string: async string" in result.stdout
+        assert "list: [1, 2, 3]" in result.stdout
+        assert "none: None" in result.stdout
+
+    def test_async_callback_in_session(self):
+        """Test async callbacks work in Session as well."""
+
+        async def async_counter():
+            return {"count": 42}
+
+        session = eryx.Session(
+            callbacks=[
+                {"name": "async_counter", "fn": async_counter, "description": ""}
+            ]
+        )
+        result = session.execute("c = await async_counter(); print(c['count'])")
+        assert "42" in result.stdout
+
+    def test_async_lambda_callback(self):
+        """Test that async lambdas work (they're actually regular functions returning coroutines)."""
+
+        # Note: Python doesn't have async lambdas, but we can test regular functions
+        async def async_double(x: int):
+            return {"result": x * 2}
+
+        sandbox = eryx.Sandbox(
+            callbacks=[{"name": "async_double", "fn": async_double, "description": ""}]
+        )
+        result = sandbox.execute("r = await async_double(x=21); print(r['result'])")
+        assert "42" in result.stdout
+
+
 class TestCallbackSchemaInference:
     """Tests for automatic schema inference from function signatures."""
 

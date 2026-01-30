@@ -213,9 +213,53 @@ print(f"Final count: {c['count']}")
     print()
 
     # =========================================================================
-    # Example 6: Error Handling
+    # Example 6: Async Callbacks
     # =========================================================================
-    print("--- Example 6: Error Handling in Callbacks ---")
+    print("--- Example 6: Async Callbacks ---")
+
+    import asyncio
+
+    registry2 = eryx.CallbackRegistry()
+
+    @registry2.callback(description="Async delay that returns after sleeping")
+    async def async_delay(ms: int):
+        await asyncio.sleep(ms / 1000)
+        return {"delayed_ms": ms, "message": "completed"}
+
+    @registry2.callback(description="Async greeting")
+    async def async_greet(name: str):
+        # Simulate async operation
+        await asyncio.sleep(0.001)
+        return {"greeting": f"Hello async, {name}!"}
+
+    # Mix sync and async callbacks
+    def sync_timestamp():
+        return {"timestamp": time.time()}
+
+    registry2.add(sync_timestamp, name="sync_timestamp", description="Sync timestamp")
+
+    sandbox6 = eryx.Sandbox(callbacks=registry2)
+
+    result = sandbox6.execute("""
+# Call async callbacks - they work just like sync ones from Python's perspective
+delayed = await async_delay(ms=10)
+print(f"Async delay result: {delayed}")
+
+greeting = await async_greet(name="World")
+print(f"Async greeting: {greeting['greeting']}")
+
+# Mix sync and async
+ts = await sync_timestamp()
+print(f"Sync timestamp: {ts['timestamp']:.2f}")
+""")
+
+    print(f"Output:\n{result.stdout}")
+    print()
+
+    # =========================================================================
+    # Example 7: Error Handling
+    # =========================================================================
+    print("--- Example 7: Error Handling in Callbacks ---")
 
     def may_fail(should_fail: bool = False):
         """A callback that may fail."""
@@ -238,6 +282,39 @@ try:
 except Exception as e:
     print(f"Caught error: {type(e).__name__}")
     print(f"Error message contains 'Intentional failure': {'Intentional failure' in str(e)}")
+""")
+
+    print(f"Output:\n{result.stdout}")
+    print()
+
+    # =========================================================================
+    # Example 8: Async Error Handling
+    # =========================================================================
+    print("--- Example 8: Async Error Handling ---")
+
+    async def async_may_fail(should_fail: bool = False):
+        """An async callback that may fail."""
+        await asyncio.sleep(0.001)  # Simulate async work
+        if should_fail:
+            raise ValueError("Async intentional failure")
+        return {"status": "async success"}
+
+    sandbox8 = eryx.Sandbox(
+        callbacks=[
+            {"name": "async_may_fail", "fn": async_may_fail, "description": "May fail"}
+        ]
+    )
+
+    result = sandbox8.execute("""
+# Successful async call
+r = await async_may_fail(should_fail=False)
+print(f"Async success: {r['status']}")
+
+# Failing async call with error handling
+try:
+    await async_may_fail(should_fail=True)
+except Exception as e:
+    print(f"Caught async error: {type(e).__name__}")
 """)
 
     print(f"Output:\n{result.stdout}")
