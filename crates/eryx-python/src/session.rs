@@ -218,7 +218,7 @@ impl Session {
         let callbacks_map = self.callbacks.clone();
 
         // Release the GIL while executing
-        py.allow_threads(|| {
+        py.detach(|| {
             let mut guard = self
                 .inner
                 .lock()
@@ -277,7 +277,7 @@ impl Session {
     fn reset(&self, py: Python<'_>) -> PyResult<()> {
         let runtime = self.runtime.clone();
 
-        py.allow_threads(|| {
+        py.detach(|| {
             let mut guard = self
                 .inner
                 .lock()
@@ -302,7 +302,7 @@ impl Session {
     fn clear_state(&self, py: Python<'_>) -> PyResult<()> {
         let runtime = self.runtime.clone();
 
-        py.allow_threads(|| {
+        py.detach(|| {
             let mut guard = self
                 .inner
                 .lock()
@@ -337,7 +337,7 @@ impl Session {
     fn snapshot_state<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyBytes>> {
         let runtime = self.runtime.clone();
 
-        let snapshot = py.allow_threads(|| {
+        let snapshot = py.detach(|| {
             let mut guard = self
                 .inner
                 .lock()
@@ -372,7 +372,7 @@ impl Session {
         let runtime = self.runtime.clone();
         let snapshot = eryx::PythonStateSnapshot::from_bytes(snapshot).map_err(eryx_error_to_py)?;
 
-        py.allow_threads(|| {
+        py.detach(|| {
             let mut guard = self
                 .inner
                 .lock()

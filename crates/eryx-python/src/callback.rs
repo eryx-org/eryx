@@ -84,7 +84,7 @@ impl PythonCallback {
 }
 
 // SAFETY: `Py<PyAny>` is Send + Sync as long as we only access it with the GIL held.
-// We always use `Python::with_gil()` when accessing the callable.
+// We always use `Python::attach()` when accessing the callable.
 unsafe impl Send for PythonCallback {}
 unsafe impl Sync for PythonCallback {}
 
@@ -106,13 +106,13 @@ impl Callback for PythonCallback {
         args: Value,
     ) -> Pin<Box<dyn Future<Output = Result<Value, CallbackError>> + Send + '_>> {
         // Clone the Py<PyAny> by acquiring the GIL briefly
-        let callable = Python::with_gil(|py| self.callable.clone_ref(py));
+        let callable = Python::attach(|py| self.callable.clone_ref(py));
         let is_async = self.is_async;
 
         Box::pin(async move {
             // Use spawn_blocking to avoid blocking the tokio runtime while holding the GIL
             tokio::task::spawn_blocking(move || {
-                Python::with_gil(|py| {
+                Python::attach(|py| {
                     // Convert JSON args to Python kwargs dict
                     let kwargs = json_to_py_kwargs(py, &args)?;
 
@@ -143,7 +143,7 @@ impl Callback for PythonCallback {
 }
 
 /// Run a Python coroutine to completion using asyncio.run().
-fn run_coroutine(py: Python<'_>, coro: &Bound<'_, PyAny>) -> Result<PyObject, CallbackError> {
+fn run_coroutine(py: Python<'_>, coro: &Bound<'_, PyAny>) -> Result<Py<PyAny>, CallbackError> {
     let asyncio = py
         .import("asyncio")
         .map_err(|e| CallbackError::ExecutionFailed(format!("Failed to import asyncio: {e}")))?;
@@ -231,7 +231,7 @@ struct CallbackDef {
 
 impl Clone for CallbackDef {
     fn clone(&self) -> Self {
-        Python::with_gil(|py| Self {
+        Python::attach(|py| Self {
             name: self.name.clone(),
             description: self.description.clone(),
             callable: self.callable.clone_ref(py),
@@ -270,7 +270,7 @@ impl CallbackRegistry {
         name: Option<String>,
         description: Option<String>,
         schema: Option<Bound<'_, PyAny>>,
-    ) -> PyResult<PyObject> {
+    ) -> PyResult<Py<PyAny>> {
         // Convert schema from Python to JSON Value if provided
         let schema_value: Option<Value> = schema
             .map(|s| pythonize::depythonize(&s))
@@ -303,7 +303,7 @@ impl CallbackRegistry {
     fn add(
         &mut self,
         py: Python<'_>,
-        callable: PyObject,
+        callable: Py<PyAny>,
         name: Option<String>,
         description: Option<String>,
         schema: Option<Bound<'_, PyAny>>,
@@ -350,7 +350,7 @@ struct DecoratorHelper {
 #[pymethods]
 impl DecoratorHelper {
     /// Called when the decorator is applied to a function.
-    fn __call__(&self, py: Python<'_>, func: PyObject) -> PyResult<PyObject> {
+    fn __call__(&self, py: Python<'_>, func: Py<PyAny>) -> PyResult<Py<PyAny>> {
         // SAFETY: The registry pointer is valid because the decorator is created
         // and used within the same Python scope where the registry exists.
         let registry = unsafe { &mut *(self.registry_ptr as *mut CallbackRegistry) };
@@ -382,7 +382,7 @@ impl CallbackRegistryIter {
         slf
     }
 
-    fn __next__(&mut self, py: Python<'_>) -> Option<PyObject> {
+    fn __next__(&mut self, py: Python<'_>) -> Option<Py<PyAny>> {
         if self.index < self.callbacks.len() {
             let def = &self.callbacks[self.index];
             self.index += 1;
@@ -407,7 +407,7 @@ impl CallbackRegistryIter {
 /// Create a CallbackDef from Python objects, extracting name/description/schema as needed.
 fn create_callback_def(
     py: Python<'_>,
-    callable: PyObject,
+    callable: Py<PyAny>,
     name: Option<String>,
     description: Option<String>,
     schema: Option<Value>,
@@ -453,7 +453,7 @@ fn create_callback_def(
 }
 
 /// Detect if a Python callable is an async function (coroutine function).
-fn detect_async_function(py: Python<'_>, callable: &PyObject) -> PyResult<bool> {
+fn detect_async_function(py: Python<'_>, callable: &Py<PyAny>) -> PyResult<bool> {
     let inspect = py.import("inspect")?;
     let is_coro_func = inspect.call_method1("iscoroutinefunction", (callable,))?;
     is_coro_func.extract::<bool>()
@@ -462,7 +462,7 @@ fn detect_async_function(py: Python<'_>, callable: &PyObject) -> PyResult<bool> 
 /// Infer a JSON Schema from a Python callable's signature.
 fn infer_schema_from_callable(
     py: Python<'_>,
-    callable: &PyObject,
+    callable: &Py<PyAny>,
 ) -> PyResult<HashMap<String, Value>> {
     let inspect = py.import("inspect")?;
     let signature = inspect.call_method1("signature", (callable,))?;
@@ -477,7 +477,7 @@ fn infer_schema_from_callable(
 
     for item in iter {
         let item = item?;
-        let tuple = item.downcast::<PyTuple>()?;
+        let tuple: &Bound<'_, PyTuple> = item.cast()?;
         let param_name: String = tuple.get_item(0)?.extract()?;
         let param = tuple.get_item(1)?;
 
@@ -595,14 +595,14 @@ pub fn extract_callbacks(
     }
 
     // Check if it's a list
-    if let Ok(list) = callbacks.downcast::<PyList>() {
+    if let Ok(list) = callbacks.cast::<PyList>() {
         for item in list.iter() {
             // Each item could be a dict or a CallbackRegistry
             if let Ok(registry) = item.extract::<PyRef<'_, CallbackRegistry>>() {
                 for def in &registry.callbacks {
                     result.push(callback_def_to_python_callback(py, def)?);
                 }
-            } else if let Ok(dict) = item.downcast::<PyDict>() {
+            } else if let Ok(dict) = item.cast::<PyDict>() {
                 result.push(dict_to_python_callback(py, dict)?);
             } else {
                 return Err(pyo3::exceptions::PyTypeError::new_err(
@@ -645,7 +645,7 @@ fn dict_to_python_callback(py: Python<'_>, dict: &Bound<'_, PyDict>) -> PyResult
         .ok_or_else(|| pyo3::exceptions::PyKeyError::new_err("Callback dict missing 'name' key"))?
         .extract()?;
 
-    let callable: PyObject = dict
+    let callable: Py<PyAny> = dict
         .get_item("fn")?
         .ok_or_else(|| pyo3::exceptions::PyKeyError::new_err("Callback dict missing 'fn' key"))?
         .extract()?;

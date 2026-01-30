@@ -166,9 +166,10 @@ impl Sandbox {
         // This allows other Python threads to run during sandbox execution
         let code = code.to_string();
         let runtime = self.runtime.clone();
-        py.allow_threads(|| {
+        let inner = &self.inner;
+        py.detach(|| {
             runtime
-                .block_on(self.inner.execute(&code))
+                .block_on(inner.execute(&code))
                 .map(ExecuteResult::from)
                 .map_err(eryx_error_to_py)
         })
