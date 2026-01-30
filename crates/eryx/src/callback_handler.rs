@@ -33,7 +33,7 @@ type InFlightCallbacks = FuturesUnordered<Pin<Box<dyn Future<Output = ()> + Send
 /// uses `asyncio.gather()` or similar patterns.
 ///
 /// Returns the total number of callback invocations.
-pub(crate) async fn run_callback_handler(
+pub async fn run_callback_handler(
     mut callback_rx: mpsc::Receiver<CallbackRequest>,
     callbacks_map: Arc<HashMap<String, Arc<dyn Callback>>>,
     resource_limits: ResourceLimits,

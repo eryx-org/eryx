@@ -33,6 +33,7 @@ futures-concurrency = "7.6"
 futures-lite = "2.6"
 lending-stream = "1.0"
 pyo3 = { version = "^0.24.2", features = ["extension-module"] } #unified
+pythonize = "0.24"
 
 # JSON Schema
 schemars = "1.0.0-alpha.17"

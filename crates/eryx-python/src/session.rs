@@ -3,12 +3,15 @@
 //! Provides the `Session` class that maintains persistent Python state across
 //! multiple executions, with optional VFS support.
 
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use eryx::Callback;
 use pyo3::prelude::*;
 use pyo3::types::PyBytes;
 
+use crate::callback::extract_callbacks;
 use crate::error::{InitializationError, eryx_error_to_py};
 use crate::result::ExecuteResult;
 use crate::vfs::VfsStorage;
@@ -56,6 +59,8 @@ pub struct Session {
     vfs_storage: Option<Arc<eryx::vfs::InMemoryStorage>>,
     /// VFS mount path configuration.
     vfs_mount_path: Option<String>,
+    /// Callbacks available for this session.
+    callbacks: Arc<HashMap<String, Arc<dyn eryx::Callback>>>,
 }
 
 #[pymethods]
@@ -70,6 +75,8 @@ impl Session {
     ///         Files written to `/data/*` will persist across executions.
     ///     vfs_mount_path: Custom mount path for VFS (default: "/data").
     ///     execution_timeout_ms: Optional timeout in milliseconds for each execution.
+    ///     callbacks: Optional callbacks that sandboxed code can invoke.
+    ///         Can be a CallbackRegistry or a list of callback dicts.
     ///
     /// Returns:
     ///     A new Session instance ready to execute Python code.
@@ -87,12 +94,23 @@ impl Session {
     ///     storage = VfsStorage()
     ///     session = Session(vfs=storage)
     ///     session.execute('open("/data/file.txt", "w").write("data")')
+    ///
+    ///     # Session with callbacks
+    ///     def get_time():
+    ///         import time
+    ///         return {"timestamp": time.time()}
+    ///
+    ///     session = Session(callbacks=[
+    ///         {"name": "get_time", "fn": get_time, "description": "Returns current time"}
+    ///     ])
     #[new]
-    #[pyo3(signature = (*, vfs=None, vfs_mount_path=None, execution_timeout_ms=None))]
+    #[pyo3(signature = (*, vfs=None, vfs_mount_path=None, execution_timeout_ms=None, callbacks=None))]
     fn new(
+        py: Python<'_>,
         vfs: Option<VfsStorage>,
         vfs_mount_path: Option<String>,
         execution_timeout_ms: Option<u64>,
+        callbacks: Option<Bound<'_, PyAny>>,
     ) -> PyResult<Self> {
         // Create a tokio runtime for async execution
         let runtime = Arc::new(
@@ -109,6 +127,23 @@ impl Session {
             InitializationError::new_err(format!("failed to create executor: {e}"))
         })?);
 
+        // Extract callbacks if provided
+        let callbacks_map: Arc<HashMap<String, Arc<dyn eryx::Callback>>> =
+            if let Some(ref cbs) = callbacks {
+                let python_callbacks = extract_callbacks(py, cbs)?;
+                Arc::new(
+                    python_callbacks
+                        .into_iter()
+                        .map(|c| (c.name().to_string(), Arc::new(c) as Arc<dyn eryx::Callback>))
+                        .collect(),
+                )
+            } else {
+                Arc::new(HashMap::new())
+            };
+
+        // Convert to slice for SessionExecutor
+        let callbacks_vec: Vec<Arc<dyn eryx::Callback>> = callbacks_map.values().cloned().collect();
+
         // Create the SessionExecutor
         let vfs_storage = vfs.map(|v| v.inner);
         let mount_path = vfs_mount_path.clone();
@@ -120,7 +155,7 @@ impl Session {
                         let config = eryx::VfsConfig::new(path);
                         eryx::SessionExecutor::new_with_vfs_config(
                             Arc::clone(&executor),
-                            &[],
+                            &callbacks_vec,
                             Arc::clone(storage),
                             config,
                         )
@@ -129,12 +164,12 @@ impl Session {
                     (Some(storage), None) => {
                         eryx::SessionExecutor::new_with_vfs(
                             Arc::clone(&executor),
-                            &[],
+                            &callbacks_vec,
                             Arc::clone(storage),
                         )
                         .await
                     }
-                    _ => eryx::SessionExecutor::new(Arc::clone(&executor), &[]).await,
+                    _ => eryx::SessionExecutor::new(Arc::clone(&executor), &callbacks_vec).await,
                 }
             })
             .map_err(eryx_error_to_py)?;
@@ -145,6 +180,7 @@ impl Session {
             runtime,
             vfs_storage,
             vfs_mount_path: mount_path,
+            callbacks: callbacks_map,
         };
 
         // Set execution timeout if provided
@@ -179,6 +215,7 @@ impl Session {
     fn execute(&self, py: Python<'_>, code: &str) -> PyResult<ExecuteResult> {
         let code = code.to_string();
         let runtime = self.runtime.clone();
+        let callbacks_map = self.callbacks.clone();
 
         // Release the GIL while executing
         py.allow_threads(|| {
@@ -190,8 +227,38 @@ impl Session {
                 .as_mut()
                 .ok_or_else(|| InitializationError::new_err("session is not initialized"))?;
 
+            // Get callbacks as a vec for with_callbacks
+            let callbacks_vec: Vec<Arc<dyn eryx::Callback>> =
+                callbacks_map.values().cloned().collect();
+
             runtime
-                .block_on(async { inner.execute(&code).run().await })
+                .block_on(async {
+                    // Create callback channel
+                    let (callback_tx, callback_rx) = tokio::sync::mpsc::channel(32);
+
+                    // Spawn callback handler task
+                    let handler_callbacks = callbacks_map.clone();
+                    let handler = tokio::spawn(async move {
+                        eryx::callback_handler::run_callback_handler(
+                            callback_rx,
+                            handler_callbacks,
+                            eryx::ResourceLimits::default(),
+                        )
+                        .await
+                    });
+
+                    // Execute with callbacks
+                    let result = inner
+                        .execute(&code)
+                        .with_callbacks(&callbacks_vec, callback_tx)
+                        .run()
+                        .await;
+
+                    // Wait for handler to finish (it will exit when channel closes)
+                    let _callback_count = handler.await.unwrap_or(0);
+
+                    result
+                })
                 .map(ExecuteResult::from_execution_output)
                 .map_err(|e| eryx_error_to_py(eryx::Error::Execution(e)))
         })

@@ -45,7 +45,7 @@
 
 pub mod cache;
 mod callback;
-mod callback_handler;
+pub mod callback_handler;
 #[cfg(feature = "embedded")]
 pub mod embedded;
 mod error;
