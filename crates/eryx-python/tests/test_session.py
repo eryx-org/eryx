@@ -366,6 +366,157 @@ print(f'file_exists: {exists}')
         assert "file_exists: False" in result.stdout
 
 
+class TestSqliteWithVfs:
+    """Tests for SQLite3 database support with VFS."""
+
+    def test_sqlite3_import(self):
+        """Test that sqlite3 module can be imported."""
+        storage = eryx.VfsStorage()
+        session = eryx.Session(vfs=storage)
+
+        result = session.execute("""
+import sqlite3
+print(sqlite3.sqlite_version)
+""")
+        # Should print version like "3.51.2"
+        assert "." in result.stdout
+        assert (
+            result.stdout.strip().replace(".", "").isdigit()
+            or result.stdout.strip()[0].isdigit()
+        )
+
+    def test_sqlite3_in_memory_database(self):
+        """Test SQLite3 in-memory database operations."""
+        storage = eryx.VfsStorage()
+        session = eryx.Session(vfs=storage)
+
+        result = session.execute("""
+import sqlite3
+conn = sqlite3.connect(':memory:')
+cursor = conn.cursor()
+cursor.execute('CREATE TABLE test (id INTEGER PRIMARY KEY, name TEXT)')
+cursor.execute("INSERT INTO test (name) VALUES ('hello')")
+cursor.execute("INSERT INTO test (name) VALUES ('world')")
+cursor.execute('SELECT name FROM test ORDER BY id')
+rows = cursor.fetchall()
+conn.close()
+print([r[0] for r in rows])
+""")
+        assert "['hello', 'world']" in result.stdout
+
+    def test_sqlite3_file_database_in_vfs(self):
+        """Test SQLite3 database stored in VFS."""
+        storage = eryx.VfsStorage()
+        session = eryx.Session(vfs=storage)
+
+        # Create database and insert data
+        session.execute("""
+import sqlite3
+conn = sqlite3.connect('/data/test.db')
+cursor = conn.cursor()
+cursor.execute('CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT)')
+cursor.execute("INSERT INTO users (name) VALUES ('alice')")
+conn.commit()
+conn.close()
+""")
+
+        # Query in separate execution
+        result = session.execute("""
+import sqlite3
+conn = sqlite3.connect('/data/test.db')
+cursor = conn.cursor()
+cursor.execute('SELECT name FROM users')
+name = cursor.fetchone()[0]
+conn.close()
+print(name)
+""")
+        assert result.stdout == "alice"
+
+    def test_sqlite3_persistence_across_reset(self):
+        """Test that SQLite database persists across session reset."""
+        storage = eryx.VfsStorage()
+        session = eryx.Session(vfs=storage)
+
+        # Create database
+        session.execute("""
+import sqlite3
+conn = sqlite3.connect('/data/persist.db')
+cursor = conn.cursor()
+cursor.execute('CREATE TABLE data (value TEXT)')
+cursor.execute("INSERT INTO data VALUES ('before_reset')")
+conn.commit()
+conn.close()
+""")
+
+        # Reset session
+        session.reset()
+
+        # Verify data persists
+        result = session.execute("""
+import sqlite3
+conn = sqlite3.connect('/data/persist.db')
+cursor = conn.cursor()
+cursor.execute('SELECT value FROM data')
+value = cursor.fetchone()[0]
+conn.close()
+print(value)
+""")
+        assert result.stdout == "before_reset"
+
+    def test_sqlite3_shared_between_sessions(self):
+        """Test that SQLite database can be shared between sessions."""
+        storage = eryx.VfsStorage()
+
+        # Session 1 creates database
+        session1 = eryx.Session(vfs=storage)
+        session1.execute("""
+import sqlite3
+conn = sqlite3.connect('/data/shared.db')
+cursor = conn.cursor()
+cursor.execute('CREATE TABLE shared (msg TEXT)')
+cursor.execute("INSERT INTO shared VALUES ('from_session_1')")
+conn.commit()
+conn.close()
+""")
+
+        # Session 2 reads database
+        session2 = eryx.Session(vfs=storage)
+        result = session2.execute("""
+import sqlite3
+conn = sqlite3.connect('/data/shared.db')
+cursor = conn.cursor()
+cursor.execute('SELECT msg FROM shared')
+msg = cursor.fetchone()[0]
+conn.close()
+print(msg)
+""")
+        assert result.stdout == "from_session_1"
+
+    def test_sqlite3_transaction_rollback(self):
+        """Test SQLite3 transaction rollback."""
+        storage = eryx.VfsStorage()
+        session = eryx.Session(vfs=storage)
+
+        result = session.execute("""
+import sqlite3
+conn = sqlite3.connect('/data/rollback.db')
+cursor = conn.cursor()
+cursor.execute('CREATE TABLE counter (n INTEGER)')
+cursor.execute('INSERT INTO counter VALUES (1)')
+conn.commit()
+
+# Start transaction, insert, then rollback
+cursor.execute('INSERT INTO counter VALUES (2)')
+conn.rollback()
+
+cursor.execute('SELECT COUNT(*) FROM counter')
+count = cursor.fetchone()[0]
+conn.close()
+print(count)
+""")
+        assert result.stdout == "1"
+
+
 class TestSessionRepr:
     """Tests for Session __repr__ with VFS info."""
 
