@@ -874,7 +874,7 @@ dependencies = [
 
 [[package]]
 name = "eryx"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -908,7 +908,7 @@ dependencies = [
 
 [[package]]
 name = "eryx-python"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "eryx",
  "pyo3",
@@ -922,7 +922,7 @@ dependencies = [
 
 [[package]]
 name = "eryx-runtime"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -944,7 +944,7 @@ dependencies = [
 
 [[package]]
 name = "eryx-vfs"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -963,7 +963,7 @@ dependencies = [
 
 [[package]]
 name = "eryx-wasm-runtime"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "pyo3",
  "tokio",
