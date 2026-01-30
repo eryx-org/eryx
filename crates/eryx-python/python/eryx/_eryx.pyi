@@ -2,9 +2,97 @@
 
 import builtins
 from pathlib import Path
-from typing import Optional, Sequence, Union
+from typing import Any, Callable, Iterator, Optional, Sequence, TypedDict, Union
 
 PathLike = Union[str, Path]
+
+
+class CallbackDict(TypedDict, total=False):
+    """Dictionary format for defining callbacks."""
+
+    name: str
+    """The callback name (required)."""
+
+    fn: Callable[..., Any]
+    """The callback function (required)."""
+
+    description: str
+    """Optional description of what the callback does."""
+
+    schema: dict[str, Any]
+    """Optional JSON Schema for parameters."""
+
+
+class CallbackRegistry:
+    """A registry for collecting callbacks using the decorator pattern.
+
+    Example:
+        registry = eryx.CallbackRegistry()
+
+        @registry.callback(description="Returns current timestamp")
+        def get_time():
+            import time
+            return {"timestamp": time.time()}
+
+        @registry.callback(name="echo", description="Echoes the message")
+        def my_echo_fn(message: str, repeat: int = 1):
+            return {"echoed": message * repeat}
+
+        sandbox = eryx.Sandbox(callbacks=registry)
+    """
+
+    def __init__(self) -> None:
+        """Create a new empty callback registry."""
+        ...
+
+    def callback(
+        self,
+        name: Optional[str] = None,
+        description: Optional[str] = None,
+        schema: Optional[dict[str, Any]] = None,
+    ) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
+        """Decorator to register a callback function.
+
+        Args:
+            name: Optional name for the callback. Defaults to the function's __name__.
+            description: Optional description. Defaults to the function's __doc__ or empty string.
+            schema: Optional JSON Schema dict for parameters. Auto-inferred if not provided.
+
+        Returns:
+            A decorator that registers the function and returns it unchanged.
+
+        Example:
+            @registry.callback(description="Echoes the message")
+            def echo(message: str, repeat: int = 1):
+                return {"echoed": message * repeat}
+        """
+        ...
+
+    def add(
+        self,
+        fn: Callable[..., Any],
+        *,
+        name: Optional[str] = None,
+        description: Optional[str] = None,
+        schema: Optional[dict[str, Any]] = None,
+    ) -> None:
+        """Add a callback directly without using the decorator pattern.
+
+        Args:
+            fn: The callable to register.
+            name: Optional name. Defaults to fn.__name__.
+            description: Optional description. Defaults to fn.__doc__ or empty string.
+            schema: Optional JSON Schema dict.
+        """
+        ...
+
+    def __len__(self) -> int:
+        """Return the number of registered callbacks."""
+        ...
+
+    def __iter__(self) -> Iterator[CallbackDict]:
+        """Return an iterator over the registered callbacks as dicts."""
+        ...
 
 
 class ExecuteResult:
@@ -228,6 +316,16 @@ class Sandbox:
         result = sandbox.execute('print("Hello from the sandbox!")')
         print(result.stdout)  # "Hello from the sandbox!"
 
+        # Sandbox with callbacks
+        def get_time():
+            import time
+            return {"timestamp": time.time()}
+
+        sandbox = Sandbox(callbacks=[
+            {"name": "get_time", "fn": get_time, "description": "Returns current time"}
+        ])
+        result = sandbox.execute('t = await get_time(); print(t)')
+
         # For custom packages, use SandboxFactory:
         factory = SandboxFactory(
             packages=["/path/to/jinja2.whl", "/path/to/markupsafe.whl"],
@@ -241,12 +339,16 @@ class Sandbox:
         *,
         resource_limits: Optional[ResourceLimits] = None,
         network: Optional[NetConfig] = None,
+        callbacks: Optional[Union[CallbackRegistry, Sequence[CallbackDict]]] = None,
     ) -> None:
         """Create a new sandbox with the embedded Python runtime.
 
         Args:
             resource_limits: Optional resource limits for execution.
             network: Optional network configuration. If provided, enables networking.
+            callbacks: Optional callbacks that sandboxed code can invoke.
+                Can be a CallbackRegistry or a list of callback dicts with
+                "name", "fn", and optionally "description" and "schema" keys.
 
         Raises:
             InitializationError: If the sandbox fails to initialize.
@@ -264,6 +366,23 @@ class Sandbox:
             # Sandbox with network access
             net = NetConfig(allowed_hosts=["api.example.com"])
             sandbox = Sandbox(network=net)
+
+            # Sandbox with callbacks (dict-based)
+            def echo(message: str):
+                return {"echoed": message}
+
+            sandbox = Sandbox(callbacks=[
+                {"name": "echo", "fn": echo, "description": "Echoes the message"}
+            ])
+
+            # Sandbox with callbacks (registry-based)
+            registry = CallbackRegistry()
+
+            @registry.callback(description="Echoes the message")
+            def echo(message: str):
+                return {"echoed": message}
+
+            sandbox = Sandbox(callbacks=registry)
         """
         ...
 
@@ -447,6 +566,7 @@ class SandboxFactory:
         site_packages: Optional[PathLike] = None,
         resource_limits: Optional[ResourceLimits] = None,
         network: Optional[NetConfig] = None,
+        callbacks: Optional[Union[CallbackRegistry, Sequence[CallbackDict]]] = None,
     ) -> Sandbox:
         """Create a new sandbox from this factory.
 
@@ -458,6 +578,8 @@ class SandboxFactory:
                 If not provided, uses the site-packages from initialization.
             resource_limits: Optional resource limits for the sandbox.
             network: Optional network configuration. If provided, enables networking.
+            callbacks: Optional callbacks that sandboxed code can invoke.
+                Can be a CallbackRegistry or a list of callback dicts.
 
         Returns:
             A new Sandbox ready to execute Python code.
@@ -472,6 +594,14 @@ class SandboxFactory:
             # With network access
             net = NetConfig(allowed_hosts=["api.example.com"])
             sandbox = factory.create_sandbox(network=net)
+
+            # With callbacks
+            def get_data():
+                return {"data": "from_factory"}
+
+            sandbox = factory.create_sandbox(callbacks=[
+                {"name": "get_data", "fn": get_data, "description": "Gets data"}
+            ])
         """
         ...
 
@@ -480,6 +610,233 @@ class SandboxFactory:
 
         This can be used for custom serialization or inspection.
         """
+        ...
+
+
+class Session:
+    """A session that maintains persistent Python state across executions.
+
+    Unlike `Sandbox` which runs each execution in isolation, `Session` preserves
+    Python variables, functions, and classes between `execute()` calls. This is
+    useful for:
+
+    - Interactive REPL-style execution
+    - Building up state incrementally
+    - Faster subsequent executions (no Python initialization overhead)
+
+    Sessions can optionally use a virtual filesystem (VFS) for persistent file
+    storage that survives across executions and even session resets.
+
+    Example:
+        # Basic session usage
+        session = Session()
+        session.execute('x = 1')
+        session.execute('y = 2')
+        result = session.execute('print(x + y)')
+        print(result.stdout)  # "3"
+
+        # Session with VFS for file persistence
+        storage = VfsStorage()
+        session = Session(vfs=storage)
+        session.execute('open("/data/test.txt", "w").write("hello")')
+        result = session.execute('print(open("/data/test.txt").read())')
+        print(result.stdout)  # "hello"
+
+        # Session with callbacks
+        def get_time():
+            import time
+            return {"timestamp": time.time()}
+
+        session = Session(callbacks=[
+            {"name": "get_time", "fn": get_time, "description": "Returns current time"}
+        ])
+    """
+
+    @property
+    def execution_count(self) -> int:
+        """Number of executions performed in this session."""
+        ...
+
+    @property
+    def execution_timeout_ms(self) -> Optional[int]:
+        """Current execution timeout in milliseconds, or None if not set."""
+        ...
+
+    @execution_timeout_ms.setter
+    def execution_timeout_ms(self, value: Optional[int]) -> None:
+        """Set the execution timeout in milliseconds."""
+        ...
+
+    @property
+    def vfs(self) -> Optional[VfsStorage]:
+        """VFS storage used by this session, if any."""
+        ...
+
+    @property
+    def vfs_mount_path(self) -> Optional[str]:
+        """VFS mount path, if VFS is enabled."""
+        ...
+
+    def __init__(
+        self,
+        *,
+        vfs: Optional[VfsStorage] = None,
+        vfs_mount_path: Optional[str] = None,
+        execution_timeout_ms: Optional[int] = None,
+        callbacks: Optional[Union[CallbackRegistry, Sequence[CallbackDict]]] = None,
+    ) -> None:
+        """Create a new session with the embedded Python runtime.
+
+        Sessions maintain persistent Python state across `execute()` calls,
+        unlike `Sandbox` which runs each execution in isolation.
+
+        Args:
+            vfs: Optional VfsStorage for persistent file storage.
+                Files written to `/data/*` will persist across executions.
+            vfs_mount_path: Custom mount path for VFS (default: "/data").
+            execution_timeout_ms: Optional timeout in milliseconds for each execution.
+            callbacks: Optional callbacks that sandboxed code can invoke.
+                Can be a CallbackRegistry or a list of callback dicts.
+
+        Raises:
+            InitializationError: If the session fails to initialize.
+
+        Example:
+            # Basic session
+            session = Session()
+            session.execute('x = 42')
+            result = session.execute('print(x)')  # prints "42"
+
+            # Session with VFS
+            storage = VfsStorage()
+            session = Session(vfs=storage)
+            session.execute('open("/data/file.txt", "w").write("data")')
+
+            # Session with callbacks
+            def echo(message: str):
+                return {"echoed": message}
+
+            session = Session(callbacks=[
+                {"name": "echo", "fn": echo, "description": "Echoes the message"}
+            ])
+        """
+        ...
+
+    def execute(self, code: str) -> ExecuteResult:
+        """Execute Python code in the session.
+
+        Unlike `Sandbox.execute()`, state from previous executions is preserved.
+        Variables, functions, and classes defined in one call are available in
+        subsequent calls.
+
+        Args:
+            code: Python source code to execute.
+
+        Returns:
+            ExecuteResult containing stdout and execution statistics.
+
+        Raises:
+            ExecutionError: If the Python code raises an exception.
+            TimeoutError: If execution exceeds the timeout limit.
+
+        Example:
+            session.execute('x = 1')
+            session.execute('y = 2')
+            result = session.execute('print(x + y)')
+            print(result.stdout)  # "3"
+        """
+        ...
+
+    def reset(self) -> None:
+        """Reset the session to a fresh state.
+
+        This clears all Python variables and state, but VFS storage persists
+        if it was provided at session creation.
+
+        Example:
+            session.execute('x = 42')
+            session.reset()
+            # x is no longer defined
+            session.execute('print(x)')  # raises NameError
+        """
+        ...
+
+    def clear_state(self) -> None:
+        """Clear Python state without fully resetting the session.
+
+        This is lighter-weight than `reset()` - it clears Python variables
+        but doesn't recreate the WASM instance.
+
+        Example:
+            session.execute('x = 42')
+            session.clear_state()
+            # x is no longer defined
+        """
+        ...
+
+    def snapshot_state(self) -> bytes:
+        """Capture a snapshot of the current Python state.
+
+        The snapshot contains all user-defined variables, serialized using pickle.
+        It can be saved to disk and restored later.
+
+        Returns:
+            The serialized snapshot data as bytes.
+
+        Raises:
+            ExecutionError: If the state cannot be serialized.
+
+        Example:
+            session.execute('x = 42')
+            snapshot = session.snapshot_state()
+            # Save snapshot to file
+            with open('state.bin', 'wb') as f:
+                f.write(snapshot)
+        """
+        ...
+
+    def restore_state(self, snapshot: bytes) -> None:
+        """Restore Python state from a previously captured snapshot.
+
+        Args:
+            snapshot: The serialized snapshot data (bytes).
+
+        Raises:
+            ExecutionError: If the snapshot cannot be restored.
+
+        Example:
+            # Load snapshot from file
+            with open('state.bin', 'rb') as f:
+                snapshot = f.read()
+            session.restore_state(snapshot)
+            result = session.execute('print(x)')  # x was in the snapshot
+        """
+        ...
+
+
+class VfsStorage:
+    """In-memory virtual filesystem storage.
+
+    VfsStorage provides persistent file storage for sessions. Files written
+    to the VFS mount path (default: `/data/*`) are stored in memory and
+    persist across executions and session resets.
+
+    The same VfsStorage instance can be shared across multiple sessions
+    to allow file sharing between them.
+
+    Example:
+        storage = VfsStorage()
+        session = Session(vfs=storage)
+        session.execute('open("/data/test.txt", "w").write("hello")')
+
+        # Create another session with the same storage
+        session2 = Session(vfs=storage)
+        result = session2.execute('print(open("/data/test.txt").read())')
+        print(result.stdout)  # "hello"
+    """
+
+    def __init__(self) -> None:
+        """Create a new empty VFS storage."""
         ...
 
 

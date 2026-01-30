@@ -13,6 +13,7 @@
 //! print(result.stdout)  # "Hello from the sandbox!\n"
 //! ```
 
+mod callback;
 mod error;
 mod net_config;
 mod preinit;
@@ -58,6 +59,7 @@ fn _eryx(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<resource_limits::ResourceLimits>()?;
     m.add_class::<net_config::NetConfig>()?;
     m.add_class::<vfs::VfsStorage>()?;
+    m.add_class::<callback::CallbackRegistry>()?;
 
     // Register exceptions
     error::register_exceptions(m)?;

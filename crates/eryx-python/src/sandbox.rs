@@ -6,6 +6,7 @@ use std::sync::Arc;
 
 use pyo3::prelude::*;
 
+use crate::callback::extract_callbacks;
 use crate::error::{InitializationError, eryx_error_to_py};
 use crate::net_config::NetConfig;
 use crate::resource_limits::ResourceLimits;
@@ -56,6 +57,8 @@ impl Sandbox {
     /// Args:
     ///     resource_limits: Optional resource limits for execution.
     ///     network: Optional network configuration. If provided, enables networking.
+    ///     callbacks: Optional callbacks that sandboxed code can invoke.
+    ///         Can be a CallbackRegistry or a list of callback dicts.
     ///
     /// Returns:
     ///     A new Sandbox instance ready to execute Python code.
@@ -76,6 +79,16 @@ impl Sandbox {
     ///     net = NetConfig(allowed_hosts=["api.example.com"])
     ///     sandbox = Sandbox(network=net)
     ///
+    ///     # Sandbox with callbacks
+    ///     def get_time():
+    ///         import time
+    ///         return {"timestamp": time.time()}
+    ///
+    ///     sandbox = Sandbox(callbacks=[
+    ///         {"name": "get_time", "fn": get_time, "description": "Returns current time"}
+    ///     ])
+    ///     result = sandbox.execute('t = await get_time(); print(t)')
+    ///
     ///     # For custom packages, use SandboxFactory instead:
     ///     factory = SandboxFactory(
     ///         packages=["/path/to/jinja2.whl", "/path/to/markupsafe.whl"],
@@ -83,8 +96,13 @@ impl Sandbox {
     ///     )
     ///     sandbox = factory.create_sandbox()
     #[new]
-    #[pyo3(signature = (*, resource_limits=None, network=None))]
-    fn new(resource_limits: Option<ResourceLimits>, network: Option<NetConfig>) -> PyResult<Self> {
+    #[pyo3(signature = (*, resource_limits=None, network=None, callbacks=None))]
+    fn new(
+        py: Python<'_>,
+        resource_limits: Option<ResourceLimits>,
+        network: Option<NetConfig>,
+        callbacks: Option<Bound<'_, PyAny>>,
+    ) -> PyResult<Self> {
         // Create a tokio runtime for async execution
         let runtime = Arc::new(
             tokio::runtime::Builder::new_multi_thread()
@@ -106,6 +124,14 @@ impl Sandbox {
         // Apply network config if provided
         if let Some(net) = network {
             builder = builder.with_network(net.into());
+        }
+
+        // Apply callbacks if provided
+        if let Some(ref cbs) = callbacks {
+            let python_callbacks = extract_callbacks(py, cbs)?;
+            for callback in python_callbacks {
+                builder = builder.with_callback(callback);
+            }
         }
 
         let inner = builder.build().map_err(eryx_error_to_py)?;
@@ -140,9 +166,10 @@ impl Sandbox {
         // This allows other Python threads to run during sandbox execution
         let code = code.to_string();
         let runtime = self.runtime.clone();
-        py.allow_threads(|| {
+        let inner = &self.inner;
+        py.detach(|| {
             runtime
-                .block_on(self.inner.execute(&code))
+                .block_on(inner.execute(&code))
                 .map(ExecuteResult::from)
                 .map_err(eryx_error_to_py)
         })

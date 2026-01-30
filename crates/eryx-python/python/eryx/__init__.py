@@ -27,12 +27,13 @@ Exceptions:
 """
 
 from eryx._eryx import (
+    # Classes
+    CallbackRegistry,
     # Exceptions
     EryxError,
     ExecuteResult,
     ExecutionError,
     InitializationError,
-    # Classes
     NetConfig,
     ResourceLimitError,
     ResourceLimits,
@@ -47,12 +48,13 @@ from eryx._eryx import (
 
 __all__ = [
     # Classes
-    "Sandbox",
-    "Session",
-    "SandboxFactory",
+    "CallbackRegistry",
     "ExecuteResult",
-    "ResourceLimits",
     "NetConfig",
+    "ResourceLimits",
+    "Sandbox",
+    "SandboxFactory",
+    "Session",
     "VfsStorage",
     # Exceptions
     "EryxError",
