@@ -405,25 +405,23 @@ impl CallbackRegistry {
     ///                 return {"status": resp.status}
     #[pyo3(signature = (name=None, description=None, schema=None))]
     fn callback(
-        &mut self,
-        py: Python<'_>,
+        slf: PyRefMut<'_, Self>,
         name: Option<String>,
         description: Option<String>,
         schema: Option<Bound<'_, PyAny>>,
     ) -> PyResult<Py<PyAny>> {
+        let py = slf.py();
+
         // Convert schema from Python to JSON Value if provided
         let schema_value: Option<Value> = schema
             .map(|s| pythonize::depythonize(&s))
             .transpose()
             .map_err(|e| pyo3::exceptions::PyValueError::new_err(format!("Invalid schema: {e}")))?;
 
-        // Create a decorator that captures the registration parameters
-        let callbacks_ptr = self as *mut CallbackRegistry;
-
         // We need to create a Python function that acts as a decorator
         // Since we can't easily create closures, we'll use a helper class
         let decorator = DecoratorHelper {
-            registry_ptr: callbacks_ptr as usize,
+            registry: slf.into(),
             name,
             description,
             schema: schema_value,
@@ -484,7 +482,7 @@ impl CallbackRegistry {
 /// Helper class to act as a decorator for the `callback()` method.
 #[pyclass]
 struct DecoratorHelper {
-    registry_ptr: usize,
+    registry: Py<CallbackRegistry>,
     name: Option<String>,
     description: Option<String>,
     schema: Option<Value>,
@@ -494,9 +492,7 @@ struct DecoratorHelper {
 impl DecoratorHelper {
     /// Called when the decorator is applied to a function.
     fn __call__(&self, py: Python<'_>, func: Py<PyAny>) -> PyResult<Py<PyAny>> {
-        // SAFETY: The registry pointer is valid because the decorator is created
-        // and used within the same Python scope where the registry exists.
-        let registry = unsafe { &mut *(self.registry_ptr as *mut CallbackRegistry) };
+        let mut registry = self.registry.borrow_mut(py);
 
         let def = create_callback_def(
             py,
