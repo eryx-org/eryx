@@ -55,14 +55,18 @@ jobs:
 
       - name: Copy prebuilt late-linking artifacts
         run: |
-          # Find the OUT_DIR with the compressed artifacts from the release build
-          # This must happen before precompile so build.rs can find them
-          OUT_DIR=$(find target/release -path "*/eryx-runtime-*/out" -type d | head -1)
+          # Find the OUT_DIR that actually contains the built artifacts
+          # (not just any OUT_DIR - the preinit build creates a new one without .so files)
+          OUT_DIR=$(find target/release -path "*/eryx-runtime-*/out/liberyx_runtime.so" -type f | head -1 | xargs dirname)
           echo "Found OUT_DIR: $OUT_DIR"
           mkdir -p crates/eryx-runtime/prebuilt
           cp "$OUT_DIR/liberyx_runtime.so.zst" crates/eryx-runtime/prebuilt/
           cp "$OUT_DIR/liberyx_bindings.so.zst" crates/eryx-runtime/prebuilt/
+          # Also copy liberyx_runtime.so for eryx-wasm-runtime tests now, before preinit build
+          mkdir -p crates/eryx-wasm-runtime/target
+          cp "$OUT_DIR/liberyx_runtime.so" crates/eryx-wasm-runtime/target/
           ls -la crates/eryx-runtime/prebuilt/
+          ls -la crates/eryx-wasm-runtime/target/
 
       - name: Set up python-stdlib for preinit
         run: mise run setup-eryx-runtime-tests
@@ -72,14 +76,6 @@ jobs:
           # Use preinit feature for faster sandbox instantiation in downstream jobs
           # (pre-initializes Python interpreter in the snapshot)
           cargo run -p eryx --example precompile --features preinit --release
-
-      - name: Copy eryx-wasm-runtime test artifacts
-        run: |
-          # Copy liberyx_runtime.so for eryx-wasm-runtime tests (from release build)
-          OUT_DIR=$(find target/release -path "*/eryx-runtime-*/out" -type d | head -1)
-          mkdir -p crates/eryx-wasm-runtime/target
-          cp "$OUT_DIR/liberyx_runtime.so" crates/eryx-wasm-runtime/target/
-          ls -la crates/eryx-wasm-runtime/target/
 
       - name: Upload WASM artifacts
         uses: namespace-actions/upload-artifact@v1
