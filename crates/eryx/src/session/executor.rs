@@ -197,6 +197,7 @@ pub struct SessionExecuteBuilder<'a> {
     callbacks: Vec<Arc<dyn Callback>>,
     callback_tx: Option<mpsc::Sender<CallbackRequest>>,
     trace_tx: Option<mpsc::UnboundedSender<TraceRequest>>,
+    fuel_limit: Option<u64>,
 }
 
 impl std::fmt::Debug for SessionExecuteBuilder<'_> {
@@ -206,6 +207,7 @@ impl std::fmt::Debug for SessionExecuteBuilder<'_> {
             .field("callbacks_count", &self.callbacks.len())
             .field("has_callback_tx", &self.callback_tx.is_some())
             .field("has_trace_tx", &self.trace_tx.is_some())
+            .field("fuel_limit", &self.fuel_limit)
             .finish_non_exhaustive()
     }
 }
@@ -219,6 +221,7 @@ impl<'a> SessionExecuteBuilder<'a> {
             callbacks: Vec::new(),
             callback_tx: None,
             trace_tx: None,
+            fuel_limit: None,
         }
     }
 
@@ -245,14 +248,34 @@ impl<'a> SessionExecuteBuilder<'a> {
         self
     }
 
+    /// Set the maximum fuel (instructions) allowed for this execution.
+    ///
+    /// Fuel provides fine-grained, deterministic execution bounds at the
+    /// instruction level. When fuel runs out, execution traps.
+    ///
+    /// This overrides the session's default fuel limit for this execution only.
+    /// If neither this nor the session's fuel limit is set, fuel defaults to
+    /// `u64::MAX` for tracking-only mode (fuel consumed is still reported).
+    #[must_use]
+    pub fn with_fuel_limit(mut self, fuel: u64) -> Self {
+        self.fuel_limit = Some(fuel);
+        self
+    }
+
     /// Execute the Python code with the configured options.
     ///
     /// # Errors
     ///
-    /// Returns an error if execution fails, times out, or the session is in use.
+    /// Returns an error if execution fails, times out, exceeds fuel limit, or the session is in use.
     pub async fn run(self) -> Result<ExecutionOutput, String> {
         self.session
-            .execute_internal(&self.code, &self.callbacks, self.callback_tx, self.trace_tx)
+            .execute_internal(
+                &self.code,
+                &self.callbacks,
+                self.callback_tx,
+                self.trace_tx,
+                self.fuel_limit,
+            )
             .await
     }
 }
@@ -337,6 +360,9 @@ pub struct SessionExecutor {
     /// Optional execution timeout for epoch-based interruption.
     execution_timeout: Option<Duration>,
 
+    /// Optional fuel limit for instruction tracking/limiting.
+    fuel_limit: Option<u64>,
+
     /// VFS storage that persists across resets.
     #[cfg(feature = "vfs")]
     vfs_storage: Option<std::sync::Arc<eryx_vfs::InMemoryStorage>>,
@@ -353,6 +379,7 @@ impl std::fmt::Debug for SessionExecutor {
             .field("has_store", &self.store.is_some())
             .field("has_bindings", &self.bindings.is_some())
             .field("execution_timeout", &self.execution_timeout)
+            .field("fuel_limit", &self.fuel_limit)
             .finish_non_exhaustive()
     }
 }
@@ -587,6 +614,12 @@ impl SessionExecutor {
         // when added to the current epoch).
         store.set_epoch_deadline(u64::MAX / 2);
 
+        // Set initial fuel - required when consume_fuel is enabled in the engine config.
+        // We use u64::MAX for tracking-only mode; actual limits are applied per-execution.
+        store
+            .set_fuel(u64::MAX)
+            .map_err(|e| Error::WasmEngine(format!("Failed to set fuel: {e}")))?;
+
         // Instantiate the component
         let bindings = executor
             .instance_pre()
@@ -600,6 +633,7 @@ impl SessionExecutor {
             bindings: Some(bindings),
             execution_count: 0,
             execution_timeout: None,
+            fuel_limit: None,
             vfs_storage: Some(vfs_storage),
             vfs_config: Some(vfs_config),
         })
@@ -632,6 +666,12 @@ impl SessionExecutor {
         // Set epoch deadline before instantiation
         store.set_epoch_deadline(u64::MAX / 2);
 
+        // Set initial fuel - required when consume_fuel is enabled in the engine config.
+        // We use u64::MAX for tracking-only mode; actual limits are applied per-execution.
+        store
+            .set_fuel(u64::MAX)
+            .map_err(|e| Error::WasmEngine(format!("Failed to set fuel: {e}")))?;
+
         // Instantiate the component
         let bindings = executor
             .instance_pre()
@@ -645,6 +685,7 @@ impl SessionExecutor {
             bindings: Some(bindings),
             execution_count: 0,
             execution_timeout: None,
+            fuel_limit: None,
         })
     }
 
@@ -665,6 +706,28 @@ impl SessionExecutor {
     #[must_use]
     pub fn execution_timeout(&self) -> Option<Duration> {
         self.execution_timeout
+    }
+
+    /// Set the fuel limit for all executions in this session.
+    ///
+    /// When set, executions will be limited to the specified number of
+    /// WASM instructions. When fuel runs out, execution traps.
+    ///
+    /// This can be overridden per-execution using
+    /// [`SessionExecuteBuilder::with_fuel_limit`].
+    ///
+    /// # Arguments
+    ///
+    /// * `limit` - Optional fuel limit. Pass `None` to disable the limit
+    ///   (fuel consumption is still tracked and reported).
+    pub fn set_fuel_limit(&mut self, limit: Option<u64>) {
+        self.fuel_limit = limit;
+    }
+
+    /// Get the current fuel limit.
+    #[must_use]
+    pub fn fuel_limit(&self) -> Option<u64> {
+        self.fuel_limit
     }
 
     /// Execute Python code with a fluent builder API.
@@ -700,6 +763,7 @@ impl SessionExecutor {
         callbacks: &[Arc<dyn Callback>],
         callback_tx: Option<mpsc::Sender<CallbackRequest>>,
         trace_tx: Option<mpsc::UnboundedSender<TraceRequest>>,
+        per_execute_fuel_limit: Option<u64>,
     ) -> Result<ExecutionOutput, String> {
         let start = Instant::now();
 
@@ -735,9 +799,18 @@ impl SessionExecutor {
 
         self.execution_count += 1;
 
+        // Set up fuel for tracking/limiting. Per-execution limit takes precedence
+        // over session-level limit. We use u64::MAX for tracking-only mode.
+        let fuel_limit = per_execute_fuel_limit.or(self.fuel_limit);
+        let initial_fuel = fuel_limit.unwrap_or(u64::MAX);
+        store
+            .set_fuel(initial_fuel)
+            .map_err(|e| format!("Failed to set fuel: {e}"))?;
+
         tracing::debug!(
             code_len = code.len(),
             execution_count = self.execution_count,
+            fuel_limit = ?fuel_limit,
             "SessionExecutor: executing Python code"
         );
 
@@ -797,17 +870,28 @@ impl SessionExecutor {
             state.peak_memory_bytes()
         };
 
+        // Get remaining fuel after execution
+        let remaining_fuel = store.get_fuel().unwrap_or(0);
+
+        // Calculate fuel consumed during execution
+        let fuel_consumed = Some(initial_fuel.saturating_sub(remaining_fuel));
+
         // Restore store and bindings before handling result
         self.store = Some(store);
         self.bindings = Some(bindings);
 
-        // Process result - check for epoch deadline exceeded (timeout)
+        // Process result - check for epoch deadline exceeded (timeout) or fuel exhaustion
         let wasmtime_result = result.map_err(|e| {
             let err_str = format!("{e:?}");
             if err_str.contains("epoch deadline") || err_str.contains("wasm trap: interrupt") {
                 format!(
                     "Execution timed out after {:?}",
                     execution_timeout.unwrap_or_default()
+                )
+            } else if err_str.contains("fuel") || err_str.contains("out of fuel") {
+                format!(
+                    "Execution ran out of fuel (limit: {:?})",
+                    fuel_limit.unwrap_or(u64::MAX)
                 )
             } else {
                 format!("WASM execution error: {e:?}")
@@ -828,6 +912,7 @@ impl SessionExecutor {
             peak_memory,
             duration,
             0, // Callback invocations tracked by caller's callback handler
+            fuel_consumed,
         ))
     }
 
@@ -898,8 +983,15 @@ impl SessionExecutor {
         // when added to the current epoch).
         store.set_epoch_deadline(u64::MAX / 2);
 
-        // Preserve execution timeout setting across reset
+        // Set initial fuel - required when consume_fuel is enabled in the engine config.
+        // We use u64::MAX for tracking-only mode; actual limits are applied per-execution.
+        store
+            .set_fuel(u64::MAX)
+            .map_err(|e| Error::WasmEngine(format!("Failed to set fuel: {e}")))?;
+
+        // Preserve settings across reset
         let execution_timeout = self.execution_timeout;
+        let fuel_limit = self.fuel_limit;
 
         // Instantiate the component
         let bindings = self
@@ -913,6 +1005,7 @@ impl SessionExecutor {
         self.bindings = Some(bindings);
         self.execution_count = 0;
         self.execution_timeout = execution_timeout;
+        self.fuel_limit = fuel_limit;
 
         Ok(())
     }

@@ -139,6 +139,11 @@ pub struct ExecutionOutput {
     pub duration: Duration,
     /// Number of callback invocations during execution.
     pub callback_invocations: u32,
+    /// Fuel consumed during execution (if fuel tracking is enabled).
+    ///
+    /// This measures the number of WASM instructions executed. Always present
+    /// when the engine has fuel consumption enabled.
+    pub fuel_consumed: Option<u64>,
 }
 
 impl ExecutionOutput {
@@ -150,6 +155,7 @@ impl ExecutionOutput {
         peak_memory_bytes: u64,
         duration: Duration,
         callback_invocations: u32,
+        fuel_consumed: Option<u64>,
     ) -> Self {
         Self {
             stdout,
@@ -157,6 +163,7 @@ impl ExecutionOutput {
             peak_memory_bytes,
             duration,
             callback_invocations,
+            fuel_consumed,
         }
     }
 }
@@ -652,6 +659,7 @@ pub struct ExecuteBuilder<'a> {
     memory_limit: Option<u64>,
     execution_timeout: Option<Duration>,
     cancellation_token: Option<CancellationToken>,
+    fuel_limit: Option<u64>,
 }
 
 impl std::fmt::Debug for ExecuteBuilder<'_> {
@@ -665,6 +673,7 @@ impl std::fmt::Debug for ExecuteBuilder<'_> {
             .field("memory_limit", &self.memory_limit)
             .field("execution_timeout", &self.execution_timeout)
             .field("has_cancellation_token", &self.cancellation_token.is_some())
+            .field("fuel_limit", &self.fuel_limit)
             .finish_non_exhaustive()
     }
 }
@@ -682,6 +691,7 @@ impl<'a> ExecuteBuilder<'a> {
             memory_limit: None,
             execution_timeout: None,
             cancellation_token: None,
+            fuel_limit: None,
         }
     }
 
@@ -745,11 +755,24 @@ impl<'a> ExecuteBuilder<'a> {
         self
     }
 
+    /// Set the maximum fuel (instructions) allowed for execution.
+    ///
+    /// Fuel provides fine-grained, deterministic execution bounds at the
+    /// instruction level. When fuel runs out, execution traps.
+    ///
+    /// If not set, fuel defaults to `u64::MAX` for tracking-only mode,
+    /// where fuel consumption is still measured and reported.
+    #[must_use]
+    pub fn with_fuel_limit(mut self, fuel: u64) -> Self {
+        self.fuel_limit = Some(fuel);
+        self
+    }
+
     /// Execute the Python code with the configured options.
     ///
     /// # Errors
     ///
-    /// Returns an error if execution fails, times out, or exceeds memory limits.
+    /// Returns an error if execution fails, times out, or exceeds memory/fuel limits.
     pub async fn run(self) -> std::result::Result<ExecutionOutput, String> {
         self.executor
             .execute_internal(
@@ -761,6 +784,7 @@ impl<'a> ExecuteBuilder<'a> {
                 self.memory_limit,
                 self.execution_timeout,
                 self.cancellation_token,
+                self.fuel_limit,
                 #[cfg(feature = "vfs")]
                 None,
             )
@@ -1179,7 +1203,8 @@ impl PythonExecutor {
     /// Version history:
     /// - v1: Initial configuration
     /// - v2: Added epoch_interruption(true) for execution timeouts
-    pub const ENGINE_CONFIG_VERSION: u32 = 2;
+    /// - v3: Added consume_fuel(true) for instruction tracking/limiting
+    pub const ENGINE_CONFIG_VERSION: u32 = 3;
 
     /// Create a configured wasmtime engine.
     ///
@@ -1199,6 +1224,12 @@ impl PythonExecutor {
         // This allows us to interrupt WASM execution even in tight loops
         // that don't yield to the async runtime (e.g., `while True: pass`).
         config.epoch_interruption(true);
+
+        // Enable fuel consumption for instruction tracking and limiting.
+        // Fuel provides fine-grained, deterministic execution bounds at the
+        // instruction level. Even when no limit is set, fuel consumption is
+        // tracked and reported for billing/metering purposes.
+        config.consume_fuel(true);
 
         // Enable copy-on-write heap images for faster instantiation
         // This defers memory initialization from instantiation time to first write
@@ -1301,6 +1332,7 @@ impl PythonExecutor {
         memory_limit: Option<u64>,
         execution_timeout: Option<Duration>,
         cancellation_token: Option<CancellationToken>,
+        fuel_limit: Option<u64>,
         #[cfg(feature = "vfs")] vfs_storage: Option<std::sync::Arc<eryx_vfs::InMemoryStorage>>,
     ) -> std::result::Result<ExecutionOutput, String> {
         // Build callback info for introspection
@@ -1445,6 +1477,13 @@ impl PythonExecutor {
         // Python initialization, only during user code execution.
         store.set_epoch_deadline(u64::MAX / 2);
 
+        // Set up fuel for tracking/limiting. We use u64::MAX for tracking-only mode
+        // when no explicit limit is set. Fuel is consumed per WASM instruction.
+        let initial_fuel = fuel_limit.unwrap_or(u64::MAX);
+        store
+            .set_fuel(initial_fuel)
+            .map_err(|e| format!("Failed to set fuel: {e}"))?;
+
         // Instantiate from the pre-compiled template (includes Python initialization)
         let bindings = self
             .instance_pre
@@ -1527,7 +1566,7 @@ impl PythonExecutor {
             stop_flag.store(true, Ordering::Relaxed);
         }
 
-        // Check for epoch deadline exceeded (timeout or cancellation)
+        // Check for epoch deadline exceeded (timeout or cancellation) or fuel exhaustion
         let wasmtime_result = wasmtime_result.map_err(|e| {
             let err_str = format!("{e:?}");
             if err_str.contains("epoch deadline") || err_str.contains("wasm trap: interrupt") {
@@ -1539,6 +1578,11 @@ impl PythonExecutor {
                         execution_timeout.unwrap_or_default()
                     )
                 }
+            } else if err_str.contains("fuel") || err_str.contains("out of fuel") {
+                format!(
+                    "Execution ran out of fuel (limit: {:?})",
+                    fuel_limit.unwrap_or(u64::MAX)
+                )
             } else {
                 format!("WASM execution error: {e:?}")
             }
@@ -1551,6 +1595,10 @@ impl PythonExecutor {
         // Get peak memory from the store before it's dropped
         let peak_memory_bytes = store.data().memory_tracker.peak_memory_bytes();
 
+        // Calculate fuel consumed during execution
+        let remaining_fuel = store.get_fuel().unwrap_or(0);
+        let fuel_consumed = Some(initial_fuel.saturating_sub(remaining_fuel));
+
         // Note: callback_invocations is 0 here because PythonExecutor doesn't
         // handle callbacks internally - it just passes the channel to the WASM state.
         // Higher-level APIs like Sandbox track callback invocations in their own
@@ -1561,6 +1609,7 @@ impl PythonExecutor {
             peak_memory_bytes,
             Duration::ZERO, // Duration tracked by higher-level APIs (Sandbox, Session)
             0,              // Callback invocations tracked by higher-level APIs
+            fuel_consumed,
         ))
     }
 }
