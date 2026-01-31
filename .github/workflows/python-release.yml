@@ -288,8 +288,9 @@ jobs:
 
       - name: Test wheel
         run: |
-          uv pip install pytest --system
-          uv pip install dist/*.whl --force-reinstall --system
+          uv venv
+          uv pip install pytest
+          uv pip install dist/*.whl --force-reinstall
           cd crates/eryx-python && uv run pytest tests/ -v
 
   # Build wheels for macOS Intel (GitHub runner)
@@ -362,8 +363,9 @@ jobs:
 
       - name: Test wheel
         run: |
-          uv pip install pytest --system
-          uv pip install dist/*.whl --force-reinstall --system
+          uv venv
+          uv pip install pytest
+          uv pip install dist/*.whl --force-reinstall
           cd crates/eryx-python && uv run pytest tests/ -v
 
   # Build wheels for Windows
