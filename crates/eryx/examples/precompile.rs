@@ -27,6 +27,16 @@ use std::path::Path;
 use eryx::Session;
 
 fn main() -> anyhow::Result<()> {
+    let args: Vec<String> = std::env::args().collect();
+
+    // Parse --output argument
+    let cwasm_path = args
+        .iter()
+        .position(|a| a == "--output")
+        .and_then(|i| args.get(i + 1))
+        .map(|s| s.as_str())
+        .unwrap_or("crates/eryx-runtime/runtime.cwasm");
+
     let wasm_path = std::env::var("ERYX_WASM_PATH")
         .unwrap_or_else(|_| "crates/eryx-runtime/runtime.wasm".to_string());
 
@@ -95,7 +105,6 @@ fn main() -> anyhow::Result<()> {
     );
 
     // Step 3: Save to disk
-    let cwasm_path = "crates/eryx-runtime/runtime.cwasm";
     println!("\n--- Step 3: Saving pre-compiled WASM ---");
     std::fs::write(cwasm_path, &precompiled)?;
     println!("Saved to: {cwasm_path}");

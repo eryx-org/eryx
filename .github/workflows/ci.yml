@@ -76,6 +76,8 @@ jobs:
           # Use preinit feature for faster sandbox instantiation in downstream jobs
           # (pre-initializes Python interpreter in the snapshot)
           cargo run -p eryx --example precompile --features preinit --release
+        env:
+          ERYX_PRECOMPILE_BOOTSTRAP: "1"
 
       - name: Upload WASM artifacts
         uses: namespace-actions/upload-artifact@v1

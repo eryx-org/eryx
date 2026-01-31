@@ -18,6 +18,13 @@ fn main() {
 mod embedded_runtime {
     use std::path::PathBuf;
 
+    /// Check if we're building the precompile example (which bootstraps without runtime.cwasm).
+    fn is_precompile_bootstrap() -> bool {
+        // The precompile example needs to build without runtime.cwasm existing.
+        // Check if ERYX_PRECOMPILE_BOOTSTRAP is set to skip the file check.
+        std::env::var("ERYX_PRECOMPILE_BOOTSTRAP").is_ok()
+    }
+
     pub fn prepare() {
         let out_dir = PathBuf::from(std::env::var("OUT_DIR").expect("OUT_DIR not set"));
         let cwasm_path = PathBuf::from("../eryx-runtime/runtime.cwasm");
@@ -26,6 +33,12 @@ mod embedded_runtime {
         println!("cargo::rerun-if-changed=../eryx-runtime/runtime.cwasm");
 
         if !cwasm_path.exists() {
+            if is_precompile_bootstrap() {
+                // Precompile bootstrap: create empty placeholder, will be replaced after precompile runs
+                let dest = out_dir.join("runtime.cwasm");
+                std::fs::write(&dest, b"").expect("Failed to write placeholder runtime.cwasm");
+                return;
+            }
             panic!(
                 "Pre-compiled runtime not found at {}.\n\
                  \n\
