@@ -317,8 +317,11 @@ pub fn recapture_stdout() {
 /// Store the result of an async import for Python's promise_get_result to read.
 ///
 /// This is called from `export_async_callback` after lifting the result from the buffer.
-/// The result is stored in `_eryx_async_import_result` in Python.
-pub fn set_async_import_result(_subtask: u32, result_json: &str) {
+/// The result is stored in `_eryx_async_import_results[subtask]` in Python.
+///
+/// We use a dict keyed by subtask ID to avoid race conditions when multiple
+/// async callbacks are in flight (e.g., with asyncio.gather()).
+pub fn set_async_import_result(subtask: u32, result_json: &str) {
     use std::ffi::CString;
 
     // Escape the JSON for embedding in Python triple-quoted string.
@@ -326,7 +329,8 @@ pub fn set_async_import_result(_subtask: u32, result_json: &str) {
     // potential triple-quote sequences.
     let escaped = result_json.replace('\\', "\\\\").replace("'''", "\\'''");
 
-    let code = format!("_eryx_async_import_result = '''{escaped}'''");
+    // Store in a dict keyed by subtask ID to support concurrent callbacks
+    let code = format!("_eryx_async_import_results[{subtask}] = '''{escaped}'''");
 
     if let Ok(code_cstr) = CString::new(code) {
         unsafe {
@@ -514,22 +518,35 @@ fn subtask_drop_(task: u32) {
 
 /// Get result from a completed async promise.
 ///
-/// This retrieves the result JSON stored in `__main__._eryx_async_import_result`
+/// This retrieves the result JSON stored in `__main__._eryx_async_import_results[subtask]`
 /// when the Rust layer completed an async import callback.
+///
+/// The subtask ID is used to look up the correct result when multiple callbacks
+/// are in flight concurrently.
 #[pyfunction]
-fn promise_get_result_(py: Python<'_>, _promise: u32) -> PyResult<String> {
-    // Get the result from __main__._eryx_async_import_result
+fn promise_get_result_(py: Python<'_>, subtask: u32) -> PyResult<String> {
+    // Get the result from __main__._eryx_async_import_results[subtask]
     let main_module = py.import("__main__")?;
-    match main_module.getattr("_eryx_async_import_result") {
-        Ok(attr) => {
-            let result: String = attr.extract()?;
-            Ok(result)
+    match main_module.getattr("_eryx_async_import_results") {
+        Ok(results_dict) => {
+            // Try to pop the result (removes it from the dict)
+            match results_dict.call_method1("pop", (subtask, py.None())) {
+                Ok(result) => {
+                    if result.is_none() {
+                        Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
+                            "Async import result not found for subtask {subtask}"
+                        )))
+                    } else {
+                        result.extract()
+                    }
+                }
+                Err(e) => Err(e),
+            }
         }
         Err(_) => {
-            // Attribute not found - this means set_async_import_result wasn't called
-            // or the PyRun_SimpleString failed
+            // Dict not found - this means initialization failed
             Err(pyo3::exceptions::PyRuntimeError::new_err(
-                "Async import result not available - callback may have failed",
+                "Async import results dict not available - initialization may have failed",
             ))
         }
     }
@@ -794,6 +811,10 @@ import sys, types
 _eryx_async = types.ModuleType('_eryx_async')
 _eryx_async.__doc__ = 'Eryx async runtime - minimal asyncio event loop for Component Model async.'
 
+# Initialize the dict for storing async import results keyed by subtask ID.
+# This must be done before the module code runs so concurrent callbacks work.
+_eryx_async_import_results = {}
+
 exec(compile(r'''
 """Eryx async runtime - minimal asyncio event loop for Component Model async."""
 
@@ -968,8 +989,9 @@ async def await_invoke(name: str, args_json: str) -> str:
 
         await future
 
-        # Get the result wrapper and parse it
-        result_json = _eryx.promise_get_result_(promise)
+        # Get the result wrapper and parse it.
+        # Use waitable (the subtask ID) as the key, not promise (which is always 0).
+        result_json = _eryx.promise_get_result_(waitable)
         try:
             result = json.loads(result_json)
         except json.JSONDecodeError as e:
