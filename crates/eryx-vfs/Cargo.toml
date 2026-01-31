@@ -15,7 +15,7 @@ bytes = "1"
 cap-fs-ext = "4"
 cap-std = "4"
 fs-set-times = "0.20"
-system-interface = "0.27"
+system-interface = { version = "0.27", features = ["cap_std_impls"] }
 thiserror.workspace = true
 tokio = { workspace = true, features = ["sync"] }
 tracing.workspace = true
