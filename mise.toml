@@ -157,10 +157,16 @@ else
     fi
 
     if [[ "$WASM_TIME" -gt "$CWASM_TIME" ]]; then
-        echo "⚠️  runtime.wasm is newer than runtime.cwasm - run 'mise run precompile-eryx-runtime'"
+        echo "⚠️  runtime.wasm is newer than runtime.cwasm - run 'mise run precompile-eryx-runtime-preinit'"
     else
-        echo "✓ runtime.cwasm is up-to-date"
+        echo "✓ runtime.cwasm is up-to-date (preinit version)"
     fi
+fi
+
+# Check for non-preinit variant
+CWASM_NO_PREINIT="crates/eryx-runtime/runtime-no-preinit.cwasm"
+if [[ -f "$CWASM_NO_PREINIT" ]]; then
+    echo "runtime-no-preinit.cwasm: $(ls -lh "$CWASM_NO_PREINIT" | awk '{print $5, $6, $7, $8}')"
 fi
 echo ""
 """
@@ -354,6 +360,7 @@ run = """
 echo "Removing WASM artifacts..."
 rm -f crates/eryx-runtime/runtime.wasm
 rm -f crates/eryx-runtime/runtime.cwasm
+rm -f crates/eryx-runtime/runtime-no-preinit.cwasm
 
 echo "Removing prebuilt artifacts..."
 rm -rf crates/eryx-runtime/prebuilt/
@@ -407,17 +414,17 @@ depends = ["precompile-eryx-runtime-preinit"]
 run = "cargo bench --package eryx --all-features -- --save-baseline main"
 
 [tasks.precompile-eryx-runtime]
-description = "Pre-compile eryx-runtime WASM to native code for faster loading"
+description = "Pre-compile eryx-runtime WASM to native code (without Python pre-init)"
 depends = ["build-eryx-runtime"]
-# Note: no --features embedded here - precompile must bootstrap without runtime.cwasm
-run = "cargo run -p eryx --example precompile --release"
+env = { ERYX_PRECOMPILE_BOOTSTRAP = "1" }
+run = "cargo run -p eryx --example precompile --release -- --output crates/eryx-runtime/runtime-no-preinit.cwasm"
 sources = ["crates/eryx-runtime/runtime.wasm"]
-outputs = ["crates/eryx-runtime/runtime.cwasm"]
+outputs = ["crates/eryx-runtime/runtime-no-preinit.cwasm"]
 
 [tasks.precompile-eryx-runtime-preinit]
 description = "Pre-initialize Python and pre-compile runtime (faster sessions, requires preinit)"
 depends = ["build-eryx-runtime", "build-preinit", "setup-eryx-runtime-tests"]
-# Note: no --features embedded here - precompile must bootstrap without runtime.cwasm
+env = { ERYX_PRECOMPILE_BOOTSTRAP = "1" }
 run = "cargo run --example precompile --features preinit --release"
 sources = [
   "crates/eryx-runtime/runtime.wasm",
