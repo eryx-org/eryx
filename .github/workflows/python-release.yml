@@ -264,15 +264,15 @@ jobs:
       - name: Mark cwasm as up-to-date
         run: touch crates/eryx-runtime/runtime.cwasm
 
-      - uses: actions/setup-python@v5
+      # Use uv to manage Python - more reliable than setup-python on namespace runners
+      - uses: astral-sh/setup-uv@v4
         with:
           python-version: "3.12"
 
-      # The namespace macOS ARM runner has Homebrew Python at /opt/homebrew/bin/python3
-      # which conflicts with actions/setup-python. We must ensure setup-python's Python
-      # is found first by maturin-action.
-      - name: Prepend setup-python to PATH
-        run: echo "${{ env.pythonLocation }}/bin" >> $GITHUB_PATH
+      - name: Install Python and add to PATH
+        run: |
+          uv python install 3.12
+          echo "$(dirname $(uv python find 3.12))" >> $GITHUB_PATH
 
       - name: Build wheels
         uses: PyO3/maturin-action@v1
@@ -286,13 +286,11 @@ jobs:
           name: wheels-macos-aarch64
           path: dist
 
-      # Use explicit Python path because pythonLocation may not match actual install path
-      # on namespace runners, and GITHUB_PATH modifications don't reliably propagate.
       - name: Test wheel
         run: |
-          "${{ env.pythonLocation }}/bin/python3" -m pip install pytest
-          "${{ env.pythonLocation }}/bin/python3" -m pip install dist/*.whl --force-reinstall
-          cd crates/eryx-python && "${{ env.pythonLocation }}/bin/python3" -m pytest tests/ -v
+          uv pip install pytest --system
+          uv pip install dist/*.whl --force-reinstall --system
+          cd crates/eryx-python && uv run pytest tests/ -v
 
   # Build wheels for macOS Intel (GitHub runner)
   macos-x86_64:
@@ -340,14 +338,15 @@ jobs:
       - name: Mark cwasm as up-to-date
         run: touch crates/eryx-runtime/runtime.cwasm
 
-      - uses: actions/setup-python@v5
+      # Use uv to manage Python - more reliable than setup-python on some runners
+      - uses: astral-sh/setup-uv@v4
         with:
           python-version: "3.12"
 
-      # The namespace macOS runner may have Homebrew Python which conflicts with
-      # actions/setup-python. Prepend setup-python's bin to ensure it's found first.
-      - name: Prepend setup-python to PATH
-        run: echo "${{ env.pythonLocation }}/bin" >> $GITHUB_PATH
+      - name: Install Python and add to PATH
+        run: |
+          uv python install 3.12
+          echo "$(dirname $(uv python find 3.12))" >> $GITHUB_PATH
 
       - name: Build wheels
         uses: PyO3/maturin-action@v1
@@ -361,12 +360,11 @@ jobs:
           name: wheels-macos-x86_64
           path: dist
 
-      # Use explicit Python path for consistency with aarch64 runner workaround
       - name: Test wheel
         run: |
-          "${{ env.pythonLocation }}/bin/python3" -m pip install pytest
-          "${{ env.pythonLocation }}/bin/python3" -m pip install dist/*.whl --force-reinstall
-          cd crates/eryx-python && "${{ env.pythonLocation }}/bin/python3" -m pytest tests/ -v
+          uv pip install pytest --system
+          uv pip install dist/*.whl --force-reinstall --system
+          cd crates/eryx-python && uv run pytest tests/ -v
 
   # Build wheels for Windows
   windows:
