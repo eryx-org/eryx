@@ -5,8 +5,9 @@
 //! ## Safety
 //!
 //! By default, this crate uses `#![forbid(unsafe_code)]` for maximum safety.
-//! When the `embedded` feature is enabled, this is relaxed to `#![deny(unsafe_code)]`
-//! to allow the unsafe wasmtime deserialization APIs needed for pre-compiled components.
+//! When the `embedded` or `preinit` features are enabled, this is relaxed to
+//! `#![deny(unsafe_code)]` to allow unsafe wasmtime APIs needed for pre-compiled
+//! component loading and CPU feature configuration (e.g., disabling AVX-512).
 //!
 //! Eryx executes Python code in a secure WebAssembly sandbox with:
 //!
@@ -40,8 +41,13 @@
 // - Default: forbid unsafe code entirely
 // - With `embedded` feature: deny unsafe code, but allow it on specific items
 //   that need wasmtime's unsafe deserialization APIs
-#![cfg_attr(not(feature = "embedded"), forbid(unsafe_code))]
-#![cfg_attr(feature = "embedded", deny(unsafe_code))]
+// - With `preinit` feature: deny unsafe code, needed for cranelift CPU feature flags
+//   during precompilation (e.g., disabling AVX-512 for portable builds)
+#![cfg_attr(
+    not(any(feature = "embedded", feature = "preinit")),
+    forbid(unsafe_code)
+)]
+#![cfg_attr(any(feature = "embedded", feature = "preinit"), deny(unsafe_code))]
 
 pub mod cache;
 mod callback;
