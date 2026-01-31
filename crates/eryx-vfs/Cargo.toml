@@ -12,8 +12,8 @@ description = "Virtual filesystem implementation for eryx sandbox"
 anyhow.workspace = true
 async-trait.workspace = true
 bytes = "1"
-cap-fs-ext = "4"
-cap-std = "4"
+cap-fs-ext = "3"
+cap-std = "3"
 fs-set-times = "0.20"
 system-interface = { version = "0.27", features = ["cap_std_impls"] }
 thiserror.workspace = true
