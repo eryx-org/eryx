@@ -1039,3 +1039,213 @@ except Exception as e:
 """)
         assert "caught: RuntimeError" in result.stdout
         assert "has_message: True" in result.stdout
+
+
+class TestConcurrentAsyncCallbacks:
+    """Tests for concurrent async callback race condition.
+
+    The bug: async callback results were stored in a single global variable
+    `_eryx_async_import_result` instead of a dict keyed by subtask ID.
+    When multiple async callbacks are in flight via asyncio.gather(), the
+    results overwrite each other.
+
+    The fix: use `_eryx_async_import_results[subtask_id]` dict instead.
+    """
+
+    def test_gather_returns_correct_results_for_each_callback(self):
+        """Test that asyncio.gather returns correct result for each callback.
+
+        This is the core test for the race condition. With the bug:
+        1. gather() starts callbacks A, B, C (all return Pending)
+        2. A completes -> sets global result = "A"
+        3. B completes -> sets global result = "B" (overwrites A!)
+        4. C completes -> sets global result = "C" (overwrites B!)
+        5. Python reads results -> all three get "C"
+
+        The test verifies each callback gets its own unique result.
+        """
+        import asyncio
+
+        async def return_unique(unique_id: str):
+            """Return a unique identifier that we can verify."""
+            await asyncio.sleep(0.001)
+            return {"id": unique_id, "data": f"result_for_{unique_id}"}
+
+        sandbox = eryx.Sandbox(
+            callbacks=[{"name": "get_result", "fn": return_unique, "description": ""}]
+        )
+
+        # Run the test many times to increase chance of hitting the race
+        for iteration in range(20):
+            result = sandbox.execute(f"""
+import asyncio
+
+# Launch 5 concurrent callbacks, each with a unique ID
+tasks = [
+    get_result(unique_id="task_A_{iteration}"),
+    get_result(unique_id="task_B_{iteration}"),
+    get_result(unique_id="task_C_{iteration}"),
+    get_result(unique_id="task_D_{iteration}"),
+    get_result(unique_id="task_E_{iteration}"),
+]
+results = await asyncio.gather(*tasks)
+
+# CRITICAL: verify each result matches its expected unique_id
+# With the bug, all results would have the same id (the last one to complete)
+expected_ids = ["task_A_{iteration}", "task_B_{iteration}", "task_C_{iteration}", "task_D_{iteration}", "task_E_{iteration}"]
+actual_ids = [r["id"] for r in results]
+
+# Check that we got each expected ID exactly once
+if sorted(actual_ids) != sorted(expected_ids):
+    print(f"FAIL: expected {{sorted(expected_ids)}}, got {{sorted(actual_ids)}}")
+    raise AssertionError(f"Results mismatched: {{actual_ids}}")
+
+# Also verify the data field matches
+for i, r in enumerate(results):
+    expected_id = expected_ids[i]
+    if r["id"] != expected_id:
+        print(f"FAIL: result[{{i}}] has id={{r['id']}}, expected={{expected_id}}")
+        raise AssertionError(f"Result {{i}} has wrong id")
+    if r["data"] != f"result_for_{{expected_id}}":
+        print(f"FAIL: result[{{i}}] has wrong data")
+        raise AssertionError(f"Result {{i}} has wrong data")
+
+print("PASS")
+""")
+            assert "PASS" in result.stdout, (
+                f"Iteration {iteration} failed: {result.stdout}"
+            )
+
+    def test_interleaved_callbacks_preserve_order(self):
+        """Test that results are correctly matched even with interleaved completion.
+
+        This test uses different delays to force a specific completion order
+        that differs from the start order, testing that results are correctly
+        routed back to the right awaiter.
+        """
+        import asyncio
+
+        async def delayed_return(value: int, delay_ms: int):
+            """Return after a specified delay."""
+            await asyncio.sleep(delay_ms / 1000.0)
+            return {"value": value, "delay": delay_ms}
+
+        sandbox = eryx.Sandbox(
+            callbacks=[{"name": "delayed", "fn": delayed_return, "description": ""}]
+        )
+
+        # Start in order 1,2,3 but complete in order 3,2,1 due to delays
+        result = sandbox.execute("""
+import asyncio
+
+# Start order: 1, 2, 3
+# Complete order: 3 (10ms), 2 (20ms), 1 (30ms)
+results = await asyncio.gather(
+    delayed(value=1, delay_ms=30),  # completes last
+    delayed(value=2, delay_ms=20),  # completes second
+    delayed(value=3, delay_ms=10),  # completes first
+)
+
+# Results should be in START order, not completion order
+# i.e., [result_for_1, result_for_2, result_for_3]
+print(f"Results: {results}")
+
+assert results[0]["value"] == 1, f"First result should be value=1, got {results[0]}"
+assert results[1]["value"] == 2, f"Second result should be value=2, got {results[1]}"
+assert results[2]["value"] == 3, f"Third result should be value=3, got {results[2]}"
+
+print("ORDER_PRESERVED")
+""")
+        assert "ORDER_PRESERVED" in result.stdout, f"Failed: {result.stdout}"
+
+    def test_many_concurrent_callbacks_stress(self):
+        """Stress test with many concurrent callbacks."""
+        import asyncio
+
+        async def echo_with_jitter(index: int):
+            """Echo with random-ish delay based on index."""
+            # Use index to create varying delays without actual randomness
+            delay = ((index * 7) % 10 + 1) / 1000.0
+            await asyncio.sleep(delay)
+            return {"index": index}
+
+        sandbox = eryx.Sandbox(
+            callbacks=[{"name": "echo", "fn": echo_with_jitter, "description": ""}]
+        )
+
+        result = sandbox.execute("""
+import asyncio
+
+NUM_CALLBACKS = 20
+
+# Launch many concurrent callbacks
+tasks = [echo(index=i) for i in range(NUM_CALLBACKS)]
+results = await asyncio.gather(*tasks)
+
+# Verify each callback got its own result
+indices = [r["index"] for r in results]
+print(f"Indices: {indices}")
+
+# Check we got each index exactly once, in order
+expected = list(range(NUM_CALLBACKS))
+if indices != expected:
+    print(f"FAIL: expected {expected}, got {indices}")
+    raise AssertionError("Results out of order or duplicated")
+
+print("STRESS_PASS")
+""")
+        assert "STRESS_PASS" in result.stdout, f"Failed: {result.stdout}"
+
+    def test_subtask_id_keying_directly(self):
+        """Directly test that subtask IDs are used to key results.
+
+        This test inspects the internal state to verify the fix is working.
+        It checks that _eryx_async_import_results dict exists and is used.
+        """
+        import asyncio
+
+        async def slow_callback(tag: str):
+            """A callback with some delay."""
+            await asyncio.sleep(0.005)
+            return {"tag": tag}
+
+        sandbox = eryx.Sandbox(
+            callbacks=[{"name": "slow", "fn": slow_callback, "description": ""}]
+        )
+
+        # This test verifies that the results dict exists and is properly cleaned up
+        result = sandbox.execute("""
+import asyncio
+
+# Check that the results dict exists (from the fix)
+import __main__
+has_results_dict = hasattr(__main__, '_eryx_async_import_results')
+print(f"has_results_dict: {has_results_dict}")
+
+# Run some concurrent callbacks
+results = await asyncio.gather(
+    slow(tag="first"),
+    slow(tag="second"),
+    slow(tag="third"),
+)
+
+# Verify results are correct
+tags = [r["tag"] for r in results]
+print(f"tags: {tags}")
+assert tags == ["first", "second", "third"], f"Wrong tags: {tags}"
+
+# After completion, the results dict should be empty (results consumed)
+results_dict = getattr(__main__, '_eryx_async_import_results', None)
+if results_dict is not None:
+    print(f"results_dict_size: {len(results_dict)}")
+    # With proper cleanup, dict should be empty after results are consumed
+    assert len(results_dict) == 0, f"Results dict not cleaned up: {results_dict}"
+
+print("SUBTASK_KEYING_OK")
+""")
+        # The test should pass if the fix is in place
+        # If the fix is NOT in place, has_results_dict will be False
+        assert "has_results_dict: True" in result.stdout, (
+            f"Results dict not found - fix not applied? Output: {result.stdout}"
+        )
+        assert "SUBTASK_KEYING_OK" in result.stdout, f"Failed: {result.stdout}"
