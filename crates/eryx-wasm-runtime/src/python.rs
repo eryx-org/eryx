@@ -811,9 +811,8 @@ import sys, types
 _eryx_async = types.ModuleType('_eryx_async')
 _eryx_async.__doc__ = 'Eryx async runtime - minimal asyncio event loop for Component Model async.'
 
-# Initialize the dict for storing async import results keyed by subtask ID.
-# This must be done before the module code runs so concurrent callbacks work.
-_eryx_async_import_results = {}
+# Note: _eryx_async_import_results is initialized in ERYX_EXEC_INFRASTRUCTURE
+# (which runs after this) to ensure it's in __main__ for PyO3 getattr to find it.
 
 exec(compile(r'''
 """Eryx async runtime - minimal asyncio event loop for Component Model async."""
@@ -1172,6 +1171,11 @@ _eryx_user_globals = {'__builtins__': __builtins__, '__name__': '__main__'}
 # Network async results storage - keyed by subtask ID
 # Used by set_net_result/set_net_bytes_result to store results for Python to retrieve
 _eryx_net_results = {}
+
+# Async import results storage - keyed by subtask ID
+# Used by set_async_import_result/promise_get_result_ for concurrent callback safety
+# This MUST be in __main__ for PyRun_SimpleString and PyO3 getattr to find it
+_eryx_async_import_results = {}
 
 # Import async infrastructure
 import _eryx_async
