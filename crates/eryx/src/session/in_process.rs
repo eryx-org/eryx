@@ -179,6 +179,7 @@ impl<'a> InProcessSession<'a> {
                         duration,
                         callback_invocations,
                         peak_memory_bytes: Some(output.peak_memory_bytes),
+                        fuel_consumed: output.fuel_consumed,
                     },
                 })
             }

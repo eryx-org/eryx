@@ -193,6 +193,7 @@ except Exception as e:
         callback_timeout: Some(Duration::from_secs(1)),
         max_memory_bytes: Some(64 * 1024 * 1024), // 64 MB
         max_callback_invocations: Some(10),
+        max_fuel: Some(1_000_000_000), // 1B instructions
     };
 
     println!("Configured limits:");
@@ -255,6 +256,7 @@ for i in range(5):
         callback_timeout: None,
         max_memory_bytes: None,
         max_callback_invocations: None,
+        max_fuel: None,
     };
 
     println!("⚠️  All limits disabled - use only for trusted code!");
@@ -266,6 +268,7 @@ for i in range(5):
     println!("  - callback_timeout: Maximum time for a single callback invocation");
     println!("  - max_memory_bytes: Maximum WASM memory usage (enforced via ResourceLimiter)");
     println!("  - max_callback_invocations: Maximum number of callback calls");
+    println!("  - max_fuel: Maximum instructions (fuel-based metering)");
     println!("\nDefault limits provide reasonable protection for most use cases.");
 
     Ok(())
