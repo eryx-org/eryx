@@ -1579,9 +1579,13 @@ impl PythonExecutor {
                     )
                 }
             } else if err_str.contains("fuel") || err_str.contains("out of fuel") {
+                // Calculate how much fuel was consumed before exhaustion
+                let remaining = store.get_fuel().unwrap_or(0);
+                let consumed = initial_fuel.saturating_sub(remaining);
+                let limit = fuel_limit.unwrap_or(u64::MAX);
                 format!(
-                    "Execution ran out of fuel (limit: {:?})",
-                    fuel_limit.unwrap_or(u64::MAX)
+                    "Execution ran out of fuel after {} instructions (limit: {})",
+                    consumed, limit
                 )
             } else {
                 format!("WASM execution error: {e:?}")
