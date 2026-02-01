@@ -192,8 +192,9 @@ jobs:
             rust = "1.90"
 
       - name: Check MSRV
-        # Exclude eryx-python as it requires native-extensions which needs WASI SDK
-        run: cargo check --workspace --exclude eryx-python
+        # Exclude eryx-python and eryx-precompile as they require building eryx-runtime
+        # which needs WASI SDK (not installed in MSRV check)
+        run: cargo check --workspace --exclude eryx-python --exclude eryx-precompile
 
   doc:
     name: Documentation

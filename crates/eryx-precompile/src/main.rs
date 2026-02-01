@@ -43,7 +43,7 @@ struct Args {
     ///   x86-64-v3  - AVX2, FMA, BMI1/2 (recommended for Fly.io, no AVX-512)
     ///   x86-64-v2  - SSE4.2, POPCNT (~2008+ CPUs)
     ///   x86-64     - Baseline SSE2 (maximum compatibility)
-    ///   <triple>   - Full target triple (e.g., aarch64-unknown-linux-gnu)
+    ///   `<triple>` - Full target triple (e.g., aarch64-unknown-linux-gnu)
     #[arg(short, long, default_value = "native")]
     target: String,
 
@@ -111,7 +111,9 @@ async fn main() -> Result<()> {
     if args.preinit {
         println!(
             "Stdlib:  {}",
-            args.stdlib.as_ref().map_or("-", |p| p.to_str().unwrap_or("-"))
+            args.stdlib
+                .as_ref()
+                .map_or("-", |p| p.to_str().unwrap_or("-"))
         );
     }
     println!();
