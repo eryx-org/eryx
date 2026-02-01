@@ -267,6 +267,15 @@ impl<'a> SessionExecuteBuilder<'a> {
     /// # Errors
     ///
     /// Returns an error if execution fails, times out, exceeds fuel limit, or the session is in use.
+    #[tracing::instrument(
+        name = "SessionExecuteBuilder::run",
+        skip(self),
+        fields(
+            code_len = self.code.len(),
+            callbacks = self.callbacks.len(),
+            fuel_limit = ?self.fuel_limit,
+        )
+    )]
     pub async fn run(self) -> Result<ExecutionOutput, Error> {
         self.session
             .execute_internal(
@@ -492,6 +501,11 @@ impl SessionExecutor {
     /// # Errors
     ///
     /// Returns an error if the WASM component cannot be instantiated.
+    #[tracing::instrument(
+        name = "SessionExecutor::new",
+        skip(executor, callbacks),
+        fields(callbacks = callbacks.len())
+    )]
     pub async fn new(
         executor: Arc<PythonExecutor>,
         callbacks: &[Arc<dyn Callback>],
@@ -932,6 +946,14 @@ impl SessionExecutor {
     /// # Errors
     ///
     /// Returns an error if re-instantiation fails.
+    #[tracing::instrument(
+        name = "SessionExecutor::reset",
+        skip(self, callbacks),
+        fields(
+            callbacks = callbacks.len(),
+            execution_count = self.execution_count,
+        )
+    )]
     pub async fn reset(&mut self, callbacks: &[Arc<dyn Callback>]) -> Result<(), Error> {
         let callback_infos = build_callback_infos(callbacks);
         let wasi = build_wasi_context(&self.executor)?;

@@ -1002,6 +1002,11 @@ impl PythonExecutor {
     ///
     /// Returns an error if the WASM component cannot be loaded or the
     /// wasmtime engine cannot be configured.
+    #[tracing::instrument(
+        name = "PythonExecutor::from_binary",
+        skip(wasm_bytes),
+        fields(wasm_bytes_len = wasm_bytes.len())
+    )]
     pub fn from_binary(wasm_bytes: &[u8]) -> std::result::Result<Self, Error> {
         let engine = Self::shared_engine()?;
         let component =
@@ -1025,6 +1030,10 @@ impl PythonExecutor {
     ///
     /// Returns an error if the file cannot be read or the WASM component
     /// cannot be loaded.
+    #[tracing::instrument(
+        name = "PythonExecutor::from_file",
+        fields(path = %path.as_ref().display())
+    )]
     pub fn from_file(path: impl AsRef<std::path::Path>) -> std::result::Result<Self, Error> {
         let engine = Self::shared_engine()?;
         let component =
@@ -1194,6 +1203,7 @@ impl PythonExecutor {
     /// Returns an error if the embedded resources cannot be extracted or
     /// the component cannot be loaded.
     #[cfg(feature = "embedded")]
+    #[tracing::instrument(name = "PythonExecutor::from_embedded_runtime")]
     pub fn from_embedded_runtime() -> std::result::Result<Self, Error> {
         let cache_key = CacheKey::embedded_runtime();
 
@@ -1675,6 +1685,7 @@ impl PythonExecutor {
     ///
     /// This does the expensive linking work once, so that `execute()` can
     /// quickly instantiate from the template.
+    #[tracing::instrument(name = "PythonExecutor::create_instance_pre", skip(engine, component))]
     fn create_instance_pre(
         engine: &Engine,
         component: &Component,
@@ -1747,6 +1758,17 @@ impl PythonExecutor {
     ///
     /// This is called by [`ExecuteBuilder::run`].
     #[allow(clippy::too_many_arguments)]
+    #[tracing::instrument(
+        name = "PythonExecutor::execute_internal",
+        skip_all,
+        fields(
+            code_len = code.len(),
+            callbacks = callbacks.len(),
+            memory_limit = ?memory_limit,
+            timeout = ?execution_timeout,
+            fuel_limit = ?fuel_limit,
+        )
+    )]
     async fn execute_internal(
         &self,
         code: &str,

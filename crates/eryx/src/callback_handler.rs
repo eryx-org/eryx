@@ -33,6 +33,13 @@ type InFlightCallbacks = FuturesUnordered<Pin<Box<dyn Future<Output = ()> + Send
 /// uses `asyncio.gather()` or similar patterns.
 ///
 /// Returns the total number of callback invocations.
+#[tracing::instrument(
+    skip(callback_rx, callbacks_map, resource_limits),
+    fields(
+        available_callbacks = callbacks_map.len(),
+        max_invocations = ?resource_limits.max_callback_invocations,
+    )
+)]
 pub async fn run_callback_handler(
     mut callback_rx: mpsc::Receiver<CallbackRequest>,
     callbacks_map: Arc<HashMap<String, Arc<dyn Callback>>>,
@@ -141,6 +148,10 @@ fn create_callback_future(
 ///
 /// Receives trace events from the channel, parses them, optionally forwards
 /// to the trace handler, and collects them for the final result.
+#[tracing::instrument(
+    skip(trace_rx, trace_handler),
+    fields(has_handler = trace_handler.is_some())
+)]
 pub(crate) async fn run_trace_collector(
     mut trace_rx: mpsc::UnboundedReceiver<TraceRequest>,
     trace_handler: Option<Arc<dyn TraceHandler>>,
@@ -165,6 +176,7 @@ pub(crate) async fn run_trace_collector(
 /// Owns a [`ConnectionManager`] and processes TCP/TLS requests received through
 /// the channel. This allows async network operations to work with wasmtime's
 /// synchronous accessor pattern.
+#[tracing::instrument(skip(net_rx, manager))]
 pub(crate) async fn run_net_handler(
     mut net_rx: mpsc::Receiver<NetRequest>,
     mut manager: ConnectionManager,

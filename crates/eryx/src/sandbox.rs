@@ -187,6 +187,16 @@ impl Sandbox {
     /// # Errors
     ///
     /// Returns an error if the Python code fails to execute or a resource limit is exceeded.
+    #[tracing::instrument(
+        skip(self, code),
+        fields(
+            code_len = code.len(),
+            callbacks = self.callbacks.len(),
+            has_trace_handler = self.trace_handler.is_some(),
+            timeout = ?self.resource_limits.execution_timeout,
+            fuel_limit = ?self.resource_limits.max_fuel,
+        )
+    )]
     pub async fn execute(&self, code: &str) -> Result<ExecuteResult, Error> {
         let start = Instant::now();
 
@@ -274,6 +284,14 @@ impl Sandbox {
                     handler.on_output(&output.stdout).await;
                     handler.on_stderr(&output.stderr).await;
                 }
+
+                tracing::info!(
+                    duration_ms = duration.as_millis() as u64,
+                    callback_invocations,
+                    peak_memory_bytes = output.peak_memory_bytes,
+                    fuel_consumed = ?output.fuel_consumed,
+                    "Sandbox execution completed"
+                );
 
                 Ok(ExecuteResult {
                     stdout: output.stdout,
@@ -373,6 +391,10 @@ impl Sandbox {
     /// # Errors
     ///
     /// Returns an error if the execution cannot be started.
+    #[tracing::instrument(
+        skip(self, code),
+        fields(code_len = code.len())
+    )]
     pub fn execute_cancellable(&self, code: &str) -> ExecutionHandle {
         let cancel_token = CancellationToken::new();
         let (result_tx, result_rx) = oneshot::channel();
@@ -1339,6 +1361,17 @@ impl SandboxBuilder<state::Has, state::Has> {
     /// This overrides any `with_embedded_runtime()` setting since native
     /// extensions must be linked into the runtime.
     #[allow(unused_mut)] // mut needed when native-extensions feature is enabled
+    #[tracing::instrument(
+        name = "SandboxBuilder::build",
+        skip(self),
+        fields(
+            callbacks = self.callbacks.len(),
+            packages = self.packages.len(),
+            has_trace_handler = self.trace_handler.is_some(),
+            timeout = ?self.resource_limits.execution_timeout,
+            fuel_limit = ?self.resource_limits.max_fuel,
+        )
+    )]
     pub fn build(mut self) -> Result<Sandbox, Error> {
         // First, compute mount indices and register native extensions from packages
         // with correct dlopen paths. Mount index 0 is reserved for explicit site-packages.
