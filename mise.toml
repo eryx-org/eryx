@@ -417,16 +417,34 @@ run = "cargo bench --package eryx --all-features -- --save-baseline main"
 description = "Pre-compile eryx-runtime WASM to native code (without Python pre-init)"
 depends = ["build-eryx-runtime"]
 env = { ERYX_PRECOMPILE_BOOTSTRAP = "1" }
-run = "cargo run -p eryx --example precompile --release -- --output crates/eryx-runtime/runtime-no-preinit.cwasm"
+run = """
+# Use ERYX_CPU_FEATURES for portable builds (default: native)
+TARGET="${ERYX_CPU_FEATURES:-native}"
+cargo run -p eryx-precompile --release -- \
+  crates/eryx-runtime/runtime.wasm \
+  --target "$TARGET" \
+  --output crates/eryx-runtime/runtime-no-preinit.cwasm \
+  --no-verify
+"""
 sources = ["crates/eryx-runtime/runtime.wasm"]
 outputs = ["crates/eryx-runtime/runtime-no-preinit.cwasm"]
 
 [tasks.precompile-eryx-runtime-preinit]
-description = "Pre-initialize Python and pre-compile runtime (faster sessions, requires preinit)"
+description = "Pre-initialize Python and pre-compile runtime (faster sessions)"
 depends = ["build-eryx-runtime", "build-preinit", "setup-eryx-runtime-tests"]
-# For portable builds (VMs without AVX-512), set ERYX_CPU_FEATURES=x86-64-v3
 env = { ERYX_PRECOMPILE_BOOTSTRAP = "1" }
-run = "cargo run --example precompile --features preinit --release"
+run = """
+# Use ERYX_CPU_FEATURES for portable builds (default: native)
+# For Fly.io, set ERYX_CPU_FEATURES=x86-64-v3 (no AVX-512)
+TARGET="${ERYX_CPU_FEATURES:-native}"
+cargo run -p eryx-precompile --release -- \
+  crates/eryx-runtime/runtime.wasm \
+  --preinit \
+  --stdlib crates/eryx-wasm-runtime/tests/python-stdlib \
+  --target "$TARGET" \
+  --output crates/eryx-runtime/runtime.cwasm \
+  --no-verify
+"""
 sources = [
   "crates/eryx-runtime/runtime.wasm",
   "crates/eryx-wasm-runtime/tests/python-stdlib/encodings/__init__.py",

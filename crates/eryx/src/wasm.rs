@@ -168,6 +168,88 @@ impl ExecutionOutput {
     }
 }
 
+/// CPU feature level for AOT compilation.
+///
+/// These levels correspond to x86-64 microarchitecture feature tiers.
+/// Using a lower level produces more portable binaries at the cost of
+/// potentially slower execution.
+///
+/// # Example
+///
+/// ```rust,ignore
+/// use eryx::{PythonExecutor, CpuFeatureLevel};
+///
+/// // Compile for Fly.io (x86-64-v3, no AVX-512)
+/// let cwasm = PythonExecutor::precompile_with_options(
+///     &wasm_bytes,
+///     None,  // native target
+///     Some(CpuFeatureLevel::X86_64_V3),
+/// )?;
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CpuFeatureLevel {
+    /// Baseline x86_64: SSE2 only. Maximum compatibility (~2003+ CPUs).
+    X86_64,
+    /// x86-64-v2: SSE4.2, POPCNT, SSSE3 (~2008+ CPUs, Nehalem/Westmere era).
+    X86_64v2,
+    /// x86-64-v3: AVX2, FMA, BMI1/2 (~2013+ CPUs, Haswell era). No AVX-512.
+    /// **Recommended for Fly.io** and other cloud VMs.
+    X86_64v3,
+    /// x86-64-v4: AVX-512 (~2017+ CPUs, Skylake-X era).
+    X86_64v4,
+    /// Use host CPU features for best performance. Not portable.
+    #[default]
+    Native,
+}
+
+impl CpuFeatureLevel {
+    /// Parse from string (e.g., "x86-64-v3" or "native").
+    ///
+    /// Returns `None` if the string doesn't match a known level.
+    #[must_use]
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "x86-64" | "x86-64-v1" => Some(Self::X86_64),
+            "x86-64-v2" => Some(Self::X86_64v2),
+            "x86-64-v3" => Some(Self::X86_64v3),
+            "x86-64-v4" => Some(Self::X86_64v4),
+            "native" => Some(Self::Native),
+            _ => None,
+        }
+    }
+
+    /// Convert to the string representation.
+    #[must_use]
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Self::X86_64 => "x86-64",
+            Self::X86_64v2 => "x86-64-v2",
+            Self::X86_64v3 => "x86-64-v3",
+            Self::X86_64v4 => "x86-64-v4",
+            Self::Native => "native",
+        }
+    }
+}
+
+impl std::fmt::Display for CpuFeatureLevel {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.as_str())
+    }
+}
+
+impl std::str::FromStr for CpuFeatureLevel {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Self::parse(s).ok_or_else(|| {
+            format!(
+                "Unknown CPU feature level '{}'. Valid values: x86-64, x86-64-v2, x86-64-v3, x86-64-v4, native",
+                s
+            )
+        })
+    }
+}
+
 /// Tracks memory usage during WASM execution.
 ///
 /// This struct implements `ResourceLimiter` to intercept memory growth
@@ -1244,6 +1326,45 @@ impl PythonExecutor {
         Self::precompile_with_target(&wasm_bytes, target)
     }
 
+    /// Pre-compile the WASM component to native code with explicit CPU feature control.
+    ///
+    /// This provides fine-grained control over both the target architecture and CPU feature
+    /// level without requiring environment variables.
+    ///
+    /// # Arguments
+    ///
+    /// * `wasm_bytes` - The WASM component bytes to precompile
+    /// * `target` - Optional target triple (e.g., "aarch64-unknown-linux-gnu"). None uses native.
+    /// * `cpu_features` - CPU feature level to target. Use `CpuFeatureLevel::X86_64v3` for Fly.io.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// use eryx::{PythonExecutor, CpuFeatureLevel};
+    ///
+    /// // Compile for Fly.io (x86-64-v3, no AVX-512)
+    /// let cwasm = PythonExecutor::precompile_with_options(
+    ///     &wasm_bytes,
+    ///     None,  // native target triple
+    ///     CpuFeatureLevel::X86_64v3,
+    /// )?;
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the target is invalid or pre-compilation fails.
+    #[cfg(any(feature = "embedded", feature = "preinit"))]
+    pub fn precompile_with_options(
+        wasm_bytes: &[u8],
+        target: Option<&str>,
+        cpu_features: CpuFeatureLevel,
+    ) -> std::result::Result<Vec<u8>, Error> {
+        let engine = Self::create_engine_with_options(target, cpu_features)?;
+        engine
+            .precompile_component(wasm_bytes)
+            .map_err(|e| Error::WasmEngine(format!("Failed to precompile component: {e}")))
+    }
+
     /// Create a configured wasmtime engine.
     ///
     /// Version identifier for engine configuration.
@@ -1344,6 +1465,110 @@ impl PythonExecutor {
         Self::apply_cpu_feature_flags(&mut config)?;
 
         Engine::new(&config).map_err(|e| Error::WasmEngine(e.to_string()))
+    }
+
+    /// Create a configured wasmtime engine with explicit CPU feature control.
+    ///
+    /// This provides an alternative to environment variables for controlling CPU features,
+    /// making it easier to use in CLI tools and avoiding global state.
+    #[cfg(any(feature = "embedded", feature = "preinit"))]
+    fn create_engine_with_options(
+        target: Option<&str>,
+        cpu_features: CpuFeatureLevel,
+    ) -> std::result::Result<Engine, Error> {
+        let mut config = Config::new();
+        config.wasm_component_model(true);
+        config.wasm_component_model_async(true);
+        config.async_support(true);
+        config.epoch_interruption(true);
+        config.consume_fuel(true);
+        config.memory_init_cow(true);
+        config.cranelift_opt_level(wasmtime::OptLevel::SpeedAndSize);
+        config.async_stack_size(512 * 1024);
+
+        // Configure target triple
+        if let Some(target_str) = target {
+            config
+                .target(target_str)
+                .map_err(|e| Error::WasmEngine(format!("Invalid target '{target_str}': {e}")))?;
+        }
+
+        // Apply CPU feature level
+        Self::apply_cpu_feature_level(&mut config, cpu_features)?;
+
+        Engine::new(&config).map_err(|e| Error::WasmEngine(e.to_string()))
+    }
+
+    /// Apply CPU feature level preset to the wasmtime config.
+    ///
+    /// This disables CPU instructions that are above the requested level,
+    /// producing more portable binaries.
+    #[cfg(any(feature = "embedded", feature = "preinit"))]
+    #[allow(unsafe_code)]
+    fn apply_cpu_feature_level(
+        config: &mut Config,
+        level: CpuFeatureLevel,
+    ) -> std::result::Result<(), Error> {
+        // AVX-512 feature flags to disable for x86-64-v3 and below
+        const AVX512_FLAGS: &[&str] = &[
+            "has_avx512bitalg",
+            "has_avx512dq",
+            "has_avx512f",
+            "has_avx512vbmi",
+            "has_avx512vl",
+        ];
+
+        match level {
+            CpuFeatureLevel::X86_64 => {
+                // Baseline: disable everything above SSE2
+                // SAFETY: These are valid Cranelift flags for x86
+                unsafe {
+                    config.cranelift_flag_set("has_sse3", "false");
+                    config.cranelift_flag_set("has_ssse3", "false");
+                    config.cranelift_flag_set("has_sse41", "false");
+                    config.cranelift_flag_set("has_sse42", "false");
+                    config.cranelift_flag_set("has_avx", "false");
+                    config.cranelift_flag_set("has_avx2", "false");
+                    config.cranelift_flag_set("has_fma", "false");
+                    config.cranelift_flag_set("has_bmi1", "false");
+                    config.cranelift_flag_set("has_bmi2", "false");
+                    config.cranelift_flag_set("has_lzcnt", "false");
+                    config.cranelift_flag_set("has_popcnt", "false");
+                    for flag in AVX512_FLAGS {
+                        config.cranelift_flag_set(flag, "false");
+                    }
+                }
+            }
+            CpuFeatureLevel::X86_64v2 => {
+                // SSE4.2, POPCNT, SSSE3 - disable AVX and above
+                // SAFETY: These are valid Cranelift flags for x86
+                unsafe {
+                    config.cranelift_flag_set("has_avx", "false");
+                    config.cranelift_flag_set("has_avx2", "false");
+                    config.cranelift_flag_set("has_fma", "false");
+                    config.cranelift_flag_set("has_bmi1", "false");
+                    config.cranelift_flag_set("has_bmi2", "false");
+                    for flag in AVX512_FLAGS {
+                        config.cranelift_flag_set(flag, "false");
+                    }
+                }
+            }
+            CpuFeatureLevel::X86_64v3 => {
+                // AVX2, FMA, BMI1/2 - disable AVX-512 only
+                // This is what Fly.io shared CPUs support (AMD EPYC)
+                // SAFETY: These are valid Cranelift flags for x86
+                unsafe {
+                    for flag in AVX512_FLAGS {
+                        config.cranelift_flag_set(flag, "false");
+                    }
+                }
+            }
+            CpuFeatureLevel::X86_64v4 | CpuFeatureLevel::Native => {
+                // Full features - nothing to disable
+            }
+        }
+
+        Ok(())
     }
 
     /// Apply CPU feature level presets and custom Cranelift flags.

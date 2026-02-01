@@ -119,3 +119,8 @@ cranelift-codegen.opt-level = 3
 regalloc2.opt-level = 3
 wasmtime.opt-level = 3
 wasmparser.opt-level = 3
+
+# The profile that 'dist' will build with
+[profile.dist]
+inherits = "release"
+lto = "thin"
