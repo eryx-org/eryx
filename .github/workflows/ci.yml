@@ -33,6 +33,8 @@ jobs:
     runs-on: self-hosted
     steps:
       - uses: actions/checkout@v4
+        with:
+          clean: false  # Preserve target/ directory for incremental builds
 
       # No cache action needed - self-hosted runner has persistent cache
 
@@ -41,15 +43,7 @@ jobs:
       - name: Install nightly toolchain
         run: rustup toolchain install nightly --component rust-src
 
-      - name: Force rebuild (cache may have stale timestamps)
-        run: |
-          # Touch ALL sources to ensure mise doesn't skip build due to cached timestamps
-          # The Rust cache may restore .rlib files with newer timestamps than sources
-          find crates/eryx-wasm-runtime/src -name "*.rs" -exec touch {} +
-          touch crates/eryx-wasm-runtime/clock_stubs.c
-          touch crates/eryx-wasm-runtime/Cargo.toml
-          # Remove outputs (mise checks mtime, not existence)
-          rm -f crates/eryx-runtime/runtime.wasm crates/eryx-runtime/runtime.cwasm
+      # Skip force rebuild on self-hosted - persistent filesystem maintains correct timestamps
 
       - name: Build eryx-runtime
         run: mise run build-eryx-runtime
