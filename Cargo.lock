@@ -897,7 +897,7 @@ dependencies = [
 
 [[package]]
 name = "eryx"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -931,7 +931,7 @@ dependencies = [
 
 [[package]]
 name = "eryx-precompile"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -943,7 +943,7 @@ dependencies = [
 
 [[package]]
 name = "eryx-python"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "eryx",
  "pyo3",
@@ -957,7 +957,7 @@ dependencies = [
 
 [[package]]
 name = "eryx-runtime"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -979,7 +979,7 @@ dependencies = [
 
 [[package]]
 name = "eryx-vfs"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -998,7 +998,7 @@ dependencies = [
 
 [[package]]
 name = "eryx-wasm-runtime"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "pyo3",
  "tokio",

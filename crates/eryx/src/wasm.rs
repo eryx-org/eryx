@@ -1065,7 +1065,7 @@ impl PythonExecutor {
     ///
     /// Returns an error if the pre-compiled bytes are invalid or incompatible
     /// with the current engine configuration.
-    #[cfg(feature = "embedded")]
+    #[cfg(any(feature = "embedded", feature = "preinit"))]
     #[allow(unsafe_code)]
     pub unsafe fn from_precompiled(precompiled_bytes: &[u8]) -> std::result::Result<Self, Error> {
         let engine = Self::shared_engine()?;
@@ -1100,16 +1100,34 @@ impl PythonExecutor {
     ///
     /// Returns an error if the file cannot be read or the pre-compiled component
     /// is invalid or incompatible with the current engine configuration.
-    #[cfg(feature = "embedded")]
+    #[cfg(any(feature = "embedded", feature = "preinit"))]
     #[allow(unsafe_code)]
     pub unsafe fn from_precompiled_file(
         path: impl AsRef<std::path::Path>,
     ) -> std::result::Result<Self, Error> {
-        // Delegate to the internal method without a cache key
-        // This means it won't use or populate the InstancePreCache
-        #[allow(unsafe_code)]
-        unsafe {
-            Self::from_precompiled_file_internal(path.as_ref(), None)
+        // With embedded feature, delegate to internal method for caching support
+        #[cfg(feature = "embedded")]
+        {
+            #[allow(unsafe_code)]
+            unsafe {
+                Self::from_precompiled_file_internal(path.as_ref(), None)
+            }
+        }
+        // With preinit-only, load directly without caching
+        #[cfg(not(feature = "embedded"))]
+        {
+            let engine = Self::shared_engine()?;
+            // SAFETY: Caller guarantees the precompiled file is trusted
+            #[allow(unsafe_code)]
+            let component = unsafe { Component::deserialize_file(&engine, path.as_ref()) }
+                .map_err(Error::WasmComponent)?;
+            let instance_pre = Self::create_instance_pre(&engine, &component)?;
+            Ok(Self {
+                engine,
+                instance_pre,
+                python_stdlib_path: None,
+                python_site_packages_paths: Vec::new(),
+            })
         }
     }
 

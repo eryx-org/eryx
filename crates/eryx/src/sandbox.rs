@@ -622,10 +622,10 @@ enum WasmSource {
     /// Path to a WASM component file (will be compiled at load time).
     File(std::path::PathBuf),
     /// Pre-compiled component bytes (skip compilation, unsafe).
-    #[cfg(feature = "embedded")]
+    #[cfg(any(feature = "embedded", feature = "preinit"))]
     PrecompiledBytes(Vec<u8>),
     /// Path to a pre-compiled component file (skip compilation, unsafe).
-    #[cfg(feature = "embedded")]
+    #[cfg(any(feature = "embedded", feature = "preinit"))]
     PrecompiledFile(std::path::PathBuf),
     /// Use the embedded pre-compiled runtime (safe, fast).
     #[cfg(feature = "embedded")]
@@ -888,7 +888,7 @@ impl<S> SandboxBuilder<state::Needs, S> {
     ///         .build()?
     /// };
     /// ```
-    #[cfg(feature = "embedded")]
+    #[cfg(any(feature = "embedded", feature = "preinit"))]
     #[must_use]
     #[allow(unsafe_code)]
     pub unsafe fn with_precompiled_bytes(
@@ -931,7 +931,7 @@ impl<S> SandboxBuilder<state::Needs, S> {
     ///         .build()?
     /// };
     /// ```
-    #[cfg(feature = "embedded")]
+    #[cfg(any(feature = "embedded", feature = "preinit"))]
     #[must_use]
     #[allow(unsafe_code)]
     pub unsafe fn with_precompiled_file(
@@ -1486,7 +1486,7 @@ impl SandboxBuilder<state::Has, state::Has> {
             WasmSource::Bytes(bytes) => PythonExecutor::from_binary(bytes)?,
             WasmSource::File(path) => PythonExecutor::from_file(path)?,
 
-            #[cfg(feature = "embedded")]
+            #[cfg(any(feature = "embedded", feature = "preinit"))]
             WasmSource::PrecompiledBytes(bytes) => {
                 // SAFETY: User is responsible for only using trusted pre-compiled bytes.
                 // The `with_precompiled_bytes` method is already marked unsafe, so the
@@ -1497,7 +1497,7 @@ impl SandboxBuilder<state::Has, state::Has> {
                 }
             }
 
-            #[cfg(feature = "embedded")]
+            #[cfg(any(feature = "embedded", feature = "preinit"))]
             WasmSource::PrecompiledFile(path) => {
                 // SAFETY: User is responsible for only using trusted pre-compiled files.
                 // The `with_precompiled_file` method is already marked unsafe, so the
