@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## `eryx-wasm-runtime` - [0.2.1](https://github.com/eryx-org/eryx/releases/tag/eryx-wasm-runtime-v0.2.1) - 2026-02-01
+## `eryx-wasm-runtime` - [0.3.0](https://github.com/eryx-org/eryx/releases/tag/eryx-wasm-runtime-v0.3.0) - 2026-02-01
 
 ### Added
 - add stderr capture and streaming
@@ -60,7 +60,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Add comprehensive integration tests for Python execution
 - *(eryx-wasm-runtime)* clarify wasm32-wasip1 vs wasip2 in docs
 
-## `eryx-python` - [0.2.1](https://github.com/eryx-org/eryx/releases/tag/eryx-python-v0.2.1) - 2026-02-01
+## `eryx-python` - [0.3.0](https://github.com/eryx-org/eryx/releases/tag/eryx-python-v0.3.0) - 2026-02-01
 
 ### Added
 - add fuel-based instruction tracking and limiting
@@ -101,7 +101,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Use 'pyeryx' for Python package
 - Run mise unify
 
-## `eryx-precompile` - [0.2.1](https://github.com/eryx-org/eryx/releases/tag/eryx-precompile-v0.2.1) - 2026-02-01
+## `eryx-precompile` - [0.3.0](https://github.com/eryx-org/eryx/releases/tag/eryx-precompile-v0.3.0) - 2026-02-01
 
 ### Added
 - add eryx-precompile CLI binary
@@ -110,7 +110,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - replace expect() with ok_or_else() for clippy
 - resolve CI failures for eryx-precompile
 
-## `eryx` - [0.2.1](https://github.com/eryx-org/eryx/compare/eryx-v0.1.0...eryx-v0.2.1) - 2026-02-01
+## `eryx` - [0.3.0](https://github.com/eryx-org/eryx/compare/eryx-v0.1.0...eryx-v0.3.0) - 2026-02-01
 
 ### Added
 - add tracing instrumentation to key eryx functions
@@ -126,7 +126,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - use typed error variants instead of string matching
 - add fuel exhaustion tests and improve error message
 
-## `eryx-vfs` - [0.2.1](https://github.com/eryx-org/eryx/releases/tag/eryx-vfs-v0.2.1) - 2026-02-01
+## `eryx-vfs` - [0.3.0](https://github.com/eryx-org/eryx/releases/tag/eryx-vfs-v0.3.0) - 2026-02-01
 
 ### Added
 - *(vfs)* implement stream support for read_via_stream/write_via_stream/append_via_stream
@@ -143,7 +143,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Other
 - Bump wasmtime
 
-## `eryx-runtime` - [0.2.1](https://github.com/eryx-org/eryx/releases/tag/eryx-runtime-v0.2.1) - 2026-02-01
+## `eryx-runtime` - [0.3.0](https://github.com/eryx-org/eryx/releases/tag/eryx-runtime-v0.3.0) - 2026-02-01
 
 ### Added
 - add SQLite3 support

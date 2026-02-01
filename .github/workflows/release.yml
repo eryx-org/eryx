@@ -278,10 +278,42 @@ jobs:
 
           gh release create "${{ needs.plan.outputs.tag }}" --target "$RELEASE_COMMIT" $PRERELEASE_FLAG --title "$ANNOUNCEMENT_TITLE" --notes-file "$RUNNER_TEMP/notes.txt" artifacts/*
 
+  # Upload WASM runtime artifacts to the release (not handled by cargo-dist)
+  upload-runtime-artifacts:
+    needs:
+      - plan
+      - host
+    if: ${{ always() && needs.host.result == 'success' }}
+    runs-on: "ubuntu-22.04"
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install mise
+        uses: jdx/mise-action@v2
+
+      - name: Build runtime.wasm
+        run: |
+          cd crates/eryx-runtime
+          mise trust ../..
+          mise run build-eryx-runtime
+        env:
+          BUILD_ERYX_RUNTIME: "1"
+
+      - name: Upload runtime.wasm to release
+        run: |
+          gh release upload "${{ needs.plan.outputs.tag }}" \
+            crates/eryx-runtime/runtime.wasm \
+            --clobber
+
   announce:
     needs:
       - plan
       - host
+      - upload-runtime-artifacts
     # use "always() && ..." to allow us to wait for all publish jobs while
     # still allowing individual publish jobs to skip themselves (for prereleases).
     # "host" however must run to completion, no skipping allowed!
