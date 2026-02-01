@@ -18,9 +18,9 @@ jobs:
   # Fast check for dependency drift - runs in parallel with build
   unify-check:
     name: Dependency Check
-    runs-on: namespace-profile-eryx-light
+    runs-on: self-hosted
     steps:
-      - uses: namespacelabs/nscloud-checkout-action@v8
+      - uses: actions/checkout@v4
 
       - uses: ./.github/actions/setup-rust
 
@@ -30,14 +30,11 @@ jobs:
   # Build eryx-wasm-runtime and precompile it - other jobs depend on this
   build-eryx-runtime:
     name: Build eryx-runtime
-    runs-on: namespace-profile-eryx-heavy-linux-amd64
+    runs-on: self-hosted
     steps:
-      - uses: namespacelabs/nscloud-checkout-action@v8
+      - uses: actions/checkout@v4
 
-      - name: Configure Rust cache
-        uses: namespacelabs/nscloud-cache-action@v1
-        with:
-          cache: rust
+      # No cache action needed - self-hosted runner has persistent cache
 
       - uses: ./.github/actions/setup-rust
 
@@ -84,7 +81,7 @@ jobs:
           ERYX_PRECOMPILE_BOOTSTRAP: "1"
 
       - name: Upload WASM artifacts
-        uses: namespace-actions/upload-artifact@v1
+        uses: actions/upload-artifact@v4
         with:
           name: wasm-runtime
           path: |
@@ -96,23 +93,20 @@ jobs:
 
   lint:
     name: Lint
-    runs-on: namespace-profile-eryx-standard
+    runs-on: self-hosted
     needs: build-eryx-runtime
     steps:
-      - uses: namespacelabs/nscloud-checkout-action@v8
+      - uses: actions/checkout@v4
 
       - name: Download WASM artifacts
-        uses: namespace-actions/download-artifact@v1
+        uses: actions/download-artifact@v4
         with:
           name: wasm-runtime
           path: crates/
 
       - uses: ./.github/actions/mark-wasm-current
 
-      - name: Configure Rust cache
-        uses: namespacelabs/nscloud-cache-action@v1
-        with:
-          cache: rust
+      # No cache action needed - self-hosted runner has persistent cache
 
       - uses: ./.github/actions/setup-rust
 
@@ -125,13 +119,13 @@ jobs:
 
   test:
     name: Test
-    runs-on: namespace-profile-eryx-heavy-linux-amd64
+    runs-on: self-hosted
     needs: build-eryx-runtime
     steps:
-      - uses: namespacelabs/nscloud-checkout-action@v8
+      - uses: actions/checkout@v4
 
       - name: Download WASM artifacts
-        uses: namespace-actions/download-artifact@v1
+        uses: actions/download-artifact@v4
         with:
           name: wasm-runtime
           path: crates/
@@ -148,24 +142,9 @@ jobs:
           ls -la crates/eryx-wasm-runtime/target/
           ls crates/eryx-wasm-runtime/tests/python-stdlib/ | head -10
 
-      - name: Install mold linker and clang
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y mold clang
+      # mold and clang already installed on self-hosted runner
 
-      - name: Configure mold linker
-        run: |
-          mkdir -p .cargo
-          cat >> .cargo/config.toml << 'EOF'
-          [target.x86_64-unknown-linux-gnu]
-          linker = "clang"
-          rustflags = ["-C", "link-arg=-fuse-ld=mold"]
-          EOF
-
-      - name: Configure Rust cache
-        uses: namespacelabs/nscloud-cache-action@v1
-        with:
-          cache: rust
+      # No cache action needed - self-hosted runner has persistent cache
 
       - uses: ./.github/actions/setup-rust
 
@@ -179,14 +158,11 @@ jobs:
 
   msrv:
     name: MSRV
-    runs-on: namespace-profile-eryx-light
+    runs-on: self-hosted
     steps:
-      - uses: namespacelabs/nscloud-checkout-action@v8
+      - uses: actions/checkout@v4
 
-      - name: Configure Rust cache
-        uses: namespacelabs/nscloud-cache-action@v1
-        with:
-          cache: rust
+      # No cache action needed - self-hosted runner has persistent cache
 
       - name: Install mise
         uses: jdx/mise-action@v3
@@ -202,23 +178,20 @@ jobs:
 
   doc:
     name: Documentation
-    runs-on: namespace-profile-eryx-standard
+    runs-on: self-hosted
     needs: build-eryx-runtime
     steps:
-      - uses: namespacelabs/nscloud-checkout-action@v8
+      - uses: actions/checkout@v4
 
       - name: Download WASM artifacts
-        uses: namespace-actions/download-artifact@v1
+        uses: actions/download-artifact@v4
         with:
           name: wasm-runtime
           path: crates/
 
       - uses: ./.github/actions/mark-wasm-current
 
-      - name: Configure Rust cache
-        uses: namespacelabs/nscloud-cache-action@v1
-        with:
-          cache: rust
+      # No cache action needed - self-hosted runner has persistent cache
 
       - uses: ./.github/actions/setup-rust
 
@@ -231,23 +204,20 @@ jobs:
   # Check that all feature combinations compile
   check-features:
     name: Check Feature Combinations
-    runs-on: namespace-profile-eryx-standard
+    runs-on: self-hosted
     needs: build-eryx-runtime
     steps:
-      - uses: namespacelabs/nscloud-checkout-action@v8
+      - uses: actions/checkout@v4
 
       - name: Download WASM artifacts
-        uses: namespace-actions/download-artifact@v1
+        uses: actions/download-artifact@v4
         with:
           name: wasm-runtime
           path: crates/
 
       - uses: ./.github/actions/mark-wasm-current
 
-      - name: Configure Rust cache
-        uses: namespacelabs/nscloud-cache-action@v1
-        with:
-          cache: rust
+      # No cache action needed - self-hosted runner has persistent cache
 
       - uses: ./.github/actions/setup-rust
 
@@ -268,23 +238,20 @@ jobs:
   # Run examples to ensure they don't bitrot
   examples:
     name: Examples
-    runs-on: namespace-profile-eryx-standard
+    runs-on: self-hosted
     needs: build-eryx-runtime
     steps:
-      - uses: namespacelabs/nscloud-checkout-action@v8
+      - uses: actions/checkout@v4
 
       - name: Download WASM artifacts
-        uses: namespace-actions/download-artifact@v1
+        uses: actions/download-artifact@v4
         with:
           name: wasm-runtime
           path: crates/
 
       - uses: ./.github/actions/mark-wasm-current
 
-      - name: Configure Rust cache
-        uses: namespacelabs/nscloud-cache-action@v1
-        with:
-          cache: rust
+      # No cache action needed - self-hosted runner has persistent cache
 
       - uses: ./.github/actions/setup-rust
 
@@ -316,23 +283,20 @@ jobs:
   # Test Python bindings
   python-bindings:
     name: Python Bindings
-    runs-on: namespace-profile-eryx-standard
+    runs-on: self-hosted
     needs: build-eryx-runtime
     steps:
-      - uses: namespacelabs/nscloud-checkout-action@v8
+      - uses: actions/checkout@v4
 
       - name: Download WASM artifacts
-        uses: namespace-actions/download-artifact@v1
+        uses: actions/download-artifact@v4
         with:
           name: wasm-runtime
           path: crates/
 
       - uses: ./.github/actions/mark-wasm-current
 
-      - name: Configure Rust cache
-        uses: namespacelabs/nscloud-cache-action@v1
-        with:
-          cache: rust
+      # No cache action needed - self-hosted runner has persistent cache
 
       - uses: ./.github/actions/setup-rust
 
