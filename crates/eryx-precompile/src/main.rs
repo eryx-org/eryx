@@ -132,7 +132,7 @@ async fn main() -> Result<()> {
         let stdlib = args
             .stdlib
             .as_ref()
-            .expect("--stdlib required with --preinit");
+            .ok_or_else(|| anyhow::anyhow!("--stdlib required with --preinit"))?;
 
         // Validate stdlib exists
         if !stdlib.exists() || !stdlib.join("encodings").exists() {
