@@ -300,9 +300,7 @@ jobs:
 
       - uses: ./.github/actions/setup-rust
 
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
+      # Use system Python on self-hosted runner (no setup-python needed)
 
       - name: Create virtualenv and install dependencies
         run: |
