@@ -11,3 +11,7 @@ ci = "github"
 installers = []
 # Target platforms to build apps for (Rust target-triple syntax)
 targets = ["aarch64-apple-darwin", "aarch64-unknown-linux-gnu", "x86_64-apple-darwin", "x86_64-unknown-linux-gnu", "x86_64-pc-windows-msvc"]
+# Build packages individually instead of using --workspace
+# This avoids feature unification issues where other packages (like eryx-python)
+# enable features that require build-time artifacts we don't have
+precise-builds = true
