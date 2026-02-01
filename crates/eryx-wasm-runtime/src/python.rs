@@ -1231,6 +1231,10 @@ def _eryx_exec(code):
     global _eryx_callback_code
     _eryx_callback_code = 0
 
+    # Clear async result dicts from any previous execution (critical for preinit)
+    _eryx_async_import_results.clear()
+    _eryx_net_results.clear()
+
     # Clear and redirect stdout/stderr
     _eryx_stdout.seek(0)
     _eryx_stdout.truncate(0)
