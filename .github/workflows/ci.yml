@@ -13,6 +13,8 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
+  # Disable incremental compilation so sccache can cache Rust builds
+  CARGO_INCREMENTAL: 0
 
 jobs:
   # Fast check for dependency drift - runs in parallel with build
