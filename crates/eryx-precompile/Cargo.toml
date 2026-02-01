@@ -1,0 +1,24 @@
+[package]
+name = "eryx-precompile"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "CLI tool for pre-compiling eryx WASM runtimes"
+
+[[bin]]
+name = "eryx-precompile"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+clap = { version = "4", features = ["derive"] }
+eryx = { workspace = true, features = ["preinit", "embedded"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
+tracing.workspace = true
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[lints]
+workspace = true
