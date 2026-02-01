@@ -69,3 +69,4 @@ crates/eryx-python/python/eryx/__pycache__/
 crates/eryx-python/python/eryx/_eryx*.so
 crates/eryx-python/tests/__pycache__/
 crates/eryx-python/.pytest_cache/
+.beads/
