@@ -185,14 +185,73 @@ except Exception as e:
 
     println!("Output:\n{}", result.stdout);
 
-    // Example 4: Custom limits for untrusted code
-    println!("\n--- Example 4: Restrictive Limits for Untrusted Code ---");
+    // Example 4: Fuel limit (instruction counting)
+    println!("\n--- Example 4: Fuel Limit (Instruction Counting) ---");
+    println!("Setting a fuel limit to bound CPU usage...\n");
+
+    let sandbox = Sandbox::embedded()
+        .with_resource_limits(ResourceLimits {
+            max_fuel: Some(500_000_000), // 500M instructions - enough for simple code
+            execution_timeout: Some(Duration::from_secs(10)),
+            ..Default::default()
+        })
+        .build()?;
+
+    // First: simple code that completes within limit
+    let result = rt.block_on(async {
+        sandbox
+            .execute(
+                r#"
+x = sum(range(100))
+print(f"Sum: {x}")
+"#,
+            )
+            .await
+    })?;
+    println!("Simple code succeeded:");
+    println!("  Output: {}", result.stdout.trim());
+    println!(
+        "  Fuel consumed: {:?} instructions",
+        result.stats.fuel_consumed
+    );
+
+    // Second: code that exceeds the fuel limit
+    let sandbox = Sandbox::embedded()
+        .with_resource_limits(ResourceLimits {
+            max_fuel: Some(100_000_000), // 100M instructions - tight limit for loops
+            execution_timeout: Some(Duration::from_secs(10)),
+            ..Default::default()
+        })
+        .build()?;
+
+    let result = rt.block_on(async {
+        sandbox
+            .execute(
+                r#"
+# This loop will exhaust fuel before completing
+total = 0
+for i in range(1000000):
+    total += i
+print(f"Total: {total}")
+"#,
+            )
+            .await
+    });
+
+    match result {
+        Ok(r) => println!("Unexpectedly succeeded: {}", r.stdout),
+        Err(e) => println!("Fuel exhausted as expected:\n  Error: {}", e),
+    }
+
+    // Example 5: Custom limits for untrusted code
+    println!("\n--- Example 5: Restrictive Limits for Untrusted Code ---");
 
     let restrictive_limits = ResourceLimits {
         execution_timeout: Some(Duration::from_secs(5)),
         callback_timeout: Some(Duration::from_secs(1)),
         max_memory_bytes: Some(64 * 1024 * 1024), // 64 MB
         max_callback_invocations: Some(10),
+        max_fuel: Some(1_000_000_000), // 1B instructions
     };
 
     println!("Configured limits:");
@@ -247,14 +306,15 @@ for i in range(5):
             .unwrap_or_else(|| "not tracked".to_string())
     );
 
-    // Example 5: No limits (use with caution!)
-    println!("\n--- Example 5: No Limits (Dangerous!) ---");
+    // Example 6: No limits (use with caution!)
+    println!("\n--- Example 6: No Limits (Dangerous!) ---");
 
     let no_limits = ResourceLimits {
         execution_timeout: None,
         callback_timeout: None,
         max_memory_bytes: None,
         max_callback_invocations: None,
+        max_fuel: None,
     };
 
     println!("⚠️  All limits disabled - use only for trusted code!");
@@ -266,6 +326,7 @@ for i in range(5):
     println!("  - callback_timeout: Maximum time for a single callback invocation");
     println!("  - max_memory_bytes: Maximum WASM memory usage (enforced via ResourceLimiter)");
     println!("  - max_callback_invocations: Maximum number of callback calls");
+    println!("  - max_fuel: Maximum instructions (fuel-based metering)");
     println!("\nDefault limits provide reasonable protection for most use cases.");
 
     Ok(())

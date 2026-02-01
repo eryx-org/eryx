@@ -33,6 +33,15 @@ pub enum Error {
     #[error("execution timed out after {0:?}")]
     Timeout(std::time::Duration),
 
+    /// Execution ran out of fuel (instruction limit exceeded).
+    #[error("execution ran out of fuel after {consumed} instructions (limit: {limit})")]
+    FuelExhausted {
+        /// Number of instructions consumed before exhaustion.
+        consumed: u64,
+        /// The fuel limit that was set.
+        limit: u64,
+    },
+
     /// Serialization/deserialization error.
     #[error("serialization error: {0}")]
     Serialization(String),

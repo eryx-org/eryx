@@ -34,6 +34,10 @@ pub struct ResourceLimits {
     /// Maximum number of callback invocations.
     #[pyo3(get, set)]
     pub max_callback_invocations: Option<u32>,
+
+    /// Maximum fuel (instructions) allowed.
+    #[pyo3(get, set)]
+    pub max_fuel: Option<u64>,
 }
 
 #[pymethods]
@@ -45,21 +49,24 @@ impl ResourceLimits {
     /// - callback_timeout_ms: 10000 (10 seconds)
     /// - max_memory_bytes: 134217728 (128 MB)
     /// - max_callback_invocations: 1000
+    /// - max_fuel: None (unlimited)
     ///
     /// Set a parameter to `None` explicitly to disable that specific limit.
     #[new]
-    #[pyo3(signature = (*, execution_timeout_ms=30000, callback_timeout_ms=10000, max_memory_bytes=134217728, max_callback_invocations=1000))]
+    #[pyo3(signature = (*, execution_timeout_ms=30000, callback_timeout_ms=10000, max_memory_bytes=134217728, max_callback_invocations=1000, max_fuel=None))]
     fn new(
         execution_timeout_ms: Option<u64>,
         callback_timeout_ms: Option<u64>,
         max_memory_bytes: Option<u64>,
         max_callback_invocations: Option<u32>,
+        max_fuel: Option<u64>,
     ) -> Self {
         Self {
             execution_timeout_ms,
             callback_timeout_ms,
             max_memory_bytes,
             max_callback_invocations,
+            max_fuel,
         }
     }
 
@@ -73,16 +80,18 @@ impl ResourceLimits {
             callback_timeout_ms: None,
             max_memory_bytes: None,
             max_callback_invocations: None,
+            max_fuel: None,
         }
     }
 
     fn __repr__(&self) -> String {
         format!(
-            "ResourceLimits(execution_timeout_ms={:?}, callback_timeout_ms={:?}, max_memory_bytes={:?}, max_callback_invocations={:?})",
+            "ResourceLimits(execution_timeout_ms={:?}, callback_timeout_ms={:?}, max_memory_bytes={:?}, max_callback_invocations={:?}, max_fuel={:?})",
             self.execution_timeout_ms,
             self.callback_timeout_ms,
             self.max_memory_bytes,
             self.max_callback_invocations,
+            self.max_fuel,
         )
     }
 }
@@ -94,6 +103,7 @@ impl From<&ResourceLimits> for eryx::ResourceLimits {
             callback_timeout: limits.callback_timeout_ms.map(Duration::from_millis),
             max_memory_bytes: limits.max_memory_bytes,
             max_callback_invocations: limits.max_callback_invocations,
+            max_fuel: limits.max_fuel,
         }
     }
 }

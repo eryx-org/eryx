@@ -248,6 +248,11 @@ impl Sandbox {
             execute_builder = execute_builder.with_timeout(timeout);
         }
 
+        // Add fuel limit if configured
+        if let Some(fuel) = self.resource_limits.max_fuel {
+            execute_builder = execute_builder.with_fuel_limit(fuel);
+        }
+
         let execution_result = execute_builder.run().await;
 
         // Wait for the handler tasks to complete
@@ -278,6 +283,7 @@ impl Sandbox {
                         duration,
                         callback_invocations,
                         peak_memory_bytes: Some(output.peak_memory_bytes),
+                        fuel_consumed: output.fuel_consumed,
                     },
                 })
             }
@@ -468,6 +474,11 @@ impl Sandbox {
             execute_builder = execute_builder.with_timeout(timeout);
         }
 
+        // Add fuel limit if configured
+        if let Some(fuel) = resource_limits.max_fuel {
+            execute_builder = execute_builder.with_fuel_limit(fuel);
+        }
+
         let execution_result = execute_builder.run().await;
 
         // Wait for the handler tasks to complete
@@ -491,6 +502,7 @@ impl Sandbox {
                         duration,
                         callback_invocations,
                         peak_memory_bytes: Some(output.peak_memory_bytes),
+                        fuel_consumed: output.fuel_consumed,
                     },
                 })
             }
@@ -1614,6 +1626,12 @@ pub struct ExecuteStats {
     pub callback_invocations: u32,
     /// Peak memory usage in bytes (if available).
     pub peak_memory_bytes: Option<u64>,
+    /// Fuel consumed during execution (if fuel tracking is enabled).
+    ///
+    /// This measures the number of WASM instructions executed. The value
+    /// is always present when the engine has fuel consumption enabled,
+    /// regardless of whether a fuel limit was set.
+    pub fuel_consumed: Option<u64>,
 }
 
 /// Resource limits for sandbox execution.
@@ -1627,6 +1645,18 @@ pub struct ResourceLimits {
     pub max_memory_bytes: Option<u64>,
     /// Maximum number of callback invocations.
     pub max_callback_invocations: Option<u32>,
+    /// Maximum fuel (instructions) allowed for execution.
+    ///
+    /// Fuel provides fine-grained, deterministic execution bounds at the
+    /// instruction level. When fuel runs out, execution traps. This enables:
+    /// - **Deterministic bounds**: Same code with same fuel limit always
+    ///   executes the same number of instructions
+    /// - **Fine-grained control**: Instruction-level granularity (vs. epoch's ~10ms)
+    /// - **Billing/metering**: Track exactly how much "work" code performed
+    ///
+    /// When `None`, fuel is set to `u64::MAX` for tracking-only mode (fuel
+    /// consumed is still reported in [`ExecuteStats`]).
+    pub max_fuel: Option<u64>,
 }
 
 impl Default for ResourceLimits {
@@ -1636,6 +1666,7 @@ impl Default for ResourceLimits {
             callback_timeout: Some(Duration::from_secs(10)),
             max_memory_bytes: Some(128 * 1024 * 1024), // 128 MB
             max_callback_invocations: Some(1000),
+            max_fuel: None, // Unlimited by default, but still tracked
         }
     }
 }
@@ -1690,12 +1721,14 @@ mod tests {
             callback_timeout: None,
             max_memory_bytes: None,
             max_callback_invocations: None,
+            max_fuel: None,
         };
 
         assert!(limits.execution_timeout.is_none());
         assert!(limits.callback_timeout.is_none());
         assert!(limits.max_memory_bytes.is_none());
         assert!(limits.max_callback_invocations.is_none());
+        assert!(limits.max_fuel.is_none());
     }
 
     #[test]
@@ -1705,12 +1738,14 @@ mod tests {
             callback_timeout: Some(Duration::from_millis(500)),
             max_memory_bytes: Some(64 * 1024 * 1024),
             max_callback_invocations: Some(10),
+            max_fuel: Some(1_000_000),
         };
 
         assert_eq!(limits.execution_timeout, Some(Duration::from_secs(5)));
         assert_eq!(limits.callback_timeout, Some(Duration::from_millis(500)));
         assert_eq!(limits.max_memory_bytes, Some(64 * 1024 * 1024));
         assert_eq!(limits.max_callback_invocations, Some(10));
+        assert_eq!(limits.max_fuel, Some(1_000_000));
     }
 
     #[test]
@@ -1725,6 +1760,7 @@ mod tests {
             limits.max_callback_invocations,
             cloned.max_callback_invocations
         );
+        assert_eq!(limits.max_fuel, cloned.max_fuel);
     }
 
     #[test]
@@ -1766,6 +1802,7 @@ mod tests {
                 duration: Duration::from_millis(100),
                 callback_invocations: 5,
                 peak_memory_bytes: Some(1024),
+                fuel_consumed: Some(50000),
             },
         };
 
@@ -1784,12 +1821,14 @@ mod tests {
                 duration: Duration::from_millis(50),
                 callback_invocations: 2,
                 peak_memory_bytes: Some(2048),
+                fuel_consumed: Some(12345),
             },
         };
 
         let cloned = result.clone();
         assert_eq!(cloned.stdout, "Test output");
         assert_eq!(cloned.stats.callback_invocations, 2);
+        assert_eq!(cloned.stats.fuel_consumed, Some(12345));
     }
 
     // ==========================================================================
@@ -1802,11 +1841,13 @@ mod tests {
             duration: Duration::from_secs(1),
             callback_invocations: 10,
             peak_memory_bytes: Some(1024 * 1024),
+            fuel_consumed: Some(100000),
         };
 
         let debug = format!("{:?}", stats);
         assert!(debug.contains("ExecuteStats"));
         assert!(debug.contains("callback_invocations"));
+        assert!(debug.contains("fuel_consumed"));
     }
 
     #[test]
@@ -1815,12 +1856,14 @@ mod tests {
             duration: Duration::from_millis(250),
             callback_invocations: 3,
             peak_memory_bytes: None,
+            fuel_consumed: Some(5000),
         };
 
         let cloned = stats.clone();
         assert_eq!(cloned.duration, Duration::from_millis(250));
         assert_eq!(cloned.callback_invocations, 3);
         assert!(cloned.peak_memory_bytes.is_none());
+        assert_eq!(cloned.fuel_consumed, Some(5000));
     }
 
     #[test]
@@ -1829,9 +1872,11 @@ mod tests {
             duration: Duration::from_millis(100),
             callback_invocations: 0,
             peak_memory_bytes: None,
+            fuel_consumed: None,
         };
 
         assert!(stats.peak_memory_bytes.is_none());
+        assert!(stats.fuel_consumed.is_none());
     }
 
     // ==========================================================================
@@ -2061,10 +2106,12 @@ mod tests {
             callback_timeout: Some(Duration::ZERO),
             max_memory_bytes: Some(0),
             max_callback_invocations: Some(0),
+            max_fuel: Some(0),
         };
 
         assert_eq!(limits.execution_timeout, Some(Duration::ZERO));
         assert_eq!(limits.max_callback_invocations, Some(0));
+        assert_eq!(limits.max_fuel, Some(0));
     }
 
     #[test]
@@ -2074,10 +2121,12 @@ mod tests {
             callback_timeout: Some(Duration::from_secs(3600)),         // 1 hour
             max_memory_bytes: Some(u64::MAX),
             max_callback_invocations: Some(u32::MAX),
+            max_fuel: Some(u64::MAX),
         };
 
         assert_eq!(limits.max_callback_invocations, Some(u32::MAX));
         assert_eq!(limits.max_memory_bytes, Some(u64::MAX));
+        assert_eq!(limits.max_fuel, Some(u64::MAX));
     }
 
     #[test]
@@ -2086,10 +2135,12 @@ mod tests {
             duration: Duration::ZERO,
             callback_invocations: 0,
             peak_memory_bytes: Some(0),
+            fuel_consumed: Some(0),
         };
 
         assert_eq!(stats.duration, Duration::ZERO);
         assert_eq!(stats.callback_invocations, 0);
+        assert_eq!(stats.fuel_consumed, Some(0));
     }
 
     #[test]
@@ -2102,6 +2153,7 @@ mod tests {
                 duration: Duration::from_millis(1),
                 callback_invocations: 0,
                 peak_memory_bytes: None,
+                fuel_consumed: None,
             },
         };
 
@@ -2134,6 +2186,7 @@ mod tests {
                 duration: Duration::from_millis(100),
                 callback_invocations: 1,
                 peak_memory_bytes: Some(1024),
+                fuel_consumed: Some(25000),
             },
         };
 
