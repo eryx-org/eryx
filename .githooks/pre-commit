@@ -1,0 +1,26 @@
+#!/usr/bin/env bash
+# Pre-commit hook to run formatters
+# Install with: git config core.hooksPath .githooks
+
+set -euo pipefail
+
+echo "Running formatters..."
+
+# Run mise fmt (cargo fmt + other formatters)
+if command -v mise &> /dev/null; then
+    mise run fmt
+else
+    # Fallback to cargo fmt if mise not available
+    cargo fmt --all
+fi
+
+# Check if formatting changed any files
+if ! git diff --quiet; then
+    echo ""
+    echo "Formatting changed some files. Please stage and commit again."
+    echo "Changed files:"
+    git diff --name-only
+    exit 1
+fi
+
+echo "Formatting check passed!"

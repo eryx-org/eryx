@@ -104,6 +104,18 @@ run = "cargo test-all-features"
 description = "Clean build artifacts"
 run = "cargo clean"
 
+[tasks.setup-hooks]
+description = "Install git hooks for pre-commit formatting"
+run = """
+git config core.hooksPath .githooks
+echo "✓ Git hooks installed from .githooks/"
+echo "  Pre-commit hook will run 'mise run fmt' before each commit"
+"""
+
+[tasks.bump-version]
+description = "Bump version using release-plz (e.g., mise run bump-version 0.3.0)"
+run = "./scripts/bump-version.sh ${1:-}"
+
 # =============================================================================
 # Cache Detection Tasks
 # =============================================================================
