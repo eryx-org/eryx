@@ -49,15 +49,7 @@ pub fn eryx_error_to_py(err: eryx::Error) -> PyErr {
         eryx::Error::Initialization(msg) => InitializationError::new_err(msg),
         eryx::Error::WasmEngine(msg) => InitializationError::new_err(msg),
         eryx::Error::WasmComponent(e) => InitializationError::new_err(e.to_string()),
-        eryx::Error::Execution(msg) => {
-            // Check if this is a timeout error wrapped in an Execution error
-            // The eryx crate converts timeouts to string messages like "Execution timed out after Xms"
-            if msg.contains("timed out") {
-                SandboxTimeoutError::new_err(msg)
-            } else {
-                ExecutionError::new_err(msg)
-            }
-        }
+        eryx::Error::Execution(msg) => ExecutionError::new_err(msg),
         eryx::Error::Callback(e) => ExecutionError::new_err(e.to_string()),
         eryx::Error::ResourceLimit(msg) => ResourceLimitError::new_err(msg),
         eryx::Error::Timeout(duration) => {

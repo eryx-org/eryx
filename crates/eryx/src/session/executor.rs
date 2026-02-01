@@ -267,7 +267,7 @@ impl<'a> SessionExecuteBuilder<'a> {
     /// # Errors
     ///
     /// Returns an error if execution fails, times out, exceeds fuel limit, or the session is in use.
-    pub async fn run(self) -> Result<ExecutionOutput, String> {
+    pub async fn run(self) -> Result<ExecutionOutput, Error> {
         self.session
             .execute_internal(
                 &self.code,
@@ -764,18 +764,17 @@ impl SessionExecutor {
         callback_tx: Option<mpsc::Sender<CallbackRequest>>,
         trace_tx: Option<mpsc::UnboundedSender<TraceRequest>>,
         per_execute_fuel_limit: Option<u64>,
-    ) -> Result<ExecutionOutput, String> {
+    ) -> Result<ExecutionOutput, Error> {
         let start = Instant::now();
 
         // Take ownership of store and bindings for async execution
-        let mut store = self
-            .store
-            .take()
-            .ok_or_else(|| "Store not available (concurrent execution?)".to_string())?;
+        let mut store = self.store.take().ok_or_else(|| {
+            Error::Execution("Store not available (concurrent execution?)".to_string())
+        })?;
         let bindings = self
             .bindings
             .take()
-            .ok_or_else(|| "Bindings not available".to_string())?;
+            .ok_or_else(|| Error::Execution("Bindings not available".to_string()))?;
 
         // Update the executor state with new channels and callbacks
         let callback_infos: Vec<HostCallbackInfo> = callbacks
@@ -805,7 +804,7 @@ impl SessionExecutor {
         let initial_fuel = fuel_limit.unwrap_or(u64::MAX);
         store
             .set_fuel(initial_fuel)
-            .map_err(|e| format!("Failed to set fuel: {e}"))?;
+            .map_err(|e| Error::Initialization(format!("Failed to set fuel: {e}")))?;
 
         tracing::debug!(
             code_len = code.len(),
@@ -884,21 +883,20 @@ impl SessionExecutor {
         let wasmtime_result = result.map_err(|e| {
             let err_str = format!("{e:?}");
             if err_str.contains("epoch deadline") || err_str.contains("wasm trap: interrupt") {
-                format!(
-                    "Execution timed out after {:?}",
-                    execution_timeout.unwrap_or_default()
-                )
+                Error::Timeout(execution_timeout.unwrap_or_default())
             } else if err_str.contains("fuel") || err_str.contains("out of fuel") {
-                format!(
-                    "Execution ran out of fuel (limit: {:?})",
-                    fuel_limit.unwrap_or(u64::MAX)
-                )
+                let consumed = initial_fuel.saturating_sub(remaining_fuel);
+                let limit = fuel_limit.unwrap_or(u64::MAX);
+                Error::FuelExhausted { consumed, limit }
             } else {
-                format!("WASM execution error: {e:?}")
+                Error::Execution(format!("WASM execution error: {e:?}"))
             }
         })?;
-        // wit_output is the WIT-generated ExecuteOutput record with stdout and stderr
-        let wit_output = wasmtime_result.map_err(|e| format!("WASM execution error: {e:?}"))??;
+        // wasmtime_result is Result<Result<ExecuteOutput, String>, wasmtime::Error>
+        // The outer Result is from wasmtime, the inner is the WIT-generated result
+        let wit_output = wasmtime_result
+            .map_err(|e| Error::Execution(format!("WASM execution error: {e:?}")))?
+            .map_err(Error::Execution)?;
 
         let duration = start.elapsed();
 

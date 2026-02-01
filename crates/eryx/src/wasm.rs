@@ -773,7 +773,7 @@ impl<'a> ExecuteBuilder<'a> {
     /// # Errors
     ///
     /// Returns an error if execution fails, times out, or exceeds memory/fuel limits.
-    pub async fn run(self) -> std::result::Result<ExecutionOutput, String> {
+    pub async fn run(self) -> std::result::Result<ExecutionOutput, Error> {
         self.executor
             .execute_internal(
                 &self.code,
@@ -1534,7 +1534,7 @@ impl PythonExecutor {
         cancellation_token: Option<CancellationToken>,
         fuel_limit: Option<u64>,
         #[cfg(feature = "vfs")] vfs_storage: Option<std::sync::Arc<eryx_vfs::InMemoryStorage>>,
-    ) -> std::result::Result<ExecutionOutput, String> {
+    ) -> std::result::Result<ExecutionOutput, Error> {
         // Build callback info for introspection
         let callback_infos: Vec<HostCallbackInfo> = callbacks
             .iter()
@@ -1576,7 +1576,9 @@ impl PythonExecutor {
                     DirPerms::READ,
                     FilePerms::READ,
                 )
-                .map_err(|e| format!("Failed to mount Python stdlib: {e}"))?;
+                .map_err(|e| {
+                    Error::Initialization(format!("Failed to mount Python stdlib: {e}"))
+                })?;
         }
 
         // Set PYTHONPATH for all configured paths (stdlib and/or site-packages)
@@ -1599,7 +1601,7 @@ impl PythonExecutor {
                     DirPerms::READ,
                     FilePerms::READ,
                 )
-                .map_err(|e| format!("Failed to mount {mount_path}: {e}"))?;
+                .map_err(|e| Error::Initialization(format!("Failed to mount {mount_path}: {e}")))?;
         }
 
         let wasi = wasi_builder.build();
@@ -1682,14 +1684,14 @@ impl PythonExecutor {
         let initial_fuel = fuel_limit.unwrap_or(u64::MAX);
         store
             .set_fuel(initial_fuel)
-            .map_err(|e| format!("Failed to set fuel: {e}"))?;
+            .map_err(|e| Error::Initialization(format!("Failed to set fuel: {e}")))?;
 
         // Instantiate from the pre-compiled template (includes Python initialization)
         let bindings = self
             .instance_pre
             .instantiate_async(&mut store)
             .await
-            .map_err(|e| format!("Failed to instantiate component: {e}"))?;
+            .map_err(Error::WasmComponent)?;
 
         tracing::debug!(code_len = code.len(), "Executing Python code");
 
@@ -1771,30 +1773,27 @@ impl PythonExecutor {
             let err_str = format!("{e:?}");
             if err_str.contains("epoch deadline") || err_str.contains("wasm trap: interrupt") {
                 if was_cancelled.load(Ordering::Relaxed) {
-                    "execution cancelled".to_string()
+                    Error::Cancelled
                 } else {
-                    format!(
-                        "Execution timed out after {:?}",
-                        execution_timeout.unwrap_or_default()
-                    )
+                    Error::Timeout(execution_timeout.unwrap_or_default())
                 }
             } else if err_str.contains("fuel") || err_str.contains("out of fuel") {
                 // Calculate how much fuel was consumed before exhaustion
                 let remaining = store.get_fuel().unwrap_or(0);
                 let consumed = initial_fuel.saturating_sub(remaining);
                 let limit = fuel_limit.unwrap_or(u64::MAX);
-                format!(
-                    "Execution ran out of fuel after {} instructions (limit: {})",
-                    consumed, limit
-                )
+                Error::FuelExhausted { consumed, limit }
             } else {
-                format!("WASM execution error: {e:?}")
+                Error::Execution(format!("WASM execution error: {e:?}"))
             }
         })?;
 
-        // wasmtime_result is wasmtime::Result<Result<ExecuteOutput, String>>
+        // wasmtime_result is Result<Result<ExecuteOutput, String>, wasmtime::Error> from the WIT layer
+        // The outer Result is from wasmtime, the inner is the WIT-generated result
         // where ExecuteOutput is the WIT-generated record with stdout and stderr
-        let wit_output = wasmtime_result.map_err(|e| format!("WASM execution error: {e:?}"))??;
+        let wit_output = wasmtime_result
+            .map_err(|e| Error::Execution(format!("WASM execution error: {e:?}")))?
+            .map_err(Error::Execution)?;
 
         // Get peak memory from the store before it's dropped
         let peak_memory_bytes = store.data().memory_tracker.peak_memory_bytes();
