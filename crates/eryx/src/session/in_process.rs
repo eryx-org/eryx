@@ -92,6 +92,14 @@ impl<'a> InProcessSession<'a> {
     /// # Errors
     ///
     /// Returns an error if the session cannot be initialized.
+    #[tracing::instrument(
+        name = "InProcessSession::new",
+        skip(sandbox),
+        fields(
+            callbacks = sandbox.callbacks().len(),
+            has_preamble = !sandbox.preamble().is_empty(),
+        )
+    )]
     pub async fn new(sandbox: &'a Sandbox) -> Result<Self, Error> {
         let callbacks: Vec<Arc<dyn Callback>> = sandbox.callbacks().values().cloned().collect();
 
@@ -116,6 +124,14 @@ impl<'a> InProcessSession<'a> {
     /// session.execute("x = 1").await?;
     /// session.execute("print(x)").await?;  // prints "1"
     /// ```
+    #[tracing::instrument(
+        name = "InProcessSession::execute",
+        skip(self, code),
+        fields(
+            code_len = code.len(),
+            execution_count = self.executor.execution_count(),
+        )
+    )]
     async fn execute_internal(&mut self, code: &str) -> Result<ExecuteResult, Error> {
         let start = Instant::now();
 
@@ -170,6 +186,14 @@ impl<'a> InProcessSession<'a> {
                     handler.on_output(&output.stdout).await;
                     handler.on_stderr(&output.stderr).await;
                 }
+
+                tracing::info!(
+                    duration_ms = duration.as_millis() as u64,
+                    callback_invocations,
+                    peak_memory_bytes = output.peak_memory_bytes,
+                    fuel_consumed = ?output.fuel_consumed,
+                    "Session execution completed"
+                );
 
                 Ok(ExecuteResult {
                     stdout: output.stdout,
