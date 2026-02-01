@@ -24,8 +24,6 @@ A Rust library that executes Python code in a WebAssembly sandbox with async cal
 
 Eryx embeds **CPython 3.14** compiled to WebAssembly (WASI). The WASI-compiled CPython and standard library come from the [componentize-py](https://github.com/bytecodealliance/componentize-py) project by the Bytecode Alliance.
 
-> **Note:** Python 3.14 is currently in development. Eryx tracks componentize-py's CPython builds, which follow CPython's main branch.
-
 ## Quick Start
 
 ```rust
