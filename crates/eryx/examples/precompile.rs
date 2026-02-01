@@ -17,6 +17,36 @@
 //!
 //! Run without preinit (faster build, slower sessions):
 //!   `cargo run --example precompile --release`
+//!
+//! # CPU Feature Configuration
+//!
+//! By default, pre-compilation targets the native CPU for best performance.
+//! This may use instructions like AVX-512 that aren't available on all machines.
+//!
+//! ## Quick: CPU Feature Levels
+//!
+//! Set `ERYX_CPU_FEATURES` to target a specific x86-64 microarchitecture level:
+//!
+//!   `ERYX_CPU_FEATURES=x86-64-v3 cargo run --example precompile --release`
+//!
+//! Levels:
+//! - `x86-64` / `x86-64-v1` - Baseline (SSE2 only, maximum compatibility)
+//! - `x86-64-v2` - SSE4.2, POPCNT, SSSE3 (~2008+ CPUs)
+//! - `x86-64-v3` - AVX2, FMA, BMI1/2 (~2013+ CPUs, no AVX-512) - **recommended for Fly.io**
+//! - `x86-64-v4` - AVX-512 (~2017+ CPUs)
+//! - `native` - Host CPU features (default)
+//!
+//! ## Cross-compilation: Target Triples
+//!
+//! For cross-compilation, specify a full target triple:
+//!
+//!   `ERYX_TARGET=aarch64-unknown-linux-gnu cargo run --example precompile --release`
+//!
+//! ## Fine-grained: Cranelift Flags
+//!
+//! For precise control, set individual Cranelift flags:
+//!
+//!   `ERYX_CRANELIFT_FLAGS=has_avx512f=false,has_avx512bw=false cargo run ...`
 
 use std::time::Instant;
 
@@ -37,11 +67,26 @@ fn main() -> anyhow::Result<()> {
         .map(|s| s.as_str())
         .unwrap_or("crates/eryx-runtime/runtime.cwasm");
 
+    // Parse --target argument (falls back to ERYX_TARGET env var in the library)
+    let target = args
+        .iter()
+        .position(|a| a == "--target")
+        .and_then(|i| args.get(i + 1))
+        .map(|s| s.as_str());
+
     let wasm_path = std::env::var("ERYX_WASM_PATH")
         .unwrap_or_else(|_| "crates/eryx-runtime/runtime.wasm".to_string());
 
     println!("=== Pre-compilation Example ===\n");
     println!("WASM path: {wasm_path}");
+    println!("Output path: {cwasm_path}");
+    if let Some(t) = target {
+        println!("Target: {t}");
+    } else if let Ok(t) = std::env::var("ERYX_TARGET") {
+        println!("Target: {t} (from ERYX_TARGET env)");
+    } else {
+        println!("Target: native (use --target or ERYX_TARGET for portable builds)");
+    }
 
     // Read the WASM bytes
     let wasm_bytes = std::fs::read(&wasm_path)?;
@@ -95,7 +140,7 @@ fn main() -> anyhow::Result<()> {
     // Step 2: Pre-compile to native code
     println!("\n--- Step 2: Pre-compiling to native code ---");
     let start = Instant::now();
-    let precompiled = eryx::PythonExecutor::precompile(&component_bytes)?;
+    let precompiled = eryx::PythonExecutor::precompile_with_target(&component_bytes, target)?;
     let precompile_time = start.elapsed();
     println!("Pre-compile time: {precompile_time:?}");
     println!(

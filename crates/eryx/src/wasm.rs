@@ -1192,6 +1192,58 @@ impl PythonExecutor {
         Self::precompile(&wasm_bytes)
     }
 
+    /// Pre-compile the WASM component to native code for a specific target.
+    ///
+    /// This allows creating pre-compiled artifacts for a different architecture
+    /// (cross-compilation).
+    ///
+    /// # Target values
+    ///
+    /// Target must be a valid target triple (see `target_lexicon::Triple`):
+    /// - `"x86_64-unknown-linux-gnu"` - Linux x86_64
+    /// - `"x86_64-apple-darwin"` - macOS x86_64
+    /// - `"aarch64-unknown-linux-gnu"` - Linux ARM64
+    /// - `"aarch64-apple-darwin"` - macOS ARM64 (Apple Silicon)
+    /// - `None` - Native CPU (fastest, but may not be portable)
+    ///
+    /// # Disabling CPU features
+    ///
+    /// To disable specific CPU features like AVX-512 for more portable builds,
+    /// set the `ERYX_CRANELIFT_FLAGS` environment variable:
+    ///
+    /// ```bash
+    /// ERYX_CRANELIFT_FLAGS=has_avx512f=false,has_avx512bw=false,has_avx512dq=false,has_avx512vl=false
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the target is invalid or pre-compilation fails.
+    pub fn precompile_with_target(
+        wasm_bytes: &[u8],
+        target: Option<&str>,
+    ) -> std::result::Result<Vec<u8>, Error> {
+        let engine = Self::create_engine_with_target(target)?;
+        engine
+            .precompile_component(wasm_bytes)
+            .map_err(|e| Error::WasmEngine(format!("Failed to precompile component: {e}")))
+    }
+
+    /// Pre-compile a WASM component file to native code for a specific target.
+    ///
+    /// Convenience method that reads the file and calls `precompile_with_target`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the file cannot be read, target is invalid, or pre-compilation fails.
+    pub fn precompile_file_with_target(
+        path: impl AsRef<std::path::Path>,
+        target: Option<&str>,
+    ) -> std::result::Result<Vec<u8>, Error> {
+        let wasm_bytes = std::fs::read(path.as_ref())
+            .map_err(|e| Error::WasmEngine(format!("Failed to read WASM file: {e}")))?;
+        Self::precompile_with_target(&wasm_bytes, target)
+    }
+
     /// Create a configured wasmtime engine.
     ///
     /// Version identifier for engine configuration.
@@ -1211,6 +1263,37 @@ impl PythonExecutor {
     /// Uses copy-on-write heap images to defer memory initialization
     /// from instantiation time to first write, improving startup performance.
     fn create_engine() -> std::result::Result<Engine, Error> {
+        Self::create_engine_with_target(None)
+    }
+
+    /// Create a configured wasmtime engine with an optional target triple.
+    ///
+    /// When `target` is `None`, compiles for the native CPU (fastest but may use
+    /// instructions like AVX-512 that aren't available on all machines).
+    ///
+    /// When `target` is `Some`, compiles for the specified target triple. Examples:
+    /// - `"x86_64-unknown-linux-gnu"` - Linux x86_64
+    /// - `"x86_64-apple-darwin"` - macOS x86_64
+    /// - `"aarch64-unknown-linux-gnu"` - Linux ARM64
+    /// - `"aarch64-apple-darwin"` - macOS ARM64 (Apple Silicon)
+    ///
+    /// Also checks the `ERYX_TARGET` environment variable if no target is provided.
+    ///
+    /// # CPU Feature Levels
+    ///
+    /// Set `ERYX_CPU_FEATURES` to a preset level:
+    /// - `x86-64` - Baseline x86_64 (SSE2 only, most compatible)
+    /// - `x86-64-v2` - SSE4.2, POPCNT, SSSE3 (Nehalem/Westmere era, ~2008+)
+    /// - `x86-64-v3` - AVX2, BMI1/2, FMA (Haswell era, ~2013+, no AVX-512)
+    /// - `x86-64-v4` - AVX-512 (Skylake-X era, ~2017+)
+    /// - `native` - Use host CPU features (default)
+    ///
+    /// # Custom Cranelift Flags
+    ///
+    /// For fine-grained control, set `ERYX_CRANELIFT_FLAGS` to a comma-separated
+    /// list of `flag=value` pairs. Example:
+    /// `ERYX_CRANELIFT_FLAGS=has_avx512f=false,has_avx512bw=false`
+    fn create_engine_with_target(target: Option<&str>) -> std::result::Result<Engine, Error> {
         let mut config = Config::new();
         config.wasm_component_model(true);
         // Enable component model async for the `invoke` callback function.
@@ -1243,7 +1326,124 @@ impl PythonExecutor {
         // Python scripts don't need deep call stacks
         config.async_stack_size(512 * 1024);
 
+        // Configure target triple for cross-compilation or portable builds.
+        // Check explicit parameter first, then environment variable, then use native.
+        let effective_target = target
+            .map(|s| s.to_string())
+            .or_else(|| std::env::var("ERYX_TARGET").ok());
+
+        if let Some(ref target_str) = effective_target {
+            config
+                .target(target_str)
+                .map_err(|e| Error::WasmEngine(format!("Invalid target '{target_str}': {e}")))?;
+        }
+
+        // Apply CPU feature level preset and custom Cranelift flags.
+        // These require unsafe code, so they're only available with embedded or preinit features.
+        #[cfg(any(feature = "embedded", feature = "preinit"))]
+        Self::apply_cpu_feature_flags(&mut config)?;
+
         Engine::new(&config).map_err(|e| Error::WasmEngine(e.to_string()))
+    }
+
+    /// Apply CPU feature level presets and custom Cranelift flags.
+    ///
+    /// This handles `ERYX_CPU_FEATURES` (preset levels) and `ERYX_CRANELIFT_FLAGS` (custom flags).
+    /// Requires `embedded` or `preinit` feature for the unsafe Cranelift flag APIs.
+    #[cfg(any(feature = "embedded", feature = "preinit"))]
+    #[allow(unsafe_code)]
+    fn apply_cpu_feature_flags(config: &mut Config) -> std::result::Result<(), Error> {
+        // Apply CPU feature level preset from environment variable.
+        // This provides an easy way to target specific x86-64 microarchitecture levels.
+        if let Ok(level) = std::env::var("ERYX_CPU_FEATURES") {
+            // AVX-512 feature flags to disable for x86-64-v3 and below
+            // Note: Only flags that exist in Cranelift's x86 settings are listed here
+            const AVX512_FLAGS: &[&str] = &[
+                "has_avx512bitalg",
+                "has_avx512dq",
+                "has_avx512f",
+                "has_avx512vbmi",
+                "has_avx512vl",
+            ];
+
+            match level.as_str() {
+                "x86-64" | "x86-64-v1" => {
+                    // Baseline: disable everything above SSE2
+                    // SAFETY: These are valid Cranelift flags for x86
+                    unsafe {
+                        config.cranelift_flag_set("has_sse3", "false");
+                        config.cranelift_flag_set("has_ssse3", "false");
+                        config.cranelift_flag_set("has_sse41", "false");
+                        config.cranelift_flag_set("has_sse42", "false");
+                        config.cranelift_flag_set("has_avx", "false");
+                        config.cranelift_flag_set("has_avx2", "false");
+                        config.cranelift_flag_set("has_fma", "false");
+                        config.cranelift_flag_set("has_bmi1", "false");
+                        config.cranelift_flag_set("has_bmi2", "false");
+                        config.cranelift_flag_set("has_lzcnt", "false");
+                        config.cranelift_flag_set("has_popcnt", "false");
+                        for flag in AVX512_FLAGS {
+                            config.cranelift_flag_set(flag, "false");
+                        }
+                    }
+                }
+                "x86-64-v2" => {
+                    // SSE4.2, POPCNT, SSSE3 - disable AVX and above
+                    // SAFETY: These are valid Cranelift flags for x86
+                    unsafe {
+                        config.cranelift_flag_set("has_avx", "false");
+                        config.cranelift_flag_set("has_avx2", "false");
+                        config.cranelift_flag_set("has_fma", "false");
+                        config.cranelift_flag_set("has_bmi1", "false");
+                        config.cranelift_flag_set("has_bmi2", "false");
+                        for flag in AVX512_FLAGS {
+                            config.cranelift_flag_set(flag, "false");
+                        }
+                    }
+                }
+                "x86-64-v3" => {
+                    // AVX2, FMA, BMI1/2 - disable AVX-512 only
+                    // This is what Fly.io shared CPUs support (AMD EPYC)
+                    // SAFETY: These are valid Cranelift flags for x86
+                    unsafe {
+                        for flag in AVX512_FLAGS {
+                            config.cranelift_flag_set(flag, "false");
+                        }
+                    }
+                }
+                "x86-64-v4" | "native" => {
+                    // Full features - nothing to disable
+                }
+                other => {
+                    return Err(Error::WasmEngine(format!(
+                        "Unknown CPU feature level '{other}'. Valid values: \
+                         x86-64, x86-64-v2, x86-64-v3, x86-64-v4, native"
+                    )));
+                }
+            }
+        }
+
+        // Apply custom Cranelift flags from environment variable.
+        // Format: ERYX_CRANELIFT_FLAGS=flag1=value1,flag2=value2
+        if let Ok(flags) = std::env::var("ERYX_CRANELIFT_FLAGS") {
+            for flag_spec in flags.split(',') {
+                let flag_spec = flag_spec.trim();
+                if flag_spec.is_empty() {
+                    continue;
+                }
+                // SAFETY: User-provided flags - they take responsibility for correctness.
+                // Invalid flags will cause Engine::new() to fail with an error.
+                unsafe {
+                    if let Some((flag, value)) = flag_spec.split_once('=') {
+                        config.cranelift_flag_set(flag.trim(), value.trim());
+                    } else {
+                        config.cranelift_flag_enable(flag_spec);
+                    }
+                }
+            }
+        }
+
+        Ok(())
     }
 
     /// Create a pre-instantiated component with all imports linked.
@@ -1743,6 +1943,49 @@ mod tests {
             assert_eq!(name, "http.get");
         } else {
             panic!("Expected CallbackStart event");
+        }
+    }
+
+    /// Test that all CPU feature level presets use valid Cranelift flags.
+    ///
+    /// This test ensures that if someone adds a new flag name that doesn't exist
+    /// in Cranelift, the test will fail at CI time rather than at runtime.
+    #[test]
+    #[cfg(any(feature = "embedded", feature = "preinit"))]
+    #[allow(unsafe_code)]
+    fn test_cpu_feature_levels_use_valid_cranelift_flags() {
+        use std::env;
+
+        // Test each preset level by creating an engine with it
+        for level in [
+            "x86-64",
+            "x86-64-v1",
+            "x86-64-v2",
+            "x86-64-v3",
+            "x86-64-v4",
+            "native",
+        ] {
+            // SAFETY: This test runs single-threaded and we clean up after ourselves.
+            // The env vars are only read during engine creation in this same thread.
+            unsafe {
+                env::set_var("ERYX_CPU_FEATURES", level);
+                env::remove_var("ERYX_CRANELIFT_FLAGS");
+                env::remove_var("ERYX_TARGET");
+            }
+
+            // Creating the engine will fail if any flag name is invalid
+            let result = PythonExecutor::create_engine_with_target(None);
+            assert!(
+                result.is_ok(),
+                "CPU feature level '{level}' failed to create engine: {:?}",
+                result.err()
+            );
+        }
+
+        // Clean up
+        // SAFETY: Same as above - single-threaded test cleanup.
+        unsafe {
+            env::remove_var("ERYX_CPU_FEATURES");
         }
     }
 }
