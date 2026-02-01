@@ -183,7 +183,7 @@ impl<'a> InProcessSession<'a> {
                     },
                 })
             }
-            Err(error) => Err(Error::Execution(error)),
+            Err(error) => Err(error),
         }
     }
 

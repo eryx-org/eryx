@@ -260,7 +260,7 @@ impl Session {
                     result
                 })
                 .map(ExecuteResult::from_execution_output)
-                .map_err(|e| eryx_error_to_py(eryx::Error::Execution(e)))
+                .map_err(eryx_error_to_py)
         })
     }
 

@@ -287,7 +287,7 @@ impl Sandbox {
                     },
                 })
             }
-            Err(error) => Err(Error::Execution(error)),
+            Err(error) => Err(error),
         }
     }
 
@@ -507,11 +507,11 @@ impl Sandbox {
                 })
             }
             Err(error) => {
-                // Check if this was a cancellation
-                if error == "execution cancelled" || cancel_token.is_cancelled() {
+                // Check if this was a cancellation (either from the error or from the token)
+                if matches!(error, Error::Cancelled) || cancel_token.is_cancelled() {
                     Err(Error::Cancelled)
                 } else {
-                    Err(Error::Execution(error))
+                    Err(error)
                 }
             }
         }

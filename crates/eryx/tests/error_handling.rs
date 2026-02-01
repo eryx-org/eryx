@@ -440,8 +440,8 @@ async fn test_execution_timeout_with_infinite_loop() {
     assert!(result.is_err(), "Infinite loop should timeout");
     let error = result.unwrap_err();
     assert!(
-        error.contains("timed out") || error.contains("epoch") || error.contains("interrupt"),
-        "Error should mention timeout/epoch/interrupt: {}",
+        matches!(error, eryx::Error::Timeout(_)),
+        "Error should be Timeout variant: {:?}",
         error
     );
 
