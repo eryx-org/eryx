@@ -1,0 +1,37 @@
+# Upload runtime.wasm to GitHub releases after cargo-dist creates the release
+# This runs separately from the cargo-dist workflow to avoid conflicts
+
+name: Upload Runtime Artifacts
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: write
+
+jobs:
+  upload-runtime:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install mise
+        uses: jdx/mise-action@v2
+
+      - name: Build runtime.wasm
+        run: |
+          mise trust
+          mise run build-eryx-runtime
+        env:
+          BUILD_ERYX_RUNTIME: "1"
+
+      - name: Upload runtime.wasm to release
+        run: |
+          gh release upload "${{ github.event.release.tag_name }}" \
+            crates/eryx-runtime/runtime.wasm \
+            --clobber
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
