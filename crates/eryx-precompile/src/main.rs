@@ -111,7 +111,9 @@ async fn main() -> Result<()> {
     if args.preinit {
         println!(
             "Stdlib:  {}",
-            args.stdlib.as_ref().map_or("-", |p| p.to_str().unwrap_or("-"))
+            args.stdlib
+                .as_ref()
+                .map_or("-", |p| p.to_str().unwrap_or("-"))
         );
     }
     println!();

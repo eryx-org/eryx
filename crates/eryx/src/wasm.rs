@@ -1685,10 +1685,7 @@ impl PythonExecutor {
     ///
     /// This does the expensive linking work once, so that `execute()` can
     /// quickly instantiate from the template.
-    #[tracing::instrument(
-        name = "PythonExecutor::create_instance_pre",
-        skip(engine, component)
-    )]
+    #[tracing::instrument(name = "PythonExecutor::create_instance_pre", skip(engine, component))]
     fn create_instance_pre(
         engine: &Engine,
         component: &Component,
