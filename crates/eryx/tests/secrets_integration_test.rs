@@ -35,8 +35,9 @@ impl MockHttpServer {
             while let Ok((mut socket, _)) = listener.accept().await {
                 let requests = requests.clone();
                 tokio::spawn(async move {
+                    use tokio::io::{AsyncReadExt, AsyncWriteExt};
                     let mut buf = vec![0u8; 4096];
-                    if let Ok(n) = socket.try_read(&mut buf) {
+                    if let Ok(n) = socket.read(&mut buf).await {
                         buf.truncate(n);
                         if let Ok(request) = String::from_utf8(buf) {
                             requests.lock().await.push(request);
@@ -47,7 +48,7 @@ impl MockHttpServer {
                                           Content-Length: 27\r\n\
                                           \r\n\
                                           {\"message\":\"success\"}";
-                            let _ = socket.try_write(response.as_bytes());
+                            let _ = socket.write_all(response.as_bytes()).await;
                         }
                     }
                 });

@@ -38,11 +38,7 @@ pub enum FileScrubPolicy {
 
 impl From<bool> for FileScrubPolicy {
     fn from(enabled: bool) -> Self {
-        if enabled {
-            Self::All
-        } else {
-            Self::None
-        }
+        if enabled { Self::All } else { Self::None }
     }
 }
 
@@ -88,11 +84,7 @@ pub enum OutputScrubPolicy {
 
 impl From<bool> for OutputScrubPolicy {
     fn from(enabled: bool) -> Self {
-        if enabled {
-            Self::All
-        } else {
-            Self::None
-        }
+        if enabled { Self::All } else { Self::None }
     }
 }
 
@@ -217,10 +209,7 @@ mod tests {
     fn test_replace_bytes() {
         let data = b"Hello NEEDLE World NEEDLE!";
         let result = replace_bytes(data, b"NEEDLE", b"REPLACEMENT");
-        assert_eq!(
-            result,
-            b"Hello REPLACEMENT World REPLACEMENT!".to_vec()
-        );
+        assert_eq!(result, b"Hello REPLACEMENT World REPLACEMENT!".to_vec());
     }
 
     #[test]

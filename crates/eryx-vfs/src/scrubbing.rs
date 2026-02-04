@@ -108,7 +108,8 @@ impl<S> ScrubbingStorage<S> {
             // Binary file - byte sequence search
             let mut result = data.to_vec();
             for secret_config in self.secrets.values() {
-                result = replace_bytes(&result, secret_config.placeholder.as_bytes(), b"[REDACTED]");
+                result =
+                    replace_bytes(&result, secret_config.placeholder.as_bytes(), b"[REDACTED]");
             }
             result
         }

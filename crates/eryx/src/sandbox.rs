@@ -1311,10 +1311,7 @@ impl<R, S> SandboxBuilder<R, S> {
 
         // Set placeholder as environment variable via preamble
         // TODO: Find proper way to set env vars in executor
-        let env_code = format!(
-            "import os\nos.environ[{:?}] = {:?}\n",
-            name, placeholder
-        );
+        let env_code = format!("import os\nos.environ[{:?}] = {:?}\n", name, placeholder);
         self.preamble.push_str(&env_code);
 
         self

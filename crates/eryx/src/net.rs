@@ -289,10 +289,7 @@ pub struct ConnectionManager {
 impl ConnectionManager {
     /// Create a new connection manager with the given config and secrets.
     #[must_use]
-    pub fn new(
-        config: NetConfig,
-        secrets: HashMap<String, crate::secrets::SecretConfig>,
-    ) -> Self {
+    pub fn new(config: NetConfig, secrets: HashMap<String, crate::secrets::SecretConfig>) -> Self {
         // Build rustls config with system root certs + any custom certs
         let mut root_store =
             rustls::RootCertStore::from_iter(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
@@ -548,11 +545,7 @@ impl ConnectionManager {
     }
 
     /// Substitute secret placeholders in HTTP headers.
-    fn substitute_http_headers(
-        &self,
-        headers: &[u8],
-        handle: u32,
-    ) -> Result<Vec<u8>, TcpError> {
+    fn substitute_http_headers(&self, headers: &[u8], handle: u32) -> Result<Vec<u8>, TcpError> {
         let text = String::from_utf8_lossy(headers);
         let target_host = self
             .connection_hosts
@@ -588,7 +581,11 @@ impl ConnectionManager {
     }
 
     /// Substitute secret placeholders in text.
-    fn substitute_secrets_in_text(&self, text: &str, target_host: &str) -> Result<String, TcpError> {
+    fn substitute_secrets_in_text(
+        &self,
+        text: &str,
+        target_host: &str,
+    ) -> Result<String, TcpError> {
         let mut result = text.to_string();
 
         for secret_config in self.secrets.values() {
@@ -981,8 +978,8 @@ mod tests {
         assert_eq!(result.unwrap(), "Bearer real-secret-value");
 
         // Test rejection for disallowed host
-        let result = manager
-            .substitute_secrets_in_text("Bearer ERYX_SECRET_PLACEHOLDER_abc123", "evil.com");
+        let result =
+            manager.substitute_secrets_in_text("Bearer ERYX_SECRET_PLACEHOLDER_abc123", "evil.com");
         assert!(result.is_err());
     }
 
