@@ -2,6 +2,8 @@
 
 The Python bindings provide a Pythonic interface to Eryx functionality.
 
+For detailed API documentation, see [docs.eryx.run/api/python/](https://docs.eryx.run/api/python/).
+
 ## Core Classes
 
 - `Sandbox` - Main class for isolated Python execution
@@ -18,4 +20,4 @@ The Python bindings provide a Pythonic interface to Eryx functionality.
 pip install pyeryx
 ```
 
-For detailed documentation, see the [PyPI package page](https://pypi.org/project/pyeryx/).
+Alternatively, see the [PyPI package page](https://pypi.org/project/pyeryx/).

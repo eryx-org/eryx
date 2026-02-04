@@ -1,12 +1,11 @@
 # Rust API Reference
 
-For detailed API documentation, see the self-hosted documentation at [docs.eryx.run](https://docs.eryx.run).
+For detailed API documentation, see the self-hosted documentation.
 
-## Key Crates
-
-- [`eryx`](https://docs.eryx.run/eryx/) - Main sandbox library
-- [`eryx-runtime`](https://docs.eryx.run/eryx-runtime/) - Python Wasm runtime packaging
-- [`eryx-vfs`](https://docs.eryx.run/eryx-vfs/) - Virtual filesystem support
+Suggested URL structure:
+- [eryx](https://docs.eryx.run/api/rust/eryx/) - Main sandbox library
+- [eryx-runtime](https://docs.eryx.run/api/rust/eryx-runtime/) - Python Wasm runtime packaging
+- [eryx-vfs](https://docs.eryx.run/api/rust/eryx-vfs/) - Virtual filesystem support
 
 ## Key Types
 
