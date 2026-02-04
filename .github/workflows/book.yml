@@ -1,0 +1,95 @@
+name: Book
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    paths:
+      - 'book/**'
+      - '.github/workflows/book.yml'
+
+permissions: {}
+
+jobs:
+  test-book:
+    name: Test Book
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout sources
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Install mise
+        uses: jdx/mise-action@v2
+
+      - name: Install mdbook and mdbook-langtabs
+        run: |
+          mise install cargo:mdbook
+          mise install cargo:mdbook-langtabs
+
+      # Build the project so that mdbook test can link against it
+      - name: Build project
+        run: mise run build
+
+      # Test Rust code blocks with mdbook test
+      - name: Test Rust code blocks
+        run: mise run book:test
+
+      # Set up Python for testing Python code blocks
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      # Install Python bindings (required for Python code samples)
+      - name: Install Python bindings
+        run: |
+          cd crates/eryx-python
+          python -m pip install --upgrade pip
+          python -m pip install maturin pytest
+          maturin develop --release
+
+      # Test code blocks with custom script
+      - name: Test code blocks
+        working-directory: book
+        run: python3 scripts/test_examples.py
+
+  deploy:
+    name: Deploy to GitHub Pages
+    runs-on: ubuntu-latest
+    needs: test-book
+    if: github.ref == 'refs/heads/main'
+    permissions:
+      contents: write
+      pages: write
+      id-token: write
+    steps:
+      - name: Checkout sources
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Install mise
+        uses: jdx/mise-action@v2
+
+      - name: Install mdbook and mdbook-langtabs
+        run: |
+          mise install cargo:mdbook
+          mise install cargo:mdbook-langtabs
+
+      - name: Build book
+        run: mise run book:build
+
+      - name: Setup Pages
+        uses: actions/configure-pages@v5
+
+      - name: Upload artifact
+        uses: actions/upload-pages-artifact@v4
+        with:
+          path: 'book/book'
+
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
