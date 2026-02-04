@@ -100,6 +100,9 @@ jobs:
           cp -r book/book/* deploy/latest/book/
           cp -r book/book/* deploy/${{ steps.version.outputs.version }}/book/
 
+          # Create CNAME file for custom domain
+          echo "docs.eryx.run" > deploy/CNAME
+
           # Create a simple index.html at root
           cat > deploy/index.html << 'EOF'
           <!DOCTYPE html>
