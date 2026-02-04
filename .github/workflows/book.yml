@@ -27,7 +27,7 @@ jobs:
       - name: Install mdbook and mdbook-langtabs
         run: |
           mise install cargo:mdbook
-          mise install cargo:mdbook-langtabs
+          cargo install mdbook-langtabs --git https://github.com/nx10/mdbook-langtabs
 
       # Build the project so that mdbook test can link against it
       - name: Build project
@@ -77,7 +77,7 @@ jobs:
       - name: Install mdbook and mdbook-langtabs
         run: |
           mise install cargo:mdbook
-          mise install cargo:mdbook-langtabs
+          cargo install mdbook-langtabs --git https://github.com/nx10/mdbook-langtabs
 
       - name: Build book
         run: mise run book:build

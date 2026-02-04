@@ -2,6 +2,15 @@
 
 This directory contains the mdbook-based documentation for Eryx.
 
+## Prerequisites
+
+The book requires mdbook 0.5+ and mdbook-langtabs from git:
+
+```bash
+mise install cargo:mdbook
+cargo install mdbook-langtabs --git https://github.com/nx10/mdbook-langtabs
+```
+
 ## Building the book
 
 ```bash
