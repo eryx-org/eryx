@@ -5,7 +5,9 @@ This guide will help you create your first Eryx sandbox and execute Python code.
 ## Basic Execution
 
 <!-- langtabs-start -->
-```rust
+```rust,no_run
+# extern crate eryx;
+# extern crate tokio;
 use eryx::Sandbox;
 
 #[tokio::main]
@@ -56,7 +58,12 @@ print(f"Execution took {result.duration_ms:.2f}ms")
 Callbacks allow sandboxed code to interact with the host in a controlled way.
 
 <!-- langtabs-start -->
-```rust
+```rust,no_run
+# extern crate eryx;
+# extern crate tokio;
+# extern crate serde;
+# extern crate serde_json;
+# extern crate schemars;
 use std::{future::Future, pin::Pin};
 use eryx::{TypedCallback, CallbackError, Sandbox, JsonSchema};
 use serde::Deserialize;
@@ -136,8 +143,10 @@ print(result.stdout)
 Sessions maintain state across multiple executions, useful for REPL-style usage.
 
 <!-- langtabs-start -->
-```rust
-use eryx::{Sandbox, session::InProcessSession};
+```rust,no_run
+# extern crate eryx;
+# extern crate tokio;
+use eryx::{Sandbox, session::{InProcessSession, Session}};
 
 #[tokio::main]
 async fn main() -> Result<(), eryx::Error> {

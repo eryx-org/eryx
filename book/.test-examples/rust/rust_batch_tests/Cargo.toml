@@ -1,0 +1,9 @@
+[package]
+name = "rust_batch_tests"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+augurs = { path = "/Users/ben/repos/rust/eryx-docs-setup-mdbook/crates/augurs", features = ["mstl", "ets", "forecaster", "outlier", "clustering", "dtw", "seasons", "prophet", "prophet-wasmstan"] }
+
+[workspace]

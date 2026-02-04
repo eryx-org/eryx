@@ -88,7 +88,7 @@ Eryx supports loading Python packages at runtime:
 
 ## Architecture Overview
 
-```
+```text
 ┌─────────────────────────────────────────────┐
 │          Your Application (Host)            │
 │  ┌─────────────────────────────────────┐   │

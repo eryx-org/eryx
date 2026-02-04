@@ -33,7 +33,9 @@ Package support (`with_package()` for `.whl` and `.tar.gz` files) is always avai
 ## Verify Installation
 
 <!-- langtabs-start -->
-```rust
+```rust,no_run
+# extern crate eryx;
+# extern crate tokio;
 use eryx::Sandbox;
 
 #[tokio::main]
