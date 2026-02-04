@@ -24,6 +24,9 @@ jobs:
       - name: Install mise
         uses: jdx/mise-action@v2
 
+      - name: Install Rust nightly
+        run: rustup toolchain install nightly
+
       - name: Install mdbook and mdbook-langtabs
         run: |
           mise install cargo:mdbook
