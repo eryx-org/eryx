@@ -2,7 +2,7 @@
 
 The Python bindings provide a Pythonic interface to Eryx functionality.
 
-For detailed API documentation, see [docs.eryx.run/api/python/](https://docs.eryx.run/api/python/).
+For detailed API documentation, see [docs.eryx.run/latest/api/python/](https://docs.eryx.run/latest/api/python/).
 
 ## Core Classes
 
