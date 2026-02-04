@@ -42,8 +42,10 @@ print(f"Execution took {result.duration_ms:.2f}ms")
 
 ## Features
 
-- **Complete Isolation**: Sandboxed code cannot access files, network, or system resources
-- **Resource Limits**: Configure timeouts and memory limits
+- **Complete Isolation**: Sandboxed code runs in WebAssembly with no host access by default
+- **Controlled Network Access**: Optional TCP/TLS networking with host filtering and policies
+- **Host Callbacks**: Expose async Python functions for controlled host interaction
+- **Resource Limits**: Configure timeouts, memory limits, and callback restrictions
 - **Fast Startup**: Pre-initialized Python runtime embedded for ~1-5ms sandbox creation
 - **Pre-initialization**: Custom snapshots with packages for even faster specialized sandboxes
 - **Package Support**: Load Python packages (.whl, .tar.gz) including native extensions
@@ -83,6 +85,16 @@ For repeated sandbox creation with custom packages, see
 
 ## API Reference
 
+**Core Classes:**
+- [`Sandbox`](#sandbox) - Main class for isolated Python execution
+- [`Session`](#session) - Persistent state across executions
+- [`ExecuteResult`](#executeresult) - Execution results with stdout and stats
+- [`ResourceLimits`](#resourcelimits) - Configure execution constraints
+- [`NetConfig`](#netconfig) - Configure network access and policies
+- [`Callbacks`](#callbacks) - Expose host functions to sandboxed code
+- [`SandboxFactory`](#sandboxfactory) - Pre-initialize sandboxes with packages
+- [`VfsStorage`](#vfsstorage) - Virtual filesystem for sessions
+
 ### Sandbox vs Session
 
 | Feature | `Sandbox` | `Session` |
@@ -112,7 +124,13 @@ sandbox = eryx.Sandbox(
     resource_limits=eryx.ResourceLimits(
         execution_timeout_ms=5000,      # 5 second timeout
         max_memory_bytes=100_000_000,   # 100MB memory limit
-    )
+    ),
+    network=eryx.NetConfig(             # Optional: enable networking
+        allowed_hosts=["api.example.com"]
+    ),
+    callbacks=[                          # Optional: host functions
+        {"name": "get_data", "fn": get_data_fn, "description": "Fetch data"}
+    ]
 )
 
 result = sandbox.execute("print('Hello!')")
@@ -170,6 +188,214 @@ limits = eryx.ResourceLimits(
 
 # Or create unlimited (use with caution!)
 unlimited = eryx.ResourceLimits.unlimited()
+```
+
+### `NetConfig`
+
+Configure network access for sandboxed code. By default, **all network access is disabled**.
+Enable networking by creating a `NetConfig` and passing it to the sandbox.
+
+```python
+import eryx
+
+# Default config - allows external hosts, blocks localhost/private networks
+config = eryx.NetConfig(
+    max_connections=10,                    # Max concurrent connections
+    connect_timeout_ms=30000,              # Connection timeout (30s)
+    io_timeout_ms=60000,                   # I/O timeout (60s)
+    allowed_hosts=["api.example.com"],     # Whitelist specific hosts
+    blocked_hosts=[]                       # Override default blocks
+)
+
+sandbox = eryx.Sandbox(network=config)
+result = sandbox.execute("""
+import urllib.request
+response = urllib.request.urlopen("https://api.example.com/data")
+print(response.read().decode())
+""")
+```
+
+#### Security Defaults
+
+By default, `NetConfig` blocks localhost and private networks to prevent SSRF attacks:
+- `localhost`, `127.*`, `[::1]`
+- Private networks: `10.*`, `172.16.*`-`172.31.*`, `192.168.*`, `169.254.*`
+
+#### Permissive Configuration
+
+For testing or development, use `.permissive()` to allow all hosts including localhost:
+
+```python
+# WARNING: Allows sandbox to access local services
+config = eryx.NetConfig.permissive()
+sandbox = eryx.Sandbox(network=config)
+```
+
+#### Host Filtering
+
+Control which hosts sandboxed code can connect to using patterns with wildcards:
+
+```python
+config = eryx.NetConfig(
+    allowed_hosts=[
+        "api.example.com",           # Exact host
+        "*.googleapis.com",          # Wildcard subdomain
+        "api.*.com",                 # Wildcard in middle
+    ]
+)
+```
+
+When `allowed_hosts` is non-empty, only matching hosts are allowed. Blocked hosts are checked first.
+
+#### Builder Methods
+
+Chain methods for convenient configuration:
+
+```python
+config = (eryx.NetConfig()
+    .allow_host("api.example.com")
+    .allow_host("*.openai.com")
+    .allow_localhost()               # Remove localhost from blocked list
+    .with_root_cert(cert_der_bytes)) # Add custom CA cert for self-signed certs
+```
+
+#### Custom Certificates
+
+Add custom root certificates for testing with self-signed certificates:
+
+```python
+# Load certificate in DER format
+with open("ca-cert.der", "rb") as f:
+    cert_der = f.read()
+
+config = eryx.NetConfig().with_root_cert(cert_der)
+sandbox = eryx.Sandbox(network=config)
+```
+
+#### Supported Protocols
+
+Network-enabled sandboxes support:
+- **HTTP/HTTPS** via `urllib.request`, `http.client`
+- **Raw TCP/TLS** via `socket` module
+- **Async networking** via `asyncio` streams
+- **Third-party libraries** like `requests`, `httpx` (when loaded via `SandboxFactory`)
+
+### `Callbacks`
+
+Expose host functions to sandboxed code as async Python functions. Callbacks enable
+controlled interaction between sandboxed code and the host environment.
+
+#### Dict-Based API
+
+Simple and explicit, good for dynamic callback registration:
+
+```python
+import eryx
+
+def get_time():
+    import time
+    return {"timestamp": time.time()}
+
+def fetch_user(user_id: int):
+    # Call database, API, etc. from host
+    return {"id": user_id, "name": "Alice", "email": "alice@example.com"}
+
+sandbox = eryx.Sandbox(
+    callbacks=[
+        {
+            "name": "get_time",
+            "fn": get_time,
+            "description": "Returns current Unix timestamp"
+        },
+        {
+            "name": "fetch_user",
+            "fn": fetch_user,
+            "description": "Fetches user data from database"
+        }
+    ]
+)
+
+result = sandbox.execute("""
+# Callbacks are available as async functions
+t = await get_time()
+print(f"Time: {t['timestamp']}")
+
+user = await fetch_user(user_id=42)
+print(f"User: {user['name']} ({user['email']})")
+""")
+```
+
+#### Decorator-Based API
+
+More Pythonic, uses `CallbackRegistry`:
+
+```python
+import eryx
+
+registry = eryx.CallbackRegistry()
+
+@registry.callback(description="Greets a person by name")
+def greet(name: str, formal: bool = False):
+    if formal:
+        return {"greeting": f"Good day, {name}"}
+    return {"greeting": f"Hey {name}!"}
+
+@registry.callback(name="calc", description="Performs calculation")
+def calculate(op: str, a: float, b: float):
+    ops = {"add": a + b, "sub": a - b, "mul": a * b, "div": a / b}
+    return {"result": ops[op]}
+
+sandbox = eryx.Sandbox(callbacks=registry)
+
+result = sandbox.execute("""
+greeting = await greet(name="Alice", formal=True)
+print(greeting['greeting'])
+
+result = await calc(op="add", a=10, b=32)
+print(f"10 + 32 = {result['result']}")
+""")
+```
+
+#### Callback Requirements
+
+- Must accept JSON-serializable arguments
+- Must return JSON-serializable values (typically a dict)
+- Can be sync or async (both work the same from Python's perspective)
+- Are called as `await callback_name(...)` from sandboxed code
+
+#### Discovering Callbacks
+
+Sandboxed code can introspect available callbacks:
+
+```python
+result = sandbox.execute("""
+import _callbacks
+callbacks = _callbacks.list()
+for cb in callbacks:
+    print(f"{cb['name']}: {cb['description']}")
+""")
+```
+
+#### Error Handling
+
+Callbacks can raise exceptions that propagate to sandboxed code:
+
+```python
+def may_fail(should_fail: bool):
+    if should_fail:
+        raise ValueError("Operation failed!")
+    return {"status": "ok"}
+
+sandbox = eryx.Sandbox(
+    callbacks=[{"name": "may_fail", "fn": may_fail, "description": "May fail"}]
+)
+
+result = sandbox.execute("""
+try:
+    await may_fail(should_fail=True)
+except Exception as e:
+    print(f"Caught: {e}")
+""")
 ```
 
 ### `SandboxFactory`
