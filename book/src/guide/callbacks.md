@@ -1,3 +1,0 @@
-# Callbacks
-
-Coming soon.

@@ -17,8 +17,8 @@ version = "1.12.0"
 [tools."cargo:mdbook"]
 version = "0.5.2"
 
-# mdbook-langtabs: installed via cargo from git for mdbook 0.5 compatibility
-# cargo install mdbook-langtabs --git https://github.com/nx10/mdbook-langtabs
+[tools."cargo:mdbook-langtabs"]
+version = "0.2.0"
 
 # Note: WASI SDK is intentionally NOT in [tools] because adding it to PATH
 # breaks host compilation (Rust picks up wasm clang for proc-macro builds).

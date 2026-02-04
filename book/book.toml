@@ -5,7 +5,7 @@ src = "src"
 title = "Eryx - Python Sandboxing with WebAssembly"
 
 [rust]
-edition = "2021"
+edition = "2024"
 
 [build]
 build-dir = "book"

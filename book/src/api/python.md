@@ -12,4 +12,10 @@ The Python bindings provide a Pythonic interface to Eryx functionality.
 - `NetConfig` - Configure network access
 - `CallbackRegistry` - Decorator-based callback registration
 
-For detailed documentation, see the [PyPI package](https://pypi.org/project/pyeryx/).
+## Installation
+
+```bash
+pip install pyeryx
+```
+
+For detailed documentation, see the [PyPI package page](https://pypi.org/project/pyeryx/).
