@@ -46,6 +46,10 @@ serde_json = "1.0"
 # Hashing
 sha2 = "0.10"
 
+# Random number generation for secret placeholders
+rand = "0.8"
+hex = "0.4"
+
 # Archive extraction
 tar = "0.4"
 tempfile = "3.20"

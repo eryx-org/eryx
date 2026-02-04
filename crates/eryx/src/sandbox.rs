@@ -116,6 +116,14 @@ pub struct Sandbox {
     resource_limits: ResourceLimits,
     /// Network configuration for TLS connections.
     net_config: Option<NetConfig>,
+    /// Secrets configuration (name -> SecretConfig).
+    secrets: HashMap<String, crate::secrets::SecretConfig>,
+    /// Stdout scrubbing policy.
+    scrub_stdout: crate::secrets::OutputScrubPolicy,
+    /// Stderr scrubbing policy.
+    scrub_stderr: crate::secrets::OutputScrubPolicy,
+    /// File scrubbing policy.
+    scrub_files: crate::secrets::FileScrubPolicy,
     /// Extracted packages (kept alive to prevent temp directory cleanup).
     _packages: Vec<crate::package::ExtractedPackage>,
 }
@@ -229,7 +237,7 @@ impl Sandbox {
         // Spawn network handler if networking is enabled
         let (net_tx, net_handler) = if let Some(ref config) = self.net_config {
             let (tx, rx) = mpsc::channel::<NetRequest>(32);
-            let manager = ConnectionManager::new(config.clone());
+            let manager = ConnectionManager::new(config.clone(), self.secrets.clone());
             let handler = tokio::spawn(async move { run_net_handler(rx, manager).await });
             (Some(tx), Some(handler))
         } else {
@@ -279,10 +287,25 @@ impl Sandbox {
 
         match execution_result {
             Ok(output) => {
-                // Stream output if handler is configured
+                // Scrub secret placeholders from output based on policy
+                let stdout = if matches!(self.scrub_stdout, crate::secrets::OutputScrubPolicy::All)
+                {
+                    crate::secrets::scrub_placeholders(&output.stdout, &self.secrets)
+                } else {
+                    output.stdout
+                };
+
+                let stderr = if matches!(self.scrub_stderr, crate::secrets::OutputScrubPolicy::All)
+                {
+                    crate::secrets::scrub_placeholders(&output.stderr, &self.secrets)
+                } else {
+                    output.stderr
+                };
+
+                // Stream output if handler is configured (stream unscrubbed for now)
                 if let Some(handler) = &self.output_handler {
-                    handler.on_output(&output.stdout).await;
-                    handler.on_stderr(&output.stderr).await;
+                    handler.on_output(&stdout).await;
+                    handler.on_stderr(&stderr).await;
                 }
 
                 tracing::info!(
@@ -294,8 +317,8 @@ impl Sandbox {
                 );
 
                 Ok(ExecuteResult {
-                    stdout: output.stdout,
-                    stderr: output.stderr,
+                    stdout,
+                    stderr,
                     trace: trace_events,
                     stats: ExecuteStats {
                         duration,
@@ -679,6 +702,14 @@ pub struct SandboxBuilder<Runtime = state::Needs, Stdlib = state::Needs> {
     packages: Vec<crate::package::ExtractedPackage>,
     /// Network configuration for TLS connections.
     net_config: Option<crate::net::NetConfig>,
+    /// Secrets configuration (name -> SecretConfig).
+    secrets: HashMap<String, crate::secrets::SecretConfig>,
+    /// Stdout scrubbing policy.
+    scrub_stdout: crate::secrets::OutputScrubPolicy,
+    /// Stderr scrubbing policy.
+    scrub_stderr: crate::secrets::OutputScrubPolicy,
+    /// File scrubbing policy.
+    scrub_files: crate::secrets::FileScrubPolicy,
     /// Phantom data for Runtime type parameter.
     _runtime: PhantomData<Runtime>,
     /// Phantom data for Stdlib type parameter.
@@ -733,6 +764,10 @@ impl SandboxBuilder<state::Needs, state::Needs> {
             filesystem_cache: None,
             packages: Vec::new(),
             net_config: None,
+            secrets: HashMap::new(),
+            scrub_stdout: crate::secrets::OutputScrubPolicy::default(),
+            scrub_stderr: crate::secrets::OutputScrubPolicy::default(),
+            scrub_files: crate::secrets::FileScrubPolicy::default(),
             _runtime: PhantomData,
             _stdlib: PhantomData,
         }
@@ -761,6 +796,10 @@ impl SandboxBuilder<state::Needs, state::Needs> {
             filesystem_cache: None,
             packages: Vec::new(),
             net_config: None,
+            secrets: HashMap::new(),
+            scrub_stdout: crate::secrets::OutputScrubPolicy::default(),
+            scrub_stderr: crate::secrets::OutputScrubPolicy::default(),
+            scrub_files: crate::secrets::FileScrubPolicy::default(),
             _runtime: PhantomData,
             _stdlib: PhantomData,
         }
@@ -789,6 +828,10 @@ impl<R, S> SandboxBuilder<R, S> {
             filesystem_cache: self.filesystem_cache,
             packages: self.packages,
             net_config: self.net_config,
+            secrets: self.secrets,
+            scrub_stdout: self.scrub_stdout,
+            scrub_stderr: self.scrub_stderr,
+            scrub_files: self.scrub_files,
             _runtime: PhantomData,
             _stdlib: PhantomData,
         }
@@ -1208,6 +1251,126 @@ impl<R, S> SandboxBuilder<R, S> {
         self
     }
 
+    /// Add a secret that will be substituted at the network boundary.
+    ///
+    /// The sandbox will receive a placeholder via environment variable,
+    /// and the real value will be injected only when making HTTP requests
+    /// to allowed hosts.
+    ///
+    /// Placeholders are automatically scrubbed from stdout/stderr/files to
+    /// prevent leakage (see [`scrub_stdout`](Self::scrub_stdout),
+    /// [`scrub_stderr`](Self::scrub_stderr), [`scrub_files`](Self::scrub_files)).
+    ///
+    /// # Arguments
+    ///
+    /// * `name` - Environment variable name (e.g., "OPENAI_API_KEY")
+    /// * `value` - The real secret value
+    /// * `allowed_hosts` - Host patterns where this secret can be used.
+    ///   Supports wildcards: `*.example.com`, `api.*.com`. Empty means inherit
+    ///   from NetConfig's allowed_hosts.
+    ///
+    /// # Security
+    ///
+    /// - Python code only sees a placeholder like `ERYX_SECRET_PLACEHOLDER_abc123`
+    /// - Real value is substituted transparently when making HTTP requests
+    /// - Placeholders are scrubbed from all outputs by default
+    /// - Secrets are ephemeral (regenerated on each sandbox creation)
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// let sandbox = Sandbox::embedded()
+    ///     .with_secret("OPENAI_API_KEY", "sk-real-key", vec!["api.openai.com"])
+    ///     .with_network(NetConfig::default().allow_host("api.openai.com"))
+    ///     .build()?;
+    ///
+    /// // Python code:
+    /// // key = os.environ["OPENAI_API_KEY"]  # Gets placeholder
+    /// // requests.get("https://api.openai.com", headers={"Authorization": f"Bearer {key}"})
+    /// // # Real key is injected transparently
+    /// ```
+    #[must_use]
+    pub fn with_secret(
+        mut self,
+        name: impl Into<String>,
+        value: impl Into<String>,
+        allowed_hosts: Vec<String>,
+    ) -> Self {
+        let name = name.into();
+        let value = value.into();
+        let placeholder = crate::secrets::generate_placeholder(&name);
+
+        self.secrets.insert(
+            name.clone(),
+            crate::secrets::SecretConfig {
+                real_value: value,
+                placeholder: placeholder.clone(),
+                allowed_hosts,
+            },
+        );
+
+        // Set placeholder as environment variable via preamble
+        // TODO: Find proper way to set env vars in executor
+        let env_code = format!(
+            "import os\nos.environ[{:?}] = {:?}\n",
+            name, placeholder
+        );
+        self.preamble.push_str(&env_code);
+
+        self
+    }
+
+    /// Control stdout scrubbing (default: All when secrets configured).
+    ///
+    /// Accepts `bool` (for convenience) or `OutputScrubPolicy` (for future extensibility).
+    ///
+    /// When enabled, secret placeholders are replaced with `[REDACTED]` in stdout.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// .scrub_stdout(true)   // Enable scrubbing (default)
+    /// .scrub_stdout(false)  // Disable for debugging
+    /// ```
+    #[must_use]
+    pub fn scrub_stdout(mut self, policy: impl Into<crate::secrets::OutputScrubPolicy>) -> Self {
+        self.scrub_stdout = policy.into();
+        self
+    }
+
+    /// Control stderr scrubbing (default: All when secrets configured).
+    ///
+    /// Accepts `bool` (for convenience) or `OutputScrubPolicy` (for future extensibility).
+    ///
+    /// When enabled, secret placeholders are replaced with `[REDACTED]` in stderr.
+    #[must_use]
+    pub fn scrub_stderr(mut self, policy: impl Into<crate::secrets::OutputScrubPolicy>) -> Self {
+        self.scrub_stderr = policy.into();
+        self
+    }
+
+    /// Control file scrubbing (default: All when secrets configured).
+    ///
+    /// Accepts `bool` or `FileScrubPolicy` for forward compatibility.
+    ///
+    /// When enabled, secret placeholders are replaced with `[REDACTED]` when
+    /// writing files to the VFS.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// // Phase 1: Simple boolean
+    /// .scrub_files(true)
+    ///
+    /// // Phase 2: Path-based policies (future)
+    /// .scrub_files(FileScrubPolicy::except(vec!["/tmp/cache/*"]))
+    /// ```
+    #[must_use]
+    pub fn scrub_files(mut self, policy: impl Into<crate::secrets::FileScrubPolicy>) -> Self {
+        self.scrub_files = policy.into();
+        self
+    }
+
     /// Set the path to additional Python packages directory.
     ///
     /// The directory will be mounted at `/site-packages` inside the WASM sandbox
@@ -1476,6 +1639,10 @@ impl SandboxBuilder<state::Has, state::Has> {
             output_handler: self.output_handler,
             resource_limits: self.resource_limits,
             net_config: self.net_config,
+            secrets: self.secrets,
+            scrub_stdout: self.scrub_stdout,
+            scrub_stderr: self.scrub_stderr,
+            scrub_files: self.scrub_files,
             _packages: self.packages,
         })
     }
