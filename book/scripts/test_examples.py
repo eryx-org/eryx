@@ -171,10 +171,10 @@ def run_command(
 
 
 def find_python_venv() -> Optional[str]:
-    """Find the Python venv for pyaugurs if it exists."""
+    """Find the Python venv for pyeryx if it exists."""
     script_dir = Path(__file__).parent.resolve()
     repo_root = script_dir.parent.parent
-    venv_python = repo_root / "crates" / "pyaugurs" / ".venv" / "bin" / "python3"
+    venv_python = repo_root / "crates" / "eryx-python" / ".venv" / "bin" / "python3"
     if venv_python.exists():
         return str(venv_python)
     return None
@@ -446,15 +446,19 @@ def test_rust_batch(
     # Create Cargo.toml
     script_dir = Path(__file__).parent.resolve()
     repo_root = script_dir.parent.parent
-    augurs_path = repo_root / "crates" / "augurs"
+    eryx_path = repo_root
 
     cargo_toml = f"""[package]
 name = "rust_batch_tests"
 version = "0.1.0"
-edition = "2021"
+edition = "2024"
 
 [dependencies]
-augurs = {{ path = "{augurs_path}", features = ["mstl", "ets", "forecaster", "outlier", "clustering", "dtw", "seasons", "prophet", "prophet-wasmstan"] }}
+eryx = {{ path = "{eryx_path}", features = ["embedded"] }}
+tokio = {{ version = "1", features = ["rt-multi-thread", "macros"] }}
+serde = {{ version = "1", features = ["derive"] }}
+serde_json = "1"
+schemars = "0.8"
 
 [workspace]
 """
@@ -609,25 +613,16 @@ def main():
 
     print(f"Found {len(all_blocks)} code blocks in langtabs\n")
 
-    # Separate Rust blocks from others for batch testing
-    rust_blocks = []
-    other_blocks = []
-
+    # Skip Rust blocks - mdbook test handles Rust testing
+    rust_results_map = {}
     for i, block in enumerate(all_blocks):
         if block.language.lower() in ("rust", "rs"):
-            rust_blocks.append((i, block))
-        else:
-            other_blocks.append((i, block))
-
-    # Test all Rust blocks together (much faster!)
-    if rust_blocks:
-        print(
-            f"{Colors.BLUE}Testing {len(rust_blocks)} Rust examples in batch...{Colors.RESET}\n"
-        )
-        rust_results_list = test_rust_batch(rust_blocks, temp_dirs["rust"])
-        rust_results_map = {idx: result for idx, result in rust_results_list}
-    else:
-        rust_results_map = {}
+            rust_results_map[i] = TestResult(
+                success=None,
+                block=block,
+                skipped=True,
+                reason="Tested by mdbook test",
+            )
 
     # Now test all blocks in order, using batched Rust results where available
     results = []

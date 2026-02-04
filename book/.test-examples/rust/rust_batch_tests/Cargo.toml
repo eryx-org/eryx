@@ -1,9 +1,13 @@
 [package]
 name = "rust_batch_tests"
 version = "0.1.0"
-edition = "2021"
+edition = "2024"
 
 [dependencies]
-augurs = { path = "/Users/ben/repos/rust/eryx-docs-setup-mdbook/crates/augurs", features = ["mstl", "ets", "forecaster", "outlier", "clustering", "dtw", "seasons", "prophet", "prophet-wasmstan"] }
+eryx = { path = "/Users/ben/repos/rust/eryx-docs-setup-mdbook", features = ["embedded"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+schemars = "0.8"
 
 [workspace]
