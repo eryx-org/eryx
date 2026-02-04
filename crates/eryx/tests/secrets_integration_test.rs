@@ -130,7 +130,10 @@ print(f"Response received: {response[:50]}")
 
     // Verify the real secret was sent to the server
     let requests = server.get_requests().await;
-    assert!(!requests.is_empty(), "Server should have received a request");
+    assert!(
+        !requests.is_empty(),
+        "Server should have received a request"
+    );
 
     let first_request = &requests[0];
     assert!(
