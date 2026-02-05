@@ -154,7 +154,6 @@ async fn main() -> Result<(), eryx::Error> {
 
     // This will fail if it tries to allocate too much memory
     let result = sandbox.execute(r#"
-# Try to allocate a large list
 try:
     big_list = [0] * 10_000_000
     print("Allocated successfully")
