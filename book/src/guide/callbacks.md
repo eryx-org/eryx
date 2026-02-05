@@ -148,7 +148,7 @@ async fn search_users(
 
 ### Python
 
-```python
+```python,no_test
 @registry.callback(description="Searches for users")
 def search_users(
     query: str,
@@ -193,7 +193,7 @@ Error variants:
 
 ### Python
 
-```python
+```python,no_test
 @registry.callback(description="Divides two numbers")
 def divide(a: float, b: float):
     if b == 0:
@@ -209,7 +209,7 @@ Multiple callbacks can run concurrently using `asyncio.gather()`:
 
 <!-- langtabs-start -->
 
-```python
+```python,no_test
 # Inside the sandbox
 import asyncio
 
@@ -230,7 +230,7 @@ The sandbox can discover available callbacks at runtime:
 
 <!-- langtabs-start -->
 
-```python
+```python,no_test
 # Inside the sandbox
 import eryx_callbacks
 
