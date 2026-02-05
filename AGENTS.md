@@ -1,8 +1,43 @@
-# AGENTS.md - Rust & Cargo Workspace Best Practices
+# AGENTS.md - Eryx Project Guide
 
-This document outlines best practices for AI agents (and humans) working on this Rust codebase.
+This document outlines project-specific knowledge for AI agents (and humans) working on this Rust codebase.
 
-## Eryx-Specific Tooling
+## What is Eryx?
+
+Eryx is a Rust library that executes Python code in a WebAssembly sandbox with async callbacks. It embeds CPython 3.14 compiled to WASM (from [componentize-py](https://github.com/bytecodealliance/componentize-py)).
+
+Key capabilities:
+- Run untrusted Python code safely in a sandbox
+- Expose Rust async functions as Python callbacks (`await get_time()`)
+- Session state persistence for REPL-style usage
+- TCP/TLS networking with host-controlled policies
+- Pre-compiled WASM for fast startup (~16ms vs ~650ms)
+
+## Project Structure
+
+```
+crates/
+├── eryx/                  # Main library - public API, Sandbox, callbacks
+│   ├── src/
+│   │   ├── sandbox.rs     # Sandbox builder and execution
+│   │   ├── callback.rs    # TypedCallback, DynamicCallback traits
+│   │   ├── session/       # State persistence (InProcessSession)
+│   │   └── wasm.rs        # Wasmtime integration
+│   ├── examples/          # Usage examples
+│   └── benches/           # Criterion benchmarks
+├── eryx-runtime/          # WASM runtime packaging
+│   ├── runtime.wasm       # Built WASM component (~47MB)
+│   ├── runtime.cwasm      # Pre-compiled native code (~52MB)
+│   ├── runtime.wit        # WIT interface definition
+│   └── libs/              # WASI libraries (zstd compressed)
+├── eryx-wasm-runtime/     # Rust code compiled TO WASM (guest side)
+│   └── src/lib.rs         # WIT exports, Python FFI
+├── eryx-python/           # Python bindings (PyO3/maturin)
+├── eryx-precompile/       # CLI tool for AOT compilation
+└── eryx-vfs/              # Virtual filesystem for WASM
+```
+
+## Tooling
 
 This project uses [mise](https://mise.jdx.dev/) for tooling and task management.
 
@@ -23,255 +58,47 @@ mise run lint          # cargo clippy with all warnings
 mise run lint-fix      # Auto-fix clippy warnings
 mise run fmt           # cargo fmt
 mise run build-eryx-runtime  # Build Python WASM component
-mise run precompile-eryx-runtime # Pre-compile to native code
+mise run precompile-eryx-runtime-preinit # Pre-compile with preinit snapshot
 ```
 
 See `mise.toml` for all available tasks.
 
-## Cargo Workspace Configuration
+## WASM Runtime Build Pipeline
 
-### Dependency Management
+Eryx embeds a Python WASM runtime for fast startup. Understanding this pipeline is essential:
 
-**All dependencies MUST be declared at the workspace root and inherited by subcrates.**
+### Build Stages
 
-In the root `Cargo.toml`:
+1. **Build WASM** (`mise run build-eryx-runtime`)
+   - Compiles `eryx-wasm-runtime` to WebAssembly
+   - Outputs: `crates/eryx-runtime/runtime.wasm`
 
-```toml
-[workspace.dependencies]
-serde = { version = "1.0", features = ["derive"] }
-tokio = { version = "1", features = ["full"] }
-thiserror = "2.0"
-anyhow = "1.0"
-```
+2. **Build Late-Linking Artifacts** (`mise run build-preinit`)
+   - Builds native shared libraries for host functions (networking, etc.)
+   - Outputs: `liberyx_runtime.so.zst` and related artifacts
+   - Required for preinit to link against host capabilities
 
-In subcrate `Cargo.toml` files:
+3. **Precompile with Preinit** (`mise run precompile-eryx-runtime-preinit`)
+   - AOT compiles WASM to native code
+   - Creates a preinitialized snapshot (Python interpreter already started)
+   - Outputs: `crates/eryx-runtime/runtime.cwasm`
 
-```toml
-[dependencies]
-serde.workspace = true
-tokio.workspace = true
-```
+4. **Embed at Compile Time**
+   - `runtime.cwasm` is included via `include_bytes!()` in Rust code
+   - Tests and binaries load this precompiled + preinitialized runtime
+   - Result: ~0.1s startup vs ~5s without precompilation
 
-This ensures:
-- Version alignment across all crates
-- Single source of truth for dependency versions
-- Easier dependency updates
-- Prevents accidental version mismatches
+### Why This Matters
 
-### Workspace Lints
+- **Without precompilation**: Each test creates a fresh Python runtime (~2-5s in debug)
+- **With precompilation**: Tests share the embedded preinitialized runtime (~0.1s total)
+- **`SandboxFactory` vs `Sandbox`**: Factory uses the preinit snapshot; if it's stale, behavior differs
 
-**Configure all lints (Rust and Clippy) at the workspace level in `Cargo.toml`.**
+## Testing
 
-In the root `Cargo.toml`:
-
-```toml
-[workspace.lints.rust]
-missing_docs = "warn"
-# Use priority -1 to ensure lint groups are applied before individual lints
-rust_2018_idioms = { level = "warn", priority = -1 }
-
-[workspace.lints.clippy]
-all = "warn"
-unwrap_used = "warn"
-expect_used = "warn"
-```
-
-**Note**: The `unsafe_code` lint is handled per-crate rather than at workspace level when some crates need conditional unsafe (e.g., for optional features like pre-compiled WASM loading).
-
-In subcrate `Cargo.toml` files:
-
-```toml
-[lints]
-workspace = true
-```
-
-**Do NOT use a separate `clippy.toml` file** - keep all lint configuration in `Cargo.toml` for a single source of truth.
-
-### Shared Package Metadata
-
-**Use `[workspace.package]` for common metadata.**
-
-```toml
-[workspace.package]
-version = "0.1.0"
-edition = "2021"
-rust-version = "1.75"
-license = "MIT OR Apache-2.0"
-repository = "https://github.com/org/repo"
-authors = ["Your Name <you@example.com>"]
-```
-
-In subcrate `Cargo.toml`:
-
-```toml
-[package]
-name = "my-subcrate"
-version.workspace = true
-edition.workspace = true
-license.workspace = true
-# ... etc
-```
-
-### Resolver Version
-
-**Always use resolver version 2** (default for edition 2021+, but be explicit):
-
-```toml
-[workspace]
-resolver = "2"
-members = ["crates/*"]
-```
-
-## Code Quality
-
-### Formatting
-
-- Run `cargo fmt` before committing
-- Use a `rustfmt.toml` for project-specific formatting rules
-- Use `cargo fmt -- --check` in CI
-
-### Clippy
-
-- Run `cargo clippy --workspace --all-targets --all-features` regularly
-- Fix or explicitly allow all clippy warnings
-- **Prefer auto-fixing over allow attributes**: Use `mise run lint-fix` (or `cargo clippy --fix --allow-dirty --workspace`) to automatically fix warnings when possible
-- Use `#[allow(clippy::...)]` sparingly and with justification comments - only when auto-fix isn't applicable
-- All clippy configuration belongs in `Cargo.toml` under `[workspace.lints.clippy]`
-
-### Testing
-
-- **NEVER use `cargo test` directly** - it runs tests sequentially in debug mode and takes minutes (each test creates a full WASM Python runtime which takes 2-5s in debug)
+- **NEVER use `cargo test` directly** - it runs tests sequentially in debug mode and takes minutes
 - **Always use `mise run test`** which uses nextest (parallel execution) with embedded/precompiled WASM
-- Use `#[cfg(test)]` modules for unit tests
-- Place integration tests in `tests/` directories
-- Run `cargo nextest run --workspace --all-features` to test all feature combinations
-
-### Documentation
-
-- Run `cargo doc --workspace --no-deps --open` to generate and view docs
-- Use `//!` for module-level documentation
-- Use `///` for item documentation
-- Document all public APIs
-- Include examples in doc comments
-
-## Error Handling
-
-### Libraries
-
-- Use `thiserror` for defining error types
-- Make errors `Send + Sync + 'static` when possible
-- Implement `std::error::Error` for all error types
-
-### Applications
-
-- Use `anyhow` for application-level error handling
-- Provide context with `.context()` or `.with_context()`
-
-### General Rules
-
-- **Never use `.unwrap()` in production code** - use `.expect()` with a descriptive message, or proper error handling
-- **Avoid `.expect()` where possible** - prefer `?` operator with proper error types
-- Use `#[track_caller]` on functions that may panic to improve error messages
-
-## Performance
-
-### Release Builds
-
-Configure release profile in root `Cargo.toml`:
-
-```toml
-[profile.release]
-lto = true
-codegen-units = 1
-panic = "abort"  # if you don't need unwinding
-strip = true
-```
-
-### Benchmarking
-
-- Use `cargo bench` with criterion or divan
-- Always benchmark release builds
-
-## Security
-
-### Auditing
-
-- Run `cargo audit` regularly to check for known vulnerabilities
-- Run `cargo deny check` for license and security policy enforcement
-- Keep dependencies updated with `cargo update`
-
-### Best Practices
-
-- Never hardcode secrets or API keys
-- Use environment variables or secure vaults for sensitive configuration
-- Minimize use of `unsafe` - require justification comments when used
-- Review transitive dependencies
-
-## Version Control
-
-**Always commit `Cargo.lock`** for all crates (both libraries and applications). This ensures:
-- Reproducible builds across all environments
-- Consistent CI results
-- Easier debugging of dependency-related issues
-
-## Project Structure
-
-Recommended workspace layout:
-
-```
-project/
-├── Cargo.toml          # Workspace root with [workspace.dependencies] and [workspace.lints]
-├── Cargo.lock          # Always committed
-├── rustfmt.toml        # Formatting configuration
-├── deny.toml           # cargo-deny configuration
-├── crates/
-│   ├── core/           # Core library
-│   │   ├── Cargo.toml
-│   │   └── src/
-│   ├── cli/            # CLI application
-│   │   ├── Cargo.toml
-│   │   └── src/
-│   └── utils/          # Shared utilities
-│       ├── Cargo.toml
-│       └── src/
-├── tests/              # Integration tests
-└── benches/            # Benchmarks
-```
-
-## Feature Flags
-
-- Document all feature flags in crate-level documentation
-- Use `default = []` for libraries to avoid bloat
-- Be explicit about feature dependencies
-- Test with `--all-features` and `--no-default-features`
-
-```toml
-[features]
-default = []
-full = ["feature-a", "feature-b"]
-feature-a = ["dep:optional-dep"]
-feature-b = []
-```
-
-## CI Recommendations
-
-Minimum CI checks:
-
-```bash
-cargo fmt -- --check
-cargo clippy --workspace --all-targets --all-features -- -D warnings
-cargo nextest run --workspace --all-features
-cargo doc --workspace --no-deps
-cargo audit
-```
-
-For this project specifically, use:
-
-```bash
-mise run ci  # Runs fmt-check, lint, test
-```
-
-The `test` task uses the `embedded` feature with precompiled WASM which reduces test time from ~50s to ~0.1s.
+- For CI, use `mise run ci` which runs fmt-check, lint, and test
 
 ## Common Gotchas
 
@@ -349,29 +176,3 @@ maturin develop --release
 - The embedded runtime cache uses content hashes (`runtime-{version}-{hash}.cwasm`)
 - CI touches all source files before building to ensure fresh builds
 - When in doubt, run `mise run clean-artifacts && mise run setup`
-
-## Landing the Plane (Session Completion)
-
-**When ending a work session**, you MUST complete ALL steps below. Work is NOT complete until `git push` succeeds.
-
-**MANDATORY WORKFLOW:**
-
-1. **File issues for remaining work** - Create issues for anything that needs follow-up
-2. **Run quality gates** (if code changed) - Tests, linters, builds
-3. **Update issue status** - Close finished work, update in-progress items
-4. **PUSH TO REMOTE** - This is MANDATORY:
-   ```bash
-   git pull --rebase
-   bd sync
-   git push
-   git status  # MUST show "up to date with origin"
-   ```
-5. **Clean up** - Clear stashes, prune remote branches
-6. **Verify** - All changes committed AND pushed
-7. **Hand off** - Provide context for next session
-
-**CRITICAL RULES:**
-- Work is NOT complete until `git push` succeeds
-- NEVER stop before pushing - that leaves work stranded locally
-- NEVER say "ready to push when you are" - YOU must push
-- If push fails, resolve and retry until it succeeds
