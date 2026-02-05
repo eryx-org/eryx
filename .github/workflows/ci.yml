@@ -385,9 +385,11 @@ jobs:
 
       - uses: ./.github/actions/mark-wasm-current
 
-      # Note: We intentionally don't use the Rust cache here because the shared
-      # cache contains many feature combinations from check-all-features, causing
-      # "multiple candidates for rmeta dependency" errors in mdbook test.
+      - name: Configure Rust cache
+        uses: namespacelabs/nscloud-cache-action@v1
+        with:
+          cache: rust
+
       - uses: ./.github/actions/setup-rust
 
       - name: Install mdbook tools
@@ -396,7 +398,11 @@ jobs:
           cargo binstall -y mdbook-langtabs
 
       - name: Build project
-        run: cargo build -p eryx --features embedded
+        run: |
+          # Clean eryx packages to avoid "multiple rmeta candidates" from cached
+          # feature combinations (e.g., from check-all-features job)
+          cargo clean -p eryx -p eryx-runtime 2>/dev/null || true
+          cargo build -p eryx --features embedded
 
       - name: Test Rust code blocks
         run: mdbook test -L ../target/debug/deps
