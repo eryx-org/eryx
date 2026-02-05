@@ -24,9 +24,7 @@ component-init-transform = { git = "https://github.com/sd2k/component-init", rev
 # Benchmarking
 criterion = { version = "0.5", features = ["async_tokio"] }
 crossterm = "0.28"
-
-# Internal crates
-eryx = { path = "crates/eryx" }
+eryx = { path = "crates/eryx", version = "^0.3.0", features = ["embedded"] } #unified
 eryx-macros = { path = "crates/eryx-macros" }
 flate2 = "1.0"
 futures = "0.3"

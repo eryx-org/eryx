@@ -29,7 +29,7 @@
 use proc_macro::TokenStream;
 use proc_macro2::TokenStream as TokenStream2;
 use quote::{format_ident, quote};
-use syn::{parse_macro_input, Attribute, FnArg, ItemFn, Pat, Type};
+use syn::{Attribute, FnArg, ItemFn, Pat, Type, parse_macro_input};
 
 /// Attribute macro for defining sandbox callbacks with minimal boilerplate.
 ///
@@ -184,9 +184,9 @@ fn generate_callback(input: ItemFn) -> syn::Result<TokenStream2> {
         impl_fn.sig.ident = impl_fn_name.clone();
         impl_fn.vis = syn::Visibility::Inherited; // Make private
         // Remove the #[callback] attribute and doc comments from impl fn
-        impl_fn.attrs.retain(|attr| {
-            !attr.path().is_ident("callback") && !attr.path().is_ident("doc")
-        });
+        impl_fn
+            .attrs
+            .retain(|attr| !attr.path().is_ident("callback") && !attr.path().is_ident("doc"));
         impl_fn
     };
 

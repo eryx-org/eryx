@@ -2,8 +2,8 @@
 
 #![cfg(feature = "macros")]
 
-use eryx::{callback, Callback, CallbackError};
-use serde_json::{json, Value};
+use eryx::{Callback, CallbackError, callback};
+use serde_json::{Value, json};
 
 #[cfg(feature = "embedded")]
 use eryx::Sandbox;
@@ -169,8 +169,7 @@ print("all tests passed")
 
 #[test]
 fn callback_macro_can_be_boxed_as_trait_object() {
-    let callbacks: Vec<Box<dyn Callback>> =
-        vec![Box::new(get_time), Box::new(echo), Box::new(add)];
+    let callbacks: Vec<Box<dyn Callback>> = vec![Box::new(get_time), Box::new(echo), Box::new(add)];
 
     assert_eq!(callbacks.len(), 3);
     assert_eq!(callbacks[0].name(), "get_time");

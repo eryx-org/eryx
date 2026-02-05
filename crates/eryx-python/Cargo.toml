@@ -16,7 +16,7 @@ name = "_eryx"
 crate-type = ["cdylib"]
 
 [dependencies]
-eryx = { path = "../eryx", features = ["embedded", "native-extensions", "vfs"] }
+eryx = { workspace = true, features = ["macros", "native-extensions", "vfs"] } #unified
 pyo3 = { workspace = true, features = ["abi3-py312"] }
 pyo3-async-runtimes.workspace = true
 pythonize.workspace = true

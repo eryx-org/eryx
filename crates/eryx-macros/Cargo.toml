@@ -19,7 +19,7 @@ quote = "1"
 syn = { version = "2", features = ["full", "parsing", "extra-traits"] }
 
 [dev-dependencies]
-eryx = { path = "../eryx", features = ["embedded", "macros"] }
+eryx = { workspace = true, features = ["macros", "native-extensions", "vfs"] } #unified
 serde = { workspace = true }
 serde_json = { workspace = true }
 schemars = { workspace = true }
