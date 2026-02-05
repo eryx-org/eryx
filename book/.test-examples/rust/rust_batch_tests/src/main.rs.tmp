@@ -1,6 +1,0 @@
-// Test single module
-mod test_3;
-
-fn main() {
-    test_3::run();
-}
