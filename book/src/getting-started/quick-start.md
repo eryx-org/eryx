@@ -4,9 +4,8 @@ This guide will help you create your first Eryx sandbox and execute Python code.
 
 ## Basic Execution
 
-### Rust
-
-```rust,no_run
+<!-- langtabs-start -->
+```rust
 # extern crate eryx;
 # extern crate tokio;
 use eryx::Sandbox;
@@ -34,8 +33,6 @@ print(f"2 + 2 = {x}")
 }
 ```
 
-### Python
-
 ```python
 import eryx
 
@@ -56,16 +53,14 @@ print(result.stdout)
 
 print(f"Execution took {result.duration_ms:.2f}ms")
 ```
-
----
+<!-- langtabs-end -->
 
 ## With Callbacks
 
 Callbacks allow sandboxed code to interact with the host in a controlled way.
 
-### Rust
-
-```rust,no_run
+<!-- langtabs-start -->
+```rust
 # extern crate eryx;
 # extern crate tokio;
 # extern crate serde;
@@ -108,7 +103,6 @@ async fn main() -> Result<(), eryx::Error> {
         .build()?;
 
     let result = sandbox.execute(r#"
-# Callbacks are available as async functions
 response = await echo(message="Hello!")
 print(f"Echo: {response}")
     "#).await?;
@@ -117,8 +111,6 @@ print(f"Echo: {response}")
     Ok(())
 }
 ```
-
-### Python
 
 ```python
 import eryx
@@ -138,23 +130,20 @@ sandbox = eryx.Sandbox(
 )
 
 result = sandbox.execute("""
-# Callbacks are available as async functions
 t = await get_time()
 print(f"Time: {t['timestamp']}")
 """)
 
 print(result.stdout)
 ```
-
----
+<!-- langtabs-end -->
 
 ## With Sessions
 
 Sessions maintain state across multiple executions, useful for REPL-style usage.
 
-### Rust
-
-```rust,no_run
+<!-- langtabs-start -->
+```rust
 # extern crate eryx;
 # extern crate tokio;
 use eryx::{Sandbox, session::{InProcessSession, Session}};
@@ -173,8 +162,6 @@ async fn main() -> Result<(), eryx::Error> {
 }
 ```
 
-### Python
-
 ```python
 import eryx
 
@@ -186,8 +173,7 @@ session.execute("y = x * 2")
 result = session.execute("print(f'{x} * 2 = {y}')")
 print(result.stdout)  # "42 * 2 = 84"
 ```
-
----
+<!-- langtabs-end -->
 
 ## Performance
 
