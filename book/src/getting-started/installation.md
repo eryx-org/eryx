@@ -1,24 +1,18 @@
 # Installation
 
-## Adding Eryx to Your Project
+Eryx provides language bindings for both Rust and Python. Choose your preferred language below.
 
-<!-- langtabs-start -->
+## Rust
+
+Add Eryx to your `Cargo.toml`:
+
 ```toml
-// Add to your Cargo.toml:
 [dependencies]
 eryx = { version = "0.3", features = ["embedded"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 ```
 
-```bash
-# Install via pip:
-pip install pyeryx
-```
-<!-- langtabs-end -->
-
-> **Python Note:** The package is installed as `pyeryx` but imported as `eryx`.
-
-### Feature Flags (Rust Only)
+### Feature Flags
 
 | Feature              | Description                                                                         | Trade-offs                               |
 |----------------------|-------------------------------------------------------------------------------------|------------------------------------------|
@@ -30,22 +24,19 @@ pip install pyeryx
 
 Package support (`with_package()` for `.whl` and `.tar.gz` files) is always available — no feature flag required.
 
-## Verify Installation
+---
 
-<!-- langtabs-start -->
-```rust,no_run
-# extern crate eryx;
-# extern crate tokio;
-use eryx::Sandbox;
+## Python
 
-#[tokio::main]
-async fn main() -> Result<(), eryx::Error> {
-    let sandbox = Sandbox::embedded().build()?;
-    let result = sandbox.execute("print('Hello from Eryx!')").await?;
-    println!("{}", result.stdout);
-    Ok(())
-}
+Install from PyPI:
+
+```bash
+pip install pyeryx
 ```
+
+> **Note:** The package is installed as `pyeryx` but imported as `eryx`.
+
+### Verify Installation
 
 ```python
 import eryx
@@ -54,7 +45,8 @@ sandbox = eryx.Sandbox()
 result = sandbox.execute("print('Hello from Eryx!')")
 print(result.stdout)
 ```
-<!-- langtabs-end -->
+
+---
 
 ## Next Steps
 

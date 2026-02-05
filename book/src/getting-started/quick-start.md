@@ -5,7 +5,7 @@ This guide will help you create your first Eryx sandbox and execute Python code.
 ## Basic Execution
 
 <!-- langtabs-start -->
-```rust,no_run
+```rust
 # extern crate eryx;
 # extern crate tokio;
 use eryx::Sandbox;
@@ -26,6 +26,8 @@ print(f"2 + 2 = {x}")
     // Output:
     // Hello from Python!
     // 2 + 2 = 4
+
+    println!("Execution took {:.2}ms", result.stats.duration.as_secs_f64() * 1000.0);
 
     Ok(())
 }
@@ -58,7 +60,7 @@ print(f"Execution took {result.duration_ms:.2f}ms")
 Callbacks allow sandboxed code to interact with the host in a controlled way.
 
 <!-- langtabs-start -->
-```rust,no_run
+```rust
 # extern crate eryx;
 # extern crate tokio;
 # extern crate serde;
@@ -101,7 +103,6 @@ async fn main() -> Result<(), eryx::Error> {
         .build()?;
 
     let result = sandbox.execute(r#"
-# Callbacks are available as async functions
 response = await echo(message="Hello!")
 print(f"Echo: {response}")
     "#).await?;
@@ -129,7 +130,6 @@ sandbox = eryx.Sandbox(
 )
 
 result = sandbox.execute("""
-# Callbacks are available as async functions
 t = await get_time()
 print(f"Time: {t['timestamp']}")
 """)
@@ -143,7 +143,7 @@ print(result.stdout)
 Sessions maintain state across multiple executions, useful for REPL-style usage.
 
 <!-- langtabs-start -->
-```rust,no_run
+```rust
 # extern crate eryx;
 # extern crate tokio;
 use eryx::{Sandbox, session::{InProcessSession, Session}};
@@ -177,13 +177,15 @@ print(result.stdout)  # "42 * 2 = 84"
 
 ## Performance
 
-The `embedded` feature provides fast sandbox creation:
+Both Rust and Python bindings use pre-compiled WebAssembly for fast sandbox creation:
 
-| Metric | Normal Wasm | Pre-compiled (embedded) | Speedup |
-|--------|-------------|------------------------|---------|
+| Metric | Normal Wasm | Pre-compiled | Speedup |
+|--------|-------------|--------------|---------|
 | Sandbox creation | ~650ms | ~16ms | **41x faster** |
 | Per-execution overhead | ~1.8ms | ~1.6ms | 14% faster |
 | Session (5 executions) | ~70ms | ~3ms | **23x faster** |
+
+> **Rust Note:** The `embedded` feature flag enables pre-compilation. See [Installation](./installation.md#feature-flags) for details.
 
 ## Next Steps
 
