@@ -118,9 +118,14 @@ zstd = { workspace = true, optional = true }
 eryx-runtime = { path = "../eryx-runtime", optional = true }
 # Virtual filesystem support (optional)
 eryx-vfs = { path = "../eryx-vfs", optional = true }
+# Proc macro support (optional)
+eryx-macros = { path = "../eryx-macros", optional = true }
 
 [features]
 default = []
+# Proc macro for simplified callback definitions.
+# Provides #[callback] attribute macro.
+macros = ["dep:eryx-macros"]
 # Zero-config sandboxes: pre-compiled runtime + stdlib embedded in binary.
 # Enables unsafe code paths for wasmtime's pre-compiled component loading.
 # Without this feature, the crate uses `forbid(unsafe_code)`.

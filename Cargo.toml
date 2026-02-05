@@ -27,6 +27,7 @@ crossterm = "0.28"
 
 # Internal crates
 eryx = { path = "crates/eryx" }
+eryx-macros = { path = "crates/eryx-macros" }
 flate2 = "1.0"
 futures = "0.3"
 futures-concurrency = "7.6"
