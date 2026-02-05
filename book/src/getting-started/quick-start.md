@@ -27,6 +27,8 @@ print(f"2 + 2 = {x}")
     // Hello from Python!
     // 2 + 2 = 4
 
+    println!("Execution took {:.2}ms", result.stats.duration.as_secs_f64() * 1000.0);
+
     Ok(())
 }
 ```
@@ -177,13 +179,15 @@ print(result.stdout)  # "42 * 2 = 84"
 
 ## Performance
 
-The `embedded` feature provides fast sandbox creation:
+Both Rust and Python bindings use pre-compiled WebAssembly for fast sandbox creation:
 
-| Metric | Normal Wasm | Pre-compiled (embedded) | Speedup |
-|--------|-------------|------------------------|---------|
+| Metric | Normal Wasm | Pre-compiled | Speedup |
+|--------|-------------|--------------|---------|
 | Sandbox creation | ~650ms | ~16ms | **41x faster** |
 | Per-execution overhead | ~1.8ms | ~1.6ms | 14% faster |
 | Session (5 executions) | ~70ms | ~3ms | **23x faster** |
+
+> **Rust Note:** The `embedded` feature flag enables pre-compilation. See [Installation](./installation.md#feature-flags) for details.
 
 ## Next Steps
 
