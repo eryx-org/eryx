@@ -56,7 +56,7 @@ jobs:
           path: |
             crates/eryx-runtime/runtime.wasm
             crates/eryx-runtime/runtime.cwasm
-            crates/eryx-runtime/prebuilt/
+            crates/eryx-runtime/prebuilt/*.zst
           retention-days: 1
 
   test-book:
