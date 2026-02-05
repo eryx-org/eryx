@@ -122,7 +122,8 @@ pub struct Sandbox {
     scrub_stdout: crate::secrets::OutputScrubPolicy,
     /// Stderr scrubbing policy.
     scrub_stderr: crate::secrets::OutputScrubPolicy,
-    /// File scrubbing policy.
+    /// File scrubbing policy (Phase 2: VFS integration).
+    #[allow(dead_code)]
     scrub_files: crate::secrets::FileScrubPolicy,
     /// Extracted packages (kept alive to prevent temp directory cleanup).
     _packages: Vec<crate::package::ExtractedPackage>,
@@ -708,7 +709,8 @@ pub struct SandboxBuilder<Runtime = state::Needs, Stdlib = state::Needs> {
     scrub_stdout: crate::secrets::OutputScrubPolicy,
     /// Stderr scrubbing policy.
     scrub_stderr: crate::secrets::OutputScrubPolicy,
-    /// File scrubbing policy.
+    /// File scrubbing policy (Phase 2: VFS integration).
+    #[allow(dead_code)]
     scrub_files: crate::secrets::FileScrubPolicy,
     /// Phantom data for Runtime type parameter.
     _runtime: PhantomData<Runtime>,

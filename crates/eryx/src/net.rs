@@ -244,7 +244,7 @@ impl From<TcpError> for TlsError {
 // ============================================================================
 
 /// HTTP parsing state for a single connection.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 struct HttpParsingState {
     /// Buffer for accumulating request data until headers are complete
     buffer: Vec<u8>,
@@ -254,17 +254,6 @@ struct HttpParsingState {
     body_bytes_sent: usize,
     /// Expected content-length (if any)
     content_length: Option<usize>,
-}
-
-impl Default for HttpParsingState {
-    fn default() -> Self {
-        Self {
-            buffer: Vec::new(),
-            headers_complete: false,
-            body_bytes_sent: 0,
-            content_length: None,
-        }
-    }
 }
 
 /// Manages TCP and TLS connections for a sandbox instance.
@@ -513,11 +502,11 @@ impl ConnectionManager {
             let n = self.tcp_write_raw(handle, data).await?;
 
             // Check if request is complete
-            if let Some(cl) = state.content_length {
-                if state.body_bytes_sent >= cl {
-                    // Request complete - reset for pipelining
-                    state = HttpParsingState::default();
-                }
+            if let Some(cl) = state.content_length
+                && state.body_bytes_sent >= cl
+            {
+                // Request complete - reset for pipelining
+                state = HttpParsingState::default();
             }
 
             self.http_states.insert(handle, state);
@@ -762,10 +751,10 @@ fn is_http2(data: &[u8]) -> bool {
 fn extract_content_length(headers: &[u8]) -> Option<usize> {
     let text = String::from_utf8_lossy(headers);
     for line in text.lines() {
-        if line.to_ascii_lowercase().starts_with("content-length:") {
-            if let Some(value) = line.split(':').nth(1) {
-                return value.trim().parse().ok();
-            }
+        if line.to_ascii_lowercase().starts_with("content-length:")
+            && let Some(value) = line.split(':').nth(1)
+        {
+            return value.trim().parse().ok();
         }
     }
     None
@@ -829,6 +818,7 @@ fn host_matches_pattern(host: &str, pattern: &str) -> bool {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
 
