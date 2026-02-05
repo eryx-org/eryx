@@ -309,14 +309,16 @@ use serde_json::json;
 
 # #[tokio::main]
 # async fn main() -> Result<(), eryx::Error> {
-let callback = DynamicCallback::new("get_config")
-    .description("Returns application configuration")
-    .handler(|_args| Box::pin(async move {
+let callback = DynamicCallback::builder(
+    "get_config",
+    "Returns application configuration",
+    |_args| Box::pin(async move {
         Ok(json!({
             "version": "1.0.0",
             "debug": false
         }))
-    }));
+    })
+).build();
 
 let sandbox = Sandbox::embedded()
     .with_callback(callback)
