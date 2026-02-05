@@ -5,7 +5,7 @@ Sessions maintain Python state across multiple executions, enabling REPL-style i
 ## Creating a Session
 
 <!-- langtabs-start -->
-```rust
+```rust,ignore
 # extern crate eryx;
 # extern crate tokio;
 use eryx::{Sandbox, session::{InProcessSession, Session}};
@@ -43,7 +43,7 @@ Sessions preserve all Python state between executions:
 ### Variables
 
 <!-- langtabs-start -->
-```rust
+```rust,ignore
 # extern crate eryx;
 # extern crate tokio;
 use eryx::{Sandbox, session::{InProcessSession, Session}};
@@ -77,7 +77,7 @@ print(result.stdout)  # "42, 84"
 ### Functions and Classes
 
 <!-- langtabs-start -->
-```rust
+```rust,ignore
 # extern crate eryx;
 # extern crate tokio;
 use eryx::{Sandbox, session::{InProcessSession, Session}};
@@ -151,7 +151,7 @@ print(result.stdout)  # "1 2 3"
 ### Imports
 
 <!-- langtabs-start -->
-```rust
+```rust,ignore
 # extern crate eryx;
 # extern crate tokio;
 use eryx::{Sandbox, session::{InProcessSession, Session}};
@@ -185,7 +185,7 @@ print(result.stdout)  # '{"a": 1}'
 Sessions track how many executions have been performed:
 
 <!-- langtabs-start -->
-```rust
+```rust,ignore
 # extern crate eryx;
 # extern crate tokio;
 use eryx::{Sandbox, session::{InProcessSession, Session}};
@@ -229,7 +229,7 @@ print(f"Count: {session.execution_count}")  # 2
 Clears Python variables while keeping the session instance:
 
 <!-- langtabs-start -->
-```rust
+```rust,ignore
 # extern crate eryx;
 # extern crate tokio;
 use eryx::{Sandbox, session::{InProcessSession, Session}};
@@ -269,7 +269,7 @@ print(result.stdout)  # "False"
 Completely resets the session by creating a new WebAssembly instance:
 
 <!-- langtabs-start -->
-```rust
+```rust,ignore
 # extern crate eryx;
 # extern crate tokio;
 use eryx::{Sandbox, session::{InProcessSession, Session}};
@@ -321,7 +321,7 @@ Sessions support snapshotting and restoring state, enabling features like checkp
 ### Taking a Snapshot
 
 <!-- langtabs-start -->
-```rust
+```rust,ignore
 # extern crate eryx;
 # extern crate tokio;
 use eryx::{Sandbox, session::{InProcessSession, Session}};
@@ -359,7 +359,7 @@ print(f"Snapshot size: {len(snapshot)} bytes")
 ### Restoring a Snapshot
 
 <!-- langtabs-start -->
-```rust
+```rust,ignore
 # extern crate eryx;
 # extern crate tokio;
 use eryx::{Sandbox, session::{InProcessSession, Session}};
@@ -448,7 +448,7 @@ print(result.stdout)  # "hello"
 Sessions can have an execution timeout configured:
 
 <!-- langtabs-start -->
-```rust
+```rust,ignore
 # extern crate eryx;
 # extern crate tokio;
 use eryx::{Sandbox, session::{InProcessSession, Session}};

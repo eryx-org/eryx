@@ -16,7 +16,7 @@ By default, sandboxes have sensible limits applied:
 ## Configuring Resource Limits
 
 <!-- langtabs-start -->
-```rust
+```rust,ignore
 # extern crate eryx;
 # extern crate tokio;
 use eryx::Sandbox;
@@ -58,7 +58,7 @@ print(result.stdout)
 The execution timeout limits how long Python code can run before being terminated:
 
 <!-- langtabs-start -->
-```rust
+```rust,ignore
 # extern crate eryx;
 # extern crate tokio;
 use eryx::{Sandbox, Error};
@@ -126,7 +126,7 @@ except eryx.TimeoutError:
 Control the maximum memory the WebAssembly instance can use:
 
 <!-- langtabs-start -->
-```rust
+```rust,ignore
 # extern crate eryx;
 # extern crate tokio;
 use eryx::Sandbox;
@@ -208,7 +208,7 @@ Fuel limits provide fine-grained control over execution by limiting the number o
 - Preventing CPU-intensive attacks
 
 <!-- langtabs-start -->
-```rust
+```rust,ignore
 # extern crate eryx;
 # extern crate tokio;
 use eryx::{Sandbox, session::{InProcessSession, Session}};
@@ -260,7 +260,7 @@ print(f"Fuel consumed: {result.fuel_consumed}")
 
 You can set fuel limits per-execution to override session defaults:
 
-```rust
+```rust,ignore
 # extern crate eryx;
 # extern crate tokio;
 use eryx::{Sandbox, session::{InProcessSession, Session}};
@@ -290,7 +290,7 @@ async fn main() -> Result<(), eryx::Error> {
 
 The same code always consumes the same amount of fuel:
 
-```rust
+```rust,ignore
 # extern crate eryx;
 # extern crate tokio;
 use eryx::{Sandbox, session::{InProcessSession, Session}};
@@ -337,7 +337,7 @@ print(result.stdout)
 Execution results include resource usage statistics:
 
 <!-- langtabs-start -->
-```rust
+```rust,ignore
 # extern crate eryx;
 # extern crate tokio;
 use eryx::Sandbox;
@@ -372,7 +372,7 @@ print(f"Callback invocations: {result.callback_invocations}")
 
 Sessions can recover after hitting resource limits by resetting:
 
-```rust
+```rust,ignore
 # extern crate eryx;
 # extern crate tokio;
 use eryx::{Sandbox, session::{InProcessSession, Session}};

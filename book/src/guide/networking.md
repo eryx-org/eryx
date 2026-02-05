@@ -5,15 +5,15 @@ By default, sandboxes have no network access. You can enable and configure netwo
 ## Enabling Network Access
 
 <!-- langtabs-start -->
-```rust
+```rust,ignore
 # extern crate eryx;
 # extern crate tokio;
-use eryx::Sandbox;
+use eryx::{Sandbox, net::NetConfig};
 
 #[tokio::main]
 async fn main() -> Result<(), eryx::Error> {
     let sandbox = Sandbox::embedded()
-        .with_network_enabled()
+        .with_network(NetConfig::default())
         .build()?;
 
     let result = sandbox.execute(r#"

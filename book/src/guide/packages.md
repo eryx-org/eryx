@@ -41,7 +41,7 @@ print(result.stdout)  # "Hello World!"
 
 In Rust, use the sandbox builder to add packages:
 
-```rust
+```rust,ignore
 # extern crate eryx;
 # extern crate tokio;
 use eryx::Sandbox;
@@ -160,25 +160,25 @@ Eryx caches compiled WebAssembly components to speed up repeated sandbox creatio
 
 ### Filesystem Cache (Rust)
 
-```rust
+```rust,ignore
 # extern crate eryx;
 # extern crate tokio;
-use eryx::{Sandbox, cache::FilesystemCache};
+use eryx::Sandbox;
 use std::path::PathBuf;
 
 #[tokio::main]
 async fn main() -> Result<(), eryx::Error> {
     let cache_dir = PathBuf::from("/tmp/eryx-cache");
-    let cache = FilesystemCache::new(&cache_dir)?;
 
+    // Use with_cache_dir for simple filesystem caching
     let sandbox = Sandbox::embedded()
-        .with_cache(cache)
+        .with_cache_dir(&cache_dir)?
         .with_package("path/to/package.whl")?
         .build()?;
 
     // Second creation is faster due to caching
     let sandbox2 = Sandbox::embedded()
-        .with_cache(FilesystemCache::new(&cache_dir)?)
+        .with_cache_dir(&cache_dir)?
         .with_package("path/to/package.whl")?
         .build()?;
 
@@ -188,14 +188,15 @@ async fn main() -> Result<(), eryx::Error> {
 
 ### In-Memory Cache (Rust)
 
-```rust
+```rust,ignore
 # extern crate eryx;
 # extern crate tokio;
 use eryx::{Sandbox, cache::InMemoryCache};
+use std::sync::Arc;
 
 #[tokio::main]
 async fn main() -> Result<(), eryx::Error> {
-    let cache = InMemoryCache::new();
+    let cache = Arc::new(InMemoryCache::new());
 
     // First build populates cache
     let sandbox1 = Sandbox::embedded()

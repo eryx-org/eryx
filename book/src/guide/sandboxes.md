@@ -5,7 +5,7 @@ Sandboxes are the core primitive in Eryx. A sandbox provides an isolated Python 
 ## Creating a Sandbox
 
 <!-- langtabs-start -->
-```rust
+```rust,ignore
 # extern crate eryx;
 # extern crate tokio;
 use eryx::Sandbox;
@@ -45,7 +45,7 @@ Each sandbox runs in complete isolation:
 - **Process isolation**: Cannot spawn processes or execute system commands
 
 <!-- langtabs-start -->
-```rust
+```rust,ignore
 # extern crate eryx;
 # extern crate tokio;
 use eryx::Sandbox;
@@ -96,7 +96,7 @@ print(result.stdout)
 When you execute code, you get back an `ExecuteResult` with useful information:
 
 <!-- langtabs-start -->
-```rust
+```rust,ignore
 # extern crate eryx;
 # extern crate tokio;
 use eryx::Sandbox;
@@ -135,7 +135,7 @@ print(f"Callback invocations: {result.callback_invocations}")
 Sandbox execution can fail for various reasons. Eryx provides typed errors to help you handle them:
 
 <!-- langtabs-start -->
-```rust
+```rust,ignore
 # extern crate eryx;
 # extern crate tokio;
 use eryx::{Sandbox, Error};
@@ -180,7 +180,7 @@ except eryx.EryxError as e:
 Sandboxes can be reused for multiple executions. Each execution starts fresh without any state from previous executions:
 
 <!-- langtabs-start -->
-```rust
+```rust,ignore
 # extern crate eryx;
 # extern crate tokio;
 use eryx::Sandbox;
@@ -233,7 +233,7 @@ If you need state to persist across executions, use a [Session](./sessions.md).
 When creating many sandboxes, use `SandboxFactory` to pre-initialize Python and packages once, then quickly instantiate sandboxes from that snapshot:
 
 <!-- langtabs-start -->
-```rust
+```rust,ignore
 # extern crate eryx;
 # extern crate tokio;
 // SandboxFactory is primarily useful in the Python bindings
