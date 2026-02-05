@@ -1,6 +1,7 @@
 //! Integration tests for the #[callback] proc macro.
 
 #![cfg(feature = "macros")]
+#![allow(clippy::expect_used, clippy::unwrap_used)]
 
 use eryx::{Callback, CallbackError, callback};
 use serde_json::{Value, json};
