@@ -1,100 +1,84 @@
-# VFS File Scrubbing
+# eryx-vfs
 
-The `eryx-vfs` crate now includes support for automatically scrubbing secret placeholders from file writes.
+Virtual Filesystem for the Eryx Python sandbox.
 
-## Usage with Secrets
+This crate provides a custom `wasi:filesystem` implementation backed by pluggable storage backends, allowing sandboxed Python code to read and write files that persist across sandbox executions.
+
+## Architecture
+
+The VFS consists of several key components:
+
+- **`VfsStorage`** - A trait for pluggable storage backends
+- **`InMemoryStorage`** - An in-memory implementation for testing and ephemeral use
+- **`HybridVfsCtx`** - Combines real filesystem access with virtual storage
+- **`ScrubbingStorage`** - A wrapper that scrubs secret placeholders from writes
+
+## Usage
+
+### Basic In-Memory VFS
+
+```rust
+use eryx_vfs::{InMemoryStorage, VfsCtx, add_vfs_to_linker};
+use std::sync::Arc;
+
+// Create storage
+let storage = Arc::new(InMemoryStorage::new());
+
+// Create VFS context
+let vfs_ctx = VfsCtx::new(storage);
+
+// Add to wasmtime linker (after adding wasmtime-wasi)
+wasmtime_wasi::p2::add_to_linker_async(&mut linker)?;
+add_vfs_to_linker(&mut linker)?;
+```
+
+### Hybrid Filesystem
+
+The hybrid VFS allows combining real filesystem access with virtual storage:
+
+```rust
+use eryx_vfs::{HybridVfsCtx, HybridPreopen, RealDir};
+
+let hybrid_ctx = HybridVfsCtx::new()
+    .with_preopen(HybridPreopen::Real(RealDir {
+        host_path: "/path/on/host".into(),
+        guest_path: "/data".into(),
+        dir_perms: DirPerms::all(),
+        file_perms: FilePerms::all(),
+    }));
+```
+
+## Secret Scrubbing
+
+The `ScrubbingStorage` wrapper can automatically scrub secret placeholders from file writes, preventing accidental leakage of sensitive data:
 
 ```rust
 use eryx_vfs::{InMemoryStorage, ScrubbingStorage, VfsSecretConfig, VfsFileScrubPolicy};
-use std::{sync::Arc, collections::HashMap};
+use std::collections::HashMap;
 
-// Create base storage
-let storage = Arc::new(InMemoryStorage::new());
+let storage = InMemoryStorage::new();
 
-// Configure secrets that should be scrubbed
 let mut secrets = HashMap::new();
 secrets.insert("API_KEY".to_string(), VfsSecretConfig {
     placeholder: "ERYX_SECRET_PLACEHOLDER_abc123".to_string(),
 });
 
-// Wrap storage with scrubbing
-let scrubbing_storage = Arc::new(ScrubbingStorage::new(
+let scrubbing_storage = ScrubbingStorage::new(
     storage,
     secrets,
-    VfsFileScrubPolicy::All,  // Scrub all files
-));
-
-// Use with VfsCtx as normal
-let vfs_ctx = VfsCtx::new(scrubbing_storage);
+    VfsFileScrubPolicy::All,
+);
 ```
 
-## Scrubbing Policies
+### Scrubbing Policies
 
-### `VfsFileScrubPolicy::All` (Default)
-Scrubs all files:
-```rust
-VfsFileScrubPolicy::All
-```
-
-### `VfsFileScrubPolicy::None`
-Disables scrubbing (useful for debugging):
-```rust
-VfsFileScrubPolicy::None
-```
-
-### `VfsFileScrubPolicy::Except` (Future)
-Scrubs all files except specified paths:
-```rust
-VfsFileScrubPolicy::Except(vec![
-    "/tmp/cache/*".to_string(),
-    "/debug/*.log".to_string(),
-])
-```
-
-### `VfsFileScrubPolicy::Only` (Future)
-Only scrubs specified paths:
-```rust
-VfsFileScrubPolicy::Only(vec![
-    "/secrets/*.txt".to_string(),
-])
-```
-
-## How It Works
-
-1. **Text files**: Placeholders are replaced via string search
-2. **Binary files**: Placeholders are replaced via byte sequence search
-3. **Writes are intercepted**: `write()` and `write_at()` scrub before passing to storage
-4. **Reads are passthrough**: No scrubbing on reads (data is already scrubbed)
-
-## Integration with eryx
-
-When using `eryx` with VFS and secrets, the scrubbing happens automatically:
-
-```rust
-use eryx::{Sandbox, NetConfig};
-
-let sandbox = Sandbox::embedded()
-    .with_secret("API_KEY", "real-value", vec!["api.example.com"])
-    .scrub_files(true)  // Enables VFS scrubbing
-    .with_network(NetConfig::default().allow_host("api.example.com"))
-    .build()?;
-```
-
-The sandbox will:
-1. Pass secrets configuration to VFS
-2. Wrap storage with `ScrubbingStorage`
-3. All file writes automatically scrub placeholders
+- `VfsFileScrubPolicy::All` - Scrub all files (default)
+- `VfsFileScrubPolicy::None` - Disable scrubbing
+- `VfsFileScrubPolicy::Except(paths)` - Scrub all except specified paths (future)
+- `VfsFileScrubPolicy::Only(paths)` - Only scrub specified paths (future)
 
 ## Testing
 
-Run VFS scrubbing tests:
 ```bash
-cargo test -p eryx-vfs scrubbing
+cargo test -p eryx-vfs
 ```
-
-The tests verify:
-- Text file scrubbing
-- Binary file scrubbing
-- Multiple placeholders
-- Scrubbing can be disabled
-- Byte replacement correctness
