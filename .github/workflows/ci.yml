@@ -385,19 +385,22 @@ jobs:
 
       - uses: ./.github/actions/mark-wasm-current
 
-      - name: Install mise
-        uses: jdx/mise-action@v2
+      # Note: We intentionally don't use the Rust cache here because the shared
+      # cache contains many feature combinations from check-all-features, causing
+      # "multiple candidates for rmeta dependency" errors in mdbook test.
+      - uses: ./.github/actions/setup-rust
 
-      - name: Install mdbook and mdbook-langtabs
+      - name: Install mdbook tools
         run: |
-          mise install cargo:mdbook
-          cargo install mdbook-langtabs --git https://github.com/nx10/mdbook-langtabs
+          cargo binstall -y mdbook
+          cargo binstall -y mdbook-langtabs
 
       - name: Build project
-        run: cargo build --workspace --features embedded
+        run: cargo build -p eryx --features embedded
 
       - name: Test Rust code blocks
-        run: mise run book:test
+        run: mdbook test -L ../target/debug/deps
+        working-directory: book
 
       - uses: actions/setup-python@v5
         with:
@@ -436,13 +439,13 @@ jobs:
         with:
           fetch-depth: 0  # Need full history for version detection
 
-      - name: Install mise
-        uses: jdx/mise-action@v2
+      - name: Install cargo-binstall
+        run: curl -L --proto '=https' --tlsv1.2 -sSf https://raw.githubusercontent.com/cargo-bins/cargo-binstall/main/install-from-binstall-release.sh | bash
 
-      - name: Install mdbook and mdbook-langtabs
+      - name: Install mdbook tools
         run: |
-          mise install cargo:mdbook
-          cargo install mdbook-langtabs --git https://github.com/nx10/mdbook-langtabs
+          cargo binstall -y mdbook
+          cargo binstall -y mdbook-langtabs
 
       - name: Detect version
         id: version
@@ -452,7 +455,8 @@ jobs:
           echo "Detected version: v$VERSION"
 
       - name: Build book
-        run: mise run book:build
+        working-directory: book
+        run: mdbook build
 
       - name: Prepare deployment directory
         run: |
