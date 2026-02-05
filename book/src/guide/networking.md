@@ -5,10 +5,10 @@ By default, sandboxes have no network access. You can enable and configure netwo
 ## Enabling Network Access
 
 <!-- langtabs-start -->
-```rust,ignore
+```rust
 # extern crate eryx;
 # extern crate tokio;
-use eryx::{Sandbox, net::NetConfig};
+use eryx::{Sandbox, NetConfig};
 
 #[tokio::main]
 async fn main() -> Result<(), eryx::Error> {

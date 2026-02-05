@@ -5,7 +5,7 @@ Sessions maintain Python state across multiple executions, enabling REPL-style i
 ## Creating a Session
 
 <!-- langtabs-start -->
-```rust,ignore
+```rust
 # extern crate eryx;
 # extern crate tokio;
 use eryx::{Sandbox, session::{InProcessSession, Session}};
@@ -43,7 +43,7 @@ Sessions preserve all Python state between executions:
 ### Variables
 
 <!-- langtabs-start -->
-```rust,ignore
+```rust
 # extern crate eryx;
 # extern crate tokio;
 use eryx::{Sandbox, session::{InProcessSession, Session}};
@@ -77,7 +77,7 @@ print(result.stdout)  # "42, 84"
 ### Functions and Classes
 
 <!-- langtabs-start -->
-```rust,ignore
+```rust
 # extern crate eryx;
 # extern crate tokio;
 use eryx::{Sandbox, session::{InProcessSession, Session}};
@@ -151,7 +151,7 @@ print(result.stdout)  # "1 2 3"
 ### Imports
 
 <!-- langtabs-start -->
-```rust,ignore
+```rust
 # extern crate eryx;
 # extern crate tokio;
 use eryx::{Sandbox, session::{InProcessSession, Session}};
@@ -185,7 +185,7 @@ print(result.stdout)  # '{"a": 1}'
 Sessions track how many executions have been performed:
 
 <!-- langtabs-start -->
-```rust,ignore
+```rust
 # extern crate eryx;
 # extern crate tokio;
 use eryx::{Sandbox, session::{InProcessSession, Session}};
@@ -229,7 +229,7 @@ print(f"Count: {session.execution_count}")  # 2
 Clears Python variables while keeping the session instance:
 
 <!-- langtabs-start -->
-```rust,ignore
+```rust
 # extern crate eryx;
 # extern crate tokio;
 use eryx::{Sandbox, session::{InProcessSession, Session}};
@@ -269,7 +269,7 @@ print(result.stdout)  # "False"
 Completely resets the session by creating a new WebAssembly instance:
 
 <!-- langtabs-start -->
-```rust,ignore
+```rust
 # extern crate eryx;
 # extern crate tokio;
 use eryx::{Sandbox, session::{InProcessSession, Session}};
@@ -280,7 +280,7 @@ async fn main() -> Result<(), eryx::Error> {
     let mut session = InProcessSession::new(&sandbox).await?;
 
     session.execute("x = 42").await?;
-    session.reset(&[]).await?;  // Full reset
+    session.reset().await?;  // Full reset
 
     // x is no longer defined
     let result = session.execute(r#"
@@ -321,7 +321,7 @@ Sessions support snapshotting and restoring state, enabling features like checkp
 ### Taking a Snapshot
 
 <!-- langtabs-start -->
-```rust,ignore
+```rust
 # extern crate eryx;
 # extern crate tokio;
 use eryx::{Sandbox, session::{InProcessSession, Session}};
@@ -359,7 +359,7 @@ print(f"Snapshot size: {len(snapshot)} bytes")
 ### Restoring a Snapshot
 
 <!-- langtabs-start -->
-```rust,ignore
+```rust
 # extern crate eryx;
 # extern crate tokio;
 use eryx::{Sandbox, session::{InProcessSession, Session}};
@@ -445,25 +445,32 @@ print(result.stdout)  # "hello"
 
 ## Execution Timeout
 
-Sessions can have an execution timeout configured:
+Sessions inherit timeout configuration from the sandbox's resource limits:
 
 <!-- langtabs-start -->
-```rust,ignore
+```rust
 # extern crate eryx;
 # extern crate tokio;
-use eryx::{Sandbox, session::{InProcessSession, Session}};
+use eryx::{Sandbox, ResourceLimits, session::{InProcessSession, Session}};
 use std::time::Duration;
 
 #[tokio::main]
 async fn main() -> Result<(), eryx::Error> {
-    let sandbox = Sandbox::embedded().build()?;
-    let mut session = InProcessSession::new(&sandbox).await?;
+    // Configure timeout via resource limits
+    let limits = ResourceLimits {
+        execution_timeout: Some(Duration::from_millis(500)),
+        ..Default::default()
+    };
 
-    session.set_timeout(Some(Duration::from_millis(500)));
+    let sandbox = Sandbox::embedded()
+        .with_resource_limits(limits)
+        .build()?;
+
+    let mut session = InProcessSession::new(&sandbox).await?;
 
     // This will timeout
     match session.execute("while True: pass").await {
-        Err(eryx::Error::Timeout { .. }) => {
+        Err(eryx::Error::Timeout(_)) => {
             println!("Execution timed out as expected");
         }
         _ => {}

@@ -16,17 +16,22 @@ By default, sandboxes have sensible limits applied:
 ## Configuring Resource Limits
 
 <!-- langtabs-start -->
-```rust,ignore
+```rust
 # extern crate eryx;
 # extern crate tokio;
-use eryx::Sandbox;
+use eryx::{Sandbox, ResourceLimits};
 use std::time::Duration;
 
 #[tokio::main]
 async fn main() -> Result<(), eryx::Error> {
+    let limits = ResourceLimits {
+        execution_timeout: Some(Duration::from_secs(5)),
+        max_memory_bytes: Some(64 * 1024 * 1024),  // 64 MB
+        ..Default::default()
+    };
+
     let sandbox = Sandbox::embedded()
-        .with_timeout(Duration::from_secs(5))
-        .with_memory_limit(64 * 1024 * 1024)  // 64 MB
+        .with_resource_limits(limits)
         .build()?;
 
     let result = sandbox.execute("print('hello')").await?;
@@ -58,20 +63,25 @@ print(result.stdout)
 The execution timeout limits how long Python code can run before being terminated:
 
 <!-- langtabs-start -->
-```rust,ignore
+```rust
 # extern crate eryx;
 # extern crate tokio;
-use eryx::{Sandbox, Error};
+use eryx::{Sandbox, ResourceLimits, Error};
 use std::time::Duration;
 
 #[tokio::main]
 async fn main() -> Result<(), eryx::Error> {
+    let limits = ResourceLimits {
+        execution_timeout: Some(Duration::from_millis(500)),
+        ..Default::default()
+    };
+
     let sandbox = Sandbox::embedded()
-        .with_timeout(Duration::from_millis(500))
+        .with_resource_limits(limits)
         .build()?;
 
     match sandbox.execute("while True: pass").await {
-        Err(Error::Timeout { duration, .. }) => {
+        Err(Error::Timeout(duration)) => {
             println!("Timed out after {:?}", duration);
         }
         _ => {}
@@ -126,15 +136,20 @@ except eryx.TimeoutError:
 Control the maximum memory the WebAssembly instance can use:
 
 <!-- langtabs-start -->
-```rust,ignore
+```rust
 # extern crate eryx;
 # extern crate tokio;
-use eryx::Sandbox;
+use eryx::{Sandbox, ResourceLimits};
 
 #[tokio::main]
 async fn main() -> Result<(), eryx::Error> {
+    let limits = ResourceLimits {
+        max_memory_bytes: Some(32 * 1024 * 1024),  // 32 MB
+        ..Default::default()
+    };
+
     let sandbox = Sandbox::embedded()
-        .with_memory_limit(32 * 1024 * 1024)  // 32 MB
+        .with_resource_limits(limits)
         .build()?;
 
     // This will fail if it tries to allocate too much memory
@@ -208,30 +223,29 @@ Fuel limits provide fine-grained control over execution by limiting the number o
 - Preventing CPU-intensive attacks
 
 <!-- langtabs-start -->
-```rust,ignore
+```rust
 # extern crate eryx;
 # extern crate tokio;
-use eryx::{Sandbox, session::{InProcessSession, Session}};
+use eryx::{Sandbox, ResourceLimits};
 
 #[tokio::main]
 async fn main() -> Result<(), eryx::Error> {
-    let sandbox = Sandbox::embedded().build()?;
-    let mut session = InProcessSession::new(&sandbox).await?;
+    // Set a fuel limit via resource limits
+    let limits = ResourceLimits {
+        max_fuel: Some(500_000_000),  // 500M instructions
+        ..Default::default()
+    };
 
-    // Set a fuel limit on the session
-    session.set_fuel_limit(Some(500_000_000));  // 500M instructions
+    let sandbox = Sandbox::embedded()
+        .with_resource_limits(limits)
+        .build()?;
 
     // Simple operations succeed
-    let result = session.execute("x = 1 + 1").await?;
+    let result = sandbox.execute("x = 1 + 1").await?;
     println!("Fuel consumed: {:?}", result.stats.fuel_consumed);
 
-    // Reset for next test
-    session.reset(&[]).await?;
-
     // Large loops may exhaust fuel
-    let result = session
-        .execute("for i in range(1000000): pass")
-        .await;
+    let result = sandbox.execute("for i in range(1000000): pass").await;
 
     match result {
         Err(eryx::Error::FuelExhausted { consumed, limit }) => {
@@ -256,44 +270,14 @@ print(f"Fuel consumed: {result.fuel_consumed}")
 ```
 <!-- langtabs-end -->
 
-### Per-Execution Fuel Limits
-
-You can set fuel limits per-execution to override session defaults:
-
-```rust,ignore
-# extern crate eryx;
-# extern crate tokio;
-use eryx::{Sandbox, session::{InProcessSession, Session}};
-
-#[tokio::main]
-async fn main() -> Result<(), eryx::Error> {
-    let sandbox = Sandbox::embedded().build()?;
-    let mut session = InProcessSession::new(&sandbox).await?;
-
-    // Session has generous limit
-    session.set_fuel_limit(Some(1_000_000_000));
-
-    // But this execution has a tight limit
-    let result = session
-        .execute("for i in range(1000000): pass")
-        .with_fuel_limit(100_000_000)  // Override with tighter limit
-        .await;
-
-    // Will fail due to per-execution limit
-    assert!(result.is_err());
-
-    Ok(())
-}
-```
-
 ### Fuel Consumption is Deterministic
 
 The same code always consumes the same amount of fuel:
 
-```rust,ignore
+```rust
 # extern crate eryx;
 # extern crate tokio;
-use eryx::{Sandbox, session::{InProcessSession, Session}};
+use eryx::Sandbox;
 
 #[tokio::main]
 async fn main() -> Result<(), eryx::Error> {
@@ -301,17 +285,20 @@ async fn main() -> Result<(), eryx::Error> {
 
     let code = "x = sum(range(100))";
 
-    // Run multiple times
+    // Run multiple times - each sandbox execution is independent
     let mut fuel_values = Vec::new();
     for _ in 0..3 {
-        let mut session = InProcessSession::new(&sandbox).await?;
-        let result = session.execute(code).await?;
-        fuel_values.push(result.stats.fuel_consumed.unwrap());
+        let result = sandbox.execute(code).await?;
+        if let Some(fuel) = result.stats.fuel_consumed {
+            fuel_values.push(fuel);
+        }
     }
 
     // All runs consume the same fuel
-    assert!(fuel_values.iter().all(|&f| f == fuel_values[0]));
-    println!("Consistent fuel consumption: {:?}", fuel_values[0]);
+    if !fuel_values.is_empty() {
+        assert!(fuel_values.iter().all(|&f| f == fuel_values[0]));
+        println!("Consistent fuel consumption: {:?}", fuel_values[0]);
+    }
 
     Ok(())
 }
@@ -337,7 +324,7 @@ print(result.stdout)
 Execution results include resource usage statistics:
 
 <!-- langtabs-start -->
-```rust,ignore
+```rust
 # extern crate eryx;
 # extern crate tokio;
 use eryx::Sandbox;
@@ -372,24 +359,32 @@ print(f"Callback invocations: {result.callback_invocations}")
 
 Sessions can recover after hitting resource limits by resetting:
 
-```rust,ignore
+```rust
 # extern crate eryx;
 # extern crate tokio;
-use eryx::{Sandbox, session::{InProcessSession, Session}};
+use eryx::{Sandbox, ResourceLimits, session::{InProcessSession, Session}};
+use std::time::Duration;
 
 #[tokio::main]
 async fn main() -> Result<(), eryx::Error> {
-    let sandbox = Sandbox::embedded().build()?;
+    // Configure a short timeout
+    let limits = ResourceLimits {
+        execution_timeout: Some(Duration::from_millis(100)),
+        ..Default::default()
+    };
+
+    let sandbox = Sandbox::embedded()
+        .with_resource_limits(limits)
+        .build()?;
+
     let mut session = InProcessSession::new(&sandbox).await?;
 
-    session.set_fuel_limit(Some(100_000_000));
-
-    // First execution exhausts fuel
-    let result = session.execute("for i in range(1000000): pass").await;
+    // First execution times out
+    let result = session.execute("while True: pass").await;
     assert!(result.is_err());
 
     // Reset the session
-    session.reset(&[]).await?;
+    session.reset().await?;
 
     // Session works again
     let result = session.execute("print('recovered')").await?;

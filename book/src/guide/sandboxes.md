@@ -5,7 +5,7 @@ Sandboxes are the core primitive in Eryx. A sandbox provides an isolated Python 
 ## Creating a Sandbox
 
 <!-- langtabs-start -->
-```rust,ignore
+```rust
 # extern crate eryx;
 # extern crate tokio;
 use eryx::Sandbox;
@@ -45,7 +45,7 @@ Each sandbox runs in complete isolation:
 - **Process isolation**: Cannot spawn processes or execute system commands
 
 <!-- langtabs-start -->
-```rust,ignore
+```rust
 # extern crate eryx;
 # extern crate tokio;
 use eryx::Sandbox;
@@ -96,7 +96,7 @@ print(result.stdout)
 When you execute code, you get back an `ExecuteResult` with useful information:
 
 <!-- langtabs-start -->
-```rust,ignore
+```rust
 # extern crate eryx;
 # extern crate tokio;
 use eryx::Sandbox;
@@ -135,7 +135,7 @@ print(f"Callback invocations: {result.callback_invocations}")
 Sandbox execution can fail for various reasons. Eryx provides typed errors to help you handle them:
 
 <!-- langtabs-start -->
-```rust,ignore
+```rust
 # extern crate eryx;
 # extern crate tokio;
 use eryx::{Sandbox, Error};
@@ -146,11 +146,11 @@ async fn main() -> Result<(), eryx::Error> {
 
     match sandbox.execute("raise ValueError('oops')").await {
         Ok(result) => println!("Success: {}", result.stdout),
-        Err(Error::Python { message, .. }) => {
+        Err(Error::Execution(message)) => {
             println!("Python error: {}", message);
         }
-        Err(Error::Timeout { .. }) => {
-            println!("Execution timed out");
+        Err(Error::Timeout(duration)) => {
+            println!("Execution timed out after {:?}", duration);
         }
         Err(e) => println!("Other error: {}", e),
     }
@@ -180,7 +180,7 @@ except eryx.EryxError as e:
 Sandboxes can be reused for multiple executions. Each execution starts fresh without any state from previous executions:
 
 <!-- langtabs-start -->
-```rust,ignore
+```rust
 # extern crate eryx;
 # extern crate tokio;
 use eryx::Sandbox;
@@ -233,7 +233,7 @@ If you need state to persist across executions, use a [Session](./sessions.md).
 When creating many sandboxes, use `SandboxFactory` to pre-initialize Python and packages once, then quickly instantiate sandboxes from that snapshot:
 
 <!-- langtabs-start -->
-```rust,ignore
+```rust
 # extern crate eryx;
 # extern crate tokio;
 // SandboxFactory is primarily useful in the Python bindings
