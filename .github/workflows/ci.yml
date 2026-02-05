@@ -372,10 +372,10 @@ jobs:
   # Test book examples
   book-tests:
     name: Book Tests
-    runs-on: ubuntu-latest
+    runs-on: namespace-profile-eryx-standard
     needs: build-eryx-runtime
     steps:
-      - uses: actions/checkout@v4
+      - uses: namespacelabs/nscloud-checkout-action@v8
 
       - name: Download WASM artifacts
         uses: namespace-actions/download-artifact@v1
