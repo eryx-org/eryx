@@ -115,19 +115,14 @@ print(f"Echo: {response}")
 ```python
 import eryx
 
+registry = eryx.CallbackRegistry()
+
+@registry.callback(description="Returns current Unix timestamp")
 def get_time():
     import time
     return {"timestamp": time.time()}
 
-sandbox = eryx.Sandbox(
-    callbacks=[
-        {
-            "name": "get_time",
-            "fn": get_time,
-            "description": "Returns current Unix timestamp"
-        }
-    ]
-)
+sandbox = eryx.Sandbox(callbacks=registry)
 
 result = sandbox.execute("""
 t = await get_time()

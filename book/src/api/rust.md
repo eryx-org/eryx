@@ -12,6 +12,7 @@ For detailed API documentation, see the self-hosted documentation.
 
 - `Sandbox` - Main sandbox type for executing Python code
 - `TypedCallback` - Strongly-typed callback trait
+- `DynamicCallback` - Runtime-defined callbacks with builder pattern
 - `InProcessSession` - Stateful sessions with persistent Python state
 - `ResourceLimits` - Resource limit configuration
 - `NetConfig` - Network configuration
