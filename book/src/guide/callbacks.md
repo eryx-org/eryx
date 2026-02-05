@@ -6,11 +6,15 @@ Callbacks allow sandboxed Python code to call functions on the host. This enable
 
 From Python's perspective, callbacks appear as async functions that can be awaited:
 
+<!-- langtabs-start -->
+
 ```python
 # Inside the sandbox
 result = await get_weather(city="London")
 print(result["temperature"])
 ```
+
+<!-- langtabs-end -->
 
 The host defines these callbacks and controls exactly what the sandbox can access.
 
@@ -195,6 +199,8 @@ def divide(a: float, b: float):
 
 Multiple callbacks can run concurrently using `asyncio.gather()`:
 
+<!-- langtabs-start -->
+
 ```python
 # Inside the sandbox
 import asyncio
@@ -208,9 +214,13 @@ results = await asyncio.gather(
 user1, user2, posts = results
 ```
 
+<!-- langtabs-end -->
+
 ## Introspection
 
 The sandbox can discover available callbacks at runtime:
+
+<!-- langtabs-start -->
 
 ```python
 # Inside the sandbox
@@ -222,11 +232,15 @@ for name in dir(eryx_callbacks):
     print(f"{name}: {callback.__doc__}")
 ```
 
+<!-- langtabs-end -->
+
 ## Alternative APIs
 
 ### Rust: Manual TypedCallback
 
 For more control, implement `TypedCallback` directly:
+
+<!-- langtabs-start -->
 
 ```rust
 # extern crate eryx;
@@ -278,9 +292,13 @@ let sandbox = Sandbox::embedded()
 # }
 ```
 
+<!-- langtabs-end -->
+
 ### Rust: DynamicCallback
 
 For runtime-defined callbacks without compile-time types:
+
+<!-- langtabs-start -->
 
 ```rust
 # extern crate eryx;
@@ -307,9 +325,13 @@ let sandbox = Sandbox::embedded()
 # }
 ```
 
+<!-- langtabs-end -->
+
 ### Python: Dict API
 
 For simple cases, use a list of dictionaries:
+
+<!-- langtabs-start -->
 
 ```python
 import eryx
@@ -327,6 +349,8 @@ sandbox = eryx.Sandbox(
     ]
 )
 ```
+
+<!-- langtabs-end -->
 
 ## Best Practices
 
