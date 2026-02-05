@@ -14,6 +14,12 @@ version = "0.8.1"
 [tools."cargo:cargo-all-features"]
 version = "1.12.0"
 
+[tools."cargo:mdbook"]
+version = "0.5.2"
+
+[tools."cargo:mdbook-langtabs"]
+version = "0.2.0"
+
 # Note: WASI SDK is intentionally NOT in [tools] because adding it to PATH
 # breaks host compilation (Rust picks up wasm clang for proc-macro builds).
 # Instead, we install it on-demand via the ensure-wasi-sdk task.
@@ -582,6 +588,32 @@ else
     cp "$OUT_DIR" target/liberyx_runtime.so
 fi
 """
+
+[tasks."book:build"]
+description = "Build the mdbook documentation"
+dir = "book"
+run = "mdbook build"
+
+[tasks."book:serve"]
+description = "Serve the mdbook documentation locally"
+dir = "book"
+run = "mdbook serve"
+
+[tasks."book:test"]
+description = "Test Rust code blocks in the book"
+depends = ["build"]
+dir = "book"
+run = "mdbook test -L ../target/debug/deps"
+
+[tasks."book:test-python"]
+description = "Test Python code blocks in the book"
+depends = ["test-python"]
+dir = "book"
+run = "python3 scripts/test_examples.py"
+
+[tasks."book:test-all"]
+description = "Test both Rust and Python code blocks in the book"
+depends = ["book:test", "book:test-python"]
 
 [tasks.test-eryx-runtime]
 description = "Run eryx-wasm-runtime integration tests"

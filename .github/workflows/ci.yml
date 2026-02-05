@@ -368,3 +368,120 @@ jobs:
           python examples/error_handling.py
           echo "=== resource_limits.py ==="
           python examples/resource_limits.py
+
+  # Test book examples
+  book-tests:
+    name: Book Tests
+    runs-on: namespace-profile-eryx-standard
+    needs: build-eryx-runtime
+    steps:
+      - uses: namespacelabs/nscloud-checkout-action@v8
+
+      - name: Download WASM artifacts
+        uses: namespace-actions/download-artifact@v1
+        with:
+          name: wasm-runtime
+          path: crates/
+
+      - uses: ./.github/actions/mark-wasm-current
+
+      - name: Install mise
+        uses: jdx/mise-action@v2
+
+      - name: Install mdbook and mdbook-langtabs
+        run: |
+          mise install cargo:mdbook
+          cargo install mdbook-langtabs --git https://github.com/nx10/mdbook-langtabs
+
+      - name: Build project
+        run: cargo build --workspace --features embedded
+
+      - name: Test Rust code blocks
+        run: mise run book:test
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Create virtualenv and install dependencies
+        run: |
+          python -m venv .venv
+          source .venv/bin/activate
+          pip install maturin pytest
+
+      - name: Build and install eryx-python
+        working-directory: crates/eryx-python
+        run: |
+          source ../../.venv/bin/activate
+          maturin develop --release
+
+      - name: Test Python code blocks
+        working-directory: book
+        run: |
+          source ../.venv/bin/activate
+          python scripts/test_examples.py
+
+  # Deploy book to GitHub Pages (only on main)
+  deploy-book:
+    name: Deploy Book
+    runs-on: ubuntu-latest
+    needs: book-tests
+    if: github.ref == 'refs/heads/main'
+    permissions:
+      contents: write
+      pages: write
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Need full history for version detection
+
+      - name: Install mise
+        uses: jdx/mise-action@v2
+
+      - name: Install mdbook and mdbook-langtabs
+        run: |
+          mise install cargo:mdbook
+          cargo install mdbook-langtabs --git https://github.com/nx10/mdbook-langtabs
+
+      - name: Detect version
+        id: version
+        run: |
+          VERSION=$(grep '^version = ' Cargo.toml | head -1 | sed 's/version = "\(.*\)"/\1/')
+          echo "version=v$VERSION" >> $GITHUB_OUTPUT
+          echo "Detected version: v$VERSION"
+
+      - name: Build book
+        run: mise run book:build
+
+      - name: Prepare deployment directory
+        run: |
+          mkdir -p deploy/latest/book
+          mkdir -p deploy/${{ steps.version.outputs.version }}/book
+          cp -r book/book/* deploy/latest/book/
+          cp -r book/book/* deploy/${{ steps.version.outputs.version }}/book/
+          echo "docs.eryx.run" > deploy/CNAME
+          cat > deploy/index.html << 'HTMLEOF'
+          <!DOCTYPE html>
+          <html>
+          <head>
+            <meta charset="utf-8">
+            <title>Eryx Documentation</title>
+            <meta http-equiv="refresh" content="0; url=latest/book/">
+          </head>
+          <body>
+            <p>Redirecting to <a href="latest/book/">latest documentation</a>...</p>
+          </body>
+          </html>
+          HTMLEOF
+
+      - name: Setup Pages
+        uses: actions/configure-pages@v5
+
+      - name: Upload artifact
+        uses: actions/upload-pages-artifact@v4
+        with:
+          path: 'deploy'
+
+      - name: Deploy to GitHub Pages
+        uses: actions/deploy-pages@v4

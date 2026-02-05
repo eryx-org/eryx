@@ -1,0 +1,19 @@
+[book]
+authors = ["Ben Sully"]
+language = "en"
+src = "src"
+title = "Eryx - Python Sandboxing with WebAssembly"
+
+[rust]
+edition = "2024"
+
+[build]
+build-dir = "book"
+
+[preprocessor.langtabs]
+command = "mdbook-langtabs"
+
+[output.html]
+git-repository-url = "https://github.com/eryx-org/eryx"
+additional-css = ["langtabs.css"]
+additional-js = ["langtabs.js"]
