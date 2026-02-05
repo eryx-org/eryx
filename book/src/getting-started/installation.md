@@ -24,22 +24,6 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 
 Package support (`with_package()` for `.whl` and `.tar.gz` files) is always available — no feature flag required.
 
-### Verify Installation
-
-```rust,no_run
-# extern crate eryx;
-# extern crate tokio;
-use eryx::Sandbox;
-
-#[tokio::main]
-async fn main() -> Result<(), eryx::Error> {
-    let sandbox = Sandbox::embedded().build()?;
-    let result = sandbox.execute("print('Hello from Eryx!')").await?;
-    println!("{}", result.stdout);
-    Ok(())
-}
-```
-
 ---
 
 ## Python
