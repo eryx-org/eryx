@@ -17,6 +17,7 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 | Feature              | Description                                                                         | Trade-offs                               |
 |----------------------|-------------------------------------------------------------------------------------|------------------------------------------|
 | `embedded`           | Zero-config sandboxes: embeds pre-compiled Wasm runtime + Python stdlib             | +32MB binary size; enables `unsafe` code paths |
+| `macros`             | Enables the `#[callback]` proc macro for simplified callback definitions            | Adds proc-macro compile time             |
 | `preinit`            | Pre-initialization support for ~25x faster sandbox creation                         | Adds `eryx-runtime` dep; requires build step |
 | `native-extensions`  | Native Python extension support (e.g., numpy) via late-linking                      | Implies `preinit`; experimental          |
 

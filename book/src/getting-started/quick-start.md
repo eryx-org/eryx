@@ -63,43 +63,20 @@ Callbacks allow sandboxed code to interact with the host in a controlled way.
 ```rust
 # extern crate eryx;
 # extern crate tokio;
-# extern crate serde;
 # extern crate serde_json;
-# extern crate schemars;
-use std::{future::Future, pin::Pin};
-use eryx::{TypedCallback, CallbackError, Sandbox, JsonSchema};
-use serde::Deserialize;
+use eryx::{callback, CallbackError, Sandbox};
 use serde_json::{json, Value};
 
-// Define a callback with typed arguments
-#[derive(Deserialize, JsonSchema)]
-struct EchoArgs {
-    /// The message to echo back
-    message: String,
-}
-
-struct Echo;
-
-impl TypedCallback for Echo {
-    type Args = EchoArgs;
-
-    fn name(&self) -> &str { "echo" }
-    fn description(&self) -> &str { "Echoes back the message" }
-
-    fn invoke_typed(
-        &self,
-        args: EchoArgs
-    ) -> Pin<Box<dyn Future<Output = Result<Value, CallbackError>> + Send + '_>> {
-        Box::pin(async move {
-            Ok(json!({ "echoed": args.message }))
-        })
-    }
+/// Echoes back the message
+#[callback]
+async fn echo(message: String) -> Result<Value, CallbackError> {
+    Ok(json!({ "echoed": message }))
 }
 
 #[tokio::main]
 async fn main() -> Result<(), eryx::Error> {
     let sandbox = Sandbox::embedded()
-        .with_callback(Echo)
+        .with_callback(echo)
         .build()?;
 
     let result = sandbox.execute(r#"
@@ -115,19 +92,14 @@ print(f"Echo: {response}")
 ```python
 import eryx
 
+registry = eryx.CallbackRegistry()
+
+@registry.callback(description="Returns current Unix timestamp")
 def get_time():
     import time
     return {"timestamp": time.time()}
 
-sandbox = eryx.Sandbox(
-    callbacks=[
-        {
-            "name": "get_time",
-            "fn": get_time,
-            "description": "Returns current Unix timestamp"
-        }
-    ]
-)
+sandbox = eryx.Sandbox(callbacks=registry)
 
 result = sandbox.execute("""
 t = await get_time()
@@ -137,6 +109,8 @@ print(f"Time: {t['timestamp']}")
 print(result.stdout)
 ```
 <!-- langtabs-end -->
+
+> **Note:** The Rust `#[callback]` macro requires the `macros` feature flag. See [Installation](./installation.md#feature-flags).
 
 ## With Sessions
 
