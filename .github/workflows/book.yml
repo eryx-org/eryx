@@ -99,18 +99,24 @@ jobs:
         with:
           python-version: '3.12'
 
-      # Install Python bindings (required for Python code samples)
-      - name: Install Python bindings
+      - name: Create virtualenv and install dependencies
         run: |
-          cd crates/eryx-python
-          python -m pip install --upgrade pip
-          python -m pip install maturin pytest
+          python -m venv .venv
+          source .venv/bin/activate
+          pip install maturin pytest
+
+      - name: Build and install eryx-python
+        working-directory: crates/eryx-python
+        run: |
+          source ../../.venv/bin/activate
           maturin develop --release
 
       # Test code blocks with custom script
       - name: Test code blocks
         working-directory: book
-        run: python3 scripts/test_examples.py
+        run: |
+          source ../.venv/bin/activate
+          python scripts/test_examples.py
 
   deploy:
     name: Deploy to GitHub Pages
