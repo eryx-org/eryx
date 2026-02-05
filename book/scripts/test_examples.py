@@ -551,9 +551,7 @@ def test_code_block(
     """Test a single code block."""
     language = block.language.lower()
 
-    if language in ("javascript", "js"):
-        return test_javascript(block, temp_dirs["js"], index)
-    elif language in ("python", "py"):
+    if language in ("python", "py"):
         return test_python(block, temp_dirs["python"], index, python_cmd)
     elif language in ("rust", "rs"):
         # Rust tests are batched, handled separately
@@ -591,15 +589,11 @@ def main():
     test_dir.mkdir(exist_ok=True)
 
     temp_dirs = {}
-    for lang in ["js", "python", "rust"]:
+    for lang in ["python", "rust"]:
         lang_dir = test_dir / lang
         lang_dir.mkdir(exist_ok=True)
         temp_dirs[lang] = lang_dir
 
-    # Set up JS test environment with local package
-    print(f"{Colors.BLUE}Setting up JavaScript test environment...{Colors.RESET}")
-    setup_js_test_env(temp_dirs["js"])
-    print()
 
     # Find all markdown files
     markdown_files = find_markdown_files(book_src_dir)
