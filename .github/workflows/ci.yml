@@ -402,7 +402,7 @@ jobs:
           # Clean eryx packages to avoid "multiple rmeta candidates" from cached
           # feature combinations (e.g., from check-all-features job)
           cargo clean -p eryx -p eryx-runtime 2>/dev/null || true
-          cargo build -p eryx --features embedded
+          cargo build -p eryx --features embedded,macros
 
       - name: Test Rust code blocks
         run: mdbook test -L ../target/debug/deps

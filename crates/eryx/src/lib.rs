@@ -106,6 +106,10 @@ pub use schema::{JsonSchema, Schema};
 // Re-export CancellationToken for convenient use with execute_cancellable
 pub use tokio_util::sync::CancellationToken;
 
+// Re-export the callback proc macro when the macros feature is enabled
+#[cfg(feature = "macros")]
+pub use eryx_macros::callback;
+
 /// Virtual filesystem support for sandboxed file operations.
 ///
 /// When the `vfs` feature is enabled, sandboxes can use an in-memory filesystem

@@ -903,6 +903,7 @@ dependencies = [
  "async-trait",
  "criterion",
  "crossterm",
+ "eryx-macros",
  "eryx-runtime",
  "eryx-vfs",
  "flate2",
@@ -927,6 +928,20 @@ dependencies = [
  "webpki-roots 0.26.11",
  "zip",
  "zstd",
+]
+
+[[package]]
+name = "eryx-macros"
+version = "0.3.0"
+dependencies = [
+ "eryx",
+ "proc-macro2",
+ "quote",
+ "schemars",
+ "serde",
+ "serde_json",
+ "syn",
+ "tokio",
 ]
 
 [[package]]
