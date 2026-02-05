@@ -24,8 +24,10 @@ jobs:
       - name: Install mise
         uses: jdx/mise-action@v2
 
-      - name: Install Rust nightly
-        run: rustup toolchain install nightly
+      - name: Install Rust nightly with rust-src
+        run: |
+          rustup toolchain install nightly
+          rustup component add rust-src --toolchain nightly
 
       - name: Install mdbook and mdbook-langtabs
         run: |
