@@ -401,7 +401,7 @@ jobs:
         run: cargo build --workspace --features embedded
 
       - name: Test Rust code blocks
-        run: mdbook test -L target/debug/deps
+        run: mdbook test -L ../target/debug/deps
         working-directory: book
 
       - uses: actions/setup-python@v5
