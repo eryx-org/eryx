@@ -24,12 +24,19 @@ jobs:
       - name: Install mise
         uses: jdx/mise-action@v2
 
+      - name: Install Rust nightly
+        run: rustup toolchain install nightly
+
       - name: Install mdbook and mdbook-langtabs
         run: |
           mise install cargo:mdbook
           cargo install mdbook-langtabs --git https://github.com/nx10/mdbook-langtabs
 
-      # Build with embedded feature (uses prebuilt artifacts from repo)
+      # Precompile runtime (required for embedded feature)
+      - name: Precompile runtime
+        run: mise run precompile-eryx-runtime-preinit
+
+      # Build the project so that mdbook test can link against it
       - name: Build project
         run: cargo build --workspace --features embedded
 
