@@ -63,7 +63,9 @@ Callbacks allow sandboxed code to interact with the host in a controlled way.
 ```rust
 # extern crate eryx;
 # extern crate tokio;
+# extern crate serde;
 # extern crate serde_json;
+# extern crate schemars;
 use eryx::{callback, CallbackError, Sandbox};
 use serde_json::{json, Value};
 

@@ -34,7 +34,9 @@ eryx = { version = "0.3", features = ["embedded", "macros"] }
 ```rust
 # extern crate eryx;
 # extern crate tokio;
+# extern crate serde;
 # extern crate serde_json;
+# extern crate schemars;
 use eryx::{callback, CallbackError, Sandbox};
 use serde_json::{json, Value};
 
@@ -43,7 +45,7 @@ use serde_json::{json, Value};
 async fn get_time() -> Result<Value, CallbackError> {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map_err(|e| CallbackError::internal(e.to_string()))?
+        .map_err(|e| CallbackError::ExecutionFailed(e.to_string()))?
         .as_secs();
     Ok(json!({ "timestamp": now }))
 }
@@ -122,7 +124,9 @@ Callback parameters are passed as JSON from the sandbox. Parameters must be dese
 
 ```rust
 # extern crate eryx;
+# extern crate serde;
 # extern crate serde_json;
+# extern crate schemars;
 use eryx::{callback, CallbackError};
 use serde_json::{json, Value};
 
@@ -134,9 +138,10 @@ async fn search_users(
     include_inactive: Option<bool>,
 ) -> Result<Value, CallbackError> {
     let limit = limit.unwrap_or(10);
-    let include_inactive = include_inactive.unwrap_or(false);
+    let _include_inactive = include_inactive.unwrap_or(false);
 
     // ... perform search ...
+    let _ = query;
     Ok(json!({ "users": [], "total": 0 }))
 }
 ```
@@ -166,22 +171,25 @@ Return errors to indicate failures to the sandbox.
 
 ```rust
 # extern crate eryx;
+# extern crate serde;
 # extern crate serde_json;
+# extern crate schemars;
 use eryx::{callback, CallbackError};
 use serde_json::{json, Value};
 
+/// Divides two numbers
 #[callback]
 async fn divide(a: f64, b: f64) -> Result<Value, CallbackError> {
     if b == 0.0 {
-        return Err(CallbackError::invalid_params("Cannot divide by zero"));
+        return Err(CallbackError::InvalidArguments("Cannot divide by zero".into()));
     }
     Ok(json!({ "result": a / b }))
 }
 ```
 
-Error types:
-- `CallbackError::invalid_params(msg)` - Bad input from the sandbox
-- `CallbackError::internal(msg)` - Internal host error
+Error variants:
+- `CallbackError::InvalidArguments(msg)` - Bad input from the sandbox
+- `CallbackError::ExecutionFailed(msg)` - Internal host error
 
 ### Python
 
