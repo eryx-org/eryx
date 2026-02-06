@@ -122,8 +122,7 @@ pub struct Sandbox {
     scrub_stdout: crate::secrets::OutputScrubPolicy,
     /// Stderr scrubbing policy.
     scrub_stderr: crate::secrets::OutputScrubPolicy,
-    /// File scrubbing policy (Phase 2: VFS integration).
-    #[allow(dead_code)]
+    /// File scrubbing policy for VFS integration.
     scrub_files: crate::secrets::FileScrubPolicy,
     /// Extracted packages (kept alive to prevent temp directory cleanup).
     _packages: Vec<crate::package::ExtractedPackage>,
@@ -226,14 +225,19 @@ impl Sandbox {
         // Spawn task to handle callback requests concurrently (Arc clone is cheap)
         let callbacks_arc = Arc::clone(&self.callbacks);
         let resource_limits = self.resource_limits.clone();
+        let secrets_arc = Arc::new(self.secrets.clone());
+        let callback_secrets = Arc::clone(&secrets_arc);
         let callback_handler = tokio::spawn(async move {
-            run_callback_handler(callback_rx, callbacks_arc, resource_limits).await
+            run_callback_handler(callback_rx, callbacks_arc, resource_limits, callback_secrets)
+                .await
         });
 
         // Spawn task to handle trace events
         let trace_handler = self.trace_handler.clone();
-        let trace_collector =
-            tokio::spawn(async move { run_trace_collector(trace_rx, trace_handler).await });
+        let trace_secrets = self.secrets.clone();
+        let trace_collector = tokio::spawn(async move {
+            run_trace_collector(trace_rx, trace_handler, trace_secrets).await
+        });
 
         // Spawn network handler if networking is enabled
         let (net_tx, net_handler) = if let Some(ref config) = self.net_config {
@@ -255,6 +259,39 @@ impl Sandbox {
         // Add network channel if networking is enabled
         if let Some(tx) = net_tx {
             execute_builder = execute_builder.with_network(tx);
+        }
+
+        // Add VFS storage with scrubbing if secrets are configured
+        #[cfg(feature = "vfs")]
+        {
+            let vfs_secrets = self
+                .secrets
+                .iter()
+                .map(|(k, v)| {
+                    (
+                        k.clone(),
+                        eryx_vfs::VfsSecretConfig {
+                            placeholder: v.placeholder.clone(),
+                        },
+                    )
+                })
+                .collect();
+            let vfs_policy = match &self.scrub_files {
+                crate::secrets::FileScrubPolicy::All => eryx_vfs::VfsFileScrubPolicy::All,
+                crate::secrets::FileScrubPolicy::None => eryx_vfs::VfsFileScrubPolicy::None,
+                crate::secrets::FileScrubPolicy::Except(paths) => {
+                    eryx_vfs::VfsFileScrubPolicy::Except(paths.clone())
+                }
+                crate::secrets::FileScrubPolicy::Only(paths) => {
+                    eryx_vfs::VfsFileScrubPolicy::Only(paths.clone())
+                }
+            };
+            let scrubbing_storage = std::sync::Arc::new(eryx_vfs::ScrubbingStorage::new(
+                eryx_vfs::InMemoryStorage::new(),
+                vfs_secrets,
+                vfs_policy,
+            ));
+            execute_builder = execute_builder.with_vfs_storage(scrubbing_storage);
         }
 
         // Add memory limit if configured
@@ -379,6 +416,12 @@ impl Sandbox {
         &self.resource_limits
     }
 
+    /// Get a reference to the secrets configuration.
+    #[must_use]
+    pub(crate) fn secrets(&self) -> &HashMap<String, crate::secrets::SecretConfig> {
+        &self.secrets
+    }
+
     /// Get a reference to the Python executor.
     ///
     /// This is primarily for internal use by session implementations.
@@ -430,6 +473,11 @@ impl Sandbox {
         let trace_handler = self.trace_handler.clone();
         let output_handler = self.output_handler.clone();
         let resource_limits = self.resource_limits.clone();
+        let net_config = self.net_config.clone();
+        let secrets = self.secrets.clone();
+        let scrub_stdout = self.scrub_stdout.clone();
+        let scrub_stderr = self.scrub_stderr.clone();
+        let scrub_files = self.scrub_files.clone();
         let code = code.to_string();
         let token = cancel_token.clone();
 
@@ -442,6 +490,11 @@ impl Sandbox {
                 trace_handler,
                 output_handler,
                 resource_limits,
+                net_config,
+                secrets,
+                scrub_stdout,
+                scrub_stderr,
+                scrub_files,
                 &code,
                 token,
             )
@@ -458,7 +511,7 @@ impl Sandbox {
     }
 
     /// Internal execution with cancellation support.
-    #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments, unused_variables)]
     async fn execute_with_cancellation(
         executor: Arc<PythonExecutor>,
         callbacks: Arc<HashMap<String, Arc<dyn Callback>>>,
@@ -466,6 +519,11 @@ impl Sandbox {
         trace_handler: Option<Arc<dyn TraceHandler>>,
         output_handler: Option<Arc<dyn OutputHandler>>,
         resource_limits: ResourceLimits,
+        net_config: Option<NetConfig>,
+        secrets: HashMap<String, crate::secrets::SecretConfig>,
+        scrub_stdout: crate::secrets::OutputScrubPolicy,
+        scrub_stderr: crate::secrets::OutputScrubPolicy,
+        scrub_files: crate::secrets::FileScrubPolicy,
         code: &str,
         cancel_token: CancellationToken,
     ) -> Result<ExecuteResult, Error> {
@@ -494,14 +552,34 @@ impl Sandbox {
         // Spawn task to handle callback requests concurrently
         let callbacks_arc = Arc::clone(&callbacks);
         let resource_limits_clone = resource_limits.clone();
+        let secrets_arc = Arc::new(secrets.clone());
+        let callback_secrets = Arc::clone(&secrets_arc);
         let callback_handler = tokio::spawn(async move {
-            run_callback_handler(callback_rx, callbacks_arc, resource_limits_clone).await
+            run_callback_handler(
+                callback_rx,
+                callbacks_arc,
+                resource_limits_clone,
+                callback_secrets,
+            )
+            .await
         });
 
         // Spawn task to handle trace events
         let trace_handler_clone = trace_handler.clone();
-        let trace_collector =
-            tokio::spawn(async move { run_trace_collector(trace_rx, trace_handler_clone).await });
+        let trace_secrets = secrets.clone();
+        let trace_collector = tokio::spawn(async move {
+            run_trace_collector(trace_rx, trace_handler_clone, trace_secrets).await
+        });
+
+        // Spawn network handler if networking is enabled
+        let (net_tx, net_handler) = if let Some(ref config) = net_config {
+            let (tx, rx) = mpsc::channel::<crate::wasm::NetRequest>(32);
+            let manager = ConnectionManager::new(config.clone(), secrets.clone());
+            let handler = tokio::spawn(async move { run_net_handler(rx, manager).await });
+            (Some(tx), Some(handler))
+        } else {
+            (None, None)
+        };
 
         // Execute the Python code using the builder API with cancellation
         let mut execute_builder = executor
@@ -509,6 +587,43 @@ impl Sandbox {
             .with_callbacks(&callbacks_vec, callback_tx)
             .with_tracing(trace_tx)
             .with_cancellation(cancel_token.clone());
+
+        // Add network channel if networking is enabled
+        if let Some(tx) = net_tx {
+            execute_builder = execute_builder.with_network(tx);
+        }
+
+        // Add VFS storage with scrubbing if secrets are configured
+        #[cfg(feature = "vfs")]
+        {
+            let vfs_secrets = secrets
+                .iter()
+                .map(|(k, v)| {
+                    (
+                        k.clone(),
+                        eryx_vfs::VfsSecretConfig {
+                            placeholder: v.placeholder.clone(),
+                        },
+                    )
+                })
+                .collect();
+            let vfs_policy = match &scrub_files {
+                crate::secrets::FileScrubPolicy::All => eryx_vfs::VfsFileScrubPolicy::All,
+                crate::secrets::FileScrubPolicy::None => eryx_vfs::VfsFileScrubPolicy::None,
+                crate::secrets::FileScrubPolicy::Except(paths) => {
+                    eryx_vfs::VfsFileScrubPolicy::Except(paths.clone())
+                }
+                crate::secrets::FileScrubPolicy::Only(paths) => {
+                    eryx_vfs::VfsFileScrubPolicy::Only(paths.clone())
+                }
+            };
+            let scrubbing_storage = std::sync::Arc::new(eryx_vfs::ScrubbingStorage::new(
+                eryx_vfs::InMemoryStorage::new(),
+                vfs_secrets,
+                vfs_policy,
+            ));
+            execute_builder = execute_builder.with_vfs_storage(scrubbing_storage);
+        }
 
         // Add memory limit if configured
         if let Some(limit) = resource_limits.max_memory_bytes {
@@ -531,18 +646,39 @@ impl Sandbox {
         let callback_invocations = callback_handler.await.unwrap_or(0);
         let trace_events = trace_collector.await.unwrap_or_default();
 
+        // Network handler completes when its channel is dropped
+        if let Some(handler) = net_handler {
+            let _ = handler.await;
+        }
+
         let duration = start.elapsed();
 
         match execution_result {
             Ok(output) => {
+                // Scrub secret placeholders from output based on policy
+                let stdout =
+                    if matches!(scrub_stdout, crate::secrets::OutputScrubPolicy::All) {
+                        crate::secrets::scrub_placeholders(&output.stdout, &secrets)
+                    } else {
+                        output.stdout
+                    };
+
+                let stderr =
+                    if matches!(scrub_stderr, crate::secrets::OutputScrubPolicy::All) {
+                        crate::secrets::scrub_placeholders(&output.stderr, &secrets)
+                    } else {
+                        output.stderr
+                    };
+
                 // Stream output if handler is configured
                 if let Some(handler) = &output_handler {
-                    handler.on_output(&output.stdout).await;
+                    handler.on_output(&stdout).await;
+                    handler.on_stderr(&stderr).await;
                 }
 
                 Ok(ExecuteResult {
-                    stdout: output.stdout,
-                    stderr: output.stderr,
+                    stdout,
+                    stderr,
                     trace: trace_events,
                     stats: ExecuteStats {
                         duration,
@@ -709,8 +845,7 @@ pub struct SandboxBuilder<Runtime = state::Needs, Stdlib = state::Needs> {
     scrub_stdout: crate::secrets::OutputScrubPolicy,
     /// Stderr scrubbing policy.
     scrub_stderr: crate::secrets::OutputScrubPolicy,
-    /// File scrubbing policy (Phase 2: VFS integration).
-    #[allow(dead_code)]
+    /// File scrubbing policy for VFS integration.
     scrub_files: crate::secrets::FileScrubPolicy,
     /// Phantom data for Runtime type parameter.
     _runtime: PhantomData<Runtime>,

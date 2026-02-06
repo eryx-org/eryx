@@ -256,6 +256,17 @@ struct HttpParsingState {
     content_length: Option<usize>,
 }
 
+/// Result of processing write data through the HTTP parser.
+#[derive(Debug)]
+enum WriteAction {
+    /// Pass data through without modification.
+    Passthrough(Vec<u8>),
+    /// Data was parsed and should be written as multiple segments.
+    Segments(Vec<Vec<u8>>),
+    /// Data is being buffered (headers not yet complete).
+    Buffering,
+}
+
 /// Manages TCP and TLS connections for a sandbox instance.
 ///
 /// Each sandbox has its own connection manager, which tracks active connections
@@ -319,6 +330,90 @@ impl ConnectionManager {
             self.next_handle = 1; // Skip 0 to avoid confusion with "no handle"
         }
         handle
+    }
+
+    /// Process write data through the HTTP parser for secret substitution.
+    ///
+    /// This is the shared logic used by both `tcp_write()` and `tls_write()`.
+    /// Returns a `WriteAction` indicating how the data should be written.
+    fn process_write_data(&mut self, handle: u32, data: &[u8]) -> Result<WriteAction, TcpError> {
+        // Get current state (borrow ends here)
+        let mut state = self.http_states.entry(handle).or_default().clone();
+
+        // Add new data to buffer
+        state.buffer.extend_from_slice(data);
+
+        if !state.headers_complete {
+            // Look for end of headers (\r\n\r\n)
+            if let Some(header_end) = find_header_end(&state.buffer) {
+                let headers_bytes = state.buffer[..header_end].to_vec();
+                let remaining = state.buffer[header_end..].to_vec();
+
+                // Check if this looks like HTTP
+                if !is_http_request(&headers_bytes) {
+                    // Not HTTP - pass through everything
+                    let all_data = state.buffer.clone();
+                    state.buffer.clear();
+                    self.http_states.insert(handle, state);
+                    return Ok(WriteAction::Passthrough(all_data));
+                }
+
+                // Check for HTTP/2 (not supported with secrets)
+                if is_http2(&headers_bytes) {
+                    return Err(TcpError::NotPermitted(
+                        "HTTP/2 with secrets not supported. Use HTTP/1.1.".into(),
+                    ));
+                }
+
+                // Parse headers and substitute secrets
+                let substituted = self.substitute_http_headers(&headers_bytes, handle)?;
+
+                // Extract Content-Length for body tracking
+                state.content_length = extract_content_length(&substituted);
+                state.headers_complete = true;
+
+                // Build segments: headers first, then any buffered body data
+                let mut segments = vec![substituted.clone()];
+                if !remaining.is_empty() {
+                    state.body_bytes_sent += remaining.len();
+                    segments.push(remaining);
+                }
+
+                // Check if request is complete (for pipelining)
+                if let Some(cl) = state.content_length {
+                    if state.body_bytes_sent >= cl {
+                        // Request complete - reset for next request
+                        state = HttpParsingState::default();
+                    }
+                } else if is_chunked(&substituted) {
+                    // Chunked encoding - keep state
+                } else {
+                    // No Content-Length and not chunked, assume request complete
+                    state.buffer.clear();
+                }
+
+                self.http_states.insert(handle, state);
+                Ok(WriteAction::Segments(segments))
+            } else {
+                // Headers not complete yet - keep buffering
+                self.http_states.insert(handle, state);
+                Ok(WriteAction::Buffering)
+            }
+        } else {
+            // Headers already sent, this is body data - pass through
+            state.body_bytes_sent += data.len();
+
+            // Check if request is complete
+            if let Some(cl) = state.content_length
+                && state.body_bytes_sent >= cl
+            {
+                // Request complete - reset for pipelining
+                state = HttpParsingState::default();
+            }
+
+            self.http_states.insert(handle, state);
+            Ok(WriteAction::Passthrough(data.to_vec()))
+        }
     }
 
     /// Check if a host is allowed by the current policy.
@@ -429,88 +524,15 @@ impl ConnectionManager {
             return self.tcp_write_raw(handle, data).await;
         }
 
-        // Get current state (borrow ends here)
-        let mut state = self.http_states.entry(handle).or_default().clone();
-
-        // Add new data to buffer
-        state.buffer.extend_from_slice(data);
-
-        if !state.headers_complete {
-            // Look for end of headers (\r\n\r\n)
-            if let Some(header_end) = find_header_end(&state.buffer) {
-                let headers_bytes = state.buffer[..header_end].to_vec();
-                let remaining = state.buffer[header_end..].to_vec();
-
-                // Check if this looks like HTTP
-                if !is_http_request(&headers_bytes) {
-                    // Not HTTP - pass through everything
-                    let all_data = state.buffer.clone();
-                    state.buffer.clear();
-                    self.http_states.insert(handle, state);
-                    return self.tcp_write_raw(handle, &all_data).await;
+        match self.process_write_data(handle, data)? {
+            WriteAction::Passthrough(bytes) => self.tcp_write_raw(handle, &bytes).await,
+            WriteAction::Segments(segments) => {
+                for segment in &segments {
+                    self.tcp_write_raw(handle, segment).await?;
                 }
-
-                // Check for HTTP/2 (not supported with secrets)
-                if is_http2(&headers_bytes) {
-                    return Err(TcpError::NotPermitted(
-                        "HTTP/2 with secrets not supported. Use HTTP/1.1.".into(),
-                    ));
-                }
-
-                // Parse headers and substitute secrets
-                let substituted = self.substitute_http_headers(&headers_bytes, handle)?;
-
-                // Extract Content-Length for body tracking
-                state.content_length = extract_content_length(&substituted);
-                state.headers_complete = true;
-
-                // Send headers
-                let _ = self.tcp_write_raw(handle, &substituted).await?;
-
-                // Send any buffered body data
-                if !remaining.is_empty() {
-                    state.body_bytes_sent += remaining.len();
-                    self.tcp_write_raw(handle, &remaining).await?;
-                }
-
-                // Check if request is complete (for pipelining)
-                if let Some(cl) = state.content_length {
-                    if state.body_bytes_sent >= cl {
-                        // Request complete - reset for next request
-                        state = HttpParsingState::default();
-                    }
-                } else if is_chunked(&substituted) {
-                    // Chunked encoding - reset when we see 0\r\n\r\n or connection closes
-                    // For now, just keep state
-                } else {
-                    // No Content-Length and not chunked, assume request complete
-                    state.buffer.clear();
-                }
-
-                self.http_states.insert(handle, state);
-                Ok(data.len() as u32)
-            } else {
-                // Headers not complete yet - keep buffering
-                // Return success but don't send anything yet
-                self.http_states.insert(handle, state);
                 Ok(data.len() as u32)
             }
-        } else {
-            // Headers already sent, this is body data - pass through
-            state.body_bytes_sent += data.len();
-
-            let n = self.tcp_write_raw(handle, data).await?;
-
-            // Check if request is complete
-            if let Some(cl) = state.content_length
-                && state.body_bytes_sent >= cl
-            {
-                // Request complete - reset for pipelining
-                state = HttpParsingState::default();
-            }
-
-            self.http_states.insert(handle, state);
-            Ok(n)
+            WriteAction::Buffering => Ok(data.len() as u32),
         }
     }
 
@@ -598,9 +620,9 @@ impl ConnectionManager {
             };
 
             if !host_allowed {
-                return Err(TcpError::NotPermitted(format!(
-                    "Secret not allowed for host '{target_host}'"
-                )));
+                return Err(TcpError::NotPermitted(
+                    "Secret not allowed for the target host".into(),
+                ));
             }
 
             // Substitute
@@ -653,6 +675,12 @@ impl ConnectionManager {
         let handle = self.alloc_handle();
         self.tls_connections.insert(handle, tls);
 
+        // Carry over host mapping and clean up old TCP state
+        if let Some(host) = self.connection_hosts.remove(&tcp_handle) {
+            self.connection_hosts.insert(handle, host);
+        }
+        self.http_states.remove(&tcp_handle);
+
         tracing::debug!(
             handle,
             hostname,
@@ -684,7 +712,29 @@ impl ConnectionManager {
     }
 
     /// Write to a TLS connection.
+    ///
+    /// If secrets are configured, this method will parse HTTP requests and
+    /// substitute secret placeholders in headers before sending.
     pub async fn tls_write(&mut self, handle: u32, data: &[u8]) -> Result<u32, TlsError> {
+        // Fast path: no secrets = no parsing
+        if self.secrets.is_empty() {
+            return self.tls_write_raw(handle, data).await;
+        }
+
+        match self.process_write_data(handle, data).map_err(TlsError::Tcp)? {
+            WriteAction::Passthrough(bytes) => self.tls_write_raw(handle, &bytes).await,
+            WriteAction::Segments(segments) => {
+                for segment in &segments {
+                    self.tls_write_raw(handle, segment).await?;
+                }
+                Ok(data.len() as u32)
+            }
+            WriteAction::Buffering => Ok(data.len() as u32),
+        }
+    }
+
+    /// Write raw data to a TLS connection without HTTP parsing.
+    async fn tls_write_raw(&mut self, handle: u32, data: &[u8]) -> Result<u32, TlsError> {
         let stream = self
             .tls_connections
             .get_mut(&handle)
@@ -992,5 +1042,208 @@ mod tests {
         let result = manager.substitute_secrets_in_text("Bearer PLACEHOLDER_XYZ", "any-host.com");
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), "Bearer real-secret-value");
+    }
+
+    // ========================================================================
+    // Adversarial Security Tests
+    // ========================================================================
+
+    /// Test that secrets are rejected for all unauthorized hosts.
+    #[test]
+    fn test_secret_blocked_for_unauthorized_host() {
+        let config = NetConfig::permissive();
+        let mut secrets = HashMap::new();
+        secrets.insert(
+            "KEY".to_string(),
+            crate::secrets::SecretConfig {
+                real_value: "top-secret".to_string(),
+                placeholder: "PH_AUTH".to_string(),
+                allowed_hosts: vec!["api.openai.com".to_string()],
+            },
+        );
+
+        let manager = ConnectionManager::new(config, secrets);
+
+        // All of these unauthorized hosts must be rejected
+        assert!(manager.substitute_secrets_in_text("PH_AUTH", "evil.com").is_err());
+        assert!(manager.substitute_secrets_in_text("PH_AUTH", "127.0.0.1").is_err());
+        assert!(manager.substitute_secrets_in_text("PH_AUTH", "localhost").is_err());
+        assert!(manager.substitute_secrets_in_text("PH_AUTH", "").is_err());
+    }
+
+    /// Test that multiple secrets with different host restrictions are independently enforced.
+    #[test]
+    fn test_multiple_secrets_independent_host_restrictions() {
+        let config = NetConfig::permissive();
+        let mut secrets = HashMap::new();
+        secrets.insert(
+            "OPENAI".to_string(),
+            crate::secrets::SecretConfig {
+                real_value: "openai-secret".to_string(),
+                placeholder: "PH_OPENAI".to_string(),
+                allowed_hosts: vec!["api.openai.com".to_string()],
+            },
+        );
+        secrets.insert(
+            "GITHUB".to_string(),
+            crate::secrets::SecretConfig {
+                real_value: "github-secret".to_string(),
+                placeholder: "PH_GITHUB".to_string(),
+                allowed_hosts: vec!["api.github.com".to_string()],
+            },
+        );
+
+        let manager = ConnectionManager::new(config, secrets);
+
+        // OpenAI key for OpenAI host: OK
+        assert!(manager.substitute_secrets_in_text("PH_OPENAI", "api.openai.com").is_ok());
+        // OpenAI key for GitHub host: REJECTED
+        assert!(manager.substitute_secrets_in_text("PH_OPENAI", "api.github.com").is_err());
+        // GitHub key for GitHub host: OK
+        assert!(manager.substitute_secrets_in_text("PH_GITHUB", "api.github.com").is_ok());
+        // GitHub key for OpenAI host: REJECTED
+        assert!(manager.substitute_secrets_in_text("PH_GITHUB", "api.openai.com").is_err());
+    }
+
+    /// Test glob pattern host enforcement for secrets.
+    #[test]
+    fn test_secret_glob_pattern_enforcement() {
+        let config = NetConfig::permissive();
+        let mut secrets = HashMap::new();
+        secrets.insert(
+            "KEY".to_string(),
+            crate::secrets::SecretConfig {
+                real_value: "secret".to_string(),
+                placeholder: "PH_GLOB".to_string(),
+                allowed_hosts: vec!["*.openai.com".to_string()],
+            },
+        );
+
+        let manager = ConnectionManager::new(config, secrets);
+
+        assert!(manager.substitute_secrets_in_text("PH_GLOB", "api.openai.com").is_ok());
+        // Bare domain doesn't match *.openai.com
+        assert!(manager.substitute_secrets_in_text("PH_GLOB", "openai.com").is_err());
+        assert!(manager.substitute_secrets_in_text("PH_GLOB", "evil.com").is_err());
+    }
+
+    /// Test that deceptive domain names don't match allowed hosts.
+    #[test]
+    fn test_secret_deceptive_domain_rejection() {
+        let config = NetConfig::permissive();
+        let mut secrets = HashMap::new();
+        secrets.insert(
+            "KEY".to_string(),
+            crate::secrets::SecretConfig {
+                real_value: "secret".to_string(),
+                placeholder: "PH_DECEPTIVE".to_string(),
+                allowed_hosts: vec!["api.openai.com".to_string()],
+            },
+        );
+
+        let manager = ConnectionManager::new(config, secrets);
+
+        // Deceptive domains that look similar but shouldn't match
+        assert!(manager.substitute_secrets_in_text("PH_DECEPTIVE", "api.openai.com.evil.com").is_err());
+        assert!(manager.substitute_secrets_in_text("PH_DECEPTIVE", "api-openai.com").is_err());
+        assert!(manager.substitute_secrets_in_text("PH_DECEPTIVE", "evil-api.openai.com").is_err());
+        assert!(manager.substitute_secrets_in_text("PH_DECEPTIVE", "xapi.openai.com").is_err());
+    }
+
+    /// Test that IP addresses don't match hostname-based restrictions.
+    #[test]
+    fn test_secret_ip_doesnt_match_hostname() {
+        let config = NetConfig::permissive();
+        let mut secrets = HashMap::new();
+        secrets.insert(
+            "KEY".to_string(),
+            crate::secrets::SecretConfig {
+                real_value: "secret".to_string(),
+                placeholder: "PH_IP".to_string(),
+                allowed_hosts: vec!["api.openai.com".to_string()],
+            },
+        );
+
+        let manager = ConnectionManager::new(config, secrets);
+
+        // IP address should NOT match hostname restriction
+        assert!(manager.substitute_secrets_in_text("PH_IP", "104.18.7.192").is_err());
+        assert!(manager.substitute_secrets_in_text("PH_IP", "1.2.3.4").is_err());
+    }
+
+    /// Test case-insensitive host matching for secrets.
+    #[test]
+    fn test_secret_case_insensitive_host() {
+        let config = NetConfig::permissive();
+        let mut secrets = HashMap::new();
+        secrets.insert(
+            "KEY".to_string(),
+            crate::secrets::SecretConfig {
+                real_value: "secret".to_string(),
+                placeholder: "PH_CASE".to_string(),
+                allowed_hosts: vec!["api.openai.com".to_string()],
+            },
+        );
+
+        let manager = ConnectionManager::new(config, secrets);
+
+        // DNS is case-insensitive, so these should all work
+        assert!(manager.substitute_secrets_in_text("PH_CASE", "API.OPENAI.COM").is_ok());
+        assert!(manager.substitute_secrets_in_text("PH_CASE", "Api.OpenAI.Com").is_ok());
+    }
+
+    /// Test that no text without placeholders triggers substitution errors.
+    #[test]
+    fn test_no_placeholder_passthrough() {
+        let config = NetConfig::permissive();
+        let mut secrets = HashMap::new();
+        secrets.insert(
+            "KEY".to_string(),
+            crate::secrets::SecretConfig {
+                real_value: "secret".to_string(),
+                placeholder: "PH_NOOP".to_string(),
+                allowed_hosts: vec!["restricted.com".to_string()],
+            },
+        );
+
+        let manager = ConnectionManager::new(config, secrets);
+
+        // Text without any placeholder should pass through unchanged, for any host
+        let result = manager.substitute_secrets_in_text("Bearer some-other-token", "evil.com");
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), "Bearer some-other-token");
+    }
+
+    /// Test that TLS upgrade preserves connection_hosts mapping.
+    #[test]
+    fn test_tls_upgrade_preserves_host_mapping() {
+        let config = NetConfig::permissive();
+        let secrets = HashMap::new();
+        let mut manager = ConnectionManager::new(config, secrets);
+
+        // Simulate a TCP connection with host mapping and HTTP state
+        let tcp_handle = 1_u32;
+        let tls_handle = 2_u32;
+        manager
+            .connection_hosts
+            .insert(tcp_handle, "example.com".to_string());
+        manager
+            .http_states
+            .insert(tcp_handle, HttpParsingState::default());
+
+        // Simulate what tls_upgrade now does: carry over host, clean up old state
+        if let Some(host) = manager.connection_hosts.remove(&tcp_handle) {
+            manager.connection_hosts.insert(tls_handle, host);
+        }
+        manager.http_states.remove(&tcp_handle);
+
+        // New TLS handle should have the host mapping
+        assert_eq!(
+            manager.connection_hosts.get(&tls_handle),
+            Some(&"example.com".to_string())
+        );
+        // Old TCP handle should be cleaned up
+        assert!(!manager.connection_hosts.contains_key(&tcp_handle));
+        assert!(!manager.http_states.contains_key(&tcp_handle));
     }
 }
