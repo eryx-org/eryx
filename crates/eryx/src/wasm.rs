@@ -745,8 +745,7 @@ pub struct ExecuteBuilder<'a> {
     cancellation_token: Option<CancellationToken>,
     fuel_limit: Option<u64>,
     #[cfg(feature = "vfs")]
-    vfs_storage:
-        Option<std::sync::Arc<eryx_vfs::ScrubbingStorage<eryx_vfs::InMemoryStorage>>>,
+    vfs_storage: Option<std::sync::Arc<eryx_vfs::ScrubbingStorage<eryx_vfs::InMemoryStorage>>>,
 }
 
 impl std::fmt::Debug for ExecuteBuilder<'_> {
@@ -1819,8 +1818,7 @@ impl PythonExecutor {
         execution_timeout: Option<Duration>,
         cancellation_token: Option<CancellationToken>,
         fuel_limit: Option<u64>,
-        #[cfg(feature = "vfs")]
-        vfs_storage: Option<
+        #[cfg(feature = "vfs")] vfs_storage: Option<
             std::sync::Arc<eryx_vfs::ScrubbingStorage<eryx_vfs::InMemoryStorage>>,
         >,
     ) -> std::result::Result<ExecutionOutput, Error> {

@@ -31,7 +31,7 @@ use pyo3::prelude::*;
 pub struct VfsStorage {
     /// The underlying storage, used when Session bindings are added.
     #[allow(dead_code)]
-    pub(crate) inner: Arc<eryx::vfs::InMemoryStorage>,
+    pub(crate) inner: Arc<eryx::vfs::ScrubbingStorage<eryx::vfs::InMemoryStorage>>,
 }
 
 #[pymethods]
@@ -46,7 +46,11 @@ impl VfsStorage {
     #[new]
     fn new() -> Self {
         Self {
-            inner: Arc::new(eryx::vfs::InMemoryStorage::new()),
+            inner: Arc::new(eryx::vfs::ScrubbingStorage::new(
+                eryx::vfs::InMemoryStorage::new(),
+                std::collections::HashMap::new(),
+                eryx::vfs::VfsFileScrubPolicy::None,
+            )),
         }
     }
 

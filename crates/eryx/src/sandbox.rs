@@ -228,8 +228,13 @@ impl Sandbox {
         let secrets_arc = Arc::new(self.secrets.clone());
         let callback_secrets = Arc::clone(&secrets_arc);
         let callback_handler = tokio::spawn(async move {
-            run_callback_handler(callback_rx, callbacks_arc, resource_limits, callback_secrets)
-                .await
+            run_callback_handler(
+                callback_rx,
+                callbacks_arc,
+                resource_limits,
+                callback_secrets,
+            )
+            .await
         });
 
         // Spawn task to handle trace events
@@ -656,19 +661,17 @@ impl Sandbox {
         match execution_result {
             Ok(output) => {
                 // Scrub secret placeholders from output based on policy
-                let stdout =
-                    if matches!(scrub_stdout, crate::secrets::OutputScrubPolicy::All) {
-                        crate::secrets::scrub_placeholders(&output.stdout, &secrets)
-                    } else {
-                        output.stdout
-                    };
+                let stdout = if matches!(scrub_stdout, crate::secrets::OutputScrubPolicy::All) {
+                    crate::secrets::scrub_placeholders(&output.stdout, &secrets)
+                } else {
+                    output.stdout
+                };
 
-                let stderr =
-                    if matches!(scrub_stderr, crate::secrets::OutputScrubPolicy::All) {
-                        crate::secrets::scrub_placeholders(&output.stderr, &secrets)
-                    } else {
-                        output.stderr
-                    };
+                let stderr = if matches!(scrub_stderr, crate::secrets::OutputScrubPolicy::All) {
+                    crate::secrets::scrub_placeholders(&output.stderr, &secrets)
+                } else {
+                    output.stderr
+                };
 
                 // Stream output if handler is configured
                 if let Some(handler) = &output_handler {

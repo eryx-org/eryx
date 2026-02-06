@@ -1292,7 +1292,9 @@ impl ExecutorState {
         trace_tx: Option<mpsc::UnboundedSender<TraceRequest>>,
         callbacks: Vec<HostCallbackInfo>,
         memory_tracker: MemoryTracker,
-        hybrid_vfs_ctx: Option<eryx_vfs::HybridVfsCtx<eryx_vfs::ScrubbingStorage<eryx_vfs::InMemoryStorage>>>,
+        hybrid_vfs_ctx: Option<
+            eryx_vfs::HybridVfsCtx<eryx_vfs::ScrubbingStorage<eryx_vfs::InMemoryStorage>>,
+        >,
     ) -> Self {
         Self {
             wasi,

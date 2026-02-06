@@ -721,7 +721,10 @@ impl ConnectionManager {
             return self.tls_write_raw(handle, data).await;
         }
 
-        match self.process_write_data(handle, data).map_err(TlsError::Tcp)? {
+        match self
+            .process_write_data(handle, data)
+            .map_err(TlsError::Tcp)?
+        {
             WriteAction::Passthrough(bytes) => self.tls_write_raw(handle, &bytes).await,
             WriteAction::Segments(segments) => {
                 for segment in &segments {
@@ -1065,9 +1068,21 @@ mod tests {
         let manager = ConnectionManager::new(config, secrets);
 
         // All of these unauthorized hosts must be rejected
-        assert!(manager.substitute_secrets_in_text("PH_AUTH", "evil.com").is_err());
-        assert!(manager.substitute_secrets_in_text("PH_AUTH", "127.0.0.1").is_err());
-        assert!(manager.substitute_secrets_in_text("PH_AUTH", "localhost").is_err());
+        assert!(
+            manager
+                .substitute_secrets_in_text("PH_AUTH", "evil.com")
+                .is_err()
+        );
+        assert!(
+            manager
+                .substitute_secrets_in_text("PH_AUTH", "127.0.0.1")
+                .is_err()
+        );
+        assert!(
+            manager
+                .substitute_secrets_in_text("PH_AUTH", "localhost")
+                .is_err()
+        );
         assert!(manager.substitute_secrets_in_text("PH_AUTH", "").is_err());
     }
 
@@ -1096,13 +1111,29 @@ mod tests {
         let manager = ConnectionManager::new(config, secrets);
 
         // OpenAI key for OpenAI host: OK
-        assert!(manager.substitute_secrets_in_text("PH_OPENAI", "api.openai.com").is_ok());
+        assert!(
+            manager
+                .substitute_secrets_in_text("PH_OPENAI", "api.openai.com")
+                .is_ok()
+        );
         // OpenAI key for GitHub host: REJECTED
-        assert!(manager.substitute_secrets_in_text("PH_OPENAI", "api.github.com").is_err());
+        assert!(
+            manager
+                .substitute_secrets_in_text("PH_OPENAI", "api.github.com")
+                .is_err()
+        );
         // GitHub key for GitHub host: OK
-        assert!(manager.substitute_secrets_in_text("PH_GITHUB", "api.github.com").is_ok());
+        assert!(
+            manager
+                .substitute_secrets_in_text("PH_GITHUB", "api.github.com")
+                .is_ok()
+        );
         // GitHub key for OpenAI host: REJECTED
-        assert!(manager.substitute_secrets_in_text("PH_GITHUB", "api.openai.com").is_err());
+        assert!(
+            manager
+                .substitute_secrets_in_text("PH_GITHUB", "api.openai.com")
+                .is_err()
+        );
     }
 
     /// Test glob pattern host enforcement for secrets.
@@ -1121,10 +1152,22 @@ mod tests {
 
         let manager = ConnectionManager::new(config, secrets);
 
-        assert!(manager.substitute_secrets_in_text("PH_GLOB", "api.openai.com").is_ok());
+        assert!(
+            manager
+                .substitute_secrets_in_text("PH_GLOB", "api.openai.com")
+                .is_ok()
+        );
         // Bare domain doesn't match *.openai.com
-        assert!(manager.substitute_secrets_in_text("PH_GLOB", "openai.com").is_err());
-        assert!(manager.substitute_secrets_in_text("PH_GLOB", "evil.com").is_err());
+        assert!(
+            manager
+                .substitute_secrets_in_text("PH_GLOB", "openai.com")
+                .is_err()
+        );
+        assert!(
+            manager
+                .substitute_secrets_in_text("PH_GLOB", "evil.com")
+                .is_err()
+        );
     }
 
     /// Test that deceptive domain names don't match allowed hosts.
@@ -1144,10 +1187,26 @@ mod tests {
         let manager = ConnectionManager::new(config, secrets);
 
         // Deceptive domains that look similar but shouldn't match
-        assert!(manager.substitute_secrets_in_text("PH_DECEPTIVE", "api.openai.com.evil.com").is_err());
-        assert!(manager.substitute_secrets_in_text("PH_DECEPTIVE", "api-openai.com").is_err());
-        assert!(manager.substitute_secrets_in_text("PH_DECEPTIVE", "evil-api.openai.com").is_err());
-        assert!(manager.substitute_secrets_in_text("PH_DECEPTIVE", "xapi.openai.com").is_err());
+        assert!(
+            manager
+                .substitute_secrets_in_text("PH_DECEPTIVE", "api.openai.com.evil.com")
+                .is_err()
+        );
+        assert!(
+            manager
+                .substitute_secrets_in_text("PH_DECEPTIVE", "api-openai.com")
+                .is_err()
+        );
+        assert!(
+            manager
+                .substitute_secrets_in_text("PH_DECEPTIVE", "evil-api.openai.com")
+                .is_err()
+        );
+        assert!(
+            manager
+                .substitute_secrets_in_text("PH_DECEPTIVE", "xapi.openai.com")
+                .is_err()
+        );
     }
 
     /// Test that IP addresses don't match hostname-based restrictions.
@@ -1167,8 +1226,16 @@ mod tests {
         let manager = ConnectionManager::new(config, secrets);
 
         // IP address should NOT match hostname restriction
-        assert!(manager.substitute_secrets_in_text("PH_IP", "104.18.7.192").is_err());
-        assert!(manager.substitute_secrets_in_text("PH_IP", "1.2.3.4").is_err());
+        assert!(
+            manager
+                .substitute_secrets_in_text("PH_IP", "104.18.7.192")
+                .is_err()
+        );
+        assert!(
+            manager
+                .substitute_secrets_in_text("PH_IP", "1.2.3.4")
+                .is_err()
+        );
     }
 
     /// Test case-insensitive host matching for secrets.
@@ -1188,8 +1255,16 @@ mod tests {
         let manager = ConnectionManager::new(config, secrets);
 
         // DNS is case-insensitive, so these should all work
-        assert!(manager.substitute_secrets_in_text("PH_CASE", "API.OPENAI.COM").is_ok());
-        assert!(manager.substitute_secrets_in_text("PH_CASE", "Api.OpenAI.Com").is_ok());
+        assert!(
+            manager
+                .substitute_secrets_in_text("PH_CASE", "API.OPENAI.COM")
+                .is_ok()
+        );
+        assert!(
+            manager
+                .substitute_secrets_in_text("PH_CASE", "Api.OpenAI.Com")
+                .is_ok()
+        );
     }
 
     /// Test that no text without placeholders triggers substitution errors.

@@ -153,8 +153,13 @@ impl<'a> InProcessSession<'a> {
         let secrets_arc = std::sync::Arc::new(self.sandbox.secrets().clone());
         let callback_secrets = std::sync::Arc::clone(&secrets_arc);
         let callback_handler = tokio::spawn(async move {
-            run_callback_handler(callback_rx, callbacks_arc, resource_limits, callback_secrets)
-                .await
+            run_callback_handler(
+                callback_rx,
+                callbacks_arc,
+                resource_limits,
+                callback_secrets,
+            )
+            .await
         });
 
         // Spawn task to handle trace events
