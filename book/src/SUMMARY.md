@@ -13,6 +13,7 @@
 - [Sandboxes](./guide/sandboxes.md)
 - [Callbacks](./guide/callbacks.md)
 - [Sessions](./guide/sessions.md)
+- [VFS and File Persistence](./guide/vfs.md)
 - [Resource Limits](./guide/resource-limits.md)
 - [Networking](./guide/networking.md)
 - [Packages](./guide/packages.md)
