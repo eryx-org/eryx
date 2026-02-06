@@ -137,8 +137,7 @@ pub use tokio_util::sync::CancellationToken;
 #[cfg(feature = "vfs")]
 pub mod vfs {
     pub use eryx_vfs::{
-        DirEntry, DirPerms, FilePerms, InMemoryStorage, Metadata, ScrubbingStorage,
-        VfsCtx, VfsError, VfsFileScrubPolicy, VfsResult, VfsSecretConfig, VfsState, VfsStorage,
-        VfsView,
+        DirEntry, DirPerms, FilePerms, InMemoryStorage, Metadata, ScrubbingStorage, VfsCtx,
+        VfsError, VfsFileScrubPolicy, VfsResult, VfsSecretConfig, VfsState, VfsStorage, VfsView,
     };
 }

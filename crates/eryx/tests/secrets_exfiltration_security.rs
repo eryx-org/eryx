@@ -433,6 +433,7 @@ print("RAW_EXFIL: sent")
 }
 
 /// Attacker splits the HTTP request across multiple TCP writes to confuse the parser.
+/// The secret is only allowed for api.openai.com, NOT for 127.0.0.1.
 #[tokio::test]
 async fn test_exfil_network_split_tcp_writes() {
     let server = ExfilServer::new();
@@ -440,7 +441,7 @@ async fn test_exfil_network_split_tcp_writes() {
     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
     let sandbox = Sandbox::embedded()
-        .with_secret("API_KEY", REAL_SECRET, vec!["127.0.0.1".to_string()])
+        .with_secret("API_KEY", REAL_SECRET, vec!["api.openai.com".to_string()])
         .with_network(NetConfig::permissive())
         .scrub_stdout(true)
         .build()

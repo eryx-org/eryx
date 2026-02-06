@@ -143,10 +143,7 @@ fn create_callback_future(
                 &value.to_string(),
                 &secrets,
             )),
-            Err(e) => Err(crate::secrets::scrub_placeholders(
-                &e.to_string(),
-                &secrets,
-            )),
+            Err(e) => Err(crate::secrets::scrub_placeholders(&e.to_string(), &secrets)),
         };
 
         // Send result back to the Python code
@@ -182,8 +179,8 @@ fn scrub_trace_event(event: &mut TraceEvent, secrets: &HashMap<String, SecretCon
         let scrubbed = crate::secrets::scrub_placeholders(&ctx_str, secrets);
         if scrubbed != ctx_str {
             // Re-parse the scrubbed JSON; fall back to string value on parse failure
-            let scrubbed_value = serde_json::from_str(&scrubbed)
-                .unwrap_or(serde_json::Value::String(scrubbed));
+            let scrubbed_value =
+                serde_json::from_str(&scrubbed).unwrap_or(serde_json::Value::String(scrubbed));
             event.context = Some(scrubbed_value);
         }
     }

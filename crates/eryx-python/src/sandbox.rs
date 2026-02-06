@@ -155,15 +155,9 @@ impl Sandbox {
         }
 
         // Apply scrub policies (default to true when secrets are present)
-        if scrub_stdout.unwrap_or(has_secrets) {
-            builder = builder.scrub_stdout(true);
-        }
-        if scrub_stderr.unwrap_or(has_secrets) {
-            builder = builder.scrub_stderr(true);
-        }
-        if scrub_files.unwrap_or(has_secrets) {
-            builder = builder.scrub_files(true);
-        }
+        builder = builder.scrub_stdout(scrub_stdout.unwrap_or(has_secrets));
+        builder = builder.scrub_stderr(scrub_stderr.unwrap_or(has_secrets));
+        builder = builder.scrub_files(scrub_files.unwrap_or(has_secrets));
 
         let inner = builder.build().map_err(eryx_error_to_py)?;
 
