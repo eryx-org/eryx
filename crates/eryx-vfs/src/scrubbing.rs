@@ -25,24 +25,38 @@ pub enum FileScrubPolicy {
     /// Don't scrub any files.
     None,
     /// Scrub all except specified paths (glob patterns supported).
+    ///
+    /// **Not yet implemented** - currently behaves the same as `All` (fail closed).
+    /// Do not use until glob matching is implemented.
+    #[doc(hidden)]
     Except(Vec<String>),
     /// Only scrub specified paths (glob patterns supported).
+    ///
+    /// **Not yet implemented** - currently behaves the same as `All` (fail closed).
+    /// Do not use until glob matching is implemented.
+    #[doc(hidden)]
     Only(Vec<String>),
 }
 
 impl FileScrubPolicy {
     /// Check if a given path should be scrubbed according to this policy.
+    ///
+    /// Note: Glob matching is not yet implemented. Both `Except` and `Only`
+    /// policies currently fail closed (scrub everything) for security.
     pub fn should_scrub(&self, _path: &str) -> bool {
         match self {
             Self::All => true,
             Self::None => false,
             Self::Except(_patterns) => {
                 // TODO: Implement glob matching
-                true // For now, scrub everything in Except mode
+                // Fail closed: scrub everything until glob matching is implemented
+                true
             }
             Self::Only(_patterns) => {
                 // TODO: Implement glob matching
-                false // For now, scrub nothing in Only mode
+                // Fail closed: scrub everything until glob matching is implemented
+                // (Previously returned false which was an insecure fail-open default)
+                true
             }
         }
     }
@@ -272,5 +286,110 @@ mod tests {
         let data = b"Hello NEEDLE World NEEDLE!";
         let result = replace_bytes(data, b"NEEDLE", b"REPLACEMENT");
         assert_eq!(result, b"Hello REPLACEMENT World REPLACEMENT!");
+    }
+
+    /// Test that the hidden FileScrubPolicy::Only fails closed (scrubs everything).
+    /// This is a security-critical test ensuring defense in depth - if someone uses
+    /// the hidden variant, it must still scrub rather than leak secrets.
+    #[tokio::test]
+    async fn test_policy_only_fails_closed() {
+        let storage = InMemoryStorage::new();
+        let mut secrets = HashMap::new();
+        secrets.insert(
+            "KEY".to_string(),
+            SecretConfig {
+                placeholder: "PLACEHOLDER_SECRET".to_string(),
+            },
+        );
+
+        // FileScrubPolicy::Only should scrub ALL files until glob matching is implemented
+        // (fail closed for security)
+        let scrubbing = ScrubbingStorage::new(
+            storage,
+            secrets,
+            FileScrubPolicy::Only(vec!["/allowed/*".to_string()]),
+        );
+
+        // Write to a path that would NOT match the "only" pattern
+        // (using root path to avoid needing to create directories)
+        scrubbing
+            .write("/unmatched.txt", b"Secret: PLACEHOLDER_SECRET")
+            .await
+            .unwrap();
+
+        // Should still be scrubbed because we fail closed
+        let content = scrubbing.read("/unmatched.txt").await.unwrap();
+        let text = String::from_utf8(content).unwrap();
+        assert_eq!(
+            text, "Secret: [REDACTED]",
+            "FileScrubPolicy::Only must fail closed and scrub all files until glob matching is implemented"
+        );
+    }
+
+    /// Test that the hidden FileScrubPolicy::Except also fails closed.
+    /// Defense in depth - if someone uses the hidden variant, it must still scrub.
+    #[tokio::test]
+    async fn test_policy_except_fails_closed() {
+        let storage = InMemoryStorage::new();
+        let mut secrets = HashMap::new();
+        secrets.insert(
+            "KEY".to_string(),
+            SecretConfig {
+                placeholder: "PLACEHOLDER_SECRET".to_string(),
+            },
+        );
+
+        // FileScrubPolicy::Except should scrub ALL files until glob matching is implemented
+        let scrubbing = ScrubbingStorage::new(
+            storage,
+            secrets,
+            FileScrubPolicy::Except(vec!["/excluded/*".to_string()]),
+        );
+
+        // Write to a path that would match the "except" pattern (should be excluded)
+        // (using root path to avoid needing to create directories)
+        scrubbing
+            .write("/excluded.txt", b"Secret: PLACEHOLDER_SECRET")
+            .await
+            .unwrap();
+
+        // Should still be scrubbed because we fail closed
+        let content = scrubbing.read("/excluded.txt").await.unwrap();
+        let text = String::from_utf8(content).unwrap();
+        assert_eq!(
+            text, "Secret: [REDACTED]",
+            "FileScrubPolicy::Except must fail closed and scrub all files until glob matching is implemented"
+        );
+    }
+
+    /// Test that should_scrub correctly returns true for all policies except None.
+    /// Hidden variants (Only, Except) must fail closed for security.
+    #[test]
+    fn test_should_scrub_policy_behavior() {
+        // All: always scrub
+        assert!(FileScrubPolicy::All.should_scrub("/any/path"));
+
+        // None: never scrub
+        assert!(!FileScrubPolicy::None.should_scrub("/any/path"));
+
+        // Only: fail closed (scrub everything until glob implemented)
+        assert!(
+            FileScrubPolicy::Only(vec!["/specific/*".to_string()]).should_scrub("/other/path"),
+            "Only policy must fail closed"
+        );
+        assert!(
+            FileScrubPolicy::Only(vec!["/specific/*".to_string()]).should_scrub("/specific/file"),
+            "Only policy must fail closed"
+        );
+
+        // Except: fail closed (scrub everything until glob implemented)
+        assert!(
+            FileScrubPolicy::Except(vec!["/excluded/*".to_string()]).should_scrub("/other/path"),
+            "Except policy must fail closed"
+        );
+        assert!(
+            FileScrubPolicy::Except(vec!["/excluded/*".to_string()]).should_scrub("/excluded/file"),
+            "Except policy must fail closed"
+        );
     }
 }

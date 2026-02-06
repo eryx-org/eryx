@@ -16,7 +16,12 @@ pub struct SecretConfig {
     pub(crate) real_value: String,
     /// Generated placeholder (what Python sees)
     pub(crate) placeholder: String,
-    /// Host restrictions for this secret (empty = inherit from NetConfig)
+    /// Host restrictions for this secret.
+    ///
+    /// **⚠️ Security Note:**
+    /// - If empty, falls back to `NetConfig.allowed_hosts`
+    /// - If both are empty, the secret can be sent to ANY host (except blocked_hosts)
+    /// - Always specify explicit hosts for production use
     pub allowed_hosts: Vec<String>,
 }
 
@@ -28,10 +33,18 @@ pub enum FileScrubPolicy {
     All,
     /// Don't scrub any files
     None,
-    /// Scrub all except specified paths (Phase 2 - future)
+    /// Scrub all except specified paths (glob patterns supported).
+    ///
+    /// **Not yet implemented** - currently behaves the same as `All` (fail closed).
+    /// Do not use until glob matching is implemented in Phase 2.
+    #[doc(hidden)]
     #[allow(dead_code)]
     Except(Vec<String>),
-    /// Scrub only specified paths (Phase 2 - future)
+    /// Scrub only specified paths (glob patterns supported).
+    ///
+    /// **Not yet implemented** - currently behaves the same as `All` (fail closed).
+    /// Do not use until glob matching is implemented in Phase 2.
+    #[doc(hidden)]
     #[allow(dead_code)]
     Only(Vec<String>),
 }
@@ -55,16 +68,20 @@ impl FileScrubPolicy {
         Self::None
     }
 
-    /// Scrub all except specific paths (glob patterns supported)
-    /// Available in Phase 2
+    /// Scrub all except specific paths (glob patterns supported).
+    ///
+    /// **Not yet implemented** - do not use until Phase 2.
+    #[doc(hidden)]
     #[allow(dead_code)]
     #[must_use]
     pub fn except(paths: Vec<String>) -> Self {
         Self::Except(paths)
     }
 
-    /// Only scrub specific paths (glob patterns supported)
-    /// Available in Phase 2
+    /// Only scrub specific paths (glob patterns supported).
+    ///
+    /// **Not yet implemented** - do not use until Phase 2.
+    #[doc(hidden)]
     #[allow(dead_code)]
     #[must_use]
     pub fn only(paths: Vec<String>) -> Self {

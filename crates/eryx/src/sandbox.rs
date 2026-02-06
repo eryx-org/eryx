@@ -1406,13 +1406,20 @@ impl<R, S> SandboxBuilder<R, S> {
     /// * `name` - Environment variable name (e.g., "OPENAI_API_KEY")
     /// * `value` - The real secret value
     /// * `allowed_hosts` - Host patterns where this secret can be used.
-    ///   Supports wildcards: `*.example.com`, `api.*.com`. Empty means inherit
-    ///   from NetConfig's allowed_hosts.
+    ///   Supports wildcards: `*.example.com`, `api.*.com`.
+    ///
+    /// # ⚠️ Important: `allowed_hosts` Behavior
+    ///
+    /// - **Empty `allowed_hosts`**: Falls back to `NetConfig.allowed_hosts`. If that
+    ///   is also empty, the secret can be sent to **ANY host** (subject to blocked_hosts).
+    /// - **Always specify `allowed_hosts`** for production use to prevent accidental
+    ///   exfiltration to unauthorized hosts.
     ///
     /// # Security
     ///
     /// - Python code only sees a placeholder like `ERYX_SECRET_PLACEHOLDER_abc123`
     /// - Real value is substituted transparently when making HTTP requests
+    /// - Host checks use the TCP connection target, NOT the HTTP Host header (prevents spoofing)
     /// - Placeholders are scrubbed from all outputs by default
     /// - Secrets are ephemeral (regenerated on each sandbox creation)
     ///

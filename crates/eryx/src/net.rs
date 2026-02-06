@@ -592,6 +592,13 @@ impl ConnectionManager {
     }
 
     /// Substitute secret placeholders in text.
+    ///
+    /// # Host Authorization Logic
+    ///
+    /// 1. If `secret.allowed_hosts` is non-empty, use that list
+    /// 2. Otherwise, fall back to `NetConfig.allowed_hosts`
+    /// 3. If both are empty, the secret is allowed for ANY host
+    ///    (⚠️ this may be surprising - always specify allowed_hosts for production)
     fn substitute_secrets_in_text(
         &self,
         text: &str,
@@ -605,14 +612,18 @@ impl ConnectionManager {
             }
 
             // Check if secret is allowed for this host
+            // Falls back to NetConfig.allowed_hosts if secret has no explicit restrictions
             let allowed_hosts = if secret_config.allowed_hosts.is_empty() {
                 &self.config.allowed_hosts
             } else {
                 &secret_config.allowed_hosts
             };
 
+            // ⚠️ If both secret and NetConfig have empty allowed_hosts,
+            // the secret can go to ANY host. This is intentional for flexibility
+            // but users should always specify allowed_hosts for production.
             let host_allowed = if allowed_hosts.is_empty() {
-                true // Empty = allow all (check blocked list separately)
+                true
             } else {
                 allowed_hosts
                     .iter()
@@ -1320,5 +1331,154 @@ mod tests {
         // Old TCP handle should be cleaned up
         assert!(!manager.connection_hosts.contains_key(&tcp_handle));
         assert!(!manager.http_states.contains_key(&tcp_handle));
+    }
+
+    /// Test that very large HTTP headers are handled correctly without security bypass.
+    /// Ensures that secrets in large headers are still properly substituted.
+    #[test]
+    fn test_large_http_headers_with_secrets() {
+        let config = NetConfig::permissive();
+        let mut secrets = HashMap::new();
+        secrets.insert(
+            "API_KEY".to_string(),
+            crate::secrets::SecretConfig {
+                real_value: "real-secret-value".to_string(),
+                placeholder: "PLACEHOLDER_LARGE".to_string(),
+                allowed_hosts: vec!["api.example.com".to_string()],
+            },
+        );
+
+        let mut manager = ConnectionManager::new(config, secrets);
+
+        // Simulate a connection to allowed host
+        let handle = 1_u32;
+        manager
+            .connection_hosts
+            .insert(handle, "api.example.com".to_string());
+
+        // Create a large header block with many headers and a secret at the end
+        let mut large_headers = String::from("GET /api HTTP/1.1\r\n");
+        large_headers.push_str("Host: api.example.com\r\n");
+
+        // Add many large headers (simulate a request with lots of metadata)
+        for i in 0..100 {
+            let padding = "X".repeat(500); // 500 char value
+            large_headers.push_str(&format!("X-Header-{i}: {padding}\r\n"));
+        }
+
+        // Add the secret header at the end
+        large_headers.push_str("Authorization: Bearer PLACEHOLDER_LARGE\r\n");
+        large_headers.push_str("\r\n");
+
+        // Verify header block is indeed large (> 50KB)
+        assert!(
+            large_headers.len() > 50_000,
+            "Test headers should be > 50KB, got {} bytes",
+            large_headers.len()
+        );
+
+        // Substitute headers
+        let result = manager.substitute_http_headers(large_headers.as_bytes(), handle);
+        assert!(result.is_ok(), "Large header substitution should succeed");
+
+        let substituted = String::from_utf8(result.unwrap()).unwrap();
+
+        // Verify the secret was substituted
+        assert!(
+            substituted.contains("Authorization: Bearer real-secret-value"),
+            "Secret should be substituted in large headers"
+        );
+        assert!(
+            !substituted.contains("PLACEHOLDER_LARGE"),
+            "Placeholder should not remain in substituted headers"
+        );
+    }
+
+    /// Test that TLS SNI hostname does NOT affect secret authorization.
+    /// The host check must use the TCP connection target, not the TLS SNI.
+    /// This prevents an attack where an attacker connects to evil.com but
+    /// sets TLS SNI to api.openai.com to try to trick secret substitution.
+    #[test]
+    fn test_tls_sni_does_not_override_host_check() {
+        let config = NetConfig::permissive();
+        let mut secrets = HashMap::new();
+        secrets.insert(
+            "API_KEY".to_string(),
+            crate::secrets::SecretConfig {
+                real_value: "real-secret-value".to_string(),
+                placeholder: "PLACEHOLDER_SNI".to_string(),
+                allowed_hosts: vec!["api.openai.com".to_string()],
+            },
+        );
+
+        let mut manager = ConnectionManager::new(config, secrets);
+
+        // Simulate: TCP connected to evil.com
+        let tcp_handle = 1_u32;
+        manager
+            .connection_hosts
+            .insert(tcp_handle, "evil.com".to_string());
+
+        // Simulate: TLS upgrade with SNI="api.openai.com" (the allowed host)
+        // In real code, tls_upgrade would copy the host from tcp to tls handle.
+        // The key security property: connection_hosts stores the TCP target, not SNI.
+        let tls_handle = 2_u32;
+        // The host should remain "evil.com" from the original TCP connection
+        if let Some(host) = manager.connection_hosts.get(&tcp_handle) {
+            manager.connection_hosts.insert(tls_handle, host.clone());
+        }
+
+        // Now try to substitute secrets - should fail because connection_hosts has "evil.com"
+        let headers = b"GET /api HTTP/1.1\r\nHost: api.openai.com\r\nAuthorization: Bearer PLACEHOLDER_SNI\r\n\r\n";
+        let result = manager.substitute_http_headers(headers, tls_handle);
+
+        assert!(
+            result.is_err(),
+            "Secret substitution must use TCP target (evil.com), not TLS SNI or Host header (api.openai.com)"
+        );
+    }
+
+    /// Test that secrets in large headers are blocked for unauthorized hosts.
+    #[test]
+    fn test_large_headers_unauthorized_host() {
+        let config = NetConfig::permissive();
+        let mut secrets = HashMap::new();
+        secrets.insert(
+            "API_KEY".to_string(),
+            crate::secrets::SecretConfig {
+                real_value: "real-secret-value".to_string(),
+                placeholder: "PLACEHOLDER_BLOCKED".to_string(),
+                allowed_hosts: vec!["api.legitimate.com".to_string()],
+            },
+        );
+
+        let mut manager = ConnectionManager::new(config, secrets);
+
+        // Simulate a connection to UNAUTHORIZED host
+        let handle = 1_u32;
+        manager
+            .connection_hosts
+            .insert(handle, "evil.com".to_string());
+
+        // Create large headers with the secret
+        let mut large_headers = String::from("POST /steal HTTP/1.1\r\n");
+        large_headers.push_str("Host: evil.com\r\n");
+
+        // Add padding
+        for i in 0..50 {
+            let padding = "Y".repeat(1000);
+            large_headers.push_str(&format!("X-Pad-{i}: {padding}\r\n"));
+        }
+
+        // Secret header buried in the middle
+        large_headers.push_str("X-Stolen: PLACEHOLDER_BLOCKED\r\n");
+        large_headers.push_str("\r\n");
+
+        // Should fail because host is not authorized for this secret
+        let result = manager.substitute_http_headers(large_headers.as_bytes(), handle);
+        assert!(
+            result.is_err(),
+            "Secret substitution should fail for unauthorized host even with large headers"
+        );
     }
 }
