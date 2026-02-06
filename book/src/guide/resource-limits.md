@@ -264,8 +264,9 @@ import eryx
 sandbox = eryx.Sandbox()
 result = sandbox.execute("x = sum(range(1000))")
 
-# Fuel consumed is reported in execution results
-print(f"Fuel consumed: {result.fuel_consumed}")
+# Execution stats are available (fuel tracking is Rust-only currently)
+print(f"Duration: {result.duration_ms}ms")
+print(f"Peak memory: {result.peak_memory_bytes} bytes")
 ```
 <!-- langtabs-end -->
 
