@@ -104,13 +104,14 @@ impl Session {
     ///         {"name": "get_time", "fn": get_time, "description": "Returns current time"}
     ///     ])
     #[new]
-    #[pyo3(signature = (*, vfs=None, vfs_mount_path=None, execution_timeout_ms=None, callbacks=None))]
+    #[pyo3(signature = (*, vfs=None, vfs_mount_path=None, execution_timeout_ms=None, callbacks=None, volumes=None))]
     fn new(
         py: Python<'_>,
         vfs: Option<VfsStorage>,
         vfs_mount_path: Option<String>,
         execution_timeout_ms: Option<u64>,
         callbacks: Option<Bound<'_, PyAny>>,
+        volumes: Option<Vec<(String, String, bool)>>,
     ) -> PyResult<Self> {
         // Create a tokio runtime for async execution
         let runtime = Arc::new(
@@ -144,32 +145,53 @@ impl Session {
         // Convert to slice for SessionExecutor
         let callbacks_vec: Vec<Arc<dyn eryx::Callback>> = callbacks_map.values().cloned().collect();
 
+        // Convert volume tuples to VolumeMount structs
+        let volume_mounts: Vec<eryx::VolumeMount> = volumes
+            .unwrap_or_default()
+            .into_iter()
+            .map(|(host_path, guest_path, read_only)| {
+                if read_only {
+                    eryx::VolumeMount::read_only(host_path, guest_path)
+                } else {
+                    eryx::VolumeMount::new(host_path, guest_path)
+                }
+            })
+            .collect();
+
         // Create the SessionExecutor
         let vfs_storage = vfs.map(|v| v.inner);
         let mount_path = vfs_mount_path.clone();
+        let needs_vfs = vfs_storage.is_some() || !volume_mounts.is_empty();
 
-        let inner = runtime
+        let (inner, vfs_storage) = runtime
             .block_on(async {
-                match (&vfs_storage, &mount_path) {
-                    (Some(storage), Some(path)) => {
-                        let config = eryx::VfsConfig::new(path);
-                        eryx::SessionExecutor::new_with_vfs_config(
-                            Arc::clone(&executor),
-                            &callbacks_vec,
-                            Arc::clone(storage),
-                            config,
-                        )
-                        .await
-                    }
-                    (Some(storage), None) => {
-                        eryx::SessionExecutor::new_with_vfs(
-                            Arc::clone(&executor),
-                            &callbacks_vec,
-                            Arc::clone(storage),
-                        )
-                        .await
-                    }
-                    _ => eryx::SessionExecutor::new(Arc::clone(&executor), &callbacks_vec).await,
+                if needs_vfs {
+                    // Auto-create VFS storage if volumes are requested but no VFS provided
+                    let storage = vfs_storage.unwrap_or_else(|| {
+                        Arc::new(eryx::vfs::ScrubbingStorage::new(
+                            eryx::vfs::InMemoryStorage::new(),
+                            std::collections::HashMap::new(),
+                            eryx::vfs::VfsFileScrubPolicy::None,
+                        ))
+                    });
+                    let mut config = if let Some(path) = &mount_path {
+                        eryx::VfsConfig::new(path)
+                    } else {
+                        eryx::VfsConfig::default()
+                    };
+                    config.volumes = volume_mounts;
+                    let session = eryx::SessionExecutor::new_with_vfs_config(
+                        Arc::clone(&executor),
+                        &callbacks_vec,
+                        Arc::clone(&storage),
+                        config,
+                    )
+                    .await?;
+                    Ok((session, Some(storage)))
+                } else {
+                    let session =
+                        eryx::SessionExecutor::new(Arc::clone(&executor), &callbacks_vec).await?;
+                    Ok((session, None))
                 }
             })
             .map_err(eryx_error_to_py)?;

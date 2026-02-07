@@ -124,6 +124,9 @@ pub struct Sandbox {
     scrub_stderr: crate::secrets::OutputScrubPolicy,
     /// File scrubbing policy for VFS integration.
     scrub_files: crate::secrets::FileScrubPolicy,
+    /// Host filesystem volume mounts.
+    #[cfg(feature = "vfs")]
+    volumes: Vec<crate::session::VolumeMount>,
     /// Extracted packages (kept alive to prevent temp directory cleanup).
     _packages: Vec<crate::package::ExtractedPackage>,
 }
@@ -297,6 +300,12 @@ impl Sandbox {
                 vfs_policy,
             ));
             execute_builder = execute_builder.with_vfs_storage(scrubbing_storage);
+        }
+
+        // Add volume mounts if configured
+        #[cfg(feature = "vfs")]
+        if !self.volumes.is_empty() {
+            execute_builder = execute_builder.with_volumes(self.volumes.clone());
         }
 
         // Add memory limit if configured
@@ -483,6 +492,8 @@ impl Sandbox {
         let scrub_stdout = self.scrub_stdout.clone();
         let scrub_stderr = self.scrub_stderr.clone();
         let scrub_files = self.scrub_files.clone();
+        #[cfg(feature = "vfs")]
+        let volumes = self.volumes.clone();
         let code = code.to_string();
         let token = cancel_token.clone();
 
@@ -500,6 +511,8 @@ impl Sandbox {
                 scrub_stdout,
                 scrub_stderr,
                 scrub_files,
+                #[cfg(feature = "vfs")]
+                volumes,
                 &code,
                 token,
             )
@@ -529,6 +542,7 @@ impl Sandbox {
         scrub_stdout: crate::secrets::OutputScrubPolicy,
         scrub_stderr: crate::secrets::OutputScrubPolicy,
         scrub_files: crate::secrets::FileScrubPolicy,
+        #[cfg(feature = "vfs")] volumes: Vec<crate::session::VolumeMount>,
         code: &str,
         cancel_token: CancellationToken,
     ) -> Result<ExecuteResult, Error> {
@@ -628,6 +642,12 @@ impl Sandbox {
                 vfs_policy,
             ));
             execute_builder = execute_builder.with_vfs_storage(scrubbing_storage);
+        }
+
+        // Add volume mounts if configured
+        #[cfg(feature = "vfs")]
+        if !volumes.is_empty() {
+            execute_builder = execute_builder.with_volumes(volumes);
         }
 
         // Add memory limit if configured
@@ -850,6 +870,9 @@ pub struct SandboxBuilder<Runtime = state::Needs, Stdlib = state::Needs> {
     scrub_stderr: crate::secrets::OutputScrubPolicy,
     /// File scrubbing policy for VFS integration.
     scrub_files: crate::secrets::FileScrubPolicy,
+    /// Host filesystem volume mounts.
+    #[cfg(feature = "vfs")]
+    volumes: Vec<crate::session::VolumeMount>,
     /// Phantom data for Runtime type parameter.
     _runtime: PhantomData<Runtime>,
     /// Phantom data for Stdlib type parameter.
@@ -908,6 +931,8 @@ impl SandboxBuilder<state::Needs, state::Needs> {
             scrub_stdout: crate::secrets::OutputScrubPolicy::default(),
             scrub_stderr: crate::secrets::OutputScrubPolicy::default(),
             scrub_files: crate::secrets::FileScrubPolicy::default(),
+            #[cfg(feature = "vfs")]
+            volumes: Vec::new(),
             _runtime: PhantomData,
             _stdlib: PhantomData,
         }
@@ -940,6 +965,8 @@ impl SandboxBuilder<state::Needs, state::Needs> {
             scrub_stdout: crate::secrets::OutputScrubPolicy::default(),
             scrub_stderr: crate::secrets::OutputScrubPolicy::default(),
             scrub_files: crate::secrets::FileScrubPolicy::default(),
+            #[cfg(feature = "vfs")]
+            volumes: Vec::new(),
             _runtime: PhantomData,
             _stdlib: PhantomData,
         }
@@ -972,6 +999,8 @@ impl<R, S> SandboxBuilder<R, S> {
             scrub_stdout: self.scrub_stdout,
             scrub_stderr: self.scrub_stderr,
             scrub_files: self.scrub_files,
+            #[cfg(feature = "vfs")]
+            volumes: self.volumes,
             _runtime: PhantomData,
             _stdlib: PhantomData,
         }
@@ -1515,6 +1544,28 @@ impl<R, S> SandboxBuilder<R, S> {
         self
     }
 
+    /// Add a host filesystem volume mount.
+    ///
+    /// Mounts a host directory into the sandbox at the specified guest path,
+    /// using cap-std for capability-based security.
+    #[cfg(feature = "vfs")]
+    #[must_use]
+    pub fn with_volume(mut self, volume: crate::session::VolumeMount) -> Self {
+        self.volumes.push(volume);
+        self
+    }
+
+    /// Add multiple host filesystem volume mounts.
+    #[cfg(feature = "vfs")]
+    #[must_use]
+    pub fn with_volumes(
+        mut self,
+        volumes: impl IntoIterator<Item = crate::session::VolumeMount>,
+    ) -> Self {
+        self.volumes.extend(volumes);
+        self
+    }
+
     /// Set the path to additional Python packages directory.
     ///
     /// The directory will be mounted at `/site-packages` inside the WASM sandbox
@@ -1787,6 +1838,8 @@ impl SandboxBuilder<state::Has, state::Has> {
             scrub_stdout: self.scrub_stdout,
             scrub_stderr: self.scrub_stderr,
             scrub_files: self.scrub_files,
+            #[cfg(feature = "vfs")]
+            volumes: self.volumes,
             _packages: self.packages,
         })
     }

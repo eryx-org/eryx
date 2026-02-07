@@ -726,6 +726,29 @@ impl<S: VfsStorage + 'static> types::HostDescriptor for HybridVfsState<'_, S> {
                     let readable = flags.contains(types::DescriptorFlags::READ);
                     let writable = flags.contains(types::DescriptorFlags::WRITE);
 
+                    // Enforce permission checks from the preopen configuration
+                    if readable && !dir.file_perms.contains(FilePerms::READ) {
+                        return Err(crate::VfsError::PermissionDenied(format!(
+                            "read access denied for {}",
+                            full_guest_path
+                        ))
+                        .into());
+                    }
+                    if writable && !dir.file_perms.contains(FilePerms::WRITE) {
+                        return Err(crate::VfsError::PermissionDenied(format!(
+                            "write access denied for {}",
+                            full_guest_path
+                        ))
+                        .into());
+                    }
+                    if create && !dir.dir_perms.contains(DirPerms::MUTATE) {
+                        return Err(crate::VfsError::PermissionDenied(format!(
+                            "create access denied for {}",
+                            full_guest_path
+                        ))
+                        .into());
+                    }
+
                     let mut open_opts = cap_std::fs::OpenOptions::new();
                     open_opts.read(readable);
                     open_opts.write(writable);

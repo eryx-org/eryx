@@ -49,9 +49,9 @@ use async_trait::async_trait;
 use crate::error::Error;
 use crate::sandbox::ExecuteResult;
 
-#[cfg(feature = "vfs")]
-pub use executor::VfsConfig;
 pub use executor::{PythonStateSnapshot, SessionExecutor, SnapshotMetadata};
+#[cfg(feature = "vfs")]
+pub use executor::{VfsConfig, VolumeMount};
 pub use in_process::InProcessSession;
 
 /// Common trait for all session implementations.

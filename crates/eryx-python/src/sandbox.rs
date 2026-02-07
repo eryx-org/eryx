@@ -105,7 +105,7 @@ impl Sandbox {
     ///     )
     ///     sandbox = factory.create_sandbox()
     #[new]
-    #[pyo3(signature = (*, resource_limits=None, network=None, callbacks=None, secrets=None, scrub_stdout=None, scrub_stderr=None, scrub_files=None))]
+    #[pyo3(signature = (*, resource_limits=None, network=None, callbacks=None, secrets=None, scrub_stdout=None, scrub_stderr=None, scrub_files=None, volumes=None))]
     #[allow(clippy::too_many_arguments)]
     fn new(
         py: Python<'_>,
@@ -116,6 +116,7 @@ impl Sandbox {
         scrub_stdout: Option<bool>,
         scrub_stderr: Option<bool>,
         scrub_files: Option<bool>,
+        volumes: Option<Vec<(String, String, bool)>>,
     ) -> PyResult<Self> {
         // Create a tokio runtime for async execution
         let runtime = Arc::new(
@@ -158,6 +159,18 @@ impl Sandbox {
         builder = builder.scrub_stdout(scrub_stdout.unwrap_or(has_secrets));
         builder = builder.scrub_stderr(scrub_stderr.unwrap_or(has_secrets));
         builder = builder.scrub_files(scrub_files.unwrap_or(has_secrets));
+
+        // Apply volume mounts if provided
+        if let Some(vols) = volumes {
+            for (host_path, guest_path, read_only) in vols {
+                let volume = if read_only {
+                    eryx::VolumeMount::read_only(host_path, guest_path)
+                } else {
+                    eryx::VolumeMount::new(host_path, guest_path)
+                };
+                builder = builder.with_volume(volume);
+            }
+        }
 
         let inner = builder.build().map_err(eryx_error_to_py)?;
 

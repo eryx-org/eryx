@@ -114,11 +114,45 @@ class TestCliNetworking:
 class TestCliVolume:
     """Tests for volume mount flag."""
 
-    def test_volume_flag_not_implemented(self, capsys):
-        result = main(["-v", "/tmp:/data", "-c", 'print("hi")'])
+    def test_volume_read_file(self, tmp_path, capsys):
+        """Test that -v mounts a host directory and reads a file."""
+        (tmp_path / "hello.txt").write_text("hello from host")
+        result = main(
+            ["-v", f"{tmp_path}:/mnt/data", "-c", 'print(open("/mnt/data/hello.txt").read())']
+        )
+        assert result == 0
+        captured = capsys.readouterr()
+        assert "hello from host" in captured.out
+
+    def test_volume_read_only(self, tmp_path, capsys):
+        """Test that :ro prevents writes."""
+        (tmp_path / "existing.txt").write_text("keep me")
+        result = main(
+            [
+                "-v", f"{tmp_path}:/mnt/data:ro",
+                "-c", 'open("/mnt/data/new.txt", "w").write("fail")',
+            ]
+        )
         assert result == 1
         captured = capsys.readouterr()
-        assert "not yet implemented" in captured.err
+        # The write should fail with a permission or OS error
+        assert "Error" in captured.err or "error" in captured.err
+
+    def test_volume_write_file(self, tmp_path, capsys):
+        """Test that a writable volume allows writing back to host."""
+        result = main(
+            [
+                "-v", f"{tmp_path}:/mnt/data",
+                "-c", 'open("/mnt/data/output.txt", "w").write("written from sandbox")',
+            ]
+        )
+        assert result == 0
+        assert (tmp_path / "output.txt").read_text() == "written from sandbox"
+
+    def test_volume_parse_format_error(self, capsys):
+        """Test that an invalid volume spec raises an error."""
+        with pytest.raises(SystemExit):
+            main(["-v", "invalid_no_colon", "-c", 'print("hi")'])
 
 
 class TestCliVersion:

@@ -289,6 +289,47 @@ impl<'a> SessionExecuteBuilder<'a> {
     }
 }
 
+/// A host filesystem volume mount.
+///
+/// Maps a host directory into the sandbox at a specified guest path,
+/// using cap-std for capability-based security.
+#[cfg(feature = "vfs")]
+#[derive(Debug, Clone)]
+pub struct VolumeMount {
+    /// Absolute path on the host filesystem.
+    pub host_path: std::path::PathBuf,
+    /// Path visible inside the sandbox (e.g., "/mnt/data").
+    pub guest_path: String,
+    /// If true, the mount is read-only.
+    pub read_only: bool,
+}
+
+#[cfg(feature = "vfs")]
+impl VolumeMount {
+    /// Create a new read-write volume mount.
+    #[must_use]
+    pub fn new(host_path: impl Into<std::path::PathBuf>, guest_path: impl Into<String>) -> Self {
+        Self {
+            host_path: host_path.into(),
+            guest_path: guest_path.into(),
+            read_only: false,
+        }
+    }
+
+    /// Create a new read-only volume mount.
+    #[must_use]
+    pub fn read_only(
+        host_path: impl Into<std::path::PathBuf>,
+        guest_path: impl Into<String>,
+    ) -> Self {
+        Self {
+            host_path: host_path.into(),
+            guest_path: guest_path.into(),
+            read_only: true,
+        }
+    }
+}
+
 /// Configuration for the virtual filesystem (VFS) in a session.
 ///
 /// This allows customizing the VFS mount path and permissions.
@@ -301,6 +342,8 @@ pub struct VfsConfig {
     pub dir_perms: eryx_vfs::DirPerms,
     /// File permissions for files in the VFS mount.
     pub file_perms: eryx_vfs::FilePerms,
+    /// Host filesystem volume mounts.
+    pub volumes: Vec<VolumeMount>,
 }
 
 #[cfg(feature = "vfs")]
@@ -310,6 +353,7 @@ impl Default for VfsConfig {
             mount_path: "/data".to_string(),
             dir_perms: eryx_vfs::DirPerms::all(),
             file_perms: eryx_vfs::FilePerms::all(),
+            volumes: Vec::new(),
         }
     }
 }
@@ -338,6 +382,20 @@ impl VfsConfig {
     #[must_use]
     pub fn with_file_perms(mut self, perms: eryx_vfs::FilePerms) -> Self {
         self.file_perms = perms;
+        self
+    }
+
+    /// Add a host filesystem volume mount.
+    #[must_use]
+    pub fn with_volume(mut self, volume: VolumeMount) -> Self {
+        self.volumes.push(volume);
+        self
+    }
+
+    /// Add multiple host filesystem volume mounts.
+    #[must_use]
+    pub fn with_volumes(mut self, volumes: impl IntoIterator<Item = VolumeMount>) -> Self {
+        self.volumes.extend(volumes);
         self
     }
 }
@@ -459,7 +517,10 @@ fn build_hybrid_vfs_context(
     executor: &PythonExecutor,
     vfs_storage: std::sync::Arc<eryx_vfs::ScrubbingStorage<eryx_vfs::InMemoryStorage>>,
     vfs_config: &VfsConfig,
-) -> eryx_vfs::HybridVfsCtx<eryx_vfs::ScrubbingStorage<eryx_vfs::InMemoryStorage>> {
+) -> std::result::Result<
+    eryx_vfs::HybridVfsCtx<eryx_vfs::ScrubbingStorage<eryx_vfs::InMemoryStorage>>,
+    Error,
+> {
     let mut ctx = eryx_vfs::HybridVfsCtx::new(vfs_storage);
 
     // Add a writable VFS directory backed by VFS storage
@@ -485,7 +546,24 @@ fn build_hybrid_vfs_context(
         }
     }
 
-    ctx
+    // Add user-specified host filesystem volume mounts
+    for volume in &vfs_config.volumes {
+        let (dir_perms, file_perms) = if volume.read_only {
+            (DirPerms::READ, FilePerms::READ)
+        } else {
+            (DirPerms::all(), FilePerms::all())
+        };
+        ctx.add_real_preopen_path(&volume.guest_path, &volume.host_path, dir_perms, file_perms)
+            .map_err(|e| {
+                Error::WasmEngine(format!(
+                    "Failed to mount volume {} -> {}: {e}",
+                    volume.host_path.display(),
+                    volume.guest_path,
+                ))
+            })?;
+    }
+
+    Ok(ctx)
 }
 
 impl SessionExecutor {
@@ -610,7 +688,7 @@ impl SessionExecutor {
             &executor,
             Arc::clone(&vfs_storage),
             &vfs_config,
-        ));
+        )?);
 
         let state = ExecutorState::new(
             wasi,
@@ -996,7 +1074,7 @@ impl SessionExecutor {
                     &self.executor,
                     vfs_storage,
                     &vfs_config,
-                )),
+                )?),
             )
         };
 

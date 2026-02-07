@@ -237,7 +237,7 @@ impl SandboxFactory {
     ///         secrets={"API_KEY": {"value": "sk-xxx", "allowed_hosts": ["api.example.com"]}},
     ///         network=NetConfig(allowed_hosts=["api.example.com"]),
     ///     )
-    #[pyo3(signature = (*, site_packages=None, resource_limits=None, network=None, callbacks=None, secrets=None, scrub_stdout=None, scrub_stderr=None, scrub_files=None))]
+    #[pyo3(signature = (*, site_packages=None, resource_limits=None, network=None, callbacks=None, secrets=None, scrub_stdout=None, scrub_stderr=None, scrub_files=None, volumes=None))]
     #[allow(clippy::too_many_arguments)]
     fn create_sandbox(
         &self,
@@ -250,6 +250,7 @@ impl SandboxFactory {
         scrub_stdout: Option<bool>,
         scrub_stderr: Option<bool>,
         scrub_files: Option<bool>,
+        volumes: Option<Vec<(String, String, bool)>>,
     ) -> PyResult<Sandbox> {
         // Use provided site_packages or fall back to the one from initialization
         let site_packages_path = site_packages.or_else(|| self.site_packages_path.clone());
@@ -298,6 +299,18 @@ impl SandboxFactory {
         }
         if scrub_files.unwrap_or(has_secrets) {
             builder = builder.scrub_files(true);
+        }
+
+        // Apply volume mounts if provided
+        if let Some(vols) = volumes {
+            for (host_path, guest_path, read_only) in vols {
+                let volume = if read_only {
+                    eryx::VolumeMount::read_only(host_path, guest_path)
+                } else {
+                    eryx::VolumeMount::new(host_path, guest_path)
+                };
+                builder = builder.with_volume(volume);
+            }
         }
 
         let inner = builder.build().map_err(eryx_error_to_py)?;

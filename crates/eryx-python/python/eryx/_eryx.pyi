@@ -358,6 +358,7 @@ class Sandbox:
         scrub_stdout: Optional[bool] = None,
         scrub_stderr: Optional[bool] = None,
         scrub_files: Optional[bool] = None,
+        volumes: Optional[Sequence[tuple[str, str, bool]]] = None,
     ) -> None:
         """Create a new sandbox with the embedded Python runtime.
 
@@ -592,6 +593,7 @@ class SandboxFactory:
         scrub_stdout: Optional[bool] = None,
         scrub_stderr: Optional[bool] = None,
         scrub_files: Optional[bool] = None,
+        volumes: Optional[Sequence[tuple[str, str, bool]]] = None,
     ) -> Sandbox:
         """Create a new sandbox from this factory.
 
@@ -712,6 +714,7 @@ class Session:
         vfs_mount_path: Optional[str] = None,
         execution_timeout_ms: Optional[int] = None,
         callbacks: Optional[Union[CallbackRegistry, Sequence[CallbackDict]]] = None,
+        volumes: Optional[Sequence[tuple[str, str, bool]]] = None,
     ) -> None:
         """Create a new session with the embedded Python runtime.
 

@@ -746,6 +746,8 @@ pub struct ExecuteBuilder<'a> {
     fuel_limit: Option<u64>,
     #[cfg(feature = "vfs")]
     vfs_storage: Option<std::sync::Arc<eryx_vfs::ScrubbingStorage<eryx_vfs::InMemoryStorage>>>,
+    #[cfg(feature = "vfs")]
+    volumes: Vec<crate::session::VolumeMount>,
 }
 
 impl std::fmt::Debug for ExecuteBuilder<'_> {
@@ -763,6 +765,8 @@ impl std::fmt::Debug for ExecuteBuilder<'_> {
             .field("fuel_limit", &self.fuel_limit);
         #[cfg(feature = "vfs")]
         debug.field("has_vfs_storage", &self.vfs_storage.is_some());
+        #[cfg(feature = "vfs")]
+        debug.field("volumes_count", &self.volumes.len());
         debug.finish_non_exhaustive()
     }
 }
@@ -783,6 +787,8 @@ impl<'a> ExecuteBuilder<'a> {
             fuel_limit: None,
             #[cfg(feature = "vfs")]
             vfs_storage: None,
+            #[cfg(feature = "vfs")]
+            volumes: Vec::new(),
         }
     }
 
@@ -870,6 +876,14 @@ impl<'a> ExecuteBuilder<'a> {
         self
     }
 
+    /// Set host filesystem volume mounts.
+    #[cfg(feature = "vfs")]
+    #[must_use]
+    pub fn with_volumes(mut self, volumes: Vec<crate::session::VolumeMount>) -> Self {
+        self.volumes = volumes;
+        self
+    }
+
     /// Execute the Python code with the configured options.
     ///
     /// # Errors
@@ -889,6 +903,8 @@ impl<'a> ExecuteBuilder<'a> {
                 self.fuel_limit,
                 #[cfg(feature = "vfs")]
                 self.vfs_storage,
+                #[cfg(feature = "vfs")]
+                self.volumes,
             )
             .await
     }
@@ -1821,6 +1837,7 @@ impl PythonExecutor {
         #[cfg(feature = "vfs")] vfs_storage: Option<
             std::sync::Arc<eryx_vfs::ScrubbingStorage<eryx_vfs::InMemoryStorage>>,
         >,
+        #[cfg(feature = "vfs")] volumes: Vec<crate::session::VolumeMount>,
     ) -> std::result::Result<ExecutionOutput, Error> {
         // Build callback info for introspection
         let callback_infos: Vec<HostCallbackInfo> = callbacks
@@ -1944,6 +1961,28 @@ impl PythonExecutor {
                 ) {
                     tracing::warn!("Failed to add {mount_path} to hybrid VFS: {e}");
                 }
+            }
+
+            // Add user-specified host filesystem volume mounts
+            for volume in &volumes {
+                let (dir_perms, file_perms) = if volume.read_only {
+                    (eryx_vfs::DirPerms::READ, eryx_vfs::FilePerms::READ)
+                } else {
+                    (eryx_vfs::DirPerms::all(), eryx_vfs::FilePerms::all())
+                };
+                ctx.add_real_preopen_path(
+                    &volume.guest_path,
+                    &volume.host_path,
+                    dir_perms,
+                    file_perms,
+                )
+                .map_err(|e| {
+                    Error::WasmEngine(format!(
+                        "Failed to mount volume {} -> {}: {e}",
+                        volume.host_path.display(),
+                        volume.guest_path,
+                    ))
+                })?;
             }
 
             Some(ctx)
