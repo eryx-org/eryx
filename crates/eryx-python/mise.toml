@@ -1,0 +1,112 @@
+# =============================================================================
+# Python bindings tasks (pyeryx via maturin + uv)
+# =============================================================================
+#
+# Usage:
+#   cd crates/eryx-python
+#   mise run build       # Build the Python extension (maturin develop)
+#   mise run test        # Build + run pytest
+#   mise run test-only   # Run pytest without rebuilding
+#   mise run clean       # Remove build artifacts
+#
+# The WASM runtime and precompiled artifacts are built via root mise tasks.
+# These are slow (~minutes) and cached aggressively — they only rebuild when
+# source files change.
+
+[tools]
+uv = "latest"
+
+# =============================================================================
+# WASM runtime (delegates to root)
+# =============================================================================
+
+[tasks.wasm-build]
+description = "Build eryx WASM runtime (delegates to root mise task)"
+sources = [
+  "../eryx-wasm-runtime/src/**/*.rs",
+  "../eryx-wasm-runtime/Cargo.toml",
+  "../eryx-runtime/wit/**/*.wit",
+]
+outputs = ["../eryx-runtime/runtime.wasm"]
+run = "cd ../.. && mise run build-eryx-runtime"
+
+[tasks.precompile]
+description = "Precompile WASM with Python pre-init (delegates to root mise task)"
+depends = ["wasm-build"]
+sources = ["../eryx-runtime/runtime.wasm"]
+outputs = ["../eryx-runtime/runtime.cwasm"]
+run = "cd ../.. && mise run precompile-eryx-runtime-preinit"
+
+# =============================================================================
+# Python environment
+# =============================================================================
+
+[tasks.sync]
+description = "Create venv and install dev dependencies with uv"
+sources = ["pyproject.toml", "uv.lock"]
+outputs = [".venv/pyvenv.cfg"]
+run = "uv sync --frozen --all-extras"
+
+# =============================================================================
+# Build
+# =============================================================================
+
+[tasks.build]
+description = "Build Python extension with maturin (release mode)"
+depends = ["precompile", "sync"]
+sources = [
+  "src/**/*.rs",
+  "Cargo.toml",
+  "pyproject.toml",
+  "python/**/*.py",
+  "../eryx-runtime/runtime.cwasm",
+  "../eryx-runtime/prebuilt/*.so.zst",
+]
+outputs = [".venv/lib/**/eryx/_eryx.abi3.so"]
+run = "uv run maturin develop --release"
+
+# =============================================================================
+# Test
+# =============================================================================
+
+[tasks.test]
+description = "Build and run Python tests"
+depends = ["build"]
+run = "uv run pytest tests/ -v"
+
+[tasks.test-only]
+description = "Run Python tests without rebuilding (assumes extension is up-to-date)"
+depends = ["sync"]
+run = "uv run pytest tests/ -v"
+
+[tasks.examples]
+description = "Run Python examples"
+depends = ["build"]
+run = """
+#!/usr/bin/env bash
+set -euo pipefail
+for f in examples/*.py; do
+  echo "=== $(basename "$f") ==="
+  uv run python "$f"
+  echo ""
+done
+"""
+
+# =============================================================================
+# Utilities
+# =============================================================================
+
+[tasks.typecheck]
+description = "Run mypy type checking"
+depends = ["build"]
+run = "uv run mypy python/eryx --ignore-missing-imports"
+
+[tasks.clean]
+description = "Remove build artifacts"
+run = """
+#!/usr/bin/env bash
+set -euo pipefail
+rm -rf target/
+rm -rf .venv/
+echo "Cleaned Python build artifacts"
+"""
