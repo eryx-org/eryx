@@ -2347,7 +2347,7 @@ pub fn initialize_python() {
 /// from the WASI adapter and wasi-libc so they don't get captured in the
 /// snapshot (which would cause "unknown handle index" errors at runtime).
 ///
-/// This is only meant to be called during component-init-transform
+/// This is only meant to be called during wasmtime-wizer
 /// pre-initialization. Calling it at runtime has no useful effect.
 pub fn finalize_preinit() {
     reset_wasi_state();

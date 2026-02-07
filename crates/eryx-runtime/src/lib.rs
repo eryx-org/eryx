@@ -18,7 +18,6 @@
 //! - `runtime.wit` - WIT interface definition
 //! - `linker` - Late-linking support for native extensions (requires `preinit`)
 //! - `preinit` - Pre-initialization support (requires `preinit` feature)
-//! - `stubwasi` - Stub WASI adapters for pre-initialization (requires `preinit`)
 //!
 //! ## See Also
 //!
@@ -34,7 +33,3 @@ pub mod linker;
 /// Pre-initialization support for capturing Python memory state.
 #[cfg(feature = "preinit")]
 pub mod preinit;
-
-/// Stub WASI adapters for pre-initialization.
-#[cfg(feature = "preinit")]
-pub mod stubwasi;

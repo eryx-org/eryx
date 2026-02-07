@@ -7,24 +7,13 @@
 //!
 //! # How It Works
 //!
-//! 1. We link the component twice: once with real WASI, once with stub WASI
-//! 2. The stub WASI adapters trap on any call (preventing file handle capture)
-//! 3. We use `component-init-transform` to instrument the component
-//! 4. We instantiate and run the stubbed component - Python initializes
-//! 5. Optionally run imports (e.g., `import numpy`) to capture more state
+//! 1. We link the component with real WASI imports
+//! 2. We use `wasmtime-wizer` to instrument the component (adding state accessors)
+//! 3. We instantiate the instrumented component - Python initializes
+//! 4. Optionally run imports (e.g., `import numpy`) to capture more state
+//! 5. Call `finalize-preinit` to reset WASI file handle state
 //! 6. The memory state is captured and embedded into the original component
 //! 7. The resulting component starts with Python already initialized
-//!
-//! # Why Stub WASI?
-//!
-//! During pre-initialization, Python opens file handles for stdlib imports.
-//! These handles get captured into the memory snapshot. When the component
-//! is instantiated in a new WASI context, those handles are invalid, causing
-//! "unknown handle index" errors.
-//!
-//! By using stub WASI adapters (that just trap on any call), we prevent any
-//! file handles from being captured. The output component references the
-//! *real* WASI imports, so it works correctly at runtime.
 //!
 //! # Performance Impact
 //!
@@ -46,9 +35,7 @@
 //! ```
 
 use anyhow::{Context, Result, anyhow};
-use async_trait::async_trait;
-use component_init_transform::Invoker;
-use futures::future::FutureExt;
+use std::collections::HashSet;
 use std::path::Path;
 use tempfile::TempDir;
 use wasmtime::{
@@ -56,6 +43,7 @@ use wasmtime::{
     component::{Component, Instance, Linker, ResourceTable, Val},
 };
 use wasmtime_wasi::{DirPerms, FilePerms, WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView};
+use wasmtime_wizer::{WasmtimeWizerComponent, Wizer};
 
 use crate::linker::{NativeExtension, link_with_extensions};
 
@@ -80,63 +68,6 @@ impl WasiView for PreInitCtx {
             ctx: &mut self.wasi,
             table: &mut self.table,
         }
-    }
-}
-
-/// Invoker implementation for component-init-transform.
-///
-/// This struct provides the interface that component-init-transform uses
-/// to extract memory state from the initialized component.
-struct PreInitInvoker {
-    store: Store<PreInitCtx>,
-    instance: Instance,
-}
-
-#[async_trait]
-impl Invoker for PreInitInvoker {
-    async fn call_s32(&mut self, function: &str) -> Result<i32> {
-        let func = self
-            .instance
-            .get_typed_func::<(), (i32,)>(&mut self.store, function)?;
-        let result = func.call_async(&mut self.store, ()).await?.0;
-        func.post_return_async(&mut self.store).await?;
-        Ok(result)
-    }
-
-    async fn call_s64(&mut self, function: &str) -> Result<i64> {
-        let func = self
-            .instance
-            .get_typed_func::<(), (i64,)>(&mut self.store, function)?;
-        let result = func.call_async(&mut self.store, ()).await?.0;
-        func.post_return_async(&mut self.store).await?;
-        Ok(result)
-    }
-
-    async fn call_f32(&mut self, function: &str) -> Result<f32> {
-        let func = self
-            .instance
-            .get_typed_func::<(), (f32,)>(&mut self.store, function)?;
-        let result = func.call_async(&mut self.store, ()).await?.0;
-        func.post_return_async(&mut self.store).await?;
-        Ok(result)
-    }
-
-    async fn call_f64(&mut self, function: &str) -> Result<f64> {
-        let func = self
-            .instance
-            .get_typed_func::<(), (f64,)>(&mut self.store, function)?;
-        let result = func.call_async(&mut self.store, ()).await?.0;
-        func.post_return_async(&mut self.store).await?;
-        Ok(result)
-    }
-
-    async fn call_list_u8(&mut self, function: &str) -> Result<Vec<u8>> {
-        let func = self
-            .instance
-            .get_typed_func::<(), (Vec<u8>,)>(&mut self.store, function)?;
-        let result = func.call_async(&mut self.store, ()).await?.0;
-        func.post_return_async(&mut self.store).await?;
-        Ok(result)
     }
 }
 
@@ -167,135 +98,367 @@ pub async fn pre_initialize(
     imports: &[&str],
     extensions: &[NativeExtension],
 ) -> Result<Vec<u8>> {
-    let python_stdlib = python_stdlib.to_path_buf();
-    let site_packages = site_packages.map(|p| p.to_path_buf());
     let imports: Vec<String> = imports.iter().map(|s| (*s).to_string()).collect();
 
     // Link the component with real WASI adapter.
-    // Note: We pass None for stage2 because:
-    // 1. The apply() function in component-init-transform uses stage2's STRUCTURE for output
-    // 2. If we pass a stubbed component, the output will have stub adapters that trap!
-    // 3. By passing None, the original component is used for both structure and measurements
-    //
-    // The risk is that file handles opened during pre-init get captured in the snapshot.
-    // However, our Python initialization may not open files if we're careful with sys.path.
-    // If "unknown handle index" errors occur, we need Option B (stub_wasi flag in runtime).
     let original_component = link_with_extensions(extensions)
         .map_err(|e| anyhow!("Failed to link component with extensions: {}", e))?;
 
-    component_init_transform::initialize_staged(
-        &original_component,
-        None, // Use original component for both structure and measurements
-        move |instrumented| {
-            let python_stdlib = python_stdlib.clone();
-            let site_packages = site_packages.clone();
-            let imports = imports.clone();
+    // Phase 1: Instrument the component (synchronous).
+    // This adds state accessor exports that wasmtime-wizer uses to read
+    // memory/global state for the snapshot.
+    let wizer = Wizer::new();
+    let (cx, instrumented_wasm) = wizer
+        .instrument_component(&original_component)
+        .context("Failed to instrument component")?;
 
-            async move {
-                // Set up wasmtime with async and component model support
-                let mut config = Config::new();
-                config.wasm_component_model(true);
-                config.wasm_component_model_async(true);
-                config.async_support(true);
+    // Phase 2: Instantiate and run the instrumented component.
+    let mut config = Config::new();
+    config.wasm_component_model(true);
+    config.wasm_component_model_async(true);
+    config.async_support(true);
 
-                let engine = Engine::new(&config)?;
-                let component = Component::new(&engine, &instrumented)?;
+    let engine = Engine::new(&config)?;
+    let component = Component::new(&engine, &instrumented_wasm)?;
 
-                // Set up WASI context with Python paths
-                let table = ResourceTable::new();
+    // Set up WASI context with Python paths
+    let table = ResourceTable::new();
 
-                // Build PYTHONPATH from stdlib and site-packages
-                let mut python_path_parts = vec!["/python-stdlib".to_string()];
-                if site_packages.is_some() {
-                    python_path_parts.push("/site-packages".to_string());
-                }
-                let python_path = python_path_parts.join(":");
+    // Build PYTHONPATH from stdlib and site-packages
+    let mut python_path_parts = vec!["/python-stdlib".to_string()];
+    if site_packages.is_some() {
+        python_path_parts.push("/site-packages".to_string());
+    }
+    let python_path = python_path_parts.join(":");
 
-                let mut wasi_builder = WasiCtxBuilder::new();
-                wasi_builder
-                    .env("PYTHONHOME", "/python-stdlib")
-                    .env("PYTHONPATH", &python_path)
-                    .env("PYTHONUNBUFFERED", "1");
+    let mut wasi_builder = WasiCtxBuilder::new();
+    wasi_builder
+        .env("PYTHONHOME", "/python-stdlib")
+        .env("PYTHONPATH", &python_path)
+        .env("PYTHONUNBUFFERED", "1");
 
-                // Mount Python stdlib
-                if python_stdlib.exists() {
-                    wasi_builder.preopened_dir(
-                        &python_stdlib,
-                        "python-stdlib",
-                        DirPerms::READ,
-                        FilePerms::READ,
-                    )?;
-                } else {
-                    return Err(anyhow!(
-                        "Python stdlib not found at {}",
-                        python_stdlib.display()
-                    ));
-                }
+    // Mount Python stdlib
+    if python_stdlib.exists() {
+        wasi_builder.preopened_dir(
+            python_stdlib,
+            "python-stdlib",
+            DirPerms::READ,
+            FilePerms::READ,
+        )?;
+    } else {
+        return Err(anyhow!(
+            "Python stdlib not found at {}",
+            python_stdlib.display()
+        ));
+    }
 
-                // Mount site-packages if provided
-                let temp_dir = if let Some(ref site_pkg) = site_packages {
-                    if site_pkg.exists() {
-                        wasi_builder.preopened_dir(
-                            site_pkg,
-                            "site-packages",
-                            DirPerms::READ,
-                            FilePerms::READ,
-                        )?;
-                    }
-                    None
-                } else {
-                    // Create empty temp dir for site-packages to avoid errors
-                    let temp = TempDir::new()?;
-                    wasi_builder.preopened_dir(
-                        temp.path(),
-                        "site-packages",
-                        DirPerms::READ,
-                        FilePerms::READ,
-                    )?;
-                    Some(temp)
-                };
+    // Mount site-packages if provided
+    let temp_dir = if let Some(site_pkg) = site_packages {
+        if site_pkg.exists() {
+            wasi_builder.preopened_dir(
+                site_pkg,
+                "site-packages",
+                DirPerms::READ,
+                FilePerms::READ,
+            )?;
+        }
+        None
+    } else {
+        // Create empty temp dir for site-packages to avoid errors
+        let temp = TempDir::new()?;
+        wasi_builder.preopened_dir(
+            temp.path(),
+            "site-packages",
+            DirPerms::READ,
+            FilePerms::READ,
+        )?;
+        Some(temp)
+    };
 
-                let wasi = wasi_builder.build();
+    let wasi = wasi_builder.build();
 
-                let mut store = Store::new(
-                    &engine,
-                    PreInitCtx {
-                        wasi,
-                        table,
-                        temp_dir,
-                    },
-                );
-
-                // Create linker and add WASI
-                let mut linker = Linker::new(&engine);
-                wasmtime_wasi::p2::add_to_linker_async(&mut linker)?;
-
-                // Add stub implementations for the sandbox imports
-                // These are needed during pre-init but won't be called
-                add_sandbox_stubs(&mut linker)?;
-
-                // Instantiate the component
-                // This triggers Python initialization via wit-dylib's Interpreter::initialize()
-                let instance = linker.instantiate_async(&mut store, &component).await?;
-
-                // If imports are specified, call execute() to import them
-                if !imports.is_empty() {
-                    call_execute_for_imports(&mut store, &instance, &imports).await?;
-                }
-
-                // CRITICAL: Call finalize-preinit to reset WASI state AFTER all imports.
-                // This clears file handles from the WASI adapter and wasi-libc so they
-                // don't get captured in the memory snapshot. Without this, restored
-                // instances get "unknown handle index" errors.
-                call_finalize_preinit(&mut store, &instance).await?;
-
-                Ok(Box::new(PreInitInvoker { store, instance }) as Box<dyn Invoker>)
-            }
-            .boxed()
+    let mut store = Store::new(
+        &engine,
+        PreInitCtx {
+            wasi,
+            table,
+            temp_dir,
         },
-    )
-    .await
-    .context("Failed to pre-initialize component")
+    );
+
+    // Create linker and add WASI
+    let mut linker = Linker::new(&engine);
+    wasmtime_wasi::p2::add_to_linker_async(&mut linker)?;
+
+    // Add stub implementations for the sandbox imports
+    // These are needed during pre-init but won't be called
+    add_sandbox_stubs(&mut linker)?;
+
+    // Instantiate the component
+    // This triggers Python initialization via wit-dylib's Interpreter::initialize()
+    let instance = linker.instantiate_async(&mut store, &component).await?;
+
+    // If imports are specified, call execute() to import them
+    if !imports.is_empty() {
+        call_execute_for_imports(&mut store, &instance, &imports).await?;
+    }
+
+    // CRITICAL: Call finalize-preinit to reset WASI state AFTER all imports.
+    // This clears file handles from the WASI adapter and wasi-libc so they
+    // don't get captured in the memory snapshot. Without this, restored
+    // instances get "unknown handle index" errors.
+    call_finalize_preinit(&mut store, &instance).await?;
+
+    // Phase 3: Snapshot the initialized state back into the component.
+    let snapshot_bytes = wizer
+        .snapshot_component(
+            cx,
+            &mut WasmtimeWizerComponent {
+                store: &mut store,
+                instance,
+            },
+        )
+        .await
+        .context("Failed to pre-initialize component")?;
+
+    // Phase 4: Restore _initialize exports stripped by wasmtime-wizer.
+    //
+    // wasmtime-wizer removes _initialize exports from all pre-initialized modules,
+    // but the component's CoreInstance sections still reference them as instantiation
+    // arguments. We add back empty (no-op) _initialize functions so the component
+    // remains valid when loaded into wasmtime.
+    restore_initialize_exports(&snapshot_bytes)
+}
+
+/// Restore `_initialize` exports that wasmtime-wizer strips during snapshot.
+///
+/// wasmtime-wizer's rewrite step removes `_initialize` from all pre-initialized
+/// modules. However, the component's `CoreInstance` sections still reference
+/// `_initialize` as instantiation arguments. This function adds back no-op
+/// `_initialize` function exports to any module that's missing one.
+fn restore_initialize_exports(component_bytes: &[u8]) -> Result<Vec<u8>> {
+    // Pass 1: Find which modules have _initialize and which import it.
+    let mut modules_with_init: HashSet<u32> = HashSet::new();
+    let mut any_module_imports_init = false;
+    let mut module_index = 0u32;
+
+    for payload in wasmparser::Parser::new(0).parse_all(component_bytes) {
+        if let wasmparser::Payload::ModuleSection {
+            unchecked_range: range,
+            ..
+        } = payload?
+        {
+            let module_bytes = &component_bytes[range.start..range.end];
+            // Use a fresh parser at offset 0 for the module slice
+            for inner in wasmparser::Parser::new(0).parse_all(module_bytes) {
+                match inner? {
+                    wasmparser::Payload::ExportSection(reader) => {
+                        for export in reader {
+                            if export?.name == "_initialize" {
+                                modules_with_init.insert(module_index);
+                            }
+                        }
+                    }
+                    wasmparser::Payload::ImportSection(reader) => {
+                        for import in reader {
+                            if import?.name == "_initialize" {
+                                any_module_imports_init = true;
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            module_index += 1;
+        }
+    }
+
+    if !any_module_imports_init {
+        return Ok(component_bytes.to_vec());
+    }
+
+    // Pass 2: Rebuild the component, adding _initialize to modules that lack it.
+    let mut component = wasm_encoder::Component::new();
+    module_index = 0;
+    let mut depth = 0u32;
+
+    for payload in wasmparser::Parser::new(0).parse_all(component_bytes) {
+        let payload = payload?;
+
+        // Track nesting depth — only process top-level sections
+        match &payload {
+            wasmparser::Payload::Version { .. } => {
+                if depth > 0 {
+                    // Nested component/module version — skip, handled by parent
+                    depth += 1;
+                    continue;
+                }
+                depth += 1;
+                continue; // Skip — Component::new() writes the header
+            }
+            wasmparser::Payload::End { .. } => {
+                depth -= 1;
+                continue; // Skip — finish() writes this
+            }
+            _ => {
+                if depth > 1 {
+                    // Inside a nested module/component — skip individual payloads
+                    continue;
+                }
+            }
+        }
+
+        match payload {
+            wasmparser::Payload::ModuleSection {
+                unchecked_range: range,
+                ..
+            } => {
+                let module_bytes = &component_bytes[range.start..range.end];
+
+                if !modules_with_init.contains(&module_index) {
+                    let patched = add_noop_initialize(module_bytes)?;
+                    component.section(&wasm_encoder::RawSection {
+                        id: wasm_encoder::ComponentSectionId::CoreModule as u8,
+                        data: &patched,
+                    });
+                } else {
+                    component.section(&wasm_encoder::RawSection {
+                        id: wasm_encoder::ComponentSectionId::CoreModule as u8,
+                        data: module_bytes,
+                    });
+                }
+                module_index += 1;
+            }
+            other => {
+                if let Some((id, range)) = other.as_section() {
+                    component.section(&wasm_encoder::RawSection {
+                        id,
+                        data: &component_bytes[range.start..range.end],
+                    });
+                }
+            }
+        }
+    }
+
+    Ok(component.finish())
+}
+
+/// Add a no-op `_initialize` function export to a core module.
+///
+/// Parses the module to find type/function counts, then rebuilds it
+/// section-by-section, appending a new type (if needed), function declaration,
+/// code body, and export entry for `_initialize`.
+fn add_noop_initialize(module_bytes: &[u8]) -> Result<Vec<u8>> {
+    use wasm_encoder::reencode::{Reencode, RoundtripReencoder};
+
+    let mut num_types = 0u32;
+    let mut num_imported_funcs = 0u32;
+    let mut num_defined_funcs = 0u32;
+    let mut noop_type_idx = None;
+
+    // First pass: count types/functions and find existing () -> () type
+    for payload in wasmparser::Parser::new(0).parse_all(module_bytes) {
+        match payload? {
+            wasmparser::Payload::TypeSection(reader) => {
+                for ty in reader.into_iter() {
+                    let ty = ty?;
+                    for sub in ty.types() {
+                        if let wasmparser::CompositeInnerType::Func(func_ty) =
+                            &sub.composite_type.inner
+                            && func_ty.params().is_empty()
+                            && func_ty.results().is_empty()
+                        {
+                            noop_type_idx = Some(num_types);
+                        }
+                        num_types += 1;
+                    }
+                }
+            }
+            wasmparser::Payload::ImportSection(reader) => {
+                for import in reader {
+                    if matches!(import?.ty, wasmparser::TypeRef::Func(_)) {
+                        num_imported_funcs += 1;
+                    }
+                }
+            }
+            wasmparser::Payload::FunctionSection(reader) => {
+                num_defined_funcs = reader.count();
+            }
+            wasmparser::Payload::CodeSectionStart { .. } => {}
+            _ => {}
+        }
+    }
+
+    let num_funcs = num_imported_funcs + num_defined_funcs;
+    let noop_type = noop_type_idx.unwrap_or(num_types);
+    let noop_func_index = num_funcs;
+    let needs_new_type = noop_type_idx.is_none();
+
+    // Second pass: rebuild module using reencode for most sections.
+    // For the code section, we use the saved range to create a CodeSectionReader.
+    let mut encoder = wasm_encoder::Module::new();
+    let mut reencode = RoundtripReencoder;
+
+    for payload in wasmparser::Parser::new(0).parse_all(module_bytes) {
+        match payload? {
+            wasmparser::Payload::Version { .. } => {}
+            wasmparser::Payload::TypeSection(reader) => {
+                let mut types = wasm_encoder::TypeSection::new();
+                reencode.parse_type_section(&mut types, reader)?;
+                if needs_new_type {
+                    types.ty().function([], []);
+                }
+                encoder.section(&types);
+            }
+            wasmparser::Payload::FunctionSection(reader) => {
+                let mut funcs = wasm_encoder::FunctionSection::new();
+                reencode.parse_function_section(&mut funcs, reader)?;
+                funcs.function(noop_type);
+                encoder.section(&funcs);
+            }
+            wasmparser::Payload::ExportSection(reader) => {
+                let mut exports = wasm_encoder::ExportSection::new();
+                reencode.parse_export_section(&mut exports, reader)?;
+                exports.export(
+                    "_initialize",
+                    wasm_encoder::ExportKind::Func,
+                    noop_func_index,
+                );
+                encoder.section(&exports);
+            }
+            wasmparser::Payload::CodeSectionStart { range, .. } => {
+                // Re-parse the code section from the saved range and reencode it,
+                // then append our noop function.
+                let section_data = &module_bytes[range.start..range.end];
+                let code_reader = wasmparser::CodeSectionReader::new(
+                    wasmparser::BinaryReader::new(section_data, 0),
+                )?;
+
+                let mut code = wasm_encoder::CodeSection::new();
+                reencode.parse_code_section(&mut code, code_reader)?;
+
+                // Append noop function body
+                let mut noop_func = wasm_encoder::Function::new([]);
+                noop_func.instructions().end();
+                code.function(&noop_func);
+                encoder.section(&code);
+            }
+            wasmparser::Payload::CodeSectionEntry(_) => {
+                // Already handled in CodeSectionStart above
+            }
+            wasmparser::Payload::End { .. } => {}
+            other => {
+                if let Some((id, range)) = other.as_section() {
+                    encoder.section(&wasm_encoder::RawSection {
+                        id,
+                        data: &module_bytes[range.start..range.end],
+                    });
+                }
+            }
+        }
+    }
+
+    Ok(encoder.finish())
 }
 
 /// Add stub implementations for sandbox imports during pre-init.

@@ -22,7 +22,7 @@ This document outlines the plan to simplify the feature flags in the `eryx` crat
 | Feature | Implies | Dependencies | Description |
 |---------|---------|--------------|-------------|
 | `late-linking` | — | `wit-component`, `zstd`, `sha2`, `zip` | Link native extensions into WASM component |
-| `pre-init` | `late-linking` | `component-init-transform`, `wasmtime`, `wasmtime-wasi`, `async-trait`, `futures`, `tempfile`, `anyhow`, `tracing` | Pre-initialization memory capture |
+| `pre-init` | `late-linking` | `wasmtime-wizer`, `wasmtime`, `wasmtime-wasi`, `async-trait`, `futures`, `tempfile`, `anyhow`, `tracing` | Pre-initialization memory capture |
 
 ## Problems
 
