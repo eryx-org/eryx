@@ -102,6 +102,9 @@ wasmtime.workspace = true
 wasmtime-wasi.workspace = true
 tracing.workspace = true
 sha2.workspace = true
+# Secrets support
+rand.workspace = true
+hex.workspace = true
 # Package support (always enabled)
 zip.workspace = true
 flate2.workspace = true

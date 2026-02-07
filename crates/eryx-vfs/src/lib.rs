@@ -37,6 +37,7 @@ pub mod hybrid;
 mod hybrid_bindings;
 mod hybrid_host;
 mod linker;
+pub mod scrubbing;
 mod storage;
 mod streams;
 mod wasi_impl;
@@ -47,6 +48,9 @@ pub use hybrid::{
 };
 pub use hybrid_bindings::HybridReaddirIterator;
 pub use linker::{HybridVfsView, VfsView, add_hybrid_vfs_to_linker, add_vfs_to_linker};
+pub use scrubbing::{
+    FileScrubPolicy as VfsFileScrubPolicy, ScrubbingStorage, SecretConfig as VfsSecretConfig,
+};
 pub use storage::{DirEntry, InMemoryStorage, Metadata, VfsStorage};
 pub use wasi_impl::{VfsCtx, VfsDescriptor, VfsReaddirIterator, VfsState};
 

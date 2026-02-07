@@ -7,6 +7,20 @@ from typing import Any, Callable, Iterator, Optional, Sequence, TypedDict, Union
 PathLike = Union[str, Path]
 
 
+class SecretDict(TypedDict, total=False):
+    """Dictionary format for configuring a secret.
+
+    Example:
+        {"value": "sk-real-key", "allowed_hosts": ["api.openai.com"]}
+    """
+
+    value: str
+    """The secret value (required)."""
+
+    allowed_hosts: list[str]
+    """Optional list of hosts allowed to receive this secret. Defaults to []."""
+
+
 class CallbackDict(TypedDict, total=False):
     """Dictionary format for defining callbacks."""
 
@@ -340,6 +354,10 @@ class Sandbox:
         resource_limits: Optional[ResourceLimits] = None,
         network: Optional[NetConfig] = None,
         callbacks: Optional[Union[CallbackRegistry, Sequence[CallbackDict]]] = None,
+        secrets: Optional[dict[str, SecretDict]] = None,
+        scrub_stdout: Optional[bool] = None,
+        scrub_stderr: Optional[bool] = None,
+        scrub_files: Optional[bool] = None,
     ) -> None:
         """Create a new sandbox with the embedded Python runtime.
 
@@ -349,6 +367,17 @@ class Sandbox:
             callbacks: Optional callbacks that sandboxed code can invoke.
                 Can be a CallbackRegistry or a list of callback dicts with
                 "name", "fn", and optionally "description" and "schema" keys.
+            secrets: Optional dict of secret names to secret configurations.
+                Each value is a dict with "value" (required) and "allowed_hosts"
+                (optional, defaults to []).
+                Python code sees a placeholder instead of the real value.
+                The real secret is only substituted when writing to an allowed host.
+            scrub_stdout: Whether to scrub secret placeholders from stdout.
+                Defaults to True when secrets are provided.
+            scrub_stderr: Whether to scrub secret placeholders from stderr.
+                Defaults to True when secrets are provided.
+            scrub_files: Whether to scrub secret placeholders from file writes.
+                Defaults to True when secrets are provided.
 
         Raises:
             InitializationError: If the sandbox fails to initialize.
@@ -358,22 +387,14 @@ class Sandbox:
             sandbox = Sandbox()
             result = sandbox.execute('import json; print(json.dumps([1, 2, 3]))')
 
-            # Sandbox with resource limits
+            # Sandbox with secrets
             sandbox = Sandbox(
-                resource_limits=ResourceLimits(execution_timeout_ms=5000)
+                secrets={
+                    "API_KEY": {"value": "sk-real-key", "allowed_hosts": ["api.example.com"]},
+                    "TOKEN": {"value": "ghp-xxx"},  # allowed_hosts defaults to []
+                },
+                network=NetConfig(allowed_hosts=["api.example.com"]),
             )
-
-            # Sandbox with network access
-            net = NetConfig(allowed_hosts=["api.example.com"])
-            sandbox = Sandbox(network=net)
-
-            # Sandbox with callbacks (dict-based)
-            def echo(message: str):
-                return {"echoed": message}
-
-            sandbox = Sandbox(callbacks=[
-                {"name": "echo", "fn": echo, "description": "Echoes the message"}
-            ])
 
             # Sandbox with callbacks (registry-based)
             registry = CallbackRegistry()
@@ -567,6 +588,10 @@ class SandboxFactory:
         resource_limits: Optional[ResourceLimits] = None,
         network: Optional[NetConfig] = None,
         callbacks: Optional[Union[CallbackRegistry, Sequence[CallbackDict]]] = None,
+        secrets: Optional[dict[str, SecretDict]] = None,
+        scrub_stdout: Optional[bool] = None,
+        scrub_stderr: Optional[bool] = None,
+        scrub_files: Optional[bool] = None,
     ) -> Sandbox:
         """Create a new sandbox from this factory.
 
@@ -580,6 +605,15 @@ class SandboxFactory:
             network: Optional network configuration. If provided, enables networking.
             callbacks: Optional callbacks that sandboxed code can invoke.
                 Can be a CallbackRegistry or a list of callback dicts.
+            secrets: Optional dict of secret names to secret configurations.
+                Each value is a dict with "value" (required) and "allowed_hosts"
+                (optional, defaults to []).
+            scrub_stdout: Whether to scrub secret placeholders from stdout.
+                Defaults to True when secrets are provided.
+            scrub_stderr: Whether to scrub secret placeholders from stderr.
+                Defaults to True when secrets are provided.
+            scrub_files: Whether to scrub secret placeholders from file writes.
+                Defaults to True when secrets are provided.
 
         Returns:
             A new Sandbox ready to execute Python code.
@@ -591,17 +625,11 @@ class SandboxFactory:
             sandbox = factory.create_sandbox()
             result = sandbox.execute('print("Hello!")')
 
-            # With network access
-            net = NetConfig(allowed_hosts=["api.example.com"])
-            sandbox = factory.create_sandbox(network=net)
-
-            # With callbacks
-            def get_data():
-                return {"data": "from_factory"}
-
-            sandbox = factory.create_sandbox(callbacks=[
-                {"name": "get_data", "fn": get_data, "description": "Gets data"}
-            ])
+            # With secrets
+            sandbox = factory.create_sandbox(
+                secrets={"API_KEY": {"value": "sk-xxx", "allowed_hosts": ["api.example.com"]}},
+                network=NetConfig(allowed_hosts=["api.example.com"]),
+            )
         """
         ...
 

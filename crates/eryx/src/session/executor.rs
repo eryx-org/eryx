@@ -374,7 +374,7 @@ pub struct SessionExecutor {
 
     /// VFS storage that persists across resets.
     #[cfg(feature = "vfs")]
-    vfs_storage: Option<std::sync::Arc<eryx_vfs::InMemoryStorage>>,
+    vfs_storage: Option<std::sync::Arc<eryx_vfs::ScrubbingStorage<eryx_vfs::InMemoryStorage>>>,
 
     /// VFS configuration that persists across resets.
     #[cfg(feature = "vfs")]
@@ -457,9 +457,9 @@ fn build_wasi_context(executor: &PythonExecutor) -> Result<WasiCtx, Error> {
 #[cfg(feature = "vfs")]
 fn build_hybrid_vfs_context(
     executor: &PythonExecutor,
-    vfs_storage: std::sync::Arc<eryx_vfs::InMemoryStorage>,
+    vfs_storage: std::sync::Arc<eryx_vfs::ScrubbingStorage<eryx_vfs::InMemoryStorage>>,
     vfs_config: &VfsConfig,
-) -> eryx_vfs::HybridVfsCtx<eryx_vfs::InMemoryStorage> {
+) -> eryx_vfs::HybridVfsCtx<eryx_vfs::ScrubbingStorage<eryx_vfs::InMemoryStorage>> {
     let mut ctx = eryx_vfs::HybridVfsCtx::new(vfs_storage);
 
     // Add a writable VFS directory backed by VFS storage
@@ -539,7 +539,7 @@ impl SessionExecutor {
     pub async fn new_with_vfs(
         executor: Arc<PythonExecutor>,
         callbacks: &[Arc<dyn Callback>],
-        vfs_storage: std::sync::Arc<eryx_vfs::InMemoryStorage>,
+        vfs_storage: std::sync::Arc<eryx_vfs::ScrubbingStorage<eryx_vfs::InMemoryStorage>>,
     ) -> Result<Self, Error> {
         Self::new_internal(executor, callbacks, Some(vfs_storage), None).await
     }
@@ -579,7 +579,7 @@ impl SessionExecutor {
     pub async fn new_with_vfs_config(
         executor: Arc<PythonExecutor>,
         callbacks: &[Arc<dyn Callback>],
-        vfs_storage: std::sync::Arc<eryx_vfs::InMemoryStorage>,
+        vfs_storage: std::sync::Arc<eryx_vfs::ScrubbingStorage<eryx_vfs::InMemoryStorage>>,
         vfs_config: VfsConfig,
     ) -> Result<Self, Error> {
         Self::new_internal(executor, callbacks, Some(vfs_storage), Some(vfs_config)).await
@@ -590,15 +590,20 @@ impl SessionExecutor {
     async fn new_internal(
         executor: Arc<PythonExecutor>,
         callbacks: &[Arc<dyn Callback>],
-        vfs_storage: Option<std::sync::Arc<eryx_vfs::InMemoryStorage>>,
+        vfs_storage: Option<std::sync::Arc<eryx_vfs::ScrubbingStorage<eryx_vfs::InMemoryStorage>>>,
         vfs_config: Option<VfsConfig>,
     ) -> Result<Self, Error> {
         let callback_infos = build_callback_infos(callbacks);
         let wasi = build_wasi_context(&executor)?;
 
-        // Use provided storage/config or create defaults
-        let vfs_storage =
-            vfs_storage.unwrap_or_else(|| std::sync::Arc::new(eryx_vfs::InMemoryStorage::new()));
+        // Use provided storage/config or create defaults (no secrets = passthrough)
+        let vfs_storage = vfs_storage.unwrap_or_else(|| {
+            std::sync::Arc::new(eryx_vfs::ScrubbingStorage::new(
+                eryx_vfs::InMemoryStorage::new(),
+                std::collections::HashMap::new(),
+                eryx_vfs::VfsFileScrubPolicy::None,
+            ))
+        });
         let vfs_config = vfs_config.unwrap_or_default();
 
         let hybrid_vfs_ctx = Some(build_hybrid_vfs_context(
@@ -971,10 +976,13 @@ impl SessionExecutor {
         #[cfg(feature = "vfs")]
         let state = {
             // Reuse existing VFS storage and config so files persist across resets
-            let vfs_storage = self
-                .vfs_storage
-                .clone()
-                .unwrap_or_else(|| std::sync::Arc::new(eryx_vfs::InMemoryStorage::new()));
+            let vfs_storage = self.vfs_storage.clone().unwrap_or_else(|| {
+                std::sync::Arc::new(eryx_vfs::ScrubbingStorage::new(
+                    eryx_vfs::InMemoryStorage::new(),
+                    std::collections::HashMap::new(),
+                    eryx_vfs::VfsFileScrubPolicy::None,
+                ))
+            });
             let vfs_config = self.vfs_config.clone().unwrap_or_default();
 
             ExecutorState::new(
@@ -1284,7 +1292,9 @@ impl ExecutorState {
         trace_tx: Option<mpsc::UnboundedSender<TraceRequest>>,
         callbacks: Vec<HostCallbackInfo>,
         memory_tracker: MemoryTracker,
-        hybrid_vfs_ctx: Option<eryx_vfs::HybridVfsCtx<eryx_vfs::InMemoryStorage>>,
+        hybrid_vfs_ctx: Option<
+            eryx_vfs::HybridVfsCtx<eryx_vfs::ScrubbingStorage<eryx_vfs::InMemoryStorage>>,
+        >,
     ) -> Self {
         Self {
             wasi,

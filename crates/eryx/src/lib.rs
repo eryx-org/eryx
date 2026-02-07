@@ -61,6 +61,7 @@ pub mod package;
 pub mod pool;
 mod sandbox;
 mod schema;
+pub mod secrets;
 pub mod session;
 mod trace;
 mod wasm;
@@ -89,6 +90,7 @@ pub use pool::{PoolConfig, PoolError, PoolStats, PooledSandbox, SandboxPool};
 pub use sandbox::{
     ExecuteResult, ExecuteStats, ExecutionHandle, ResourceLimits, Sandbox, SandboxBuilder, state,
 };
+pub use secrets::{FileScrubPolicy, OutputScrubPolicy, SecretConfig};
 #[cfg(feature = "vfs")]
 pub use session::VfsConfig;
 pub use session::{
@@ -139,7 +141,7 @@ pub use eryx_macros::callback;
 #[cfg(feature = "vfs")]
 pub mod vfs {
     pub use eryx_vfs::{
-        DirEntry, DirPerms, FilePerms, InMemoryStorage, Metadata, VfsCtx, VfsError, VfsResult,
-        VfsState, VfsStorage, VfsView,
+        DirEntry, DirPerms, FilePerms, InMemoryStorage, Metadata, ScrubbingStorage, VfsCtx,
+        VfsError, VfsFileScrubPolicy, VfsResult, VfsSecretConfig, VfsState, VfsStorage, VfsView,
     };
 }

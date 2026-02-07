@@ -365,8 +365,10 @@ pub struct ExecutorState {
     pub(crate) net_tx: Option<mpsc::Sender<NetRequest>>,
     /// Hybrid virtual filesystem context (when vfs feature is enabled).
     /// Routes /data/* to VFS storage, other paths to real filesystem.
+    /// Uses ScrubbingStorage to scrub secret placeholders from file writes.
     #[cfg(feature = "vfs")]
-    pub(crate) hybrid_vfs_ctx: Option<eryx_vfs::HybridVfsCtx<eryx_vfs::InMemoryStorage>>,
+    pub(crate) hybrid_vfs_ctx:
+        Option<eryx_vfs::HybridVfsCtx<eryx_vfs::ScrubbingStorage<eryx_vfs::InMemoryStorage>>>,
 }
 
 impl std::fmt::Debug for ExecutorState {
@@ -400,7 +402,7 @@ impl WasiView for ExecutorState {
 
 #[cfg(feature = "vfs")]
 impl eryx_vfs::HybridVfsView for ExecutorState {
-    type Storage = eryx_vfs::InMemoryStorage;
+    type Storage = eryx_vfs::ScrubbingStorage<eryx_vfs::InMemoryStorage>;
 
     #[allow(clippy::expect_used)]
     fn hybrid_vfs(&mut self) -> eryx_vfs::HybridVfsState<'_, Self::Storage> {
@@ -742,11 +744,14 @@ pub struct ExecuteBuilder<'a> {
     execution_timeout: Option<Duration>,
     cancellation_token: Option<CancellationToken>,
     fuel_limit: Option<u64>,
+    #[cfg(feature = "vfs")]
+    vfs_storage: Option<std::sync::Arc<eryx_vfs::ScrubbingStorage<eryx_vfs::InMemoryStorage>>>,
 }
 
 impl std::fmt::Debug for ExecuteBuilder<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("ExecuteBuilder")
+        let mut debug = f.debug_struct("ExecuteBuilder");
+        debug
             .field("code_len", &self.code.len())
             .field("callbacks_count", &self.callbacks.len())
             .field("has_callback_tx", &self.callback_tx.is_some())
@@ -755,8 +760,10 @@ impl std::fmt::Debug for ExecuteBuilder<'_> {
             .field("memory_limit", &self.memory_limit)
             .field("execution_timeout", &self.execution_timeout)
             .field("has_cancellation_token", &self.cancellation_token.is_some())
-            .field("fuel_limit", &self.fuel_limit)
-            .finish_non_exhaustive()
+            .field("fuel_limit", &self.fuel_limit);
+        #[cfg(feature = "vfs")]
+        debug.field("has_vfs_storage", &self.vfs_storage.is_some());
+        debug.finish_non_exhaustive()
     }
 }
 
@@ -774,6 +781,8 @@ impl<'a> ExecuteBuilder<'a> {
             execution_timeout: None,
             cancellation_token: None,
             fuel_limit: None,
+            #[cfg(feature = "vfs")]
+            vfs_storage: None,
         }
     }
 
@@ -850,6 +859,17 @@ impl<'a> ExecuteBuilder<'a> {
         self
     }
 
+    /// Set VFS storage with scrubbing for secret placeholders.
+    #[cfg(feature = "vfs")]
+    #[must_use]
+    pub fn with_vfs_storage(
+        mut self,
+        storage: std::sync::Arc<eryx_vfs::ScrubbingStorage<eryx_vfs::InMemoryStorage>>,
+    ) -> Self {
+        self.vfs_storage = Some(storage);
+        self
+    }
+
     /// Execute the Python code with the configured options.
     ///
     /// # Errors
@@ -868,7 +888,7 @@ impl<'a> ExecuteBuilder<'a> {
                 self.cancellation_token,
                 self.fuel_limit,
                 #[cfg(feature = "vfs")]
-                None,
+                self.vfs_storage,
             )
             .await
     }
@@ -1798,7 +1818,9 @@ impl PythonExecutor {
         execution_timeout: Option<Duration>,
         cancellation_token: Option<CancellationToken>,
         fuel_limit: Option<u64>,
-        #[cfg(feature = "vfs")] vfs_storage: Option<std::sync::Arc<eryx_vfs::InMemoryStorage>>,
+        #[cfg(feature = "vfs")] vfs_storage: Option<
+            std::sync::Arc<eryx_vfs::ScrubbingStorage<eryx_vfs::InMemoryStorage>>,
+        >,
     ) -> std::result::Result<ExecutionOutput, Error> {
         // Build callback info for introspection
         let callback_infos: Vec<HostCallbackInfo> = callbacks
@@ -1878,9 +1900,14 @@ impl PythonExecutor {
         // with real filesystem preopens to satisfy the linker bindings.
         #[cfg(feature = "vfs")]
         let hybrid_vfs_ctx = {
-            // Use provided storage or create an empty in-memory storage
-            let storage = vfs_storage
-                .unwrap_or_else(|| std::sync::Arc::new(eryx_vfs::InMemoryStorage::new()));
+            // Use provided storage or create an empty scrubbing storage (no secrets = passthrough)
+            let storage = vfs_storage.unwrap_or_else(|| {
+                std::sync::Arc::new(eryx_vfs::ScrubbingStorage::new(
+                    eryx_vfs::InMemoryStorage::new(),
+                    std::collections::HashMap::new(),
+                    eryx_vfs::VfsFileScrubPolicy::None,
+                ))
+            });
             let mut ctx = eryx_vfs::HybridVfsCtx::new(storage);
 
             // Add a writable /data directory backed by VFS storage

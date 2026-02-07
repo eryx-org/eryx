@@ -6,13 +6,13 @@
 use std::path::{Path, PathBuf};
 
 use pyo3::prelude::*;
-use pyo3::types::PyBytes;
+use pyo3::types::{PyBytes, PyDict};
 
 use crate::callback::extract_callbacks;
 use crate::error::{InitializationError, eryx_error_to_py};
 use crate::net_config::NetConfig;
 use crate::resource_limits::ResourceLimits;
-use crate::sandbox::Sandbox;
+use crate::sandbox::{Sandbox, apply_secrets};
 
 /// A factory for creating sandboxes with custom packages.
 ///
@@ -231,7 +231,14 @@ impl SandboxFactory {
     ///     sandbox = factory.create_sandbox(callbacks=[
     ///         {"name": "get_time", "fn": get_time, "description": "Returns current time"}
     ///     ])
-    #[pyo3(signature = (*, site_packages=None, resource_limits=None, network=None, callbacks=None))]
+    ///
+    ///     # With secrets
+    ///     sandbox = factory.create_sandbox(
+    ///         secrets={"API_KEY": {"value": "sk-xxx", "allowed_hosts": ["api.example.com"]}},
+    ///         network=NetConfig(allowed_hosts=["api.example.com"]),
+    ///     )
+    #[pyo3(signature = (*, site_packages=None, resource_limits=None, network=None, callbacks=None, secrets=None, scrub_stdout=None, scrub_stderr=None, scrub_files=None))]
+    #[allow(clippy::too_many_arguments)]
     fn create_sandbox(
         &self,
         py: Python<'_>,
@@ -239,6 +246,10 @@ impl SandboxFactory {
         resource_limits: Option<ResourceLimits>,
         network: Option<NetConfig>,
         callbacks: Option<Bound<'_, PyAny>>,
+        secrets: Option<Bound<'_, PyDict>>,
+        scrub_stdout: Option<bool>,
+        scrub_stderr: Option<bool>,
+        scrub_files: Option<bool>,
     ) -> PyResult<Sandbox> {
         // Use provided site_packages or fall back to the one from initialization
         let site_packages_path = site_packages.or_else(|| self.site_packages_path.clone());
@@ -270,6 +281,23 @@ impl SandboxFactory {
             for callback in python_callbacks {
                 builder = builder.with_callback(callback);
             }
+        }
+
+        // Apply secrets if provided
+        let has_secrets = secrets.as_ref().is_some_and(|s| !s.is_empty());
+        if let Some(ref secrets_dict) = secrets {
+            builder = apply_secrets(builder, secrets_dict)?;
+        }
+
+        // Apply scrub policies (default to true when secrets are present)
+        if scrub_stdout.unwrap_or(has_secrets) {
+            builder = builder.scrub_stdout(true);
+        }
+        if scrub_stderr.unwrap_or(has_secrets) {
+            builder = builder.scrub_stderr(true);
+        }
+        if scrub_files.unwrap_or(has_secrets) {
+            builder = builder.scrub_files(true);
         }
 
         let inner = builder.build().map_err(eryx_error_to_py)?;

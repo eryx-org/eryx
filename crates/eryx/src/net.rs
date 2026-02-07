@@ -243,6 +243,30 @@ impl From<TcpError> for TlsError {
 // Connection Manager
 // ============================================================================
 
+/// HTTP parsing state for a single connection.
+#[derive(Debug, Clone, Default)]
+struct HttpParsingState {
+    /// Buffer for accumulating request data until headers are complete
+    buffer: Vec<u8>,
+    /// Have we seen complete headers (\r\n\r\n)?
+    headers_complete: bool,
+    /// Total bytes of the current request body we've sent
+    body_bytes_sent: usize,
+    /// Expected content-length (if any)
+    content_length: Option<usize>,
+}
+
+/// Result of processing write data through the HTTP parser.
+#[derive(Debug)]
+enum WriteAction {
+    /// Pass data through without modification.
+    Passthrough(Vec<u8>),
+    /// Data was parsed and should be written as multiple segments.
+    Segments(Vec<Vec<u8>>),
+    /// Data is being buffered (headers not yet complete).
+    Buffering,
+}
+
 /// Manages TCP and TLS connections for a sandbox instance.
 ///
 /// Each sandbox has its own connection manager, which tracks active connections
@@ -254,12 +278,18 @@ pub struct ConnectionManager {
     tcp_connections: HashMap<u32, TcpStream>,
     tls_connections: HashMap<u32, TlsStream<TcpStream>>,
     next_handle: u32,
+    /// Track HTTP parsing state per connection handle
+    http_states: HashMap<u32, HttpParsingState>,
+    /// Track which host each connection is connected to
+    connection_hosts: HashMap<u32, String>,
+    /// Secrets configuration for substitution
+    secrets: HashMap<String, crate::secrets::SecretConfig>,
 }
 
 impl ConnectionManager {
-    /// Create a new connection manager with the given config.
+    /// Create a new connection manager with the given config and secrets.
     #[must_use]
-    pub fn new(config: NetConfig) -> Self {
+    pub fn new(config: NetConfig, secrets: HashMap<String, crate::secrets::SecretConfig>) -> Self {
         // Build rustls config with system root certs + any custom certs
         let mut root_store =
             rustls::RootCertStore::from_iter(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
@@ -281,6 +311,9 @@ impl ConnectionManager {
             tcp_connections: HashMap::new(),
             tls_connections: HashMap::new(),
             next_handle: 1,
+            http_states: HashMap::new(),
+            connection_hosts: HashMap::new(),
+            secrets,
         }
     }
 
@@ -297,6 +330,90 @@ impl ConnectionManager {
             self.next_handle = 1; // Skip 0 to avoid confusion with "no handle"
         }
         handle
+    }
+
+    /// Process write data through the HTTP parser for secret substitution.
+    ///
+    /// This is the shared logic used by both `tcp_write()` and `tls_write()`.
+    /// Returns a `WriteAction` indicating how the data should be written.
+    fn process_write_data(&mut self, handle: u32, data: &[u8]) -> Result<WriteAction, TcpError> {
+        // Get current state (borrow ends here)
+        let mut state = self.http_states.entry(handle).or_default().clone();
+
+        // Add new data to buffer
+        state.buffer.extend_from_slice(data);
+
+        if !state.headers_complete {
+            // Look for end of headers (\r\n\r\n)
+            if let Some(header_end) = find_header_end(&state.buffer) {
+                let headers_bytes = state.buffer[..header_end].to_vec();
+                let remaining = state.buffer[header_end..].to_vec();
+
+                // Check if this looks like HTTP
+                if !is_http_request(&headers_bytes) {
+                    // Not HTTP - pass through everything
+                    let all_data = state.buffer.clone();
+                    state.buffer.clear();
+                    self.http_states.insert(handle, state);
+                    return Ok(WriteAction::Passthrough(all_data));
+                }
+
+                // Check for HTTP/2 (not supported with secrets)
+                if is_http2(&headers_bytes) {
+                    return Err(TcpError::NotPermitted(
+                        "HTTP/2 with secrets not supported. Use HTTP/1.1.".into(),
+                    ));
+                }
+
+                // Parse headers and substitute secrets
+                let substituted = self.substitute_http_headers(&headers_bytes, handle)?;
+
+                // Extract Content-Length for body tracking
+                state.content_length = extract_content_length(&substituted);
+                state.headers_complete = true;
+
+                // Build segments: headers first, then any buffered body data
+                let mut segments = vec![substituted.clone()];
+                if !remaining.is_empty() {
+                    state.body_bytes_sent += remaining.len();
+                    segments.push(remaining);
+                }
+
+                // Check if request is complete (for pipelining)
+                if let Some(cl) = state.content_length {
+                    if state.body_bytes_sent >= cl {
+                        // Request complete - reset for next request
+                        state = HttpParsingState::default();
+                    }
+                } else if is_chunked(&substituted) {
+                    // Chunked encoding - keep state
+                } else {
+                    // No Content-Length and not chunked, assume request complete
+                    state.buffer.clear();
+                }
+
+                self.http_states.insert(handle, state);
+                Ok(WriteAction::Segments(segments))
+            } else {
+                // Headers not complete yet - keep buffering
+                self.http_states.insert(handle, state);
+                Ok(WriteAction::Buffering)
+            }
+        } else {
+            // Headers already sent, this is body data - pass through
+            state.body_bytes_sent += data.len();
+
+            // Check if request is complete
+            if let Some(cl) = state.content_length
+                && state.body_bytes_sent >= cl
+            {
+                // Request complete - reset for pipelining
+                state = HttpParsingState::default();
+            }
+
+            self.http_states.insert(handle, state);
+            Ok(WriteAction::Passthrough(data.to_vec()))
+        }
     }
 
     /// Check if a host is allowed by the current policy.
@@ -370,6 +487,7 @@ impl ConnectionManager {
 
         let handle = self.alloc_handle();
         self.tcp_connections.insert(handle, tcp);
+        self.connection_hosts.insert(handle, host.to_string());
 
         tracing::debug!(handle, host, port, "TCP connection established");
         Ok(handle)
@@ -397,7 +515,29 @@ impl ConnectionManager {
     }
 
     /// Write to a TCP connection.
+    ///
+    /// If secrets are configured, this method will parse HTTP requests and
+    /// substitute secret placeholders in headers before sending.
     pub async fn tcp_write(&mut self, handle: u32, data: &[u8]) -> Result<u32, TcpError> {
+        // Fast path: no secrets = no parsing
+        if self.secrets.is_empty() {
+            return self.tcp_write_raw(handle, data).await;
+        }
+
+        match self.process_write_data(handle, data)? {
+            WriteAction::Passthrough(bytes) => self.tcp_write_raw(handle, &bytes).await,
+            WriteAction::Segments(segments) => {
+                for segment in &segments {
+                    self.tcp_write_raw(handle, segment).await?;
+                }
+                Ok(data.len() as u32)
+            }
+            WriteAction::Buffering => Ok(data.len() as u32),
+        }
+    }
+
+    /// Write raw data to a TCP connection without HTTP parsing.
+    async fn tcp_write_raw(&mut self, handle: u32, data: &[u8]) -> Result<u32, TcpError> {
         let stream = self
             .tcp_connections
             .get_mut(&handle)
@@ -415,11 +555,102 @@ impl ConnectionManager {
         Ok(n as u32)
     }
 
+    /// Substitute secret placeholders in HTTP headers.
+    fn substitute_http_headers(&self, headers: &[u8], handle: u32) -> Result<Vec<u8>, TcpError> {
+        let text = String::from_utf8_lossy(headers);
+        let target_host = self
+            .connection_hosts
+            .get(&handle)
+            .ok_or(TcpError::InvalidHandle)?;
+
+        let mut result = String::new();
+
+        // Process line by line
+        for line in text.lines() {
+            if line.is_empty() {
+                result.push_str("\r\n");
+                continue;
+            }
+
+            // Check if this is a header line (contains ':')
+            if let Some(colon_pos) = line.find(':') {
+                let name = &line[..colon_pos];
+                let value = line[colon_pos + 1..].trim_start();
+
+                // Substitute secrets in header value
+                let substituted_value = self.substitute_secrets_in_text(value, target_host)?;
+                result.push_str(&format!("{name}: {substituted_value}\r\n"));
+            } else {
+                // Request line (GET /path HTTP/1.1)
+                result.push_str(line);
+                result.push_str("\r\n");
+            }
+        }
+
+        result.push_str("\r\n"); // End of headers
+        Ok(result.into_bytes())
+    }
+
+    /// Substitute secret placeholders in text.
+    ///
+    /// # Host Authorization Logic
+    ///
+    /// 1. If `secret.allowed_hosts` is non-empty, use that list
+    /// 2. Otherwise, fall back to `NetConfig.allowed_hosts`
+    /// 3. If both are empty, the secret is allowed for ANY host
+    ///    (⚠️ this may be surprising - always specify allowed_hosts for production)
+    fn substitute_secrets_in_text(
+        &self,
+        text: &str,
+        target_host: &str,
+    ) -> Result<String, TcpError> {
+        let mut result = text.to_string();
+
+        for secret_config in self.secrets.values() {
+            if !text.contains(&secret_config.placeholder) {
+                continue;
+            }
+
+            // Check if secret is allowed for this host
+            // Falls back to NetConfig.allowed_hosts if secret has no explicit restrictions
+            let allowed_hosts = if secret_config.allowed_hosts.is_empty() {
+                &self.config.allowed_hosts
+            } else {
+                &secret_config.allowed_hosts
+            };
+
+            // ⚠️ If both secret and NetConfig have empty allowed_hosts,
+            // the secret can go to ANY host. This is intentional for flexibility
+            // but users should always specify allowed_hosts for production.
+            let host_allowed = if allowed_hosts.is_empty() {
+                true
+            } else {
+                allowed_hosts
+                    .iter()
+                    .any(|p| host_matches_pattern(target_host, p))
+            };
+
+            if !host_allowed {
+                return Err(TcpError::NotPermitted(
+                    "Secret not allowed for the target host".into(),
+                ));
+            }
+
+            // Substitute
+            result = result.replace(&secret_config.placeholder, &secret_config.real_value);
+        }
+
+        Ok(result)
+    }
+
     /// Close a TCP connection.
     pub fn tcp_close(&mut self, handle: u32) {
         if self.tcp_connections.remove(&handle).is_some() {
             tracing::debug!(handle, "TCP connection closed");
         }
+        // Clean up HTTP parsing state and host tracking
+        self.http_states.remove(&handle);
+        self.connection_hosts.remove(&handle);
     }
 
     // ========================================================================
@@ -455,6 +686,12 @@ impl ConnectionManager {
         let handle = self.alloc_handle();
         self.tls_connections.insert(handle, tls);
 
+        // Carry over host mapping and clean up old TCP state
+        if let Some(host) = self.connection_hosts.remove(&tcp_handle) {
+            self.connection_hosts.insert(handle, host);
+        }
+        self.http_states.remove(&tcp_handle);
+
         tracing::debug!(
             handle,
             hostname,
@@ -486,7 +723,32 @@ impl ConnectionManager {
     }
 
     /// Write to a TLS connection.
+    ///
+    /// If secrets are configured, this method will parse HTTP requests and
+    /// substitute secret placeholders in headers before sending.
     pub async fn tls_write(&mut self, handle: u32, data: &[u8]) -> Result<u32, TlsError> {
+        // Fast path: no secrets = no parsing
+        if self.secrets.is_empty() {
+            return self.tls_write_raw(handle, data).await;
+        }
+
+        match self
+            .process_write_data(handle, data)
+            .map_err(TlsError::Tcp)?
+        {
+            WriteAction::Passthrough(bytes) => self.tls_write_raw(handle, &bytes).await,
+            WriteAction::Segments(segments) => {
+                for segment in &segments {
+                    self.tls_write_raw(handle, segment).await?;
+                }
+                Ok(data.len() as u32)
+            }
+            WriteAction::Buffering => Ok(data.len() as u32),
+        }
+    }
+
+    /// Write raw data to a TLS connection without HTTP parsing.
+    async fn tls_write_raw(&mut self, handle: u32, data: &[u8]) -> Result<u32, TlsError> {
         let stream = self
             .tls_connections
             .get_mut(&handle)
@@ -509,8 +771,66 @@ impl ConnectionManager {
         if self.tls_connections.remove(&handle).is_some() {
             tracing::debug!(handle, "TLS connection closed");
         }
+        // Clean up HTTP parsing state and host tracking
+        self.http_states.remove(&handle);
+        self.connection_hosts.remove(&handle);
         // TLS shutdown happens on drop
     }
+}
+
+// ============================================================================
+// HTTP Parsing Helpers
+// ============================================================================
+
+/// Find the end of HTTP headers (\r\n\r\n).
+fn find_header_end(data: &[u8]) -> Option<usize> {
+    data.windows(4)
+        .position(|w| w == b"\r\n\r\n")
+        .map(|pos| pos + 4)
+}
+
+/// Check if data starts with an HTTP request method.
+fn is_http_request(data: &[u8]) -> bool {
+    if data.len() < 4 {
+        return false;
+    }
+
+    data.starts_with(b"GET ")
+        || data.starts_with(b"POST ")
+        || data.starts_with(b"PUT ")
+        || data.starts_with(b"DELETE ")
+        || data.starts_with(b"PATCH ")
+        || data.starts_with(b"HEAD ")
+        || data.starts_with(b"OPTIONS ")
+        || data.starts_with(b"CONNECT ")
+        || data.starts_with(b"TRACE ")
+}
+
+/// Check if data is an HTTP/2 connection preface.
+fn is_http2(data: &[u8]) -> bool {
+    data.starts_with(b"PRI * HTTP/2")
+}
+
+/// Extract Content-Length header value from HTTP headers.
+fn extract_content_length(headers: &[u8]) -> Option<usize> {
+    let text = String::from_utf8_lossy(headers);
+    for line in text.lines() {
+        if line.to_ascii_lowercase().starts_with("content-length:")
+            && let Some(value) = line.split(':').nth(1)
+        {
+            return value.trim().parse().ok();
+        }
+    }
+    None
+}
+
+/// Check if Transfer-Encoding is chunked.
+fn is_chunked(headers: &[u8]) -> bool {
+    let text = String::from_utf8_lossy(headers);
+    text.lines().any(|line| {
+        line.to_ascii_lowercase().contains("transfer-encoding")
+            && line.to_ascii_lowercase().contains("chunked")
+    })
 }
 
 /// Check if a hostname matches a pattern with wildcards.
@@ -562,6 +882,7 @@ fn host_matches_pattern(host: &str, pattern: &str) -> bool {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
 
@@ -598,7 +919,7 @@ mod tests {
     #[test]
     fn test_default_config_blocks_private() {
         let config = NetConfig::default();
-        let manager = ConnectionManager::new(config);
+        let manager = ConnectionManager::new(config, HashMap::new());
 
         assert!(manager.check_host_allowed("localhost").is_err());
         assert!(manager.check_host_allowed("127.0.0.1").is_err());
@@ -615,7 +936,7 @@ mod tests {
         let config = NetConfig::default()
             .allow_host("*.example.com")
             .allow_host("api.github.com");
-        let manager = ConnectionManager::new(config);
+        let manager = ConnectionManager::new(config, HashMap::new());
 
         assert!(manager.check_host_allowed("api.example.com").is_ok());
         assert!(manager.check_host_allowed("api.github.com").is_ok());
@@ -625,10 +946,539 @@ mod tests {
     #[test]
     fn test_permissive_config() {
         let config = NetConfig::permissive();
-        let manager = ConnectionManager::new(config);
+        let manager = ConnectionManager::new(config, HashMap::new());
 
         assert!(manager.check_host_allowed("localhost").is_ok());
         assert!(manager.check_host_allowed("127.0.0.1").is_ok());
         assert!(manager.check_host_allowed("google.com").is_ok());
+    }
+
+    // HTTP parsing helper tests
+    #[test]
+    fn test_find_header_end() {
+        let data = b"GET / HTTP/1.1\r\nHost: example.com\r\n\r\nBody";
+        // Position should be just after \r\n\r\n (at index 37)
+        assert_eq!(find_header_end(data), Some(37));
+
+        let incomplete = b"GET / HTTP/1.1\r\nHost: example.com\r\n";
+        assert_eq!(find_header_end(incomplete), None);
+    }
+
+    #[test]
+    fn test_is_http_request() {
+        assert!(is_http_request(b"GET / HTTP/1.1\r\n"));
+        assert!(is_http_request(b"POST /api HTTP/1.1\r\n"));
+        assert!(is_http_request(b"PUT /resource HTTP/1.1\r\n"));
+        assert!(is_http_request(b"DELETE /item HTTP/1.1\r\n"));
+        assert!(is_http_request(b"PATCH /update HTTP/1.1\r\n"));
+        assert!(is_http_request(b"HEAD / HTTP/1.1\r\n"));
+        assert!(is_http_request(b"OPTIONS * HTTP/1.1\r\n"));
+
+        assert!(!is_http_request(b"NOTHTTP"));
+        assert!(!is_http_request(b""));
+        assert!(!is_http_request(b"GET"));
+    }
+
+    #[test]
+    fn test_is_http2() {
+        assert!(is_http2(b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n"));
+        assert!(!is_http2(b"GET / HTTP/1.1\r\n"));
+        assert!(!is_http2(b""));
+    }
+
+    #[test]
+    fn test_extract_content_length() {
+        let headers = b"POST / HTTP/1.1\r\nContent-Length: 42\r\n\r\n";
+        assert_eq!(extract_content_length(headers), Some(42));
+
+        let headers_upper = b"POST / HTTP/1.1\r\nCONTENT-LENGTH: 100\r\n\r\n";
+        assert_eq!(extract_content_length(headers_upper), Some(100));
+
+        let no_cl = b"GET / HTTP/1.1\r\nHost: example.com\r\n\r\n";
+        assert_eq!(extract_content_length(no_cl), None);
+    }
+
+    #[test]
+    fn test_is_chunked() {
+        let chunked = b"POST / HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n";
+        assert!(is_chunked(chunked));
+
+        let chunked_upper = b"POST / HTTP/1.1\r\nTRANSFER-ENCODING: CHUNKED\r\n\r\n";
+        assert!(is_chunked(chunked_upper));
+
+        let not_chunked = b"GET / HTTP/1.1\r\nContent-Length: 0\r\n\r\n";
+        assert!(!is_chunked(not_chunked));
+    }
+
+    #[test]
+    fn test_secret_substitution() {
+        let config = NetConfig::permissive();
+        let mut secrets = HashMap::new();
+        secrets.insert(
+            "API_KEY".to_string(),
+            crate::secrets::SecretConfig {
+                real_value: "real-secret-value".to_string(),
+                placeholder: "ERYX_SECRET_PLACEHOLDER_abc123".to_string(),
+                allowed_hosts: vec!["api.example.com".to_string()],
+            },
+        );
+
+        let manager = ConnectionManager::new(config, secrets);
+
+        // Test substitution for allowed host
+        let result = manager
+            .substitute_secrets_in_text("Bearer ERYX_SECRET_PLACEHOLDER_abc123", "api.example.com");
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), "Bearer real-secret-value");
+
+        // Test rejection for disallowed host
+        let result =
+            manager.substitute_secrets_in_text("Bearer ERYX_SECRET_PLACEHOLDER_abc123", "evil.com");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_secret_substitution_empty_allowed_hosts() {
+        let config = NetConfig::permissive();
+        let mut secrets = HashMap::new();
+        secrets.insert(
+            "API_KEY".to_string(),
+            crate::secrets::SecretConfig {
+                real_value: "real-secret-value".to_string(),
+                placeholder: "PLACEHOLDER_XYZ".to_string(),
+                allowed_hosts: vec![], // Empty = allow all
+            },
+        );
+
+        let manager = ConnectionManager::new(config, secrets);
+
+        // Should work for any host when allowed_hosts is empty
+        let result = manager.substitute_secrets_in_text("Bearer PLACEHOLDER_XYZ", "any-host.com");
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), "Bearer real-secret-value");
+    }
+
+    // ========================================================================
+    // Adversarial Security Tests
+    // ========================================================================
+
+    /// Test that secrets are rejected for all unauthorized hosts.
+    #[test]
+    fn test_secret_blocked_for_unauthorized_host() {
+        let config = NetConfig::permissive();
+        let mut secrets = HashMap::new();
+        secrets.insert(
+            "KEY".to_string(),
+            crate::secrets::SecretConfig {
+                real_value: "top-secret".to_string(),
+                placeholder: "PH_AUTH".to_string(),
+                allowed_hosts: vec!["api.openai.com".to_string()],
+            },
+        );
+
+        let manager = ConnectionManager::new(config, secrets);
+
+        // All of these unauthorized hosts must be rejected
+        assert!(
+            manager
+                .substitute_secrets_in_text("PH_AUTH", "evil.com")
+                .is_err()
+        );
+        assert!(
+            manager
+                .substitute_secrets_in_text("PH_AUTH", "127.0.0.1")
+                .is_err()
+        );
+        assert!(
+            manager
+                .substitute_secrets_in_text("PH_AUTH", "localhost")
+                .is_err()
+        );
+        assert!(manager.substitute_secrets_in_text("PH_AUTH", "").is_err());
+    }
+
+    /// Test that multiple secrets with different host restrictions are independently enforced.
+    #[test]
+    fn test_multiple_secrets_independent_host_restrictions() {
+        let config = NetConfig::permissive();
+        let mut secrets = HashMap::new();
+        secrets.insert(
+            "OPENAI".to_string(),
+            crate::secrets::SecretConfig {
+                real_value: "openai-secret".to_string(),
+                placeholder: "PH_OPENAI".to_string(),
+                allowed_hosts: vec!["api.openai.com".to_string()],
+            },
+        );
+        secrets.insert(
+            "GITHUB".to_string(),
+            crate::secrets::SecretConfig {
+                real_value: "github-secret".to_string(),
+                placeholder: "PH_GITHUB".to_string(),
+                allowed_hosts: vec!["api.github.com".to_string()],
+            },
+        );
+
+        let manager = ConnectionManager::new(config, secrets);
+
+        // OpenAI key for OpenAI host: OK
+        assert!(
+            manager
+                .substitute_secrets_in_text("PH_OPENAI", "api.openai.com")
+                .is_ok()
+        );
+        // OpenAI key for GitHub host: REJECTED
+        assert!(
+            manager
+                .substitute_secrets_in_text("PH_OPENAI", "api.github.com")
+                .is_err()
+        );
+        // GitHub key for GitHub host: OK
+        assert!(
+            manager
+                .substitute_secrets_in_text("PH_GITHUB", "api.github.com")
+                .is_ok()
+        );
+        // GitHub key for OpenAI host: REJECTED
+        assert!(
+            manager
+                .substitute_secrets_in_text("PH_GITHUB", "api.openai.com")
+                .is_err()
+        );
+    }
+
+    /// Test glob pattern host enforcement for secrets.
+    #[test]
+    fn test_secret_glob_pattern_enforcement() {
+        let config = NetConfig::permissive();
+        let mut secrets = HashMap::new();
+        secrets.insert(
+            "KEY".to_string(),
+            crate::secrets::SecretConfig {
+                real_value: "secret".to_string(),
+                placeholder: "PH_GLOB".to_string(),
+                allowed_hosts: vec!["*.openai.com".to_string()],
+            },
+        );
+
+        let manager = ConnectionManager::new(config, secrets);
+
+        assert!(
+            manager
+                .substitute_secrets_in_text("PH_GLOB", "api.openai.com")
+                .is_ok()
+        );
+        // Bare domain doesn't match *.openai.com
+        assert!(
+            manager
+                .substitute_secrets_in_text("PH_GLOB", "openai.com")
+                .is_err()
+        );
+        assert!(
+            manager
+                .substitute_secrets_in_text("PH_GLOB", "evil.com")
+                .is_err()
+        );
+    }
+
+    /// Test that deceptive domain names don't match allowed hosts.
+    #[test]
+    fn test_secret_deceptive_domain_rejection() {
+        let config = NetConfig::permissive();
+        let mut secrets = HashMap::new();
+        secrets.insert(
+            "KEY".to_string(),
+            crate::secrets::SecretConfig {
+                real_value: "secret".to_string(),
+                placeholder: "PH_DECEPTIVE".to_string(),
+                allowed_hosts: vec!["api.openai.com".to_string()],
+            },
+        );
+
+        let manager = ConnectionManager::new(config, secrets);
+
+        // Deceptive domains that look similar but shouldn't match
+        assert!(
+            manager
+                .substitute_secrets_in_text("PH_DECEPTIVE", "api.openai.com.evil.com")
+                .is_err()
+        );
+        assert!(
+            manager
+                .substitute_secrets_in_text("PH_DECEPTIVE", "api-openai.com")
+                .is_err()
+        );
+        assert!(
+            manager
+                .substitute_secrets_in_text("PH_DECEPTIVE", "evil-api.openai.com")
+                .is_err()
+        );
+        assert!(
+            manager
+                .substitute_secrets_in_text("PH_DECEPTIVE", "xapi.openai.com")
+                .is_err()
+        );
+    }
+
+    /// Test that IP addresses don't match hostname-based restrictions.
+    #[test]
+    fn test_secret_ip_doesnt_match_hostname() {
+        let config = NetConfig::permissive();
+        let mut secrets = HashMap::new();
+        secrets.insert(
+            "KEY".to_string(),
+            crate::secrets::SecretConfig {
+                real_value: "secret".to_string(),
+                placeholder: "PH_IP".to_string(),
+                allowed_hosts: vec!["api.openai.com".to_string()],
+            },
+        );
+
+        let manager = ConnectionManager::new(config, secrets);
+
+        // IP address should NOT match hostname restriction
+        assert!(
+            manager
+                .substitute_secrets_in_text("PH_IP", "104.18.7.192")
+                .is_err()
+        );
+        assert!(
+            manager
+                .substitute_secrets_in_text("PH_IP", "1.2.3.4")
+                .is_err()
+        );
+    }
+
+    /// Test case-insensitive host matching for secrets.
+    #[test]
+    fn test_secret_case_insensitive_host() {
+        let config = NetConfig::permissive();
+        let mut secrets = HashMap::new();
+        secrets.insert(
+            "KEY".to_string(),
+            crate::secrets::SecretConfig {
+                real_value: "secret".to_string(),
+                placeholder: "PH_CASE".to_string(),
+                allowed_hosts: vec!["api.openai.com".to_string()],
+            },
+        );
+
+        let manager = ConnectionManager::new(config, secrets);
+
+        // DNS is case-insensitive, so these should all work
+        assert!(
+            manager
+                .substitute_secrets_in_text("PH_CASE", "API.OPENAI.COM")
+                .is_ok()
+        );
+        assert!(
+            manager
+                .substitute_secrets_in_text("PH_CASE", "Api.OpenAI.Com")
+                .is_ok()
+        );
+    }
+
+    /// Test that no text without placeholders triggers substitution errors.
+    #[test]
+    fn test_no_placeholder_passthrough() {
+        let config = NetConfig::permissive();
+        let mut secrets = HashMap::new();
+        secrets.insert(
+            "KEY".to_string(),
+            crate::secrets::SecretConfig {
+                real_value: "secret".to_string(),
+                placeholder: "PH_NOOP".to_string(),
+                allowed_hosts: vec!["restricted.com".to_string()],
+            },
+        );
+
+        let manager = ConnectionManager::new(config, secrets);
+
+        // Text without any placeholder should pass through unchanged, for any host
+        let result = manager.substitute_secrets_in_text("Bearer some-other-token", "evil.com");
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), "Bearer some-other-token");
+    }
+
+    /// Test that TLS upgrade preserves connection_hosts mapping.
+    #[test]
+    fn test_tls_upgrade_preserves_host_mapping() {
+        let config = NetConfig::permissive();
+        let secrets = HashMap::new();
+        let mut manager = ConnectionManager::new(config, secrets);
+
+        // Simulate a TCP connection with host mapping and HTTP state
+        let tcp_handle = 1_u32;
+        let tls_handle = 2_u32;
+        manager
+            .connection_hosts
+            .insert(tcp_handle, "example.com".to_string());
+        manager
+            .http_states
+            .insert(tcp_handle, HttpParsingState::default());
+
+        // Simulate what tls_upgrade now does: carry over host, clean up old state
+        if let Some(host) = manager.connection_hosts.remove(&tcp_handle) {
+            manager.connection_hosts.insert(tls_handle, host);
+        }
+        manager.http_states.remove(&tcp_handle);
+
+        // New TLS handle should have the host mapping
+        assert_eq!(
+            manager.connection_hosts.get(&tls_handle),
+            Some(&"example.com".to_string())
+        );
+        // Old TCP handle should be cleaned up
+        assert!(!manager.connection_hosts.contains_key(&tcp_handle));
+        assert!(!manager.http_states.contains_key(&tcp_handle));
+    }
+
+    /// Test that very large HTTP headers are handled correctly without security bypass.
+    /// Ensures that secrets in large headers are still properly substituted.
+    #[test]
+    fn test_large_http_headers_with_secrets() {
+        let config = NetConfig::permissive();
+        let mut secrets = HashMap::new();
+        secrets.insert(
+            "API_KEY".to_string(),
+            crate::secrets::SecretConfig {
+                real_value: "real-secret-value".to_string(),
+                placeholder: "PLACEHOLDER_LARGE".to_string(),
+                allowed_hosts: vec!["api.example.com".to_string()],
+            },
+        );
+
+        let mut manager = ConnectionManager::new(config, secrets);
+
+        // Simulate a connection to allowed host
+        let handle = 1_u32;
+        manager
+            .connection_hosts
+            .insert(handle, "api.example.com".to_string());
+
+        // Create a large header block with many headers and a secret at the end
+        let mut large_headers = String::from("GET /api HTTP/1.1\r\n");
+        large_headers.push_str("Host: api.example.com\r\n");
+
+        // Add many large headers (simulate a request with lots of metadata)
+        for i in 0..100 {
+            let padding = "X".repeat(500); // 500 char value
+            large_headers.push_str(&format!("X-Header-{i}: {padding}\r\n"));
+        }
+
+        // Add the secret header at the end
+        large_headers.push_str("Authorization: Bearer PLACEHOLDER_LARGE\r\n");
+        large_headers.push_str("\r\n");
+
+        // Verify header block is indeed large (> 50KB)
+        assert!(
+            large_headers.len() > 50_000,
+            "Test headers should be > 50KB, got {} bytes",
+            large_headers.len()
+        );
+
+        // Substitute headers
+        let result = manager.substitute_http_headers(large_headers.as_bytes(), handle);
+        assert!(result.is_ok(), "Large header substitution should succeed");
+
+        let substituted = String::from_utf8(result.unwrap()).unwrap();
+
+        // Verify the secret was substituted
+        assert!(
+            substituted.contains("Authorization: Bearer real-secret-value"),
+            "Secret should be substituted in large headers"
+        );
+        assert!(
+            !substituted.contains("PLACEHOLDER_LARGE"),
+            "Placeholder should not remain in substituted headers"
+        );
+    }
+
+    /// Test that TLS SNI hostname does NOT affect secret authorization.
+    /// The host check must use the TCP connection target, not the TLS SNI.
+    /// This prevents an attack where an attacker connects to evil.com but
+    /// sets TLS SNI to api.openai.com to try to trick secret substitution.
+    #[test]
+    fn test_tls_sni_does_not_override_host_check() {
+        let config = NetConfig::permissive();
+        let mut secrets = HashMap::new();
+        secrets.insert(
+            "API_KEY".to_string(),
+            crate::secrets::SecretConfig {
+                real_value: "real-secret-value".to_string(),
+                placeholder: "PLACEHOLDER_SNI".to_string(),
+                allowed_hosts: vec!["api.openai.com".to_string()],
+            },
+        );
+
+        let mut manager = ConnectionManager::new(config, secrets);
+
+        // Simulate: TCP connected to evil.com
+        let tcp_handle = 1_u32;
+        manager
+            .connection_hosts
+            .insert(tcp_handle, "evil.com".to_string());
+
+        // Simulate: TLS upgrade with SNI="api.openai.com" (the allowed host)
+        // In real code, tls_upgrade would copy the host from tcp to tls handle.
+        // The key security property: connection_hosts stores the TCP target, not SNI.
+        let tls_handle = 2_u32;
+        // The host should remain "evil.com" from the original TCP connection
+        if let Some(host) = manager.connection_hosts.get(&tcp_handle) {
+            manager.connection_hosts.insert(tls_handle, host.clone());
+        }
+
+        // Now try to substitute secrets - should fail because connection_hosts has "evil.com"
+        let headers = b"GET /api HTTP/1.1\r\nHost: api.openai.com\r\nAuthorization: Bearer PLACEHOLDER_SNI\r\n\r\n";
+        let result = manager.substitute_http_headers(headers, tls_handle);
+
+        assert!(
+            result.is_err(),
+            "Secret substitution must use TCP target (evil.com), not TLS SNI or Host header (api.openai.com)"
+        );
+    }
+
+    /// Test that secrets in large headers are blocked for unauthorized hosts.
+    #[test]
+    fn test_large_headers_unauthorized_host() {
+        let config = NetConfig::permissive();
+        let mut secrets = HashMap::new();
+        secrets.insert(
+            "API_KEY".to_string(),
+            crate::secrets::SecretConfig {
+                real_value: "real-secret-value".to_string(),
+                placeholder: "PLACEHOLDER_BLOCKED".to_string(),
+                allowed_hosts: vec!["api.legitimate.com".to_string()],
+            },
+        );
+
+        let mut manager = ConnectionManager::new(config, secrets);
+
+        // Simulate a connection to UNAUTHORIZED host
+        let handle = 1_u32;
+        manager
+            .connection_hosts
+            .insert(handle, "evil.com".to_string());
+
+        // Create large headers with the secret
+        let mut large_headers = String::from("POST /steal HTTP/1.1\r\n");
+        large_headers.push_str("Host: evil.com\r\n");
+
+        // Add padding
+        for i in 0..50 {
+            let padding = "Y".repeat(1000);
+            large_headers.push_str(&format!("X-Pad-{i}: {padding}\r\n"));
+        }
+
+        // Secret header buried in the middle
+        large_headers.push_str("X-Stolen: PLACEHOLDER_BLOCKED\r\n");
+        large_headers.push_str("\r\n");
+
+        // Should fail because host is not authorized for this secret
+        let result = manager.substitute_http_headers(large_headers.as_bytes(), handle);
+        assert!(
+            result.is_err(),
+            "Secret substitution should fail for unauthorized host even with large headers"
+        );
     }
 }

@@ -150,14 +150,24 @@ impl<'a> InProcessSession<'a> {
         // Spawn task to handle callback requests concurrently (Arc clone is cheap)
         let callbacks_arc = self.sandbox.callbacks_arc();
         let resource_limits = self.sandbox.resource_limits().clone();
+        let secrets_arc = std::sync::Arc::new(self.sandbox.secrets().clone());
+        let callback_secrets = std::sync::Arc::clone(&secrets_arc);
         let callback_handler = tokio::spawn(async move {
-            run_callback_handler(callback_rx, callbacks_arc, resource_limits).await
+            run_callback_handler(
+                callback_rx,
+                callbacks_arc,
+                resource_limits,
+                callback_secrets,
+            )
+            .await
         });
 
         // Spawn task to handle trace events
         let trace_handler = self.sandbox.trace_handler().clone();
-        let trace_collector =
-            tokio::spawn(async move { run_trace_collector(trace_rx, trace_handler).await });
+        let trace_secrets = self.sandbox.secrets().clone();
+        let trace_collector = tokio::spawn(async move {
+            run_trace_collector(trace_rx, trace_handler, trace_secrets).await
+        });
 
         // Get callbacks for this execution
         let callbacks: Vec<Arc<dyn Callback>> =

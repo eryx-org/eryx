@@ -5,6 +5,7 @@
 use std::sync::Arc;
 
 use pyo3::prelude::*;
+use pyo3::types::PyDict;
 
 use crate::callback::extract_callbacks;
 use crate::error::{InitializationError, eryx_error_to_py};
@@ -89,6 +90,14 @@ impl Sandbox {
     ///     ])
     ///     result = sandbox.execute('t = await get_time(); print(t)')
     ///
+    ///     # Sandbox with secrets
+    ///     sandbox = Sandbox(
+    ///         secrets={
+    ///             "API_KEY": {"value": "sk-real-key", "allowed_hosts": ["api.example.com"]},
+    ///         },
+    ///         network=NetConfig(allowed_hosts=["api.example.com"]),
+    ///     )
+    ///
     ///     # For custom packages, use SandboxFactory instead:
     ///     factory = SandboxFactory(
     ///         packages=["/path/to/jinja2.whl", "/path/to/markupsafe.whl"],
@@ -96,12 +105,17 @@ impl Sandbox {
     ///     )
     ///     sandbox = factory.create_sandbox()
     #[new]
-    #[pyo3(signature = (*, resource_limits=None, network=None, callbacks=None))]
+    #[pyo3(signature = (*, resource_limits=None, network=None, callbacks=None, secrets=None, scrub_stdout=None, scrub_stderr=None, scrub_files=None))]
+    #[allow(clippy::too_many_arguments)]
     fn new(
         py: Python<'_>,
         resource_limits: Option<ResourceLimits>,
         network: Option<NetConfig>,
         callbacks: Option<Bound<'_, PyAny>>,
+        secrets: Option<Bound<'_, PyDict>>,
+        scrub_stdout: Option<bool>,
+        scrub_stderr: Option<bool>,
+        scrub_files: Option<bool>,
     ) -> PyResult<Self> {
         // Create a tokio runtime for async execution
         let runtime = Arc::new(
@@ -133,6 +147,17 @@ impl Sandbox {
                 builder = builder.with_callback(callback);
             }
         }
+
+        // Apply secrets if provided
+        let has_secrets = secrets.as_ref().is_some_and(|s| !s.is_empty());
+        if let Some(ref secrets_dict) = secrets {
+            builder = apply_secrets(builder, secrets_dict)?;
+        }
+
+        // Apply scrub policies (default to true when secrets are present)
+        builder = builder.scrub_stdout(scrub_stdout.unwrap_or(has_secrets));
+        builder = builder.scrub_stderr(scrub_stderr.unwrap_or(has_secrets));
+        builder = builder.scrub_files(scrub_files.unwrap_or(has_secrets));
 
         let inner = builder.build().map_err(eryx_error_to_py)?;
 
@@ -216,4 +241,53 @@ impl std::fmt::Debug for Sandbox {
             .field("resource_limits", self.inner.resource_limits())
             .finish_non_exhaustive()
     }
+}
+
+/// Parse a Python dict of secrets and apply them to the sandbox builder.
+///
+/// Expected format: `{"NAME": {"value": "secret", "allowed_hosts": ["host.com"]}}`
+/// The `allowed_hosts` key is optional and defaults to an empty list.
+pub(crate) fn apply_secrets<R, S>(
+    mut builder: eryx::SandboxBuilder<R, S>,
+    secrets_dict: &Bound<'_, PyDict>,
+) -> PyResult<eryx::SandboxBuilder<R, S>> {
+    for (key, value) in secrets_dict.iter() {
+        let name: String = key
+            .extract()
+            .map_err(|_| pyo3::exceptions::PyTypeError::new_err("secret names must be strings"))?;
+
+        let value_dict: Bound<'_, PyDict> = value.cast_into().map_err(|_| {
+            pyo3::exceptions::PyTypeError::new_err(format!(
+                "secret '{name}' value must be a dict with a 'value' key"
+            ))
+        })?;
+
+        let secret_value: String = value_dict
+            .get_item("value")?
+            .ok_or_else(|| {
+                pyo3::exceptions::PyValueError::new_err(format!(
+                    "secret '{name}' dict must contain a 'value' key"
+                ))
+            })?
+            .extract()
+            .map_err(|_| {
+                pyo3::exceptions::PyTypeError::new_err(format!(
+                    "secret '{name}' value must be a string"
+                ))
+            })?;
+
+        let allowed_hosts: Vec<String> = value_dict
+            .get_item("allowed_hosts")?
+            .map(|v| v.extract())
+            .transpose()
+            .map_err(|_| {
+                pyo3::exceptions::PyTypeError::new_err(format!(
+                    "secret '{name}' allowed_hosts must be a list of strings"
+                ))
+            })?
+            .unwrap_or_default();
+
+        builder = builder.with_secret(name, secret_value, allowed_hosts);
+    }
+    Ok(builder)
 }

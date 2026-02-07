@@ -56,7 +56,7 @@ pub struct Session {
     /// Tokio runtime for executing async code.
     runtime: Arc<tokio::runtime::Runtime>,
     /// VFS storage (kept for sharing across sessions).
-    vfs_storage: Option<Arc<eryx::vfs::InMemoryStorage>>,
+    vfs_storage: Option<Arc<eryx::vfs::ScrubbingStorage<eryx::vfs::InMemoryStorage>>>,
     /// VFS mount path configuration.
     vfs_mount_path: Option<String>,
     /// Callbacks available for this session.
@@ -243,6 +243,7 @@ impl Session {
                             callback_rx,
                             handler_callbacks,
                             eryx::ResourceLimits::default(),
+                            std::sync::Arc::new(std::collections::HashMap::new()),
                         )
                         .await
                     });
