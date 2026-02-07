@@ -100,6 +100,52 @@ print(files)
         )
         assert "deeply nested" in result.stdout
 
+    def test_single_file_mount(self, tmp_path):
+        """A single host file can be mounted at a specific guest path."""
+        host_file = tmp_path / "script.py"
+        host_file.write_text("print('hello from script')")
+        sandbox = eryx.Sandbox(
+            volumes=[(str(host_file), "/mnt/script.py", True)],
+        )
+        result = sandbox.execute('print(open("/mnt/script.py").read())')
+        assert "print('hello from script')" in result.stdout
+
+    def test_single_file_mount_restricts_siblings(self, tmp_path):
+        """A single-file mount should not expose other files in the host dir."""
+        (tmp_path / "allowed.txt").write_text("ok")
+        (tmp_path / "secret.txt").write_text("should not be visible")
+        sandbox = eryx.Sandbox(
+            volumes=[(str(tmp_path / "allowed.txt"), "/mnt/allowed.txt", True)],
+        )
+        # The allowed file works
+        result = sandbox.execute('print(open("/mnt/allowed.txt").read())')
+        assert "ok" in result.stdout
+        # The sibling should not be accessible
+        with pytest.raises(eryx.ExecutionError):
+            sandbox.execute('open("/mnt/secret.txt").read()')
+
+    def test_single_file_mount_writable(self, tmp_path):
+        """A writable single-file mount allows writes back to host."""
+        host_file = tmp_path / "output.txt"
+        host_file.write_text("original")
+        sandbox = eryx.Sandbox(
+            volumes=[(str(host_file), "/mnt/output.txt", False)],
+        )
+        sandbox.execute(
+            'open("/mnt/output.txt", "w").write("updated from sandbox")'
+        )
+        assert host_file.read_text() == "updated from sandbox"
+
+    def test_single_file_mount_renamed(self, tmp_path):
+        """A file can be mounted with a different guest name than host name."""
+        host_file = tmp_path / "source.py"
+        host_file.write_text("print('renamed')")
+        sandbox = eryx.Sandbox(
+            volumes=[(str(host_file), "/mnt/target.py", True)],
+        )
+        result = sandbox.execute('print(open("/mnt/target.py").read())')
+        assert "print('renamed')" in result.stdout
+
 
 class TestSessionVolumes:
     """Test volume mounts with the stateful Session."""

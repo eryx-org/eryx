@@ -7,6 +7,7 @@
 //! This allows Python to access its stdlib while still providing an isolated
 //! writable filesystem area for user code.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use wasmtime::component::ResourceTable;
@@ -28,6 +29,10 @@ pub struct RealDir {
     pub file_perms: FilePerms,
     /// Whether to allow blocking the current thread.
     pub allow_blocking: bool,
+    /// If set, maps guest filenames to host filenames, restricting access.
+    /// Used for single-file volume mounts (e.g., `-v /host/src.py:/mnt/dst.py`).
+    /// Key = guest filename (what the sandbox sees), Value = host filename (real file).
+    pub file_map: Option<HashMap<String, String>>,
 }
 
 impl std::fmt::Debug for RealDir {
@@ -47,6 +52,7 @@ impl RealDir {
             dir_perms,
             file_perms,
             allow_blocking: false,
+            file_map: None,
         }
     }
 
@@ -58,6 +64,36 @@ impl RealDir {
     ) -> std::io::Result<Self> {
         let dir = cap_std::fs::Dir::open_ambient_dir(path, cap_std::ambient_authority())?;
         Ok(Self::new(dir, dir_perms, file_perms))
+    }
+
+    /// Check whether a guest-relative path is allowed by the file map.
+    ///
+    /// Returns `true` if there is no restriction or if the path matches a
+    /// mapped guest filename.
+    pub fn is_path_allowed(&self, guest_rel_path: &str) -> bool {
+        match &self.file_map {
+            None => true,
+            Some(map) => {
+                let normalized = guest_rel_path.strip_prefix("./").unwrap_or(guest_rel_path);
+                map.contains_key(normalized)
+            }
+        }
+    }
+
+    /// Translate a guest-relative path to a host-relative path.
+    ///
+    /// If this directory has a `file_map`, the guest filename is translated to
+    /// the corresponding host filename. Otherwise, the path is returned as-is.
+    pub fn translate_path<'a>(&'a self, guest_rel_path: &'a str) -> &'a str {
+        match &self.file_map {
+            None => guest_rel_path,
+            Some(map) => {
+                let normalized = guest_rel_path.strip_prefix("./").unwrap_or(guest_rel_path);
+                map.get(normalized)
+                    .map(String::as_str)
+                    .unwrap_or(guest_rel_path)
+            }
+        }
     }
 }
 
@@ -312,6 +348,63 @@ impl<S: VfsStorage> HybridVfsCtx<S> {
     ) -> std::io::Result<()> {
         let dir = RealDir::open_ambient(host_path, dir_perms, file_perms)?;
         self.add_real_preopen(guest_path, dir);
+        Ok(())
+    }
+
+    /// Add a real filesystem preopen for a single host file.
+    ///
+    /// This mounts the file's parent directory at the guest file's parent path,
+    /// restricted so only the specified filename is accessible.
+    ///
+    /// For example, mounting host `/home/ben/fetch.py` at guest `/mnt/fetch.py`
+    /// opens `/home/ben/` at `/mnt/` but only allows access to `fetch.py`.
+    pub fn add_real_file_preopen_path(
+        &mut self,
+        guest_path: impl Into<String>,
+        host_path: impl AsRef<std::path::Path>,
+        dir_perms: DirPerms,
+        file_perms: FilePerms,
+    ) -> std::io::Result<()> {
+        let host_path = host_path.as_ref();
+        let guest_path = guest_path.into();
+
+        let host_parent = host_path.parent().ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("file has no parent directory: {}", host_path.display()),
+            )
+        })?;
+
+        let file_name = host_path
+            .file_name()
+            .ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    format!("file has no name: {}", host_path.display()),
+                )
+            })?
+            .to_string_lossy()
+            .into_owned();
+
+        let guest_parent = guest_path
+            .rsplit_once('/')
+            .map(|(parent, _)| {
+                if parent.is_empty() {
+                    "/".to_string()
+                } else {
+                    parent.to_string()
+                }
+            })
+            .unwrap_or_else(|| "/".to_string());
+
+        let guest_file_name = guest_path
+            .rsplit_once('/')
+            .map(|(_, name)| name.to_string())
+            .unwrap_or_else(|| guest_path.clone());
+
+        let mut dir = RealDir::open_ambient(host_parent, dir_perms, file_perms)?;
+        dir.file_map = Some(HashMap::from([(guest_file_name, file_name)]));
+        self.add_real_preopen(guest_parent, dir);
         Ok(())
     }
 

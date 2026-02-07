@@ -1970,13 +1970,22 @@ impl PythonExecutor {
                 } else {
                     (eryx_vfs::DirPerms::all(), eryx_vfs::FilePerms::all())
                 };
-                ctx.add_real_preopen_path(
-                    &volume.guest_path,
-                    &volume.host_path,
-                    dir_perms,
-                    file_perms,
-                )
-                .map_err(|e| {
+                let result = if volume.host_path.is_file() {
+                    ctx.add_real_file_preopen_path(
+                        &volume.guest_path,
+                        &volume.host_path,
+                        dir_perms,
+                        file_perms,
+                    )
+                } else {
+                    ctx.add_real_preopen_path(
+                        &volume.guest_path,
+                        &volume.host_path,
+                        dir_perms,
+                        file_perms,
+                    )
+                };
+                result.map_err(|e| {
                     Error::WasmEngine(format!(
                         "Failed to mount volume {} -> {}: {e}",
                         volume.host_path.display(),

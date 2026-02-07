@@ -149,6 +149,17 @@ class TestCliVolume:
         assert result == 0
         assert (tmp_path / "output.txt").read_text() == "written from sandbox"
 
+    def test_volume_single_file(self, tmp_path, capsys):
+        """Test that -v can mount a single file."""
+        host_file = tmp_path / "data.txt"
+        host_file.write_text("single file content")
+        result = main(
+            ["-v", f"{host_file}:/mnt/data.txt:ro", "-c", 'print(open("/mnt/data.txt").read())']
+        )
+        assert result == 0
+        captured = capsys.readouterr()
+        assert "single file content" in captured.out
+
     def test_volume_parse_format_error(self, capsys):
         """Test that an invalid volume spec raises an error."""
         with pytest.raises(SystemExit):
