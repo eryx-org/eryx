@@ -52,6 +52,18 @@ print(json.dumps(data, sort_keys=True))
 `);
     expect(result.stdout).toBe('{"key": "value", "num": 42}');
   });
+
+  it("imports non-pre-initialized stdlib modules", async () => {
+    const result = await sandbox.execute(`
+import pickle
+data = {"hello": "world", "num": 42}
+pickled = pickle.dumps(data)
+restored = pickle.loads(pickled)
+print(restored)
+`);
+    expect(result.stdout).toContain("hello");
+    expect(result.stdout).toContain("world");
+  });
 });
 
 describe("state persistence", () => {

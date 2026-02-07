@@ -86,16 +86,17 @@ outputs = ["eryx-sandbox/eryx-sandbox.js"]
 run = "node patch-jco.cjs"
 
 [tasks.build]
-description = "Build JavaScript bindings (WASM + transpile + version sync)"
+description = "Build JavaScript bindings (WASM + transpile + version sync + stdlib)"
 depends = ["patch-js"]
-sources = ["eryx-sandbox/eryx-sandbox.js", "../Cargo.toml"]
-outputs = ["eryx-sandbox/package.json"]
+sources = ["eryx-sandbox/eryx-sandbox.js", "../Cargo.toml", "../crates/eryx/python-stdlib.tar.gz"]
+outputs = ["eryx-sandbox/package.json", "eryx-sandbox/python-stdlib.tar.gz"]
 run = """
 #!/usr/bin/env bash
 set -euo pipefail
 VERSION=$(cargo metadata --format-version 1 --manifest-path ../Cargo.toml | jq -r '.packages[] | select(.name == "eryx") | .version')
 jq --arg v "$VERSION" '.version = $v' eryx-sandbox/package.json > eryx-sandbox/package.json.tmp
 mv eryx-sandbox/package.json.tmp eryx-sandbox/package.json
+cp ../crates/eryx/python-stdlib.tar.gz eryx-sandbox/python-stdlib.tar.gz
 """
 
 [tasks.test]

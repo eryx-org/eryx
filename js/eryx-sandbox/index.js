@@ -22,6 +22,22 @@ import {
   finalizePreinit as _finalizePreinit,
 } from "./eryx-sandbox.js";
 
+// Import filesystem shim to populate with Python stdlib
+import { _setFileData } from "@bytecodealliance/preview2-shim/filesystem";
+
+// Import stdlib loader
+import { loadStdlib } from "./stdlib-loader.js";
+
+// Load the Python stdlib into the preview2-shim virtual filesystem.
+// This must happen before _finalizePreinit() so Python can find stdlib modules.
+const stdlibTree = await loadStdlib();
+
+// The stdlib tar extracts to python-stdlib/*, but the WASM expects
+// files at the root of the preopen (mounted as /python-stdlib).
+// So we set the root fileData to contain the stdlib directory contents.
+const stdlibDir = stdlibTree.dir?.["python-stdlib"] || stdlibTree;
+_setFileData({ dir: { "python-stdlib": stdlibDir } });
+
 // Complete Python interpreter initialization.
 // The pre-initialized WASM has Python's core state baked in, but
 // finalizePreinit() must still be called to finish setup.
