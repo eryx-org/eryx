@@ -351,6 +351,15 @@ print(f"pickle:  {len(pickled)} bytes")`,
             statusEl.className = type + ' visible';
         }
 
+        // ===== URL hash (restore before WASM load so textarea doesn't flash) =====
+        function saveHash() {
+            history.replaceState(null, '', '#' + encodeURIComponent(codeEl.value));
+        }
+        if (window.location.hash) {
+            try { codeEl.value = decodeURIComponent(window.location.hash.slice(1)); } catch {}
+        }
+        codeEl.addEventListener('input', saveHash);
+
         // ===== JSPI check =====
         if (typeof WebAssembly?.Suspending !== 'function') {
             setStatus(
@@ -567,15 +576,6 @@ print(f"pickle:  {len(pickled)} bytes")`,
                 }
             });
         });
-
-        // ===== URL hash =====
-        function saveHash() {
-            history.replaceState(null, '', '#' + encodeURIComponent(codeEl.value));
-        }
-        if (window.location.hash) {
-            try { codeEl.value = decodeURIComponent(window.location.hash.slice(1)); } catch {}
-        }
-        codeEl.addEventListener('input', saveHash);
 
         // ===== Copy =====
         $('#copy-btn')?.addEventListener('click', () => {

@@ -87,22 +87,40 @@ describe("state persistence", () => {
     await expect(sandbox.execute("print(y)")).rejects.toThrow();
   });
 
-  it("snapshots and restores state", async () => {
+  it("snapshots and restores variables after clear", async () => {
     const fresh = new Sandbox();
     await fresh.execute("counter = 10");
 
-    // Snapshot with counter = 10
     const snapshot = new Uint8Array(await fresh.snapshotState());
     expect(snapshot.length).toBeGreaterThan(0);
 
-    // Mutate state
-    await fresh.execute("counter = 999");
-    const mutated = await fresh.execute("print(counter)");
-    expect(mutated.stdout).toBe("999");
+    // Clear state - variable should be gone
+    await fresh.clearState();
+    await expect(fresh.execute("print(counter)")).rejects.toThrow();
 
-    // Restore snapshot (counter should be 10 again)
+    // Restore snapshot - variable should be back
     await fresh.restoreState(snapshot);
     const restored = await fresh.execute("print(counter)");
     expect(restored.stdout).toBe("10");
+  });
+
+  it("does not snapshot exec-defined functions (pickle limitation)", async () => {
+    // Snapshot uses pickle, which can't serialize functions defined via exec().
+    // Functions persist across execute() calls (in-memory), but not across
+    // snapshot/restore cycles.
+    const fresh = new Sandbox();
+    await fresh.execute("def greet(name): return f'Hello, {name}!'");
+    await fresh.execute("counter = 42");
+
+    const snapshot = new Uint8Array(await fresh.snapshotState());
+
+    await fresh.clearState();
+
+    await fresh.restoreState(snapshot);
+    // Variable survives snapshot/restore
+    const restored = await fresh.execute("print(counter)");
+    expect(restored.stdout).toBe("42");
+    // Function does not survive (pickle can't serialize exec-defined functions)
+    await expect(fresh.execute("print(greet('x'))")).rejects.toThrow();
   });
 });
