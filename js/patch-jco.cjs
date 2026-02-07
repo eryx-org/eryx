@@ -92,6 +92,72 @@ if (useDirectBug.test(code)) {
   patched = true;
 }
 
+// Patch 7: Fix task-return map using raw WASM exports instead of lifting trampolines
+// jco generates proper taskReturn.bind trampolines with liftFns for async export
+// results, but wires raw WASM exports into the task-return map instead.
+// This causes "liftFn is not a function" errors when snapshot-state/restore-state return.
+{
+  // Find the three taskReturn trampolines by their distinctive lift patterns
+  const executeTramp = code.match(/const (trampoline\d+) = taskReturn\.bind\([^;]*?'stdout'[^;]*?\);/s)?.[1];
+  const snapshotTramp = code.match(/const (trampoline\d+) = taskReturn\.bind\([^;]*?_liftFlatList[^;]*?\);/s)?.[1];
+  const restoreTramp = code.match(/const (trampoline\d+) = taskReturn\.bind\([^;]*?'ok', null, null[^;]*?\);/s)?.[1];
+
+  if (executeTramp && snapshotTramp && restoreTramp) {
+    let count = 0;
+    const taskReturnExportRe = /'\[task-return\](execute|snapshot-state|restore-state)':\s*exports0\['\d+'\]/g;
+    code = code.replace(taskReturnExportRe, (match, name) => {
+      count++;
+      switch (name) {
+        case 'execute': return `'[task-return]execute': ${executeTramp}`;
+        case 'snapshot-state': return `'[task-return]snapshot-state': ${snapshotTramp}`;
+        case 'restore-state': return `'[task-return]restore-state': ${restoreTramp}`;
+        default: return match;
+      }
+    });
+    if (count > 0) {
+      console.log(`Patched: wired ${count} task-return trampolines (${executeTramp}, ${snapshotTramp}, ${restoreTramp})`);
+      patched = true;
+    }
+  } else if (code.match(/'\[task-return\]execute':\s*trampoline\d+/)) {
+    console.log('Already patched: task-return trampolines');
+  } else {
+    console.error('Warning: Could not find task-return trampolines to wire');
+  }
+}
+
+// Patch 9: Fix _liftFlatList for list<u8> in snapshot-state result lifting
+// _liftFlatList has two bugs: (1) missing return _liftFlatListInner, and
+// (2) .bind(null, 4) passes 4 as elemLiftFn instead of alignment32.
+// Replace with an inline list<u8> lifter that reads (ptr, len) from params.
+{
+  const listLiftBug = "_liftFlatResult([['ok', _liftFlatList.bind(null, 4), 8]";
+  const listLiftFix = "_liftFlatResult([['ok', function(ctx){const[p,c]=_liftFlatU32(ctx);const[l,c2]=_liftFlatU32(c);return[new Uint8Array(c2.memory.buffer.slice(p,p+l)),c2];}, 8]";
+  if (code.includes(listLiftBug)) {
+    code = code.replace(listLiftBug, listLiftFix);
+    console.log('Patched: replaced _liftFlatList.bind(null, 4) with inline list<u8> lifter');
+    patched = true;
+  } else if (code.includes('function(ctx){const[p,c]=_liftFlatU32')) {
+    console.log('Already patched: list<u8> lifter');
+  } else {
+    console.error('Warning: Could not find _liftFlatList.bind(null, 4) in result to patch');
+  }
+}
+
 if (patched) {
   fs.writeFileSync(path, code);
+}
+
+// Patch 8: Strip debug console.log statements from preview2-shim filesystem.js
+// These produce noisy [filesystem] FLAGS FOR, RENAME AT, etc. messages
+const shimFsPath = 'eryx-sandbox/node_modules/@bytecodealliance/preview2-shim/lib/browser/filesystem.js';
+if (fs.existsSync(shimFsPath)) {
+  let shimCode = fs.readFileSync(shimFsPath, 'utf8');
+  const debugLogRe = /^\s*console\.log\(`\[filesystem\].*$\n?/gm;
+  if (debugLogRe.test(shimCode)) {
+    shimCode = shimCode.replace(debugLogRe, '');
+    fs.writeFileSync(shimFsPath, shimCode);
+    console.log('Patched: stripped [filesystem] debug logs from preview2-shim');
+  } else {
+    console.log('Already patched: preview2-shim filesystem debug logs');
+  }
 }

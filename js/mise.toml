@@ -106,7 +106,8 @@ sources = ["eryx-sandbox/**/*.js", "eryx-sandbox/**/*.wasm", "testpkg/**/*.ts"]
 dir = "testpkg"
 run = """
 cd ../eryx-sandbox && npm ci
-cd ../testpkg && npm ci && npm run typecheck && npm run test:ci
+cd .. && node patch-jco.cjs
+cd testpkg && npm ci && npm run typecheck && npm run test:ci
 """
 
 [tasks.clean]

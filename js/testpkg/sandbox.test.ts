@@ -86,4 +86,23 @@ describe("state persistence", () => {
     await sandbox.clearState();
     await expect(sandbox.execute("print(y)")).rejects.toThrow();
   });
+
+  it("snapshots and restores state", async () => {
+    const fresh = new Sandbox();
+    await fresh.execute("counter = 10");
+
+    // Snapshot with counter = 10
+    const snapshot = new Uint8Array(await fresh.snapshotState());
+    expect(snapshot.length).toBeGreaterThan(0);
+
+    // Mutate state
+    await fresh.execute("counter = 999");
+    const mutated = await fresh.execute("print(counter)");
+    expect(mutated.stdout).toBe("999");
+
+    // Restore snapshot (counter should be 10 again)
+    await fresh.restoreState(snapshot);
+    const restored = await fresh.execute("print(counter)");
+    expect(restored.stdout).toBe("10");
+  });
 });
