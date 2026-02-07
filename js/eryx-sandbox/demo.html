@@ -141,7 +141,7 @@
         Code is saved in the URL for sharing.
     </p>
 
-    <div id="status" class="info visible loading">Loading Python sandbox (~42MB)&hellip; this may take a moment.</div>
+    <div id="status" class="info visible loading">Loading Python sandbox (~45MB)&hellip; this may take a moment.</div>
 
     <div class="tab-bar">
         <button class="tab-btn active" data-tab="run">Run</button>
@@ -308,19 +308,21 @@ p1 = Point(0, 0)
 p2 = Point(3, 4)
 print(f"{p1} -> {p2}")
 print(f"Distance: {p1.distance_to(p2)}")`,
-            stdlib: `import json, re, hashlib, base64, datetime
+            stdlib: `import json, re, hashlib, base64, datetime, pickle
 
 data = json.loads('{"key": "value", "n": 42}')
 encoded = base64.b64encode(b"hello eryx").decode()
 hash_val = hashlib.md5(b"test").hexdigest()[:8]
 match = re.search(r'\\d+', 'abc123def')
 now = datetime.datetime.now()
+pickled = pickle.dumps(data)
 
-print(f"json:   {data}")
-print(f"base64: {encoded}")
-print(f"md5:    {hash_val}")
-print(f"regex:  {match.group()}")
-print(f"time:   {now}")`,
+print(f"json:    {data}")
+print(f"base64:  {encoded}")
+print(f"md5:     {hash_val}")
+print(f"regex:   {match.group()}")
+print(f"time:    {now}")
+print(f"pickle:  {len(pickled)} bytes")`,
         };
 
         const SESSION_EXAMPLES = {
