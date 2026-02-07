@@ -18,9 +18,35 @@ run = """
 cd .. && mise run build-eryx-runtime
 """
 
+[tasks.extract-stdlib]
+description = "Extract Python stdlib for pre-initialization"
+depends = ["wasm-build"]
+sources = ["../crates/eryx/python-stdlib.tar.zst"]
+outputs = ["../crates/eryx-wasm-runtime/tests/python-stdlib/encodings/__init__.py"]
+run = """
+#!/usr/bin/env bash
+set -euo pipefail
+cd ../crates/eryx-wasm-runtime
+PYTHON_LIB="../eryx/python-stdlib.tar.zst"
+if [[ ! -f "$PYTHON_LIB" ]]; then
+    echo "Error: python-stdlib.tar.zst not found at $PYTHON_LIB"
+    exit 1
+fi
+if [[ -d "tests/python-stdlib/encodings" ]]; then
+    echo "Python stdlib already extracted"
+    exit 0
+fi
+echo "Extracting $PYTHON_LIB"
+rm -rf tests/python-stdlib-tmp tests/python-stdlib
+mkdir -p tests/python-stdlib-tmp
+tar -xf "$PYTHON_LIB" -C tests/python-stdlib-tmp
+mv tests/python-stdlib-tmp/python-stdlib tests/python-stdlib
+rm -rf tests/python-stdlib-tmp
+"""
+
 [tasks.preinit]
 description = "Pre-initialize Python in the WASM component (bakes in stdlib)"
-depends = ["wasm-build"]
+depends = ["wasm-build", "extract-stdlib"]
 sources = ["../crates/eryx-runtime/runtime.wasm"]
 outputs = ["../crates/eryx-runtime/runtime-preinit.wasm"]
 env = { ERYX_PRECOMPILE_BOOTSTRAP = "1" }
