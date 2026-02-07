@@ -4,6 +4,7 @@
 
 use std::sync::Arc;
 
+use async_trait::async_trait;
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 
@@ -21,12 +22,13 @@ pub(crate) struct PyOutputHandler {
     pub(crate) on_stderr: Option<Py<PyAny>>,
 }
 
+#[async_trait]
 impl OutputHandler for PyOutputHandler {
     async fn on_output(&self, chunk: &str) {
         if let Some(ref callback) = self.on_stdout {
             let chunk = chunk.to_string();
             let callback = callback.clone();
-            Python::with_gil(|py| {
+            Python::attach(|py| {
                 if let Err(e) = callback.call1(py, (chunk,)) {
                     e.print(py);
                 }
@@ -38,7 +40,7 @@ impl OutputHandler for PyOutputHandler {
         if let Some(ref callback) = self.on_stderr {
             let chunk = chunk.to_string();
             let callback = callback.clone();
-            Python::with_gil(|py| {
+            Python::attach(|py| {
                 if let Err(e) = callback.call1(py, (chunk,)) {
                     e.print(py);
                 }

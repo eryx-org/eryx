@@ -16,6 +16,7 @@ name = "_eryx"
 crate-type = ["cdylib"]
 
 [dependencies]
+async-trait.workspace = true
 eryx = { workspace = true, features = ["macros", "native-extensions", "vfs"] } #unified
 pyo3 = { workspace = true, features = ["abi3-py312"] }
 pyo3-async-runtimes.workspace = true

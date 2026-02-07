@@ -1155,7 +1155,6 @@ static PYTHON_INITIALIZED: AtomicBool = AtomicBool::new(false);
 /// - User globals namespace (isolated from infrastructure)
 const ERYX_EXEC_INFRASTRUCTURE: &str = r#"
 import sys as _sys
-import _io
 import ast as _ast
 import types as _types
 
@@ -1193,10 +1192,15 @@ _socket.socketpair = _dummy_socketpair
 
 # Streaming writer that both accumulates text and streams each write to the host.
 # Replaces StringIO for stdout/stderr capture so output appears in real-time.
-class _EryxStreamingWriter(_io.TextIOBase):
+# Uses duck typing (plain class) rather than inheriting from _io.TextIOBase
+# because _io.TextIOBase may not be available in all WASI Python builds.
+class _EryxStreamingWriter:
     def __init__(self, stream_id):
         self._stream_id = stream_id
         self._buffer = []
+        self.encoding = 'utf-8'
+        self.errors = 'strict'
+        self.newlines = None
     def write(self, s):
         if not isinstance(s, str):
             raise TypeError("write() argument must be str")
@@ -1214,9 +1218,11 @@ class _EryxStreamingWriter(_io.TextIOBase):
         return False
     def readable(self):
         return False
+    def flush(self):
+        pass
     @property
-    def encoding(self):
-        return 'utf-8'
+    def closed(self):
+        return False
 
 # Persistent stdout/stderr capture - created once, reused across executions
 _eryx_stdout = _EryxStreamingWriter(0)
