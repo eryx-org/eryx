@@ -36,7 +36,13 @@ const stdlibTree = await loadStdlib();
 // files at the root of the preopen (mounted as /python-stdlib).
 // So we set the root fileData to contain the stdlib directory contents.
 const stdlibDir = stdlibTree.dir?.["python-stdlib"] || stdlibTree;
-_setFileData({ dir: { "python-stdlib": stdlibDir } });
+
+// Build the file tree with stdlib and an empty site-packages directory.
+// This tree is exported so consumers (e.g., the demo) can add packages to it.
+export const _fileTree = {
+  dir: { "python-stdlib": stdlibDir, "site-packages": { dir: {} } },
+};
+_setFileData(_fileTree);
 
 // Complete Python interpreter initialization.
 // The pre-initialized WASM has Python's core state baked in, but

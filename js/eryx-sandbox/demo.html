@@ -240,19 +240,17 @@ finally:
 
     <!-- Tab: Packages -->
     <div id="tab-packages" class="tab-panel">
-        <div class="info-banner">
-            <strong>Coming soon.</strong> Package installation is available in the Rust and Python SDKs
-            via <code>SandboxFactory</code>. Browser-side package loading is planned.
-        </div>
+        <p style="color:#666;margin-top:0">Upload pure-Python wheels to make packages available for import. Files are extracted into a virtual filesystem.</p>
         <div class="upload-zone" id="upload-zone">
             <p style="margin:0 0 8px"><strong>Drop .whl files here</strong> or click to browse</p>
             <p style="margin:0;font-size:13px">Pure Python wheels (py3-none-any) are supported</p>
             <input type="file" id="file-input" accept=".whl" multiple>
         </div>
         <div id="package-list"></div>
+        <div id="pkg-output" class="output-box" style="display:none"></div>
         <p style="font-size:13px;color:#888;margin-top:16px">
-            Example packages that work with eryx: <strong>requests</strong>, <strong>jinja2</strong>,
-            <strong>pyyaml</strong>, <strong>httpx</strong>, <strong>beautifulsoup4</strong> (pure Python wheels only).
+            Download wheels from <a href="https://pypi.org" style="color:#007bff">PyPI</a> (look for <code>py3-none-any.whl</code> files).
+            Packages with native C extensions are not supported in the browser.
         </p>
     </div>
 
@@ -519,6 +517,12 @@ print(f"pickle:  {len(pickled)} bytes")`,
                 const uploadZone = $('#upload-zone');
                 const fileInput = $('#file-input');
                 const packages = [];
+                let sitePackagesConfigured = false;
+
+                // Import filesystem shim to update virtual FS after adding packages
+                const { _setFileData } = await import('@bytecodealliance/preview2-shim/filesystem');
+                // Get the file tree reference from the eryx module (includes stdlib + empty site-packages)
+                const fileTree = mod._fileTree;
 
                 uploadZone.addEventListener('click', () => fileInput.click());
                 uploadZone.addEventListener('dragover', e => { e.preventDefault(); uploadZone.classList.add('dragover'); });
@@ -530,26 +534,180 @@ print(f"pickle:  {len(pickled)} bytes")`,
                 });
                 fileInput.addEventListener('change', () => handleFiles(fileInput.files));
 
-                function handleFiles(files) {
+                async function handleFiles(files) {
                     for (const f of files) {
                         if (!f.name.endsWith('.whl')) continue;
                         const parts = f.name.replace('.whl', '').split('-');
-                        packages.push({ name: parts[0], version: parts[1] || '?', size: f.size, file: f });
+                        const pkg = { name: parts[0], version: parts[1] || '?', size: f.size, file: f, status: 'pending' };
+                        packages.push(pkg);
                     }
                     renderPackages();
+
+                    // Install each pending package
+                    for (const pkg of packages) {
+                        if (pkg.status !== 'pending') continue;
+                        pkg.status = 'installing';
+                        renderPackages();
+                        try {
+                            await installWheel(pkg);
+                            pkg.status = 'installed';
+                        } catch (e) {
+                            pkg.status = 'error';
+                            pkg.error = e.message;
+                            console.error(`Failed to install ${pkg.name}:`, e);
+                        }
+                        renderPackages();
+                    }
+
+                    // Configure sys.path if we have any installed packages
+                    if (!sitePackagesConfigured && packages.some(p => p.status === 'installed')) {
+                        sitePackagesConfigured = true;
+                        try {
+                            await sandbox.execute('import sys; sys.path.insert(0, "/site-packages")');
+                        } catch (e) {
+                            console.warn('Failed to configure sys.path:', e);
+                        }
+                    }
+
+                    const installed = packages.filter(p => p.status === 'installed');
+                    if (installed.length > 0) {
+                        setStatus(`${installed.length} package${installed.length > 1 ? 's' : ''} installed. Use "import ${installed[0].name}" in your code.`, 'success');
+                    }
+                }
+
+                async function installWheel(pkg) {
+                    const arrayBuffer = await pkg.file.arrayBuffer();
+                    const entries = await parseZip(new Uint8Array(arrayBuffer));
+                    const sitePackages = fileTree.dir['site-packages'];
+                    let fileCount = 0;
+
+                    for (const [path, data] of entries) {
+                        // Skip .dist-info metadata directories
+                        if (path.includes('.dist-info/')) continue;
+                        // Skip __pycache__
+                        if (path.includes('__pycache__/')) continue;
+
+                        const parts = path.split('/');
+                        let current = sitePackages;
+                        for (let i = 0; i < parts.length - 1; i++) {
+                            if (!parts[i]) continue;
+                            if (!current.dir) current.dir = {};
+                            if (!current.dir[parts[i]]) current.dir[parts[i]] = { dir: {} };
+                            current = current.dir[parts[i]];
+                        }
+                        const fileName = parts[parts.length - 1];
+                        if (fileName) {
+                            if (!current.dir) current.dir = {};
+                            current.dir[fileName] = { source: data };
+                            fileCount++;
+                        }
+                    }
+
+                    pkg.fileCount = fileCount;
+
+                    // Update the virtual filesystem
+                    _setFileData(fileTree);
+                }
+
+                /**
+                 * Parse a ZIP file (wheel) and return [path, Uint8Array] entries.
+                 * Minimal ZIP parser - handles the common cases for Python wheels.
+                 */
+                async function parseZip(data) {
+                    const entries = [];
+                    const view = new DataView(data.buffer, data.byteOffset, data.byteLength);
+
+                    // Find End of Central Directory record (scan backwards)
+                    let eocdOffset = -1;
+                    for (let i = data.length - 22; i >= 0; i--) {
+                        if (view.getUint32(i, true) === 0x06054b50) {
+                            eocdOffset = i;
+                            break;
+                        }
+                    }
+                    if (eocdOffset === -1) throw new Error('Not a valid ZIP file');
+
+                    const cdOffset = view.getUint32(eocdOffset + 16, true);
+                    const cdCount = view.getUint16(eocdOffset + 10, true);
+                    let pos = cdOffset;
+
+                    for (let i = 0; i < cdCount; i++) {
+                        if (view.getUint32(pos, true) !== 0x02014b50) break;
+
+                        const compressionMethod = view.getUint16(pos + 10, true);
+                        const compressedSize = view.getUint32(pos + 20, true);
+                        const uncompressedSize = view.getUint32(pos + 24, true);
+                        const nameLen = view.getUint16(pos + 28, true);
+                        const extraLen = view.getUint16(pos + 30, true);
+                        const commentLen = view.getUint16(pos + 32, true);
+                        const localHeaderOffset = view.getUint32(pos + 42, true);
+                        const name = new TextDecoder().decode(data.subarray(pos + 46, pos + 46 + nameLen));
+
+                        pos += 46 + nameLen + extraLen + commentLen;
+
+                        // Skip directories
+                        if (name.endsWith('/')) continue;
+
+                        // Read from local file header
+                        const localNameLen = view.getUint16(localHeaderOffset + 26, true);
+                        const localExtraLen = view.getUint16(localHeaderOffset + 28, true);
+                        const dataStart = localHeaderOffset + 30 + localNameLen + localExtraLen;
+
+                        let fileData;
+                        if (compressionMethod === 0) {
+                            // Stored (no compression)
+                            fileData = data.slice(dataStart, dataStart + uncompressedSize);
+                        } else if (compressionMethod === 8) {
+                            // Deflate
+                            const compressed = data.subarray(dataStart, dataStart + compressedSize);
+                            const ds = new DecompressionStream('deflate-raw');
+                            const writer = ds.writable.getWriter();
+                            const reader = ds.readable.getReader();
+                            writer.write(compressed);
+                            writer.close();
+                            const chunks = [];
+                            let totalLen = 0;
+                            while (true) {
+                                const { done, value } = await reader.read();
+                                if (done) break;
+                                chunks.push(value);
+                                totalLen += value.length;
+                            }
+                            fileData = new Uint8Array(totalLen);
+                            let offset = 0;
+                            for (const chunk of chunks) {
+                                fileData.set(chunk, offset);
+                                offset += chunk.length;
+                            }
+                        } else {
+                            console.warn(`Skipping ${name}: unsupported compression method ${compressionMethod}`);
+                            continue;
+                        }
+
+                        entries.push([name, fileData]);
+                    }
+
+                    return entries;
                 }
 
                 function renderPackages() {
                     const list = $('#package-list');
                     if (packages.length === 0) { list.innerHTML = ''; return; }
-                    list.innerHTML = '<h3 style="font-size:15px;margin-bottom:8px">Uploaded Packages</h3>' +
-                        packages.map(p =>
-                            `<div style="padding:8px 12px;background:#f1f3f5;border-radius:6px;margin-bottom:6px;font-size:14px">
+                    list.innerHTML = '<h3 style="font-size:15px;margin-bottom:8px">Packages</h3>' +
+                        packages.map(p => {
+                            const statusHtml = p.status === 'installed'
+                                ? `<span style="color:#28a745;float:right">Installed (${p.fileCount} files)</span>`
+                                : p.status === 'installing'
+                                ? `<span style="color:#007bff;float:right">Installing...</span>`
+                                : p.status === 'error'
+                                ? `<span style="color:#dc3545;float:right" title="${p.error || ''}">Error</span>`
+                                : `<span style="color:#888;float:right">Pending</span>`;
+                            return `<div style="padding:8px 12px;background:#f1f3f5;border-radius:6px;margin-bottom:6px;font-size:14px">
                                 <strong>${p.name}</strong> ${p.version}
                                 <span style="color:#888;margin-left:8px">${(p.size/1024).toFixed(1)} KB</span>
-                                <span style="color:#888;float:right">Installation API coming soon</span>
-                            </div>`
-                        ).join('');
+                                ${statusHtml}
+                            </div>`;
+                        }).join('');
                 }
 
             } catch (e) {
