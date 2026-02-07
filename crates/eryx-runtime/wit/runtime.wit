@@ -46,6 +46,16 @@ world sandbox {
     /// - context-json: Optional context data (e.g., local variables snapshot)
     import report-trace: func(lineno: u32, event-json: string, context-json: string);
 
+    /// Report output from the Python runtime to the host in real-time.
+    ///
+    /// Called by the Python runtime's sys.stdout/sys.stderr on every write()
+    /// to stream output as it's produced, rather than waiting for execution
+    /// to complete.
+    ///
+    /// - stream-id: 0 for stdout, 1 for stderr
+    /// - data: The text that was written
+    import report-output: func(stream-id: u32, data: string);
+
     /// Callback metadata returned by list-callbacks.
     record callback-info {
         /// Unique name for this callback (e.g., "http.get", "grafana.prometheus").

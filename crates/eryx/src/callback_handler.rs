@@ -18,8 +18,8 @@ use crate::callback::{Callback, CallbackError};
 use crate::net::ConnectionManager;
 use crate::sandbox::ResourceLimits;
 use crate::secrets::SecretConfig;
-use crate::trace::{TraceEvent, TraceEventKind, TraceHandler};
-use crate::wasm::{CallbackRequest, NetRequest, TraceRequest, parse_trace_event};
+use crate::trace::{OutputHandler, TraceEvent, TraceEventKind, TraceHandler};
+use crate::wasm::{CallbackRequest, NetRequest, OutputRequest, TraceRequest, parse_trace_event};
 
 /// Type alias for the in-flight callback futures collection.
 type InFlightCallbacks = FuturesUnordered<Pin<Box<dyn Future<Output = ()> + Send>>>;
@@ -217,6 +217,44 @@ pub(crate) async fn run_trace_collector(
     }
 
     events
+}
+
+/// Collect and dispatch streaming output (stdout/stderr) from the Python runtime.
+///
+/// Receives output chunks via the channel and dispatches them to the
+/// `OutputHandler` in real-time. Optionally scrubs secret placeholders.
+#[tracing::instrument(
+    skip(output_rx, output_handler, secrets),
+    fields(has_handler = output_handler.is_some())
+)]
+pub(crate) async fn run_output_collector(
+    mut output_rx: mpsc::UnboundedReceiver<OutputRequest>,
+    output_handler: Option<Arc<dyn OutputHandler>>,
+    secrets: HashMap<String, SecretConfig>,
+    scrub_stdout: bool,
+    scrub_stderr: bool,
+) {
+    while let Some(request) = output_rx.recv().await {
+        if let Some(handler) = &output_handler {
+            let should_scrub = match request.stream {
+                0 => scrub_stdout,
+                1 => scrub_stderr,
+                _ => false,
+            };
+
+            let data = if should_scrub && !secrets.is_empty() {
+                crate::secrets::scrub_placeholders(&request.data, &secrets)
+            } else {
+                request.data
+            };
+
+            match request.stream {
+                0 => handler.on_output(&data).await,
+                1 => handler.on_stderr(&data).await,
+                _ => {}
+            }
+        }
+    }
 }
 
 /// Handle network requests (TCP and TLS) from Python code.

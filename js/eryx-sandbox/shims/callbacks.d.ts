@@ -35,3 +35,15 @@ export function setTraceHandler(
     | ((lineno: number, eventJson: string, contextJson: string) => void)
     | null,
 ): void;
+
+/**
+ * Set a handler for streaming output (stdout/stderr) from the Python runtime.
+ *
+ * The handler is called in real-time as Python code writes to stdout or stderr,
+ * rather than waiting for execution to complete.
+ *
+ * @param handler - stream: 0 = stdout, 1 = stderr; data: the text written
+ */
+export function setOutputHandler(
+  handler: ((stream: number, data: string) => void) | null,
+): void;

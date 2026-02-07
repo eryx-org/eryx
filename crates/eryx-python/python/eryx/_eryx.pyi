@@ -359,6 +359,8 @@ class Sandbox:
         scrub_stderr: Optional[bool] = None,
         scrub_files: Optional[bool] = None,
         volumes: Optional[Sequence[tuple[str, str, bool]]] = None,
+        on_stdout: Optional[Callable[[str], None]] = None,
+        on_stderr: Optional[Callable[[str], None]] = None,
     ) -> None:
         """Create a new sandbox with the embedded Python runtime.
 
@@ -379,6 +381,12 @@ class Sandbox:
                 Defaults to True when secrets are provided.
             scrub_files: Whether to scrub secret placeholders from file writes.
                 Defaults to True when secrets are provided.
+            on_stdout: Optional callback for streaming stdout output.
+                Called in real-time as Python code writes to stdout, rather than
+                waiting for execution to complete. Receives the text chunk as a string.
+            on_stderr: Optional callback for streaming stderr output.
+                Called in real-time as Python code writes to stderr, rather than
+                waiting for execution to complete. Receives the text chunk as a string.
 
         Raises:
             InitializationError: If the sandbox fails to initialize.
@@ -387,6 +395,12 @@ class Sandbox:
             # Default sandbox (stdlib only, no network)
             sandbox = Sandbox()
             result = sandbox.execute('import json; print(json.dumps([1, 2, 3]))')
+
+            # Sandbox with streaming output
+            sandbox = Sandbox(
+                on_stdout=lambda chunk: print(f"[stdout] {chunk}", end=""),
+                on_stderr=lambda chunk: print(f"[stderr] {chunk}", end=""),
+            )
 
             # Sandbox with secrets
             sandbox = Sandbox(
@@ -594,6 +608,8 @@ class SandboxFactory:
         scrub_stderr: Optional[bool] = None,
         scrub_files: Optional[bool] = None,
         volumes: Optional[Sequence[tuple[str, str, bool]]] = None,
+        on_stdout: Optional[Callable[[str], None]] = None,
+        on_stderr: Optional[Callable[[str], None]] = None,
     ) -> Sandbox:
         """Create a new sandbox from this factory.
 
