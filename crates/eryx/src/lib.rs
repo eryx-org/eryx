@@ -100,7 +100,7 @@ pub use session::{VfsConfig, VolumeMount};
 pub use trace::{OutputHandler, TraceEvent, TraceEventKind, TraceHandler};
 
 // Re-export precompilation utilities and internal types
-pub use wasm::{CpuFeatureLevel, ExecutionOutput, PythonExecutor};
+pub use wasm::{CpuFeatureLevel, ExecutionOutput, OutputRequest, PythonExecutor};
 
 // Re-export schema types at top level for convenience
 pub use schema::{JsonSchema, Schema};

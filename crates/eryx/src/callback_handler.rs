@@ -227,7 +227,7 @@ pub(crate) async fn run_trace_collector(
     skip(output_rx, output_handler, secrets),
     fields(has_handler = output_handler.is_some())
 )]
-pub(crate) async fn run_output_collector(
+pub async fn run_output_collector(
     mut output_rx: mpsc::UnboundedReceiver<OutputRequest>,
     output_handler: Option<Arc<dyn OutputHandler>>,
     secrets: HashMap<String, SecretConfig>,

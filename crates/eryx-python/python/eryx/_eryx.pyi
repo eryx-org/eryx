@@ -731,6 +731,8 @@ class Session:
         execution_timeout_ms: Optional[int] = None,
         callbacks: Optional[Union[CallbackRegistry, Sequence[CallbackDict]]] = None,
         volumes: Optional[Sequence[tuple[str, str, bool]]] = None,
+        on_stdout: Optional[Callable[[str], None]] = None,
+        on_stderr: Optional[Callable[[str], None]] = None,
     ) -> None:
         """Create a new session with the embedded Python runtime.
 
@@ -744,6 +746,8 @@ class Session:
             execution_timeout_ms: Optional timeout in milliseconds for each execution.
             callbacks: Optional callbacks that sandboxed code can invoke.
                 Can be a CallbackRegistry or a list of callback dicts.
+            on_stdout: Optional callback for streaming stdout output in real-time.
+            on_stderr: Optional callback for streaming stderr output in real-time.
 
         Raises:
             InitializationError: If the session fails to initialize.

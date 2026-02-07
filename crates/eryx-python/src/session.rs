@@ -8,12 +8,15 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use eryx::Callback;
+use eryx::OutputHandler;
 use pyo3::prelude::*;
 use pyo3::types::PyBytes;
+use tokio::sync::mpsc;
 
 use crate::callback::extract_callbacks;
 use crate::error::{InitializationError, eryx_error_to_py};
 use crate::result::ExecuteResult;
+use crate::sandbox::PyOutputHandler;
 use crate::vfs::VfsStorage;
 
 /// A session that maintains persistent Python state across executions.
@@ -61,6 +64,8 @@ pub struct Session {
     vfs_mount_path: Option<String>,
     /// Callbacks available for this session.
     callbacks: Arc<HashMap<String, Arc<dyn eryx::Callback>>>,
+    /// Output handler for streaming stdout/stderr.
+    output_handler: Option<Arc<dyn OutputHandler>>,
 }
 
 #[pymethods]
@@ -104,7 +109,7 @@ impl Session {
     ///         {"name": "get_time", "fn": get_time, "description": "Returns current time"}
     ///     ])
     #[new]
-    #[pyo3(signature = (*, vfs=None, vfs_mount_path=None, execution_timeout_ms=None, callbacks=None, volumes=None))]
+    #[pyo3(signature = (*, vfs=None, vfs_mount_path=None, execution_timeout_ms=None, callbacks=None, volumes=None, on_stdout=None, on_stderr=None))]
     fn new(
         py: Python<'_>,
         vfs: Option<VfsStorage>,
@@ -112,6 +117,8 @@ impl Session {
         execution_timeout_ms: Option<u64>,
         callbacks: Option<Bound<'_, PyAny>>,
         volumes: Option<Vec<(String, String, bool)>>,
+        on_stdout: Option<Py<PyAny>>,
+        on_stderr: Option<Py<PyAny>>,
     ) -> PyResult<Self> {
         // Create a tokio runtime for async execution
         let runtime = Arc::new(
@@ -196,6 +203,17 @@ impl Session {
             })
             .map_err(eryx_error_to_py)?;
 
+        // Build output handler if streaming callbacks are provided
+        let output_handler: Option<Arc<dyn OutputHandler>> =
+            if on_stdout.is_some() || on_stderr.is_some() {
+                Some(Arc::new(PyOutputHandler {
+                    on_stdout,
+                    on_stderr,
+                }))
+            } else {
+                None
+            };
+
         let session = Self {
             inner: Mutex::new(Some(inner)),
             executor,
@@ -203,6 +221,7 @@ impl Session {
             vfs_storage,
             vfs_mount_path: mount_path,
             callbacks: callbacks_map,
+            output_handler,
         };
 
         // Set execution timeout if provided
@@ -238,6 +257,7 @@ impl Session {
         let code = code.to_string();
         let runtime = self.runtime.clone();
         let callbacks_map = self.callbacks.clone();
+        let output_handler = self.output_handler.clone();
 
         // Release the GIL while executing
         py.detach(|| {
@@ -270,15 +290,43 @@ impl Session {
                         .await
                     });
 
-                    // Execute with callbacks
-                    let result = inner
+                    // Spawn output collector for real-time streaming if handler is configured
+                    let (output_tx, output_collector) = if output_handler.is_some() {
+                        let (tx, rx) = mpsc::unbounded_channel::<eryx::OutputRequest>();
+                        let handler = output_handler.clone();
+                        let task = tokio::spawn(async move {
+                            eryx::callback_handler::run_output_collector(
+                                rx,
+                                handler,
+                                std::collections::HashMap::new(),
+                                false,
+                                false,
+                            )
+                            .await;
+                        });
+                        (Some(tx), Some(task))
+                    } else {
+                        (None, None)
+                    };
+
+                    // Execute with callbacks and optional output streaming
+                    let mut builder = inner
                         .execute(&code)
-                        .with_callbacks(&callbacks_vec, callback_tx)
-                        .run()
-                        .await;
+                        .with_callbacks(&callbacks_vec, callback_tx);
+
+                    if let Some(tx) = output_tx {
+                        builder = builder.with_output_streaming(tx);
+                    }
+
+                    let result = builder.run().await;
 
                     // Wait for handler to finish (it will exit when channel closes)
                     let _callback_count = handler.await.unwrap_or(0);
+
+                    // Wait for output collector to finish
+                    if let Some(collector) = output_collector {
+                        let _ = collector.await;
+                    }
 
                     result
                 })
