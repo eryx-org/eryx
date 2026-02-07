@@ -1,0 +1,16 @@
+{
+  "name": "@bsull/eryx-testpkg",
+  "type": "module",
+  "private": true,
+  "devDependencies": {
+    "@bsull/eryx": "../eryx-sandbox",
+    "@types/node": "^22.13.0",
+    "typescript": "^5.8.0",
+    "vitest": "^3.0.0"
+  },
+  "scripts": {
+    "test": "vitest",
+    "test:ci": "vitest run",
+    "typecheck": "tsc --noEmit"
+  }
+}

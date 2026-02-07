@@ -1,0 +1,122 @@
+[tools]
+node = "24"
+"npm:@bytecodealliance/jco" = "1.16.1"
+
+# =============================================================================
+# JavaScript bindings tasks (browser/Node.js via jco)
+# =============================================================================
+
+[tasks.wasm-build]
+description = "Build eryx WASM runtime (delegates to root mise task)"
+sources = [
+  "../crates/eryx-wasm-runtime/src/**/*.rs",
+  "../crates/eryx-wasm-runtime/Cargo.toml",
+  "../crates/eryx-runtime/wit/**/*.wit",
+]
+outputs = ["../crates/eryx-runtime/runtime.wasm"]
+run = """
+cd .. && mise run build-eryx-runtime
+"""
+
+[tasks.extract-stdlib]
+description = "Extract Python stdlib for pre-initialization"
+depends = ["wasm-build"]
+sources = ["../crates/eryx/python-stdlib.tar.zst"]
+outputs = ["../crates/eryx-wasm-runtime/tests/python-stdlib/encodings/__init__.py"]
+run = """
+#!/usr/bin/env bash
+set -euo pipefail
+cd ../crates/eryx-wasm-runtime
+PYTHON_LIB="../eryx/python-stdlib.tar.zst"
+if [[ ! -f "$PYTHON_LIB" ]]; then
+    echo "Error: python-stdlib.tar.zst not found at $PYTHON_LIB"
+    exit 1
+fi
+if [[ -d "tests/python-stdlib/encodings" ]]; then
+    echo "Python stdlib already extracted"
+    exit 0
+fi
+echo "Extracting $PYTHON_LIB"
+rm -rf tests/python-stdlib-tmp tests/python-stdlib
+mkdir -p tests/python-stdlib-tmp
+tar -xf "$PYTHON_LIB" -C tests/python-stdlib-tmp
+mv tests/python-stdlib-tmp/python-stdlib tests/python-stdlib
+rm -rf tests/python-stdlib-tmp
+"""
+
+[tasks.preinit]
+description = "Pre-initialize Python in the WASM component (bakes in stdlib)"
+depends = ["wasm-build", "extract-stdlib"]
+sources = ["../crates/eryx-runtime/runtime.wasm"]
+outputs = ["../crates/eryx-runtime/runtime-preinit.wasm"]
+env = { ERYX_PRECOMPILE_BOOTSTRAP = "1" }
+run = """
+cd .. && cargo run -p eryx-precompile --release -- \
+  crates/eryx-runtime/runtime.wasm \
+  --preinit \
+  --stdlib crates/eryx-wasm-runtime/tests/python-stdlib \
+  --wasm-only \
+  --output crates/eryx-runtime/runtime-preinit.wasm \
+  --no-verify
+"""
+
+[tasks.transpile]
+description = "Transpile WASM component to JavaScript using jco"
+depends = ["preinit"]
+sources = ["../crates/eryx-runtime/runtime-preinit.wasm"]
+outputs = ["eryx-sandbox/eryx-sandbox.js", "eryx-sandbox/eryx-sandbox.core.wasm"]
+run = """
+jco transpile \
+  ../crates/eryx-runtime/runtime-preinit.wasm \
+  --name eryx-sandbox \
+  --out-dir eryx-sandbox \
+  --map 'eryx:net/tcp=./shims/net.js#tcp' \
+  --map 'eryx:net/tls=./shims/net.js#tls' \
+  --map 'invoke=./shims/callbacks.js#invoke' \
+  --map 'list-callbacks=./shims/callbacks.js#listCallbacks' \
+  --map 'report-trace=./shims/callbacks.js#reportTrace' \
+  --map 'wasi:sockets/*=./shims/sockets.js#*'
+"""
+
+[tasks.patch-js]
+description = "Patch generated JS for webpack compat and jco codegen bugs"
+depends = ["transpile"]
+sources = ["eryx-sandbox/eryx-sandbox.js", "patch-jco.cjs"]
+outputs = ["eryx-sandbox/eryx-sandbox.js"]
+run = "node patch-jco.cjs"
+
+[tasks.build]
+description = "Build JavaScript bindings (WASM + transpile + version sync + stdlib)"
+depends = ["patch-js"]
+sources = ["eryx-sandbox/eryx-sandbox.js", "../Cargo.toml", "../crates/eryx/python-stdlib.tar.gz"]
+outputs = ["eryx-sandbox/package.json", "eryx-sandbox/python-stdlib.tar.gz"]
+run = """
+#!/usr/bin/env bash
+set -euo pipefail
+VERSION=$(cargo metadata --format-version 1 --manifest-path ../Cargo.toml | jq -r '.packages[] | select(.name == "eryx") | .version')
+jq --arg v "$VERSION" '.version = $v' eryx-sandbox/package.json > eryx-sandbox/package.json.tmp
+mv eryx-sandbox/package.json.tmp eryx-sandbox/package.json
+cp ../crates/eryx/python-stdlib.tar.gz eryx-sandbox/python-stdlib.tar.gz
+"""
+
+[tasks.test]
+description = "Run JavaScript tests"
+depends = ["build"]
+sources = ["eryx-sandbox/**/*.js", "eryx-sandbox/**/*.wasm", "testpkg/**/*.ts"]
+dir = "testpkg"
+run = """
+cd ../eryx-sandbox && npm ci
+cd .. && node patch-jco.cjs
+cd testpkg && npm ci && npm run typecheck && npm run test:ci
+"""
+
+[tasks.clean]
+description = "Clean JavaScript build artifacts (generated files only)"
+dir = "eryx-sandbox"
+run = "rm -rf eryx-sandbox.js eryx-sandbox.d.ts eryx-sandbox.core*.wasm interfaces"
+
+[tasks.publish]
+description = "Publish JavaScript package to npm"
+depends = ["test"]
+dir = "eryx-sandbox"
+run = "npm publish --access public"
