@@ -80,6 +80,4 @@ js/eryx-sandbox/eryx-sandbox.d.ts
 js/eryx-sandbox/eryx-sandbox.core*.wasm
 js/eryx-sandbox/interfaces/
 js/eryx-sandbox/node_modules/
-js/eryx-sandbox/package-lock.json
 js/testpkg/node_modules/
-js/testpkg/package-lock.json

@@ -449,7 +449,10 @@ print(f"time:   {now}")`,
                     const name = prompt('Snapshot name:', `snapshot-${snapshots.size + 1}`);
                     if (!name) return;
                     try {
-                        const data = await sandbox.snapshotState();
+                        // Copy the snapshot data - the returned Uint8Array may reference
+                        // WASM linear memory which gets invalidated by subsequent calls.
+                        const raw = await sandbox.snapshotState();
+                        const data = new Uint8Array(raw);
                         snapshots.set(name, { data, time: new Date() });
                         renderSnapshots();
                         setStatus(`Snapshot "${name}" saved (${(data.byteLength / 1024).toFixed(1)} KB)`, 'success');
