@@ -532,9 +532,11 @@ for i in range(5):
     let output = result.unwrap();
 
     // The output handler's combined output should match result.stdout
+    // (result.stdout has trailing newlines stripped, handler output is raw)
     let handler_output = output_handler.combined_output();
     assert_eq!(
-        handler_output, output.stdout,
+        handler_output.trim_end_matches('\n'),
+        output.stdout,
         "Handler output should match result stdout"
     );
 }
@@ -626,8 +628,10 @@ for i in range(100):
         "Should have substantial output: {} chars",
         combined.len()
     );
+    // result.stdout has trailing newlines stripped, handler output is raw
     assert_eq!(
-        combined, output.stdout,
+        combined.trim_end_matches('\n'),
+        output.stdout,
         "Handler output should match stdout"
     );
 }
@@ -878,10 +882,12 @@ print("chunk3")
     );
 
     // Combined output should equal final stdout
+    // (result.stdout has trailing newlines stripped, handler output is raw)
     let combined = output_handler.combined_output();
     let result = result.unwrap();
     assert_eq!(
-        combined, result.stdout,
+        combined.trim_end_matches('\n'),
+        result.stdout,
         "Streamed chunks should combine to match final stdout"
     );
 }
