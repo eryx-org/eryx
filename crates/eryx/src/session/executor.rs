@@ -869,11 +869,32 @@ impl SessionExecutor {
             None::<Arc<AtomicBool>>
         };
 
-        // Execute the code
+        // Execute the code.
+        // Wrap in tokio::time::timeout so that blocking WASI host calls (e.g. poll_oneoff
+        // used by time.sleep) are cancelled when the future is dropped, not just CPU-bound
+        // loops caught by epoch interruption.
         let code_owned = code.to_string();
-        let result = store
-            .run_concurrent(async |accessor| bindings.call_execute(accessor, code_owned).await)
-            .await;
+        let mut async_timeout_elapsed = false;
+        let result = if let Some(timeout) = execution_timeout {
+            match tokio::time::timeout(
+                timeout,
+                store.run_concurrent(async |accessor| {
+                    bindings.call_execute(accessor, code_owned).await
+                }),
+            )
+            .await
+            {
+                Ok(result) => result,
+                Err(_elapsed) => {
+                    async_timeout_elapsed = true;
+                    Err(wasmtime::Error::msg("async timeout elapsed"))
+                }
+            }
+        } else {
+            store
+                .run_concurrent(async |accessor| bindings.call_execute(accessor, code_owned).await)
+                .await
+        };
 
         // Stop the epoch ticker thread if it was running
         if let Some(stop_flag) = epoch_ticker {
@@ -898,12 +919,15 @@ impl SessionExecutor {
         self.store = Some(store);
         self.bindings = Some(bindings);
 
-        // Process result - check for epoch deadline exceeded (timeout) or fuel exhaustion
+        // Classify errors using proper type matching. wasmtime::Error is anyhow::Error,
+        // so we downcast to wasmtime::Trap for WASM-level traps (Interrupt, OutOfFuel).
+        // The async_timeout_elapsed flag covers blocking WASI host calls (e.g. time.sleep).
         let wasmtime_result = result.map_err(|e| {
-            let err_str = format!("{e:?}");
-            if err_str.contains("epoch deadline") || err_str.contains("wasm trap: interrupt") {
+            if async_timeout_elapsed
+                || e.downcast_ref::<wasmtime::Trap>() == Some(&wasmtime::Trap::Interrupt)
+            {
                 Error::Timeout(execution_timeout.unwrap_or_default())
-            } else if err_str.contains("fuel") || err_str.contains("out of fuel") {
+            } else if e.downcast_ref::<wasmtime::Trap>() == Some(&wasmtime::Trap::OutOfFuel) {
                 let consumed = initial_fuel.saturating_sub(remaining_fuel);
                 let limit = fuel_limit.unwrap_or(u64::MAX);
                 Error::FuelExhausted { consumed, limit }
