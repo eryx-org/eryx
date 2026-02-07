@@ -1,0 +1,595 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>eryx - Python Sandbox in WebAssembly</title>
+    <script type="importmap">
+    {
+      "imports": {
+        "@bsull/eryx": "./index.js",
+        "@bsull/eryx/callbacks": "./shims/callbacks.js",
+        "@bytecodealliance/preview2-shim/cli": "./node_modules/@bytecodealliance/preview2-shim/lib/browser/cli.js",
+        "@bytecodealliance/preview2-shim/clocks": "./node_modules/@bytecodealliance/preview2-shim/lib/browser/clocks.js",
+        "@bytecodealliance/preview2-shim/filesystem": "./node_modules/@bytecodealliance/preview2-shim/lib/browser/filesystem.js",
+        "@bytecodealliance/preview2-shim/io": "./node_modules/@bytecodealliance/preview2-shim/lib/browser/io.js",
+        "@bytecodealliance/preview2-shim/random": "./node_modules/@bytecodealliance/preview2-shim/lib/browser/random.js"
+      }
+    }
+    </script>
+    <style>
+        * { box-sizing: border-box; }
+        body {
+            font-family: system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif;
+            max-width: 900px;
+            margin: 0 auto;
+            padding: 20px;
+            line-height: 1.6;
+            color: #1a1a1a;
+        }
+        h1 { margin-bottom: 6px; font-size: 28px; }
+        .description { margin-top: 0; color: #666; margin-bottom: 20px; font-size: 15px; }
+        .description a { color: #007bff; }
+
+        /* Status bar */
+        #status { padding: 12px; margin-bottom: 20px; border-radius: 6px; display: none; font-size: 14px; }
+        #status.visible { display: block; }
+        #status.info { background: #d1ecf1; color: #0c5460; border: 1px solid #bee5eb; }
+        #status.error { background: #f8d7da; color: #721c24; border: 1px solid #f5c6cb; }
+        #status.success { background: #d4edda; color: #155724; border: 1px solid #c3e6cb; }
+        #status.warning { background: #fff3cd; color: #856404; border: 1px solid #ffeaa7; }
+
+        /* Tabs */
+        .tab-bar { display: flex; border-bottom: 2px solid #dee2e6; margin-bottom: 20px; gap: 4px; }
+        .tab-btn {
+            padding: 10px 20px; background: none; border: none;
+            border-bottom: 2px solid transparent; margin-bottom: -2px;
+            cursor: pointer; font-size: 15px; font-weight: 500; color: #6c757d;
+            transition: all 0.15s;
+        }
+        .tab-btn.active { color: #007bff; border-bottom-color: #007bff; }
+        .tab-btn:hover:not(.active) { color: #495057; border-bottom-color: #dee2e6; }
+        .tab-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+        .tab-panel { display: none; }
+        .tab-panel.active { display: block; }
+
+        /* Code input */
+        textarea {
+            width: 100%; padding: 12px; border: 1px solid #ccc; border-radius: 6px;
+            font-size: 14px; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+            min-height: 180px; resize: vertical; tab-size: 4; margin-bottom: 12px;
+        }
+        textarea:focus { outline: none; border-color: #007bff; box-shadow: 0 0 0 2px rgba(0,123,255,0.25); }
+
+        /* Buttons */
+        .btn-row { display: flex; gap: 10px; margin-bottom: 16px; flex-wrap: wrap; }
+        button {
+            padding: 10px 20px; cursor: pointer; border: none; border-radius: 6px;
+            font-size: 14px; font-weight: 500; transition: background 0.15s;
+        }
+        .btn-primary { background: #007bff; color: white; }
+        .btn-primary:hover:not(:disabled) { background: #0056b3; }
+        .btn-primary:disabled { background: #6c757d; cursor: wait; opacity: 0.7; }
+        .btn-secondary { background: #6c757d; color: white; }
+        .btn-secondary:hover:not(:disabled) { background: #545b62; }
+        .btn-success { background: #28a745; color: white; }
+        .btn-success:hover:not(:disabled) { background: #218838; }
+        .btn-warning { background: #ffc107; color: #212529; }
+        .btn-warning:hover:not(:disabled) { background: #e0a800; }
+        .btn-danger { background: #dc3545; color: white; }
+        .btn-danger:hover:not(:disabled) { background: #c82333; }
+        .btn-sm { padding: 6px 12px; font-size: 13px; }
+
+        /* Example pills */
+        .examples { margin-bottom: 16px; }
+        .examples h3 { font-size: 13px; color: #888; margin: 0 0 8px 0; font-weight: 500; text-transform: uppercase; letter-spacing: 0.5px; }
+        .pill-row { display: flex; flex-wrap: wrap; gap: 6px; }
+        .pill {
+            padding: 5px 14px; font-size: 13px; background: #f1f3f5; border: 1px solid #dee2e6;
+            border-radius: 20px; color: #495057; cursor: pointer; transition: all 0.1s;
+        }
+        .pill:hover { background: #e9ecef; border-color: #adb5bd; }
+
+        /* Output */
+        .output-section { margin-top: 4px; }
+        .output-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
+        .output-header h2 { margin: 0; font-size: 18px; }
+        #output, .output-box {
+            background: #1e1e1e; color: #d4d4d4; padding: 14px; border-radius: 6px;
+            font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+            font-size: 13px; white-space: pre-wrap; word-wrap: break-word;
+            min-height: 60px; max-height: 400px; overflow-y: auto;
+        }
+        .output-box.error-output { color: #f97583; }
+        .exec-time { font-size: 12px; color: #888; margin-top: 6px; }
+
+        /* Sessions */
+        .snapshots-list { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 16px; }
+        .snapshot-card {
+            background: #f8f9fa; border: 1px solid #dee2e6; border-radius: 8px;
+            padding: 12px 16px; min-width: 180px;
+        }
+        .snapshot-card .name { font-weight: 600; font-size: 14px; }
+        .snapshot-card .meta { font-size: 12px; color: #888; margin: 4px 0 8px; }
+        .snapshot-card .actions { display: flex; gap: 6px; }
+
+        /* Info banner */
+        .info-banner {
+            background: #fff3cd; border: 1px solid #ffeaa7; border-radius: 6px;
+            padding: 14px 18px; margin-bottom: 16px; font-size: 14px; color: #856404;
+        }
+        .info-banner strong { color: #664d03; }
+
+        /* Upload zone */
+        .upload-zone {
+            border: 2px dashed #ccc; border-radius: 8px; padding: 40px 20px;
+            text-align: center; color: #888; margin-bottom: 16px; transition: all 0.2s;
+        }
+        .upload-zone:hover, .upload-zone.dragover { border-color: #007bff; color: #007bff; background: #f0f7ff; }
+        .upload-zone input[type="file"] { display: none; }
+
+        /* Loading animation */
+        @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.4; } }
+        .loading { animation: pulse 1.5s ease-in-out infinite; }
+    </style>
+</head>
+<body>
+    <h1>eryx</h1>
+    <p class="description">
+        A sandboxed Python 3.14 interpreter running entirely in your browser via WebAssembly.
+        Powered by <a href="https://github.com/eryx-org/eryx">eryx</a>.
+        Code is saved in the URL for sharing.
+    </p>
+
+    <div id="status" class="info visible loading">Loading Python sandbox (~45MB)&hellip; this may take a moment.</div>
+
+    <div class="tab-bar">
+        <button class="tab-btn active" data-tab="run">Run</button>
+        <button class="tab-btn" data-tab="sessions" disabled>Sessions</button>
+        <button class="tab-btn" data-tab="networking" disabled>Networking</button>
+        <button class="tab-btn" data-tab="packages" disabled>Packages</button>
+    </div>
+
+    <!-- Tab: Run -->
+    <div id="tab-run" class="tab-panel active">
+        <div class="examples">
+            <h3>Examples</h3>
+            <div class="pill-row">
+                <button class="pill" data-example="hello">Hello World</button>
+                <button class="pill" data-example="math">Math</button>
+                <button class="pill" data-example="fibonacci">Fibonacci</button>
+                <button class="pill" data-example="strings">Strings</button>
+                <button class="pill" data-example="lists">Lists</button>
+                <button class="pill" data-example="classes">Classes</button>
+                <button class="pill" data-example="stdlib">Stdlib</button>
+            </div>
+        </div>
+        <textarea id="code" placeholder="Enter Python code here...">print("Hello from eryx!")
+result = sum(range(10))
+print(f"Sum of 0..9 = {result}")</textarea>
+        <div class="btn-row">
+            <button id="run-btn" class="btn-primary" disabled>Run (Ctrl+Enter)</button>
+            <button id="clear-btn" class="btn-secondary">Clear Output</button>
+        </div>
+        <div class="output-section" id="output-section" style="display:none">
+            <div class="output-header">
+                <h2>Output</h2>
+                <button id="copy-btn" class="btn-secondary btn-sm">Copy</button>
+            </div>
+            <div id="output"></div>
+            <div class="exec-time" id="exec-time"></div>
+        </div>
+    </div>
+
+    <!-- Tab: Sessions -->
+    <div id="tab-sessions" class="tab-panel">
+        <p style="color:#666;margin-top:0">Variables persist across runs. Use snapshots to save and restore interpreter state.</p>
+        <div class="examples">
+            <div class="pill-row">
+                <button class="pill" data-session-example="define">Define Variables</button>
+                <button class="pill" data-session-example="check">Check State</button>
+                <button class="pill" data-session-example="modify">Modify State</button>
+                <button class="pill" data-session-example="function">Define Function</button>
+                <button class="pill" data-session-example="call">Call Function</button>
+            </div>
+        </div>
+        <textarea id="session-code" placeholder="Enter Python code...">x = 42
+y = "hello"
+items = [1, 2, 3]
+print(f"x={x}, y={y}, items={items}")</textarea>
+        <div class="btn-row">
+            <button id="session-run" class="btn-primary" disabled>Run</button>
+            <button id="snapshot-btn" class="btn-success btn-sm" disabled>Snapshot State</button>
+            <button id="clear-state-btn" class="btn-warning btn-sm" disabled>Clear State</button>
+        </div>
+        <div class="output-section">
+            <div id="session-output" class="output-box" style="display:none"></div>
+            <div class="exec-time" id="session-time"></div>
+        </div>
+        <div id="snapshots-container" style="display:none">
+            <h3 style="font-size:15px;margin-bottom:8px">Saved Snapshots</h3>
+            <div class="snapshots-list" id="snapshots-list"></div>
+        </div>
+    </div>
+
+    <!-- Tab: Networking -->
+    <div id="tab-networking" class="tab-panel">
+        <div class="info-banner">
+            <strong>Coming soon.</strong> Networking is available in the Rust and Python SDKs.
+            The JavaScript bindings currently return stub errors. This tab shows what the API looks like.
+        </div>
+        <textarea id="net-code" placeholder="Networking example code...">import socket
+
+# eryx supports TCP and TLS via the eryx:net WIT interfaces.
+# In the JS bindings, networking stubs are not yet implemented.
+sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+try:
+    sock.connect(("example.com", 80))
+    sock.sendall(b"GET / HTTP/1.0\r\nHost: example.com\r\n\r\n")
+    data = sock.recv(512)
+    print(data.decode()[:200])
+except Exception as e:
+    print(f"Error: {e}")
+finally:
+    sock.close()</textarea>
+        <div class="btn-row">
+            <button id="net-run" class="btn-primary" disabled>Run</button>
+        </div>
+        <div id="net-output" class="output-box" style="display:none"></div>
+    </div>
+
+    <!-- Tab: Packages -->
+    <div id="tab-packages" class="tab-panel">
+        <div class="info-banner">
+            <strong>Coming soon.</strong> Package installation is available in the Rust and Python SDKs
+            via <code>SandboxFactory</code>. Browser-side package loading is planned.
+        </div>
+        <div class="upload-zone" id="upload-zone">
+            <p style="margin:0 0 8px"><strong>Drop .whl files here</strong> or click to browse</p>
+            <p style="margin:0;font-size:13px">Pure Python wheels (py3-none-any) are supported</p>
+            <input type="file" id="file-input" accept=".whl" multiple>
+        </div>
+        <div id="package-list"></div>
+        <p style="font-size:13px;color:#888;margin-top:16px">
+            Example packages that work with eryx: <strong>requests</strong>, <strong>jinja2</strong>,
+            <strong>pyyaml</strong>, <strong>httpx</strong>, <strong>beautifulsoup4</strong> (pure Python wheels only).
+        </p>
+    </div>
+
+    <script type="module">
+        // ===== Examples =====
+        const EXAMPLES = {
+            hello: `print("Hello from eryx!")
+print("Python 3.14 in WebAssembly!")`,
+            math: `# Arithmetic
+result = (2 ** 10) + (3 * 7) - 1
+print(f"2^10 + 3*7 - 1 = {result}")
+
+# Float
+pi_approx = 355 / 113
+print(f"Pi approx: {pi_approx:.10f}")`,
+            fibonacci: `def fibonacci(n):
+    a, b = 0, 1
+    for _ in range(n):
+        a, b = b, a + b
+    return a
+
+for i in range(15):
+    print(f"fib({i:2d}) = {fibonacci(i)}")`,
+            strings: `name = "eryx"
+greeting = f"Hello, {name}!"
+print(greeting)
+print(greeting.upper())
+print(greeting[::-1])
+
+words = "the quick brown fox".split()
+print(" ".join(w.capitalize() for w in words))`,
+            lists: `squares = [x ** 2 for x in range(10)]
+print(f"Squares: {squares}")
+
+evens = [x for x in squares if x % 2 == 0]
+print(f"Even squares: {evens}")
+
+matrix = [[i * 3 + j for j in range(3)] for i in range(3)]
+for row in matrix:
+    print(row)`,
+            classes: `class Point:
+    def __init__(self, x, y):
+        self.x = x
+        self.y = y
+
+    def distance_to(self, other):
+        return ((self.x - other.x)**2 + (self.y - other.y)**2) ** 0.5
+
+    def __repr__(self):
+        return f"Point({self.x}, {self.y})"
+
+p1 = Point(0, 0)
+p2 = Point(3, 4)
+print(f"{p1} -> {p2}")
+print(f"Distance: {p1.distance_to(p2)}")`,
+            stdlib: `import json, re, hashlib, base64, datetime, pickle
+
+data = json.loads('{"key": "value", "n": 42}')
+encoded = base64.b64encode(b"hello eryx").decode()
+hash_val = hashlib.md5(b"test").hexdigest()[:8]
+match = re.search(r'\\d+', 'abc123def')
+now = datetime.datetime.now()
+pickled = pickle.dumps(data)
+
+print(f"json:    {data}")
+print(f"base64:  {encoded}")
+print(f"md5:     {hash_val}")
+print(f"regex:   {match.group()}")
+print(f"time:    {now}")
+print(f"pickle:  {len(pickled)} bytes")`,
+        };
+
+        const SESSION_EXAMPLES = {
+            define: `x = 42\ny = "hello"\nitems = [1, 2, 3]\nprint(f"x={x}, y={y}, items={items}")`,
+            check: `print(f"x={x}, y={y}, items={items}")`,
+            modify: `x += 1\nitems.append(len(items) + 1)\nprint(f"x={x}, items={items}")`,
+            function: `def greet(name):\n    return f"Hello, {name}!"\nprint(greet("World"))`,
+            call: `print(greet("eryx"))`,
+        };
+
+        // ===== DOM refs =====
+        const $ = (s) => document.querySelector(s);
+        const statusEl = $('#status');
+        const codeEl = $('#code');
+        const runBtn = $('#run-btn');
+        const outputSection = $('#output-section');
+        const outputEl = $('#output');
+        const execTimeEl = $('#exec-time');
+        const sessionCodeEl = $('#session-code');
+        const sessionOutputEl = $('#session-output');
+        const sessionTimeEl = $('#session-time');
+
+        // ===== Status =====
+        function setStatus(msg, type) {
+            statusEl.textContent = msg;
+            statusEl.className = type + ' visible';
+        }
+
+        // ===== URL hash (restore before WASM load so textarea doesn't flash) =====
+        function saveHash() {
+            history.replaceState(null, '', '#' + encodeURIComponent(codeEl.value));
+        }
+        if (window.location.hash) {
+            try { codeEl.value = decodeURIComponent(window.location.hash.slice(1)); } catch {}
+        }
+        codeEl.addEventListener('input', saveHash);
+
+        // ===== JSPI check =====
+        if (typeof WebAssembly?.Suspending !== 'function') {
+            setStatus(
+                'Your browser does not support WebAssembly JSPI. Please use Chrome 133+ or Edge 133+.',
+                'error'
+            );
+        } else {
+            // ===== Load sandbox =====
+            const startLoad = performance.now();
+            try {
+                const mod = await import('@bsull/eryx');
+                const Sandbox = mod.Sandbox;
+                const sandbox = new Sandbox();
+
+                const loadTime = ((performance.now() - startLoad) / 1000).toFixed(1);
+                setStatus(`Sandbox loaded in ${loadTime}s. Ready to run Python 3.14!`, 'success');
+
+                // Enable all buttons
+                runBtn.disabled = false;
+                document.querySelectorAll('.tab-btn').forEach(b => b.disabled = false);
+                $('#session-run').disabled = false;
+                $('#snapshot-btn').disabled = false;
+                $('#clear-state-btn').disabled = false;
+                $('#net-run').disabled = false;
+
+                // ===== Tab switching =====
+                document.querySelectorAll('.tab-btn').forEach(btn => {
+                    btn.addEventListener('click', () => {
+                        document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+                        document.querySelectorAll('.tab-panel').forEach(p => p.classList.remove('active'));
+                        btn.classList.add('active');
+                        $(`#tab-${btn.dataset.tab}`).classList.add('active');
+                    });
+                });
+
+                // ===== Run tab =====
+                async function runCode(code, outputBox, timeBox) {
+                    const start = performance.now();
+                    try {
+                        const result = await sandbox.execute(code);
+                        const elapsed = performance.now() - start;
+                        let text = '';
+                        if (result.stdout) text += result.stdout;
+                        if (result.stderr) {
+                            if (text) text += '\n';
+                            text += '[stderr] ' + result.stderr;
+                        }
+                        outputBox.textContent = text || '(no output)';
+                        outputBox.className = 'output-box';
+                        if (timeBox) timeBox.textContent = `Executed in ${elapsed.toFixed(1)}ms`;
+                        return true;
+                    } catch (e) {
+                        const elapsed = performance.now() - start;
+                        outputBox.textContent = 'Error: ' + e.message;
+                        outputBox.className = 'output-box error-output';
+                        if (timeBox) timeBox.textContent = `Failed in ${elapsed.toFixed(1)}ms`;
+                        return false;
+                    }
+                }
+
+                runBtn.addEventListener('click', async () => {
+                    const code = codeEl.value.trim();
+                    if (!code) return;
+                    runBtn.disabled = true;
+                    runBtn.textContent = 'Running...';
+                    outputSection.style.display = 'block';
+                    outputEl.textContent = '';
+                    await runCode(code, outputEl, execTimeEl);
+                    runBtn.disabled = false;
+                    runBtn.textContent = 'Run (Ctrl+Enter)';
+                });
+
+                // Example pills
+                document.querySelectorAll('[data-example]').forEach(btn => {
+                    btn.addEventListener('click', () => {
+                        codeEl.value = EXAMPLES[btn.dataset.example];
+                        saveHash();
+                    });
+                });
+
+                // ===== Sessions tab =====
+                const snapshots = new Map();
+
+                $('#session-run').addEventListener('click', async () => {
+                    const code = sessionCodeEl.value.trim();
+                    if (!code) return;
+                    sessionOutputEl.style.display = 'block';
+                    await runCode(code, sessionOutputEl, sessionTimeEl);
+                });
+
+                document.querySelectorAll('[data-session-example]').forEach(btn => {
+                    btn.addEventListener('click', () => {
+                        sessionCodeEl.value = SESSION_EXAMPLES[btn.dataset.sessionExample];
+                    });
+                });
+
+                $('#snapshot-btn').addEventListener('click', async () => {
+                    const name = prompt('Snapshot name:', `snapshot-${snapshots.size + 1}`);
+                    if (!name) return;
+                    try {
+                        // Copy the snapshot data - the returned Uint8Array may reference
+                        // WASM linear memory which gets invalidated by subsequent calls.
+                        const raw = await sandbox.snapshotState();
+                        const data = new Uint8Array(raw);
+                        snapshots.set(name, { data, time: new Date() });
+                        renderSnapshots();
+                        setStatus(`Snapshot "${name}" saved (${(data.byteLength / 1024).toFixed(1)} KB)`, 'success');
+                    } catch (e) {
+                        setStatus('Snapshot failed: ' + e.message, 'error');
+                    }
+                });
+
+                $('#clear-state-btn').addEventListener('click', async () => {
+                    await sandbox.clearState();
+                    setStatus('State cleared', 'success');
+                });
+
+                function renderSnapshots() {
+                    const container = $('#snapshots-container');
+                    const list = $('#snapshots-list');
+                    if (snapshots.size === 0) { container.style.display = 'none'; return; }
+                    container.style.display = 'block';
+                    list.innerHTML = '';
+                    for (const [name, snap] of snapshots) {
+                        const card = document.createElement('div');
+                        card.className = 'snapshot-card';
+                        card.innerHTML = `
+                            <div class="name">${name}</div>
+                            <div class="meta">${snap.time.toLocaleTimeString()} &middot; ${(snap.data.byteLength/1024).toFixed(1)} KB</div>
+                            <div class="actions">
+                                <button class="btn-primary btn-sm restore-btn">Restore</button>
+                                <button class="btn-danger btn-sm delete-btn">Delete</button>
+                            </div>
+                        `;
+                        card.querySelector('.restore-btn').addEventListener('click', async () => {
+                            await sandbox.restoreState(snap.data);
+                            setStatus(`Restored "${name}"`, 'success');
+                        });
+                        card.querySelector('.delete-btn').addEventListener('click', () => {
+                            snapshots.delete(name);
+                            renderSnapshots();
+                        });
+                        list.appendChild(card);
+                    }
+                }
+
+                // ===== Networking tab =====
+                $('#net-run').addEventListener('click', async () => {
+                    const code = $('#net-code').value.trim();
+                    if (!code) return;
+                    const out = $('#net-output');
+                    out.style.display = 'block';
+                    await runCode(code, out, null);
+                });
+
+                // ===== Packages tab =====
+                const uploadZone = $('#upload-zone');
+                const fileInput = $('#file-input');
+                const packages = [];
+
+                uploadZone.addEventListener('click', () => fileInput.click());
+                uploadZone.addEventListener('dragover', e => { e.preventDefault(); uploadZone.classList.add('dragover'); });
+                uploadZone.addEventListener('dragleave', () => uploadZone.classList.remove('dragover'));
+                uploadZone.addEventListener('drop', e => {
+                    e.preventDefault();
+                    uploadZone.classList.remove('dragover');
+                    handleFiles(e.dataTransfer.files);
+                });
+                fileInput.addEventListener('change', () => handleFiles(fileInput.files));
+
+                function handleFiles(files) {
+                    for (const f of files) {
+                        if (!f.name.endsWith('.whl')) continue;
+                        const parts = f.name.replace('.whl', '').split('-');
+                        packages.push({ name: parts[0], version: parts[1] || '?', size: f.size, file: f });
+                    }
+                    renderPackages();
+                }
+
+                function renderPackages() {
+                    const list = $('#package-list');
+                    if (packages.length === 0) { list.innerHTML = ''; return; }
+                    list.innerHTML = '<h3 style="font-size:15px;margin-bottom:8px">Uploaded Packages</h3>' +
+                        packages.map(p =>
+                            `<div style="padding:8px 12px;background:#f1f3f5;border-radius:6px;margin-bottom:6px;font-size:14px">
+                                <strong>${p.name}</strong> ${p.version}
+                                <span style="color:#888;margin-left:8px">${(p.size/1024).toFixed(1)} KB</span>
+                                <span style="color:#888;float:right">Installation API coming soon</span>
+                            </div>`
+                        ).join('');
+                }
+
+            } catch (e) {
+                setStatus('Failed to load sandbox: ' + e.message, 'error');
+                console.error(e);
+            }
+        }
+
+        // ===== Keyboard shortcuts =====
+        document.querySelectorAll('textarea').forEach(ta => {
+            ta.addEventListener('keydown', e => {
+                if (e.key === 'Tab') {
+                    e.preventDefault();
+                    const start = ta.selectionStart;
+                    ta.value = ta.value.substring(0, start) + '    ' + ta.value.substring(ta.selectionEnd);
+                    ta.selectionStart = ta.selectionEnd = start + 4;
+                }
+                if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
+                    e.preventDefault();
+                    // Find the run button for the active tab
+                    const activePanel = document.querySelector('.tab-panel.active');
+                    const btn = activePanel?.querySelector('.btn-primary');
+                    if (btn && !btn.disabled) btn.click();
+                }
+            });
+        });
+
+        // ===== Copy =====
+        $('#copy-btn')?.addEventListener('click', () => {
+            navigator.clipboard.writeText(outputEl.textContent);
+            const btn = $('#copy-btn');
+            btn.textContent = 'Copied!';
+            setTimeout(() => { btn.textContent = 'Copy'; }, 1500);
+        });
+
+        // ===== Clear =====
+        $('#clear-btn')?.addEventListener('click', () => {
+            outputSection.style.display = 'none';
+            outputEl.textContent = '';
+        });
+    </script>
+</body>
+</html>
