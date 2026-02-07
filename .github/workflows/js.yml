@@ -35,4 +35,4 @@ jobs:
 
       - name: Build and test JavaScript bindings
         working-directory: js
-        run: mise run //js:test
+        run: mise run test
