@@ -495,3 +495,105 @@ jobs:
 
       - name: Deploy to GitHub Pages
         uses: actions/deploy-pages@v4
+
+  # Deploy browser demo to Cloudflare Pages (only on main)
+  deploy-demo:
+    name: Deploy Demo
+    runs-on: namespace-profile-eryx-standard
+    needs: build-eryx-runtime
+    if: github.ref == 'refs/heads/main'
+    permissions:
+      contents: write
+    steps:
+      - uses: namespacelabs/nscloud-checkout-action@v8
+
+      - name: Download WASM artifacts
+        uses: namespace-actions/download-artifact@v1
+        with:
+          name: wasm-runtime
+          path: crates/
+
+      - uses: ./.github/actions/mark-wasm-current
+
+      - name: Configure Rust cache
+        uses: namespacelabs/nscloud-cache-action@v1
+        with:
+          cache: rust
+
+      - uses: ./.github/actions/setup-rust
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - name: Install jco
+        run: npm install -g @bytecodealliance/jco@1.16.1
+
+      - name: Extract Python stdlib
+        run: |
+          mkdir -p crates/eryx-wasm-runtime/tests/python-stdlib
+          tar -xf crates/eryx/python-stdlib.tar.zst -C crates/eryx-wasm-runtime/tests/
+
+      - name: Pre-initialize WASM
+        run: |
+          cargo run -p eryx-precompile --release -- \
+            crates/eryx-runtime/runtime.wasm \
+            --preinit \
+            --stdlib crates/eryx-wasm-runtime/tests/python-stdlib \
+            --wasm-only \
+            --output crates/eryx-runtime/runtime-preinit.wasm \
+            --no-verify
+        env:
+          ERYX_PRECOMPILE_BOOTSTRAP: "1"
+
+      - name: Transpile WASM to JS
+        working-directory: js
+        run: |
+          jco transpile \
+            ../crates/eryx-runtime/runtime-preinit.wasm \
+            --name eryx-sandbox \
+            --out-dir eryx-sandbox \
+            --map 'eryx:net/tcp=./shims/net.js#tcp' \
+            --map 'eryx:net/tls=./shims/net.js#tls' \
+            --map 'invoke=./shims/callbacks.js#invoke' \
+            --map 'list-callbacks=./shims/callbacks.js#listCallbacks' \
+            --map 'report-trace=./shims/callbacks.js#reportTrace' \
+            --map 'wasi:sockets/*=./shims/sockets.js#*'
+
+      - name: Install demo dependencies
+        run: npm ci --prefix js/eryx-sandbox
+
+      - name: Patch JS for jco bugs
+        working-directory: js
+        run: node patch-jco.cjs
+
+      - name: Prepare deploy directory
+        run: |
+          mkdir -p deploy/shims deploy/node_modules
+
+          # demo.html as index page
+          cp js/eryx-sandbox/demo.html deploy/index.html
+
+          # JS sources
+          cp js/eryx-sandbox/index.js deploy/
+          cp js/eryx-sandbox/stdlib-loader.js deploy/
+          cp js/eryx-sandbox/eryx-sandbox.js deploy/
+
+          # WASM modules
+          cp js/eryx-sandbox/eryx-sandbox.core*.wasm deploy/
+
+          # Python stdlib archive
+          cp crates/eryx/python-stdlib.tar.gz deploy/
+
+          # Shims
+          cp -r js/eryx-sandbox/shims deploy/
+
+          # preview2-shim (referenced by import map in demo.html)
+          cp -r js/eryx-sandbox/node_modules/@bytecodealliance deploy/node_modules/
+
+      - name: Deploy to demo branch
+        uses: peaceiris/actions-gh-pages@v4
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: ./deploy
+          publish_branch: demo
