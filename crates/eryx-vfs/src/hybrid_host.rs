@@ -444,17 +444,17 @@ impl<S: VfsStorage + 'static> types::HostDescriptor for HybridVfsState<'_, S> {
                 if !dir.dir_perms.contains(DirPerms::READ) {
                     return Err(crate::VfsError::PermissionDenied("read".to_string()).into());
                 }
-                let dir_arc = Arc::clone(&dir.dir);
 
-                // Read directory entries from real filesystem
-                let mut entries = Vec::new();
-                for entry_result in dir_arc
+                // RestrictedDir::entries() handles filtering + RestrictedDir::guest_name()
+                // handles the reverse translation — no manual file_map logic needed.
+                let raw_entries = dir
+                    .dir
                     .entries()
-                    .map_err(|e| crate::VfsError::Io(format!("read_dir {}: {}", guest_path, e)))?
-                {
-                    let entry = entry_result
-                        .map_err(|e| crate::VfsError::Io(format!("read_dir entry: {}", e)))?;
-                    let name = entry.file_name().to_string_lossy().into_owned();
+                    .map_err(|e| crate::VfsError::Io(format!("read_dir {}: {}", guest_path, e)))?;
+
+                let mut entries = Vec::new();
+                for entry in raw_entries {
+                    let name = dir.dir.guest_name(&entry);
                     let file_type = entry
                         .file_type()
                         .map_err(|e| crate::VfsError::Io(format!("file_type: {}", e)))?;
@@ -701,16 +701,18 @@ impl<S: VfsStorage + 'static> types::HostDescriptor for HybridVfsState<'_, S> {
                 let full_guest_path = format!("{}/{}", guest_path.trim_end_matches('/'), path);
 
                 if is_directory {
-                    // Opening a subdirectory
-                    let sub_dir = dir.dir.open_dir(&path).map_err(|e| {
-                        if e.kind() == std::io::ErrorKind::NotFound {
+                    // Opening a subdirectory — RestrictedDir::open_dir checks + translates
+                    let restricted_sub = dir.dir.open_dir(&path).map_err(|e| {
+                        if e.kind() == std::io::ErrorKind::NotFound
+                            || e.kind() == std::io::ErrorKind::PermissionDenied
+                        {
                             crate::VfsError::NotFound(full_guest_path.clone())
                         } else {
                             crate::VfsError::Io(format!("open_dir {}: {}", full_guest_path, e))
                         }
                     })?;
                     let new_real_dir = RealDir {
-                        dir: Arc::new(sub_dir),
+                        dir: restricted_sub,
                         dir_perms: dir.dir_perms,
                         file_perms: dir.file_perms,
                         allow_blocking: dir.allow_blocking,
@@ -726,6 +728,29 @@ impl<S: VfsStorage + 'static> types::HostDescriptor for HybridVfsState<'_, S> {
                     let readable = flags.contains(types::DescriptorFlags::READ);
                     let writable = flags.contains(types::DescriptorFlags::WRITE);
 
+                    // Enforce permission checks from the preopen configuration
+                    if readable && !dir.file_perms.contains(FilePerms::READ) {
+                        return Err(crate::VfsError::PermissionDenied(format!(
+                            "read access denied for {}",
+                            full_guest_path
+                        ))
+                        .into());
+                    }
+                    if writable && !dir.file_perms.contains(FilePerms::WRITE) {
+                        return Err(crate::VfsError::PermissionDenied(format!(
+                            "write access denied for {}",
+                            full_guest_path
+                        ))
+                        .into());
+                    }
+                    if create && !dir.dir_perms.contains(DirPerms::MUTATE) {
+                        return Err(crate::VfsError::PermissionDenied(format!(
+                            "create access denied for {}",
+                            full_guest_path
+                        ))
+                        .into());
+                    }
+
                     let mut open_opts = cap_std::fs::OpenOptions::new();
                     open_opts.read(readable);
                     open_opts.write(writable);
@@ -735,8 +760,11 @@ impl<S: VfsStorage + 'static> types::HostDescriptor for HybridVfsState<'_, S> {
                         open_opts.create_new(true);
                     }
 
+                    // RestrictedDir::open_with checks + translates
                     let file = dir.dir.open_with(&path, &open_opts).map_err(|e| {
-                        if e.kind() == std::io::ErrorKind::NotFound {
+                        if e.kind() == std::io::ErrorKind::NotFound
+                            || e.kind() == std::io::ErrorKind::PermissionDenied
+                        {
                             crate::VfsError::NotFound(full_guest_path.clone())
                         } else if e.kind() == std::io::ErrorKind::AlreadyExists {
                             crate::VfsError::AlreadyExists(full_guest_path.clone())
@@ -867,6 +895,7 @@ impl<S: VfsStorage + 'static> types::HostDescriptor for HybridVfsState<'_, S> {
                 {
                     return Err(crate::VfsError::PermissionDenied("mutate".to_string()).into());
                 }
+                // RestrictedDir::rename checks + translates both sides
                 old_dir
                     .dir
                     .rename(&old_path, &new_dir.dir, &new_path)

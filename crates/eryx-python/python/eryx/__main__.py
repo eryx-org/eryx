@@ -21,6 +21,18 @@ import textwrap
 import eryx
 
 
+def _parse_volume(spec: str) -> tuple[str, str, bool]:
+    """Parse a Docker-style volume spec: SRC:DST[:ro|:rw]."""
+    parts = spec.split(":")
+    if len(parts) == 2:
+        return (parts[0], parts[1], False)
+    if len(parts) == 3 and parts[2] in ("ro", "rw"):
+        return (parts[0], parts[1], parts[2] == "ro")
+    raise argparse.ArgumentTypeError(
+        f"invalid volume format '{spec}', expected SRC:DST or SRC:DST:ro"
+    )
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="eryx",
@@ -98,8 +110,9 @@ def _build_parser() -> argparse.ArgumentParser:
         "--volume",
         action="append",
         default=[],
-        metavar="SRC:DST",
-        help="mount host directory SRC at sandbox path DST (not yet implemented)",
+        type=_parse_volume,
+        metavar="SRC:DST[:ro]",
+        help="mount host directory SRC at sandbox path DST (append :ro for read-only)",
     )
 
     return parser
@@ -134,6 +147,8 @@ def _run_once(code: str, args: argparse.Namespace) -> int:
         kwargs["resource_limits"] = limits
     if net is not None:
         kwargs["network"] = net
+    if args.volume:
+        kwargs["volumes"] = args.volume
 
     sandbox = eryx.Sandbox(**kwargs)
     try:
@@ -164,6 +179,8 @@ def _repl(args: argparse.Namespace) -> int:
     limits = _make_resource_limits(args)
     if limits is not None:
         kwargs["execution_timeout_ms"] = limits.execution_timeout_ms
+    if args.volume:
+        kwargs["volumes"] = args.volume
 
     session = eryx.Session(**kwargs)
 
@@ -227,13 +244,6 @@ def _repl(args: argparse.Namespace) -> int:
 def main(argv: list[str] | None = None) -> int:
     parser = _build_parser()
     args = parser.parse_args(argv)
-
-    if args.volume:
-        print(
-            "eryx: --volume/-v is not yet implemented",
-            file=sys.stderr,
-        )
-        return 1
 
     # -c CODE
     if args.command is not None:

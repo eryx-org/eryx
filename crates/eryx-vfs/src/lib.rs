@@ -44,7 +44,7 @@ mod wasi_impl;
 
 pub use error::{VfsError, VfsResult};
 pub use hybrid::{
-    HybridDescriptor, HybridPreopen, HybridVfsCtx, HybridVfsState, RealDir, RealFile,
+    HybridDescriptor, HybridPreopen, HybridVfsCtx, HybridVfsState, RealDir, RealFile, RestrictedDir,
 };
 pub use hybrid_bindings::HybridReaddirIterator;
 pub use linker::{HybridVfsView, VfsView, add_hybrid_vfs_to_linker, add_vfs_to_linker};

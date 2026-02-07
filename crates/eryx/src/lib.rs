@@ -91,12 +91,12 @@ pub use sandbox::{
     ExecuteResult, ExecuteStats, ExecutionHandle, ResourceLimits, Sandbox, SandboxBuilder, state,
 };
 pub use secrets::{FileScrubPolicy, OutputScrubPolicy, SecretConfig};
-#[cfg(feature = "vfs")]
-pub use session::VfsConfig;
 pub use session::{
     InProcessSession, PythonStateSnapshot, Session, SessionExecutor, SnapshotMetadata,
     SnapshotSession,
 };
+#[cfg(feature = "vfs")]
+pub use session::{VfsConfig, VolumeMount};
 pub use trace::{OutputHandler, TraceEvent, TraceEventKind, TraceHandler};
 
 // Re-export precompilation utilities and internal types
