@@ -1,0 +1,38 @@
+name: js
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+  MISE_EXPERIMENTAL: 1
+
+permissions: {}
+
+jobs:
+  build:
+    name: JavaScript bindings
+    runs-on: namespace-profile-eryx-heavy-linux-amd64
+    steps:
+      - uses: namespacelabs/nscloud-checkout-action@v8
+
+      - name: Configure Rust cache
+        uses: namespacelabs/nscloud-cache-action@v1
+        with:
+          cache: rust
+
+      - uses: ./.github/actions/setup-rust
+
+      - name: Install nightly toolchain
+        run: rustup toolchain install nightly --component rust-src
+
+      - name: Force rebuild (cache may have stale timestamps)
+        run: |
+          find crates/eryx-wasm-runtime/src -name "*.rs" -exec touch {} +
+          find crates/eryx-runtime/wit -name "*.wit" -exec touch {} +
+
+      - name: Build and test JavaScript bindings
+        working-directory: js
+        run: mise run //js:test

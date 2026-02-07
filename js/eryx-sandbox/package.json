@@ -1,0 +1,46 @@
+{
+  "name": "@bsull/eryx",
+  "type": "module",
+  "description": "A Python sandbox powered by WebAssembly, for browser and Node.js",
+  "version": "0.3.0",
+  "license": "MIT OR Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/sd2k/eryx.git"
+  },
+  "files": [
+    "interfaces/*",
+    "shims/*",
+    "*.wasm",
+    "*.js",
+    "*.d.ts",
+    "README.md"
+  ],
+  "main": "index.js",
+  "types": "index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./index.d.ts",
+      "default": "./index.js"
+    },
+    "./callbacks": {
+      "types": "./shims/callbacks.d.ts",
+      "default": "./shims/callbacks.js"
+    },
+    "./low-level": {
+      "types": "./eryx-sandbox.d.ts",
+      "default": "./eryx-sandbox.js"
+    }
+  },
+  "keywords": [
+    "python",
+    "sandbox",
+    "wasm",
+    "webassembly",
+    "component-model",
+    "interpreter"
+  ],
+  "dependencies": {
+    "@bytecodealliance/preview2-shim": "^0.17.0"
+  }
+}
