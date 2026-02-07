@@ -517,40 +517,141 @@ async fn test_snapshot_serialization() {
     assert_eq!(output.stdout, "42");
 }
 
-/// Test that unpicklable objects are handled gracefully.
+/// Test that unserializable objects (e.g. modules) are skipped gracefully.
 #[tokio::test]
-async fn test_snapshot_with_unpicklable() {
+async fn test_snapshot_with_unserializable() {
     let mut session = create_session().await;
 
-    // Create a lambda (unpicklable)
+    // Import a module (not serializable)
     session
-        .execute("fn = lambda x: x * 2")
+        .execute("import sys")
         .run()
         .await
-        .unwrap_or_else(|e| panic!("Failed to create lambda: {}", e));
+        .unwrap_or_else(|e| panic!("Failed to import sys: {}", e));
 
-    // Also create a picklable variable
+    // Also create a serializable variable
     session
         .execute("num = 100")
         .run()
         .await
         .unwrap_or_else(|e| panic!("Failed to set num: {}", e));
 
-    // Snapshot should still work, just skip the unpicklable lambda
-    let snapshot = session.snapshot_state().await;
+    // Snapshot should succeed, skipping the module
+    let snapshot = session
+        .snapshot_state()
+        .await
+        .unwrap_or_else(|e| panic!("Failed to snapshot: {}", e));
 
-    // The snapshot might succeed (skipping unpicklable) or fail
-    // Either behavior is acceptable
-    if let Ok(snap) = snapshot {
-        // If it succeeded, verify we can restore
-        session.clear_state().await.unwrap();
-        session.restore_state(&snap).await.unwrap();
+    session.clear_state().await.unwrap();
+    session.restore_state(&snapshot).await.unwrap();
 
-        // num should be restored
-        let result = session.execute("print(num)").run().await;
-        assert!(result.is_ok(), "num should be restored");
-        let output = result.unwrap();
-        assert_eq!(output.stdout, "100", "num should equal 100");
-    }
-    // If snapshot failed, that's also acceptable behavior
+    let output = session
+        .execute("print(num)")
+        .run()
+        .await
+        .unwrap_or_else(|e| panic!("Failed to print num: {}", e));
+    assert_eq!(output.stdout, "100", "num should be restored");
+}
+
+/// Test that user-defined functions survive snapshot/restore.
+#[tokio::test]
+async fn test_snapshot_with_functions() {
+    let mut session = create_session().await;
+
+    session
+        .execute("def greet(name): return f'Hello, {name}!'")
+        .run()
+        .await
+        .unwrap_or_else(|e| panic!("Failed to define function: {}", e));
+
+    session
+        .execute("fn = lambda x: x * 2")
+        .run()
+        .await
+        .unwrap_or_else(|e| panic!("Failed to define lambda: {}", e));
+
+    let snapshot = session
+        .snapshot_state()
+        .await
+        .unwrap_or_else(|e| panic!("Failed to snapshot: {}", e));
+    assert!(
+        snapshot.size() > 10,
+        "Snapshot should contain serialized data"
+    );
+
+    session.clear_state().await.unwrap();
+
+    session
+        .restore_state(&snapshot)
+        .await
+        .unwrap_or_else(|e| panic!("Failed to restore: {}", e));
+
+    let output = session
+        .execute("print(greet('World'))")
+        .run()
+        .await
+        .unwrap_or_else(|e| panic!("Failed to call greet: {}", e));
+    assert_eq!(output.stdout, "Hello, World!");
+
+    let output = session
+        .execute("print(fn(21))")
+        .run()
+        .await
+        .unwrap_or_else(|e| panic!("Failed to call lambda: {}", e));
+    assert_eq!(output.stdout, "42");
+}
+
+/// Test that user-defined classes and instances survive snapshot/restore.
+#[tokio::test]
+async fn test_snapshot_with_classes() {
+    let mut session = create_session().await;
+
+    session
+        .execute(
+            r#"
+class Point:
+    def __init__(self, x, y):
+        self.x = x
+        self.y = y
+    def distance(self):
+        return (self.x**2 + self.y**2) ** 0.5
+"#,
+        )
+        .run()
+        .await
+        .unwrap_or_else(|e| panic!("Failed to define class: {}", e));
+
+    session
+        .execute("p = Point(3, 4)")
+        .run()
+        .await
+        .unwrap_or_else(|e| panic!("Failed to create instance: {}", e));
+
+    let snapshot = session
+        .snapshot_state()
+        .await
+        .unwrap_or_else(|e| panic!("Failed to snapshot: {}", e));
+
+    session.clear_state().await.unwrap();
+
+    session
+        .restore_state(&snapshot)
+        .await
+        .unwrap_or_else(|e| panic!("Failed to restore: {}", e));
+
+    // Instance should work
+    let output = session
+        .execute("print(p.distance())")
+        .run()
+        .await
+        .unwrap_or_else(|e| panic!("Failed to call method: {}", e));
+    assert_eq!(output.stdout, "5.0");
+
+    // Can create new instances of the restored class
+    let output = session
+        .execute("print(Point(5, 12).distance())")
+        .run()
+        .await
+        .unwrap_or_else(|e| panic!("Failed to create new instance: {}", e));
+    assert_eq!(output.stdout, "13.0");
 }

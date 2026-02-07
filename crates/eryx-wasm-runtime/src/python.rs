@@ -2704,28 +2704,35 @@ unsafe fn set_python_variable_bytes(name: &str, data: &[u8]) -> Result<(), Strin
     }
 }
 
-/// Snapshot the current Python state by pickling `_eryx_user_globals`.
+/// Snapshot the current Python state by serializing `_eryx_user_globals` with dill.
 ///
-/// Returns the pickled state as bytes, which can be restored later with `restore_state`.
+/// Returns the serialized state as bytes, which can be restored later with `restore_state`.
+///
+/// Uses [dill](https://pypi.org/project/dill/) instead of pickle for serialization.
+/// Dill can serialize functions, classes, lambdas, closures, and other objects that
+/// standard pickle cannot handle (e.g., objects defined via `exec()`).
 ///
 /// # What is preserved
 /// - All user-defined variables in the user namespace
 /// - Simple types (int, float, str, list, dict, tuple, set, etc.)
+/// - User-defined functions (including lambdas and closures)
+/// - User-defined classes and their instances
 /// - Most standard library objects
 ///
 /// # What is NOT preserved
 /// - Open file handles, sockets, etc.
-/// - Imported modules (they remain, but aren't pickled)
-/// - Objects with unpicklable state
+/// - Imported modules (they remain in the session, but aren't serialized)
+/// - Callback infrastructure (re-created on each session)
+/// - Generator/coroutine objects (live iterators with frame state)
 pub fn snapshot_state() -> Result<Vec<u8>, String> {
     if !is_python_initialized() {
         return Err("Python not initialized".to_string());
     }
 
     unsafe {
-        // Pickle _eryx_user_globals, excluding unpicklable items
+        // Serialize _eryx_user_globals with dill, excluding infrastructure items
         let pickle_code = c"
-import pickle as _eryx_pickle
+import dill as _eryx_dill
 
 # Items to exclude from snapshot (builtins and metadata)
 _eryx_exclude = {
@@ -2755,7 +2762,7 @@ def _eryx_is_callback_obj(obj):
 # Take a snapshot of the keys first to avoid 'dictionary changed size during iteration'
 _eryx_keys = list(_eryx_user_globals.keys())
 
-# Build dict of picklable items
+# Build dict of serializable items
 _eryx_state_dict = {}
 for _k in _eryx_keys:
     if _k not in _eryx_exclude and not _k.startswith('_eryx_'):
@@ -2765,18 +2772,18 @@ for _k in _eryx_keys:
             if _eryx_is_callback_obj(_v):
                 continue
             try:
-                # Test if item is picklable
-                _eryx_pickle.dumps(_v)
+                # Test if item is serializable with dill
+                _eryx_dill.dumps(_v)
                 _eryx_state_dict[_k] = _v
-            except (TypeError, _eryx_pickle.PicklingError, AttributeError):
-                # Skip unpicklable items (modules, functions with closures, etc.)
+            except Exception:
+                # Skip items dill can't serialize (modules, open handles, etc.)
                 pass
 
-# Pickle the filtered dict
-_eryx_state_bytes = _eryx_pickle.dumps(_eryx_state_dict)
+# Serialize the filtered dict with dill
+_eryx_state_bytes = _eryx_dill.dumps(_eryx_state_dict)
 
 # Clean up local helpers
-del _eryx_exclude, _eryx_is_callback_obj, _eryx_keys, _eryx_state_dict, _eryx_pickle
+del _eryx_exclude, _eryx_is_callback_obj, _eryx_keys, _eryx_state_dict, _eryx_dill
 ";
 
         if PyRun_SimpleString(pickle_code.as_ptr()) != 0 {
@@ -2785,7 +2792,7 @@ del _eryx_exclude, _eryx_is_callback_obj, _eryx_keys, _eryx_state_dict, _eryx_pi
             return Err(format!("Failed to snapshot state: {err}"));
         }
 
-        // Get the pickled bytes
+        // Get the serialized bytes
         let state_bytes = get_python_variable_bytes("_eryx_state_bytes")?;
 
         // Clean up
@@ -2797,8 +2804,11 @@ del _eryx_exclude, _eryx_is_callback_obj, _eryx_keys, _eryx_state_dict, _eryx_pi
 
 /// Restore Python state from a previous snapshot.
 ///
-/// This unpickles the data and updates `_eryx_user_globals` with the restored values.
-/// Existing variables that aren't in the snapshot are preserved.
+/// This deserializes the data with dill and updates `_eryx_user_globals` with the
+/// restored values. Existing variables that aren't in the snapshot are preserved.
+///
+/// After deserialization, function and method globals are re-bound to `_eryx_user_globals`
+/// so restored functions can access other user-defined names in the session.
 pub fn restore_state(data: &[u8]) -> Result<(), String> {
     if !is_python_initialized() {
         return Err("Python not initialized".to_string());
@@ -2813,18 +2823,42 @@ pub fn restore_state(data: &[u8]) -> Result<(), String> {
         // Set the bytes in Python
         set_python_variable_bytes("_eryx_restore_bytes", data)?;
 
-        // Unpickle and update _eryx_user_globals
+        // Deserialize with dill and update _eryx_user_globals
         let restore_code = c"
-import pickle as _eryx_pickle
+import dill as _eryx_dill
+import types as _eryx_types
 
-# Unpickle the state
-_eryx_restored_dict = _eryx_pickle.loads(_eryx_restore_bytes)
+# Deserialize the state
+_eryx_restored_dict = _eryx_dill.loads(_eryx_restore_bytes)
+
+# Re-bind function globals to _eryx_user_globals so restored functions
+# can access other user-defined names (dill creates isolated globals dicts).
+def _eryx_rebind_globals(obj):
+    '''Recursively fix up function/method globals to use _eryx_user_globals.'''
+    if isinstance(obj, _eryx_types.FunctionType):
+        return _eryx_types.FunctionType(
+            obj.__code__, _eryx_user_globals, obj.__name__,
+            obj.__defaults__, obj.__closure__
+        )
+    return obj
+
+for _k in list(_eryx_restored_dict):
+    _v = _eryx_restored_dict[_k]
+    # Fix standalone functions/lambdas
+    if isinstance(_v, _eryx_types.FunctionType):
+        _eryx_restored_dict[_k] = _eryx_rebind_globals(_v)
+    # Fix methods inside classes
+    elif isinstance(_v, type):
+        for _attr_name in list(vars(_v)):
+            _attr = vars(_v).get(_attr_name)
+            if isinstance(_attr, _eryx_types.FunctionType):
+                setattr(_v, _attr_name, _eryx_rebind_globals(_attr))
 
 # Update user globals with restored values
 _eryx_user_globals.update(_eryx_restored_dict)
 
 # Clean up
-del _eryx_restore_bytes, _eryx_restored_dict, _eryx_pickle
+del _eryx_restore_bytes, _eryx_restored_dict, _eryx_dill, _eryx_types, _eryx_rebind_globals
 ";
 
         if PyRun_SimpleString(restore_code.as_ptr()) != 0 {

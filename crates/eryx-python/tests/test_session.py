@@ -129,6 +129,46 @@ class Counter:
         result = session.execute("print(f'{x}, {y}')")
         assert result.stdout == "42, hello"
 
+    def test_snapshot_restore_functions(self):
+        """Test that user-defined functions survive snapshot/restore."""
+        session = eryx.Session()
+        session.execute("def greet(name): return f'Hello, {name}!'")
+        session.execute("fn = lambda x: x * 2")
+
+        snapshot = session.snapshot_state()
+        session.clear_state()
+        session.restore_state(snapshot)
+
+        result = session.execute("print(greet('World'))")
+        assert result.stdout == "Hello, World!"
+
+        result = session.execute("print(fn(21))")
+        assert result.stdout == "42"
+
+    def test_snapshot_restore_classes(self):
+        """Test that user-defined classes and instances survive snapshot/restore."""
+        session = eryx.Session()
+        session.execute(
+            "class Point:\n"
+            "    def __init__(self, x, y):\n"
+            "        self.x = x\n"
+            "        self.y = y\n"
+            "    def distance(self):\n"
+            "        return (self.x**2 + self.y**2) ** 0.5\n"
+        )
+        session.execute("p = Point(3, 4)")
+
+        snapshot = session.snapshot_state()
+        session.clear_state()
+        session.restore_state(snapshot)
+
+        result = session.execute("print(p.distance())")
+        assert result.stdout == "5.0"
+
+        # Can create new instances of the restored class
+        result = session.execute("print(Point(5, 12).distance())")
+        assert result.stdout == "13.0"
+
     def test_snapshot_restore_across_sessions(self):
         """Test that snapshot can be restored in a different session."""
         session1 = eryx.Session()
