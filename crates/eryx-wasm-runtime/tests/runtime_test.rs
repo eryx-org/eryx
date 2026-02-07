@@ -347,6 +347,15 @@ async fn test_instantiate_component() -> Result<(), Box<dyn std::error::Error>> 
          _results: &mut [Val]| { Ok(()) },
     )?;
 
+    // report-output: func(stream: u32, data: string)
+    linker.root().func_new(
+        "report-output",
+        |_ctx: wasmtime::StoreContextMut<'_, State>,
+         _func_ty: wasmtime::component::types::ComponentFunc,
+         _params: &[Val],
+         _results: &mut [Val]| { Ok(()) },
+    )?;
+
     // Add network stub implementations (TCP and TLS)
     // These return "not-permitted" errors since networking is not available in this test.
     add_network_stubs(&mut linker)?;
