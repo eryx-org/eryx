@@ -104,10 +104,7 @@ describe("state persistence", () => {
     expect(restored.stdout).toBe("10");
   });
 
-  it("does not snapshot exec-defined functions (pickle limitation)", async () => {
-    // Snapshot uses pickle, which can't serialize functions defined via exec().
-    // Functions persist across execute() calls (in-memory), but not across
-    // snapshot/restore cycles.
+  it("snapshots and restores functions", async () => {
     const fresh = new Sandbox();
     await fresh.execute("def greet(name): return f'Hello, {name}!'");
     await fresh.execute("counter = 42");
@@ -115,12 +112,37 @@ describe("state persistence", () => {
     const snapshot = new Uint8Array(await fresh.snapshotState());
 
     await fresh.clearState();
+    await expect(fresh.execute("print(greet('x'))")).rejects.toThrow();
 
     await fresh.restoreState(snapshot);
-    // Variable survives snapshot/restore
-    const restored = await fresh.execute("print(counter)");
-    expect(restored.stdout).toBe("42");
-    // Function does not survive (pickle can't serialize exec-defined functions)
-    await expect(fresh.execute("print(greet('x'))")).rejects.toThrow();
+    const restored = await fresh.execute("print(greet('eryx'))");
+    expect(restored.stdout).toBe("Hello, eryx!");
+    const counter = await fresh.execute("print(counter)");
+    expect(counter.stdout).toBe("42");
+  });
+
+  it("snapshots and restores classes and instances", async () => {
+    const fresh = new Sandbox();
+    await fresh.execute(`
+class Point:
+    def __init__(self, x, y):
+        self.x = x
+        self.y = y
+    def distance(self):
+        return (self.x**2 + self.y**2) ** 0.5
+p = Point(3, 4)
+`);
+
+    const snapshot = new Uint8Array(await fresh.snapshotState());
+
+    await fresh.clearState();
+    await expect(fresh.execute("print(p)")).rejects.toThrow();
+
+    await fresh.restoreState(snapshot);
+    const result = await fresh.execute("print(p.distance())");
+    expect(result.stdout).toBe("5.0");
+    // Can also create new instances of the restored class
+    const result2 = await fresh.execute("print(Point(5, 12).distance())");
+    expect(result2.stdout).toBe("13.0");
   });
 });
