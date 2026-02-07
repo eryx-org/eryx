@@ -579,8 +579,10 @@ jobs:
           cp js/eryx-sandbox/stdlib-loader.js deploy/
           cp js/eryx-sandbox/eryx-sandbox.js deploy/
 
-          # WASM modules
-          cp js/eryx-sandbox/eryx-sandbox.core*.wasm deploy/
+          # WASM modules (pre-compressed to stay under Cloudflare Pages' 25MB limit)
+          for f in js/eryx-sandbox/eryx-sandbox.core*.wasm; do
+            brotli -9 -c "$f" > "deploy/$(basename "$f")"
+          done
 
           # Python stdlib archive
           cp crates/eryx/python-stdlib.tar.gz deploy/
@@ -590,6 +592,9 @@ jobs:
 
           # preview2-shim (referenced by import map in demo.html)
           cp -r js/eryx-sandbox/node_modules/@bytecodealliance deploy/node_modules/
+
+          # Headers file: tell browsers the .wasm files are brotli-encoded
+          printf '/*.wasm\n  Content-Encoding: br\n' > deploy/_headers
 
       - name: Deploy to demo branch
         uses: peaceiris/actions-gh-pages@v4
