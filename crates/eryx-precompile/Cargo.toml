@@ -16,9 +16,11 @@ path = "src/main.rs"
 anyhow.workspace = true
 clap = { version = "4", features = ["derive"] }
 eryx = { workspace = true, features = ["preinit"] }
+tempfile.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
 tracing.workspace = true
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+walkdir.workspace = true
 
 [lints]
 workspace = true
