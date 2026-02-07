@@ -569,7 +569,7 @@ jobs:
 
       - name: Prepare deploy directory
         run: |
-          mkdir -p deploy/shims deploy/node_modules
+          mkdir -p deploy/shims deploy/vendor
 
           # demo.html as index page
           cp js/eryx-sandbox/demo.html deploy/index.html
@@ -591,7 +591,8 @@ jobs:
           cp -r js/eryx-sandbox/shims deploy/
 
           # preview2-shim (referenced by import map in demo.html)
-          cp -r js/eryx-sandbox/node_modules/@bytecodealliance deploy/node_modules/
+          # Uses vendor/ instead of node_modules/ because Cloudflare Pages ignores node_modules/
+          cp -r js/eryx-sandbox/node_modules/@bytecodealliance/preview2-shim deploy/vendor/preview2-shim
 
           # Headers file: tell browsers the .wasm files are brotli-encoded
           printf '/*.wasm\n  Content-Encoding: br\n' > deploy/_headers
