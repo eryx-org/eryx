@@ -2050,27 +2050,50 @@ impl PythonExecutor {
         // Call the async execute export
         let code_owned = code.to_string();
 
-        // run_concurrent returns Result<R, Error> where R is the closure's return type
-        let wasmtime_result = store
-            .run_concurrent(async |accessor| bindings.call_execute(accessor, code_owned).await)
-            .await;
+        // run_concurrent returns Result<R, Error> where R is the closure's return type.
+        // Wrap in tokio::time::timeout so that blocking WASI host calls (e.g. poll_oneoff
+        // used by time.sleep) are cancelled when the future is dropped, not just CPU-bound
+        // loops caught by epoch interruption.
+        let mut async_timeout_elapsed = false;
+        let wasmtime_result = if let Some(timeout) = execution_timeout {
+            match tokio::time::timeout(
+                timeout,
+                store.run_concurrent(async |accessor| {
+                    bindings.call_execute(accessor, code_owned).await
+                }),
+            )
+            .await
+            {
+                Ok(result) => result,
+                Err(_elapsed) => {
+                    async_timeout_elapsed = true;
+                    Err(wasmtime::Error::msg("async timeout elapsed"))
+                }
+            }
+        } else {
+            store
+                .run_concurrent(async |accessor| bindings.call_execute(accessor, code_owned).await)
+                .await
+        };
 
         // Stop the epoch ticker thread if it was running
         if let Some(stop_flag) = epoch_ticker {
             stop_flag.store(true, Ordering::Relaxed);
         }
 
-        // Check for epoch deadline exceeded (timeout or cancellation) or fuel exhaustion
+        // Classify errors using proper type matching. wasmtime::Error is anyhow::Error,
+        // so we downcast to wasmtime::Trap for WASM-level traps (Interrupt, OutOfFuel).
+        // The async_timeout_elapsed flag covers blocking WASI host calls (e.g. time.sleep).
         let wasmtime_result = wasmtime_result.map_err(|e| {
-            let err_str = format!("{e:?}");
-            if err_str.contains("epoch deadline") || err_str.contains("wasm trap: interrupt") {
+            if async_timeout_elapsed
+                || e.downcast_ref::<wasmtime::Trap>() == Some(&wasmtime::Trap::Interrupt)
+            {
                 if was_cancelled.load(Ordering::Relaxed) {
                     Error::Cancelled
                 } else {
                     Error::Timeout(execution_timeout.unwrap_or_default())
                 }
-            } else if err_str.contains("fuel") || err_str.contains("out of fuel") {
-                // Calculate how much fuel was consumed before exhaustion
+            } else if e.downcast_ref::<wasmtime::Trap>() == Some(&wasmtime::Trap::OutOfFuel) {
                 let remaining = store.get_fuel().unwrap_or(0);
                 let consumed = initial_fuel.saturating_sub(remaining);
                 let limit = fuel_limit.unwrap_or(u64::MAX);

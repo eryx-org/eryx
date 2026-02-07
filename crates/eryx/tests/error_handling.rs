@@ -504,3 +504,35 @@ async fn test_session_recovers_after_timeout() {
     );
     assert!(result.unwrap().stdout.contains("recovered"));
 }
+
+#[tokio::test]
+async fn test_execution_timeout_interrupts_blocking_sleep() {
+    use std::time::Duration;
+
+    let executor = get_shared_executor();
+    let mut session = SessionExecutor::new(executor, &[])
+        .await
+        .expect("Failed to create session");
+
+    // Set a 1s timeout - the sleep(10) should be interrupted well before 10s
+    session.set_execution_timeout(Some(Duration::from_secs(1)));
+
+    let start = std::time::Instant::now();
+    let result = session.execute("import time\ntime.sleep(10)").run().await;
+    let elapsed = start.elapsed();
+
+    assert!(result.is_err(), "Sleep should be interrupted by timeout");
+    let error = result.unwrap_err();
+    assert!(
+        matches!(error, eryx::Error::Timeout(_)),
+        "Error should be Timeout variant: {:?}",
+        error
+    );
+
+    // The key assertion: should complete in ~1s, not 10s
+    assert!(
+        elapsed < Duration::from_secs(3),
+        "Timeout should interrupt blocking sleep promptly. Elapsed: {:?}",
+        elapsed
+    );
+}
