@@ -444,68 +444,30 @@ impl<S: VfsStorage + 'static> types::HostDescriptor for HybridVfsState<'_, S> {
                 if !dir.dir_perms.contains(DirPerms::READ) {
                     return Err(crate::VfsError::PermissionDenied("read".to_string()).into());
                 }
-                let dir_arc = Arc::clone(&dir.dir);
-                let file_map = &dir.file_map;
 
-                // Read directory entries from real filesystem
+                // RestrictedDir::entries() handles filtering + RestrictedDir::guest_name()
+                // handles the reverse translation — no manual file_map logic needed.
+                let raw_entries = dir
+                    .dir
+                    .entries()
+                    .map_err(|e| crate::VfsError::Io(format!("read_dir {}: {}", guest_path, e)))?;
+
                 let mut entries = Vec::new();
-
-                if let Some(map) = file_map {
-                    // For file-mapped mounts, only show mapped files with guest names
-                    // Build reverse map: host_name -> guest_name
-                    let reverse_map: std::collections::HashMap<&str, &str> = map
-                        .iter()
-                        .map(|(guest, host)| (host.as_str(), guest.as_str()))
-                        .collect();
-
-                    for entry_result in dir_arc.entries().map_err(|e| {
-                        crate::VfsError::Io(format!("read_dir {}: {}", guest_path, e))
-                    })? {
-                        let entry = entry_result
-                            .map_err(|e| crate::VfsError::Io(format!("read_dir entry: {}", e)))?;
-                        let host_name = entry.file_name().to_string_lossy().into_owned();
-
-                        // Only include files that are in the reverse map
-                        if let Some(&guest_name) = reverse_map.get(host_name.as_str()) {
-                            let file_type = entry
-                                .file_type()
-                                .map_err(|e| crate::VfsError::Io(format!("file_type: {}", e)))?;
-                            let type_ = if file_type.is_dir() {
-                                types::DescriptorType::Directory
-                            } else if file_type.is_symlink() {
-                                types::DescriptorType::SymbolicLink
-                            } else if file_type.is_file() {
-                                types::DescriptorType::RegularFile
-                            } else {
-                                types::DescriptorType::Unknown
-                            };
-                            entries.push(types::DirectoryEntry {
-                                name: guest_name.to_string(),
-                                type_,
-                            });
-                        }
-                    }
-                } else {
-                    for entry_result in dir_arc.entries().map_err(|e| {
-                        crate::VfsError::Io(format!("read_dir {}: {}", guest_path, e))
-                    })? {
-                        let entry = entry_result
-                            .map_err(|e| crate::VfsError::Io(format!("read_dir entry: {}", e)))?;
-                        let name = entry.file_name().to_string_lossy().into_owned();
-                        let file_type = entry
-                            .file_type()
-                            .map_err(|e| crate::VfsError::Io(format!("file_type: {}", e)))?;
-                        let type_ = if file_type.is_dir() {
-                            types::DescriptorType::Directory
-                        } else if file_type.is_symlink() {
-                            types::DescriptorType::SymbolicLink
-                        } else if file_type.is_file() {
-                            types::DescriptorType::RegularFile
-                        } else {
-                            types::DescriptorType::Unknown
-                        };
-                        entries.push(types::DirectoryEntry { name, type_ });
-                    }
+                for entry in raw_entries {
+                    let name = dir.dir.guest_name(&entry);
+                    let file_type = entry
+                        .file_type()
+                        .map_err(|e| crate::VfsError::Io(format!("file_type: {}", e)))?;
+                    let type_ = if file_type.is_dir() {
+                        types::DescriptorType::Directory
+                    } else if file_type.is_symlink() {
+                        types::DescriptorType::SymbolicLink
+                    } else if file_type.is_file() {
+                        types::DescriptorType::RegularFile
+                    } else {
+                        types::DescriptorType::Unknown
+                    };
+                    entries.push(types::DirectoryEntry { name, type_ });
                 }
 
                 let iterator = HybridReaddirIterator::new(entries);
@@ -552,18 +514,10 @@ impl<S: VfsStorage + 'static> types::HostDescriptor for HybridVfsState<'_, S> {
                 Ok(())
             }
             HybridDescriptor::RealDir { dir, guest_path } => {
-                if !dir.is_path_allowed(&path) {
-                    let full = format!("{}/{}", guest_path.trim_end_matches('/'), path);
-                    return Err(crate::VfsError::PermissionDenied(format!(
-                        "access denied for {full}"
-                    ))
-                    .into());
-                }
                 if !dir.dir_perms.contains(DirPerms::MUTATE) {
                     return Err(crate::VfsError::PermissionDenied("mutate".to_string()).into());
                 }
-                let host_path = dir.translate_path(&path);
-                dir.dir.create_dir(host_path).map_err(|e| {
+                dir.dir.create_dir(&path).map_err(|e| {
                     crate::VfsError::Io(format!("create_dir {}/{}: {}", guest_path, path, e))
                 })?;
                 Ok(())
@@ -618,12 +572,7 @@ impl<S: VfsStorage + 'static> types::HostDescriptor for HybridVfsState<'_, S> {
                 Ok(vfs_metadata_to_stat(&meta))
             }
             HybridDescriptor::RealDir { dir, guest_path } => {
-                if !dir.is_path_allowed(&path) {
-                    let full = format!("{}/{}", guest_path.trim_end_matches('/'), path);
-                    return Err(crate::VfsError::NotFound(full).into());
-                }
-                let host_path = dir.translate_path(&path);
-                let meta = dir.dir.metadata(host_path).map_err(|e| {
+                let meta = dir.dir.metadata(&path).map_err(|e| {
                     crate::VfsError::Io(format!("stat {}/{}: {}", guest_path, path, e))
                 })?;
                 Ok(cap_metadata_to_stat(&meta))
@@ -751,29 +700,22 @@ impl<S: VfsStorage + 'static> types::HostDescriptor for HybridVfsState<'_, S> {
 
                 let full_guest_path = format!("{}/{}", guest_path.trim_end_matches('/'), path);
 
-                // Enforce allowed_files restriction (for single-file mounts)
-                if !dir.is_path_allowed(&path) {
-                    return Err(crate::VfsError::NotFound(full_guest_path).into());
-                }
-
-                // Translate guest filename to host filename for file-mapped mounts
-                let host_path = dir.translate_path(&path);
-
                 if is_directory {
-                    // Opening a subdirectory
-                    let sub_dir = dir.dir.open_dir(host_path).map_err(|e| {
-                        if e.kind() == std::io::ErrorKind::NotFound {
+                    // Opening a subdirectory — RestrictedDir::open_dir checks + translates
+                    let restricted_sub = dir.dir.open_dir(&path).map_err(|e| {
+                        if e.kind() == std::io::ErrorKind::NotFound
+                            || e.kind() == std::io::ErrorKind::PermissionDenied
+                        {
                             crate::VfsError::NotFound(full_guest_path.clone())
                         } else {
                             crate::VfsError::Io(format!("open_dir {}: {}", full_guest_path, e))
                         }
                     })?;
                     let new_real_dir = RealDir {
-                        dir: Arc::new(sub_dir),
+                        dir: restricted_sub,
                         dir_perms: dir.dir_perms,
                         file_perms: dir.file_perms,
                         allow_blocking: dir.allow_blocking,
-                        file_map: None, // subdirs don't inherit file restrictions
                     };
                     let new_descriptor = HybridDescriptor::RealDir {
                         dir: new_real_dir,
@@ -818,8 +760,11 @@ impl<S: VfsStorage + 'static> types::HostDescriptor for HybridVfsState<'_, S> {
                         open_opts.create_new(true);
                     }
 
-                    let file = dir.dir.open_with(host_path, &open_opts).map_err(|e| {
-                        if e.kind() == std::io::ErrorKind::NotFound {
+                    // RestrictedDir::open_with checks + translates
+                    let file = dir.dir.open_with(&path, &open_opts).map_err(|e| {
+                        if e.kind() == std::io::ErrorKind::NotFound
+                            || e.kind() == std::io::ErrorKind::PermissionDenied
+                        {
                             crate::VfsError::NotFound(full_guest_path.clone())
                         } else if e.kind() == std::io::ErrorKind::AlreadyExists {
                             crate::VfsError::AlreadyExists(full_guest_path.clone())
@@ -865,12 +810,7 @@ impl<S: VfsStorage + 'static> types::HostDescriptor for HybridVfsState<'_, S> {
                 Err(crate::VfsError::PermissionDenied("symlinks not supported".to_string()).into())
             }
             HybridDescriptor::RealDir { dir, guest_path } => {
-                if !dir.is_path_allowed(&path) {
-                    let full = format!("{}/{}", guest_path.trim_end_matches('/'), path);
-                    return Err(crate::VfsError::NotFound(full).into());
-                }
-                let host_path = dir.translate_path(&path);
-                let target = dir.dir.read_link(host_path).map_err(|e| {
+                let target = dir.dir.read_link(&path).map_err(|e| {
                     crate::VfsError::Io(format!("readlink {}/{}: {}", guest_path, path, e))
                 })?;
                 Ok(target.to_string_lossy().into_owned())
@@ -900,18 +840,10 @@ impl<S: VfsStorage + 'static> types::HostDescriptor for HybridVfsState<'_, S> {
                 Ok(())
             }
             HybridDescriptor::RealDir { dir, guest_path } => {
-                if !dir.is_path_allowed(&path) {
-                    let full = format!("{}/{}", guest_path.trim_end_matches('/'), path);
-                    return Err(crate::VfsError::PermissionDenied(format!(
-                        "access denied for {full}"
-                    ))
-                    .into());
-                }
                 if !dir.dir_perms.contains(DirPerms::MUTATE) {
                     return Err(crate::VfsError::PermissionDenied("mutate".to_string()).into());
                 }
-                let host_path = dir.translate_path(&path);
-                dir.dir.remove_dir(host_path).map_err(|e| {
+                dir.dir.remove_dir(&path).map_err(|e| {
                     crate::VfsError::Io(format!("rmdir {}/{}: {}", guest_path, path, e))
                 })?;
                 Ok(())
@@ -958,22 +890,15 @@ impl<S: VfsStorage + 'static> types::HostDescriptor for HybridVfsState<'_, S> {
                     guest_path: new_guest,
                 },
             ) => {
-                if !old_dir.is_path_allowed(&old_path) || !new_dir.is_path_allowed(&new_path) {
-                    return Err(crate::VfsError::PermissionDenied(
-                        "access denied by file mount restriction".to_string(),
-                    )
-                    .into());
-                }
                 if !old_dir.dir_perms.contains(DirPerms::MUTATE)
                     || !new_dir.dir_perms.contains(DirPerms::MUTATE)
                 {
                     return Err(crate::VfsError::PermissionDenied("mutate".to_string()).into());
                 }
-                let host_old = old_dir.translate_path(&old_path);
-                let host_new = new_dir.translate_path(&new_path);
+                // RestrictedDir::rename checks + translates both sides
                 old_dir
                     .dir
-                    .rename(host_old, &new_dir.dir, host_new)
+                    .rename(&old_path, &new_dir.dir, &new_path)
                     .map_err(|e| {
                         crate::VfsError::Io(format!(
                             "rename {}/{} -> {}/{}: {}",
@@ -1004,20 +929,11 @@ impl<S: VfsStorage + 'static> types::HostDescriptor for HybridVfsState<'_, S> {
                 Err(crate::VfsError::PermissionDenied("symlinks not supported".to_string()).into())
             }
             HybridDescriptor::RealDir { dir, guest_path } => {
-                if !dir.is_path_allowed(&dest_path) {
-                    return Err(crate::VfsError::PermissionDenied(format!(
-                        "access denied for {}/{}",
-                        guest_path.trim_end_matches('/'),
-                        dest_path
-                    ))
-                    .into());
-                }
                 if !dir.dir_perms.contains(DirPerms::MUTATE) {
                     return Err(crate::VfsError::PermissionDenied("mutate".to_string()).into());
                 }
-                let host_dest = dir.translate_path(&dest_path);
                 dir.dir
-                    .symlink(&src_path, host_dest)
+                    .symlink(&src_path, &dest_path)
                     .map_err(|e| crate::VfsError::Io(format!("symlink {}: {}", guest_path, e)))?;
                 Ok(())
             }
@@ -1046,18 +962,10 @@ impl<S: VfsStorage + 'static> types::HostDescriptor for HybridVfsState<'_, S> {
                 Ok(())
             }
             HybridDescriptor::RealDir { dir, guest_path } => {
-                if !dir.is_path_allowed(&path) {
-                    let full = format!("{}/{}", guest_path.trim_end_matches('/'), path);
-                    return Err(crate::VfsError::PermissionDenied(format!(
-                        "access denied for {full}"
-                    ))
-                    .into());
-                }
                 if !dir.dir_perms.contains(DirPerms::MUTATE) {
                     return Err(crate::VfsError::PermissionDenied("mutate".to_string()).into());
                 }
-                let host_path = dir.translate_path(&path);
-                dir.dir.remove_file(host_path).map_err(|e| {
+                dir.dir.remove_file(&path).map_err(|e| {
                     crate::VfsError::Io(format!("unlink {}/{}: {}", guest_path, path, e))
                 })?;
                 Ok(())
@@ -1244,12 +1152,7 @@ impl<S: VfsStorage + 'static> types::HostDescriptor for HybridVfsState<'_, S> {
                 })
             }
             HybridDescriptor::RealDir { dir, guest_path } => {
-                if !dir.is_path_allowed(&path) {
-                    let full = format!("{}/{}", guest_path.trim_end_matches('/'), path);
-                    return Err(crate::VfsError::NotFound(full).into());
-                }
-                let host_path = dir.translate_path(&path);
-                let meta = dir.dir.metadata(host_path).map_err(|e| {
+                let meta = dir.dir.metadata(&path).map_err(|e| {
                     crate::VfsError::Io(format!("stat {}/{}: {}", guest_path, path, e))
                 })?;
                 let full_path = format!("{}/{}", guest_path, path);

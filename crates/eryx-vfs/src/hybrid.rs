@@ -16,28 +16,237 @@ use wasmtime_wasi::{DirPerms, FilePerms};
 use crate::storage::VfsStorage;
 use crate::wasi_impl::VfsDescriptor;
 
+/// A capability-restricted directory handle.
+///
+/// Wraps `cap_std::fs::Dir` and enforces `file_map` restrictions on every
+/// filesystem operation. The inner `Dir` is private, so there is no way to
+/// bypass the filter — access control is enforced by the type system, not
+/// by convention.
+///
+/// When `file_map` is `None`, all child paths are allowed (normal directory
+/// mount). When `file_map` is `Some`, only mapped guest filenames can be
+/// accessed, and they are transparently translated to host filenames.
+#[derive(Clone)]
+pub struct RestrictedDir {
+    inner: Arc<cap_std::fs::Dir>,
+    file_map: Option<HashMap<String, String>>,
+}
+
+impl std::fmt::Debug for RestrictedDir {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RestrictedDir")
+            .field("restricted", &self.file_map.is_some())
+            .finish_non_exhaustive()
+    }
+}
+
+impl RestrictedDir {
+    /// Create an unrestricted directory handle (all child paths allowed).
+    pub fn new(dir: cap_std::fs::Dir) -> Self {
+        Self {
+            inner: Arc::new(dir),
+            file_map: None,
+        }
+    }
+
+    /// Create a restricted directory handle with a guest-to-host filename map.
+    ///
+    /// Only filenames present as keys in the map will be accessible.
+    /// Guest filenames are transparently translated to host filenames.
+    pub fn with_file_map(dir: cap_std::fs::Dir, file_map: HashMap<String, String>) -> Self {
+        Self {
+            inner: Arc::new(dir),
+            file_map: Some(file_map),
+        }
+    }
+
+    /// Open an ambient directory as an unrestricted handle.
+    pub fn open_ambient(path: impl AsRef<std::path::Path>) -> std::io::Result<Self> {
+        let dir = cap_std::fs::Dir::open_ambient_dir(path, cap_std::ambient_authority())?;
+        Ok(Self::new(dir))
+    }
+
+    /// Check whether a guest-relative path is allowed.
+    fn check_allowed(&self, guest_rel_path: &str) -> Result<(), std::io::Error> {
+        match &self.file_map {
+            None => Ok(()),
+            Some(map) => {
+                let normalized = guest_rel_path.strip_prefix("./").unwrap_or(guest_rel_path);
+                if map.contains_key(normalized) {
+                    Ok(())
+                } else {
+                    Err(std::io::Error::new(
+                        std::io::ErrorKind::PermissionDenied,
+                        format!("access denied: {guest_rel_path}"),
+                    ))
+                }
+            }
+        }
+    }
+
+    /// Translate a guest-relative path to a host-relative path.
+    fn translate<'a>(&'a self, guest_rel_path: &'a str) -> &'a str {
+        match &self.file_map {
+            None => guest_rel_path,
+            Some(map) => {
+                let normalized = guest_rel_path.strip_prefix("./").unwrap_or(guest_rel_path);
+                map.get(normalized)
+                    .map(String::as_str)
+                    .unwrap_or(guest_rel_path)
+            }
+        }
+    }
+
+    // ========================================================================
+    // Filesystem operations — each checks + translates before delegating
+    // ========================================================================
+
+    /// Open a file within this directory.
+    pub fn open_with(
+        &self,
+        guest_path: &str,
+        opts: &cap_std::fs::OpenOptions,
+    ) -> std::io::Result<cap_std::fs::File> {
+        self.check_allowed(guest_path)?;
+        self.inner.open_with(self.translate(guest_path), opts)
+    }
+
+    /// Open a subdirectory. The returned `RestrictedDir` is unrestricted
+    /// (subdirectories don't inherit single-file restrictions).
+    pub fn open_dir(&self, guest_path: &str) -> std::io::Result<RestrictedDir> {
+        self.check_allowed(guest_path)?;
+        let sub = self.inner.open_dir(self.translate(guest_path))?;
+        Ok(RestrictedDir {
+            inner: Arc::new(sub),
+            file_map: None,
+        })
+    }
+
+    /// Create a subdirectory.
+    pub fn create_dir(&self, guest_path: &str) -> std::io::Result<()> {
+        self.check_allowed(guest_path)?;
+        self.inner.create_dir(self.translate(guest_path))
+    }
+
+    /// Get metadata for a child path.
+    pub fn metadata(&self, guest_path: &str) -> std::io::Result<cap_std::fs::Metadata> {
+        self.check_allowed(guest_path)?;
+        self.inner.metadata(self.translate(guest_path))
+    }
+
+    /// Get metadata for the directory itself (no child path, no filter).
+    pub fn dir_metadata(&self) -> std::io::Result<cap_std::fs::Metadata> {
+        self.inner.dir_metadata()
+    }
+
+    /// Read a symbolic link.
+    pub fn read_link(&self, guest_path: &str) -> std::io::Result<std::path::PathBuf> {
+        self.check_allowed(guest_path)?;
+        self.inner.read_link(self.translate(guest_path))
+    }
+
+    /// Remove a subdirectory.
+    pub fn remove_dir(&self, guest_path: &str) -> std::io::Result<()> {
+        self.check_allowed(guest_path)?;
+        self.inner.remove_dir(self.translate(guest_path))
+    }
+
+    /// Remove a file.
+    pub fn remove_file(&self, guest_path: &str) -> std::io::Result<()> {
+        self.check_allowed(guest_path)?;
+        self.inner.remove_file(self.translate(guest_path))
+    }
+
+    /// Rename a file or directory. Both source and destination are checked.
+    pub fn rename(
+        &self,
+        old_guest: &str,
+        dest: &RestrictedDir,
+        new_guest: &str,
+    ) -> std::io::Result<()> {
+        self.check_allowed(old_guest)?;
+        dest.check_allowed(new_guest)?;
+        self.inner.rename(
+            self.translate(old_guest),
+            &dest.inner,
+            dest.translate(new_guest),
+        )
+    }
+
+    /// Create a symbolic link.
+    pub fn symlink(&self, src_path: &str, dest_guest: &str) -> std::io::Result<()> {
+        self.check_allowed(dest_guest)?;
+        self.inner.symlink(src_path, self.translate(dest_guest))
+    }
+
+    /// List directory entries, filtered and translated through the file map.
+    ///
+    /// If restricted, only mapped files are returned with guest-visible names.
+    /// If unrestricted, all entries are returned as-is.
+    pub fn entries(&self) -> std::io::Result<Vec<cap_std::fs::DirEntry>> {
+        match &self.file_map {
+            None => self.inner.entries()?.collect::<Result<Vec<_>, _>>(),
+            Some(map) => {
+                // Build reverse map: host_name → guest_name
+                let reverse: HashMap<&str, &str> = map
+                    .iter()
+                    .map(|(guest, host)| (host.as_str(), guest.as_str()))
+                    .collect();
+                let mut result = Vec::new();
+                for entry in self.inner.entries()? {
+                    let entry = entry?;
+                    let host_name = entry.file_name().to_string_lossy().into_owned();
+                    if reverse.contains_key(host_name.as_str()) {
+                        result.push(entry);
+                    }
+                }
+                Ok(result)
+            }
+        }
+    }
+
+    /// Get the guest-visible name for a directory entry.
+    ///
+    /// If restricted, translates the host filename back to the guest filename.
+    /// If unrestricted, returns the entry's filename as-is.
+    pub fn guest_name(&self, entry: &cap_std::fs::DirEntry) -> String {
+        let host_name = entry.file_name().to_string_lossy().into_owned();
+        match &self.file_map {
+            None => host_name,
+            Some(map) => {
+                // Reverse lookup: find the guest name for this host name
+                for (guest, host) in map {
+                    if host == &host_name {
+                        return guest.clone();
+                    }
+                }
+                host_name
+            }
+        }
+    }
+}
+
 /// A real filesystem directory handle.
 ///
-/// This wraps cap-std's Dir with permissions and configuration.
+/// This wraps a [`RestrictedDir`] with permissions and configuration.
+/// The underlying `cap_std::fs::Dir` is not directly accessible — all
+/// filesystem operations go through `RestrictedDir`'s access control.
 #[derive(Clone)]
 pub struct RealDir {
-    /// The underlying cap-std directory.
-    pub dir: Arc<cap_std::fs::Dir>,
+    /// The restricted directory handle (enforces file_map at type level).
+    pub dir: RestrictedDir,
     /// Directory permissions.
     pub dir_perms: DirPerms,
     /// Default file permissions for files in this directory.
     pub file_perms: FilePerms,
     /// Whether to allow blocking the current thread.
     pub allow_blocking: bool,
-    /// If set, maps guest filenames to host filenames, restricting access.
-    /// Used for single-file volume mounts (e.g., `-v /host/src.py:/mnt/dst.py`).
-    /// Key = guest filename (what the sandbox sees), Value = host filename (real file).
-    pub file_map: Option<HashMap<String, String>>,
 }
 
 impl std::fmt::Debug for RealDir {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("RealDir")
+            .field("dir", &self.dir)
             .field("dir_perms", &self.dir_perms)
             .field("file_perms", &self.file_perms)
             .finish_non_exhaustive()
@@ -48,11 +257,10 @@ impl RealDir {
     /// Create a new RealDir from a cap-std Dir.
     pub fn new(dir: cap_std::fs::Dir, dir_perms: DirPerms, file_perms: FilePerms) -> Self {
         Self {
-            dir: Arc::new(dir),
+            dir: RestrictedDir::new(dir),
             dir_perms,
             file_perms,
             allow_blocking: false,
-            file_map: None,
         }
     }
 
@@ -64,36 +272,6 @@ impl RealDir {
     ) -> std::io::Result<Self> {
         let dir = cap_std::fs::Dir::open_ambient_dir(path, cap_std::ambient_authority())?;
         Ok(Self::new(dir, dir_perms, file_perms))
-    }
-
-    /// Check whether a guest-relative path is allowed by the file map.
-    ///
-    /// Returns `true` if there is no restriction or if the path matches a
-    /// mapped guest filename.
-    pub fn is_path_allowed(&self, guest_rel_path: &str) -> bool {
-        match &self.file_map {
-            None => true,
-            Some(map) => {
-                let normalized = guest_rel_path.strip_prefix("./").unwrap_or(guest_rel_path);
-                map.contains_key(normalized)
-            }
-        }
-    }
-
-    /// Translate a guest-relative path to a host-relative path.
-    ///
-    /// If this directory has a `file_map`, the guest filename is translated to
-    /// the corresponding host filename. Otherwise, the path is returned as-is.
-    pub fn translate_path<'a>(&'a self, guest_rel_path: &'a str) -> &'a str {
-        match &self.file_map {
-            None => guest_rel_path,
-            Some(map) => {
-                let normalized = guest_rel_path.strip_prefix("./").unwrap_or(guest_rel_path);
-                map.get(normalized)
-                    .map(String::as_str)
-                    .unwrap_or(guest_rel_path)
-            }
-        }
     }
 }
 
@@ -402,8 +580,16 @@ impl<S: VfsStorage> HybridVfsCtx<S> {
             .map(|(_, name)| name.to_string())
             .unwrap_or_else(|| guest_path.clone());
 
-        let mut dir = RealDir::open_ambient(host_parent, dir_perms, file_perms)?;
-        dir.file_map = Some(HashMap::from([(guest_file_name, file_name)]));
+        let raw_dir =
+            cap_std::fs::Dir::open_ambient_dir(host_parent, cap_std::ambient_authority())?;
+        let restricted =
+            RestrictedDir::with_file_map(raw_dir, HashMap::from([(guest_file_name, file_name)]));
+        let dir = RealDir {
+            dir: restricted,
+            dir_perms,
+            file_perms,
+            allow_blocking: false,
+        };
         self.add_real_preopen(guest_parent, dir);
         Ok(())
     }
