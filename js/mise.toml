@@ -104,8 +104,8 @@ depends = ["build"]
 sources = ["eryx-sandbox/**/*.js", "eryx-sandbox/**/*.wasm", "testpkg/**/*.ts"]
 dir = "testpkg"
 run = """
-cd ../eryx-sandbox && npm ci
-cd ../testpkg && npm ci && npm run typecheck && npm run test:ci
+cd ../eryx-sandbox && npm install
+cd ../testpkg && npm install && npm run typecheck && npm run test:ci
 """
 
 [tasks.clean]
