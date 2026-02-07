@@ -74,13 +74,10 @@ if (code.includes(recordReturnBugStr)) {
 }
 
 // Patch 5: Fix const destructuring + reassignment in _liftFlatRecordInner
-const constReassignBug = `    const { memory, useDirectParams, storagePtr, storageLen, params } = ctx;
-
-    if (useDirectParams) {
-      storagePtr = params[0]
-    }`;
-const constReassignFix = `    const { memory, useDirectParams, storagePtr, storageLen, params } = ctx;`;
-if (code.includes(constReassignBug)) {
+// The blank line between const and if may have trailing whitespace, so use regex
+const constReassignBug = /const \{ memory, useDirectParams, storagePtr, storageLen, params \} = ctx;\s+if \(useDirectParams\) \{\s+storagePtr = params\[0\]\s+\}/;
+const constReassignFix = `const { memory, useDirectParams, storagePtr, storageLen, params } = ctx;`;
+if (constReassignBug.test(code)) {
   code = code.replace(constReassignBug, constReassignFix);
   console.log('Patched: removed const reassignment in _liftFlatRecordInner');
   patched = true;
