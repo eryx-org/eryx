@@ -110,6 +110,7 @@ impl Session {
     ///     ])
     #[new]
     #[pyo3(signature = (*, vfs=None, vfs_mount_path=None, execution_timeout_ms=None, callbacks=None, volumes=None, on_stdout=None, on_stderr=None))]
+    #[allow(clippy::too_many_arguments)]
     fn new(
         py: Python<'_>,
         vfs: Option<VfsStorage>,
