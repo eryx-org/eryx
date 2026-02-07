@@ -26,6 +26,9 @@ classifiers = [
     "Topic :: Software Development :: Interpreters",
 ]
 
+[project.scripts]
+eryx = "eryx.__main__:main"
+
 [project.optional-dependencies]
 dev = ["pytest", "pytest-asyncio", "mypy", "requests", "httpx"]
 
