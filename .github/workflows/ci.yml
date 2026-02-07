@@ -560,6 +560,9 @@ jobs:
             --map 'report-trace=./shims/callbacks.js#reportTrace' \
             --map 'wasi:sockets/*=./shims/sockets.js#*'
 
+      - name: Install demo dependencies
+        run: npm ci --prefix js/eryx-sandbox
+
       - name: Patch JS for jco bugs
         working-directory: js
         run: node patch-jco.cjs
@@ -586,7 +589,6 @@ jobs:
           cp -r js/eryx-sandbox/shims deploy/
 
           # preview2-shim (referenced by import map in demo.html)
-          npm ci --prefix js/eryx-sandbox
           cp -r js/eryx-sandbox/node_modules/@bytecodealliance deploy/node_modules/
 
       - name: Deploy to demo branch
