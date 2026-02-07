@@ -27,7 +27,6 @@ impl OutputHandler for PyOutputHandler {
     async fn on_output(&self, chunk: &str) {
         if let Some(ref callback) = self.on_stdout {
             let chunk = chunk.to_string();
-            let callback = callback.clone();
             Python::attach(|py| {
                 if let Err(e) = callback.call1(py, (chunk,)) {
                     e.print(py);
@@ -39,7 +38,6 @@ impl OutputHandler for PyOutputHandler {
     async fn on_stderr(&self, chunk: &str) {
         if let Some(ref callback) = self.on_stderr {
             let chunk = chunk.to_string();
-            let callback = callback.clone();
             Python::attach(|py| {
                 if let Err(e) = callback.call1(py, (chunk,)) {
                     e.print(py);
