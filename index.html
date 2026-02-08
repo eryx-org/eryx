@@ -128,6 +128,31 @@
         .upload-zone:hover, .upload-zone.dragover { border-color: #007bff; color: #007bff; background: #f0f7ff; }
         .upload-zone input[type="file"] { display: none; }
 
+        /* File tree */
+        .fs-tree {
+            background: #f8f9fa; border: 1px solid #dee2e6; border-radius: 6px;
+            padding: 8px 0; font-size: 13px; min-height: 60px; max-height: 350px; overflow-y: auto;
+            font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+        }
+        .fs-entry {
+            padding: 4px 12px; cursor: pointer; display: flex; align-items: center; gap: 6px;
+            transition: background 0.1s;
+        }
+        .fs-entry:hover { background: #e9ecef; }
+        .fs-entry.selected { background: #d1ecf1; }
+        .fs-entry .icon { width: 16px; text-align: center; flex-shrink: 0; }
+        .fs-entry .name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .fs-entry .meta { color: #888; font-size: 12px; flex-shrink: 0; }
+        .fs-entry .actions-inline { display: none; gap: 4px; flex-shrink: 0; }
+        .fs-entry:hover .actions-inline { display: flex; }
+        .fs-entry .act-btn {
+            padding: 1px 6px; font-size: 11px; border-radius: 3px; border: 1px solid #ccc;
+            background: white; cursor: pointer; color: #495057;
+        }
+        .fs-entry .act-btn:hover { background: #e9ecef; }
+        .fs-entry .act-btn.del:hover { background: #f8d7da; color: #721c24; border-color: #f5c6cb; }
+        .fs-empty { padding: 16px; text-align: center; color: #888; font-style: italic; }
+
         /* Loading animation */
         @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.4; } }
         .loading { animation: pulse 1.5s ease-in-out infinite; }
@@ -138,7 +163,6 @@
     <p class="description">
         A sandboxed Python 3.14 interpreter running entirely in your browser via WebAssembly.
         Powered by <a href="https://github.com/eryx-org/eryx">eryx</a>.
-        Code is saved in the URL for sharing.
     </p>
 
     <div id="status" class="info visible loading">Loading Python sandbox (~45MB)&hellip; this may take a moment.</div>
@@ -147,11 +171,13 @@
         <button class="tab-btn active" data-tab="run">Run</button>
         <button class="tab-btn" data-tab="sessions" disabled>Sessions</button>
         <button class="tab-btn" data-tab="networking" disabled>Networking</button>
+        <button class="tab-btn" data-tab="filesystem" disabled>Filesystem</button>
         <button class="tab-btn" data-tab="packages" disabled>Packages</button>
     </div>
 
     <!-- Tab: Run -->
     <div id="tab-run" class="tab-panel active">
+        <p style="color:#666;margin-top:0;font-size:13px">Code is saved in the URL for sharing.</p>
         <div class="examples">
             <h3>Examples</h3>
             <div class="pill-row">
@@ -236,6 +262,64 @@ finally:
             <button id="net-run" class="btn-primary" disabled>Run</button>
         </div>
         <div id="net-output" class="output-box" style="display:none"></div>
+    </div>
+
+    <!-- Tab: Filesystem -->
+    <div id="tab-filesystem" class="tab-panel">
+        <p style="color:#666;margin-top:0">
+            Browse the sandbox's virtual filesystem. Import files from a local directory to work with them in Python.
+        </p>
+        <div id="fs-no-support" class="info-banner" style="display:none">
+            <strong>File System Access API not available.</strong> Use Chrome/Edge 86+ over HTTPS to mount local directories.
+            You can still browse and edit files in the sandbox VFS.
+        </div>
+        <div class="examples">
+            <h3>Examples</h3>
+            <div class="pill-row">
+                <button class="pill" data-fs-example="list">List Files</button>
+                <button class="pill" data-fs-example="readwrite">Read &amp; Write</button>
+                <button class="pill" data-fs-example="csv">CSV Processing</button>
+                <button class="pill" data-fs-example="filestats">File Stats</button>
+                <button class="pill" data-fs-example="tree">Directory Tree</button>
+            </div>
+        </div>
+        <textarea id="fs-code" placeholder="Enter Python filesystem code...">import os
+
+# List files in the sandbox VFS
+for entry in os.listdir('/data'):
+    full = os.path.join('/data', entry)
+    kind = 'dir' if os.path.isdir(full) else 'file'
+    print(f"  [{kind}] {entry}")</textarea>
+        <div class="btn-row">
+            <button id="fs-run" class="btn-primary" disabled>Run (Ctrl+Enter)</button>
+            <button id="fs-mount-btn" class="btn-success btn-sm" disabled>Mount Directory</button>
+            <button id="fs-refresh-btn" class="btn-secondary btn-sm" disabled>Refresh Tree</button>
+        </div>
+        <div class="output-section">
+            <div id="fs-output" class="output-box" style="display:none"></div>
+            <div class="exec-time" id="fs-time"></div>
+        </div>
+        <div id="fs-explorer" style="margin-top:16px">
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+                <h3 style="font-size:15px;margin:0">File Explorer — <code>/data</code></h3>
+                <div style="display:flex;gap:6px">
+                    <button id="fs-new-file-btn" class="btn-primary btn-sm" disabled>New File</button>
+                    <button id="fs-new-dir-btn" class="btn-secondary btn-sm" disabled>New Folder</button>
+                </div>
+            </div>
+            <div id="fs-mount-info" style="display:none;font-size:13px;color:#666;margin-bottom:8px"></div>
+            <div id="fs-tree" class="fs-tree"><span style="color:#888;font-size:13px">Loading sandbox to browse files...</span></div>
+        </div>
+        <div id="fs-editor-container" style="display:none;margin-top:16px">
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+                <h3 style="font-size:15px;margin:0" id="fs-editor-title">Editing: <code></code></h3>
+                <div style="display:flex;gap:6px">
+                    <button id="fs-save-btn" class="btn-primary btn-sm">Save</button>
+                    <button id="fs-close-editor-btn" class="btn-secondary btn-sm">Close</button>
+                </div>
+            </div>
+            <textarea id="fs-editor" style="min-height:200px"></textarea>
+        </div>
     </div>
 
     <!-- Tab: Packages -->
@@ -514,6 +598,335 @@ print(f"pickle:  {len(pickled)} bytes")`,
                     out.style.display = 'block';
                     await runCode(code, out, null);
                 });
+
+                // ===== Filesystem tab =====
+                const FS_EXAMPLES = {
+                    list: `import os
+
+# List all files in /data
+for entry in os.listdir('/data'):
+    full = os.path.join('/data', entry)
+    kind = 'dir' if os.path.isdir(full) else 'file'
+    size = os.path.getsize(full) if os.path.isfile(full) else 0
+    print(f"  [{kind:4s}] {entry:30s} {size:>8d} bytes")`,
+                    readwrite: `# Write a file
+with open('/data/hello.txt', 'w') as f:
+    f.write('Hello from the eryx sandbox!\\n')
+    f.write('This file lives in the virtual filesystem.\\n')
+
+# Read it back
+with open('/data/hello.txt', 'r') as f:
+    content = f.read()
+
+print("Wrote and read /data/hello.txt:")
+print(content)`,
+                    csv: `import csv, io
+
+# Write a CSV file
+with open('/data/people.csv', 'w', newline='') as f:
+    writer = csv.writer(f)
+    writer.writerow(['Name', 'Age', 'City'])
+    writer.writerow(['Alice', 30, 'London'])
+    writer.writerow(['Bob', 25, 'Paris'])
+    writer.writerow(['Charlie', 35, 'Tokyo'])
+
+# Read it back
+with open('/data/people.csv', 'r') as f:
+    reader = csv.DictReader(f)
+    for row in reader:
+        print(f"{row['Name']:10s} age {row['Age']:>3s} from {row['City']}")`,
+                    filestats: `import os, datetime
+
+path = '/data'
+print(f"Contents of {path}:\\n")
+for name in sorted(os.listdir(path)):
+    full = os.path.join(path, name)
+    stat = os.stat(full)
+    is_dir = os.path.isdir(full)
+    size = stat.st_size
+    mtime = datetime.datetime.fromtimestamp(stat.st_mtime)
+    prefix = 'd' if is_dir else '-'
+    print(f"  {prefix} {size:>8d}  {mtime:%Y-%m-%d %H:%M}  {name}")`,
+                    tree: `import os
+
+def print_tree(path, prefix=''):
+    entries = sorted(os.listdir(path))
+    dirs = [e for e in entries if os.path.isdir(os.path.join(path, e))]
+    files = [e for e in entries if os.path.isfile(os.path.join(path, e))]
+    all_entries = dirs + files
+    for i, entry in enumerate(all_entries):
+        is_last = i == len(all_entries) - 1
+        connector = '\\u2514\\u2500\\u2500 ' if is_last else '\\u251c\\u2500\\u2500 '
+        full = os.path.join(path, entry)
+        if os.path.isdir(full):
+            print(f"{prefix}{connector}{entry}/")
+            ext = '    ' if is_last else '\\u2502   '
+            print_tree(full, prefix + ext)
+        else:
+            size = os.path.getsize(full)
+            print(f"{prefix}{connector}{entry} ({size}B)")
+
+print("/data/")
+print_tree('/data')`,
+                };
+
+                const fsCodeEl = $('#fs-code');
+                const fsOutputEl = $('#fs-output');
+                const fsTimeEl = $('#fs-time');
+                const fsTreeEl = $('#fs-tree');
+
+                // Check File System Access API support
+                const hasFSAccess = typeof window.showDirectoryPicker === 'function';
+                if (!hasFSAccess) {
+                    $('#fs-no-support').style.display = 'block';
+                    $('#fs-mount-btn').style.display = 'none';
+                }
+
+                // Enable buttons
+                $('#fs-run').disabled = false;
+                $('#fs-mount-btn').disabled = false;
+                $('#fs-refresh-btn').disabled = false;
+                $('#fs-new-file-btn').disabled = false;
+                $('#fs-new-dir-btn').disabled = false;
+
+                // Example pills
+                document.querySelectorAll('[data-fs-example]').forEach(btn => {
+                    btn.addEventListener('click', () => {
+                        fsCodeEl.value = FS_EXAMPLES[btn.dataset.fsExample];
+                    });
+                });
+
+                // Run button
+                $('#fs-run').addEventListener('click', async () => {
+                    const code = fsCodeEl.value.trim();
+                    if (!code) return;
+                    fsOutputEl.style.display = 'block';
+                    await runCode(code, fsOutputEl, fsTimeEl);
+                    await refreshFileTree();
+                });
+
+                // Refresh file tree
+                async function refreshFileTree() {
+                    const scanCode = `
+import os, json
+result = []
+for root, dirs, files in os.walk('/data'):
+    rel = root[len('/data'):] or '/'
+    for d in sorted(dirs):
+        result.append({'path': os.path.join(root, d), 'name': d, 'dir': rel, 'type': 'dir', 'size': 0})
+    for f in sorted(files):
+        full = os.path.join(root, f)
+        try:
+            size = os.path.getsize(full)
+        except:
+            size = 0
+        result.append({'path': full, 'name': f, 'dir': rel, 'type': 'file', 'size': size})
+print(json.dumps(result))
+`;
+                    try {
+                        const result = await sandbox.execute(scanCode);
+                        const entries = JSON.parse(result.stdout.trim());
+                        renderFileTree(entries);
+                    } catch (e) {
+                        fsTreeEl.innerHTML = `<div class="fs-empty">Could not read /data: ${e.message}</div>`;
+                    }
+                }
+
+                function renderFileTree(entries) {
+                    if (entries.length === 0) {
+                        fsTreeEl.innerHTML = '<div class="fs-empty">Empty &mdash; create files or mount a directory</div>';
+                        return;
+                    }
+                    fsTreeEl.innerHTML = '';
+                    for (const entry of entries) {
+                        const div = document.createElement('div');
+                        div.className = 'fs-entry';
+                        const depth = (entry.dir === '/' ? 0 : entry.dir.split('/').filter(Boolean).length);
+                        div.style.paddingLeft = (12 + depth * 16) + 'px';
+                        const icon = entry.type === 'dir' ? '\u{1F4C1}' : '\u{1F4C4}';
+                        const sizeStr = entry.type === 'file' ? formatSize(entry.size) : '';
+                        div.innerHTML = `
+                            <span class="icon">${icon}</span>
+                            <span class="name">${escapeHtml(entry.name)}${entry.type === 'dir' ? '/' : ''}</span>
+                            <span class="meta">${sizeStr}</span>
+                            <span class="actions-inline">
+                                ${entry.type === 'file' ? '<button class="act-btn edit-btn">Edit</button>' : ''}
+                                <button class="act-btn del">Delete</button>
+                            </span>
+                        `;
+                        const editBtn = div.querySelector('.edit-btn');
+                        if (editBtn) {
+                            editBtn.addEventListener('click', (e) => {
+                                e.stopPropagation();
+                                openEditor(entry.path);
+                            });
+                        }
+                        div.querySelector('.del').addEventListener('click', async (e) => {
+                            e.stopPropagation();
+                            const what = entry.type === 'dir' ? 'directory' : 'file';
+                            if (!confirm(`Delete ${what} "${entry.name}"?`)) return;
+                            const delCode = entry.type === 'dir'
+                                ? `import shutil; shutil.rmtree(${JSON.stringify(entry.path)})`
+                                : `import os; os.remove(${JSON.stringify(entry.path)})`;
+                            try {
+                                await sandbox.execute(delCode);
+                                await refreshFileTree();
+                            } catch (err) {
+                                setStatus('Delete failed: ' + err.message, 'error');
+                            }
+                        });
+                        if (entry.type === 'file') {
+                            div.addEventListener('click', () => openEditor(entry.path));
+                        }
+                        fsTreeEl.appendChild(div);
+                    }
+                }
+
+                function formatSize(bytes) {
+                    if (bytes < 1024) return bytes + ' B';
+                    if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
+                    return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
+                }
+
+                function escapeHtml(s) {
+                    return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+                }
+
+                // File editor
+                async function openEditor(filePath) {
+                    const readCode = `
+import base64
+with open(${JSON.stringify(filePath)}, 'rb') as f:
+    data = f.read()
+print(base64.b64encode(data).decode())
+`;
+                    try {
+                        const result = await sandbox.execute(readCode);
+                        const b64 = result.stdout.trim();
+                        const bytes = Uint8Array.from(atob(b64), c => c.charCodeAt(0));
+                        const text = new TextDecoder().decode(bytes);
+                        $('#fs-editor').value = text;
+                        $('#fs-editor-title').innerHTML = `Editing: <code>${escapeHtml(filePath)}</code>`;
+                        $('#fs-editor-container').style.display = 'block';
+                        $('#fs-editor-container').dataset.path = filePath;
+                        $('#fs-editor').focus();
+                    } catch (e) {
+                        setStatus('Failed to read file: ' + e.message, 'error');
+                    }
+                }
+
+                // Save file
+                $('#fs-save-btn').addEventListener('click', async () => {
+                    const filePath = $('#fs-editor-container').dataset.path;
+                    const content = $('#fs-editor').value;
+                    const b64 = btoa(Array.from(new TextEncoder().encode(content), b => String.fromCharCode(b)).join(''));
+                    const writeCode = `
+import base64
+data = base64.b64decode(${JSON.stringify(b64)})
+with open(${JSON.stringify(filePath)}, 'wb') as f:
+    f.write(data)
+print(f"Saved {len(data)} bytes to ${filePath}")
+`;
+                    try {
+                        await sandbox.execute(writeCode);
+                        setStatus(`Saved ${filePath}`, 'success');
+                        await refreshFileTree();
+                    } catch (e) {
+                        setStatus('Save failed: ' + e.message, 'error');
+                    }
+                });
+
+                // Close editor
+                $('#fs-close-editor-btn').addEventListener('click', () => {
+                    $('#fs-editor-container').style.display = 'none';
+                });
+
+                // New file
+                $('#fs-new-file-btn').addEventListener('click', async () => {
+                    const name = prompt('File name:', 'new_file.txt');
+                    if (!name) return;
+                    const filePath = '/data/' + name;
+                    const createCode = `
+import os
+os.makedirs(os.path.dirname(${JSON.stringify(filePath)}), exist_ok=True)
+with open(${JSON.stringify(filePath)}, 'w') as f:
+    f.write('')
+print('Created ' + ${JSON.stringify(filePath)})
+`;
+                    try {
+                        await sandbox.execute(createCode);
+                        await refreshFileTree();
+                        openEditor(filePath);
+                    } catch (e) {
+                        setStatus('Create failed: ' + e.message, 'error');
+                    }
+                });
+
+                // New directory
+                $('#fs-new-dir-btn').addEventListener('click', async () => {
+                    const name = prompt('Folder name:', 'new_folder');
+                    if (!name) return;
+                    const dirPath = '/data/' + name;
+                    try {
+                        await sandbox.execute(`import os; os.makedirs(${JSON.stringify(dirPath)}, exist_ok=True); print('Created ' + ${JSON.stringify(dirPath)})`);
+                        await refreshFileTree();
+                    } catch (e) {
+                        setStatus('Create failed: ' + e.message, 'error');
+                    }
+                });
+
+                // Refresh button
+                $('#fs-refresh-btn').addEventListener('click', () => refreshFileTree());
+
+                // Mount host directory
+                $('#fs-mount-btn').addEventListener('click', async () => {
+                    if (!hasFSAccess) return;
+                    try {
+                        const dirHandle = await window.showDirectoryPicker({ mode: 'read' });
+                        setStatus(`Importing "${dirHandle.name}"...`, 'info');
+                        await syncHostToSandbox(dirHandle, '/data');
+                        $('#fs-mount-info').style.display = 'block';
+                        $('#fs-mount-info').textContent = `Imported: ${dirHandle.name} \u2192 /data (read-only)`;
+                        await refreshFileTree();
+                        setStatus(`Imported "${dirHandle.name}" \u2192 /data`, 'success');
+                    } catch (e) {
+                        if (e.name !== 'AbortError') {
+                            setStatus('Mount failed: ' + e.message, 'error');
+                        }
+                    }
+                });
+
+                // Sync host directory into sandbox VFS
+                async function syncHostToSandbox(dirHandle, basePath) {
+                    for await (const [name, handle] of dirHandle) {
+                        const guestPath = basePath + '/' + name;
+                        if (handle.kind === 'directory') {
+                            await sandbox.execute(`import os; os.makedirs(${JSON.stringify(guestPath)}, exist_ok=True)`);
+                            await syncHostToSandbox(handle, guestPath);
+                        } else {
+                            const file = await handle.getFile();
+                            const buf = await file.arrayBuffer();
+                            const bytes = new Uint8Array(buf);
+                            // For files up to ~1MB, use base64 transfer
+                            if (bytes.length > 1024 * 1024) {
+                                console.warn(`Skipping ${name}: too large (${bytes.length} bytes)`);
+                                continue;
+                            }
+                            const b64 = btoa(Array.from(bytes, b => String.fromCharCode(b)).join(''));
+                            const writeCode = `
+import base64, os
+os.makedirs(os.path.dirname(${JSON.stringify(guestPath)}), exist_ok=True)
+data = base64.b64decode(${JSON.stringify(b64)})
+with open(${JSON.stringify(guestPath)}, 'wb') as f:
+    f.write(data)
+`;
+                            await sandbox.execute(writeCode);
+                        }
+                    }
+                }
+
+                // Initial tree load
+                refreshFileTree();
 
                 // ===== Packages tab =====
                 const uploadZone = $('#upload-zone');
