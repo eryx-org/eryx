@@ -31,38 +31,41 @@
   });
 </script>
 
-<h1>eryx</h1>
-<p class="description">
-  A sandboxed Python 3.14 interpreter running entirely in your browser via
-  WebAssembly. Powered by <a href="https://github.com/eryx-org/eryx">eryx</a>.
-</p>
+<main>
+  <h1>eryx</h1>
+  <p class="description">
+    A sandboxed Python 3.14 interpreter running entirely in your browser via
+    WebAssembly. Powered by <a href="https://github.com/eryx-org/eryx">eryx</a>.
+  </p>
 
-<StatusBar />
+  <StatusBar />
 
-<div class="tab-bar">
-  {#each tabs as tab}
-    <button
-      class="tab-btn"
-      class:active={activeTab === tab.id}
-      disabled={tab.id !== "run" && !ready}
-      onclick={() => (activeTab = tab.id)}
-    >
-      {tab.label}
-    </button>
-  {/each}
-</div>
+  <nav class="tab-bar" aria-label="Demo sections">
+    {#each tabs as tab}
+      <button
+        class="tab-btn"
+        class:active={activeTab === tab.id}
+        disabled={tab.id !== "run" && !ready}
+        onclick={() => (activeTab = tab.id)}
+        aria-current={activeTab === tab.id ? "page" : undefined}
+      >
+        {tab.label}
+      </button>
+    {/each}
+  </nav>
 
-{#if activeTab === "run"}
-  <TabRun />
-{:else if activeTab === "sessions"}
-  <TabSessions />
-{:else if activeTab === "networking"}
-  <TabNetworking />
-{:else if activeTab === "filesystem"}
-  <TabFilesystem />
-{:else if activeTab === "packages"}
-  <TabPackages />
-{/if}
+  {#if activeTab === "run"}
+    <TabRun />
+  {:else if activeTab === "sessions"}
+    <TabSessions />
+  {:else if activeTab === "networking"}
+    <TabNetworking />
+  {:else if activeTab === "filesystem"}
+    <TabFilesystem />
+  {:else if activeTab === "packages"}
+    <TabPackages />
+  {/if}
+</main>
 
 <style>
   :global(*) {
@@ -89,7 +92,7 @@
     font-size: 15px;
   }
   .description a {
-    color: #007bff;
+    color: #0056b3;
   }
 
   .tab-bar {
@@ -111,8 +114,8 @@
     transition: all 0.15s;
   }
   .tab-btn.active {
-    color: #007bff;
-    border-bottom-color: #007bff;
+    color: #0056b3;
+    border-bottom-color: #0056b3;
   }
   .tab-btn:hover:not(.active) {
     color: #495057;
@@ -158,11 +161,11 @@
     transition: background 0.15s;
   }
   :global(.btn-primary) {
-    background: #007bff;
+    background: #0061d1;
     color: white;
   }
   :global(.btn-primary:hover:not(:disabled)) {
-    background: #0056b3;
+    background: #004a9e;
   }
   :global(.btn-primary:disabled) {
     background: #6c757d;
@@ -205,9 +208,9 @@
   :global(.examples) {
     margin-bottom: 16px;
   }
-  :global(.examples h3) {
+  :global(.examples-label) {
     font-size: 13px;
-    color: #888;
+    color: #595959;
     margin: 0 0 8px 0;
     font-weight: 500;
     text-transform: uppercase;
@@ -251,7 +254,7 @@
   }
   :global(.exec-time) {
     font-size: 12px;
-    color: #888;
+    color: #737373;
     margin-top: 6px;
   }
 

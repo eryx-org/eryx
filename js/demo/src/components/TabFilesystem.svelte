@@ -295,7 +295,7 @@ with open(${JSON.stringify(guestPath)}, 'wb') as f:
 
 <div class="fs-explorer">
   <div class="explorer-header">
-    <h3>File Explorer &mdash; <code>/data</code></h3>
+    <h2>File Explorer &mdash; <code>/data</code></h2>
     <div class="explorer-actions">
       <button
         class="btn-primary btn-sm"
@@ -371,7 +371,7 @@ with open(${JSON.stringify(guestPath)}, 'wb') as f:
 {#if editorOpen}
   <div class="editor-container">
     <div class="editor-header">
-      <h3>Editing: <code>{editorPath}</code></h3>
+      <h2>Editing: <code>{editorPath}</code></h2>
       <div class="editor-actions">
         <button class="btn-primary btn-sm" onclick={saveFile}>Save</button>
         <button
@@ -420,7 +420,7 @@ with open(${JSON.stringify(guestPath)}, 'wb') as f:
     align-items: center;
     margin-bottom: 8px;
   }
-  .explorer-header h3 {
+  .explorer-header h2 {
     font-size: 15px;
     margin: 0;
   }
@@ -446,7 +446,7 @@ with open(${JSON.stringify(guestPath)}, 'wb') as f:
     font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   }
   .tree-placeholder {
-    color: #888;
+    color: #737373;
     font-size: 13px;
     padding: 8px 12px;
     display: block;
@@ -454,7 +454,7 @@ with open(${JSON.stringify(guestPath)}, 'wb') as f:
   .fs-empty {
     padding: 16px;
     text-align: center;
-    color: #888;
+    color: #737373;
     font-style: italic;
   }
 
@@ -481,7 +481,7 @@ with open(${JSON.stringify(guestPath)}, 'wb') as f:
     white-space: nowrap;
   }
   .fs-entry .meta {
-    color: #888;
+    color: #737373;
     font-size: 12px;
     flex-shrink: 0;
   }
@@ -521,7 +521,7 @@ with open(${JSON.stringify(guestPath)}, 'wb') as f:
     align-items: center;
     margin-bottom: 8px;
   }
-  .editor-header h3 {
+  .editor-header h2 {
     font-size: 15px;
     margin: 0;
   }

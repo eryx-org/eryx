@@ -138,7 +138,7 @@ print(f"x={x}, y={y}, items={items}")`,
 
 {#if snapshots.size > 0}
   <div class="snapshots">
-    <h3>Saved Snapshots</h3>
+    <h2>Saved Snapshots</h2>
     <div class="snapshots-list">
       {#each [...snapshots] as [name, snap]}
         <div class="snapshot-card">
@@ -185,7 +185,7 @@ print(f"x={x}, y={y}, items={items}")`,
     color: #721c24;
     border: 1px solid #f5c6cb;
   }
-  .snapshots h3 {
+  .snapshots h2 {
     font-size: 15px;
     margin-bottom: 8px;
   }
@@ -208,7 +208,7 @@ print(f"x={x}, y={y}, items={items}")`,
   }
   .snapshot-card .meta {
     font-size: 12px;
-    color: #888;
+    color: #737373;
     margin: 4px 0 8px;
   }
   .snapshot-card .actions {

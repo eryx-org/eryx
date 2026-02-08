@@ -65,7 +65,7 @@
 </div>
 
 {#if packages.length > 0}
-  <h3 class="pkg-title">Uploaded Packages</h3>
+  <h2 class="pkg-title">Uploaded Packages</h2>
   {#each packages as pkg}
     <div class="pkg-row">
       <strong>{pkg.name}</strong>
@@ -88,7 +88,7 @@
     border-radius: 8px;
     padding: 40px 20px;
     text-align: center;
-    color: #888;
+    color: #737373;
     margin-bottom: 16px;
     transition: all 0.2s;
     cursor: pointer;
@@ -121,16 +121,16 @@
     font-size: 14px;
   }
   .pkg-size {
-    color: #888;
+    color: #737373;
     margin-left: 8px;
   }
   .pkg-status {
-    color: #888;
+    color: #737373;
     float: right;
   }
   .pkg-hint {
     font-size: 13px;
-    color: #888;
+    color: #737373;
     margin-top: 16px;
   }
 </style>

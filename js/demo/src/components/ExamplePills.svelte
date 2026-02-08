@@ -8,7 +8,7 @@
 </script>
 
 <div class="examples">
-  <h3>Examples</h3>
+  <p class="examples-label">Examples</p>
   <div class="pill-row">
     {#each Object.entries(examples) as [_key, ex]}
       <button class="pill" onclick={() => onselect(ex.code)}>{ex.label}</button>
