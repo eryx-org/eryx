@@ -26,7 +26,7 @@ Start an interactive session with persistent state:
 python -m eryx
 ```
 
-```
+```text
 Eryx 0.3.1 (sandbox REPL)
 Type "exit()" or Ctrl-D to quit.
 >>> x = 42
