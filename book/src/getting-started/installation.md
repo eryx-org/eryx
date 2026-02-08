@@ -1,6 +1,6 @@
 # Installation
 
-Eryx provides language bindings for both Rust and Python. Choose your preferred language below.
+Eryx provides language bindings for Rust, Python, and JavaScript. Choose your preferred language below.
 
 ## Rust
 
@@ -46,6 +46,44 @@ sandbox = eryx.Sandbox()
 result = sandbox.execute("print('Hello from Eryx!')")
 print(result.stdout)
 ```
+
+---
+
+## JavaScript
+
+Install from npm:
+
+```bash
+npm install @bsull/eryx
+```
+
+> **Note:** JavaScript bindings require WebAssembly JSPI support. In Node.js, pass `--experimental-wasm-jspi`. In browsers, Chrome 133+ and Edge 133+ are supported.
+
+### Node.js
+
+```bash
+node --experimental-wasm-jspi your-script.js
+```
+
+```javascript
+import { Sandbox } from "@bsull/eryx";
+
+const sandbox = new Sandbox();
+const result = await sandbox.execute('print("Hello from Eryx!")');
+console.log(result.stdout);
+```
+
+### Browser
+
+```javascript
+import { Sandbox } from "@bsull/eryx";
+
+const sandbox = new Sandbox();
+const result = await sandbox.execute('print("Hello from the browser!")');
+console.log(result.stdout);
+```
+
+See the [JavaScript API](../api/javascript.md) reference for full documentation.
 
 ---
 

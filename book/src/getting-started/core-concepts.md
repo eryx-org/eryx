@@ -57,6 +57,17 @@ Resource limits prevent runaway code from consuming excessive resources.
 
 Network access is controlled by the host, not the sandboxed code.
 
+## Secrets
+
+**Secrets** provide secure handling of sensitive values like API keys:
+
+- Python code sees opaque placeholders, never real values
+- Real values are only substituted when making HTTP requests to authorized hosts
+- Placeholders are automatically scrubbed from stdout, stderr, and file writes
+- Each secret can be restricted to specific hosts
+
+Secrets prevent untrusted code from exfiltrating sensitive credentials.
+
 ## WebAssembly & WASI
 
 Eryx uses WebAssembly (Wasm) and WASI for sandboxing:
@@ -85,6 +96,17 @@ Eryx supports loading Python packages at runtime:
 - `.tar.gz` / `.tgz` files (used by wasi-wheels project)
 - Native extensions compiled for WASI
 - Packages are loaded per-sandbox or via `SandboxFactory` for reuse
+
+## Volume Mounts
+
+**Volume Mounts** allow controlled access to host filesystem directories:
+
+- Mount host directories at specific paths inside the sandbox
+- Optional read-only enforcement
+- Uses capability-based security (cap-std)
+- Sandboxed code cannot access paths outside the mounted directories
+
+Volume mounts complement the VFS by providing access to real host files when needed.
 
 ## Architecture Overview
 
@@ -126,7 +148,8 @@ Eryx provides defense-in-depth security:
 2. **Capability-based security** — Only explicitly granted capabilities are available
 3. **Resource limits** — Prevent resource exhaustion
 4. **Network policies** — Control which hosts can be accessed
-5. **No filesystem access** — Unless explicitly enabled with VFS
+5. **No filesystem access** — Unless explicitly enabled with VFS or volume mounts
+6. **Secrets isolation** — Sensitive values are never directly accessible to sandboxed code
 
 This makes Eryx suitable for running untrusted Python code.
 
@@ -136,3 +159,5 @@ This makes Eryx suitable for running untrusted Python code.
 - [Callbacks Guide](../guide/callbacks.md) - Implementing callbacks
 - [Sessions Guide](../guide/sessions.md) - Working with sessions
 - [Resource Limits](../guide/resource-limits.md) - Configuring limits
+- [Secrets Guide](../guide/secrets.md) - Secure secrets management
+- [CLI Guide](../guide/cli.md) - Command-line interface

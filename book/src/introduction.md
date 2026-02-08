@@ -10,7 +10,7 @@
 - **Async callback mechanism** — Callbacks are exposed as direct async functions (e.g., `await get_time()`)
 - **Parallel execution** — Multiple callbacks can run concurrently via `asyncio.gather()`
 - **Session state persistence** — Variables, functions, and classes persist between executions for REPL-style usage
-- **State snapshots** — Capture and restore Python state with pickle-based serialization
+- **State snapshots** — Capture and restore Python state with dill-based serialization
 - **Execution tracing** — Line-level progress reporting via `sys.settrace`
 - **Stderr capture** — Separate stdout and stderr streams with optional streaming handlers
 - **Execution cancellation** — Cancel long-running executions via `ExecutionHandle`
@@ -19,6 +19,11 @@
 - **Composable runtime libraries** — Pre-built APIs with Python wrappers and type stubs
 - **Pre-compiled Wasm** — 41x faster sandbox creation with ahead-of-time compilation
 - **Sandbox pooling** — Managed pool of warm sandbox instances for high-throughput scenarios
+- **Secrets management** — Secure placeholder-based secrets with per-host authorization
+- **Host volume mounts** — Mount host directories into the sandbox with read-only support
+- **Real-time output streaming** — Stream stdout/stderr as code executes
+- **Command-line interface** — REPL and script runner via `python -m eryx` or `uvx`
+- **JavaScript bindings** — Run sandboxes in browsers and Node.js via WebAssembly
 
 ## Python Version
 
@@ -44,6 +49,20 @@ Eryx uses [Wasmtime](https://wasmtime.dev/) to run CPython compiled to WebAssemb
 - **Resource limits** — Configurable timeouts, memory limits, and callback restrictions
 
 Host callbacks are implemented using the WebAssembly Component Model, allowing Rust or Python host code to expose async functions that sandboxed Python can call.
+
+## Try It Now
+
+Run the Eryx REPL without installing anything:
+
+```bash
+uvx --with pyeryx eryx
+```
+
+Or execute a one-liner:
+
+```bash
+uvx --with pyeryx eryx -c 'import sys; print(f"Python {sys.version} in a sandbox!")'
+```
 
 ## Next Steps
 
