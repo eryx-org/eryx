@@ -344,9 +344,10 @@ jobs:
             --stdlib crates/eryx-wasm-runtime/tests/python-stdlib \
             --package /tmp/numpy-wasi.tar.gz \
             --import numpy \
-            --wasm-only \
-            -o /tmp/numpy-preinit.wasm
-          echo "Output size: $(du -h /tmp/numpy-preinit.wasm | cut -f1)"
+            --verify-code "import numpy as np; a = np.array([1,2,3]); assert a.sum() == 6; print(f'numpy OK: sum={a.sum()}')" \
+            --target x86-64-v2 \
+            -o /tmp/numpy.cwasm
+          echo "Output size: $(du -h /tmp/numpy.cwasm | cut -f1)"
 
       - name: "Test: six (pure Python, .whl)"
         run: |
@@ -357,9 +358,10 @@ jobs:
             --stdlib crates/eryx-wasm-runtime/tests/python-stdlib \
             --package "$SIX_WHEEL" \
             --import six \
-            --wasm-only \
-            -o /tmp/six-preinit.wasm
-          echo "Output size: $(du -h /tmp/six-preinit.wasm | cut -f1)"
+            --verify-code "import six; assert six.PY3; print(f'six OK: PY3={six.PY3}, version={six.__version__}')" \
+            --target x86-64-v2 \
+            -o /tmp/six.cwasm
+          echo "Output size: $(du -h /tmp/six.cwasm | cut -f1)"
 
   # Run examples to ensure they don't bitrot
   examples:

@@ -22,6 +22,11 @@
 //! # Pre-init with site-packages directory
 //! eryx-precompile runtime.wasm -o runtime.cwasm --preinit --stdlib ./python-stdlib \
 //!   --site-packages ./my-site-packages --import jinja2
+//!
+//! # Verify packages work (not just import)
+//! eryx-precompile runtime.wasm -o numpy.cwasm --preinit --stdlib ./python-stdlib \
+//!   --package numpy-wasi.tar.gz --import numpy \
+//!   --verify-code "import numpy; print(numpy.array(\[1,2,3\]).sum())"
 //! ```
 
 use std::path::PathBuf;
@@ -100,6 +105,15 @@ struct Args {
     /// Skip verification step
     #[arg(long)]
     no_verify: bool,
+
+    /// Python code to execute during verification
+    ///
+    /// Runs after the standard import verification. Useful for testing that
+    /// packages actually work, not just that they import.
+    ///
+    /// Example: `--verify-code "import numpy; print(numpy.array(\[1,2,3\]).sum())"`
+    #[arg(long, value_name = "CODE")]
+    verify_code: Option<String>,
 
     /// Verbose output
     #[arg(short, long)]
@@ -275,7 +289,13 @@ async fn main() -> Result<()> {
         if !args.no_verify {
             println!();
             println!("Step 4: Verifying...");
-            verify_cwasm(&output, args.stdlib.as_deref(), &args.imports).await?;
+            verify_cwasm(
+                &output,
+                args.stdlib.as_deref(),
+                &args.imports,
+                args.verify_code.as_deref(),
+            )
+            .await?;
             println!("  Verification passed!");
         }
     }
@@ -404,6 +424,7 @@ async fn verify_cwasm(
     cwasm_path: &PathBuf,
     stdlib: Option<&std::path::Path>,
     imports: &[String],
+    verify_code: Option<&str>,
 ) -> Result<()> {
     let stdlib_path = if let Some(path) = stdlib {
         path.to_path_buf()
@@ -475,6 +496,24 @@ async fn verify_cwasm(
         }
 
         println!("  Imports verified: {}", imports.join(", "));
+    }
+
+    // Run custom verification code
+    if let Some(code) = verify_code {
+        println!("  Running verify code...");
+
+        let result = session
+            .execute(code)
+            .await
+            .context("Failed to execute verify code")?;
+
+        if !result.stderr.is_empty() {
+            anyhow::bail!("Verify code produced stderr:\n{}", result.stderr);
+        }
+
+        if !result.stdout.is_empty() {
+            print!("  Output: {}", result.stdout);
+        }
     }
 
     Ok(())
