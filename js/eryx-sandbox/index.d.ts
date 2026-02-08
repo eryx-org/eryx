@@ -89,3 +89,17 @@ export class Sandbox {
  * @throws If the Python code raises an unhandled exception
  */
 export function execute(code: string): Promise<ExecuteResult>;
+
+/**
+ * The virtual file tree backing the WASI filesystem.
+ *
+ * This is the same object passed to `_setFileData()` from the preview2-shim.
+ * It contains `python-stdlib` and `site-packages` directories. You can add
+ * files to `_fileTree.dir["site-packages"]` and then call `_setFileData(_fileTree)`
+ * to make them visible to the sandbox.
+ *
+ * @internal This is primarily for use by the demo app and advanced integrations.
+ */
+export const _fileTree: {
+  dir: Record<string, unknown>;
+};
