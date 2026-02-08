@@ -928,9 +928,11 @@ dependencies = [
  "anyhow",
  "clap",
  "eryx",
+ "tempfile",
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "walkdir",
 ]
 
 [[package]]
