@@ -110,6 +110,22 @@ cd .. && node patch-jco.cjs
 cd testpkg && npm ci && npm run typecheck && npm run test:ci
 """
 
+[tasks.demo]
+description = "Serve the browser demo on localhost and open it in Chrome"
+depends = ["build"]
+dir = "eryx-sandbox"
+run = """
+#!/usr/bin/env bash
+set -euo pipefail
+PORT=8000
+npm ci
+echo "Serving demo at http://localhost:$PORT/demo.html"
+echo "Press Ctrl+C to stop"
+# Open in the default browser after a short delay to let the server start
+(sleep 0.5 && xdg-open "http://localhost:$PORT/demo.html" 2>/dev/null || open "http://localhost:$PORT/demo.html" 2>/dev/null || true) &
+python3 -m http.server "$PORT" --bind 127.0.0.1
+"""
+
 [tasks.clean]
 description = "Clean JavaScript build artifacts (generated files only)"
 dir = "eryx-sandbox"
