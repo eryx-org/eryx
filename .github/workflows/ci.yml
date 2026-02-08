@@ -566,8 +566,10 @@ jobs:
         run: |
           mkdir -p deploy/shims deploy/vendor
 
-          # demo.html as index page
-          cp js/eryx-sandbox/demo.html deploy/index.html
+          # demo.html as index page (rewrite node_modules paths to vendor/ for deploy,
+          # since Cloudflare Pages ignores node_modules/)
+          sed 's|./node_modules/@bytecodealliance/preview2-shim|./vendor/preview2-shim|g' \
+            js/eryx-sandbox/demo.html > deploy/index.html
 
           # JS sources
           cp js/eryx-sandbox/index.js deploy/
@@ -589,8 +591,10 @@ jobs:
           # Uses vendor/ instead of node_modules/ because Cloudflare Pages ignores node_modules/
           cp -r js/eryx-sandbox/node_modules/@bytecodealliance/preview2-shim deploy/vendor/preview2-shim
 
-          # Headers file: tell browsers the .wasm files are brotli-encoded
-          printf '/*.wasm\n  Content-Encoding: br\n' > deploy/_headers
+          # Headers file for Cloudflare Pages:
+          # - Cache all static assets at the edge for 1 hour
+          # - WASM files are pre-compressed with brotli and cached for 1 day
+          printf '/*\n  Cache-Control: public, max-age=3600, s-maxage=3600\n/*.wasm\n  Content-Encoding: br\n  Cache-Control: public, max-age=86400, s-maxage=86400\n' > deploy/_headers
 
       - name: Deploy to demo branch
         uses: peaceiris/actions-gh-pages@v4
