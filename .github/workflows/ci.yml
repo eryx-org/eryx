@@ -585,8 +585,9 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          BODY="🌐 **Demo preview:** ${{ steps.deploy.outputs.pages-deployment-alias-url }}
+          📌 **This deploy:** ${{ steps.deploy.outputs.deployment-url }}"
           gh pr comment ${{ github.event.pull_request.number }} \
-            --body "🌐 **Demo preview:** ${{ steps.deploy.outputs.deployment-url }}" \
-            --edit-last || \
+            --body "$BODY" --edit-last || \
           gh pr comment ${{ github.event.pull_request.number }} \
-            --body "🌐 **Demo preview:** ${{ steps.deploy.outputs.deployment-url }}"
+            --body "$BODY"
