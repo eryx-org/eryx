@@ -1,10 +1,10 @@
 import { defineConfig } from "vitest/config";
 import { resolve } from "path";
 
-// Resolve paths to the browser shims in eryx-sandbox's node_modules
+// Resolve paths to the browser shims in eryx's node_modules
 const shimBase = resolve(
   __dirname,
-  "../eryx-sandbox/node_modules/@bytecodealliance/preview2-shim/lib/browser",
+  "../eryx/node_modules/@bytecodealliance/preview2-shim/lib/browser",
 );
 
 export default defineConfig({

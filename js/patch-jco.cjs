@@ -4,7 +4,7 @@
  * See ~/jco-1.16.1-bugs.md for detailed descriptions of each bug.
  */
 const fs = require('fs');
-const path = 'eryx-sandbox/eryx-sandbox.js';
+const path = 'eryx/eryx-sandbox.js';
 let code = fs.readFileSync(path, 'utf8');
 let patched = false;
 
@@ -149,7 +149,7 @@ if (patched) {
 
 // Patch 8: Strip debug console.log statements from preview2-shim filesystem.js
 // These produce noisy [filesystem] FLAGS FOR, RENAME AT, etc. messages
-const shimFsPath = 'eryx-sandbox/node_modules/@bytecodealliance/preview2-shim/lib/browser/filesystem.js';
+const shimFsPath = 'eryx/node_modules/@bytecodealliance/preview2-shim/lib/browser/filesystem.js';
 if (fs.existsSync(shimFsPath)) {
   let shimCode = fs.readFileSync(shimFsPath, 'utf8');
   const debugLogRe = /^\s*console\.log\(`\[filesystem\].*$\n?/gm;

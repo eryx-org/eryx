@@ -103,7 +103,7 @@ export default defineConfig({
   resolve: {
     alias: [
       // Vite resolves bare imports relative to the importing file. Since
-      // @bsull/eryx is symlinked from ../eryx-sandbox/ (outside demo/),
+      // @bsull/eryx is symlinked from ../eryx/ (outside demo/),
       // Vite can't find preview2-shim from there. Alias it to our copy.
       {
         find: /^@bytecodealliance\/preview2-shim\/(.+)$/,
@@ -130,10 +130,10 @@ export default defineConfig({
       "Cross-Origin-Embedder-Policy": "require-corp",
     },
     fs: {
-      // Allow serving WASM/JS files from the eryx-sandbox package (symlinked
+      // Allow serving WASM/JS files from the eryx package (symlinked
       // from outside demo/ via the file: dependency). Setting allow
       // disables automatic workspace root detection, so include "." too.
-      allow: [".", resolve(__dirname, "../eryx-sandbox")],
+      allow: [".", resolve(__dirname, "../eryx")],
     },
   },
 });

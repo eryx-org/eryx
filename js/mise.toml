@@ -64,12 +64,12 @@ cd .. && cargo run -p eryx-precompile --release -- \
 description = "Transpile WASM component to JavaScript using jco"
 depends = ["preinit"]
 sources = ["../crates/eryx-runtime/runtime-preinit.wasm"]
-outputs = ["eryx-sandbox/eryx-sandbox.js", "eryx-sandbox/eryx-sandbox.core.wasm"]
+outputs = ["eryx/eryx-sandbox.js", "eryx/eryx-sandbox.core.wasm"]
 run = """
 jco transpile \
   ../crates/eryx-runtime/runtime-preinit.wasm \
   --name eryx-sandbox \
-  --out-dir eryx-sandbox \
+  --out-dir eryx \
   --map 'eryx:net/tcp=./shims/net.js#tcp' \
   --map 'eryx:net/tls=./shims/net.js#tls' \
   --map 'invoke=./shims/callbacks.js#invoke' \
@@ -82,31 +82,31 @@ jco transpile \
 [tasks.patch-js]
 description = "Patch generated JS for webpack compat and jco codegen bugs"
 depends = ["transpile"]
-sources = ["eryx-sandbox/eryx-sandbox.js", "patch-jco.cjs"]
-outputs = ["eryx-sandbox/eryx-sandbox.js"]
+sources = ["eryx/eryx-sandbox.js", "patch-jco.cjs"]
+outputs = ["eryx/eryx-sandbox.js"]
 run = "node patch-jco.cjs"
 
 [tasks.build]
 description = "Build JavaScript bindings (WASM + transpile + version sync + stdlib)"
 depends = ["patch-js"]
-sources = ["eryx-sandbox/eryx-sandbox.js", "../Cargo.toml", "../crates/eryx/python-stdlib.tar.gz"]
-outputs = ["eryx-sandbox/package.json", "eryx-sandbox/python-stdlib.tar.gz"]
+sources = ["eryx/eryx-sandbox.js", "../Cargo.toml", "../crates/eryx/python-stdlib.tar.gz"]
+outputs = ["eryx/package.json", "eryx/python-stdlib.tar.gz"]
 run = """
 #!/usr/bin/env bash
 set -euo pipefail
 VERSION=$(cargo metadata --format-version 1 --manifest-path ../Cargo.toml | jq -r '.packages[] | select(.name == "eryx") | .version')
-jq --arg v "$VERSION" '.version = $v' eryx-sandbox/package.json > eryx-sandbox/package.json.tmp
-mv eryx-sandbox/package.json.tmp eryx-sandbox/package.json
-cp ../crates/eryx/python-stdlib.tar.gz eryx-sandbox/python-stdlib.tar.gz
+jq --arg v "$VERSION" '.version = $v' eryx/package.json > eryx/package.json.tmp
+mv eryx/package.json.tmp eryx/package.json
+cp ../crates/eryx/python-stdlib.tar.gz eryx/python-stdlib.tar.gz
 """
 
 [tasks.test]
 description = "Run JavaScript tests"
 depends = ["build"]
-sources = ["eryx-sandbox/**/*.js", "eryx-sandbox/**/*.wasm", "testpkg/**/*.ts"]
+sources = ["eryx/**/*.js", "eryx/**/*.wasm", "testpkg/**/*.ts"]
 dir = "testpkg"
 run = """
-cd ../eryx-sandbox && npm ci
+cd ../eryx && npm ci
 cd .. && node patch-jco.cjs
 cd testpkg && npm ci && npm run typecheck && npm run test:ci
 """
@@ -141,11 +141,11 @@ run = "npx vite preview --open"
 
 [tasks.clean]
 description = "Clean JavaScript build artifacts (generated files only)"
-dir = "eryx-sandbox"
+dir = "eryx"
 run = "rm -rf eryx-sandbox.js eryx-sandbox.d.ts eryx-sandbox.core*.wasm interfaces"
 
 [tasks.publish]
 description = "Publish JavaScript package to npm"
 depends = ["test"]
-dir = "eryx-sandbox"
+dir = "eryx"
 run = "npm publish --access public"

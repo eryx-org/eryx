@@ -26,6 +26,14 @@ echo "Bumping all packages to $NEW_VERSION using release-plz..."
 cd "$ROOT_DIR"
 release-plz set-version "$NEW_VERSION"
 
+# Sync JS package version
+JS_PKG="$ROOT_DIR/js/eryx/package.json"
+if [[ -f "$JS_PKG" ]]; then
+  echo "Syncing JS package version to $NEW_VERSION..."
+  jq --arg v "$NEW_VERSION" '.version = $v' "$JS_PKG" > "$JS_PKG.tmp"
+  mv "$JS_PKG.tmp" "$JS_PKG"
+fi
+
 echo ""
 echo "Version bumped to $NEW_VERSION"
 echo ""

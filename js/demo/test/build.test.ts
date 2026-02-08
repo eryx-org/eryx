@@ -97,13 +97,13 @@ describe("demo dev server", () => {
       // Verify the eryx package's index.js can be transformed
       // (tests both fs.allow and the preview2-shim alias)
       const transformedEryx = await server.transformRequest(
-        resolve(root, "../eryx-sandbox/index.js"),
+        resolve(root, "../eryx/index.js"),
       );
       expect(transformedEryx).not.toBeNull();
 
       // Verify .tar.gz files are served as raw gzip (no Content-Encoding)
       // so that DecompressionStream("gzip") in stdlib-loader.js works
-      const stdlibPath = resolve(root, "../eryx-sandbox/python-stdlib.tar.gz");
+      const stdlibPath = resolve(root, "../eryx/python-stdlib.tar.gz");
       const gzResp = await fetch(`${base}/@fs${stdlibPath}`);
       expect(gzResp.status).toBe(200);
       expect(gzResp.headers.get("content-encoding")).toBeNull();
