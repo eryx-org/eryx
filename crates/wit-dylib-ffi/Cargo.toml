@@ -1,0 +1,36 @@
+[package]
+name = "wit-dylib-ffi"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Rust FFI bindings for the wit-dylib C interface"
+publish = false
+
+# This crate is only built as part of the WASM runtime (wasm32 target).
+# Tests and doctests are not applicable.
+[lib]
+test = false
+doctest = false
+
+[features]
+default = []
+
+# Note: lints are NOT inherited from the workspace because this is vendored
+# upstream code (from bytecodealliance/wasm-tools). The FFI layer intentionally
+# uses unsafe code and has different conventions from eryx.
+[lints.rust]
+missing_docs = "allow"
+missing_debug_implementations = "allow"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+# These are expected in FFI/vendored code
+unwrap_used = "allow"
+expect_used = "allow"
+missing-safety-doc = "allow"
+new-ret-no-self = "allow"
+boxed-local = "allow"
+len-without-is-empty = "allow"

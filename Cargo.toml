@@ -80,8 +80,8 @@ wasmtime-wizer = { version = "41", features = ["component-model", "wasmtime"] }
 wit-component = "0.243"
 wit-dylib = "0.243"
 
-# wit-dylib FFI for implementing interpreter interface (not published to crates.io)
-wit-dylib-ffi = { git = "https://github.com/bytecodealliance/wasm-tools.git", rev = "d05406062d031ae96146486f58a965d87eefea5e", features = ["async-raw"] }
+# wit-dylib FFI for implementing interpreter interface (inlined from wasm-tools)
+wit-dylib-ffi = { path = "crates/wit-dylib-ffi" }
 wit-parser = "0.243"
 zip = "2.0"
 

@@ -3884,8 +3884,7 @@ dependencies = [
 
 [[package]]
 name = "wit-dylib-ffi"
-version = "0.1.0"
-source = "git+https://github.com/bytecodealliance/wasm-tools.git?rev=d05406062d031ae96146486f58a965d87eefea5e#d05406062d031ae96146486f58a965d87eefea5e"
+version = "0.3.0"
 
 [[package]]
 name = "wit-parser"
