@@ -43,7 +43,7 @@
 //! ```
 
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use tokio::sync::mpsc;
@@ -54,8 +54,8 @@ use crate::error::Error;
 use crate::sandbox::{ExecuteResult, ExecuteStats, Sandbox};
 use crate::wasm::{CallbackRequest, TraceRequest};
 
-use super::Session;
 use super::executor::{PythonStateSnapshot, SessionExecutor};
+use super::{Session, SessionStats};
 
 /// An in-process session that keeps the WASM instance alive between executions.
 ///
@@ -72,13 +72,18 @@ pub struct InProcessSession<'a> {
 
     /// Whether the preamble has been executed.
     preamble_executed: bool,
+
+    /// Session activity and execution statistics.
+    stats: SessionStats,
 }
 
 impl std::fmt::Debug for InProcessSession<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("InProcessSession")
-            .field("execution_count", &self.executor.execution_count())
+            .field("execution_count", &self.stats.execution_count)
             .field("preamble_executed", &self.preamble_executed)
+            .field("last_activity", &self.stats.last_activity)
+            .field("total_execution_time", &self.stats.total_execution_time)
             .finish_non_exhaustive()
     }
 }
@@ -112,6 +117,7 @@ impl<'a> InProcessSession<'a> {
             sandbox,
             executor,
             preamble_executed: false,
+            stats: SessionStats::new(),
         })
     }
 
@@ -189,8 +195,19 @@ impl<'a> InProcessSession<'a> {
 
         let duration = start.elapsed();
 
+        // Update session statistics
+        self.stats.execution_count += 1;
+        self.stats.total_execution_time += duration;
+        self.stats.total_callback_invocations += u64::from(callback_invocations);
+        self.stats.last_activity = Some(Instant::now());
+
         match execution_result {
             Ok(output) => {
+                // Update peak memory if this execution used more
+                if output.peak_memory_bytes > self.stats.peak_memory_bytes {
+                    self.stats.peak_memory_bytes = output.peak_memory_bytes;
+                }
+
                 // Stream output if handler is configured
                 if let Some(handler) = self.sandbox.output_handler() {
                     handler.on_output(&output.stdout).await;
@@ -223,8 +240,59 @@ impl<'a> InProcessSession<'a> {
 
     /// Get the number of executions performed in this session.
     #[must_use]
-    pub fn execution_count(&self) -> u32 {
-        self.executor.execution_count()
+    pub fn execution_count(&self) -> u64 {
+        self.stats.execution_count
+    }
+
+    /// Get the time of the last execution completion.
+    ///
+    /// Returns `None` if no executions have been performed yet.
+    #[must_use]
+    pub fn last_activity(&self) -> Option<Instant> {
+        self.stats.last_activity
+    }
+
+    /// Get the duration since the last execution completed.
+    ///
+    /// Returns `None` if no executions have been performed yet.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// session.execute("x = 1").await?;
+    /// std::thread::sleep(Duration::from_secs(1));
+    /// let idle = session.idle_duration().unwrap();
+    /// assert!(idle >= Duration::from_secs(1));
+    /// ```
+    #[must_use]
+    pub fn idle_duration(&self) -> Option<Duration> {
+        self.stats.last_activity.map(|last| last.elapsed())
+    }
+
+    /// Get the total execution time across all runs in this session.
+    #[must_use]
+    pub fn total_execution_time(&self) -> Duration {
+        self.stats.total_execution_time
+    }
+
+    /// Get the complete session statistics.
+    ///
+    /// This includes creation time, last activity, execution count,
+    /// total execution time, callback invocations, and peak memory usage.
+    #[must_use]
+    pub fn stats(&self) -> SessionStats {
+        self.stats.clone()
+    }
+
+    /// Reset the session statistics without affecting session state.
+    ///
+    /// This clears all statistics (execution count, total time, etc.) but
+    /// preserves the original session creation time and all Python state.
+    ///
+    /// Use this if you want to measure statistics for a specific workload
+    /// without resetting the Python environment.
+    pub fn reset_stats(&mut self) {
+        self.stats.reset();
     }
 
     /// Capture a snapshot of the current Python session state.
@@ -254,6 +322,9 @@ impl<'a> InProcessSession<'a> {
     /// This is lighter-weight than `reset()` because it doesn't recreate
     /// the WASM instance - it just clears the Python-level state.
     ///
+    /// Note: Statistics are preserved across `clear_state()`. Use `reset_stats()`
+    /// to clear statistics, or `reset()` to clear both state and statistics.
+    ///
     /// # Errors
     ///
     /// Returns an error if the clear fails.
@@ -276,6 +347,9 @@ impl Session for InProcessSession<'_> {
 
         // Reset preamble flag so it runs again on next execute
         self.preamble_executed = false;
+
+        // Full reset of stats (including creation time)
+        self.stats.reset_full();
 
         Ok(())
     }

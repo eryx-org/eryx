@@ -92,8 +92,8 @@ pub use sandbox::{
 };
 pub use secrets::{FileScrubPolicy, OutputScrubPolicy, SecretConfig};
 pub use session::{
-    InProcessSession, PythonStateSnapshot, Session, SessionExecutor, SnapshotMetadata,
-    SnapshotSession,
+    InProcessSession, PythonStateSnapshot, Session, SessionExecutor, SessionStats,
+    SnapshotMetadata, SnapshotSession,
 };
 #[cfg(feature = "vfs")]
 pub use session::{VfsConfig, VolumeMount};
