@@ -592,9 +592,9 @@ jobs:
           cp -r js/eryx-sandbox/node_modules/@bytecodealliance/preview2-shim deploy/vendor/preview2-shim
 
           # Headers file for Cloudflare Pages:
-          # - Cache all static assets at the edge for 1 hour
-          # - WASM files are pre-compressed with brotli and cached for 1 day
-          printf '/*\n  Cache-Control: public, max-age=3600, s-maxage=3600\n/*.wasm\n  Content-Encoding: br\n  Cache-Control: public, max-age=86400, s-maxage=86400\n' > deploy/_headers
+          # - Browsers always revalidate; edge caches for 1 day (purged on deploy)
+          # - WASM files are pre-compressed with brotli
+          printf '/*\n  Cache-Control: public, max-age=0, s-maxage=86400\n/*.wasm\n  Content-Encoding: br\n' > deploy/_headers
 
       - name: Deploy to demo branch
         uses: peaceiris/actions-gh-pages@v4
