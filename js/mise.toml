@@ -112,20 +112,32 @@ cd testpkg && npm ci && npm run typecheck && npm run test:ci
 """
 
 [tasks.demo]
-description = "Serve the browser demo on localhost and open it in Chrome"
+description = "Serve the browser demo on localhost with Vite dev server"
 depends = ["build"]
-dir = "eryx-sandbox"
+dir = "demo"
 run = """
 #!/usr/bin/env bash
 set -euo pipefail
-PORT=8000
-npm ci
-echo "Serving demo at http://localhost:$PORT/demo.html"
-echo "Press Ctrl+C to stop"
-# Open in the default browser after a short delay to let the server start
-(sleep 0.5 && xdg-open "http://localhost:$PORT/demo.html" 2>/dev/null || open "http://localhost:$PORT/demo.html" 2>/dev/null || true) &
-python3 -m http.server "$PORT" --bind 127.0.0.1
+npm install
+npx vite --open
 """
+
+[tasks.demo-build]
+description = "Build the demo site for production (static output in demo/dist/)"
+depends = ["build"]
+dir = "demo"
+run = """
+#!/usr/bin/env bash
+set -euo pipefail
+npm install
+npx vite build
+"""
+
+[tasks.demo-preview]
+description = "Build and preview the demo site in production mode"
+depends = ["demo-build"]
+dir = "demo"
+run = "npx vite preview --open"
 
 [tasks.clean]
 description = "Clean JavaScript build artifacts (generated files only)"
