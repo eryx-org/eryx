@@ -17,10 +17,6 @@ doctest = false
 
 [features]
 default = []
-async-raw = []
-# Not used by eryx, but referenced in upstream code with cfg(feature = "async-runtime").
-# Declared here to silence unexpected_cfgs warnings.
-async-runtime = []
 
 # Note: lints are NOT inherited from the workspace because this is vendored
 # upstream code (from bytecodealliance/wasm-tools). The FFI layer intentionally

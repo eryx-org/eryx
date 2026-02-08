@@ -393,7 +393,6 @@ impl ImportFunction {
         }
     }
 
-    #[cfg(feature = "async-raw")]
     pub unsafe fn call_import_async(&self, cx: &mut impl Call) -> Option<PendingAsyncImportCall> {
         use core::alloc::Layout;
 
@@ -422,55 +421,8 @@ impl ImportFunction {
         }
     }
 
-    #[cfg(feature = "async-raw")]
     pub unsafe fn lift_import_async_result(&self, cx: &mut impl Call, buffer: *mut u8) {
         unsafe { self.ptr.async_lift_impl.unwrap()((&raw mut *cx).cast(), buffer.cast()) };
-    }
-
-    #[cfg(feature = "async-runtime")]
-    pub async fn call_import_async(&self, cx: &mut impl Call) {
-        use core::alloc::Layout;
-        use wit_bindgen::rt::async_support::Subtask;
-
-        return DylibSubtask { ptr: self.ptr, cx }.call(()).await;
-
-        struct DylibSubtask<C> {
-            ptr: &'static ffi::wit_import_func_t,
-            cx: *mut C,
-        }
-
-        unsafe impl<C> Subtask for DylibSubtask<C> {
-            type Params = ();
-            type ParamsLower = ();
-            type Results = ();
-
-            fn abi_layout(&self) -> Layout {
-                Layout::from_size_align(self.ptr.async_abi_area_size, self.ptr.async_abi_area_align)
-                    .unwrap()
-            }
-
-            fn results_offset(&self) -> usize {
-                0
-            }
-
-            unsafe fn params_lower(&self, (): (), _: *mut u8) {}
-            unsafe fn params_dealloc_lists(&self, (): ()) {}
-            unsafe fn params_dealloc_lists_and_own(&self, (): ()) {}
-
-            unsafe fn call_import(&self, (): (), ptr: *mut u8) -> u32 {
-                unsafe {
-                    let cx: *mut _ = self.cx;
-                    self.ptr.async_impl.unwrap()(cx.cast(), ptr.cast())
-                }
-            }
-
-            unsafe fn results_lift(&self, ptr: *mut u8) {
-                unsafe {
-                    let cx: *mut _ = self.cx;
-                    self.ptr.async_lift_impl.unwrap()(cx.cast(), ptr.cast());
-                }
-            }
-        }
     }
 }
 

@@ -81,7 +81,7 @@ wit-component = "0.243"
 wit-dylib = "0.243"
 
 # wit-dylib FFI for implementing interpreter interface (inlined from wasm-tools)
-wit-dylib-ffi = { path = "crates/wit-dylib-ffi", features = ["async-raw"] }
+wit-dylib-ffi = { path = "crates/wit-dylib-ffi" }
 wit-parser = "0.243"
 zip = "2.0"
 
