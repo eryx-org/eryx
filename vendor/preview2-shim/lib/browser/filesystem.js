@@ -157,15 +157,19 @@ class Descriptor {
     }
 
     appendViaStream() {
+        console.log(`[filesystem] APPEND STREAM`);
     }
 
     advise(descriptor, offset, length, advice) {
+        console.log(`[filesystem] ADVISE`, descriptor, offset, length, advice);
     }
 
     syncData() {
+        console.log(`[filesystem] SYNC DATA`);
     }
 
     getFlags() {
+        console.log(`[filesystem] FLAGS FOR`);
     }
 
     getType() {
@@ -182,6 +186,7 @@ class Descriptor {
     }
 
     setSize(size) {
+        console.log(`[filesystem] SET SIZE`, size);
     }
 
     setTimes(dataAccessTimestamp, dataModificationTimestamp) {
@@ -218,6 +223,7 @@ class Descriptor {
     }
 
     sync() {
+        console.log(`[filesystem] SYNC`);
     }
 
     createDirectoryAt(path) {
@@ -275,9 +281,11 @@ class Descriptor {
     }
 
     setTimesAt() {
+        console.log(`[filesystem] SET TIMES AT`);
     }
 
     linkAt() {
+        console.log(`[filesystem] LINK AT`);
     }
 
     openAt(_pathFlags, path, openFlags, _descriptorFlags, _modes) {
@@ -286,18 +294,23 @@ class Descriptor {
     }
 
     readlinkAt() {
+        console.log(`[filesystem] READLINK AT`);
     }
 
     removeDirectoryAt() {
+        console.log(`[filesystem] REMOVE DIR AT`);
     }
 
     renameAt() {
+        console.log(`[filesystem] RENAME AT`);
     }
 
     symlinkAt() {
+        console.log(`[filesystem] SYMLINK AT`);
     }
 
     unlinkFileAt() {
+        console.log(`[filesystem] UNLINK FILE AT`);
     }
 
     isSameObject(other) {

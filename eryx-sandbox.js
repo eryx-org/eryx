@@ -1,4 +1,4 @@
-"use jco";import { invoke, listCallbacks, reportTrace } from './shims/callbacks.js';
+"use jco";import { invoke, listCallbacks, reportOutput, reportTrace } from './shims/callbacks.js';
 import { tcp, tls } from './shims/net.js';
 import { instanceNetwork as instanceNetwork$1, ipNameLookup, network, tcp as tcp$1, tcpCreateSocket, udp, udpCreateSocket } from './shims/sockets.js';
 import { environment, exit as exit$1, stderr, stdin, stdout, terminalInput, terminalOutput, terminalStderr, terminalStdin, terminalStdout } from '@bytecodealliance/preview2-shim/cli';
@@ -6,8 +6,6 @@ import { monotonicClock, wallClock } from '@bytecodealliance/preview2-shim/clock
 import { preopens, types } from '@bytecodealliance/preview2-shim/filesystem';
 import { error, poll as poll$1, streams } from '@bytecodealliance/preview2-shim/io';
 import { insecure, insecureSeed as insecureSeed$1, random } from '@bytecodealliance/preview2-shim/random';
-import reportOutput from 'report-output';
-reportOutput._isHostProvided = true;
 const { close,
   connect,
   read,
