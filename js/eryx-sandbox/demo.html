@@ -267,7 +267,7 @@ finally:
     <!-- Tab: Filesystem -->
     <div id="tab-filesystem" class="tab-panel">
         <p style="color:#666;margin-top:0">
-            Browse the sandbox's virtual filesystem. Mount a local directory to sync files in and out.
+            Browse the sandbox's virtual filesystem. Import files from a local directory to work with them in Python.
         </p>
         <div id="fs-no-support" class="info-banner" style="display:none">
             <strong>File System Access API not available.</strong> Use Chrome/Edge 86+ over HTTPS to mount local directories.
@@ -293,7 +293,6 @@ for entry in os.listdir('/data'):
         <div class="btn-row">
             <button id="fs-run" class="btn-primary" disabled>Run (Ctrl+Enter)</button>
             <button id="fs-mount-btn" class="btn-success btn-sm" disabled>Mount Directory</button>
-            <button id="fs-sync-back-btn" class="btn-warning btn-sm" disabled style="display:none">Sync to Host</button>
             <button id="fs-refresh-btn" class="btn-secondary btn-sm" disabled>Refresh Tree</button>
         </div>
         <div class="output-section">
@@ -675,7 +674,6 @@ print_tree('/data')`,
                 const fsOutputEl = $('#fs-output');
                 const fsTimeEl = $('#fs-time');
                 const fsTreeEl = $('#fs-tree');
-                let hostDirHandle = null;
 
                 // Check File System Access API support
                 const hasFSAccess = typeof window.showDirectoryPicker === 'function';
@@ -884,15 +882,13 @@ print('Created ' + ${JSON.stringify(filePath)})
                 $('#fs-mount-btn').addEventListener('click', async () => {
                     if (!hasFSAccess) return;
                     try {
-                        hostDirHandle = await window.showDirectoryPicker({ mode: 'readwrite' });
-                        setStatus(`Mounting "${hostDirHandle.name}"...`, 'info');
-                        await syncHostToSandbox(hostDirHandle, '/data');
+                        const dirHandle = await window.showDirectoryPicker({ mode: 'read' });
+                        setStatus(`Importing "${dirHandle.name}"...`, 'info');
+                        await syncHostToSandbox(dirHandle, '/data');
                         $('#fs-mount-info').style.display = 'block';
-                        $('#fs-mount-info').textContent = `Mounted: ${hostDirHandle.name} \u2194 /data`;
-                        $('#fs-sync-back-btn').style.display = '';
-                        $('#fs-sync-back-btn').disabled = false;
+                        $('#fs-mount-info').textContent = `Imported: ${dirHandle.name} \u2192 /data (read-only)`;
                         await refreshFileTree();
-                        setStatus(`Mounted "${hostDirHandle.name}" \u2192 /data`, 'success');
+                        setStatus(`Imported "${dirHandle.name}" \u2192 /data`, 'success');
                     } catch (e) {
                         if (e.name !== 'AbortError') {
                             setStatus('Mount failed: ' + e.message, 'error');
@@ -928,48 +924,6 @@ with open(${JSON.stringify(guestPath)}, 'wb') as f:
                         }
                     }
                 }
-
-                // Sync sandbox VFS back to host directory
-                $('#fs-sync-back-btn').addEventListener('click', async () => {
-                    if (!hostDirHandle) return;
-                    try {
-                        setStatus('Syncing files back to host...', 'info');
-                        // Get list of all files in /data
-                        const listCode = `
-import os, json, base64
-files = []
-for root, dirs, filenames in os.walk('/data'):
-    for f in filenames:
-        full = os.path.join(root, f)
-        rel = os.path.relpath(full, '/data')
-        with open(full, 'rb') as fh:
-            data = base64.b64encode(fh.read()).decode()
-        files.append({'rel': rel, 'data': data})
-print(json.dumps(files))
-`;
-                        const result = await sandbox.execute(listCode);
-                        const files = JSON.parse(result.stdout.trim());
-                        let synced = 0;
-                        for (const f of files) {
-                            const parts = f.rel.split('/');
-                            let dir = hostDirHandle;
-                            // Create subdirectories
-                            for (let i = 0; i < parts.length - 1; i++) {
-                                dir = await dir.getDirectoryHandle(parts[i], { create: true });
-                            }
-                            const fileName = parts[parts.length - 1];
-                            const fileHandle = await dir.getFileHandle(fileName, { create: true });
-                            const writable = await fileHandle.createWritable();
-                            const bytes = Uint8Array.from(atob(f.data), c => c.charCodeAt(0));
-                            await writable.write(bytes);
-                            await writable.close();
-                            synced++;
-                        }
-                        setStatus(`Synced ${synced} file${synced !== 1 ? 's' : ''} to "${hostDirHandle.name}"`, 'success');
-                    } catch (e) {
-                        setStatus('Sync failed: ' + e.message, 'error');
-                    }
-                });
 
                 // Initial tree load
                 refreshFileTree();
