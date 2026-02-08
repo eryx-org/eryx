@@ -17,10 +17,6 @@ authors = ["Ben Sully <ben.sully88@gmail.com>"]
 anyhow = "1.0"
 async-trait = "0.1"
 
-# Pre-initialization for capturing Python memory state
-# Note: crates.io version 0.1.0 uses wasm-tools 0.235, incompatible with 0.243
-component-init-transform = { git = "https://github.com/sd2k/component-init", rev = "75be39bf2e9d8af57b9bc10888c3f2992fbca3df" }
-
 # Benchmarking
 criterion = { version = "0.5", features = ["async_tokio"] }
 crossterm = "0.28"
@@ -78,6 +74,7 @@ wasmparser = "0.243"
 # WebAssembly runtime (v40+ required for async component model)
 wasmtime = { version = "41", features = ["component-model", "async"] }
 wasmtime-wasi = "41"
+wasmtime-wizer = { version = "41", features = ["component-model", "wasmtime"] }
 
 # WebAssembly component linking and WIT parsing
 wit-component = "0.243"
@@ -99,7 +96,7 @@ missing_docs = "warn"
 rust_2018_idioms = { level = "warn", priority = -1 }
 # Note: unsafe_code lint is handled per-crate in lib.rs, not at workspace level.
 # The eryx crate uses `forbid(unsafe_code)` by default, relaxed to `deny` when
-# the `precompiled` feature is enabled.
+# the `embedded` feature is enabled.
 
 [workspace.lints.clippy]
 all = "warn"
@@ -122,6 +119,12 @@ cranelift-codegen.opt-level = 3
 regalloc2.opt-level = 3
 wasmtime.opt-level = 3
 wasmparser.opt-level = 3
+# wasmtime-wizer's snapshot_component() debug-asserts that its output is valid,
+# but it strips _initialize exports that the component model still references.
+# Our restore_initialize_exports() post-processing fixes this, but runs after
+# the assertion. Disable debug assertions for this dep since the final output
+# is valid.
+wasmtime-wizer.debug-assertions = false
 
 # The profile that 'dist' will build with
 [profile.dist]

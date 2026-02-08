@@ -647,7 +647,7 @@ let sandbox = pre.instantiate().await?;
 How it works:
 1. Runs Python initialization and imports once
 2. Calls `finalize-preinit` export to reset WASI file handle state
-3. Captures memory snapshot via `component-init-transform`
+3. Captures memory snapshot via `wasmtime-wizer`
 4. New sandboxes restore from the snapshot instead of re-initializing
 
 This combines the best of both worlds:
@@ -672,7 +672,7 @@ Pre-initialization captures Python's initialized memory state, enabling ~25x fas
 │  4. Call finalize-preinit export:                                       │
 │     • reset_adapter_state() - clears WASI Preview 1 adapter state       │
 │     • __wasilibc_reset_preopens() - clears preopened file handles       │
-│  5. Capture memory snapshot via component-init-transform                │
+│  5. Capture memory snapshot via wasmtime-wizer                │
 │  6. Store as SandboxPre template                                        │
 └─────────────────────────────────────────────────────────────────────────┘
                               │
@@ -1131,7 +1131,7 @@ Results:
 - **~25x faster** sandbox creation (~18ms vs ~450ms)
 - Supports pre-importing modules (e.g., numpy) for even faster execution
 - Uses `finalize-preinit` export to reset WASI file handle state before snapshot
-- Memory snapshot captured via `component-init-transform`
+- Memory snapshot captured via `wasmtime-wizer`
 
 ### 2. Component Caching ✅ IMPLEMENTED
 
