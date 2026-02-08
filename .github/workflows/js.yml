@@ -29,7 +29,7 @@ jobs:
         with:
           path: |
             crates/eryx-runtime/runtime.wasm
-          key: wasm-runtime-${{ hashFiles('crates/eryx-wasm-runtime/src/**', 'crates/eryx-wasm-runtime/clock_stubs.c', 'crates/eryx-wasm-runtime/Cargo.toml', 'crates/eryx-runtime/build.rs', 'crates/eryx-runtime/wit/runtime.wit', 'crates/eryx-runtime/libs/*.zst', 'Cargo.lock') }}
+          key: wasm-runtime-v2-${{ hashFiles('crates/eryx-wasm-runtime/src/**', 'crates/eryx-wasm-runtime/clock_stubs.c', 'crates/eryx-wasm-runtime/Cargo.toml', 'crates/eryx-runtime/build.rs', 'crates/eryx-runtime/wit/runtime.wit', 'crates/eryx-runtime/libs/*.zst', 'Cargo.lock') }}
 
       - name: Touch cached WASM
         if: steps.wasm-cache.outputs.cache-hit == 'true'

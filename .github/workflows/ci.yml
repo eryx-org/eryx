@@ -43,7 +43,7 @@ jobs:
             crates/eryx-runtime/runtime.cwasm
             crates/eryx-runtime/prebuilt/
             crates/eryx-wasm-runtime/target/liberyx_runtime.so
-          key: wasm-runtime-${{ hashFiles('crates/eryx-wasm-runtime/src/**', 'crates/eryx-wasm-runtime/clock_stubs.c', 'crates/eryx-wasm-runtime/Cargo.toml', 'crates/eryx-runtime/build.rs', 'crates/eryx-runtime/wit/runtime.wit', 'crates/eryx-runtime/libs/*.zst', 'Cargo.lock') }}
+          key: wasm-runtime-v2-${{ hashFiles('crates/eryx-wasm-runtime/src/**', 'crates/eryx-wasm-runtime/clock_stubs.c', 'crates/eryx-wasm-runtime/Cargo.toml', 'crates/eryx-runtime/build.rs', 'crates/eryx-runtime/wit/runtime.wit', 'crates/eryx-runtime/libs/*.zst', 'Cargo.lock') }}
 
       - name: Touch cached artifacts
         if: steps.wasm-cache.outputs.cache-hit == 'true'
@@ -122,6 +122,9 @@ jobs:
           cargo run -p eryx --example precompile --features preinit --release
         env:
           ERYX_PRECOMPILE_BOOTSTRAP: "1"
+          # Use x86-64-v2 for portable cwasm across runner types (Namespace has AVX-512,
+          # but downstream jobs on ubuntu-latest do not)
+          ERYX_CPU_FEATURES: "x86-64-v2"
 
       - name: Upload WASM artifacts (cache miss)
         if: steps.wasm-cache.outputs.cache-hit != 'true'
