@@ -138,6 +138,18 @@ def _make_net_config(args: argparse.Namespace) -> eryx.NetConfig | None:
     return config
 
 
+def _write_stdout(chunk: str) -> None:
+    """Stream stdout chunks to the terminal in real-time."""
+    sys.stdout.write(chunk)
+    sys.stdout.flush()
+
+
+def _write_stderr(chunk: str) -> None:
+    """Stream stderr chunks to the terminal in real-time."""
+    sys.stderr.write(chunk)
+    sys.stderr.flush()
+
+
 def _run_once(code: str, args: argparse.Namespace) -> int:
     """Execute code in a stateless Sandbox and print the result."""
     limits = _make_resource_limits(args)
@@ -150,9 +162,13 @@ def _run_once(code: str, args: argparse.Namespace) -> int:
     if args.volume:
         kwargs["volumes"] = args.volume
 
+    # Stream output in real-time instead of buffering until completion
+    kwargs["on_stdout"] = _write_stdout
+    kwargs["on_stderr"] = _write_stderr
+
     sandbox = eryx.Sandbox(**kwargs)
     try:
-        result = sandbox.execute(code)
+        sandbox.execute(code)
     except eryx.TimeoutError as exc:
         print(f"eryx: timeout: {exc}", file=sys.stderr)
         return 1
@@ -166,10 +182,6 @@ def _run_once(code: str, args: argparse.Namespace) -> int:
         print(f"eryx: {exc}", file=sys.stderr)
         return 1
 
-    if result.stdout:
-        sys.stdout.write(result.stdout)
-        if not result.stdout.endswith("\n"):
-            sys.stdout.write("\n")
     return 0
 
 
@@ -181,6 +193,10 @@ def _repl(args: argparse.Namespace) -> int:
         kwargs["execution_timeout_ms"] = limits.execution_timeout_ms
     if args.volume:
         kwargs["volumes"] = args.volume
+
+    # Stream output in real-time
+    kwargs["on_stdout"] = _write_stdout
+    kwargs["on_stderr"] = _write_stderr
 
     session = eryx.Session(**kwargs)
 
@@ -219,7 +235,7 @@ def _repl(args: argparse.Namespace) -> int:
         prompt = ">>> "
 
         try:
-            result = session.execute(code)
+            session.execute(code)
         except eryx.TimeoutError as exc:
             print(f"TimeoutError: {exc}", file=sys.stderr)
             continue
@@ -232,11 +248,6 @@ def _repl(args: argparse.Namespace) -> int:
         except eryx.EryxError as exc:
             print(f"EryxError: {exc}", file=sys.stderr)
             continue
-
-        if result.stdout:
-            sys.stdout.write(result.stdout)
-            if not result.stdout.endswith("\n"):
-                sys.stdout.write("\n")
 
     return 0
 

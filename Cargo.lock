@@ -937,6 +937,7 @@ dependencies = [
 name = "eryx-python"
 version = "0.3.0"
 dependencies = [
+ "async-trait",
  "eryx",
  "pyo3",
  "pyo3-async-runtimes",

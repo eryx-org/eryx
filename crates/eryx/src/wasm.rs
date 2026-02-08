@@ -63,6 +63,15 @@ pub struct TraceRequest {
     pub context_json: String,
 }
 
+/// Request to stream output from Python code in real-time.
+#[derive(Debug, Clone)]
+pub struct OutputRequest {
+    /// Stream identifier: 0 = stdout, 1 = stderr.
+    pub stream: u32,
+    /// The text that was written.
+    pub data: String,
+}
+
 /// Request for a network operation from Python code.
 #[derive(Debug)]
 pub enum NetRequest {
@@ -363,6 +372,8 @@ pub struct ExecutorState {
     pub(crate) memory_tracker: MemoryTracker,
     /// Channel to send network requests to the handler.
     pub(crate) net_tx: Option<mpsc::Sender<NetRequest>>,
+    /// Channel to stream output (stdout/stderr) to the host in real-time.
+    pub(crate) output_tx: Option<mpsc::UnboundedSender<OutputRequest>>,
     /// Hybrid virtual filesystem context (when vfs feature is enabled).
     /// Routes /data/* to VFS storage, other paths to real filesystem.
     /// Uses ScrubbingStorage to scrub secret placeholders from file writes.
@@ -384,7 +395,8 @@ impl std::fmt::Debug for ExecutorState {
                 "peak_memory_bytes",
                 &self.memory_tracker.peak_memory_bytes(),
             )
-            .field("net_tx", &self.net_tx.is_some());
+            .field("net_tx", &self.net_tx.is_some())
+            .field("output_tx", &self.output_tx.is_some());
         #[cfg(feature = "vfs")]
         debug.field("hybrid_vfs_ctx", &self.hybrid_vfs_ctx.is_some());
         debug.finish()
@@ -479,6 +491,18 @@ impl SandboxImports for ExecutorState {
                 context_json,
             };
             // Fire-and-forget - trace events are not critical
+            let _ = tx.send(request);
+        }
+    }
+
+    /// Report output (stdout/stderr) to the host in real-time.
+    fn report_output(&mut self, stream_id: u32, data: String) {
+        if let Some(tx) = &self.output_tx {
+            let request = OutputRequest {
+                stream: stream_id,
+                data,
+            };
+            // Fire-and-forget - output streaming is not critical
             let _ = tx.send(request);
         }
     }
@@ -740,6 +764,7 @@ pub struct ExecuteBuilder<'a> {
     callback_tx: Option<mpsc::Sender<CallbackRequest>>,
     trace_tx: Option<mpsc::UnboundedSender<TraceRequest>>,
     net_tx: Option<mpsc::Sender<NetRequest>>,
+    output_tx: Option<mpsc::UnboundedSender<OutputRequest>>,
     memory_limit: Option<u64>,
     execution_timeout: Option<Duration>,
     cancellation_token: Option<CancellationToken>,
@@ -759,6 +784,7 @@ impl std::fmt::Debug for ExecuteBuilder<'_> {
             .field("has_callback_tx", &self.callback_tx.is_some())
             .field("has_trace_tx", &self.trace_tx.is_some())
             .field("has_net_tx", &self.net_tx.is_some())
+            .field("has_output_tx", &self.output_tx.is_some())
             .field("memory_limit", &self.memory_limit)
             .field("execution_timeout", &self.execution_timeout)
             .field("has_cancellation_token", &self.cancellation_token.is_some())
@@ -781,6 +807,7 @@ impl<'a> ExecuteBuilder<'a> {
             callback_tx: None,
             trace_tx: None,
             net_tx: None,
+            output_tx: None,
             memory_limit: None,
             execution_timeout: None,
             cancellation_token: None,
@@ -822,6 +849,19 @@ impl<'a> ExecuteBuilder<'a> {
     #[must_use]
     pub fn with_network(mut self, net_tx: mpsc::Sender<NetRequest>) -> Self {
         self.net_tx = Some(net_tx);
+        self
+    }
+
+    /// Enable real-time output streaming for this execution.
+    ///
+    /// The `output_tx` channel receives `OutputRequest`s for every
+    /// `sys.stdout.write()` / `sys.stderr.write()` call in Python.
+    #[must_use]
+    pub fn with_output_streaming(
+        mut self,
+        output_tx: mpsc::UnboundedSender<OutputRequest>,
+    ) -> Self {
+        self.output_tx = Some(output_tx);
         self
     }
 
@@ -897,6 +937,7 @@ impl<'a> ExecuteBuilder<'a> {
                 self.callback_tx,
                 self.trace_tx,
                 self.net_tx,
+                self.output_tx,
                 self.memory_limit,
                 self.execution_timeout,
                 self.cancellation_token,
@@ -1830,6 +1871,7 @@ impl PythonExecutor {
         callback_tx: Option<mpsc::Sender<CallbackRequest>>,
         trace_tx: Option<mpsc::UnboundedSender<TraceRequest>>,
         net_tx: Option<mpsc::Sender<NetRequest>>,
+        output_tx: Option<mpsc::UnboundedSender<OutputRequest>>,
         memory_limit: Option<u64>,
         execution_timeout: Option<Duration>,
         cancellation_token: Option<CancellationToken>,
@@ -2005,6 +2047,7 @@ impl PythonExecutor {
             callbacks: callback_infos,
             memory_tracker: MemoryTracker::new(memory_limit),
             net_tx,
+            output_tx,
             #[cfg(feature = "vfs")]
             hybrid_vfs_ctx,
         };

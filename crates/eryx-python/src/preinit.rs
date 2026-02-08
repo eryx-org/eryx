@@ -12,7 +12,7 @@ use crate::callback::extract_callbacks;
 use crate::error::{InitializationError, eryx_error_to_py};
 use crate::net_config::NetConfig;
 use crate::resource_limits::ResourceLimits;
-use crate::sandbox::{Sandbox, apply_secrets};
+use crate::sandbox::{PyOutputHandler, Sandbox, apply_secrets};
 
 /// A factory for creating sandboxes with custom packages.
 ///
@@ -237,7 +237,7 @@ impl SandboxFactory {
     ///         secrets={"API_KEY": {"value": "sk-xxx", "allowed_hosts": ["api.example.com"]}},
     ///         network=NetConfig(allowed_hosts=["api.example.com"]),
     ///     )
-    #[pyo3(signature = (*, site_packages=None, resource_limits=None, network=None, callbacks=None, secrets=None, scrub_stdout=None, scrub_stderr=None, scrub_files=None, volumes=None))]
+    #[pyo3(signature = (*, site_packages=None, resource_limits=None, network=None, callbacks=None, secrets=None, scrub_stdout=None, scrub_stderr=None, scrub_files=None, volumes=None, on_stdout=None, on_stderr=None))]
     #[allow(clippy::too_many_arguments)]
     fn create_sandbox(
         &self,
@@ -251,6 +251,8 @@ impl SandboxFactory {
         scrub_stderr: Option<bool>,
         scrub_files: Option<bool>,
         volumes: Option<Vec<(String, String, bool)>>,
+        on_stdout: Option<Py<PyAny>>,
+        on_stderr: Option<Py<PyAny>>,
     ) -> PyResult<Sandbox> {
         // Use provided site_packages or fall back to the one from initialization
         let site_packages_path = site_packages.or_else(|| self.site_packages_path.clone());
@@ -311,6 +313,14 @@ impl SandboxFactory {
                 };
                 builder = builder.with_volume(volume);
             }
+        }
+
+        // Apply output handler if stdout/stderr callbacks are provided
+        if on_stdout.is_some() || on_stderr.is_some() {
+            builder = builder.with_output_handler(PyOutputHandler {
+                on_stdout,
+                on_stderr,
+            });
         }
 
         let inner = builder.build().map_err(eryx_error_to_py)?;

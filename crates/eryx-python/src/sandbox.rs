@@ -4,14 +4,48 @@
 
 use std::sync::Arc;
 
+use async_trait::async_trait;
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
+
+use eryx::OutputHandler;
 
 use crate::callback::extract_callbacks;
 use crate::error::{InitializationError, eryx_error_to_py};
 use crate::net_config::NetConfig;
 use crate::resource_limits::ResourceLimits;
 use crate::result::ExecuteResult;
+
+/// An `OutputHandler` backed by Python callables for stdout and stderr.
+pub(crate) struct PyOutputHandler {
+    pub(crate) on_stdout: Option<Py<PyAny>>,
+    pub(crate) on_stderr: Option<Py<PyAny>>,
+}
+
+#[async_trait]
+impl OutputHandler for PyOutputHandler {
+    async fn on_output(&self, chunk: &str) {
+        if let Some(ref callback) = self.on_stdout {
+            let chunk = chunk.to_string();
+            Python::attach(|py| {
+                if let Err(e) = callback.call1(py, (chunk,)) {
+                    e.print(py);
+                }
+            });
+        }
+    }
+
+    async fn on_stderr(&self, chunk: &str) {
+        if let Some(ref callback) = self.on_stderr {
+            let chunk = chunk.to_string();
+            Python::attach(|py| {
+                if let Err(e) = callback.call1(py, (chunk,)) {
+                    e.print(py);
+                }
+            });
+        }
+    }
+}
 
 /// A Python sandbox powered by WebAssembly.
 ///
@@ -105,7 +139,7 @@ impl Sandbox {
     ///     )
     ///     sandbox = factory.create_sandbox()
     #[new]
-    #[pyo3(signature = (*, resource_limits=None, network=None, callbacks=None, secrets=None, scrub_stdout=None, scrub_stderr=None, scrub_files=None, volumes=None))]
+    #[pyo3(signature = (*, resource_limits=None, network=None, callbacks=None, secrets=None, scrub_stdout=None, scrub_stderr=None, scrub_files=None, volumes=None, on_stdout=None, on_stderr=None))]
     #[allow(clippy::too_many_arguments)]
     fn new(
         py: Python<'_>,
@@ -117,6 +151,8 @@ impl Sandbox {
         scrub_stderr: Option<bool>,
         scrub_files: Option<bool>,
         volumes: Option<Vec<(String, String, bool)>>,
+        on_stdout: Option<Py<PyAny>>,
+        on_stderr: Option<Py<PyAny>>,
     ) -> PyResult<Self> {
         // Create a tokio runtime for async execution
         let runtime = Arc::new(
@@ -170,6 +206,14 @@ impl Sandbox {
                 };
                 builder = builder.with_volume(volume);
             }
+        }
+
+        // Apply output handler if stdout/stderr callbacks are provided
+        if on_stdout.is_some() || on_stderr.is_some() {
+            builder = builder.with_output_handler(PyOutputHandler {
+                on_stdout,
+                on_stderr,
+            });
         }
 
         let inner = builder.build().map_err(eryx_error_to_py)?;

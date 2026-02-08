@@ -502,6 +502,18 @@ fn add_sandbox_stubs(linker: &mut Linker<PreInitCtx>) -> Result<()> {
         },
     )?;
 
+    // report-output: func(stream-id: u32, data: string)
+    linker.root().func_new(
+        "report-output",
+        |_ctx: wasmtime::StoreContextMut<'_, PreInitCtx>,
+         _func_ty: wasmtime::component::types::ComponentFunc,
+         _params: &[Val],
+         _results: &mut [Val]| {
+            // No-op - output during init can be ignored
+            Ok(())
+        },
+    )?;
+
     // Add network stubs (TCP and TLS interfaces)
     add_network_stubs(linker)?;
 

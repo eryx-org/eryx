@@ -121,7 +121,8 @@ impl TraceHandler for CollectingTraceHandler {
 /// Shared data for the collecting output handler.
 #[derive(Default)]
 struct OutputData {
-    chunks: Vec<String>,
+    stdout_chunks: Vec<String>,
+    stderr_chunks: Vec<String>,
     call_count: u32,
 }
 
@@ -145,7 +146,15 @@ impl CollectingOutputHandler {
     }
 
     fn combined_output(&self) -> String {
-        self.data.lock().unwrap().chunks.join("")
+        self.data.lock().unwrap().stdout_chunks.join("")
+    }
+
+    fn stdout_chunks(&self) -> Vec<String> {
+        self.data.lock().unwrap().stdout_chunks.clone()
+    }
+
+    fn combined_stderr(&self) -> String {
+        self.data.lock().unwrap().stderr_chunks.join("")
     }
 }
 
@@ -154,7 +163,13 @@ impl OutputHandler for CollectingOutputHandler {
     async fn on_output(&self, output: &str) {
         let mut data = self.data.lock().unwrap();
         data.call_count += 1;
-        data.chunks.push(output.to_string());
+        data.stdout_chunks.push(output.to_string());
+    }
+
+    async fn on_stderr(&self, output: &str) {
+        let mut data = self.data.lock().unwrap();
+        data.call_count += 1;
+        data.stderr_chunks.push(output.to_string());
     }
 }
 
@@ -517,9 +532,11 @@ for i in range(5):
     let output = result.unwrap();
 
     // The output handler's combined output should match result.stdout
+    // (result.stdout has trailing newlines stripped, handler output is raw)
     let handler_output = output_handler.combined_output();
     assert_eq!(
-        handler_output, output.stdout,
+        handler_output.trim_end_matches('\n'),
+        output.stdout,
         "Handler output should match result stdout"
     );
 }
@@ -611,8 +628,10 @@ for i in range(100):
         "Should have substantial output: {} chars",
         combined.len()
     );
+    // result.stdout has trailing newlines stripped, handler output is raw
     assert_eq!(
-        combined, output.stdout,
+        combined.trim_end_matches('\n'),
+        output.stdout,
         "Handler output should match stdout"
     );
 }
@@ -695,9 +714,14 @@ print("After error")  # Never reached
 
     assert!(result.is_err(), "Execution should fail");
 
-    // Note: Output handler is only called on successful execution.
-    // When execution fails, the output handler may not receive partial output.
-    // This is current behavior - output is collected and only streamed on success.
+    // With streaming output, the handler receives output in real-time.
+    // "Before error" should have been streamed before the exception occurred.
+    let combined = output_handler.combined_output();
+    assert!(
+        combined.contains("Before error"),
+        "Should have received output streamed before the error: {}",
+        combined
+    );
 
     // Trace handler should have received some events before the error
     // (trace events are collected during execution, not just at the end)
@@ -820,4 +844,86 @@ result = await succeed()
     if let (Some(start), Some(end)) = (start_idx, end_idx) {
         assert!(start < end, "CallbackStart should come before CallbackEnd");
     }
+}
+
+// =============================================================================
+// Streaming Output Tests
+// =============================================================================
+
+#[tokio::test]
+async fn test_streaming_output_per_print_chunks() {
+    let output_handler = CollectingOutputHandler::new();
+
+    let sandbox = sandbox_builder()
+        .with_output_handler(output_handler.clone())
+        .build()
+        .expect("Failed to build sandbox");
+
+    let result = sandbox
+        .execute(
+            r#"
+print("chunk1")
+print("chunk2")
+print("chunk3")
+"#,
+        )
+        .await;
+
+    assert!(result.is_ok(), "Execution should succeed: {:?}", result);
+
+    // With streaming, each print() should produce at least one chunk.
+    // print() calls write() once with the text and once with '\n'.
+    let chunks = output_handler.stdout_chunks();
+    assert!(
+        chunks.len() >= 3,
+        "Should have at least 3 chunks (one per print), got {}: {:?}",
+        chunks.len(),
+        chunks
+    );
+
+    // Combined output should equal final stdout
+    // (result.stdout has trailing newlines stripped, handler output is raw)
+    let combined = output_handler.combined_output();
+    let result = result.unwrap();
+    assert_eq!(
+        combined.trim_end_matches('\n'),
+        result.stdout,
+        "Streamed chunks should combine to match final stdout"
+    );
+}
+
+#[tokio::test]
+async fn test_streaming_stderr_output() {
+    let output_handler = CollectingOutputHandler::new();
+
+    let sandbox = sandbox_builder()
+        .with_output_handler(output_handler.clone())
+        .build()
+        .expect("Failed to build sandbox");
+
+    let result = sandbox
+        .execute(
+            r#"
+import sys
+print("stdout line", file=sys.stdout)
+print("stderr line", file=sys.stderr)
+"#,
+        )
+        .await;
+
+    assert!(result.is_ok(), "Execution should succeed: {:?}", result);
+
+    let stdout = output_handler.combined_output();
+    let stderr = output_handler.combined_stderr();
+
+    assert!(
+        stdout.contains("stdout line"),
+        "stdout should contain 'stdout line': {}",
+        stdout
+    );
+    assert!(
+        stderr.contains("stderr line"),
+        "stderr should contain 'stderr line': {}",
+        stderr
+    );
 }

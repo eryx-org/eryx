@@ -91,12 +91,14 @@ fn find_python_stdlib() -> Option<PathBuf> {
     None
 }
 use crate::callback::Callback;
-use crate::callback_handler::{run_callback_handler, run_net_handler, run_trace_collector};
+use crate::callback_handler::{
+    run_callback_handler, run_net_handler, run_output_collector, run_trace_collector,
+};
 use crate::error::Error;
 use crate::library::RuntimeLibrary;
 use crate::net::{ConnectionManager, NetConfig};
 use crate::trace::{OutputHandler, TraceEvent, TraceHandler};
-use crate::wasm::{CallbackRequest, NetRequest, PythonExecutor, TraceRequest};
+use crate::wasm::{CallbackRequest, NetRequest, OutputRequest, PythonExecutor, TraceRequest};
 
 /// A sandboxed Python execution environment.
 pub struct Sandbox {
@@ -257,12 +259,32 @@ impl Sandbox {
             (None, None)
         };
 
+        // Spawn output collector for real-time streaming if handler is configured
+        let (output_tx, output_handler_task) = if self.output_handler.is_some() {
+            let (tx, rx) = mpsc::unbounded_channel::<OutputRequest>();
+            let handler = self.output_handler.clone();
+            let output_secrets = self.secrets.clone();
+            let scrub_stdout = matches!(self.scrub_stdout, crate::secrets::OutputScrubPolicy::All);
+            let scrub_stderr = matches!(self.scrub_stderr, crate::secrets::OutputScrubPolicy::All);
+            let task = tokio::spawn(async move {
+                run_output_collector(rx, handler, output_secrets, scrub_stdout, scrub_stderr).await
+            });
+            (Some(tx), Some(task))
+        } else {
+            (None, None)
+        };
+
         // Execute the Python code using the builder API
         let mut execute_builder = self
             .executor
             .execute(&full_code)
             .with_callbacks(&callbacks, callback_tx)
             .with_tracing(trace_tx);
+
+        // Add output streaming if handler is configured
+        if let Some(tx) = output_tx {
+            execute_builder = execute_builder.with_output_streaming(tx);
+        }
 
         // Add network channel if networking is enabled
         if let Some(tx) = net_tx {
@@ -335,6 +357,11 @@ impl Sandbox {
             let _ = handler.await;
         }
 
+        // Output handler completes when its channel is dropped (execute_builder dropped)
+        if let Some(handler) = output_handler_task {
+            let _ = handler.await;
+        }
+
         let duration = start.elapsed();
 
         match execution_result {
@@ -353,12 +380,6 @@ impl Sandbox {
                 } else {
                     output.stderr
                 };
-
-                // Stream output if handler is configured (stream unscrubbed for now)
-                if let Some(handler) = &self.output_handler {
-                    handler.on_output(&stdout).await;
-                    handler.on_stderr(&stderr).await;
-                }
 
                 tracing::info!(
                     duration_ms = duration.as_millis() as u64,
@@ -434,6 +455,18 @@ impl Sandbox {
     #[must_use]
     pub(crate) fn secrets(&self) -> &HashMap<String, crate::secrets::SecretConfig> {
         &self.secrets
+    }
+
+    /// Whether stdout should be scrubbed of secret placeholders.
+    #[must_use]
+    pub(crate) fn scrub_stdout(&self) -> bool {
+        matches!(self.scrub_stdout, crate::secrets::OutputScrubPolicy::All)
+    }
+
+    /// Whether stderr should be scrubbed of secret placeholders.
+    #[must_use]
+    pub(crate) fn scrub_stderr(&self) -> bool {
+        matches!(self.scrub_stderr, crate::secrets::OutputScrubPolicy::All)
     }
 
     /// Get a reference to the Python executor.
@@ -590,6 +623,21 @@ impl Sandbox {
             run_trace_collector(trace_rx, trace_handler_clone, trace_secrets).await
         });
 
+        // Spawn output collector for real-time streaming if handler is configured
+        let (output_tx, output_handler_task) = if output_handler.is_some() {
+            let (tx, rx) = mpsc::unbounded_channel::<OutputRequest>();
+            let handler = output_handler.clone();
+            let output_secrets = secrets.clone();
+            let scrub_out = matches!(scrub_stdout, crate::secrets::OutputScrubPolicy::All);
+            let scrub_err = matches!(scrub_stderr, crate::secrets::OutputScrubPolicy::All);
+            let task = tokio::spawn(async move {
+                run_output_collector(rx, handler, output_secrets, scrub_out, scrub_err).await
+            });
+            (Some(tx), Some(task))
+        } else {
+            (None, None)
+        };
+
         // Spawn network handler if networking is enabled
         let (net_tx, net_handler) = if let Some(ref config) = net_config {
             let (tx, rx) = mpsc::channel::<crate::wasm::NetRequest>(32);
@@ -606,6 +654,11 @@ impl Sandbox {
             .with_callbacks(&callbacks_vec, callback_tx)
             .with_tracing(trace_tx)
             .with_cancellation(cancel_token.clone());
+
+        // Add output streaming channel if handler is configured
+        if let Some(tx) = output_tx {
+            execute_builder = execute_builder.with_output_streaming(tx);
+        }
 
         // Add network channel if networking is enabled
         if let Some(tx) = net_tx {
@@ -671,6 +724,11 @@ impl Sandbox {
         let callback_invocations = callback_handler.await.unwrap_or(0);
         let trace_events = trace_collector.await.unwrap_or_default();
 
+        // Output handler completes when its channel is dropped
+        if let Some(task) = output_handler_task {
+            let _ = task.await;
+        }
+
         // Network handler completes when its channel is dropped
         if let Some(handler) = net_handler {
             let _ = handler.await;
@@ -680,7 +738,7 @@ impl Sandbox {
 
         match execution_result {
             Ok(output) => {
-                // Scrub secret placeholders from output based on policy
+                // Scrub secret placeholders from final output based on policy
                 let stdout = if matches!(scrub_stdout, crate::secrets::OutputScrubPolicy::All) {
                     crate::secrets::scrub_placeholders(&output.stdout, &secrets)
                 } else {
@@ -692,12 +750,6 @@ impl Sandbox {
                 } else {
                     output.stderr
                 };
-
-                // Stream output if handler is configured
-                if let Some(handler) = &output_handler {
-                    handler.on_output(&stdout).await;
-                    handler.on_stderr(&stderr).await;
-                }
 
                 Ok(ExecuteResult {
                     stdout,

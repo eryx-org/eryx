@@ -8,6 +8,7 @@ export {
   setCallbackHandler,
   setCallbacks,
   setTraceHandler,
+  setOutputHandler,
 } from "./shims/callbacks.js";
 
 /**

@@ -49,10 +49,10 @@ use async_trait::async_trait;
 use tokio::sync::mpsc;
 
 use crate::callback::Callback;
-use crate::callback_handler::{run_callback_handler, run_trace_collector};
+use crate::callback_handler::{run_callback_handler, run_output_collector, run_trace_collector};
 use crate::error::Error;
 use crate::sandbox::{ExecuteResult, ExecuteStats, Sandbox};
-use crate::wasm::{CallbackRequest, TraceRequest};
+use crate::wasm::{CallbackRequest, OutputRequest, TraceRequest};
 
 use super::Session;
 use super::executor::{PythonStateSnapshot, SessionExecutor};
@@ -169,6 +169,23 @@ impl<'a> InProcessSession<'a> {
             run_trace_collector(trace_rx, trace_handler, trace_secrets).await
         });
 
+        // Spawn task to handle streaming output
+        let (output_tx, output_rx) = mpsc::unbounded_channel::<OutputRequest>();
+        let output_handler_ref = self.sandbox.output_handler().clone();
+        let output_secrets = self.sandbox.secrets().clone();
+        let scrub_stdout = self.sandbox.scrub_stdout();
+        let scrub_stderr = self.sandbox.scrub_stderr();
+        let output_collector = tokio::spawn(async move {
+            run_output_collector(
+                output_rx,
+                output_handler_ref,
+                output_secrets,
+                scrub_stdout,
+                scrub_stderr,
+            )
+            .await
+        });
+
         // Get callbacks for this execution
         let callbacks: Vec<Arc<dyn Callback>> =
             self.sandbox.callbacks().values().cloned().collect();
@@ -180,23 +197,19 @@ impl<'a> InProcessSession<'a> {
             .execute(&full_code)
             .with_callbacks(&callbacks, callback_tx)
             .with_tracing(trace_tx)
+            .with_output_streaming(output_tx)
             .run()
             .await;
 
         // Wait for the handler tasks to complete
         let callback_invocations = callback_handler.await.unwrap_or(0);
         let trace_events = trace_collector.await.unwrap_or_default();
+        let _ = output_collector.await;
 
         let duration = start.elapsed();
 
         match execution_result {
             Ok(output) => {
-                // Stream output if handler is configured
-                if let Some(handler) = self.sandbox.output_handler() {
-                    handler.on_output(&output.stdout).await;
-                    handler.on_stderr(&output.stderr).await;
-                }
-
                 tracing::info!(
                     duration_ms = duration.as_millis() as u64,
                     callback_invocations,

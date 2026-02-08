@@ -466,6 +466,7 @@ fn with_wit<T>(wit: Wit, f: impl FnOnce() -> T) -> T {
         python::set_invoke_callback(Some(invoke_callback_wrapper));
         python::set_invoke_async_callback(Some(invoke_async_callback_wrapper));
         python::set_report_trace_callback(Some(report_trace_callback_wrapper));
+        python::set_report_output_callback(Some(report_output_callback_wrapper));
 
         let result = f();
 
@@ -473,6 +474,7 @@ fn with_wit<T>(wit: Wit, f: impl FnOnce() -> T) -> T {
         python::set_invoke_callback(None);
         python::set_invoke_async_callback(None);
         python::set_report_trace_callback(None);
+        python::set_report_output_callback(None);
 
         *cell.borrow_mut() = old;
         result
@@ -716,6 +718,38 @@ fn call_report_trace(lineno: u32, event_json: &str, context_json: &str) {
 /// Wrapper function that matches the ReportTraceCallback signature.
 fn report_trace_callback_wrapper(lineno: u32, event_json: &str, context_json: &str) {
     call_report_trace(lineno, event_json, context_json);
+}
+
+/// Call report-output import to stream output to the host in real-time.
+/// This is a synchronous call with no return value.
+fn call_report_output(stream: u32, data: &str) {
+    CURRENT_WIT.with(|cell| {
+        let wit = cell.borrow();
+        let Some(wit) = wit.as_ref() else {
+            return; // No WIT context - output streaming not available
+        };
+
+        // Get the report-output import function
+        let import_func = match wit.get_import(None, "report-output") {
+            Some(f) => f,
+            None => return, // Output streaming not available
+        };
+
+        // Create a call context and push arguments
+        let mut cx = EryxCall::new();
+
+        // Push arguments in reverse order (wit-dylib pops in reverse)
+        cx.push_string(data.to_string());
+        cx.push_u32(stream);
+
+        // Call the import (synchronous, no return value)
+        import_func.call_import_sync(&mut cx);
+    });
+}
+
+/// Wrapper function that matches the ReportOutputCallback signature.
+fn report_output_callback_wrapper(stream: u32, data: &str) {
+    call_report_output(stream, data);
 }
 
 // =============================================================================

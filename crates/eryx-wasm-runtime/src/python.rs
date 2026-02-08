@@ -108,6 +108,11 @@ pub type InvokeAsyncCallback = fn(&str, &str) -> Result<crate::InvokeResult, Str
 /// Takes (lineno, event_json, context_json) and sends to host.
 pub type ReportTraceCallback = fn(u32, &str, &str);
 
+/// Type for the report_output callback function.
+/// Takes (stream, data) and sends to host for real-time output streaming.
+/// stream: 0 = stdout, 1 = stderr
+pub type ReportOutputCallback = fn(u32, &str);
+
 use std::cell::RefCell;
 
 // Thread-local storage for the callbacks.
@@ -117,6 +122,7 @@ thread_local! {
     static INVOKE_CALLBACK: RefCell<Option<InvokeCallback>> = const { RefCell::new(None) };
     static INVOKE_ASYNC_CALLBACK: RefCell<Option<InvokeAsyncCallback>> = const { RefCell::new(None) };
     static REPORT_TRACE_CALLBACK: RefCell<Option<ReportTraceCallback>> = const { RefCell::new(None) };
+    static REPORT_OUTPUT_CALLBACK: RefCell<Option<ReportOutputCallback>> = const { RefCell::new(None) };
     /// Stores the last callback error if Python callback execution failed.
     /// This allows export_async_callback to detect uncaught exceptions.
     static LAST_CALLBACK_ERROR: RefCell<Option<String>> = const { RefCell::new(None) };
@@ -184,6 +190,24 @@ pub fn do_report_trace(lineno: u32, event_json: &str, context_json: &str) {
             cb(lineno, event_json, context_json);
         }
         // If no callback registered, tracing is simply disabled - not an error
+    });
+}
+
+/// Set the report_output callback function.
+/// This should be called by lib.rs before executing Python code.
+pub fn set_report_output_callback(callback: Option<ReportOutputCallback>) {
+    REPORT_OUTPUT_CALLBACK.with(|cell| *cell.borrow_mut() = callback);
+}
+
+/// Call the registered report_output callback.
+/// Silently does nothing if no callback is registered (output streaming disabled).
+pub fn do_report_output(stream: u32, data: &str) {
+    REPORT_OUTPUT_CALLBACK.with(|cell| {
+        let callback = cell.borrow();
+        if let Some(cb) = callback.as_ref() {
+            cb(stream, data);
+        }
+        // If no callback registered, output streaming is simply disabled - not an error
     });
 }
 
@@ -420,6 +444,14 @@ fn _eryx_invoke(name: String, args_json: String) -> PyResult<String> {
 #[pyfunction]
 fn _eryx_report_trace(lineno: u32, event_json: String, context_json: String) {
     do_report_trace(lineno, &event_json, &context_json);
+}
+
+/// Report output to the host for real-time streaming.
+/// Called by _EryxStreamingWriter.write() on every sys.stdout/stderr write.
+/// Python signature: _eryx_report_output(stream: int, data: str) -> None
+#[pyfunction]
+fn _eryx_report_output(stream: u32, data: String) {
+    do_report_output(stream, &data);
 }
 
 /// Async-aware invoke function exposed to Python.
@@ -766,6 +798,7 @@ fn eryx_module(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(_eryx_invoke, m)?)?;
     m.add_function(wrap_pyfunction!(_eryx_invoke_async, m)?)?;
     m.add_function(wrap_pyfunction!(_eryx_report_trace, m)?)?;
+    m.add_function(wrap_pyfunction!(_eryx_report_output, m)?)?;
     // Async support functions
     m.add_function(wrap_pyfunction!(waitable_set_new_, m)?)?;
     m.add_function(wrap_pyfunction!(waitable_set_drop_, m)?)?;
@@ -1122,7 +1155,6 @@ static PYTHON_INITIALIZED: AtomicBool = AtomicBool::new(false);
 /// - User globals namespace (isolated from infrastructure)
 const ERYX_EXEC_INFRASTRUCTURE: &str = r#"
 import sys as _sys
-from io import StringIO as _StringIO
 import ast as _ast
 import types as _types
 
@@ -1158,9 +1190,43 @@ def _dummy_socketpair(family=None, type=None, proto=0):
 
 _socket.socketpair = _dummy_socketpair
 
+# Streaming writer that both accumulates text and streams each write to the host.
+# Replaces StringIO for stdout/stderr capture so output appears in real-time.
+# Uses duck typing (plain class) rather than inheriting from _io.TextIOBase
+# because _io.TextIOBase may not be available in all WASI Python builds.
+class _EryxStreamingWriter:
+    def __init__(self, stream_id):
+        self._stream_id = stream_id
+        self._buffer = []
+        self.encoding = 'utf-8'
+        self.errors = 'strict'
+        self.newlines = None
+    def write(self, s):
+        if not isinstance(s, str):
+            raise TypeError("write() argument must be str")
+        if s:
+            self._buffer.append(s)
+            _eryx_mod._eryx_report_output(self._stream_id, s)
+        return len(s)
+    def getvalue(self):
+        return ''.join(self._buffer)
+    def reset(self):
+        self._buffer.clear()
+    def writable(self):
+        return True
+    def seekable(self):
+        return False
+    def readable(self):
+        return False
+    def flush(self):
+        pass
+    @property
+    def closed(self):
+        return False
+
 # Persistent stdout/stderr capture - created once, reused across executions
-_eryx_stdout = _StringIO()
-_eryx_stderr = _StringIO()
+_eryx_stdout = _EryxStreamingWriter(0)
+_eryx_stderr = _EryxStreamingWriter(1)
 _eryx_old_stdout = _sys.stdout
 _eryx_old_stderr = _sys.stderr
 
@@ -1236,10 +1302,8 @@ def _eryx_exec(code):
     _eryx_net_results.clear()
 
     # Clear and redirect stdout/stderr
-    _eryx_stdout.seek(0)
-    _eryx_stdout.truncate(0)
-    _eryx_stderr.seek(0)
-    _eryx_stderr.truncate(0)
+    _eryx_stdout.reset()
+    _eryx_stderr.reset()
     _sys.stdout = _eryx_stdout
     _sys.stderr = _eryx_stderr
 

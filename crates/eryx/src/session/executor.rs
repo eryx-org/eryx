@@ -197,6 +197,7 @@ pub struct SessionExecuteBuilder<'a> {
     callbacks: Vec<Arc<dyn Callback>>,
     callback_tx: Option<mpsc::Sender<CallbackRequest>>,
     trace_tx: Option<mpsc::UnboundedSender<TraceRequest>>,
+    output_tx: Option<mpsc::UnboundedSender<crate::wasm::OutputRequest>>,
     fuel_limit: Option<u64>,
 }
 
@@ -207,6 +208,7 @@ impl std::fmt::Debug for SessionExecuteBuilder<'_> {
             .field("callbacks_count", &self.callbacks.len())
             .field("has_callback_tx", &self.callback_tx.is_some())
             .field("has_trace_tx", &self.trace_tx.is_some())
+            .field("has_output_tx", &self.output_tx.is_some())
             .field("fuel_limit", &self.fuel_limit)
             .finish_non_exhaustive()
     }
@@ -221,6 +223,7 @@ impl<'a> SessionExecuteBuilder<'a> {
             callbacks: Vec::new(),
             callback_tx: None,
             trace_tx: None,
+            output_tx: None,
             fuel_limit: None,
         }
     }
@@ -245,6 +248,16 @@ impl<'a> SessionExecuteBuilder<'a> {
     #[must_use]
     pub fn with_tracing(mut self, trace_tx: mpsc::UnboundedSender<TraceRequest>) -> Self {
         self.trace_tx = Some(trace_tx);
+        self
+    }
+
+    /// Enable real-time output streaming for this execution.
+    #[must_use]
+    pub fn with_output_streaming(
+        mut self,
+        output_tx: mpsc::UnboundedSender<crate::wasm::OutputRequest>,
+    ) -> Self {
+        self.output_tx = Some(output_tx);
         self
     }
 
@@ -283,6 +296,7 @@ impl<'a> SessionExecuteBuilder<'a> {
                 &self.callbacks,
                 self.callback_tx,
                 self.trace_tx,
+                self.output_tx,
                 self.fuel_limit,
             )
             .await
@@ -869,6 +883,7 @@ impl SessionExecutor {
         callbacks: &[Arc<dyn Callback>],
         callback_tx: Option<mpsc::Sender<CallbackRequest>>,
         trace_tx: Option<mpsc::UnboundedSender<TraceRequest>>,
+        output_tx: Option<mpsc::UnboundedSender<crate::wasm::OutputRequest>>,
         per_execute_fuel_limit: Option<u64>,
     ) -> Result<ExecutionOutput, Error> {
         let start = Instant::now();
@@ -898,6 +913,7 @@ impl SessionExecutor {
             let state = store.data_mut();
             state.set_callback_tx(callback_tx);
             state.set_trace_tx(trace_tx);
+            state.set_output_tx(output_tx);
             state.set_callbacks(callback_infos);
             state.reset_memory_tracker();
         }
@@ -993,6 +1009,7 @@ impl SessionExecutor {
             let state = store.data_mut();
             state.set_callback_tx(None);
             state.set_trace_tx(None);
+            state.set_output_tx(None);
             state.peak_memory_bytes()
         };
 
@@ -1390,7 +1407,8 @@ impl ExecutorState {
             trace_tx,
             callbacks,
             memory_tracker,
-            net_tx: None, // Set via with_network() when network handler is running
+            net_tx: None,    // Set via with_network() when network handler is running
+            output_tx: None, // Set via set_output_tx() when output handler is running
         }
     }
 
@@ -1414,7 +1432,8 @@ impl ExecutorState {
             trace_tx,
             callbacks,
             memory_tracker,
-            net_tx: None, // Set via with_network() when network handler is running
+            net_tx: None,    // Set via with_network() when network handler is running
+            output_tx: None, // Set via set_output_tx() when output handler is running
             hybrid_vfs_ctx,
         }
     }
@@ -1427,6 +1446,14 @@ impl ExecutorState {
     /// Update the trace channel for a new execution.
     pub(crate) fn set_trace_tx(&mut self, tx: Option<mpsc::UnboundedSender<TraceRequest>>) {
         self.trace_tx = tx;
+    }
+
+    /// Update the output streaming channel for a new execution.
+    pub(crate) fn set_output_tx(
+        &mut self,
+        tx: Option<mpsc::UnboundedSender<crate::wasm::OutputRequest>>,
+    ) {
+        self.output_tx = tx;
     }
 
     /// Update the available callbacks for a new execution.

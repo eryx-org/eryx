@@ -5,8 +5,10 @@
  * - invoke: call a registered callback by name with JSON arguments
  * - listCallbacks: list all registered callbacks
  * - reportTrace: receive trace events from the Python runtime
+ * - reportOutput: receive streaming stdout/stderr output from the Python runtime
  *
- * Users can register callbacks via setCallbackHandler() and setTraceHandler().
+ * Users can register callbacks via setCallbackHandler(), setTraceHandler(),
+ * and setOutputHandler().
  */
 
 /** @type {((name: string, argsJson: string) => string | Promise<string>) | null} */
@@ -14,6 +16,9 @@ let _callbackHandler = null;
 
 /** @type {((lineno: number, eventJson: string, contextJson: string) => void) | null} */
 let _traceHandler = null;
+
+/** @type {((stream: number, data: string) => void) | null} */
+let _outputHandler = null;
 
 /** @type {Array<{name: string, description: string, parametersSchemaJson: string}>} */
 let _registeredCallbacks = [];
@@ -50,6 +55,20 @@ export function setCallbacks(callbacks) {
  */
 export function setTraceHandler(handler) {
   _traceHandler = handler;
+}
+
+/**
+ * Set a handler for streaming output (stdout/stderr) from the Python runtime.
+ *
+ * The handler is called in real-time as Python code writes to stdout or stderr,
+ * rather than waiting for execution to complete.
+ *
+ * @param {((stream: number, data: string) => void) | null} handler
+ *   stream: 0 = stdout, 1 = stderr
+ *   data: the text written
+ */
+export function setOutputHandler(handler) {
+  _outputHandler = handler;
 }
 
 /**
@@ -90,5 +109,18 @@ export function listCallbacks() {
 export function reportTrace(lineno, eventJson, contextJson) {
   if (_traceHandler) {
     _traceHandler(lineno, eventJson, contextJson);
+  }
+}
+
+/**
+ * Report streaming output from the Python runtime.
+ * This is called by the sandbox runtime on every sys.stdout/stderr.write().
+ *
+ * @param {number} stream - 0 = stdout, 1 = stderr
+ * @param {string} data - The text written
+ */
+export function reportOutput(stream, data) {
+  if (_outputHandler) {
+    _outputHandler(stream, data);
   }
 }

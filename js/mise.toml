@@ -75,6 +75,7 @@ jco transpile \
   --map 'invoke=./shims/callbacks.js#invoke' \
   --map 'list-callbacks=./shims/callbacks.js#listCallbacks' \
   --map 'report-trace=./shims/callbacks.js#reportTrace' \
+  --map 'report-output=./shims/callbacks.js#reportOutput' \
   --map 'wasi:sockets/*=./shims/sockets.js#*'
 """
 
