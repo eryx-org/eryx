@@ -407,6 +407,78 @@ except Exception as e:
 # Should show "has_real_passwd: False" or "access_denied: ..."
 ```
 
+## Host Volume Mounts
+
+In addition to the in-memory VFS, Eryx supports mounting host filesystem directories into the sandbox. This allows sandboxed code to read and write real files on the host, with optional read-only enforcement.
+
+### Python API
+
+Pass a list of `(host_path, guest_path, read_only)` tuples:
+
+```python
+import eryx
+
+# Read-write mount
+sandbox = eryx.Sandbox(
+    volumes=[("/home/user/data", "/mnt/data", False)],
+)
+
+# Read-only mount
+sandbox = eryx.Sandbox(
+    volumes=[("/home/user/data", "/mnt/data", True)],
+)
+
+# Multiple mounts
+sandbox = eryx.Sandbox(
+    volumes=[
+        ("/home/user/input", "/input", True),
+        ("/home/user/output", "/output", False),
+    ],
+)
+```
+
+Volume mounts also work with sessions:
+
+```python
+session = eryx.Session(
+    volumes=[("/home/user/data", "/mnt/data", False)],
+)
+```
+
+### Rust API
+
+Use `VolumeMount::new()` for read-write or `VolumeMount::read_only()` for read-only:
+
+```rust,ignore
+use eryx::{Sandbox, VolumeMount};
+
+let sandbox = Sandbox::embedded()
+    .with_volume(VolumeMount::new("/home/user/data", "/mnt/data"))
+    .with_volume(VolumeMount::read_only("/home/user/config", "/config"))
+    .build()?;
+```
+
+### CLI
+
+Use Docker-style `-v` syntax:
+
+```bash
+# Read-write
+python -m eryx -v /host/path:/sandbox/path script.py
+
+# Read-only (append :ro)
+python -m eryx -v /host/path:/sandbox/path:ro script.py
+
+# Multiple mounts
+python -m eryx -v ./input:/input:ro -v ./output:/output script.py
+```
+
+### How It Works
+
+Volume mounts use capability-based security (cap-std) to provide controlled access to host directories. The sandbox can only access the specific directories that were explicitly mounted — it cannot traverse outside the mount point or access other host paths.
+
+Read-only mounts enforce that sandboxed code cannot modify any files in the mounted directory.
+
 ## Best Practices
 
 1. **Use shared storage for multi-session workflows** - When sessions need to share data
@@ -414,6 +486,8 @@ except Exception as e:
 3. **Prefer file-based SQLite over in-memory** - For data that needs to persist
 4. **Use appropriate mount paths** - Customize for your application's needs
 5. **Handle file errors gracefully** - Files may not exist or paths may be invalid
+6. **Use read-only mounts for input data** - Prevent sandboxed code from modifying source files
+7. **Prefer VFS for ephemeral data** - Use volume mounts only when you need access to real host files
 
 ## Next Steps
 

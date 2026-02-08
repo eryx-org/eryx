@@ -17,11 +17,15 @@
 - [Resource Limits](./guide/resource-limits.md)
 - [Networking](./guide/networking.md)
 - [Packages](./guide/packages.md)
+- [Secrets](./guide/secrets.md)
+- [Output Streaming](./guide/output-streaming.md)
+- [CLI](./guide/cli.md)
 
 # API Reference
 
 - [Rust API](./api/rust.md)
 - [Python API](./api/python.md)
+- [JavaScript API](./api/javascript.md)
 
 # Contributing
 
