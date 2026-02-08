@@ -3,7 +3,7 @@
   "type": "module",
   "private": true,
   "devDependencies": {
-    "@bsull/eryx": "../eryx-sandbox",
+    "@bsull/eryx": "../eryx",
     "@types/node": "^22.13.0",
     "typescript": "^5.8.0",
     "vitest": "^3.0.0"

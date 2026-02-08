@@ -563,8 +563,8 @@ jobs:
         working-directory: js
         run: mise run build
 
-      - name: Install eryx-sandbox dependencies
-        run: npm ci --prefix js/eryx-sandbox
+      - name: Install eryx dependencies
+        run: npm ci --prefix js/eryx
 
       - name: Build demo site
         working-directory: js/demo
