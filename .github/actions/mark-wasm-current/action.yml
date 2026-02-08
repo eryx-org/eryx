@@ -7,12 +7,16 @@ runs:
     - name: Mark WASM as up-to-date
       shell: bash
       run: |
-        # Touch WASM artifacts to be newer than sources so mise skips rebuild
-        touch crates/eryx-runtime/runtime.wasm crates/eryx-runtime/runtime.cwasm
+        # Touch WASM artifacts with a future timestamp so mise reliably skips
+        # rebuild. A plain `touch` uses the current second which can collide
+        # with checkout timestamps, causing mise to consider sources as
+        # equal-or-newer and trigger a full wasm-build from source.
+        FUTURE=$(date -d "+5 minutes" +%Y%m%d%H%M.%S)
+        touch -t "$FUTURE" crates/eryx-runtime/runtime.wasm crates/eryx-runtime/runtime.cwasm
 
         # Touch prebuilt artifacts if they exist
         if [ -d crates/eryx-runtime/prebuilt ]; then
-          touch crates/eryx-runtime/prebuilt/*
+          touch -t "$FUTURE" crates/eryx-runtime/prebuilt/*
         fi
 
         # Check if prebuilt artifacts changed by comparing checksums
