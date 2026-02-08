@@ -301,6 +301,68 @@ jobs:
           cargo check -p eryx --features native-extensions
           cargo check -p eryx --features embedded,native-extensions
 
+  # Test eryx-precompile CLI with third-party packages
+  test-precompile-packages:
+    name: Test Precompile CLI (Packages)
+    runs-on: ubuntu-latest
+    needs: build-eryx-runtime
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download WASM artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: wasm-runtime
+          path: crates/
+
+      - uses: ./.github/actions/mark-wasm-current
+
+      - name: Configure Rust cache
+        uses: Swatinem/rust-cache@v2
+
+      - uses: ./.github/actions/setup-rust
+
+      - name: Extract Python stdlib
+        run: |
+          mkdir -p crates/eryx-wasm-runtime/tests/python-stdlib
+          tar -xf crates/eryx/python-stdlib.tar.zst -C crates/eryx-wasm-runtime/tests/
+
+      - name: Download test packages
+        run: |
+          # numpy (native WASI extension) from wasi-wheels
+          curl -sL https://github.com/dicej/wasi-wheels/releases/download/v0.0.2/numpy-wasi.tar.gz \
+            -o /tmp/numpy-wasi.tar.gz
+
+          # six (pure Python wheel) from PyPI - use pip to get a stable URL
+          pip download six --no-deps --only-binary :all: -d /tmp/wheels
+
+      - name: "Test: numpy (native extension, tar.gz)"
+        run: |
+          cargo run -p eryx-precompile --release -- \
+            crates/eryx-runtime/runtime.wasm \
+            --preinit \
+            --stdlib crates/eryx-wasm-runtime/tests/python-stdlib \
+            --package /tmp/numpy-wasi.tar.gz \
+            --import numpy \
+            --verify-code "import numpy as np; a = np.array([1,2,3]); assert a.sum() == 6; print(f'numpy OK: sum={a.sum()}')" \
+            --target x86-64-v2 \
+            -o /tmp/numpy.cwasm
+          echo "Output size: $(du -h /tmp/numpy.cwasm | cut -f1)"
+
+      - name: "Test: six (pure Python, .whl)"
+        run: |
+          SIX_WHEEL=$(ls /tmp/wheels/six-*.whl)
+          cargo run -p eryx-precompile --release -- \
+            crates/eryx-runtime/runtime.wasm \
+            --preinit \
+            --stdlib crates/eryx-wasm-runtime/tests/python-stdlib \
+            --package "$SIX_WHEEL" \
+            --import six \
+            --verify-code "import six; assert six.PY3; print(f'six OK: PY3={six.PY3}, version={six.__version__}')" \
+            --target x86-64-v2 \
+            -o /tmp/six.cwasm
+          echo "Output size: $(du -h /tmp/six.cwasm | cut -f1)"
+
   # Run examples to ensure they don't bitrot
   examples:
     name: Examples

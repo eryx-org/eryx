@@ -14,6 +14,19 @@
 //!
 //! # AOT compile only (no pre-init, for already pre-initialized .wasm)
 //! eryx-precompile runtime-preinit.wasm -o runtime.cwasm --target x86-64-v3
+//!
+//! # Pre-init with packages (wheels, tar.gz, or directories)
+//! eryx-precompile runtime.wasm -o runtime-numpy.cwasm --preinit --stdlib ./python-stdlib \
+//!   --package numpy-2.2.3-wasi.tar.gz --import numpy
+//!
+//! # Pre-init with site-packages directory
+//! eryx-precompile runtime.wasm -o runtime.cwasm --preinit --stdlib ./python-stdlib \
+//!   --site-packages ./my-site-packages --import jinja2
+//!
+//! # Verify packages work (not just import)
+//! eryx-precompile runtime.wasm -o numpy.cwasm --preinit --stdlib ./python-stdlib \
+//!   --package numpy-wasi.tar.gz --import numpy \
+//!   --verify-code "import numpy; print(numpy.array(\[1,2,3\]).sum())"
 //! ```
 
 use std::path::PathBuf;
@@ -58,6 +71,30 @@ struct Args {
     #[arg(long, required_if_eq("preinit", "true"))]
     stdlib: Option<PathBuf>,
 
+    /// Path to a site-packages directory
+    ///
+    /// Mount a directory containing Python packages. Any .so files found
+    /// will be linked as native extensions. Can be combined with --package.
+    #[arg(long)]
+    site_packages: Option<PathBuf>,
+
+    /// Package file to include (.whl, .tar.gz, or directory)
+    ///
+    /// Packages are extracted and their contents are made available as
+    /// site-packages. Native extensions (.so files) are automatically
+    /// linked. Can be specified multiple times.
+    #[arg(long = "package", value_name = "PATH")]
+    packages: Vec<PathBuf>,
+
+    /// Module to pre-import during initialization
+    ///
+    /// Pre-importing modules captures their initialized state in the snapshot,
+    /// making them instantly available at runtime. Can be specified multiple times.
+    ///
+    /// Example: --import numpy --import pandas
+    #[arg(long = "import", value_name = "MODULE")]
+    imports: Vec<String>,
+
     /// Output pre-initialized .wasm instead of native .cwasm
     ///
     /// Use this to create architecture-independent pre-initialized artifacts
@@ -68,6 +105,15 @@ struct Args {
     /// Skip verification step
     #[arg(long)]
     no_verify: bool,
+
+    /// Python code to execute during verification
+    ///
+    /// Runs after the standard import verification. Useful for testing that
+    /// packages actually work, not just that they import.
+    ///
+    /// Example: `--verify-code "import numpy; print(numpy.array(\[1,2,3\]).sum())"`
+    #[arg(long, value_name = "CODE")]
+    verify_code: Option<String>,
 
     /// Verbose output
     #[arg(short, long)]
@@ -116,6 +162,22 @@ async fn main() -> Result<()> {
                 .map_or("-", |p| p.to_str().unwrap_or("-"))
         );
     }
+    if let Some(ref site_pkg) = args.site_packages {
+        println!("Site-packages: {}", site_pkg.display());
+    }
+    if !args.packages.is_empty() {
+        println!(
+            "Packages: {}",
+            args.packages
+                .iter()
+                .map(|p| p.display().to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+    }
+    if !args.imports.is_empty() {
+        println!("Imports: {}", args.imports.join(", "));
+    }
     println!();
 
     // Read input WASM
@@ -142,15 +204,29 @@ async fn main() -> Result<()> {
             );
         }
 
+        // Process packages and site-packages
+        let (final_site_packages, extensions, _extracted_packages) =
+            process_packages(args.site_packages.as_ref(), &args.packages)?;
+
+        if let Some(ref sp) = final_site_packages {
+            println!("Site-packages dir: {}", sp.display());
+        }
+        if !extensions.is_empty() {
+            println!("Native extensions: {}", extensions.len());
+        }
+
+        // Convert imports to &str references
+        let import_refs: Vec<&str> = args.imports.iter().map(|s| s.as_str()).collect();
+
         println!();
         println!("Step 1: Pre-initializing Python...");
         let start = Instant::now();
 
         let preinit_bytes = eryx::preinit::pre_initialize(
             stdlib,
-            None, // No site-packages for base runtime
-            &[],  // No imports for base runtime
-            &[],  // No native extensions for base runtime
+            final_site_packages.as_deref(),
+            &import_refs,
+            &extensions,
         )
         .await
         .context("Failed to pre-initialize Python")?;
@@ -213,13 +289,118 @@ async fn main() -> Result<()> {
         if !args.no_verify {
             println!();
             println!("Step 4: Verifying...");
-            verify_cwasm(&output, args.stdlib.as_deref()).await?;
+            verify_cwasm(
+                &output,
+                args.stdlib.as_deref(),
+                &args.imports,
+                args.verify_code.as_deref(),
+            )
+            .await?;
             println!("  Verification passed!");
         }
     }
 
     println!();
     println!("Success!");
+    Ok(())
+}
+
+/// Process packages and site-packages to extract native extensions.
+///
+/// Returns (site_packages_path, native_extensions, extracted_packages).
+/// The extracted_packages must be kept alive to prevent temp directory cleanup.
+fn process_packages(
+    site_packages: Option<&PathBuf>,
+    packages: &[PathBuf],
+) -> Result<(
+    Option<PathBuf>,
+    Vec<eryx::preinit::NativeExtension>,
+    Vec<eryx::ExtractedPackage>,
+)> {
+    let mut extensions = Vec::new();
+    let mut extracted_packages = Vec::new();
+    let mut final_site_packages = site_packages.cloned();
+
+    // Extract each package and collect native extensions
+    for path in packages {
+        println!("Extracting package: {}", path.display());
+        let package = eryx::ExtractedPackage::from_path(path)
+            .with_context(|| format!("Failed to extract package: {}", path.display()))?;
+
+        println!(
+            "  {} (native extensions: {})",
+            package.name,
+            package.native_extensions.len()
+        );
+
+        // Use the first package's python_path as site_packages if not already set
+        if final_site_packages.is_none() {
+            final_site_packages = Some(package.python_path.clone());
+        } else if let Some(ref target_dir) = final_site_packages {
+            // Copy this package's contents into the consolidated site-packages directory
+            copy_directory_contents(&package.python_path, target_dir)
+                .with_context(|| format!("Failed to merge package: {}", package.name))?;
+        }
+
+        // Collect native extensions with dlopen paths relative to /site-packages
+        for ext in &package.native_extensions {
+            let dlopen_path = format!("/site-packages/{}", ext.relative_path);
+            extensions.push(eryx::preinit::NativeExtension::new(
+                dlopen_path,
+                ext.bytes.clone(),
+            ));
+        }
+
+        extracted_packages.push(package);
+    }
+
+    // Scan site-packages directory for additional native extensions
+    if let Some(ref site_pkg_path) = final_site_packages
+        && site_pkg_path.exists()
+    {
+        for entry in walkdir::WalkDir::new(site_pkg_path) {
+            let entry = entry.context("Failed to walk site-packages directory")?;
+            let path = entry.path();
+
+            if path.extension().is_some_and(|ext| ext == "so") {
+                let relative = path
+                    .strip_prefix(site_pkg_path)
+                    .context("Failed to compute relative path")?;
+                let dlopen_path = format!("/site-packages/{}", relative.display());
+
+                // Skip if we already have this extension from packages
+                if extensions.iter().any(|e| e.name == dlopen_path) {
+                    continue;
+                }
+
+                let bytes = std::fs::read(path).context("Failed to read native extension .so")?;
+                extensions.push(eryx::preinit::NativeExtension::new(dlopen_path, bytes));
+            }
+        }
+    }
+
+    Ok((final_site_packages, extensions, extracted_packages))
+}
+
+/// Copy contents of one directory into another.
+fn copy_directory_contents(src: &std::path::Path, dst: &std::path::Path) -> Result<()> {
+    for entry in walkdir::WalkDir::new(src) {
+        let entry = entry.context("Failed to walk directory")?;
+        let src_path = entry.path();
+        let relative = src_path
+            .strip_prefix(src)
+            .context("Failed to compute relative path")?;
+        let dst_path = dst.join(relative);
+
+        if src_path.is_dir() {
+            std::fs::create_dir_all(&dst_path).context("Failed to create directory")?;
+        } else if src_path.is_file() {
+            if let Some(parent) = dst_path.parent() {
+                std::fs::create_dir_all(parent).context("Failed to create parent directory")?;
+            }
+            std::fs::copy(src_path, &dst_path).context("Failed to copy file")?;
+        }
+    }
     Ok(())
 }
 
@@ -239,9 +420,12 @@ fn parse_target(target: &str) -> Result<(Option<&str>, CpuFeatureLevel)> {
 }
 
 /// Verify that the compiled cwasm file works correctly.
-async fn verify_cwasm(cwasm_path: &PathBuf, stdlib: Option<&std::path::Path>) -> Result<()> {
-    // For verification, we need the embedded feature which provides EmbeddedResources
-    // If stdlib was provided, use that; otherwise try to use embedded resources
+async fn verify_cwasm(
+    cwasm_path: &PathBuf,
+    stdlib: Option<&std::path::Path>,
+    imports: &[String],
+    verify_code: Option<&str>,
+) -> Result<()> {
     let stdlib_path = if let Some(path) = stdlib {
         path.to_path_buf()
     } else {
@@ -282,6 +466,54 @@ async fn verify_cwasm(cwasm_path: &PathBuf, stdlib: Option<&std::path::Path>) ->
 
     if !result.stdout.contains("OK") {
         anyhow::bail!("Verification failed: unexpected output: {}", result.stdout);
+    }
+
+    // Verify that pre-imported modules are available
+    if !imports.is_empty() {
+        let import_code = imports
+            .iter()
+            .map(|m| format!("import {m}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let verify_code = format!("{import_code}\nprint('imports OK')");
+
+        let result = session
+            .execute(&verify_code)
+            .await
+            .context("Failed to verify imports")?;
+
+        if !result.stdout.contains("imports OK") {
+            let error_detail = if result.stderr.is_empty() {
+                result.stdout.clone()
+            } else {
+                result.stderr.clone()
+            };
+            anyhow::bail!(
+                "Import verification failed for [{}]: {}",
+                imports.join(", "),
+                error_detail
+            );
+        }
+
+        println!("  Imports verified: {}", imports.join(", "));
+    }
+
+    // Run custom verification code
+    if let Some(code) = verify_code {
+        println!("  Running verify code...");
+
+        let result = session
+            .execute(code)
+            .await
+            .context("Failed to execute verify code")?;
+
+        if !result.stderr.is_empty() {
+            anyhow::bail!("Verify code produced stderr:\n{}", result.stderr);
+        }
+
+        if !result.stdout.is_empty() {
+            print!("  Output: {}", result.stdout);
+        }
     }
 
     Ok(())
