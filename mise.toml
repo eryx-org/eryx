@@ -404,7 +404,7 @@ sources = [
   "crates/eryx-wasm-runtime/src/**/*.rs",
   "crates/eryx-wasm-runtime/clock_stubs.c",
   "crates/eryx-wasm-runtime/Cargo.toml",
-  "crates/eryx-runtime/runtime.wit",
+  "crates/eryx-runtime/wit/**/*.wit",
 ]
 outputs = ["crates/eryx-runtime/runtime.wasm"]
 

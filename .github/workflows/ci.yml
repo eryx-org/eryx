@@ -555,50 +555,12 @@ jobs:
 
       - uses: ./.github/actions/setup-rust
 
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 24
-
-      - name: Install jco
-        run: npm install -g @bytecodealliance/jco@1.16.1
-
-      - name: Extract Python stdlib
-        run: |
-          mkdir -p crates/eryx-wasm-runtime/tests/python-stdlib
-          tar -xf crates/eryx/python-stdlib.tar.zst -C crates/eryx-wasm-runtime/tests/
-
-      - name: Pre-initialize WASM
-        run: |
-          cargo run -p eryx-precompile --release -- \
-            crates/eryx-runtime/runtime.wasm \
-            --preinit \
-            --stdlib crates/eryx-wasm-runtime/tests/python-stdlib \
-            --wasm-only \
-            --output crates/eryx-runtime/runtime-preinit.wasm \
-            --no-verify
-        env:
-          ERYX_PRECOMPILE_BOOTSTRAP: "1"
-
-      - name: Transpile WASM to JS
+      - name: Build JavaScript bindings
         working-directory: js
-        run: |
-          jco transpile \
-            ../crates/eryx-runtime/runtime-preinit.wasm \
-            --name eryx-sandbox \
-            --out-dir eryx-sandbox \
-            --map 'eryx:net/tcp=./shims/net.js#tcp' \
-            --map 'eryx:net/tls=./shims/net.js#tls' \
-            --map 'invoke=./shims/callbacks.js#invoke' \
-            --map 'list-callbacks=./shims/callbacks.js#listCallbacks' \
-            --map 'report-trace=./shims/callbacks.js#reportTrace' \
-            --map 'wasi:sockets/*=./shims/sockets.js#*'
+        run: mise run build
 
       - name: Install demo dependencies
         run: npm ci --prefix js/eryx-sandbox
-
-      - name: Patch JS for jco bugs
-        working-directory: js
-        run: node patch-jco.cjs
 
       - name: Prepare deploy directory
         run: |
