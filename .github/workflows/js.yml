@@ -14,14 +14,31 @@ permissions: {}
 jobs:
   build:
     name: JavaScript bindings
-    runs-on: namespace-profile-eryx-heavy-linux-amd64
+    runs-on: ubuntu-latest
     steps:
-      - uses: namespacelabs/nscloud-checkout-action@v8
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          sudo docker image prune --all --force
+
+      - uses: actions/checkout@v4
+
+      - name: Cache WASM runtime
+        id: wasm-cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            crates/eryx-runtime/runtime.wasm
+          key: wasm-runtime-${{ hashFiles('crates/eryx-wasm-runtime/src/**', 'crates/eryx-wasm-runtime/clock_stubs.c', 'crates/eryx-wasm-runtime/Cargo.toml', 'crates/eryx-runtime/build.rs', 'crates/eryx-runtime/wit/runtime.wit', 'crates/eryx-runtime/libs/*.zst', 'Cargo.lock') }}
+
+      - name: Touch cached WASM
+        if: steps.wasm-cache.outputs.cache-hit == 'true'
+        run: |
+          # Touch runtime.wasm so mise considers wasm-build task current
+          touch crates/eryx-runtime/runtime.wasm
 
       - name: Configure Rust cache
-        uses: namespacelabs/nscloud-cache-action@v1
-        with:
-          cache: rust
+        uses: Swatinem/rust-cache@v2
 
       - uses: ./.github/actions/setup-rust
 
@@ -29,6 +46,7 @@ jobs:
         run: rustup toolchain install nightly --component rust-src
 
       - name: Force rebuild (cache may have stale timestamps)
+        if: steps.wasm-cache.outputs.cache-hit != 'true'
         run: |
           find crates/eryx-wasm-runtime/src -name "*.rs" -exec touch {} +
           find crates/eryx-runtime/wit -name "*.wit" -exec touch {} +

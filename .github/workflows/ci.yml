@@ -18,9 +18,9 @@ jobs:
   # Fast check for dependency drift - runs in parallel with build
   unify-check:
     name: Dependency Check
-    runs-on: namespace-profile-eryx-light
+    runs-on: ubuntu-latest
     steps:
-      - uses: namespacelabs/nscloud-checkout-action@v8
+      - uses: actions/checkout@v4
 
       - uses: ./.github/actions/setup-rust
 
@@ -34,17 +34,53 @@ jobs:
     steps:
       - uses: namespacelabs/nscloud-checkout-action@v8
 
+      - name: Cache WASM runtime artifacts
+        id: wasm-cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            crates/eryx-runtime/runtime.wasm
+            crates/eryx-runtime/runtime.cwasm
+            crates/eryx-runtime/prebuilt/
+            crates/eryx-wasm-runtime/target/liberyx_runtime.so
+          key: wasm-runtime-${{ hashFiles('crates/eryx-wasm-runtime/src/**', 'crates/eryx-wasm-runtime/clock_stubs.c', 'crates/eryx-wasm-runtime/Cargo.toml', 'crates/eryx-runtime/build.rs', 'crates/eryx-runtime/wit/runtime.wit', 'crates/eryx-runtime/libs/*.zst', 'Cargo.lock') }}
+
+      - name: Touch cached artifacts
+        if: steps.wasm-cache.outputs.cache-hit == 'true'
+        run: |
+          # Touch all cached files so mise/make consider them current
+          touch crates/eryx-runtime/runtime.wasm
+          touch crates/eryx-runtime/runtime.cwasm
+          touch crates/eryx-runtime/prebuilt/*
+          touch crates/eryx-wasm-runtime/target/liberyx_runtime.so
+
+      - name: Upload WASM artifacts (cache hit)
+        if: steps.wasm-cache.outputs.cache-hit == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: wasm-runtime
+          path: |
+            crates/eryx-runtime/runtime.wasm
+            crates/eryx-runtime/runtime.cwasm
+            crates/eryx-runtime/prebuilt/
+            crates/eryx-wasm-runtime/target/liberyx_runtime.so
+          retention-days: 1
+
       - name: Configure Rust cache
+        if: steps.wasm-cache.outputs.cache-hit != 'true'
         uses: namespacelabs/nscloud-cache-action@v1
         with:
           cache: rust
 
       - uses: ./.github/actions/setup-rust
+        if: steps.wasm-cache.outputs.cache-hit != 'true'
 
       - name: Install nightly toolchain
+        if: steps.wasm-cache.outputs.cache-hit != 'true'
         run: rustup toolchain install nightly --component rust-src
 
       - name: Force rebuild (cache may have stale timestamps)
+        if: steps.wasm-cache.outputs.cache-hit != 'true'
         run: |
           # Touch ALL sources to ensure mise doesn't skip build due to cached timestamps
           # The Rust cache may restore .rlib files with newer timestamps than sources
@@ -55,9 +91,11 @@ jobs:
           rm -f crates/eryx-runtime/runtime.wasm crates/eryx-runtime/runtime.cwasm
 
       - name: Build eryx-runtime
+        if: steps.wasm-cache.outputs.cache-hit != 'true'
         run: mise run build-eryx-runtime
 
       - name: Copy prebuilt late-linking artifacts
+        if: steps.wasm-cache.outputs.cache-hit != 'true'
         run: |
           # Find the OUT_DIR that actually contains the built artifacts
           # (not just any OUT_DIR - the preinit build creates a new one without .so files)
@@ -73,9 +111,11 @@ jobs:
           ls -la crates/eryx-wasm-runtime/target/
 
       - name: Set up python-stdlib for preinit
+        if: steps.wasm-cache.outputs.cache-hit != 'true'
         run: mise run setup-eryx-runtime-tests
 
       - name: Precompile WASM with preinit
+        if: steps.wasm-cache.outputs.cache-hit != 'true'
         run: |
           # Use preinit feature for faster sandbox instantiation in downstream jobs
           # (pre-initializes Python interpreter in the snapshot)
@@ -83,8 +123,9 @@ jobs:
         env:
           ERYX_PRECOMPILE_BOOTSTRAP: "1"
 
-      - name: Upload WASM artifacts
-        uses: namespace-actions/upload-artifact@v1
+      - name: Upload WASM artifacts (cache miss)
+        if: steps.wasm-cache.outputs.cache-hit != 'true'
+        uses: actions/upload-artifact@v4
         with:
           name: wasm-runtime
           path: |
@@ -96,13 +137,13 @@ jobs:
 
   lint:
     name: Lint
-    runs-on: namespace-profile-eryx-standard
+    runs-on: ubuntu-latest
     needs: build-eryx-runtime
     steps:
-      - uses: namespacelabs/nscloud-checkout-action@v8
+      - uses: actions/checkout@v4
 
       - name: Download WASM artifacts
-        uses: namespace-actions/download-artifact@v1
+        uses: actions/download-artifact@v4
         with:
           name: wasm-runtime
           path: crates/
@@ -110,9 +151,7 @@ jobs:
       - uses: ./.github/actions/mark-wasm-current
 
       - name: Configure Rust cache
-        uses: namespacelabs/nscloud-cache-action@v1
-        with:
-          cache: rust
+        uses: Swatinem/rust-cache@v2
 
       - uses: ./.github/actions/setup-rust
 
@@ -131,7 +170,7 @@ jobs:
       - uses: namespacelabs/nscloud-checkout-action@v8
 
       - name: Download WASM artifacts
-        uses: namespace-actions/download-artifact@v1
+        uses: actions/download-artifact@v4
         with:
           name: wasm-runtime
           path: crates/
@@ -179,14 +218,12 @@ jobs:
 
   msrv:
     name: MSRV
-    runs-on: namespace-profile-eryx-light
+    runs-on: ubuntu-latest
     steps:
-      - uses: namespacelabs/nscloud-checkout-action@v8
+      - uses: actions/checkout@v4
 
       - name: Configure Rust cache
-        uses: namespacelabs/nscloud-cache-action@v1
-        with:
-          cache: rust
+        uses: Swatinem/rust-cache@v2
 
       - name: Install mise
         uses: jdx/mise-action@v3
@@ -202,13 +239,13 @@ jobs:
 
   doc:
     name: Documentation
-    runs-on: namespace-profile-eryx-standard
+    runs-on: ubuntu-latest
     needs: build-eryx-runtime
     steps:
-      - uses: namespacelabs/nscloud-checkout-action@v8
+      - uses: actions/checkout@v4
 
       - name: Download WASM artifacts
-        uses: namespace-actions/download-artifact@v1
+        uses: actions/download-artifact@v4
         with:
           name: wasm-runtime
           path: crates/
@@ -216,9 +253,7 @@ jobs:
       - uses: ./.github/actions/mark-wasm-current
 
       - name: Configure Rust cache
-        uses: namespacelabs/nscloud-cache-action@v1
-        with:
-          cache: rust
+        uses: Swatinem/rust-cache@v2
 
       - uses: ./.github/actions/setup-rust
 
@@ -231,13 +266,13 @@ jobs:
   # Check that all feature combinations compile
   check-features:
     name: Check Feature Combinations
-    runs-on: namespace-profile-eryx-standard
+    runs-on: ubuntu-latest
     needs: build-eryx-runtime
     steps:
-      - uses: namespacelabs/nscloud-checkout-action@v8
+      - uses: actions/checkout@v4
 
       - name: Download WASM artifacts
-        uses: namespace-actions/download-artifact@v1
+        uses: actions/download-artifact@v4
         with:
           name: wasm-runtime
           path: crates/
@@ -245,9 +280,7 @@ jobs:
       - uses: ./.github/actions/mark-wasm-current
 
       - name: Configure Rust cache
-        uses: namespacelabs/nscloud-cache-action@v1
-        with:
-          cache: rust
+        uses: Swatinem/rust-cache@v2
 
       - uses: ./.github/actions/setup-rust
 
@@ -268,13 +301,13 @@ jobs:
   # Run examples to ensure they don't bitrot
   examples:
     name: Examples
-    runs-on: namespace-profile-eryx-standard
+    runs-on: ubuntu-latest
     needs: build-eryx-runtime
     steps:
-      - uses: namespacelabs/nscloud-checkout-action@v8
+      - uses: actions/checkout@v4
 
       - name: Download WASM artifacts
-        uses: namespace-actions/download-artifact@v1
+        uses: actions/download-artifact@v4
         with:
           name: wasm-runtime
           path: crates/
@@ -282,9 +315,7 @@ jobs:
       - uses: ./.github/actions/mark-wasm-current
 
       - name: Configure Rust cache
-        uses: namespacelabs/nscloud-cache-action@v1
-        with:
-          cache: rust
+        uses: Swatinem/rust-cache@v2
 
       - uses: ./.github/actions/setup-rust
 
@@ -316,13 +347,13 @@ jobs:
   # Test Python bindings
   python-bindings:
     name: Python Bindings
-    runs-on: namespace-profile-eryx-standard
+    runs-on: ubuntu-latest
     needs: build-eryx-runtime
     steps:
-      - uses: namespacelabs/nscloud-checkout-action@v8
+      - uses: actions/checkout@v4
 
       - name: Download WASM artifacts
-        uses: namespace-actions/download-artifact@v1
+        uses: actions/download-artifact@v4
         with:
           name: wasm-runtime
           path: crates/
@@ -330,9 +361,7 @@ jobs:
       - uses: ./.github/actions/mark-wasm-current
 
       - name: Configure Rust cache
-        uses: namespacelabs/nscloud-cache-action@v1
-        with:
-          cache: rust
+        uses: Swatinem/rust-cache@v2
 
       - uses: ./.github/actions/setup-rust
 
@@ -372,13 +401,18 @@ jobs:
   # Test book examples
   book-tests:
     name: Book Tests
-    runs-on: namespace-profile-eryx-standard
+    runs-on: ubuntu-latest
     needs: build-eryx-runtime
     steps:
-      - uses: namespacelabs/nscloud-checkout-action@v8
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          sudo docker image prune --all --force
+
+      - uses: actions/checkout@v4
 
       - name: Download WASM artifacts
-        uses: namespace-actions/download-artifact@v1
+        uses: actions/download-artifact@v4
         with:
           name: wasm-runtime
           path: crates/
@@ -386,9 +420,7 @@ jobs:
       - uses: ./.github/actions/mark-wasm-current
 
       - name: Configure Rust cache
-        uses: namespacelabs/nscloud-cache-action@v1
-        with:
-          cache: rust
+        uses: Swatinem/rust-cache@v2
 
       - uses: ./.github/actions/setup-rust
 
@@ -499,16 +531,16 @@ jobs:
   # Deploy browser demo to Cloudflare Pages (only on main)
   deploy-demo:
     name: Deploy Demo
-    runs-on: namespace-profile-eryx-standard
+    runs-on: ubuntu-latest
     needs: build-eryx-runtime
     if: github.ref == 'refs/heads/main'
     permissions:
       contents: write
     steps:
-      - uses: namespacelabs/nscloud-checkout-action@v8
+      - uses: actions/checkout@v4
 
       - name: Download WASM artifacts
-        uses: namespace-actions/download-artifact@v1
+        uses: actions/download-artifact@v4
         with:
           name: wasm-runtime
           path: crates/
@@ -516,9 +548,7 @@ jobs:
       - uses: ./.github/actions/mark-wasm-current
 
       - name: Configure Rust cache
-        uses: namespacelabs/nscloud-cache-action@v1
-        with:
-          cache: rust
+        uses: Swatinem/rust-cache@v2
 
       - uses: ./.github/actions/setup-rust
 
