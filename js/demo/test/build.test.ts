@@ -21,18 +21,17 @@ describe("demo build", () => {
     expect(assets.some((f: string) => f.endsWith(".wasm"))).toBe(true);
     expect(assets.some((f: string) => f.includes(".gz"))).toBe(true);
 
-    // Verify WASM files are brotli-compressed (brotli magic: 0xce 0xb2 0xcf 0x81)
-    // Brotli doesn't have a fixed magic number, but compressed output won't
-    // start with the WASM magic (\0asm = 0x00 0x61 0x73 0x6d)
+    // Verify WASM files are brotli-compressed (won't start with WASM magic \0asm)
     const wasmFiles = assets.filter((f: string) => f.endsWith(".wasm"));
     for (const wf of wasmFiles) {
       const bytes = readFileSync(resolve(distDir, "assets", wf));
       expect(bytes[0]).not.toBe(0x00); // not raw WASM
     }
 
-    // Verify _headers file exists for Cloudflare Pages
+    // Verify _headers file sets Content-Encoding and no-transform
     const headers = readFileSync(resolve(distDir, "_headers"), "utf-8");
     expect(headers).toContain("Content-Encoding: br");
+    expect(headers).toContain("no-transform");
   });
 
   it("serves .tar.gz without Content-Encoding in preview mode", async () => {
