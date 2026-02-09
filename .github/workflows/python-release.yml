@@ -126,7 +126,7 @@ jobs:
       - name: Mark cwasm as up-to-date
         run: touch crates/eryx-runtime/runtime.cwasm
 
-      - uses: actions/setup-python@v5
+      - uses: astral-sh/setup-uv@v4
         with:
           python-version: "3.12"
 
@@ -145,9 +145,10 @@ jobs:
 
       - name: Test wheel
         run: |
-          python -m pip install pytest
-          python -m pip install dist/*.whl --force-reinstall
-          cd crates/eryx-python && pytest tests/ -v
+          uv venv
+          uv pip install dist/*.whl --force-reinstall
+          uv pip install -e 'crates/eryx-python[dev]'
+          .venv/bin/pytest crates/eryx-python/tests/ -v
 
   # Build wheels for Linux aarch64 (native ARM build with precompile)
   linux-aarch64:
@@ -197,7 +198,7 @@ jobs:
       - name: Mark cwasm as up-to-date
         run: touch crates/eryx-runtime/runtime.cwasm
 
-      - uses: actions/setup-python@v5
+      - uses: astral-sh/setup-uv@v4
         with:
           python-version: "3.12"
 
@@ -216,9 +217,10 @@ jobs:
 
       - name: Test wheel
         run: |
-          python -m pip install pytest
-          python -m pip install dist/*.whl --force-reinstall
-          cd crates/eryx-python && pytest tests/ -v
+          uv venv
+          uv pip install dist/*.whl --force-reinstall
+          uv pip install -e 'crates/eryx-python[dev]'
+          .venv/bin/pytest crates/eryx-python/tests/ -v
 
   # Build wheels for macOS ARM (native build with precompile)
   macos-aarch64:
@@ -293,8 +295,8 @@ jobs:
       - name: Test wheel
         run: |
           uv venv
-          uv pip install pytest
           uv pip install dist/*.whl --force-reinstall
+          uv pip install -e 'crates/eryx-python[dev]'
           .venv/bin/pytest crates/eryx-python/tests/ -v
 
   # Build wheels for macOS Intel (GitHub runner)
@@ -370,8 +372,8 @@ jobs:
       - name: Test wheel
         run: |
           uv venv
-          uv pip install pytest
           uv pip install dist/*.whl --force-reinstall
+          uv pip install -e 'crates/eryx-python[dev]'
           .venv/bin/pytest crates/eryx-python/tests/ -v
 
   # Build wheels for Windows
@@ -430,10 +432,9 @@ jobs:
         shell: bash
         run: touch crates/eryx-runtime/runtime.cwasm
 
-      - uses: actions/setup-python@v5
+      - uses: astral-sh/setup-uv@v4
         with:
           python-version: "3.12"
-          architecture: ${{ matrix.target }}
 
       - name: Build wheels
         uses: PyO3/maturin-action@v1
@@ -450,9 +451,10 @@ jobs:
       - name: Test wheel
         shell: bash
         run: |
-          python -m pip install pytest
-          python -m pip install dist/*.whl --force-reinstall
-          cd crates/eryx-python && pytest tests/ -v
+          uv venv
+          uv pip install dist/*.whl --force-reinstall
+          uv pip install -e 'crates/eryx-python[dev]'
+          .venv/Scripts/pytest crates/eryx-python/tests/ -v
 
   # Build source distribution
   sdist:
