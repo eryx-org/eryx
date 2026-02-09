@@ -6,25 +6,28 @@
 //! # Examples
 //!
 //! ```bash
+//! # One-time setup for crates.io users (downloads + compiles for your platform)
+//! eryx-precompile setup
+//!
 //! # Pre-init + compile for Fly.io (x86-64-v3, no AVX-512)
-//! eryx-precompile runtime.wasm -o runtime.cwasm --preinit --stdlib ./python-stdlib --target x86-64-v3
+//! eryx-precompile compile runtime.wasm -o runtime.cwasm --preinit --stdlib ./python-stdlib --target x86-64-v3
 //!
 //! # Pre-init only (output pre-initialized .wasm for later compilation)
-//! eryx-precompile runtime.wasm -o runtime-preinit.wasm --preinit --stdlib ./python-stdlib --wasm-only
+//! eryx-precompile compile runtime.wasm -o runtime-preinit.wasm --preinit --stdlib ./python-stdlib --wasm-only
 //!
 //! # AOT compile only (no pre-init, for already pre-initialized .wasm)
-//! eryx-precompile runtime-preinit.wasm -o runtime.cwasm --target x86-64-v3
+//! eryx-precompile compile runtime-preinit.wasm -o runtime.cwasm --target x86-64-v3
 //!
 //! # Pre-init with packages (wheels, tar.gz, or directories)
-//! eryx-precompile runtime.wasm -o runtime-numpy.cwasm --preinit --stdlib ./python-stdlib \
+//! eryx-precompile compile runtime.wasm -o runtime-numpy.cwasm --preinit --stdlib ./python-stdlib \
 //!   --package numpy-2.2.3-wasi.tar.gz --import numpy
 //!
 //! # Pre-init with site-packages directory
-//! eryx-precompile runtime.wasm -o runtime.cwasm --preinit --stdlib ./python-stdlib \
+//! eryx-precompile compile runtime.wasm -o runtime.cwasm --preinit --stdlib ./python-stdlib \
 //!   --site-packages ./my-site-packages --import jinja2
 //!
 //! # Verify packages work (not just import)
-//! eryx-precompile runtime.wasm -o numpy.cwasm --preinit --stdlib ./python-stdlib \
+//! eryx-precompile compile runtime.wasm -o numpy.cwasm --preinit --stdlib ./python-stdlib \
 //!   --package numpy-wasi.tar.gz --import numpy \
 //!   --verify-code "import numpy; print(numpy.array(\[1,2,3\]).sum())"
 //! ```
@@ -33,14 +36,51 @@ use std::path::PathBuf;
 use std::time::Instant;
 
 use anyhow::{Context, Result};
-use clap::Parser;
+use clap::{Parser, Subcommand};
 use eryx::{CpuFeatureLevel, Session}; // For execute() method and CPU features
 
 /// Pre-compile eryx WASM runtimes for fast sandbox creation.
 #[derive(Parser, Debug)]
 #[command(name = "eryx-precompile")]
 #[command(version, about, long_about = None)]
-struct Args {
+struct Cli {
+    #[command(subcommand)]
+    command: Command,
+}
+
+#[derive(Subcommand, Debug)]
+enum Command {
+    /// Download and pre-compile the WASM runtime for your platform.
+    ///
+    /// Downloads runtime.wasm from the matching GitHub Release, pre-compiles it
+    /// to native code, and caches it in ~/.cache/eryx/ so that `cargo build`
+    /// with `features = ["embedded"]` finds it automatically.
+    ///
+    /// For cross-compilation, custom CPU targets, or pre-initialization with
+    /// packages, use the `compile` subcommand instead.
+    Setup(SetupArgs),
+
+    /// Pre-compile a WASM file to native code (advanced).
+    ///
+    /// For direct control over pre-initialization and AOT compilation.
+    Compile(CompileArgs),
+}
+
+#[derive(Parser, Debug)]
+struct SetupArgs {
+    /// Version to download (default: version of this binary)
+    ///
+    /// Must match an existing GitHub Release with a runtime.wasm asset.
+    #[arg(long)]
+    version: Option<String>,
+
+    /// Verbose output
+    #[arg(short, long)]
+    verbose: bool,
+}
+
+#[derive(Parser, Debug)]
+struct CompileArgs {
     /// Input WASM file (.wasm or pre-initialized .wasm)
     #[arg(required = true)]
     input: PathBuf,
@@ -122,8 +162,164 @@ struct Args {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let args = Args::parse();
+    let cli = Cli::parse();
 
+    match cli.command {
+        Command::Setup(args) => run_setup(args).await,
+        Command::Compile(args) => run_compile(args).await,
+    }
+}
+
+/// Determine the cache directory for eryx runtime artifacts.
+fn cache_dir() -> Result<PathBuf> {
+    let dir = if let Ok(xdg) = std::env::var("XDG_CACHE_HOME") {
+        PathBuf::from(xdg).join("eryx")
+    } else {
+        let home = std::env::var("HOME")
+            .or_else(|_| std::env::var("USERPROFILE"))
+            .context("Could not determine home directory (set HOME or XDG_CACHE_HOME)")?;
+        PathBuf::from(home).join(".cache").join("eryx")
+    };
+    Ok(dir)
+}
+
+/// Build a short platform target string like "x86_64-linux" or "aarch64-macos".
+fn platform_target() -> String {
+    let arch = std::env::consts::ARCH; // "x86_64", "aarch64", etc.
+    let os = std::env::consts::OS; // "linux", "macos", "windows"
+    format!("{arch}-{os}")
+}
+
+/// Try to download runtime.wasm from a GitHub Release.
+///
+/// Tries multiple tag patterns since the naming convention has changed over time:
+/// - `v{version}` (cargo-dist releases, used for v0.3.0 and earlier)
+/// - `eryx-v{version}` (release-plz releases, used from v0.4.0+)
+async fn download_runtime_wasm(client: &reqwest::Client, version: &str) -> Result<Vec<u8>> {
+    let tag_patterns = [format!("v{version}"), format!("eryx-v{version}")];
+
+    let mut last_error = None;
+    for tag in &tag_patterns {
+        let url = format!("https://github.com/eryx-org/eryx/releases/download/{tag}/runtime.wasm");
+        println!("  Trying {url}");
+
+        match client.get(&url).send().await {
+            Ok(resp) if resp.status().is_success() => {
+                println!("  Found runtime.wasm in release {tag}");
+                let bytes = resp
+                    .bytes()
+                    .await
+                    .context("Failed to download runtime.wasm body")?;
+                return Ok(bytes.to_vec());
+            }
+            Ok(resp) => {
+                last_error = Some(anyhow::anyhow!("GET {url} returned HTTP {}", resp.status()));
+            }
+            Err(e) => {
+                last_error = Some(e.into());
+            }
+        }
+    }
+
+    Err(last_error.unwrap_or_else(|| anyhow::anyhow!("No tag patterns to try"))).context(format!(
+        "Could not find runtime.wasm in any GitHub Release for version {version}.\n\
+             Tried tags: {}.\n\
+             Check https://github.com/eryx-org/eryx/releases for available versions.",
+        tag_patterns.join(", ")
+    ))
+}
+
+async fn run_setup(args: SetupArgs) -> Result<()> {
+    let filter = if args.verbose {
+        "eryx=debug,eryx_precompile=debug"
+    } else {
+        "eryx=warn,eryx_precompile=info"
+    };
+    tracing_subscriber::fmt()
+        .with_env_filter(filter)
+        .with_target(false)
+        .init();
+
+    let version = args
+        .version
+        .unwrap_or_else(|| env!("CARGO_PKG_VERSION").to_string());
+    let target = platform_target();
+    let cache = cache_dir()?;
+    let cwasm_name = format!("runtime-v{version}-{target}.cwasm");
+    let cwasm_path = cache.join(&cwasm_name);
+
+    println!("eryx-precompile setup");
+    println!("=====================");
+    println!();
+    println!("Version:  {version}");
+    println!("Platform: {target}");
+    println!("Cache:    {}", cache.display());
+    println!();
+
+    // Check if already cached
+    if cwasm_path.exists() {
+        println!("Already cached: {}", cwasm_path.display());
+        println!();
+        println!(
+            "To force re-download, delete the file and run again:\n  rm {}",
+            cwasm_path.display()
+        );
+        return Ok(());
+    }
+
+    // Step 1: Download runtime.wasm
+    println!("Step 1: Downloading runtime.wasm from GitHub Release...");
+    let client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::limited(10))
+        .user_agent(format!("eryx-precompile/{version}"))
+        .build()
+        .context("Failed to create HTTP client")?;
+
+    let wasm_bytes = download_runtime_wasm(&client, &version).await?;
+
+    println!(
+        "  Downloaded {} bytes ({:.1} MB)",
+        wasm_bytes.len(),
+        wasm_bytes.len() as f64 / 1_000_000.0
+    );
+
+    // Step 2: Pre-compile to native code
+    println!();
+    println!("Step 2: Pre-compiling to native code (this may take a minute)...");
+    let start = Instant::now();
+
+    let precompiled = eryx::PythonExecutor::precompile(&wasm_bytes)
+        .context("Failed to pre-compile runtime.wasm to native code")?;
+
+    let elapsed = start.elapsed();
+    println!(
+        "  Done in {elapsed:?} ({} bytes, {:.1} MB)",
+        precompiled.len(),
+        precompiled.len() as f64 / 1_000_000.0
+    );
+
+    // Step 3: Write to cache
+    println!();
+    println!("Step 3: Writing to cache...");
+    std::fs::create_dir_all(&cache)
+        .with_context(|| format!("Failed to create cache directory: {}", cache.display()))?;
+    std::fs::write(&cwasm_path, &precompiled)
+        .with_context(|| format!("Failed to write {}", cwasm_path.display()))?;
+    println!("  Saved to: {}", cwasm_path.display());
+
+    println!();
+    println!(
+        "Setup complete! `cargo build` with `features = [\"embedded\"]` will now find the cached runtime."
+    );
+    println!();
+    println!(
+        "Tip: for cross-compilation or custom CPU targets, use `eryx-precompile compile` instead."
+    );
+
+    Ok(())
+}
+
+async fn run_compile(args: CompileArgs) -> Result<()> {
     // Set up tracing
     let filter = if args.verbose {
         "eryx=debug,eryx_precompile=debug"

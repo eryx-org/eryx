@@ -434,7 +434,7 @@ env = { ERYX_PRECOMPILE_BOOTSTRAP = "1" }
 run = """
 # Use ERYX_CPU_FEATURES for portable builds (default: native)
 TARGET="${ERYX_CPU_FEATURES:-native}"
-cargo run -p eryx-precompile --release -- \
+cargo run -p eryx-precompile --release -- compile \
   crates/eryx-runtime/runtime.wasm \
   --target "$TARGET" \
   --output crates/eryx-runtime/runtime-no-preinit.cwasm \
@@ -451,7 +451,7 @@ run = """
 # Use ERYX_CPU_FEATURES for portable builds (default: native)
 # For Fly.io, set ERYX_CPU_FEATURES=x86-64-v3 (no AVX-512)
 TARGET="${ERYX_CPU_FEATURES:-native}"
-cargo run -p eryx-precompile --release -- \
+cargo run -p eryx-precompile --release -- compile \
   crates/eryx-runtime/runtime.wasm \
   --preinit \
   --stdlib crates/eryx-wasm-runtime/tests/python-stdlib \
