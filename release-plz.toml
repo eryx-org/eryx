@@ -10,17 +10,6 @@ git_tag_enable = true
 # Create GitHub releases
 git_release_enable = true
 
-# eryx-macros has a circular dev-dependency on eryx, so cargo publish
-# verification fails until eryx is published first.
-[[package]]
-name = "eryx-macros"
-publish_no_verify = true
-
-# eryx uses a relative path to WIT files that don't exist in the packaged tarball.
-[[package]]
-name = "eryx"
-publish_no_verify = true
-
 [changelog]
 body = """
 
