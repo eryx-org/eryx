@@ -4,6 +4,15 @@ on:
   push:
     branches: ["main"]
   pull_request:
+    paths:
+      - 'crates/eryx-core/**'
+      - 'crates/eryx/**'
+      - 'crates/eryx-wasm-runtime/**'
+      - 'crates/eryx-runtime/**'
+      - 'js/**'
+      - 'Cargo.lock'
+      - 'Cargo.toml'
+      - '.github/workflows/js.yml'
 
 env:
   CARGO_TERM_COLOR: always

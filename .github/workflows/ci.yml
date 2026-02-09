@@ -15,10 +15,56 @@ env:
   RUST_BACKTRACE: 1
 
 jobs:
+  # Detect which paths changed to skip unnecessary jobs.
+  # Each downstream job has an explicit 'github.event_name == push' override
+  # so that all jobs always run on pushes to main.
+  changes:
+    name: Detect Changes
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: read
+    outputs:
+      core: ${{ steps.filter.outputs.core }}
+      python: ${{ steps.filter.outputs.python }}
+      book: ${{ steps.filter.outputs.book }}
+      examples: ${{ steps.filter.outputs.examples }}
+      js: ${{ steps.filter.outputs.js }}
+      demo: ${{ steps.filter.outputs.demo }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            core:
+              - 'crates/eryx-core/**'
+              - 'crates/eryx/**'
+              - 'crates/eryx-wasm-runtime/**'
+              - 'crates/eryx-runtime/**'
+              - 'crates/eryx-precompile/**'
+              - 'Cargo.lock'
+              - 'Cargo.toml'
+              - '.github/workflows/ci.yml'
+              - '.github/actions/**'
+            python:
+              - 'crates/eryx-python/**'
+            book:
+              - 'book/**'
+            examples:
+              - 'examples/**'
+            js:
+              - 'js/**'
+            demo:
+              - 'demo/**'
+
   # Fast check for dependency drift - runs in parallel with build
   unify-check:
     name: Dependency Check
     runs-on: ubuntu-latest
+    needs: changes
+    if: >-
+      github.event_name == 'push'
+      || needs.changes.outputs.core == 'true'
     steps:
       - uses: actions/checkout@v4
 
@@ -27,10 +73,20 @@ jobs:
       - name: Check dependency unification
         run: cargo rail unify --check
 
-  # Build eryx-wasm-runtime and precompile it - other jobs depend on this
+  # Build eryx-wasm-runtime and precompile it - other jobs depend on this.
+  # Runs when core paths change, or when any downstream job needs WASM artifacts.
   build-eryx-runtime:
     name: Build eryx-runtime
     runs-on: namespace-profile-eryx-heavy-linux-amd64
+    needs: changes
+    if: >-
+      github.event_name == 'push'
+      || needs.changes.outputs.core == 'true'
+      || needs.changes.outputs.python == 'true'
+      || needs.changes.outputs.book == 'true'
+      || needs.changes.outputs.examples == 'true'
+      || needs.changes.outputs.js == 'true'
+      || needs.changes.outputs.demo == 'true'
     steps:
       - uses: namespacelabs/nscloud-checkout-action@v8
 
@@ -141,7 +197,10 @@ jobs:
   lint:
     name: Lint
     runs-on: ubuntu-latest
-    needs: build-eryx-runtime
+    needs: [changes, build-eryx-runtime]
+    if: >-
+      github.event_name == 'push'
+      || needs.changes.outputs.core == 'true'
     steps:
       - uses: actions/checkout@v4
 
@@ -168,7 +227,10 @@ jobs:
   test:
     name: Test
     runs-on: namespace-profile-eryx-heavy-linux-amd64
-    needs: build-eryx-runtime
+    needs: [changes, build-eryx-runtime]
+    if: >-
+      github.event_name == 'push'
+      || needs.changes.outputs.core == 'true'
     steps:
       - uses: namespacelabs/nscloud-checkout-action@v8
 
@@ -222,6 +284,10 @@ jobs:
   msrv:
     name: MSRV
     runs-on: ubuntu-latest
+    needs: changes
+    if: >-
+      github.event_name == 'push'
+      || needs.changes.outputs.core == 'true'
     steps:
       - uses: actions/checkout@v4
 
@@ -243,7 +309,10 @@ jobs:
   doc:
     name: Documentation
     runs-on: ubuntu-latest
-    needs: build-eryx-runtime
+    needs: [changes, build-eryx-runtime]
+    if: >-
+      github.event_name == 'push'
+      || needs.changes.outputs.core == 'true'
     steps:
       - uses: actions/checkout@v4
 
@@ -270,7 +339,10 @@ jobs:
   check-features:
     name: Check Feature Combinations
     runs-on: ubuntu-latest
-    needs: build-eryx-runtime
+    needs: [changes, build-eryx-runtime]
+    if: >-
+      github.event_name == 'push'
+      || needs.changes.outputs.core == 'true'
     steps:
       - uses: actions/checkout@v4
 
@@ -305,7 +377,11 @@ jobs:
   examples:
     name: Examples
     runs-on: ubuntu-latest
-    needs: build-eryx-runtime
+    needs: [changes, build-eryx-runtime]
+    if: >-
+      github.event_name == 'push'
+      || needs.changes.outputs.core == 'true'
+      || needs.changes.outputs.examples == 'true'
     steps:
       - uses: actions/checkout@v4
 
@@ -351,7 +427,11 @@ jobs:
   python-bindings:
     name: Python Bindings
     runs-on: ubuntu-latest
-    needs: build-eryx-runtime
+    needs: [changes, build-eryx-runtime]
+    if: >-
+      github.event_name == 'push'
+      || needs.changes.outputs.core == 'true'
+      || needs.changes.outputs.python == 'true'
     steps:
       - uses: actions/checkout@v4
 
@@ -405,7 +485,12 @@ jobs:
   book-tests:
     name: Book Tests
     runs-on: ubuntu-latest
-    needs: build-eryx-runtime
+    needs: [changes, build-eryx-runtime]
+    if: >-
+      github.event_name == 'push'
+      || needs.changes.outputs.core == 'true'
+      || needs.changes.outputs.book == 'true'
+      || needs.changes.outputs.python == 'true'
     steps:
       - name: Free disk space
         run: |
@@ -537,8 +622,13 @@ jobs:
   deploy-demo:
     name: Deploy Demo
     runs-on: ubuntu-latest
-    needs: build-eryx-runtime
-    if: github.event.pull_request.head.repo.fork != true
+    needs: [changes, build-eryx-runtime]
+    if: >-
+      github.event.pull_request.head.repo.fork != true
+      && (github.event_name == 'push'
+      || needs.changes.outputs.core == 'true'
+      || needs.changes.outputs.js == 'true'
+      || needs.changes.outputs.demo == 'true')
     permissions:
       contents: read
       deployments: write
