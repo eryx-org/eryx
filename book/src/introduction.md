@@ -2,7 +2,7 @@
 
 **Eryx** is a library for running Python code in a WebAssembly sandbox. It's designed for AI agents and applications that need to execute untrusted Python safely, with fine-grained control over what the code can access.
 
-> **eryx** (noun): A genus of sand boas (Erycinae) — non-venomous snakes that live *in* sand.
+> **eryx** (noun): A genus of sand boas (Erycinae) — non-venomous snakes that live _in_ sand.
 > Perfect for "Python running inside a sandbox."
 
 ## Try It Now
@@ -45,7 +45,7 @@ Or try it in the browser at [demo.eryx.run](https://demo.eryx.run).
 
 ### Multi-language support
 
-- **Rust, Python, and JavaScript** — First-class bindings for all three, plus a CLI for quick scripting
+- **Rust, Python, and JavaScript** — First-class bindings for all three
 - **CLI** — Run sandboxed Python from the terminal with `python -m eryx` or `uvx --with pyeryx eryx`
 
 ## Use Cases
