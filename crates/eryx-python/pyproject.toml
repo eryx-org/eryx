@@ -30,7 +30,7 @@ classifiers = [
 eryx = "eryx.__main__:main"
 
 [project.optional-dependencies]
-dev = ["pytest", "pytest-asyncio", "mypy", "requests", "httpx"]
+dev = ["pytest", "pytest-asyncio", "mypy", "requests", "httpx", "mcp>=1.0"]
 serve = ["mcp>=1.0"]
 
 [tool.maturin]
