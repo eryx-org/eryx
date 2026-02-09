@@ -35,6 +35,17 @@ Use sessions when you need stateful, interactive Python execution.
 
 Callbacks are the primary way sandboxed code interacts with the outside world.
 
+## MCP Integration
+
+**MCP (Model Context Protocol)** tools can be bridged into the sandbox as callbacks:
+
+- Automatically discovers MCP servers from IDE configs (Claude Code, Cursor, VS Code, Zed, Windsurf, Codex, Gemini)
+- Exposes tools as async functions under `mcp.<server>.<tool>` namespaces
+- The entire call path is handled in Rust for performance
+- Only stdio-type servers are supported
+
+MCP integration lets sandboxed code access external tool servers without any custom callback code.
+
 ## Resource Limits
 
 **Resource Limits** control what sandboxed code can do:
@@ -157,6 +168,7 @@ This makes Eryx suitable for running untrusted Python code.
 
 - [Sandboxes Guide](../guide/sandboxes.md) - Detailed sandbox configuration
 - [Callbacks Guide](../guide/callbacks.md) - Implementing callbacks
+- [MCP Integration](../guide/mcp.md) - Connecting MCP tool servers
 - [Sessions Guide](../guide/sessions.md) - Working with sessions
 - [Resource Limits](../guide/resource-limits.md) - Configuring limits
 - [Secrets Guide](../guide/secrets.md) - Secure secrets management

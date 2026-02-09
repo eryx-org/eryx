@@ -19,6 +19,7 @@
 - [Packages](./guide/packages.md)
 - [Secrets](./guide/secrets.md)
 - [Output Streaming](./guide/output-streaming.md)
+- [MCP Integration](./guide/mcp.md)
 - [CLI](./guide/cli.md)
 
 # API Reference

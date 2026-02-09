@@ -362,6 +362,12 @@ sandbox = eryx.Sandbox(
 
 <!-- langtabs-end -->
 
+## MCP Tools as Callbacks
+
+Eryx can also bridge [MCP (Model Context Protocol)](https://modelcontextprotocol.io/) servers into the sandbox as callbacks. This lets sandboxed code call tools from external MCP servers (GitHub, filesystem, databases, etc.) using the same async callback mechanism.
+
+See [MCP Integration](./mcp.md) for details.
+
 ## Best Practices
 
 1. **Keep callbacks focused** - Each callback should do one thing well
