@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## `eryx` - [0.4.1](https://github.com/eryx-org/eryx/compare/eryx-v0.4.0...eryx-v0.4.1) - 2026-02-09
+
+### Other
+- add publish_no_verify for eryx-macros and eryx ([#107](https://github.com/eryx-org/eryx/pull/107))
+
+## `eryx-macros` - [0.4.1](https://github.com/eryx-org/eryx/compare/eryx-macros-v0.4.0...eryx-macros-v0.4.1) - 2026-02-09
+
+### Other
+- add publish_no_verify for eryx-macros and eryx ([#107](https://github.com/eryx-org/eryx/pull/107))
+
 ## `eryx-vfs` - [0.4.0](https://github.com/eryx-org/eryx/releases/tag/eryx-vfs-v0.4.0) - 2026-02-09
 
 ### Added
