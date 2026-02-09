@@ -11,6 +11,8 @@
 uvx --with pyeryx eryx -c 'import sys; print(f"Python {sys.version} in a sandbox!")'
 ```
 
+Or try it in the browser at [demo.eryx.run](https://demo.eryx.run).
+
 ## Features
 
 ### Secure by default

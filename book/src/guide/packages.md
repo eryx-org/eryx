@@ -6,10 +6,10 @@ Eryx supports installing Python packages in sandboxes. This allows sandboxed cod
 
 Eryx supports two package formats:
 
-| Format | Extension | Description |
-|--------|-----------|-------------|
-| Wheel | `.whl` | Standard Python wheel format (recommended) |
-| Tar.gz | `.tar.gz`, `.tgz` | Compressed archive format |
+| Format | Extension         | Description                                |
+| ------ | ----------------- | ------------------------------------------ |
+| Wheel  | `.whl`            | Standard Python wheel format (recommended) |
+| Tar.gz | `.tar.gz`, `.tgz` | Compressed archive format                  |
 
 ## Adding Packages with SandboxFactory
 
@@ -106,7 +106,9 @@ Pure Python packages (no native extensions) work out of the box:
 Some packages with native extensions have WASI-compiled versions available:
 
 - Check [pypi.org](https://pypi.org) for wheels with `wasi` in the platform tag
-- The [pywasm](https://github.com/nickmqb/pywasm) project provides some pre-built packages
+- Multiple `wasi-wheels` repositories exist, including:
+  - [dicej/wasi-wheels](https://github.com/dicej/wasi-wheels/)
+  - [benbrandt/wasi-wheels](https://github.com/benbrandt/wasi-wheels/) (see also [this PR](https://github.com/benbrandt/wasi-wheels/pull/272) for an example of adding a new wheel)]
 
 ### Native Extensions
 
@@ -157,60 +159,6 @@ except ValueError as e:
 ## Caching Compiled Components
 
 Eryx caches compiled WebAssembly components to speed up repeated sandbox creation:
-
-### Filesystem Cache (Rust)
-
-```rust,ignore
-# extern crate eryx;
-# extern crate tokio;
-use eryx::Sandbox;
-use std::path::PathBuf;
-
-#[tokio::main]
-async fn main() -> Result<(), eryx::Error> {
-    let cache_dir = PathBuf::from("/tmp/eryx-cache");
-
-    // Use with_cache_dir for simple filesystem caching
-    let sandbox = Sandbox::embedded()
-        .with_cache_dir(&cache_dir)?
-        .with_package("path/to/package.whl")?
-        .build()?;
-
-    // Second creation is faster due to caching
-    let sandbox2 = Sandbox::embedded()
-        .with_cache_dir(&cache_dir)?
-        .with_package("path/to/package.whl")?
-        .build()?;
-
-    Ok(())
-}
-```
-
-### In-Memory Cache (Rust)
-
-```rust,ignore
-# extern crate eryx;
-# extern crate tokio;
-use eryx::{Sandbox, cache::InMemoryCache};
-use std::sync::Arc;
-
-#[tokio::main]
-async fn main() -> Result<(), eryx::Error> {
-    let cache = Arc::new(InMemoryCache::new());
-
-    // First build populates cache
-    let sandbox1 = Sandbox::embedded()
-        .with_cache(cache.clone())
-        .build()?;
-
-    // Second build uses cache
-    let sandbox2 = Sandbox::embedded()
-        .with_cache(cache)
-        .build()?;
-
-    Ok(())
-}
-```
 
 ## Saving and Loading Factories
 
