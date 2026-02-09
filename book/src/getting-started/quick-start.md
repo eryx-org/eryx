@@ -161,7 +161,7 @@ Both Rust and Python bindings use pre-compiled WebAssembly for fast sandbox crea
 | Per-execution overhead | ~1.8ms | ~1.6ms | 14% faster |
 | Session (5 executions) | ~70ms | ~3ms | **23x faster** |
 
-> **Rust Note:** The `embedded` feature flag enables pre-compilation. See [Installation](./installation.md#feature-flags) for details.
+> **Rust Note:** The `embedded` feature flag enables pre-compilation but requires a one-time setup step. See [Installation](./installation.md#setting-up-the-embedded-feature) for details.
 
 ## Next Steps
 

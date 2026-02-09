@@ -4,9 +4,6 @@
 # See https://release-plz.ieni.dev/docs/extra/single-changelog#all-packages.
 changelog_path = "./CHANGELOG.md"
 
-# Disable crates.io publishing since we have git dependencies
-publish = false
-
 # Create git tags for releases
 git_tag_enable = true
 

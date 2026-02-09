@@ -12,16 +12,29 @@ eryx = { version = "0.3", features = ["embedded"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 ```
 
+### Setting up the `embedded` feature
+
+The `embedded` feature embeds a pre-compiled Wasm runtime into your binary for zero-config sandbox creation. Because the pre-compiled runtime is platform-specific (~55MB), it is **not** included in the crate and must be generated once for your machine:
+
+```bash
+cargo binstall eryx-precompile   # install the pre-compile tool
+eryx-precompile setup            # download runtime + pre-compile for your platform
+```
+
+After this one-time setup, `cargo build` will find the cached runtime automatically. You can also set `ERYX_RUNTIME_CWASM=/path/to/runtime.cwasm` to use a specific file.
+
+> **Note:** The `eryx-precompile setup` command is not yet implemented — see [#99](https://github.com/eryx-org/eryx/issues/99). For now, the `embedded` feature requires building from the workspace. If you don't need the embedded runtime, omit the feature and provide your own `runtime.wasm` path via `Sandbox::builder()`.
+
 ### Feature Flags
 
 | Feature              | Description                                                                         | Trade-offs                               |
 |----------------------|-------------------------------------------------------------------------------------|------------------------------------------|
-| `embedded`           | Zero-config sandboxes: embeds pre-compiled Wasm runtime + Python stdlib             | +32MB binary size; enables `unsafe` code paths |
+| `embedded`           | Embeds pre-compiled Wasm runtime + Python stdlib into your binary                   | +55MB binary size; requires one-time setup (see above) |
 | `macros`             | Enables the `#[callback]` proc macro for simplified callback definitions            | Adds proc-macro compile time             |
 | `preinit`            | Pre-initialization support for ~25x faster sandbox creation                         | Adds `eryx-runtime` dep; requires build step |
 | `native-extensions`  | Native Python extension support (e.g., numpy) via late-linking                      | Implies `preinit`; experimental          |
 
-**Recommended**: Start with the `embedded` feature for zero-configuration setup.
+**Recommended**: Start with the `embedded` feature for the simplest setup.
 
 Package support (`with_package()` for `.whl` and `.tar.gz` files) is always available — no feature flag required.
 

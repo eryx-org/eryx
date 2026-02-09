@@ -8,6 +8,7 @@ repository.workspace = true
 authors.workspace = true
 description = "WASM guest runtime for eryx sandbox - implements WIT exports via CPython"
 readme = "README.md"
+publish = false
 
 # Build as staticlib, then use WASI SDK clang to create .so
 # This matches how componentize-py builds their runtime

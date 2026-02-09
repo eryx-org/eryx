@@ -2,13 +2,8 @@
 #
 # This workflow builds, tests, and publishes the npm package.
 # It runs on:
-# - Tags starting with 'js-v' (e.g., js-v0.3.0)
+# - GitHub Release published (filtered to eryx-v* tags, triggered by release-plz)
 # - Manual workflow dispatch
-#
-# To release:
-# 1. Update version (scripts/bump-version.sh syncs JS automatically)
-# 2. git tag js-v0.3.0
-# 3. git push origin js-v0.3.0
 #
 # npm provenance is provided via OIDC - no NPM_TOKEN secret needed.
 # Configure "trusted publishers" on npmjs.com for this repo.
@@ -16,9 +11,8 @@
 name: JS Release
 
 on:
-  push:
-    tags:
-      - "js-v*"
+  release:
+    types: [published]
   workflow_dispatch:
     inputs:
       publish:
@@ -37,6 +31,10 @@ jobs:
   build-and-test:
     name: Build & Test
     runs-on: namespace-profile-eryx-heavy-linux-amd64
+    # Only run for the main eryx crate release (not eryx-macros, eryx-vfs, etc.)
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      startsWith(github.event.release.tag_name, 'eryx-v')
     steps:
       - name: Free disk space
         run: |
@@ -89,7 +87,7 @@ jobs:
     name: Publish to npm
     runs-on: ubuntu-latest
     needs: build-and-test
-    if: startsWith(github.ref, 'refs/tags/js-v') || (github.event_name == 'workflow_dispatch' && inputs.publish)
+    if: github.event_name == 'release' || (github.event_name == 'workflow_dispatch' && inputs.publish)
     environment: npm
     permissions:
       contents: read

@@ -2,20 +2,14 @@
 #
 # This workflow builds and publishes Python wheels for multiple platforms.
 # It runs on:
-# - Tags starting with 'py-v' (e.g., py-v0.1.0)
+# - GitHub Release published (filtered to eryx-v* tags, triggered by release-plz)
 # - Manual workflow dispatch
-#
-# To release:
-# 1. Update version in crates/eryx-python/Cargo.toml and pyproject.toml
-# 2. git tag py-v0.1.0
-# 3. git push origin py-v0.1.0
 
 name: Python Release
 
 on:
-  push:
-    tags:
-      - "py-v*"
+  release:
+    types: [published]
   workflow_dispatch:
     inputs:
       publish:
@@ -36,6 +30,10 @@ jobs:
   build-runtime:
     name: Build Runtime
     runs-on: namespace-profile-eryx-heavy-linux-amd64
+    # Only run for the main eryx crate release (not eryx-macros, eryx-vfs, etc.)
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      startsWith(github.event.release.tag_name, 'eryx-v')
     steps:
       - uses: actions/checkout@v4
 
@@ -490,7 +488,7 @@ jobs:
   release:
     name: Publish to PyPI
     runs-on: namespace-profile-eryx-light
-    if: startsWith(github.ref, 'refs/tags/py-v') || (github.event_name == 'workflow_dispatch' && inputs.publish)
+    if: github.event_name == 'release' || (github.event_name == 'workflow_dispatch' && inputs.publish)
     needs:
       [linux-x86_64, linux-aarch64, macos-aarch64, macos-x86_64, windows, sdist]
     environment: pypi
