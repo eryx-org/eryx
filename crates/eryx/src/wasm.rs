@@ -73,51 +73,79 @@ pub struct OutputRequest {
 }
 
 /// Request for a network operation from Python code.
+///
+/// Sent from the WASM host imports to the network handler task via an
+/// [`mpsc`](tokio::sync::mpsc) channel. Each request that expects a reply
+/// carries a oneshot `response_tx` for the handler to send the result back.
 #[derive(Debug)]
 pub enum NetRequest {
     // TCP operations
     /// Connect to a host over TCP.
     TcpConnect {
+        /// Target hostname or IP address.
         host: String,
+        /// Target port number.
         port: u16,
+        /// Channel for returning the connection handle (or error).
         response_tx: oneshot::Sender<Result<u32, crate::net::TcpError>>,
     },
     /// Read from a TCP connection.
     TcpRead {
+        /// Connection handle returned by [`TcpConnect`](Self::TcpConnect).
         handle: u32,
+        /// Maximum number of bytes to read.
         len: u32,
+        /// Channel for returning the read bytes (or error).
         response_tx: oneshot::Sender<Result<Vec<u8>, crate::net::TcpError>>,
     },
     /// Write to a TCP connection.
     TcpWrite {
+        /// Connection handle returned by [`TcpConnect`](Self::TcpConnect).
         handle: u32,
+        /// Bytes to write.
         data: Vec<u8>,
+        /// Channel for returning the number of bytes written (or error).
         response_tx: oneshot::Sender<Result<u32, crate::net::TcpError>>,
     },
     /// Close a TCP connection.
-    TcpClose { handle: u32 },
+    TcpClose {
+        /// Connection handle to close.
+        handle: u32,
+    },
 
     // TLS operations
     /// Upgrade a TCP connection to TLS.
     TlsUpgrade {
+        /// TCP connection handle to upgrade.
         tcp_handle: u32,
+        /// SNI hostname for the TLS handshake.
         hostname: String,
+        /// Channel for returning the TLS connection handle (or error).
         response_tx: oneshot::Sender<Result<u32, crate::net::TlsError>>,
     },
     /// Read from a TLS connection.
     TlsRead {
+        /// TLS connection handle returned by [`TlsUpgrade`](Self::TlsUpgrade).
         handle: u32,
+        /// Maximum number of bytes to read.
         len: u32,
+        /// Channel for returning the read bytes (or error).
         response_tx: oneshot::Sender<Result<Vec<u8>, crate::net::TlsError>>,
     },
     /// Write to a TLS connection.
     TlsWrite {
+        /// TLS connection handle returned by [`TlsUpgrade`](Self::TlsUpgrade).
         handle: u32,
+        /// Bytes to write.
         data: Vec<u8>,
+        /// Channel for returning the number of bytes written (or error).
         response_tx: oneshot::Sender<Result<u32, crate::net::TlsError>>,
     },
     /// Close a TLS connection.
-    TlsClose { handle: u32 },
+    TlsClose {
+        /// TLS connection handle to close.
+        handle: u32,
+    },
 }
 
 /// Callback info for introspection (internal type to avoid conflicts with generated code).

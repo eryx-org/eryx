@@ -125,6 +125,20 @@ See [MCP Integration](./mcp.md) for details on config discovery and supported ID
 | `--version`    | Print version and exit |
 | `-h`, `--help` | Show help message      |
 
+## Subcommands
+
+### `eryx serve`
+
+Start an MCP server that exposes the sandbox as a `run_python` tool:
+
+```bash
+eryx serve                              # basic sandbox server
+eryx serve --timeout 60000 --net        # with options
+eryx serve --mcp                        # with inner MCP tools
+```
+
+The serve subcommand accepts all the same sandbox flags listed above. See [MCP Server](./mcp-server.md) for full documentation.
+
 ## Examples
 
 ```bash
@@ -152,5 +166,6 @@ print(os.listdir("/data"))
 
 - [Sandboxes](./sandboxes.md) — Sandbox configuration
 - [MCP Integration](./mcp.md) — Connect to MCP tool servers
+- [MCP Server](./mcp-server.md) — Expose the sandbox as an MCP tool
 - [Resource Limits](./resource-limits.md) — Controlling execution constraints
 - [VFS and File Persistence](./vfs.md) — Virtual filesystem and volume mounts

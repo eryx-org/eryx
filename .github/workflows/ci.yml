@@ -452,17 +452,17 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Create virtualenv and install dependencies
-        run: |
-          python -m venv .venv
-          source .venv/bin/activate
-          pip install maturin pytest
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
 
-      - name: Build and install eryx-python
+      - name: Build and install eryx-python with dev dependencies
         working-directory: crates/eryx-python
         run: |
+          uv venv ../../.venv
           source ../../.venv/bin/activate
+          uv pip install maturin
           maturin develop --release
+          uv pip install -e '.[dev]'
 
       - name: Run Python tests
         working-directory: crates/eryx-python

@@ -15,6 +15,7 @@ use tokio::sync::mpsc;
 
 use crate::callback::extract_callbacks;
 use crate::error::{InitializationError, eryx_error_to_py};
+use crate::net_config::NetConfig;
 use crate::result::ExecuteResult;
 use crate::sandbox::PyOutputHandler;
 use crate::vfs::VfsStorage;
@@ -64,6 +65,8 @@ pub struct Session {
     vfs_mount_path: Option<String>,
     /// Callbacks available for this session.
     callbacks: Arc<HashMap<String, Arc<dyn eryx::Callback>>>,
+    /// Network configuration for this session.
+    net_config: Option<eryx::NetConfig>,
     /// Output handler for streaming stdout/stderr.
     output_handler: Option<Arc<dyn OutputHandler>>,
 }
@@ -109,13 +112,14 @@ impl Session {
     ///         {"name": "get_time", "fn": get_time, "description": "Returns current time"}
     ///     ])
     #[new]
-    #[pyo3(signature = (*, vfs=None, vfs_mount_path=None, execution_timeout_ms=None, callbacks=None, mcp=None, volumes=None, on_stdout=None, on_stderr=None))]
+    #[pyo3(signature = (*, vfs=None, vfs_mount_path=None, execution_timeout_ms=None, network=None, callbacks=None, mcp=None, volumes=None, on_stdout=None, on_stderr=None))]
     #[allow(clippy::too_many_arguments)]
     fn new(
         py: Python<'_>,
         vfs: Option<VfsStorage>,
         vfs_mount_path: Option<String>,
         execution_timeout_ms: Option<u64>,
+        network: Option<NetConfig>,
         callbacks: Option<Bound<'_, PyAny>>,
         mcp: Option<PyRef<'_, crate::mcp::MCPManager>>,
         volumes: Option<Vec<(String, String, bool)>>,
@@ -226,6 +230,8 @@ impl Session {
                 None
             };
 
+        let net_config: Option<eryx::NetConfig> = network.map(Into::into);
+
         let session = Self {
             inner: Mutex::new(Some(inner)),
             executor,
@@ -233,6 +239,7 @@ impl Session {
             vfs_storage,
             vfs_mount_path: mount_path,
             callbacks: callbacks_map,
+            net_config,
             output_handler,
         };
 
@@ -270,6 +277,7 @@ impl Session {
         let runtime = self.runtime.clone();
         let callbacks_map = self.callbacks.clone();
         let output_handler = self.output_handler.clone();
+        let net_config = self.net_config.clone();
 
         // Release the GIL while executing
         py.detach(|| {
@@ -302,6 +310,21 @@ impl Session {
                         .await
                     });
 
+                    // Spawn network handler if networking is enabled
+                    let (net_tx, net_handler) = if let Some(ref config) = net_config {
+                        let (tx, rx) = mpsc::channel::<eryx::NetRequest>(32);
+                        let manager = eryx::net::ConnectionManager::new(
+                            config.clone(),
+                            std::collections::HashMap::new(),
+                        );
+                        let task = tokio::spawn(async move {
+                            eryx::callback_handler::run_net_handler(rx, manager).await;
+                        });
+                        (Some(tx), Some(task))
+                    } else {
+                        (None, None)
+                    };
+
                     // Spawn output collector for real-time streaming if handler is configured
                     let (output_tx, output_collector) = if output_handler.is_some() {
                         let (tx, rx) = mpsc::unbounded_channel::<eryx::OutputRequest>();
@@ -321,10 +344,14 @@ impl Session {
                         (None, None)
                     };
 
-                    // Execute with callbacks and optional output streaming
+                    // Execute with callbacks and optional output streaming / networking
                     let mut builder = inner
                         .execute(&code)
                         .with_callbacks(&callbacks_vec, callback_tx);
+
+                    if let Some(tx) = net_tx {
+                        builder = builder.with_network(tx);
+                    }
 
                     if let Some(tx) = output_tx {
                         builder = builder.with_output_streaming(tx);
@@ -334,6 +361,11 @@ impl Session {
 
                     // Wait for handler to finish (it will exit when channel closes)
                     let _callback_count = handler.await.unwrap_or(0);
+
+                    // Wait for network handler to finish
+                    if let Some(handler) = net_handler {
+                        let _ = handler.await;
+                    }
 
                     // Wait for output collector to finish
                     if let Some(collector) = output_collector {
