@@ -34,6 +34,7 @@ from eryx._eryx import (
     ExecuteResult,
     ExecutionError,
     InitializationError,
+    MCPManager,
     NetConfig,
     ResourceLimitError,
     ResourceLimits,
@@ -50,6 +51,7 @@ __all__ = [
     # Classes
     "CallbackRegistry",
     "ExecuteResult",
+    "MCPManager",
     "NetConfig",
     "ResourceLimits",
     "Sandbox",

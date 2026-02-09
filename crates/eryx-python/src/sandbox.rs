@@ -139,13 +139,14 @@ impl Sandbox {
     ///     )
     ///     sandbox = factory.create_sandbox()
     #[new]
-    #[pyo3(signature = (*, resource_limits=None, network=None, callbacks=None, secrets=None, scrub_stdout=None, scrub_stderr=None, scrub_files=None, volumes=None, on_stdout=None, on_stderr=None))]
+    #[pyo3(signature = (*, resource_limits=None, network=None, callbacks=None, mcp=None, secrets=None, scrub_stdout=None, scrub_stderr=None, scrub_files=None, volumes=None, on_stdout=None, on_stderr=None))]
     #[allow(clippy::too_many_arguments)]
     fn new(
         py: Python<'_>,
         resource_limits: Option<ResourceLimits>,
         network: Option<NetConfig>,
         callbacks: Option<Bound<'_, PyAny>>,
+        mcp: Option<PyRef<'_, crate::mcp::MCPManager>>,
         secrets: Option<Bound<'_, PyDict>>,
         scrub_stdout: Option<bool>,
         scrub_stderr: Option<bool>,
@@ -181,6 +182,13 @@ impl Sandbox {
         if let Some(ref cbs) = callbacks {
             let python_callbacks = extract_callbacks(py, cbs)?;
             for callback in python_callbacks {
+                builder = builder.with_callback(callback);
+            }
+        }
+
+        // Apply MCP callbacks if provided
+        if let Some(ref mcp_mgr) = mcp {
+            for callback in mcp_mgr.as_callbacks() {
                 builder = builder.with_callback(callback);
             }
         }

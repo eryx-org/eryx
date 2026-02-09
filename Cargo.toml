@@ -63,6 +63,7 @@ rustls-pemfile = "2.0"
 tokio-rustls = "0.26"
 webpki-roots = "0.26"
 rcgen = "0.13"
+rmcp = "0.14"
 
 # Utilities
 tracing = "0.1"

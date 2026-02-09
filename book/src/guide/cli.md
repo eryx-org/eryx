@@ -101,6 +101,23 @@ python -m eryx -v $(pwd):/mnt/data script.py
 python -m eryx -v /path/to/files:/input:ro -c 'print(open("/input/data.txt").read())'
 ```
 
+### MCP (Model Context Protocol)
+
+| Flag               | Description                                                            |
+| ------------------ | ---------------------------------------------------------------------- |
+| `--mcp`            | Enable MCP server integration (auto-discovers from IDE configs)        |
+| `--mcp-config PATH`| Path to MCP config file (implies `--mcp`, can be repeated)            |
+
+```bash
+# Auto-discover MCP servers from Claude, Cursor, VS Code, Zed, Windsurf, Codex, Gemini configs
+python -m eryx --mcp -c 'r = await mcp.github.search_repos(query="test"); print(r)'
+
+# Use a specific config file
+python -m eryx --mcp-config .mcp.json -c '...'
+```
+
+See [MCP Integration](./mcp.md) for details on config discovery and supported IDEs.
+
 ### Other
 
 | Flag           | Description            |
@@ -134,5 +151,6 @@ print(os.listdir("/data"))
 ## Next Steps
 
 - [Sandboxes](./sandboxes.md) — Sandbox configuration
+- [MCP Integration](./mcp.md) — Connect to MCP tool servers
 - [Resource Limits](./resource-limits.md) — Controlling execution constraints
 - [VFS and File Persistence](./vfs.md) — Virtual filesystem and volume mounts
