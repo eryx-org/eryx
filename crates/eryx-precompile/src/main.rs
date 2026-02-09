@@ -55,6 +55,9 @@ enum Command {
     /// Downloads runtime.wasm from the matching GitHub Release, pre-compiles it
     /// to native code, and caches it in ~/.cache/eryx/ so that `cargo build`
     /// with `features = ["embedded"]` finds it automatically.
+    ///
+    /// For cross-compilation, custom CPU targets, or pre-initialization with
+    /// packages, use the `compile` subcommand instead.
     Setup(SetupArgs),
 
     /// Pre-compile a WASM file to native code (advanced).
@@ -307,6 +310,10 @@ async fn run_setup(args: SetupArgs) -> Result<()> {
     println!();
     println!(
         "Setup complete! `cargo build` with `features = [\"embedded\"]` will now find the cached runtime."
+    );
+    println!();
+    println!(
+        "Tip: for cross-compilation or custom CPU targets, use `eryx-precompile compile` instead."
     );
 
     Ok(())
