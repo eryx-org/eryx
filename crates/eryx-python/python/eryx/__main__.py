@@ -103,6 +103,22 @@ def _build_parser() -> argparse.ArgumentParser:
         help="allow network access to hosts matching PATTERN (implies --net)",
     )
 
+    # --- MCP ---
+    mcp_group = parser.add_argument_group("MCP (Model Context Protocol)")
+    mcp_group.add_argument(
+        "--mcp",
+        action="store_true",
+        default=False,
+        help="enable MCP server integration (discovers servers from .mcp.json and ~/.claude.json)",
+    )
+    mcp_group.add_argument(
+        "--mcp-config",
+        action="append",
+        default=[],
+        metavar="PATH",
+        help="path to MCP config file (implies --mcp, can be repeated)",
+    )
+
     # --- filesystem ---
     fs = parser.add_argument_group("filesystem")
     fs.add_argument(
@@ -150,7 +166,7 @@ def _write_stderr(chunk: str) -> None:
     sys.stderr.flush()
 
 
-def _run_once(code: str, args: argparse.Namespace) -> int:
+def _run_once(code: str, args: argparse.Namespace, mcp_manager: object | None = None) -> int:
     """Execute code in a stateless Sandbox and print the result."""
     limits = _make_resource_limits(args)
     net = _make_net_config(args)
@@ -161,6 +177,8 @@ def _run_once(code: str, args: argparse.Namespace) -> int:
         kwargs["network"] = net
     if args.volume:
         kwargs["volumes"] = args.volume
+    if mcp_manager is not None:
+        kwargs["mcp"] = mcp_manager
 
     # Stream output in real-time instead of buffering until completion
     kwargs["on_stdout"] = _write_stdout
@@ -185,7 +203,7 @@ def _run_once(code: str, args: argparse.Namespace) -> int:
     return 0
 
 
-def _repl(args: argparse.Namespace) -> int:
+def _repl(args: argparse.Namespace, mcp_manager: object | None = None) -> int:
     """Run an interactive REPL using Session for persistent state."""
     kwargs = {}
     limits = _make_resource_limits(args)
@@ -193,6 +211,8 @@ def _repl(args: argparse.Namespace) -> int:
         kwargs["execution_timeout_ms"] = limits.execution_timeout_ms
     if args.volume:
         kwargs["volumes"] = args.volume
+    if mcp_manager is not None:
+        kwargs["mcp"] = mcp_manager
 
     # Stream output in real-time
     kwargs["on_stdout"] = _write_stdout
@@ -252,41 +272,59 @@ def _repl(args: argparse.Namespace) -> int:
     return 0
 
 
+def _make_mcp_manager(args: argparse.Namespace) -> object | None:
+    """Create an MCP manager if --mcp or --mcp-config is specified."""
+    if not args.mcp and not args.mcp_config:
+        return None
+
+    from eryx.mcp import connect_servers
+
+    config_paths = args.mcp_config if args.mcp_config else None
+    return connect_servers(config_paths=config_paths)
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = _build_parser()
     args = parser.parse_args(argv)
 
-    # -c CODE
-    if args.command is not None:
-        return _run_once(args.command, args)
+    # Create MCP manager if requested
+    mcp_manager = _make_mcp_manager(args)
 
-    # script file or stdin
-    if args.script is not None:
-        if args.script == "-":
-            code = sys.stdin.read()
-        else:
-            try:
-                with open(args.script) as f:
-                    code = f.read()
-            except FileNotFoundError:
-                print(f"eryx: {args.script}: No such file", file=sys.stderr)
-                return 1
-            except OSError as exc:
-                print(f"eryx: {args.script}: {exc}", file=sys.stderr)
-                return 1
-        return _run_once(code, args)
+    try:
+        # -c CODE
+        if args.command is not None:
+            return _run_once(args.command, args, mcp_manager)
 
-    # interactive REPL (only if stdin is a terminal)
-    if sys.stdin.isatty():
-        return _repl(args)
+        # script file or stdin
+        if args.script is not None:
+            if args.script == "-":
+                code = sys.stdin.read()
+            else:
+                try:
+                    with open(args.script) as f:
+                        code = f.read()
+                except FileNotFoundError:
+                    print(f"eryx: {args.script}: No such file", file=sys.stderr)
+                    return 1
+                except OSError as exc:
+                    print(f"eryx: {args.script}: {exc}", file=sys.stderr)
+                    return 1
+            return _run_once(code, args, mcp_manager)
 
-    # piped input without '-' — read stdin anyway
-    code = sys.stdin.read()
-    if code.strip():
-        return _run_once(code, args)
+        # interactive REPL (only if stdin is a terminal)
+        if sys.stdin.isatty():
+            return _repl(args, mcp_manager)
 
-    parser.print_help()
-    return 0
+        # piped input without '-' — read stdin anyway
+        code = sys.stdin.read()
+        if code.strip():
+            return _run_once(code, args, mcp_manager)
+
+        parser.print_help()
+        return 0
+    finally:
+        if mcp_manager is not None:
+            mcp_manager.close()
 
 
 if __name__ == "__main__":

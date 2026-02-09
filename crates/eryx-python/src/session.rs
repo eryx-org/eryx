@@ -109,7 +109,7 @@ impl Session {
     ///         {"name": "get_time", "fn": get_time, "description": "Returns current time"}
     ///     ])
     #[new]
-    #[pyo3(signature = (*, vfs=None, vfs_mount_path=None, execution_timeout_ms=None, callbacks=None, volumes=None, on_stdout=None, on_stderr=None))]
+    #[pyo3(signature = (*, vfs=None, vfs_mount_path=None, execution_timeout_ms=None, callbacks=None, mcp=None, volumes=None, on_stdout=None, on_stderr=None))]
     #[allow(clippy::too_many_arguments)]
     fn new(
         py: Python<'_>,
@@ -117,6 +117,7 @@ impl Session {
         vfs_mount_path: Option<String>,
         execution_timeout_ms: Option<u64>,
         callbacks: Option<Bound<'_, PyAny>>,
+        mcp: Option<PyRef<'_, crate::mcp::MCPManager>>,
         volumes: Option<Vec<(String, String, bool)>>,
         on_stdout: Option<Py<PyAny>>,
         on_stderr: Option<Py<PyAny>>,
@@ -137,18 +138,28 @@ impl Session {
         })?);
 
         // Extract callbacks if provided
-        let callbacks_map: Arc<HashMap<String, Arc<dyn eryx::Callback>>> =
-            if let Some(ref cbs) = callbacks {
+        let callbacks_map: Arc<HashMap<String, Arc<dyn eryx::Callback>>> = {
+            let mut map: HashMap<String, Arc<dyn eryx::Callback>> = if let Some(ref cbs) = callbacks
+            {
                 let python_callbacks = extract_callbacks(py, cbs)?;
-                Arc::new(
-                    python_callbacks
-                        .into_iter()
-                        .map(|c| (c.name().to_string(), Arc::new(c) as Arc<dyn eryx::Callback>))
-                        .collect(),
-                )
+                python_callbacks
+                    .into_iter()
+                    .map(|c| (c.name().to_string(), Arc::new(c) as Arc<dyn eryx::Callback>))
+                    .collect()
             } else {
-                Arc::new(HashMap::new())
+                HashMap::new()
             };
+
+            // Merge MCP callbacks if provided
+            if let Some(ref mcp_mgr) = mcp {
+                for c in mcp_mgr.as_callbacks() {
+                    let arc: Arc<dyn eryx::Callback> = Arc::new(c);
+                    map.insert(arc.name().to_string(), arc);
+                }
+            }
+
+            Arc::new(map)
+        };
 
         // Convert to slice for SessionExecutor
         let callbacks_vec: Vec<Arc<dyn eryx::Callback>> = callbacks_map.values().cloned().collect();

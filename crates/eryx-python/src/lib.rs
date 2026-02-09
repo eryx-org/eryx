@@ -15,6 +15,7 @@
 
 mod callback;
 mod error;
+mod mcp;
 mod net_config;
 mod preinit;
 mod resource_limits;
@@ -60,6 +61,7 @@ fn _eryx(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<net_config::NetConfig>()?;
     m.add_class::<vfs::VfsStorage>()?;
     m.add_class::<callback::CallbackRegistry>()?;
+    m.add_class::<mcp::MCPManager>()?;
 
     // Register exceptions
     error::register_exceptions(m)?;

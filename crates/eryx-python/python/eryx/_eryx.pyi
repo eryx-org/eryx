@@ -37,6 +37,70 @@ class CallbackDict(TypedDict, total=False):
     """Optional JSON Schema for parameters."""
 
 
+class MCPManager:
+    """Manager for MCP (Model Context Protocol) server connections.
+
+    Creates connections to MCP servers and exposes their tools as native
+    Rust callbacks that can be used by ``Sandbox`` and ``Session``.
+
+    Tools are exposed as dotted callbacks under ``mcp.<server>.<tool>``,
+    so sandboxed code can call them as ``await mcp.server.tool(args)``.
+
+    Example:
+        manager = MCPManager()
+        manager.connect("fs", "npx", ["-y", "@anthropic/mcp-server-filesystem", "."])
+        tools = manager.list_tools()
+        sandbox = Sandbox(mcp=manager)
+        result = sandbox.execute('data = await mcp.fs.read_file(path="README.md")')
+    """
+
+    @property
+    def server_names(self) -> list[str]:
+        """Names of all connected MCP servers."""
+        ...
+
+    def __init__(self) -> None:
+        """Create a new empty MCP manager."""
+        ...
+
+    def connect(
+        self,
+        name: str,
+        command: str,
+        args: list[str] = [],
+        env: dict[str, str] = {},
+        timeout_secs: float = 30.0,
+    ) -> int:
+        """Connect to an MCP server by spawning a child process.
+
+        Args:
+            name: A human-readable name for this server connection.
+            command: The command to spawn (e.g., "npx", "uvx").
+            args: Arguments to pass to the command.
+            env: Environment variables to set for the child process.
+            timeout_secs: Timeout in seconds for the connection handshake.
+
+        Returns:
+            The number of tools available from this server.
+
+        Raises:
+            InitializationError: If the connection fails.
+        """
+        ...
+
+    def list_tools(self) -> list[dict[str, Any]]:
+        """List all available tools across all connected servers.
+
+        Returns:
+            A list of dicts, each with "name", "description", and "schema" keys.
+        """
+        ...
+
+    def close(self) -> None:
+        """Gracefully shut down all MCP server connections."""
+        ...
+
+
 class CallbackRegistry:
     """A registry for collecting callbacks using the decorator pattern.
 
@@ -354,6 +418,7 @@ class Sandbox:
         resource_limits: Optional[ResourceLimits] = None,
         network: Optional[NetConfig] = None,
         callbacks: Optional[Union[CallbackRegistry, Sequence[CallbackDict]]] = None,
+        mcp: Optional[MCPManager] = None,
         secrets: Optional[dict[str, SecretDict]] = None,
         scrub_stdout: Optional[bool] = None,
         scrub_stderr: Optional[bool] = None,
@@ -370,6 +435,9 @@ class Sandbox:
             callbacks: Optional callbacks that sandboxed code can invoke.
                 Can be a CallbackRegistry or a list of callback dicts with
                 "name", "fn", and optionally "description" and "schema" keys.
+            mcp: Optional MCPManager with connected MCP servers. Tools from
+                connected servers are exposed as callbacks named
+                ``mcp.<server>.<tool>``.
             secrets: Optional dict of secret names to secret configurations.
                 Each value is a dict with "value" (required) and "allowed_hosts"
                 (optional, defaults to []).
@@ -396,20 +464,10 @@ class Sandbox:
             sandbox = Sandbox()
             result = sandbox.execute('import json; print(json.dumps([1, 2, 3]))')
 
-            # Sandbox with streaming output
-            sandbox = Sandbox(
-                on_stdout=lambda chunk: print(f"[stdout] {chunk}", end=""),
-                on_stderr=lambda chunk: print(f"[stderr] {chunk}", end=""),
-            )
-
-            # Sandbox with secrets
-            sandbox = Sandbox(
-                secrets={
-                    "API_KEY": {"value": "sk-real-key", "allowed_hosts": ["api.example.com"]},
-                    "TOKEN": {"value": "ghp-xxx"},  # allowed_hosts defaults to []
-                },
-                network=NetConfig(allowed_hosts=["api.example.com"]),
-            )
+            # Sandbox with MCP tools
+            manager = MCPManager()
+            manager.connect("fs", "npx", ["-y", "@anthropic/mcp-server-filesystem", "."])
+            sandbox = Sandbox(mcp=manager)
 
             # Sandbox with callbacks (registry-based)
             registry = CallbackRegistry()
@@ -730,6 +788,7 @@ class Session:
         vfs_mount_path: Optional[str] = None,
         execution_timeout_ms: Optional[int] = None,
         callbacks: Optional[Union[CallbackRegistry, Sequence[CallbackDict]]] = None,
+        mcp: Optional[MCPManager] = None,
         volumes: Optional[Sequence[tuple[str, str, bool]]] = None,
         on_stdout: Optional[Callable[[str], None]] = None,
         on_stderr: Optional[Callable[[str], None]] = None,
@@ -746,6 +805,7 @@ class Session:
             execution_timeout_ms: Optional timeout in milliseconds for each execution.
             callbacks: Optional callbacks that sandboxed code can invoke.
                 Can be a CallbackRegistry or a list of callback dicts.
+            mcp: Optional MCPManager with connected MCP servers.
             on_stdout: Optional callback for streaming stdout output in real-time.
             on_stderr: Optional callback for streaming stderr output in real-time.
 
@@ -758,10 +818,10 @@ class Session:
             session.execute('x = 42')
             result = session.execute('print(x)')  # prints "42"
 
-            # Session with VFS
-            storage = VfsStorage()
-            session = Session(vfs=storage)
-            session.execute('open("/data/file.txt", "w").write("data")')
+            # Session with MCP tools
+            manager = MCPManager()
+            manager.connect("fs", "npx", ["-y", "@anthropic/mcp-server-filesystem", "."])
+            session = Session(mcp=manager)
 
             # Session with callbacks
             def echo(message: str):
