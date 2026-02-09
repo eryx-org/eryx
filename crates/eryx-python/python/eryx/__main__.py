@@ -5,11 +5,13 @@ Usage:
     python -m eryx script.py           # Execute a file
     python -m eryx -c 'print("hi")'   # Execute a string
     echo 'print("hi")' | python -m eryx -  # Execute from stdin
+    python -m eryx serve               # Start MCP server
 
 Examples:
     uvx --with pyeryx eryx -c 'import sys; print(sys.version)'
     uvx --with pyeryx eryx --timeout 5000 -c 'print("hello")'
     uvx --with pyeryx eryx --net --allow-host '*.example.com' -c 'import urllib.request; ...'
+    uvx --with 'pyeryx[serve]' eryx serve --mcp
 """
 
 from __future__ import annotations
@@ -46,6 +48,8 @@ def _build_parser() -> argparse.ArgumentParser:
               echo 'print(1+1)' | eryx -        read code from stdin
               eryx --timeout 5000 script.py     set execution timeout
               eryx --net -c 'import requests'   enable network access
+              eryx serve                        start MCP server
+              eryx serve --mcp                  MCP server with inner tools
         """),
     )
 
@@ -284,6 +288,14 @@ def _make_mcp_manager(args: argparse.Namespace) -> object | None:
 
 
 def main(argv: list[str] | None = None) -> int:
+    raw_args = argv if argv is not None else sys.argv[1:]
+
+    # Subcommand: eryx serve
+    if raw_args and raw_args[0] == "serve":
+        from eryx.serve import serve
+
+        return serve(raw_args[1:])
+
     parser = _build_parser()
     args = parser.parse_args(argv)
 
