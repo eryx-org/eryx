@@ -1,6 +1,6 @@
 [package]
 name = "eryx"
-version = "0.3.0"
+version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
@@ -118,11 +118,11 @@ webpki-roots.workspace = true
 # Embedded runtime/stdlib (optional)
 zstd = { workspace = true, optional = true }
 # Native extension support (optional)
-eryx-runtime = { path = "../eryx-runtime", version = "^0.3.0", optional = true }
+eryx-runtime = { path = "../eryx-runtime", version = "^0.4.0", optional = true }
 # Virtual filesystem support (optional)
-eryx-vfs = { path = "../eryx-vfs", version = "^0.3.0", optional = true }
+eryx-vfs = { path = "../eryx-vfs", version = "^0.4.0", optional = true }
 # Proc macro support (optional)
-eryx-macros = { path = "../eryx-macros", version = "^0.3.0", optional = true }
+eryx-macros = { path = "../eryx-macros", version = "^0.4.0", optional = true }
 
 [features]
 default = []

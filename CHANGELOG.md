@@ -7,6 +7,81 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## `eryx-vfs` - [0.4.0](https://github.com/eryx-org/eryx/releases/tag/eryx-vfs-v0.4.0) - 2026-02-09
+
+### Added
+- *(volumes)* add host filesystem volume mounts ([#71](https://github.com/eryx-org/eryx/pull/71))
+- *(secrets)* implement placeholder substitution for secure secrets management ([#58](https://github.com/eryx-org/eryx/pull/58))
+- *(vfs)* implement stream support for read_via_stream/write_via_stream/append_via_stream
+- *(python)* add Session class with VFS support
+- *(vfs)* implement hybrid VFS for SessionExecutor
+
+### Fixed
+- *(eryx-vfs)* fix Windows build by downgrading cap-std to v3
+- *(eryx-vfs)* enable cap_std_impls feature for Windows support
+- *(vfs)* improve thread safety, configurability, and documentation
+- *(vfs)* improve thread safety and reduce code duplication
+- resolve CI failures (clippy lints and Python VfsStorage export)
+
+### Other
+- Bump wasmtime
+
+## `eryx-runtime` - [0.4.0](https://github.com/eryx-org/eryx/releases/tag/eryx-runtime-v0.4.0) - 2026-02-09
+
+### Added
+- *(python)* add MCP server integration via rmcp ([#85](https://github.com/eryx-org/eryx/pull/85))
+- *(output)* stream stdout/stderr in real-time via report-output WIT import ([#75](https://github.com/eryx-org/eryx/pull/75))
+- *(python)* switch snapshot/restore serialization from pickle to dill ([#72](https://github.com/eryx-org/eryx/pull/72))
+- add SQLite3 support
+- add stderr capture and streaming
+- *(preinit)* add network interface stubs for TCP/TLS
+- *(net)* add TCP and TLS networking with eryx:net package
+- *(tls)* add TLS WIT interface and host implementation
+- split preinit feature from native-extensions
+- *(preinit)* add finalize-preinit export to fix WASI handle invalidation
+- add cargo-rail and cargo-all-features support
+- simplify feature flags from 6 to 2
+- *(eryx)* add pre-initialization support for native extensions
+- Add native Python extension support via late-linking
+- *(eryx-wasm-runtime)* complete async callback implementation
+
+### Fixed
+- *(build)* prefer prebuilt artifacts over cached OUT_DIR
+- *(net)* align TCP/TLS shims with sync WIT imports using fiber-based async
+- *(net)* use fiber-based async for TCP/TLS socket shims
+- update preinit vs native-extensions feature handling
+- benchmark clippy lints and asyncio.run issue
+- add build-native-extensions task for --all-features commands
+- format code with cargo fmt
+- *(ci)* auto-decompress libs in build.rs
+- *(ci)* use POSIX-compatible test syntax in ensure-wasi-sdk
+- resolve session state and link test failures
+
+### Other
+- *(runtime)* replace component-init-transform with wasmtime-wizer ([#78](https://github.com/eryx-org/eryx/pull/78))
+- add prebuilt late-linking artifacts for CI ([#50](https://github.com/eryx-org/eryx/pull/50))
+- Revert "feat(tls): add TLS WIT interface and host implementation"
+- Document sandbox Python version
+- Fix preinit stub to use 'invoke' instead of '[async]invoke'
+- Deduplicate callback handler and clean up accumulated cruft
+- Rename/improve mise tasks, remove some unnecessary Python code
+- Maybe fix CI once and for all
+- only build WASM when BUILD_ERYX_RUNTIME is set or wasm missing
+- Fix rustfmt and lint errors
+- Remove unused runtime files; update architecture doc
+- Run rustfmt
+- Fix clippy lints
+- Improve API to use direct function calls instead of 'invoke'
+- Support session reuse
+- Add CI workflow and improve build configuration
+- Add examples and actual implementation
+- Second stage
+
+## `eryx-macros` - [0.4.0](https://github.com/eryx-org/eryx/releases/tag/eryx-macros-v0.4.0) - 2026-02-09
+
+### Added
+- *(macros)* add #[callback] proc macro for simplified callback definitions ([#64](https://github.com/eryx-org/eryx/pull/64))
+
 ## `eryx-wasm-runtime` - [0.3.0](https://github.com/eryx-org/eryx/releases/tag/eryx-wasm-runtime-v0.3.0) - 2026-02-01
 
 ### Added
