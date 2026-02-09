@@ -46,7 +46,7 @@ use wasmtime_wasi::{DirPerms, FilePerms, WasiCtx, WasiCtxBuilder};
 use crate::callback::Callback;
 use crate::error::Error;
 use crate::wasm::{
-    CallbackRequest, ExecutionOutput, ExecutorState, HostCallbackInfo, MemoryTracker,
+    CallbackRequest, ExecutionOutput, ExecutorState, HostCallbackInfo, MemoryTracker, NetRequest,
     PythonExecutor, Sandbox as SandboxBindings, TraceRequest,
 };
 
@@ -197,6 +197,7 @@ pub struct SessionExecuteBuilder<'a> {
     callbacks: Vec<Arc<dyn Callback>>,
     callback_tx: Option<mpsc::Sender<CallbackRequest>>,
     trace_tx: Option<mpsc::UnboundedSender<TraceRequest>>,
+    net_tx: Option<mpsc::Sender<NetRequest>>,
     output_tx: Option<mpsc::UnboundedSender<crate::wasm::OutputRequest>>,
     fuel_limit: Option<u64>,
 }
@@ -208,6 +209,7 @@ impl std::fmt::Debug for SessionExecuteBuilder<'_> {
             .field("callbacks_count", &self.callbacks.len())
             .field("has_callback_tx", &self.callback_tx.is_some())
             .field("has_trace_tx", &self.trace_tx.is_some())
+            .field("has_net_tx", &self.net_tx.is_some())
             .field("has_output_tx", &self.output_tx.is_some())
             .field("fuel_limit", &self.fuel_limit)
             .finish_non_exhaustive()
@@ -223,6 +225,7 @@ impl<'a> SessionExecuteBuilder<'a> {
             callbacks: Vec::new(),
             callback_tx: None,
             trace_tx: None,
+            net_tx: None,
             output_tx: None,
             fuel_limit: None,
         }
@@ -248,6 +251,16 @@ impl<'a> SessionExecuteBuilder<'a> {
     #[must_use]
     pub fn with_tracing(mut self, trace_tx: mpsc::UnboundedSender<TraceRequest>) -> Self {
         self.trace_tx = Some(trace_tx);
+        self
+    }
+
+    /// Enable networking for this execution.
+    ///
+    /// The `net_tx` channel is used to send network requests (TCP/TLS) from
+    /// the WASM guest to the host for processing.
+    #[must_use]
+    pub fn with_network(mut self, net_tx: mpsc::Sender<NetRequest>) -> Self {
+        self.net_tx = Some(net_tx);
         self
     }
 
@@ -296,6 +309,7 @@ impl<'a> SessionExecuteBuilder<'a> {
                 &self.callbacks,
                 self.callback_tx,
                 self.trace_tx,
+                self.net_tx,
                 self.output_tx,
                 self.fuel_limit,
             )
@@ -883,6 +897,7 @@ impl SessionExecutor {
         callbacks: &[Arc<dyn Callback>],
         callback_tx: Option<mpsc::Sender<CallbackRequest>>,
         trace_tx: Option<mpsc::UnboundedSender<TraceRequest>>,
+        net_tx: Option<mpsc::Sender<NetRequest>>,
         output_tx: Option<mpsc::UnboundedSender<crate::wasm::OutputRequest>>,
         per_execute_fuel_limit: Option<u64>,
     ) -> Result<ExecutionOutput, Error> {
@@ -913,6 +928,7 @@ impl SessionExecutor {
             let state = store.data_mut();
             state.set_callback_tx(callback_tx);
             state.set_trace_tx(trace_tx);
+            state.set_net_tx(net_tx);
             state.set_output_tx(output_tx);
             state.set_callbacks(callback_infos);
             state.reset_memory_tracker();
@@ -1009,6 +1025,7 @@ impl SessionExecutor {
             let state = store.data_mut();
             state.set_callback_tx(None);
             state.set_trace_tx(None);
+            state.set_net_tx(None);
             state.set_output_tx(None);
             state.peak_memory_bytes()
         };
@@ -1446,6 +1463,11 @@ impl ExecutorState {
     /// Update the trace channel for a new execution.
     pub(crate) fn set_trace_tx(&mut self, tx: Option<mpsc::UnboundedSender<TraceRequest>>) {
         self.trace_tx = tx;
+    }
+
+    /// Update the network channel for a new execution.
+    pub(crate) fn set_net_tx(&mut self, tx: Option<mpsc::Sender<NetRequest>>) {
+        self.net_tx = tx;
     }
 
     /// Update the output streaming channel for a new execution.

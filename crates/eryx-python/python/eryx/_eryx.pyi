@@ -787,6 +787,7 @@ class Session:
         vfs: Optional[VfsStorage] = None,
         vfs_mount_path: Optional[str] = None,
         execution_timeout_ms: Optional[int] = None,
+        network: Optional[NetConfig] = None,
         callbacks: Optional[Union[CallbackRegistry, Sequence[CallbackDict]]] = None,
         mcp: Optional[MCPManager] = None,
         volumes: Optional[Sequence[tuple[str, str, bool]]] = None,
@@ -803,6 +804,7 @@ class Session:
                 Files written to `/data/*` will persist across executions.
             vfs_mount_path: Custom mount path for VFS (default: "/data").
             execution_timeout_ms: Optional timeout in milliseconds for each execution.
+            network: Optional network configuration. If provided, enables networking.
             callbacks: Optional callbacks that sandboxed code can invoke.
                 Can be a CallbackRegistry or a list of callback dicts.
             mcp: Optional MCPManager with connected MCP servers.

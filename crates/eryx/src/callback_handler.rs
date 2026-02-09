@@ -263,7 +263,7 @@ pub async fn run_output_collector(
 /// the channel. This allows async network operations to work with wasmtime's
 /// synchronous accessor pattern.
 #[tracing::instrument(skip(net_rx, manager))]
-pub(crate) async fn run_net_handler(
+pub async fn run_net_handler(
     mut net_rx: mpsc::Receiver<NetRequest>,
     mut manager: ConnectionManager,
 ) {
