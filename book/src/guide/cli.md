@@ -65,10 +65,10 @@ echo 'import sys; print(sys.version)' | python -m eryx
 
 ### Resource Limits
 
-| Flag | Description | Default |
-|------|-------------|---------|
-| `--timeout MS` | Execution timeout in milliseconds | 30000 |
-| `--max-memory BYTES` | Maximum memory in bytes | 128MB |
+| Flag                 | Description                       | Default |
+| -------------------- | --------------------------------- | ------- |
+| `--timeout MS`       | Execution timeout in milliseconds | 30000   |
+| `--max-memory BYTES` | Maximum memory in bytes           | 128MB   |
 
 ```bash
 python -m eryx --timeout 5000 -c 'print("quick")'
@@ -77,9 +77,9 @@ python -m eryx --max-memory 67108864 script.py   # 64MB limit
 
 ### Networking
 
-| Flag | Description |
-|------|-------------|
-| `--net` | Enable network access |
+| Flag                   | Description                                              |
+| ---------------------- | -------------------------------------------------------- |
+| `--net`                | Enable network access                                    |
 | `--allow-host PATTERN` | Allow access to hosts matching pattern (implies `--net`) |
 
 ```bash
@@ -89,8 +89,8 @@ python -m eryx --allow-host '*.example.com' -c '...'
 
 ### Filesystem
 
-| Flag | Description |
-|------|-------------|
+| Flag              | Description                                  |
+| ----------------- | -------------------------------------------- |
 | `-v SRC:DST[:ro]` | Mount host directory SRC at sandbox path DST |
 
 ```bash
@@ -103,10 +103,10 @@ python -m eryx -v /path/to/files:/input:ro -c 'print(open("/input/data.txt").rea
 
 ### Other
 
-| Flag | Description |
-|------|-------------|
-| `--version` | Print version and exit |
-| `-h`, `--help` | Show help message |
+| Flag           | Description            |
+| -------------- | ---------------------- |
+| `--version`    | Print version and exit |
+| `-h`, `--help` | Show help message      |
 
 ## Examples
 
@@ -118,14 +118,14 @@ uvx --with pyeryx eryx -c 'import sys; print(f"Python {sys.version}")'
 uvx --with pyeryx eryx --timeout 5000 script.py
 
 # Network-enabled execution
-uvx --with pyeryx eryx --net --allow-host 'api.example.com' -c '
+uvx --with pyeryx eryx --net --allow-host 'httpbin.org' -c '
 import urllib.request
-resp = urllib.request.urlopen("https://api.example.com/data")
+resp = urllib.request.urlopen("https://httpbin.org/get")
 print(resp.read().decode())
 '
 
-# Mount a local directory
-uvx --with pyeryx eryx -v ./data:/data -c '
+# Mount a local directory (read-only)
+uvx --with pyeryx eryx -v ./data:/data:ro -c '
 import os
 print(os.listdir("/data"))
 '
