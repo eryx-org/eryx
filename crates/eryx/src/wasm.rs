@@ -369,7 +369,7 @@ impl ResourceLimiter for MemoryTracker {
 // the guest's perspective the calls are blocking. This requires `Config::async_support`
 // but NOT `Config::wasm_component_model_async`.
 wasmtime::component::bindgen!({
-    path: "../eryx-runtime/wit",
+    path: "wit",
     imports: {
         // TCP network operations - fiber-based async (blocking to guest, async on host)
         "eryx:net/tcp.connect": async,
