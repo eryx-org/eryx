@@ -63,6 +63,23 @@ class TestConfigDiscovery:
         assert "enabled" in servers
         assert "disabled" not in servers
 
+    def test_discover_skips_enabled_false(self, tmp_path):
+        """Test that servers with enabled=false are skipped (Codex style)."""
+        from eryx.mcp import discover_servers
+
+        config = {
+            "mcpServers": {
+                "active": {"command": "cmd1"},
+                "inactive": {"command": "cmd2", "enabled": False},
+            }
+        }
+        config_file = tmp_path / ".mcp.json"
+        config_file.write_text(json.dumps(config))
+
+        servers = discover_servers(config_paths=[config_file])
+        assert "active" in servers
+        assert "inactive" not in servers
+
     def test_discover_skips_non_stdio(self, tmp_path):
         """Test that non-stdio servers are skipped."""
         from eryx.mcp import discover_servers
@@ -147,6 +164,163 @@ class TestConfigDiscovery:
         servers = discover_servers(config_paths=[config_file])
         assert "no_cmd" not in servers
         assert "has_cmd" in servers
+
+
+class TestMultiIDEDiscovery:
+    """Tests for discovering MCP servers from various IDE config formats."""
+
+    def test_vscode_servers_key(self, tmp_path):
+        """Test VS Code uses 'servers' key instead of 'mcpServers'."""
+        from eryx.mcp import _extract_stdio_servers
+
+        data = {
+            "servers": {
+                "memory": {
+                    "type": "stdio",
+                    "command": "npx",
+                    "args": ["-y", "@modelcontextprotocol/server-memory"],
+                }
+            }
+        }
+        servers = _extract_stdio_servers(data, "servers")
+        assert "memory" in servers
+        assert servers["memory"]["command"] == "npx"
+
+    def test_zed_context_servers_key(self, tmp_path):
+        """Test Zed uses 'context_servers' key."""
+        from eryx.mcp import _extract_stdio_servers
+
+        data = {
+            "context_servers": {
+                "my_server": {
+                    "command": "node",
+                    "args": ["/path/to/server.js"],
+                    "env": {"API_KEY": "test"},
+                }
+            }
+        }
+        servers = _extract_stdio_servers(data, "context_servers")
+        assert "my_server" in servers
+        assert servers["my_server"]["command"] == "node"
+        assert servers["my_server"]["env"] == {"API_KEY": "test"}
+
+    def test_codex_toml_format(self, tmp_path):
+        """Test Codex TOML config format."""
+        from eryx.mcp import _read_toml, _extract_stdio_servers
+
+        toml_content = """\
+[mcp_servers.my_server]
+command = "npx"
+args = ["-y", "@some/mcp-server"]
+
+[mcp_servers.my_server.env]
+API_KEY = "test-key"
+
+[mcp_servers.disabled_server]
+command = "other-cmd"
+enabled = false
+"""
+        toml_file = tmp_path / "config.toml"
+        toml_file.write_text(toml_content)
+
+        data = _read_toml(toml_file)
+        assert data is not None
+
+        servers = _extract_stdio_servers(data, "mcp_servers")
+        assert "my_server" in servers
+        assert servers["my_server"]["command"] == "npx"
+        assert servers["my_server"]["args"] == ["-y", "@some/mcp-server"]
+        assert servers["my_server"]["env"] == {"API_KEY": "test-key"}
+        assert "disabled_server" not in servers
+
+    def test_codex_toml_invalid(self, tmp_path):
+        """Test that invalid TOML files are silently skipped."""
+        from eryx.mcp import _read_toml
+
+        toml_file = tmp_path / "bad.toml"
+        toml_file.write_text("not valid [[[toml")
+
+        assert _read_toml(toml_file) is None
+
+    def test_cursor_config(self, tmp_path):
+        """Test Cursor config format (same key as Claude)."""
+        from eryx.mcp import _extract_stdio_servers
+
+        data = {
+            "mcpServers": {
+                "github": {
+                    "command": "npx",
+                    "args": ["-y", "@anthropic/mcp-server-github"],
+                    "env": {"GITHUB_TOKEN": "ghp_xxx"},
+                }
+            }
+        }
+        servers = _extract_stdio_servers(data, "mcpServers")
+        assert "github" in servers
+        assert servers["github"]["env"] == {"GITHUB_TOKEN": "ghp_xxx"}
+
+    def test_windsurf_config(self, tmp_path):
+        """Test Windsurf config (mcpServers key, skips remote servers)."""
+        from eryx.mcp import _extract_stdio_servers
+
+        data = {
+            "mcpServers": {
+                "local": {"command": "my-server", "args": ["--local"]},
+                "remote": {"serverUrl": "https://mcp.example.com/mcp"},
+            }
+        }
+        servers = _extract_stdio_servers(data, "mcpServers")
+        assert "local" in servers
+        assert "remote" not in servers
+
+    def test_gemini_config(self, tmp_path):
+        """Test Gemini CLI config format."""
+        from eryx.mcp import _extract_stdio_servers
+
+        data = {
+            "mcpServers": {
+                "local_tool": {
+                    "command": "/usr/local/bin/my-tool",
+                    "args": ["--arg1"],
+                },
+                "http_tool": {
+                    "httpUrl": "https://mcp.example.com/endpoint",
+                },
+            }
+        }
+        servers = _extract_stdio_servers(data, "mcpServers")
+        assert "local_tool" in servers
+        assert "http_tool" not in servers
+
+    def test_default_sources_structure(self):
+        """Test that _default_sources returns expected structure."""
+        from eryx.mcp import _default_sources
+
+        sources = _default_sources()
+        # Should have both global and project sources
+        assert len(sources) >= 10
+
+        # Check some expected entries exist
+        paths = [str(s.path) for s in sources]
+        keys = [s.key for s in sources]
+        fmts = [s.fmt for s in sources]
+
+        # Claude Code global
+        assert any(".claude.json" in p for p in paths)
+        # Cursor
+        assert any(".cursor" in p and "mcp.json" in p for p in paths)
+        # VS Code
+        assert any(".vscode" in p for p in paths)
+        # Zed
+        assert any("zed" in p for p in paths)
+        assert "context_servers" in keys
+        # Gemini
+        assert any(".gemini" in p for p in paths)
+        # Codex TOML
+        assert any(".codex" in p for p in paths)
+        assert "toml" in fmts
+        # VS Code uses "servers"
+        assert "servers" in keys
 
 
 class TestEnvVarExpansion:

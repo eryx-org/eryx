@@ -109,7 +109,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "--mcp",
         action="store_true",
         default=False,
-        help="enable MCP server integration (discovers servers from .mcp.json and ~/.claude.json)",
+        help="enable MCP server integration (discovers servers from Claude, Cursor, VS Code, Zed, Windsurf, Codex, Gemini configs)",
     )
     mcp_group.add_argument(
         "--mcp-config",
