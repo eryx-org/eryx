@@ -51,7 +51,7 @@ sources = ["../crates/eryx-runtime/runtime.wasm"]
 outputs = ["../crates/eryx-runtime/runtime-preinit.wasm"]
 env = { ERYX_PRECOMPILE_BOOTSTRAP = "1" }
 run = """
-cd .. && cargo run -p eryx-precompile --release -- \
+cd .. && cargo run -p eryx-precompile --release -- compile \
   crates/eryx-runtime/runtime.wasm \
   --preinit \
   --stdlib crates/eryx-wasm-runtime/tests/python-stdlib \
