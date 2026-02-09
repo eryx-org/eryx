@@ -18,8 +18,14 @@ jobs:
         with:
           submodules: recursive
 
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install nightly toolchain
+        run: rustup toolchain install nightly --component rust-src
+
       - name: Install mise
-        uses: jdx/mise-action@v2
+        uses: jdx/mise-action@v3
 
       - name: Build runtime.wasm
         run: |
