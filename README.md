@@ -2,10 +2,10 @@
 
 [![CI](https://github.com/eryx-org/eryx/actions/workflows/ci.yml/badge.svg)](https://github.com/eryx-org/eryx/actions/workflows/ci.yml)
 [![crates.io](https://img.shields.io/crates/v/eryx.svg)](https://crates.io/crates/eryx)
-[![PyPI](https://img.shields.io/pypi/v/eryx.svg)](https://pypi.org/project/eryx/)
+[![PyPI](https://img.shields.io/pypi/v/pyeryx.svg)](https://pypi.org/project/pyeryx/)
 [![npm](https://img.shields.io/npm/v/@bsull/eryx.svg)](https://www.npmjs.com/package/@bsull/eryx)
 
-> **eryx** (noun): A genus of sand boas (Erycinae) — non-venomous snakes that live *in* sand.
+> **eryx** (noun): A genus of sand boas (Erycinae) — non-venomous snakes that live _in_ sand.
 > Perfect for "Python running inside a sandbox."
 
 A Rust library that executes Python code in a WebAssembly sandbox with async callbacks. [Try the demo.](https://demo.eryx.run)
@@ -184,6 +184,7 @@ let pool = SandboxPool::with_builder(
 ```
 
 Key features:
+
 - **Pre-warming**: Pool creates `min_idle` sandboxes upfront for immediate availability
 - **Bounded concurrency**: `max_size` limits concurrent sandbox usage via semaphore
 - **Statistics tracking**: Monitor acquisitions, creations, and wait times
@@ -285,6 +286,7 @@ print(response.read().decode())
 ```
 
 By default, networking is disabled. When enabled via `with_network()`:
+
 - Localhost and private networks are blocked by default
 - Use `allowed_hosts` patterns with wildcards (e.g., `*.example.com`)
 - The host handles DNS resolution and connection management
@@ -292,11 +294,11 @@ By default, networking is disabled. When enabled via `with_network()`:
 
 ## Feature Flags
 
-| Feature              | Description                                                                         | Trade-offs                               |
-|----------------------|-------------------------------------------------------------------------------------|------------------------------------------|
-| `embedded`           | Zero-config sandboxes: embeds pre-compiled Wasm runtime + Python stdlib             | +32MB binary size; enables `unsafe` code paths |
-| `preinit`            | Pre-initialization support for ~25x faster sandbox creation                         | Adds `eryx-runtime` dep; requires build step |
-| `native-extensions`  | Native Python extension support (e.g., numpy) via late-linking                      | Implies `preinit`; experimental          |
+| Feature             | Description                                                             | Trade-offs                                     |
+| ------------------- | ----------------------------------------------------------------------- | ---------------------------------------------- |
+| `embedded`          | Zero-config sandboxes: embeds pre-compiled Wasm runtime + Python stdlib | +32MB binary size; enables `unsafe` code paths |
+| `preinit`           | Pre-initialization support for ~25x faster sandbox creation             | Adds `eryx-runtime` dep; requires build step   |
+| `native-extensions` | Native Python extension support (e.g., numpy) via late-linking          | Implies `preinit`; experimental                |
 
 Package support (`with_package()` for `.whl` and `.tar.gz` files) is always available — no feature flag required.
 
@@ -304,9 +306,9 @@ Package support (`with_package()` for `.whl` and `.tar.gz` files) is always avai
 
 The `preinit` feature provides ~25x faster sandbox creation by capturing Python's initialized memory state at build time. This works with or without native extensions — you can pre-import stdlib modules like `json`, `asyncio`, `re`, etc.
 
-| Metric | Without Pre-init | With Pre-init | Speedup |
-|--------|-----------------|---------------|---------|
-| Sandbox creation | ~450ms | ~18ms | **25x faster** |
+| Metric           | Without Pre-init | With Pre-init | Speedup        |
+| ---------------- | ---------------- | ------------- | -------------- |
+| Sandbox creation | ~450ms           | ~18ms         | **25x faster** |
 
 ### Recommended Configurations
 
@@ -337,11 +339,11 @@ let sandbox = Sandbox::embedded()
 
 ## Performance
 
-| Metric | Normal Wasm | Pre-compiled | Speedup |
-|--------|-------------|--------------|---------|
-| Sandbox creation | ~650ms | ~16ms | **41x faster** |
-| Per-execution overhead | ~1.8ms | ~1.6ms | 14% faster |
-| Session (5 executions) | ~70ms | ~3ms | **23x faster** |
+| Metric                 | Normal Wasm | Pre-compiled | Speedup        |
+| ---------------------- | ----------- | ------------ | -------------- |
+| Sandbox creation       | ~650ms      | ~16ms        | **41x faster** |
+| Per-execution overhead | ~1.8ms      | ~1.6ms       | 14% faster     |
+| Session (5 executions) | ~70ms       | ~3ms         | **23x faster** |
 
 ## Development
 
@@ -417,6 +419,7 @@ cd crates/eryx-python && maturin develop --release
 ```
 
 Common symptoms of stale caches:
+
 - Code changes don't seem to take effect
 - `SandboxFactory` behaves differently than `Sandbox`
 - Tests pass locally but fail in CI (or vice versa)
@@ -499,23 +502,25 @@ This project builds on excellent work from the [Bytecode Alliance](https://bytec
 
 ### Comparison with componentize-py
 
-| Aspect                     | componentize-py                                      | eryx                                                 |
-|----------------------------|------------------------------------------------------|------------------------------------------------------|
-| **Primary Use Case**       | Build Python *components* that export WIT interfaces | Embed Python as a *sandbox* within a Rust host       |
-| **Direction of Control**   | Python exports functions for hosts to call           | Rust host executes Python code and exposes callbacks |
-| **WIT Usage**              | Python implements WIT worlds (exports)               | Internal implementation detail (not user-facing)     |
-| **Output**                 | Standalone `.wasm` component files                   | In-process sandboxed execution                       |
-| **Async Model**            | Component Model async (if supported)                 | Python `asyncio` with Rust `async` callbacks         |
-| **Target Audience**        | Python developers building Wasm components           | Rust/Python developers embedding sandboxed scripting |
-| **State Management**       | Stateless component invocations                      | Session persistence, snapshots, REPL-style           |
-| **Package Loading**        | Build-time only (bundled into component)             | Dynamic at runtime via `with_package()`              |
+| Aspect                   | componentize-py                                      | eryx                                                 |
+| ------------------------ | ---------------------------------------------------- | ---------------------------------------------------- |
+| **Primary Use Case**     | Build Python _components_ that export WIT interfaces | Embed Python as a _sandbox_ within a Rust host       |
+| **Direction of Control** | Python exports functions for hosts to call           | Rust host executes Python code and exposes callbacks |
+| **WIT Usage**            | Python implements WIT worlds (exports)               | Internal implementation detail (not user-facing)     |
+| **Output**               | Standalone `.wasm` component files                   | In-process sandboxed execution                       |
+| **Async Model**          | Component Model async (if supported)                 | Python `asyncio` with Rust `async` callbacks         |
+| **Target Audience**      | Python developers building Wasm components           | Rust/Python developers embedding sandboxed scripting |
+| **State Management**     | Stateless component invocations                      | Session persistence, snapshots, REPL-style           |
+| **Package Loading**      | Build-time only (bundled into component)             | Dynamic at runtime via `with_package()`              |
 
 **When to use componentize-py:**
+
 - You're building a Python application to distribute as a Wasm component
 - You want Python to implement a WIT interface that other components/hosts consume
 - You're working in a component-model-native ecosystem (e.g., wasmCloud, Spin)
 
 **When to use eryx:**
+
 - You're building a Rust or Python application that needs to run user-provided Python code
 - You need a sandboxed scripting environment with controlled host callbacks
 - You want REPL-style sessions with state persistence between executions
