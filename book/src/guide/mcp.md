@@ -268,6 +268,7 @@ for tool in mcp_tools:
 
 ## Next Steps
 
+- [MCP Server](./mcp-server.md) — Expose the sandbox as an MCP tool
 - [Callbacks](./callbacks.md) — Define custom host-side callbacks
 - [CLI](./cli.md) — Full CLI reference
 - [Sessions](./sessions.md) — Persistent state across executions

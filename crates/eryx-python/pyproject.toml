@@ -31,6 +31,7 @@ eryx = "eryx.__main__:main"
 
 [project.optional-dependencies]
 dev = ["pytest", "pytest-asyncio", "mypy", "requests", "httpx"]
+serve = ["mcp>=1.0"]
 
 [tool.maturin]
 features = ["pyo3/extension-module"]
