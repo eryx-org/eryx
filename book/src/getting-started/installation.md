@@ -23,8 +23,6 @@ eryx-precompile setup            # download runtime + pre-compile for your platf
 
 After this one-time setup, `cargo build` will find the cached runtime automatically. You can also set `ERYX_RUNTIME_CWASM=/path/to/runtime.cwasm` to use a specific file.
 
-> **Note:** The `eryx-precompile setup` command is not yet implemented — see [#99](https://github.com/eryx-org/eryx/issues/99). For now, the `embedded` feature requires building from the workspace. If you don't need the embedded runtime, omit the feature and provide your own `runtime.wasm` path via `Sandbox::builder()`.
-
 ### Feature Flags
 
 | Feature              | Description                                                                         | Trade-offs                               |
