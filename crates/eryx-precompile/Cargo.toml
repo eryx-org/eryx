@@ -7,8 +7,6 @@ license.workspace = true
 repository.workspace = true
 authors.workspace = true
 description = "CLI tool for pre-compiling eryx WASM runtimes"
-publish = false
-
 [[bin]]
 name = "eryx-precompile"
 path = "src/main.rs"
@@ -24,7 +22,6 @@ tracing.workspace = true
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 walkdir.workspace = true
 
-# Not published to crates.io, but cargo-dist builds release binaries
 [package.metadata.dist]
 dist = true
 
