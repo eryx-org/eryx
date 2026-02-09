@@ -3110,18 +3110,27 @@ class _EryxNamespace:
                 self._children[child] = _EryxNamespace(self._invoke, new_prefix)
             self._children[child]._add_callback(parts[1:])
 
-    def __getattr__(self, name):
-        if name.startswith('_'):
-            raise AttributeError(name)
+    def _resolve(self, name):
         if name in self._children:
             return self._children[name]
         full_name = f"{{self._prefix}}{{name}}"
         return _EryxCallbackLeaf(self._invoke, full_name)
 
+    def __getattr__(self, name):
+        if name.startswith('_'):
+            raise AttributeError(name)
+        return self._resolve(name)
+
+    def __getitem__(self, name):
+        return self._resolve(name)
+
     async def __call__(self, **kwargs):
         if self._prefix:
             return await self._invoke(self._prefix.rstrip('.'), **kwargs)
         raise TypeError("Cannot call root namespace")
+
+    def __repr__(self):
+        return f"<EryxNamespace '{{self._prefix.rstrip('.')}}'>"
 
 class _EryxCallbackLeaf:
     def __init__(self, invoke_fn, name):
@@ -3130,6 +3139,9 @@ class _EryxCallbackLeaf:
 
     async def __call__(self, **kwargs):
         return await self._invoke(self._name, **kwargs)
+
+    def __repr__(self):
+        return f"<EryxCallback '{{self._name}}'>"
 
 # Generate callback wrappers - add to both module globals and user globals
 _eryx_namespaces = {{}}

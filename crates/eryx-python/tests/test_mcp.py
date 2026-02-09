@@ -556,6 +556,44 @@ class TestMCPSandboxIntegration:
         )
         assert "invoked" in result.stdout
 
+    def test_dict_access_style(self, mcp_manager):
+        """Test calling MCP tool via dict-access on namespace."""
+        sandbox = eryx.Sandbox(mcp=mcp_manager)
+        result = sandbox.execute(
+            textwrap.dedent("""\
+            r = await mcp["mock"]["echo"](message="dict-style")
+            print(r["text"])
+            """)
+        )
+        assert "dict-style" in result.stdout
+
+    def test_dict_access_hyphenated_server(self):
+        """Test dict-access with hyphenated server name (invalid Python identifier)."""
+        manager = eryx.MCPManager()
+        manager.connect("my-server", sys.executable, [MOCK_SERVER], {}, 10.0)
+        try:
+            sandbox = eryx.Sandbox(mcp=manager)
+            result = sandbox.execute(
+                textwrap.dedent("""\
+                r = await mcp["my-server"]["echo"](message="hyphen-test")
+                print(r["text"])
+                """)
+            )
+            assert "hyphen-test" in result.stdout
+        finally:
+            manager.close()
+
+    def test_dict_access_mixed_with_dotted(self, mcp_manager):
+        """Test mixing dict-access and dotted syntax."""
+        sandbox = eryx.Sandbox(mcp=mcp_manager)
+        result = sandbox.execute(
+            textwrap.dedent("""\
+            r = await mcp["mock"].echo(message="mixed-style")
+            print(r["text"])
+            """)
+        )
+        assert "mixed-style" in result.stdout
+
 
 # =============================================================================
 # Session Integration Tests

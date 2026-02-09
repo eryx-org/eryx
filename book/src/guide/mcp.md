@@ -218,11 +218,32 @@ result = await mcp.github.search_repos(query="test")
 #              mcp namespace
 ```
 
-You can also use the generic `invoke()` function:
+### Dict-Access Syntax
+
+Server and tool names that aren't valid Python identifiers (hyphens, `@`, `/`, etc.) can't use dotted attribute syntax. Use dict-style `[]` access instead:
 
 ```python,no_test
-result = await invoke("mcp.github.search_repos", query="test")
+# Hyphenated server name — dotted syntax won't work
+result = await mcp["my-server"].echo(message="hello")
+
+# Both parts can use dict access
+result = await mcp["my-server"]["some-tool"](arg=1)
+
+# Mix freely — dict access for invalid names, dots for valid ones
+result = await mcp["my-server"].search(query="test")
 ```
+
+All three styles are equivalent and can be mixed:
+
+```python,no_test
+# These all call the same tool:
+await mcp.github.search_repos(query="test")           # dotted
+await mcp["github"]["search_repos"](query="test")     # dict
+await mcp["github"].search_repos(query="test")         # mixed
+await invoke("mcp.github.search_repos", query="test")  # invoke()
+```
+
+The `invoke()` function works with any callback name string, regardless of special characters.
 
 ## Introspection
 
