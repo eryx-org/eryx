@@ -23,5 +23,9 @@ tracing.workspace = true
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 walkdir.workspace = true
 
+# Not published to crates.io, but cargo-dist builds release binaries
+[package.metadata.dist]
+dist = true
+
 [lints]
 workspace = true
