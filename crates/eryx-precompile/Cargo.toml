@@ -7,6 +7,7 @@ license.workspace = true
 repository.workspace = true
 authors.workspace = true
 description = "CLI tool for pre-compiling eryx WASM runtimes"
+publish = false
 
 [[bin]]
 name = "eryx-precompile"

@@ -10,6 +10,7 @@ description = "Python bindings for the Eryx sandbox"
 readme = "README.md"
 keywords = ["python", "sandbox", "wasm", "webassembly", "pyo3"]
 categories = ["development-tools", "wasm", "api-bindings"]
+publish = false
 
 [lib]
 name = "_eryx"
