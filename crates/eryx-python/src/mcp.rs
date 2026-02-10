@@ -52,10 +52,10 @@ impl std::fmt::Debug for MCPConnection {
 ///     manager = MCPManager()
 ///     manager.connect("filesystem", "npx", ["-y", "@anthropic/mcp-server-filesystem", "."], {})
 ///     tools = manager.list_tools()
-///     print(tools)  # [{"name": "mcp.filesystem.read_file", ...}, ...]
+///     print(tools)  # [{"name": "mcp[\"filesystem\"].read_file", ...}, ...]
 ///
 ///     sandbox = Sandbox(mcp=manager)
-///     result = sandbox.execute('data = await mcp.filesystem.read_file(path="README.md")')
+///     result = sandbox.execute('data = await mcp["filesystem"].read_file(path="README.md")')
 #[pyclass(module = "eryx")]
 pub struct MCPManager {
     /// Tokio runtime owned by this manager. Kept alive via Arc so that
@@ -180,7 +180,7 @@ impl MCPManager {
         for conn in &self.connections {
             for tool in &conn.tools {
                 let dict = PyDict::new(py);
-                dict.set_item("name", format!("mcp.{}.{}", conn.name, tool.name))?;
+                dict.set_item("name", format!(r#"mcp["{}"].{}"#, conn.name, tool.name))?;
                 dict.set_item("description", tool.description.as_deref().unwrap_or(""))?;
                 let schema_value = serde_json::to_value(&*tool.input_schema)
                     .unwrap_or(Value::Object(Default::default()));

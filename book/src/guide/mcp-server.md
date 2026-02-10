@@ -90,8 +90,8 @@ When inner MCP tools are enabled, the `run_python` tool description is automatic
 Execute Python code in a persistent sandboxed environment. ...
 
 Available tools inside the sandbox (call with `await`):
-- `await mcp.github.search_repos(...)`: Search GitHub repositories
-- `await mcp.filesystem.read_file(...)`: Read a file from the filesystem
+- `await mcp["github"].search_repos(...)`: Search GitHub repositories
+- `await mcp["filesystem"].read_file(...)`: Read a file from the filesystem
 ```
 
 This is useful when you want an AI to have both code execution *and* tool access, but want all of it to run through a single sandboxed environment.

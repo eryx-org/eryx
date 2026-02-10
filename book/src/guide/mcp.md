@@ -10,21 +10,21 @@ MCP tools are bridged into the sandbox as async callbacks. The entire call path 
 
 ```text
 Sandbox Python code
-    → await mcp.server.tool(args)
+    → await mcp["server"].tool(args)
     → WASM callback invoke
     → Rust DynamicCallback
     → rmcp client
     → MCP server (stdio)
 ```
 
-From Python's perspective, MCP tools appear as dotted async functions under a namespace:
+From Python's perspective, MCP tools appear as async functions under the `mcp` namespace:
 
 ```python,no_test
 # Inside the sandbox
-result = await mcp.github.search_repos(query="eryx sandbox")
+result = await mcp["github"].search_repos(query="eryx sandbox")
 print(result["items"])
 
-result = await mcp.filesystem.read_file(path="/tmp/data.txt")
+result = await mcp["filesystem"].read_file(path="/tmp/data.txt")
 print(result["text"])
 ```
 
@@ -93,7 +93,7 @@ Enable MCP with the `--mcp` flag:
 python -m eryx --mcp -c 'tools = list_callbacks(); print([t["name"] for t in tools])'
 
 # Use a specific config file
-python -m eryx --mcp-config .mcp.json -c 'r = await mcp.github.search_repos(query="eryx"); print(r)'
+python -m eryx --mcp-config .mcp.json -c 'r = await mcp["github"].search_repos(query="eryx"); print(r)'
 
 # Multiple config files (later overrides earlier)
 python -m eryx --mcp-config global.json --mcp-config project.json -c '...'
@@ -127,7 +127,7 @@ if manager is not None:
     # Use with a sandbox
     sandbox = eryx.Sandbox(mcp=manager)
     result = sandbox.execute("""
-r = await mcp.github.search_repos(query="python sandbox")
+r = await mcp["github"].search_repos(query="python sandbox")
 print(f"Found {len(r['items'])} repos")
 """)
     print(result.stdout)
@@ -195,7 +195,7 @@ sandbox = eryx.Sandbox(
 
 result = sandbox.execute("""
 # MCP tool
-data = await mcp.filesystem.read_file(path="/tmp/input.txt")
+data = await mcp["filesystem"].read_file(path="/tmp/input.txt")
 
 # Python callback
 upper = await transform(text=data["text"])
@@ -207,39 +207,40 @@ print(upper["result"])
 
 ## Tool Naming
 
-MCP tools are exposed in the sandbox with dotted names following the pattern `mcp.<server>.<tool>`:
+MCP tools are exposed in the sandbox under the `mcp` namespace using bracket syntax for server names:
 
 ```python,no_test
 # Inside the sandbox
-result = await mcp.github.search_repos(query="test")
-#              ^^^  ^^^^^^  ^^^^^^^^^^^^
-#              |    |       tool name
+result = await mcp["github"].search_repos(query="test")
+#              ^^^  ^^^^^^^^  ^^^^^^^^^^^^
+#              |    |         tool name
 #              |    server name
 #              mcp namespace
 ```
 
-### Dict-Access Syntax
-
-Server and tool names that aren't valid Python identifiers (hyphens, `@`, `/`, etc.) can't use dotted attribute syntax. Use dict-style `[]` access instead:
+The bracket syntax is unambiguous and works for all server names, including those with hyphens or other special characters:
 
 ```python,no_test
-# Hyphenated server name — dotted syntax won't work
 result = await mcp["my-server"].echo(message="hello")
-
-# Both parts can use dict access
 result = await mcp["my-server"]["some-tool"](arg=1)
-
-# Mix freely — dict access for invalid names, dots for valid ones
-result = await mcp["my-server"].search(query="test")
 ```
 
-All three styles are equivalent and can be mixed:
+### Dotted Syntax
+
+When server and tool names are valid Python identifiers, you can also use dotted attribute access:
+
+```python,no_test
+# Equivalent — only works when names are valid identifiers
+await mcp.github.search_repos(query="test")
+```
+
+All styles are equivalent and can be mixed:
 
 ```python,no_test
 # These all call the same tool:
+await mcp["github"].search_repos(query="test")         # bracket (recommended)
+await mcp["github"]["search_repos"](query="test")     # full bracket
 await mcp.github.search_repos(query="test")           # dotted
-await mcp["github"]["search_repos"](query="test")     # dict
-await mcp["github"].search_repos(query="test")         # mixed
 await invoke("mcp.github.search_repos", query="test")  # invoke()
 ```
 

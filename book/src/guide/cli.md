@@ -110,7 +110,7 @@ python -m eryx -v /path/to/files:/input:ro -c 'print(open("/input/data.txt").rea
 
 ```bash
 # Auto-discover MCP servers from Claude, Cursor, VS Code, Zed, Windsurf, Codex, Gemini configs
-python -m eryx --mcp -c 'r = await mcp.github.search_repos(query="test"); print(r)'
+python -m eryx --mcp -c 'r = await mcp["github"].search_repos(query="test"); print(r)'
 
 # Use a specific config file
 python -m eryx --mcp-config .mcp.json -c '...'
