@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## `eryx-vfs` - [0.4.3](https://github.com/eryx-org/eryx/compare/eryx-vfs-v0.4.2...eryx-vfs-v0.4.3) - 2026-02-10
+
+### Fixed
+- Windows symlink support + add Windows CI check ([#126](https://github.com/eryx-org/eryx/pull/126))
+
 ## `eryx-precompile` - [0.4.2](https://github.com/eryx-org/eryx/compare/eryx-precompile-v0.4.1...eryx-precompile-v0.4.2) - 2026-02-10
 
 ### Fixed

@@ -932,7 +932,7 @@ dependencies = [
 
 [[package]]
 name = "eryx"
-version = "0.4.2"
+version = "0.4.3"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -969,7 +969,7 @@ dependencies = [
 
 [[package]]
 name = "eryx-macros"
-version = "0.4.2"
+version = "0.4.3"
 dependencies = [
  "eryx",
  "proc-macro2",
@@ -983,7 +983,7 @@ dependencies = [
 
 [[package]]
 name = "eryx-precompile"
-version = "0.4.2"
+version = "0.4.3"
 dependencies = [
  "anyhow",
  "clap",
@@ -998,7 +998,7 @@ dependencies = [
 
 [[package]]
 name = "eryx-python"
-version = "0.4.2"
+version = "0.4.3"
 dependencies = [
  "async-trait",
  "eryx",
@@ -1014,7 +1014,7 @@ dependencies = [
 
 [[package]]
 name = "eryx-runtime"
-version = "0.4.2"
+version = "0.4.3"
 dependencies = [
  "anyhow",
  "futures",
@@ -1035,7 +1035,7 @@ dependencies = [
 
 [[package]]
 name = "eryx-vfs"
-version = "0.4.2"
+version = "0.4.3"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1054,7 +1054,7 @@ dependencies = [
 
 [[package]]
 name = "eryx-wasm-runtime"
-version = "0.4.2"
+version = "0.4.3"
 dependencies = [
  "pyo3",
  "tokio",
@@ -4468,7 +4468,7 @@ dependencies = [
 
 [[package]]
 name = "wit-dylib-ffi"
-version = "0.4.2"
+version = "0.4.3"
 
 [[package]]
 name = "wit-parser"
