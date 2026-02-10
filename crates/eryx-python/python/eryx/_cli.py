@@ -8,8 +8,14 @@ import eryx
 
 
 def parse_volume(spec: str) -> tuple[str, str, bool]:
-    """Parse a Docker-style volume spec: SRC:DST[:ro|:rw]."""
+    """Parse a Docker-style volume spec: SRC:DST[:ro|:rw].
+
+    Handles Windows drive letters (e.g. C:\\Users\\foo:/mnt/data).
+    """
     parts = spec.split(":")
+    # Rejoin Windows drive letter (e.g. ["C", "\\Users\\foo", "/mnt", ...])
+    if len(parts) >= 2 and len(parts[0]) == 1 and parts[0].isalpha():
+        parts = [parts[0] + ":" + parts[1]] + parts[2:]
     if len(parts) == 2:
         return (parts[0], parts[1], False)
     if len(parts) == 3 and parts[2] in ("ro", "rw"):
