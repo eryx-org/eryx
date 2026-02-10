@@ -570,13 +570,93 @@ async fn test_snapshot_with_functions() {
         .await
         .unwrap_or_else(|e| panic!("Failed to define lambda: {}", e));
 
+    // --- CI diagnostic: inspect globals and dill serialization ---
+    let diag = session
+        .execute(
+            r#"
+import dill
+import sys
+
+lines = []
+lines.append(f"Python: {sys.version}")
+lines.append(f"dill version: {dill.__version__}")
+
+g = globals()
+user_keys = sorted([k for k in g.keys() if not k.startswith('__') and not k.startswith('_eryx')])
+all_keys = sorted(g.keys())
+lines.append(f"all globals keys: {all_keys}")
+lines.append(f"user keys: {user_keys}")
+
+# Check if callback infrastructure exists
+for name in ['invoke', 'list_callbacks', '_EryxNamespace', '_EryxCallbackLeaf', '_eryx_make_callback', '_eryx_reserved']:
+    lines.append(f"  {name} in globals: {name in g}")
+
+# Try serializing each user item individually
+for k in user_keys:
+    v = g[k]
+    try:
+        data = dill.dumps(v)
+        lines.append(f"OK: {k} ({type(v).__name__}, {len(data)} bytes)")
+    except Exception as e:
+        lines.append(f"FAIL: {k} ({type(v).__name__}): {type(e).__name__}: {e}")
+
+# For functions, check __globals__ contents
+for k in user_keys:
+    v = g[k]
+    if callable(v) and hasattr(v, '__globals__'):
+        fg_keys = sorted(v.__globals__.keys())
+        lines.append(f"  {k}.__globals__ keys: {fg_keys}")
+        lines.append(f"  {k}.__globals__ is globals(): {v.__globals__ is g}")
+        # Check if callback items are in __globals__
+        for cb in ['invoke', 'list_callbacks', '_EryxNamespace']:
+            lines.append(f"    '{cb}' in {k}.__globals__: {cb in v.__globals__}")
+
+# Try the full stash-and-serialize approach manually
+lines.append("--- manual stash test ---")
+exclude = {'__builtins__', '__name__', '__doc__', '__package__', '__loader__', '__spec__', '__cached__', '__file__', 'invoke', 'list_callbacks', '_EryxNamespace', '_EryxCallbackLeaf', '_eryx_make_callback', '_eryx_reserved'}
+stashed = {}
+for sk in list(g.keys()):
+    if sk in exclude:
+        stashed[sk] = g.pop(sk)
+try:
+    remaining = sorted([k for k in g.keys() if not k.startswith('_eryx')])
+    lines.append(f"after stash, remaining user keys: {remaining}")
+    state_dict = {}
+    for sk in remaining:
+        sv = g.get(sk)
+        if sv is not None:
+            try:
+                dill.dumps(sv)
+                state_dict[sk] = sv
+                lines.append(f"  stashed OK: {sk}")
+            except Exception as e:
+                lines.append(f"  stashed FAIL: {sk}: {type(e).__name__}: {e}")
+    result = dill.dumps(state_dict)
+    lines.append(f"final dict size: {len(result)} bytes, keys: {sorted(state_dict.keys())}")
+finally:
+    g.update(stashed)
+lines.append(f"after restore, invoke in globals: {'invoke' in g}")
+
+print('\n'.join(lines))
+"#,
+        )
+        .run()
+        .await
+        .unwrap_or_else(|e| panic!("Diagnostic failed: {}", e));
+    eprintln!(
+        "=== SNAPSHOT DIAGNOSTIC ===\n{}\n=== END DIAGNOSTIC ===",
+        diag.stdout
+    );
+    // --- end diagnostic ---
+
     let snapshot = session
         .snapshot_state()
         .await
         .unwrap_or_else(|e| panic!("Failed to snapshot: {}", e));
     assert!(
         snapshot.size() > 10,
-        "Snapshot should contain serialized data"
+        "Snapshot should contain serialized data, got {} bytes",
+        snapshot.size()
     );
 
     session.clear_state().await.unwrap();
@@ -627,10 +707,47 @@ class Point:
         .await
         .unwrap_or_else(|e| panic!("Failed to create instance: {}", e));
 
+    // --- CI diagnostic for class snapshot ---
+    let diag = session
+        .execute(
+            r#"
+import dill
+lines = []
+g = globals()
+user_keys = sorted([k for k in g.keys() if not k.startswith('__') and not k.startswith('_eryx')])
+lines.append(f"user keys: {user_keys}")
+for k in user_keys:
+    v = g[k]
+    try:
+        data = dill.dumps(v)
+        lines.append(f"OK: {k} ({type(v).__name__}, {len(data)} bytes)")
+    except Exception as e:
+        lines.append(f"FAIL: {k} ({type(v).__name__}): {type(e).__name__}: {e}")
+        # For classes/instances, try to understand WHY serialization fails
+        if hasattr(v, '__dict__'):
+            for attr_name, attr_val in vars(v).items():
+                try:
+                    dill.dumps(attr_val)
+                    lines.append(f"  attr OK: {attr_name}")
+                except Exception as e2:
+                    lines.append(f"  attr FAIL: {attr_name}: {type(e2).__name__}: {e2}")
+print('\n'.join(lines))
+"#,
+        )
+        .run()
+        .await
+        .unwrap_or_else(|e| panic!("Class diagnostic failed: {}", e));
+    eprintln!(
+        "=== CLASS SNAPSHOT DIAGNOSTIC ===\n{}\n=== END DIAGNOSTIC ===",
+        diag.stdout
+    );
+    // --- end diagnostic ---
+
     let snapshot = session
         .snapshot_state()
         .await
         .unwrap_or_else(|e| panic!("Failed to snapshot: {}", e));
+    eprintln!("Class snapshot size: {} bytes", snapshot.size());
 
     session.clear_state().await.unwrap();
 
@@ -638,6 +755,25 @@ class Point:
         .restore_state(&snapshot)
         .await
         .unwrap_or_else(|e| panic!("Failed to restore: {}", e));
+
+    // --- Diagnostic: check what's in globals after restore ---
+    let diag2 = session
+        .execute(
+            r#"
+g = globals()
+user_keys = sorted([k for k in g.keys() if not k.startswith('__') and not k.startswith('_eryx')])
+print(f"after restore user keys: {user_keys}")
+for k in user_keys:
+    print(f"  {k}: {type(g[k]).__name__}")
+"#,
+        )
+        .run()
+        .await
+        .unwrap_or_else(|e| panic!("Post-restore diagnostic failed: {}", e));
+    eprintln!(
+        "=== POST-RESTORE DIAGNOSTIC ===\n{}\n=== END DIAGNOSTIC ===",
+        diag2.stdout
+    );
 
     // Instance should work
     let output = session
