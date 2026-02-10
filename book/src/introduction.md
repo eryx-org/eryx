@@ -39,7 +39,7 @@ Or try it in the browser at [demo.eryx.run](https://demo.eryx.run).
 
 ### True CPython
 
-- **Real CPython 3.14** — Not a reimplementation or subset; runs the full CPython interpreter compiled to WebAssembly via [componentize-py](https://github.com/bytecodealliance/componentize-py)
+- **Real CPython 3.14** — Not a reimplementation or subset; runs the full CPython interpreter compiled to WebAssembly using techniques from [componentize-py](https://github.com/bytecodealliance/componentize-py)
 - **Install packages** — Add `.whl` and `.tar.gz` packages including WASI-compiled native extensions
 - **Full standard library** — `json`, `sqlite3`, `pathlib`, `re`, `asyncio`, and the rest of the stdlib work out of the box
 
