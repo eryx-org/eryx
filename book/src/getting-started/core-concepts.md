@@ -41,7 +41,6 @@ Callbacks are the primary way sandboxed code interacts with the outside world.
 
 - Automatically discovers MCP servers from IDE configs (Claude Code, Cursor, VS Code, Zed, Windsurf, Codex, Gemini)
 - Exposes tools as async functions under `mcp.<server>.<tool>` namespaces
-- The entire call path is handled in Rust for performance
 - Only stdio-type servers are supported
 
 MCP integration lets sandboxed code access external tool servers without any custom callback code.
