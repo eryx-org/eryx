@@ -1,6 +1,6 @@
 //! # Eryx
 //!
-//! A Python sandbox with async callbacks powered by WebAssembly.
+//! A Python sandbox with async callbacks, powered by WebAssembly.
 //!
 //! ## Safety
 //!
