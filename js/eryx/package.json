@@ -29,6 +29,12 @@
       "types": "./shims/callbacks.d.ts",
       "default": "./shims/callbacks.js"
     },
+    "./shims/net": {
+      "default": "./shims/net.js"
+    },
+    "./shims/sockets": {
+      "default": "./shims/sockets.js"
+    },
     "./low-level": {
       "types": "./eryx-sandbox.d.ts",
       "default": "./eryx-sandbox.js"

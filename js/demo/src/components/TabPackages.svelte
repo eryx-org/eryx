@@ -66,13 +66,29 @@
     setTimeout(() => (statusMessage = null), 4000);
   }
 
+  function isSupportedPackage(name: string): boolean {
+    return name.endsWith(".whl") || name.endsWith(".tar.gz") || name.endsWith(".tgz");
+  }
+
+  function parsePackageName(filename: string): { name: string; version: string } {
+    if (filename.endsWith(".whl")) {
+      const parts = filename.replace(".whl", "").split("-");
+      return { name: parts[0], version: parts[1] || "?" };
+    }
+    // tar.gz: e.g. "numpy-wasi.tar.gz" or "numpy-1.26.4.tar.gz"
+    const base = filename.replace(/\.tar\.gz$|\.tgz$/, "");
+    const match = base.match(/^(.+?)-(\d+\..*)$/);
+    if (match) return { name: match[1], version: match[2] };
+    return { name: base, version: "?" };
+  }
+
   async function handleFiles(files: FileList) {
     for (const f of files) {
-      if (!f.name.endsWith(".whl")) continue;
-      const parts = f.name.replace(".whl", "").split("-");
+      if (!isSupportedPackage(f.name)) continue;
+      const { name, version } = parsePackageName(f.name);
       packages.push({
-        name: parts[0],
-        version: parts[1] || "?",
+        name,
+        version,
         size: f.size,
         file: f,
         status: "pending",
@@ -88,7 +104,7 @@
       pkg.status = "installing";
       packages = [...packages];
       try {
-        await installWheel(pkg);
+        await installPackage(pkg);
         pkg.status = "installed";
       } catch (e) {
         pkg.status = "error";
@@ -117,9 +133,12 @@
     }
   }
 
-  async function installWheel(pkg: Package) {
+  async function installPackage(pkg: Package) {
     const arrayBuffer = await pkg.file.arrayBuffer();
-    const entries = await parseZip(new Uint8Array(arrayBuffer));
+    const raw = new Uint8Array(arrayBuffer);
+    const entries = pkg.file.name.endsWith(".whl")
+      ? await parseZip(raw)
+      : await parseTarGz(raw);
 
     // Check for native WASI extensions
     const nativeExts = detectNativeExtensions(entries);
@@ -184,8 +203,10 @@
       for (const [path, data] of entries) {
         if (path.includes(".dist-info/") || path.includes("__pycache__/"))
           continue;
-        // Skip .so files (already linked into the component)
-        if (path.endsWith(".so")) continue;
+        // Keep .so files on the filesystem — Python's import system needs to
+        // find them via stat/readdir before it'll call dlopen(). The actual
+        // native code is already linked into the WASM component; dlopen()
+        // resolves pre-linked libraries by name, not by file content.
 
         const parts = path.split("/");
         let current = sitePackages;
@@ -212,6 +233,67 @@
 
     // Configure sys.path for the new sandbox
     sitePackagesConfigured = false;
+  }
+
+  /**
+   * Parse a .tar.gz file and return [path, Uint8Array] entries.
+   */
+  async function parseTarGz(
+    data: Uint8Array,
+  ): Promise<[string, Uint8Array][]> {
+    // Decompress gzip
+    const ds = new DecompressionStream("gzip");
+    const writer = ds.writable.getWriter();
+    const reader = ds.readable.getReader();
+    writer.write(data);
+    writer.close();
+    const chunks: Uint8Array[] = [];
+    let totalLen = 0;
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      chunks.push(value);
+      totalLen += value.length;
+    }
+    const tar = new Uint8Array(totalLen);
+    let writeOffset = 0;
+    for (const chunk of chunks) {
+      tar.set(chunk, writeOffset);
+      writeOffset += chunk.length;
+    }
+
+    // Parse tar
+    const entries: [string, Uint8Array][] = [];
+    let pos = 0;
+    const decoder = new TextDecoder();
+
+    while (pos + 512 <= tar.length) {
+      const header = tar.subarray(pos, pos + 512);
+      // Check for end-of-archive (two zero blocks)
+      if (header.every((b) => b === 0)) break;
+
+      const nameRaw = decoder.decode(header.subarray(0, 100)).replace(/\0.*/, "");
+      const sizeOctal = decoder.decode(header.subarray(124, 136)).replace(/\0.*/, "").trim();
+      const typeFlag = header[156];
+      const prefix = decoder.decode(header.subarray(345, 500)).replace(/\0.*/, "");
+
+      const fullName = prefix ? `${prefix}/${nameRaw}` : nameRaw;
+      const size = sizeOctal ? parseInt(sizeOctal, 8) : 0;
+
+      pos += 512; // Move past header
+
+      if (typeFlag === 0x30 || typeFlag === 0) {
+        // Regular file
+        if (size > 0 && !fullName.endsWith("/")) {
+          entries.push([fullName, tar.slice(pos, pos + size)]);
+        }
+      }
+
+      // Advance past file data (rounded up to 512-byte blocks)
+      pos += Math.ceil(size / 512) * 512;
+    }
+
+    return entries;
   }
 
   /**
@@ -313,9 +395,10 @@
 </script>
 
 <p class="hint">
-  Upload Python wheels to make packages available for import. Pure-Python
-  wheels are extracted into a virtual filesystem. Wheels with native WASI
-  extensions trigger an in-browser linking pipeline.
+  Upload Python packages (.whl or .tar.gz) to make them available for import.
+  Pure-Python packages are extracted into a virtual filesystem. Packages with
+  native WASI extensions trigger an in-browser linking and transpilation
+  pipeline, which may take a minute or two.
 </p>
 
 {#if statusMessage}
@@ -345,12 +428,12 @@
   ondragleave={() => (dragover = false)}
   ondrop={handleDrop}
 >
-  <p><strong>Drop .whl files here</strong> or click to browse</p>
-  <p class="small">Pure Python and native WASI extension wheels are supported</p>
+  <p><strong>Drop .whl or .tar.gz files here</strong> or click to browse</p>
+  <p class="small">Pure Python and native WASI extension packages are supported</p>
   <input
     bind:this={fileInput}
     type="file"
-    accept=".whl"
+    accept=".whl,.tar.gz,.tgz,application/gzip,application/x-gzip,application/x-tar"
     multiple
     disabled={state.status !== "ready"}
     onchange={(e) => {
@@ -401,9 +484,9 @@
 {/if}
 
 <p class="pkg-hint">
-  Download wheels from <a href="https://pypi.org">PyPI</a>. Pure Python
+  Download packages from <a href="https://pypi.org">PyPI</a>. Pure Python
   (<code>py3-none-any.whl</code>) and native WASI extension
-  (<code>wasm32-wasi.whl</code>) wheels are supported.
+  (<code>wasm32-wasi.whl</code> / <code>.tar.gz</code>) packages are supported.
 </p>
 
 <style>

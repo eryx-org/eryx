@@ -22,7 +22,9 @@ cd .. && mise run build-eryx-runtime
 description = "Extract Python stdlib for pre-initialization"
 depends = ["wasm-build"]
 sources = ["../crates/eryx/python-stdlib.tar.zst"]
-outputs = ["../crates/eryx-wasm-runtime/tests/python-stdlib/encodings/__init__.py"]
+outputs = [
+  "../crates/eryx-wasm-runtime/tests/python-stdlib/encodings/__init__.py",
+]
 run = """
 #!/usr/bin/env bash
 set -euo pipefail
@@ -89,7 +91,11 @@ run = "node patch-jco.cjs"
 [tasks.build]
 description = "Build JavaScript bindings (WASM + transpile + version sync + stdlib)"
 depends = ["patch-js"]
-sources = ["eryx/eryx-sandbox.js", "../Cargo.toml", "../crates/eryx/python-stdlib.tar.gz"]
+sources = [
+  "eryx/eryx-sandbox.js",
+  "../Cargo.toml",
+  "../crates/eryx/python-stdlib.tar.gz",
+]
 outputs = ["eryx/package.json", "eryx/python-stdlib.tar.gz"]
 run = """
 #!/usr/bin/env bash
@@ -119,7 +125,7 @@ run = """
 #!/usr/bin/env bash
 set -euo pipefail
 npm install
-npx vite --open
+npx vite --open --host
 """
 
 [tasks.demo-build]

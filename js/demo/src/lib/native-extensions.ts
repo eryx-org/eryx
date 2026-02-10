@@ -301,6 +301,8 @@ async function loadDynamicSandbox(
   onProgress: ProgressCallback,
 ): Promise<DynamicSandboxExports> {
   onProgress("Loading dynamic sandbox...");
+  console.log("[native-extensions] transpile result imports:", transpiled.imports);
+  console.log("[native-extensions] transpile result exports:", transpiled.exports);
 
   // Build an in-memory map of filename -> content
   const fileMap = new Map<string, Uint8Array>();
@@ -311,11 +313,6 @@ async function loadDynamicSandbox(
       // Decode and apply patches to the main JS file
       let jsCode = new TextDecoder().decode(content);
       jsCode = applyJcoPatches(jsCode);
-
-      // Rewrite import paths for shims to use absolute URLs from the eryx package.
-      // The transpiled code imports from relative paths like './shims/net.js'
-      // which won't resolve from a blob URL. Rewrite them to absolute module paths.
-      jsCode = rewriteShimImports(jsCode);
 
       mainJsSource = jsCode;
     } else {
@@ -363,27 +360,10 @@ async function loadDynamicSandbox(
 
     onProgress("Instantiating WASM...");
 
-    // Load shim modules for the imports
-    // Import shim modules. Use @vite-ignore for dynamic paths that Vite
-    // shouldn't try to resolve at build time.
-    const callbackShims: any = await import(
-      /* @vite-ignore */ new URL(
-        "../eryx/shims/callbacks.js",
-        import.meta.url,
-      ).href
-    );
-    const netShims: any = await import(
-      /* @vite-ignore */ new URL(
-        "../eryx/shims/net.js",
-        import.meta.url,
-      ).href
-    );
-    const socketShims: any = await import(
-      /* @vite-ignore */ new URL(
-        "../eryx/shims/sockets.js",
-        import.meta.url,
-      ).href
-    );
+    // Load shim modules from the @bsull/eryx package
+    const callbackShims: any = await import("@bsull/eryx/callbacks");
+    const netShims: any = await import(/* @vite-ignore */ "@bsull/eryx/shims/net");
+    const socketShims: any = await import(/* @vite-ignore */ "@bsull/eryx/shims/sockets");
     const [p2Cli, p2Clocks, p2Filesystem, p2Io, p2Random] =
       await Promise.all([
         import("@bytecodealliance/preview2-shim/cli"),
@@ -393,28 +373,39 @@ async function loadDynamicSandbox(
         import("@bytecodealliance/preview2-shim/random"),
       ]);
 
-    // Build the imports object matching what the instantiation mode expects.
-    // The import names come from the --map flags and preview2-shim defaults.
+    // In instantiation mode, jco's instantiate(compileCore, imports) expects
+    // imports keyed by module path (for mapped imports) or WIT interface name
+    // (for unmapped ones). Since the map may not apply consistently, we
+    // provide both styles and also discover keys from the transpiled output.
     const shimImports: Record<string, any> = {
-      "eryx:net/tcp": netShims.tcp,
-      "eryx:net/tls": netShims.tls,
-      invoke: callbackShims.invoke,
-      "list-callbacks": callbackShims.listCallbacks,
-      "report-trace": callbackShims.reportTrace,
-      "report-output": callbackShims.reportOutput,
-      "wasi:sockets/instance-network@0.2.3": socketShims.instanceNetwork,
-      "wasi:sockets/ip-name-lookup@0.2.3": socketShims.ipNameLookup,
-      "wasi:sockets/network@0.2.3": socketShims.network,
-      "wasi:sockets/tcp-create-socket@0.2.3": socketShims.tcpCreateSocket,
-      "wasi:sockets/tcp@0.2.3": socketShims.tcp,
-      "wasi:sockets/udp-create-socket@0.2.3": socketShims.udpCreateSocket,
-      "wasi:sockets/udp@0.2.3": socketShims.udp,
-      // preview2-shim WASI imports
-      ...extractWasiImports("cli", p2Cli),
-      ...extractWasiImports("clocks", p2Clocks),
-      ...extractWasiImports("filesystem", p2Filesystem),
-      ...extractWasiImports("io", p2Io),
-      ...extractWasiImports("random", p2Random),
+      // Mapped custom shims (keyed by map target path)
+      "./shims/callbacks.js": {
+        invoke: callbackShims.invoke,
+        listCallbacks: callbackShims.listCallbacks,
+        reportTrace: callbackShims.reportTrace,
+        reportOutput: callbackShims.reportOutput,
+      },
+      "./shims/net.js": {
+        tcp: netShims.tcp,
+        tls: netShims.tls,
+      },
+      "./shims/sockets.js": {
+        instanceNetwork: socketShims.instanceNetwork,
+        ipNameLookup: socketShims.ipNameLookup,
+        network: socketShims.network,
+        tcpCreateSocket: socketShims.tcpCreateSocket,
+        tcp: socketShims.tcp,
+        udpCreateSocket: socketShims.udpCreateSocket,
+        udp: socketShims.udp,
+      },
+      // WASI imports keyed by individual WIT interface name.
+      ...expandWasiImports("cli", p2Cli),
+      ...expandWasiImports("clocks", p2Clocks),
+      ...expandWasiImports("filesystem", p2Filesystem),
+      ...expandWasiImports("io", p2Io),
+      ...expandWasiImports("random", p2Random),
+      // Socket shims also under WIT names (map may not apply for versioned keys)
+      ...expandWasiImports("sockets", socketShims),
     };
 
     // compileCore: resolves WASM URLs to compiled modules.
@@ -428,14 +419,13 @@ async function loadDynamicSandbox(
       return WebAssembly.compileStreaming(resp);
     };
 
-    const instance = await mod.instantiate(compileCore, shimImports);
-
-    // Set up filesystem before finalizePreinit
+    // Set up environment and filesystem BEFORE instantiation — Py_InitializeEx
+    // runs during __wasm_call_ctors and needs PYTHONHOME + stdlib available.
     onProgress("Loading Python stdlib...");
-    await setupFilesystem();
+    await setupEnvironmentAndFilesystem();
 
-    onProgress("Initializing Python interpreter (this may take a while)...");
-    instance.finalizePreinit();
+    onProgress("Instantiating WASM (Python cold start, may take a while)...");
+    const instance = await mod.instantiate(compileCore, shimImports);
 
     return {
       execute: instance.execute,
@@ -452,49 +442,47 @@ async function loadDynamicSandbox(
   }
 }
 
+
 /**
- * Extract WASI imports from a preview2-shim sub-module.
+ * Expand a preview2-shim sub-module into individual WIT interface entries.
  *
- * Each sub-module (e.g., "cli") exports named members like `environment`,
- * `exit`, `stderr`, etc. These map to `wasi:cli/environment@0.2.3`, etc.
+ * e.g. expandWasiImports("cli", p2Cli) produces:
+ *   { "wasi:cli/environment": p2Cli.environment,
+ *     "wasi:cli/exit": p2Cli.exit, ... }
  */
-function extractWasiImports(
+function expandWasiImports(
   namespace: string,
-  mod: any,
+  mod: Record<string, any>,
 ): Record<string, any> {
-  const imports: Record<string, any> = {};
+  const result: Record<string, any> = {};
   for (const [key, val] of Object.entries(mod)) {
-    if (key.startsWith("_")) continue; // Skip private exports
-    const wasiKey = `wasi:${namespace}/${camelToKebab(key)}@0.2.3`;
-    imports[wasiKey] = val;
+    if (key.startsWith("_") || typeof val !== "object") continue;
+    const kebab = key.replace(/([a-z])([A-Z])/g, "$1-$2").toLowerCase();
+    result[`wasi:${namespace}/${kebab}`] = val;
   }
-  return imports;
-}
-
-function camelToKebab(s: string): string {
-  return s.replace(/([a-z])([A-Z])/g, "$1-$2").toLowerCase();
+  return result;
 }
 
 /**
- * Rewrite shim import paths in transpiled JS to absolute URLs.
+ * Set up WASI environment variables and filesystem before Python initializes.
  *
- * jco generates imports like `from './shims/net.js'` which won't resolve
- * from a blob URL context. With instantiation: 'async', most imports are
- * passed via the imports object, but some may still be referenced.
+ * Python needs PYTHONHOME and PYTHONPATH to find the stdlib, and the
+ * preview2-shim filesystem must have the stdlib files available.
  */
-function rewriteShimImports(code: string): string {
-  // In instantiation mode, imports are passed to instantiate(),
-  // so we shouldn't need to rewrite imports. But if there are
-  // any static imports of preview2-shim, handle them.
-  return code;
-}
+async function setupEnvironmentAndFilesystem(): Promise<void> {
+  // Set PYTHONHOME and PYTHONPATH so Py_InitializeEx can find the stdlib
+  const cliMod: any = await import("@bytecodealliance/preview2-shim/cli");
+  if (cliMod._setEnv) {
+    cliMod._setEnv({
+      PYTHONHOME: "/python-stdlib",
+      PYTHONPATH: "/python-stdlib",
+    });
+  }
 
-/** Set up the preview2-shim filesystem with stdlib. */
-async function setupFilesystem(): Promise<void> {
+  // Load stdlib into the preview2-shim virtual filesystem
   const fsMod: any = await import(
     "@bytecodealliance/preview2-shim/filesystem"
   );
-  const _setFileData = fsMod._setFileData;
 
   // The main eryx module has already been loaded by the initial sandbox,
   // so _fileTree contains the stdlib + site-packages.
@@ -504,7 +492,7 @@ async function setupFilesystem(): Promise<void> {
     throw new Error("eryx _fileTree not available; initial sandbox must load first");
   }
 
-  _setFileData(fileTree);
+  fsMod._setFileData(fileTree);
 }
 
 // --------------------------------------------------------------------------
@@ -515,6 +503,10 @@ async function setupFilesystem(): Promise<void> {
  * Detect native WASI extensions in a wheel's file entries.
  *
  * Returns entries whose filenames end in `.so` and contain `wasm32-wasi`.
+ * The `name` field is set to the full installed filesystem path (e.g.,
+ * `/site-packages/numpy/core/_multiarray_umath.cpython-314-wasm32-wasi.so`)
+ * because wit-component's built-in libdl uses exact string matching in
+ * `dlopen()` — the name must match what Python's import system passes.
  */
 export function detectNativeExtensions(
   entries: [string, Uint8Array][],
@@ -522,7 +514,8 @@ export function detectNativeExtensions(
   const extensions: NativeExtension[] = [];
   for (const [path, data] of entries) {
     if (path.endsWith(".so") && path.includes("wasm32-wasi")) {
-      const name = path.split("/").pop() || path;
+      // Use full installed path so dlopen() can find it by exact match
+      const name = `/site-packages/${path}`;
       extensions.push({ name, bytes: data });
     }
   }
