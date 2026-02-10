@@ -17,6 +17,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 - tidy crate doc comments to trigger release ([#118](https://github.com/eryx-org/eryx/pull/118))
 
+### Other
+- release v0.4.2 ([#123](https://github.com/eryx-org/eryx/pull/123))
+
+## `eryx-vfs` - [0.4.2](https://github.com/eryx-org/eryx/compare/eryx-vfs-v0.4.1...eryx-vfs-v0.4.2) - 2026-02-10
+
+### Fixed
+- tidy crate doc comments to trigger release ([#118](https://github.com/eryx-org/eryx/pull/118))
+
+## `eryx-runtime` - [0.4.2](https://github.com/eryx-org/eryx/compare/eryx-runtime-v0.4.1...eryx-runtime-v0.4.2) - 2026-02-10
+
+### Fixed
+- *(ci)* unpin nightly and clean stale build-std artifacts on rebuild ([#122](https://github.com/eryx-org/eryx/pull/122))
+- pin nightly toolchain to 2026-01-31 for WASM build ([#121](https://github.com/eryx-org/eryx/pull/121))
+- tidy crate doc comments to trigger release ([#118](https://github.com/eryx-org/eryx/pull/118))
+
+## `eryx-macros` - [0.4.2](https://github.com/eryx-org/eryx/compare/eryx-macros-v0.4.1...eryx-macros-v0.4.2) - 2026-02-10
+
+### Fixed
+- tidy crate doc comments to trigger release ([#118](https://github.com/eryx-org/eryx/pull/118))
+
+## `eryx-precompile` - [0.4.2](https://github.com/eryx-org/eryx/compare/eryx-precompile-v0.4.1...eryx-precompile-v0.4.2) - 2026-02-10
+
+### Fixed
+- tidy crate doc comments to trigger release ([#118](https://github.com/eryx-org/eryx/pull/118))
+
+## `eryx` - [0.4.2](https://github.com/eryx-org/eryx/compare/eryx-v0.4.1...eryx-v0.4.2) - 2026-02-10
+
+### Fixed
+- tidy crate doc comments to trigger release ([#118](https://github.com/eryx-org/eryx/pull/118))
+
 ## `eryx-vfs` - [0.4.2](https://github.com/eryx-org/eryx/compare/eryx-vfs-v0.4.1...eryx-vfs-v0.4.2) - 2026-02-10
 
 ### Fixed
