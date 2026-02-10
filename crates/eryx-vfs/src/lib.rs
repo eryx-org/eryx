@@ -1,8 +1,8 @@
 //! Virtual Filesystem for Eryx Sandbox
 //!
-//! This crate provides a custom `wasi:filesystem` implementation backed by a
-//! key-value store, allowing sandboxed Python code to read and write files
-//! that persist across sandbox executions.
+//! Provides a custom `wasi:filesystem` implementation backed by a key-value
+//! store, allowing sandboxed Python code to read and write files that persist
+//! across sandbox executions.
 //!
 //! ## Architecture
 //!

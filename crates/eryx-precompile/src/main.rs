@@ -1,7 +1,7 @@
 //! CLI tool for pre-compiling eryx WASM runtimes.
 //!
-//! This tool pre-initializes Python and/or pre-compiles WASM to native code,
-//! producing artifacts that dramatically speed up sandbox creation.
+//! Pre-initializes Python and/or pre-compiles WASM to native code, producing
+//! artifacts that dramatically speed up sandbox creation.
 //!
 //! # Examples
 //!

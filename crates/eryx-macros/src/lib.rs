@@ -1,7 +1,7 @@
 //! Procedural macros for the eryx Python sandbox.
 //!
-//! This crate provides the `#[callback]` attribute macro for defining
-//! sandbox callbacks with minimal boilerplate.
+//! Provides the `#[callback]` attribute macro for defining sandbox callbacks
+//! with minimal boilerplate.
 //!
 //! # Example
 //!
