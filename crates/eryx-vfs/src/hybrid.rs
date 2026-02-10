@@ -10,6 +10,8 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+#[cfg(windows)]
+use cap_fs_ext::DirExt as _;
 use wasmtime::component::ResourceTable;
 use wasmtime_wasi::{DirPerms, FilePerms};
 
