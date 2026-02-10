@@ -2823,31 +2823,54 @@ def _eryx_is_callback_obj(obj):
         return True
     return False
 
-# Take a snapshot of the keys first to avoid 'dictionary changed size during iteration'
-_eryx_keys = list(_eryx_user_globals.keys())
+# Temporarily remove callback infrastructure from _eryx_user_globals before
+# serialization. User-defined functions have __globals__ == _eryx_user_globals,
+# so dill will try to serialize the entire globals dict when pickling a function.
+# If the globals contain unserializable callback objects (invoke, _EryxNamespace,
+# etc.), dill.dumps() fails silently and the function is skipped.
+_eryx_stashed = {}
 
-# Build dict of serializable items
-_eryx_state_dict = {}
-for _k in _eryx_keys:
-    if _k not in _eryx_exclude and not _k.startswith('_eryx_'):
-        _v = _eryx_user_globals.get(_k)
-        if _v is not None:
-            # Skip callback infrastructure objects
-            if _eryx_is_callback_obj(_v):
-                continue
-            try:
-                # Test if item is serializable with dill
-                _eryx_dill.dumps(_v)
-                _eryx_state_dict[_k] = _v
-            except Exception:
-                # Skip items dill can't serialize (modules, open handles, etc.)
-                pass
+# First, identify _eryx_make_callback-generated wrappers and namespace objects
+# (must be done BEFORE removing 'invoke' since the detection checks for it)
+for _k in list(_eryx_user_globals.keys()):
+    _v = _eryx_user_globals.get(_k)
+    if _v is not None and _eryx_is_callback_obj(_v):
+        _eryx_stashed[_k] = _eryx_user_globals.pop(_k)
 
-# Serialize the filtered dict with dill
-_eryx_state_bytes = _eryx_dill.dumps(_eryx_state_dict)
+# Then remove the named excluded items
+for _k in list(_eryx_exclude):
+    if _k in _eryx_user_globals:
+        _eryx_stashed[_k] = _eryx_user_globals.pop(_k)
 
-# Clean up local helpers
-del _eryx_exclude, _eryx_is_callback_obj, _eryx_keys, _eryx_state_dict, _eryx_dill
+try:
+    # Take a snapshot of the keys first to avoid 'dictionary changed size during iteration'
+    _eryx_keys = list(_eryx_user_globals.keys())
+
+    # Build dict of serializable items
+    _eryx_state_dict = {}
+    for _k in _eryx_keys:
+        if _k not in _eryx_exclude and not _k.startswith('_eryx_'):
+            _v = _eryx_user_globals.get(_k)
+            if _v is not None:
+                try:
+                    # Test if item is serializable with dill
+                    _eryx_dill.dumps(_v)
+                    _eryx_state_dict[_k] = _v
+                except Exception:
+                    # Skip items dill can't serialize (modules, open handles, etc.)
+                    pass
+
+    # Serialize the filtered dict with dill
+    _eryx_state_bytes = _eryx_dill.dumps(_eryx_state_dict)
+
+    # Clean up serialization helpers
+    del _eryx_keys, _eryx_state_dict
+finally:
+    # Always restore callback infrastructure to _eryx_user_globals
+    _eryx_user_globals.update(_eryx_stashed)
+
+# Clean up remaining helpers
+del _eryx_exclude, _eryx_is_callback_obj, _eryx_dill, _eryx_stashed
 ";
 
         if PyRun_SimpleString(pickle_code.as_ptr()) != 0 {
