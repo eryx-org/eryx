@@ -133,7 +133,7 @@ jobs:
 
       - name: Install nightly toolchain
         if: steps.wasm-cache.outputs.cache-hit != 'true'
-        run: rustup toolchain install nightly-2026-01-31 --component rust-src
+        run: rustup toolchain install nightly --component rust-src
 
       - name: Force rebuild (cache may have stale timestamps)
         if: steps.wasm-cache.outputs.cache-hit != 'true'
@@ -145,6 +145,9 @@ jobs:
           touch crates/eryx-wasm-runtime/Cargo.toml
           # Remove outputs (mise checks mtime, not existence)
           rm -f crates/eryx-runtime/runtime.wasm crates/eryx-runtime/runtime.cwasm
+          # Clean nested build-std target dirs to avoid stale std artifacts
+          # when the nightly toolchain updates between runs
+          rm -rf target/release/build/eryx-runtime-*/out/wasm-runtime-target
 
       - name: Build eryx-runtime
         if: steps.wasm-cache.outputs.cache-hit != 'true'
