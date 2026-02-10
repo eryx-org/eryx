@@ -10,6 +10,12 @@ git_tag_enable = true
 # Create GitHub releases
 git_release_enable = true
 
+# eryx-precompile verification builds eryx from the registry, which
+# panics without runtime.cwasm due to feature unification enabling embedded.
+[[package]]
+name = "eryx-precompile"
+publish_no_verify = true
+
 [changelog]
 body = """
 
