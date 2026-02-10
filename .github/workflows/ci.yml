@@ -132,7 +132,6 @@ jobs:
         if: steps.wasm-cache.outputs.cache-hit != 'true'
 
       - name: Install nightly toolchain
-        if: steps.wasm-cache.outputs.cache-hit != 'true'
         run: rustup toolchain install nightly --component rust-src
 
       - name: Force rebuild (cache may have stale timestamps)
