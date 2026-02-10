@@ -27,6 +27,45 @@
 
   let state = $derived(getSandboxState());
 
+  const EXAMPLES = [
+    {
+      filename: "humanize-4.15.0-py3-none-any.whl",
+      label: "humanize",
+      meta: "132 KB · pure Python",
+      code: 'import humanize\nprint(humanize.naturalsize(1048576))',
+    },
+    {
+      filename: "numpy-wasi.tar.gz",
+      label: "numpy",
+      meta: "9.3 MB · native ext",
+      code: 'import numpy\nprint(numpy.sum([1, 2, 3]))',
+    },
+  ] as const;
+
+  let exampleLoading: string | null = $state(null);
+
+  async function installExample(ex: (typeof EXAMPLES)[number]) {
+    if (exampleLoading) return;
+    exampleLoading = ex.filename;
+    try {
+      const resp = await fetch(`${import.meta.env.BASE_URL}examples/${ex.filename}`);
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+      const ct = resp.headers.get("content-type") || "";
+      if (ct.startsWith("text/html"))
+        throw new Error("Example file not found (got HTML fallback)");
+      const blob = await resp.blob();
+      const file = new File([blob], ex.filename, { type: blob.type });
+      const dt = new DataTransfer();
+      dt.items.add(file);
+      await handleFiles(dt.files);
+      code = ex.code;
+    } catch (e) {
+      showStatus(`Failed to load ${ex.label}: ${(e as Error).message}`, "error");
+    } finally {
+      exampleLoading = null;
+    }
+  }
+
   let code = $state(`import example_pkg\nprint(example_pkg)`);
   let output: string | null = $state(null);
   let isError = $state(false);
@@ -241,25 +280,31 @@
   async function parseTarGz(
     data: Uint8Array,
   ): Promise<[string, Uint8Array][]> {
-    // Decompress gzip
-    const ds = new DecompressionStream("gzip");
-    const writer = ds.writable.getWriter();
-    const reader = ds.readable.getReader();
-    writer.write(data);
-    writer.close();
-    const chunks: Uint8Array[] = [];
-    let totalLen = 0;
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      chunks.push(value);
-      totalLen += value.length;
-    }
-    const tar = new Uint8Array(totalLen);
-    let writeOffset = 0;
-    for (const chunk of chunks) {
-      tar.set(chunk, writeOffset);
-      writeOffset += chunk.length;
+    // Decompress gzip (skip if already decompressed, e.g. by Content-Encoding)
+    let tar: Uint8Array;
+    const isGzip = data.length >= 2 && data[0] === 0x1f && data[1] === 0x8b;
+    if (isGzip) {
+      const ds = new DecompressionStream("gzip");
+      const writer = ds.writable.getWriter();
+      const reader = ds.readable.getReader();
+      writer.write(data);
+      writer.close();
+      const chunks: Uint8Array[] = [];
+      let totalLen = 0;
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        chunks.push(value);
+        totalLen += value.length;
+      }
+      tar = new Uint8Array(totalLen);
+      let writeOffset = 0;
+      for (const chunk of chunks) {
+        tar.set(chunk, writeOffset);
+        writeOffset += chunk.length;
+      }
+    } else {
+      tar = data;
     }
 
     // Parse tar
@@ -443,6 +488,23 @@
   />
 </div>
 
+<div class="example-row">
+  <span class="example-label">Try:</span>
+  {#each EXAMPLES as ex}
+    <button
+      class="pill"
+      disabled={state.status !== "ready" || exampleLoading !== null}
+      onclick={(e) => { e.stopPropagation(); installExample(ex); }}
+    >
+      {#if exampleLoading === ex.filename}
+        <span class="pill-spinner"></span>
+      {/if}
+      {ex.label}
+      <span class="pill-meta">{ex.meta}</span>
+    </button>
+  {/each}
+</div>
+
 {#if packages.length > 0}
   <h2 class="pkg-title">Packages</h2>
   {#each packages as pkg}
@@ -599,5 +661,32 @@
   }
   .pkg-hint a {
     color: #007bff;
+  }
+  .example-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-top: -8px;
+    margin-bottom: 4px;
+  }
+  .example-label {
+    font-size: 13px;
+    color: #737373;
+  }
+  .pill-meta {
+    font-size: 11px;
+    color: #868e96;
+    margin-left: 4px;
+  }
+  .pill-spinner {
+    display: inline-block;
+    width: 12px;
+    height: 12px;
+    border: 2px solid #adb5bd;
+    border-top-color: transparent;
+    border-radius: 50%;
+    animation: spin 0.8s linear infinite;
+    vertical-align: middle;
+    margin-right: 4px;
   }
 </style>

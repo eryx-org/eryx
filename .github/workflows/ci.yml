@@ -690,6 +690,16 @@ jobs:
           mise run build-linker-wasm
           mise run copy-base-libs
 
+      - name: Download example packages for demo
+        working-directory: js/demo/public
+        run: |
+          mkdir -p examples
+          curl -fSL -o examples/humanize-4.15.0-py3-none-any.whl \
+            "https://files.pythonhosted.org/packages/c5/7b/bca5613a0c3b542420cf92bd5e5fb8ebd5435ce1011a091f66bb7693285e/humanize-4.15.0-py3-none-any.whl"
+          curl -fSL -o examples/numpy-wasi.tar.gz \
+            "https://github.com/eryx-org/eryx/releases/download/demo-assets/numpy-wasi.tar.gz"
+          ls -lh examples/
+
       - name: Install eryx dependencies
         run: npm ci --prefix js/eryx
 

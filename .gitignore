@@ -82,3 +82,6 @@ js/eryx/interfaces/
 js/eryx/python-stdlib.tar.gz
 js/eryx/node_modules/
 js/testpkg/node_modules/
+
+# Demo example packages (populated at build time by mise copy-examples)
+js/demo/public/examples/
