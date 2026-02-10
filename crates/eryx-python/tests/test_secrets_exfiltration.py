@@ -137,9 +137,11 @@ for f in found:
 
         try:
             sandbox = eryx.Sandbox()
+            # Use forward slashes to avoid Windows backslash escape issues
+            safe_path = host_file.replace("\\", "/")
             result = sandbox.execute(f"""
 try:
-    with open("{host_file}", "r") as f:
+    with open("{safe_path}", "r") as f:
         content = f.read()
     print(f"FILE_LEAK: {{content}}")
 except Exception as e:
