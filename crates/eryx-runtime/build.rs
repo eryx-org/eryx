@@ -125,7 +125,7 @@ fn build_wasm_runtime(wasm_runtime_dir: &PathBuf) -> PathBuf {
     let mut cmd = Command::new("rustup");
     cmd.current_dir(wasm_runtime_dir)
         .arg("run")
-        .arg("nightly")
+        .arg("nightly-2026-01-31")
         .arg("cargo")
         .arg("build")
         .arg("-Z")
