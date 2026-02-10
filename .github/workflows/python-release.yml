@@ -147,7 +147,7 @@ jobs:
         run: |
           uv venv
           uv pip install dist/*.whl --force-reinstall
-          uv pip install -e 'crates/eryx-python[dev]'
+          cd crates/eryx-python && uv sync --extra dev --no-install-project && cd ../..
           .venv/bin/pytest crates/eryx-python/tests/ -v
 
   # Build wheels for Linux aarch64 (native ARM build with precompile)
@@ -219,7 +219,7 @@ jobs:
         run: |
           uv venv
           uv pip install dist/*.whl --force-reinstall
-          uv pip install -e 'crates/eryx-python[dev]'
+          cd crates/eryx-python && uv sync --extra dev --no-install-project && cd ../..
           .venv/bin/pytest crates/eryx-python/tests/ -v
 
   # Build wheels for macOS ARM (native build with precompile)
@@ -296,7 +296,7 @@ jobs:
         run: |
           uv venv
           uv pip install dist/*.whl --force-reinstall
-          uv pip install -e 'crates/eryx-python[dev]'
+          cd crates/eryx-python && uv sync --extra dev --no-install-project && cd ../..
           .venv/bin/pytest crates/eryx-python/tests/ -v
 
   # Build wheels for macOS Intel (GitHub runner)
@@ -373,7 +373,7 @@ jobs:
         run: |
           uv venv
           uv pip install dist/*.whl --force-reinstall
-          uv pip install -e 'crates/eryx-python[dev]'
+          cd crates/eryx-python && uv sync --extra dev --no-install-project && cd ../..
           .venv/bin/pytest crates/eryx-python/tests/ -v
 
   # Build wheels for Windows
@@ -453,7 +453,7 @@ jobs:
         run: |
           uv venv
           uv pip install dist/*.whl --force-reinstall
-          uv pip install -e 'crates/eryx-python[dev]'
+          cd crates/eryx-python && uv sync --extra dev --no-install-project && cd ../..
           .venv/Scripts/pytest crates/eryx-python/tests/ -v
 
   # Build source distribution

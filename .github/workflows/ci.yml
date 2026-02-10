@@ -488,7 +488,7 @@ jobs:
           source ../../.venv/bin/activate
           uv pip install maturin
           maturin develop --release
-          uv pip install -e '.[dev]'
+          uv sync --extra dev --no-install-project
 
       - name: Run Python tests
         working-directory: crates/eryx-python
