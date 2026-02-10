@@ -78,7 +78,7 @@ async function fetchAndDecompressBaseLibs(
 
 function getLinker() {
   if (!_linkerInit) {
-    _linkerInit = import("./linker-wasm/linker");
+    _linkerInit = import(/* @vite-ignore */ "./linker-wasm/linker");
   }
   return _linkerInit;
 }

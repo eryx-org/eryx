@@ -675,9 +675,20 @@ jobs:
 
       - uses: ./.github/actions/setup-rust
 
+      - name: Install wasm32-unknown-unknown target
+        run: rustup target add wasm32-unknown-unknown
+
+      - name: Install wasm-bindgen-cli
+        run: cargo binstall wasm-bindgen-cli --no-confirm
+
       - name: Build JavaScript bindings
         working-directory: js
         run: mise run build
+
+      - name: Build linker WASM + copy base libs
+        run: |
+          mise run build-linker-wasm
+          mise run copy-base-libs
 
       - name: Install eryx dependencies
         run: npm ci --prefix js/eryx
