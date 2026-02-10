@@ -1,9 +1,11 @@
 <script lang="ts">
-  import { getSandboxState, runCode } from "../lib/sandbox.svelte";
+  import { getSandboxState, replaceSandbox, runCode } from "../lib/sandbox.svelte";
+  import { detectNativeExtensions, linkAndTranspile } from "../lib/native-extensions";
+  import type { NativeExtension } from "../lib/native-extensions";
   import CodeEditor from "./CodeEditor.svelte";
   import OutputBox from "./OutputBox.svelte";
 
-  type PackageStatus = "pending" | "installing" | "installed" | "error";
+  type PackageStatus = "pending" | "installing" | "installed" | "linking" | "error";
 
   interface Package {
     name: string;
@@ -12,6 +14,7 @@
     file: File;
     status: PackageStatus;
     fileCount?: number;
+    nativeExtCount?: number;
     error?: string;
   }
 
@@ -20,6 +23,7 @@
   let sitePackagesConfigured = false;
   let statusMessage: string | null = $state(null);
   let statusType: "success" | "error" = $state("success");
+  let linkProgress: string | null = $state(null);
 
   let state = $derived(getSandboxState());
 
@@ -116,6 +120,16 @@
   async function installWheel(pkg: Package) {
     const arrayBuffer = await pkg.file.arrayBuffer();
     const entries = await parseZip(new Uint8Array(arrayBuffer));
+
+    // Check for native WASI extensions
+    const nativeExts = detectNativeExtensions(entries);
+    if (nativeExts.length > 0) {
+      pkg.nativeExtCount = nativeExts.length;
+      await installWithNativeExtensions(pkg, entries, nativeExts);
+      return;
+    }
+
+    // Pure Python wheel: install directly into the filesystem
     const sitePackages = fileTree!.dir["site-packages"];
     let fileCount = 0;
 
@@ -142,6 +156,62 @@
 
     pkg.fileCount = fileCount;
     _setFileData!(fileTree);
+  }
+
+  async function installWithNativeExtensions(
+    pkg: Package,
+    entries: [string, Uint8Array][],
+    nativeExts: NativeExtension[],
+  ) {
+    pkg.status = "linking";
+    packages = [...packages];
+
+    await replaceSandbox(async (onProgress) => {
+      linkProgress = "Starting native extension linking...";
+
+      const exports = await linkAndTranspile(nativeExts, (msg) => {
+        linkProgress = msg;
+        onProgress(msg);
+      });
+
+      // After sandbox is replaced, install Python files into the new filesystem
+      linkProgress = "Installing Python files...";
+      await ensureFileTreeLoaded();
+
+      const sitePackages = fileTree!.dir["site-packages"];
+      let fileCount = 0;
+
+      for (const [path, data] of entries) {
+        if (path.includes(".dist-info/") || path.includes("__pycache__/"))
+          continue;
+        // Skip .so files (already linked into the component)
+        if (path.endsWith(".so")) continue;
+
+        const parts = path.split("/");
+        let current = sitePackages;
+        for (let i = 0; i < parts.length - 1; i++) {
+          if (!parts[i]) continue;
+          if (!current.dir) current.dir = {};
+          if (!current.dir[parts[i]]) current.dir[parts[i]] = { dir: {} };
+          current = current.dir[parts[i]];
+        }
+        const fileName = parts[parts.length - 1];
+        if (fileName) {
+          if (!current.dir) current.dir = {};
+          current.dir[fileName] = { source: data };
+          fileCount++;
+        }
+      }
+
+      pkg.fileCount = fileCount;
+      _setFileData!(fileTree);
+
+      linkProgress = null;
+      return exports;
+    });
+
+    // Configure sys.path for the new sandbox
+    sitePackagesConfigured = false;
   }
 
   /**
@@ -243,13 +313,21 @@
 </script>
 
 <p class="hint">
-  Upload pure-Python wheels to make packages available for import. Files are
-  extracted into a virtual filesystem.
+  Upload Python wheels to make packages available for import. Pure-Python
+  wheels are extracted into a virtual filesystem. Wheels with native WASI
+  extensions trigger an in-browser linking pipeline.
 </p>
 
 {#if statusMessage}
   <div class="status" class:success={statusType === "success"} class:error={statusType === "error"}>
     {statusMessage}
+  </div>
+{/if}
+
+{#if linkProgress}
+  <div class="link-progress">
+    <div class="spinner"></div>
+    <span>{linkProgress}</span>
   </div>
 {/if}
 
@@ -268,7 +346,7 @@
   ondrop={handleDrop}
 >
   <p><strong>Drop .whl files here</strong> or click to browse</p>
-  <p class="small">Pure Python wheels (py3-none-any) are supported</p>
+  <p class="small">Pure Python and native WASI extension wheels are supported</p>
   <input
     bind:this={fileInput}
     type="file"
@@ -290,9 +368,13 @@
       {pkg.version}
       <span class="pkg-size">{(pkg.size / 1024).toFixed(1)} KB</span>
       {#if pkg.status === "installed"}
-        <span class="pkg-status installed">Installed ({pkg.fileCount} files)</span>
+        <span class="pkg-status installed">
+          Installed ({pkg.fileCount} files{pkg.nativeExtCount ? `, ${pkg.nativeExtCount} native ext` : ""})
+        </span>
       {:else if pkg.status === "installing"}
         <span class="pkg-status installing">Installing...</span>
+      {:else if pkg.status === "linking"}
+        <span class="pkg-status linking">Linking native extensions...</span>
       {:else if pkg.status === "error"}
         <span class="pkg-status error" title={pkg.error}>Error</span>
       {:else}
@@ -319,9 +401,9 @@
 {/if}
 
 <p class="pkg-hint">
-  Download wheels from <a href="https://pypi.org">PyPI</a> (look for
-  <code>py3-none-any.whl</code> files). Packages with native C extensions are
-  not supported in the browser.
+  Download wheels from <a href="https://pypi.org">PyPI</a>. Pure Python
+  (<code>py3-none-any.whl</code>) and native WASI extension
+  (<code>wasm32-wasi.whl</code>) wheels are supported.
 </p>
 
 <style>
@@ -344,6 +426,29 @@
     background: #f8d7da;
     color: #721c24;
     border: 1px solid #f5c6cb;
+  }
+  .link-progress {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 12px;
+    margin-bottom: 16px;
+    border-radius: 6px;
+    background: #e8f4fd;
+    color: #0c5460;
+    border: 1px solid #bee5eb;
+    font-size: 14px;
+  }
+  .spinner {
+    width: 16px;
+    height: 16px;
+    border: 2px solid #0c5460;
+    border-top-color: transparent;
+    border-radius: 50%;
+    animation: spin 0.8s linear infinite;
+  }
+  @keyframes spin {
+    to { transform: rotate(360deg); }
   }
   .upload-zone {
     border: 2px dashed #ccc;
@@ -394,6 +499,9 @@
   }
   .pkg-status.installing {
     color: #007bff;
+  }
+  .pkg-status.linking {
+    color: #6f42c1;
   }
   .pkg-status.error {
     color: #dc3545;

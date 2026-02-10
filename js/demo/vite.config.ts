@@ -12,6 +12,18 @@ const shimDir = resolve(
   "node_modules/@bytecodealliance/preview2-shim/lib/browser",
 );
 
+/** Serve .zst files as raw binary (application/octet-stream). */
+const serveZstdRaw: Connect.NextHandleFunction = (req, res, next) => {
+  const url = req.url ?? "";
+  if (!url.endsWith(".zst")) return next();
+  const filePath = resolve(__dirname, url.startsWith("/") ? url.slice(1) : url);
+  if (!existsSync(filePath)) return next();
+  const content = readFileSync(filePath);
+  res.setHeader("Content-Type", "application/octet-stream");
+  res.setHeader("Content-Length", content.length.toString());
+  res.end(content);
+};
+
 /** Intercept .gz requests and serve without Content-Encoding so the browser
  *  doesn't auto-decompress (stdlib-loader uses DecompressionStream itself). */
 const serveGzipRaw: Connect.NextHandleFunction = (req, res, next) => {
@@ -47,12 +59,14 @@ export default defineConfig({
     // causing the browser to auto-decompress them. The stdlib loader expects
     // to decompress the gzip itself via DecompressionStream.
     {
-      name: "serve-gzip-raw",
+      name: "serve-raw-binary",
       configureServer(server) {
         server.middlewares.use(serveGzipRaw);
+        server.middlewares.use(serveZstdRaw);
       },
       configurePreviewServer(server) {
         server.middlewares.use(serveGzipRaw);
+        server.middlewares.use(serveZstdRaw);
       },
     },
     // Brotli-compress .wasm files and write a Cloudflare Pages _headers file.
@@ -120,9 +134,11 @@ export default defineConfig({
     reportCompressedSize: false,
   },
   optimizeDeps: {
-    // Don't pre-bundle eryx during dev - it has top-level await and WASM loads
-    exclude: ["@bsull/eryx"],
+    // Don't pre-bundle eryx during dev - it has top-level await and WASM loads.
+    // Don't pre-bundle jco - it loads WASM via import.meta.url.
+    exclude: ["@bsull/eryx", "@bytecodealliance/jco"],
   },
+  assetsInclude: ["**/*.wasm"],
   server: {
     headers: {
       // Required for SharedArrayBuffer (used by WASM JSPI)
@@ -133,7 +149,15 @@ export default defineConfig({
       // Allow serving WASM/JS files from the eryx package (symlinked
       // from outside demo/ via the file: dependency). Setting allow
       // disables automatic workspace root detection, so include "." too.
-      allow: [".", resolve(__dirname, "../eryx")],
+      // Also allow the jco package (loads internal WASM files).
+      allow: [
+        ".",
+        resolve(__dirname, "../eryx"),
+        resolve(
+          __dirname,
+          "node_modules/@bytecodealliance/jco",
+        ),
+      ],
     },
   },
 });

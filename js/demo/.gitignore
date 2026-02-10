@@ -1,2 +1,4 @@
 node_modules/
 dist/
+public/libs/
+src/lib/linker-wasm/

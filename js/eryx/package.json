@@ -2,7 +2,7 @@
   "name": "@bsull/eryx",
   "type": "module",
   "description": "A Python sandbox powered by WebAssembly, for browser and Node.js",
-  "version": "0.4.0",
+  "version": "0.4.4",
   "license": "MIT OR Apache-2.0",
   "repository": {
     "type": "git",
