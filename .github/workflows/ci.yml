@@ -39,6 +39,7 @@ jobs:
             core:
               - 'crates/eryx-core/**'
               - 'crates/eryx/**'
+              - 'crates/eryx-vfs/**'
               - 'crates/eryx-wasm-runtime/**'
               - 'crates/eryx-runtime/**'
               - 'crates/eryx-precompile/**'
@@ -307,6 +308,26 @@ jobs:
         # Exclude eryx-python and eryx-precompile as they require building eryx-runtime
         # which needs WASI SDK (not installed in MSRV check)
         run: cargo check --workspace --exclude eryx-python --exclude eryx-precompile
+
+  windows-check:
+    name: Windows Check
+    runs-on: windows-latest
+    needs: changes
+    if: >-
+      github.event_name == 'push'
+      || needs.changes.outputs.core == 'true'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure Rust cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install Rust
+        run: rustup show active-toolchain
+
+      - name: Check compilation on Windows
+        # Exclude crates that need WASI SDK or Python for their build scripts
+        run: cargo check --workspace --exclude eryx-python --exclude eryx-precompile --exclude eryx-wasm-runtime
 
   doc:
     name: Documentation
