@@ -6,6 +6,7 @@ license.workspace = true
 repository.workspace = true
 authors.workspace = true
 description = "Browser-side WASM linker for eryx native extensions"
+publish = false
 
 [lib]
 crate-type = ["cdylib"]
