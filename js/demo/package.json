@@ -10,7 +10,9 @@
   },
   "dependencies": {
     "@bsull/eryx": "file:../eryx",
-    "@bytecodealliance/preview2-shim": "^0.17.0"
+    "@bytecodealliance/jco": "1.16.1",
+    "@bytecodealliance/preview2-shim": "^0.17.0",
+    "fzstd": "^0.1.1"
   },
   "devDependencies": {
     "@sveltejs/vite-plugin-svelte": "^5.0.3",

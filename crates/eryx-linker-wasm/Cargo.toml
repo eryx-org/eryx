@@ -1,0 +1,19 @@
+[package]
+name = "eryx-linker-wasm"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Browser-side WASM linker for eryx native extensions"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+wasm-bindgen = "0.2"
+wit-component = { workspace = true }
+js-sys = "0.3"
+
+[lints]
+workspace = true

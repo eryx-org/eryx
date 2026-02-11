@@ -968,6 +968,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "eryx-linker-wasm"
+version = "0.4.4"
+dependencies = [
+ "js-sys",
+ "wasm-bindgen",
+ "wit-component 0.243.0",
+]
+
+[[package]]
 name = "eryx-macros"
 version = "0.4.4"
 dependencies = [

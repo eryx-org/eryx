@@ -22,7 +22,9 @@ cd .. && mise run build-eryx-runtime
 description = "Extract Python stdlib for pre-initialization"
 depends = ["wasm-build"]
 sources = ["../crates/eryx/python-stdlib.tar.zst"]
-outputs = ["../crates/eryx-wasm-runtime/tests/python-stdlib/encodings/__init__.py"]
+outputs = [
+  "../crates/eryx-wasm-runtime/tests/python-stdlib/encodings/__init__.py",
+]
 run = """
 #!/usr/bin/env bash
 set -euo pipefail
@@ -89,7 +91,11 @@ run = "node patch-jco.cjs"
 [tasks.build]
 description = "Build JavaScript bindings (WASM + transpile + version sync + stdlib)"
 depends = ["patch-js"]
-sources = ["eryx/eryx-sandbox.js", "../Cargo.toml", "../crates/eryx/python-stdlib.tar.gz"]
+sources = [
+  "eryx/eryx-sandbox.js",
+  "../Cargo.toml",
+  "../crates/eryx/python-stdlib.tar.gz",
+]
 outputs = ["eryx/package.json", "eryx/python-stdlib.tar.gz"]
 run = """
 #!/usr/bin/env bash
@@ -111,20 +117,47 @@ cd .. && node patch-jco.cjs
 cd testpkg && npm ci && npm run typecheck && npm run test:ci
 """
 
+[tasks.copy-examples]
+description = "Download example packages for the demo Packages tab"
+dir = "demo/public"
+run = """
+#!/usr/bin/env bash
+set -euo pipefail
+mkdir -p examples
+HUMANIZE="examples/humanize-4.15.0-py3-none-any.whl"
+NUMPY="examples/numpy-wasi.tar.gz"
+if [[ ! -f "$HUMANIZE" ]]; then
+  echo "Downloading humanize wheel from PyPI..."
+  curl -fSL -o "$HUMANIZE" \
+    "https://files.pythonhosted.org/packages/c5/7b/bca5613a0c3b542420cf92bd5e5fb8ebd5435ce1011a091f66bb7693285e/humanize-4.15.0-py3-none-any.whl"
+else
+  echo "humanize wheel already present, skipping"
+fi
+if [[ ! -f "$NUMPY" ]]; then
+  echo "Downloading numpy-wasi.tar.gz from GitHub release..."
+  curl -fSL -o "$NUMPY" \
+    "https://github.com/eryx-org/eryx/releases/download/demo-assets/numpy-wasi.tar.gz"
+else
+  echo "numpy-wasi.tar.gz already present, skipping"
+fi
+echo "Example packages ready:"
+ls -lh examples/
+"""
+
 [tasks.demo]
 description = "Serve the browser demo on localhost with Vite dev server"
-depends = ["build"]
+depends = ["build", "copy-examples"]
 dir = "demo"
 run = """
 #!/usr/bin/env bash
 set -euo pipefail
 npm install
-npx vite --open
+npx vite --open --host
 """
 
 [tasks.demo-build]
 description = "Build the demo site for production (static output in demo/dist/)"
-depends = ["build"]
+depends = ["build", "copy-examples"]
 dir = "demo"
 run = """
 #!/usr/bin/env bash

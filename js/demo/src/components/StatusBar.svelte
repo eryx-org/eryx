@@ -8,6 +8,10 @@
   <div class="status info loading">
     Loading Python sandbox (~45MB)&hellip; this may take a moment.
   </div>
+{:else if state.status === "relinking"}
+  <div class="status info loading">
+    Linking native extensions: {state.progress}
+  </div>
 {:else if state.status === "error"}
   <div class="status error">{state.message}</div>
 {:else}

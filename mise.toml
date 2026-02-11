@@ -20,6 +20,9 @@ version = "0.5.2"
 [tools."cargo:mdbook-langtabs"]
 version = "0.2.0"
 
+[tools."cargo:wasm-bindgen-cli"]
+version = "0.2.108"
+
 # Note: WASI SDK is intentionally NOT in [tools] because adding it to PATH
 # breaks host compilation (Rust picks up wasm clang for proc-macro builds).
 # Instead, we install it on-demand via the ensure-wasi-sdk task.
@@ -610,6 +613,45 @@ run = "python3 scripts/test_examples.py"
 [tasks."book:test-all"]
 description = "Test both Rust and Python code blocks in the book"
 depends = ["book:test", "book:test-python"]
+
+[tasks.build-linker-wasm]
+description = "Build the eryx-linker-wasm crate for browser use (wasm-bindgen)"
+run = """
+#!/usr/bin/env bash
+set -euo pipefail
+cargo build --package eryx-linker-wasm --target wasm32-unknown-unknown --release
+wasm-bindgen target/wasm32-unknown-unknown/release/eryx_linker_wasm.wasm \
+  --target web \
+  --out-dir js/demo/src/lib/linker-wasm \
+  --out-name linker
+# Optimize the WASM binary if wasm-opt is available
+if command -v wasm-opt &>/dev/null; then
+  wasm-opt -Oz js/demo/src/lib/linker-wasm/linker_bg.wasm \
+    -o js/demo/src/lib/linker-wasm/linker_bg.wasm
+fi
+"""
+sources = ["crates/eryx-linker-wasm/src/**/*.rs", "crates/eryx-linker-wasm/Cargo.toml"]
+outputs = ["js/demo/src/lib/linker-wasm/linker_bg.wasm", "js/demo/src/lib/linker-wasm/linker.js"]
+
+[tasks.copy-base-libs]
+description = "Copy compressed base libraries to demo public/ for browser fetching"
+run = """
+#!/usr/bin/env bash
+set -euo pipefail
+DEST=js/demo/public/libs
+mkdir -p "$DEST"
+# Base libraries from libs/
+for f in libc.so.zst libc++.so.zst libc++abi.so.zst libpython3.14.so.zst \
+         libwasi-emulated-mman.so.zst libwasi-emulated-process-clocks.so.zst \
+         libwasi-emulated-getpid.so.zst libwasi-emulated-signal.so.zst \
+         wasi_snapshot_preview1.reactor.wasm.zst; do
+  cp "crates/eryx-runtime/libs/$f" "$DEST/$f"
+done
+# Prebuilt runtime libraries
+cp crates/eryx-runtime/prebuilt/liberyx_runtime.so.zst "$DEST/"
+cp crates/eryx-runtime/prebuilt/liberyx_bindings.so.zst "$DEST/"
+echo "Copied $(ls "$DEST" | wc -l) files to $DEST"
+"""
 
 [tasks.test-eryx-runtime]
 description = "Run eryx-wasm-runtime integration tests"

@@ -1,9 +1,11 @@
 <script lang="ts">
-  import { getSandboxState, runCode } from "../lib/sandbox.svelte";
+  import { getSandboxState, replaceSandbox, runCode } from "../lib/sandbox.svelte";
+  import { detectNativeExtensions, linkAndTranspile } from "../lib/native-extensions";
+  import type { NativeExtension } from "../lib/native-extensions";
   import CodeEditor from "./CodeEditor.svelte";
   import OutputBox from "./OutputBox.svelte";
 
-  type PackageStatus = "pending" | "installing" | "installed" | "error";
+  type PackageStatus = "pending" | "installing" | "installed" | "linking" | "error";
 
   interface Package {
     name: string;
@@ -12,6 +14,7 @@
     file: File;
     status: PackageStatus;
     fileCount?: number;
+    nativeExtCount?: number;
     error?: string;
   }
 
@@ -20,8 +23,48 @@
   let sitePackagesConfigured = false;
   let statusMessage: string | null = $state(null);
   let statusType: "success" | "error" = $state("success");
+  let linkProgress: string | null = $state(null);
 
   let state = $derived(getSandboxState());
+
+  const EXAMPLES = [
+    {
+      filename: "humanize-4.15.0-py3-none-any.whl",
+      label: "humanize",
+      meta: "132 KB · pure Python",
+      code: 'import humanize\nprint(humanize.naturalsize(1048576))',
+    },
+    {
+      filename: "numpy-wasi.tar.gz",
+      label: "numpy",
+      meta: "9.3 MB · native ext",
+      code: 'import numpy\nprint(numpy.sum([1, 2, 3]))',
+    },
+  ] as const;
+
+  let exampleLoading: string | null = $state(null);
+
+  async function installExample(ex: (typeof EXAMPLES)[number]) {
+    if (exampleLoading) return;
+    exampleLoading = ex.filename;
+    try {
+      const resp = await fetch(`${import.meta.env.BASE_URL}examples/${ex.filename}`);
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+      const ct = resp.headers.get("content-type") || "";
+      if (ct.startsWith("text/html"))
+        throw new Error("Example file not found (got HTML fallback)");
+      const blob = await resp.blob();
+      const file = new File([blob], ex.filename, { type: blob.type });
+      const dt = new DataTransfer();
+      dt.items.add(file);
+      await handleFiles(dt.files);
+      code = ex.code;
+    } catch (e) {
+      showStatus(`Failed to load ${ex.label}: ${(e as Error).message}`, "error");
+    } finally {
+      exampleLoading = null;
+    }
+  }
 
   let code = $state(`import example_pkg\nprint(example_pkg)`);
   let output: string | null = $state(null);
@@ -62,13 +105,29 @@
     setTimeout(() => (statusMessage = null), 4000);
   }
 
+  function isSupportedPackage(name: string): boolean {
+    return name.endsWith(".whl") || name.endsWith(".tar.gz") || name.endsWith(".tgz");
+  }
+
+  function parsePackageName(filename: string): { name: string; version: string } {
+    if (filename.endsWith(".whl")) {
+      const parts = filename.replace(".whl", "").split("-");
+      return { name: parts[0], version: parts[1] || "?" };
+    }
+    // tar.gz: e.g. "numpy-wasi.tar.gz" or "numpy-1.26.4.tar.gz"
+    const base = filename.replace(/\.tar\.gz$|\.tgz$/, "");
+    const match = base.match(/^(.+?)-(\d+\..*)$/);
+    if (match) return { name: match[1], version: match[2] };
+    return { name: base, version: "?" };
+  }
+
   async function handleFiles(files: FileList) {
     for (const f of files) {
-      if (!f.name.endsWith(".whl")) continue;
-      const parts = f.name.replace(".whl", "").split("-");
+      if (!isSupportedPackage(f.name)) continue;
+      const { name, version } = parsePackageName(f.name);
       packages.push({
-        name: parts[0],
-        version: parts[1] || "?",
+        name,
+        version,
         size: f.size,
         file: f,
         status: "pending",
@@ -84,7 +143,7 @@
       pkg.status = "installing";
       packages = [...packages];
       try {
-        await installWheel(pkg);
+        await installPackage(pkg);
         pkg.status = "installed";
       } catch (e) {
         pkg.status = "error";
@@ -113,9 +172,22 @@
     }
   }
 
-  async function installWheel(pkg: Package) {
+  async function installPackage(pkg: Package) {
     const arrayBuffer = await pkg.file.arrayBuffer();
-    const entries = await parseZip(new Uint8Array(arrayBuffer));
+    const raw = new Uint8Array(arrayBuffer);
+    const entries = pkg.file.name.endsWith(".whl")
+      ? await parseZip(raw)
+      : await parseTarGz(raw);
+
+    // Check for native WASI extensions
+    const nativeExts = detectNativeExtensions(entries);
+    if (nativeExts.length > 0) {
+      pkg.nativeExtCount = nativeExts.length;
+      await installWithNativeExtensions(pkg, entries, nativeExts);
+      return;
+    }
+
+    // Pure Python wheel: install directly into the filesystem
     const sitePackages = fileTree!.dir["site-packages"];
     let fileCount = 0;
 
@@ -142,6 +214,131 @@
 
     pkg.fileCount = fileCount;
     _setFileData!(fileTree);
+  }
+
+  async function installWithNativeExtensions(
+    pkg: Package,
+    entries: [string, Uint8Array][],
+    nativeExts: NativeExtension[],
+  ) {
+    pkg.status = "linking";
+    packages = [...packages];
+
+    await replaceSandbox(async (onProgress) => {
+      linkProgress = "Starting native extension linking...";
+
+      const exports = await linkAndTranspile(nativeExts, (msg) => {
+        linkProgress = msg;
+        onProgress(msg);
+      });
+
+      // After sandbox is replaced, install Python files into the new filesystem
+      linkProgress = "Installing Python files...";
+      await ensureFileTreeLoaded();
+
+      const sitePackages = fileTree!.dir["site-packages"];
+      let fileCount = 0;
+
+      for (const [path, data] of entries) {
+        if (path.includes(".dist-info/") || path.includes("__pycache__/"))
+          continue;
+        // Keep .so files on the filesystem — Python's import system needs to
+        // find them via stat/readdir before it'll call dlopen(). The actual
+        // native code is already linked into the WASM component; dlopen()
+        // resolves pre-linked libraries by name, not by file content.
+
+        const parts = path.split("/");
+        let current = sitePackages;
+        for (let i = 0; i < parts.length - 1; i++) {
+          if (!parts[i]) continue;
+          if (!current.dir) current.dir = {};
+          if (!current.dir[parts[i]]) current.dir[parts[i]] = { dir: {} };
+          current = current.dir[parts[i]];
+        }
+        const fileName = parts[parts.length - 1];
+        if (fileName) {
+          if (!current.dir) current.dir = {};
+          current.dir[fileName] = { source: data };
+          fileCount++;
+        }
+      }
+
+      pkg.fileCount = fileCount;
+      _setFileData!(fileTree);
+
+      linkProgress = null;
+      return exports;
+    });
+
+    // Configure sys.path for the new sandbox
+    sitePackagesConfigured = false;
+  }
+
+  /**
+   * Parse a .tar.gz file and return [path, Uint8Array] entries.
+   */
+  async function parseTarGz(
+    data: Uint8Array,
+  ): Promise<[string, Uint8Array][]> {
+    // Decompress gzip (skip if already decompressed, e.g. by Content-Encoding)
+    let tar: Uint8Array;
+    const isGzip = data.length >= 2 && data[0] === 0x1f && data[1] === 0x8b;
+    if (isGzip) {
+      const ds = new DecompressionStream("gzip");
+      const writer = ds.writable.getWriter();
+      const reader = ds.readable.getReader();
+      writer.write(data);
+      writer.close();
+      const chunks: Uint8Array[] = [];
+      let totalLen = 0;
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        chunks.push(value);
+        totalLen += value.length;
+      }
+      tar = new Uint8Array(totalLen);
+      let writeOffset = 0;
+      for (const chunk of chunks) {
+        tar.set(chunk, writeOffset);
+        writeOffset += chunk.length;
+      }
+    } else {
+      tar = data;
+    }
+
+    // Parse tar
+    const entries: [string, Uint8Array][] = [];
+    let pos = 0;
+    const decoder = new TextDecoder();
+
+    while (pos + 512 <= tar.length) {
+      const header = tar.subarray(pos, pos + 512);
+      // Check for end-of-archive (two zero blocks)
+      if (header.every((b) => b === 0)) break;
+
+      const nameRaw = decoder.decode(header.subarray(0, 100)).replace(/\0.*/, "");
+      const sizeOctal = decoder.decode(header.subarray(124, 136)).replace(/\0.*/, "").trim();
+      const typeFlag = header[156];
+      const prefix = decoder.decode(header.subarray(345, 500)).replace(/\0.*/, "");
+
+      const fullName = prefix ? `${prefix}/${nameRaw}` : nameRaw;
+      const size = sizeOctal ? parseInt(sizeOctal, 8) : 0;
+
+      pos += 512; // Move past header
+
+      if (typeFlag === 0x30 || typeFlag === 0) {
+        // Regular file
+        if (size > 0 && !fullName.endsWith("/")) {
+          entries.push([fullName, tar.slice(pos, pos + size)]);
+        }
+      }
+
+      // Advance past file data (rounded up to 512-byte blocks)
+      pos += Math.ceil(size / 512) * 512;
+    }
+
+    return entries;
   }
 
   /**
@@ -243,13 +440,22 @@
 </script>
 
 <p class="hint">
-  Upload pure-Python wheels to make packages available for import. Files are
-  extracted into a virtual filesystem.
+  Upload Python packages (.whl or .tar.gz) to make them available for import.
+  Pure-Python packages are extracted into a virtual filesystem. Packages with
+  native WASI extensions trigger an in-browser linking and transpilation
+  pipeline, which may take a minute or two.
 </p>
 
 {#if statusMessage}
   <div class="status" class:success={statusType === "success"} class:error={statusType === "error"}>
     {statusMessage}
+  </div>
+{/if}
+
+{#if linkProgress}
+  <div class="link-progress">
+    <div class="spinner"></div>
+    <span>{linkProgress}</span>
   </div>
 {/if}
 
@@ -267,12 +473,12 @@
   ondragleave={() => (dragover = false)}
   ondrop={handleDrop}
 >
-  <p><strong>Drop .whl files here</strong> or click to browse</p>
-  <p class="small">Pure Python wheels (py3-none-any) are supported</p>
+  <p><strong>Drop .whl or .tar.gz files here</strong> or click to browse</p>
+  <p class="small">Pure Python and native WASI extension packages are supported</p>
   <input
     bind:this={fileInput}
     type="file"
-    accept=".whl"
+    accept=".whl,.tar.gz,.tgz,application/gzip,application/x-gzip,application/x-tar"
     multiple
     disabled={state.status !== "ready"}
     onchange={(e) => {
@@ -280,6 +486,23 @@
       if (input.files) handleFiles(input.files);
     }}
   />
+</div>
+
+<div class="example-row">
+  <span class="example-label">Try:</span>
+  {#each EXAMPLES as ex}
+    <button
+      class="pill"
+      disabled={state.status !== "ready" || exampleLoading !== null}
+      onclick={(e) => { e.stopPropagation(); installExample(ex); }}
+    >
+      {#if exampleLoading === ex.filename}
+        <span class="pill-spinner"></span>
+      {/if}
+      {ex.label}
+      <span class="pill-meta">{ex.meta}</span>
+    </button>
+  {/each}
 </div>
 
 {#if packages.length > 0}
@@ -290,9 +513,13 @@
       {pkg.version}
       <span class="pkg-size">{(pkg.size / 1024).toFixed(1)} KB</span>
       {#if pkg.status === "installed"}
-        <span class="pkg-status installed">Installed ({pkg.fileCount} files)</span>
+        <span class="pkg-status installed">
+          Installed ({pkg.fileCount} files{pkg.nativeExtCount ? `, ${pkg.nativeExtCount} native ext` : ""})
+        </span>
       {:else if pkg.status === "installing"}
         <span class="pkg-status installing">Installing...</span>
+      {:else if pkg.status === "linking"}
+        <span class="pkg-status linking">Linking native extensions...</span>
       {:else if pkg.status === "error"}
         <span class="pkg-status error" title={pkg.error}>Error</span>
       {:else}
@@ -319,9 +546,9 @@
 {/if}
 
 <p class="pkg-hint">
-  Download wheels from <a href="https://pypi.org">PyPI</a> (look for
-  <code>py3-none-any.whl</code> files). Packages with native C extensions are
-  not supported in the browser.
+  Download packages from <a href="https://pypi.org">PyPI</a>. Pure Python
+  (<code>py3-none-any.whl</code>) and native WASI extension
+  (<code>wasm32-wasi.whl</code> / <code>.tar.gz</code>) packages are supported.
 </p>
 
 <style>
@@ -344,6 +571,29 @@
     background: #f8d7da;
     color: #721c24;
     border: 1px solid #f5c6cb;
+  }
+  .link-progress {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 12px;
+    margin-bottom: 16px;
+    border-radius: 6px;
+    background: #e8f4fd;
+    color: #0c5460;
+    border: 1px solid #bee5eb;
+    font-size: 14px;
+  }
+  .spinner {
+    width: 16px;
+    height: 16px;
+    border: 2px solid #0c5460;
+    border-top-color: transparent;
+    border-radius: 50%;
+    animation: spin 0.8s linear infinite;
+  }
+  @keyframes spin {
+    to { transform: rotate(360deg); }
   }
   .upload-zone {
     border: 2px dashed #ccc;
@@ -395,6 +645,9 @@
   .pkg-status.installing {
     color: #007bff;
   }
+  .pkg-status.linking {
+    color: #6f42c1;
+  }
   .pkg-status.error {
     color: #dc3545;
   }
@@ -408,5 +661,32 @@
   }
   .pkg-hint a {
     color: #007bff;
+  }
+  .example-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-top: -8px;
+    margin-bottom: 4px;
+  }
+  .example-label {
+    font-size: 13px;
+    color: #737373;
+  }
+  .pill-meta {
+    font-size: 11px;
+    color: #868e96;
+    margin-left: 4px;
+  }
+  .pill-spinner {
+    display: inline-block;
+    width: 12px;
+    height: 12px;
+    border: 2px solid #adb5bd;
+    border-top-color: transparent;
+    border-radius: 50%;
+    animation: spin 0.8s linear infinite;
+    vertical-align: middle;
+    margin-right: 4px;
   }
 </style>

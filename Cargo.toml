@@ -90,6 +90,10 @@ zip = "2.0"
 # Compression
 zstd = "0.13"
 
+# Browser WASM bindings
+wasm-bindgen = "0.2"
+js-sys = "0.3"
+
 [workspace.lints.rust]
 missing_debug_implementations = "warn"
 missing_docs = "warn"
