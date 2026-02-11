@@ -36,6 +36,7 @@
   <p class="description">
     A sandboxed Python 3.14 interpreter running entirely in your browser via
     WebAssembly. Powered by <a href="https://github.com/eryx-org/eryx">eryx</a>.
+    <a href="https://docs.eryx.run">Read the docs.</a>
   </p>
 
   <StatusBar />
