@@ -678,9 +678,6 @@ jobs:
       - name: Install wasm32-unknown-unknown target
         run: rustup target add wasm32-unknown-unknown
 
-      - name: Install wasm-bindgen-cli
-        run: cargo binstall wasm-bindgen-cli --no-confirm
-
       - name: Build JavaScript bindings
         working-directory: js
         run: mise run build

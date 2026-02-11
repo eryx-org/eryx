@@ -20,6 +20,9 @@ version = "0.5.2"
 [tools."cargo:mdbook-langtabs"]
 version = "0.2.0"
 
+[tools."cargo:wasm-bindgen-cli"]
+version = "0.2.108"
+
 # Note: WASI SDK is intentionally NOT in [tools] because adding it to PATH
 # breaks host compilation (Rust picks up wasm clang for proc-macro builds).
 # Instead, we install it on-demand via the ensure-wasi-sdk task.
