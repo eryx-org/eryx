@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.5] - 2026-02-11
+
+### Fixed
+- use bracket syntax for MCP tool names in list_tools output ([#136](https://github.com/eryx-org/eryx/pull/136))
+
+### Added
+- *(demo)* add in-browser native WASM extension support ([#134](https://github.com/eryx-org/eryx/pull/134))
+
+### Other
+- mark eryx-linker-wasm as publish = false ([#138](https://github.com/eryx-org/eryx/pull/138))
+- tweak some wording and silly claims ([#135](https://github.com/eryx-org/eryx/pull/135))
+- bump cryptography in /crates/eryx-python ([#137](https://github.com/eryx-org/eryx/pull/137))
+
 ## `eryx-precompile` - [0.4.4](https://github.com/eryx-org/eryx/compare/eryx-precompile-v0.4.3...eryx-precompile-v0.4.4) - 2026-02-10
 
 ### Other
