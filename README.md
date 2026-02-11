@@ -4,11 +4,12 @@
 [![crates.io](https://img.shields.io/crates/v/eryx.svg)](https://crates.io/crates/eryx)
 [![PyPI](https://img.shields.io/pypi/v/pyeryx.svg)](https://pypi.org/project/pyeryx/)
 [![npm](https://img.shields.io/npm/v/@bsull/eryx.svg)](https://www.npmjs.com/package/@bsull/eryx)
+[![docs](https://img.shields.io/badge/docs-docs.eryx.run-blue)](https://docs.eryx.run)
 
 > **eryx** (noun): A genus of sand boas (Erycinae) — non-venomous snakes that live _in_ sand.
 > Perfect for "Python running inside a sandbox."
 
-A Rust library that executes Python code in a WebAssembly sandbox with async callbacks. [Try the demo.](https://demo.eryx.run)
+A Rust library that executes Python code in a WebAssembly sandbox with async callbacks. [Try the demo](https://demo.eryx.run) or [read the docs](https://docs.eryx.run).
 
 ## Features
 
