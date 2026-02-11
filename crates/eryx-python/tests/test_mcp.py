@@ -406,8 +406,8 @@ class TestMCPManager:
         tools = manager.list_tools()
         assert len(tools) == 2
         tool_names = [t["name"] for t in tools]
-        assert "mcp.mock.echo" in tool_names
-        assert "mcp.mock.add" in tool_names
+        assert 'mcp["mock"].echo' in tool_names
+        assert 'mcp["mock"].add' in tool_names
 
         manager.close()
 
@@ -455,10 +455,10 @@ class TestMCPManager:
         manager.connect("mock", sys.executable, [MOCK_SERVER], {}, 10.0)
 
         tools = manager.list_tools()
-        echo_tool = next(t for t in tools if t["name"] == "mcp.mock.echo")
+        echo_tool = next(t for t in tools if t["name"] == 'mcp["mock"].echo')
         assert "echo" in echo_tool["description"].lower()
 
-        add_tool = next(t for t in tools if t["name"] == "mcp.mock.add")
+        add_tool = next(t for t in tools if t["name"] == 'mcp["mock"].add')
         assert "add" in add_tool["description"].lower()
 
         manager.close()
@@ -469,7 +469,7 @@ class TestMCPManager:
         manager.connect("mock", sys.executable, [MOCK_SERVER], {}, 10.0)
 
         tools = manager.list_tools()
-        echo_tool = next(t for t in tools if t["name"] == "mcp.mock.echo")
+        echo_tool = next(t for t in tools if t["name"] == 'mcp["mock"].echo')
         schema = echo_tool["schema"]
         assert "properties" in schema
         assert "message" in schema["properties"]

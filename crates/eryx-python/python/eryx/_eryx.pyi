@@ -43,15 +43,15 @@ class MCPManager:
     Creates connections to MCP servers and exposes their tools as native
     Rust callbacks that can be used by ``Sandbox`` and ``Session``.
 
-    Tools are exposed as dotted callbacks under ``mcp.<server>.<tool>``,
-    so sandboxed code can call them as ``await mcp.server.tool(args)``.
+    Tools are exposed as callbacks under ``mcp["<server>"].<tool>``,
+    so sandboxed code can call them as ``await mcp["server"].tool(args)``.
 
     Example:
         manager = MCPManager()
         manager.connect("fs", "npx", ["-y", "@anthropic/mcp-server-filesystem", "."])
         tools = manager.list_tools()
         sandbox = Sandbox(mcp=manager)
-        result = sandbox.execute('data = await mcp.fs.read_file(path="README.md")')
+        result = sandbox.execute('data = await mcp["fs"].read_file(path="README.md")')
     """
 
     @property
