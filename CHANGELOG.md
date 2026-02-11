@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## `eryx-linker-wasm` - [0.4.4](https://github.com/eryx-org/eryx/releases/tag/eryx-linker-wasm-v0.4.4) - 2026-02-11
+
+### Added
+- *(demo)* add in-browser native WASM extension support ([#86](https://github.com/eryx-org/eryx/pull/86)) ([#134](https://github.com/eryx-org/eryx/pull/134))
+
 ## `eryx-precompile` - [0.4.4](https://github.com/eryx-org/eryx/compare/eryx-precompile-v0.4.3...eryx-precompile-v0.4.4) - 2026-02-10
 
 ### Other
