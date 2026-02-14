@@ -32,63 +32,35 @@ async fn main() -> Result<(), eryx::Error> {
 }
 ```
 
-## With Callbacks (TypedCallback)
+## With Callbacks
 
-Use `TypedCallback` for strongly-typed callbacks with automatic JSON Schema generation:
+Use the `#[callback]` macro for strongly-typed callbacks with automatic JSON Schema generation:
 
 ```rust
-use std::{future::Future, pin::Pin};
-
-use eryx::{TypedCallback, CallbackError, Sandbox, JsonSchema};
-use serde::Deserialize;
+use eryx::{callback, CallbackError, Sandbox};
 use serde_json::{json, Value};
 
-// Define typed arguments - schema is auto-generated
-#[derive(Deserialize, JsonSchema)]
-struct EchoArgs {
-    message: String,
+/// Returns the current Unix timestamp
+#[callback]
+async fn get_time() -> Result<Value, CallbackError> {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    Ok(json!(now))
 }
 
-struct Echo;
-
-impl TypedCallback for Echo {
-    type Args = EchoArgs;
-
-    fn name(&self) -> &str { "echo" }
-    fn description(&self) -> &str { "Echoes back the message" }
-
-    fn invoke_typed(&self, args: EchoArgs) -> Pin<Box<dyn Future<Output = Result<Value, CallbackError>> + Send + '_>> {
-        Box::pin(async move {
-            Ok(json!({ "echoed": args.message }))
-        })
-    }
-}
-
-// For no-argument callbacks, use () as Args
-struct GetTime;
-
-impl TypedCallback for GetTime {
-    type Args = ();
-
-    fn name(&self) -> &str { "get_time" }
-    fn description(&self) -> &str { "Returns the current Unix timestamp" }
-
-    fn invoke_typed(&self, _args: ()) -> Pin<Box<dyn Future<Output = Result<Value, CallbackError>> + Send + '_>> {
-        Box::pin(async move {
-            let now = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_secs();
-            Ok(json!(now))
-        })
-    }
+/// Echoes back the message
+#[callback]
+async fn echo(message: String) -> Result<Value, CallbackError> {
+    Ok(json!({ "echoed": message }))
 }
 
 #[tokio::main]
 async fn main() -> Result<(), eryx::Error> {
     let sandbox = Sandbox::builder()
-        .with_callback(GetTime)
-        .with_callback(Echo)
+        .with_callback(get_time)
+        .with_callback(echo)
         .build()?;
 
     let result = sandbox.execute(r#"
