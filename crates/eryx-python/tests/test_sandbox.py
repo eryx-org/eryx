@@ -586,14 +586,14 @@ sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 sock.settimeout(15)
 
 try:
-    sock.connect(("example.com", 443))
+    sock.connect(("httpbin.org", 443))
     print("TCP connected")
 
     ctx = ssl.create_default_context()
-    ssl_sock = ctx.wrap_socket(sock, server_hostname="example.com")
+    ssl_sock = ctx.wrap_socket(sock, server_hostname="httpbin.org")
     print("TLS handshake complete")
 
-    request = b"GET / HTTP/1.1\\r\\nHost: example.com\\r\\nConnection: close\\r\\n\\r\\n"
+    request = b"GET / HTTP/1.1\\r\\nHost: httpbin.org\\r\\nConnection: close\\r\\n\\r\\n"
     ssl_sock.send(request)
     print("Request sent")
 
@@ -666,13 +666,13 @@ print("SUCCESS")
         result = network_sandbox.execute("""
 import _eryx_async
 
-tcp_handle = await _eryx_async.await_tcp_connect("example.com", 443)
+tcp_handle = await _eryx_async.await_tcp_connect("httpbin.org", 443)
 print("TCP connected")
 
-tls_handle = await _eryx_async.await_tls_upgrade(tcp_handle, "example.com")
+tls_handle = await _eryx_async.await_tls_upgrade(tcp_handle, "httpbin.org")
 print("TLS upgraded")
 
-request = b"GET / HTTP/1.1\\r\\nHost: example.com\\r\\nConnection: close\\r\\n\\r\\n"
+request = b"GET / HTTP/1.1\\r\\nHost: httpbin.org\\r\\nConnection: close\\r\\n\\r\\n"
 written = await _eryx_async.await_tls_write(tls_handle, request)
 print(f"Wrote {written} bytes")
 
