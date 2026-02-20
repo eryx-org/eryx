@@ -234,11 +234,11 @@ except Exception as e:
         result = network_sandbox.execute("""
 import urllib.request
 
-with urllib.request.urlopen("https://example.com/", timeout=10) as response:
+with urllib.request.urlopen("https://httpbin.org/get", timeout=10) as response:
     status = response.status
     body = response.read().decode()
     print(f"Status: {status}")
-    if status == 200 and "Example Domain" in body:
+    if status == 200 and "httpbin.org" in body:
         print("SUCCESS")
     else:
         print(f"Unexpected: status={status}, len={len(body)}")
