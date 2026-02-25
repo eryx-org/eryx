@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## `eryx-precompile` - [0.4.6](https://github.com/eryx-org/eryx/compare/eryx-precompile-v0.4.5...eryx-precompile-v0.4.6) - 2026-02-25
+
+### Other
+- update Cargo.lock dependencies
+
+## `eryx` - [0.4.6](https://github.com/eryx-org/eryx/compare/eryx-v0.4.5...eryx-v0.4.6) - 2026-02-25
+
+### Other
+- update callback examples to use #[callback] macro ([#142](https://github.com/eryx-org/eryx/pull/142))
+
 ## [0.4.5] - 2026-02-11
 
 ### Fixed
