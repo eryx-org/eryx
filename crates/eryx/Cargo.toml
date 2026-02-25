@@ -118,11 +118,11 @@ webpki-roots.workspace = true
 # Embedded runtime/stdlib (optional)
 zstd = { workspace = true, optional = true }
 # Native extension support (optional)
-eryx-runtime = { path = "../eryx-runtime", version = "^0.4.4", optional = true }
+eryx-runtime = { path = "../eryx-runtime", version = "^0.4.6", optional = true }
 # Virtual filesystem support (optional)
-eryx-vfs = { path = "../eryx-vfs", version = "^0.4.4", optional = true }
+eryx-vfs = { path = "../eryx-vfs", version = "^0.4.6", optional = true }
 # Proc macro support (optional)
-eryx-macros = { path = "../eryx-macros", version = "^0.4.4", optional = true }
+eryx-macros = { path = "../eryx-macros", version = "^0.4.6", optional = true }
 
 [features]
 default = []
