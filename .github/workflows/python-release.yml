@@ -151,6 +151,78 @@ jobs:
           cd crates/eryx-python && uv export --extra dev --no-dev --no-hashes --no-emit-project --frozen | uv pip install -r - && cd ../..
           pytest crates/eryx-python/tests/ -v
 
+  # Build wheels for Linux musllinux x86_64 (for Alpine Linux)
+  musllinux-x86_64:
+    name: Linux musllinux (x86_64)
+    runs-on: namespace-profile-eryx-heavy-linux-amd64
+    needs: build-runtime
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download WASM artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: wasm-runtime
+          path: crates/
+
+      - name: Verify artifacts
+        run: |
+          echo "=== Checking downloaded artifacts ==="
+          ls -la crates/eryx-runtime/
+          ls -la crates/eryx-runtime/prebuilt/ || echo "prebuilt dir missing!"
+
+          # Verify required files exist
+          test -f crates/eryx-runtime/runtime.wasm || (echo "runtime.wasm missing!" && exit 1)
+          test -f crates/eryx-runtime/prebuilt/liberyx_runtime.so.zst || (echo "liberyx_runtime.so.zst missing!" && exit 1)
+          test -f crates/eryx-runtime/prebuilt/liberyx_bindings.so.zst || (echo "liberyx_bindings.so.zst missing!" && exit 1)
+
+          # Touch to mark as up-to-date
+          touch crates/eryx-runtime/runtime.wasm
+          touch crates/eryx-runtime/prebuilt/*
+
+          echo "=== All artifacts verified ==="
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust
+        uses: Swatinem/rust-cache@v2
+
+      - name: Pre-compile WASM for this platform (with Python pre-init)
+        run: |
+          echo "Pre-compiling WASM for Linux x86_64 with Python pre-initialization..."
+          cargo run -p eryx --example precompile --features preinit --release
+          ls -la crates/eryx-runtime/runtime.cwasm
+        env:
+          ERYX_PRECOMPILE_BOOTSTRAP: "1"
+
+      - name: Mark cwasm as up-to-date
+        run: touch crates/eryx-runtime/runtime.cwasm
+
+      - name: Build wheels
+        uses: PyO3/maturin-action@v1
+        with:
+          target: x86_64
+          args: --release --out dist --manifest-path crates/eryx-python/Cargo.toml
+          manylinux: musllinux_1_2
+
+      - name: Upload wheels
+        uses: actions/upload-artifact@v4
+        with:
+          name: wheels-musllinux-x86_64
+          path: dist
+
+      - name: Test wheel
+        run: |
+          docker run --rm \
+            -v $(pwd)/dist:/dist \
+            -v $(pwd)/crates/eryx-python/tests:/tests \
+            python:3.12-alpine sh -c "
+              pip install /dist/*.whl &&
+              pip install pytest pytest-asyncio &&
+              pytest /tests/ -v
+            "
+
   # Build wheels for Linux aarch64 (native ARM build with precompile)
   linux-aarch64:
     name: Linux (aarch64)
@@ -223,6 +295,78 @@ jobs:
           uv pip install dist/*.whl --force-reinstall
           cd crates/eryx-python && uv export --extra dev --no-dev --no-hashes --no-emit-project --frozen | uv pip install -r - && cd ../..
           pytest crates/eryx-python/tests/ -v
+
+  # Build wheels for Linux musllinux aarch64 (for Alpine Linux on ARM)
+  musllinux-aarch64:
+    name: Linux musllinux (aarch64)
+    runs-on: namespace-profile-eryx-heavy-linux-arm64
+    needs: build-runtime
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download WASM artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: wasm-runtime
+          path: crates/
+
+      - name: Verify artifacts
+        run: |
+          echo "=== Checking downloaded artifacts ==="
+          ls -la crates/eryx-runtime/
+          ls -la crates/eryx-runtime/prebuilt/ || echo "prebuilt dir missing!"
+
+          # Verify required files exist
+          test -f crates/eryx-runtime/runtime.wasm || (echo "runtime.wasm missing!" && exit 1)
+          test -f crates/eryx-runtime/prebuilt/liberyx_runtime.so.zst || (echo "liberyx_runtime.so.zst missing!" && exit 1)
+          test -f crates/eryx-runtime/prebuilt/liberyx_bindings.so.zst || (echo "liberyx_bindings.so.zst missing!" && exit 1)
+
+          # Touch to mark as up-to-date
+          touch crates/eryx-runtime/runtime.wasm
+          touch crates/eryx-runtime/prebuilt/*
+
+          echo "=== All artifacts verified ==="
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust
+        uses: Swatinem/rust-cache@v2
+
+      - name: Pre-compile WASM for this platform (with Python pre-init)
+        run: |
+          echo "Pre-compiling WASM for Linux aarch64 with Python pre-initialization..."
+          cargo run -p eryx --example precompile --features preinit --release
+          ls -la crates/eryx-runtime/runtime.cwasm
+        env:
+          ERYX_PRECOMPILE_BOOTSTRAP: "1"
+
+      - name: Mark cwasm as up-to-date
+        run: touch crates/eryx-runtime/runtime.cwasm
+
+      - name: Build wheels
+        uses: PyO3/maturin-action@v1
+        with:
+          target: aarch64
+          args: --release --out dist --manifest-path crates/eryx-python/Cargo.toml
+          manylinux: musllinux_1_2
+
+      - name: Upload wheels
+        uses: actions/upload-artifact@v4
+        with:
+          name: wheels-musllinux-aarch64
+          path: dist
+
+      - name: Test wheel
+        run: |
+          docker run --rm \
+            -v $(pwd)/dist:/dist \
+            -v $(pwd)/crates/eryx-python/tests:/tests \
+            python:3.12-alpine sh -c "
+              pip install /dist/*.whl &&
+              pip install pytest pytest-asyncio &&
+              pytest /tests/ -v
+            "
 
   # Build wheels for macOS ARM (native build with precompile)
   macos-aarch64:
@@ -497,7 +641,7 @@ jobs:
     runs-on: namespace-profile-eryx-light
     if: github.event_name == 'release' || (github.event_name == 'workflow_dispatch' && inputs.publish)
     needs:
-      [linux-x86_64, linux-aarch64, macos-aarch64, macos-x86_64, windows, sdist]
+      [linux-x86_64, musllinux-x86_64, linux-aarch64, musllinux-aarch64, macos-aarch64, macos-x86_64, windows, sdist]
     environment: pypi
     permissions:
       id-token: write
