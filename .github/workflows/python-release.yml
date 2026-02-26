@@ -218,8 +218,7 @@ jobs:
             -v $(pwd)/dist:/dist \
             -v $(pwd)/crates/eryx-python/tests:/tests \
             python:3.12-alpine sh -c "
-              pip install pyeryx --no-index --find-links /dist/ &&
-              pip install pytest pytest-asyncio &&
+              pip install 'pyeryx[dev]' --find-links /dist/ --only-binary pyeryx &&
               pytest /tests/ -v
             "
 
@@ -363,8 +362,7 @@ jobs:
             -v $(pwd)/dist:/dist \
             -v $(pwd)/crates/eryx-python/tests:/tests \
             python:3.12-alpine sh -c "
-              pip install pyeryx --no-index --find-links /dist/ &&
-              pip install pytest pytest-asyncio &&
+              pip install 'pyeryx[dev]' --find-links /dist/ --only-binary pyeryx &&
               pytest /tests/ -v
             "
 
