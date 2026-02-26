@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 
 import eryx
 
@@ -73,6 +74,17 @@ def add_sandbox_args(parser: argparse.ArgumentParser) -> None:
         help="path to MCP config file (implies --mcp, can be repeated)",
     )
 
+    env = parser.add_argument_group("environment")
+    env.add_argument(
+        "-e",
+        "--env",
+        action="append",
+        default=[],
+        metavar="KEY[=VALUE]",
+        help="pass environment variable to sandbox (scrubbed from output). "
+        "Use KEY=VALUE to set explicitly, or KEY to inherit from host",
+    )
+
     fs = parser.add_argument_group("filesystem")
     fs.add_argument(
         "-v",
@@ -105,6 +117,29 @@ def make_net_config(args: argparse.Namespace) -> eryx.NetConfig | None:
     for pattern in args.allow_host:
         config.allow_host(pattern)
     return config
+
+
+def make_secrets(args: argparse.Namespace) -> dict | None:
+    """Build secrets dict from -e/--env CLI args, or None if no env vars.
+
+    Each -e spec is either KEY=VALUE (explicit) or KEY (inherit from host).
+    Values are passed as scrubbed secrets so they're redacted in output.
+    """
+    if not args.env:
+        return None
+    secrets = {}
+    for spec in args.env:
+        if "=" in spec:
+            key, value = spec.split("=", 1)
+        else:
+            key = spec
+            value = os.environ.get(key)
+            if value is None:
+                raise argparse.ArgumentTypeError(
+                    f"environment variable '{key}' is not set"
+                )
+        secrets[key] = {"value": value}
+    return secrets
 
 
 def make_mcp_manager(args: argparse.Namespace) -> object | None:
