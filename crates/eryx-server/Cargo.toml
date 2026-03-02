@@ -1,0 +1,29 @@
+[package]
+name = "eryx-server"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "gRPC server for sandboxed Python execution via eryx"
+
+[dependencies]
+eryx = { workspace = true, features = ["embedded"] }
+tokio = { workspace = true, features = ["full"] }
+tokio-stream.workspace = true
+tonic.workspace = true
+prost.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+uuid = { workspace = true, features = ["v4"] }
+dashmap.workspace = true
+async-trait.workspace = true
+clap = { version = "4", features = ["derive", "env"] }
+
+[build-dependencies]
+tonic-build.workspace = true
+
+[lints]
+workspace = true

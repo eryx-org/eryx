@@ -477,6 +477,49 @@ impl Sandbox {
         self.executor.clone()
     }
 
+    /// Set the registered callbacks (replacing any existing ones).
+    ///
+    /// Used by the pool to configure per-request callbacks on a reused sandbox.
+    pub(crate) fn set_callbacks(&mut self, callbacks: Vec<Box<dyn Callback>>) {
+        let mut map = HashMap::new();
+        for callback in callbacks {
+            map.insert(callback.name().to_string(), Arc::from(callback));
+        }
+        self.callbacks = Arc::new(map);
+    }
+
+    /// Set the trace handler for execution events.
+    ///
+    /// Used by the pool to configure per-request tracing on a reused sandbox.
+    pub(crate) fn set_trace_handler(&mut self, handler: impl TraceHandler + 'static) {
+        self.trace_handler = Some(Arc::new(handler));
+    }
+
+    /// Set the output handler for streaming stdout/stderr.
+    ///
+    /// Used by the pool to configure per-request output streaming on a reused sandbox.
+    pub(crate) fn set_output_handler(&mut self, handler: impl OutputHandler + 'static) {
+        self.output_handler = Some(Arc::new(handler));
+    }
+
+    /// Set resource limits for execution.
+    ///
+    /// Used by the pool to configure per-request limits on a reused sandbox.
+    pub(crate) fn set_resource_limits(&mut self, limits: ResourceLimits) {
+        self.resource_limits = limits;
+    }
+
+    /// Clear per-request state so the sandbox can be returned to the pool.
+    ///
+    /// Resets callbacks, handlers, and resource limits to defaults while
+    /// preserving the executor and other long-lived state.
+    pub(crate) fn clear_per_request_state(&mut self) {
+        self.callbacks = Arc::new(HashMap::new());
+        self.trace_handler = None;
+        self.output_handler = None;
+        self.resource_limits = ResourceLimits::default();
+    }
+
     /// Execute Python code with cancellation support.
     ///
     /// Returns an [`ExecutionHandle`] that can be used to cancel the execution
