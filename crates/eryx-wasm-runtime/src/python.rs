@@ -90,6 +90,12 @@ pub use pyo3::ffi::{
 unsafe extern "C" {
     pub fn PyRun_SimpleString(command: *const c_char) -> std::ffi::c_int;
     pub fn PyUnicode_AsUTF8(unicode: *mut PyObject) -> *const c_char;
+    pub fn PyObject_CallMethod(
+        obj: *mut PyObject,
+        name: *const c_char,
+        format: *const c_char,
+        ...
+    ) -> *mut PyObject;
 }
 
 // =============================================================================
@@ -312,15 +318,82 @@ _eryx_callback_code = _eryx_async.resume({event0}, {event1}, {event2})
     unsafe {
         if PyRun_SimpleString(code_cstr.as_ptr()) != 0 {
             // Python callback raised an uncaught exception.
-            // Capture the error before clearing it.
-            let error = get_last_error_message();
+            //
+            // NOTE: PyRun_SimpleString calls PyErr_Print() before returning -1,
+            // which clears the error indicator and prints the traceback to stderr.
+            // Since stderr is captured by _eryx_stderr, we can read the traceback
+            // from there instead of relying on get_last_error_message() which
+            // would always return "Unknown error" (PyErr_Occurred is already null).
+            let error = get_captured_stderr_error();
             set_last_callback_error(error);
-            PyErr_Clear();
+            PyErr_Clear(); // Clear any residual error state
             return callback_code::EXIT;
         }
     }
 
     get_python_callback_code()
+}
+
+/// Get the error message from captured stderr.
+///
+/// When `PyRun_SimpleString` fails, it calls `PyErr_Print()` which prints
+/// the traceback to `sys.stderr`. Since we redirect stderr to `_eryx_stderr`,
+/// the traceback is captured there. This function reads it.
+///
+/// Falls back to `get_last_error_message()` if stderr is empty.
+///
+/// # Safety
+///
+/// Python must be initialized.
+unsafe fn get_captured_stderr_error() -> String {
+    // Try to get the error from _eryx_stderr (where PyErr_Print wrote it)
+    let stderr_content = unsafe {
+        // Read _eryx_stderr.getvalue() directly
+        let main_module = PyImport_AddModule(c"__main__".as_ptr());
+        if !main_module.is_null() {
+            let main_dict = PyModule_GetDict(main_module);
+            if !main_dict.is_null() {
+                let stderr_obj = PyDict_GetItemString(main_dict, c"_eryx_stderr".as_ptr());
+                if !stderr_obj.is_null() {
+                    let getvalue =
+                        PyObject_CallMethod(stderr_obj, c"getvalue".as_ptr(), std::ptr::null());
+                    if !getvalue.is_null() {
+                        let utf8 = PyUnicode_AsUTF8(getvalue);
+                        let msg = if !utf8.is_null() {
+                            let s = std::ffi::CStr::from_ptr(utf8)
+                                .to_string_lossy()
+                                .into_owned();
+                            Some(s)
+                        } else {
+                            None
+                        };
+                        Py_DecRef(getvalue);
+                        msg
+                    } else {
+                        PyErr_Clear();
+                        None
+                    }
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        } else {
+            PyErr_Clear();
+            None
+        }
+    };
+
+    if let Some(content) = stderr_content
+        && !content.is_empty()
+    {
+        // The traceback is in stderr. Return it trimmed.
+        return content.trim().to_string();
+    }
+
+    // Fallback: try get_last_error_message (may still return "Unknown error")
+    unsafe { get_last_error_message() }
 }
 
 /// Re-capture stdout after async execution completes.
@@ -343,24 +416,58 @@ pub fn recapture_stdout() {
 /// This is called from `export_async_callback` after lifting the result from the buffer.
 /// The result is stored in `_eryx_async_import_results[subtask]` in Python.
 ///
-/// We use a dict keyed by subtask ID to avoid race conditions when multiple
-/// async callbacks are in flight (e.g., with asyncio.gather()).
+/// Uses the CPython C API directly (PyDict_SetItem) to avoid fragile string
+/// interpolation. The old approach embedded the result in a Python triple-quoted
+/// string literal, which broke when the result contained `'''` or certain
+/// escape sequences.
 pub fn set_async_import_result(subtask: u32, result_json: &str) {
-    use std::ffi::CString;
+    unsafe {
+        // Get __main__._eryx_async_import_results dict
+        let main_module = PyImport_AddModule(c"__main__".as_ptr());
+        if main_module.is_null() {
+            eprintln!("ERROR: set_async_import_result: __main__ not found");
+            PyErr_Clear();
+            return;
+        }
 
-    // Escape the JSON for embedding in Python triple-quoted string.
-    // We need to escape backslashes first, then single quotes, then handle
-    // potential triple-quote sequences.
-    let escaped = result_json.replace('\\', "\\\\").replace("'''", "\\'''");
+        let main_dict = PyModule_GetDict(main_module);
+        if main_dict.is_null() {
+            eprintln!("ERROR: set_async_import_result: __main__.__dict__ not found");
+            return;
+        }
 
-    // Store in a dict keyed by subtask ID to support concurrent callbacks
-    let code = format!("_eryx_async_import_results[{subtask}] = '''{escaped}'''");
+        let results_dict = PyDict_GetItemString(main_dict, c"_eryx_async_import_results".as_ptr());
+        if results_dict.is_null() {
+            eprintln!("ERROR: set_async_import_result: _eryx_async_import_results not found");
+            PyErr_Clear();
+            return;
+        }
 
-    if let Ok(code_cstr) = CString::new(code) {
-        unsafe {
-            if PyRun_SimpleString(code_cstr.as_ptr()) != 0 {
-                PyErr_Clear();
-            }
+        // Create Python key (int) and value (str)
+        let py_key = PyLong_FromLong(subtask as std::ffi::c_long);
+        if py_key.is_null() {
+            eprintln!("ERROR: set_async_import_result: failed to create key");
+            PyErr_Clear();
+            return;
+        }
+
+        let py_value =
+            PyUnicode_FromStringAndSize(result_json.as_ptr().cast(), result_json.len() as isize);
+        if py_value.is_null() {
+            eprintln!("ERROR: set_async_import_result: failed to create value string");
+            Py_DecRef(py_key);
+            PyErr_Clear();
+            return;
+        }
+
+        // Set dict[subtask] = result_json
+        let ret = PyDict_SetItem(results_dict, py_key, py_value);
+        Py_DecRef(py_key);
+        Py_DecRef(py_value);
+
+        if ret != 0 {
+            eprintln!("ERROR: set_async_import_result: PyDict_SetItem failed");
+            PyErr_Clear();
         }
     }
 }

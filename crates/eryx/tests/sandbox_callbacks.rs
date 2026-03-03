@@ -174,6 +174,66 @@ impl TypedCallback for SleepCallback {
     }
 }
 
+/// Arguments for the list_items callback (all optional, like list_datasources).
+#[derive(Deserialize, JsonSchema)]
+struct ListItemsArgs {
+    /// Optional name filter
+    name: Option<String>,
+    /// Optional type filters
+    types: Option<Vec<String>>,
+}
+
+/// A callback with all-optional parameters, simulating list_datasources.
+/// Can be called with zero arguments.
+struct ListItemsCallback;
+
+impl TypedCallback for ListItemsCallback {
+    type Args = ListItemsArgs;
+
+    fn name(&self) -> &str {
+        "list_items"
+    }
+
+    fn description(&self) -> &str {
+        "Lists items with optional filters"
+    }
+
+    fn invoke_typed(
+        &self,
+        args: ListItemsArgs,
+    ) -> Pin<Box<dyn Future<Output = Result<Value, CallbackError>> + Send + '_>> {
+        Box::pin(async move {
+            // Return a response with special characters to exercise
+            // the result serialization path
+            let items = vec![
+                json!({"name": "item1", "type": "prometheus", "url": "http://prom:9090"}),
+                json!({"name": "item2", "type": "loki", "url": "http://loki:3100"}),
+                json!({"name": "item'''3", "type": "tempo", "url": "C:\\path\\to\\thing"}),
+            ];
+
+            let filtered: Vec<_> = items
+                .into_iter()
+                .filter(|item| {
+                    if let Some(ref name) = args.name
+                        && item["name"].as_str() != Some(name.as_str())
+                    {
+                        return false;
+                    }
+                    if let Some(ref types) = args.types
+                        && let Some(t) = item["type"].as_str()
+                        && !types.iter().any(|ft| ft == t)
+                    {
+                        return false;
+                    }
+                    true
+                })
+                .collect();
+
+            Ok(json!({"items": filtered, "count": filtered.len()}))
+        })
+    }
+}
+
 // =============================================================================
 // Helper Functions
 // =============================================================================
@@ -1015,4 +1075,79 @@ print(f"validate: {v}")
     );
     let output = result.unwrap();
     assert_eq!(output.stats.callback_invocations, 3);
+}
+
+// =============================================================================
+// Optional Arguments Tests
+// =============================================================================
+
+#[tokio::test]
+async fn test_callback_all_optional_args_called_with_none() {
+    // Simulates the list_datasources pattern: all parameters are optional,
+    // and calling with no arguments should return all items.
+    let sandbox = sandbox_builder()
+        .with_callback(ListItemsCallback)
+        .build()
+        .expect("Failed to build sandbox");
+
+    let result = sandbox
+        .execute(
+            r#"
+result = await list_items()
+print(f"count={result['count']}")
+print(f"items={len(result['items'])}")
+for item in result['items']:
+    print(f"  {item['name']}: {item['type']}")
+"#,
+        )
+        .await;
+
+    assert!(
+        result.is_ok(),
+        "list_items() with no args should succeed: {:?}",
+        result
+    );
+    let output = result.unwrap();
+    assert!(
+        output.stdout.contains("count=3"),
+        "should return all 3 items when no filters: {}",
+        output.stdout
+    );
+    // Verify item with triple quotes in name is handled correctly
+    assert!(
+        output.stdout.contains("item'''3"),
+        "should handle triple quotes in data: {}",
+        output.stdout
+    );
+}
+
+#[tokio::test]
+async fn test_callback_all_optional_args_called_with_filter() {
+    let sandbox = sandbox_builder()
+        .with_callback(ListItemsCallback)
+        .build()
+        .expect("Failed to build sandbox");
+
+    let result = sandbox
+        .execute(
+            r#"
+result = await list_items(types=["prometheus"])
+print(f"count={result['count']}")
+for item in result['items']:
+    print(f"  {item['name']}: {item['type']}")
+"#,
+        )
+        .await;
+
+    assert!(
+        result.is_ok(),
+        "list_items(types=['prometheus']) should succeed: {:?}",
+        result
+    );
+    let output = result.unwrap();
+    assert!(
+        output.stdout.contains("count=1"),
+        "should return 1 item with prometheus filter: {}",
+        output.stdout
+    );
 }
