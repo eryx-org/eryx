@@ -626,3 +626,95 @@ print(f"beta: {result}")
         assert!(got_result, "never received ExecuteResult for request 2");
     }
 }
+
+/// Test that callback results containing special characters (triple quotes,
+/// backslashes, JSON with nested escapes) are handled correctly.
+///
+/// This verifies the fix for the fragile triple-quoted string interpolation
+/// in `set_async_import_result`, which previously broke when the callback
+/// result contained `'''` or certain escape sequences.
+#[tokio::test]
+async fn execute_callback_with_special_characters_in_result() {
+    let channel = start_server().await;
+    let mut client = EryxClient::new(channel);
+
+    let (tx, rx) = mpsc::channel(16);
+
+    tx.send(ClientMessage {
+        message: Some(client_message::Message::ExecuteRequest(ExecuteRequest {
+            code: r#"
+result = await get_data()
+# Verify we can access the data correctly
+print(f"name={result['name']}")
+print(f"desc={result['description']}")
+print(f"path={result['path']}")
+"#
+            .to_string(),
+            callbacks: vec![CallbackDeclaration {
+                name: "get_data".to_string(),
+                description: "Returns data with special characters".to_string(),
+                parameters: vec![],
+            }],
+            resource_limits: Some(ResourceLimits {
+                execution_timeout_ms: 30_000,
+                ..Default::default()
+            }),
+            enable_tracing: false,
+        })),
+    })
+    .await
+    .unwrap();
+
+    let mut stream = client
+        .execute(ReceiverStream::new(rx))
+        .await
+        .unwrap()
+        .into_inner();
+
+    let mut got_result = false;
+    while let Some(msg) = stream.message().await.unwrap() {
+        match msg.message {
+            Some(server_message::Message::CallbackRequest(req)) => {
+                assert_eq!(req.name, "get_data");
+                // Return JSON with triple quotes, backslashes, and nested escapes
+                let response_json = serde_json::json!({
+                    "name": "test'''datasource",
+                    "description": "A datasource with '''triple quotes''' and \\backslashes\\",
+                    "path": "C:\\Users\\test\\config.yaml",
+                })
+                .to_string();
+
+                tx.send(ClientMessage {
+                    message: Some(client_message::Message::CallbackResponse(
+                        eryx_server::proto::eryx::v1::CallbackResponse {
+                            request_id: req.request_id,
+                            result: Some(callback_response::Result::JsonResult(response_json)),
+                        },
+                    )),
+                })
+                .await
+                .unwrap();
+            }
+            Some(server_message::Message::ExecuteResult(result)) => {
+                assert!(
+                    result.success,
+                    "execution failed: {} (stderr: {})",
+                    result.error, result.stderr
+                );
+                assert!(
+                    result.stdout.contains("name=test'''datasource"),
+                    "stdout missing name with triple quotes: {:?}",
+                    result.stdout
+                );
+                assert!(
+                    result.stdout.contains("path=C:\\Users\\test\\config.yaml"),
+                    "stdout missing path with backslashes: {:?}",
+                    result.stdout
+                );
+                got_result = true;
+            }
+            _ => {}
+        }
+    }
+    assert!(got_result, "never received ExecuteResult");
+}
