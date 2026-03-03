@@ -64,6 +64,16 @@ message ExecuteRequest {
   // Previously captured state snapshot to restore before execution.
   // Only used when persist_state is true.
   bytes state_snapshot = 6;
+
+  // Supporting files to write to the sandbox filesystem before execution.
+  // These are made importable as Python modules (added to sys.path).
+  repeated SupportingFile files = 7;
+}
+
+// A supporting file to place in the sandbox filesystem.
+message SupportingFile {
+  string name = 1;     // e.g. "helpers.py"
+  string content = 2;
 }
 
 // Declaration of a callback that the Go worker can handle.

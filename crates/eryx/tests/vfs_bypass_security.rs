@@ -13,16 +13,12 @@ use std::sync::Arc;
 
 use eryx::{
     PythonExecutor, SessionExecutor,
-    vfs::{InMemoryStorage, ScrubbingStorage},
+    vfs::{ArcStorage, InMemoryStorage},
 };
 
 /// Helper to run adversarial Python code and check it doesn't succeed
 async fn run_adversarial_test(code: &str, test_name: &str) -> (bool, String) {
-    let storage = Arc::new(ScrubbingStorage::new(
-        InMemoryStorage::new(),
-        std::collections::HashMap::new(),
-        eryx::vfs::VfsFileScrubPolicy::None,
-    ));
+    let storage = Arc::new(ArcStorage::new(Arc::new(InMemoryStorage::new())));
     let executor = create_executor().await;
     let mut session = SessionExecutor::new_with_vfs(executor, &[], storage)
         .await
@@ -49,11 +45,7 @@ async fn run_adversarial_test(code: &str, test_name: &str) -> (bool, String) {
 #[allow(dead_code)]
 /// Helper to run adversarial test with verbose output (for debugging)
 async fn run_adversarial_test_verbose(code: &str, test_name: &str) -> (bool, String) {
-    let storage = Arc::new(ScrubbingStorage::new(
-        InMemoryStorage::new(),
-        std::collections::HashMap::new(),
-        eryx::vfs::VfsFileScrubPolicy::None,
-    ));
+    let storage = Arc::new(ArcStorage::new(Arc::new(InMemoryStorage::new())));
     let executor = create_executor().await;
     let mut session = SessionExecutor::new_with_vfs(executor, &[], storage)
         .await
@@ -136,11 +128,7 @@ async fn create_executor() -> Arc<PythonExecutor> {
 /// Test that VFS basic operations work (write, read, list)
 #[tokio::test]
 async fn test_vfs_basic_operations() {
-    let storage = Arc::new(ScrubbingStorage::new(
-        InMemoryStorage::new(),
-        std::collections::HashMap::new(),
-        eryx::vfs::VfsFileScrubPolicy::None,
-    ));
+    let storage = Arc::new(ArcStorage::new(Arc::new(InMemoryStorage::new())));
     let executor = create_executor().await;
     let mut session = SessionExecutor::new_with_vfs(executor, &[], storage)
         .await
@@ -187,11 +175,7 @@ print("VFS basic operations work")
 /// Test that VFS append mode works correctly
 #[tokio::test]
 async fn test_vfs_append_mode() {
-    let storage = Arc::new(ScrubbingStorage::new(
-        InMemoryStorage::new(),
-        std::collections::HashMap::new(),
-        eryx::vfs::VfsFileScrubPolicy::None,
-    ));
+    let storage = Arc::new(ArcStorage::new(Arc::new(InMemoryStorage::new())));
     let executor = create_executor().await;
     let mut session = SessionExecutor::new_with_vfs(executor, &[], storage)
         .await
@@ -251,11 +235,7 @@ print(f"Content: {content}")
 /// Test that VFS data persists across executions within a session
 #[tokio::test]
 async fn test_vfs_persistence_across_executions() {
-    let storage = Arc::new(ScrubbingStorage::new(
-        InMemoryStorage::new(),
-        std::collections::HashMap::new(),
-        eryx::vfs::VfsFileScrubPolicy::None,
-    ));
+    let storage = Arc::new(ArcStorage::new(Arc::new(InMemoryStorage::new())));
     let executor = create_executor().await;
     let mut session = SessionExecutor::new_with_vfs(executor, &[], storage)
         .await
@@ -1263,16 +1243,8 @@ async fn test_vfs_storage_isolation_between_sessions() {
     let executor = create_executor().await;
 
     // Create two sessions with different storage instances
-    let storage1 = Arc::new(ScrubbingStorage::new(
-        InMemoryStorage::new(),
-        std::collections::HashMap::new(),
-        eryx::vfs::VfsFileScrubPolicy::None,
-    ));
-    let storage2 = Arc::new(ScrubbingStorage::new(
-        InMemoryStorage::new(),
-        std::collections::HashMap::new(),
-        eryx::vfs::VfsFileScrubPolicy::None,
-    ));
+    let storage1 = Arc::new(ArcStorage::new(Arc::new(InMemoryStorage::new())));
+    let storage2 = Arc::new(ArcStorage::new(Arc::new(InMemoryStorage::new())));
 
     let mut session1 = SessionExecutor::new_with_vfs(Arc::clone(&executor), &[], storage1)
         .await
@@ -1330,11 +1302,7 @@ async fn test_vfs_storage_sharing_between_sessions() {
     let executor = create_executor().await;
 
     // Create two sessions with the SAME storage instance
-    let shared_storage = Arc::new(ScrubbingStorage::new(
-        InMemoryStorage::new(),
-        std::collections::HashMap::new(),
-        eryx::vfs::VfsFileScrubPolicy::None,
-    ));
+    let shared_storage = Arc::new(ArcStorage::new(Arc::new(InMemoryStorage::new())));
 
     let mut session1 =
         SessionExecutor::new_with_vfs(Arc::clone(&executor), &[], Arc::clone(&shared_storage))
@@ -1388,11 +1356,7 @@ except FileNotFoundError:
 #[tokio::test]
 async fn test_vfs_storage_persists_across_reset() {
     let executor = create_executor().await;
-    let storage = Arc::new(ScrubbingStorage::new(
-        InMemoryStorage::new(),
-        std::collections::HashMap::new(),
-        eryx::vfs::VfsFileScrubPolicy::None,
-    ));
+    let storage = Arc::new(ArcStorage::new(Arc::new(InMemoryStorage::new())));
 
     let mut session = SessionExecutor::new_with_vfs(Arc::clone(&executor), &[], storage)
         .await
@@ -1446,11 +1410,7 @@ async fn test_vfs_custom_mount_path() {
     use eryx::VfsConfig;
 
     let executor = create_executor().await;
-    let storage = Arc::new(ScrubbingStorage::new(
-        InMemoryStorage::new(),
-        std::collections::HashMap::new(),
-        eryx::vfs::VfsFileScrubPolicy::None,
-    ));
+    let storage = Arc::new(ArcStorage::new(Arc::new(InMemoryStorage::new())));
     let config = VfsConfig::new("/workspace"); // Custom mount path instead of /data
 
     let mut session =

@@ -6,6 +6,7 @@ use std::time::{Duration, Instant};
 
 use dashmap::DashMap;
 use eryx::callback_handler::run_callback_handler;
+use eryx::vfs::{ArcStorage, InMemoryStorage, VfsStorage};
 use eryx::{
     Callback, CallbackRequest, OutputRequest, PythonStateSnapshot, ResourceLimits, SandboxPool,
     SecretConfig, SessionExecutor, TraceRequest,
@@ -18,8 +19,8 @@ use tracing::Instrument;
 use crate::callbacks::{self, CallbackResult, PendingCallbacks};
 use crate::output::GrpcOutputHandler;
 use crate::proto::eryx::v1::{
-    ClientMessage, ExecuteResult, ExecuteStats, ServerMessage, callback_response, client_message,
-    server_message,
+    ClientMessage, ExecuteResult, ExecuteStats, ServerMessage, SupportingFile, callback_response,
+    client_message, server_message,
 };
 use crate::trace::GrpcTraceHandler;
 
@@ -70,6 +71,7 @@ impl crate::proto::eryx::v1::eryx_server::Eryx for EryxService {
         let enable_tracing = execute_req.enable_tracing;
         let persist_state = execute_req.persist_state;
         let state_snapshot = execute_req.state_snapshot;
+        let files = execute_req.files;
 
         let span = tracing::info_span!(
             "execute",
@@ -77,6 +79,7 @@ impl crate::proto::eryx::v1::eryx_server::Eryx for EryxService {
             callbacks = declarations.len(),
             tracing = enable_tracing,
             persist_state,
+            supporting_files = files.len(),
         );
 
         // 2. Parse resource limits.
@@ -206,6 +209,7 @@ impl crate::proto::eryx::v1::eryx_server::Eryx for EryxService {
                     execute_with_session(
                         &mut sandbox,
                         &code,
+                        &files,
                         &state_snapshot,
                         enable_tracing,
                         &server_tx_result,
@@ -213,6 +217,12 @@ impl crate::proto::eryx::v1::eryx_server::Eryx for EryxService {
                     )
                     .await
                 } else {
+                    if !files.is_empty() {
+                        tracing::warn!(
+                            file_count = files.len(),
+                            "supporting files ignored in stateless mode (requires persist_state=true)"
+                        );
+                    }
                     execute_stateless(&sandbox, &code).await
                 };
 
@@ -276,6 +286,29 @@ async fn execute_stateless(sandbox: &eryx::PooledSandbox, code: &str) -> Execute
     }
 }
 
+/// Create a VFS storage pre-populated with the given supporting files.
+///
+/// Files are written to `/data/<name>` so they can be imported as Python
+/// modules once `/data` is added to `sys.path`.
+async fn create_vfs_with_files(files: &[SupportingFile]) -> Arc<ArcStorage> {
+    let storage = Arc::new(ArcStorage::new(
+        Arc::new(InMemoryStorage::new()) as Arc<dyn VfsStorage>
+    ));
+
+    // The VFS mount path is /data (the default). The InMemoryStorage root is /,
+    // so files at /data/<name> in the guest map to /<name> in storage.
+    for f in files {
+        let path = format!("/{}", f.name);
+        if let Err(e) = storage.write(&path, f.content.as_bytes()).await {
+            tracing::warn!(file = %f.name, error = %e, "failed to write supporting file to VFS");
+        } else {
+            tracing::debug!(file = %f.name, size = f.content.len(), "wrote supporting file to VFS");
+        }
+    }
+
+    storage
+}
+
 /// Execute Python code with session-based state persistence.
 ///
 /// Creates a [`SessionExecutor`] from the sandbox's Python executor, optionally
@@ -284,6 +317,7 @@ async fn execute_stateless(sandbox: &eryx::PooledSandbox, code: &str) -> Execute
 async fn execute_with_session(
     sandbox: &mut eryx::PooledSandbox,
     code: &str,
+    files: &[SupportingFile],
     state_snapshot: &[u8],
     enable_tracing: bool,
     server_tx: &mpsc::Sender<ServerMessage>,
@@ -300,16 +334,35 @@ async fn execute_with_session(
         .collect();
     let callbacks_arc: Vec<Arc<dyn Callback>> = callbacks_map.values().cloned().collect();
 
-    // Create the session executor.
-    let mut session = match SessionExecutor::new(executor, &callbacks_arc).await {
-        Ok(s) => s,
-        Err(e) => {
-            tracing::warn!(error = %e, "failed to create session executor");
-            return ExecuteResult {
-                success: false,
-                error: format!("session creation failed: {e}"),
-                ..Default::default()
-            };
+    // Create the session executor, optionally with pre-populated VFS for supporting files.
+    let mut session = if files.is_empty() {
+        match SessionExecutor::new(executor, &callbacks_arc).await {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::warn!(error = %e, "failed to create session executor");
+                return ExecuteResult {
+                    success: false,
+                    error: format!("session creation failed: {e}"),
+                    ..Default::default()
+                };
+            }
+        }
+    } else {
+        let vfs_storage = create_vfs_with_files(files).await;
+        tracing::info!(
+            file_count = files.len(),
+            "created VFS with supporting files"
+        );
+        match SessionExecutor::new_with_vfs(executor, &callbacks_arc, vfs_storage).await {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::warn!(error = %e, "failed to create session executor with VFS");
+                return ExecuteResult {
+                    success: false,
+                    error: format!("session creation failed: {e}"),
+                    ..Default::default()
+                };
+            }
         }
     };
 
@@ -325,6 +378,16 @@ async fn execute_with_session(
             Err(e) => {
                 tracing::warn!(error = %e, "invalid state snapshot bytes, proceeding with clean state");
             }
+        }
+    }
+
+    // If we have supporting files, run a setup step (without tracing) to add
+    // /data to sys.path so the user's code can `import` the modules directly.
+    if !files.is_empty() {
+        let setup_code = "import sys\nif '/data' not in sys.path: sys.path.insert(0, '/data')";
+        if let Err(e) = session.execute(setup_code).run().await {
+            tracing::warn!(error = %e, "failed to set up sys.path for supporting files");
+            // Non-fatal — user code may still work if it doesn't import the files.
         }
     }
 
@@ -387,7 +450,7 @@ async fn execute_with_session(
         }
     });
 
-    // Execute the code with the session.
+    // Execute the user code with the session.
     let mut builder = session
         .execute(code)
         .with_callbacks(&callbacks_arc, callback_tx)
@@ -564,5 +627,43 @@ fn parse_trace_event_json(event_json: &str) -> (String, String, String, String, 
             String::new(),
             0,
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_create_vfs_with_files() {
+        let files = vec![
+            SupportingFile {
+                name: "helpers.py".to_string(),
+                content: "def greet(): return 'hello'".to_string(),
+            },
+            SupportingFile {
+                name: "utils.py".to_string(),
+                content: "PI = 3.14".to_string(),
+            },
+        ];
+
+        let storage = create_vfs_with_files(&files).await;
+
+        // Files are stored at /<name> in VFS storage (the /data mount maps / in storage).
+        let content = storage.read("/helpers.py").await.unwrap();
+        assert_eq!(
+            String::from_utf8(content).unwrap(),
+            "def greet(): return 'hello'"
+        );
+
+        let content = storage.read("/utils.py").await.unwrap();
+        assert_eq!(String::from_utf8(content).unwrap(), "PI = 3.14");
+    }
+
+    #[tokio::test]
+    async fn test_create_vfs_with_no_files() {
+        let storage = create_vfs_with_files(&[]).await;
+        // Should just be an empty storage with root dir
+        assert!(storage.read("/helpers.py").await.is_err());
     }
 }

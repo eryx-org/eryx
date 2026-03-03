@@ -72,6 +72,7 @@ async fn execute_simple_print() {
             enable_tracing: false,
             persist_state: false,
             state_snapshot: vec![],
+            files: vec![],
         })),
     })
     .await
@@ -130,6 +131,7 @@ print(f"got: {result}")
             enable_tracing: false,
             persist_state: false,
             state_snapshot: vec![],
+            files: vec![],
         })),
     })
     .await
@@ -214,6 +216,7 @@ except Exception as e:
             enable_tracing: false,
             persist_state: false,
             state_snapshot: vec![],
+            files: vec![],
         })),
     })
     .await
@@ -284,6 +287,7 @@ for i in range(3):
             enable_tracing: false,
             persist_state: false,
             state_snapshot: vec![],
+            files: vec![],
         })),
     })
     .await
@@ -340,6 +344,7 @@ async fn execute_reports_stats() {
             enable_tracing: false,
             persist_state: false,
             state_snapshot: vec![],
+            files: vec![],
         })),
     })
     .await
@@ -383,6 +388,7 @@ print(x + y)
             enable_tracing: true,
             persist_state: false,
             state_snapshot: vec![],
+            files: vec![],
         })),
     })
     .await
@@ -454,6 +460,7 @@ async fn execute_without_tracing_no_trace_events() {
             enable_tracing: false,
             persist_state: false,
             state_snapshot: vec![],
+            files: vec![],
         })),
     })
     .await
@@ -519,6 +526,7 @@ print(f"alpha: {result}")
                 enable_tracing: false,
                 persist_state: false,
                 state_snapshot: vec![],
+                files: vec![],
             })),
         })
         .await
@@ -597,6 +605,7 @@ print(f"beta: {result}")
                 enable_tracing: false,
                 persist_state: false,
                 state_snapshot: vec![],
+                files: vec![],
             })),
         })
         .await
@@ -680,6 +689,7 @@ print(f"path={result['path']}")
             enable_tracing: false,
             persist_state: false,
             state_snapshot: vec![],
+            files: vec![],
         })),
     })
     .await

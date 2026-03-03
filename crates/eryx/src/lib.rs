@@ -145,7 +145,8 @@ pub use eryx_macros::callback;
 #[cfg(feature = "vfs")]
 pub mod vfs {
     pub use eryx_vfs::{
-        DirEntry, DirPerms, FilePerms, InMemoryStorage, Metadata, ScrubbingStorage, VfsCtx,
-        VfsError, VfsFileScrubPolicy, VfsResult, VfsSecretConfig, VfsState, VfsStorage, VfsView,
+        ArcStorage, DirEntry, DirPerms, FilePerms, InMemoryStorage, Metadata, ScrubbingStorage,
+        VfsCtx, VfsError, VfsFileScrubPolicy, VfsResult, VfsSecretConfig, VfsState, VfsStorage,
+        VfsView,
     };
 }

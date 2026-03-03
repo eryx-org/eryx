@@ -51,7 +51,7 @@ pub use linker::{HybridVfsView, VfsView, add_hybrid_vfs_to_linker, add_vfs_to_li
 pub use scrubbing::{
     FileScrubPolicy as VfsFileScrubPolicy, ScrubbingStorage, SecretConfig as VfsSecretConfig,
 };
-pub use storage::{DirEntry, InMemoryStorage, Metadata, VfsStorage};
+pub use storage::{ArcStorage, DirEntry, InMemoryStorage, Metadata, VfsStorage};
 pub use wasi_impl::{VfsCtx, VfsDescriptor, VfsReaddirIterator, VfsState};
 
 // Re-export permission types from wasmtime-wasi for convenience

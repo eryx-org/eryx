@@ -9,7 +9,7 @@ authors.workspace = true
 description = "gRPC server for sandboxed Python execution via eryx"
 
 [dependencies]
-eryx = { workspace = true, features = ["embedded"] }
+eryx = { workspace = true, features = ["embedded", "vfs"] }
 tokio = { workspace = true, features = ["full"] }
 tokio-stream.workspace = true
 tonic.workspace = true

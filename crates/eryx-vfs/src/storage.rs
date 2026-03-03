@@ -1,6 +1,7 @@
 //! VFS storage trait and implementations.
 
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 use std::time::SystemTime;
 
 use async_trait::async_trait;
@@ -96,6 +97,94 @@ pub trait VfsStorage: Send + Sync {
         Err(VfsError::Storage(
             "mkdir_sync not implemented for this storage backend".to_string(),
         ))
+    }
+}
+
+/// Type-erased VFS storage that wraps any [`VfsStorage`] implementation.
+///
+/// This avoids propagating generic type parameters through the entire
+/// executor stack while still allowing different storage backends
+/// (e.g., [`InMemoryStorage`], [`ScrubbingStorage`](crate::ScrubbingStorage))
+/// to be used interchangeably.
+///
+/// # Example
+///
+/// ```rust,ignore
+/// use eryx_vfs::{ArcStorage, InMemoryStorage};
+/// use std::sync::Arc;
+///
+/// // Wrap any VfsStorage in a ArcStorage
+/// let storage = ArcStorage::new(Arc::new(InMemoryStorage::new()));
+/// ```
+pub struct ArcStorage(Arc<dyn VfsStorage>);
+
+impl ArcStorage {
+    /// Wrap any `VfsStorage` implementation in a type-erased `ArcStorage`.
+    pub fn new(storage: Arc<dyn VfsStorage>) -> Self {
+        Self(storage)
+    }
+}
+
+impl std::fmt::Debug for ArcStorage {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("ArcStorage")
+            .field(&"<dyn VfsStorage>")
+            .finish()
+    }
+}
+
+#[async_trait]
+impl VfsStorage for ArcStorage {
+    async fn read(&self, path: &str) -> VfsResult<Vec<u8>> {
+        self.0.read(path).await
+    }
+
+    async fn read_at(&self, path: &str, offset: u64, len: u64) -> VfsResult<Vec<u8>> {
+        self.0.read_at(path, offset, len).await
+    }
+
+    async fn write(&self, path: &str, data: &[u8]) -> VfsResult<()> {
+        self.0.write(path, data).await
+    }
+
+    async fn write_at(&self, path: &str, offset: u64, data: &[u8]) -> VfsResult<()> {
+        self.0.write_at(path, offset, data).await
+    }
+
+    async fn set_size(&self, path: &str, size: u64) -> VfsResult<()> {
+        self.0.set_size(path, size).await
+    }
+
+    async fn delete(&self, path: &str) -> VfsResult<()> {
+        self.0.delete(path).await
+    }
+
+    async fn exists(&self, path: &str) -> VfsResult<bool> {
+        self.0.exists(path).await
+    }
+
+    async fn list(&self, path: &str) -> VfsResult<Vec<DirEntry>> {
+        self.0.list(path).await
+    }
+
+    async fn stat(&self, path: &str) -> VfsResult<Metadata> {
+        self.0.stat(path).await
+    }
+
+    async fn mkdir(&self, path: &str) -> VfsResult<()> {
+        self.0.mkdir(path).await
+    }
+
+    async fn rmdir(&self, path: &str) -> VfsResult<()> {
+        self.0.rmdir(path).await
+    }
+
+    async fn rename(&self, from: &str, to: &str) -> VfsResult<()> {
+        self.0.rename(from, to).await
+    }
+
+    fn mkdir_sync(&self, path: &str) -> VfsResult<()> {
+        self.0.mkdir_sync(path)
     }
 }
 
