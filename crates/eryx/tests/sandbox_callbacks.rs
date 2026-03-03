@@ -589,6 +589,49 @@ for cb in callbacks:
 }
 
 #[tokio::test]
+async fn test_list_callbacks_includes_schema() {
+    let sandbox = sandbox_builder()
+        .with_callback(EchoCallback)
+        .with_callback(ValidatingCallback)
+        .build()
+        .expect("Failed to build sandbox");
+
+    let result = sandbox
+        .execute(
+            r#"
+import json
+callbacks = list_callbacks()
+for cb in callbacks:
+    schema = cb.get('parameters_schema')
+    if schema:
+        print(f"{cb['name']}: {json.dumps(schema)}")
+    else:
+        print(f"{cb['name']}: no schema")
+"#,
+        )
+        .await;
+
+    assert!(
+        result.is_ok(),
+        "Should list callbacks with schema: {:?}",
+        result
+    );
+    let output = result.unwrap();
+    // EchoCallback has a 'message' parameter - schema should include it
+    assert!(
+        output.stdout.contains("message"),
+        "Echo callback schema should contain 'message' field: {}",
+        output.stdout
+    );
+    // ValidatingCallback has a 'value' parameter - schema should include it
+    assert!(
+        output.stdout.contains("value"),
+        "Validate callback schema should contain 'value' field: {}",
+        output.stdout
+    );
+}
+
+#[tokio::test]
 async fn test_invoke_by_name() {
     let sandbox = sandbox_builder()
         .with_callback(EchoCallback)

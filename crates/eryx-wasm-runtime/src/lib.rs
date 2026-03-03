@@ -29,7 +29,7 @@ pub mod python;
 use std::alloc::Layout;
 use wit_dylib_ffi::{
     Call, Enum, ExportFunction, Flags, Future, Interpreter, List, Record, Resource, Stream, Tuple,
-    Variant, Wit, WitOption, WitResult,
+    Type, Variant, Wit, WitOption, WitResult,
 };
 
 // =============================================================================
@@ -74,6 +74,8 @@ pub struct EryxCall {
     stack: Vec<Value>,
     /// Deferred deallocations
     deferred: Vec<(*mut u8, Layout)>,
+    /// Iterators for list iteration via pop_list/pop_iter_next/pop_iter.
+    iterators: Vec<std::vec::IntoIter<Value>>,
 }
 
 /// A value on the call stack.
@@ -93,6 +95,12 @@ enum Value {
     Char(char),
     String(String),
     Bytes(Vec<u8>),
+    /// A record with its fields collected in definition order.
+    Record(Vec<Value>),
+    /// A generic list (non-u8) with collected elements.
+    GenericList(Vec<Value>),
+    /// A tuple with its elements collected in definition order.
+    Tuple(Vec<Value>),
     /// For result<T, E>: true = ok, false = err
     ResultDiscriminant(bool),
     /// For option<T>: true = some, false = none
@@ -104,6 +112,7 @@ impl EryxCall {
         Self {
             stack: Vec::new(),
             deferred: Vec::new(),
+            iterators: Vec::new(),
         }
     }
 }
@@ -283,33 +292,79 @@ impl Call for EryxCall {
     }
 
     fn pop_record(&mut self, _ty: Record) {
-        // Records are flattened - fields are already on the stack
+        // Pop a Record value and push its fields back onto the stack in reverse order
+        // so they can be popped in definition order (LIFO).
+        match self.stack.pop() {
+            Some(Value::Record(fields)) => {
+                for field in fields.into_iter().rev() {
+                    self.stack.push(field);
+                }
+            }
+            other => panic!("expected Record, got {other:?}"),
+        }
     }
 
     fn pop_tuple(&mut self, _ty: Tuple) {
-        // Tuples are flattened - elements are already on the stack
+        // Pop a Tuple value and push its elements back onto the stack in reverse order
+        // so they can be popped in definition order (LIFO).
+        match self.stack.pop() {
+            Some(Value::Tuple(elements)) => {
+                for elem in elements.into_iter().rev() {
+                    self.stack.push(elem);
+                }
+            }
+            other => panic!("expected Tuple, got {other:?}"),
+        }
+    }
+
+    unsafe fn maybe_pop_list(&mut self, ty: List) -> Option<(*const u8, usize)> {
+        // For byte lists, return a raw pointer to the bytes for efficient transfer.
+        if matches!(ty.ty(), Type::U8)
+            && let Some(Value::Bytes(bytes)) = self.stack.last()
+        {
+            let ptr = bytes.as_ptr();
+            let len = bytes.len();
+            return Some((ptr, len));
+        }
+        None
     }
 
     fn pop_list(&mut self, _ty: List) -> usize {
         match self.stack.pop() {
             Some(Value::Bytes(bytes)) => {
                 let len = bytes.len();
-                // Push bytes back for iteration
-                for b in bytes.into_iter().rev() {
-                    self.stack.push(Value::U8(b));
-                }
+                // Push bytes as an iterator for pop_iter_next
+                self.iterators.push(
+                    bytes
+                        .into_iter()
+                        .map(Value::U8)
+                        .collect::<Vec<_>>()
+                        .into_iter(),
+                );
                 len
             }
-            other => panic!("expected Bytes for list, got {other:?}"),
+            Some(Value::GenericList(items)) => {
+                let len = items.len();
+                // Push items as an iterator for pop_iter_next
+                self.iterators.push(items.into_iter());
+                len
+            }
+            other => panic!("expected Bytes or GenericList for list, got {other:?}"),
         }
     }
 
     fn pop_iter_next(&mut self, _ty: List) {
-        // Called for each element during iteration - element should already be ready
+        // Pop next item from the current iterator and push it onto the stack.
+        if let Some(iter) = self.iterators.last_mut()
+            && let Some(value) = iter.next()
+        {
+            self.stack.push(value);
+        }
     }
 
     fn pop_iter(&mut self, _ty: List) {
-        // Called when iteration is complete
+        // Iteration complete - remove the iterator.
+        self.iterators.pop();
     }
 
     fn push_bool(&mut self, val: bool) {
@@ -364,12 +419,20 @@ impl Call for EryxCall {
         self.stack.push(Value::String(val));
     }
 
-    fn push_record(&mut self, _ty: Record) {
-        // Records are flattened - fields will be pushed individually
+    fn push_record(&mut self, ty: Record) {
+        // Collect the top N values from the stack (the record's fields) into a Record.
+        let n = ty.fields().len();
+        let start = self.stack.len() - n;
+        let fields = self.stack.drain(start..).collect();
+        self.stack.push(Value::Record(fields));
     }
 
-    fn push_tuple(&mut self, _ty: Tuple) {
-        // Tuples are flattened - elements will be pushed individually
+    fn push_tuple(&mut self, ty: Tuple) {
+        // Collect the top N values from the stack (the tuple's elements) into a Tuple.
+        let n = ty.types().len();
+        let start = self.stack.len() - n;
+        let elements = self.stack.drain(start..).collect();
+        self.stack.push(Value::Tuple(elements));
     }
 
     fn push_flags(&mut self, _ty: Flags, bits: u32) {
@@ -408,18 +471,43 @@ impl Call for EryxCall {
         self.stack.push(Value::ResultDiscriminant(!is_err));
     }
 
-    fn push_list(&mut self, _ty: List, _capacity: usize) {
-        // Start collecting list elements
-        self.stack.push(Value::Bytes(Vec::new()));
+    unsafe fn push_raw_list(&mut self, ty: List, ptr: *mut u8, len: usize) -> bool {
+        // For byte lists, take ownership and push as Bytes.
+        if matches!(ty.ty(), Type::U8) {
+            let bytes = unsafe { Vec::from_raw_parts(ptr, len, len) };
+            self.stack.push(Value::Bytes(bytes));
+            return true;
+        }
+        false
+    }
+
+    fn push_list(&mut self, ty: List, _capacity: usize) {
+        // Start collecting list elements.
+        // Use Bytes for list<u8>, GenericList for everything else.
+        if matches!(ty.ty(), Type::U8) {
+            self.stack.push(Value::Bytes(Vec::new()));
+        } else {
+            self.stack.push(Value::GenericList(Vec::new()));
+        }
     }
 
     fn list_append(&mut self, _ty: List) {
-        // Pop the element and append to the list
-        let elem = self.stack.pop();
-        if let Some(Value::Bytes(bytes)) = self.stack.last_mut()
-            && let Some(Value::U8(b)) = elem
-        {
-            bytes.push(b);
+        // Pop the element and append to the list being built.
+        let elem = self.stack.pop().expect("list_append: missing element");
+        match self.stack.last_mut() {
+            Some(Value::Bytes(bytes)) => {
+                if let Value::U8(b) = elem {
+                    bytes.push(b);
+                } else {
+                    panic!("list_append: expected U8 element for Bytes list, got {elem:?}");
+                }
+            }
+            Some(Value::GenericList(items)) => {
+                items.push(elem);
+            }
+            other => {
+                panic!("list_append: expected Bytes or GenericList at stack top, got {other:?}")
+            }
         }
     }
 }
@@ -647,40 +735,44 @@ fn call_list_callbacks(wit: Wit) -> Vec<python::CallbackInfo> {
     // Call the import (synchronous)
     import_func.call_import_sync(&mut cx);
 
-    // Parse the stack contents into callback info.
-    // The actual format depends on how wasmtime and wit-dylib interact.
-    // From observation, the stack contains flattened record fields.
-    // We'll collect all string values and try to group them.
+    // The result is a list<record{name: string, description: string, parameters-schema-json: string}>
+    // With our fixed Call trait, this arrives as a GenericList of Record values.
     let mut callbacks = Vec::new();
-    let mut strings: Vec<String> = Vec::new();
 
-    // Collect all string values from the stack, skipping empty Bytes
-    for value in cx.stack.drain(..) {
-        match value {
-            Value::String(s) => strings.push(s),
-            Value::Bytes(b) if !b.is_empty() => {
-                // Non-empty bytes might be a string
-                if let Ok(s) = String::from_utf8(b) {
-                    strings.push(s);
-                }
-            }
-            _ => {} // Skip empty Bytes and other types
+    let list = match cx.stack.pop() {
+        Some(Value::GenericList(items)) => items,
+        Some(other) => {
+            // Shouldn't happen, but handle gracefully
+            eprintln!("call_list_callbacks: unexpected stack value: {other:?}");
+            return Vec::new();
         }
-    }
+        None => return Vec::new(),
+    };
 
-    // Group strings into callbacks.
-    // Each callback has: name, description, (optional parameters_schema_json)
-    // From observation, we get pairs of (name, description) when schema is empty
-    if strings.len() >= 2 {
-        // Assume pairs of (name, description)
-        for chunk in strings.chunks(2) {
-            if chunk.len() >= 2 {
+    for item in list {
+        match item {
+            Value::Record(fields) if fields.len() == 3 => {
+                // Fields are in WIT definition order: name, description, parameters_schema_json
+                let mut iter = fields.into_iter();
+                let name = match iter.next() {
+                    Some(Value::String(s)) => s,
+                    _ => continue,
+                };
+                let description = match iter.next() {
+                    Some(Value::String(s)) => s,
+                    _ => continue,
+                };
+                let parameters_schema_json = match iter.next() {
+                    Some(Value::String(s)) => s,
+                    _ => continue,
+                };
                 callbacks.push(python::CallbackInfo {
-                    name: chunk[0].clone(),
-                    description: chunk[1].clone(),
-                    parameters_schema_json: String::new(), // Schema not available in this format
+                    name,
+                    description,
+                    parameters_schema_json,
                 });
             }
+            _ => {} // Skip malformed items
         }
     }
 
@@ -1353,11 +1445,12 @@ fn handle_export(wit: Wit, func_index: usize, cx: &mut EryxCall) -> HandleExport
 
             match result {
                 python::ExecuteResult::Complete(output) => {
-                    // Push record fields in REVERSE order for LIFO stack
                     // WIT defines: execute-output { stdout, stderr }
-                    // wit-dylib pops fields in definition order, so push stderr first, then stdout
-                    cx.push_string(output.stderr);
-                    cx.push_string(output.stdout);
+                    // Push as a Record in definition order; pop_record handles field extraction
+                    cx.stack.push(Value::Record(vec![
+                        Value::String(output.stdout),
+                        Value::String(output.stderr),
+                    ]));
                     cx.stack.push(Value::ResultDiscriminant(true));
                     HandleExportResult::Complete
                 }
@@ -1566,9 +1659,12 @@ impl Interpreter for EryxInterpreter {
                         python::get_python_variable_string("_eryx_errors").unwrap_or_default()
                     };
 
-                    // Push record fields in REVERSE order for LIFO stack (stderr first, then stdout)
-                    cx.push_string(stderr.trim_end_matches('\n').to_string());
-                    cx.push_string(stdout.trim_end_matches('\n').to_string());
+                    // WIT defines: execute-output { stdout, stderr }
+                    // Push as a Record in definition order; pop_record handles field extraction
+                    cx.stack.push(Value::Record(vec![
+                        Value::String(stdout.trim_end_matches('\n').to_string()),
+                        Value::String(stderr.trim_end_matches('\n').to_string()),
+                    ]));
                     cx.stack.push(Value::ResultDiscriminant(true));
                 }
 
