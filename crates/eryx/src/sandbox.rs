@@ -471,9 +471,10 @@ impl Sandbox {
 
     /// Get a reference to the Python executor.
     ///
-    /// This is primarily for internal use by session implementations.
+    /// This allows creating a [`SessionExecutor`] from a pooled sandbox,
+    /// enabling state persistence between executions.
     #[must_use]
-    pub(crate) fn executor(&self) -> Arc<PythonExecutor> {
+    pub fn executor(&self) -> Arc<PythonExecutor> {
         self.executor.clone()
     }
 

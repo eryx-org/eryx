@@ -70,6 +70,8 @@ async fn execute_simple_print() {
                 ..Default::default()
             }),
             enable_tracing: false,
+            persist_state: false,
+            state_snapshot: vec![],
         })),
     })
     .await
@@ -126,6 +128,8 @@ print(f"got: {result}")
                 ..Default::default()
             }),
             enable_tracing: false,
+            persist_state: false,
+            state_snapshot: vec![],
         })),
     })
     .await
@@ -208,6 +212,8 @@ except Exception as e:
                 ..Default::default()
             }),
             enable_tracing: false,
+            persist_state: false,
+            state_snapshot: vec![],
         })),
     })
     .await
@@ -276,6 +282,8 @@ for i in range(3):
                 ..Default::default()
             }),
             enable_tracing: false,
+            persist_state: false,
+            state_snapshot: vec![],
         })),
     })
     .await
@@ -330,6 +338,8 @@ async fn execute_reports_stats() {
             callbacks: vec![],
             resource_limits: None,
             enable_tracing: false,
+            persist_state: false,
+            state_snapshot: vec![],
         })),
     })
     .await
@@ -371,6 +381,8 @@ print(x + y)
                 ..Default::default()
             }),
             enable_tracing: true,
+            persist_state: false,
+            state_snapshot: vec![],
         })),
     })
     .await
@@ -440,6 +452,8 @@ async fn execute_without_tracing_no_trace_events() {
                 ..Default::default()
             }),
             enable_tracing: false,
+            persist_state: false,
+            state_snapshot: vec![],
         })),
     })
     .await
@@ -503,6 +517,8 @@ print(f"alpha: {result}")
                     ..Default::default()
                 }),
                 enable_tracing: false,
+                persist_state: false,
+                state_snapshot: vec![],
             })),
         })
         .await
@@ -579,6 +595,8 @@ print(f"beta: {result}")
                     ..Default::default()
                 }),
                 enable_tracing: false,
+                persist_state: false,
+                state_snapshot: vec![],
             })),
         })
         .await
@@ -660,6 +678,8 @@ print(f"path={result['path']}")
                 ..Default::default()
             }),
             enable_tracing: false,
+            persist_state: false,
+            state_snapshot: vec![],
         })),
     })
     .await

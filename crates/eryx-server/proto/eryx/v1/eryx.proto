@@ -54,6 +54,16 @@ message ExecuteRequest {
   // When true, the server will send TraceEvent messages for line execution,
   // function calls/returns, exceptions, and callback start/end events.
   bool enable_tracing = 4;
+
+  // Whether to persist Python state between executions.
+  // When true, the server will snapshot state after execution and include it
+  // in the ExecuteResult. If state_snapshot is also provided, the server will
+  // restore that state before executing code.
+  bool persist_state = 5;
+
+  // Previously captured state snapshot to restore before execution.
+  // Only used when persist_state is true.
+  bytes state_snapshot = 6;
 }
 
 // Declaration of a callback that the Go worker can handle.
@@ -160,6 +170,10 @@ message ExecuteResult {
 
   // Execution statistics.
   ExecuteStats stats = 5;
+
+  // Captured Python state snapshot after execution.
+  // Only populated when persist_state was true in the request.
+  bytes state_snapshot = 6;
 }
 
 // A trace event emitted during execution.

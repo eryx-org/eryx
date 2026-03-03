@@ -1,10 +1,15 @@
 //! gRPC service implementation for the Eryx Execute RPC.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use dashmap::DashMap;
-use eryx::{ResourceLimits, SandboxPool};
+use eryx::callback_handler::run_callback_handler;
+use eryx::{
+    Callback, CallbackRequest, OutputRequest, PythonStateSnapshot, ResourceLimits, SandboxPool,
+    SecretConfig, SessionExecutor, TraceRequest,
+};
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status, Streaming};
@@ -63,12 +68,15 @@ impl crate::proto::eryx::v1::eryx_server::Eryx for EryxService {
         let code = execute_req.code;
         let declarations = execute_req.callbacks;
         let enable_tracing = execute_req.enable_tracing;
+        let persist_state = execute_req.persist_state;
+        let state_snapshot = execute_req.state_snapshot;
 
         let span = tracing::info_span!(
             "execute",
             code_len = code.len(),
             callbacks = declarations.len(),
             tracing = enable_tracing,
+            persist_state,
         );
 
         // 2. Parse resource limits.
@@ -143,7 +151,7 @@ impl crate::proto::eryx::v1::eryx_server::Eryx for EryxService {
             .map_err(|e| Status::unavailable(format!("failed to acquire sandbox: {e}")))?
             .with_callbacks(cbs)
             .with_output_handler(GrpcOutputHandler::new(server_tx.clone()))
-            .with_resource_limits(resource_limits);
+            .with_resource_limits(resource_limits.clone());
         span.in_scope(|| {
             tracing::info!(
                 acquire_ms = acquire_start.elapsed().as_millis() as u64,
@@ -194,43 +202,18 @@ impl crate::proto::eryx::v1::eryx_server::Eryx for EryxService {
         let resp_tx_final = resp_tx;
         tokio::spawn(
             async move {
-                let exec_result = sandbox.execute(&code).await;
-
-                let result_msg = match exec_result {
-                    Ok(result) => {
-                        tracing::info!(
-                            success = true,
-                            duration_ms = result.stats.duration.as_millis() as u64,
-                            callback_invocations = result.stats.callback_invocations,
-                            "execution completed"
-                        );
-                        ExecuteResult {
-                            success: true,
-                            stdout: result.stdout,
-                            stderr: result.stderr,
-                            error: String::new(),
-                            stats: Some(ExecuteStats {
-                                duration_ms: result.stats.duration.as_millis() as u64,
-                                callback_invocations: result.stats.callback_invocations,
-                                peak_memory_bytes: result.stats.peak_memory_bytes.unwrap_or(0),
-                                fuel_consumed: result.stats.fuel_consumed.unwrap_or(0),
-                            }),
-                        }
-                    }
-                    Err(e) => {
-                        tracing::warn!(
-                            success = false,
-                            error = %e,
-                            "execution completed"
-                        );
-                        ExecuteResult {
-                            success: false,
-                            stdout: String::new(),
-                            stderr: String::new(),
-                            error: e.to_string(),
-                            stats: None,
-                        }
-                    }
+                let result_msg = if persist_state {
+                    execute_with_session(
+                        &mut sandbox,
+                        &code,
+                        &state_snapshot,
+                        enable_tracing,
+                        &server_tx_result,
+                        resource_limits,
+                    )
+                    .await
+                } else {
+                    execute_stateless(&sandbox, &code).await
                 };
 
                 let msg = ServerMessage {
@@ -252,5 +235,334 @@ impl crate::proto::eryx::v1::eryx_server::Eryx for EryxService {
         );
 
         Ok(Response::new(ReceiverStream::new(resp_rx)))
+    }
+}
+
+/// Execute Python code statelessly via the sandbox's built-in execute method.
+async fn execute_stateless(sandbox: &eryx::PooledSandbox, code: &str) -> ExecuteResult {
+    match sandbox.execute(code).await {
+        Ok(result) => {
+            tracing::info!(
+                success = true,
+                duration_ms = result.stats.duration.as_millis() as u64,
+                callback_invocations = result.stats.callback_invocations,
+                "execution completed"
+            );
+            ExecuteResult {
+                success: true,
+                stdout: result.stdout,
+                stderr: result.stderr,
+                error: String::new(),
+                stats: Some(ExecuteStats {
+                    duration_ms: result.stats.duration.as_millis() as u64,
+                    callback_invocations: result.stats.callback_invocations,
+                    peak_memory_bytes: result.stats.peak_memory_bytes.unwrap_or(0),
+                    fuel_consumed: result.stats.fuel_consumed.unwrap_or(0),
+                }),
+                state_snapshot: Vec::new(),
+            }
+        }
+        Err(e) => {
+            tracing::warn!(success = false, error = %e, "execution completed");
+            ExecuteResult {
+                success: false,
+                stdout: String::new(),
+                stderr: String::new(),
+                error: e.to_string(),
+                stats: None,
+                state_snapshot: Vec::new(),
+            }
+        }
+    }
+}
+
+/// Execute Python code with session-based state persistence.
+///
+/// Creates a [`SessionExecutor`] from the sandbox's Python executor, optionally
+/// restores a previous state snapshot, executes the code, and captures a new
+/// snapshot for the caller to persist.
+async fn execute_with_session(
+    sandbox: &mut eryx::PooledSandbox,
+    code: &str,
+    state_snapshot: &[u8],
+    enable_tracing: bool,
+    server_tx: &mpsc::Sender<ServerMessage>,
+    resource_limits: ResourceLimits,
+) -> ExecuteResult {
+    let start = Instant::now();
+
+    // Get the shared PythonExecutor and clone the configured callbacks from the sandbox.
+    let executor = sandbox.executor();
+    let callbacks_map: HashMap<String, Arc<dyn Callback>> = sandbox
+        .callbacks()
+        .iter()
+        .map(|(k, v)| (k.clone(), Arc::clone(v)))
+        .collect();
+    let callbacks_arc: Vec<Arc<dyn Callback>> = callbacks_map.values().cloned().collect();
+
+    // Create the session executor.
+    let mut session = match SessionExecutor::new(executor, &callbacks_arc).await {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::warn!(error = %e, "failed to create session executor");
+            return ExecuteResult {
+                success: false,
+                error: format!("session creation failed: {e}"),
+                ..Default::default()
+            };
+        }
+    };
+
+    // Restore previous state if provided.
+    if !state_snapshot.is_empty() {
+        match PythonStateSnapshot::from_bytes(state_snapshot) {
+            Ok(snapshot) => {
+                if let Err(e) = session.restore_state(&snapshot).await {
+                    tracing::warn!(error = %e, "failed to restore state, proceeding with clean state");
+                    // Don't fail — just proceed with a fresh session.
+                }
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "invalid state snapshot bytes, proceeding with clean state");
+            }
+        }
+    }
+
+    // Set up callback handler channels (mirroring Sandbox::execute pattern).
+    let (callback_tx, callback_rx) = mpsc::channel::<CallbackRequest>(32);
+    let cb_map = Arc::new(callbacks_map);
+    let cb_secrets: Arc<HashMap<String, SecretConfig>> = Arc::new(HashMap::new());
+    let callback_handler = tokio::spawn(async move {
+        run_callback_handler(callback_rx, cb_map, resource_limits, cb_secrets).await
+    });
+
+    // Set up trace channel if tracing is enabled.
+    let (trace_tx, mut trace_rx) = mpsc::unbounded_channel::<TraceRequest>();
+    if enable_tracing {
+        let trace_server_tx = server_tx.clone();
+        tokio::spawn(async move {
+            while let Some(req) = trace_rx.recv().await {
+                // Parse event_json into a proto TraceEvent.
+                let (event_type, function, message, name, duration_ms) =
+                    parse_trace_event_json(&req.event_json);
+                let proto_event = crate::proto::eryx::v1::TraceEvent {
+                    lineno: req.lineno,
+                    event_type,
+                    function,
+                    message,
+                    name,
+                    duration_ms,
+                    context_json: req.context_json,
+                };
+                let msg = ServerMessage {
+                    message: Some(server_message::Message::TraceEvent(proto_event)),
+                };
+                if trace_server_tx.send(msg).await.is_err() {
+                    break;
+                }
+            }
+        });
+    }
+
+    // Set up output streaming channel.
+    let (output_tx, mut output_rx) = mpsc::unbounded_channel::<OutputRequest>();
+    let output_server_tx = server_tx.clone();
+    tokio::spawn(async move {
+        use crate::proto::eryx::v1::{OutputEvent, OutputStream};
+        while let Some(req) = output_rx.recv().await {
+            let stream = if req.stream == 0 {
+                OutputStream::Stdout
+            } else {
+                OutputStream::Stderr
+            };
+            let msg = ServerMessage {
+                message: Some(server_message::Message::OutputEvent(OutputEvent {
+                    stream: stream.into(),
+                    data: req.data,
+                })),
+            };
+            if output_server_tx.send(msg).await.is_err() {
+                break;
+            }
+        }
+    });
+
+    // Execute the code with the session.
+    let mut builder = session
+        .execute(code)
+        .with_callbacks(&callbacks_arc, callback_tx)
+        .with_output_streaming(output_tx);
+    if enable_tracing {
+        builder = builder.with_tracing(trace_tx);
+    }
+    let exec_result = builder.run().await;
+
+    // Wait for callback handler to finish.
+    let callback_invocations = callback_handler.await.unwrap_or(0);
+
+    // Snapshot state after execution.
+    let snapshot_bytes = match session.snapshot_state().await {
+        Ok(snapshot) => {
+            let bytes = snapshot.to_bytes();
+            tracing::info!(snapshot_bytes = bytes.len(), "state snapshot captured");
+            bytes
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "failed to capture state snapshot");
+            Vec::new()
+        }
+    };
+
+    let duration = start.elapsed();
+
+    match exec_result {
+        Ok(output) => {
+            tracing::info!(
+                success = true,
+                duration_ms = duration.as_millis() as u64,
+                callback_invocations,
+                snapshot_bytes = snapshot_bytes.len(),
+                "session execution completed"
+            );
+            ExecuteResult {
+                success: true,
+                stdout: output.stdout,
+                stderr: output.stderr,
+                error: String::new(),
+                stats: Some(ExecuteStats {
+                    duration_ms: duration.as_millis() as u64,
+                    callback_invocations,
+                    peak_memory_bytes: output.peak_memory_bytes,
+                    fuel_consumed: output.fuel_consumed.unwrap_or(0),
+                }),
+                state_snapshot: snapshot_bytes,
+            }
+        }
+        Err(e) => {
+            tracing::warn!(
+                success = false,
+                error = %e,
+                "session execution completed"
+            );
+            ExecuteResult {
+                success: false,
+                stdout: String::new(),
+                stderr: String::new(),
+                error: e.to_string(),
+                stats: None,
+                // Still return the snapshot — the Go service decides whether to keep it.
+                state_snapshot: snapshot_bytes,
+            }
+        }
+    }
+}
+
+/// Parse a trace event JSON string into its proto components.
+///
+/// The event_json from eryx's TraceRequest contains a JSON representation of the
+/// trace event type. We extract the relevant fields for the proto message.
+fn parse_trace_event_json(event_json: &str) -> (String, String, String, String, u64) {
+    // event_json is typically: "line", {"call": {"function": "foo"}}, etc.
+    if let Ok(value) = serde_json::from_str::<serde_json::Value>(event_json) {
+        match &value {
+            serde_json::Value::String(s) => {
+                (s.clone(), String::new(), String::new(), String::new(), 0)
+            }
+            serde_json::Value::Object(map) => {
+                if let Some(inner) = map.get("call") {
+                    let function = inner
+                        .get("function")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    (
+                        "call".to_string(),
+                        function,
+                        String::new(),
+                        String::new(),
+                        0,
+                    )
+                } else if let Some(inner) = map.get("return") {
+                    let function = inner
+                        .get("function")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    (
+                        "return".to_string(),
+                        function,
+                        String::new(),
+                        String::new(),
+                        0,
+                    )
+                } else if let Some(inner) = map.get("exception") {
+                    let message = inner
+                        .get("message")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    (
+                        "exception".to_string(),
+                        String::new(),
+                        message,
+                        String::new(),
+                        0,
+                    )
+                } else if let Some(inner) = map.get("callback_start") {
+                    let name = inner
+                        .get("name")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    (
+                        "callback_start".to_string(),
+                        String::new(),
+                        String::new(),
+                        name,
+                        0,
+                    )
+                } else if let Some(inner) = map.get("callback_end") {
+                    let name = inner
+                        .get("name")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    let duration_ms = inner
+                        .get("duration_ms")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(0);
+                    (
+                        "callback_end".to_string(),
+                        String::new(),
+                        String::new(),
+                        name,
+                        duration_ms,
+                    )
+                } else {
+                    (
+                        "unknown".to_string(),
+                        String::new(),
+                        String::new(),
+                        String::new(),
+                        0,
+                    )
+                }
+            }
+            _ => (
+                "unknown".to_string(),
+                String::new(),
+                String::new(),
+                String::new(),
+                0,
+            ),
+        }
+    } else {
+        (
+            event_json.to_string(),
+            String::new(),
+            String::new(),
+            String::new(),
+            0,
+        )
     }
 }
