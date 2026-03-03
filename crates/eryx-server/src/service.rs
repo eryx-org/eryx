@@ -1,13 +1,14 @@
 //! gRPC service implementation for the Eryx Execute RPC.
 
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use dashmap::DashMap;
 use eryx::{ResourceLimits, SandboxPool};
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status, Streaming};
+use tracing::Instrument;
 
 use crate::callbacks::{self, CallbackResult, PendingCallbacks};
 use crate::output::GrpcOutputHandler;
@@ -63,6 +64,13 @@ impl crate::proto::eryx::v1::eryx_server::Eryx for EryxService {
         let declarations = execute_req.callbacks;
         let enable_tracing = execute_req.enable_tracing;
 
+        let span = tracing::info_span!(
+            "execute",
+            code_len = code.len(),
+            callbacks = declarations.len(),
+            tracing = enable_tracing,
+        );
+
         // 2. Parse resource limits.
         let resource_limits = if let Some(limits) = execute_req.resource_limits {
             ResourceLimits {
@@ -96,6 +104,15 @@ impl crate::proto::eryx::v1::eryx_server::Eryx for EryxService {
             ResourceLimits::default()
         };
 
+        span.in_scope(|| {
+            tracing::info!(
+                timeout = ?resource_limits.execution_timeout,
+                max_memory_bytes = ?resource_limits.max_memory_bytes,
+                max_fuel = ?resource_limits.max_fuel,
+                "request received"
+            );
+        });
+
         // 3. Set up gRPC response channel.
         let (resp_tx, resp_rx) = mpsc::channel::<Result<ServerMessage, Status>>(64);
 
@@ -118,6 +135,7 @@ impl crate::proto::eryx::v1::eryx_server::Eryx for EryxService {
             callbacks::build_callbacks(&declarations, server_tx.clone(), Arc::clone(&pending));
 
         // 5. Acquire sandbox from pool and configure for this request.
+        let acquire_start = Instant::now();
         let mut sandbox = self
             .pool
             .acquire()
@@ -126,6 +144,12 @@ impl crate::proto::eryx::v1::eryx_server::Eryx for EryxService {
             .with_callbacks(cbs)
             .with_output_handler(GrpcOutputHandler::new(server_tx.clone()))
             .with_resource_limits(resource_limits);
+        span.in_scope(|| {
+            tracing::info!(
+                acquire_ms = acquire_start.elapsed().as_millis() as u64,
+                "sandbox acquired from pool"
+            );
+        });
 
         // Conditionally add trace handler.
         if enable_tracing {
@@ -135,68 +159,97 @@ impl crate::proto::eryx::v1::eryx_server::Eryx for EryxService {
         // 6. Spawn callback dispatch task: reads inbound CallbackResponses and
         //    routes them to the pending oneshot senders.
         let pending_dispatch = Arc::clone(&pending);
-        tokio::spawn(async move {
-            while let Ok(Some(msg)) = inbound.message().await {
-                if let Some(client_message::Message::CallbackResponse(resp)) = msg.message {
-                    let result = match resp.result {
-                        Some(callback_response::Result::JsonResult(json)) => {
-                            CallbackResult::Ok(json)
-                        }
-                        Some(callback_response::Result::Error(err)) => CallbackResult::Err(err),
-                        None => CallbackResult::Err("empty callback response".to_string()),
-                    };
-                    callbacks::dispatch_callback_response(
-                        &pending_dispatch,
-                        &resp.request_id,
-                        result,
-                    );
+        tokio::spawn(
+            async move {
+                while let Ok(Some(msg)) = inbound.message().await {
+                    if let Some(client_message::Message::CallbackResponse(resp)) = msg.message {
+                        let request_id = resp.request_id;
+                        let result = match resp.result {
+                            Some(callback_response::Result::JsonResult(json)) => {
+                                tracing::debug!(%request_id, "dispatching callback result (ok)");
+                                CallbackResult::Ok(json)
+                            }
+                            Some(callback_response::Result::Error(err)) => {
+                                tracing::debug!(%request_id, "dispatching callback result (error)");
+                                CallbackResult::Err(err)
+                            }
+                            None => {
+                                tracing::debug!(%request_id, "dispatching callback result (empty)");
+                                CallbackResult::Err("empty callback response".to_string())
+                            }
+                        };
+                        callbacks::dispatch_callback_response(
+                            &pending_dispatch,
+                            &request_id,
+                            result,
+                        );
+                    }
                 }
             }
-        });
+            .instrument(span.clone()),
+        );
 
         // 7. Spawn execution task.
         let server_tx_result = server_tx;
         let resp_tx_final = resp_tx;
-        tokio::spawn(async move {
-            let exec_result = sandbox.execute(&code).await;
+        tokio::spawn(
+            async move {
+                let exec_result = sandbox.execute(&code).await;
 
-            let result_msg = match exec_result {
-                Ok(result) => ExecuteResult {
-                    success: true,
-                    stdout: result.stdout,
-                    stderr: result.stderr,
-                    error: String::new(),
-                    stats: Some(ExecuteStats {
-                        duration_ms: result.stats.duration.as_millis() as u64,
-                        callback_invocations: result.stats.callback_invocations,
-                        peak_memory_bytes: result.stats.peak_memory_bytes.unwrap_or(0),
-                        fuel_consumed: result.stats.fuel_consumed.unwrap_or(0),
-                    }),
-                },
-                Err(e) => ExecuteResult {
-                    success: false,
-                    stdout: String::new(),
-                    stderr: String::new(),
-                    error: e.to_string(),
-                    stats: None,
-                },
-            };
+                let result_msg = match exec_result {
+                    Ok(result) => {
+                        tracing::info!(
+                            success = true,
+                            duration_ms = result.stats.duration.as_millis() as u64,
+                            callback_invocations = result.stats.callback_invocations,
+                            "execution completed"
+                        );
+                        ExecuteResult {
+                            success: true,
+                            stdout: result.stdout,
+                            stderr: result.stderr,
+                            error: String::new(),
+                            stats: Some(ExecuteStats {
+                                duration_ms: result.stats.duration.as_millis() as u64,
+                                callback_invocations: result.stats.callback_invocations,
+                                peak_memory_bytes: result.stats.peak_memory_bytes.unwrap_or(0),
+                                fuel_consumed: result.stats.fuel_consumed.unwrap_or(0),
+                            }),
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            success = false,
+                            error = %e,
+                            "execution completed"
+                        );
+                        ExecuteResult {
+                            success: false,
+                            stdout: String::new(),
+                            stderr: String::new(),
+                            error: e.to_string(),
+                            stats: None,
+                        }
+                    }
+                };
 
-            let msg = ServerMessage {
-                message: Some(server_message::Message::ExecuteResult(result_msg)),
-            };
+                let msg = ServerMessage {
+                    message: Some(server_message::Message::ExecuteResult(result_msg)),
+                };
 
-            // Send via internal channel first, then drop it so the forwarder ends.
-            let _ = server_tx_result.send(msg).await;
-            drop(server_tx_result);
+                // Send via internal channel first, then drop it so the forwarder ends.
+                let _ = server_tx_result.send(msg).await;
+                drop(server_tx_result);
 
-            // sandbox is dropped here — per-request state cleared, returned to pool.
-            drop(sandbox);
+                // sandbox is dropped here — per-request state cleared, returned to pool.
+                drop(sandbox);
 
-            // The resp_tx_final is kept alive to ensure the response stream stays
-            // open until this task completes. Dropping it signals stream end.
-            drop(resp_tx_final);
-        });
+                // The resp_tx_final is kept alive to ensure the response stream stays
+                // open until this task completes. Dropping it signals stream end.
+                drop(resp_tx_final);
+            }
+            .instrument(span.clone()),
+        );
 
         Ok(Response::new(ReceiverStream::new(resp_rx)))
     }

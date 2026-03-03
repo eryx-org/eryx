@@ -5,6 +5,7 @@
 //! responses from the client via per-request oneshot channels.
 
 use std::sync::Arc;
+use std::time::Instant;
 
 use dashmap::DashMap;
 use eryx::{CallbackError, DynamicCallback};
@@ -38,6 +39,7 @@ pub fn build_callbacks(
     grpc_tx: mpsc::Sender<ServerMessage>,
     pending: PendingCallbacks,
 ) -> Vec<Box<dyn eryx::Callback>> {
+    tracing::debug!(callback_count = declarations.len(), "building callbacks");
     declarations
         .iter()
         .map(|decl| {
@@ -54,9 +56,17 @@ pub fn build_callbacks(
                     let name = name.clone();
 
                     Box::pin(async move {
+                        let started = Instant::now();
                         let request_id = Uuid::new_v4().to_string();
                         let arguments_json = serde_json::to_string(&args)
                             .map_err(|e| CallbackError::ExecutionFailed(e.to_string()))?;
+
+                        tracing::debug!(
+                            callback_name = %name,
+                            %request_id,
+                            args_len = arguments_json.len(),
+                            "callback invoked"
+                        );
 
                         // Create oneshot channel for the response.
                         let (resp_tx, resp_rx) = oneshot::channel();
@@ -67,34 +77,66 @@ pub fn build_callbacks(
                             message: Some(server_message::Message::CallbackRequest(
                                 CallbackRequest {
                                     request_id: request_id.clone(),
-                                    name,
+                                    name: name.clone(),
                                     arguments_json,
                                 },
                             )),
                         };
 
-                        tx.send(msg).await.map_err(|_| {
+                        tx.send(msg).await.map_err(|e| {
+                            tracing::warn!(
+                                callback_name = %name,
+                                %request_id,
+                                error = %e,
+                                "gRPC response channel closed"
+                            );
                             CallbackError::ExecutionFailed(
                                 "gRPC response channel closed".to_string(),
                             )
                         })?;
 
                         // Wait for the Go client to respond.
-                        let result = resp_rx.await.map_err(|_| {
+                        let result = resp_rx.await.map_err(|e| {
+                            tracing::warn!(
+                                callback_name = %name,
+                                %request_id,
+                                error = %e,
+                                "callback response channel dropped"
+                            );
                             CallbackError::ExecutionFailed(
                                 "callback response channel dropped".to_string(),
                             )
                         })?;
 
+                        let duration_ms = started.elapsed().as_millis() as u64;
+
                         // Clean up the pending entry (already removed by dispatch).
                         match result {
-                            CallbackResult::Ok(json_str) => serde_json::from_str(&json_str)
-                                .map_err(|e| {
+                            CallbackResult::Ok(ref json_str) => {
+                                tracing::debug!(
+                                    callback_name = %name,
+                                    %request_id,
+                                    duration_ms,
+                                    success = true,
+                                    "callback response received"
+                                );
+                                serde_json::from_str(json_str).map_err(|e| {
                                     CallbackError::ExecutionFailed(format!(
                                         "invalid callback result JSON: {e}"
                                     ))
-                                }),
-                            CallbackResult::Err(err) => Err(CallbackError::ExecutionFailed(err)),
+                                })
+                            }
+                            CallbackResult::Err(err) => {
+                                tracing::debug!(
+                                    callback_name = %name,
+                                    %request_id,
+                                    duration_ms,
+                                    success = false,
+                                    error = %err.chars().take(200).collect::<String>(),
+                                    "callback response received"
+                                );
+                                Err(CallbackError::ExecutionFailed(err))
+                            }
                         }
                     })
                 },
@@ -125,6 +167,7 @@ pub fn dispatch_callback_response(
     result: CallbackResult,
 ) -> bool {
     if let Some((_, sender)) = pending.remove(request_id) {
+        tracing::debug!(request_id, "dispatching callback response");
         // Ignoring send error: the callback handler may have timed out.
         let _ = sender.send(result);
         true

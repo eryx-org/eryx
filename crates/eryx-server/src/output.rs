@@ -19,6 +19,7 @@ impl GrpcOutputHandler {
     }
 
     async fn send_output(&self, stream: OutputStream, data: &str) {
+        tracing::trace!(stream = ?stream, data_len = data.len(), "sending output");
         let msg = ServerMessage {
             message: Some(server_message::Message::OutputEvent(OutputEvent {
                 stream: stream.into(),

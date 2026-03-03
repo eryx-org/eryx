@@ -70,6 +70,18 @@ fn to_proto_trace_event(event: &TraceEvent) -> v1::TraceEvent {
 #[async_trait]
 impl TraceHandler for GrpcTraceHandler {
     async fn on_trace(&self, event: TraceEvent) {
+        tracing::trace!(
+            event_type = %match &event.event {
+                TraceEventKind::Line => "line",
+                TraceEventKind::Call { .. } => "call",
+                TraceEventKind::Return { .. } => "return",
+                TraceEventKind::Exception { .. } => "exception",
+                TraceEventKind::CallbackStart { .. } => "callback_start",
+                TraceEventKind::CallbackEnd { .. } => "callback_end",
+            },
+            lineno = event.lineno,
+            "trace event"
+        );
         let proto_event = to_proto_trace_event(&event);
         let msg = ServerMessage {
             message: Some(server_message::Message::TraceEvent(proto_event)),
