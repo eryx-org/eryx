@@ -214,17 +214,16 @@ impl TypedCallback for ListItemsCallback {
             let filtered: Vec<_> = items
                 .into_iter()
                 .filter(|item| {
-                    if let Some(ref name) = args.name {
-                        if item["name"].as_str() != Some(name.as_str()) {
-                            return false;
-                        }
+                    if let Some(ref name) = args.name
+                        && item["name"].as_str() != Some(name.as_str())
+                    {
+                        return false;
                     }
-                    if let Some(ref types) = args.types {
-                        if let Some(t) = item["type"].as_str() {
-                            if !types.iter().any(|ft| ft == t) {
-                                return false;
-                            }
-                        }
+                    if let Some(ref types) = args.types
+                        && let Some(t) = item["type"].as_str()
+                        && !types.iter().any(|ft| ft == t)
+                    {
+                        return false;
                     }
                     true
                 })
