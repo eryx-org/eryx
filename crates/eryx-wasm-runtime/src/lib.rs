@@ -523,10 +523,6 @@ const EXPORT_RESTORE_STATE: usize = 2;
 const EXPORT_CLEAR_STATE: usize = 3;
 const EXPORT_FINALIZE_PREINIT: usize = 4;
 
-/// Track whether we've set up callbacks in Python
-static CALLBACKS_INITIALIZED: std::sync::atomic::AtomicBool =
-    std::sync::atomic::AtomicBool::new(false);
-
 // =============================================================================
 // Invoke callback mechanism
 // =============================================================================
@@ -1378,18 +1374,21 @@ pub fn do_tls_close(handle: u32) {
     call_tls_close(handle);
 }
 
-/// Initialize callbacks in Python if not already done.
-fn ensure_callbacks_initialized(wit: Wit) {
-    use std::sync::atomic::Ordering;
-
-    if CALLBACKS_INITIALIZED.swap(true, Ordering::SeqCst) {
-        return; // Already initialized
-    }
-
+/// Initialize callbacks in Python.
+///
+/// This is called on every execute to ensure callbacks are always in sync
+/// with the host's current per-request state. This is essential for:
+/// - Pool reuse: different requests may have different callbacks
+/// - Session reuse: callbacks may change between executions
+/// - Error recovery: a previous failed setup won't prevent future attempts
+fn initialize_callbacks(wit: Wit) {
     let callbacks = call_list_callbacks(wit);
 
-    if let Err(_e) = python::setup_callbacks(&callbacks) {
-        // Callback setup failed - continue without callbacks
+    if let Err(e) = python::setup_callbacks(&callbacks) {
+        eprintln!(
+            "ERROR: Failed to set up callbacks ({} declarations): {e}",
+            callbacks.len()
+        );
     }
 }
 
@@ -1437,8 +1436,9 @@ fn handle_export(wit: Wit, func_index: usize, cx: &mut EryxCall) -> HandleExport
             // execute(code: string) -> result<string, string>
             let code = cx.pop_string().to_string();
 
-            // Ensure callbacks are set up before first execute
-            ensure_callbacks_initialized(wit);
+            // Set up callbacks from the host's current per-request state.
+            // This runs on every execute to stay in sync with the host.
+            initialize_callbacks(wit);
 
             // Execute Python with Wit handle available for callbacks
             let result = with_wit(wit, || python::execute_python(&code));

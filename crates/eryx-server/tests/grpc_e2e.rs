@@ -468,3 +468,161 @@ async fn execute_without_tracing_no_trace_events() {
         trace_events.len()
     );
 }
+
+/// Verify that callbacks are correctly re-initialized when a pooled sandbox
+/// handles requests with different callbacks. This tests that the WASM runtime
+/// does NOT cache stale callback state across pool reuse.
+#[tokio::test]
+async fn execute_pool_reuse_different_callbacks() {
+    let channel = start_server().await;
+
+    // --- Request 1: call "alpha" callback ---
+    {
+        let mut client = EryxClient::new(channel.clone());
+        let (tx, rx) = mpsc::channel(16);
+
+        tx.send(ClientMessage {
+            message: Some(client_message::Message::ExecuteRequest(ExecuteRequest {
+                code: r#"
+result = await alpha(value="first")
+print(f"alpha: {result}")
+"#
+                .to_string(),
+                callbacks: vec![CallbackDeclaration {
+                    name: "alpha".to_string(),
+                    description: "Alpha callback".to_string(),
+                    parameters: vec![ParameterDeclaration {
+                        name: "value".to_string(),
+                        json_type: "string".to_string(),
+                        description: "A value".to_string(),
+                        required: true,
+                    }],
+                }],
+                resource_limits: Some(ResourceLimits {
+                    execution_timeout_ms: 30_000,
+                    ..Default::default()
+                }),
+                enable_tracing: false,
+            })),
+        })
+        .await
+        .unwrap();
+
+        let mut stream = client
+            .execute(ReceiverStream::new(rx))
+            .await
+            .unwrap()
+            .into_inner();
+
+        let mut got_result = false;
+        while let Some(msg) = stream.message().await.unwrap() {
+            match msg.message {
+                Some(server_message::Message::CallbackRequest(req)) => {
+                    assert_eq!(req.name, "alpha");
+                    let response_json = serde_json::json!({ "from": "alpha" }).to_string();
+                    tx.send(ClientMessage {
+                        message: Some(client_message::Message::CallbackResponse(
+                            eryx_server::proto::eryx::v1::CallbackResponse {
+                                request_id: req.request_id,
+                                result: Some(callback_response::Result::JsonResult(response_json)),
+                            },
+                        )),
+                    })
+                    .await
+                    .unwrap();
+                }
+                Some(server_message::Message::ExecuteResult(result)) => {
+                    assert!(result.success, "request 1 failed: {}", result.error);
+                    assert!(
+                        result.stdout.contains("alpha"),
+                        "request 1 stdout missing alpha: {:?}",
+                        result.stdout
+                    );
+                    got_result = true;
+                }
+                _ => {}
+            }
+        }
+        assert!(got_result, "never received ExecuteResult for request 1");
+    }
+
+    // --- Request 2: call "beta" callback (different from request 1) ---
+    {
+        let mut client = EryxClient::new(channel.clone());
+        let (tx, rx) = mpsc::channel(16);
+
+        tx.send(ClientMessage {
+            message: Some(client_message::Message::ExecuteRequest(ExecuteRequest {
+                code: r#"
+# list_callbacks should be available and show beta (not alpha)
+cbs = list_callbacks()
+cb_names = [cb['name'] for cb in cbs]
+print(f"callbacks: {cb_names}")
+assert 'beta' in cb_names, f"beta not in callbacks: {cb_names}"
+
+result = await beta(value="second")
+print(f"beta: {result}")
+"#
+                .to_string(),
+                callbacks: vec![CallbackDeclaration {
+                    name: "beta".to_string(),
+                    description: "Beta callback".to_string(),
+                    parameters: vec![ParameterDeclaration {
+                        name: "value".to_string(),
+                        json_type: "string".to_string(),
+                        description: "A value".to_string(),
+                        required: true,
+                    }],
+                }],
+                resource_limits: Some(ResourceLimits {
+                    execution_timeout_ms: 30_000,
+                    ..Default::default()
+                }),
+                enable_tracing: false,
+            })),
+        })
+        .await
+        .unwrap();
+
+        let mut stream = client
+            .execute(ReceiverStream::new(rx))
+            .await
+            .unwrap()
+            .into_inner();
+
+        let mut got_result = false;
+        while let Some(msg) = stream.message().await.unwrap() {
+            match msg.message {
+                Some(server_message::Message::CallbackRequest(req)) => {
+                    assert_eq!(req.name, "beta");
+                    let response_json = serde_json::json!({ "from": "beta" }).to_string();
+                    tx.send(ClientMessage {
+                        message: Some(client_message::Message::CallbackResponse(
+                            eryx_server::proto::eryx::v1::CallbackResponse {
+                                request_id: req.request_id,
+                                result: Some(callback_response::Result::JsonResult(response_json)),
+                            },
+                        )),
+                    })
+                    .await
+                    .unwrap();
+                }
+                Some(server_message::Message::ExecuteResult(result)) => {
+                    assert!(
+                        result.success,
+                        "request 2 failed: {} | stdout: {}",
+                        result.error, result.stdout
+                    );
+                    assert!(
+                        result.stdout.contains("beta"),
+                        "request 2 stdout missing beta: {:?}",
+                        result.stdout
+                    );
+                    got_result = true;
+                }
+                _ => {}
+            }
+        }
+        assert!(got_result, "never received ExecuteResult for request 2");
+    }
+}
