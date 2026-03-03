@@ -262,16 +262,20 @@ impl<T: TypedCallback> Callback for T {
         &self,
         args: serde_json::Value,
     ) -> Pin<Box<dyn Future<Output = Result<serde_json::Value, CallbackError>> + Send + '_>> {
-        // Handle empty objects as null for unit type compatibility.
-        // Python sends {} for empty kwargs, but serde expects null for ().
-        let args = if args.is_object() && args.as_object().is_some_and(|m| m.is_empty()) {
-            serde_json::Value::Null
-        } else {
-            args
-        };
-
-        // Deserialize the JSON value into the typed Args
-        let typed_args: Result<T::Args, _> = serde_json::from_value(args);
+        // Deserialize the JSON value into the typed Args.
+        //
+        // Python sends {} for empty kwargs. For unit type () callbacks, serde
+        // expects null, not {}. For struct callbacks with all-optional fields,
+        // {} is correct. We try the original value first, then fall back to
+        // null for unit type compatibility.
+        let is_empty_object = args.is_object() && args.as_object().is_some_and(|m| m.is_empty());
+        let typed_args: Result<T::Args, _> = serde_json::from_value(args.clone()).or_else(|e| {
+            if is_empty_object {
+                serde_json::from_value(serde_json::Value::Null).map_err(|_| e)
+            } else {
+                Err(e)
+            }
+        });
 
         Box::pin(async move {
             let args = typed_args.map_err(|e| CallbackError::InvalidArguments(e.to_string()))?;
