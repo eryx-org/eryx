@@ -142,6 +142,66 @@ impl TypedCallback for ValidatingCallback {
     }
 }
 
+/// Arguments for the add callback.
+#[derive(Deserialize, JsonSchema)]
+struct AddArgs {
+    /// First number
+    a: i64,
+    /// Second number
+    b: i64,
+}
+
+/// A callback that adds two numbers.
+struct AddCallback;
+
+impl TypedCallback for AddCallback {
+    type Args = AddArgs;
+
+    fn name(&self) -> &str {
+        "add"
+    }
+
+    fn description(&self) -> &str {
+        "Adds two numbers together"
+    }
+
+    fn invoke_typed(
+        &self,
+        args: AddArgs,
+    ) -> Pin<Box<dyn Future<Output = Result<Value, CallbackError>> + Send + '_>> {
+        Box::pin(async move { Ok(json!({"result": args.a + args.b})) })
+    }
+}
+
+/// Arguments for the search dashboards callback.
+#[derive(Deserialize, JsonSchema)]
+struct SearchArgs {
+    /// Search query string
+    query: String,
+}
+
+/// A callback with a dotted name for namespace testing.
+struct SearchDashboardsCallback;
+
+impl TypedCallback for SearchDashboardsCallback {
+    type Args = SearchArgs;
+
+    fn name(&self) -> &str {
+        "search.dashboards"
+    }
+
+    fn description(&self) -> &str {
+        "Search for dashboards by query"
+    }
+
+    fn invoke_typed(
+        &self,
+        args: SearchArgs,
+    ) -> Pin<Box<dyn Future<Output = Result<Value, CallbackError>> + Send + '_>> {
+        Box::pin(async move { Ok(json!({"dashboards": [{"name": args.query}]})) })
+    }
+}
+
 /// Arguments for the sleep callback.
 #[derive(Deserialize, JsonSchema)]
 struct SleepArgs {
@@ -1148,6 +1208,235 @@ for item in result['items']:
     assert!(
         output.stdout.contains("count=1"),
         "should return 1 item with prometheus filter: {}",
+        output.stdout
+    );
+}
+
+// =============================================================================
+// Positional Argument Tests
+// =============================================================================
+
+#[tokio::test]
+async fn test_callback_positional_debug_schema() {
+    let sandbox = sandbox_builder()
+        .with_callback(EchoCallback)
+        .build()
+        .expect("Failed to build sandbox");
+
+    // First: inspect the raw schema JSON
+    let result = sandbox
+        .execute(
+            r#"
+import json
+cbs = list_callbacks()
+for cb in cbs:
+    print(f"CB: {cb['name']}")
+    schema = cb.get('parameters_schema')
+    print(f"  parameters_schema={schema}")
+    print(f"  type={type(schema)}")
+"#,
+        )
+        .await;
+
+    match &result {
+        Ok(output) => eprintln!("SCHEMA STDOUT:\n{}", output.stdout),
+        Err(e) => eprintln!("SCHEMA ERROR: {e:?}"),
+    }
+
+    // Now try positional arg with error catching
+    let result2 = sandbox
+        .execute(
+            r#"
+import traceback
+try:
+    result = await echo("Hello positional!")
+    print(f"Echoed: {result['echoed']}")
+except Exception as e:
+    print(f"EXCEPTION: {type(e).__name__}: {e}")
+    traceback.print_exc()
+"#,
+        )
+        .await;
+
+    match &result2 {
+        Ok(output) => {
+            eprintln!("POSITIONAL STDOUT:\n{}", output.stdout);
+            eprintln!("POSITIONAL STDERR:\n{}", output.stderr);
+        }
+        Err(e) => eprintln!("POSITIONAL ERROR: {e:?}"),
+    }
+    assert!(result2.is_ok(), "Should work: {:?}", result2);
+}
+
+#[tokio::test]
+async fn test_callback_positional_single_arg() {
+    let sandbox = sandbox_builder()
+        .with_callback(EchoCallback)
+        .build()
+        .expect("Failed to build sandbox");
+
+    let result = sandbox
+        .execute(
+            r#"
+result = await echo("Hello positional!")
+print(f"Echoed: {result['echoed']}")
+"#,
+        )
+        .await;
+
+    assert!(result.is_ok(), "Positional arg should work: {:?}", result);
+    let output = result.unwrap();
+    assert!(
+        output.stdout.contains("Hello positional!"),
+        "Should echo the positional message: {}",
+        output.stdout
+    );
+}
+
+#[tokio::test]
+async fn test_callback_positional_multiple_args() {
+    let sandbox = sandbox_builder()
+        .with_callback(AddCallback)
+        .build()
+        .expect("Failed to build sandbox");
+
+    let result = sandbox
+        .execute(
+            r#"
+result = await add(10, 32)
+print(f"Result: {result['result']}")
+"#,
+        )
+        .await;
+
+    assert!(
+        result.is_ok(),
+        "Multiple positional args should work: {:?}",
+        result
+    );
+    let output = result.unwrap();
+    assert!(
+        output.stdout.contains("Result: 42"),
+        "add(10, 32) should return 42: {}",
+        output.stdout
+    );
+}
+
+#[tokio::test]
+async fn test_callback_positional_mixed_with_kwargs() {
+    let sandbox = sandbox_builder()
+        .with_callback(AddCallback)
+        .build()
+        .expect("Failed to build sandbox");
+
+    let result = sandbox
+        .execute(
+            r#"
+result = await add(10, b=32)
+print(f"Result: {result['result']}")
+"#,
+        )
+        .await;
+
+    assert!(
+        result.is_ok(),
+        "Mixed positional and keyword args should work: {:?}",
+        result
+    );
+    let output = result.unwrap();
+    assert!(
+        output.stdout.contains("Result: 42"),
+        "add(10, b=32) should return 42: {}",
+        output.stdout
+    );
+}
+
+#[tokio::test]
+async fn test_callback_positional_namespace() {
+    let sandbox = sandbox_builder()
+        .with_callback(SearchDashboardsCallback)
+        .build()
+        .expect("Failed to build sandbox");
+
+    // This is the exact pattern that was failing before the fix:
+    // search.dashboards('overview') passes 'overview' as a positional arg
+    let result = sandbox
+        .execute(
+            r#"
+result = await search.dashboards('overview')
+print(f"Dashboards: {result['dashboards']}")
+"#,
+        )
+        .await;
+
+    assert!(
+        result.is_ok(),
+        "Namespace callback with positional arg should work: {:?}",
+        result
+    );
+    let output = result.unwrap();
+    assert!(
+        output.stdout.contains("overview"),
+        "search.dashboards('overview') should return results: {}",
+        output.stdout
+    );
+}
+
+#[tokio::test]
+async fn test_callback_keyword_args_still_work() {
+    let sandbox = sandbox_builder()
+        .with_callback(AddCallback)
+        .build()
+        .expect("Failed to build sandbox");
+
+    let result = sandbox
+        .execute(
+            r#"
+result = await add(a=100, b=200)
+print(f"Result: {result['result']}")
+"#,
+        )
+        .await;
+
+    assert!(
+        result.is_ok(),
+        "Keyword args should still work: {:?}",
+        result
+    );
+    let output = result.unwrap();
+    assert!(
+        output.stdout.contains("Result: 300"),
+        "add(a=100, b=200) should return 300: {}",
+        output.stdout
+    );
+}
+
+#[tokio::test]
+async fn test_callback_positional_namespace_keyword_fallback() {
+    let sandbox = sandbox_builder()
+        .with_callback(SearchDashboardsCallback)
+        .build()
+        .expect("Failed to build sandbox");
+
+    // Keyword args should still work for namespace callbacks
+    let result = sandbox
+        .execute(
+            r#"
+result = await search.dashboards(query='metrics')
+print(f"Dashboards: {result['dashboards']}")
+"#,
+        )
+        .await;
+
+    assert!(
+        result.is_ok(),
+        "Namespace callback with keyword arg should work: {:?}",
+        result
+    );
+    let output = result.unwrap();
+    assert!(
+        output.stdout.contains("metrics"),
+        "search.dashboards(query='metrics') should return results: {}",
         output.stdout
     );
 }

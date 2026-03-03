@@ -3193,8 +3193,20 @@ _eryx_reserved = set(dir(__builtins__)) | {{
 
 # Helper to create async callback wrappers
 def _eryx_make_callback(_cb_name):
-    async def callback(**kwargs):
-        # invoke() is now async, so await it
+    # Extract ordered parameter names from schema so positional args work
+    _param_names = []
+    for _cb in _eryx_callbacks:
+        if _cb['name'] == _cb_name and _cb.get('parameters_schema_json'):
+            _schema = _json.loads(_cb['parameters_schema_json'])
+            if 'properties' in _schema:
+                _param_names = list(_schema['properties'].keys())
+            break
+
+    async def callback(*args, **kwargs):
+        # Map positional args to parameter names
+        for _i, _arg in enumerate(args):
+            if _i < len(_param_names):
+                kwargs[_param_names[_i]] = _arg
         return await invoke(_cb_name, **kwargs)
     callback.__name__ = _cb_name
     callback.__doc__ = f"Invoke the '{{_cb_name}}' callback (async)."
@@ -3231,9 +3243,20 @@ class _EryxNamespace:
     def __getitem__(self, name):
         return self._resolve(name)
 
-    async def __call__(self, **kwargs):
+    async def __call__(self, *args, **kwargs):
         if self._prefix:
-            return await self._invoke(self._prefix.rstrip('.'), **kwargs)
+            _full = self._prefix.rstrip('.')
+            # Map positional args to parameter names from schema
+            if args:
+                for _cb in _eryx_callbacks:
+                    if _cb['name'] == _full and _cb.get('parameters_schema_json'):
+                        _s = _json.loads(_cb['parameters_schema_json'])
+                        _pn = list(_s.get('properties', {{}}).keys())
+                        for _i, _a in enumerate(args):
+                            if _i < len(_pn):
+                                kwargs[_pn[_i]] = _a
+                        break
+            return await self._invoke(_full, **kwargs)
         raise TypeError("Cannot call root namespace")
 
     def __repr__(self):
@@ -3244,7 +3267,17 @@ class _EryxCallbackLeaf:
         self._invoke = invoke_fn
         self._name = name
 
-    async def __call__(self, **kwargs):
+    async def __call__(self, *args, **kwargs):
+        # Map positional args to parameter names from schema
+        if args:
+            for _cb in _eryx_callbacks:
+                if _cb['name'] == self._name and _cb.get('parameters_schema_json'):
+                    _s = _json.loads(_cb['parameters_schema_json'])
+                    _pn = list(_s.get('properties', {{}}).keys())
+                    for _i, _a in enumerate(args):
+                        if _i < len(_pn):
+                            kwargs[_pn[_i]] = _a
+                    break
         return await self._invoke(self._name, **kwargs)
 
     def __repr__(self):
