@@ -8,6 +8,8 @@ use eryx_server::proto::eryx::v1::eryx_server::EryxServer;
 use eryx_server::service::EryxService;
 use tonic::transport::Server;
 use tracing_subscriber::EnvFilter;
+use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::util::SubscriberInitExt;
 
 /// gRPC server for sandboxed Python execution via eryx.
 #[derive(Parser, Debug)]
@@ -31,11 +33,12 @@ struct Args {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    tracing_subscriber::fmt()
-        .with_env_filter(
+    tracing_subscriber::registry()
+        .with(
             EnvFilter::try_from_default_env()
                 .unwrap_or_else(|_| EnvFilter::new("info,h2=warn,tonic::transport=warn")),
         )
+        .with(tracing_logfmt::layer())
         .init();
 
     let args = Args::parse();

@@ -16,7 +16,8 @@ tonic.workspace = true
 prost.workspace = true
 serde_json.workspace = true
 tracing.workspace = true
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter", "registry"] }
+tracing-logfmt = "0.3"
 uuid = { workspace = true, features = ["v4"] }
 dashmap.workspace = true
 async-trait.workspace = true
