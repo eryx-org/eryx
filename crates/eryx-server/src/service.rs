@@ -5,11 +5,11 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use dashmap::DashMap;
-use eryx::callback_handler::run_callback_handler;
+use eryx::callback_handler::{run_callback_handler, run_net_handler};
 use eryx::vfs::{ArcStorage, InMemoryStorage, VfsStorage};
 use eryx::{
-    Callback, CallbackRequest, OutputRequest, PythonStateSnapshot, ResourceLimits, SandboxPool,
-    SecretConfig, SessionExecutor, TraceRequest,
+    Callback, CallbackRequest, ConnectionManager, NetConfig, NetRequest, OutputRequest,
+    PythonStateSnapshot, ResourceLimits, SandboxPool, SecretConfig, SessionExecutor, TraceRequest,
 };
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
@@ -73,6 +73,35 @@ impl crate::proto::eryx::v1::eryx_server::Eryx for EryxService {
         let state_snapshot = execute_req.state_snapshot;
         let files = execute_req.files;
 
+        // Parse network config: present = networking enabled, absent = disabled.
+        let net_config = execute_req.network_config.map(|nc| {
+            let defaults = NetConfig::default();
+            NetConfig {
+                allowed_hosts: nc.allowed_hosts,
+                blocked_hosts: if nc.blocked_hosts.is_empty() {
+                    defaults.blocked_hosts
+                } else {
+                    nc.blocked_hosts
+                },
+                max_connections: if nc.max_connections > 0 {
+                    nc.max_connections
+                } else {
+                    defaults.max_connections
+                },
+                connect_timeout: if nc.connect_timeout_ms > 0 {
+                    Duration::from_millis(nc.connect_timeout_ms)
+                } else {
+                    defaults.connect_timeout
+                },
+                io_timeout: if nc.io_timeout_ms > 0 {
+                    Duration::from_millis(nc.io_timeout_ms)
+                } else {
+                    defaults.io_timeout
+                },
+                custom_root_certs: vec![],
+            }
+        });
+
         let span = tracing::info_span!(
             "execute",
             code_len = code.len(),
@@ -80,6 +109,7 @@ impl crate::proto::eryx::v1::eryx_server::Eryx for EryxService {
             tracing = enable_tracing,
             persist_state,
             supporting_files = files.len(),
+            networking = net_config.is_some(),
         );
 
         // 2. Parse resource limits.
@@ -205,16 +235,16 @@ impl crate::proto::eryx::v1::eryx_server::Eryx for EryxService {
         let resp_tx_final = resp_tx;
         tokio::spawn(
             async move {
-                let result_msg = execute_with_session(
-                    &mut sandbox,
-                    &code,
-                    &files,
-                    persist_state.then_some(state_snapshot.as_slice()),
+                let params = SessionParams {
+                    code: &code,
+                    files: &files,
+                    state: persist_state.then_some(state_snapshot.as_slice()),
                     enable_tracing,
-                    &server_tx_result,
                     resource_limits,
-                )
-                .await;
+                    net_config,
+                };
+                let result_msg =
+                    execute_with_session(&mut sandbox, &params, &server_tx_result).await;
 
                 let msg = ServerMessage {
                     message: Some(server_message::Message::ExecuteResult(result_msg)),
@@ -285,6 +315,16 @@ async fn create_vfs_with_files(files: &[SupportingFile], mount_path: &str) -> Ar
     storage
 }
 
+/// Parameters for a single session execution.
+struct SessionParams<'a> {
+    code: &'a str,
+    files: &'a [SupportingFile],
+    state: Option<&'a [u8]>,
+    enable_tracing: bool,
+    resource_limits: ResourceLimits,
+    net_config: Option<NetConfig>,
+}
+
 /// Execute Python code using a session executor.
 ///
 /// Creates a [`SessionExecutor`] from the sandbox's Python executor, mounts any
@@ -296,12 +336,8 @@ async fn create_vfs_with_files(files: &[SupportingFile], mount_path: &str) -> Ar
 /// persistence occurs.
 async fn execute_with_session(
     sandbox: &mut eryx::PooledSandbox,
-    code: &str,
-    files: &[SupportingFile],
-    state: Option<&[u8]>,
-    enable_tracing: bool,
+    params: &SessionParams<'_>,
     server_tx: &mpsc::Sender<ServerMessage>,
-    resource_limits: ResourceLimits,
 ) -> ExecuteResult {
     let start = Instant::now();
 
@@ -315,7 +351,7 @@ async fn execute_with_session(
     let callbacks_arc: Vec<Arc<dyn Callback>> = callbacks_map.values().cloned().collect();
 
     // Create the session executor, optionally with pre-populated VFS for supporting files.
-    let mut session = if files.is_empty() {
+    let mut session = if params.files.is_empty() {
         match SessionExecutor::new(executor, &callbacks_arc).await {
             Ok(s) => s,
             Err(e) => {
@@ -328,9 +364,9 @@ async fn execute_with_session(
             }
         }
     } else {
-        let vfs_storage = create_vfs_with_files(files, "/eryx").await;
+        let vfs_storage = create_vfs_with_files(params.files, "/eryx").await;
         tracing::info!(
-            file_count = files.len(),
+            file_count = params.files.len(),
             "created VFS with supporting files"
         );
         match SessionExecutor::new_with_vfs(executor, &callbacks_arc, vfs_storage).await {
@@ -347,11 +383,11 @@ async fn execute_with_session(
     };
 
     // Apply resource limits to the session so they take effect for all executions.
-    session.set_execution_timeout(resource_limits.execution_timeout);
-    session.set_fuel_limit(resource_limits.max_fuel);
+    session.set_execution_timeout(params.resource_limits.execution_timeout);
+    session.set_fuel_limit(params.resource_limits.max_fuel);
 
     // Restore previous state if provided.
-    if let Some(state_snapshot) = state.filter(|s| !s.is_empty()) {
+    if let Some(state_snapshot) = params.state.filter(|s| !s.is_empty()) {
         match PythonStateSnapshot::from_bytes(state_snapshot) {
             Ok(snapshot) => {
                 if let Err(e) = session.restore_state(&snapshot).await {
@@ -367,7 +403,7 @@ async fn execute_with_session(
 
     // If we have supporting files, add /eryx/lib to sys.path before user code runs.
     // This is a separate session.execute() call (no callbacks needed for path setup).
-    if !files.is_empty() {
+    if !params.files.is_empty() {
         let setup_code = concat!(
             "import sys, importlib\n",
             "importlib.invalidate_caches()\n",
@@ -380,16 +416,17 @@ async fn execute_with_session(
 
     // Set up callback handler channels (mirroring Sandbox::execute pattern).
     let (callback_tx, callback_rx) = mpsc::channel::<CallbackRequest>(32);
-    let fuel_limit = resource_limits.max_fuel;
+    let fuel_limit = params.resource_limits.max_fuel;
     let cb_map = Arc::new(callbacks_map);
     let cb_secrets: Arc<HashMap<String, SecretConfig>> = Arc::new(HashMap::new());
+    let resource_limits = params.resource_limits.clone();
     let callback_handler = tokio::spawn(async move {
         run_callback_handler(callback_rx, cb_map, resource_limits, cb_secrets).await
     });
 
     // Set up trace channel if tracing is enabled.
     let (trace_tx, mut trace_rx) = mpsc::unbounded_channel::<TraceRequest>();
-    if enable_tracing {
+    if params.enable_tracing {
         let trace_server_tx = server_tx.clone();
         tokio::spawn(async move {
             while let Some(req) = trace_rx.recv().await {
@@ -438,11 +475,21 @@ async fn execute_with_session(
         }
     });
 
+    // Spawn network handler if networking is enabled (mirrors Sandbox::execute pattern).
+    let (net_tx, _net_handler) = if let Some(config) = params.net_config.clone() {
+        let (tx, rx) = mpsc::channel::<NetRequest>(32);
+        let manager = ConnectionManager::new(config, HashMap::new());
+        let handler = tokio::spawn(async move { run_net_handler(rx, manager).await });
+        (Some(tx), Some(handler))
+    } else {
+        (None, None)
+    };
+
     // Prepend builtins injection to user code so callbacks are accessible from
     // imported modules. This must run in the same execution context as the user
     // code (where callbacks are bound via .with_callbacks()), not as a separate
     // session.execute() call which would lack callback bindings.
-    let full_code = format!("{BUILTINS_INJECT}{code}");
+    let full_code = format!("{BUILTINS_INJECT}{}", params.code);
     let mut builder = session
         .execute(&full_code)
         .with_callbacks(&callbacks_arc, callback_tx)
@@ -450,8 +497,11 @@ async fn execute_with_session(
     if let Some(fuel) = fuel_limit {
         builder = builder.with_fuel_limit(fuel);
     }
-    if enable_tracing {
+    if params.enable_tracing {
         builder = builder.with_tracing(trace_tx);
+    }
+    if let Some(tx) = net_tx {
+        builder = builder.with_network(tx);
     }
     let exec_result = builder.run().await;
 
@@ -459,7 +509,7 @@ async fn execute_with_session(
     let callback_invocations = callback_handler.await.unwrap_or(0);
 
     // Snapshot state after execution (only when persistence is requested).
-    let snapshot_bytes = if state.is_some() {
+    let snapshot_bytes = if params.state.is_some() {
         match session.snapshot_state().await {
             Ok(snapshot) => {
                 let bytes = snapshot.to_bytes();
