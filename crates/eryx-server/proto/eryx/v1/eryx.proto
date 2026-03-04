@@ -66,14 +66,25 @@ message ExecuteRequest {
   bytes state_snapshot = 6;
 
   // Supporting files to write to the sandbox filesystem before execution.
-  // These are made importable as Python modules (added to sys.path).
+  // Files are placed under /eryx/lib/ (MODULE) or /eryx/data/ (DATA) based on
+  // their kind. Only MODULE files are added to sys.path for importing.
   repeated SupportingFile files = 7;
+}
+
+// Kind of supporting file — determines where it's placed in the sandbox.
+enum FileKind {
+  // Data file placed in /eryx/data/ (not importable). Default — files are
+  // inert unless explicitly marked as modules.
+  FILE_KIND_DATA = 0;
+  // Python module placed in /eryx/lib/ and added to sys.path.
+  FILE_KIND_MODULE = 1;
 }
 
 // A supporting file to place in the sandbox filesystem.
 message SupportingFile {
   string name = 1;     // e.g. "helpers.py"
   string content = 2;
+  FileKind kind = 3;
 }
 
 // Declaration of a callback that the Go worker can handle.

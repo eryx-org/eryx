@@ -1,7 +1,7 @@
 //! Hybrid VFS that routes paths to either VFS storage or real filesystem.
 //!
 //! This module provides a filesystem implementation that combines:
-//! - VFS storage for sandboxed paths (e.g., `/data/*`)
+//! - VFS storage for sandboxed paths (e.g., `/eryx/*`)
 //! - Real filesystem passthrough for system paths (e.g., `/python-stdlib/*`)
 //!
 //! This allows Python to access its stdlib while still providing an isolated

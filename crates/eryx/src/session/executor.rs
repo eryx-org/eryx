@@ -364,7 +364,7 @@ impl VolumeMount {
 #[cfg(feature = "vfs")]
 #[derive(Debug, Clone)]
 pub struct VfsConfig {
-    /// The guest path where VFS storage is mounted (default: "/data").
+    /// The guest path where VFS storage is mounted (default: "/eryx").
     pub mount_path: String,
     /// Directory permissions for the VFS mount.
     pub dir_perms: eryx_vfs::DirPerms,
@@ -378,7 +378,7 @@ pub struct VfsConfig {
 impl Default for VfsConfig {
     fn default() -> Self {
         Self {
-            mount_path: "/data".to_string(),
+            mount_path: "/eryx".to_string(),
             dir_perms: eryx_vfs::DirPerms::all(),
             file_perms: eryx_vfs::FilePerms::all(),
             volumes: Vec::new(),
@@ -635,7 +635,7 @@ impl SessionExecutor {
     /// Create a new session executor with a custom VFS storage.
     ///
     /// This allows providing an external `InMemoryStorage` that persists
-    /// across session resets. Files written to the VFS mount path (default: `/data/*`)
+    /// across session resets. Files written to the VFS mount path (default: `/eryx/*`)
     /// will be stored in the provided storage.
     ///
     /// # Arguments

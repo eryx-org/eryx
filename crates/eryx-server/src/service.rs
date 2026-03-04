@@ -19,8 +19,8 @@ use tracing::Instrument;
 use crate::callbacks::{self, CallbackResult, PendingCallbacks};
 use crate::output::GrpcOutputHandler;
 use crate::proto::eryx::v1::{
-    ClientMessage, ExecuteResult, ExecuteStats, ServerMessage, SupportingFile, callback_response,
-    client_message, server_message,
+    ClientMessage, ExecuteResult, ExecuteStats, FileKind, ServerMessage, SupportingFile,
+    callback_response, client_message, server_message,
 };
 use crate::trace::GrpcTraceHandler;
 
@@ -205,26 +205,16 @@ impl crate::proto::eryx::v1::eryx_server::Eryx for EryxService {
         let resp_tx_final = resp_tx;
         tokio::spawn(
             async move {
-                let result_msg = if persist_state {
-                    execute_with_session(
-                        &mut sandbox,
-                        &code,
-                        &files,
-                        &state_snapshot,
-                        enable_tracing,
-                        &server_tx_result,
-                        resource_limits,
-                    )
-                    .await
-                } else {
-                    if !files.is_empty() {
-                        tracing::warn!(
-                            file_count = files.len(),
-                            "supporting files ignored in stateless mode (requires persist_state=true)"
-                        );
-                    }
-                    execute_stateless(&sandbox, &code).await
-                };
+                let result_msg = execute_with_session(
+                    &mut sandbox,
+                    &code,
+                    &files,
+                    persist_state.then_some(state_snapshot.as_slice()),
+                    enable_tracing,
+                    &server_tx_result,
+                    resource_limits,
+                )
+                .await;
 
                 let msg = ServerMessage {
                     message: Some(server_message::Message::ExecuteResult(result_msg)),
@@ -248,77 +238,67 @@ impl crate::proto::eryx::v1::eryx_server::Eryx for EryxService {
     }
 }
 
-/// Execute Python code statelessly via the sandbox's built-in execute method.
-async fn execute_stateless(sandbox: &eryx::PooledSandbox, code: &str) -> ExecuteResult {
-    match sandbox.execute(code).await {
-        Ok(result) => {
-            tracing::info!(
-                success = true,
-                duration_ms = result.stats.duration.as_millis() as u64,
-                callback_invocations = result.stats.callback_invocations,
-                "execution completed"
-            );
-            ExecuteResult {
-                success: true,
-                stdout: result.stdout,
-                stderr: result.stderr,
-                error: String::new(),
-                stats: Some(ExecuteStats {
-                    duration_ms: result.stats.duration.as_millis() as u64,
-                    callback_invocations: result.stats.callback_invocations,
-                    peak_memory_bytes: result.stats.peak_memory_bytes.unwrap_or(0),
-                    fuel_consumed: result.stats.fuel_consumed.unwrap_or(0),
-                }),
-                state_snapshot: Vec::new(),
-            }
-        }
-        Err(e) => {
-            tracing::warn!(success = false, error = %e, "execution completed");
-            ExecuteResult {
-                success: false,
-                stdout: String::new(),
-                stderr: String::new(),
-                error: e.to_string(),
-                stats: None,
-                state_snapshot: Vec::new(),
-            }
-        }
-    }
-}
+/// Builtins injection code — copies callable callbacks from globals() into the
+/// builtins module so they're visible in imported modules too.
+const BUILTINS_INJECT: &str = concat!(
+    "import builtins as _b\n",
+    "for _k, _v in list(globals().items()):\n",
+    "    if not _k.startswith('_') and callable(_v):\n",
+    "        setattr(_b, _k, _v)\n",
+);
 
 /// Create a VFS storage pre-populated with the given supporting files.
 ///
-/// Files are written to `/data/<name>` so they can be imported as Python
-/// modules once `/data` is added to `sys.path`.
-async fn create_vfs_with_files(files: &[SupportingFile]) -> Arc<ArcStorage> {
+/// Files are routed into subdirectories under the VFS mount based on their kind:
+/// - `MODULE` files go to `{mount_path}/lib/<name>` (added to `sys.path`)
+/// - `DATA` files go to `{mount_path}/data/<name>` (readable but not importable)
+///
+/// The `mount_path` must match the VFS preopen path (e.g. `/eryx`) because
+/// `VfsDescriptor::resolve_path` prepends it when the guest accesses files.
+async fn create_vfs_with_files(files: &[SupportingFile], mount_path: &str) -> Arc<ArcStorage> {
     let storage = Arc::new(ArcStorage::new(
         Arc::new(InMemoryStorage::new()) as Arc<dyn VfsStorage>
     ));
 
-    // The VFS mount path is /data (the default). The InMemoryStorage root is /,
-    // so files at /data/<name> in the guest map to /<name> in storage.
+    let lib_path = format!("{mount_path}/lib");
+    let data_path = format!("{mount_path}/data");
+
+    // Create subdirectories under the mount path. The VFS preopen will also
+    // create the mount_path dir itself via add_vfs_preopen, but we need the
+    // sub-dirs to exist before writing files.
+    let _ = storage.mkdir_sync(&lib_path);
+    let _ = storage.mkdir_sync(&data_path);
+
     for f in files {
-        let path = format!("/{}", f.name);
+        let dir = match f.kind() {
+            FileKind::Module => &lib_path,
+            FileKind::Data => &data_path,
+        };
+        let path = format!("{dir}/{}", f.name);
         if let Err(e) = storage.write(&path, f.content.as_bytes()).await {
-            tracing::warn!(file = %f.name, error = %e, "failed to write supporting file to VFS");
+            tracing::warn!(file = %f.name, kind = ?f.kind(), error = %e, "failed to write supporting file to VFS");
         } else {
-            tracing::debug!(file = %f.name, size = f.content.len(), "wrote supporting file to VFS");
+            tracing::debug!(file = %f.name, kind = ?f.kind(), dir, size = f.content.len(), "wrote supporting file to VFS");
         }
     }
 
     storage
 }
 
-/// Execute Python code with session-based state persistence.
+/// Execute Python code using a session executor.
 ///
-/// Creates a [`SessionExecutor`] from the sandbox's Python executor, optionally
-/// restores a previous state snapshot, executes the code, and captures a new
-/// snapshot for the caller to persist.
+/// Creates a [`SessionExecutor`] from the sandbox's Python executor, mounts any
+/// supporting files into the VFS, injects callbacks into builtins, executes the
+/// code, and optionally saves/restores state snapshots.
+///
+/// When `state` is `Some(bytes)`, the session restores from `bytes` (if non-empty)
+/// before execution and captures a snapshot afterwards. When `None`, no state
+/// persistence occurs.
 async fn execute_with_session(
     sandbox: &mut eryx::PooledSandbox,
     code: &str,
     files: &[SupportingFile],
-    state_snapshot: &[u8],
+    state: Option<&[u8]>,
     enable_tracing: bool,
     server_tx: &mpsc::Sender<ServerMessage>,
     resource_limits: ResourceLimits,
@@ -348,7 +328,7 @@ async fn execute_with_session(
             }
         }
     } else {
-        let vfs_storage = create_vfs_with_files(files).await;
+        let vfs_storage = create_vfs_with_files(files, "/eryx").await;
         tracing::info!(
             file_count = files.len(),
             "created VFS with supporting files"
@@ -367,7 +347,7 @@ async fn execute_with_session(
     };
 
     // Restore previous state if provided.
-    if !state_snapshot.is_empty() {
+    if let Some(state_snapshot) = state.filter(|s| !s.is_empty()) {
         match PythonStateSnapshot::from_bytes(state_snapshot) {
             Ok(snapshot) => {
                 if let Err(e) = session.restore_state(&snapshot).await {
@@ -381,13 +361,16 @@ async fn execute_with_session(
         }
     }
 
-    // If we have supporting files, run a setup step (without tracing) to add
-    // /data to sys.path so the user's code can `import` the modules directly.
+    // If we have supporting files, add /eryx/lib to sys.path before user code runs.
+    // This is a separate session.execute() call (no callbacks needed for path setup).
     if !files.is_empty() {
-        let setup_code = "import sys\nif '/data' not in sys.path: sys.path.insert(0, '/data')";
+        let setup_code = concat!(
+            "import sys, importlib\n",
+            "importlib.invalidate_caches()\n",
+            "if '/eryx/lib' not in sys.path: sys.path.insert(0, '/eryx/lib')\n",
+        );
         if let Err(e) = session.execute(setup_code).run().await {
             tracing::warn!(error = %e, "failed to set up sys.path for supporting files");
-            // Non-fatal — user code may still work if it doesn't import the files.
         }
     }
 
@@ -450,9 +433,13 @@ async fn execute_with_session(
         }
     });
 
-    // Execute the user code with the session.
+    // Prepend builtins injection to user code so callbacks are accessible from
+    // imported modules. This must run in the same execution context as the user
+    // code (where callbacks are bound via .with_callbacks()), not as a separate
+    // session.execute() call which would lack callback bindings.
+    let full_code = format!("{BUILTINS_INJECT}{code}");
     let mut builder = session
-        .execute(code)
+        .execute(&full_code)
         .with_callbacks(&callbacks_arc, callback_tx)
         .with_output_streaming(output_tx);
     if enable_tracing {
@@ -463,17 +450,21 @@ async fn execute_with_session(
     // Wait for callback handler to finish.
     let callback_invocations = callback_handler.await.unwrap_or(0);
 
-    // Snapshot state after execution.
-    let snapshot_bytes = match session.snapshot_state().await {
-        Ok(snapshot) => {
-            let bytes = snapshot.to_bytes();
-            tracing::info!(snapshot_bytes = bytes.len(), "state snapshot captured");
-            bytes
+    // Snapshot state after execution (only when persistence is requested).
+    let snapshot_bytes = if state.is_some() {
+        match session.snapshot_state().await {
+            Ok(snapshot) => {
+                let bytes = snapshot.to_bytes();
+                tracing::info!(snapshot_bytes = bytes.len(), "state snapshot captured");
+                bytes
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "failed to capture state snapshot");
+                Vec::new()
+            }
         }
-        Err(e) => {
-            tracing::warn!(error = %e, "failed to capture state snapshot");
-            Vec::new()
-        }
+    } else {
+        Vec::new()
     };
 
     let duration = start.elapsed();
@@ -634,36 +625,99 @@ fn parse_trace_event_json(event_json: &str) -> (String, String, String, String, 
 mod tests {
     use super::*;
 
+    const MOUNT_PATH: &str = "/eryx";
+
     #[tokio::test]
     async fn test_create_vfs_with_files() {
         let files = vec![
             SupportingFile {
                 name: "helpers.py".to_string(),
                 content: "def greet(): return 'hello'".to_string(),
+                kind: FileKind::Module as i32,
             },
             SupportingFile {
                 name: "utils.py".to_string(),
                 content: "PI = 3.14".to_string(),
+                kind: FileKind::Module as i32,
             },
         ];
 
-        let storage = create_vfs_with_files(&files).await;
+        let storage = create_vfs_with_files(&files, MOUNT_PATH).await;
 
-        // Files are stored at /<name> in VFS storage (the /data mount maps / in storage).
-        let content = storage.read("/helpers.py").await.unwrap();
+        // MODULE files are stored at {mount_path}/lib/<name> in VFS storage.
+        let content = storage.read("/eryx/lib/helpers.py").await.unwrap();
         assert_eq!(
             String::from_utf8(content).unwrap(),
             "def greet(): return 'hello'"
         );
 
-        let content = storage.read("/utils.py").await.unwrap();
+        let content = storage.read("/eryx/lib/utils.py").await.unwrap();
         assert_eq!(String::from_utf8(content).unwrap(), "PI = 3.14");
     }
 
     #[tokio::test]
+    async fn test_create_vfs_with_data_files() {
+        let files = vec![
+            SupportingFile {
+                name: "config.json".to_string(),
+                content: r#"{"key": "value"}"#.to_string(),
+                kind: FileKind::Data as i32,
+            },
+            SupportingFile {
+                name: "input.csv".to_string(),
+                content: "a,b,c\n1,2,3".to_string(),
+                kind: FileKind::Data as i32,
+            },
+        ];
+
+        let storage = create_vfs_with_files(&files, MOUNT_PATH).await;
+
+        // DATA files are stored at {mount_path}/data/<name> in VFS storage.
+        let content = storage.read("/eryx/data/config.json").await.unwrap();
+        assert_eq!(String::from_utf8(content).unwrap(), r#"{"key": "value"}"#);
+
+        let content = storage.read("/eryx/data/input.csv").await.unwrap();
+        assert_eq!(String::from_utf8(content).unwrap(), "a,b,c\n1,2,3");
+    }
+
+    #[tokio::test]
+    async fn test_create_vfs_mixed_kinds() {
+        let files = vec![
+            SupportingFile {
+                name: "helpers.py".to_string(),
+                content: "def greet(): return 'hello'".to_string(),
+                kind: FileKind::Module as i32,
+            },
+            SupportingFile {
+                name: "data.json".to_string(),
+                content: r#"{"items": []}"#.to_string(),
+                kind: FileKind::Data as i32,
+            },
+        ];
+
+        let storage = create_vfs_with_files(&files, MOUNT_PATH).await;
+
+        // MODULE file goes to {mount_path}/lib/
+        let content = storage.read("/eryx/lib/helpers.py").await.unwrap();
+        assert_eq!(
+            String::from_utf8(content).unwrap(),
+            "def greet(): return 'hello'"
+        );
+
+        // DATA file goes to {mount_path}/data/
+        let content = storage.read("/eryx/data/data.json").await.unwrap();
+        assert_eq!(String::from_utf8(content).unwrap(), r#"{"items": []}"#);
+
+        // Verify files are NOT in the wrong directories.
+        assert!(storage.read("/eryx/data/helpers.py").await.is_err());
+        assert!(storage.read("/eryx/lib/data.json").await.is_err());
+    }
+
+    #[tokio::test]
     async fn test_create_vfs_with_no_files() {
-        let storage = create_vfs_with_files(&[]).await;
-        // Should just be an empty storage with root dir
-        assert!(storage.read("/helpers.py").await.is_err());
+        let storage = create_vfs_with_files(&[], MOUNT_PATH).await;
+        // Should have {mount_path}/lib and {mount_path}/data dirs but no files.
+        assert!(storage.read("/eryx/lib/helpers.py").await.is_err());
+        assert!(storage.read("/eryx/data/config.json").await.is_err());
     }
 }
