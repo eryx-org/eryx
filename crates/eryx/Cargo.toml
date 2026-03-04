@@ -158,6 +158,7 @@ workspace = true
 
 [package.metadata."docs.rs"]
 all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
 
 [package.metadata.cargo-all-features]
 # Skip feature combinations that require the WASM runtime to be built first.

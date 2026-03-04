@@ -61,7 +61,15 @@ mod embedded_runtime {
 
         // Rebuild when env var or source files change
         println!("cargo::rerun-if-env-changed=ERYX_RUNTIME_CWASM");
+        println!("cargo::rerun-if-env-changed=DOCS_RS");
         println!("cargo::rerun-if-changed=../eryx-runtime/runtime.cwasm");
+
+        // docs.rs sandbox: no WASM artifacts available, write empty placeholder
+        if std::env::var("DOCS_RS").is_ok() {
+            let dest = out_dir.join("runtime.cwasm");
+            std::fs::write(&dest, b"").expect("Failed to write docs.rs placeholder runtime.cwasm");
+            return;
+        }
 
         // 1. Explicit env var
         let cwasm_path = std::env::var("ERYX_RUNTIME_CWASM")
