@@ -646,7 +646,7 @@ jobs:
   # - On main: production deployment (custom domain)
   # - On PRs: preview deployment (<branch>.eryx-demo.pages.dev)
   deploy-demo:
-    name: Deploy Demo
+    name: Deploy Demo (Cloudflare)
     runs-on: ubuntu-latest
     needs: [changes, build-eryx-runtime]
     if: >-
@@ -725,3 +725,23 @@ jobs:
             --body "$BODY" --edit-last || \
           gh pr comment ${{ github.event.pull_request.number }} \
             --body "$BODY"
+
+  # Gate job for the "Deploy Demo" required status check.
+  # The actual deploy is skipped for fork PRs (no secrets), but GitHub
+  # treats skipped required checks as failing. This job passes when the
+  # deploy is skipped, so fork/dependabot PRs aren't blocked.
+  deploy-demo-status:
+    name: Deploy Demo
+    runs-on: ubuntu-latest
+    needs: [deploy-demo]
+    if: always()
+    steps:
+      - name: Check deploy result
+        run: |
+          result="${{ needs.deploy-demo.result }}"
+          if [ "$result" = "success" ] || [ "$result" = "skipped" ]; then
+            echo "Deploy demo: $result"
+          else
+            echo "Deploy demo: $result"
+            exit 1
+          fi
