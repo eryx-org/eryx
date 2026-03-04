@@ -346,6 +346,10 @@ async fn execute_with_session(
         }
     };
 
+    // Apply resource limits to the session so they take effect for all executions.
+    session.set_execution_timeout(resource_limits.execution_timeout);
+    session.set_fuel_limit(resource_limits.max_fuel);
+
     // Restore previous state if provided.
     if let Some(state_snapshot) = state.filter(|s| !s.is_empty()) {
         match PythonStateSnapshot::from_bytes(state_snapshot) {
@@ -376,6 +380,7 @@ async fn execute_with_session(
 
     // Set up callback handler channels (mirroring Sandbox::execute pattern).
     let (callback_tx, callback_rx) = mpsc::channel::<CallbackRequest>(32);
+    let fuel_limit = resource_limits.max_fuel;
     let cb_map = Arc::new(callbacks_map);
     let cb_secrets: Arc<HashMap<String, SecretConfig>> = Arc::new(HashMap::new());
     let callback_handler = tokio::spawn(async move {
@@ -442,6 +447,9 @@ async fn execute_with_session(
         .execute(&full_code)
         .with_callbacks(&callbacks_arc, callback_tx)
         .with_output_streaming(output_tx);
+    if let Some(fuel) = fuel_limit {
+        builder = builder.with_fuel_limit(fuel);
+    }
     if enable_tracing {
         builder = builder.with_tracing(trace_tx);
     }
