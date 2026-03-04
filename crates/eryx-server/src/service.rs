@@ -277,6 +277,16 @@ const BUILTINS_INJECT: &str = concat!(
     "        setattr(_b, _k, _v)\n",
 );
 
+/// Sys-path setup code — adds `/eryx/lib` to `sys.path` and invalidates importlib caches
+/// so newly-mounted VFS files are discoverable. Merged into the single user-code execution
+/// to avoid a separate WASM execution cycle.
+const SYS_PATH_INJECT: &str = concat!(
+    "import sys as _sys, importlib as _il\n",
+    "_il.invalidate_caches()\n",
+    "if '/eryx/lib' not in _sys.path: _sys.path.insert(0, '/eryx/lib')\n",
+    "del _sys, _il\n",
+);
+
 /// Create a VFS storage pre-populated with the given supporting files.
 ///
 /// Files are routed into subdirectories under the VFS mount based on their kind:
@@ -401,19 +411,6 @@ async fn execute_with_session(
         }
     }
 
-    // If we have supporting files, add /eryx/lib to sys.path before user code runs.
-    // This is a separate session.execute() call (no callbacks needed for path setup).
-    if !params.files.is_empty() {
-        let setup_code = concat!(
-            "import sys, importlib\n",
-            "importlib.invalidate_caches()\n",
-            "if '/eryx/lib' not in sys.path: sys.path.insert(0, '/eryx/lib')\n",
-        );
-        if let Err(e) = session.execute(setup_code).run().await {
-            tracing::warn!(error = %e, "failed to set up sys.path for supporting files");
-        }
-    }
-
     // Set up callback handler channels (mirroring Sandbox::execute pattern).
     let (callback_tx, callback_rx) = mpsc::channel::<CallbackRequest>(32);
     let fuel_limit = params.resource_limits.max_fuel;
@@ -486,10 +483,13 @@ async fn execute_with_session(
     };
 
     // Prepend builtins injection to user code so callbacks are accessible from
-    // imported modules. This must run in the same execution context as the user
-    // code (where callbacks are bound via .with_callbacks()), not as a separate
-    // session.execute() call which would lack callback bindings.
-    let full_code = format!("{BUILTINS_INJECT}{}", params.code);
+    // imported modules. Also prepend sys.path setup when supporting files are
+    // present — merged here to avoid a separate WASM execution cycle.
+    let full_code = if !params.files.is_empty() {
+        format!("{SYS_PATH_INJECT}{BUILTINS_INJECT}{}", params.code)
+    } else {
+        format!("{BUILTINS_INJECT}{}", params.code)
+    };
     let mut builder = session
         .execute(&full_code)
         .with_callbacks(&callbacks_arc, callback_tx)

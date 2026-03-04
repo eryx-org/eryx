@@ -73,6 +73,7 @@ async fn execute_simple_print() {
             persist_state: false,
             state_snapshot: vec![],
             files: vec![],
+            network_config: None,
         })),
     })
     .await
@@ -132,6 +133,7 @@ print(f"got: {result}")
             persist_state: false,
             state_snapshot: vec![],
             files: vec![],
+            network_config: None,
         })),
     })
     .await
@@ -217,6 +219,7 @@ except Exception as e:
             persist_state: false,
             state_snapshot: vec![],
             files: vec![],
+            network_config: None,
         })),
     })
     .await
@@ -288,6 +291,7 @@ for i in range(3):
             persist_state: false,
             state_snapshot: vec![],
             files: vec![],
+            network_config: None,
         })),
     })
     .await
@@ -345,6 +349,7 @@ async fn execute_reports_stats() {
             persist_state: false,
             state_snapshot: vec![],
             files: vec![],
+            network_config: None,
         })),
     })
     .await
@@ -389,6 +394,7 @@ print(x + y)
             persist_state: false,
             state_snapshot: vec![],
             files: vec![],
+            network_config: None,
         })),
     })
     .await
@@ -461,6 +467,7 @@ async fn execute_without_tracing_no_trace_events() {
             persist_state: false,
             state_snapshot: vec![],
             files: vec![],
+            network_config: None,
         })),
     })
     .await
@@ -527,6 +534,7 @@ print(f"alpha: {result}")
                 persist_state: false,
                 state_snapshot: vec![],
                 files: vec![],
+                network_config: None,
             })),
         })
         .await
@@ -606,6 +614,7 @@ print(f"beta: {result}")
                 persist_state: false,
                 state_snapshot: vec![],
                 files: vec![],
+                network_config: None,
             })),
         })
         .await
@@ -690,6 +699,7 @@ print(f"path={result['path']}")
             persist_state: false,
             state_snapshot: vec![],
             files: vec![],
+            network_config: None,
         })),
     })
     .await
