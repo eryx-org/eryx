@@ -571,111 +571,81 @@ async fn execute_with_session(
 
 /// Parse a trace event JSON string into its proto components.
 ///
-/// The event_json from eryx's TraceRequest contains a JSON representation of the
-/// trace event type. We extract the relevant fields for the proto message.
+/// The event_json uses serde's internally-tagged format with a `"type"` key:
+/// `{"type":"line"}`, `{"type":"call","function":"foo"}`, etc.
 fn parse_trace_event_json(event_json: &str) -> (String, String, String, String, u64) {
-    // event_json is typically: "line", {"call": {"function": "foo"}}, etc.
-    if let Ok(value) = serde_json::from_str::<serde_json::Value>(event_json) {
-        match &value {
-            serde_json::Value::String(s) => {
-                (s.clone(), String::new(), String::new(), String::new(), 0)
-            }
-            serde_json::Value::Object(map) => {
-                if let Some(inner) = map.get("call") {
-                    let function = inner
-                        .get("function")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("")
-                        .to_string();
-                    (
-                        "call".to_string(),
-                        function,
-                        String::new(),
-                        String::new(),
-                        0,
-                    )
-                } else if let Some(inner) = map.get("return") {
-                    let function = inner
-                        .get("function")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("")
-                        .to_string();
-                    (
-                        "return".to_string(),
-                        function,
-                        String::new(),
-                        String::new(),
-                        0,
-                    )
-                } else if let Some(inner) = map.get("exception") {
-                    let message = inner
-                        .get("message")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("")
-                        .to_string();
-                    (
-                        "exception".to_string(),
-                        String::new(),
-                        message,
-                        String::new(),
-                        0,
-                    )
-                } else if let Some(inner) = map.get("callback_start") {
-                    let name = inner
-                        .get("name")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("")
-                        .to_string();
-                    (
-                        "callback_start".to_string(),
-                        String::new(),
-                        String::new(),
-                        name,
-                        0,
-                    )
-                } else if let Some(inner) = map.get("callback_end") {
-                    let name = inner
-                        .get("name")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("")
-                        .to_string();
-                    let duration_ms = inner
-                        .get("duration_ms")
-                        .and_then(|v| v.as_u64())
-                        .unwrap_or(0);
-                    (
-                        "callback_end".to_string(),
-                        String::new(),
-                        String::new(),
-                        name,
-                        duration_ms,
-                    )
-                } else {
-                    (
-                        "unknown".to_string(),
-                        String::new(),
-                        String::new(),
-                        String::new(),
-                        0,
-                    )
-                }
-            }
-            _ => (
-                "unknown".to_string(),
-                String::new(),
-                String::new(),
-                String::new(),
-                0,
-            ),
-        }
-    } else {
-        (
+    let str_or = |map: &serde_json::Map<String, serde_json::Value>, key: &str| -> String {
+        map.get(key)
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string()
+    };
+
+    let Ok(serde_json::Value::Object(map)) = serde_json::from_str::<serde_json::Value>(event_json)
+    else {
+        return (
             event_json.to_string(),
             String::new(),
             String::new(),
             String::new(),
             0,
-        )
+        );
+    };
+
+    let event_type = str_or(&map, "type");
+    match event_type.as_str() {
+        "line" => (
+            "line".into(),
+            String::new(),
+            String::new(),
+            String::new(),
+            0,
+        ),
+        "call" => (
+            "call".into(),
+            str_or(&map, "function"),
+            String::new(),
+            String::new(),
+            0,
+        ),
+        "return" => (
+            "return".into(),
+            str_or(&map, "function"),
+            String::new(),
+            String::new(),
+            0,
+        ),
+        "exception" => (
+            "exception".into(),
+            String::new(),
+            str_or(&map, "message"),
+            String::new(),
+            0,
+        ),
+        "callback_start" => (
+            "callback_start".into(),
+            String::new(),
+            String::new(),
+            str_or(&map, "name"),
+            0,
+        ),
+        "callback_end" => {
+            let duration_ms = map.get("duration_ms").and_then(|v| v.as_u64()).unwrap_or(0);
+            (
+                "callback_end".into(),
+                String::new(),
+                String::new(),
+                str_or(&map, "name"),
+                duration_ms,
+            )
+        }
+        _ => (
+            "unknown".into(),
+            String::new(),
+            String::new(),
+            String::new(),
+            0,
+        ),
     }
 }
 
