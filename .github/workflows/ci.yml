@@ -651,6 +651,7 @@ jobs:
     needs: [changes, build-eryx-runtime]
     if: >-
       github.event.pull_request.head.repo.fork != true
+      && github.actor != 'dependabot[bot]'
       && (github.event_name == 'push'
       || needs.changes.outputs.core == 'true'
       || needs.changes.outputs.js == 'true'
