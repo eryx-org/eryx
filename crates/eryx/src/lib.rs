@@ -48,6 +48,7 @@
     forbid(unsafe_code)
 )]
 #![cfg_attr(any(feature = "embedded", feature = "preinit"), deny(unsafe_code))]
+#![cfg_attr(docsrs, feature(doc_cfg))]
 
 pub mod cache;
 mod callback;

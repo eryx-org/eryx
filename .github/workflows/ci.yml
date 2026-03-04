@@ -361,6 +361,28 @@ jobs:
         env:
           RUSTDOCFLAGS: -D warnings
 
+  # Simulate docs.rs build (no WASM artifacts needed)
+  docsrs:
+    name: docs.rs
+    runs-on: ubuntu-latest
+    needs: changes
+    if: >-
+      github.event_name == 'push'
+      || needs.changes.outputs.core == 'true'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install nightly toolchain
+        run: rustup toolchain install nightly
+
+      - name: Configure Rust cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build docs (docs.rs simulation)
+        run: DOCS_RS=1 cargo +nightly doc -p eryx -p eryx-runtime --all-features --no-deps
+        env:
+          RUSTDOCFLAGS: "--cfg docsrs -D warnings"
+
   # Check that all feature combinations compile
   check-features:
     name: Check Feature Combinations

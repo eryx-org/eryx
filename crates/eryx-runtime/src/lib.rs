@@ -1,3 +1,4 @@
+#![cfg_attr(docsrs, feature(doc_cfg))]
 //! Eryx Python WASM Runtime
 //!
 //! Contains the WIT definition and builds the eryx sandbox WASM component.

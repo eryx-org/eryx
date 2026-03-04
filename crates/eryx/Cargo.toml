@@ -157,9 +157,8 @@ rustls-pemfile.workspace = true
 workspace = true
 
 [package.metadata."docs.rs"]
-# Don't use all-features: embedded requires runtime.cwasm, and preinit/native-extensions
-# require WASM build artifacts that aren't available on docs.rs.
-features = ["macros", "vfs"]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
 
 [package.metadata.cargo-all-features]
 # Skip feature combinations that require the WASM runtime to be built first.

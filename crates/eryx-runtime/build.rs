@@ -51,6 +51,19 @@ fn main() {
         "cargo::rerun-if-changed={}",
         manifest_dir.join("prebuilt").display()
     );
+    // Rerun if docs.rs env changes
+    println!("cargo::rerun-if-env-changed=DOCS_RS");
+
+    // docs.rs sandbox: no WASM build tools available, write empty placeholders
+    if env::var("DOCS_RS").is_ok() {
+        if env::var("CARGO_FEATURE_PREINIT").is_ok() {
+            std::fs::write(out_dir.join("liberyx_runtime.so.zst"), b"")
+                .expect("failed to write docs.rs placeholder runtime");
+            std::fs::write(out_dir.join("liberyx_bindings.so.zst"), b"")
+                .expect("failed to write docs.rs placeholder bindings");
+        }
+        return;
+    }
 
     // Only build when explicitly requested via BUILD_ERYX_RUNTIME env var
     // Previously we also built in release mode, but that causes issues in CI where
