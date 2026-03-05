@@ -1,3 +1,6 @@
+# Build arg: "default" precompiles from source, "custom" uses a pre-built .cwasm.
+ARG RUNTIME_SOURCE=default
+
 # Pre-built cargo-chef binary.
 FROM lukemathwalker/cargo-chef:latest-rust-1.90-bookworm AS chef
 
@@ -77,6 +80,17 @@ RUN ERYX_PRECOMPILE_BOOTSTRAP=1 \
       --output crates/eryx-runtime/runtime.cwasm \
       --no-verify
 
+# Runtime provider: default (from precompile stage output)
+FROM precompile AS runtime-default
+
+# Runtime provider: custom (from build context file)
+FROM scratch AS runtime-custom
+ARG RUNTIME_CWASM=runtime.cwasm
+COPY ${RUNTIME_CWASM} /build/crates/eryx-runtime/runtime.cwasm
+
+# Select runtime based on RUNTIME_SOURCE arg
+FROM runtime-${RUNTIME_SOURCE} AS runtime
+
 # Stage 4: Build the server (only recompiles when server code changes).
 FROM rust:1.90-bookworm AS builder
 
@@ -90,8 +104,8 @@ WORKDIR /build
 # Bring in pre-built dependencies from cook stage.
 COPY --from=cook /build/target target
 
-# Copy runtime.cwasm from precompile stage so build.rs can embed it.
-COPY --from=precompile /build/crates/eryx-runtime/runtime.cwasm crates/eryx-runtime/runtime.cwasm
+# Copy runtime.cwasm from selected runtime stage so build.rs can embed it.
+COPY --from=runtime /build/crates/eryx-runtime/runtime.cwasm crates/eryx-runtime/runtime.cwasm
 
 # Copy full workspace source.
 COPY . .

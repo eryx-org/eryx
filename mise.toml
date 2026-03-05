@@ -653,6 +653,44 @@ cp crates/eryx-runtime/prebuilt/liberyx_bindings.so.zst "$DEST/"
 echo "Copied $(ls "$DEST" | wc -l) files to $DEST"
 """
 
+[tasks.download-server-packages]
+description = "Download polars and numpy wheels for custom server runtime"
+run = """
+mkdir -p crates/eryx-server/packages
+pip download polars==1.38.1 --no-deps -d crates/eryx-server/packages/
+curl -sL https://github.com/dicej/wasi-wheels/releases/download/v0.0.2/numpy-wasi.tar.gz \
+    -o /tmp/numpy-wasi.tar.gz
+tar -xzf /tmp/numpy-wasi.tar.gz -C crates/eryx-server/packages/
+"""
+
+[tasks.build-server-runtime]
+description = "Build a custom runtime.cwasm with polars and numpy baked in"
+depends = ["download-server-packages", "build-eryx-runtime", "build-preinit", "setup-eryx-runtime-tests"]
+env = { ERYX_PRECOMPILE_BOOTSTRAP = "1" }
+run = """
+TARGET="${ERYX_CPU_FEATURES:-native}"
+cargo run -p eryx-precompile --release -- compile \
+    crates/eryx-runtime/runtime.wasm \
+    --preinit \
+    --stdlib crates/eryx-wasm-runtime/tests/python-stdlib \
+    --package crates/eryx-server/packages/polars-*.whl \
+    --package crates/eryx-server/packages/numpy \
+    --target "$TARGET" \
+    --output crates/eryx-server/runtime.cwasm \
+    --no-verify
+"""
+
+[tasks.build-server-image]
+description = "Build Docker image with custom runtime"
+depends = ["build-server-runtime"]
+run = """
+docker build -f crates/eryx-server/Dockerfile \
+    --build-arg RUNTIME_SOURCE=custom \
+    --build-arg RUNTIME_CWASM=crates/eryx-server/runtime.cwasm \
+    -t eryx-server:custom \
+    .
+"""
+
 [tasks.test-eryx-runtime]
 description = "Run eryx-wasm-runtime integration tests"
 depends = ["build-eryx-runtime", "setup-eryx-runtime-tests"]

@@ -83,5 +83,9 @@ js/eryx/python-stdlib.tar.gz
 js/eryx/node_modules/
 js/testpkg/node_modules/
 
+# Server custom runtime packages (populated by mise download-server-packages)
+crates/eryx-server/packages/
+crates/eryx-server/runtime.cwasm
+
 # Demo example packages (populated at build time by mise copy-examples)
 js/demo/public/examples/
