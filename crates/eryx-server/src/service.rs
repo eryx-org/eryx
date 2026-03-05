@@ -10,6 +10,7 @@ use eryx::vfs::{ArcStorage, InMemoryStorage, VfsStorage};
 use eryx::{
     Callback, CallbackRequest, ConnectionManager, NetConfig, NetRequest, OutputRequest,
     PythonStateSnapshot, ResourceLimits, SandboxPool, SecretConfig, SessionExecutor, TraceRequest,
+    VfsConfig,
 };
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
@@ -17,12 +18,10 @@ use tonic::{Request, Response, Status, Streaming};
 use tracing::Instrument;
 
 use crate::callbacks::{self, CallbackResult, PendingCallbacks};
-use crate::output::GrpcOutputHandler;
 use crate::proto::eryx::v1::{
     ClientMessage, ExecuteResult, ExecuteStats, FileKind, ServerMessage, SupportingFile,
     callback_response, client_message, server_message,
 };
-use crate::trace::GrpcTraceHandler;
 
 /// The Eryx gRPC service.
 ///
@@ -183,7 +182,6 @@ impl crate::proto::eryx::v1::eryx_server::Eryx for EryxService {
             .await
             .map_err(|e| Status::unavailable(format!("failed to acquire sandbox: {e}")))?
             .with_callbacks(cbs)
-            .with_output_handler(GrpcOutputHandler::new(server_tx.clone()))
             .with_resource_limits(resource_limits.clone());
         span.in_scope(|| {
             tracing::info!(
@@ -191,11 +189,6 @@ impl crate::proto::eryx::v1::eryx_server::Eryx for EryxService {
                 "sandbox acquired from pool"
             );
         });
-
-        // Conditionally add trace handler.
-        if enable_tracing {
-            sandbox = sandbox.with_trace_handler(GrpcTraceHandler::new(server_tx.clone()));
-        }
 
         // 6. Spawn callback dispatch task: reads inbound CallbackResponses and
         //    routes them to the pending oneshot senders.
@@ -287,6 +280,14 @@ const SYS_PATH_INJECT: &str = concat!(
     "del _sys, _il\n",
 );
 
+/// Check whether a filename is safe for use in VFS paths.
+///
+/// Rejects names that contain path separators (`/`, `\`) or `..` components,
+/// which could be used to escape the intended directory.
+fn is_safe_filename(name: &str) -> bool {
+    !name.is_empty() && !name.contains('/') && !name.contains('\\') && !name.contains("..")
+}
+
 /// Create a VFS storage pre-populated with the given supporting files.
 ///
 /// Files are routed into subdirectories under the VFS mount based on their kind:
@@ -310,6 +311,10 @@ async fn create_vfs_with_files(files: &[SupportingFile], mount_path: &str) -> Ar
     let _ = storage.mkdir_sync(&data_path);
 
     for f in files {
+        if !is_safe_filename(&f.name) {
+            tracing::warn!(file = %f.name, "skipping supporting file with unsafe name (path separators or '..' not allowed)");
+            continue;
+        }
         let dir = match f.kind() {
             FileKind::Module => &lib_path,
             FileKind::Data => &data_path,
@@ -353,12 +358,8 @@ async fn execute_with_session(
 
     // Get the shared PythonExecutor and clone the configured callbacks from the sandbox.
     let executor = sandbox.executor();
-    let callbacks_map: HashMap<String, Arc<dyn Callback>> = sandbox
-        .callbacks()
-        .iter()
-        .map(|(k, v)| (k.clone(), Arc::clone(v)))
-        .collect();
-    let callbacks_arc: Vec<Arc<dyn Callback>> = callbacks_map.values().cloned().collect();
+    let callbacks_ref = sandbox.callbacks();
+    let callbacks_arc: Vec<Arc<dyn Callback>> = callbacks_ref.values().cloned().collect();
 
     // Create the session executor, optionally with pre-populated VFS for supporting files.
     let mut session = if params.files.is_empty() {
@@ -374,12 +375,21 @@ async fn execute_with_session(
             }
         }
     } else {
-        let vfs_storage = create_vfs_with_files(params.files, "/eryx").await;
+        let vfs_mount_path = "/eryx";
+        let vfs_storage = create_vfs_with_files(params.files, vfs_mount_path).await;
         tracing::info!(
             file_count = params.files.len(),
             "created VFS with supporting files"
         );
-        match SessionExecutor::new_with_vfs(executor, &callbacks_arc, vfs_storage).await {
+        let vfs_config = VfsConfig::new(vfs_mount_path);
+        match SessionExecutor::new_with_vfs_config(
+            executor,
+            &callbacks_arc,
+            vfs_storage,
+            vfs_config,
+        )
+        .await
+        {
             Ok(s) => s,
             Err(e) => {
                 tracing::warn!(error = %e, "failed to create session executor with VFS");
@@ -414,7 +424,7 @@ async fn execute_with_session(
     // Set up callback handler channels (mirroring Sandbox::execute pattern).
     let (callback_tx, callback_rx) = mpsc::channel::<CallbackRequest>(32);
     let fuel_limit = params.resource_limits.max_fuel;
-    let cb_map = Arc::new(callbacks_map);
+    let cb_map: Arc<HashMap<String, Arc<dyn Callback>>> = Arc::new(callbacks_ref.clone());
     let cb_secrets: Arc<HashMap<String, SecretConfig>> = Arc::new(HashMap::new());
     let resource_limits = params.resource_limits.clone();
     let callback_handler = tokio::spawn(async move {
@@ -747,5 +757,66 @@ mod tests {
         // Should have {mount_path}/lib and {mount_path}/data dirs but no files.
         assert!(storage.read("/eryx/lib/helpers.py").await.is_err());
         assert!(storage.read("/eryx/data/config.json").await.is_err());
+    }
+
+    #[test]
+    fn test_is_safe_filename_accepts_valid_names() {
+        assert!(is_safe_filename("helpers.py"));
+        assert!(is_safe_filename("my_module.py"));
+        assert!(is_safe_filename("data.json"));
+        assert!(is_safe_filename("file-with-dashes.txt"));
+        assert!(is_safe_filename("CamelCase.py"));
+    }
+
+    #[test]
+    fn test_is_safe_filename_rejects_path_traversal() {
+        assert!(!is_safe_filename("../../etc/passwd"));
+        assert!(!is_safe_filename("../malicious.py"));
+        assert!(!is_safe_filename(".."));
+        assert!(!is_safe_filename("foo/../bar.py"));
+    }
+
+    #[test]
+    fn test_is_safe_filename_rejects_path_separators() {
+        assert!(!is_safe_filename("sub/module.py"));
+        assert!(!is_safe_filename("sub\\module.py"));
+        assert!(!is_safe_filename("/absolute.py"));
+        assert!(!is_safe_filename("\\absolute.py"));
+    }
+
+    #[test]
+    fn test_is_safe_filename_rejects_empty() {
+        assert!(!is_safe_filename(""));
+    }
+
+    #[tokio::test]
+    async fn test_create_vfs_skips_unsafe_filenames() {
+        let files = vec![
+            SupportingFile {
+                name: "good.py".to_string(),
+                content: "x = 1".to_string(),
+                kind: FileKind::Module as i32,
+            },
+            SupportingFile {
+                name: "../../etc/passwd".to_string(),
+                content: "malicious".to_string(),
+                kind: FileKind::Module as i32,
+            },
+            SupportingFile {
+                name: "sub/nested.py".to_string(),
+                content: "nested".to_string(),
+                kind: FileKind::Module as i32,
+            },
+        ];
+
+        let storage = create_vfs_with_files(&files, MOUNT_PATH).await;
+
+        // Valid file should be written.
+        let content = storage.read("/eryx/lib/good.py").await.unwrap();
+        assert_eq!(String::from_utf8(content).unwrap(), "x = 1");
+
+        // Unsafe files should NOT be written anywhere.
+        assert!(storage.read("/eryx/lib/../../etc/passwd").await.is_err());
+        assert!(storage.read("/eryx/lib/sub/nested.py").await.is_err());
     }
 }

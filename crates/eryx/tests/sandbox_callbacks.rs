@@ -1440,3 +1440,79 @@ print(f"Dashboards: {result['dashboards']}")
         output.stdout
     );
 }
+
+// =============================================================================
+// Duplicate Positional/Keyword Argument Tests
+// =============================================================================
+
+#[tokio::test]
+async fn test_callback_positional_and_keyword_duplicate_raises_typeerror() {
+    let sandbox = sandbox_builder()
+        .with_callback(AddCallback)
+        .build()
+        .expect("Failed to build sandbox");
+
+    // Passing 'a' as both positional (first arg) and keyword should raise TypeError
+    let result = sandbox
+        .execute(
+            r#"
+try:
+    result = await add(1, a=2)
+    print("ERROR: should have raised TypeError")
+except TypeError as e:
+    print(f"TypeError: {e}")
+"#,
+        )
+        .await;
+
+    assert!(result.is_ok(), "Execution should succeed: {:?}", result);
+    let output = result.unwrap();
+    assert!(
+        output.stdout.contains("TypeError"),
+        "Should raise TypeError for duplicate arg: {}",
+        output.stdout
+    );
+    assert!(
+        output
+            .stdout
+            .contains("got multiple values for argument 'a'"),
+        "Error message should mention the parameter name: {}",
+        output.stdout
+    );
+}
+
+#[tokio::test]
+async fn test_callback_namespace_positional_and_keyword_duplicate_raises_typeerror() {
+    let sandbox = sandbox_builder()
+        .with_callback(SearchDashboardsCallback)
+        .build()
+        .expect("Failed to build sandbox");
+
+    // Passing 'query' as both positional and keyword via namespace leaf
+    let result = sandbox
+        .execute(
+            r#"
+try:
+    result = await search.dashboards('test', query='other')
+    print("ERROR: should have raised TypeError")
+except TypeError as e:
+    print(f"TypeError: {e}")
+"#,
+        )
+        .await;
+
+    assert!(result.is_ok(), "Execution should succeed: {:?}", result);
+    let output = result.unwrap();
+    assert!(
+        output.stdout.contains("TypeError"),
+        "Should raise TypeError for duplicate arg in namespace callback: {}",
+        output.stdout
+    );
+    assert!(
+        output
+            .stdout
+            .contains("got multiple values for argument 'query'"),
+        "Error message should mention the parameter name: {}",
+        output.stdout
+    );
+}

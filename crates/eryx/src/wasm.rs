@@ -1989,9 +1989,9 @@ impl PythonExecutor {
             });
             let mut ctx = eryx_vfs::HybridVfsCtx::new(storage);
 
-            // Add a writable /eryx directory backed by VFS storage
+            // Add a writable /data directory backed by VFS storage
             ctx.add_vfs_preopen(
-                "/eryx",
+                "/data",
                 eryx_vfs::DirPerms::all(),
                 eryx_vfs::FilePerms::all(),
             );
