@@ -659,8 +659,7 @@ run = """
 mkdir -p crates/eryx-server/packages
 pip download polars==1.38.1 --no-deps -d crates/eryx-server/packages/
 curl -sL https://github.com/dicej/wasi-wheels/releases/download/v0.0.2/numpy-wasi.tar.gz \
-    -o /tmp/numpy-wasi.tar.gz
-tar -xzf /tmp/numpy-wasi.tar.gz -C crates/eryx-server/packages/
+    -o crates/eryx-server/packages/numpy-wasi.tar.gz
 """
 
 [tasks.build-server-runtime]
@@ -673,8 +672,8 @@ cargo run -p eryx-precompile --release -- compile \
     crates/eryx-runtime/runtime.wasm \
     --preinit \
     --stdlib crates/eryx-wasm-runtime/tests/python-stdlib \
-    --package crates/eryx-server/packages/polars-*.whl \
-    --package crates/eryx-server/packages/numpy \
+    --package crates/eryx-server/packages/numpy-wasi.tar.gz \
+    --import numpy \
     --target "$TARGET" \
     --output crates/eryx-server/runtime.cwasm \
     --no-verify

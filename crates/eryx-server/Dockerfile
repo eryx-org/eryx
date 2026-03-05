@@ -104,11 +104,12 @@ WORKDIR /build
 # Bring in pre-built dependencies from cook stage.
 COPY --from=cook /build/target target
 
-# Copy runtime.cwasm from selected runtime stage so build.rs can embed it.
-COPY --from=runtime /build/crates/eryx-runtime/runtime.cwasm crates/eryx-runtime/runtime.cwasm
-
 # Copy full workspace source.
 COPY . .
+
+# Copy runtime.cwasm from selected runtime stage AFTER source copy so it
+# isn't overwritten by any runtime.cwasm that exists in the source tree.
+COPY --from=runtime /build/crates/eryx-runtime/runtime.cwasm crates/eryx-runtime/runtime.cwasm
 
 # Build the server with preinit support.
 # runtime.cwasm already exists, so build.rs will embed it.
