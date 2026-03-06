@@ -1,5 +1,6 @@
 //! eryx-server: gRPC server for sandboxed Python execution.
 
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use clap::Parser;
@@ -29,6 +30,13 @@ struct Args {
     /// Minimum number of idle sandboxes to keep warm.
     #[arg(long, default_value_t = 1, env = "ERYX_POOL_MIN_IDLE")]
     pool_min_idle: usize,
+
+    /// Path to a pre-compiled runtime (.cwasm) to use instead of the embedded runtime.
+    ///
+    /// This allows using a custom runtime with additional packages (e.g. numpy, polars)
+    /// baked in via `eryx-precompile`.
+    #[arg(long, env = "ERYX_RUNTIME_CWASM")]
+    runtime_cwasm: Option<PathBuf>,
 }
 
 #[tokio::main]
@@ -54,10 +62,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         %addr,
         pool_max_size = pool_config.max_size,
         pool_min_idle = pool_config.min_idle,
+        runtime_cwasm = ?args.runtime_cwasm,
         "starting eryx gRPC server"
     );
 
-    let pool = SandboxPool::new(Sandbox::embedded(), pool_config).await?;
+    let builder = if let Some(cwasm_path) = &args.runtime_cwasm {
+        // Use the embedded stdlib (extracted from the binary) even when
+        // loading a custom runtime — Python needs real stdlib files on disk.
+        let embedded = eryx::embedded::EmbeddedResources::get()?;
+        // SAFETY: The user is responsible for providing a trusted .cwasm file
+        // that was precompiled with a compatible engine configuration.
+        unsafe {
+            Sandbox::builder()
+                .with_precompiled_file(cwasm_path)
+                .with_python_stdlib(&embedded.stdlib_path)
+        }
+    } else {
+        Sandbox::embedded()
+    };
+
+    let pool = SandboxPool::new(builder, pool_config).await?;
     let service = EryxService::new(Arc::new(pool));
 
     Server::builder()
