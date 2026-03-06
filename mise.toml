@@ -653,18 +653,17 @@ cp crates/eryx-runtime/prebuilt/liberyx_bindings.so.zst "$DEST/"
 echo "Copied $(ls "$DEST" | wc -l) files to $DEST"
 """
 
-[tasks.download-server-packages]
-description = "Download polars and numpy wheels for custom server runtime"
+[tasks.download-numpy-wasi]
+description = "Download numpy WASI wheel for custom runtime demo"
 run = """
 mkdir -p crates/eryx-server/packages
-pip download polars==1.38.1 --no-deps -d crates/eryx-server/packages/
 curl -sL https://github.com/dicej/wasi-wheels/releases/download/v0.0.2/numpy-wasi.tar.gz \
     -o crates/eryx-server/packages/numpy-wasi.tar.gz
 """
 
-[tasks.build-server-runtime]
-description = "Build a custom runtime.cwasm with polars and numpy baked in"
-depends = ["download-server-packages", "build-eryx-runtime", "build-preinit", "setup-eryx-runtime-tests"]
+[tasks.build-numpy-runtime]
+description = "Build a custom runtime.cwasm with numpy baked in (demo)"
+depends = ["download-numpy-wasi", "build-eryx-runtime", "build-preinit", "setup-eryx-runtime-tests"]
 env = { ERYX_PRECOMPILE_BOOTSTRAP = "1" }
 run = """
 TARGET="${ERYX_CPU_FEATURES:-native}"
@@ -679,15 +678,28 @@ cargo run -p eryx-precompile --release -- compile \
     --no-verify
 """
 
-[tasks.build-server-image]
-description = "Build Docker image with custom runtime"
-depends = ["build-server-runtime"]
+[tasks.build-numpy-server-image]
+description = "Build Docker image with numpy runtime (demo)"
+depends = ["build-numpy-runtime"]
 run = """
 docker build -f crates/eryx-server/Dockerfile \
     --build-arg RUNTIME_SOURCE=custom \
     --build-arg RUNTIME_CWASM=crates/eryx-server/runtime.cwasm \
     -t eryx-server:custom \
     .
+"""
+
+[tasks.build-server-image-ci]
+description = "Build Docker image using pre-built runtime.cwasm (simulates CI)"
+depends = ["precompile-eryx-runtime-preinit"]
+run = """
+cp crates/eryx-runtime/runtime.cwasm crates/eryx-server/runtime.cwasm
+docker build -f crates/eryx-server/Dockerfile \
+    --build-arg RUNTIME_SOURCE=custom \
+    --build-arg RUNTIME_CWASM=crates/eryx-server/runtime.cwasm \
+    -t eryx-server:ci-test \
+    .
+rm -f crates/eryx-server/runtime.cwasm
 """
 
 [tasks.test-eryx-runtime]

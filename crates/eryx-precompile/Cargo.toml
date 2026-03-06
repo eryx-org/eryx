@@ -13,13 +13,13 @@ path = "src/main.rs"
 
 [dependencies]
 anyhow.workspace = true
-clap = { version = "4", features = ["derive"] }
+clap = { workspace = true, features = ["env"] } #unified
 eryx = { workspace = true, features = ["preinit"] }
 reqwest.workspace = true
 tempfile.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
 tracing.workspace = true
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter", "registry"] }
 walkdir.workspace = true
 
 [package.metadata.dist]

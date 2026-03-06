@@ -483,7 +483,7 @@ impl Sandbox {
 
     /// Get a reference to the Python executor.
     ///
-    /// This allows creating a [`SessionExecutor`] from a pooled sandbox,
+    /// This allows creating a `SessionExecutor` from a pooled sandbox,
     /// enabling state persistence between executions.
     #[must_use]
     pub fn executor(&self) -> Arc<PythonExecutor> {

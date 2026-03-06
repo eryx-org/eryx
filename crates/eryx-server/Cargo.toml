@@ -21,7 +21,7 @@ tracing-logfmt = "0.3"
 uuid = { workspace = true, features = ["v4"] }
 dashmap.workspace = true
 async-trait.workspace = true
-clap = { version = "4", features = ["derive", "env"] }
+clap = { workspace = true, features = ["env"] } #unified
 
 [build-dependencies]
 tonic-build.workspace = true

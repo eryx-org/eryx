@@ -104,6 +104,7 @@ zstd = "0.13"
 # Browser WASM bindings
 wasm-bindgen = "0.2"
 js-sys = "0.3"
+clap = { version = "^4.5.57", features = ["derive"] } #unified
 
 [workspace.lints.rust]
 missing_debug_implementations = "warn"
