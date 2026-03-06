@@ -23,7 +23,7 @@ use crate::wasi_impl::VfsDescriptor;
 // preopens::Host Implementation
 // ============================================================================
 
-impl<S: VfsStorage + 'static> preopens::Host for HybridVfsState<'_, S> {
+impl<S: VfsStorage + Clone + 'static> preopens::Host for HybridVfsState<'_, S> {
     fn get_directories(&mut self) -> wasmtime::Result<Vec<(Resource<HybridDescriptor>, String)>> {
         tracing::debug!(
             "hybrid VFS get_directories called, {} preopens configured",
@@ -65,7 +65,7 @@ impl<S: VfsStorage + 'static> preopens::Host for HybridVfsState<'_, S> {
 // types::Host Implementation
 // ============================================================================
 
-impl<S: VfsStorage + 'static> types::Host for HybridVfsState<'_, S> {
+impl<S: VfsStorage + Clone + 'static> types::Host for HybridVfsState<'_, S> {
     fn convert_error_code(&mut self, err: HybridFsError) -> anyhow::Result<types::ErrorCode> {
         err.downcast()
     }
@@ -187,7 +187,7 @@ fn cap_metadata_to_stat(meta: &cap_std::fs::Metadata) -> types::DescriptorStat {
 // types::HostDescriptor Implementation
 // ============================================================================
 
-impl<S: VfsStorage + 'static> types::HostDescriptor for HybridVfsState<'_, S> {
+impl<S: VfsStorage + Clone + 'static> types::HostDescriptor for HybridVfsState<'_, S> {
     async fn advise(
         &mut self,
         _fd: Resource<HybridDescriptor>,
@@ -991,7 +991,7 @@ impl<S: VfsStorage + 'static> types::HostDescriptor for HybridVfsState<'_, S> {
                     return Err(crate::VfsError::PermissionDenied("read".to_string()).into());
                 }
                 let path = vfs_desc.path.clone();
-                let storage = Arc::clone(&self.ctx.storage);
+                let storage = self.ctx.storage.clone();
                 let stream = VfsInputStream::new(storage, path, offset);
                 let stream: DynInputStream = Box::new(stream);
                 let resource = self.table.push(stream)?;
@@ -1028,7 +1028,7 @@ impl<S: VfsStorage + 'static> types::HostDescriptor for HybridVfsState<'_, S> {
                     return Err(crate::VfsError::PermissionDenied("write".to_string()).into());
                 }
                 let path = vfs_desc.path.clone();
-                let storage = Arc::clone(&self.ctx.storage);
+                let storage = self.ctx.storage.clone();
                 let stream = VfsOutputStream::write_at(storage, path, offset);
                 let stream: DynOutputStream = Box::new(stream);
                 let resource = self.table.push(stream)?;
@@ -1064,7 +1064,7 @@ impl<S: VfsStorage + 'static> types::HostDescriptor for HybridVfsState<'_, S> {
                 }
 
                 let path = vfs_desc.path.clone();
-                let storage = Arc::clone(&self.ctx.storage);
+                let storage = self.ctx.storage.clone();
                 let stream = VfsOutputStream::append(storage, path);
                 let stream: DynOutputStream = Box::new(stream);
                 let resource = self.table.push(stream)?;
@@ -1182,7 +1182,7 @@ fn compute_hash(path: &str, size: u64) -> u64 {
 // types::HostDirectoryEntryStream Implementation
 // ============================================================================
 
-impl<S: VfsStorage + 'static> types::HostDirectoryEntryStream for HybridVfsState<'_, S> {
+impl<S: VfsStorage + Clone + 'static> types::HostDirectoryEntryStream for HybridVfsState<'_, S> {
     async fn read_directory_entry(
         &mut self,
         stream: Resource<HybridReaddirIterator>,

@@ -116,6 +116,7 @@ pub trait VfsStorage: Send + Sync {
 /// // Wrap any VfsStorage in a ArcStorage
 /// let storage = ArcStorage::new(Arc::new(InMemoryStorage::new()));
 /// ```
+#[derive(Clone)]
 pub struct ArcStorage(Arc<dyn VfsStorage>);
 
 impl ArcStorage {

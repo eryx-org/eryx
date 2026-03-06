@@ -437,9 +437,9 @@ impl HybridPreopen {
 ///
 /// This combines VFS storage with real filesystem passthrough, routing
 /// operations based on path prefixes.
-pub struct HybridVfsCtx<S: VfsStorage> {
+pub struct HybridVfsCtx<S: VfsStorage + Clone> {
     /// The VFS storage backend for virtual paths.
-    pub storage: Arc<S>,
+    pub storage: S,
     /// Path prefixes that should be handled by VFS (e.g., ["/data"]).
     pub vfs_prefixes: Vec<String>,
     /// Preopened directories (both VFS and real).
@@ -448,7 +448,7 @@ pub struct HybridVfsCtx<S: VfsStorage> {
     pub allow_blocking_current_thread: bool,
 }
 
-impl<S: VfsStorage> std::fmt::Debug for HybridVfsCtx<S> {
+impl<S: VfsStorage + Clone> std::fmt::Debug for HybridVfsCtx<S> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("HybridVfsCtx")
             .field("vfs_prefixes", &self.vfs_prefixes)
@@ -461,12 +461,12 @@ impl<S: VfsStorage> std::fmt::Debug for HybridVfsCtx<S> {
     }
 }
 
-impl<S: VfsStorage> HybridVfsCtx<S> {
+impl<S: VfsStorage + Clone> HybridVfsCtx<S> {
     /// Create a new hybrid VFS context with the given storage.
     ///
     /// By default, no paths are configured. Use `add_vfs_preopen` and
     /// `add_real_preopen` to configure paths.
-    pub fn new(storage: Arc<S>) -> Self {
+    pub fn new(storage: S) -> Self {
         Self {
             storage,
             vfs_prefixes: Vec::new(),
@@ -610,14 +610,14 @@ impl<S: VfsStorage> HybridVfsCtx<S> {
 }
 
 /// A view into the hybrid VFS state for WASI trait implementations.
-pub struct HybridVfsState<'a, S: VfsStorage> {
+pub struct HybridVfsState<'a, S: VfsStorage + Clone> {
     /// The hybrid VFS context.
     pub ctx: &'a mut HybridVfsCtx<S>,
     /// The resource table for managing descriptors.
     pub table: &'a mut ResourceTable,
 }
 
-impl<S: VfsStorage> std::fmt::Debug for HybridVfsState<'_, S> {
+impl<S: VfsStorage + Clone> std::fmt::Debug for HybridVfsState<'_, S> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("HybridVfsState")
             .field("ctx", &self.ctx)
@@ -625,7 +625,7 @@ impl<S: VfsStorage> std::fmt::Debug for HybridVfsState<'_, S> {
     }
 }
 
-impl<'a, S: VfsStorage> HybridVfsState<'a, S> {
+impl<'a, S: VfsStorage + Clone> HybridVfsState<'a, S> {
     /// Create a new hybrid VFS state.
     pub fn new(ctx: &'a mut HybridVfsCtx<S>, table: &'a mut ResourceTable) -> Self {
         Self { ctx, table }
@@ -641,11 +641,11 @@ impl<'a, S: VfsStorage> HybridVfsState<'a, S> {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
-    use crate::InMemoryStorage;
+    use crate::{ArcStorage, InMemoryStorage};
 
     #[test]
     fn test_is_vfs_path() {
-        let storage = Arc::new(InMemoryStorage::new());
+        let storage = ArcStorage::new(Arc::new(InMemoryStorage::new()));
         let mut ctx = HybridVfsCtx::new(storage);
         ctx.add_vfs_preopen("/data", DirPerms::all(), FilePerms::all());
 

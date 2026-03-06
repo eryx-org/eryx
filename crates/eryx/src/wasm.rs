@@ -797,7 +797,7 @@ pub struct ExecuteBuilder<'a> {
     cancellation_token: Option<CancellationToken>,
     fuel_limit: Option<u64>,
     #[cfg(feature = "vfs")]
-    vfs_storage: Option<std::sync::Arc<eryx_vfs::ArcStorage>>,
+    vfs_storage: Option<eryx_vfs::ArcStorage>,
     #[cfg(feature = "vfs")]
     volumes: Vec<crate::session::VolumeMount>,
 }
@@ -935,7 +935,7 @@ impl<'a> ExecuteBuilder<'a> {
     /// Set VFS storage with scrubbing for secret placeholders.
     #[cfg(feature = "vfs")]
     #[must_use]
-    pub fn with_vfs_storage(mut self, storage: std::sync::Arc<eryx_vfs::ArcStorage>) -> Self {
+    pub fn with_vfs_storage(mut self, storage: eryx_vfs::ArcStorage) -> Self {
         self.vfs_storage = Some(storage);
         self
     }
@@ -1900,7 +1900,7 @@ impl PythonExecutor {
         execution_timeout: Option<Duration>,
         cancellation_token: Option<CancellationToken>,
         fuel_limit: Option<u64>,
-        #[cfg(feature = "vfs")] vfs_storage: Option<std::sync::Arc<eryx_vfs::ArcStorage>>,
+        #[cfg(feature = "vfs")] vfs_storage: Option<eryx_vfs::ArcStorage>,
         #[cfg(feature = "vfs")] volumes: Vec<crate::session::VolumeMount>,
     ) -> std::result::Result<ExecutionOutput, Error> {
         // Build callback info for introspection
@@ -1983,9 +1983,7 @@ impl PythonExecutor {
         let hybrid_vfs_ctx = {
             // Use provided storage or create a plain in-memory storage (no scrubbing)
             let storage = vfs_storage.unwrap_or_else(|| {
-                std::sync::Arc::new(eryx_vfs::ArcStorage::new(std::sync::Arc::new(
-                    eryx_vfs::InMemoryStorage::new(),
-                )))
+                eryx_vfs::ArcStorage::new(std::sync::Arc::new(eryx_vfs::InMemoryStorage::new()))
             });
             let mut ctx = eryx_vfs::HybridVfsCtx::new(storage);
 

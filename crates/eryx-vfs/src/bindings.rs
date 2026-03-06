@@ -118,8 +118,8 @@ use crate::wasi_impl::VfsState;
 ///
 /// This is similar to `WasiFilesystem` from wasmtime-wasi but uses our
 /// VFS storage backend instead of the native filesystem.
-pub struct VfsFilesystem<S: VfsStorage + 'static>(std::marker::PhantomData<S>);
+pub struct VfsFilesystem<S: VfsStorage + Clone + 'static>(std::marker::PhantomData<S>);
 
-impl<S: VfsStorage + 'static> HasData for VfsFilesystem<S> {
+impl<S: VfsStorage + Clone + 'static> HasData for VfsFilesystem<S> {
     type Data<'a> = VfsState<'a, S>;
 }

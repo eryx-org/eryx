@@ -19,7 +19,7 @@ use crate::wasi_impl::VfsState;
 /// Similar to how `WasiView` provides access to WASI context.
 pub trait VfsView: Send {
     /// The storage backend type.
-    type Storage: VfsStorage + 'static;
+    type Storage: VfsStorage + Clone + 'static;
 
     /// Get access to the VFS state.
     fn vfs(&mut self) -> VfsState<'_, Self::Storage>;
@@ -87,7 +87,7 @@ where
 /// real filesystem based on path.
 pub trait HybridVfsView: Send {
     /// The storage backend type for VFS paths.
-    type Storage: VfsStorage + 'static;
+    type Storage: VfsStorage + Clone + 'static;
 
     /// Get access to the hybrid VFS state.
     fn hybrid_vfs(&mut self) -> HybridVfsState<'_, Self::Storage>;

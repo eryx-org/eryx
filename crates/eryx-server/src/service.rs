@@ -296,10 +296,8 @@ fn is_safe_filename(name: &str) -> bool {
 ///
 /// The `mount_path` must match the VFS preopen path (e.g. `/eryx`) because
 /// `VfsDescriptor::resolve_path` prepends it when the guest accesses files.
-async fn create_vfs_with_files(files: &[SupportingFile], mount_path: &str) -> Arc<ArcStorage> {
-    let storage = Arc::new(ArcStorage::new(
-        Arc::new(InMemoryStorage::new()) as Arc<dyn VfsStorage>
-    ));
+async fn create_vfs_with_files(files: &[SupportingFile], mount_path: &str) -> ArcStorage {
+    let storage = ArcStorage::new(Arc::new(InMemoryStorage::new()) as Arc<dyn VfsStorage>);
 
     let lib_path = format!("{mount_path}/lib");
     let data_path = format!("{mount_path}/data");
@@ -660,6 +658,7 @@ fn parse_trace_event_json(event_json: &str) -> (String, String, String, String, 
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
 

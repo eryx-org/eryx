@@ -300,7 +300,7 @@ impl Sandbox {
         #[cfg(feature = "vfs")]
         {
             let vfs_storage = if let Some(ref storage) = self.vfs_storage {
-                std::sync::Arc::new(eryx_vfs::ArcStorage::new(Arc::clone(storage)))
+                eryx_vfs::ArcStorage::new(Arc::clone(storage))
             } else {
                 let vfs_secrets = self
                     .secrets
@@ -329,9 +329,7 @@ impl Sandbox {
                     vfs_secrets,
                     vfs_policy,
                 );
-                std::sync::Arc::new(eryx_vfs::ArcStorage::new(std::sync::Arc::new(
-                    scrubbing_storage,
-                )))
+                eryx_vfs::ArcStorage::new(std::sync::Arc::new(scrubbing_storage))
             };
             execute_builder = execute_builder.with_vfs_storage(vfs_storage);
         }
@@ -746,7 +744,7 @@ impl Sandbox {
         #[cfg(feature = "vfs")]
         {
             let vfs_storage = if let Some(storage) = vfs_storage_override {
-                std::sync::Arc::new(eryx_vfs::ArcStorage::new(storage))
+                eryx_vfs::ArcStorage::new(storage)
             } else {
                 let vfs_secrets = secrets
                     .iter()
@@ -774,9 +772,7 @@ impl Sandbox {
                     vfs_secrets,
                     vfs_policy,
                 );
-                std::sync::Arc::new(eryx_vfs::ArcStorage::new(std::sync::Arc::new(
-                    scrubbing_storage,
-                )))
+                eryx_vfs::ArcStorage::new(std::sync::Arc::new(scrubbing_storage))
             };
             execute_builder = execute_builder.with_vfs_storage(vfs_storage);
         }

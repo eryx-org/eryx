@@ -460,7 +460,7 @@ pub struct SessionExecutor {
 
     /// VFS storage that persists across resets.
     #[cfg(feature = "vfs")]
-    vfs_storage: Option<std::sync::Arc<eryx_vfs::ArcStorage>>,
+    vfs_storage: Option<eryx_vfs::ArcStorage>,
 
     /// VFS configuration that persists across resets.
     #[cfg(feature = "vfs")]
@@ -543,7 +543,7 @@ fn build_wasi_context(executor: &PythonExecutor) -> Result<WasiCtx, Error> {
 #[cfg(feature = "vfs")]
 fn build_hybrid_vfs_context(
     executor: &PythonExecutor,
-    vfs_storage: std::sync::Arc<eryx_vfs::ArcStorage>,
+    vfs_storage: eryx_vfs::ArcStorage,
     vfs_config: &VfsConfig,
 ) -> std::result::Result<eryx_vfs::HybridVfsCtx<eryx_vfs::ArcStorage>, Error> {
     let mut ctx = eryx_vfs::HybridVfsCtx::new(vfs_storage);
@@ -651,7 +651,7 @@ impl SessionExecutor {
     pub async fn new_with_vfs(
         executor: Arc<PythonExecutor>,
         callbacks: &[Arc<dyn Callback>],
-        vfs_storage: std::sync::Arc<eryx_vfs::ArcStorage>,
+        vfs_storage: eryx_vfs::ArcStorage,
     ) -> Result<Self, Error> {
         Self::new_internal(executor, callbacks, Some(vfs_storage), None).await
     }
@@ -691,7 +691,7 @@ impl SessionExecutor {
     pub async fn new_with_vfs_config(
         executor: Arc<PythonExecutor>,
         callbacks: &[Arc<dyn Callback>],
-        vfs_storage: std::sync::Arc<eryx_vfs::ArcStorage>,
+        vfs_storage: eryx_vfs::ArcStorage,
         vfs_config: VfsConfig,
     ) -> Result<Self, Error> {
         Self::new_internal(executor, callbacks, Some(vfs_storage), Some(vfs_config)).await
@@ -702,7 +702,7 @@ impl SessionExecutor {
     async fn new_internal(
         executor: Arc<PythonExecutor>,
         callbacks: &[Arc<dyn Callback>],
-        vfs_storage: Option<std::sync::Arc<eryx_vfs::ArcStorage>>,
+        vfs_storage: Option<eryx_vfs::ArcStorage>,
         vfs_config: Option<VfsConfig>,
     ) -> Result<Self, Error> {
         let callback_infos = build_callback_infos(callbacks);
@@ -710,15 +710,13 @@ impl SessionExecutor {
 
         // Use provided storage/config or create defaults (plain in-memory, no scrubbing)
         let vfs_storage = vfs_storage.unwrap_or_else(|| {
-            std::sync::Arc::new(eryx_vfs::ArcStorage::new(std::sync::Arc::new(
-                eryx_vfs::InMemoryStorage::new(),
-            )))
+            eryx_vfs::ArcStorage::new(std::sync::Arc::new(eryx_vfs::InMemoryStorage::new()))
         });
         let vfs_config = vfs_config.unwrap_or_default();
 
         let hybrid_vfs_ctx = Some(build_hybrid_vfs_context(
             &executor,
-            Arc::clone(&vfs_storage),
+            vfs_storage.clone(),
             &vfs_config,
         )?);
 
@@ -1118,9 +1116,7 @@ impl SessionExecutor {
         let state = {
             // Reuse existing VFS storage and config so files persist across resets
             let vfs_storage = self.vfs_storage.clone().unwrap_or_else(|| {
-                std::sync::Arc::new(eryx_vfs::ArcStorage::new(std::sync::Arc::new(
-                    eryx_vfs::InMemoryStorage::new(),
-                )))
+                eryx_vfs::ArcStorage::new(std::sync::Arc::new(eryx_vfs::InMemoryStorage::new()))
             });
             let vfs_config = self.vfs_config.clone().unwrap_or_default();
 

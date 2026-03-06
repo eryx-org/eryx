@@ -3,7 +3,6 @@
 //! This module provides the core types used by the WASI filesystem host
 //! implementation: descriptors, directory iterators, and error conversion.
 
-use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::bindings::{DirPerms, FilePerms, types};
@@ -11,16 +10,16 @@ use crate::storage::{DirEntry, Metadata, VfsStorage};
 
 /// Context for VFS operations.
 #[derive(Debug)]
-pub struct VfsCtx<S: VfsStorage> {
+pub struct VfsCtx<S: VfsStorage + Clone> {
     /// The storage backend.
-    pub storage: Arc<S>,
+    pub storage: S,
     /// Preopened directories (path, dir_perms, file_perms).
     pub preopens: Vec<(String, DirPerms, FilePerms)>,
 }
 
-impl<S: VfsStorage> VfsCtx<S> {
+impl<S: VfsStorage + Clone> VfsCtx<S> {
     /// Create a new VFS context with the given storage and root preopen.
-    pub fn new(storage: Arc<S>) -> Self {
+    pub fn new(storage: S) -> Self {
         Self {
             storage,
             preopens: vec![("/".to_string(), DirPerms::all(), FilePerms::all())],
@@ -28,7 +27,7 @@ impl<S: VfsStorage> VfsCtx<S> {
     }
 
     /// Create a new VFS context with the given storage and no preopens.
-    pub fn new_empty(storage: Arc<S>) -> Self {
+    pub fn new_empty(storage: S) -> Self {
         Self {
             storage,
             preopens: Vec::new(),
@@ -47,14 +46,14 @@ impl<S: VfsStorage> VfsCtx<S> {
 }
 
 /// A view into the VFS state for WASI trait implementations.
-pub struct VfsState<'a, S: VfsStorage> {
+pub struct VfsState<'a, S: VfsStorage + Clone> {
     /// The VFS context.
     pub ctx: &'a mut VfsCtx<S>,
     /// The resource table for managing descriptors.
     pub table: &'a mut wasmtime::component::ResourceTable,
 }
 
-impl<S: VfsStorage> std::fmt::Debug for VfsState<'_, S> {
+impl<S: VfsStorage + Clone> std::fmt::Debug for VfsState<'_, S> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("VfsState")
             .field("preopens", &self.ctx.preopens.len())

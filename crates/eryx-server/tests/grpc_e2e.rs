@@ -482,11 +482,8 @@ async fn execute_without_tracing_no_trace_events() {
     let mut trace_events = Vec::new();
 
     while let Some(msg) = stream.message().await.unwrap() {
-        match msg.message {
-            Some(server_message::Message::TraceEvent(event)) => {
-                trace_events.push(event);
-            }
-            _ => {}
+        if let Some(server_message::Message::TraceEvent(event)) = msg.message {
+            trace_events.push(event);
         }
     }
 

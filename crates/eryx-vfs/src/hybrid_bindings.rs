@@ -167,8 +167,8 @@ use crate::hybrid::HybridVfsState;
 use crate::storage::VfsStorage;
 
 /// Marker type for implementing filesystem Host traits via HybridVfsState.
-pub struct HybridFilesystem<S: VfsStorage + 'static>(std::marker::PhantomData<S>);
+pub struct HybridFilesystem<S: VfsStorage + Clone + 'static>(std::marker::PhantomData<S>);
 
-impl<S: VfsStorage + 'static> HasData for HybridFilesystem<S> {
+impl<S: VfsStorage + Clone + 'static> HasData for HybridFilesystem<S> {
     type Data<'a> = HybridVfsState<'a, S>;
 }

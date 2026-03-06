@@ -157,7 +157,7 @@ pub fn build_callbacks(
         .collect()
 }
 
-/// Dispatch a [`CallbackResponse`] to its pending oneshot sender.
+/// Dispatch a `CallbackResponse` to its pending oneshot sender.
 ///
 /// Returns `true` if the response was delivered, `false` if no pending
 /// request was found for the given `request_id`.

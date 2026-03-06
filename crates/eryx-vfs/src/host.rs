@@ -2,8 +2,6 @@
 //!
 //! This module implements the WASI filesystem Host traits for our VFS.
 
-use std::sync::Arc;
-
 use wasmtime::component::Resource;
 use wasmtime_wasi_io::streams::{DynInputStream, DynOutputStream};
 
@@ -18,7 +16,7 @@ use crate::wasi_impl::{
 // preopens::Host Implementation
 // ============================================================================
 
-impl<S: VfsStorage + 'static> preopens::Host for VfsState<'_, S> {
+impl<S: VfsStorage + Clone + 'static> preopens::Host for VfsState<'_, S> {
     fn get_directories(&mut self) -> wasmtime::Result<Vec<(Resource<VfsDescriptor>, String)>> {
         let mut result = Vec::new();
         for (path, dir_perms, file_perms) in &self.ctx.preopens {
@@ -34,7 +32,7 @@ impl<S: VfsStorage + 'static> preopens::Host for VfsState<'_, S> {
 // types::Host Implementation
 // ============================================================================
 
-impl<S: VfsStorage + 'static> types::Host for VfsState<'_, S> {
+impl<S: VfsStorage + Clone + 'static> types::Host for VfsState<'_, S> {
     fn convert_error_code(&mut self, err: VfsFsError) -> anyhow::Result<types::ErrorCode> {
         err.downcast()
     }
@@ -75,7 +73,7 @@ impl<S: VfsStorage + 'static> types::Host for VfsState<'_, S> {
 // types::HostDescriptor Implementation
 // ============================================================================
 
-impl<S: VfsStorage + 'static> types::HostDescriptor for VfsState<'_, S> {
+impl<S: VfsStorage + Clone + 'static> types::HostDescriptor for VfsState<'_, S> {
     async fn advise(
         &mut self,
         _fd: Resource<VfsDescriptor>,
@@ -454,7 +452,7 @@ impl<S: VfsStorage + 'static> types::HostDescriptor for VfsState<'_, S> {
             return Err(crate::VfsError::PermissionDenied("read".to_string()).into());
         }
         let path = descriptor.path.clone();
-        let storage = Arc::clone(&self.ctx.storage);
+        let storage = self.ctx.storage.clone();
         let stream = VfsInputStream::new(storage, path, offset);
         let stream: DynInputStream = Box::new(stream);
         let resource = self.table.push(stream)?;
@@ -474,7 +472,7 @@ impl<S: VfsStorage + 'static> types::HostDescriptor for VfsState<'_, S> {
             return Err(crate::VfsError::PermissionDenied("write".to_string()).into());
         }
         let path = descriptor.path.clone();
-        let storage = Arc::clone(&self.ctx.storage);
+        let storage = self.ctx.storage.clone();
         let stream = VfsOutputStream::write_at(storage, path, offset);
         let stream: DynOutputStream = Box::new(stream);
         let resource = self.table.push(stream)?;
@@ -493,7 +491,7 @@ impl<S: VfsStorage + 'static> types::HostDescriptor for VfsState<'_, S> {
             return Err(crate::VfsError::PermissionDenied("write".to_string()).into());
         }
         let path = descriptor.path.clone();
-        let storage = Arc::clone(&self.ctx.storage);
+        let storage = self.ctx.storage.clone();
         let stream = VfsOutputStream::append(storage, path);
         let stream: DynOutputStream = Box::new(stream);
         let resource = self.table.push(stream)?;
@@ -557,7 +555,7 @@ impl<S: VfsStorage + 'static> types::HostDescriptor for VfsState<'_, S> {
 // types::HostDirectoryEntryStream Implementation
 // ============================================================================
 
-impl<S: VfsStorage + 'static> types::HostDirectoryEntryStream for VfsState<'_, S> {
+impl<S: VfsStorage + Clone + 'static> types::HostDirectoryEntryStream for VfsState<'_, S> {
     async fn read_directory_entry(
         &mut self,
         stream: Resource<VfsReaddirIterator>,
