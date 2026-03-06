@@ -60,7 +60,7 @@ pub struct Session {
     /// Tokio runtime for executing async code.
     runtime: Arc<tokio::runtime::Runtime>,
     /// VFS storage (kept for sharing across sessions).
-    vfs_storage: Option<Arc<eryx::vfs::ScrubbingStorage<eryx::vfs::InMemoryStorage>>>,
+    vfs_storage: Option<eryx::vfs::ArcStorage>,
     /// VFS mount path configuration.
     vfs_mount_path: Option<String>,
     /// Callbacks available for this session.
@@ -182,7 +182,7 @@ impl Session {
             .collect();
 
         // Create the SessionExecutor
-        let vfs_storage = vfs.map(|v| v.inner);
+        let vfs_storage = vfs.map(|v| v.into_arc_storage());
         let mount_path = vfs_mount_path.clone();
         let needs_vfs = vfs_storage.is_some() || !volume_mounts.is_empty();
 
@@ -190,13 +190,15 @@ impl Session {
             .block_on(async {
                 if needs_vfs {
                     // Auto-create VFS storage if volumes are requested but no VFS provided
-                    let storage = vfs_storage.unwrap_or_else(|| {
-                        Arc::new(eryx::vfs::ScrubbingStorage::new(
+                    let storage: eryx::vfs::ArcStorage = if let Some(s) = vfs_storage {
+                        s
+                    } else {
+                        eryx::vfs::ArcStorage::new(Arc::new(eryx::vfs::ScrubbingStorage::new(
                             eryx::vfs::InMemoryStorage::new(),
                             std::collections::HashMap::new(),
                             eryx::vfs::VfsFileScrubPolicy::None,
-                        ))
-                    });
+                        )))
+                    };
                     let mut config = if let Some(path) = &mount_path {
                         eryx::VfsConfig::new(path)
                     } else {
@@ -206,7 +208,7 @@ impl Session {
                     let session = eryx::SessionExecutor::new_with_vfs_config(
                         Arc::clone(&executor),
                         &callbacks_vec,
-                        Arc::clone(&storage),
+                        storage.clone(),
                         config,
                     )
                     .await?;
@@ -550,7 +552,7 @@ impl Session {
     #[getter]
     fn vfs(&self) -> Option<VfsStorage> {
         self.vfs_storage.as_ref().map(|storage| VfsStorage {
-            inner: Arc::clone(storage),
+            inner: storage.clone(),
         })
     }
 

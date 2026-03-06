@@ -101,7 +101,10 @@ pub use session::{VfsConfig, VolumeMount};
 pub use trace::{OutputHandler, TraceEvent, TraceEventKind, TraceHandler};
 
 // Re-export precompilation utilities and internal types
-pub use wasm::{CpuFeatureLevel, ExecutionOutput, NetRequest, OutputRequest, PythonExecutor};
+pub use wasm::{
+    CallbackRequest, CpuFeatureLevel, ExecutionOutput, NetRequest, OutputRequest, PythonExecutor,
+    TraceRequest,
+};
 
 // Re-export schema types at top level for convenience
 pub use schema::{JsonSchema, Schema};
@@ -142,7 +145,8 @@ pub use eryx_macros::callback;
 #[cfg(feature = "vfs")]
 pub mod vfs {
     pub use eryx_vfs::{
-        DirEntry, DirPerms, FilePerms, InMemoryStorage, Metadata, ScrubbingStorage, VfsCtx,
-        VfsError, VfsFileScrubPolicy, VfsResult, VfsSecretConfig, VfsState, VfsStorage, VfsView,
+        ArcStorage, DirEntry, DirPerms, FilePerms, InMemoryStorage, Metadata, ScrubbingStorage,
+        VfsCtx, VfsError, VfsFileScrubPolicy, VfsResult, VfsSecretConfig, VfsState, VfsStorage,
+        VfsView,
     };
 }

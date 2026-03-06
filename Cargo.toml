@@ -65,6 +65,17 @@ webpki-roots = "0.26"
 rcgen = "0.13"
 rmcp = "0.14"
 
+# gRPC
+tonic = "0.13"
+tonic-build = "0.13"
+prost = "0.13"
+
+# Unique identifiers
+uuid = "1"
+
+# Concurrent maps
+dashmap = "6"
+
 # Utilities
 tracing = "0.1"
 
@@ -93,6 +104,7 @@ zstd = "0.13"
 # Browser WASM bindings
 wasm-bindgen = "0.2"
 js-sys = "0.3"
+clap = { version = "^4.5.57", features = ["derive"] } #unified
 
 [workspace.lints.rust]
 missing_debug_implementations = "warn"

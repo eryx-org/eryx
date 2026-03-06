@@ -3193,8 +3193,22 @@ _eryx_reserved = set(dir(__builtins__)) | {{
 
 # Helper to create async callback wrappers
 def _eryx_make_callback(_cb_name):
-    async def callback(**kwargs):
-        # invoke() is now async, so await it
+    # Extract ordered parameter names from schema so positional args work
+    _param_names = []
+    for _cb in _eryx_callbacks:
+        if _cb['name'] == _cb_name and _cb.get('parameters_schema_json'):
+            _schema = _json.loads(_cb['parameters_schema_json'])
+            if 'properties' in _schema:
+                _param_names = list(_schema['properties'].keys())
+            break
+
+    async def callback(*args, **kwargs):
+        # Map positional args to parameter names
+        for _i, _arg in enumerate(args):
+            if _i < len(_param_names):
+                if _param_names[_i] in kwargs:
+                    raise TypeError(f"{{_cb_name}}() got multiple values for argument '{{_param_names[_i]}}'")
+                kwargs[_param_names[_i]] = _arg
         return await invoke(_cb_name, **kwargs)
     callback.__name__ = _cb_name
     callback.__doc__ = f"Invoke the '{{_cb_name}}' callback (async)."
@@ -3206,6 +3220,15 @@ class _EryxNamespace:
         self._invoke = invoke_fn
         self._prefix = prefix
         self._children = {{}}
+        # Cache param names from schema at construction time
+        self._param_names = []
+        if prefix:
+            _full = prefix.rstrip('.')
+            for _cb in _eryx_callbacks:
+                if _cb['name'] == _full and _cb.get('parameters_schema_json'):
+                    _s = _json.loads(_cb['parameters_schema_json'])
+                    self._param_names = list(_s.get('properties', {{}}).keys())
+                    break
 
     def _add_callback(self, parts):
         if len(parts) == 1:
@@ -3231,9 +3254,16 @@ class _EryxNamespace:
     def __getitem__(self, name):
         return self._resolve(name)
 
-    async def __call__(self, **kwargs):
+    async def __call__(self, *args, **kwargs):
         if self._prefix:
-            return await self._invoke(self._prefix.rstrip('.'), **kwargs)
+            _full = self._prefix.rstrip('.')
+            # Map positional args to cached parameter names
+            for _i, _a in enumerate(args):
+                if _i < len(self._param_names):
+                    if self._param_names[_i] in kwargs:
+                        raise TypeError(f"{{_full}}() got multiple values for argument '{{self._param_names[_i]}}'")
+                    kwargs[self._param_names[_i]] = _a
+            return await self._invoke(_full, **kwargs)
         raise TypeError("Cannot call root namespace")
 
     def __repr__(self):
@@ -3243,8 +3273,21 @@ class _EryxCallbackLeaf:
     def __init__(self, invoke_fn, name):
         self._invoke = invoke_fn
         self._name = name
+        # Cache param names from schema at construction time
+        self._param_names = []
+        for _cb in _eryx_callbacks:
+            if _cb['name'] == name and _cb.get('parameters_schema_json'):
+                _s = _json.loads(_cb['parameters_schema_json'])
+                self._param_names = list(_s.get('properties', {{}}).keys())
+                break
 
-    async def __call__(self, **kwargs):
+    async def __call__(self, *args, **kwargs):
+        # Map positional args to parameter names from cached schema
+        for _i, _a in enumerate(args):
+            if _i < len(self._param_names):
+                if self._param_names[_i] in kwargs:
+                    raise TypeError(f"{{self._name}}() got multiple values for argument '{{self._param_names[_i]}}'")
+                kwargs[self._param_names[_i]] = _a
         return await self._invoke(self._name, **kwargs)
 
     def __repr__(self):
@@ -3578,5 +3621,57 @@ ValueError: invalid "input""#;
                 }
             }
         }
+    }
+
+    #[test]
+    fn test_serde_json_mini_serialize_preserves_schema() {
+        use super::{CallbackInfo, serde_json_mini_serialize_callbacks};
+
+        let schema = r#"{"type":"object","properties":{"a":{"type":"integer"}}}"#;
+        let callbacks = vec![CallbackInfo {
+            name: "add".to_string(),
+            description: "Adds two numbers".to_string(),
+            parameters_schema_json: schema.to_string(),
+        }];
+
+        let json_str = serde_json_mini_serialize_callbacks(&callbacks);
+        eprintln!("Serialized JSON: {json_str}");
+
+        // The JSON should contain the schema string with escaped quotes
+        assert!(
+            json_str.contains("parameters_schema_json"),
+            "should have psj field"
+        );
+        // The schema's double-quotes are escaped as \"
+        assert!(
+            json_str.contains(r#"\"type\""#),
+            "should have escaped schema: {json_str}"
+        );
+
+        // Simulate the Python embedding pipeline:
+        // 1. .replace('\\', "\\\\") doubles backslashes for Python string literal
+        let python_embedded = json_str.replace('\\', "\\\\").replace('\'', "\\'");
+        eprintln!("Python embedded: {python_embedded}");
+
+        // 2. Python triple-quoted string interprets \\ as \
+        let after_python = python_embedded.replace("\\\\", "\\");
+        eprintln!("After Python unescape: {after_python}");
+
+        // after_python should equal the original json_str
+        assert_eq!(
+            after_python, json_str,
+            "Python roundtrip should preserve JSON"
+        );
+
+        // Verify the psj field value is non-empty by checking the JSON structure
+        // Find "parameters_schema_json": "<value>" and verify <value> is non-empty
+        let marker = r#""parameters_schema_json": ""#;
+        let start = json_str.find(marker).expect("should find psj field") + marker.len();
+        // The value starts after the opening quote and ends at the next unescaped quote
+        let value = &json_str[start..];
+        assert!(
+            !value.starts_with('"'),
+            "parameters_schema_json should not be empty: {json_str}"
+        );
     }
 }

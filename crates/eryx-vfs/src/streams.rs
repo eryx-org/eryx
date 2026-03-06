@@ -181,9 +181,9 @@ impl OutputStream for RealFileOutputStream {
 // ============================================================================
 
 /// An input stream for reading from a VFS file.
-pub struct VfsInputStream<S: VfsStorage + 'static> {
+pub struct VfsInputStream<S: VfsStorage + Clone + 'static> {
     /// The VFS storage backend.
-    storage: Arc<S>,
+    storage: S,
     /// Path to the file.
     path: String,
     /// Current read position.
@@ -192,9 +192,9 @@ pub struct VfsInputStream<S: VfsStorage + 'static> {
     closed: bool,
 }
 
-impl<S: VfsStorage + 'static> VfsInputStream<S> {
+impl<S: VfsStorage + Clone + 'static> VfsInputStream<S> {
     /// Create a new VFS input stream starting at the given offset.
-    pub fn new(storage: Arc<S>, path: String, offset: u64) -> Self {
+    pub fn new(storage: S, path: String, offset: u64) -> Self {
         Self {
             storage,
             path,
@@ -209,7 +209,7 @@ impl<S: VfsStorage + 'static> VfsInputStream<S> {
             return Ok(Bytes::new());
         }
 
-        let storage = Arc::clone(&self.storage);
+        let storage = self.storage.clone();
         let path = self.path.clone();
         let position = self.position;
 
@@ -242,14 +242,14 @@ impl<S: VfsStorage + 'static> VfsInputStream<S> {
 }
 
 #[async_trait::async_trait]
-impl<S: VfsStorage + 'static> Pollable for VfsInputStream<S> {
+impl<S: VfsStorage + Clone + 'static> Pollable for VfsInputStream<S> {
     async fn ready(&mut self) {
         // VFS reads are always "ready"
     }
 }
 
 #[async_trait::async_trait]
-impl<S: VfsStorage + 'static> InputStream for VfsInputStream<S> {
+impl<S: VfsStorage + Clone + 'static> InputStream for VfsInputStream<S> {
     fn read(&mut self, size: usize) -> StreamResult<Bytes> {
         if self.closed {
             return Err(StreamError::Closed);
@@ -267,9 +267,9 @@ impl<S: VfsStorage + 'static> InputStream for VfsInputStream<S> {
 /// This stream buffers writes and flushes them to VFS storage.
 /// Since VFS operations are async but stream writes are sync, we use
 /// a buffer and flush strategy.
-pub struct VfsOutputStream<S: VfsStorage + 'static> {
+pub struct VfsOutputStream<S: VfsStorage + Clone + 'static> {
     /// The VFS storage backend.
-    storage: Arc<S>,
+    storage: S,
     /// Path to the file.
     path: String,
     /// Write buffer.
@@ -280,9 +280,9 @@ pub struct VfsOutputStream<S: VfsStorage + 'static> {
     closed: bool,
 }
 
-impl<S: VfsStorage + 'static> VfsOutputStream<S> {
+impl<S: VfsStorage + Clone + 'static> VfsOutputStream<S> {
     /// Create a new VFS output stream for writing at a specific offset.
-    pub fn write_at(storage: Arc<S>, path: String, offset: u64) -> Self {
+    pub fn write_at(storage: S, path: String, offset: u64) -> Self {
         Self {
             storage,
             path,
@@ -293,7 +293,7 @@ impl<S: VfsStorage + 'static> VfsOutputStream<S> {
     }
 
     /// Create a new VFS output stream for appending to a file.
-    pub fn append(storage: Arc<S>, path: String) -> Self {
+    pub fn append(storage: S, path: String) -> Self {
         Self {
             storage,
             path,
@@ -323,7 +323,7 @@ impl<S: VfsStorage + 'static> VfsOutputStream<S> {
 
         // Write to VFS storage
         // We spawn a blocking thread to handle the async operation
-        let storage = Arc::clone(&self.storage);
+        let storage = self.storage.clone();
         let path = self.path.clone();
 
         let position = self.position;
@@ -371,14 +371,14 @@ impl<S: VfsStorage + 'static> VfsOutputStream<S> {
 }
 
 #[async_trait::async_trait]
-impl<S: VfsStorage + 'static> Pollable for VfsOutputStream<S> {
+impl<S: VfsStorage + Clone + 'static> Pollable for VfsOutputStream<S> {
     async fn ready(&mut self) {
         // VFS writes are always "ready" since we buffer
     }
 }
 
 #[async_trait::async_trait]
-impl<S: VfsStorage + 'static> OutputStream for VfsOutputStream<S> {
+impl<S: VfsStorage + Clone + 'static> OutputStream for VfsOutputStream<S> {
     fn write(&mut self, bytes: Bytes) -> StreamResult<()> {
         if self.closed {
             return Err(StreamError::Closed);
@@ -432,7 +432,7 @@ impl<S: VfsStorage + 'static> OutputStream for VfsOutputStream<S> {
     }
 }
 
-impl<S: VfsStorage + 'static> Drop for VfsOutputStream<S> {
+impl<S: VfsStorage + Clone + 'static> Drop for VfsOutputStream<S> {
     fn drop(&mut self) {
         // Try to flush any remaining buffered data
         let _ = self.flush_sync();
@@ -443,14 +443,14 @@ impl<S: VfsStorage + 'static> Drop for VfsOutputStream<S> {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
-    use crate::storage::InMemoryStorage;
+    use crate::storage::{ArcStorage, InMemoryStorage};
 
     #[tokio::test]
     async fn test_vfs_input_stream_read() {
-        let storage = Arc::new(InMemoryStorage::new());
+        let storage = ArcStorage::new(Arc::new(InMemoryStorage::new()));
         storage.write("/test.txt", b"hello world").await.unwrap();
 
-        let mut stream = VfsInputStream::new(Arc::clone(&storage), "/test.txt".to_string(), 0);
+        let mut stream = VfsInputStream::new(storage.clone(), "/test.txt".to_string(), 0);
 
         // Read all content
         let result = stream.read(100).unwrap();
@@ -463,11 +463,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_vfs_input_stream_read_at_offset() {
-        let storage = Arc::new(InMemoryStorage::new());
+        let storage = ArcStorage::new(Arc::new(InMemoryStorage::new()));
         storage.write("/test.txt", b"hello world").await.unwrap();
 
         // Start reading from offset 6
-        let mut stream = VfsInputStream::new(Arc::clone(&storage), "/test.txt".to_string(), 6);
+        let mut stream = VfsInputStream::new(storage.clone(), "/test.txt".to_string(), 6);
 
         let result = stream.read(100).unwrap();
         assert_eq!(&*result, b"world");
@@ -475,10 +475,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_vfs_input_stream_partial_read() {
-        let storage = Arc::new(InMemoryStorage::new());
+        let storage = ArcStorage::new(Arc::new(InMemoryStorage::new()));
         storage.write("/test.txt", b"hello world").await.unwrap();
 
-        let mut stream = VfsInputStream::new(Arc::clone(&storage), "/test.txt".to_string(), 0);
+        let mut stream = VfsInputStream::new(storage.clone(), "/test.txt".to_string(), 0);
 
         // Read only 5 bytes
         let result = stream.read(5).unwrap();
@@ -491,12 +491,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_vfs_output_stream_write() {
-        let storage = Arc::new(InMemoryStorage::new());
+        let storage = ArcStorage::new(Arc::new(InMemoryStorage::new()));
         // Create empty file first
         storage.write("/test.txt", b"").await.unwrap();
 
-        let mut stream =
-            VfsOutputStream::write_at(Arc::clone(&storage), "/test.txt".to_string(), 0);
+        let mut stream = VfsOutputStream::write_at(storage.clone(), "/test.txt".to_string(), 0);
 
         stream.write(Bytes::from("hello")).unwrap();
         stream.flush().unwrap();
@@ -508,12 +507,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_vfs_output_stream_write_at_offset() {
-        let storage = Arc::new(InMemoryStorage::new());
+        let storage = ArcStorage::new(Arc::new(InMemoryStorage::new()));
         storage.write("/test.txt", b"XXXXX world").await.unwrap();
 
         // Write at offset 0
-        let mut stream =
-            VfsOutputStream::write_at(Arc::clone(&storage), "/test.txt".to_string(), 0);
+        let mut stream = VfsOutputStream::write_at(storage.clone(), "/test.txt".to_string(), 0);
 
         stream.write(Bytes::from("hello")).unwrap();
         stream.flush().unwrap();
@@ -525,11 +523,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_vfs_output_stream_append() {
-        let storage = Arc::new(InMemoryStorage::new());
+        let storage = ArcStorage::new(Arc::new(InMemoryStorage::new()));
         storage.write("/test.txt", b"hello").await.unwrap();
 
         // Append to file
-        let mut stream = VfsOutputStream::append(Arc::clone(&storage), "/test.txt".to_string());
+        let mut stream = VfsOutputStream::append(storage.clone(), "/test.txt".to_string());
 
         stream.write(Bytes::from(" world")).unwrap();
         stream.flush().unwrap();
@@ -541,10 +539,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_vfs_output_stream_append_to_nonexistent() {
-        let storage = Arc::new(InMemoryStorage::new());
+        let storage = ArcStorage::new(Arc::new(InMemoryStorage::new()));
 
         // Append to non-existent file (should start at offset 0)
-        let mut stream = VfsOutputStream::append(Arc::clone(&storage), "/new.txt".to_string());
+        let mut stream = VfsOutputStream::append(storage.clone(), "/new.txt".to_string());
 
         stream.write(Bytes::from("new content")).unwrap();
         stream.flush().unwrap();
@@ -556,10 +554,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_vfs_output_stream_multiple_appends() {
-        let storage = Arc::new(InMemoryStorage::new());
+        let storage = ArcStorage::new(Arc::new(InMemoryStorage::new()));
         storage.write("/test.txt", b"").await.unwrap();
 
-        let mut stream = VfsOutputStream::append(Arc::clone(&storage), "/test.txt".to_string());
+        let mut stream = VfsOutputStream::append(storage.clone(), "/test.txt".to_string());
 
         stream.write(Bytes::from("one")).unwrap();
         stream.flush().unwrap();
@@ -574,12 +572,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_vfs_output_stream_drop_flushes() {
-        let storage = Arc::new(InMemoryStorage::new());
+        let storage = ArcStorage::new(Arc::new(InMemoryStorage::new()));
         storage.write("/test.txt", b"").await.unwrap();
 
         {
-            let mut stream =
-                VfsOutputStream::write_at(Arc::clone(&storage), "/test.txt".to_string(), 0);
+            let mut stream = VfsOutputStream::write_at(storage.clone(), "/test.txt".to_string(), 0);
             stream.write(Bytes::from("hello")).unwrap();
             // Don't explicitly flush - drop should flush
         }
@@ -591,11 +588,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_vfs_streams_closed_error() {
-        let storage = Arc::new(InMemoryStorage::new());
+        let storage = ArcStorage::new(Arc::new(InMemoryStorage::new()));
         storage.write("/test.txt", b"hello").await.unwrap();
 
         // Read until closed
-        let mut input = VfsInputStream::new(Arc::clone(&storage), "/test.txt".to_string(), 0);
+        let mut input = VfsInputStream::new(storage.clone(), "/test.txt".to_string(), 0);
         let _ = input.read(100).unwrap(); // Read all
         let _ = input.read(100); // Triggers closed
 

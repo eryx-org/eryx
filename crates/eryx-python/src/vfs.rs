@@ -29,9 +29,15 @@ use pyo3::prelude::*;
 #[pyclass(module = "eryx")]
 #[derive(Clone)]
 pub struct VfsStorage {
-    /// The underlying storage, used when Session bindings are added.
-    #[allow(dead_code)]
-    pub(crate) inner: Arc<eryx::vfs::ScrubbingStorage<eryx::vfs::InMemoryStorage>>,
+    /// The underlying type-erased storage.
+    pub(crate) inner: eryx::vfs::ArcStorage,
+}
+
+impl VfsStorage {
+    /// Convert into the underlying `ArcStorage`.
+    pub(crate) fn into_arc_storage(self) -> eryx::vfs::ArcStorage {
+        self.inner
+    }
 }
 
 #[pymethods]
@@ -46,11 +52,11 @@ impl VfsStorage {
     #[new]
     fn new() -> Self {
         Self {
-            inner: Arc::new(eryx::vfs::ScrubbingStorage::new(
+            inner: eryx::vfs::ArcStorage::new(Arc::new(eryx::vfs::ScrubbingStorage::new(
                 eryx::vfs::InMemoryStorage::new(),
                 std::collections::HashMap::new(),
                 eryx::vfs::VfsFileScrubPolicy::None,
-            )),
+            ))),
         }
     }
 

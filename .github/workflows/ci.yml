@@ -25,6 +25,7 @@ jobs:
       pull-requests: read
     outputs:
       core: ${{ steps.filter.outputs.core }}
+      server: ${{ steps.filter.outputs.server }}
       python: ${{ steps.filter.outputs.python }}
       book: ${{ steps.filter.outputs.book }}
       examples: ${{ steps.filter.outputs.examples }}
@@ -47,6 +48,8 @@ jobs:
               - 'Cargo.toml'
               - '.github/workflows/ci.yml'
               - '.github/actions/**'
+            server:
+              - 'crates/eryx-server/**'
             python:
               - 'crates/eryx-python/**'
             book:
@@ -86,6 +89,7 @@ jobs:
       || needs.changes.outputs.python == 'true'
       || needs.changes.outputs.book == 'true'
       || needs.changes.outputs.examples == 'true'
+      || needs.changes.outputs.server == 'true'
       || needs.changes.outputs.js == 'true'
       || needs.changes.outputs.demo == 'true'
     steps:
@@ -207,6 +211,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Install protoc
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+
       - name: Download WASM artifacts
         uses: actions/download-artifact@v4
         with:
@@ -255,10 +262,10 @@ jobs:
           ls -la crates/eryx-wasm-runtime/target/
           ls crates/eryx-wasm-runtime/tests/python-stdlib/ | head -10
 
-      - name: Install mold linker and clang
+      - name: Install mold linker, clang, and protoc
         run: |
           sudo apt-get update
-          sudo apt-get install -y mold clang
+          sudo apt-get install -y mold clang protobuf-compiler
 
       - name: Configure mold linker
         run: |
@@ -305,9 +312,8 @@ jobs:
             rust = "1.90"
 
       - name: Check MSRV
-        # Exclude eryx-python and eryx-precompile as they require building eryx-runtime
-        # which needs WASI SDK (not installed in MSRV check)
-        run: cargo check --workspace --exclude eryx-python --exclude eryx-precompile
+        # Exclude crates that require WASM artifacts or WASI SDK
+        run: cargo check --workspace --exclude eryx-python --exclude eryx-precompile --exclude eryx-server
 
   platform-check:
     name: ${{ matrix.os == 'windows-latest' && 'Windows' || 'macOS' }} Check
@@ -329,8 +335,8 @@ jobs:
         run: rustup show active-toolchain
 
       - name: Check compilation
-        # Exclude crates that need WASI SDK or Python for their build scripts
-        run: cargo check --workspace --exclude eryx-python --exclude eryx-precompile --exclude eryx-wasm-runtime
+        # Exclude crates that need WASI SDK, Python, or WASM artifacts
+        run: cargo check --workspace --exclude eryx-python --exclude eryx-precompile --exclude eryx-wasm-runtime --exclude eryx-server
 
   doc:
     name: Documentation
@@ -341,6 +347,9 @@ jobs:
       || needs.changes.outputs.core == 'true'
     steps:
       - uses: actions/checkout@v4
+
+      - name: Install protoc
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
 
       - name: Download WASM artifacts
         uses: actions/download-artifact@v4
@@ -768,3 +777,61 @@ jobs:
             echo "Deploy demo: $result"
             exit 1
           fi
+
+  # Build Docker image for the gRPC server.
+  # Uses the pre-built runtime.cwasm from build-eryx-runtime to skip the
+  # expensive WASM precompilation step inside Docker. Only pushes on main.
+  docker:
+    name: Docker
+    runs-on: namespace-profile-eryx-heavy-linux-amd64
+    needs: [changes, build-eryx-runtime]
+    if: >-
+      github.event.pull_request.head.repo.fork != true
+      && (github.event_name == 'push'
+      || needs.changes.outputs.core == 'true'
+      || needs.changes.outputs.server == 'true')
+    permissions:
+      contents: read
+    steps:
+      - uses: namespacelabs/nscloud-checkout-action@v8
+
+      - name: Download WASM artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: wasm-runtime
+          path: crates/
+
+      - name: Prepare runtime.cwasm for Docker build context
+        run: cp crates/eryx-runtime/runtime.cwasm crates/eryx-server/runtime.cwasm
+
+      - name: Set up Docker Buildx with Namespace cache
+        uses: namespacelabs/nscloud-setup-buildx-action@v0
+
+      - name: Log in to Docker Hub
+        if: github.event_name == 'push'
+        uses: docker/login-action@v4
+        with:
+          username: sd2k
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Docker meta
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: sd2k/eryx-server
+          tags: |
+            type=sha
+            type=ref,event=branch
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: crates/eryx-server/Dockerfile
+          build-args: |
+            RUNTIME_SOURCE=custom
+            RUNTIME_CWASM=crates/eryx-server/runtime.cwasm
+          push: ${{ github.event_name == 'push' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}

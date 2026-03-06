@@ -406,8 +406,7 @@ pub struct ExecutorState {
     /// Routes /data/* to VFS storage, other paths to real filesystem.
     /// Uses ScrubbingStorage to scrub secret placeholders from file writes.
     #[cfg(feature = "vfs")]
-    pub(crate) hybrid_vfs_ctx:
-        Option<eryx_vfs::HybridVfsCtx<eryx_vfs::ScrubbingStorage<eryx_vfs::InMemoryStorage>>>,
+    pub(crate) hybrid_vfs_ctx: Option<eryx_vfs::HybridVfsCtx<eryx_vfs::ArcStorage>>,
 }
 
 impl std::fmt::Debug for ExecutorState {
@@ -442,7 +441,7 @@ impl WasiView for ExecutorState {
 
 #[cfg(feature = "vfs")]
 impl eryx_vfs::HybridVfsView for ExecutorState {
-    type Storage = eryx_vfs::ScrubbingStorage<eryx_vfs::InMemoryStorage>;
+    type Storage = eryx_vfs::ArcStorage;
 
     #[allow(clippy::expect_used)]
     fn hybrid_vfs(&mut self) -> eryx_vfs::HybridVfsState<'_, Self::Storage> {
@@ -798,7 +797,7 @@ pub struct ExecuteBuilder<'a> {
     cancellation_token: Option<CancellationToken>,
     fuel_limit: Option<u64>,
     #[cfg(feature = "vfs")]
-    vfs_storage: Option<std::sync::Arc<eryx_vfs::ScrubbingStorage<eryx_vfs::InMemoryStorage>>>,
+    vfs_storage: Option<eryx_vfs::ArcStorage>,
     #[cfg(feature = "vfs")]
     volumes: Vec<crate::session::VolumeMount>,
 }
@@ -936,10 +935,7 @@ impl<'a> ExecuteBuilder<'a> {
     /// Set VFS storage with scrubbing for secret placeholders.
     #[cfg(feature = "vfs")]
     #[must_use]
-    pub fn with_vfs_storage(
-        mut self,
-        storage: std::sync::Arc<eryx_vfs::ScrubbingStorage<eryx_vfs::InMemoryStorage>>,
-    ) -> Self {
+    pub fn with_vfs_storage(mut self, storage: eryx_vfs::ArcStorage) -> Self {
         self.vfs_storage = Some(storage);
         self
     }
@@ -1904,9 +1900,7 @@ impl PythonExecutor {
         execution_timeout: Option<Duration>,
         cancellation_token: Option<CancellationToken>,
         fuel_limit: Option<u64>,
-        #[cfg(feature = "vfs")] vfs_storage: Option<
-            std::sync::Arc<eryx_vfs::ScrubbingStorage<eryx_vfs::InMemoryStorage>>,
-        >,
+        #[cfg(feature = "vfs")] vfs_storage: Option<eryx_vfs::ArcStorage>,
         #[cfg(feature = "vfs")] volumes: Vec<crate::session::VolumeMount>,
     ) -> std::result::Result<ExecutionOutput, Error> {
         // Build callback info for introspection
@@ -1987,13 +1981,9 @@ impl PythonExecutor {
         // with real filesystem preopens to satisfy the linker bindings.
         #[cfg(feature = "vfs")]
         let hybrid_vfs_ctx = {
-            // Use provided storage or create an empty scrubbing storage (no secrets = passthrough)
+            // Use provided storage or create a plain in-memory storage (no scrubbing)
             let storage = vfs_storage.unwrap_or_else(|| {
-                std::sync::Arc::new(eryx_vfs::ScrubbingStorage::new(
-                    eryx_vfs::InMemoryStorage::new(),
-                    std::collections::HashMap::new(),
-                    eryx_vfs::VfsFileScrubPolicy::None,
-                ))
+                eryx_vfs::ArcStorage::new(std::sync::Arc::new(eryx_vfs::InMemoryStorage::new()))
             });
             let mut ctx = eryx_vfs::HybridVfsCtx::new(storage);
 

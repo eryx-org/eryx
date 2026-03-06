@@ -129,6 +129,10 @@ pub struct Sandbox {
     /// Host filesystem volume mounts.
     #[cfg(feature = "vfs")]
     volumes: Vec<crate::session::VolumeMount>,
+    /// Per-request VFS storage override (set via pool's `with_vfs_storage`).
+    /// When set, this replaces the default scrubbing storage in `execute()`.
+    #[cfg(feature = "vfs")]
+    vfs_storage: Option<std::sync::Arc<dyn eryx_vfs::VfsStorage>>,
     /// Extracted packages (kept alive to prevent temp directory cleanup).
     _packages: Vec<crate::package::ExtractedPackage>,
 }
@@ -291,37 +295,43 @@ impl Sandbox {
             execute_builder = execute_builder.with_network(tx);
         }
 
-        // Add VFS storage with scrubbing if secrets are configured
+        // Add VFS storage — use per-request override if set, otherwise create
+        // a scrubbing storage from the sandbox's secrets configuration.
         #[cfg(feature = "vfs")]
         {
-            let vfs_secrets = self
-                .secrets
-                .iter()
-                .map(|(k, v)| {
-                    (
-                        k.clone(),
-                        eryx_vfs::VfsSecretConfig {
-                            placeholder: v.placeholder.clone(),
-                        },
-                    )
-                })
-                .collect();
-            let vfs_policy = match &self.scrub_files {
-                crate::secrets::FileScrubPolicy::All => eryx_vfs::VfsFileScrubPolicy::All,
-                crate::secrets::FileScrubPolicy::None => eryx_vfs::VfsFileScrubPolicy::None,
-                crate::secrets::FileScrubPolicy::Except(paths) => {
-                    eryx_vfs::VfsFileScrubPolicy::Except(paths.clone())
-                }
-                crate::secrets::FileScrubPolicy::Only(paths) => {
-                    eryx_vfs::VfsFileScrubPolicy::Only(paths.clone())
-                }
+            let vfs_storage = if let Some(ref storage) = self.vfs_storage {
+                eryx_vfs::ArcStorage::new(Arc::clone(storage))
+            } else {
+                let vfs_secrets = self
+                    .secrets
+                    .iter()
+                    .map(|(k, v)| {
+                        (
+                            k.clone(),
+                            eryx_vfs::VfsSecretConfig {
+                                placeholder: v.placeholder.clone(),
+                            },
+                        )
+                    })
+                    .collect();
+                let vfs_policy = match &self.scrub_files {
+                    crate::secrets::FileScrubPolicy::All => eryx_vfs::VfsFileScrubPolicy::All,
+                    crate::secrets::FileScrubPolicy::None => eryx_vfs::VfsFileScrubPolicy::None,
+                    crate::secrets::FileScrubPolicy::Except(paths) => {
+                        eryx_vfs::VfsFileScrubPolicy::Except(paths.clone())
+                    }
+                    crate::secrets::FileScrubPolicy::Only(paths) => {
+                        eryx_vfs::VfsFileScrubPolicy::Only(paths.clone())
+                    }
+                };
+                let scrubbing_storage = eryx_vfs::ScrubbingStorage::new(
+                    eryx_vfs::InMemoryStorage::new(),
+                    vfs_secrets,
+                    vfs_policy,
+                );
+                eryx_vfs::ArcStorage::new(std::sync::Arc::new(scrubbing_storage))
             };
-            let scrubbing_storage = std::sync::Arc::new(eryx_vfs::ScrubbingStorage::new(
-                eryx_vfs::InMemoryStorage::new(),
-                vfs_secrets,
-                vfs_policy,
-            ));
-            execute_builder = execute_builder.with_vfs_storage(scrubbing_storage);
+            execute_builder = execute_builder.with_vfs_storage(vfs_storage);
         }
 
         // Add volume mounts if configured
@@ -471,10 +481,67 @@ impl Sandbox {
 
     /// Get a reference to the Python executor.
     ///
-    /// This is primarily for internal use by session implementations.
+    /// This allows creating a `SessionExecutor` from a pooled sandbox,
+    /// enabling state persistence between executions.
     #[must_use]
-    pub(crate) fn executor(&self) -> Arc<PythonExecutor> {
+    pub fn executor(&self) -> Arc<PythonExecutor> {
         self.executor.clone()
+    }
+
+    /// Set the registered callbacks (replacing any existing ones).
+    ///
+    /// Used by the pool to configure per-request callbacks on a reused sandbox.
+    pub(crate) fn set_callbacks(&mut self, callbacks: Vec<Box<dyn Callback>>) {
+        let mut map = HashMap::new();
+        for callback in callbacks {
+            map.insert(callback.name().to_string(), Arc::from(callback));
+        }
+        self.callbacks = Arc::new(map);
+    }
+
+    /// Set the trace handler for execution events.
+    ///
+    /// Used by the pool to configure per-request tracing on a reused sandbox.
+    pub(crate) fn set_trace_handler(&mut self, handler: impl TraceHandler + 'static) {
+        self.trace_handler = Some(Arc::new(handler));
+    }
+
+    /// Set the output handler for streaming stdout/stderr.
+    ///
+    /// Used by the pool to configure per-request output streaming on a reused sandbox.
+    pub(crate) fn set_output_handler(&mut self, handler: impl OutputHandler + 'static) {
+        self.output_handler = Some(Arc::new(handler));
+    }
+
+    /// Set resource limits for execution.
+    ///
+    /// Used by the pool to configure per-request limits on a reused sandbox.
+    pub(crate) fn set_resource_limits(&mut self, limits: ResourceLimits) {
+        self.resource_limits = limits;
+    }
+
+    /// Set VFS storage for this request.
+    ///
+    /// When set, this replaces the default scrubbing storage created in `execute()`.
+    /// Used by the pool to inject pre-populated VFS storage (e.g., supporting files).
+    #[cfg(feature = "vfs")]
+    pub(crate) fn set_vfs_storage(&mut self, storage: std::sync::Arc<dyn eryx_vfs::VfsStorage>) {
+        self.vfs_storage = Some(storage);
+    }
+
+    /// Clear per-request state so the sandbox can be returned to the pool.
+    ///
+    /// Resets callbacks, handlers, and resource limits to defaults while
+    /// preserving the executor and other long-lived state.
+    pub(crate) fn clear_per_request_state(&mut self) {
+        self.callbacks = Arc::new(HashMap::new());
+        self.trace_handler = None;
+        self.output_handler = None;
+        self.resource_limits = ResourceLimits::default();
+        #[cfg(feature = "vfs")]
+        {
+            self.vfs_storage = None;
+        }
     }
 
     /// Execute Python code with cancellation support.
@@ -527,6 +594,8 @@ impl Sandbox {
         let scrub_files = self.scrub_files.clone();
         #[cfg(feature = "vfs")]
         let volumes = self.volumes.clone();
+        #[cfg(feature = "vfs")]
+        let vfs_storage = self.vfs_storage.clone();
         let code = code.to_string();
         let token = cancel_token.clone();
 
@@ -546,6 +615,8 @@ impl Sandbox {
                 scrub_files,
                 #[cfg(feature = "vfs")]
                 volumes,
+                #[cfg(feature = "vfs")]
+                vfs_storage,
                 &code,
                 token,
             )
@@ -576,6 +647,9 @@ impl Sandbox {
         scrub_stderr: crate::secrets::OutputScrubPolicy,
         scrub_files: crate::secrets::FileScrubPolicy,
         #[cfg(feature = "vfs")] volumes: Vec<crate::session::VolumeMount>,
+        #[cfg(feature = "vfs")] vfs_storage_override: Option<
+            std::sync::Arc<dyn eryx_vfs::VfsStorage>,
+        >,
         code: &str,
         cancel_token: CancellationToken,
     ) -> Result<ExecuteResult, Error> {
@@ -665,36 +739,42 @@ impl Sandbox {
             execute_builder = execute_builder.with_network(tx);
         }
 
-        // Add VFS storage with scrubbing if secrets are configured
+        // Add VFS storage — use per-request override if set, otherwise create
+        // a scrubbing storage from the secrets configuration.
         #[cfg(feature = "vfs")]
         {
-            let vfs_secrets = secrets
-                .iter()
-                .map(|(k, v)| {
-                    (
-                        k.clone(),
-                        eryx_vfs::VfsSecretConfig {
-                            placeholder: v.placeholder.clone(),
-                        },
-                    )
-                })
-                .collect();
-            let vfs_policy = match &scrub_files {
-                crate::secrets::FileScrubPolicy::All => eryx_vfs::VfsFileScrubPolicy::All,
-                crate::secrets::FileScrubPolicy::None => eryx_vfs::VfsFileScrubPolicy::None,
-                crate::secrets::FileScrubPolicy::Except(paths) => {
-                    eryx_vfs::VfsFileScrubPolicy::Except(paths.clone())
-                }
-                crate::secrets::FileScrubPolicy::Only(paths) => {
-                    eryx_vfs::VfsFileScrubPolicy::Only(paths.clone())
-                }
+            let vfs_storage = if let Some(storage) = vfs_storage_override {
+                eryx_vfs::ArcStorage::new(storage)
+            } else {
+                let vfs_secrets = secrets
+                    .iter()
+                    .map(|(k, v)| {
+                        (
+                            k.clone(),
+                            eryx_vfs::VfsSecretConfig {
+                                placeholder: v.placeholder.clone(),
+                            },
+                        )
+                    })
+                    .collect();
+                let vfs_policy = match &scrub_files {
+                    crate::secrets::FileScrubPolicy::All => eryx_vfs::VfsFileScrubPolicy::All,
+                    crate::secrets::FileScrubPolicy::None => eryx_vfs::VfsFileScrubPolicy::None,
+                    crate::secrets::FileScrubPolicy::Except(paths) => {
+                        eryx_vfs::VfsFileScrubPolicy::Except(paths.clone())
+                    }
+                    crate::secrets::FileScrubPolicy::Only(paths) => {
+                        eryx_vfs::VfsFileScrubPolicy::Only(paths.clone())
+                    }
+                };
+                let scrubbing_storage = eryx_vfs::ScrubbingStorage::new(
+                    eryx_vfs::InMemoryStorage::new(),
+                    vfs_secrets,
+                    vfs_policy,
+                );
+                eryx_vfs::ArcStorage::new(std::sync::Arc::new(scrubbing_storage))
             };
-            let scrubbing_storage = std::sync::Arc::new(eryx_vfs::ScrubbingStorage::new(
-                eryx_vfs::InMemoryStorage::new(),
-                vfs_secrets,
-                vfs_policy,
-            ));
-            execute_builder = execute_builder.with_vfs_storage(scrubbing_storage);
+            execute_builder = execute_builder.with_vfs_storage(vfs_storage);
         }
 
         // Add volume mounts if configured
@@ -1892,6 +1972,8 @@ impl SandboxBuilder<state::Has, state::Has> {
             scrub_files: self.scrub_files,
             #[cfg(feature = "vfs")]
             volumes: self.volumes,
+            #[cfg(feature = "vfs")]
+            vfs_storage: None,
             _packages: self.packages,
         })
     }

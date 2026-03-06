@@ -1,0 +1,256 @@
+syntax = "proto3";
+
+package eryx.v1;
+
+// The Eryx sandbox execution service.
+//
+// Provides bidirectional streaming RPC for executing Python code in a
+// sandboxed environment with callback support. The client sends an initial
+// ExecuteRequest followed by CallbackResponse messages; the server streams
+// back CallbackRequest, OutputEvent, and ExecuteResult messages.
+service Eryx {
+  // Execute Python code with bidirectional callback streaming.
+  //
+  // Protocol:
+  //   1. Client sends ExecuteRequest as the first message
+  //   2. Server may send CallbackRequest messages when Python invokes a callback
+  //   3. Client responds with CallbackResponse for each CallbackRequest
+  //   4. Server streams OutputEvent messages as Python produces output
+  //   5. Server sends ExecuteResult as the final message
+  rpc Execute(stream ClientMessage) returns (stream ServerMessage);
+}
+
+// Messages sent from the client (Go worker) to the server (Eryx).
+message ClientMessage {
+  oneof message {
+    ExecuteRequest execute_request = 1;
+    CallbackResponse callback_response = 2;
+  }
+}
+
+// Messages sent from the server (Eryx) to the client (Go worker).
+message ServerMessage {
+  oneof message {
+    CallbackRequest callback_request = 1;
+    OutputEvent output_event = 2;
+    ExecuteResult execute_result = 3;
+    TraceEvent trace_event = 4;
+  }
+}
+
+// Initial request to execute Python code.
+message ExecuteRequest {
+  // Python source code to execute.
+  string code = 1;
+
+  // Callback declarations that will be available to the Python code.
+  // Each declaration defines a callback that Python can invoke via `await name(...)`.
+  repeated CallbackDeclaration callbacks = 2;
+
+  // Resource limits for the execution.
+  ResourceLimits resource_limits = 3;
+
+  // Whether to stream trace events during execution.
+  // When true, the server will send TraceEvent messages for line execution,
+  // function calls/returns, exceptions, and callback start/end events.
+  bool enable_tracing = 4;
+
+  // Whether to persist Python state between executions.
+  // When true, the server will snapshot state after execution and include it
+  // in the ExecuteResult. If state_snapshot is also provided, the server will
+  // restore that state before executing code.
+  bool persist_state = 5;
+
+  // Previously captured state snapshot to restore before execution.
+  // Only used when persist_state is true.
+  bytes state_snapshot = 6;
+
+  // Supporting files to write to the sandbox filesystem before execution.
+  // Files are placed under /eryx/lib/ (MODULE) or /eryx/data/ (DATA) based on
+  // their kind. Only MODULE files are added to sys.path for importing.
+  repeated SupportingFile files = 7;
+
+  // Network configuration. If absent, networking is disabled entirely.
+  NetworkConfig network_config = 8;
+}
+
+// Kind of supporting file — determines where it's placed in the sandbox.
+enum FileKind {
+  // Data file placed in /eryx/data/ (not importable). Default — files are
+  // inert unless explicitly marked as modules.
+  FILE_KIND_DATA = 0;
+  // Python module placed in /eryx/lib/ and added to sys.path.
+  FILE_KIND_MODULE = 1;
+}
+
+// A supporting file to place in the sandbox filesystem.
+message SupportingFile {
+  string name = 1;     // e.g. "helpers.py"
+  string content = 2;
+  FileKind kind = 3;
+}
+
+// Declaration of a callback that the Go worker can handle.
+message CallbackDeclaration {
+  // Callback name (e.g., "query_loki", "query_prometheus").
+  // This becomes an async function in Python: `await query_loki(...)`.
+  string name = 1;
+
+  // Human-readable description of the callback.
+  string description = 2;
+
+  // Parameter definitions for this callback.
+  repeated ParameterDeclaration parameters = 3;
+}
+
+// Declaration of a single parameter for a callback.
+message ParameterDeclaration {
+  // Parameter name.
+  string name = 1;
+
+  // JSON Schema type: "string", "number", "integer", "boolean", "object", "array".
+  string json_type = 2;
+
+  // Human-readable description of the parameter.
+  string description = 3;
+
+  // Whether this parameter is required.
+  bool required = 4;
+}
+
+// Resource limits for sandbox execution.
+message ResourceLimits {
+  // Maximum execution time in milliseconds (0 = default 30s).
+  uint64 execution_timeout_ms = 1;
+
+  // Maximum callback timeout in milliseconds (0 = default 10s).
+  uint64 callback_timeout_ms = 2;
+
+  // Maximum memory in bytes (0 = default 128MB).
+  uint64 max_memory_bytes = 3;
+
+  // Maximum number of callback invocations (0 = default 1000).
+  uint32 max_callback_invocations = 4;
+
+  // Maximum fuel/instructions (0 = unlimited).
+  uint64 max_fuel = 5;
+}
+
+// Network configuration for the sandbox.
+// Controls which hosts Python code can connect to and sets timeouts.
+message NetworkConfig {
+  // Allowed host patterns (wildcards ok). Empty = allow all non-blocked.
+  repeated string allowed_hosts = 1;
+  // Blocked host patterns. Checked after allowed. Private nets always blocked by Rust defaults.
+  repeated string blocked_hosts = 2;
+  // Maximum concurrent connections (0 = default 10).
+  uint32 max_connections = 3;
+  // Connection timeout in milliseconds (0 = default 30s).
+  uint64 connect_timeout_ms = 4;
+  // I/O read/write timeout in milliseconds (0 = default 60s).
+  uint64 io_timeout_ms = 5;
+}
+
+// Server requests the client to execute a callback.
+message CallbackRequest {
+  // Unique ID for this callback invocation (UUID).
+  // The client must include this ID in the corresponding CallbackResponse.
+  string request_id = 1;
+
+  // Name of the callback to invoke.
+  string name = 2;
+
+  // JSON-encoded arguments object.
+  string arguments_json = 3;
+}
+
+// Client responds with the result of a callback invocation.
+message CallbackResponse {
+  // The request_id from the corresponding CallbackRequest.
+  string request_id = 1;
+
+  oneof result {
+    // JSON-encoded result on success.
+    string json_result = 2;
+
+    // Error message on failure.
+    string error = 3;
+  }
+}
+
+// Streaming output event from the sandbox.
+message OutputEvent {
+  // Which output stream this came from.
+  OutputStream stream = 1;
+
+  // The output data.
+  string data = 2;
+}
+
+// Output stream identifier.
+enum OutputStream {
+  STDOUT = 0;
+  STDERR = 1;
+}
+
+// Final execution result.
+message ExecuteResult {
+  // Whether execution completed successfully.
+  bool success = 1;
+
+  // Complete stdout output.
+  string stdout = 2;
+
+  // Complete stderr output.
+  string stderr = 3;
+
+  // Error message if execution failed.
+  string error = 4;
+
+  // Execution statistics.
+  ExecuteStats stats = 5;
+
+  // Captured Python state snapshot after execution.
+  // Only populated when persist_state was true in the request.
+  bytes state_snapshot = 6;
+}
+
+// A trace event emitted during execution.
+// Sent when enable_tracing is true in the ExecuteRequest.
+message TraceEvent {
+  // Line number in the source code.
+  uint32 lineno = 1;
+
+  // Event type: "line", "call", "return", "exception", "callback_start", "callback_end".
+  string event_type = 2;
+
+  // Function name (for "call" and "return" events).
+  string function = 3;
+
+  // Error/exception message (for "exception" events).
+  string message = 4;
+
+  // Callback name (for "callback_start" and "callback_end" events).
+  string name = 5;
+
+  // Callback duration in milliseconds (for "callback_end" events).
+  uint64 duration_ms = 6;
+
+  // Optional JSON-encoded context data (e.g., local variables).
+  string context_json = 7;
+}
+
+// Execution statistics.
+message ExecuteStats {
+  // Total execution duration in milliseconds.
+  uint64 duration_ms = 1;
+
+  // Number of callback invocations.
+  uint32 callback_invocations = 2;
+
+  // Peak memory usage in bytes (0 if unavailable).
+  uint64 peak_memory_bytes = 3;
+
+  // Fuel consumed (0 if unavailable).
+  uint64 fuel_consumed = 4;
+}

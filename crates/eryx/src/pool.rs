@@ -57,7 +57,9 @@ use tokio::sync::Semaphore;
 use tokio::time::timeout;
 
 use crate::Error;
-use crate::sandbox::{Sandbox, SandboxBuilder, state};
+use crate::callback::Callback;
+use crate::sandbox::{ResourceLimits, Sandbox, SandboxBuilder, state};
+use crate::trace::{OutputHandler, TraceHandler};
 
 /// Configuration for a sandbox pool.
 #[derive(Debug, Clone)]
@@ -695,10 +697,10 @@ impl DerefMut for PooledSandbox {
 
 impl Drop for PooledSandbox {
     fn drop(&mut self) {
-        if let Some(sandbox) = self.sandbox.take() {
-            // Note: We can't do async reset here since Drop is sync.
-            // If reset_on_release is needed, users should call reset() manually
-            // before dropping, or use a wrapper that handles this.
+        if let Some(mut sandbox) = self.sandbox.take() {
+            // Clear per-request state (callbacks, handlers, limits) before
+            // returning to the pool so the next user gets a clean sandbox.
+            sandbox.clear_per_request_state();
             self.pool.return_sandbox(sandbox);
         }
         // The semaphore permit is automatically released when _permit is dropped
@@ -728,6 +730,54 @@ impl PooledSandbox {
     #[must_use]
     pub fn detach(mut self) -> Sandbox {
         self.sandbox.take().expect("sandbox already taken")
+    }
+
+    /// Set callbacks for this request.
+    ///
+    /// These will be cleared automatically when the sandbox is returned to the pool.
+    #[must_use]
+    pub fn with_callbacks(mut self, callbacks: Vec<Box<dyn Callback>>) -> Self {
+        self.sandbox_mut().set_callbacks(callbacks);
+        self
+    }
+
+    /// Set a trace handler for this request.
+    ///
+    /// This will be cleared automatically when the sandbox is returned to the pool.
+    #[must_use]
+    pub fn with_trace_handler<H: TraceHandler + 'static>(mut self, handler: H) -> Self {
+        self.sandbox_mut().set_trace_handler(handler);
+        self
+    }
+
+    /// Set an output handler for this request.
+    ///
+    /// This will be cleared automatically when the sandbox is returned to the pool.
+    #[must_use]
+    pub fn with_output_handler<H: OutputHandler + 'static>(mut self, handler: H) -> Self {
+        self.sandbox_mut().set_output_handler(handler);
+        self
+    }
+
+    /// Set resource limits for this request.
+    ///
+    /// These will be reset to defaults when the sandbox is returned to the pool.
+    #[must_use]
+    pub fn with_resource_limits(mut self, limits: ResourceLimits) -> Self {
+        self.sandbox_mut().set_resource_limits(limits);
+        self
+    }
+
+    /// Set VFS storage for this request.
+    ///
+    /// This will be cleared automatically when the sandbox is returned to the pool.
+    /// The provided storage replaces the default scrubbing storage created during
+    /// execution, allowing pre-populated files to be available to Python code.
+    #[cfg(feature = "vfs")]
+    #[must_use]
+    pub fn with_vfs_storage(mut self, storage: std::sync::Arc<dyn eryx_vfs::VfsStorage>) -> Self {
+        self.sandbox_mut().set_vfs_storage(storage);
+        self
     }
 }
 
