@@ -7,6 +7,7 @@ license.workspace = true
 repository.workspace = true
 authors.workspace = true
 description = "gRPC server for sandboxed Python execution via eryx"
+publish = false
 
 [dependencies]
 eryx = { workspace = true, features = ["embedded", "vfs"] }
@@ -21,7 +22,7 @@ tracing-logfmt = "0.3"
 uuid = { workspace = true, features = ["v4"] }
 dashmap.workspace = true
 async-trait.workspace = true
-clap = { workspace = true, features = ["env"] } #unified
+clap = { workspace = true, features = ["env"] }                                 #unified
 
 [build-dependencies]
 tonic-build.workspace = true
