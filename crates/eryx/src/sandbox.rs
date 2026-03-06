@@ -1329,6 +1329,35 @@ impl<R> SandboxBuilder<R, state::Needs> {
         let path = find_python_stdlib().ok_or(Error::MissingPythonStdlib)?;
         Ok(self.with_python_stdlib(path))
     }
+
+    /// Use the embedded Python standard library.
+    ///
+    /// Extracts the stdlib bundled in the binary to a cached temp directory
+    /// and configures the builder to use it. This is useful when loading a
+    /// custom pre-compiled runtime via [`with_precompiled_file()`](SandboxBuilder::with_precompiled_file)
+    /// but still wanting the convenience of the embedded stdlib.
+    ///
+    /// Requires the `embedded-stdlib` feature (also enabled by `embedded`).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if stdlib extraction fails.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// let sandbox = unsafe {
+    ///     Sandbox::builder()
+    ///         .with_precompiled_file("custom-runtime.cwasm")
+    ///         .with_embedded_stdlib()?
+    ///         .build()?
+    /// };
+    /// ```
+    #[cfg(feature = "embedded-stdlib")]
+    pub fn with_embedded_stdlib(self) -> Result<SandboxBuilder<R, state::Has>, Error> {
+        let stdlib = crate::embedded_stdlib::EmbeddedStdlib::get()?;
+        Ok(self.with_python_stdlib(stdlib.path()))
+    }
 }
 
 // Methods available in ANY state

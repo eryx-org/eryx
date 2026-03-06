@@ -55,6 +55,8 @@ mod callback;
 pub mod callback_handler;
 #[cfg(feature = "embedded")]
 pub mod embedded;
+#[cfg(feature = "embedded-stdlib")]
+pub mod embedded_stdlib;
 mod error;
 mod library;
 pub mod net;
