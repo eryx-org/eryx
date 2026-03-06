@@ -129,10 +129,14 @@ default = []
 # Proc macro for simplified callback definitions.
 # Provides #[callback] attribute macro.
 macros = ["dep:eryx-macros"]
+# Embed just the Python stdlib (python-stdlib.tar.zst) in the binary.
+# Enables `with_embedded_stdlib()` on SandboxBuilder for use with custom runtimes.
+# Much smaller than `embedded` (~6MB vs ~36MB added to binary).
+embedded-stdlib = ["dep:zstd"]
 # Zero-config sandboxes: pre-compiled runtime + stdlib embedded in binary.
 # Enables unsafe code paths for wasmtime's pre-compiled component loading.
 # Without this feature, the crate uses `forbid(unsafe_code)`.
-embedded = ["dep:zstd"]
+embedded = ["embedded-stdlib"]
 # Pre-initialization support for capturing Python memory state.
 # Provides ~25x speedup for sandbox creation by snapshotting initialized Python.
 # Works with or without native extensions - can pre-import stdlib modules only.
