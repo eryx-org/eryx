@@ -33,14 +33,15 @@ impl<S: VfsStorage + Clone + 'static> preopens::Host for VfsState<'_, S> {
 // ============================================================================
 
 impl<S: VfsStorage + Clone + 'static> types::Host for VfsState<'_, S> {
-    fn convert_error_code(&mut self, err: VfsFsError) -> anyhow::Result<types::ErrorCode> {
+    fn convert_error_code(&mut self, err: VfsFsError) -> wasmtime::Result<types::ErrorCode> {
         err.downcast()
+            .map_err(|e| wasmtime::Error::msg(e.to_string()))
     }
 
     fn filesystem_error_code(
         &mut self,
-        err: Resource<anyhow::Error>,
-    ) -> anyhow::Result<Option<types::ErrorCode>> {
+        err: Resource<wasmtime::Error>,
+    ) -> wasmtime::Result<Option<types::ErrorCode>> {
         let err = self.table.get(&err)?;
         if let Some(vfs_err) = err.downcast_ref::<crate::VfsError>() {
             return Ok(Some(vfs_error_to_error_code(vfs_err)));
@@ -353,7 +354,7 @@ impl<S: VfsStorage + Clone + 'static> types::HostDescriptor for VfsState<'_, S> 
         }
     }
 
-    fn drop(&mut self, fd: Resource<VfsDescriptor>) -> anyhow::Result<()> {
+    fn drop(&mut self, fd: Resource<VfsDescriptor>) -> wasmtime::Result<()> {
         self.table.delete(fd)?;
         Ok(())
     }
@@ -502,7 +503,7 @@ impl<S: VfsStorage + Clone + 'static> types::HostDescriptor for VfsState<'_, S> 
         &mut self,
         a: Resource<VfsDescriptor>,
         b: Resource<VfsDescriptor>,
-    ) -> anyhow::Result<bool> {
+    ) -> wasmtime::Result<bool> {
         let desc_a = self.table.get(&a)?;
         let desc_b = self.table.get(&b)?;
         Ok(desc_a.path == desc_b.path)
@@ -564,7 +565,7 @@ impl<S: VfsStorage + Clone + 'static> types::HostDirectoryEntryStream for VfsSta
         Ok(iterator.next())
     }
 
-    fn drop(&mut self, stream: Resource<VfsReaddirIterator>) -> anyhow::Result<()> {
+    fn drop(&mut self, stream: Resource<VfsReaddirIterator>) -> wasmtime::Result<()> {
         self.table.delete(stream)?;
         Ok(())
     }

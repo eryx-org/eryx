@@ -236,7 +236,9 @@ impl<S: VfsStorage + Clone + 'static> VfsInputStream<S> {
                     Ok(Bytes::from(data))
                 }
             }
-            Err(e) => Err(StreamError::LastOperationFailed(anyhow::anyhow!("{}", e))),
+            Err(e) => Err(StreamError::LastOperationFailed(wasmtime::Error::msg(
+                e.to_string(),
+            ))),
         }
     }
 }
@@ -365,7 +367,9 @@ impl<S: VfsStorage + Clone + 'static> VfsOutputStream<S> {
                 self.position = Some(write_position + data_len);
                 Ok(())
             }
-            Err(e) => Err(StreamError::LastOperationFailed(anyhow::anyhow!("{}", e))),
+            Err(e) => Err(StreamError::LastOperationFailed(wasmtime::Error::msg(
+                e.to_string(),
+            ))),
         }
     }
 }
