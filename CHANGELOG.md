@@ -7,6 +7,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## `eryx-precompile` - [0.4.7](https://github.com/eryx-org/eryx/compare/eryx-precompile-v0.4.6...eryx-precompile-v0.4.7) - 2026-03-10
+
+### Added
+- add gRPC server for sandboxed Python execution ([#158](https://github.com/eryx-org/eryx/pull/158))
+
+### Other
+- add eryx-precompile guide ([#163](https://github.com/eryx-org/eryx/pull/163))
+
+## `eryx` - [0.4.7](https://github.com/eryx-org/eryx/compare/eryx-v0.4.6...eryx-v0.4.7) - 2026-03-10
+
+### Added
+- add `embedded-stdlib` feature for lightweight stdlib embedding ([#162](https://github.com/eryx-org/eryx/pull/162))
+- add gRPC server for sandboxed Python execution ([#158](https://github.com/eryx-org/eryx/pull/158))
+
+### Fixed
+- support all-features docs.rs builds with WASM placeholders ([#154](https://github.com/eryx-org/eryx/pull/154))
+- callback bugs for optional args and error reporting ([#153](https://github.com/eryx-org/eryx/pull/153))
+- handle complex WIT types in EryxCall trait implementation ([#152](https://github.com/eryx-org/eryx/pull/152))
+
+## `eryx-vfs` - [0.4.7](https://github.com/eryx-org/eryx/compare/eryx-vfs-v0.4.6...eryx-vfs-v0.4.7) - 2026-03-10
+
+### Added
+- add gRPC server for sandboxed Python execution ([#158](https://github.com/eryx-org/eryx/pull/158))
+
+## `eryx-runtime` - [0.4.7](https://github.com/eryx-org/eryx/compare/eryx-runtime-v0.4.6...eryx-runtime-v0.4.7) - 2026-03-10
+
+### Fixed
+- support all-features docs.rs builds with WASM placeholders ([#154](https://github.com/eryx-org/eryx/pull/154))
+- callback bugs for optional args and error reporting ([#153](https://github.com/eryx-org/eryx/pull/153))
+
 ## `eryx-precompile` - [0.4.6](https://github.com/eryx-org/eryx/compare/eryx-precompile-v0.4.5...eryx-precompile-v0.4.6) - 2026-02-25
 
 ### Other
