@@ -112,13 +112,14 @@ impl Session {
     ///         {"name": "get_time", "fn": get_time, "description": "Returns current time"}
     ///     ])
     #[new]
-    #[pyo3(signature = (*, vfs=None, vfs_mount_path=None, execution_timeout_ms=None, network=None, callbacks=None, mcp=None, volumes=None, on_stdout=None, on_stderr=None))]
+    #[pyo3(signature = (*, vfs=None, vfs_mount_path=None, execution_timeout_ms=None, max_fuel=None, network=None, callbacks=None, mcp=None, volumes=None, on_stdout=None, on_stderr=None))]
     #[allow(clippy::too_many_arguments)]
     fn new(
         py: Python<'_>,
         vfs: Option<VfsStorage>,
         vfs_mount_path: Option<String>,
         execution_timeout_ms: Option<u64>,
+        max_fuel: Option<u64>,
         network: Option<NetConfig>,
         callbacks: Option<Bound<'_, PyAny>>,
         mcp: Option<PyRef<'_, crate::mcp::MCPManager>>,
@@ -248,6 +249,11 @@ impl Session {
         // Set execution timeout if provided
         if let Some(timeout_ms) = execution_timeout_ms {
             session.set_execution_timeout_ms(Some(timeout_ms))?;
+        }
+
+        // Set fuel limit if provided
+        if max_fuel.is_some() {
+            session.set_fuel_limit(max_fuel)?;
         }
 
         Ok(session)
@@ -545,6 +551,36 @@ impl Session {
             .ok_or_else(|| InitializationError::new_err("session is not initialized"))?;
         let timeout = timeout_ms.map(Duration::from_millis);
         inner.set_execution_timeout(timeout);
+        Ok(())
+    }
+
+    /// Get the current fuel limit, or None if not set.
+    #[getter]
+    fn fuel_limit(&self) -> PyResult<Option<u64>> {
+        let guard = self
+            .inner
+            .lock()
+            .map_err(|_| InitializationError::new_err("session lock poisoned"))?;
+        let inner = guard
+            .as_ref()
+            .ok_or_else(|| InitializationError::new_err("session is not initialized"))?;
+        Ok(inner.fuel_limit())
+    }
+
+    /// Set the fuel limit (max WASM instructions per execution).
+    ///
+    /// Args:
+    ///     limit: Fuel limit, or None to disable (fuel is still tracked).
+    #[setter]
+    fn set_fuel_limit(&self, limit: Option<u64>) -> PyResult<()> {
+        let mut guard = self
+            .inner
+            .lock()
+            .map_err(|_| InitializationError::new_err("session lock poisoned"))?;
+        let inner = guard
+            .as_mut()
+            .ok_or_else(|| InitializationError::new_err("session is not initialized"))?;
+        inner.set_fuel_limit(limit);
         Ok(())
     }
 

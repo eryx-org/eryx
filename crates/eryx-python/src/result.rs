@@ -30,18 +30,23 @@ pub struct ExecuteResult {
     /// Peak memory usage in bytes (if available).
     #[pyo3(get)]
     pub peak_memory_bytes: Option<u64>,
+
+    /// Fuel (WASM instructions) consumed during execution (if available).
+    #[pyo3(get)]
+    pub fuel_consumed: Option<u64>,
 }
 
 #[pymethods]
 impl ExecuteResult {
     fn __repr__(&self) -> String {
         format!(
-            "ExecuteResult(stdout={:?}, stderr={:?}, duration_ms={:.2}, callback_invocations={}, peak_memory_bytes={:?})",
+            "ExecuteResult(stdout={:?}, stderr={:?}, duration_ms={:.2}, callback_invocations={}, peak_memory_bytes={:?}, fuel_consumed={:?})",
             truncate_string(&self.stdout, 50),
             truncate_string(&self.stderr, 50),
             self.duration_ms,
             self.callback_invocations,
             self.peak_memory_bytes,
+            self.fuel_consumed,
         )
     }
 
@@ -58,6 +63,7 @@ impl From<eryx::ExecuteResult> for ExecuteResult {
             duration_ms: result.stats.duration.as_secs_f64() * 1000.0,
             callback_invocations: result.stats.callback_invocations,
             peak_memory_bytes: result.stats.peak_memory_bytes,
+            fuel_consumed: result.stats.fuel_consumed,
         }
     }
 }
@@ -71,6 +77,7 @@ impl ExecuteResult {
             duration_ms: output.duration.as_secs_f64() * 1000.0,
             callback_invocations: output.callback_invocations,
             peak_memory_bytes: Some(output.peak_memory_bytes),
+            fuel_consumed: output.fuel_consumed,
         }
     }
 }
