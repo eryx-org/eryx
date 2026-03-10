@@ -21,6 +21,7 @@
 - [Output Streaming](./guide/output-streaming.md)
 - [MCP Integration](./guide/mcp.md)
 - [MCP Server](./guide/mcp-server.md)
+- [Pre-compiling Runtimes](./guide/precompile.md)
 - [CLI](./guide/cli.md)
 
 # API Reference
