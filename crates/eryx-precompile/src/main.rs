@@ -162,6 +162,13 @@ struct CompileArgs {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // Install the TLS crypto provider before any reqwest/rustls usage.
+    // We use aws-lc-rs to match the workspace and avoid conflicts from
+    // feature unification (see commit 1897e8a).
+    if let Err(_already_set) = rustls::crypto::aws_lc_rs::default_provider().install_default() {
+        // Another provider was already installed; that's fine.
+    }
+
     let cli = Cli::parse();
 
     match cli.command {

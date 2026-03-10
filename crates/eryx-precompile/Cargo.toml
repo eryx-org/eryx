@@ -15,7 +15,8 @@ path = "src/main.rs"
 anyhow.workspace = true
 clap = { workspace = true, features = ["env"] } #unified
 eryx = { workspace = true, features = ["preinit"] }
-reqwest = { workspace = true, features = ["rustls-tls-webpki-roots"] }
+reqwest.workspace = true
+rustls = { workspace = true, features = ["aws-lc-rs"] }
 tempfile.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
 tracing.workspace = true
