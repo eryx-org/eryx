@@ -195,8 +195,13 @@ fn platform_target() -> String {
 /// Tries multiple tag patterns since the naming convention has changed over time:
 /// - `v{version}` (cargo-dist releases, used for v0.3.0 and earlier)
 /// - `eryx-v{version}` (release-plz releases, used from v0.4.0+)
+/// - `eryx-precompile-v{version}` (upload-runtime attaches to whichever release triggers it)
 async fn download_runtime_wasm(client: &reqwest::Client, version: &str) -> Result<Vec<u8>> {
-    let tag_patterns = [format!("v{version}"), format!("eryx-v{version}")];
+    let tag_patterns = [
+        format!("eryx-v{version}"),
+        format!("eryx-precompile-v{version}"),
+        format!("v{version}"),
+    ];
 
     let mut last_error = None;
     for tag in &tag_patterns {
