@@ -17,7 +17,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Other
 - update callback examples to use #[callback] macro ([#142](https://github.com/eryx-org/eryx/pull/142))
 
-## [0.4.5] - 2026-02-11
+## `eryx` - [0.4.5](https://github.com/eryx-org/eryx/compare/eryx-v0.4.4...eryx-v0.4.5) - 2026-02-11
 
 ### Fixed
 - use bracket syntax for MCP tool names in list_tools output ([#136](https://github.com/eryx-org/eryx/pull/136))
@@ -29,6 +29,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - mark eryx-linker-wasm as publish = false ([#138](https://github.com/eryx-org/eryx/pull/138))
 - tweak some wording and silly claims ([#135](https://github.com/eryx-org/eryx/pull/135))
 - bump cryptography in /crates/eryx-python ([#137](https://github.com/eryx-org/eryx/pull/137))
+
+## `eryx-macros` - [0.4.5](https://github.com/eryx-org/eryx/compare/eryx-macros-v0.4.4...eryx-macros-v0.4.5) - 2026-02-11
+
+### Other
+- mark eryx-linker-wasm as publish = false ([#138](https://github.com/eryx-org/eryx/pull/138))
+
+## `eryx-runtime` - [0.4.5](https://github.com/eryx-org/eryx/compare/eryx-runtime-v0.4.4...eryx-runtime-v0.4.5) - 2026-02-11
+
+### Other
+- mark eryx-linker-wasm as publish = false ([#138](https://github.com/eryx-org/eryx/pull/138))
+
+## `eryx-vfs` - [0.4.5](https://github.com/eryx-org/eryx/compare/eryx-vfs-v0.4.4...eryx-vfs-v0.4.5) - 2026-02-11
+
+### Other
+- mark eryx-linker-wasm as publish = false ([#138](https://github.com/eryx-org/eryx/pull/138))
+
+## `eryx-precompile` - [0.4.5](https://github.com/eryx-org/eryx/compare/eryx-precompile-v0.4.4...eryx-precompile-v0.4.5) - 2026-02-11
+
+### Other
+- mark eryx-linker-wasm as publish = false ([#138](https://github.com/eryx-org/eryx/pull/138))
 
 ## `eryx-precompile` - [0.4.4](https://github.com/eryx-org/eryx/compare/eryx-precompile-v0.4.3...eryx-precompile-v0.4.4) - 2026-02-10
 
