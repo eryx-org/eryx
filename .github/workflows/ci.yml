@@ -208,6 +208,7 @@ jobs:
     if: >-
       github.event_name == 'push'
       || needs.changes.outputs.core == 'true'
+      || needs.changes.outputs.server == 'true'
     steps:
       - uses: actions/checkout@v4
 
@@ -241,6 +242,7 @@ jobs:
     if: >-
       github.event_name == 'push'
       || needs.changes.outputs.core == 'true'
+      || needs.changes.outputs.server == 'true'
     steps:
       - uses: namespacelabs/nscloud-checkout-action@v8
 
