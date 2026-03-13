@@ -429,17 +429,33 @@ async fn execute_with_session(
         run_callback_handler(callback_rx, cb_map, resource_limits, cb_secrets).await
     });
 
+    // Compute preamble line count so trace events can be adjusted to user code lines.
+    let preamble_lines = if !params.files.is_empty() {
+        let preamble = format!("{SYS_PATH_INJECT}{BUILTINS_INJECT}");
+        preamble.chars().filter(|&c| c == '\n').count() as u32
+    } else {
+        BUILTINS_INJECT.chars().filter(|&c| c == '\n').count() as u32
+    };
+
     // Set up trace channel if tracing is enabled.
     let (trace_tx, mut trace_rx) = mpsc::unbounded_channel::<TraceRequest>();
     if params.enable_tracing {
         let trace_server_tx = server_tx.clone();
         tokio::spawn(async move {
             while let Some(req) = trace_rx.recv().await {
+                // Adjust line numbers to account for injected preamble code.
+                // Trace events from the preamble itself are suppressed.
+                let adjusted_lineno = if req.lineno > preamble_lines {
+                    req.lineno - preamble_lines
+                } else {
+                    continue; // Skip trace events from the preamble
+                };
+
                 // Parse event_json into a proto TraceEvent.
                 let (event_type, function, message, name, duration_ms) =
                     parse_trace_event_json(&req.event_json);
                 let proto_event = crate::proto::eryx::v1::TraceEvent {
-                    lineno: req.lineno,
+                    lineno: adjusted_lineno,
                     event_type,
                     function,
                     message,

@@ -494,6 +494,182 @@ async fn execute_without_tracing_no_trace_events() {
     );
 }
 
+/// Verify that trace event line numbers are adjusted to account for the
+/// injected preamble (BUILTINS_INJECT). Line 1 in user code should report
+/// lineno=1, not lineno=5 (preamble is 4 lines).
+#[tokio::test]
+async fn execute_trace_linenos_adjusted_for_preamble() {
+    let channel = start_server().await;
+    let mut client = EryxClient::new(channel);
+
+    let (tx, rx) = mpsc::channel(16);
+
+    // User code: 3 lines, no leading newline. Line 1 = x = 1, line 2 = y = 2, line 3 = print.
+    tx.send(ClientMessage {
+        message: Some(client_message::Message::ExecuteRequest(ExecuteRequest {
+            code: "x = 1\ny = 2\nprint(x + y)".to_string(),
+            callbacks: vec![],
+            resource_limits: Some(ResourceLimits {
+                execution_timeout_ms: 30_000,
+                ..Default::default()
+            }),
+            enable_tracing: true,
+            persist_state: false,
+            state_snapshot: vec![],
+            files: vec![],
+            network_config: None,
+        })),
+    })
+    .await
+    .unwrap();
+
+    let mut stream = client
+        .execute(ReceiverStream::new(rx))
+        .await
+        .unwrap()
+        .into_inner();
+
+    let mut trace_events = Vec::new();
+    let mut got_result = false;
+
+    while let Some(msg) = stream.message().await.unwrap() {
+        match msg.message {
+            Some(server_message::Message::TraceEvent(event)) => {
+                trace_events.push(event);
+            }
+            Some(server_message::Message::ExecuteResult(result)) => {
+                assert!(result.success, "execution failed: {}", result.error);
+                got_result = true;
+            }
+            _ => {}
+        }
+    }
+
+    assert!(got_result, "never received ExecuteResult");
+
+    // Extract "line" events and their line numbers.
+    let line_nos: Vec<u32> = trace_events
+        .iter()
+        .filter(|e| e.event_type == "line")
+        .map(|e| e.lineno)
+        .collect();
+
+    assert!(!line_nos.is_empty(), "expected line trace events, got none");
+
+    // All line numbers should be within the user code range (1..=3).
+    // None should reference preamble lines (which would be > 3 without adjustment).
+    for lineno in &line_nos {
+        assert!(
+            *lineno >= 1 && *lineno <= 3,
+            "trace lineno {} is outside user code range 1..=3 (preamble not adjusted?), all line events: {:?}",
+            lineno,
+            line_nos
+        );
+    }
+
+    // We should see line events for all 3 user lines.
+    assert!(
+        line_nos.contains(&1),
+        "missing trace for line 1, got: {:?}",
+        line_nos
+    );
+    assert!(
+        line_nos.contains(&2),
+        "missing trace for line 2, got: {:?}",
+        line_nos
+    );
+    assert!(
+        line_nos.contains(&3),
+        "missing trace for line 3, got: {:?}",
+        line_nos
+    );
+}
+
+/// Same as above but with a leading newline in user code (common pattern from LLMs).
+/// Line numbers should still be relative to user code, with the leading blank line
+/// counting as line 1.
+#[tokio::test]
+async fn execute_trace_linenos_adjusted_with_leading_newline() {
+    let channel = start_server().await;
+    let mut client = EryxClient::new(channel);
+
+    let (tx, rx) = mpsc::channel(16);
+
+    // Leading newline: line 1 = empty, line 2 = x = 42, line 3 = print.
+    tx.send(ClientMessage {
+        message: Some(client_message::Message::ExecuteRequest(ExecuteRequest {
+            code: "\nx = 42\nprint(x)".to_string(),
+            callbacks: vec![],
+            resource_limits: Some(ResourceLimits {
+                execution_timeout_ms: 30_000,
+                ..Default::default()
+            }),
+            enable_tracing: true,
+            persist_state: false,
+            state_snapshot: vec![],
+            files: vec![],
+            network_config: None,
+        })),
+    })
+    .await
+    .unwrap();
+
+    let mut stream = client
+        .execute(ReceiverStream::new(rx))
+        .await
+        .unwrap()
+        .into_inner();
+
+    let mut trace_events = Vec::new();
+    let mut got_result = false;
+
+    while let Some(msg) = stream.message().await.unwrap() {
+        match msg.message {
+            Some(server_message::Message::TraceEvent(event)) => {
+                trace_events.push(event);
+            }
+            Some(server_message::Message::ExecuteResult(result)) => {
+                assert!(result.success, "execution failed: {}", result.error);
+                assert!(result.stdout.contains("42"));
+                got_result = true;
+            }
+            _ => {}
+        }
+    }
+
+    assert!(got_result, "never received ExecuteResult");
+
+    let line_nos: Vec<u32> = trace_events
+        .iter()
+        .filter(|e| e.event_type == "line")
+        .map(|e| e.lineno)
+        .collect();
+
+    assert!(!line_nos.is_empty(), "expected line trace events");
+
+    // User code is 3 lines (empty + x=42 + print). Line numbers should be 1..=3.
+    for lineno in &line_nos {
+        assert!(
+            *lineno >= 1 && *lineno <= 3,
+            "trace lineno {} is outside user code range 1..=3, all: {:?}",
+            lineno,
+            line_nos
+        );
+    }
+
+    // Should see line 2 (x = 42) and line 3 (print).
+    assert!(
+        line_nos.contains(&2),
+        "missing trace for line 2, got: {:?}",
+        line_nos
+    );
+    assert!(
+        line_nos.contains(&3),
+        "missing trace for line 3, got: {:?}",
+        line_nos
+    );
+}
+
 /// Verify that callbacks are correctly re-initialized when a pooled sandbox
 /// handles requests with different callbacks. This tests that the WASM runtime
 /// does NOT cache stale callback state across pool reuse.
