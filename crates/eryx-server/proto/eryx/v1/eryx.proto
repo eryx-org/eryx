@@ -72,6 +72,18 @@ message ExecuteRequest {
 
   // Network configuration. If absent, networking is disabled entirely.
   NetworkConfig network_config = 8;
+
+  // Secrets to inject into the sandbox.
+  // Each secret becomes an environment variable with a random placeholder value.
+  // Real values are substituted in HTTP request headers to allowed hosts only.
+  // Placeholder values are scrubbed from stdout/stderr by default.
+  repeated SecretConfig secrets = 9;
+
+  // Disable placeholder scrubbing on stdout. Default: scrubbing is ON when secrets are present.
+  bool disable_stdout_scrub = 10;
+
+  // Disable placeholder scrubbing on stderr. Default: scrubbing is ON when secrets are present.
+  bool disable_stderr_scrub = 11;
 }
 
 // Kind of supporting file — determines where it's placed in the sandbox.
@@ -149,6 +161,19 @@ message NetworkConfig {
   uint64 connect_timeout_ms = 4;
   // I/O read/write timeout in milliseconds (0 = default 60s).
   uint64 io_timeout_ms = 5;
+}
+
+// A secret to inject into the sandbox environment.
+// The real value is never exposed to Python code — a random placeholder is
+// used instead. The real value is substituted transparently in HTTP headers
+// when making requests to allowed_hosts.
+message SecretConfig {
+  // Secret name (becomes the environment variable name in Python).
+  string name = 1;
+  // The real secret value.
+  string value = 2;
+  // Hosts where this secret may be sent. Empty = falls back to NetworkConfig.allowed_hosts.
+  repeated string allowed_hosts = 3;
 }
 
 // Server requests the client to execute a callback.

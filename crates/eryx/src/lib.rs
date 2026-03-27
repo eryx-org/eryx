@@ -93,7 +93,9 @@ pub use pool::{PoolConfig, PoolError, PoolStats, PooledSandbox, SandboxPool};
 pub use sandbox::{
     ExecuteResult, ExecuteStats, ExecutionHandle, ResourceLimits, Sandbox, SandboxBuilder, state,
 };
-pub use secrets::{FileScrubPolicy, OutputScrubPolicy, SecretConfig};
+pub use secrets::{
+    FileScrubPolicy, OutputScrubPolicy, SecretConfig, generate_placeholder, scrub_placeholders,
+};
 pub use session::{
     InProcessSession, PythonStateSnapshot, Session, SessionExecutor, SnapshotMetadata,
     SnapshotSession,

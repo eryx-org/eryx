@@ -74,6 +74,7 @@ async fn execute_simple_print() {
             state_snapshot: vec![],
             files: vec![],
             network_config: None,
+            ..Default::default()
         })),
     })
     .await
@@ -134,6 +135,7 @@ print(f"got: {result}")
             state_snapshot: vec![],
             files: vec![],
             network_config: None,
+            ..Default::default()
         })),
     })
     .await
@@ -220,6 +222,7 @@ except Exception as e:
             state_snapshot: vec![],
             files: vec![],
             network_config: None,
+            ..Default::default()
         })),
     })
     .await
@@ -292,6 +295,7 @@ for i in range(3):
             state_snapshot: vec![],
             files: vec![],
             network_config: None,
+            ..Default::default()
         })),
     })
     .await
@@ -350,6 +354,7 @@ async fn execute_reports_stats() {
             state_snapshot: vec![],
             files: vec![],
             network_config: None,
+            ..Default::default()
         })),
     })
     .await
@@ -395,6 +400,7 @@ print(x + y)
             state_snapshot: vec![],
             files: vec![],
             network_config: None,
+            ..Default::default()
         })),
     })
     .await
@@ -468,6 +474,7 @@ async fn execute_without_tracing_no_trace_events() {
             state_snapshot: vec![],
             files: vec![],
             network_config: None,
+            ..Default::default()
         })),
     })
     .await
@@ -518,6 +525,7 @@ async fn execute_trace_linenos_adjusted_for_preamble() {
             state_snapshot: vec![],
             files: vec![],
             network_config: None,
+            ..Default::default()
         })),
     })
     .await
@@ -609,6 +617,7 @@ async fn execute_trace_linenos_adjusted_with_leading_newline() {
             state_snapshot: vec![],
             files: vec![],
             network_config: None,
+            ..Default::default()
         })),
     })
     .await
@@ -708,6 +717,7 @@ print(f"alpha: {result}")
                 state_snapshot: vec![],
                 files: vec![],
                 network_config: None,
+                ..Default::default()
             })),
         })
         .await
@@ -788,6 +798,7 @@ print(f"beta: {result}")
                 state_snapshot: vec![],
                 files: vec![],
                 network_config: None,
+                ..Default::default()
             })),
         })
         .await
@@ -873,6 +884,7 @@ print(f"path={result['path']}")
             state_snapshot: vec![],
             files: vec![],
             network_config: None,
+            ..Default::default()
         })),
     })
     .await

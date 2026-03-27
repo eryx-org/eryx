@@ -13,9 +13,9 @@ use std::collections::HashMap;
 #[derive(Clone, Debug)]
 pub struct SecretConfig {
     /// The real secret value (never exposed to sandbox)
-    pub(crate) real_value: String,
+    pub real_value: String,
     /// Generated placeholder (what Python sees)
-    pub(crate) placeholder: String,
+    pub placeholder: String,
     /// Host restrictions for this secret.
     ///
     /// **⚠️ Security Note:**
@@ -110,7 +110,7 @@ impl From<bool> for OutputScrubPolicy {
 /// Format: `ERYX_SECRET_PLACEHOLDER_{random_hex}`
 ///
 /// Placeholders are ephemeral (regenerated on each use) for better security.
-pub(crate) fn generate_placeholder(_secret_name: &str) -> String {
+pub fn generate_placeholder(_secret_name: &str) -> String {
     use rand::Rng;
     let mut rng = rand::thread_rng();
     let random: [u8; 16] = rng.r#gen();
@@ -119,7 +119,7 @@ pub(crate) fn generate_placeholder(_secret_name: &str) -> String {
 }
 
 /// Scrub secret placeholders from text, replacing them with `[REDACTED]`.
-pub(crate) fn scrub_placeholders(text: &str, secrets: &HashMap<String, SecretConfig>) -> String {
+pub fn scrub_placeholders(text: &str, secrets: &HashMap<String, SecretConfig>) -> String {
     let mut result = text.to_string();
     for secret in secrets.values() {
         result = result.replace(&secret.placeholder, "[REDACTED]");
