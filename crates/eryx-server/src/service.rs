@@ -101,16 +101,29 @@ impl crate::proto::eryx::v1::eryx_server::Eryx for EryxService {
             }
         });
 
-        // Parse secrets: generate placeholders and build env preamble.
+        // Parse and validate secrets: generate placeholders and build env preamble.
         let (secrets, secrets_preamble) = {
             let mut map = HashMap::new();
             let mut preamble = String::new();
+            if !execute_req.secrets.is_empty() {
+                preamble.push_str("import os\n");
+            }
             for s in &execute_req.secrets {
+                // Validate secret name: must be a valid Python env var name.
+                if !is_valid_secret_name(&s.name) {
+                    return Err(Status::invalid_argument(format!(
+                        "invalid secret name {:?}: must match [A-Za-z_][A-Za-z0-9_]*",
+                        s.name
+                    )));
+                }
+                if map.contains_key(&s.name) {
+                    return Err(Status::invalid_argument(format!(
+                        "duplicate secret name {:?}",
+                        s.name
+                    )));
+                }
                 let placeholder = generate_placeholder(&s.name);
-                preamble.push_str(&format!(
-                    "import os\nos.environ[{:?}] = {:?}\n",
-                    s.name, placeholder
-                ));
+                preamble.push_str(&format!("os.environ[{:?}] = {:?}\n", s.name, placeholder));
                 map.insert(
                     s.name.clone(),
                     SecretConfig {
@@ -309,6 +322,18 @@ const SYS_PATH_INJECT: &str = concat!(
     "if '/eryx/lib' not in _sys.path: _sys.path.insert(0, '/eryx/lib')\n",
     "del _sys, _il\n",
 );
+
+/// Check whether a secret name is a valid Python environment variable name.
+///
+/// Must match `[A-Za-z_][A-Za-z0-9_]*`.
+fn is_valid_secret_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    match chars.next() {
+        Some(c) if c.is_ascii_alphabetic() || c == '_' => {}
+        _ => return false,
+    }
+    chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
 
 /// Check whether a filename is safe for use in VFS paths.
 ///

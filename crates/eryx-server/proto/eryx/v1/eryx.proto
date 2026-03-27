@@ -170,7 +170,8 @@ message NetworkConfig {
 message SecretConfig {
   // Secret name (becomes the environment variable name in Python).
   string name = 1;
-  // The real secret value.
+  // The real secret value. Transmitted in plaintext over the gRPC connection —
+  // callers must ensure the transport is secure (e.g. localhost, mTLS, or TLS).
   string value = 2;
   // Hosts where this secret may be sent. Empty = falls back to NetworkConfig.allowed_hosts.
   repeated string allowed_hosts = 3;

@@ -10,7 +10,7 @@
 use std::collections::HashMap;
 
 /// A secret with its placeholder and allowed hosts.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct SecretConfig {
     /// The real secret value (never exposed to sandbox)
     pub real_value: String,
@@ -23,6 +23,16 @@ pub struct SecretConfig {
     /// - If both are empty, the secret can be sent to ANY host (except blocked_hosts)
     /// - Always specify explicit hosts for production use
     pub allowed_hosts: Vec<String>,
+}
+
+impl std::fmt::Debug for SecretConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SecretConfig")
+            .field("real_value", &"[REDACTED]")
+            .field("placeholder", &self.placeholder)
+            .field("allowed_hosts", &self.allowed_hosts)
+            .finish()
+    }
 }
 
 /// File scrubbing policy for preventing secret leakage via file writes.
