@@ -10,7 +10,7 @@ use eryx::vfs::{ArcStorage, InMemoryStorage, VfsStorage};
 use eryx::{
     Callback, CallbackRequest, ConnectionManager, NetConfig, NetRequest, OutputRequest,
     PythonStateSnapshot, ResourceLimits, SandboxPool, SecretConfig, SessionExecutor, TraceRequest,
-    VfsConfig,
+    VfsConfig, generate_placeholder, scrub_placeholders,
 };
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
@@ -101,6 +101,44 @@ impl crate::proto::eryx::v1::eryx_server::Eryx for EryxService {
             }
         });
 
+        // Parse and validate secrets: generate placeholders and build env preamble.
+        let (secrets, secrets_preamble) = {
+            let mut map = HashMap::new();
+            let mut preamble = String::new();
+            if !execute_req.secrets.is_empty() {
+                preamble.push_str("import os\n");
+            }
+            for s in &execute_req.secrets {
+                // Validate secret name: must be a valid Python env var name.
+                if !is_valid_secret_name(&s.name) {
+                    return Err(Status::invalid_argument(format!(
+                        "invalid secret name {:?}: must match [A-Za-z_][A-Za-z0-9_]*",
+                        s.name
+                    )));
+                }
+                if map.contains_key(&s.name) {
+                    return Err(Status::invalid_argument(format!(
+                        "duplicate secret name {:?}",
+                        s.name
+                    )));
+                }
+                let placeholder = generate_placeholder(&s.name);
+                preamble.push_str(&format!("os.environ[{:?}] = {:?}\n", s.name, placeholder));
+                map.insert(
+                    s.name.clone(),
+                    SecretConfig {
+                        real_value: s.value.clone(),
+                        placeholder,
+                        allowed_hosts: s.allowed_hosts.clone(),
+                    },
+                );
+            }
+            (map, preamble)
+        };
+        let has_secrets = !secrets.is_empty();
+        let scrub_stdout = has_secrets && !execute_req.disable_stdout_scrub;
+        let scrub_stderr = has_secrets && !execute_req.disable_stderr_scrub;
+
         let span = tracing::info_span!(
             "execute",
             code_len = code.len(),
@@ -109,6 +147,7 @@ impl crate::proto::eryx::v1::eryx_server::Eryx for EryxService {
             persist_state,
             supporting_files = files.len(),
             networking = net_config.is_some(),
+            secrets = secrets.len(),
         );
 
         // 2. Parse resource limits.
@@ -235,6 +274,10 @@ impl crate::proto::eryx::v1::eryx_server::Eryx for EryxService {
                     enable_tracing,
                     resource_limits,
                     net_config,
+                    secrets,
+                    secrets_preamble,
+                    scrub_stdout,
+                    scrub_stderr,
                 };
                 let result_msg =
                     execute_with_session(&mut sandbox, &params, &server_tx_result).await;
@@ -279,6 +322,18 @@ const SYS_PATH_INJECT: &str = concat!(
     "if '/eryx/lib' not in _sys.path: _sys.path.insert(0, '/eryx/lib')\n",
     "del _sys, _il\n",
 );
+
+/// Check whether a secret name is a valid Python environment variable name.
+///
+/// Must match `[A-Za-z_][A-Za-z0-9_]*`.
+fn is_valid_secret_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    match chars.next() {
+        Some(c) if c.is_ascii_alphabetic() || c == '_' => {}
+        _ => return false,
+    }
+    chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
 
 /// Check whether a filename is safe for use in VFS paths.
 ///
@@ -336,6 +391,10 @@ struct SessionParams<'a> {
     enable_tracing: bool,
     resource_limits: ResourceLimits,
     net_config: Option<NetConfig>,
+    secrets: HashMap<String, SecretConfig>,
+    secrets_preamble: String,
+    scrub_stdout: bool,
+    scrub_stderr: bool,
 }
 
 /// Execute Python code using a session executor.
@@ -423,18 +482,20 @@ async fn execute_with_session(
     let (callback_tx, callback_rx) = mpsc::channel::<CallbackRequest>(32);
     let fuel_limit = params.resource_limits.max_fuel;
     let cb_map: Arc<HashMap<String, Arc<dyn Callback>>> = Arc::new(callbacks_ref.clone());
-    let cb_secrets: Arc<HashMap<String, SecretConfig>> = Arc::new(HashMap::new());
+    let cb_secrets: Arc<HashMap<String, SecretConfig>> = Arc::new(params.secrets.clone());
     let resource_limits = params.resource_limits.clone();
     let callback_handler = tokio::spawn(async move {
         run_callback_handler(callback_rx, cb_map, resource_limits, cb_secrets).await
     });
 
     // Compute preamble line count so trace events can be adjusted to user code lines.
-    let preamble_lines = if !params.files.is_empty() {
-        let preamble = format!("{SYS_PATH_INJECT}{BUILTINS_INJECT}");
+    let preamble_lines = {
+        let mut preamble = params.secrets_preamble.clone();
+        if !params.files.is_empty() {
+            preamble.push_str(SYS_PATH_INJECT);
+        }
+        preamble.push_str(BUILTINS_INJECT);
         preamble.chars().filter(|&c| c == '\n').count() as u32
-    } else {
-        BUILTINS_INJECT.chars().filter(|&c| c == '\n').count() as u32
     };
 
     // Set up trace channel if tracing is enabled.
@@ -473,9 +534,16 @@ async fn execute_with_session(
         });
     }
 
-    // Set up output streaming channel.
+    // Set up output streaming channel with optional secret scrubbing.
     let (output_tx, mut output_rx) = mpsc::unbounded_channel::<OutputRequest>();
     let output_server_tx = server_tx.clone();
+    let output_scrub_stdout = params.scrub_stdout;
+    let output_scrub_stderr = params.scrub_stderr;
+    let output_secrets = if output_scrub_stdout || output_scrub_stderr {
+        Some(params.secrets.clone())
+    } else {
+        None
+    };
     tokio::spawn(async move {
         use crate::proto::eryx::v1::{OutputEvent, OutputStream};
         while let Some(req) = output_rx.recv().await {
@@ -484,10 +552,23 @@ async fn execute_with_session(
             } else {
                 OutputStream::Stderr
             };
+            let data = if let Some(ref secrets) = output_secrets {
+                let should_scrub = match req.stream {
+                    0 => output_scrub_stdout,
+                    _ => output_scrub_stderr,
+                };
+                if should_scrub {
+                    scrub_placeholders(&req.data, secrets)
+                } else {
+                    req.data
+                }
+            } else {
+                req.data
+            };
             let msg = ServerMessage {
                 message: Some(server_message::Message::OutputEvent(OutputEvent {
                     stream: stream.into(),
-                    data: req.data,
+                    data,
                 })),
             };
             if output_server_tx.send(msg).await.is_err() {
@@ -499,7 +580,7 @@ async fn execute_with_session(
     // Spawn network handler if networking is enabled (mirrors Sandbox::execute pattern).
     let (net_tx, _net_handler) = if let Some(config) = params.net_config.clone() {
         let (tx, rx) = mpsc::channel::<NetRequest>(32);
-        let manager = ConnectionManager::new(config, HashMap::new());
+        let manager = ConnectionManager::new(config, params.secrets.clone());
         let handler = tokio::spawn(async move { run_net_handler(rx, manager).await });
         (Some(tx), Some(handler))
     } else {
@@ -510,9 +591,15 @@ async fn execute_with_session(
     // imported modules. Also prepend sys.path setup when supporting files are
     // present — merged here to avoid a separate WASM execution cycle.
     let full_code = if !params.files.is_empty() {
-        format!("{SYS_PATH_INJECT}{BUILTINS_INJECT}{}", params.code)
+        format!(
+            "{}{SYS_PATH_INJECT}{BUILTINS_INJECT}{}",
+            params.secrets_preamble, params.code
+        )
     } else {
-        format!("{BUILTINS_INJECT}{}", params.code)
+        format!(
+            "{}{BUILTINS_INJECT}{}",
+            params.secrets_preamble, params.code
+        )
     };
     let mut builder = session
         .execute(&full_code)
@@ -560,10 +647,20 @@ async fn execute_with_session(
                 snapshot_bytes = snapshot_bytes.len(),
                 "session execution completed"
             );
+            let stdout = if params.scrub_stdout {
+                scrub_placeholders(&output.stdout, &params.secrets)
+            } else {
+                output.stdout
+            };
+            let stderr = if params.scrub_stderr {
+                scrub_placeholders(&output.stderr, &params.secrets)
+            } else {
+                output.stderr
+            };
             ExecuteResult {
                 success: true,
-                stdout: output.stdout,
-                stderr: output.stderr,
+                stdout,
+                stderr,
                 error: String::new(),
                 stats: Some(ExecuteStats {
                     duration_ms: duration.as_millis() as u64,
