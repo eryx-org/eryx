@@ -6,12 +6,14 @@ Usage:
     python -m eryx -c 'print("hi")'   # Execute a string
     echo 'print("hi")' | python -m eryx -  # Execute from stdin
     python -m eryx serve               # Start MCP server
+    python -m eryx wrap -- npx ...     # Wrap MCP servers
 
 Examples:
     uvx --with pyeryx eryx -c 'import sys; print(sys.version)'
     uvx --with pyeryx eryx --timeout 5000 -c 'print("hello")'
     uvx --with pyeryx eryx --net --allow-host '*.example.com' -c 'import urllib.request; ...'
     uvx --with 'pyeryx[serve]' eryx serve --mcp
+    uvx --with 'pyeryx[serve]' eryx wrap -- npx @anthropic/mcp-filesystem .
 """
 
 from __future__ import annotations
@@ -40,6 +42,7 @@ def _build_parser() -> argparse.ArgumentParser:
               eryx --net -c 'import requests'   enable network access
               eryx serve                        start MCP server
               eryx serve --mcp                  MCP server with inner tools
+              eryx wrap -- npx ...              wrap MCP servers
         """),
     )
 
@@ -198,6 +201,12 @@ def main(argv: list[str] | None = None) -> int:
         from eryx.serve import serve
 
         return serve(raw_args[1:])
+
+    # Subcommand: eryx wrap
+    if raw_args and raw_args[0] == "wrap":
+        from eryx.wrap import wrap
+
+        return wrap(raw_args[1:])
 
     parser = _build_parser()
     args = parser.parse_args(argv)
