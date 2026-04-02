@@ -481,6 +481,7 @@ struct SessionParams<'a> {
 /// When `state` is `Some(bytes)`, the session restores from `bytes` (if non-empty)
 /// before execution and captures a snapshot afterwards. When `None`, no state
 /// persistence occurs.
+#[tracing::instrument(skip_all, fields(code_len = params.code.len(), enable_tracing = params.enable_tracing, has_state = params.state.is_some()))]
 async fn execute_with_session(
     sandbox: &mut eryx::PooledSandbox,
     params: &SessionParams<'_>,

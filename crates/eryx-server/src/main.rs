@@ -8,10 +8,8 @@ use clap::Parser;
 use eryx::{PoolConfig, Sandbox, SandboxPool};
 use eryx_server::proto::eryx::v1::eryx_server::EryxServer;
 use eryx_server::service::EryxService;
+use eryx_server::telemetry::setup_tracing;
 use tonic::transport::Server;
-use tracing_subscriber::EnvFilter;
-use tracing_subscriber::layer::SubscriberExt;
-use tracing_subscriber::util::SubscriberInitExt;
 
 /// gRPC server for sandboxed Python execution via eryx.
 #[derive(Parser, Debug)]
@@ -72,13 +70,7 @@ fn spawn_pool_stats_recorder(pool: Arc<SandboxPool>) {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    tracing_subscriber::registry()
-        .with(
-            EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| EnvFilter::new("info,h2=warn,tonic::transport=warn")),
-        )
-        .with(tracing_logfmt::layer())
-        .init();
+    setup_tracing()?;
 
     let args = Args::parse();
     let addr = args.listen_addr.parse()?;
@@ -150,6 +142,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .add_service(EryxServer::new(service))
         .serve(addr)
         .await?;
+
+    opentelemetry::global::shutdown_tracer_provider();
 
     Ok(())
 }

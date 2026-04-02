@@ -80,6 +80,13 @@ dashmap = "6"
 metrics = "0.24"
 metrics-exporter-prometheus = { version = "0.18.1", default-features = false, features = ["http-listener"] }
 
+# Telemetry
+opentelemetry = "0.27"
+opentelemetry_sdk = "0.27"
+opentelemetry-otlp = "0.27"
+tracing-opentelemetry = "0.28"
+tracing-error = "0.2"
+
 # Utilities
 tracing = "0.1"
 
