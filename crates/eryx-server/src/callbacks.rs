@@ -61,7 +61,7 @@ pub fn build_callbacks(
                         let arguments_json = serde_json::to_string(&args)
                             .map_err(|e| CallbackError::ExecutionFailed(e.to_string()))?;
 
-                        tracing::debug!(
+                        tracing::info!(
                             callback_name = %name,
                             %request_id,
                             args_len = arguments_json.len(),
@@ -84,10 +84,12 @@ pub fn build_callbacks(
                         };
 
                         tx.send(msg).await.map_err(|e| {
+                            let elapsed_ms = started.elapsed().as_millis() as u64;
                             tracing::warn!(
                                 callback_name = %name,
                                 %request_id,
                                 error = %e,
+                                waiting_ms = elapsed_ms,
                                 "gRPC response channel closed"
                             );
                             CallbackError::ExecutionFailed(
@@ -97,10 +99,12 @@ pub fn build_callbacks(
 
                         // Wait for the Go client to respond.
                         let result = resp_rx.await.map_err(|e| {
+                            let elapsed_ms = started.elapsed().as_millis() as u64;
                             tracing::warn!(
                                 callback_name = %name,
                                 %request_id,
                                 error = %e,
+                                waiting_ms = elapsed_ms,
                                 "callback response channel dropped"
                             );
                             CallbackError::ExecutionFailed(
@@ -109,6 +113,15 @@ pub fn build_callbacks(
                         })?;
 
                         let duration_ms = started.elapsed().as_millis() as u64;
+
+                        if duration_ms > 5000 {
+                            tracing::warn!(
+                                callback_name = %name,
+                                %request_id,
+                                duration_ms,
+                                "slow callback: round-trip exceeded 5s"
+                            );
+                        }
 
                         // Clean up the pending entry (already removed by dispatch).
                         match result {

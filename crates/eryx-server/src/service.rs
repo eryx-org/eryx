@@ -216,16 +216,34 @@ impl crate::proto::eryx::v1::eryx_server::Eryx for EryxService {
 
         // 5. Acquire sandbox from pool and configure for this request.
         let acquire_start = Instant::now();
-        let mut sandbox = self
-            .pool
-            .acquire()
-            .await
-            .map_err(|e| Status::unavailable(format!("failed to acquire sandbox: {e}")))?
+        let mut sandbox = match self.pool.acquire().await {
+            Ok(s) => s,
+            Err(e) => {
+                let stats = self.pool.stats();
+                span.in_scope(|| {
+                    tracing::warn!(
+                        error = %e,
+                        pool_in_use = stats.in_use,
+                        pool_available = stats.available,
+                        pool_total = stats.total,
+                        "failed to acquire sandbox from pool"
+                    );
+                });
+                return Err(Status::unavailable(format!(
+                    "failed to acquire sandbox: {e}"
+                )));
+            }
+        };
+        sandbox = sandbox
             .with_callbacks(cbs)
             .with_resource_limits(resource_limits.clone());
+        let pool_stats = self.pool.stats();
         span.in_scope(|| {
             tracing::info!(
                 acquire_ms = acquire_start.elapsed().as_millis() as u64,
+                pool_in_use = pool_stats.in_use,
+                pool_available = pool_stats.available,
+                pool_total = pool_stats.total,
                 "sandbox acquired from pool"
             );
         });
@@ -274,6 +292,8 @@ impl crate::proto::eryx::v1::eryx_server::Eryx for EryxService {
                         "client disconnected with pending callbacks, cancelling"
                     );
                     pending_dispatch.clear();
+                } else {
+                    tracing::info!("client disconnected cleanly, no pending callbacks");
                 }
                 // Signal the execution task that the client is gone.
                 cancel_dispatch.cancel();
@@ -285,6 +305,7 @@ impl crate::proto::eryx::v1::eryx_server::Eryx for EryxService {
         let server_tx_result = server_tx;
         let resp_tx_final = resp_tx;
         let cancel_exec = cancel;
+        let sandbox_held_start = Instant::now();
         tokio::spawn(
             async move {
                 let params = SessionParams {
@@ -328,6 +349,11 @@ impl crate::proto::eryx::v1::eryx_server::Eryx for EryxService {
                 drop(server_tx_result);
 
                 // sandbox is dropped here — per-request state cleared, returned to pool.
+                let sandbox_held_ms = sandbox_held_start.elapsed().as_millis() as u64;
+                tracing::debug!(
+                    sandbox_held_ms,
+                    "execution task finished, returning sandbox to pool"
+                );
                 drop(sandbox);
 
                 // The resp_tx_final is kept alive to ensure the response stream stays
@@ -400,6 +426,9 @@ async fn create_vfs_with_files(files: &[SupportingFile], mount_path: &str) -> Ar
     let _ = storage.mkdir_sync(&lib_path);
     let _ = storage.mkdir_sync(&data_path);
 
+    let mut mounted_count: usize = 0;
+    let mut total_bytes: usize = 0;
+
     for f in files {
         if !is_safe_filename(&f.name) {
             tracing::warn!(file = %f.name, "skipping supporting file with unsafe name (path separators or '..' not allowed)");
@@ -414,8 +443,17 @@ async fn create_vfs_with_files(files: &[SupportingFile], mount_path: &str) -> Ar
             tracing::warn!(file = %f.name, kind = ?f.kind(), error = %e, "failed to write supporting file to VFS");
         } else {
             tracing::debug!(file = %f.name, kind = ?f.kind(), dir, size = f.content.len(), "wrote supporting file to VFS");
+            mounted_count += 1;
+            total_bytes += f.content.len();
         }
     }
+
+    tracing::info!(
+        mounted_files = mounted_count,
+        total_bytes,
+        requested_files = files.len(),
+        "VFS file mounting complete"
+    );
 
     storage
 }
@@ -443,6 +481,7 @@ struct SessionParams<'a> {
 /// When `state` is `Some(bytes)`, the session restores from `bytes` (if non-empty)
 /// before execution and captures a snapshot afterwards. When `None`, no state
 /// persistence occurs.
+#[tracing::instrument(skip_all, fields(code_len = params.code.len(), enable_tracing = params.enable_tracing, has_state = params.state.is_some()))]
 async fn execute_with_session(
     sandbox: &mut eryx::PooledSandbox,
     params: &SessionParams<'_>,
@@ -460,7 +499,12 @@ async fn execute_with_session(
         match SessionExecutor::new(executor, &callbacks_arc).await {
             Ok(s) => s,
             Err(e) => {
-                tracing::warn!(error = %e, "failed to create session executor");
+                tracing::warn!(
+                    error = %e,
+                    code_len = params.code.len(),
+                    file_count = params.files.len(),
+                    "failed to create session executor"
+                );
                 return ExecuteResult {
                     success: false,
                     error: format!("session creation failed: {e}"),
@@ -486,7 +530,12 @@ async fn execute_with_session(
         {
             Ok(s) => s,
             Err(e) => {
-                tracing::warn!(error = %e, "failed to create session executor with VFS");
+                tracing::warn!(
+                    error = %e,
+                    code_len = params.code.len(),
+                    file_count = params.files.len(),
+                    "failed to create session executor with VFS"
+                );
                 return ExecuteResult {
                     success: false,
                     error: format!("session creation failed: {e}"),
@@ -502,15 +551,31 @@ async fn execute_with_session(
 
     // Restore previous state if provided.
     if let Some(state_snapshot) = params.state.filter(|s| !s.is_empty()) {
+        let restore_start = Instant::now();
         match PythonStateSnapshot::from_bytes(state_snapshot) {
             Ok(snapshot) => {
                 if let Err(e) = session.restore_state(&snapshot).await {
-                    tracing::warn!(error = %e, "failed to restore state, proceeding with clean state");
+                    tracing::warn!(
+                        error = %e,
+                        restore_ms = restore_start.elapsed().as_millis() as u64,
+                        snapshot_bytes = state_snapshot.len(),
+                        "failed to restore state, proceeding with clean state"
+                    );
                     // Don't fail — just proceed with a fresh session.
+                } else {
+                    tracing::info!(
+                        restore_ms = restore_start.elapsed().as_millis() as u64,
+                        snapshot_bytes = state_snapshot.len(),
+                        "state restored from snapshot"
+                    );
                 }
             }
             Err(e) => {
-                tracing::warn!(error = %e, "invalid state snapshot bytes, proceeding with clean state");
+                tracing::warn!(
+                    error = %e,
+                    snapshot_bytes = state_snapshot.len(),
+                    "invalid state snapshot bytes, proceeding with clean state"
+                );
             }
         }
     }
@@ -617,8 +682,15 @@ async fn execute_with_session(
     // Spawn network handler if networking is enabled (mirrors Sandbox::execute pattern).
     let (net_tx, _net_handler) = if let Some(config) = params.net_config.clone() {
         let (tx, rx) = mpsc::channel::<NetRequest>(32);
+        let allowed_hosts = config.allowed_hosts.len();
+        let max_connections = config.max_connections;
         let manager = ConnectionManager::new(config, params.secrets.clone());
-        let handler = tokio::spawn(async move { run_net_handler(rx, manager).await });
+        tracing::info!(allowed_hosts, max_connections, "network handler started");
+        let handler = tokio::spawn(async move {
+            let result = run_net_handler(rx, manager).await;
+            tracing::info!("network handler stopped");
+            result
+        });
         (Some(tx), Some(handler))
     } else {
         (None, None)
@@ -658,14 +730,23 @@ async fn execute_with_session(
 
     // Snapshot state after execution (only when persistence is requested).
     let snapshot_bytes = if params.state.is_some() {
+        let snapshot_start = Instant::now();
         match session.snapshot_state().await {
             Ok(snapshot) => {
                 let bytes = snapshot.to_bytes();
-                tracing::info!(snapshot_bytes = bytes.len(), "state snapshot captured");
+                tracing::info!(
+                    snapshot_bytes = bytes.len(),
+                    snapshot_ms = snapshot_start.elapsed().as_millis() as u64,
+                    "state snapshot captured"
+                );
                 bytes
             }
             Err(e) => {
-                tracing::warn!(error = %e, "failed to capture state snapshot");
+                tracing::warn!(
+                    error = %e,
+                    snapshot_ms = snapshot_start.elapsed().as_millis() as u64,
+                    "failed to capture state snapshot"
+                );
                 Vec::new()
             }
         }

@@ -9,6 +9,7 @@
 pub mod callbacks;
 pub mod output;
 pub mod service;
+pub mod telemetry;
 pub mod trace;
 
 /// Generated protobuf types for the eryx gRPC API.
