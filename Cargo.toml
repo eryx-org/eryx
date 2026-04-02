@@ -76,6 +76,10 @@ uuid = "1"
 # Concurrent maps
 dashmap = "6"
 
+# Metrics
+metrics = "0.24"
+metrics-exporter-prometheus = { version = "0.18.1", default-features = false, features = ["http-listener"] }
+
 # Utilities
 tracing = "0.1"
 

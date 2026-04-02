@@ -11,8 +11,11 @@ publish = false
 
 [dependencies]
 eryx = { workspace = true, features = ["embedded", "vfs"] }
+metrics.workspace = true
+metrics-exporter-prometheus.workspace = true
 tokio = { workspace = true, features = ["full"] }
 tokio-stream.workspace = true
+tokio-util.workspace = true
 tonic.workspace = true
 prost.workspace = true
 serde_json.workspace = true

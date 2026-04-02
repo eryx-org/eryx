@@ -1,5 +1,6 @@
 //! eryx-server: gRPC server for sandboxed Python execution.
 
+use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -31,6 +32,10 @@ struct Args {
     #[arg(long, default_value_t = 1, env = "ERYX_POOL_MIN_IDLE")]
     pool_min_idle: usize,
 
+    /// Address for the Prometheus metrics endpoint.
+    #[arg(long, default_value = "0.0.0.0:9090", env = "ERYX_METRICS_ADDR")]
+    metrics_addr: SocketAddr,
+
     /// Path to a pre-compiled runtime (.cwasm) to use instead of the embedded runtime.
     ///
     /// This allows using a custom runtime with additional packages (e.g. numpy, polars)
@@ -44,6 +49,25 @@ struct Args {
     /// builds without the `embedded` feature to provide stdlib externally.
     #[arg(long, env = "ERYX_STDLIB")]
     stdlib: Option<PathBuf>,
+}
+
+/// Spawn a background task that periodically records pool gauge metrics.
+fn spawn_pool_stats_recorder(pool: Arc<SandboxPool>) {
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(5));
+        loop {
+            interval.tick().await;
+            let stats = pool.stats();
+            metrics::gauge!("eryx_sandbox_pool_in_use").set(stats.in_use as f64);
+            metrics::gauge!("eryx_sandbox_pool_available").set(stats.available as f64);
+            metrics::gauge!("eryx_sandbox_pool_total").set(stats.total as f64);
+            metrics::gauge!("eryx_sandbox_pool_max_size").set(pool.config().max_size as f64);
+            metrics::counter!("eryx_sandbox_pool_acquisitions_total")
+                .absolute(stats.total_acquisitions);
+            metrics::counter!("eryx_sandbox_pool_creations_total").absolute(stats.total_creations);
+            metrics::counter!("eryx_sandbox_pool_wait_count_total").absolute(stats.wait_count);
+        }
+    });
 }
 
 #[tokio::main]
@@ -71,8 +95,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         pool_min_idle = pool_config.min_idle,
         runtime_cwasm = ?args.runtime_cwasm,
         stdlib = ?args.stdlib,
+        metrics_addr = %args.metrics_addr,
         "starting eryx gRPC server"
     );
+
+    // Install the Prometheus metrics exporter. It starts an HTTP listener
+    // that serves /metrics for scraping.
+    let prom_builder =
+        metrics_exporter_prometheus::PrometheusBuilder::new().with_http_listener(args.metrics_addr);
+    prom_builder.install().map_err(|e| {
+        format!(
+            "failed to install prometheus metrics exporter on {}: {e}",
+            args.metrics_addr
+        )
+    })?;
+    tracing::info!(%args.metrics_addr, "prometheus metrics endpoint started");
 
     let builder = match (&args.runtime_cwasm, &args.stdlib) {
         (Some(cwasm_path), Some(stdlib_path)) => {
@@ -102,7 +139,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     let pool = SandboxPool::new(builder, pool_config).await?;
-    let service = EryxService::new(Arc::new(pool));
+    let pool = Arc::new(pool);
+
+    // Record pool gauge metrics every 5 seconds.
+    spawn_pool_stats_recorder(Arc::clone(&pool));
+
+    let service = EryxService::new(pool);
 
     Server::builder()
         .add_service(EryxServer::new(service))
