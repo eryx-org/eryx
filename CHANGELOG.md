@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## `eryx-precompile` - [0.4.9](https://github.com/eryx-org/eryx/compare/eryx-precompile-v0.4.8...eryx-precompile-v0.4.9) - 2026-03-27
+
+### Other
+- update Cargo.lock dependencies
+
+## `eryx` - [0.4.9](https://github.com/eryx-org/eryx/compare/eryx-v0.4.7...eryx-v0.4.9) - 2026-03-27
+
+### Added
+- *(server)* wire secrets support into gRPC service ([#179](https://github.com/eryx-org/eryx/pull/179))
+
+### Other
+- release v0.4.8 ([#172](https://github.com/eryx-org/eryx/pull/172))
+
 ## `eryx-precompile` - [0.4.8](https://github.com/eryx-org/eryx/compare/eryx-precompile-v0.4.7...eryx-precompile-v0.4.8) - 2026-03-27
 
 ### Other
