@@ -14,6 +14,7 @@ use eryx::{
 };
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
+use tokio_util::sync::CancellationToken;
 use tonic::{Request, Response, Status, Streaming};
 use tracing::Instrument;
 
@@ -228,10 +229,16 @@ impl crate::proto::eryx::v1::eryx_server::Eryx for EryxService {
                 "sandbox acquired from pool"
             );
         });
+        metrics::counter!("eryx_sandbox_acquisitions_total").increment(1);
+
+        // Create a cancellation token so the dispatch task can signal the
+        // execution task when the client disconnects.
+        let cancel = CancellationToken::new();
 
         // 6. Spawn callback dispatch task: reads inbound CallbackResponses and
         //    routes them to the pending oneshot senders.
         let pending_dispatch = Arc::clone(&pending);
+        let cancel_dispatch = cancel.clone();
         tokio::spawn(
             async move {
                 while let Ok(Some(msg)) = inbound.message().await {
@@ -258,6 +265,18 @@ impl crate::proto::eryx::v1::eryx_server::Eryx for EryxService {
                         );
                     }
                 }
+                // Client disconnected — cancel pending callbacks so their oneshot
+                // receivers error immediately instead of waiting for callback_timeout.
+                let remaining = pending_dispatch.len();
+                if remaining > 0 {
+                    tracing::warn!(
+                        pending_callbacks = remaining,
+                        "client disconnected with pending callbacks, cancelling"
+                    );
+                    pending_dispatch.clear();
+                }
+                // Signal the execution task that the client is gone.
+                cancel_dispatch.cancel();
             }
             .instrument(span.clone()),
         );
@@ -265,6 +284,7 @@ impl crate::proto::eryx::v1::eryx_server::Eryx for EryxService {
         // 7. Spawn execution task.
         let server_tx_result = server_tx;
         let resp_tx_final = resp_tx;
+        let cancel_exec = cancel;
         tokio::spawn(
             async move {
                 let params = SessionParams {
@@ -279,8 +299,25 @@ impl crate::proto::eryx::v1::eryx_server::Eryx for EryxService {
                     scrub_stdout,
                     scrub_stderr,
                 };
-                let result_msg =
-                    execute_with_session(&mut sandbox, &params, &server_tx_result).await;
+
+                // Race execution against client cancellation. If the client
+                // disconnects, abandon execution and release the sandbox promptly
+                // instead of waiting for timeouts to expire.
+                let result_msg = tokio::select! {
+                    result = execute_with_session(&mut sandbox, &params, &server_tx_result) => result,
+                    () = cancel_exec.cancelled() => {
+                        tracing::warn!("client disconnected, aborting execution");
+                        metrics::counter!("eryx_executions_cancelled_total").increment(1);
+                        ExecuteResult {
+                            success: false,
+                            stdout: String::new(),
+                            stderr: String::new(),
+                            error: "execution cancelled: client disconnected".to_string(),
+                            stats: None,
+                            state_snapshot: Vec::new(),
+                        }
+                    }
+                };
 
                 let msg = ServerMessage {
                     message: Some(server_message::Message::ExecuteResult(result_msg)),
@@ -506,26 +543,26 @@ async fn execute_with_session(
             while let Some(req) = trace_rx.recv().await {
                 // Adjust line numbers to account for injected preamble code.
                 // Trace events from the preamble itself are suppressed.
-                let adjusted_lineno = if req.lineno > preamble_lines {
-                    req.lineno - preamble_lines
-                } else {
-                    continue; // Skip trace events from the preamble
-                };
+                let adjusted_line = req.lineno.saturating_sub(preamble_lines);
+                if adjusted_line == 0 && req.lineno > 0 {
+                    continue;
+                }
 
-                // Parse event_json into a proto TraceEvent.
-                let (event_type, function, message, name, duration_ms) =
+                let (event_type, function, message, callback_name, duration_ms) =
                     parse_trace_event_json(&req.event_json);
-                let proto_event = crate::proto::eryx::v1::TraceEvent {
-                    lineno: adjusted_lineno,
-                    event_type,
-                    function,
-                    message,
-                    name,
-                    duration_ms,
-                    context_json: req.context_json,
-                };
+
                 let msg = ServerMessage {
-                    message: Some(server_message::Message::TraceEvent(proto_event)),
+                    message: Some(server_message::Message::TraceEvent(
+                        crate::proto::eryx::v1::TraceEvent {
+                            lineno: adjusted_line,
+                            event_type,
+                            function,
+                            message,
+                            name: callback_name,
+                            duration_ms,
+                            context_json: String::new(),
+                        },
+                    )),
                 };
                 if trace_server_tx.send(msg).await.is_err() {
                     break;
@@ -647,6 +684,8 @@ async fn execute_with_session(
                 snapshot_bytes = snapshot_bytes.len(),
                 "session execution completed"
             );
+            metrics::counter!("eryx_executions_total", "status" => "success").increment(1);
+            metrics::histogram!("eryx_execution_duration_seconds").record(duration.as_secs_f64());
             let stdout = if params.scrub_stdout {
                 scrub_placeholders(&output.stdout, &params.secrets)
             } else {
@@ -677,6 +716,8 @@ async fn execute_with_session(
                 error = %e,
                 "session execution completed"
             );
+            metrics::counter!("eryx_executions_total", "status" => "error").increment(1);
+            metrics::histogram!("eryx_execution_duration_seconds").record(duration.as_secs_f64());
             ExecuteResult {
                 success: false,
                 stdout: String::new(),
