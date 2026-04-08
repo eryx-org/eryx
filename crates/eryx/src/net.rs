@@ -941,10 +941,12 @@ mod tests {
 
     #[test]
     fn test_allowed_hosts_whitelist() {
-        let mut config = NetConfig::default()
-            .allow_host("*.example.com")
-            .allow_host("api.github.com");
-        config.allow_all_hosts = false;
+        let config = NetConfig {
+            allow_all_hosts: false,
+            ..NetConfig::default()
+                .allow_host("*.example.com")
+                .allow_host("api.github.com")
+        };
         let manager = ConnectionManager::new(config, HashMap::new());
 
         assert!(manager.check_host_allowed("api.example.com").is_ok());
@@ -954,9 +956,11 @@ mod tests {
 
     #[test]
     fn test_allow_all_hosts_false_empty_list_blocks_everything() {
-        let mut config = NetConfig::default();
-        config.allow_all_hosts = false;
         // allowed_hosts is empty + allow_all_hosts is false = nothing allowed
+        let config = NetConfig {
+            allow_all_hosts: false,
+            ..NetConfig::default()
+        };
         let manager = ConnectionManager::new(config, HashMap::new());
 
         assert!(manager.check_host_allowed("google.com").is_err());
