@@ -151,9 +151,9 @@ message ResourceLimits {
 // Network configuration for the sandbox.
 // Controls which hosts Python code can connect to and sets timeouts.
 message NetworkConfig {
-  // Allowed host patterns (wildcards ok). Empty = allow all non-blocked.
+  // Allowed host patterns (wildcards ok). Only checked when allow_all_hosts is false.
   repeated string allowed_hosts = 1;
-  // Blocked host patterns. Checked after allowed. Private nets always blocked by Rust defaults.
+  // Blocked host patterns. Checked before allowed. Private nets always blocked by Rust defaults.
   repeated string blocked_hosts = 2;
   // Maximum concurrent connections (0 = default 10).
   uint32 max_connections = 3;
@@ -161,6 +161,9 @@ message NetworkConfig {
   uint64 connect_timeout_ms = 4;
   // I/O read/write timeout in milliseconds (0 = default 60s).
   uint64 io_timeout_ms = 5;
+  // When true, all non-blocked hosts are allowed (allowed_hosts is ignored).
+  // When false (default), only hosts matching allowed_hosts are permitted.
+  bool allow_all_hosts = 6;
 }
 
 // A secret to inject into the sandbox environment.

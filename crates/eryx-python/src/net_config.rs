@@ -38,7 +38,11 @@ pub struct NetConfig {
     #[pyo3(get, set)]
     pub io_timeout_ms: u64,
 
-    /// Allowed host patterns (empty = allow all external hosts).
+    /// When true, all non-blocked hosts are allowed (allowed_hosts is ignored).
+    #[pyo3(get, set)]
+    pub allow_all_hosts: bool,
+
+    /// Allowed host patterns (only checked when allow_all_hosts is false).
     #[pyo3(get, set)]
     pub allowed_hosts: Vec<String>,
 
@@ -58,14 +62,17 @@ impl NetConfig {
     /// - max_connections: 10
     /// - connect_timeout_ms: 30000 (30 seconds)
     /// - io_timeout_ms: 60000 (60 seconds)
-    /// - allowed_hosts: [] (allow all external hosts)
+    /// - allow_all_hosts: true (all external hosts allowed)
+    /// - allowed_hosts: [] (only used when allow_all_hosts is false)
     /// - blocked_hosts: localhost and private networks
     ///
     /// Args:
     ///     max_connections: Maximum number of concurrent connections.
     ///     connect_timeout_ms: Timeout for establishing connections.
     ///     io_timeout_ms: Timeout for read/write operations.
+    ///     allow_all_hosts: When true, all non-blocked hosts are allowed (allowed_hosts is ignored).
     ///     allowed_hosts: List of allowed host patterns (supports wildcards like "*.example.com").
+    ///         Setting this implicitly sets allow_all_hosts to false.
     ///     blocked_hosts: List of blocked host patterns.
     ///
     /// Example:
@@ -75,18 +82,24 @@ impl NetConfig {
     ///     # Custom timeouts
     ///     net = NetConfig(connect_timeout_ms=5000, io_timeout_ms=10000)
     #[new]
-    #[pyo3(signature = (*, max_connections=10, connect_timeout_ms=30000, io_timeout_ms=60000, allowed_hosts=None, blocked_hosts=None))]
+    #[pyo3(signature = (*, max_connections=10, connect_timeout_ms=30000, io_timeout_ms=60000, allow_all_hosts=None, allowed_hosts=None, blocked_hosts=None))]
     fn new(
         max_connections: u32,
         connect_timeout_ms: u64,
         io_timeout_ms: u64,
+        allow_all_hosts: Option<bool>,
         allowed_hosts: Option<Vec<String>>,
         blocked_hosts: Option<Vec<String>>,
     ) -> Self {
+        // If allowed_hosts is provided and allow_all_hosts wasn't explicitly set,
+        // default to false (allowlist mode).
+        let allow_all =
+            allow_all_hosts.unwrap_or_else(|| allowed_hosts.as_ref().is_none_or(|h| h.is_empty()));
         Self {
             max_connections,
             connect_timeout_ms,
             io_timeout_ms,
+            allow_all_hosts: allow_all,
             allowed_hosts: allowed_hosts.unwrap_or_default(),
             blocked_hosts: blocked_hosts.unwrap_or_else(default_blocked_hosts),
             custom_root_certs: vec![],
@@ -106,6 +119,7 @@ impl NetConfig {
             max_connections: 100,
             connect_timeout_ms: 30000,
             io_timeout_ms: 60000,
+            allow_all_hosts: true,
             allowed_hosts: vec![],
             blocked_hosts: vec![],
             custom_root_certs: vec![],
@@ -160,10 +174,11 @@ impl NetConfig {
 
     fn __repr__(&self) -> String {
         format!(
-            "NetConfig(max_connections={}, connect_timeout_ms={}, io_timeout_ms={}, allowed_hosts={:?}, blocked_hosts=[{} patterns])",
+            "NetConfig(max_connections={}, connect_timeout_ms={}, io_timeout_ms={}, allow_all_hosts={}, allowed_hosts={:?}, blocked_hosts=[{} patterns])",
             self.max_connections,
             self.connect_timeout_ms,
             self.io_timeout_ms,
+            self.allow_all_hosts,
             self.allowed_hosts,
             self.blocked_hosts.len(),
         )
@@ -205,6 +220,7 @@ impl From<&NetConfig> for eryx::NetConfig {
             max_connections: config.max_connections,
             connect_timeout: Duration::from_millis(config.connect_timeout_ms),
             io_timeout: Duration::from_millis(config.io_timeout_ms),
+            allow_all_hosts: config.allow_all_hosts,
             allowed_hosts: config.allowed_hosts.clone(),
             blocked_hosts: config.blocked_hosts.clone(),
             custom_root_certs: config.custom_root_certs.clone(),
