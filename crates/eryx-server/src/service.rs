@@ -77,6 +77,7 @@ impl crate::proto::eryx::v1::eryx_server::Eryx for EryxService {
         let net_config = execute_req.network_config.map(|nc| {
             let defaults = NetConfig::default();
             NetConfig {
+                allow_all_hosts: nc.allow_all_hosts,
                 allowed_hosts: nc.allowed_hosts,
                 blocked_hosts: if nc.blocked_hosts.is_empty() {
                     defaults.blocked_hosts

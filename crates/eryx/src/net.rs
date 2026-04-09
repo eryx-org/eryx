@@ -33,7 +33,10 @@ pub struct NetConfig {
     pub connect_timeout: Duration,
     /// Read/write timeout for I/O operations.
     pub io_timeout: Duration,
-    /// Allowed host patterns (empty = allow all).
+    /// When true, all non-blocked hosts are allowed (`allowed_hosts` is ignored).
+    /// When false (default), only hosts matching `allowed_hosts` are permitted.
+    pub allow_all_hosts: bool,
+    /// Allowed host patterns (only checked when `allow_all_hosts` is false).
     ///
     /// Patterns support wildcards: `*.example.com`, `api.*.com`, `exact.host.com`
     pub allowed_hosts: Vec<String>,
@@ -53,7 +56,8 @@ impl Default for NetConfig {
             max_connections: 10,
             connect_timeout: Duration::from_secs(30),
             io_timeout: Duration::from_secs(60),
-            allowed_hosts: vec![], // Empty = allow all
+            allow_all_hosts: false,
+            allowed_hosts: vec![],
             blocked_hosts: vec![
                 // Block private/local networks by default
                 "localhost".into(),
@@ -148,6 +152,7 @@ impl NetConfig {
             max_connections: 100,
             connect_timeout: Duration::from_secs(30),
             io_timeout: Duration::from_secs(60),
+            allow_all_hosts: true,
             allowed_hosts: vec![],
             blocked_hosts: vec![],
             custom_root_certs: vec![],
@@ -418,25 +423,28 @@ impl ConnectionManager {
 
     /// Check if a host is allowed by the current policy.
     fn check_host_allowed(&self, host: &str) -> Result<(), TcpError> {
-        // Check blocked first
+        // Check blocked first (always enforced).
         for pattern in &self.config.blocked_hosts {
             if host_matches_pattern(host, pattern) {
                 return Err(TcpError::NotPermitted(format!("host '{host}' is blocked")));
             }
         }
 
-        // If allowed list is non-empty, host must match
-        if !self.config.allowed_hosts.is_empty() {
-            let allowed = self
-                .config
-                .allowed_hosts
-                .iter()
-                .any(|p| host_matches_pattern(host, p));
-            if !allowed {
-                return Err(TcpError::NotPermitted(format!(
-                    "host '{host}' not in allowed list"
-                )));
-            }
+        // If allow_all_hosts is set, skip the allowlist check.
+        if self.config.allow_all_hosts {
+            return Ok(());
+        }
+
+        // Otherwise host must match the allowlist.
+        let allowed = self
+            .config
+            .allowed_hosts
+            .iter()
+            .any(|p| host_matches_pattern(host, p));
+        if !allowed {
+            return Err(TcpError::NotPermitted(format!(
+                "host '{host}' not in allowed list"
+            )));
         }
 
         Ok(())
@@ -917,18 +925,17 @@ mod tests {
     }
 
     #[test]
-    fn test_default_config_blocks_private() {
+    fn test_default_config_blocks_everything() {
         let config = NetConfig::default();
         let manager = ConnectionManager::new(config, HashMap::new());
 
+        // Default is allow_all_hosts=false with empty allowed_hosts, so nothing is permitted.
         assert!(manager.check_host_allowed("localhost").is_err());
         assert!(manager.check_host_allowed("127.0.0.1").is_err());
         assert!(manager.check_host_allowed("192.168.1.1").is_err());
         assert!(manager.check_host_allowed("10.0.0.1").is_err());
-
-        // Public hosts should be allowed
-        assert!(manager.check_host_allowed("google.com").is_ok());
-        assert!(manager.check_host_allowed("api.example.com").is_ok());
+        assert!(manager.check_host_allowed("google.com").is_err());
+        assert!(manager.check_host_allowed("api.example.com").is_err());
     }
 
     #[test]
@@ -941,6 +948,22 @@ mod tests {
         assert!(manager.check_host_allowed("api.example.com").is_ok());
         assert!(manager.check_host_allowed("api.github.com").is_ok());
         assert!(manager.check_host_allowed("google.com").is_err());
+    }
+
+    #[test]
+    fn test_allow_all_hosts_true() {
+        let config = NetConfig {
+            allow_all_hosts: true,
+            ..NetConfig::default()
+        };
+        let manager = ConnectionManager::new(config, HashMap::new());
+
+        // allow_all_hosts=true permits all non-blocked hosts.
+        assert!(manager.check_host_allowed("google.com").is_ok());
+        assert!(manager.check_host_allowed("api.example.com").is_ok());
+        // Blocked hosts are still blocked.
+        assert!(manager.check_host_allowed("localhost").is_err());
+        assert!(manager.check_host_allowed("127.0.0.1").is_err());
     }
 
     #[test]
