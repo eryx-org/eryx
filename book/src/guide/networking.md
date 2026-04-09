@@ -13,7 +13,7 @@ use eryx::{Sandbox, NetConfig};
 #[tokio::main]
 async fn main() -> Result<(), eryx::Error> {
     let sandbox = Sandbox::embedded()
-        .with_network(NetConfig::default())
+        .with_network(NetConfig::default().allow_host("example.com"))
         .build()?;
 
     let result = sandbox.execute(r#"
@@ -36,8 +36,8 @@ print("Connected!" if b"HTTP" in response else "Failed")
 ```python
 import eryx
 
-# Enable networking with default configuration
-config = eryx.NetConfig()
+# Enable networking, allowing connections to example.com
+config = eryx.NetConfig(allowed_hosts=["example.com"])
 sandbox = eryx.Sandbox(network=config)
 
 result = sandbox.execute("""
@@ -64,7 +64,8 @@ The default `NetConfig` has sensible security defaults:
 | `max_connections` | 10 | Maximum simultaneous connections |
 | `connect_timeout_ms` | 30,000 | Connection timeout (30 seconds) |
 | `io_timeout_ms` | 60,000 | Read/write timeout (60 seconds) |
-| `allowed_hosts` | `[]` (empty = all) | Whitelist of allowed hosts |
+| `allow_all_hosts` | `false` | When true, all non-blocked hosts are allowed |
+| `allowed_hosts` | `[]` | Whitelist of allowed hosts (used when `allow_all_hosts` is false) |
 | `blocked_hosts` | localhost, private networks | Security blocklist |
 
 ```python
