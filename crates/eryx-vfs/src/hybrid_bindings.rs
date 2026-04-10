@@ -79,7 +79,7 @@ impl HybridReaddirIterator {
 
 impl HybridFsError {
     /// Convert to WASI error code.
-    pub fn downcast(self) -> anyhow::Result<types::ErrorCode> {
+    pub fn downcast(self) -> wasmtime::Result<types::ErrorCode> {
         Ok(vfs_error_to_error_code(&self.0))
     }
 }

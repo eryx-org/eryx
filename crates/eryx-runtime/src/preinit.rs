@@ -34,7 +34,7 @@
 //! ).await?;
 //! ```
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Result, anyhow};
 use std::collections::HashSet;
 use std::path::Path;
 use tempfile::TempDir;
@@ -110,13 +110,12 @@ pub async fn pre_initialize(
     let wizer = Wizer::new();
     let (cx, instrumented_wasm) = wizer
         .instrument_component(&original_component)
-        .context("Failed to instrument component")?;
+        .map_err(|e| e.context("Failed to instrument component"))?;
 
     // Phase 2: Instantiate and run the instrumented component.
     let mut config = Config::new();
     config.wasm_component_model(true);
     config.wasm_component_model_async(true);
-    config.async_support(true);
 
     let engine = Engine::new(&config)?;
     let component = Component::new(&engine, &instrumented_wasm)?;
@@ -219,7 +218,7 @@ pub async fn pre_initialize(
             },
         )
         .await
-        .context("Failed to pre-initialize component")?;
+        .map_err(|e| e.context("Failed to pre-initialize component"))?;
 
     // Phase 4: Restore _initialize exports stripped by wasmtime-wizer.
     //
@@ -571,7 +570,7 @@ fn add_network_stubs(linker: &mut Linker<PreInitCtx>) -> Result<()> {
     // Get or create the eryx:net/tcp interface
     let mut tcp_instance = linker
         .instance("eryx:net/tcp@0.1.0")
-        .context("Failed to get eryx:net/tcp instance")?;
+        .map_err(|e| e.context("Failed to get eryx:net/tcp instance"))?;
 
     // tcp.connect: func(host: string, port: u16) -> result<tcp-handle, tcp-error>
     tcp_instance.func_wrap_async(
@@ -627,7 +626,7 @@ fn add_network_stubs(linker: &mut Linker<PreInitCtx>) -> Result<()> {
     // Get or create the eryx:net/tls interface
     let mut tls_instance = linker
         .instance("eryx:net/tls@0.1.0")
-        .context("Failed to get eryx:net/tls instance")?;
+        .map_err(|e| e.context("Failed to get eryx:net/tls instance"))?;
 
     // tls.upgrade: func(tcp: tcp-handle, hostname: string) -> result<tls-handle, tls-error>
     tls_instance.func_wrap_async(
@@ -728,9 +727,7 @@ async fn call_execute_for_imports(
     execute_func
         .call_async(&mut *store, &args, &mut results)
         .await
-        .context("Failed to execute imports during pre-init")?;
-
-    execute_func.post_return_async(&mut *store).await?;
+        .map_err(|e| e.context("Failed to execute imports during pre-init"))?;
 
     // Check if the result was an error
     // result<string, string> is represented as Val::Result(Result<Option<Box<Val>>, Option<Box<Val>>>)
@@ -775,9 +772,7 @@ async fn call_finalize_preinit(store: &mut Store<PreInitCtx>, instance: &Instanc
     finalize_func
         .call_async(&mut *store, &args, &mut results)
         .await
-        .context("Failed to call finalize-preinit")?;
-
-    finalize_func.post_return_async(&mut *store).await?;
+        .map_err(|e| e.context("Failed to call finalize-preinit"))?;
 
     Ok(())
 }

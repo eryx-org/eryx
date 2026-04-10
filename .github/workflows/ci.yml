@@ -311,7 +311,7 @@ jobs:
         with:
           mise_toml: |
             [tools]
-            rust = "1.90"
+            rust = "1.91"
 
       - name: Check MSRV
         # Exclude crates that require WASM artifacts or WASI SDK

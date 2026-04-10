@@ -328,7 +328,7 @@ impl ResourceLimiter for MemoryTracker {
         _current: usize,
         desired: usize,
         maximum: Option<usize>,
-    ) -> anyhow::Result<bool> {
+    ) -> wasmtime::Result<bool> {
         // Track peak memory usage
         let desired_u64 = desired as u64;
         self.peak_memory_bytes
@@ -352,7 +352,7 @@ impl ResourceLimiter for MemoryTracker {
         _current: usize,
         desired: usize,
         maximum: Option<usize>,
-    ) -> anyhow::Result<bool> {
+    ) -> wasmtime::Result<bool> {
         // Allow table growth up to the declared maximum
         if maximum.is_some_and(|max| desired > max) {
             return Ok(false);
@@ -366,8 +366,8 @@ impl ResourceLimiter for MemoryTracker {
 // Network functions are declared as regular sync `func` in WIT (not `async func`).
 // We use the `async` flag for network imports to generate `func_wrap_async` bindings.
 // This gives us fiber-based async: the host can await on async operations, but from
-// the guest's perspective the calls are blocking. This requires `Config::async_support`
-// but NOT `Config::wasm_component_model_async`.
+// the guest's perspective the calls are blocking. This requires
+// `Config::wasm_component_model_async`.
 wasmtime::component::bindgen!({
     path: "wit",
     imports: {
@@ -1551,7 +1551,6 @@ impl PythonExecutor {
         // TCP/TLS functions are sync `func` in WIT but use fiber-based async
         // on the host (via `async` bindgen flag) - they appear blocking to guest.
         config.wasm_component_model_async(true);
-        config.async_support(true);
 
         // Enable epoch-based interruption for execution timeouts.
         // This allows us to interrupt WASM execution even in tight loops
@@ -1608,7 +1607,6 @@ impl PythonExecutor {
         let mut config = Config::new();
         config.wasm_component_model(true);
         config.wasm_component_model_async(true);
-        config.async_support(true);
         config.epoch_interruption(true);
         config.consume_fuel(true);
         config.memory_init_cow(true);
