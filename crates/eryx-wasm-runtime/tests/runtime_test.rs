@@ -144,7 +144,6 @@ async fn test_instantiate_component() -> Result<(), Box<dyn std::error::Error>> 
 
     // Create engine with async and component model support
     let mut config = Config::new();
-    config.async_support(true);
     config.wasm_component_model(true);
     config.wasm_component_model_async(true);
 
@@ -382,7 +381,6 @@ async fn test_instantiate_component() -> Result<(), Box<dyn std::error::Error>> 
     let (result,) = execute
         .call_async(&mut store, ("print(1+1)".to_string(),))
         .await?;
-    execute.post_return_async(&mut store).await?;
 
     match &result {
         Ok(output) => {
@@ -399,7 +397,6 @@ async fn test_instantiate_component() -> Result<(), Box<dyn std::error::Error>> 
     let (result,) = execute
         .call_async(&mut store, ("print('hello')\nprint('world')".to_string(),))
         .await?;
-    execute.post_return_async(&mut store).await?;
 
     match &result {
         Ok(output) => {
@@ -419,7 +416,6 @@ async fn test_instantiate_component() -> Result<(), Box<dyn std::error::Error>> 
     let (result,) = execute
         .call_async(&mut store, ("x = 42".to_string(),))
         .await?;
-    execute.post_return_async(&mut store).await?;
 
     match &result {
         Ok(output) => {
@@ -436,7 +432,6 @@ async fn test_instantiate_component() -> Result<(), Box<dyn std::error::Error>> 
     let (result,) = execute
         .call_async(&mut store, ("def broken(".to_string(),))
         .await?;
-    execute.post_return_async(&mut store).await?;
 
     match &result {
         Ok(output) => {
@@ -456,7 +451,6 @@ async fn test_instantiate_component() -> Result<(), Box<dyn std::error::Error>> 
     let (result,) = execute
         .call_async(&mut store, ("print(undefined_variable)".to_string(),))
         .await?;
-    execute.post_return_async(&mut store).await?;
 
     match &result {
         Ok(output) => {
@@ -476,7 +470,6 @@ async fn test_instantiate_component() -> Result<(), Box<dyn std::error::Error>> 
     let (result,) = execute
         .call_async(&mut store, ("my_var = 'persisted'".to_string(),))
         .await?;
-    execute.post_return_async(&mut store).await?;
     match &result {
         Ok(_) => println!("  Assignment OK"),
         Err(e) => panic!("Assignment failed with: {e}"),
@@ -485,7 +478,6 @@ async fn test_instantiate_component() -> Result<(), Box<dyn std::error::Error>> 
     let (result,) = execute
         .call_async(&mut store, ("print(my_var)".to_string(),))
         .await?;
-    execute.post_return_async(&mut store).await?;
 
     match &result {
         Ok(output) => {
@@ -506,7 +498,6 @@ async fn test_instantiate_component() -> Result<(), Box<dyn std::error::Error>> 
     let (result,) = execute
         .call_async(&mut store, ("import math; print(math.pi)".to_string(),))
         .await?;
-    execute.post_return_async(&mut store).await?;
 
     match &result {
         Ok(output) => {
@@ -552,12 +543,10 @@ async fn test_instantiate_component() -> Result<(), Box<dyn std::error::Error>> 
             ("x = 42\ny = 'hello'\nz = [1, 2, 3]".to_string(),),
         )
         .await?;
-    execute.post_return_async(&mut store).await?;
     assert!(result.is_ok(), "Setting variables should succeed");
 
     // Take a snapshot
     let (snapshot_result,) = snapshot_state.call_async(&mut store, ()).await?;
-    snapshot_state.post_return_async(&mut store).await?;
 
     let snapshot_data = match snapshot_result {
         Ok(data) => {
@@ -573,13 +562,11 @@ async fn test_instantiate_component() -> Result<(), Box<dyn std::error::Error>> 
     // Test 9: Clear state
     println!("Test 9: Clear state...");
     clear_state.call_async(&mut store, ()).await?;
-    clear_state.post_return_async(&mut store).await?;
 
     // Verify variables are gone
     let (result,) = execute
         .call_async(&mut store, ("print(x)".to_string(),))
         .await?;
-    execute.post_return_async(&mut store).await?;
 
     match &result {
         Ok(output) => {
@@ -599,7 +586,6 @@ async fn test_instantiate_component() -> Result<(), Box<dyn std::error::Error>> 
     let (restore_result,) = restore_state
         .call_async(&mut store, (snapshot_data,))
         .await?;
-    restore_state.post_return_async(&mut store).await?;
 
     match &restore_result {
         Ok(()) => {
@@ -614,7 +600,6 @@ async fn test_instantiate_component() -> Result<(), Box<dyn std::error::Error>> 
     let (result,) = execute
         .call_async(&mut store, ("print(x, y, z)".to_string(),))
         .await?;
-    execute.post_return_async(&mut store).await?;
 
     match &result {
         Ok(output) => {
@@ -650,7 +635,6 @@ print(f"count: {len(cbs)}")
             .to_string(),),
         )
         .await?;
-    execute.post_return_async(&mut store).await?;
 
     match &result {
         Ok(output) => {
@@ -678,7 +662,6 @@ print(f"timestamp: {result.get('timestamp', 'missing')}")
             .to_string(),),
         )
         .await?;
-    execute.post_return_async(&mut store).await?;
 
     match &result {
         Ok(output) => {
@@ -710,7 +693,6 @@ print(f"callbacks: {names}")
             .to_string(),),
         )
         .await?;
-    execute.post_return_async(&mut store).await?;
 
     match &result {
         Ok(output) => {
@@ -737,7 +719,6 @@ print(f"add result: {result.get('result', 'missing')}")
             .to_string(),),
         )
         .await?;
-    execute.post_return_async(&mut store).await?;
 
     match &result {
         Ok(output) => {
@@ -765,7 +746,6 @@ print(f"url: {result.get('url', 'missing')}")
             .to_string(),),
         )
         .await?;
-    execute.post_return_async(&mut store).await?;
 
     match &result {
         Ok(output) => {
@@ -801,7 +781,6 @@ except RuntimeError as e:
             .to_string(),),
         )
         .await?;
-    execute.post_return_async(&mut store).await?;
 
     match &result {
         Ok(output) => {
@@ -829,7 +808,6 @@ print("to stderr", file=sys.stderr)
             .to_string(),),
         )
         .await?;
-    execute.post_return_async(&mut store).await?;
 
     match &result {
         Ok(output) => {
