@@ -43,7 +43,7 @@ impl From<wasmtime::component::ResourceTableError> for VfsFsError {
 
 impl VfsFsError {
     /// Convert to WASI error code.
-    pub fn downcast(self) -> anyhow::Result<generated::wasi::filesystem::types::ErrorCode> {
+    pub fn downcast(self) -> wasmtime::Result<generated::wasi::filesystem::types::ErrorCode> {
         Ok(crate::wasi_impl::vfs_error_to_error_code(&self.0))
     }
 }

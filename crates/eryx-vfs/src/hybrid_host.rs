@@ -66,14 +66,14 @@ impl<S: VfsStorage + Clone + 'static> preopens::Host for HybridVfsState<'_, S> {
 // ============================================================================
 
 impl<S: VfsStorage + Clone + 'static> types::Host for HybridVfsState<'_, S> {
-    fn convert_error_code(&mut self, err: HybridFsError) -> anyhow::Result<types::ErrorCode> {
+    fn convert_error_code(&mut self, err: HybridFsError) -> wasmtime::Result<types::ErrorCode> {
         err.downcast()
     }
 
     fn filesystem_error_code(
         &mut self,
-        err: Resource<anyhow::Error>,
-    ) -> anyhow::Result<Option<types::ErrorCode>> {
+        err: Resource<wasmtime::Error>,
+    ) -> wasmtime::Result<Option<types::ErrorCode>> {
         let err = self.table.get(&err)?;
         if let Some(vfs_err) = err.downcast_ref::<crate::VfsError>() {
             return Ok(Some(crate::hybrid_bindings::vfs_error_to_error_code(
@@ -794,7 +794,7 @@ impl<S: VfsStorage + Clone + 'static> types::HostDescriptor for HybridVfsState<'
         }
     }
 
-    fn drop(&mut self, fd: Resource<HybridDescriptor>) -> anyhow::Result<()> {
+    fn drop(&mut self, fd: Resource<HybridDescriptor>) -> wasmtime::Result<()> {
         self.table.delete(fd)?;
         Ok(())
     }
@@ -1089,7 +1089,7 @@ impl<S: VfsStorage + Clone + 'static> types::HostDescriptor for HybridVfsState<'
         &mut self,
         a: Resource<HybridDescriptor>,
         b: Resource<HybridDescriptor>,
-    ) -> anyhow::Result<bool> {
+    ) -> wasmtime::Result<bool> {
         let desc_a = self.table.get(&a)?;
         let desc_b = self.table.get(&b)?;
         Ok(desc_a.path() == desc_b.path())
@@ -1191,7 +1191,7 @@ impl<S: VfsStorage + Clone + 'static> types::HostDirectoryEntryStream for Hybrid
         Ok(iterator.next())
     }
 
-    fn drop(&mut self, stream: Resource<HybridReaddirIterator>) -> anyhow::Result<()> {
+    fn drop(&mut self, stream: Resource<HybridReaddirIterator>) -> wasmtime::Result<()> {
         self.table.delete(stream)?;
         Ok(())
     }

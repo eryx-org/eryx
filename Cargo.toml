@@ -96,9 +96,10 @@ wasm-encoder = "0.243"
 wasmparser = "0.243"
 
 # WebAssembly runtime (v40+ required for async component model)
-wasmtime = { version = "41", features = ["component-model", "async"] }
-wasmtime-wasi = "41"
-wasmtime-wizer = { version = "41", features = ["component-model", "wasmtime"] }
+wasmtime = { version = "43", features = ["component-model", "async"] }
+wasmtime-wasi = "43"
+wasmtime-wasi-io = "43"
+wasmtime-wizer = { version = "43", features = ["component-model", "wasmtime"] }
 
 # WebAssembly component linking and WIT parsing
 wit-component = "0.243"
