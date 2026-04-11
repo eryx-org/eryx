@@ -78,6 +78,7 @@ fn write_param(out: &mut String, param: &ParameterDeclaration, required: bool) {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
     use crate::{CallbackDeclaration, ParameterDeclaration};

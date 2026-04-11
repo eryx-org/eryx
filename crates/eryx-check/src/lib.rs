@@ -127,6 +127,7 @@ pub fn check_types_with_options(
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
 
