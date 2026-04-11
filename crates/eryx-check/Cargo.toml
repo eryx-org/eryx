@@ -1,0 +1,25 @@
+[package]
+name = "eryx-check"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Python linting and type checking for eryx"
+publish = false
+
+[dependencies]
+anyhow.workspace = true
+
+# All crates from the ruff monorepo, pinned to the commit used by ty 0.0.29
+ruff_db = { git = "https://github.com/astral-sh/ruff.git", rev = "208780434" }
+ruff_python_ast = { git = "https://github.com/astral-sh/ruff.git", rev = "208780434" }
+ruff_python_parser = { git = "https://github.com/astral-sh/ruff.git", rev = "208780434" }
+ty_module_resolver = { git = "https://github.com/astral-sh/ruff.git", rev = "208780434" }
+ty_python_semantic = { git = "https://github.com/astral-sh/ruff.git", rev = "208780434" }
+ty_vendored = { git = "https://github.com/astral-sh/ruff.git", rev = "208780434" }
+salsa = { git = "https://github.com/salsa-rs/salsa.git", rev = "2f687a17ceea8ec7aaa605561ccbde938ccef086", default-features = false }
+
+[lints]
+workspace = true
