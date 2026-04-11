@@ -18,6 +18,54 @@ service Eryx {
   //   4. Server streams OutputEvent messages as Python produces output
   //   5. Server sends ExecuteResult as the final message
   rpc Execute(stream ClientMessage) returns (stream ServerMessage);
+
+  // Check Python code for syntax and type errors.
+  //
+  // Performs static analysis only — no sandbox or execution. Returns
+  // diagnostics including syntax errors and type checker findings.
+  // Callback declarations generate type stubs so the checker can
+  // validate callback invocations.
+  rpc Check(CheckRequest) returns (CheckResponse);
+}
+
+// Request to check Python code for errors.
+message CheckRequest {
+  // Python source code to check.
+  string code = 1;
+
+  // Supporting files available during type checking.
+  // MODULE files are placed alongside the script so they're importable.
+  // DATA files are ignored for type checking purposes.
+  repeated SupportingFile files = 2;
+
+  // Callback declarations to generate type stubs for.
+  // Each declaration becomes an async function stub that the type checker
+  // can validate calls against.
+  repeated CallbackDeclaration callbacks = 3;
+}
+
+// A single diagnostic from the checker.
+message CheckDiagnostic {
+  // Human-readable error/warning message.
+  string message = 1;
+
+  // Severity: "error", "warning", or "info".
+  string severity = 2;
+
+  // Source: "syntax" or "type".
+  string source = 3;
+
+  // Byte offset of the diagnostic start in the original source code.
+  uint32 start_offset = 4;
+
+  // Byte offset of the diagnostic end in the original source code.
+  uint32 end_offset = 5;
+}
+
+// Response from the Check RPC.
+message CheckResponse {
+  // All diagnostics found in the code.
+  repeated CheckDiagnostic diagnostics = 1;
 }
 
 // Messages sent from the client (Go worker) to the server (Eryx).

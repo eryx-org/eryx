@@ -19,7 +19,11 @@ use ty_python_semantic::{
     PythonVersionSource, PythonVersionWithSource, default_lint_registry,
 };
 
-use crate::{Diagnostic, Severity, Source};
+use crate::stubs::generate_callback_stubs;
+use crate::{CheckOptions, Diagnostic, Severity, Source};
+
+/// Import line prepended to user source when callback stubs are present.
+const CALLBACK_IMPORT: &str = "from _eryx_callbacks import *\n";
 
 /// Salsa database for type checking.
 #[salsa::db]
@@ -108,14 +112,38 @@ impl ModuleResolverDb for CheckDb {
 #[salsa::db]
 impl salsa::Database for CheckDb {}
 
-/// Type-check a Python source string using ty.
-pub(crate) fn check(source: &str) -> anyhow::Result<Vec<Diagnostic>> {
+/// Type-check a Python source string using ty, with supporting files and callback stubs.
+pub(crate) fn check_with_options(
+    source: &str,
+    options: &CheckOptions,
+) -> anyhow::Result<Vec<Diagnostic>> {
     let db = CheckDb::new();
+    let fs = db.memory_file_system();
 
     let src_root = SystemPathBuf::from("/src");
-    db.memory_file_system().create_directory_all(&src_root)?;
-    db.memory_file_system()
-        .write_file_all(SystemPath::new("/src/script.py"), source)?;
+    fs.create_directory_all(&src_root)?;
+
+    // 1. Write supporting files under /src/ so they're importable.
+    for file in &options.files {
+        let path = format!("/src/{}", file.name);
+        fs.write_file_all(SystemPath::new(&path), &file.content)?;
+    }
+
+    // 2. Generate callback stubs and prepend import if needed.
+    let stubs = generate_callback_stubs(&options.callbacks);
+    let (source_to_check, prepend_len) = if stubs.is_empty() {
+        (source.to_string(), 0u32)
+    } else {
+        fs.write_file_all(SystemPath::new("/src/_eryx_callbacks.pyi"), &stubs)?;
+        let mut combined = String::with_capacity(CALLBACK_IMPORT.len() + source.len());
+        combined.push_str(CALLBACK_IMPORT);
+        combined.push_str(source);
+        let prepend_len = CALLBACK_IMPORT.len() as u32;
+        (combined, prepend_len)
+    };
+
+    // 3. Write the main script.
+    fs.write_file_all(SystemPath::new("/src/script.py"), &source_to_check)?;
 
     Program::from_settings(
         &db,
@@ -138,7 +166,7 @@ pub(crate) fn check(source: &str) -> anyhow::Result<Vec<Diagnostic>> {
 
     let diagnostics = ty_diagnostics
         .into_iter()
-        .map(|d| {
+        .filter_map(|d| {
             let severity = match d.severity() {
                 ruff_db::diagnostic::Severity::Info => Severity::Info,
                 ruff_db::diagnostic::Severity::Warning => Severity::Warning,
@@ -152,13 +180,18 @@ pub(crate) fn check(source: &str) -> anyhow::Result<Vec<Diagnostic>> {
                 .map(|r| (u32::from(r.start()), u32::from(r.end())))
                 .unwrap_or((0, 0));
 
-            Diagnostic {
+            // Filter out diagnostics that fall entirely within the prepended import.
+            if prepend_len > 0 && end <= prepend_len {
+                return None;
+            }
+
+            Some(Diagnostic {
                 message: d.primary_message().to_string(),
                 severity,
                 source: Source::Type,
-                start_offset: start,
-                end_offset: end,
-            }
+                start_offset: start.saturating_sub(prepend_len),
+                end_offset: end.saturating_sub(prepend_len),
+            })
         })
         .collect();
 

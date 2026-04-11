@@ -1296,6 +1296,7 @@ dependencies = [
  "clap",
  "dashmap",
  "eryx",
+ "eryx-check",
  "metrics",
  "metrics-exporter-prometheus",
  "opentelemetry",
