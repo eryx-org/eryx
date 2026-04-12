@@ -185,6 +185,18 @@ pub(crate) fn check_with_options(
                 return None;
             }
 
+            // Eryx scripts support top-level await via PyCF_ALLOW_TOP_LEVEL_AWAIT,
+            // so suppress all "... outside of an asynchronous function" diagnostics.
+            // This covers `await`, `async for`, `async with`, and async comprehensions.
+            // We match on InvalidSyntax id + message suffix to be robust against
+            // wording changes in individual variants.
+            if d.id() == ruff_db::diagnostic::DiagnosticId::InvalidSyntax
+                && d.primary_message()
+                    .ends_with("outside of an asynchronous function")
+            {
+                return None;
+            }
+
             Some(Diagnostic {
                 message: d.primary_message().to_string(),
                 severity,

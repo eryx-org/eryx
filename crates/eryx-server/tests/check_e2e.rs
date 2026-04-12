@@ -304,6 +304,42 @@ async fn check_callback_with_optional_params() {
     );
 }
 
+/// Eryx scripts support top-level await (TLA) — no need for `async def main()`.
+#[tokio::test]
+async fn check_callback_top_level_await() {
+    let channel = start_server().await;
+    let mut client = EryxClient::new(channel);
+
+    let resp = client
+        .check(CheckRequest {
+            code: "result = await query_prom(expr='up')\nprint(result)\n".to_string(),
+            files: vec![],
+            callbacks: vec![CallbackDeclaration {
+                name: "query_prom".to_string(),
+                description: "Query Prometheus".to_string(),
+                parameters: vec![ParameterDeclaration {
+                    name: "expr".to_string(),
+                    json_type: "string".to_string(),
+                    description: "PromQL expression".to_string(),
+                    required: true,
+                }],
+            }],
+        })
+        .await
+        .unwrap()
+        .into_inner();
+
+    let type_errors: Vec<_> = resp
+        .diagnostics
+        .iter()
+        .filter(|d| d.source == "type")
+        .collect();
+    assert!(
+        type_errors.is_empty(),
+        "top-level await should not cause type errors, got: {type_errors:?}"
+    );
+}
+
 #[tokio::test]
 async fn check_diagnostic_offsets_are_valid() {
     let channel = start_server().await;
