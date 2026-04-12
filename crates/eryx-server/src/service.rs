@@ -405,13 +405,21 @@ impl crate::proto::eryx::v1::eryx_server::Eryx for EryxService {
 
         let options = eryx_check::CheckOptions { files, callbacks };
 
-        // Run type checking on a blocking thread — it's CPU-bound.
+        // Run syntax + type checking on a blocking thread — it's CPU-bound.
         let diagnostics = tokio::task::spawn_blocking(move || {
-            eryx_check::check_types_with_options(&code, options)
+            // Syntax errors first (fast), then type errors (heavier).
+            let mut all = eryx_check::check_syntax(&code);
+            match eryx_check::check_types_with_options(&code, options) {
+                Ok(type_diags) => all.extend(type_diags),
+                Err(e) => {
+                    tracing::warn!("type check setup failed: {e}");
+                    // Still return syntax diagnostics even if type checking fails.
+                }
+            }
+            all
         })
         .await
-        .map_err(|e| Status::internal(format!("type check task failed: {e}")))?
-        .map_err(|e| Status::internal(format!("type check error: {e}")))?;
+        .map_err(|e| Status::internal(format!("check task failed: {e}")))?;
 
         let proto_diagnostics: Vec<CheckDiagnostic> = diagnostics
             .into_iter()
