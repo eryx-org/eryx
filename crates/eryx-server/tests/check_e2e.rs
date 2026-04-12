@@ -1,8 +1,8 @@
-//! End-to-end gRPC tests for the Check RPC.
+//! End-to-end gRPC tests for the Check and Format RPCs.
 //!
 //! These tests start a tonic server in-process and exercise the unary Check
-//! RPC for Python type checking. Unlike the Execute tests, these do NOT
-//! require the WASM runtime — type checking is pure Rust via ty.
+//! and Format RPCs. Unlike the Execute tests, these do NOT require the WASM
+//! runtime — type checking and formatting are pure Rust via ty/ruff.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use std::sync::Arc;
@@ -12,7 +12,8 @@ use eryx::{PoolConfig, Sandbox, SandboxPool};
 use eryx_server::proto::eryx::v1::eryx_client::EryxClient;
 use eryx_server::proto::eryx::v1::eryx_server::EryxServer;
 use eryx_server::proto::eryx::v1::{
-    CallbackDeclaration, CheckRequest, FileKind, ParameterDeclaration, SupportingFile,
+    CallbackDeclaration, CheckRequest, FileKind, FormatRequest, ParameterDeclaration,
+    SupportingFile,
 };
 use eryx_server::service::EryxService;
 use tokio::net::TcpListener;
@@ -366,4 +367,87 @@ async fn check_diagnostic_offsets_are_valid() {
             diag
         );
     }
+}
+
+// ─── Format RPC tests ───────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn format_fixes_whitespace() {
+    let channel = start_server().await;
+    let mut client = EryxClient::new(channel);
+
+    let resp = client
+        .format(FormatRequest {
+            code: "x=1\ny =  2\n".to_string(),
+        })
+        .await
+        .unwrap()
+        .into_inner();
+
+    assert!(resp.error.is_empty(), "unexpected error: {}", resp.error);
+    assert_eq!(resp.formatted_code, "x = 1\ny = 2\n");
+}
+
+#[tokio::test]
+async fn format_already_clean() {
+    let channel = start_server().await;
+    let mut client = EryxClient::new(channel);
+
+    let source = "x = 1\nprint(x)\n";
+    let resp = client
+        .format(FormatRequest {
+            code: source.to_string(),
+        })
+        .await
+        .unwrap()
+        .into_inner();
+
+    assert!(resp.error.is_empty());
+    assert_eq!(resp.formatted_code, source);
+}
+
+#[tokio::test]
+async fn format_syntax_error_returns_error() {
+    let channel = start_server().await;
+    let mut client = EryxClient::new(channel);
+
+    let resp = client
+        .format(FormatRequest {
+            code: "def foo(\n".to_string(),
+        })
+        .await
+        .unwrap()
+        .into_inner();
+
+    assert!(
+        !resp.error.is_empty(),
+        "expected error for syntax-invalid code"
+    );
+    assert!(
+        resp.formatted_code.is_empty(),
+        "formatted_code should be empty on error"
+    );
+}
+
+#[tokio::test]
+async fn format_multiline_function() {
+    let channel = start_server().await;
+    let mut client = EryxClient::new(channel);
+
+    let messy = "def foo( a,b,  c ):\n  return a+b+c\n";
+    let resp = client
+        .format(FormatRequest {
+            code: messy.to_string(),
+        })
+        .await
+        .unwrap()
+        .into_inner();
+
+    assert!(resp.error.is_empty(), "unexpected error: {}", resp.error);
+    // Ruff formatter normalizes spacing.
+    assert!(
+        resp.formatted_code.contains("def foo(a, b, c)"),
+        "expected normalized function signature, got: {:?}",
+        resp.formatted_code
+    );
 }

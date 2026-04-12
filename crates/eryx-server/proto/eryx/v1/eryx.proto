@@ -26,6 +26,12 @@ service Eryx {
   // Callback declarations generate type stubs so the checker can
   // validate callback invocations.
   rpc Check(CheckRequest) returns (CheckResponse);
+
+  // Format Python source code.
+  //
+  // Returns the formatted source code. Requires valid syntax — returns
+  // an error if the source cannot be parsed.
+  rpc Format(FormatRequest) returns (FormatResponse);
 }
 
 // Request to check Python code for errors.
@@ -66,6 +72,22 @@ message CheckDiagnostic {
 message CheckResponse {
   // All diagnostics found in the code.
   repeated CheckDiagnostic diagnostics = 1;
+}
+
+// Request to format Python source code.
+message FormatRequest {
+  // Python source code to format.
+  string code = 1;
+}
+
+// Response from the Format RPC.
+message FormatResponse {
+  // Formatted source code. Empty if formatting failed.
+  string formatted_code = 1;
+
+  // Error message if formatting failed (e.g. syntax error).
+  // Empty on success.
+  string error = 2;
 }
 
 // Messages sent from the client (Go worker) to the server (Eryx).

@@ -1,11 +1,13 @@
-//! Python linting and type checking for eryx.
+//! Python linting, type checking, and formatting for eryx.
 //!
-//! Uses ruff's Python parser for syntax validation and ty for type checking.
+//! Uses ruff's Python parser for syntax validation, ty for type checking,
+//! and ruff's formatter for code formatting.
 //! All crates are pinned to the ruff commit used by ty 0.0.29.
 
 mod stubs;
 mod tycheck;
 
+use ruff_python_formatter::{FormatModuleError, PyFormatOptions, format_module_source};
 use ruff_python_parser::{Mode, parse_unchecked};
 
 /// A diagnostic from checking Python source code.
@@ -86,6 +88,15 @@ pub struct CheckOptions {
     pub callbacks: Vec<CallbackDeclaration>,
 }
 
+/// Format Python source code using ruff's formatter.
+///
+/// Returns the formatted source on success, or an error if the source
+/// has syntax errors (the formatter requires valid syntax).
+pub fn format_source(source: &str) -> Result<String, FormatModuleError> {
+    let printed = format_module_source(source, PyFormatOptions::default())?;
+    Ok(printed.as_code().to_string())
+}
+
 /// Check Python source code for syntax errors.
 ///
 /// Returns an empty vec if the code is syntactically valid.
@@ -130,6 +141,24 @@ pub fn check_types_with_options(
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn format_fixes_whitespace() {
+        let formatted = format_source("x=1\ny =  2\n").unwrap();
+        assert_eq!(formatted, "x = 1\ny = 2\n");
+    }
+
+    #[test]
+    fn format_already_clean() {
+        let source = "x = 1\nprint(x)\n";
+        let formatted = format_source(source).unwrap();
+        assert_eq!(formatted, source);
+    }
+
+    #[test]
+    fn format_syntax_error_returns_err() {
+        assert!(format_source("def foo(\n").is_err());
+    }
 
     #[test]
     fn valid_syntax() {

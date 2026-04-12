@@ -6,7 +6,7 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 authors.workspace = true
-description = "Python linting and type checking for eryx"
+description = "Python linting, type checking, and formatting for eryx"
 publish = false
 
 [dependencies]
@@ -15,6 +15,7 @@ anyhow.workspace = true
 # All crates from the ruff monorepo, pinned to the commit used by ty 0.0.29
 ruff_db = { git = "https://github.com/astral-sh/ruff.git", rev = "208780434" }
 ruff_python_ast = { git = "https://github.com/astral-sh/ruff.git", rev = "208780434" }
+ruff_python_formatter = { git = "https://github.com/astral-sh/ruff.git", rev = "208780434" }
 ruff_python_parser = { git = "https://github.com/astral-sh/ruff.git", rev = "208780434" }
 ty_module_resolver = { git = "https://github.com/astral-sh/ruff.git", rev = "208780434" }
 ty_python_semantic = { git = "https://github.com/astral-sh/ruff.git", rev = "208780434" }

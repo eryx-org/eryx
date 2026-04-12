@@ -21,7 +21,8 @@ use tracing::Instrument;
 use crate::callbacks::{self, CallbackResult, PendingCallbacks};
 use crate::proto::eryx::v1::{
     CheckDiagnostic, CheckRequest, CheckResponse, ClientMessage, ExecuteResult, ExecuteStats,
-    FileKind, ServerMessage, SupportingFile, callback_response, client_message, server_message,
+    FileKind, FormatRequest, FormatResponse, ServerMessage, SupportingFile, callback_response,
+    client_message, server_message,
 };
 
 /// The Eryx gRPC service.
@@ -444,6 +445,28 @@ impl crate::proto::eryx::v1::eryx_server::Eryx for EryxService {
         Ok(Response::new(CheckResponse {
             diagnostics: proto_diagnostics,
         }))
+    }
+
+    async fn format(
+        &self,
+        request: Request<FormatRequest>,
+    ) -> Result<Response<FormatResponse>, Status> {
+        let code = request.into_inner().code;
+
+        let result = tokio::task::spawn_blocking(move || eryx_check::format_source(&code))
+            .await
+            .map_err(|e| Status::internal(format!("format task failed: {e}")))?;
+
+        match result {
+            Ok(formatted) => Ok(Response::new(FormatResponse {
+                formatted_code: formatted,
+                error: String::new(),
+            })),
+            Err(e) => Ok(Response::new(FormatResponse {
+                formatted_code: String::new(),
+                error: e.to_string(),
+            })),
+        }
     }
 }
 
