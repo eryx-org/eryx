@@ -12,17 +12,40 @@ use eryx::{
     PythonStateSnapshot, ResourceLimits, SandboxPool, SecretConfig, SessionExecutor, TraceRequest,
     VfsConfig, generate_placeholder, scrub_placeholders,
 };
+use opentelemetry::propagation::Extractor;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use tokio_util::sync::CancellationToken;
+use tonic::metadata::MetadataMap;
 use tonic::{Request, Response, Status, Streaming};
 use tracing::Instrument;
+use tracing_opentelemetry::OpenTelemetrySpanExt;
 
 use crate::callbacks::{self, CallbackResult, PendingCallbacks};
 use crate::proto::eryx::v1::{
     ClientMessage, ExecuteResult, ExecuteStats, FileKind, ServerMessage, SupportingFile,
     callback_response, client_message, server_message,
 };
+
+/// Adapts tonic's [`MetadataMap`] to OpenTelemetry's [`Extractor`] trait,
+/// allowing the propagator to read `traceparent`/`tracestate` from gRPC metadata.
+struct MetadataExtractor<'a>(&'a MetadataMap);
+
+impl Extractor for MetadataExtractor<'_> {
+    fn get(&self, key: &str) -> Option<&str> {
+        self.0.get(key).and_then(|v| v.to_str().ok())
+    }
+
+    fn keys(&self) -> Vec<&str> {
+        self.0
+            .keys()
+            .filter_map(|k| match k {
+                tonic::metadata::KeyRef::Ascii(key) => Some(key.as_str()),
+                _ => None,
+            })
+            .collect()
+    }
+}
 
 /// The Eryx gRPC service.
 ///
@@ -48,6 +71,12 @@ impl crate::proto::eryx::v1::eryx_server::Eryx for EryxService {
         &self,
         request: Request<Streaming<ClientMessage>>,
     ) -> Result<Response<Self::ExecuteStream>, Status> {
+        // Extract W3C trace context from incoming gRPC metadata so that spans
+        // created here become children of the caller's trace.
+        let parent_cx = opentelemetry::global::get_text_map_propagator(|propagator| {
+            propagator.extract(&MetadataExtractor(request.metadata()))
+        });
+
         let mut inbound = request.into_inner();
 
         // 1. Read the first message — must be ExecuteRequest.
@@ -151,6 +180,9 @@ impl crate::proto::eryx::v1::eryx_server::Eryx for EryxService {
             networking = net_config.is_some(),
             secrets = secrets.len(),
         );
+        if let Err(e) = span.set_parent(parent_cx) {
+            tracing::debug!("failed to set parent trace context: {e}");
+        }
 
         // 2. Parse resource limits.
         let resource_limits = if let Some(limits) = execute_req.resource_limits {
@@ -587,9 +619,10 @@ async fn execute_with_session(
     let cb_map: Arc<HashMap<String, Arc<dyn Callback>>> = Arc::new(callbacks_ref.clone());
     let cb_secrets: Arc<HashMap<String, SecretConfig>> = Arc::new(params.secrets.clone());
     let resource_limits = params.resource_limits.clone();
-    let callback_handler = tokio::spawn(async move {
-        run_callback_handler(callback_rx, cb_map, resource_limits, cb_secrets).await
-    });
+    let callback_handler = tokio::spawn(
+        async move { run_callback_handler(callback_rx, cb_map, resource_limits, cb_secrets).await }
+            .instrument(tracing::Span::current()),
+    );
 
     // Compute preamble line count so trace events can be adjusted to user code lines.
     let preamble_lines = {

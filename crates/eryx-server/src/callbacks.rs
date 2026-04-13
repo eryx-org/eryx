@@ -4,12 +4,14 @@
 //! that send callback requests over the gRPC response stream and await
 //! responses from the client via per-request oneshot channels.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
 
 use dashmap::DashMap;
 use eryx::{CallbackError, DynamicCallback};
 use tokio::sync::{mpsc, oneshot};
+use tracing_opentelemetry::OpenTelemetrySpanExt;
 use uuid::Uuid;
 
 use crate::proto::eryx::v1::{CallbackDeclaration, CallbackRequest, ServerMessage, server_message};
@@ -72,6 +74,17 @@ pub fn build_callbacks(
                         let (resp_tx, resp_rx) = oneshot::channel();
                         pending.insert(request_id.clone(), resp_tx);
 
+                        // Capture the current span's trace context so the Go
+                        // client can create child spans for callback handling.
+                        let trace_context = {
+                            let cx = tracing::Span::current().context();
+                            let mut fields = HashMap::new();
+                            opentelemetry::global::get_text_map_propagator(|propagator| {
+                                propagator.inject_context(&cx, &mut fields);
+                            });
+                            fields.remove("traceparent").unwrap_or_default()
+                        };
+
                         // Send the callback request to the Go client.
                         let msg = ServerMessage {
                             message: Some(server_message::Message::CallbackRequest(
@@ -79,6 +92,7 @@ pub fn build_callbacks(
                                     request_id: request_id.clone(),
                                     name: name.clone(),
                                     arguments_json,
+                                    trace_context,
                                 },
                             )),
                         };

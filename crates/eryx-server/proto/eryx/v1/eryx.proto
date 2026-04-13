@@ -191,6 +191,11 @@ message CallbackRequest {
 
   // JSON-encoded arguments object.
   string arguments_json = 3;
+
+  // W3C traceparent header for distributed trace propagation.
+  // Allows the client to link callback handling spans as children of the
+  // server-side callback span. Empty when tracing is not configured.
+  string trace_context = 4;
 }
 
 // Client responds with the result of a callback invocation.
