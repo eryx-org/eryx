@@ -619,9 +619,10 @@ async fn execute_with_session(
     let cb_map: Arc<HashMap<String, Arc<dyn Callback>>> = Arc::new(callbacks_ref.clone());
     let cb_secrets: Arc<HashMap<String, SecretConfig>> = Arc::new(params.secrets.clone());
     let resource_limits = params.resource_limits.clone();
-    let callback_handler = tokio::spawn(async move {
-        run_callback_handler(callback_rx, cb_map, resource_limits, cb_secrets).await
-    });
+    let callback_handler = tokio::spawn(
+        async move { run_callback_handler(callback_rx, cb_map, resource_limits, cb_secrets).await }
+            .instrument(tracing::Span::current()),
+    );
 
     // Compute preamble line count so trace events can be adjusted to user code lines.
     let preamble_lines = {
