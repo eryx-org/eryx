@@ -12,6 +12,7 @@ use opentelemetry::trace::TracerProvider as _;
 use opentelemetry_otlp::{SpanExporter, WithExportConfig};
 use opentelemetry_sdk::{
     Resource,
+    propagation::TraceContextPropagator,
     trace::{Sampler, SdkTracerProvider},
 };
 use tracing_error::ErrorLayer;
@@ -30,6 +31,10 @@ use tracing_subscriber::{EnvFilter, layer::SubscriberExt, util::SubscriberInitEx
 ///
 /// Returns an error if the OTLP exporter fails to build (e.g. invalid endpoint).
 pub fn setup_tracing() -> Result<Option<SdkTracerProvider>, Box<dyn std::error::Error>> {
+    // Register the W3C TraceContext propagator so incoming `traceparent` headers
+    // are extracted and outgoing requests propagate context.
+    opentelemetry::global::set_text_map_propagator(TraceContextPropagator::new());
+
     let (telemetry_layer, provider) =
         match std::env::var(opentelemetry_otlp::OTEL_EXPORTER_OTLP_ENDPOINT) {
             Ok(endpoint) => {
