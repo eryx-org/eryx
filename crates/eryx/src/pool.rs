@@ -284,7 +284,7 @@ impl SandboxPool {
     /// ).await?;
     /// ```
     pub async fn new(
-        _builder: SandboxBuilder<state::Has, state::Has>,
+        builder: SandboxBuilder<state::Has, state::Has>,
         config: PoolConfig,
     ) -> Result<Self, PoolError> {
         // Validate configuration
@@ -299,28 +299,13 @@ impl SandboxPool {
             ));
         }
 
-        // Create a builder function that can create sandboxes on demand.
-        // We build one sandbox first to validate the configuration, then
-        // create a closure that rebuilds sandboxes with the same settings.
-        //
-        // Since SandboxBuilder consumes self on build(), we need to store
-        // enough information to recreate sandboxes. The embedded() builder
-        // is stateless, so we can just call it again.
+        // Extract the reusable sandbox factory from the builder.
+        // SandboxBuilder consumes self on build(), so we convert it to a
+        // closure that can recreate sandboxes with the same base configuration
+        // (wasm source + stdlib). Per-request settings like callbacks, packages,
+        // and resource limits are not captured -- those are set by the caller.
         let builder_fn: Arc<dyn Fn() -> Result<Sandbox, Error> + Send + Sync> =
-            Arc::new(move || {
-                // For now, we only support the embedded builder pattern.
-                // This creates a fresh embedded sandbox each time.
-                #[cfg(feature = "embedded")]
-                {
-                    Sandbox::embedded().build()
-                }
-                #[cfg(not(feature = "embedded"))]
-                {
-                    Err(Error::Initialization(
-                        "Pool requires embedded feature".to_string(),
-                    ))
-                }
-            });
+            Arc::new(builder.into_factory());
 
         let pool = Arc::new(StdMutex::new(VecDeque::with_capacity(config.max_size)));
         let semaphore = Arc::new(Semaphore::new(config.max_size));

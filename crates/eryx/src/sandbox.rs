@@ -1864,6 +1864,56 @@ impl<R, S> SandboxBuilder<R, S> {
 
 // Build only available when BOTH runtime AND stdlib are configured
 impl SandboxBuilder<state::Has, state::Has> {
+    /// Convert this builder into a reusable factory closure.
+    ///
+    /// The factory captures the wasm source and stdlib path so it can create
+    /// fresh sandboxes on demand. Per-request settings (callbacks, packages,
+    /// resource limits, etc.) are NOT captured -- each sandbox starts with
+    /// defaults for those.
+    ///
+    /// This is used by [`SandboxPool`](crate::SandboxPool) to recreate sandboxes
+    /// since `build()` consumes the builder.
+    pub(crate) fn into_factory(self) -> Box<dyn Fn() -> Result<Sandbox, Error> + Send + Sync> {
+        let wasm_source = self.wasm_source;
+        let stdlib_path = self.python_stdlib_path;
+
+        Box::new(move || {
+            // Reconstruct a builder using the public API based on the captured config.
+            let builder = match &wasm_source {
+                #[cfg(feature = "embedded")]
+                WasmSource::EmbeddedRuntime => Sandbox::embedded(),
+                #[cfg(any(feature = "embedded", feature = "preinit"))]
+                WasmSource::PrecompiledFile(path) => {
+                    let stdlib = stdlib_path.as_ref().ok_or_else(|| {
+                        Error::Initialization("stdlib path required for precompiled file".into())
+                    })?;
+                    // SAFETY: The original builder was already constructed with unsafe
+                    // by the caller, who vouched for the .cwasm file's trustworthiness.
+                    #[allow(unsafe_code)]
+                    unsafe {
+                        Sandbox::builder()
+                            .with_precompiled_file(path)
+                            .with_python_stdlib(stdlib)
+                    }
+                }
+                WasmSource::File(path) => {
+                    let stdlib = stdlib_path
+                        .as_ref()
+                        .ok_or_else(|| Error::Initialization("stdlib path required".into()))?;
+                    Sandbox::builder()
+                        .with_wasm_file(path)
+                        .with_python_stdlib(stdlib)
+                }
+                _ => {
+                    return Err(Error::Initialization(
+                        "unsupported wasm source for pool factory".into(),
+                    ));
+                }
+            };
+            builder.build()
+        })
+    }
+
     /// Build the sandbox.
     ///
     /// # Errors
