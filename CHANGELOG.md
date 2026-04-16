@@ -7,6 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## `eryx-precompile` - [0.4.9](https://github.com/eryx-org/eryx/compare/eryx-precompile-v0.4.8...eryx-precompile-v0.4.9) - 2026-04-15
+
+### Other
+- update Cargo.lock dependencies
+
+## `eryx` - [0.4.9](https://github.com/eryx-org/eryx/compare/eryx-v0.4.8...eryx-v0.4.9) - 2026-04-15
+
+### Added
+- *(net)* add explicit allow_all_hosts field to NetworkConfig ([#190](https://github.com/eryx-org/eryx/pull/190))
+
+### Fixed
+- *(pool)* use builder config instead of hardcoding embedded runtime ([#198](https://github.com/eryx-org/eryx/pull/198))
+
+### Other
+- *(deps)* bump wasmtime from 41 to 43 ([#193](https://github.com/eryx-org/eryx/pull/193))
+
+## `eryx-vfs` - [0.4.9](https://github.com/eryx-org/eryx/compare/eryx-vfs-v0.4.8...eryx-vfs-v0.4.9) - 2026-04-15
+
+### Other
+- *(deps)* bump wasmtime from 41 to 43 ([#193](https://github.com/eryx-org/eryx/pull/193))
+
+## `eryx-runtime` - [0.4.9](https://github.com/eryx-org/eryx/compare/eryx-runtime-v0.4.8...eryx-runtime-v0.4.9) - 2026-04-15
+
+### Other
+- *(deps)* bump wasmtime from 41 to 43 ([#193](https://github.com/eryx-org/eryx/pull/193))
+
 ## `eryx-precompile` - [0.4.8](https://github.com/eryx-org/eryx/compare/eryx-precompile-v0.4.7...eryx-precompile-v0.4.8) - 2026-03-27
 
 ### Other
