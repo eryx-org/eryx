@@ -808,9 +808,6 @@ jobs:
       - name: Prepare runtime.cwasm for Docker build context
         run: cp crates/eryx-runtime/runtime.cwasm crates/eryx-server/runtime.cwasm
 
-      - name: Set up Docker Buildx with Namespace cache
-        uses: namespacelabs/nscloud-setup-buildx-action@v0
-
       - name: Log in to Docker Hub
         if: github.event_name == 'push'
         uses: docker/login-action@v4
