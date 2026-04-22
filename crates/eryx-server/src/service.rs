@@ -1,4 +1,4 @@
-//! gRPC service implementation for the Eryx Execute RPC.
+//! gRPC service implementation for the Eryx Execute and Check RPCs.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -23,8 +23,9 @@ use tracing_opentelemetry::OpenTelemetrySpanExt;
 
 use crate::callbacks::{self, CallbackResult, PendingCallbacks};
 use crate::proto::eryx::v1::{
-    ClientMessage, ExecuteResult, ExecuteStats, FileKind, ServerMessage, SupportingFile,
-    callback_response, client_message, server_message,
+    CheckDiagnostic, CheckRequest, CheckResponse, ClientMessage, ExecuteResult, ExecuteStats,
+    FileKind, FormatRequest, FormatResponse, ServerMessage, SupportingFile, callback_response,
+    client_message, server_message,
 };
 
 /// Adapts tonic's [`MetadataMap`] to OpenTelemetry's [`Extractor`] trait,
@@ -397,6 +398,107 @@ impl crate::proto::eryx::v1::eryx_server::Eryx for EryxService {
         );
 
         Ok(Response::new(ReceiverStream::new(resp_rx)))
+    }
+
+    async fn check(
+        &self,
+        request: Request<CheckRequest>,
+    ) -> Result<Response<CheckResponse>, Status> {
+        let req = request.into_inner();
+        let code = req.code;
+
+        // Convert proto types to eryx-check types (only MODULE files matter).
+        let files: Vec<eryx_check::SupportingFile> = req
+            .files
+            .into_iter()
+            .filter(|f| f.kind() == FileKind::Module)
+            .map(|f| eryx_check::SupportingFile {
+                name: f.name,
+                content: f.content,
+            })
+            .collect();
+
+        let callbacks: Vec<eryx_check::CallbackDeclaration> = req
+            .callbacks
+            .into_iter()
+            .map(|cb| eryx_check::CallbackDeclaration {
+                name: cb.name,
+                description: cb.description,
+                parameters: cb
+                    .parameters
+                    .into_iter()
+                    .map(|p| eryx_check::ParameterDeclaration {
+                        name: p.name,
+                        json_type: p.json_type,
+                        required: p.required,
+                    })
+                    .collect(),
+            })
+            .collect();
+
+        let options = eryx_check::CheckOptions { files, callbacks };
+
+        // Run syntax + type checking on a blocking thread — it's CPU-bound.
+        let diagnostics = tokio::task::spawn_blocking(move || {
+            // Syntax errors first (fast), then type errors (heavier).
+            let mut all = eryx_check::check_syntax(&code);
+            match eryx_check::check_types_with_options(&code, options) {
+                Ok(type_diags) => all.extend(type_diags),
+                Err(e) => {
+                    tracing::warn!("type check setup failed: {e}");
+                    // Still return syntax diagnostics even if type checking fails.
+                }
+            }
+            all
+        })
+        .await
+        .map_err(|e| Status::internal(format!("check task failed: {e}")))?;
+
+        let proto_diagnostics: Vec<CheckDiagnostic> = diagnostics
+            .into_iter()
+            .map(|d| CheckDiagnostic {
+                message: d.message,
+                severity: match d.severity {
+                    eryx_check::Severity::Error => "error",
+                    eryx_check::Severity::Warning => "warning",
+                    eryx_check::Severity::Info => "info",
+                }
+                .to_string(),
+                source: match d.source {
+                    eryx_check::Source::Syntax => "syntax",
+                    eryx_check::Source::Type => "type",
+                }
+                .to_string(),
+                start_offset: d.start_offset,
+                end_offset: d.end_offset,
+            })
+            .collect();
+
+        Ok(Response::new(CheckResponse {
+            diagnostics: proto_diagnostics,
+        }))
+    }
+
+    async fn format(
+        &self,
+        request: Request<FormatRequest>,
+    ) -> Result<Response<FormatResponse>, Status> {
+        let code = request.into_inner().code;
+
+        let result = tokio::task::spawn_blocking(move || eryx_check::format_source(&code))
+            .await
+            .map_err(|e| Status::internal(format!("format task failed: {e}")))?;
+
+        match result {
+            Ok(formatted) => Ok(Response::new(FormatResponse {
+                formatted_code: formatted,
+                error: String::new(),
+            })),
+            Err(e) => Ok(Response::new(FormatResponse {
+                formatted_code: String::new(),
+                error: e.to_string(),
+            })),
+        }
     }
 }
 

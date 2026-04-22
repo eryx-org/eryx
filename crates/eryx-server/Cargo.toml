@@ -11,6 +11,7 @@ publish = false
 
 [dependencies]
 eryx = { workspace = true, features = ["embedded", "vfs"] }
+eryx-check = { path = "../eryx-check" }
 metrics.workspace = true
 metrics-exporter-prometheus.workspace = true
 tokio = { workspace = true, features = ["full"] }

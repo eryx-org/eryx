@@ -8,7 +8,7 @@ members = ["crates/*"]
 [workspace.package]
 version = "0.4.9"
 edition = "2024"
-rust-version = "1.91.0"
+rust-version = "1.92.0"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/sd2k/eryx"
 authors = ["Ben Sully <ben.sully88@gmail.com>"]
