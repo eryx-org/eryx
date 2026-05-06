@@ -16,7 +16,7 @@ use std::time::Duration;
 ///         max_memory_bytes=100_000_000,  # 100MB memory limit
 ///     )
 ///     sandbox = Sandbox(resource_limits=limits)
-#[pyclass(module = "eryx")]
+#[pyclass(module = "eryx", from_py_object)]
 #[derive(Debug, Clone)]
 pub struct ResourceLimits {
     /// Maximum execution time in milliseconds.

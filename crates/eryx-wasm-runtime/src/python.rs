@@ -644,8 +644,9 @@ fn context_get_(py: Python<'_>) -> Option<Py<PyAny>> {
         // Convert raw pointer back to PyObject
         // The object was incref'd when stored, so we borrow it here
         let obj_ptr = ptr as *mut pyo3::ffi::PyObject;
-        // Create a Py<PyAny> from the raw pointer (steals reference)
-        Some(unsafe { Py::from_borrowed_ptr(py, obj_ptr) })
+        // Create a Bound<PyAny> from the raw pointer (borrows, incrementing refcount)
+        // then unbind to get Py<PyAny>
+        Some(unsafe { Bound::from_borrowed_ptr(py, obj_ptr) }.unbind())
     }
 }
 
