@@ -5,12 +5,12 @@
 ARG RUNTIME_SOURCE=default
 
 # ---------- Stage 1: Precompile WASM runtime (only when RUNTIME_SOURCE=default) ----------
-FROM rust:1.91-bookworm AS precompile
+FROM rust:1.92-bookworm AS precompile
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    protobuf-compiler \
-    zstd \
-    && rm -rf /var/lib/apt/lists/*
+  protobuf-compiler \
+  zstd \
+  && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /build
 
@@ -35,22 +35,22 @@ RUN mkdir -p crates/eryx-server/src && echo "fn main() {}" > crates/eryx-server/
 
 # Extract Python stdlib for pre-initialization.
 RUN mkdir -p crates/eryx-wasm-runtime/tests/python-stdlib && \
-    tar -xf crates/eryx/python-stdlib.tar.zst \
-      -C crates/eryx-wasm-runtime/tests/ \
-      --strip-components=0
+  tar -xf crates/eryx/python-stdlib.tar.zst \
+  -C crates/eryx-wasm-runtime/tests/ \
+  --strip-components=0
 
 # Build eryx-precompile and produce runtime.cwasm with preinit.
 ARG ERYX_CPU_FEATURES=x86-64-v3
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
-    --mount=type=cache,target=/build/target \
-    ERYX_PRECOMPILE_BOOTSTRAP=1 \
-    cargo run --release -p eryx-precompile -- compile \
-      crates/eryx-runtime/runtime.wasm \
-      --preinit \
-      --stdlib crates/eryx-wasm-runtime/tests/python-stdlib \
-      --target "${ERYX_CPU_FEATURES}" \
-      --output crates/eryx-runtime/runtime.cwasm \
-      --no-verify
+  --mount=type=cache,target=/build/target \
+  ERYX_PRECOMPILE_BOOTSTRAP=1 \
+  cargo run --release -p eryx-precompile -- compile \
+  crates/eryx-runtime/runtime.wasm \
+  --preinit \
+  --stdlib crates/eryx-wasm-runtime/tests/python-stdlib \
+  --target "${ERYX_CPU_FEATURES}" \
+  --output crates/eryx-runtime/runtime.cwasm \
+  --no-verify
 
 # Runtime provider: default (from precompile stage output)
 FROM precompile AS runtime-default
@@ -64,12 +64,12 @@ COPY ${RUNTIME_CWASM} /build/crates/eryx-runtime/runtime.cwasm
 FROM runtime-${RUNTIME_SOURCE} AS runtime
 
 # ---------- Stage 2: Build the server binary ----------
-FROM rust:1.91-bookworm AS builder
+FROM rust:1.92-bookworm AS builder
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    protobuf-compiler \
-    zstd \
-    && rm -rf /var/lib/apt/lists/*
+  protobuf-compiler \
+  zstd \
+  && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /build
 
@@ -85,16 +85,16 @@ COPY --from=runtime /build/crates/eryx-runtime/runtime.cwasm crates/eryx-runtime
 # - target dir cache: enables incremental compilation across builds
 # We copy the final binary out of the cache mount since it disappears after RUN.
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
-    --mount=type=cache,target=/build/target \
-    cargo build --release -p eryx-server --features eryx/embedded,eryx/preinit \
-    && cp target/release/eryx-server /usr/local/bin/eryx-server
+  --mount=type=cache,target=/build/target \
+  cargo build --release -p eryx-server --features eryx/embedded,eryx/preinit \
+  && cp target/release/eryx-server /usr/local/bin/eryx-server
 
 # ---------- Stage 3: Runtime image ----------
 FROM debian:bookworm-slim
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    ca-certificates \
-    && rm -rf /var/lib/apt/lists/*
+  ca-certificates \
+  && rm -rf /var/lib/apt/lists/*
 
 COPY --from=builder /usr/local/bin/eryx-server /usr/local/bin/eryx-server
 
