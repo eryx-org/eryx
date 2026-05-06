@@ -8,7 +8,7 @@ use pyo3::prelude::*;
 ///
 /// This class is returned by `Sandbox.execute()` and contains the output,
 /// timing information, and execution statistics.
-#[pyclass(frozen, module = "eryx")]
+#[pyclass(frozen, module = "eryx", from_py_object)]
 #[derive(Debug, Clone)]
 pub struct ExecuteResult {
     /// Complete stdout output from the sandboxed code.

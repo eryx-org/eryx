@@ -23,7 +23,7 @@ use std::time::Duration;
 ///     # Allow localhost for local development
 ///     net = NetConfig.permissive()
 ///     sandbox = Sandbox(network=net)
-#[pyclass(module = "eryx")]
+#[pyclass(module = "eryx", from_py_object)]
 #[derive(Debug, Clone)]
 pub struct NetConfig {
     /// Maximum concurrent connections.

@@ -26,7 +26,7 @@ use pyo3::prelude::*;
 ///     # Storage persists across executions within the session
 ///     result = session.execute('print(open("/data/test.txt").read())')
 ///     print(result.stdout)  # "hello"
-#[pyclass(module = "eryx")]
+#[pyclass(module = "eryx", from_py_object)]
 #[derive(Clone)]
 pub struct VfsStorage {
     /// The underlying type-erased storage.
