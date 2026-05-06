@@ -5,7 +5,7 @@
 ARG RUNTIME_SOURCE=default
 
 # ---------- Stage 1: Precompile WASM runtime (only when RUNTIME_SOURCE=default) ----------
-FROM rust:1.91-bookworm AS precompile
+FROM rust:1.92-bookworm AS precompile
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     protobuf-compiler \
@@ -64,7 +64,7 @@ COPY ${RUNTIME_CWASM} /build/crates/eryx-runtime/runtime.cwasm
 FROM runtime-${RUNTIME_SOURCE} AS runtime
 
 # ---------- Stage 2: Build the server binary ----------
-FROM rust:1.91-bookworm AS builder
+FROM rust:1.92-bookworm AS builder
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     protobuf-compiler \
