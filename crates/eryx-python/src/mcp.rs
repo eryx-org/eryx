@@ -272,17 +272,14 @@ impl MCPManager {
                             }
                         };
 
-                        let result = peer
-                            .call_tool(CallToolRequestParams {
-                                meta: None,
-                                name: tool_name,
-                                arguments,
-                                task: None,
-                            })
-                            .await
-                            .map_err(|e| {
-                                CallbackError::ExecutionFailed(format!("MCP call_tool failed: {e}"))
-                            })?;
+                        let mut params = CallToolRequestParams::new(tool_name);
+                        if let Some(args) = arguments {
+                            params = params.with_arguments(args);
+                        }
+
+                        let result = peer.call_tool(params).await.map_err(|e| {
+                            CallbackError::ExecutionFailed(format!("MCP call_tool failed: {e}"))
+                        })?;
 
                         // Check for error
                         if result.is_error == Some(true) {
