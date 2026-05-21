@@ -30,7 +30,7 @@ env:
 jobs:
   build-and-test:
     name: Build & Test
-    runs-on: namespace-profile-eryx-heavy-linux-amd64
+    runs-on: ubuntu-latest
     # Only run for the main eryx crate release (not eryx-macros, eryx-vfs, etc.)
     if: >-
       github.event_name == 'workflow_dispatch' ||
@@ -41,7 +41,7 @@ jobs:
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
           sudo docker image prune --all --force
 
-      - uses: namespacelabs/nscloud-checkout-action@v8
+      - uses: actions/checkout@v4
 
       - name: Cache WASM runtime artifacts
         id: wasm-cache
@@ -59,10 +59,7 @@ jobs:
           touch crates/eryx-runtime/runtime-preinit.wasm
 
       - name: Configure Rust cache
-        uses: namespacelabs/nscloud-cache-action@v1
-        with:
-          cache: rust
-          size: 2
+        uses: Swatinem/rust-cache@v2
 
       - uses: ./.github/actions/setup-rust
 
