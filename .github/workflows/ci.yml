@@ -81,7 +81,7 @@ jobs:
   # Runs when core paths change, or when any downstream job needs WASM artifacts.
   build-eryx-runtime:
     name: Build eryx-runtime
-    runs-on: namespace-profile-eryx-heavy-linux-amd64
+    runs-on: ubuntu-latest
     needs: changes
     if: >-
       github.event_name == 'push'
@@ -93,7 +93,7 @@ jobs:
       || needs.changes.outputs.js == 'true'
       || needs.changes.outputs.demo == 'true'
     steps:
-      - uses: namespacelabs/nscloud-checkout-action@v8
+      - uses: actions/checkout@v4
 
       - name: Cache WASM runtime artifacts
         id: wasm-cache
@@ -129,10 +129,7 @@ jobs:
 
       - name: Configure Rust cache
         if: steps.wasm-cache.outputs.cache-hit != 'true'
-        uses: namespacelabs/nscloud-cache-action@v1
-        with:
-          cache: rust
-          size: 2
+        uses: Swatinem/rust-cache@v2
 
       - uses: ./.github/actions/setup-rust
         if: steps.wasm-cache.outputs.cache-hit != 'true'
@@ -186,8 +183,7 @@ jobs:
           cargo run -p eryx --example precompile --features preinit --release
         env:
           ERYX_PRECOMPILE_BOOTSTRAP: "1"
-          # Use x86-64-v2 for portable cwasm across runner types (Namespace has AVX-512,
-          # but downstream jobs on ubuntu-latest do not)
+          # Use x86-64-v2 for portable cwasm across runner types
           ERYX_CPU_FEATURES: "x86-64-v2"
 
       - name: Upload WASM artifacts (cache miss)
@@ -238,14 +234,14 @@ jobs:
 
   test:
     name: Test
-    runs-on: namespace-profile-eryx-heavy-linux-amd64
+    runs-on: ubuntu-latest
     needs: [changes, build-eryx-runtime]
     if: >-
       github.event_name == 'push'
       || needs.changes.outputs.core == 'true'
       || needs.changes.outputs.server == 'true'
     steps:
-      - uses: namespacelabs/nscloud-checkout-action@v8
+      - uses: actions/checkout@v4
 
       - name: Download WASM artifacts
         uses: actions/download-artifact@v4
@@ -280,10 +276,7 @@ jobs:
           EOF
 
       - name: Configure Rust cache
-        uses: namespacelabs/nscloud-cache-action@v1
-        with:
-          cache: rust
-          size: 2
+        uses: Swatinem/rust-cache@v2
 
       - uses: ./.github/actions/setup-rust
 
@@ -787,7 +780,7 @@ jobs:
   # expensive WASM precompilation step inside Docker. Only pushes on main.
   docker:
     name: Docker
-    runs-on: namespace-profile-eryx-heavy-linux-amd64
+    runs-on: ubuntu-latest
     needs: [changes, build-eryx-runtime]
     if: >-
       github.event.pull_request.head.repo.fork != true
@@ -797,7 +790,7 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: namespacelabs/nscloud-checkout-action@v8
+      - uses: actions/checkout@v4
 
       - name: Download WASM artifacts
         uses: actions/download-artifact@v4
