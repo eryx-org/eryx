@@ -25,14 +25,8 @@ export default defineConfig({
   test: {
     environment: "node",
     // Run tests serially since sandbox state is global
-    pool: "forks",
-    poolOptions: {
-      forks: {
-        singleFork: true,
-        // Enable JSPI for async WASM component model support
-        execArgv: ["--experimental-wasm-jspi"],
-      },
-    },
+    maxWorkers: 1,
+    execArgv: ["--experimental-wasm-jspi"],
     sequence: {
       shuffle: false,
     },
