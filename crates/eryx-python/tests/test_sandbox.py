@@ -582,29 +582,33 @@ except Exception as e:
 import socket
 import ssl
 
-sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-sock.settimeout(15)
+hosts = ["httpbin.org", "example.com", "www.google.com"]
 
-try:
-    sock.connect(("httpbin.org", 443))
-    print("TCP connected")
+for host in hosts:
+    try:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.settimeout(8)
+        sock.connect((host, 443))
+        print(f"TCP connected to {host}")
 
-    ctx = ssl.create_default_context()
-    ssl_sock = ctx.wrap_socket(sock, server_hostname="httpbin.org")
-    print("TLS handshake complete")
+        ctx = ssl.create_default_context()
+        ssl_sock = ctx.wrap_socket(sock, server_hostname=host)
+        print("TLS handshake complete")
 
-    request = b"GET / HTTP/1.1\\r\\nHost: httpbin.org\\r\\nConnection: close\\r\\n\\r\\n"
-    ssl_sock.send(request)
-    print("Request sent")
+        request = f"GET / HTTP/1.1\\r\\nHost: {host}\\r\\nConnection: close\\r\\n\\r\\n".encode()
+        ssl_sock.send(request)
 
-    response = ssl_sock.recv(1024)
-    if b"HTTP/1.1" in response or b"HTTP/1.0" in response:
-        print("HTTPS response received")
+        response = ssl_sock.recv(1024)
+        if b"HTTP/1.1" in response or b"HTTP/1.0" in response:
+            print("HTTPS response received")
 
-    ssl_sock.close()
-    print("SUCCESS")
-except Exception as e:
-    print(f"Error: {type(e).__name__}: {e}")
+        ssl_sock.close()
+        print(f"SUCCESS via {host}")
+        break
+    except Exception as e:
+        print(f"Failed {host}: {type(e).__name__}: {e}")
+else:
+    print("All hosts failed")
 """)
         assert "SUCCESS" in result.stdout, f"Test failed: {result.stdout}"
 
@@ -645,19 +649,27 @@ print("SUCCESS")
         result = network_sandbox.execute("""
 import _eryx_async
 
-tcp_handle = await _eryx_async.await_tcp_connect("example.com", 80)
-print(f"Connected with handle: {tcp_handle}")
+hosts = ["example.com", "httpbin.org", "www.google.com"]
 
-request = b"GET / HTTP/1.1\\r\\nHost: example.com\\r\\nConnection: close\\r\\n\\r\\n"
-written = await _eryx_async.await_tcp_write(tcp_handle, request)
-print(f"Wrote {written} bytes")
+for host in hosts:
+    try:
+        tcp_handle = await _eryx_async.await_tcp_connect(host, 80)
+        print(f"Connected to {host}")
 
-response = await _eryx_async.await_tcp_read(tcp_handle, 1024)
-if b"HTTP" in response:
-    print("Got HTTP response")
+        request = f"GET / HTTP/1.1\\r\\nHost: {host}\\r\\nConnection: close\\r\\n\\r\\n".encode()
+        written = await _eryx_async.await_tcp_write(tcp_handle, request)
 
-_eryx_async.tcp_close(tcp_handle)
-print("SUCCESS")
+        response = await _eryx_async.await_tcp_read(tcp_handle, 1024)
+        if b"HTTP" in response:
+            print("Got HTTP response")
+
+        _eryx_async.tcp_close(tcp_handle)
+        print(f"SUCCESS via {host}")
+        break
+    except Exception as e:
+        print(f"Failed {host}: {type(e).__name__}: {e}")
+else:
+    print("All hosts failed")
 """)
         assert "SUCCESS" in result.stdout, f"Test failed: {result.stdout}"
 
@@ -666,22 +678,30 @@ print("SUCCESS")
         result = network_sandbox.execute("""
 import _eryx_async
 
-tcp_handle = await _eryx_async.await_tcp_connect("httpbin.org", 443)
-print("TCP connected")
+hosts = ["httpbin.org", "example.com", "www.google.com"]
 
-tls_handle = await _eryx_async.await_tls_upgrade(tcp_handle, "httpbin.org")
-print("TLS upgraded")
+for host in hosts:
+    try:
+        tcp_handle = await _eryx_async.await_tcp_connect(host, 443)
+        print(f"TCP connected to {host}")
 
-request = b"GET / HTTP/1.1\\r\\nHost: httpbin.org\\r\\nConnection: close\\r\\n\\r\\n"
-written = await _eryx_async.await_tls_write(tls_handle, request)
-print(f"Wrote {written} bytes")
+        tls_handle = await _eryx_async.await_tls_upgrade(tcp_handle, host)
+        print("TLS upgraded")
 
-response = await _eryx_async.await_tls_read(tls_handle, 1024)
-if b"HTTP" in response:
-    print("Got HTTPS response")
+        request = f"GET / HTTP/1.1\\r\\nHost: {host}\\r\\nConnection: close\\r\\n\\r\\n".encode()
+        written = await _eryx_async.await_tls_write(tls_handle, request)
 
-_eryx_async.tls_close(tls_handle)
-print("SUCCESS")
+        response = await _eryx_async.await_tls_read(tls_handle, 1024)
+        if b"HTTP" in response:
+            print("Got HTTPS response")
+
+        _eryx_async.tls_close(tls_handle)
+        print(f"SUCCESS via {host}")
+        break
+    except Exception as e:
+        print(f"Failed {host}: {type(e).__name__}: {e}")
+else:
+    print("All hosts failed")
 """)
         assert "SUCCESS" in result.stdout, f"Test failed: {result.stdout}"
 
