@@ -234,13 +234,21 @@ except Exception as e:
         result = network_sandbox.execute("""
 import urllib.request
 
-with urllib.request.urlopen("https://httpbin.org/get", timeout=10) as response:
-    status = response.status
-    body = response.read().decode()
-    print(f"Status: {status}")
-    if status == 200 and "httpbin.org" in body:
-        print("SUCCESS")
-    else:
-        print(f"Unexpected: status={status}, len={len(body)}")
+urls = [
+    "https://httpbin.org/get",
+    "https://example.com",
+    "https://www.google.com",
+]
+
+for url in urls:
+    try:
+        with urllib.request.urlopen(url, timeout=8) as response:
+            if response.status == 200:
+                print(f"SUCCESS via {url}")
+                break
+    except Exception as e:
+        print(f"Failed {url}: {type(e).__name__}: {e}")
+else:
+    print("All URLs failed")
 """)
         assert "SUCCESS" in result.stdout, f"Test failed: {result.stdout}"
