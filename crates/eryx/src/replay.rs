@@ -255,6 +255,12 @@ impl ReplayState {
     }
 
     /// Record a suspension (only the first one is kept).
+    ///
+    /// In-flight callbacks launched concurrently (e.g. `asyncio.gather`) may
+    /// complete and call [`record_live`](Self::record_live) after a suspension
+    /// is recorded. This is intentional: those callbacks *did* complete
+    /// successfully on the host side, so journaling them lets the next resume
+    /// replay them from cache instead of re-running expensive calls.
     fn record_suspend(&mut self, suspended: SuspendedCallback) {
         if self.suspended.is_none() {
             self.suspended = Some(suspended);
