@@ -27,7 +27,7 @@
 //! A callback can also *defer* — signal that it cannot complete right now but
 //! should be retried later (e.g. waiting on external approval or a rate-limit
 //! cooldown). A callback signals this by returning
-//! [`CallbackError::Suspend`](crate::CallbackError::Suspend). When that happens
+//! [`CallbackError::Suspend`]. When that happens
 //! during a replay-aware run, the suspending callback is recorded as
 //! [`ReplayOutcome::suspended`](crate::ReplayOutcome::suspended), the journal of
 //! all *completed* callbacks up to that point is still returned, and the
