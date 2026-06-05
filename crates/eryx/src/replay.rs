@@ -38,6 +38,18 @@
 //!
 //! Eryx does not interpret the suspension reason; it is an opaque, caller-defined
 //! string.
+//!
+//! # Security: journal trust boundary
+//!
+//! Replayed journal entries are returned to Python code as-is — eryx does not
+//! re-execute the callback. This means a crafted journal can inject arbitrary
+//! values into a script's execution. **The journal is a trusted input.**
+//!
+//! When journals round-trip through the caller (e.g. stored in a database and
+//! loaded later, or returned to a client and echoed back), the caller must
+//! ensure they have not been tampered with. The gRPC server layer
+//! (`eryx-server`) provides HMAC-SHA256 signing for this purpose; the core
+//! `eryx` crate is agnostic to signing and trusts whatever journal it receives.
 
 use std::collections::HashMap;
 use std::future::Future;

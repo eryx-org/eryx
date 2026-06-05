@@ -982,7 +982,10 @@ print(f"got: {result}")
             code: code.to_string(),
             callbacks: vec![echo_declaration()],
             // Presence of the (empty) journal opts into replay/journaling.
-            callback_journal: Some(CallbackJournal { entries: vec![] }),
+            callback_journal: Some(CallbackJournal {
+                entries: vec![],
+                signature: vec![],
+            }),
             ..Default::default()
         })),
     })
@@ -1113,7 +1116,10 @@ print("should not reach here")
         message: Some(client_message::Message::ExecuteRequest(ExecuteRequest {
             code: code.to_string(),
             callbacks: vec![echo_declaration(), approve_decl],
-            callback_journal: Some(CallbackJournal { entries: vec![] }),
+            callback_journal: Some(CallbackJournal {
+                entries: vec![],
+                signature: vec![],
+            }),
             ..Default::default()
         })),
     })

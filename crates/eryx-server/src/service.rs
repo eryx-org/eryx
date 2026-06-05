@@ -53,13 +53,31 @@ impl Extractor for MetadataExtractor<'_> {
 #[derive(Debug)]
 pub struct EryxService {
     pool: Arc<SandboxPool>,
+    journal_signer: crate::replay::JournalSigner,
 }
 
 impl EryxService {
-    /// Create a new service instance backed by the given sandbox pool.
+    /// Create a new service instance with the given pool and journal signer.
+    ///
+    /// The `signer` should use a stable key shared across all replicas (see
+    /// [`JournalSigner::from_key`](crate::replay::JournalSigner::from_key))
+    /// so journals are portable. Use [`Self::new`] for tests/dev where a random
+    /// ephemeral key is acceptable.
+    #[must_use]
+    pub fn with_signer(pool: Arc<SandboxPool>, signer: crate::replay::JournalSigner) -> Self {
+        Self {
+            pool,
+            journal_signer: signer,
+        }
+    }
+
+    /// Create a new service with a random ephemeral signing key.
+    ///
+    /// Journals signed by this instance cannot be verified by other replicas or
+    /// after a restart. Intended for tests and single-instance dev servers.
     #[must_use]
     pub fn new(pool: Arc<SandboxPool>) -> Self {
-        Self { pool }
+        Self::with_signer(pool, crate::replay::JournalSigner::random())
     }
 }
 
@@ -104,10 +122,21 @@ impl crate::proto::eryx::v1::eryx_server::Eryx for EryxService {
 
         // Callback-result replay: presence of the journal field (even empty)
         // opts this execution into journaling; its entries seed replay.
-        let previous_journal: Option<CallbackJournal> = execute_req
-            .callback_journal
-            .as_ref()
-            .map(|j| crate::replay::journal_from_proto(&code, j));
+        // Non-empty journals must pass HMAC verification (bound to `code`) — a
+        // failed check discards the entries (falling back to fresh journaling,
+        // not an error). This also catches journals from a different script.
+        let previous_journal: Option<CallbackJournal> =
+            execute_req.callback_journal.as_ref().map(|j| {
+                if !j.entries.is_empty() && !self.journal_signer.verify(j, &code) {
+                    tracing::warn!(
+                        entries = j.entries.len(),
+                        "callback journal signature verification failed — ignoring entries"
+                    );
+                    CallbackJournal::new(&code)
+                } else {
+                    crate::replay::journal_from_proto(&code, j)
+                }
+            });
 
         // Parse network config: present = networking enabled, absent = disabled.
         let net_config = execute_req.network_config.map(|nc| {
@@ -357,6 +386,7 @@ impl crate::proto::eryx::v1::eryx_server::Eryx for EryxService {
         );
 
         // 7. Spawn execution task.
+        let journal_signer = self.journal_signer.clone();
         let server_tx_result = server_tx;
         let resp_tx_final = resp_tx;
         let cancel_exec = cancel;
@@ -375,6 +405,7 @@ impl crate::proto::eryx::v1::eryx_server::Eryx for EryxService {
                     scrub_stdout,
                     scrub_stderr,
                     previous_journal,
+                    journal_signer: journal_signer.clone(),
                 };
 
                 // Race execution against client cancellation. If the client
@@ -530,6 +561,8 @@ struct SessionParams<'a> {
     /// Previous callback journal to replay from. `Some` (even when empty) enables
     /// callback journaling/replay for this execution; `None` disables it entirely.
     previous_journal: Option<CallbackJournal>,
+    /// Signer for HMAC-signing outgoing journals.
+    journal_signer: crate::replay::JournalSigner,
 }
 
 /// Execute Python code using a session executor.
@@ -811,10 +844,10 @@ async fn execute_with_session(
             let guard = state
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let mut journal = crate::replay::journal_to_proto(&guard.build_journal(params.code));
+            params.journal_signer.sign(&mut journal, params.code);
             (
-                Some(crate::replay::journal_to_proto(
-                    &guard.build_journal(params.code),
-                )),
+                Some(journal),
                 guard.suspended().map(crate::replay::suspended_to_proto),
                 guard.replayed_count(),
             )

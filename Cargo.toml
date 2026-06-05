@@ -38,12 +38,13 @@ schemars = "1.0.0-alpha.17"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 
-# Hashing
+# Hashing / HMAC
+hex = "0.4"
+hmac = "0.12"
 sha2 = "0.10"
 
 # Random number generation for secret placeholders
 rand = "0.8"
-hex = "0.4"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-webpki-roots-no-provider"] }
 
 # Archive extraction

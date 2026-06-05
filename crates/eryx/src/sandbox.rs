@@ -231,6 +231,15 @@ impl Sandbox {
     ///
     /// Each call uses fresh replay state, so a sandbox may be executed
     /// repeatedly without the journal cursor leaking between runs.
+    ///
+    /// # Security
+    ///
+    /// Replayed journal entries are returned to Python verbatim — the callback
+    /// is not re-executed. A crafted journal can therefore inject arbitrary
+    /// values into the script. **Only replay journals produced by a trusted
+    /// source** (e.g. a previous run of the same sandbox, or a journal verified
+    /// via HMAC signature). See the [`replay`](crate::replay) module docs for
+    /// details.
     pub async fn execute_with_journal(&self, code: &str) -> ReplayOutcome {
         let previous = self
             .replay_journal
@@ -1608,6 +1617,12 @@ impl<R, S> SandboxBuilder<R, S> {
     ///
     /// This only affects [`Sandbox::execute_with_journal`]; plain
     /// [`Sandbox::execute`] ignores it.
+    ///
+    /// # Security
+    ///
+    /// Journal entries are replayed verbatim — a crafted journal can inject
+    /// arbitrary callback results. Only use journals from a trusted source
+    /// (a previous execution you control, or one verified via HMAC signature).
     #[must_use]
     pub fn with_replay_journal(mut self, journal: CallbackJournal) -> Self {
         self.replay_journal = Some(journal);

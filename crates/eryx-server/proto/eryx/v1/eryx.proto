@@ -97,6 +97,16 @@ message ExecuteRequest {
   // To start a replay session, send an empty `CallbackJournal{}` on the first
   // run and echo back the returned journal on subsequent runs. When this field
   // is ABSENT, execution behaves exactly as before (no journaling, no replay).
+  //
+  // SECURITY: replayed entries are returned to Python verbatim — the callback
+  // is not re-executed. A valid HMAC signature (see CallbackJournal.signature)
+  // attests that the journal is an unmodified record of a real execution of
+  // THIS SCRIPT on a server holding the signing key. Signing does not (and
+  // cannot) prevent the callback-answering client from choosing arbitrary
+  // values live — it always could. What it provides is provenance and tamper
+  // detection for journals that round-trip through storage or intermediaries.
+  // The server rejects unsigned or mis-signed journals by discarding their
+  // entries (falling back to fresh execution, not an error).
   CallbackJournal callback_journal = 12;
 }
 
@@ -270,9 +280,20 @@ message CallbackJournalEntry {
 // Sent in ExecuteRequest to enable replay/journaling (presence-significant: an
 // empty journal still turns journaling on) and returned in ExecuteResult with
 // the invocations recorded during the run.
+//
+// SECURITY: a valid signature attests that this journal is an unmodified record
+// of a real execution of a specific script on a server holding the signing key.
+// The server signs outgoing journals and rejects unsigned or mis-signed ones by
+// discarding their entries (falling back to fresh execution). The MAC covers
+// both the entries and the script code, so a journal cannot be replayed against
+// a different script.
 message CallbackJournal {
   // Ordered callback invocations, in the order they were initiated.
   repeated CallbackJournalEntry entries = 1;
+  // HMAC-SHA256 over the journal entries + script code. Produced by the server
+  // using a configured signing key. Empty on the first request (no journal to
+  // sign yet); the server returns a signed journal in the result.
+  bytes signature = 2;
 }
 
 // The callback that requested suspension, when execution was deferred.
