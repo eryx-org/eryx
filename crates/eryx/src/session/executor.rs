@@ -39,6 +39,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use tokio::sync::mpsc;
+use tokio_util::sync::CancellationToken;
 use wasmtime::Store;
 use wasmtime::component::ResourceTable;
 use wasmtime_wasi::{DirPerms, FilePerms, WasiCtx, WasiCtxBuilder};
@@ -200,6 +201,7 @@ pub struct SessionExecuteBuilder<'a> {
     net_tx: Option<mpsc::Sender<NetRequest>>,
     output_tx: Option<mpsc::UnboundedSender<crate::wasm::OutputRequest>>,
     fuel_limit: Option<u64>,
+    cancellation_token: Option<CancellationToken>,
 }
 
 impl std::fmt::Debug for SessionExecuteBuilder<'_> {
@@ -228,6 +230,7 @@ impl<'a> SessionExecuteBuilder<'a> {
             net_tx: None,
             output_tx: None,
             fuel_limit: None,
+            cancellation_token: None,
         }
     }
 
@@ -288,6 +291,17 @@ impl<'a> SessionExecuteBuilder<'a> {
         self
     }
 
+    /// Set a cancellation token for this execution.
+    ///
+    /// When the token is cancelled, the WASM guest is interrupted via an epoch
+    /// bump. This is used by callback-result replay to halt execution
+    /// immediately when a callback suspends.
+    #[must_use]
+    pub fn with_cancellation(mut self, token: CancellationToken) -> Self {
+        self.cancellation_token = Some(token);
+        self
+    }
+
     /// Execute the Python code with the configured options.
     ///
     /// # Errors
@@ -312,6 +326,7 @@ impl<'a> SessionExecuteBuilder<'a> {
                 self.net_tx,
                 self.output_tx,
                 self.fuel_limit,
+                self.cancellation_token,
             )
             .await
     }
@@ -894,6 +909,7 @@ impl SessionExecutor {
         net_tx: Option<mpsc::Sender<NetRequest>>,
         output_tx: Option<mpsc::UnboundedSender<crate::wasm::OutputRequest>>,
         per_execute_fuel_limit: Option<u64>,
+        cancellation_token: Option<CancellationToken>,
     ) -> Result<ExecutionOutput, Error> {
         let start = Instant::now();
 
@@ -945,38 +961,45 @@ impl SessionExecutor {
             "SessionExecutor: executing Python code"
         );
 
-        // Set up epoch-based deadline if timeout is configured.
+        // Set up epoch-based deadline if timeout or cancellation is configured.
         // This allows us to interrupt WASM execution even in tight loops.
+        const EPOCH_TICK_MS: u64 = 10;
+        const CANCELLATION_DEADLINE: u64 = 10000;
         let execution_timeout = self.execution_timeout;
-        let epoch_ticker = if let Some(timeout) = execution_timeout {
-            // Set deadline to N epoch ticks from now (we'll increment epochs over time)
-            // We use a granularity of 10ms for epoch ticks
-            const EPOCH_TICK_MS: u64 = 10;
-            let ticks_until_timeout = timeout.as_millis() as u64 / EPOCH_TICK_MS;
-            // Ensure at least 1 tick
-            let ticks = ticks_until_timeout.max(1);
-            store.set_epoch_deadline(ticks);
+        let was_cancelled = Arc::new(AtomicBool::new(false));
+        let epoch_ticker = if execution_timeout.is_some() || cancellation_token.is_some() {
+            if let Some(timeout) = execution_timeout {
+                let ticks_until_timeout = timeout.as_millis() as u64 / EPOCH_TICK_MS;
+                let ticks = ticks_until_timeout.max(1);
+                store.set_epoch_deadline(ticks);
+            } else {
+                store.set_epoch_deadline(CANCELLATION_DEADLINE);
+            }
 
-            // Configure the store to trap when the epoch deadline is reached
             store.epoch_deadline_trap();
 
-            // Spawn a thread to increment the engine's epoch periodically.
-            // We use a std::thread instead of tokio::spawn because the WASM
-            // execution may block the tokio runtime, preventing async tasks
-            // from running.
             let engine = self.executor.engine().clone();
             let stop_flag = Arc::new(AtomicBool::new(false));
             let stop_flag_clone = Arc::clone(&stop_flag);
+            let was_cancelled_clone = Arc::clone(&was_cancelled);
+            let cancel_token = cancellation_token.clone();
             std::thread::spawn(move || {
                 while !stop_flag_clone.load(Ordering::Relaxed) {
+                    if let Some(ref token) = cancel_token
+                        && token.is_cancelled()
+                    {
+                        was_cancelled_clone.store(true, Ordering::Relaxed);
+                        for _ in 0..CANCELLATION_DEADLINE + 1 {
+                            engine.increment_epoch();
+                        }
+                        break;
+                    }
                     std::thread::sleep(Duration::from_millis(EPOCH_TICK_MS));
                     engine.increment_epoch();
                 }
             });
             Some(stop_flag)
         } else {
-            // No timeout - set a very high deadline that won't be reached
-            // (but not u64::MAX to avoid overflow when added to current epoch)
             store.set_epoch_deadline(u64::MAX / 2);
             store.epoch_deadline_trap();
             None::<Arc<AtomicBool>>

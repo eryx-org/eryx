@@ -182,10 +182,6 @@ enum Decision {
     Hit(Result<serde_json::Value, String>),
     /// Not in the journal (or journal diverged); invoke live and record at `seq`.
     Miss { seq: usize },
-    /// A previous callback already suspended; reject immediately without
-    /// invoking or recording. This prevents callbacks from succeeding after
-    /// suspension even if Python catches the exception.
-    AlreadySuspended,
 }
 
 impl ReplayState {
@@ -212,10 +208,6 @@ impl ReplayState {
     /// sequence numbers and cursor advancement are deterministic even when
     /// callbacks are launched concurrently via `asyncio.gather`.
     fn decide(&mut self, name: &str, args_hash: u64, args_json: &str) -> Decision {
-        if self.suspended.is_some() {
-            return Decision::AlreadySuspended;
-        }
-
         let seq = self.next_seq;
         self.next_seq += 1;
         self.ensure_slot(seq);
@@ -348,11 +340,6 @@ impl Callback for ReplayCallback {
         let decision = lock_state(&self.state).decide(&name, args_hash, &args_json);
 
         match decision {
-            Decision::AlreadySuspended => Box::pin(async {
-                Err(CallbackError::Suspend(
-                    "execution already suspended by a previous callback".into(),
-                ))
-            }),
             Decision::Hit(result) => {
                 let invoke_result = match result {
                     Ok(value) => Ok(value),
@@ -754,35 +741,26 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn callbacks_after_suspension_are_rejected() {
+    async fn suspend_records_metadata_without_journaling() {
+        // The actual execution halt is enforced by epoch-based cancellation at
+        // the WASM level (tested in integration tests). This unit test only
+        // verifies that the replay layer correctly records the suspension
+        // metadata and does not journal the suspended callback.
         let state = Arc::new(Mutex::new(ReplayState::new(CallbackJournal::new("code"))));
 
-        // First callback suspends.
         let (suspender, suspend_calls) = programmable("approve", Outcome::Suspend("wait".into()));
         let suspend_wrapper = ReplayCallback::new(suspender, Arc::clone(&state));
-        let err = suspend_wrapper.invoke(json!({})).await.unwrap_err();
+        let err = suspend_wrapper.invoke(json!({"id": 5})).await.unwrap_err();
         assert!(matches!(err, CallbackError::Suspend(_)));
         assert_eq!(suspend_calls.load(Ordering::SeqCst), 1);
 
-        // Second callback should be immediately rejected without live invocation,
-        // even though it would normally succeed. This ensures that if Python
-        // catches the suspension exception, no callbacks fire afterward.
-        let (fetch, fetch_calls) = programmable("fetch", Outcome::Ok(json!("live")));
-        let fetch_wrapper = ReplayCallback::new(fetch, Arc::clone(&state));
-        let err2 = fetch_wrapper.invoke(json!({})).await.unwrap_err();
-        assert!(
-            matches!(err2, CallbackError::Suspend(_)),
-            "should get Suspend, got: {err2:?}"
-        );
-        assert_eq!(
-            fetch_calls.load(Ordering::SeqCst),
-            0,
-            "real callback must not be invoked after suspension"
-        );
-
-        // Journal should contain nothing (the suspended callback is not journaled,
-        // and the rejected callback is not journaled either).
         let st = lock_state(&state);
-        assert!(st.build_journal("code").is_empty());
+        let suspended = st.suspended().expect("suspension should be recorded");
+        assert_eq!(suspended.name, "approve");
+        assert_eq!(suspended.reason, "wait");
+        assert!(
+            st.build_journal("code").is_empty(),
+            "suspended callback must not be journaled"
+        );
     }
 }

@@ -158,6 +158,7 @@ impl<'a> InProcessSession<'a> {
                 callbacks_arc,
                 resource_limits,
                 callback_secrets,
+                None,
             )
             .await
         });

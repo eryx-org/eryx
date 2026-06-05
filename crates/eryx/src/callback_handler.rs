@@ -14,6 +14,8 @@ use futures::StreamExt;
 use futures::stream::FuturesUnordered;
 use tokio::sync::mpsc;
 
+use tokio_util::sync::CancellationToken;
+
 use crate::callback::{Callback, CallbackError};
 use crate::net::ConnectionManager;
 use crate::sandbox::ResourceLimits;
@@ -33,9 +35,15 @@ type InFlightCallbacks = FuturesUnordered<Pin<Box<dyn Future<Output = ()> + Send
 /// This allows multiple callbacks to execute in parallel when Python code
 /// uses `asyncio.gather()` or similar patterns.
 ///
+/// When `suspend_cancel` is `Some` and a callback returns
+/// [`CallbackError::Suspend`], the token is cancelled after the result is sent
+/// back to the guest. The epoch ticker thread (running in `wasm.rs`) detects
+/// the cancellation and bumps the epoch, causing the WASM guest to trap —
+/// Python cannot catch a WASM trap, so execution halts immediately.
+///
 /// Returns the total number of callback invocations.
 #[tracing::instrument(
-    skip(callback_rx, callbacks_map, resource_limits, secrets),
+    skip(callback_rx, callbacks_map, resource_limits, secrets, suspend_cancel),
     fields(
         available_callbacks = callbacks_map.len(),
         max_invocations = ?resource_limits.max_callback_invocations,
@@ -46,6 +54,7 @@ pub async fn run_callback_handler(
     callbacks_map: Arc<HashMap<String, Arc<dyn Callback>>>,
     resource_limits: ResourceLimits,
     secrets: Arc<HashMap<String, SecretConfig>>,
+    suspend_cancel: Option<CancellationToken>,
 ) -> u32 {
     let invocation_count = Arc::new(AtomicU32::new(0));
     let mut in_flight: InFlightCallbacks = FuturesUnordered::new();
@@ -61,6 +70,7 @@ pub async fn run_callback_handler(
                         &resource_limits,
                         &invocation_count,
                         &secrets,
+                        &suspend_cancel,
                     ) {
                         in_flight.push(fut);
                     }
@@ -92,6 +102,7 @@ fn create_callback_future(
     resource_limits: &ResourceLimits,
     invocation_count: &Arc<AtomicU32>,
     secrets: &Arc<HashMap<String, SecretConfig>>,
+    suspend_cancel: &Option<CancellationToken>,
 ) -> Option<Pin<Box<dyn Future<Output = ()> + Send>>> {
     // Check callback limit
     let current_count = invocation_count.fetch_add(1, Ordering::SeqCst);
@@ -126,6 +137,7 @@ fn create_callback_future(
     // Create the future
     let timeout = resource_limits.callback_timeout;
     let secrets = Arc::clone(secrets);
+    let suspend_cancel = suspend_cancel.clone();
     let fut = async move {
         let invoke_future = callback.invoke(args);
 
@@ -137,6 +149,8 @@ fn create_callback_future(
             invoke_future.await
         };
 
+        let is_suspend = matches!(callback_result, Err(CallbackError::Suspend(_)));
+
         // Scrub secret placeholders from callback results
         let result = match callback_result {
             Ok(value) => Ok(crate::secrets::scrub_placeholders(
@@ -146,8 +160,18 @@ fn create_callback_future(
             Err(e) => Err(crate::secrets::scrub_placeholders(&e.to_string(), &secrets)),
         };
 
-        // Send result back to the Python code
+        // Send result back to the Python code — the suspend error reaches the
+        // `await` point so the exception is raised at the correct location.
         let _ = request.response_tx.send(result);
+
+        // After the result is sent, cancel execution. The epoch ticker thread
+        // will detect this and bump the engine epoch, causing a WASM trap that
+        // Python cannot catch. The error reaches the await first (above), then
+        // the trap fires before any subsequent code runs.
+        if is_suspend && let Some(ref token) = suspend_cancel {
+            tracing::info!("callback suspended — cancelling execution via epoch interrupt");
+            token.cancel();
+        }
     };
 
     Some(Box::pin(fut))

@@ -693,9 +693,20 @@ async fn execute_with_session(
     let cb_map: Arc<HashMap<String, Arc<dyn Callback>>> = Arc::new(active_callbacks);
     let cb_secrets: Arc<HashMap<String, SecretConfig>> = Arc::new(params.secrets.clone());
     let resource_limits = params.resource_limits.clone();
+    let suspend_cancel = replay_state.as_ref().map(|_| CancellationToken::new());
+    let suspend_cancel_exec = suspend_cancel.clone();
     let callback_handler = tokio::spawn(
-        async move { run_callback_handler(callback_rx, cb_map, resource_limits, cb_secrets).await }
-            .instrument(tracing::Span::current()),
+        async move {
+            run_callback_handler(
+                callback_rx,
+                cb_map,
+                resource_limits,
+                cb_secrets,
+                suspend_cancel,
+            )
+            .await
+        }
+        .instrument(tracing::Span::current()),
     );
 
     // Compute preamble line count so trace events can be adjusted to user code lines.
@@ -830,6 +841,9 @@ async fn execute_with_session(
     }
     if let Some(tx) = net_tx {
         builder = builder.with_network(tx);
+    }
+    if let Some(token) = suspend_cancel_exec {
+        builder = builder.with_cancellation(token);
     }
     let exec_result = builder.run().await;
 

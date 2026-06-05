@@ -309,12 +309,18 @@ impl Sandbox {
         let resource_limits = self.resource_limits.clone();
         let secrets_arc = Arc::new(self.secrets.clone());
         let callback_secrets = Arc::clone(&secrets_arc);
+        // When replay is active, provide a cancellation token so that a
+        // Suspend callback triggers an epoch interrupt — Python cannot catch
+        // a WASM trap, so this guarantees execution halts immediately.
+        let suspend_cancel = replay_state.as_ref().map(|_| CancellationToken::new());
+        let suspend_cancel_exec = suspend_cancel.clone();
         let callback_handler = tokio::spawn(async move {
             run_callback_handler(
                 callback_rx,
                 callbacks_arc,
                 resource_limits,
                 callback_secrets,
+                suspend_cancel,
             )
             .await
         });
@@ -426,6 +432,12 @@ impl Sandbox {
         // Add fuel limit if configured
         if let Some(fuel) = self.resource_limits.max_fuel {
             execute_builder = execute_builder.with_fuel_limit(fuel);
+        }
+
+        // When replay is active, wire the suspend cancellation token into the
+        // executor so the epoch ticker thread can interrupt the WASM guest.
+        if let Some(token) = suspend_cancel_exec {
+            execute_builder = execute_builder.with_cancellation(token);
         }
 
         let execution_result = execute_builder.run().await;
@@ -759,6 +771,7 @@ impl Sandbox {
                 callbacks_arc,
                 resource_limits_clone,
                 callback_secrets,
+                None,
             )
             .await
         });
