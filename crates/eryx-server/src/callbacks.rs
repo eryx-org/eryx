@@ -23,6 +23,10 @@ pub enum CallbackResult {
     Ok(String),
     /// Error message.
     Err(String),
+    /// The callback deferred execution; the string is the opaque suspension
+    /// reason. Surfaced as [`CallbackError::Suspend`] so replay-aware execution
+    /// can stop cleanly and report it.
+    Suspend(String),
 }
 
 /// Map of pending callback requests, keyed by request ID.
@@ -163,6 +167,15 @@ pub fn build_callbacks(
                                     "callback response received"
                                 );
                                 Err(CallbackError::ExecutionFailed(err))
+                            }
+                            CallbackResult::Suspend(reason) => {
+                                tracing::info!(
+                                    callback_name = %name,
+                                    %request_id,
+                                    duration_ms,
+                                    "callback requested suspension"
+                                );
+                                Err(CallbackError::Suspend(reason))
                             }
                         }
                     })

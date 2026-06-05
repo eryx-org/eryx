@@ -1,16 +1,16 @@
 //! gRPC service implementation for the Eryx Execute RPC.
 
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use dashmap::DashMap;
 use eryx::callback_handler::{run_callback_handler, run_net_handler};
 use eryx::vfs::{ArcStorage, InMemoryStorage, VfsStorage};
 use eryx::{
-    Callback, CallbackRequest, ConnectionManager, NetConfig, NetRequest, OutputRequest,
-    PythonStateSnapshot, ResourceLimits, SandboxPool, SecretConfig, SessionExecutor, TraceRequest,
-    VfsConfig, generate_placeholder, scrub_placeholders,
+    Callback, CallbackJournal, CallbackRequest, ConnectionManager, NetConfig, NetRequest,
+    OutputRequest, PythonStateSnapshot, ReplayState, ResourceLimits, SandboxPool, SecretConfig,
+    SessionExecutor, TraceRequest, VfsConfig, generate_placeholder, scrub_placeholders,
 };
 use opentelemetry::propagation::Extractor;
 use tokio::sync::mpsc;
@@ -23,8 +23,8 @@ use tracing_opentelemetry::OpenTelemetrySpanExt;
 
 use crate::callbacks::{self, CallbackResult, PendingCallbacks};
 use crate::proto::eryx::v1::{
-    ClientMessage, ExecuteResult, ExecuteStats, FileKind, ServerMessage, SupportingFile,
-    callback_response, client_message, server_message,
+    CallbackOutcome, ClientMessage, ExecuteResult, ExecuteStats, FileKind, ServerMessage,
+    SupportingFile, callback_response, client_message, server_message,
 };
 
 /// Adapts tonic's [`MetadataMap`] to OpenTelemetry's [`Extractor`] trait,
@@ -101,6 +101,13 @@ impl crate::proto::eryx::v1::eryx_server::Eryx for EryxService {
         let persist_state = execute_req.persist_state;
         let state_snapshot = execute_req.state_snapshot;
         let files = execute_req.files;
+
+        // Callback-result replay: presence of the journal field (even empty)
+        // opts this execution into journaling; its entries seed replay.
+        let previous_journal: Option<CallbackJournal> = execute_req
+            .callback_journal
+            .as_ref()
+            .map(|j| crate::replay::journal_from_proto(&code, j));
 
         // Parse network config: present = networking enabled, absent = disabled.
         let net_config = execute_req.network_config.map(|nc| {
@@ -295,18 +302,33 @@ impl crate::proto::eryx::v1::eryx_server::Eryx for EryxService {
                 while let Ok(Some(msg)) = inbound.message().await {
                     if let Some(client_message::Message::CallbackResponse(resp)) = msg.message {
                         let request_id = resp.request_id;
-                        let result = match resp.result {
-                            Some(callback_response::Result::JsonResult(json)) => {
-                                tracing::debug!(%request_id, "dispatching callback result (ok)");
-                                CallbackResult::Ok(json)
-                            }
-                            Some(callback_response::Result::Error(err)) => {
-                                tracing::debug!(%request_id, "dispatching callback result (error)");
-                                CallbackResult::Err(err)
-                            }
-                            None => {
-                                tracing::debug!(%request_id, "dispatching callback result (empty)");
-                                CallbackResult::Err("empty callback response".to_string())
+                        let outcome =
+                            CallbackOutcome::try_from(resp.outcome).unwrap_or(CallbackOutcome::Ok);
+                        let result = if outcome == CallbackOutcome::Suspend {
+                            // SUSPEND: the result oneof string is the opaque reason.
+                            let reason = match resp.result {
+                                Some(callback_response::Result::JsonResult(s))
+                                | Some(callback_response::Result::Error(s)) => s,
+                                None => String::new(),
+                            };
+                            tracing::debug!(%request_id, "dispatching callback result (suspend)");
+                            CallbackResult::Suspend(reason)
+                        } else {
+                            // OK (default) / ERROR: the oneof variant determines
+                            // success vs. failure, exactly as before.
+                            match resp.result {
+                                Some(callback_response::Result::JsonResult(json)) => {
+                                    tracing::debug!(%request_id, "dispatching callback result (ok)");
+                                    CallbackResult::Ok(json)
+                                }
+                                Some(callback_response::Result::Error(err)) => {
+                                    tracing::debug!(%request_id, "dispatching callback result (error)");
+                                    CallbackResult::Err(err)
+                                }
+                                None => {
+                                    tracing::debug!(%request_id, "dispatching callback result (empty)");
+                                    CallbackResult::Err("empty callback response".to_string())
+                                }
                             }
                         };
                         callbacks::dispatch_callback_response(
@@ -352,6 +374,7 @@ impl crate::proto::eryx::v1::eryx_server::Eryx for EryxService {
                     secrets_preamble,
                     scrub_stdout,
                     scrub_stderr,
+                    previous_journal,
                 };
 
                 // Race execution against client cancellation. If the client
@@ -369,6 +392,7 @@ impl crate::proto::eryx::v1::eryx_server::Eryx for EryxService {
                             error: "execution cancelled: client disconnected".to_string(),
                             stats: None,
                             state_snapshot: Vec::new(),
+                            ..Default::default()
                         }
                     }
                 };
@@ -503,6 +527,9 @@ struct SessionParams<'a> {
     secrets_preamble: String,
     scrub_stdout: bool,
     scrub_stderr: bool,
+    /// Previous callback journal to replay from. `Some` (even when empty) enables
+    /// callback journaling/replay for this execution; `None` disables it entirely.
+    previous_journal: Option<CallbackJournal>,
 }
 
 /// Execute Python code using a session executor.
@@ -525,7 +552,19 @@ async fn execute_with_session(
     // Get the shared PythonExecutor and clone the configured callbacks from the sandbox.
     let executor = sandbox.executor();
     let callbacks_ref = sandbox.callbacks();
-    let callbacks_arc: Vec<Arc<dyn Callback>> = callbacks_ref.values().cloned().collect();
+
+    // Set up callback-result replay when the request opted in. The same shared
+    // ReplayState is used for both the executor registration and the callback
+    // handler so the replay cursor advances across all callbacks in order.
+    let replay_state: Option<Arc<Mutex<ReplayState>>> = params
+        .previous_journal
+        .as_ref()
+        .map(|journal| Arc::new(Mutex::new(ReplayState::new(journal.clone()))));
+    let active_callbacks: HashMap<String, Arc<dyn Callback>> = match &replay_state {
+        Some(state) => crate::replay::wrap_for_replay(callbacks_ref, state),
+        None => callbacks_ref.clone(),
+    };
+    let callbacks_arc: Vec<Arc<dyn Callback>> = active_callbacks.values().cloned().collect();
 
     // Create the session executor, optionally with pre-populated VFS for supporting files.
     let mut session = if params.files.is_empty() {
@@ -616,7 +655,9 @@ async fn execute_with_session(
     // Set up callback handler channels (mirroring Sandbox::execute pattern).
     let (callback_tx, callback_rx) = mpsc::channel::<CallbackRequest>(32);
     let fuel_limit = params.resource_limits.max_fuel;
-    let cb_map: Arc<HashMap<String, Arc<dyn Callback>>> = Arc::new(callbacks_ref.clone());
+    // The handler invokes callbacks via this map, so it must hold the same
+    // (possibly replay-wrapped) callbacks used for executor registration.
+    let cb_map: Arc<HashMap<String, Arc<dyn Callback>>> = Arc::new(active_callbacks);
     let cb_secrets: Arc<HashMap<String, SecretConfig>> = Arc::new(params.secrets.clone());
     let resource_limits = params.resource_limits.clone();
     let callback_handler = tokio::spawn(
@@ -762,6 +803,26 @@ async fn execute_with_session(
     // Wait for callback handler to finish.
     let callback_invocations = callback_handler.await.unwrap_or(0);
 
+    // Extract the recorded replay journal and any suspension. Read regardless of
+    // success/failure so the caller can replay completed callbacks even when a
+    // later one errored or suspended.
+    let (proto_journal, suspended_callback, replayed_callbacks) = match &replay_state {
+        Some(state) => {
+            let guard = state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            (
+                Some(crate::replay::journal_to_proto(
+                    &guard.build_journal(params.code),
+                )),
+                guard.suspended().map(crate::replay::suspended_to_proto),
+                guard.replayed_count(),
+            )
+        }
+        None => (None, None, 0),
+    };
+    let suspended = suspended_callback.is_some();
+
     // Snapshot state after execution (only when persistence is requested).
     let snapshot_bytes = if params.state.is_some() {
         let snapshot_start = Instant::now();
@@ -821,8 +882,12 @@ async fn execute_with_session(
                     callback_invocations,
                     peak_memory_bytes: output.peak_memory_bytes,
                     fuel_consumed: output.fuel_consumed.unwrap_or(0),
+                    replayed_callbacks,
                 }),
                 state_snapshot: snapshot_bytes,
+                callback_journal: proto_journal,
+                suspended,
+                suspended_callback,
             }
         }
         Err(e) => {
@@ -838,9 +903,21 @@ async fn execute_with_session(
                 stdout: String::new(),
                 stderr: String::new(),
                 error: e.to_string(),
-                stats: None,
+                // Provide stats only when replay is active (to surface
+                // replayed_callbacks, e.g. on suspension); otherwise keep the
+                // previous behavior of omitting stats on error.
+                stats: replay_state.is_some().then_some(ExecuteStats {
+                    duration_ms: duration.as_millis() as u64,
+                    callback_invocations,
+                    peak_memory_bytes: 0,
+                    fuel_consumed: 0,
+                    replayed_callbacks,
+                }),
                 // Still return the snapshot — the Go service decides whether to keep it.
                 state_snapshot: snapshot_bytes,
+                callback_journal: proto_journal,
+                suspended,
+                suspended_callback,
             }
         }
     }

@@ -84,6 +84,20 @@ message ExecuteRequest {
 
   // Disable placeholder scrubbing on stderr. Default: scrubbing is ON when secrets are present.
   bool disable_stderr_scrub = 11;
+
+  // Callback-result replay (optional, backwards-compatible).
+  //
+  // PRESENCE of this field — even with an empty `entries` list — opts the
+  // execution into journaling: the server records every callback invocation and
+  // returns the journal in ExecuteResult.callback_journal. When `entries` is
+  // non-empty, matching callbacks (by name + args + invocation position) are
+  // replayed from the journal instead of being dispatched to the client, until
+  // the first divergence (after which execution goes live).
+  //
+  // To start a replay session, send an empty `CallbackJournal{}` on the first
+  // run and echo back the returned journal on subsequent runs. When this field
+  // is ABSENT, execution behaves exactly as before (no journaling, no replay).
+  CallbackJournal callback_journal = 12;
 }
 
 // Kind of supporting file — determines where it's placed in the sandbox.
@@ -210,6 +224,65 @@ message CallbackResponse {
     // Error message on failure.
     string error = 3;
   }
+
+  // How the callback resolved. Defaults to CALLBACK_OUTCOME_OK (0) for clients
+  // that don't set it, preserving the previous behavior where the `result`
+  // oneof alone determined success vs. error.
+  //
+  // Set to CALLBACK_OUTCOME_SUSPEND to defer: execution stops cleanly, the
+  // callback is reported in ExecuteResult.suspended_callback, and the journal
+  // of completed callbacks is still returned (only meaningful when the request
+  // opted into replay via `callback_journal`). The `result` oneof string is
+  // used as the opaque suspension reason.
+  CallbackOutcome outcome = 4;
+}
+
+// How a callback invocation resolved, for journaling and replay.
+enum CallbackOutcome {
+  // Success — the `value` is the JSON-encoded result.
+  CALLBACK_OUTCOME_OK = 0;
+  // Permanent failure — the `value` is the error message.
+  CALLBACK_OUTCOME_ERROR = 1;
+  // Deferred — the callback could not complete now and execution should be
+  // retried later. Carried on CallbackResponse; never stored in a journal.
+  CALLBACK_OUTCOME_SUSPEND = 2;
+}
+
+// A single recorded callback invocation in a replay journal.
+message CallbackJournalEntry {
+  // Position in the invocation sequence (0-indexed, in initiation order).
+  uint32 index = 1;
+  // Callback name.
+  string name = 2;
+  // Stable hash of the canonicalized arguments JSON (for fast comparison).
+  uint64 args_hash = 3;
+  // Canonicalized arguments JSON (for verification/debugging).
+  string args_json = 4;
+  // Whether the recorded invocation succeeded or failed. Only OK and ERROR are
+  // ever recorded; SUSPEND terminates execution before an entry is written.
+  CallbackOutcome outcome = 5;
+  // The JSON-encoded result value (OK) or the error message (ERROR).
+  string value = 6;
+}
+
+// An ordered journal of callback invocations.
+//
+// Sent in ExecuteRequest to enable replay/journaling (presence-significant: an
+// empty journal still turns journaling on) and returned in ExecuteResult with
+// the invocations recorded during the run.
+message CallbackJournal {
+  // Ordered callback invocations, in the order they were initiated.
+  repeated CallbackJournalEntry entries = 1;
+}
+
+// The callback that requested suspension, when execution was deferred.
+message SuspendedCallback {
+  // Name of the callback that suspended.
+  string name = 1;
+  // Canonicalized arguments JSON the callback was invoked with.
+  string args_json = 2;
+  // The opaque, caller-defined reason returned by the callback.
+  string reason = 3;
 }
 
 // Streaming output event from the sandbox.
@@ -247,6 +320,19 @@ message ExecuteResult {
   // Captured Python state snapshot after execution.
   // Only populated when persist_state was true in the request.
   bytes state_snapshot = 6;
+
+  // The callback journal recorded during this run, in initiation order.
+  // Present only when the request opted into replay (sent a callback_journal).
+  // Echo it back in the next ExecuteRequest to replay completed callbacks.
+  CallbackJournal callback_journal = 7;
+
+  // True if a callback requested suspension (CALLBACK_OUTCOME_SUSPEND).
+  // When true, `error` typically carries the suspension exception traceback;
+  // branch on this rather than treating it as a failure.
+  bool suspended = 8;
+
+  // Details of the callback that suspended, when `suspended` is true.
+  SuspendedCallback suspended_callback = 9;
 }
 
 // A trace event emitted during execution.
@@ -287,4 +373,8 @@ message ExecuteStats {
 
   // Fuel consumed (0 if unavailable).
   uint64 fuel_consumed = 4;
+
+  // Number of callbacks served from the replay journal (cache hits).
+  // 0 when replay was not enabled or nothing matched.
+  uint32 replayed_callbacks = 5;
 }
