@@ -314,6 +314,7 @@ impl Session {
                             handler_callbacks,
                             eryx::ResourceLimits::default(),
                             std::sync::Arc::new(std::collections::HashMap::new()),
+                            None,
                         )
                         .await
                     });
