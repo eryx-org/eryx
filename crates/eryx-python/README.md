@@ -1,6 +1,8 @@
 # PyEryx - Python Bindings for Eryx
 
-Python bindings for the [Eryx](https://github.com/sd2k/eryx) sandbox - execute Python code securely inside WebAssembly.
+Python bindings for the [Eryx](https://github.com/eryx-org/eryx) sandbox - execute untrusted Python code securely inside WebAssembly, from within a Python host.
+
+Eryx runs full **CPython 3.14** (not a limited subset), with memory and CPU limits, no filesystem or network access by default, and async host callbacks for the access you _do_ want to allow. **Used in production at [Grafana](https://grafana.com/).**
 
 ## Installation
 
