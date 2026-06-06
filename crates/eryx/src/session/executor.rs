@@ -1064,7 +1064,11 @@ impl SessionExecutor {
             if async_timeout_elapsed
                 || e.downcast_ref::<wasmtime::Trap>() == Some(&wasmtime::Trap::Interrupt)
             {
-                Error::Timeout(execution_timeout.unwrap_or_default())
+                if was_cancelled.load(Ordering::Relaxed) {
+                    Error::Cancelled
+                } else {
+                    Error::Timeout(execution_timeout.unwrap_or_default())
+                }
             } else if e.downcast_ref::<wasmtime::Trap>() == Some(&wasmtime::Trap::OutOfFuel) {
                 let consumed = initial_fuel.saturating_sub(remaining_fuel);
                 let limit = fuel_limit.unwrap_or(u64::MAX);
