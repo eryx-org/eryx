@@ -2104,17 +2104,17 @@ impl PythonExecutor {
 
         // Set up epoch ticker if we have a timeout or cancellation token
         let epoch_ticker = if execution_timeout.is_some() || cancellation_token.is_some() {
-            // Set deadline based on timeout, or use a moderate value for cancellation-only
-            if let Some(timeout) = execution_timeout {
-                let ticks_until_timeout = timeout.as_millis() as u64 / EPOCH_TICK_MS;
-                let ticks = ticks_until_timeout.max(1);
-                store.set_epoch_deadline(ticks);
+            // Capture the exact deadline we set so cancellation can bump the
+            // epoch *past* it. Bumping a fixed amount would fail to trap for
+            // timeouts longer than that amount.
+            const CANCELLATION_DEADLINE: u64 = 10000;
+            let deadline_ticks = if let Some(timeout) = execution_timeout {
+                (timeout.as_millis() as u64 / EPOCH_TICK_MS).max(1)
             } else {
-                // No timeout but we have cancellation - set a reachable deadline.
-                // When cancelled, we bump epoch by more than this to trigger interrupt.
-                const CANCELLATION_DEADLINE: u64 = 10000;
-                store.set_epoch_deadline(CANCELLATION_DEADLINE);
-            }
+                // No timeout but we have cancellation — set a reachable deadline.
+                CANCELLATION_DEADLINE
+            };
+            store.set_epoch_deadline(deadline_ticks);
 
             // Configure the store to trap when the epoch deadline is reached
             store.epoch_deadline_trap();
@@ -2135,8 +2135,9 @@ impl PythonExecutor {
                         && token.is_cancelled()
                     {
                         was_cancelled_clone.store(true, Ordering::Relaxed);
-                        // Bump epoch to exceed CANCELLATION_DEADLINE and trigger interrupt
-                        for _ in 0..10001 {
+                        // Bump past the configured deadline (inclusive) to force
+                        // an immediate trap regardless of timeout length.
+                        for _ in 0..=deadline_ticks {
                             engine.increment_epoch();
                         }
                         break;

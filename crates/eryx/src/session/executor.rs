@@ -968,13 +968,15 @@ impl SessionExecutor {
         let execution_timeout = self.execution_timeout;
         let was_cancelled = Arc::new(AtomicBool::new(false));
         let epoch_ticker = if execution_timeout.is_some() || cancellation_token.is_some() {
-            if let Some(timeout) = execution_timeout {
-                let ticks_until_timeout = timeout.as_millis() as u64 / EPOCH_TICK_MS;
-                let ticks = ticks_until_timeout.max(1);
-                store.set_epoch_deadline(ticks);
+            // Capture the exact deadline we set so cancellation can bump the
+            // epoch *past* it. Bumping a fixed amount would fail to trap for
+            // timeouts longer than that amount.
+            let deadline_ticks = if let Some(timeout) = execution_timeout {
+                (timeout.as_millis() as u64 / EPOCH_TICK_MS).max(1)
             } else {
-                store.set_epoch_deadline(CANCELLATION_DEADLINE);
-            }
+                CANCELLATION_DEADLINE
+            };
+            store.set_epoch_deadline(deadline_ticks);
 
             store.epoch_deadline_trap();
 
@@ -989,7 +991,9 @@ impl SessionExecutor {
                         && token.is_cancelled()
                     {
                         was_cancelled_clone.store(true, Ordering::Relaxed);
-                        for _ in 0..CANCELLATION_DEADLINE + 1 {
+                        // Bump past the configured deadline (inclusive) to force
+                        // an immediate trap regardless of timeout length.
+                        for _ in 0..=deadline_ticks {
                             engine.increment_epoch();
                         }
                         break;
