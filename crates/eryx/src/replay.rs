@@ -54,9 +54,9 @@
 //! Suspension is enforced by two mechanisms working together:
 //!
 //! 1. A **synchronous gate**: once any callback has suspended, every *subsequent
-//!    callback* the guest dispatches is rejected under the state lock (see
-//!    [`Decision::AlreadySuspended`]), so no further callback runs — even if
-//!    Python caught the suspend exception in a `try/except`. This is
+//!    callback* the guest dispatches is rejected under the state lock (the
+//!    internal `Decision::AlreadySuspended` path), so no further callback runs —
+//!    even if Python caught the suspend exception in a `try/except`. This is
 //!    deterministic and independent of timing.
 //! 2. An **asynchronous epoch interrupt** (a backstop wired up by the executor):
 //!    after the suspend result is delivered to the guest, the engine epoch is
