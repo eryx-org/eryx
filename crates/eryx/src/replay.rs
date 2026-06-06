@@ -233,24 +233,45 @@ impl ReplayState {
         if !self.live_mode
             && let Some(entry) = self.previous.entries.get(self.cursor)
         {
-            if entry.name == name && entry.args_hash == args_hash && entry.args_json == args_json {
-                // Cache hit: advance the cursor and record the replayed entry.
-                self.cursor += 1;
-                self.replayed_count += 1;
-                let result = entry.result.clone();
-                self.entries[seq] = Some(CallbackJournalEntry {
-                    index: u32::try_from(seq).unwrap_or(u32::MAX),
-                    name: name.to_string(),
-                    args_hash,
-                    args_json: args_json.to_string(),
-                    result: result.clone(),
-                });
-                return Decision::Hit(result);
+            // Match by recorded initiation position (`index`), not by raw cursor
+            // offset. A suspended callback leaves no entry, so the previous
+            // journal can have holes; matching on `index` keeps later entries
+            // replayable across those holes (e.g. a concurrent `gather` where the
+            // suspender was initiated before a sibling that completed).
+            let entry_index = entry.index as usize;
+            if entry_index == seq {
+                if entry.name == name
+                    && entry.args_hash == args_hash
+                    && entry.args_json == args_json
+                {
+                    // Cache hit: advance the cursor and record the replayed entry.
+                    self.cursor += 1;
+                    self.replayed_count += 1;
+                    let result = entry.result.clone();
+                    self.entries[seq] = Some(CallbackJournalEntry {
+                        index: u32::try_from(seq).unwrap_or(u32::MAX),
+                        name: name.to_string(),
+                        args_hash,
+                        args_json: args_json.to_string(),
+                        result: result.clone(),
+                    });
+                    return Decision::Hit(result);
+                }
+                // A recorded position now has a different call: the trace
+                // genuinely diverged. Switch to live mode for the rest of the
+                // run — later cached entries may depend on earlier results that
+                // are now different.
+                self.live_mode = true;
+            } else if entry_index < seq {
+                // Defensive: a recorded invocation is missing at its position
+                // (should not happen while matching, since we either consume an
+                // entry at its index or diverge there). Treat as divergence.
+                self.live_mode = true;
             }
-            // The trace diverged: switch to live mode for the rest of the run.
-            // We do not try to re-sync, because later cached entries may depend
-            // on earlier results that are now different.
-            self.live_mode = true;
+            // entry_index > seq: this position was a hole in the previous run
+            // (its callback suspended), so there is nothing to replay here. Fall
+            // through to a live Miss WITHOUT entering live mode, leaving the
+            // entry for when `seq` reaches its index so later calls still replay.
         }
         // Otherwise the previous journal is exhausted (or we are already live):
         // fall through to live invocation.
@@ -821,5 +842,44 @@ mod tests {
         // Nothing new journaled.
         let st = lock_state(&state);
         assert!(st.build_journal("code").is_empty());
+    }
+
+    #[tokio::test]
+    async fn replays_across_a_suspended_hole() {
+        // Models resume after a concurrent `gather` where the suspender was
+        // initiated first (seq 0, not journaled) and a sibling completed
+        // (seq 1, journaled at index 1). The journal has a hole at index 0.
+        let fetch_args = json!({"q": "x"});
+        let previous = CallbackJournal {
+            code: "code".into(),
+            entries: vec![entry_ok(1, "fetch", &fetch_args, json!("cached"))],
+        };
+        let state = Arc::new(Mutex::new(ReplayState::new(previous)));
+
+        // seq 0: the retried suspender — a hole in the journal — runs live.
+        let (approve, approve_calls) = programmable("approve", Outcome::Ok(json!("approved")));
+        let approve_wrapper = ReplayCallback::new(approve, Arc::clone(&state));
+        let r0 = approve_wrapper.invoke(json!({})).await.unwrap();
+        assert_eq!(r0, json!("approved"));
+        assert_eq!(
+            approve_calls.load(Ordering::SeqCst),
+            1,
+            "suspender runs live"
+        );
+
+        // seq 1: the sibling matches index 1 across the hole and replays from
+        // cache instead of re-running.
+        let (fetch, fetch_calls) = programmable("fetch", Outcome::Ok(json!("LIVE")));
+        let fetch_wrapper = ReplayCallback::new(fetch, Arc::clone(&state));
+        let r1 = fetch_wrapper.invoke(fetch_args).await.unwrap();
+        assert_eq!(r1, json!("cached"), "sibling replayed across the hole");
+        assert_eq!(
+            fetch_calls.load(Ordering::SeqCst),
+            0,
+            "completed sibling must not re-run"
+        );
+
+        let st = lock_state(&state);
+        assert_eq!(st.replayed_count(), 1);
     }
 }
