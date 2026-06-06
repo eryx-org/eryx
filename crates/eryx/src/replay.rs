@@ -17,6 +17,16 @@
 //! conditionals, nested functions) — the journal operates on the *invocation
 //! sequence*, not on the code.
 //!
+//! At this layer, replay matching tolerates code edits: callbacks are matched by
+//! name, arguments, and position in the invocation sequence, so a journal can
+//! replay its still-matching prefix even if the script changed between runs (the
+//! first divergence switches to live mode). Note, however, that a caller that
+//! signs journals and binds the signature to the exact script (as the
+//! `eryx-server` layer does) will reject an edited script's journal *before* it
+//! reaches this matching logic, restricting replay to byte-identical re-runs
+//! (e.g. suspend/resume). Whether edits can replay is therefore a property of
+//! the integrity policy layered on top, not of this module.
+//!
 //! Replay is implemented entirely as a [`Callback`] wrapper ([`ReplayCallback`]):
 //! no changes are needed to the WASM runtime, the WIT interface, or the Python
 //! code. The wrapper consults a shared [`ReplayState`] before delegating to the
@@ -38,6 +48,31 @@
 //!
 //! Eryx does not interpret the suspension reason; it is an opaque, caller-defined
 //! string.
+//!
+//! ## What suspension does and does not guarantee
+//!
+//! Suspension is enforced by two mechanisms working together:
+//!
+//! 1. A **synchronous gate**: once any callback has suspended, every *subsequent
+//!    callback* the guest dispatches is rejected under the state lock (see
+//!    [`Decision::AlreadySuspended`]), so no further callback runs — even if
+//!    Python caught the suspend exception in a `try/except`. This is
+//!    deterministic and independent of timing.
+//! 2. An **asynchronous epoch interrupt** (a backstop wired up by the executor):
+//!    after the suspend result is delivered to the guest, the engine epoch is
+//!    bumped, trapping the WASM guest so that *pure* (non-callback) Python code
+//!    after the suspension point stops running too.
+//!
+//! Because the epoch interrupt is asynchronous (the ticker polls on a ~10ms
+//! granularity), there is a brief window after the suspend exception is raised
+//! in which non-callback Python code may still execute if the script catches the
+//! exception. The synchronous gate closes this window for *callbacks*, but other
+//! host-backed side effects that do not funnel through the callback gate — most
+//! notably **outbound network requests and VFS writes** — are *not* gated and
+//! may still occur within that window. Suspension is therefore a clean stop for
+//! callback side effects, but is best-effort for other side effects. Callers
+//! that need a hard guarantee against post-suspension network or filesystem
+//! activity must enforce it at a higher layer.
 //!
 //! # Security: journal trust boundary
 //!

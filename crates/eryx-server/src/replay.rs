@@ -111,6 +111,13 @@ impl JournalSigner {
     }
 
     fn feed_mac(&self, mac: &mut HmacSha256, entries: &[pb::CallbackJournalEntry], code: &str) {
+        // Length-prefix the code so the boundary between the code and the first
+        // entry is unambiguous. Without this, `code || <entry stream>` could be
+        // re-split — a script whose bytes happen to embed an entry's encoding
+        // could feed-collide with a different (code, entries) pair. The key is
+        // secret so forgery is infeasible regardless, but framing every
+        // variable-length input keeps the MAC injective over (code, entries).
+        mac.update(&(code.len() as u64).to_le_bytes());
         mac.update(code.as_bytes());
         // Deterministic protobuf encoding of each entry. Prost's `encode_to_vec`
         // length-prefixes all variable-length fields on the wire, so there is no

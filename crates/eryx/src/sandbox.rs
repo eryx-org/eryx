@@ -2339,10 +2339,12 @@ impl SandboxBuilder<state::Has, state::Has> {
 pub struct ReplayOutcome {
     /// The execution result, exactly as [`Sandbox::execute`] would return it.
     ///
-    /// When [`suspended`](Self::suspended) is `Some`, this is typically the
-    /// `Err` produced by the suspension exception propagating into Python; that
-    /// is expected, and callers should branch on `suspended` rather than treating
-    /// it as a failure.
+    /// When [`suspended`](Self::suspended) is `Some`, this is typically
+    /// `Err(`[`Error::Cancelled`](crate::Error::Cancelled)`)`: the suspend
+    /// exception is delivered to Python and the epoch interrupt then traps the
+    /// guest, so the run terminates via cancellation rather than surfacing the
+    /// Python traceback. This is expected — callers should branch on `suspended`
+    /// rather than treating the error as a failure.
     pub result: Result<ExecuteResult, Error>,
     /// The callback journal recorded during this run, in initiation order.
     pub journal: CallbackJournal,

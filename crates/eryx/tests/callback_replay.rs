@@ -232,6 +232,10 @@ print(f"a={a['live_call']} b={b['live_call']}")
 async fn suspension_surfaces_and_preserves_prefix_journal() {
     let tick_calls = Arc::new(AtomicU32::new(0));
     let approve_calls = Arc::new(AtomicU32::new(0));
+    // A callback invoked *after* the suspension point. It must never run: the
+    // synchronous suspend gate rejects post-suspension callbacks, and the epoch
+    // interrupt traps the guest before subsequent code executes.
+    let marker_calls = Arc::new(AtomicU32::new(0));
 
     let sandbox = sandbox_builder()
         .with_callback(CountingCallback {
@@ -243,12 +247,17 @@ async fn suspension_surfaces_and_preserves_prefix_journal() {
             reason: "needs human approval".to_string(),
             live_calls: Arc::clone(&approve_calls),
         })
+        .with_callback(CountingCallback {
+            name: "marker".to_string(),
+            live_calls: Arc::clone(&marker_calls),
+        })
         .build()
         .expect("build sandbox");
 
     let script = r#"
 a = await tick(step="one")
 b = await approve(amount=100)
+c = await marker(step="after-suspend")
 print("should not reach here")
 "#;
 
@@ -260,7 +269,17 @@ print("should not reach here")
     assert_eq!(suspended.reason, "needs human approval");
     assert_eq!(approve_calls.load(Ordering::SeqCst), 1);
 
-    // The completed `tick` callback is journaled; the suspended one is not.
+    // The guarantee: code after the suspension point does not run. The `marker`
+    // callback is dispatched after `approve` in the script, yet must never be
+    // invoked live.
+    assert_eq!(
+        marker_calls.load(Ordering::SeqCst),
+        0,
+        "callback after the suspension point must not run"
+    );
+
+    // The completed `tick` callback is journaled; neither the suspended
+    // `approve` nor the gated `marker` is.
     assert_eq!(
         outcome.journal.entries.len(),
         1,
@@ -280,6 +299,10 @@ print("should not reach here")
             reason: "needs human approval".to_string(),
             live_calls: Arc::clone(&approve_calls),
         })
+        .with_callback(CountingCallback {
+            name: "marker".to_string(),
+            live_calls: Arc::clone(&marker_calls),
+        })
         .with_replay_journal(outcome.journal)
         .build()
         .expect("build resume sandbox");
@@ -296,6 +319,11 @@ print("should not reach here")
         approve_calls.load(Ordering::SeqCst),
         2,
         "approve ran live again"
+    );
+    assert_eq!(
+        marker_calls.load(Ordering::SeqCst),
+        0,
+        "callback after the suspension point must not run on resume either"
     );
 }
 

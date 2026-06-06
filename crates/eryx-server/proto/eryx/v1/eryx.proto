@@ -348,8 +348,11 @@ message ExecuteResult {
   CallbackJournal callback_journal = 7;
 
   // True if a callback requested suspension (CALLBACK_OUTCOME_SUSPEND).
-  // When true, `error` typically carries the suspension exception traceback;
-  // branch on this rather than treating it as a failure.
+  // When true, `success` is false and `error` typically describes a cancelled
+  // execution (the suspend is delivered to Python and the guest is then trapped
+  // via an epoch interrupt, so the run ends in cancellation rather than a Python
+  // traceback). Branch on this field rather than treating the error as a
+  // failure; the suspension details are in `suspended_callback`.
   bool suspended = 8;
 
   // Details of the callback that suspended, when `suspended` is true.

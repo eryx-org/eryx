@@ -956,6 +956,10 @@ async fn execute_with_session(
                 stats: replay_state.is_some().then_some(ExecuteStats {
                     duration_ms: duration.as_millis() as u64,
                     callback_invocations,
+                    // peak_memory_bytes and fuel_consumed come from the
+                    // execution `output`, which we don't have on the error path;
+                    // they are intentionally 0 here (unavailable), unlike the
+                    // success path which populates them.
                     peak_memory_bytes: 0,
                     fuel_consumed: 0,
                     replayed_callbacks,

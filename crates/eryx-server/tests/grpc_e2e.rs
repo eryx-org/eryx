@@ -1095,9 +1095,13 @@ async fn callback_suspension_reported_with_prefix_journal() {
     let channel = start_server().await;
     let mut client = EryxClient::new(channel);
 
+    // The `marker` callback is dispatched *after* `approve` in the script. It
+    // must never reach the client: the server's suspend gate rejects callbacks
+    // initiated after a suspension, and the epoch interrupt halts the guest.
     let code = r#"
 a = await echo(message="first")
 b = await approve(amount=100)
+c = await marker(message="after-suspend")
 print("should not reach here")
 "#;
     let approve_decl = CallbackDeclaration {
@@ -1110,12 +1114,22 @@ print("should not reach here")
             required: true,
         }],
     };
+    let marker_decl = CallbackDeclaration {
+        name: "marker".to_string(),
+        description: "Must never be dispatched after suspension".to_string(),
+        parameters: vec![ParameterDeclaration {
+            name: "message".to_string(),
+            json_type: "string".to_string(),
+            description: "The message".to_string(),
+            required: true,
+        }],
+    };
 
     let (tx, rx) = mpsc::channel(16);
     tx.send(ClientMessage {
         message: Some(client_message::Message::ExecuteRequest(ExecuteRequest {
             code: code.to_string(),
-            callbacks: vec![echo_declaration(), approve_decl],
+            callbacks: vec![echo_declaration(), approve_decl, marker_decl],
             callback_journal: Some(CallbackJournal {
                 entries: vec![],
                 signature: vec![],
@@ -1133,6 +1147,7 @@ print("should not reach here")
         .into_inner();
 
     let mut got_result = false;
+    let mut marker_dispatched = false;
     while let Some(msg) = stream.message().await.unwrap() {
         match msg.message {
             Some(server_message::Message::CallbackRequest(req)) => {
@@ -1143,6 +1158,9 @@ print("should not reach here")
                         callback_response::Result::Error("needs human approval".to_string()),
                     )
                 } else {
+                    if req.name == "marker" {
+                        marker_dispatched = true;
+                    }
                     let response_json = serde_json::json!({ "echoed": "first" }).to_string();
                     (0, callback_response::Result::JsonResult(response_json))
                 };
@@ -1175,4 +1193,8 @@ print("should not reach here")
         }
     }
     assert!(got_result, "never received ExecuteResult");
+    assert!(
+        !marker_dispatched,
+        "callback after the suspension point must not be dispatched to the client"
+    );
 }
