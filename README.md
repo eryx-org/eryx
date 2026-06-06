@@ -6,10 +6,14 @@
 [![npm](https://img.shields.io/npm/v/@bsull/eryx.svg)](https://www.npmjs.com/package/@bsull/eryx)
 [![docs](https://img.shields.io/badge/docs-docs.eryx.run-blue)](https://docs.eryx.run)
 
+A WebAssembly sandbox for running **untrusted Python** safely — memory and CPU limits, no filesystem or network access by default, and async host callbacks for the access you _do_ want to allow.
+
+Embed it from **Python**, **JavaScript**, or **Rust**. Runs full **CPython 3.14** (not a limited subset), so the real standard library and most pure-Python packages just work. [Try the demo](https://demo.eryx.run) or [read the docs](https://docs.eryx.run).
+
+> **Used in production at [Grafana](https://grafana.com/).**
+
 > **eryx** (noun): A genus of sand boas (Erycinae) — non-venomous snakes that live _in_ sand.
 > Perfect for "Python running inside a sandbox."
-
-A Rust library that executes Python code in a WebAssembly sandbox with async callbacks. [Try the demo](https://demo.eryx.run) or [read the docs](https://docs.eryx.run).
 
 ## Features
 
@@ -31,6 +35,42 @@ A Rust library that executes Python code in a WebAssembly sandbox with async cal
 Eryx embeds **CPython 3.14** compiled to WebAssembly (WASI). The WASI-compiled CPython and standard library come from the [componentize-py](https://github.com/bytecodealliance/componentize-py) project by the Bytecode Alliance.
 
 ## Quick Start
+
+### Python
+
+```bash
+pip install pyeryx
+```
+
+> The package is published as `pyeryx` but imported as `eryx`.
+
+```python
+import eryx
+
+# Zero-config: ships with a pre-initialized CPython runtime, so this is fast (~1-5ms)
+sandbox = eryx.Sandbox()
+
+result = sandbox.execute('''
+print("Hello from the sandbox!")
+print(f"2 + 2 = {2 + 2}")
+''')
+
+print(result.stdout)
+```
+
+See the [PyPI package](https://pypi.org/project/pyeryx/) and [`crates/eryx-python`](crates/eryx-python/README.md) for the full Python API (sessions, callbacks, package loading, resource limits).
+
+### JavaScript
+
+```bash
+npm install @bsull/eryx
+```
+
+### Rust
+
+```bash
+cargo add eryx --features embedded
+```
 
 ```rust
 use eryx::Sandbox;
