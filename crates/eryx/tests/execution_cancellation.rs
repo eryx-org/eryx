@@ -4,11 +4,20 @@
 //! including cancellation, waiting for results, and error handling.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
+use std::future::Future;
 #[cfg(not(feature = "embedded"))]
 use std::path::PathBuf;
+use std::pin::Pin;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use eryx::{Error, ResourceLimits, Sandbox};
+use eryx::{
+    Callback, CallbackError, CancellationToken, Error, ResourceLimits, Sandbox, Schema,
+    SessionExecutor,
+};
+use serde_json::{Value, json};
+use tokio::sync::Notify;
 
 // =============================================================================
 // Helper Functions
@@ -70,6 +79,32 @@ fn sandbox_builder_with_short_timeout() -> eryx::SandboxBuilder<eryx::state::Has
         execution_timeout: Some(Duration::from_secs(3)),
         ..Default::default()
     })
+}
+
+struct NotifyStartedCallback {
+    started: Arc<Notify>,
+}
+
+impl Callback for NotifyStartedCallback {
+    fn name(&self) -> &str {
+        "started"
+    }
+
+    fn description(&self) -> &str {
+        "Signals that Python execution reached the test callback"
+    }
+
+    fn parameters_schema(&self) -> Schema {
+        Schema::empty()
+    }
+
+    fn invoke(
+        &self,
+        _args: Value,
+    ) -> Pin<Box<dyn Future<Output = Result<Value, CallbackError>> + Send + '_>> {
+        self.started.notify_one();
+        Box::pin(async { Ok(json!({"started": true})) })
+    }
 }
 
 // =============================================================================
@@ -217,6 +252,148 @@ async fn test_cancellation_token_can_be_shared() {
         Err(Error::Cancelled) => {} // Expected
         Err(e) => panic!("Expected Cancelled error, got: {:?}", e),
         Ok(_) => panic!("Expected error, got success"),
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_cancellation_without_timeout_ignores_epoch_progress_until_cancelled() {
+    let started = Arc::new(Notify::new());
+    let sandbox = sandbox_builder()
+        .with_resource_limits(ResourceLimits {
+            execution_timeout: None,
+            ..Default::default()
+        })
+        .with_callback(NotifyStartedCallback {
+            started: Arc::clone(&started),
+        })
+        .build()
+        .expect("Failed to build sandbox");
+    let engine = sandbox.executor().engine().clone();
+
+    let handle = sandbox.execute_cancellable(
+        r#"
+await started()
+while True:
+    pass
+"#,
+    );
+    tokio::time::timeout(Duration::from_secs(3), started.notified())
+        .await
+        .expect("Python did not reach the started callback");
+
+    let stop_spammer = Arc::new(AtomicBool::new(false));
+    let spammer_stop = Arc::clone(&stop_spammer);
+    let spammer = tokio::task::spawn_blocking(move || {
+        let start = std::time::Instant::now();
+        while start.elapsed() < Duration::from_millis(600) && !spammer_stop.load(Ordering::Relaxed)
+        {
+            for _ in 0..100 {
+                engine.increment_epoch();
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    });
+
+    let token = handle.cancellation_token();
+    let cleanup_token = token.clone();
+    let cancel_thread = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(1200));
+        cleanup_token.cancel();
+    });
+    let mut wait = Box::pin(handle.wait());
+    match tokio::time::timeout(Duration::from_millis(300), &mut wait).await {
+        Ok(result) => {
+            stop_spammer.store(true, Ordering::Relaxed);
+            let _ = spammer.await;
+            cancel_thread.join().expect("cancel thread panicked");
+            panic!("uncancelled execution finished under epoch pressure: {result:?}");
+        }
+        Err(_elapsed) => {}
+    }
+
+    token.cancel();
+    let result = tokio::time::timeout(Duration::from_secs(3), &mut wait)
+        .await
+        .expect("cancelled execution did not finish");
+    stop_spammer.store(true, Ordering::Relaxed);
+    let _ = spammer.await;
+    cancel_thread.join().expect("cancel thread panicked");
+
+    match result {
+        Err(Error::Cancelled) => {}
+        Err(e) => panic!("Expected Cancelled error, got: {:?}", e),
+        Ok(_) => panic!("Expected cancellation, got success"),
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_session_cancellation_without_timeout_ignores_epoch_progress_until_cancelled() {
+    let sandbox = sandbox_builder().build().expect("Failed to build sandbox");
+    let executor = sandbox.executor();
+    let engine = executor.engine().clone();
+    let mut session = SessionExecutor::new(executor, &[])
+        .await
+        .expect("Failed to create session");
+    session.set_execution_timeout(None);
+
+    let token = CancellationToken::new();
+    let run_token = token.clone();
+    let mut execution = tokio::spawn(async move {
+        session
+            .execute(
+                r#"
+while True:
+    pass
+"#,
+            )
+            .with_cancellation(run_token)
+            .run()
+            .await
+    });
+
+    let stop_spammer = Arc::new(AtomicBool::new(false));
+    let spammer_stop = Arc::clone(&stop_spammer);
+    let spammer = tokio::task::spawn_blocking(move || {
+        std::thread::sleep(Duration::from_millis(100));
+        let start = std::time::Instant::now();
+        while start.elapsed() < Duration::from_millis(600) && !spammer_stop.load(Ordering::Relaxed)
+        {
+            for _ in 0..100 {
+                engine.increment_epoch();
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    });
+
+    let cleanup_token = token.clone();
+    let cancel_thread = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(1200));
+        cleanup_token.cancel();
+    });
+    match tokio::time::timeout(Duration::from_millis(300), &mut execution).await {
+        Ok(joined) => {
+            stop_spammer.store(true, Ordering::Relaxed);
+            let _ = spammer.await;
+            cancel_thread.join().expect("cancel thread panicked");
+            let result = joined.expect("session execution task panicked");
+            panic!("uncancelled session finished under epoch pressure: {result:?}");
+        }
+        Err(_elapsed) => {}
+    }
+
+    token.cancel();
+    let result = tokio::time::timeout(Duration::from_secs(3), &mut execution)
+        .await
+        .expect("cancelled session did not finish")
+        .expect("session execution task panicked");
+    stop_spammer.store(true, Ordering::Relaxed);
+    let _ = spammer.await;
+    cancel_thread.join().expect("cancel thread panicked");
+
+    match result {
+        Err(Error::Cancelled) => {}
+        Err(e) => panic!("Expected Cancelled error, got: {:?}", e),
+        Ok(_) => panic!("Expected cancellation, got success"),
     }
 }
 

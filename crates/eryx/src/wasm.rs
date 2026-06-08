@@ -34,7 +34,7 @@ use crate::cache::{CacheKey, InstancePreCache};
 use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 use wasmtime::component::{Accessor, Component, HasSelf, Linker, ResourceTable};
-use wasmtime::{Config, Engine, ResourceLimiter, Store};
+use wasmtime::{Config, Engine, ResourceLimiter, Store, UpdateDeadline};
 use wasmtime_wasi::{DirPerms, FilePerms, WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView};
 
 use crate::callback::Callback;
@@ -2102,18 +2102,12 @@ impl PythonExecutor {
         // Track whether execution was cancelled (vs timed out)
         let was_cancelled = Arc::new(AtomicBool::new(false));
 
-        // Set up epoch ticker if we have a timeout or cancellation token
-        let epoch_ticker = if execution_timeout.is_some() || cancellation_token.is_some() {
+        const CANCELLATION_DEADLINE: u64 = 10000;
+        let epoch_ticker = if let Some(timeout) = execution_timeout {
             // Capture the exact deadline we set so cancellation can bump the
             // epoch *past* it. Bumping a fixed amount would fail to trap for
             // timeouts longer than that amount.
-            const CANCELLATION_DEADLINE: u64 = 10000;
-            let deadline_ticks = if let Some(timeout) = execution_timeout {
-                (timeout.as_millis() as u64 / EPOCH_TICK_MS).max(1)
-            } else {
-                // No timeout but we have cancellation — set a reachable deadline.
-                CANCELLATION_DEADLINE
-            };
+            let deadline_ticks = (timeout.as_millis() as u64 / EPOCH_TICK_MS).max(1);
             store.set_epoch_deadline(deadline_ticks);
 
             // Configure the store to trap when the epoch deadline is reached
@@ -2144,6 +2138,37 @@ impl PythonExecutor {
                     }
                     std::thread::sleep(Duration::from_millis(EPOCH_TICK_MS));
                     engine.increment_epoch();
+                }
+            });
+            Some(stop_flag)
+        } else if let Some(cancel_token) = cancellation_token.clone() {
+            store.set_epoch_deadline(CANCELLATION_DEADLINE);
+
+            let deadline_token = cancel_token.clone();
+            let deadline_was_cancelled = Arc::clone(&was_cancelled);
+            store.epoch_deadline_callback(move |_store| {
+                if deadline_token.is_cancelled() || deadline_was_cancelled.load(Ordering::Relaxed) {
+                    deadline_was_cancelled.store(true, Ordering::Relaxed);
+                    Ok(UpdateDeadline::Interrupt)
+                } else {
+                    Ok(UpdateDeadline::Continue(CANCELLATION_DEADLINE))
+                }
+            });
+
+            let engine = self.engine.clone();
+            let stop_flag = Arc::new(AtomicBool::new(false));
+            let stop_flag_clone = Arc::clone(&stop_flag);
+            let was_cancelled_clone = Arc::clone(&was_cancelled);
+            std::thread::spawn(move || {
+                while !stop_flag_clone.load(Ordering::Relaxed) {
+                    if cancel_token.is_cancelled() {
+                        was_cancelled_clone.store(true, Ordering::Relaxed);
+                        for _ in 0..=CANCELLATION_DEADLINE {
+                            engine.increment_epoch();
+                        }
+                        break;
+                    }
+                    std::thread::sleep(Duration::from_millis(EPOCH_TICK_MS));
                 }
             });
             Some(stop_flag)
