@@ -988,6 +988,9 @@ impl SessionExecutor {
             state.set_output_tx(output_tx);
             state.set_callbacks(callback_infos);
             state.reset_memory_tracker();
+            // A reused store keeps its ExecutorState across runs; clear any stale
+            // suspension flag so it does not misclassify this run's trap.
+            state.clear_suspended();
         }
 
         self.execution_count += 1;
@@ -1077,6 +1080,11 @@ impl SessionExecutor {
         }
 
         // Clear channels after execution and capture peak memory
+        // Capture any suspension reason before the store is restored: a callback
+        // that suspended poisons fuel to halt the guest, so the resulting trap
+        // must be classified as a suspension rather than fuel-limit exhaustion.
+        let suspended_reason = store.data().suspended.clone();
+
         let peak_memory = {
             let state = store.data_mut();
             state.set_callback_tx(None);
@@ -1105,9 +1113,13 @@ impl SessionExecutor {
             {
                 Error::Timeout(execution_timeout.unwrap_or_default())
             } else if e.downcast_ref::<wasmtime::Trap>() == Some(&wasmtime::Trap::OutOfFuel) {
-                let consumed = initial_fuel.saturating_sub(remaining_fuel);
-                let limit = fuel_limit.unwrap_or(u64::MAX);
-                Error::FuelExhausted { consumed, limit }
+                if let Some(reason) = suspended_reason.clone() {
+                    Error::Suspended(reason)
+                } else {
+                    let consumed = initial_fuel.saturating_sub(remaining_fuel);
+                    let limit = fuel_limit.unwrap_or(u64::MAX);
+                    Error::FuelExhausted { consumed, limit }
+                }
             } else {
                 Error::Execution(format!("WASM execution error: {e:?}"))
             }
@@ -1498,6 +1510,7 @@ impl ExecutorState {
             memory_tracker,
             net_tx: None,    // Set via with_network() when network handler is running
             output_tx: None, // Set via set_output_tx() when output handler is running
+            suspended: None,
         }
     }
 
@@ -1522,6 +1535,7 @@ impl ExecutorState {
             net_tx: None,    // Set via with_network() when network handler is running
             output_tx: None, // Set via set_output_tx() when output handler is running
             hybrid_vfs_ctx,
+            suspended: None,
         }
     }
 
@@ -1551,6 +1565,15 @@ impl ExecutorState {
     /// Update the available callbacks for a new execution.
     pub(crate) fn set_callbacks(&mut self, callbacks: Vec<HostCallbackInfo>) {
         self.callbacks = callbacks;
+    }
+
+    /// Clear any suspension flag left over from a previous execution.
+    ///
+    /// A reused session [`Store`] keeps its [`ExecutorState`] across runs, so the
+    /// suspension flag must be cleared before each execution to avoid a stale
+    /// suspension classifying a fresh run's trap.
+    pub(crate) fn clear_suspended(&mut self) {
+        self.suspended = None;
     }
 
     /// Get the peak memory usage from the tracker.

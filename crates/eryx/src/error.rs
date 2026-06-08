@@ -75,6 +75,18 @@ pub enum Error {
     #[error("execution cancelled")]
     Cancelled,
 
+    /// Execution was suspended by a callback returning
+    /// [`CallbackError::Suspend`](crate::CallbackError::Suspend).
+    ///
+    /// The guest was halted (its fuel poisoned) the instant the callback
+    /// suspended, so no normal output is produced. This is distinct from
+    /// [`FuelExhausted`](Self::FuelExhausted), which signals a real fuel-limit
+    /// overrun. The opaque reason and the suspended callback's metadata are
+    /// surfaced separately (e.g. via
+    /// [`ReplayOutcome::suspended`](crate::ReplayOutcome::suspended)).
+    #[error("execution suspended: {0}")]
+    Suspended(String),
+
     /// I/O error.
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),

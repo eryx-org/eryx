@@ -93,6 +93,7 @@ pub use package::{ExtractedPackage, PackageFormat};
 pub use pool::{PoolConfig, PoolError, PoolStats, PooledSandbox, SandboxPool};
 pub use replay::{
     CallbackJournal, CallbackJournalEntry, CallbackOutcome, ReplayCallback, ReplayState,
+    SuspendedCallback,
 };
 pub use sandbox::{
     ExecuteResult, ExecuteStats, ExecutionHandle, ReplayOutcome, ResourceLimits, Sandbox,

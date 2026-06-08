@@ -34,12 +34,29 @@ use crate::cache::{CacheKey, InstancePreCache};
 use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 use wasmtime::component::{Accessor, Component, HasSelf, Linker, ResourceTable};
-use wasmtime::{Config, Engine, ResourceLimiter, Store};
+use wasmtime::{AsContextMut, Config, Engine, ResourceLimiter, Store};
 use wasmtime_wasi::{DirPerms, FilePerms, WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView};
 
 use crate::callback::Callback;
 use crate::error::Error;
 use crate::trace::TraceEvent;
+
+/// The result a callback handler sends back to the `invoke` host import.
+///
+/// Distinguishes a successful result and an ordinary error (both surface to
+/// Python as a value / exception and let execution continue) from a
+/// **suspension**, which causes the import to poison the store's fuel and halt
+/// the guest synchronously.
+#[derive(Debug, Clone)]
+pub enum CallbackHostResult {
+    /// The callback succeeded; the JSON value is returned to Python.
+    Ok(String),
+    /// The callback failed; the message is raised as an exception in Python.
+    Err(String),
+    /// The callback asked to suspend. The import poisons fuel to halt the guest;
+    /// the string is the opaque reason recorded for the caller.
+    Suspend(String),
+}
 
 /// Request to invoke a callback from Python code.
 #[derive(Debug)]
@@ -49,7 +66,7 @@ pub struct CallbackRequest {
     /// JSON-encoded arguments.
     pub arguments_json: String,
     /// Channel to send the response back.
-    pub response_tx: oneshot::Sender<std::result::Result<String, String>>,
+    pub response_tx: oneshot::Sender<CallbackHostResult>,
 }
 
 /// Request to report a trace event from Python code.
@@ -431,6 +448,13 @@ pub struct ExecutorState {
     /// Uses ScrubbingStorage to scrub secret placeholders from file writes.
     #[cfg(feature = "vfs")]
     pub(crate) hybrid_vfs_ctx: Option<eryx_vfs::HybridVfsCtx<eryx_vfs::ArcStorage>>,
+    /// Set when a callback requested suspension (`CallbackError::Suspend`).
+    ///
+    /// The callback import sets this synchronously and poisons the store's fuel
+    /// to `0`, which traps the guest at its next fuel-metered instruction. The
+    /// flag both gates further host effects (network / VFS / output) and lets the
+    /// trap be classified as a suspension rather than a fuel-limit exhaustion.
+    pub(crate) suspended: Option<String>,
 }
 
 impl std::fmt::Debug for ExecutorState {
@@ -507,10 +531,28 @@ impl SandboxImportsWithStore for HasSelf<ExecutorState> {
                 if tx.send(request).await.is_err() {
                     Err("Callback channel closed".to_string())
                 } else {
-                    // Wait for response
-                    response_rx
-                        .await
-                        .unwrap_or_else(|_| Err("Callback response channel closed".to_string()))
+                    // Wait for the handler's response.
+                    match response_rx.await {
+                        Ok(CallbackHostResult::Ok(value)) => Ok(value),
+                        Ok(CallbackHostResult::Err(message)) => Err(message),
+                        Ok(CallbackHostResult::Suspend(reason)) => {
+                            // Suspension is a synchronous callback-boundary event:
+                            // poison the store's fuel to 0 so the guest traps at
+                            // its next fuel-metered instruction — Python cannot run
+                            // any further code, dispatch callbacks, or perform I/O
+                            // afterwards. The host-side flag records the reason and
+                            // drives trap classification plus the net/VFS/output
+                            // gates.
+                            accessor.with(|mut access| {
+                                access.get().suspended = Some(reason.clone());
+                                let _ = access.as_context_mut().set_fuel(0);
+                            });
+                            // The return value is moot: the guest traps before it
+                            // can observe it. Surface the reason for completeness.
+                            Err(reason)
+                        }
+                        Err(_) => Err("Callback response channel closed".to_string()),
+                    }
                 }
             } else {
                 // No callback channel - return error
@@ -548,6 +590,10 @@ impl SandboxImports for ExecutorState {
 
     /// Report output (stdout/stderr) to the host in real-time.
     fn report_output(&mut self, stream_id: u32, data: String) {
+        // Drop output once suspended: no side effects after a suspension.
+        if self.suspended.is_some() {
+            return;
+        }
         if let Some(tx) = &self.output_tx {
             let request = OutputRequest {
                 stream: stream_id,
@@ -601,6 +647,10 @@ impl tcp::Host for ExecutorState {
     ) -> Result<u32, tcp::TcpError> {
         tracing::debug!(host = %host, port, timeout_ms, "TCP connect requested");
 
+        if self.suspended.is_some() {
+            return Err(tcp::TcpError::NotPermitted("execution suspended".into()));
+        }
+
         let tx = self.net_tx.clone().ok_or_else(|| {
             tcp::TcpError::NotPermitted("networking not enabled for this sandbox".into())
         })?;
@@ -634,6 +684,10 @@ impl tcp::Host for ExecutorState {
     ) -> Result<Vec<u8>, tcp::TcpError> {
         tracing::trace!(handle, len, timeout_ms, "TCP read requested");
 
+        if self.suspended.is_some() {
+            return Err(tcp::TcpError::NotPermitted("execution suspended".into()));
+        }
+
         let tx = self.net_tx.clone().ok_or_else(|| {
             tcp::TcpError::NotPermitted("networking not enabled for this sandbox".into())
         })?;
@@ -664,6 +718,10 @@ impl tcp::Host for ExecutorState {
         data: Vec<u8>,
     ) -> Result<u32, tcp::TcpError> {
         tracing::trace!(handle, len = data.len(), timeout_ms, "TCP write requested");
+
+        if self.suspended.is_some() {
+            return Err(tcp::TcpError::NotPermitted("execution suspended".into()));
+        }
 
         let tx = self.net_tx.clone().ok_or_else(|| {
             tcp::TcpError::NotPermitted("networking not enabled for this sandbox".into())
@@ -710,6 +768,12 @@ impl tls::Host for ExecutorState {
     ) -> Result<u32, tls::TlsError> {
         tracing::debug!(tcp_handle, hostname = %hostname, timeout_ms, "TLS upgrade requested");
 
+        if self.suspended.is_some() {
+            return Err(tls::TlsError::Tcp(tcp::TcpError::NotPermitted(
+                "execution suspended".into(),
+            )));
+        }
+
         let tx = self.net_tx.clone().ok_or_else(|| {
             tls::TlsError::Tcp(tcp::TcpError::NotPermitted(
                 "networking not enabled for this sandbox".into(),
@@ -749,6 +813,12 @@ impl tls::Host for ExecutorState {
     ) -> Result<Vec<u8>, tls::TlsError> {
         tracing::trace!(handle, len, timeout_ms, "TLS read requested");
 
+        if self.suspended.is_some() {
+            return Err(tls::TlsError::Tcp(tcp::TcpError::NotPermitted(
+                "execution suspended".into(),
+            )));
+        }
+
         let tx = self.net_tx.clone().ok_or_else(|| {
             tls::TlsError::Tcp(tcp::TcpError::NotPermitted(
                 "networking not enabled for this sandbox".into(),
@@ -787,6 +857,12 @@ impl tls::Host for ExecutorState {
         data: Vec<u8>,
     ) -> Result<u32, tls::TlsError> {
         tracing::trace!(handle, len = data.len(), timeout_ms, "TLS write requested");
+
+        if self.suspended.is_some() {
+            return Err(tls::TlsError::Tcp(tcp::TcpError::NotPermitted(
+                "execution suspended".into(),
+            )));
+        }
 
         let tx = self.net_tx.clone().ok_or_else(|| {
             tls::TlsError::Tcp(tcp::TcpError::NotPermitted(
@@ -2157,6 +2233,7 @@ impl PythonExecutor {
             output_tx,
             #[cfg(feature = "vfs")]
             hybrid_vfs_ctx,
+            suspended: None,
         };
 
         // Create store for this execution
@@ -2305,10 +2382,18 @@ impl PythonExecutor {
                     Error::Timeout(execution_timeout.unwrap_or_default())
                 }
             } else if e.downcast_ref::<wasmtime::Trap>() == Some(&wasmtime::Trap::OutOfFuel) {
-                let remaining = store.get_fuel().unwrap_or(0);
-                let consumed = initial_fuel.saturating_sub(remaining);
-                let limit = fuel_limit.unwrap_or(u64::MAX);
-                Error::FuelExhausted { consumed, limit }
+                // A callback that suspended poisons the store's fuel to halt the
+                // guest, which surfaces as an OutOfFuel trap. Classify that as a
+                // suspension rather than a real fuel-limit overrun (the suspended
+                // flag is only set on the suspension path).
+                if let Some(reason) = store.data().suspended.clone() {
+                    Error::Suspended(reason)
+                } else {
+                    let remaining = store.get_fuel().unwrap_or(0);
+                    let consumed = initial_fuel.saturating_sub(remaining);
+                    let limit = fuel_limit.unwrap_or(u64::MAX);
+                    Error::FuelExhausted { consumed, limit }
+                }
             } else {
                 Error::Execution(format!("WASM execution error: {e:?}"))
             }

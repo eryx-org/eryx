@@ -12,8 +12,8 @@ use eryx::{PoolConfig, Sandbox, SandboxPool};
 use eryx_server::proto::eryx::v1::eryx_client::EryxClient;
 use eryx_server::proto::eryx::v1::eryx_server::EryxServer;
 use eryx_server::proto::eryx::v1::{
-    CallbackDeclaration, CallbackJournal, ClientMessage, ExecuteRequest, ParameterDeclaration,
-    ResourceLimits, callback_response, client_message, server_message,
+    CallbackDeclaration, CallbackJournal, CallbackOutcome, ClientMessage, ExecuteRequest,
+    ParameterDeclaration, ResourceLimits, callback_response, client_message, server_message,
 };
 use eryx_server::service::EryxService;
 use tokio::net::TcpListener;
@@ -473,6 +473,7 @@ print(f"got: {result}")
                     message: Some(client_message::Message::CallbackResponse(
                         eryx_server::proto::eryx::v1::CallbackResponse {
                             request_id: req.request_id,
+                            outcome: 0,
                             result: Some(callback_response::Result::JsonResult(response_json)),
                         },
                     )),
@@ -558,6 +559,7 @@ except Exception as e:
                     message: Some(client_message::Message::CallbackResponse(
                         eryx_server::proto::eryx::v1::CallbackResponse {
                             request_id: req.request_id,
+                            outcome: 0,
                             result: Some(callback_response::Result::Error(
                                 "datasource unavailable".to_string(),
                             )),
@@ -1067,6 +1069,7 @@ print(f"alpha: {result}")
                         message: Some(client_message::Message::CallbackResponse(
                             eryx_server::proto::eryx::v1::CallbackResponse {
                                 request_id: req.request_id,
+                                outcome: 0,
                                 result: Some(callback_response::Result::JsonResult(response_json)),
                             },
                         )),
@@ -1150,6 +1153,7 @@ print(f"beta: {result}")
                         message: Some(client_message::Message::CallbackResponse(
                             eryx_server::proto::eryx::v1::CallbackResponse {
                                 request_id: req.request_id,
+                                outcome: 0,
                                 result: Some(callback_response::Result::JsonResult(response_json)),
                             },
                         )),
@@ -1245,6 +1249,7 @@ print(f"path={result['path']}")
                     message: Some(client_message::Message::CallbackResponse(
                         eryx_server::proto::eryx::v1::CallbackResponse {
                             request_id: req.request_id,
+                            outcome: 0,
                             result: Some(callback_response::Result::JsonResult(response_json)),
                         },
                     )),
@@ -1496,6 +1501,7 @@ print(f"got: {result}")
                     message: Some(client_message::Message::CallbackResponse(
                         eryx_server::proto::eryx::v1::CallbackResponse {
                             request_id: req.request_id,
+                            outcome: 0,
                             result: Some(callback_response::Result::JsonResult(response_json)),
                         },
                     )),
@@ -1571,4 +1577,119 @@ print(f"got: {result}")
     // Keep tx2 alive until the stream ends so the server doesn't see a client
     // disconnect and cancel mid-execution.
     drop(tx2);
+}
+
+/// A client replying with CALLBACK_OUTCOME_SUSPEND stops execution cleanly: the
+/// result reports the suspension (with the suspended callback details), the
+/// guest is halted (fuel poisoned) before any later callback is dispatched, and
+/// the journal of callbacks that completed before the suspension is preserved.
+#[tokio::test]
+async fn callback_suspension_reported_with_prefix_journal() {
+    let channel = start_server().await;
+    let mut client = EryxClient::new(channel);
+
+    // `marker` is dispatched *after* `approve` in the script. It must never reach
+    // the client: the suspend gate rejects callbacks initiated after a suspension
+    // and the fuel-poison halt traps the guest before it can dispatch `marker`.
+    let code = r#"
+a = await echo(message="first")
+b = await approve(amount=100)
+c = await marker(message="after-suspend")
+print("should not reach here")
+"#;
+    let approve_decl = CallbackDeclaration {
+        name: "approve".to_string(),
+        description: "Requires approval".to_string(),
+        parameters: vec![ParameterDeclaration {
+            name: "amount".to_string(),
+            json_type: "integer".to_string(),
+            description: "Amount to approve".to_string(),
+            required: true,
+        }],
+    };
+    let marker_decl = CallbackDeclaration {
+        name: "marker".to_string(),
+        description: "Must never be dispatched after suspension".to_string(),
+        parameters: vec![ParameterDeclaration {
+            name: "message".to_string(),
+            json_type: "string".to_string(),
+            description: "The message".to_string(),
+            required: true,
+        }],
+    };
+
+    let (tx, rx) = mpsc::channel(16);
+    tx.send(ClientMessage {
+        message: Some(client_message::Message::ExecuteRequest(Box::new(
+            ExecuteRequest {
+                code: code.to_string(),
+                callbacks: vec![echo_declaration(), approve_decl, marker_decl],
+                callback_journal: Some(CallbackJournal {
+                    entries: vec![],
+                    signature: vec![],
+                }),
+                ..Default::default()
+            },
+        ))),
+    })
+    .await
+    .unwrap();
+
+    let mut stream = client
+        .execute(ReceiverStream::new(rx))
+        .await
+        .unwrap()
+        .into_inner();
+
+    let mut got_result = false;
+    let mut marker_dispatched = false;
+    while let Some(msg) = stream.message().await.unwrap() {
+        match msg.message {
+            Some(server_message::Message::CallbackRequest(req)) => {
+                let (outcome, payload) = if req.name == "approve" {
+                    // Defer: signal suspension with an opaque reason.
+                    (
+                        CallbackOutcome::Suspend as i32,
+                        callback_response::Result::Error("needs human approval".to_string()),
+                    )
+                } else {
+                    if req.name == "marker" {
+                        marker_dispatched = true;
+                    }
+                    let response_json = serde_json::json!({ "echoed": "first" }).to_string();
+                    (0, callback_response::Result::JsonResult(response_json))
+                };
+                tx.send(ClientMessage {
+                    message: Some(client_message::Message::CallbackResponse(
+                        eryx_server::proto::eryx::v1::CallbackResponse {
+                            request_id: req.request_id,
+                            outcome,
+                            result: Some(payload),
+                        },
+                    )),
+                })
+                .await
+                .unwrap();
+            }
+            Some(server_message::Message::ExecuteResult(result)) => {
+                assert!(result.suspended, "execution should be suspended");
+                let suspended = result
+                    .suspended_callback
+                    .expect("suspended_callback should be set");
+                assert_eq!(suspended.name, "approve");
+                assert_eq!(suspended.reason, "needs human approval");
+                // Only the completed `echo` callback is journaled.
+                let journal = result.callback_journal.expect("journal returned");
+                assert_eq!(journal.entries.len(), 1);
+                assert_eq!(journal.entries[0].name, "echo");
+                got_result = true;
+            }
+            _ => {}
+        }
+    }
+    assert!(got_result, "never received ExecuteResult");
+    assert!(
+        !marker_dispatched,
+        "callback after the suspension point must not be dispatched to the client"
+    );
 }

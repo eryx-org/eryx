@@ -33,7 +33,9 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-use eryx::{Callback, CallbackJournal, CallbackJournalEntry, ReplayCallback, ReplayState};
+use eryx::{
+    Callback, CallbackJournal, CallbackJournalEntry, ReplayCallback, ReplayState, SuspendedCallback,
+};
 use hmac::{Hmac, Mac};
 use prost::Message;
 use sha2::Sha256;
@@ -194,6 +196,16 @@ fn entry_to_proto(entry: &CallbackJournalEntry) -> pb::CallbackJournalEntry {
         args_json: entry.args_json.clone(),
         outcome: outcome as i32,
         value,
+    }
+}
+
+/// Convert an eryx [`SuspendedCallback`] into its proto form.
+#[must_use]
+pub fn suspended_to_proto(suspended: &SuspendedCallback) -> pb::SuspendedCallback {
+    pb::SuspendedCallback {
+        name: suspended.name.clone(),
+        args_json: suspended.args_json.clone(),
+        reason: suspended.reason.clone(),
     }
 }
 

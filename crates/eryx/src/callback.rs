@@ -312,6 +312,20 @@ pub enum CallbackError {
     /// variant directly.
     #[error("{0}")]
     Replayed(String),
+
+    /// The callback cannot complete now and asks execution to **suspend**.
+    ///
+    /// Returning this variant defers the work ("retry later"): execution stops
+    /// immediately and Python-blind (the suspending callback poisons the WASM
+    /// fuel, trapping the guest before any further Python runs), the suspension
+    /// is reported to the caller (callback name, arguments, and this opaque
+    /// `reason`), and the journal of callbacks that already completed is returned
+    /// so a later run can replay that prefix and resume.
+    ///
+    /// The `reason` is opaque to eryx — a caller might use it to decide what to
+    /// wait for (e.g. human approval) before re-executing with the journal.
+    #[error("{0}")]
+    Suspend(String),
 }
 
 /// Helper function to create an empty parameters schema (no arguments).

@@ -11,7 +11,7 @@ use std::{
 use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 
-use crate::replay::{CallbackJournal, ReplayState, wrap_callbacks};
+use crate::replay::{CallbackJournal, ReplayState, SuspendedCallback, wrap_callbacks};
 
 #[cfg(feature = "native-extensions")]
 use crate::cache::ComponentCache;
@@ -257,6 +257,7 @@ impl Sandbox {
         ReplayOutcome {
             journal: guard.build_journal(code),
             replayed_callbacks: guard.replayed_count(),
+            suspended: guard.suspended().cloned(),
             result,
         }
     }
@@ -2407,16 +2408,28 @@ impl SandboxBuilder<state::Has, state::Has> {
 /// Result of a replay-aware execution via [`Sandbox::execute_with_journal`].
 ///
 /// The [`journal`](Self::journal) is always present — even when
-/// [`result`](Self::result) is an error — so a later resubmission can replay
-/// every callback that completed.
+/// [`result`](Self::result) is an error or the run suspended — so a later
+/// resubmission can replay every callback that completed.
 #[derive(Debug)]
 pub struct ReplayOutcome {
     /// The execution result, exactly as [`Sandbox::execute`] would return it.
+    ///
+    /// When [`suspended`](Self::suspended) is `Some`, this is `Err` — the guest
+    /// was halted (its fuel poisoned) the instant the callback suspended, so
+    /// there is no normal output. Callers should branch on `suspended` first and
+    /// treat this error as the expected consequence of a suspension rather than a
+    /// failure.
     pub result: Result<ExecuteResult, Error>,
-    /// The callback journal recorded during this run, in initiation order.
+    /// The callback journal recorded during this run, in initiation order. The
+    /// suspended callback itself is *not* recorded, so it re-runs live on resume.
     pub journal: CallbackJournal,
     /// How many callbacks were served from the previous journal (cache hits).
     pub replayed_callbacks: u32,
+    /// Set when a callback requested suspension via
+    /// [`CallbackError::Suspend`](crate::CallbackError::Suspend). Carries the
+    /// callback name, arguments, and opaque reason so the caller can decide what
+    /// to wait for before resuming with [`journal`](Self::journal).
+    pub suspended: Option<SuspendedCallback>,
 }
 
 /// Result of executing Python code in the sandbox.

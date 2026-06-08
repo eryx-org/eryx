@@ -64,6 +64,9 @@ pub fn eryx_error_to_py(err: eryx::Error) -> PyErr {
         ),
         eryx::Error::Snapshot(msg) => InitializationError::new_err(msg),
         eryx::Error::Cancelled => CancelledError::new_err("execution was cancelled"),
+        eryx::Error::Suspended(reason) => {
+            ExecutionError::new_err(format!("execution suspended: {reason}"))
+        }
         eryx::Error::FuelExhausted { consumed, limit } => ResourceLimitError::new_err(format!(
             "execution ran out of fuel after {consumed} instructions (limit: {limit})"
         )),
