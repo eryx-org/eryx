@@ -282,6 +282,10 @@ message CallbackJournalEntry {
 // discarding their entries (falling back to fresh execution). The MAC covers
 // both the entries and the script code, so a journal cannot be replayed against
 // a different script.
+//
+// MATCHING: replay matches callbacks by (name, canonical args). Concurrent calls
+// with identical (name, args) are indistinguishable to replay; include a
+// correlation key in args if stable assignment is required.
 message CallbackJournal {
   // Ordered callback invocations, in the order they were initiated.
   repeated CallbackJournalEntry entries = 1;

@@ -16,7 +16,7 @@
 //! structure (loops, conditionals, nested functions) — the journal operates on
 //! the callback invocations, not on the code.
 //!
-//! # Matching model: keyed FIFO multiset
+//! # Matching model: keyed FIFO multiset with a divergence guard
 //!
 //! Callbacks are matched by their **name plus canonicalized arguments**, treated
 //! as a FIFO multiset. When a journal is loaded, every recorded result is bucketed
@@ -24,21 +24,54 @@
 //! cached result for its key. Repeated identical calls therefore replay their
 //! results in the order they were originally recorded.
 //!
-//! Crucially, matching is **independent of invocation order**. A concurrently
-//! launched batch of callbacks (e.g. `asyncio.gather`) replays correctly no matter
-//! which future the scheduler polls first or which call completes first, because a
-//! call is matched by what it *is*, not by its position in the sequence. A call
-//! that does not match any remaining cached result for its key — because its
-//! arguments changed, or it is a brand-new call — simply runs live; it does not
-//! affect whether other calls match. (Safety is preserved: if a call's arguments
-//! changed because they depended on an earlier result that is now different, the
-//! key won't match and the call goes live.)
+//! While replay is active, matching is **independent of invocation order**: a
+//! concurrently launched batch of callbacks (e.g. `asyncio.gather`) replays
+//! correctly no matter which future the scheduler polls first or which call
+//! completes first, because a call is matched by what it *is*, not by its position
+//! in the sequence.
+//!
+//! ## Divergence guard (safety)
+//!
+//! The first invocation that does *not* match any remaining cached result for its
+//! `(name, args)` key — a **miss** — is treated as a divergence from the recorded
+//! run: replay stops, and that call *and every subsequent call* run live for the
+//! rest of the execution (`live_mode` is sticky). This is the safety property.
+//!
+//! Without it, keyed matching alone could replay a **stale** result across a real
+//! divergence. Consider a script edited to write before it reads:
+//!
+//! ```text
+//! run 1:                          run 2 (edited):
+//! y = await read_counter()  # 5     await set_counter(10)   # new key -> miss
+//!                                   y = await read_counter() # args {} -> would
+//!                                                            # pop cached 5, but
+//!                                                            # the true value is 10
+//! ```
+//!
+//! The `set_counter(10)` call is a new key and misses. The guard then forces the
+//! following `read_counter()` to run live (returning the true `10`) instead of
+//! replaying the now-stale cached `5`. The `gather` win is unaffected: in that
+//! case every call is a hit, so no miss fires and all calls still replay.
 //!
 //! A caller that signs journals and binds the signature to the exact script (as
 //! the `eryx-server` layer does) will reject an edited script's journal *before*
 //! it reaches this matching logic, restricting replay to re-runs of the same
 //! script. Whether edited scripts can replay is therefore a property of the
 //! integrity policy layered on top, not of this module.
+//!
+//! ## Concurrent identity is not part of the contract
+//!
+//! The replay matching identity is exactly **(callback name, canonical args)**.
+//! Repeated *concurrent* calls that share an identity are therefore
+//! **indistinguishable to replay**: FIFO ordering of cached results is guaranteed
+//! for *sequential* identical calls, but it is **not** a stable per-task identity
+//! for *concurrent* identical calls. A script may behave correctly against a
+//! particular live scheduler (e.g. relying on which `gather` task happened to get
+//! which result), but replay cannot preserve that per-task assignment without an
+//! invocation id, so **stable assignment of concurrent identical calls is outside
+//! the replay contract**. Callers that need a stable assignment must make each
+//! call's identity unique — include a **nonce or correlation key in the callback
+//! args** — so the calls no longer share a key.
 //!
 //! Replay is implemented entirely as a [`Callback`] wrapper ([`ReplayCallback`]):
 //! no changes are needed to the WASM runtime, the WIT interface, or the Python
@@ -143,8 +176,10 @@ impl CallbackJournal {
 /// Mutable replay state shared across all wrapped callbacks in one execution.
 ///
 /// A single state is shared (behind a mutex) by every [`ReplayCallback`] in an
-/// execution. Matching is by `(name, canonical args)` as a FIFO multiset, so it
-/// is independent of the order in which callbacks are initiated or completed.
+/// execution. While replay is active, matching is by `(name, canonical args)` as
+/// a FIFO multiset, so it is independent of the order in which callbacks are
+/// initiated or completed. The first miss trips the sticky divergence guard
+/// (`live_mode`), after which all calls run live.
 #[derive(Debug)]
 pub struct ReplayState {
     /// Cached results from the previous journal, bucketed by `(name, args_json)`
@@ -152,6 +187,11 @@ pub struct ReplayState {
     /// a live invocation pops the next one (FIFO), so repeated identical calls
     /// replay in their original order.
     cached: HashMap<(String, String), VecDeque<Result<serde_json::Value, String>>>,
+    /// Sticky divergence guard. Once any invocation misses (its `(name, args)` key
+    /// has no remaining cached result), the run is considered to have diverged
+    /// from the journal: this is set and every subsequent invocation runs live,
+    /// preventing a later same-key call from replaying a now-stale cached result.
+    live_mode: bool,
     /// Monotonic counter assigning each invocation its recording index. This is
     /// only an entry index/order tag — matching no longer depends on it.
     next_seq: usize,
@@ -189,6 +229,7 @@ impl ReplayState {
         }
         Self {
             cached,
+            live_mode: false,
             next_seq: 0,
             entries: Vec::new(),
             replayed_count: 0,
@@ -197,19 +238,24 @@ impl ReplayState {
 
     /// Decide how to handle an invocation by matching on `(name, args)`.
     ///
-    /// This runs synchronously when the invocation is dispatched. Matching pops
-    /// the next cached result for the `(name, args_json)` key, so it is
-    /// independent of the order callbacks are initiated or complete in (e.g. a
-    /// concurrent `asyncio.gather` batch replays correctly regardless of
-    /// scheduling). A key with no remaining cached result runs live.
+    /// This runs synchronously when the invocation is dispatched. While replay is
+    /// active it pops the next cached result for the `(name, args_json)` key, so
+    /// it is independent of the order callbacks are initiated or complete in (e.g.
+    /// a concurrent `asyncio.gather` batch replays correctly regardless of
+    /// scheduling). The first miss (a key with no remaining cached result) trips
+    /// the sticky divergence guard, after which every invocation runs live so a
+    /// later same-key call cannot replay a now-stale result.
     fn decide(&mut self, name: &str, args_hash: u64, args_json: &str) -> Decision {
         let seq = self.next_seq;
         self.next_seq += 1;
         self.ensure_slot(seq);
 
-        // Match by name + canonical args, popping the next cached result for the
-        // key. `remove`-then-reinsert keeps the borrow checker happy while letting
-        // us drop emptied buckets.
+        // Once diverged, everything runs live.
+        if self.live_mode {
+            return Decision::Miss { seq };
+        }
+
+        // Match by name + canonical args, popping the next cached result for the key.
         let key = (name.to_string(), args_json.to_string());
         if let Some(queue) = self.cached.get_mut(&key)
             && let Some(result) = queue.pop_front()
@@ -225,7 +271,10 @@ impl ReplayState {
             return Decision::Hit(result);
         }
 
-        // No cached result for this key (absent or exhausted): run live.
+        // First miss for this key (absent or exhausted): the run has diverged from
+        // the journal. Trip the sticky guard so this call and all later ones run
+        // live, preventing replay of a stale cached result after the divergence.
+        self.live_mode = true;
         Decision::Miss { seq }
     }
 
@@ -566,42 +615,83 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn unrelated_call_goes_live_without_disrupting_matches() {
-        // Keyed matching: an unrelated/new call runs live, but it does NOT poison
-        // replay for other calls — a still-matching call replays from cache.
-        let args = json!({"q": "a"});
+    async fn first_miss_switches_to_live_mode() {
+        // Divergence guard: the journal has keys [A, B]. A NEW key "C" is invoked
+        // first (miss -> live), then "A" — which has a cached result — must STILL
+        // run live, because the first miss made live-mode sticky.
+        let a_args = json!({"id": "A"});
+        let b_args = json!({"id": "B"});
         let previous = CallbackJournal {
             code: "code".into(),
-            entries: vec![entry_ok(0, "fetch", &args, json!("cached"))],
+            entries: vec![
+                entry_ok(0, "a", &a_args, json!("cached-a")),
+                entry_ok(1, "b", &b_args, json!("cached-b")),
+            ],
         };
         let state = Arc::new(Mutex::new(ReplayState::new(previous)));
 
-        // A brand-new call (key not in the journal) goes live.
-        let (other, other_calls) = programmable("other", Outcome::Ok(json!("live-other")));
-        let other_wrapper = ReplayCallback::new(other, Arc::clone(&state));
-        let r1 = other_wrapper.invoke(args.clone()).await.unwrap();
-        assert_eq!(r1, json!("live-other"));
-        assert_eq!(other_calls.load(Ordering::SeqCst), 1);
+        // New key "C": not in the journal -> miss -> trips the guard.
+        let (c, c_calls) = programmable("c", Outcome::Ok(json!("live-c")));
+        let c_wrapper = ReplayCallback::new(c, Arc::clone(&state));
+        let rc = c_wrapper.invoke(json!({"id": "C"})).await.unwrap();
+        assert_eq!(rc, json!("live-c"));
+        assert_eq!(c_calls.load(Ordering::SeqCst), 1);
 
-        // The matching "fetch" call still replays — there is no sticky live mode.
-        let (fetch, fetch_calls) = programmable("fetch", Outcome::Ok(json!("live-fetch")));
-        let fetch_wrapper = ReplayCallback::new(fetch, Arc::clone(&state));
-        let r2 = fetch_wrapper.invoke(args.clone()).await.unwrap();
+        // "a" has a cached result, but the guard is sticky, so it runs LIVE.
+        let (a, a_calls) = programmable("a", Outcome::Ok(json!("live-a")));
+        let a_wrapper = ReplayCallback::new(a, Arc::clone(&state));
+        let ra = a_wrapper.invoke(a_args.clone()).await.unwrap();
         assert_eq!(
-            r2,
-            json!("cached"),
-            "matching call replays despite earlier miss"
+            ra,
+            json!("live-a"),
+            "a runs live after divergence, not replayed"
         );
-        assert_eq!(
-            fetch_calls.load(Ordering::SeqCst),
-            0,
-            "fetch not invoked live"
-        );
+        assert_eq!(a_calls.load(Ordering::SeqCst), 1, "a actually invoked");
 
         let st = lock_state(&state);
-        assert_eq!(st.replayed_count(), 1);
-        // Two recorded entries: the live "other" and the replayed "fetch".
-        assert_eq!(st.build_journal("code").entries.len(), 2);
+        assert_eq!(
+            st.replayed_count(),
+            0,
+            "nothing replayed after the first miss"
+        );
+    }
+
+    #[tokio::test]
+    async fn write_miss_before_read_prevents_stale_replay() {
+        // Concrete stale-replay-prevention shape: run 1 recorded only a read
+        // (read_counter {} -> 5). Run 2 inserts a write (set_counter {value:10})
+        // before the read. The write is a new key (miss -> live), so the guard
+        // forces the subsequent read to run live (true value 10) instead of
+        // replaying the stale cached 5.
+        let read_args = json!({});
+        let previous = CallbackJournal {
+            code: "code".into(),
+            entries: vec![entry_ok(0, "read_counter", &read_args, json!(5))],
+        };
+        let state = Arc::new(Mutex::new(ReplayState::new(previous)));
+
+        // The new write call misses and trips the guard.
+        let (write, write_calls) = programmable("set_counter", Outcome::Ok(json!("ok")));
+        let write_wrapper = ReplayCallback::new(write, Arc::clone(&state));
+        let _ = write_wrapper.invoke(json!({"value": 10})).await.unwrap();
+        assert_eq!(write_calls.load(Ordering::SeqCst), 1);
+
+        // The read would otherwise pop the cached 5, but must run live now.
+        let (read, read_calls) = programmable("read_counter", Outcome::Ok(json!(10)));
+        let read_wrapper = ReplayCallback::new(read, Arc::clone(&state));
+        let r = read_wrapper.invoke(read_args.clone()).await.unwrap();
+        assert_eq!(
+            r,
+            json!(10),
+            "read runs live, returning the true post-write value"
+        );
+        assert_eq!(
+            read_calls.load(Ordering::SeqCst),
+            1,
+            "read not replayed from stale cache"
+        );
+
+        assert_eq!(lock_state(&state).replayed_count(), 0);
     }
 
     #[tokio::test]
