@@ -105,7 +105,9 @@ impl crate::proto::eryx::v1::eryx_server::Eryx for EryxService {
             .ok_or_else(|| Status::invalid_argument("stream closed before ExecuteRequest"))?;
 
         let execute_req = match first_msg.message {
-            Some(client_message::Message::ExecuteRequest(req)) => req,
+            // The variant is boxed (see build.rs `.boxed(...)`); deref to own the
+            // request so individual fields can be moved out below.
+            Some(client_message::Message::ExecuteRequest(req)) => *req,
             _ => {
                 return Err(Status::invalid_argument(
                     "first message must be ExecuteRequest",
@@ -421,7 +423,7 @@ impl crate::proto::eryx::v1::eryx_server::Eryx for EryxService {
                 };
 
                 let msg = ServerMessage {
-                    message: Some(server_message::Message::ExecuteResult(result_msg)),
+                    message: Some(server_message::Message::ExecuteResult(Box::new(result_msg))),
                 };
 
                 // Send via internal channel first, then drop it so the forwarder ends.

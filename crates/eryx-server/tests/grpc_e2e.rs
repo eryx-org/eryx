@@ -1461,16 +1461,18 @@ print(f"got: {result}")
     // ---- Run 1: empty journal present => journaling on, nothing to replay. ----
     let (tx1, rx1) = mpsc::channel(16);
     tx1.send(ClientMessage {
-        message: Some(client_message::Message::ExecuteRequest(ExecuteRequest {
-            code: code.to_string(),
-            callbacks: vec![echo_declaration()],
-            // Presence of the (empty) journal opts into replay/journaling.
-            callback_journal: Some(CallbackJournal {
-                entries: vec![],
-                signature: vec![],
-            }),
-            ..Default::default()
-        })),
+        message: Some(client_message::Message::ExecuteRequest(Box::new(
+            ExecuteRequest {
+                code: code.to_string(),
+                callbacks: vec![echo_declaration()],
+                // Presence of the (empty) journal opts into replay/journaling.
+                callback_journal: Some(CallbackJournal {
+                    entries: vec![],
+                    signature: vec![],
+                }),
+                ..Default::default()
+            },
+        ))),
     })
     .await
     .unwrap();
@@ -1521,12 +1523,14 @@ print(f"got: {result}")
     // ---- Run 2: replay from the recorded journal — no callback dispatched. ----
     let (tx2, rx2) = mpsc::channel(16);
     tx2.send(ClientMessage {
-        message: Some(client_message::Message::ExecuteRequest(ExecuteRequest {
-            code: code.to_string(),
-            callbacks: vec![echo_declaration()],
-            callback_journal: Some(journal),
-            ..Default::default()
-        })),
+        message: Some(client_message::Message::ExecuteRequest(Box::new(
+            ExecuteRequest {
+                code: code.to_string(),
+                callbacks: vec![echo_declaration()],
+                callback_journal: Some(journal),
+                ..Default::default()
+            },
+        ))),
     })
     .await
     .unwrap();
