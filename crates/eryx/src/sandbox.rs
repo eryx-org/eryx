@@ -4,12 +4,14 @@ use std::{
     collections::HashMap,
     marker::PhantomData,
     path::PathBuf,
-    sync::Arc,
+    sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
 
 use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
+
+use crate::replay::{CallbackJournal, ReplayState, wrap_callbacks};
 
 #[cfg(feature = "native-extensions")]
 use crate::cache::ComponentCache;
@@ -139,6 +141,10 @@ pub struct Sandbox {
     vfs_storage: Option<std::sync::Arc<dyn eryx_vfs::VfsStorage>>,
     /// Extracted packages (kept alive to prevent temp directory cleanup).
     _packages: Vec<crate::package::ExtractedPackage>,
+    /// Previous callback journal to replay from, set via
+    /// [`SandboxBuilder::with_replay_journal`]. Used by
+    /// [`Sandbox::execute_with_journal`].
+    replay_journal: Option<CallbackJournal>,
 }
 
 impl std::fmt::Debug for Sandbox {
@@ -208,17 +214,74 @@ impl Sandbox {
     /// # Errors
     ///
     /// Returns an error if the Python code fails to execute or a resource limit is exceeded.
+    pub async fn execute(&self, code: &str) -> Result<ExecuteResult, Error> {
+        self.run_inner(code, None).await
+    }
+
+    /// Execute Python code with callback-result replay and journaling.
+    ///
+    /// This behaves like [`execute`](Self::execute) but additionally records a
+    /// [`CallbackJournal`] of every callback invocation, and — if a previous
+    /// journal was configured via
+    /// [`SandboxBuilder::with_replay_journal`] — replays matching callbacks from
+    /// that journal instead of invoking them live. See the
+    /// [`replay`](crate::replay) module for the full model.
+    ///
+    /// The returned [`ReplayOutcome`] always carries the freshly-recorded
+    /// journal, even when execution fails, so a later resubmission can replay
+    /// everything that completed.
+    ///
+    /// Each call uses fresh replay state, so a sandbox may be executed
+    /// repeatedly without the journal cursor leaking between runs.
+    ///
+    /// # Security
+    ///
+    /// Replayed journal entries are returned to Python verbatim — the callback
+    /// is not re-executed. A crafted journal can therefore inject arbitrary
+    /// values into the script. **Only replay journals produced by a trusted
+    /// source** (e.g. a previous run of the same sandbox, or a journal verified
+    /// via HMAC signature). See the [`replay`](crate::replay) module docs for
+    /// details.
+    pub async fn execute_with_journal(&self, code: &str) -> ReplayOutcome {
+        let previous = self
+            .replay_journal
+            .clone()
+            .unwrap_or_else(|| CallbackJournal::new(code));
+        let state = Arc::new(Mutex::new(ReplayState::new(previous)));
+
+        let result = self.run_inner(code, Some(Arc::clone(&state))).await;
+
+        let guard = state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        ReplayOutcome {
+            journal: guard.build_journal(code),
+            replayed_callbacks: guard.replayed_count(),
+            result,
+        }
+    }
+
+    /// Shared execution body for [`execute`](Self::execute) and
+    /// [`execute_with_journal`](Self::execute_with_journal).
+    ///
+    /// When `replay_state` is `Some`, every registered callback is wrapped with
+    /// a [`ReplayCallback`](crate::replay::ReplayCallback) sharing that state.
     #[tracing::instrument(
-        skip(self, code),
+        skip(self, code, replay_state),
         fields(
             code_len = code.len(),
             callbacks = self.callbacks.len(),
             has_trace_handler = self.trace_handler.is_some(),
+            replay = replay_state.is_some(),
             timeout = ?self.resource_limits.execution_timeout,
             fuel_limit = ?self.resource_limits.max_fuel,
         )
     )]
-    pub async fn execute(&self, code: &str) -> Result<ExecuteResult, Error> {
+    async fn run_inner(
+        &self,
+        code: &str,
+        replay_state: Option<Arc<Mutex<ReplayState>>>,
+    ) -> Result<ExecuteResult, Error> {
         let start = Instant::now();
 
         // Prepend preamble to user code if present
@@ -232,11 +295,18 @@ impl Sandbox {
         let (callback_tx, callback_rx) = mpsc::channel::<CallbackRequest>(32);
         let (trace_tx, trace_rx) = mpsc::unbounded_channel::<TraceRequest>();
 
+        // Select callbacks: wrap each with a replay wrapper when journaling/replay
+        // is enabled, otherwise use the registered callbacks directly.
+        let active_callbacks: Arc<HashMap<String, Arc<dyn Callback>>> = match &replay_state {
+            Some(state) => Arc::new(wrap_callbacks(&self.callbacks, state)),
+            None => Arc::clone(&self.callbacks),
+        };
+
         // Collect callbacks as a Vec for the executor
-        let callbacks: Vec<Arc<dyn Callback>> = self.callbacks.values().cloned().collect();
+        let callbacks: Vec<Arc<dyn Callback>> = active_callbacks.values().cloned().collect();
 
         // Spawn task to handle callback requests concurrently (Arc clone is cheap)
-        let callbacks_arc = Arc::clone(&self.callbacks);
+        let callbacks_arc = Arc::clone(&active_callbacks);
         let resource_limits = self.resource_limits.clone();
         let secrets_arc = Arc::new(self.secrets.clone());
         let callback_secrets = Arc::clone(&secrets_arc);
@@ -1060,6 +1130,9 @@ pub struct SandboxBuilder<Runtime = state::Needs, Stdlib = state::Needs> {
     /// Host filesystem volume mounts.
     #[cfg(feature = "vfs")]
     volumes: Vec<crate::session::VolumeMount>,
+    /// Previous callback journal to replay from (see
+    /// [`with_replay_journal`](SandboxBuilder::with_replay_journal)).
+    replay_journal: Option<CallbackJournal>,
     /// Phantom data for Runtime type parameter.
     _runtime: PhantomData<Runtime>,
     /// Phantom data for Stdlib type parameter.
@@ -1122,6 +1195,7 @@ impl SandboxBuilder<state::Needs, state::Needs> {
             scrub_files: crate::secrets::FileScrubPolicy::default(),
             #[cfg(feature = "vfs")]
             volumes: Vec::new(),
+            replay_journal: None,
             _runtime: PhantomData,
             _stdlib: PhantomData,
         }
@@ -1158,6 +1232,7 @@ impl SandboxBuilder<state::Needs, state::Needs> {
             scrub_files: crate::secrets::FileScrubPolicy::default(),
             #[cfg(feature = "vfs")]
             volumes: Vec::new(),
+            replay_journal: None,
             _runtime: PhantomData,
             _stdlib: PhantomData,
         }
@@ -1194,6 +1269,7 @@ impl<R, S> SandboxBuilder<R, S> {
             scrub_files: self.scrub_files,
             #[cfg(feature = "vfs")]
             volumes: self.volumes,
+            replay_journal: self.replay_journal,
             _runtime: PhantomData,
             _stdlib: PhantomData,
         }
@@ -1585,6 +1661,29 @@ impl<R, S> SandboxBuilder<R, S> {
         let boxed: Box<dyn Callback> = Box::new(callback);
         self.callbacks
             .insert(boxed.name().to_string(), Arc::from(boxed));
+        self
+    }
+
+    /// Replay callback results from a previously-recorded journal.
+    ///
+    /// When set, [`Sandbox::execute_with_journal`] wraps every registered
+    /// callback so that invocations matching `journal` (by name, arguments, and
+    /// position in the invocation sequence) return the cached result instead of
+    /// running live. The first divergence from the journal switches to live
+    /// execution for the remainder of the run. See the [`replay`](crate::replay)
+    /// module for the full model.
+    ///
+    /// This only affects [`Sandbox::execute_with_journal`]; plain
+    /// [`Sandbox::execute`] ignores it.
+    ///
+    /// # Security
+    ///
+    /// Journal entries are replayed verbatim — a crafted journal can inject
+    /// arbitrary callback results. Only use journals from a trusted source
+    /// (a previous execution you control, or one verified via HMAC signature).
+    #[must_use]
+    pub fn with_replay_journal(mut self, journal: CallbackJournal) -> Self {
+        self.replay_journal = Some(journal);
         self
     }
 
@@ -2144,6 +2243,7 @@ impl SandboxBuilder<state::Has, state::Has> {
             #[cfg(feature = "vfs")]
             vfs_storage: None,
             _packages: self.packages,
+            replay_journal: self.replay_journal,
         })
     }
 
@@ -2302,6 +2402,21 @@ impl SandboxBuilder<state::Has, state::Has> {
         // No cache or embedded feature - create executor directly from linked bytes
         PythonExecutor::from_binary(&component_bytes)
     }
+}
+
+/// Result of a replay-aware execution via [`Sandbox::execute_with_journal`].
+///
+/// The [`journal`](Self::journal) is always present — even when
+/// [`result`](Self::result) is an error — so a later resubmission can replay
+/// every callback that completed.
+#[derive(Debug)]
+pub struct ReplayOutcome {
+    /// The execution result, exactly as [`Sandbox::execute`] would return it.
+    pub result: Result<ExecuteResult, Error>,
+    /// The callback journal recorded during this run, in initiation order.
+    pub journal: CallbackJournal,
+    /// How many callbacks were served from the previous journal (cache hits).
+    pub replayed_callbacks: u32,
 }
 
 /// Result of executing Python code in the sandbox.

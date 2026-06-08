@@ -62,6 +62,7 @@ mod library;
 pub mod net;
 pub mod package;
 pub mod pool;
+pub mod replay;
 mod sandbox;
 mod schema;
 pub mod secrets;
@@ -90,8 +91,12 @@ pub use library::RuntimeLibrary;
 pub use net::{ConnectionManager, NetConfig, TcpError, TlsError};
 pub use package::{ExtractedPackage, PackageFormat};
 pub use pool::{PoolConfig, PoolError, PoolStats, PooledSandbox, SandboxPool};
+pub use replay::{
+    CallbackJournal, CallbackJournalEntry, CallbackOutcome, ReplayCallback, ReplayState,
+};
 pub use sandbox::{
-    ExecuteResult, ExecuteStats, ExecutionHandle, ResourceLimits, Sandbox, SandboxBuilder, state,
+    ExecuteResult, ExecuteStats, ExecutionHandle, ReplayOutcome, ResourceLimits, Sandbox,
+    SandboxBuilder, state,
 };
 pub use secrets::{
     FileScrubPolicy, OutputScrubPolicy, SecretConfig, generate_placeholder, scrub_placeholders,

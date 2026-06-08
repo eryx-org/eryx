@@ -32,6 +32,10 @@ uuid = { workspace = true, features = ["v4"] }
 dashmap.workspace = true
 async-trait.workspace = true
 clap = { workspace = true, features = ["env"] }                                 #unified
+hex.workspace = true
+hmac.workspace = true
+sha2.workspace = true
+rand.workspace = true
 
 [build-dependencies]
 tonic-prost-build.workspace = true
