@@ -145,7 +145,7 @@ impl Default for JournalSigner {
 
 /// Build an eryx [`CallbackJournal`] (to replay from) out of a request's proto
 /// journal. `code` is the script being executed — it is informational; replay
-/// matches on the callback invocation sequence, not the code.
+/// matches on callback name + canonical args (FIFO per key), not the code.
 #[must_use]
 pub fn journal_from_proto(code: &str, proto: &pb::CallbackJournal) -> CallbackJournal {
     CallbackJournal {

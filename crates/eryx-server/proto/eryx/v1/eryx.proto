@@ -100,9 +100,10 @@ message ExecuteRequest {
   // PRESENCE of this field — even with an empty `entries` list — opts the
   // execution into journaling: the server records every callback invocation and
   // returns the journal in ExecuteResult.callback_journal. When `entries` is
-  // non-empty, matching callbacks (by name + args + invocation position) are
-  // replayed from the journal instead of being dispatched to the client, until
-  // the first divergence (after which execution goes live).
+  // non-empty, callbacks are matched by name + canonical args and their cached
+  // results are consumed FIFO per key, replayed instead of being dispatched to
+  // the client. The first miss (a callback not present in the journal) switches
+  // the remainder of the run to live execution.
   //
   // To start a replay session, send an empty `CallbackJournal{}` on the first
   // run and echo back the returned journal on subsequent runs. When this field

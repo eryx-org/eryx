@@ -1667,11 +1667,11 @@ impl<R, S> SandboxBuilder<R, S> {
     /// Replay callback results from a previously-recorded journal.
     ///
     /// When set, [`Sandbox::execute_with_journal`] wraps every registered
-    /// callback so that invocations matching `journal` (by name, arguments, and
-    /// position in the invocation sequence) return the cached result instead of
-    /// running live. The first divergence from the journal switches to live
-    /// execution for the remainder of the run. See the [`replay`](crate::replay)
-    /// module for the full model.
+    /// callback so that invocations matching `journal` (by callback name plus
+    /// canonical arguments, consuming cached results FIFO per key) return the
+    /// cached result instead of running live. The first miss (a callback not in
+    /// the journal) switches to live execution for the remainder of the run. See
+    /// the [`replay`](crate::replay) module for the full model.
     ///
     /// This only affects [`Sandbox::execute_with_journal`]; plain
     /// [`Sandbox::execute`] ignores it.
