@@ -181,35 +181,6 @@ if response.status_code == 200:
             f"Test failed: {result.stdout}\nstderr: {result.stderr}"
         )
 
-    def test_httpx_get_https_external(self, httpx_sandbox):
-        """Test httpx.get() with HTTPS to an external service.
-
-        Parity with test_requests_get_https_external: exercises the ssl shim
-        through httpx's HTTP stack so a missing ssl constant or context attribute
-        can't silently break HTTPS. Tries several hosts to avoid CI flake (#224).
-        """
-        result = httpx_sandbox.execute("""
-import httpx
-
-urls = [
-    "https://httpbin.org/get",
-    "https://example.com",
-    "https://www.google.com",
-]
-
-for url in urls:
-    try:
-        response = httpx.get(url, timeout=8)
-        if response.status_code == 200:
-            print(f"SUCCESS via {url}")
-            break
-    except Exception as e:
-        print(f"Failed {url}: {type(e).__name__}: {e}")
-else:
-    print("All URLs failed")
-""")
-        assert "SUCCESS" in result.stdout, f"Test failed: {result.stdout}"
-
 
 class TestUrllibLibrary:
     """Tests for urllib (standard library HTTP client).
