@@ -325,3 +325,39 @@ except Exception as e:
     // Should get connection error (can't actually reach example.com in tests)
     assert!(result.is_ok());
 }
+
+/// The structured `result` channel must honor the same secret scrubbing as stdout:
+/// a secret placeholder placed into `result` is redacted, and the real secret never
+/// appears.
+#[tokio::test]
+async fn test_placeholder_scrubbed_from_result() {
+    let sandbox = Sandbox::embedded()
+        .with_secret("TEST_KEY", "supersecret", vec![])
+        .scrub_stdout(true)
+        .build()
+        .expect("Failed to create sandbox");
+
+    let out = sandbox
+        .execute(
+            r#"
+import os
+result = {"leaked": os.environ.get("TEST_KEY", "")}
+"#,
+        )
+        .await
+        .expect("Failed to execute");
+
+    let result = out.result.expect("expected a result");
+    assert!(
+        result.contains("[REDACTED]"),
+        "placeholder should be scrubbed from result, got: {result}"
+    );
+    assert!(
+        !result.contains("ERYX_SECRET_PLACEHOLDER_"),
+        "raw placeholder must not appear in result: {result}"
+    );
+    assert!(
+        !result.contains("supersecret"),
+        "real secret must never appear in result: {result}"
+    );
+}

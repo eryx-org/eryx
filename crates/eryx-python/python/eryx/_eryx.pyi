@@ -212,7 +212,9 @@ class ExecuteResult:
         value, or ``None`` if it was not set.
 
         The captured variable name defaults to ``result`` and can be changed via the
-        ``result_variable`` argument to ``Sandbox``/``Session``. If the value was set
+        ``result_variable`` argument to ``Sandbox``/``Session``. The variable is
+        consumed after each execution, so in a ``Session`` a later run that does not
+        set it reports ``None`` rather than the previous value. If the value was set
         but could not be JSON-serialized, this is ``None`` and ``result_error``
         explains why."""
         ...

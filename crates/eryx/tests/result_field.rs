@@ -52,6 +52,19 @@ async fn non_serializable_result_reports_error() {
     );
 }
 
+/// A non-finite float (`inf`/`nan`) is rejected rather than emitting the invalid
+/// JSON tokens `Infinity`/`NaN` (json.dumps with allow_nan=False).
+#[tokio::test]
+async fn non_finite_float_reports_error() {
+    let sandbox = Sandbox::embedded().build().unwrap();
+    let out = sandbox.execute("result = float('inf')").await.unwrap();
+    assert!(out.result.is_none());
+    assert!(
+        out.result_error.is_some(),
+        "expected a result_error for non-finite float"
+    );
+}
+
 /// `result` populated through a top-level `await` (the async suspend/resume path).
 #[tokio::test]
 async fn captures_result_from_async_code() {

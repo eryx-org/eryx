@@ -153,9 +153,8 @@ p = Point(3, 4)
   });
 
   it("leaves result undefined when not set", async () => {
-    // State persists across execute() calls, so clear any `result` left over
-    // from a previous test before asserting it is absent.
-    await sandbox.clearState();
+    // The result variable is consumed after each execution, so a subsequent run
+    // that doesn't set it reports undefined even though state otherwise persists.
     const result = await sandbox.execute('print("no result here")');
     expect(result.result).toBeUndefined();
     expect(result.resultError).toBeUndefined();
@@ -168,12 +167,12 @@ p = Point(3, 4)
   });
 
   it("honors a custom result variable name", async () => {
-    setResultVariable("out");
+    await setResultVariable("out");
     try {
       const result = await sandbox.execute("out = 42\nresult = 1");
       expect(result.result).toBe(42);
     } finally {
-      setResultVariable("result");
+      await setResultVariable("result");
     }
   });
 });

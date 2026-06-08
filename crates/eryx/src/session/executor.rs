@@ -883,8 +883,9 @@ impl SessionExecutor {
     /// Normally the name is configured on the parent [`PythonExecutor`] via
     /// [`PythonExecutor::with_result_variable`] and applied at instantiation. This
     /// method sets it on the already-instantiated session instance, e.g. to apply a
-    /// per-request override. Note it is reset to the executor's configured name
-    /// whenever the session instance is re-created (e.g. by `restore_state`).
+    /// per-request override. The override persists across `restore_state` (which
+    /// reuses the current instance) but is reset to the executor's configured name
+    /// whenever the instance is re-created (e.g. by `reset`/reinstantiation).
     ///
     /// # Errors
     ///

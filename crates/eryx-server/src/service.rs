@@ -588,14 +588,6 @@ async fn execute_with_session(
     session.set_execution_timeout(params.resource_limits.execution_timeout);
     session.set_fuel_limit(params.resource_limits.max_fuel);
 
-    // Apply a per-request result-variable override (the guest defaults to "result").
-    // Done after any restore_state above, which re-instantiates the session instance.
-    if !params.result_variable.is_empty()
-        && let Err(e) = session.set_result_variable(&params.result_variable).await
-    {
-        tracing::warn!(error = %e, "failed to set result variable, using default");
-    }
-
     // Restore previous state if provided.
     if let Some(state_snapshot) = params.state.filter(|s| !s.is_empty()) {
         let restore_start = Instant::now();
@@ -625,6 +617,15 @@ async fn execute_with_session(
                 );
             }
         }
+    }
+
+    // Apply a per-request result-variable override. Done *after* restore_state:
+    // although restore_state reuses the current instance today, applying the
+    // override last keeps it correct even if restore were to reset the instance.
+    if !params.result_variable.is_empty()
+        && let Err(e) = session.set_result_variable(&params.result_variable).await
+    {
+        tracing::warn!(error = %e, "failed to set result variable, using default");
     }
 
     // Set up callback handler channels (mirroring Sandbox::execute pattern).
@@ -825,6 +826,12 @@ async fn execute_with_session(
             } else {
                 output.stderr
             };
+            // The structured result is an output channel too: scrub it under the
+            // same policy as stdout so secret placeholders don't leak through it.
+            let result = match output.result {
+                Some(r) if params.scrub_stdout => scrub_placeholders(&r, &params.secrets),
+                other => other.unwrap_or_default(),
+            };
             ExecuteResult {
                 success: true,
                 stdout,
@@ -837,7 +844,7 @@ async fn execute_with_session(
                     fuel_consumed: output.fuel_consumed.unwrap_or(0),
                 }),
                 state_snapshot: snapshot_bytes,
-                result: output.result.unwrap_or_default(),
+                result,
                 result_error: output.result_error.unwrap_or_default(),
             }
         }

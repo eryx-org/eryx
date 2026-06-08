@@ -1045,3 +1045,81 @@ async fn execute_captures_custom_result_variable() {
     }
     assert!(got_result, "never received ExecuteResult");
 }
+
+// Guards the ordering of the per-request result-variable override relative to
+// state restore: a request that both restores a snapshot AND sets a custom
+// result_variable must still capture the custom variable. Two steps: capture a
+// snapshot, then restore it in a second request with a custom variable name.
+#[tokio::test]
+async fn execute_custom_result_variable_with_state_restore() {
+    let channel = start_server().await;
+    let mut client = EryxClient::new(channel);
+
+    // Step 1: run with persist_state to obtain a state snapshot.
+    let (tx1, rx1) = mpsc::channel(16);
+    tx1.send(ClientMessage {
+        message: Some(client_message::Message::ExecuteRequest(Box::new(
+            ExecuteRequest {
+                code: "seed = 7".to_string(),
+                persist_state: true,
+                resource_limits: Some(ResourceLimits {
+                    execution_timeout_ms: 30_000,
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+        ))),
+    })
+    .await
+    .unwrap();
+    let mut stream1 = client
+        .execute(ReceiverStream::new(rx1))
+        .await
+        .unwrap()
+        .into_inner();
+    let mut snapshot = vec![];
+    while let Some(msg) = stream1.message().await.unwrap() {
+        if let Some(server_message::Message::ExecuteResult(r)) = msg.message {
+            assert!(r.success, "step 1 failed: {}", r.error);
+            snapshot = r.state_snapshot;
+        }
+    }
+    assert!(
+        !snapshot.is_empty(),
+        "expected a state snapshot from step 1"
+    );
+
+    // Step 2: restore the snapshot AND request a custom result variable.
+    let (tx2, rx2) = mpsc::channel(16);
+    tx2.send(ClientMessage {
+        message: Some(client_message::Message::ExecuteRequest(Box::new(
+            ExecuteRequest {
+                code: "out = seed * 6".to_string(),
+                persist_state: true,
+                state_snapshot: snapshot,
+                result_variable: "out".to_string(),
+                resource_limits: Some(ResourceLimits {
+                    execution_timeout_ms: 30_000,
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+        ))),
+    })
+    .await
+    .unwrap();
+    let mut stream2 = client
+        .execute(ReceiverStream::new(rx2))
+        .await
+        .unwrap()
+        .into_inner();
+    let mut got = false;
+    while let Some(msg) = stream2.message().await.unwrap() {
+        if let Some(server_message::Message::ExecuteResult(r)) = msg.message {
+            assert!(r.success, "step 2 failed: {}", r.error);
+            assert_eq!(r.result, "42", "custom result var lost across restore");
+            got = true;
+        }
+    }
+    assert!(got, "never received ExecuteResult in step 2");
+}

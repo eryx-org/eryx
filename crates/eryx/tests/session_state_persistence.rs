@@ -655,3 +655,30 @@ class Point:
         .unwrap_or_else(|e| panic!("Failed to create new instance: {}", e));
     assert_eq!(output.stdout, "13.0");
 }
+
+/// The `result` variable is captured per-execution and consumed afterward, so a
+/// later run in the same (persistent) session that does not set it reports no
+/// result rather than re-reporting the stale value.
+#[tokio::test]
+async fn test_result_consumed_per_execution() {
+    let mut session = create_session().await;
+
+    let output = session
+        .execute("result = 42")
+        .run()
+        .await
+        .unwrap_or_else(|e| panic!("Failed first execute: {}", e));
+    assert_eq!(output.result.as_deref(), Some("42"));
+
+    // Same session (state persists), but `result` was consumed by the prior run.
+    let output = session
+        .execute("print('no result this time')")
+        .run()
+        .await
+        .unwrap_or_else(|e| panic!("Failed second execute: {}", e));
+    assert!(
+        output.result.is_none(),
+        "expected result to be consumed, got {:?}",
+        output.result
+    );
+}

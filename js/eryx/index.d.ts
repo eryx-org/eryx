@@ -108,9 +108,12 @@ export function execute(code: string): Promise<ExecuteResult>;
  * namespace, JSON-serialized, and returned as `ExecuteResult.result`. Applies to
  * the shared sandbox instance. Defaults to `"result"`.
  *
+ * The underlying export is async; await the returned promise before calling
+ * `execute()` if you need the new name to take effect for the next execution.
+ *
  * @param name - The variable name to capture
  */
-export function setResultVariable(name: string): void;
+export function setResultVariable(name: string): Promise<void>;
 
 /**
  * The virtual file tree backing the WASI filesystem.

@@ -1484,17 +1484,27 @@ def _eryx_capture_result():
     and _eryx_result_error (a message when the variable exists but is not
     JSON-serializable, else ''). Never raises: serialization failure is a soft side
     channel, not an execution error.
+
+    The variable is *consumed* (deleted from the user namespace) after reading, so
+    the result is genuinely per-execution: in a persistent session, a later run that
+    does not set it reports no result rather than re-reporting a stale value.
+
+    Uses allow_nan=False so non-finite floats (nan/inf) are reported via
+    _eryx_result_error instead of emitting the invalid-JSON tokens NaN/Infinity.
     '''
     global _eryx_result, _eryx_result_error
     _eryx_result = ''
     _eryx_result_error = ''
     name = _eryx_result_var_name
     if name in _eryx_user_globals:
-        value = _eryx_user_globals[name]
+        value = _eryx_user_globals.pop(name)
         try:
-            _eryx_result = _json.dumps(value)
-        except (TypeError, ValueError):
-            _eryx_result_error = 'result is not JSON-serializable: ' + type(value).__name__
+            _eryx_result = _json.dumps(value, allow_nan=False)
+        except Exception as e:
+            _eryx_result_error = (
+                'result is not JSON-serializable: ' + type(value).__name__
+                + ' (' + type(e).__name__ + ')'
+            )
 "#;
 
 // =============================================================================

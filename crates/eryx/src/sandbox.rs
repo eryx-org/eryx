@@ -391,6 +391,17 @@ impl Sandbox {
                     output.stderr
                 };
 
+                // The structured result is an output channel too: scrub secret
+                // placeholders from it under the same policy as stdout.
+                let result = match output.result {
+                    Some(r)
+                        if matches!(self.scrub_stdout, crate::secrets::OutputScrubPolicy::All) =>
+                    {
+                        Some(crate::secrets::scrub_placeholders(&r, &self.secrets))
+                    }
+                    other => other,
+                };
+
                 tracing::info!(
                     duration_ms = duration.as_millis() as u64,
                     callback_invocations,
@@ -403,7 +414,7 @@ impl Sandbox {
                     stdout,
                     stderr,
                     trace: trace_events,
-                    result: output.result,
+                    result,
                     result_error: output.result_error,
                     stats: ExecuteStats {
                         duration,
@@ -833,11 +844,19 @@ impl Sandbox {
                     output.stderr
                 };
 
+                // Scrub the structured result under the same policy as stdout.
+                let result = match output.result {
+                    Some(r) if matches!(scrub_stdout, crate::secrets::OutputScrubPolicy::All) => {
+                        Some(crate::secrets::scrub_placeholders(&r, &secrets))
+                    }
+                    other => other,
+                };
+
                 Ok(ExecuteResult {
                     stdout,
                     stderr,
                     trace: trace_events,
-                    result: output.result,
+                    result,
                     result_error: output.result_error,
                     stats: ExecuteStats {
                         duration,
@@ -2250,6 +2269,10 @@ pub struct ExecuteResult {
     /// JSON-serialized value of the script's result variable (default name
     /// `result`, configurable via [`SandboxBuilder::with_result_variable`]), or
     /// `None` if the variable was not set.
+    ///
+    /// The variable is consumed (cleared from the namespace) after each execution,
+    /// so in a persistent session a later run that does not set it reports `None`
+    /// rather than re-reporting a stale value.
     pub result: Option<String>,
     /// Why result capture failed (e.g. the value was not JSON-serializable), or
     /// `None` when capture succeeded or no result variable was set.
