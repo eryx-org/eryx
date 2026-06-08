@@ -1736,6 +1736,15 @@ class SSLSocket:
         return 0
 
     @property
+    def _sslobj(self):
+        # httpcore reads sock._sslobj as the connection's "ssl_object" (via
+        # SyncStream.get_extra_info("ssl_object")) and then calls
+        # selected_alpn_protocol() on it to detect HTTP/2. We already implement
+        # that API (plus version()/cipher()/getpeercert()), so expose self.
+        # Without this, every httpx HTTPS request fails with AttributeError.
+        return self
+
+    @property
     def server_hostname(self):
         return self._server_hostname
 
