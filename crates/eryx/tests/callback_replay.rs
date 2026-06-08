@@ -47,6 +47,39 @@ impl Callback for CountingCallback {
     }
 }
 
+/// A callback that sleeps for a configurable duration before returning, so a
+/// concurrent `asyncio.gather` batch completes in a different order than it was
+/// initiated. Counts live invocations like [`CountingCallback`].
+struct SlowCallback {
+    name: String,
+    delay_ms: u64,
+    live_calls: Arc<AtomicU32>,
+}
+
+impl Callback for SlowCallback {
+    fn name(&self) -> &str {
+        &self.name
+    }
+    fn description(&self) -> &str {
+        "Sleeps then returns its name"
+    }
+    fn parameters_schema(&self) -> Schema {
+        Schema::empty()
+    }
+    fn invoke(
+        &self,
+        _args: Value,
+    ) -> Pin<Box<dyn Future<Output = Result<Value, CallbackError>> + Send + '_>> {
+        self.live_calls.fetch_add(1, Ordering::SeqCst);
+        let delay = self.delay_ms;
+        let name = self.name.clone();
+        Box::pin(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
+            Ok(json!({ "from": name }))
+        })
+    }
+}
+
 // =============================================================================
 // Helpers
 // =============================================================================
@@ -216,4 +249,79 @@ async fn journaling_without_previous_records_fresh() {
     assert_eq!(outcome.replayed_callbacks, 0);
     assert_eq!(outcome.journal.entries.len(), 2);
     assert_eq!(outcome.journal.code, TWO_CALL_SCRIPT);
+}
+
+/// Regression test for concurrent replay: two callbacks launched together via
+/// `asyncio.gather` complete in a different order than they were initiated
+/// (`slow_a` sleeps longer than `slow_b`). Keyed `(name, args)` matching must
+/// replay BOTH on the second run regardless of completion order — under the old
+/// positional-cursor model the out-of-order completion silently fell back to
+/// live.
+const GATHER_SCRIPT: &str = r#"
+import asyncio
+a, b = await asyncio.gather(slow_a(), slow_b())
+print(f"a={a['from']} b={b['from']}")
+"#;
+
+#[tokio::test]
+async fn concurrent_gather_callbacks_replay_regardless_of_order() {
+    let a_calls = Arc::new(AtomicU32::new(0));
+    let b_calls = Arc::new(AtomicU32::new(0));
+
+    let build = |a: &Arc<AtomicU32>, b: &Arc<AtomicU32>| {
+        sandbox_builder()
+            // slow_a finishes AFTER slow_b, so completion order != initiation order.
+            .with_callback(SlowCallback {
+                name: "slow_a".to_string(),
+                delay_ms: 80,
+                live_calls: Arc::clone(a),
+            })
+            .with_callback(SlowCallback {
+                name: "slow_b".to_string(),
+                delay_ms: 5,
+                live_calls: Arc::clone(b),
+            })
+    };
+
+    // ---- Run 1: record the journal. ----
+    let sandbox = build(&a_calls, &b_calls).build().expect("build sandbox");
+    let first = sandbox.execute_with_journal(GATHER_SCRIPT).await;
+    let first_out = first.result.expect("first run succeeds");
+    assert!(
+        first_out.stdout.contains("a=slow_a b=slow_b"),
+        "got: {}",
+        first_out.stdout
+    );
+    assert_eq!(a_calls.load(Ordering::SeqCst), 1, "slow_a ran live once");
+    assert_eq!(b_calls.load(Ordering::SeqCst), 1, "slow_b ran live once");
+    assert_eq!(first.journal.entries.len(), 2, "both callbacks journaled");
+    assert_eq!(first.replayed_callbacks, 0);
+
+    // ---- Run 2: replay from the recorded journal. ----
+    let replay_sandbox = build(&a_calls, &b_calls)
+        .with_replay_journal(first.journal)
+        .build()
+        .expect("build replay sandbox");
+    let second = replay_sandbox.execute_with_journal(GATHER_SCRIPT).await;
+    let second_out = second.result.expect("second run succeeds");
+
+    assert_eq!(
+        second.replayed_callbacks, 2,
+        "both concurrent callbacks replayed"
+    );
+    assert_eq!(
+        a_calls.load(Ordering::SeqCst),
+        1,
+        "slow_a must not be invoked live again"
+    );
+    assert_eq!(
+        b_calls.load(Ordering::SeqCst),
+        1,
+        "slow_b must not be invoked live again"
+    );
+    assert!(
+        second_out.stdout.contains("a=slow_a b=slow_b"),
+        "replayed output mismatch, got: {}",
+        second_out.stdout
+    );
 }

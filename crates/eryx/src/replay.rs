@@ -8,24 +8,37 @@
 //! subsequent run.
 //!
 //! Rather than checkpointing the Python interpreter (which can't capture
-//! mid-execution frames), we record the ordered sequence of callback
-//! invocations and their results. On resubmission the entire script is
-//! re-executed, but callbacks that match the recorded journal short-circuit to
-//! the cached result instead of making a real call. Because callbacks are the
-//! expensive part, and Python execution between them is comparatively free,
-//! this is both fast and robust to arbitrary code structure (loops,
-//! conditionals, nested functions) — the journal operates on the *invocation
-//! sequence*, not on the code.
+//! mid-execution frames), we record each callback invocation and its result. On
+//! resubmission the entire script is re-executed, but callbacks that match the
+//! recorded journal short-circuit to the cached result instead of making a real
+//! call. Because callbacks are the expensive part, and Python execution between
+//! them is comparatively free, this is both fast and robust to arbitrary code
+//! structure (loops, conditionals, nested functions) — the journal operates on
+//! the callback invocations, not on the code.
 //!
-//! At this layer, replay matching tolerates code edits: callbacks are matched by
-//! name, arguments, and position in the invocation sequence, so a journal can
-//! replay its still-matching prefix even if the script changed between runs (the
-//! first divergence switches to live mode). Note, however, that a caller that
-//! signs journals and binds the signature to the exact script (as the
-//! `eryx-server` layer does) will reject an edited script's journal *before* it
-//! reaches this matching logic, restricting replay to byte-identical re-runs.
-//! Whether edits can replay is therefore a property of the integrity policy
-//! layered on top, not of this module.
+//! # Matching model: keyed FIFO multiset
+//!
+//! Callbacks are matched by their **name plus canonicalized arguments**, treated
+//! as a FIFO multiset. When a journal is loaded, every recorded result is bucketed
+//! by its `(name, args)` key in recorded order; each live invocation pops the next
+//! cached result for its key. Repeated identical calls therefore replay their
+//! results in the order they were originally recorded.
+//!
+//! Crucially, matching is **independent of invocation order**. A concurrently
+//! launched batch of callbacks (e.g. `asyncio.gather`) replays correctly no matter
+//! which future the scheduler polls first or which call completes first, because a
+//! call is matched by what it *is*, not by its position in the sequence. A call
+//! that does not match any remaining cached result for its key — because its
+//! arguments changed, or it is a brand-new call — simply runs live; it does not
+//! affect whether other calls match. (Safety is preserved: if a call's arguments
+//! changed because they depended on an earlier result that is now different, the
+//! key won't match and the call goes live.)
+//!
+//! A caller that signs journals and binds the signature to the exact script (as
+//! the `eryx-server` layer does) will reject an edited script's journal *before*
+//! it reaches this matching logic, restricting replay to re-runs of the same
+//! script. Whether edited scripts can replay is therefore a property of the
+//! integrity policy layered on top, not of this module.
 //!
 //! Replay is implemented entirely as a [`Callback`] wrapper ([`ReplayCallback`]):
 //! no changes are needed to the WASM runtime, the WIT interface, or the Python
@@ -44,7 +57,7 @@
 //! (`eryx-server`) provides HMAC-SHA256 signing for this purpose; the core
 //! `eryx` crate is agnostic to signing and trusts whatever journal it receives.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
@@ -130,17 +143,17 @@ impl CallbackJournal {
 /// Mutable replay state shared across all wrapped callbacks in one execution.
 ///
 /// A single state is shared (behind a mutex) by every [`ReplayCallback`] in an
-/// execution, so the cursor advances across callbacks of different names in
-/// strict initiation order.
+/// execution. Matching is by `(name, canonical args)` as a FIFO multiset, so it
+/// is independent of the order in which callbacks are initiated or completed.
 #[derive(Debug)]
 pub struct ReplayState {
-    /// The previous journal being replayed from.
-    previous: CallbackJournal,
-    /// Current position in `previous.entries`.
-    cursor: usize,
-    /// Once a mismatch is hit we switch to live mode permanently.
-    live_mode: bool,
-    /// Monotonic counter assigning each invocation its position.
+    /// Cached results from the previous journal, bucketed by `(name, args_json)`
+    /// key. Each deque holds the recorded results for that key in recorded order;
+    /// a live invocation pops the next one (FIFO), so repeated identical calls
+    /// replay in their original order.
+    cached: HashMap<(String, String), VecDeque<Result<serde_json::Value, String>>>,
+    /// Monotonic counter assigning each invocation its recording index. This is
+    /// only an entry index/order tag — matching no longer depends on it.
     next_seq: usize,
     /// Entries recorded for *this* execution, indexed by sequence number.
     /// `None` marks a reserved-but-unrecorded slot (in-flight).
@@ -153,63 +166,66 @@ pub struct ReplayState {
 enum Decision {
     /// Served from the journal; the result is returned without a live call.
     Hit(Result<serde_json::Value, String>),
-    /// Not in the journal (or journal diverged); invoke live and record at `seq`.
+    /// Not in the journal (key absent or exhausted); invoke live and record at `seq`.
     Miss { seq: usize },
 }
 
 impl ReplayState {
     /// Create fresh replay state that replays from `previous`.
     ///
-    /// Pass an empty journal (see [`CallbackJournal::new`]) to record a fresh
-    /// journal without replaying anything.
+    /// The previous journal's entries are bucketed by `(name, args_json)` key in
+    /// recorded order, so later invocations match regardless of the order they
+    /// run in. Pass an empty journal (see [`CallbackJournal::new`]) to record a
+    /// fresh journal without replaying anything.
     #[must_use]
     pub fn new(previous: CallbackJournal) -> Self {
+        let mut cached: HashMap<(String, String), VecDeque<Result<serde_json::Value, String>>> =
+            HashMap::new();
+        for entry in previous.entries {
+            cached
+                .entry((entry.name, entry.args_json))
+                .or_default()
+                .push_back(entry.result);
+        }
         Self {
-            previous,
-            cursor: 0,
-            live_mode: false,
+            cached,
             next_seq: 0,
             entries: Vec::new(),
             replayed_count: 0,
         }
     }
 
-    /// Decide how to handle an invocation, advancing the cursor as needed.
+    /// Decide how to handle an invocation by matching on `(name, args)`.
     ///
-    /// This runs synchronously in callback-initiation order, so the assigned
-    /// sequence numbers and cursor advancement are deterministic even when
-    /// callbacks are launched concurrently via `asyncio.gather`.
+    /// This runs synchronously when the invocation is dispatched. Matching pops
+    /// the next cached result for the `(name, args_json)` key, so it is
+    /// independent of the order callbacks are initiated or complete in (e.g. a
+    /// concurrent `asyncio.gather` batch replays correctly regardless of
+    /// scheduling). A key with no remaining cached result runs live.
     fn decide(&mut self, name: &str, args_hash: u64, args_json: &str) -> Decision {
         let seq = self.next_seq;
         self.next_seq += 1;
         self.ensure_slot(seq);
 
-        if !self.live_mode
-            && let Some(entry) = self.previous.entries.get(self.cursor)
+        // Match by name + canonical args, popping the next cached result for the
+        // key. `remove`-then-reinsert keeps the borrow checker happy while letting
+        // us drop emptied buckets.
+        let key = (name.to_string(), args_json.to_string());
+        if let Some(queue) = self.cached.get_mut(&key)
+            && let Some(result) = queue.pop_front()
         {
-            if entry.name == name && entry.args_hash == args_hash && entry.args_json == args_json {
-                // Cache hit: advance the cursor and record the replayed entry.
-                self.cursor += 1;
-                self.replayed_count += 1;
-                let result = entry.result.clone();
-                self.entries[seq] = Some(CallbackJournalEntry {
-                    index: u32::try_from(seq).unwrap_or(u32::MAX),
-                    name: name.to_string(),
-                    args_hash,
-                    args_json: args_json.to_string(),
-                    result: result.clone(),
-                });
-                return Decision::Hit(result);
-            }
-            // The recorded position now has a different call: the trace
-            // genuinely diverged. Switch to live mode for the rest of the run —
-            // later cached entries may depend on earlier results that are now
-            // different.
-            self.live_mode = true;
+            self.replayed_count += 1;
+            self.entries[seq] = Some(CallbackJournalEntry {
+                index: u32::try_from(seq).unwrap_or(u32::MAX),
+                name: name.to_string(),
+                args_hash,
+                args_json: args_json.to_string(),
+                result: result.clone(),
+            });
+            return Decision::Hit(result);
         }
-        // Otherwise the previous journal is exhausted (or we are already live):
-        // fall through to live invocation.
 
+        // No cached result for this key (absent or exhausted): run live.
         Decision::Miss { seq }
     }
 
@@ -236,7 +252,7 @@ impl ReplayState {
     /// Build the journal recorded during this run for the given script.
     ///
     /// Reserved-but-unrecorded slots (e.g. in-flight callbacks) are dropped;
-    /// recorded entries keep their initiation-order positions.
+    /// recorded entries keep their dispatch-order positions.
     #[must_use]
     pub fn build_journal(&self, code: impl Into<String>) -> CallbackJournal {
         CallbackJournal {
@@ -248,9 +264,9 @@ impl ReplayState {
 
 /// Wraps a real callback with journal-aware replay logic.
 ///
-/// All wrapped callbacks in a single execution share one [`ReplayState`], so the
-/// replay cursor advances across callbacks of different names in the order they
-/// are invoked.
+/// All wrapped callbacks in a single execution share one [`ReplayState`], so an
+/// invocation of any callback can match a cached result recorded for the same
+/// `(name, args)` key, regardless of which wrapper records it.
 pub struct ReplayCallback {
     /// The real callback to delegate to on a cache miss.
     inner: Arc<dyn Callback>,
@@ -296,7 +312,8 @@ impl Callback for ReplayCallback {
         let args_hash = fnv1a_64(args_json.as_bytes());
 
         // The journal decision runs synchronously, before the future is
-        // returned, so it happens in callback-initiation order.
+        // returned. Matching is keyed on (name, args), so the result is the same
+        // regardless of the order in which concurrent invocations are dispatched.
         let decision = lock_state(&self.state).decide(&name, args_hash, &args_json);
 
         match decision {
@@ -549,34 +566,102 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn mismatch_switches_to_live_mode_permanently() {
+    async fn unrelated_call_goes_live_without_disrupting_matches() {
+        // Keyed matching: an unrelated/new call runs live, but it does NOT poison
+        // replay for other calls — a still-matching call replays from cache.
         let args = json!({"q": "a"});
-        // Journal expects "fetch" first, but we'll invoke "other" -> mismatch.
         let previous = CallbackJournal {
             code: "code".into(),
-            entries: vec![
-                entry_ok(0, "fetch", &args, json!("cached")),
-                entry_ok(1, "fetch", &args, json!("cached2")),
-            ],
+            entries: vec![entry_ok(0, "fetch", &args, json!("cached"))],
         };
         let state = Arc::new(Mutex::new(ReplayState::new(previous)));
 
+        // A brand-new call (key not in the journal) goes live.
         let (other, other_calls) = programmable("other", Outcome::Ok(json!("live-other")));
         let other_wrapper = ReplayCallback::new(other, Arc::clone(&state));
         let r1 = other_wrapper.invoke(args.clone()).await.unwrap();
         assert_eq!(r1, json!("live-other"));
         assert_eq!(other_calls.load(Ordering::SeqCst), 1);
 
-        // Even though "fetch" now matches the cursor, live mode is sticky.
+        // The matching "fetch" call still replays — there is no sticky live mode.
         let (fetch, fetch_calls) = programmable("fetch", Outcome::Ok(json!("live-fetch")));
         let fetch_wrapper = ReplayCallback::new(fetch, Arc::clone(&state));
         let r2 = fetch_wrapper.invoke(args.clone()).await.unwrap();
-        assert_eq!(r2, json!("live-fetch"), "no re-sync after divergence");
-        assert_eq!(fetch_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            r2,
+            json!("cached"),
+            "matching call replays despite earlier miss"
+        );
+        assert_eq!(
+            fetch_calls.load(Ordering::SeqCst),
+            0,
+            "fetch not invoked live"
+        );
 
         let st = lock_state(&state);
-        assert_eq!(st.replayed_count(), 0);
+        assert_eq!(st.replayed_count(), 1);
+        // Two recorded entries: the live "other" and the replayed "fetch".
         assert_eq!(st.build_journal("code").entries.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn matching_is_order_independent() {
+        // Journal recorded A then B (distinct keys). Invoke the wrappers in the
+        // REVERSED order (B then A): both must still replay from cache, proving
+        // matching does not depend on invocation order (the concurrent-gather case).
+        let a_args = json!({"id": "A"});
+        let b_args = json!({"id": "B"});
+        let previous = CallbackJournal {
+            code: "code".into(),
+            entries: vec![
+                entry_ok(0, "a", &a_args, json!("cached-a")),
+                entry_ok(1, "b", &b_args, json!("cached-b")),
+            ],
+        };
+        let state = Arc::new(Mutex::new(ReplayState::new(previous)));
+
+        let (a, a_calls) = programmable("a", Outcome::Ok(json!("live-a")));
+        let (b, b_calls) = programmable("b", Outcome::Ok(json!("live-b")));
+        let a_wrapper = ReplayCallback::new(a, Arc::clone(&state));
+        let b_wrapper = ReplayCallback::new(b, Arc::clone(&state));
+
+        // Reversed: B first, then A.
+        let rb = b_wrapper.invoke(b_args.clone()).await.unwrap();
+        let ra = a_wrapper.invoke(a_args.clone()).await.unwrap();
+
+        assert_eq!(rb, json!("cached-b"), "B replayed out of order");
+        assert_eq!(ra, json!("cached-a"), "A replayed out of order");
+        assert_eq!(b_calls.load(Ordering::SeqCst), 0, "B not invoked live");
+        assert_eq!(a_calls.load(Ordering::SeqCst), 0, "A not invoked live");
+
+        let st = lock_state(&state);
+        assert_eq!(st.replayed_count(), 2);
+    }
+
+    #[tokio::test]
+    async fn repeated_identical_calls_replay_fifo() {
+        // Two identical-key entries with distinct results must replay in recorded
+        // (FIFO) order across repeated invocations.
+        let args = json!({"q": "x"});
+        let previous = CallbackJournal {
+            code: "code".into(),
+            entries: vec![
+                entry_ok(0, "fetch", &args, json!("first")),
+                entry_ok(1, "fetch", &args, json!("second")),
+            ],
+        };
+        let state = Arc::new(Mutex::new(ReplayState::new(previous)));
+        let (inner, calls) = programmable("fetch", Outcome::Ok(json!("live")));
+
+        let w1 = ReplayCallback::new(Arc::clone(&inner) as Arc<dyn Callback>, Arc::clone(&state));
+        let r1 = w1.invoke(args.clone()).await.unwrap();
+        let w2 = ReplayCallback::new(inner as Arc<dyn Callback>, Arc::clone(&state));
+        let r2 = w2.invoke(args.clone()).await.unwrap();
+
+        assert_eq!(r1, json!("first"));
+        assert_eq!(r2, json!("second"));
+        assert_eq!(calls.load(Ordering::SeqCst), 0, "neither invoked live");
+        assert_eq!(lock_state(&state).replayed_count(), 2);
     }
 
     #[tokio::test]
