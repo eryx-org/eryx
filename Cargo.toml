@@ -97,10 +97,11 @@ wasm-encoder = "0.243"
 wasmparser = "0.243"
 
 # WebAssembly runtime (v40+ required for async component model)
-wasmtime = { version = "44", features = ["component-model", "async"] }
-wasmtime-wasi = "44"
-wasmtime-wasi-io = "44"
-wasmtime-wizer = { version = "44", features = ["component-model", "wasmtime"] }
+# 44.0.2 patches GHSA-2r75-cxrj-cmph (WASI path_open TRUNCATE bypasses FilePerms::WRITE)
+wasmtime = { version = "44.0.2", features = ["component-model", "async"] }
+wasmtime-wasi = "44.0.2"
+wasmtime-wasi-io = "44.0.2"
+wasmtime-wizer = { version = "44.0.2", features = ["component-model", "wasmtime"] }
 
 # WebAssembly component linking and WIT parsing
 wit-component = "0.243"
