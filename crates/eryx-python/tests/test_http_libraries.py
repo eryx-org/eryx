@@ -181,6 +181,39 @@ if response.status_code == 200:
             f"Test failed: {result.stdout}\nstderr: {result.stderr}"
         )
 
+    def test_httpx_get_https_external(self, httpx_sandbox):
+        """Test httpx.get() with HTTPS to an external service.
+
+        Regression test for the missing SSLSocket._sslobj attribute. httpcore
+        reads sock._sslobj via get_extra_info("ssl_object") to detect ALPN/HTTP2
+        after the handshake; without it every httpx HTTPS request failed with
+        AttributeError. Distinct from the requests/urllib3 path (#231).
+
+        Tries several hosts so a single slow/unreachable host doesn't flake CI
+        (matches the urllib external test and #224).
+        """
+        result = httpx_sandbox.execute("""
+import httpx
+
+urls = [
+    "https://httpbin.org/get",
+    "https://example.com",
+    "https://www.google.com",
+]
+
+for url in urls:
+    try:
+        response = httpx.get(url, timeout=8)
+        if response.status_code == 200:
+            print(f"SUCCESS via {url}")
+            break
+    except Exception as e:
+        print(f"Failed {url}: {type(e).__name__}: {e}")
+else:
+    print("All URLs failed")
+""")
+        assert "SUCCESS" in result.stdout, f"Test failed: {result.stdout}"
+
 
 class TestUrllibLibrary:
     """Tests for urllib (standard library HTTP client).
