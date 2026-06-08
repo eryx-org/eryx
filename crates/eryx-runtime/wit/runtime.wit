@@ -72,6 +72,13 @@ world sandbox {
         stdout: string,
         /// Captured stderr from the Python execution.
         stderr: string,
+        /// JSON-serialized value of the script's result variable (see
+        /// set-result-variable), or "" if the variable was not set.
+        /// ("result" is a reserved WIT keyword, hence "result-json".)
+        result-json: string,
+        /// Why result capture failed (e.g. the value was not JSON-serializable),
+        /// or "" when capture succeeded or no result variable was set.
+        result-error: string,
     }
 
     /// Execute Python code in the sandbox.
@@ -119,4 +126,15 @@ world sandbox {
     /// This is only meant to be called during wasmtime-wizer
     /// pre-initialization. Calling it at runtime has no useful effect.
     export finalize-preinit: func();
+
+    /// Set the name of the user variable captured as the structured result.
+    ///
+    /// After each execute() call, the variable with this name is read from the
+    /// user namespace, JSON-serialized, and returned in execute-output.result.
+    /// Defaults to "result". Configured once by the host when building a sandbox.
+    ///
+    /// Declared `async` so it can be driven on the same async store as `execute`
+    /// (a synchronous export cannot be called on wasmtime's async store); the
+    /// guest work itself is synchronous and completes immediately.
+    export set-result-variable: async func(name: string);
 }

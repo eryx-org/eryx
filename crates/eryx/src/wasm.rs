@@ -181,10 +181,19 @@ pub struct ExecutionOutput {
     /// This measures the number of WASM instructions executed. Always present
     /// when the engine has fuel consumption enabled.
     pub fuel_consumed: Option<u64>,
+    /// JSON-serialized value of the script's result variable, or `None` if the
+    /// variable was not set. See [`PythonExecutor::with_result_variable`].
+    pub result: Option<String>,
+    /// Why result capture failed (e.g. the value was not JSON-serializable), or
+    /// `None` when capture succeeded or no result variable was set.
+    pub result_error: Option<String>,
 }
 
 impl ExecutionOutput {
     /// Create a new execution output.
+    ///
+    /// The captured `result`/`result_error` fields default to `None`; set them on
+    /// the returned value when result capture is available.
     #[must_use]
     pub fn new(
         stdout: String,
@@ -201,6 +210,8 @@ impl ExecutionOutput {
             duration,
             callback_invocations,
             fuel_consumed,
+            result: None,
+            result_error: None,
         }
     }
 }
@@ -993,6 +1004,9 @@ pub struct PythonExecutor {
     /// Paths to Python package directories.
     /// Each will be mounted at `/site-packages-N` and added to PYTHONPATH.
     python_site_packages_paths: Vec<PathBuf>,
+    /// Name of the user variable captured as the structured result after each
+    /// execution. Defaults to `"result"`. Configured via [`Self::with_result_variable`].
+    result_variable: String,
 }
 
 impl std::fmt::Debug for PythonExecutor {
@@ -1005,6 +1019,7 @@ impl std::fmt::Debug for PythonExecutor {
                 "python_site_packages_paths",
                 &self.python_site_packages_paths,
             )
+            .field("result_variable", &self.result_variable)
             .finish_non_exhaustive()
     }
 }
@@ -1034,6 +1049,12 @@ impl PythonExecutor {
         &self.python_site_packages_paths
     }
 
+    /// Get the configured result-capture variable name (defaults to `"result"`).
+    #[must_use]
+    pub fn result_variable(&self) -> &str {
+        &self.result_variable
+    }
+
     /// Set the path to the Python standard library directory.
     ///
     /// This is required when using the eryx-wasm-runtime (Rust/CPython FFI based).
@@ -1056,6 +1077,17 @@ impl PythonExecutor {
     #[must_use]
     pub fn with_site_packages(mut self, path: impl Into<PathBuf>) -> Self {
         self.python_site_packages_paths.push(path.into());
+        self
+    }
+
+    /// Set the name of the user variable captured as the structured result.
+    ///
+    /// After each `execute()`, the variable with this name is read from the user
+    /// namespace, JSON-serialized, and returned in [`ExecutionOutput::result`].
+    /// Defaults to `"result"`.
+    #[must_use]
+    pub fn with_result_variable(mut self, name: impl Into<String>) -> Self {
+        self.result_variable = name.into();
         self
     }
 
@@ -1119,6 +1151,7 @@ impl PythonExecutor {
             instance_pre,
             python_stdlib_path: None,
             python_site_packages_paths: Vec::new(),
+            result_variable: "result".to_string(),
         })
     }
 
@@ -1146,6 +1179,7 @@ impl PythonExecutor {
             instance_pre,
             python_stdlib_path: None,
             python_site_packages_paths: Vec::new(),
+            result_variable: "result".to_string(),
         })
     }
 
@@ -1181,6 +1215,7 @@ impl PythonExecutor {
             instance_pre,
             python_stdlib_path: None,
             python_site_packages_paths: Vec::new(),
+            result_variable: "result".to_string(),
         })
     }
 
@@ -1228,6 +1263,7 @@ impl PythonExecutor {
                 instance_pre,
                 python_stdlib_path: None,
                 python_site_packages_paths: Vec::new(),
+                result_variable: "result".to_string(),
             })
         }
     }
@@ -1282,6 +1318,7 @@ impl PythonExecutor {
                 instance_pre,
                 python_stdlib_path: None,
                 python_site_packages_paths: Vec::new(),
+                result_variable: "result".to_string(),
             });
         }
 
@@ -1303,6 +1340,7 @@ impl PythonExecutor {
             instance_pre,
             python_stdlib_path: None,
             python_site_packages_paths: Vec::new(),
+            result_variable: "result".to_string(),
         })
     }
 
@@ -1337,6 +1375,7 @@ impl PythonExecutor {
                 instance_pre,
                 python_stdlib_path: stdlib_path,
                 python_site_packages_paths: Vec::new(),
+                result_variable: "result".to_string(),
             });
         }
 
@@ -1364,6 +1403,7 @@ impl PythonExecutor {
             instance_pre,
             python_stdlib_path: None,
             python_site_packages_paths: Vec::new(),
+            result_variable: "result".to_string(),
         })
     }
 
@@ -2092,6 +2132,19 @@ impl PythonExecutor {
             .await
             .map_err(Error::WasmComponent)?;
 
+        // Configure the guest's result-capture variable name. The guest defaults to
+        // "result", so only call the export when a non-default name is configured.
+        if self.result_variable != "result" {
+            let name = self.result_variable.clone();
+            store
+                .run_concurrent(async |accessor| {
+                    bindings.call_set_result_variable(accessor, name).await
+                })
+                .await
+                .map_err(|e| Error::Execution(format!("set-result-variable failed: {e:?}")))?
+                .map_err(Error::WasmComponent)?;
+        }
+
         tracing::debug!(code_len = code.len(), "Executing Python code");
 
         // Now set up epoch-based deadline for execution timeout and/or cancellation.
@@ -2228,14 +2281,21 @@ impl PythonExecutor {
         // handle callbacks internally - it just passes the channel to the WASM state.
         // Higher-level APIs like Sandbox track callback invocations in their own
         // callback handler tasks.
-        Ok(ExecutionOutput::new(
+        // The guest uses "" as the "absent" sentinel for both result fields
+        // (a JSON value is never the empty string), so map empty -> None.
+        let empty_to_none = |s: String| if s.is_empty() { None } else { Some(s) };
+
+        let mut output = ExecutionOutput::new(
             wit_output.stdout,
             wit_output.stderr,
             peak_memory_bytes,
             Duration::ZERO, // Duration tracked by higher-level APIs (Sandbox, Session)
             0,              // Callback invocations tracked by higher-level APIs
             fuel_consumed,
-        ))
+        );
+        output.result = empty_to_none(wit_output.result_json);
+        output.result_error = empty_to_none(wit_output.result_error);
+        Ok(output)
     }
 }
 

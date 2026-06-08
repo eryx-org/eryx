@@ -754,6 +754,19 @@ impl SessionExecutor {
             .await
             .map_err(|e| Error::WasmEngine(format!("Failed to instantiate component: {e}")))?;
 
+        // Configure the result-capture variable name once for the session
+        // (the guest defaults to "result", so only call for a custom name).
+        if executor.result_variable() != "result" {
+            let name = executor.result_variable().to_string();
+            store
+                .run_concurrent(async |accessor| {
+                    bindings.call_set_result_variable(accessor, name).await
+                })
+                .await
+                .map_err(|e| Error::WasmEngine(format!("Failed to set result variable: {e}")))?
+                .map_err(|e| Error::WasmEngine(format!("Failed to set result variable: {e}")))?;
+        }
+
         Ok(Self {
             executor,
             store: Some(store),
@@ -806,6 +819,19 @@ impl SessionExecutor {
             .await
             .map_err(|e| Error::WasmEngine(format!("Failed to instantiate component: {e}")))?;
 
+        // Configure the result-capture variable name once for the session
+        // (the guest defaults to "result", so only call for a custom name).
+        if executor.result_variable() != "result" {
+            let name = executor.result_variable().to_string();
+            store
+                .run_concurrent(async |accessor| {
+                    bindings.call_set_result_variable(accessor, name).await
+                })
+                .await
+                .map_err(|e| Error::WasmEngine(format!("Failed to set result variable: {e}")))?
+                .map_err(|e| Error::WasmEngine(format!("Failed to set result variable: {e}")))?;
+        }
+
         Ok(Self {
             executor,
             store: Some(store),
@@ -849,6 +875,38 @@ impl SessionExecutor {
     ///   (fuel consumption is still tracked and reported).
     pub fn set_fuel_limit(&mut self, limit: Option<u64>) {
         self.fuel_limit = limit;
+    }
+
+    /// Override the name of the variable captured as the structured result for
+    /// this session's current instance.
+    ///
+    /// Normally the name is configured on the parent [`PythonExecutor`] via
+    /// [`PythonExecutor::with_result_variable`] and applied at instantiation. This
+    /// method sets it on the already-instantiated session instance, e.g. to apply a
+    /// per-request override. Note it is reset to the executor's configured name
+    /// whenever the session instance is re-created (e.g. by `restore_state`).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the session instance is unavailable or the guest call fails.
+    pub async fn set_result_variable(&mut self, name: &str) -> Result<(), Error> {
+        let store = self
+            .store
+            .as_mut()
+            .ok_or_else(|| Error::Execution("session store unavailable".to_string()))?;
+        let bindings = self
+            .bindings
+            .as_ref()
+            .ok_or_else(|| Error::Execution("session bindings unavailable".to_string()))?;
+        let name = name.to_string();
+        store
+            .run_concurrent(async |accessor| {
+                bindings.call_set_result_variable(accessor, name).await
+            })
+            .await
+            .map_err(|e| Error::WasmEngine(format!("Failed to set result variable: {e}")))?
+            .map_err(|e| Error::WasmEngine(format!("Failed to set result variable: {e}")))?;
+        Ok(())
     }
 
     /// Get the current fuel limit.
@@ -1058,18 +1116,24 @@ impl SessionExecutor {
 
         let duration = start.elapsed();
 
+        // The guest uses "" as the "absent" sentinel for both result fields.
+        let empty_to_none = |s: String| if s.is_empty() { None } else { Some(s) };
+
         // Note: callback_invocations is 0 here because SessionExecutor doesn't
         // handle callbacks internally - it just passes the channel to the WASM state.
         // Callers that use with_callbacks() should spawn their own callback handler
         // task to count invocations if needed.
-        Ok(ExecutionOutput::new(
+        let mut output = ExecutionOutput::new(
             wit_output.stdout,
             wit_output.stderr,
             peak_memory,
             duration,
             0, // Callback invocations tracked by caller's callback handler
             fuel_consumed,
-        ))
+        );
+        output.result = empty_to_none(wit_output.result_json);
+        output.result_error = empty_to_none(wit_output.result_error);
+        Ok(output)
     }
 
     /// Get the number of executions performed in this session.
@@ -1163,6 +1227,18 @@ impl SessionExecutor {
             .instantiate_async(&mut store)
             .await
             .map_err(|e| Error::WasmEngine(format!("Failed to reinstantiate component: {e}")))?;
+
+        // Re-apply the result-capture variable name on the fresh instance.
+        if self.executor.result_variable() != "result" {
+            let name = self.executor.result_variable().to_string();
+            store
+                .run_concurrent(async |accessor| {
+                    bindings.call_set_result_variable(accessor, name).await
+                })
+                .await
+                .map_err(|e| Error::WasmEngine(format!("Failed to set result variable: {e}")))?
+                .map_err(|e| Error::WasmEngine(format!("Failed to set result variable: {e}")))?;
+        }
 
         self.store = Some(store);
         self.bindings = Some(bindings);

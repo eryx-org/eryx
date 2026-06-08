@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { Sandbox } from "@bsull/eryx";
+import { Sandbox, setResultVariable } from "@bsull/eryx";
 
 describe("Sandbox", () => {
   const sandbox = new Sandbox();
@@ -144,5 +144,36 @@ p = Point(3, 4)
     // Can also create new instances of the restored class
     const result2 = await fresh.execute("print(Point(5, 12).distance())");
     expect(result2.stdout).toBe("13.0");
+  });
+
+  it("captures the result variable as a parsed value", async () => {
+    const result = await sandbox.execute('result = {"a": 1, "b": [2, 3]}');
+    expect(result.result).toEqual({ a: 1, b: [2, 3] });
+    expect(result.resultError).toBeUndefined();
+  });
+
+  it("leaves result undefined when not set", async () => {
+    // State persists across execute() calls, so clear any `result` left over
+    // from a previous test before asserting it is absent.
+    await sandbox.clearState();
+    const result = await sandbox.execute('print("no result here")');
+    expect(result.result).toBeUndefined();
+    expect(result.resultError).toBeUndefined();
+  });
+
+  it("reports an error for a non-serializable result", async () => {
+    const result = await sandbox.execute("result = object()");
+    expect(result.result).toBeUndefined();
+    expect(result.resultError).toContain("not JSON-serializable");
+  });
+
+  it("honors a custom result variable name", async () => {
+    setResultVariable("out");
+    try {
+      const result = await sandbox.execute("out = 42\nresult = 1");
+      expect(result.result).toBe(42);
+    } finally {
+      setResultVariable("result");
+    }
   });
 });

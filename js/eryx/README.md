@@ -22,6 +22,20 @@ const result = await sandbox.execute('print("Hello from Python!")');
 console.log(result.stdout); // "Hello from Python!"
 ```
 
+### Returning a structured result
+
+Assign a variable named `result` and it is JSON-serialized and returned as
+`result.result` — a structured channel separate from `stdout`:
+
+```js
+const result = await sandbox.execute('result = {"answer": 42, "items": [1, 2, 3]}');
+console.log(result.result); // { answer: 42, items: [ 1, 2, 3 ] }
+```
+
+If the value is not JSON-serializable, `result.result` is `undefined` and
+`result.resultError` explains why (execution still succeeds). Use
+`setResultVariable("name")` to capture a different variable name.
+
 ### Persistent state
 
 Variables, functions, and imports persist across `execute()` calls:

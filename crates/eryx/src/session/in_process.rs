@@ -222,6 +222,8 @@ impl<'a> InProcessSession<'a> {
                     stdout: output.stdout,
                     stderr: output.stderr,
                     trace: trace_events,
+                    result: output.result,
+                    result_error: output.result_error,
                     stats: ExecuteStats {
                         duration,
                         callback_invocations,

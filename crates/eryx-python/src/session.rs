@@ -112,7 +112,7 @@ impl Session {
     ///         {"name": "get_time", "fn": get_time, "description": "Returns current time"}
     ///     ])
     #[new]
-    #[pyo3(signature = (*, vfs=None, vfs_mount_path=None, execution_timeout_ms=None, max_fuel=None, network=None, callbacks=None, mcp=None, volumes=None, on_stdout=None, on_stderr=None))]
+    #[pyo3(signature = (*, vfs=None, vfs_mount_path=None, execution_timeout_ms=None, max_fuel=None, network=None, callbacks=None, mcp=None, volumes=None, on_stdout=None, on_stderr=None, result_variable=None))]
     #[allow(clippy::too_many_arguments)]
     fn new(
         py: Python<'_>,
@@ -126,6 +126,7 @@ impl Session {
         volumes: Option<Vec<(String, String, bool)>>,
         on_stdout: Option<Py<PyAny>>,
         on_stderr: Option<Py<PyAny>>,
+        result_variable: Option<String>,
     ) -> PyResult<Self> {
         // Create a tokio runtime for async execution
         let runtime = Arc::new(
@@ -138,9 +139,12 @@ impl Session {
         );
 
         // Create the PythonExecutor from embedded runtime
-        let executor = Arc::new(eryx::PythonExecutor::from_embedded_runtime().map_err(|e| {
-            InitializationError::new_err(format!("failed to create executor: {e}"))
-        })?);
+        let mut executor = eryx::PythonExecutor::from_embedded_runtime()
+            .map_err(|e| InitializationError::new_err(format!("failed to create executor: {e}")))?;
+        if let Some(name) = result_variable {
+            executor = executor.with_result_variable(name);
+        }
+        let executor = Arc::new(executor);
 
         // Extract callbacks if provided
         let callbacks_map: Arc<HashMap<String, Arc<dyn eryx::Callback>>> = {

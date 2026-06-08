@@ -143,6 +143,25 @@ if (useDirectBug.test(code)) {
   }
 }
 
+// Patch 10: camelCase the execute-output record keys in the lift spec.
+// jco's record lifter keys the returned object with the verbatim WIT field
+// names (kebab-case), so multi-word fields surface as `output['result-json']`
+// instead of the `output.resultJson` promised by the generated .d.ts. Single-word
+// fields (stdout/stderr) are unaffected. Rewrite the two kebab keys to camelCase.
+{
+  const keyRenames = [
+    ["'result-json'", "'resultJson'"],
+    ["'result-error'", "'resultError'"],
+  ];
+  for (const [kebab, camel] of keyRenames) {
+    if (code.includes(kebab)) {
+      code = code.split(kebab).join(camel);
+      console.log(`Patched: lift-spec key ${kebab} -> ${camel}`);
+      patched = true;
+    }
+  }
+}
+
 if (patched) {
   fs.writeFileSync(path, code);
 }

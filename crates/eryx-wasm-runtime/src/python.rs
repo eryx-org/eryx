@@ -246,6 +246,10 @@ pub struct ExecuteOutput {
     pub stdout: String,
     /// Captured stderr from the Python execution.
     pub stderr: String,
+    /// JSON-serialized value of the user's result variable, or "" if unset.
+    pub result: String,
+    /// Reason result capture failed (e.g. not JSON-serializable), or "" on success.
+    pub result_error: String,
 }
 
 /// Result of executing Python code.
@@ -408,6 +412,26 @@ pub fn recapture_stdout() {
         if PyRun_SimpleString(c"_eryx_output, _eryx_errors = _eryx_get_output()".as_ptr()) != 0 {
             PyErr_Clear();
         }
+    }
+}
+
+/// Capture the user's result variable after execution.
+///
+/// Runs `_eryx_capture_result()` in the guest and reads back the JSON-serialized
+/// value and any serialization-error message. Returns `(result, result_error)`,
+/// each `""` when absent. Never fails the execution: capture is a soft side channel.
+///
+/// # Safety
+/// Must be called with the Python interpreter initialized.
+pub unsafe fn capture_result() -> (String, String) {
+    unsafe {
+        if PyRun_SimpleString(c"_eryx_capture_result()".as_ptr()) != 0 {
+            PyErr_Clear();
+            return (String::new(), String::new());
+        }
+        let result = get_python_variable_string("_eryx_result").unwrap_or_default();
+        let result_error = get_python_variable_string("_eryx_result_error").unwrap_or_default();
+        (result, result_error)
     }
 }
 
@@ -1359,6 +1383,16 @@ import json as _json
 # Callback code storage
 _eryx_callback_code = 0
 
+# Name of the user variable captured as the structured result (configurable via
+# the set-result-variable export). Defaults to 'result'.
+_eryx_result_var_name = 'result'
+# Capture slots populated by _eryx_capture_result() after each execution. Both use
+# the empty string as the "absent" sentinel (a JSON value is never the empty string,
+# so this is unambiguous). _eryx_result holds the JSON-serialized value; on a
+# serialization failure it stays '' and _eryx_result_error holds the reason.
+_eryx_result = ''
+_eryx_result_error = ''
+
 def _eryx_run_async(coro):
     '''Run a coroutine using _eryx_async runtime.'''
     global _eryx_callback_code
@@ -1442,6 +1476,25 @@ def _eryx_get_output():
 def _eryx_get_output_keep_capture():
     '''Get captured stdout without restoring streams (for pending async).'''
     return _eryx_stdout.getvalue(), _eryx_stderr.getvalue()
+
+def _eryx_capture_result():
+    '''JSON-serialize the user's result variable, if present.
+
+    Sets module globals _eryx_result (JSON string, or '' if the variable is unset)
+    and _eryx_result_error (a message when the variable exists but is not
+    JSON-serializable, else ''). Never raises: serialization failure is a soft side
+    channel, not an execution error.
+    '''
+    global _eryx_result, _eryx_result_error
+    _eryx_result = ''
+    _eryx_result_error = ''
+    name = _eryx_result_var_name
+    if name in _eryx_user_globals:
+        value = _eryx_user_globals[name]
+        try:
+            _eryx_result = _json.dumps(value)
+        except (TypeError, ValueError):
+            _eryx_result_error = 'result is not JSON-serializable: ' + type(value).__name__
 "#;
 
 // =============================================================================
@@ -2783,10 +2836,34 @@ pub fn execute_python(code: &str) -> ExecuteResult {
         let stdout = get_python_variable_string("_eryx_output").unwrap_or_default();
         let stderr = get_python_variable_string("_eryx_errors").unwrap_or_default();
 
+        // Capture the user's result variable (JSON-serialized into _eryx_result, or
+        // "" if unset; _eryx_result_error holds the reason on serialization failure).
+        let (result, result_error) = capture_result();
+
         ExecuteResult::Complete(ExecuteOutput {
             stdout: stdout.trim_end_matches('\n').to_string(),
             stderr: stderr.trim_end_matches('\n').to_string(),
+            result,
+            result_error,
         })
+    }
+}
+
+/// Set the name of the user variable captured as the structured result.
+///
+/// Backs the `set-result-variable` WIT export. The name is escaped and assigned
+/// to the guest's `_eryx_result_var_name` global, which defaults to `"result"`.
+///
+/// # Safety
+/// Must be called with the Python interpreter initialized.
+pub unsafe fn set_result_variable_name(name: &str) {
+    use std::ffi::CString;
+
+    let assignment = format!("_eryx_result_var_name = {}", python_string_literal(name));
+    if let Ok(cstr) = CString::new(assignment) {
+        unsafe {
+            PyRun_SimpleString(cstr.as_ptr());
+        }
     }
 }
 

@@ -139,7 +139,7 @@ impl Sandbox {
     ///     )
     ///     sandbox = factory.create_sandbox()
     #[new]
-    #[pyo3(signature = (*, resource_limits=None, network=None, callbacks=None, mcp=None, secrets=None, scrub_stdout=None, scrub_stderr=None, scrub_files=None, volumes=None, on_stdout=None, on_stderr=None))]
+    #[pyo3(signature = (*, resource_limits=None, network=None, callbacks=None, mcp=None, secrets=None, scrub_stdout=None, scrub_stderr=None, scrub_files=None, volumes=None, on_stdout=None, on_stderr=None, result_variable=None))]
     #[allow(clippy::too_many_arguments)]
     fn new(
         py: Python<'_>,
@@ -154,6 +154,7 @@ impl Sandbox {
         volumes: Option<Vec<(String, String, bool)>>,
         on_stdout: Option<Py<PyAny>>,
         on_stderr: Option<Py<PyAny>>,
+        result_variable: Option<String>,
     ) -> PyResult<Self> {
         // Create a tokio runtime for async execution
         let runtime = Arc::new(
@@ -171,6 +172,11 @@ impl Sandbox {
         // Apply resource limits if provided
         if let Some(limits) = resource_limits {
             builder = builder.with_resource_limits(limits.into());
+        }
+
+        // Apply the result-capture variable name if provided
+        if let Some(name) = result_variable {
+            builder = builder.with_result_variable(name);
         }
 
         // Apply network config if provided

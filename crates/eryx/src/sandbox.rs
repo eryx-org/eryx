@@ -403,6 +403,8 @@ impl Sandbox {
                     stdout,
                     stderr,
                     trace: trace_events,
+                    result: output.result,
+                    result_error: output.result_error,
                     stats: ExecuteStats {
                         duration,
                         callback_invocations,
@@ -835,6 +837,8 @@ impl Sandbox {
                     stdout,
                     stderr,
                     trace: trace_events,
+                    result: output.result,
+                    result_error: output.result_error,
                     stats: ExecuteStats {
                         duration,
                         callback_invocations,
@@ -977,6 +981,8 @@ pub struct SandboxBuilder<Runtime = state::Needs, Stdlib = state::Needs> {
     trace_handler: Option<Arc<dyn TraceHandler>>,
     output_handler: Option<Arc<dyn OutputHandler>>,
     resource_limits: ResourceLimits,
+    /// Name of the user variable captured as the structured result. Default `result`.
+    result_variable: String,
     /// Path to Python stdlib for eryx-wasm-runtime.
     python_stdlib_path: Option<std::path::PathBuf>,
     /// Path to Python site-packages for eryx-wasm-runtime.
@@ -1049,6 +1055,7 @@ impl SandboxBuilder<state::Needs, state::Needs> {
             trace_handler: None,
             output_handler: None,
             resource_limits: ResourceLimits::default(),
+            result_variable: "result".to_string(),
             python_stdlib_path: None,
             python_site_packages_path: None,
             #[cfg(feature = "native-extensions")]
@@ -1083,6 +1090,7 @@ impl SandboxBuilder<state::Needs, state::Needs> {
             trace_handler: None,
             output_handler: None,
             resource_limits: ResourceLimits::default(),
+            result_variable: "result".to_string(),
             python_stdlib_path: None, // Will use embedded stdlib
             python_site_packages_path: None,
             #[cfg(feature = "native-extensions")]
@@ -1117,6 +1125,7 @@ impl<R, S> SandboxBuilder<R, S> {
             trace_handler: self.trace_handler,
             output_handler: self.output_handler,
             resource_limits: self.resource_limits,
+            result_variable: self.result_variable,
             python_stdlib_path: self.python_stdlib_path,
             python_site_packages_path: self.python_site_packages_path,
             #[cfg(feature = "native-extensions")]
@@ -1545,6 +1554,18 @@ impl<R, S> SandboxBuilder<R, S> {
     #[must_use]
     pub const fn with_resource_limits(mut self, limits: ResourceLimits) -> Self {
         self.resource_limits = limits;
+        self
+    }
+
+    /// Set the name of the user variable captured as the structured result.
+    ///
+    /// After each `execute()`, the variable with this name is read from the script's
+    /// namespace, JSON-serialized, and returned as [`ExecuteResult::result`]. If the
+    /// value is not JSON-serializable, [`ExecuteResult::result_error`] explains why and
+    /// `result` is `None` — execution still succeeds. Defaults to `"result"`.
+    #[must_use]
+    pub fn with_result_variable(mut self, name: impl Into<String>) -> Self {
+        self.result_variable = name.into();
         self
     }
 
@@ -2036,6 +2057,9 @@ impl SandboxBuilder<state::Has, state::Has> {
             .into_iter()
             .fold(executor, |exec, path| exec.with_site_packages(&path));
 
+        // Apply the configured result-capture variable name.
+        let executor = executor.with_result_variable(self.result_variable);
+
         Ok(Sandbox {
             executor: Arc::new(executor),
             callbacks: Arc::new(self.callbacks),
@@ -2223,6 +2247,13 @@ pub struct ExecuteResult {
     pub stderr: String,
     /// Collected trace events (also streamed via `TraceHandler` if configured).
     pub trace: Vec<TraceEvent>,
+    /// JSON-serialized value of the script's result variable (default name
+    /// `result`, configurable via [`SandboxBuilder::with_result_variable`]), or
+    /// `None` if the variable was not set.
+    pub result: Option<String>,
+    /// Why result capture failed (e.g. the value was not JSON-serializable), or
+    /// `None` when capture succeeded or no result variable was set.
+    pub result_error: Option<String>,
     /// Execution statistics.
     pub stats: ExecuteStats,
 }
@@ -2408,6 +2439,8 @@ mod tests {
             stdout: "Hello".to_string(),
             stderr: String::new(),
             trace: vec![],
+            result: None,
+            result_error: None,
             stats: ExecuteStats {
                 duration: Duration::from_millis(100),
                 callback_invocations: 5,
@@ -2427,6 +2460,8 @@ mod tests {
             stdout: "Test output".to_string(),
             stderr: String::new(),
             trace: vec![],
+            result: None,
+            result_error: None,
             stats: ExecuteStats {
                 duration: Duration::from_millis(50),
                 callback_invocations: 2,
@@ -2759,6 +2794,8 @@ mod tests {
             stdout: String::new(),
             stderr: String::new(),
             trace: vec![],
+            result: None,
+            result_error: None,
             stats: ExecuteStats {
                 duration: Duration::from_millis(1),
                 callback_invocations: 0,
@@ -2792,6 +2829,8 @@ mod tests {
                     context: None,
                 },
             ],
+            result: None,
+            result_error: None,
             stats: ExecuteStats {
                 duration: Duration::from_millis(100),
                 callback_invocations: 1,

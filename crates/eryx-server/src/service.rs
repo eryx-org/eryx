@@ -101,6 +101,7 @@ impl crate::proto::eryx::v1::eryx_server::Eryx for EryxService {
         let persist_state = execute_req.persist_state;
         let state_snapshot = execute_req.state_snapshot;
         let files = execute_req.files;
+        let result_variable = execute_req.result_variable;
 
         // Parse network config: present = networking enabled, absent = disabled.
         let net_config = execute_req.network_config.map(|nc| {
@@ -352,6 +353,7 @@ impl crate::proto::eryx::v1::eryx_server::Eryx for EryxService {
                     secrets_preamble,
                     scrub_stdout,
                     scrub_stderr,
+                    result_variable,
                 };
 
                 // Race execution against client cancellation. If the client
@@ -369,6 +371,8 @@ impl crate::proto::eryx::v1::eryx_server::Eryx for EryxService {
                             error: "execution cancelled: client disconnected".to_string(),
                             stats: None,
                             state_snapshot: Vec::new(),
+                            result: String::new(),
+                            result_error: String::new(),
                         }
                     }
                 };
@@ -503,6 +507,8 @@ struct SessionParams<'a> {
     secrets_preamble: String,
     scrub_stdout: bool,
     scrub_stderr: bool,
+    /// Name of the variable captured as the structured result. Empty = default "result".
+    result_variable: String,
 }
 
 /// Execute Python code using a session executor.
@@ -581,6 +587,14 @@ async fn execute_with_session(
     // Apply resource limits to the session so they take effect for all executions.
     session.set_execution_timeout(params.resource_limits.execution_timeout);
     session.set_fuel_limit(params.resource_limits.max_fuel);
+
+    // Apply a per-request result-variable override (the guest defaults to "result").
+    // Done after any restore_state above, which re-instantiates the session instance.
+    if !params.result_variable.is_empty()
+        && let Err(e) = session.set_result_variable(&params.result_variable).await
+    {
+        tracing::warn!(error = %e, "failed to set result variable, using default");
+    }
 
     // Restore previous state if provided.
     if let Some(state_snapshot) = params.state.filter(|s| !s.is_empty()) {
@@ -823,6 +837,8 @@ async fn execute_with_session(
                     fuel_consumed: output.fuel_consumed.unwrap_or(0),
                 }),
                 state_snapshot: snapshot_bytes,
+                result: output.result.unwrap_or_default(),
+                result_error: output.result_error.unwrap_or_default(),
             }
         }
         Err(e) => {
@@ -841,6 +857,8 @@ async fn execute_with_session(
                 stats: None,
                 // Still return the snapshot — the Go service decides whether to keep it.
                 state_snapshot: snapshot_bytes,
+                result: String::new(),
+                result_error: String::new(),
             }
         }
     }

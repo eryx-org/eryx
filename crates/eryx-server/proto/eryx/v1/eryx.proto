@@ -84,6 +84,10 @@ message ExecuteRequest {
 
   // Disable placeholder scrubbing on stderr. Default: scrubbing is ON when secrets are present.
   bool disable_stderr_scrub = 11;
+
+  // Name of the variable captured from the script and returned in
+  // ExecuteResult.result (JSON-serialized). Empty defaults to "result".
+  string result_variable = 12;
 }
 
 // Kind of supporting file — determines where it's placed in the sandbox.
@@ -247,6 +251,15 @@ message ExecuteResult {
   // Captured Python state snapshot after execution.
   // Only populated when persist_state was true in the request.
   bytes state_snapshot = 6;
+
+  // JSON-serialized value of the script's result variable (default name
+  // "result", configurable via ExecuteRequest.result_variable), or empty if
+  // the variable was not set.
+  string result = 7;
+
+  // Why result capture failed (e.g. the value was not JSON-serializable), or
+  // empty when capture succeeded or no result variable was set.
+  string result_error = 8;
 }
 
 // A trace event emitted during execution.

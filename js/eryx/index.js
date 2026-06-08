@@ -20,6 +20,7 @@ import {
   restoreState as _restoreState,
   clearState as _clearState,
   finalizePreinit as _finalizePreinit,
+  setResultVariable as _setResultVariable,
 } from "./eryx-sandbox.js";
 
 // Import filesystem shim to populate with Python stdlib
@@ -62,7 +63,39 @@ export {
  * @typedef {Object} ExecuteResult
  * @property {string} stdout - Captured standard output
  * @property {string} stderr - Captured standard error
+ * @property {*} [result] - The script's `result` variable, parsed from JSON, or
+ *   undefined if it was not set. See {@link setResultVariable} to change the name.
+ * @property {string} [resultError] - Why result capture failed (e.g. the value was
+ *   not JSON-serializable), or undefined on success.
  */
+
+/**
+ * Map a raw jco execute-output record into the public ExecuteResult shape,
+ * parsing the captured result variable from JSON.
+ * @param {Object} output
+ * @returns {ExecuteResult}
+ */
+function _toResult(output) {
+  return {
+    stdout: output.stdout,
+    stderr: output.stderr,
+    result: output.resultJson ? JSON.parse(output.resultJson) : undefined,
+    resultError: output.resultError || undefined,
+  };
+}
+
+/**
+ * Set the name of the variable captured as the structured result.
+ *
+ * After each execute(), the variable with this name is read from the script's
+ * namespace, JSON-serialized, and returned as `ExecuteResult.result`. Applies to
+ * the shared sandbox instance. Defaults to "result".
+ *
+ * @param {string} name - The variable name to capture
+ */
+export function setResultVariable(name) {
+  _setResultVariable(name);
+}
 
 /**
  * A Python sandbox powered by WebAssembly.
@@ -103,10 +136,7 @@ export class Sandbox {
     if (output.tag === "error") {
       throw new Error(output.val);
     }
-    return {
-      stdout: output.stdout,
-      stderr: output.stderr,
-    };
+    return _toResult(output);
   }
 
   /**
@@ -169,8 +199,5 @@ export async function execute(code) {
   if (output.tag === "error") {
     throw new Error(output.val);
   }
-  return {
-    stdout: output.stdout,
-    stderr: output.stderr,
-  };
+  return _toResult(output);
 }
