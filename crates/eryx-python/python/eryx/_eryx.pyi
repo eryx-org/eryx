@@ -182,6 +182,11 @@ class ExecuteResult:
         ...
 
     @property
+    def stderr(self) -> str:
+        """Complete stderr output from the sandboxed code."""
+        ...
+
+    @property
     def duration_ms(self) -> float:
         """Execution duration in milliseconds."""
         ...
@@ -194,6 +199,35 @@ class ExecuteResult:
     @property
     def peak_memory_bytes(self) -> Optional[int]:
         """Peak memory usage in bytes (if available)."""
+        ...
+
+    @property
+    def fuel_consumed(self) -> Optional[int]:
+        """Fuel (WASM instructions) consumed during execution (if available)."""
+        ...
+
+    @property
+    def result(self) -> Any:
+        """The script's ``result`` variable, parsed from JSON into a native Python
+        value, or ``None`` if it was not set.
+
+        The captured variable name defaults to ``result`` and can be changed via the
+        ``result_variable`` argument to ``Sandbox``/``Session``. The variable is
+        consumed after each execution, so in a ``Session`` a later run that does not
+        set it reports ``None`` rather than the previous value. If the value was set
+        but could not be JSON-serialized, this is ``None`` and ``result_error``
+        explains why."""
+        ...
+
+    @property
+    def result_json(self) -> Optional[str]:
+        """The raw JSON string of the captured ``result`` variable, or ``None``."""
+        ...
+
+    @property
+    def result_error(self) -> Optional[str]:
+        """Why result capture failed (e.g. the value was not JSON-serializable), or
+        ``None`` when capture succeeded or no result variable was set."""
         ...
 
 
@@ -422,10 +456,12 @@ class Sandbox:
         secrets: Optional[dict[str, SecretDict]] = None,
         scrub_stdout: Optional[bool] = None,
         scrub_stderr: Optional[bool] = None,
+        scrub_result: Optional[bool] = None,
         scrub_files: Optional[bool] = None,
         volumes: Optional[Sequence[tuple[str, str, bool]]] = None,
         on_stdout: Optional[Callable[[str], None]] = None,
         on_stderr: Optional[Callable[[str], None]] = None,
+        result_variable: Optional[str] = None,
     ) -> None:
         """Create a new sandbox with the embedded Python runtime.
 
@@ -447,6 +483,10 @@ class Sandbox:
                 Defaults to True when secrets are provided.
             scrub_stderr: Whether to scrub secret placeholders from stderr.
                 Defaults to True when secrets are provided.
+            scrub_result: Whether to scrub secret placeholders from the structured
+                ``result`` (and ``result_error``). Defaults to False even when secrets
+                are provided: the result is a programmatic side channel, so scrubbing
+                is opt-in.
             scrub_files: Whether to scrub secret placeholders from file writes.
                 Defaults to True when secrets are provided.
             on_stdout: Optional callback for streaming stdout output.
@@ -455,6 +495,8 @@ class Sandbox:
             on_stderr: Optional callback for streaming stderr output.
                 Called in real-time as Python code writes to stderr, rather than
                 waiting for execution to complete. Receives the text chunk as a string.
+            result_variable: Name of the variable captured from the script and exposed
+                as ``ExecuteResult.result`` (JSON-serialized). Defaults to ``"result"``.
 
         Raises:
             InitializationError: If the sandbox fails to initialize.
@@ -793,6 +835,7 @@ class Session:
         volumes: Optional[Sequence[tuple[str, str, bool]]] = None,
         on_stdout: Optional[Callable[[str], None]] = None,
         on_stderr: Optional[Callable[[str], None]] = None,
+        result_variable: Optional[str] = None,
     ) -> None:
         """Create a new session with the embedded Python runtime.
 

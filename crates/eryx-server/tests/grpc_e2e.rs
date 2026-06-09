@@ -62,20 +62,22 @@ async fn execute_simple_print() {
 
     let (tx, rx) = mpsc::channel(16);
     tx.send(ClientMessage {
-        message: Some(client_message::Message::ExecuteRequest(ExecuteRequest {
-            code: "print('hello from eryx')".to_string(),
-            callbacks: vec![],
-            resource_limits: Some(ResourceLimits {
-                execution_timeout_ms: 30_000,
+        message: Some(client_message::Message::ExecuteRequest(Box::new(
+            ExecuteRequest {
+                code: "print('hello from eryx')".to_string(),
+                callbacks: vec![],
+                resource_limits: Some(ResourceLimits {
+                    execution_timeout_ms: 30_000,
+                    ..Default::default()
+                }),
+                enable_tracing: false,
+                persist_state: false,
+                state_snapshot: vec![],
+                files: vec![],
+                network_config: None,
                 ..Default::default()
-            }),
-            enable_tracing: false,
-            persist_state: false,
-            state_snapshot: vec![],
-            files: vec![],
-            network_config: None,
-            ..Default::default()
-        })),
+            },
+        ))),
     })
     .await
     .unwrap();
@@ -110,33 +112,35 @@ async fn execute_with_echo_callback() {
 
     // Send the execute request with an echo callback declaration.
     tx.send(ClientMessage {
-        message: Some(client_message::Message::ExecuteRequest(ExecuteRequest {
-            code: r#"
+        message: Some(client_message::Message::ExecuteRequest(Box::new(
+            ExecuteRequest {
+                code: r#"
 result = await echo(message="hello callback")
 print(f"got: {result}")
 "#
-            .to_string(),
-            callbacks: vec![CallbackDeclaration {
-                name: "echo".to_string(),
-                description: "Echoes the message back".to_string(),
-                parameters: vec![ParameterDeclaration {
-                    name: "message".to_string(),
-                    json_type: "string".to_string(),
-                    description: "The message to echo".to_string(),
-                    required: true,
+                .to_string(),
+                callbacks: vec![CallbackDeclaration {
+                    name: "echo".to_string(),
+                    description: "Echoes the message back".to_string(),
+                    parameters: vec![ParameterDeclaration {
+                        name: "message".to_string(),
+                        json_type: "string".to_string(),
+                        description: "The message to echo".to_string(),
+                        required: true,
+                    }],
                 }],
-            }],
-            resource_limits: Some(ResourceLimits {
-                execution_timeout_ms: 30_000,
+                resource_limits: Some(ResourceLimits {
+                    execution_timeout_ms: 30_000,
+                    ..Default::default()
+                }),
+                enable_tracing: false,
+                persist_state: false,
+                state_snapshot: vec![],
+                files: vec![],
+                network_config: None,
                 ..Default::default()
-            }),
-            enable_tracing: false,
-            persist_state: false,
-            state_snapshot: vec![],
-            files: vec![],
-            network_config: None,
-            ..Default::default()
-        })),
+            },
+        ))),
     })
     .await
     .unwrap();
@@ -199,31 +203,33 @@ async fn execute_with_callback_error() {
     let (tx, rx) = mpsc::channel(16);
 
     tx.send(ClientMessage {
-        message: Some(client_message::Message::ExecuteRequest(ExecuteRequest {
-            code: r#"
+        message: Some(client_message::Message::ExecuteRequest(Box::new(
+            ExecuteRequest {
+                code: r#"
 try:
     await failing_op()
     print("should not reach here")
 except Exception as e:
     print(f"caught: {e}")
 "#
-            .to_string(),
-            callbacks: vec![CallbackDeclaration {
-                name: "failing_op".to_string(),
-                description: "Always fails".to_string(),
-                parameters: vec![],
-            }],
-            resource_limits: Some(ResourceLimits {
-                execution_timeout_ms: 30_000,
+                .to_string(),
+                callbacks: vec![CallbackDeclaration {
+                    name: "failing_op".to_string(),
+                    description: "Always fails".to_string(),
+                    parameters: vec![],
+                }],
+                resource_limits: Some(ResourceLimits {
+                    execution_timeout_ms: 30_000,
+                    ..Default::default()
+                }),
+                enable_tracing: false,
+                persist_state: false,
+                state_snapshot: vec![],
+                files: vec![],
+                network_config: None,
                 ..Default::default()
-            }),
-            enable_tracing: false,
-            persist_state: false,
-            state_snapshot: vec![],
-            files: vec![],
-            network_config: None,
-            ..Default::default()
-        })),
+            },
+        ))),
     })
     .await
     .unwrap();
@@ -279,24 +285,26 @@ async fn execute_streams_output_events() {
     let (tx, rx) = mpsc::channel(16);
 
     tx.send(ClientMessage {
-        message: Some(client_message::Message::ExecuteRequest(ExecuteRequest {
-            code: r#"
+        message: Some(client_message::Message::ExecuteRequest(Box::new(
+            ExecuteRequest {
+                code: r#"
 for i in range(3):
     print(f"line {i}")
 "#
-            .to_string(),
-            callbacks: vec![],
-            resource_limits: Some(ResourceLimits {
-                execution_timeout_ms: 30_000,
+                .to_string(),
+                callbacks: vec![],
+                resource_limits: Some(ResourceLimits {
+                    execution_timeout_ms: 30_000,
+                    ..Default::default()
+                }),
+                enable_tracing: false,
+                persist_state: false,
+                state_snapshot: vec![],
+                files: vec![],
+                network_config: None,
                 ..Default::default()
-            }),
-            enable_tracing: false,
-            persist_state: false,
-            state_snapshot: vec![],
-            files: vec![],
-            network_config: None,
-            ..Default::default()
-        })),
+            },
+        ))),
     })
     .await
     .unwrap();
@@ -345,17 +353,19 @@ async fn execute_reports_stats() {
     let (tx, rx) = mpsc::channel(16);
 
     tx.send(ClientMessage {
-        message: Some(client_message::Message::ExecuteRequest(ExecuteRequest {
-            code: "x = 1 + 1".to_string(),
-            callbacks: vec![],
-            resource_limits: None,
-            enable_tracing: false,
-            persist_state: false,
-            state_snapshot: vec![],
-            files: vec![],
-            network_config: None,
-            ..Default::default()
-        })),
+        message: Some(client_message::Message::ExecuteRequest(Box::new(
+            ExecuteRequest {
+                code: "x = 1 + 1".to_string(),
+                callbacks: vec![],
+                resource_limits: None,
+                enable_tracing: false,
+                persist_state: false,
+                state_snapshot: vec![],
+                files: vec![],
+                network_config: None,
+                ..Default::default()
+            },
+        ))),
     })
     .await
     .unwrap();
@@ -383,25 +393,27 @@ async fn execute_with_tracing_streams_trace_events() {
     let (tx, rx) = mpsc::channel(16);
 
     tx.send(ClientMessage {
-        message: Some(client_message::Message::ExecuteRequest(ExecuteRequest {
-            code: r#"
+        message: Some(client_message::Message::ExecuteRequest(Box::new(
+            ExecuteRequest {
+                code: r#"
 x = 1
 y = 2
 print(x + y)
 "#
-            .to_string(),
-            callbacks: vec![],
-            resource_limits: Some(ResourceLimits {
-                execution_timeout_ms: 30_000,
+                .to_string(),
+                callbacks: vec![],
+                resource_limits: Some(ResourceLimits {
+                    execution_timeout_ms: 30_000,
+                    ..Default::default()
+                }),
+                enable_tracing: true,
+                persist_state: false,
+                state_snapshot: vec![],
+                files: vec![],
+                network_config: None,
                 ..Default::default()
-            }),
-            enable_tracing: true,
-            persist_state: false,
-            state_snapshot: vec![],
-            files: vec![],
-            network_config: None,
-            ..Default::default()
-        })),
+            },
+        ))),
     })
     .await
     .unwrap();
@@ -462,20 +474,22 @@ async fn execute_without_tracing_no_trace_events() {
     let (tx, rx) = mpsc::channel(16);
 
     tx.send(ClientMessage {
-        message: Some(client_message::Message::ExecuteRequest(ExecuteRequest {
-            code: "x = 1 + 1".to_string(),
-            callbacks: vec![],
-            resource_limits: Some(ResourceLimits {
-                execution_timeout_ms: 30_000,
+        message: Some(client_message::Message::ExecuteRequest(Box::new(
+            ExecuteRequest {
+                code: "x = 1 + 1".to_string(),
+                callbacks: vec![],
+                resource_limits: Some(ResourceLimits {
+                    execution_timeout_ms: 30_000,
+                    ..Default::default()
+                }),
+                enable_tracing: false,
+                persist_state: false,
+                state_snapshot: vec![],
+                files: vec![],
+                network_config: None,
                 ..Default::default()
-            }),
-            enable_tracing: false,
-            persist_state: false,
-            state_snapshot: vec![],
-            files: vec![],
-            network_config: None,
-            ..Default::default()
-        })),
+            },
+        ))),
     })
     .await
     .unwrap();
@@ -513,20 +527,22 @@ async fn execute_trace_linenos_adjusted_for_preamble() {
 
     // User code: 3 lines, no leading newline. Line 1 = x = 1, line 2 = y = 2, line 3 = print.
     tx.send(ClientMessage {
-        message: Some(client_message::Message::ExecuteRequest(ExecuteRequest {
-            code: "x = 1\ny = 2\nprint(x + y)".to_string(),
-            callbacks: vec![],
-            resource_limits: Some(ResourceLimits {
-                execution_timeout_ms: 30_000,
+        message: Some(client_message::Message::ExecuteRequest(Box::new(
+            ExecuteRequest {
+                code: "x = 1\ny = 2\nprint(x + y)".to_string(),
+                callbacks: vec![],
+                resource_limits: Some(ResourceLimits {
+                    execution_timeout_ms: 30_000,
+                    ..Default::default()
+                }),
+                enable_tracing: true,
+                persist_state: false,
+                state_snapshot: vec![],
+                files: vec![],
+                network_config: None,
                 ..Default::default()
-            }),
-            enable_tracing: true,
-            persist_state: false,
-            state_snapshot: vec![],
-            files: vec![],
-            network_config: None,
-            ..Default::default()
-        })),
+            },
+        ))),
     })
     .await
     .unwrap();
@@ -605,20 +621,22 @@ async fn execute_trace_linenos_adjusted_with_leading_newline() {
 
     // Leading newline: line 1 = empty, line 2 = x = 42, line 3 = print.
     tx.send(ClientMessage {
-        message: Some(client_message::Message::ExecuteRequest(ExecuteRequest {
-            code: "\nx = 42\nprint(x)".to_string(),
-            callbacks: vec![],
-            resource_limits: Some(ResourceLimits {
-                execution_timeout_ms: 30_000,
+        message: Some(client_message::Message::ExecuteRequest(Box::new(
+            ExecuteRequest {
+                code: "\nx = 42\nprint(x)".to_string(),
+                callbacks: vec![],
+                resource_limits: Some(ResourceLimits {
+                    execution_timeout_ms: 30_000,
+                    ..Default::default()
+                }),
+                enable_tracing: true,
+                persist_state: false,
+                state_snapshot: vec![],
+                files: vec![],
+                network_config: None,
                 ..Default::default()
-            }),
-            enable_tracing: true,
-            persist_state: false,
-            state_snapshot: vec![],
-            files: vec![],
-            network_config: None,
-            ..Default::default()
-        })),
+            },
+        ))),
     })
     .await
     .unwrap();
@@ -692,33 +710,35 @@ async fn execute_pool_reuse_different_callbacks() {
         let (tx, rx) = mpsc::channel(16);
 
         tx.send(ClientMessage {
-            message: Some(client_message::Message::ExecuteRequest(ExecuteRequest {
-                code: r#"
+            message: Some(client_message::Message::ExecuteRequest(Box::new(
+                ExecuteRequest {
+                    code: r#"
 result = await alpha(value="first")
 print(f"alpha: {result}")
 "#
-                .to_string(),
-                callbacks: vec![CallbackDeclaration {
-                    name: "alpha".to_string(),
-                    description: "Alpha callback".to_string(),
-                    parameters: vec![ParameterDeclaration {
-                        name: "value".to_string(),
-                        json_type: "string".to_string(),
-                        description: "A value".to_string(),
-                        required: true,
+                    .to_string(),
+                    callbacks: vec![CallbackDeclaration {
+                        name: "alpha".to_string(),
+                        description: "Alpha callback".to_string(),
+                        parameters: vec![ParameterDeclaration {
+                            name: "value".to_string(),
+                            json_type: "string".to_string(),
+                            description: "A value".to_string(),
+                            required: true,
+                        }],
                     }],
-                }],
-                resource_limits: Some(ResourceLimits {
-                    execution_timeout_ms: 30_000,
+                    resource_limits: Some(ResourceLimits {
+                        execution_timeout_ms: 30_000,
+                        ..Default::default()
+                    }),
+                    enable_tracing: false,
+                    persist_state: false,
+                    state_snapshot: vec![],
+                    files: vec![],
+                    network_config: None,
                     ..Default::default()
-                }),
-                enable_tracing: false,
-                persist_state: false,
-                state_snapshot: vec![],
-                files: vec![],
-                network_config: None,
-                ..Default::default()
-            })),
+                },
+            ))),
         })
         .await
         .unwrap();
@@ -767,8 +787,9 @@ print(f"alpha: {result}")
         let (tx, rx) = mpsc::channel(16);
 
         tx.send(ClientMessage {
-            message: Some(client_message::Message::ExecuteRequest(ExecuteRequest {
-                code: r#"
+            message: Some(client_message::Message::ExecuteRequest(Box::new(
+                ExecuteRequest {
+                    code: r#"
 # list_callbacks should be available and show beta (not alpha)
 cbs = list_callbacks()
 cb_names = [cb['name'] for cb in cbs]
@@ -778,28 +799,29 @@ assert 'beta' in cb_names, f"beta not in callbacks: {cb_names}"
 result = await beta(value="second")
 print(f"beta: {result}")
 "#
-                .to_string(),
-                callbacks: vec![CallbackDeclaration {
-                    name: "beta".to_string(),
-                    description: "Beta callback".to_string(),
-                    parameters: vec![ParameterDeclaration {
-                        name: "value".to_string(),
-                        json_type: "string".to_string(),
-                        description: "A value".to_string(),
-                        required: true,
+                    .to_string(),
+                    callbacks: vec![CallbackDeclaration {
+                        name: "beta".to_string(),
+                        description: "Beta callback".to_string(),
+                        parameters: vec![ParameterDeclaration {
+                            name: "value".to_string(),
+                            json_type: "string".to_string(),
+                            description: "A value".to_string(),
+                            required: true,
+                        }],
                     }],
-                }],
-                resource_limits: Some(ResourceLimits {
-                    execution_timeout_ms: 30_000,
+                    resource_limits: Some(ResourceLimits {
+                        execution_timeout_ms: 30_000,
+                        ..Default::default()
+                    }),
+                    enable_tracing: false,
+                    persist_state: false,
+                    state_snapshot: vec![],
+                    files: vec![],
+                    network_config: None,
                     ..Default::default()
-                }),
-                enable_tracing: false,
-                persist_state: false,
-                state_snapshot: vec![],
-                files: vec![],
-                network_config: None,
-                ..Default::default()
-            })),
+                },
+            ))),
         })
         .await
         .unwrap();
@@ -861,31 +883,33 @@ async fn execute_callback_with_special_characters_in_result() {
     let (tx, rx) = mpsc::channel(16);
 
     tx.send(ClientMessage {
-        message: Some(client_message::Message::ExecuteRequest(ExecuteRequest {
-            code: r#"
+        message: Some(client_message::Message::ExecuteRequest(Box::new(
+            ExecuteRequest {
+                code: r#"
 result = await get_data()
 # Verify we can access the data correctly
 print(f"name={result['name']}")
 print(f"desc={result['description']}")
 print(f"path={result['path']}")
 "#
-            .to_string(),
-            callbacks: vec![CallbackDeclaration {
-                name: "get_data".to_string(),
-                description: "Returns data with special characters".to_string(),
-                parameters: vec![],
-            }],
-            resource_limits: Some(ResourceLimits {
-                execution_timeout_ms: 30_000,
+                .to_string(),
+                callbacks: vec![CallbackDeclaration {
+                    name: "get_data".to_string(),
+                    description: "Returns data with special characters".to_string(),
+                    parameters: vec![],
+                }],
+                resource_limits: Some(ResourceLimits {
+                    execution_timeout_ms: 30_000,
+                    ..Default::default()
+                }),
+                enable_tracing: false,
+                persist_state: false,
+                state_snapshot: vec![],
+                files: vec![],
+                network_config: None,
                 ..Default::default()
-            }),
-            enable_tracing: false,
-            persist_state: false,
-            state_snapshot: vec![],
-            files: vec![],
-            network_config: None,
-            ..Default::default()
-        })),
+            },
+        ))),
     })
     .await
     .unwrap();
@@ -942,4 +966,160 @@ print(f"path={result['path']}")
         }
     }
     assert!(got_result, "never received ExecuteResult");
+}
+
+#[tokio::test]
+async fn execute_captures_result() {
+    let channel = start_server().await;
+    let mut client = EryxClient::new(channel);
+
+    let (tx, rx) = mpsc::channel(16);
+    tx.send(ClientMessage {
+        message: Some(client_message::Message::ExecuteRequest(Box::new(
+            ExecuteRequest {
+                code: "result = {\"a\": 1, \"b\": [2, 3]}".to_string(),
+                resource_limits: Some(ResourceLimits {
+                    execution_timeout_ms: 30_000,
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+        ))),
+    })
+    .await
+    .unwrap();
+
+    let mut stream = client
+        .execute(ReceiverStream::new(rx))
+        .await
+        .unwrap()
+        .into_inner();
+
+    let mut got_result = false;
+    while let Some(msg) = stream.message().await.unwrap() {
+        if let Some(server_message::Message::ExecuteResult(result)) = msg.message {
+            assert!(result.success, "execution failed: {}", result.error);
+            assert_eq!(result.result, "{\"a\": 1, \"b\": [2, 3]}");
+            assert_eq!(result.result_error, "");
+            got_result = true;
+        }
+    }
+    assert!(got_result, "never received ExecuteResult");
+}
+
+#[tokio::test]
+async fn execute_captures_custom_result_variable() {
+    let channel = start_server().await;
+    let mut client = EryxClient::new(channel);
+
+    let (tx, rx) = mpsc::channel(16);
+    tx.send(ClientMessage {
+        message: Some(client_message::Message::ExecuteRequest(Box::new(
+            ExecuteRequest {
+                code: "out = 42\nresult = 1".to_string(),
+                result_variable: "out".to_string(),
+                resource_limits: Some(ResourceLimits {
+                    execution_timeout_ms: 30_000,
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+        ))),
+    })
+    .await
+    .unwrap();
+
+    let mut stream = client
+        .execute(ReceiverStream::new(rx))
+        .await
+        .unwrap()
+        .into_inner();
+
+    let mut got_result = false;
+    while let Some(msg) = stream.message().await.unwrap() {
+        if let Some(server_message::Message::ExecuteResult(result)) = msg.message {
+            assert!(result.success, "execution failed: {}", result.error);
+            assert_eq!(result.result, "42");
+            got_result = true;
+        }
+    }
+    assert!(got_result, "never received ExecuteResult");
+}
+
+// Guards the ordering of the per-request result-variable override relative to
+// state restore: a request that both restores a snapshot AND sets a custom
+// result_variable must still capture the custom variable. Two steps: capture a
+// snapshot, then restore it in a second request with a custom variable name.
+#[tokio::test]
+async fn execute_custom_result_variable_with_state_restore() {
+    let channel = start_server().await;
+    let mut client = EryxClient::new(channel);
+
+    // Step 1: run with persist_state to obtain a state snapshot.
+    let (tx1, rx1) = mpsc::channel(16);
+    tx1.send(ClientMessage {
+        message: Some(client_message::Message::ExecuteRequest(Box::new(
+            ExecuteRequest {
+                code: "seed = 7".to_string(),
+                persist_state: true,
+                resource_limits: Some(ResourceLimits {
+                    execution_timeout_ms: 30_000,
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+        ))),
+    })
+    .await
+    .unwrap();
+    let mut stream1 = client
+        .execute(ReceiverStream::new(rx1))
+        .await
+        .unwrap()
+        .into_inner();
+    let mut snapshot = vec![];
+    while let Some(msg) = stream1.message().await.unwrap() {
+        if let Some(server_message::Message::ExecuteResult(r)) = msg.message {
+            assert!(r.success, "step 1 failed: {}", r.error);
+            snapshot = r.state_snapshot;
+        }
+    }
+    assert!(
+        !snapshot.is_empty(),
+        "expected a state snapshot from step 1"
+    );
+
+    // Step 2: restore the snapshot AND request a custom result variable.
+    let (tx2, rx2) = mpsc::channel(16);
+    tx2.send(ClientMessage {
+        message: Some(client_message::Message::ExecuteRequest(Box::new(
+            ExecuteRequest {
+                code: "out = seed * 6".to_string(),
+                persist_state: true,
+                state_snapshot: snapshot,
+                result_variable: "out".to_string(),
+                resource_limits: Some(ResourceLimits {
+                    execution_timeout_ms: 30_000,
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+        ))),
+    })
+    .await
+    .unwrap();
+    let mut stream2 = client
+        .execute(ReceiverStream::new(rx2))
+        .await
+        .unwrap()
+        .into_inner();
+    let mut got = false;
+    while let Some(msg) = stream2.message().await.unwrap() {
+        if let Some(server_message::Message::ExecuteResult(r)) = msg.message {
+            assert!(r.success, "step 2 failed: {}", r.error);
+            assert_eq!(r.result, "42", "custom result var lost across restore");
+            got = true;
+        }
+    }
+    assert!(got, "never received ExecuteResult in step 2");
 }

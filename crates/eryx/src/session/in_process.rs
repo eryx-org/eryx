@@ -218,10 +218,28 @@ impl<'a> InProcessSession<'a> {
                     "Session execution completed"
                 );
 
+                // Scrub the structured result only when opted in (it's a
+                // programmatic side channel); scrub the error message too.
+                let (result, result_error) = if self.sandbox.scrub_result() {
+                    let secrets = self.sandbox.secrets();
+                    (
+                        output
+                            .result
+                            .map(|r| crate::secrets::scrub_placeholders(&r, secrets)),
+                        output
+                            .result_error
+                            .map(|e| crate::secrets::scrub_placeholders(&e, secrets)),
+                    )
+                } else {
+                    (output.result, output.result_error)
+                };
+
                 Ok(ExecuteResult {
                     stdout: output.stdout,
                     stderr: output.stderr,
                     trace: trace_events,
+                    result,
+                    result_error,
                     stats: ExecuteStats {
                         duration,
                         callback_invocations,

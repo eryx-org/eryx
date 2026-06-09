@@ -124,6 +124,10 @@ pub struct Sandbox {
     scrub_stdout: crate::secrets::OutputScrubPolicy,
     /// Stderr scrubbing policy.
     scrub_stderr: crate::secrets::OutputScrubPolicy,
+    /// Whether to scrub secret placeholders from the structured `result` (and
+    /// `result_error`) channel. Defaults to `false`: unlike stdout/stderr, the
+    /// result is a programmatic side channel, so scrubbing is opt-in.
+    scrub_result: bool,
     /// File scrubbing policy for VFS integration.
     scrub_files: crate::secrets::FileScrubPolicy,
     /// Host filesystem volume mounts.
@@ -391,6 +395,22 @@ impl Sandbox {
                     output.stderr
                 };
 
+                // The structured result is an output channel too, but scrubbing is
+                // opt-in (it's a programmatic side channel). When enabled, scrub both
+                // the result and its error message.
+                let (result, result_error) = if self.scrub_result {
+                    (
+                        output
+                            .result
+                            .map(|r| crate::secrets::scrub_placeholders(&r, &self.secrets)),
+                        output
+                            .result_error
+                            .map(|e| crate::secrets::scrub_placeholders(&e, &self.secrets)),
+                    )
+                } else {
+                    (output.result, output.result_error)
+                };
+
                 tracing::info!(
                     duration_ms = duration.as_millis() as u64,
                     callback_invocations,
@@ -403,6 +423,8 @@ impl Sandbox {
                     stdout,
                     stderr,
                     trace: trace_events,
+                    result,
+                    result_error,
                     stats: ExecuteStats {
                         duration,
                         callback_invocations,
@@ -477,6 +499,13 @@ impl Sandbox {
     #[must_use]
     pub(crate) fn scrub_stderr(&self) -> bool {
         matches!(self.scrub_stderr, crate::secrets::OutputScrubPolicy::All)
+    }
+
+    /// Whether the structured `result` channel should be scrubbed of secret
+    /// placeholders. Opt-in (defaults to `false`).
+    #[must_use]
+    pub(crate) fn scrub_result(&self) -> bool {
+        self.scrub_result
     }
 
     /// Get a reference to the Python executor.
@@ -591,6 +620,7 @@ impl Sandbox {
         let secrets = self.secrets.clone();
         let scrub_stdout = self.scrub_stdout.clone();
         let scrub_stderr = self.scrub_stderr.clone();
+        let scrub_result = self.scrub_result;
         let scrub_files = self.scrub_files.clone();
         #[cfg(feature = "vfs")]
         let volumes = self.volumes.clone();
@@ -612,6 +642,7 @@ impl Sandbox {
                 secrets,
                 scrub_stdout,
                 scrub_stderr,
+                scrub_result,
                 scrub_files,
                 #[cfg(feature = "vfs")]
                 volumes,
@@ -645,6 +676,7 @@ impl Sandbox {
         secrets: HashMap<String, crate::secrets::SecretConfig>,
         scrub_stdout: crate::secrets::OutputScrubPolicy,
         scrub_stderr: crate::secrets::OutputScrubPolicy,
+        scrub_result: bool,
         scrub_files: crate::secrets::FileScrubPolicy,
         #[cfg(feature = "vfs")] volumes: Vec<crate::session::VolumeMount>,
         #[cfg(feature = "vfs")] vfs_storage_override: Option<
@@ -831,10 +863,27 @@ impl Sandbox {
                     output.stderr
                 };
 
+                // The structured result is scrubbed only when explicitly opted in
+                // (it's a programmatic side channel). Scrub the error message too.
+                let (result, result_error) = if scrub_result {
+                    (
+                        output
+                            .result
+                            .map(|r| crate::secrets::scrub_placeholders(&r, &secrets)),
+                        output
+                            .result_error
+                            .map(|e| crate::secrets::scrub_placeholders(&e, &secrets)),
+                    )
+                } else {
+                    (output.result, output.result_error)
+                };
+
                 Ok(ExecuteResult {
                     stdout,
                     stderr,
                     trace: trace_events,
+                    result,
+                    result_error,
                     stats: ExecuteStats {
                         duration,
                         callback_invocations,
@@ -977,6 +1026,8 @@ pub struct SandboxBuilder<Runtime = state::Needs, Stdlib = state::Needs> {
     trace_handler: Option<Arc<dyn TraceHandler>>,
     output_handler: Option<Arc<dyn OutputHandler>>,
     resource_limits: ResourceLimits,
+    /// Name of the user variable captured as the structured result. Default `result`.
+    result_variable: String,
     /// Path to Python stdlib for eryx-wasm-runtime.
     python_stdlib_path: Option<std::path::PathBuf>,
     /// Path to Python site-packages for eryx-wasm-runtime.
@@ -1000,6 +1051,10 @@ pub struct SandboxBuilder<Runtime = state::Needs, Stdlib = state::Needs> {
     scrub_stdout: crate::secrets::OutputScrubPolicy,
     /// Stderr scrubbing policy.
     scrub_stderr: crate::secrets::OutputScrubPolicy,
+    /// Whether to scrub secret placeholders from the structured `result` (and
+    /// `result_error`) channel. Defaults to `false`: unlike stdout/stderr, the
+    /// result is a programmatic side channel, so scrubbing is opt-in.
+    scrub_result: bool,
     /// File scrubbing policy for VFS integration.
     scrub_files: crate::secrets::FileScrubPolicy,
     /// Host filesystem volume mounts.
@@ -1049,6 +1104,7 @@ impl SandboxBuilder<state::Needs, state::Needs> {
             trace_handler: None,
             output_handler: None,
             resource_limits: ResourceLimits::default(),
+            result_variable: "result".to_string(),
             python_stdlib_path: None,
             python_site_packages_path: None,
             #[cfg(feature = "native-extensions")]
@@ -1062,6 +1118,7 @@ impl SandboxBuilder<state::Needs, state::Needs> {
             secrets: HashMap::new(),
             scrub_stdout: crate::secrets::OutputScrubPolicy::default(),
             scrub_stderr: crate::secrets::OutputScrubPolicy::default(),
+            scrub_result: false,
             scrub_files: crate::secrets::FileScrubPolicy::default(),
             #[cfg(feature = "vfs")]
             volumes: Vec::new(),
@@ -1083,6 +1140,7 @@ impl SandboxBuilder<state::Needs, state::Needs> {
             trace_handler: None,
             output_handler: None,
             resource_limits: ResourceLimits::default(),
+            result_variable: "result".to_string(),
             python_stdlib_path: None, // Will use embedded stdlib
             python_site_packages_path: None,
             #[cfg(feature = "native-extensions")]
@@ -1096,6 +1154,7 @@ impl SandboxBuilder<state::Needs, state::Needs> {
             secrets: HashMap::new(),
             scrub_stdout: crate::secrets::OutputScrubPolicy::default(),
             scrub_stderr: crate::secrets::OutputScrubPolicy::default(),
+            scrub_result: false,
             scrub_files: crate::secrets::FileScrubPolicy::default(),
             #[cfg(feature = "vfs")]
             volumes: Vec::new(),
@@ -1117,6 +1176,7 @@ impl<R, S> SandboxBuilder<R, S> {
             trace_handler: self.trace_handler,
             output_handler: self.output_handler,
             resource_limits: self.resource_limits,
+            result_variable: self.result_variable,
             python_stdlib_path: self.python_stdlib_path,
             python_site_packages_path: self.python_site_packages_path,
             #[cfg(feature = "native-extensions")]
@@ -1130,6 +1190,7 @@ impl<R, S> SandboxBuilder<R, S> {
             secrets: self.secrets,
             scrub_stdout: self.scrub_stdout,
             scrub_stderr: self.scrub_stderr,
+            scrub_result: self.scrub_result,
             scrub_files: self.scrub_files,
             #[cfg(feature = "vfs")]
             volumes: self.volumes,
@@ -1548,6 +1609,18 @@ impl<R, S> SandboxBuilder<R, S> {
         self
     }
 
+    /// Set the name of the user variable captured as the structured result.
+    ///
+    /// After each `execute()`, the variable with this name is read from the script's
+    /// namespace, JSON-serialized, and returned as [`ExecuteResult::result`]. If the
+    /// value is not JSON-serializable, [`ExecuteResult::result_error`] explains why and
+    /// `result` is `None` — execution still succeeds. Defaults to `"result"`.
+    #[must_use]
+    pub fn with_result_variable(mut self, name: impl Into<String>) -> Self {
+        self.result_variable = name.into();
+        self
+    }
+
     /// Enable TLS networking with the given configuration.
     ///
     /// This allows Python code in the sandbox to make HTTPS requests using
@@ -1680,6 +1753,19 @@ impl<R, S> SandboxBuilder<R, S> {
     #[must_use]
     pub fn scrub_stderr(mut self, policy: impl Into<crate::secrets::OutputScrubPolicy>) -> Self {
         self.scrub_stderr = policy.into();
+        self
+    }
+
+    /// Control scrubbing of the structured `result` channel (default: `false`).
+    ///
+    /// Unlike stdout/stderr — which are scrubbed by default because they tend to be
+    /// surfaced to humans/LLMs — the `result` (and `result_error`) field is a
+    /// programmatic side channel, so secret-placeholder scrubbing is opt-in. When
+    /// enabled, placeholders in [`ExecuteResult::result`] and
+    /// [`ExecuteResult::result_error`] are replaced with `[REDACTED]`.
+    #[must_use]
+    pub fn scrub_result(mut self, enabled: bool) -> Self {
+        self.scrub_result = enabled;
         self
     }
 
@@ -2036,6 +2122,9 @@ impl SandboxBuilder<state::Has, state::Has> {
             .into_iter()
             .fold(executor, |exec, path| exec.with_site_packages(&path));
 
+        // Apply the configured result-capture variable name.
+        let executor = executor.with_result_variable(self.result_variable);
+
         Ok(Sandbox {
             executor: Arc::new(executor),
             callbacks: Arc::new(self.callbacks),
@@ -2048,6 +2137,7 @@ impl SandboxBuilder<state::Has, state::Has> {
             secrets: self.secrets,
             scrub_stdout: self.scrub_stdout,
             scrub_stderr: self.scrub_stderr,
+            scrub_result: self.scrub_result,
             scrub_files: self.scrub_files,
             #[cfg(feature = "vfs")]
             volumes: self.volumes,
@@ -2223,6 +2313,17 @@ pub struct ExecuteResult {
     pub stderr: String,
     /// Collected trace events (also streamed via `TraceHandler` if configured).
     pub trace: Vec<TraceEvent>,
+    /// JSON-serialized value of the script's result variable (default name
+    /// `result`, configurable via [`SandboxBuilder::with_result_variable`]), or
+    /// `None` if the variable was not set.
+    ///
+    /// The variable is consumed (cleared from the namespace) after each execution,
+    /// so in a persistent session a later run that does not set it reports `None`
+    /// rather than re-reporting a stale value.
+    pub result: Option<String>,
+    /// Why result capture failed (e.g. the value was not JSON-serializable), or
+    /// `None` when capture succeeded or no result variable was set.
+    pub result_error: Option<String>,
     /// Execution statistics.
     pub stats: ExecuteStats,
 }
@@ -2408,6 +2509,8 @@ mod tests {
             stdout: "Hello".to_string(),
             stderr: String::new(),
             trace: vec![],
+            result: None,
+            result_error: None,
             stats: ExecuteStats {
                 duration: Duration::from_millis(100),
                 callback_invocations: 5,
@@ -2427,6 +2530,8 @@ mod tests {
             stdout: "Test output".to_string(),
             stderr: String::new(),
             trace: vec![],
+            result: None,
+            result_error: None,
             stats: ExecuteStats {
                 duration: Duration::from_millis(50),
                 callback_invocations: 2,
@@ -2759,6 +2864,8 @@ mod tests {
             stdout: String::new(),
             stderr: String::new(),
             trace: vec![],
+            result: None,
+            result_error: None,
             stats: ExecuteStats {
                 duration: Duration::from_millis(1),
                 callback_invocations: 0,
@@ -2792,6 +2899,8 @@ mod tests {
                     context: None,
                 },
             ],
+            result: None,
+            result_error: None,
             stats: ExecuteStats {
                 duration: Duration::from_millis(100),
                 callback_invocations: 1,

@@ -325,3 +325,113 @@ except Exception as e:
     // Should get connection error (can't actually reach example.com in tests)
     assert!(result.is_ok());
 }
+
+/// When result scrubbing is opted into (`scrub_result(true)`), a secret placeholder
+/// placed into `result` is redacted and the real secret never appears.
+#[tokio::test]
+async fn test_placeholder_scrubbed_from_result() {
+    let sandbox = Sandbox::embedded()
+        .with_secret("TEST_KEY", "supersecret", vec![])
+        .scrub_result(true)
+        .build()
+        .expect("Failed to create sandbox");
+
+    let out = sandbox
+        .execute(
+            r#"
+import os
+result = {"leaked": os.environ.get("TEST_KEY", "")}
+"#,
+        )
+        .await
+        .expect("Failed to execute");
+
+    let result = out.result.expect("expected a result");
+    assert!(
+        result.contains("[REDACTED]"),
+        "placeholder should be scrubbed from result, got: {result}"
+    );
+    assert!(
+        !result.contains("ERYX_SECRET_PLACEHOLDER_"),
+        "raw placeholder must not appear in result: {result}"
+    );
+    assert!(
+        !result.contains("supersecret"),
+        "real secret must never appear in result: {result}"
+    );
+}
+
+/// Result scrubbing is OFF by default (it's a programmatic side channel). Even with
+/// stdout scrubbing on, an unscrubbed `result` still carries the placeholder — but
+/// never the real secret value (placeholders are substituted only at egress).
+#[tokio::test]
+async fn test_result_not_scrubbed_by_default() {
+    let sandbox = Sandbox::embedded()
+        .with_secret("TEST_KEY", "supersecret", vec![])
+        .scrub_stdout(true) // stdout scrubbing on, result scrubbing left default (off)
+        .build()
+        .expect("Failed to create sandbox");
+
+    let out = sandbox
+        .execute(
+            r#"
+import os
+result = {"leaked": os.environ.get("TEST_KEY", "")}
+"#,
+        )
+        .await
+        .expect("Failed to execute");
+
+    let result = out.result.expect("expected a result");
+    assert!(
+        result.contains("ERYX_SECRET_PLACEHOLDER_"),
+        "placeholder should remain in result when scrub_result is off: {result}"
+    );
+    assert!(
+        !result.contains("[REDACTED]"),
+        "result should not be scrubbed by default: {result}"
+    );
+    assert!(
+        !result.contains("supersecret"),
+        "real secret must never appear in result regardless of scrubbing: {result}"
+    );
+}
+
+/// Result scrubbing is governed by its own flag, independent of `scrub_stdout`:
+/// with stdout scrubbing OFF but `scrub_result(true)`, the result is still scrubbed.
+#[tokio::test]
+async fn test_result_scrubbing_independent_of_stdout() {
+    let sandbox = Sandbox::embedded()
+        .with_secret("TEST_KEY", "supersecret", vec![])
+        .scrub_stdout(false)
+        .scrub_result(true)
+        .build()
+        .expect("Failed to create sandbox");
+
+    let out = sandbox
+        .execute(
+            r#"
+import os
+print(os.environ.get("TEST_KEY", ""))
+result = {"leaked": os.environ.get("TEST_KEY", "")}
+"#,
+        )
+        .await
+        .expect("Failed to execute");
+
+    // stdout is NOT scrubbed (placeholder visible), but result IS.
+    assert!(
+        out.stdout.contains("ERYX_SECRET_PLACEHOLDER_"),
+        "stdout should keep the placeholder when scrub_stdout is off: {}",
+        out.stdout
+    );
+    let result = out.result.expect("expected a result");
+    assert!(
+        result.contains("[REDACTED]"),
+        "result should be scrubbed when scrub_result is on: {result}"
+    );
+    assert!(
+        !result.contains("ERYX_SECRET_PLACEHOLDER_"),
+        "raw placeholder must not appear in scrubbed result: {result}"
+    );
+}

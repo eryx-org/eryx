@@ -19,6 +19,27 @@ export interface ExecuteResult {
   stdout: string;
   /** Captured standard error */
   stderr: string;
+  /**
+   * The script's `result` variable, parsed from JSON into a native value, or
+   * `undefined` if it was not set. The captured variable name defaults to
+   * `result` and can be changed via {@link setResultVariable}.
+   *
+   * Integers outside the IEEE-754 safe range (|n| > 2^53 - 1) are parsed as
+   * `bigint` to avoid precision loss, so a numeric field may be `number` or
+   * `bigint` depending on its magnitude. Use {@link resultJson} if you want the
+   * exact text and to control parsing yourself.
+   */
+  result?: unknown;
+  /**
+   * The raw JSON string of the captured `result`, or `undefined` if it was not
+   * set. Exact (no precision loss); parse it yourself if you need full control.
+   */
+  resultJson?: string;
+  /**
+   * Why result capture failed (e.g. the value was not JSON-serializable), or
+   * `undefined` when capture succeeded or no result variable was set.
+   */
+  resultError?: string;
 }
 
 /**
@@ -89,6 +110,20 @@ export class Sandbox {
  * @throws If the Python code raises an unhandled exception
  */
 export function execute(code: string): Promise<ExecuteResult>;
+
+/**
+ * Set the name of the variable captured as the structured result.
+ *
+ * After each `execute()`, the variable with this name is read from the script's
+ * namespace, JSON-serialized, and returned as `ExecuteResult.result`. Applies to
+ * the shared sandbox instance. Defaults to `"result"`.
+ *
+ * The underlying export is async; await the returned promise before calling
+ * `execute()` if you need the new name to take effect for the next execution.
+ *
+ * @param name - The variable name to capture
+ */
+export function setResultVariable(name: string): Promise<void>;
 
 /**
  * The virtual file tree backing the WASI filesystem.

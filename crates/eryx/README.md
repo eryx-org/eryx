@@ -32,6 +32,32 @@ async fn main() -> Result<(), eryx::Error> {
 }
 ```
 
+## Returning a structured result
+
+Assign a variable named `result` in the script and it is JSON-serialized and
+returned as `ExecuteResult::result` — a structured channel separate from stdout:
+
+```rust
+use eryx::Sandbox;
+
+#[tokio::main]
+async fn main() -> Result<(), eryx::Error> {
+    let sandbox = Sandbox::builder().build()?;
+
+    let result = sandbox
+        .execute(r#"result = {"answer": 42, "items": [1, 2, 3]}"#)
+        .await?;
+
+    // `result.result` is the JSON string `{"answer": 42, "items": [1, 2, 3]}`.
+    assert_eq!(result.result.as_deref(), Some(r#"{"answer": 42, "items": [1, 2, 3]}"#));
+    Ok(())
+}
+```
+
+If the value is not JSON-serializable, `result.result` is `None` and
+`result.result_error` explains why (execution still succeeds). Use
+`SandboxBuilder::with_result_variable` to capture a different variable name.
+
 ## With Callbacks
 
 Use the `#[callback]` macro for strongly-typed callbacks with automatic JSON Schema generation:

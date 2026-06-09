@@ -39,6 +39,10 @@ struct ExecuteOutput {
     stdout: String,
     #[component(name = "stderr")]
     stderr: String,
+    #[component(name = "result-json")]
+    result: String,
+    #[component(name = "result-error")]
+    result_error: String,
 }
 
 struct State {
@@ -421,9 +425,28 @@ async fn test_instantiate_component() -> Result<(), Box<dyn std::error::Error>> 
         Ok(output) => {
             println!("  OK: {output:?}");
             assert_eq!(output.stdout, "", "Assignment should produce no output");
+            assert_eq!(output.result, "", "No `result` variable -> empty result");
+            assert_eq!(output.result_error, "", "No serialization error expected");
         }
         Err(error) => {
             panic!("Test 3 failed with error: {error}");
+        }
+    }
+
+    // Test 3b: `result` variable is JSON-serialized and captured.
+    println!("Test 3b: result variable capture...");
+    let (result,) = execute
+        .call_async(&mut store, ("result = {\"k\": 5}".to_string(),))
+        .await?;
+
+    match &result {
+        Ok(output) => {
+            println!("  OK: {output:?}");
+            assert_eq!(output.result, "{\"k\": 5}", "result should be JSON");
+            assert_eq!(output.result_error, "", "No serialization error expected");
+        }
+        Err(error) => {
+            panic!("Test 3b failed with error: {error}");
         }
     }
 

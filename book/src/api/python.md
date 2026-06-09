@@ -21,3 +21,21 @@ pip install pyeryx
 ```
 
 Alternatively, see the [PyPI package page](https://pypi.org/project/pyeryx/).
+
+## Returning a structured result
+
+Assign a variable named `result` in the executed script and Eryx JSON-serializes it
+and returns it on `ExecuteResult.result` — a structured channel separate from
+`stdout`:
+
+```python
+import eryx
+
+sandbox = eryx.Sandbox()
+out = sandbox.execute('result = {"answer": 42, "items": [1, 2, 3]}')
+print(out.result)  # {'answer': 42, 'items': [1, 2, 3]}
+```
+
+If the value is not JSON-serializable, `result` is `None` and `result_error`
+explains why — execution still succeeds. Pass `result_variable="name"` to
+`Sandbox(...)` or `Session(...)` to capture a different variable name.

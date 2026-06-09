@@ -172,9 +172,34 @@ versions. These are automatically late-linked into the WebAssembly component.
 Returned by `sandbox.execute()` with execution results:
 
 - `stdout: str` - Captured standard output
+- `stderr: str` - Captured standard error
+- `result: Any` - The script's `result` variable, parsed from JSON into a native
+  Python value, or `None` if it was not set (see below)
+- `result_json: Optional[str]` - The raw JSON string of the captured `result`
+- `result_error: Optional[str]` - Why result capture failed (e.g. the value was not
+  JSON-serializable), or `None` on success
 - `duration_ms: float` - Execution time in milliseconds
 - `callback_invocations: int` - Number of callback invocations
 - `peak_memory_bytes: Optional[int]` - Peak memory usage (if available)
+- `fuel_consumed: Optional[int]` - Fuel (WASM instructions) consumed (if available)
+
+#### Returning a structured result
+
+Assign a variable named `result` in your script and it is JSON-serialized and
+returned as `ExecuteResult.result` — a structured channel separate from `stdout`:
+
+```python
+result = sandbox.execute('result = {"answer": 42, "items": [1, 2, 3]}')
+print(result.result)  # {'answer': 42, 'items': [1, 2, 3]}
+```
+
+If `result` is not JSON-serializable, `result` is `None` and `result_error`
+explains why — execution still succeeds. To capture a different variable name,
+pass `result_variable=` to `Sandbox(...)` (or `Session(...)`):
+
+```python
+sandbox = eryx.Sandbox(result_variable="output")
+```
 
 ### `ResourceLimits`
 

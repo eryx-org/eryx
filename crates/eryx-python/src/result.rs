@@ -34,19 +34,51 @@ pub struct ExecuteResult {
     /// Fuel (WASM instructions) consumed during execution (if available).
     #[pyo3(get)]
     pub fuel_consumed: Option<u64>,
+
+    /// JSON-serialized value of the script's result variable, or `None` if it
+    /// was not set. Exposed to Python as the parsed value via the `result`
+    /// property; the raw JSON string is available via `result_json`.
+    pub result_json: Option<String>,
+
+    /// Reason result capture failed (e.g. the value was not JSON-serializable),
+    /// or `None` when capture succeeded or no result variable was set.
+    #[pyo3(get)]
+    pub result_error: Option<String>,
 }
 
 #[pymethods]
 impl ExecuteResult {
+    /// The script's `result` variable, parsed from JSON into a native Python
+    /// value, or `None` if the variable was not set. See `result_error` if the
+    /// value could not be captured.
+    #[getter]
+    fn result(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        match &self.result_json {
+            Some(json) => {
+                let json_mod = py.import("json")?;
+                Ok(json_mod.call_method1("loads", (json.as_str(),))?.unbind())
+            }
+            None => Ok(py.None()),
+        }
+    }
+
+    /// The raw JSON string of the captured `result` variable, or `None`.
+    #[getter]
+    fn result_json(&self) -> Option<String> {
+        self.result_json.clone()
+    }
+
     fn __repr__(&self) -> String {
         format!(
-            "ExecuteResult(stdout={:?}, stderr={:?}, duration_ms={:.2}, callback_invocations={}, peak_memory_bytes={:?}, fuel_consumed={:?})",
+            "ExecuteResult(stdout={:?}, stderr={:?}, duration_ms={:.2}, callback_invocations={}, peak_memory_bytes={:?}, fuel_consumed={:?}, result={:?}, result_error={:?})",
             truncate_string(&self.stdout, 50),
             truncate_string(&self.stderr, 50),
             self.duration_ms,
             self.callback_invocations,
             self.peak_memory_bytes,
             self.fuel_consumed,
+            self.result_json.as_deref().map(|s| truncate_string(s, 50)),
+            self.result_error,
         )
     }
 
@@ -64,6 +96,8 @@ impl From<eryx::ExecuteResult> for ExecuteResult {
             callback_invocations: result.stats.callback_invocations,
             peak_memory_bytes: result.stats.peak_memory_bytes,
             fuel_consumed: result.stats.fuel_consumed,
+            result_json: result.result,
+            result_error: result.result_error,
         }
     }
 }
@@ -78,6 +112,8 @@ impl ExecuteResult {
             callback_invocations: output.callback_invocations,
             peak_memory_bytes: Some(output.peak_memory_bytes),
             fuel_consumed: output.fuel_consumed,
+            result_json: output.result,
+            result_error: output.result_error,
         }
     }
 }

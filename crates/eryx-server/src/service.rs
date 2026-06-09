@@ -101,6 +101,8 @@ impl crate::proto::eryx::v1::eryx_server::Eryx for EryxService {
         let persist_state = execute_req.persist_state;
         let state_snapshot = execute_req.state_snapshot;
         let files = execute_req.files;
+        let result_variable = execute_req.result_variable;
+        let scrub_result = execute_req.scrub_result;
 
         // Parse network config: present = networking enabled, absent = disabled.
         let net_config = execute_req.network_config.map(|nc| {
@@ -352,6 +354,8 @@ impl crate::proto::eryx::v1::eryx_server::Eryx for EryxService {
                     secrets_preamble,
                     scrub_stdout,
                     scrub_stderr,
+                    scrub_result,
+                    result_variable,
                 };
 
                 // Race execution against client cancellation. If the client
@@ -369,6 +373,8 @@ impl crate::proto::eryx::v1::eryx_server::Eryx for EryxService {
                             error: "execution cancelled: client disconnected".to_string(),
                             stats: None,
                             state_snapshot: Vec::new(),
+                            result: String::new(),
+                            result_error: String::new(),
                         }
                     }
                 };
@@ -503,6 +509,10 @@ struct SessionParams<'a> {
     secrets_preamble: String,
     scrub_stdout: bool,
     scrub_stderr: bool,
+    /// Enable scrubbing of the structured result/result_error. Default OFF (opt-in).
+    scrub_result: bool,
+    /// Name of the variable captured as the structured result. Empty = default "result".
+    result_variable: String,
 }
 
 /// Execute Python code using a session executor.
@@ -611,6 +621,15 @@ async fn execute_with_session(
                 );
             }
         }
+    }
+
+    // Apply a per-request result-variable override. Done *after* restore_state:
+    // although restore_state reuses the current instance today, applying the
+    // override last keeps it correct even if restore were to reset the instance.
+    if !params.result_variable.is_empty()
+        && let Err(e) = session.set_result_variable(&params.result_variable).await
+    {
+        tracing::warn!(error = %e, "failed to set result variable, using default");
     }
 
     // Set up callback handler channels (mirroring Sandbox::execute pattern).
@@ -811,6 +830,26 @@ async fn execute_with_session(
             } else {
                 output.stderr
             };
+            // The structured result is a programmatic side channel, so scrubbing is
+            // opt-in (params.scrub_result), independent of the stdout/stderr policy.
+            // When enabled, scrub both the result and its error message.
+            let (result, result_error) = if params.scrub_result {
+                (
+                    output
+                        .result
+                        .map(|r| scrub_placeholders(&r, &params.secrets))
+                        .unwrap_or_default(),
+                    output
+                        .result_error
+                        .map(|e| scrub_placeholders(&e, &params.secrets))
+                        .unwrap_or_default(),
+                )
+            } else {
+                (
+                    output.result.unwrap_or_default(),
+                    output.result_error.unwrap_or_default(),
+                )
+            };
             ExecuteResult {
                 success: true,
                 stdout,
@@ -823,6 +862,8 @@ async fn execute_with_session(
                     fuel_consumed: output.fuel_consumed.unwrap_or(0),
                 }),
                 state_snapshot: snapshot_bytes,
+                result,
+                result_error,
             }
         }
         Err(e) => {
@@ -841,6 +882,8 @@ async fn execute_with_session(
                 stats: None,
                 // Still return the snapshot — the Go service decides whether to keep it.
                 state_snapshot: snapshot_bytes,
+                result: String::new(),
+                result_error: String::new(),
             }
         }
     }

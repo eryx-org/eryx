@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { Sandbox } from "@bsull/eryx";
+import { Sandbox, setResultVariable } from "@bsull/eryx";
 
 describe("Sandbox", () => {
   const sandbox = new Sandbox();
@@ -144,5 +144,55 @@ p = Point(3, 4)
     // Can also create new instances of the restored class
     const result2 = await fresh.execute("print(Point(5, 12).distance())");
     expect(result2.stdout).toBe("13.0");
+  });
+
+  it("captures the result variable as a parsed value", async () => {
+    const result = await sandbox.execute('result = {"a": 1, "b": [2, 3]}');
+    expect(result.result).toEqual({ a: 1, b: [2, 3] });
+    expect(result.resultError).toBeUndefined();
+  });
+
+  it("leaves result undefined when not set", async () => {
+    // The result variable is consumed after each execution, so a subsequent run
+    // that doesn't set it reports undefined even though state otherwise persists.
+    const result = await sandbox.execute('print("no result here")');
+    expect(result.result).toBeUndefined();
+    expect(result.resultError).toBeUndefined();
+  });
+
+  it("reports an error for a non-serializable result", async () => {
+    const result = await sandbox.execute("result = object()");
+    expect(result.result).toBeUndefined();
+    expect(result.resultError).toContain("not JSON-serializable");
+  });
+
+  it("honors a custom result variable name", async () => {
+    await setResultVariable("out");
+    try {
+      const result = await sandbox.execute("out = 42\nresult = 1");
+      expect(result.result).toBe(42);
+    } finally {
+      await setResultVariable("result");
+    }
+  });
+
+  it("exposes the raw result JSON alongside the parsed value", async () => {
+    const result = await sandbox.execute('result = {"a": 1}');
+    expect(result.result).toEqual({ a: 1 });
+    expect(result.resultJson).toBe('{"a": 1}');
+  });
+
+  it("parses large integers as BigInt without precision loss", async () => {
+    // 2**63 exceeds Number.MAX_SAFE_INTEGER, so a plain JSON.parse would round it.
+    const result = await sandbox.execute("result = 2 ** 63");
+    expect(result.result).toBe(9223372036854775808n);
+    // The raw JSON is exact regardless of how .result is typed.
+    expect(result.resultJson).toBe("9223372036854775808");
+  });
+
+  it("keeps safe-range integers as plain numbers", async () => {
+    const result = await sandbox.execute("result = 42");
+    expect(result.result).toBe(42);
+    expect(typeof result.result).toBe("number");
   });
 });

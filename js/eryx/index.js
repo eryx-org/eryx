@@ -20,6 +20,7 @@ import {
   restoreState as _restoreState,
   clearState as _clearState,
   finalizePreinit as _finalizePreinit,
+  setResultVariable as _setResultVariable,
 } from "./eryx-sandbox.js";
 
 // Import filesystem shim to populate with Python stdlib
@@ -62,7 +63,75 @@ export {
  * @typedef {Object} ExecuteResult
  * @property {string} stdout - Captured standard output
  * @property {string} stderr - Captured standard error
+ * @property {*} [result] - The script's `result` variable, parsed from JSON, or
+ *   undefined if it was not set. Integers outside the safe range are parsed as
+ *   BigInt to avoid precision loss (so a numeric field may be a number or a
+ *   bigint depending on magnitude). See {@link setResultVariable} to change the name.
+ * @property {string} [resultJson] - The raw JSON string of the captured result, or
+ *   undefined if not set. Use this when you need exact values (e.g. large integers)
+ *   and want to parse them yourself.
+ * @property {string} [resultError] - Why result capture failed (e.g. the value was
+ *   not JSON-serializable), or undefined on success.
  */
+
+/**
+ * Parse the captured result JSON, promoting integers outside the IEEE-754 safe
+ * range to BigInt so they round-trip without precision loss.
+ *
+ * Uses the ES2023 reviver `context.source` (the raw source text of the value) to
+ * distinguish a true integer literal from a float. When the runtime doesn't
+ * provide it (older engines), falls back to a plain (lossy) parse.
+ * @param {string} json
+ * @returns {*}
+ */
+function _parseResultJson(json) {
+  return JSON.parse(json, (_key, value, context) => {
+    if (
+      typeof value === "number" &&
+      Number.isInteger(value) &&
+      !Number.isSafeInteger(value) &&
+      context &&
+      typeof context.source === "string" &&
+      /^-?\d+$/.test(context.source)
+    ) {
+      return BigInt(context.source);
+    }
+    return value;
+  });
+}
+
+/**
+ * Map a raw jco execute-output record into the public ExecuteResult shape,
+ * parsing the captured result variable from JSON.
+ * @param {Object} output
+ * @returns {ExecuteResult}
+ */
+function _toResult(output) {
+  return {
+    stdout: output.stdout,
+    stderr: output.stderr,
+    result: output.resultJson ? _parseResultJson(output.resultJson) : undefined,
+    resultJson: output.resultJson || undefined,
+    resultError: output.resultError || undefined,
+  };
+}
+
+/**
+ * Set the name of the variable captured as the structured result.
+ *
+ * After each execute(), the variable with this name is read from the script's
+ * namespace, JSON-serialized, and returned as `ExecuteResult.result`. Applies to
+ * the shared sandbox instance. Defaults to "result".
+ *
+ * The underlying export is async; await the returned promise before calling
+ * execute() if you need the new name to take effect for the next execution.
+ *
+ * @param {string} name - The variable name to capture
+ * @returns {Promise<void>}
+ */
+export function setResultVariable(name) {
+  return _setResultVariable(name);
+}
 
 /**
  * A Python sandbox powered by WebAssembly.
@@ -103,10 +172,7 @@ export class Sandbox {
     if (output.tag === "error") {
       throw new Error(output.val);
     }
-    return {
-      stdout: output.stdout,
-      stderr: output.stderr,
-    };
+    return _toResult(output);
   }
 
   /**
@@ -169,8 +235,5 @@ export async function execute(code) {
   if (output.tag === "error") {
     throw new Error(output.val);
   }
-  return {
-    stdout: output.stdout,
-    stderr: output.stderr,
-  };
+  return _toResult(output);
 }

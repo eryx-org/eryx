@@ -522,6 +522,7 @@ const EXPORT_SNAPSHOT_STATE: usize = 1;
 const EXPORT_RESTORE_STATE: usize = 2;
 const EXPORT_CLEAR_STATE: usize = 3;
 const EXPORT_FINALIZE_PREINIT: usize = 4;
+const EXPORT_SET_RESULT_VARIABLE: usize = 5;
 
 // =============================================================================
 // Invoke callback mechanism
@@ -1445,11 +1446,13 @@ fn handle_export(wit: Wit, func_index: usize, cx: &mut EryxCall) -> HandleExport
 
             match result {
                 python::ExecuteResult::Complete(output) => {
-                    // WIT defines: execute-output { stdout, stderr }
+                    // WIT defines: execute-output { stdout, stderr, result, result-error }
                     // Push as a Record in definition order; pop_record handles field extraction
                     cx.stack.push(Value::Record(vec![
                         Value::String(output.stdout),
                         Value::String(output.stderr),
+                        Value::String(output.result),
+                        Value::String(output.result_error),
                     ]));
                     cx.stack.push(Value::ResultDiscriminant(true));
                     HandleExportResult::Complete
@@ -1506,6 +1509,14 @@ fn handle_export(wit: Wit, func_index: usize, cx: &mut EryxCall) -> HandleExport
             // finalize-preinit() - no return value
             // Reset WASI state after all imports are done during pre-init
             python::finalize_preinit();
+            HandleExportResult::Complete
+        }
+        EXPORT_SET_RESULT_VARIABLE => {
+            // set-result-variable(name: string) - no return value
+            let name = cx.pop_string().to_string();
+            unsafe {
+                python::set_result_variable_name(&name);
+            }
             HandleExportResult::Complete
         }
         _ => {
@@ -1647,6 +1658,10 @@ impl Interpreter for EryxInterpreter {
 
                 // Check if there was an uncaught Python exception during the callback
                 if let Some(error) = python::take_last_callback_error() {
+                    // Consume the result variable so a value set before the exception
+                    // can't leak into a later successful run (mirrors the sync error
+                    // path in execute_python).
+                    unsafe { python::discard_result() };
                     // Push error result
                     cx.push_string(error);
                     cx.stack.push(Value::ResultDiscriminant(false));
@@ -1659,11 +1674,16 @@ impl Interpreter for EryxInterpreter {
                         python::get_python_variable_string("_eryx_errors").unwrap_or_default()
                     };
 
-                    // WIT defines: execute-output { stdout, stderr }
+                    // Capture the user's result variable now that async execution finished.
+                    let (result, result_error) = unsafe { python::capture_result() };
+
+                    // WIT defines: execute-output { stdout, stderr, result, result-error }
                     // Push as a Record in definition order; pop_record handles field extraction
                     cx.stack.push(Value::Record(vec![
                         Value::String(stdout.trim_end_matches('\n').to_string()),
                         Value::String(stderr.trim_end_matches('\n').to_string()),
+                        Value::String(result),
+                        Value::String(result_error),
                     ]));
                     cx.stack.push(Value::ResultDiscriminant(true));
                 }

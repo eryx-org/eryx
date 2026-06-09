@@ -31,9 +31,25 @@ console.log(result.stdout);  // "43\n"
 console.log(result.stderr);  // ""
 ```
 
-**Returns:** `ExecuteResult` with `stdout` and `stderr` string fields.
+**Returns:** `ExecuteResult` with `stdout` and `stderr` string fields, plus an
+optional `result` (the script's `result` variable parsed from JSON) and
+`resultError` (set when the value could not be JSON-serialized).
 
 **Throws:** If the Python code raises an unhandled exception.
+
+### Returning a structured result
+
+Assign a variable named `result` and it is JSON-serialized and returned as
+`result.result` — a structured channel separate from `stdout`:
+
+```javascript
+const result = await sandbox.execute('result = {"answer": 42, "items": [1, 2, 3]}');
+console.log(result.result); // { answer: 42, items: [ 1, 2, 3 ] }
+```
+
+If the value is not JSON-serializable, `result.result` is `undefined` and
+`result.resultError` explains why. Use `setResultVariable("name")` to capture a
+different variable name.
 
 ### `snapshotState(): Promise<Uint8Array>`
 
