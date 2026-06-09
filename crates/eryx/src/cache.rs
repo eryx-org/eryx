@@ -61,6 +61,7 @@ use crate::wasm::{ExecutorState, SandboxPre};
 
 /// Error type for cache operations.
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum CacheError {
     /// I/O error when reading or writing cache files.
     #[error("I/O error: {0}")]

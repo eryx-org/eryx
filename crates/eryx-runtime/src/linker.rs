@@ -55,6 +55,7 @@ impl NativeExtension {
 
 /// Metadata about a Python wheel.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct WheelInfo {
     /// Package name (e.g., "numpy")
     pub name: String,
@@ -150,6 +151,7 @@ pub fn parse_wheel(wheel_bytes: &[u8]) -> Result<WheelInfo, WheelParseError> {
 
 /// Errors that can occur when parsing a wheel.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub enum WheelParseError {
     /// The wheel is not a valid ZIP file.
     InvalidZip(String),
@@ -335,6 +337,7 @@ fn decompress_zstd(data: &[u8]) -> Result<Vec<u8>, LinkError> {
 
 /// Errors that can occur during linking.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub enum LinkError {
     /// Failed to add a base library.
     Library(String, String),

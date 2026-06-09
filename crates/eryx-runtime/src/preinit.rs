@@ -779,6 +779,7 @@ async fn call_finalize_preinit(store: &mut Store<PreInitCtx>, instance: &Instanc
 
 /// Errors that can occur during pre-initialization.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub enum PreInitError {
     /// Failed to create wasmtime engine.
     Engine(String),

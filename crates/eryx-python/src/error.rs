@@ -65,6 +65,9 @@ pub fn eryx_error_to_py(err: eryx::Error) -> PyErr {
             "execution ran out of fuel after {consumed} instructions (limit: {limit})"
         )),
         eryx::Error::Io(e) => PyRuntimeError::new_err(e.to_string()),
+        // `eryx::Error` is `#[non_exhaustive]`; map any future variants to a
+        // generic Eryx error rather than failing to compile.
+        other => EryxError::new_err(other.to_string()),
     }
 }
 

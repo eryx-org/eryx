@@ -178,6 +178,7 @@ impl Default for Schema {
 
 /// Errors that can occur when working with schemas.
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum SchemaError {
     /// The provided JSON value is not a valid JSON Schema.
     #[error("invalid schema: {0}")]

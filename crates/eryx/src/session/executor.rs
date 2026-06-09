@@ -92,6 +92,7 @@ pub struct PythonStateSnapshot {
 
 /// Metadata about a state snapshot.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct SnapshotMetadata {
     /// Unix timestamp (milliseconds) when the snapshot was captured.
     pub timestamp_ms: u64,

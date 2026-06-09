@@ -175,6 +175,7 @@ impl NetConfig {
 
 /// Errors that can occur during TCP operations.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub enum TcpError {
     /// Connection was refused by the remote host.
     ConnectionRefused,
@@ -214,6 +215,7 @@ impl std::error::Error for TcpError {}
 
 /// Errors that can occur during TLS operations.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub enum TlsError {
     /// Error from the underlying TCP layer.
     Tcp(TcpError),
