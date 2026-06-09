@@ -69,6 +69,10 @@ name = "with_tracing"
 required-features = ["embedded"]
 
 [[example]]
+name = "result_capture"
+required-features = ["embedded"]
+
+[[example]]
 name = "numpy_native"
 required-features = ["native-extensions", "embedded"]
 
