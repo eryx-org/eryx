@@ -120,6 +120,7 @@ impl Default for PoolConfig {
 
 /// Error type for pool operations.
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum PoolError {
     /// Pool has reached maximum capacity and no sandboxes are available.
     #[error("pool exhausted: all {0} sandboxes are in use")]
@@ -150,6 +151,7 @@ impl From<Error> for PoolError {
 
 /// Statistics about pool usage.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct PoolStats {
     /// Total number of sandboxes (in use + available).
     pub total: usize,

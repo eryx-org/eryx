@@ -4,6 +4,7 @@ use crate::callback::CallbackError;
 
 /// The main error type for Eryx operations.
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum Error {
     /// Error during sandbox initialization.
     #[error("initialization failed: {0}")]

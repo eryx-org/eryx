@@ -150,6 +150,7 @@ pub enum NetRequest {
 
 /// Callback info for introspection (internal type to avoid conflicts with generated code).
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct HostCallbackInfo {
     /// Unique name for this callback.
     pub name: String,

@@ -7,6 +7,7 @@ pub type VfsResult<T> = Result<T, VfsError>;
 
 /// Errors that can occur during VFS operations.
 #[derive(Debug, Error)]
+#[non_exhaustive]
 pub enum VfsError {
     /// File or directory not found.
     #[error("not found: {0}")]

@@ -286,6 +286,7 @@ impl<T: TypedCallback> Callback for T {
 
 /// Errors that can occur during callback execution.
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum CallbackError {
     /// The provided arguments don't match the expected schema.
     #[error("invalid arguments: {0}")]

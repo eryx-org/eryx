@@ -2306,6 +2306,7 @@ impl SandboxBuilder<state::Has, state::Has> {
 
 /// Result of executing Python code in the sandbox.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct ExecuteResult {
     /// Complete stdout output (also streamed via `OutputHandler` if configured).
     pub stdout: String,
@@ -2330,6 +2331,7 @@ pub struct ExecuteResult {
 
 /// Statistics about sandbox execution.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct ExecuteStats {
     /// Total execution time.
     pub duration: Duration,

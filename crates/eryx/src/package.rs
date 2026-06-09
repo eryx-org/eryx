@@ -60,6 +60,7 @@ impl PackageFormat {
 
 /// An extracted package ready for use in a sandbox.
 #[derive(Debug)]
+#[non_exhaustive]
 pub struct ExtractedPackage {
     /// Package name (e.g., "numpy").
     pub name: String,
@@ -78,6 +79,7 @@ pub struct ExtractedPackage {
 
 /// A native extension (.so file) found in a package.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct NativeExtension {
     /// Relative path within the package (e.g., "numpy/core/_multiarray_umath.cpython-314-wasm32-wasi.so").
     /// This will be prefixed with the mount path when building the sandbox.
