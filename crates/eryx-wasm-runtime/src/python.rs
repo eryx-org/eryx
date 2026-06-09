@@ -435,6 +435,22 @@ pub unsafe fn capture_result() -> (String, String) {
     }
 }
 
+/// Consume the user's result variable without capturing it.
+///
+/// Used on the execution error path so a value assigned before an exception can't
+/// leak into a later successful run of a persistent session. Runs
+/// `_eryx_discard_result()` in the guest. Never fails.
+///
+/// # Safety
+/// Must be called with the Python interpreter initialized.
+pub unsafe fn discard_result() {
+    unsafe {
+        if PyRun_SimpleString(c"_eryx_discard_result()".as_ptr()) != 0 {
+            PyErr_Clear();
+        }
+    }
+}
+
 /// Store the result of an async import for Python's promise_get_result to read.
 ///
 /// This is called from `export_async_callback` after lifting the result from the buffer.
@@ -1505,6 +1521,21 @@ def _eryx_capture_result():
                 'result is not JSON-serializable: ' + type(value).__name__
                 + ' (' + type(e).__name__ + ')'
             )
+
+def _eryx_discard_result():
+    '''Consume the result variable without capturing it.
+
+    Called on the execution error path: when user code raises, _eryx_capture_result()
+    never runs, so the result variable would otherwise linger in the user namespace
+    and leak into the *next* successful run of a persistent session. Popping it here
+    preserves the per-execution guarantee (an erroring run reports no result, and the
+    stale value is gone). Also resets the capture slots so a prior run's value is not
+    re-reported. Never raises.
+    '''
+    global _eryx_result, _eryx_result_error
+    _eryx_result = ''
+    _eryx_result_error = ''
+    _eryx_user_globals.pop(_eryx_result_var_name, None)
 "#;
 
 // =============================================================================
@@ -2818,7 +2849,15 @@ pub fn execute_python(code: &str) -> ExecuteResult {
             let _ = PyRun_SimpleString(c"_eryx_output, _eryx_errors = _eryx_get_output()".as_ptr());
 
             let stderr_output = get_python_variable_string("_eryx_errors").unwrap_or_default();
+            // get_last_error_message consumes the pending exception, so do this
+            // before discarding the result (PyRun_SimpleString is a no-op while an
+            // exception is pending).
             let exception_msg = get_last_error_message();
+
+            // Consume the result variable so a value set before the exception can't
+            // leak into a later successful run of a persistent session. Result
+            // capture only runs on the success path, so discard explicitly here.
+            let _ = PyRun_SimpleString(c"_eryx_discard_result()".as_ptr());
 
             let error = if !stderr_output.is_empty() && exception_msg != "Unknown error" {
                 format!("{stderr_output}\n{exception_msg}")

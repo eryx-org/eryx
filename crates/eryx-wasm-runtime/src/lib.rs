@@ -1658,6 +1658,10 @@ impl Interpreter for EryxInterpreter {
 
                 // Check if there was an uncaught Python exception during the callback
                 if let Some(error) = python::take_last_callback_error() {
+                    // Consume the result variable so a value set before the exception
+                    // can't leak into a later successful run (mirrors the sync error
+                    // path in execute_python).
+                    unsafe { python::discard_result() };
                     // Push error result
                     cx.push_string(error);
                     cx.stack.push(Value::ResultDiscriminant(false));
