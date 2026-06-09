@@ -456,6 +456,7 @@ class Sandbox:
         secrets: Optional[dict[str, SecretDict]] = None,
         scrub_stdout: Optional[bool] = None,
         scrub_stderr: Optional[bool] = None,
+        scrub_result: Optional[bool] = None,
         scrub_files: Optional[bool] = None,
         volumes: Optional[Sequence[tuple[str, str, bool]]] = None,
         on_stdout: Optional[Callable[[str], None]] = None,
@@ -482,6 +483,10 @@ class Sandbox:
                 Defaults to True when secrets are provided.
             scrub_stderr: Whether to scrub secret placeholders from stderr.
                 Defaults to True when secrets are provided.
+            scrub_result: Whether to scrub secret placeholders from the structured
+                ``result`` (and ``result_error``). Defaults to False even when secrets
+                are provided: the result is a programmatic side channel, so scrubbing
+                is opt-in.
             scrub_files: Whether to scrub secret placeholders from file writes.
                 Defaults to True when secrets are provided.
             on_stdout: Optional callback for streaming stdout output.

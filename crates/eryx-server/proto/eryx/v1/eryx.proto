@@ -88,6 +88,12 @@ message ExecuteRequest {
   // Name of the variable captured from the script and returned in
   // ExecuteResult.result (JSON-serialized). Empty defaults to "result".
   string result_variable = 12;
+
+  // Enable placeholder scrubbing on the structured result (and result_error).
+  // Default: OFF. Unlike stdout/stderr (which default to scrubbing ON via the
+  // disable_* fields above), the result is a programmatic side channel, so
+  // scrubbing is opt-in.
+  bool scrub_result = 13;
 }
 
 // Kind of supporting file — determines where it's placed in the sandbox.

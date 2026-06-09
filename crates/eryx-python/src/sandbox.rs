@@ -139,7 +139,7 @@ impl Sandbox {
     ///     )
     ///     sandbox = factory.create_sandbox()
     #[new]
-    #[pyo3(signature = (*, resource_limits=None, network=None, callbacks=None, mcp=None, secrets=None, scrub_stdout=None, scrub_stderr=None, scrub_files=None, volumes=None, on_stdout=None, on_stderr=None, result_variable=None))]
+    #[pyo3(signature = (*, resource_limits=None, network=None, callbacks=None, mcp=None, secrets=None, scrub_stdout=None, scrub_stderr=None, scrub_result=None, scrub_files=None, volumes=None, on_stdout=None, on_stderr=None, result_variable=None))]
     #[allow(clippy::too_many_arguments)]
     fn new(
         py: Python<'_>,
@@ -150,6 +150,7 @@ impl Sandbox {
         secrets: Option<Bound<'_, PyDict>>,
         scrub_stdout: Option<bool>,
         scrub_stderr: Option<bool>,
+        scrub_result: Option<bool>,
         scrub_files: Option<bool>,
         volumes: Option<Vec<(String, String, bool)>>,
         on_stdout: Option<Py<PyAny>>,
@@ -209,6 +210,9 @@ impl Sandbox {
         builder = builder.scrub_stdout(scrub_stdout.unwrap_or(has_secrets));
         builder = builder.scrub_stderr(scrub_stderr.unwrap_or(has_secrets));
         builder = builder.scrub_files(scrub_files.unwrap_or(has_secrets));
+        // The structured result scrubbing is opt-in (default off) even when secrets
+        // are present: it's a programmatic side channel, not human/LLM-facing output.
+        builder = builder.scrub_result(scrub_result.unwrap_or(false));
 
         // Apply volume mounts if provided
         if let Some(vols) = volumes {

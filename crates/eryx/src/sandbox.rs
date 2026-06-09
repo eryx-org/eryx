@@ -124,6 +124,10 @@ pub struct Sandbox {
     scrub_stdout: crate::secrets::OutputScrubPolicy,
     /// Stderr scrubbing policy.
     scrub_stderr: crate::secrets::OutputScrubPolicy,
+    /// Whether to scrub secret placeholders from the structured `result` (and
+    /// `result_error`) channel. Defaults to `false`: unlike stdout/stderr, the
+    /// result is a programmatic side channel, so scrubbing is opt-in.
+    scrub_result: bool,
     /// File scrubbing policy for VFS integration.
     scrub_files: crate::secrets::FileScrubPolicy,
     /// Host filesystem volume mounts.
@@ -391,15 +395,20 @@ impl Sandbox {
                     output.stderr
                 };
 
-                // The structured result is an output channel too: scrub secret
-                // placeholders from it under the same policy as stdout.
-                let result = match output.result {
-                    Some(r)
-                        if matches!(self.scrub_stdout, crate::secrets::OutputScrubPolicy::All) =>
-                    {
-                        Some(crate::secrets::scrub_placeholders(&r, &self.secrets))
-                    }
-                    other => other,
+                // The structured result is an output channel too, but scrubbing is
+                // opt-in (it's a programmatic side channel). When enabled, scrub both
+                // the result and its error message.
+                let (result, result_error) = if self.scrub_result {
+                    (
+                        output
+                            .result
+                            .map(|r| crate::secrets::scrub_placeholders(&r, &self.secrets)),
+                        output
+                            .result_error
+                            .map(|e| crate::secrets::scrub_placeholders(&e, &self.secrets)),
+                    )
+                } else {
+                    (output.result, output.result_error)
                 };
 
                 tracing::info!(
@@ -415,7 +424,7 @@ impl Sandbox {
                     stderr,
                     trace: trace_events,
                     result,
-                    result_error: output.result_error,
+                    result_error,
                     stats: ExecuteStats {
                         duration,
                         callback_invocations,
@@ -490,6 +499,13 @@ impl Sandbox {
     #[must_use]
     pub(crate) fn scrub_stderr(&self) -> bool {
         matches!(self.scrub_stderr, crate::secrets::OutputScrubPolicy::All)
+    }
+
+    /// Whether the structured `result` channel should be scrubbed of secret
+    /// placeholders. Opt-in (defaults to `false`).
+    #[must_use]
+    pub(crate) fn scrub_result(&self) -> bool {
+        self.scrub_result
     }
 
     /// Get a reference to the Python executor.
@@ -604,6 +620,7 @@ impl Sandbox {
         let secrets = self.secrets.clone();
         let scrub_stdout = self.scrub_stdout.clone();
         let scrub_stderr = self.scrub_stderr.clone();
+        let scrub_result = self.scrub_result;
         let scrub_files = self.scrub_files.clone();
         #[cfg(feature = "vfs")]
         let volumes = self.volumes.clone();
@@ -625,6 +642,7 @@ impl Sandbox {
                 secrets,
                 scrub_stdout,
                 scrub_stderr,
+                scrub_result,
                 scrub_files,
                 #[cfg(feature = "vfs")]
                 volumes,
@@ -658,6 +676,7 @@ impl Sandbox {
         secrets: HashMap<String, crate::secrets::SecretConfig>,
         scrub_stdout: crate::secrets::OutputScrubPolicy,
         scrub_stderr: crate::secrets::OutputScrubPolicy,
+        scrub_result: bool,
         scrub_files: crate::secrets::FileScrubPolicy,
         #[cfg(feature = "vfs")] volumes: Vec<crate::session::VolumeMount>,
         #[cfg(feature = "vfs")] vfs_storage_override: Option<
@@ -844,12 +863,19 @@ impl Sandbox {
                     output.stderr
                 };
 
-                // Scrub the structured result under the same policy as stdout.
-                let result = match output.result {
-                    Some(r) if matches!(scrub_stdout, crate::secrets::OutputScrubPolicy::All) => {
-                        Some(crate::secrets::scrub_placeholders(&r, &secrets))
-                    }
-                    other => other,
+                // The structured result is scrubbed only when explicitly opted in
+                // (it's a programmatic side channel). Scrub the error message too.
+                let (result, result_error) = if scrub_result {
+                    (
+                        output
+                            .result
+                            .map(|r| crate::secrets::scrub_placeholders(&r, &secrets)),
+                        output
+                            .result_error
+                            .map(|e| crate::secrets::scrub_placeholders(&e, &secrets)),
+                    )
+                } else {
+                    (output.result, output.result_error)
                 };
 
                 Ok(ExecuteResult {
@@ -857,7 +883,7 @@ impl Sandbox {
                     stderr,
                     trace: trace_events,
                     result,
-                    result_error: output.result_error,
+                    result_error,
                     stats: ExecuteStats {
                         duration,
                         callback_invocations,
@@ -1025,6 +1051,10 @@ pub struct SandboxBuilder<Runtime = state::Needs, Stdlib = state::Needs> {
     scrub_stdout: crate::secrets::OutputScrubPolicy,
     /// Stderr scrubbing policy.
     scrub_stderr: crate::secrets::OutputScrubPolicy,
+    /// Whether to scrub secret placeholders from the structured `result` (and
+    /// `result_error`) channel. Defaults to `false`: unlike stdout/stderr, the
+    /// result is a programmatic side channel, so scrubbing is opt-in.
+    scrub_result: bool,
     /// File scrubbing policy for VFS integration.
     scrub_files: crate::secrets::FileScrubPolicy,
     /// Host filesystem volume mounts.
@@ -1088,6 +1118,7 @@ impl SandboxBuilder<state::Needs, state::Needs> {
             secrets: HashMap::new(),
             scrub_stdout: crate::secrets::OutputScrubPolicy::default(),
             scrub_stderr: crate::secrets::OutputScrubPolicy::default(),
+            scrub_result: false,
             scrub_files: crate::secrets::FileScrubPolicy::default(),
             #[cfg(feature = "vfs")]
             volumes: Vec::new(),
@@ -1123,6 +1154,7 @@ impl SandboxBuilder<state::Needs, state::Needs> {
             secrets: HashMap::new(),
             scrub_stdout: crate::secrets::OutputScrubPolicy::default(),
             scrub_stderr: crate::secrets::OutputScrubPolicy::default(),
+            scrub_result: false,
             scrub_files: crate::secrets::FileScrubPolicy::default(),
             #[cfg(feature = "vfs")]
             volumes: Vec::new(),
@@ -1158,6 +1190,7 @@ impl<R, S> SandboxBuilder<R, S> {
             secrets: self.secrets,
             scrub_stdout: self.scrub_stdout,
             scrub_stderr: self.scrub_stderr,
+            scrub_result: self.scrub_result,
             scrub_files: self.scrub_files,
             #[cfg(feature = "vfs")]
             volumes: self.volumes,
@@ -1723,6 +1756,19 @@ impl<R, S> SandboxBuilder<R, S> {
         self
     }
 
+    /// Control scrubbing of the structured `result` channel (default: `false`).
+    ///
+    /// Unlike stdout/stderr — which are scrubbed by default because they tend to be
+    /// surfaced to humans/LLMs — the `result` (and `result_error`) field is a
+    /// programmatic side channel, so secret-placeholder scrubbing is opt-in. When
+    /// enabled, placeholders in [`ExecuteResult::result`] and
+    /// [`ExecuteResult::result_error`] are replaced with `[REDACTED]`.
+    #[must_use]
+    pub fn scrub_result(mut self, enabled: bool) -> Self {
+        self.scrub_result = enabled;
+        self
+    }
+
     /// Control file scrubbing (default: All when secrets configured).
     ///
     /// Accepts `bool` or `FileScrubPolicy` for forward compatibility.
@@ -2091,6 +2137,7 @@ impl SandboxBuilder<state::Has, state::Has> {
             secrets: self.secrets,
             scrub_stdout: self.scrub_stdout,
             scrub_stderr: self.scrub_stderr,
+            scrub_result: self.scrub_result,
             scrub_files: self.scrub_files,
             #[cfg(feature = "vfs")]
             volumes: self.volumes,

@@ -102,6 +102,7 @@ impl crate::proto::eryx::v1::eryx_server::Eryx for EryxService {
         let state_snapshot = execute_req.state_snapshot;
         let files = execute_req.files;
         let result_variable = execute_req.result_variable;
+        let scrub_result = execute_req.scrub_result;
 
         // Parse network config: present = networking enabled, absent = disabled.
         let net_config = execute_req.network_config.map(|nc| {
@@ -353,6 +354,7 @@ impl crate::proto::eryx::v1::eryx_server::Eryx for EryxService {
                     secrets_preamble,
                     scrub_stdout,
                     scrub_stderr,
+                    scrub_result,
                     result_variable,
                 };
 
@@ -507,6 +509,8 @@ struct SessionParams<'a> {
     secrets_preamble: String,
     scrub_stdout: bool,
     scrub_stderr: bool,
+    /// Enable scrubbing of the structured result/result_error. Default OFF (opt-in).
+    scrub_result: bool,
     /// Name of the variable captured as the structured result. Empty = default "result".
     result_variable: String,
 }
@@ -826,11 +830,25 @@ async fn execute_with_session(
             } else {
                 output.stderr
             };
-            // The structured result is an output channel too: scrub it under the
-            // same policy as stdout so secret placeholders don't leak through it.
-            let result = match output.result {
-                Some(r) if params.scrub_stdout => scrub_placeholders(&r, &params.secrets),
-                other => other.unwrap_or_default(),
+            // The structured result is a programmatic side channel, so scrubbing is
+            // opt-in (params.scrub_result), independent of the stdout/stderr policy.
+            // When enabled, scrub both the result and its error message.
+            let (result, result_error) = if params.scrub_result {
+                (
+                    output
+                        .result
+                        .map(|r| scrub_placeholders(&r, &params.secrets))
+                        .unwrap_or_default(),
+                    output
+                        .result_error
+                        .map(|e| scrub_placeholders(&e, &params.secrets))
+                        .unwrap_or_default(),
+                )
+            } else {
+                (
+                    output.result.unwrap_or_default(),
+                    output.result_error.unwrap_or_default(),
+                )
             };
             ExecuteResult {
                 success: true,
@@ -845,7 +863,7 @@ async fn execute_with_session(
                 }),
                 state_snapshot: snapshot_bytes,
                 result,
-                result_error: output.result_error.unwrap_or_default(),
+                result_error,
             }
         }
         Err(e) => {
