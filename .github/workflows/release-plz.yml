@@ -56,6 +56,21 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
+      # release-plz runs cargo-semver-checks with its default (all-features)
+      # heuristic, which enables the `embedded` feature. That feature's build
+      # script requires a `runtime.cwasm`; without one it panics, the semver
+      # check silently no-ops, and API-breaking changes (e.g. new public struct
+      # fields) slip through as a patch bump instead of a minor one.
+      #
+      # For the semver check the cwasm is only embedded as bytes for rustdoc and
+      # is never deserialized or executed, so an empty placeholder is sufficient
+      # (identical to how the crate's own build.rs handles docs.rs builds). This
+      # avoids building the real WASM runtime here just to satisfy the check.
+      - name: Provide placeholder runtime.cwasm for cargo-semver-checks
+        run: |
+          : > "$RUNNER_TEMP/runtime.cwasm"
+          echo "ERYX_RUNTIME_CWASM=$RUNNER_TEMP/runtime.cwasm" >> "$GITHUB_ENV"
+
       - name: Run release-plz
         uses: release-plz/action@v0.5
         with:
