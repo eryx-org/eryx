@@ -175,4 +175,24 @@ p = Point(3, 4)
       await setResultVariable("result");
     }
   });
+
+  it("exposes the raw result JSON alongside the parsed value", async () => {
+    const result = await sandbox.execute('result = {"a": 1}');
+    expect(result.result).toEqual({ a: 1 });
+    expect(result.resultJson).toBe('{"a": 1}');
+  });
+
+  it("parses large integers as BigInt without precision loss", async () => {
+    // 2**63 exceeds Number.MAX_SAFE_INTEGER, so a plain JSON.parse would round it.
+    const result = await sandbox.execute("result = 2 ** 63");
+    expect(result.result).toBe(9223372036854775808n);
+    // The raw JSON is exact regardless of how .result is typed.
+    expect(result.resultJson).toBe("9223372036854775808");
+  });
+
+  it("keeps safe-range integers as plain numbers", async () => {
+    const result = await sandbox.execute("result = 42");
+    expect(result.result).toBe(42);
+    expect(typeof result.result).toBe("number");
+  });
 });

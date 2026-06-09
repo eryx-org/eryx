@@ -23,8 +23,18 @@ export interface ExecuteResult {
    * The script's `result` variable, parsed from JSON into a native value, or
    * `undefined` if it was not set. The captured variable name defaults to
    * `result` and can be changed via {@link setResultVariable}.
+   *
+   * Integers outside the IEEE-754 safe range (|n| > 2^53 - 1) are parsed as
+   * `bigint` to avoid precision loss, so a numeric field may be `number` or
+   * `bigint` depending on its magnitude. Use {@link resultJson} if you want the
+   * exact text and to control parsing yourself.
    */
   result?: unknown;
+  /**
+   * The raw JSON string of the captured `result`, or `undefined` if it was not
+   * set. Exact (no precision loss); parse it yourself if you need full control.
+   */
+  resultJson?: string;
   /**
    * Why result capture failed (e.g. the value was not JSON-serializable), or
    * `undefined` when capture succeeded or no result variable was set.
