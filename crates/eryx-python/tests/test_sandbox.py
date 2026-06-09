@@ -790,3 +790,52 @@ class TestResultCapture:
         sandbox = eryx.Sandbox(result_variable="out")
         result = sandbox.execute("out = 42\nresult = 1")
         assert result.result == 42
+
+    def test_falsy_result_captured(self):
+        """Falsy values are captured, not mistaken for an absent result."""
+        sandbox = eryx.Sandbox()
+        assert sandbox.execute("result = 0").result == 0
+        assert sandbox.execute("result = False").result is False
+        assert sandbox.execute("result = []").result == []
+
+    def test_bytes_result_reports_error(self):
+        """bytes is not JSON-serializable -> result_error, execution succeeds."""
+        sandbox = eryx.Sandbox()
+        result = sandbox.execute("result = b'bytes'")
+        assert result.result is None
+        assert result.result_error is not None
+        assert "not JSON-serializable" in result.result_error
+
+    def test_result_consumed_on_error_does_not_leak(self):
+        """A result set before an exception must not leak into a later run."""
+        sandbox = eryx.Sandbox()
+        with pytest.raises(eryx.ExecutionError):
+            sandbox.execute("result = 42\nraise ValueError('boom')")
+        # State persists across calls, but the discarded result must be gone.
+        after = sandbox.execute("print('after error')")
+        assert after.result is None
+
+    def test_scrub_result_redacts_placeholder(self):
+        """With scrub_result=True, secret placeholders are redacted from result."""
+        sandbox = eryx.Sandbox(
+            secrets={"TOKEN": {"value": "ghp-real-token"}},
+            scrub_result=True,
+        )
+        result = sandbox.execute(
+            'import os\nresult = {"t": os.environ.get("TOKEN", "")}'
+        )
+        assert "[REDACTED]" in result.result_json
+        assert "ERYX_SECRET_PLACEHOLDER_" not in result.result_json
+        assert "ghp-real-token" not in result.result_json
+
+    def test_result_not_scrubbed_by_default(self):
+        """Result scrubbing is off by default; the real secret still never appears."""
+        sandbox = eryx.Sandbox(
+            secrets={"TOKEN": {"value": "ghp-real-token"}},
+        )
+        result = sandbox.execute(
+            'import os\nresult = {"t": os.environ.get("TOKEN", "")}'
+        )
+        assert "ERYX_SECRET_PLACEHOLDER_" in result.result_json
+        assert "[REDACTED]" not in result.result_json
+        assert "ghp-real-token" not in result.result_json
