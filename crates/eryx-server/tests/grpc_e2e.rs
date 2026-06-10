@@ -103,6 +103,99 @@ async fn execute_simple_print() {
     assert!(got_result, "never received ExecuteResult");
 }
 
+/// An uncaught exception over gRPC. The traceback (which Python writes to
+/// stderr) is surfaced consistently in three places:
+///   - streamed live as STDERR `OutputEvent`s while the code runs,
+///   - in the final `ExecuteResult.stderr` field, and
+///   - in `ExecuteResult.error`, with `success = false`.
+///
+/// The `stderr` field used to be empty on the error path; it now matches the
+/// stream and the success path.
+#[tokio::test]
+async fn execute_uncaught_exception_returns_error_not_stderr() {
+    use eryx_server::proto::eryx::v1::OutputStream;
+
+    let channel = start_server().await;
+    let mut client = EryxClient::new(channel);
+
+    let (tx, rx) = mpsc::channel(16);
+    tx.send(ClientMessage {
+        message: Some(client_message::Message::ExecuteRequest(Box::new(
+            ExecuteRequest {
+                // Print to stdout first, then raise: both captured streams must
+                // survive onto the final result.
+                code: "print('before the boom')\nraise Exception()".to_string(),
+                callbacks: vec![],
+                resource_limits: Some(ResourceLimits {
+                    execution_timeout_ms: 30_000,
+                    ..Default::default()
+                }),
+                enable_tracing: false,
+                persist_state: false,
+                state_snapshot: vec![],
+                files: vec![],
+                network_config: None,
+                ..Default::default()
+            },
+        ))),
+    })
+    .await
+    .unwrap();
+
+    let mut stream = client
+        .execute(ReceiverStream::new(rx))
+        .await
+        .unwrap()
+        .into_inner();
+
+    let mut got_result = false;
+    let mut stderr_events: Vec<String> = Vec::new();
+    while let Some(msg) = stream.message().await.unwrap() {
+        match msg.message {
+            Some(server_message::Message::OutputEvent(event)) => {
+                if event.stream == OutputStream::Stderr as i32 {
+                    stderr_events.push(event.data);
+                }
+            }
+            Some(server_message::Message::ExecuteResult(result)) => {
+                assert!(
+                    !result.success,
+                    "uncaught exception should report success=false"
+                );
+                // The traceback is surfaced through the error field...
+                assert!(
+                    result.error.contains("Traceback") && result.error.contains("Exception"),
+                    "error should carry the traceback, got: {:?}",
+                    result.error
+                );
+                // ...and also through the stderr field (matching the stream).
+                assert!(
+                    result.stderr.contains("Traceback") && result.stderr.contains("Exception"),
+                    "stderr field should carry the traceback, got: {:?}",
+                    result.stderr
+                );
+                // stdout produced before the exception is preserved too.
+                assert!(
+                    result.stdout.contains("before the boom"),
+                    "stdout field should carry pre-exception output, got: {:?}",
+                    result.stdout
+                );
+                got_result = true;
+            }
+            _ => {}
+        }
+    }
+
+    assert!(got_result, "never received ExecuteResult");
+    // The traceback IS delivered live as STDERR output events during execution.
+    let streamed = stderr_events.concat();
+    assert!(
+        streamed.contains("Traceback") && streamed.contains("Exception"),
+        "expected the traceback to be streamed as STDERR events, got: {:?}",
+        stderr_events
+    );
+}
+
 #[tokio::test]
 async fn execute_with_echo_callback() {
     let channel = start_server().await;

@@ -699,12 +699,20 @@ async fn execute_with_session(
     } else {
         None
     };
-    tokio::spawn(async move {
+    // Accumulate the raw (pre-scrub) streamed output so the final ExecuteResult
+    // can carry it. The error path otherwise loses captured output entirely
+    // because no ExecutionOutput is produced; accumulating here lets the final
+    // stdout/stderr fields match what was streamed (and the success path).
+    let output_accumulator = tokio::spawn(async move {
         use crate::proto::eryx::v1::{OutputEvent, OutputStream};
+        let mut stdout_buf = String::new();
+        let mut stderr_buf = String::new();
         while let Some(req) = output_rx.recv().await {
             let stream = if req.stream == 0 {
+                stdout_buf.push_str(&req.data);
                 OutputStream::Stdout
             } else {
+                stderr_buf.push_str(&req.data);
                 OutputStream::Stderr
             };
             let data = if let Some(ref secrets) = output_secrets {
@@ -730,6 +738,7 @@ async fn execute_with_session(
                 break;
             }
         }
+        (stdout_buf, stderr_buf)
     });
 
     // Spawn network handler if networking is enabled (mirrors Sandbox::execute pattern).
@@ -780,6 +789,11 @@ async fn execute_with_session(
 
     // Wait for callback handler to finish.
     let callback_invocations = callback_handler.await.unwrap_or(0);
+
+    // The output channel sender is dropped once execution completes, so the
+    // accumulator task has now (or will shortly) finish draining. Its captured
+    // stdout/stderr are used to populate the error-path result below.
+    let (streamed_stdout, streamed_stderr) = output_accumulator.await.unwrap_or_default();
 
     // Snapshot state after execution (only when persistence is requested).
     let snapshot_bytes = if params.state.is_some() {
@@ -874,10 +888,24 @@ async fn execute_with_session(
             );
             metrics::counter!("eryx_executions_total", "status" => "error").increment(1);
             metrics::histogram!("eryx_execution_duration_seconds").record(duration.as_secs_f64());
+            // Surface output captured before the failure (e.g. an uncaught
+            // exception's traceback, which Python writes to stderr) so the
+            // stdout/stderr fields match what was streamed and the success path.
+            // Scrub the whole buffer, consistent with the Ok arm.
+            let stdout = if params.scrub_stdout {
+                scrub_placeholders(&streamed_stdout, &params.secrets)
+            } else {
+                streamed_stdout
+            };
+            let stderr = if params.scrub_stderr {
+                scrub_placeholders(&streamed_stderr, &params.secrets)
+            } else {
+                streamed_stderr
+            };
             ExecuteResult {
                 success: false,
-                stdout: String::new(),
-                stderr: String::new(),
+                stdout,
+                stderr,
                 error: e.to_string(),
                 stats: None,
                 // Still return the snapshot — the Go service decides whether to keep it.

@@ -288,6 +288,51 @@ async fn test_python_value_error() {
     );
 }
 
+/// An uncaught exception surfaces the full Python traceback.
+///
+/// Regression guard for a user report that `raise Exception()` "does not return
+/// anything". It does: an uncaught exception is returned as an `Err` whose
+/// message is the full traceback (captured from the redirected `sys.stderr`),
+/// including the exception *type* even when no message is supplied.
+///
+/// Note the channel: the traceback comes back through the error return, NOT in
+/// the `stderr` field of a successful `ExecutionOutput` (on the error path there
+/// is no output struct). The gRPC layer mirrors this — it puts the traceback in
+/// `ExecuteResult.error` and leaves `stderr` empty.
+#[tokio::test]
+async fn test_python_uncaught_exception_returns_traceback() {
+    let mut session = create_session().await;
+
+    // Bare exception with no message: the type name must still appear.
+    let bare = session
+        .execute("raise Exception()")
+        .run()
+        .await
+        .expect_err("raise Exception() should be an error");
+    let bare = bare.to_string();
+    assert!(
+        !bare.trim().is_empty(),
+        "bare Exception() produced an empty error: {bare:?}"
+    );
+    assert!(
+        bare.contains("Traceback") && bare.contains("Exception"),
+        "expected a traceback naming the exception type, got: {bare:?}"
+    );
+
+    // Message-bearing exception: both type and message appear.
+    let mut session = create_session().await;
+    let with_msg = session
+        .execute(r#"raise ValueError("boom")"#)
+        .run()
+        .await
+        .expect_err(r#"raise ValueError("boom") should be an error"#)
+        .to_string();
+    assert!(
+        with_msg.contains("ValueError") && with_msg.contains("boom"),
+        "expected 'ValueError: boom' in traceback, got: {with_msg:?}"
+    );
+}
+
 // =============================================================================
 // Edge Case Tests
 // =============================================================================
