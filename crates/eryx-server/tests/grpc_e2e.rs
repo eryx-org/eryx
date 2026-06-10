@@ -103,6 +103,314 @@ async fn execute_simple_print() {
     assert!(got_result, "never received ExecuteResult");
 }
 
+/// An uncaught exception over gRPC. The traceback (which Python writes to
+/// stderr) is surfaced as CPython would — over stderr, not as a sandbox error:
+///   - streamed live as STDERR `OutputEvent`s while the code runs,
+///   - in the final `ExecuteResult.stderr` field, and
+///   - classified via `failure_kind = SCRIPT_EXCEPTION`, with `error` left empty
+///     (it is reserved for sandbox-level failures) and `success = false`.
+#[tokio::test]
+async fn execute_uncaught_exception_returns_error_not_stderr() {
+    use eryx_server::proto::eryx::v1::{FailureKind, OutputStream};
+
+    let channel = start_server().await;
+    let mut client = EryxClient::new(channel);
+
+    let (tx, rx) = mpsc::channel(16);
+    tx.send(ClientMessage {
+        message: Some(client_message::Message::ExecuteRequest(Box::new(
+            ExecuteRequest {
+                // Print to stdout first, then raise: both captured streams must
+                // survive onto the final result.
+                code: "print('before the boom')\nraise Exception()".to_string(),
+                callbacks: vec![],
+                resource_limits: Some(ResourceLimits {
+                    execution_timeout_ms: 30_000,
+                    ..Default::default()
+                }),
+                enable_tracing: false,
+                persist_state: false,
+                state_snapshot: vec![],
+                files: vec![],
+                network_config: None,
+                ..Default::default()
+            },
+        ))),
+    })
+    .await
+    .unwrap();
+
+    let mut stream = client
+        .execute(ReceiverStream::new(rx))
+        .await
+        .unwrap()
+        .into_inner();
+
+    let mut got_result = false;
+    let mut stderr_events: Vec<String> = Vec::new();
+    while let Some(msg) = stream.message().await.unwrap() {
+        match msg.message {
+            Some(server_message::Message::OutputEvent(event)) => {
+                if event.stream == OutputStream::Stderr as i32 {
+                    stderr_events.push(event.data);
+                }
+            }
+            Some(server_message::Message::ExecuteResult(result)) => {
+                assert!(
+                    !result.success,
+                    "uncaught exception should report success=false"
+                );
+                // Classified as a script exception, not a sandbox failure.
+                assert_eq!(
+                    result.failure_kind,
+                    FailureKind::ScriptException as i32,
+                    "uncaught exception should be FAILURE_KIND_SCRIPT_EXCEPTION"
+                );
+                // `error` is reserved for sandbox failures, so it stays empty.
+                assert!(
+                    result.error.is_empty(),
+                    "error should be empty for a script exception, got: {:?}",
+                    result.error
+                );
+                // The traceback is surfaced through stderr (matching the stream).
+                assert!(
+                    result.stderr.contains("Traceback") && result.stderr.contains("Exception"),
+                    "stderr field should carry the traceback, got: {:?}",
+                    result.stderr
+                );
+                // stdout produced before the exception is preserved too.
+                assert!(
+                    result.stdout.contains("before the boom"),
+                    "stdout field should carry pre-exception output, got: {:?}",
+                    result.stdout
+                );
+                got_result = true;
+            }
+            _ => {}
+        }
+    }
+
+    assert!(got_result, "never received ExecuteResult");
+    // The traceback IS delivered live as STDERR output events during execution.
+    let streamed = stderr_events.concat();
+    assert!(
+        streamed.contains("Traceback") && streamed.contains("Exception"),
+        "expected the traceback to be streamed as STDERR events, got: {:?}",
+        stderr_events
+    );
+}
+
+/// A wall-clock timeout is a sandbox failure, not a script failure: it is
+/// classified `FAILURE_KIND_TIMEOUT` with a populated `error` (the limit isn't
+/// something CPython surfaces, so it belongs in `error`, not stderr).
+#[tokio::test]
+async fn execute_timeout_is_sandbox_failure() {
+    use eryx_server::proto::eryx::v1::FailureKind;
+
+    let channel = start_server().await;
+    let mut client = EryxClient::new(channel);
+
+    let (tx, rx) = mpsc::channel(16);
+    tx.send(ClientMessage {
+        message: Some(client_message::Message::ExecuteRequest(Box::new(
+            ExecuteRequest {
+                // Busy loop that never returns before the tiny timeout.
+                code: "while True:\n    pass".to_string(),
+                callbacks: vec![],
+                resource_limits: Some(ResourceLimits {
+                    execution_timeout_ms: 200,
+                    ..Default::default()
+                }),
+                enable_tracing: false,
+                persist_state: false,
+                state_snapshot: vec![],
+                files: vec![],
+                network_config: None,
+                ..Default::default()
+            },
+        ))),
+    })
+    .await
+    .unwrap();
+
+    let mut stream = client
+        .execute(ReceiverStream::new(rx))
+        .await
+        .unwrap()
+        .into_inner();
+
+    let mut got_result = false;
+    while let Some(msg) = stream.message().await.unwrap() {
+        if let Some(server_message::Message::ExecuteResult(result)) = msg.message {
+            assert!(!result.success, "timeout should report success=false");
+            assert_eq!(
+                result.failure_kind,
+                FailureKind::Timeout as i32,
+                "timeout should be FAILURE_KIND_TIMEOUT"
+            );
+            assert!(
+                !result.error.is_empty(),
+                "a sandbox failure should populate the error field"
+            );
+            got_result = true;
+        }
+    }
+    assert!(got_result, "never received ExecuteResult");
+}
+
+/// NUL bytes in the code are rejected host-side before reaching the guest, and
+/// classified as a sandbox/input failure rather than a script exception.
+#[tokio::test]
+async fn execute_null_bytes_is_sandbox_failure() {
+    use eryx_server::proto::eryx::v1::FailureKind;
+
+    let channel = start_server().await;
+    let mut client = EryxClient::new(channel);
+
+    let (tx, rx) = mpsc::channel(16);
+    tx.send(ClientMessage {
+        message: Some(client_message::Message::ExecuteRequest(Box::new(
+            ExecuteRequest {
+                code: "x = 1\0y = 2".to_string(),
+                callbacks: vec![],
+                resource_limits: Some(ResourceLimits {
+                    execution_timeout_ms: 30_000,
+                    ..Default::default()
+                }),
+                enable_tracing: false,
+                persist_state: false,
+                state_snapshot: vec![],
+                files: vec![],
+                network_config: None,
+                ..Default::default()
+            },
+        ))),
+    })
+    .await
+    .unwrap();
+
+    let mut stream = client
+        .execute(ReceiverStream::new(rx))
+        .await
+        .unwrap()
+        .into_inner();
+
+    let mut got_result = false;
+    while let Some(msg) = stream.message().await.unwrap() {
+        if let Some(server_message::Message::ExecuteResult(result)) = msg.message {
+            assert!(!result.success, "null bytes should report success=false");
+            assert_eq!(
+                result.failure_kind,
+                FailureKind::SandboxError as i32,
+                "null bytes should be FAILURE_KIND_SANDBOX_ERROR, not a script exception"
+            );
+            assert!(
+                !result.error.is_empty(),
+                "a sandbox failure should populate the error field"
+            );
+            got_result = true;
+        }
+    }
+    assert!(got_result, "never received ExecuteResult");
+}
+
+/// A secret surfaced via an uncaught exception's traceback must not leak. Two
+/// guarantees compound here: Python only ever sees a random *placeholder* (never
+/// the real value), and stderr scrubbing replaces that placeholder with
+/// `[REDACTED]`. Verified across the streamed events, the `stderr` field, and
+/// the (empty) `error` field.
+#[tokio::test]
+async fn execute_secret_in_uncaught_exception_is_scrubbed() {
+    use eryx_server::proto::eryx::v1::{FailureKind, OutputStream, SecretConfig};
+
+    const REAL_SECRET: &str = "s3cr3t-value-do-not-leak-42";
+
+    let channel = start_server().await;
+    let mut client = EryxClient::new(channel);
+
+    let (tx, rx) = mpsc::channel(16);
+    tx.send(ClientMessage {
+        message: Some(client_message::Message::ExecuteRequest(Box::new(
+            ExecuteRequest {
+                code: "import os\nraise Exception(os.environ['MY_SECRET'])".to_string(),
+                secrets: vec![SecretConfig {
+                    name: "MY_SECRET".to_string(),
+                    value: REAL_SECRET.to_string(),
+                    allowed_hosts: vec![],
+                }],
+                callbacks: vec![],
+                resource_limits: Some(ResourceLimits {
+                    execution_timeout_ms: 30_000,
+                    ..Default::default()
+                }),
+                enable_tracing: false,
+                persist_state: false,
+                state_snapshot: vec![],
+                files: vec![],
+                network_config: None,
+                ..Default::default()
+            },
+        ))),
+    })
+    .await
+    .unwrap();
+
+    let mut stream = client
+        .execute(ReceiverStream::new(rx))
+        .await
+        .unwrap()
+        .into_inner();
+
+    let mut got_result = false;
+    let mut stderr_events: Vec<String> = Vec::new();
+    while let Some(msg) = stream.message().await.unwrap() {
+        match msg.message {
+            Some(server_message::Message::OutputEvent(event)) => {
+                if event.stream == OutputStream::Stderr as i32 {
+                    stderr_events.push(event.data);
+                }
+            }
+            Some(server_message::Message::ExecuteResult(result)) => {
+                assert!(!result.success);
+                assert_eq!(result.failure_kind, FailureKind::ScriptException as i32);
+                // The real secret never reaches Python, so it cannot appear
+                // anywhere, and the placeholder must be scrubbed from stderr.
+                assert!(
+                    !result.stderr.contains(REAL_SECRET),
+                    "real secret leaked into stderr: {:?}",
+                    result.stderr
+                );
+                assert!(
+                    !result.stderr.contains("ERYX_SECRET_PLACEHOLDER_"),
+                    "unscrubbed placeholder leaked into stderr: {:?}",
+                    result.stderr
+                );
+                assert!(
+                    result.stderr.contains("[REDACTED]"),
+                    "expected the placeholder to be redacted in the traceback: {:?}",
+                    result.stderr
+                );
+                // `error` is empty for a script exception — nothing to leak there.
+                assert!(result.error.is_empty());
+                got_result = true;
+            }
+            _ => {}
+        }
+    }
+
+    assert!(got_result, "never received ExecuteResult");
+    // The real secret can never appear in the live stream either — Python only
+    // ever holds the placeholder. (We don't assert placeholder-absence on the
+    // raw stream: per-chunk scrubbing can't redact a placeholder split across
+    // two writes. The final `stderr` field, scrubbed whole, is the guarantee.)
+    let streamed = stderr_events.concat();
+    assert!(
+        !streamed.contains(REAL_SECRET),
+        "real secret leaked into streamed stderr events: {:?}",
+        stderr_events
+    );
+}
+
 #[tokio::test]
 async fn execute_with_echo_callback() {
     let channel = start_server().await;

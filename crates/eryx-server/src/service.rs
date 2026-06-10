@@ -8,7 +8,7 @@ use dashmap::DashMap;
 use eryx::callback_handler::{run_callback_handler, run_net_handler};
 use eryx::vfs::{ArcStorage, InMemoryStorage, VfsStorage};
 use eryx::{
-    Callback, CallbackRequest, ConnectionManager, NetConfig, NetRequest, OutputRequest,
+    Callback, CallbackRequest, ConnectionManager, Error, NetConfig, NetRequest, OutputRequest,
     PythonStateSnapshot, ResourceLimits, SandboxPool, SecretConfig, SessionExecutor, TraceRequest,
     VfsConfig, generate_placeholder, scrub_placeholders,
 };
@@ -23,8 +23,8 @@ use tracing_opentelemetry::OpenTelemetrySpanExt;
 
 use crate::callbacks::{self, CallbackResult, PendingCallbacks};
 use crate::proto::eryx::v1::{
-    ClientMessage, ExecuteResult, ExecuteStats, FileKind, ServerMessage, SupportingFile,
-    callback_response, client_message, server_message,
+    ClientMessage, ExecuteResult, ExecuteStats, FailureKind, FileKind, ServerMessage,
+    SupportingFile, callback_response, client_message, server_message,
 };
 
 /// Adapts tonic's [`MetadataMap`] to OpenTelemetry's [`Extractor`] trait,
@@ -375,6 +375,7 @@ impl crate::proto::eryx::v1::eryx_server::Eryx for EryxService {
                             state_snapshot: Vec::new(),
                             result: String::new(),
                             result_error: String::new(),
+                            failure_kind: FailureKind::Cancelled as i32,
                         }
                     }
                 };
@@ -551,6 +552,7 @@ async fn execute_with_session(
                 return ExecuteResult {
                     success: false,
                     error: format!("session creation failed: {e}"),
+                    failure_kind: FailureKind::SandboxError as i32,
                     ..Default::default()
                 };
             }
@@ -582,6 +584,7 @@ async fn execute_with_session(
                 return ExecuteResult {
                     success: false,
                     error: format!("session creation failed: {e}"),
+                    failure_kind: FailureKind::SandboxError as i32,
                     ..Default::default()
                 };
             }
@@ -699,12 +702,20 @@ async fn execute_with_session(
     } else {
         None
     };
-    tokio::spawn(async move {
+    // Accumulate the raw (pre-scrub) streamed output so the final ExecuteResult
+    // can carry it. The error path otherwise loses captured output entirely
+    // because no ExecutionOutput is produced; accumulating here lets the final
+    // stdout/stderr fields match what was streamed (and the success path).
+    let output_accumulator = tokio::spawn(async move {
         use crate::proto::eryx::v1::{OutputEvent, OutputStream};
+        let mut stdout_buf = String::new();
+        let mut stderr_buf = String::new();
         while let Some(req) = output_rx.recv().await {
             let stream = if req.stream == 0 {
+                stdout_buf.push_str(&req.data);
                 OutputStream::Stdout
             } else {
+                stderr_buf.push_str(&req.data);
                 OutputStream::Stderr
             };
             let data = if let Some(ref secrets) = output_secrets {
@@ -730,6 +741,7 @@ async fn execute_with_session(
                 break;
             }
         }
+        (stdout_buf, stderr_buf)
     });
 
     // Spawn network handler if networking is enabled (mirrors Sandbox::execute pattern).
@@ -780,6 +792,11 @@ async fn execute_with_session(
 
     // Wait for callback handler to finish.
     let callback_invocations = callback_handler.await.unwrap_or(0);
+
+    // The output channel sender is dropped once execution completes, so the
+    // accumulator task has now (or will shortly) finish draining. Its captured
+    // stdout/stderr are used to populate the error-path result below.
+    let (streamed_stdout, streamed_stderr) = output_accumulator.await.unwrap_or_default();
 
     // Snapshot state after execution (only when persistence is requested).
     let snapshot_bytes = if params.state.is_some() {
@@ -864,28 +881,73 @@ async fn execute_with_session(
                 state_snapshot: snapshot_bytes,
                 result,
                 result_error,
+                failure_kind: FailureKind::Unspecified as i32,
             }
         }
         Err(e) => {
+            let failure_kind = classify_failure(&e);
             tracing::warn!(
                 success = false,
                 error = %e,
+                failure_kind = ?failure_kind,
                 "session execution completed"
             );
             metrics::counter!("eryx_executions_total", "status" => "error").increment(1);
             metrics::histogram!("eryx_execution_duration_seconds").record(duration.as_secs_f64());
+            // Surface output captured before the failure (e.g. an uncaught
+            // exception's traceback, which Python writes to stderr) so the
+            // stdout/stderr fields match what was streamed and the success path.
+            // Scrub the whole buffer, consistent with the Ok arm.
+            let stdout = if params.scrub_stdout {
+                scrub_placeholders(&streamed_stdout, &params.secrets)
+            } else {
+                streamed_stdout
+            };
+            let stderr = if params.scrub_stderr {
+                scrub_placeholders(&streamed_stderr, &params.secrets)
+            } else {
+                streamed_stderr
+            };
+            // For a script exception the traceback is already in `stderr`
+            // (CPython-style); `error` is reserved for sandbox failures, so leave
+            // it empty and let callers branch on `failure_kind`. For machinery
+            // failures, scrub the message as defense-in-depth in case a future
+            // error string ever interpolates user-derived input. (Secrets reach
+            // Python only as placeholders, so this scrubs placeholders, never
+            // real values; it is a no-op when no secrets are configured.)
+            let error = if failure_kind == FailureKind::ScriptException {
+                String::new()
+            } else {
+                scrub_placeholders(&e.to_string(), &params.secrets)
+            };
             ExecuteResult {
                 success: false,
-                stdout: String::new(),
-                stderr: String::new(),
-                error: e.to_string(),
+                stdout,
+                stderr,
+                error,
                 stats: None,
                 // Still return the snapshot — the Go service decides whether to keep it.
                 state_snapshot: snapshot_bytes,
                 result: String::new(),
                 result_error: String::new(),
+                failure_kind: failure_kind as i32,
             }
         }
+    }
+}
+
+/// Classify a library [`Error`] into the proto [`FailureKind`].
+///
+/// [`Error::PythonException`] is a *script* failure — its traceback is surfaced
+/// in `stderr` — so it maps to [`FailureKind::ScriptException`]. Everything else
+/// is a sandbox-level failure whose message belongs in the `error` field.
+fn classify_failure(error: &Error) -> FailureKind {
+    match error {
+        Error::PythonException(_) => FailureKind::ScriptException,
+        Error::Timeout(_) => FailureKind::Timeout,
+        Error::FuelExhausted { .. } => FailureKind::FuelExhausted,
+        Error::Cancelled => FailureKind::Cancelled,
+        _ => FailureKind::SandboxError,
     }
 }
 

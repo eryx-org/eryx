@@ -18,9 +18,19 @@ pub enum Error {
     #[error("wasm component error: {0}")]
     WasmComponent(#[from] wasmtime::Error),
 
-    /// Error during Python execution.
+    /// Error during Python execution machinery (e.g. a WASM trap, the store or
+    /// bindings being unavailable, or invalid input). This is a *sandbox* failure
+    /// — the runtime could not faithfully execute the script. An uncaught
+    /// exception raised *by* the script is [`Error::PythonException`] instead.
     #[error("execution failed: {0}")]
     Execution(String),
+
+    /// The script raised an uncaught Python exception. The contained string is
+    /// the traceback exactly as CPython would have written it to stderr. This is
+    /// a *script* failure, not a sandbox failure: the runtime ran the code
+    /// faithfully and the code itself errored.
+    #[error("{0}")]
+    PythonException(String),
 
     /// A callback error occurred during execution.
     #[error("callback error: {0}")]
@@ -74,4 +84,20 @@ impl From<serde_json::Error> for Error {
     fn from(err: serde_json::Error) -> Self {
         Self::Serialization(err.to_string())
     }
+}
+
+/// Reject user code the guest cannot run, before it reaches the WASM boundary.
+///
+/// Currently this rejects embedded NUL bytes: the code is handed to the guest
+/// as a C string, so a NUL would be caught there and surface as an opaque guest
+/// error. Validating host-side keeps it classified as a sandbox/input failure
+/// ([`Error::Execution`]) rather than being mistaken for an uncaught Python
+/// exception ([`Error::PythonException`]).
+pub(crate) fn validate_user_code(code: &str) -> Result<(), Error> {
+    if code.contains('\0') {
+        return Err(Error::Execution(
+            "code contains NUL bytes, which cannot be executed".to_string(),
+        ));
+    }
+    Ok(())
 }

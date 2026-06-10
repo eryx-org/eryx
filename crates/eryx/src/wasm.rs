@@ -1942,6 +1942,8 @@ impl PythonExecutor {
         #[cfg(feature = "vfs")] vfs_storage: Option<eryx_vfs::ArcStorage>,
         #[cfg(feature = "vfs")] volumes: Vec<crate::session::VolumeMount>,
     ) -> std::result::Result<ExecutionOutput, Error> {
+        crate::error::validate_user_code(code)?;
+
         // Build callback info for introspection
         let callback_infos: Vec<HostCallbackInfo> = callbacks
             .iter()
@@ -2267,9 +2269,11 @@ impl PythonExecutor {
         // wasmtime_result is Result<Result<ExecuteOutput, String>, wasmtime::Error> from the WIT layer
         // The outer Result is from wasmtime, the inner is the WIT-generated result
         // where ExecuteOutput is the WIT-generated record with stdout and stderr
+        // The inner WIT Err is the guest's logical execution error — for real
+        // input that is always an uncaught Python exception (its traceback).
         let wit_output = wasmtime_result
             .map_err(|e| Error::Execution(format!("WASM execution error: {e:?}")))?
-            .map_err(Error::Execution)?;
+            .map_err(Error::PythonException)?;
 
         // Get peak memory from the store before it's dropped
         let peak_memory_bytes = store.data().memory_tracker.peak_memory_bytes();
