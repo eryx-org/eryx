@@ -139,6 +139,8 @@ The divergence guard keeps this **safe**: a recomputed argument that misses fall
 
 To make a nondeterministic input replayable, **route it through a callback** so it lands in the journal — fetch the current time or a random seed via a callback rather than reading it inside the sandbox, and it will replay deterministically like any other recorded result.
 
+> A built-in deterministic mode (a seedable RNG and a mockable clock, captured in the journal) is being explored in [issue #244](https://github.com/eryx-org/eryx/issues/244) to cover these cases without routing each input through a callback.
+
 ## Security: journals are a trusted input
 
 Replayed journal entries are returned to Python **verbatim** — eryx does not re-execute the callback to validate them. A crafted journal can therefore inject arbitrary values into a script's execution. **Treat the journal as a trusted input.**
