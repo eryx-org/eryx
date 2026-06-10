@@ -2225,6 +2225,11 @@ class socket:
         return self._proto
 
     def settimeout(self, timeout):
+        # http.client passes socket._GLOBAL_DEFAULT_TIMEOUT (an object() sentinel,
+        # not None) when no explicit timeout was set. Normalize it to None here so
+        # downstream code (_timeout_ms) never compares the sentinel with `<=`.
+        if timeout is _GLOBAL_DEFAULT_TIMEOUT:
+            timeout = None
         self._timeout = timeout
         self._blocking = timeout is None
 
@@ -2248,7 +2253,7 @@ class socket:
         configured ceiling, so this can only shorten a timeout, never extend it.
         """
         t = self._timeout
-        if t is None or t <= 0:
+        if t is None or t is _GLOBAL_DEFAULT_TIMEOUT or t <= 0:
             return 0
         ms = int(t * 1000)
         return ms if ms > 0 else 1

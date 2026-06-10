@@ -264,6 +264,34 @@ except Exception as e:
 """)
         assert "SUCCESS" in result.stdout, f"Test failed: {result.stdout}"
 
+    def test_urllib_get_no_explicit_timeout(self, network_sandbox, http_server):
+        """Regression test for #246: bare urlopen (no timeout=) must not raise.
+
+        When no explicit ``timeout=`` is passed, ``http.client`` connects with
+        ``socket._GLOBAL_DEFAULT_TIMEOUT`` — an ``object()`` sentinel, not
+        ``None``. The socket shim used to store the sentinel verbatim, so
+        ``_timeout_ms`` hit ``sentinel <= 0`` and raised
+        ``TypeError: '<=' not supported between instances of 'object' and 'int'``.
+        The shim now normalizes the sentinel to "no timeout" (use the host
+        default). Uses the local server so the test is hermetic.
+        """
+        host, port = http_server
+        result = network_sandbox.execute(f"""
+import urllib.request
+
+try:
+    with urllib.request.urlopen("http://{host}:{port}/") as response:
+        status = response.status
+        body = response.read().decode()
+        if status == 200 and "Hello from test server" in body:
+            print("SUCCESS")
+        else:
+            print(f"Unexpected: {{status}} {{body[:100]}}")
+except Exception as e:
+    print(f"Error: {{type(e).__name__}}: {{e}}")
+""")
+        assert "SUCCESS" in result.stdout, f"Test failed: {result.stdout}"
+
     def test_urllib_get_json_local_http(self, network_sandbox, http_server):
         """Test urllib with JSON response from local HTTP server."""
         host, port = http_server
