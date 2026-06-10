@@ -88,9 +88,10 @@
 //! later run replays the recorded prefix. Two layers guarantee no further
 //! callback runs after a suspension:
 //!
-//! 1. A **synchronous gate**: once any callback has suspended, every subsequent
-//!    invocation funneling through [`ReplayState`] is rejected (the internal
-//!    `Decision::AlreadySuspended` path), covering in-flight `gather` siblings.
+//! 1. A **synchronous gate**: once any callback has suspended, every callback
+//!    *dispatched after* that point funneling through [`ReplayState`] is rejected
+//!    (the internal `Decision::AlreadySuspended` path), covering later `gather`
+//!    siblings.
 //! 2. The **fuel-poison halt** in the host import, which traps the guest before
 //!    it can dispatch any further callback or perform I/O.
 //!
@@ -240,6 +241,12 @@ pub struct ReplayState {
     /// set, every subsequent invocation is rejected (`Decision::AlreadySuspended`)
     /// so no further callback runs after a suspension.
     suspended: Option<SuspendedCallback>,
+    /// Initiation sequence of the suspending callback, if any. Concurrently
+    /// dispatched siblings (e.g. an `asyncio.gather` batch) reserve sequence
+    /// numbers around the suspending call and may complete and record *after* it;
+    /// the built journal drops every entry at or after this sequence so it is a
+    /// clean prefix that ends before the suspension point.
+    suspend_seq: Option<usize>,
     /// How many invocations were served from the previous journal.
     replayed_count: u32,
 }
@@ -258,8 +265,10 @@ enum Decision {
     /// any callback the guest dispatches *after* the suspension is rejected here.
     /// Fuel poisoning already halts the guest synchronously at the suspending
     /// callback's import, so in practice no further callback is dispatched; this
-    /// gate is a belt-and-suspenders guard that also covers in-flight siblings of
-    /// a concurrent `asyncio.gather` batch whose futures were already pending.
+    /// gate is a belt-and-suspenders guard that also rejects any concurrent
+    /// `asyncio.gather` sibling dispatched *after* the suspension is recorded. (A
+    /// sibling that was already past `decide` completes and is journaled normally;
+    /// `build_journal` then truncates it back out of the recorded prefix.)
     AlreadySuspended,
 }
 
@@ -286,6 +295,7 @@ impl ReplayState {
             next_seq: 0,
             entries: Vec::new(),
             suspended: None,
+            suspend_seq: None,
             replayed_count: 0,
         }
     }
@@ -353,11 +363,14 @@ impl ReplayState {
         self.entries[seq] = Some(entry);
     }
 
-    /// Record that a callback suspended. Only the first suspension is kept; the
-    /// suspended call itself is *not* journaled (so it re-runs live on resume).
-    fn record_suspend(&mut self, suspended: SuspendedCallback) {
+    /// Record that a callback suspended at initiation sequence `seq`. Only the
+    /// first suspension is kept; the suspended call itself is *not* journaled (so
+    /// it re-runs live on resume). The sequence is remembered so `build_journal`
+    /// can truncate entries recorded by concurrent siblings after this point.
+    fn record_suspend(&mut self, seq: usize, suspended: SuspendedCallback) {
         if self.suspended.is_none() {
             self.suspended = Some(suspended);
+            self.suspend_seq = Some(seq);
         }
     }
 
@@ -376,12 +389,27 @@ impl ReplayState {
     /// Build the journal recorded during this run for the given script.
     ///
     /// Reserved-but-unrecorded slots (e.g. in-flight callbacks) are dropped;
-    /// recorded entries keep their dispatch-order positions.
+    /// recorded entries keep their dispatch-order positions. If a callback
+    /// suspended, entries initiated at or after the suspending call are also
+    /// dropped — a concurrently dispatched sibling may have completed and
+    /// recorded around the suspension point, but the journal must be a clean
+    /// prefix that ends before the suspension so a later run replays only what
+    /// truly preceded it.
     #[must_use]
     pub fn build_journal(&self, code: impl Into<String>) -> CallbackJournal {
+        let entries = self
+            .entries
+            .iter()
+            .flatten()
+            .filter(|entry| match self.suspend_seq {
+                Some(seq) => (entry.index as usize) < seq,
+                None => true,
+            })
+            .cloned()
+            .collect();
         CallbackJournal {
             code: code.into(),
-            entries: self.entries.iter().flatten().cloned().collect(),
+            entries,
         }
     }
 }
@@ -485,11 +513,14 @@ impl Callback for ReplayCallback {
                             // Do not journal a suspended callback: only record
                             // that it suspended so the caller can act on it. The
                             // call re-runs live when execution resumes.
-                            lock_state(&state).record_suspend(SuspendedCallback {
-                                name,
-                                args_json,
-                                reason,
-                            });
+                            lock_state(&state).record_suspend(
+                                seq,
+                                SuspendedCallback {
+                                    name,
+                                    args_json,
+                                    reason,
+                                },
+                            );
                         }
                     }
                     result
@@ -961,6 +992,43 @@ mod tests {
         // Nothing new journaled by the rejected call.
         let st = lock_state(&state);
         assert!(st.build_journal("code").is_empty());
+    }
+
+    #[test]
+    fn build_journal_truncates_entries_after_suspend_point() {
+        // Three callbacks are dispatched concurrently, reserving seq 0, 1, 2. The
+        // seq-0 and seq-2 calls complete and record; the seq-1 call suspends. The
+        // built journal must be a clean prefix: only the entry initiated *before*
+        // the suspending call (seq 0) is kept. The seq-2 sibling that happened to
+        // complete around the suspension is dropped, so a later resume does not
+        // replay/skip a callback that logically followed the suspension point.
+        let mut st = ReplayState::new(CallbackJournal::new("code"));
+        let args = json!({});
+        let h = fnv1a_64(canonical_json(&args).as_bytes());
+
+        assert!(matches!(st.decide("a", h, "{}"), Decision::Miss { seq: 0 }));
+        assert!(matches!(st.decide("b", h, "{}"), Decision::Miss { seq: 1 }));
+        assert!(matches!(st.decide("c", h, "{}"), Decision::Miss { seq: 2 }));
+
+        st.record_live(entry_ok(0, "a", &args, json!("a-done")));
+        st.record_live(entry_ok(2, "c", &args, json!("c-done")));
+        st.record_suspend(
+            1,
+            SuspendedCallback {
+                name: "b".into(),
+                args_json: "{}".into(),
+                reason: "wait".into(),
+            },
+        );
+
+        let journal = st.build_journal("code");
+        assert_eq!(
+            journal.entries.len(),
+            1,
+            "only the pre-suspend prefix is kept"
+        );
+        assert_eq!(journal.entries[0].index, 0);
+        assert_eq!(journal.entries[0].name, "a");
     }
 
     #[tokio::test]

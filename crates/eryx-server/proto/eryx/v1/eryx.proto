@@ -408,6 +408,12 @@ enum FailureKind {
   FAILURE_KIND_SANDBOX_ERROR = 4;
   // Execution was cancelled before completing (e.g. the client disconnected).
   FAILURE_KIND_CANCELLED = 5;
+  // A callback requested suspension (CALLBACK_OUTCOME_SUSPEND). This is an
+  // expected control outcome, not a failure: `suspended` is true and the prefix
+  // journal / `suspended_callback` carry the state needed to resume. Branch on
+  // `suspended` first; this kind is a secondary signal for consumers that key
+  // solely on `failure_kind`.
+  FAILURE_KIND_SUSPENDED = 6;
 }
 
 // A trace event emitted during execution.

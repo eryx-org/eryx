@@ -1693,3 +1693,178 @@ print("should not reach here")
         "callback after the suspension point must not be dispatched to the client"
     );
 }
+
+/// A client may reply CALLBACK_OUTCOME_SUSPEND even when the request did NOT opt
+/// into replay (no `callback_journal`). The result must still report the
+/// suspension — `suspended` true, `failure_kind` SUSPENDED, the reason carried —
+/// rather than being mis-surfaced as an ordinary sandbox error.
+#[tokio::test]
+async fn suspend_without_replay_opt_in_is_reported_as_suspended() {
+    use eryx_server::proto::eryx::v1::FailureKind;
+
+    let channel = start_server().await;
+    let mut client = EryxClient::new(channel);
+
+    let code = r#"
+b = await approve(amount=100)
+print("should not reach here")
+"#;
+    let approve_decl = CallbackDeclaration {
+        name: "approve".to_string(),
+        description: "Requires approval".to_string(),
+        parameters: vec![ParameterDeclaration {
+            name: "amount".to_string(),
+            json_type: "integer".to_string(),
+            description: "Amount to approve".to_string(),
+            required: true,
+        }],
+    };
+
+    let (tx, rx) = mpsc::channel(16);
+    tx.send(ClientMessage {
+        message: Some(client_message::Message::ExecuteRequest(Box::new(
+            ExecuteRequest {
+                code: code.to_string(),
+                callbacks: vec![approve_decl],
+                // NOTE: no callback_journal — replay/journaling is NOT enabled.
+                ..Default::default()
+            },
+        ))),
+    })
+    .await
+    .unwrap();
+
+    let mut stream = client
+        .execute(ReceiverStream::new(rx))
+        .await
+        .unwrap()
+        .into_inner();
+
+    let mut got_result = false;
+    while let Some(msg) = stream.message().await.unwrap() {
+        match msg.message {
+            Some(server_message::Message::CallbackRequest(req)) => {
+                assert_eq!(req.name, "approve");
+                tx.send(ClientMessage {
+                    message: Some(client_message::Message::CallbackResponse(
+                        eryx_server::proto::eryx::v1::CallbackResponse {
+                            request_id: req.request_id,
+                            outcome: CallbackOutcome::Suspend as i32,
+                            result: Some(callback_response::Result::Error(
+                                "needs human approval".to_string(),
+                            )),
+                        },
+                    )),
+                })
+                .await
+                .unwrap();
+            }
+            Some(server_message::Message::ExecuteResult(result)) => {
+                assert!(
+                    result.suspended,
+                    "suspension must be reported even without replay opt-in"
+                );
+                assert!(!result.success);
+                assert_eq!(
+                    result.failure_kind,
+                    FailureKind::Suspended as i32,
+                    "suspension must not be classified as a sandbox error"
+                );
+                let suspended = result
+                    .suspended_callback
+                    .expect("suspended_callback should carry the reason");
+                assert_eq!(suspended.reason, "needs human approval");
+                // No journal is returned when replay was not enabled.
+                assert!(
+                    result.callback_journal.is_none(),
+                    "no journal without replay opt-in"
+                );
+                got_result = true;
+            }
+            _ => {}
+        }
+    }
+    assert!(got_result, "never received ExecuteResult");
+}
+
+/// A suspension on a stateful (persist_state) session must NOT attempt a state
+/// snapshot: the guest's fuel is poisoned to 0 by the suspension, so the
+/// snapshot export would trap and yield a misleading empty snapshot. The result
+/// reports the suspension and returns an empty `state_snapshot` cleanly.
+#[tokio::test]
+async fn suspended_stateful_session_skips_snapshot() {
+    let channel = start_server().await;
+    let mut client = EryxClient::new(channel);
+
+    let code = r#"
+saved = 42
+b = await approve(amount=100)
+print("should not reach here")
+"#;
+    let approve_decl = CallbackDeclaration {
+        name: "approve".to_string(),
+        description: "Requires approval".to_string(),
+        parameters: vec![ParameterDeclaration {
+            name: "amount".to_string(),
+            json_type: "integer".to_string(),
+            description: "Amount to approve".to_string(),
+            required: true,
+        }],
+    };
+
+    let (tx, rx) = mpsc::channel(16);
+    tx.send(ClientMessage {
+        message: Some(client_message::Message::ExecuteRequest(Box::new(
+            ExecuteRequest {
+                code: code.to_string(),
+                callbacks: vec![approve_decl],
+                persist_state: true,
+                callback_journal: Some(CallbackJournal {
+                    entries: vec![],
+                    signature: vec![],
+                }),
+                ..Default::default()
+            },
+        ))),
+    })
+    .await
+    .unwrap();
+
+    let mut stream = client
+        .execute(ReceiverStream::new(rx))
+        .await
+        .unwrap()
+        .into_inner();
+
+    let mut got_result = false;
+    while let Some(msg) = stream.message().await.unwrap() {
+        match msg.message {
+            Some(server_message::Message::CallbackRequest(req)) => {
+                assert_eq!(req.name, "approve");
+                tx.send(ClientMessage {
+                    message: Some(client_message::Message::CallbackResponse(
+                        eryx_server::proto::eryx::v1::CallbackResponse {
+                            request_id: req.request_id,
+                            outcome: CallbackOutcome::Suspend as i32,
+                            result: Some(callback_response::Result::Error(
+                                "needs human approval".to_string(),
+                            )),
+                        },
+                    )),
+                })
+                .await
+                .unwrap();
+            }
+            Some(server_message::Message::ExecuteResult(result)) => {
+                assert!(result.suspended, "execution should be suspended");
+                assert!(
+                    result.state_snapshot.is_empty(),
+                    "no snapshot should be captured for a suspended session"
+                );
+                got_result = true;
+            }
+            _ => {}
+        }
+    }
+    assert!(got_result, "never received ExecuteResult");
+}

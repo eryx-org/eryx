@@ -24,7 +24,8 @@ use tracing_opentelemetry::OpenTelemetrySpanExt;
 use crate::callbacks::{self, CallbackResult, PendingCallbacks};
 use crate::proto::eryx::v1::{
     CallbackOutcome, ClientMessage, ExecuteResult, ExecuteStats, FailureKind, FileKind,
-    ServerMessage, SupportingFile, callback_response, client_message, server_message,
+    ServerMessage, SupportingFile, SuspendedCallback, callback_response, client_message,
+    server_message,
 };
 
 /// Adapts tonic's [`MetadataMap`] to OpenTelemetry's [`Extractor`] trait,
@@ -889,10 +890,29 @@ async fn execute_with_session(
         }
         None => (None, 0, None),
     };
+    // A client can reply CALLBACK_OUTCOME_SUSPEND even without opting into replay.
+    // In that case there is no ReplayState to record the suspended callback's
+    // name/args, but the executor still returns Error::Suspended. Derive the
+    // suspension from the error so the outcome is reported as a suspension (with
+    // its reason) rather than mis-surfaced as an ordinary sandbox error. There is
+    // no prefix journal to resume from in this mode, but the signal is honest.
+    let suspended_callback = suspended_callback.or_else(|| match &exec_result {
+        Err(Error::Suspended(reason)) => Some(SuspendedCallback {
+            name: String::new(),
+            args_json: String::new(),
+            reason: reason.clone(),
+        }),
+        _ => None,
+    });
     let suspended = suspended_callback.is_some();
 
-    // Snapshot state after execution (only when persistence is requested).
-    let snapshot_bytes = if params.state.is_some() {
+    // Snapshot state after execution (only when persistence is requested, and not
+    // after a suspension: the guest's fuel is poisoned to 0 once a callback
+    // suspends, so invoking the snapshot_state export would trap immediately
+    // (OutOfFuel) and yield a misleading empty snapshot — which could clobber
+    // prior session state. Resume goes through journal replay, not the snapshot,
+    // so the snapshot is not needed here anyway.)
+    let snapshot_bytes = if params.state.is_some() && !suspended {
         let snapshot_start = Instant::now();
         match session.snapshot_state().await {
             Ok(snapshot) => {
@@ -1052,14 +1072,18 @@ async fn execute_with_session(
 /// Classify a library [`Error`] into the proto [`FailureKind`].
 ///
 /// [`Error::PythonException`] is a *script* failure — its traceback is surfaced
-/// in `stderr` — so it maps to [`FailureKind::ScriptException`]. Everything else
-/// is a sandbox-level failure whose message belongs in the `error` field.
+/// in `stderr` — so it maps to [`FailureKind::ScriptException`].
+/// [`Error::Suspended`] is an expected control outcome (a callback deferred), not
+/// a failure, so it maps to [`FailureKind::Suspended`]; callers should branch on
+/// the `suspended` flag first. Everything else is a sandbox-level failure whose
+/// message belongs in the `error` field.
 fn classify_failure(error: &Error) -> FailureKind {
     match error {
         Error::PythonException(_) => FailureKind::ScriptException,
         Error::Timeout(_) => FailureKind::Timeout,
         Error::FuelExhausted { .. } => FailureKind::FuelExhausted,
         Error::Cancelled => FailureKind::Cancelled,
+        Error::Suspended(_) => FailureKind::Suspended,
         _ => FailureKind::SandboxError,
     }
 }
