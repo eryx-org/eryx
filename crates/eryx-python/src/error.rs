@@ -50,6 +50,9 @@ pub fn eryx_error_to_py(err: eryx::Error) -> PyErr {
         eryx::Error::WasmEngine(msg) => InitializationError::new_err(msg),
         eryx::Error::WasmComponent(e) => InitializationError::new_err(e.to_string()),
         eryx::Error::Execution(msg) => ExecutionError::new_err(msg),
+        // A script raising an uncaught exception is also an execution error from
+        // the Python caller's perspective; keep it mapped to ExecutionError.
+        eryx::Error::PythonException(msg) => ExecutionError::new_err(msg),
         eryx::Error::Callback(e) => ExecutionError::new_err(e.to_string()),
         eryx::Error::ResourceLimit(msg) => ResourceLimitError::new_err(msg),
         eryx::Error::Timeout(duration) => {

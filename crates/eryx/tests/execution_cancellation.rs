@@ -294,7 +294,7 @@ async fn test_python_error_not_confused_with_cancellation() {
     assert!(result.is_err(), "Should fail with Python error");
     match result {
         Err(Error::Cancelled) => panic!("Should not be Cancelled error"),
-        Err(Error::Execution(msg)) => {
+        Err(Error::PythonException(msg)) => {
             assert!(
                 msg.contains("ValueError") || msg.contains("test error"),
                 "Error should mention ValueError: {}",
@@ -316,7 +316,7 @@ async fn test_syntax_error_not_confused_with_cancellation() {
     assert!(result.is_err(), "Should fail with syntax error");
     match result {
         Err(Error::Cancelled) => panic!("Should not be Cancelled error"),
-        Err(Error::Execution(_)) => {} // Expected
+        Err(Error::PythonException(_)) => {} // Expected: syntax error raises in-guest
         Err(e) => panic!("Unexpected error type: {:?}", e),
         Ok(_) => panic!("Expected error, got success"),
     }

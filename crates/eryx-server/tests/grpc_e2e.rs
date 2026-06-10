@@ -104,16 +104,14 @@ async fn execute_simple_print() {
 }
 
 /// An uncaught exception over gRPC. The traceback (which Python writes to
-/// stderr) is surfaced consistently in three places:
+/// stderr) is surfaced as CPython would — over stderr, not as a sandbox error:
 ///   - streamed live as STDERR `OutputEvent`s while the code runs,
 ///   - in the final `ExecuteResult.stderr` field, and
-///   - in `ExecuteResult.error`, with `success = false`.
-///
-/// The `stderr` field used to be empty on the error path; it now matches the
-/// stream and the success path.
+///   - classified via `failure_kind = SCRIPT_EXCEPTION`, with `error` left empty
+///     (it is reserved for sandbox-level failures) and `success = false`.
 #[tokio::test]
 async fn execute_uncaught_exception_returns_error_not_stderr() {
-    use eryx_server::proto::eryx::v1::OutputStream;
+    use eryx_server::proto::eryx::v1::{FailureKind, OutputStream};
 
     let channel = start_server().await;
     let mut client = EryxClient::new(channel);
@@ -162,13 +160,19 @@ async fn execute_uncaught_exception_returns_error_not_stderr() {
                     !result.success,
                     "uncaught exception should report success=false"
                 );
-                // The traceback is surfaced through the error field...
+                // Classified as a script exception, not a sandbox failure.
+                assert_eq!(
+                    result.failure_kind,
+                    FailureKind::ScriptException as i32,
+                    "uncaught exception should be FAILURE_KIND_SCRIPT_EXCEPTION"
+                );
+                // `error` is reserved for sandbox failures, so it stays empty.
                 assert!(
-                    result.error.contains("Traceback") && result.error.contains("Exception"),
-                    "error should carry the traceback, got: {:?}",
+                    result.error.is_empty(),
+                    "error should be empty for a script exception, got: {:?}",
                     result.error
                 );
-                // ...and also through the stderr field (matching the stream).
+                // The traceback is surfaced through stderr (matching the stream).
                 assert!(
                     result.stderr.contains("Traceback") && result.stderr.contains("Exception"),
                     "stderr field should carry the traceback, got: {:?}",
@@ -194,6 +198,120 @@ async fn execute_uncaught_exception_returns_error_not_stderr() {
         "expected the traceback to be streamed as STDERR events, got: {:?}",
         stderr_events
     );
+}
+
+/// A wall-clock timeout is a sandbox failure, not a script failure: it is
+/// classified `FAILURE_KIND_TIMEOUT` with a populated `error` (the limit isn't
+/// something CPython surfaces, so it belongs in `error`, not stderr).
+#[tokio::test]
+async fn execute_timeout_is_sandbox_failure() {
+    use eryx_server::proto::eryx::v1::FailureKind;
+
+    let channel = start_server().await;
+    let mut client = EryxClient::new(channel);
+
+    let (tx, rx) = mpsc::channel(16);
+    tx.send(ClientMessage {
+        message: Some(client_message::Message::ExecuteRequest(Box::new(
+            ExecuteRequest {
+                // Busy loop that never returns before the tiny timeout.
+                code: "while True:\n    pass".to_string(),
+                callbacks: vec![],
+                resource_limits: Some(ResourceLimits {
+                    execution_timeout_ms: 200,
+                    ..Default::default()
+                }),
+                enable_tracing: false,
+                persist_state: false,
+                state_snapshot: vec![],
+                files: vec![],
+                network_config: None,
+                ..Default::default()
+            },
+        ))),
+    })
+    .await
+    .unwrap();
+
+    let mut stream = client
+        .execute(ReceiverStream::new(rx))
+        .await
+        .unwrap()
+        .into_inner();
+
+    let mut got_result = false;
+    while let Some(msg) = stream.message().await.unwrap() {
+        if let Some(server_message::Message::ExecuteResult(result)) = msg.message {
+            assert!(!result.success, "timeout should report success=false");
+            assert_eq!(
+                result.failure_kind,
+                FailureKind::Timeout as i32,
+                "timeout should be FAILURE_KIND_TIMEOUT"
+            );
+            assert!(
+                !result.error.is_empty(),
+                "a sandbox failure should populate the error field"
+            );
+            got_result = true;
+        }
+    }
+    assert!(got_result, "never received ExecuteResult");
+}
+
+/// NUL bytes in the code are rejected host-side before reaching the guest, and
+/// classified as a sandbox/input failure rather than a script exception.
+#[tokio::test]
+async fn execute_null_bytes_is_sandbox_failure() {
+    use eryx_server::proto::eryx::v1::FailureKind;
+
+    let channel = start_server().await;
+    let mut client = EryxClient::new(channel);
+
+    let (tx, rx) = mpsc::channel(16);
+    tx.send(ClientMessage {
+        message: Some(client_message::Message::ExecuteRequest(Box::new(
+            ExecuteRequest {
+                code: "x = 1\0y = 2".to_string(),
+                callbacks: vec![],
+                resource_limits: Some(ResourceLimits {
+                    execution_timeout_ms: 30_000,
+                    ..Default::default()
+                }),
+                enable_tracing: false,
+                persist_state: false,
+                state_snapshot: vec![],
+                files: vec![],
+                network_config: None,
+                ..Default::default()
+            },
+        ))),
+    })
+    .await
+    .unwrap();
+
+    let mut stream = client
+        .execute(ReceiverStream::new(rx))
+        .await
+        .unwrap()
+        .into_inner();
+
+    let mut got_result = false;
+    while let Some(msg) = stream.message().await.unwrap() {
+        if let Some(server_message::Message::ExecuteResult(result)) = msg.message {
+            assert!(!result.success, "null bytes should report success=false");
+            assert_eq!(
+                result.failure_kind,
+                FailureKind::SandboxError as i32,
+                "null bytes should be FAILURE_KIND_SANDBOX_ERROR, not a script exception"
+            );
+            assert!(
+                !result.error.is_empty(),
+                "a sandbox failure should populate the error field"
+            );
+            got_result = true;
+        }
+    }
+    assert!(got_result, "never received ExecuteResult");
 }
 
 #[tokio::test]

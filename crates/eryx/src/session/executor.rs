@@ -955,6 +955,8 @@ impl SessionExecutor {
         output_tx: Option<mpsc::UnboundedSender<crate::wasm::OutputRequest>>,
         per_execute_fuel_limit: Option<u64>,
     ) -> Result<ExecutionOutput, Error> {
+        crate::error::validate_user_code(code)?;
+
         let start = Instant::now();
 
         // Take ownership of store and bindings for async execution
@@ -1111,10 +1113,12 @@ impl SessionExecutor {
             }
         })?;
         // wasmtime_result is Result<Result<ExecuteOutput, String>, wasmtime::Error>
-        // The outer Result is from wasmtime, the inner is the WIT-generated result
+        // The outer Result is from wasmtime, the inner is the WIT-generated result.
+        // The inner Err is the guest's logical execution error — for real input
+        // that is always an uncaught Python exception (its traceback).
         let wit_output = wasmtime_result
             .map_err(|e| Error::Execution(format!("WASM execution error: {e:?}")))?
-            .map_err(Error::Execution)?;
+            .map_err(Error::PythonException)?;
 
         let duration = start.elapsed();
 

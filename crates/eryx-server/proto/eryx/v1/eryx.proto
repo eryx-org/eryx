@@ -248,7 +248,11 @@ message ExecuteResult {
   // Complete stderr output.
   string stderr = 3;
 
-  // Error message if execution failed.
+  // Human-readable message for a *sandbox* failure (timeout, fuel exhaustion,
+  // WASM trap, invalid input, etc.). Empty when execution succeeded AND empty
+  // for an uncaught Python exception — in that case the traceback is in
+  // `stderr` (as CPython would print it) and `failure_kind` is
+  // FAILURE_KIND_SCRIPT_EXCEPTION. Use `failure_kind` to branch, not this string.
   string error = 4;
 
   // Execution statistics.
@@ -266,6 +270,32 @@ message ExecuteResult {
   // Why result capture failed (e.g. the value was not JSON-serializable), or
   // empty when capture succeeded or no result variable was set.
   string result_error = 8;
+
+  // Why execution failed. FAILURE_KIND_UNSPECIFIED when success is true.
+  // Distinguishes a script-level failure (an uncaught Python exception, with
+  // its traceback in `stderr`) from sandbox-level failures (timeout, fuel
+  // exhaustion, traps, invalid input), so callers can branch without parsing
+  // the `error` string.
+  FailureKind failure_kind = 9;
+}
+
+// Why an execution failed, when success is false.
+enum FailureKind {
+  // Execution succeeded; no failure.
+  FAILURE_KIND_UNSPECIFIED = 0;
+  // The script raised an uncaught Python exception. The traceback is in
+  // `stderr` and `error` is empty.
+  FAILURE_KIND_SCRIPT_EXCEPTION = 1;
+  // Execution exceeded the configured wall-clock timeout.
+  FAILURE_KIND_TIMEOUT = 2;
+  // Execution exceeded the configured fuel (instruction) limit.
+  FAILURE_KIND_FUEL_EXHAUSTED = 3;
+  // A sandbox/infrastructure failure: WASM trap, invalid input (e.g. NUL bytes
+  // in the code), session creation failure, or an internal runtime error.
+  // Details are in `error`.
+  FAILURE_KIND_SANDBOX_ERROR = 4;
+  // Execution was cancelled before completing (e.g. the client disconnected).
+  FAILURE_KIND_CANCELLED = 5;
 }
 
 // A trace event emitted during execution.

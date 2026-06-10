@@ -288,17 +288,15 @@ async fn test_python_value_error() {
     );
 }
 
-/// An uncaught exception surfaces the full Python traceback.
+/// An uncaught exception surfaces the full Python traceback as a
+/// [`eryx::Error::PythonException`] — a *script* failure, distinct from
+/// sandbox failures.
 ///
 /// Regression guard for a user report that `raise Exception()` "does not return
-/// anything". It does: an uncaught exception is returned as an `Err` whose
-/// message is the full traceback (captured from the redirected `sys.stderr`),
-/// including the exception *type* even when no message is supplied.
-///
-/// Note the channel: the traceback comes back through the error return, NOT in
-/// the `stderr` field of a successful `ExecutionOutput` (on the error path there
-/// is no output struct). The gRPC layer mirrors this — it puts the traceback in
-/// `ExecuteResult.error` and leaves `stderr` empty.
+/// anything". It does: the returned `Err` carries the full traceback (captured
+/// from the redirected `sys.stderr`), including the exception *type* even when no
+/// message is supplied. The dedicated variant lets callers tell "the script
+/// raised" apart from "the sandbox failed" without parsing the message.
 #[tokio::test]
 async fn test_python_uncaught_exception_returns_traceback() {
     let mut session = create_session().await;
@@ -309,6 +307,10 @@ async fn test_python_uncaught_exception_returns_traceback() {
         .run()
         .await
         .expect_err("raise Exception() should be an error");
+    assert!(
+        matches!(bare, eryx::Error::PythonException(_)),
+        "a raise should be a PythonException, got: {bare:?}"
+    );
     let bare = bare.to_string();
     assert!(
         !bare.trim().is_empty(),
@@ -325,11 +327,36 @@ async fn test_python_uncaught_exception_returns_traceback() {
         .execute(r#"raise ValueError("boom")"#)
         .run()
         .await
-        .expect_err(r#"raise ValueError("boom") should be an error"#)
-        .to_string();
+        .expect_err(r#"raise ValueError("boom") should be an error"#);
+    assert!(
+        matches!(with_msg, eryx::Error::PythonException(_)),
+        "a raise should be a PythonException, got: {with_msg:?}"
+    );
+    let with_msg = with_msg.to_string();
     assert!(
         with_msg.contains("ValueError") && with_msg.contains("boom"),
         "expected 'ValueError: boom' in traceback, got: {with_msg:?}"
+    );
+}
+
+/// NUL bytes in the code are rejected host-side as a sandbox/input failure
+/// ([`eryx::Error::Execution`]), NOT mistaken for a script exception.
+#[tokio::test]
+async fn test_null_bytes_in_code_is_not_python_exception() {
+    let mut session = create_session().await;
+
+    let err = session
+        .execute("x = 1\0y = 2")
+        .run()
+        .await
+        .expect_err("code with NUL bytes should be rejected");
+    assert!(
+        matches!(err, eryx::Error::Execution(_)),
+        "NUL bytes should be a sandbox Execution error, not PythonException, got: {err:?}"
+    );
+    assert!(
+        !matches!(err, eryx::Error::PythonException(_)),
+        "NUL bytes must not be classified as a script exception"
     );
 }
 

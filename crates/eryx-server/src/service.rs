@@ -8,7 +8,7 @@ use dashmap::DashMap;
 use eryx::callback_handler::{run_callback_handler, run_net_handler};
 use eryx::vfs::{ArcStorage, InMemoryStorage, VfsStorage};
 use eryx::{
-    Callback, CallbackRequest, ConnectionManager, NetConfig, NetRequest, OutputRequest,
+    Callback, CallbackRequest, ConnectionManager, Error, NetConfig, NetRequest, OutputRequest,
     PythonStateSnapshot, ResourceLimits, SandboxPool, SecretConfig, SessionExecutor, TraceRequest,
     VfsConfig, generate_placeholder, scrub_placeholders,
 };
@@ -23,8 +23,8 @@ use tracing_opentelemetry::OpenTelemetrySpanExt;
 
 use crate::callbacks::{self, CallbackResult, PendingCallbacks};
 use crate::proto::eryx::v1::{
-    ClientMessage, ExecuteResult, ExecuteStats, FileKind, ServerMessage, SupportingFile,
-    callback_response, client_message, server_message,
+    ClientMessage, ExecuteResult, ExecuteStats, FailureKind, FileKind, ServerMessage,
+    SupportingFile, callback_response, client_message, server_message,
 };
 
 /// Adapts tonic's [`MetadataMap`] to OpenTelemetry's [`Extractor`] trait,
@@ -375,6 +375,7 @@ impl crate::proto::eryx::v1::eryx_server::Eryx for EryxService {
                             state_snapshot: Vec::new(),
                             result: String::new(),
                             result_error: String::new(),
+                            failure_kind: FailureKind::Cancelled as i32,
                         }
                     }
                 };
@@ -551,6 +552,7 @@ async fn execute_with_session(
                 return ExecuteResult {
                     success: false,
                     error: format!("session creation failed: {e}"),
+                    failure_kind: FailureKind::SandboxError as i32,
                     ..Default::default()
                 };
             }
@@ -582,6 +584,7 @@ async fn execute_with_session(
                 return ExecuteResult {
                     success: false,
                     error: format!("session creation failed: {e}"),
+                    failure_kind: FailureKind::SandboxError as i32,
                     ..Default::default()
                 };
             }
@@ -878,12 +881,15 @@ async fn execute_with_session(
                 state_snapshot: snapshot_bytes,
                 result,
                 result_error,
+                failure_kind: FailureKind::Unspecified as i32,
             }
         }
         Err(e) => {
+            let failure_kind = classify_failure(&e);
             tracing::warn!(
                 success = false,
                 error = %e,
+                failure_kind = ?failure_kind,
                 "session execution completed"
             );
             metrics::counter!("eryx_executions_total", "status" => "error").increment(1);
@@ -902,18 +908,42 @@ async fn execute_with_session(
             } else {
                 streamed_stderr
             };
+            // For a script exception the traceback is already in `stderr`
+            // (CPython-style); `error` is reserved for sandbox failures, so leave
+            // it empty and let callers branch on `failure_kind`.
+            let error = if failure_kind == FailureKind::ScriptException {
+                String::new()
+            } else {
+                e.to_string()
+            };
             ExecuteResult {
                 success: false,
                 stdout,
                 stderr,
-                error: e.to_string(),
+                error,
                 stats: None,
                 // Still return the snapshot — the Go service decides whether to keep it.
                 state_snapshot: snapshot_bytes,
                 result: String::new(),
                 result_error: String::new(),
+                failure_kind: failure_kind as i32,
             }
         }
+    }
+}
+
+/// Classify a library [`Error`] into the proto [`FailureKind`].
+///
+/// [`Error::PythonException`] is a *script* failure — its traceback is surfaced
+/// in `stderr` — so it maps to [`FailureKind::ScriptException`]. Everything else
+/// is a sandbox-level failure whose message belongs in the `error` field.
+fn classify_failure(error: &Error) -> FailureKind {
+    match error {
+        Error::PythonException(_) => FailureKind::ScriptException,
+        Error::Timeout(_) => FailureKind::Timeout,
+        Error::FuelExhausted { .. } => FailureKind::FuelExhausted,
+        Error::Cancelled => FailureKind::Cancelled,
+        _ => FailureKind::SandboxError,
     }
 }
 
