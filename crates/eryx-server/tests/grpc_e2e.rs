@@ -314,6 +314,103 @@ async fn execute_null_bytes_is_sandbox_failure() {
     assert!(got_result, "never received ExecuteResult");
 }
 
+/// A secret surfaced via an uncaught exception's traceback must not leak. Two
+/// guarantees compound here: Python only ever sees a random *placeholder* (never
+/// the real value), and stderr scrubbing replaces that placeholder with
+/// `[REDACTED]`. Verified across the streamed events, the `stderr` field, and
+/// the (empty) `error` field.
+#[tokio::test]
+async fn execute_secret_in_uncaught_exception_is_scrubbed() {
+    use eryx_server::proto::eryx::v1::{FailureKind, OutputStream, SecretConfig};
+
+    const REAL_SECRET: &str = "s3cr3t-value-do-not-leak-42";
+
+    let channel = start_server().await;
+    let mut client = EryxClient::new(channel);
+
+    let (tx, rx) = mpsc::channel(16);
+    tx.send(ClientMessage {
+        message: Some(client_message::Message::ExecuteRequest(Box::new(
+            ExecuteRequest {
+                code: "import os\nraise Exception(os.environ['MY_SECRET'])".to_string(),
+                secrets: vec![SecretConfig {
+                    name: "MY_SECRET".to_string(),
+                    value: REAL_SECRET.to_string(),
+                    allowed_hosts: vec![],
+                }],
+                callbacks: vec![],
+                resource_limits: Some(ResourceLimits {
+                    execution_timeout_ms: 30_000,
+                    ..Default::default()
+                }),
+                enable_tracing: false,
+                persist_state: false,
+                state_snapshot: vec![],
+                files: vec![],
+                network_config: None,
+                ..Default::default()
+            },
+        ))),
+    })
+    .await
+    .unwrap();
+
+    let mut stream = client
+        .execute(ReceiverStream::new(rx))
+        .await
+        .unwrap()
+        .into_inner();
+
+    let mut got_result = false;
+    let mut stderr_events: Vec<String> = Vec::new();
+    while let Some(msg) = stream.message().await.unwrap() {
+        match msg.message {
+            Some(server_message::Message::OutputEvent(event)) => {
+                if event.stream == OutputStream::Stderr as i32 {
+                    stderr_events.push(event.data);
+                }
+            }
+            Some(server_message::Message::ExecuteResult(result)) => {
+                assert!(!result.success);
+                assert_eq!(result.failure_kind, FailureKind::ScriptException as i32);
+                // The real secret never reaches Python, so it cannot appear
+                // anywhere, and the placeholder must be scrubbed from stderr.
+                assert!(
+                    !result.stderr.contains(REAL_SECRET),
+                    "real secret leaked into stderr: {:?}",
+                    result.stderr
+                );
+                assert!(
+                    !result.stderr.contains("ERYX_SECRET_PLACEHOLDER_"),
+                    "unscrubbed placeholder leaked into stderr: {:?}",
+                    result.stderr
+                );
+                assert!(
+                    result.stderr.contains("[REDACTED]"),
+                    "expected the placeholder to be redacted in the traceback: {:?}",
+                    result.stderr
+                );
+                // `error` is empty for a script exception — nothing to leak there.
+                assert!(result.error.is_empty());
+                got_result = true;
+            }
+            _ => {}
+        }
+    }
+
+    assert!(got_result, "never received ExecuteResult");
+    // The real secret can never appear in the live stream either — Python only
+    // ever holds the placeholder. (We don't assert placeholder-absence on the
+    // raw stream: per-chunk scrubbing can't redact a placeholder split across
+    // two writes. The final `stderr` field, scrubbed whole, is the guarantee.)
+    let streamed = stderr_events.concat();
+    assert!(
+        !streamed.contains(REAL_SECRET),
+        "real secret leaked into streamed stderr events: {:?}",
+        stderr_events
+    );
+}
+
 #[tokio::test]
 async fn execute_with_echo_callback() {
     let channel = start_server().await;

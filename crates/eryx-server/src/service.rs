@@ -910,11 +910,15 @@ async fn execute_with_session(
             };
             // For a script exception the traceback is already in `stderr`
             // (CPython-style); `error` is reserved for sandbox failures, so leave
-            // it empty and let callers branch on `failure_kind`.
+            // it empty and let callers branch on `failure_kind`. For machinery
+            // failures, scrub the message as defense-in-depth in case a future
+            // error string ever interpolates user-derived input. (Secrets reach
+            // Python only as placeholders, so this scrubs placeholders, never
+            // real values; it is a no-op when no secrets are configured.)
             let error = if failure_kind == FailureKind::ScriptException {
                 String::new()
             } else {
-                e.to_string()
+                scrub_placeholders(&e.to_string(), &params.secrets)
             };
             ExecuteResult {
                 success: false,
