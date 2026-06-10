@@ -325,3 +325,197 @@ async fn concurrent_gather_callbacks_replay_regardless_of_order() {
         second_out.stdout
     );
 }
+
+// =============================================================================
+// Suspension test callbacks
+// =============================================================================
+
+/// A callback that suspends on its first `n` live invocations, then (if invoked
+/// again, e.g. after `resume_after` calls) succeeds. Counts live invocations.
+struct SuspendingCallback {
+    name: String,
+    reason: String,
+    live_calls: Arc<AtomicU32>,
+    /// Once live_calls exceeds this, the callback succeeds instead of suspending.
+    resume_after: u32,
+}
+
+impl Callback for SuspendingCallback {
+    fn name(&self) -> &str {
+        &self.name
+    }
+    fn description(&self) -> &str {
+        "Suspends pending approval"
+    }
+    fn parameters_schema(&self) -> Schema {
+        Schema::empty()
+    }
+    fn invoke(
+        &self,
+        _args: Value,
+    ) -> Pin<Box<dyn Future<Output = Result<Value, CallbackError>> + Send + '_>> {
+        let n = self.live_calls.fetch_add(1, Ordering::SeqCst) + 1;
+        let reason = self.reason.clone();
+        let resume_after = self.resume_after;
+        Box::pin(async move {
+            if n > resume_after {
+                Ok(json!({"approved": true}))
+            } else {
+                Err(CallbackError::Suspend(reason))
+            }
+        })
+    }
+}
+
+// =============================================================================
+// Suspension tests
+// =============================================================================
+
+/// Core guarantee: when a callback suspends, the guest is halted (fuel poisoned)
+/// the instant it suspends — a subsequent `marker` callback is NEVER invoked,
+/// and the suspension is surfaced with the callback name and reason.
+#[tokio::test]
+async fn suspend_halts_guest_before_subsequent_callback() {
+    let approve_calls = Arc::new(AtomicU32::new(0));
+    let marker_calls = Arc::new(AtomicU32::new(0));
+
+    let script = r#"
+try:
+    await approve()
+except Exception:
+    pass
+await marker()
+print("AFTER_MARKER")
+"#;
+
+    let sandbox = sandbox_builder()
+        .with_callback(SuspendingCallback {
+            name: "approve".to_string(),
+            reason: "needs human approval".to_string(),
+            live_calls: Arc::clone(&approve_calls),
+            resume_after: u32::MAX, // always suspends
+        })
+        .with_callback(CountingCallback {
+            name: "marker".to_string(),
+            live_calls: Arc::clone(&marker_calls),
+        })
+        .build()
+        .expect("build sandbox");
+
+    let outcome = sandbox.execute_with_journal(script).await;
+
+    assert_eq!(
+        approve_calls.load(Ordering::SeqCst),
+        1,
+        "approve invoked once"
+    );
+    assert_eq!(
+        marker_calls.load(Ordering::SeqCst),
+        0,
+        "marker must NEVER run after a suspension halts the guest"
+    );
+
+    let suspended = outcome
+        .suspended
+        .expect("execution should report suspension");
+    assert_eq!(suspended.name, "approve");
+    assert_eq!(suspended.reason, "needs human approval");
+
+    // The run halts with the dedicated Suspended error (not FuelExhausted).
+    let err = outcome
+        .result
+        .expect_err("suspended run yields an error result");
+    assert!(
+        matches!(err, eryx::Error::Suspended(_)),
+        "expected Error::Suspended, got: {err:?}"
+    );
+
+    // The suspended callback itself is not journaled.
+    assert!(
+        outcome.journal.entries.iter().all(|e| e.name != "approve"),
+        "suspended callback must not be journaled"
+    );
+}
+
+/// Suspend then resume: run 1 completes `fetch` then suspends at `approve`;
+/// persist the journal; run 2 replays `fetch` from cache (keyed) while `approve`
+/// runs live again and now succeeds.
+#[tokio::test]
+async fn suspend_then_resume_replays_completed_prefix() {
+    let fetch_calls = Arc::new(AtomicU32::new(0));
+    let approve_calls = Arc::new(AtomicU32::new(0));
+
+    let script = r#"
+data = await fetch(key="report")
+ok = await approve()
+print(f"fetched={data['live_call']} approved={ok['approved']}")
+"#;
+
+    // ---- Run 1: fetch completes, approve suspends. ----
+    let sandbox = sandbox_builder()
+        .with_callback(CountingCallback {
+            name: "fetch".to_string(),
+            live_calls: Arc::clone(&fetch_calls),
+        })
+        .with_callback(SuspendingCallback {
+            name: "approve".to_string(),
+            reason: "awaiting approval".to_string(),
+            live_calls: Arc::clone(&approve_calls),
+            resume_after: 1, // suspend on first call, succeed afterwards
+        })
+        .build()
+        .expect("build sandbox");
+
+    let first = sandbox.execute_with_journal(script).await;
+    assert_eq!(fetch_calls.load(Ordering::SeqCst), 1, "fetch ran live once");
+    assert_eq!(
+        approve_calls.load(Ordering::SeqCst),
+        1,
+        "approve ran live once"
+    );
+    let suspended = first.suspended.expect("run 1 suspends");
+    assert_eq!(suspended.name, "approve");
+    assert_eq!(
+        first.journal.entries.len(),
+        1,
+        "only fetch journaled; suspended approve is not"
+    );
+    assert_eq!(first.journal.entries[0].name, "fetch");
+
+    // ---- Run 2: resume with the journal. fetch replays, approve runs live. ----
+    let resume_sandbox = sandbox_builder()
+        .with_callback(CountingCallback {
+            name: "fetch".to_string(),
+            live_calls: Arc::clone(&fetch_calls),
+        })
+        .with_callback(SuspendingCallback {
+            name: "approve".to_string(),
+            reason: "awaiting approval".to_string(),
+            live_calls: Arc::clone(&approve_calls),
+            resume_after: 1, // already called once in run 1, so this call succeeds
+        })
+        .with_replay_journal(first.journal)
+        .build()
+        .expect("build resume sandbox");
+
+    let second = resume_sandbox.execute_with_journal(script).await;
+    let output = second.result.expect("resume run succeeds");
+
+    assert!(second.suspended.is_none(), "no suspension on resume");
+    assert_eq!(
+        fetch_calls.load(Ordering::SeqCst),
+        1,
+        "fetch NOT re-invoked — replayed from journal"
+    );
+    assert_eq!(
+        approve_calls.load(Ordering::SeqCst),
+        2,
+        "approve invoked live again on resume"
+    );
+    assert_eq!(second.replayed_callbacks, 1, "fetch replayed");
+    assert!(
+        output.stdout.contains("approved=True"),
+        "approve succeeded on resume, got: {}",
+        output.stdout
+    );
+}

@@ -23,8 +23,9 @@ use tracing_opentelemetry::OpenTelemetrySpanExt;
 
 use crate::callbacks::{self, CallbackResult, PendingCallbacks};
 use crate::proto::eryx::v1::{
-    ClientMessage, ExecuteResult, ExecuteStats, FailureKind, FileKind, ServerMessage,
-    SupportingFile, callback_response, client_message, server_message,
+    CallbackOutcome, ClientMessage, ExecuteResult, ExecuteStats, FailureKind, FileKind,
+    ServerMessage, SupportingFile, SuspendedCallback, callback_response, client_message,
+    server_message,
 };
 
 /// Adapts tonic's [`MetadataMap`] to OpenTelemetry's [`Extractor`] trait,
@@ -335,18 +336,31 @@ impl crate::proto::eryx::v1::eryx_server::Eryx for EryxService {
                 while let Ok(Some(msg)) = inbound.message().await {
                     if let Some(client_message::Message::CallbackResponse(resp)) = msg.message {
                         let request_id = resp.request_id;
-                        let result = match resp.result {
-                            Some(callback_response::Result::JsonResult(json)) => {
-                                tracing::debug!(%request_id, "dispatching callback result (ok)");
-                                CallbackResult::Ok(json)
-                            }
-                            Some(callback_response::Result::Error(err)) => {
-                                tracing::debug!(%request_id, "dispatching callback result (error)");
-                                CallbackResult::Err(err)
-                            }
-                            None => {
-                                tracing::debug!(%request_id, "dispatching callback result (empty)");
-                                CallbackResult::Err("empty callback response".to_string())
+                        // A SUSPEND outcome takes precedence over the result oneof:
+                        // the reason is carried in the `error` field. This defers
+                        // execution (halts the guest) rather than surfacing an
+                        // ordinary value/exception.
+                        let result = if resp.outcome == CallbackOutcome::Suspend as i32 {
+                            let reason = match resp.result {
+                                Some(callback_response::Result::Error(err)) => err,
+                                _ => String::new(),
+                            };
+                            tracing::debug!(%request_id, "dispatching callback result (suspend)");
+                            CallbackResult::Suspend(reason)
+                        } else {
+                            match resp.result {
+                                Some(callback_response::Result::JsonResult(json)) => {
+                                    tracing::debug!(%request_id, "dispatching callback result (ok)");
+                                    CallbackResult::Ok(json)
+                                }
+                                Some(callback_response::Result::Error(err)) => {
+                                    tracing::debug!(%request_id, "dispatching callback result (error)");
+                                    CallbackResult::Err(err)
+                                }
+                                None => {
+                                    tracing::debug!(%request_id, "dispatching callback result (empty)");
+                                    CallbackResult::Err("empty callback response".to_string())
+                                }
                             }
                         };
                         callbacks::dispatch_callback_response(
@@ -418,6 +432,8 @@ impl crate::proto::eryx::v1::eryx_server::Eryx for EryxService {
                             result_error: String::new(),
                             failure_kind: FailureKind::Cancelled as i32,
                             callback_journal: None,
+                            suspended: false,
+                            suspended_callback: None,
                         }
                     }
                 };
@@ -860,21 +876,43 @@ async fn execute_with_session(
     let (streamed_stdout, streamed_stderr) = output_accumulator.await.unwrap_or_default();
 
     // Extract the recorded replay journal. Read regardless of success/failure so
-    // the caller can replay completed callbacks even when a later one errored.
-    let (proto_journal, replayed_callbacks) = match &replay_state {
+    // the caller can replay completed callbacks even when a later one errored or
+    // suspended. The suspension metadata (if any) is read from the same guard.
+    let (proto_journal, replayed_callbacks, suspended_callback) = match &replay_state {
         Some(state) => {
             let guard = state
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             let mut journal = crate::replay::journal_to_proto(&guard.build_journal(params.code));
             params.journal_signer.sign(&mut journal, params.code);
-            (Some(journal), guard.replayed_count())
+            let suspended = guard.suspended().map(crate::replay::suspended_to_proto);
+            (Some(journal), guard.replayed_count(), suspended)
         }
-        None => (None, 0),
+        None => (None, 0, None),
     };
+    // A client can reply CALLBACK_OUTCOME_SUSPEND even without opting into replay.
+    // In that case there is no ReplayState to record the suspended callback's
+    // name/args, but the executor still returns Error::Suspended. Derive the
+    // suspension from the error so the outcome is reported as a suspension (with
+    // its reason) rather than mis-surfaced as an ordinary sandbox error. There is
+    // no prefix journal to resume from in this mode, but the signal is honest.
+    let suspended_callback = suspended_callback.or_else(|| match &exec_result {
+        Err(Error::Suspended(reason)) => Some(SuspendedCallback {
+            name: String::new(),
+            args_json: String::new(),
+            reason: reason.clone(),
+        }),
+        _ => None,
+    });
+    let suspended = suspended_callback.is_some();
 
-    // Snapshot state after execution (only when persistence is requested).
-    let snapshot_bytes = if params.state.is_some() {
+    // Snapshot state after execution (only when persistence is requested, and not
+    // after a suspension: the guest's fuel is poisoned to 0 once a callback
+    // suspends, so invoking the snapshot_state export would trap immediately
+    // (OutOfFuel) and yield a misleading empty snapshot — which could clobber
+    // prior session state. Resume goes through journal replay, not the snapshot,
+    // so the snapshot is not needed here anyway.)
+    let snapshot_bytes = if params.state.is_some() && !suspended {
         let snapshot_start = Instant::now();
         match session.snapshot_state().await {
             Ok(snapshot) => {
@@ -959,6 +997,8 @@ async fn execute_with_session(
                 result_error,
                 failure_kind: FailureKind::Unspecified as i32,
                 callback_journal: proto_journal,
+                suspended,
+                suspended_callback,
             }
         }
         Err(e) => {
@@ -1022,6 +1062,8 @@ async fn execute_with_session(
                 result_error: String::new(),
                 failure_kind: failure_kind as i32,
                 callback_journal: proto_journal,
+                suspended,
+                suspended_callback,
             }
         }
     }
@@ -1030,14 +1072,18 @@ async fn execute_with_session(
 /// Classify a library [`Error`] into the proto [`FailureKind`].
 ///
 /// [`Error::PythonException`] is a *script* failure — its traceback is surfaced
-/// in `stderr` — so it maps to [`FailureKind::ScriptException`]. Everything else
-/// is a sandbox-level failure whose message belongs in the `error` field.
+/// in `stderr` — so it maps to [`FailureKind::ScriptException`].
+/// [`Error::Suspended`] is an expected control outcome (a callback deferred), not
+/// a failure, so it maps to [`FailureKind::Suspended`]; callers should branch on
+/// the `suspended` flag first. Everything else is a sandbox-level failure whose
+/// message belongs in the `error` field.
 fn classify_failure(error: &Error) -> FailureKind {
     match error {
         Error::PythonException(_) => FailureKind::ScriptException,
         Error::Timeout(_) => FailureKind::Timeout,
         Error::FuelExhausted { .. } => FailureKind::FuelExhausted,
         Error::Cancelled => FailureKind::Cancelled,
+        Error::Suspended(_) => FailureKind::Suspended,
         _ => FailureKind::SandboxError,
     }
 }

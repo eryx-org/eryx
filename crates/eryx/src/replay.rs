@@ -78,6 +78,23 @@
 //! code. The wrapper consults a shared [`ReplayState`] before delegating to the
 //! real callback.
 //!
+//! # Suspension
+//!
+//! A callback can return [`CallbackError::Suspend`] to defer its work
+//! ("retry later"). When that happens the wrapper records a [`SuspendedCallback`]
+//! (name, args, opaque reason) but does **not** journal the call, and the
+//! suspension propagates back to the host import, which poisons the WASM fuel to
+//! halt the guest synchronously. The suspended call therefore re-runs live when a
+//! later run replays the recorded prefix. Two layers guarantee no further
+//! callback runs after a suspension:
+//!
+//! 1. A **synchronous gate**: once any callback has suspended, every callback
+//!    *dispatched after* that point funneling through [`ReplayState`] is rejected
+//!    (the internal `Decision::AlreadySuspended` path), covering later `gather`
+//!    siblings.
+//! 2. The **fuel-poison halt** in the host import, which traps the guest before
+//!    it can dispatch any further callback or perform I/O.
+//!
 //! # Security: journal trust boundary
 //!
 //! Replayed journal entries are returned to Python code as-is — eryx does not
@@ -102,10 +119,12 @@ use crate::schema::Schema;
 
 /// The outcome of a callback invocation, as understood by replay.
 ///
-/// This mirrors what a callback can communicate back through the
-/// [`Callback`] trait: a success value or a permanent error. Both
-/// [`CallbackOutcome::Ok`] and [`CallbackOutcome::Err`] are journaled so that a
-/// later replay reproduces the same result.
+/// This mirrors what a callback can communicate back through the [`Callback`]
+/// trait: a success value, a permanent error, or a request to suspend. Only
+/// [`CallbackOutcome::Ok`] and [`CallbackOutcome::Err`] are ever journaled so a
+/// later replay reproduces the same result; [`CallbackOutcome::Suspend`]
+/// terminates execution before an entry is recorded, so the suspended call is
+/// re-attempted live on the resuming run.
 #[derive(Debug, Clone)]
 pub enum CallbackOutcome {
     /// The callback succeeded. The value is returned to Python and journaled.
@@ -113,6 +132,10 @@ pub enum CallbackOutcome {
     /// The callback failed permanently. Python receives an exception and the
     /// error is journaled (so a later replay reproduces the same failure).
     Err(String),
+    /// The callback asked to suspend (via [`CallbackError::Suspend`]). Execution
+    /// stops, the suspension is surfaced to the caller, and nothing is journaled
+    /// for this call. The reason string is opaque to eryx.
+    Suspend(String),
 }
 
 impl CallbackOutcome {
@@ -120,6 +143,7 @@ impl CallbackOutcome {
     fn from_invoke(result: &Result<serde_json::Value, CallbackError>) -> Self {
         match result {
             Ok(value) => Self::Ok(value.clone()),
+            Err(CallbackError::Suspend(reason)) => Self::Suspend(reason.clone()),
             Err(other) => Self::Err(other.to_string()),
         }
     }
@@ -173,6 +197,21 @@ impl CallbackJournal {
     }
 }
 
+/// Details of the callback that suspended execution.
+///
+/// Recorded when a callback returns [`CallbackError::Suspend`]; surfaced to the
+/// caller (e.g. via [`ReplayOutcome::suspended`](crate::ReplayOutcome::suspended))
+/// so it can act on the reason and later resume by re-executing with the journal.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SuspendedCallback {
+    /// Name of the callback that suspended.
+    pub name: String,
+    /// Canonicalized arguments JSON the callback was invoked with.
+    pub args_json: String,
+    /// The opaque reason string the callback returned.
+    pub reason: String,
+}
+
 /// Mutable replay state shared across all wrapped callbacks in one execution.
 ///
 /// A single state is shared (behind a mutex) by every [`ReplayCallback`] in an
@@ -196,8 +235,18 @@ pub struct ReplayState {
     /// only an entry index/order tag — matching no longer depends on it.
     next_seq: usize,
     /// Entries recorded for *this* execution, indexed by sequence number.
-    /// `None` marks a reserved-but-unrecorded slot (in-flight).
+    /// `None` marks a reserved-but-unrecorded slot (in-flight or suspended).
     entries: Vec<Option<CallbackJournalEntry>>,
+    /// Set if a callback suspended; only the first suspension is recorded. Once
+    /// set, every subsequent invocation is rejected (`Decision::AlreadySuspended`)
+    /// so no further callback runs after a suspension.
+    suspended: Option<SuspendedCallback>,
+    /// Initiation sequence of the suspending callback, if any. Concurrently
+    /// dispatched siblings (e.g. an `asyncio.gather` batch) reserve sequence
+    /// numbers around the suspending call and may complete and record *after* it;
+    /// the built journal drops every entry at or after this sequence so it is a
+    /// clean prefix that ends before the suspension point.
+    suspend_seq: Option<usize>,
     /// How many invocations were served from the previous journal.
     replayed_count: u32,
 }
@@ -208,6 +257,19 @@ enum Decision {
     Hit(Result<serde_json::Value, String>),
     /// Not in the journal (key absent or exhausted); invoke live and record at `seq`.
     Miss { seq: usize },
+    /// A previous callback already suspended; reject this invocation without
+    /// invoking the real callback or recording anything.
+    ///
+    /// This is the deterministic guarantee that no side-effecting callback runs
+    /// after a suspension: because every invocation funnels through `decide`,
+    /// any callback the guest dispatches *after* the suspension is rejected here.
+    /// Fuel poisoning already halts the guest synchronously at the suspending
+    /// callback's import, so in practice no further callback is dispatched; this
+    /// gate is a belt-and-suspenders guard that also rejects any concurrent
+    /// `asyncio.gather` sibling dispatched *after* the suspension is recorded. (A
+    /// sibling that was already past `decide` completes and is journaled normally;
+    /// `build_journal` then truncates it back out of the recorded prefix.)
+    AlreadySuspended,
 }
 
 impl ReplayState {
@@ -232,6 +294,8 @@ impl ReplayState {
             live_mode: false,
             next_seq: 0,
             entries: Vec::new(),
+            suspended: None,
+            suspend_seq: None,
             replayed_count: 0,
         }
     }
@@ -246,6 +310,13 @@ impl ReplayState {
     /// the sticky divergence guard, after which every invocation runs live so a
     /// later same-key call cannot replay a now-stale result.
     fn decide(&mut self, name: &str, args_hash: u64, args_json: &str) -> Decision {
+        // Once any callback has suspended, reject every subsequent invocation
+        // without invoking the real callback or recording anything. No seq is
+        // reserved, so the rejected call leaves no hole in the journal.
+        if self.suspended.is_some() {
+            return Decision::AlreadySuspended;
+        }
+
         let seq = self.next_seq;
         self.next_seq += 1;
         self.ensure_slot(seq);
@@ -292,6 +363,23 @@ impl ReplayState {
         self.entries[seq] = Some(entry);
     }
 
+    /// Record that a callback suspended at initiation sequence `seq`. Only the
+    /// first suspension is kept; the suspended call itself is *not* journaled (so
+    /// it re-runs live on resume). The sequence is remembered so `build_journal`
+    /// can truncate entries recorded by concurrent siblings after this point.
+    fn record_suspend(&mut self, seq: usize, suspended: SuspendedCallback) {
+        if self.suspended.is_none() {
+            self.suspended = Some(suspended);
+            self.suspend_seq = Some(seq);
+        }
+    }
+
+    /// The callback that suspended this execution, if any.
+    #[must_use]
+    pub fn suspended(&self) -> Option<&SuspendedCallback> {
+        self.suspended.as_ref()
+    }
+
     /// Number of invocations served from the previous journal.
     #[must_use]
     pub fn replayed_count(&self) -> u32 {
@@ -301,12 +389,27 @@ impl ReplayState {
     /// Build the journal recorded during this run for the given script.
     ///
     /// Reserved-but-unrecorded slots (e.g. in-flight callbacks) are dropped;
-    /// recorded entries keep their dispatch-order positions.
+    /// recorded entries keep their dispatch-order positions. If a callback
+    /// suspended, entries initiated at or after the suspending call are also
+    /// dropped — a concurrently dispatched sibling may have completed and
+    /// recorded around the suspension point, but the journal must be a clean
+    /// prefix that ends before the suspension so a later run replays only what
+    /// truly preceded it.
     #[must_use]
     pub fn build_journal(&self, code: impl Into<String>) -> CallbackJournal {
+        let entries = self
+            .entries
+            .iter()
+            .flatten()
+            .filter(|entry| match self.suspend_seq {
+                Some(seq) => (entry.index as usize) < seq,
+                None => true,
+            })
+            .cloned()
+            .collect();
         CallbackJournal {
             code: code.into(),
-            entries: self.entries.iter().flatten().cloned().collect(),
+            entries,
         }
     }
 }
@@ -366,6 +469,11 @@ impl Callback for ReplayCallback {
         let decision = lock_state(&self.state).decide(&name, args_hash, &args_json);
 
         match decision {
+            Decision::AlreadySuspended => Box::pin(async {
+                Err(CallbackError::Suspend(
+                    "execution already suspended by a previous callback".into(),
+                ))
+            }),
             Decision::Hit(result) => {
                 let invoke_result = match result {
                     Ok(value) => Ok(value),
@@ -400,6 +508,19 @@ impl Callback for ReplayCallback {
                                 args_json,
                                 result: Err(message),
                             });
+                        }
+                        CallbackOutcome::Suspend(reason) => {
+                            // Do not journal a suspended callback: only record
+                            // that it suspended so the caller can act on it. The
+                            // call re-runs live when execution resumes.
+                            lock_state(&state).record_suspend(
+                                seq,
+                                SuspendedCallback {
+                                    name,
+                                    args_json,
+                                    reason,
+                                },
+                            );
                         }
                     }
                     result
@@ -488,6 +609,7 @@ mod tests {
     enum Outcome {
         Ok(serde_json::Value),
         Err(String),
+        Suspend(String),
     }
 
     impl Callback for ProgrammableCallback {
@@ -511,6 +633,7 @@ mod tests {
                 match outcome {
                     Outcome::Ok(v) => Ok(v),
                     Outcome::Err(m) => Err(CallbackError::ExecutionFailed(m)),
+                    Outcome::Suspend(r) => Err(CallbackError::Suspend(r)),
                 }
             })
         }
@@ -810,5 +933,136 @@ mod tests {
             journal.entries[0].result,
             Err("execution failed: boom".to_string())
         );
+    }
+
+    // ---- suspension ---------------------------------------------------------
+
+    #[test]
+    fn outcome_classifies_suspend() {
+        assert!(matches!(
+            CallbackOutcome::from_invoke(&Err(CallbackError::Suspend("wait".into()))),
+            CallbackOutcome::Suspend(_)
+        ));
+    }
+
+    #[tokio::test]
+    async fn suspend_records_metadata_without_journaling() {
+        // The replay layer records the suspension metadata and does NOT journal
+        // the suspended callback (the actual guest halt is the fuel-poison in the
+        // host import, exercised by the integration tests).
+        let state = Arc::new(Mutex::new(ReplayState::new(CallbackJournal::new("code"))));
+
+        let (suspender, suspend_calls) = programmable("approve", Outcome::Suspend("wait".into()));
+        let suspend_wrapper = ReplayCallback::new(suspender, Arc::clone(&state));
+        let err = suspend_wrapper.invoke(json!({"id": 5})).await.unwrap_err();
+        assert!(matches!(err, CallbackError::Suspend(_)));
+        assert_eq!(suspend_calls.load(Ordering::SeqCst), 1);
+
+        let st = lock_state(&state);
+        let suspended = st.suspended().expect("suspension should be recorded");
+        assert_eq!(suspended.name, "approve");
+        assert_eq!(suspended.reason, "wait");
+        assert!(
+            st.build_journal("code").is_empty(),
+            "suspended callback must not be journaled"
+        );
+    }
+
+    #[tokio::test]
+    async fn callbacks_dispatched_after_suspension_are_rejected() {
+        // A callback the guest dispatches *after* the suspension is recorded
+        // (e.g. an in-flight gather sibling) must be rejected without invoking
+        // the real callback — deterministically, the gate alongside fuel-poison.
+        let state = Arc::new(Mutex::new(ReplayState::new(CallbackJournal::new("code"))));
+
+        let (suspender, _) = programmable("approve", Outcome::Suspend("wait".into()));
+        let suspend_wrapper = ReplayCallback::new(suspender, Arc::clone(&state));
+        let _ = suspend_wrapper.invoke(json!({})).await;
+
+        let (fetch, fetch_calls) = programmable("fetch", Outcome::Ok(json!("live")));
+        let fetch_wrapper = ReplayCallback::new(fetch, Arc::clone(&state));
+        let err = fetch_wrapper.invoke(json!({})).await.unwrap_err();
+        assert!(matches!(err, CallbackError::Suspend(_)));
+        assert_eq!(
+            fetch_calls.load(Ordering::SeqCst),
+            0,
+            "callback dispatched after suspension must not run"
+        );
+
+        // Nothing new journaled by the rejected call.
+        let st = lock_state(&state);
+        assert!(st.build_journal("code").is_empty());
+    }
+
+    #[test]
+    fn build_journal_truncates_entries_after_suspend_point() {
+        // Three callbacks are dispatched concurrently, reserving seq 0, 1, 2. The
+        // seq-0 and seq-2 calls complete and record; the seq-1 call suspends. The
+        // built journal must be a clean prefix: only the entry initiated *before*
+        // the suspending call (seq 0) is kept. The seq-2 sibling that happened to
+        // complete around the suspension is dropped, so a later resume does not
+        // replay/skip a callback that logically followed the suspension point.
+        let mut st = ReplayState::new(CallbackJournal::new("code"));
+        let args = json!({});
+        let h = fnv1a_64(canonical_json(&args).as_bytes());
+
+        assert!(matches!(st.decide("a", h, "{}"), Decision::Miss { seq: 0 }));
+        assert!(matches!(st.decide("b", h, "{}"), Decision::Miss { seq: 1 }));
+        assert!(matches!(st.decide("c", h, "{}"), Decision::Miss { seq: 2 }));
+
+        st.record_live(entry_ok(0, "a", &args, json!("a-done")));
+        st.record_live(entry_ok(2, "c", &args, json!("c-done")));
+        st.record_suspend(
+            1,
+            SuspendedCallback {
+                name: "b".into(),
+                args_json: "{}".into(),
+                reason: "wait".into(),
+            },
+        );
+
+        let journal = st.build_journal("code");
+        assert_eq!(
+            journal.entries.len(),
+            1,
+            "only the pre-suspend prefix is kept"
+        );
+        assert_eq!(journal.entries[0].index, 0);
+        assert_eq!(journal.entries[0].name, "a");
+    }
+
+    #[tokio::test]
+    async fn resume_replays_prefix_and_reruns_suspended_call_live() {
+        // Run 1 completed `fetch` (journaled) then `approve` suspended (not
+        // journaled). On resume the journal has only `fetch`; keyed matching
+        // replays it from cache while `approve` runs live again.
+        let fetch_args = json!({"q": "x"});
+        let previous = CallbackJournal {
+            code: "code".into(),
+            entries: vec![entry_ok(0, "fetch", &fetch_args, json!("cached"))],
+        };
+        let state = Arc::new(Mutex::new(ReplayState::new(previous)));
+
+        // `fetch` replays from cache (not invoked live).
+        let (fetch, fetch_calls) = programmable("fetch", Outcome::Ok(json!("LIVE")));
+        let fetch_wrapper = ReplayCallback::new(fetch, Arc::clone(&state));
+        let rf = fetch_wrapper.invoke(fetch_args.clone()).await.unwrap();
+        assert_eq!(rf, json!("cached"), "fetch replayed from cache");
+        assert_eq!(
+            fetch_calls.load(Ordering::SeqCst),
+            0,
+            "fetch not re-invoked"
+        );
+
+        // `approve` is not in the journal -> runs live, and this time succeeds.
+        let (approve, approve_calls) = programmable("approve", Outcome::Ok(json!("approved")));
+        let approve_wrapper = ReplayCallback::new(approve, Arc::clone(&state));
+        let ra = approve_wrapper.invoke(json!({})).await.unwrap();
+        assert_eq!(ra, json!("approved"));
+        assert_eq!(approve_calls.load(Ordering::SeqCst), 1, "approve runs live");
+
+        let st = lock_state(&state);
+        assert_eq!(st.replayed_count(), 1, "only fetch replayed");
+        assert!(st.suspended().is_none(), "no suspension on the resume run");
     }
 }

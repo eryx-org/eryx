@@ -242,9 +242,19 @@ message CallbackResponse {
     // JSON-encoded result on success.
     string json_result = 2;
 
-    // Error message on failure.
+    // Error message on failure, or the opaque suspend reason when
+    // `outcome == CALLBACK_OUTCOME_SUSPEND`.
     string error = 3;
   }
+
+  // How this callback resolved. Defaults to CALLBACK_OUTCOME_OK / ERROR based on
+  // the `result` oneof for backwards compatibility; set to
+  // CALLBACK_OUTCOME_SUSPEND to defer execution. When SUSPEND, execution stops
+  // cleanly: the callback is reported in ExecuteResult.suspended_callback, the
+  // guest is halted before any further code runs, and the journal of completed
+  // callbacks is returned so a later run can replay the prefix and resume. The
+  // suspend reason is carried in the `error` field of the `result` oneof.
+  CallbackOutcome outcome = 4;
 }
 
 // How a callback invocation resolved, for journaling and replay.
@@ -253,6 +263,19 @@ enum CallbackOutcome {
   CALLBACK_OUTCOME_OK = 0;
   // Permanent failure — the `value` is the error message.
   CALLBACK_OUTCOME_ERROR = 1;
+  // Suspend — defer execution. Only valid in CallbackResponse; never recorded in
+  // a journal entry (SUSPEND terminates execution before an entry is written).
+  CALLBACK_OUTCOME_SUSPEND = 2;
+}
+
+// Details of the callback that suspended execution.
+message SuspendedCallback {
+  // Name of the callback that suspended.
+  string name = 1;
+  // Canonicalized arguments JSON the callback was invoked with.
+  string args_json = 2;
+  // The opaque reason string the callback returned.
+  string reason = 3;
 }
 
 // A single recorded callback invocation in a replay journal.
@@ -356,6 +379,16 @@ message ExecuteResult {
   // Present only when the request opted into replay (sent a callback_journal).
   // Echo it back in the next ExecuteRequest to replay completed callbacks.
   CallbackJournal callback_journal = 10;
+
+  // True if a callback requested suspension (CALLBACK_OUTCOME_SUSPEND). When
+  // set, `success` is false and `error` describes the halted (fuel-poisoned)
+  // execution — that is expected, not a failure. Branch on `suspended` first;
+  // the suspension details are in `suspended_callback` and the prefix journal is
+  // in `callback_journal`, ready to resume.
+  bool suspended = 11;
+
+  // Details of the callback that suspended, when `suspended` is true.
+  SuspendedCallback suspended_callback = 12;
 }
 
 // Why an execution failed, when success is false.
@@ -375,6 +408,12 @@ enum FailureKind {
   FAILURE_KIND_SANDBOX_ERROR = 4;
   // Execution was cancelled before completing (e.g. the client disconnected).
   FAILURE_KIND_CANCELLED = 5;
+  // A callback requested suspension (CALLBACK_OUTCOME_SUSPEND). This is an
+  // expected control outcome, not a failure: `suspended` is true and the prefix
+  // journal / `suspended_callback` carry the state needed to resume. Branch on
+  // `suspended` first; this kind is a secondary signal for consumers that key
+  // solely on `failure_kind`.
+  FAILURE_KIND_SUSPENDED = 6;
 }
 
 // A trace event emitted during execution.

@@ -19,7 +19,9 @@ use crate::net::ConnectionManager;
 use crate::sandbox::ResourceLimits;
 use crate::secrets::SecretConfig;
 use crate::trace::{OutputHandler, TraceEvent, TraceEventKind, TraceHandler};
-use crate::wasm::{CallbackRequest, NetRequest, OutputRequest, TraceRequest, parse_trace_event};
+use crate::wasm::{
+    CallbackHostResult, CallbackRequest, NetRequest, OutputRequest, TraceRequest, parse_trace_event,
+};
 
 /// Type alias for the in-flight callback futures collection.
 type InFlightCallbacks = FuturesUnordered<Pin<Box<dyn Future<Output = ()> + Send>>>;
@@ -98,17 +100,18 @@ fn create_callback_future(
     if let Some(max) = resource_limits.max_callback_invocations
         && current_count >= max
     {
-        let _ = request
-            .response_tx
-            .send(Err(format!("Callback limit exceeded ({max} invocations)")));
+        let _ = request.response_tx.send(CallbackHostResult::Err(format!(
+            "Callback limit exceeded ({max} invocations)"
+        )));
         return None;
     }
 
     // Find the callback
     let Some(callback) = callbacks_map.get(&request.name).cloned() else {
-        let _ = request
-            .response_tx
-            .send(Err(format!("Callback '{}' not found", request.name)));
+        let _ = request.response_tx.send(CallbackHostResult::Err(format!(
+            "Callback '{}' not found",
+            request.name
+        )));
         return None;
     };
 
@@ -116,9 +119,9 @@ fn create_callback_future(
     let args: serde_json::Value = match serde_json::from_str(&request.arguments_json) {
         Ok(v) => v,
         Err(e) => {
-            let _ = request
-                .response_tx
-                .send(Err(format!("Invalid arguments JSON: {e}")));
+            let _ = request.response_tx.send(CallbackHostResult::Err(format!(
+                "Invalid arguments JSON: {e}"
+            )));
             return None;
         }
     };
@@ -137,13 +140,21 @@ fn create_callback_future(
             invoke_future.await
         };
 
-        // Scrub secret placeholders from callback results
+        // Scrub secret placeholders from callback results. A `Suspend` is mapped
+        // to its own host-result variant so the `invoke` import can halt the
+        // guest (it does not surface as an ordinary Python exception path).
         let result = match callback_result {
-            Ok(value) => Ok(crate::secrets::scrub_placeholders(
+            Ok(value) => CallbackHostResult::Ok(crate::secrets::scrub_placeholders(
                 &value.to_string(),
                 &secrets,
             )),
-            Err(e) => Err(crate::secrets::scrub_placeholders(&e.to_string(), &secrets)),
+            Err(CallbackError::Suspend(reason)) => {
+                CallbackHostResult::Suspend(crate::secrets::scrub_placeholders(&reason, &secrets))
+            }
+            Err(e) => CallbackHostResult::Err(crate::secrets::scrub_placeholders(
+                &e.to_string(),
+                &secrets,
+            )),
         };
 
         // Send result back to the Python code
