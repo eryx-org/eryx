@@ -86,6 +86,8 @@ pub enum NetRequest {
         host: String,
         /// Target port number.
         port: u16,
+        /// Guest-requested connect timeout in milliseconds (`0` = host default).
+        timeout_ms: u32,
         /// Channel for returning the connection handle (or error).
         response_tx: oneshot::Sender<Result<u32, crate::net::TcpError>>,
     },
@@ -95,6 +97,8 @@ pub enum NetRequest {
         handle: u32,
         /// Maximum number of bytes to read.
         len: u32,
+        /// Guest-requested I/O timeout in milliseconds (`0` = host default).
+        timeout_ms: u32,
         /// Channel for returning the read bytes (or error).
         response_tx: oneshot::Sender<Result<Vec<u8>, crate::net::TcpError>>,
     },
@@ -104,6 +108,8 @@ pub enum NetRequest {
         handle: u32,
         /// Bytes to write.
         data: Vec<u8>,
+        /// Guest-requested I/O timeout in milliseconds (`0` = host default).
+        timeout_ms: u32,
         /// Channel for returning the number of bytes written (or error).
         response_tx: oneshot::Sender<Result<u32, crate::net::TcpError>>,
     },
@@ -120,6 +126,8 @@ pub enum NetRequest {
         tcp_handle: u32,
         /// SNI hostname for the TLS handshake.
         hostname: String,
+        /// Guest-requested handshake timeout in milliseconds (`0` = host default).
+        timeout_ms: u32,
         /// Channel for returning the TLS connection handle (or error).
         response_tx: oneshot::Sender<Result<u32, crate::net::TlsError>>,
     },
@@ -129,6 +137,8 @@ pub enum NetRequest {
         handle: u32,
         /// Maximum number of bytes to read.
         len: u32,
+        /// Guest-requested I/O timeout in milliseconds (`0` = host default).
+        timeout_ms: u32,
         /// Channel for returning the read bytes (or error).
         response_tx: oneshot::Sender<Result<Vec<u8>, crate::net::TlsError>>,
     },
@@ -138,6 +148,8 @@ pub enum NetRequest {
         handle: u32,
         /// Bytes to write.
         data: Vec<u8>,
+        /// Guest-requested I/O timeout in milliseconds (`0` = host default).
+        timeout_ms: u32,
         /// Channel for returning the number of bytes written (or error).
         response_tx: oneshot::Sender<Result<u32, crate::net::TlsError>>,
     },
@@ -581,8 +593,13 @@ fn to_wit_tls_error(e: crate::net::TlsError) -> tls::TlsError {
 // ============================================================================
 
 impl tcp::Host for ExecutorState {
-    async fn connect(&mut self, host: String, port: u16) -> Result<u32, tcp::TcpError> {
-        tracing::debug!(host = %host, port, "TCP connect requested");
+    async fn connect(
+        &mut self,
+        host: String,
+        port: u16,
+        timeout_ms: u32,
+    ) -> Result<u32, tcp::TcpError> {
+        tracing::debug!(host = %host, port, timeout_ms, "TCP connect requested");
 
         let tx = self.net_tx.clone().ok_or_else(|| {
             tcp::TcpError::NotPermitted("networking not enabled for this sandbox".into())
@@ -593,6 +610,7 @@ impl tcp::Host for ExecutorState {
         let request = NetRequest::TcpConnect {
             host,
             port,
+            timeout_ms,
             response_tx,
         };
 
@@ -608,8 +626,13 @@ impl tcp::Host for ExecutorState {
             .map_err(to_wit_tcp_error)
     }
 
-    async fn read(&mut self, handle: u32, len: u32) -> Result<Vec<u8>, tcp::TcpError> {
-        tracing::trace!(handle, len, "TCP read requested");
+    async fn read(
+        &mut self,
+        handle: u32,
+        len: u32,
+        timeout_ms: u32,
+    ) -> Result<Vec<u8>, tcp::TcpError> {
+        tracing::trace!(handle, len, timeout_ms, "TCP read requested");
 
         let tx = self.net_tx.clone().ok_or_else(|| {
             tcp::TcpError::NotPermitted("networking not enabled for this sandbox".into())
@@ -620,6 +643,7 @@ impl tcp::Host for ExecutorState {
         let request = NetRequest::TcpRead {
             handle,
             len,
+            timeout_ms,
             response_tx,
         };
 
@@ -633,8 +657,13 @@ impl tcp::Host for ExecutorState {
             .map_err(to_wit_tcp_error)
     }
 
-    async fn write(&mut self, handle: u32, data: Vec<u8>) -> Result<u32, tcp::TcpError> {
-        tracing::trace!(handle, len = data.len(), "TCP write requested");
+    async fn write(
+        &mut self,
+        handle: u32,
+        timeout_ms: u32,
+        data: Vec<u8>,
+    ) -> Result<u32, tcp::TcpError> {
+        tracing::trace!(handle, len = data.len(), timeout_ms, "TCP write requested");
 
         let tx = self.net_tx.clone().ok_or_else(|| {
             tcp::TcpError::NotPermitted("networking not enabled for this sandbox".into())
@@ -645,6 +674,7 @@ impl tcp::Host for ExecutorState {
         let request = NetRequest::TcpWrite {
             handle,
             data,
+            timeout_ms,
             response_tx,
         };
 
@@ -672,8 +702,13 @@ impl tcp::Host for ExecutorState {
 // ============================================================================
 
 impl tls::Host for ExecutorState {
-    async fn upgrade(&mut self, tcp_handle: u32, hostname: String) -> Result<u32, tls::TlsError> {
-        tracing::debug!(tcp_handle, hostname = %hostname, "TLS upgrade requested");
+    async fn upgrade(
+        &mut self,
+        tcp_handle: u32,
+        hostname: String,
+        timeout_ms: u32,
+    ) -> Result<u32, tls::TlsError> {
+        tracing::debug!(tcp_handle, hostname = %hostname, timeout_ms, "TLS upgrade requested");
 
         let tx = self.net_tx.clone().ok_or_else(|| {
             tls::TlsError::Tcp(tcp::TcpError::NotPermitted(
@@ -686,6 +721,7 @@ impl tls::Host for ExecutorState {
         let request = NetRequest::TlsUpgrade {
             tcp_handle,
             hostname,
+            timeout_ms,
             response_tx,
         };
 
@@ -705,8 +741,13 @@ impl tls::Host for ExecutorState {
             .map_err(to_wit_tls_error)
     }
 
-    async fn read(&mut self, handle: u32, len: u32) -> Result<Vec<u8>, tls::TlsError> {
-        tracing::trace!(handle, len, "TLS read requested");
+    async fn read(
+        &mut self,
+        handle: u32,
+        len: u32,
+        timeout_ms: u32,
+    ) -> Result<Vec<u8>, tls::TlsError> {
+        tracing::trace!(handle, len, timeout_ms, "TLS read requested");
 
         let tx = self.net_tx.clone().ok_or_else(|| {
             tls::TlsError::Tcp(tcp::TcpError::NotPermitted(
@@ -719,6 +760,7 @@ impl tls::Host for ExecutorState {
         let request = NetRequest::TlsRead {
             handle,
             len,
+            timeout_ms,
             response_tx,
         };
 
@@ -738,8 +780,13 @@ impl tls::Host for ExecutorState {
             .map_err(to_wit_tls_error)
     }
 
-    async fn write(&mut self, handle: u32, data: Vec<u8>) -> Result<u32, tls::TlsError> {
-        tracing::trace!(handle, len = data.len(), "TLS write requested");
+    async fn write(
+        &mut self,
+        handle: u32,
+        timeout_ms: u32,
+        data: Vec<u8>,
+    ) -> Result<u32, tls::TlsError> {
+        tracing::trace!(handle, len = data.len(), timeout_ms, "TLS write requested");
 
         let tx = self.net_tx.clone().ok_or_else(|| {
             tls::TlsError::Tcp(tcp::TcpError::NotPermitted(
@@ -752,6 +799,7 @@ impl tls::Host for ExecutorState {
         let request = NetRequest::TlsWrite {
             handle,
             data,
+            timeout_ms,
             response_tx,
         };
 

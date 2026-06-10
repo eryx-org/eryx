@@ -1079,3 +1079,143 @@ else:
         output.stdout
     );
 }
+
+// =============================================================================
+// Guest socket timeout propagation
+// =============================================================================
+//
+// These tests verify that a Python-level `socket.settimeout()` is propagated to
+// the host network calls, and that the host's configured timeout always acts as
+// a ceiling the guest can shorten but never exceed. This is what stops a single
+// slow host from consuming the whole sandbox execution budget when Python code
+// sets a per-request timeout (e.g. `httpx.get(url, timeout=8)`).
+
+/// A TCP server that accepts connections and then never responds, so any read
+/// blocks until the client's timeout fires. This exercises the I/O timeout path
+/// deterministically, without depending on network blackhole behaviour.
+struct SilentServer {
+    addr: std::net::SocketAddr,
+    _handle: tokio::task::JoinHandle<()>,
+}
+
+impl SilentServer {
+    async fn start() -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("Failed to bind silent server");
+        let addr = listener.local_addr().expect("Failed to get local addr");
+        let handle = tokio::spawn(async move {
+            // Keep every accepted connection open without ever writing a byte,
+            // so the client's recv() blocks until its timeout elapses.
+            let mut held = Vec::new();
+            while let Ok((stream, _)) = listener.accept().await {
+                held.push(stream);
+            }
+        });
+        Self {
+            addr,
+            _handle: handle,
+        }
+    }
+}
+
+/// A guest `settimeout()` shorter than the host's configured timeout must take
+/// effect, so a hung read fails quickly instead of burning the host's budget.
+#[tokio::test]
+async fn test_guest_socket_timeout_is_honored() {
+    let server = SilentServer::start().await;
+    let port = server.addr.port();
+
+    // Host I/O timeout is generous (30s); the guest asks for a much shorter 1s.
+    let sandbox = sandbox_builder_with_network()
+        .with_network(
+            NetConfig::permissive()
+                .with_connect_timeout(std::time::Duration::from_secs(10))
+                .with_io_timeout(std::time::Duration::from_secs(30)),
+        )
+        .build()
+        .expect("Failed to build sandbox");
+
+    let code = format!(
+        r#"
+import socket
+
+s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+s.settimeout(1.0)
+s.connect(("127.0.0.1", {port}))
+s.sendall(b"GET / HTTP/1.0\r\n\r\n")
+try:
+    data = s.recv(1024)
+    print(f"UNEXPECTED_DATA: {{len(data)}}")
+except Exception as e:
+    print(f"TIMEOUT: {{type(e).__name__}}")
+"#
+    );
+
+    let start = std::time::Instant::now();
+    let result = sandbox.execute(&code).await;
+    let elapsed = start.elapsed();
+
+    let output = result.expect("execution should complete");
+    assert!(
+        output.stdout.contains("TIMEOUT"),
+        "expected a guest read timeout, got: {}",
+        output.stdout
+    );
+    // If the guest timeout were ignored the host's 30s timeout would apply.
+    assert!(
+        elapsed < std::time::Duration::from_secs(8),
+        "guest 1s timeout was not honored; recv took {elapsed:?} (host io_timeout was 30s)"
+    );
+}
+
+/// A guest `settimeout()` longer than the host's configured timeout must NOT
+/// extend it: the host timeout is a hard ceiling, so sandboxed code cannot
+/// bypass the operator's configured limit.
+#[tokio::test]
+async fn test_guest_socket_timeout_capped_by_host() {
+    let server = SilentServer::start().await;
+    let port = server.addr.port();
+
+    // Host I/O timeout is short (500ms); the guest asks for a much longer 30s.
+    let sandbox = sandbox_builder_with_network()
+        .with_network(
+            NetConfig::permissive()
+                .with_connect_timeout(std::time::Duration::from_secs(10))
+                .with_io_timeout(std::time::Duration::from_millis(500)),
+        )
+        .build()
+        .expect("Failed to build sandbox");
+
+    let code = format!(
+        r#"
+import socket
+
+s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+s.settimeout(30.0)
+s.connect(("127.0.0.1", {port}))
+s.sendall(b"GET / HTTP/1.0\r\n\r\n")
+try:
+    data = s.recv(1024)
+    print(f"UNEXPECTED_DATA: {{len(data)}}")
+except Exception as e:
+    print(f"TIMEOUT: {{type(e).__name__}}")
+"#
+    );
+
+    let start = std::time::Instant::now();
+    let result = sandbox.execute(&code).await;
+    let elapsed = start.elapsed();
+
+    let output = result.expect("execution should complete");
+    assert!(
+        output.stdout.contains("TIMEOUT"),
+        "expected the host to cap the read timeout, got: {}",
+        output.stdout
+    );
+    // The host's 500ms ceiling must win over the guest's 30s request.
+    assert!(
+        elapsed < std::time::Duration::from_secs(8),
+        "host timeout ceiling did not cap the guest; recv took {elapsed:?} (host io_timeout was 500ms)"
+    );
+}

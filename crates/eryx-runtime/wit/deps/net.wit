@@ -65,8 +65,13 @@ interface tcp {
     /// The hostname is used for DNS resolution. The host controls which
     /// connections are allowed via its network policy configuration.
     ///
+    /// `timeout-ms` is the guest-requested connect timeout in milliseconds, or
+    /// `0` to defer entirely to the host's configured connect timeout. The host
+    /// always clamps the effective timeout to its own configured ceiling, so a
+    /// guest can shorten but never extend it.
+    ///
     /// Blocks until the connection is established or fails.
-    connect: func(host: string, port: u16) -> result<tcp-handle, tcp-error>;
+    connect: func(host: string, port: u16, timeout-ms: u32) -> result<tcp-handle, tcp-error>;
 
     /// Read up to `len` bytes from a TCP connection.
     ///
@@ -74,16 +79,27 @@ interface tcp {
     /// data is available. Returns empty list on EOF (connection closed
     /// gracefully by peer).
     ///
+    /// `timeout-ms` is the guest-requested I/O timeout in milliseconds, or `0`
+    /// to defer to the host's configured I/O timeout. The effective timeout is
+    /// clamped to the host's configured ceiling.
+    ///
     /// Blocks until data is available or the connection is closed.
-    read: func(handle: tcp-handle, len: u32) -> result<list<u8>, tcp-error>;
+    read: func(handle: tcp-handle, len: u32, timeout-ms: u32) -> result<list<u8>, tcp-error>;
 
     /// Write bytes to a TCP connection.
     ///
     /// Returns the number of bytes written. May be less than the input
     /// length if the connection buffer is full.
     ///
+    /// `timeout-ms` is the guest-requested I/O timeout in milliseconds, or `0`
+    /// to defer to the host's configured I/O timeout. The effective timeout is
+    /// clamped to the host's configured ceiling.
+    ///
+    /// `timeout-ms` precedes `data` so the trailing `list<u8>` argument stays
+    /// last (the guest's zero-copy list lowering requires it).
+    ///
     /// Blocks until data is written.
-    write: func(handle: tcp-handle, data: list<u8>) -> result<u32, tcp-error>;
+    write: func(handle: tcp-handle, timeout-ms: u32, data: list<u8>) -> result<u32, tcp-error>;
 
     /// Close a TCP connection.
     ///
@@ -123,8 +139,12 @@ interface tls {
     /// After upgrade, the original tcp-handle is invalid - use the returned
     /// tls-handle for all further operations.
     ///
+    /// `timeout-ms` is the guest-requested handshake timeout in milliseconds,
+    /// or `0` to defer to the host's configured connect timeout. The effective
+    /// timeout is clamped to the host's configured ceiling.
+    ///
     /// Blocks until the TLS handshake completes.
-    upgrade: func(tcp: tcp-handle, hostname: string) -> result<tls-handle, tls-error>;
+    upgrade: func(tcp: tcp-handle, hostname: string, timeout-ms: u32) -> result<tls-handle, tls-error>;
 
     /// Read up to `len` bytes from a TLS connection.
     ///
@@ -132,16 +152,27 @@ interface tls {
     /// data is available. Returns empty list on EOF (connection closed
     /// gracefully by peer after TLS close_notify).
     ///
+    /// `timeout-ms` is the guest-requested I/O timeout in milliseconds, or `0`
+    /// to defer to the host's configured I/O timeout. The effective timeout is
+    /// clamped to the host's configured ceiling.
+    ///
     /// Blocks until data is available or the connection is closed.
-    read: func(handle: tls-handle, len: u32) -> result<list<u8>, tls-error>;
+    read: func(handle: tls-handle, len: u32, timeout-ms: u32) -> result<list<u8>, tls-error>;
 
     /// Write bytes to a TLS connection.
     ///
     /// Returns the number of bytes written. May be less than the input
     /// length if the connection buffer is full.
     ///
+    /// `timeout-ms` is the guest-requested I/O timeout in milliseconds, or `0`
+    /// to defer to the host's configured I/O timeout. The effective timeout is
+    /// clamped to the host's configured ceiling.
+    ///
+    /// `timeout-ms` precedes `data` so the trailing `list<u8>` argument stays
+    /// last (the guest's zero-copy list lowering requires it).
+    ///
     /// Blocks until data is written.
-    write: func(handle: tls-handle, data: list<u8>) -> result<u32, tls-error>;
+    write: func(handle: tls-handle, timeout-ms: u32, data: list<u8>) -> result<u32, tls-error>;
 
     /// Close a TLS connection.
     ///

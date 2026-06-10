@@ -745,10 +745,20 @@ fn promise_get_result_(py: Python<'_>, subtask: u32) -> PyResult<String> {
 /// - result_type 1: Err - value is the error message (str)
 /// - result_type 2: Pending - value is a tuple (waitable_id, promise_id)
 ///
-/// Python signature: _eryx_tcp_connect(host: str, port: int) -> tuple[int, Any]
+/// Python signature: _eryx_tcp_connect(host: str, port: int, timeout_ms: int = 0) -> tuple[int, Any]
+///
+/// `timeout_ms` is the guest-requested connect timeout in milliseconds, or `0`
+/// to defer to the host's configured timeout. The host always clamps it to its
+/// own ceiling.
 #[pyfunction]
-fn _eryx_tcp_connect(py: Python<'_>, host: String, port: u16) -> PyResult<(i32, Py<PyAny>)> {
-    match crate::do_tcp_connect(&host, port) {
+#[pyo3(signature = (host, port, timeout_ms=0))]
+fn _eryx_tcp_connect(
+    py: Python<'_>,
+    host: String,
+    port: u16,
+    timeout_ms: u32,
+) -> PyResult<(i32, Py<PyAny>)> {
+    match crate::do_tcp_connect(&host, port, timeout_ms) {
         Ok((status, value)) => match value {
             crate::NetResultValue::Handle(h) => {
                 Ok((status, h.into_pyobject(py)?.into_any().unbind()))
@@ -774,10 +784,16 @@ fn _eryx_tcp_connect(py: Python<'_>, host: String, port: u16) -> PyResult<(i32, 
 /// - result_type 1: Err - value is the error message (str)
 /// - result_type 2: Pending - value is a tuple (waitable_id, promise_id)
 ///
-/// Python signature: _eryx_tcp_read(handle: int, length: int) -> tuple[int, Any]
+/// Python signature: _eryx_tcp_read(handle: int, length: int, timeout_ms: int = 0) -> tuple[int, Any]
 #[pyfunction]
-fn _eryx_tcp_read(py: Python<'_>, handle: u32, length: u32) -> PyResult<(i32, Py<PyAny>)> {
-    match crate::do_tcp_read(handle, length) {
+#[pyo3(signature = (handle, length, timeout_ms=0))]
+fn _eryx_tcp_read(
+    py: Python<'_>,
+    handle: u32,
+    length: u32,
+    timeout_ms: u32,
+) -> PyResult<(i32, Py<PyAny>)> {
+    match crate::do_tcp_read(handle, length, timeout_ms) {
         Ok((status, value)) => match value {
             crate::NetResultValue::Bytes(b) => {
                 Ok((status, b.into_pyobject(py)?.into_any().unbind()))
@@ -803,10 +819,16 @@ fn _eryx_tcp_read(py: Python<'_>, handle: u32, length: u32) -> PyResult<(i32, Py
 /// - result_type 1: Err - value is the error message (str)
 /// - result_type 2: Pending - value is a tuple (waitable_id, promise_id)
 ///
-/// Python signature: _eryx_tcp_write(handle: int, data: bytes) -> tuple[int, Any]
+/// Python signature: _eryx_tcp_write(handle: int, data: bytes, timeout_ms: int = 0) -> tuple[int, Any]
 #[pyfunction]
-fn _eryx_tcp_write(py: Python<'_>, handle: u32, data: Vec<u8>) -> PyResult<(i32, Py<PyAny>)> {
-    match crate::do_tcp_write(handle, &data) {
+#[pyo3(signature = (handle, data, timeout_ms=0))]
+fn _eryx_tcp_write(
+    py: Python<'_>,
+    handle: u32,
+    data: Vec<u8>,
+    timeout_ms: u32,
+) -> PyResult<(i32, Py<PyAny>)> {
+    match crate::do_tcp_write(handle, &data, timeout_ms) {
         Ok((status, value)) => match value {
             crate::NetResultValue::Handle(n) => {
                 Ok((status, n.into_pyobject(py)?.into_any().unbind()))
@@ -846,14 +868,16 @@ fn _eryx_tcp_close(handle: u32) {
 /// - result_type 1: Err - value is the error message (str)
 /// - result_type 2: Pending - value is a tuple (waitable_id, promise_id)
 ///
-/// Python signature: _eryx_tls_upgrade(tcp_handle: int, hostname: str) -> tuple[int, Any]
+/// Python signature: _eryx_tls_upgrade(tcp_handle: int, hostname: str, timeout_ms: int = 0) -> tuple[int, Any]
 #[pyfunction]
+#[pyo3(signature = (tcp_handle, hostname, timeout_ms=0))]
 fn _eryx_tls_upgrade(
     py: Python<'_>,
     tcp_handle: u32,
     hostname: String,
+    timeout_ms: u32,
 ) -> PyResult<(i32, Py<PyAny>)> {
-    match crate::do_tls_upgrade(tcp_handle, &hostname) {
+    match crate::do_tls_upgrade(tcp_handle, &hostname, timeout_ms) {
         Ok((status, value)) => match value {
             crate::NetResultValue::Handle(h) => {
                 Ok((status, h.into_pyobject(py)?.into_any().unbind()))
@@ -879,10 +903,16 @@ fn _eryx_tls_upgrade(
 /// - result_type 1: Err - value is the error message (str)
 /// - result_type 2: Pending - value is a tuple (waitable_id, promise_id)
 ///
-/// Python signature: _eryx_tls_read(handle: int, length: int) -> tuple[int, Any]
+/// Python signature: _eryx_tls_read(handle: int, length: int, timeout_ms: int = 0) -> tuple[int, Any]
 #[pyfunction]
-fn _eryx_tls_read(py: Python<'_>, handle: u32, length: u32) -> PyResult<(i32, Py<PyAny>)> {
-    match crate::do_tls_read(handle, length) {
+#[pyo3(signature = (handle, length, timeout_ms=0))]
+fn _eryx_tls_read(
+    py: Python<'_>,
+    handle: u32,
+    length: u32,
+    timeout_ms: u32,
+) -> PyResult<(i32, Py<PyAny>)> {
+    match crate::do_tls_read(handle, length, timeout_ms) {
         Ok((status, value)) => match value {
             crate::NetResultValue::Bytes(b) => {
                 Ok((status, b.into_pyobject(py)?.into_any().unbind()))
@@ -908,10 +938,16 @@ fn _eryx_tls_read(py: Python<'_>, handle: u32, length: u32) -> PyResult<(i32, Py
 /// - result_type 1: Err - value is the error message (str)
 /// - result_type 2: Pending - value is a tuple (waitable_id, promise_id)
 ///
-/// Python signature: _eryx_tls_write(handle: int, data: bytes) -> tuple[int, Any]
+/// Python signature: _eryx_tls_write(handle: int, data: bytes, timeout_ms: int = 0) -> tuple[int, Any]
 #[pyfunction]
-fn _eryx_tls_write(py: Python<'_>, handle: u32, data: Vec<u8>) -> PyResult<(i32, Py<PyAny>)> {
-    match crate::do_tls_write(handle, &data) {
+#[pyo3(signature = (handle, data, timeout_ms=0))]
+fn _eryx_tls_write(
+    py: Python<'_>,
+    handle: u32,
+    data: Vec<u8>,
+    timeout_ms: u32,
+) -> PyResult<(i32, Py<PyAny>)> {
+    match crate::do_tls_write(handle, &data, timeout_ms) {
         Ok((status, value)) => match value {
             crate::NetResultValue::Handle(n) => {
                 Ok((status, n.into_pyobject(py)?.into_any().unbind()))
@@ -1736,7 +1772,9 @@ class SSLSocket:
             raise SSLError("No hostname available for TLS handshake")
 
         import _eryx
-        result_type, value = _eryx._eryx_tls_upgrade(self._sock._tcp_handle, hostname)
+        result_type, value = _eryx._eryx_tls_upgrade(
+            self._sock._tcp_handle, hostname, self._sock._timeout_ms()
+        )
 
         if result_type == 0:
             # Success - value is the TLS handle
@@ -2200,6 +2238,21 @@ class socket:
     def getblocking(self):
         return self._blocking
 
+    def _timeout_ms(self):
+        """Current timeout as integer milliseconds for the host net calls.
+
+        Returns 0 when no timeout is set (blocking mode), which tells the host
+        to use its own configured timeout. A positive Python timeout is rounded
+        up to at least 1ms so a small but non-zero timeout is never silently
+        treated as "use the host default". The host clamps the result to its own
+        configured ceiling, so this can only shorten a timeout, never extend it.
+        """
+        t = self._timeout
+        if t is None or t <= 0:
+            return 0
+        ms = int(t * 1000)
+        return ms if ms > 0 else 1
+
     def setsockopt(self, level, optname, value, optlen=None):
         pass  # Ignore socket options
 
@@ -2215,7 +2268,7 @@ class socket:
 
         host, port = address
         import _eryx
-        result_type, value = _eryx._eryx_tcp_connect(host, port)
+        result_type, value = _eryx._eryx_tcp_connect(host, port, self._timeout_ms())
 
         if result_type == 0:
             # Success - value is the TCP handle
@@ -2294,10 +2347,11 @@ class socket:
             return b""
 
         import _eryx
+        timeout_ms = self._timeout_ms()
         if self._tls_handle is not None:
-            result_type, value = _eryx._eryx_tls_read(handle, bufsize)
+            result_type, value = _eryx._eryx_tls_read(handle, bufsize, timeout_ms)
         else:
-            result_type, value = _eryx._eryx_tcp_read(handle, bufsize)
+            result_type, value = _eryx._eryx_tcp_read(handle, bufsize, timeout_ms)
 
         if result_type == 0:
             # Success - value is the bytes read
@@ -2331,10 +2385,11 @@ class socket:
             data = bytes(data)
 
         import _eryx
+        timeout_ms = self._timeout_ms()
         if self._tls_handle is not None:
-            result_type, value = _eryx._eryx_tls_write(handle, data)
+            result_type, value = _eryx._eryx_tls_write(handle, data, timeout_ms)
         else:
-            result_type, value = _eryx._eryx_tcp_write(handle, data)
+            result_type, value = _eryx._eryx_tcp_write(handle, data, timeout_ms)
 
         if result_type == 0:
             # Success - value is the number of bytes written

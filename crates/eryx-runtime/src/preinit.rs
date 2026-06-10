@@ -572,10 +572,11 @@ fn add_network_stubs(linker: &mut Linker<PreInitCtx>) -> Result<()> {
         .instance("eryx:net/tcp@0.1.0")
         .map_err(|e| e.context("Failed to get eryx:net/tcp instance"))?;
 
-    // tcp.connect: func(host: string, port: u16) -> result<tcp-handle, tcp-error>
+    // tcp.connect: func(host: string, port: u16, timeout-ms: u32) -> result<tcp-handle, tcp-error>
     tcp_instance.func_wrap_async(
         "connect",
-        |_ctx: wasmtime::StoreContextMut<'_, PreInitCtx>, (_host, _port): (String, u16)| {
+        |_ctx: wasmtime::StoreContextMut<'_, PreInitCtx>,
+         (_host, _port, _timeout_ms): (String, u16, u32)| {
             Box::new(async move {
                 Ok((Result::<u32, PreInitTcpError>::Err(
                     PreInitTcpError::NotPermitted(
@@ -586,10 +587,11 @@ fn add_network_stubs(linker: &mut Linker<PreInitCtx>) -> Result<()> {
         },
     )?;
 
-    // tcp.read: func(handle: tcp-handle, len: u32) -> result<list<u8>, tcp-error>
+    // tcp.read: func(handle: tcp-handle, len: u32, timeout-ms: u32) -> result<list<u8>, tcp-error>
     tcp_instance.func_wrap_async(
         "read",
-        |_ctx: wasmtime::StoreContextMut<'_, PreInitCtx>, (_handle, _len): (u32, u32)| {
+        |_ctx: wasmtime::StoreContextMut<'_, PreInitCtx>,
+         (_handle, _len, _timeout_ms): (u32, u32, u32)| {
             Box::new(async move {
                 Ok((Result::<Vec<u8>, PreInitTcpError>::Err(
                     PreInitTcpError::NotPermitted(
@@ -600,10 +602,11 @@ fn add_network_stubs(linker: &mut Linker<PreInitCtx>) -> Result<()> {
         },
     )?;
 
-    // tcp.write: func(handle: tcp-handle, data: list<u8>) -> result<u32, tcp-error>
+    // tcp.write: func(handle: tcp-handle, timeout-ms: u32, data: list<u8>) -> result<u32, tcp-error>
     tcp_instance.func_wrap_async(
         "write",
-        |_ctx: wasmtime::StoreContextMut<'_, PreInitCtx>, (_handle, _data): (u32, Vec<u8>)| {
+        |_ctx: wasmtime::StoreContextMut<'_, PreInitCtx>,
+         (_handle, _timeout_ms, _data): (u32, u32, Vec<u8>)| {
             Box::new(async move {
                 Ok((Result::<u32, PreInitTcpError>::Err(
                     PreInitTcpError::NotPermitted(
@@ -628,11 +631,11 @@ fn add_network_stubs(linker: &mut Linker<PreInitCtx>) -> Result<()> {
         .instance("eryx:net/tls@0.1.0")
         .map_err(|e| e.context("Failed to get eryx:net/tls instance"))?;
 
-    // tls.upgrade: func(tcp: tcp-handle, hostname: string) -> result<tls-handle, tls-error>
+    // tls.upgrade: func(tcp: tcp-handle, hostname: string, timeout-ms: u32) -> result<tls-handle, tls-error>
     tls_instance.func_wrap_async(
         "upgrade",
         |_ctx: wasmtime::StoreContextMut<'_, PreInitCtx>,
-         (_tcp_handle, _hostname): (u32, String)| {
+         (_tcp_handle, _hostname, _timeout_ms): (u32, String, u32)| {
             Box::new(async move {
                 Ok((Result::<u32, PreInitTlsError>::Err(
                     PreInitTlsError::HandshakeFailed(
@@ -643,10 +646,11 @@ fn add_network_stubs(linker: &mut Linker<PreInitCtx>) -> Result<()> {
         },
     )?;
 
-    // tls.read: func(handle: tls-handle, len: u32) -> result<list<u8>, tls-error>
+    // tls.read: func(handle: tls-handle, len: u32, timeout-ms: u32) -> result<list<u8>, tls-error>
     tls_instance.func_wrap_async(
         "read",
-        |_ctx: wasmtime::StoreContextMut<'_, PreInitCtx>, (_handle, _len): (u32, u32)| {
+        |_ctx: wasmtime::StoreContextMut<'_, PreInitCtx>,
+         (_handle, _len, _timeout_ms): (u32, u32, u32)| {
             Box::new(async move {
                 Ok((Result::<Vec<u8>, PreInitTlsError>::Err(
                     PreInitTlsError::HandshakeFailed(
@@ -657,10 +661,11 @@ fn add_network_stubs(linker: &mut Linker<PreInitCtx>) -> Result<()> {
         },
     )?;
 
-    // tls.write: func(handle: tls-handle, data: list<u8>) -> result<u32, tls-error>
+    // tls.write: func(handle: tls-handle, timeout-ms: u32, data: list<u8>) -> result<u32, tls-error>
     tls_instance.func_wrap_async(
         "write",
-        |_ctx: wasmtime::StoreContextMut<'_, PreInitCtx>, (_handle, _data): (u32, Vec<u8>)| {
+        |_ctx: wasmtime::StoreContextMut<'_, PreInitCtx>,
+         (_handle, _timeout_ms, _data): (u32, u32, Vec<u8>)| {
             Box::new(async move {
                 Ok((Result::<u32, PreInitTlsError>::Err(
                     PreInitTlsError::HandshakeFailed(
