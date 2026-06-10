@@ -474,7 +474,7 @@ impl ConnectionManager {
     /// Connect to a host over TCP.
     ///
     /// `timeout_ms` is the guest-requested connect timeout in milliseconds
-    /// (`0` = use the host default); see [`Self::effective_timeout`].
+    /// (`0` = use the host default); see `effective_timeout`.
     pub async fn tcp_connect(
         &mut self,
         host: &str,
@@ -528,7 +528,7 @@ impl ConnectionManager {
     /// Read from a TCP connection.
     ///
     /// `timeout_ms` is the guest-requested I/O timeout in milliseconds
-    /// (`0` = use the host default); see [`Self::effective_timeout`].
+    /// (`0` = use the host default); see `effective_timeout`.
     pub async fn tcp_read(
         &mut self,
         handle: u32,
@@ -760,7 +760,7 @@ impl ConnectionManager {
     /// Read from a TLS connection.
     ///
     /// `timeout_ms` is the guest-requested I/O timeout in milliseconds
-    /// (`0` = use the host default); see [`Self::effective_timeout`].
+    /// (`0` = use the host default); see `effective_timeout`.
     pub async fn tls_read(
         &mut self,
         handle: u32,
