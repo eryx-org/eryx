@@ -127,6 +127,18 @@ let result = outcome.result?; // only reached if not suspended
 
 To resume, rebuild the sandbox with the journal from the suspended run via `with_replay_journal` and execute the same code again. The recorded prefix replays from cache; the previously-suspended callback re-runs live (it was never journaled) and, assuming its dependency is now ready, returns a real value so the script continues past the suspension point.
 
+## Determinism and limitations
+
+Replay short-circuits *callbacks* — the Python **between** callbacks always re-executes live on every run. Replay therefore reproduces callback *results*, not whole-program state, and it assumes the script is deterministic given the same callback results. Nondeterminism in the script itself — an unseeded `random`, wall-clock time (`time.time()`, `datetime.now()`), or anything else that varies run to run — is recomputed fresh each time, with three consequences:
+
+- **If it feeds callback arguments**, the recomputed args won't match what was journaled, so those calls *miss* — the divergence guard then runs them, and everything after them, live (re-incurring their cost).
+- **If it drives control flow**, the replayed run may take a different path than the recorded one, dispatching a different set of callbacks.
+- **Non-callback output is not reproduced** — values the script computes itself rather than via a callback are recomputed, so stdout or the [result variable](../guide/callbacks.md) can differ even when every callback replayed.
+
+The divergence guard keeps this **safe**: a recomputed argument that misses falls back to live execution rather than injecting a stale cached result. But replay is only fully *transparent* for scripts whose callback names, arguments, and control flow are deterministic given the same callback results.
+
+To make a nondeterministic input replayable, **route it through a callback** so it lands in the journal — fetch the current time or a random seed via a callback rather than reading it inside the sandbox, and it will replay deterministically like any other recorded result.
+
 ## Security: journals are a trusted input
 
 Replayed journal entries are returned to Python **verbatim** — eryx does not re-execute the callback to validate them. A crafted journal can therefore inject arbitrary values into a script's execution. **Treat the journal as a trusted input.**
