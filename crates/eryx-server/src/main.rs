@@ -47,6 +47,14 @@ struct Args {
     /// builds without the `embedded` feature to provide stdlib externally.
     #[arg(long, env = "ERYX_STDLIB")]
     stdlib: Option<PathBuf>,
+
+    /// Hex-encoded 32-byte HMAC key for signing callback replay journals.
+    ///
+    /// All server replicas must share the same key so that journals are portable
+    /// across instances. If not set, a random ephemeral key is generated (journals
+    /// signed by one process cannot be verified by another or after a restart).
+    #[arg(long, env = "ERYX_JOURNAL_SIGNING_KEY", hide = true)]
+    journal_signing_key: Option<String>,
 }
 
 /// Spawn a background task that periodically records pool gauge metrics.
@@ -136,7 +144,28 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Record pool gauge metrics every 5 seconds.
     spawn_pool_stats_recorder(Arc::clone(&pool));
 
-    let service = EryxService::new(pool);
+    let signer = match args.journal_signing_key {
+        Some(hex_key) => {
+            let bytes = hex::decode(&hex_key)
+                .map_err(|e| format!("ERYX_JOURNAL_SIGNING_KEY must be valid hex: {e}"))?;
+            let key: [u8; 32] = bytes.try_into().map_err(|v: Vec<u8>| {
+                format!(
+                    "ERYX_JOURNAL_SIGNING_KEY must be exactly 32 bytes (64 hex chars), got {} bytes",
+                    v.len()
+                )
+            })?;
+            tracing::info!("journal signing key loaded from configuration");
+            eryx_server::replay::JournalSigner::from_key(key)
+        }
+        None => {
+            tracing::warn!(
+                "no ERYX_JOURNAL_SIGNING_KEY configured — using random ephemeral key; \
+                 replay journals will not survive restarts or work across replicas"
+            );
+            eryx_server::replay::JournalSigner::random()
+        }
+    };
+    let service = EryxService::with_signer(pool, signer);
 
     Server::builder()
         .add_service(EryxServer::new(service))

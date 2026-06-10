@@ -8,11 +8,16 @@
 
 pub mod callbacks;
 pub mod output;
+pub mod replay;
 pub mod service;
 pub mod telemetry;
 pub mod trace;
 
 /// Generated protobuf types for the eryx gRPC API.
+// `missing_docs`: prost/tonic-generated types carry no doc comments. The large
+// oneof variants (`ClientMessage.execute_request`, `ServerMessage.execute_result`)
+// are boxed in `build.rs` via `.boxed(...)`, so no `large_enum_variant` allow is
+// needed (boxing is in-memory only; the wire format is unchanged).
 #[allow(missing_docs)]
 pub mod proto {
     /// The `eryx.v1` package.

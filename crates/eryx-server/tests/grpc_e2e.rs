@@ -12,8 +12,8 @@ use eryx::{PoolConfig, Sandbox, SandboxPool};
 use eryx_server::proto::eryx::v1::eryx_client::EryxClient;
 use eryx_server::proto::eryx::v1::eryx_server::EryxServer;
 use eryx_server::proto::eryx::v1::{
-    CallbackDeclaration, ClientMessage, ExecuteRequest, ParameterDeclaration, ResourceLimits,
-    callback_response, client_message, server_message,
+    CallbackDeclaration, CallbackJournal, ClientMessage, ExecuteRequest, ParameterDeclaration,
+    ResourceLimits, callback_response, client_message, server_message,
 };
 use eryx_server::service::EryxService;
 use tokio::net::TcpListener;
@@ -1430,4 +1430,145 @@ async fn execute_custom_result_variable_with_state_restore() {
         }
     }
     assert!(got, "never received ExecuteResult in step 2");
+}
+
+/// Build the `echo` callback declaration used by the replay tests.
+fn echo_declaration() -> CallbackDeclaration {
+    CallbackDeclaration {
+        name: "echo".to_string(),
+        description: "Echoes the message back".to_string(),
+        parameters: vec![ParameterDeclaration {
+            name: "message".to_string(),
+            json_type: "string".to_string(),
+            description: "The message to echo".to_string(),
+            required: true,
+        }],
+    }
+}
+
+/// A first run with an (empty) journal records the callback; a second run with
+/// that journal replays it — the server never dispatches the callback again.
+#[tokio::test]
+async fn replay_across_requests_skips_live_callback() {
+    let channel = start_server().await;
+    let mut client = EryxClient::new(channel);
+
+    let code = r#"
+result = await echo(message="hello callback")
+print(f"got: {result}")
+"#;
+
+    // ---- Run 1: empty journal present => journaling on, nothing to replay. ----
+    let (tx1, rx1) = mpsc::channel(16);
+    tx1.send(ClientMessage {
+        message: Some(client_message::Message::ExecuteRequest(Box::new(
+            ExecuteRequest {
+                code: code.to_string(),
+                callbacks: vec![echo_declaration()],
+                // Presence of the (empty) journal opts into replay/journaling.
+                callback_journal: Some(CallbackJournal {
+                    entries: vec![],
+                    signature: vec![],
+                }),
+                ..Default::default()
+            },
+        ))),
+    })
+    .await
+    .unwrap();
+
+    let mut stream1 = client
+        .execute(ReceiverStream::new(rx1))
+        .await
+        .unwrap()
+        .into_inner();
+
+    let mut live_callbacks = 0;
+    let mut recorded_journal = None;
+    while let Some(msg) = stream1.message().await.unwrap() {
+        match msg.message {
+            Some(server_message::Message::CallbackRequest(req)) => {
+                live_callbacks += 1;
+                let args: serde_json::Value = serde_json::from_str(&req.arguments_json).unwrap();
+                let message = args["message"].as_str().unwrap();
+                let response_json = serde_json::json!({ "echoed": message }).to_string();
+                tx1.send(ClientMessage {
+                    message: Some(client_message::Message::CallbackResponse(
+                        eryx_server::proto::eryx::v1::CallbackResponse {
+                            request_id: req.request_id,
+                            result: Some(callback_response::Result::JsonResult(response_json)),
+                        },
+                    )),
+                })
+                .await
+                .unwrap();
+            }
+            Some(server_message::Message::ExecuteResult(result)) => {
+                assert!(result.success, "run 1 failed: {}", result.error);
+                assert_eq!(
+                    result.stats.as_ref().map(|s| s.replayed_callbacks),
+                    Some(0),
+                    "nothing should be replayed on the first run"
+                );
+                recorded_journal = result.callback_journal;
+            }
+            _ => {}
+        }
+    }
+    assert_eq!(live_callbacks, 1, "callback dispatched live once on run 1");
+    let journal = recorded_journal.expect("run 1 returned a journal");
+    assert_eq!(journal.entries.len(), 1, "one callback journaled");
+    assert_eq!(journal.entries[0].name, "echo");
+
+    // ---- Run 2: replay from the recorded journal — no callback dispatched. ----
+    let (tx2, rx2) = mpsc::channel(16);
+    tx2.send(ClientMessage {
+        message: Some(client_message::Message::ExecuteRequest(Box::new(
+            ExecuteRequest {
+                code: code.to_string(),
+                callbacks: vec![echo_declaration()],
+                callback_journal: Some(journal),
+                ..Default::default()
+            },
+        ))),
+    })
+    .await
+    .unwrap();
+
+    let mut stream2 = client
+        .execute(ReceiverStream::new(rx2))
+        .await
+        .unwrap()
+        .into_inner();
+
+    let mut live_callbacks2 = 0;
+    let mut got_result = false;
+    while let Some(msg) = stream2.message().await.unwrap() {
+        match msg.message {
+            Some(server_message::Message::CallbackRequest(_)) => live_callbacks2 += 1,
+            Some(server_message::Message::ExecuteResult(result)) => {
+                assert!(result.success, "run 2 failed: {}", result.error);
+                assert!(
+                    result.stdout.contains("echoed"),
+                    "replayed value missing from stdout: {:?}",
+                    result.stdout
+                );
+                assert_eq!(
+                    result.stats.as_ref().map(|s| s.replayed_callbacks),
+                    Some(1),
+                    "the callback should have been replayed"
+                );
+                got_result = true;
+            }
+            _ => {}
+        }
+    }
+    assert_eq!(
+        live_callbacks2, 0,
+        "replayed callback must not be dispatched to the client"
+    );
+    assert!(got_result, "run 2 never produced a result");
+    // Keep tx2 alive until the stream ends so the server doesn't see a client
+    // disconnect and cancel mid-execution.
+    drop(tx2);
 }

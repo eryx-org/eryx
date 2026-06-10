@@ -303,6 +303,15 @@ pub enum CallbackError {
     /// The callback execution timed out.
     #[error("timeout")]
     Timeout,
+
+    /// A replayed result reconstructed from a callback journal.
+    ///
+    /// Used internally by replay to re-surface a previously-journaled error with
+    /// its original message intact (the `Display` is transparent, so the callback
+    /// handler does not double-prefix it). Callbacks should not return this
+    /// variant directly.
+    #[error("{0}")]
+    Replayed(String),
 }
 
 /// Helper function to create an empty parameters schema (no arguments).

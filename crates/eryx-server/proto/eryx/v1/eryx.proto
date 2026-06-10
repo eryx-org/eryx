@@ -94,6 +94,31 @@ message ExecuteRequest {
   // disable_* fields above), the result is a programmatic side channel, so
   // scrubbing is opt-in.
   bool scrub_result = 13;
+
+  // Callback-result replay (optional, backwards-compatible).
+  //
+  // PRESENCE of this field — even with an empty `entries` list — opts the
+  // execution into journaling: the server records every callback invocation and
+  // returns the journal in ExecuteResult.callback_journal. When `entries` is
+  // non-empty, callbacks are matched by name + canonical args and their cached
+  // results are consumed FIFO per key, replayed instead of being dispatched to
+  // the client. The first miss (a callback not present in the journal) switches
+  // the remainder of the run to live execution.
+  //
+  // To start a replay session, send an empty `CallbackJournal{}` on the first
+  // run and echo back the returned journal on subsequent runs. When this field
+  // is ABSENT, execution behaves exactly as before (no journaling, no replay).
+  //
+  // SECURITY: replayed entries are returned to Python verbatim — the callback
+  // is not re-executed. A valid HMAC signature (see CallbackJournal.signature)
+  // attests that the journal is an unmodified record of a real execution of
+  // THIS SCRIPT on a server holding the signing key. Signing does not (and
+  // cannot) prevent the callback-answering client from choosing arbitrary
+  // values live — it always could. What it provides is provenance and tamper
+  // detection for journals that round-trip through storage or intermediaries.
+  // The server rejects unsigned or mis-signed journals by discarding their
+  // entries (falling back to fresh execution, not an error).
+  CallbackJournal callback_journal = 14;
 }
 
 // Kind of supporting file — determines where it's placed in the sandbox.
@@ -222,6 +247,55 @@ message CallbackResponse {
   }
 }
 
+// How a callback invocation resolved, for journaling and replay.
+enum CallbackOutcome {
+  // Success — the `value` is the JSON-encoded result.
+  CALLBACK_OUTCOME_OK = 0;
+  // Permanent failure — the `value` is the error message.
+  CALLBACK_OUTCOME_ERROR = 1;
+}
+
+// A single recorded callback invocation in a replay journal.
+message CallbackJournalEntry {
+  // Position in the invocation sequence (0-indexed, in initiation order).
+  uint32 index = 1;
+  // Callback name.
+  string name = 2;
+  // Stable hash of the canonicalized arguments JSON (for fast comparison).
+  uint64 args_hash = 3;
+  // Canonicalized arguments JSON (for verification/debugging).
+  string args_json = 4;
+  // Whether the recorded invocation succeeded or failed.
+  CallbackOutcome outcome = 5;
+  // The JSON-encoded result value (OK) or the error message (ERROR).
+  string value = 6;
+}
+
+// An ordered journal of callback invocations.
+//
+// Sent in ExecuteRequest to enable replay/journaling (presence-significant: an
+// empty journal still turns journaling on) and returned in ExecuteResult with
+// the invocations recorded during the run.
+//
+// SECURITY: a valid signature attests that this journal is an unmodified record
+// of a real execution of a specific script on a server holding the signing key.
+// The server signs outgoing journals and rejects unsigned or mis-signed ones by
+// discarding their entries (falling back to fresh execution). The MAC covers
+// both the entries and the script code, so a journal cannot be replayed against
+// a different script.
+//
+// MATCHING: replay matches callbacks by (name, canonical args). Concurrent calls
+// with identical (name, args) are indistinguishable to replay; include a
+// correlation key in args if stable assignment is required.
+message CallbackJournal {
+  // Ordered callback invocations, in the order they were initiated.
+  repeated CallbackJournalEntry entries = 1;
+  // HMAC-SHA256 over the journal entries + script code. Produced by the server
+  // using a configured signing key. Empty on the first request (no journal to
+  // sign yet); the server returns a signed journal in the result.
+  bytes signature = 2;
+}
+
 // Streaming output event from the sandbox.
 message OutputEvent {
   // Which output stream this came from.
@@ -277,6 +351,11 @@ message ExecuteResult {
   // exhaustion, traps, invalid input), so callers can branch without parsing
   // the `error` string.
   FailureKind failure_kind = 9;
+
+  // The callback journal recorded during this run, in initiation order.
+  // Present only when the request opted into replay (sent a callback_journal).
+  // Echo it back in the next ExecuteRequest to replay completed callbacks.
+  CallbackJournal callback_journal = 10;
 }
 
 // Why an execution failed, when success is false.
@@ -336,4 +415,8 @@ message ExecuteStats {
 
   // Fuel consumed (0 if unavailable).
   uint64 fuel_consumed = 4;
+
+  // Number of callbacks served from the replay journal (cache hits).
+  // 0 when replay was not enabled or nothing matched.
+  uint32 replayed_callbacks = 5;
 }

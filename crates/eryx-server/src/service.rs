@@ -1,16 +1,16 @@
 //! gRPC service implementation for the Eryx Execute RPC.
 
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use dashmap::DashMap;
 use eryx::callback_handler::{run_callback_handler, run_net_handler};
 use eryx::vfs::{ArcStorage, InMemoryStorage, VfsStorage};
 use eryx::{
-    Callback, CallbackRequest, ConnectionManager, Error, NetConfig, NetRequest, OutputRequest,
-    PythonStateSnapshot, ResourceLimits, SandboxPool, SecretConfig, SessionExecutor, TraceRequest,
-    VfsConfig, generate_placeholder, scrub_placeholders,
+    Callback, CallbackJournal, CallbackRequest, ConnectionManager, Error, NetConfig, NetRequest,
+    OutputRequest, PythonStateSnapshot, ReplayState, ResourceLimits, SandboxPool, SecretConfig,
+    SessionExecutor, TraceRequest, VfsConfig, generate_placeholder, scrub_placeholders,
 };
 use opentelemetry::propagation::Extractor;
 use tokio::sync::mpsc;
@@ -53,13 +53,31 @@ impl Extractor for MetadataExtractor<'_> {
 #[derive(Debug)]
 pub struct EryxService {
     pool: Arc<SandboxPool>,
+    journal_signer: crate::replay::JournalSigner,
 }
 
 impl EryxService {
-    /// Create a new service instance backed by the given sandbox pool.
+    /// Create a new service instance with the given pool and journal signer.
+    ///
+    /// The `signer` should use a stable key shared across all replicas (see
+    /// [`JournalSigner::from_key`](crate::replay::JournalSigner::from_key))
+    /// so journals are portable. Use [`Self::new`] for tests/dev where a random
+    /// ephemeral key is acceptable.
+    #[must_use]
+    pub fn with_signer(pool: Arc<SandboxPool>, signer: crate::replay::JournalSigner) -> Self {
+        Self {
+            pool,
+            journal_signer: signer,
+        }
+    }
+
+    /// Create a new service with a random ephemeral signing key.
+    ///
+    /// Journals signed by this instance cannot be verified by other replicas or
+    /// after a restart. Intended for tests and single-instance dev servers.
     #[must_use]
     pub fn new(pool: Arc<SandboxPool>) -> Self {
-        Self { pool }
+        Self::with_signer(pool, crate::replay::JournalSigner::random())
     }
 }
 
@@ -87,7 +105,9 @@ impl crate::proto::eryx::v1::eryx_server::Eryx for EryxService {
             .ok_or_else(|| Status::invalid_argument("stream closed before ExecuteRequest"))?;
 
         let execute_req = match first_msg.message {
-            Some(client_message::Message::ExecuteRequest(req)) => req,
+            // The variant is boxed (see build.rs `.boxed(...)`); deref to own the
+            // request so individual fields can be moved out below.
+            Some(client_message::Message::ExecuteRequest(req)) => *req,
             _ => {
                 return Err(Status::invalid_argument(
                     "first message must be ExecuteRequest",
@@ -103,6 +123,24 @@ impl crate::proto::eryx::v1::eryx_server::Eryx for EryxService {
         let files = execute_req.files;
         let result_variable = execute_req.result_variable;
         let scrub_result = execute_req.scrub_result;
+
+        // Callback-result replay: presence of the journal field (even empty)
+        // opts this execution into journaling; its entries seed replay.
+        // Non-empty journals must pass HMAC verification (bound to `code`) — a
+        // failed check discards the entries (falling back to fresh journaling,
+        // not an error). This also catches journals from a different script.
+        let previous_journal: Option<CallbackJournal> =
+            execute_req.callback_journal.as_ref().map(|j| {
+                if !j.entries.is_empty() && !self.journal_signer.verify(j, &code) {
+                    tracing::warn!(
+                        entries = j.entries.len(),
+                        "callback journal signature verification failed — ignoring entries"
+                    );
+                    CallbackJournal::new(&code)
+                } else {
+                    crate::replay::journal_from_proto(&code, j)
+                }
+            });
 
         // Parse network config: present = networking enabled, absent = disabled.
         let net_config = execute_req.network_config.map(|nc| {
@@ -337,6 +375,7 @@ impl crate::proto::eryx::v1::eryx_server::Eryx for EryxService {
         );
 
         // 7. Spawn execution task.
+        let journal_signer = self.journal_signer.clone();
         let server_tx_result = server_tx;
         let resp_tx_final = resp_tx;
         let cancel_exec = cancel;
@@ -356,6 +395,8 @@ impl crate::proto::eryx::v1::eryx_server::Eryx for EryxService {
                     scrub_stderr,
                     scrub_result,
                     result_variable,
+                    previous_journal,
+                    journal_signer: journal_signer.clone(),
                 };
 
                 // Race execution against client cancellation. If the client
@@ -376,12 +417,13 @@ impl crate::proto::eryx::v1::eryx_server::Eryx for EryxService {
                             result: String::new(),
                             result_error: String::new(),
                             failure_kind: FailureKind::Cancelled as i32,
+                            callback_journal: None,
                         }
                     }
                 };
 
                 let msg = ServerMessage {
-                    message: Some(server_message::Message::ExecuteResult(result_msg)),
+                    message: Some(server_message::Message::ExecuteResult(Box::new(result_msg))),
                 };
 
                 // Send via internal channel first, then drop it so the forwarder ends.
@@ -514,6 +556,11 @@ struct SessionParams<'a> {
     scrub_result: bool,
     /// Name of the variable captured as the structured result. Empty = default "result".
     result_variable: String,
+    /// Previous callback journal to replay from. `Some` (even when empty) enables
+    /// callback journaling/replay for this execution; `None` disables it entirely.
+    previous_journal: Option<CallbackJournal>,
+    /// Signer for HMAC-signing outgoing journals.
+    journal_signer: crate::replay::JournalSigner,
 }
 
 /// Execute Python code using a session executor.
@@ -536,7 +583,19 @@ async fn execute_with_session(
     // Get the shared PythonExecutor and clone the configured callbacks from the sandbox.
     let executor = sandbox.executor();
     let callbacks_ref = sandbox.callbacks();
-    let callbacks_arc: Vec<Arc<dyn Callback>> = callbacks_ref.values().cloned().collect();
+
+    // Set up callback-result replay when the request opted in. The same shared
+    // ReplayState is used for both the executor registration and the callback
+    // handler so the replay cursor advances across all callbacks in order.
+    let replay_state: Option<Arc<Mutex<ReplayState>>> = params
+        .previous_journal
+        .as_ref()
+        .map(|journal| Arc::new(Mutex::new(ReplayState::new(journal.clone()))));
+    let active_callbacks: HashMap<String, Arc<dyn Callback>> = match &replay_state {
+        Some(state) => crate::replay::wrap_for_replay(callbacks_ref, state),
+        None => callbacks_ref.clone(),
+    };
+    let callbacks_arc: Vec<Arc<dyn Callback>> = active_callbacks.values().cloned().collect();
 
     // Create the session executor, optionally with pre-populated VFS for supporting files.
     let mut session = if params.files.is_empty() {
@@ -638,7 +697,9 @@ async fn execute_with_session(
     // Set up callback handler channels (mirroring Sandbox::execute pattern).
     let (callback_tx, callback_rx) = mpsc::channel::<CallbackRequest>(32);
     let fuel_limit = params.resource_limits.max_fuel;
-    let cb_map: Arc<HashMap<String, Arc<dyn Callback>>> = Arc::new(callbacks_ref.clone());
+    // The handler invokes callbacks via this map, so it must hold the same
+    // (possibly replay-wrapped) callbacks used for executor registration.
+    let cb_map: Arc<HashMap<String, Arc<dyn Callback>>> = Arc::new(active_callbacks);
     let cb_secrets: Arc<HashMap<String, SecretConfig>> = Arc::new(params.secrets.clone());
     let resource_limits = params.resource_limits.clone();
     let callback_handler = tokio::spawn(
@@ -798,6 +859,20 @@ async fn execute_with_session(
     // stdout/stderr are used to populate the error-path result below.
     let (streamed_stdout, streamed_stderr) = output_accumulator.await.unwrap_or_default();
 
+    // Extract the recorded replay journal. Read regardless of success/failure so
+    // the caller can replay completed callbacks even when a later one errored.
+    let (proto_journal, replayed_callbacks) = match &replay_state {
+        Some(state) => {
+            let guard = state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let mut journal = crate::replay::journal_to_proto(&guard.build_journal(params.code));
+            params.journal_signer.sign(&mut journal, params.code);
+            (Some(journal), guard.replayed_count())
+        }
+        None => (None, 0),
+    };
+
     // Snapshot state after execution (only when persistence is requested).
     let snapshot_bytes = if params.state.is_some() {
         let snapshot_start = Instant::now();
@@ -877,11 +952,13 @@ async fn execute_with_session(
                     callback_invocations,
                     peak_memory_bytes: output.peak_memory_bytes,
                     fuel_consumed: output.fuel_consumed.unwrap_or(0),
+                    replayed_callbacks,
                 }),
                 state_snapshot: snapshot_bytes,
                 result,
                 result_error,
                 failure_kind: FailureKind::Unspecified as i32,
+                callback_journal: proto_journal,
             }
         }
         Err(e) => {
@@ -925,12 +1002,26 @@ async fn execute_with_session(
                 stdout,
                 stderr,
                 error,
-                stats: None,
+                // Provide stats only when replay is active (to surface
+                // replayed_callbacks); otherwise keep the previous behavior of
+                // omitting stats on error.
+                stats: replay_state.is_some().then_some(ExecuteStats {
+                    duration_ms: duration.as_millis() as u64,
+                    callback_invocations,
+                    // peak_memory_bytes and fuel_consumed come from the
+                    // execution `output`, which we don't have on the error path;
+                    // they are intentionally 0 here (unavailable), unlike the
+                    // success path which populates them.
+                    peak_memory_bytes: 0,
+                    fuel_consumed: 0,
+                    replayed_callbacks,
+                }),
                 // Still return the snapshot — the Go service decides whether to keep it.
                 state_snapshot: snapshot_bytes,
                 result: String::new(),
                 result_error: String::new(),
                 failure_kind: failure_kind as i32,
+                callback_journal: proto_journal,
             }
         }
     }
