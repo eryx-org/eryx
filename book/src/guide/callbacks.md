@@ -368,6 +368,12 @@ Eryx can also bridge [MCP (Model Context Protocol)](https://modelcontextprotocol
 
 See [MCP Integration](./mcp.md) for details.
 
+## Replay and Suspension
+
+When a script drives expensive callbacks (tool calls, API requests, database queries), eryx can **journal** callback results on one run and **replay** them on the next, so a re-run only re-executes the callbacks that haven't run yet. A callback can also **suspend** execution — returning a "retry later" signal that halts the guest and lets the run resume once a dependency is ready.
+
+See [Callback Replay & Suspension](./callback-replay.md) for details.
+
 ## Best Practices
 
 1. **Keep callbacks focused** - Each callback should do one thing well

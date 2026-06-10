@@ -95,6 +95,22 @@
 //! 2. The **fuel-poison halt** in the host import, which traps the guest before
 //!    it can dispatch any further callback or perform I/O.
 //!
+//! # Determinism
+//!
+//! Replay short-circuits callbacks but re-executes the Python *between* them
+//! live on every run, so it reproduces callback *results*, not whole-program
+//! state. Script-level nondeterminism — an unseeded `random`, wall-clock time,
+//! anything that varies run to run — is recomputed each time. If it feeds
+//! callback arguments, the recomputed args miss and the divergence guard falls
+//! back to live execution; if it drives control flow, the replayed run may
+//! dispatch a different set of callbacks; and values the script computes itself
+//! (rather than via a callback) are not reproduced. The guard keeps this
+//! *safe* — a miss never replays a stale result — but replay is only fully
+//! *transparent* for scripts whose callback names, arguments, and control flow
+//! are deterministic given the same callback results. Routing a nondeterministic
+//! input through a callback records it in the journal, so it replays
+//! deterministically like any other result.
+//!
 //! # Security: journal trust boundary
 //!
 //! Replayed journal entries are returned to Python code as-is — eryx does not
