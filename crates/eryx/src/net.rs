@@ -329,6 +329,21 @@ impl ConnectionManager {
         self.tcp_connections.len() + self.tls_connections.len()
     }
 
+    /// Resolve the effective timeout for an operation.
+    ///
+    /// `guest_ms` is the timeout the sandboxed code requested (e.g. via
+    /// `socket.settimeout`), in milliseconds, where `0` means "no preference,
+    /// use the host default". The result is always clamped to the host's
+    /// configured `default_timeout`, so a guest can shorten a timeout but never
+    /// extend it beyond the sandbox's configured ceiling.
+    fn effective_timeout(default_timeout: Duration, guest_ms: u32) -> Duration {
+        if guest_ms == 0 {
+            default_timeout
+        } else {
+            default_timeout.min(Duration::from_millis(u64::from(guest_ms)))
+        }
+    }
+
     /// Allocate a new handle.
     fn alloc_handle(&mut self) -> u32 {
         let handle = self.next_handle;
@@ -457,7 +472,15 @@ impl ConnectionManager {
     // ========================================================================
 
     /// Connect to a host over TCP.
-    pub async fn tcp_connect(&mut self, host: &str, port: u16) -> Result<u32, TcpError> {
+    ///
+    /// `timeout_ms` is the guest-requested connect timeout in milliseconds
+    /// (`0` = use the host default); see `effective_timeout`.
+    pub async fn tcp_connect(
+        &mut self,
+        host: &str,
+        port: u16,
+        timeout_ms: u32,
+    ) -> Result<u32, TcpError> {
         // 1. Check host against allowed/blocked patterns
         self.check_host_allowed(host)?;
 
@@ -468,24 +491,23 @@ impl ConnectionManager {
             return Err(TcpError::NotPermitted("connection limit reached".into()));
         }
 
-        // 3. DNS resolve + TCP connect (with timeout)
-        let addr = tokio::time::timeout(
-            self.config.connect_timeout,
-            tokio::net::lookup_host((host, port)),
-        )
-        .await
-        .map_err(|_| TcpError::TimedOut)?
-        .map_err(|e| {
-            if e.kind() == std::io::ErrorKind::NotFound {
-                TcpError::HostNotFound
-            } else {
-                TcpError::IoError(e.to_string())
-            }
-        })?
-        .next()
-        .ok_or(TcpError::HostNotFound)?;
+        let connect_timeout = Self::effective_timeout(self.config.connect_timeout, timeout_ms);
 
-        let tcp = tokio::time::timeout(self.config.connect_timeout, TcpStream::connect(addr))
+        // 3. DNS resolve + TCP connect (with timeout)
+        let addr = tokio::time::timeout(connect_timeout, tokio::net::lookup_host((host, port)))
+            .await
+            .map_err(|_| TcpError::TimedOut)?
+            .map_err(|e| {
+                if e.kind() == std::io::ErrorKind::NotFound {
+                    TcpError::HostNotFound
+                } else {
+                    TcpError::IoError(e.to_string())
+                }
+            })?
+            .next()
+            .ok_or(TcpError::HostNotFound)?;
+
+        let tcp = tokio::time::timeout(connect_timeout, TcpStream::connect(addr))
             .await
             .map_err(|_| TcpError::TimedOut)?
             .map_err(|e| match e.kind() {
@@ -504,14 +526,23 @@ impl ConnectionManager {
     }
 
     /// Read from a TCP connection.
-    pub async fn tcp_read(&mut self, handle: u32, len: u32) -> Result<Vec<u8>, TcpError> {
+    ///
+    /// `timeout_ms` is the guest-requested I/O timeout in milliseconds
+    /// (`0` = use the host default); see `effective_timeout`.
+    pub async fn tcp_read(
+        &mut self,
+        handle: u32,
+        len: u32,
+        timeout_ms: u32,
+    ) -> Result<Vec<u8>, TcpError> {
+        let io_timeout = Self::effective_timeout(self.config.io_timeout, timeout_ms);
         let stream = self
             .tcp_connections
             .get_mut(&handle)
             .ok_or(TcpError::InvalidHandle)?;
 
         let mut buf = vec![0u8; len as usize];
-        let n = tokio::time::timeout(self.config.io_timeout, stream.read(&mut buf))
+        let n = tokio::time::timeout(io_timeout, stream.read(&mut buf))
             .await
             .map_err(|_| TcpError::TimedOut)?
             .map_err(|e| match e.kind() {
@@ -528,17 +559,22 @@ impl ConnectionManager {
     ///
     /// If secrets are configured, this method will parse HTTP requests and
     /// substitute secret placeholders in headers before sending.
-    pub async fn tcp_write(&mut self, handle: u32, data: &[u8]) -> Result<u32, TcpError> {
+    pub async fn tcp_write(
+        &mut self,
+        handle: u32,
+        data: &[u8],
+        timeout_ms: u32,
+    ) -> Result<u32, TcpError> {
         // Fast path: no secrets = no parsing
         if self.secrets.is_empty() {
-            return self.tcp_write_raw(handle, data).await;
+            return self.tcp_write_raw(handle, data, timeout_ms).await;
         }
 
         match self.process_write_data(handle, data)? {
-            WriteAction::Passthrough(bytes) => self.tcp_write_raw(handle, &bytes).await,
+            WriteAction::Passthrough(bytes) => self.tcp_write_raw(handle, &bytes, timeout_ms).await,
             WriteAction::Segments(segments) => {
                 for segment in &segments {
-                    self.tcp_write_raw(handle, segment).await?;
+                    self.tcp_write_raw(handle, segment, timeout_ms).await?;
                 }
                 Ok(data.len() as u32)
             }
@@ -547,13 +583,19 @@ impl ConnectionManager {
     }
 
     /// Write raw data to a TCP connection without HTTP parsing.
-    async fn tcp_write_raw(&mut self, handle: u32, data: &[u8]) -> Result<u32, TcpError> {
+    async fn tcp_write_raw(
+        &mut self,
+        handle: u32,
+        data: &[u8],
+        timeout_ms: u32,
+    ) -> Result<u32, TcpError> {
+        let io_timeout = Self::effective_timeout(self.config.io_timeout, timeout_ms);
         let stream = self
             .tcp_connections
             .get_mut(&handle)
             .ok_or(TcpError::InvalidHandle)?;
 
-        let n = tokio::time::timeout(self.config.io_timeout, stream.write(data))
+        let n = tokio::time::timeout(io_timeout, stream.write(data))
             .await
             .map_err(|_| TcpError::TimedOut)?
             .map_err(|e| match e.kind() {
@@ -671,7 +713,14 @@ impl ConnectionManager {
     ///
     /// Takes ownership of the TCP connection and performs a TLS handshake.
     /// After upgrade, the original tcp_handle is invalid.
-    pub async fn tls_upgrade(&mut self, tcp_handle: u32, hostname: &str) -> Result<u32, TlsError> {
+    pub async fn tls_upgrade(
+        &mut self,
+        tcp_handle: u32,
+        hostname: &str,
+        timeout_ms: u32,
+    ) -> Result<u32, TlsError> {
+        let connect_timeout = Self::effective_timeout(self.config.connect_timeout, timeout_ms);
+
         // Remove the TCP connection (we're taking ownership)
         let tcp = self
             .tcp_connections
@@ -685,13 +734,10 @@ impl ConnectionManager {
             .try_into()
             .map_err(|_| TlsError::HandshakeFailed("invalid hostname".into()))?;
 
-        let tls = tokio::time::timeout(
-            self.config.connect_timeout,
-            connector.connect(server_name, tcp),
-        )
-        .await
-        .map_err(|_| TlsError::Tcp(TcpError::TimedOut))?
-        .map_err(|e| TlsError::HandshakeFailed(e.to_string()))?;
+        let tls = tokio::time::timeout(connect_timeout, connector.connect(server_name, tcp))
+            .await
+            .map_err(|_| TlsError::Tcp(TcpError::TimedOut))?
+            .map_err(|e| TlsError::HandshakeFailed(e.to_string()))?;
 
         let handle = self.alloc_handle();
         self.tls_connections.insert(handle, tls);
@@ -712,14 +758,23 @@ impl ConnectionManager {
     }
 
     /// Read from a TLS connection.
-    pub async fn tls_read(&mut self, handle: u32, len: u32) -> Result<Vec<u8>, TlsError> {
+    ///
+    /// `timeout_ms` is the guest-requested I/O timeout in milliseconds
+    /// (`0` = use the host default); see `effective_timeout`.
+    pub async fn tls_read(
+        &mut self,
+        handle: u32,
+        len: u32,
+        timeout_ms: u32,
+    ) -> Result<Vec<u8>, TlsError> {
+        let io_timeout = Self::effective_timeout(self.config.io_timeout, timeout_ms);
         let stream = self
             .tls_connections
             .get_mut(&handle)
             .ok_or(TlsError::InvalidHandle)?;
 
         let mut buf = vec![0u8; len as usize];
-        let n = tokio::time::timeout(self.config.io_timeout, stream.read(&mut buf))
+        let n = tokio::time::timeout(io_timeout, stream.read(&mut buf))
             .await
             .map_err(|_| TlsError::Tcp(TcpError::TimedOut))?
             .map_err(|e| match e.kind() {
@@ -736,20 +791,25 @@ impl ConnectionManager {
     ///
     /// If secrets are configured, this method will parse HTTP requests and
     /// substitute secret placeholders in headers before sending.
-    pub async fn tls_write(&mut self, handle: u32, data: &[u8]) -> Result<u32, TlsError> {
+    pub async fn tls_write(
+        &mut self,
+        handle: u32,
+        data: &[u8],
+        timeout_ms: u32,
+    ) -> Result<u32, TlsError> {
         // Fast path: no secrets = no parsing
         if self.secrets.is_empty() {
-            return self.tls_write_raw(handle, data).await;
+            return self.tls_write_raw(handle, data, timeout_ms).await;
         }
 
         match self
             .process_write_data(handle, data)
             .map_err(TlsError::Tcp)?
         {
-            WriteAction::Passthrough(bytes) => self.tls_write_raw(handle, &bytes).await,
+            WriteAction::Passthrough(bytes) => self.tls_write_raw(handle, &bytes, timeout_ms).await,
             WriteAction::Segments(segments) => {
                 for segment in &segments {
-                    self.tls_write_raw(handle, segment).await?;
+                    self.tls_write_raw(handle, segment, timeout_ms).await?;
                 }
                 Ok(data.len() as u32)
             }
@@ -758,13 +818,19 @@ impl ConnectionManager {
     }
 
     /// Write raw data to a TLS connection without HTTP parsing.
-    async fn tls_write_raw(&mut self, handle: u32, data: &[u8]) -> Result<u32, TlsError> {
+    async fn tls_write_raw(
+        &mut self,
+        handle: u32,
+        data: &[u8],
+        timeout_ms: u32,
+    ) -> Result<u32, TlsError> {
+        let io_timeout = Self::effective_timeout(self.config.io_timeout, timeout_ms);
         let stream = self
             .tls_connections
             .get_mut(&handle)
             .ok_or(TlsError::InvalidHandle)?;
 
-        let n = tokio::time::timeout(self.config.io_timeout, stream.write(data))
+        let n = tokio::time::timeout(io_timeout, stream.write(data))
             .await
             .map_err(|_| TlsError::Tcp(TcpError::TimedOut))?
             .map_err(|e| match e.kind() {
@@ -895,6 +961,50 @@ fn host_matches_pattern(host: &str, pattern: &str) -> bool {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_effective_timeout_uses_default_when_guest_zero() {
+        // A guest timeout of 0 means "no preference" - fall back to the host default.
+        let default = Duration::from_secs(30);
+        assert_eq!(
+            ConnectionManager::effective_timeout(default, 0),
+            default,
+            "guest_ms == 0 should use the host default"
+        );
+    }
+
+    #[test]
+    fn test_effective_timeout_guest_can_shorten() {
+        // A guest timeout below the host ceiling shortens the effective timeout.
+        let default = Duration::from_secs(30);
+        assert_eq!(
+            ConnectionManager::effective_timeout(default, 1000),
+            Duration::from_millis(1000),
+            "a shorter guest timeout should win"
+        );
+    }
+
+    #[test]
+    fn test_effective_timeout_guest_cannot_exceed_host() {
+        // The host ceiling caps the guest: a script must not be able to extend
+        // a timeout beyond the sandbox's configured limit.
+        let default = Duration::from_secs(5);
+        assert_eq!(
+            ConnectionManager::effective_timeout(default, 60_000),
+            default,
+            "a longer guest timeout must be clamped to the host ceiling"
+        );
+    }
+
+    #[test]
+    fn test_effective_timeout_equal_is_stable() {
+        let default = Duration::from_secs(2);
+        assert_eq!(
+            ConnectionManager::effective_timeout(default, 2000),
+            default,
+            "an equal guest timeout should match the host ceiling exactly"
+        );
+    }
 
     #[test]
     fn test_pattern_matching() {

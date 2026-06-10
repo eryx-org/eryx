@@ -89,20 +89,24 @@ if response.status_code == 200:
         path, so this guards against a recurrence.
 
         Tries several hosts so a single slow/unreachable host doesn't flake CI
-        (matches the urllib external test and #224).
+        (matches the urllib external test and #224). The most reliable host is
+        tried first, and the per-request timeout is honored by the sandbox (it
+        is propagated to the host socket calls), so a slow host fails fast and
+        falls through well within the execution budget rather than hanging until
+        the sandbox-level timeout.
         """
         result = requests_sandbox.execute("""
 import requests
 
 urls = [
-    "https://httpbin.org/get",
     "https://example.com",
     "https://www.google.com",
+    "https://httpbin.org/get",
 ]
 
 for url in urls:
     try:
-        response = requests.get(url, timeout=8)
+        response = requests.get(url, timeout=5)
         if response.status_code == 200:
             print(f"SUCCESS via {url}")
             break
@@ -190,20 +194,24 @@ if response.status_code == 200:
         AttributeError. Distinct from the requests/urllib3 path (#231).
 
         Tries several hosts so a single slow/unreachable host doesn't flake CI
-        (matches the urllib external test and #224).
+        (matches the urllib external test and #224). The most reliable host is
+        tried first, and the per-request timeout is honored by the sandbox (it
+        is propagated to the host socket calls), so a slow host fails fast and
+        falls through well within the execution budget rather than hanging until
+        the sandbox-level timeout.
         """
         result = httpx_sandbox.execute("""
 import httpx
 
 urls = [
-    "https://httpbin.org/get",
     "https://example.com",
     "https://www.google.com",
+    "https://httpbin.org/get",
 ]
 
 for url in urls:
     try:
-        response = httpx.get(url, timeout=8)
+        response = httpx.get(url, timeout=5)
         if response.status_code == 200:
             print(f"SUCCESS via {url}")
             break
@@ -298,19 +306,24 @@ except Exception as e:
         assert "SUCCESS" in result.stdout, f"Test failed: {result.stdout}"
 
     def test_urllib_https_external(self, network_sandbox):
-        """Test urllib.request.urlopen() with HTTPS to external service."""
+        """Test urllib.request.urlopen() with HTTPS to external service.
+
+        The most reliable host is tried first, and the per-request timeout is
+        honored by the sandbox (it is propagated to the host socket calls), so a
+        slow host fails fast and falls through well within the execution budget.
+        """
         result = network_sandbox.execute("""
 import urllib.request
 
 urls = [
-    "https://httpbin.org/get",
     "https://example.com",
     "https://www.google.com",
+    "https://httpbin.org/get",
 ]
 
 for url in urls:
     try:
-        with urllib.request.urlopen(url, timeout=8) as response:
+        with urllib.request.urlopen(url, timeout=5) as response:
             if response.status == 200:
                 print(f"SUCCESS via {url}")
                 break

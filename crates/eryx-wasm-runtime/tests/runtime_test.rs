@@ -900,10 +900,11 @@ fn add_network_stubs(linker: &mut Linker<State>) -> Result<(), Box<dyn std::erro
     // TCP interface stubs
     let mut tcp = linker.instance("eryx:net/tcp@0.1.0")?;
 
-    // tcp.connect: func(host: string, port: u16) -> result<tcp-handle, tcp-error>
+    // tcp.connect: func(host: string, port: u16, timeout-ms: u32) -> result<tcp-handle, tcp-error>
     tcp.func_wrap_async(
         "connect",
-        |_ctx: wasmtime::StoreContextMut<'_, State>, (_host, _port): (String, u16)| {
+        |_ctx: wasmtime::StoreContextMut<'_, State>,
+         (_host, _port, _timeout_ms): (String, u16, u32)| {
             Box::new(async move {
                 Ok((Result::<u32, TcpError>::Err(TcpError::NotPermitted(
                     "networking not available in test".into(),
@@ -912,10 +913,11 @@ fn add_network_stubs(linker: &mut Linker<State>) -> Result<(), Box<dyn std::erro
         },
     )?;
 
-    // tcp.read: func(handle: tcp-handle, len: u32) -> result<list<u8>, tcp-error>
+    // tcp.read: func(handle: tcp-handle, len: u32, timeout-ms: u32) -> result<list<u8>, tcp-error>
     tcp.func_wrap_async(
         "read",
-        |_ctx: wasmtime::StoreContextMut<'_, State>, (_handle, _len): (u32, u32)| {
+        |_ctx: wasmtime::StoreContextMut<'_, State>,
+         (_handle, _len, _timeout_ms): (u32, u32, u32)| {
             Box::new(async move {
                 Ok((Result::<Vec<u8>, TcpError>::Err(TcpError::NotPermitted(
                     "networking not available in test".into(),
@@ -924,10 +926,11 @@ fn add_network_stubs(linker: &mut Linker<State>) -> Result<(), Box<dyn std::erro
         },
     )?;
 
-    // tcp.write: func(handle: tcp-handle, data: list<u8>) -> result<u32, tcp-error>
+    // tcp.write: func(handle: tcp-handle, timeout-ms: u32, data: list<u8>) -> result<u32, tcp-error>
     tcp.func_wrap_async(
         "write",
-        |_ctx: wasmtime::StoreContextMut<'_, State>, (_handle, _data): (u32, Vec<u8>)| {
+        |_ctx: wasmtime::StoreContextMut<'_, State>,
+         (_handle, _timeout_ms, _data): (u32, u32, Vec<u8>)| {
             Box::new(async move {
                 Ok((Result::<u32, TcpError>::Err(TcpError::NotPermitted(
                     "networking not available in test".into(),
@@ -945,10 +948,11 @@ fn add_network_stubs(linker: &mut Linker<State>) -> Result<(), Box<dyn std::erro
     // TLS interface stubs
     let mut tls = linker.instance("eryx:net/tls@0.1.0")?;
 
-    // tls.upgrade: func(tcp: tcp-handle, hostname: string) -> result<tls-handle, tls-error>
+    // tls.upgrade: func(tcp: tcp-handle, hostname: string, timeout-ms: u32) -> result<tls-handle, tls-error>
     tls.func_wrap_async(
         "upgrade",
-        |_ctx: wasmtime::StoreContextMut<'_, State>, (_tcp_handle, _hostname): (u32, String)| {
+        |_ctx: wasmtime::StoreContextMut<'_, State>,
+         (_tcp_handle, _hostname, _timeout_ms): (u32, String, u32)| {
             Box::new(async move {
                 Ok((Result::<u32, TlsError>::Err(TlsError::HandshakeFailed(
                     "networking not available in test".into(),
@@ -957,10 +961,11 @@ fn add_network_stubs(linker: &mut Linker<State>) -> Result<(), Box<dyn std::erro
         },
     )?;
 
-    // tls.read: func(handle: tls-handle, len: u32) -> result<list<u8>, tls-error>
+    // tls.read: func(handle: tls-handle, len: u32, timeout-ms: u32) -> result<list<u8>, tls-error>
     tls.func_wrap_async(
         "read",
-        |_ctx: wasmtime::StoreContextMut<'_, State>, (_handle, _len): (u32, u32)| {
+        |_ctx: wasmtime::StoreContextMut<'_, State>,
+         (_handle, _len, _timeout_ms): (u32, u32, u32)| {
             Box::new(async move {
                 Ok((Result::<Vec<u8>, TlsError>::Err(TlsError::HandshakeFailed(
                     "networking not available in test".into(),
@@ -969,10 +974,11 @@ fn add_network_stubs(linker: &mut Linker<State>) -> Result<(), Box<dyn std::erro
         },
     )?;
 
-    // tls.write: func(handle: tls-handle, data: list<u8>) -> result<u32, tls-error>
+    // tls.write: func(handle: tls-handle, timeout-ms: u32, data: list<u8>) -> result<u32, tls-error>
     tls.func_wrap_async(
         "write",
-        |_ctx: wasmtime::StoreContextMut<'_, State>, (_handle, _data): (u32, Vec<u8>)| {
+        |_ctx: wasmtime::StoreContextMut<'_, State>,
+         (_handle, _timeout_ms, _data): (u32, u32, Vec<u8>)| {
             Box::new(async move {
                 Ok((Result::<u32, TlsError>::Err(TlsError::HandshakeFailed(
                     "networking not available in test".into(),

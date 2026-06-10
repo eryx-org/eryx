@@ -863,7 +863,7 @@ pub enum NetResult<T> {
 // -----------------------------------------------------------------------------
 
 /// Call the TCP connect import (synchronous - blocks until complete).
-fn call_tcp_connect(host: &str, port: u16) -> Result<NetResult<u32>, String> {
+fn call_tcp_connect(host: &str, port: u16, timeout_ms: u32) -> Result<NetResult<u32>, String> {
     CURRENT_WIT.with(|cell| {
         let wit = cell.borrow();
         let wit = wit
@@ -876,7 +876,8 @@ fn call_tcp_connect(host: &str, port: u16) -> Result<NetResult<u32>, String> {
 
         let mut cx = EryxCall::new();
 
-        // Push arguments: port (u16), then host (string) - reverse order for wit-dylib
+        // Push arguments in reverse declaration order (host, port, timeout-ms).
+        cx.push_u32(timeout_ms);
         cx.push_u16(port);
         cx.push_string(host.to_string());
 
@@ -910,7 +911,7 @@ fn call_tcp_connect(host: &str, port: u16) -> Result<NetResult<u32>, String> {
 }
 
 /// Call the TCP read import (synchronous - blocks until complete).
-fn call_tcp_read(handle: u32, len: u32) -> Result<NetResult<Vec<u8>>, String> {
+fn call_tcp_read(handle: u32, len: u32, timeout_ms: u32) -> Result<NetResult<Vec<u8>>, String> {
     CURRENT_WIT.with(|cell| {
         let wit = cell.borrow();
         let wit = wit
@@ -923,6 +924,8 @@ fn call_tcp_read(handle: u32, len: u32) -> Result<NetResult<Vec<u8>>, String> {
 
         let mut cx = EryxCall::new();
 
+        // Push arguments in reverse declaration order (handle, len, timeout-ms).
+        cx.push_u32(timeout_ms);
         cx.push_u32(len);
         cx.push_u32(handle);
 
@@ -955,7 +958,7 @@ fn call_tcp_read(handle: u32, len: u32) -> Result<NetResult<Vec<u8>>, String> {
 }
 
 /// Call the TCP write import (synchronous - blocks until complete).
-fn call_tcp_write(handle: u32, data: &[u8]) -> Result<NetResult<u32>, String> {
+fn call_tcp_write(handle: u32, data: &[u8], timeout_ms: u32) -> Result<NetResult<u32>, String> {
     CURRENT_WIT.with(|cell| {
         let wit = cell.borrow();
         let wit = wit
@@ -968,7 +971,12 @@ fn call_tcp_write(handle: u32, data: &[u8]) -> Result<NetResult<u32>, String> {
 
         let mut cx = EryxCall::new();
 
+        // Push arguments in reverse declaration order (handle, timeout-ms, data).
+        // The `data` list is the last declared argument so the guest's zero-copy
+        // byte-list lowering (which does not pop the value) leaves nothing on the
+        // stack for a later scalar pop to trip over.
         cx.stack.push(Value::Bytes(data.to_vec()));
+        cx.push_u32(timeout_ms);
         cx.push_u32(handle);
 
         // Synchronous call - blocks until the host completes the operation
@@ -1037,7 +1045,11 @@ fn tcp_error_name(discr: u32) -> &'static str {
 // -----------------------------------------------------------------------------
 
 /// Call the TLS upgrade import (synchronous - blocks until complete).
-fn call_tls_upgrade(tcp_handle: u32, hostname: &str) -> Result<NetResult<u32>, String> {
+fn call_tls_upgrade(
+    tcp_handle: u32,
+    hostname: &str,
+    timeout_ms: u32,
+) -> Result<NetResult<u32>, String> {
     CURRENT_WIT.with(|cell| {
         let wit = cell.borrow();
         let wit = wit
@@ -1050,7 +1062,8 @@ fn call_tls_upgrade(tcp_handle: u32, hostname: &str) -> Result<NetResult<u32>, S
 
         let mut cx = EryxCall::new();
 
-        // Push arguments: hostname (string), then tcp_handle (u32) - reverse order
+        // Push arguments in reverse declaration order (tcp, hostname, timeout-ms).
+        cx.push_u32(timeout_ms);
         cx.push_string(hostname.to_string());
         cx.push_u32(tcp_handle);
 
@@ -1085,7 +1098,7 @@ fn call_tls_upgrade(tcp_handle: u32, hostname: &str) -> Result<NetResult<u32>, S
 }
 
 /// Call the TLS read import (synchronous - blocks until complete).
-fn call_tls_read(handle: u32, len: u32) -> Result<NetResult<Vec<u8>>, String> {
+fn call_tls_read(handle: u32, len: u32, timeout_ms: u32) -> Result<NetResult<Vec<u8>>, String> {
     CURRENT_WIT.with(|cell| {
         let wit = cell.borrow();
         let wit = wit
@@ -1098,6 +1111,8 @@ fn call_tls_read(handle: u32, len: u32) -> Result<NetResult<Vec<u8>>, String> {
 
         let mut cx = EryxCall::new();
 
+        // Push arguments in reverse declaration order (handle, len, timeout-ms).
+        cx.push_u32(timeout_ms);
         cx.push_u32(len);
         cx.push_u32(handle);
 
@@ -1130,7 +1145,7 @@ fn call_tls_read(handle: u32, len: u32) -> Result<NetResult<Vec<u8>>, String> {
 }
 
 /// Call the TLS write import (synchronous - blocks until complete).
-fn call_tls_write(handle: u32, data: &[u8]) -> Result<NetResult<u32>, String> {
+fn call_tls_write(handle: u32, data: &[u8], timeout_ms: u32) -> Result<NetResult<u32>, String> {
     CURRENT_WIT.with(|cell| {
         let wit = cell.borrow();
         let wit = wit
@@ -1143,7 +1158,12 @@ fn call_tls_write(handle: u32, data: &[u8]) -> Result<NetResult<u32>, String> {
 
         let mut cx = EryxCall::new();
 
+        // Push arguments in reverse declaration order (handle, timeout-ms, data).
+        // The `data` list is the last declared argument so the guest's zero-copy
+        // byte-list lowering (which does not pop the value) leaves nothing on the
+        // stack for a later scalar pop to trip over.
         cx.stack.push(Value::Bytes(data.to_vec()));
+        cx.push_u32(timeout_ms);
         cx.push_u32(handle);
 
         // Synchronous call - blocks until the host completes the operation
@@ -1232,8 +1252,12 @@ pub type TlsResultValue = NetResultValue;
 /// - status 0: success, value is handle (u32)
 /// - status 1: error, value is error message (String)
 /// - status 2: pending, value is (waitable_id, promise_id)
-pub fn do_tcp_connect(host: &str, port: u16) -> Result<(i32, NetResultValue), String> {
-    match call_tcp_connect(host, port)? {
+pub fn do_tcp_connect(
+    host: &str,
+    port: u16,
+    timeout_ms: u32,
+) -> Result<(i32, NetResultValue), String> {
+    match call_tcp_connect(host, port, timeout_ms)? {
         NetResult::Ok(handle) => Ok((0, NetResultValue::Handle(handle))),
         NetResult::Err(discr, payload) => {
             let error_name = tcp_error_name(discr);
@@ -1255,8 +1279,12 @@ pub fn do_tcp_connect(host: &str, port: u16) -> Result<(i32, NetResultValue), St
 /// - status 0: success, value is bytes (`Vec<u8>`)
 /// - status 1: error, value is error message (`String`)
 /// - status 2: pending, value is (waitable_id, promise_id) (`(u32, u32)`)
-pub fn do_tcp_read(handle: u32, len: u32) -> Result<(i32, NetResultValue), String> {
-    match call_tcp_read(handle, len)? {
+pub fn do_tcp_read(
+    handle: u32,
+    len: u32,
+    timeout_ms: u32,
+) -> Result<(i32, NetResultValue), String> {
+    match call_tcp_read(handle, len, timeout_ms)? {
         NetResult::Ok(bytes) => Ok((0, NetResultValue::Bytes(bytes))),
         NetResult::Err(discr, payload) => {
             let error_name = tcp_error_name(discr);
@@ -1277,8 +1305,12 @@ pub fn do_tcp_read(handle: u32, len: u32) -> Result<(i32, NetResultValue), Strin
 /// - status 0: success, value is bytes written (u32)
 /// - status 1: error, value is error message (String)
 /// - status 2: pending, value is (waitable_id, promise_id)
-pub fn do_tcp_write(handle: u32, data: &[u8]) -> Result<(i32, NetResultValue), String> {
-    match call_tcp_write(handle, data)? {
+pub fn do_tcp_write(
+    handle: u32,
+    data: &[u8],
+    timeout_ms: u32,
+) -> Result<(i32, NetResultValue), String> {
+    match call_tcp_write(handle, data, timeout_ms)? {
         NetResult::Ok(written) => Ok((0, NetResultValue::Handle(written))),
         NetResult::Err(discr, payload) => {
             let error_name = tcp_error_name(discr);
@@ -1308,8 +1340,12 @@ pub fn do_tcp_close(handle: u32) {
 /// - status 0: success, value is TLS handle (u32)
 /// - status 1: error, value is error message (String)
 /// - status 2: pending, value is (waitable_id, promise_id)
-pub fn do_tls_upgrade(tcp_handle: u32, hostname: &str) -> Result<(i32, NetResultValue), String> {
-    match call_tls_upgrade(tcp_handle, hostname)? {
+pub fn do_tls_upgrade(
+    tcp_handle: u32,
+    hostname: &str,
+    timeout_ms: u32,
+) -> Result<(i32, NetResultValue), String> {
+    match call_tls_upgrade(tcp_handle, hostname, timeout_ms)? {
         NetResult::Ok(handle) => Ok((0, NetResultValue::Handle(handle))),
         NetResult::Err(discr, payload) => {
             let error_name = tls_error_name(discr);
@@ -1331,8 +1367,12 @@ pub fn do_tls_upgrade(tcp_handle: u32, hostname: &str) -> Result<(i32, NetResult
 /// - status 0: success, value is bytes (`Vec<u8>`)
 /// - status 1: error, value is error message (`String`)
 /// - status 2: pending, value is (waitable_id, promise_id) (`(u32, u32)`)
-pub fn do_tls_read(handle: u32, len: u32) -> Result<(i32, NetResultValue), String> {
-    match call_tls_read(handle, len)? {
+pub fn do_tls_read(
+    handle: u32,
+    len: u32,
+    timeout_ms: u32,
+) -> Result<(i32, NetResultValue), String> {
+    match call_tls_read(handle, len, timeout_ms)? {
         NetResult::Ok(bytes) => Ok((0, NetResultValue::Bytes(bytes))),
         NetResult::Err(discr, payload) => {
             let error_name = tls_error_name(discr);
@@ -1353,8 +1393,12 @@ pub fn do_tls_read(handle: u32, len: u32) -> Result<(i32, NetResultValue), Strin
 /// - status 0: success, value is bytes written (u32)
 /// - status 1: error, value is error message (String)
 /// - status 2: pending, value is (waitable_id, promise_id)
-pub fn do_tls_write(handle: u32, data: &[u8]) -> Result<(i32, NetResultValue), String> {
-    match call_tls_write(handle, data)? {
+pub fn do_tls_write(
+    handle: u32,
+    data: &[u8],
+    timeout_ms: u32,
+) -> Result<(i32, NetResultValue), String> {
+    match call_tls_write(handle, data, timeout_ms)? {
         NetResult::Ok(written) => Ok((0, NetResultValue::Handle(written))),
         NetResult::Err(discr, payload) => {
             let error_name = tls_error_name(discr);

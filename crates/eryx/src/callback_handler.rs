@@ -273,25 +273,28 @@ pub async fn run_net_handler(
             NetRequest::TcpConnect {
                 host,
                 port,
+                timeout_ms,
                 response_tx,
             } => {
-                let result = manager.tcp_connect(&host, port).await;
+                let result = manager.tcp_connect(&host, port, timeout_ms).await;
                 let _ = response_tx.send(result);
             }
             NetRequest::TcpRead {
                 handle,
                 len,
+                timeout_ms,
                 response_tx,
             } => {
-                let result = manager.tcp_read(handle, len).await;
+                let result = manager.tcp_read(handle, len, timeout_ms).await;
                 let _ = response_tx.send(result);
             }
             NetRequest::TcpWrite {
                 handle,
                 data,
+                timeout_ms,
                 response_tx,
             } => {
-                let result = manager.tcp_write(handle, &data).await;
+                let result = manager.tcp_write(handle, &data, timeout_ms).await;
                 let _ = response_tx.send(result);
             }
             NetRequest::TcpClose { handle } => {
@@ -302,25 +305,28 @@ pub async fn run_net_handler(
             NetRequest::TlsUpgrade {
                 tcp_handle,
                 hostname,
+                timeout_ms,
                 response_tx,
             } => {
-                let result = manager.tls_upgrade(tcp_handle, &hostname).await;
+                let result = manager.tls_upgrade(tcp_handle, &hostname, timeout_ms).await;
                 let _ = response_tx.send(result);
             }
             NetRequest::TlsRead {
                 handle,
                 len,
+                timeout_ms,
                 response_tx,
             } => {
-                let result = manager.tls_read(handle, len).await;
+                let result = manager.tls_read(handle, len, timeout_ms).await;
                 let _ = response_tx.send(result);
             }
             NetRequest::TlsWrite {
                 handle,
                 data,
+                timeout_ms,
                 response_tx,
             } => {
-                let result = manager.tls_write(handle, &data).await;
+                let result = manager.tls_write(handle, &data, timeout_ms).await;
                 let _ = response_tx.send(result);
             }
             NetRequest::TlsClose { handle } => {
