@@ -22,6 +22,7 @@
 - [Output Streaming](./guide/output-streaming.md)
 - [MCP Integration](./guide/mcp.md)
 - [MCP Server](./guide/mcp-server.md)
+- [gRPC Server](./guide/grpc-server.md)
 - [Pre-compiling Runtimes](./guide/precompile.md)
 - [CLI](./guide/cli.md)
 
