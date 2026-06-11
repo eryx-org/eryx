@@ -9,7 +9,8 @@ use eryx::{PoolConfig, Sandbox, SandboxPool};
 use eryx_server::proto::eryx::v1::eryx_server::EryxServer;
 use eryx_server::service::EryxService;
 use eryx_server::telemetry::setup_tracing;
-use tonic::transport::Server;
+use tonic::transport::server::ServerTlsConfig;
+use tonic::transport::{Certificate, Identity, Server};
 
 /// gRPC server for sandboxed Python execution via eryx.
 #[derive(Parser, Debug)]
@@ -55,6 +56,55 @@ struct Args {
     /// signed by one process cannot be verified by another or after a restart).
     #[arg(long, env = "ERYX_JOURNAL_SIGNING_KEY", hide = true)]
     journal_signing_key: Option<String>,
+
+    /// Path to a PEM-encoded TLS certificate chain.
+    ///
+    /// Enables TLS for the gRPC transport. Must be provided together with
+    /// `--tls-key`. When neither is set, the server listens over plaintext
+    /// (the default).
+    #[arg(long, env = "ERYX_TLS_CERT", requires = "tls_key")]
+    tls_cert: Option<PathBuf>,
+
+    /// Path to the PEM-encoded TLS private key for `--tls-cert`.
+    #[arg(long, env = "ERYX_TLS_KEY", requires = "tls_cert")]
+    tls_key: Option<PathBuf>,
+
+    /// Path to a PEM-encoded CA bundle used to verify client certificates.
+    ///
+    /// Setting this enables mutual TLS: clients must present a certificate
+    /// signed by one of the CAs in the bundle, otherwise the connection is
+    /// rejected. Requires `--tls-cert`/`--tls-key`.
+    #[arg(long, env = "ERYX_TLS_CLIENT_CA", requires = "tls_cert")]
+    tls_client_ca: Option<PathBuf>,
+}
+
+/// Build a [`ServerTlsConfig`] from the configured cert/key/CA paths.
+///
+/// Returns `Ok(None)` when no certificate is configured (plaintext mode).
+/// clap's `requires` wiring guarantees `--tls-key` accompanies `--tls-cert`
+/// and that `--tls-client-ca` is only set alongside them, so this only has to
+/// load the files and assemble the config.
+fn build_tls_config(args: &Args) -> Result<Option<ServerTlsConfig>, Box<dyn std::error::Error>> {
+    let (Some(cert_path), Some(key_path)) = (&args.tls_cert, &args.tls_key) else {
+        return Ok(None);
+    };
+
+    let cert = std::fs::read(cert_path)
+        .map_err(|e| format!("failed to read TLS cert {}: {e}", cert_path.display()))?;
+    let key = std::fs::read(key_path)
+        .map_err(|e| format!("failed to read TLS key {}: {e}", key_path.display()))?;
+
+    let mut tls = ServerTlsConfig::new().identity(Identity::from_pem(cert, key));
+
+    if let Some(ca_path) = &args.tls_client_ca {
+        let ca = std::fs::read(ca_path)
+            .map_err(|e| format!("failed to read TLS client CA {}: {e}", ca_path.display()))?;
+        // Presence of a client CA requires (and verifies) client certificates:
+        // `client_auth_optional` defaults to false, so this is required mTLS.
+        tls = tls.client_ca_root(Certificate::from_pem(ca));
+    }
+
+    Ok(Some(tls))
 }
 
 /// Spawn a background task that periodically records pool gauge metrics.
@@ -144,9 +194,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Record pool gauge metrics every 5 seconds.
     spawn_pool_stats_recorder(Arc::clone(&pool));
 
-    let signer = match args.journal_signing_key {
+    let signer = match &args.journal_signing_key {
         Some(hex_key) => {
-            let bytes = hex::decode(&hex_key)
+            let bytes = hex::decode(hex_key)
                 .map_err(|e| format!("ERYX_JOURNAL_SIGNING_KEY must be valid hex: {e}"))?;
             let key: [u8; 32] = bytes.try_into().map_err(|v: Vec<u8>| {
                 format!(
@@ -167,7 +217,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     let service = EryxService::with_signer(pool, signer);
 
-    Server::builder()
+    let mut server = Server::builder();
+    match build_tls_config(&args)? {
+        Some(tls) => {
+            let mtls = args.tls_client_ca.is_some();
+            server = server.tls_config(tls)?;
+            tracing::info!(mtls, "TLS enabled for gRPC transport");
+        }
+        None => {
+            tracing::info!("TLS disabled — serving gRPC over plaintext");
+        }
+    }
+
+    server
         .add_service(EryxServer::new(service))
         .serve(addr)
         .await?;
