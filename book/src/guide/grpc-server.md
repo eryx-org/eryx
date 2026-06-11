@@ -8,14 +8,20 @@ It's the backend for hosted, multi-tenant deployments where sandbox execution ru
 
 ## Running the server
 
-The server ships as the `eryx-server` binary in the `eryx-server` crate. Build it with the `embedded` and `preinit` features so the runtime and stdlib are baked in:
+The easiest way to run the server is the published Docker image, [`sd2k/eryx-server`](https://hub.docker.com/r/sd2k/eryx-server):
+
+```bash
+docker run -p 50051:50051 sd2k/eryx-server
+```
+
+The image sets `ENTRYPOINT ["eryx-server"]` and listens on `[::]:50051`; it's built from `crates/eryx-server/Dockerfile`.
+
+To build from source instead, the server is the `eryx-server` binary in the `eryx-server` crate. Build it with the `embedded` and `preinit` features so the runtime and stdlib are baked in:
 
 ```bash
 cargo build --release -p eryx-server --features eryx/embedded,eryx/preinit
 ./target/release/eryx-server
 ```
-
-A `Dockerfile` is provided at `crates/eryx-server/Dockerfile` (its image sets `ENTRYPOINT ["eryx-server"]` and listens on `[::]:50051`).
 
 Every flag also has an environment variable, so the server is easy to configure in a container:
 
