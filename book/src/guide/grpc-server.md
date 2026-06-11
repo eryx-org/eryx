@@ -2,7 +2,7 @@
 
 Eryx can run as a standalone **gRPC server** (`eryx-server`) that executes Python in a sandbox on behalf of remote clients. A pool of warm sandboxes is shared across requests, and a single bidirectional streaming RPC carries everything a request needs: [callbacks](./callbacks.md), real-time [output streaming](./output-streaming.md), execution tracing, [secrets](./secrets.md), [networking](./networking.md), [session state](./sessions.md), the structured result value, and [callback replay & suspension](./callback-replay.md).
 
-This is the backend behind hosted integrations such as the Grafana Assistant's `execute_python` tool. If you only need to embed the sandbox in a single process, use the [Rust API](../api/rust.md) directly; if you want a tool for an AI assistant over stdio, see the [MCP Server](./mcp-server.md). The gRPC server is for remote, multi-tenant, networked execution.
+It's the backend for hosted, multi-tenant deployments where sandbox execution runs as a remote service. If you only need to embed the sandbox in a single process, use the [Rust API](../api/rust.md) directly; if you want a tool for an AI assistant over stdio, see the [MCP Server](./mcp-server.md). The gRPC server is for remote, multi-tenant, networked execution.
 
 > The protobuf service definition is the source of truth for the API: [`crates/eryx-server/proto/eryx/v1/eryx.proto`](https://github.com/eryx-org/eryx/blob/main/crates/eryx-server/proto/eryx/v1/eryx.proto). The fields and messages described below are documented inline there.
 
