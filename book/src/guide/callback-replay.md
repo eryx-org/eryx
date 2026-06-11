@@ -4,7 +4,7 @@ When an LLM iterates on a Python script that drives expensive [callbacks](./call
 
 **Suspension** is the companion feature: a callback can return [`CallbackError::Suspend`] to halt execution ("I can't answer yet — retry later"). Eryx records what was waiting on, stops the guest immediately, and the recorded journal lets you resume from where you left off once the dependency is ready.
 
-> **Availability.** These features are currently exposed in the **Rust library API** only. Python and JavaScript bindings are tracked in [issue #241](https://github.com/eryx-org/eryx/issues/241); gRPC-server documentation is tracked in [issue #242](https://github.com/eryx-org/eryx/issues/242). (The gRPC server already implements both features, including HMAC-signed journals — it just isn't documented in this book yet.)
+> **Availability.** This guide describes the **Rust library API**. The [gRPC server](./grpc-server.md) also implements both features — including HMAC-signed journals — over its `callback_journal` field and `CALLBACK_OUTCOME_SUSPEND` outcome; see the [gRPC Server](./grpc-server.md#callback-replay) guide for the wire-level details. Python and JavaScript bindings are tracked in [issue #241](https://github.com/eryx-org/eryx/issues/241).
 
 ## How replay works
 
@@ -23,7 +23,7 @@ Callbacks are matched by their **name plus canonicalized arguments**, treated as
 
 The first invocation that does **not** match a remaining cached result for its key — a *miss* — is treated as a divergence from the recorded run: replay stops, and that call *and every subsequent call* run live for the rest of the execution. This is the key safety property: it prevents a stale cached result from being replayed across a real divergence (for example, a script edited to write before it reads).
 
-A caller that signs journals and binds the signature to the exact script (as the gRPC server layer does) rejects an edited script's journal *before* matching even runs, restricting replay to re-runs of the same script.
+A caller that signs journals and binds the signature to the exact script (as the [gRPC server layer](./grpc-server.md#journal-signing-and-the-trust-boundary) does) rejects an edited script's journal *before* matching even runs, restricting replay to re-runs of the same script.
 
 ## Recording a journal
 
@@ -145,7 +145,7 @@ To make a nondeterministic input replayable, **route it through a callback** so 
 
 Replayed journal entries are returned to Python **verbatim** — eryx does not re-execute the callback to validate them. A crafted journal can therefore inject arbitrary values into a script's execution. **Treat the journal as a trusted input.**
 
-The core `eryx` crate is agnostic to signing and trusts whatever journal it receives, so only replay journals from a source you control (a previous run of the same sandbox). When journals round-trip through an untrusted boundary — stored externally, or returned to a client and echoed back — verify integrity first. The gRPC server layer provides HMAC-SHA256 signing that binds a journal to the exact script for exactly this purpose.
+The core `eryx` crate is agnostic to signing and trusts whatever journal it receives, so only replay journals from a source you control (a previous run of the same sandbox). When journals round-trip through an untrusted boundary — stored externally, or returned to a client and echoed back — verify integrity first. The [gRPC server layer](./grpc-server.md#journal-signing-and-the-trust-boundary) provides HMAC-SHA256 signing that binds a journal to the exact script for exactly this purpose.
 
 ## See also
 
