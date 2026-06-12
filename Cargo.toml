@@ -1,6 +1,11 @@
 [workspace]
 resolver = "2"
 members = ["crates/*"]
+# SPIKE: standalone QuickJS guest prototype. Excluded from the workspace so its
+# heavy `rquickjs` (bundled-quickjs) dependency and native-only build don't affect
+# the normal `cargo check` of the rest of the tree. Check it on its own with
+# `cargo check -p eryx-js-wasm-runtime --manifest-path crates/eryx-js-wasm-runtime/Cargo.toml`.
+exclude = ["crates/eryx-js-wasm-runtime"]
 
 # Dev tools (install via cargo or mise):
 # - cargo-nextest: Fast test runner (`cargo nextest run`)

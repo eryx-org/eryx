@@ -1,0 +1,4 @@
+# This spike is its own (excluded) workspace, so build artifacts and the lockfile
+# land inside the crate directory. Keep them out of git.
+/target/
+/Cargo.lock

@@ -1,0 +1,42 @@
+# SPIKE: QuickJS guest runtime prototype.
+#
+# This mirrors `crates/eryx-wasm-runtime` (the CPython guest) but uses QuickJS
+# (via the `rquickjs` bindings) as the embedded interpreter. The goal is to prove
+# out the Rust *shape* of a second guest language, NOT to produce a shippable
+# WASM component. See the module docs in `src/lib.rs` for the open questions.
+#
+# This crate is deliberately EXCLUDED from the workspace (see root Cargo.toml)
+# because:
+#   1. `rquickjs` with `bundled` pulls in a C build of QuickJS that is irrelevant
+#      to the rest of the tree.
+#   2. The real target is `wasm32-wasip2` with a WASI-SDK clang toolchain, which
+#      is out of scope for the spike. We `cargo check` against the *native* target
+#      instead, just to type-check the Rust against the real `rquickjs` API.
+# Empty workspace table => this crate is its own workspace root, so it never tries
+# to join the surrounding eryx workspace (or any ancestor workspace, e.g. when this
+# lives inside a git worktree under `.claude/`). Combined with the root manifest's
+# `exclude`, the spike stays fully standalone.
+[workspace]
+
+[package]
+name = "eryx-js-wasm-runtime"
+version = "0.0.0"
+edition = "2024"
+publish = false
+description = "SPIKE: WASM guest runtime for eryx sandbox - implements WIT exports via QuickJS"
+
+# Real build would be `crate-type = ["staticlib"]` like eryx-wasm-runtime, then
+# linked into a component with WASI-SDK clang. For the spike we build a plain rlib
+# so it type-checks natively without the wasm toolchain.
+[lib]
+crate-type = ["rlib"]
+
+[dependencies]
+# rquickjs is the ergonomic Rust binding to Bellard's QuickJS — the JS analog of
+# PyO3. It vendors and compiles the QuickJS C source by default (no opt-in feature
+# needed). `bindgen` regenerates the C FFI bindings for whatever target we build
+# for (here: native, for `cargo check`).
+rquickjs = { version = "0.12", features = ["bindgen"] }
+
+# Same FFI shim the Python guest implements its Interpreter trait against.
+wit-dylib-ffi = { path = "../wit-dylib-ffi" }
