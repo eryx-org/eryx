@@ -91,7 +91,7 @@ async fn main() -> anyhow::Result<()> {
 
     // Pre-compile for faster instantiation
     let start = Instant::now();
-    let precompiled = eryx::PythonExecutor::precompile(&preinit_component)?;
+    let precompiled = eryx::Executor::precompile(&preinit_component)?;
     println!(
         "  Pre-compiled in {:?} ({:.1} MB)",
         start.elapsed(),
@@ -102,8 +102,8 @@ async fn main() -> anyhow::Result<()> {
     let create_sandbox = || unsafe {
         Sandbox::builder()
             .with_precompiled_bytes(precompiled.clone())
-            .with_python_stdlib(&python_stdlib)
-            .with_site_packages(&site_packages)
+            .with_stdlib(&python_stdlib)
+            .with_library_path(&site_packages)
             .build()
     };
 

@@ -53,7 +53,7 @@ async fn preinit_can_execute() {
     // Create sandbox from pre-initialized bytes
     let sandbox = Sandbox::builder()
         .with_wasm_bytes(preinit_bytes)
-        .with_python_stdlib(&stdlib)
+        .with_stdlib(&stdlib)
         .build()
         .expect("sandbox creation should succeed");
 
@@ -80,7 +80,7 @@ async fn preinit_arbitrary_imports_work() {
 
     let sandbox = Sandbox::builder()
         .with_wasm_bytes(preinit_bytes)
-        .with_python_stdlib(&stdlib)
+        .with_stdlib(&stdlib)
         .build()
         .expect("sandbox creation should succeed");
 
@@ -127,7 +127,7 @@ async fn preinit_multiple_sandboxes() {
     for i in 0..3 {
         let sandbox = Sandbox::builder()
             .with_wasm_bytes((*preinit_bytes).clone())
-            .with_python_stdlib(&stdlib)
+            .with_stdlib(&stdlib)
             .build()
             .expect("sandbox creation should succeed");
 
@@ -152,7 +152,7 @@ async fn preinit_sandboxes_isolated() {
     // Create first sandbox and set a variable
     let sandbox1 = Sandbox::builder()
         .with_wasm_bytes(preinit_bytes.clone())
-        .with_python_stdlib(&stdlib)
+        .with_stdlib(&stdlib)
         .build()
         .unwrap();
 
@@ -164,7 +164,7 @@ async fn preinit_sandboxes_isolated() {
     // Create second sandbox - should NOT see the variable
     let sandbox2 = Sandbox::builder()
         .with_wasm_bytes(preinit_bytes)
-        .with_python_stdlib(&stdlib)
+        .with_stdlib(&stdlib)
         .build()
         .unwrap();
 
@@ -195,7 +195,7 @@ async fn preinit_with_imports() {
 
     let sandbox = Sandbox::builder()
         .with_wasm_bytes(preinit_bytes)
-        .with_python_stdlib(&stdlib)
+        .with_stdlib(&stdlib)
         .build()
         .expect("sandbox creation should succeed");
 
@@ -232,7 +232,7 @@ async fn preinit_imports_work_within_execution() {
 
     let sandbox = Sandbox::builder()
         .with_wasm_bytes(preinit_bytes)
-        .with_python_stdlib(&stdlib)
+        .with_stdlib(&stdlib)
         .build()
         .unwrap();
 
@@ -264,7 +264,7 @@ async fn preinit_file_operations_work() {
 
     let sandbox = Sandbox::builder()
         .with_wasm_bytes(preinit_bytes)
-        .with_python_stdlib(&stdlib)
+        .with_stdlib(&stdlib)
         .build()
         .unwrap();
 

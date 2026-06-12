@@ -19,7 +19,7 @@
 //! let sandbox = unsafe {
 //!     Sandbox::builder()
 //!         .with_precompiled_file("/path/to/custom-runtime.cwasm")
-//!         .with_python_stdlib(stdlib.path())
+//!         .with_stdlib(stdlib.path())
 //!         .build()?
 //! };
 //! ```

@@ -8,37 +8,37 @@
 use std::path::PathBuf;
 use std::sync::{Arc, OnceLock};
 
-use eryx::{PythonExecutor, SessionExecutor};
+use eryx::{Executor, SessionExecutor};
 
 /// Shared executor to avoid repeated WASM loading across tests.
-static SHARED_EXECUTOR: OnceLock<Arc<PythonExecutor>> = OnceLock::new();
+static SHARED_EXECUTOR: OnceLock<Arc<Executor>> = OnceLock::new();
 
-fn get_shared_executor() -> Arc<PythonExecutor> {
+fn get_shared_executor() -> Arc<Executor> {
     SHARED_EXECUTOR
         .get_or_init(|| Arc::new(create_executor()))
         .clone()
 }
 
-/// Create a PythonExecutor, using embedded resources if available.
-fn create_executor() -> PythonExecutor {
+/// Create a Executor, using embedded resources if available.
+fn create_executor() -> Executor {
     #[cfg(feature = "embedded")]
     {
         let resources =
             eryx::embedded::EmbeddedResources::get().expect("Failed to extract embedded resources");
 
         #[allow(unsafe_code)]
-        unsafe { PythonExecutor::from_precompiled_file(resources.runtime()) }
+        unsafe { Executor::from_precompiled_file(resources.runtime()) }
             .expect("Failed to load embedded runtime")
-            .with_python_stdlib(resources.stdlib())
+            .with_stdlib(resources.stdlib())
     }
 
     #[cfg(not(feature = "embedded"))]
     {
-        let stdlib_path = python_stdlib_path();
+        let stdlib_path = stdlib_path();
         let path = runtime_wasm_path();
-        PythonExecutor::from_file(&path)
+        Executor::from_file(&path)
             .unwrap_or_else(|e| panic!("Failed to load runtime.wasm from {:?}: {}", path, e))
-            .with_python_stdlib(&stdlib_path)
+            .with_stdlib(&stdlib_path)
     }
 }
 
@@ -53,8 +53,8 @@ fn runtime_wasm_path() -> PathBuf {
 }
 
 #[cfg(not(feature = "embedded"))]
-fn python_stdlib_path() -> PathBuf {
-    if let Ok(path) = std::env::var("ERYX_PYTHON_STDLIB") {
+fn stdlib_path() -> PathBuf {
+    if let Ok(path) = std::env::var("ERYX_STDLIB") {
         let path = PathBuf::from(path);
         if path.exists() {
             return path;

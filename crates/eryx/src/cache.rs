@@ -330,7 +330,7 @@ impl ComponentCache for NoCache {
 ///
 /// # Usage
 ///
-/// This cache is used automatically by [`PythonExecutor`](crate::wasm::PythonExecutor)
+/// This cache is used automatically by [`Executor`](crate::wasm::Executor)
 /// when creating executors from precompiled files or the embedded runtime.
 /// You typically don't need to interact with it directly.
 ///

@@ -99,7 +99,7 @@ fn main() -> anyhow::Result<()> {
     // With preinit: do pre-initialization for faster session creation
     #[cfg(feature = "preinit")]
     let component_bytes = {
-        let python_stdlib = find_python_stdlib()?;
+        let python_stdlib = find_stdlib()?;
         println!("Python stdlib: {}\n", python_stdlib.display());
 
         println!("--- Step 1: Pre-initializing Python ---");
@@ -140,7 +140,7 @@ fn main() -> anyhow::Result<()> {
     // Step 2: Pre-compile to native code
     println!("\n--- Step 2: Pre-compiling to native code ---");
     let start = Instant::now();
-    let precompiled = eryx::PythonExecutor::precompile_with_target(&component_bytes, target)?;
+    let precompiled = eryx::Executor::precompile_with_target(&component_bytes, target)?;
     let precompile_time = start.elapsed();
     println!("Pre-compile time: {precompile_time:?}");
     println!(
@@ -166,12 +166,12 @@ fn main() -> anyhow::Result<()> {
         let rt = tokio::runtime::Runtime::new()?;
 
         // Load the precompiled file we just created
-        // SAFETY: We just created this file from PythonExecutor::precompile()
+        // SAFETY: We just created this file from Executor::precompile()
         #[allow(unsafe_code)]
         let sandbox = unsafe {
             eryx::Sandbox::builder()
                 .with_precompiled_file(cwasm_path)
-                .with_python_stdlib(resources.stdlib())
+                .with_stdlib(resources.stdlib())
                 .build()?
         };
 
@@ -183,7 +183,7 @@ fn main() -> anyhow::Result<()> {
             let _sandbox = unsafe {
                 eryx::Sandbox::builder()
                     .with_precompiled_file(cwasm_path)
-                    .with_python_stdlib(resources.stdlib())
+                    .with_stdlib(resources.stdlib())
                     .build()?
             };
         }
@@ -253,9 +253,9 @@ fn main() -> anyhow::Result<()> {
 
 /// Find the Python stdlib directory.
 #[cfg(feature = "preinit")]
-fn find_python_stdlib() -> anyhow::Result<std::path::PathBuf> {
+fn find_stdlib() -> anyhow::Result<std::path::PathBuf> {
     // Check env vars first (used in CI)
-    for var in ["ERYX_PYTHON_STDLIB", "PYTHON_STDLIB_PATH"] {
+    for var in ["ERYX_STDLIB", "PYTHON_STDLIB_PATH"] {
         if let Ok(path) = std::env::var(var) {
             let p = Path::new(&path);
             if p.exists() && p.join("encodings").exists() {
@@ -282,7 +282,7 @@ fn find_python_stdlib() -> anyhow::Result<std::path::PathBuf> {
     anyhow::bail!(
         "Could not find Python stdlib. Tried: {:?}\n\
          Run `mise run setup-eryx-runtime-tests` to extract the stdlib, \
-         or set ERYX_PYTHON_STDLIB environment variable.",
+         or set ERYX_STDLIB environment variable.",
         candidates
     )
 }

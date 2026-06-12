@@ -58,6 +58,7 @@ pub mod embedded;
 #[cfg(feature = "embedded-stdlib")]
 pub mod embedded_stdlib;
 mod error;
+mod language;
 mod library;
 pub mod net;
 pub mod package;
@@ -87,6 +88,7 @@ pub use callback::{
     Callback, CallbackError, DynamicCallback, DynamicCallbackBuilder, TypedCallback, empty_schema,
 };
 pub use error::Error;
+pub use language::Language;
 pub use library::RuntimeLibrary;
 pub use net::{ConnectionManager, NetConfig, TcpError, TlsError};
 pub use package::{ExtractedPackage, PackageFormat};
@@ -103,18 +105,31 @@ pub use secrets::{
     FileScrubPolicy, OutputScrubPolicy, SecretConfig, generate_placeholder, scrub_placeholders,
 };
 pub use session::{
-    InProcessSession, PythonStateSnapshot, Session, SessionExecutor, SnapshotMetadata,
-    SnapshotSession,
+    InProcessSession, Session, SessionExecutor, SnapshotMetadata, SnapshotSession, StateSnapshot,
 };
+
+/// Deprecated alias for [`StateSnapshot`], retained to ease the 0.6.0 migration.
+#[deprecated(
+    since = "0.6.0",
+    note = "Eryx now supports multiple guest languages; use `StateSnapshot` instead"
+)]
+pub type PythonStateSnapshot = StateSnapshot;
 #[cfg(feature = "vfs")]
 pub use session::{VfsConfig, VolumeMount};
 pub use trace::{OutputHandler, TraceEvent, TraceEventKind, TraceHandler};
 
 // Re-export precompilation utilities and internal types
 pub use wasm::{
-    CallbackRequest, CpuFeatureLevel, ExecutionOutput, NetRequest, OutputRequest, PythonExecutor,
+    CallbackRequest, CpuFeatureLevel, ExecutionOutput, Executor, NetRequest, OutputRequest,
     TraceRequest,
 };
+
+/// Deprecated alias for [`Executor`], retained to ease the 0.6.0 migration.
+#[deprecated(
+    since = "0.6.0",
+    note = "Eryx now supports multiple guest languages; use `Executor` (with `Language`) instead"
+)]
+pub type PythonExecutor = Executor;
 
 // Re-export schema types at top level for convenience
 pub use schema::{JsonSchema, Schema};

@@ -101,7 +101,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         builder = builder.with_native_extension(name.clone(), bytes.clone());
     }
     let sandbox1 = builder
-        .with_site_packages(site_packages)
+        .with_library_path(site_packages)
         .with_cache_dir(cache_dir)?
         .build()?;
     let cold_time = start.elapsed();
@@ -125,7 +125,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         builder = builder.with_native_extension(name.clone(), bytes.clone());
     }
     let sandbox2 = builder
-        .with_site_packages(site_packages)
+        .with_library_path(site_packages)
         .with_cache_dir(cache_dir)?
         .build()?;
     let warm_time = start.elapsed();
@@ -149,7 +149,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         builder = builder.with_native_extension(name.clone(), bytes.clone());
     }
     let sandbox3 = builder
-        .with_site_packages(site_packages)
+        .with_library_path(site_packages)
         .with_cache_dir(cache_dir)?
         .build()?;
     let warm_time2 = start.elapsed();

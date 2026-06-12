@@ -480,7 +480,7 @@ eryx/
 │   │       ├── callback.rs # Callback trait, CallbackError
 │   │       ├── library.rs  # RuntimeLibrary struct
 │   │       ├── trace.rs    # TraceEvent, TraceHandler
-│   │       ├── wasm.rs     # wasmtime setup, PythonExecutor
+│   │       ├── wasm.rs     # wasmtime setup, Executor
 │   │       ├── error.rs    # Error types
 │   │       └── session/    # Session state persistence
 │   │           ├── mod.rs

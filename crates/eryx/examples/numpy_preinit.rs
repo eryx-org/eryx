@@ -132,7 +132,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("\nStep 2: Pre-compiling component...");
     let start = Instant::now();
 
-    let precompiled = eryx::PythonExecutor::precompile(&preinit_component)?;
+    let precompiled = eryx::Executor::precompile(&preinit_component)?;
     println!(
         "  Pre-compiled in {:?} ({:.1} MB)",
         start.elapsed(),
@@ -160,8 +160,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let sandbox = unsafe {
         Sandbox::builder()
             .with_precompiled_bytes(precompiled.clone())
-            .with_python_stdlib(&python_stdlib)
-            .with_site_packages(site_packages)
+            .with_stdlib(&python_stdlib)
+            .with_library_path(site_packages)
             .build()?
     };
     println!("  Created in {:?}", start.elapsed());
@@ -193,8 +193,8 @@ print(f"Mean: {a.mean()}")
         let sandbox = unsafe {
             Sandbox::builder()
                 .with_precompiled_bytes(precompiled.clone())
-                .with_python_stdlib(&python_stdlib)
-                .with_site_packages(site_packages)
+                .with_stdlib(&python_stdlib)
+                .with_library_path(site_packages)
                 .build()?
         };
         let elapsed = start.elapsed();

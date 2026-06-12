@@ -49,7 +49,7 @@ use async_trait::async_trait;
 use crate::error::Error;
 use crate::sandbox::ExecuteResult;
 
-pub use executor::{PythonStateSnapshot, SessionExecutor, SnapshotMetadata};
+pub use executor::{SessionExecutor, SnapshotMetadata, StateSnapshot};
 #[cfg(feature = "vfs")]
 pub use executor::{VfsConfig, VolumeMount};
 pub use in_process::InProcessSession;

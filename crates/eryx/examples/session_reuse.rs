@@ -15,9 +15,7 @@
 use std::sync::Arc;
 use std::time::Instant;
 
-use eryx::{
-    InProcessSession, PythonExecutor, PythonStateSnapshot, Sandbox, Session, SessionExecutor,
-};
+use eryx::{Executor, InProcessSession, Sandbox, Session, SessionExecutor, StateSnapshot};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -26,8 +24,8 @@ async fn main() -> anyhow::Result<()> {
     // Build the sandbox once using embedded runtime - all sessions will share it
     let sandbox = Sandbox::embedded().build()?;
 
-    // Also create a PythonExecutor for SessionExecutor demo
-    let executor = Arc::new(PythonExecutor::from_embedded_runtime()?);
+    // Also create a Executor for SessionExecutor demo
+    let executor = Arc::new(Executor::from_embedded_runtime()?);
 
     // Run each demo
     demo_session_executor(&executor).await?;
@@ -45,7 +43,7 @@ async fn main() -> anyhow::Result<()> {
 ///
 /// The core building block for session reuse. Keeps the WASM instance
 /// alive between executions, avoiding Python initialization overhead.
-async fn demo_session_executor(executor: &Arc<PythonExecutor>) -> anyhow::Result<()> {
+async fn demo_session_executor(executor: &Arc<Executor>) -> anyhow::Result<()> {
     println!("--- SessionExecutor (Core) ---");
     println!("Keeps WASM Store and Instance alive between executions.");
     println!("This is the foundation for all session types.\n");
@@ -152,7 +150,7 @@ async fn demo_in_process_session(sandbox: &Sandbox) -> anyhow::Result<()> {
 /// State Snapshots Demo
 ///
 /// Demonstrates capturing and restoring Python state.
-async fn demo_state_snapshots(executor: &Arc<PythonExecutor>) -> anyhow::Result<()> {
+async fn demo_state_snapshots(executor: &Arc<Executor>) -> anyhow::Result<()> {
     println!("--- State Snapshots ---");
     println!("Capture and restore Python state using pickle serialization.");
     println!("Enables state persistence across process restarts.\n");
@@ -220,7 +218,7 @@ async fn demo_state_snapshots(executor: &Arc<PythonExecutor>) -> anyhow::Result<
 
     // Demonstrate deserializing from bytes (simulating load from storage)
     println!("\nSimulating load from storage...");
-    let restored_snapshot = PythonStateSnapshot::from_bytes(&bytes)?;
+    let restored_snapshot = StateSnapshot::from_bytes(&bytes)?;
     println!(
         "Deserialized snapshot: {} bytes, timestamp {}",
         restored_snapshot.size(),
@@ -243,10 +241,7 @@ async fn demo_state_snapshots(executor: &Arc<PythonExecutor>) -> anyhow::Result<
 }
 
 /// Compare execution times between regular sandbox and sessions.
-async fn benchmark_comparison(
-    sandbox: &Sandbox,
-    executor: &Arc<PythonExecutor>,
-) -> anyhow::Result<()> {
+async fn benchmark_comparison(sandbox: &Sandbox, executor: &Arc<Executor>) -> anyhow::Result<()> {
     println!("--- Performance Comparison ---\n");
 
     const ITERATIONS: usize = 5;

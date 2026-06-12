@@ -21,16 +21,24 @@ pub enum Error {
     /// Error during Python execution machinery (e.g. a WASM trap, the store or
     /// bindings being unavailable, or invalid input). This is a *sandbox* failure
     /// — the runtime could not faithfully execute the script. An uncaught
-    /// exception raised *by* the script is [`Error::PythonException`] instead.
+    /// exception raised *by* the script is [`Error::GuestException`] instead.
     #[error("execution failed: {0}")]
     Execution(String),
 
-    /// The script raised an uncaught Python exception. The contained string is
-    /// the traceback exactly as CPython would have written it to stderr. This is
-    /// a *script* failure, not a sandbox failure: the runtime ran the code
-    /// faithfully and the code itself errored.
+    /// The script raised an uncaught exception in the guest. The contained
+    /// string is the guest's traceback. This is a *script* failure, not a
+    /// sandbox failure: the runtime ran the code faithfully and the code itself
+    /// errored.
+    ///
+    /// The format is currently Python-shaped — exactly as CPython would have
+    /// written the traceback to stderr — because Python is the only guest
+    /// language with a working execution path. The variant is named
+    /// language-neutrally (`GuestException`, not `PythonException`) so it can
+    /// carry a JavaScript stack trace once the QuickJS guest lands, without
+    /// another breaking rename. Callers that parse the string should not assume
+    /// the Python format will hold across guest languages.
     #[error("{0}")]
-    PythonException(String),
+    GuestException(String),
 
     /// A callback error occurred during execution.
     #[error("callback error: {0}")]
@@ -57,15 +65,13 @@ pub enum Error {
     #[error("serialization error: {0}")]
     Serialization(String),
 
-    /// Python stdlib not found during auto-detection.
+    /// Guest stdlib not found during auto-detection.
     ///
-    /// Use [`SandboxBuilder::with_python_stdlib()`](crate::SandboxBuilder::with_python_stdlib)
+    /// Use [`SandboxBuilder::with_stdlib()`](crate::SandboxBuilder::with_stdlib)
     /// to specify the stdlib path explicitly, or enable the `embedded` feature and use
     /// [`Sandbox::embedded()`](crate::Sandbox::embedded).
-    #[error(
-        "Python stdlib not found. Set ERYX_PYTHON_STDLIB, use with_python_stdlib(), or use Sandbox::embedded()"
-    )]
-    MissingPythonStdlib,
+    #[error("stdlib not found. Set ERYX_STDLIB, use with_stdlib(), or use Sandbox::embedded()")]
+    MissingStdlib,
 
     /// State snapshot error.
     #[error("snapshot error: {0}")]
@@ -104,7 +110,7 @@ impl From<serde_json::Error> for Error {
 /// as a C string, so a NUL would be caught there and surface as an opaque guest
 /// error. Validating host-side keeps it classified as a sandbox/input failure
 /// ([`Error::Execution`]) rather than being mistaken for an uncaught Python
-/// exception ([`Error::PythonException`]).
+/// exception ([`Error::GuestException`]).
 pub(crate) fn validate_user_code(code: &str) -> Result<(), Error> {
     if code.contains('\0') {
         return Err(Error::Execution(

@@ -8,10 +8,10 @@
 //!
 //! The `SessionExecutor` wraps a `Store<ExecutorState>` and the instantiated
 //! component, keeping them alive between executions. This is in contrast to
-//! the regular `PythonExecutor` which creates a fresh Store for each execution.
+//! the regular `Executor` which creates a fresh Store for each execution.
 //!
 //! ```text
-//! Regular PythonExecutor:
+//! Regular Executor:
 //!   execute() -> new Store -> new Instance -> run -> drop Store
 //!   execute() -> new Store -> new Instance -> run -> drop Store
 //!   (Each call pays ~1.5ms Python init overhead)
@@ -46,8 +46,8 @@ use wasmtime_wasi::{DirPerms, FilePerms, WasiCtx, WasiCtxBuilder};
 use crate::callback::Callback;
 use crate::error::Error;
 use crate::wasm::{
-    CallbackRequest, ExecutionOutput, ExecutorState, HostCallbackInfo, MemoryTracker, NetRequest,
-    PythonExecutor, Sandbox as SandboxBindings, TraceRequest,
+    CallbackRequest, ExecutionOutput, Executor, ExecutorState, HostCallbackInfo, MemoryTracker,
+    NetRequest, Sandbox as SandboxBindings, TraceRequest,
 };
 
 /// Maximum snapshot size in bytes (10 MB).
@@ -77,12 +77,12 @@ pub const MAX_SNAPSHOT_SIZE: usize = 10 * 1024 * 1024;
 /// let bytes = snapshot.to_bytes();
 ///
 /// // Later, restore in a new session
-/// let snapshot = PythonStateSnapshot::from_bytes(&bytes)?;
+/// let snapshot = StateSnapshot::from_bytes(&bytes)?;
 /// new_session.restore_state(&snapshot).await?;
 /// new_session.execute("print(x + y)").run().await?; // prints "3"
 /// ```
 #[derive(Debug, Clone)]
-pub struct PythonStateSnapshot {
+pub struct StateSnapshot {
     /// Pickled Python state bytes.
     data: Vec<u8>,
 
@@ -101,7 +101,7 @@ pub struct SnapshotMetadata {
     pub size_bytes: usize,
 }
 
-impl PythonStateSnapshot {
+impl StateSnapshot {
     /// Create a new snapshot from raw pickle data.
     fn new(data: Vec<u8>) -> Self {
         let timestamp_ms = SystemTime::now()
@@ -431,7 +431,7 @@ impl VfsConfig {
 
 /// A session-aware executor that keeps WASM instances alive between executions.
 ///
-/// Unlike `PythonExecutor` which creates a fresh instance for each execution,
+/// Unlike `Executor` which creates a fresh instance for each execution,
 /// `SessionExecutor` maintains state between calls, enabling:
 ///
 /// - Faster subsequent executions (no Python init overhead)
@@ -440,7 +440,7 @@ impl VfsConfig {
 /// - State snapshots for persistence and transfer
 pub struct SessionExecutor {
     /// The parent executor (for engine and instance_pre access).
-    executor: Arc<PythonExecutor>,
+    executor: Arc<Executor>,
 
     /// The store containing the WASM instance state.
     /// This is `Option` so we can take ownership during async execution.
@@ -494,14 +494,14 @@ fn build_callback_infos(callbacks: &[Arc<dyn Callback>]) -> Vec<HostCallbackInfo
 }
 
 /// Build WASI context with Python stdlib and site-packages mounts.
-fn build_wasi_context(executor: &PythonExecutor) -> Result<WasiCtx, Error> {
+fn build_wasi_context(executor: &Executor) -> Result<WasiCtx, Error> {
     let mut wasi_builder = WasiCtxBuilder::new();
     wasi_builder.inherit_stdout().inherit_stderr();
 
     // Build PYTHONPATH from stdlib and all site-packages directories
-    let site_packages_paths = executor.python_site_packages_paths();
+    let site_packages_paths = executor.library_paths();
     let mut pythonpath_parts = Vec::new();
-    if executor.python_stdlib_path().is_some() {
+    if executor.stdlib_path().is_some() {
         pythonpath_parts.push("/python-stdlib".to_string());
     }
     for i in 0..site_packages_paths.len() {
@@ -509,7 +509,7 @@ fn build_wasi_context(executor: &PythonExecutor) -> Result<WasiCtx, Error> {
     }
 
     // Mount Python stdlib if configured (required for eryx-wasm-runtime)
-    if let Some(stdlib_path) = executor.python_stdlib_path() {
+    if let Some(stdlib_path) = executor.stdlib_path() {
         wasi_builder.env("PYTHONHOME", "/python-stdlib");
         if !pythonpath_parts.is_empty() {
             wasi_builder.env("PYTHONPATH", pythonpath_parts.join(":"));
@@ -543,7 +543,7 @@ fn build_wasi_context(executor: &PythonExecutor) -> Result<WasiCtx, Error> {
 /// Build hybrid VFS context with VFS storage and real filesystem preopens.
 #[cfg(feature = "vfs")]
 fn build_hybrid_vfs_context(
-    executor: &PythonExecutor,
+    executor: &Executor,
     vfs_storage: eryx_vfs::ArcStorage,
     vfs_config: &VfsConfig,
 ) -> std::result::Result<eryx_vfs::HybridVfsCtx<eryx_vfs::ArcStorage>, Error> {
@@ -557,13 +557,13 @@ fn build_hybrid_vfs_context(
     );
 
     // Add real filesystem preopens that mirror the WASI preopens
-    if let Some(stdlib_path) = executor.python_stdlib_path()
+    if let Some(stdlib_path) = executor.stdlib_path()
         && let Ok(real_dir) =
             eryx_vfs::RealDir::open_ambient(stdlib_path, DirPerms::READ, FilePerms::READ)
     {
         ctx.add_real_preopen("/python-stdlib", real_dir);
     }
-    for (i, site_packages_path) in executor.python_site_packages_paths().iter().enumerate() {
+    for (i, site_packages_path) in executor.library_paths().iter().enumerate() {
         let mount_path = format!("/site-packages-{i}");
         if let Ok(real_dir) =
             eryx_vfs::RealDir::open_ambient(site_packages_path, DirPerms::READ, FilePerms::READ)
@@ -602,7 +602,7 @@ fn build_hybrid_vfs_context(
 }
 
 impl SessionExecutor {
-    /// Create a new session executor from a `PythonExecutor`.
+    /// Create a new session executor from a `Executor`.
     ///
     /// This instantiates the WASM component and keeps it alive for reuse.
     ///
@@ -620,7 +620,7 @@ impl SessionExecutor {
         fields(callbacks = callbacks.len())
     )]
     pub async fn new(
-        executor: Arc<PythonExecutor>,
+        executor: Arc<Executor>,
         callbacks: &[Arc<dyn Callback>],
     ) -> Result<Self, Error> {
         #[cfg(feature = "vfs")]
@@ -650,7 +650,7 @@ impl SessionExecutor {
     /// Returns an error if the WASM component cannot be instantiated.
     #[cfg(feature = "vfs")]
     pub async fn new_with_vfs(
-        executor: Arc<PythonExecutor>,
+        executor: Arc<Executor>,
         callbacks: &[Arc<dyn Callback>],
         vfs_storage: eryx_vfs::ArcStorage,
     ) -> Result<Self, Error> {
@@ -671,7 +671,7 @@ impl SessionExecutor {
     /// # Example
     ///
     /// ```rust,ignore
-    /// use eryx::{PythonExecutor, SessionExecutor, VfsConfig};
+    /// use eryx::{Executor, SessionExecutor, VfsConfig};
     /// use eryx::vfs::InMemoryStorage;
     /// use std::sync::Arc;
     ///
@@ -690,7 +690,7 @@ impl SessionExecutor {
     /// Returns an error if the WASM component cannot be instantiated.
     #[cfg(feature = "vfs")]
     pub async fn new_with_vfs_config(
-        executor: Arc<PythonExecutor>,
+        executor: Arc<Executor>,
         callbacks: &[Arc<dyn Callback>],
         vfs_storage: eryx_vfs::ArcStorage,
         vfs_config: VfsConfig,
@@ -701,7 +701,7 @@ impl SessionExecutor {
     /// Internal constructor with optional VFS storage and config.
     #[cfg(feature = "vfs")]
     async fn new_internal(
-        executor: Arc<PythonExecutor>,
+        executor: Arc<Executor>,
         callbacks: &[Arc<dyn Callback>],
         vfs_storage: Option<eryx_vfs::ArcStorage>,
         vfs_config: Option<VfsConfig>,
@@ -783,7 +783,7 @@ impl SessionExecutor {
     /// Internal constructor without VFS.
     #[cfg(not(feature = "vfs"))]
     async fn new_internal(
-        executor: Arc<PythonExecutor>,
+        executor: Arc<Executor>,
         callbacks: &[Arc<dyn Callback>],
     ) -> Result<Self, Error> {
         let callback_infos = build_callback_infos(callbacks);
@@ -881,8 +881,8 @@ impl SessionExecutor {
     /// Override the name of the variable captured as the structured result for
     /// this session's current instance.
     ///
-    /// Normally the name is configured on the parent [`PythonExecutor`] via
-    /// [`PythonExecutor::with_result_variable`] and applied at instantiation. This
+    /// Normally the name is configured on the parent [`Executor`] via
+    /// [`Executor::with_result_variable`] and applied at instantiation. This
     /// method sets it on the already-instantiated session instance, e.g. to apply a
     /// per-request override. The override persists across `restore_state` (which
     /// reuses the current instance) but is reset to the executor's configured name
@@ -956,6 +956,12 @@ impl SessionExecutor {
         per_execute_fuel_limit: Option<u64>,
     ) -> Result<ExecutionOutput, Error> {
         crate::error::validate_user_code(code)?;
+
+        // SPIKE: only the Python guest is implemented; JS (QuickJS) is reserved.
+        match self.executor.language() {
+            crate::Language::Python => {}
+            crate::Language::JavaScript => todo!("JS guest not yet implemented"),
+        }
 
         let start = Instant::now();
 
@@ -1130,7 +1136,7 @@ impl SessionExecutor {
         // that is always an uncaught Python exception (its traceback).
         let wit_output = wasmtime_result
             .map_err(|e| Error::Execution(format!("WASM execution error: {e:?}")))?
-            .map_err(Error::PythonException)?;
+            .map_err(Error::GuestException)?;
 
         let duration = start.elapsed();
 
@@ -1304,7 +1310,7 @@ impl SessionExecutor {
     ///
     /// # Returns
     ///
-    /// A `PythonStateSnapshot` that can be serialized and restored later.
+    /// A `StateSnapshot` that can be serialized and restored later.
     ///
     /// # Errors
     ///
@@ -1320,7 +1326,7 @@ impl SessionExecutor {
     /// let snapshot = session.snapshot_state().await?;
     /// println!("Snapshot size: {} bytes", snapshot.size());
     /// ```
-    pub async fn snapshot_state(&mut self) -> Result<PythonStateSnapshot, Error> {
+    pub async fn snapshot_state(&mut self) -> Result<StateSnapshot, Error> {
         // Take ownership of store and bindings
         let mut store = self
             .store
@@ -1362,7 +1368,7 @@ impl SessionExecutor {
 
         tracing::debug!(size_bytes = data.len(), "State snapshot captured");
 
-        Ok(PythonStateSnapshot::new(data))
+        Ok(StateSnapshot::new(data))
     }
 
     /// Restore Python session state from a previously captured snapshot.
@@ -1384,13 +1390,13 @@ impl SessionExecutor {
     ///
     /// ```rust,ignore
     /// // Restore from a previously saved snapshot
-    /// let snapshot = PythonStateSnapshot::from_bytes(&saved_bytes)?;
+    /// let snapshot = StateSnapshot::from_bytes(&saved_bytes)?;
     /// session.restore_state(&snapshot).await?;
     ///
     /// // Variables from the snapshot are now available
     /// session.execute("print(x)", &[], None, None).await?;
     /// ```
-    pub async fn restore_state(&mut self, snapshot: &PythonStateSnapshot) -> Result<(), Error> {
+    pub async fn restore_state(&mut self, snapshot: &StateSnapshot) -> Result<(), Error> {
         // Take ownership of store and bindings
         let mut store = self
             .store
@@ -1601,7 +1607,7 @@ mod tests {
     #[test]
     fn test_python_state_snapshot_roundtrip() {
         let data = vec![1, 2, 3, 4, 5];
-        let snapshot = PythonStateSnapshot::new(data.clone());
+        let snapshot = StateSnapshot::new(data.clone());
 
         assert_eq!(snapshot.data(), &data);
         assert_eq!(snapshot.size(), 5);
@@ -1609,7 +1615,7 @@ mod tests {
 
         // Test serialization roundtrip
         let bytes = snapshot.to_bytes();
-        let restored = PythonStateSnapshot::from_bytes(&bytes).expect("from_bytes failed");
+        let restored = StateSnapshot::from_bytes(&bytes).expect("from_bytes failed");
 
         assert_eq!(restored.data(), &data);
         assert_eq!(
@@ -1621,13 +1627,13 @@ mod tests {
     #[test]
     fn test_python_state_snapshot_from_bytes_too_short() {
         let bytes = vec![1, 2, 3]; // Less than 8 bytes
-        let result = PythonStateSnapshot::from_bytes(&bytes);
+        let result = StateSnapshot::from_bytes(&bytes);
         assert!(result.is_err());
     }
 
     #[test]
     fn test_snapshot_metadata() {
-        let snapshot = PythonStateSnapshot::new(vec![0; 100]);
+        let snapshot = StateSnapshot::new(vec![0; 100]);
         let meta = snapshot.metadata();
 
         assert_eq!(meta.size_bytes, 100);

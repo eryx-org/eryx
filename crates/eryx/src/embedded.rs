@@ -20,7 +20,7 @@
 //!
 //! let sandbox = Sandbox::builder()
 //!     .with_precompiled_file(&resources.runtime_path)
-//!     .with_python_stdlib(&resources.stdlib_path)
+//!     .with_stdlib(&resources.stdlib_path)
 //!     .build()?;
 //! ```
 

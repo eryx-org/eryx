@@ -12,7 +12,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use eryx::{
-    PythonExecutor, SessionExecutor,
+    Executor, SessionExecutor,
     vfs::{ArcStorage, InMemoryStorage},
 };
 
@@ -85,8 +85,8 @@ fn runtime_wasm_path() -> PathBuf {
 }
 
 #[cfg(not(feature = "embedded"))]
-fn python_stdlib_path() -> PathBuf {
-    if let Ok(path) = std::env::var("ERYX_PYTHON_STDLIB") {
+fn stdlib_path() -> PathBuf {
+    if let Ok(path) = std::env::var("ERYX_STDLIB") {
         let path = PathBuf::from(path);
         if path.exists() {
             return path;
@@ -102,21 +102,19 @@ fn python_stdlib_path() -> PathBuf {
         .join("python-stdlib")
 }
 
-/// Create a PythonExecutor for use with SessionExecutor
-async fn create_executor() -> Arc<PythonExecutor> {
+/// Create a Executor for use with SessionExecutor
+async fn create_executor() -> Arc<Executor> {
     #[cfg(feature = "embedded")]
     {
-        Arc::new(
-            PythonExecutor::from_embedded_runtime().expect("Failed to create embedded executor"),
-        )
+        Arc::new(Executor::from_embedded_runtime().expect("Failed to create embedded executor"))
     }
 
     #[cfg(not(feature = "embedded"))]
     {
-        let stdlib_path = python_stdlib_path();
-        let executor = PythonExecutor::from_file(runtime_wasm_path())
+        let stdlib_path = stdlib_path();
+        let executor = Executor::from_file(runtime_wasm_path())
             .expect("Failed to load runtime")
-            .with_python_stdlib(&stdlib_path);
+            .with_stdlib(&stdlib_path);
         Arc::new(executor)
     }
 }

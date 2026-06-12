@@ -55,7 +55,7 @@ use crate::sandbox::{ExecuteResult, ExecuteStats, Sandbox};
 use crate::wasm::{CallbackRequest, OutputRequest, TraceRequest};
 
 use super::Session;
-use super::executor::{PythonStateSnapshot, SessionExecutor};
+use super::executor::{SessionExecutor, StateSnapshot};
 
 /// An in-process session that keeps the WASM instance alive between executions.
 ///
@@ -265,7 +265,7 @@ impl<'a> InProcessSession<'a> {
     /// # Errors
     ///
     /// Returns an error if the snapshot cannot be captured.
-    pub async fn snapshot_state(&mut self) -> Result<PythonStateSnapshot, Error> {
+    pub async fn snapshot_state(&mut self) -> Result<StateSnapshot, Error> {
         self.executor.snapshot_state().await
     }
 
@@ -276,7 +276,7 @@ impl<'a> InProcessSession<'a> {
     /// # Errors
     ///
     /// Returns an error if the restore fails.
-    pub async fn restore_state(&mut self, snapshot: &PythonStateSnapshot) -> Result<(), Error> {
+    pub async fn restore_state(&mut self, snapshot: &StateSnapshot) -> Result<(), Error> {
         self.executor.restore_state(snapshot).await
     }
 

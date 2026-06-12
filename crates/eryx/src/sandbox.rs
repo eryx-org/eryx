@@ -30,10 +30,11 @@ pub mod state {
     pub struct Has;
 }
 
-/// Try to automatically find the Python stdlib directory.
+/// Try to automatically find the guest stdlib directory.
 ///
 /// This function searches multiple locations in order:
-/// 1. `ERYX_PYTHON_STDLIB` environment variable
+/// 1. `ERYX_STDLIB` environment variable (falls back to the legacy
+///    `ERYX_PYTHON_STDLIB` for backwards compatibility)
 /// 2. `./python-stdlib` (relative to current directory)
 /// 3. `<exe_dir>/python-stdlib` (relative to executable)
 /// 4. `<exe_dir>/../python-stdlib` (sibling of executable directory)
@@ -41,22 +42,31 @@ pub mod state {
 /// Returns `Some(path)` if a valid stdlib directory is found, `None` otherwise.
 /// A valid stdlib directory must exist and contain an `encodings` subdirectory
 /// (required for Python initialization).
-fn find_python_stdlib() -> Option<PathBuf> {
+///
+/// SPIKE: the directory layout searched here is still Python-specific. A real
+/// multi-language implementation would key the search off the selected
+/// [`Language`](crate::Language); for the spike we keep the Python paths.
+fn find_stdlib() -> Option<PathBuf> {
     // Helper to validate a stdlib directory
     fn is_valid_stdlib(path: &std::path::Path) -> bool {
         path.is_dir() && path.join("encodings").is_dir()
     }
 
-    // 1. Environment variable
-    if let Ok(path) = std::env::var("ERYX_PYTHON_STDLIB") {
+    // 1. Environment variable: prefer the new `ERYX_STDLIB`, fall back to the
+    //    legacy `ERYX_PYTHON_STDLIB` so existing deployments keep working.
+    let env_path = std::env::var("ERYX_STDLIB")
+        .map(|p| ("ERYX_STDLIB", p))
+        .or_else(|_| std::env::var("ERYX_PYTHON_STDLIB").map(|p| ("ERYX_PYTHON_STDLIB", p)));
+    if let Ok((var, path)) = env_path {
         let path = PathBuf::from(path);
         if is_valid_stdlib(&path) {
-            tracing::debug!(path = %path.display(), "Found Python stdlib via ERYX_PYTHON_STDLIB");
+            tracing::debug!(path = %path.display(), var, "Found stdlib via environment variable");
             return Some(path);
         }
         tracing::warn!(
             path = %path.display(),
-            "ERYX_PYTHON_STDLIB is set but path is not a valid stdlib directory"
+            var,
+            "stdlib environment variable is set but path is not a valid stdlib directory"
         );
     }
 
@@ -100,12 +110,12 @@ use crate::error::Error;
 use crate::library::RuntimeLibrary;
 use crate::net::{ConnectionManager, NetConfig};
 use crate::trace::{OutputHandler, TraceEvent, TraceHandler};
-use crate::wasm::{CallbackRequest, NetRequest, OutputRequest, PythonExecutor, TraceRequest};
+use crate::wasm::{CallbackRequest, Executor, NetRequest, OutputRequest, TraceRequest};
 
 /// A sandboxed Python execution environment.
 pub struct Sandbox {
     /// The Python WASM executor (wrapped in Arc for sharing with sessions).
-    executor: Arc<PythonExecutor>,
+    executor: Arc<Executor>,
     /// Registered callbacks that Python code can invoke (wrapped in Arc to avoid cloning the map on each execute).
     callbacks: Arc<HashMap<String, Arc<dyn Callback>>>,
     /// Python preamble code injected before user code.
@@ -175,7 +185,7 @@ impl Sandbox {
     /// ```rust,ignore
     /// let sandbox = Sandbox::builder()
     ///     .with_wasm_file("runtime.wasm")
-    ///     .with_python_stdlib("/path/to/stdlib")
+    ///     .with_stdlib("/path/to/stdlib")
     ///     .build()?;
     /// ```
     ///
@@ -584,7 +594,7 @@ impl Sandbox {
     /// This allows creating a `SessionExecutor` from a pooled sandbox,
     /// enabling state persistence between executions.
     #[must_use]
-    pub fn executor(&self) -> Arc<PythonExecutor> {
+    pub fn executor(&self) -> Arc<Executor> {
         self.executor.clone()
     }
 
@@ -737,7 +747,7 @@ impl Sandbox {
     /// Internal execution with cancellation support.
     #[allow(clippy::too_many_arguments, unused_variables)]
     async fn execute_with_cancellation(
-        executor: Arc<PythonExecutor>,
+        executor: Arc<Executor>,
         callbacks: Arc<HashMap<String, Arc<dyn Callback>>>,
         preamble: &str,
         trace_handler: Option<Arc<dyn TraceHandler>>,
@@ -1086,7 +1096,7 @@ enum WasmSource {
 /// // Without embedded - must specify both runtime and stdlib
 /// let sandbox = Sandbox::builder()
 ///     .with_wasm_file("runtime.wasm")
-///     .with_python_stdlib("/path/to/stdlib")
+///     .with_stdlib("/path/to/stdlib")
 ///     .build()?;
 /// ```
 pub struct SandboxBuilder<Runtime = state::Needs, Stdlib = state::Needs> {
@@ -1099,10 +1109,12 @@ pub struct SandboxBuilder<Runtime = state::Needs, Stdlib = state::Needs> {
     resource_limits: ResourceLimits,
     /// Name of the user variable captured as the structured result. Default `result`.
     result_variable: String,
+    /// Guest language to run (default [`Language::Python`](crate::Language::Python)).
+    language: crate::Language,
     /// Path to Python stdlib for eryx-wasm-runtime.
-    python_stdlib_path: Option<std::path::PathBuf>,
+    stdlib_path: Option<std::path::PathBuf>,
     /// Path to Python site-packages for eryx-wasm-runtime.
-    python_site_packages_path: Option<std::path::PathBuf>,
+    library_path: Option<std::path::PathBuf>,
     /// Native Python extensions to link into the component.
     #[cfg(feature = "native-extensions")]
     native_extensions: Vec<eryx_runtime::linker::NativeExtension>,
@@ -1179,8 +1191,9 @@ impl SandboxBuilder<state::Needs, state::Needs> {
             output_handler: None,
             resource_limits: ResourceLimits::default(),
             result_variable: "result".to_string(),
-            python_stdlib_path: None,
-            python_site_packages_path: None,
+            language: crate::Language::default(),
+            stdlib_path: None,
+            library_path: None,
             #[cfg(feature = "native-extensions")]
             native_extensions: Vec::new(),
             #[cfg(feature = "native-extensions")]
@@ -1216,8 +1229,9 @@ impl SandboxBuilder<state::Needs, state::Needs> {
             output_handler: None,
             resource_limits: ResourceLimits::default(),
             result_variable: "result".to_string(),
-            python_stdlib_path: None, // Will use embedded stdlib
-            python_site_packages_path: None,
+            language: crate::Language::default(),
+            stdlib_path: None, // Will use embedded stdlib
+            library_path: None,
             #[cfg(feature = "native-extensions")]
             native_extensions: Vec::new(),
             #[cfg(feature = "native-extensions")]
@@ -1253,8 +1267,9 @@ impl<R, S> SandboxBuilder<R, S> {
             output_handler: self.output_handler,
             resource_limits: self.resource_limits,
             result_variable: self.result_variable,
-            python_stdlib_path: self.python_stdlib_path,
-            python_site_packages_path: self.python_site_packages_path,
+            language: self.language,
+            stdlib_path: self.stdlib_path,
+            library_path: self.library_path,
             #[cfg(feature = "native-extensions")]
             native_extensions: self.native_extensions,
             #[cfg(feature = "native-extensions")]
@@ -1318,7 +1333,7 @@ impl<S> SandboxBuilder<state::Needs, S> {
     /// Set the WASM component from bytes.
     ///
     /// Use this to embed the WASM component in your binary.
-    /// You still need to configure the Python stdlib with [`with_python_stdlib()`](SandboxBuilder::with_python_stdlib)
+    /// You still need to configure the Python stdlib with [`with_stdlib()`](SandboxBuilder::with_stdlib)
     /// or [`with_auto_stdlib()`](SandboxBuilder::with_auto_stdlib).
     #[must_use]
     pub fn with_wasm_bytes(mut self, bytes: impl Into<Vec<u8>>) -> SandboxBuilder<state::Has, S> {
@@ -1328,7 +1343,7 @@ impl<S> SandboxBuilder<state::Needs, S> {
 
     /// Set the WASM component from a file path.
     ///
-    /// You still need to configure the Python stdlib with [`with_python_stdlib()`](SandboxBuilder::with_python_stdlib)
+    /// You still need to configure the Python stdlib with [`with_stdlib()`](SandboxBuilder::with_stdlib)
     /// or [`with_auto_stdlib()`](SandboxBuilder::with_auto_stdlib).
     #[must_use]
     pub fn with_wasm_file(
@@ -1343,7 +1358,7 @@ impl<S> SandboxBuilder<state::Needs, S> {
     ///
     /// Pre-compiled components load much faster because they skip compilation
     /// (~50x faster sandbox creation). Create pre-compiled bytes using
-    /// `PythonExecutor::precompile()`.
+    /// `Executor::precompile()`.
     ///
     /// # Safety
     ///
@@ -1352,7 +1367,7 @@ impl<S> SandboxBuilder<state::Needs, S> {
     /// bytes can lead to **arbitrary code execution**.
     ///
     /// Only call this with pre-compiled bytes that:
-    /// - Were created by `PythonExecutor::precompile()` or `precompile_file()`
+    /// - Were created by `Executor::precompile()` or `precompile_file()`
     /// - Come from a trusted source you control
     /// - Were compiled with a compatible wasmtime version and configuration
     ///
@@ -1360,13 +1375,13 @@ impl<S> SandboxBuilder<state::Needs, S> {
     ///
     /// ```rust,ignore
     /// // Pre-compile once (safe operation)
-    /// let precompiled = PythonExecutor::precompile_file("runtime.wasm")?;
+    /// let precompiled = Executor::precompile_file("runtime.wasm")?;
     ///
     /// // Load from pre-compiled (unsafe - you must trust the bytes)
     /// let sandbox = unsafe {
     ///     Sandbox::builder()
     ///         .with_precompiled_bytes(precompiled)
-    ///         .with_python_stdlib("/path/to/stdlib")
+    ///         .with_stdlib("/path/to/stdlib")
     ///         .build()?
     /// };
     /// ```
@@ -1385,7 +1400,7 @@ impl<S> SandboxBuilder<state::Needs, S> {
     ///
     /// Pre-compiled components load much faster because they skip compilation
     /// (~50x faster sandbox creation). Create pre-compiled files using
-    /// `PythonExecutor::precompile_file()`.
+    /// `Executor::precompile_file()`.
     ///
     /// # Safety
     ///
@@ -1394,7 +1409,7 @@ impl<S> SandboxBuilder<state::Needs, S> {
     /// files can lead to **arbitrary code execution**.
     ///
     /// Only call this with pre-compiled files that:
-    /// - Were created by `PythonExecutor::precompile()` or `precompile_file()`
+    /// - Were created by `Executor::precompile()` or `precompile_file()`
     /// - Come from a trusted source you control
     /// - Were compiled with a compatible wasmtime version and configuration
     ///
@@ -1402,14 +1417,14 @@ impl<S> SandboxBuilder<state::Needs, S> {
     ///
     /// ```rust,ignore
     /// // Pre-compile once and save to disk
-    /// let precompiled = PythonExecutor::precompile_file("runtime.wasm")?;
+    /// let precompiled = Executor::precompile_file("runtime.wasm")?;
     /// std::fs::write("runtime.cwasm", &precompiled)?;
     ///
     /// // Load from pre-compiled file (unsafe - you must trust the file)
     /// let sandbox = unsafe {
     ///     Sandbox::builder()
     ///         .with_precompiled_file("runtime.cwasm")
-    ///         .with_python_stdlib("/path/to/stdlib")
+    ///         .with_stdlib("/path/to/stdlib")
     ///         .build()?
     /// };
     /// ```
@@ -1435,25 +1450,36 @@ impl<R> SandboxBuilder<R, state::Needs> {
     ///
     /// The stdlib will be mounted at `/python-stdlib` inside the WASM sandbox.
     #[must_use]
-    pub fn with_python_stdlib(
+    pub fn with_stdlib(
         mut self,
         path: impl Into<std::path::PathBuf>,
     ) -> SandboxBuilder<R, state::Has> {
-        self.python_stdlib_path = Some(path.into());
+        self.stdlib_path = Some(path.into());
         self.transition()
     }
 
-    /// Auto-detect Python stdlib from common locations.
+    /// Deprecated alias for [`with_stdlib`](Self::with_stdlib).
+    #[deprecated(since = "0.6.0", note = "renamed to `with_stdlib`")]
+    #[must_use]
+    pub fn with_python_stdlib(
+        self,
+        path: impl Into<std::path::PathBuf>,
+    ) -> SandboxBuilder<R, state::Has> {
+        self.with_stdlib(path)
+    }
+
+    /// Auto-detect the guest stdlib from common locations.
     ///
     /// Searches in order:
-    /// 1. `ERYX_PYTHON_STDLIB` environment variable
+    /// 1. `ERYX_STDLIB` environment variable (falls back to the legacy
+    ///    `ERYX_PYTHON_STDLIB`)
     /// 2. `./python-stdlib` (relative to current directory)
     /// 3. `<exe_dir>/python-stdlib` (relative to executable)
     /// 4. `<exe_dir>/../python-stdlib` (sibling of executable directory)
     ///
     /// # Errors
     ///
-    /// Returns [`Error::MissingPythonStdlib`] if no valid stdlib directory is found.
+    /// Returns [`Error::MissingStdlib`] if no valid stdlib directory is found.
     ///
     /// # Example
     ///
@@ -1464,8 +1490,8 @@ impl<R> SandboxBuilder<R, state::Needs> {
     ///     .build()?;
     /// ```
     pub fn with_auto_stdlib(self) -> Result<SandboxBuilder<R, state::Has>, Error> {
-        let path = find_python_stdlib().ok_or(Error::MissingPythonStdlib)?;
-        Ok(self.with_python_stdlib(path))
+        let path = find_stdlib().ok_or(Error::MissingStdlib)?;
+        Ok(self.with_stdlib(path))
     }
 
     /// Use the embedded Python standard library.
@@ -1494,7 +1520,7 @@ impl<R> SandboxBuilder<R, state::Needs> {
     #[cfg(feature = "embedded-stdlib")]
     pub fn with_embedded_stdlib(self) -> Result<SandboxBuilder<R, state::Has>, Error> {
         let stdlib = crate::embedded_stdlib::EmbeddedStdlib::get()?;
-        Ok(self.with_python_stdlib(stdlib.path()))
+        Ok(self.with_stdlib(stdlib.path()))
     }
 }
 
@@ -1519,7 +1545,7 @@ impl<R, S> SandboxBuilder<R, S> {
     ///
     /// let sandbox = Sandbox::builder()
     ///     .with_native_extension("numpy/core/_multiarray_umath.cpython-314-wasm32-wasi.so", numpy_core)
-    ///     .with_site_packages("path/to/site-packages")  // For Python files
+    ///     .with_library_path("path/to/site-packages")  // For Python files
     ///     .build()?;
     ///
     /// // Now numpy can be imported!
@@ -1913,13 +1939,34 @@ impl<R, S> SandboxBuilder<R, S> {
         self
     }
 
-    /// Set the path to additional Python packages directory.
+    /// Set the path to an additional guest library / packages directory.
     ///
     /// The directory will be mounted at `/site-packages` inside the WASM sandbox
-    /// and added to Python's import path.
+    /// and added to the guest's import path (for Python, the site-packages dir).
     #[must_use]
-    pub fn with_site_packages(mut self, path: impl Into<std::path::PathBuf>) -> Self {
-        self.python_site_packages_path = Some(path.into());
+    pub fn with_library_path(mut self, path: impl Into<std::path::PathBuf>) -> Self {
+        self.library_path = Some(path.into());
+        self
+    }
+
+    /// Deprecated alias for [`with_library_path`](Self::with_library_path).
+    #[deprecated(since = "0.6.0", note = "renamed to `with_library_path`")]
+    #[must_use]
+    pub fn with_site_packages(self, path: impl Into<std::path::PathBuf>) -> Self {
+        self.with_library_path(path)
+    }
+
+    /// Select the guest language for this sandbox.
+    ///
+    /// Threads the language through to the [`Executor`](crate::Executor) built by
+    /// [`build`](SandboxBuilder::build).
+    ///
+    /// SPIKE: only [`Language::Python`] (the default) has a working execution
+    /// path today; selecting [`Language::JavaScript`] builds fine but executing
+    /// will `todo!()` until the QuickJS guest lands.
+    #[must_use]
+    pub fn with_language(mut self, language: crate::Language) -> Self {
+        self.language = language;
         self
     }
 
@@ -2061,7 +2108,7 @@ impl SandboxBuilder<state::Has, state::Has> {
     /// since `build()` consumes the builder.
     pub(crate) fn into_factory(self) -> Box<dyn Fn() -> Result<Sandbox, Error> + Send + Sync> {
         let wasm_source = self.wasm_source;
-        let stdlib_path = self.python_stdlib_path;
+        let stdlib_path = self.stdlib_path;
 
         Box::new(move || {
             // Reconstruct a builder using the public API based on the captured config.
@@ -2079,16 +2126,14 @@ impl SandboxBuilder<state::Has, state::Has> {
                     unsafe {
                         Sandbox::builder()
                             .with_precompiled_file(path)
-                            .with_python_stdlib(stdlib)
+                            .with_stdlib(stdlib)
                     }
                 }
                 WasmSource::File(path) => {
                     let stdlib = stdlib_path
                         .as_ref()
                         .ok_or_else(|| Error::Initialization("stdlib path required".into()))?;
-                    Sandbox::builder()
-                        .with_wasm_file(path)
-                        .with_python_stdlib(stdlib)
+                    Sandbox::builder().with_wasm_file(path).with_stdlib(stdlib)
                 }
                 _ => {
                     return Err(Error::Initialization(
@@ -2132,11 +2177,7 @@ impl SandboxBuilder<state::Has, state::Has> {
         // with correct dlopen paths. Mount index 0 is reserved for explicit site-packages.
         #[cfg(feature = "native-extensions")]
         {
-            let start_index = if self.python_site_packages_path.is_some() {
-                1
-            } else {
-                0
-            };
+            let start_index = if self.library_path.is_some() { 1 } else { 0 };
             for (pkg_idx, package) in self.packages.iter().enumerate() {
                 let mount_index = start_index + pkg_idx;
                 for ext in &package.native_extensions {
@@ -2189,21 +2230,21 @@ impl SandboxBuilder<state::Has, state::Has> {
         // Determine stdlib path: explicit > embedded > auto-detect > none
         #[cfg(feature = "embedded")]
         let stdlib_path = self
-            .python_stdlib_path
+            .stdlib_path
             .clone()
             .or_else(|| {
                 crate::embedded::EmbeddedResources::get()
                     .ok()
                     .map(|r| r.stdlib_path.clone())
             })
-            .or_else(find_python_stdlib);
+            .or_else(find_stdlib);
 
         #[cfg(not(feature = "embedded"))]
-        let stdlib_path = self.python_stdlib_path.clone().or_else(find_python_stdlib);
+        let stdlib_path = self.stdlib_path.clone().or_else(find_stdlib);
 
         // Collect all site-packages paths: explicit path first, then package paths
         let mut site_packages_paths = Vec::new();
-        if let Some(explicit_path) = self.python_site_packages_path.clone() {
+        if let Some(explicit_path) = self.library_path.clone() {
             site_packages_paths.push(explicit_path);
         }
         for package in &self.packages {
@@ -2212,7 +2253,7 @@ impl SandboxBuilder<state::Has, state::Has> {
 
         // Apply Python stdlib path if available
         let executor = if let Some(stdlib) = stdlib_path {
-            executor.with_python_stdlib(&stdlib)
+            executor.with_stdlib(&stdlib)
         } else {
             executor
         };
@@ -2220,10 +2261,13 @@ impl SandboxBuilder<state::Has, state::Has> {
         // Apply all site-packages paths
         let executor = site_packages_paths
             .into_iter()
-            .fold(executor, |exec, path| exec.with_site_packages(&path));
+            .fold(executor, |exec, path| exec.with_library_path(&path));
 
         // Apply the configured result-capture variable name.
         let executor = executor.with_result_variable(self.result_variable);
+
+        // Thread the selected guest language through to the executor.
+        let executor = executor.with_language(self.language);
 
         Ok(Sandbox {
             executor: Arc::new(executor),
@@ -2249,10 +2293,10 @@ impl SandboxBuilder<state::Has, state::Has> {
     }
 
     /// Build executor from the configured WASM source.
-    fn build_executor_from_source(&self) -> Result<PythonExecutor, Error> {
+    fn build_executor_from_source(&self) -> Result<Executor, Error> {
         let executor = match &self.wasm_source {
-            WasmSource::Bytes(bytes) => PythonExecutor::from_binary(bytes)?,
-            WasmSource::File(path) => PythonExecutor::from_file(path)?,
+            WasmSource::Bytes(bytes) => Executor::from_binary(bytes)?,
+            WasmSource::File(path) => Executor::from_file(path)?,
 
             #[cfg(any(feature = "embedded", feature = "preinit"))]
             WasmSource::PrecompiledBytes(bytes) => {
@@ -2261,7 +2305,7 @@ impl SandboxBuilder<state::Has, state::Has> {
                 // caller has acknowledged this responsibility.
                 #[allow(unsafe_code)]
                 unsafe {
-                    PythonExecutor::from_precompiled(bytes)?
+                    Executor::from_precompiled(bytes)?
                 }
             }
 
@@ -2272,14 +2316,14 @@ impl SandboxBuilder<state::Has, state::Has> {
                 // caller has acknowledged this responsibility.
                 #[allow(unsafe_code)]
                 unsafe {
-                    PythonExecutor::from_precompiled_file(path)?
+                    Executor::from_precompiled_file(path)?
                 }
             }
 
             #[cfg(feature = "embedded")]
             WasmSource::EmbeddedRuntime => {
                 // Use the optimized path that leverages InstancePreCache
-                PythonExecutor::from_embedded_runtime()?
+                Executor::from_embedded_runtime()?
             }
 
             WasmSource::None => {
@@ -2288,7 +2332,7 @@ impl SandboxBuilder<state::Has, state::Has> {
                 {
                     tracing::debug!("No WASM source specified, using embedded runtime");
                     // Use the optimized path that leverages InstancePreCache
-                    PythonExecutor::from_embedded_runtime()?
+                    Executor::from_embedded_runtime()?
                 }
 
                 #[cfg(not(feature = "embedded"))]
@@ -2312,7 +2356,7 @@ impl SandboxBuilder<state::Has, state::Has> {
     /// 2. If found, load from cache (fast path)
     /// 3. If not found, link extensions, pre-compile, cache, and return
     #[cfg(feature = "native-extensions")]
-    fn build_executor_with_extensions(&self) -> Result<PythonExecutor, Error> {
+    fn build_executor_with_extensions(&self) -> Result<Executor, Error> {
         #[cfg(feature = "embedded")]
         use crate::cache::{CacheKey, InstancePreCache};
 
@@ -2326,7 +2370,7 @@ impl SandboxBuilder<state::Has, state::Has> {
                 key = %cache_key.to_hex(),
                 "instance_pre cache hit - returning cached executor"
             );
-            return PythonExecutor::from_cached_instance_pre(instance_pre);
+            return Executor::from_cached_instance_pre(instance_pre);
         }
 
         // Tier 2: Try filesystem cache (mmap-based, faster than bytes)
@@ -2340,12 +2384,12 @@ impl SandboxBuilder<state::Has, state::Has> {
                 "component cache hit - loading via mmap"
             );
             // SAFETY: The cached pre-compiled file was created by us (from
-            // `PythonExecutor::precompile()`) in a previous call. We trust our
+            // `Executor::precompile()`) in a previous call. We trust our
             // own cache directory. If the cache is corrupted or tampered with,
             // wasmtime will detect it during deserialization.
             // Use with_key to populate InstancePreCache for future calls.
             #[allow(unsafe_code)]
-            return unsafe { PythonExecutor::from_precompiled_file_with_key(&path, cache_key) };
+            return unsafe { Executor::from_precompiled_file_with_key(&path, cache_key) };
         }
 
         // Tier 2 (continued): Fall back to in-memory byte cache (for InMemoryCache users)
@@ -2358,7 +2402,7 @@ impl SandboxBuilder<state::Has, state::Has> {
                 );
                 // Load and populate InstancePreCache for future calls
                 #[allow(unsafe_code)]
-                let executor = unsafe { PythonExecutor::from_precompiled(&precompiled) }?;
+                let executor = unsafe { Executor::from_precompiled(&precompiled) }?;
                 InstancePreCache::global().put(cache_key, executor.instance_pre().clone());
                 return Ok(executor);
             }
@@ -2376,7 +2420,7 @@ impl SandboxBuilder<state::Has, state::Has> {
         // Pre-compile and cache if available
         #[cfg(feature = "embedded")]
         if let Some(cache) = &self.cache {
-            let precompiled = PythonExecutor::precompile(&component_bytes)?;
+            let precompiled = Executor::precompile(&component_bytes)?;
 
             // Cache the pre-compiled bytes
             if let Err(e) = cache.put(&cache_key, precompiled.clone()) {
@@ -2395,13 +2439,13 @@ impl SandboxBuilder<state::Has, state::Has> {
             // Load from pre-compiled bytes and populate InstancePreCache
             // SAFETY: We just created these bytes from `precompile()` above.
             #[allow(unsafe_code)]
-            let executor = unsafe { PythonExecutor::from_precompiled(&precompiled) }?;
+            let executor = unsafe { Executor::from_precompiled(&precompiled) }?;
             InstancePreCache::global().put(cache_key, executor.instance_pre().clone());
             return Ok(executor);
         }
 
         // No cache or embedded feature - create executor directly from linked bytes
-        PythonExecutor::from_binary(&component_bytes)
+        Executor::from_binary(&component_bytes)
     }
 }
 
@@ -2826,7 +2870,7 @@ mod tests {
         // We can verify that a fully-configured builder does have build():
         let _builder = SandboxBuilder::new()
             .with_wasm_bytes(vec![])
-            .with_python_stdlib("/fake/path");
+            .with_stdlib("/fake/path");
         // _builder.build() would work here (though fail at runtime due to invalid WASM)
     }
 
@@ -2917,7 +2961,7 @@ mod tests {
         // that the builder pattern compiles correctly
         let builder = Sandbox::builder()
             .with_wasm_bytes(vec![]) // Invalid, but tests the API
-            .with_python_stdlib("/fake/stdlib") // Required for typestate
+            .with_stdlib("/fake/stdlib") // Required for typestate
             .with_callback(TestCallback)
             .with_resource_limits(ResourceLimits {
                 max_callback_invocations: Some(100),
@@ -3051,7 +3095,7 @@ mod tests {
     fn sandbox_builder_wasm_file_not_found() {
         let result = Sandbox::builder()
             .with_wasm_file("/nonexistent/path/to/runtime.wasm")
-            .with_python_stdlib("/fake/stdlib")
+            .with_stdlib("/fake/stdlib")
             .build();
 
         assert!(result.is_err());
@@ -3068,7 +3112,7 @@ mod tests {
     fn sandbox_builder_invalid_wasm_bytes() {
         let result = Sandbox::builder()
             .with_wasm_bytes(vec![0, 1, 2, 3]) // Invalid WASM magic bytes
-            .with_python_stdlib("/fake/stdlib")
+            .with_stdlib("/fake/stdlib")
             .build();
 
         assert!(result.is_err());
@@ -3084,7 +3128,7 @@ mod tests {
     fn sandbox_builder_empty_wasm_bytes() {
         let result = Sandbox::builder()
             .with_wasm_bytes(vec![])
-            .with_python_stdlib("/fake/stdlib")
+            .with_stdlib("/fake/stdlib")
             .build();
 
         assert!(result.is_err());
@@ -3107,7 +3151,7 @@ mod tests {
             .with_wasm_bytes(vec![])
             .with_auto_stdlib();
 
-        // Either Ok (stdlib found) or Err (MissingPythonStdlib)
+        // Either Ok (stdlib found) or Err (MissingStdlib)
         match result {
             Ok(builder) => {
                 // Stdlib was found, builder is now fully configured
@@ -3116,7 +3160,7 @@ mod tests {
                 assert!(build_result.is_err()); // Invalid WASM
             }
             Err(e) => {
-                // Stdlib not found - should be MissingPythonStdlib error
+                // Stdlib not found - should be MissingStdlib error
                 let err_str = e.to_string();
                 assert!(
                     err_str.contains("stdlib") || err_str.contains("Python"),
@@ -3139,9 +3183,7 @@ mod tests {
         let builder = builder.with_callback(TestCallback);
 
         // Must configure both to get build()
-        let builder = builder
-            .with_wasm_bytes(vec![1, 2, 3])
-            .with_python_stdlib("/fake");
+        let builder = builder.with_wasm_bytes(vec![1, 2, 3]).with_stdlib("/fake");
 
         // Now build() is available (will fail due to invalid WASM, but that's expected)
         let result = builder.build();

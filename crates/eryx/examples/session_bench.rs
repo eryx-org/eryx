@@ -63,7 +63,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         builder = builder.with_native_extension(name.clone(), bytes.clone());
     }
     let sandbox = builder
-        .with_site_packages(site_packages)
+        .with_library_path(site_packages)
         .with_cache_dir(cache_dir)?
         .build()?;
     println!("  Cold sandbox creation: {:?}\n", start.elapsed());
@@ -124,7 +124,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             builder = builder.with_native_extension(name.clone(), bytes.clone());
         }
         let _sandbox = builder
-            .with_site_packages(site_packages)
+            .with_library_path(site_packages)
             .with_cache_dir(cache_dir)?
             .build()?;
         let elapsed = start.elapsed();

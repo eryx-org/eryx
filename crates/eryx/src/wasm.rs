@@ -3,7 +3,7 @@
 //! This module handles the wasmtime engine configuration, component loading,
 //! and host import implementations for running Python code in the sandbox.
 //!
-//! The `PythonExecutor` uses pre-instantiation (`SandboxPre`) to avoid
+//! The `Executor` uses pre-instantiation (`SandboxPre`) to avoid
 //! re-linking on every execution, significantly improving performance.
 //!
 //! # Pre-compiled Components
@@ -13,11 +13,11 @@
 //!
 //! ```rust,ignore
 //! // At build time - compile once:
-//! let precompiled = PythonExecutor::precompile_file("runtime.wasm")?;
+//! let precompiled = Executor::precompile_file("runtime.wasm")?;
 //! std::fs::write("runtime.cwasm", precompiled)?;
 //!
 //! // At runtime - load quickly (unsafe, must trust the file):
-//! let executor = unsafe { PythonExecutor::from_precompiled_file("runtime.cwasm")? };
+//! let executor = unsafe { Executor::from_precompiled_file("runtime.cwasm")? };
 //! ```
 //!
 //! Alternatively, enable the `embedded` feature for a safe API that
@@ -39,6 +39,7 @@ use wasmtime_wasi::{DirPerms, FilePerms, WasiCtx, WasiCtxBuilder, WasiCtxView, W
 
 use crate::callback::Callback;
 use crate::error::Error;
+use crate::language::Language;
 use crate::trace::TraceEvent;
 
 /// The result a callback handler sends back to the `invoke` host import.
@@ -212,7 +213,7 @@ pub struct ExecutionOutput {
     /// when the engine has fuel consumption enabled.
     pub fuel_consumed: Option<u64>,
     /// JSON-serialized value of the script's result variable, or `None` if the
-    /// variable was not set. See [`PythonExecutor::with_result_variable`].
+    /// variable was not set. See [`Executor::with_result_variable`].
     pub result: Option<String>,
     /// Why result capture failed (e.g. the value was not JSON-serializable), or
     /// `None` when capture succeeded or no result variable was set.
@@ -255,10 +256,10 @@ impl ExecutionOutput {
 /// # Example
 ///
 /// ```rust,ignore
-/// use eryx::{PythonExecutor, CpuFeatureLevel};
+/// use eryx::{Executor, CpuFeatureLevel};
 ///
 /// // Compile for Fly.io (x86-64-v3, no AVX-512)
-/// let cwasm = PythonExecutor::precompile_with_options(
+/// let cwasm = Executor::precompile_with_options(
 ///     &wasm_bytes,
 ///     None,  // native target
 ///     Some(CpuFeatureLevel::X86_64_V3),
@@ -906,7 +907,7 @@ impl tls::Host for ExecutorState {
 
 /// Builder for configuring and executing Python code.
 ///
-/// Created by [`PythonExecutor::execute`]. Use the builder methods to
+/// Created by [`Executor::execute`]. Use the builder methods to
 /// configure callbacks, tracing, memory limits, and timeouts, then call
 /// [`run`](Self::run) to execute.
 ///
@@ -921,7 +922,7 @@ impl tls::Host for ExecutorState {
 ///     .await?;
 /// ```
 pub struct ExecuteBuilder<'a> {
-    executor: &'a PythonExecutor,
+    executor: &'a Executor,
     code: String,
     callbacks: Vec<Arc<dyn Callback>>,
     callback_tx: Option<mpsc::Sender<CallbackRequest>>,
@@ -962,7 +963,7 @@ impl std::fmt::Debug for ExecuteBuilder<'_> {
 
 impl<'a> ExecuteBuilder<'a> {
     /// Create a new execute builder.
-    fn new(executor: &'a PythonExecutor, code: impl Into<String>) -> Self {
+    fn new(executor: &'a Executor, code: impl Into<String>) -> Self {
         Self {
             executor,
             code: code.into(),
@@ -1118,38 +1119,41 @@ impl<'a> ExecuteBuilder<'a> {
 /// compiling, linking) happen once during construction. Each `execute()`
 /// call only needs to create a new store and instantiate from the
 /// pre-compiled template, which is much faster.
-pub struct PythonExecutor {
+pub struct Executor {
+    /// The guest language this executor runs.
+    ///
+    /// SPIKE: only [`Language::Python`] has a working execution path today;
+    /// [`Language::JavaScript`] is reserved for an upcoming release.
+    language: Language,
     /// The wasmtime engine (shared configuration).
     engine: Engine,
     /// Pre-instantiated component - linking is already done.
     instance_pre: SandboxPre<ExecutorState>,
-    /// Path to the Python standard library directory.
-    /// Required for the eryx-wasm-runtime to initialize Python.
-    python_stdlib_path: Option<PathBuf>,
-    /// Paths to Python package directories.
-    /// Each will be mounted at `/site-packages-N` and added to PYTHONPATH.
-    python_site_packages_paths: Vec<PathBuf>,
+    /// Path to the guest standard library directory.
+    /// Required for the eryx-wasm-runtime to initialize the guest.
+    stdlib_path: Option<PathBuf>,
+    /// Paths to guest library / package directories.
+    /// Each will be mounted at `/site-packages-N` and added to the import path.
+    library_paths: Vec<PathBuf>,
     /// Name of the user variable captured as the structured result after each
     /// execution. Defaults to `"result"`. Configured via [`Self::with_result_variable`].
     result_variable: String,
 }
 
-impl std::fmt::Debug for PythonExecutor {
+impl std::fmt::Debug for Executor {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("PythonExecutor")
+        f.debug_struct("Executor")
+            .field("language", &self.language)
             .field("engine", &"<wasmtime::Engine>")
             .field("instance_pre", &"<SandboxPre>")
-            .field("python_stdlib_path", &self.python_stdlib_path)
-            .field(
-                "python_site_packages_paths",
-                &self.python_site_packages_paths,
-            )
+            .field("stdlib_path", &self.stdlib_path)
+            .field("library_paths", &self.library_paths)
             .field("result_variable", &self.result_variable)
             .finish_non_exhaustive()
     }
 }
 
-impl PythonExecutor {
+impl Executor {
     /// Get a reference to the wasmtime engine.
     #[must_use]
     pub fn engine(&self) -> &Engine {
@@ -1162,16 +1166,22 @@ impl PythonExecutor {
         &self.instance_pre
     }
 
-    /// Get the Python stdlib path if configured.
+    /// Get the guest language this executor runs.
     #[must_use]
-    pub fn python_stdlib_path(&self) -> Option<&PathBuf> {
-        self.python_stdlib_path.as_ref()
+    pub fn language(&self) -> Language {
+        self.language
     }
 
-    /// Get the Python site-packages paths.
+    /// Get the guest stdlib path if configured.
     #[must_use]
-    pub fn python_site_packages_paths(&self) -> &[PathBuf] {
-        &self.python_site_packages_paths
+    pub fn stdlib_path(&self) -> Option<&PathBuf> {
+        self.stdlib_path.as_ref()
+    }
+
+    /// Get the guest library paths (e.g. Python site-packages directories).
+    #[must_use]
+    pub fn library_paths(&self) -> &[PathBuf] {
+        &self.library_paths
     }
 
     /// Get the configured result-capture variable name (defaults to `"result"`).
@@ -1180,29 +1190,54 @@ impl PythonExecutor {
         &self.result_variable
     }
 
-    /// Set the path to the Python standard library directory.
+    /// Select the guest language this executor runs.
+    ///
+    /// SPIKE: only [`Language::Python`] has a working execution path today;
+    /// selecting [`Language::JavaScript`] builds fine but
+    /// [`execute`](Self::execute) will `todo!()` until the JS guest lands.
+    #[must_use]
+    pub fn with_language(mut self, language: Language) -> Self {
+        self.language = language;
+        self
+    }
+
+    /// Set the path to the guest standard library directory.
     ///
     /// This is required when using the eryx-wasm-runtime (Rust/CPython FFI based).
-    /// The directory should contain the extracted Python stdlib (e.g., from
+    /// The directory should contain the extracted stdlib (e.g., for Python, from
     /// componentize-py's python-lib.tar.zst).
     ///
     /// The stdlib will be mounted at `/python-stdlib` inside the WASM sandbox.
     #[must_use]
-    pub fn with_python_stdlib(mut self, path: impl Into<PathBuf>) -> Self {
-        self.python_stdlib_path = Some(path.into());
+    pub fn with_stdlib(mut self, path: impl Into<PathBuf>) -> Self {
+        self.stdlib_path = Some(path.into());
         self
     }
 
-    /// Add a path to Python packages directory.
+    /// Deprecated alias for [`with_stdlib`](Self::with_stdlib).
+    #[deprecated(since = "0.6.0", note = "renamed to `with_stdlib`")]
+    #[must_use]
+    pub fn with_python_stdlib(self, path: impl Into<PathBuf>) -> Self {
+        self.with_stdlib(path)
+    }
+
+    /// Add a guest library / package directory.
     ///
     /// The first directory will be mounted at `/site-packages` inside the WASM sandbox
     /// (for compatibility with preinit). Additional directories are mounted at
-    /// `/site-packages-1`, `/site-packages-2`, etc. All paths are added to Python's
+    /// `/site-packages-1`, `/site-packages-2`, etc. All paths are added to the guest's
     /// import path. Can be called multiple times.
     #[must_use]
-    pub fn with_site_packages(mut self, path: impl Into<PathBuf>) -> Self {
-        self.python_site_packages_paths.push(path.into());
+    pub fn with_library_path(mut self, path: impl Into<PathBuf>) -> Self {
+        self.library_paths.push(path.into());
         self
+    }
+
+    /// Deprecated alias for [`with_library_path`](Self::with_library_path).
+    #[deprecated(since = "0.6.0", note = "renamed to `with_library_path`")]
+    #[must_use]
+    pub fn with_site_packages(self, path: impl Into<PathBuf>) -> Self {
+        self.with_library_path(path)
     }
 
     /// Set the name of the user variable captured as the structured result.
@@ -1218,7 +1253,7 @@ impl PythonExecutor {
 
     /// Get or create the global shared wasmtime Engine.
     ///
-    /// The Engine is thread-safe and automatically shared across all `PythonExecutor`
+    /// The Engine is thread-safe and automatically shared across all `Executor`
     /// instances. Sharing an Engine saves memory and startup time since the JIT
     /// compiler configuration and compiled code cache are shared.
     ///
@@ -1261,7 +1296,7 @@ impl PythonExecutor {
     /// Returns an error if the WASM component cannot be loaded or the
     /// wasmtime engine cannot be configured.
     #[tracing::instrument(
-        name = "PythonExecutor::from_binary",
+        name = "Executor::from_binary",
         skip(wasm_bytes),
         fields(wasm_bytes_len = wasm_bytes.len())
     )]
@@ -1274,8 +1309,9 @@ impl PythonExecutor {
         Ok(Self {
             engine,
             instance_pre,
-            python_stdlib_path: None,
-            python_site_packages_paths: Vec::new(),
+            language: Language::Python,
+            stdlib_path: None,
+            library_paths: Vec::new(),
             result_variable: "result".to_string(),
         })
     }
@@ -1290,7 +1326,7 @@ impl PythonExecutor {
     /// Returns an error if the file cannot be read or the WASM component
     /// cannot be loaded.
     #[tracing::instrument(
-        name = "PythonExecutor::from_file",
+        name = "Executor::from_file",
         fields(path = %path.as_ref().display())
     )]
     pub fn from_file(path: impl AsRef<std::path::Path>) -> std::result::Result<Self, Error> {
@@ -1302,8 +1338,9 @@ impl PythonExecutor {
         Ok(Self {
             engine,
             instance_pre,
-            python_stdlib_path: None,
-            python_site_packages_paths: Vec::new(),
+            language: Language::Python,
+            stdlib_path: None,
+            library_paths: Vec::new(),
             result_variable: "result".to_string(),
         })
     }
@@ -1338,8 +1375,9 @@ impl PythonExecutor {
         Ok(Self {
             engine,
             instance_pre,
-            python_stdlib_path: None,
-            python_site_packages_paths: Vec::new(),
+            language: Language::Python,
+            stdlib_path: None,
+            library_paths: Vec::new(),
             result_variable: "result".to_string(),
         })
     }
@@ -1386,8 +1424,9 @@ impl PythonExecutor {
             Ok(Self {
                 engine,
                 instance_pre,
-                python_stdlib_path: None,
-                python_site_packages_paths: Vec::new(),
+                language: Language::Python,
+                stdlib_path: None,
+                library_paths: Vec::new(),
                 result_variable: "result".to_string(),
             })
         }
@@ -1441,8 +1480,9 @@ impl PythonExecutor {
             return Ok(Self {
                 engine,
                 instance_pre,
-                python_stdlib_path: None,
-                python_site_packages_paths: Vec::new(),
+                language: Language::Python,
+                stdlib_path: None,
+                library_paths: Vec::new(),
                 result_variable: "result".to_string(),
             });
         }
@@ -1463,8 +1503,9 @@ impl PythonExecutor {
         Ok(Self {
             engine,
             instance_pre,
-            python_stdlib_path: None,
-            python_site_packages_paths: Vec::new(),
+            language: Language::Python,
+            stdlib_path: None,
+            library_paths: Vec::new(),
             result_variable: "result".to_string(),
         })
     }
@@ -1477,7 +1518,7 @@ impl PythonExecutor {
     /// - Only loads from disk on first call; subsequent calls return cached instance
     ///
     /// The executor is created without Python stdlib or site-packages paths.
-    /// Use [`Self::with_python_stdlib`] and [`Self::with_site_packages`] to
+    /// Use [`Self::with_stdlib`] and [`Self::with_library_path`] to
     /// configure paths after creation.
     ///
     /// # Errors
@@ -1485,7 +1526,7 @@ impl PythonExecutor {
     /// Returns an error if the embedded resources cannot be extracted or
     /// the component cannot be loaded.
     #[cfg(feature = "embedded")]
-    #[tracing::instrument(name = "PythonExecutor::from_embedded_runtime")]
+    #[tracing::instrument(name = "Executor::from_embedded_runtime")]
     pub fn from_embedded_runtime() -> std::result::Result<Self, Error> {
         let cache_key = CacheKey::embedded_runtime();
 
@@ -1498,8 +1539,9 @@ impl PythonExecutor {
             return Ok(Self {
                 engine: Self::shared_engine()?,
                 instance_pre,
-                python_stdlib_path: stdlib_path,
-                python_site_packages_paths: Vec::new(),
+                language: Language::Python,
+                stdlib_path,
+                library_paths: Vec::new(),
                 result_variable: "result".to_string(),
             });
         }
@@ -1511,7 +1553,7 @@ impl PythonExecutor {
         let mut executor =
             unsafe { Self::from_precompiled_file_with_key(resources.runtime(), cache_key)? };
 
-        executor.python_stdlib_path = stdlib_path;
+        executor.stdlib_path = stdlib_path;
         Ok(executor)
     }
 
@@ -1526,8 +1568,9 @@ impl PythonExecutor {
         Ok(Self {
             engine: Self::shared_engine()?,
             instance_pre,
-            python_stdlib_path: None,
-            python_site_packages_paths: Vec::new(),
+            language: Language::Python,
+            stdlib_path: None,
+            library_paths: Vec::new(),
             result_variable: "result".to_string(),
         })
     }
@@ -1634,10 +1677,10 @@ impl PythonExecutor {
     /// # Example
     ///
     /// ```rust,ignore
-    /// use eryx::{PythonExecutor, CpuFeatureLevel};
+    /// use eryx::{Executor, CpuFeatureLevel};
     ///
     /// // Compile for Fly.io (x86-64-v3, no AVX-512)
-    /// let cwasm = PythonExecutor::precompile_with_options(
+    /// let cwasm = Executor::precompile_with_options(
     ///     &wasm_bytes,
     ///     None,  // native target triple
     ///     CpuFeatureLevel::X86_64v3,
@@ -1967,7 +2010,7 @@ impl PythonExecutor {
     ///
     /// This does the expensive linking work once, so that `execute()` can
     /// quickly instantiate from the template.
-    #[tracing::instrument(name = "PythonExecutor::create_instance_pre", skip(engine, component))]
+    #[tracing::instrument(name = "Executor::create_instance_pre", skip(engine, component))]
     fn create_instance_pre(
         engine: &Engine,
         component: &Component,
@@ -2041,7 +2084,7 @@ impl PythonExecutor {
     /// This is called by [`ExecuteBuilder::run`].
     #[allow(clippy::too_many_arguments)]
     #[tracing::instrument(
-        name = "PythonExecutor::execute_internal",
+        name = "Executor::execute_internal",
         skip_all,
         fields(
             code_len = code.len(),
@@ -2068,6 +2111,13 @@ impl PythonExecutor {
     ) -> std::result::Result<ExecutionOutput, Error> {
         crate::error::validate_user_code(code)?;
 
+        // SPIKE: dispatch on the configured guest language. Only Python has a
+        // working WASM guest today; the JS (QuickJS) path is reserved for 0.6.0.
+        match self.language {
+            Language::Python => {}
+            Language::JavaScript => todo!("JS guest not yet implemented"),
+        }
+
         // Build callback info for introspection
         let callback_infos: Vec<HostCallbackInfo> = callbacks
             .iter()
@@ -2087,10 +2137,10 @@ impl PythonExecutor {
         // The first site-packages is mounted at /site-packages (for preinit compatibility)
         // Additional ones are mounted at /site-packages-1, /site-packages-2, etc.
         let mut pythonpath_parts = Vec::new();
-        if self.python_stdlib_path.is_some() {
+        if self.stdlib_path.is_some() {
             pythonpath_parts.push("/python-stdlib".to_string());
         }
-        for i in 0..self.python_site_packages_paths.len() {
+        for i in 0..self.library_paths.len() {
             if i == 0 {
                 pythonpath_parts.push("/site-packages".to_string());
             } else {
@@ -2099,7 +2149,7 @@ impl PythonExecutor {
         }
 
         // Mount Python stdlib if configured (required for eryx-wasm-runtime)
-        if let Some(ref stdlib_path) = self.python_stdlib_path {
+        if let Some(ref stdlib_path) = self.stdlib_path {
             // PYTHONHOME tells Python where to find the standard library
             wasi_builder.env("PYTHONHOME", "/python-stdlib");
             wasi_builder
@@ -2121,7 +2171,7 @@ impl PythonExecutor {
 
         // Mount each site-packages directory
         // First one at /site-packages (for preinit compatibility), rest at /site-packages-N
-        for (i, site_packages_path) in self.python_site_packages_paths.iter().enumerate() {
+        for (i, site_packages_path) in self.library_paths.iter().enumerate() {
             let mount_path = if i == 0 {
                 "/site-packages".to_string()
             } else {
@@ -2160,7 +2210,7 @@ impl PythonExecutor {
             );
 
             // Add Python stdlib as read-only real filesystem preopen
-            if let Some(ref stdlib_path) = self.python_stdlib_path
+            if let Some(ref stdlib_path) = self.stdlib_path
                 && let Err(e) = ctx.add_real_preopen_path(
                     "/python-stdlib",
                     stdlib_path,
@@ -2172,7 +2222,7 @@ impl PythonExecutor {
             }
 
             // Add site-packages directories as read-only real filesystem preopens
-            for (i, site_packages_path) in self.python_site_packages_paths.iter().enumerate() {
+            for (i, site_packages_path) in self.library_paths.iter().enumerate() {
                 let mount_path = if i == 0 {
                     "/site-packages".to_string()
                 } else {
@@ -2406,7 +2456,7 @@ impl PythonExecutor {
         // input that is always an uncaught Python exception (its traceback).
         let wit_output = wasmtime_result
             .map_err(|e| Error::Execution(format!("WASM execution error: {e:?}")))?
-            .map_err(Error::PythonException)?;
+            .map_err(Error::GuestException)?;
 
         // Get peak memory from the store before it's dropped
         let peak_memory_bytes = store.data().memory_tracker.peak_memory_bytes();
@@ -2415,7 +2465,7 @@ impl PythonExecutor {
         let remaining_fuel = store.get_fuel().unwrap_or(0);
         let fuel_consumed = Some(initial_fuel.saturating_sub(remaining_fuel));
 
-        // Note: callback_invocations is 0 here because PythonExecutor doesn't
+        // Note: callback_invocations is 0 here because Executor doesn't
         // handle callbacks internally - it just passes the channel to the WASM state.
         // Higher-level APIs like Sandbox track callback invocations in their own
         // callback handler tasks.
@@ -2593,7 +2643,7 @@ mod tests {
             }
 
             // Creating the engine will fail if any flag name is invalid
-            let result = PythonExecutor::create_engine_with_target(None);
+            let result = Executor::create_engine_with_target(None);
             assert!(
                 result.is_ok(),
                 "CPU feature level '{level}' failed to create engine: {:?}",

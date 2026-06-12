@@ -25,9 +25,9 @@ fn runtime_wasm_path() -> PathBuf {
 }
 
 #[cfg(not(feature = "embedded"))]
-fn python_stdlib_path() -> PathBuf {
-    // Check ERYX_PYTHON_STDLIB env var first (used in CI)
-    if let Ok(path) = std::env::var("ERYX_PYTHON_STDLIB") {
+fn stdlib_path() -> PathBuf {
+    // Check ERYX_STDLIB env var first (used in CI)
+    if let Ok(path) = std::env::var("ERYX_STDLIB") {
         let path = PathBuf::from(path);
         if path.exists() {
             return path;
@@ -55,10 +55,10 @@ fn sandbox_builder() -> eryx::SandboxBuilder<eryx::state::Has, eryx::state::Has>
     // Fallback to explicit paths for testing without embedded feature
     #[cfg(not(feature = "embedded"))]
     {
-        let stdlib_path = python_stdlib_path();
+        let stdlib_path = stdlib_path();
         Sandbox::builder()
             .with_wasm_file(runtime_wasm_path())
-            .with_python_stdlib(&stdlib_path)
+            .with_stdlib(&stdlib_path)
     }
 }
 
@@ -294,7 +294,7 @@ async fn test_python_error_not_confused_with_cancellation() {
     assert!(result.is_err(), "Should fail with Python error");
     match result {
         Err(Error::Cancelled) => panic!("Should not be Cancelled error"),
-        Err(Error::PythonException(msg)) => {
+        Err(Error::GuestException(msg)) => {
             assert!(
                 msg.contains("ValueError") || msg.contains("test error"),
                 "Error should mention ValueError: {}",
@@ -316,7 +316,7 @@ async fn test_syntax_error_not_confused_with_cancellation() {
     assert!(result.is_err(), "Should fail with syntax error");
     match result {
         Err(Error::Cancelled) => panic!("Should not be Cancelled error"),
-        Err(Error::PythonException(_)) => {} // Expected: syntax error raises in-guest
+        Err(Error::GuestException(_)) => {} // Expected: syntax error raises in-guest
         Err(e) => panic!("Unexpected error type: {:?}", e),
         Ok(_) => panic!("Expected error, got success"),
     }
