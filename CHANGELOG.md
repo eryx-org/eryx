@@ -7,6 +7,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## `eryx-precompile` - [0.5.0](https://github.com/eryx-org/eryx/compare/eryx-precompile-v0.4.10...eryx-precompile-v0.5.0) - 2026-06-16
+
+### Other
+- update Cargo.lock dependencies
+
+## `eryx` - [0.5.0](https://github.com/eryx-org/eryx/compare/eryx-v0.4.10...eryx-v0.5.0) - 2026-06-16
+
+### Added
+- callback suspension via fuel-poison halt ([#230](https://github.com/eryx-org/eryx/pull/230))
+- callback-result replay for the sandbox + gRPC API ([#228](https://github.com/eryx-org/eryx/pull/228))
+- mark result/output structs and error enums #[non_exhaustive] ([#238](https://github.com/eryx-org/eryx/pull/238))
+- capture a structured result from executed scripts ([#229](https://github.com/eryx-org/eryx/pull/229))
+
+### Fixed
+- *(net)* honor Python socket timeouts, capped by the host config ([#240](https://github.com/eryx-org/eryx/pull/240))
+- *(server)* surface captured output on the execution error path ([#239](https://github.com/eryx-org/eryx/pull/239))
+
+### Other
+- add callback replay & suspension guide ([#243](https://github.com/eryx-org/eryx/pull/243))
+
+## `eryx-vfs` - [0.5.0](https://github.com/eryx-org/eryx/compare/eryx-vfs-v0.4.10...eryx-vfs-v0.5.0) - 2026-06-16
+
+### Added
+- mark result/output structs and error enums #[non_exhaustive] ([#238](https://github.com/eryx-org/eryx/pull/238))
+
+## `eryx-runtime` - [0.5.0](https://github.com/eryx-org/eryx/compare/eryx-runtime-v0.4.10...eryx-runtime-v0.5.0) - 2026-06-16
+
+### Added
+- mark result/output structs and error enums #[non_exhaustive] ([#238](https://github.com/eryx-org/eryx/pull/238))
+- capture a structured result from executed scripts ([#229](https://github.com/eryx-org/eryx/pull/229))
+
+### Fixed
+- *(net)* treat _GLOBAL_DEFAULT_TIMEOUT sentinel as no timeout ([#247](https://github.com/eryx-org/eryx/pull/247))
+- *(net)* honor Python socket timeouts, capped by the host config ([#240](https://github.com/eryx-org/eryx/pull/240))
+- expose SSLSocket._sslobj so httpx HTTPS works in the sandbox ([#236](https://github.com/eryx-org/eryx/pull/236))
+
+### Other
+- regenerate prebuilt runtime snapshot with ssl VERIFY_X509_PARTIAL_CHAIN ([#233](https://github.com/eryx-org/eryx/pull/233))
+
 ## `eryx-precompile` - [0.4.10](https://github.com/eryx-org/eryx/compare/eryx-precompile-v0.4.9...eryx-precompile-v0.4.10) - 2026-06-03
 
 ### Other
