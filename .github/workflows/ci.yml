@@ -3,6 +3,9 @@ name: CI
 on:
   push:
     branches: [main]
+    # Release tags (pushed by release-plz via the GitHub App token) so the
+    # docker job can publish a version-tagged image, e.g. sd2k/eryx-server:0.5.0.
+    tags: ['eryx-v[0-9]+.[0-9]+.[0-9]+']
   pull_request:
     branches: [main]
 
@@ -680,6 +683,7 @@ jobs:
     if: >-
       github.event.pull_request.head.repo.fork != true
       && github.actor != 'dependabot[bot]'
+      && github.ref_type != 'tag'
       && (github.event_name == 'push'
       || needs.changes.outputs.core == 'true'
       || needs.changes.outputs.js == 'true'
@@ -813,10 +817,15 @@ jobs:
         uses: docker/metadata-action@v5
         with:
           images: sd2k/eryx-server
+          # On main: sha + branch + latest. On a release tag (eryx-v0.5.0):
+          # the version tags 0.5.0 and 0.5 (type=match strips the eryx-v prefix).
+          # latest stays tied to main and is not moved by tag builds.
           tags: |
             type=sha,prefix=
             type=ref,event=branch
             type=raw,value=latest,enable={{is_default_branch}}
+            type=match,pattern=\d+.\d+.\d+,group=0
+            type=match,pattern=\d+.\d+,group=0
 
       - name: Build and push
         uses: docker/build-push-action@v6
