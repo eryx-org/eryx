@@ -10,6 +10,14 @@ git_tag_enable = true
 # Create GitHub releases
 git_release_enable = true
 
+# eryx-precompile ships prebuilt binaries via cargo-dist (.github/workflows/release.yml),
+# which creates AND populates its GitHub release when the tag is pushed. If release-plz
+# also created that release, cargo-dist's `gh release create` would collide and fail.
+# So let release-plz create only the tag (which triggers cargo-dist) — not the release.
+[[package]]
+name = "eryx-precompile"
+git_release_enable = false
+
 [changelog]
 body = """
 
