@@ -1139,6 +1139,8 @@ dependencies = [
  "cap-fs-ext",
  "cap-std",
  "fs-set-times",
+ "serde",
+ "serde_json",
  "system-interface",
  "thiserror 2.0.18",
  "tokio",
