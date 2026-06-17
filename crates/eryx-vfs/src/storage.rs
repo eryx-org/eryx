@@ -52,6 +52,16 @@ pub struct DirEntry {
 /// All paths are absolute paths starting with `/`.
 #[async_trait]
 pub trait VfsStorage: Send + Sync {
+    /// Downcasting hook for storage-specific operations (e.g. capturing an
+    /// in-memory snapshot).
+    ///
+    /// Concrete storages that support downcasting return `Some(self)`; the
+    /// default is `None`. [`InMemoryStorage`] returns `Some` so callers can
+    /// reach [`InMemoryStorage::snapshot`].
+    fn as_any(&self) -> Option<&dyn core::any::Any> {
+        None
+    }
+
     /// Read file contents.
     async fn read(&self, path: &str) -> VfsResult<Vec<u8>>;
 
@@ -194,7 +204,8 @@ impl VfsStorage for ArcStorage {
 /// Combining files and directories into a single struct allows us to use
 /// a single `RwLock`, avoiding potential deadlock issues from acquiring
 /// multiple locks.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 struct StorageState {
     /// File contents: path -> data
     files: HashMap<String, FileData>,
@@ -213,11 +224,28 @@ pub struct InMemoryStorage {
 }
 
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 struct FileData {
     content: Vec<u8>,
     created: SystemTime,
     modified: SystemTime,
     accessed: SystemTime,
+}
+
+/// A clonable, optionally-serializable snapshot of an [`InMemoryStorage`]'s
+/// complete contents (all files and directories).
+///
+/// Produced by [`InMemoryStorage::snapshot`]. Apply it to an existing storage
+/// with [`InMemoryStorage::restore`] (in place, preserving the storage's
+/// identity so existing `Arc` references stay valid), or create an independent
+/// copy with [`InMemoryStorage::from_snapshot`] (for forking a session).
+///
+/// With the `serde` feature, this derives `Serialize`/`Deserialize` so it can be
+/// persisted to bytes.
+#[derive(Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct InMemorySnapshot {
+    state: StorageState,
 }
 
 impl Default for InMemoryStorage {
@@ -237,6 +265,36 @@ impl InMemoryStorage {
                 files: HashMap::new(),
                 directories,
             }),
+        }
+    }
+
+    /// Capture the entire contents (files and directories) as a snapshot.
+    ///
+    /// The snapshot is an independent copy; later mutations to this storage do
+    /// not affect it.
+    pub async fn snapshot(&self) -> InMemorySnapshot {
+        InMemorySnapshot {
+            state: self.state.read().await.clone(),
+        }
+    }
+
+    /// Replace this storage's entire contents with a snapshot, in place.
+    ///
+    /// The storage's identity is preserved, so any `Arc<dyn VfsStorage>` handles
+    /// (e.g. those wired into a running sandbox) continue to refer to it and see
+    /// the restored contents.
+    pub async fn restore(&self, snapshot: &InMemorySnapshot) {
+        *self.state.write().await = snapshot.state.clone();
+    }
+
+    /// Create a new, independent storage initialized from a snapshot.
+    ///
+    /// Useful for forking a session: the returned storage shares no state with
+    /// the original, so the two can diverge freely.
+    #[must_use]
+    pub fn from_snapshot(snapshot: &InMemorySnapshot) -> Self {
+        Self {
+            state: RwLock::new(snapshot.state.clone()),
         }
     }
 
@@ -298,6 +356,10 @@ impl InMemoryStorage {
 
 #[async_trait]
 impl VfsStorage for InMemoryStorage {
+    fn as_any(&self) -> Option<&dyn core::any::Any> {
+        Some(self)
+    }
+
     async fn read(&self, path: &str) -> VfsResult<Vec<u8>> {
         let path = Self::normalize_path(path)?;
         let state = self.state.read().await;
@@ -694,6 +756,44 @@ impl VfsStorage for InMemoryStorage {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn test_snapshot_restore_and_fork() {
+        let storage = InMemoryStorage::new();
+        storage.mkdir("/data").await.unwrap();
+        storage.write("/data/a.txt", b"original").await.unwrap();
+
+        // Snapshot, then mutate.
+        let snap = storage.snapshot().await;
+        storage.write("/data/a.txt", b"changed").await.unwrap();
+        storage.write("/data/b.txt", b"new").await.unwrap();
+
+        // Restore in place: back to the snapshot, b.txt gone.
+        storage.restore(&snap).await;
+        assert_eq!(storage.read("/data/a.txt").await.unwrap(), b"original");
+        assert!(storage.read("/data/b.txt").await.is_err());
+
+        // Fork: an independent copy that diverges without affecting the original.
+        let forked = InMemoryStorage::from_snapshot(&snap);
+        forked.write("/data/a.txt", b"forked").await.unwrap();
+        assert_eq!(forked.read("/data/a.txt").await.unwrap(), b"forked");
+        assert_eq!(storage.read("/data/a.txt").await.unwrap(), b"original");
+    }
+
+    #[cfg(feature = "serde")]
+    #[tokio::test]
+    async fn test_snapshot_serde_round_trip() {
+        let storage = InMemoryStorage::new();
+        storage.mkdir("/d").await.unwrap();
+        storage.write("/d/f.txt", b"payload").await.unwrap();
+
+        let snap = storage.snapshot().await;
+        let bytes = serde_json::to_vec(&snap).unwrap();
+        let restored: InMemorySnapshot = serde_json::from_slice(&bytes).unwrap();
+
+        let fresh = InMemoryStorage::from_snapshot(&restored);
+        assert_eq!(fresh.read("/d/f.txt").await.unwrap(), b"payload");
+    }
 
     #[tokio::test]
     async fn test_file_operations() {
