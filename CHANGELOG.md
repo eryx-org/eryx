@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## `eryx-vfs` - [0.5.1](https://github.com/eryx-org/eryx/compare/eryx-vfs-v0.5.0...eryx-vfs-v0.5.1) - 2026-06-23
+
+### Added
+- *(eryx-vfs)* snapshot / restore / clone for InMemoryStorage ([#259](https://github.com/eryx-org/eryx/pull/259))
+
 ## `eryx-precompile` - [0.5.0](https://github.com/eryx-org/eryx/compare/eryx-precompile-v0.4.10...eryx-precompile-v0.5.0) - 2026-06-16
 
 ### Other
