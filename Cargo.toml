@@ -84,7 +84,7 @@ metrics-exporter-prometheus = { version = "0.18.1", default-features = false, fe
 
 # Telemetry
 opentelemetry = "0.31"
-opentelemetry_sdk = "0.31"
+opentelemetry_sdk = "0.32"
 opentelemetry-otlp = { version = "0.31", features = ["grpc-tonic"] }
 tracing-opentelemetry = "0.32"
 tracing-error = "0.2"
