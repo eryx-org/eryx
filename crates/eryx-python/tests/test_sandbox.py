@@ -376,6 +376,26 @@ except NameError:
         result = sandbox.execute("import json; print(json.dumps([1,2]))")
         assert result.stdout == "[1, 2]"
 
+    def test_factory_load_with_cache_key(self, sandbox_factory, tmp_path):
+        """Test loading a factory with a caller-supplied cache key."""
+        save_path = tmp_path / "factory.bin"
+        sandbox_factory.save(save_path)
+
+        loaded = eryx.SandboxFactory.load(save_path, cache_key="artifact-test-1")
+        assert loaded.size_bytes == sandbox_factory.size_bytes
+
+        sandbox = loaded.create_sandbox()
+        result = sandbox.execute("print('hello')")
+        assert result.stdout == "hello"
+
+    def test_factory_load_rejects_empty_cache_key(self, sandbox_factory, tmp_path):
+        """Test that an empty cache_key raises ValueError."""
+        save_path = tmp_path / "factory.bin"
+        sandbox_factory.save(save_path)
+
+        with pytest.raises(ValueError):
+            eryx.SandboxFactory.load(save_path, cache_key="")
+
     def test_factory_to_bytes(self, sandbox_factory):
         """Test getting factory as bytes."""
         data = sandbox_factory.to_bytes()

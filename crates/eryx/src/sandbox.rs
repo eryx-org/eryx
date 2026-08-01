@@ -1059,6 +1059,13 @@ enum WasmSource {
     /// Pre-compiled component bytes (skip compilation, unsafe).
     #[cfg(any(feature = "embedded", feature = "preinit"))]
     PrecompiledBytes(Vec<u8>),
+    /// Pre-compiled component bytes shared via `Arc` (skip compilation, unsafe).
+    ///
+    /// Unlike [`WasmSource::PrecompiledBytes`], the bytes are not copied when
+    /// the sandbox is created, making repeated creation from a long-lived
+    /// artifact cheap.
+    #[cfg(any(feature = "embedded", feature = "preinit"))]
+    PrecompiledBytesShared(Arc<[u8]>),
     /// Path to a pre-compiled component file (skip compilation, unsafe).
     #[cfg(any(feature = "embedded", feature = "preinit"))]
     PrecompiledFile(std::path::PathBuf),
@@ -1091,6 +1098,10 @@ enum WasmSource {
 /// ```
 pub struct SandboxBuilder<Runtime = state::Needs, Stdlib = state::Needs> {
     wasm_source: WasmSource,
+    /// Cache key for pre-compiled bytes, enabling the global [`InstancePreCache`]
+    /// fast path when set.
+    #[cfg(feature = "embedded")]
+    precompiled_cache_key: Option<crate::cache::CacheKey>,
     callbacks: HashMap<String, Arc<dyn Callback>>,
     preamble: String,
     type_stubs: String,
@@ -1172,6 +1183,8 @@ impl SandboxBuilder<state::Needs, state::Needs> {
     pub fn new() -> Self {
         Self {
             wasm_source: WasmSource::None,
+            #[cfg(feature = "embedded")]
+            precompiled_cache_key: None,
             callbacks: HashMap::new(),
             preamble: String::new(),
             type_stubs: String::new(),
@@ -1209,6 +1222,8 @@ impl SandboxBuilder<state::Needs, state::Needs> {
     fn new_embedded() -> SandboxBuilder<state::Has, state::Has> {
         SandboxBuilder {
             wasm_source: WasmSource::EmbeddedRuntime,
+            #[cfg(feature = "embedded")]
+            precompiled_cache_key: None,
             callbacks: HashMap::new(),
             preamble: String::new(),
             type_stubs: String::new(),
@@ -1242,10 +1257,28 @@ impl SandboxBuilder<state::Needs, state::Needs> {
 
 // Helper for state transitions
 impl<R, S> SandboxBuilder<R, S> {
+    /// Set the cache key for pre-compiled component bytes.
+    ///
+    /// When set together with [`Self::with_precompiled_bytes`] or
+    /// [`Self::with_precompiled_bytes_shared`], the executor is looked up in
+    /// the global [`crate::cache::InstancePreCache`] before deserializing, making repeated
+    /// sandbox creation from the same artifact ~0ms after the first call.
+    ///
+    /// The key must uniquely identify the pre-compiled bytes; see
+    /// [`crate::cache::CacheKey::from_precompiled`].
+    #[cfg(feature = "embedded")]
+    #[must_use]
+    pub fn with_precompiled_cache_key(mut self, key: crate::cache::CacheKey) -> Self {
+        self.precompiled_cache_key = Some(key);
+        self
+    }
+
     /// Internal: transition to new state while preserving all fields.
     fn transition<R2, S2>(self) -> SandboxBuilder<R2, S2> {
         SandboxBuilder {
             wasm_source: self.wasm_source,
+            #[cfg(feature = "embedded")]
+            precompiled_cache_key: self.precompiled_cache_key,
             callbacks: self.callbacks,
             preamble: self.preamble,
             type_stubs: self.type_stubs,
@@ -1378,6 +1411,38 @@ impl<S> SandboxBuilder<state::Needs, S> {
         bytes: impl Into<Vec<u8>>,
     ) -> SandboxBuilder<state::Has, S> {
         self.wasm_source = WasmSource::PrecompiledBytes(bytes.into());
+        self.transition()
+    }
+
+    /// Set the WASM component from pre-compiled bytes shared via [`std::sync::Arc`].
+    ///
+    /// Pre-compiled components load much faster because they skip compilation
+    /// (~50x faster sandbox creation). Create pre-compiled files using
+    /// `PythonExecutor::precompile_file()`.
+    ///
+    /// Unlike [`Self::with_precompiled_bytes`], the bytes are not copied: the
+    /// sandbox retains a reference-counted handle, so creating many sandboxes
+    /// from one long-lived artifact (e.g. a factory) avoids re-copying the
+    /// artifact on every creation.
+    ///
+    /// # Safety
+    ///
+    /// This function is unsafe because wasmtime cannot fully validate
+    /// pre-compiled components for safety. Loading untrusted pre-compiled
+    /// bytes can lead to **arbitrary code execution**.
+    ///
+    /// Only call this with pre-compiled bytes that:
+    /// - Were created by `PythonExecutor::precompile()` or `precompile_file()`
+    /// - Come from a trusted source you control
+    /// - Were compiled with a compatible wasmtime version and configuration
+    #[cfg(any(feature = "embedded", feature = "preinit"))]
+    #[must_use]
+    #[allow(unsafe_code)]
+    pub unsafe fn with_precompiled_bytes_shared(
+        mut self,
+        bytes: Arc<[u8]>,
+    ) -> SandboxBuilder<state::Has, S> {
+        self.wasm_source = WasmSource::PrecompiledBytesShared(bytes);
         self.transition()
     }
 
@@ -2250,6 +2315,12 @@ impl SandboxBuilder<state::Has, state::Has> {
 
     /// Build executor from the configured WASM source.
     fn build_executor_from_source(&self) -> Result<PythonExecutor, Error> {
+        // Cache key for pre-compiled bytes (only available with `embedded`).
+        #[cfg(feature = "embedded")]
+        let precompiled_cache_key = self.precompiled_cache_key.as_ref();
+        #[cfg(all(not(feature = "embedded"), feature = "preinit"))]
+        let precompiled_cache_key: Option<&crate::cache::CacheKey> = None;
+
         let executor = match &self.wasm_source {
             WasmSource::Bytes(bytes) => PythonExecutor::from_binary(bytes)?,
             WasmSource::File(path) => PythonExecutor::from_file(path)?,
@@ -2261,7 +2332,18 @@ impl SandboxBuilder<state::Has, state::Has> {
                 // caller has acknowledged this responsibility.
                 #[allow(unsafe_code)]
                 unsafe {
-                    PythonExecutor::from_precompiled(bytes)?
+                    Self::load_precompiled(bytes, precompiled_cache_key)?
+                }
+            }
+
+            #[cfg(any(feature = "embedded", feature = "preinit"))]
+            WasmSource::PrecompiledBytesShared(bytes) => {
+                // SAFETY: User is responsible for only using trusted pre-compiled bytes.
+                // The `with_precompiled_bytes_shared` method is already marked unsafe, so
+                // the caller has acknowledged this responsibility.
+                #[allow(unsafe_code)]
+                unsafe {
+                    Self::load_precompiled(bytes, precompiled_cache_key)?
                 }
             }
 
@@ -2302,6 +2384,36 @@ impl SandboxBuilder<state::Has, state::Has> {
         };
 
         Ok(executor)
+    }
+
+    /// Load a pre-compiled component, using the global [`InstancePreCache`]
+    /// when a cache key is configured.
+    ///
+    /// # Safety
+    ///
+    /// Caller guarantees the pre-compiled bytes are trusted and were created
+    /// by `PythonExecutor::precompile()` with a compatible engine configuration.
+    #[cfg(any(feature = "embedded", feature = "preinit"))]
+    #[allow(unsafe_code)]
+    unsafe fn load_precompiled(
+        bytes: &[u8],
+        cache_key: Option<&crate::cache::CacheKey>,
+    ) -> Result<PythonExecutor, Error> {
+        #[cfg(feature = "embedded")]
+        if let Some(key) = cache_key {
+            // SAFETY: Caller guarantees the pre-compiled bytes are trusted.
+            #[allow(unsafe_code)]
+            return unsafe { PythonExecutor::from_precompiled_with_key(bytes, key.clone()) };
+        }
+        // Without `embedded` there is no cache to consult; the key is unused.
+        #[cfg(not(feature = "embedded"))]
+        let _ = cache_key;
+
+        // SAFETY: Caller guarantees the pre-compiled bytes are trusted.
+        #[allow(unsafe_code)]
+        unsafe {
+            PythonExecutor::from_precompiled(bytes)
+        }
     }
 
     /// Build executor with native extensions, using cache if available.

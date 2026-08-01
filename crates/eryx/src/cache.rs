@@ -119,6 +119,66 @@ impl CacheKey {
         }
     }
 
+    /// Compute a cache key from a caller-supplied artifact identity.
+    ///
+    /// Unlike [`Self::from_precompiled`], the artifact bytes are not hashed:
+    /// the caller provides a stable identity string that uniquely identifies
+    /// the exact pre-compiled artifact (e.g. a content hash computed when the
+    /// artifact was produced). This makes factory construction cheap for
+    /// callers that already track an artifact identity.
+    ///
+    /// The identity is domain-separated from other key sources, so a caller
+    /// string can never collide with a content-derived or sentinel key.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `identity` is empty. Callers must reject empty identities
+    /// before calling.
+    #[cfg(feature = "embedded")]
+    #[must_use]
+    pub fn from_precompiled_identity(identity: &str) -> Self {
+        assert!(!identity.is_empty(), "cache key identity must not be empty");
+        let mut hasher = Sha256::new();
+
+        // Domain-separation tag: caller identities live in their own namespace.
+        hasher.update(b"eryx-precompiled-identity-v1\0");
+        hasher.update((identity.len() as u64).to_le_bytes());
+        hasher.update(identity.as_bytes());
+
+        let extensions_hash: [u8; 32] = hasher.finalize().into();
+
+        Self {
+            extensions_hash,
+            eryx_version: env!("CARGO_PKG_VERSION"),
+            wasmtime_version: wasmtime_version(),
+        }
+    }
+
+    /// Compute a cache key from pre-compiled component bytes.
+    ///
+    /// The full artifact is hashed so that distinct pre-compiled components
+    /// (e.g. factories pre-initialized with different packages) never share a
+    /// cached `SandboxPre`. Computing the key costs one SHA-256 pass over the
+    /// artifact, so callers that create sandboxes repeatedly should compute it
+    /// once and reuse it.
+    #[cfg(feature = "embedded")]
+    #[must_use]
+    pub fn from_precompiled(precompiled: &[u8]) -> Self {
+        let mut hasher = Sha256::new();
+
+        // Include the length so two artifacts sharing a prefix hash differently.
+        hasher.update((precompiled.len() as u64).to_le_bytes());
+        hasher.update(precompiled);
+
+        let extensions_hash: [u8; 32] = hasher.finalize().into();
+
+        Self {
+            extensions_hash,
+            eryx_version: env!("CARGO_PKG_VERSION"),
+            wasmtime_version: wasmtime_version(),
+        }
+    }
+
     /// Compute a cache key from a list of native extensions.
     ///
     /// The extensions are sorted by name before hashing to ensure
@@ -169,7 +229,7 @@ impl CacheKey {
 /// not compatible across wasmtime versions.
 fn wasmtime_version() -> &'static str {
     // Keep in sync with workspace wasmtime version in Cargo.toml
-    "39"
+    "44"
 }
 
 /// Encode bytes as hex string.
@@ -433,6 +493,38 @@ impl std::fmt::Debug for InstancePreCache {
 #[allow(clippy::expect_used, clippy::unwrap_used)]
 mod tests {
     use super::*;
+
+    #[cfg(feature = "embedded")]
+    #[test]
+    fn from_precompiled_identity_is_deterministic_and_domain_separated() {
+        let a = CacheKey::from_precompiled_identity("artifact-a");
+        let b = CacheKey::from_precompiled_identity("artifact-a");
+        let c = CacheKey::from_precompiled_identity("artifact-b");
+        let content = CacheKey::from_precompiled(b"artifact-a");
+
+        // Same identity -> same key (deterministic)
+        assert_eq!(a, b);
+        // Different identity -> different key
+        assert_ne!(a, c);
+        // Domain separation: a caller identity never collides with a content hash
+        assert_ne!(a, content);
+    }
+
+    #[cfg(feature = "embedded")]
+    #[test]
+    fn from_precompiled_key_is_deterministic_and_content_based() {
+        let key1 = CacheKey::from_precompiled(b"abc");
+        let key2 = CacheKey::from_precompiled(b"abc");
+        let key3 = CacheKey::from_precompiled(b"abd");
+        let key4 = CacheKey::from_precompiled(b"abcd"); // same prefix, longer
+
+        // Same bytes -> same key (deterministic)
+        assert_eq!(key1, key2);
+        // Different bytes -> different key
+        assert_ne!(key1, key3);
+        // Different length with shared prefix -> different key
+        assert_ne!(key1, key4);
+    }
 
     #[test]
     fn cache_key_to_hex_is_deterministic() {
