@@ -95,6 +95,8 @@ pub use replay::{
     CallbackJournal, CallbackJournalEntry, CallbackOutcome, ReplayCallback, ReplayState,
     SuspendedCallback,
 };
+#[cfg(any(feature = "embedded", feature = "preinit"))]
+pub use sandbox::PrecompiledArtifact;
 pub use sandbox::{
     ExecuteResult, ExecuteStats, ExecutionHandle, ReplayOutcome, ResourceLimits, Sandbox,
     SandboxBuilder, state,

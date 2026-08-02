@@ -1,7 +1,5 @@
 """Tests for the eryx Python bindings."""
 
-from pathlib import Path
-
 import eryx
 import pytest
 
@@ -360,6 +358,21 @@ except NameError:
 """)
         assert "isolated" in result.stdout
 
+    def test_cached_factory_sandboxes_are_isolated(self, sandbox_factory, tmp_path):
+        """Test that a cache hit still produces an isolated sandbox."""
+        save_path = tmp_path / "cached-factory.bin"
+        sandbox_factory.save(save_path)
+
+        cached_factory = eryx.SandboxFactory.load(save_path, cache=True)
+        first = cached_factory.create_sandbox()
+        first.execute("cached_state = object()")
+
+        second = cached_factory.create_sandbox()
+        result = second.execute(
+            "print('clean' if 'cached_state' not in globals() else 'dirty')"
+        )
+        assert result.stdout == "clean"
+
     def test_factory_save_and_load(self, sandbox_factory, tmp_path):
         """Test saving and loading a sandbox factory."""
         save_path = tmp_path / "factory.bin"
@@ -375,26 +388,6 @@ except NameError:
         sandbox = loaded.create_sandbox()
         result = sandbox.execute("import json; print(json.dumps([1,2]))")
         assert result.stdout == "[1, 2]"
-
-    def test_factory_load_with_cache_key(self, sandbox_factory, tmp_path):
-        """Test loading a factory with a caller-supplied cache key."""
-        save_path = tmp_path / "factory.bin"
-        sandbox_factory.save(save_path)
-
-        loaded = eryx.SandboxFactory.load(save_path, cache_key="artifact-test-1")
-        assert loaded.size_bytes == sandbox_factory.size_bytes
-
-        sandbox = loaded.create_sandbox()
-        result = sandbox.execute("print('hello')")
-        assert result.stdout == "hello"
-
-    def test_factory_load_rejects_empty_cache_key(self, sandbox_factory, tmp_path):
-        """Test that an empty cache_key raises ValueError."""
-        save_path = tmp_path / "factory.bin"
-        sandbox_factory.save(save_path)
-
-        with pytest.raises(ValueError):
-            eryx.SandboxFactory.load(save_path, cache_key="")
 
     def test_factory_to_bytes(self, sandbox_factory):
         """Test getting factory as bytes."""

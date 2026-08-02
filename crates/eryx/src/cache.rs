@@ -92,12 +92,12 @@ pub trait ComponentCache: Send + Sync {
 /// Cache key for identifying pre-compiled components.
 ///
 /// The key includes:
-/// - Hash of all native extension contents
+/// - Hash of the component inputs or pre-compiled component contents
 /// - eryx-runtime version (for base library changes)
 /// - wasmtime version (for compilation compatibility)
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct CacheKey {
-    /// Hash of native extensions (sorted by name for determinism).
+    /// Hash of the inputs identifying the pre-compiled component.
     pub extensions_hash: [u8; 32],
     /// Version of eryx-runtime crate.
     pub eryx_version: &'static str,
@@ -119,58 +119,18 @@ impl CacheKey {
         }
     }
 
-    /// Compute a cache key from a caller-supplied artifact identity.
-    ///
-    /// Unlike [`Self::from_precompiled`], the artifact bytes are not hashed:
-    /// the caller provides a stable identity string that uniquely identifies
-    /// the exact pre-compiled artifact (e.g. a content hash computed when the
-    /// artifact was produced). This makes factory construction cheap for
-    /// callers that already track an artifact identity.
-    ///
-    /// The identity is domain-separated from other key sources, so a caller
-    /// string can never collide with a content-derived or sentinel key.
-    ///
-    /// # Panics
-    ///
-    /// Panics if `identity` is empty. Callers must reject empty identities
-    /// before calling.
-    #[cfg(feature = "embedded")]
-    #[must_use]
-    pub fn from_precompiled_identity(identity: &str) -> Self {
-        assert!(!identity.is_empty(), "cache key identity must not be empty");
-        let mut hasher = Sha256::new();
-
-        // Domain-separation tag: caller identities live in their own namespace.
-        hasher.update(b"eryx-precompiled-identity-v1\0");
-        hasher.update((identity.len() as u64).to_le_bytes());
-        hasher.update(identity.as_bytes());
-
-        let extensions_hash: [u8; 32] = hasher.finalize().into();
-
-        Self {
-            extensions_hash,
-            eryx_version: env!("CARGO_PKG_VERSION"),
-            wasmtime_version: wasmtime_version(),
-        }
-    }
-
     /// Compute a cache key from pre-compiled component bytes.
     ///
     /// The full artifact is hashed so that distinct pre-compiled components
     /// (e.g. factories pre-initialized with different packages) never share a
-    /// cached `SandboxPre`. Computing the key costs one SHA-256 pass over the
-    /// artifact, so callers that create sandboxes repeatedly should compute it
-    /// once and reuse it.
+    /// cached `SandboxPre`. Computing the key costs one BLAKE3 pass over the
+    /// artifact, so callers should compute it once and reuse it.
     #[cfg(feature = "embedded")]
     #[must_use]
-    pub fn from_precompiled(precompiled: &[u8]) -> Self {
-        let mut hasher = Sha256::new();
-
-        // Include the length so two artifacts sharing a prefix hash differently.
-        hasher.update((precompiled.len() as u64).to_le_bytes());
+    pub(crate) fn from_precompiled(precompiled: &[u8]) -> Self {
+        let mut hasher = blake3::Hasher::new_derive_key("eryx precompiled component cache key v1");
         hasher.update(precompiled);
-
-        let extensions_hash: [u8; 32] = hasher.finalize().into();
+        let extensions_hash = *hasher.finalize().as_bytes();
 
         Self {
             extensions_hash,
@@ -493,22 +453,6 @@ impl std::fmt::Debug for InstancePreCache {
 #[allow(clippy::expect_used, clippy::unwrap_used)]
 mod tests {
     use super::*;
-
-    #[cfg(feature = "embedded")]
-    #[test]
-    fn from_precompiled_identity_is_deterministic_and_domain_separated() {
-        let a = CacheKey::from_precompiled_identity("artifact-a");
-        let b = CacheKey::from_precompiled_identity("artifact-a");
-        let c = CacheKey::from_precompiled_identity("artifact-b");
-        let content = CacheKey::from_precompiled(b"artifact-a");
-
-        // Same identity -> same key (deterministic)
-        assert_eq!(a, b);
-        // Different identity -> different key
-        assert_ne!(a, c);
-        // Domain separation: a caller identity never collides with a content hash
-        assert_ne!(a, content);
-    }
 
     #[cfg(feature = "embedded")]
     #[test]

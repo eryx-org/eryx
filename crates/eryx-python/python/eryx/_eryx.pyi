@@ -622,7 +622,7 @@ class SandboxFactory:
         site_packages: Optional[PathLike] = None,
         packages: Optional[Sequence[PathLike]] = None,
         imports: Optional[Sequence[str]] = None,
-        cache_key: Optional[str] = None,
+        cache: bool = False,
     ) -> None:
         """Create a new sandbox factory with custom packages.
 
@@ -635,17 +635,13 @@ class SandboxFactory:
                 These are extracted and their native extensions are linked.
             imports: Optional list of module names to pre-import during initialization.
                 Pre-imported modules are immediately available without import overhead.
-            cache_key: Optional stable identity for the exact pre-compiled artifact.
-                Reuse a key only when the artifact bytes are equivalent; change it
-                whenever packages, native-extension contents, pre-imports, build
-                inputs, or the generated artifact change. Keys are process-global
-                cache identities, not secrets. If omitted, Eryx derives a safe key
-                by hashing the complete artifact (may be expensive for large
-                factories).
+            cache: Whether to cache the pre-compiled component in the process-global
+                cache. Enabling this computes a BLAKE3 content hash once during
+                factory construction and makes subsequent sandbox creation from an
+                equivalent artifact avoid deserialization. Defaults to False.
 
         Raises:
             InitializationError: If initialization fails.
-            ValueError: If `cache_key` is an empty string.
 
         Example:
             # Create factory with jinja2 and markupsafe
@@ -664,7 +660,7 @@ class SandboxFactory:
         path: PathLike,
         *,
         site_packages: Optional[PathLike] = None,
-        cache_key: Optional[str] = None,
+        cache: bool = False,
     ) -> SandboxFactory:
         """Load a sandbox factory from a file.
 
@@ -675,14 +671,9 @@ class SandboxFactory:
             path: Path to the saved factory file.
             site_packages: Optional path to site-packages directory.
                 Required if the factory was saved without embedded packages.
-            cache_key: Optional stable identity for the exact pre-compiled artifact.
-                See the `SandboxFactory` constructor for the contract. If omitted,
-                Eryx derives a safe key by hashing the complete artifact (may be
-                expensive for large factories).
-
-        Raises:
-            InitializationError: If loading fails.
-            ValueError: If `cache_key` is an empty string.
+            cache: Whether to cache the pre-compiled component in the process-global
+                cache. Enabling this computes a BLAKE3 content hash once during
+                loading. Defaults to False.
 
         Returns:
             A SandboxFactory loaded from the file.
