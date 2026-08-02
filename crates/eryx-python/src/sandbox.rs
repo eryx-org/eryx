@@ -168,7 +168,7 @@ impl Sandbox {
         );
 
         // Build the eryx sandbox with embedded runtime
-        let mut builder = eryx::Sandbox::embedded();
+        let mut builder = eryx::Sandbox::embedded().with_trace_collection(false);
 
         // Apply resource limits if provided
         if let Some(limits) = resource_limits {

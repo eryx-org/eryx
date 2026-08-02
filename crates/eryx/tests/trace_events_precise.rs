@@ -744,3 +744,32 @@ async fn test_trace_events_in_result() {
         ]
     );
 }
+
+/// Test: Trace collection can be disabled for lower execution overhead.
+#[tokio::test]
+async fn test_trace_collection_can_be_disabled() {
+    let sandbox = sandbox_builder()
+        .with_trace_collection(false)
+        .build()
+        .expect("Failed to build sandbox");
+
+    let result = sandbox.execute("x = 1").await;
+    assert!(result.is_ok(), "Execution should succeed");
+    assert!(result.unwrap().trace.is_empty());
+}
+
+/// Test: A trace handler still receives events when result collection is disabled.
+#[tokio::test]
+async fn test_trace_handler_without_result_collection() {
+    let trace = CollectingTraceHandler::new();
+    let sandbox = sandbox_builder()
+        .with_trace_collection(false)
+        .with_trace_handler(trace.clone())
+        .build()
+        .expect("Failed to build sandbox");
+
+    let result = sandbox.execute("x = 1").await;
+    assert!(result.is_ok(), "Execution should succeed");
+    assert!(result.unwrap().trace.is_empty());
+    assert!(!trace.simple_events().is_empty());
+}

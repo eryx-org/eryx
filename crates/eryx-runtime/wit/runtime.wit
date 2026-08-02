@@ -35,6 +35,12 @@ world sandbox {
     ///       print(f"{cb['name']}: {cb['description']}")
     import list-callbacks: func() -> list<callback-info>;
 
+    /// Read execution behavior flags from the host.
+    ///
+    /// Returns a bitmask: bit 0 enables Python tracing, and bit 1 allows the
+    /// guest to reuse callback infrastructure captured in a fresh instance.
+    import get-execution-options: func() -> u32;
+
     /// Report a trace event to the host.
     ///
     /// Called by the Python runtime's sys.settrace hook to report

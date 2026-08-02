@@ -200,16 +200,17 @@ fn scrub_trace_event(event: &mut TraceEvent, secrets: &HashMap<String, SecretCon
 /// Collect trace events from the Python runtime.
 ///
 /// Receives trace events from the channel, parses them, optionally forwards
-/// to the trace handler, and collects them for the final result.
+/// them to the trace handler, and optionally collects them for the final result.
 ///
 /// Secret placeholders are scrubbed from events before storing/forwarding.
 #[tracing::instrument(
     skip(trace_rx, trace_handler, secrets),
-    fields(has_handler = trace_handler.is_some())
+    fields(has_handler = trace_handler.is_some(), collect_trace)
 )]
 pub(crate) async fn run_trace_collector(
     mut trace_rx: mpsc::UnboundedReceiver<TraceRequest>,
     trace_handler: Option<Arc<dyn TraceHandler>>,
+    collect_trace: bool,
     secrets: HashMap<String, SecretConfig>,
 ) -> Vec<TraceEvent> {
     let mut events = Vec::new();
@@ -223,7 +224,9 @@ pub(crate) async fn run_trace_collector(
             if let Some(handler) = &trace_handler {
                 handler.on_trace(event.clone()).await;
             }
-            events.push(event);
+            if collect_trace {
+                events.push(event);
+            }
         }
     }
 
