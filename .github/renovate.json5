@@ -1,0 +1,273 @@
+{
+  $schema: "https://docs.renovatebot.com/renovate-schema.json",
+  extends: [
+    "config:recommended",
+    ":dependencyDashboard",
+    // Match the existing "build(deps): ..." convention (see recent git log).
+    ":semanticCommitTypeAll(build)",
+  ],
+  semanticCommitScope: "deps",
+  labels: ["dependencies"],
+  // Rust toolchain, wasmtime, and Docker bumps are deliberate — keep them
+  // reviewable rather than firehosing PRs.
+  prConcurrentLimit: 10,
+  prHourlyLimit: 4,
+
+  // Refresh Cargo.lock / uv.lock / package-lock weekly.
+  lockFileMaintenance: {
+    enabled: true,
+    schedule: ["before 6am on monday"],
+  },
+
+  packageRules: [
+    // ------------------------------------------------------------------
+    // Internal / path dependencies — never bump these.
+    // (Belt-and-suspenders: Renovate skips path deps, but the workspace
+    //  path deps carry explicit versions and the npm ones use file:.)
+    // ------------------------------------------------------------------
+    {
+      matchPackageNames: [
+        "/^eryx(-|$)/",
+        "wit-dylib-ffi",
+        "pyeryx",
+        "/^@bsull\\//",
+      ],
+      enabled: false,
+    },
+
+    // ------------------------------------------------------------------
+    // wasmtime + wasm-tools — MUST move in lockstep.
+    //
+    // wasmtime N embeds the wasm-tools 0.(199+N) crates (wasmtime 44 <->
+    // wasm-tools 0.243), and mise's `cargo:wasm-tools` CLI (1.243) tracks
+    // the same line. Bump all of them in a single PR or the build breaks.
+    // ------------------------------------------------------------------
+    {
+      groupName: "wasmtime & wasm-tools",
+      matchPackageNames: [
+        "wasmtime",
+        "wasmtime-wasi",
+        "wasmtime-wasi-io",
+        "wasmtime-wizer",
+        "cranelift-codegen",
+        "wasm-encoder",
+        "wasmparser",
+        "wit-component",
+        "wit-dylib",
+        "wit-parser",
+        // mise `cargo:wasm-tools` backend tool (surfaces as wasm-tools).
+        "wasm-tools",
+      ],
+    },
+
+    // ------------------------------------------------------------------
+    // wasm-bindgen crate (Cargo) and CLI (mise) must match exactly.
+    // ------------------------------------------------------------------
+    {
+      groupName: "wasm-bindgen",
+      matchPackageNames: [
+        "wasm-bindgen",
+        "wasm-bindgen-cli",
+        // js-sys / web-sys release in lockstep with wasm-bindgen.
+        "js-sys",
+        "web-sys",
+      ],
+    },
+
+    // ------------------------------------------------------------------
+    // jco: mise tool (npm:@bytecodealliance/jco) + js/demo dependency,
+    // plus preview2-shim (the runtime shim jco's transpiled output imports —
+    // its version must stay compatible with the jco that generated the code).
+    // NOTE: jco is currently pinned at 1.16.1 and held back on purpose — the
+    // mise aube trust gate rejects a jco transitive oxc dep (see the
+    // comment in js/mise.toml). Review the PR, don't auto-merge.
+    // ------------------------------------------------------------------
+    {
+      groupName: "bytecodealliance (jco)",
+      matchPackageNames: [
+        "@bytecodealliance/jco",
+        "@bytecodealliance/preview2-shim",
+      ],
+    },
+
+    // ------------------------------------------------------------------
+    // pyo3 ecosystem tracks the pyo3 version (all 0.28).
+    // ------------------------------------------------------------------
+    {
+      groupName: "pyo3",
+      matchPackageNames: [
+        "pyo3",
+        "pyo3-async-runtimes",
+        "pyo3-build-config",
+        "pythonize",
+      ],
+    },
+
+    // ------------------------------------------------------------------
+    // OpenTelemetry ecosystem moves in lockstep. Note the minor is offset:
+    // opentelemetry* are 0.31 while tracing-opentelemetry tracks it at 0.32.
+    // ------------------------------------------------------------------
+    {
+      groupName: "opentelemetry",
+      matchPackageNames: [
+        "opentelemetry",
+        "opentelemetry_sdk",
+        "opentelemetry-otlp",
+        "opentelemetry-http",
+        "opentelemetry-proto",
+        "tracing-opentelemetry",
+      ],
+    },
+
+    // ------------------------------------------------------------------
+    // tonic / prost gRPC stack — strict lockstep. Since the tonic 0.14
+    // split, tonic + tonic-prost(-build) + prost must share a version.
+    // ------------------------------------------------------------------
+    {
+      groupName: "tonic & prost",
+      matchPackageNames: [
+        "tonic",
+        "tonic-prost",
+        "tonic-prost-build",
+        "tonic-build",
+        "prost",
+        "prost-build",
+        "prost-types",
+      ],
+    },
+
+    // ------------------------------------------------------------------
+    // rustls / TLS stack. tokio-rustls re-exports rustls; rustls-pemfile
+    // and webpki-roots track the same rustls major. Bump together.
+    // ------------------------------------------------------------------
+    {
+      groupName: "rustls",
+      matchPackageNames: [
+        "rustls",
+        "tokio-rustls",
+        "rustls-pemfile",
+        "webpki-roots",
+      ],
+    },
+
+    // ------------------------------------------------------------------
+    // cap-std sandboxing crates share a major (v3) and must stay aligned.
+    // ------------------------------------------------------------------
+    {
+      groupName: "cap-std",
+      matchPackageNames: ["cap-std", "cap-fs-ext"],
+    },
+
+    // ------------------------------------------------------------------
+    // metrics facade + prometheus exporter are version-coupled.
+    // ------------------------------------------------------------------
+    {
+      groupName: "metrics",
+      matchPackageNames: ["metrics", "metrics-exporter-prometheus"],
+    },
+
+    // ------------------------------------------------------------------
+    // RustCrypto hashing: hmac + sha2 share the `digest` trait version,
+    // so a major bump in one requires the other.
+    // ------------------------------------------------------------------
+    {
+      groupName: "rustcrypto-hashing",
+      matchPackageNames: ["hmac", "sha2"],
+    },
+
+    // ------------------------------------------------------------------
+    // tracing ecosystem (excludes tracing-opentelemetry, which is grouped
+    // with opentelemetry as its version is pinned to the otel line).
+    // ------------------------------------------------------------------
+    {
+      groupName: "tracing",
+      matchPackageNames: [
+        "tracing",
+        "tracing-subscriber",
+        "tracing-error",
+        "tracing-logfmt",
+      ],
+    },
+
+    // ------------------------------------------------------------------
+    // Convenience groups: same-org crates that release compatibly — group
+    // to cut PR noise (not strict lockstep, but always safe together).
+    // ------------------------------------------------------------------
+    {
+      groupName: "tokio",
+      matchPackageNames: ["tokio", "tokio-stream", "tokio-util"],
+    },
+    {
+      groupName: "serde",
+      matchPackageNames: ["serde", "serde_json"],
+    },
+    {
+      groupName: "proc-macro",
+      matchPackageNames: ["proc-macro2", "quote", "syn"],
+    },
+
+    // ------------------------------------------------------------------
+    // JS tooling pairs: plugin tracks framework, test runner tracks bundler.
+    // ------------------------------------------------------------------
+    {
+      groupName: "svelte",
+      matchPackageNames: ["svelte", "@sveltejs/vite-plugin-svelte"],
+    },
+    {
+      groupName: "vite",
+      matchPackageNames: ["vite", "vitest"],
+    },
+
+    // ------------------------------------------------------------------
+    // Python test tooling: pytest-asyncio tracks pytest.
+    // ------------------------------------------------------------------
+    {
+      groupName: "pytest",
+      matchPackageNames: ["pytest", "pytest-asyncio"],
+    },
+
+    // ------------------------------------------------------------------
+    // Rust toolchain: mise `rust` + Docker `rust:*` base images + the
+    // Cargo.toml MSRV (via the customManager below, which surfaces as a
+    // docker `rust` dep) all move together in one PR.
+    // ------------------------------------------------------------------
+    {
+      groupName: "Rust toolchain",
+      matchPackageNames: ["rust"],
+      matchDatasources: ["docker"],
+    },
+    {
+      groupName: "Rust toolchain",
+      matchManagers: ["mise"],
+      matchPackageNames: ["rust"],
+    },
+
+    // ------------------------------------------------------------------
+    // Roll all GitHub Actions bumps into one PR.
+    // ------------------------------------------------------------------
+    {
+      matchManagers: ["github-actions"],
+      groupName: "github-actions",
+    },
+  ],
+
+  // ------------------------------------------------------------------
+  // Keep the Cargo.toml MSRV (`rust-version = "1.92.0"`) in sync with the
+  // Rust toolchain. There's no native manager for this field, so track it
+  // against the `rust` Docker image (reliable semver tags). Because the
+  // resulting dep is packageName "rust" + datasource "docker", it lands in
+  // the "Rust toolchain" group above alongside the Docker base images.
+  // ------------------------------------------------------------------
+  customManagers: [
+    {
+      customType: "regex",
+      managerFilePatterns: ["/(^|/)Cargo\\.toml$/"],
+      matchStrings: [
+        "rust-version\\s*=\\s*\"(?<currentValue>\\d+\\.\\d+\\.\\d+)\"",
+      ],
+      depNameTemplate: "rust",
+      datasourceTemplate: "docker",
+      versioningTemplate: "semver",
+    },
+  ],
+}
