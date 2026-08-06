@@ -65,18 +65,29 @@
     // ------------------------------------------------------------------
     {
       groupName: "wasm-bindgen",
-      matchPackageNames: ["wasm-bindgen", "wasm-bindgen-cli"],
+      matchPackageNames: [
+        "wasm-bindgen",
+        "wasm-bindgen-cli",
+        // js-sys / web-sys release in lockstep with wasm-bindgen.
+        "js-sys",
+        "web-sys",
+      ],
     },
 
     // ------------------------------------------------------------------
-    // jco: mise tool (npm:@bytecodealliance/jco) + js/demo dependency.
-    // NOTE: currently pinned at 1.16.1 and held back on purpose — the
+    // jco: mise tool (npm:@bytecodealliance/jco) + js/demo dependency,
+    // plus preview2-shim (the runtime shim jco's transpiled output imports —
+    // its version must stay compatible with the jco that generated the code).
+    // NOTE: jco is currently pinned at 1.16.1 and held back on purpose — the
     // mise aube trust gate rejects a jco transitive oxc dep (see the
     // comment in js/mise.toml). Review the PR, don't auto-merge.
     // ------------------------------------------------------------------
     {
-      groupName: "jco",
-      matchPackageNames: ["@bytecodealliance/jco"],
+      groupName: "bytecodealliance (jco)",
+      matchPackageNames: [
+        "@bytecodealliance/jco",
+        "@bytecodealliance/preview2-shim",
+      ],
     },
 
     // ------------------------------------------------------------------
@@ -84,7 +95,12 @@
     // ------------------------------------------------------------------
     {
       groupName: "pyo3",
-      matchPackageNames: ["pyo3", "pyo3-async-runtimes", "pythonize"],
+      matchPackageNames: [
+        "pyo3",
+        "pyo3-async-runtimes",
+        "pyo3-build-config",
+        "pythonize",
+      ],
     },
 
     // ------------------------------------------------------------------
@@ -101,6 +117,113 @@
         "opentelemetry-proto",
         "tracing-opentelemetry",
       ],
+    },
+
+    // ------------------------------------------------------------------
+    // tonic / prost gRPC stack — strict lockstep. Since the tonic 0.14
+    // split, tonic + tonic-prost(-build) + prost must share a version.
+    // ------------------------------------------------------------------
+    {
+      groupName: "tonic & prost",
+      matchPackageNames: [
+        "tonic",
+        "tonic-prost",
+        "tonic-prost-build",
+        "tonic-build",
+        "prost",
+        "prost-build",
+        "prost-types",
+      ],
+    },
+
+    // ------------------------------------------------------------------
+    // rustls / TLS stack. tokio-rustls re-exports rustls; rustls-pemfile
+    // and webpki-roots track the same rustls major. Bump together.
+    // ------------------------------------------------------------------
+    {
+      groupName: "rustls",
+      matchPackageNames: [
+        "rustls",
+        "tokio-rustls",
+        "rustls-pemfile",
+        "webpki-roots",
+      ],
+    },
+
+    // ------------------------------------------------------------------
+    // cap-std sandboxing crates share a major (v3) and must stay aligned.
+    // ------------------------------------------------------------------
+    {
+      groupName: "cap-std",
+      matchPackageNames: ["cap-std", "cap-fs-ext"],
+    },
+
+    // ------------------------------------------------------------------
+    // metrics facade + prometheus exporter are version-coupled.
+    // ------------------------------------------------------------------
+    {
+      groupName: "metrics",
+      matchPackageNames: ["metrics", "metrics-exporter-prometheus"],
+    },
+
+    // ------------------------------------------------------------------
+    // RustCrypto hashing: hmac + sha2 share the `digest` trait version,
+    // so a major bump in one requires the other.
+    // ------------------------------------------------------------------
+    {
+      groupName: "rustcrypto-hashing",
+      matchPackageNames: ["hmac", "sha2"],
+    },
+
+    // ------------------------------------------------------------------
+    // tracing ecosystem (excludes tracing-opentelemetry, which is grouped
+    // with opentelemetry as its version is pinned to the otel line).
+    // ------------------------------------------------------------------
+    {
+      groupName: "tracing",
+      matchPackageNames: [
+        "tracing",
+        "tracing-subscriber",
+        "tracing-error",
+        "tracing-logfmt",
+      ],
+    },
+
+    // ------------------------------------------------------------------
+    // Convenience groups: same-org crates that release compatibly — group
+    // to cut PR noise (not strict lockstep, but always safe together).
+    // ------------------------------------------------------------------
+    {
+      groupName: "tokio",
+      matchPackageNames: ["tokio", "tokio-stream", "tokio-util"],
+    },
+    {
+      groupName: "serde",
+      matchPackageNames: ["serde", "serde_json"],
+    },
+    {
+      groupName: "proc-macro",
+      matchPackageNames: ["proc-macro2", "quote", "syn"],
+    },
+
+    // ------------------------------------------------------------------
+    // JS tooling pairs: plugin tracks framework, test runner tracks bundler.
+    // ------------------------------------------------------------------
+    {
+      groupName: "svelte",
+      matchPackageNames: ["svelte", "@sveltejs/vite-plugin-svelte"],
+    },
+    {
+      groupName: "vite",
+      matchPackageNames: ["vite", "vitest"],
+    },
+
+    // ------------------------------------------------------------------
+    // Python test tooling: pytest-asyncio tracks pytest.
+    // ------------------------------------------------------------------
+    {
+      groupName: "pytest",
+      matchPackageNames: ["pytest", "pytest-asyncio"],
     },
 
     // ------------------------------------------------------------------
