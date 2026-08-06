@@ -134,6 +134,7 @@ const JCO_MAP: [string, string][] = [
   ["eryx:net/tls", "./shims/net.js#tls"],
   ["invoke", "./shims/callbacks.js#invoke"],
   ["list-callbacks", "./shims/callbacks.js#listCallbacks"],
+  ["get-execution-options", "./shims/callbacks.js#getExecutionOptions"],
   ["report-trace", "./shims/callbacks.js#reportTrace"],
   ["report-output", "./shims/callbacks.js#reportOutput"],
   ["wasi:sockets/instance-network@0.2.3", "./shims/sockets.js#instanceNetwork"],
@@ -382,6 +383,7 @@ async function loadDynamicSandbox(
       "./shims/callbacks.js": {
         invoke: callbackShims.invoke,
         listCallbacks: callbackShims.listCallbacks,
+        getExecutionOptions: callbackShims.getExecutionOptions,
         reportTrace: callbackShims.reportTrace,
         reportOutput: callbackShims.reportOutput,
       },

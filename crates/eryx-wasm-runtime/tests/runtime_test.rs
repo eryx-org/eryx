@@ -341,6 +341,19 @@ async fn test_instantiate_component() -> Result<(), Box<dyn std::error::Error>> 
         },
     )?;
 
+    // get-execution-options: func() -> u32
+    // Preserve the default behavior: tracing enabled, callback reuse disabled.
+    linker.root().func_new(
+        "get-execution-options",
+        |_ctx: wasmtime::StoreContextMut<'_, State>,
+         _func_ty: wasmtime::component::types::ComponentFunc,
+         _params: &[Val],
+         results: &mut [Val]| {
+            results[0] = Val::U32(0b01);
+            Ok(())
+        },
+    )?;
+
     // report-trace: func(lineno: u32, event-json: string, context-json: string)
     linker.root().func_new(
         "report-trace",
