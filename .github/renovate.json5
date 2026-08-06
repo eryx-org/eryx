@@ -88,6 +88,22 @@
     },
 
     // ------------------------------------------------------------------
+    // OpenTelemetry ecosystem moves in lockstep. Note the minor is offset:
+    // opentelemetry* are 0.31 while tracing-opentelemetry tracks it at 0.32.
+    // ------------------------------------------------------------------
+    {
+      groupName: "opentelemetry",
+      matchPackageNames: [
+        "opentelemetry",
+        "opentelemetry_sdk",
+        "opentelemetry-otlp",
+        "opentelemetry-http",
+        "opentelemetry-proto",
+        "tracing-opentelemetry",
+      ],
+    },
+
+    // ------------------------------------------------------------------
     // Rust toolchain: mise `rust` + Docker `rust:*` base images + the
     // Cargo.toml MSRV (via the customManager below, which surfaces as a
     // docker `rust` dep) all move together in one PR.
