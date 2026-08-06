@@ -106,6 +106,7 @@ wasmtime.workspace = true
 wasmtime-wasi.workspace = true
 tracing.workspace = true
 sha2.workspace = true
+blake3 = { workspace = true, optional = true }
 # Secrets support
 rand.workspace = true
 hex.workspace = true
@@ -140,7 +141,7 @@ embedded-stdlib = ["dep:zstd"]
 # Zero-config sandboxes: pre-compiled runtime + stdlib embedded in binary.
 # Enables unsafe code paths for wasmtime's pre-compiled component loading.
 # Without this feature, the crate uses `forbid(unsafe_code)`.
-embedded = ["embedded-stdlib"]
+embedded = ["embedded-stdlib", "dep:blake3"]
 # Pre-initialization support for capturing Python memory state.
 # Provides ~25x speedup for sandbox creation by snapshotting initialized Python.
 # Works with or without native extensions - can pre-import stdlib modules only.

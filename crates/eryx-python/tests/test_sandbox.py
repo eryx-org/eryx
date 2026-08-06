@@ -1,7 +1,5 @@
 """Tests for the eryx Python bindings."""
 
-from pathlib import Path
-
 import eryx
 import pytest
 
@@ -359,6 +357,21 @@ except NameError:
     print("isolated")
 """)
         assert "isolated" in result.stdout
+
+    def test_cached_factory_sandboxes_are_isolated(self, sandbox_factory, tmp_path):
+        """Test that a cache hit still produces an isolated sandbox."""
+        save_path = tmp_path / "cached-factory.bin"
+        sandbox_factory.save(save_path)
+
+        cached_factory = eryx.SandboxFactory.load(save_path, cache=True)
+        first = cached_factory.create_sandbox()
+        first.execute("cached_state = object()")
+
+        second = cached_factory.create_sandbox()
+        result = second.execute(
+            "print('clean' if 'cached_state' not in globals() else 'dirty')"
+        )
+        assert result.stdout == "clean"
 
     def test_factory_save_and_load(self, sandbox_factory, tmp_path):
         """Test saving and loading a sandbox factory."""

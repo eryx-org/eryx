@@ -622,6 +622,7 @@ class SandboxFactory:
         site_packages: Optional[PathLike] = None,
         packages: Optional[Sequence[PathLike]] = None,
         imports: Optional[Sequence[str]] = None,
+        cache: bool = False,
     ) -> None:
         """Create a new sandbox factory with custom packages.
 
@@ -634,6 +635,10 @@ class SandboxFactory:
                 These are extracted and their native extensions are linked.
             imports: Optional list of module names to pre-import during initialization.
                 Pre-imported modules are immediately available without import overhead.
+            cache: Whether to cache the pre-compiled component in the process-global
+                cache. Enabling this computes a BLAKE3 content hash once during
+                factory construction and makes subsequent sandbox creation from an
+                equivalent artifact avoid deserialization. Defaults to False.
 
         Raises:
             InitializationError: If initialization fails.
@@ -655,6 +660,7 @@ class SandboxFactory:
         path: PathLike,
         *,
         site_packages: Optional[PathLike] = None,
+        cache: bool = False,
     ) -> SandboxFactory:
         """Load a sandbox factory from a file.
 
@@ -665,6 +671,9 @@ class SandboxFactory:
             path: Path to the saved factory file.
             site_packages: Optional path to site-packages directory.
                 Required if the factory was saved without embedded packages.
+            cache: Whether to cache the pre-compiled component in the process-global
+                cache. Enabling this computes a BLAKE3 content hash once during
+                loading. Defaults to False.
 
         Returns:
             A SandboxFactory loaded from the file.

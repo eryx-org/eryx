@@ -92,12 +92,12 @@ pub trait ComponentCache: Send + Sync {
 /// Cache key for identifying pre-compiled components.
 ///
 /// The key includes:
-/// - Hash of all native extension contents
+/// - Hash of the component inputs or pre-compiled component contents
 /// - eryx-runtime version (for base library changes)
 /// - wasmtime version (for compilation compatibility)
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct CacheKey {
-    /// Hash of native extensions (sorted by name for determinism).
+    /// Hash of the inputs identifying the pre-compiled component.
     pub extensions_hash: [u8; 32],
     /// Version of eryx-runtime crate.
     pub eryx_version: &'static str,
@@ -114,6 +114,26 @@ impl CacheKey {
     pub fn embedded_runtime() -> Self {
         Self {
             extensions_hash: [0u8; 32], // All zeros = no extensions
+            eryx_version: env!("CARGO_PKG_VERSION"),
+            wasmtime_version: wasmtime_version(),
+        }
+    }
+
+    /// Compute a cache key from pre-compiled component bytes.
+    ///
+    /// The full artifact is hashed so that distinct pre-compiled components
+    /// (e.g. factories pre-initialized with different packages) never share a
+    /// cached `SandboxPre`. Computing the key costs one BLAKE3 pass over the
+    /// artifact, so callers should compute it once and reuse it.
+    #[cfg(feature = "embedded")]
+    #[must_use]
+    pub(crate) fn from_precompiled(precompiled: &[u8]) -> Self {
+        let mut hasher = blake3::Hasher::new_derive_key("eryx precompiled component cache key v1");
+        hasher.update(precompiled);
+        let extensions_hash = *hasher.finalize().as_bytes();
+
+        Self {
+            extensions_hash,
             eryx_version: env!("CARGO_PKG_VERSION"),
             wasmtime_version: wasmtime_version(),
         }
@@ -169,7 +189,7 @@ impl CacheKey {
 /// not compatible across wasmtime versions.
 fn wasmtime_version() -> &'static str {
     // Keep in sync with workspace wasmtime version in Cargo.toml
-    "39"
+    "44"
 }
 
 /// Encode bytes as hex string.
@@ -433,6 +453,22 @@ impl std::fmt::Debug for InstancePreCache {
 #[allow(clippy::expect_used, clippy::unwrap_used)]
 mod tests {
     use super::*;
+
+    #[cfg(feature = "embedded")]
+    #[test]
+    fn from_precompiled_key_is_deterministic_and_content_based() {
+        let key1 = CacheKey::from_precompiled(b"abc");
+        let key2 = CacheKey::from_precompiled(b"abc");
+        let key3 = CacheKey::from_precompiled(b"abd");
+        let key4 = CacheKey::from_precompiled(b"abcd"); // same prefix, longer
+
+        // Same bytes -> same key (deterministic)
+        assert_eq!(key1, key2);
+        // Different bytes -> different key
+        assert_ne!(key1, key3);
+        // Different length with shared prefix -> different key
+        assert_ne!(key1, key4);
+    }
 
     #[test]
     fn cache_key_to_hex_is_deterministic() {

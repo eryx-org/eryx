@@ -41,8 +41,8 @@ use crate::sandbox::{PyOutputHandler, Sandbox, apply_secrets};
 ///     factory = SandboxFactory.load("/path/to/jinja2-factory.bin")
 #[pyclass(module = "eryx")]
 pub struct SandboxFactory {
-    /// Pre-compiled component bytes (native code, not WASM).
-    precompiled: Vec<u8>,
+    /// Pre-compiled component artifact shared across sandboxes without copying.
+    precompiled: eryx::PrecompiledArtifact,
     /// Path to Python stdlib.
     stdlib_path: PathBuf,
     /// Path to site-packages (if any).
@@ -50,6 +50,15 @@ pub struct SandboxFactory {
     /// Extracted packages (kept alive to prevent temp dir cleanup).
     #[allow(dead_code)]
     extracted_packages: Vec<eryx::ExtractedPackage>,
+}
+
+/// Construct a pre-compiled artifact with optional content-safe caching.
+fn make_precompiled_artifact(bytes: Vec<u8>, cache: bool) -> eryx::PrecompiledArtifact {
+    if cache {
+        eryx::PrecompiledArtifact::new_cached(bytes)
+    } else {
+        eryx::PrecompiledArtifact::new(bytes)
+    }
 }
 
 #[pymethods]
@@ -65,6 +74,10 @@ impl SandboxFactory {
     ///         These are extracted and their native extensions are linked.
     ///     imports: Optional list of module names to pre-import during initialization.
     ///         Pre-imported modules are immediately available without import overhead.
+    ///     cache: Whether to cache the pre-compiled component in the process-global
+    ///         cache. Enabling this computes a BLAKE3 content hash once during
+    ///         factory construction and makes subsequent sandbox creation from an
+    ///         equivalent artifact avoid deserialization. Defaults to False.
     ///
     /// Returns:
     ///     A SandboxFactory ready to create sandboxes with packages.
@@ -82,11 +95,12 @@ impl SandboxFactory {
     ///         imports=["jinja2"],
     ///     )
     #[new]
-    #[pyo3(signature = (*, site_packages=None, packages=None, imports=None))]
+    #[pyo3(signature = (*, site_packages=None, packages=None, imports=None, cache=false))]
     fn new(
         site_packages: Option<PathBuf>,
         packages: Option<Vec<PathBuf>>,
         imports: Option<Vec<String>>,
+        cache: bool,
     ) -> PyResult<Self> {
         // Create tokio runtime for async pre-initialization
         let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -123,6 +137,7 @@ impl SandboxFactory {
         // Pre-compile to native code for faster instantiation
         let precompiled = eryx::PythonExecutor::precompile(&preinit_bytes)
             .map_err(|e| InitializationError::new_err(format!("pre-compilation failed: {e}")))?;
+        let precompiled = make_precompiled_artifact(precompiled, cache);
 
         Ok(Self {
             precompiled,
@@ -139,6 +154,9 @@ impl SandboxFactory {
     ///
     /// Args:
     ///     path: Path to the saved factory file.
+    ///     cache: Whether to cache the pre-compiled component in the process-global
+    ///         cache. Enabling this computes a BLAKE3 content hash once during
+    ///         loading. Defaults to False.
     ///
     /// Returns:
     ///     A SandboxFactory loaded from the file.
@@ -150,8 +168,8 @@ impl SandboxFactory {
     ///     factory = SandboxFactory.load("/path/to/jinja2-factory.bin")
     ///     sandbox = factory.create_sandbox()
     #[staticmethod]
-    #[pyo3(signature = (path, *, site_packages=None))]
-    fn load(path: PathBuf, site_packages: Option<PathBuf>) -> PyResult<Self> {
+    #[pyo3(signature = (path, *, site_packages=None, cache=false))]
+    fn load(path: PathBuf, site_packages: Option<PathBuf>, cache: bool) -> PyResult<Self> {
         // Get embedded resources for stdlib path
         let embedded = eryx::embedded::EmbeddedResources::get().map_err(eryx_error_to_py)?;
         let stdlib_path = embedded.stdlib().to_path_buf();
@@ -163,6 +181,7 @@ impl SandboxFactory {
                 path.display()
             ))
         })?;
+        let precompiled = make_precompiled_artifact(precompiled, cache);
 
         Ok(Self {
             precompiled,
@@ -187,7 +206,7 @@ impl SandboxFactory {
     ///     factory = SandboxFactory(packages=[...], imports=["jinja2"])
     ///     factory.save("/path/to/jinja2-factory.bin")
     fn save(&self, path: PathBuf) -> PyResult<()> {
-        std::fs::write(&path, &self.precompiled).map_err(|e| {
+        std::fs::write(&path, self.precompiled.as_bytes()).map_err(|e| {
             InitializationError::new_err(format!(
                 "failed to save factory to {}: {e}",
                 path.display()
@@ -262,7 +281,7 @@ impl SandboxFactory {
         // from a valid WASM component, so they are safe to deserialize.
         let mut builder = unsafe {
             eryx::Sandbox::builder()
-                .with_precompiled_bytes(self.precompiled.clone())
+                .with_precompiled_artifact(self.precompiled.clone())
                 .with_python_stdlib(&self.stdlib_path)
         };
 
@@ -338,7 +357,7 @@ impl SandboxFactory {
     ///
     /// This can be used for custom serialization or inspection.
     fn to_bytes<'py>(&self, py: Python<'py>) -> Bound<'py, PyBytes> {
-        PyBytes::new(py, &self.precompiled)
+        PyBytes::new(py, self.precompiled.as_bytes())
     }
 
     fn __repr__(&self) -> String {

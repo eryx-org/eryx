@@ -1328,12 +1328,100 @@ impl PythonExecutor {
     #[cfg(any(feature = "embedded", feature = "preinit"))]
     #[allow(unsafe_code)]
     pub unsafe fn from_precompiled(precompiled_bytes: &[u8]) -> std::result::Result<Self, Error> {
+        // With embedded feature, delegate to internal method for caching support
+        #[cfg(feature = "embedded")]
+        {
+            #[allow(unsafe_code)]
+            unsafe {
+                Self::from_precompiled_internal(precompiled_bytes, None)
+            }
+        }
+        // With preinit-only, load directly without caching
+        #[cfg(not(feature = "embedded"))]
+        {
+            let engine = Self::shared_engine()?;
+            // SAFETY: Caller guarantees the precompiled bytes are trusted and were
+            // created by `precompile()` with a compatible engine configuration.
+            let component = unsafe { Component::deserialize(&engine, precompiled_bytes) }
+                .map_err(Error::WasmComponent)?;
+            let instance_pre = Self::create_instance_pre(&engine, &component)?;
+
+            Ok(Self {
+                engine,
+                instance_pre,
+                python_stdlib_path: None,
+                python_site_packages_paths: Vec::new(),
+                result_variable: "result".to_string(),
+            })
+        }
+    }
+
+    /// Create a new executor by loading a pre-compiled component from bytes,
+    /// with caching via [`InstancePreCache`].
+    ///
+    /// When a `cache_key` is provided:
+    /// - First checks the global [`InstancePreCache`] for a cached `SandboxPre`
+    /// - On cache hit, returns immediately without deserializing (~0ms)
+    /// - On cache miss, deserializes the bytes and stores in cache for future use
+    ///
+    /// This is the internal method used by the sandbox builder for cached
+    /// executor creation from pre-compiled bytes.
+    ///
+    /// # Safety
+    ///
+    /// This function is unsafe because Wasmtime cannot fully validate pre-compiled
+    /// components for safety. Only use this with bytes you control and trust.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the pre-compiled bytes are invalid or incompatible
+    /// with the current engine configuration.
+    #[cfg(feature = "embedded")]
+    #[allow(unsafe_code)]
+    pub(crate) unsafe fn from_precompiled_with_key(
+        precompiled_bytes: &[u8],
+        cache_key: CacheKey,
+    ) -> std::result::Result<Self, Error> {
+        #[allow(unsafe_code)]
+        unsafe {
+            Self::from_precompiled_internal(precompiled_bytes, Some(cache_key))
+        }
+    }
+
+    /// Internal implementation for loading from pre-compiled bytes with optional caching.
+    #[cfg(feature = "embedded")]
+    #[allow(unsafe_code)]
+    unsafe fn from_precompiled_internal(
+        precompiled_bytes: &[u8],
+        cache_key: Option<CacheKey>,
+    ) -> std::result::Result<Self, Error> {
         let engine = Self::shared_engine()?;
+
+        // Check InstancePreCache if we have a cache key
+        if let Some(ref key) = cache_key
+            && let Some(instance_pre) = InstancePreCache::global().get(key)
+        {
+            return Ok(Self {
+                engine,
+                instance_pre,
+                python_stdlib_path: None,
+                python_site_packages_paths: Vec::new(),
+                result_variable: "result".to_string(),
+            });
+        }
+
+        // Cache miss - deserialize from bytes and create instance_pre
         // SAFETY: Caller guarantees the precompiled bytes are trusted and were
         // created by `precompile()` with a compatible engine configuration.
+        #[allow(unsafe_code)]
         let component = unsafe { Component::deserialize(&engine, precompiled_bytes) }
             .map_err(Error::WasmComponent)?;
         let instance_pre = Self::create_instance_pre(&engine, &component)?;
+
+        // Store in cache if we have a key
+        if let Some(key) = cache_key {
+            InstancePreCache::global().put(key, instance_pre.clone());
+        }
 
         Ok(Self {
             engine,
