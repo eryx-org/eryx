@@ -1511,6 +1511,7 @@ impl ExecutorState {
             net_tx: None,    // Set via with_network() when network handler is running
             output_tx: None, // Set via set_output_tx() when output handler is running
             suspended: None,
+            reuse_empty_callbacks: false,
         }
     }
 
@@ -1536,6 +1537,7 @@ impl ExecutorState {
             output_tx: None, // Set via set_output_tx() when output handler is running
             hybrid_vfs_ctx,
             suspended: None,
+            reuse_empty_callbacks: false,
         }
     }
 

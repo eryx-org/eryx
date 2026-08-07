@@ -114,6 +114,8 @@ pub struct Sandbox {
     type_stubs: String,
     /// Handler for execution trace events.
     trace_handler: Option<Arc<dyn TraceHandler>>,
+    /// Whether trace events are collected in [`ExecuteResult::trace`].
+    collect_trace: bool,
     /// Handler for streaming stdout output.
     output_handler: Option<Arc<dyn OutputHandler>>,
     /// Resource limits for execution.
@@ -158,6 +160,7 @@ impl std::fmt::Debug for Sandbox {
             .field("preamble_len", &self.preamble.len())
             .field("type_stubs_len", &self.type_stubs.len())
             .field("has_trace_handler", &self.trace_handler.is_some())
+            .field("collect_trace", &self.collect_trace)
             .field("has_output_handler", &self.output_handler.is_some())
             .field("resource_limits", &self.resource_limits)
             .field("has_net_config", &self.net_config.is_some());
@@ -323,9 +326,10 @@ impl Sandbox {
 
         // Spawn task to handle trace events
         let trace_handler = self.trace_handler.clone();
+        let collect_trace = self.collect_trace;
         let trace_secrets = self.secrets.clone();
         let trace_collector = tokio::spawn(async move {
-            run_trace_collector(trace_rx, trace_handler, trace_secrets).await
+            run_trace_collector(trace_rx, trace_handler, collect_trace, trace_secrets).await
         });
 
         // Spawn network handler if networking is enabled
@@ -353,12 +357,18 @@ impl Sandbox {
             (None, None)
         };
 
-        // Execute the Python code using the builder API
+        // Execute the Python code using the builder API. A configured handler
+        // always enables tracing, even if result collection was disabled.
+        let tracing_enabled = self.collect_trace || self.trace_handler.is_some();
         let mut execute_builder = self
             .executor
             .execute(&full_code)
-            .with_callbacks(&callbacks, callback_tx)
-            .with_tracing(trace_tx);
+            .with_callbacks(&callbacks, callback_tx);
+        if tracing_enabled {
+            execute_builder = execute_builder.with_tracing(trace_tx);
+        } else {
+            drop(trace_tx);
+        }
 
         // Add output streaming if handler is configured
         if let Some(tx) = output_tx {
@@ -542,6 +552,18 @@ impl Sandbox {
         &self.trace_handler
     }
 
+    /// Whether execution tracing is required for result collection or a handler.
+    #[must_use]
+    pub(crate) fn tracing_enabled(&self) -> bool {
+        self.collect_trace || self.trace_handler.is_some()
+    }
+
+    /// Whether trace events should be retained in [`ExecuteResult::trace`].
+    #[must_use]
+    pub(crate) const fn trace_collection_enabled(&self) -> bool {
+        self.collect_trace
+    }
+
     /// Get a reference to the output handler.
     #[must_use]
     pub fn output_handler(&self) -> &Option<Arc<dyn OutputHandler>> {
@@ -685,6 +707,7 @@ impl Sandbox {
         let callbacks = Arc::clone(&self.callbacks);
         let preamble = self.preamble.clone();
         let trace_handler = self.trace_handler.clone();
+        let collect_trace = self.collect_trace;
         let output_handler = self.output_handler.clone();
         let resource_limits = self.resource_limits.clone();
         let net_config = self.net_config.clone();
@@ -707,6 +730,7 @@ impl Sandbox {
                 callbacks,
                 &preamble,
                 trace_handler,
+                collect_trace,
                 output_handler,
                 resource_limits,
                 net_config,
@@ -741,6 +765,7 @@ impl Sandbox {
         callbacks: Arc<HashMap<String, Arc<dyn Callback>>>,
         preamble: &str,
         trace_handler: Option<Arc<dyn TraceHandler>>,
+        collect_trace: bool,
         output_handler: Option<Arc<dyn OutputHandler>>,
         resource_limits: ResourceLimits,
         net_config: Option<NetConfig>,
@@ -797,7 +822,7 @@ impl Sandbox {
         let trace_handler_clone = trace_handler.clone();
         let trace_secrets = secrets.clone();
         let trace_collector = tokio::spawn(async move {
-            run_trace_collector(trace_rx, trace_handler_clone, trace_secrets).await
+            run_trace_collector(trace_rx, trace_handler_clone, collect_trace, trace_secrets).await
         });
 
         // Spawn output collector for real-time streaming if handler is configured
@@ -825,12 +850,17 @@ impl Sandbox {
             (None, None)
         };
 
-        // Execute the Python code using the builder API with cancellation
+        // Execute the Python code using the builder API with cancellation.
+        let tracing_enabled = collect_trace || trace_handler.is_some();
         let mut execute_builder = executor
             .execute(&full_code)
             .with_callbacks(&callbacks_vec, callback_tx)
-            .with_tracing(trace_tx)
             .with_cancellation(cancel_token.clone());
+        if tracing_enabled {
+            execute_builder = execute_builder.with_tracing(trace_tx);
+        } else {
+            drop(trace_tx);
+        }
 
         // Add output streaming channel if handler is configured
         if let Some(tx) = output_tx {
@@ -1171,6 +1201,7 @@ pub struct SandboxBuilder<Runtime = state::Needs, Stdlib = state::Needs> {
     preamble: String,
     type_stubs: String,
     trace_handler: Option<Arc<dyn TraceHandler>>,
+    collect_trace: bool,
     output_handler: Option<Arc<dyn OutputHandler>>,
     resource_limits: ResourceLimits,
     /// Name of the user variable captured as the structured result. Default `result`.
@@ -1232,6 +1263,7 @@ impl<R, S> std::fmt::Debug for SandboxBuilder<R, S> {
             .field("preamble_len", &self.preamble.len())
             .field("type_stubs_len", &self.type_stubs.len())
             .field("has_trace_handler", &self.trace_handler.is_some())
+            .field("collect_trace", &self.collect_trace)
             .field("has_output_handler", &self.output_handler.is_some())
             .field("resource_limits", &self.resource_limits)
             .field("wasm_source", &self.wasm_source)
@@ -1252,6 +1284,7 @@ impl SandboxBuilder<state::Needs, state::Needs> {
             preamble: String::new(),
             type_stubs: String::new(),
             trace_handler: None,
+            collect_trace: true,
             output_handler: None,
             resource_limits: ResourceLimits::default(),
             result_variable: "result".to_string(),
@@ -1289,6 +1322,7 @@ impl SandboxBuilder<state::Needs, state::Needs> {
             preamble: String::new(),
             type_stubs: String::new(),
             trace_handler: None,
+            collect_trace: true,
             output_handler: None,
             resource_limits: ResourceLimits::default(),
             result_variable: "result".to_string(),
@@ -1326,6 +1360,7 @@ impl<R, S> SandboxBuilder<R, S> {
             preamble: self.preamble,
             type_stubs: self.type_stubs,
             trace_handler: self.trace_handler,
+            collect_trace: self.collect_trace,
             output_handler: self.output_handler,
             resource_limits: self.resource_limits,
             result_variable: self.result_variable,
@@ -1800,6 +1835,18 @@ impl<R, S> SandboxBuilder<R, S> {
     #[must_use]
     pub fn with_trace_handler<H: TraceHandler + 'static>(mut self, handler: H) -> Self {
         self.trace_handler = Some(Arc::new(handler));
+        self
+    }
+
+    /// Configure whether execution trace events are collected in the result.
+    ///
+    /// Trace collection is enabled by default for backward compatibility. It
+    /// installs Python's `sys.settrace` hook, which can be expensive for
+    /// instruction-heavy workloads. A configured [`TraceHandler`] always keeps
+    /// tracing enabled regardless of this setting.
+    #[must_use]
+    pub const fn with_trace_collection(mut self, enabled: bool) -> Self {
+        self.collect_trace = enabled;
         self
     }
 
@@ -2339,6 +2386,7 @@ impl SandboxBuilder<state::Has, state::Has> {
             preamble: self.preamble,
             type_stubs: self.type_stubs,
             trace_handler: self.trace_handler,
+            collect_trace: self.collect_trace,
             output_handler: self.output_handler,
             resource_limits: self.resource_limits,
             net_config: self.net_config,

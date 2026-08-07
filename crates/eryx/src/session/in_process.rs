@@ -164,9 +164,10 @@ impl<'a> InProcessSession<'a> {
 
         // Spawn task to handle trace events
         let trace_handler = self.sandbox.trace_handler().clone();
+        let collect_trace = self.sandbox.trace_collection_enabled();
         let trace_secrets = self.sandbox.secrets().clone();
         let trace_collector = tokio::spawn(async move {
-            run_trace_collector(trace_rx, trace_handler, trace_secrets).await
+            run_trace_collector(trace_rx, trace_handler, collect_trace, trace_secrets).await
         });
 
         // Spawn task to handle streaming output
@@ -192,14 +193,17 @@ impl<'a> InProcessSession<'a> {
 
         // Execute using the session executor (keeps instance alive!)
         // Timeout is handled via epoch-based interruption inside the executor
-        let execution_result = self
+        let mut execute_builder = self
             .executor
             .execute(&full_code)
             .with_callbacks(&callbacks, callback_tx)
-            .with_tracing(trace_tx)
-            .with_output_streaming(output_tx)
-            .run()
-            .await;
+            .with_output_streaming(output_tx);
+        if self.sandbox.tracing_enabled() {
+            execute_builder = execute_builder.with_tracing(trace_tx);
+        } else {
+            drop(trace_tx);
+        }
+        let execution_result = execute_builder.run().await;
 
         // Wait for the handler tasks to complete
         let callback_invocations = callback_handler.await.unwrap_or(0);
