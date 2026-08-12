@@ -93,41 +93,38 @@ name = "jinja2_sandbox"
 required-features = ["native-extensions", "embedded"]
 
 [dependencies]
-tokio = { workspace = true, features = ["sync", "net", "io-util", "time"] }
-tokio-util.workspace = true
 anyhow.workspace = true
 async-trait.workspace = true
+blake3 = { workspace = true, optional = true }
+eryx-macros = { workspace = true, optional = true } #unified
+eryx-runtime = { workspace = true, optional = true } #unified
+eryx-vfs = { workspace = true, optional = true } #unified
+flate2.workspace = true
 futures.workspace = true
+hex.workspace = true
+# Secrets support
+rand.workspace = true
+# TLS networking
+rustls.workspace = true
 schemars.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-thiserror.workspace = true
-wasmtime.workspace = true
-wasmtime-wasi.workspace = true
-tracing.workspace = true
 sha2.workspace = true
-blake3 = { workspace = true, optional = true }
-# Secrets support
-rand.workspace = true
-hex.workspace = true
-# Package support (always enabled)
-zip.workspace = true
-flate2.workspace = true
 tar.workspace = true
 tempfile.workspace = true
-walkdir.workspace = true
-# TLS networking
-rustls.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["sync", "net", "io-util", "time"] }
 tokio-rustls.workspace = true
+tokio-util.workspace = true
+tracing.workspace = true
+walkdir.workspace = true
+wasmtime.workspace = true
+wasmtime-wasi.workspace = true
 webpki-roots.workspace = true
+# Package support (always enabled)
+zip.workspace = true
 # Embedded runtime/stdlib (optional)
 zstd = { workspace = true, optional = true }
-# Native extension support (optional)
-eryx-runtime = { path = "../eryx-runtime", version = "^0.5.0", optional = true }
-# Virtual filesystem support (optional)
-eryx-vfs = { path = "../eryx-vfs", version = "^0.5.0", optional = true }
-# Proc macro support (optional)
-eryx-macros = { path = "../eryx-macros", version = "^0.5.0", optional = true }
 
 [features]
 default = []
@@ -156,11 +153,11 @@ vfs = ["dep:eryx-vfs"]
 
 [dev-dependencies]
 async-trait.workspace = true
-tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 criterion.workspace = true
 crossterm.workspace = true
 rcgen.workspace = true
 rustls-pemfile.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 
 [lints]
 workspace = true
