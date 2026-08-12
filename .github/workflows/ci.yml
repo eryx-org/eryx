@@ -130,12 +130,12 @@ jobs:
             crates/eryx-wasm-runtime/target/liberyx_runtime.so
           retention-days: 1
 
+      - uses: ./.github/actions/setup-rust
+        if: steps.wasm-cache.outputs.cache-hit != 'true'
+
       - name: Configure Rust cache
         if: steps.wasm-cache.outputs.cache-hit != 'true'
         uses: Swatinem/rust-cache@v2
-
-      - uses: ./.github/actions/setup-rust
-        if: steps.wasm-cache.outputs.cache-hit != 'true'
 
       - name: Install nightly toolchain
         run: rustup toolchain install nightly --component rust-src
@@ -223,10 +223,10 @@ jobs:
 
       - uses: ./.github/actions/mark-wasm-current
 
+      - uses: ./.github/actions/setup-rust
+
       - name: Configure Rust cache
         uses: Swatinem/rust-cache@v2
-
-      - uses: ./.github/actions/setup-rust
 
       - name: Check formatting
         run: cargo fmt --all -- --check
@@ -278,10 +278,10 @@ jobs:
           rustflags = ["-C", "link-arg=-fuse-ld=mold"]
           EOF
 
+      - uses: ./.github/actions/setup-rust
+
       - name: Configure Rust cache
         uses: Swatinem/rust-cache@v2
-
-      - uses: ./.github/actions/setup-rust
 
       - name: Run tests
         # Use --all-features to test everything. This works because:
@@ -301,15 +301,15 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Configure Rust cache
-        uses: Swatinem/rust-cache@v2
-
       - name: Install mise
         uses: jdx/mise-action@v3
         with:
           mise_toml: |
             [tools]
             rust = "1.92"
+
+      - name: Configure Rust cache
+        uses: Swatinem/rust-cache@v2
 
       - name: Check MSRV
         # Exclude crates that require WASM artifacts or WASI SDK
@@ -359,10 +359,10 @@ jobs:
 
       - uses: ./.github/actions/mark-wasm-current
 
+      - uses: ./.github/actions/setup-rust
+
       - name: Configure Rust cache
         uses: Swatinem/rust-cache@v2
-
-      - uses: ./.github/actions/setup-rust
 
       - name: Build documentation
         # Use --all-features now that prebuilt artifacts are available
@@ -411,10 +411,10 @@ jobs:
 
       - uses: ./.github/actions/mark-wasm-current
 
+      - uses: ./.github/actions/setup-rust
+
       - name: Configure Rust cache
         uses: Swatinem/rust-cache@v2
-
-      - uses: ./.github/actions/setup-rust
 
       - name: Check all feature combinations
         # cargo-all-features checks the powerset of feature combinations.
@@ -450,10 +450,10 @@ jobs:
 
       - uses: ./.github/actions/mark-wasm-current
 
+      - uses: ./.github/actions/setup-rust
+
       - name: Configure Rust cache
         uses: Swatinem/rust-cache@v2
-
-      - uses: ./.github/actions/setup-rust
 
       - name: Run examples
         run: |
@@ -500,10 +500,10 @@ jobs:
 
       - uses: ./.github/actions/mark-wasm-current
 
+      - uses: ./.github/actions/setup-rust
+
       - name: Configure Rust cache
         uses: Swatinem/rust-cache@v2
-
-      - uses: ./.github/actions/setup-rust
 
       - uses: actions/setup-python@v5
         with:
@@ -564,10 +564,10 @@ jobs:
 
       - uses: ./.github/actions/mark-wasm-current
 
+      - uses: ./.github/actions/setup-rust
+
       - name: Configure Rust cache
         uses: Swatinem/rust-cache@v2
-
-      - uses: ./.github/actions/setup-rust
 
       - name: Install mdbook tools
         run: |
@@ -580,6 +580,28 @@ jobs:
           # feature combinations (e.g., from check-all-features job)
           cargo clean -p eryx -p eryx-runtime 2>/dev/null || true
           cargo build -p eryx --features embedded,macros
+
+          # `mdbook test -L ../target/debug/deps` hands the whole directory to
+          # rustdoc rather than naming exact artifacts, so rustdoc aborts with
+          # E0464 ("multiple candidates for rlib dependency") if any crate is
+          # present twice under different -Cmetadata hashes. That happens
+          # whenever the restored cache was built by a different toolchain or
+          # feature set. Keep the newest artifact per crate — the one the build
+          # above just produced — and drop the stale duplicates. Deleting
+          # rather than rebuilding is safe because at least one copy always
+          # survives.
+          if [ -d target/debug/deps ]; then
+            cd target/debug/deps
+            for ext in rlib rmeta so; do
+              ls -t -- *."$ext" 2>/dev/null | awk -v ext="$ext" '
+                { stem = $0; sub("-[0-9a-f]+\\." ext "$", "", stem)
+                  if (seen[stem]++) print }
+              ' | while read -r stale; do
+                echo "removing stale duplicate: $stale"
+                rm -f -- "$stale"
+              done
+            done
+          fi
 
       - name: Test Rust code blocks
         run: mdbook test -L ../target/debug/deps
@@ -703,10 +725,10 @@ jobs:
 
       - uses: ./.github/actions/mark-wasm-current
 
+      - uses: ./.github/actions/setup-rust
+
       - name: Configure Rust cache
         uses: Swatinem/rust-cache@v2
-
-      - uses: ./.github/actions/setup-rust
 
       - name: Install wasm32-unknown-unknown target
         run: rustup target add wasm32-unknown-unknown
