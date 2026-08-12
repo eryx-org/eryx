@@ -18,7 +18,7 @@ anyhow = "1.0"
 async-trait = "0.1"
 
 # Benchmarking
-criterion = { version = "0.5", features = ["async_tokio"] }
+criterion = { version = "0.8", features = ["async_tokio"] }
 crossterm = "0.28"
 eryx = { path = "crates/eryx", version = "^0.5.0" }
 eryx-macros = { path = "crates/eryx-macros", version = "^0.5.0" }
