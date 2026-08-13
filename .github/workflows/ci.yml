@@ -51,6 +51,12 @@ jobs:
               - 'Cargo.toml'
               - '.github/workflows/ci.yml'
               - '.github/actions/**'
+              # Tool versions and the cargo-rail config drive what every Rust
+              # job actually runs. Without these, a Renovate bump that touches
+              # only mise.toml skips all of CI and merges green — which is how
+              # cargo-rail 0.8.1 -> 0.21.0 (#297) landed and broke main.
+              - 'mise.toml'
+              - '.config/rail.toml'
             server:
               - 'crates/eryx-server/**'
             python:

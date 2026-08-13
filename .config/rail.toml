@@ -9,24 +9,10 @@ targets = ["x86_64-unknown-linux-gnu", "aarch64-apple-darwin"]
 include_paths = true
 include_renamed = false
 
-pin_transitives = false  # we don't use workspace-hack crates
-transitive_host = "root"
-
 strict_version_compat = true
 exact_pin_handling = "warn"
 major_version_conflict = "warn"
-
-msrv = true
-msrv_source = "workspace"  # use rust-version from workspace Cargo.toml
-
-detect_unused = true
-remove_unused = true
-sort_dependencies = false
-
-prune_dead_features = true
 preserve_features = []
-detect_undeclared_features = true
-fix_undeclared_features = true
 skip_undeclared_patterns = [
   "default",
   "std",
@@ -39,14 +25,12 @@ skip_undeclared_patterns = [
 exclude = ["eryx-wasm-runtime"]
 include = []
 max_backups = 3
+msrv_policy = { mode = "compute", source = "workspace" }
 
 
 [release]
 tag_prefix = "v"
 tag_format = "{crate}-{prefix}{version}"
-require_clean = true
-publish_delay = 5
-create_github_release = false
 sign_tags = false
 changelog_path = "CHANGELOG.md"
 changelog_relative_to = "crate"
