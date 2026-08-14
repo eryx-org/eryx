@@ -5,7 +5,7 @@
   "devDependencies": {
     "@bsull/eryx": "../eryx",
     "@types/node": "^24.0.0",
-    "typescript": "^5.8.0",
+    "typescript": "^7.0.0",
     "vitest": "^4.1.0"
   },
   "scripts": {
