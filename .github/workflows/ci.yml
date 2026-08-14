@@ -582,69 +582,70 @@ jobs:
 
       - name: Build project
         run: |
-          # Clean eryx packages to avoid "multiple rmeta candidates" from cached
-          # feature combinations (e.g., from check-all-features job)
-          cargo clean -p eryx -p eryx-runtime 2>/dev/null || true
-
-          # `mdbook test -L ../target/debug/deps` points rustdoc at the whole
-          # directory instead of naming artifacts, so leftovers from a run under
-          # a different Cargo.lock break it two ways: rustdoc either refuses to
-          # choose (E0464 "multiple candidates for rlib dependency") or loads a
-          # copy eryx was not linked against (E0460 "found possibly newer
-          # version of crate"). The Rust cache is keyed per job, so these
-          # accumulate across runs whenever dependencies move.
+          # `mdbook test -L <dir>` points rustdoc at a whole directory instead of
+          # naming artifacts, so that directory must hold exactly one copy of
+          # each crate. Two separate things break that in target/debug/deps:
           #
-          # Ask cargo which artifacts this build actually resolves to. It emits
-          # a compiler-artifact message per unit, including ones it considers
-          # fresh, so the JSON is the complete current set. mtime is NOT usable
-          # here: the newest copy on disk is not necessarily the one eryx links
-          # against, and deleting the older one is what produces E0460.
-          KEEP="$RUNNER_TEMP/current-artifacts.txt"
-          cargo build -p eryx --features embedded,macros \
+          #  1. Cargo legitimately compiles some crates twice in one build --
+          #     once for the target graph and once for the host graph (build
+          #     scripts, proc macros and their dependencies), which
+          #     resolver = "2" deliberately does not feature-unify. Both land in
+          #     target/debug/deps and rustdoc cannot choose:
+          #       error[E0464]: multiple candidates for `rlib` dependency `serde`
+          #     Rust 1.97 produces two more such units than 1.92 did, which is
+          #     why this surfaced on the toolchain bump and not before.
+          #  2. The Rust cache is keyed per job, so artifacts from earlier runs
+          #     under a different Cargo.lock linger alongside current ones.
+          #
+          # Building with an explicit --target fixes (1): target-side artifacts
+          # go to target/<triple>/debug/deps and the host graph stays out.
+          # Assembling the link directory from cargo's own artifact list fixes
+          # (2): only what this build resolved to is copied in.
+          TRIPLE=$(rustc -vV | sed -n 's/^host: //p')
+          echo "building for $TRIPLE"
+
+          cargo clean -p eryx -p eryx-runtime --target "$TRIPLE" 2>/dev/null || true
+          cargo build -p eryx --features embedded,macros --target "$TRIPLE" \
             --message-format=json-render-diagnostics \
             > "$RUNNER_TEMP/cargo-build.json"
+
+          BOOK_DEPS=target/book-deps
+          rm -rf "$BOOK_DEPS" && mkdir -p "$BOOK_DEPS"
           jq -r 'select(.reason == "compiler-artifact") | .filenames[]?' \
             "$RUNNER_TEMP/cargo-build.json" \
-            | grep '/deps/' | xargs -r -n1 basename | sort -u > "$KEEP"
-          echo "cargo reported $(wc -l < "$KEEP") current artifacts"
+            | grep "/$TRIPLE/debug/deps/" | grep -E '\.(rlib|rmeta)$' \
+            | while read -r f; do cp -n "$f" "$BOOK_DEPS/"; done
 
-          # `[ -e ]` guards rather than ls/find: the step runs under
-          # `bash -e -o pipefail`, where an unmatched glob feeding a pipeline
-          # would abort the job instead of yielding an empty list.
-          cd target/debug/deps
-          for ext in rlib rmeta so; do
-            dups=$(
-              for f in *."$ext"; do
-                [ -e "$f" ] || continue
-                printf '%s\n' "$f" | sed -E "s/-[0-9a-f]+\.$ext\$//"
-              done | sort | uniq -d
-            )
-            [ -n "$dups" ] || continue
-            printf '%s\n' "$dups" | while read -r stem; do
-              # Only ever remove copies cargo did not name. If it named none of
-              # them, leave the whole set alone rather than guess — a duplicate
-              # is recoverable, deleting the only good copy is not.
-              kept=0
-              for f in "$stem"-*."$ext"; do
-                [ -e "$f" ] || continue
-                grep -qxF "$f" "$KEEP" && kept=1
-              done
-              if [ "$kept" -eq 0 ]; then
-                echo "no current artifact for $stem, leaving as-is"
-                continue
-              fi
-              for f in "$stem"-*."$ext"; do
-                [ -e "$f" ] || continue
-                if ! grep -qxF "$f" "$KEEP"; then
-                  echo "removing stale duplicate: $f"
-                  rm -f -- "$f"
-                fi
-              done
-            done
+          # Cargo reports the *root* package's rlib at its uplifted path
+          # (target/<triple>/debug/liberyx.rlib) rather than the hashed one
+          # under deps/, so the loop above copies eryx's .rmeta but not its
+          # .rlib. rustdoc loads the hashed .rmeta and then looks for a .rlib
+          # with the matching hash beside it -- the unhashed uplifted copy does
+          # not satisfy it, and every example fails with
+          #   error: crate `eryx` required to be available in rlib format
+          # Pick up the sibling .rlib for each .rmeta already copied. Keying off
+          # the rmeta keeps this restricted to crates cargo actually named, so
+          # leftovers from an earlier Cargo.lock still cannot slip in.
+          for m in "$BOOK_DEPS"/*.rmeta; do
+            [ -e "$m" ] || continue
+            sib="target/$TRIPLE/debug/deps/$(basename "$m" .rmeta).rlib"
+            [ -e "$sib" ] && cp -n "$sib" "$BOOK_DEPS/" || true
           done
 
+          # Proc macros are host artifacts, so --target keeps them out of the
+          # target directory -- but rustdoc still needs them to expand derives,
+          # or every example using one fails with
+          #   error[E0463]: can't find crate for `serde_derive`
+          # They are dylibs, so they cannot collide with the rlibs above.
+          jq -r 'select(.reason == "compiler-artifact")
+                 | select(.target.kind[]? == "proc-macro") | .filenames[]?' \
+            "$RUNNER_TEMP/cargo-build.json" \
+            | while read -r f; do cp -n "$f" "$BOOK_DEPS/"; done
+
+          echo "assembled $(ls "$BOOK_DEPS" | wc -l) artifacts into $BOOK_DEPS"
+
       - name: Test Rust code blocks
-        run: mdbook test -L ../target/debug/deps
+        run: mdbook test -L ../target/book-deps
         working-directory: book
 
       - uses: actions/setup-python@v5
