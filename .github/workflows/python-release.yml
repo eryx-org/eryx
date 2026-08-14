@@ -35,7 +35,7 @@ jobs:
       github.event_name == 'workflow_dispatch' ||
       startsWith(github.event.release.tag_name, 'eryx-v')
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -44,7 +44,7 @@ jobs:
         run: rustup toolchain install nightly --component rust-src
 
       - name: Install mise
-        uses: jdx/mise-action@v3
+        uses: jdx/mise-action@v4
 
       - name: Cache Rust
         uses: Swatinem/rust-cache@v2
@@ -69,7 +69,7 @@ jobs:
           cp "$OUT_DIR/liberyx_bindings.so.zst" crates/eryx-runtime/prebuilt/
 
       - name: Upload WASM artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: wasm-runtime
           path: |
@@ -84,10 +84,10 @@ jobs:
     runs-on: ubuntu-latest
     needs: build-runtime
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Download WASM artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: wasm-runtime
           path: crates/
@@ -127,7 +127,7 @@ jobs:
       - name: Mark cwasm as up-to-date
         run: touch crates/eryx-runtime/runtime.cwasm
 
-      - uses: astral-sh/setup-uv@v4
+      - uses: astral-sh/setup-uv@v10.0.1
         with:
           python-version: "3.12"
 
@@ -139,7 +139,7 @@ jobs:
           manylinux: auto
 
       - name: Upload wheels
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: wheels-linux-x86_64
           path: dist
@@ -158,10 +158,10 @@ jobs:
     runs-on: ubuntu-latest
     needs: build-runtime
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Download WASM artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: wasm-runtime
           path: crates/
@@ -209,7 +209,7 @@ jobs:
           manylinux: musllinux_1_2
 
       - name: Upload wheels
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: wheels-musllinux-x86_64
           path: dist
@@ -230,10 +230,10 @@ jobs:
     runs-on: ubuntu-24.04-arm
     needs: build-runtime
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Download WASM artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: wasm-runtime
           path: crates/
@@ -272,7 +272,7 @@ jobs:
       - name: Mark cwasm as up-to-date
         run: touch crates/eryx-runtime/runtime.cwasm
 
-      - uses: astral-sh/setup-uv@v4
+      - uses: astral-sh/setup-uv@v10.0.1
         with:
           python-version: "3.12"
 
@@ -284,7 +284,7 @@ jobs:
           manylinux: auto
 
       - name: Upload wheels
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: wheels-linux-aarch64
           path: dist
@@ -303,10 +303,10 @@ jobs:
     runs-on: ubuntu-24.04-arm
     needs: build-runtime
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Download WASM artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: wasm-runtime
           path: crates/
@@ -353,7 +353,7 @@ jobs:
           manylinux: musllinux_1_2
 
       - name: Upload wheels
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: wheels-musllinux-aarch64
           path: dist
@@ -371,13 +371,13 @@ jobs:
   # Build wheels for macOS ARM (native build with precompile)
   macos-aarch64:
     name: macOS (aarch64)
-    runs-on: macos-15
+    runs-on: macos-26
     needs: build-runtime
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Download WASM artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: wasm-runtime
           path: crates/
@@ -416,7 +416,7 @@ jobs:
       - name: Mark cwasm as up-to-date
         run: touch crates/eryx-runtime/runtime.cwasm
 
-      - uses: astral-sh/setup-uv@v4
+      - uses: astral-sh/setup-uv@v10.0.1
         with:
           python-version: "3.12"
 
@@ -432,7 +432,7 @@ jobs:
           args: --release --out dist --manifest-path crates/eryx-python/Cargo.toml
 
       - name: Upload wheels
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: wheels-macos-aarch64
           path: dist
@@ -448,13 +448,13 @@ jobs:
   # Build wheels for macOS Intel (GitHub runner)
   macos-x86_64:
     name: macOS (x86_64)
-    runs-on: macos-15-intel
+    runs-on: macos-26-intel
     needs: build-runtime
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Download WASM artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: wasm-runtime
           path: crates/
@@ -495,7 +495,7 @@ jobs:
         run: touch crates/eryx-runtime/runtime.cwasm
 
       # Use uv to manage Python - more reliable than setup-python on some runners
-      - uses: astral-sh/setup-uv@v4
+      - uses: astral-sh/setup-uv@v10.0.1
         with:
           python-version: "3.12"
 
@@ -511,7 +511,7 @@ jobs:
           args: --release --out dist --manifest-path crates/eryx-python/Cargo.toml
 
       - name: Upload wheels
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: wheels-macos-x86_64
           path: dist
@@ -535,10 +535,10 @@ jobs:
         target:
           - x64
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Download WASM artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: wasm-runtime
           path: crates/
@@ -581,7 +581,7 @@ jobs:
         shell: bash
         run: touch crates/eryx-runtime/runtime.cwasm
 
-      - uses: astral-sh/setup-uv@v4
+      - uses: astral-sh/setup-uv@v10.0.1
         with:
           python-version: "3.12"
 
@@ -592,7 +592,7 @@ jobs:
           args: --release --out dist --manifest-path crates/eryx-python/Cargo.toml
 
       - name: Upload wheels
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: wheels-windows-${{ matrix.target }}
           path: dist
@@ -612,15 +612,15 @@ jobs:
     runs-on: ubuntu-latest
     needs: build-runtime
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Download WASM artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: wasm-runtime
           path: crates/
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.14"
 
@@ -631,7 +631,7 @@ jobs:
           args: --out dist --manifest-path crates/eryx-python/Cargo.toml
 
       - name: Upload sdist
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: wheels-sdist
           path: dist
@@ -650,7 +650,7 @@ jobs:
       attestations: write
     steps:
       - name: Download all artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           pattern: wheels-*
           merge-multiple: true
@@ -660,7 +660,7 @@ jobs:
         run: ls -la dist/
 
       - name: Generate artifact attestation
-        uses: actions/attest-build-provenance@v2
+        uses: actions/attest-build-provenance@v4
         with:
           subject-path: "dist/*"
 
