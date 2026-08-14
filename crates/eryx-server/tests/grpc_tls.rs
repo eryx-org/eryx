@@ -21,7 +21,7 @@ use eryx_server::proto::eryx::v1::{
     ClientMessage, ExecuteRequest, ResourceLimits, client_message, server_message,
 };
 use eryx_server::service::EryxService;
-use rcgen::{BasicConstraints, CertificateParams, IsCa, KeyPair};
+use rcgen::{BasicConstraints, CertificateParams, CertifiedIssuer, IsCa, KeyPair};
 use tokio::net::TcpListener;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::{ReceiverStream, TcpListenerStream};
@@ -42,23 +42,27 @@ fn generate_certs() -> TestCerts {
     let ca_key = KeyPair::generate().unwrap();
     let mut ca_params = CertificateParams::new(Vec::<String>::new()).unwrap();
     ca_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
-    let ca_cert = ca_params.self_signed(&ca_key).unwrap();
+    // rcgen 0.14 folds the issuer's certificate and signing key into a single
+    // `Issuer`. `CertifiedIssuer` is the variant that also keeps the cert
+    // around, which we still need for `ca_pem`; it derefs to `Issuer`, so it
+    // passes straight to `signed_by`.
+    let ca = CertifiedIssuer::self_signed(ca_params, ca_key).unwrap();
 
     let server_key = KeyPair::generate().unwrap();
     let server_cert =
         CertificateParams::new(vec!["localhost".to_string(), "127.0.0.1".to_string()])
             .unwrap()
-            .signed_by(&server_key, &ca_cert, &ca_key)
+            .signed_by(&server_key, &ca)
             .unwrap();
 
     let client_key = KeyPair::generate().unwrap();
     let client_cert = CertificateParams::new(vec!["eryx-test-client".to_string()])
         .unwrap()
-        .signed_by(&client_key, &ca_cert, &ca_key)
+        .signed_by(&client_key, &ca)
         .unwrap();
 
     TestCerts {
-        ca_pem: ca_cert.pem(),
+        ca_pem: ca.pem(),
         server_cert_pem: server_cert.pem(),
         server_key_pem: server_key.serialize_pem(),
         client_cert_pem: client_cert.pem(),
