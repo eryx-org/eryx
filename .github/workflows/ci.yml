@@ -616,6 +616,22 @@ jobs:
             | grep "/$TRIPLE/debug/deps/" | grep -E '\.(rlib|rmeta)$' \
             | while read -r f; do cp -n "$f" "$BOOK_DEPS/"; done
 
+          # Cargo reports the *root* package's rlib at its uplifted path
+          # (target/<triple>/debug/liberyx.rlib) rather than the hashed one
+          # under deps/, so the loop above copies eryx's .rmeta but not its
+          # .rlib. rustdoc loads the hashed .rmeta and then looks for a .rlib
+          # with the matching hash beside it -- the unhashed uplifted copy does
+          # not satisfy it, and every example fails with
+          #   error: crate `eryx` required to be available in rlib format
+          # Pick up the sibling .rlib for each .rmeta already copied. Keying off
+          # the rmeta keeps this restricted to crates cargo actually named, so
+          # leftovers from an earlier Cargo.lock still cannot slip in.
+          for m in "$BOOK_DEPS"/*.rmeta; do
+            [ -e "$m" ] || continue
+            sib="target/$TRIPLE/debug/deps/$(basename "$m" .rmeta).rlib"
+            [ -e "$sib" ] && cp -n "$sib" "$BOOK_DEPS/" || true
+          done
+
           # Proc macros are host artifacts, so --target keeps them out of the
           # target directory -- but rustdoc still needs them to expand derives,
           # or every example using one fails with
