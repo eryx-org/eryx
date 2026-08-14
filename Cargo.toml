@@ -35,7 +35,7 @@ futures = "0.3"
 futures-concurrency = "7.6"
 futures-lite = "2.6"
 hex = "0.4"
-hmac = "0.12"
+hmac = "0.13"
 js-sys = "0.3"          # browser WASM bindings
 lending-stream = "1.0"
 metrics = "0.24"
@@ -56,7 +56,7 @@ rustls-pemfile = "2.0"
 schemars = "1.0.0-alpha.17" # JSON Schema
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-sha2 = "0.10"
+sha2 = "0.11"
 tar = "0.4"
 tempfile = "3.20"
 thiserror = "2.0"
