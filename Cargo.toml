@@ -24,7 +24,7 @@ async-trait = "0.1"
 blake3 = "1.8"
 clap = { version = "^4.5.57", features = ["derive"] } #unified
 criterion = { version = "0.8", features = ["async_tokio"] } # benchmarking
-crossterm = "0.28"                                          # terminal control
+crossterm = "0.29"                                          # terminal control
 dashmap = "6"                                               # concurrent maps
 eryx = { path = "crates/eryx", version = "^0.5.0" }
 eryx-macros = { path = "crates/eryx-macros", version = "^0.5.0" }
