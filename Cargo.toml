@@ -49,7 +49,7 @@ pyo3-async-runtimes = { version = "0.29", features = ["tokio-runtime"] }
 pythonize = "0.29"
 rand = "0.10"           # secret placeholder generation
 rcgen = "0.14"          # test certificate generation
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-webpki-roots-no-provider"] }
+reqwest = { version = "0.13", default-features = false, features = ["rustls-tls-webpki-roots-no-provider"] }
 rmcp = "3.0"            # Model Context Protocol SDK
 rustls = "0.23"
 rustls-pemfile = "2.0"
