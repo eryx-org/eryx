@@ -286,7 +286,7 @@ impl MCPManager {
                             let error_text: String = result
                                 .content
                                 .iter()
-                                .filter_map(|c| c.raw.as_text().map(|t| t.text.as_str()))
+                                .filter_map(|c| c.as_text().map(|t| t.text.as_str()))
                                 .collect::<Vec<_>>()
                                 .join("\n");
                             return Err(CallbackError::ExecutionFailed(format!(
@@ -298,7 +298,7 @@ impl MCPManager {
                         let text_parts: Vec<&str> = result
                             .content
                             .iter()
-                            .filter_map(|c| c.raw.as_text().map(|t| t.text.as_str()))
+                            .filter_map(|c| c.as_text().map(|t| t.text.as_str()))
                             .collect();
 
                         // If there's structured content, prefer it

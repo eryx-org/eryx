@@ -50,7 +50,7 @@ pythonize = "0.29"
 rand = "0.8"            # secret placeholder generation
 rcgen = "0.14"          # test certificate generation
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-webpki-roots-no-provider"] }
-rmcp = "1.4"            # Model Context Protocol SDK
+rmcp = "3.0"            # Model Context Protocol SDK
 rustls = "0.23"
 rustls-pemfile = "2.0"
 schemars = "1.0.0-alpha.17" # JSON Schema
