@@ -81,7 +81,7 @@ wasmtime = { version = "44.0.2", features = ["component-model", "async"] }
 wasmtime-wasi = "44.0.2"
 wasmtime-wasi-io = "44.0.2"
 wasmtime-wizer = { version = "44.0.2", features = ["component-model", "wasmtime"] }
-webpki-roots = "0.26"   # TLS trust roots
+webpki-roots = "1.0"   # TLS trust roots
 wit-component = "0.243"
 wit-dylib = "0.243"
 # wit-dylib FFI for implementing the interpreter interface (inlined from wasm-tools).
