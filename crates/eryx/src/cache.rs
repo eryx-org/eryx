@@ -195,7 +195,11 @@ fn wasmtime_version() -> &'static str {
     // `'static` string the cache key holds.
     static VERSION: OnceLock<&'static str> = OnceLock::new();
     VERSION.get_or_init(|| {
-        String::leak(wasmtime::ModuleVersionStrategy::default().as_str().to_owned())
+        String::leak(
+            wasmtime::ModuleVersionStrategy::default()
+                .as_str()
+                .to_owned(),
+        )
     })
 }
 
