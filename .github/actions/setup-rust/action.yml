@@ -15,5 +15,5 @@ runs:
         # default, and an auto-upgrade to 2026.8.2 broke CI (its new aube
         # supply-chain trust gate rejected a jco transitive dep). See the
         # trust_policy_excludes note in js/mise.toml. Bump deliberately.
-        version: 2026.8.5
+        version: 2026.8.6
         cache: false # We handle caching ourselves to include ~/.rustup
