@@ -177,11 +177,22 @@
 
     // ------------------------------------------------------------------
     // cap-std sandboxing crates share a major (v3) and must stay aligned.
+    //
+    // system-interface belongs in this group too: eryx-vfs gets `read_at` /
+    // `write_at` on cap-std files from `system_interface::fs::FileIoExt`,
+    // enabled by system-interface's `cap_std_impls` feature. Those impls are
+    // written against a specific cap-std major, so a cap-std bump on its own
+    // does not compile — see #316, where cap-std 4 landed alone and every
+    // positional read/write in eryx-vfs lost its trait impl.
+    //
+    // Note this group is therefore gated on system-interface's release
+    // cadence: as of writing its latest (0.27.3) still requires cap-std ^3,
+    // so no combination takes cap-std 4 yet and the group will simply hold.
     // ------------------------------------------------------------------
     {
       groupName: "cap-std",
       separateMajorMinor: false,
-      matchPackageNames: ["cap-std", "cap-fs-ext"],
+      matchPackageNames: ["cap-std", "cap-fs-ext", "system-interface"],
     },
 
     // ------------------------------------------------------------------
