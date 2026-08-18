@@ -27,7 +27,7 @@ def main():
     print("--- Example 2: Custom Strict Limits ---")
     strict_limits = eryx.ResourceLimits(
         execution_timeout_ms=1000,  # 1 second
-        max_memory_bytes=96_000_000,  # 96 MB
+        max_memory_bytes=50_000_000,  # 50 MB
         max_callback_invocations=10,
     )
     print(f"Strict limits: {strict_limits}")

@@ -382,7 +382,7 @@ class TestResourceExhaustion:
     def test_memory_bomb_rejected(self):
         """Attempt to allocate massive memory should be limited."""
         sandbox = eryx.Sandbox(resource_limits=eryx.ResourceLimits(
-            max_memory_bytes=96 * 1024 * 1024,  # 96MB limit
+            max_memory_bytes=50 * 1024 * 1024,  # 50MB limit
         ))
 
         # This should either fail or be limited

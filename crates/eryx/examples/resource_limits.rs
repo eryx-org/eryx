@@ -249,7 +249,7 @@ print(f"Total: {total}")
     let restrictive_limits = ResourceLimits {
         execution_timeout: Some(Duration::from_secs(5)),
         callback_timeout: Some(Duration::from_secs(1)),
-        max_memory_bytes: Some(96 * 1024 * 1024), // 96 MB
+        max_memory_bytes: Some(64 * 1024 * 1024), // 64 MB
         max_callback_invocations: Some(10),
         max_fuel: Some(1_000_000_000), // 1B instructions
     };
