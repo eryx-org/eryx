@@ -36,7 +36,7 @@ use std::sync::{Arc, Mutex};
 use eryx::{
     Callback, CallbackJournal, CallbackJournalEntry, ReplayCallback, ReplayState, SuspendedCallback,
 };
-use hmac::{Hmac, Mac};
+use hmac::{Hmac, KeyInit, Mac};
 use prost::Message;
 use sha2::Sha256;
 
@@ -81,9 +81,11 @@ impl JournalSigner {
     /// after a restart. Intended for tests and single-instance dev servers.
     #[must_use]
     pub fn random() -> Self {
-        use rand::RngCore;
+        // rand 0.10 renamed the core trait `RngCore` -> `Rng` (and the old
+        // `Rng` extension trait -> `RngExt`), and `thread_rng()` -> `rng()`.
+        use rand::Rng;
         let mut key = [0u8; 32];
-        rand::thread_rng().fill_bytes(&mut key);
+        rand::rng().fill_bytes(&mut key);
         Self { key }
     }
 

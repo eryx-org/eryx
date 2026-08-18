@@ -121,9 +121,9 @@ impl From<bool> for OutputScrubPolicy {
 ///
 /// Placeholders are ephemeral (regenerated on each use) for better security.
 pub fn generate_placeholder(_secret_name: &str) -> String {
-    use rand::Rng;
-    let mut rng = rand::thread_rng();
-    let random: [u8; 16] = rng.r#gen();
+    use rand::RngExt;
+    let mut rng = rand::rng();
+    let random: [u8; 16] = rng.random();
     let hex = hex::encode(random);
     format!("ERYX_SECRET_PLACEHOLDER_{hex}")
 }

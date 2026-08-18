@@ -259,7 +259,9 @@ fn restore_initialize_exports(component_bytes: &[u8]) -> Result<Vec<u8>> {
                         }
                     }
                     wasmparser::Payload::ImportSection(reader) => {
-                        for import in reader {
+                        // Each section entry is a *group* since the compact
+                        // imports proposal, so flatten before matching names.
+                        for import in reader.into_imports() {
                             if import?.name == "_initialize" {
                                 any_module_imports_init = true;
                             }
@@ -374,7 +376,10 @@ fn add_noop_initialize(module_bytes: &[u8]) -> Result<Vec<u8>> {
                 }
             }
             wasmparser::Payload::ImportSection(reader) => {
-                for import in reader {
+                // Must flatten each group: this count defines where the
+                // defined-function index space starts, so a group that expands
+                // to several imported functions has to contribute all of them.
+                for import in reader.into_imports() {
                     if matches!(import?.ty, wasmparser::TypeRef::Func(_)) {
                         num_imported_funcs += 1;
                     }

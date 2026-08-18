@@ -19,6 +19,18 @@
     schedule: ["before 6am on monday"],
   },
 
+  // ------------------------------------------------------------------
+  // Security updates are left to Dependabot, which is already enabled on
+  // this repo. Renovate's vulnerabilityAlerts defaults force groupName to
+  // null, so an advisory bumps the vulnerable crate on its own and tears
+  // apart the lockstep groups below — it opened opentelemetry_sdk 0.32
+  // against opentelemetry 0.31, and a pyo3 bump that would not resolve at
+  // all. The grouped PRs carry the same fixes with the group intact.
+  // ------------------------------------------------------------------
+  vulnerabilityAlerts: {
+    enabled: false,
+  },
+
   packageRules: [
     // ------------------------------------------------------------------
     // Internal / path dependencies — never bump these.
@@ -41,9 +53,22 @@
     // wasmtime N embeds the wasm-tools 0.(199+N) crates (wasmtime 44 <->
     // wasm-tools 0.243), and mise's `cargo:wasm-tools` CLI (1.243) tracks
     // the same line. Bump all of them in a single PR or the build breaks.
+    //
+    // A wasmtime bump also moves the `wasi:*` WIT packages that
+    // `wasmtime-wasi` ships (0.2.6 under wasmtime 44, 0.2.12 under 47).
+    // `crates/eryx-vfs/wit` has to be re-synced to the same versions by hand,
+    // or the VFS silently stops shadowing wasmtime-wasi's filesystem and every
+    // mounted path returns ENOENT — see `crates/eryx-vfs/wit/world.wit`.
+    //
+    // separateMajorMinor is off on every strict-lockstep group below.
+    // Left on, Renovate splits a group into a major PR and a minor/patch
+    // PR whenever its members' next hops differ in update type — which let
+    // wasm-tools go 0.243 -> 0.255 while wasmtime stayed on 44, the exact
+    // mismatch the group exists to prevent.
     // ------------------------------------------------------------------
     {
       groupName: "wasmtime & wasm-tools",
+      separateMajorMinor: false,
       matchPackageNames: [
         "wasmtime",
         "wasmtime-wasi",
@@ -65,6 +90,7 @@
     // ------------------------------------------------------------------
     {
       groupName: "wasm-bindgen",
+      separateMajorMinor: false,
       matchPackageNames: [
         "wasm-bindgen",
         "wasm-bindgen-cli",
@@ -84,6 +110,7 @@
     // ------------------------------------------------------------------
     {
       groupName: "bytecodealliance (jco)",
+      separateMajorMinor: false,
       matchPackageNames: [
         "@bytecodealliance/jco",
         "@bytecodealliance/preview2-shim",
@@ -95,6 +122,7 @@
     // ------------------------------------------------------------------
     {
       groupName: "pyo3",
+      separateMajorMinor: false,
       matchPackageNames: [
         "pyo3",
         "pyo3-async-runtimes",
@@ -109,6 +137,7 @@
     // ------------------------------------------------------------------
     {
       groupName: "opentelemetry",
+      separateMajorMinor: false,
       matchPackageNames: [
         "opentelemetry",
         "opentelemetry_sdk",
@@ -125,6 +154,7 @@
     // ------------------------------------------------------------------
     {
       groupName: "tonic & prost",
+      separateMajorMinor: false,
       matchPackageNames: [
         "tonic",
         "tonic-prost",
@@ -142,6 +172,7 @@
     // ------------------------------------------------------------------
     {
       groupName: "rustls",
+      separateMajorMinor: false,
       matchPackageNames: [
         "rustls",
         "tokio-rustls",
@@ -152,10 +183,22 @@
 
     // ------------------------------------------------------------------
     // cap-std sandboxing crates share a major (v3) and must stay aligned.
+    //
+    // system-interface belongs in this group too: eryx-vfs gets `read_at` /
+    // `write_at` on cap-std files from `system_interface::fs::FileIoExt`,
+    // enabled by system-interface's `cap_std_impls` feature. Those impls are
+    // written against a specific cap-std major, so a cap-std bump on its own
+    // does not compile — see #316, where cap-std 4 landed alone and every
+    // positional read/write in eryx-vfs lost its trait impl.
+    //
+    // Note this group is therefore gated on system-interface's release
+    // cadence: as of writing its latest (0.27.3) still requires cap-std ^3,
+    // so no combination takes cap-std 4 yet and the group will simply hold.
     // ------------------------------------------------------------------
     {
       groupName: "cap-std",
-      matchPackageNames: ["cap-std", "cap-fs-ext"],
+      separateMajorMinor: false,
+      matchPackageNames: ["cap-std", "cap-fs-ext", "system-interface"],
     },
 
     // ------------------------------------------------------------------
@@ -163,6 +206,7 @@
     // ------------------------------------------------------------------
     {
       groupName: "metrics",
+      separateMajorMinor: false,
       matchPackageNames: ["metrics", "metrics-exporter-prometheus"],
     },
 
@@ -172,6 +216,7 @@
     // ------------------------------------------------------------------
     {
       groupName: "rustcrypto-hashing",
+      separateMajorMinor: false,
       matchPackageNames: ["hmac", "sha2"],
     },
 
@@ -192,6 +237,8 @@
     // ------------------------------------------------------------------
     // Convenience groups: same-org crates that release compatibly — group
     // to cut PR noise (not strict lockstep, but always safe together).
+    // These keep the default major/minor split, since a major bump in one
+    // member is worth reviewing on its own.
     // ------------------------------------------------------------------
     {
       groupName: "tokio",
@@ -239,7 +286,11 @@
     {
       groupName: "Rust toolchain",
       matchManagers: ["mise"],
-      matchPackageNames: ["rust"],
+      // matchDepNames, not matchPackageNames: the mise manager resolves the
+      // `rust` tool to packageName "rust-lang/rust" (datasource github-tags),
+      // so matching on "rust" as a package name silently misses it and mise
+      // splits off into its own PR.
+      matchDepNames: ["rust"],
     },
 
     // ------------------------------------------------------------------
@@ -248,6 +299,20 @@
     {
       matchManagers: ["github-actions"],
       groupName: "github-actions",
+    },
+
+    // ------------------------------------------------------------------
+    // release.yml is generated by `dist generate` from dist-workspace.toml's
+    // pinned cargo-dist-version — its action pins come from that tool's
+    // bundled templates, not from us. Renovate editing them directly makes
+    // the file diverge from what `dist` would (re)generate, which fails the
+    // release workflow's "plan" job ("run 'dist init' to update the file").
+    // Bump cargo-dist-version and rerun `dist generate` instead (see #319).
+    // ------------------------------------------------------------------
+    {
+      matchManagers: ["github-actions"],
+      matchFileNames: [".github/workflows/release.yml"],
+      enabled: false,
     },
   ],
 
@@ -268,6 +333,27 @@
       depNameTemplate: "rust",
       datasourceTemplate: "docker",
       versioningTemplate: "semver",
+    },
+
+    // ------------------------------------------------------------------
+    // The MSRV job pins its toolchain in an inline mise config passed to
+    // jdx/mise-action (`mise_toml: |`). The github-actions manager only
+    // reads `uses:`, and the mise manager only reads mise.toml files, so
+    // nothing sees this pin — it sat at 1.92 while the rest of the
+    // toolchain moved. Anchor on the [tools] header so this can't match
+    // an unrelated `rust = "..."` elsewhere in a workflow.
+    // ------------------------------------------------------------------
+    {
+      customType: "regex",
+      managerFilePatterns: ["/^\\.github/workflows/.+\\.ya?ml$/"],
+      matchStrings: [
+        "\\[tools\\]\\s*\\n\\s*rust\\s*=\\s*\"(?<currentValue>\\d+\\.\\d+(?:\\.\\d+)?)\"",
+      ],
+      depNameTemplate: "rust",
+      datasourceTemplate: "docker",
+      // docker versioning, not semver: this pin is the two-component "1.92"
+      // form, which semver won't parse.
+      versioningTemplate: "docker",
     },
   ],
 }

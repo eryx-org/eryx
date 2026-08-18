@@ -8,119 +8,87 @@ members = ["crates/*"]
 [workspace.package]
 version = "0.5.0"
 edition = "2024"
-rust-version = "1.92.0"
+rust-version = "1.97.1"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/eryx-org/eryx"
 authors = ["Ben Sully <ben.sully88@gmail.com>"]
 
 [workspace.dependencies]
+# Sorted alphabetically by `cargo rail unify`, which sorts unconditionally
+# since 0.21 (the unify.sort_dependencies opt-out is gone). Purpose notes
+# therefore ride on the dependency itself rather than sitting above a block
+# — a header only stays true until the next dependency sorts underneath it.
+# Self-explanatory crates are left unannotated.
 anyhow = "1.0"
 async-trait = "0.1"
-
-# Benchmarking
-criterion = { version = "0.5", features = ["async_tokio"] }
-crossterm = "0.28"
+blake3 = "1.8"
+clap = { version = "^4.5.57", features = ["derive"] } #unified
+criterion = { version = "0.8", features = ["async_tokio"] } # benchmarking
+crossterm = "0.29"                                          # terminal control
+dashmap = "6"                                               # concurrent maps
 eryx = { path = "crates/eryx", version = "^0.5.0" }
 eryx-macros = { path = "crates/eryx-macros", version = "^0.5.0" }
+eryx-runtime = { path = "crates/eryx-runtime", version = "^0.5.0" } #unified
+eryx-vfs = { path = "crates/eryx-vfs", version = "^0.5.0" } #unified
 flate2 = "1.0"
 futures = "0.3"
 futures-concurrency = "7.6"
 futures-lite = "2.6"
-lending-stream = "1.0"
-pyo3 = { version = "^0.28", features = ["extension-module"] }
-pyo3-async-runtimes = { version = "0.28", features = ["tokio-runtime"] }
-pythonize = "0.28"
-
-# JSON Schema
-schemars = "1.0.0-alpha.17"
-
-# Serialization
-serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
-
-# Hashing / HMAC
-blake3 = "1.8"
 hex = "0.4"
-hmac = "0.12"
-sha2 = "0.10"
-
-# Random number generation for secret placeholders
-rand = "0.8"
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-webpki-roots-no-provider"] }
-
-# Archive extraction
-tar = "0.4"
-tempfile = "3.20"
-
-# Error handling
-thiserror = "2.0"
-# Async runtime
-tokio = { version = "1", features = ["full"] }
-tokio-stream = "0.1"
-tokio-util = "0.7"
-
-# TLS
+hmac = "0.13"
+js-sys = "0.3"          # browser WASM bindings
+lending-stream = "1.0"
+metrics = "0.24"
+metrics-exporter-prometheus = { version = "0.18.1", default-features = false, features = ["http-listener"] }
+opentelemetry = "0.32"
+opentelemetry-otlp = { version = "0.32", features = ["grpc-tonic"] }
+opentelemetry_sdk = "0.32"
+prost = "0.14"          # gRPC (with tonic)
+pyo3 = { version = "^0.29.0", features = ["extension-module"] }
+pyo3-async-runtimes = { version = "0.29", features = ["tokio-runtime"] }
+pythonize = "0.29"
+rand = "0.10"           # secret placeholder generation
+rcgen = "0.14"          # test certificate generation
+reqwest = { version = "0.13", default-features = false, features = ["rustls-no-provider"] }
+rmcp = "3.0"            # Model Context Protocol SDK
 rustls = "0.23"
 rustls-pemfile = "2.0"
+schemars = "1.0.0-alpha.17" # JSON Schema
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+sha2 = "0.11"
+tar = "0.4"
+tempfile = "3.20"
+thiserror = "2.0"
+tokio = { version = "1", features = ["full"] }
 tokio-rustls = "0.26"
-webpki-roots = "0.26"
-rcgen = "0.13"
-rmcp = "1.4"
-
-# gRPC
+tokio-stream = "0.1"
+tokio-util = "0.7"
 tonic = "0.14"
 tonic-prost = "0.14"
 tonic-prost-build = "0.14"
-prost = "0.14"
-
-# Unique identifiers
-uuid = "1"
-
-# Concurrent maps
-dashmap = "6"
-
-# Metrics
-metrics = "0.24"
-metrics-exporter-prometheus = { version = "0.18.1", default-features = false, features = ["http-listener"] }
-
-# Telemetry
-opentelemetry = "0.31"
-opentelemetry_sdk = "0.31"
-opentelemetry-otlp = { version = "0.31", features = ["grpc-tonic"] }
-tracing-opentelemetry = "0.32"
-tracing-error = "0.2"
-
-# Utilities
 tracing = "0.1"
-
-# Directory walking
+tracing-error = "0.2"
+tracing-opentelemetry = "0.33"
+uuid = "1"
 walkdir = "2.5"
-wasm-encoder = "0.243"
-wasmparser = "0.243"
-
-# WebAssembly runtime (v40+ required for async component model)
-# 44.0.2 patches GHSA-2r75-cxrj-cmph (WASI path_open TRUNCATE bypasses FilePerms::WRITE)
-wasmtime = { version = "44.0.2", features = ["component-model", "async"] }
-wasmtime-wasi = "44.0.2"
-wasmtime-wasi-io = "44.0.2"
-wasmtime-wizer = { version = "44.0.2", features = ["component-model", "wasmtime"] }
-
-# WebAssembly component linking and WIT parsing
-wit-component = "0.243"
-wit-dylib = "0.243"
-
-# wit-dylib FFI for implementing interpreter interface (inlined from wasm-tools)
+wasm-bindgen = "0.2"    # browser WASM bindings
+wasm-encoder = "0.252"
+wasmparser = "0.252"
+# wasmtime v40+ required for the async component model.
+# 44.0.2 patches GHSA-2r75-cxrj-cmph (WASI path_open TRUNCATE bypasses FilePerms::WRITE).
+wasmtime = { version = "47.0.0", features = ["component-model", "async"] }
+wasmtime-wasi = "47.0.0"
+wasmtime-wasi-io = "47.0.0"
+wasmtime-wizer = { version = "47.0.0", features = ["component-model", "wasmtime"] }
+webpki-roots = "1.0"   # TLS trust roots
+wit-component = "0.252"
+wit-dylib = "0.252"
+# wit-dylib FFI for implementing the interpreter interface (inlined from wasm-tools).
 wit-dylib-ffi = { path = "crates/wit-dylib-ffi" }
-wit-parser = "0.243"
+wit-parser = "0.252"
 zip = "2.0"
-
-# Compression
 zstd = "0.13"
-
-# Browser WASM bindings
-wasm-bindgen = "0.2"
-js-sys = "0.3"
-clap = { version = "^4.5.57", features = ["derive"] } #unified
 
 [workspace.lints.rust]
 missing_debug_implementations = "warn"

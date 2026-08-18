@@ -9,11 +9,11 @@ runs:
       run: curl -L --proto '=https' --tlsv1.2 -sSf https://raw.githubusercontent.com/cargo-bins/cargo-binstall/main/install-from-binstall-release.sh | bash
 
     - name: Install mise
-      uses: jdx/mise-action@v3
+      uses: jdx/mise-action@v4
       with:
         # Pinned for reproducibility: mise-action installs the latest mise by
         # default, and an auto-upgrade to 2026.8.2 broke CI (its new aube
         # supply-chain trust gate rejected a jco transitive dep). See the
         # trust_policy_excludes note in js/mise.toml. Bump deliberately.
-        version: 2026.8.2
+        version: 2026.8.8
         cache: false # We handle caching ourselves to include ~/.rustup

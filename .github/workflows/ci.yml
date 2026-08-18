@@ -35,8 +35,8 @@ jobs:
       js: ${{ steps.filter.outputs.js }}
       demo: ${{ steps.filter.outputs.demo }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: dorny/paths-filter@v3
+      - uses: actions/checkout@v7
+      - uses: dorny/paths-filter@v4
         id: filter
         with:
           filters: |
@@ -51,6 +51,12 @@ jobs:
               - 'Cargo.toml'
               - '.github/workflows/ci.yml'
               - '.github/actions/**'
+              # Tool versions and the cargo-rail config drive what every Rust
+              # job actually runs. Without these, a Renovate bump that touches
+              # only mise.toml skips all of CI and merges green — which is how
+              # cargo-rail 0.8.1 -> 0.21.0 (#297) landed and broke main.
+              - 'mise.toml'
+              - '.config/rail.toml'
             server:
               - 'crates/eryx-server/**'
             python:
@@ -73,7 +79,7 @@ jobs:
       github.event_name == 'push'
       || needs.changes.outputs.core == 'true'
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: ./.github/actions/setup-rust
 
@@ -96,11 +102,11 @@ jobs:
       || needs.changes.outputs.js == 'true'
       || needs.changes.outputs.demo == 'true'
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Cache WASM runtime artifacts
         id: wasm-cache
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             crates/eryx-runtime/runtime.wasm
@@ -120,7 +126,7 @@ jobs:
 
       - name: Upload WASM artifacts (cache hit)
         if: steps.wasm-cache.outputs.cache-hit == 'true'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: wasm-runtime
           path: |
@@ -130,12 +136,12 @@ jobs:
             crates/eryx-wasm-runtime/target/liberyx_runtime.so
           retention-days: 1
 
+      - uses: ./.github/actions/setup-rust
+        if: steps.wasm-cache.outputs.cache-hit != 'true'
+
       - name: Configure Rust cache
         if: steps.wasm-cache.outputs.cache-hit != 'true'
         uses: Swatinem/rust-cache@v2
-
-      - uses: ./.github/actions/setup-rust
-        if: steps.wasm-cache.outputs.cache-hit != 'true'
 
       - name: Install nightly toolchain
         run: rustup toolchain install nightly --component rust-src
@@ -191,7 +197,7 @@ jobs:
 
       - name: Upload WASM artifacts (cache miss)
         if: steps.wasm-cache.outputs.cache-hit != 'true'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: wasm-runtime
           path: |
@@ -210,23 +216,23 @@ jobs:
       || needs.changes.outputs.core == 'true'
       || needs.changes.outputs.server == 'true'
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install protoc
         run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
 
       - name: Download WASM artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: wasm-runtime
           path: crates/
 
       - uses: ./.github/actions/mark-wasm-current
 
+      - uses: ./.github/actions/setup-rust
+
       - name: Configure Rust cache
         uses: Swatinem/rust-cache@v2
-
-      - uses: ./.github/actions/setup-rust
 
       - name: Check formatting
         run: cargo fmt --all -- --check
@@ -244,10 +250,10 @@ jobs:
       || needs.changes.outputs.core == 'true'
       || needs.changes.outputs.server == 'true'
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Download WASM artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: wasm-runtime
           path: crates/
@@ -278,10 +284,10 @@ jobs:
           rustflags = ["-C", "link-arg=-fuse-ld=mold"]
           EOF
 
+      - uses: ./.github/actions/setup-rust
+
       - name: Configure Rust cache
         uses: Swatinem/rust-cache@v2
-
-      - uses: ./.github/actions/setup-rust
 
       - name: Run tests
         # Use --all-features to test everything. This works because:
@@ -299,17 +305,17 @@ jobs:
       github.event_name == 'push'
       || needs.changes.outputs.core == 'true'
     steps:
-      - uses: actions/checkout@v4
-
-      - name: Configure Rust cache
-        uses: Swatinem/rust-cache@v2
+      - uses: actions/checkout@v7
 
       - name: Install mise
-        uses: jdx/mise-action@v3
+        uses: jdx/mise-action@v4
         with:
           mise_toml: |
             [tools]
-            rust = "1.92"
+            rust = "1.97"
+
+      - name: Configure Rust cache
+        uses: Swatinem/rust-cache@v2
 
       - name: Check MSRV
         # Exclude crates that require WASM artifacts or WASI SDK
@@ -326,7 +332,7 @@ jobs:
       matrix:
         os: [windows-latest, macos-latest]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Configure Rust cache
         uses: Swatinem/rust-cache@v2
@@ -346,23 +352,23 @@ jobs:
       github.event_name == 'push'
       || needs.changes.outputs.core == 'true'
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install protoc
         run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
 
       - name: Download WASM artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: wasm-runtime
           path: crates/
 
       - uses: ./.github/actions/mark-wasm-current
 
+      - uses: ./.github/actions/setup-rust
+
       - name: Configure Rust cache
         uses: Swatinem/rust-cache@v2
-
-      - uses: ./.github/actions/setup-rust
 
       - name: Build documentation
         # Use --all-features now that prebuilt artifacts are available
@@ -379,7 +385,7 @@ jobs:
       github.event_name == 'push'
       || needs.changes.outputs.core == 'true'
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install nightly toolchain
         run: rustup toolchain install nightly
@@ -401,20 +407,20 @@ jobs:
       github.event_name == 'push'
       || needs.changes.outputs.core == 'true'
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Download WASM artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: wasm-runtime
           path: crates/
 
       - uses: ./.github/actions/mark-wasm-current
 
+      - uses: ./.github/actions/setup-rust
+
       - name: Configure Rust cache
         uses: Swatinem/rust-cache@v2
-
-      - uses: ./.github/actions/setup-rust
 
       - name: Check all feature combinations
         # cargo-all-features checks the powerset of feature combinations.
@@ -440,20 +446,20 @@ jobs:
       || needs.changes.outputs.core == 'true'
       || needs.changes.outputs.examples == 'true'
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Download WASM artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: wasm-runtime
           path: crates/
 
       - uses: ./.github/actions/mark-wasm-current
 
+      - uses: ./.github/actions/setup-rust
+
       - name: Configure Rust cache
         uses: Swatinem/rust-cache@v2
-
-      - uses: ./.github/actions/setup-rust
 
       - name: Run examples
         run: |
@@ -490,27 +496,27 @@ jobs:
       || needs.changes.outputs.core == 'true'
       || needs.changes.outputs.python == 'true'
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Download WASM artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: wasm-runtime
           path: crates/
 
       - uses: ./.github/actions/mark-wasm-current
 
+      - uses: ./.github/actions/setup-rust
+
       - name: Configure Rust cache
         uses: Swatinem/rust-cache@v2
 
-      - uses: ./.github/actions/setup-rust
-
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
-          python-version: "3.12"
+          python-version: "3.14"
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v6
+        uses: astral-sh/setup-uv@v10.0.1
 
       - name: Build and install eryx-python with dev dependencies
         working-directory: crates/eryx-python
@@ -554,20 +560,20 @@ jobs:
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
           sudo docker image prune --all --force
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Download WASM artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: wasm-runtime
           path: crates/
 
       - uses: ./.github/actions/mark-wasm-current
 
+      - uses: ./.github/actions/setup-rust
+
       - name: Configure Rust cache
         uses: Swatinem/rust-cache@v2
-
-      - uses: ./.github/actions/setup-rust
 
       - name: Install mdbook tools
         run: |
@@ -576,18 +582,75 @@ jobs:
 
       - name: Build project
         run: |
-          # Clean eryx packages to avoid "multiple rmeta candidates" from cached
-          # feature combinations (e.g., from check-all-features job)
-          cargo clean -p eryx -p eryx-runtime 2>/dev/null || true
-          cargo build -p eryx --features embedded,macros
+          # `mdbook test -L <dir>` points rustdoc at a whole directory instead of
+          # naming artifacts, so that directory must hold exactly one copy of
+          # each crate. Two separate things break that in target/debug/deps:
+          #
+          #  1. Cargo legitimately compiles some crates twice in one build --
+          #     once for the target graph and once for the host graph (build
+          #     scripts, proc macros and their dependencies), which
+          #     resolver = "2" deliberately does not feature-unify. Both land in
+          #     target/debug/deps and rustdoc cannot choose:
+          #       error[E0464]: multiple candidates for `rlib` dependency `serde`
+          #     Rust 1.97 produces two more such units than 1.92 did, which is
+          #     why this surfaced on the toolchain bump and not before.
+          #  2. The Rust cache is keyed per job, so artifacts from earlier runs
+          #     under a different Cargo.lock linger alongside current ones.
+          #
+          # Building with an explicit --target fixes (1): target-side artifacts
+          # go to target/<triple>/debug/deps and the host graph stays out.
+          # Assembling the link directory from cargo's own artifact list fixes
+          # (2): only what this build resolved to is copied in.
+          TRIPLE=$(rustc -vV | sed -n 's/^host: //p')
+          echo "building for $TRIPLE"
+
+          cargo clean -p eryx -p eryx-runtime --target "$TRIPLE" 2>/dev/null || true
+          cargo build -p eryx --features embedded,macros --target "$TRIPLE" \
+            --message-format=json-render-diagnostics \
+            > "$RUNNER_TEMP/cargo-build.json"
+
+          BOOK_DEPS=target/book-deps
+          rm -rf "$BOOK_DEPS" && mkdir -p "$BOOK_DEPS"
+          jq -r 'select(.reason == "compiler-artifact") | .filenames[]?' \
+            "$RUNNER_TEMP/cargo-build.json" \
+            | grep "/$TRIPLE/debug/deps/" | grep -E '\.(rlib|rmeta)$' \
+            | while read -r f; do cp -n "$f" "$BOOK_DEPS/"; done
+
+          # Cargo reports the *root* package's rlib at its uplifted path
+          # (target/<triple>/debug/liberyx.rlib) rather than the hashed one
+          # under deps/, so the loop above copies eryx's .rmeta but not its
+          # .rlib. rustdoc loads the hashed .rmeta and then looks for a .rlib
+          # with the matching hash beside it -- the unhashed uplifted copy does
+          # not satisfy it, and every example fails with
+          #   error: crate `eryx` required to be available in rlib format
+          # Pick up the sibling .rlib for each .rmeta already copied. Keying off
+          # the rmeta keeps this restricted to crates cargo actually named, so
+          # leftovers from an earlier Cargo.lock still cannot slip in.
+          for m in "$BOOK_DEPS"/*.rmeta; do
+            [ -e "$m" ] || continue
+            sib="target/$TRIPLE/debug/deps/$(basename "$m" .rmeta).rlib"
+            [ -e "$sib" ] && cp -n "$sib" "$BOOK_DEPS/" || true
+          done
+
+          # Proc macros are host artifacts, so --target keeps them out of the
+          # target directory -- but rustdoc still needs them to expand derives,
+          # or every example using one fails with
+          #   error[E0463]: can't find crate for `serde_derive`
+          # They are dylibs, so they cannot collide with the rlibs above.
+          jq -r 'select(.reason == "compiler-artifact")
+                 | select(.target.kind[]? == "proc-macro") | .filenames[]?' \
+            "$RUNNER_TEMP/cargo-build.json" \
+            | while read -r f; do cp -n "$f" "$BOOK_DEPS/"; done
+
+          echo "assembled $(ls "$BOOK_DEPS" | wc -l) artifacts into $BOOK_DEPS"
 
       - name: Test Rust code blocks
-        run: mdbook test -L ../target/debug/deps
+        run: mdbook test -L ../target/book-deps
         working-directory: book
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
-          python-version: '3.12'
+          python-version: '3.14'
 
       - name: Create virtualenv and install dependencies
         run: |
@@ -618,7 +681,7 @@ jobs:
       pages: write
       id-token: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0  # Need full history for version detection
 
@@ -663,15 +726,15 @@ jobs:
           HTMLEOF
 
       - name: Setup Pages
-        uses: actions/configure-pages@v5
+        uses: actions/configure-pages@v6
 
       - name: Upload artifact
-        uses: actions/upload-pages-artifact@v4
+        uses: actions/upload-pages-artifact@v5
         with:
           path: 'deploy'
 
       - name: Deploy to GitHub Pages
-        uses: actions/deploy-pages@v4
+        uses: actions/deploy-pages@v5
 
   # Deploy browser demo to Cloudflare Pages.
   # - On main: production deployment (custom domain)
@@ -693,20 +756,20 @@ jobs:
       deployments: write
       pull-requests: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Download WASM artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: wasm-runtime
           path: crates/
 
       - uses: ./.github/actions/mark-wasm-current
 
+      - uses: ./.github/actions/setup-rust
+
       - name: Configure Rust cache
         uses: Swatinem/rust-cache@v2
-
-      - uses: ./.github/actions/setup-rust
 
       - name: Install wasm32-unknown-unknown target
         run: rustup target add wasm32-unknown-unknown
@@ -741,7 +804,7 @@ jobs:
 
       - name: Deploy to Cloudflare Pages
         id: deploy
-        uses: cloudflare/wrangler-action@v3
+        uses: cloudflare/wrangler-action@v4
         with:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
@@ -794,10 +857,10 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Download WASM artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: wasm-runtime
           path: crates/
@@ -814,7 +877,7 @@ jobs:
 
       - name: Docker meta
         id: meta
-        uses: docker/metadata-action@v5
+        uses: docker/metadata-action@v6
         with:
           images: sd2k/eryx-server
           # On main: sha + branch + latest. On a release tag (eryx-v0.5.0):
@@ -828,7 +891,7 @@ jobs:
             type=match,pattern=\d+.\d+,group=0
 
       - name: Build and push
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           file: crates/eryx-server/Dockerfile

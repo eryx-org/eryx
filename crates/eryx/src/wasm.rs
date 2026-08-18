@@ -506,9 +506,11 @@ impl eryx_vfs::HybridVfsView for ExecutorState {
 }
 
 // Host implementation of the WIT-generated sandbox imports trait.
-impl SandboxImportsWithStore for HasSelf<ExecutorState> {
+// wasmtime 47 moved the store type parameter off the individual methods and
+// onto the `*WithStore` trait itself; the accessor argument is unchanged.
+impl<T> SandboxImportsWithStore<T> for HasSelf<ExecutorState> {
     /// Invoke a callback by name with JSON arguments (async).
-    fn invoke<T>(
+    fn invoke(
         accessor: &Accessor<T, Self>,
         name: String,
         arguments_json: String,

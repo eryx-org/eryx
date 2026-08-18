@@ -25,8 +25,8 @@ jobs:
     outputs:
       js: ${{ steps.filter.outputs.js }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: dorny/paths-filter@v3
+      - uses: actions/checkout@v7
+      - uses: dorny/paths-filter@v4
         id: filter
         with:
           filters: |
@@ -53,11 +53,11 @@ jobs:
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
           sudo docker image prune --all --force
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Cache WASM runtime
         id: wasm-cache
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             crates/eryx-runtime/runtime.wasm

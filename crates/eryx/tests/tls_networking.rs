@@ -37,7 +37,7 @@ impl TestServer {
             .expect("Failed to generate certificate");
 
         let cert_der = cert.cert.der().to_vec();
-        let key_der = cert.key_pair.serialize_der();
+        let key_der = cert.signing_key.serialize_der();
 
         // Build rustls server config
         let certs = vec![CertificateDer::from(cert_der.clone())];
