@@ -6,9 +6,20 @@ Python WASM runtime component for the eryx sandbox.
 
 This runtime uses **CPython 3.14** compiled for WASI (WebAssembly System Interface).
 
-The WASI-compiled CPython and supporting libraries are sourced from
+The WASI-compiled CPython (`libpython3.14.so`) is sourced from
 [componentize-py](https://github.com/bytecodealliance/componentize-py), a Bytecode Alliance
 project that provides the foundational tooling for running Python in WebAssembly.
+
+The generic WASI support libraries (`libc.so`, `libc++.so`, `libc++abi.so`, and the
+`libwasi-emulated-*.so` shims) are sourced directly from the
+[wasi-sdk](https://github.com/WebAssembly/wasi-sdk) release's `wasm32-wasip2` sysroot
+rather than from componentize-py — they aren't CPython-specific, and componentize-py's
+own `wasm32-wasip2` sysroot libs (it targets wasip2 too, as of this vintage) are the same
+artifacts wasi-sdk ships directly. `libpython3.14.so` still expects a `wasm32-wasip2`-style
+libc underneath it (it needs full BSD socket symbols, which only the wasip2 sysroot's libc
+provides — the `wasm32-wasip1` sysroot's libc does not), even though `eryx-wasm-runtime`
+itself still compiles for `wasm32-wasip1` and is bridged in via the `wasi_snapshot_preview1`
+adapter below.
 
 ## Overview
 
