@@ -6,9 +6,22 @@ Python WASM runtime component for the eryx sandbox.
 
 This runtime uses **CPython 3.14** compiled for WASI (WebAssembly System Interface).
 
-The WASI-compiled CPython and supporting libraries are sourced from
-[componentize-py](https://github.com/bytecodealliance/componentize-py), a Bytecode Alliance
-project that provides the foundational tooling for running Python in WebAssembly.
+The WASI-compiled CPython and supporting libraries are built via the
+[componentize-py](https://github.com/bytecodealliance/componentize-py) `main` branch's own
+`cargo build` pipeline (`WASI_SDK_VERSION=33`, matching its CI), which downloads and compiles
+CPython 3.14 from `dicej/cpython`'s `v3.14.0-wasi-sdk-30` source tarball against wasi-sdk-33
+tools. All of `libpython3.14.so` and the generic WASI sysroot libs (`libc.so`, `libc++.so`,
+`libc++abi.so`, `libwasi-emulated-*.so`) come from this single build's `OUT_DIR`, so they're
+guaranteed to be built consistently against the same wasi-sdk/wasi-libc revision — mixing a
+freshly-built libc with an old libpython (or vice versa) silently breaks CPython's
+reference-counting-based object finalization (`__del__`/`gc.collect()` never fire), so these
+files must always be re-vendored together as a set. See `docs/wasi-sdk-wasip2-migration.md`
+for the full investigation.
+
+The `wasi_snapshot_preview1` adapter (`wasi_snapshot_preview1.reactor.wasm`) is a separate,
+much more stable artifact from componentize-py's `adapters/` directory (bridges
+`eryx-wasm-runtime`'s own `wasm32-wasip1` build into the component) and doesn't need to be
+re-vendored in lockstep with the CPython/libc bundle above.
 
 ## Overview
 

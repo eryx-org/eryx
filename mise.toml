@@ -28,7 +28,7 @@ version = "0.2.127"
 # Instead, we install it on-demand via the ensure-wasi-sdk task.
 
 [vars]
-wasi_sdk_version = "wasi-sdk-27"
+wasi_sdk_version = "wasi-sdk-33"
 
 [tasks.check]
 description = "Run cargo check"
