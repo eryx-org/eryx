@@ -682,6 +682,24 @@ print(f"Second result: {result}")
 // =============================================================================
 
 #[tokio::test]
+async fn test_empty_callback_fast_path_installs_callback_api() {
+    let sandbox = sandbox_builder().build().expect("Failed to build sandbox");
+
+    let output = sandbox
+        .execute(
+            r#"
+assert list_callbacks() == []
+assert callable(invoke)
+print("callback API ready")
+"#,
+        )
+        .await
+        .expect("Empty callback fast path should preserve the callback API");
+
+    assert_eq!(output.stdout, "callback API ready");
+}
+
+#[tokio::test]
 async fn test_list_callbacks() {
     let sandbox = sandbox_builder()
         .with_callback(EchoCallback)

@@ -607,10 +607,12 @@ impl SandboxImports for ExecutorState {
         }
     }
 
-    /// Read execution behavior flags.
-    /// Bit 0 enables Python tracing; bit 1 reuses initialized empty callbacks.
-    fn get_execution_options(&mut self) -> u32 {
-        (u32::from(self.reuse_empty_callbacks) << 1) | u32::from(self.trace_tx.is_some())
+    /// Read host-controlled behavior for this execution.
+    fn get_execution_options(&mut self) -> ExecutionOptions {
+        ExecutionOptions {
+            python_tracing: self.trace_tx.is_some(),
+            reuse_empty_callbacks: self.reuse_empty_callbacks,
+        }
     }
 }
 

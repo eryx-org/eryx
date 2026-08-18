@@ -501,7 +501,7 @@ fn add_sandbox_stubs(linker: &mut Linker<PreInitCtx>) -> Result<()> {
         },
     )?;
 
-    // get-execution-options: func() -> u32
+    // get-execution-options: func() -> execution-options
     // Pre-initialization does not execute user code, so no options are needed.
     linker.root().func_new(
         "get-execution-options",
@@ -509,7 +509,10 @@ fn add_sandbox_stubs(linker: &mut Linker<PreInitCtx>) -> Result<()> {
          _func_ty: wasmtime::component::types::ComponentFunc,
          _params: &[Val],
          results: &mut [Val]| {
-            results[0] = Val::U32(0);
+            results[0] = Val::Record(vec![
+                ("python-tracing".to_string(), Val::Bool(false)),
+                ("reuse-empty-callbacks".to_string(), Val::Bool(false)),
+            ]);
             Ok(())
         },
     )?;

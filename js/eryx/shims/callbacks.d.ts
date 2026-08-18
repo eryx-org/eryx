@@ -36,6 +36,15 @@ export function setTraceHandler(
     | null,
 ): void;
 
+/** Host-controlled behavior for a single execution. */
+export interface ExecutionOptions {
+  pythonTracing: boolean;
+  reuseEmptyCallbacks: boolean;
+}
+
+/** Return the current JavaScript host execution behavior. */
+export function getExecutionOptions(): ExecutionOptions;
+
 /**
  * Set a handler for streaming output (stdout/stderr) from the Python runtime.
  *

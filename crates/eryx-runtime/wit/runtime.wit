@@ -35,11 +35,8 @@ world sandbox {
     ///       print(f"{cb['name']}: {cb['description']}")
     import list-callbacks: func() -> list<callback-info>;
 
-    /// Read execution behavior flags from the host.
-    ///
-    /// Returns a bitmask: bit 0 enables Python tracing, and bit 1 allows the
-    /// guest to reuse callback infrastructure captured in a fresh instance.
-    import get-execution-options: func() -> u32;
+    /// Read per-execution behavior options from the host.
+    import get-execution-options: func() -> execution-options;
 
     /// Report a trace event to the host.
     ///
@@ -70,6 +67,14 @@ world sandbox {
         description: string,
         /// JSON Schema for expected arguments.
         parameters-schema-json: string,
+    }
+
+    /// Host-controlled behavior for a single execution.
+    record execution-options {
+        /// Whether the guest should install Python tracing.
+        python-tracing: bool,
+        /// Whether a fresh instance may reuse its pre-initialized empty callbacks.
+        reuse-empty-callbacks: bool,
     }
 
     /// Output from executing Python code.

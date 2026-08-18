@@ -716,15 +716,24 @@ fn call_invoke(name: &str, args_json: &str) -> Result<String, String> {
     }
 }
 
-/// Read execution behavior flags from the host.
-///
-/// Bit 0 enables Python tracing, and bit 1 allows callback setup to reuse the
-/// empty callback infrastructure captured in a fresh instance. Conservative
-/// defaults preserve tracing and perform callback setup.
-fn call_get_execution_options(wit: Wit) -> (bool, bool) {
+#[derive(Clone, Copy)]
+struct ExecutionOptions {
+    python_tracing: bool,
+    reuse_empty_callbacks: bool,
+}
+
+impl ExecutionOptions {
+    const CONSERVATIVE: Self = Self {
+        python_tracing: true,
+        reuse_empty_callbacks: false,
+    };
+}
+
+/// Read host-controlled behavior for this execution.
+fn call_get_execution_options(wit: Wit) -> ExecutionOptions {
     let import_func = match wit.get_import(None, "get-execution-options") {
         Some(f) => f,
-        None => return (false, true),
+        None => return ExecutionOptions::CONSERVATIVE,
     };
 
     // Create a call context to receive the result
@@ -734,14 +743,24 @@ fn call_get_execution_options(wit: Wit) -> (bool, bool) {
     import_func.call_import_sync(&mut cx);
 
     match cx.stack.pop() {
-        Some(Value::U32(bits)) => {
-            let python_tracing = bits & 0b01 != 0;
-            let reuse_empty_callbacks = bits & 0b10 != 0;
-            (reuse_empty_callbacks, python_tracing)
+        Some(Value::Record(fields)) if fields.len() == 2 => {
+            let mut fields = fields.into_iter();
+            match (fields.next(), fields.next()) {
+                (Some(Value::Bool(python_tracing)), Some(Value::Bool(reuse_empty_callbacks))) => {
+                    ExecutionOptions {
+                        python_tracing,
+                        reuse_empty_callbacks,
+                    }
+                }
+                _ => {
+                    eprintln!("call_get_execution_options: unexpected record fields");
+                    ExecutionOptions::CONSERVATIVE
+                }
+            }
         }
         other => {
             eprintln!("call_get_execution_options: unexpected stack value: {other:?}");
-            (false, true)
+            ExecutionOptions::CONSERVATIVE
         }
     }
 }
@@ -1523,11 +1542,13 @@ fn handle_export(wit: Wit, func_index: usize, cx: &mut EryxCall) -> HandleExport
 
             // Set up callbacks from the host's current per-request state.
             // This runs on every execute to stay in sync with the host.
-            let (reuse_empty_callbacks, trace_enabled) = call_get_execution_options(wit);
-            initialize_callbacks(wit, reuse_empty_callbacks);
+            let options = call_get_execution_options(wit);
+            initialize_callbacks(wit, options.reuse_empty_callbacks);
 
             // Execute Python with Wit handle available for callbacks
-            let result = with_wit(wit, || python::execute_python(&code, trace_enabled));
+            let result = with_wit(wit, || {
+                python::execute_python(&code, options.python_tracing)
+            });
 
             match result {
                 python::ExecuteResult::Complete(output) => {

@@ -359,7 +359,7 @@ impl Sandbox {
 
         // Execute the Python code using the builder API. A configured handler
         // always enables tracing, even if result collection was disabled.
-        let tracing_enabled = self.collect_trace || self.trace_handler.is_some();
+        let tracing_enabled = self.tracing_enabled();
         let mut execute_builder = self
             .executor
             .execute(&full_code)
@@ -708,6 +708,7 @@ impl Sandbox {
         let preamble = self.preamble.clone();
         let trace_handler = self.trace_handler.clone();
         let collect_trace = self.collect_trace;
+        let tracing_enabled = self.tracing_enabled();
         let output_handler = self.output_handler.clone();
         let resource_limits = self.resource_limits.clone();
         let net_config = self.net_config.clone();
@@ -731,6 +732,7 @@ impl Sandbox {
                 &preamble,
                 trace_handler,
                 collect_trace,
+                tracing_enabled,
                 output_handler,
                 resource_limits,
                 net_config,
@@ -766,6 +768,7 @@ impl Sandbox {
         preamble: &str,
         trace_handler: Option<Arc<dyn TraceHandler>>,
         collect_trace: bool,
+        tracing_enabled: bool,
         output_handler: Option<Arc<dyn OutputHandler>>,
         resource_limits: ResourceLimits,
         net_config: Option<NetConfig>,
@@ -851,7 +854,6 @@ impl Sandbox {
         };
 
         // Execute the Python code using the builder API with cancellation.
-        let tracing_enabled = collect_trace || trace_handler.is_some();
         let mut execute_builder = executor
             .execute(&full_code)
             .with_callbacks(&callbacks_vec, callback_tx)

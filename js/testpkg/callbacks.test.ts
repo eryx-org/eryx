@@ -1,11 +1,31 @@
 import { describe, expect, it, beforeEach } from "vitest";
 import { execute } from "@bsull/eryx";
-import { setCallbackHandler, setCallbacks } from "@bsull/eryx/callbacks";
+import {
+  getExecutionOptions,
+  setCallbackHandler,
+  setCallbacks,
+  setTraceHandler,
+} from "@bsull/eryx/callbacks";
 
 describe("callbacks", () => {
   beforeEach(() => {
     setCallbackHandler(null);
     setCallbacks([]);
+    setTraceHandler(null);
+  });
+
+  it("enables Python tracing only while a trace handler is registered", () => {
+    expect(getExecutionOptions()).toEqual({
+      pythonTracing: false,
+      reuseEmptyCallbacks: false,
+    });
+
+    setTraceHandler(() => {});
+
+    expect(getExecutionOptions()).toEqual({
+      pythonTracing: true,
+      reuseEmptyCallbacks: false,
+    });
   });
 
   // Skipped: jco 1.16.1 has bugs in async import lowering that prevent callbacks from working.
