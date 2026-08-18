@@ -41,11 +41,11 @@ jobs:
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
           sudo docker image prune --all --force
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Cache WASM runtime artifacts
         id: wasm-cache
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             crates/eryx-runtime/runtime.wasm
@@ -67,14 +67,14 @@ jobs:
         run: rustup toolchain install nightly --component rust-src
 
       - name: Install mise
-        uses: jdx/mise-action@v3
+        uses: jdx/mise-action@v4
 
       - name: Build and test JS bindings
         working-directory: js
         run: mise run test
 
       - name: Upload JS package
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: js-package
           path: js/eryx/
@@ -91,12 +91,12 @@ jobs:
       id-token: write
     steps:
       - name: Download JS package
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: js-package
           path: package/
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: "24"
           registry-url: "https://registry.npmjs.org"

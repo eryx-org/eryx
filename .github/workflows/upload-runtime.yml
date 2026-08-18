@@ -12,9 +12,9 @@ permissions:
 
 jobs:
   upload-runtime:
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           submodules: recursive
 
@@ -25,7 +25,7 @@ jobs:
         run: rustup toolchain install nightly --component rust-src
 
       - name: Install mise
-        uses: jdx/mise-action@v3
+        uses: jdx/mise-action@v4
 
       - name: Build runtime.wasm
         run: |
