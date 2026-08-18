@@ -42,7 +42,7 @@ async def test_list_tools():
         assert "run_python" in names
 
         tool = next(t for t in result.tools if t.name == "run_python")
-        schema = tool.inputSchema
+        schema = tool.input_schema
         assert "code" in schema["properties"]
 
     await _run_with_session(body)
