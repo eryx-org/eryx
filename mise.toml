@@ -6,7 +6,7 @@ rust = { version = "1.97", profile = "default" }
 version = "0.9.143"
 
 [tools."cargo:wasm-tools"]
-version = "1.252.0"
+version = "1.256.0"
 
 [tools."cargo:cargo-rail"]
 version = "0.21.0"
@@ -28,7 +28,7 @@ version = "0.2.127"
 # Instead, we install it on-demand via the ensure-wasi-sdk task.
 
 [vars]
-wasi_sdk_version = "wasi-sdk-27"
+wasi_sdk_version = "wasi-sdk-33"
 
 [tasks.check]
 description = "Run cargo check"

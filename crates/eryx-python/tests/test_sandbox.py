@@ -686,9 +686,20 @@ else:
 """)
         assert "SUCCESS" in result.stdout, f"Test failed: {result.stdout}"
 
-    def test_async_tls_api_external(self, network_sandbox):
+    def test_async_tls_api_external(self):
         """Test the async _eryx_async TLS API with external service."""
-        result = network_sandbox.execute("""
+        # Per-op net timeouts must leave room for every host attempt inside the
+        # execution timeout. On the defaults (connect 30s, io 60s, execution
+        # 30s) one stalled host exhausts the whole budget, so the failure
+        # surfaces as a bare SandboxTimeoutError naming neither host nor step.
+        config = eryx.NetConfig(
+            allow_all_hosts=True, connect_timeout_ms=4000, io_timeout_ms=4000
+        )
+        sandbox = eryx.Sandbox(
+            network=config,
+            resource_limits=eryx.ResourceLimits(execution_timeout_ms=60000),
+        )
+        result = sandbox.execute("""
 import _eryx_async
 
 hosts = ["httpbin.org", "example.com", "www.google.com"]

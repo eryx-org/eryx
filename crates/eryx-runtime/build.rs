@@ -51,6 +51,13 @@ fn main() {
         "cargo::rerun-if-changed={}",
         manifest_dir.join("prebuilt").display()
     );
+    // Rerun if the vendored CPython/libc blobs are re-vendored. Without this a
+    // warm cargo cache keeps the previously linked runtime.wasm, so a lib swap
+    // silently tests the old component.
+    println!(
+        "cargo::rerun-if-changed={}",
+        manifest_dir.join("libs").display()
+    );
     // Rerun if docs.rs env changes
     println!("cargo::rerun-if-env-changed=DOCS_RS");
 
