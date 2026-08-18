@@ -87,7 +87,7 @@ wit-dylib = "0.252"
 # wit-dylib FFI for implementing the interpreter interface (inlined from wasm-tools).
 wit-dylib-ffi = { path = "crates/wit-dylib-ffi" }
 wit-parser = "0.252"
-zip = "2.0"
+zip = "8.0"
 zstd = "0.13"
 
 [workspace.lints.rust]

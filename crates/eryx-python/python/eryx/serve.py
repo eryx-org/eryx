@@ -70,7 +70,7 @@ def _build_tool_description(mcp_manager: object | None) -> str:
 def serve(argv: list[str] | None = None) -> int:
     """Run the eryx MCP server over stdio."""
     try:
-        from mcp.server.fastmcp import FastMCP
+        from mcp.server import MCPServer
     except ImportError:
         print(
             "eryx serve requires the 'mcp' package.\n"
@@ -108,7 +108,7 @@ def serve(argv: list[str] | None = None) -> int:
 
     # Create the MCP server
     tool_description = _build_tool_description(mcp_manager)
-    server = FastMCP("eryx")
+    server = MCPServer("eryx")
 
     @server.tool(description=tool_description)
     def run_python(code: str, timeout_ms: int | None = None) -> str:
