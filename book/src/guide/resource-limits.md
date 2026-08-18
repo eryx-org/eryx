@@ -26,7 +26,7 @@ use std::time::Duration;
 async fn main() -> Result<(), eryx::Error> {
     let limits = ResourceLimits {
         execution_timeout: Some(Duration::from_secs(5)),
-        max_memory_bytes: Some(64 * 1024 * 1024),  // 64 MB
+        max_memory_bytes: Some(96 * 1024 * 1024),  // 96 MB
         ..Default::default()
     };
 
@@ -48,7 +48,7 @@ import eryx
 limits = eryx.ResourceLimits(
     execution_timeout_ms=5000,      # 5 seconds
     callback_timeout_ms=2000,       # 2 seconds per callback
-    max_memory_bytes=64_000_000,    # 64 MB
+    max_memory_bytes=96_000_000,    # 96 MB
     max_callback_invocations=100,   # Max 100 callback calls
 )
 
@@ -144,7 +144,7 @@ use eryx::{Sandbox, ResourceLimits};
 #[tokio::main]
 async fn main() -> Result<(), eryx::Error> {
     let limits = ResourceLimits {
-        max_memory_bytes: Some(32 * 1024 * 1024),  // 32 MB
+        max_memory_bytes: Some(96 * 1024 * 1024),  // 96 MB
         ..Default::default()
     };
 
@@ -170,7 +170,7 @@ except MemoryError:
 ```python
 import eryx
 
-limits = eryx.ResourceLimits(max_memory_bytes=32_000_000)  # 32 MB
+limits = eryx.ResourceLimits(max_memory_bytes=96_000_000)  # 96 MB
 sandbox = eryx.Sandbox(resource_limits=limits)
 
 result = sandbox.execute("""
