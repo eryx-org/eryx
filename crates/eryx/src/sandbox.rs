@@ -295,9 +295,8 @@ impl Sandbox {
             format!("{}\n\n# User code\n{}", self.preamble, code)
         };
 
-        // Create channels for callback requests and trace events
+        // Create channel for callback requests
         let (callback_tx, callback_rx) = mpsc::channel::<CallbackRequest>(32);
-        let (trace_tx, trace_rx) = mpsc::unbounded_channel::<TraceRequest>();
 
         // Select callbacks: wrap each with a replay wrapper when journaling/replay
         // is enabled, otherwise use the registered callbacks directly.
@@ -324,13 +323,20 @@ impl Sandbox {
             .await
         });
 
-        // Spawn task to handle trace events
-        let trace_handler = self.trace_handler.clone();
-        let collect_trace = self.collect_trace;
-        let trace_secrets = self.secrets.clone();
-        let trace_collector = tokio::spawn(async move {
-            run_trace_collector(trace_rx, trace_handler, collect_trace, trace_secrets).await
-        });
+        // Create the trace channel and collector only when tracing is enabled.
+        let tracing_enabled = self.tracing_enabled();
+        let (trace_tx, trace_collector) = if tracing_enabled {
+            let (trace_tx, trace_rx) = mpsc::unbounded_channel::<TraceRequest>();
+            let trace_handler = self.trace_handler.clone();
+            let collect_trace = self.collect_trace;
+            let trace_secrets = self.secrets.clone();
+            let trace_collector = tokio::spawn(async move {
+                run_trace_collector(trace_rx, trace_handler, collect_trace, trace_secrets).await
+            });
+            (Some(trace_tx), Some(trace_collector))
+        } else {
+            (None, None)
+        };
 
         // Spawn network handler if networking is enabled
         let (net_tx, net_handler) = if let Some(ref config) = self.net_config {
@@ -359,15 +365,12 @@ impl Sandbox {
 
         // Execute the Python code using the builder API. A configured handler
         // always enables tracing, even if result collection was disabled.
-        let tracing_enabled = self.tracing_enabled();
         let mut execute_builder = self
             .executor
             .execute(&full_code)
             .with_callbacks(&callbacks, callback_tx);
-        if tracing_enabled {
+        if let Some(trace_tx) = trace_tx {
             execute_builder = execute_builder.with_tracing(trace_tx);
-        } else {
-            drop(trace_tx);
         }
 
         // Add output streaming if handler is configured
@@ -445,7 +448,10 @@ impl Sandbox {
         // Wait for the handler tasks to complete
         // The callback channel is closed when execute_future completes (callback_tx dropped)
         let callback_invocations = callback_handler.await.unwrap_or(0);
-        let trace_events = trace_collector.await.unwrap_or_default();
+        let trace_events = match trace_collector {
+            Some(trace_collector) => trace_collector.await.unwrap_or_default(),
+            None => Vec::new(),
+        };
 
         // Network handler completes when its channel is dropped (execute_builder dropped)
         if let Some(handler) = net_handler {
@@ -799,9 +805,8 @@ impl Sandbox {
             )
         };
 
-        // Create channels for callback requests and trace events
+        // Create channel for callback requests
         let (callback_tx, callback_rx) = mpsc::channel::<CallbackRequest>(32);
-        let (trace_tx, trace_rx) = mpsc::unbounded_channel::<TraceRequest>();
 
         // Collect callbacks as a Vec for the executor
         let callbacks_vec: Vec<Arc<dyn Callback>> = callbacks.values().cloned().collect();
@@ -821,12 +826,18 @@ impl Sandbox {
             .await
         });
 
-        // Spawn task to handle trace events
-        let trace_handler_clone = trace_handler.clone();
-        let trace_secrets = secrets.clone();
-        let trace_collector = tokio::spawn(async move {
-            run_trace_collector(trace_rx, trace_handler_clone, collect_trace, trace_secrets).await
-        });
+        // Create the trace channel and collector only when tracing is enabled.
+        let (trace_tx, trace_collector) = if tracing_enabled {
+            let (trace_tx, trace_rx) = mpsc::unbounded_channel::<TraceRequest>();
+            let trace_handler = trace_handler.clone();
+            let trace_secrets = secrets.clone();
+            let trace_collector = tokio::spawn(async move {
+                run_trace_collector(trace_rx, trace_handler, collect_trace, trace_secrets).await
+            });
+            (Some(trace_tx), Some(trace_collector))
+        } else {
+            (None, None)
+        };
 
         // Spawn output collector for real-time streaming if handler is configured
         let (output_tx, output_handler_task) = if output_handler.is_some() {
@@ -858,10 +869,8 @@ impl Sandbox {
             .execute(&full_code)
             .with_callbacks(&callbacks_vec, callback_tx)
             .with_cancellation(cancel_token.clone());
-        if tracing_enabled {
+        if let Some(trace_tx) = trace_tx {
             execute_builder = execute_builder.with_tracing(trace_tx);
-        } else {
-            drop(trace_tx);
         }
 
         // Add output streaming channel if handler is configured
@@ -937,7 +946,10 @@ impl Sandbox {
 
         // Wait for the handler tasks to complete
         let callback_invocations = callback_handler.await.unwrap_or(0);
-        let trace_events = trace_collector.await.unwrap_or_default();
+        let trace_events = match trace_collector {
+            Some(trace_collector) => trace_collector.await.unwrap_or_default(),
+            None => Vec::new(),
+        };
 
         // Output handler completes when its channel is dropped
         if let Some(task) = output_handler_task {
