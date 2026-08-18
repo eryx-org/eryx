@@ -283,6 +283,7 @@ impl SandboxFactory {
             eryx::Sandbox::builder()
                 .with_precompiled_artifact(self.precompiled.clone())
                 .with_python_stdlib(&self.stdlib_path)
+                .with_trace_collection(false)
         };
 
         if let Some(path) = site_packages_path {

@@ -506,6 +506,22 @@ fn add_sandbox_stubs(linker: &mut Linker<PreInitCtx>) -> Result<()> {
         },
     )?;
 
+    // get-execution-options: func() -> execution-options
+    // Pre-initialization does not execute user code, so no options are needed.
+    linker.root().func_new(
+        "get-execution-options",
+        |_ctx: wasmtime::StoreContextMut<'_, PreInitCtx>,
+         _func_ty: wasmtime::component::types::ComponentFunc,
+         _params: &[Val],
+         results: &mut [Val]| {
+            results[0] = Val::Record(vec![
+                ("python-tracing".to_string(), Val::Bool(false)),
+                ("reuse-empty-callbacks".to_string(), Val::Bool(false)),
+            ]);
+            Ok(())
+        },
+    )?;
+
     // report-output: func(stream-id: u32, data: string)
     linker.root().func_new(
         "report-output",

@@ -17,11 +17,37 @@
 //! cargo nextest run --workspace --features precompiled
 //! ```
 
+use std::future::Future;
 #[cfg(not(feature = "embedded"))]
 use std::path::PathBuf;
+use std::pin::Pin;
 use std::sync::{Arc, OnceLock};
 
-use eryx::{PythonExecutor, PythonStateSnapshot, SessionExecutor};
+use eryx::{
+    Callback, CallbackError, PythonExecutor, PythonStateSnapshot, SessionExecutor, TypedCallback,
+};
+use serde_json::{Value, json};
+
+struct SessionCallback;
+
+impl TypedCallback for SessionCallback {
+    type Args = ();
+
+    fn name(&self) -> &str {
+        "session_callback"
+    }
+
+    fn description(&self) -> &str {
+        "Callback used to verify per-execution session refresh"
+    }
+
+    fn invoke_typed(
+        &self,
+        _args: (),
+    ) -> Pin<Box<dyn Future<Output = Result<Value, CallbackError>> + Send + '_>> {
+        Box::pin(async { Ok(json!({"ok": true})) })
+    }
+}
 
 /// Shared executor to avoid repeated WASM loading across tests.
 /// With precompiled WASM (the default), loading takes ~50ms.
@@ -100,6 +126,34 @@ async fn create_session() -> SessionExecutor {
     SessionExecutor::new(executor, &[])
         .await
         .unwrap_or_else(|e| panic!("Failed to create session: {}", e))
+}
+
+#[tokio::test]
+async fn test_session_refreshes_empty_callbacks_after_callback_execution() {
+    let executor = get_shared_executor();
+    let callbacks: Vec<Arc<dyn Callback>> = vec![Arc::new(SessionCallback)];
+    let mut session = SessionExecutor::new(executor, &callbacks)
+        .await
+        .expect("Failed to create session");
+    let (callback_tx, _callback_rx) = tokio::sync::mpsc::channel(1);
+
+    let output = session
+        .execute("print([callback['name'] for callback in list_callbacks()])")
+        .with_callbacks(&callbacks, callback_tx)
+        .run()
+        .await
+        .expect("Failed callback-bearing execution");
+    assert_eq!(output.stdout, "['session_callback']");
+
+    let output = session
+        .execute("print(list_callbacks())")
+        .run()
+        .await
+        .expect("Failed empty-callback execution");
+    assert_eq!(
+        output.stdout, "[]",
+        "persistent sessions must not reuse stale callback metadata"
+    );
 }
 
 /// Test that variables persist between execute() calls.

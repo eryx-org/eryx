@@ -4,6 +4,7 @@
  * These provide the host-side implementations of the sandbox's callback imports:
  * - invoke: call a registered callback by name with JSON arguments
  * - listCallbacks: list all registered callbacks
+ * - getExecutionOptions: return per-execution behavior options
  * - reportTrace: receive trace events from the Python runtime
  * - reportOutput: receive streaming stdout/stderr output from the Python runtime
  *
@@ -96,6 +97,22 @@ export function invoke(name, argumentsJson) {
  */
 export function listCallbacks() {
   return _registeredCallbacks;
+}
+
+/**
+ * Return execution behavior options for the JavaScript host.
+ *
+ * JavaScript instances may execute repeatedly with different callbacks, so
+ * callback setup is not reused. Tracing is enabled only while a trace handler
+ * is registered.
+ *
+ * @returns {{pythonTracing: boolean, reuseEmptyCallbacks: boolean}}
+ */
+export function getExecutionOptions() {
+  return {
+    pythonTracing: _traceHandler !== null,
+    reuseEmptyCallbacks: false,
+  };
 }
 
 /**

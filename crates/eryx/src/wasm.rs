@@ -455,6 +455,9 @@ pub struct ExecutorState {
     /// flag both gates further host effects (network / VFS / output) and lets the
     /// trap be classified as a suspension rather than a fuel-limit exhaustion.
     pub(crate) suspended: Option<String>,
+    /// Whether this execution uses a fresh instance whose initialized empty
+    /// callback state can be reused safely.
+    pub(crate) reuse_empty_callbacks: bool,
 }
 
 impl std::fmt::Debug for ExecutorState {
@@ -603,6 +606,14 @@ impl SandboxImports for ExecutorState {
             };
             // Fire-and-forget - output streaming is not critical
             let _ = tx.send(request);
+        }
+    }
+
+    /// Read host-controlled behavior for this execution.
+    fn get_execution_options(&mut self) -> ExecutionOptions {
+        ExecutionOptions {
+            python_tracing: self.trace_tx.is_some(),
+            reuse_empty_callbacks: self.reuse_empty_callbacks,
         }
     }
 }
@@ -2324,6 +2335,7 @@ impl PythonExecutor {
             #[cfg(feature = "vfs")]
             hybrid_vfs_ctx,
             suspended: None,
+            reuse_empty_callbacks: true,
         };
 
         // Create store for this execution

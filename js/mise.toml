@@ -83,6 +83,7 @@ jco transpile \
   --map 'eryx:net/tls=./shims/net.js#tls' \
   --map 'invoke=./shims/callbacks.js#invoke' \
   --map 'list-callbacks=./shims/callbacks.js#listCallbacks' \
+  --map 'get-execution-options=./shims/callbacks.js#getExecutionOptions' \
   --map 'report-trace=./shims/callbacks.js#reportTrace' \
   --map 'report-output=./shims/callbacks.js#reportOutput' \
   --map 'wasi:sockets/*=./shims/sockets.js#*'

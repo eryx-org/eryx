@@ -1313,6 +1313,15 @@ sys.modules['_eryx_async'] = _eryx_async
 /// Track whether we've initialized Python.
 static PYTHON_INITIALIZED: AtomicBool = AtomicBool::new(false);
 
+/// True when initialization installed the empty-callback infrastructure.
+/// A failed installation degrades to per-execution callback setup.
+static CALLBACKS_PRE_INITIALIZED: AtomicBool = AtomicBool::new(false);
+
+/// Whether the pre-init snapshot contains the empty-callback infrastructure.
+pub fn callbacks_pre_initialized() -> bool {
+    CALLBACKS_PRE_INITIALIZED.load(Ordering::SeqCst)
+}
+
 /// Initialize Python interpreter.
 ///
 /// This should be called once during `wit_dylib_initialize`.
@@ -1482,7 +1491,7 @@ def _eryx_trace_func(frame, event, arg):
 
     return _eryx_trace_func
 
-def _eryx_exec(code):
+def _eryx_exec(code, trace_enabled):
     '''Execute user code efficiently. Called once per execute().
 
     This function is pre-compiled and runs user code in an isolated namespace.
@@ -1504,8 +1513,10 @@ def _eryx_exec(code):
     # Compile user code with top-level await support
     compiled = compile(code, '<user>', 'exec', flags=_ast.PyCF_ALLOW_TOP_LEVEL_AWAIT)
 
-    # Enable tracing
-    _sys.settrace(_eryx_trace_func)
+    # Callback trace events are emitted independently by invoke and are
+    # unaffected by this Python line/call/return/exception tracing switch.
+    if trace_enabled:
+        _sys.settrace(_eryx_trace_func)
 
     try:
         # Check if the compiled code is a coroutine (has top-level await)
@@ -1517,7 +1528,8 @@ def _eryx_exec(code):
             # Regular synchronous code - execute in user namespace
             exec(compiled, _eryx_user_globals, _eryx_user_globals)
     finally:
-        _sys.settrace(None)
+        if trace_enabled:
+            _sys.settrace(None)
 
 def _eryx_get_output():
     '''Get captured stdout and restore original streams.'''
@@ -2665,6 +2677,17 @@ pub fn initialize_python() {
             PyErr_Clear();
         }
 
+        // Install empty callback infrastructure once so fresh instances with no
+        // callbacks do not have to recreate it for every execution. Non-empty
+        // callback lists still reinstall their request-specific definitions.
+        let callbacks_ok = setup_callbacks(&[]).is_ok();
+        CALLBACKS_PRE_INITIALIZED.store(callbacks_ok, Ordering::SeqCst);
+        if !callbacks_ok {
+            eprintln!(
+                "WARNING: pre-init setup_callbacks([]) failed; empty-callback fast path disabled"
+            );
+        }
+
         // Note: We do NOT call reset_wasi_state() here!
         //
         // The reset must happen AFTER all imports are done, not here during
@@ -2878,7 +2901,7 @@ fn python_string_literal(s: &str) -> String {
 /// - `Complete(stdout)` - The captured stdout output (may be empty)
 /// - `Error(message)` - Error message if execution failed
 /// - `Pending(waitable_set)` - Execution suspended, waiting for async callback
-pub fn execute_python(code: &str) -> ExecuteResult {
+pub fn execute_python(code: &str, trace_enabled: bool) -> ExecuteResult {
     use std::ffi::CString;
 
     if !is_python_initialized() {
@@ -2896,7 +2919,11 @@ pub fn execute_python(code: &str) -> ExecuteResult {
         // 1. All infrastructure (imports, trace func, etc.) is already set up
         // 2. We only parse/compile the user code, not 100+ lines of wrapper
         // 3. stdout/stderr capture reuses existing StringIO objects
-        let exec_call = format!("_eryx_exec({})", python_string_literal(code));
+        let exec_call = format!(
+            "_eryx_exec({}, {})",
+            python_string_literal(code),
+            if trace_enabled { "True" } else { "False" }
+        );
 
         let exec_code_cstr = match CString::new(exec_call) {
             Ok(s) => s,

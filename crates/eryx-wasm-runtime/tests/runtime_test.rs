@@ -341,6 +341,22 @@ async fn test_instantiate_component() -> Result<(), Box<dyn std::error::Error>> 
         },
     )?;
 
+    // get-execution-options: func() -> execution-options
+    // Preserve the default behavior: tracing enabled, callback reuse disabled.
+    linker.root().func_new(
+        "get-execution-options",
+        |_ctx: wasmtime::StoreContextMut<'_, State>,
+         _func_ty: wasmtime::component::types::ComponentFunc,
+         _params: &[Val],
+         results: &mut [Val]| {
+            results[0] = Val::Record(vec![
+                ("python-tracing".to_string(), Val::Bool(true)),
+                ("reuse-empty-callbacks".to_string(), Val::Bool(false)),
+            ]);
+            Ok(())
+        },
+    )?;
+
     // report-trace: func(lineno: u32, event-json: string, context-json: string)
     linker.root().func_new(
         "report-trace",
