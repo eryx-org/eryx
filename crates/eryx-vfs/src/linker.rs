@@ -30,6 +30,10 @@ pub trait VfsView: Send {
 /// This adds the `wasi:filesystem/types` and `wasi:filesystem/preopens` interfaces
 /// using our VFS implementation, overriding any previously added filesystem bindings.
 ///
+/// The override only works while our `wit/deps` packages carry the same
+/// `wasi:filesystem` version that `wasmtime-wasi` ships — see the note in
+/// `wit/world.wit`.
+///
 /// # Usage
 ///
 /// The typical pattern is to first add standard WASI bindings, then call this function
@@ -100,6 +104,10 @@ pub trait HybridVfsView: Send {
 /// VFS storage (for sandboxed paths like `/data/*`) or real filesystem (for system
 /// paths like `/python-stdlib/*`).
 ///
+/// As with [`add_vfs_to_linker`], this only overrides `wasmtime-wasi`'s
+/// filesystem while our `wit/deps` packages carry the same `wasi:filesystem`
+/// version that `wasmtime-wasi` ships — see the note in `wit/world.wit`.
+///
 /// # Usage
 ///
 /// ```rust,ignore
@@ -158,4 +166,97 @@ where
     })?;
 
     Ok(())
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use wasmtime::Engine;
+    use wasmtime::component::{Linker, ResourceTable};
+    use wasmtime_wasi::{WasiCtx, WasiCtxView, WasiView};
+
+    use super::{HybridVfsView, VfsView, add_hybrid_vfs_to_linker, add_vfs_to_linker};
+    use crate::hybrid::{HybridVfsCtx, HybridVfsState};
+    use crate::storage::ArcStorage;
+    use crate::wasi_impl::{VfsCtx, VfsState};
+
+    /// Store state for the linker checks below. Only its `impl`s matter — the
+    /// test never instantiates a component, it just registers host functions.
+    struct TestState {
+        wasi: WasiCtx,
+        table: ResourceTable,
+        vfs: VfsCtx<ArcStorage>,
+        hybrid: HybridVfsCtx<ArcStorage>,
+    }
+
+    impl WasiView for TestState {
+        fn ctx(&mut self) -> WasiCtxView<'_> {
+            WasiCtxView {
+                ctx: &mut self.wasi,
+                table: &mut self.table,
+            }
+        }
+    }
+
+    impl VfsView for TestState {
+        type Storage = ArcStorage;
+
+        fn vfs(&mut self) -> VfsState<'_, Self::Storage> {
+            VfsState {
+                ctx: &mut self.vfs,
+                table: &mut self.table,
+            }
+        }
+    }
+
+    impl HybridVfsView for TestState {
+        type Storage = ArcStorage;
+
+        fn hybrid_vfs(&mut self) -> HybridVfsState<'_, Self::Storage> {
+            HybridVfsState::new(&mut self.hybrid, &mut self.table)
+        }
+    }
+
+    fn wasi_linker() -> Linker<TestState> {
+        let engine = Engine::default();
+        let mut linker = Linker::<TestState>::new(&engine);
+        wasmtime_wasi::p2::add_to_linker_async(&mut linker).unwrap();
+        linker
+    }
+
+    /// The VFS bindings must land on exactly the same linker names that
+    /// `wasmtime-wasi` registers, because callers rely on `allow_shadowing` to
+    /// *replace* the host filesystem rather than sit alongside it.
+    ///
+    /// The names include the WIT package version, so if `crates/eryx-vfs/wit`
+    /// falls behind the `wasi:filesystem` version that the current
+    /// `wasmtime-wasi` ships, both implementations end up registered and
+    /// wasmtime's semver-compatible lookup silently picks the higher version —
+    /// i.e. the host filesystem — leaving every VFS mount unreachable.
+    ///
+    /// A `Linker` with the default `allow_shadowing(false)` turns that drift
+    /// into a "defined twice" error, so *failing* to add is what we want here.
+    #[test]
+    fn linker_shadows_wasmtime_wasi_filesystem() {
+        for (label, result) in [
+            ("add_vfs_to_linker", add_vfs_to_linker(&mut wasi_linker())),
+            (
+                "add_hybrid_vfs_to_linker",
+                add_hybrid_vfs_to_linker(&mut wasi_linker()),
+            ),
+        ] {
+            let err = result.err().unwrap_or_else(|| {
+                panic!(
+                    "{label} did not collide with wasmtime-wasi's filesystem: the \
+                     wasi:filesystem version in crates/eryx-vfs/wit must be bumped to \
+                     match the one wasmtime-wasi ships"
+                )
+            });
+            let err = format!("{err:#}");
+            assert!(
+                err.contains("defined twice") && err.contains("wasi:filesystem/"),
+                "{label} failed for an unexpected reason: {err}"
+            );
+        }
+    }
 }

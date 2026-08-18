@@ -188,8 +188,19 @@ impl CacheKey {
 /// invalidation when wasmtime is upgraded. Pre-compiled components are
 /// not compatible across wasmtime versions.
 fn wasmtime_version() -> &'static str {
-    // Keep in sync with workspace wasmtime version in Cargo.toml
-    "44"
+    // Taken from wasmtime itself rather than hand-maintained: its default
+    // `ModuleVersionStrategy` reports wasmtime's own `CARGO_PKG_VERSION_MAJOR`,
+    // which is exactly the granularity `.cwasm` compatibility breaks at. The
+    // borrow is tied to the strategy value, so leak a copy once to get the
+    // `'static` string the cache key holds.
+    static VERSION: OnceLock<&'static str> = OnceLock::new();
+    VERSION.get_or_init(|| {
+        String::leak(
+            wasmtime::ModuleVersionStrategy::default()
+                .as_str()
+                .to_owned(),
+        )
+    })
 }
 
 /// Encode bytes as hex string.

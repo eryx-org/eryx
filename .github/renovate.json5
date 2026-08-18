@@ -54,6 +54,12 @@
     // wasm-tools 0.243), and mise's `cargo:wasm-tools` CLI (1.243) tracks
     // the same line. Bump all of them in a single PR or the build breaks.
     //
+    // A wasmtime bump also moves the `wasi:*` WIT packages that
+    // `wasmtime-wasi` ships (0.2.6 under wasmtime 44, 0.2.12 under 47).
+    // `crates/eryx-vfs/wit` has to be re-synced to the same versions by hand,
+    // or the VFS silently stops shadowing wasmtime-wasi's filesystem and every
+    // mounted path returns ENOENT — see `crates/eryx-vfs/wit/world.wit`.
+    //
     // separateMajorMinor is off on every strict-lockstep group below.
     // Left on, Renovate splits a group into a major PR and a minor/patch
     // PR whenever its members' next hops differ in update type — which let
