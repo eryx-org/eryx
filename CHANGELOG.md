@@ -7,6 +7,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## `eryx-precompile` - [0.6.0](https://github.com/eryx-org/eryx/compare/eryx-precompile-v0.5.0...eryx-precompile-v0.6.0) - 2026-08-19
+
+### Other
+- update Cargo.toml dependencies
+
+## `eryx` - [0.6.0](https://github.com/eryx-org/eryx/compare/eryx-v0.5.0...eryx-v0.6.0) - 2026-08-19
+
+### Added
+- cache pre-compiled bytes in InstancePreCache ([#265](https://github.com/eryx-org/eryx/pull/265))
+
+### Other
+- Merge commit from fork
+- *(eryx)* share pre-init bytes across preinit tests ([#338](https://github.com/eryx-org/eryx/pull/338))
+- Optimize callback setup and Python tracing ([#270](https://github.com/eryx-org/eryx/pull/270))
+- *(deps)* update wasmtime & wasm-tools ([#279](https://github.com/eryx-org/eryx/pull/279))
+- *(deps)* update rust crate rand to 0.10 ([#302](https://github.com/eryx-org/eryx/pull/302))
+- *(deps)* update rust crate rcgen to 0.14 ([#304](https://github.com/eryx-org/eryx/pull/304))
+- fix main after cargo-rail 0.21 bump, and stop mise.toml changes skipping CI ([#309](https://github.com/eryx-org/eryx/pull/309))
+
+## `eryx-vfs` - [0.6.0](https://github.com/eryx-org/eryx/compare/eryx-vfs-v0.5.0...eryx-vfs-v0.6.0) - 2026-08-19
+
+### Added
+- *(eryx-vfs)* snapshot / restore / clone for InMemoryStorage ([#259](https://github.com/eryx-org/eryx/pull/259))
+
+### Other
+- Merge commit from fork
+- *(deps)* update wasmtime & wasm-tools ([#279](https://github.com/eryx-org/eryx/pull/279))
+
+## `eryx-runtime` - [0.6.0](https://github.com/eryx-org/eryx/compare/eryx-runtime-v0.5.0...eryx-runtime-v0.6.0) - 2026-08-19
+
+### Other
+- Optimize callback setup and Python tracing ([#270](https://github.com/eryx-org/eryx/pull/270))
+- *(eryx-python)* guard CPython finalization; fix libs/ rebuild tracking ([#333](https://github.com/eryx-org/eryx/pull/333))
+- *(deps)* update wasmtime & wasm-tools ([#331](https://github.com/eryx-org/eryx/pull/331))
+- *(deps)* update wasmtime & wasm-tools ([#279](https://github.com/eryx-org/eryx/pull/279))
+
+## `eryx-macros` - [0.6.0](https://github.com/eryx-org/eryx/compare/eryx-macros-v0.5.0...eryx-macros-v0.6.0) - 2026-08-19
+
+### Other
+- *(deps)* update rust crate syn to v3 ([#323](https://github.com/eryx-org/eryx/pull/323))
+- fix main after cargo-rail 0.21 bump, and stop mise.toml changes skipping CI ([#309](https://github.com/eryx-org/eryx/pull/309))
+
 ## `eryx-precompile` - [0.5.0](https://github.com/eryx-org/eryx/compare/eryx-precompile-v0.4.10...eryx-precompile-v0.5.0) - 2026-06-16
 
 ### Other
