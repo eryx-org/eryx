@@ -14,8 +14,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## `eryx` - [0.6.0](https://github.com/eryx-org/eryx/compare/eryx-v0.5.0...eryx-v0.6.0) - 2026-08-19
 
+### Security
+- Bound guest-controlled host allocations so sandboxed code cannot exhaust host
+  memory: socket reads (`tcp_read`, `tls_read`) no longer size a host buffer from
+  the length the guest asked for, and the in-memory virtual filesystem is capped
+  (see `eryx-vfs` below). VFS and socket buffers live in host memory, outside
+  `max_memory_bytes`, so no configuration previously bounded them.
+  (GHSA-8h84-8vq7-j6cv)
+
 ### Added
 - cache pre-compiled bytes in InstancePreCache ([#265](https://github.com/eryx-org/eryx/pull/265))
+- `ResourceLimits::max_vfs_bytes` caps the in-memory virtual filesystem, with
+  `ResourceLimits::unlimited()` and a `with_*` setter per limit
+
+### Changed
+- [**breaking**] `ResourceLimits` is now `#[non_exhaustive]`, so it can no longer
+  be built with a struct literal - including with `..Default::default()`. Use the
+  builder instead:
+  `ResourceLimits::default().with_max_fuel(n)`. Its fields stay public, so
+  reading them, and mutating them on a value you own, both still work.
 
 ### Other
 - Merge commit from fork
@@ -28,8 +45,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## `eryx-vfs` - [0.6.0](https://github.com/eryx-org/eryx/compare/eryx-vfs-v0.5.0...eryx-vfs-v0.6.0) - 2026-08-19
 
+### Security
+- `InMemoryStorage` now bounds the total bytes it will hold, 64 MiB by default
+  (`DEFAULT_MAX_BYTES`). File contents live in host memory and the guest chooses
+  its own write offsets, so a single small write at a large offset could make the
+  host allocate arbitrarily much. Writes past the budget fail with
+  `VfsError::QuotaExceeded`, which guests see as `ENOSPC`; sparse writes inside
+  the budget still work. Stream reads are capped per call.
+  (GHSA-8h84-8vq7-j6cv)
+
 ### Added
 - *(eryx-vfs)* snapshot / restore / clone for InMemoryStorage ([#259](https://github.com/eryx-org/eryx/pull/259))
+- `InMemoryStorage::with_max_bytes` / `max_bytes` to set and read the budget
+- `VfsError::QuotaExceeded`
 
 ### Other
 - Merge commit from fork
