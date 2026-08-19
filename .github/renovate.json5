@@ -355,5 +355,25 @@
       // form, which semver won't parse.
       versioningTemplate: "docker",
     },
+
+    // ------------------------------------------------------------------
+    // The protoc version installed by arduino/setup-protoc is a `version:`
+    // input, not a `uses:` ref, so the github-actions manager can't see it and
+    // the pin would otherwise sit still forever. Upstream tags are `v35.1`;
+    // the input takes the bare `35.1`, hence extractVersion. semver-coerced
+    // parses that two-component form and still treats `-rc` tags as unstable
+    // so release candidates aren't proposed.
+    // ------------------------------------------------------------------
+    {
+      customType: "regex",
+      managerFilePatterns: ["/^\\.github/workflows/.+\\.ya?ml$/"],
+      matchStrings: [
+        "arduino/setup-protoc@[^\\n]+\\n\\s*with:\\s*\\n\\s*version:\\s*\"(?<currentValue>[\\d.]+)\"",
+      ],
+      depNameTemplate: "protocolbuffers/protobuf",
+      datasourceTemplate: "github-releases",
+      extractVersionTemplate: "^v(?<version>.+)$",
+      versioningTemplate: "semver-coerced",
+    },
   ],
 }
