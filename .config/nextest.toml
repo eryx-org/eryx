@@ -1,5 +1,13 @@
 # See https://nexte.st/docs/configuration/
 
+# A single `pre_initialize()` call already saturates several cores (wizer
+# instrumentation plus a full wasmtime compile of a 34MB component), so running
+# the preinit tests concurrently makes them thrash each other and the rest of
+# the suite. Serializing them also lets the first test populate the shared
+# pre-init cache in crates/eryx/tests/preinit.rs so the others just read it.
+[test-groups]
+preinit = { max-threads = 1 }
+
 [profile.default]
 # Print slow tests after the run
 slow-timeout = { period = "30s", terminate-after = 2 }
@@ -13,10 +21,14 @@ fail-fast = false
 # Number of retries for flaky tests (0 = no retries)
 retries = 0
 
+# Inherited by every profile, including `ci`.
+[[profile.default.overrides]]
+filter = 'binary_id(=eryx::preinit)'
+test-group = 'preinit'
+
 [profile.ci]
 # CI profile with stricter settings
 fail-fast = true
 retries = 2
+# Slow WASM component tests are reported at 60s and killed at 3x that.
 slow-timeout = { period = "60s", terminate-after = 3 }
-# Increase default timeout for slow WASM component tests
-default-timeout = "120s"
