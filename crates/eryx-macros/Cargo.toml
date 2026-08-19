@@ -19,7 +19,14 @@ quote = "1"
 syn = { version = "3", features = ["full", "parsing", "extra-traits"] }
 
 [dev-dependencies]
-eryx = { workspace = true, features = ["macros", "native-extensions", "vfs"] } #unified
+# Must stay a path dependency with NO version requirement, and must not be
+# unified into [workspace.dependencies]: this is a cycle (eryx depends on
+# eryx-macros for its `macros` feature), and cargo only tolerates a cyclic
+# dev-dependency if it can drop it when packaging, which it does exactly when no
+# version is specified. With a version, publishing eryx-macros has to resolve
+# `eryx` from the registry at a version that does not exist yet, because eryx is
+# published after it. That is what broke the v0.6.0 release.
+eryx = { path = "../eryx", features = ["macros", "native-extensions", "vfs"] }
 schemars = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
