@@ -219,7 +219,10 @@ jobs:
       - uses: actions/checkout@v7
 
       - name: Install protoc
-        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+        uses: arduino/setup-protoc@v3
+        with:
+          version: "35.1"
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Download WASM artifacts
         uses: actions/download-artifact@v8
@@ -270,10 +273,25 @@ jobs:
           ls -la crates/eryx-wasm-runtime/target/
           ls crates/eryx-wasm-runtime/tests/python-stdlib/ | head -10
 
-      - name: Install mold linker, clang, and protoc
+      - name: Install protoc
+        uses: arduino/setup-protoc@v3
+        with:
+          version: "35.1"
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      # `apt-daily`/`unattended-upgrades` runs on freshly booted runners and
+      # holds the dpkg/apt locks. apt waits for a held lock *forever* by
+      # default and prints nothing while it does, so a run that loses this race
+      # burns the full 6h job limit with no output — that is what hung Lint and
+      # Documentation on #256. DPkg::Lock::Timeout bounds the lock wait (apt
+      # then exits non-zero, so the failure is fast and retryable) and
+      # timeout-minutes is the backstop for anything else that stalls, such as
+      # an unresponsive archive mirror.
+      - name: Install mold linker and clang
+        timeout-minutes: 5
         run: |
-          sudo apt-get update
-          sudo apt-get install -y mold clang protobuf-compiler
+          sudo apt-get -o DPkg::Lock::Timeout=120 update
+          sudo apt-get -o DPkg::Lock::Timeout=120 install -y mold clang
 
       - name: Configure mold linker
         run: |
@@ -355,7 +373,10 @@ jobs:
       - uses: actions/checkout@v7
 
       - name: Install protoc
-        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+        uses: arduino/setup-protoc@v3
+        with:
+          version: "35.1"
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Download WASM artifacts
         uses: actions/download-artifact@v8
