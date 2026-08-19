@@ -98,6 +98,8 @@ pub fn vfs_error_to_error_code(err: &crate::VfsError) -> types::ErrorCode {
         crate::VfsError::Storage(_) => types::ErrorCode::Io,
         crate::VfsError::InvalidSeek(_) => types::ErrorCode::Invalid,
         crate::VfsError::Busy(_) => types::ErrorCode::Busy,
+        // ENOSPC: indistinguishable from a full disk from the guest's side.
+        crate::VfsError::QuotaExceeded(_) => types::ErrorCode::InsufficientSpace,
     }
 }
 

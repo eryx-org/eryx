@@ -1662,12 +1662,21 @@ print("Long path tests completed without crash")
     assert!(safe, "Long paths should be handled safely: {}", output);
 }
 
-/// Test that seeking/reading at extreme offsets doesn't cause issues
+/// Test that seeking/reading at extreme offsets doesn't cause issues.
+///
+/// The VFS keeps file contents in *host* memory, so a write at a guest-chosen
+/// offset sizes a host allocation. Writes past the storage's byte budget must
+/// therefore be refused outright rather than materialized: 2^31 and 2^32 used
+/// to succeed (2 GiB and 4 GiB of zeroes each), and 2^40 aborted the host
+/// process on allocation failure.
 #[tokio::test]
 async fn test_extreme_offset_attack() {
     let (safe, output) = run_adversarial_test(
-        r#"
+        &format!(
+            r#"
 import os
+
+BUDGET = {budget}
 
 # Create a small file
 with open('/data/small.txt', 'w') as f:
@@ -1679,6 +1688,7 @@ extreme_offsets = [
     2**31,          # Overflow signed 32-bit
     2**32 - 1,      # Max unsigned 32-bit
     2**32,          # Overflow unsigned 32-bit
+    2**40,          # Enough to abort the host on allocation failure
     2**63 - 1,      # Max signed 64-bit
     2**62,          # Large but not max
 ]
@@ -1690,37 +1700,63 @@ for offset in extreme_offsets:
             f.seek(offset)
             data = f.read(10)
             if data:
-                print(f"WARNING: Read data at offset {offset}: {data}")
+                print(f"SECURITY ISSUE: Read data at offset {{offset}}: {{data}}")
             else:
-                print(f"OK: No data at offset {offset}")
+                print(f"OK: No data at offset {{offset}}")
     except (OSError, OverflowError, ValueError) as e:
-        print(f"EXPECTED: Cannot seek to {offset}: {type(e).__name__}")
+        print(f"EXPECTED: Cannot seek to {{offset}}: {{type(e).__name__}}")
     except Exception as e:
-        print(f"EXPECTED: Blocked seek to {offset}: {type(e).__name__}")
+        print(f"EXPECTED: Blocked seek to {{offset}}: {{type(e).__name__}}")
 
-    # Try seek and write
+    # Try seek and write. Every one of these offsets is past the budget, so
+    # none of them should produce a file at all.
     try:
         with open('/data/sparse.bin', 'wb') as f:
             f.seek(offset)
             f.write(b'X')
-        # Check file size
         size = os.path.getsize('/data/sparse.bin')
-        if size > 10 * 1024 * 1024 * 1024:  # 10GB
-            print(f"SECURITY ISSUE: Created sparse file of {size} bytes")
-        else:
-            print(f"OK: Sparse file size: {size}")
+        print(f"SECURITY ISSUE: Created file of {{size}} bytes at offset {{offset}}")
         os.remove('/data/sparse.bin')
     except (OSError, OverflowError, ValueError, MemoryError) as e:
-        print(f"EXPECTED: Cannot write at {offset}: {type(e).__name__}")
+        print(f"EXPECTED: Cannot write at {{offset}}: {{type(e).__name__}}")
     except Exception as e:
-        print(f"EXPECTED: Blocked write at {offset}: {type(e).__name__}")
+        print(f"EXPECTED: Blocked write at {{offset}}: {{type(e).__name__}}")
+
+# A sparse write inside the budget is still allowed, and still cheap.
+with open('/data/ok.bin', 'wb') as f:
+    f.seek(1024)
+    f.write(b'X')
+print(f"OK: in-budget sparse file size: {{os.path.getsize('/data/ok.bin')}}")
+
+# Writing just past the budget is refused, not truncated.
+try:
+    with open('/data/toobig.bin', 'wb') as f:
+        f.seek(BUDGET)
+        f.write(b'X')
+    print(f"SECURITY ISSUE: exceeded budget: {{os.path.getsize('/data/toobig.bin')}} bytes")
+except OSError as e:
+    print(f"EXPECTED: budget enforced: {{type(e).__name__}}")
 
 print("Extreme offset tests completed without crash")
 "#,
+            budget = eryx::vfs::DEFAULT_MAX_BYTES,
+        ),
         "extreme_offset_attack",
     )
     .await;
     assert!(safe, "Extreme offsets should be handled safely: {}", output);
+    assert!(
+        output.contains("in-budget sparse file size: 1025"),
+        "in-budget sparse writes should still work: {output}"
+    );
+    assert!(
+        output.contains("EXPECTED: budget enforced"),
+        "writes past the budget should be refused: {output}"
+    );
+    assert!(
+        output.contains("Extreme offset tests completed without crash"),
+        "the guest should survive every attempt: {output}"
+    );
 }
 
 /// Test that pickle/marshal deserialization from VFS files is sandboxed

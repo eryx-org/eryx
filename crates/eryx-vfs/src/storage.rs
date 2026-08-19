@@ -213,14 +213,29 @@ struct StorageState {
     directories: HashSet<String>,
 }
 
+/// Default limit on the total bytes of file content an [`InMemoryStorage`]
+/// will hold: 64 MiB.
+///
+/// File contents live in host memory, and a sandboxed guest chooses both the
+/// offsets it writes at and the sizes it truncates to. Without a limit, a
+/// one-byte write at a large offset turns into an arbitrarily large host
+/// allocation. Override with [`InMemoryStorage::with_max_bytes`].
+pub const DEFAULT_MAX_BYTES: u64 = 64 * 1024 * 1024;
+
 /// In-memory VFS storage implementation.
 ///
 /// Stores files and directories in memory using `HashMap` and `HashSet`.
 /// Thread-safe via a single `RwLock` over the combined state.
+///
+/// Total file content is capped at [`DEFAULT_MAX_BYTES`] unless changed with
+/// [`InMemoryStorage::with_max_bytes`]; operations that would exceed the cap
+/// fail with [`VfsError::QuotaExceeded`], which guests see as `ENOSPC`.
 #[derive(Debug)]
 pub struct InMemoryStorage {
     /// Combined state under a single lock to prevent deadlocks.
     state: RwLock<StorageState>,
+    /// Maximum total bytes of file content, across all files.
+    max_bytes: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -256,8 +271,21 @@ impl Default for InMemoryStorage {
 
 impl InMemoryStorage {
     /// Create a new empty in-memory storage with root directory.
+    ///
+    /// Total file content is capped at [`DEFAULT_MAX_BYTES`].
     #[must_use]
     pub fn new() -> Self {
+        Self::with_max_bytes(DEFAULT_MAX_BYTES)
+    }
+
+    /// Create a new empty in-memory storage with an explicit size cap.
+    ///
+    /// `max_bytes` bounds the total content of all files combined. Because the
+    /// contents live in host memory and a sandboxed guest picks its own write
+    /// offsets, this is a limit on how much memory the guest can make the host
+    /// allocate - keep it well below what the host can afford to lose.
+    #[must_use]
+    pub fn with_max_bytes(max_bytes: u64) -> Self {
         let mut directories = HashSet::new();
         directories.insert("/".to_string());
         Self {
@@ -265,7 +293,14 @@ impl InMemoryStorage {
                 files: HashMap::new(),
                 directories,
             }),
+            max_bytes,
         }
+    }
+
+    /// The total-content cap, in bytes.
+    #[must_use]
+    pub fn max_bytes(&self) -> u64 {
+        self.max_bytes
     }
 
     /// Capture the entire contents (files and directories) as a snapshot.
@@ -295,6 +330,7 @@ impl InMemoryStorage {
     pub fn from_snapshot(snapshot: &InMemorySnapshot) -> Self {
         Self {
             state: RwLock::new(snapshot.state.clone()),
+            max_bytes: DEFAULT_MAX_BYTES,
         }
     }
 
@@ -343,6 +379,47 @@ impl InMemoryStorage {
         }
     }
 
+    /// Check that resizing `path` to `new_len` keeps total content within
+    /// `max_bytes`, returning `new_len` as a `usize` ready to resize with.
+    ///
+    /// Called before every allocation so that a guest-chosen offset or length
+    /// can never turn into an unbounded host allocation. The current total is
+    /// summed on the spot rather than tracked incrementally: it is only needed
+    /// on the growth paths, and a running counter is one missed update away
+    /// from being wrong.
+    fn check_budget(&self, state: &StorageState, path: &str, new_len: u64) -> VfsResult<usize> {
+        let current_len = state
+            .files
+            .get(path)
+            .map_or(0, |f| f.content.len().try_into().unwrap_or(u64::MAX));
+
+        // Only growth needs checking; shrinking always fits.
+        if new_len > current_len {
+            let others: u64 = state
+                .files
+                .iter()
+                .filter(|(p, _)| p.as_str() != path)
+                .map(|(_, f)| f.content.len().try_into().unwrap_or(u64::MAX))
+                .fold(0u64, u64::saturating_add);
+
+            let total = others.saturating_add(new_len);
+            if total > self.max_bytes {
+                return Err(VfsError::QuotaExceeded(format!(
+                    "{path}: {new_len} bytes would put the filesystem at {total} bytes, over the {} byte limit",
+                    self.max_bytes
+                )));
+            }
+        }
+
+        // new_len <= max_bytes, which is a u64 the host was willing to allocate,
+        // so this only fails on a 32-bit host with an oversized cap.
+        new_len.try_into().map_err(|_| {
+            VfsError::QuotaExceeded(format!(
+                "{path}: {new_len} bytes exceeds host addressable size"
+            ))
+        })
+    }
+
     /// Check if parent directory exists (requires state to already be borrowed).
     fn check_parent_exists_with_state(state: &StorageState, path: &str) -> VfsResult<()> {
         if let Some(parent) = Self::parent_path(path)
@@ -380,13 +457,16 @@ impl VfsStorage for InMemoryStorage {
         let state = self.state.read().await;
         match state.files.get(&path) {
             Some(data) => {
-                let offset = offset as usize;
-                let len = len as usize;
-                if offset >= data.content.len() {
+                // Both offset and len come from the guest, so stay in u64 and
+                // saturate: `offset + len` overflows for offsets near u64::MAX.
+                let content_len = data.content.len().try_into().unwrap_or(u64::MAX);
+                if offset >= content_len {
                     Ok(Vec::new())
                 } else {
-                    let end = (offset + len).min(data.content.len());
-                    Ok(data.content[offset..end].to_vec())
+                    // offset < content_len, and end is clamped to it, so both
+                    // fit in usize.
+                    let end = offset.saturating_add(len).min(content_len);
+                    Ok(data.content[offset as usize..end as usize].to_vec())
                 }
             }
             None => {
@@ -409,6 +489,8 @@ impl VfsStorage for InMemoryStorage {
         if state.directories.contains(&path) {
             return Err(VfsError::NotFile(path));
         }
+
+        self.check_budget(&state, &path, data.len().try_into().unwrap_or(u64::MAX))?;
 
         let now = SystemTime::now();
         let file_data = state.files.entry(path).or_insert_with(|| FileData {
@@ -433,8 +515,19 @@ impl VfsStorage for InMemoryStorage {
             return Err(VfsError::NotFile(path));
         }
 
+        // The guest picks the offset, so a one-byte write can ask the host to
+        // materialize gigabytes of zeroes. Compute the end in u64 and check it
+        // against the budget before allocating anything; an offset that
+        // overflows u64 is over the limit by definition.
+        let data_len: u64 = data.len().try_into().unwrap_or(u64::MAX);
+        let end = offset.checked_add(data_len).ok_or_else(|| {
+            VfsError::QuotaExceeded(format!(
+                "{path}: write of {data_len} bytes at offset {offset} overflows the address space"
+            ))
+        })?;
+        let needed_len = self.check_budget(&state, &path, end)?;
+
         let now = SystemTime::now();
-        let offset = offset as usize;
         let file_data = state.files.entry(path).or_insert_with(|| FileData {
             content: Vec::new(),
             created: now,
@@ -443,11 +536,11 @@ impl VfsStorage for InMemoryStorage {
         });
 
         // Extend file if necessary
-        let needed_len = offset + data.len();
         if file_data.content.len() < needed_len {
             file_data.content.resize(needed_len, 0);
         }
-        file_data.content[offset..offset + data.len()].copy_from_slice(data);
+        let start = needed_len - data.len();
+        file_data.content[start..needed_len].copy_from_slice(data);
         file_data.modified = now;
         Ok(())
     }
@@ -456,9 +549,17 @@ impl VfsStorage for InMemoryStorage {
         let path = Self::normalize_path(path)?;
         let now = SystemTime::now();
         let mut state = self.state.write().await;
+        if !state.files.contains_key(&path) {
+            return Err(VfsError::NotFound(path));
+        }
+
+        // `size` is guest-controlled: truncating up to u64::MAX would either
+        // abort the host on allocation failure or panic on capacity overflow.
+        let size = self.check_budget(&state, &path, size)?;
+
         match state.files.get_mut(&path) {
             Some(data) => {
-                data.content.resize(size as usize, 0);
+                data.content.resize(size, 0);
                 data.modified = now;
                 Ok(())
             }
@@ -756,6 +857,135 @@ impl VfsStorage for InMemoryStorage {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+
+    /// Every offset here used to turn a one-byte write into a multi-gigabyte
+    /// host allocation: 2^31 and 2^32 succeeded (2 GiB and 4 GiB of zeroes),
+    /// 2^40 aborted the process outright ("memory allocation of 1099511627777
+    /// bytes failed"), and u64::MAX panicked on `offset + len`. All of them are
+    /// reachable from sandboxed Python via `f.seek(off); f.write(b'X')`.
+    #[tokio::test]
+    async fn write_at_extreme_offset_is_refused_not_allocated() {
+        let storage = InMemoryStorage::new();
+        storage.write("/f", b"small content").await.unwrap();
+
+        for offset in [
+            1u64 << 31,
+            1 << 32,
+            1 << 40,
+            1 << 62,
+            u64::MAX - 1,
+            u64::MAX,
+        ] {
+            let err = storage.write_at("/f", offset, b"X").await.unwrap_err();
+            assert!(
+                matches!(err, VfsError::QuotaExceeded(_)),
+                "offset {offset} gave {err:?}"
+            );
+        }
+
+        // The file is untouched by the refused writes.
+        assert_eq!(storage.read("/f").await.unwrap(), b"small content");
+        assert_eq!(storage.stat("/f").await.unwrap().size, 13);
+    }
+
+    #[tokio::test]
+    async fn write_at_within_budget_still_extends_sparsely() {
+        let storage = InMemoryStorage::new();
+        storage.write("/f", b"abc").await.unwrap();
+
+        storage.write_at("/f", 1000, b"X").await.unwrap();
+
+        assert_eq!(storage.stat("/f").await.unwrap().size, 1001);
+        let content = storage.read("/f").await.unwrap();
+        assert_eq!(&content[..3], b"abc");
+        assert!(content[3..1000].iter().all(|b| *b == 0));
+        assert_eq!(content[1000], b'X');
+    }
+
+    #[tokio::test]
+    async fn write_at_offset_overwrites_in_place() {
+        let storage = InMemoryStorage::new();
+        storage.write("/f", b"aaaaa").await.unwrap();
+
+        storage.write_at("/f", 1, b"bb").await.unwrap();
+
+        assert_eq!(storage.read("/f").await.unwrap(), b"abbaa");
+        assert_eq!(storage.stat("/f").await.unwrap().size, 5);
+    }
+
+    #[tokio::test]
+    async fn set_size_beyond_budget_is_refused() {
+        let storage = InMemoryStorage::new();
+        storage.write("/f", b"x").await.unwrap();
+
+        // u64::MAX used to panic with "capacity overflow".
+        for size in [u64::MAX, 1 << 62, DEFAULT_MAX_BYTES + 1] {
+            let err = storage.set_size("/f", size).await.unwrap_err();
+            assert!(
+                matches!(err, VfsError::QuotaExceeded(_)),
+                "size {size} gave {err:?}"
+            );
+        }
+
+        assert_eq!(storage.stat("/f").await.unwrap().size, 1);
+        // Shrinking is always allowed.
+        storage.set_size("/f", 0).await.unwrap();
+        assert_eq!(storage.stat("/f").await.unwrap().size, 0);
+    }
+
+    #[tokio::test]
+    async fn read_at_huge_length_does_not_overflow() {
+        let storage = InMemoryStorage::new();
+        storage.write("/f", b"small content").await.unwrap();
+
+        // `offset + len` used to overflow and panic.
+        assert_eq!(
+            storage.read_at("/f", 5, u64::MAX).await.unwrap(),
+            b" content"
+        );
+        assert_eq!(
+            storage.read_at("/f", 0, u64::MAX).await.unwrap(),
+            b"small content"
+        );
+        assert!(
+            storage
+                .read_at("/f", u64::MAX, 10)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            storage
+                .read_at("/f", 13, u64::MAX)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn budget_covers_all_files_together() {
+        let storage = InMemoryStorage::with_max_bytes(1024);
+
+        storage.write("/a", &vec![0u8; 600]).await.unwrap();
+        // 600 + 600 > 1024, so the second file does not fit.
+        let err = storage.write("/b", &vec![0u8; 600]).await.unwrap_err();
+        assert!(matches!(err, VfsError::QuotaExceeded(_)), "{err:?}");
+
+        // Freeing the first file makes room again.
+        storage.delete("/a").await.unwrap();
+        storage.write("/b", &vec![0u8; 600]).await.unwrap();
+
+        // Overwriting a file counts its new size, not the sum of both.
+        storage.write("/b", &vec![0u8; 1024]).await.unwrap();
+        assert_eq!(storage.stat("/b").await.unwrap().size, 1024);
+    }
+
+    #[tokio::test]
+    async fn max_bytes_is_reported() {
+        assert_eq!(InMemoryStorage::new().max_bytes(), DEFAULT_MAX_BYTES);
+        assert_eq!(InMemoryStorage::with_max_bytes(42).max_bytes(), 42);
+    }
 
     #[tokio::test]
     async fn test_snapshot_restore_and_fork() {

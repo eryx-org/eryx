@@ -457,10 +457,8 @@ use std::time::Duration;
 #[tokio::main]
 async fn main() -> Result<(), eryx::Error> {
     // Configure timeout via resource limits
-    let limits = ResourceLimits {
-        execution_timeout: Some(Duration::from_millis(500)),
-        ..Default::default()
-    };
+    let limits = ResourceLimits::default()
+        .with_execution_timeout(Duration::from_millis(500));
 
     let sandbox = Sandbox::embedded()
         .with_resource_limits(limits)

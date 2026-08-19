@@ -52,4 +52,12 @@ pub enum VfsError {
     /// Resource busy.
     #[error("resource busy: {0}")]
     Busy(String),
+
+    /// The operation would grow the filesystem past its size limit.
+    ///
+    /// In-memory storage keeps file contents in host memory, so an unbounded
+    /// write is an unbounded host allocation. Guests see this as `ENOSPC`
+    /// (`OSError` in Python), the same as a full disk.
+    #[error("filesystem full: {0}")]
+    QuotaExceeded(String),
 }

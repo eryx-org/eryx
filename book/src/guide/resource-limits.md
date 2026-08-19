@@ -12,8 +12,15 @@ By default, sandboxes have sensible limits applied:
 | Callback timeout | 10 seconds |
 | Memory | 128 MB |
 | Callback invocations | 1000 |
+| Virtual filesystem | 64 MB |
 
 ## Configuring Resource Limits
+
+In Rust, start from `ResourceLimits::default()` and adjust with the `with_*`
+methods. Each one takes either a value or `None` to remove that limit;
+`ResourceLimits::unlimited()` removes them all at once. (`ResourceLimits` is
+`#[non_exhaustive]` so that new limits can be added without breaking callers,
+which means it cannot be built with a struct literal.)
 
 <!-- langtabs-start -->
 ```rust
@@ -24,11 +31,9 @@ use std::time::Duration;
 
 #[tokio::main]
 async fn main() -> Result<(), eryx::Error> {
-    let limits = ResourceLimits {
-        execution_timeout: Some(Duration::from_secs(5)),
-        max_memory_bytes: Some(64 * 1024 * 1024),  // 64 MB
-        ..Default::default()
-    };
+    let limits = ResourceLimits::default()
+        .with_execution_timeout(Duration::from_secs(5))
+        .with_max_memory_bytes(64 * 1024 * 1024);  // 64 MB
 
     let sandbox = Sandbox::embedded()
         .with_resource_limits(limits)
@@ -71,10 +76,8 @@ use std::time::Duration;
 
 #[tokio::main]
 async fn main() -> Result<(), eryx::Error> {
-    let limits = ResourceLimits {
-        execution_timeout: Some(Duration::from_millis(500)),
-        ..Default::default()
-    };
+    let limits = ResourceLimits::default()
+        .with_execution_timeout(Duration::from_millis(500));
 
     let sandbox = Sandbox::embedded()
         .with_resource_limits(limits)
@@ -143,10 +146,8 @@ use eryx::{Sandbox, ResourceLimits};
 
 #[tokio::main]
 async fn main() -> Result<(), eryx::Error> {
-    let limits = ResourceLimits {
-        max_memory_bytes: Some(32 * 1024 * 1024),  // 32 MB
-        ..Default::default()
-    };
+    let limits = ResourceLimits::default()
+        .with_max_memory_bytes(32 * 1024 * 1024);  // 32 MB
 
     let sandbox = Sandbox::embedded()
         .with_resource_limits(limits)
@@ -183,6 +184,44 @@ except MemoryError:
 print(result.stdout)
 ```
 <!-- langtabs-end -->
+
+## Virtual Filesystem Size
+
+`max_vfs_bytes` caps the total bytes of file content the [virtual
+filesystem](./vfs.md) holds, across all files. Unlike `max_memory_bytes`, which
+bounds the WebAssembly instance's linear memory, VFS contents live in **host**
+memory - and the script picks its own write offsets, so `f.seek(2**40)` followed
+by a one-byte write would otherwise ask the host to materialize a terabyte of
+zeroes. Scripts that hit the cap see `ENOSPC` (`OSError`), the same as a full
+disk.
+
+<!-- langtabs-start -->
+```rust
+# extern crate eryx;
+use eryx::ResourceLimits;
+
+let limits = ResourceLimits::default()
+    .with_max_vfs_bytes(256 * 1024 * 1024); // 256 MB of in-memory files
+```
+
+```python
+import eryx
+
+limits = eryx.ResourceLimits(max_vfs_bytes=256 * 1024 * 1024)
+```
+<!-- langtabs-end -->
+
+This applies to the storage eryx creates for you. If you construct storage
+yourself, set the limit there instead:
+
+```rust,ignore
+use eryx::vfs::InMemoryStorage;
+
+let storage = InMemoryStorage::with_max_bytes(256 * 1024 * 1024);
+```
+
+Because the cap protects host memory rather than the guest, it is not disabled by
+`ResourceLimits::unlimited()`; raise it explicitly if you need more.
 
 ## Callback Invocation Limits
 
@@ -230,10 +269,8 @@ use eryx::{Sandbox, ResourceLimits};
 #[tokio::main]
 async fn main() -> Result<(), eryx::Error> {
     // Set a fuel limit via resource limits
-    let limits = ResourceLimits {
-        max_fuel: Some(500_000_000),  // 500M instructions
-        ..Default::default()
-    };
+    let limits = ResourceLimits::default()
+        .with_max_fuel(500_000_000);  // 500M instructions
 
     let sandbox = Sandbox::embedded()
         .with_resource_limits(limits)
@@ -368,10 +405,8 @@ use std::time::Duration;
 #[tokio::main]
 async fn main() -> Result<(), eryx::Error> {
     // Configure a short timeout
-    let limits = ResourceLimits {
-        execution_timeout: Some(Duration::from_millis(100)),
-        ..Default::default()
-    };
+    let limits = ResourceLimits::default()
+        .with_execution_timeout(Duration::from_millis(100));
 
     let sandbox = Sandbox::embedded()
         .with_resource_limits(limits)

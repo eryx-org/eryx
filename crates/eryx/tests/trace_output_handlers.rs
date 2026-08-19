@@ -377,10 +377,9 @@ async fn test_trace_handler_callback_duration_tracked() {
     let sandbox = sandbox_builder()
         .with_callback(SleepCallback)
         .with_trace_handler(trace_handler.clone())
-        .with_resource_limits(ResourceLimits {
-            callback_timeout: Some(Duration::from_secs(5)),
-            ..Default::default()
-        })
+        .with_resource_limits(
+            ResourceLimits::default().with_callback_timeout(Duration::from_secs(5)),
+        )
         .build()
         .expect("Failed to build sandbox");
 

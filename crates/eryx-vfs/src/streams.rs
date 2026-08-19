@@ -13,6 +13,13 @@ use wasmtime_wasi_io::streams::{InputStream, OutputStream, StreamError, StreamRe
 
 use crate::storage::VfsStorage;
 
+/// Largest buffer a single stream read will allocate, regardless of the length
+/// the guest asked for (1 MiB).
+///
+/// WASI streams are allowed to return short reads, so a guest that wants more
+/// simply reads again.
+const MAX_READ_CHUNK: usize = 1024 * 1024;
+
 /// An input stream for reading from a real filesystem file.
 pub struct RealFileInputStream {
     /// The underlying file.
@@ -53,7 +60,10 @@ impl InputStream for RealFileInputStream {
             return Ok(Bytes::new());
         }
 
-        let mut buf = vec![0u8; size];
+        // `size` is the guest's requested read length. Streams may return
+        // short reads, so cap the buffer instead of allocating whatever was
+        // asked for - otherwise a single read call sizes a host allocation.
+        let mut buf = vec![0u8; size.min(MAX_READ_CHUNK)];
         match self.file.read_at(&mut buf, self.position) {
             Ok(0) => {
                 // EOF
@@ -208,6 +218,7 @@ impl<S: VfsStorage + Clone + 'static> VfsInputStream<S> {
         if size == 0 {
             return Ok(Bytes::new());
         }
+        let size = size.min(MAX_READ_CHUNK);
 
         let storage = self.storage.clone();
         let path = self.path.clone();

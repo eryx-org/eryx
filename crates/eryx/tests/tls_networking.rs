@@ -953,6 +953,62 @@ else:
     );
 }
 
+/// Test that an oversized guest read length still reads correctly end to end.
+///
+/// The host caps the buffer it allocates for a guest-requested read (see
+/// `net::read_buf_len`, which is where the bound is unit-tested - the
+/// multi-gigabyte allocation it prevents is invisible from here, since sockets
+/// return short reads either way). What this test covers is that capping does
+/// not break the read: an oversized request still yields the full response
+/// across successive reads.
+#[tokio::test]
+async fn test_tcp_read_oversized_length_still_reads() {
+    let server = PlainHttpServer::start().await;
+    let port = server.port();
+
+    let sandbox = sandbox_builder_with_network()
+        .with_network(NetConfig::permissive())
+        .build()
+        .expect("Failed to build sandbox");
+
+    let code = format!(
+        r#"
+import _eryx_async
+
+tcp_handle = await _eryx_async.await_tcp_connect("127.0.0.1", {port})
+request = b"GET /get HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"
+await _eryx_async.await_tcp_write(tcp_handle, request)
+
+# Ask for the largest length the interface can carry (u32::MAX).
+response = b""
+while True:
+    chunk = await _eryx_async.await_tcp_read(tcp_handle, 2**32 - 1)
+    if not chunk:
+        break
+    response += chunk
+
+_eryx_async.tcp_close(tcp_handle)
+
+status_line = response.decode('utf-8').split('\r\n')[0]
+if '200 OK' in status_line:
+    print(f"SUCCESS: read {{len(response)}} bytes with an oversized request")
+else:
+    print(f"FAILED: {{status_line}}")
+"#
+    );
+
+    let result = sandbox.execute(&code).await;
+    server.shutdown().await;
+
+    assert!(result.is_ok(), "Oversized read should work: {:?}", result);
+    let output = result.unwrap();
+    assert!(
+        output.stdout.contains("SUCCESS"),
+        "Should succeed: {}",
+        output.stdout
+    );
+}
+
 /// Test plain HTTP POST with JSON body using TCP API.
 #[tokio::test]
 async fn test_plain_http_post() {

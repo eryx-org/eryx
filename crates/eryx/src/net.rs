@@ -22,6 +22,24 @@ use tokio::net::TcpStream;
 use tokio_rustls::TlsConnector;
 use tokio_rustls::client::TlsStream;
 
+/// Largest buffer a single socket read will allocate, regardless of the length
+/// the guest asked for (1 MiB).
+///
+/// The read length is guest-controlled, and the buffer is allocated on the
+/// *host*, outside the sandbox's memory limit. Socket reads are short reads by
+/// nature (`recv(n)` may always return fewer than `n` bytes), so a guest that
+/// wants more simply reads again.
+const MAX_READ_LEN: usize = 1024 * 1024;
+
+/// Buffer size to allocate for a guest-requested read of `len` bytes.
+///
+/// Split out from the read paths so the bound itself is testable: the failure
+/// mode it prevents (a multi-gigabyte host allocation) is invisible end-to-end,
+/// because sockets return short reads either way.
+fn read_buf_len(len: u32) -> usize {
+    (len as usize).min(MAX_READ_LEN)
+}
+
 /// Network configuration for the sandbox.
 ///
 /// Controls which hosts Python code can connect to and sets timeouts.
@@ -529,6 +547,9 @@ impl ConnectionManager {
     ///
     /// `timeout_ms` is the guest-requested I/O timeout in milliseconds
     /// (`0` = use the host default); see `effective_timeout`.
+    ///
+    /// `len` is capped at [`MAX_READ_LEN`]; like any socket read, this may
+    /// return fewer bytes than requested.
     pub async fn tcp_read(
         &mut self,
         handle: u32,
@@ -541,7 +562,7 @@ impl ConnectionManager {
             .get_mut(&handle)
             .ok_or(TcpError::InvalidHandle)?;
 
-        let mut buf = vec![0u8; len as usize];
+        let mut buf = vec![0u8; read_buf_len(len)];
         let n = tokio::time::timeout(io_timeout, stream.read(&mut buf))
             .await
             .map_err(|_| TcpError::TimedOut)?
@@ -761,6 +782,9 @@ impl ConnectionManager {
     ///
     /// `timeout_ms` is the guest-requested I/O timeout in milliseconds
     /// (`0` = use the host default); see `effective_timeout`.
+    ///
+    /// `len` is capped at [`MAX_READ_LEN`]; like any socket read, this may
+    /// return fewer bytes than requested.
     pub async fn tls_read(
         &mut self,
         handle: u32,
@@ -773,7 +797,7 @@ impl ConnectionManager {
             .get_mut(&handle)
             .ok_or(TlsError::InvalidHandle)?;
 
-        let mut buf = vec![0u8; len as usize];
+        let mut buf = vec![0u8; read_buf_len(len)];
         let n = tokio::time::timeout(io_timeout, stream.read(&mut buf))
             .await
             .map_err(|_| TlsError::Tcp(TcpError::TimedOut))?
@@ -960,6 +984,23 @@ fn host_matches_pattern(host: &str, pattern: &str) -> bool {
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
+    /// `len` is guest-controlled and the buffer lands on the host, outside the
+    /// sandbox's memory limit: `recv(2**32 - 1)` used to allocate 4 GiB per call.
+    #[test]
+    fn read_buf_len_is_bounded() {
+        use super::{MAX_READ_LEN, read_buf_len};
+
+        // Small reads are honoured exactly - no forced round-up.
+        assert_eq!(read_buf_len(0), 0);
+        assert_eq!(read_buf_len(1), 1);
+        assert_eq!(read_buf_len(4096), 4096);
+
+        // At and past the cap, the buffer stops growing.
+        assert_eq!(read_buf_len(MAX_READ_LEN as u32), MAX_READ_LEN);
+        assert_eq!(read_buf_len(MAX_READ_LEN as u32 + 1), MAX_READ_LEN);
+        assert_eq!(read_buf_len(u32::MAX), MAX_READ_LEN);
+    }
+
     use super::*;
 
     #[test]

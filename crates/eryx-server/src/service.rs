@@ -227,33 +227,38 @@ impl crate::proto::eryx::v1::eryx_server::Eryx for EryxService {
 
         // 2. Parse resource limits.
         let resource_limits = if let Some(limits) = execute_req.resource_limits {
-            ResourceLimits {
-                execution_timeout: if limits.execution_timeout_ms > 0 {
+            // A zero in the request means "unset": keep the default. `max_vfs_bytes`
+            // is deliberately absent from the proto and so never client-controllable
+            // - it bounds *host* memory (VFS contents live outside the guest's
+            // linear memory), so letting a request raise it would hand the DoS back.
+            let defaults = ResourceLimits::default();
+            defaults
+                .clone()
+                .with_execution_timeout(if limits.execution_timeout_ms > 0 {
                     Some(Duration::from_millis(limits.execution_timeout_ms))
                 } else {
-                    ResourceLimits::default().execution_timeout
-                },
-                callback_timeout: if limits.callback_timeout_ms > 0 {
+                    defaults.execution_timeout
+                })
+                .with_callback_timeout(if limits.callback_timeout_ms > 0 {
                     Some(Duration::from_millis(limits.callback_timeout_ms))
                 } else {
-                    ResourceLimits::default().callback_timeout
-                },
-                max_memory_bytes: if limits.max_memory_bytes > 0 {
+                    defaults.callback_timeout
+                })
+                .with_max_memory_bytes(if limits.max_memory_bytes > 0 {
                     Some(limits.max_memory_bytes)
                 } else {
-                    ResourceLimits::default().max_memory_bytes
-                },
-                max_callback_invocations: if limits.max_callback_invocations > 0 {
+                    defaults.max_memory_bytes
+                })
+                .with_max_callback_invocations(if limits.max_callback_invocations > 0 {
                     Some(limits.max_callback_invocations)
                 } else {
-                    ResourceLimits::default().max_callback_invocations
-                },
-                max_fuel: if limits.max_fuel > 0 {
+                    defaults.max_callback_invocations
+                })
+                .with_max_fuel(if limits.max_fuel > 0 {
                     Some(limits.max_fuel)
                 } else {
                     None
-                },
-            }
+                })
         } else {
             ResourceLimits::default()
         };

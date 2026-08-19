@@ -387,6 +387,10 @@ impl Sandbox {
         // a scrubbing storage from the sandbox's secrets configuration.
         #[cfg(feature = "vfs")]
         {
+            let vfs_max_bytes = self
+                .resource_limits
+                .max_vfs_bytes
+                .unwrap_or(eryx_vfs::DEFAULT_MAX_BYTES);
             let vfs_storage = if let Some(ref storage) = self.vfs_storage {
                 eryx_vfs::ArcStorage::new(Arc::clone(storage))
             } else {
@@ -413,7 +417,7 @@ impl Sandbox {
                     }
                 };
                 let scrubbing_storage = eryx_vfs::ScrubbingStorage::new(
-                    eryx_vfs::InMemoryStorage::new(),
+                    eryx_vfs::InMemoryStorage::with_max_bytes(vfs_max_bytes),
                     vfs_secrets,
                     vfs_policy,
                 );
@@ -912,7 +916,11 @@ impl Sandbox {
                     }
                 };
                 let scrubbing_storage = eryx_vfs::ScrubbingStorage::new(
-                    eryx_vfs::InMemoryStorage::new(),
+                    eryx_vfs::InMemoryStorage::with_max_bytes(
+                        resource_limits
+                            .max_vfs_bytes
+                            .unwrap_or(eryx_vfs::DEFAULT_MAX_BYTES),
+                    ),
                     vfs_secrets,
                     vfs_policy,
                 );
@@ -2687,7 +2695,26 @@ pub struct ExecuteStats {
 }
 
 /// Resource limits for sandbox execution.
+///
+/// Start from [`ResourceLimits::default()`] (or [`ResourceLimits::unlimited()`])
+/// and adjust with the `with_*` methods:
+///
+/// ```rust
+/// use std::time::Duration;
+/// use eryx::ResourceLimits;
+///
+/// let limits = ResourceLimits::default()
+///     .with_execution_timeout(Duration::from_secs(5))
+///     .with_max_memory_bytes(64 * 1024 * 1024)
+///     .with_max_fuel(None); // disable a single limit
+/// ```
+///
+/// This type is `#[non_exhaustive]`: new limits get added as new things become
+/// boundable, so it cannot be built with a struct literal from outside the
+/// crate. Its fields stay public, so reading them - and mutating them on a value
+/// you own - both still work.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct ResourceLimits {
     /// Maximum execution time for the entire script.
     pub execution_timeout: Option<Duration>,
@@ -2709,6 +2736,19 @@ pub struct ResourceLimits {
     /// When `None`, fuel is set to `u64::MAX` for tracking-only mode (fuel
     /// consumed is still reported in [`ExecuteStats`]).
     pub max_fuel: Option<u64>,
+    /// Maximum total bytes the in-memory virtual filesystem may hold.
+    ///
+    /// VFS file contents live in *host* memory, outside
+    /// [`max_memory_bytes`](Self::max_memory_bytes), and the script picks its own
+    /// write offsets - so this is what stops a script from making the host
+    /// allocate arbitrarily much via `f.seek(2**40); f.write(b'X')`. Scripts see
+    /// the limit as `ENOSPC`.
+    ///
+    /// Only applies with the `vfs` feature, and only to the storage eryx creates
+    /// itself; storage you construct and pass in carries its own limit (see
+    /// `eryx::vfs::InMemoryStorage::with_max_bytes`). `None` uses the `eryx-vfs`
+    /// default of 64 MiB.
+    pub max_vfs_bytes: Option<u64>,
 }
 
 impl Default for ResourceLimits {
@@ -2718,8 +2758,88 @@ impl Default for ResourceLimits {
             callback_timeout: Some(Duration::from_secs(10)),
             max_memory_bytes: Some(128 * 1024 * 1024), // 128 MB
             max_callback_invocations: Some(1000),
-            max_fuel: None, // Unlimited by default, but still tracked
+            max_fuel: None,      // Unlimited by default, but still tracked
+            max_vfs_bytes: None, // eryx-vfs default (64 MiB)
         }
+    }
+}
+
+impl ResourceLimits {
+    /// Limits with every bound disabled.
+    ///
+    /// Only for code you trust: scripts can then run indefinitely and consume
+    /// memory without bound.
+    ///
+    /// [`max_vfs_bytes`](Self::max_vfs_bytes) is the exception and stays at its
+    /// default. It bounds *host* memory rather than the guest, so clearing it
+    /// would let a script abort the process rather than merely outstay its
+    /// welcome; raise it explicitly if you need more room.
+    #[must_use]
+    pub fn unlimited() -> Self {
+        Self {
+            execution_timeout: None,
+            callback_timeout: None,
+            max_memory_bytes: None,
+            max_callback_invocations: None,
+            max_fuel: None,
+            max_vfs_bytes: None,
+        }
+    }
+
+    /// Set the maximum execution time for the entire script.
+    ///
+    /// Pass `None` to remove the limit.
+    #[must_use]
+    pub fn with_execution_timeout(mut self, timeout: impl Into<Option<Duration>>) -> Self {
+        self.execution_timeout = timeout.into();
+        self
+    }
+
+    /// Set the maximum time for a single callback invocation.
+    ///
+    /// Pass `None` to remove the limit.
+    #[must_use]
+    pub fn with_callback_timeout(mut self, timeout: impl Into<Option<Duration>>) -> Self {
+        self.callback_timeout = timeout.into();
+        self
+    }
+
+    /// Set the maximum guest memory in bytes.
+    ///
+    /// Pass `None` to remove the limit.
+    #[must_use]
+    pub fn with_max_memory_bytes(mut self, bytes: impl Into<Option<u64>>) -> Self {
+        self.max_memory_bytes = bytes.into();
+        self
+    }
+
+    /// Set the maximum number of callback invocations.
+    ///
+    /// Pass `None` to remove the limit.
+    #[must_use]
+    pub fn with_max_callback_invocations(mut self, count: impl Into<Option<u32>>) -> Self {
+        self.max_callback_invocations = count.into();
+        self
+    }
+
+    /// Set the maximum fuel (WASM instructions) allowed for execution.
+    ///
+    /// Pass `None` for tracking-only mode, where fuel is still reported in
+    /// [`ExecuteStats`] but never runs out.
+    #[must_use]
+    pub fn with_max_fuel(mut self, fuel: impl Into<Option<u64>>) -> Self {
+        self.max_fuel = fuel.into();
+        self
+    }
+
+    /// Set the maximum total bytes the in-memory virtual filesystem may hold.
+    ///
+    /// Pass `None` to use the `eryx-vfs` default of 64 MiB. There is no way to
+    /// remove this limit: see [`max_vfs_bytes`](Self::max_vfs_bytes).
+    #[must_use]
+    pub fn with_max_vfs_bytes(mut self, bytes: impl Into<Option<u64>>) -> Self {
+        self.max_vfs_bytes = bytes.into();
+        self
     }
 }
 
@@ -2768,36 +2888,69 @@ mod tests {
 
     #[test]
     fn resource_limits_can_disable_all_limits() {
-        let limits = ResourceLimits {
-            execution_timeout: None,
-            callback_timeout: None,
-            max_memory_bytes: None,
-            max_callback_invocations: None,
-            max_fuel: None,
-        };
+        let limits = ResourceLimits::unlimited();
 
         assert!(limits.execution_timeout.is_none());
         assert!(limits.callback_timeout.is_none());
         assert!(limits.max_memory_bytes.is_none());
         assert!(limits.max_callback_invocations.is_none());
         assert!(limits.max_fuel.is_none());
+        // Host-memory bound: `unlimited()` leaves it at the eryx-vfs default.
+        assert!(limits.max_vfs_bytes.is_none());
     }
 
+    /// The `with_*` setters take `impl Into<Option<T>>`, so both a bare value and
+    /// `None` have to work at the call site - that inference is the whole
+    /// ergonomic case for the builder, and it is easy to break.
     #[test]
-    fn resource_limits_can_set_custom_values() {
-        let limits = ResourceLimits {
-            execution_timeout: Some(Duration::from_secs(5)),
-            callback_timeout: Some(Duration::from_millis(500)),
-            max_memory_bytes: Some(64 * 1024 * 1024),
-            max_callback_invocations: Some(10),
-            max_fuel: Some(1_000_000),
-        };
+    fn resource_limits_builder_accepts_values_and_none() {
+        let limits = ResourceLimits::default()
+            .with_execution_timeout(Duration::from_secs(5))
+            .with_callback_timeout(Duration::from_millis(500))
+            .with_max_memory_bytes(64 * 1024 * 1024)
+            .with_max_callback_invocations(10)
+            .with_max_fuel(1_000_000)
+            .with_max_vfs_bytes(8 * 1024 * 1024);
 
         assert_eq!(limits.execution_timeout, Some(Duration::from_secs(5)));
         assert_eq!(limits.callback_timeout, Some(Duration::from_millis(500)));
         assert_eq!(limits.max_memory_bytes, Some(64 * 1024 * 1024));
         assert_eq!(limits.max_callback_invocations, Some(10));
         assert_eq!(limits.max_fuel, Some(1_000_000));
+        assert_eq!(limits.max_vfs_bytes, Some(8 * 1024 * 1024));
+
+        let cleared = limits
+            .with_execution_timeout(None)
+            .with_callback_timeout(None)
+            .with_max_memory_bytes(None)
+            .with_max_callback_invocations(None)
+            .with_max_fuel(None)
+            .with_max_vfs_bytes(None);
+
+        assert!(cleared.execution_timeout.is_none());
+        assert!(cleared.callback_timeout.is_none());
+        assert!(cleared.max_memory_bytes.is_none());
+        assert!(cleared.max_callback_invocations.is_none());
+        assert!(cleared.max_fuel.is_none());
+        assert!(cleared.max_vfs_bytes.is_none());
+    }
+
+    #[test]
+    fn resource_limits_can_set_custom_values() {
+        let limits = ResourceLimits::default()
+            .with_execution_timeout(Duration::from_secs(5))
+            .with_callback_timeout(Duration::from_millis(500))
+            .with_max_memory_bytes(64 * 1024 * 1024)
+            .with_max_callback_invocations(10)
+            .with_max_fuel(1_000_000)
+            .with_max_vfs_bytes(8 * 1024 * 1024);
+
+        assert_eq!(limits.execution_timeout, Some(Duration::from_secs(5)));
+        assert_eq!(limits.callback_timeout, Some(Duration::from_millis(500)));
+        assert_eq!(limits.max_memory_bytes, Some(64 * 1024 * 1024));
+        assert_eq!(limits.max_callback_invocations, Some(10));
+        assert_eq!(limits.max_fuel, Some(1_000_000));
+        assert_eq!(limits.max_vfs_bytes, Some(8 * 1024 * 1024));
     }
 
     #[test]
@@ -2828,10 +2981,7 @@ mod tests {
     #[test]
     fn resource_limits_partial_override() {
         // Common pattern: override just one limit
-        let limits = ResourceLimits {
-            max_callback_invocations: Some(5),
-            ..Default::default()
-        };
+        let limits = ResourceLimits::default().with_max_callback_invocations(5);
 
         assert_eq!(limits.max_callback_invocations, Some(5));
         // Others should be default
@@ -3083,10 +3233,7 @@ mod tests {
 
     #[test]
     fn sandbox_builder_with_resource_limits_is_chainable() {
-        let limits = ResourceLimits {
-            max_callback_invocations: Some(5),
-            ..Default::default()
-        };
+        let limits = ResourceLimits::default().with_max_callback_invocations(5);
 
         let _builder = SandboxBuilder::new().with_resource_limits(limits);
     }
@@ -3130,10 +3277,7 @@ mod tests {
             .with_wasm_bytes(vec![]) // Invalid, but tests the API
             .with_python_stdlib("/fake/stdlib") // Required for typestate
             .with_callback(TestCallback)
-            .with_resource_limits(ResourceLimits {
-                max_callback_invocations: Some(100),
-                ..Default::default()
-            });
+            .with_resource_limits(ResourceLimits::default().with_max_callback_invocations(100));
 
         // Try to build - will fail due to invalid WASM
         let result = builder.build();
@@ -3157,13 +3301,13 @@ mod tests {
     #[test]
     fn resource_limits_zero_values() {
         // Zero limits should be representable (though may not be useful)
-        let limits = ResourceLimits {
-            execution_timeout: Some(Duration::ZERO),
-            callback_timeout: Some(Duration::ZERO),
-            max_memory_bytes: Some(0),
-            max_callback_invocations: Some(0),
-            max_fuel: Some(0),
-        };
+        let limits = ResourceLimits::default()
+            .with_execution_timeout(Duration::ZERO)
+            .with_callback_timeout(Duration::ZERO)
+            .with_max_memory_bytes(0)
+            .with_max_callback_invocations(0)
+            .with_max_fuel(0)
+            .with_max_vfs_bytes(0);
 
         assert_eq!(limits.execution_timeout, Some(Duration::ZERO));
         assert_eq!(limits.max_callback_invocations, Some(0));
@@ -3172,13 +3316,13 @@ mod tests {
 
     #[test]
     fn resource_limits_very_large_values() {
-        let limits = ResourceLimits {
-            execution_timeout: Some(Duration::from_secs(86400 * 365)), // 1 year
-            callback_timeout: Some(Duration::from_secs(3600)),         // 1 hour
-            max_memory_bytes: Some(u64::MAX),
-            max_callback_invocations: Some(u32::MAX),
-            max_fuel: Some(u64::MAX),
-        };
+        let limits = ResourceLimits::default()
+            .with_execution_timeout(Duration::from_secs(86400 * 365)) // 1 year
+            .with_callback_timeout(Duration::from_secs(3600)) // 1 hour
+            .with_max_memory_bytes(u64::MAX)
+            .with_max_callback_invocations(u32::MAX)
+            .with_max_fuel(u64::MAX)
+            .with_max_vfs_bytes(u64::MAX);
 
         assert_eq!(limits.max_callback_invocations, Some(u32::MAX));
         assert_eq!(limits.max_memory_bytes, Some(u64::MAX));

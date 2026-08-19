@@ -11,6 +11,9 @@ The VFS provides:
 - **Shared storage** - Multiple sessions can share the same VFS storage
 - **Full filesystem API** - Standard Python file operations work (open, read, write, mkdir, etc.)
 - **SQLite support** - SQLite databases can be stored in the VFS
+- **Bounded size** - Total file content is capped (64 MB by default) so scripts
+  cannot exhaust host memory; see
+  [Virtual Filesystem Size](./resource-limits.md#virtual-filesystem-size)
 
 ## Creating a Session with VFS
 

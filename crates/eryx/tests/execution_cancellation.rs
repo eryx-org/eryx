@@ -66,10 +66,9 @@ fn sandbox_builder() -> eryx::SandboxBuilder<eryx::state::Has, eryx::state::Has>
 /// This ensures tests don't hang for 30s if cancellation fails.
 fn sandbox_builder_with_short_timeout() -> eryx::SandboxBuilder<eryx::state::Has, eryx::state::Has>
 {
-    sandbox_builder().with_resource_limits(ResourceLimits {
-        execution_timeout: Some(Duration::from_secs(3)),
-        ..Default::default()
-    })
+    sandbox_builder().with_resource_limits(
+        ResourceLimits::default().with_execution_timeout(Duration::from_secs(3)),
+    )
 }
 
 // =============================================================================

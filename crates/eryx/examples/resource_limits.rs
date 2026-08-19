@@ -88,10 +88,7 @@ fn main() -> anyhow::Result<()> {
 
     let sandbox = Sandbox::embedded()
         .with_callback(Counter)
-        .with_resource_limits(ResourceLimits {
-            max_callback_invocations: Some(3),
-            ..Default::default()
-        })
+        .with_resource_limits(ResourceLimits::default().with_max_callback_invocations(3))
         .build()?;
 
     let result = rt.block_on(async {
@@ -124,10 +121,9 @@ print("\n".join(results))
 
     let sandbox = Sandbox::embedded()
         .with_callback(Sleep)
-        .with_resource_limits(ResourceLimits {
-            execution_timeout: Some(Duration::from_secs(2)),
-            ..Default::default()
-        })
+        .with_resource_limits(
+            ResourceLimits::default().with_execution_timeout(Duration::from_secs(2)),
+        )
         .build()?;
 
     let start = std::time::Instant::now();
@@ -154,11 +150,11 @@ print(f"First sleep completed: {result}")
 
     let sandbox = Sandbox::embedded()
         .with_callback(Sleep)
-        .with_resource_limits(ResourceLimits {
-            callback_timeout: Some(Duration::from_millis(500)),
-            execution_timeout: Some(Duration::from_secs(10)),
-            ..Default::default()
-        })
+        .with_resource_limits(
+            ResourceLimits::default()
+                .with_callback_timeout(Duration::from_millis(500))
+                .with_execution_timeout(Duration::from_secs(10)),
+        )
         .build()?;
 
     let result = rt.block_on(async {
@@ -190,11 +186,12 @@ except Exception as e:
     println!("Setting a fuel limit to bound CPU usage...\n");
 
     let sandbox = Sandbox::embedded()
-        .with_resource_limits(ResourceLimits {
-            max_fuel: Some(500_000_000), // 500M instructions - enough for simple code
-            execution_timeout: Some(Duration::from_secs(10)),
-            ..Default::default()
-        })
+        .with_resource_limits(
+            ResourceLimits::default()
+                // 500M instructions - enough for simple code
+                .with_max_fuel(500_000_000)
+                .with_execution_timeout(Duration::from_secs(10)),
+        )
         .build()?;
 
     // First: simple code that completes within limit
@@ -217,11 +214,12 @@ print(f"Sum: {x}")
 
     // Second: code that exceeds the fuel limit
     let sandbox = Sandbox::embedded()
-        .with_resource_limits(ResourceLimits {
-            max_fuel: Some(100_000_000), // 100M instructions - tight limit for loops
-            execution_timeout: Some(Duration::from_secs(10)),
-            ..Default::default()
-        })
+        .with_resource_limits(
+            ResourceLimits::default()
+                // 100M instructions - tight limit for loops
+                .with_max_fuel(100_000_000)
+                .with_execution_timeout(Duration::from_secs(10)),
+        )
         .build()?;
 
     let result = rt.block_on(async {
@@ -246,13 +244,13 @@ print(f"Total: {total}")
     // Example 5: Custom limits for untrusted code
     println!("\n--- Example 5: Restrictive Limits for Untrusted Code ---");
 
-    let restrictive_limits = ResourceLimits {
-        execution_timeout: Some(Duration::from_secs(5)),
-        callback_timeout: Some(Duration::from_secs(1)),
-        max_memory_bytes: Some(64 * 1024 * 1024), // 64 MB
-        max_callback_invocations: Some(10),
-        max_fuel: Some(1_000_000_000), // 1B instructions
-    };
+    let restrictive_limits = ResourceLimits::default()
+        .with_execution_timeout(Duration::from_secs(5))
+        .with_callback_timeout(Duration::from_secs(1))
+        .with_max_memory_bytes(64 * 1024 * 1024) // 64 MB
+        .with_max_callback_invocations(10)
+        .with_max_fuel(1_000_000_000) // 1B instructions
+        .with_max_vfs_bytes(8 * 1024 * 1024); // 8 MB of in-memory files
 
     println!("Configured limits:");
     println!(
@@ -309,13 +307,9 @@ for i in range(5):
     // Example 6: No limits (use with caution!)
     println!("\n--- Example 6: No Limits (Dangerous!) ---");
 
-    let no_limits = ResourceLimits {
-        execution_timeout: None,
-        callback_timeout: None,
-        max_memory_bytes: None,
-        max_callback_invocations: None,
-        max_fuel: None,
-    };
+    // `unlimited()` clears every guest-facing limit. The VFS cap is not one of
+    // them: it bounds host memory, so it stays at its default.
+    let no_limits = ResourceLimits::unlimited();
 
     println!("⚠️  All limits disabled - use only for trusted code!");
     println!("Configured limits: {:?}", no_limits);

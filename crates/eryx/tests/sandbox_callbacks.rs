@@ -827,10 +827,7 @@ except Exception as e:
 async fn test_callback_invocation_limit() {
     let sandbox = sandbox_builder()
         .with_callback(SucceedCallback)
-        .with_resource_limits(ResourceLimits {
-            max_callback_invocations: Some(3),
-            ..Default::default()
-        })
+        .with_resource_limits(ResourceLimits::default().with_max_callback_invocations(3))
         .build()
         .expect("Failed to build sandbox");
 
@@ -868,12 +865,12 @@ for r in results:
 async fn test_callback_timeout() {
     let sandbox = sandbox_builder()
         .with_callback(SleepCallback)
-        .with_resource_limits(ResourceLimits {
-            // Use larger timeout margins to be robust on slow CI runners
-            callback_timeout: Some(Duration::from_millis(500)),
-            execution_timeout: Some(Duration::from_secs(10)),
-            ..Default::default()
-        })
+        .with_resource_limits(
+            ResourceLimits::default()
+                // Use larger timeout margins to be robust on slow CI runners
+                .with_callback_timeout(Duration::from_millis(500))
+                .with_execution_timeout(Duration::from_secs(10)),
+        )
         .build()
         .expect("Failed to build sandbox");
 

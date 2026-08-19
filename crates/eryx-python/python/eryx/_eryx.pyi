@@ -381,6 +381,16 @@ class ResourceLimits:
     max_callback_invocations: Optional[int]
     """Maximum number of callback invocations."""
 
+    max_fuel: Optional[int]
+    """Maximum fuel (WASM instructions) allowed."""
+
+    max_vfs_bytes: Optional[int]
+    """Maximum total bytes the in-memory virtual filesystem may hold.
+
+    VFS files live in host memory, outside `max_memory_bytes`, and the script
+    picks its own write offsets. `None` uses the default (64 MB).
+    """
+
     def __init__(
         self,
         *,
@@ -388,6 +398,8 @@ class ResourceLimits:
         callback_timeout_ms: Optional[int] = None,
         max_memory_bytes: Optional[int] = None,
         max_callback_invocations: Optional[int] = None,
+        max_fuel: Optional[int] = None,
+        max_vfs_bytes: Optional[int] = None,
     ) -> None:
         """Create new resource limits.
 
@@ -396,8 +408,12 @@ class ResourceLimits:
         - callback_timeout_ms: 10000 (10 seconds)
         - max_memory_bytes: 134217728 (128 MB)
         - max_callback_invocations: 1000
+        - max_fuel: None (unlimited)
+        - max_vfs_bytes: None (64 MB)
 
-        Pass `None` to disable a specific limit.
+        Pass `None` to disable a specific limit. `max_vfs_bytes` is the
+        exception: `None` means the default cap, since an uncapped in-memory
+        filesystem lets a script exhaust host memory.
         """
         ...
 
@@ -406,6 +422,9 @@ class ResourceLimits:
         """Create resource limits with no restrictions.
 
         Warning: Use with caution! Code can run indefinitely and use unlimited memory.
+
+        The virtual filesystem cap still applies (see `max_vfs_bytes`): it bounds
+        *host* memory, so removing it would let a script kill the process.
         """
         ...
 
