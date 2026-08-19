@@ -21,8 +21,19 @@ skip_undeclared_patterns = [
   "*_impl",
 ]
 
-# Exclude eryx-wasm-runtime as it's a staticlib for WASM, not a normal crate
-exclude = ["eryx-wasm-runtime"]
+# eryx-wasm-runtime: a staticlib for WASM, not a normal crate.
+#
+# eryx-macros: its dev-dependency on eryx must stay a bare path dep with no
+# version requirement. eryx depends on eryx-macros for its `macros` feature, so
+# that dev-dep is a cycle, and cargo only tolerates a cyclic dev-dependency
+# because it drops dev-deps when packaging - which it does exactly when no
+# version is given. Unifying it into [workspace.dependencies] attaches
+# `version = "^x.y.z"`, and publishing eryx-macros then has to resolve eryx from
+# the registry at a version that does not exist yet, because eryx is published
+# after it. That is what broke the v0.6.0 release (#344). `include_paths = false`
+# does not prevent this - it still converts the member dep - so the crate has to
+# be excluded from unification outright.
+exclude = ["eryx-wasm-runtime", "eryx-macros"]
 include = []
 max_backups = 3
 msrv_policy = { mode = "compute", source = "workspace" }
