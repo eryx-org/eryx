@@ -31,10 +31,17 @@ jobs:
   build-and-test:
     name: Build & Test
     runs-on: ubuntu-latest
-    # Only run for the main eryx crate release (not eryx-macros, eryx-vfs, etc.)
+    # Only run for the main eryx crate release, not the other crates.
+    #
+    # `startsWith(tag, 'eryx-v')` alone is NOT enough: release-plz tags are
+    # `{crate}-v{version}`, and "eryx-vfs-v0.6.0" starts with "eryx-v" too, so
+    # eryx-vfs releases were also triggering this. The other crates happen not to
+    # collide (eryx-macros, eryx-precompile, eryx-runtime), but any future crate
+    # whose name starts with "v" after the dash would need excluding here as well.
     if: >-
       github.event_name == 'workflow_dispatch' ||
-      startsWith(github.event.release.tag_name, 'eryx-v')
+      (startsWith(github.event.release.tag_name, 'eryx-v') &&
+       !startsWith(github.event.release.tag_name, 'eryx-vfs-v'))
     steps:
       - name: Free disk space
         run: |
