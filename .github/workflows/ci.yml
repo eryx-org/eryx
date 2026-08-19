@@ -279,26 +279,26 @@ jobs:
           version: "35.1"
           repo-token: ${{ secrets.GITHUB_TOKEN }}
 
-      # `apt-daily`/`unattended-upgrades` runs on freshly booted runners and
-      # holds the dpkg/apt locks. apt waits for a held lock *forever* by
-      # default and prints nothing while it does, so a run that loses this race
-      # burns the full 6h job limit with no output — that is what hung Lint and
-      # Documentation on #256. DPkg::Lock::Timeout bounds the lock wait (apt
-      # then exits non-zero, so the failure is fast and retryable) and
-      # timeout-minutes is the backstop for anything else that stalls, such as
-      # an unresponsive archive mirror.
-      - name: Install mold linker and clang
-        timeout-minutes: 5
-        run: |
-          sudo apt-get -o DPkg::Lock::Timeout=120 update
-          sudo apt-get -o DPkg::Lock::Timeout=120 install -y mold clang
+      # No apt anywhere in this workflow, deliberately. Beyond the dpkg-lock
+      # hang that took protoc off apt in #337, `azure.archive.ubuntu.com` is
+      # slow often enough to matter: on #339 `apt-get update` pulled 11.4 MB of
+      # package indexes at 47 kB/s, taking 4m01s, then spent another 38s and
+      # four `Ign:` retries fetching mold before falling back to
+      # archive.ubuntu.com — 4m51s against this step's 5m timeout, for a 2.5 MB
+      # linker. setup-mold fetches a prebuilt release from GitHub instead, the
+      # same trade as arduino/setup-protoc above.
+      #
+      # Nothing else was needed from apt: the runner image already ships clang
+      # and gcc, and `-fuse-ld=mold` works with the default gcc driver, so no
+      # `linker =` override is required either.
+      - name: Install mold linker
+        uses: rui314/setup-mold@v1
 
       - name: Configure mold linker
         run: |
           mkdir -p .cargo
           cat >> .cargo/config.toml << 'EOF'
           [target.x86_64-unknown-linux-gnu]
-          linker = "clang"
           rustflags = ["-C", "link-arg=-fuse-ld=mold"]
           EOF
 
