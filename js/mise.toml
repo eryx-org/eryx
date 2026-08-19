@@ -7,7 +7,7 @@ node = "24"
 # NOT help — its dependency tree still resolves oxc 0.76.0 (verified on 1.27.0).
 # Remove this exclude once jco pulls a signed oxc (>=0.90.0) or mise stops
 # flagging it. See https://aube.jdx.dev/security#trust-policy
-"npm:@bytecodealliance/jco" = { version = "1.16.1", trust_policy_excludes = ["@oxc-parser/binding-*"] }
+"npm:@bytecodealliance/jco" = { version = "1.30.0", trust_policy_excludes = ["@oxc-parser/binding-*"] }
 
 # =============================================================================
 # JavaScript bindings tasks (browser/Node.js via jco)
