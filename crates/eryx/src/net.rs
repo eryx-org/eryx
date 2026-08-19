@@ -548,8 +548,8 @@ impl ConnectionManager {
     /// `timeout_ms` is the guest-requested I/O timeout in milliseconds
     /// (`0` = use the host default); see `effective_timeout`.
     ///
-    /// `len` is capped at [`MAX_READ_LEN`]; like any socket read, this may
-    /// return fewer bytes than requested.
+    /// `len` is capped at 1 MiB; like any socket read, this may return fewer
+    /// bytes than requested.
     pub async fn tcp_read(
         &mut self,
         handle: u32,
@@ -783,8 +783,8 @@ impl ConnectionManager {
     /// `timeout_ms` is the guest-requested I/O timeout in milliseconds
     /// (`0` = use the host default); see `effective_timeout`.
     ///
-    /// `len` is capped at [`MAX_READ_LEN`]; like any socket read, this may
-    /// return fewer bytes than requested.
+    /// `len` is capped at 1 MiB; like any socket read, this may return fewer
+    /// bytes than requested.
     pub async fn tls_read(
         &mut self,
         handle: u32,
