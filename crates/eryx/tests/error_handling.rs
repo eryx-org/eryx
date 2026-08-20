@@ -547,6 +547,91 @@ async fn test_execution_timeout_allows_fast_code() {
     assert!(result.unwrap().stdout.contains("499500"));
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_concurrent_timeouts_use_one_shared_epoch_clock() {
+    let executor = get_shared_executor();
+    let mut first = SessionExecutor::new(Arc::clone(&executor), &[])
+        .await
+        .expect("Failed to create first session");
+    let mut second = SessionExecutor::new(executor, &[])
+        .await
+        .expect("Failed to create second session");
+    let timeout = std::time::Duration::from_millis(400);
+    first.set_execution_timeout(Some(timeout));
+    second.set_execution_timeout(Some(timeout));
+
+    let start = std::time::Instant::now();
+    let first = tokio::spawn(async move { first.execute("while True: pass").run().await });
+    let second = tokio::spawn(async move { second.execute("while True: pass").run().await });
+    let (first, second) = tokio::join!(first, second);
+    let elapsed = start.elapsed();
+
+    for result in [first, second] {
+        let error = result
+            .expect("Execution task should not panic")
+            .unwrap_err();
+        assert!(
+            matches!(error, eryx::Error::Timeout(_)),
+            "Expected timeout, got {error:?}"
+        );
+    }
+    assert!(
+        elapsed >= std::time::Duration::from_millis(300),
+        "Concurrent executions advanced the shared epoch too quickly: {elapsed:?}"
+    );
+    assert!(
+        elapsed < std::time::Duration::from_secs(2),
+        "Concurrent executions did not time out promptly: {elapsed:?}"
+    );
+}
+
+#[cfg(target_os = "linux")]
+fn epoch_ticker_thread_count() -> usize {
+    std::fs::read_dir("/proc/self/task")
+        .ok()
+        .into_iter()
+        .flatten()
+        .filter_map(Result::ok)
+        .filter_map(|entry| std::fs::read_to_string(entry.path().join("comm")).ok())
+        // Linux limits the comm field to 15 bytes, truncating the full name.
+        .filter(|name| name.trim().starts_with("eryx-epoch-tick"))
+        .count()
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn test_execution_unwinds_do_not_leave_epoch_ticker_threads() {
+    let executor = get_shared_executor();
+    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    let ticker_count = epoch_ticker_thread_count();
+    assert_eq!(
+        ticker_count, 1,
+        "shared engine should have exactly one epoch ticker"
+    );
+
+    for _ in 0..3 {
+        let result = executor
+            .execute("while True: pass")
+            .with_timeout(std::time::Duration::from_millis(50))
+            .run()
+            .await;
+        assert!(matches!(result, Err(eryx::Error::Timeout(_))));
+
+        let result = executor
+            .execute("raise ValueError('unwind')")
+            .with_timeout(std::time::Duration::from_millis(50))
+            .run()
+            .await;
+        assert!(matches!(result, Err(eryx::Error::PythonException(_))));
+    }
+
+    assert_eq!(
+        epoch_ticker_thread_count(),
+        ticker_count,
+        "execution unwinds must not leave per-execution epoch tickers"
+    );
+}
+
 #[tokio::test]
 async fn test_session_recovers_after_timeout() {
     use std::time::Duration;
