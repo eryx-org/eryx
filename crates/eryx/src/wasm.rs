@@ -34,12 +34,48 @@ use crate::cache::{CacheKey, InstancePreCache};
 use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 use wasmtime::component::{Accessor, Component, HasSelf, Linker, ResourceTable};
-use wasmtime::{AsContextMut, Config, Engine, ResourceLimiter, Store};
+use wasmtime::{AsContextMut, Config, Engine, ResourceLimiter, Store, UpdateDeadline};
 use wasmtime_wasi::{DirPerms, FilePerms, WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView};
 
 use crate::callback::Callback;
 use crate::error::Error;
 use crate::trace::TraceEvent;
+
+/// Interval between increments of the process-wide epoch ticker.
+pub(crate) const EPOCH_TICK_INTERVAL: Duration = Duration::from_millis(10);
+
+/// Convert an execution timeout into a number of epoch ticks.
+pub(crate) fn epoch_ticks(timeout: Duration) -> u64 {
+    let ticks = timeout.as_millis() / EPOCH_TICK_INTERVAL.as_millis();
+    u64::try_from(ticks).unwrap_or(u64::MAX / 2).max(1)
+}
+
+/// Start the process-lifetime epoch ticker for the shared engine once.
+pub(crate) fn ensure_epoch_ticker(engine: &Engine) -> std::result::Result<(), Error> {
+    use std::sync::OnceLock;
+
+    static EPOCH_TICKER: OnceLock<std::result::Result<(), String>> = OnceLock::new();
+
+    EPOCH_TICKER
+        .get_or_init(|| {
+            let ticker_engine = engine.clone();
+            // Use a dedicated OS thread because guest execution can block the Tokio
+            // runtime. Epochs must continue advancing independently of async scheduling.
+            std::thread::Builder::new()
+                .name("eryx-epoch-ticker".to_string())
+                .spawn(move || {
+                    loop {
+                        std::thread::sleep(EPOCH_TICK_INTERVAL);
+                        ticker_engine.increment_epoch();
+                    }
+                })
+                .map(|_| ())
+                .map_err(|error| format!("Failed to start epoch ticker: {error}"))
+        })
+        .as_ref()
+        .map(|_| ())
+        .map_err(|error| Error::WasmEngine(error.clone()))
+}
 
 /// The result a callback handler sends back to the `invoke` host import.
 ///
@@ -1243,17 +1279,13 @@ impl PythonExecutor {
     /// Returns an error if engine creation fails (only on first call).
     pub fn shared_engine() -> std::result::Result<Engine, Error> {
         use std::sync::OnceLock;
-        static SHARED_ENGINE: OnceLock<Engine> = OnceLock::new();
+        static SHARED_ENGINE: OnceLock<std::result::Result<Engine, String>> = OnceLock::new();
 
-        // Fast path: engine already initialized
-        if let Some(engine) = SHARED_ENGINE.get() {
-            return Ok(engine.clone());
-        }
-
-        // Slow path: create engine (may race with other threads)
-        let engine = Self::create_engine()?;
-        // get_or_init handles the race - only one engine is kept
-        Ok(SHARED_ENGINE.get_or_init(|| engine).clone())
+        SHARED_ENGINE
+            .get_or_init(|| Self::create_engine().map_err(|error| error.to_string()))
+            .as_ref()
+            .cloned()
+            .map_err(|error| Error::WasmEngine(error.clone()))
     }
 
     /// Create a new executor by loading a WASM component from bytes.
@@ -2380,62 +2412,46 @@ impl PythonExecutor {
         // Now set up epoch-based deadline for execution timeout and/or cancellation.
         // This is done AFTER instantiation so the timeout only applies to user code execution,
         // not Python initialization.
-        const EPOCH_TICK_MS: u64 = 10;
-
         // Track whether execution was cancelled (vs timed out)
         let was_cancelled = Arc::new(AtomicBool::new(false));
 
-        // Set up epoch ticker if we have a timeout or cancellation token
-        let epoch_ticker = if execution_timeout.is_some() || cancellation_token.is_some() {
-            // Set deadline based on timeout, or use a moderate value for cancellation-only
-            if let Some(timeout) = execution_timeout {
-                let ticks_until_timeout = timeout.as_millis() as u64 / EPOCH_TICK_MS;
-                let ticks = ticks_until_timeout.max(1);
-                store.set_epoch_deadline(ticks);
-            } else {
-                // No timeout but we have cancellation - set a reachable deadline.
-                // When cancelled, we bump epoch by more than this to trigger interrupt.
-                const CANCELLATION_DEADLINE: u64 = 10000;
-                store.set_epoch_deadline(CANCELLATION_DEADLINE);
-            }
+        // Untimed executions do not need the epoch clock. Once started, the single
+        // process-lifetime ticker is shared by all timed and cancellable executions.
+        if execution_timeout.is_some() || cancellation_token.is_some() {
+            ensure_epoch_ticker(&self.engine)?;
+        }
 
-            // Configure the store to trap when the epoch deadline is reached
-            store.epoch_deadline_trap();
-
-            // Spawn a thread to increment the engine's epoch periodically.
-            // We use a std::thread instead of tokio::spawn because the WASM
-            // execution may block the tokio runtime, preventing async tasks
-            // from running.
-            let engine = self.engine.clone();
-            let stop_flag = Arc::new(AtomicBool::new(false));
-            let stop_flag_clone = Arc::clone(&stop_flag);
+        if let Some(cancel_token) = cancellation_token.clone() {
+            let mut timeout_ticks = execution_timeout.map(epoch_ticks);
             let was_cancelled_clone = Arc::clone(&was_cancelled);
-            let cancel_token = cancellation_token.clone();
-            std::thread::spawn(move || {
-                while !stop_flag_clone.load(Ordering::Relaxed) {
-                    // Check for cancellation
-                    if let Some(ref token) = cancel_token
-                        && token.is_cancelled()
-                    {
-                        was_cancelled_clone.store(true, Ordering::Relaxed);
-                        // Bump epoch to exceed CANCELLATION_DEADLINE and trigger interrupt
-                        for _ in 0..10001 {
-                            engine.increment_epoch();
-                        }
-                        break;
+            // Check cancellation once per epoch tick. The remaining timeout is kept in
+            // this Store's callback so executions share only the clock, not deadline state.
+            store.set_epoch_deadline(1);
+            store.epoch_deadline_callback(move |_store| {
+                if cancel_token.is_cancelled() {
+                    was_cancelled_clone.store(true, Ordering::Relaxed);
+                    return Ok(UpdateDeadline::Interrupt);
+                }
+
+                match timeout_ticks.as_mut() {
+                    Some(ticks) if *ticks <= 1 => Ok(UpdateDeadline::Interrupt),
+                    Some(ticks) => {
+                        *ticks -= 1;
+                        Ok(UpdateDeadline::Continue(1))
                     }
-                    std::thread::sleep(Duration::from_millis(EPOCH_TICK_MS));
-                    engine.increment_epoch();
+                    None => Ok(UpdateDeadline::Continue(1)),
                 }
             });
-            Some(stop_flag)
+        } else if let Some(timeout) = execution_timeout {
+            store.set_epoch_deadline(epoch_ticks(timeout));
+            store.epoch_deadline_trap();
         } else {
-            // No timeout and no cancellation - set a very high deadline that won't be reached
-            // (but not u64::MAX to avoid overflow when added to current epoch)
+            // The shared ticker may be running for another Store, so untimed Stores need
+            // a deadline far enough in the future to remain effectively unlimited. Avoid
+            // u64::MAX because Wasmtime adds the deadline to the current epoch.
             store.set_epoch_deadline(u64::MAX / 2);
             store.epoch_deadline_trap();
-            None::<Arc<AtomicBool>>
-        };
+        }
 
         // Call the async execute export
         let code_owned = code.to_string();
@@ -2466,11 +2482,6 @@ impl PythonExecutor {
                 .await
         };
 
-        // Stop the epoch ticker thread if it was running
-        if let Some(stop_flag) = epoch_ticker {
-            stop_flag.store(true, Ordering::Relaxed);
-        }
-
         // Classify errors using proper type matching. wasmtime::Error is anyhow::Error,
         // so we downcast to wasmtime::Trap for WASM-level traps (Interrupt, OutOfFuel).
         // The async_timeout_elapsed flag covers blocking WASI host calls (e.g. time.sleep).
@@ -2478,7 +2489,11 @@ impl PythonExecutor {
             if async_timeout_elapsed
                 || e.downcast_ref::<wasmtime::Trap>() == Some(&wasmtime::Trap::Interrupt)
             {
-                if was_cancelled.load(Ordering::Relaxed) {
+                if was_cancelled.load(Ordering::Relaxed)
+                    || cancellation_token
+                        .as_ref()
+                        .is_some_and(CancellationToken::is_cancelled)
+                {
                     Error::Cancelled
                 } else {
                     Error::Timeout(execution_timeout.unwrap_or_default())

@@ -35,7 +35,6 @@
 //! persistence to storage. The Python runtime uses pickle for serialization.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use tokio::sync::mpsc;
@@ -957,6 +956,11 @@ impl SessionExecutor {
     ) -> Result<ExecutionOutput, Error> {
         crate::error::validate_user_code(code)?;
 
+        let execution_timeout = self.execution_timeout;
+        if execution_timeout.is_some() {
+            crate::wasm::ensure_epoch_ticker(self.executor.engine())?;
+        }
+
         let start = Instant::now();
 
         // Take ownership of store and bindings for async execution
@@ -1012,40 +1016,16 @@ impl SessionExecutor {
 
         // Set up epoch-based deadline if timeout is configured.
         // This allows us to interrupt WASM execution even in tight loops.
-        let execution_timeout = self.execution_timeout;
-        let epoch_ticker = if let Some(timeout) = execution_timeout {
-            // Set deadline to N epoch ticks from now (we'll increment epochs over time)
-            // We use a granularity of 10ms for epoch ticks
-            const EPOCH_TICK_MS: u64 = 10;
-            let ticks_until_timeout = timeout.as_millis() as u64 / EPOCH_TICK_MS;
-            // Ensure at least 1 tick
-            let ticks = ticks_until_timeout.max(1);
-            store.set_epoch_deadline(ticks);
-
-            // Configure the store to trap when the epoch deadline is reached
+        if let Some(timeout) = execution_timeout {
+            store.set_epoch_deadline(crate::wasm::epoch_ticks(timeout));
             store.epoch_deadline_trap();
-
-            // Spawn a thread to increment the engine's epoch periodically.
-            // We use a std::thread instead of tokio::spawn because the WASM
-            // execution may block the tokio runtime, preventing async tasks
-            // from running.
-            let engine = self.executor.engine().clone();
-            let stop_flag = Arc::new(AtomicBool::new(false));
-            let stop_flag_clone = Arc::clone(&stop_flag);
-            std::thread::spawn(move || {
-                while !stop_flag_clone.load(Ordering::Relaxed) {
-                    std::thread::sleep(Duration::from_millis(EPOCH_TICK_MS));
-                    engine.increment_epoch();
-                }
-            });
-            Some(stop_flag)
         } else {
-            // No timeout - set a very high deadline that won't be reached
-            // (but not u64::MAX to avoid overflow when added to current epoch)
+            // The shared ticker may be running for another Store, so untimed Stores need
+            // a deadline far enough in the future to remain effectively unlimited. Avoid
+            // u64::MAX because Wasmtime adds the deadline to the current epoch.
             store.set_epoch_deadline(u64::MAX / 2);
             store.epoch_deadline_trap();
-            None::<Arc<AtomicBool>>
-        };
+        }
 
         // Execute the code.
         // Wrap in tokio::time::timeout so that blocking WASI host calls (e.g. poll_oneoff
@@ -1073,11 +1053,6 @@ impl SessionExecutor {
                 .run_concurrent(async |accessor| bindings.call_execute(accessor, code_owned).await)
                 .await
         };
-
-        // Stop the epoch ticker thread if it was running
-        if let Some(stop_flag) = epoch_ticker {
-            stop_flag.store(true, Ordering::Relaxed);
-        }
 
         // Clear channels after execution and capture peak memory
         // Capture any suspension reason before the store is restored: a callback
