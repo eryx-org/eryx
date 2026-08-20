@@ -42,7 +42,9 @@ use tokio::sync::mpsc;
 use wasmtime::Store;
 use wasmtime::component::ResourceTable;
 // wasmtime 48 collapsed DirPerms/FilePerms into FsPerms; the fine-grained
-// flags the VFS enforces now live in eryx-vfs.
+// flags the VFS enforces now live in eryx-vfs. Only `build_hybrid_vfs_context`
+// uses them, so the import carries that function's feature gate.
+#[cfg(feature = "vfs")]
 use eryx_vfs::{DirPerms, FilePerms};
 use wasmtime_wasi::{FsPerms, WasiCtx, WasiCtxBuilder};
 

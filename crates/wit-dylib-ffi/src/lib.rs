@@ -326,13 +326,28 @@ macro_rules! export {
         }
 
         #[unsafe(no_mangle)]
-        pub unsafe extern "C" fn wit_dylib_pop_iter_next(cx: *mut u8, ty: usize) {
-            unsafe { <$name as $crate::RawInterpreter>::raw_pop_iter_next(cx, ty) }
+        pub unsafe extern "C" fn wit_dylib_pop_list_iter_next(cx: *mut u8, ty: usize) {
+            unsafe { <$name as $crate::RawInterpreter>::raw_pop_list_iter_next(cx, ty) }
         }
 
         #[unsafe(no_mangle)]
-        pub unsafe extern "C" fn wit_dylib_pop_iter(cx: *mut u8, ty: usize) {
-            unsafe { <$name as $crate::RawInterpreter>::raw_pop_iter(cx, ty) }
+        pub unsafe extern "C" fn wit_dylib_pop_list_iter(cx: *mut u8, ty: usize) {
+            unsafe { <$name as $crate::RawInterpreter>::raw_pop_list_iter(cx, ty) }
+        }
+
+        #[unsafe(no_mangle)]
+        pub unsafe extern "C" fn wit_dylib_pop_map(cx: *mut u8, ty: usize) -> usize {
+            unsafe { <$name as $crate::RawInterpreter>::raw_pop_map(cx, ty) }
+        }
+
+        #[unsafe(no_mangle)]
+        pub unsafe extern "C" fn wit_dylib_pop_map_iter_next(cx: *mut u8, ty: usize) {
+            unsafe { <$name as $crate::RawInterpreter>::raw_pop_map_iter_next(cx, ty) }
+        }
+
+        #[unsafe(no_mangle)]
+        pub unsafe extern "C" fn wit_dylib_pop_map_iter(cx: *mut u8, ty: usize) {
+            unsafe { <$name as $crate::RawInterpreter>::raw_pop_map_iter(cx, ty) }
         }
 
         #[unsafe(no_mangle)]
@@ -348,6 +363,16 @@ macro_rules! export {
         #[unsafe(no_mangle)]
         pub unsafe extern "C" fn wit_dylib_list_append(cx: *mut u8, ty: usize) {
             unsafe { <$name as $crate::RawInterpreter>::raw_list_append(cx, ty) }
+        }
+
+        #[unsafe(no_mangle)]
+        pub unsafe extern "C" fn wit_dylib_push_map(cx: *mut u8, ty: usize, len: usize) {
+            unsafe { <$name as $crate::RawInterpreter>::raw_push_map(cx, ty, len) }
+        }
+
+        #[unsafe(no_mangle)]
+        pub unsafe extern "C" fn wit_dylib_map_append(cx: *mut u8, ty: usize) {
+            unsafe { <$name as $crate::RawInterpreter>::raw_map_append(cx, ty) }
         }
 
         fn main() {
@@ -422,8 +447,24 @@ pub trait Call {
         None
     }
     fn pop_list(&mut self, ty: List) -> usize;
-    fn pop_iter_next(&mut self, ty: List);
-    fn pop_iter(&mut self, ty: List);
+    fn pop_list_iter_next(&mut self, ty: List);
+    fn pop_list_iter(&mut self, ty: List);
+
+    // WIT `map<k, v>` marshalling. wit-dylib imports these unconditionally, so
+    // the symbols have to exist, but no eryx world declares a map type and the
+    // generated bindings only call them for a `TypeDefKind::Map`. The defaults
+    // therefore panic rather than silently mis-marshalling: a map appearing in
+    // a future WIT should fail loudly at the first call. `ty` is a raw map type
+    // index — there is no `Map` reflection type because nothing decodes one.
+    fn pop_map(&mut self, ty: usize) -> usize {
+        panic!("WIT map types are not supported by this interpreter (map type {ty})")
+    }
+    fn pop_map_iter_next(&mut self, ty: usize) {
+        panic!("WIT map types are not supported by this interpreter (map type {ty})")
+    }
+    fn pop_map_iter(&mut self, ty: usize) {
+        panic!("WIT map types are not supported by this interpreter (map type {ty})")
+    }
 
     fn push_bool(&mut self, val: bool);
     fn push_char(&mut self, val: char);
@@ -455,6 +496,15 @@ pub trait Call {
     }
     fn push_list(&mut self, ty: List, capacity: usize);
     fn list_append(&mut self, ty: List);
+
+    /// See the `pop_map` family above — unreachable for eryx's worlds.
+    fn push_map(&mut self, ty: usize, capacity: usize) {
+        let _ = capacity;
+        panic!("WIT map types are not supported by this interpreter (map type {ty})")
+    }
+    fn map_append(&mut self, ty: usize) {
+        panic!("WIT map types are not supported by this interpreter (map type {ty})")
+    }
 }
 
 static mut WIT_T: *const ffi::wit_t = ptr::null_mut();
@@ -724,20 +774,35 @@ pub trait RawInterpreter: Interpreter {
         }
     }
 
-    unsafe fn raw_pop_iter_next(cx: *mut u8, ty: usize) {
-        debug_println!("pop_iter_next({cx:?}, {ty})");
+    unsafe fn raw_pop_list_iter_next(cx: *mut u8, ty: usize) {
+        debug_println!("pop_list_iter_next({cx:?}, {ty})");
         unsafe {
             let wit = Wit::from_raw(WIT_T);
-            Self::cx_mut(cx).pop_iter_next(wit.list(ty))
+            Self::cx_mut(cx).pop_list_iter_next(wit.list(ty))
         }
     }
 
-    unsafe fn raw_pop_iter(cx: *mut u8, ty: usize) {
-        debug_println!("pop_iter({cx:?}, {ty})");
+    unsafe fn raw_pop_list_iter(cx: *mut u8, ty: usize) {
+        debug_println!("pop_list_iter({cx:?}, {ty})");
         unsafe {
             let wit = Wit::from_raw(WIT_T);
-            Self::cx_mut(cx).pop_iter(wit.list(ty))
+            Self::cx_mut(cx).pop_list_iter(wit.list(ty))
         }
+    }
+
+    unsafe fn raw_pop_map(cx: *mut u8, ty: usize) -> usize {
+        debug_println!("pop_map({cx:?}, {ty})");
+        unsafe { Self::cx_mut(cx).pop_map(ty) }
+    }
+
+    unsafe fn raw_pop_map_iter_next(cx: *mut u8, ty: usize) {
+        debug_println!("pop_map_iter_next({cx:?}, {ty})");
+        unsafe { Self::cx_mut(cx).pop_map_iter_next(ty) }
+    }
+
+    unsafe fn raw_pop_map_iter(cx: *mut u8, ty: usize) {
+        debug_println!("pop_map_iter({cx:?}, {ty})");
+        unsafe { Self::cx_mut(cx).pop_map_iter(ty) }
     }
 
     unsafe fn raw_push_bool(cx: *mut u8, val: bool) {
@@ -918,6 +983,16 @@ pub trait RawInterpreter: Interpreter {
             let wit = Wit::from_raw(WIT_T);
             Self::cx_mut(cx).list_append(wit.list(ty))
         }
+    }
+
+    unsafe fn raw_push_map(cx: *mut u8, ty: usize, len: usize) {
+        debug_println!("push_map({cx:?}, {ty}, {len})");
+        unsafe { Self::cx_mut(cx).push_map(ty, len) }
+    }
+
+    unsafe fn raw_map_append(cx: *mut u8, ty: usize) {
+        debug_println!("map_append({cx:?}, {ty})");
+        unsafe { Self::cx_mut(cx).map_append(ty) }
     }
 }
 
