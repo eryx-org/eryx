@@ -50,6 +50,31 @@ pub(crate) fn epoch_ticks(timeout: Duration) -> u64 {
     u64::try_from(ticks).unwrap_or(u64::MAX / 2).max(1)
 }
 
+/// Start the process-lifetime epoch ticker for the shared engine once.
+pub(crate) fn ensure_epoch_ticker(engine: &Engine) -> std::result::Result<(), Error> {
+    use std::sync::OnceLock;
+
+    static EPOCH_TICKER: OnceLock<std::result::Result<(), String>> = OnceLock::new();
+
+    EPOCH_TICKER
+        .get_or_init(|| {
+            let ticker_engine = engine.clone();
+            std::thread::Builder::new()
+                .name("eryx-epoch-ticker".to_string())
+                .spawn(move || {
+                    loop {
+                        std::thread::sleep(EPOCH_TICK_INTERVAL);
+                        ticker_engine.increment_epoch();
+                    }
+                })
+                .map(|_| ())
+                .map_err(|error| format!("Failed to start epoch ticker: {error}"))
+        })
+        .as_ref()
+        .map(|_| ())
+        .map_err(|error| Error::WasmEngine(error.clone()))
+}
+
 /// The result a callback handler sends back to the `invoke` host import.
 ///
 /// Distinguishes a successful result and an ordinary error (both surface to
@@ -1255,20 +1280,7 @@ impl PythonExecutor {
         static SHARED_ENGINE: OnceLock<std::result::Result<Engine, String>> = OnceLock::new();
 
         SHARED_ENGINE
-            .get_or_init(|| {
-                let engine = Self::create_engine().map_err(|error| error.to_string())?;
-                let ticker_engine = engine.clone();
-                std::thread::Builder::new()
-                    .name("eryx-epoch-ticker".to_string())
-                    .spawn(move || {
-                        loop {
-                            std::thread::sleep(EPOCH_TICK_INTERVAL);
-                            ticker_engine.increment_epoch();
-                        }
-                    })
-                    .map_err(|error| format!("Failed to start epoch ticker: {error}"))?;
-                Ok(engine)
-            })
+            .get_or_init(|| Self::create_engine().map_err(|error| error.to_string()))
             .as_ref()
             .cloned()
             .map_err(|error| Error::WasmEngine(error.clone()))
@@ -2400,6 +2412,10 @@ impl PythonExecutor {
         // not Python initialization.
         // Track whether execution was cancelled (vs timed out)
         let was_cancelled = Arc::new(AtomicBool::new(false));
+
+        if execution_timeout.is_some() || cancellation_token.is_some() {
+            ensure_epoch_ticker(&self.engine)?;
+        }
 
         if let Some(cancel_token) = cancellation_token.clone() {
             let mut timeout_ticks = execution_timeout.map(epoch_ticks);

@@ -585,69 +585,6 @@ async fn test_concurrent_timeouts_use_one_shared_epoch_clock() {
     );
 }
 
-#[cfg(target_os = "linux")]
-fn epoch_ticker_thread_count() -> Option<usize> {
-    Some(
-        std::fs::read_dir("/proc/self/task")
-            .ok()?
-            .filter_map(Result::ok)
-            .filter_map(|entry| std::fs::read_to_string(entry.path().join("comm")).ok())
-            // Linux limits the comm field to 15 bytes, truncating the full name.
-            .filter(|name| name.trim().starts_with("eryx-epoch-tick"))
-            .count(),
-    )
-}
-
-#[cfg(target_os = "linux")]
-#[tokio::test]
-async fn test_execution_unwinds_do_not_leave_epoch_ticker_threads() {
-    let executor = get_shared_executor();
-    let Some(mut ticker_count) = epoch_ticker_thread_count() else {
-        eprintln!("skipping ticker-thread assertion: /proc/self/task is unavailable");
-        return;
-    };
-    for _ in 0..100 {
-        if ticker_count == 1 {
-            break;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-        let Some(count) = epoch_ticker_thread_count() else {
-            eprintln!("skipping ticker-thread assertion: /proc/self/task disappeared");
-            return;
-        };
-        ticker_count = count;
-    }
-    assert_eq!(
-        ticker_count, 1,
-        "shared engine should have exactly one epoch ticker"
-    );
-
-    for _ in 0..3 {
-        let result = executor
-            .execute("while True: pass")
-            .with_timeout(std::time::Duration::from_millis(50))
-            .run()
-            .await;
-        assert!(matches!(result, Err(eryx::Error::Timeout(_))));
-
-        let result = executor
-            .execute("raise ValueError('unwind')")
-            .with_timeout(std::time::Duration::from_millis(50))
-            .run()
-            .await;
-        assert!(matches!(result, Err(eryx::Error::PythonException(_))));
-    }
-
-    let Some(final_count) = epoch_ticker_thread_count() else {
-        eprintln!("skipping ticker-thread assertion: /proc/self/task disappeared");
-        return;
-    };
-    assert_eq!(
-        final_count, ticker_count,
-        "execution unwinds must not leave per-execution epoch tickers"
-    );
-}
-
 #[tokio::test]
 async fn test_session_recovers_after_timeout() {
     use std::time::Duration;

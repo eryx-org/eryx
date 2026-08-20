@@ -956,6 +956,11 @@ impl SessionExecutor {
     ) -> Result<ExecutionOutput, Error> {
         crate::error::validate_user_code(code)?;
 
+        let execution_timeout = self.execution_timeout;
+        if execution_timeout.is_some() {
+            crate::wasm::ensure_epoch_ticker(self.executor.engine())?;
+        }
+
         let start = Instant::now();
 
         // Take ownership of store and bindings for async execution
@@ -1011,7 +1016,6 @@ impl SessionExecutor {
 
         // Set up epoch-based deadline if timeout is configured.
         // This allows us to interrupt WASM execution even in tight loops.
-        let execution_timeout = self.execution_timeout;
         if let Some(timeout) = execution_timeout {
             store.set_epoch_deadline(crate::wasm::epoch_ticks(timeout));
             store.epoch_deadline_trap();
