@@ -135,7 +135,7 @@ fn create_callback_future(
         let callback_result = if let Some(timeout) = timeout {
             tokio::time::timeout(timeout, invoke_future)
                 .await
-                .map_or(Err(CallbackError::Timeout), |r| r)
+                .unwrap_or(Err(CallbackError::Timeout))
         } else {
             invoke_future.await
         };
