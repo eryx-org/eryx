@@ -113,7 +113,13 @@ jobs:
             crates/eryx-runtime/runtime.cwasm
             crates/eryx-runtime/prebuilt/
             crates/eryx-wasm-runtime/target/liberyx_runtime.so
-          key: wasm-runtime-v2-${{ hashFiles('crates/eryx-wasm-runtime/src/**', 'crates/eryx-wasm-runtime/clock_stubs.c', 'crates/eryx-wasm-runtime/Cargo.toml', 'crates/eryx-runtime/build.rs', 'crates/eryx-runtime/wit/runtime.wit', 'crates/eryx-runtime/libs/*.zst', 'Cargo.lock') }}
+          # NOTE: this key does not cover the cwasm's CPU-feature configuration,
+          # which comes from `ERYX_CPU_FEATURES` below and the flag lists in
+          # crates/eryx/src/wasm.rs (compiled into the `precompile` example).
+          # Changing either without busting the version prefix silently reuses a
+          # cwasm built with the old settings. Bumped v2 -> v3 for the VNNI flags
+          # added under wasmtime 48.
+          key: wasm-runtime-v3-${{ hashFiles('crates/eryx-wasm-runtime/src/**', 'crates/eryx-wasm-runtime/clock_stubs.c', 'crates/eryx-wasm-runtime/Cargo.toml', 'crates/eryx-runtime/build.rs', 'crates/eryx-runtime/wit/runtime.wit', 'crates/eryx-runtime/libs/*.zst', 'Cargo.lock') }}
 
       - name: Touch cached artifacts
         if: steps.wasm-cache.outputs.cache-hit == 'true'
