@@ -59,6 +59,8 @@ pub(crate) fn ensure_epoch_ticker(engine: &Engine) -> std::result::Result<(), Er
     EPOCH_TICKER
         .get_or_init(|| {
             let ticker_engine = engine.clone();
+            // Use a dedicated OS thread because guest execution can block the Tokio
+            // runtime. Epochs must continue advancing independently of async scheduling.
             std::thread::Builder::new()
                 .name("eryx-epoch-ticker".to_string())
                 .spawn(move || {
@@ -2413,6 +2415,8 @@ impl PythonExecutor {
         // Track whether execution was cancelled (vs timed out)
         let was_cancelled = Arc::new(AtomicBool::new(false));
 
+        // Untimed executions do not need the epoch clock. Once started, the single
+        // process-lifetime ticker is shared by all timed and cancellable executions.
         if execution_timeout.is_some() || cancellation_token.is_some() {
             ensure_epoch_ticker(&self.engine)?;
         }
@@ -2420,6 +2424,8 @@ impl PythonExecutor {
         if let Some(cancel_token) = cancellation_token.clone() {
             let mut timeout_ticks = execution_timeout.map(epoch_ticks);
             let was_cancelled_clone = Arc::clone(&was_cancelled);
+            // Check cancellation once per epoch tick. The remaining timeout is kept in
+            // this Store's callback so executions share only the clock, not deadline state.
             store.set_epoch_deadline(1);
             store.epoch_deadline_callback(move |_store| {
                 if cancel_token.is_cancelled() {
@@ -2440,8 +2446,9 @@ impl PythonExecutor {
             store.set_epoch_deadline(epoch_ticks(timeout));
             store.epoch_deadline_trap();
         } else {
-            // No timeout and no cancellation - set a very high deadline that won't be reached
-            // (but not u64::MAX to avoid overflow when added to current epoch)
+            // The shared ticker may be running for another Store, so untimed Stores need
+            // a deadline far enough in the future to remain effectively unlimited. Avoid
+            // u64::MAX because Wasmtime adds the deadline to the current epoch.
             store.set_epoch_deadline(u64::MAX / 2);
             store.epoch_deadline_trap();
         }

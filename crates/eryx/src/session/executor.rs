@@ -1020,8 +1020,9 @@ impl SessionExecutor {
             store.set_epoch_deadline(crate::wasm::epoch_ticks(timeout));
             store.epoch_deadline_trap();
         } else {
-            // No timeout - set a very high deadline that won't be reached
-            // (but not u64::MAX to avoid overflow when added to current epoch)
+            // The shared ticker may be running for another Store, so untimed Stores need
+            // a deadline far enough in the future to remain effectively unlimited. Avoid
+            // u64::MAX because Wasmtime adds the deadline to the current epoch.
             store.set_epoch_deadline(u64::MAX / 2);
             store.epoch_deadline_trap();
         }
