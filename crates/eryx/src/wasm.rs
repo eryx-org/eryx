@@ -35,7 +35,7 @@ use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 use wasmtime::component::{Accessor, Component, HasSelf, Linker, ResourceTable};
 use wasmtime::{AsContextMut, Config, Engine, ResourceLimiter, Store};
-use wasmtime_wasi::{DirPerms, FilePerms, WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView};
+use wasmtime_wasi::{FsPerms, WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView};
 
 use crate::callback::Callback;
 use crate::error::Error;
@@ -2204,12 +2204,7 @@ impl PythonExecutor {
             // PYTHONHOME tells Python where to find the standard library
             wasi_builder.env("PYTHONHOME", "/python-stdlib");
             wasi_builder
-                .preopened_dir(
-                    stdlib_path,
-                    "/python-stdlib",
-                    DirPerms::READ,
-                    FilePerms::READ,
-                )
+                .preopened_dir(stdlib_path, "/python-stdlib", FsPerms::ReadOnly)
                 .map_err(|e| {
                     Error::Initialization(format!("Failed to mount Python stdlib: {e}"))
                 })?;
@@ -2229,12 +2224,7 @@ impl PythonExecutor {
                 format!("/site-packages-{i}")
             };
             wasi_builder
-                .preopened_dir(
-                    site_packages_path,
-                    &mount_path,
-                    DirPerms::READ,
-                    FilePerms::READ,
-                )
+                .preopened_dir(site_packages_path, &mount_path, FsPerms::ReadOnly)
                 .map_err(|e| Error::Initialization(format!("Failed to mount {mount_path}: {e}")))?;
         }
 

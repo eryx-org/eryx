@@ -97,9 +97,12 @@ fn test_link_runtime() -> Result<(), Box<dyn std::error::Error>> {
     // Order matters! Dependencies must come before dependents (same as build.rs)
     println!("Linking all libraries into component...");
 
-    let linker = Linker::default()
-        .validate(true)
-        .use_built_in_libdl(true)
+    // wit-component 0.257 turned `Linker` into a `&mut self` builder and moved
+    // `validate`/`adapter` onto the inner `ComponentEncoder`.
+    let mut linker = Linker::default();
+    linker.use_built_in_libdl(true);
+    linker.encoder().validate(true);
+    linker
         // WASI emulation libs
         .library("libwasi-emulated-process-clocks.so", &wasi_clocks, false)?
         .library("libwasi-emulated-signal.so", &wasi_signal, false)?
@@ -113,8 +116,11 @@ fn test_link_runtime() -> Result<(), Box<dyn std::error::Error>> {
         .library("libpython3.14.so", &libpython, false)?
         // Our runtime and bindings
         .library("liberyx_runtime.so", &runtime, false)?
-        .library("liberyx_bindings.so", &bindings, false)?
-        // WASI adapter
+        .library("liberyx_bindings.so", &bindings, false)?;
+
+    // WASI adapter
+    linker
+        .encoder()
         .adapter("wasi_snapshot_preview1", &adapter)?;
 
     let component = linker.encode()?;

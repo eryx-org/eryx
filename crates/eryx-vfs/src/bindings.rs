@@ -107,7 +107,7 @@ pub use generated::wasi::filesystem::{preopens, types};
 pub type VfsFsResult<T> = Result<T, VfsFsError>;
 
 // Re-export wasmtime-wasi types that we need
-pub use wasmtime_wasi::{DirPerms, FilePerms};
+pub use crate::perms::{DirPerms, FilePerms};
 
 use wasmtime::component::HasData;
 

@@ -41,7 +41,10 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::sync::mpsc;
 use wasmtime::Store;
 use wasmtime::component::ResourceTable;
-use wasmtime_wasi::{DirPerms, FilePerms, WasiCtx, WasiCtxBuilder};
+// wasmtime 48 collapsed DirPerms/FilePerms into FsPerms; the fine-grained
+// flags the VFS enforces now live in eryx-vfs.
+use eryx_vfs::{DirPerms, FilePerms};
+use wasmtime_wasi::{FsPerms, WasiCtx, WasiCtxBuilder};
 
 use crate::callback::Callback;
 use crate::error::Error;
@@ -515,12 +518,7 @@ fn build_wasi_context(executor: &PythonExecutor) -> Result<WasiCtx, Error> {
             wasi_builder.env("PYTHONPATH", pythonpath_parts.join(":"));
         }
         wasi_builder
-            .preopened_dir(
-                stdlib_path,
-                "/python-stdlib",
-                DirPerms::READ,
-                FilePerms::READ,
-            )
+            .preopened_dir(stdlib_path, "/python-stdlib", FsPerms::ReadOnly)
             .map_err(|e| Error::WasmEngine(format!("Failed to mount Python stdlib: {e}")))?;
     }
 
@@ -528,12 +526,7 @@ fn build_wasi_context(executor: &PythonExecutor) -> Result<WasiCtx, Error> {
     for (i, site_packages_path) in site_packages_paths.iter().enumerate() {
         let mount_path = format!("/site-packages-{i}");
         wasi_builder
-            .preopened_dir(
-                site_packages_path,
-                &mount_path,
-                DirPerms::READ,
-                FilePerms::READ,
-            )
+            .preopened_dir(site_packages_path, &mount_path, FsPerms::ReadOnly)
             .map_err(|e| Error::WasmEngine(format!("Failed to mount {mount_path}: {e}")))?;
     }
 

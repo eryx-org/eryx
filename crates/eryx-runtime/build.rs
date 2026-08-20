@@ -355,9 +355,12 @@ fn build_component(manifest_dir: &std::path::Path, runtime_so: &std::path::Path)
 
     // Link all libraries together
     // Order matters! Dependencies must come before dependents
-    let linker = wit_component::Linker::default()
-        .validate(true)
-        .use_built_in_libdl(true)
+    // wit-component 0.257 turned `Linker` into a `&mut self` builder and moved
+    // `validate`/`adapter` onto the inner `ComponentEncoder`.
+    let mut linker = wit_component::Linker::default();
+    linker.use_built_in_libdl(true);
+    linker.encoder().validate(true);
+    linker
         // WASI emulation libs
         .library("libwasi-emulated-process-clocks.so", &wasi_clocks, false)
         .expect("failed to add wasi-clocks")
@@ -381,8 +384,11 @@ fn build_component(manifest_dir: &std::path::Path, runtime_so: &std::path::Path)
         .library("liberyx_runtime.so", &runtime, false)
         .expect("failed to add eryx runtime")
         .library("liberyx_bindings.so", &bindings, false)
-        .expect("failed to add bindings")
-        // WASI adapter
+        .expect("failed to add bindings");
+
+    // WASI adapter
+    linker
+        .encoder()
         .adapter("wasi_snapshot_preview1", &adapter)
         .expect("failed to add WASI adapter");
 

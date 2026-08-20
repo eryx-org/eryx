@@ -74,10 +74,14 @@ pub fn link_extensions(
     bindings: &[u8],
     extensions: Vec<NativeExtension>,
 ) -> Result<Vec<u8>, JsError> {
-    let mut linker = Linker::default().validate(true).use_built_in_libdl(true);
+    // wit-component 0.257 turned `Linker` into a `&mut self` builder and moved
+    // `validate`/`adapter` onto the inner `ComponentEncoder`.
+    let mut linker = Linker::default();
+    linker.use_built_in_libdl(true);
+    linker.encoder().validate(true);
 
     // Add base libraries (order matters for symbol resolution)
-    linker = linker
+    linker
         .library("libwasi-emulated-process-clocks.so", wasi_clocks, false)
         .map_err(|e| JsError::new(&format!("libwasi-emulated-process-clocks.so: {e}")))?
         .library("libwasi-emulated-signal.so", wasi_signal, false)
@@ -104,13 +108,14 @@ pub fn link_extensions(
 
     // Add user's native extensions (dl_openable = true for dlopen/dlsym)
     for ext in &extensions {
-        linker = linker
+        linker
             .library(&ext.name, &ext.bytes, true)
             .map_err(|e| JsError::new(&format!("{}: {e}", ext.name)))?;
     }
 
     // Add WASI adapter
-    linker = linker
+    linker
+        .encoder()
         .adapter("wasi_snapshot_preview1", adapter)
         .map_err(|e| JsError::new(&format!("WASI adapter: {e}")))?;
 

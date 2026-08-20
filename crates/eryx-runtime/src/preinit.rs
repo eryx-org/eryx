@@ -42,7 +42,7 @@ use wasmtime::{
     Config, Engine, Store,
     component::{Component, Instance, Linker, ResourceTable, Val},
 };
-use wasmtime_wasi::{DirPerms, FilePerms, WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView};
+use wasmtime_wasi::{FsPerms, WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView};
 use wasmtime_wizer::{WasmtimeWizerComponent, Wizer};
 
 use crate::linker::{NativeExtension, link_with_extensions};
@@ -138,12 +138,7 @@ pub async fn pre_initialize(
 
     // Mount Python stdlib
     if python_stdlib.exists() {
-        wasi_builder.preopened_dir(
-            python_stdlib,
-            "python-stdlib",
-            DirPerms::READ,
-            FilePerms::READ,
-        )?;
+        wasi_builder.preopened_dir(python_stdlib, "python-stdlib", FsPerms::ReadOnly)?;
     } else {
         return Err(anyhow!(
             "Python stdlib not found at {}",
@@ -154,23 +149,13 @@ pub async fn pre_initialize(
     // Mount site-packages if provided
     let temp_dir = if let Some(site_pkg) = site_packages {
         if site_pkg.exists() {
-            wasi_builder.preopened_dir(
-                site_pkg,
-                "site-packages",
-                DirPerms::READ,
-                FilePerms::READ,
-            )?;
+            wasi_builder.preopened_dir(site_pkg, "site-packages", FsPerms::ReadOnly)?;
         }
         None
     } else {
         // Create empty temp dir for site-packages to avoid errors
         let temp = TempDir::new()?;
-        wasi_builder.preopened_dir(
-            temp.path(),
-            "site-packages",
-            DirPerms::READ,
-            FilePerms::READ,
-        )?;
+        wasi_builder.preopened_dir(temp.path(), "site-packages", FsPerms::ReadOnly)?;
         Some(temp)
     };
 
@@ -211,7 +196,7 @@ pub async fn pre_initialize(
     // Phase 3: Snapshot the initialized state back into the component.
     let snapshot_bytes = wizer
         .snapshot_component(
-            cx,
+            &cx,
             &mut WasmtimeWizerComponent {
                 store: &mut store,
                 instance,
@@ -235,6 +220,18 @@ pub async fn pre_initialize(
 /// modules. However, the component's `CoreInstance` sections still reference
 /// `_initialize` as instantiation arguments. This function adds back no-op
 /// `_initialize` function exports to any module that's missing one.
+/// Slice `bytes` by a wasmparser section range.
+///
+/// wasmparser 0.257 widened section ranges to `u64` so it can describe 64-bit
+/// modules. Everything here is parsed from an in-memory slice, so the narrowing
+/// only fails on a target where the offsets genuinely do not fit in a `usize` —
+/// in which case the buffer could not have been read in the first place.
+fn slice_range<'a>(bytes: &'a [u8], range: &std::ops::Range<u64>) -> Result<&'a [u8]> {
+    let start = usize::try_from(range.start)?;
+    let end = usize::try_from(range.end)?;
+    Ok(&bytes[start..end])
+}
+
 fn restore_initialize_exports(component_bytes: &[u8]) -> Result<Vec<u8>> {
     // Pass 1: Find which modules have _initialize and which import it.
     let mut modules_with_init: HashSet<u32> = HashSet::new();
@@ -247,7 +244,7 @@ fn restore_initialize_exports(component_bytes: &[u8]) -> Result<Vec<u8>> {
             ..
         } = payload?
         {
-            let module_bytes = &component_bytes[range.start..range.end];
+            let module_bytes = slice_range(component_bytes, &range)?;
             // Use a fresh parser at offset 0 for the module slice
             for inner in wasmparser::Parser::new(0).parse_all(module_bytes) {
                 match inner? {
@@ -314,7 +311,7 @@ fn restore_initialize_exports(component_bytes: &[u8]) -> Result<Vec<u8>> {
                 unchecked_range: range,
                 ..
             } => {
-                let module_bytes = &component_bytes[range.start..range.end];
+                let module_bytes = slice_range(component_bytes, &range)?;
 
                 if !modules_with_init.contains(&module_index) {
                     let patched = add_noop_initialize(module_bytes)?;
@@ -334,7 +331,7 @@ fn restore_initialize_exports(component_bytes: &[u8]) -> Result<Vec<u8>> {
                 if let Some((id, range)) = other.as_section() {
                     component.section(&wasm_encoder::RawSection {
                         id,
-                        data: &component_bytes[range.start..range.end],
+                        data: slice_range(component_bytes, &range)?,
                     });
                 }
             }
@@ -433,7 +430,7 @@ fn add_noop_initialize(module_bytes: &[u8]) -> Result<Vec<u8>> {
             wasmparser::Payload::CodeSectionStart { range, .. } => {
                 // Re-parse the code section from the saved range and reencode it,
                 // then append our noop function.
-                let section_data = &module_bytes[range.start..range.end];
+                let section_data = slice_range(module_bytes, &range)?;
                 let code_reader = wasmparser::CodeSectionReader::new(
                     wasmparser::BinaryReader::new(section_data, 0),
                 )?;
@@ -455,7 +452,7 @@ fn add_noop_initialize(module_bytes: &[u8]) -> Result<Vec<u8>> {
                 if let Some((id, range)) = other.as_section() {
                     encoder.section(&wasm_encoder::RawSection {
                         id,
-                        data: &module_bytes[range.start..range.end],
+                        data: slice_range(module_bytes, &range)?,
                     });
                 }
             }

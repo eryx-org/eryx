@@ -1343,6 +1343,7 @@ version = "0.6.0"
 dependencies = [
  "anyhow",
  "async-trait",
+ "bitflags",
  "bytes",
  "cap-fs-ext 3.4.5",
  "cap-std 3.4.5",

@@ -283,10 +283,14 @@ pub fn link_with_extensions(extensions: &[NativeExtension]) -> Result<Vec<u8>, L
     let runtime = decompress_zstd(base_libraries::LIBERYX_RUNTIME)?;
     let bindings = decompress_zstd(base_libraries::LIBERYX_BINDINGS)?;
 
-    let mut linker = Linker::default().validate(true).use_built_in_libdl(true);
+    // wit-component 0.257 turned `Linker` into a `&mut self` builder and moved
+    // `validate`/`adapter` onto the inner `ComponentEncoder`.
+    let mut linker = Linker::default();
+    linker.use_built_in_libdl(true);
+    linker.encoder().validate(true);
 
     // Add base libraries (order matters for symbol resolution)
-    linker = linker
+    linker
         // WASI emulation libraries
         .library("libwasi-emulated-process-clocks.so", &wasi_clocks, false)
         .map_err(|e| {
@@ -316,13 +320,14 @@ pub fn link_with_extensions(extensions: &[NativeExtension]) -> Result<Vec<u8>, L
 
     // Add user's native extensions (dl_openable = true for dlopen/dlsym)
     for ext in extensions {
-        linker = linker
+        linker
             .library(&ext.name, &ext.bytes, true)
             .map_err(|e| LinkError::Extension(ext.name.clone(), e.to_string()))?;
     }
 
     // Add WASI adapter
-    linker = linker
+    linker
+        .encoder()
         .adapter("wasi_snapshot_preview1", &adapter)
         .map_err(|e| LinkError::Adapter(e.to_string()))?;
 
