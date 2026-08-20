@@ -221,7 +221,7 @@ jobs:
       - name: Install protoc
         uses: arduino/setup-protoc@v3
         with:
-          version: "35.1"
+          version: "36.0"
           repo-token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Download WASM artifacts
@@ -276,7 +276,7 @@ jobs:
       - name: Install protoc
         uses: arduino/setup-protoc@v3
         with:
-          version: "35.1"
+          version: "36.0"
           repo-token: ${{ secrets.GITHUB_TOKEN }}
 
       # No apt anywhere in this workflow, deliberately. Beyond the dpkg-lock
@@ -375,7 +375,7 @@ jobs:
       - name: Install protoc
         uses: arduino/setup-protoc@v3
         with:
-          version: "35.1"
+          version: "36.0"
           repo-token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Download WASM artifacts
