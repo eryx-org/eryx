@@ -356,7 +356,22 @@ jobs:
         uses: Swatinem/rust-cache@v2
 
       - name: Install Rust
-        run: rustup show active-toolchain
+        # Install the pinned toolchain rather than trusting the runner image's
+        # preinstalled Rust, which lags: the macos-latest image shipped 1.97.1
+        # while the workspace MSRV was 1.98.0, so `cargo check` refused to build
+        # ("rustc 1.97.1 is not supported by the following packages"). Reading
+        # mise.toml keeps this following the same pin as every other job, which
+        # Renovate bumps as one "Rust toolchain" group.
+        shell: bash
+        run: |
+          RUST_VERSION=$(sed -n 's/^rust = { version = "\([^"]*\)".*/\1/p' mise.toml)
+          if [ -z "$RUST_VERSION" ]; then
+            echo "could not read the rust pin from mise.toml" >&2
+            exit 1
+          fi
+          rustup toolchain install "$RUST_VERSION" --profile minimal
+          rustup default "$RUST_VERSION"
+          rustup show active-toolchain
 
       - name: Check compilation
         # Exclude crates that need WASI SDK, Python, or WASM artifacts
