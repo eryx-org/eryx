@@ -37,6 +37,7 @@ pub mod hybrid;
 mod hybrid_bindings;
 mod hybrid_host;
 mod linker;
+mod perms;
 pub mod scrubbing;
 mod storage;
 mod streams;
@@ -57,5 +58,6 @@ pub use storage::{
 };
 pub use wasi_impl::{VfsCtx, VfsDescriptor, VfsReaddirIterator, VfsState};
 
-// Re-export permission types from wasmtime-wasi for convenience
-pub use wasmtime_wasi::{DirPerms, FilePerms};
+// Permission types. Vendored rather than re-exported from wasmtime-wasi, which
+// collapsed them into a coarse `FsPerms` in wasmtime 48 — see `perms`.
+pub use perms::{DirPerms, FilePerms};

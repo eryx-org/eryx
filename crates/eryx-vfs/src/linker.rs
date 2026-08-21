@@ -236,8 +236,18 @@ mod tests {
     ///
     /// A `Linker` with the default `allow_shadowing(false)` turns that drift
     /// into a "defined twice" error, so *failing* to add is what we want here.
+    ///
+    /// The colliding name is the *nested* entry rather than the interface:
+    /// wasmtime reuses an already-registered instance and reports the first
+    /// duplicate inside it, so `wasi:filesystem/types` surfaces as its
+    /// `descriptor` resource. That still pins the version, because the nested
+    /// map belongs to the exactly-named instance — a drifted version registers
+    /// a separate instance and nothing collides at all.
     #[test]
     fn linker_shadows_wasmtime_wasi_filesystem() {
+        // Entry inside `wasi:filesystem/types` that both implementations define.
+        const COLLIDING_ENTRY: &str = "descriptor";
+
         for (label, result) in [
             ("add_vfs_to_linker", add_vfs_to_linker(&mut wasi_linker())),
             (
@@ -254,7 +264,7 @@ mod tests {
             });
             let err = format!("{err:#}");
             assert!(
-                err.contains("defined twice") && err.contains("wasi:filesystem/"),
+                err.contains("defined twice") && err.contains(COLLIDING_ENTRY),
                 "{label} failed for an unexpected reason: {err}"
             );
         }

@@ -161,7 +161,7 @@ pub use generated::wasi::filesystem::{preopens, types};
 pub type HybridFsResult<T> = Result<T, HybridFsError>;
 
 // Re-export wasmtime-wasi types that we need
-pub use wasmtime_wasi::{DirPerms, FilePerms};
+pub use crate::perms::{DirPerms, FilePerms};
 
 use wasmtime::component::HasData;
 

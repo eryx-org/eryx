@@ -11,6 +11,8 @@ description = "Virtual filesystem implementation for eryx sandbox"
 [dependencies]
 anyhow.workspace = true
 async-trait.workspace = true
+# Vendored DirPerms/FilePerms; see src/perms.rs.
+bitflags = "2"
 bytes = "1"
 cap-fs-ext = "3"
 cap-std = "3"

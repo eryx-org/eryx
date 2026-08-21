@@ -74,7 +74,7 @@ pub struct EryxCall {
     stack: Vec<Value>,
     /// Deferred deallocations
     deferred: Vec<(*mut u8, Layout)>,
-    /// Iterators for list iteration via pop_list/pop_iter_next/pop_iter.
+    /// Iterators for list iteration via pop_list/pop_list_iter_next/pop_list_iter.
     iterators: Vec<std::vec::IntoIter<Value>>,
 }
 
@@ -333,7 +333,7 @@ impl Call for EryxCall {
         match self.stack.pop() {
             Some(Value::Bytes(bytes)) => {
                 let len = bytes.len();
-                // Push bytes as an iterator for pop_iter_next
+                // Push bytes as an iterator for pop_list_iter_next
                 self.iterators.push(
                     bytes
                         .into_iter()
@@ -345,7 +345,7 @@ impl Call for EryxCall {
             }
             Some(Value::GenericList(items)) => {
                 let len = items.len();
-                // Push items as an iterator for pop_iter_next
+                // Push items as an iterator for pop_list_iter_next
                 self.iterators.push(items.into_iter());
                 len
             }
@@ -353,7 +353,7 @@ impl Call for EryxCall {
         }
     }
 
-    fn pop_iter_next(&mut self, _ty: List) {
+    fn pop_list_iter_next(&mut self, _ty: List) {
         // Pop next item from the current iterator and push it onto the stack.
         if let Some(iter) = self.iterators.last_mut()
             && let Some(value) = iter.next()
@@ -362,7 +362,7 @@ impl Call for EryxCall {
         }
     }
 
-    fn pop_iter(&mut self, _ty: List) {
+    fn pop_list_iter(&mut self, _ty: List) {
         // Iteration complete - remove the iterator.
         self.iterators.pop();
     }
