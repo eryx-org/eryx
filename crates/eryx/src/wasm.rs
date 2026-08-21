@@ -1879,7 +1879,10 @@ impl PythonExecutor {
         config.cranelift_opt_level(wasmtime::OptLevel::SpeedAndSize);
         config.async_stack_size(512 * 1024);
 
-        // Configure target triple
+        // Configure target triple. Doing so also stops Cranelift inferring CPU
+        // features from the build machine, which `apply_cpu_feature_level`
+        // relies on — hence passing whether it already happened here.
+        let target_pinned = target.is_some();
         if let Some(target_str) = target {
             config
                 .target(target_str)
@@ -1887,88 +1890,69 @@ impl PythonExecutor {
         }
 
         // Apply CPU feature level
-        Self::apply_cpu_feature_level(&mut config, cpu_features)?;
+        Self::apply_cpu_feature_level(&mut config, cpu_features, target_pinned)?;
 
         Engine::new(&config).map_err(|e| Error::WasmEngine(e.to_string()))
     }
 
-    /// Apply CPU feature level preset to the wasmtime config.
+    /// Pin the compilation target and enable the requested x86-64 psABI level.
     ///
-    /// This disables CPU instructions that are above the requested level,
-    /// producing more portable binaries.
+    /// Cranelift infers every CPU feature flag from the build machine unless a
+    /// target triple is set:
+    ///
+    /// ```text
+    /// let triple_specified = triple.is_some();
+    /// let triple = triple.unwrap_or_else(Triple::host);
+    /// let mut isa_flags = lookup(triple)?;
+    /// if !triple_specified {
+    ///     cranelift_native::infer_native_flags(&mut isa_flags).unwrap();
+    /// }
+    /// ```
+    ///
+    /// This used to infer the host's flags and then *subtract* a hand-written
+    /// list of "too new" ones, which meant any flag the list did not mention was
+    /// silently inherited from whichever machine did the build. That is how
+    /// `has_avx512vnni` ended up baked into a supposedly portable cwasm as soon
+    /// as Cranelift started detecting it, breaking every host without VNNI.
+    ///
+    /// Setting a target triple — the host's own is fine, and keeps `Component`
+    /// creation working — turns inference off, so every flag starts from the
+    /// target's baseline. The level is then applied with Cranelift's own psABI
+    /// presets, whose names are exactly [`CpuFeatureLevel::as_str`]. That makes
+    /// this an allowlist: a feature Cranelift learns about in some future
+    /// release stays off unless the psABI level actually includes it, so the
+    /// cost of not knowing about it is a missed optimisation rather than an
+    /// artifact that refuses to load.
+    ///
+    /// `target_pinned` records whether the caller already set an explicit
+    /// target, in which case inference is off already and only the preset is
+    /// needed.
     #[cfg(any(feature = "embedded", feature = "preinit"))]
     #[allow(unsafe_code)]
     fn apply_cpu_feature_level(
         config: &mut Config,
         level: CpuFeatureLevel,
+        target_pinned: bool,
     ) -> std::result::Result<(), Error> {
-        // Feature flags above x86-64-v3, disabled for v3 and below.
-        //
-        // cranelift 0.135 (wasmtime 48) started detecting `has_avx512vnni` and
-        // `has_avx_vnni`. Neither belongs to any x86-64-vN psABI level, so
-        // leaving them enabled bakes the *build* machine's VNNI support into a
-        // supposedly portable cwasm, which then refuses to load elsewhere with
-        // `compilation setting "has_avx512vnni" is enabled, but not available
-        // on the host`. Only flags that exist in Cranelift's x86 settings may
-        // be listed here.
-        const ABOVE_V3_FLAGS: &[&str] = &[
-            "has_avx512bitalg",
-            "has_avx512dq",
-            "has_avx512f",
-            "has_avx512vbmi",
-            "has_avx512vl",
-            "has_avx512vnni",
-            "has_avx_vnni",
-        ];
+        // `Native` means "whatever this machine has", which is precisely what
+        // Cranelift does when no target is pinned. Leave it alone.
+        if level == CpuFeatureLevel::Native {
+            return Ok(());
+        }
 
-        match level {
-            CpuFeatureLevel::X86_64 => {
-                // Baseline: disable everything above SSE2
-                // SAFETY: These are valid Cranelift flags for x86
-                unsafe {
-                    config.cranelift_flag_set("has_sse3", "false");
-                    config.cranelift_flag_set("has_ssse3", "false");
-                    config.cranelift_flag_set("has_sse41", "false");
-                    config.cranelift_flag_set("has_sse42", "false");
-                    config.cranelift_flag_set("has_avx", "false");
-                    config.cranelift_flag_set("has_avx2", "false");
-                    config.cranelift_flag_set("has_fma", "false");
-                    config.cranelift_flag_set("has_bmi1", "false");
-                    config.cranelift_flag_set("has_bmi2", "false");
-                    config.cranelift_flag_set("has_lzcnt", "false");
-                    config.cranelift_flag_set("has_popcnt", "false");
-                    for flag in ABOVE_V3_FLAGS {
-                        config.cranelift_flag_set(flag, "false");
-                    }
-                }
-            }
-            CpuFeatureLevel::X86_64v2 => {
-                // SSE4.2, POPCNT, SSSE3 - disable AVX and above
-                // SAFETY: These are valid Cranelift flags for x86
-                unsafe {
-                    config.cranelift_flag_set("has_avx", "false");
-                    config.cranelift_flag_set("has_avx2", "false");
-                    config.cranelift_flag_set("has_fma", "false");
-                    config.cranelift_flag_set("has_bmi1", "false");
-                    config.cranelift_flag_set("has_bmi2", "false");
-                    for flag in ABOVE_V3_FLAGS {
-                        config.cranelift_flag_set(flag, "false");
-                    }
-                }
-            }
-            CpuFeatureLevel::X86_64v3 => {
-                // AVX2, FMA, BMI1/2 - disable AVX-512 only
-                // This is what Fly.io shared CPUs support (AMD EPYC)
-                // SAFETY: These are valid Cranelift flags for x86
-                unsafe {
-                    for flag in ABOVE_V3_FLAGS {
-                        config.cranelift_flag_set(flag, "false");
-                    }
-                }
-            }
-            CpuFeatureLevel::X86_64v4 | CpuFeatureLevel::Native => {
-                // Full features - nothing to disable
-            }
+        if !target_pinned {
+            let host = target_lexicon::Triple::host().to_string();
+            config.target(&host).map_err(|e| {
+                Error::WasmEngine(format!("Failed to pin host target '{host}': {e}"))
+            })?;
+        }
+
+        // SAFETY: `as_str` only ever yields one of Cranelift's x86 psABI preset
+        // names. Engine::new reports an error if the target has no such preset,
+        // which is what happens if an x86-64 level is asked for on another
+        // architecture.
+        unsafe {
+            config.cranelift_flag_enable(level.as_str());
         }
 
         Ok(())
@@ -1984,74 +1968,10 @@ impl PythonExecutor {
         // Apply CPU feature level preset from environment variable.
         // This provides an easy way to target specific x86-64 microarchitecture levels.
         if let Ok(level) = std::env::var("ERYX_CPU_FEATURES") {
-            // Feature flags above x86-64-v3, disabled for v3 and below.
-            // See `apply_cpu_feature_level` for why the VNNI flags are here.
-            // Note: Only flags that exist in Cranelift's x86 settings are listed here
-            const ABOVE_V3_FLAGS: &[&str] = &[
-                "has_avx512bitalg",
-                "has_avx512dq",
-                "has_avx512f",
-                "has_avx512vbmi",
-                "has_avx512vl",
-                "has_avx512vnni",
-                "has_avx_vnni",
-            ];
-
-            match level.as_str() {
-                "x86-64" | "x86-64-v1" => {
-                    // Baseline: disable everything above SSE2
-                    // SAFETY: These are valid Cranelift flags for x86
-                    unsafe {
-                        config.cranelift_flag_set("has_sse3", "false");
-                        config.cranelift_flag_set("has_ssse3", "false");
-                        config.cranelift_flag_set("has_sse41", "false");
-                        config.cranelift_flag_set("has_sse42", "false");
-                        config.cranelift_flag_set("has_avx", "false");
-                        config.cranelift_flag_set("has_avx2", "false");
-                        config.cranelift_flag_set("has_fma", "false");
-                        config.cranelift_flag_set("has_bmi1", "false");
-                        config.cranelift_flag_set("has_bmi2", "false");
-                        config.cranelift_flag_set("has_lzcnt", "false");
-                        config.cranelift_flag_set("has_popcnt", "false");
-                        for flag in ABOVE_V3_FLAGS {
-                            config.cranelift_flag_set(flag, "false");
-                        }
-                    }
-                }
-                "x86-64-v2" => {
-                    // SSE4.2, POPCNT, SSSE3 - disable AVX and above
-                    // SAFETY: These are valid Cranelift flags for x86
-                    unsafe {
-                        config.cranelift_flag_set("has_avx", "false");
-                        config.cranelift_flag_set("has_avx2", "false");
-                        config.cranelift_flag_set("has_fma", "false");
-                        config.cranelift_flag_set("has_bmi1", "false");
-                        config.cranelift_flag_set("has_bmi2", "false");
-                        for flag in ABOVE_V3_FLAGS {
-                            config.cranelift_flag_set(flag, "false");
-                        }
-                    }
-                }
-                "x86-64-v3" => {
-                    // AVX2, FMA, BMI1/2 - disable AVX-512 only
-                    // This is what Fly.io shared CPUs support (AMD EPYC)
-                    // SAFETY: These are valid Cranelift flags for x86
-                    unsafe {
-                        for flag in ABOVE_V3_FLAGS {
-                            config.cranelift_flag_set(flag, "false");
-                        }
-                    }
-                }
-                "x86-64-v4" | "native" => {
-                    // Full features - nothing to disable
-                }
-                other => {
-                    return Err(Error::WasmEngine(format!(
-                        "Unknown CPU feature level '{other}'. Valid values: \
-                         x86-64, x86-64-v2, x86-64-v3, x86-64-v4, native"
-                    )));
-                }
-            }
+            let level: CpuFeatureLevel = level.parse().map_err(Error::WasmEngine)?;
+            // No explicit target here: this is the default engine path, so the
+            // helper pins the host triple itself.
+            Self::apply_cpu_feature_level(config, level, false)?;
         }
 
         // Apply custom Cranelift flags from environment variable.
