@@ -614,7 +614,7 @@ fn copy_directory_contents(src: &std::path::Path, dst: &std::path::Path) -> Resu
 
 /// Parse target string into target triple and CPU feature level.
 ///
-/// CPU feature levels (x86-64, x86-64-v2, x86-64-v3, x86-64-v4, native) are used
+/// CPU feature levels (baseline, x86-64, x86-64-v2, x86-64-v3, x86-64-v4, native) are used
 /// directly, while full target triples (e.g., aarch64-unknown-linux-gnu) are
 /// passed through with Native CPU features.
 fn parse_target(target: &str) -> Result<(Option<&str>, CpuFeatureLevel)> {
