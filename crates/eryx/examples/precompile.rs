@@ -34,6 +34,8 @@
 //! - `x86-64-v2` - SSE4.2, POPCNT, SSSE3 (~2008+ CPUs)
 //! - `x86-64-v3` - AVX2, FMA, BMI1/2 (~2013+ CPUs, no AVX-512) - **recommended for Fly.io**
 //! - `x86-64-v4` - AVX-512 (~2017+ CPUs)
+//! - `baseline` - the target's own baseline; use this on aarch64, which has
+//!   no psABI presets and would otherwise inherit the build machine's features
 //! - `native` - Host CPU features (default)
 //!
 //! ## Cross-compilation: Target Triples

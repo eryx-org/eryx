@@ -22,6 +22,7 @@ use wasmtime::{Config, Engine};
 
 /// Every psABI level, i.e. everything except `Native`.
 const PINNED_LEVELS: &[CpuFeatureLevel] = &[
+    CpuFeatureLevel::Baseline,
     CpuFeatureLevel::X86_64,
     CpuFeatureLevel::X86_64v2,
     CpuFeatureLevel::X86_64v3,
@@ -56,9 +57,13 @@ fn reference_config(level: CpuFeatureLevel) -> Config {
     config
         .target(&target_lexicon::Triple::host().to_string())
         .expect("the host triple should be a valid target");
-    // SAFETY: `as_str` yields a Cranelift x86 psABI preset name.
-    unsafe {
-        config.cranelift_flag_enable(level.as_str());
+    // `Baseline` is the pinned target with nothing enabled on top; every other
+    // level names a Cranelift x86 psABI preset.
+    if level != CpuFeatureLevel::Baseline {
+        // SAFETY: `as_str` yields a Cranelift x86 psABI preset name.
+        unsafe {
+            config.cranelift_flag_enable(level.as_str());
+        }
     }
     config
 }
@@ -186,4 +191,122 @@ fn native_is_not_pinned_to_a_level() {
         "native output matched every pinned level, which suggests host feature \
          inference is no longer happening for CpuFeatureLevel::Native"
     );
+}
+
+/// The aarch64 story, checked from x86 via cross-compilation.
+///
+/// aarch64 has `has_lse`, `has_pauth`, `has_fp16`, `has_dotprod` and `has_i8mm`
+/// and *no* Cranelift psABI presets, so `Baseline` — pin the triple, enable
+/// nothing — is the only way to get an artifact that does not depend on the
+/// build machine. Without it, wheels built on an M2-or-later runner bake in
+/// ARMv8.6 features (`has_i8mm` especially) and fail to load on an M1.
+///
+/// eryx has no ARM test job, so these run on x86 against an explicit aarch64
+/// target. That needs Cranelift's non-host backends, hence wasmtime's
+/// `all-arch` feature in dev-dependencies.
+mod aarch64 {
+    use super::{Config, CpuFeatureLevel, Engine, PythonExecutor, tiny_component};
+
+    const TARGET: &str = "aarch64-unknown-linux-gnu";
+
+    /// Feature flags Cranelift can infer for aarch64.
+    const ARM_FEATURES: &[&str] = &[
+        "has_lse",
+        "has_pauth",
+        "has_fp16",
+        "has_dotprod",
+        "has_i8mm",
+    ];
+
+    fn pinned_config() -> Config {
+        let mut config = Config::new();
+        config.wasm_component_model(true);
+        config.wasm_component_model_async(true);
+        config.epoch_interruption(true);
+        config.consume_fuel(true);
+        config.memory_init_cow(true);
+        config.cranelift_opt_level(wasmtime::OptLevel::SpeedAndSize);
+        config.async_stack_size(512 * 1024);
+        config
+            .target(TARGET)
+            .expect("aarch64 should be a valid target");
+        config
+    }
+
+    /// `Baseline` against an aarch64 target must enable none of the ARM features.
+    ///
+    /// Forcing them all off has to make no difference; if it does, something is
+    /// switching them on from the build machine.
+    #[test]
+    fn baseline_enables_no_arm_features() {
+        let wasm = tiny_component();
+
+        let baseline =
+            PythonExecutor::precompile_with_options(&wasm, Some(TARGET), CpuFeatureLevel::Baseline)
+                .expect("aarch64 baseline precompile should succeed");
+
+        let mut forced = pinned_config();
+        // SAFETY: all are Cranelift aarch64 flag names.
+        unsafe {
+            for flag in ARM_FEATURES {
+                forced.cranelift_flag_set(flag, "false");
+            }
+        }
+        let forced = Engine::new(&forced)
+            .expect("engine with ARM features forced off should build")
+            .precompile_component(&wasm)
+            .expect("forced precompile should succeed");
+
+        assert!(
+            baseline == forced,
+            "aarch64 Baseline differs from an explicitly feature-free build \
+             ({} vs {} bytes), so ARM features are leaking in",
+            baseline.len(),
+            forced.len()
+        );
+    }
+
+    /// Guards that the assertion above is not vacuous: the ARM flags must
+    /// actually reach codegen, so turning one on has to change the output.
+    #[test]
+    fn arm_features_reach_codegen() {
+        let wasm = tiny_component();
+
+        let baseline =
+            PythonExecutor::precompile_with_options(&wasm, Some(TARGET), CpuFeatureLevel::Baseline)
+                .expect("aarch64 baseline precompile should succeed");
+
+        let mut with_lse = pinned_config();
+        // SAFETY: `has_lse` is a Cranelift aarch64 flag name.
+        unsafe {
+            with_lse.cranelift_flag_set("has_lse", "true");
+        }
+        let with_lse = Engine::new(&with_lse)
+            .expect("engine with has_lse should build")
+            .precompile_component(&wasm)
+            .expect("has_lse precompile should succeed");
+
+        assert!(
+            baseline != with_lse,
+            "enabling has_lse did not change the aarch64 output, so this test \
+             cannot detect a leak"
+        );
+    }
+
+    /// An x86-64 psABI level against an aarch64 target must be rejected with a
+    /// clear message rather than an unknown-setting error out of `Engine::new`.
+    #[test]
+    fn x86_levels_are_rejected_for_aarch64() {
+        let wasm = tiny_component();
+
+        let err =
+            PythonExecutor::precompile_with_options(&wasm, Some(TARGET), CpuFeatureLevel::X86_64v2)
+                .expect_err("an x86-64 level should not apply to an aarch64 target");
+
+        let msg = err.to_string();
+        assert!(
+            msg.contains("x86-64 psABI level") && msg.contains("baseline"),
+            "error should explain the mismatch and point at 'baseline', got: {msg}"
+        );
+    }
 }
