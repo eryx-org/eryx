@@ -111,6 +111,8 @@ serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 tar.workspace = true
+# Host triple, used to pin Cranelift's compilation target (see wasm.rs).
+target-lexicon = "0.13"
 tempfile.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["sync", "net", "io-util", "time"] }
@@ -151,6 +153,7 @@ native-extensions = ["preinit", "eryx-runtime/native-extensions"]
 # Provides a sandboxed in-memory filesystem that can be persisted.
 vfs = ["dep:eryx-vfs"]
 
+
 [dev-dependencies]
 async-trait.workspace = true
 criterion.workspace = true
@@ -158,6 +161,7 @@ crossterm.workspace = true
 rcgen.workspace = true
 rustls-pemfile.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+wat = "1"
 
 [lints]
 workspace = true
