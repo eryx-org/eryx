@@ -4,7 +4,7 @@ import { resolve } from "path";
 // Resolve paths to the browser shims in eryx's node_modules
 const shimBase = resolve(
   __dirname,
-  "../eryx/node_modules/@bytecodealliance/preview2-shim/lib/browser",
+  "../eryx/node_modules/@bytecodealliance/preview2-shim/dist/browser",
 );
 
 export default defineConfig({
