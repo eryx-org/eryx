@@ -9,7 +9,7 @@ import { brotliCompressSync, constants } from "zlib";
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const shimDir = resolve(
   __dirname,
-  "node_modules/@bytecodealliance/preview2-shim/lib/browser",
+  "node_modules/@bytecodealliance/preview2-shim/dist/browser",
 );
 
 /** Serve .zst files as raw binary (application/octet-stream). */

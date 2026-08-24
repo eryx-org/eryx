@@ -16,7 +16,7 @@ publish = false
 crate-type = ["staticlib"]
 
 [dependencies]
-pyo3 = { workspace = true, features = ["abi3-py312"] } #unified
+pyo3 = { workspace = true } #unified
 wit-dylib-ffi.workspace = true
 
 [dev-dependencies]
