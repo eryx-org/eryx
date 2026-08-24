@@ -1011,16 +1011,7 @@ impl SessionExecutor {
 
         // Set up epoch-based deadline if timeout is configured.
         // This allows us to interrupt WASM execution even in tight loops.
-        if let Some(timeout) = execution_timeout {
-            store.set_epoch_deadline(crate::wasm::epoch_ticks(timeout));
-            store.epoch_deadline_trap();
-        } else {
-            // The shared ticker may be running for another Store, so untimed Stores need
-            // a deadline far enough in the future to remain effectively unlimited. Avoid
-            // u64::MAX because Wasmtime adds the deadline to the current epoch.
-            store.set_epoch_deadline(u64::MAX / 2);
-            store.epoch_deadline_trap();
-        }
+        crate::wasm::arm_epoch_deadline(&mut store, execution_timeout);
 
         // Execute the code.
         // Wrap in tokio::time::timeout so that blocking WASI host calls (e.g. poll_oneoff

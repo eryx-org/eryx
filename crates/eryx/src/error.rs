@@ -14,6 +14,14 @@ pub enum Error {
     #[error("wasm engine error: {0}")]
     WasmEngine(String),
 
+    /// The process-wide epoch ticker could not be started or restarted, or an
+    /// existing ticker worker terminated unexpectedly.
+    ///
+    /// This is an execution-time prerequisite for timeouts and cancellation,
+    /// rather than a failure to initialize the sandbox itself.
+    #[error("epoch ticker error: {0}")]
+    EpochTicker(String),
+
     /// Error during WASM component loading or instantiation.
     #[error("wasm component error: {0}")]
     WasmComponent(#[from] wasmtime::Error),

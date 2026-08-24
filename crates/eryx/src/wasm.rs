@@ -88,29 +88,88 @@ impl<T> RetryableOnce<T> {
     }
 }
 
-/// Start the process-lifetime epoch ticker for the shared engine once.
-pub(crate) fn ensure_epoch_ticker(engine: &Engine) -> std::result::Result<(), Error> {
-    static EPOCH_TICKER: RetryableOnce<()> = RetryableOnce::new();
+/// A process-lifetime epoch ticker.
+struct EpochTicker {
+    handle: std::thread::JoinHandle<()>,
+}
 
-    EPOCH_TICKER
-        .get_or_try_init(|| {
-            let ticker_engine = engine.clone();
-            // Use a dedicated OS thread because guest execution can block the Tokio
-            // runtime. Epochs must continue advancing independently of async scheduling.
-            std::thread::Builder::new()
-                .name("eryx-epoch-ticker".to_string())
-                .spawn(move || {
-                    loop {
-                        std::thread::sleep(EPOCH_TICK_INTERVAL);
-                        ticker_engine.increment_epoch();
-                    }
-                })
-                .map(|_| ())
-                .map_err(|error| {
-                    Error::WasmEngine(format!("Failed to start epoch ticker: {error}"))
-                })
-        })
-        .map(|_| ())
+impl EpochTicker {
+    fn start(engine: &Engine) -> std::result::Result<Self, Error> {
+        let ticker_engine = engine.clone();
+
+        // Use a dedicated OS thread because guest execution can block the Tokio
+        // runtime. Epochs must continue advancing independently of async scheduling.
+        let handle = std::thread::Builder::new()
+            .name("eryx-epoch-ticker".to_string())
+            .spawn(move || {
+                loop {
+                    std::thread::sleep(EPOCH_TICK_INTERVAL);
+                    ticker_engine.increment_epoch();
+                }
+            })
+            .map_err(|error| {
+                Error::EpochTicker(format!("Failed to start epoch ticker: {error}"))
+            })?;
+
+        Ok(Self { handle })
+    }
+}
+
+/// Observe the process-lifetime ticker state.
+///
+/// A finished worker is removed before returning its error, so the next call
+/// can retry startup. There is necessarily a small check-to-execution race: a
+/// worker can exit immediately after `is_finished` returns false.
+fn observe_epoch_ticker(ticker: &mut Option<EpochTicker>) -> std::result::Result<bool, Error> {
+    let Some(dead) = ticker.take() else {
+        return Ok(false);
+    };
+
+    if !dead.handle.is_finished() {
+        *ticker = Some(dead);
+        return Ok(true);
+    }
+
+    let detail = match dead.handle.join() {
+        Ok(()) => "epoch ticker worker exited unexpectedly".to_string(),
+        Err(payload) => {
+            let panic = payload
+                .downcast_ref::<&str>()
+                .copied()
+                .or_else(|| payload.downcast_ref::<String>().map(String::as_str))
+                .unwrap_or("unknown panic");
+            format!("epoch ticker worker panicked: {panic}")
+        }
+    };
+    Err(Error::EpochTicker(detail))
+}
+
+fn is_already_cancelled(token: Option<&CancellationToken>) -> bool {
+    token.is_some_and(CancellationToken::is_cancelled)
+}
+
+/// Start or restart the process-lifetime epoch ticker for the shared engine.
+pub(crate) fn ensure_epoch_ticker(engine: &Engine) -> std::result::Result<(), Error> {
+    static EPOCH_TICKER: Mutex<Option<EpochTicker>> = Mutex::new(None);
+
+    let mut ticker = EPOCH_TICKER
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if observe_epoch_ticker(&mut ticker)? {
+        return Ok(());
+    }
+
+    // Spawn errors are deliberately not cached. A later execution can retry.
+    *ticker = Some(EpochTicker::start(engine)?);
+    Ok(())
+}
+
+/// Arm a store-local timeout deadline, or an effectively unlimited deadline
+/// when no timeout is configured. The deadline remains local to this Store;
+/// only the epoch clock itself is shared by executions.
+pub(crate) fn arm_epoch_deadline<T>(store: &mut Store<T>, timeout: Option<Duration>) {
+    store.set_epoch_deadline(timeout.map_or(u64::MAX / 2, epoch_ticks));
+    store.epoch_deadline_trap();
 }
 
 /// Classify an epoch interrupt from the state captured when it was triggered.
@@ -2261,6 +2320,13 @@ impl PythonExecutor {
     ) -> std::result::Result<ExecutionOutput, Error> {
         crate::error::validate_user_code(code)?;
 
+        // Avoid making an already-cancelled request wait for the first epoch
+        // tick. Cancellation that races this check is still observed by the
+        // Store-local deadline callback below.
+        if is_already_cancelled(cancellation_token.as_ref()) {
+            return Err(Error::Cancelled);
+        }
+
         // Build callback info for introspection
         let callback_infos: Vec<HostCallbackInfo> = callbacks
             .iter()
@@ -2483,24 +2549,20 @@ impl PythonExecutor {
                     return Ok(UpdateDeadline::Interrupt);
                 }
 
+                // Yield on non-interrupt ticks so Tokio can run cancellation
+                // tasks while CPU-bound guest code is executing. Timeout-only
+                // stores use the non-yielding deadline trap path below.
                 match timeout_ticks.as_mut() {
                     Some(ticks) if *ticks <= 1 => Ok(UpdateDeadline::Interrupt),
                     Some(ticks) => {
                         *ticks -= 1;
-                        Ok(UpdateDeadline::Continue(1))
+                        Ok(UpdateDeadline::Yield(1))
                     }
-                    None => Ok(UpdateDeadline::Continue(1)),
+                    None => Ok(UpdateDeadline::Yield(1)),
                 }
             });
-        } else if let Some(timeout) = execution_timeout {
-            store.set_epoch_deadline(epoch_ticks(timeout));
-            store.epoch_deadline_trap();
         } else {
-            // The shared ticker may be running for another Store, so untimed Stores need
-            // a deadline far enough in the future to remain effectively unlimited. Avoid
-            // u64::MAX because Wasmtime adds the deadline to the current epoch.
-            store.set_epoch_deadline(u64::MAX / 2);
-            store.epoch_deadline_trap();
+            arm_epoch_deadline(&mut store, execution_timeout);
         }
 
         // Call the async execute export
@@ -2697,6 +2759,41 @@ mod tests {
             })
             .unwrap();
         assert_eq!(*cached, 42);
+    }
+
+    #[test]
+    fn test_epoch_ticker_dead_worker_is_reported_and_slot_is_retryable() {
+        let mut ticker = Some(EpochTicker {
+            handle: std::thread::spawn(|| {}),
+        });
+        while !ticker.as_ref().unwrap().handle.is_finished() {
+            std::thread::yield_now();
+        }
+
+        let error = observe_epoch_ticker(&mut ticker).unwrap_err();
+        assert!(matches!(error, Error::EpochTicker(message) if message.contains("exited")));
+        assert!(ticker.is_none());
+
+        // The cleared slot is ready for a later startup attempt. This short
+        // worker keeps the test self-contained and does not spawn a permanent
+        // ticker thread.
+        ticker = Some(EpochTicker {
+            handle: std::thread::spawn(|| {}),
+        });
+        while !ticker.as_ref().unwrap().handle.is_finished() {
+            std::thread::yield_now();
+        }
+        assert!(observe_epoch_ticker(&mut ticker).is_err());
+        assert!(ticker.is_none());
+    }
+
+    #[test]
+    fn test_already_cancelled_token_is_detected_synchronously() {
+        let token = CancellationToken::new();
+        assert!(!is_already_cancelled(Some(&token)));
+        token.cancel();
+        assert!(is_already_cancelled(Some(&token)));
+        assert!(!is_already_cancelled(None));
     }
 
     #[test]

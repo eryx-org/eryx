@@ -48,6 +48,7 @@ pub fn eryx_error_to_py(err: eryx::Error) -> PyErr {
     match err {
         eryx::Error::Initialization(msg) => InitializationError::new_err(msg),
         eryx::Error::WasmEngine(msg) => InitializationError::new_err(msg),
+        eryx::Error::EpochTicker(msg) => ExecutionError::new_err(msg),
         eryx::Error::WasmComponent(e) => InitializationError::new_err(e.to_string()),
         eryx::Error::Execution(msg) => ExecutionError::new_err(msg),
         // A script raising an uncaught exception is also an execution error from
