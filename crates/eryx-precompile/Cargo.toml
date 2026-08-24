@@ -13,7 +13,7 @@ path = "src/main.rs"
 
 [dependencies]
 anyhow.workspace = true
-clap = { workspace = true, features = ["env"] } #unified
+clap = { workspace = true } #unified
 eryx = { workspace = true, features = ["preinit"] }
 reqwest.workspace = true
 rustls = { workspace = true, features = ["aws-lc-rs"] }
