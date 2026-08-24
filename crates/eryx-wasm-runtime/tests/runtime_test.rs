@@ -117,9 +117,12 @@ fn build_component() -> Result<Vec<u8>, Box<dyn std::error::Error>> {
     embed_component_metadata(&mut bindings, &resolve, world_id, StringEncoding::UTF8)?;
 
     // Link - order matters! Dependencies must come before dependents
-    let linker = wit_component::Linker::default()
-        .validate(true)
-        .use_built_in_libdl(true)
+    // wit-component 0.257 turned `Linker` into a `&mut self` builder and moved
+    // `validate`/`adapter` onto the inner `ComponentEncoder`.
+    let mut linker = wit_component::Linker::default();
+    linker.use_built_in_libdl(true);
+    linker.encoder().validate(true);
+    linker
         // WASI emulation libs
         .library("libwasi-emulated-process-clocks.so", &wasi_clocks, false)?
         .library("libwasi-emulated-signal.so", &wasi_signal, false)?
@@ -133,8 +136,11 @@ fn build_component() -> Result<Vec<u8>, Box<dyn std::error::Error>> {
         .library("libpython3.14.so", &libpython, false)?
         // Our runtime and bindings
         .library("liberyx_runtime.so", &runtime, false)?
-        .library("liberyx_bindings.so", &bindings, false)?
-        // WASI adapter
+        .library("liberyx_bindings.so", &bindings, false)?;
+
+    // WASI adapter
+    linker
+        .encoder()
         .adapter("wasi_snapshot_preview1", &adapter)?;
 
     Ok(linker.encode()?)
@@ -189,15 +195,13 @@ async fn test_instantiate_component() -> Result<(), Box<dyn std::error::Error>> 
         .preopened_dir(
             &stdlib_path,
             "/python-stdlib",
-            wasmtime_wasi::DirPerms::READ,
-            wasmtime_wasi::FilePerms::READ,
+            wasmtime_wasi::FsPerms::ReadOnly,
         )?
         // Mount site-packages
         .preopened_dir(
             &site_packages_path,
             "/site-packages",
-            wasmtime_wasi::DirPerms::READ,
-            wasmtime_wasi::FilePerms::READ,
+            wasmtime_wasi::FsPerms::ReadOnly,
         )?
         .build();
 

@@ -35,7 +35,7 @@ use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 use wasmtime::component::{Accessor, Component, HasSelf, Linker, ResourceTable};
 use wasmtime::{AsContextMut, Config, Engine, ResourceLimiter, Store, UpdateDeadline};
-use wasmtime_wasi::{DirPerms, FilePerms, WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView};
+use wasmtime_wasi::{FsPerms, WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView};
 
 use crate::callback::Callback;
 use crate::error::Error;
@@ -1981,13 +1981,23 @@ impl PythonExecutor {
         config: &mut Config,
         level: CpuFeatureLevel,
     ) -> std::result::Result<(), Error> {
-        // AVX-512 feature flags to disable for x86-64-v3 and below
-        const AVX512_FLAGS: &[&str] = &[
+        // Feature flags above x86-64-v3, disabled for v3 and below.
+        //
+        // cranelift 0.135 (wasmtime 48) started detecting `has_avx512vnni` and
+        // `has_avx_vnni`. Neither belongs to any x86-64-vN psABI level, so
+        // leaving them enabled bakes the *build* machine's VNNI support into a
+        // supposedly portable cwasm, which then refuses to load elsewhere with
+        // `compilation setting "has_avx512vnni" is enabled, but not available
+        // on the host`. Only flags that exist in Cranelift's x86 settings may
+        // be listed here.
+        const ABOVE_V3_FLAGS: &[&str] = &[
             "has_avx512bitalg",
             "has_avx512dq",
             "has_avx512f",
             "has_avx512vbmi",
             "has_avx512vl",
+            "has_avx512vnni",
+            "has_avx_vnni",
         ];
 
         match level {
@@ -2006,7 +2016,7 @@ impl PythonExecutor {
                     config.cranelift_flag_set("has_bmi2", "false");
                     config.cranelift_flag_set("has_lzcnt", "false");
                     config.cranelift_flag_set("has_popcnt", "false");
-                    for flag in AVX512_FLAGS {
+                    for flag in ABOVE_V3_FLAGS {
                         config.cranelift_flag_set(flag, "false");
                     }
                 }
@@ -2020,7 +2030,7 @@ impl PythonExecutor {
                     config.cranelift_flag_set("has_fma", "false");
                     config.cranelift_flag_set("has_bmi1", "false");
                     config.cranelift_flag_set("has_bmi2", "false");
-                    for flag in AVX512_FLAGS {
+                    for flag in ABOVE_V3_FLAGS {
                         config.cranelift_flag_set(flag, "false");
                     }
                 }
@@ -2030,7 +2040,7 @@ impl PythonExecutor {
                 // This is what Fly.io shared CPUs support (AMD EPYC)
                 // SAFETY: These are valid Cranelift flags for x86
                 unsafe {
-                    for flag in AVX512_FLAGS {
+                    for flag in ABOVE_V3_FLAGS {
                         config.cranelift_flag_set(flag, "false");
                     }
                 }
@@ -2053,14 +2063,17 @@ impl PythonExecutor {
         // Apply CPU feature level preset from environment variable.
         // This provides an easy way to target specific x86-64 microarchitecture levels.
         if let Ok(level) = std::env::var("ERYX_CPU_FEATURES") {
-            // AVX-512 feature flags to disable for x86-64-v3 and below
+            // Feature flags above x86-64-v3, disabled for v3 and below.
+            // See `apply_cpu_feature_level` for why the VNNI flags are here.
             // Note: Only flags that exist in Cranelift's x86 settings are listed here
-            const AVX512_FLAGS: &[&str] = &[
+            const ABOVE_V3_FLAGS: &[&str] = &[
                 "has_avx512bitalg",
                 "has_avx512dq",
                 "has_avx512f",
                 "has_avx512vbmi",
                 "has_avx512vl",
+                "has_avx512vnni",
+                "has_avx_vnni",
             ];
 
             match level.as_str() {
@@ -2079,7 +2092,7 @@ impl PythonExecutor {
                         config.cranelift_flag_set("has_bmi2", "false");
                         config.cranelift_flag_set("has_lzcnt", "false");
                         config.cranelift_flag_set("has_popcnt", "false");
-                        for flag in AVX512_FLAGS {
+                        for flag in ABOVE_V3_FLAGS {
                             config.cranelift_flag_set(flag, "false");
                         }
                     }
@@ -2093,7 +2106,7 @@ impl PythonExecutor {
                         config.cranelift_flag_set("has_fma", "false");
                         config.cranelift_flag_set("has_bmi1", "false");
                         config.cranelift_flag_set("has_bmi2", "false");
-                        for flag in AVX512_FLAGS {
+                        for flag in ABOVE_V3_FLAGS {
                             config.cranelift_flag_set(flag, "false");
                         }
                     }
@@ -2103,7 +2116,7 @@ impl PythonExecutor {
                     // This is what Fly.io shared CPUs support (AMD EPYC)
                     // SAFETY: These are valid Cranelift flags for x86
                     unsafe {
-                        for flag in AVX512_FLAGS {
+                        for flag in ABOVE_V3_FLAGS {
                             config.cranelift_flag_set(flag, "false");
                         }
                     }
@@ -2283,12 +2296,7 @@ impl PythonExecutor {
             // PYTHONHOME tells Python where to find the standard library
             wasi_builder.env("PYTHONHOME", "/python-stdlib");
             wasi_builder
-                .preopened_dir(
-                    stdlib_path,
-                    "/python-stdlib",
-                    DirPerms::READ,
-                    FilePerms::READ,
-                )
+                .preopened_dir(stdlib_path, "/python-stdlib", FsPerms::ReadOnly)
                 .map_err(|e| {
                     Error::Initialization(format!("Failed to mount Python stdlib: {e}"))
                 })?;
@@ -2308,12 +2316,7 @@ impl PythonExecutor {
                 format!("/site-packages-{i}")
             };
             wasi_builder
-                .preopened_dir(
-                    site_packages_path,
-                    &mount_path,
-                    DirPerms::READ,
-                    FilePerms::READ,
-                )
+                .preopened_dir(site_packages_path, &mount_path, FsPerms::ReadOnly)
                 .map_err(|e| Error::Initialization(format!("Failed to mount {mount_path}: {e}")))?;
         }
 

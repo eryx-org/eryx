@@ -113,7 +113,13 @@ jobs:
             crates/eryx-runtime/runtime.cwasm
             crates/eryx-runtime/prebuilt/
             crates/eryx-wasm-runtime/target/liberyx_runtime.so
-          key: wasm-runtime-v2-${{ hashFiles('crates/eryx-wasm-runtime/src/**', 'crates/eryx-wasm-runtime/clock_stubs.c', 'crates/eryx-wasm-runtime/Cargo.toml', 'crates/eryx-runtime/build.rs', 'crates/eryx-runtime/wit/runtime.wit', 'crates/eryx-runtime/libs/*.zst', 'Cargo.lock') }}
+          # NOTE: this key does not cover the cwasm's CPU-feature configuration,
+          # which comes from `ERYX_CPU_FEATURES` below and the flag lists in
+          # crates/eryx/src/wasm.rs (compiled into the `precompile` example).
+          # Changing either without busting the version prefix silently reuses a
+          # cwasm built with the old settings. Bumped v2 -> v3 for the VNNI flags
+          # added under wasmtime 48.
+          key: wasm-runtime-v3-${{ hashFiles('crates/eryx-wasm-runtime/src/**', 'crates/eryx-wasm-runtime/clock_stubs.c', 'crates/eryx-wasm-runtime/Cargo.toml', 'crates/eryx-runtime/build.rs', 'crates/eryx-runtime/wit/runtime.wit', 'crates/eryx-runtime/libs/*.zst', 'Cargo.lock') }}
 
       - name: Touch cached artifacts
         if: steps.wasm-cache.outputs.cache-hit == 'true'
@@ -221,7 +227,7 @@ jobs:
       - name: Install protoc
         uses: arduino/setup-protoc@v3
         with:
-          version: "35.1"
+          version: "36.0"
           repo-token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Download WASM artifacts
@@ -276,7 +282,7 @@ jobs:
       - name: Install protoc
         uses: arduino/setup-protoc@v3
         with:
-          version: "35.1"
+          version: "36.0"
           repo-token: ${{ secrets.GITHUB_TOKEN }}
 
       # No apt anywhere in this workflow, deliberately. Beyond the dpkg-lock
@@ -330,7 +336,7 @@ jobs:
         with:
           mise_toml: |
             [tools]
-            rust = "1.97"
+            rust = "1.98"
 
       - name: Configure Rust cache
         uses: Swatinem/rust-cache@v2
@@ -356,7 +362,22 @@ jobs:
         uses: Swatinem/rust-cache@v2
 
       - name: Install Rust
-        run: rustup show active-toolchain
+        # Install the pinned toolchain rather than trusting the runner image's
+        # preinstalled Rust, which lags: the macos-latest image shipped 1.97.1
+        # while the workspace MSRV was 1.98.0, so `cargo check` refused to build
+        # ("rustc 1.97.1 is not supported by the following packages"). Reading
+        # mise.toml keeps this following the same pin as every other job, which
+        # Renovate bumps as one "Rust toolchain" group.
+        shell: bash
+        run: |
+          RUST_VERSION=$(sed -n 's/^rust = { version = "\([^"]*\)".*/\1/p' mise.toml)
+          if [ -z "$RUST_VERSION" ]; then
+            echo "could not read the rust pin from mise.toml" >&2
+            exit 1
+          fi
+          rustup toolchain install "$RUST_VERSION" --profile minimal
+          rustup default "$RUST_VERSION"
+          rustup show active-toolchain
 
       - name: Check compilation
         # Exclude crates that need WASI SDK, Python, or WASM artifacts
@@ -375,7 +396,7 @@ jobs:
       - name: Install protoc
         uses: arduino/setup-protoc@v3
         with:
-          version: "35.1"
+          version: "36.0"
           repo-token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Download WASM artifacts
