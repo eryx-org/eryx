@@ -11,7 +11,7 @@
   "dependencies": {
     "@bsull/eryx": "file:../eryx",
     "@bytecodealliance/jco": "1.32.1",
-    "@bytecodealliance/preview2-shim": "^0.22.0",
+    "@bytecodealliance/preview2-shim": "^0.23.0",
     "fzstd": "^0.1.1"
   },
   "devDependencies": {
