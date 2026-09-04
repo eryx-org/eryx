@@ -73,8 +73,8 @@ tracing-opentelemetry = "0.33"
 uuid = "1"
 walkdir = "2.5"
 wasm-bindgen = "0.2"    # browser WASM bindings
-wasm-encoder = "0.257"
-wasmparser = "0.257"
+wasm-encoder = "0.258"
+wasmparser = "0.258"
 # wasmtime v40+ required for the async component model.
 # 44.0.2 patches GHSA-2r75-cxrj-cmph (WASI path_open TRUNCATE bypasses FilePerms::WRITE).
 wasmtime = { version = "48.0.0", features = ["component-model", "async"] }
@@ -82,11 +82,11 @@ wasmtime-wasi = "48.0.0"
 wasmtime-wasi-io = "48.0.0"
 wasmtime-wizer = { version = "48.0.0", features = ["component-model", "wasmtime"] }
 webpki-roots = "1.0"   # TLS trust roots
-wit-component = "0.257"
-wit-dylib = "0.257"
+wit-component = "0.258"
+wit-dylib = "0.258"
 # wit-dylib FFI for implementing the interpreter interface (inlined from wasm-tools).
 wit-dylib-ffi = { path = "crates/wit-dylib-ffi" }
-wit-parser = "0.257"
+wit-parser = "0.258"
 zip = "8.0"
 zstd = "0.14"
 
