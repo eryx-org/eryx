@@ -6,7 +6,7 @@
     "@bsull/eryx": "../eryx",
     "@types/node": "^24.0.0",
     "typescript": "^7.0.0",
-    "vitest": "^4.1.0"
+    "vitest": "^5.0.0"
   },
   "scripts": {
     "test": "vitest",
