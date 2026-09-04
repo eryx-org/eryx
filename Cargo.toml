@@ -88,7 +88,7 @@ wit-dylib = "0.257"
 wit-dylib-ffi = { path = "crates/wit-dylib-ffi" }
 wit-parser = "0.257"
 zip = "8.0"
-zstd = "0.13"
+zstd = "0.14"
 
 [workspace.lints.rust]
 missing_debug_implementations = "warn"
