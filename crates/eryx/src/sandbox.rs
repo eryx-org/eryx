@@ -1016,12 +1016,10 @@ impl Sandbox {
                 })
             }
             Err(error) => {
-                // Check if this was a cancellation (either from the error or from the token)
-                if matches!(error, Error::Cancelled) || cancel_token.is_cancelled() {
-                    Err(Error::Cancelled)
-                } else {
-                    Err(error)
-                }
+                // The executor captures cancellation at the epoch interrupt.
+                // Do not re-read the live token here: it may have been
+                // cancelled after a timeout trap and would misclassify it.
+                Err(error)
             }
         }
     }

@@ -93,12 +93,14 @@ async fn test_execute_cancellable_cancel_infinite_loop() {
         .build()
         .expect("Failed to build sandbox");
 
+    let start = std::time::Instant::now();
     let handle = sandbox.execute_cancellable("while True: pass");
 
-    // Cancel after a short delay
+    // Use a host thread so cancellation is delivered even while the execution
+    // occupies the async runtime thread with a tight loop.
     let cancel_handle = handle.cancellation_token();
-    tokio::spawn(async move {
-        tokio::time::sleep(Duration::from_millis(100)).await;
+    std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(100));
         cancel_handle.cancel();
     });
 
@@ -109,6 +111,10 @@ async fn test_execute_cancellable_cancel_infinite_loop() {
         Err(e) => panic!("Expected Cancelled error, got: {:?}", e),
         Ok(_) => panic!("Expected error, got success"),
     }
+    assert!(
+        start.elapsed() < Duration::from_secs(1),
+        "Cancellation should interrupt execution promptly"
+    );
 }
 
 #[tokio::test]

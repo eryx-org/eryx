@@ -24,8 +24,8 @@
 //! pre-compiles at build time and embeds the result in the binary.
 
 use std::path::PathBuf;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 #[cfg(feature = "embedded")]
@@ -34,12 +34,158 @@ use crate::cache::{CacheKey, InstancePreCache};
 use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 use wasmtime::component::{Accessor, Component, HasSelf, Linker, ResourceTable};
-use wasmtime::{AsContextMut, Config, Engine, ResourceLimiter, Store};
+use wasmtime::{AsContextMut, Config, Engine, ResourceLimiter, Store, UpdateDeadline};
 use wasmtime_wasi::{FsPerms, WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView};
 
 use crate::callback::Callback;
 use crate::error::Error;
 use crate::trace::TraceEvent;
+
+/// Interval between increments of the process-wide epoch ticker.
+pub(crate) const EPOCH_TICK_INTERVAL: Duration = Duration::from_millis(10);
+
+/// Convert an execution timeout into a number of epoch ticks.
+pub(crate) fn epoch_ticks(timeout: Duration) -> u64 {
+    let ticks = timeout.as_millis() / EPOCH_TICK_INTERVAL.as_millis();
+    u64::try_from(ticks).unwrap_or(u64::MAX / 2).max(1)
+}
+
+/// A shared value whose failed initialization attempts can be retried.
+///
+/// Successful reads are lock-free. The mutex serializes only initialization
+/// attempts, allowing a later caller to retry after a transient error or panic.
+struct RetryableOnce<T> {
+    value: OnceLock<T>,
+    init_lock: Mutex<()>,
+}
+
+impl<T> RetryableOnce<T> {
+    const fn new() -> Self {
+        Self {
+            value: OnceLock::new(),
+            init_lock: Mutex::new(()),
+        }
+    }
+
+    fn get_or_try_init<E>(
+        &self,
+        init: impl FnOnce() -> std::result::Result<T, E>,
+    ) -> std::result::Result<&T, E> {
+        if let Some(value) = self.value.get() {
+            return Ok(value);
+        }
+
+        let _guard = self
+            .init_lock
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(value) = self.value.get() {
+            return Ok(value);
+        }
+
+        let value = init()?;
+        Ok(self.value.get_or_init(|| value))
+    }
+}
+
+/// A process-lifetime epoch ticker.
+struct EpochTicker {
+    handle: std::thread::JoinHandle<()>,
+}
+
+impl EpochTicker {
+    fn start(engine: &Engine) -> std::result::Result<Self, Error> {
+        let ticker_engine = engine.clone();
+
+        // Use a dedicated OS thread because guest execution can block the Tokio
+        // runtime. Epochs must continue advancing independently of async scheduling.
+        let handle = std::thread::Builder::new()
+            .name("eryx-epoch-ticker".to_string())
+            .spawn(move || {
+                loop {
+                    std::thread::sleep(EPOCH_TICK_INTERVAL);
+                    ticker_engine.increment_epoch();
+                }
+            })
+            .map_err(|error| {
+                Error::EpochTicker(format!("Failed to start epoch ticker: {error}"))
+            })?;
+
+        Ok(Self { handle })
+    }
+}
+
+/// Observe the process-lifetime ticker state.
+///
+/// A finished worker is removed before returning its error, so the next call
+/// can retry startup. There is necessarily a small check-to-execution race: a
+/// worker can exit immediately after `is_finished` returns false.
+fn observe_epoch_ticker(ticker: &mut Option<EpochTicker>) -> std::result::Result<bool, Error> {
+    let Some(dead) = ticker.take() else {
+        return Ok(false);
+    };
+
+    if !dead.handle.is_finished() {
+        *ticker = Some(dead);
+        return Ok(true);
+    }
+
+    let detail = match dead.handle.join() {
+        Ok(()) => "epoch ticker worker exited unexpectedly".to_string(),
+        Err(payload) => {
+            let panic = payload
+                .downcast_ref::<&str>()
+                .copied()
+                .or_else(|| payload.downcast_ref::<String>().map(String::as_str))
+                .unwrap_or("unknown panic");
+            format!("epoch ticker worker panicked: {panic}")
+        }
+    };
+    Err(Error::EpochTicker(detail))
+}
+
+fn is_already_cancelled(token: Option<&CancellationToken>) -> bool {
+    token.is_some_and(CancellationToken::is_cancelled)
+}
+
+/// Start or restart the process-lifetime epoch ticker for the shared engine.
+pub(crate) fn ensure_epoch_ticker(engine: &Engine) -> std::result::Result<(), Error> {
+    static EPOCH_TICKER: Mutex<Option<EpochTicker>> = Mutex::new(None);
+
+    let mut ticker = EPOCH_TICKER
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if observe_epoch_ticker(&mut ticker)? {
+        return Ok(());
+    }
+
+    // Spawn errors are deliberately not cached. A later execution can retry.
+    *ticker = Some(EpochTicker::start(engine)?);
+    Ok(())
+}
+
+/// Arm a store-local timeout deadline, or an effectively unlimited deadline
+/// when no timeout is configured. The deadline remains local to this Store;
+/// only the epoch clock itself is shared by executions.
+pub(crate) fn arm_epoch_deadline<T>(store: &mut Store<T>, timeout: Option<Duration>) {
+    store.set_epoch_deadline(timeout.map_or(u64::MAX / 2, epoch_ticks));
+    store.epoch_deadline_trap();
+}
+
+/// Classify an epoch interrupt from the state captured when it was triggered.
+///
+/// Do not consult the live cancellation token here: it may be cancelled after
+/// a timeout has already fired, which would misclassify that timeout.
+fn classify_epoch_interrupt(
+    was_cancelled_at_interrupt: bool,
+    execution_timeout: Option<Duration>,
+) -> Error {
+    if was_cancelled_at_interrupt {
+        Error::Cancelled
+    } else {
+        Error::Timeout(execution_timeout.unwrap_or_default())
+    }
+}
 
 /// The result a callback handler sends back to the `invoke` host import.
 ///
@@ -1240,20 +1386,12 @@ impl PythonExecutor {
     ///
     /// # Errors
     ///
-    /// Returns an error if engine creation fails (only on first call).
+    /// Returns an error if engine creation fails. A later call will retry
+    /// initialization after a transient failure.
     pub fn shared_engine() -> std::result::Result<Engine, Error> {
-        use std::sync::OnceLock;
-        static SHARED_ENGINE: OnceLock<Engine> = OnceLock::new();
+        static SHARED_ENGINE: RetryableOnce<Engine> = RetryableOnce::new();
 
-        // Fast path: engine already initialized
-        if let Some(engine) = SHARED_ENGINE.get() {
-            return Ok(engine.clone());
-        }
-
-        // Slow path: create engine (may race with other threads)
-        let engine = Self::create_engine()?;
-        // get_or_init handles the race - only one engine is kept
-        Ok(SHARED_ENGINE.get_or_init(|| engine).clone())
+        SHARED_ENGINE.get_or_try_init(Self::create_engine).cloned()
     }
 
     /// Create a new executor by loading a WASM component from bytes.
@@ -2102,6 +2240,13 @@ impl PythonExecutor {
     ) -> std::result::Result<ExecutionOutput, Error> {
         crate::error::validate_user_code(code)?;
 
+        // Avoid making an already-cancelled request wait for the first epoch
+        // tick. Cancellation that races this check is still observed by the
+        // Store-local deadline callback below.
+        if is_already_cancelled(cancellation_token.as_ref()) {
+            return Err(Error::Cancelled);
+        }
+
         // Build callback info for introspection
         let callback_infos: Vec<HostCallbackInfo> = callbacks
             .iter()
@@ -2303,62 +2448,42 @@ impl PythonExecutor {
         // Now set up epoch-based deadline for execution timeout and/or cancellation.
         // This is done AFTER instantiation so the timeout only applies to user code execution,
         // not Python initialization.
-        const EPOCH_TICK_MS: u64 = 10;
-
         // Track whether execution was cancelled (vs timed out)
         let was_cancelled = Arc::new(AtomicBool::new(false));
 
-        // Set up epoch ticker if we have a timeout or cancellation token
-        let epoch_ticker = if execution_timeout.is_some() || cancellation_token.is_some() {
-            // Set deadline based on timeout, or use a moderate value for cancellation-only
-            if let Some(timeout) = execution_timeout {
-                let ticks_until_timeout = timeout.as_millis() as u64 / EPOCH_TICK_MS;
-                let ticks = ticks_until_timeout.max(1);
-                store.set_epoch_deadline(ticks);
-            } else {
-                // No timeout but we have cancellation - set a reachable deadline.
-                // When cancelled, we bump epoch by more than this to trigger interrupt.
-                const CANCELLATION_DEADLINE: u64 = 10000;
-                store.set_epoch_deadline(CANCELLATION_DEADLINE);
-            }
+        // Untimed executions do not need the epoch clock. Once started, the single
+        // process-lifetime ticker is shared by all timed and cancellable executions.
+        if execution_timeout.is_some() || cancellation_token.is_some() {
+            ensure_epoch_ticker(&self.engine)?;
+        }
 
-            // Configure the store to trap when the epoch deadline is reached
-            store.epoch_deadline_trap();
-
-            // Spawn a thread to increment the engine's epoch periodically.
-            // We use a std::thread instead of tokio::spawn because the WASM
-            // execution may block the tokio runtime, preventing async tasks
-            // from running.
-            let engine = self.engine.clone();
-            let stop_flag = Arc::new(AtomicBool::new(false));
-            let stop_flag_clone = Arc::clone(&stop_flag);
+        if let Some(cancel_token) = cancellation_token.clone() {
+            let mut timeout_ticks = execution_timeout.map(epoch_ticks);
             let was_cancelled_clone = Arc::clone(&was_cancelled);
-            let cancel_token = cancellation_token.clone();
-            std::thread::spawn(move || {
-                while !stop_flag_clone.load(Ordering::Relaxed) {
-                    // Check for cancellation
-                    if let Some(ref token) = cancel_token
-                        && token.is_cancelled()
-                    {
-                        was_cancelled_clone.store(true, Ordering::Relaxed);
-                        // Bump epoch to exceed CANCELLATION_DEADLINE and trigger interrupt
-                        for _ in 0..10001 {
-                            engine.increment_epoch();
-                        }
-                        break;
+            // Check cancellation once per epoch tick. The remaining timeout is kept in
+            // this Store's callback so executions share only the clock, not deadline state.
+            store.set_epoch_deadline(1);
+            store.epoch_deadline_callback(move |_store| {
+                if cancel_token.is_cancelled() {
+                    was_cancelled_clone.store(true, Ordering::Relaxed);
+                    return Ok(UpdateDeadline::Interrupt);
+                }
+
+                // Yield on non-interrupt ticks so Tokio can run cancellation
+                // tasks while CPU-bound guest code is executing. Timeout-only
+                // stores use the non-yielding deadline trap path below.
+                match timeout_ticks.as_mut() {
+                    Some(ticks) if *ticks <= 1 => Ok(UpdateDeadline::Interrupt),
+                    Some(ticks) => {
+                        *ticks -= 1;
+                        Ok(UpdateDeadline::Yield(1))
                     }
-                    std::thread::sleep(Duration::from_millis(EPOCH_TICK_MS));
-                    engine.increment_epoch();
+                    None => Ok(UpdateDeadline::Yield(1)),
                 }
             });
-            Some(stop_flag)
         } else {
-            // No timeout and no cancellation - set a very high deadline that won't be reached
-            // (but not u64::MAX to avoid overflow when added to current epoch)
-            store.set_epoch_deadline(u64::MAX / 2);
-            store.epoch_deadline_trap();
-            None::<Arc<AtomicBool>>
-        };
+            arm_epoch_deadline(&mut store, execution_timeout);
+        }
 
         // Call the async execute export
         let code_owned = code.to_string();
@@ -2389,11 +2514,6 @@ impl PythonExecutor {
                 .await
         };
 
-        // Stop the epoch ticker thread if it was running
-        if let Some(stop_flag) = epoch_ticker {
-            stop_flag.store(true, Ordering::Relaxed);
-        }
-
         // Classify errors using proper type matching. wasmtime::Error is anyhow::Error,
         // so we downcast to wasmtime::Trap for WASM-level traps (Interrupt, OutOfFuel).
         // The async_timeout_elapsed flag covers blocking WASI host calls (e.g. time.sleep).
@@ -2401,11 +2521,7 @@ impl PythonExecutor {
             if async_timeout_elapsed
                 || e.downcast_ref::<wasmtime::Trap>() == Some(&wasmtime::Trap::Interrupt)
             {
-                if was_cancelled.load(Ordering::Relaxed) {
-                    Error::Cancelled
-                } else {
-                    Error::Timeout(execution_timeout.unwrap_or_default())
-                }
+                classify_epoch_interrupt(was_cancelled.load(Ordering::Relaxed), execution_timeout)
             } else if e.downcast_ref::<wasmtime::Trap>() == Some(&wasmtime::Trap::OutOfFuel) {
                 // A callback that suspended poisons the store's fuel to halt the
                 // guest, which surfaces as an OutOfFuel trap. Classify that as a
@@ -2542,6 +2658,80 @@ pub fn parse_trace_event(request: &TraceRequest) -> std::result::Result<TraceEve
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_retryable_once_retries_after_failure() {
+        let cell = RetryableOnce::new();
+
+        let first = cell.get_or_try_init(|| Err::<u32, _>("transient failure"));
+        assert_eq!(first.unwrap_err(), "transient failure");
+        assert!(
+            cell.value.get().is_none(),
+            "failed initialization must not be cached"
+        );
+
+        let second = cell.get_or_try_init(|| Ok::<_, &str>(42)).unwrap();
+        assert_eq!(*second, 42);
+
+        let cached = cell
+            .get_or_try_init(|| -> Result<u32, &str> {
+                panic!("initializer must not run after success")
+            })
+            .unwrap();
+        assert_eq!(*cached, 42);
+    }
+
+    #[test]
+    fn test_epoch_ticker_dead_worker_is_reported_and_slot_is_retryable() {
+        let mut ticker = Some(EpochTicker {
+            handle: std::thread::spawn(|| {}),
+        });
+        while !ticker.as_ref().unwrap().handle.is_finished() {
+            std::thread::yield_now();
+        }
+
+        let error = observe_epoch_ticker(&mut ticker).unwrap_err();
+        assert!(matches!(error, Error::EpochTicker(message) if message.contains("exited")));
+        assert!(ticker.is_none());
+
+        // The cleared slot is ready for a later startup attempt. This short
+        // worker keeps the test self-contained and does not spawn a permanent
+        // ticker thread.
+        ticker = Some(EpochTicker {
+            handle: std::thread::spawn(|| {}),
+        });
+        while !ticker.as_ref().unwrap().handle.is_finished() {
+            std::thread::yield_now();
+        }
+        assert!(observe_epoch_ticker(&mut ticker).is_err());
+        assert!(ticker.is_none());
+    }
+
+    #[test]
+    fn test_already_cancelled_token_is_detected_synchronously() {
+        let token = CancellationToken::new();
+        assert!(!is_already_cancelled(Some(&token)));
+        token.cancel();
+        assert!(is_already_cancelled(Some(&token)));
+        assert!(!is_already_cancelled(None));
+    }
+
+    #[test]
+    fn test_epoch_interrupt_classification_uses_captured_state() {
+        let timeout = Duration::from_millis(50);
+        let token = CancellationToken::new();
+        let was_cancelled_at_interrupt = token.is_cancelled();
+        token.cancel();
+
+        assert!(matches!(
+            classify_epoch_interrupt(was_cancelled_at_interrupt, Some(timeout)),
+            Error::Timeout(duration) if duration == timeout
+        ));
+        assert!(matches!(
+            classify_epoch_interrupt(true, Some(timeout)),
+            Error::Cancelled
+        ));
+    }
 
     #[test]
     fn test_parse_trace_event_line() {

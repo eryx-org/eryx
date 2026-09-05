@@ -547,6 +547,44 @@ async fn test_execution_timeout_allows_fast_code() {
     assert!(result.unwrap().stdout.contains("499500"));
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_concurrent_timeouts_use_one_shared_epoch_clock() {
+    let executor = get_shared_executor();
+    let mut first = SessionExecutor::new(Arc::clone(&executor), &[])
+        .await
+        .expect("Failed to create first session");
+    let mut second = SessionExecutor::new(executor, &[])
+        .await
+        .expect("Failed to create second session");
+    let timeout = std::time::Duration::from_millis(400);
+    first.set_execution_timeout(Some(timeout));
+    second.set_execution_timeout(Some(timeout));
+
+    let start = std::time::Instant::now();
+    let first = tokio::spawn(async move { first.execute("while True: pass").run().await });
+    let second = tokio::spawn(async move { second.execute("while True: pass").run().await });
+    let (first, second) = tokio::join!(first, second);
+    let elapsed = start.elapsed();
+
+    for result in [first, second] {
+        let error = result
+            .expect("Execution task should not panic")
+            .unwrap_err();
+        assert!(
+            matches!(error, eryx::Error::Timeout(_)),
+            "Expected timeout, got {error:?}"
+        );
+    }
+    assert!(
+        elapsed >= std::time::Duration::from_millis(300),
+        "Concurrent executions advanced the shared epoch too quickly: {elapsed:?}"
+    );
+    assert!(
+        elapsed < std::time::Duration::from_secs(2),
+        "Concurrent executions did not time out promptly: {elapsed:?}"
+    );
+}
+
 #[tokio::test]
 async fn test_session_recovers_after_timeout() {
     use std::time::Duration;
