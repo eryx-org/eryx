@@ -47,15 +47,3 @@ changelog_path = "CHANGELOG.md"
 changelog_relative_to = "crate"
 skip_changelog_for = ["eryx-wasm-runtime"]
 require_changelog_entries = false
-
-
-[change-detection]
-# Paths that trigger full workspace rebuild
-infrastructure = [
-  ".github/**",
-  "scripts/**",
-  "mise.toml",
-  "*.sh",
-  "deny.toml",
-  ".config/rail.toml",
-]
