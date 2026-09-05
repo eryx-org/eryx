@@ -411,7 +411,20 @@ impl ExecutionOutput {
 /// )?;
 /// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
 pub enum CpuFeatureLevel {
+    /// The target architecture's own baseline, with no optional CPU features.
+    ///
+    /// Portable to every CPU the target supports, and the only portable choice
+    /// on architectures Cranelift has no psABI presets for — notably aarch64,
+    /// where the alternative is [`Self::Native`] baking in whichever machine
+    /// happened to run the build. On x86-64 this is equivalent to
+    /// [`Self::X86_64`].
+    ///
+    /// The cost is real: on aarch64 it gives up LSE atomics, FP16, dot-product
+    /// and I8MM, so hot code is slower. Use it for artifacts you ship to
+    /// machines you do not control.
+    Baseline,
     /// Baseline x86_64: SSE2 only. Maximum compatibility (~2003+ CPUs).
     X86_64,
     /// x86-64-v2: SSE4.2, POPCNT, SSSE3 (~2008+ CPUs, Nehalem/Westmere era).
@@ -433,6 +446,7 @@ impl CpuFeatureLevel {
     #[must_use]
     pub fn parse(s: &str) -> Option<Self> {
         match s {
+            "baseline" => Some(Self::Baseline),
             "x86-64" | "x86-64-v1" => Some(Self::X86_64),
             "x86-64-v2" => Some(Self::X86_64v2),
             "x86-64-v3" => Some(Self::X86_64v3),
@@ -446,6 +460,7 @@ impl CpuFeatureLevel {
     #[must_use]
     pub const fn as_str(&self) -> &'static str {
         match self {
+            Self::Baseline => "baseline",
             Self::X86_64 => "x86-64",
             Self::X86_64v2 => "x86-64-v2",
             Self::X86_64v3 => "x86-64-v3",
@@ -467,7 +482,7 @@ impl std::str::FromStr for CpuFeatureLevel {
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         Self::parse(s).ok_or_else(|| {
             format!(
-                "Unknown CPU feature level '{}'. Valid values: x86-64, x86-64-v2, x86-64-v3, x86-64-v4, native",
+                "Unknown CPU feature level '{}'. Valid values: baseline, x86-64, x86-64-v2, x86-64-v3, x86-64-v4, native",
                 s
             )
         })
@@ -1936,6 +1951,8 @@ impl PythonExecutor {
     /// # CPU Feature Levels
     ///
     /// Set `ERYX_CPU_FEATURES` to a preset level:
+    /// - `baseline` - The target architecture's baseline, no optional features.
+    ///   The only portable choice on aarch64, which has no psABI presets.
     /// - `x86-64` - Baseline x86_64 (SSE2 only, most compatible)
     /// - `x86-64-v2` - SSE4.2, POPCNT, SSSE3 (Nehalem/Westmere era, ~2008+)
     /// - `x86-64-v3` - AVX2, BMI1/2, FMA (Haswell era, ~2013+, no AVX-512)
@@ -2017,18 +2034,9 @@ impl PythonExecutor {
         config.cranelift_opt_level(wasmtime::OptLevel::SpeedAndSize);
         config.async_stack_size(512 * 1024);
 
-        // Configure target triple. Doing so also stops Cranelift inferring CPU
-        // features from the build machine, which `apply_cpu_feature_level`
-        // relies on — hence passing whether it already happened here.
-        let target_pinned = target.is_some();
-        if let Some(target_str) = target {
-            config
-                .target(target_str)
-                .map_err(|e| Error::WasmEngine(format!("Invalid target '{target_str}': {e}")))?;
-        }
-
-        // Apply CPU feature level
-        Self::apply_cpu_feature_level(&mut config, cpu_features, target_pinned)?;
+        // Target triple and CPU features are set together: pinning a triple is
+        // also what stops Cranelift inferring features from the build machine.
+        Self::apply_cpu_feature_level(&mut config, cpu_features, target)?;
 
         Engine::new(&config).map_err(|e| Error::WasmEngine(e.to_string()))
     }
@@ -2062,33 +2070,70 @@ impl PythonExecutor {
     /// cost of not knowing about it is a missed optimisation rather than an
     /// artifact that refuses to load.
     ///
-    /// `target_pinned` records whether the caller already set an explicit
-    /// target, in which case inference is off already and only the preset is
-    /// needed.
+    /// [`CpuFeatureLevel::Baseline`] pins the target and stops there, which is
+    /// the only portable option on architectures Cranelift has no presets for.
+    /// The psABI levels are x86-64 only, so asking for one against a non-x86-64
+    /// target is rejected here rather than surfacing as an unknown-setting error
+    /// from `Engine::new`.
+    ///
+    /// `explicit_target` is the caller's requested triple, if any; the host's is
+    /// used otherwise.
     #[cfg(any(feature = "embedded", feature = "preinit"))]
     #[allow(unsafe_code)]
     fn apply_cpu_feature_level(
         config: &mut Config,
         level: CpuFeatureLevel,
-        target_pinned: bool,
+        explicit_target: Option<&str>,
     ) -> std::result::Result<(), Error> {
-        // `Native` means "whatever this machine has", which is precisely what
-        // Cranelift does when no target is pinned. Leave it alone.
+        // `Native` means "whatever this machine has", which is exactly what
+        // Cranelift does when no target is pinned — including when the caller
+        // asked for a specific triple, where it is the caller's business.
         if level == CpuFeatureLevel::Native {
+            if let Some(target_str) = explicit_target {
+                config.target(target_str).map_err(|e| {
+                    Error::WasmEngine(format!("Invalid target '{target_str}': {e}"))
+                })?;
+            }
             return Ok(());
         }
 
-        if !target_pinned {
-            let host = target_lexicon::Triple::host().to_string();
-            config.target(&host).map_err(|e| {
-                Error::WasmEngine(format!("Failed to pin host target '{host}': {e}"))
-            })?;
+        let triple = match explicit_target {
+            Some(target_str) => {
+                config.target(target_str).map_err(|e| {
+                    Error::WasmEngine(format!("Invalid target '{target_str}': {e}"))
+                })?;
+                target_str
+                    .parse::<target_lexicon::Triple>()
+                    .map_err(|e| Error::WasmEngine(format!("Invalid target '{target_str}': {e}")))?
+            }
+            None => {
+                let host = target_lexicon::Triple::host();
+                config.target(&host.to_string()).map_err(|e| {
+                    Error::WasmEngine(format!("Failed to pin host target '{host}': {e}"))
+                })?;
+                host
+            }
+        };
+
+        // The target is pinned now, so Cranelift starts from its baseline and
+        // never consults the build machine. `Baseline` wants exactly that and
+        // nothing more.
+        if level == CpuFeatureLevel::Baseline {
+            return Ok(());
         }
 
-        // SAFETY: `as_str` only ever yields one of Cranelift's x86 psABI preset
-        // names. Engine::new reports an error if the target has no such preset,
-        // which is what happens if an x86-64 level is asked for on another
-        // architecture.
+        // Everything else is an x86-64 psABI level. Cranelift only defines those
+        // presets for x86, so reject other architectures with something more
+        // useful than "unknown setting" out of Engine::new.
+        if triple.architecture != target_lexicon::Architecture::X86_64 {
+            return Err(Error::WasmEngine(format!(
+                "CPU feature level '{level}' is an x86-64 psABI level and does not \
+                 apply to target '{triple}'. Use 'baseline' for a portable build \
+                 or 'native' to use this machine's features."
+            )));
+        }
+
+        // SAFETY: `as_str` yields one of Cranelift's x86 psABI preset names.
         unsafe {
             config.cranelift_flag_enable(level.as_str());
         }
@@ -2109,7 +2154,7 @@ impl PythonExecutor {
             let level: CpuFeatureLevel = level.parse().map_err(Error::WasmEngine)?;
             // No explicit target here: this is the default engine path, so the
             // helper pins the host triple itself.
-            Self::apply_cpu_feature_level(config, level, false)?;
+            Self::apply_cpu_feature_level(config, level, None)?;
         }
 
         // Apply custom Cranelift flags from environment variable.

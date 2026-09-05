@@ -40,6 +40,9 @@ RUN mkdir -p crates/eryx-wasm-runtime/tests/python-stdlib && \
   --strip-components=0
 
 # Build eryx-precompile and produce runtime.cwasm with preinit.
+# The x86-64-vN levels are x86-64 only; building this image on an arm64
+# host needs --build-arg ERYX_CPU_FEATURES=baseline, which pins the target
+# without enabling optional features (aarch64 has no psABI presets).
 ARG ERYX_CPU_FEATURES=x86-64-v3
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
   --mount=type=cache,target=/build/target \

@@ -275,6 +275,12 @@ jobs:
           ls -la crates/eryx-runtime/runtime.cwasm
         env:
           ERYX_PRECOMPILE_BOOTSTRAP: "1"
+          # aarch64 has no Cranelift psABI presets, so "baseline" (pin the
+          # target, enable nothing) is the only setting that does not bake this
+          # runner's CPU into the wheel. Without it the default is native, and a
+          # runner refresh to ARMv8.6 hardware would emit has_i8mm and break
+          # every M1. Costs LSE atomics, FP16, dotprod and I8MM.
+          ERYX_CPU_FEATURES: "baseline"
 
       - name: Mark cwasm as up-to-date
         run: touch crates/eryx-runtime/runtime.cwasm
@@ -348,6 +354,12 @@ jobs:
           ls -la crates/eryx-runtime/runtime.cwasm
         env:
           ERYX_PRECOMPILE_BOOTSTRAP: "1"
+          # aarch64 has no Cranelift psABI presets, so "baseline" (pin the
+          # target, enable nothing) is the only setting that does not bake this
+          # runner's CPU into the wheel. Without it the default is native, and a
+          # runner refresh to ARMv8.6 hardware would emit has_i8mm and break
+          # every M1. Costs LSE atomics, FP16, dotprod and I8MM.
+          ERYX_CPU_FEATURES: "baseline"
 
       - name: Mark cwasm as up-to-date
         run: touch crates/eryx-runtime/runtime.cwasm
@@ -419,6 +431,12 @@ jobs:
           ls -la crates/eryx-runtime/runtime.cwasm
         env:
           ERYX_PRECOMPILE_BOOTSTRAP: "1"
+          # aarch64 has no Cranelift psABI presets, so "baseline" (pin the
+          # target, enable nothing) is the only setting that does not bake this
+          # runner's CPU into the wheel. Without it the default is native, and a
+          # runner refresh to ARMv8.6 hardware would emit has_i8mm and break
+          # every M1. Costs LSE atomics, FP16, dotprod and I8MM.
+          ERYX_CPU_FEATURES: "baseline"
 
       - name: Mark cwasm as up-to-date
         run: touch crates/eryx-runtime/runtime.cwasm

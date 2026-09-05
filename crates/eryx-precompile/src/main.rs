@@ -102,7 +102,7 @@ struct CompileArgs {
 
     /// CPU feature level for AOT compilation
     ///
-    /// Controls which x86-64 psABI instruction set level the artifact targets.
+    /// Controls which instruction set level the artifact targets.
     /// Lower levels are more portable; higher levels produce faster code.
     ///
     /// Values:
@@ -111,6 +111,7 @@ struct CompileArgs {
     ///   x86-64-v3  - AVX2, FMA, BMI1/2 (~2013+ Haswell, recommended for Fly.io)
     ///   x86-64-v2  - SSE4.2, POPCNT (~2008+ Nehalem)
     ///   x86-64     - Baseline SSE2 (maximum compatibility)
+    ///   baseline   - Target architecture baseline, no optional features
     ///
     /// Defaults to native when omitted.
     #[arg(short = 'c', long, value_name = "LEVEL")]
