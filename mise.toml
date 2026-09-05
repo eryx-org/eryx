@@ -9,7 +9,7 @@ version = "0.9.143"
 version = "1.258.0"
 
 [tools."cargo:cargo-rail"]
-version = "0.22.1"
+version = "0.25.0"
 
 [tools."cargo:cargo-all-features"]
 version = "1.12.0"
@@ -21,7 +21,7 @@ version = "0.5.4"
 version = "0.2.0"
 
 [tools."cargo:wasm-bindgen-cli"]
-version = "0.2.127"
+version = "0.2.128"
 
 # Note: WASI SDK is intentionally NOT in [tools] because adding it to PATH
 # breaks host compilation (Rust picks up wasm clang for proc-macro builds).

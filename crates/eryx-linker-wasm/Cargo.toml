@@ -14,7 +14,6 @@ crate-type = ["cdylib"]
 [dependencies]
 wasm-bindgen = "0.2"
 wit-component = { workspace = true }
-js-sys = "0.3"
 
 [lints]
 workspace = true

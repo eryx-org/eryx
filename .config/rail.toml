@@ -3,7 +3,7 @@
 
 # Targets for multi-platform validation
 # Include common host targets and WASM for the runtime
-targets = ["x86_64-unknown-linux-gnu", "aarch64-apple-darwin"]
+targets = ["x86_64-unknown-linux-gnu"]
 
 [unify]
 include_paths = true
@@ -43,19 +43,4 @@ msrv_policy = { mode = "compute", source = "workspace" }
 tag_prefix = "v"
 tag_format = "{crate}-{prefix}{version}"
 sign_tags = false
-changelog_path = "CHANGELOG.md"
-changelog_relative_to = "crate"
-skip_changelog_for = ["eryx-wasm-runtime"]
 require_changelog_entries = false
-
-
-[change-detection]
-# Paths that trigger full workspace rebuild
-infrastructure = [
-  ".github/**",
-  "scripts/**",
-  "mise.toml",
-  "*.sh",
-  "deny.toml",
-  ".config/rail.toml",
-]
