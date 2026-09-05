@@ -36,7 +36,6 @@ futures-concurrency = "7.6"
 futures-lite = "2.6"
 hex = "0.4"
 hmac = "0.13"
-js-sys = "0.3"          # browser WASM bindings
 lending-stream = "1.0"
 metrics = "0.24"
 metrics-exporter-prometheus = { version = "0.18.1", default-features = false, features = ["http-listener"] }
@@ -45,14 +44,12 @@ opentelemetry-otlp = { version = "0.32", features = ["grpc-tonic"] }
 opentelemetry_sdk = "0.32"
 prost = "0.14"          # gRPC (with tonic)
 pyo3 = { version = "^0.29.2", features = ["abi3-py312", "extension-module"] } #unified
-pyo3-async-runtimes = { version = "0.29", features = ["tokio-runtime"] }
 pythonize = "0.29"
 rand = "0.10"           # secret placeholder generation
 rcgen = "0.14"          # test certificate generation
 reqwest = { version = "0.13", default-features = false, features = ["rustls-no-provider"] }
 rmcp = "3.0"            # Model Context Protocol SDK
 rustls = "0.23"
-rustls-pemfile = "2.0"
 schemars = "1.0.0-alpha.17" # JSON Schema
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"

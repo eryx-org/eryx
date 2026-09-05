@@ -17,7 +17,6 @@ clap = { workspace = true } #unified
 eryx = { workspace = true, features = ["preinit"] }
 reqwest.workspace = true
 rustls = { workspace = true, features = ["aws-lc-rs"] }
-tempfile.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
 tracing.workspace = true
 tracing-subscriber = { version = "0.3", features = ["env-filter", "registry"] }

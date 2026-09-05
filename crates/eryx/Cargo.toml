@@ -156,7 +156,6 @@ async-trait.workspace = true
 criterion.workspace = true
 crossterm.workspace = true
 rcgen.workspace = true
-rustls-pemfile.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 
 [lints]

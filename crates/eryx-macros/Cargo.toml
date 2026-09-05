@@ -30,7 +30,6 @@ eryx = { path = "../eryx", features = ["macros", "native-extensions", "vfs"] }
 schemars = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
-tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 
 [lints]
 workspace = true
