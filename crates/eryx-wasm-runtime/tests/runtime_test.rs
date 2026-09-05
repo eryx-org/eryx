@@ -111,6 +111,7 @@ fn build_component() -> Result<Vec<u8>, Box<dyn std::error::Error>> {
     let mut opts = wit_dylib::DylibOpts {
         interpreter: Some("liberyx_runtime.so".to_string()),
         async_: wit_dylib::AsyncFilterSet::default(),
+        stack_pointer: wit_dylib::StackPointer::Global,
     };
 
     let mut bindings = wit_dylib::create(&resolve, world_id, Some(&mut opts));

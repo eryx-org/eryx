@@ -84,6 +84,7 @@ fn test_link_runtime() -> Result<(), Box<dyn std::error::Error>> {
     let mut opts = wit_dylib::DylibOpts {
         interpreter: Some("liberyx_runtime.so".to_string()),
         async_: wit_dylib::AsyncFilterSet::default(),
+        stack_pointer: wit_dylib::StackPointer::Global,
     };
 
     println!("Generating wit-dylib bindings...");
