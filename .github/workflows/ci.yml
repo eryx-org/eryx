@@ -83,6 +83,9 @@ jobs:
 
       - uses: ./.github/actions/setup-rust
 
+      - name: Install protoc for eryx-server build.rs
+        run: sudo apt-get install -y protobuf-compiler
+
       - name: Check dependency unification
         run: cargo rail unify --check
         env:
