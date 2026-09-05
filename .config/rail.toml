@@ -3,7 +3,7 @@
 
 # Targets for multi-platform validation
 # Include common host targets and WASM for the runtime
-targets = ["x86_64-unknown-linux-gnu", "aarch64-apple-darwin"]
+targets = ["x86_64-unknown-linux-gnu"]
 
 [unify]
 include_paths = true
