@@ -10,13 +10,17 @@
 //! eryx-precompile setup
 //!
 //! # Pre-init + compile for Fly.io (x86-64-v3, no AVX-512)
-//! eryx-precompile compile runtime.wasm -o runtime.cwasm --preinit --stdlib ./python-stdlib --target x86-64-v3
+//! eryx-precompile compile runtime.wasm -o runtime.cwasm --preinit --stdlib ./python-stdlib \
+//!   --cpu-features x86-64-v3
 //!
 //! # Pre-init only (output pre-initialized .wasm for later compilation)
 //! eryx-precompile compile runtime.wasm -o runtime-preinit.wasm --preinit --stdlib ./python-stdlib --wasm-only
 //!
 //! # AOT compile only (no pre-init, for already pre-initialized .wasm)
-//! eryx-precompile compile runtime-preinit.wasm -o runtime.cwasm --target x86-64-v3
+//! eryx-precompile compile runtime-preinit.wasm -o runtime.cwasm --cpu-features x86-64-v3
+//!
+//! # Cross-compile for aarch64
+//! eryx-precompile compile runtime.wasm -o runtime.cwasm --target aarch64-unknown-linux-gnu
 //!
 //! # Pre-init with packages (wheels, tar.gz, or directories)
 //! eryx-precompile compile runtime.wasm -o runtime-numpy.cwasm --preinit --stdlib ./python-stdlib \
@@ -89,16 +93,28 @@ struct CompileArgs {
     #[arg(short, long)]
     output: Option<PathBuf>,
 
-    /// Target CPU features for AOT compilation
+    /// Cross-compilation target triple (e.g. aarch64-unknown-linux-gnu)
+    ///
+    /// When omitted, compiles for the host architecture. For controlling
+    /// CPU feature levels (SSE, AVX, etc.), use --cpu-features instead.
+    #[arg(short, long)]
+    target: Option<String>,
+
+    /// CPU feature level for AOT compilation
+    ///
+    /// Controls which x86-64 psABI instruction set level the artifact targets.
+    /// Lower levels are more portable; higher levels produce faster code.
     ///
     /// Values:
-    ///   native     - Host CPU features (default, fastest but not portable)
-    ///   x86-64-v3  - AVX2, FMA, BMI1/2 (recommended for Fly.io, no AVX-512)
-    ///   x86-64-v2  - SSE4.2, POPCNT (~2008+ CPUs)
+    ///   native     - Host CPU features (fastest but not portable)
+    ///   x86-64-v4  - AVX-512 (~2017+ Skylake-X)
+    ///   x86-64-v3  - AVX2, FMA, BMI1/2 (~2013+ Haswell, recommended for Fly.io)
+    ///   x86-64-v2  - SSE4.2, POPCNT (~2008+ Nehalem)
     ///   x86-64     - Baseline SSE2 (maximum compatibility)
-    ///   `<triple>` - Full target triple (e.g., aarch64-unknown-linux-gnu)
-    #[arg(short, long, default_value = "native")]
-    target: String,
+    ///
+    /// Defaults to native when omitted.
+    #[arg(short = 'c', long, value_name = "LEVEL")]
+    cpu_features: Option<CpuFeatureLevel>,
 
     /// Pre-initialize Python before compiling
     ///
@@ -139,7 +155,7 @@ struct CompileArgs {
     ///
     /// Use this to create architecture-independent pre-initialized artifacts
     /// that can be AOT compiled later for different targets.
-    #[arg(long, conflicts_with = "target")]
+    #[arg(long, conflicts_with_all = ["target", "cpu_features"])]
     wasm_only: bool,
 
     /// Skip verification step
@@ -354,13 +370,20 @@ async fn run_compile(args: CompileArgs) -> Result<()> {
         out
     });
 
+    // Resolve target triple and CPU feature level from the flags.
+    let (target_triple, cpu_features) =
+        resolve_target_and_features(args.target.as_deref(), args.cpu_features)?;
+
     println!("eryx-precompile");
     println!("===============");
     println!();
     println!("Input:   {}", args.input.display());
     println!("Output:  {}", output.display());
     if !args.wasm_only {
-        println!("Target:  {}", args.target);
+        if let Some(ref triple) = target_triple {
+            println!("Target:  {triple}");
+        }
+        println!("CPU:     {cpu_features}");
     }
     if args.preinit {
         println!(
@@ -469,12 +492,9 @@ async fn run_compile(args: CompileArgs) -> Result<()> {
         println!("Step 2: AOT compiling to native code...");
         let start = Instant::now();
 
-        // Parse target as either a CPU feature level (x86-64-v3) or target triple
-        let (target_triple, cpu_features) = parse_target(&args.target)?;
-
         let precompiled = eryx::PythonExecutor::precompile_with_options(
             &component_bytes,
-            target_triple,
+            target_triple.as_deref(),
             cpu_features,
         )
         .context("Failed to AOT compile")?;
@@ -612,19 +632,38 @@ fn copy_directory_contents(src: &std::path::Path, dst: &std::path::Path) -> Resu
     Ok(())
 }
 
-/// Parse target string into target triple and CPU feature level.
+/// Resolve the `--target` and `--cpu-features` flags into a target triple and
+/// CPU feature level.
 ///
-/// CPU feature levels (x86-64, x86-64-v2, x86-64-v3, x86-64-v4, native) are used
-/// directly, while full target triples (e.g., aarch64-unknown-linux-gnu) are
-/// passed through with Native CPU features.
-fn parse_target(target: &str) -> Result<(Option<&str>, CpuFeatureLevel)> {
-    // Try to parse as CPU feature level first
-    if let Some(level) = CpuFeatureLevel::parse(target) {
-        return Ok((None, level));
+/// Handles backward compatibility: `--target x86-64-v3` (without `--cpu-features`)
+/// is treated as `--cpu-features x86-64-v3`.
+fn resolve_target_and_features(
+    target: Option<&str>,
+    cpu_features: Option<CpuFeatureLevel>,
+) -> Result<(Option<String>, CpuFeatureLevel)> {
+    match (target, cpu_features) {
+        (None, None) => Ok((None, CpuFeatureLevel::Native)),
+        (None, Some(level)) => Ok((None, level)),
+        (Some(t), None) => {
+            // Backward compat: --target x86-64-v3 still works.
+            if let Some(level) = CpuFeatureLevel::parse(t) {
+                eprintln!(
+                    "note: use --cpu-features {t} instead of --target {t} \
+                     (--target is now for cross-compilation triples)"
+                );
+                Ok((None, level))
+            } else {
+                Ok((Some(t.to_string()), CpuFeatureLevel::Native))
+            }
+        }
+        (Some(t), Some(_)) if CpuFeatureLevel::parse(t).is_some() => {
+            anyhow::bail!(
+                "--target {t} looks like a CPU feature level, not a target triple. \
+                 Use --cpu-features {t} instead, or pass a real triple to --target."
+            );
+        }
+        (Some(t), Some(level)) => Ok((Some(t.to_string()), level)),
     }
-
-    // Otherwise treat as target triple with native features
-    Ok((Some(target), CpuFeatureLevel::Native))
 }
 
 /// Verify that the compiled cwasm file works correctly.
