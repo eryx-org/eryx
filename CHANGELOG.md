@@ -7,6 +7,49 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## `eryx-precompile` - [0.7.0](https://github.com/eryx-org/eryx/compare/eryx-precompile-v0.6.0...eryx-precompile-v0.7.0) - 2026-09-05
+
+### Added
+- [**breaking**] add a Baseline CPU feature level and seal CpuFeatureLevel ([#361](https://github.com/eryx-org/eryx/pull/361))
+
+### Fixed
+- pin the compilation target so CPU features cannot leak from the build host ([#360](https://github.com/eryx-org/eryx/pull/360))
+
+### Other
+- *(deps)* update dependency cargo:cargo-rail to v0.25.0 ([#367](https://github.com/eryx-org/eryx/pull/367))
+- *(deps)* update dependency cargo:cargo-rail to v0.22.1 ([#365](https://github.com/eryx-org/eryx/pull/365))
+
+## `eryx` - [0.7.0](https://github.com/eryx-org/eryx/compare/eryx-v0.6.0...eryx-v0.7.0) - 2026-09-05
+
+### Added
+- [**breaking**] add a Baseline CPU feature level and seal CpuFeatureLevel ([#361](https://github.com/eryx-org/eryx/pull/361))
+
+### Fixed
+- share the epoch ticker across executions ([#349](https://github.com/eryx-org/eryx/pull/349))
+- pin the compilation target so CPU features cannot leak from the build host ([#360](https://github.com/eryx-org/eryx/pull/360))
+
+### Other
+- *(deps)* update dependency cargo:cargo-rail to v0.25.0 ([#367](https://github.com/eryx-org/eryx/pull/367))
+- *(deps)* update wasmtime & wasm-tools ([#343](https://github.com/eryx-org/eryx/pull/343))
+- *(deps)* update dependency rust to 1.98 ([#354](https://github.com/eryx-org/eryx/pull/354))
+
+## `eryx-vfs` - [0.7.0](https://github.com/eryx-org/eryx/compare/eryx-vfs-v0.6.0...eryx-vfs-v0.7.0) - 2026-09-05
+
+### Other
+- *(deps)* update dependency cargo:cargo-rail to v0.25.0 ([#367](https://github.com/eryx-org/eryx/pull/367))
+- *(deps)* update wasmtime & wasm-tools ([#343](https://github.com/eryx-org/eryx/pull/343))
+
+## `eryx-runtime` - [0.7.0](https://github.com/eryx-org/eryx/compare/eryx-runtime-v0.6.0...eryx-runtime-v0.7.0) - 2026-09-05
+
+### Other
+- *(deps)* update wasmtime & wasm-tools ([#370](https://github.com/eryx-org/eryx/pull/370))
+- *(deps)* update wasmtime & wasm-tools ([#343](https://github.com/eryx-org/eryx/pull/343))
+
+## `eryx-macros` - [0.7.0](https://github.com/eryx-org/eryx/compare/eryx-macros-v0.6.0...eryx-macros-v0.7.0) - 2026-09-05
+
+### Other
+- *(deps)* update dependency cargo:cargo-rail to v0.25.0 ([#367](https://github.com/eryx-org/eryx/pull/367))
+
 ## `eryx-precompile` - [0.6.0](https://github.com/eryx-org/eryx/compare/eryx-precompile-v0.5.0...eryx-precompile-v0.6.0) - 2026-08-19
 
 ### Other
