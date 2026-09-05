@@ -85,6 +85,8 @@ jobs:
 
       - name: Check dependency unification
         run: cargo rail unify --check
+        env:
+          ERYX_PRECOMPILE_BOOTSTRAP: "1"
 
   # Build eryx-wasm-runtime and precompile it - other jobs depend on this.
   # Runs when core paths change, or when any downstream job needs WASM artifacts.
