@@ -438,6 +438,7 @@ Use cases for `SandboxFactory`:
 
 - Load packages (jinja2, numpy, etc.) once and create many sandboxes from the factory
 - Pre-import modules to eliminate import overhead on first execution
+- Pre-execute setup code (environment creation, filter registration) baked into the snapshot
 - Save/load factory state to disk for persistence across process restarts
 
 ```python
@@ -464,6 +465,40 @@ for i in range(100):
     sandbox = factory.create_sandbox()
     sandbox.execute(f"print('Sandbox {i}')")
 ```
+
+#### Setup Code
+
+Beyond pre-importing modules, you can run arbitrary Python code during factory
+construction. The resulting state is captured in the memory snapshot — each
+sandbox starts with it in copy-on-write memory, preserving full isolation.
+
+```python
+factory = eryx.SandboxFactory(
+    packages=["jinja2.whl", "markupsafe.whl"],
+    imports=["jinja2", "jinja2.sandbox"],
+    setup_code="""
+from jinja2.sandbox import SandboxedEnvironment
+
+def my_filter(value):
+    return value.upper()
+
+env = SandboxedEnvironment()
+env.filters['shout'] = my_filter
+""",
+)
+
+# Every sandbox starts with `env` and `my_filter` already defined
+sandbox = factory.create_sandbox()
+result = sandbox.execute('''
+template = env.from_string("{{ name | shout }}")
+print(template.render(name="world"))
+''')
+print(result.stdout)  # "WORLD"
+```
+
+This reduces per-sandbox execution time by avoiding repeated setup work. The
+factory build cost (one-time) is negligibly higher since the setup code runs
+during pre-initialization.
 
 #### Saving and Loading
 

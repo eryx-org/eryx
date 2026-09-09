@@ -121,6 +121,33 @@ eryx-precompile compile runtime.wasm -o runtime.cwasm \
 
 Supported package formats: `.whl`, `.tar.gz`, and directories. Native extensions (`.so` files) are detected and linked automatically.
 
+### Setup Code
+
+Beyond importing modules, you can execute arbitrary Python code during pre-initialization. The resulting state (variables, objects, environments) is captured in the memory snapshot — each sandbox starts with that state in copy-on-write memory, preserving full isolation.
+
+This is useful when your sandboxes all need the same expensive setup that doesn't change between requests:
+
+```bash
+# Bake a Jinja2 SandboxedEnvironment with custom filters into the snapshot
+eryx-precompile compile runtime.wasm -o jinja2.cwasm \
+  --preinit --stdlib ./python-stdlib \
+  --package jinja2.whl --package markupsafe.whl \
+  --import jinja2 --import jinja2.sandbox \
+  --setup-code "
+from jinja2.sandbox import SandboxedEnvironment
+env = SandboxedEnvironment()
+"
+
+# For longer setup scripts, use --setup-file
+eryx-precompile compile runtime.wasm -o jinja2.cwasm \
+  --preinit --stdlib ./python-stdlib \
+  --package jinja2.whl --package markupsafe.whl \
+  --import jinja2 \
+  --setup-file setup.py
+```
+
+Each sandbox created from the resulting artifact starts with `env` already defined. Per-request code only needs to handle the request-specific work (deserializing data, compiling the template, rendering).
+
 ### Verification
 
 By default, `compile` verifies the output by creating a test sandbox. You can add custom verification:
