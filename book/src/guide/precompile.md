@@ -185,6 +185,60 @@ eryx-precompile compile runtime.wasm -o numpy-runtime.cwasm \
   --verify-code "import numpy; print(numpy.zeros((2,2)))"
 ```
 
+## Environment Variables for CPU Targeting
+
+When using eryx as a library — from Python (`pyeryx`), Rust (`Sandbox::embedded()`), or JavaScript — the embedded runtime is compiled to native code at build time. By default it targets the **host CPU**, which may include instructions (e.g. AVX-512) that aren't available on the machine where your application actually runs.
+
+If the build machine has different CPU features from the deployment target, the sandbox will fail to initialize at runtime with an error like:
+
+```
+Compilation settings are not compatible with the native host
+```
+
+Set these environment variables at **build time** (when the `.cwasm` is generated) or at **import time** (when the library first loads its embedded runtime) to control which CPU features the compiled code uses:
+
+### `ERYX_CPU_FEATURES`
+
+Choose an x86-64 microarchitecture level:
+
+| Value | CPU Features | Use Case |
+|-------|-------------|----------|
+| `native` | Host CPU (default) | Local development |
+| `x86-64-v3` | AVX2, FMA, BMI1/2 | **Recommended for cloud VMs** (Fly.io, AWS, GCP) |
+| `x86-64-v2` | SSE4.2, POPCNT, SSSE3 | Older servers (~2008+) |
+| `x86-64` | Baseline SSE2 only | Maximum compatibility |
+| `x86-64-v4` | AVX-512 | Skylake-X and newer |
+
+Example with Python:
+
+```bash
+ERYX_CPU_FEATURES=x86-64-v3 python my_app.py
+```
+
+Example with Rust:
+
+```bash
+ERYX_CPU_FEATURES=x86-64-v3 cargo build --features embedded --release
+```
+
+### `ERYX_TARGET`
+
+For cross-compilation, specify a full target triple:
+
+```bash
+ERYX_TARGET=aarch64-unknown-linux-gnu cargo build --features embedded --release
+```
+
+### `ERYX_CRANELIFT_FLAGS`
+
+For fine-grained control over individual Cranelift compiler flags:
+
+```bash
+ERYX_CRANELIFT_FLAGS=has_avx512f=false,has_avx512bw=false cargo build --features embedded --release
+```
+
+> **Tip:** For most deployments, `ERYX_CPU_FEATURES=x86-64-v3` is the right choice. It covers all cloud VMs from the last decade while avoiding AVX-512 instructions that many virtualized environments don't expose.
+
 ## Cache Location
 
 The `setup` command caches compiled runtimes at:
