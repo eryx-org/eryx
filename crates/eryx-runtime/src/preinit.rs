@@ -31,6 +31,7 @@
 //!     Some(&site_packages_path),
 //!     &["numpy", "pandas"],  // Modules to import during pre-init
 //!     &native_extensions,
+//!     Some("import numpy as np; arr = np.zeros(10)"),  // Optional setup code
 //! ).await?;
 //! ```
 
@@ -40,7 +41,7 @@ use std::path::Path;
 use tempfile::TempDir;
 use wasmtime::{
     Config, Engine, Store,
-    component::{Component, Instance, Linker, ResourceTable, Val},
+    component::{Component, Func, Instance, Linker, ResourceTable, Val},
 };
 use wasmtime_wasi::{FsPerms, WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView};
 use wasmtime_wizer::{WasmtimeWizerComponent, Wizer};
@@ -83,6 +84,9 @@ impl WasiView for PreInitCtx {
 /// * `site_packages` - Optional path to site-packages directory
 /// * `imports` - Modules to import during pre-init (e.g., ["numpy", "pandas"])
 /// * `extensions` - Native extensions to link into the component
+/// * `setup_code` - Optional Python code to execute after imports, baked into
+///   the snapshot. Use this to pre-create objects (e.g., a Jinja2
+///   `SandboxedEnvironment`) so every sandbox starts with them in COW memory.
 ///
 /// # Returns
 ///
@@ -91,12 +95,13 @@ impl WasiView for PreInitCtx {
 /// # Errors
 ///
 /// Returns an error if pre-initialization fails (e.g., Python init error,
-/// import failure).
+/// import failure, or setup code exception).
 pub async fn pre_initialize(
     python_stdlib: &Path,
     site_packages: Option<&Path>,
     imports: &[&str],
     extensions: &[NativeExtension],
+    setup_code: Option<&str>,
 ) -> Result<Vec<u8>> {
     let imports: Vec<String> = imports.iter().map(|s| (*s).to_string()).collect();
 
@@ -185,6 +190,12 @@ pub async fn pre_initialize(
     // If imports are specified, call execute() to import them
     if !imports.is_empty() {
         call_execute_for_imports(&mut store, &instance, &imports).await?;
+    }
+
+    // If setup code is provided, execute it after imports so its state
+    // (variables, objects, etc.) gets captured in the Wizer snapshot.
+    if let Some(code) = setup_code {
+        call_execute_code(&mut store, &instance, code, "setup code").await?;
     }
 
     // CRITICAL: Call finalize-preinit to reset WASI state AFTER all imports.
@@ -712,16 +723,63 @@ async fn call_execute_for_imports(
     instance: &Instance,
     imports: &[String],
 ) -> Result<()> {
-    // Find the execute function.
-    // Our WIT exports functions directly, not in an "exports" interface.
-    // Try direct export first, then fall back to exports interface.
-    let execute_func = if let Some(func) = instance.get_func(&mut *store, "execute") {
-        func
+    let import_code = imports
+        .iter()
+        .map(|module| format!("import {module}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    call_execute_code(store, instance, &import_code, "imports").await
+}
+
+/// Call the execute export with arbitrary Python code during pre-init.
+///
+/// The `label` is used in error messages to identify what kind of code failed
+/// (e.g., "imports", "setup code").
+async fn call_execute_code(
+    store: &mut Store<PreInitCtx>,
+    instance: &Instance,
+    code: &str,
+    label: &str,
+) -> Result<()> {
+    let execute_func = find_execute_func(store, instance)?;
+
+    let args = [Val::String(code.to_string())];
+    let mut results = vec![Val::Bool(false)];
+
+    execute_func
+        .call_async(&mut *store, &args, &mut results)
+        .await
+        .map_err(|e| e.context(format!("Failed to execute {label} during pre-init")))?;
+
+    match &results[0] {
+        Val::Result(Ok(_)) => Ok(()),
+        Val::Result(Err(Some(error_val))) => {
+            let error_msg = match error_val.as_ref() {
+                Val::String(s) => s.clone(),
+                other => format!("unexpected error value: {other:?}"),
+            };
+            Err(anyhow!(
+                "Pre-init {label} execution failed: {error_msg}\nCode:\n{code}"
+            ))
+        }
+        Val::Result(Err(None)) => Err(anyhow!(
+            "Pre-init {label} execution failed with unknown error\nCode:\n{code}"
+        )),
+        other => {
+            tracing::warn!("Unexpected result type from execute during pre-init: {other:?}");
+            Ok(())
+        }
+    }
+}
+
+/// Find the `execute` export function on the WASM instance.
+fn find_execute_func(store: &mut Store<PreInitCtx>, instance: &Instance) -> Result<Func> {
+    if let Some(func) = instance.get_func(&mut *store, "execute") {
+        Ok(func)
     } else if let Some(func) = instance.get_func(&mut *store, "[async]execute") {
-        // Async exports may have [async] prefix
-        func
+        Ok(func)
     } else {
-        // Try looking in an "exports" interface (for compatibility)
         let (_item, exports_idx) = instance
             .get_export(&mut *store, None, "exports")
             .ok_or_else(|| anyhow!("No 'exports' or 'execute' export found"))?;
@@ -732,52 +790,7 @@ async fn call_execute_for_imports(
 
         instance
             .get_func(&mut *store, execute_idx)
-            .ok_or_else(|| anyhow!("Could not get execute func from index"))?
-    };
-
-    // Generate import code
-    let import_code = imports
-        .iter()
-        .map(|module| format!("import {module}"))
-        .collect::<Vec<_>>()
-        .join("\n");
-
-    // Call execute with the import code
-    let args = [Val::String(import_code.clone())];
-    // Result placeholder - wasmtime will fill this with Val::Result
-    let mut results = vec![Val::Bool(false)];
-
-    execute_func
-        .call_async(&mut *store, &args, &mut results)
-        .await
-        .map_err(|e| e.context("Failed to execute imports during pre-init"))?;
-
-    // Check if the result was an error
-    // result<string, string> is represented as Val::Result(Result<Option<Box<Val>>, Option<Box<Val>>>)
-    match &results[0] {
-        Val::Result(Ok(_)) => {
-            // Success - imports completed
-            Ok(())
-        }
-        Val::Result(Err(Some(error_val))) => {
-            // Error - extract the error message
-            let error_msg = match error_val.as_ref() {
-                Val::String(s) => s.clone(),
-                other => format!("unexpected error value: {other:?}"),
-            };
-            Err(anyhow!(
-                "Pre-init import execution failed: {error_msg}\nImport code:\n{import_code}"
-            ))
-        }
-        Val::Result(Err(None)) => Err(anyhow!(
-            "Pre-init import execution failed with unknown error\nImport code:\n{import_code}"
-        )),
-        other => {
-            // Unexpected result type - log warning but don't fail
-            // This shouldn't happen, but be defensive
-            tracing::warn!("Unexpected result type from execute during pre-init: {other:?}");
-            Ok(())
-        }
+            .ok_or_else(|| anyhow!("Could not get execute func from index"))
     }
 }
 

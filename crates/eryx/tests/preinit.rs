@@ -123,7 +123,7 @@ async fn shared_preinit(stdlib: &Path, imports: &[&str]) -> Arc<Vec<u8>> {
         Arc::new(bytes)
     } else {
         let bytes = Arc::new(
-            pre_initialize(stdlib, None, imports, &[])
+            pre_initialize(stdlib, None, imports, &[], None)
                 .await
                 .expect("pre-initialization should succeed"),
         );
@@ -390,4 +390,121 @@ print(f"has_encodings: {'encodings' in files}")
         .unwrap();
 
     assert!(result.stdout.contains("has_encodings: True"));
+}
+
+// =============================================================================
+// Setup Code Tests
+// =============================================================================
+
+/// Test that setup_code runs during pre-init and state is available in sandboxes.
+#[tokio::test]
+async fn preinit_setup_code_defines_variable() {
+    let stdlib = get_stdlib_path();
+
+    let preinit_bytes = pre_initialize(
+        &stdlib,
+        None,
+        &[],
+        &[],
+        Some("setup_value = 42\nsetup_list = [1, 2, 3]"),
+    )
+    .await
+    .expect("pre-initialization with setup code should succeed");
+
+    let sandbox = Sandbox::builder()
+        .with_wasm_bytes(preinit_bytes)
+        .with_python_stdlib(&stdlib)
+        .build()
+        .expect("sandbox creation should succeed");
+
+    let result = sandbox
+        .execute("print(f'{setup_value} {setup_list}')")
+        .await
+        .expect("execution should succeed");
+
+    assert!(result.stdout.contains("42 [1, 2, 3]"));
+}
+
+/// Test that setup_code runs after imports, so imported modules are available.
+#[tokio::test]
+async fn preinit_setup_code_uses_imports() {
+    let stdlib = get_stdlib_path();
+
+    let preinit_bytes = pre_initialize(
+        &stdlib,
+        None,
+        &["json"],
+        &[],
+        Some("precomputed = json.dumps({'ready': True})"),
+    )
+    .await
+    .expect("pre-initialization with imports + setup code should succeed");
+
+    let sandbox = Sandbox::builder()
+        .with_wasm_bytes(preinit_bytes)
+        .with_python_stdlib(&stdlib)
+        .build()
+        .expect("sandbox creation should succeed");
+
+    let result = sandbox
+        .execute("print(precomputed)")
+        .await
+        .expect("execution should succeed");
+
+    assert!(result.stdout.contains(r#"{"ready": true}"#));
+}
+
+/// Test that setup_code state is isolated between sandboxes (COW).
+#[tokio::test]
+async fn preinit_setup_code_isolated_between_sandboxes() {
+    let stdlib = get_stdlib_path();
+
+    let preinit_bytes = pre_initialize(&stdlib, None, &[], &[], Some("counter = 0"))
+        .await
+        .expect("pre-initialization should succeed");
+
+    // First sandbox: mutate the variable
+    let sandbox1 = Sandbox::builder()
+        .with_wasm_bytes(preinit_bytes.clone())
+        .with_python_stdlib(&stdlib)
+        .build()
+        .unwrap();
+
+    sandbox1
+        .execute("counter += 100\nprint(f'sb1: {counter}')")
+        .await
+        .unwrap();
+
+    // Second sandbox: should see the original value, not the mutated one
+    let sandbox2 = Sandbox::builder()
+        .with_wasm_bytes(preinit_bytes)
+        .with_python_stdlib(&stdlib)
+        .build()
+        .unwrap();
+
+    let result = sandbox2.execute("print(f'sb2: {counter}')").await.unwrap();
+
+    assert!(result.stdout.contains("sb2: 0"));
+}
+
+/// Test that setup_code errors are reported clearly.
+#[tokio::test]
+async fn preinit_setup_code_error_is_reported() {
+    let stdlib = get_stdlib_path();
+
+    let result = pre_initialize(
+        &stdlib,
+        None,
+        &[],
+        &[],
+        Some("raise ValueError('setup failed')"),
+    )
+    .await;
+
+    assert!(result.is_err());
+    let err = result.unwrap_err().to_string();
+    assert!(
+        err.contains("setup code"),
+        "error should mention 'setup code': {err}"
+    );
 }

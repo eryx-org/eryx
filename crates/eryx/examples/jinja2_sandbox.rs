@@ -81,6 +81,7 @@ async fn main() -> anyhow::Result<()> {
         Some(&site_packages),
         &["jinja2"], // Pre-import jinja2 during init
         &extensions,
+        None,
     )
     .await?;
     println!(

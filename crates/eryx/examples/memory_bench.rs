@@ -269,6 +269,7 @@ async fn run_numpy_benchmark() -> Result<(), Box<dyn std::error::Error>> {
         Some(site_packages),
         &["numpy"],
         &native_extensions,
+        None,
     )
     .await?;
     println!("  Pre-init in {:?}", start.elapsed());

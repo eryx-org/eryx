@@ -115,6 +115,7 @@ fn main() -> anyhow::Result<()> {
                 None, // No site-packages for base runtime
                 &[],  // No imports for base runtime
                 &[],  // No native extensions for base runtime
+                None, // No setup code
             )
             .await
         })?;

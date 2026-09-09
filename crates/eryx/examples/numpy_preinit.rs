@@ -119,6 +119,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Some(site_packages),
         &["numpy"], // Pre-import numpy during init
         &native_extensions,
+        None,
     )
     .await?;
 

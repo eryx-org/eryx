@@ -67,7 +67,7 @@ enum Command {
     /// Pre-compile a WASM file to native code (advanced).
     ///
     /// For direct control over pre-initialization and AOT compilation.
-    Compile(CompileArgs),
+    Compile(Box<CompileArgs>),
 }
 
 #[derive(Parser, Debug)]
@@ -163,6 +163,36 @@ struct CompileArgs {
     #[arg(long)]
     no_verify: bool,
 
+    /// Python code to execute during pre-initialization (baked into snapshot)
+    ///
+    /// Runs after imports, before the memory snapshot is taken. Use this to
+    /// pre-create objects that every sandbox should start with (e.g., a Jinja2
+    /// SandboxedEnvironment with filters registered). The state is captured in
+    /// COW memory, so each sandbox gets its own isolated copy.
+    ///
+    /// Mutually exclusive with --setup-file. Requires --preinit.
+    ///
+    /// Example: `--setup-code "from jinja2.sandbox import SandboxedEnvironment; env = SandboxedEnvironment()"`
+    #[arg(
+        long,
+        value_name = "CODE",
+        conflicts_with = "setup_file",
+        requires = "preinit"
+    )]
+    setup_code: Option<String>,
+
+    /// Read setup code from a file instead of inline
+    ///
+    /// Like --setup-code, but reads the Python code from a file. Useful for
+    /// longer setup scripts. Requires --preinit.
+    #[arg(
+        long,
+        value_name = "PATH",
+        conflicts_with = "setup_code",
+        requires = "preinit"
+    )]
+    setup_file: Option<PathBuf>,
+
     /// Python code to execute during verification
     ///
     /// Runs after the standard import verification. Useful for testing that
@@ -190,7 +220,7 @@ async fn main() -> Result<()> {
 
     match cli.command {
         Command::Setup(args) => run_setup(args).await,
-        Command::Compile(args) => run_compile(args).await,
+        Command::Compile(args) => run_compile(*args).await,
     }
 }
 
@@ -410,6 +440,26 @@ async fn run_compile(args: CompileArgs) -> Result<()> {
     if !args.imports.is_empty() {
         println!("Imports: {}", args.imports.join(", "));
     }
+
+    // Resolve setup code from --setup-code or --setup-file
+    let setup_code = if let Some(code) = args.setup_code {
+        Some(code)
+    } else if let Some(ref path) = args.setup_file {
+        let code = std::fs::read_to_string(path)
+            .with_context(|| format!("Failed to read setup file: {}", path.display()))?;
+        Some(code)
+    } else {
+        None
+    };
+
+    if setup_code.is_some() {
+        println!(
+            "Setup:   {} (baked into snapshot)",
+            args.setup_file
+                .as_ref()
+                .map_or("inline code".to_string(), |p| p.display().to_string())
+        );
+    }
     println!();
 
     // Read input WASM
@@ -459,6 +509,7 @@ async fn run_compile(args: CompileArgs) -> Result<()> {
             final_site_packages.as_deref(),
             &import_refs,
             &extensions,
+            setup_code.as_deref(),
         )
         .await
         .context("Failed to pre-initialize Python")?;

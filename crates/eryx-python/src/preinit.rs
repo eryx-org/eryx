@@ -95,11 +95,12 @@ impl SandboxFactory {
     ///         imports=["jinja2"],
     ///     )
     #[new]
-    #[pyo3(signature = (*, site_packages=None, packages=None, imports=None, cache=false))]
+    #[pyo3(signature = (*, site_packages=None, packages=None, imports=None, setup_code=None, cache=false))]
     fn new(
         site_packages: Option<PathBuf>,
         packages: Option<Vec<PathBuf>>,
         imports: Option<Vec<String>>,
+        setup_code: Option<String>,
         cache: bool,
     ) -> PyResult<Self> {
         // Create tokio runtime for async pre-initialization
@@ -129,6 +130,7 @@ impl SandboxFactory {
                 final_site_packages.as_deref(),
                 &import_refs,
                 &extensions,
+                setup_code.as_deref(),
             )
             .await
             .map_err(|e| InitializationError::new_err(format!("pre-initialization failed: {e}")))

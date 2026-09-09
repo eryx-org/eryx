@@ -641,6 +641,7 @@ class SandboxFactory:
         site_packages: Optional[PathLike] = None,
         packages: Optional[Sequence[PathLike]] = None,
         imports: Optional[Sequence[str]] = None,
+        setup_code: Optional[str] = None,
         cache: bool = False,
     ) -> None:
         """Create a new sandbox factory with custom packages.
@@ -654,6 +655,11 @@ class SandboxFactory:
                 These are extracted and their native extensions are linked.
             imports: Optional list of module names to pre-import during initialization.
                 Pre-imported modules are immediately available without import overhead.
+            setup_code: Optional Python code to execute after imports, baked into the
+                snapshot. Use this to pre-create objects (e.g., a Jinja2
+                ``SandboxedEnvironment``) so every sandbox starts with them already
+                in memory. Each sandbox gets its own copy-on-write clone, preserving
+                full isolation.
             cache: Whether to cache the pre-compiled component in the process-global
                 cache. Enabling this computes a BLAKE3 content hash once during
                 factory construction and makes subsequent sandbox creation from an
@@ -670,6 +676,16 @@ class SandboxFactory:
                     "/path/to/markupsafe-2.1.3-wasi.tar.gz",
                 ],
                 imports=["jinja2"],
+            )
+
+            # With setup code baked into the snapshot
+            factory = SandboxFactory(
+                packages=["jinja2.whl", "markupsafe.whl"],
+                imports=["jinja2", "jinja2.sandbox"],
+                setup_code=(
+                    "from jinja2.sandbox import SandboxedEnvironment\\n"
+                    "env = SandboxedEnvironment()\\n"
+                ),
             )
         """
         ...
