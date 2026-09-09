@@ -191,7 +191,7 @@ When using eryx as a library — from Python (`pyeryx`), Rust (`Sandbox::embedde
 
 If the build machine has different CPU features from the deployment target, the sandbox will fail to initialize at runtime with an error like:
 
-```
+```text
 Compilation settings are not compatible with the native host
 ```
 
