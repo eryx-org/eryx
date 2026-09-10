@@ -6,7 +6,7 @@ rust = { version = "1.98.1", profile = "default" }
 version = "0.9.143"
 
 [tools."cargo:wasm-tools"]
-version = "1.258.0"
+version = "1.259.0"
 
 [tools."cargo:cargo-rail"]
 version = "0.25.0"
