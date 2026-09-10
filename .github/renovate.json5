@@ -340,6 +340,23 @@
     },
 
     // ------------------------------------------------------------------
+    // rust-toolchain.toml channel pin. cargo-dist runners (and any CI
+    // that doesn't use mise) read this to install the right Rust via
+    // rustup. Same dep identity as the Cargo.toml MSRV manager above
+    // so both land in the "Rust toolchain" group.
+    // ------------------------------------------------------------------
+    {
+      customType: "regex",
+      managerFilePatterns: ["/rust-toolchain\\.toml$/"],
+      matchStrings: [
+        "channel\\s*=\\s*\"(?<currentValue>\\d+\\.\\d+\\.\\d+)\"",
+      ],
+      depNameTemplate: "rust",
+      datasourceTemplate: "docker",
+      versioningTemplate: "semver",
+    },
+
+    // ------------------------------------------------------------------
     // The MSRV job pins its toolchain in an inline mise config passed to
     // jdx/mise-action (`mise_toml: |`). The github-actions manager only
     // reads `uses:`, and the mise manager only reads mise.toml files, so
