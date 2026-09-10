@@ -106,6 +106,8 @@ eryx-vfs = { workspace = true, optional = true } #unified
 flate2.workspace = true
 futures.workspace = true
 hex.workspace = true
+# glibc malloc tunables (Linux only; see AllocatorSettings in wasm.rs)
+libc.workspace = true
 # Secrets support
 rand.workspace = true
 # TLS networking

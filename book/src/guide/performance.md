@@ -65,6 +65,29 @@ If a process holds more than `ERYX_POOL_INSTANCES` sessions open at once,
 raise the limit or switch to `on-demand`. Note that the choice of allocator does
 not affect precompiled `.cwasm` artifacts; only compilation settings do.
 
+## Host heap
+
+Wasmtime keeps each instance's metadata (the `VMContext`, about 450 KB for this
+runtime's ~10k function references) on the ordinary host heap and frees it when
+the instance is torn down. With glibc's default `malloc` settings that block is
+usually the top of the heap, so freeing it hands the pages back to the kernel
+and the next instantiation grows the heap and faults them in again: three `brk`
+calls and roughly 100 page faults per execution, or about a quarter of a cold
+`pass` once the allocator above is in place.
+
+On Linux with glibc, eryx therefore sets two `malloc` tunables once, when the
+engine is created: trimming is disabled (`M_TRIM_THRESHOLD = -1`) and the heap
+grows in 64 MiB steps (`M_TOP_PAD`). Both are process-wide; the cost is that
+freed heap stays mapped in the process instead of being returned to the OS.
+
+| Variable | Default | Effect |
+|----------|---------|--------|
+| `ERYX_GLIBC_MALLOC_TUNING` | `1` | `0` leaves `malloc` untouched. |
+
+Processes that use another allocator (jemalloc, mimalloc, or musl's) are not
+affected either way; check whether that allocator returns freed memory eagerly
+if you see `brk`/`munmap` churn in `strace` around executions.
+
 ## Measuring
 
 `crates/eryx/examples/profile_stateless.rs` times the stateless path and is a

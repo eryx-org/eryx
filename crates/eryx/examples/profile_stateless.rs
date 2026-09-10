@@ -30,7 +30,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     rt.block_on(async {
         eprintln!("Creating sandbox...");
-        let sandbox = Sandbox::embedded().build()?;
+        // Trace collection (sys.settrace) is on by default; `ERYX_PROFILE_TRACE=0`
+        // turns it off to measure without per-event trace overhead.
+        let collect_trace = !std::env::var("ERYX_PROFILE_TRACE").is_ok_and(|v| v.trim() == "0");
+        let sandbox = Sandbox::embedded()
+            .with_trace_collection(collect_trace)
+            .build()?;
         let executor = sandbox.executor();
 
         eprintln!("Warming up (10 iterations)...");

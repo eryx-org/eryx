@@ -512,12 +512,22 @@ impl std::str::FromStr for CpuFeatureLevel {
 ///   pages with Linux's `PAGEMAP_SCAN` ioctl (6.7+) and reset only those;
 ///   `0` resets the whole keep-resident budget with `memcpy` instead, which
 ///   trades a larger copy for fewer page faults on the next execution.
+/// - `ERYX_GLIBC_MALLOC_TUNING`: `1` (default) stops glibc's `malloc` from
+///   returning freed heap to the kernel and grows the heap in 64 MiB steps
+///   (`M_TRIM_THRESHOLD` / `M_TOP_PAD`). Wasmtime heap-allocates each
+///   instance's `VMContext` (~450 KB for this runtime's ~10k function
+///   references) and frees it on teardown; with glibc's defaults that
+///   allocation sits at the top of the heap, so every execution trims it back
+///   to the kernel and grows it again — three `brk` calls and ~100 page faults.
+///   `0` leaves `malloc` alone. Only has an effect on Linux with glibc and the
+///   `embedded` or `preinit` feature.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct AllocatorSettings {
     pooling: bool,
     pool_instances: u32,
     keep_resident_bytes: usize,
     pagemap_scan: bool,
+    glibc_malloc_tuning: bool,
 }
 
 impl Default for AllocatorSettings {
@@ -527,9 +537,39 @@ impl Default for AllocatorSettings {
             pool_instances: 1000,
             keep_resident_bytes: 64 << 20,
             pagemap_scan: true,
+            glibc_malloc_tuning: true,
         }
     }
 }
+
+/// Stop glibc returning freed heap to the kernel and grow it in 64 MiB steps.
+///
+/// Process-wide, so it is applied at most once; see the
+/// `ERYX_GLIBC_MALLOC_TUNING` entry on [`AllocatorSettings`] for why.
+#[cfg(all(
+    target_os = "linux",
+    target_env = "gnu",
+    any(feature = "embedded", feature = "preinit")
+))]
+#[allow(unsafe_code)]
+fn tune_glibc_malloc() {
+    static APPLIED: std::sync::Once = std::sync::Once::new();
+    APPLIED.call_once(|| {
+        // SAFETY: `mallopt` only records allocator parameters; it has no
+        // preconditions beyond valid parameter constants, which these are.
+        unsafe {
+            libc::mallopt(libc::M_TRIM_THRESHOLD, -1);
+            libc::mallopt(libc::M_TOP_PAD, 64 << 20);
+        }
+    });
+}
+
+#[cfg(not(all(
+    target_os = "linux",
+    target_env = "gnu",
+    any(feature = "embedded", feature = "preinit")
+)))]
+fn tune_glibc_malloc() {}
 
 impl AllocatorSettings {
     /// Upper bound on funcref table growth per instance.
@@ -591,7 +631,25 @@ impl AllocatorSettings {
             None => {}
         }
 
+        match lookup("ERYX_GLIBC_MALLOC_TUNING") {
+            Some(v) if v.trim() == "0" => settings.glibc_malloc_tuning = false,
+            Some(v) if v.trim() == "1" => settings.glibc_malloc_tuning = true,
+            Some(v) => {
+                return Err(Error::WasmEngine(format!(
+                    "ERYX_GLIBC_MALLOC_TUNING must be 0 or 1, got '{v}'"
+                )));
+            }
+            None => {}
+        }
+
         Ok(settings)
+    }
+
+    /// Apply the process-wide `malloc` tunables, if enabled.
+    pub(crate) fn apply_malloc_tuning(&self) {
+        if self.glibc_malloc_tuning {
+            tune_glibc_malloc();
+        }
     }
 
     /// The pooling configuration to use, or `None` for on-demand allocation.
@@ -2269,6 +2327,7 @@ impl PythonExecutor {
     /// on either allocator, so that refusal only costs instantiation latency.
     fn build_engine(mut config: Config) -> std::result::Result<Engine, Error> {
         let allocator = AllocatorSettings::from_env()?;
+        allocator.apply_malloc_tuning();
         let Some(pooling) = allocator.pooling_config() else {
             return Engine::new(&config).map_err(|e| Error::WasmEngine(e.to_string()));
         };
@@ -3153,6 +3212,17 @@ mod tests {
     }
 
     #[test]
+    fn malloc_tuning_is_on_by_default_and_can_be_disabled() {
+        assert!(allocator_settings(&[]).unwrap().glibc_malloc_tuning);
+        let settings = allocator_settings(&[("ERYX_GLIBC_MALLOC_TUNING", "0")]).unwrap();
+        assert!(!settings.glibc_malloc_tuning);
+        // Applying is a no-op when disabled and idempotent when enabled.
+        settings.apply_malloc_tuning();
+        AllocatorSettings::default().apply_malloc_tuning();
+        AllocatorSettings::default().apply_malloc_tuning();
+    }
+
+    #[test]
     fn allocator_rejects_invalid_values() {
         for vars in [
             [("ERYX_ALLOCATOR", "mmap")],
@@ -3160,6 +3230,7 @@ mod tests {
             [("ERYX_POOL_INSTANCES", "lots")],
             [("ERYX_POOL_KEEP_RESIDENT_MB", "-1")],
             [("ERYX_POOL_PAGEMAP_SCAN", "yes")],
+            [("ERYX_GLIBC_MALLOC_TUNING", "true")],
         ] {
             let err = allocator_settings(&vars).expect_err("invalid setting must be rejected");
             assert!(matches!(err, Error::WasmEngine(_)), "{vars:?}: {err:?}");
