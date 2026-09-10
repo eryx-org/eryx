@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## `eryx-precompile` - [0.7.1](https://github.com/eryx-org/eryx/compare/eryx-precompile-v0.7.0...eryx-precompile-v0.7.1) - 2026-09-10
+
+### Fixed
+- normalize native extension dlopen paths on Windows ([#405](https://github.com/eryx-org/eryx/pull/405))
+
+## `eryx` - [0.7.1](https://github.com/eryx-org/eryx/compare/eryx-v0.7.0...eryx-v0.7.1) - 2026-09-10
+
+### Fixed
+- normalize native extension dlopen paths on Windows ([#405](https://github.com/eryx-org/eryx/pull/405))
+
 ## `eryx-precompile` - [0.7.0](https://github.com/eryx-org/eryx/compare/eryx-precompile-v0.6.0...eryx-precompile-v0.7.0) - 2026-09-10
 
 ### Added
