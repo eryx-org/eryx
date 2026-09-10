@@ -205,3 +205,22 @@ async fn the_pool_is_inactive_on_a_current_thread_runtime() {
     tokio::time::sleep(Duration::from_millis(200)).await;
     assert_eq!(sandbox.executor().warm_instances_ready(), 0);
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn fuel_consumed_is_the_same_on_cold_and_warm_instances() {
+    let sandbox = Sandbox::embedded().build().unwrap();
+    let code = "x = sum(range(100))";
+
+    // The first execution instantiates, the rest take a warm instance;
+    // instantiation must not be charged to either.
+    let mut fuel = Vec::new();
+    for _ in 0..3 {
+        fuel.push(sandbox.execute(code).await.unwrap().stats.fuel_consumed);
+        wait_for_warm(&sandbox).await;
+    }
+    assert!(fuel[0].is_some());
+    assert!(
+        fuel.iter().all(|f| *f == fuel[0]),
+        "fuel should not depend on the instance's origin: {fuel:?}"
+    );
+}
