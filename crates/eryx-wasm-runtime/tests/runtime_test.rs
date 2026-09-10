@@ -114,7 +114,7 @@ fn build_component() -> Result<Vec<u8>, Box<dyn std::error::Error>> {
         stack_pointer: wit_dylib::StackPointer::Global,
     };
 
-    let mut bindings = wit_dylib::create(&resolve, world_id, Some(&mut opts));
+    let mut bindings = wit_dylib::create(&resolve, world_id, Some(&mut opts))?;
     embed_component_metadata(&mut bindings, &resolve, world_id, StringEncoding::UTF8)?;
 
     // Link - order matters! Dependencies must come before dependents
