@@ -339,7 +339,8 @@ fn build_component(manifest_dir: &std::path::Path, runtime_so: &std::path::Path)
         stack_pointer: wit_dylib::StackPointer::Global,
     };
 
-    let mut bindings = wit_dylib::create(&resolve, world_id, Some(&mut opts));
+    let mut bindings =
+        wit_dylib::create(&resolve, world_id, Some(&mut opts)).expect("failed to create bindings");
     embed_component_metadata(&mut bindings, &resolve, world_id, StringEncoding::UTF8)
         .expect("failed to embed component metadata");
 
