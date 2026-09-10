@@ -134,7 +134,7 @@ jobs:
       - name: Mark cwasm as up-to-date
         run: touch crates/eryx-runtime/runtime.cwasm
 
-      - uses: astral-sh/setup-uv@v10.0.1
+      - uses: astral-sh/setup-uv@v10.1.0
         with:
           python-version: "3.12"
 
@@ -285,7 +285,7 @@ jobs:
       - name: Mark cwasm as up-to-date
         run: touch crates/eryx-runtime/runtime.cwasm
 
-      - uses: astral-sh/setup-uv@v10.0.1
+      - uses: astral-sh/setup-uv@v10.1.0
         with:
           python-version: "3.12"
 
@@ -441,7 +441,7 @@ jobs:
       - name: Mark cwasm as up-to-date
         run: touch crates/eryx-runtime/runtime.cwasm
 
-      - uses: astral-sh/setup-uv@v10.0.1
+      - uses: astral-sh/setup-uv@v10.1.0
         with:
           python-version: "3.12"
 
@@ -520,7 +520,7 @@ jobs:
         run: touch crates/eryx-runtime/runtime.cwasm
 
       # Use uv to manage Python - more reliable than setup-python on some runners
-      - uses: astral-sh/setup-uv@v10.0.1
+      - uses: astral-sh/setup-uv@v10.1.0
         with:
           python-version: "3.12"
 
@@ -606,7 +606,7 @@ jobs:
         shell: bash
         run: touch crates/eryx-runtime/runtime.cwasm
 
-      - uses: astral-sh/setup-uv@v10.0.1
+      - uses: astral-sh/setup-uv@v10.1.0
         with:
           python-version: "3.12"
 
