@@ -34,12 +34,16 @@ use crate::cache::{CacheKey, InstancePreCache};
 use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 use wasmtime::component::{Accessor, Component, HasSelf, Linker, ResourceTable};
-use wasmtime::{AsContextMut, Config, Engine, ResourceLimiter, Store, UpdateDeadline};
+use wasmtime::{
+    AsContextMut, Config, Enabled, Engine, InstanceAllocationStrategy, PoolingAllocationConfig,
+    ResourceLimiter, Store, UpdateDeadline,
+};
 use wasmtime_wasi::{FsPerms, WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView};
 
 use crate::callback::Callback;
 use crate::error::Error;
 use crate::trace::TraceEvent;
+use crate::warm::{WarmInstance, WarmPool};
 
 /// Interval between increments of the process-wide epoch ticker.
 pub(crate) const EPOCH_TICK_INTERVAL: Duration = Duration::from_millis(10);
@@ -489,6 +493,132 @@ impl std::str::FromStr for CpuFeatureLevel {
     }
 }
 
+/// How the shared engine allocates instance resources (linear memories,
+/// tables, and async stacks).
+///
+/// Read from the environment rather than a builder because the engine is
+/// process-global ([`PythonExecutor::shared_engine`]) and is created before
+/// any sandbox configuration exists.
+///
+/// - `ERYX_ALLOCATOR`: `pooling` (default) or `on-demand`.
+/// - `ERYX_POOL_INSTANCES`: maximum concurrently live instances with the
+///   pooling allocator (default 1000). Every live `Sandbox::execute()` and
+///   every live session holds one; instantiation fails once the pool is full.
+/// - `ERYX_POOL_KEEP_RESIDENT_MB`: how much of each linear memory to keep
+///   mapped between uses (default 64). Dirty pages within this budget are
+///   restored with `memcpy` instead of being unmapped, so the next instance
+///   in the slot takes no page faults for them.
+/// - `ERYX_POOL_PAGEMAP_SCAN`: `1` (default) lets wasmtime find the dirty
+///   pages with Linux's `PAGEMAP_SCAN` ioctl (6.7+) and reset only those;
+///   `0` resets the whole keep-resident budget with `memcpy` instead, which
+///   trades a larger copy for fewer page faults on the next execution.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct AllocatorSettings {
+    pooling: bool,
+    pool_instances: u32,
+    keep_resident_bytes: usize,
+    pagemap_scan: bool,
+}
+
+impl Default for AllocatorSettings {
+    fn default() -> Self {
+        Self {
+            pooling: true,
+            pool_instances: 1000,
+            keep_resident_bytes: 64 << 20,
+            pagemap_scan: true,
+        }
+    }
+}
+
+impl AllocatorSettings {
+    /// Upper bound on funcref table growth per instance.
+    ///
+    /// The runtime's function table starts at ~6k entries and grows when
+    /// native extensions are `dlopen`ed, so this sits well above wasmtime's
+    /// 20k default while still bounding the per-slot address reservation.
+    const TABLE_ELEMENTS: usize = 1 << 20;
+
+    pub(crate) fn from_env() -> std::result::Result<Self, Error> {
+        Self::from_lookup(|name| std::env::var(name).ok())
+    }
+
+    /// Parse the settings from `lookup`, a view of the environment.
+    fn from_lookup(lookup: impl Fn(&str) -> Option<String>) -> std::result::Result<Self, Error> {
+        let mut settings = Self::default();
+
+        match lookup("ERYX_ALLOCATOR") {
+            Some(v) if v.eq_ignore_ascii_case("pooling") => settings.pooling = true,
+            Some(v) if v.eq_ignore_ascii_case("on-demand") => settings.pooling = false,
+            Some(v) => {
+                return Err(Error::WasmEngine(format!(
+                    "Unknown allocator '{v}' in ERYX_ALLOCATOR. Valid values: pooling, on-demand"
+                )));
+            }
+            None => {}
+        }
+
+        if let Some(v) = lookup("ERYX_POOL_INSTANCES") {
+            settings.pool_instances =
+                v.trim()
+                    .parse::<u32>()
+                    .ok()
+                    .filter(|n| *n > 0)
+                    .ok_or_else(|| {
+                        Error::WasmEngine(format!(
+                            "ERYX_POOL_INSTANCES must be a positive integer, got '{v}'"
+                        ))
+                    })?;
+        }
+
+        if let Some(v) = lookup("ERYX_POOL_KEEP_RESIDENT_MB") {
+            let mib = v.trim().parse::<usize>().map_err(|_| {
+                Error::WasmEngine(format!(
+                    "ERYX_POOL_KEEP_RESIDENT_MB must be a non-negative integer, got '{v}'"
+                ))
+            })?;
+            settings.keep_resident_bytes = mib << 20;
+        }
+
+        match lookup("ERYX_POOL_PAGEMAP_SCAN") {
+            Some(v) if v.trim() == "0" => settings.pagemap_scan = false,
+            Some(v) if v.trim() == "1" => settings.pagemap_scan = true,
+            Some(v) => {
+                return Err(Error::WasmEngine(format!(
+                    "ERYX_POOL_PAGEMAP_SCAN must be 0 or 1, got '{v}'"
+                )));
+            }
+            None => {}
+        }
+
+        Ok(settings)
+    }
+
+    /// The pooling configuration to use, or `None` for on-demand allocation.
+    pub(crate) fn pooling_config(&self) -> Option<PoolingAllocationConfig> {
+        if !self.pooling {
+            return None;
+        }
+
+        let mut pooling = PoolingAllocationConfig::new();
+        pooling
+            .total_component_instances(self.pool_instances)
+            .total_core_instances(self.pool_instances)
+            .total_memories(self.pool_instances)
+            .total_tables(self.pool_instances)
+            .total_stacks(self.pool_instances)
+            .table_elements(Self::TABLE_ELEMENTS)
+            .linear_memory_keep_resident(self.keep_resident_bytes)
+            .table_keep_resident(Self::TABLE_ELEMENTS * std::mem::size_of::<usize>())
+            .pagemap_scan(if self.pagemap_scan {
+                Enabled::Auto
+            } else {
+                Enabled::No
+            });
+        Some(pooling)
+    }
+}
+
 /// Tracks memory usage during WASM execution.
 ///
 /// This struct implements `ResourceLimiter` to intercept memory growth
@@ -521,6 +651,11 @@ impl MemoryTracker {
     /// Reset the peak memory tracker to zero.
     pub fn reset(&self) {
         self.peak_memory_bytes.store(0, Ordering::Relaxed);
+    }
+
+    /// Record memory that was already in use before this tracker was installed.
+    pub(crate) fn observe(&self, bytes: u64) {
+        self.peak_memory_bytes.fetch_max(bytes, Ordering::Relaxed);
     }
 }
 
@@ -640,6 +775,62 @@ impl std::fmt::Debug for ExecutorState {
         debug.field("hybrid_vfs_ctx", &self.hybrid_vfs_ctx.is_some());
         debug.finish()
     }
+}
+
+impl ExecutorState {
+    /// State for instantiating a store ahead of any execution.
+    ///
+    /// Instantiation runs no guest code beyond table initialisation, so the
+    /// guest never observes this state; [`PythonExecutor::execute_internal`]
+    /// replaces it wholesale with the real per-execution state before the
+    /// first export call.
+    pub(crate) fn placeholder() -> Self {
+        Self {
+            wasi: WasiCtxBuilder::new().build(),
+            table: ResourceTable::new(),
+            callback_tx: None,
+            trace_tx: None,
+            callbacks: Vec::new(),
+            memory_tracker: MemoryTracker::new(None),
+            net_tx: None,
+            output_tx: None,
+            #[cfg(feature = "vfs")]
+            hybrid_vfs_ctx: None,
+            suspended: None,
+            reuse_empty_callbacks: true,
+        }
+    }
+
+    /// Drop every channel to the host so their receivers see end-of-stream.
+    pub(crate) fn disconnect(&mut self) {
+        self.callback_tx = None;
+        self.trace_tx = None;
+        self.net_tx = None;
+        self.output_tx = None;
+    }
+}
+
+/// Create a store around `state` and instantiate `pre` into it.
+///
+/// The epoch deadline is left effectively unbounded so instantiation cannot be
+/// interrupted; callers arm the real deadline before running user code.
+pub(crate) async fn instantiate_store(
+    pre: &SandboxPre<ExecutorState>,
+    state: ExecutorState,
+    initial_fuel: u64,
+) -> std::result::Result<(Store<ExecutorState>, Sandbox), Error> {
+    let mut store = Store::new(pre.engine(), state);
+    store.limiter(|state| &mut state.memory_tracker);
+    store.set_epoch_deadline(u64::MAX / 2);
+    store
+        .set_fuel(initial_fuel)
+        .map_err(|e| Error::Initialization(format!("Failed to set fuel: {e}")))?;
+
+    let bindings = pre
+        .instantiate_async(&mut store)
+        .await
+        .map_err(Error::WasmComponent)?;
+    Ok((store, bindings))
 }
 
 impl WasiView for ExecutorState {
@@ -1336,6 +1527,19 @@ impl PythonExecutor {
         &self.instance_pre
     }
 
+    /// Number of pre-instantiated stores currently waiting for this
+    /// executor's component.
+    ///
+    /// Stateless executions take one of these instead of instantiating, and a
+    /// background task replaces it afterwards. The pool is shared by every
+    /// executor loading the same component and sized by `ERYX_WARM_INSTANCES`
+    /// (default 1, `0` disables it); it is only used on a multi-threaded Tokio
+    /// runtime.
+    #[must_use]
+    pub fn warm_instances_ready(&self) -> usize {
+        WarmPool::global().ready(&self.instance_pre)
+    }
+
     /// Get the Python stdlib path if configured.
     #[must_use]
     pub fn python_stdlib_path(&self) -> Option<&PathBuf> {
@@ -1965,6 +2169,52 @@ impl PythonExecutor {
     /// list of `flag=value` pairs. Example:
     /// `ERYX_CRANELIFT_FLAGS=has_avx512f=false,has_avx512bw=false`
     fn create_engine_with_target(target: Option<&str>) -> std::result::Result<Engine, Error> {
+        let mut config = Self::base_engine_config();
+
+        // Configure target triple for cross-compilation or portable builds.
+        // Check explicit parameter first, then environment variable, then use native.
+        let effective_target = target
+            .map(|s| s.to_string())
+            .or_else(|| std::env::var("ERYX_TARGET").ok());
+
+        if let Some(ref target_str) = effective_target {
+            config
+                .target(target_str)
+                .map_err(|e| Error::WasmEngine(format!("Invalid target '{target_str}': {e}")))?;
+        }
+
+        // Apply CPU feature level preset and custom Cranelift flags.
+        // These require unsafe code, so they're only available with embedded or preinit features.
+        #[cfg(any(feature = "embedded", feature = "preinit"))]
+        Self::apply_cpu_feature_flags(&mut config)?;
+
+        Self::build_engine(config)
+    }
+
+    /// Create a configured wasmtime engine with explicit CPU feature control.
+    ///
+    /// This provides an alternative to environment variables for controlling CPU features,
+    /// making it easier to use in CLI tools and avoiding global state.
+    #[cfg(any(feature = "embedded", feature = "preinit"))]
+    fn create_engine_with_options(
+        target: Option<&str>,
+        cpu_features: CpuFeatureLevel,
+    ) -> std::result::Result<Engine, Error> {
+        let mut config = Self::base_engine_config();
+
+        // Target triple and CPU features are set together: pinning a triple is
+        // also what stops Cranelift inferring features from the build machine.
+        Self::apply_cpu_feature_level(&mut config, cpu_features, target)?;
+
+        Self::build_engine(config)
+    }
+
+    /// The engine options shared by every engine eryx creates.
+    ///
+    /// Everything here except the allocation strategy affects the generated
+    /// code, so a change to this function must be paired with a bump of
+    /// [`ENGINE_CONFIG_VERSION`](Self::ENGINE_CONFIG_VERSION).
+    fn base_engine_config() -> Config {
         let mut config = Config::new();
         config.wasm_component_model(true);
         // Enable component model async for the `invoke` callback function.
@@ -1996,49 +2246,35 @@ impl PythonExecutor {
         // Python scripts don't need deep call stacks
         config.async_stack_size(512 * 1024);
 
-        // Configure target triple for cross-compilation or portable builds.
-        // Check explicit parameter first, then environment variable, then use native.
-        let effective_target = target
-            .map(|s| s.to_string())
-            .or_else(|| std::env::var("ERYX_TARGET").ok());
-
-        if let Some(ref target_str) = effective_target {
-            config
-                .target(target_str)
-                .map_err(|e| Error::WasmEngine(format!("Invalid target '{target_str}': {e}")))?;
-        }
-
-        // Apply CPU feature level preset and custom Cranelift flags.
-        // These require unsafe code, so they're only available with embedded or preinit features.
-        #[cfg(any(feature = "embedded", feature = "preinit"))]
-        Self::apply_cpu_feature_flags(&mut config)?;
-
-        Engine::new(&config).map_err(|e| Error::WasmEngine(e.to_string()))
+        config
     }
 
-    /// Create a configured wasmtime engine with explicit CPU feature control.
+    /// Build the engine, falling back to on-demand allocation if the pool
+    /// cannot be reserved.
     ///
-    /// This provides an alternative to environment variables for controlling CPU features,
-    /// making it easier to use in CLI tools and avoiding global state.
-    #[cfg(any(feature = "embedded", feature = "preinit"))]
-    fn create_engine_with_options(
-        target: Option<&str>,
-        cpu_features: CpuFeatureLevel,
-    ) -> std::result::Result<Engine, Error> {
-        let mut config = Config::new();
-        config.wasm_component_model(true);
-        config.wasm_component_model_async(true);
-        config.epoch_interruption(true);
-        config.consume_fuel(true);
-        config.memory_init_cow(true);
-        config.cranelift_opt_level(wasmtime::OptLevel::SpeedAndSize);
-        config.async_stack_size(512 * 1024);
+    /// The pooling allocator reserves virtual address space for every slot up
+    /// front (terabytes with the default limits), which a host with a low
+    /// `ulimit -v` or an exotic kernel can refuse. Execution works identically
+    /// on either allocator, so that refusal only costs instantiation latency.
+    fn build_engine(mut config: Config) -> std::result::Result<Engine, Error> {
+        let allocator = AllocatorSettings::from_env()?;
+        let Some(pooling) = allocator.pooling_config() else {
+            return Engine::new(&config).map_err(|e| Error::WasmEngine(e.to_string()));
+        };
 
-        // Target triple and CPU features are set together: pinning a triple is
-        // also what stops Cranelift inferring features from the build machine.
-        Self::apply_cpu_feature_level(&mut config, cpu_features, target)?;
-
-        Engine::new(&config).map_err(|e| Error::WasmEngine(e.to_string()))
+        config.allocation_strategy(InstanceAllocationStrategy::Pooling(pooling));
+        match Engine::new(&config) {
+            Ok(engine) => Ok(engine),
+            Err(pooling_err) => {
+                tracing::warn!(
+                    error = %pooling_err,
+                    "failed to create wasmtime engine with the pooling allocator; \
+                     falling back to on-demand allocation"
+                );
+                config.allocation_strategy(InstanceAllocationStrategy::OnDemand);
+                Engine::new(&config).map_err(|e| Error::WasmEngine(e.to_string()))
+            }
+        }
     }
 
     /// Pin the compilation target and enable the requested x86-64 psABI level.
@@ -2451,30 +2687,73 @@ impl PythonExecutor {
             reuse_empty_callbacks: true,
         };
 
-        // Create store for this execution
-        let mut store = Store::new(&self.engine, state);
-
-        // Register the memory tracker as a resource limiter
-        store.limiter(|state| &mut state.memory_tracker);
-
-        // Set a high epoch deadline for instantiation - we don't want to timeout during
-        // Python initialization, only during user code execution.
-        store.set_epoch_deadline(u64::MAX / 2);
-
         // Set up fuel for tracking/limiting. We use u64::MAX for tracking-only mode
         // when no explicit limit is set. Fuel is consumed per WASM instruction.
         let initial_fuel = fuel_limit.unwrap_or(u64::MAX);
-        store
-            .set_fuel(initial_fuel)
-            .map_err(|e| Error::Initialization(format!("Failed to set fuel: {e}")))?;
 
-        // Instantiate from the pre-compiled template (includes Python initialization)
-        let bindings = self
-            .instance_pre
-            .instantiate_async(&mut store)
-            .await
-            .map_err(Error::WasmComponent)?;
+        let (mut store, bindings) = self
+            .acquire_store(state, memory_limit, initial_fuel)
+            .await?;
 
+        let result = self
+            .run_on_store(
+                &mut store,
+                &bindings,
+                code,
+                execution_timeout,
+                cancellation_token,
+                fuel_limit,
+                initial_fuel,
+            )
+            .await;
+
+        // Teardown (resetting the memory slot) and re-instantiation happen off
+        // the request path when the warm pool is active.
+        WarmPool::global().retire(&self.instance_pre, store);
+        result
+    }
+
+    /// Take a warm store for this component, or instantiate a fresh one.
+    ///
+    /// A warm store was instantiated with a placeholder state; the real
+    /// per-execution `state` replaces it here, before any export is called.
+    async fn acquire_store(
+        &self,
+        state: ExecutorState,
+        memory_limit: Option<u64>,
+        initial_fuel: u64,
+    ) -> std::result::Result<(Store<ExecutorState>, Sandbox), Error> {
+        if let Some(WarmInstance {
+            mut store,
+            bindings,
+        }) = WarmPool::global().take(&self.instance_pre, memory_limit)
+        {
+            // The placeholder's tracker saw the memory instantiation mapped;
+            // carry that into this execution's peak.
+            let baseline = store.data().memory_tracker.peak_memory_bytes();
+            state.memory_tracker.observe(baseline);
+            *store.data_mut() = state;
+            store
+                .set_fuel(initial_fuel)
+                .map_err(|e| Error::Initialization(format!("Failed to set fuel: {e}")))?;
+            return Ok((store, bindings));
+        }
+
+        instantiate_store(&self.instance_pre, state, initial_fuel).await
+    }
+
+    /// Run `code` on an instantiated store.
+    #[allow(clippy::too_many_arguments)]
+    async fn run_on_store(
+        &self,
+        store: &mut Store<ExecutorState>,
+        bindings: &Sandbox,
+        code: &str,
+        execution_timeout: Option<Duration>,
+        cancellation_token: Option<CancellationToken>,
+        fuel_limit: Option<u64>,
+        initial_fuel: u64,
+    ) -> std::result::Result<ExecutionOutput, Error> {
         // Configure the guest's result-capture variable name. The guest defaults to
         // "result", so only call the export when a non-default name is configured.
         if self.result_variable != "result" {
@@ -2527,7 +2806,7 @@ impl PythonExecutor {
                 }
             });
         } else {
-            arm_epoch_deadline(&mut store, execution_timeout);
+            arm_epoch_deadline(store, execution_timeout);
         }
 
         // Call the async execute export
@@ -2823,6 +3102,69 @@ mod tests {
         } else {
             panic!("Expected CallbackStart event");
         }
+    }
+
+    fn allocator_settings(vars: &[(&str, &str)]) -> std::result::Result<AllocatorSettings, Error> {
+        AllocatorSettings::from_lookup(|name| {
+            vars.iter()
+                .find(|(k, _)| *k == name)
+                .map(|(_, v)| (*v).to_string())
+        })
+    }
+
+    #[test]
+    fn allocator_defaults_to_pooling() {
+        let settings = allocator_settings(&[]).unwrap();
+        assert_eq!(settings, AllocatorSettings::default());
+        assert!(settings.pooling_config().is_some());
+    }
+
+    #[test]
+    fn allocator_can_be_switched_to_on_demand() {
+        let settings = allocator_settings(&[("ERYX_ALLOCATOR", "On-Demand")]).unwrap();
+        assert!(settings.pooling_config().is_none());
+    }
+
+    #[test]
+    fn allocator_pool_limits_are_applied() {
+        let settings = allocator_settings(&[
+            ("ERYX_POOL_INSTANCES", " 42 "),
+            ("ERYX_POOL_KEEP_RESIDENT_MB", "8"),
+            ("ERYX_POOL_PAGEMAP_SCAN", "0"),
+        ])
+        .unwrap();
+        let pooling = settings.pooling_config().unwrap();
+        assert_eq!(pooling.get_total_memories(), 42);
+        assert_eq!(pooling.get_total_component_instances(), 42);
+        assert_eq!(pooling.get_total_stacks(), 42);
+        assert_eq!(pooling.get_memory_keep_resident(), 8 << 20);
+        assert!(matches!(pooling.get_pagemap_scan(), Enabled::No));
+    }
+
+    #[test]
+    fn allocator_rejects_invalid_values() {
+        for vars in [
+            [("ERYX_ALLOCATOR", "mmap")],
+            [("ERYX_POOL_INSTANCES", "0")],
+            [("ERYX_POOL_INSTANCES", "lots")],
+            [("ERYX_POOL_KEEP_RESIDENT_MB", "-1")],
+            [("ERYX_POOL_PAGEMAP_SCAN", "yes")],
+        ] {
+            let err = allocator_settings(&vars).expect_err("invalid setting must be rejected");
+            assert!(matches!(err, Error::WasmEngine(_)), "{vars:?}: {err:?}");
+        }
+    }
+
+    /// The pooling configuration must be accepted by wasmtime, and instantiation
+    /// must work under it: the pool imposes per-instance limits (table size,
+    /// instance metadata size) that the on-demand allocator does not.
+    #[test]
+    #[cfg(feature = "embedded")]
+    fn pooling_engine_is_constructible() {
+        let mut config = PythonExecutor::base_engine_config();
+        let pooling = AllocatorSettings::default().pooling_config().unwrap();
+        config.allocation_strategy(InstanceAllocationStrategy::Pooling(pooling));
+        Engine::new(&config).expect("pooling configuration must be valid");
     }
 
     /// Test that all CPU feature level presets use valid Cranelift flags.

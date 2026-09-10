@@ -158,8 +158,10 @@ fn bench_sandbox_creation(c: &mut Criterion) {
 
 /// Benchmark stateless execution via `Sandbox::execute()`.
 ///
-/// Each call creates a fresh WASM instance and initializes Python from scratch.
-/// This is ~500ms per execution due to Python interpreter initialization.
+/// Each call runs on a fresh WASM instance. Python itself is already
+/// initialized in the pre-initialized snapshot, so the per-call cost is
+/// instantiation (or taking a warm instance from the pool, since this runtime
+/// is multi-threaded), the per-execute callback setup, and the code itself.
 ///
 /// Use this when you need complete isolation between executions.
 fn bench_stateless_execution(c: &mut Criterion) {
@@ -168,7 +170,7 @@ fn bench_stateless_execution(c: &mut Criterion) {
 
     let mut group = c.benchmark_group("stateless_execution");
 
-    // Stateless execution is slow (~500ms), so reduce sample size
+    // Stateless execution is the slowest path, so reduce sample size
     group.sample_size(10);
     group.measurement_time(Duration::from_secs(10));
 
