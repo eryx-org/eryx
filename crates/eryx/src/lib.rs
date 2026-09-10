@@ -68,6 +68,7 @@ mod schema;
 pub mod secrets;
 pub mod session;
 mod trace;
+mod warm;
 mod wasm;
 
 /// Pre-initialization support for capturing Python memory state.
