@@ -810,26 +810,37 @@ impl ExecutorState {
     }
 }
 
-/// Create a store around `state` and instantiate `pre` into it.
+/// Create a store around `state` and instantiate `pre` into it, leaving
+/// `initial_fuel` in the tank for user code.
 ///
 /// The epoch deadline is left effectively unbounded so instantiation cannot be
 /// interrupted; callers arm the real deadline before running user code.
+/// Instantiation burns fuel of its own (the modules' table-initialising start
+/// functions), so it runs on an unlimited tank and `initial_fuel` is set
+/// afterwards: `fuel_consumed` then measures only the user's code and is the
+/// same whether or not the store came from the warm pool.
 pub(crate) async fn instantiate_store(
     pre: &SandboxPre<ExecutorState>,
     state: ExecutorState,
     initial_fuel: u64,
 ) -> std::result::Result<(Store<ExecutorState>, Sandbox), Error> {
+    let set_fuel = |store: &mut Store<ExecutorState>, fuel: u64| {
+        store
+            .set_fuel(fuel)
+            .map_err(|e| Error::Initialization(format!("Failed to set fuel: {e}")))
+    };
+
     let mut store = Store::new(pre.engine(), state);
     store.limiter(|state| &mut state.memory_tracker);
     store.set_epoch_deadline(u64::MAX / 2);
-    store
-        .set_fuel(initial_fuel)
-        .map_err(|e| Error::Initialization(format!("Failed to set fuel: {e}")))?;
+    set_fuel(&mut store, u64::MAX)?;
 
     let bindings = pre
         .instantiate_async(&mut store)
         .await
         .map_err(Error::WasmComponent)?;
+
+    set_fuel(&mut store, initial_fuel)?;
     Ok((store, bindings))
 }
 
