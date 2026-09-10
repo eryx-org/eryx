@@ -617,6 +617,12 @@ jobs:
           touch crates/eryx-runtime/runtime.wasm
           touch crates/eryx-runtime/prebuilt/*
 
+      - name: Set up Python stdlib for preinit
+        shell: bash
+        run: |
+          mkdir -p crates/eryx-wasm-runtime/tests/python-stdlib
+          tar -xf crates/eryx/python-stdlib.tar.zst -C crates/eryx-wasm-runtime/tests/
+
       - name: Install Rust
         shell: bash
         run: |
