@@ -646,7 +646,12 @@ fn process_packages(
                 let relative = path
                     .strip_prefix(site_pkg_path)
                     .context("Failed to compute relative path")?;
-                let dlopen_path = format!("/site-packages/{}", relative.display());
+                let relative_str = relative
+                    .components()
+                    .map(|c| c.as_os_str().to_string_lossy())
+                    .collect::<Vec<_>>()
+                    .join("/");
+                let dlopen_path = format!("/site-packages/{relative_str}");
 
                 // Skip if we already have this extension from packages
                 if extensions.iter().any(|e| e.name == dlopen_path) {

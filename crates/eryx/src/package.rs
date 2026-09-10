@@ -360,7 +360,11 @@ impl ExtractedPackage {
                     Error::Initialization(format!("Failed to compute relative path: {e}"))
                 })?;
 
-                let relative_path = relative.display().to_string();
+                let relative_path = relative
+                    .components()
+                    .map(|c| c.as_os_str().to_string_lossy())
+                    .collect::<Vec<_>>()
+                    .join("/");
 
                 let bytes = std::fs::read(path)
                     .map_err(|e| Error::Initialization(format!("Failed to read .so file: {e}")))?;
