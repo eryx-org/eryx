@@ -4,6 +4,7 @@
 //! The factory bundles packages and pre-imports into a reusable snapshot.
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyDict};
@@ -13,6 +14,7 @@ use crate::error::{InitializationError, eryx_error_to_py};
 use crate::net_config::NetConfig;
 use crate::resource_limits::ResourceLimits;
 use crate::sandbox::{PyOutputHandler, Sandbox, apply_secrets};
+use crate::session::Session;
 
 /// A factory for creating sandboxes with custom packages.
 ///
@@ -49,7 +51,7 @@ pub struct SandboxFactory {
     site_packages_path: Option<PathBuf>,
     /// Extracted packages (kept alive to prevent temp dir cleanup).
     #[allow(dead_code)]
-    extracted_packages: Vec<eryx::ExtractedPackage>,
+    extracted_packages: Arc<Vec<eryx::ExtractedPackage>>,
 }
 
 /// Construct a pre-compiled artifact with optional content-safe caching.
@@ -145,7 +147,7 @@ impl SandboxFactory {
             precompiled,
             stdlib_path,
             site_packages_path: final_site_packages,
-            extracted_packages,
+            extracted_packages: Arc::new(extracted_packages),
         })
     }
 
@@ -189,7 +191,7 @@ impl SandboxFactory {
             precompiled,
             stdlib_path,
             site_packages_path: site_packages,
-            extracted_packages: Vec::new(),
+            extracted_packages: Arc::new(Vec::new()),
         })
     }
 
@@ -215,6 +217,94 @@ impl SandboxFactory {
             ))
         })?;
         Ok(())
+    }
+
+    /// Create a persistent Python session from this factory's preinitialized
+    /// runtime. The session preserves interpreter and module state across
+    /// executions while remaining isolated from other sessions and sandboxes.
+    /// The factory remains disposable; extracted package ownership is retained
+    /// by the returned session.
+    ///
+    /// Args:
+    ///     vfs: Optional caller-owned VFS storage. Its policy and quota remain
+    ///         owned by the caller.
+    ///     vfs_mount_path: Mount path used when `vfs` or `volumes` enable a
+    ///         wrapper-visible VFS; alone it does not expose `Session.vfs`.
+    ///     resource_limits: Optional session limits. Factory defaults are no
+    ///         execution, memory, or fuel limit, a 10-second callback timeout,
+    ///         and 1000 callback invocations.
+    ///     network: Optional network configuration.
+    ///     callbacks: Optional callbacks that sandboxed code can invoke.
+    ///     volumes: Optional host volume mounts; these enable wrapper-visible
+    ///         VFS storage when no caller storage is supplied.
+    ///     on_stdout: Optional stdout streaming callback.
+    ///     on_stderr: Optional stderr streaming callback.
+    ///     result_variable: Optional variable whose value is returned by execute.
+    ///
+    /// Returns:
+    ///     A new persistent `Session`.
+    ///
+    /// Raises:
+    ///     InitializationError: If the session cannot be initialized.
+    #[pyo3(signature = (*, vfs=None, vfs_mount_path=None, resource_limits=None, network=None, callbacks=None, volumes=None, on_stdout=None, on_stderr=None, result_variable=None))]
+    #[allow(clippy::too_many_arguments)]
+    fn create_session(
+        &self,
+        py: Python<'_>,
+        vfs: Option<crate::vfs::VfsStorage>,
+        vfs_mount_path: Option<String>,
+        resource_limits: Option<ResourceLimits>,
+        network: Option<NetConfig>,
+        callbacks: Option<Bound<'_, PyAny>>,
+        volumes: Option<Vec<(String, String, bool)>>,
+        on_stdout: Option<Py<PyAny>>,
+        on_stderr: Option<Py<PyAny>>,
+        result_variable: Option<String>,
+    ) -> PyResult<Session> {
+        let runtime = Arc::new(
+            tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()
+                .map_err(|e| {
+                    InitializationError::new_err(format!("failed to create runtime: {e}"))
+                })?,
+        );
+        // SAFETY: the bytes were produced by `PythonExecutor::precompile` or
+        // loaded from a factory file created by this same API.
+        let mut executor = unsafe { self.precompiled.to_executor() }.map_err(|e| {
+            InitializationError::new_err(format!("failed to load factory runtime: {e}"))
+        })?;
+        executor = executor.with_python_stdlib(&self.stdlib_path);
+        if let Some(path) = &self.site_packages_path {
+            executor = executor.with_site_packages(path);
+        }
+        if let Some(name) = result_variable {
+            executor = executor.with_result_variable(name);
+        }
+        let limits = resource_limits.unwrap_or(ResourceLimits {
+            execution_timeout_ms: None,
+            callback_timeout_ms: Some(10_000),
+            max_memory_bytes: None,
+            max_callback_invocations: Some(1000),
+            max_fuel: None,
+            max_vfs_bytes: None,
+        });
+        let limits: eryx::ResourceLimits = (&limits).into();
+        Session::from_executor(
+            py,
+            Arc::new(executor),
+            runtime,
+            vfs,
+            vfs_mount_path,
+            limits,
+            network,
+            callbacks,
+            None,
+            volumes,
+            on_stdout,
+            on_stderr,
+            Some(Arc::clone(&self.extracted_packages)),
+        )
     }
 
     /// Create a new sandbox from this factory.

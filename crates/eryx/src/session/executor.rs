@@ -49,6 +49,7 @@ use wasmtime_wasi::{FsPerms, WasiCtx, WasiCtxBuilder};
 
 use crate::callback::Callback;
 use crate::error::Error;
+use crate::sandbox::ResourceLimits;
 use crate::wasm::{
     CallbackRequest, ExecutionOutput, ExecutorState, HostCallbackInfo, MemoryTracker, NetRequest,
     PythonExecutor, Sandbox as SandboxBindings, TraceRequest,
@@ -463,6 +464,9 @@ pub struct SessionExecutor {
     /// Optional fuel limit for instruction tracking/limiting.
     fuel_limit: Option<u64>,
 
+    /// Maximum guest memory, preserved when the store is recreated.
+    memory_limit: Option<u64>,
+
     /// VFS storage that persists across resets.
     #[cfg(feature = "vfs")]
     vfs_storage: Option<eryx_vfs::ArcStorage>,
@@ -470,6 +474,10 @@ pub struct SessionExecutor {
     /// VFS configuration that persists across resets.
     #[cfg(feature = "vfs")]
     vfs_config: Option<VfsConfig>,
+
+    /// Quota used when creating the session's own VFS storage.
+    #[cfg(feature = "vfs")]
+    vfs_max_bytes: Option<u64>,
 }
 
 impl std::fmt::Debug for SessionExecutor {
@@ -480,6 +488,7 @@ impl std::fmt::Debug for SessionExecutor {
             .field("has_bindings", &self.bindings.is_some())
             .field("execution_timeout", &self.execution_timeout)
             .field("fuel_limit", &self.fuel_limit)
+            .field("memory_limit", &self.memory_limit)
             .finish_non_exhaustive()
     }
 }
@@ -497,6 +506,19 @@ fn build_callback_infos(callbacks: &[Arc<dyn Callback>]) -> Vec<HostCallbackInfo
         .collect()
 }
 
+/// Guest mount path for the `index`-th site-packages directory.
+///
+/// Index 0 is mounted at `/site-packages` because the preinitialized snapshot
+/// bakes that path into `sys.path`; later directories get an index suffix.
+/// This matches the sandbox mount scheme in [`crate::wasm`].
+fn site_packages_mount_path(index: usize) -> String {
+    if index == 0 {
+        "/site-packages".to_string()
+    } else {
+        format!("/site-packages-{index}")
+    }
+}
+
 /// Build WASI context with Python stdlib and site-packages mounts.
 fn build_wasi_context(executor: &PythonExecutor) -> Result<WasiCtx, Error> {
     let mut wasi_builder = WasiCtxBuilder::new();
@@ -509,7 +531,7 @@ fn build_wasi_context(executor: &PythonExecutor) -> Result<WasiCtx, Error> {
         pythonpath_parts.push("/python-stdlib".to_string());
     }
     for i in 0..site_packages_paths.len() {
-        pythonpath_parts.push(format!("/site-packages-{i}"));
+        pythonpath_parts.push(site_packages_mount_path(i));
     }
 
     // Mount Python stdlib if configured (required for eryx-wasm-runtime)
@@ -523,9 +545,9 @@ fn build_wasi_context(executor: &PythonExecutor) -> Result<WasiCtx, Error> {
             .map_err(|e| Error::WasmEngine(format!("Failed to mount Python stdlib: {e}")))?;
     }
 
-    // Mount each site-packages directory at a unique path
+    // Mount each site-packages directory (index 0 keeps the baked sys.path)
     for (i, site_packages_path) in site_packages_paths.iter().enumerate() {
-        let mount_path = format!("/site-packages-{i}");
+        let mount_path = site_packages_mount_path(i);
         wasi_builder
             .preopened_dir(site_packages_path, &mount_path, FsPerms::ReadOnly)
             .map_err(|e| Error::WasmEngine(format!("Failed to mount {mount_path}: {e}")))?;
@@ -558,7 +580,7 @@ fn build_hybrid_vfs_context(
         ctx.add_real_preopen("/python-stdlib", real_dir);
     }
     for (i, site_packages_path) in executor.python_site_packages_paths().iter().enumerate() {
-        let mount_path = format!("/site-packages-{i}");
+        let mount_path = site_packages_mount_path(i);
         if let Ok(real_dir) =
             eryx_vfs::RealDir::open_ambient(site_packages_path, DirPerms::READ, FilePerms::READ)
         {
@@ -617,13 +639,33 @@ impl SessionExecutor {
         executor: Arc<PythonExecutor>,
         callbacks: &[Arc<dyn Callback>],
     ) -> Result<Self, Error> {
+        Self::new_with_limits(executor, callbacks, &ResourceLimits::unlimited()).await
+    }
+
+    /// Create a session with the supplied execution and resource limits.
+    ///
+    /// The limits are applied before component instantiation, so the memory
+    /// cap also bounds initial memory growth. The execution timeout and fuel
+    /// limit apply to every execution and are retained when the session is
+    /// reset. Callback timeout and invocation-count limits remain the
+    /// responsibility of the callback handler; this low-level executor only
+    /// forwards callback requests.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the component cannot be instantiated.
+    pub async fn new_with_limits(
+        executor: Arc<PythonExecutor>,
+        callbacks: &[Arc<dyn Callback>],
+        limits: &ResourceLimits,
+    ) -> Result<Self, Error> {
         #[cfg(feature = "vfs")]
         {
-            Self::new_internal(executor, callbacks, None, None).await
+            Self::new_internal(executor, callbacks, None, None, limits).await
         }
         #[cfg(not(feature = "vfs"))]
         {
-            Self::new_internal(executor, callbacks).await
+            Self::new_internal(executor, callbacks, limits).await
         }
     }
 
@@ -648,7 +690,14 @@ impl SessionExecutor {
         callbacks: &[Arc<dyn Callback>],
         vfs_storage: eryx_vfs::ArcStorage,
     ) -> Result<Self, Error> {
-        Self::new_internal(executor, callbacks, Some(vfs_storage), None).await
+        Self::new_internal(
+            executor,
+            callbacks,
+            Some(vfs_storage),
+            None,
+            &ResourceLimits::unlimited(),
+        )
+        .await
     }
 
     /// Create a new session executor with custom VFS storage and configuration.
@@ -689,7 +738,41 @@ impl SessionExecutor {
         vfs_storage: eryx_vfs::ArcStorage,
         vfs_config: VfsConfig,
     ) -> Result<Self, Error> {
-        Self::new_internal(executor, callbacks, Some(vfs_storage), Some(vfs_config)).await
+        Self::new_internal(
+            executor,
+            callbacks,
+            Some(vfs_storage),
+            Some(vfs_config),
+            &ResourceLimits::unlimited(),
+        )
+        .await
+    }
+
+    /// Create a session with caller-owned VFS storage and resource limits.
+    ///
+    /// The supplied storage retains ownership of its own quota and policy;
+    /// `limits.max_vfs_bytes` is only used for storage created by Eryx.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the WASM component cannot be instantiated or a VFS
+    /// mount cannot be created.
+    #[cfg(feature = "vfs")]
+    pub async fn new_with_vfs_config_and_limits(
+        executor: Arc<PythonExecutor>,
+        callbacks: &[Arc<dyn Callback>],
+        vfs_storage: eryx_vfs::ArcStorage,
+        vfs_config: VfsConfig,
+        limits: &ResourceLimits,
+    ) -> Result<Self, Error> {
+        Self::new_internal(
+            executor,
+            callbacks,
+            Some(vfs_storage),
+            Some(vfs_config),
+            limits,
+        )
+        .await
     }
 
     /// Internal constructor with optional VFS storage and config.
@@ -699,13 +782,19 @@ impl SessionExecutor {
         callbacks: &[Arc<dyn Callback>],
         vfs_storage: Option<eryx_vfs::ArcStorage>,
         vfs_config: Option<VfsConfig>,
+        limits: &ResourceLimits,
     ) -> Result<Self, Error> {
         let callback_infos = build_callback_infos(callbacks);
         let wasi = build_wasi_context(&executor)?;
 
-        // Use provided storage/config or create defaults (plain in-memory, no scrubbing)
+        // Use provided storage/config or create defaults. A storage supplied by
+        // the caller owns its own quota; max_vfs_bytes applies only here.
         let vfs_storage = vfs_storage.unwrap_or_else(|| {
-            eryx_vfs::ArcStorage::new(std::sync::Arc::new(eryx_vfs::InMemoryStorage::new()))
+            eryx_vfs::ArcStorage::new(std::sync::Arc::new(
+                eryx_vfs::InMemoryStorage::with_max_bytes(
+                    limits.max_vfs_bytes.unwrap_or(eryx_vfs::DEFAULT_MAX_BYTES),
+                ),
+            ))
         });
         let vfs_config = vfs_config.unwrap_or_default();
 
@@ -721,7 +810,7 @@ impl SessionExecutor {
             None,
             None,
             callback_infos,
-            MemoryTracker::new(None),
+            MemoryTracker::new(limits.max_memory_bytes),
             hybrid_vfs_ctx,
         );
 
@@ -767,10 +856,12 @@ impl SessionExecutor {
             store: Some(store),
             bindings: Some(bindings),
             execution_count: 0,
-            execution_timeout: None,
-            fuel_limit: None,
+            execution_timeout: limits.execution_timeout,
+            fuel_limit: limits.max_fuel,
+            memory_limit: limits.max_memory_bytes,
             vfs_storage: Some(vfs_storage),
             vfs_config: Some(vfs_config),
+            vfs_max_bytes: limits.max_vfs_bytes,
         })
     }
 
@@ -779,6 +870,7 @@ impl SessionExecutor {
     async fn new_internal(
         executor: Arc<PythonExecutor>,
         callbacks: &[Arc<dyn Callback>],
+        limits: &ResourceLimits,
     ) -> Result<Self, Error> {
         let callback_infos = build_callback_infos(callbacks);
         let wasi = build_wasi_context(&executor)?;
@@ -789,7 +881,7 @@ impl SessionExecutor {
             None,
             None,
             callback_infos,
-            MemoryTracker::new(None),
+            MemoryTracker::new(limits.max_memory_bytes),
         );
 
         // Create store
@@ -832,8 +924,9 @@ impl SessionExecutor {
             store: Some(store),
             bindings: Some(bindings),
             execution_count: 0,
-            execution_timeout: None,
-            fuel_limit: None,
+            execution_timeout: limits.execution_timeout,
+            fuel_limit: limits.max_fuel,
+            memory_limit: limits.max_memory_bytes,
         })
     }
 
@@ -1152,14 +1245,20 @@ impl SessionExecutor {
             None,
             None,
             callback_infos,
-            MemoryTracker::new(None),
+            MemoryTracker::new(self.memory_limit),
         );
 
         #[cfg(feature = "vfs")]
         let state = {
             // Reuse existing VFS storage and config so files persist across resets
             let vfs_storage = self.vfs_storage.clone().unwrap_or_else(|| {
-                eryx_vfs::ArcStorage::new(std::sync::Arc::new(eryx_vfs::InMemoryStorage::new()))
+                // This is only a defensive fallback (constructors always keep
+                // the storage), but retain the configured quota if it is used.
+                eryx_vfs::ArcStorage::new(std::sync::Arc::new(
+                    eryx_vfs::InMemoryStorage::with_max_bytes(
+                        self.vfs_max_bytes.unwrap_or(eryx_vfs::DEFAULT_MAX_BYTES),
+                    ),
+                ))
             });
             let vfs_config = self.vfs_config.clone().unwrap_or_default();
 
@@ -1169,7 +1268,7 @@ impl SessionExecutor {
                 None,
                 None,
                 callback_infos,
-                MemoryTracker::new(None),
+                MemoryTracker::new(self.memory_limit),
                 Some(build_hybrid_vfs_context(
                     &self.executor,
                     vfs_storage,

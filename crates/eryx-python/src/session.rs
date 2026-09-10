@@ -69,6 +69,130 @@ pub struct Session {
     net_config: Option<eryx::NetConfig>,
     /// Output handler for streaming stdout/stderr.
     output_handler: Option<Arc<dyn OutputHandler>>,
+    /// Keep extracted package directories alive for factory-created sessions.
+    #[allow(dead_code)]
+    package_storage_owner: Option<Arc<Vec<eryx::ExtractedPackage>>>,
+    /// Limits passed to callback handlers for this session.
+    callback_limits: eryx::ResourceLimits,
+}
+
+impl Session {
+    /// Build a session from a preconfigured executor. Factory sessions use this
+    /// path so ordinary `Session` construction remains unchanged.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn from_executor(
+        py: Python<'_>,
+        executor: Arc<eryx::PythonExecutor>,
+        runtime: Arc<tokio::runtime::Runtime>,
+        vfs: Option<VfsStorage>,
+        vfs_mount_path: Option<String>,
+        limits: eryx::ResourceLimits,
+        network: Option<NetConfig>,
+        callbacks: Option<Bound<'_, PyAny>>,
+        mcp: Option<PyRef<'_, crate::mcp::MCPManager>>,
+        volumes: Option<Vec<(String, String, bool)>>,
+        on_stdout: Option<Py<PyAny>>,
+        on_stderr: Option<Py<PyAny>>,
+        package_storage_owner: Option<Arc<Vec<eryx::ExtractedPackage>>>,
+    ) -> PyResult<Self> {
+        let callbacks_map: Arc<HashMap<String, Arc<dyn eryx::Callback>>> = {
+            let mut map = if let Some(ref cbs) = callbacks {
+                extract_callbacks(py, cbs)?
+                    .into_iter()
+                    .map(|c| (c.name().to_string(), Arc::new(c) as Arc<dyn eryx::Callback>))
+                    .collect()
+            } else {
+                HashMap::new()
+            };
+            if let Some(ref mcp_mgr) = mcp {
+                for c in mcp_mgr.as_callbacks() {
+                    let arc: Arc<dyn eryx::Callback> = Arc::new(c);
+                    map.insert(arc.name().to_string(), arc);
+                }
+            }
+            Arc::new(map)
+        };
+        let callbacks_vec: Vec<Arc<dyn eryx::Callback>> = callbacks_map.values().cloned().collect();
+        let volume_mounts = volumes
+            .unwrap_or_default()
+            .into_iter()
+            .map(|(host, guest, ro)| {
+                if ro {
+                    eryx::VolumeMount::read_only(host, guest)
+                } else {
+                    eryx::VolumeMount::new(host, guest)
+                }
+            })
+            .collect::<Vec<_>>();
+        let vfs_storage = vfs.map(VfsStorage::into_arc_storage);
+        let mount_path = vfs_mount_path.clone();
+        let needs_vfs = vfs_storage.is_some() || !volume_mounts.is_empty();
+        let (inner, vfs_storage) = runtime
+            .block_on(async {
+                if needs_vfs {
+                    let storage = vfs_storage.unwrap_or_else(|| {
+                        let storage = match limits.max_vfs_bytes {
+                            Some(max_bytes) => {
+                                eryx::vfs::InMemoryStorage::with_max_bytes(max_bytes)
+                            }
+                            None => eryx::vfs::InMemoryStorage::new(),
+                        };
+                        eryx::vfs::ArcStorage::new(Arc::new(eryx::vfs::ScrubbingStorage::new(
+                            storage,
+                            HashMap::new(),
+                            eryx::vfs::VfsFileScrubPolicy::None,
+                        )))
+                    });
+                    let mut config = if let Some(path) = &mount_path {
+                        eryx::VfsConfig::new(path)
+                    } else {
+                        eryx::VfsConfig::default()
+                    };
+                    config.volumes = volume_mounts;
+                    let session = eryx::SessionExecutor::new_with_vfs_config_and_limits(
+                        Arc::clone(&executor),
+                        &callbacks_vec,
+                        storage.clone(),
+                        config,
+                        &limits,
+                    )
+                    .await?;
+                    Ok((session, Some(storage)))
+                } else {
+                    let session = eryx::SessionExecutor::new_with_limits(
+                        Arc::clone(&executor),
+                        &callbacks_vec,
+                        &limits,
+                    )
+                    .await?;
+                    Ok((session, None))
+                }
+            })
+            .map_err(eryx_error_to_py)?;
+        let callback_limits = eryx::ResourceLimits::unlimited()
+            .with_callback_timeout(limits.callback_timeout)
+            .with_max_callback_invocations(limits.max_callback_invocations);
+        let output_handler = if on_stdout.is_some() || on_stderr.is_some() {
+            Some(Arc::new(PyOutputHandler {
+                on_stdout,
+                on_stderr,
+            }) as Arc<dyn OutputHandler>)
+        } else {
+            None
+        };
+        Ok(Self {
+            inner: Mutex::new(Some(inner)),
+            executor,
+            runtime,
+            vfs_storage,
+            vfs_mount_path: mount_path,
+            callbacks: callbacks_map,
+            net_config: network.map(Into::into),
+            output_handler,
+            package_storage_owner,
+            callback_limits,
+        })
+    }
 }
 
 #[pymethods]
@@ -146,121 +270,26 @@ impl Session {
         }
         let executor = Arc::new(executor);
 
-        // Extract callbacks if provided
-        let callbacks_map: Arc<HashMap<String, Arc<dyn eryx::Callback>>> = {
-            let mut map: HashMap<String, Arc<dyn eryx::Callback>> = if let Some(ref cbs) = callbacks
-            {
-                let python_callbacks = extract_callbacks(py, cbs)?;
-                python_callbacks
-                    .into_iter()
-                    .map(|c| (c.name().to_string(), Arc::new(c) as Arc<dyn eryx::Callback>))
-                    .collect()
-            } else {
-                HashMap::new()
-            };
-
-            // Merge MCP callbacks if provided
-            if let Some(ref mcp_mgr) = mcp {
-                for c in mcp_mgr.as_callbacks() {
-                    let arc: Arc<dyn eryx::Callback> = Arc::new(c);
-                    map.insert(arc.name().to_string(), arc);
-                }
-            }
-
-            Arc::new(map)
-        };
-
-        // Convert to slice for SessionExecutor
-        let callbacks_vec: Vec<Arc<dyn eryx::Callback>> = callbacks_map.values().cloned().collect();
-
-        // Convert volume tuples to VolumeMount structs
-        let volume_mounts: Vec<eryx::VolumeMount> = volumes
-            .unwrap_or_default()
-            .into_iter()
-            .map(|(host_path, guest_path, read_only)| {
-                if read_only {
-                    eryx::VolumeMount::read_only(host_path, guest_path)
-                } else {
-                    eryx::VolumeMount::new(host_path, guest_path)
-                }
-            })
-            .collect();
-
-        // Create the SessionExecutor
-        let vfs_storage = vfs.map(|v| v.into_arc_storage());
-        let mount_path = vfs_mount_path.clone();
-        let needs_vfs = vfs_storage.is_some() || !volume_mounts.is_empty();
-
-        let (inner, vfs_storage) = runtime
-            .block_on(async {
-                if needs_vfs {
-                    // Auto-create VFS storage if volumes are requested but no VFS provided
-                    let storage: eryx::vfs::ArcStorage = if let Some(s) = vfs_storage {
-                        s
-                    } else {
-                        eryx::vfs::ArcStorage::new(Arc::new(eryx::vfs::ScrubbingStorage::new(
-                            eryx::vfs::InMemoryStorage::new(),
-                            std::collections::HashMap::new(),
-                            eryx::vfs::VfsFileScrubPolicy::None,
-                        )))
-                    };
-                    let mut config = if let Some(path) = &mount_path {
-                        eryx::VfsConfig::new(path)
-                    } else {
-                        eryx::VfsConfig::default()
-                    };
-                    config.volumes = volume_mounts;
-                    let session = eryx::SessionExecutor::new_with_vfs_config(
-                        Arc::clone(&executor),
-                        &callbacks_vec,
-                        storage.clone(),
-                        config,
-                    )
-                    .await?;
-                    Ok((session, Some(storage)))
-                } else {
-                    let session =
-                        eryx::SessionExecutor::new(Arc::clone(&executor), &callbacks_vec).await?;
-                    Ok((session, None))
-                }
-            })
-            .map_err(eryx_error_to_py)?;
-
-        // Build output handler if streaming callbacks are provided
-        let output_handler: Option<Arc<dyn OutputHandler>> =
-            if on_stdout.is_some() || on_stderr.is_some() {
-                Some(Arc::new(PyOutputHandler {
-                    on_stdout,
-                    on_stderr,
-                }))
-            } else {
-                None
-            };
-
-        let net_config: Option<eryx::NetConfig> = network.map(Into::into);
-
-        let session = Self {
-            inner: Mutex::new(Some(inner)),
+        let limits = eryx::ResourceLimits::unlimited()
+            .with_execution_timeout(execution_timeout_ms.map(Duration::from_millis))
+            .with_max_fuel(max_fuel)
+            .with_callback_timeout(Some(Duration::from_secs(10)))
+            .with_max_callback_invocations(Some(1000));
+        Self::from_executor(
+            py,
             executor,
             runtime,
-            vfs_storage,
-            vfs_mount_path: mount_path,
-            callbacks: callbacks_map,
-            net_config,
-            output_handler,
-        };
-
-        // Set execution timeout if provided
-        if let Some(timeout_ms) = execution_timeout_ms {
-            session.set_execution_timeout_ms(Some(timeout_ms))?;
-        }
-
-        // Set fuel limit if provided
-        if max_fuel.is_some() {
-            session.set_fuel_limit(max_fuel)?;
-        }
-
-        Ok(session)
+            vfs,
+            vfs_mount_path,
+            limits,
+            network,
+            callbacks,
+            mcp,
+            volumes,
+            on_stdout,
+            on_stderr,
+            None,
+        )
     }
 
     /// Execute Python code in the session.
@@ -290,6 +319,7 @@ impl Session {
         let callbacks_map = self.callbacks.clone();
         let output_handler = self.output_handler.clone();
         let net_config = self.net_config.clone();
+        let callback_limits = self.callback_limits.clone();
 
         // Release the GIL while executing
         py.detach(|| {
@@ -316,7 +346,7 @@ impl Session {
                         eryx::callback_handler::run_callback_handler(
                             callback_rx,
                             handler_callbacks,
-                            eryx::ResourceLimits::default(),
+                            callback_limits,
                             std::sync::Arc::new(std::collections::HashMap::new()),
                         )
                         .await

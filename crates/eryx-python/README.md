@@ -460,6 +460,11 @@ from jinja2 import Template
 print(Template("Hello {{ name }}").render(name="World"))
 ''')
 
+# Persistent state with the same preinitialized packages
+session = factory.create_session()
+session.execute("counter = 1")
+session.execute("print(counter)")
+
 # Create many sandboxes from the same factory
 for i in range(100):
     sandbox = factory.create_sandbox()
@@ -517,9 +522,16 @@ sandbox = factory.create_sandbox()
 
 - `factory.size_bytes` - Size of the pre-compiled factory in bytes
 - `factory.create_sandbox(resource_limits=...)` - Create a new sandbox
+- `factory.create_session(...)` - Create a persistent session from the factory
 - `factory.save(path)` - Save factory to a file
 - `factory.to_bytes()` - Get factory as bytes
 - `SandboxFactory.load(path)` - Load factory from a file
+
+Factory sessions default to no execution-time, memory, or fuel limit, with a
+10-second callback timeout and a maximum of 1000 callback invocations. A
+caller-provided `VfsStorage` retains its own quota; `max_vfs_bytes` applies to
+storage created internally for the session. Extracted package storage is kept
+alive by each session, so imports continue to work after dropping the factory.
 
 ### `Session`
 

@@ -86,8 +86,12 @@ impl std::fmt::Debug for InProcessSession<'_> {
 impl<'a> InProcessSession<'a> {
     /// Create a new in-process session from a sandbox.
     ///
-    /// The session will share the sandbox's configuration (callbacks, preamble, etc.)
-    /// but maintain its own persistent state.
+    /// The session will share the sandbox's configuration (callbacks, preamble,
+    /// and resource limits) but maintain its own persistent state. Its memory
+    /// limit is applied while the WASM instance is created, while timeout and
+    /// fuel limits apply to each execution and remain in force after [`Self::reset`]. Callback
+    /// timeout and invocation-count limits continue to be enforced by the
+    /// callback handler.
     ///
     /// # Errors
     ///
@@ -103,10 +107,15 @@ impl<'a> InProcessSession<'a> {
     pub async fn new(sandbox: &'a Sandbox) -> Result<Self, Error> {
         let callbacks: Vec<Arc<dyn Callback>> = sandbox.callbacks().values().cloned().collect();
 
-        let mut executor = SessionExecutor::new(sandbox.executor().clone(), &callbacks).await?;
-
-        // Set execution timeout from sandbox resource limits
-        executor.set_execution_timeout(sandbox.resource_limits().execution_timeout);
+        // Construct the store with the sandbox's execution, memory, and VFS
+        // limits so memory growth is constrained during instantiation, not
+        // only execution. Callback limits remain handler-owned below.
+        let executor = SessionExecutor::new_with_limits(
+            sandbox.executor().clone(),
+            &callbacks,
+            sandbox.resource_limits(),
+        )
+        .await?;
 
         Ok(Self {
             sandbox,

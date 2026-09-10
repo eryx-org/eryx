@@ -1150,8 +1150,34 @@ impl PrecompiledArtifact {
         self.bytes.is_empty()
     }
 
-    fn cache_key(&self) -> Option<&crate::cache::CacheKey> {
-        self.cache_key.as_ref()
+    /// Build a [`PythonExecutor`] from this artifact, consulting the
+    /// process-global [`crate::cache::InstancePreCache`] when it carries a
+    /// cache key.
+    ///
+    /// On a cache hit this skips deserializing the component bytes. Artifacts
+    /// without a cache key use the uncached loading path.
+    ///
+    /// # Safety
+    ///
+    /// Pre-compiled bytes cannot be fully validated by Wasmtime. Only construct
+    /// executors from artifacts created by [`PythonExecutor::precompile`] from
+    /// trusted components.
+    #[allow(unsafe_code)]
+    pub unsafe fn to_executor(&self) -> std::result::Result<PythonExecutor, Error> {
+        #[cfg(feature = "embedded")]
+        if let Some(key) = &self.cache_key {
+            // SAFETY: The caller guarantees that the artifact bytes are trusted.
+            #[allow(unsafe_code)]
+            return unsafe {
+                PythonExecutor::from_precompiled_with_key(self.as_bytes(), key.clone())
+            };
+        }
+
+        // SAFETY: The caller guarantees that the artifact bytes are trusted.
+        #[allow(unsafe_code)]
+        unsafe {
+            PythonExecutor::from_precompiled(self.as_bytes())
+        }
     }
 }
 
@@ -2437,7 +2463,7 @@ impl SandboxBuilder<state::Has, state::Has> {
                 // caller has acknowledged this responsibility.
                 #[allow(unsafe_code)]
                 unsafe {
-                    Self::load_precompiled(bytes, None)?
+                    PythonExecutor::from_precompiled(bytes)?
                 }
             }
 
@@ -2448,7 +2474,7 @@ impl SandboxBuilder<state::Has, state::Has> {
                 // the caller has acknowledged this responsibility.
                 #[allow(unsafe_code)]
                 unsafe {
-                    Self::load_precompiled(artifact.as_bytes(), artifact.cache_key())?
+                    artifact.to_executor()?
                 }
             }
 
@@ -2489,36 +2515,6 @@ impl SandboxBuilder<state::Has, state::Has> {
         };
 
         Ok(executor)
-    }
-
-    /// Load a pre-compiled component, using the global [`InstancePreCache`]
-    /// when a cache key is configured.
-    ///
-    /// # Safety
-    ///
-    /// Caller guarantees the pre-compiled bytes are trusted and were created
-    /// by `PythonExecutor::precompile()` with a compatible engine configuration.
-    #[cfg(any(feature = "embedded", feature = "preinit"))]
-    #[allow(unsafe_code)]
-    unsafe fn load_precompiled(
-        bytes: &[u8],
-        cache_key: Option<&crate::cache::CacheKey>,
-    ) -> Result<PythonExecutor, Error> {
-        #[cfg(feature = "embedded")]
-        if let Some(key) = cache_key {
-            // SAFETY: Caller guarantees the pre-compiled bytes are trusted.
-            #[allow(unsafe_code)]
-            return unsafe { PythonExecutor::from_precompiled_with_key(bytes, key.clone()) };
-        }
-        // Without `embedded` there is no cache to consult; the key is unused.
-        #[cfg(not(feature = "embedded"))]
-        let _ = cache_key;
-
-        // SAFETY: Caller guarantees the pre-compiled bytes are trusted.
-        #[allow(unsafe_code)]
-        unsafe {
-            PythonExecutor::from_precompiled(bytes)
-        }
     }
 
     /// Build executor with native extensions, using cache if available.

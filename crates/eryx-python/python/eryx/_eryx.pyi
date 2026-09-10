@@ -740,6 +740,40 @@ class SandboxFactory:
         """
         ...
 
+    def create_session(
+        self,
+        *,
+        vfs: Optional[VfsStorage] = None,
+        vfs_mount_path: Optional[str] = None,
+        resource_limits: Optional[ResourceLimits] = None,
+        network: Optional[NetConfig] = None,
+        callbacks: Optional[Union[CallbackRegistry, Sequence[CallbackDict]]] = None,
+        volumes: Optional[Sequence[tuple[str, str, bool]]] = None,
+        on_stdout: Optional[Callable[[str], None]] = None,
+        on_stderr: Optional[Callable[[str], None]] = None,
+        result_variable: Optional[str] = None,
+    ) -> Session:
+        """Create a persistent session from this factory's preinitialized runtime.
+
+        The session preserves interpreter and module state across executions,
+        while remaining isolated from other sessions and sandboxes. The factory
+        can be dropped after creation; extracted package storage remains owned
+        by the session.
+
+        `vfs_mount_path` applies only when caller-provided `vfs` storage or
+        `volumes` enable a wrapper-visible VFS; by itself it does not expose
+        `Session.vfs`. Caller-provided `vfs` retains its own policy and quota.
+
+        Supported options include VFS storage and mounts, resource limits,
+        networking, callbacks, volumes, output handlers, and a result variable.
+        Defaults are no execution, memory, or fuel limit, a 10-second callback
+        timeout, and 1000 callback invocations.
+
+        Returns a persistent `Session`. Raises `InitializationError` if it
+        cannot be initialized.
+        """
+        ...
+
     def create_sandbox(
         self,
         *,
