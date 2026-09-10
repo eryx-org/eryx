@@ -6,7 +6,7 @@ Demonstrates sandboxed Jinja2 template evaluation using eryx with
 SandboxFactory for fast sandbox creation with packages.
 
 This is similar to jinja2_sandbox.py but uses SandboxFactory
-to achieve ~10-20ms sandbox creation instead of ~700ms.
+to achieve ~1ms sandbox creation instead of ~700ms.
 
 Prerequisites:
     # Download jinja2 (pure Python)
@@ -197,7 +197,7 @@ print(f"HOME env var: {home}")
     print()
     print("  Key benefits:")
     print("    - Pre-import expensive modules (jinja2) once")
-    print("    - Create sandboxes in ~10-20ms instead of ~700ms")
+    print("    - Create sandboxes in ~1ms instead of ~700ms")
     print("    - Save/load factory for fast startup across processes")
     print("    - Full isolation: each sandbox is independent")
 

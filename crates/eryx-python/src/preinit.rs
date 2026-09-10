@@ -32,7 +32,7 @@ use crate::session::Session;
 ///         imports=["jinja2"],
 ///     )
 ///
-///     # Create sandboxes with packages already loaded (~10-20ms each)
+///     # Create sandboxes with packages already loaded (~1ms each)
 ///     sandbox = factory.create_sandbox()
 ///     result = sandbox.execute('from jinja2 import Template; print(Template("{{ x }}").render(x=42))')
 ///
@@ -68,7 +68,7 @@ impl SandboxFactory {
     /// Create a new sandbox factory with custom packages.
     ///
     /// This performs one-time initialization that can take 3-5 seconds,
-    /// but subsequent sandbox creation will be very fast (~10-20ms).
+    /// but subsequent sandbox creation will be very fast (~1ms).
     ///
     /// Args:
     ///     site_packages: Optional path to a directory containing Python packages.
@@ -77,9 +77,10 @@ impl SandboxFactory {
     ///     imports: Optional list of module names to pre-import during initialization.
     ///         Pre-imported modules are immediately available without import overhead.
     ///     cache: Whether to cache the pre-compiled component in the process-global
-    ///         cache. Enabling this computes a BLAKE3 content hash once during
-    ///         factory construction and makes subsequent sandbox creation from an
-    ///         equivalent artifact avoid deserialization. Defaults to False.
+    ///         cache. When enabled, a BLAKE3 content hash is computed once during
+    ///         factory construction and subsequent ``create_sandbox()`` calls skip
+    ///         component deserialization entirely (~0.8ms vs ~8ms per call).
+    ///         Defaults to True.
     ///
     /// Returns:
     ///     A SandboxFactory ready to create sandboxes with packages.
@@ -97,7 +98,7 @@ impl SandboxFactory {
     ///         imports=["jinja2"],
     ///     )
     #[new]
-    #[pyo3(signature = (*, site_packages=None, packages=None, imports=None, setup_code=None, cache=false))]
+    #[pyo3(signature = (*, site_packages=None, packages=None, imports=None, setup_code=None, cache=true))]
     fn new(
         site_packages: Option<PathBuf>,
         packages: Option<Vec<PathBuf>>,
@@ -159,8 +160,9 @@ impl SandboxFactory {
     /// Args:
     ///     path: Path to the saved factory file.
     ///     cache: Whether to cache the pre-compiled component in the process-global
-    ///         cache. Enabling this computes a BLAKE3 content hash once during
-    ///         loading. Defaults to False.
+    ///         cache. When enabled, a BLAKE3 content hash is computed once during
+    ///         loading and subsequent ``create_sandbox()`` calls skip component
+    ///         deserialization entirely (~0.8ms vs ~8ms per call). Defaults to True.
     ///
     /// Returns:
     ///     A SandboxFactory loaded from the file.
@@ -172,7 +174,7 @@ impl SandboxFactory {
     ///     factory = SandboxFactory.load("/path/to/jinja2-factory.bin")
     ///     sandbox = factory.create_sandbox()
     #[staticmethod]
-    #[pyo3(signature = (path, *, site_packages=None, cache=false))]
+    #[pyo3(signature = (path, *, site_packages=None, cache=true))]
     fn load(path: PathBuf, site_packages: Option<PathBuf>, cache: bool) -> PyResult<Self> {
         // Get embedded resources for stdlib path
         let embedded = eryx::embedded::EmbeddedResources::get().map_err(eryx_error_to_py)?;
@@ -309,7 +311,7 @@ impl SandboxFactory {
 
     /// Create a new sandbox from this factory.
     ///
-    /// This is fast (~10-20ms) because the packages are already bundled
+    /// This is fast (~1ms) because the packages are already bundled
     /// into the factory's snapshot.
     ///
     /// Args:

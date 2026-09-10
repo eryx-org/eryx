@@ -155,7 +155,7 @@ factory = eryx.SandboxFactory(
     imports=["jinja2"],  # Optional: pre-import for faster first execution
 )
 
-# Create sandboxes with packages already loaded (~10-20ms each)
+# Create sandboxes with packages already loaded (~1ms each)
 sandbox = factory.create_sandbox()
 result = sandbox.execute('''
 from jinja2 import Template
@@ -453,7 +453,7 @@ factory = eryx.SandboxFactory(
     imports=["jinja2"],  # Pre-import modules
 )
 
-# Create sandboxes with packages already loaded (~10-20ms each)
+# Create sandboxes with packages already loaded (~1ms each)
 sandbox = factory.create_sandbox()
 result = sandbox.execute('''
 from jinja2 import Template
