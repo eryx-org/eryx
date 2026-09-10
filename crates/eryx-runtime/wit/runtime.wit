@@ -73,7 +73,10 @@ world sandbox {
     record execution-options {
         /// Whether the guest should install Python tracing.
         python-tracing: bool,
-        /// Whether a fresh instance may reuse its pre-initialized empty callbacks.
+        /// Historical hint that a fresh instance may keep its pre-initialized
+        /// empty callbacks. The guest now compares the host's declarations with
+        /// what is installed and ignores this field; it is kept so existing
+        /// hosts stay compatible.
         reuse-empty-callbacks: bool,
     }
 

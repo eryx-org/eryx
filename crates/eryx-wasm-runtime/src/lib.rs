@@ -719,13 +719,11 @@ fn call_invoke(name: &str, args_json: &str) -> Result<String, String> {
 #[derive(Clone, Copy)]
 struct ExecutionOptions {
     python_tracing: bool,
-    reuse_empty_callbacks: bool,
 }
 
 impl ExecutionOptions {
     const CONSERVATIVE: Self = Self {
         python_tracing: true,
-        reuse_empty_callbacks: false,
     };
 }
 
@@ -745,12 +743,11 @@ fn call_get_execution_options(wit: Wit) -> ExecutionOptions {
     match cx.stack.pop() {
         Some(Value::Record(fields)) if fields.len() == 2 => {
             let mut fields = fields.into_iter();
+            // The second field, `reuse-empty-callbacks`, is kept in the WIT
+            // for compatibility; the guest now tracks installed callbacks itself.
             match (fields.next(), fields.next()) {
-                (Some(Value::Bool(python_tracing)), Some(Value::Bool(reuse_empty_callbacks))) => {
-                    ExecutionOptions {
-                        python_tracing,
-                        reuse_empty_callbacks,
-                    }
+                (Some(Value::Bool(python_tracing)), Some(Value::Bool(_))) => {
+                    ExecutionOptions { python_tracing }
                 }
                 _ => {
                     eprintln!("call_get_execution_options: unexpected record fields");
@@ -1476,17 +1473,11 @@ pub fn do_tls_close(handle: u32) {
 /// - Session reuse: callbacks may change between executions
 /// - Error recovery: a previous failed setup won't prevent future attempts
 ///
-/// Fresh instances can reuse empty callback infrastructure captured during
-/// initialization. Persistent sessions must perform setup on every execution
-/// because their callback state may have changed since the previous request.
-fn initialize_callbacks(wit: Wit, reuse_empty_callbacks: bool) {
+/// The host's callback set can change between executions of a persistent
+/// session, so it is fetched every time; `setup_callbacks` only reinstalls
+/// when it differs from what is already installed.
+fn initialize_callbacks(wit: Wit) {
     let callbacks = call_list_callbacks(wit);
-
-    let skip_setup =
-        reuse_empty_callbacks && callbacks.is_empty() && python::callbacks_pre_initialized();
-    if skip_setup {
-        return;
-    }
 
     if let Err(e) = python::setup_callbacks(&callbacks) {
         eprintln!(
@@ -1543,7 +1534,7 @@ fn handle_export(wit: Wit, func_index: usize, cx: &mut EryxCall) -> HandleExport
             // Set up callbacks from the host's current per-request state.
             // This runs on every execute to stay in sync with the host.
             let options = call_get_execution_options(wit);
-            initialize_callbacks(wit, options.reuse_empty_callbacks);
+            initialize_callbacks(wit);
 
             // Execute Python with Wit handle available for callbacks
             let result = with_wit(wit, || {

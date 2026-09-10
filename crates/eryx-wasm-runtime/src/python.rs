@@ -9,6 +9,7 @@
 #![allow(missing_debug_implementations)]
 
 use std::ffi::c_char;
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 // Re-export pyo3::ffi types and functions available in the stable ABI
@@ -1313,13 +1314,20 @@ sys.modules['_eryx_async'] = _eryx_async
 /// Track whether we've initialized Python.
 static PYTHON_INITIALIZED: AtomicBool = AtomicBool::new(false);
 
-/// True when initialization installed the empty-callback infrastructure.
-/// A failed installation degrades to per-execution callback setup.
-static CALLBACKS_PRE_INITIALIZED: AtomicBool = AtomicBool::new(false);
+/// The callback declarations whose wrappers are currently installed, in the
+/// JSON form handed to the setup script.
+///
+/// `None` means the installation is unknown or may have been disturbed, so
+/// the next [`setup_callbacks`] reinstalls unconditionally. Pre-initialization
+/// installs the empty set, and that value is carried in the snapshot, so a
+/// fresh instance with no callbacks never runs the setup script.
+static INSTALLED_CALLBACKS: Mutex<Option<String>> = Mutex::new(None);
 
-/// Whether the pre-init snapshot contains the empty-callback infrastructure.
-pub fn callbacks_pre_initialized() -> bool {
-    CALLBACKS_PRE_INITIALIZED.load(Ordering::SeqCst)
+/// Forget which callbacks are installed so the next setup reinstalls them.
+fn invalidate_installed_callbacks() {
+    if let Ok(mut installed) = INSTALLED_CALLBACKS.lock() {
+        *installed = None;
+    }
 }
 
 /// Initialize Python interpreter.
@@ -2677,15 +2685,10 @@ pub fn initialize_python() {
             PyErr_Clear();
         }
 
-        // Install empty callback infrastructure once so fresh instances with no
-        // callbacks do not have to recreate it for every execution. Non-empty
-        // callback lists still reinstall their request-specific definitions.
-        let callbacks_ok = setup_callbacks(&[]).is_ok();
-        CALLBACKS_PRE_INITIALIZED.store(callbacks_ok, Ordering::SeqCst);
-        if !callbacks_ok {
-            eprintln!(
-                "WARNING: pre-init setup_callbacks([]) failed; empty-callback fast path disabled"
-            );
+        // Install the empty callback infrastructure once so fresh instances
+        // with no callbacks do not have to recreate it for every execution.
+        if let Err(e) = setup_callbacks(&[]) {
+            eprintln!("WARNING: pre-init setup_callbacks([]) failed: {e}");
         }
 
         // Note: We do NOT call reset_wasi_state() here!
@@ -3261,9 +3264,11 @@ del _eryx_restore_bytes, _eryx_restored_dict, _eryx_dill, _eryx_types, _eryx_reb
             let _ = PyRun_SimpleString(c"del _eryx_restore_bytes".as_ptr());
             return Err(format!("Failed to restore state: {err}"));
         }
-
-        Ok(())
     }
+
+    // The restored globals may have replaced callback wrappers.
+    invalidate_installed_callbacks();
+    Ok(())
 }
 
 /// Clear all user-defined state from `_eryx_user_globals`.
@@ -3319,6 +3324,9 @@ del _eryx_keep, _eryx_should_keep, _eryx_to_delete, _k
             PyErr_Clear();
         }
     }
+
+    // The keep-list above is a heuristic; make the next execution reinstall.
+    invalidate_installed_callbacks();
 }
 
 // =============================================================================
@@ -3340,15 +3348,29 @@ pub struct CallbackInfo {
 /// 2. A `list_callbacks()` function for introspection
 /// 3. Direct wrapper functions for each callback (e.g., `sleep(ms=100)`)
 /// 4. Namespace objects for dotted callbacks (e.g., `http.get(url="...")`)
+///
+/// Installing is idempotent: the declarations are compared with the set that
+/// is already installed and the setup script only runs when they differ. The
+/// script compiles a few hundred lines of Python, which is several times the
+/// cost of a short execution, so this is what keeps per-execution overhead
+/// low for sessions and for sandboxes with callbacks.
 pub fn setup_callbacks(callbacks: &[CallbackInfo]) -> Result<(), String> {
     if !is_python_initialized() {
         return Err("Python not initialized".to_string());
     }
 
-    unsafe {
-        // Serialize callbacks to JSON for Python to parse
-        let callbacks_json = serde_json_mini_serialize_callbacks(callbacks);
+    // Serialize callbacks to JSON for Python to parse
+    let callbacks_json = serde_json_mini_serialize_callbacks(callbacks);
 
+    let already_installed = INSTALLED_CALLBACKS
+        .lock()
+        .is_ok_and(|installed| installed.as_deref() == Some(callbacks_json.as_str()));
+    if already_installed {
+        return Ok(());
+    }
+    invalidate_installed_callbacks();
+
+    unsafe {
         // Inject the callback setup code
         let setup_code = format!(
             r#"
@@ -3563,9 +3585,12 @@ except NameError:
             let err = get_last_error_message();
             return Err(format!("Failed to set up callbacks: {err}"));
         }
-
-        Ok(())
     }
+
+    if let Ok(mut installed) = INSTALLED_CALLBACKS.lock() {
+        *installed = Some(callbacks_json);
+    }
+    Ok(())
 }
 
 /// Simple JSON serialization for callbacks (avoiding serde dependency in WASM)
