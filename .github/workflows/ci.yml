@@ -591,6 +591,85 @@ jobs:
           echo "=== resource_limits.py ==="
           python examples/resource_limits.py
 
+  # Test Python bindings on Windows so platform-specific failures (path
+  # separators, temp-dir cleanup, native extension loading) are caught before
+  # the release workflow, which is the only other place Windows tests run.
+  python-bindings-windows:
+    name: Python Bindings (Windows)
+    runs-on: windows-latest
+    needs: [changes, build-eryx-runtime]
+    if: >-
+      github.event_name == 'push'
+      || needs.changes.outputs.core == 'true'
+      || needs.changes.outputs.python == 'true'
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Download WASM artifacts
+        uses: actions/download-artifact@v8
+        with:
+          name: wasm-runtime
+          path: crates/
+
+      - name: Mark WASM artifacts as current
+        shell: bash
+        run: |
+          touch crates/eryx-runtime/runtime.wasm
+          touch crates/eryx-runtime/prebuilt/*
+
+      - name: Set up Python stdlib for preinit
+        shell: bash
+        run: |
+          mkdir -p crates/eryx-wasm-runtime/tests/python-stdlib
+          tar -xf crates/eryx/python-stdlib.tar.zst -C crates/eryx-wasm-runtime/tests/
+
+      - name: Install Rust
+        shell: bash
+        run: |
+          RUST_VERSION=$(sed -n 's/^rust = { version = "\([^"]*\)".*/\1/p' mise.toml)
+          if [ -z "$RUST_VERSION" ]; then
+            echo "could not read the rust pin from mise.toml" >&2
+            exit 1
+          fi
+          rustup toolchain install "$RUST_VERSION" --profile minimal
+          rustup default "$RUST_VERSION"
+
+      - name: Configure Rust cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: Pre-compile WASM for Windows
+        shell: bash
+        run: |
+          cargo run -p eryx --example precompile --features preinit --release
+          touch crates/eryx-runtime/runtime.cwasm
+        env:
+          ERYX_PRECOMPILE_BOOTSTRAP: "1"
+          ERYX_CPU_FEATURES: "x86-64-v2"
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.14"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v10.0.1
+
+      - name: Build and install eryx-python with dev dependencies
+        shell: bash
+        working-directory: crates/eryx-python
+        run: |
+          uv venv ../../.venv
+          source ../../.venv/Scripts/activate
+          uv pip install maturin
+          maturin develop --release
+          uv export --extra dev --no-dev --no-hashes --no-emit-project --frozen | uv pip install -r -
+
+      - name: Run Python tests
+        shell: bash
+        working-directory: crates/eryx-python
+        run: |
+          source ../../.venv/Scripts/activate
+          pytest tests/ -v
+
   # Test book examples
   book-tests:
     name: Book Tests
