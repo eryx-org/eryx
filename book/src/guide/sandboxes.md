@@ -260,7 +260,7 @@ factory = eryx.SandboxFactory()
 
 print(f"Factory size: {factory.size_bytes} bytes")
 
-# Create sandboxes quickly from the factory (~16ms each)
+# Create sandboxes quickly from the factory (~1ms each)
 for i in range(5):
     sandbox = factory.create_sandbox()
     result = sandbox.execute(f"print('sandbox {i}')")
