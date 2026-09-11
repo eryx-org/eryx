@@ -230,7 +230,7 @@ If you need state to persist across executions, use a [Session](./sessions.md).
 
 ## SandboxFactory for Fast Creation
 
-When creating many sandboxes, use `SandboxFactory` to pre-initialize Python and packages once, then quickly instantiate sandboxes from that snapshot:
+When creating many sandboxes, use `SandboxFactory` to pre-initialize Python and packages once, then quickly instantiate sandboxes from that snapshot. Executions on short-lived sandboxes also pick up a pre-instantiated WebAssembly instance from a process-wide pool; see [Performance Tuning](./performance.md) for how that works and how to size it.
 
 <!-- langtabs-start -->
 ```rust
