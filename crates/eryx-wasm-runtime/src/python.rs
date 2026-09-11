@@ -22,6 +22,8 @@ pub use pyo3::ffi::{
     Py_Initialize,
     Py_InitializeEx,
     Py_IsInitialized,
+    // Bool
+    PyBool_FromLong,
     // Bytes operations
     PyBytes_AsString,
     PyBytes_AsStringAndSize,
@@ -2665,6 +2667,10 @@ pub fn initialize_python() {
             PyErr_Clear();
         }
 
+        // Resolve the execute-path helpers once so execute() calls them
+        // directly instead of compiling wrapper snippets per request.
+        init_exec_helpers();
+
         // Inject the socket shim module.
         // This replaces sys.modules['socket'] with our TLS-backed implementation.
         let socket_cstr = std::ffi::CString::new(SOCKET_SHIM_CODE).unwrap();
@@ -2891,6 +2897,233 @@ fn python_string_literal(s: &str) -> String {
     format!("\"\"\"{}\"\"\"", escaped)
 }
 
+/// `__main__` objects the execute path calls directly.
+///
+/// Resolved once by [`init_exec_helpers`] after the execution infrastructure
+/// is installed. The pointers are owned references into the interpreter heap,
+/// so they survive the pre-init snapshot along with everything else in linear
+/// memory and are valid in every instance restored from it.
+struct ExecHelpers {
+    /// `__main__.__dict__` (owned reference).
+    main_dict: *mut PyObject,
+    /// `_eryx_exec(code, trace_enabled)`.
+    exec: *mut PyObject,
+    /// `_eryx_get_output() -> (stdout, stderr)`.
+    get_output: *mut PyObject,
+    /// `_eryx_capture_result()`; results are read from `main_dict`.
+    capture_result: *mut PyObject,
+    /// `_eryx_discard_result()`.
+    discard_result: *mut PyObject,
+}
+
+// SAFETY: the guest is single-threaded; these are plain pointers into the
+// interpreter heap that are never mutated after initialization.
+unsafe impl Send for ExecHelpers {}
+unsafe impl Sync for ExecHelpers {}
+
+static EXEC_HELPERS: std::sync::OnceLock<ExecHelpers> = std::sync::OnceLock::new();
+
+/// Look up the execute-path helpers in `__main__` and keep owned references.
+///
+/// Leaves [`EXEC_HELPERS`] unset (so [`execute_python`] falls back to
+/// `PyRun_SimpleString`) if anything is missing.
+///
+/// # Safety
+/// Python must be initialized and `ERYX_EXEC_INFRASTRUCTURE` must have run.
+unsafe fn init_exec_helpers() {
+    unsafe {
+        let main_module = PyImport_AddModule(c"__main__".as_ptr());
+        if main_module.is_null() {
+            PyErr_Clear();
+            return;
+        }
+        let main_dict = PyModule_GetDict(main_module);
+        if main_dict.is_null() {
+            PyErr_Clear();
+            return;
+        }
+        let lookup = |name: &std::ffi::CStr| -> Option<*mut PyObject> {
+            let obj = PyDict_GetItemString(main_dict, name.as_ptr());
+            if obj.is_null() {
+                None
+            } else {
+                Py_IncRef(obj);
+                Some(obj)
+            }
+        };
+        let (Some(exec), Some(get_output), Some(capture_result), Some(discard_result)) = (
+            lookup(c"_eryx_exec"),
+            lookup(c"_eryx_get_output"),
+            lookup(c"_eryx_capture_result"),
+            lookup(c"_eryx_discard_result"),
+        ) else {
+            eprintln!(
+                "WARNING: execute helpers missing from __main__; using PyRun_SimpleString path"
+            );
+            return;
+        };
+        Py_IncRef(main_dict);
+        let _ = EXEC_HELPERS.set(ExecHelpers {
+            main_dict,
+            exec,
+            get_output,
+            capture_result,
+            discard_result,
+        });
+    }
+}
+
+/// Copy a `str` object's UTF-8 contents, or `""` if it is not a string.
+///
+/// # Safety
+/// `obj` must be a valid object pointer or null.
+unsafe fn unicode_to_string(obj: *mut PyObject) -> String {
+    if obj.is_null() {
+        return String::new();
+    }
+    unsafe {
+        let utf8 = PyUnicode_AsUTF8(obj);
+        if utf8.is_null() {
+            PyErr_Clear();
+            return String::new();
+        }
+        std::ffi::CStr::from_ptr(utf8)
+            .to_string_lossy()
+            .into_owned()
+    }
+}
+
+impl ExecHelpers {
+    /// Call `_eryx_get_output()` and return `(stdout, stderr)`.
+    unsafe fn get_output(&self) -> (String, String) {
+        unsafe {
+            let tuple = PyObject_CallNoArgs(self.get_output);
+            if tuple.is_null() {
+                PyErr_Clear();
+                return (String::new(), String::new());
+            }
+            let out = (
+                unicode_to_string(PyTuple_GetItem(tuple, 0)),
+                unicode_to_string(PyTuple_GetItem(tuple, 1)),
+            );
+            Py_DecRef(tuple);
+            out
+        }
+    }
+
+    /// Call `_eryx_capture_result()` and read back `(result, result_error)`.
+    unsafe fn capture_result(&self) -> (String, String) {
+        unsafe {
+            let ret = PyObject_CallNoArgs(self.capture_result);
+            if ret.is_null() {
+                PyErr_Clear();
+                return (String::new(), String::new());
+            }
+            Py_DecRef(ret);
+            (
+                unicode_to_string(PyDict_GetItemString(
+                    self.main_dict,
+                    c"_eryx_result".as_ptr(),
+                )),
+                unicode_to_string(PyDict_GetItemString(
+                    self.main_dict,
+                    c"_eryx_result_error".as_ptr(),
+                )),
+            )
+        }
+    }
+
+    /// Call `_eryx_discard_result()`.
+    unsafe fn discard_result(&self) {
+        unsafe {
+            let ret = PyObject_CallNoArgs(self.discard_result);
+            if ret.is_null() {
+                PyErr_Clear();
+            } else {
+                Py_DecRef(ret);
+            }
+        }
+    }
+
+    /// Call `_eryx_exec(code, trace_enabled)`. Returns `false` if it raised, in
+    /// which case the traceback has been printed to the (redirected) stderr the
+    /// same way `PyRun_SimpleString` would have.
+    unsafe fn exec(&self, code: &str, trace_enabled: bool) -> Result<bool, String> {
+        unsafe {
+            let code_obj = PyUnicode_FromStringAndSize(code.as_ptr().cast(), code.len() as isize);
+            if code_obj.is_null() {
+                PyErr_Clear();
+                return Err("Invalid code string".to_string());
+            }
+            let trace_obj = PyBool_FromLong(std::ffi::c_long::from(trace_enabled));
+            let args = PyTuple_New(2);
+            if args.is_null() {
+                Py_DecRef(code_obj);
+                Py_DecRef(trace_obj);
+                PyErr_Clear();
+                return Err("Failed to allocate arguments".to_string());
+            }
+            // PyTuple_SetItem steals both references.
+            PyTuple_SetItem(args, 0, code_obj);
+            PyTuple_SetItem(args, 1, trace_obj);
+            let ret = PyObject_Call(self.exec, args, std::ptr::null_mut());
+            Py_DecRef(args);
+            if ret.is_null() {
+                PyErr_Print();
+                return Ok(false);
+            }
+            Py_DecRef(ret);
+            Ok(true)
+        }
+    }
+}
+
+/// [`execute_python`] without re-parsing any Python source except the user's.
+///
+/// # Safety
+/// Python must be initialized.
+unsafe fn execute_python_direct(
+    helpers: &ExecHelpers,
+    code: &str,
+    trace_enabled: bool,
+) -> ExecuteResult {
+    unsafe {
+        match helpers.exec(code, trace_enabled) {
+            Err(e) => return ExecuteResult::Error(e),
+            Ok(false) => {
+                let (_, stderr_output) = helpers.get_output();
+                // PyErr_Print consumed the exception, exactly as PyRun_SimpleString
+                // does, so the traceback lives in stderr.
+                let exception_msg = get_last_error_message();
+                helpers.discard_result();
+                let error = if !stderr_output.is_empty() && exception_msg != "Unknown error" {
+                    format!("{stderr_output}\n{exception_msg}")
+                } else if !stderr_output.is_empty() {
+                    stderr_output
+                } else {
+                    exception_msg
+                };
+                return ExecuteResult::Error(error);
+            }
+            Ok(true) => {}
+        }
+
+        let callback_code_value = get_python_callback_code();
+        if callback_code::get_code(callback_code_value) == callback_code::WAIT {
+            return ExecuteResult::Pending(callback_code_value);
+        }
+
+        let (stdout, stderr) = helpers.get_output();
+        let (result, result_error) = helpers.capture_result();
+        ExecuteResult::Complete(ExecuteOutput {
+            stdout: stdout.trim_end_matches('\n').to_string(),
+            stderr: stderr.trim_end_matches('\n').to_string(),
+            result,
+            result_error,
+        })
+    }
+}
+
 /// Execute Python code and capture stdout.
 ///
 /// This is the main entry point for the `execute` WIT export.
@@ -2914,6 +3147,11 @@ pub fn execute_python(code: &str, trace_enabled: bool) -> ExecuteResult {
     // Validate that code is valid UTF-8 (CString requires this)
     if CString::new(code).is_err() {
         return ExecuteResult::Error("Invalid code string: contains null bytes".to_string());
+    }
+
+    if let Some(helpers) = EXEC_HELPERS.get() {
+        // SAFETY: Python is initialized (checked above).
+        return unsafe { execute_python_direct(helpers, code, trace_enabled) };
     }
 
     unsafe {
