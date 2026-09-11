@@ -441,6 +441,10 @@ class Sandbox:
 
     For sandboxes with custom packages, use `SandboxFactory` instead.
 
+    Execution trace collection (`sys.settrace`) is disabled for Python
+    sandboxes; `ExecuteResult` does not expose trace events, so there is no
+    per-line tracing overhead.
+
     Example:
         # Basic sandbox (stdlib only)
         sandbox = Sandbox()

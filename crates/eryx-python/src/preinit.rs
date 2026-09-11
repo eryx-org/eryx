@@ -370,7 +370,8 @@ impl SandboxFactory {
         // Use provided site_packages or fall back to the one from initialization
         let site_packages_path = site_packages.or_else(|| self.site_packages_path.clone());
 
-        // Build sandbox from precompiled bytes
+        // Build sandbox from precompiled bytes. Trace collection (sys.settrace)
+        // is always off for Python sandboxes; see `Sandbox::new`.
         // SAFETY: The precompiled bytes were created by PythonExecutor::precompile()
         // from a valid WASM component, so they are safe to deserialize.
         let mut builder = unsafe {
