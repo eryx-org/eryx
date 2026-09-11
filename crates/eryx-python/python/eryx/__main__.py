@@ -22,7 +22,7 @@ import textwrap
 
 import eryx
 
-from eryx._cli import add_sandbox_args, make_mcp_manager, make_net_config, make_resource_limits
+from eryx._cli import add_sandbox_args, make_mcp_manager, make_net_config, make_resource_limits, make_secrets
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -90,6 +90,9 @@ def _run_once(code: str, args: argparse.Namespace, mcp_manager: object | None = 
         kwargs["resource_limits"] = limits
     if net is not None:
         kwargs["network"] = net
+    secrets = make_secrets(args)
+    if secrets is not None:
+        kwargs["secrets"] = secrets
     if args.volume:
         kwargs["volumes"] = args.volume
     if mcp_manager is not None:
@@ -127,6 +130,9 @@ def _repl(args: argparse.Namespace, mcp_manager: object | None = None) -> int:
     net = make_net_config(args)
     if net is not None:
         kwargs["network"] = net
+    secrets = make_secrets(args)
+    if secrets is not None:
+        kwargs["secrets"] = secrets
     if args.volume:
         kwargs["volumes"] = args.volume
     if mcp_manager is not None:
