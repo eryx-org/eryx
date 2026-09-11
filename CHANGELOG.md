@@ -29,6 +29,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - *(runtime)* only reinstall callbacks when their declarations change ([#416](https://github.com/eryx-org/eryx/pull/416))
 - *(deps)* update wasmtime & wasm-tools ([#414](https://github.com/eryx-org/eryx/pull/414))
 
+## `eryx-precompile` - [0.7.2](https://github.com/eryx-org/eryx/compare/eryx-precompile-v0.7.1...eryx-precompile-v0.7.2) - 2026-09-11
+
+### Other
+- *(preinit)* bake callback declarations into the snapshot ([#423](https://github.com/eryx-org/eryx/pull/423))
+
+## `eryx` - [0.7.2](https://github.com/eryx-org/eryx/compare/eryx-v0.7.1...eryx-v0.7.2) - 2026-09-11
+
+### Added
+- make trace collection easy to disable (docs + ERYX_PROFILE_TRACE) ([#424](https://github.com/eryx-org/eryx/pull/424))
+
+### Other
+- *(preinit)* bake callback declarations into the snapshot ([#423](https://github.com/eryx-org/eryx/pull/423))
+- *(runtime)* only reinstall callbacks when their declarations change ([#416](https://github.com/eryx-org/eryx/pull/416))
+
+## `eryx-runtime` - [0.7.2](https://github.com/eryx-org/eryx/compare/eryx-runtime-v0.7.1...eryx-runtime-v0.7.2) - 2026-09-11
+
+### Other
+- *(preinit)* bake callback declarations into the snapshot ([#423](https://github.com/eryx-org/eryx/pull/423))
+- *(runtime)* call the execute helpers directly instead of compiling snippets ([#418](https://github.com/eryx-org/eryx/pull/418))
+- *(runtime)* only reinstall callbacks when their declarations change ([#416](https://github.com/eryx-org/eryx/pull/416))
+- *(deps)* update wasmtime & wasm-tools ([#414](https://github.com/eryx-org/eryx/pull/414))
+
 ## `eryx-precompile` - [0.7.1](https://github.com/eryx-org/eryx/compare/eryx-precompile-v0.7.0...eryx-precompile-v0.7.1) - 2026-09-10
 
 ### Fixed
