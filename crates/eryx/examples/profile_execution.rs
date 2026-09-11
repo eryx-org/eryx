@@ -6,6 +6,9 @@
 //!
 //! Or with a specific iteration count:
 //!   samply record ./target/release/examples/profile_execution 5000
+//!
+//! Set `ERYX_PROFILE_TRACE=0` to disable trace collection (`sys.settrace`),
+//! which is on by default and dominates anything heavier than `pass`.
 
 use std::time::Instant;
 
@@ -23,7 +26,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     rt.block_on(async {
         eprintln!("Creating sandbox...");
-        let sandbox = Sandbox::embedded().build()?;
+        // Trace collection (sys.settrace) is on by default; `ERYX_PROFILE_TRACE=0`
+        // turns it off to measure without per-event trace overhead.
+        let collect_trace = !std::env::var("ERYX_PROFILE_TRACE").is_ok_and(|v| v.trim() == "0");
+        eprintln!("  trace collection: {collect_trace}");
+        let sandbox = Sandbox::embedded()
+            .with_trace_collection(collect_trace)
+            .build()?;
 
         eprintln!("Creating session...");
         let mut session = InProcessSession::new(&sandbox).await?;

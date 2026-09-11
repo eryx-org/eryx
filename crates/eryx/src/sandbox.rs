@@ -1887,9 +1887,27 @@ impl<R, S> SandboxBuilder<R, S> {
     /// Configure whether execution trace events are collected in the result.
     ///
     /// Trace collection is enabled by default for backward compatibility. It
-    /// installs Python's `sys.settrace` hook, which can be expensive for
-    /// instruction-heavy workloads. A configured [`TraceHandler`] always keeps
-    /// tracing enabled regardless of this setting.
+    /// installs Python's `sys.settrace` hook, which fires on every line, call
+    /// and return in the guest, so its cost scales with the amount of Python
+    /// executed rather than with sandbox setup. Measured on a Ryzen 9 7950X
+    /// (wasmtime 48, fresh instance per call), enabled vs disabled:
+    ///
+    /// | Workload | On | Off |
+    /// |---|---|---|
+    /// | `pass` | 1.28 ms | 1.08 ms |
+    /// | `json.loads` + `string.Template(...).substitute(...)` | 3.7 ms | 0.9 ms |
+    /// | `sum(i * i for i in range(20_000))` | 369 ms | 3.8 ms |
+    ///
+    /// Disable it unless you read [`ExecuteResult::trace`]:
+    ///
+    /// ```rust,ignore
+    /// let sandbox = Sandbox::embedded().with_trace_collection(false).build()?;
+    /// ```
+    ///
+    /// This also applies to [`InProcessSession`](crate::session::InProcessSession)s
+    /// created from the sandbox. A configured [`TraceHandler`] always keeps
+    /// tracing enabled regardless of this setting; only the retention of
+    /// events in the result is controlled here.
     #[must_use]
     pub const fn with_trace_collection(mut self, enabled: bool) -> Self {
         self.collect_trace = enabled;

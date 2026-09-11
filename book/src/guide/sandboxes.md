@@ -130,6 +130,31 @@ print(f"Callback invocations: {result.callback_invocations}")
 ```
 <!-- langtabs-end -->
 
+### Trace Collection
+
+In Rust, the sandbox also records line-level execution events in
+`ExecuteResult::trace`. This is on by default and installs Python's
+`sys.settrace` hook, whose cost scales with how much Python runs: `pass`
+costs about 20% extra per execution, a small `json` + `string.Template`
+render goes from 0.9 ms to 3.7 ms, and `sum(i * i for i in range(20_000))`
+from 3.8 ms to 369 ms. Disable it unless you read the trace:
+
+```rust
+# extern crate eryx;
+use eryx::Sandbox;
+
+# fn main() -> Result<(), eryx::Error> {
+let sandbox = Sandbox::embedded().with_trace_collection(false).build()?;
+# Ok(())
+# }
+```
+
+A `TraceHandler` set with `with_trace_handler` still receives events when
+collection is disabled. Sessions created from the sandbox inherit the setting.
+
+The Python bindings never collect traces (`ExecuteResult` does not expose
+them), so no option is needed there.
+
 ## Error Handling
 
 Sandbox execution can fail for various reasons. Eryx provides typed errors to help you handle them:

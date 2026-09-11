@@ -2,6 +2,10 @@
 //!
 //! Run with: `cargo bench --package eryx --features embedded`
 //!
+//! Trace collection (`sys.settrace`) is on by default, matching the library
+//! default so historical numbers stay comparable. Set `ERYX_PROFILE_TRACE=0`
+//! to benchmark with it disabled.
+//!
 //! ## Benchmark Groups
 //!
 //! - **sandbox_creation**: Measures time to create a new sandbox
@@ -121,7 +125,11 @@ impl TypedCallback for WorkCallback {
 // ============================================================================
 
 fn create_sandbox() -> Sandbox {
+    // Trace collection (sys.settrace) is on by default; `ERYX_PROFILE_TRACE=0`
+    // turns it off to measure without per-event trace overhead.
+    let collect_trace = !std::env::var("ERYX_PROFILE_TRACE").is_ok_and(|v| v.trim() == "0");
     Sandbox::embedded()
+        .with_trace_collection(collect_trace)
         .with_callback(NoopCallback)
         .with_callback(EchoCallback)
         .with_callback(WorkCallback)

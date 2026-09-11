@@ -56,9 +56,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Create sandbox using cache_dir (handles linking, pre-init, precompile, and mmap)
     println!("Creating sandbox (cold - linking + compiling + caching)...");
     let start = Instant::now();
+    // Trace collection (sys.settrace) is on by default; `ERYX_PROFILE_TRACE=0`
+    // turns it off to measure without per-event trace overhead.
+    let collect_trace = !std::env::var("ERYX_PROFILE_TRACE").is_ok_and(|v| v.trim() == "0");
+    println!("  trace collection: {collect_trace}");
     // Start with embedded() which provides runtime+stdlib, then late-linking
     // overrides the runtime when native extensions are added
-    let mut builder = Sandbox::embedded();
+    let mut builder = Sandbox::embedded().with_trace_collection(collect_trace);
     for (name, bytes) in &extensions {
         builder = builder.with_native_extension(name.clone(), bytes.clone());
     }

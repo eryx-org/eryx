@@ -89,6 +89,10 @@ impl Sandbox {
     ///
     /// For sandboxes with custom packages, use `SandboxFactory` instead.
     ///
+    /// Execution trace collection (`sys.settrace`) is disabled for Python
+    /// sandboxes; `ExecuteResult` does not expose trace events, so there is
+    /// no per-line tracing overhead.
+    ///
     /// Args:
     ///     resource_limits: Optional resource limits for execution.
     ///     network: Optional network configuration. If provided, enables networking.
@@ -167,7 +171,10 @@ impl Sandbox {
                 })?,
         );
 
-        // Build the eryx sandbox with embedded runtime
+        // Build the eryx sandbox with embedded runtime. Trace collection
+        // (sys.settrace) is always off: the Python ExecuteResult does not
+        // expose trace events, and the hook makes instruction-heavy scripts
+        // orders of magnitude slower.
         let mut builder = eryx::Sandbox::embedded().with_trace_collection(false);
 
         // Apply resource limits if provided
