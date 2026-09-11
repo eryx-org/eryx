@@ -114,6 +114,29 @@ Some packages with native extensions have WASI-compiled versions available:
 
 Packages with native C extensions (like `numpy`, `pandas`) require WASI-compiled wheels. Check if WASI builds are available for your specific package.
 
+## Baking Callbacks into the Factory
+
+Registering callbacks installs a Python wrapper for each of them inside the guest. A fresh sandbox starts from the factory's snapshot, and the snapshot only knows the callbacks it was created with — none, by default — so every `create_sandbox()` re-runs that installation on its first execution (a few milliseconds for a handful of callbacks, more than creating the sandbox itself).
+
+If every sandbox from a factory registers the same callbacks, pass them to the factory instead. Their declarations (name, description, parameter schema) are baked into the snapshot, and `create_sandbox()` / `create_session()` register them unless given callbacks of their own:
+
+```python
+import eryx
+
+def get_time():
+    import time
+    return {"timestamp": time.time()}
+
+factory = eryx.SandboxFactory(
+    callbacks=[{"name": "get_time", "fn": get_time, "description": "Returns current time"}],
+)
+
+sandbox = factory.create_sandbox()  # get_time() is ready; no per-sandbox setup
+result = sandbox.execute("print((await get_time())['timestamp'] > 0)")
+```
+
+A sandbox that is given a different set of callbacks still works; it installs them itself as before. Setup code cannot invoke the callbacks, since nothing answers them while the snapshot is being built. A saved factory keeps the baked declarations but not the Python functions, so pass the same `callbacks=` to `SandboxFactory.load()`.
+
 ## Package Dependencies
 
 When installing packages, you must include all dependencies:

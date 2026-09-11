@@ -1234,6 +1234,8 @@ dependencies = [
  "eryx",
  "reqwest",
  "rustls",
+ "serde",
+ "serde_json",
  "tokio",
  "tracing",
  "tracing-subscriber",

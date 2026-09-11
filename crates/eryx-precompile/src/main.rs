@@ -36,7 +36,7 @@
 //!   --verify-code "import numpy; print(numpy.array(\[1,2,3\]).sum())"
 //! ```
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use anyhow::{Context, Result};
@@ -192,6 +192,19 @@ struct CompileArgs {
         requires = "preinit"
     )]
     setup_file: Option<PathBuf>,
+
+    /// JSON file declaring the callbacks sandboxes will register (baked into snapshot)
+    ///
+    /// A list of objects with "name", "description" and optional "parameters"
+    /// (a JSON Schema object, `{}` if omitted). Their Python wrappers are
+    /// installed during pre-initialization, so a fresh instance whose host
+    /// registers callbacks with the same names, descriptions and schemas skips
+    /// the per-execution callback setup. Requires --preinit.
+    ///
+    /// Example: `--callbacks callbacks.json` with
+    /// `[{"name": "get_time", "description": "Current time", "parameters": {"type": "object"}}]`
+    #[arg(long, value_name = "PATH", requires = "preinit")]
+    callbacks: Option<PathBuf>,
 
     /// Python code to execute during verification
     ///
@@ -378,6 +391,40 @@ async fn run_setup(args: SetupArgs) -> Result<()> {
     Ok(())
 }
 
+/// One entry of the `--callbacks` file.
+#[derive(serde::Deserialize)]
+struct CallbackDeclarationFile {
+    name: String,
+    #[serde(default)]
+    description: String,
+    /// JSON Schema for the arguments; an empty object when omitted.
+    #[serde(default = "empty_object")]
+    parameters: serde_json::Value,
+}
+
+fn empty_object() -> serde_json::Value {
+    serde_json::Value::Object(serde_json::Map::new())
+}
+
+/// Read the callback declarations to bake into the snapshot from `path`.
+fn read_callback_declarations(path: &Path) -> Result<Vec<eryx::preinit::CallbackDeclaration>> {
+    let text = std::fs::read_to_string(path)
+        .with_context(|| format!("Failed to read callbacks file: {}", path.display()))?;
+    let entries: Vec<CallbackDeclarationFile> = serde_json::from_str(&text)
+        .with_context(|| format!("Invalid callbacks file: {}", path.display()))?;
+    entries
+        .into_iter()
+        .map(|entry| {
+            Ok(eryx::preinit::CallbackDeclaration {
+                name: entry.name,
+                description: entry.description,
+                parameters_schema_json: serde_json::to_string(&entry.parameters)
+                    .context("Failed to serialize callback parameters schema")?,
+            })
+        })
+        .collect()
+}
+
 async fn run_compile(args: CompileArgs) -> Result<()> {
     // Set up tracing
     let filter = if args.verbose {
@@ -460,6 +507,21 @@ async fn run_compile(args: CompileArgs) -> Result<()> {
                 .map_or("inline code".to_string(), |p| p.display().to_string())
         );
     }
+
+    let callbacks = match &args.callbacks {
+        Some(path) => read_callback_declarations(path)?,
+        None => Vec::new(),
+    };
+    if !callbacks.is_empty() {
+        println!(
+            "Callbacks: {} (baked into snapshot)",
+            callbacks
+                .iter()
+                .map(|cb| cb.name.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+    }
     println!();
 
     // Read input WASM
@@ -497,22 +559,23 @@ async fn run_compile(args: CompileArgs) -> Result<()> {
             println!("Native extensions: {}", extensions.len());
         }
 
-        // Convert imports to &str references
-        let import_refs: Vec<&str> = args.imports.iter().map(|s| s.as_str()).collect();
-
         println!();
         println!("Step 1: Pre-initializing Python...");
         let start = Instant::now();
 
-        let preinit_bytes = eryx::preinit::pre_initialize(
-            stdlib,
-            final_site_packages.as_deref(),
-            &import_refs,
-            &extensions,
-            setup_code.as_deref(),
-        )
-        .await
-        .context("Failed to pre-initialize Python")?;
+        let mut options = eryx::preinit::PreInitOptions::new(stdlib)
+            .imports(args.imports.iter().cloned())
+            .extensions(extensions)
+            .callbacks(callbacks);
+        if let Some(path) = &final_site_packages {
+            options = options.site_packages(path);
+        }
+        if let Some(code) = &setup_code {
+            options = options.setup_code(code.clone());
+        }
+        let preinit_bytes = eryx::preinit::pre_initialize_with_options(options)
+            .await
+            .context("Failed to pre-initialize Python")?;
 
         let elapsed = start.elapsed();
         println!(
