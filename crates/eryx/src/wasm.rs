@@ -618,6 +618,10 @@ pub struct ExecutorState {
     pub(crate) suspended: Option<String>,
     /// Whether this execution uses a fresh instance whose initialized empty
     /// callback state can be reused safely.
+    ///
+    /// Reported to the guest as `reuse-empty-callbacks`. Current guests ignore
+    /// it and reinstall callbacks only when the declarations change; older
+    /// guests use it to skip setup on fresh, callback-free instances.
     pub(crate) reuse_empty_callbacks: bool,
 }
 
