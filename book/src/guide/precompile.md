@@ -148,6 +148,25 @@ eryx-precompile compile runtime.wasm -o jinja2.cwasm \
 
 Each sandbox created from the resulting artifact starts with `env` already defined. Per-request code only needs to handle the request-specific work (deserializing data, compiling the template, rendering).
 
+### Callbacks
+
+Registering callbacks on a sandbox installs a Python wrapper for each of them inside the guest. A persistent session pays for that once, but a fresh sandbox per request starts from the snapshot, and the snapshot only knows the callbacks it was taken with — none, by default — so every request re-runs the installation (a few milliseconds of Python for a handful of callbacks, more than the instantiation itself).
+
+If the set of callbacks is fixed per deployment, declare it at pre-initialization and the wrappers are part of the snapshot. A sandbox that registers callbacks with the same names, descriptions and parameter schemas (in any order) then skips the installation; one that registers a different set still works, it just installs as before.
+
+```bash
+# callbacks.json: what the sandboxes will register at runtime
+# [
+#   {"name": "get_time", "description": "Current time", "parameters": {"type": "object", "properties": {}}},
+#   {"name": "fetch", "description": "HTTP GET", "parameters": {"type": "object", "properties": {"url": {"type": "string"}}}}
+# ]
+eryx-precompile compile runtime.wasm -o runtime.cwasm \
+  --preinit --stdlib ./python-stdlib \
+  --callbacks callbacks.json
+```
+
+`parameters` defaults to `{}` when omitted. Setup code cannot invoke the callbacks: there is no host to answer them during pre-initialization. In Rust, pass `PreInitOptions::callbacks` (build the declarations with `eryx::preinit::callback_declaration`); in Python, pass `callbacks=` to `SandboxFactory`.
+
 ### Verification
 
 By default, `compile` verifies the output by creating a test sandbox. You can add custom verification:

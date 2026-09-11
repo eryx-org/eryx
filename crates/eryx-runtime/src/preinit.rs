@@ -23,21 +23,21 @@
 //! # Example
 //!
 //! ```rust,ignore
-//! use eryx_runtime::preinit::pre_initialize;
+//! use eryx_runtime::preinit::{PreInitOptions, pre_initialize_with_options};
 //!
 //! // Pre-initialize with native extensions
-//! let preinit_component = pre_initialize(
-//!     &python_stdlib_path,
-//!     Some(&site_packages_path),
-//!     &["numpy", "pandas"],  // Modules to import during pre-init
-//!     &native_extensions,
-//!     Some("import numpy as np; arr = np.zeros(10)"),  // Optional setup code
+//! let preinit_component = pre_initialize_with_options(
+//!     PreInitOptions::new(&python_stdlib_path)
+//!         .site_packages(&site_packages_path)
+//!         .imports(["numpy", "pandas"])  // Modules to import during pre-init
+//!         .extensions(native_extensions)
+//!         .setup_code("import numpy as np; arr = np.zeros(10)"),  // Optional setup code
 //! ).await?;
 //! ```
 
 use anyhow::{Result, anyhow};
 use std::collections::HashSet;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use tempfile::TempDir;
 use wasmtime::{
     Config, Engine, Store,
@@ -48,6 +48,92 @@ use wasmtime_wizer::{WasmtimeWizerComponent, Wizer};
 
 use crate::linker::{NativeExtension, link_with_extensions};
 
+/// A callback the sandbox will offer at runtime, as the guest sees it.
+///
+/// Passing the declarations of the callbacks a sandbox will register to
+/// [`PreInitOptions::callbacks`] installs their Python wrappers during
+/// pre-initialization, so a fresh instance whose host registers the same set
+/// (compared by name, description and schema) skips the per-instance setup
+/// entirely. The set is matched irrespective of order.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CallbackDeclaration {
+    /// Unique name of the callback (e.g. `"http.get"`).
+    pub name: String,
+    /// Human-readable description.
+    pub description: String,
+    /// JSON Schema for the callback's arguments, serialized.
+    pub parameters_schema_json: String,
+}
+
+/// Everything [`pre_initialize_with_options`] needs.
+#[derive(Debug, Clone)]
+pub struct PreInitOptions {
+    python_stdlib: PathBuf,
+    site_packages: Option<PathBuf>,
+    imports: Vec<String>,
+    extensions: Vec<NativeExtension>,
+    setup_code: Option<String>,
+    callbacks: Vec<CallbackDeclaration>,
+}
+
+impl PreInitOptions {
+    /// Options for pre-initializing with the Python standard library at
+    /// `python_stdlib` and nothing else.
+    pub fn new(python_stdlib: impl Into<PathBuf>) -> Self {
+        Self {
+            python_stdlib: python_stdlib.into(),
+            site_packages: None,
+            imports: Vec::new(),
+            extensions: Vec::new(),
+            setup_code: None,
+            callbacks: Vec::new(),
+        }
+    }
+
+    /// Mount `path` as `/site-packages` during pre-initialization.
+    #[must_use]
+    pub fn site_packages(mut self, path: impl Into<PathBuf>) -> Self {
+        self.site_packages = Some(path.into());
+        self
+    }
+
+    /// Modules to import during pre-init (e.g. `["numpy", "pandas"]`).
+    #[must_use]
+    pub fn imports<I, S>(mut self, imports: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.imports = imports.into_iter().map(Into::into).collect();
+        self
+    }
+
+    /// Native extensions to link into the component.
+    #[must_use]
+    pub fn extensions(mut self, extensions: Vec<NativeExtension>) -> Self {
+        self.extensions = extensions;
+        self
+    }
+
+    /// Python code to run after the imports, baked into the snapshot. Use
+    /// this to pre-create objects (e.g. a Jinja2 `SandboxedEnvironment`) so
+    /// every sandbox starts with them in copy-on-write memory.
+    #[must_use]
+    pub fn setup_code(mut self, code: impl Into<String>) -> Self {
+        self.setup_code = Some(code.into());
+        self
+    }
+
+    /// Callbacks the sandboxes will register at runtime; see
+    /// [`CallbackDeclaration`]. Setup code cannot invoke them (there is no
+    /// host to answer during pre-initialization).
+    #[must_use]
+    pub fn callbacks(mut self, callbacks: Vec<CallbackDeclaration>) -> Self {
+        self.callbacks = callbacks;
+        self
+    }
+}
+
 /// Context for the pre-initialization runtime.
 struct PreInitCtx {
     wasi: WasiCtx,
@@ -55,6 +141,8 @@ struct PreInitCtx {
     /// Temp directory for dummy files - must be kept alive during pre-init
     #[allow(dead_code)]
     temp_dir: Option<TempDir>,
+    /// What the `list-callbacks` import answers, sorted by name.
+    callbacks: Vec<CallbackDeclaration>,
 }
 
 impl std::fmt::Debug for PreInitCtx {
@@ -103,10 +191,46 @@ pub async fn pre_initialize(
     extensions: &[NativeExtension],
     setup_code: Option<&str>,
 ) -> Result<Vec<u8>> {
-    let imports: Vec<String> = imports.iter().map(|s| (*s).to_string()).collect();
+    let mut options = PreInitOptions::new(python_stdlib)
+        .imports(imports.iter().copied())
+        .extensions(extensions.to_vec());
+    if let Some(path) = site_packages {
+        options = options.site_packages(path);
+    }
+    if let Some(code) = setup_code {
+        options = options.setup_code(code);
+    }
+    pre_initialize_with_options(options).await
+}
+
+/// Pre-initialize a Python component according to `options`.
+///
+/// Links the component with the native extensions, runs the Python
+/// interpreter's initialization, imports the requested modules, runs the setup
+/// code, installs the declared callbacks' wrappers, and captures the resulting
+/// memory state into the returned component.
+///
+/// # Errors
+///
+/// Returns an error if pre-initialization fails (e.g., Python init error,
+/// import failure, or setup code exception).
+pub async fn pre_initialize_with_options(options: PreInitOptions) -> Result<Vec<u8>> {
+    let PreInitOptions {
+        python_stdlib,
+        site_packages,
+        imports,
+        extensions,
+        setup_code,
+        mut callbacks,
+    } = options;
+    let python_stdlib = python_stdlib.as_path();
+    let site_packages = site_packages.as_deref();
+    // The guest compares the host's declarations with the installed set as a
+    // serialized list, so both sides present them in the same (name) order.
+    callbacks.sort_by(|a, b| a.name.cmp(&b.name));
 
     // Link the component with real WASI adapter.
-    let original_component = link_with_extensions(extensions)
+    let original_component = link_with_extensions(&extensions)
         .map_err(|e| anyhow!("Failed to link component with extensions: {}", e))?;
 
     // Phase 1: Instrument the component (synchronous).
@@ -166,12 +290,14 @@ pub async fn pre_initialize(
 
     let wasi = wasi_builder.build();
 
+    let has_callbacks = !callbacks.is_empty();
     let mut store = Store::new(
         &engine,
         PreInitCtx {
             wasi,
             table,
             temp_dir,
+            callbacks,
         },
     );
 
@@ -194,8 +320,15 @@ pub async fn pre_initialize(
 
     // If setup code is provided, execute it after imports so its state
     // (variables, objects, etc.) gets captured in the Wizer snapshot.
-    if let Some(code) = setup_code {
+    if let Some(code) = &setup_code {
         call_execute_code(&mut store, &instance, code, "setup code").await?;
+    }
+
+    // The guest installs the declared callbacks' wrappers on its first
+    // execute(). If nothing above ran one, run a no-op so the installation
+    // still lands in the snapshot.
+    if has_callbacks && imports.is_empty() && setup_code.is_none() {
+        call_execute_code(&mut store, &instance, "pass", "callback installation").await?;
     }
 
     // CRITICAL: Call finalize-preinit to reset WASI state AFTER all imports.
@@ -490,14 +623,34 @@ fn add_sandbox_stubs(linker: &mut Linker<PreInitCtx>) -> Result<()> {
     )?;
 
     // list-callbacks: func() -> list<callback-info>
+    //
+    // Answers with the declarations from `PreInitOptions::callbacks` so the
+    // guest installs their wrappers into the snapshot; empty by default.
     linker.root().func_new(
         "list-callbacks",
-        |_ctx: wasmtime::StoreContextMut<'_, PreInitCtx>,
+        |ctx: wasmtime::StoreContextMut<'_, PreInitCtx>,
          _func_ty: wasmtime::component::types::ComponentFunc,
          _params: &[Val],
          results: &mut [Val]| {
-            // Return empty list
-            results[0] = Val::List(vec![]);
+            let declared = ctx
+                .data()
+                .callbacks
+                .iter()
+                .map(|cb| {
+                    Val::Record(vec![
+                        ("name".to_string(), Val::String(cb.name.clone())),
+                        (
+                            "description".to_string(),
+                            Val::String(cb.description.clone()),
+                        ),
+                        (
+                            "parameters-schema-json".to_string(),
+                            Val::String(cb.parameters_schema_json.clone()),
+                        ),
+                    ])
+                })
+                .collect();
+            results[0] = Val::List(declared);
             Ok(())
         },
     )?;

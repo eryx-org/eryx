@@ -80,7 +80,26 @@ mod wasm;
 #[cfg(feature = "preinit")]
 pub mod preinit {
     pub use eryx_runtime::linker::NativeExtension;
-    pub use eryx_runtime::preinit::{PreInitError, pre_initialize};
+    pub use eryx_runtime::preinit::{
+        CallbackDeclaration, PreInitError, PreInitOptions, pre_initialize,
+        pre_initialize_with_options,
+    };
+
+    /// The declaration the guest sees for `callback`, for
+    /// [`PreInitOptions::callbacks`].
+    ///
+    /// Sandboxes created from a snapshot that baked this declaration and that
+    /// register a callback with the same name, description and schema skip the
+    /// per-instance callback setup.
+    #[must_use]
+    pub fn callback_declaration(callback: &dyn crate::Callback) -> CallbackDeclaration {
+        CallbackDeclaration {
+            name: callback.name().to_string(),
+            description: callback.description().to_string(),
+            parameters_schema_json: serde_json::to_string(&callback.parameters_schema())
+                .unwrap_or_else(|_| "{}".to_string()),
+        }
+    }
 }
 
 pub use callback::{

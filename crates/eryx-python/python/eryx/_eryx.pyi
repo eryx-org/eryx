@@ -646,6 +646,7 @@ class SandboxFactory:
         packages: Optional[Sequence[PathLike]] = None,
         imports: Optional[Sequence[str]] = None,
         setup_code: Optional[str] = None,
+        callbacks: Optional[Union[CallbackRegistry, Sequence[CallbackDict]]] = None,
         cache: bool = True,
     ) -> None:
         """Create a new sandbox factory with custom packages.
@@ -664,6 +665,13 @@ class SandboxFactory:
                 ``SandboxedEnvironment``) so every sandbox starts with them already
                 in memory. Each sandbox gets its own copy-on-write clone, preserving
                 full isolation.
+            callbacks: Optional callbacks (a ``CallbackRegistry`` or a list of callback
+                dicts) whose declarations are baked into the snapshot, so sandboxes
+                created from this factory skip the per-sandbox callback setup (a few
+                milliseconds per sandbox). ``create_sandbox()`` and ``create_session()``
+                register these callbacks unless given their own; a sandbox given a
+                different set still works, it just installs them itself. Setup code
+                cannot invoke the callbacks.
             cache: Whether to cache the pre-compiled component in the process-global
                 cache. When enabled, a BLAKE3 content hash is computed once during
                 factory construction and subsequent ``create_sandbox()`` calls skip
@@ -700,6 +708,7 @@ class SandboxFactory:
         path: PathLike,
         *,
         site_packages: Optional[PathLike] = None,
+        callbacks: Optional[Union[CallbackRegistry, Sequence[CallbackDict]]] = None,
         cache: bool = True,
     ) -> SandboxFactory:
         """Load a sandbox factory from a file.
@@ -711,6 +720,9 @@ class SandboxFactory:
             path: Path to the saved factory file.
             site_packages: Optional path to site-packages directory.
                 Required if the factory was saved without embedded packages.
+            callbacks: The callbacks the factory was created with, if any. The file
+                holds their baked declarations but not the Python callables, so pass
+                the same callbacks here to keep the setup-free fast path.
             cache: Whether to cache the pre-compiled component in the process-global
                 cache. When enabled, a BLAKE3 content hash is computed once during
                 loading and subsequent ``create_sandbox()`` calls skip component

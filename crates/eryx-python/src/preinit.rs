@@ -52,6 +52,10 @@ pub struct SandboxFactory {
     /// Extracted packages (kept alive to prevent temp dir cleanup).
     #[allow(dead_code)]
     extracted_packages: Arc<Vec<eryx::ExtractedPackage>>,
+    /// Callbacks whose declarations were baked into the snapshot (or, for a
+    /// loaded factory, the ones the caller says were). `create_sandbox()` and
+    /// `create_session()` register them when given no callbacks of their own.
+    callbacks: Option<Py<PyAny>>,
 }
 
 /// Construct a pre-compiled artifact with optional content-safe caching.
@@ -76,6 +80,11 @@ impl SandboxFactory {
     ///         These are extracted and their native extensions are linked.
     ///     imports: Optional list of module names to pre-import during initialization.
     ///         Pre-imported modules are immediately available without import overhead.
+    ///     callbacks: Optional callbacks (a CallbackRegistry or a list of callback
+    ///         dicts) whose declarations are baked into the snapshot, so sandboxes
+    ///         created from this factory skip the per-sandbox callback setup.
+    ///         `create_sandbox()` and `create_session()` register these callbacks
+    ///         unless given their own. Setup code cannot invoke them.
     ///     cache: Whether to cache the pre-compiled component in the process-global
     ///         cache. When enabled, a BLAKE3 content hash is computed once during
     ///         factory construction and subsequent ``create_sandbox()`` calls skip
@@ -97,13 +106,21 @@ impl SandboxFactory {
     ///         ],
     ///         imports=["jinja2"],
     ///     )
+    ///
+    ///     # With the callbacks every sandbox will register
+    ///     factory = SandboxFactory(callbacks=[
+    ///         {"name": "get_time", "fn": get_time, "description": "Returns current time"}
+    ///     ])
+    ///     sandbox = factory.create_sandbox()  # get_time() available, no setup cost
     #[new]
-    #[pyo3(signature = (*, site_packages=None, packages=None, imports=None, setup_code=None, cache=true))]
+    #[pyo3(signature = (*, site_packages=None, packages=None, imports=None, setup_code=None, callbacks=None, cache=true))]
     fn new(
+        py: Python<'_>,
         site_packages: Option<PathBuf>,
         packages: Option<Vec<PathBuf>>,
         imports: Option<Vec<String>>,
         setup_code: Option<String>,
+        callbacks: Option<Bound<'_, PyAny>>,
         cache: bool,
     ) -> PyResult<Self> {
         // Create tokio runtime for async pre-initialization
@@ -120,23 +137,34 @@ impl SandboxFactory {
         let (final_site_packages, extensions, extracted_packages) =
             process_packages(site_packages.as_ref(), packages.as_ref())?;
 
-        // Convert imports to the format pre_initialize expects
-        let import_refs: Vec<&str> = imports
-            .as_ref()
-            .map(|v| v.iter().map(|s| s.as_str()).collect())
-            .unwrap_or_default();
+        // Bake the callbacks' declarations so sandboxes registering the same
+        // set skip the per-sandbox wrapper installation.
+        let declarations = match &callbacks {
+            Some(cbs) => extract_callbacks(py, cbs)?
+                .iter()
+                .map(|cb| eryx::preinit::callback_declaration(cb))
+                .collect(),
+            None => Vec::new(),
+        };
+
+        let mut options = eryx::preinit::PreInitOptions::new(&stdlib_path)
+            .imports(imports.unwrap_or_default())
+            .extensions(extensions)
+            .callbacks(declarations);
+        if let Some(path) = &final_site_packages {
+            options = options.site_packages(path);
+        }
+        if let Some(code) = setup_code {
+            options = options.setup_code(code);
+        }
 
         // Run pre-initialization
         let preinit_bytes = runtime.block_on(async {
-            eryx::preinit::pre_initialize(
-                &stdlib_path,
-                final_site_packages.as_deref(),
-                &import_refs,
-                &extensions,
-                setup_code.as_deref(),
-            )
-            .await
-            .map_err(|e| InitializationError::new_err(format!("pre-initialization failed: {e}")))
+            eryx::preinit::pre_initialize_with_options(options)
+                .await
+                .map_err(|e| {
+                    InitializationError::new_err(format!("pre-initialization failed: {e}"))
+                })
         })?;
 
         // Pre-compile to native code for faster instantiation
@@ -149,6 +177,7 @@ impl SandboxFactory {
             stdlib_path,
             site_packages_path: final_site_packages,
             extracted_packages: Arc::new(extracted_packages),
+            callbacks: callbacks.map(Bound::unbind),
         })
     }
 
@@ -159,6 +188,10 @@ impl SandboxFactory {
     ///
     /// Args:
     ///     path: Path to the saved factory file.
+    ///     callbacks: The callbacks the factory was created with, if any. The
+    ///         file holds their baked declarations but not the Python callables,
+    ///         so pass the same callbacks here to get the setup-free fast path;
+    ///         a different set still works, it just installs per sandbox.
     ///     cache: Whether to cache the pre-compiled component in the process-global
     ///         cache. When enabled, a BLAKE3 content hash is computed once during
     ///         loading and subsequent ``create_sandbox()`` calls skip component
@@ -174,8 +207,13 @@ impl SandboxFactory {
     ///     factory = SandboxFactory.load("/path/to/jinja2-factory.bin")
     ///     sandbox = factory.create_sandbox()
     #[staticmethod]
-    #[pyo3(signature = (path, *, site_packages=None, cache=true))]
-    fn load(path: PathBuf, site_packages: Option<PathBuf>, cache: bool) -> PyResult<Self> {
+    #[pyo3(signature = (path, *, site_packages=None, callbacks=None, cache=true))]
+    fn load(
+        path: PathBuf,
+        site_packages: Option<PathBuf>,
+        callbacks: Option<Bound<'_, PyAny>>,
+        cache: bool,
+    ) -> PyResult<Self> {
         // Get embedded resources for stdlib path
         let embedded = eryx::embedded::EmbeddedResources::get().map_err(eryx_error_to_py)?;
         let stdlib_path = embedded.stdlib().to_path_buf();
@@ -194,6 +232,7 @@ impl SandboxFactory {
             stdlib_path,
             site_packages_path: site_packages,
             extracted_packages: Arc::new(Vec::new()),
+            callbacks: callbacks.map(Bound::unbind),
         })
     }
 
@@ -292,6 +331,7 @@ impl SandboxFactory {
             max_vfs_bytes: None,
         });
         let limits: eryx::ResourceLimits = (&limits).into();
+        let callbacks = self.default_callbacks(py, callbacks);
         Session::from_executor(
             py,
             Arc::new(executor),
@@ -393,8 +433,9 @@ impl SandboxFactory {
             builder = builder.with_network(net.into());
         }
 
-        // Apply callbacks if provided
-        if let Some(ref cbs) = callbacks {
+        // Apply the caller's callbacks, or the factory's own (whose
+        // declarations are baked into the snapshot) when none are given.
+        if let Some(ref cbs) = self.default_callbacks(py, callbacks) {
             let python_callbacks = extract_callbacks(py, cbs)?;
             for callback in python_callbacks {
                 builder = builder.with_callback(callback);
@@ -462,6 +503,18 @@ impl SandboxFactory {
             self.precompiled.len(),
             self.site_packages_path,
         )
+    }
+}
+
+impl SandboxFactory {
+    /// The callbacks a sandbox or session gets when the caller passes none:
+    /// the factory's own.
+    fn default_callbacks<'py>(
+        &self,
+        py: Python<'py>,
+        callbacks: Option<Bound<'py, PyAny>>,
+    ) -> Option<Bound<'py, PyAny>> {
+        callbacks.or_else(|| self.callbacks.as_ref().map(|cbs| cbs.bind(py).clone()))
     }
 }
 

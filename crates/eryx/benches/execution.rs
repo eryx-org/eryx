@@ -124,12 +124,17 @@ impl TypedCallback for WorkCallback {
 // Helpers
 // ============================================================================
 
+/// Whether to collect traces, honouring `ERYX_PROFILE_TRACE`.
+///
+/// Trace collection (`sys.settrace`) is on by default; `ERYX_PROFILE_TRACE=0`
+/// turns it off to measure without per-event trace overhead.
+fn collect_trace() -> bool {
+    !std::env::var("ERYX_PROFILE_TRACE").is_ok_and(|v| v.trim() == "0")
+}
+
 fn create_sandbox() -> Sandbox {
-    // Trace collection (sys.settrace) is on by default; `ERYX_PROFILE_TRACE=0`
-    // turns it off to measure without per-event trace overhead.
-    let collect_trace = !std::env::var("ERYX_PROFILE_TRACE").is_ok_and(|v| v.trim() == "0");
     Sandbox::embedded()
-        .with_trace_collection(collect_trace)
+        .with_trace_collection(collect_trace())
         .with_callback(NoopCallback)
         .with_callback(EchoCallback)
         .with_callback(WorkCallback)
@@ -195,6 +200,61 @@ fn bench_stateless_execution(c: &mut Criterion) {
     });
 
     group.finish();
+}
+
+/// Stateless execution from a snapshot that has the three benchmark callbacks
+/// baked in (`PreInitOptions::callbacks`), so a fresh instance skips the
+/// per-instance callback setup that dominates `stateless_execution/pass`.
+///
+/// Needs the `preinit` feature (`--features embedded,preinit`); otherwise the
+/// group is skipped. Pre-initialization itself takes ~20 s before the first
+/// sample.
+fn bench_stateless_execution_baked_callbacks(c: &mut Criterion) {
+    #[cfg(not(feature = "preinit"))]
+    {
+        let _ = c;
+        eprintln!("stateless_execution_baked: skipped (enable the `preinit` feature)");
+    }
+    #[cfg(feature = "preinit")]
+    {
+        use eryx::preinit::{PreInitOptions, callback_declaration, pre_initialize_with_options};
+        use std::path::PathBuf;
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let stdlib = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../eryx-wasm-runtime/tests/python-stdlib");
+        let callbacks: [&dyn eryx::Callback; 3] = [&NoopCallback, &EchoCallback, &WorkCallback];
+        let declarations = callbacks
+            .iter()
+            .map(|cb| callback_declaration(*cb))
+            .collect();
+        let preinit = rt
+            .block_on(pre_initialize_with_options(
+                PreInitOptions::new(&stdlib).callbacks(declarations),
+            ))
+            .expect("pre-initialization should succeed");
+        let precompiled = eryx::PythonExecutor::precompile(&preinit).expect("precompile");
+        let artifact = eryx::PrecompiledArtifact::new(precompiled);
+
+        // SAFETY: the artifact was produced by `PythonExecutor::precompile` just above.
+        let sandbox = unsafe { Sandbox::builder().with_precompiled_artifact(artifact) }
+            .with_python_stdlib(&stdlib)
+            .with_trace_collection(collect_trace())
+            .with_callback(NoopCallback)
+            .with_callback(EchoCallback)
+            .with_callback(WorkCallback)
+            .build()
+            .expect("Failed to create sandbox");
+
+        let mut group = c.benchmark_group("stateless_execution_baked");
+        group.sample_size(10);
+        group.measurement_time(Duration::from_secs(10));
+        group.bench_function("pass", |b| {
+            b.to_async(&rt)
+                .iter(|| async { sandbox.execute("pass").await.expect("Execution failed") });
+        });
+        group.finish();
+    }
 }
 
 // ============================================================================
@@ -460,6 +520,7 @@ criterion_group!(
     bench_sandbox_creation,
     bench_session_creation,
     bench_stateless_execution,
+    bench_stateless_execution_baked_callbacks,
     bench_session_execution,
     bench_callback_overhead,
     bench_parallel_callbacks,

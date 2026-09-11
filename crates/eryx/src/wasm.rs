@@ -734,15 +734,23 @@ impl<T> SandboxImportsWithStore<T> for HasSelf<ExecutorState> {
 
 impl SandboxImports for ExecutorState {
     /// List all available callbacks for introspection.
+    ///
+    /// Sorted by name: the guest compares this list, serialized, with the set
+    /// whose wrappers it has installed (possibly baked into the pre-init
+    /// snapshot from `PreInitOptions::callbacks`, which sorts the same way), so
+    /// registration order must not affect whether the sets match.
     fn list_callbacks(&mut self) -> Vec<CallbackInfo> {
-        self.callbacks
+        let mut infos: Vec<CallbackInfo> = self
+            .callbacks
             .iter()
             .map(|cb| CallbackInfo {
                 name: cb.name.clone(),
                 description: cb.description.clone(),
                 parameters_schema_json: cb.parameters_schema_json.clone(),
             })
-            .collect()
+            .collect();
+        infos.sort_by(|a, b| a.name.cmp(&b.name));
+        infos
     }
 
     /// Report a trace event to the host.

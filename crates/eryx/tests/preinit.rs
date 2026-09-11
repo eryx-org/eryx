@@ -11,6 +11,7 @@
 use eryx::Sandbox;
 use eryx::preinit::pre_initialize;
 use std::collections::HashMap;
+use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::{Mutex, OnceCell};
@@ -507,4 +508,138 @@ async fn preinit_setup_code_error_is_reported() {
         err.contains("setup code"),
         "error should mention 'setup code': {err}"
     );
+}
+
+// =============================================================================
+// Baked Callback Tests
+// =============================================================================
+
+/// A callback that returns its arguments.
+struct Echo;
+
+impl eryx::Callback for Echo {
+    fn name(&self) -> &str {
+        "echo"
+    }
+    fn description(&self) -> &str {
+        "Returns its arguments"
+    }
+    fn parameters_schema(&self) -> eryx::Schema {
+        eryx::empty_schema()
+    }
+    fn invoke(
+        &self,
+        args: serde_json::Value,
+    ) -> std::pin::Pin<
+        Box<dyn Future<Output = Result<serde_json::Value, eryx::CallbackError>> + Send + '_>,
+    > {
+        Box::pin(async move { Ok(args) })
+    }
+}
+
+/// A callback that answers "pong".
+struct Ping;
+
+impl eryx::Callback for Ping {
+    fn name(&self) -> &str {
+        "ping"
+    }
+    fn description(&self) -> &str {
+        "Answers pong"
+    }
+    fn parameters_schema(&self) -> eryx::Schema {
+        eryx::empty_schema()
+    }
+    fn invoke(
+        &self,
+        _args: serde_json::Value,
+    ) -> std::pin::Pin<
+        Box<dyn Future<Output = Result<serde_json::Value, eryx::CallbackError>> + Send + '_>,
+    > {
+        Box::pin(async move { Ok(serde_json::json!("pong")) })
+    }
+}
+
+/// Pre-initialize with the given callbacks' declarations baked in.
+async fn preinit_with_callbacks(stdlib: &Path, callbacks: &[&dyn eryx::Callback]) -> Vec<u8> {
+    use eryx::preinit::{PreInitOptions, callback_declaration, pre_initialize_with_options};
+
+    let declarations = callbacks
+        .iter()
+        .map(|cb| callback_declaration(*cb))
+        .collect();
+    pre_initialize_with_options(PreInitOptions::new(stdlib).callbacks(declarations))
+        .await
+        .expect("pre-initialization with callbacks should succeed")
+}
+
+/// Callbacks baked into the snapshot are callable from a sandbox registering
+/// the same set, and a sandbox registering a different set gets that set.
+#[tokio::test]
+async fn preinit_baked_callbacks() {
+    let stdlib = get_stdlib_path();
+    let preinit_bytes = preinit_with_callbacks(&stdlib, &[&Echo]).await;
+
+    // Same set as baked: the wrapper is already installed and works.
+    let sandbox = Sandbox::builder()
+        .with_wasm_bytes(preinit_bytes.clone())
+        .with_python_stdlib(&stdlib)
+        .with_callback(Echo)
+        .build()
+        .expect("sandbox creation should succeed");
+    let result = sandbox
+        .execute(
+            "print(sorted(c['name'] for c in list_callbacks()))\nprint((await echo(data=7))['data'])",
+        )
+        .await
+        .expect("execution should succeed");
+    assert_eq!(result.stdout.trim(), "['echo']\n7");
+
+    // A different set is installed as before, replacing the baked one.
+    let sandbox = Sandbox::builder()
+        .with_wasm_bytes(preinit_bytes.clone())
+        .with_python_stdlib(&stdlib)
+        .with_callback(Ping)
+        .build()
+        .expect("sandbox creation should succeed");
+    let result = sandbox
+        .execute("print(sorted(c['name'] for c in list_callbacks()), await ping())")
+        .await
+        .expect("execution should succeed");
+    assert_eq!(result.stdout.trim(), "['ping'] pong");
+
+    // No callbacks registered: the guest reflects the host, not the snapshot.
+    let sandbox = Sandbox::builder()
+        .with_wasm_bytes(preinit_bytes)
+        .with_python_stdlib(&stdlib)
+        .build()
+        .expect("sandbox creation should succeed");
+    let result = sandbox
+        .execute("print(list_callbacks())")
+        .await
+        .expect("execution should succeed");
+    assert_eq!(result.stdout.trim(), "[]");
+}
+
+/// Declaration order does not matter: the snapshot and the host both present
+/// callbacks sorted by name.
+#[tokio::test]
+async fn preinit_baked_callbacks_ignore_registration_order() {
+    let stdlib = get_stdlib_path();
+    let preinit_bytes = preinit_with_callbacks(&stdlib, &[&Ping, &Echo]).await;
+
+    let sandbox = Sandbox::builder()
+        .with_wasm_bytes(preinit_bytes)
+        .with_python_stdlib(&stdlib)
+        .with_callback(Echo)
+        .with_callback(Ping)
+        .build()
+        .expect("sandbox creation should succeed");
+    let result = sandbox
+        .execute(
+            "print([c['name'] for c in list_callbacks()], await ping(), (await echo(x=1))['x'])",
+        )
+        .await
+        .expect("execution should succeed");
+    assert_eq!(result.stdout.trim(), "['echo', 'ping'] pong 1");
 }
