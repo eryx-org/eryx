@@ -2136,6 +2136,7 @@ class SocketIO:
         self._sock = sock
         self._mode = mode
         self._closed = False
+        self._sock._io_refs += 1
 
     def read(self, size=-1):
         if self._closed:
@@ -2158,6 +2159,8 @@ class SocketIO:
         return n
 
     def readline(self, limit=-1):
+        if self._closed:
+            raise ValueError("I/O operation on closed file")
         # Simple line reading - HTTP headers are typically small
         result = b''
         while True:
@@ -2193,8 +2196,18 @@ class SocketIO:
         pass
 
     def close(self):
+        if self._closed:
+            return
         self._closed = True
-        # Don't close underlying socket - that's the caller's responsibility
+        sock = self._sock
+        self._sock = None
+        sock._decref_socketios()
+
+    def __del__(self):
+        try:
+            self.close()
+        except Exception:
+            pass
 
     def readable(self):
         return 'r' in self._mode or '+' in self._mode
@@ -2233,6 +2246,7 @@ class socket:
         self._tcp_handle = None   # TCP connection handle
         self._tls_handle = None   # TLS handle (set when upgraded via ssl.wrap_socket)
         self._closed = False
+        self._io_refs = 0
 
     @property
     def family(self):
@@ -2328,13 +2342,19 @@ class socket:
         if self._closed:
             return
         self._closed = True
-        # Note: We intentionally do NOT close the handles here immediately.
-        # This is because http.client and other libraries may call close() on
-        # the socket while still expecting to read data through a makefile() wrapper.
-        # The handles will be closed when the socket is garbage collected via __del__.
+        # Keep the handles alive while a makefile() wrapper may still be reading.
+        # Once all wrappers are closed, release the handles immediately.
+        if self._io_refs == 0:
+            self._force_close()
+
+    def _decref_socketios(self):
+        if self._io_refs > 0:
+            self._io_refs -= 1
+        if self._closed and self._io_refs == 0:
+            self._force_close()
 
     def _force_close(self):
-        """Actually close the underlying handles. Called by __del__."""
+        """Actually close the underlying handles."""
         import _eryx
         if self._tls_handle is not None:
             try:
@@ -2367,9 +2387,8 @@ class socket:
         handle = self._tls_handle if self._tls_handle is not None else self._tcp_handle
 
         # If no handle available, return empty bytes (EOF)
-        # Note: We allow reads even after close() because libraries like http.client
-        # may close the socket but still read through a makefile() wrapper.
-        # The handles are only closed in __del__, not in close().
+        # Allow reads after close() while a makefile() wrapper still owns the
+        # underlying handles.
         if handle is None:
             return b""
 

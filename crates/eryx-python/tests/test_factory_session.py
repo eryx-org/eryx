@@ -187,6 +187,61 @@ print(b"".join(chunks).decode(errors="replace"))
     assert "Hello from test server" in result.stdout
 
 
+def test_factory_session_reclaims_closed_socket_handles(http_server, sandbox_factory):
+    host, port = http_server
+    net = eryx.NetConfig(
+        max_connections=1,
+        allow_all_hosts=True,
+        blocked_hosts=[],
+    )
+    session = sandbox_factory.create_session(network=net)
+    result = session.execute(f"""
+import socket
+
+def request(sock):
+    sock.sendall(b"GET / HTTP/1.1\\r\\nHost: {host}:{port}\\r\\nConnection: close\\r\\n\\r\\n")
+    chunks = []
+    while True:
+        chunk = sock.recv(4096)
+        if not chunk:
+            break
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+first = socket.create_connection(("{host}", {port}), timeout=5)
+assert b"Hello from test server" in request(first)
+first.close()
+
+second = socket.create_connection(("{host}", {port}), timeout=5)
+assert b"Hello from test server" in request(second)
+second.close()
+
+with_socket = socket.create_connection(("{host}", {port}), timeout=5)
+reader = with_socket.makefile("rb")
+with_socket.sendall(b"GET / HTTP/1.1\\r\\nHost: {host}:{port}\\r\\nConnection: close\\r\\n\\r\\n")
+with_socket.close()
+assert b"Hello from test server" in reader.read()
+reader.close()
+
+after_reader = socket.create_connection(("{host}", {port}), timeout=5)
+assert b"Hello from test server" in request(after_reader)
+after_reader.close()
+
+import gc
+
+abandoned_socket = socket.create_connection(("{host}", {port}), timeout=5)
+abandoned_reader = abandoned_socket.makefile("rb")
+abandoned_socket.close()
+del abandoned_reader
+gc.collect()
+
+after_gc = socket.create_connection(("{host}", {port}), timeout=5)
+after_gc.close()
+print("reader collected")
+""")
+    assert result.stdout == "reader collected"
+
+
 def test_factory_session_preimport_and_local_wheel_lifetime(sandbox_factory, tmp_path):
     wheel = tmp_path / "tiny-1.0-py3-none-any.whl"
     with zipfile.ZipFile(wheel, "w") as archive:
