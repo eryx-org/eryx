@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## `eryx-precompile` - [0.7.3](https://github.com/eryx-org/eryx/compare/eryx-precompile-v0.7.2...eryx-precompile-v0.7.3) - 2026-09-15
+
+### Other
+- update Cargo.lock dependencies
+
+## `eryx-vfs` - [0.7.3](https://github.com/eryx-org/eryx/compare/eryx-vfs-v0.7.2...eryx-vfs-v0.7.3) - 2026-09-15
+
+### Other
+- *(vfs)* replace cap-std with cap-primitives ([#436](https://github.com/eryx-org/eryx/pull/436))
+
 ## `eryx-precompile` - [0.7.2](https://github.com/eryx-org/eryx/compare/eryx-precompile-v0.7.1...eryx-precompile-v0.7.2) - 2026-09-11
 
 ### Other
