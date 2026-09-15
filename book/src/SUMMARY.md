@@ -24,6 +24,7 @@
 - [MCP Server](./guide/mcp-server.md)
 - [gRPC Server](./guide/grpc-server.md)
 - [Pre-compiling Runtimes](./guide/precompile.md)
+- [Performance Tuning](./guide/performance.md)
 - [CLI](./guide/cli.md)
 
 # API Reference

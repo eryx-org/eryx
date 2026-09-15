@@ -85,6 +85,15 @@ print(f"Execution took {(time.perf_counter() - start) * 1000:.1f}ms")
 For repeated sandbox creation with custom packages, see
 [`SandboxFactory`](#sandboxfactory) below.
 
+Each `execute()` on a fresh sandbox also has to instantiate the WebAssembly
+runtime. Eryx hides most of that by keeping a pre-instantiated instance ready
+in the background and handing it to the next execution; the environment
+variables that tune this (`ERYX_WARM_INSTANCES`, `ERYX_ALLOCATOR`, ...) are
+documented in the
+[Performance Tuning](https://docs.eryx.run/guide/performance.html)
+guide. Set them in the environment of the Python process before importing
+`eryx`.
+
 ## API Reference
 
 **Core Classes:**
