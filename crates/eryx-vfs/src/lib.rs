@@ -32,6 +32,7 @@
 
 mod bindings;
 mod error;
+mod file_io;
 mod host;
 pub mod hybrid;
 mod hybrid_bindings;

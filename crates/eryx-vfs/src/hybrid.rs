@@ -8,11 +8,12 @@
 //! writable filesystem area for user code.
 
 use std::collections::HashMap;
+use std::path::Path;
 use std::sync::Arc;
 
+use cap_primitives::fs as capfs;
+
 use crate::perms::{DirPerms, FilePerms};
-#[cfg(windows)]
-use cap_fs_ext::DirExt as _;
 use wasmtime::component::ResourceTable;
 
 use crate::storage::VfsStorage;
@@ -20,17 +21,17 @@ use crate::wasi_impl::VfsDescriptor;
 
 /// A capability-restricted directory handle.
 ///
-/// Wraps `cap_std::fs::Dir` and enforces `file_map` restrictions on every
-/// filesystem operation. The inner `Dir` is private, so there is no way to
-/// bypass the filter — access control is enforced by the type system, not
-/// by convention.
+/// Wraps a sandboxed directory file descriptor and enforces `file_map`
+/// restrictions on every filesystem operation. The inner fd is private, so
+/// there is no way to bypass the filter — access control is enforced by the
+/// type system, not by convention.
 ///
 /// When `file_map` is `None`, all child paths are allowed (normal directory
 /// mount). When `file_map` is `Some`, only mapped guest filenames can be
 /// accessed, and they are transparently translated to host filenames.
 #[derive(Clone)]
 pub struct RestrictedDir {
-    inner: Arc<cap_std::fs::Dir>,
+    inner: Arc<std::fs::File>,
     file_map: Option<HashMap<String, String>>,
 }
 
@@ -44,7 +45,7 @@ impl std::fmt::Debug for RestrictedDir {
 
 impl RestrictedDir {
     /// Create an unrestricted directory handle (all child paths allowed).
-    pub fn new(dir: cap_std::fs::Dir) -> Self {
+    pub fn new(dir: std::fs::File) -> Self {
         Self {
             inner: Arc::new(dir),
             file_map: None,
@@ -55,7 +56,7 @@ impl RestrictedDir {
     ///
     /// Only filenames present as keys in the map will be accessible.
     /// Guest filenames are transparently translated to host filenames.
-    pub fn with_file_map(dir: cap_std::fs::Dir, file_map: HashMap<String, String>) -> Self {
+    pub fn with_file_map(dir: std::fs::File, file_map: HashMap<String, String>) -> Self {
         Self {
             inner: Arc::new(dir),
             file_map: Some(file_map),
@@ -63,8 +64,8 @@ impl RestrictedDir {
     }
 
     /// Open an ambient directory as an unrestricted handle.
-    pub fn open_ambient(path: impl AsRef<std::path::Path>) -> std::io::Result<Self> {
-        let dir = cap_std::fs::Dir::open_ambient_dir(path, cap_std::ambient_authority())?;
+    pub fn open_ambient(path: impl AsRef<Path>) -> std::io::Result<Self> {
+        let dir = capfs::open_ambient_dir(path.as_ref(), ambient_authority::ambient_authority())?;
         Ok(Self::new(dir))
     }
 
@@ -107,17 +108,17 @@ impl RestrictedDir {
     pub fn open_with(
         &self,
         guest_path: &str,
-        opts: &cap_std::fs::OpenOptions,
-    ) -> std::io::Result<cap_std::fs::File> {
+        opts: &capfs::OpenOptions,
+    ) -> std::io::Result<std::fs::File> {
         self.check_allowed(guest_path)?;
-        self.inner.open_with(self.translate(guest_path), opts)
+        capfs::open(&self.inner, self.translate(guest_path).as_ref(), opts)
     }
 
     /// Open a subdirectory. The returned `RestrictedDir` is unrestricted
     /// (subdirectories don't inherit single-file restrictions).
     pub fn open_dir(&self, guest_path: &str) -> std::io::Result<RestrictedDir> {
         self.check_allowed(guest_path)?;
-        let sub = self.inner.open_dir(self.translate(guest_path))?;
+        let sub = capfs::open_dir(&self.inner, self.translate(guest_path).as_ref())?;
         Ok(RestrictedDir {
             inner: Arc::new(sub),
             file_map: None,
@@ -127,36 +128,44 @@ impl RestrictedDir {
     /// Create a subdirectory.
     pub fn create_dir(&self, guest_path: &str) -> std::io::Result<()> {
         self.check_allowed(guest_path)?;
-        self.inner.create_dir(self.translate(guest_path))
+        capfs::create_dir(
+            &self.inner,
+            self.translate(guest_path).as_ref(),
+            &capfs::DirOptions::new(),
+        )
     }
 
     /// Get metadata for a child path.
-    pub fn metadata(&self, guest_path: &str) -> std::io::Result<cap_std::fs::Metadata> {
+    pub fn metadata(&self, guest_path: &str) -> std::io::Result<capfs::Metadata> {
         self.check_allowed(guest_path)?;
-        self.inner.metadata(self.translate(guest_path))
+        capfs::stat(
+            &self.inner,
+            self.translate(guest_path).as_ref(),
+            capfs::FollowSymlinks::Yes,
+        )
     }
 
     /// Get metadata for the directory itself (no child path, no filter).
-    pub fn dir_metadata(&self) -> std::io::Result<cap_std::fs::Metadata> {
-        self.inner.dir_metadata()
+    pub fn dir_metadata(&self) -> std::io::Result<capfs::Metadata> {
+        capfs::Metadata::from_file(&self.inner)
     }
 
     /// Read a symbolic link.
     pub fn read_link(&self, guest_path: &str) -> std::io::Result<std::path::PathBuf> {
         self.check_allowed(guest_path)?;
-        self.inner.read_link(self.translate(guest_path))
+        capfs::read_link(&self.inner, self.translate(guest_path).as_ref())
     }
 
     /// Remove a subdirectory.
     pub fn remove_dir(&self, guest_path: &str) -> std::io::Result<()> {
         self.check_allowed(guest_path)?;
-        self.inner.remove_dir(self.translate(guest_path))
+        capfs::remove_dir(&self.inner, self.translate(guest_path).as_ref())
     }
 
     /// Remove a file.
     pub fn remove_file(&self, guest_path: &str) -> std::io::Result<()> {
         self.check_allowed(guest_path)?;
-        self.inner.remove_file(self.translate(guest_path))
+        capfs::remove_file(&self.inner, self.translate(guest_path).as_ref())
     }
 
     /// Rename a file or directory. Both source and destination are checked.
@@ -168,34 +177,54 @@ impl RestrictedDir {
     ) -> std::io::Result<()> {
         self.check_allowed(old_guest)?;
         dest.check_allowed(new_guest)?;
-        self.inner.rename(
-            self.translate(old_guest),
+        capfs::rename(
+            &self.inner,
+            self.translate(old_guest).as_ref(),
             &dest.inner,
-            dest.translate(new_guest),
+            dest.translate(new_guest).as_ref(),
         )
     }
 
     /// Create a symbolic link.
+    ///
+    /// On Windows, the target must exist so its file or directory type can be
+    /// determined before creating the link.
     pub fn symlink(&self, src_path: &str, dest_guest: &str) -> std::io::Result<()> {
         self.check_allowed(dest_guest)?;
-        self.inner.symlink(src_path, self.translate(dest_guest))
+        let dest_path = Path::new(self.translate(dest_guest));
+        #[cfg(not(windows))]
+        {
+            capfs::symlink(src_path.as_ref(), &self.inner, dest_path)
+        }
+        #[cfg(windows)]
+        {
+            // Windows requires the link type at creation time. Resolve the
+            // target relative to the translated link's parent, within the
+            // same capability boundary as the other directory operations.
+            let target = dest_path.parent().unwrap_or(Path::new("")).join(src_path);
+            let metadata = capfs::stat(&self.inner, &target, capfs::FollowSymlinks::Yes)?;
+            if metadata.is_dir() {
+                capfs::symlink_dir(src_path.as_ref(), &self.inner, dest_path)
+            } else {
+                capfs::symlink_file(src_path.as_ref(), &self.inner, dest_path)
+            }
+        }
     }
 
     /// List directory entries, filtered and translated through the file map.
     ///
     /// If restricted, only mapped files are returned with guest-visible names.
     /// If unrestricted, all entries are returned as-is.
-    pub fn entries(&self) -> std::io::Result<Vec<cap_std::fs::DirEntry>> {
+    pub fn entries(&self) -> std::io::Result<Vec<capfs::DirEntry>> {
         match &self.file_map {
-            None => self.inner.entries()?.collect::<Result<Vec<_>, _>>(),
+            None => capfs::read_dir(&self.inner, ".".as_ref())?.collect::<Result<Vec<_>, _>>(),
             Some(map) => {
-                // Build reverse map: host_name → guest_name
                 let reverse: HashMap<&str, &str> = map
                     .iter()
                     .map(|(guest, host)| (host.as_str(), guest.as_str()))
                     .collect();
                 let mut result = Vec::new();
-                for entry in self.inner.entries()? {
+                for entry in capfs::read_dir(&self.inner, ".".as_ref())? {
                     let entry = entry?;
                     let host_name = entry.file_name().to_string_lossy().into_owned();
                     if reverse.contains_key(host_name.as_str()) {
@@ -211,12 +240,11 @@ impl RestrictedDir {
     ///
     /// If restricted, translates the host filename back to the guest filename.
     /// If unrestricted, returns the entry's filename as-is.
-    pub fn guest_name(&self, entry: &cap_std::fs::DirEntry) -> String {
+    pub fn guest_name(&self, entry: &capfs::DirEntry) -> String {
         let host_name = entry.file_name().to_string_lossy().into_owned();
         match &self.file_map {
             None => host_name,
             Some(map) => {
-                // Reverse lookup: find the guest name for this host name
                 for (guest, host) in map {
                     if host == &host_name {
                         return guest.clone();
@@ -231,7 +259,7 @@ impl RestrictedDir {
 /// A real filesystem directory handle.
 ///
 /// This wraps a [`RestrictedDir`] with permissions and configuration.
-/// The underlying `cap_std::fs::Dir` is not directly accessible — all
+/// The underlying directory fd is not directly accessible — all
 /// filesystem operations go through `RestrictedDir`'s access control.
 #[derive(Clone)]
 pub struct RealDir {
@@ -256,8 +284,8 @@ impl std::fmt::Debug for RealDir {
 }
 
 impl RealDir {
-    /// Create a new RealDir from a cap-std Dir.
-    pub fn new(dir: cap_std::fs::Dir, dir_perms: DirPerms, file_perms: FilePerms) -> Self {
+    /// Create a new RealDir from a directory file descriptor.
+    pub fn new(dir: std::fs::File, dir_perms: DirPerms, file_perms: FilePerms) -> Self {
         Self {
             dir: RestrictedDir::new(dir),
             dir_perms,
@@ -268,19 +296,19 @@ impl RealDir {
 
     /// Open a directory from a path.
     pub fn open_ambient(
-        path: impl AsRef<std::path::Path>,
+        path: impl AsRef<Path>,
         dir_perms: DirPerms,
         file_perms: FilePerms,
     ) -> std::io::Result<Self> {
-        let dir = cap_std::fs::Dir::open_ambient_dir(path, cap_std::ambient_authority())?;
+        let dir = capfs::open_ambient_dir(path.as_ref(), ambient_authority::ambient_authority())?;
         Ok(Self::new(dir, dir_perms, file_perms))
     }
 }
 
 /// A real filesystem file handle.
 pub struct RealFile {
-    /// The underlying cap-std file.
-    pub file: Arc<cap_std::fs::File>,
+    /// The underlying file.
+    pub file: Arc<std::fs::File>,
     /// File permissions.
     pub perms: FilePerms,
     /// Whether the file is open for reading.
@@ -522,7 +550,7 @@ impl<S: VfsStorage + Clone> HybridVfsCtx<S> {
     pub fn add_real_preopen_path(
         &mut self,
         guest_path: impl Into<String>,
-        host_path: impl AsRef<std::path::Path>,
+        host_path: impl AsRef<Path>,
         dir_perms: DirPerms,
         file_perms: FilePerms,
     ) -> std::io::Result<()> {
@@ -541,7 +569,7 @@ impl<S: VfsStorage + Clone> HybridVfsCtx<S> {
     pub fn add_real_file_preopen_path(
         &mut self,
         guest_path: impl Into<String>,
-        host_path: impl AsRef<std::path::Path>,
+        host_path: impl AsRef<Path>,
         dir_perms: DirPerms,
         file_perms: FilePerms,
     ) -> std::io::Result<()> {
@@ -582,8 +610,7 @@ impl<S: VfsStorage + Clone> HybridVfsCtx<S> {
             .map(|(_, name)| name.to_string())
             .unwrap_or_else(|| guest_path.clone());
 
-        let raw_dir =
-            cap_std::fs::Dir::open_ambient_dir(host_parent, cap_std::ambient_authority())?;
+        let raw_dir = capfs::open_ambient_dir(host_parent, ambient_authority::ambient_authority())?;
         let restricted =
             RestrictedDir::with_file_map(raw_dir, HashMap::from([(guest_file_name, file_name)]));
         let dir = RealDir {
@@ -642,6 +669,39 @@ impl<'a, S: VfsStorage + Clone> HybridVfsState<'a, S> {
 mod tests {
     use super::*;
     use crate::{ArcStorage, InMemoryStorage};
+
+    #[test]
+    fn test_symlink_relative_to_translated_destination() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::create_dir(temp.path().join("nested")).unwrap();
+        std::fs::create_dir(temp.path().join("nested/target_dir")).unwrap();
+        std::fs::write(temp.path().join("nested/target_file"), b"hello").unwrap();
+        let handle =
+            capfs::open_ambient_dir(temp.path(), ambient_authority::ambient_authority()).unwrap();
+        let dir = RestrictedDir::with_file_map(
+            handle,
+            HashMap::from([
+                ("file_link".into(), "nested/file_link".into()),
+                ("dir_link".into(), "nested/dir_link".into()),
+            ]),
+        );
+        assert_eq!(
+            dir.symlink("target_file", "denied").unwrap_err().kind(),
+            std::io::ErrorKind::PermissionDenied
+        );
+        dir.symlink("target_file", "file_link").unwrap();
+        dir.symlink("target_dir", "dir_link").unwrap();
+        assert_eq!(
+            dir.read_link("file_link").unwrap(),
+            Path::new("target_file")
+        );
+        assert!(dir.metadata("file_link").unwrap().is_file());
+        assert!(dir.metadata("dir_link").unwrap().is_dir());
+        assert_eq!(
+            std::fs::read(temp.path().join("nested/file_link")).unwrap(),
+            b"hello"
+        );
+    }
 
     #[test]
     fn test_is_vfs_path() {

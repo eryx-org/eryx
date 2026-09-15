@@ -6,11 +6,11 @@
 use std::sync::Arc;
 
 use bytes::Bytes;
-use system_interface::fs::FileIoExt;
 use tokio::sync::RwLock;
 use wasmtime_wasi_io::poll::Pollable;
 use wasmtime_wasi_io::streams::{InputStream, OutputStream, StreamError, StreamResult};
 
+use crate::file_io::{read_at, write_at};
 use crate::storage::VfsStorage;
 
 /// Largest buffer a single stream read will allocate, regardless of the length
@@ -23,7 +23,7 @@ const MAX_READ_CHUNK: usize = 1024 * 1024;
 /// An input stream for reading from a real filesystem file.
 pub struct RealFileInputStream {
     /// The underlying file.
-    file: Arc<cap_std::fs::File>,
+    file: Arc<std::fs::File>,
     /// Current read position.
     position: u64,
     /// Whether the stream has been closed.
@@ -32,7 +32,7 @@ pub struct RealFileInputStream {
 
 impl RealFileInputStream {
     /// Create a new file input stream starting at the given offset.
-    pub fn new(file: Arc<cap_std::fs::File>, offset: u64) -> Self {
+    pub fn new(file: Arc<std::fs::File>, offset: u64) -> Self {
         Self {
             file,
             position: offset,
@@ -64,7 +64,7 @@ impl InputStream for RealFileInputStream {
         // short reads, so cap the buffer instead of allocating whatever was
         // asked for - otherwise a single read call sizes a host allocation.
         let mut buf = vec![0u8; size.min(MAX_READ_CHUNK)];
-        match self.file.read_at(&mut buf, self.position) {
+        match read_at(&self.file, &mut buf, self.position) {
             Ok(0) => {
                 // EOF
                 self.closed = true;
@@ -89,7 +89,7 @@ impl InputStream for RealFileInputStream {
 /// An output stream for writing to a real filesystem file.
 pub struct RealFileOutputStream {
     /// The underlying file.
-    file: Arc<cap_std::fs::File>,
+    file: Arc<std::fs::File>,
     /// Current write position.
     position: u64,
     /// Whether to append to the file.
@@ -100,7 +100,7 @@ pub struct RealFileOutputStream {
 
 impl RealFileOutputStream {
     /// Create a new file output stream for writing at a specific offset.
-    pub fn write_at(file: Arc<cap_std::fs::File>, offset: u64) -> Self {
+    pub fn write_at(file: Arc<std::fs::File>, offset: u64) -> Self {
         Self {
             file,
             position: offset,
@@ -110,7 +110,7 @@ impl RealFileOutputStream {
     }
 
     /// Create a new file output stream for appending.
-    pub fn append(file: Arc<cap_std::fs::File>) -> Self {
+    pub fn append(file: Arc<std::fs::File>) -> Self {
         Self {
             file,
             position: 0, // Position doesn't matter for append
@@ -140,16 +140,16 @@ impl OutputStream for RealFileOutputStream {
 
         let result = if self.append {
             // For append mode, get the file length and write there
-            // since cap-std doesn't have a direct append_at method
+            // since there's no direct append_at method
             match self.file.metadata() {
                 Ok(meta) => {
                     let len = meta.len();
-                    self.file.write_at(&bytes, len)
+                    write_at(&self.file, &bytes, len)
                 }
                 Err(e) => Err(e),
             }
         } else {
-            self.file.write_at(&bytes, self.position)
+            write_at(&self.file, &bytes, self.position)
         };
 
         match result {
@@ -167,8 +167,7 @@ impl OutputStream for RealFileOutputStream {
         if self.closed {
             return Err(StreamError::Closed);
         }
-        // cap-std File doesn't have a flush method that we can call synchronously
-        // in the way OutputStream expects. The sync will happen on close.
+        // The sync will happen on close.
         Ok(())
     }
 
@@ -459,6 +458,24 @@ impl<S: VfsStorage + Clone + 'static> Drop for VfsOutputStream<S> {
 mod tests {
     use super::*;
     use crate::storage::{ArcStorage, InMemoryStorage};
+
+    #[test]
+    fn test_real_streams_independent_offsets_and_append() {
+        let file = Arc::new(tempfile::tempfile().unwrap());
+        write_at(&file, b"hello world", 0).unwrap();
+        let mut first = RealFileInputStream::new(Arc::clone(&file), 0);
+        let mut second = RealFileInputStream::new(Arc::clone(&file), 6);
+        let mut output = RealFileOutputStream::write_at(Arc::clone(&file), 6);
+        let mut append = RealFileOutputStream::append(Arc::clone(&file));
+
+        assert_eq!(&*first.read(5).unwrap(), b"hello");
+        output.write(Bytes::from_static(b"Rust")).unwrap();
+        append.write(Bytes::from_static(b"!")).unwrap();
+        output.write(Bytes::from_static(b"?")).unwrap();
+        assert_eq!(&*second.read(6).unwrap(), b"Rust?!");
+        assert_eq!(&*first.read(7).unwrap(), b" Rust?!");
+        assert!(matches!(second.read(1), Err(StreamError::Closed)));
+    }
 
     #[tokio::test]
     async fn test_vfs_input_stream_read() {
