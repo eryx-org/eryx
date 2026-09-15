@@ -212,6 +212,107 @@ impl MCPManager {
         })
     }
 
+    /// Call a tool on a connected MCP server.
+    ///
+    /// The tool name can use either dot notation (``server.tool``) or bracket
+    /// notation (``mcp["server"].tool``).
+    ///
+    /// Args:
+    ///     name: The qualified tool name (e.g. ``"fs.read_file"``).
+    ///     arguments: Optional dict of arguments to pass to the tool.
+    ///
+    /// Returns:
+    ///     The tool result as a Python object (parsed JSON).
+    ///
+    /// Raises:
+    ///     ValueError: If the tool name format is invalid or the server/tool is not found.
+    ///     RuntimeError: If the tool call fails.
+    #[pyo3(signature = (name, arguments=None))]
+    fn call_tool(
+        &self,
+        py: Python<'_>,
+        name: String,
+        arguments: Option<Bound<'_, PyDict>>,
+    ) -> PyResult<Py<PyAny>> {
+        let (server_name, tool_name) =
+            parse_tool_name(&name).map_err(|e| pyo3::exceptions::PyValueError::new_err(e))?;
+
+        let conn = self
+            .connections
+            .iter()
+            .find(|c| c.name == server_name)
+            .ok_or_else(|| {
+                pyo3::exceptions::PyValueError::new_err(format!(
+                    "unknown MCP server '{server_name}'. Connected servers: {}",
+                    self.connections
+                        .iter()
+                        .map(|c| c.name.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ))
+            })?;
+
+        // Verify the tool exists on this server
+        if !conn.tools.iter().any(|t| t.name.as_ref() == tool_name) {
+            let available: Vec<&str> = conn.tools.iter().map(|t| t.name.as_ref()).collect();
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "unknown tool '{tool_name}' on server '{server_name}'. Available: {}",
+                available.join(", ")
+            )));
+        }
+
+        // Convert Python dict to serde_json Map
+        let json_args: Option<serde_json::Map<String, Value>> = if let Some(dict) = arguments {
+            let val: Value = pythonize::depythonize(&dict).map_err(|e| {
+                pyo3::exceptions::PyValueError::new_err(format!("failed to convert arguments: {e}"))
+            })?;
+            match val {
+                Value::Object(map) => Some(map),
+                _ => {
+                    return Err(pyo3::exceptions::PyValueError::new_err(
+                        "arguments must be a dict",
+                    ));
+                }
+            }
+        } else {
+            None
+        };
+
+        let peer = conn.service.peer().clone();
+        let runtime = self.runtime.clone();
+        let tool_name_cow: Cow<'static, str> = tool_name.to_string().into();
+
+        py.detach(|| {
+            let result_value = runtime.block_on(async {
+                let result = peer
+                    .call_tool(CallToolRequestParams {
+                        meta: None,
+                        name: tool_name_cow,
+                        arguments: json_args,
+                        task: None,
+                    })
+                    .await
+                    .map_err(|e| {
+                        pyo3::exceptions::PyRuntimeError::new_err(format!(
+                            "MCP call_tool failed: {e}"
+                        ))
+                    })?;
+
+                mcp_result_to_value(result)
+            })?;
+
+            Python::attach(|py| {
+                pythonize::pythonize(py, &result_value)
+                    .map(|obj| obj.unbind())
+                    .map_err(|e| {
+                        pyo3::exceptions::PyRuntimeError::new_err(format!(
+                            "failed to convert result: {e}"
+                        ))
+                    })
+            })
+        })
+    }
+
     fn __repr__(&self) -> String {
         let servers: Vec<&str> = self.connections.iter().map(|c| c.name.as_str()).collect();
         let tool_count: usize = self.connections.iter().map(|c| c.tools.len()).sum();
@@ -221,6 +322,76 @@ impl MCPManager {
             tool_count
         )
     }
+}
+
+/// Parse a qualified tool name into (server, tool) components.
+///
+/// Accepts:
+///   - ``server.tool`` — dot notation
+///   - ``mcp["server"].tool`` — bracket notation (as returned by `list_tools`)
+fn parse_tool_name(name: &str) -> Result<(&str, &str), String> {
+    // Bracket notation: mcp["server"].tool
+    if let Some(rest) = name.strip_prefix("mcp[\"") {
+        if let Some((server, rest)) = rest.split_once("\"].")
+            && !rest.is_empty()
+        {
+            return Ok((server, rest));
+        }
+        return Err(format!(
+            "invalid tool name '{name}': expected mcp[\"server\"].tool format"
+        ));
+    }
+
+    // Dot notation: server.tool
+    if let Some((server, tool)) = name.split_once('.')
+        && !server.is_empty()
+        && !tool.is_empty()
+    {
+        return Ok((server, tool));
+    }
+
+    Err(format!(
+        "invalid tool name '{name}': expected server.tool or mcp[\"server\"].tool format"
+    ))
+}
+
+/// Convert an MCP `CallToolResult` to a `serde_json::Value`.
+fn mcp_result_to_value(result: rmcp::model::CallToolResult) -> PyResult<Value> {
+    // Check for error
+    if result.is_error == Some(true) {
+        let error_text: String = result
+            .content
+            .iter()
+            .filter_map(|c| c.raw.as_text().map(|t| t.text.as_str()))
+            .collect::<Vec<_>>()
+            .join("\n");
+        return Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
+            "MCP tool error: {error_text}"
+        )));
+    }
+
+    // Extract text content from the result
+    let text_parts: Vec<&str> = result
+        .content
+        .iter()
+        .filter_map(|c| c.raw.as_text().map(|t| t.text.as_str()))
+        .collect();
+
+    // If there's structured content, prefer it
+    if let Some(structured) = result.structured_content {
+        return Ok(structured);
+    }
+
+    // Try to parse the first text content as JSON
+    if text_parts.len() == 1
+        && let Ok(parsed) = serde_json::from_str(text_parts[0])
+    {
+        return Ok(parsed);
+    }
+
+    // Return text content as a JSON object
+    let combined = text_parts.join("\n");
+    Ok(serde_json::json!({ "text": combined }))
 }
 
 impl MCPManager {
