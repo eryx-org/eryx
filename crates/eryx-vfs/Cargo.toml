@@ -14,10 +14,9 @@ async-trait.workspace = true
 # Vendored DirPerms/FilePerms; see src/perms.rs.
 bitflags = "2"
 bytes = "1"
-cap-fs-ext = "3"
-cap-std = "3"
+ambient-authority = "0.0.2"
+cap-primitives = "4"
 serde = { workspace = true, optional = true }
-system-interface = { version = "0.27", features = ["cap_std_impls"] }
 thiserror.workspace = true
 tokio = { workspace = true, features = ["sync"] }
 tracing.workspace = true

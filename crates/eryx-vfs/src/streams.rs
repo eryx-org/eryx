@@ -6,7 +6,8 @@
 use std::sync::Arc;
 
 use bytes::Bytes;
-use system_interface::fs::FileIoExt;
+#[cfg(unix)]
+use std::os::unix::fs::FileExt;
 use tokio::sync::RwLock;
 use wasmtime_wasi_io::poll::Pollable;
 use wasmtime_wasi_io::streams::{InputStream, OutputStream, StreamError, StreamResult};
@@ -23,7 +24,7 @@ const MAX_READ_CHUNK: usize = 1024 * 1024;
 /// An input stream for reading from a real filesystem file.
 pub struct RealFileInputStream {
     /// The underlying file.
-    file: Arc<cap_std::fs::File>,
+    file: Arc<std::fs::File>,
     /// Current read position.
     position: u64,
     /// Whether the stream has been closed.
@@ -32,7 +33,7 @@ pub struct RealFileInputStream {
 
 impl RealFileInputStream {
     /// Create a new file input stream starting at the given offset.
-    pub fn new(file: Arc<cap_std::fs::File>, offset: u64) -> Self {
+    pub fn new(file: Arc<std::fs::File>, offset: u64) -> Self {
         Self {
             file,
             position: offset,
@@ -89,7 +90,7 @@ impl InputStream for RealFileInputStream {
 /// An output stream for writing to a real filesystem file.
 pub struct RealFileOutputStream {
     /// The underlying file.
-    file: Arc<cap_std::fs::File>,
+    file: Arc<std::fs::File>,
     /// Current write position.
     position: u64,
     /// Whether to append to the file.
@@ -100,7 +101,7 @@ pub struct RealFileOutputStream {
 
 impl RealFileOutputStream {
     /// Create a new file output stream for writing at a specific offset.
-    pub fn write_at(file: Arc<cap_std::fs::File>, offset: u64) -> Self {
+    pub fn write_at(file: Arc<std::fs::File>, offset: u64) -> Self {
         Self {
             file,
             position: offset,
@@ -110,7 +111,7 @@ impl RealFileOutputStream {
     }
 
     /// Create a new file output stream for appending.
-    pub fn append(file: Arc<cap_std::fs::File>) -> Self {
+    pub fn append(file: Arc<std::fs::File>) -> Self {
         Self {
             file,
             position: 0, // Position doesn't matter for append
@@ -140,7 +141,7 @@ impl OutputStream for RealFileOutputStream {
 
         let result = if self.append {
             // For append mode, get the file length and write there
-            // since cap-std doesn't have a direct append_at method
+            // since there's no direct append_at method
             match self.file.metadata() {
                 Ok(meta) => {
                     let len = meta.len();
@@ -167,8 +168,7 @@ impl OutputStream for RealFileOutputStream {
         if self.closed {
             return Err(StreamError::Closed);
         }
-        // cap-std File doesn't have a flush method that we can call synchronously
-        // in the way OutputStream expects. The sync will happen on close.
+        // The sync will happen on close.
         Ok(())
     }
 

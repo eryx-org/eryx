@@ -6,9 +6,9 @@
 
 use std::sync::Arc;
 
-#[cfg_attr(not(windows), allow(unused_imports))]
-use cap_fs_ext::{DirExt, MetadataExt as CapMetadataExt};
-use system_interface::fs::FileIoExt;
+use cap_primitives::fs as capfs;
+#[cfg(unix)]
+use std::os::unix::fs::FileExt;
 use wasmtime::component::Resource;
 use wasmtime_wasi_io::streams::{DynInputStream, DynOutputStream};
 
@@ -126,8 +126,8 @@ fn vfs_metadata_to_stat(meta: &crate::storage::Metadata) -> types::DescriptorSta
     }
 }
 
-/// Convert cap-std metadata to hybrid WASI DescriptorStat.
-fn cap_metadata_to_stat(meta: &cap_std::fs::Metadata) -> types::DescriptorStat {
+/// Convert cap-primitives metadata to hybrid WASI DescriptorStat.
+fn cap_metadata_to_stat(meta: &capfs::Metadata) -> types::DescriptorStat {
     let file_type = meta.file_type();
     let dtype = if file_type.is_dir() {
         types::DescriptorType::Directory
@@ -139,8 +139,7 @@ fn cap_metadata_to_stat(meta: &cap_std::fs::Metadata) -> types::DescriptorStat {
         types::DescriptorType::Unknown
     };
 
-    // Get timestamps using cap-std's SystemTime
-    let atime = meta.accessed().ok().map(|t| {
+    fn to_datetime(t: cap_primitives::time::SystemTime) -> types::Datetime {
         let d = t
             .into_std()
             .duration_since(std::time::UNIX_EPOCH)
@@ -149,33 +148,20 @@ fn cap_metadata_to_stat(meta: &cap_std::fs::Metadata) -> types::DescriptorStat {
             seconds: d.as_secs(),
             nanoseconds: d.subsec_nanos(),
         }
-    });
+    }
 
-    let mtime = meta.modified().ok().map(|t| {
-        let d = t
-            .into_std()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default();
-        types::Datetime {
-            seconds: d.as_secs(),
-            nanoseconds: d.subsec_nanos(),
-        }
-    });
+    let atime = meta.accessed().ok().map(to_datetime);
+    let mtime = meta.modified().ok().map(to_datetime);
+    let ctime = meta.created().ok().map(to_datetime);
 
-    let ctime = meta.created().ok().map(|t| {
-        let d = t
-            .into_std()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default();
-        types::Datetime {
-            seconds: d.as_secs(),
-            nanoseconds: d.subsec_nanos(),
-        }
-    });
+    #[cfg(unix)]
+    let link_count = capfs::MetadataExt::nlink(meta);
+    #[cfg(not(unix))]
+    let link_count = 1;
 
     types::DescriptorStat {
         type_: dtype,
-        link_count: meta.nlink(),
+        link_count,
         size: meta.len(),
         data_access_timestamp: atime,
         data_modification_timestamp: mtime,
@@ -351,8 +337,8 @@ impl<S: VfsStorage + Clone + 'static> types::HostDescriptor for HybridVfsState<'
                 let file_arc = Arc::clone(&file.file);
                 let guest_path = guest_path.clone();
 
-                // Read from the file at the specified offset using FileIoExt
                 let mut buf = vec![0u8; len as usize];
+                #[cfg(unix)]
                 let bytes_read = match file_arc.read_at(&mut buf, offset) {
                     Ok(n) => n,
                     Err(e) => {
@@ -398,7 +384,7 @@ impl<S: VfsStorage + Clone + 'static> types::HostDescriptor for HybridVfsState<'
                 let file_arc = Arc::clone(&file.file);
                 let guest_path = guest_path.clone();
 
-                // Write to the file at the specified offset using FileIoExt
+                #[cfg(unix)]
                 match file_arc.write_at(&buf, offset) {
                     Ok(n) => Ok(n as u64),
                     Err(e) => {
@@ -546,9 +532,7 @@ impl<S: VfsStorage + Clone + 'static> types::HostDescriptor for HybridVfsState<'
                 Ok(cap_metadata_to_stat(&meta))
             }
             HybridDescriptor::RealFile { file, guest_path } => {
-                let meta = file
-                    .file
-                    .metadata()
+                let meta = capfs::Metadata::from_file(&file.file)
                     .map_err(|e| crate::VfsError::Io(format!("stat {}: {}", guest_path, e)))?;
                 Ok(cap_metadata_to_stat(&meta))
             }
@@ -751,7 +735,7 @@ impl<S: VfsStorage + Clone + 'static> types::HostDescriptor for HybridVfsState<'
                         .into());
                     }
 
-                    let mut open_opts = cap_std::fs::OpenOptions::new();
+                    let mut open_opts = capfs::OpenOptions::new();
                     open_opts.read(readable);
                     open_opts.write(writable);
                     open_opts.create(create);
