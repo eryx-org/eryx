@@ -186,13 +186,29 @@ impl RestrictedDir {
     }
 
     /// Create a symbolic link.
+    ///
+    /// On Windows, the target must exist so its file or directory type can be
+    /// determined before creating the link.
     pub fn symlink(&self, src_path: &str, dest_guest: &str) -> std::io::Result<()> {
         self.check_allowed(dest_guest)?;
-        capfs::symlink(
-            src_path.as_ref(),
-            &self.inner,
-            self.translate(dest_guest).as_ref(),
-        )
+        let dest_path = Path::new(self.translate(dest_guest));
+        #[cfg(not(windows))]
+        {
+            capfs::symlink(src_path.as_ref(), &self.inner, dest_path)
+        }
+        #[cfg(windows)]
+        {
+            // Windows requires the link type at creation time. Resolve the
+            // target relative to the translated link's parent, within the
+            // same capability boundary as the other directory operations.
+            let target = dest_path.parent().unwrap_or(Path::new("")).join(src_path);
+            let metadata = capfs::stat(&self.inner, &target, capfs::FollowSymlinks::Yes)?;
+            if metadata.is_dir() {
+                capfs::symlink_dir(src_path.as_ref(), &self.inner, dest_path)
+            } else {
+                capfs::symlink_file(src_path.as_ref(), &self.inner, dest_path)
+            }
+        }
     }
 
     /// List directory entries, filtered and translated through the file map.
@@ -653,6 +669,39 @@ impl<'a, S: VfsStorage + Clone> HybridVfsState<'a, S> {
 mod tests {
     use super::*;
     use crate::{ArcStorage, InMemoryStorage};
+
+    #[test]
+    fn test_symlink_relative_to_translated_destination() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::create_dir(temp.path().join("nested")).unwrap();
+        std::fs::create_dir(temp.path().join("nested/target_dir")).unwrap();
+        std::fs::write(temp.path().join("nested/target_file"), b"hello").unwrap();
+        let handle =
+            capfs::open_ambient_dir(temp.path(), ambient_authority::ambient_authority()).unwrap();
+        let dir = RestrictedDir::with_file_map(
+            handle,
+            HashMap::from([
+                ("file_link".into(), "nested/file_link".into()),
+                ("dir_link".into(), "nested/dir_link".into()),
+            ]),
+        );
+        assert_eq!(
+            dir.symlink("target_file", "denied").unwrap_err().kind(),
+            std::io::ErrorKind::PermissionDenied
+        );
+        dir.symlink("target_file", "file_link").unwrap();
+        dir.symlink("target_dir", "dir_link").unwrap();
+        assert_eq!(
+            dir.read_link("file_link").unwrap(),
+            Path::new("target_file")
+        );
+        assert!(dir.metadata("file_link").unwrap().is_file());
+        assert!(dir.metadata("dir_link").unwrap().is_dir());
+        assert_eq!(
+            std::fs::read(temp.path().join("nested/file_link")).unwrap(),
+            b"hello"
+        );
+    }
 
     #[test]
     fn test_is_vfs_path() {

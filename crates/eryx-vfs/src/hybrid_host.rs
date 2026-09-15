@@ -7,12 +7,11 @@
 use std::sync::Arc;
 
 use cap_primitives::fs as capfs;
-#[cfg(unix)]
-use std::os::unix::fs::FileExt;
 use wasmtime::component::Resource;
 use wasmtime_wasi_io::streams::{DynInputStream, DynOutputStream};
 
 use crate::HybridReaddirIterator;
+use crate::file_io::{read_at, write_at};
 use crate::hybrid::{HybridDescriptor, HybridPreopen, HybridVfsState, RealDir, RealFile};
 use crate::hybrid_bindings::{DirPerms, FilePerms, HybridFsError, HybridFsResult, preopens, types};
 use crate::storage::VfsStorage;
@@ -338,8 +337,7 @@ impl<S: VfsStorage + Clone + 'static> types::HostDescriptor for HybridVfsState<'
                 let guest_path = guest_path.clone();
 
                 let mut buf = vec![0u8; len as usize];
-                #[cfg(unix)]
-                let bytes_read = match file_arc.read_at(&mut buf, offset) {
+                let bytes_read = match read_at(&file_arc, &mut buf, offset) {
                     Ok(n) => n,
                     Err(e) => {
                         return Err(
@@ -384,8 +382,7 @@ impl<S: VfsStorage + Clone + 'static> types::HostDescriptor for HybridVfsState<'
                 let file_arc = Arc::clone(&file.file);
                 let guest_path = guest_path.clone();
 
-                #[cfg(unix)]
-                match file_arc.write_at(&buf, offset) {
+                match write_at(&file_arc, &buf, offset) {
                     Ok(n) => Ok(n as u64),
                     Err(e) => {
                         Err(crate::VfsError::Io(format!("write {}: {}", guest_path, e)).into())

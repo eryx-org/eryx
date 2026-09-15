@@ -6,12 +6,11 @@
 use std::sync::Arc;
 
 use bytes::Bytes;
-#[cfg(unix)]
-use std::os::unix::fs::FileExt;
 use tokio::sync::RwLock;
 use wasmtime_wasi_io::poll::Pollable;
 use wasmtime_wasi_io::streams::{InputStream, OutputStream, StreamError, StreamResult};
 
+use crate::file_io::{read_at, write_at};
 use crate::storage::VfsStorage;
 
 /// Largest buffer a single stream read will allocate, regardless of the length
@@ -65,7 +64,7 @@ impl InputStream for RealFileInputStream {
         // short reads, so cap the buffer instead of allocating whatever was
         // asked for - otherwise a single read call sizes a host allocation.
         let mut buf = vec![0u8; size.min(MAX_READ_CHUNK)];
-        match self.file.read_at(&mut buf, self.position) {
+        match read_at(&self.file, &mut buf, self.position) {
             Ok(0) => {
                 // EOF
                 self.closed = true;
@@ -145,12 +144,12 @@ impl OutputStream for RealFileOutputStream {
             match self.file.metadata() {
                 Ok(meta) => {
                     let len = meta.len();
-                    self.file.write_at(&bytes, len)
+                    write_at(&self.file, &bytes, len)
                 }
                 Err(e) => Err(e),
             }
         } else {
-            self.file.write_at(&bytes, self.position)
+            write_at(&self.file, &bytes, self.position)
         };
 
         match result {
@@ -459,6 +458,24 @@ impl<S: VfsStorage + Clone + 'static> Drop for VfsOutputStream<S> {
 mod tests {
     use super::*;
     use crate::storage::{ArcStorage, InMemoryStorage};
+
+    #[test]
+    fn test_real_streams_independent_offsets_and_append() {
+        let file = Arc::new(tempfile::tempfile().unwrap());
+        write_at(&file, b"hello world", 0).unwrap();
+        let mut first = RealFileInputStream::new(Arc::clone(&file), 0);
+        let mut second = RealFileInputStream::new(Arc::clone(&file), 6);
+        let mut output = RealFileOutputStream::write_at(Arc::clone(&file), 6);
+        let mut append = RealFileOutputStream::append(Arc::clone(&file));
+
+        assert_eq!(&*first.read(5).unwrap(), b"hello");
+        output.write(Bytes::from_static(b"Rust")).unwrap();
+        append.write(Bytes::from_static(b"!")).unwrap();
+        output.write(Bytes::from_static(b"?")).unwrap();
+        assert_eq!(&*second.read(6).unwrap(), b"Rust?!");
+        assert_eq!(&*first.read(7).unwrap(), b" Rust?!");
+        assert!(matches!(second.read(1), Err(StreamError::Closed)));
+    }
 
     #[tokio::test]
     async fn test_vfs_input_stream_read() {
