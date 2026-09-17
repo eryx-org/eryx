@@ -346,8 +346,33 @@ pub async fn run_net_handler(
             NetRequest::TlsClose { handle } => {
                 manager.tls_close(handle);
             }
+
+            NetRequest::CloseAll { response_tx } => {
+                manager.close_all_connections();
+                let _ = response_tx.send(());
+            }
         }
     }
+}
+
+/// Close all connections managed by a running [`run_net_handler`].
+///
+/// Sends a [`NetRequest::CloseAll`] through the channel and waits for the
+/// handler to confirm that every TCP and TLS stream has been dropped. Network
+/// configuration, secrets, and handle allocation are preserved — stale guest
+/// handles will receive `InvalidHandle` errors on subsequent use.
+///
+/// Returns `Err` if the net handler has already exited (channel closed).
+pub async fn close_all_connections(
+    net_tx: &mpsc::Sender<NetRequest>,
+) -> Result<(), mpsc::error::SendError<NetRequest>> {
+    let (response_tx, response_rx) = tokio::sync::oneshot::channel();
+    net_tx.send(NetRequest::CloseAll { response_tx }).await?;
+    // The handler always sends () before processing the next request, so this
+    // only fails if the handler panicked — treat that as success (connections
+    // are gone either way).
+    let _ = response_rx.await;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -473,5 +498,32 @@ mod tests {
             }
             _ => panic!("Expected Exception event"),
         }
+    }
+
+    #[tokio::test]
+    async fn close_all_connections_via_channel() {
+        use crate::net::{ConnectionManager, NetConfig};
+
+        let manager = ConnectionManager::new(NetConfig::permissive(), HashMap::new());
+        let (tx, rx) = mpsc::channel::<NetRequest>(8);
+
+        let handler = tokio::spawn(run_net_handler(rx, manager));
+
+        // Should succeed when the handler is running.
+        close_all_connections(&tx).await.unwrap();
+
+        // Drop the sender to shut down the handler.
+        drop(tx);
+        handler.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn close_all_connections_fails_after_handler_exit() {
+        let (tx, rx) = mpsc::channel::<NetRequest>(1);
+        // Drop the receiver immediately so sends fail.
+        drop(rx);
+
+        let result = close_all_connections(&tx).await;
+        assert!(result.is_err());
     }
 }
