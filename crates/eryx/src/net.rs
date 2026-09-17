@@ -876,6 +876,25 @@ impl ConnectionManager {
         self.connection_hosts.remove(&handle);
         // TLS shutdown happens on drop
     }
+
+    /// Close all active connections, clearing per-connection state.
+    ///
+    /// Drops every TCP and TLS stream (triggering OS-level close / TLS
+    /// shutdown) and removes all HTTP parsing and host-tracking state.
+    ///
+    /// Preserved across the call:
+    /// - `config` and `tls_config` (network policy)
+    /// - `secrets` (secret substitution rules)
+    /// - `next_handle` (stays monotonic — stale guest handles remain invalid)
+    pub fn close_all_connections(&mut self) {
+        let tcp_count = self.tcp_connections.len();
+        let tls_count = self.tls_connections.len();
+        self.tcp_connections.clear();
+        self.tls_connections.clear();
+        self.http_states.clear();
+        self.connection_hosts.clear();
+        tracing::debug!(tcp_count, tls_count, "all connections closed");
+    }
 }
 
 // ============================================================================
@@ -1656,5 +1675,117 @@ mod tests {
             result.is_err(),
             "Secret substitution should fail for unauthorized host even with large headers"
         );
+    }
+
+    #[tokio::test]
+    async fn close_all_connections_clears_connections_and_state() {
+        let config = NetConfig::permissive();
+        let mut secrets = HashMap::new();
+        secrets.insert(
+            "KEY".to_string(),
+            crate::secrets::SecretConfig {
+                real_value: "secret".to_string(),
+                placeholder: "PH".to_string(),
+                allowed_hosts: vec![],
+            },
+        );
+
+        let mut manager = ConnectionManager::new(config, secrets);
+
+        // Allocate handles and insert fake per-connection state.
+        let h1 = manager.alloc_handle();
+        let h2 = manager.alloc_handle();
+        manager
+            .connection_hosts
+            .insert(h1, "a.example.com".to_string());
+        manager
+            .connection_hosts
+            .insert(h2, "b.example.com".to_string());
+        manager.http_states.insert(h1, HttpParsingState::default());
+        manager.http_states.insert(h2, HttpParsingState::default());
+
+        // Create a real TCP pair so tcp_connections has entries.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (client, _server) = tokio::join!(tokio::net::TcpStream::connect(addr), async {
+            listener.accept().await.unwrap().0
+        },);
+        manager.tcp_connections.insert(h1, client.unwrap());
+
+        let next_before = manager.next_handle;
+        assert_eq!(manager.connection_count(), 1);
+        assert_eq!(manager.connection_hosts.len(), 2);
+        assert_eq!(manager.http_states.len(), 2);
+
+        manager.close_all_connections();
+
+        // Connections and per-connection state are cleared.
+        assert_eq!(manager.connection_count(), 0);
+        assert!(manager.connection_hosts.is_empty());
+        assert!(manager.http_states.is_empty());
+
+        // Config, secrets, and handle counter are preserved.
+        assert_eq!(manager.next_handle, next_before);
+        assert!(manager.secrets.contains_key("KEY"));
+        assert!(manager.config.allow_all_hosts);
+    }
+
+    #[tokio::test]
+    async fn stale_handles_are_invalid_after_close_all() {
+        let config = NetConfig::permissive();
+        let mut manager = ConnectionManager::new(config, HashMap::new());
+
+        // Create a real connection and store it.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (client, _server) = tokio::join!(tokio::net::TcpStream::connect(addr), async {
+            listener.accept().await.unwrap().0
+        },);
+        let handle = manager.alloc_handle();
+        manager.tcp_connections.insert(handle, client.unwrap());
+        assert_eq!(manager.connection_count(), 1);
+
+        manager.close_all_connections();
+
+        // The stale handle now produces an InvalidHandle error.
+        let result = manager.tcp_read(handle, 1, 0).await;
+        assert!(
+            matches!(result, Err(TcpError::InvalidHandle)),
+            "read on stale handle after close_all should return InvalidHandle, got {result:?}"
+        );
+
+        let result = manager.tcp_write(handle, b"x", 0).await;
+        assert!(
+            matches!(result, Err(TcpError::InvalidHandle)),
+            "write on stale handle after close_all should return InvalidHandle, got {result:?}"
+        );
+    }
+
+    #[test]
+    fn close_all_on_empty_manager_is_noop() {
+        let mut manager = ConnectionManager::new(NetConfig::permissive(), HashMap::new());
+        let next_before = manager.next_handle;
+
+        manager.close_all_connections();
+
+        assert_eq!(manager.connection_count(), 0);
+        assert_eq!(manager.next_handle, next_before);
+    }
+
+    #[test]
+    fn handle_counter_advances_after_close_all() {
+        let mut manager = ConnectionManager::new(NetConfig::permissive(), HashMap::new());
+        let h1 = manager.alloc_handle();
+        let h2 = manager.alloc_handle();
+
+        manager.close_all_connections();
+
+        let h3 = manager.alloc_handle();
+        assert!(
+            h3 > h2,
+            "handle after close_all ({h3}) should be greater than handle before ({h2})"
+        );
+        assert_ne!(h3, h1);
+        assert_ne!(h3, h2);
     }
 }

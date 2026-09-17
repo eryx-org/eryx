@@ -321,6 +321,17 @@ pub enum NetRequest {
         /// TLS connection handle to close.
         handle: u32,
     },
+
+    /// Close all active connections.
+    ///
+    /// Drops every TCP and TLS stream and clears per-connection state while
+    /// preserving network configuration, secrets, and monotonic handle
+    /// allocation. Intended for application-controlled cleanup between
+    /// executions on a reused session.
+    CloseAll {
+        /// Channel for signalling completion.
+        response_tx: oneshot::Sender<()>,
+    },
 }
 
 /// Callback info for introspection (internal type to avoid conflicts with generated code).
