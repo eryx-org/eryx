@@ -241,6 +241,7 @@ pub struct OutputRequest {
 /// [`mpsc`](tokio::sync::mpsc) channel. Each request that expects a reply
 /// carries a oneshot `response_tx` for the handler to send the result back.
 #[derive(Debug)]
+#[non_exhaustive]
 pub enum NetRequest {
     // TCP operations
     /// Connect to a host over TCP.
