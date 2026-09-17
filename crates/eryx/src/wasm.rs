@@ -194,6 +194,7 @@ fn classify_epoch_interrupt(
 /// **suspension**, which causes the import to poison the store's fuel and halt
 /// the guest synchronously.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub enum CallbackHostResult {
     /// The callback succeeded; the JSON value is returned to Python.
     Ok(String),
