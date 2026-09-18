@@ -81,6 +81,7 @@ impl TraceHandler for PrintingTraceHandler {
             TraceEventKind::CallbackEnd { name, duration_ms } => {
                 format!("callback END: {name} ({duration_ms}ms)")
             }
+            _ => format!("trace event at line {}", event.lineno),
         };
 
         println!("  [{count:3}] {event_desc}");
@@ -92,8 +93,9 @@ struct StreamingOutputHandler;
 
 #[async_trait]
 impl OutputHandler for StreamingOutputHandler {
-    async fn on_output(&self, output: &str) {
-        for line in output.lines() {
+    async fn on_output(&self, output: &[u8]) {
+        let text = String::from_utf8_lossy(output);
+        for line in text.lines() {
             println!("  [OUTPUT] {line}");
         }
     }
@@ -191,6 +193,7 @@ print(f"All done! Results: {results}")
             TraceEventKind::CallbackStart { .. } => callback_starts += 1,
             TraceEventKind::CallbackEnd { .. } => callback_ends += 1,
             TraceEventKind::Exception { .. } => {}
+            _ => {}
         }
     }
 

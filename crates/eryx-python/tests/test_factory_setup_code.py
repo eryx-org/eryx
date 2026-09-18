@@ -20,17 +20,17 @@ class TestSetupCodeBasic:
     def test_variable_available(self, setup_factory):
         sandbox = setup_factory.create_sandbox()
         result = sandbox.execute("print(setup_value)")
-        assert result.stdout.strip() == "42"
+        assert result.stdout.strip() == b"42"
 
     def test_list_available(self, setup_factory):
         sandbox = setup_factory.create_sandbox()
         result = sandbox.execute("print(setup_list)")
-        assert result.stdout.strip() == "[1, 2, 3]"
+        assert result.stdout.strip() == b"[1, 2, 3]"
 
     def test_function_available(self, setup_factory):
         sandbox = setup_factory.create_sandbox()
         result = sandbox.execute("print(setup_add(3, 4))")
-        assert result.stdout.strip() == "7"
+        assert result.stdout.strip() == b"7"
 
 
 class TestSetupCodeWithImports:
@@ -41,7 +41,7 @@ class TestSetupCodeWithImports:
         )
         sandbox = factory.create_sandbox()
         result = sandbox.execute("print(precomputed)")
-        assert result.stdout.strip() == '{"ready": true}'
+        assert result.stdout.strip() == b'{"ready": true}'
 
 
 class TestSetupCodeIsolation:
@@ -53,7 +53,7 @@ class TestSetupCodeIsolation:
         # Second sandbox: should see original value
         sb2 = setup_factory.create_sandbox()
         result = sb2.execute("print(setup_value)")
-        assert result.stdout.strip() == "42"
+        assert result.stdout.strip() == b"42"
 
     def test_list_mutation_does_not_leak(self, setup_factory):
         sb1 = setup_factory.create_sandbox()
@@ -61,7 +61,7 @@ class TestSetupCodeIsolation:
 
         sb2 = setup_factory.create_sandbox()
         result = sb2.execute("print(len(setup_list))")
-        assert result.stdout.strip() == "3"
+        assert result.stdout.strip() == b"3"
 
 
 class TestSetupCodeErrors:
@@ -86,4 +86,4 @@ class TestSetupCodeSaveLoad:
         loaded = eryx.SandboxFactory.load(str(path))
         sandbox = loaded.create_sandbox()
         result = sandbox.execute("print(setup_value)")
-        assert result.stdout.strip() == "42"
+        assert result.stdout.strip() == b"42"

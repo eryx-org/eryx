@@ -11,6 +11,7 @@ use eryx::{
     Callback, CallbackJournal, CallbackRequest, ConnectionManager, Error, NetConfig, NetRequest,
     OutputRequest, PythonStateSnapshot, ReplayState, ResourceLimits, SandboxPool, SecretConfig,
     SessionExecutor, TraceRequest, VfsConfig, generate_placeholder, scrub_placeholders,
+    scrub_placeholders_bytes,
 };
 use opentelemetry::propagation::Extractor;
 use tokio::sync::mpsc;
@@ -428,8 +429,8 @@ impl crate::proto::eryx::v1::eryx_server::Eryx for EryxService {
                         metrics::counter!("eryx_executions_cancelled_total").increment(1);
                         ExecuteResult {
                             success: false,
-                            stdout: String::new(),
-                            stderr: String::new(),
+                            stdout: Vec::new(),
+                            stderr: Vec::new(),
                             error: "execution cancelled: client disconnected".to_string(),
                             stats: None,
                             state_snapshot: Vec::new(),
@@ -790,14 +791,14 @@ async fn execute_with_session(
     // stdout/stderr fields match what was streamed (and the success path).
     let output_accumulator = tokio::spawn(async move {
         use crate::proto::eryx::v1::{OutputEvent, OutputStream};
-        let mut stdout_buf = String::new();
-        let mut stderr_buf = String::new();
+        let mut stdout_buf = Vec::<u8>::new();
+        let mut stderr_buf = Vec::<u8>::new();
         while let Some(req) = output_rx.recv().await {
             let stream = if req.stream == 0 {
-                stdout_buf.push_str(&req.data);
+                stdout_buf.extend_from_slice(&req.data);
                 OutputStream::Stdout
             } else {
-                stderr_buf.push_str(&req.data);
+                stderr_buf.extend_from_slice(&req.data);
                 OutputStream::Stderr
             };
             let data = if let Some(ref secrets) = output_secrets {
@@ -806,7 +807,7 @@ async fn execute_with_session(
                     _ => output_scrub_stderr,
                 };
                 if should_scrub {
-                    scrub_placeholders(&req.data, secrets)
+                    scrub_placeholders_bytes(&req.data, secrets)
                 } else {
                     req.data
                 }
@@ -956,12 +957,12 @@ async fn execute_with_session(
             metrics::counter!("eryx_executions_total", "status" => "success").increment(1);
             metrics::histogram!("eryx_execution_duration_seconds").record(duration.as_secs_f64());
             let stdout = if params.scrub_stdout {
-                scrub_placeholders(&output.stdout, &params.secrets)
+                scrub_placeholders_bytes(&output.stdout, &params.secrets)
             } else {
                 output.stdout
             };
             let stderr = if params.scrub_stderr {
-                scrub_placeholders(&output.stderr, &params.secrets)
+                scrub_placeholders_bytes(&output.stderr, &params.secrets)
             } else {
                 output.stderr
             };
@@ -1021,12 +1022,12 @@ async fn execute_with_session(
             // stdout/stderr fields match what was streamed and the success path.
             // Scrub the whole buffer, consistent with the Ok arm.
             let stdout = if params.scrub_stdout {
-                scrub_placeholders(&streamed_stdout, &params.secrets)
+                scrub_placeholders_bytes(&streamed_stdout, &params.secrets)
             } else {
                 streamed_stdout
             };
             let stderr = if params.scrub_stderr {
-                scrub_placeholders(&streamed_stderr, &params.secrets)
+                scrub_placeholders_bytes(&streamed_stderr, &params.secrets)
             } else {
                 streamed_stderr
             };

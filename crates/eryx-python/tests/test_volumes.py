@@ -14,7 +14,7 @@ class TestSandboxVolumes:
             volumes=[(str(tmp_path), "/mnt/data", False)],
         )
         result = sandbox.execute('print(open("/mnt/data/input.txt").read())')
-        assert "hello from host" in result.stdout
+        assert b"hello from host" in result.stdout
 
     def test_write_file_to_host(self, tmp_path):
         """Sandbox can write a file back to the host through a writable mount."""
@@ -44,7 +44,7 @@ class TestSandboxVolumes:
             volumes=[(str(tmp_path), "/mnt/data", True)],
         )
         result = sandbox.execute('print(open("/mnt/data/readable.txt").read())')
-        assert "can read this" in result.stdout
+        assert b"can read this" in result.stdout
 
     def test_multiple_mounts(self, tmp_path):
         """Multiple directories can be mounted simultaneously."""
@@ -68,7 +68,7 @@ b = open("/mnt/b/file_b.txt").read()
 print(f"{a} + {b}")
 """
         )
-        assert "from A + from B" in result.stdout
+        assert b"from A + from B" in result.stdout
 
     def test_list_directory(self, tmp_path):
         """Sandbox can list files in a mounted directory."""
@@ -84,8 +84,8 @@ files = sorted(os.listdir("/mnt/data"))
 print(files)
 """
         )
-        assert "one.txt" in result.stdout
-        assert "two.txt" in result.stdout
+        assert b"one.txt" in result.stdout
+        assert b"two.txt" in result.stdout
 
     def test_subdirectory_access(self, tmp_path):
         """Sandbox can access files in subdirectories of the mount."""
@@ -98,7 +98,7 @@ print(files)
         result = sandbox.execute(
             'print(open("/mnt/data/sub/dir/nested.txt").read())'
         )
-        assert "deeply nested" in result.stdout
+        assert b"deeply nested" in result.stdout
 
     def test_single_file_mount(self, tmp_path):
         """A single host file can be mounted at a specific guest path."""
@@ -108,7 +108,7 @@ print(files)
             volumes=[(str(host_file), "/mnt/script.py", True)],
         )
         result = sandbox.execute('print(open("/mnt/script.py").read())')
-        assert "print('hello from script')" in result.stdout
+        assert b"print('hello from script')" in result.stdout
 
     def test_single_file_mount_restricts_siblings(self, tmp_path):
         """A single-file mount should not expose other files in the host dir."""
@@ -119,7 +119,7 @@ print(files)
         )
         # The allowed file works
         result = sandbox.execute('print(open("/mnt/allowed.txt").read())')
-        assert "ok" in result.stdout
+        assert b"ok" in result.stdout
         # The sibling should not be accessible
         with pytest.raises(eryx.ExecutionError):
             sandbox.execute('open("/mnt/secret.txt").read()')
@@ -144,7 +144,7 @@ print(files)
             volumes=[(str(host_file), "/mnt/target.py", True)],
         )
         result = sandbox.execute('print(open("/mnt/target.py").read())')
-        assert "print('renamed')" in result.stdout
+        assert b"print('renamed')" in result.stdout
 
 
 class TestSessionVolumes:
@@ -157,7 +157,7 @@ class TestSessionVolumes:
             volumes=[(str(tmp_path), "/mnt/data", False)],
         )
         result = session.execute('print(open("/mnt/data/input.txt").read())')
-        assert "session host file" in result.stdout
+        assert b"session host file" in result.stdout
 
     def test_volumes_persist_across_executions(self, tmp_path):
         """Writes to volumes in one execution are visible in the next."""
@@ -170,7 +170,7 @@ class TestSessionVolumes:
         result = session.execute(
             'print(open("/mnt/data/persisted.txt").read())'
         )
-        assert "from exec 1" in result.stdout
+        assert b"from exec 1" in result.stdout
         # Also verify on host
         assert (tmp_path / "persisted.txt").read_text() == "from exec 1"
 
@@ -194,8 +194,8 @@ vfs = open("/data/vfs_file.txt").read()
 print(f"host={host}, vfs={vfs}")
 """
         )
-        assert "host=from host" in result.stdout
-        assert "vfs=from vfs" in result.stdout
+        assert b"host=from host" in result.stdout
+        assert b"vfs=from vfs" in result.stdout
 
     def test_session_volumes_auto_creates_vfs(self, tmp_path):
         """When volumes are provided without explicit VFS, one is auto-created."""
@@ -204,7 +204,7 @@ print(f"host={host}, vfs={vfs}")
             volumes=[(str(tmp_path), "/mnt/data", True)],
         )
         result = session.execute('print(open("/mnt/data/auto.txt").read())')
-        assert "auto vfs" in result.stdout
+        assert b"auto vfs" in result.stdout
 
 
 class TestSandboxFactoryVolumes:
@@ -217,4 +217,4 @@ class TestSandboxFactoryVolumes:
             volumes=[(str(tmp_path), "/mnt/data", True)],
         )
         result = sandbox.execute('print(open("/mnt/data/factory.txt").read())')
-        assert "from factory sandbox" in result.stdout
+        assert b"from factory sandbox" in result.stdout

@@ -66,6 +66,7 @@ impl From<&TraceEvent> for SimpleEvent {
             TraceEventKind::Exception { message } => format!("exception:{}", message),
             TraceEventKind::CallbackStart { name } => format!("callback_start:{}", name),
             TraceEventKind::CallbackEnd { name, .. } => format!("callback_end:{}", name),
+            _ => "unknown".to_string(),
         };
         Self {
             lineno: event.lineno,
@@ -710,7 +711,7 @@ async fn test_trace_print() {
     assert!(result.is_ok(), "Execution should succeed");
 
     let output = result.unwrap();
-    assert_eq!(output.stdout, "hello");
+    assert_eq!(output.stdout, b"hello");
 
     let events = trace.simple_events();
 

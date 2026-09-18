@@ -36,9 +36,9 @@ fn decompress_zstd(data: &[u8]) -> Vec<u8> {
 #[component(record)]
 struct ExecuteOutput {
     #[component(name = "stdout")]
-    stdout: String,
+    stdout: Vec<u8>,
     #[component(name = "stderr")]
-    stderr: String,
+    stderr: Vec<u8>,
     #[component(name = "result-json")]
     result: String,
     #[component(name = "result-error")]
@@ -410,7 +410,11 @@ async fn test_instantiate_component() -> Result<(), Box<dyn std::error::Error>> 
     match &result {
         Ok(output) => {
             println!("  OK: {output:?}");
-            assert_eq!(output.stdout.trim(), "2", "print(1+1) should output '2'");
+            assert_eq!(
+                String::from_utf8_lossy(&output.stdout),
+                "2",
+                "print(1+1) should output '2'"
+            );
         }
         Err(error) => {
             panic!("Test 1 failed with error: {error}");
@@ -427,7 +431,7 @@ async fn test_instantiate_component() -> Result<(), Box<dyn std::error::Error>> 
         Ok(output) => {
             println!("  OK: {output:?}");
             assert_eq!(
-                output.stdout, "hello\nworld",
+                output.stdout, b"hello\nworld",
                 "Should have two lines of output"
             );
         }
@@ -445,7 +449,7 @@ async fn test_instantiate_component() -> Result<(), Box<dyn std::error::Error>> 
     match &result {
         Ok(output) => {
             println!("  OK: {output:?}");
-            assert_eq!(output.stdout, "", "Assignment should produce no output");
+            assert_eq!(output.stdout, b"", "Assignment should produce no output");
             assert_eq!(output.result, "", "No `result` variable -> empty result");
             assert_eq!(output.result_error, "", "No serialization error expected");
         }
@@ -527,7 +531,7 @@ async fn test_instantiate_component() -> Result<(), Box<dyn std::error::Error>> 
         Ok(output) => {
             println!("  OK: {output:?}");
             assert_eq!(
-                output.stdout.trim(),
+                String::from_utf8_lossy(&output.stdout),
                 "persisted",
                 "Variable should persist between calls"
             );
@@ -547,7 +551,7 @@ async fn test_instantiate_component() -> Result<(), Box<dyn std::error::Error>> 
         Ok(output) => {
             println!("  OK: {output:?}");
             assert!(
-                output.stdout.starts_with("3.14"),
+                String::from_utf8_lossy(&output.stdout).starts_with("3.14"),
                 "math.pi should start with 3.14: {output:?}"
             );
         }
@@ -649,9 +653,9 @@ async fn test_instantiate_component() -> Result<(), Box<dyn std::error::Error>> 
         Ok(output) => {
             println!("  OK: Restored values: {output:?}");
             assert!(
-                output.stdout.contains("42")
-                    && output.stdout.contains("hello")
-                    && output.stdout.contains("[1, 2, 3]"),
+                String::from_utf8_lossy(&output.stdout).contains("42")
+                    && String::from_utf8_lossy(&output.stdout).contains("hello")
+                    && String::from_utf8_lossy(&output.stdout).contains("[1, 2, 3]"),
                 "Restored values should match: {output:?}"
             );
         }
@@ -684,7 +688,7 @@ print(f"count: {len(cbs)}")
         Ok(output) => {
             println!("  OK: {output:?}");
             assert!(
-                output.stdout.contains("list_callbacks returned: list"),
+                String::from_utf8_lossy(&output.stdout).contains("list_callbacks returned: list"),
                 "list_callbacks should return a list: {output:?}"
             );
         }
@@ -711,11 +715,11 @@ print(f"timestamp: {result.get('timestamp', 'missing')}")
         Ok(output) => {
             println!("  OK: {output:?}");
             assert!(
-                output.stdout.contains("result type: dict"),
+                String::from_utf8_lossy(&output.stdout).contains("result type: dict"),
                 "invoke should return a dict: {output:?}"
             );
             assert!(
-                output.stdout.contains("timestamp: 1234567890"),
+                String::from_utf8_lossy(&output.stdout).contains("timestamp: 1234567890"),
                 "invoke should return correct timestamp: {output:?}"
             );
         }
@@ -742,7 +746,7 @@ print(f"callbacks: {names}")
         Ok(output) => {
             println!("  OK: {output:?}");
             assert!(
-                output.stdout.contains("get_time"),
+                String::from_utf8_lossy(&output.stdout).contains("get_time"),
                 "Should list get_time callback: {output:?}"
             );
         }
@@ -768,7 +772,7 @@ print(f"add result: {result.get('result', 'missing')}")
         Ok(output) => {
             println!("  OK: {output:?}");
             assert!(
-                output.stdout.contains("add result: 42"),
+                String::from_utf8_lossy(&output.stdout).contains("add result: 42"),
                 "invoke('add', a=10, b=32) should return 42: {output:?}"
             );
         }
@@ -795,11 +799,11 @@ print(f"url: {result.get('url', 'missing')}")
         Ok(output) => {
             println!("  OK: {output:?}");
             assert!(
-                output.stdout.contains("status: 200"),
+                String::from_utf8_lossy(&output.stdout).contains("status: 200"),
                 "http.get should return status 200: {output:?}"
             );
             assert!(
-                output.stdout.contains("url: https://example.com"),
+                String::from_utf8_lossy(&output.stdout).contains("url: https://example.com"),
                 "http.get should return correct url: {output:?}"
             );
         }
@@ -830,7 +834,7 @@ except RuntimeError as e:
         Ok(output) => {
             println!("  OK: {output:?}");
             assert!(
-                output.stdout.contains("RuntimeError raised"),
+                String::from_utf8_lossy(&output.stdout).contains("RuntimeError raised"),
                 "invoke('nonexistent') should raise RuntimeError: {output:?}"
             );
         }
@@ -858,12 +862,12 @@ print("to stderr", file=sys.stderr)
             println!("  stdout: {:?}", output.stdout);
             println!("  stderr: {:?}", output.stderr);
             assert_eq!(
-                output.stdout.trim(),
+                String::from_utf8_lossy(&output.stdout),
                 "to stdout",
                 "stdout should capture print()"
             );
             assert_eq!(
-                output.stderr.trim(),
+                String::from_utf8_lossy(&output.stderr),
                 "to stderr",
                 "stderr should capture print(..., file=sys.stderr)"
             );

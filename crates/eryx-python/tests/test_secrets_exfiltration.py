@@ -102,9 +102,9 @@ print(f"HOST_SECRET: {host_val}")
         # Clean up
         del os.environ["TEST_HOST_SECRET"]
 
-        assert "host-secret-value-12345" not in result.stdout, \
+        assert b"host-secret-value-12345" not in result.stdout, \
             "Host environment variables must NOT be visible inside sandbox"
-        assert "NOT_FOUND" in result.stdout, \
+        assert b"NOT_FOUND" in result.stdout, \
             "Sandbox should return NOT_FOUND for host env vars"
 
     def test_sandbox_cannot_enumerate_host_env(self):
@@ -125,7 +125,7 @@ for f in found:
 
         del os.environ["EXFIL_TEST_SECRET"]
 
-        assert "exfil-me-12345" not in result.stdout, \
+        assert b"exfil-me-12345" not in result.stdout, \
             "Host env vars must not be enumerable from sandbox"
 
     def test_sandbox_cannot_read_host_files(self):
@@ -148,7 +148,7 @@ except Exception as e:
     print(f"FILE_BLOCKED: {{type(e).__name__}}")
 """)
 
-            assert "HOST_FILE_SECRET_DATA" not in result.stdout, \
+            assert b"HOST_FILE_SECRET_DATA" not in result.stdout, \
                 "Sandbox must NOT be able to read host filesystem files"
         finally:
             os.unlink(host_file)
@@ -175,7 +175,7 @@ except Exception as e:
     print(f"BLOCKED: {type(e).__name__}")
 """)
 
-        assert "BYPASS" not in result.stdout, \
+        assert b"BYPASS" not in result.stdout, \
             "Sandbox without network config must block all connections"
 
     def test_network_sandbox_blocks_localhost_by_default(self):
@@ -192,7 +192,7 @@ except Exception as e:
     print(f"BLOCKED: {type(e).__name__}")
 """)
 
-        assert "BYPASS" not in result.stdout, \
+        assert b"BYPASS" not in result.stdout, \
             "Default NetConfig must block localhost"
 
     def test_network_sandbox_blocks_private_networks(self):
@@ -213,7 +213,7 @@ for addr in ["10.0.0.1", "172.16.0.1", "192.168.1.1"]:
 print(f"BLOCKED_COUNT: {blocked}")
 """)
 
-        assert "BYPASS" not in result.stdout, \
+        assert b"BYPASS" not in result.stdout, \
             "Default NetConfig must block private network ranges"
 
     def test_allowed_host_restriction(self, exfil_server):
@@ -234,7 +234,7 @@ except Exception as e:
     print(f"BLOCKED: {{type(e).__name__}}")
 """)
 
-        assert "BYPASS" not in result.stdout, \
+        assert b"BYPASS" not in result.stdout, \
             "Sandbox must not connect to hosts outside allowed list"
 
     def test_data_exfiltration_via_http(self, exfil_server):
@@ -290,7 +290,7 @@ except ImportError as e:
     print(f"BLOCKED: {e}")
 """)
 
-        assert "BYPASS" not in result.stdout, \
+        assert b"BYPASS" not in result.stdout, \
             "ctypes must not be importable in sandbox"
 
     def test_cannot_import_subprocess(self):
@@ -305,7 +305,7 @@ except Exception as e:
     print(f"BLOCKED: {type(e).__name__}")
 """)
 
-        assert "BYPASS" not in result.stdout, \
+        assert b"BYPASS" not in result.stdout, \
             "subprocess must not work in sandbox"
 
     def test_cannot_access_host_proc(self):
@@ -320,7 +320,7 @@ except Exception as e:
     print(f"BLOCKED: {type(e).__name__}")
 """)
 
-        assert "BYPASS" not in result.stdout, \
+        assert b"BYPASS" not in result.stdout, \
             "Sandbox must not access /proc filesystem"
 
     def test_cannot_use_eval_exec_for_escape(self):
@@ -336,7 +336,7 @@ except Exception as e:
         # Even if exec works, the sandbox isolation should prevent host access
         home = os.environ.get("HOME", "")
         if home:
-            assert home not in result.stdout, \
+            assert home.encode() not in result.stdout, \
                 "exec'd code must not access host HOME directory"
 
     def test_cannot_use_compile_for_escape(self):
@@ -351,7 +351,7 @@ except Exception as e:
 """)
 
         # Output should only show sandbox filesystem, not host
-        assert "/etc" not in result.stdout or "BLOCKED" in result.stdout or "ERROR" in result.stdout, \
+        assert b"/etc" not in result.stdout or b"BLOCKED" in result.stdout or b"ERROR" in result.stdout, \
             "Compiled code must be sandboxed"
 
     def test_gc_cannot_leak_objects(self):
@@ -368,7 +368,7 @@ except Exception as e:
     print(f"GC_ERROR: {type(e).__name__}")
 """)
 
-        assert "BYPASS" not in result.stdout
+        assert b"BYPASS" not in result.stdout
 
 
 # =============================================================================
@@ -397,7 +397,7 @@ except Exception as e:
     print(f"BLOCKED: {type(e).__name__}")
 """)
 
-        assert "BYPASS" not in result.stdout, \
+        assert b"BYPASS" not in result.stdout, \
             "Memory bomb should be prevented by resource limits"
 
     def test_infinite_loop_timeout(self):
@@ -438,9 +438,9 @@ val = os.environ.get("API_KEY", "NOT_FOUND")
 print(f"API_KEY={val}")
 """)
         # Python sees a placeholder, NOT the real value
-        assert "sk-test-12345" not in result.stdout, \
+        assert b"sk-test-12345" not in result.stdout, \
             "Real secret value must NOT appear in sandbox output"
-        assert "NOT_FOUND" not in result.stdout, \
+        assert b"NOT_FOUND" not in result.stdout, \
             "Secret should be available as an env var (with placeholder value)"
 
     def test_secret_placeholder_is_not_real_value(self):
@@ -454,7 +454,7 @@ import os
 val = os.environ.get("MY_SECRET", "")
 print(val)
 """)
-        assert real_secret not in result.stdout, \
+        assert real_secret.encode() not in result.stdout, \
             "Real secret must never appear in stdout"
         # The placeholder should be non-empty
         output = result.stdout.strip()
@@ -471,10 +471,10 @@ import os
 token = os.environ.get("TOKEN", "")
 print(f"Token: {token}")
 """)
-        assert "ghp-real-token" not in result.stdout, \
+        assert b"ghp-real-token" not in result.stdout, \
             "Real secret must not appear in stdout"
         # The placeholder should be scrubbed to [REDACTED]
-        assert "[REDACTED]" in result.stdout, \
+        assert b"[REDACTED]" in result.stdout, \
             "Placeholder should be scrubbed to [REDACTED] in stdout"
 
     def test_scrub_stdout_disabled(self):
@@ -488,10 +488,10 @@ import os
 token = os.environ.get("TOKEN", "")
 print(f"Token: {token}")
 """)
-        assert "ghp-real-token" not in result.stdout, \
+        assert b"ghp-real-token" not in result.stdout, \
             "Real secret must never appear in stdout"
         # With scrubbing disabled, the placeholder should appear raw
-        assert "[REDACTED]" not in result.stdout, \
+        assert b"[REDACTED]" not in result.stdout, \
             "With scrub_stdout=False, placeholder should not be redacted"
 
     def test_multiple_secrets(self):
@@ -509,16 +509,16 @@ b = os.environ.get("KEY_B", "NOT_FOUND")
 print(f"A={a}")
 print(f"B={b}")
 """)
-        assert "secret-a" not in result.stdout
-        assert "secret-b" not in result.stdout
-        assert "NOT_FOUND" not in result.stdout, \
+        assert b"secret-a" not in result.stdout
+        assert b"secret-b" not in result.stdout
+        assert b"NOT_FOUND" not in result.stdout, \
             "Both secrets should be available as env vars"
 
     def test_empty_secrets_dict(self):
         """Empty secrets dict should work without enabling scrubbing."""
         sandbox = eryx.Sandbox(secrets={})
         result = sandbox.execute('print("hello")')
-        assert "hello" in result.stdout
+        assert b"hello" in result.stdout
 
     def test_invalid_secret_value_type(self):
         """Secret value must be a dict, not a plain string."""

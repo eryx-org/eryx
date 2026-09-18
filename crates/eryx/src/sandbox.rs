@@ -474,14 +474,14 @@ impl Sandbox {
                 // Scrub secret placeholders from output based on policy
                 let stdout = if matches!(self.scrub_stdout, crate::secrets::OutputScrubPolicy::All)
                 {
-                    crate::secrets::scrub_placeholders(&output.stdout, &self.secrets)
+                    crate::secrets::scrub_placeholders_bytes(&output.stdout, &self.secrets)
                 } else {
                     output.stdout
                 };
 
                 let stderr = if matches!(self.scrub_stderr, crate::secrets::OutputScrubPolicy::All)
                 {
-                    crate::secrets::scrub_placeholders(&output.stderr, &self.secrets)
+                    crate::secrets::scrub_placeholders_bytes(&output.stderr, &self.secrets)
                 } else {
                     output.stderr
                 };
@@ -695,7 +695,7 @@ impl Sandbox {
     ///
     /// // Wait for result
     /// match handle.wait().await {
-    ///     Ok(result) => println!("Completed: {}", result.stdout),
+    ///     Ok(result) => println!("Completed: {}", result.stdout_text()),
     ///     Err(Error::Cancelled) => println!("Cancelled"),
     ///     Err(e) => println!("Error: {e}"),
     /// }
@@ -975,13 +975,13 @@ impl Sandbox {
             Ok(output) => {
                 // Scrub secret placeholders from final output based on policy
                 let stdout = if matches!(scrub_stdout, crate::secrets::OutputScrubPolicy::All) {
-                    crate::secrets::scrub_placeholders(&output.stdout, &secrets)
+                    crate::secrets::scrub_placeholders_bytes(&output.stdout, &secrets)
                 } else {
                     output.stdout
                 };
 
                 let stderr = if matches!(scrub_stderr, crate::secrets::OutputScrubPolicy::All) {
-                    crate::secrets::scrub_placeholders(&output.stderr, &secrets)
+                    crate::secrets::scrub_placeholders_bytes(&output.stderr, &secrets)
                 } else {
                     output.stderr
                 };
@@ -2667,10 +2667,10 @@ pub struct ReplayOutcome {
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct ExecuteResult {
-    /// Complete stdout output (also streamed via `OutputHandler` if configured).
-    pub stdout: String,
-    /// Complete stderr output (also streamed via `OutputHandler` if configured).
-    pub stderr: String,
+    /// Complete stdout output as raw bytes (also streamed via `OutputHandler` if configured).
+    pub stdout: Vec<u8>,
+    /// Complete stderr output as raw bytes (also streamed via `OutputHandler` if configured).
+    pub stderr: Vec<u8>,
     /// Collected trace events (also streamed via `TraceHandler` if configured).
     pub trace: Vec<TraceEvent>,
     /// JSON-serialized value of the script's result variable (default name
@@ -2686,6 +2686,30 @@ pub struct ExecuteResult {
     pub result_error: Option<String>,
     /// Execution statistics.
     pub stats: ExecuteStats,
+}
+
+impl ExecuteResult {
+    /// Decode stdout as UTF-8, replacing invalid sequences with U+FFFD.
+    #[must_use]
+    pub fn stdout_text(&self) -> String {
+        String::from_utf8_lossy(&self.stdout).into_owned()
+    }
+
+    /// Decode stderr as UTF-8, replacing invalid sequences with U+FFFD.
+    #[must_use]
+    pub fn stderr_text(&self) -> String {
+        String::from_utf8_lossy(&self.stderr).into_owned()
+    }
+
+    /// Try to decode stdout as valid UTF-8.
+    pub fn stdout_utf8(&self) -> Result<&str, std::str::Utf8Error> {
+        std::str::from_utf8(&self.stdout)
+    }
+
+    /// Try to decode stderr as valid UTF-8.
+    pub fn stderr_utf8(&self) -> Result<&str, std::str::Utf8Error> {
+        std::str::from_utf8(&self.stderr)
+    }
 }
 
 /// Statistics about sandbox execution.
@@ -3009,8 +3033,8 @@ mod tests {
     #[test]
     fn execute_result_is_debug() {
         let result = ExecuteResult {
-            stdout: "Hello".to_string(),
-            stderr: String::new(),
+            stdout: b"Hello".to_vec(),
+            stderr: Vec::new(),
             trace: vec![],
             result: None,
             result_error: None,
@@ -3024,14 +3048,15 @@ mod tests {
 
         let debug = format!("{:?}", result);
         assert!(debug.contains("ExecuteResult"));
-        assert!(debug.contains("Hello"));
+        assert!(debug.contains("stdout"));
+        assert!(debug.contains("[72, 101, 108, 108, 111]"));
     }
 
     #[test]
     fn execute_result_is_clone() {
         let result = ExecuteResult {
-            stdout: "Test output".to_string(),
-            stderr: String::new(),
+            stdout: b"Test output".to_vec(),
+            stderr: Vec::new(),
             trace: vec![],
             result: None,
             result_error: None,
@@ -3044,7 +3069,7 @@ mod tests {
         };
 
         let cloned = result.clone();
-        assert_eq!(cloned.stdout, "Test output");
+        assert_eq!(cloned.stdout, b"Test output");
         assert_eq!(cloned.stats.callback_invocations, 2);
         assert_eq!(cloned.stats.fuel_consumed, Some(12345));
     }
@@ -3358,8 +3383,8 @@ mod tests {
     #[test]
     fn execute_result_empty_stdout() {
         let result = ExecuteResult {
-            stdout: String::new(),
-            stderr: String::new(),
+            stdout: Vec::new(),
+            stderr: Vec::new(),
             trace: vec![],
             result: None,
             result_error: None,
@@ -3380,8 +3405,8 @@ mod tests {
         use crate::trace::{TraceEvent, TraceEventKind};
 
         let result = ExecuteResult {
-            stdout: "output".to_string(),
-            stderr: String::new(),
+            stdout: b"output".to_vec(),
+            stderr: Vec::new(),
             trace: vec![
                 TraceEvent {
                     lineno: 1,

@@ -27,7 +27,7 @@ async fn run_adversarial_test(code: &str, test_name: &str) -> (bool, String) {
     let result = session.execute(code).run().await;
     match result {
         Ok(output) => {
-            let stdout = output.stdout;
+            let stdout = output.stdout_text();
             let has_security_issue =
                 stdout.contains("SECURITY ISSUE") || stdout.contains("BYPASS SUCCESSFUL");
             if has_security_issue {
@@ -54,12 +54,12 @@ async fn run_adversarial_test_verbose(code: &str, test_name: &str) -> (bool, Str
     let result = session.execute(code).run().await;
     match result {
         Ok(output) => {
-            let stdout = output.stdout;
+            let stdout = output.stdout_text();
             let has_security_issue =
                 stdout.contains("SECURITY ISSUE") || stdout.contains("BYPASS SUCCESSFUL");
             println!("=== {} ===\n{}", test_name, stdout);
             if !output.stderr.is_empty() {
-                println!("stderr: {}", output.stderr);
+                println!("stderr: {}", output.stderr_text());
             }
             (!has_security_issue, stdout)
         }
@@ -161,14 +161,14 @@ print("VFS basic operations work")
     assert!(result.is_ok(), "Should execute: {:?}", result);
     let output = result.unwrap();
     assert!(
-        output.stdout.contains("Content: hello world"),
+        output.stdout_text().contains("Content: hello world"),
         "Should read written content: {}",
-        output.stdout
+        String::from_utf8_lossy(&output.stdout)
     );
     assert!(
-        output.stdout.contains("VFS basic operations work"),
+        output.stdout_text().contains("VFS basic operations work"),
         "Should complete: {}",
-        output.stdout
+        String::from_utf8_lossy(&output.stdout)
     );
 }
 
@@ -226,9 +226,9 @@ print(f"Content: {content}")
     assert!(result3.is_ok(), "Read should succeed: {:?}", result3);
     let output = result3.unwrap();
     assert!(
-        output.stdout.contains("Content: first second"),
+        output.stdout_text().contains("Content: first second"),
         "Append mode should work correctly: {}",
-        output.stdout
+        String::from_utf8_lossy(&output.stdout)
     );
 }
 
@@ -272,9 +272,9 @@ except FileNotFoundError:
     assert!(result2.is_ok(), "Second execution should succeed");
     let output = result2.unwrap();
     assert!(
-        output.stdout.contains("Read: persistent data"),
+        output.stdout_text().contains("Read: persistent data"),
         "Should persist data across executions: {}",
-        output.stdout
+        String::from_utf8_lossy(&output.stdout)
     );
 }
 
@@ -1285,14 +1285,14 @@ except FileNotFoundError:
     assert!(result2.is_ok(), "Session2 read should execute");
     let output2 = result2.unwrap();
     assert!(
-        output2.stdout.contains("EXPECTED: File not found"),
+        output2.stdout_text().contains("EXPECTED: File not found"),
         "Session2 should NOT see session1's files: {}",
-        output2.stdout
+        String::from_utf8_lossy(&output2.stdout)
     );
     assert!(
-        !output2.stdout.contains("ISOLATION FAILURE"),
+        !output2.stdout_text().contains("ISOLATION FAILURE"),
         "Storage should be isolated: {}",
-        output2.stdout
+        String::from_utf8_lossy(&output2.stdout)
     );
 }
 
@@ -1345,10 +1345,10 @@ except FileNotFoundError:
     let output2 = result2.unwrap();
     assert!(
         output2
-            .stdout
+            .stdout_text()
             .contains("SUCCESS: session2 read shared file"),
         "Session2 should see session1's files when storage is shared: {}",
-        output2.stdout
+        String::from_utf8_lossy(&output2.stdout)
     );
 }
 
@@ -1397,10 +1397,10 @@ except FileNotFoundError:
     let output2 = result2.unwrap();
     assert!(
         output2
-            .stdout
+            .stdout_text()
             .contains("SUCCESS: File persisted across reset"),
         "VFS storage should persist across reset: {}",
-        output2.stdout
+        String::from_utf8_lossy(&output2.stdout)
     );
 }
 
@@ -1446,9 +1446,9 @@ print(f"Read from /workspace: {content}")
     assert!(result2.is_ok(), "Read from custom path should succeed");
     let output2 = result2.unwrap();
     assert!(
-        output2.stdout.contains("custom path works"),
+        output2.stdout_text().contains("custom path works"),
         "Custom mount path should work: {}",
-        output2.stdout
+        String::from_utf8_lossy(&output2.stdout)
     );
 
     // Verify default /data path doesn't work with custom config
@@ -1469,9 +1469,11 @@ except (FileNotFoundError, OSError) as e:
     assert!(result3.is_ok(), "Check /data should execute");
     let output3 = result3.unwrap();
     assert!(
-        output3.stdout.contains("EXPECTED: /data not available"),
+        output3
+            .stdout_text()
+            .contains("EXPECTED: /data not available"),
         "/data should not be available when using custom mount path: {}",
-        output3.stdout
+        String::from_utf8_lossy(&output3.stdout)
     );
 }
 

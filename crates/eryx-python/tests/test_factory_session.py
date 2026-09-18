@@ -14,7 +14,7 @@ def test_factory_session_persistent_state_and_full_reset(sandbox_factory):
     assert session.execution_timeout_ms is None
     assert session.fuel_limit is None
     session.execute("value = 41")
-    assert session.execute("print(value + 1)").stdout == "42"
+    assert session.execute("print(value + 1)").stdout == b"42"
     session.reset()
     with pytest.raises(eryx.ExecutionError):
         session.execute("print(value)")
@@ -84,8 +84,8 @@ def test_factory_session_callback_count_applies_after_reset(sandbox_factory):
         resource_limits=eryx.ResourceLimits(max_callback_invocations=1),
     )
     # max_callback_invocations is per execution, so both single-callback calls succeed.
-    assert session.execute("print(await count())").stdout == "1"
-    assert session.execute("print(await count())").stdout == "2"
+    assert session.execute("print(await count())").stdout == b"1"
+    assert session.execute("print(await count())").stdout == b"2"
     session.reset()
     with pytest.raises(eryx.ExecutionError):
         session.execute("await count(); await count()")
@@ -130,7 +130,7 @@ def test_factory_session_caller_vfs_keeps_own_policy_and_mount_path(sandbox_fact
     )
     session.execute("with open('/custom/a', 'w') as f: f.write('caller-owned')")
     session.reset()
-    assert session.execute("print(open('/custom/a').read())").stdout == "caller-owned"
+    assert session.execute("print(open('/custom/a').read())").stdout == b"caller-owned"
     assert session.vfs_mount_path == "/custom"
 
 
@@ -146,7 +146,7 @@ def test_factory_session_volumes_output_and_native_import(
         on_stdout=output.append,
         on_stderr=errors.append,
     )
-    assert session.execute("import os; print(os.path.isdir('/mnt'))").stdout == "True"
+    assert session.execute("import os; print(os.path.isdir('/mnt'))").stdout == b"True"
     assert output
     with pytest.raises(eryx.ExecutionError):
         session.execute("with open('/mnt/nope', 'w') as f: f.write('x')")
@@ -162,7 +162,7 @@ def test_factory_session_volumes_output_and_native_import(
             "import markupsafe; import markupsafe._speedups; "
             "print(markupsafe._speedups.__name__)"
         ).stdout
-        == "markupsafe._speedups"
+        == b"markupsafe._speedups"
     )
 
 
@@ -184,7 +184,7 @@ while True:
 sock.close()
 print(b"".join(chunks).decode(errors="replace"))
 """)
-    assert "Hello from test server" in result.stdout
+    assert b"Hello from test server" in result.stdout
 
 
 def test_factory_session_reclaims_closed_socket_handles(http_server, sandbox_factory):
@@ -239,7 +239,7 @@ after_gc = socket.create_connection(("{host}", {port}), timeout=5)
 after_gc.close()
 print("reader collected")
 """)
-    assert result.stdout == "reader collected"
+    assert result.stdout == b"reader collected"
 
 
 def test_factory_session_preimport_and_local_wheel_lifetime(sandbox_factory, tmp_path):
@@ -253,12 +253,12 @@ def test_factory_session_preimport_and_local_wheel_lifetime(sandbox_factory, tmp
         archive.writestr("tiny-1.0.dist-info/WHEEL", "Wheel-Version: 1.0\n")
     factory = eryx.SandboxFactory(packages=[str(wheel)], imports=["json"])
     session = factory.create_session()
-    assert session.execute("import sys; print('json' in sys.modules)").stdout == "True"
+    assert session.execute("import sys; print('json' in sys.modules)").stdout == b"True"
     del factory
     gc.collect()
-    assert session.execute("import tiny_late; print(tiny_late.VALUE)").stdout == "42"
+    assert session.execute("import tiny_late; print(tiny_late.VALUE)").stdout == b"42"
     session.reset()
-    assert session.execute("import tiny_late; print(tiny_late.VALUE)").stdout == "42"
+    assert session.execute("import tiny_late; print(tiny_late.VALUE)").stdout == b"42"
 
 
 def test_saved_factory_session_lazily_imports_from_supplied_site_packages(tmp_path):
@@ -277,13 +277,13 @@ def test_saved_factory_session_lazily_imports_from_supplied_site_packages(tmp_pa
         session.execute(
             "import sys; print('saved_factory_package' not in sys.modules)"
         ).stdout
-        == "True"
+        == b"True"
     )
     assert (
         session.execute(
             "import saved_factory_package; print(saved_factory_package.VALUE)"
         ).stdout
-        == "42"
+        == b"42"
     )
 
 
@@ -297,13 +297,13 @@ def test_cached_loaded_factory_sessions_are_isolated_and_equivalent(
     first = loaded.create_session()
     second = loaded.create_session()
     assert first.execute("print('clean' if 'state' not in globals() else 'dirty')").stdout == (
-        "clean"
+        b"clean"
     )
     assert second.execute("print('clean' if 'state' not in globals() else 'dirty')").stdout == (
-        "clean"
+        b"clean"
     )
 
     first.execute("state = 'first'")
     second.execute("state = 'second'")
-    assert first.execute("print(state)").stdout == "first"
-    assert second.execute("print(state)").stdout == "second"
+    assert first.execute("print(state)").stdout == b"first"
+    assert second.execute("print(state)").stdout == b"second"

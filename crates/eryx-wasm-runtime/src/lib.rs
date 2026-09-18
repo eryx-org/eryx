@@ -318,12 +318,19 @@ impl Call for EryxCall {
     }
 
     unsafe fn maybe_pop_list(&mut self, ty: List) -> Option<(*const u8, usize)> {
-        // For byte lists, return a raw pointer to the bytes for efficient transfer.
+        // For byte lists, pop the value and return a raw pointer for zero-copy transfer.
+        // The Vec is moved into a deferred allocation so the pointer stays valid until
+        // the EryxCall is dropped — same pattern as pop_string.
         if matches!(ty.ty(), Type::U8)
-            && let Some(Value::Bytes(bytes)) = self.stack.last()
+            && matches!(self.stack.last(), Some(Value::Bytes(_)))
+            && let Some(Value::Bytes(bytes)) = self.stack.pop()
         {
-            let ptr = bytes.as_ptr();
             let len = bytes.len();
+            let boxed = bytes.into_boxed_slice();
+            let raw = Box::into_raw(boxed);
+            let ptr = unsafe { (*raw).as_ptr() };
+            let layout = Layout::for_value(unsafe { &*raw });
+            self.deferred.push((raw as *mut u8, layout));
             return Some((ptr, len));
         }
         None
@@ -857,7 +864,7 @@ fn report_trace_callback_wrapper(lineno: u32, event_json: &str, context_json: &s
 
 /// Call report-output import to stream output to the host in real-time.
 /// This is a synchronous call with no return value.
-fn call_report_output(stream: u32, data: &str) {
+fn call_report_output(stream: u32, data: &[u8]) {
     CURRENT_WIT.with(|cell| {
         let wit = cell.borrow();
         let Some(wit) = wit.as_ref() else {
@@ -873,8 +880,9 @@ fn call_report_output(stream: u32, data: &str) {
         // Create a call context and push arguments
         let mut cx = EryxCall::new();
 
-        // Push arguments in reverse order (wit-dylib pops in reverse)
-        cx.push_string(data.to_string());
+        // Push arguments in reverse declaration order (wit-dylib pops in reverse).
+        // data (list<u8>) is declared last, so push it first.
+        cx.stack.push(Value::Bytes(data.to_vec()));
         cx.push_u32(stream);
 
         // Call the import (synchronous, no return value)
@@ -883,7 +891,7 @@ fn call_report_output(stream: u32, data: &str) {
 }
 
 /// Wrapper function that matches the ReportOutputCallback signature.
-fn report_output_callback_wrapper(stream: u32, data: &str) {
+fn report_output_callback_wrapper(stream: u32, data: &[u8]) {
     call_report_output(stream, data);
 }
 
@@ -1543,11 +1551,11 @@ fn handle_export(wit: Wit, func_index: usize, cx: &mut EryxCall) -> HandleExport
 
             match result {
                 python::ExecuteResult::Complete(output) => {
-                    // WIT defines: execute-output { stdout, stderr, result, result-error }
-                    // Push as a Record in definition order; pop_record handles field extraction
+                    // WIT defines: execute-output { stdout: list<u8>, stderr: list<u8>,
+                    //               result-json: string, result-error: string }
                     cx.stack.push(Value::Record(vec![
-                        Value::String(output.stdout),
-                        Value::String(output.stderr),
+                        Value::Bytes(output.stdout),
+                        Value::Bytes(output.stderr),
                         Value::String(output.result),
                         Value::String(output.result_error),
                     ]));
@@ -1765,20 +1773,20 @@ impl Interpreter for EryxInterpreter {
                 } else {
                     // Get the output from Python (both stdout and stderr)
                     let stdout = unsafe {
-                        python::get_python_variable_string("_eryx_output").unwrap_or_default()
+                        python::get_python_variable_bytes("_eryx_output").unwrap_or_default()
                     };
                     let stderr = unsafe {
-                        python::get_python_variable_string("_eryx_errors").unwrap_or_default()
+                        python::get_python_variable_bytes("_eryx_errors").unwrap_or_default()
                     };
 
                     // Capture the user's result variable now that async execution finished.
                     let (result, result_error) = unsafe { python::capture_result() };
 
-                    // WIT defines: execute-output { stdout, stderr, result, result-error }
-                    // Push as a Record in definition order; pop_record handles field extraction
+                    // WIT defines: execute-output { stdout: list<u8>, stderr: list<u8>,
+                    //               result-json: string, result-error: string }
                     cx.stack.push(Value::Record(vec![
-                        Value::String(stdout.trim_end_matches('\n').to_string()),
-                        Value::String(stderr.trim_end_matches('\n').to_string()),
+                        Value::Bytes(python::trim_trailing_newline(stdout)),
+                        Value::Bytes(python::trim_trailing_newline(stderr)),
                         Value::String(result),
                         Value::String(result_error),
                     ]));

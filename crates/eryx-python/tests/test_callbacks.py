@@ -138,7 +138,7 @@ class TestSandboxWithCallbacks:
             ]
         )
         result = sandbox.execute("v = await get_value(); print(v['value'])")
-        assert "42" in result.stdout
+        assert b"42" in result.stdout
 
     def test_callback_with_args(self):
         """Test a callback that receives arguments."""
@@ -150,7 +150,7 @@ class TestSandboxWithCallbacks:
             callbacks=[{"name": "add", "fn": add, "description": "Adds two numbers"}]
         )
         result = sandbox.execute("r = await add(a=3, b=5); print(r['sum'])")
-        assert "8" in result.stdout
+        assert b"8" in result.stdout
 
     def test_callback_with_string_args(self):
         """Test a callback with string arguments."""
@@ -162,7 +162,7 @@ class TestSandboxWithCallbacks:
             callbacks=[{"name": "greet", "fn": greet, "description": "Greets someone"}]
         )
         result = sandbox.execute('r = await greet(name="World"); print(r["greeting"])')
-        assert "Hello, World!" in result.stdout
+        assert b"Hello, World!" in result.stdout
 
     def test_callback_return_types(self):
         """Test various callback return types."""
@@ -219,13 +219,13 @@ print(f"dict: {d}")
 """
         )
 
-        assert "string: just a string" in result.stdout
-        assert "int: 123" in result.stdout
-        assert "float: 3.14" in result.stdout
-        assert "bool: True" in result.stdout
-        assert "none: None" in result.stdout
-        assert "list: [1, 2, 3]" in result.stdout
-        assert "dict: {'nested': {'value': 42}}" in result.stdout
+        assert b"string: just a string" in result.stdout
+        assert b"int: 123" in result.stdout
+        assert b"float: 3.14" in result.stdout
+        assert b"bool: True" in result.stdout
+        assert b"none: None" in result.stdout
+        assert b"list: [1, 2, 3]" in result.stdout
+        assert b"dict: {'nested': {'value': 42}}" in result.stdout
 
     def test_callback_exception(self):
         """Test that Python exceptions in callbacks are propagated."""
@@ -253,7 +253,7 @@ print(f"dict: {d}")
 
         sandbox = eryx.Sandbox(callbacks=registry)
         result = sandbox.execute("c = await get_counter(); print(c['counter'])")
-        assert "100" in result.stdout
+        assert b"100" in result.stdout
 
     def test_multiple_callbacks(self):
         """Test a sandbox with multiple callbacks."""
@@ -283,7 +283,7 @@ rc = await c()
 print(f"{ra['from']}-{rb['from']}-{rc['from']}")
 """
         )
-        assert "a-b-c" in result.stdout
+        assert b"a-b-c" in result.stdout
 
     def test_callback_invocations_count(self):
         """Test that callback_invocations is tracked."""
@@ -327,8 +327,8 @@ for cb in callbacks:
     print(f"{cb['name']}: {cb['description']}")
 """
         )
-        assert "my_callback" in result.stdout
-        assert "A test callback" in result.stdout
+        assert b"my_callback" in result.stdout
+        assert b"A test callback" in result.stdout
 
     def test_parallel_callbacks_with_asyncio_gather(self):
         """Test parallel callback execution with asyncio.gather.
@@ -361,9 +361,9 @@ for r in results:
         )
 
         # All three should complete successfully
-        assert "1" in result.stdout
-        assert "2" in result.stdout
-        assert "3" in result.stdout
+        assert b"1" in result.stdout
+        assert b"2" in result.stdout
+        assert b"3" in result.stdout
         assert result.callback_invocations == 3
 
 
@@ -381,7 +381,7 @@ class TestSandboxFactoryWithCallbacks:
             callbacks=[{"name": "get_data", "fn": get_data, "description": ""}]
         )
         result = sandbox.execute("d = await get_data(); print(d['data'])")
-        assert "from_factory" in result.stdout
+        assert b"from_factory" in result.stdout
 
 
 class TestSessionWithCallbacks:
@@ -399,7 +399,7 @@ class TestSessionWithCallbacks:
             ]
         )
         result = session.execute("v = await get_value(); print(v['value'])")
-        assert "42" in result.stdout
+        assert b"42" in result.stdout
 
     def test_session_callback_with_args(self):
         """Test a callback with arguments in a session."""
@@ -411,7 +411,7 @@ class TestSessionWithCallbacks:
             callbacks=[{"name": "add", "fn": add, "description": "Adds two numbers"}]
         )
         result = session.execute("r = await add(a=3, b=5); print(r['sum'])")
-        assert "8" in result.stdout
+        assert b"8" in result.stdout
 
     def test_session_callback_state_persistence(self):
         """Test that session state persists while callbacks work."""
@@ -432,7 +432,7 @@ class TestSessionWithCallbacks:
         result = session.execute(
             "m = await get_multiplier(); print(x * m['multiplier'])"
         )
-        assert "50" in result.stdout
+        assert b"50" in result.stdout
 
     def test_session_callback_with_registry(self):
         """Test using a CallbackRegistry with Session."""
@@ -444,7 +444,7 @@ class TestSessionWithCallbacks:
 
         session = eryx.Session(callbacks=registry)
         result = session.execute('g = await greet(name="World"); print(g["greeting"])')
-        assert "Hello, World!" in result.stdout
+        assert b"Hello, World!" in result.stdout
 
     def test_session_multiple_executions_with_callbacks(self):
         """Test multiple executions with callbacks in a session."""
@@ -463,7 +463,7 @@ class TestSessionWithCallbacks:
         session.execute("c2 = await increment()")
         result = session.execute("c3 = await increment(); print(c3['count'])")
 
-        assert "3" in result.stdout
+        assert b"3" in result.stdout
         assert counter["value"] == 3
 
 
@@ -482,7 +482,7 @@ class TestAsyncCallbacks:
             ]
         )
         result = sandbox.execute("r = await async_hello(); print(r['message'])")
-        assert "hello from async" in result.stdout
+        assert b"hello from async" in result.stdout
 
     def test_async_callback_with_await(self):
         """Test async callback that actually awaits something."""
@@ -498,7 +498,7 @@ class TestAsyncCallbacks:
             ]
         )
         result = sandbox.execute("r = await async_delay(ms=10); print(r['delayed_ms'])")
-        assert "10" in result.stdout
+        assert b"10" in result.stdout
 
     def test_async_callback_with_args(self):
         """Test async callback with multiple arguments."""
@@ -510,7 +510,7 @@ class TestAsyncCallbacks:
             callbacks=[{"name": "async_add", "fn": async_add, "description": ""}]
         )
         result = sandbox.execute("r = await async_add(a=3, b=7); print(r['sum'])")
-        assert "10" in result.stdout
+        assert b"10" in result.stdout
 
     def test_async_callback_exception(self):
         """Test that async exceptions are propagated."""
@@ -546,7 +546,7 @@ a = await async_cb()
 print(f"{s['type']}-{a['type']}")
 """
         )
-        assert "sync-async" in result.stdout
+        assert b"sync-async" in result.stdout
 
     def test_async_callback_with_registry(self):
         """Test async callbacks with the decorator API."""
@@ -560,7 +560,7 @@ print(f"{s['type']}-{a['type']}")
         result = sandbox.execute(
             'r = await async_greet(name="Async World"); print(r["greeting"])'
         )
-        assert "Hello, Async World!" in result.stdout
+        assert b"Hello, Async World!" in result.stdout
 
     def test_async_callback_returns_various_types(self):
         """Test async callbacks returning different types."""
@@ -591,9 +591,9 @@ n = await return_none()
 print(f"none: {n}")
 """
         )
-        assert "string: async string" in result.stdout
-        assert "list: [1, 2, 3]" in result.stdout
-        assert "none: None" in result.stdout
+        assert b"string: async string" in result.stdout
+        assert b"list: [1, 2, 3]" in result.stdout
+        assert b"none: None" in result.stdout
 
     def test_async_callback_in_session(self):
         """Test async callbacks work in Session as well."""
@@ -607,7 +607,7 @@ print(f"none: {n}")
             ]
         )
         result = session.execute("c = await async_counter(); print(c['count'])")
-        assert "42" in result.stdout
+        assert b"42" in result.stdout
 
     def test_async_lambda_callback(self):
         """Test that async lambdas work (they're actually regular functions returning coroutines)."""
@@ -620,7 +620,7 @@ print(f"none: {n}")
             callbacks=[{"name": "async_double", "fn": async_double, "description": ""}]
         )
         result = sandbox.execute("r = await async_double(x=21); print(r['result'])")
-        assert "42" in result.stdout
+        assert b"42" in result.stdout
 
 
 class TestCallbackSchemaInference:
@@ -698,7 +698,7 @@ class TestCallbackEdgeCases:
             callbacks=[{"name": "no_return", "fn": no_return, "description": ""}]
         )
         result = sandbox.execute("r = await no_return(); print(r)")
-        assert "None" in result.stdout
+        assert b"None" in result.stdout
 
     def test_callback_with_kwargs_only(self):
         """Test calling a callback with keyword arguments only."""
@@ -712,14 +712,14 @@ class TestCallbackEdgeCases:
         result = sandbox.execute(
             'r = await kwargs_only(name="test", value=99); print(r)'
         )
-        assert "test" in result.stdout
-        assert "99" in result.stdout
+        assert b"test" in result.stdout
+        assert b"99" in result.stdout
 
     def test_empty_callbacks_list(self):
         """Test creating a sandbox with an empty callbacks list."""
         sandbox = eryx.Sandbox(callbacks=[])
         result = sandbox.execute("print('no callbacks')")
-        assert "no callbacks" in result.stdout
+        assert b"no callbacks" in result.stdout
 
     def test_callback_dict_missing_name_raises(self):
         """Test that a callback dict without 'name' raises an error."""
@@ -743,7 +743,7 @@ class TestCallbackEdgeCases:
             ]
         )
         result = sandbox.execute("r = await double(x=21); print(r['result'])")
-        assert "42" in result.stdout
+        assert b"42" in result.stdout
 
     def test_closure_callback(self):
         """Test using a closure as a callback."""
@@ -768,7 +768,7 @@ r3 = await increment()
 print(r3['count'])
 """
         )
-        assert "3" in result.stdout
+        assert b"3" in result.stdout
 
 
 class TestAsyncCallbackIsolation:
@@ -802,7 +802,7 @@ class TestAsyncCallbackIsolation:
         )
 
         result = sandbox.execute("r = await double(value=21); print(r['result'])")
-        assert "42" in result.stdout
+        assert b"42" in result.stdout
 
     def test_async_callback_from_async_context(self):
         """Test async callbacks work when called from async context."""
@@ -823,7 +823,7 @@ class TestAsyncCallbackIsolation:
                 ]
             )
             result = sandbox.execute("r = await triple(value=10); print(r['result'])")
-            assert "30" in result.stdout
+            assert b"30" in result.stdout
 
         asyncio.run(main())
 
@@ -856,7 +856,7 @@ r2 = await enqueue(item="second")
 r3 = await enqueue(item="third")
 print(f"queued {r3['queue_size']} items")
 """)
-        assert "queued 3 items" in result.stdout
+        assert b"queued 3 items" in result.stdout
 
         # Verify items were actually put in the queue
         items = []
@@ -896,7 +896,7 @@ r2 = await increment()
 r3 = await increment()
 print(f"final count: {r3['count']}")
 """)
-        assert "final count: 3" in result.stdout
+        assert b"final count: 3" in result.stdout
         assert counter["value"] == 3
 
     def test_async_callback_parallel_execution(self):
@@ -935,7 +935,7 @@ results = await asyncio.gather(
 )
 print(f"completed {len(results)} tasks")
 """)
-        assert "completed 3 tasks" in result.stdout
+        assert b"completed 3 tasks" in result.stdout
         assert len(call_times) == 3
 
         # Verify callbacks ran in parallel (overlapping time ranges)
@@ -966,7 +966,7 @@ print(f"completed {len(results)} tasks")
             result = sandbox.execute(
                 "r = await sync_double(value=21); print(r['doubled'])"
             )
-            assert "42" in result.stdout
+            assert b"42" in result.stdout
 
         asyncio.run(main())
 
@@ -1000,7 +1000,7 @@ s = await sync_cb(name="first")
 a = await async_cb(name="second")
 print(f"{s['type']}-{a['type']}")
 """)
-        assert "sync-async" in result.stdout
+        assert b"sync-async" in result.stdout
         assert results_order == ["sync-first", "async-second"]
 
     def test_async_callback_error_propagation(self):
@@ -1037,8 +1037,8 @@ except Exception as e:
     print(f"caught: {type(e).__name__}")
     print(f"has_message: {'Specific error message' in str(e)}")
 """)
-        assert "caught: RuntimeError" in result.stdout
-        assert "has_message: True" in result.stdout
+        assert b"caught: RuntimeError" in result.stdout
+        assert b"has_message: True" in result.stdout
 
 
 class TestConcurrentAsyncCallbacks:
@@ -1112,7 +1112,7 @@ for i, r in enumerate(results):
 
 print("PASS")
 """)
-            assert "PASS" in result.stdout, (
+            assert b"PASS" in result.stdout, (
                 f"Iteration {iteration} failed: {result.stdout}"
             )
 
@@ -1156,7 +1156,7 @@ assert results[2]["value"] == 3, f"Third result should be value=3, got {results[
 
 print("ORDER_PRESERVED")
 """)
-        assert "ORDER_PRESERVED" in result.stdout, f"Failed: {result.stdout}"
+        assert b"ORDER_PRESERVED" in result.stdout, f"Failed: {result.stdout}"
 
     def test_many_concurrent_callbacks_stress(self):
         """Stress test with many concurrent callbacks."""
@@ -1194,7 +1194,7 @@ if indices != expected:
 
 print("STRESS_PASS")
 """)
-        assert "STRESS_PASS" in result.stdout, f"Failed: {result.stdout}"
+        assert b"STRESS_PASS" in result.stdout, f"Failed: {result.stdout}"
 
     def test_subtask_id_keying_directly(self):
         """Directly test that subtask IDs are used to key results.
@@ -1230,4 +1230,4 @@ assert tags == ["first", "second", "third"], f"Wrong tags: {tags}"
 
 print("SUBTASK_KEYING_OK")
 """)
-        assert "SUBTASK_KEYING_OK" in result.stdout, f"Failed: {result.stdout}"
+        assert b"SUBTASK_KEYING_OK" in result.stdout, f"Failed: {result.stdout}"

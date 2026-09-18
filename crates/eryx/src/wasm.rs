@@ -194,6 +194,7 @@ fn classify_epoch_interrupt(
 /// **suspension**, which causes the import to poison the store's fuel and halt
 /// the guest synchronously.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub enum CallbackHostResult {
     /// The callback succeeded; the JSON value is returned to Python.
     Ok(String),
@@ -231,8 +232,8 @@ pub struct TraceRequest {
 pub struct OutputRequest {
     /// Stream identifier: 0 = stdout, 1 = stderr.
     pub stream: u32,
-    /// The text that was written.
-    pub data: String,
+    /// The raw bytes that were written.
+    pub data: Vec<u8>,
 }
 
 /// Request for a network operation from Python code.
@@ -241,6 +242,7 @@ pub struct OutputRequest {
 /// [`mpsc`](tokio::sync::mpsc) channel. Each request that expects a reply
 /// carries a oneshot `response_tx` for the handler to send the result back.
 #[derive(Debug)]
+#[non_exhaustive]
 pub enum NetRequest {
     // TCP operations
     /// Connect to a host over TCP.
@@ -353,10 +355,10 @@ pub struct HostCallbackInfo {
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct ExecutionOutput {
-    /// Captured stdout from the Python execution.
-    pub stdout: String,
-    /// Captured stderr from the Python execution.
-    pub stderr: String,
+    /// Captured stdout from the Python execution (raw bytes).
+    pub stdout: Vec<u8>,
+    /// Captured stderr from the Python execution (raw bytes).
+    pub stderr: Vec<u8>,
     /// Peak memory usage in bytes during execution.
     pub peak_memory_bytes: u64,
     /// Execution duration.
@@ -383,8 +385,8 @@ impl ExecutionOutput {
     /// the returned value when result capture is available.
     #[must_use]
     pub fn new(
-        stdout: String,
-        stderr: String,
+        stdout: Vec<u8>,
+        stderr: Vec<u8>,
         peak_memory_bytes: u64,
         duration: Duration,
         callback_invocations: u32,
@@ -400,6 +402,18 @@ impl ExecutionOutput {
             result: None,
             result_error: None,
         }
+    }
+
+    /// Decode stdout as UTF-8, replacing invalid sequences with U+FFFD.
+    #[must_use]
+    pub fn stdout_text(&self) -> String {
+        String::from_utf8_lossy(&self.stdout).into_owned()
+    }
+
+    /// Decode stderr as UTF-8, replacing invalid sequences with U+FFFD.
+    #[must_use]
+    pub fn stderr_text(&self) -> String {
+        String::from_utf8_lossy(&self.stderr).into_owned()
     }
 }
 
@@ -778,7 +792,7 @@ impl SandboxImports for ExecutorState {
     }
 
     /// Report output (stdout/stderr) to the host in real-time.
-    fn report_output(&mut self, stream_id: u32, data: String) {
+    fn report_output(&mut self, stream_id: u32, data: Vec<u8>) {
         // Drop output once suspended: no side effects after a suspension.
         if self.suspended.is_some() {
             return;

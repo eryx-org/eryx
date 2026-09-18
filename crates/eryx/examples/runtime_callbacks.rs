@@ -155,7 +155,7 @@ print(f"Formal: {formal['greeting']}")
         )
         .await?;
 
-    println!("Output:\n{}", result.stdout);
+    println!("Output:\n{}", result.stdout_text());
 
     // Example 2: Using the dynamic "calculate" callback
     println!("=== Example 2: Dynamic 'calculate' callback ===");
@@ -177,7 +177,7 @@ for op, a, b in operations:
         )
         .await?;
 
-    println!("Output:\n{}", result.stdout);
+    println!("Output:\n{}", result.stdout_text());
 
     // Example 3: Using the dynamic "lookup" callback
     println!("=== Example 3: Dynamic 'lookup' callback ===");
@@ -197,7 +197,7 @@ for key in keys:
         )
         .await?;
 
-    println!("Output:\n{}", result.stdout);
+    println!("Output:\n{}", result.stdout_text());
 
     // Example 4: Introspection - Python can discover the dynamic callbacks
     println!("=== Example 4: Introspection ===");
@@ -219,7 +219,7 @@ for cb in callbacks:
         )
         .await?;
 
-    println!("Output:\n{}", result.stdout);
+    println!("Output:\n{}", result.stdout_text());
 
     // Example 5: Error handling with dynamic callbacks
     println!("=== Example 5: Error handling ===");
@@ -240,7 +240,7 @@ except Exception as e:
         )
         .await?;
 
-    println!("Output:\n{}", result.stdout);
+    println!("Output:\n{}", result.stdout_text());
 
     println!("\n=== Summary ===");
     println!("DynamicCallback is useful when:");

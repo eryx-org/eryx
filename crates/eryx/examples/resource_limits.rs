@@ -109,7 +109,7 @@ print("\n".join(results))
             .await
     })?;
 
-    println!("Output:\n{}", result.stdout);
+    println!("Output:\n{}", result.stdout_text());
     println!(
         "Callback invocations recorded: {}\n",
         result.stats.callback_invocations
@@ -140,7 +140,7 @@ print(f"First sleep completed: {result}")
     });
 
     match result {
-        Ok(r) => println!("Completed in {:?}:\n{}", start.elapsed(), r.stdout),
+        Ok(r) => println!("Completed in {:?}:\n{}", start.elapsed(), r.stdout_text()),
         Err(e) => println!("Error after {:?}: {}", start.elapsed(), e),
     }
 
@@ -179,7 +179,7 @@ except Exception as e:
             .await
     })?;
 
-    println!("Output:\n{}", result.stdout);
+    println!("Output:\n{}", result.stdout_text());
 
     // Example 4: Fuel limit (instruction counting)
     println!("\n--- Example 4: Fuel Limit (Instruction Counting) ---");
@@ -206,7 +206,8 @@ print(f"Sum: {x}")
             .await
     })?;
     println!("Simple code succeeded:");
-    println!("  Output: {}", result.stdout.trim());
+    let stdout = result.stdout_text();
+    println!("  Output: {}", stdout.trim());
     println!(
         "  Fuel consumed: {:?} instructions",
         result.stats.fuel_consumed
@@ -237,7 +238,7 @@ print(f"Total: {total}")
     });
 
     match result {
-        Ok(r) => println!("Unexpectedly succeeded: {}", r.stdout),
+        Ok(r) => println!("Unexpectedly succeeded: {}", r.stdout_text()),
         Err(e) => println!("Fuel exhausted as expected:\n  Error: {}", e),
     }
 
@@ -288,7 +289,7 @@ for i in range(5):
             .await
     })?;
 
-    println!("\nOutput:\n{}", result.stdout);
+    println!("\nOutput:\n{}", result.stdout_text());
     println!("Execution stats:");
     println!("  - Duration: {:?}", result.stats.duration);
     println!(

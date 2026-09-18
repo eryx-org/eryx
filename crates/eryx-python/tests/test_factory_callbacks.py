@@ -34,18 +34,18 @@ class TestFactoryCallbacks:
         result = sandbox.execute(
             "t = await get_time(); r = await add(a=3, b=4); print(t['timestamp'], r['sum'])"
         )
-        assert result.stdout.strip() == "1234 7"
+        assert result.stdout.strip() == b"1234 7"
 
     def test_introspection_lists_baked_callbacks(self, callback_factory):
         sandbox = callback_factory.create_sandbox()
         result = sandbox.execute("print(sorted(c['name'] for c in list_callbacks()))")
-        assert result.stdout.strip() == "['add', 'get_time']"
+        assert result.stdout.strip() == b"['add', 'get_time']"
 
     def test_repeated_sandboxes_keep_working(self, callback_factory):
         for i in range(3):
             sandbox = callback_factory.create_sandbox()
             result = sandbox.execute(f"print((await add(a={i}, b=1))['sum'])")
-            assert result.stdout.strip() == str(i + 1)
+            assert result.stdout.strip() == str(i + 1).encode()
 
     def test_explicit_callbacks_override_the_baked_set(self, callback_factory):
         sandbox = callback_factory.create_sandbox(
@@ -54,12 +54,12 @@ class TestFactoryCallbacks:
         result = sandbox.execute(
             "print(sorted(c['name'] for c in list_callbacks()), await ping())"
         )
-        assert result.stdout.strip() == "['ping'] pong"
+        assert result.stdout.strip() == b"['ping'] pong"
 
     def test_session_registers_factory_callbacks_by_default(self, callback_factory):
         session = callback_factory.create_session()
         result = session.execute("print((await get_time())['timestamp'])")
-        assert result.stdout.strip() == "1234"
+        assert result.stdout.strip() == b"1234"
 
     def test_save_and_load_with_callbacks(self, callback_factory, tmp_path):
         path = tmp_path / "factory.bin"
@@ -68,12 +68,12 @@ class TestFactoryCallbacks:
         loaded = eryx.SandboxFactory.load(path, callbacks=CALLBACKS)
         sandbox = loaded.create_sandbox()
         result = sandbox.execute("print((await add(a=20, b=22))['sum'])")
-        assert result.stdout.strip() == "42"
+        assert result.stdout.strip() == b"42"
 
         # Loading without callbacks still works; the sandbox just has none.
         bare = eryx.SandboxFactory.load(path)
         result = bare.create_sandbox().execute("print(list_callbacks())")
-        assert result.stdout.strip() == "[]"
+        assert result.stdout.strip() == b"[]"
 
 
 class TestFactoryCallbacksWithSetupCode:
@@ -84,4 +84,4 @@ class TestFactoryCallbacksWithSetupCode:
         )
         sandbox = factory.create_sandbox()
         result = sandbox.execute("print((await add(a=base, b=1))['sum'])")
-        assert result.stdout.strip() == "101"
+        assert result.stdout.strip() == b"101"

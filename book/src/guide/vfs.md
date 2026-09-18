@@ -38,7 +38,7 @@ result = session.execute("""
 with open('/data/hello.txt', 'r') as f:
     print(f.read())
 """)
-print(result.stdout)  # "Hello, VFS!"
+print(result.stdout_text)  # "Hello, VFS!"
 ```
 
 ## Default Mount Path
@@ -86,7 +86,7 @@ with open('/data/example.txt', 'r') as f:
     content = f.read()
     print(content)
 """)
-print(result.stdout)
+print(result.stdout_text)
 # Line 1
 # Line 2
 ```
@@ -104,7 +104,7 @@ session.execute("open('/data/log.txt', 'a').write('Entry 2\\n')")
 session.execute("open('/data/log.txt', 'a').write('Entry 3\\n')")
 
 result = session.execute("print(open('/data/log.txt').read())")
-print(result.stdout)
+print(result.stdout_text)
 # Entry 1
 # Entry 2
 # Entry 3
@@ -130,7 +130,7 @@ with open('/data/binary.bin', 'rb') as f:
     data = f.read()
 print(list(data))
 """)
-print(result.stdout)  # "[0, 1, 2, 255, 254, 253]"
+print(result.stdout_text)  # "[0, 1, 2, 255, 254, 253]"
 ```
 
 ### Using pathlib
@@ -155,7 +155,7 @@ result = session.execute("""
 from pathlib import Path
 print(Path('/data/pathlib_test.txt').read_text())
 """)
-print(result.stdout)  # "Written with pathlib"
+print(result.stdout_text)  # "Written with pathlib"
 ```
 
 ## Directory Operations
@@ -177,7 +177,7 @@ with open('/data/nested/deep/directory/file.txt', 'w') as f:
 """)
 
 result = session.execute("print(open('/data/nested/deep/directory/file.txt').read())")
-print(result.stdout)  # "Deep file"
+print(result.stdout_text)  # "Deep file"
 ```
 
 ### Listing Directories
@@ -200,7 +200,7 @@ import os
 files = sorted(os.listdir('/data'))
 print(files)
 """)
-print(result.stdout)  # "['a.txt', 'b.txt', 'c.txt']"
+print(result.stdout_text)  # "['a.txt', 'b.txt', 'c.txt']"
 ```
 
 ### Deleting Files and Directories
@@ -242,7 +242,7 @@ session1.execute("open('/data/shared.txt', 'w').write('from session 1')")
 # Session 2 can read the same file
 session2 = eryx.Session(vfs=storage)
 result = session2.execute("print(open('/data/shared.txt').read())")
-print(result.stdout)  # "from session 1"
+print(result.stdout_text)  # "from session 1"
 ```
 
 ## Isolated Storage
@@ -264,7 +264,7 @@ result = session2.execute("""
 import os
 print(f"exists: {os.path.exists('/data/isolated.txt')}")
 """)
-print(result.stdout)  # "exists: False"
+print(result.stdout_text)  # "exists: False"
 ```
 
 ## VFS Persistence Across Reset
@@ -285,7 +285,7 @@ session.reset()
 
 # VFS data is still there
 result = session.execute("print(open('/data/persist.txt').read())")
-print(result.stdout)  # "before reset"
+print(result.stdout_text)  # "before reset"
 ```
 
 ## SQLite Databases in VFS
@@ -316,7 +316,7 @@ conn.close()
 
 print(names)
 """)
-print(result.stdout)  # "['Alice', 'Bob']"
+print(result.stdout_text)  # "['Alice', 'Bob']"
 ```
 
 ### File-Based Databases
@@ -349,7 +349,7 @@ for name, price in cursor.fetchall():
     print(f"{name}: ${price}")
 conn.close()
 """)
-print(result.stdout)
+print(result.stdout_text)
 # Widget: $9.99
 # Gadget: $19.99
 ```
@@ -383,7 +383,7 @@ cursor.execute('SELECT text FROM messages')
 print(cursor.fetchone()[0])
 conn.close()
 """)
-print(result.stdout)  # "Hello from session 1"
+print(result.stdout_text)  # "Hello from session 1"
 ```
 
 ## Host Filesystem Isolation

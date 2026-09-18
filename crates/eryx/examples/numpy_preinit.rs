@@ -182,7 +182,7 @@ print(f"Mean: {a.mean()}")
         )
         .await?;
     println!("  Executed in {:?}", start.elapsed());
-    println!("Output:\n{}", result.stdout);
+    println!("Output:\n{}", result.stdout_text());
 
     // Create multiple sandboxes to show the speed
     println!("=== Multiple Sandbox Creation Benchmark ===\n");
@@ -205,7 +205,7 @@ print(f"Mean: {a.mean()}")
         let result = sandbox
             .execute("import numpy as np; print(np.sum([1,2,3]))")
             .await?;
-        assert!(result.stdout.contains("6"));
+        assert!(result.stdout_text().contains("6"));
 
         println!("  Sandbox {}: {:?}", i + 1, elapsed);
     }

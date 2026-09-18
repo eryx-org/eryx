@@ -24,22 +24,22 @@ pub(crate) struct PyOutputHandler {
 
 #[async_trait]
 impl OutputHandler for PyOutputHandler {
-    async fn on_output(&self, chunk: &str) {
+    async fn on_output(&self, chunk: &[u8]) {
         if let Some(ref callback) = self.on_stdout {
-            let chunk = chunk.to_string();
+            let chunk = chunk.to_vec();
             Python::attach(|py| {
-                if let Err(e) = callback.call1(py, (chunk,)) {
+                if let Err(e) = callback.call1(py, (chunk.as_slice(),)) {
                     e.print(py);
                 }
             });
         }
     }
 
-    async fn on_stderr(&self, chunk: &str) {
+    async fn on_stderr(&self, chunk: &[u8]) {
         if let Some(ref callback) = self.on_stderr {
-            let chunk = chunk.to_string();
+            let chunk = chunk.to_vec();
             Python::attach(|py| {
-                if let Err(e) = callback.call1(py, (chunk,)) {
+                if let Err(e) = callback.call1(py, (chunk.as_slice(),)) {
                     e.print(py);
                 }
             });

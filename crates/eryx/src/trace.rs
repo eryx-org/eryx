@@ -19,6 +19,7 @@ pub struct TraceEvent {
 /// The kind of trace event.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum TraceEventKind {
     /// About to execute a line (from `sys.settrace` 'line' event).
     Line,
@@ -64,14 +65,14 @@ pub trait TraceHandler: Send + Sync {
 /// Handler for streaming output during execution.
 #[async_trait]
 pub trait OutputHandler: Send + Sync {
-    /// Called when stdout output is produced.
-    async fn on_output(&self, chunk: &str);
+    /// Called when stdout output is produced (raw bytes).
+    async fn on_output(&self, chunk: &[u8]);
 
-    /// Called when stderr output is produced.
+    /// Called when stderr output is produced (raw bytes).
     ///
     /// The default implementation does nothing. Override this method
     /// to handle stderr separately from stdout.
-    async fn on_stderr(&self, chunk: &str) {
+    async fn on_stderr(&self, chunk: &[u8]) {
         // Default: ignore stderr
         let _ = chunk;
     }

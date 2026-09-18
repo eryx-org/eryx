@@ -34,7 +34,7 @@ from jinja2 import Template
 template = Template("Hello {{ name }}!")
 print(template.render(name="World"))
 """)
-print(result.stdout)  # "Hello World!"
+print(result.stdout_text)  # "Hello World!"
 ```
 
 ## Adding Packages to a Sandbox Builder (Rust)
@@ -59,7 +59,7 @@ template = Template("Hello {{ name }}!")
 print(template.render(name="Rust"))
     "#).await?;
 
-    println!("{}", result.stdout);
+    println!("{}", result.stdout_text());
 
     Ok(())
 }
@@ -230,7 +230,7 @@ print(f"base64: {encoded}")
 print(f"hash: {hash_val}")
 print(f"regex: {match.group()}")
 """)
-print(result.stdout)
+print(result.stdout_text)
 ```
 
 ## Common Package Examples
@@ -251,7 +251,7 @@ from jinja2 import Template
 t = Template("{% for item in items %}{{ item }}{% endfor %}")
 print(t.render(items=[1, 2, 3]))
 """)
-print(result.stdout)  # "123"
+print(result.stdout_text)  # "123"
 ```
 
 ### Requests (HTTP Client)

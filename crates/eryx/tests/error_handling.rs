@@ -420,8 +420,11 @@ print(message)
 
     assert!(result.is_ok(), "Unicode should work");
     let output = result.unwrap();
-    assert!(output.stdout.contains("世界"), "Should contain Chinese");
-    assert!(output.stdout.contains("🌍"), "Should contain emoji");
+    assert!(
+        output.stdout_text().contains("世界"),
+        "Should contain Chinese"
+    );
+    assert!(output.stdout_text().contains("🌍"), "Should contain emoji");
 }
 
 #[tokio::test]
@@ -458,7 +461,7 @@ async fn test_multiple_errors_in_sequence() {
     // Session should still work after error
     let result2 = session.execute("print('recovered')").run().await;
     assert!(result2.is_ok());
-    assert!(result2.unwrap().stdout.contains("recovered"));
+    assert!(result2.unwrap().stdout_text().contains("recovered"));
 
     // Another error
     let result3 = session.execute("y = undefined_var").run().await;
@@ -489,7 +492,10 @@ for i in range(1000):
         output.stdout.len() > 100_000,
         "Should have substantial output"
     );
-    assert!(output.stdout.contains("Line 999"), "Should have last line");
+    assert!(
+        output.stdout_text().contains("Line 999"),
+        "Should have last line"
+    );
 }
 
 #[tokio::test]
@@ -544,7 +550,7 @@ async fn test_execution_timeout_allows_fast_code() {
         .await;
 
     assert!(result.is_ok(), "Fast code should succeed: {:?}", result);
-    assert!(result.unwrap().stdout.contains("499500"));
+    assert!(result.unwrap().stdout_text().contains("499500"));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -612,7 +618,7 @@ async fn test_session_recovers_after_timeout() {
         "Session should recover after timeout: {:?}",
         result
     );
-    assert!(result.unwrap().stdout.contains("recovered"));
+    assert!(result.unwrap().stdout_text().contains("recovered"));
 }
 
 #[tokio::test]

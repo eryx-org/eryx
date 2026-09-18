@@ -50,6 +50,7 @@ fn to_proto_trace_event(event: &TraceEvent) -> v1::TraceEvent {
             name.clone(),
             *duration_ms,
         ),
+        _ => ("unknown", String::new(), String::new(), String::new(), 0),
     };
 
     v1::TraceEvent {
@@ -78,6 +79,7 @@ impl TraceHandler for GrpcTraceHandler {
                 TraceEventKind::Exception { .. } => "exception",
                 TraceEventKind::CallbackStart { .. } => "callback_start",
                 TraceEventKind::CallbackEnd { .. } => "callback_end",
+                _ => "unknown",
             },
             lineno = event.lineno,
             "trace event"

@@ -30,7 +30,7 @@
 //!
 //!     let result = sandbox.execute("print('Hello from Python!')").await?;
 //!
-//!     println!("Output: {}", result.stdout);
+//!     println!("Output: {}", result.stdout_text());
 //!     Ok(())
 //! }
 //! # #[cfg(not(feature = "embedded"))]
@@ -122,6 +122,7 @@ pub use sandbox::{
 };
 pub use secrets::{
     FileScrubPolicy, OutputScrubPolicy, SecretConfig, generate_placeholder, scrub_placeholders,
+    scrub_placeholders_bytes,
 };
 pub use session::{
     InProcessSession, PythonStateSnapshot, Session, SessionExecutor, SnapshotMetadata,

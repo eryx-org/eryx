@@ -17,7 +17,7 @@ async fn main() -> Result<(), eryx::Error> {
 
     // Execute code
     let result = sandbox.execute("print('Hello!')").await?;
-    println!("{}", result.stdout);
+    println!("{}", result.stdout_text());
 
     Ok(())
 }
@@ -31,7 +31,7 @@ sandbox = eryx.Sandbox()
 
 # Execute code
 result = sandbox.execute("print('Hello!')")
-print(result.stdout)  # "Hello!"
+print(result.stdout_text)  # "Hello!"
 ```
 <!-- langtabs-end -->
 
@@ -64,7 +64,7 @@ except Exception as e:
     print(f"Access blocked: {type(e).__name__}")
     "#).await?;
 
-    println!("{}", result.stdout);
+    println!("{}", result.stdout_text());
     // Output: "Access blocked: FileNotFoundError" or shows empty virtual directory
 
     Ok(())
@@ -86,7 +86,7 @@ except Exception as e:
     print(f"Access blocked: {type(e).__name__}")
 """)
 
-print(result.stdout)
+print(result.stdout_text)
 # Output: "Access blocked: FileNotFoundError" or shows empty virtual directory
 ```
 <!-- langtabs-end -->
@@ -107,7 +107,7 @@ async fn main() -> Result<(), eryx::Error> {
 
     let result = sandbox.execute("x = sum(range(1000))").await?;
 
-    println!("stdout: {}", result.stdout);
+    println!("stdout: {}", result.stdout_text());
     println!("Duration: {:?}", result.stats.duration);
     println!("Peak memory: {:?} bytes", result.stats.peak_memory_bytes);
     println!("Fuel consumed: {:?}", result.stats.fuel_consumed);
@@ -170,7 +170,7 @@ async fn main() -> Result<(), eryx::Error> {
     let sandbox = Sandbox::embedded().build()?;
 
     match sandbox.execute("raise ValueError('oops')").await {
-        Ok(result) => println!("Success: {}", result.stdout),
+        Ok(result) => println!("Success: {}", result.stdout_text()),
         Err(Error::Execution(message)) => {
             println!("Python error: {}", message);
         }
@@ -225,7 +225,7 @@ except NameError:
     print("x is not defined")
     "#).await?;
 
-    println!("{}", result.stdout);  // "x is not defined"
+    println!("{}", result.stdout_text());  // "x is not defined"
 
     Ok(())
 }
@@ -247,7 +247,7 @@ except NameError:
     print("x is not defined")
 """)
 
-print(result.stdout)  # "x is not defined"
+print(result.stdout_text)  # "x is not defined"
 ```
 <!-- langtabs-end -->
 
@@ -271,7 +271,7 @@ async fn main() -> Result<(), eryx::Error> {
     for i in 0..5 {
         let sandbox = Sandbox::embedded().build()?;
         let result = sandbox.execute(&format!("print('sandbox {}')", i)).await?;
-        println!("{}", result.stdout);
+        println!("{}", result.stdout_text());
     }
     Ok(())
 }
@@ -289,7 +289,7 @@ print(f"Factory size: {factory.size_bytes} bytes")
 for i in range(5):
     sandbox = factory.create_sandbox()
     result = sandbox.execute(f"print('sandbox {i}')")
-    print(result.stdout)
+    print(result.stdout_text)
 ```
 <!-- langtabs-end -->
 
@@ -316,7 +316,7 @@ from jinja2 import Template
 t = Template("Hello {{ name }}")
 print(t.render(name="World"))
 """)
-print(result.stdout)  # "Hello World"
+print(result.stdout_text)  # "Hello World"
 ```
 
 ### Saving and Loading Factories

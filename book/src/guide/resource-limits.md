@@ -40,7 +40,7 @@ async fn main() -> Result<(), eryx::Error> {
         .build()?;
 
     let result = sandbox.execute("print('hello')").await?;
-    println!("{}", result.stdout);
+    println!("{}", result.stdout_text());
 
     Ok(())
 }
@@ -59,7 +59,7 @@ limits = eryx.ResourceLimits(
 
 sandbox = eryx.Sandbox(resource_limits=limits)
 result = sandbox.execute("print('hello')")
-print(result.stdout)
+print(result.stdout_text)
 ```
 <!-- langtabs-end -->
 
@@ -162,7 +162,7 @@ except MemoryError:
     print("Memory limit exceeded")
     "#).await?;
 
-    println!("{}", result.stdout);
+    println!("{}", result.stdout_text());
 
     Ok(())
 }
@@ -181,7 +181,7 @@ try:
 except MemoryError:
     print("Memory limit exceeded")
 """)
-print(result.stdout)
+print(result.stdout_text)
 ```
 <!-- langtabs-end -->
 
@@ -249,7 +249,7 @@ for i in range(10):
         print(f"Call {i+1} failed: {type(e).__name__}")
         break
 """)
-print(result.stdout)
+print(result.stdout_text)
 ```
 
 ## Fuel Limits (Instruction Counting)
@@ -353,7 +353,7 @@ limits = eryx.ResourceLimits.unlimited()
 
 sandbox = eryx.Sandbox(resource_limits=limits)
 result = sandbox.execute("print('no limits!')")
-print(result.stdout)
+print(result.stdout_text)
 ```
 
 ## Resource Usage Reporting
@@ -423,7 +423,7 @@ async fn main() -> Result<(), eryx::Error> {
 
     // Session works again
     let result = session.execute("print('recovered')").await?;
-    println!("{}", result.stdout);  // "recovered"
+    println!("{}", result.stdout_text());  // "recovered"
 
     Ok(())
 }

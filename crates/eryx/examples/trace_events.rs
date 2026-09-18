@@ -393,6 +393,10 @@ impl TraceHandler for VisualTraceHandler {
                 format!("[{:2}] ← CALLBACK {} ({}ms)", count, name, duration_ms),
                 Color::Cyan,
             ),
+            _ => (
+                format!("[{:2}] TRACE {}", count, event.lineno),
+                Color::White,
+            ),
         };
 
         self.events.lock().expect("lock events").push((desc, color));
@@ -459,7 +463,7 @@ async fn run_visual_example(
     execute!(stdout, MoveUp(handler.num_lines as u16))?;
     handler.render()?;
 
-    Ok(result.stdout)
+    Ok(result.stdout_text())
 }
 
 fn print_header(text: &str) -> std::io::Result<()> {

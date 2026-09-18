@@ -78,7 +78,7 @@ print("\nNumpy loaded via with_package()!")
         .await?;
 
     println!("  Executed in {:?}", start.elapsed());
-    println!("\nOutput:\n{}", result.stdout);
+    println!("\nOutput:\n{}", result.stdout_text());
 
     // Test warm cache (automatic at $TMPDIR/eryx-cache)
     println!("--- Second sandbox (cache hit) ---\n");
@@ -96,7 +96,8 @@ print("\nNumpy loaded via with_package()!")
     let result = sandbox2
         .execute("import numpy; print(numpy.__version__)")
         .await?;
-    println!("  numpy version: {}", result.stdout.trim());
+    let stdout = result.stdout_text();
+    println!("  numpy version: {}", stdout.trim());
 
     // Summary
     println!("\n=== Summary ===");

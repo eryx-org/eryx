@@ -21,7 +21,7 @@ async fn run_adversarial_test(code: &str, test_name: &str) -> (bool, String) {
     let result = sandbox.execute(code).await;
     match result {
         Ok(output) => {
-            let stdout = output.stdout;
+            let stdout = output.stdout_text();
             let has_security_issue =
                 stdout.contains("SECURITY ISSUE") || stdout.contains("BYPASS SUCCESSFUL");
             if has_security_issue {
@@ -47,12 +47,12 @@ async fn run_adversarial_test_verbose(code: &str, test_name: &str) -> (bool, Str
     let result = sandbox.execute(code).await;
     match result {
         Ok(output) => {
-            let stdout = output.stdout;
+            let stdout = output.stdout_text();
             let has_security_issue =
                 stdout.contains("SECURITY ISSUE") || stdout.contains("BYPASS SUCCESSFUL");
             println!("=== {} ===\n{}", test_name, stdout);
             if !output.stderr.is_empty() {
-                println!("stderr: {}", output.stderr);
+                println!("stderr: {}", output.stderr_text());
             }
             (!has_security_issue, stdout)
         }
@@ -146,9 +146,9 @@ print(f"Socket class name: {socket_class_name}")
     assert!(result.is_ok(), "Should execute: {:?}", result);
     let output = result.unwrap();
     assert!(
-        output.stdout.contains("socket is _socket: True"),
+        output.stdout_text().contains("socket is _socket: True"),
         "Both modules should be the same shim: {}",
-        output.stdout
+        String::from_utf8_lossy(&output.stdout)
     );
 }
 
@@ -184,9 +184,9 @@ print("_socket import test passed - it's our shim")
     assert!(result.is_ok(), "Should execute: {:?}", result);
     let output = result.unwrap();
     assert!(
-        output.stdout.contains("_socket import test passed"),
+        output.stdout_text().contains("_socket import test passed"),
         "Should use shimmed _socket: {}",
-        output.stdout
+        String::from_utf8_lossy(&output.stdout)
     );
 }
 
@@ -229,9 +229,10 @@ except Exception as e:
     assert!(result.is_ok(), "Should execute: {:?}", result);
     let output = result.unwrap();
     assert!(
-        output.stdout.contains("EXPECTED") && !output.stdout.contains("SECURITY ISSUE"),
+        output.stdout_text().contains("EXPECTED")
+            && !output.stdout_text().contains("SECURITY ISSUE"),
         "ctypes socket bypass should be blocked: {}",
-        output.stdout
+        String::from_utf8_lossy(&output.stdout)
     );
 }
 
@@ -274,9 +275,10 @@ except Exception as e:
     assert!(result.is_ok(), "Should execute: {:?}", result);
     let output = result.unwrap();
     assert!(
-        output.stdout.contains("EXPECTED") && !output.stdout.contains("SECURITY ISSUE"),
+        output.stdout_text().contains("EXPECTED")
+            && !output.stdout_text().contains("SECURITY ISSUE"),
         "/dev/tcp bypass should be blocked: {}",
-        output.stdout
+        String::from_utf8_lossy(&output.stdout)
     );
 }
 
@@ -314,9 +316,10 @@ except Exception as e:
     assert!(result.is_ok(), "Should execute: {:?}", result);
     let output = result.unwrap();
     assert!(
-        output.stdout.contains("EXPECTED") && !output.stdout.contains("SECURITY ISSUE"),
+        output.stdout_text().contains("EXPECTED")
+            && !output.stdout_text().contains("SECURITY ISSUE"),
         "subprocess network bypass should be blocked: {}",
-        output.stdout
+        String::from_utf8_lossy(&output.stdout)
     );
 }
 
@@ -358,9 +361,10 @@ finally:
     assert!(result.is_ok(), "Should execute: {:?}", result);
     let output = result.unwrap();
     assert!(
-        output.stdout.contains("EXPECTED") && !output.stdout.contains("SECURITY ISSUE"),
+        output.stdout_text().contains("EXPECTED")
+            && !output.stdout_text().contains("SECURITY ISSUE"),
         "Shimmed socket should respect NetConfig: {}",
-        output.stdout
+        String::from_utf8_lossy(&output.stdout)
     );
 }
 
@@ -406,13 +410,13 @@ print("WASI socket isolation test completed")
     let output = result.unwrap();
     assert!(
         output
-            .stdout
+            .stdout_text()
             .contains("Network access is properly channeled through eryx")
             || output
-                .stdout
+                .stdout_text()
                 .contains("WASI socket isolation test completed"),
         "Should show proper network channeling: {}",
-        output.stdout
+        String::from_utf8_lossy(&output.stdout)
     );
 }
 
@@ -455,7 +459,7 @@ else:
     let output = result.unwrap();
     // Note: This test documents current behavior - os module shouldn't have raw socket functions
     // but if it does, they should go through WASI which we don't import
-    println!("os network functions output: {}", output.stdout);
+    println!("os network functions output: {}", output.stdout_text());
 }
 
 /// Test that multiprocessing cannot be used to spawn processes with network access
@@ -492,9 +496,10 @@ except Exception as e:
     assert!(result.is_ok(), "Should execute: {:?}", result);
     let output = result.unwrap();
     assert!(
-        output.stdout.contains("EXPECTED") && !output.stdout.contains("SECURITY ISSUE"),
+        output.stdout_text().contains("EXPECTED")
+            && !output.stdout_text().contains("SECURITY ISSUE"),
         "multiprocessing should be blocked: {}",
-        output.stdout
+        String::from_utf8_lossy(&output.stdout)
     );
 }
 

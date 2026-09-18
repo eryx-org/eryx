@@ -324,8 +324,8 @@ message OutputEvent {
   // Which output stream this came from.
   OutputStream stream = 1;
 
-  // The output data.
-  string data = 2;
+  // The output data (raw bytes).
+  bytes data = 2;
 }
 
 // Output stream identifier.
@@ -339,11 +339,11 @@ message ExecuteResult {
   // Whether execution completed successfully.
   bool success = 1;
 
-  // Complete stdout output.
-  string stdout = 2;
+  // Complete stdout output (raw bytes).
+  bytes stdout = 2;
 
-  // Complete stderr output.
-  string stderr = 3;
+  // Complete stderr output (raw bytes).
+  bytes stderr = 3;
 
   // Human-readable message for a *sandbox* failure (timeout, fuel exhaustion,
   // WASM trap, invalid input, etc.). Empty when execution succeeded AND empty

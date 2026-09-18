@@ -16,7 +16,7 @@ class TestSandbox:
         """Test simple code execution."""
         sandbox = eryx.Sandbox()
         result = sandbox.execute('print("hello")')
-        assert result.stdout == "hello"
+        assert result.stdout == b"hello"
 
     def test_execute_returns_result(self):
         """Test that execute returns an ExecuteResult."""
@@ -42,7 +42,7 @@ print("line 1")
 print("line 2")
 print("line 3")
 """)
-        assert result.stdout == "line 1\nline 2\nline 3"
+        assert result.stdout == b"line 1\nline 2\nline 3"
 
     def test_arithmetic(self):
         """Test arithmetic operations."""
@@ -52,7 +52,7 @@ x = 2 + 3
 y = x * 4
 print(f"{x}, {y}")
 """)
-        assert result.stdout == "5, 20"
+        assert result.stdout == b"5, 20"
 
     def test_data_structures(self):
         """Test Python data structures work in sandbox."""
@@ -63,8 +63,8 @@ dct = {"a": 1, "b": 2}
 print(f"list: {lst}")
 print(f"dict: {dct}")
 """)
-        assert "list: [1, 2, 3]" in result.stdout
-        assert "dict: {'a': 1, 'b': 2}" in result.stdout
+        assert b"list: [1, 2, 3]" in result.stdout
+        assert b"dict: {'a': 1, 'b': 2}" in result.stdout
 
     def test_sandbox_isolation(self):
         """Test that sandbox is isolated from host filesystem."""
@@ -79,17 +79,38 @@ except Exception as e:
     print(f"blocked: {type(e).__name__}")
 """)
         # Should either fail or show an empty/virtual filesystem
-        assert "blocked" in result.stdout or "accessed" not in result.stdout
+        assert b"blocked" in result.stdout or b"accessed" not in result.stdout
 
     def test_sandbox_reuse(self):
         """Test that a sandbox can be reused for multiple executions."""
         sandbox = eryx.Sandbox()
 
         result1 = sandbox.execute('print("first")')
-        assert result1.stdout == "first"
+        assert result1.stdout == b"first"
 
         result2 = sandbox.execute('print("second")')
-        assert result2.stdout == "second"
+        assert result2.stdout == b"second"
+
+    def test_stdout_returns_bytes(self):
+        """Test that stdout is bytes and stdout_text is str."""
+        sandbox = eryx.Sandbox()
+        result = sandbox.execute('print("hello")')
+        assert isinstance(result.stdout, bytes)
+        assert isinstance(result.stderr, bytes)
+        assert isinstance(result.stdout_text, str)
+        assert isinstance(result.stderr_text, str)
+        assert result.stdout == b"hello"
+        assert result.stdout_text == "hello"
+
+    def test_surrogate_roundtrip(self):
+        """Test that unpaired surrogates survive the stdout pipeline via surrogateescape."""
+        sandbox = eryx.Sandbox()
+        result = sandbox.execute(r"""
+s = "hello \udce9 world"
+print(s, end="")
+""")
+        assert b"\xe9" in result.stdout
+        assert result.stdout_text  # lossy decode should not crash
 
 
 class TestNetConfig:
@@ -166,14 +187,14 @@ class TestNetConfig:
         config = eryx.NetConfig(allowed_hosts=["api.example.com"])
         sandbox = eryx.Sandbox(network=config)
         result = sandbox.execute('print("ok")')
-        assert result.stdout == "ok"
+        assert result.stdout == b"ok"
 
     def test_sandbox_with_permissive_network(self):
         """Test creating sandbox with permissive network config."""
         config = eryx.NetConfig.permissive()
         sandbox = eryx.Sandbox(network=config)
         result = sandbox.execute('print("permissive ok")')
-        assert result.stdout == "permissive ok"
+        assert result.stdout == b"permissive ok"
 
     def test_repr(self):
         """Test NetConfig repr."""
@@ -216,7 +237,7 @@ class TestResourceLimits:
         limits = eryx.ResourceLimits(execution_timeout_ms=10000)
         sandbox = eryx.Sandbox(resource_limits=limits)
         result = sandbox.execute('print("ok")')
-        assert result.stdout == "ok"
+        assert result.stdout == b"ok"
 
     def test_execution_timeout(self):
         """Test that execution timeout works."""
@@ -331,7 +352,7 @@ class TestSandboxFactory:
         assert sandbox is not None
 
         result = sandbox.execute("print('hello')")
-        assert result.stdout == "hello"
+        assert result.stdout == b"hello"
 
     def test_factory_multiple_sandboxes(self, sandbox_factory):
         """Test creating multiple sandboxes from same factory."""
@@ -341,8 +362,8 @@ class TestSandboxFactory:
         result1 = sandbox1.execute("print('sandbox1')")
         result2 = sandbox2.execute("print('sandbox2')")
 
-        assert result1.stdout == "sandbox1"
-        assert result2.stdout == "sandbox2"
+        assert result1.stdout == b"sandbox1"
+        assert result2.stdout == b"sandbox2"
 
     def test_factory_sandboxes_isolated(self, sandbox_factory):
         """Test that sandboxes from same factory are isolated."""
@@ -356,7 +377,7 @@ try:
 except NameError:
     print("isolated")
 """)
-        assert "isolated" in result.stdout
+        assert b"isolated" in result.stdout
 
     def test_cached_factory_sandboxes_are_isolated(self, sandbox_factory, tmp_path):
         """Test that a cache hit still produces an isolated sandbox."""
@@ -371,7 +392,7 @@ except NameError:
         result = second.execute(
             "print('clean' if 'cached_state' not in globals() else 'dirty')"
         )
-        assert result.stdout == "clean"
+        assert result.stdout == b"clean"
 
     def test_factory_save_and_load(self, sandbox_factory, tmp_path):
         """Test saving and loading a sandbox factory."""
@@ -387,7 +408,7 @@ except NameError:
 
         sandbox = loaded.create_sandbox()
         result = sandbox.execute("import json; print(json.dumps([1,2]))")
-        assert result.stdout == "[1, 2]"
+        assert result.stdout == b"[1, 2]"
 
     def test_factory_to_bytes(self, sandbox_factory):
         """Test getting factory as bytes."""
@@ -423,7 +444,7 @@ except NameError:
 
         # Just verify we can create and use the sandbox
         result = sandbox.execute("print('ok')")
-        assert result.stdout == "ok"
+        assert result.stdout == b"ok"
 
     def test_factory_stdlib_imports_work(self, sandbox_factory):
         """Test that stdlib imports work with factory."""
@@ -437,8 +458,8 @@ data = json.dumps({"x": 1})
 match = re.search(r"\\d+", data)
 print(f"json: {data}, match: {match.group()}")
 """)
-        assert "json:" in result.stdout
-        assert "match: 1" in result.stdout
+        assert b"json:" in result.stdout
+        assert b"match: 1" in result.stdout
 
     def test_factory_with_packages(self, jinja2_wheel, markupsafe_wheel):
         """Test factory with packages including native extensions.
@@ -457,7 +478,7 @@ from jinja2 import Template
 t = Template("Hello {{ name }}")
 print(t.render(name="PreInit"))
 """)
-        assert result.stdout == "Hello PreInit"
+        assert result.stdout == b"Hello PreInit"
 
 
 class TestNetworkIntegration:
@@ -479,7 +500,7 @@ print(f"AF_INET={socket.AF_INET}")
 print(f"SOCK_STREAM={socket.SOCK_STREAM}")
 print("socket import ok")
 """)
-        assert "socket import ok" in result.stdout
+        assert b"socket import ok" in result.stdout
 
     def test_ssl_shim_is_registered(self, network_sandbox):
         """Test that the ssl shim is properly registered in sys.modules.
@@ -509,7 +530,7 @@ if ssl_in_modules:
 else:
     print("FAIL: ssl not in sys.modules")
 """)
-        assert "SSL_SHIM_OK" in result.stdout, (
+        assert b"SSL_SHIM_OK" in result.stdout, (
             f"SSL shim not properly registered: {result.stdout}"
         )
 
@@ -521,7 +542,7 @@ ctx = ssl.create_default_context()
 print(f"SSLContext created: {type(ctx).__name__}")
 print("ssl import ok")
 """)
-        assert "ssl import ok" in result.stdout
+        assert b"ssl import ok" in result.stdout
 
     def test_sync_socket_tcp_connect_local(self, network_sandbox, http_server):
         """Test synchronous socket.connect() to local test server."""
@@ -559,8 +580,8 @@ try:
 except Exception as e:
     print(f"Error: {{e}}")
 """)
-        assert "SUCCESS" in result.stdout, f"Test failed: {result.stdout}"
-        assert "Got expected body" in result.stdout, f"Test failed: {result.stdout}"
+        assert b"SUCCESS" in result.stdout, f"Test failed: {result.stdout}"
+        assert b"Got expected body" in result.stdout, f"Test failed: {result.stdout}"
 
     def test_sync_socket_tcp_connect_external(self, network_sandbox):
         """Test synchronous socket.connect() to external service."""
@@ -587,7 +608,7 @@ try:
 except Exception as e:
     print(f"Error: {e}")
 """)
-        assert "SUCCESS" in result.stdout, f"Test failed: {result.stdout}"
+        assert b"SUCCESS" in result.stdout, f"Test failed: {result.stdout}"
 
     def test_sync_socket_https_external(self, network_sandbox):
         """Test synchronous HTTPS via socket + ssl.wrap_socket()."""
@@ -623,7 +644,7 @@ for host in hosts:
 else:
     print("All hosts failed")
 """)
-        assert "SUCCESS" in result.stdout, f"Test failed: {result.stdout}"
+        assert b"SUCCESS" in result.stdout, f"Test failed: {result.stdout}"
 
     def test_async_tcp_api_local(self, network_sandbox, http_server):
         """Test the async _eryx_async TCP API with local server."""
@@ -654,8 +675,8 @@ if b"Hello from test server" in full_response:
 _eryx_async.tcp_close(tcp_handle)
 print("SUCCESS")
 """)
-        assert "SUCCESS" in result.stdout, f"Test failed: {result.stdout}"
-        assert "Got expected body" in result.stdout, f"Test failed: {result.stdout}"
+        assert b"SUCCESS" in result.stdout, f"Test failed: {result.stdout}"
+        assert b"Got expected body" in result.stdout, f"Test failed: {result.stdout}"
 
     def test_async_tcp_api_external(self, network_sandbox):
         """Test the async _eryx_async TCP API with external service."""
@@ -684,7 +705,7 @@ for host in hosts:
 else:
     print("All hosts failed")
 """)
-        assert "SUCCESS" in result.stdout, f"Test failed: {result.stdout}"
+        assert b"SUCCESS" in result.stdout, f"Test failed: {result.stdout}"
 
     def test_async_tls_api_external(self):
         """Test the async _eryx_async TLS API with external service."""
@@ -727,7 +748,7 @@ for host in hosts:
 else:
     print("All hosts failed")
 """)
-        assert "SUCCESS" in result.stdout, f"Test failed: {result.stdout}"
+        assert b"SUCCESS" in result.stdout, f"Test failed: {result.stdout}"
 
     def test_network_blocked_host(self):
         """Test that blocked hosts are rejected."""
@@ -748,7 +769,7 @@ except OSError as e:
     else:
         print(f"Error: {e}")
 """)
-        assert "EXPECTED: Connection blocked" in result.stdout, (
+        assert b"EXPECTED: Connection blocked" in result.stdout, (
             f"Test failed: {result.stdout}"
         )
 
@@ -766,7 +787,7 @@ print(f"Connected to example.com")
 _eryx_async.tcp_close(tcp_handle)
 print("SUCCESS")
 """)
-        assert "SUCCESS" in result.stdout, f"Test failed: {result.stdout}"
+        assert b"SUCCESS" in result.stdout, f"Test failed: {result.stdout}"
 
         # Should NOT be able to connect to other hosts
         result = sandbox.execute("""
@@ -778,7 +799,7 @@ try:
 except OSError as e:
     print("EXPECTED: Connection to google.com blocked")
 """)
-        assert "EXPECTED: Connection to google.com blocked" in result.stdout, (
+        assert b"EXPECTED: Connection to google.com blocked" in result.stdout, (
             f"Test failed: {result.stdout}"
         )
 

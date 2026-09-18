@@ -213,9 +213,9 @@ print(f"PROTOCOL_TLS_CLIENT: {ssl.PROTOCOL_TLS_CLIENT}")
 
     assert!(result.is_ok(), "SSL import should work: {:?}", result);
     let output = result.unwrap();
-    assert!(output.stdout.contains("SSL module loaded: ssl"));
-    assert!(output.stdout.contains("HAS_SNI: True"));
-    assert!(output.stdout.contains("HAS_ALPN: True"));
+    assert!(output.stdout_text().contains("SSL module loaded: ssl"));
+    assert!(output.stdout_text().contains("HAS_SNI: True"));
+    assert!(output.stdout_text().contains("HAS_ALPN: True"));
 }
 
 #[tokio::test]
@@ -239,8 +239,8 @@ print(f"check_hostname: {ctx.check_hostname}")
 
     assert!(result.is_ok(), "SSL context should work: {:?}", result);
     let output = result.unwrap();
-    assert!(output.stdout.contains("Context created: SSLContext"));
-    assert!(output.stdout.contains("check_hostname: True"));
+    assert!(output.stdout_text().contains("Context created: SSLContext"));
+    assert!(output.stdout_text().contains("check_hostname: True"));
 }
 
 // =============================================================================
@@ -268,9 +268,13 @@ print(f"has_ipv6: {socket.has_ipv6}")
 
     assert!(result.is_ok(), "Socket import should work: {:?}", result);
     let output = result.unwrap();
-    assert!(output.stdout.contains("Socket module loaded: socket"));
-    assert!(output.stdout.contains("AF_INET: 2"));
-    assert!(output.stdout.contains("SOCK_STREAM: 1"));
+    assert!(
+        output
+            .stdout_text()
+            .contains("Socket module loaded: socket")
+    );
+    assert!(output.stdout_text().contains("AF_INET: 2"));
+    assert!(output.stdout_text().contains("SOCK_STREAM: 1"));
 }
 
 #[tokio::test]
@@ -296,8 +300,8 @@ print("Socket closed")
 
     assert!(result.is_ok(), "Socket creation should work: {:?}", result);
     let output = result.unwrap();
-    assert!(output.stdout.contains("Socket created: socket"));
-    assert!(output.stdout.contains("Socket closed"));
+    assert!(output.stdout_text().contains("Socket created: socket"));
+    assert!(output.stdout_text().contains("Socket closed"));
 }
 
 #[tokio::test]
@@ -321,7 +325,7 @@ for family, socktype, proto, canonname, sockaddr in info:
 
     assert!(result.is_ok(), "getaddrinfo should work: {:?}", result);
     let output = result.unwrap();
-    assert!(output.stdout.contains("getaddrinfo returned"));
+    assert!(output.stdout_text().contains("getaddrinfo returned"));
 }
 
 // =============================================================================
@@ -360,11 +364,11 @@ except OSError as e:
     assert!(result.is_ok(), "Should handle blocked host: {:?}", result);
     let output = result.unwrap();
     assert!(
-        output.stdout.contains("EXPECTED")
-            || output.stdout.contains("blocked")
-            || output.stdout.contains("not permitted"),
+        output.stdout_text().contains("EXPECTED")
+            || output.stdout_text().contains("blocked")
+            || output.stdout_text().contains("not permitted"),
         "Should block localhost: {}",
-        output.stdout
+        String::from_utf8_lossy(&output.stdout)
     );
 }
 
@@ -397,11 +401,11 @@ except OSError as e:
     assert!(result.is_ok(), "Should handle blocked host: {:?}", result);
     let output = result.unwrap();
     assert!(
-        output.stdout.contains("EXPECTED")
-            || output.stdout.contains("blocked")
-            || output.stdout.contains("not permitted"),
+        output.stdout_text().contains("EXPECTED")
+            || output.stdout_text().contains("blocked")
+            || output.stdout_text().contains("not permitted"),
         "Should block private network: {}",
-        output.stdout
+        String::from_utf8_lossy(&output.stdout)
     );
 }
 
@@ -502,9 +506,9 @@ except Exception as e:
     assert!(result.is_ok(), "HTTPS request should work: {:?}", result);
     let output = result.unwrap();
     assert!(
-        output.stdout.contains("SUCCESS") || output.stdout.contains("200 OK"),
+        output.stdout_text().contains("SUCCESS") || output.stdout_text().contains("200 OK"),
         "Should get 200 OK: {}",
-        output.stdout
+        String::from_utf8_lossy(&output.stdout)
     );
 }
 
@@ -560,9 +564,9 @@ print("SUCCESS")
     assert!(result.is_ok(), "http.client should work: {:?}", result);
     let output = result.unwrap();
     assert!(
-        output.stdout.contains("SUCCESS") || output.stdout.contains("200"),
+        output.stdout_text().contains("SUCCESS") || output.stdout_text().contains("200"),
         "Should succeed: {}",
-        output.stdout
+        String::from_utf8_lossy(&output.stdout)
     );
 }
 
@@ -623,9 +627,9 @@ else:
     assert!(result.is_ok(), "POST should work: {:?}", result);
     let output = result.unwrap();
     assert!(
-        output.stdout.contains("SUCCESS"),
+        output.stdout_text().contains("SUCCESS"),
         "Should succeed: {}",
-        output.stdout
+        String::from_utf8_lossy(&output.stdout)
     );
 }
 
@@ -674,9 +678,9 @@ print("SUCCESS: All requests completed")
     assert!(result.is_ok(), "Connection reuse should work: {:?}", result);
     let output = result.unwrap();
     assert!(
-        output.stdout.contains("SUCCESS"),
+        output.stdout_text().contains("SUCCESS"),
         "Should succeed: {}",
-        output.stdout
+        String::from_utf8_lossy(&output.stdout)
     );
 }
 
@@ -714,9 +718,9 @@ except OSError as e:
     );
     let output = result.unwrap();
     assert!(
-        output.stdout.contains("EXPECTED") || output.stdout.contains("Error"),
+        output.stdout_text().contains("EXPECTED") || output.stdout_text().contains("Error"),
         "Should handle connection refused: {}",
-        output.stdout
+        String::from_utf8_lossy(&output.stdout)
     );
 }
 
@@ -752,9 +756,9 @@ except OSError as e:
     assert!(result.is_ok(), "Should handle timeout: {:?}", result);
     let output = result.unwrap();
     assert!(
-        output.stdout.contains("EXPECTED") || output.stdout.contains("Error"),
+        output.stdout_text().contains("EXPECTED") || output.stdout_text().contains("Error"),
         "Should timeout or error: {}",
-        output.stdout
+        String::from_utf8_lossy(&output.stdout)
     );
 }
 
@@ -787,7 +791,7 @@ sock.close()
     assert!(
         result
             .unwrap()
-            .stdout
+            .stdout_text()
             .contains("Permissive config accepted")
     );
 }
@@ -947,9 +951,9 @@ else:
     assert!(result.is_ok(), "Plain HTTP GET should work: {:?}", result);
     let output = result.unwrap();
     assert!(
-        output.stdout.contains("SUCCESS"),
+        output.stdout_text().contains("SUCCESS"),
         "Should succeed: {}",
-        output.stdout
+        String::from_utf8_lossy(&output.stdout)
     );
 }
 
@@ -1003,9 +1007,9 @@ else:
     assert!(result.is_ok(), "Oversized read should work: {:?}", result);
     let output = result.unwrap();
     assert!(
-        output.stdout.contains("SUCCESS"),
+        output.stdout_text().contains("SUCCESS"),
         "Should succeed: {}",
-        output.stdout
+        String::from_utf8_lossy(&output.stdout)
     );
 }
 
@@ -1065,9 +1069,9 @@ else:
     assert!(result.is_ok(), "Plain HTTP POST should work: {:?}", result);
     let output = result.unwrap();
     assert!(
-        output.stdout.contains("SUCCESS"),
+        output.stdout_text().contains("SUCCESS"),
         "Should succeed: {}",
-        output.stdout
+        String::from_utf8_lossy(&output.stdout)
     );
 }
 
@@ -1130,9 +1134,9 @@ else:
     );
     let output = result.unwrap();
     assert!(
-        output.stdout.contains("SUCCESS"),
+        output.stdout_text().contains("SUCCESS"),
         "Should succeed: {}",
-        output.stdout
+        String::from_utf8_lossy(&output.stdout)
     );
 }
 
@@ -1214,9 +1218,9 @@ except Exception as e:
 
     let output = result.expect("execution should complete");
     assert!(
-        output.stdout.contains("TIMEOUT"),
+        output.stdout_text().contains("TIMEOUT"),
         "expected a guest read timeout, got: {}",
-        output.stdout
+        String::from_utf8_lossy(&output.stdout)
     );
     // If the guest timeout were ignored the host's 30s timeout would apply.
     assert!(
@@ -1265,9 +1269,9 @@ except Exception as e:
 
     let output = result.expect("execution should complete");
     assert!(
-        output.stdout.contains("TIMEOUT"),
+        output.stdout_text().contains("TIMEOUT"),
         "expected the host to cap the read timeout, got: {}",
-        output.stdout
+        String::from_utf8_lossy(&output.stdout)
     );
     // The host's 500ms ceiling must win over the guest's 30s request.
     assert!(

@@ -37,6 +37,7 @@ impl std::fmt::Debug for SecretConfig {
 
 /// File scrubbing policy for preventing secret leakage via file writes.
 #[derive(Debug, Clone, Default)]
+#[non_exhaustive]
 pub enum FileScrubPolicy {
     /// Scrub all files (default when secrets configured)
     #[default]
@@ -101,6 +102,7 @@ impl FileScrubPolicy {
 
 /// Output stream scrubbing policy for preventing secret leakage via stdout/stderr.
 #[derive(Debug, Clone, Default)]
+#[non_exhaustive]
 pub enum OutputScrubPolicy {
     /// Scrub output (default when secrets configured)
     #[default]
@@ -141,12 +143,7 @@ pub fn scrub_placeholders(text: &str, secrets: &HashMap<String, SecretConfig>) -
 ///
 /// For text data (valid UTF-8), performs string replacement.
 /// For binary data, performs byte sequence search.
-/// Phase 2: Used for VFS file scrubbing.
-#[allow(dead_code)]
-pub(crate) fn scrub_placeholders_bytes(
-    data: &[u8],
-    secrets: &HashMap<String, SecretConfig>,
-) -> Vec<u8> {
+pub fn scrub_placeholders_bytes(data: &[u8], secrets: &HashMap<String, SecretConfig>) -> Vec<u8> {
     if let Ok(text) = std::str::from_utf8(data) {
         // Text file - string replacement
         scrub_placeholders(text, secrets).into_bytes()
@@ -161,8 +158,6 @@ pub(crate) fn scrub_placeholders_bytes(
 }
 
 /// Replace all occurrences of a byte sequence with another.
-/// Phase 2: Used for VFS file scrubbing.
-#[allow(dead_code)]
 fn replace_bytes(haystack: &[u8], needle: &[u8], replacement: &[u8]) -> Vec<u8> {
     let mut result = Vec::with_capacity(haystack.len());
     let mut i = 0;
