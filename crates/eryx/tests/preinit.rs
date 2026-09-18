@@ -182,7 +182,7 @@ async fn preinit_can_execute() {
         .await
         .expect("execution should succeed");
 
-    assert!(result.stdout.contains("hello from preinit"));
+    assert!(result.stdout_text().contains("hello from preinit"));
 }
 
 /// Test that arbitrary stdlib imports work after pre-initialization.
@@ -223,11 +223,11 @@ print(f"collections: {type(collections.OrderedDict()).__name__}")
         .await
         .expect("imports should work");
 
-    assert!(result.stdout.contains(r#"json: {"a": 1}"#));
-    assert!(result.stdout.contains("base64: dGVzdA==")); // base64 of 'test'
-    assert!(result.stdout.contains("hashlib: 098f6bcd")); // md5 prefix
-    assert!(result.stdout.contains("re: 123"));
-    assert!(result.stdout.contains("collections: OrderedDict"));
+    assert!(result.stdout_text().contains(r#"json: {"a": 1}"#));
+    assert!(result.stdout_text().contains("base64: dGVzdA==")); // base64 of 'test'
+    assert!(result.stdout_text().contains("hashlib: 098f6bcd")); // md5 prefix
+    assert!(result.stdout_text().contains("re: 123"));
+    assert!(result.stdout_text().contains("collections: OrderedDict"));
 }
 
 /// Test that multiple sandboxes can be created from the same pre-init bytes.
@@ -250,7 +250,7 @@ async fn preinit_multiple_sandboxes() {
             .await
             .expect("execution should succeed");
 
-        assert!(result.stdout.contains(&format!("sandbox {i}")));
+        assert!(result.stdout_text().contains(&format!("sandbox {i}")));
     }
 }
 
@@ -292,7 +292,7 @@ except NameError:
         .await
         .unwrap();
 
-    assert!(result.stdout.contains("correctly isolated"));
+    assert!(result.stdout_text().contains("correctly isolated"));
 }
 
 /// Test pre-initialization with imports specified.
@@ -328,8 +328,8 @@ print(json.dumps([1, 2, 3]))
         .await
         .expect("execution should succeed");
 
-    assert!(result.stdout.contains("json was pre-imported"));
-    assert!(result.stdout.contains("[1, 2, 3]"));
+    assert!(result.stdout_text().contains("json was pre-imported"));
+    assert!(result.stdout_text().contains("[1, 2, 3]"));
 }
 
 /// Test that imports work within a single execute call (multi-statement).
@@ -358,8 +358,8 @@ print(hashlib.md5(b'test').hexdigest()[:8])
         .await
         .unwrap();
 
-    assert!(result.stdout.contains(r#"{"works": true}"#));
-    assert!(result.stdout.contains("098f6bcd"));
+    assert!(result.stdout_text().contains(r#"{"works": true}"#));
+    assert!(result.stdout_text().contains("098f6bcd"));
 }
 
 /// Test that file operations work after pre-init (WASI is functional).
@@ -390,7 +390,7 @@ print(f"has_encodings: {'encodings' in files}")
         .await
         .unwrap();
 
-    assert!(result.stdout.contains("has_encodings: True"));
+    assert!(result.stdout_text().contains("has_encodings: True"));
 }
 
 // =============================================================================
@@ -423,7 +423,7 @@ async fn preinit_setup_code_defines_variable() {
         .await
         .expect("execution should succeed");
 
-    assert!(result.stdout.contains("42 [1, 2, 3]"));
+    assert!(result.stdout_text().contains("42 [1, 2, 3]"));
 }
 
 /// Test that setup_code runs after imports, so imported modules are available.
@@ -452,7 +452,7 @@ async fn preinit_setup_code_uses_imports() {
         .await
         .expect("execution should succeed");
 
-    assert!(result.stdout.contains(r#"{"ready": true}"#));
+    assert!(result.stdout_text().contains(r#"{"ready": true}"#));
 }
 
 /// Test that setup_code state is isolated between sandboxes (COW).
@@ -485,7 +485,7 @@ async fn preinit_setup_code_isolated_between_sandboxes() {
 
     let result = sandbox2.execute("print(f'sb2: {counter}')").await.unwrap();
 
-    assert!(result.stdout.contains("sb2: 0"));
+    assert!(result.stdout_text().contains("sb2: 0"));
 }
 
 /// Test that setup_code errors are reported clearly.
@@ -593,7 +593,7 @@ async fn preinit_baked_callbacks() {
         )
         .await
         .expect("execution should succeed");
-    assert_eq!(result.stdout.trim(), "['echo']\n7");
+    assert_eq!(result.stdout_text().trim(), "['echo']\n7");
 
     // A different set is installed as before, replacing the baked one.
     let sandbox = Sandbox::builder()
@@ -606,7 +606,7 @@ async fn preinit_baked_callbacks() {
         .execute("print(sorted(c['name'] for c in list_callbacks()), await ping())")
         .await
         .expect("execution should succeed");
-    assert_eq!(result.stdout.trim(), "['ping'] pong");
+    assert_eq!(result.stdout_text().trim(), "['ping'] pong");
 
     // No callbacks registered: the guest reflects the host, not the snapshot.
     let sandbox = Sandbox::builder()
@@ -618,7 +618,7 @@ async fn preinit_baked_callbacks() {
         .execute("print(list_callbacks())")
         .await
         .expect("execution should succeed");
-    assert_eq!(result.stdout.trim(), "[]");
+    assert_eq!(result.stdout_text().trim(), "[]");
 }
 
 /// Declaration order does not matter: the snapshot and the host both present
@@ -641,5 +641,5 @@ async fn preinit_baked_callbacks_ignore_registration_order() {
         )
         .await
         .expect("execution should succeed");
-    assert_eq!(result.stdout.trim(), "['echo', 'ping'] pong 1");
+    assert_eq!(result.stdout_text().trim(), "['echo', 'ping'] pong 1");
 }

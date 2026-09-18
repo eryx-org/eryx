@@ -130,7 +130,7 @@ if manager is not None:
 r = await mcp["github"].search_repos(query="python sandbox")
 print(f"Found {len(r['items'])} repos")
 """)
-    print(result.stdout)
+    print(result.stdout_text)
 
     # Clean up
     manager.close()

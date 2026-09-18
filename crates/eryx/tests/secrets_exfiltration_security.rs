@@ -101,15 +101,15 @@ print(key)
         .unwrap();
 
     assert!(
-        !result.stdout.contains(REAL_SECRET),
+        !result.stdout_text().contains(REAL_SECRET),
         "Real secret must never appear in stdout"
     );
     assert!(
-        !result.stdout.contains("ERYX_SECRET_PLACEHOLDER_"),
+        !result.stdout_text().contains("ERYX_SECRET_PLACEHOLDER_"),
         "Placeholder must be scrubbed from stdout"
     );
     assert!(
-        result.stdout.contains("[REDACTED]"),
+        result.stdout_text().contains("[REDACTED]"),
         "Scrubbed value should show [REDACTED]"
     );
 }
@@ -135,11 +135,11 @@ sys.stderr.write(key + "\n")
         .unwrap();
 
     assert!(
-        !result.stderr.contains(REAL_SECRET),
+        !result.stderr_text().contains(REAL_SECRET),
         "Real secret must never appear in stderr"
     );
     assert!(
-        !result.stderr.contains("ERYX_SECRET_PLACEHOLDER_"),
+        !result.stderr_text().contains("ERYX_SECRET_PLACEHOLDER_"),
         "Placeholder must be scrubbed from stderr"
     );
 }
@@ -169,7 +169,7 @@ print()
     // The placeholder is still assembled as a full string in Python's output buffer,
     // so scrubbing should catch it. Verify real secret is absent regardless.
     assert!(
-        !result.stdout.contains(REAL_SECRET),
+        !result.stdout_text().contains(REAL_SECRET),
         "Real secret must not appear in stdout even with char-by-char printing"
     );
 }
@@ -208,7 +208,7 @@ print(f"REV: {reversed_key}")
 
     // The real secret is never in the sandbox, so encoding tricks are moot
     assert!(
-        !result.stdout.contains(REAL_SECRET),
+        !result.stdout_text().contains(REAL_SECRET),
         "Real secret must not appear in stdout even when encoded"
     );
 }
@@ -240,7 +240,7 @@ print(f"HAS_REAL_PREFIX: {has_real}")
         .unwrap();
 
     assert!(
-        result.stdout.contains("HAS_REAL_PREFIX: False"),
+        result.stdout_text().contains("HAS_REAL_PREFIX: False"),
         "Real secret prefix must NOT be in the sandbox environment variable"
     );
 }
@@ -564,11 +564,11 @@ for key, val in os.environ.items():
         .unwrap();
 
     assert!(
-        !result.stdout.contains(REAL_SECRET),
+        !result.stdout_text().contains(REAL_SECRET),
         "Real secret must not appear when enumerating env vars"
     );
     assert!(
-        !result.stdout.contains("ERYX_SECRET_PLACEHOLDER_"),
+        !result.stdout_text().contains("ERYX_SECRET_PLACEHOLDER_"),
         "Placeholder must be scrubbed from env var enumeration output"
     );
 }
@@ -609,11 +609,11 @@ except Exception as e:
         .unwrap();
 
     assert!(
-        !result.stdout.contains(REAL_SECRET),
+        !result.stdout_text().contains(REAL_SECRET),
         "Real secret must not be discoverable via frame introspection"
     );
     assert!(
-        !result.stdout.contains("ERYX_SECRET_PLACEHOLDER_"),
+        !result.stdout_text().contains("ERYX_SECRET_PLACEHOLDER_"),
         "Placeholder must be scrubbed from introspection output"
     );
 }
@@ -646,11 +646,11 @@ except Exception:
         .unwrap();
 
     assert!(
-        !result.stdout.contains(REAL_SECRET),
+        !result.stdout_text().contains(REAL_SECRET),
         "Real secret must not appear in exception tracebacks"
     );
     assert!(
-        !result.stdout.contains("ERYX_SECRET_PLACEHOLDER_"),
+        !result.stdout_text().contains("ERYX_SECRET_PLACEHOLDER_"),
         "Placeholder must be scrubbed from traceback output"
     );
 }
@@ -677,11 +677,11 @@ sys.stderr.write(f"ERROR: Auth failed with {key}\n")
         .unwrap();
 
     assert!(
-        !result.stderr.contains(REAL_SECRET),
+        !result.stderr_text().contains(REAL_SECRET),
         "Real secret must not appear in stderr"
     );
     assert!(
-        !result.stderr.contains("ERYX_SECRET_PLACEHOLDER_"),
+        !result.stderr_text().contains("ERYX_SECRET_PLACEHOLDER_"),
         "Placeholder must be scrubbed from stderr"
     );
 }
@@ -724,7 +724,7 @@ except Exception as e:
 
     // The real secret should never be in the output
     assert!(
-        !result.stdout.contains(REAL_SECRET),
+        !result.stdout_text().contains(REAL_SECRET),
         "Real secret must not appear in file read-back output"
     );
 }
@@ -759,7 +759,7 @@ print(f"LENGTH: {len(key)}")
     // The length itself isn't the real secret, and this is acceptable.
     // But verify the actual secret isn't leaked.
     assert!(
-        !result.stdout.contains(REAL_SECRET),
+        !result.stdout_text().contains(REAL_SECRET),
         "Real secret must not appear even when probing length"
     );
 }
@@ -1031,11 +1031,11 @@ print(f"KEY={key}")
         .unwrap();
 
     assert!(
-        !result.stdout.contains(REAL_SECRET),
+        !result.stdout_text().contains(REAL_SECRET),
         "Real secret must not leak via null byte injection"
     );
     assert!(
-        !result.stdout.contains("ERYX_SECRET_PLACEHOLDER_"),
+        !result.stdout_text().contains("ERYX_SECRET_PLACEHOLDER_"),
         "Placeholder must be scrubbed even with null byte injection attempts"
     );
 }

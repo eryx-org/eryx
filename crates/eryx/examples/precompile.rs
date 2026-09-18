@@ -226,7 +226,8 @@ fn main() -> anyhow::Result<()> {
 
         // Verify output works
         let result = rt.block_on(session.execute("print('Hello from pre-compiled sandbox!')"))?;
-        println!("\nOutput: {}", result.stdout.trim());
+        let stdout = result.stdout_text();
+        println!("\nOutput: {}", stdout.trim());
 
         // Summary
         println!("\n=== Summary ===");

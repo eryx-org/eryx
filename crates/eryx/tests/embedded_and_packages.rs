@@ -21,7 +21,7 @@ async fn embedded_runtime_is_automatic() {
         .execute("print('hello')")
         .await
         .expect("execution should work");
-    assert!(result.stdout.contains("hello"));
+    assert!(result.stdout_text().contains("hello"));
 }
 
 /// Test that multiple sandboxes can be created quickly with embedded runtime.
@@ -37,7 +37,7 @@ async fn embedded_runtime_multiple_sandboxes() {
             .execute(&format!("print('sandbox {i}')"))
             .await
             .expect("execution should work");
-        assert!(result.stdout.contains(&format!("sandbox {i}")));
+        assert!(result.stdout_text().contains(&format!("sandbox {i}")));
     }
 }
 
@@ -58,7 +58,7 @@ async fn embedded_stdlib_is_automatic() {
         .execute("import json; print(json.dumps({'a': 1}))")
         .await
         .expect("json module should be available");
-    assert!(result.stdout.contains(r#"{"a": 1}"#));
+    assert!(result.stdout_text().contains(r#"{"a": 1}"#));
 }
 
 /// Test that various stdlib modules work with embedded stdlib.
@@ -88,10 +88,10 @@ print(re.match(r'\d+', '123abc').group())
 "#;
 
     let result = sandbox.execute(code).await.unwrap();
-    assert!(result.stdout.contains("[1, 2, 3]"));
-    assert!(result.stdout.contains("aGVsbG8=")); // base64 of 'hello'
-    assert!(result.stdout.contains("098f6bcd")); // md5 of 'test' prefix
-    assert!(result.stdout.contains("123"));
+    assert!(result.stdout_text().contains("[1, 2, 3]"));
+    assert!(result.stdout_text().contains("aGVsbG8=")); // base64 of 'hello'
+    assert!(result.stdout_text().contains("098f6bcd")); // md5 of 'test' prefix
+    assert!(result.stdout_text().contains("123"));
 }
 
 // =============================================================================

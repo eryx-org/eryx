@@ -177,13 +177,23 @@ class ExecuteResult:
     """Result of executing Python code in the sandbox."""
 
     @property
-    def stdout(self) -> str:
-        """Complete stdout output from the sandboxed code."""
+    def stdout(self) -> bytes:
+        """Complete stdout output from the sandboxed code as raw bytes."""
         ...
 
     @property
-    def stderr(self) -> str:
-        """Complete stderr output from the sandboxed code."""
+    def stderr(self) -> bytes:
+        """Complete stderr output from the sandboxed code as raw bytes."""
+        ...
+
+    @property
+    def stdout_text(self) -> str:
+        """Stdout decoded as UTF-8 with replacement characters for invalid bytes."""
+        ...
+
+    @property
+    def stderr_text(self) -> str:
+        """Stderr decoded as UTF-8 with replacement characters for invalid bytes."""
         ...
 
     @property
@@ -449,7 +459,7 @@ class Sandbox:
         # Basic sandbox (stdlib only)
         sandbox = Sandbox()
         result = sandbox.execute('print("Hello from the sandbox!")')
-        print(result.stdout)  # "Hello from the sandbox!"
+        print(result.stdout_text)  # "Hello from the sandbox!"
 
         # Sandbox with callbacks
         def get_time():
@@ -482,8 +492,8 @@ class Sandbox:
         scrub_result: Optional[bool] = None,
         scrub_files: Optional[bool] = None,
         volumes: Optional[Sequence[tuple[str, str, bool]]] = None,
-        on_stdout: Optional[Callable[[str], None]] = None,
-        on_stderr: Optional[Callable[[str], None]] = None,
+        on_stdout: Optional[Callable[[bytes], None]] = None,
+        on_stderr: Optional[Callable[[bytes], None]] = None,
         result_variable: Optional[str] = None,
     ) -> None:
         """Create a new sandbox with the embedded Python runtime.
@@ -514,10 +524,10 @@ class Sandbox:
                 Defaults to True when secrets are provided.
             on_stdout: Optional callback for streaming stdout output.
                 Called in real-time as Python code writes to stdout, rather than
-                waiting for execution to complete. Receives the text chunk as a string.
+                waiting for execution to complete. Receives the output chunk as bytes.
             on_stderr: Optional callback for streaming stderr output.
                 Called in real-time as Python code writes to stderr, rather than
-                waiting for execution to complete. Receives the text chunk as a string.
+                waiting for execution to complete. Receives the output chunk as bytes.
             result_variable: Name of the variable captured from the script and exposed
                 as ``ExecuteResult.result`` (JSON-serialized). Defaults to ``"result"``.
 
@@ -767,8 +777,8 @@ class SandboxFactory:
         network: Optional[NetConfig] = None,
         callbacks: Optional[Union[CallbackRegistry, Sequence[CallbackDict]]] = None,
         volumes: Optional[Sequence[tuple[str, str, bool]]] = None,
-        on_stdout: Optional[Callable[[str], None]] = None,
-        on_stderr: Optional[Callable[[str], None]] = None,
+        on_stdout: Optional[Callable[[bytes], None]] = None,
+        on_stderr: Optional[Callable[[bytes], None]] = None,
         result_variable: Optional[str] = None,
     ) -> Session:
         """Create a persistent session from this factory's preinitialized runtime.
@@ -804,8 +814,8 @@ class SandboxFactory:
         scrub_stderr: Optional[bool] = None,
         scrub_files: Optional[bool] = None,
         volumes: Optional[Sequence[tuple[str, str, bool]]] = None,
-        on_stdout: Optional[Callable[[str], None]] = None,
-        on_stderr: Optional[Callable[[str], None]] = None,
+        on_stdout: Optional[Callable[[bytes], None]] = None,
+        on_stderr: Optional[Callable[[bytes], None]] = None,
     ) -> Sandbox:
         """Create a new sandbox from this factory.
 
@@ -929,8 +939,8 @@ class Session:
         callbacks: Optional[Union[CallbackRegistry, Sequence[CallbackDict]]] = None,
         mcp: Optional[MCPManager] = None,
         volumes: Optional[Sequence[tuple[str, str, bool]]] = None,
-        on_stdout: Optional[Callable[[str], None]] = None,
-        on_stderr: Optional[Callable[[str], None]] = None,
+        on_stdout: Optional[Callable[[bytes], None]] = None,
+        on_stderr: Optional[Callable[[bytes], None]] = None,
         result_variable: Optional[str] = None,
     ) -> None:
         """Create a new session with the embedded Python runtime.

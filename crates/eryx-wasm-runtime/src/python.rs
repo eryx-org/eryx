@@ -120,7 +120,7 @@ pub type ReportTraceCallback = fn(u32, &str, &str);
 /// Type for the report_output callback function.
 /// Takes (stream, data) and sends to host for real-time output streaming.
 /// stream: 0 = stdout, 1 = stderr
-pub type ReportOutputCallback = fn(u32, &str);
+pub type ReportOutputCallback = fn(u32, &[u8]);
 
 use std::cell::RefCell;
 
@@ -210,7 +210,7 @@ pub fn set_report_output_callback(callback: Option<ReportOutputCallback>) {
 
 /// Call the registered report_output callback.
 /// Silently does nothing if no callback is registered (output streaming disabled).
-pub fn do_report_output(stream: u32, data: &str) {
+pub fn do_report_output(stream: u32, data: &[u8]) {
     REPORT_OUTPUT_CALLBACK.with(|cell| {
         let callback = cell.borrow();
         if let Some(cb) = callback.as_ref() {
@@ -245,10 +245,10 @@ pub mod callback_code {
 /// Output from executing Python code.
 #[derive(Debug, Clone)]
 pub struct ExecuteOutput {
-    /// Captured stdout from the Python execution.
-    pub stdout: String,
-    /// Captured stderr from the Python execution.
-    pub stderr: String,
+    /// Captured stdout from the Python execution (raw bytes).
+    pub stdout: Vec<u8>,
+    /// Captured stderr from the Python execution (raw bytes).
+    pub stderr: Vec<u8>,
     /// JSON-serialized value of the user's result variable, or "" if unset.
     pub result: String,
     /// Reason result capture failed (e.g. not JSON-serializable), or "" on success.
@@ -365,13 +365,20 @@ unsafe fn get_captured_stderr_error() -> String {
                     let getvalue =
                         PyObject_CallMethod(stderr_obj, c"getvalue".as_ptr(), std::ptr::null());
                     if !getvalue.is_null() {
-                        let utf8 = PyUnicode_AsUTF8(getvalue);
-                        let msg = if !utf8.is_null() {
-                            let s = std::ffi::CStr::from_ptr(utf8)
-                                .to_string_lossy()
-                                .into_owned();
-                            Some(s)
+                        // getvalue() returns bytes (after the surrogateescape migration)
+                        let ptr = PyBytes_AsString(getvalue);
+                        let msg = if !ptr.is_null() {
+                            let size = PyBytes_Size(getvalue);
+                            if size < 0 {
+                                PyErr_Clear();
+                                None
+                            } else {
+                                let slice =
+                                    std::slice::from_raw_parts(ptr as *const u8, size as usize);
+                                Some(String::from_utf8_lossy(slice).into_owned())
+                            }
                         } else {
+                            PyErr_Clear();
                             None
                         };
                         Py_DecRef(getvalue);
@@ -598,10 +605,10 @@ fn _eryx_report_trace(lineno: u32, event_json: String, context_json: String) {
 
 /// Report output to the host for real-time streaming.
 /// Called by _EryxStreamingWriter.write() on every sys.stdout/stderr write.
-/// Python signature: _eryx_report_output(stream: int, data: str) -> None
+/// Python signature: _eryx_report_output(stream: int, data: bytes) -> None
 #[pyfunction]
-fn _eryx_report_output(stream: u32, data: String) {
-    do_report_output(stream, &data);
+fn _eryx_report_output(stream: u32, data: &[u8]) {
+    do_report_output(stream, data);
 }
 
 /// Async-aware invoke function exposed to Python.
@@ -1402,17 +1409,18 @@ class _EryxStreamingWriter:
         self._stream_id = stream_id
         self._buffer = []
         self.encoding = 'utf-8'
-        self.errors = 'strict'
+        self.errors = 'surrogateescape'
         self.newlines = None
     def write(self, s):
         if not isinstance(s, str):
             raise TypeError("write() argument must be str")
         if s:
-            self._buffer.append(s)
-            _eryx_mod._eryx_report_output(self._stream_id, s)
+            encoded = s.encode('utf-8', 'surrogateescape')
+            self._buffer.append(encoded)
+            _eryx_mod._eryx_report_output(self._stream_id, encoded)
         return len(s)
     def getvalue(self):
-        return ''.join(self._buffer)
+        return b''.join(self._buffer)
     def reset(self):
         self._buffer.clear()
     def writable(self):
@@ -3012,18 +3020,41 @@ unsafe fn unicode_to_string(obj: *mut PyObject) -> String {
     }
 }
 
+/// Copy a `bytes` object's contents, or `b""` if it is not a bytes object.
+///
+/// # Safety
+/// `obj` must be a valid object pointer or null.
+unsafe fn bytes_to_vec(obj: *mut PyObject) -> Vec<u8> {
+    if obj.is_null() {
+        return Vec::new();
+    }
+    unsafe {
+        let ptr = PyBytes_AsString(obj);
+        if ptr.is_null() {
+            PyErr_Clear();
+            return Vec::new();
+        }
+        let size = PyBytes_Size(obj);
+        if size < 0 {
+            PyErr_Clear();
+            return Vec::new();
+        }
+        std::slice::from_raw_parts(ptr.cast::<u8>(), size as usize).to_vec()
+    }
+}
+
 impl ExecHelpers {
-    /// Call `_eryx_get_output()` and return `(stdout, stderr)`.
-    unsafe fn get_output(&self) -> (String, String) {
+    /// Call `_eryx_get_output()` and return `(stdout, stderr)` as raw bytes.
+    unsafe fn get_output(&self) -> (Vec<u8>, Vec<u8>) {
         unsafe {
             let tuple = PyObject_CallNoArgs(self.get_output);
             if tuple.is_null() {
                 PyErr_Clear();
-                return (String::new(), String::new());
+                return (Vec::new(), Vec::new());
             }
             let out = (
-                unicode_to_string(PyTuple_GetItem(tuple, 0)),
-                unicode_to_string(PyTuple_GetItem(tuple, 1)),
+                bytes_to_vec(PyTuple_GetItem(tuple, 0)),
+                bytes_to_vec(PyTuple_GetItem(tuple, 1)),
             );
             Py_DecRef(tuple);
             out
@@ -3097,6 +3128,26 @@ impl ExecHelpers {
     }
 }
 
+/// Trim all trailing newline bytes from output, matching the old
+/// `trim_end_matches('\n')` behavior on the string path.
+pub fn trim_trailing_newline(mut bytes: Vec<u8>) -> Vec<u8> {
+    while bytes.last() == Some(&b'\n') {
+        bytes.pop();
+    }
+    bytes
+}
+
+fn format_execution_error(stderr_output: &[u8], exception_msg: String) -> String {
+    let stderr_str = String::from_utf8_lossy(stderr_output);
+    if !stderr_output.is_empty() && exception_msg != "Unknown error" {
+        format!("{stderr_str}\n{exception_msg}")
+    } else if !stderr_output.is_empty() {
+        stderr_str.into_owned()
+    } else {
+        exception_msg
+    }
+}
+
 /// [`execute_python`] without re-parsing any Python source except the user's.
 ///
 /// # Safety
@@ -3111,18 +3162,9 @@ unsafe fn execute_python_direct(
             Err(e) => return ExecuteResult::Error(e),
             Ok(false) => {
                 let (_, stderr_output) = helpers.get_output();
-                // PyErr_Print consumed the exception, exactly as PyRun_SimpleString
-                // does, so the traceback lives in stderr.
                 let exception_msg = get_last_error_message();
                 helpers.discard_result();
-                let error = if !stderr_output.is_empty() && exception_msg != "Unknown error" {
-                    format!("{stderr_output}\n{exception_msg}")
-                } else if !stderr_output.is_empty() {
-                    stderr_output
-                } else {
-                    exception_msg
-                };
-                return ExecuteResult::Error(error);
+                return ExecuteResult::Error(format_execution_error(&stderr_output, exception_msg));
             }
             Ok(true) => {}
         }
@@ -3135,8 +3177,8 @@ unsafe fn execute_python_direct(
         let (stdout, stderr) = helpers.get_output();
         let (result, result_error) = helpers.capture_result();
         ExecuteResult::Complete(ExecuteOutput {
-            stdout: stdout.trim_end_matches('\n').to_string(),
-            stderr: stderr.trim_end_matches('\n').to_string(),
+            stdout: trim_trailing_newline(stdout),
+            stderr: trim_trailing_newline(stderr),
             result,
             result_error,
         })
@@ -3195,7 +3237,7 @@ pub fn execute_python(code: &str, trace_enabled: bool) -> ExecuteResult {
             // Execution failed - get error and output
             let _ = PyRun_SimpleString(c"_eryx_output, _eryx_errors = _eryx_get_output()".as_ptr());
 
-            let stderr_output = get_python_variable_string("_eryx_errors").unwrap_or_default();
+            let stderr_output = get_python_variable_bytes("_eryx_errors").unwrap_or_default();
             // get_last_error_message consumes the pending exception, so do this
             // before discarding the result (PyRun_SimpleString is a no-op while an
             // exception is pending).
@@ -3206,15 +3248,7 @@ pub fn execute_python(code: &str, trace_enabled: bool) -> ExecuteResult {
             // capture only runs on the success path, so discard explicitly here.
             let _ = PyRun_SimpleString(c"_eryx_discard_result()".as_ptr());
 
-            let error = if !stderr_output.is_empty() && exception_msg != "Unknown error" {
-                format!("{stderr_output}\n{exception_msg}")
-            } else if !stderr_output.is_empty() {
-                stderr_output
-            } else {
-                exception_msg
-            };
-
-            return ExecuteResult::Error(error);
+            return ExecuteResult::Error(format_execution_error(&stderr_output, exception_msg));
         }
 
         // Check the callback code to see if execution is pending
@@ -3229,16 +3263,16 @@ pub fn execute_python(code: &str, trace_enabled: bool) -> ExecuteResult {
         // Execution complete - get output and restore streams
         let _ = PyRun_SimpleString(c"_eryx_output, _eryx_errors = _eryx_get_output()".as_ptr());
 
-        let stdout = get_python_variable_string("_eryx_output").unwrap_or_default();
-        let stderr = get_python_variable_string("_eryx_errors").unwrap_or_default();
+        let stdout = get_python_variable_bytes("_eryx_output").unwrap_or_default();
+        let stderr = get_python_variable_bytes("_eryx_errors").unwrap_or_default();
 
         // Capture the user's result variable (JSON-serialized into _eryx_result, or
         // "" if unset; _eryx_result_error holds the reason on serialization failure).
         let (result, result_error) = capture_result();
 
         ExecuteResult::Complete(ExecuteOutput {
-            stdout: stdout.trim_end_matches('\n').to_string(),
-            stderr: stderr.trim_end_matches('\n').to_string(),
+            stdout: trim_trailing_newline(stdout),
+            stderr: trim_trailing_newline(stderr),
             result,
             result_error,
         })
@@ -3272,7 +3306,7 @@ pub unsafe fn set_result_variable_name(name: &str) {
 /// # Safety
 ///
 /// Python must be initialized.
-unsafe fn get_python_variable_bytes(name: &str) -> Result<Vec<u8>, String> {
+pub unsafe fn get_python_variable_bytes(name: &str) -> Result<Vec<u8>, String> {
     use std::ffi::CString;
 
     let name_cstr = CString::new(name).map_err(|e| format!("Invalid variable name: {e}"))?;

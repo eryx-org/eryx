@@ -165,7 +165,7 @@ print("all tests passed")
         .await
         .expect("should execute");
 
-    assert!(result.stdout.contains("all tests passed"));
+    assert!(result.stdout_text().contains("all tests passed"));
 }
 
 #[test]

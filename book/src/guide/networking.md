@@ -27,7 +27,7 @@ sock.close()
 print("Connected!" if b"HTTP" in response else "Failed")
     "#).await?;
 
-    println!("{}", result.stdout);
+    println!("{}", result.stdout_text());
 
     Ok(())
 }
@@ -51,7 +51,7 @@ sock.close()
 print("Connected!" if b"HTTP" in response else "Failed")
 """)
 
-print(result.stdout)  # "Connected!"
+print(result.stdout_text)  # "Connected!"
 ```
 <!-- langtabs-end -->
 

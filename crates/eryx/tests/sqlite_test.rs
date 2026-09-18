@@ -24,7 +24,7 @@ async fn test_sqlite3_import() {
         !output.stdout.is_empty(),
         "sqlite3.sqlite_version returned empty"
     );
-    println!("SQLite version: {}", output.stdout.trim());
+    println!("SQLite version: {}", output.stdout_text().trim());
 }
 
 #[tokio::test]
@@ -60,9 +60,12 @@ print(rows)
 
     let output = result.unwrap();
     assert!(
-        output.stdout.contains("Alice"),
+        output.stdout_text().contains("Alice"),
         "Output should contain Alice"
     );
-    assert!(output.stdout.contains("Bob"), "Output should contain Bob");
-    println!("CRUD test output: {}", output.stdout);
+    assert!(
+        output.stdout_text().contains("Bob"),
+        "Output should contain Bob"
+    );
+    println!("CRUD test output: {}", output.stdout_text());
 }

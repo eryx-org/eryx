@@ -11,13 +11,11 @@ use pyo3::prelude::*;
 #[pyclass(frozen, module = "eryx", from_py_object)]
 #[derive(Debug, Clone)]
 pub struct ExecuteResult {
-    /// Complete stdout output from the sandboxed code.
-    #[pyo3(get)]
-    pub stdout: String,
+    /// Complete stdout output from the sandboxed code (raw bytes).
+    pub stdout: Vec<u8>,
 
-    /// Complete stderr output from the sandboxed code.
-    #[pyo3(get)]
-    pub stderr: String,
+    /// Complete stderr output from the sandboxed code (raw bytes).
+    pub stderr: Vec<u8>,
 
     /// Execution duration in milliseconds.
     #[pyo3(get)]
@@ -48,6 +46,30 @@ pub struct ExecuteResult {
 
 #[pymethods]
 impl ExecuteResult {
+    /// stdout as raw bytes.
+    #[getter]
+    fn stdout(&self) -> &[u8] {
+        &self.stdout
+    }
+
+    /// stderr as raw bytes.
+    #[getter]
+    fn stderr(&self) -> &[u8] {
+        &self.stderr
+    }
+
+    /// stdout decoded as UTF-8, replacing invalid sequences with U+FFFD.
+    #[getter]
+    fn stdout_text(&self) -> String {
+        String::from_utf8_lossy(&self.stdout).into_owned()
+    }
+
+    /// stderr decoded as UTF-8, replacing invalid sequences with U+FFFD.
+    #[getter]
+    fn stderr_text(&self) -> String {
+        String::from_utf8_lossy(&self.stderr).into_owned()
+    }
+
     /// The script's `result` variable, parsed from JSON into a native Python
     /// value, or `None` if the variable was not set. See `result_error` if the
     /// value could not be captured.
@@ -69,10 +91,12 @@ impl ExecuteResult {
     }
 
     fn __repr__(&self) -> String {
+        let stdout_str = String::from_utf8_lossy(&self.stdout);
+        let stderr_str = String::from_utf8_lossy(&self.stderr);
         format!(
             "ExecuteResult(stdout={:?}, stderr={:?}, duration_ms={:.2}, callback_invocations={}, peak_memory_bytes={:?}, fuel_consumed={:?}, result={:?}, result_error={:?})",
-            truncate_string(&self.stdout, 50),
-            truncate_string(&self.stderr, 50),
+            truncate_string(&stdout_str, 50),
+            truncate_string(&stderr_str, 50),
             self.duration_ms,
             self.callback_invocations,
             self.peak_memory_bytes,
@@ -83,7 +107,7 @@ impl ExecuteResult {
     }
 
     fn __str__(&self) -> String {
-        self.stdout.clone()
+        String::from_utf8_lossy(&self.stdout).into_owned()
     }
 }
 

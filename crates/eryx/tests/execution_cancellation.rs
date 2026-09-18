@@ -84,7 +84,7 @@ async fn test_execute_cancellable_completes_normally() {
     let result = handle.wait().await;
     assert!(result.is_ok(), "Should complete normally: {:?}", result);
     let output = result.unwrap();
-    assert!(output.stdout.contains("Hello from cancellable!"));
+    assert!(output.stdout_text().contains("Hello from cancellable!"));
 }
 
 #[tokio::test]
@@ -282,7 +282,7 @@ async fn test_fast_execution_completes_before_cancel() {
         result
     );
     let output = result.unwrap();
-    assert!(output.stdout.contains("fast"));
+    assert!(output.stdout_text().contains("fast"));
 }
 
 // =============================================================================

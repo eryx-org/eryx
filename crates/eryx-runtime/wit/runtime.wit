@@ -56,8 +56,8 @@ world sandbox {
     /// to complete.
     ///
     /// - stream-id: 0 for stdout, 1 for stderr
-    /// - data: The text that was written
-    import report-output: func(stream-id: u32, data: string);
+    /// - data: The raw bytes that were written
+    import report-output: func(stream-id: u32, data: list<u8>);
 
     /// Callback metadata returned by list-callbacks.
     record callback-info {
@@ -82,10 +82,10 @@ world sandbox {
 
     /// Output from executing Python code.
     record execute-output {
-        /// Captured stdout from the Python execution.
-        stdout: string,
-        /// Captured stderr from the Python execution.
-        stderr: string,
+        /// Captured stdout from the Python execution (raw bytes).
+        stdout: list<u8>,
+        /// Captured stderr from the Python execution (raw bytes).
+        stderr: list<u8>,
         /// JSON-serialized value of the script's result variable (see
         /// set-result-variable), or "" if the variable was not set.
         /// ("result" is a reserved WIT keyword, hence "result-json".)

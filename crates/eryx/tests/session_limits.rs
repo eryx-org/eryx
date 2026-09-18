@@ -71,7 +71,7 @@ async fn ordinary_session_still_executes_and_preserves_state() {
         .run()
         .await
         .expect("stateful execution");
-    assert_eq!(output.stdout.trim(), "42");
+    assert_eq!(output.stdout_text().trim(), "42");
 }
 
 #[tokio::test]

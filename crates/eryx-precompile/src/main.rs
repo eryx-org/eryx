@@ -831,8 +831,9 @@ async fn verify_cwasm(
         .await
         .context("Failed to execute test code")?;
 
-    if !result.stdout.contains("OK") {
-        anyhow::bail!("Verification failed: unexpected output: {}", result.stdout);
+    let stdout = result.stdout_text();
+    if !stdout.contains("OK") {
+        anyhow::bail!("Verification failed: unexpected output: {}", stdout);
     }
 
     // Verify that pre-imported modules are available
@@ -849,11 +850,12 @@ async fn verify_cwasm(
             .await
             .context("Failed to verify imports")?;
 
-        if !result.stdout.contains("imports OK") {
+        let stdout = result.stdout_text();
+        if !stdout.contains("imports OK") {
             let error_detail = if result.stderr.is_empty() {
-                result.stdout.clone()
+                stdout
             } else {
-                result.stderr.clone()
+                result.stderr_text()
             };
             anyhow::bail!(
                 "Import verification failed for [{}]: {}",
@@ -875,11 +877,11 @@ async fn verify_cwasm(
             .context("Failed to execute verify code")?;
 
         if !result.stderr.is_empty() {
-            anyhow::bail!("Verify code produced stderr:\n{}", result.stderr);
+            anyhow::bail!("Verify code produced stderr:\n{}", result.stderr_text());
         }
 
         if !result.stdout.is_empty() {
-            print!("  Output: {}", result.stdout);
+            print!("  Output: {}", result.stdout_text());
         }
     }
 

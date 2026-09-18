@@ -160,16 +160,18 @@ impl CollectingOutputHandler {
 
 #[async_trait]
 impl OutputHandler for CollectingOutputHandler {
-    async fn on_output(&self, output: &str) {
+    async fn on_output(&self, output: &[u8]) {
         let mut data = self.data.lock().unwrap();
         data.call_count += 1;
-        data.stdout_chunks.push(output.to_string());
+        data.stdout_chunks
+            .push(String::from_utf8_lossy(output).into_owned());
     }
 
-    async fn on_stderr(&self, output: &str) {
+    async fn on_stderr(&self, output: &[u8]) {
         let mut data = self.data.lock().unwrap();
         data.call_count += 1;
-        data.stderr_chunks.push(output.to_string());
+        data.stderr_chunks
+            .push(String::from_utf8_lossy(output).into_owned());
     }
 }
 
@@ -535,7 +537,7 @@ for i in range(5):
     let handler_output = output_handler.combined_output();
     assert_eq!(
         handler_output.trim_end_matches('\n'),
-        output.stdout,
+        output.stdout_text(),
         "Handler output should match result stdout"
     );
 }
@@ -630,7 +632,7 @@ for i in range(100):
     // result.stdout has trailing newlines stripped, handler output is raw
     assert_eq!(
         combined.trim_end_matches('\n'),
-        output.stdout,
+        output.stdout_text(),
         "Handler output should match stdout"
     );
 }
@@ -886,7 +888,7 @@ print("chunk3")
     let result = result.unwrap();
     assert_eq!(
         combined.trim_end_matches('\n'),
-        result.stdout,
+        result.stdout_text(),
         "Streamed chunks should combine to match final stdout"
     );
 }

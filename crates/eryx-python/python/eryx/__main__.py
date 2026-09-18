@@ -69,16 +69,26 @@ def _build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _write_stdout(chunk: str) -> None:
+def _write_stdout(chunk: bytes) -> None:
     """Stream stdout chunks to the terminal in real-time."""
-    sys.stdout.write(chunk)
-    sys.stdout.flush()
+    buf = getattr(sys.stdout, "buffer", None)
+    if buf is not None:
+        buf.write(chunk)
+        buf.flush()
+    else:
+        sys.stdout.write(chunk.decode("utf-8", "replace"))
+        sys.stdout.flush()
 
 
-def _write_stderr(chunk: str) -> None:
+def _write_stderr(chunk: bytes) -> None:
     """Stream stderr chunks to the terminal in real-time."""
-    sys.stderr.write(chunk)
-    sys.stderr.flush()
+    buf = getattr(sys.stderr, "buffer", None)
+    if buf is not None:
+        buf.write(chunk)
+        buf.flush()
+    else:
+        sys.stderr.write(chunk.decode("utf-8", "replace"))
+        sys.stderr.flush()
 
 
 def _run_once(code: str, args: argparse.Namespace, mcp_manager: object | None = None) -> int:

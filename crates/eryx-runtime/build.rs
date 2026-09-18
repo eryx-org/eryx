@@ -118,6 +118,25 @@ fn main() {
             build_component(&manifest_dir, &runtime_so);
         }
     }
+
+    // Emit a content fingerprint for the late-linking artifacts so that cargo
+    // recompiles eryx-runtime (and its dependents) when their content changes.
+    // Without this, `include_bytes!` in linker.rs bakes stale bytes into the
+    // cached .rlib even after build.rs re-copies fresh .so.zst files to OUT_DIR.
+    if out_runtime_zst.exists() && out_bindings_zst.exists() {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::hash::DefaultHasher::new();
+        std::fs::read(&out_runtime_zst)
+            .expect("failed to read runtime .so.zst for fingerprint")
+            .hash(&mut hasher);
+        std::fs::read(&out_bindings_zst)
+            .expect("failed to read bindings .so.zst for fingerprint")
+            .hash(&mut hasher);
+        println!(
+            "cargo::rustc-env=ERYX_LATE_LINKING_HASH={:016x}",
+            hasher.finish()
+        );
+    }
 }
 
 /// Build the eryx-wasm-runtime shared library.

@@ -70,6 +70,7 @@ export function setTraceHandler(handler) {
  */
 export function setOutputHandler(handler) {
   _outputHandler = handler;
+  _resetOutputDecoders();
 }
 
 /**
@@ -129,15 +130,29 @@ export function reportTrace(lineno, eventJson, contextJson) {
   }
 }
 
+const _decoderOpts = { fatal: false, ignoreBOM: true };
+let _stdoutDecoder = new TextDecoder("utf-8", _decoderOpts);
+let _stderrDecoder = new TextDecoder("utf-8", _decoderOpts);
+
+/**
+ * Reset streaming decoders so incomplete multi-byte sequences from one
+ * execution don't leak into the next. Called from setOutputHandler.
+ */
+function _resetOutputDecoders() {
+  _stdoutDecoder = new TextDecoder("utf-8", _decoderOpts);
+  _stderrDecoder = new TextDecoder("utf-8", _decoderOpts);
+}
+
 /**
  * Report streaming output from the Python runtime.
  * This is called by the sandbox runtime on every sys.stdout/stderr.write().
  *
  * @param {number} stream - 0 = stdout, 1 = stderr
- * @param {string} data - The text written
+ * @param {Uint8Array} data - The raw bytes written
  */
 export function reportOutput(stream, data) {
   if (_outputHandler) {
-    _outputHandler(stream, data);
+    const decoder = stream === 0 ? _stdoutDecoder : _stderrDecoder;
+    _outputHandler(stream, decoder.decode(data, { stream: true }));
   }
 }

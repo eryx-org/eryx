@@ -18,12 +18,12 @@ impl GrpcOutputHandler {
         Self { tx }
     }
 
-    async fn send_output(&self, stream: OutputStream, data: &str) {
+    async fn send_output(&self, stream: OutputStream, data: &[u8]) {
         tracing::trace!(stream = ?stream, data_len = data.len(), "sending output");
         let msg = ServerMessage {
             message: Some(server_message::Message::OutputEvent(OutputEvent {
                 stream: stream.into(),
-                data: data.to_string(),
+                data: data.to_vec(),
             })),
         };
         // Best-effort: if the channel is closed, the output is lost.
@@ -33,11 +33,11 @@ impl GrpcOutputHandler {
 
 #[async_trait]
 impl OutputHandler for GrpcOutputHandler {
-    async fn on_output(&self, chunk: &str) {
+    async fn on_output(&self, chunk: &[u8]) {
         self.send_output(OutputStream::Stdout, chunk).await;
     }
 
-    async fn on_stderr(&self, chunk: &str) {
+    async fn on_stderr(&self, chunk: &[u8]) {
         self.send_output(OutputStream::Stderr, chunk).await;
     }
 }
@@ -52,12 +52,12 @@ mod tests {
         let (tx, mut rx) = mpsc::channel(16);
         let handler = GrpcOutputHandler::new(tx);
 
-        handler.on_output("hello").await;
+        handler.on_output(b"hello").await;
 
         let msg = rx.recv().await.unwrap();
         if let Some(server_message::Message::OutputEvent(event)) = msg.message {
             assert_eq!(event.stream, i32::from(OutputStream::Stdout));
-            assert_eq!(event.data, "hello");
+            assert_eq!(event.data, b"hello");
         } else {
             panic!("expected OutputEvent");
         }
@@ -68,12 +68,12 @@ mod tests {
         let (tx, mut rx) = mpsc::channel(16);
         let handler = GrpcOutputHandler::new(tx);
 
-        handler.on_stderr("error").await;
+        handler.on_stderr(b"error").await;
 
         let msg = rx.recv().await.unwrap();
         if let Some(server_message::Message::OutputEvent(event)) = msg.message {
             assert_eq!(event.stream, i32::from(OutputStream::Stderr));
-            assert_eq!(event.data, "error");
+            assert_eq!(event.data, b"error");
         } else {
             panic!("expected OutputEvent");
         }

@@ -131,7 +131,8 @@ print(output)
         sandbox_time,
         start.elapsed()
     );
-    println!("  Output: {}", result.stdout.trim());
+    let stdout = result.stdout_text();
+    println!("  Output: {}", stdout.trim());
 
     // Example 2: Template with loops and conditionals
     println!("\n=== Example 2: Loops and conditionals ===");
@@ -166,7 +167,8 @@ print(output)
         sandbox_time,
         start.elapsed()
     );
-    println!("  Output:{}", result.stdout.trim_end());
+    let stdout = result.stdout_text();
+    println!("  Output:{}", stdout.trim_end());
 
     // Example 3: User-supplied template (simulating untrusted input)
     println!("\n=== Example 3: User-supplied template ===");
@@ -218,7 +220,8 @@ print(output)
         sandbox_time,
         start.elapsed()
     );
-    println!("  Output:{}", result.stdout.trim_end());
+    let stdout = result.stdout_text();
+    println!("  Output:{}", stdout.trim_end());
 
     // Example 4: Environment with custom filters
     println!("\n=== Example 4: Environment with custom filters ===");
@@ -250,7 +253,7 @@ print(output)
         sandbox_time,
         start.elapsed()
     );
-    println!("  Output:\n{}", indent(&result.stdout, "    "));
+    println!("  Output:\n{}", indent(&result.stdout_text(), "    "));
 
     // Example 5: Template inheritance
     println!("=== Example 5: Template inheritance (in-memory) ===");
@@ -302,7 +305,8 @@ print(output)
         sandbox_time,
         start.elapsed()
     );
-    println!("  Output:\n{}", indent(result.stdout.trim(), "    "));
+    let stdout = result.stdout_text();
+    println!("  Output:\n{}", indent(stdout.trim(), "    "));
 
     // Example 6: Sandbox security
     println!("\n=== Example 6: Security - sandbox isolation ===");
@@ -337,7 +341,7 @@ except Exception as e:
         sandbox_time,
         start.elapsed()
     );
-    println!("  Output:\n{}", indent(&result.stdout, "    "));
+    println!("  Output:\n{}", indent(&result.stdout_text(), "    "));
 
     println!("=== Summary ===");
     println!("  Pre-initialization bakes jinja2 into the WASM component");

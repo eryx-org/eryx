@@ -114,7 +114,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let result = sandbox1
         .execute("import numpy as np; print(np.array([1,2,3]).sum())")
         .await?;
-    println!("  Test: {}", result.stdout.trim());
+    let stdout = result.stdout_text();
+    println!("  Test: {}", stdout.trim());
 
     // Second sandbox creation (warm - cache hit with mmap)
     println!("\n--- Second sandbox (cache hit) ---\n");
@@ -138,7 +139,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let result = sandbox2
         .execute("import numpy as np; print(np.array([4,5,6]).sum())")
         .await?;
-    println!("  Test: {}", result.stdout.trim());
+    let stdout = result.stdout_text();
+    println!("  Test: {}", stdout.trim());
 
     // Third sandbox (also warm with mmap)
     println!("\n--- Third sandbox (cache hit) ---\n");
@@ -159,7 +161,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let result = sandbox3
         .execute("import numpy as np; print(np.linalg.det([[1,2],[3,4]]))")
         .await?;
-    println!("  Test: det([[1,2],[3,4]]) = {}", result.stdout.trim());
+    let stdout = result.stdout_text();
+    println!("  Test: det([[1,2],[3,4]]) = {}", stdout.trim());
 
     // Summary
     println!("\n=== Summary ===\n");
@@ -215,7 +218,7 @@ print("\nNumpy is working!")
 "#;
 
     let result = sandbox3.execute(code).await?;
-    println!("{}", result.stdout);
+    println!("{}", result.stdout_text());
 
     Ok(())
 }

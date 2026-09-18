@@ -63,7 +63,7 @@ async fn demo_session_executor(executor: &Arc<PythonExecutor>) -> anyhow::Result
         .map_err(|e| anyhow::anyhow!(e))?;
     println!(
         "Execute 'x = 1': '{}' (execution #{})",
-        output.stdout,
+        output.stdout_text(),
         session.execution_count()
     );
 
@@ -74,7 +74,7 @@ async fn demo_session_executor(executor: &Arc<PythonExecutor>) -> anyhow::Result
         .map_err(|e| anyhow::anyhow!(e))?;
     println!(
         "Execute 'y = 2': '{}' (execution #{})",
-        output.stdout,
+        output.stdout_text(),
         session.execution_count()
     );
 
@@ -87,7 +87,7 @@ async fn demo_session_executor(executor: &Arc<PythonExecutor>) -> anyhow::Result
         .map_err(|e| anyhow::anyhow!(e))?;
     println!(
         "Execute 'print(x + y)': '{}' (execution #{})",
-        output.stdout,
+        output.stdout_text(),
         session.execution_count()
     );
 
@@ -122,20 +122,23 @@ async fn demo_in_process_session(sandbox: &Sandbox) -> anyhow::Result<()> {
     let result = session.execute("x = 1").await?;
     println!(
         "Execute 'x = 1': '{}' ({:?})",
-        result.stdout, result.stats.duration
+        result.stdout_text(),
+        result.stats.duration
     );
 
     let result = session.execute("y = 2").await?;
     println!(
         "Execute 'y = 2': '{}' ({:?})",
-        result.stdout, result.stats.duration
+        result.stdout_text(),
+        result.stats.duration
     );
 
     // This works because x and y persist from previous calls!
     let result = session.execute("print(x + y)").await?;
     println!(
         "Execute 'print(x + y)': '{}' ({:?})",
-        result.stdout, result.stats.duration
+        result.stdout_text(),
+        result.stats.duration
     );
 
     let total = start.elapsed();
@@ -203,7 +206,7 @@ async fn demo_state_snapshots(executor: &Arc<PythonExecutor>) -> anyhow::Result<
         .run()
         .await
         .map_err(|e| anyhow::anyhow!(e))?;
-    println!("\n{}", output.stdout);
+    println!("\n{}", output.stdout_text());
 
     // Restore from snapshot
     let restore_start = Instant::now();
@@ -215,7 +218,7 @@ async fn demo_state_snapshots(executor: &Arc<PythonExecutor>) -> anyhow::Result<
         .run()
         .await
         .map_err(|e| anyhow::anyhow!(e))?;
-    println!("{}", output.stdout);
+    println!("{}", output.stdout_text());
     println!("Restore time: {:?}", restore_duration);
 
     // Demonstrate deserializing from bytes (simulating load from storage)
@@ -237,7 +240,7 @@ async fn demo_state_snapshots(executor: &Arc<PythonExecutor>) -> anyhow::Result<
         .run()
         .await
         .map_err(|e| anyhow::anyhow!(e))?;
-    println!("{}", output.stdout);
+    println!("{}", output.stdout_text());
 
     Ok(())
 }

@@ -92,8 +92,9 @@ struct StreamingOutputHandler;
 
 #[async_trait]
 impl OutputHandler for StreamingOutputHandler {
-    async fn on_output(&self, output: &str) {
-        for line in output.lines() {
+    async fn on_output(&self, output: &[u8]) {
+        let text = String::from_utf8_lossy(output);
+        for line in text.lines() {
             println!("  [OUTPUT] {line}");
         }
     }

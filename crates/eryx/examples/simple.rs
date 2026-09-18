@@ -109,7 +109,7 @@ print(f"2 + 2 = {2 + 2}")
         )
         .await?;
 
-    println!("Output: {}", result.stdout);
+    println!("Output: {}", result.stdout_text());
     println!("Duration: {:?}", result.stats.duration);
     println!(
         "Peak memory: {} bytes",
@@ -128,7 +128,7 @@ print(f"Current Unix timestamp: {timestamp}")
         )
         .await?;
 
-    println!("Output: {}", result.stdout);
+    println!("Output: {}", result.stdout_text());
     println!("Callbacks invoked: {}", result.stats.callback_invocations);
     println!(
         "Peak memory: {} bytes",
@@ -147,7 +147,7 @@ print(f"Echo response: {response}")
         )
         .await?;
 
-    println!("Output: {}", result.stdout);
+    println!("Output: {}", result.stdout_text());
     println!();
 
     // Example 4: List available callbacks
@@ -163,7 +163,7 @@ for cb in callbacks:
         )
         .await?;
 
-    println!("Output:\n{}", result.stdout);
+    println!("Output:\n{}", result.stdout_text());
     println!();
 
     // Example 5: Using Python's asyncio.gather for parallel execution
@@ -186,7 +186,7 @@ for i, result in enumerate(results):
         )
         .await?;
 
-    println!("Output:\n{}", result.stdout);
+    println!("Output:\n{}", result.stdout_text());
     println!(
         "Total callbacks invoked: {}",
         result.stats.callback_invocations

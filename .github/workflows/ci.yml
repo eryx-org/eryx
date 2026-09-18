@@ -122,9 +122,9 @@ jobs:
           # which comes from `ERYX_CPU_FEATURES` below and the flag lists in
           # crates/eryx/src/wasm.rs (compiled into the `precompile` example).
           # Changing either without busting the version prefix silently reuses a
-          # cwasm built with the old settings. Bumped v2 -> v3 for the VNNI flags
-          # added under wasmtime 48.
-          key: wasm-runtime-v3-${{ hashFiles('crates/eryx-wasm-runtime/src/**', 'crates/eryx-wasm-runtime/clock_stubs.c', 'crates/eryx-wasm-runtime/Cargo.toml', 'crates/eryx-runtime/build.rs', 'crates/eryx-runtime/wit/runtime.wit', 'crates/eryx-runtime/libs/*.zst', 'Cargo.lock') }}
+          # cwasm built with the old settings. Bumped v3 -> v4 for the
+          # stdout bytes migration (list<u8> WIT change).
+          key: wasm-runtime-v4-${{ hashFiles('crates/eryx-wasm-runtime/src/**', 'crates/eryx-wasm-runtime/clock_stubs.c', 'crates/eryx-wasm-runtime/Cargo.toml', 'crates/eryx-runtime/build.rs', 'crates/eryx-runtime/wit/runtime.wit', 'crates/eryx-runtime/libs/*.zst', 'Cargo.lock') }}
 
       - name: Touch cached artifacts
         if: steps.wasm-cache.outputs.cache-hit == 'true'
@@ -153,6 +153,8 @@ jobs:
       - name: Configure Rust cache
         if: steps.wasm-cache.outputs.cache-hit != 'true'
         uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: v2
 
       - name: Install nightly toolchain
         run: rustup toolchain install nightly --component rust-src
@@ -247,6 +249,8 @@ jobs:
 
       - name: Configure Rust cache
         uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: v2
 
       - name: Check formatting
         run: cargo fmt --all -- --check
@@ -317,6 +321,8 @@ jobs:
 
       - name: Configure Rust cache
         uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: v2
 
       - name: Run tests
         # Use --all-features to test everything. This works because:
@@ -345,6 +351,8 @@ jobs:
 
       - name: Configure Rust cache
         uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: v2
 
       - name: Check MSRV
         # Exclude crates that require WASM artifacts or WASI SDK
@@ -365,6 +373,8 @@ jobs:
 
       - name: Configure Rust cache
         uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: v2
 
       - name: Install Rust
         # Install the pinned toolchain rather than trusting the runner image's
@@ -416,6 +426,8 @@ jobs:
 
       - name: Configure Rust cache
         uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: v2
 
       - name: Build documentation
         # Use --all-features now that prebuilt artifacts are available
@@ -439,6 +451,8 @@ jobs:
 
       - name: Configure Rust cache
         uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: v2
 
       - name: Build docs (docs.rs simulation)
         run: DOCS_RS=1 cargo +nightly doc -p eryx -p eryx-runtime --all-features --no-deps
@@ -468,6 +482,8 @@ jobs:
 
       - name: Configure Rust cache
         uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: v2
 
       - name: Check all feature combinations
         # cargo-all-features checks the powerset of feature combinations.
@@ -507,6 +523,8 @@ jobs:
 
       - name: Configure Rust cache
         uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: v2
 
       - name: Run examples
         run: |
@@ -557,6 +575,8 @@ jobs:
 
       - name: Configure Rust cache
         uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: v2
 
       - uses: actions/setup-python@v7
         with:
@@ -636,6 +656,8 @@ jobs:
 
       - name: Configure Rust cache
         uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: v2
 
       - name: Pre-compile WASM for Windows
         shell: bash
@@ -700,6 +722,8 @@ jobs:
 
       - name: Configure Rust cache
         uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: v2
 
       - name: Install mdbook tools
         run: |
@@ -896,6 +920,8 @@ jobs:
 
       - name: Configure Rust cache
         uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: v2
 
       - name: Install wasm32-unknown-unknown target
         run: rustup target add wasm32-unknown-unknown

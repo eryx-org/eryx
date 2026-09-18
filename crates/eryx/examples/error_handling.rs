@@ -173,7 +173,7 @@ except Exception as e:
         .await;
 
     match result {
-        Ok(r) => println!("Output: {}", r.stdout),
+        Ok(r) => println!("Output: {}", r.stdout_text()),
         Err(e) => println!("Error: {e}"),
     }
     println!();
@@ -214,7 +214,8 @@ except Exception as e:
     match result {
         Ok(r) => {
             println!("Output:");
-            for line in r.stdout.lines() {
+            let stdout = r.stdout_text();
+            for line in stdout.lines() {
                 println!("  {line}");
             }
         }
@@ -238,7 +239,7 @@ except Exception as e:
         .await;
 
     match result {
-        Ok(r) => println!("Output: {}", r.stdout),
+        Ok(r) => println!("Output: {}", r.stdout_text()),
         Err(e) => println!("Error: {e}"),
     }
     println!();
@@ -278,7 +279,8 @@ print(f"\nSuccessfully validated {len(results)} out of 5 values")
     match result {
         Ok(r) => {
             println!("Output:");
-            for line in r.stdout.lines() {
+            let stdout = r.stdout_text();
+            for line in stdout.lines() {
                 println!("  {line}");
             }
         }

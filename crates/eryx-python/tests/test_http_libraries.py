@@ -26,8 +26,8 @@ import requests
 print(f"requests version: {requests.__version__}")
 print("IMPORT_OK")
 """)
-        assert "IMPORT_OK" in result.stdout
-        assert "requests version:" in result.stdout
+        assert b"IMPORT_OK" in result.stdout
+        assert b"requests version:" in result.stdout
 
     def test_requests_get_local_http(self, requests_sandbox, http_server):
         """Test requests.get() to local HTTP server."""
@@ -41,7 +41,7 @@ print(f"Body: {{response.text}}")
 if response.status_code == 200 and "Hello from test server" in response.text:
     print("SUCCESS")
 """)
-        assert "SUCCESS" in result.stdout, (
+        assert b"SUCCESS" in result.stdout, (
             f"Test failed: {result.stdout}\nstderr: {result.stderr}"
         )
 
@@ -58,7 +58,7 @@ print(f"JSON: {{data}}")
 if data.get("status") == "ok":
     print("SUCCESS")
 """)
-        assert "SUCCESS" in result.stdout, (
+        assert b"SUCCESS" in result.stdout, (
             f"Test failed: {result.stdout}\nstderr: {result.stderr}"
         )
 
@@ -74,7 +74,7 @@ print(f"Body: {{response.text}}")
 if response.status_code == 200:
     print("SUCCESS")
 """)
-        assert "SUCCESS" in result.stdout, (
+        assert b"SUCCESS" in result.stdout, (
             f"Test failed: {result.stdout}\nstderr: {result.stderr}"
         )
 
@@ -115,7 +115,7 @@ for url in urls:
 else:
     print("All URLs failed")
 """)
-        assert "SUCCESS" in result.stdout, f"Test failed: {result.stdout}"
+        assert b"SUCCESS" in result.stdout, f"Test failed: {result.stdout}"
 
 
 class TestHttpxLibrary:
@@ -133,8 +133,8 @@ import httpx
 print(f"httpx version: {httpx.__version__}")
 print("IMPORT_OK")
 """)
-        assert "IMPORT_OK" in result.stdout
-        assert "httpx version:" in result.stdout
+        assert b"IMPORT_OK" in result.stdout
+        assert b"httpx version:" in result.stdout
 
     def test_httpx_get_local_http(self, httpx_sandbox, http_server):
         """Test httpx.get() to local HTTP server."""
@@ -148,7 +148,7 @@ print(f"Body: {{response.text}}")
 if response.status_code == 200 and "Hello from test server" in response.text:
     print("SUCCESS")
 """)
-        assert "SUCCESS" in result.stdout, (
+        assert b"SUCCESS" in result.stdout, (
             f"Test failed: {result.stdout}\nstderr: {result.stderr}"
         )
 
@@ -165,7 +165,7 @@ print(f"JSON: {{data}}")
 if data.get("status") == "ok":
     print("SUCCESS")
 """)
-        assert "SUCCESS" in result.stdout, (
+        assert b"SUCCESS" in result.stdout, (
             f"Test failed: {result.stdout}\nstderr: {result.stderr}"
         )
 
@@ -181,7 +181,7 @@ print(f"Body: {{response.text}}")
 if response.status_code == 200:
     print("SUCCESS")
 """)
-        assert "SUCCESS" in result.stdout, (
+        assert b"SUCCESS" in result.stdout, (
             f"Test failed: {result.stdout}\nstderr: {result.stderr}"
         )
 
@@ -220,7 +220,7 @@ for url in urls:
 else:
     print("All URLs failed")
 """)
-        assert "SUCCESS" in result.stdout, f"Test failed: {result.stdout}"
+        assert b"SUCCESS" in result.stdout, f"Test failed: {result.stdout}"
 
 
 class TestUrllibLibrary:
@@ -242,7 +242,7 @@ import urllib.parse
 import urllib.error
 print("urllib import ok")
 """)
-        assert "urllib import ok" in result.stdout
+        assert b"urllib import ok" in result.stdout
 
     def test_urllib_get_local_http(self, network_sandbox, http_server):
         """Test urllib.request.urlopen() to local HTTP server."""
@@ -262,7 +262,7 @@ try:
 except Exception as e:
     print(f"Error: {{type(e).__name__}}: {{e}}")
 """)
-        assert "SUCCESS" in result.stdout, f"Test failed: {result.stdout}"
+        assert b"SUCCESS" in result.stdout, f"Test failed: {result.stdout}"
 
     def test_urllib_get_no_explicit_timeout(self, network_sandbox, http_server):
         """Regression test for #246: bare urlopen (no timeout=) must not raise.
@@ -290,7 +290,7 @@ try:
 except Exception as e:
     print(f"Error: {{type(e).__name__}}: {{e}}")
 """)
-        assert "SUCCESS" in result.stdout, f"Test failed: {result.stdout}"
+        assert b"SUCCESS" in result.stdout, f"Test failed: {result.stdout}"
 
     def test_urllib_get_json_local_http(self, network_sandbox, http_server):
         """Test urllib with JSON response from local HTTP server."""
@@ -309,7 +309,7 @@ try:
 except Exception as e:
     print(f"Error: {{type(e).__name__}}: {{e}}")
 """)
-        assert "SUCCESS" in result.stdout, f"Test failed: {result.stdout}"
+        assert b"SUCCESS" in result.stdout, f"Test failed: {result.stdout}"
 
     def test_urllib_post_local_http(self, network_sandbox, http_server):
         """Test urllib POST request to local HTTP server."""
@@ -331,7 +331,7 @@ try:
 except Exception as e:
     print(f"Error: {{type(e).__name__}}: {{e}}")
 """)
-        assert "SUCCESS" in result.stdout, f"Test failed: {result.stdout}"
+        assert b"SUCCESS" in result.stdout, f"Test failed: {result.stdout}"
 
     def test_urllib_https_external(self, network_sandbox):
         """Test urllib.request.urlopen() with HTTPS to external service.
@@ -360,4 +360,4 @@ for url in urls:
 else:
     print("All URLs failed")
 """)
-        assert "SUCCESS" in result.stdout, f"Test failed: {result.stdout}"
+        assert b"SUCCESS" in result.stdout, f"Test failed: {result.stdout}"

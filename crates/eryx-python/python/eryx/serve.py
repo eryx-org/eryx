@@ -99,8 +99,8 @@ def serve(argv: list[str] | None = None) -> int:
         session_kwargs["mcp"] = mcp_manager
 
     # Mutable buffers for capturing output per-execution
-    stdout_chunks: list[str] = []
-    stderr_chunks: list[str] = []
+    stdout_chunks: list[bytes] = []
+    stderr_chunks: list[bytes] = []
     session_kwargs["on_stdout"] = lambda chunk: stdout_chunks.append(chunk)
     session_kwargs["on_stderr"] = lambda chunk: stderr_chunks.append(chunk)
 
@@ -122,8 +122,8 @@ def serve(argv: list[str] | None = None) -> int:
 
         try:
             session.execute(code)
-            stdout = "".join(stdout_chunks)
-            stderr = "".join(stderr_chunks)
+            stdout = b"".join(stdout_chunks).decode("utf-8", "replace")
+            stderr = b"".join(stderr_chunks).decode("utf-8", "replace")
             parts = []
             if stdout:
                 parts.append(stdout)
@@ -135,8 +135,8 @@ def serve(argv: list[str] | None = None) -> int:
             eryx.TimeoutError,
             eryx.ResourceLimitError,
         ) as exc:
-            stdout = "".join(stdout_chunks)
-            stderr = "".join(stderr_chunks)
+            stdout = b"".join(stdout_chunks).decode("utf-8", "replace")
+            stderr = b"".join(stderr_chunks).decode("utf-8", "replace")
             parts = []
             if stdout:
                 parts.append(stdout)

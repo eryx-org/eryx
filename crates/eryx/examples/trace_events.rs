@@ -459,7 +459,7 @@ async fn run_visual_example(
     execute!(stdout, MoveUp(handler.num_lines as u16))?;
     handler.render()?;
 
-    Ok(result.stdout)
+    Ok(result.stdout_text())
 }
 
 fn print_header(text: &str) -> std::io::Result<()> {

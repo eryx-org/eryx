@@ -95,7 +95,11 @@ fn echo_and_ping() -> Vec<Arc<dyn Callback>> {
 
 /// Run `code` on `session` with `callbacks` available, serving their
 /// invocations with the same handler `Sandbox` uses.
-async fn run(session: &mut SessionExecutor, callbacks: &[Arc<dyn Callback>], code: &str) -> String {
+async fn run(
+    session: &mut SessionExecutor,
+    callbacks: &[Arc<dyn Callback>],
+    code: &str,
+) -> Vec<u8> {
     let (callback_tx, callback_rx) = tokio::sync::mpsc::channel(4);
     let callbacks_map: HashMap<String, Arc<dyn Callback>> = callbacks
         .iter()
@@ -125,7 +129,10 @@ async fn wrappers_keep_working_when_the_callback_set_is_unchanged() {
 
     for i in 0..3 {
         let code = format!("print(await echo(data={i}))");
-        assert_eq!(run(&mut session, &callbacks, &code).await, i.to_string());
+        assert_eq!(
+            run(&mut session, &callbacks, &code).await,
+            i.to_string().into_bytes()
+        );
     }
 }
 
@@ -142,7 +149,7 @@ async fn a_changed_callback_set_is_installed() {
             "print(sorted(c['name'] for c in list_callbacks()))"
         )
         .await,
-        "['echo']"
+        b"['echo']"
     );
 
     // Adding a callback exposes its wrapper and updates introspection.
@@ -153,7 +160,7 @@ async fn a_changed_callback_set_is_installed() {
             "print(sorted(c['name'] for c in list_callbacks()), await ping())"
         )
         .await,
-        "['echo', 'ping'] pong"
+        b"['echo', 'ping'] pong"
     );
 
     // Going back to the smaller set is picked up too.
@@ -164,7 +171,7 @@ async fn a_changed_callback_set_is_installed() {
             "print(sorted(c['name'] for c in list_callbacks()))"
         )
         .await,
-        "['echo']"
+        b"['echo']"
     );
 }
 
@@ -180,7 +187,7 @@ async fn callbacks_survive_clear_state() {
             "x = 1\nprint(await echo(data='a'))"
         )
         .await,
-        "a"
+        b"a"
     );
     session.clear_state().await.unwrap();
     assert_eq!(
@@ -190,7 +197,7 @@ async fn callbacks_survive_clear_state() {
             "print('x' in globals(), await echo(data='b'))"
         )
         .await,
-        "False b"
+        b"False b"
     );
 }
 
@@ -206,7 +213,7 @@ async fn callbacks_survive_snapshot_and_restore() {
             "x = 41\nprint(await echo(data=x))"
         )
         .await,
-        "41"
+        b"41"
     );
     let snapshot = session.snapshot_state().await.unwrap();
 
@@ -214,7 +221,7 @@ async fn callbacks_survive_snapshot_and_restore() {
     restored.restore_state(&snapshot).await.unwrap();
     assert_eq!(
         run(&mut restored, &callbacks, "print(await echo(data=x + 1))").await,
-        "42"
+        b"42"
     );
 }
 
@@ -230,6 +237,6 @@ async fn stateless_sandboxes_with_callbacks_work_repeatedly() {
             .execute(&format!("print(await echo(data={i}))"))
             .await
             .unwrap();
-        assert_eq!(output.stdout, i.to_string());
+        assert_eq!(output.stdout, i.to_string().into_bytes());
     }
 }

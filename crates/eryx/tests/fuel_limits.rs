@@ -234,7 +234,7 @@ async fn test_session_recovers_after_fuel_exhaustion() {
         "Session should recover after reset: {:?}",
         result
     );
-    assert!(result.unwrap().stdout.contains("recovered"));
+    assert!(result.unwrap().stdout_text().contains("recovered"));
 }
 
 // =============================================================================
