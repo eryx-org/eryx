@@ -41,6 +41,22 @@ create_exception!(
 );
 create_exception!(eryx, CancelledError, EryxError, "Execution was cancelled.");
 
+// Pool-specific exceptions
+create_exception!(eryx, PoolError, EryxError, "Base pool error.");
+create_exception!(
+    eryx,
+    PoolExhaustedError,
+    PoolError,
+    "All sandboxes in the pool are in use."
+);
+create_exception!(
+    eryx,
+    PoolTimeoutError,
+    PoolError,
+    "Timed out waiting for an available sandbox."
+);
+create_exception!(eryx, PoolClosedError, PoolError, "Pool has been closed.");
+
 /// Convert an `eryx::Error` to a Python exception.
 ///
 /// This is a free function rather than a `From` impl due to the orphan rule:
@@ -89,6 +105,22 @@ pub fn make_runtime() -> PyResult<Arc<tokio::runtime::Runtime>> {
     ))
 }
 
+/// Convert an `eryx::PoolError` to a Python exception.
+pub fn pool_error_to_py(err: eryx::PoolError) -> PyErr {
+    match err {
+        eryx::PoolError::Exhausted(n) => {
+            PoolExhaustedError::new_err(format!("all {n} sandboxes are in use"))
+        }
+        eryx::PoolError::Timeout(d) => {
+            PoolTimeoutError::new_err(format!("acquire timed out after {d:?}"))
+        }
+        eryx::PoolError::Closed => PoolClosedError::new_err("pool is closed"),
+        eryx::PoolError::Creation(msg) => InitializationError::new_err(msg),
+        eryx::PoolError::Reset(msg) => PoolError::new_err(msg),
+        other => PoolError::new_err(other.to_string()),
+    }
+}
+
 /// Register exception types with the Python module.
 pub fn register_exceptions(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("EryxError", m.py().get_type::<EryxError>())?;
@@ -103,5 +135,12 @@ pub fn register_exceptions(m: &Bound<'_, PyModule>) -> PyResult<()> {
     )?;
     m.add("TimeoutError", m.py().get_type::<SandboxTimeoutError>())?;
     m.add("CancelledError", m.py().get_type::<CancelledError>())?;
+    m.add("PoolError", m.py().get_type::<PoolError>())?;
+    m.add(
+        "PoolExhaustedError",
+        m.py().get_type::<PoolExhaustedError>(),
+    )?;
+    m.add("PoolTimeoutError", m.py().get_type::<PoolTimeoutError>())?;
+    m.add("PoolClosedError", m.py().get_type::<PoolClosedError>())?;
     Ok(())
 }

@@ -61,8 +61,9 @@ pub struct SandboxFactory {
     /// `create_session()` register them when given no callbacks of their own.
     callbacks: Option<Py<PyAny>>,
     /// Holds the temp directory for data files extracted during `load()`.
+    /// Arc-wrapped so the pool can share ownership and outlive the factory.
     #[allow(dead_code)]
-    data_files_dir: Option<tempfile::TempDir>,
+    data_files_dir: Option<Arc<tempfile::TempDir>>,
     /// Tokio runtime shared across all sandboxes and sessions created by this
     /// factory. Children hold an `Arc` clone, so the runtime outlives the
     /// factory when children still exist.
@@ -254,7 +255,7 @@ impl SandboxFactory {
             site_packages_path,
             extracted_packages: Arc::new(Vec::new()),
             callbacks: callbacks.map(Bound::unbind),
-            data_files_dir,
+            data_files_dir: data_files_dir.map(Arc::new),
             runtime,
         })
     }
@@ -525,6 +526,89 @@ impl SandboxFactory {
     /// This can be used for custom serialization or inspection.
     fn to_bytes<'py>(&self, py: Python<'py>) -> Bound<'py, PyBytes> {
         PyBytes::new(py, self.precompiled.as_bytes())
+    }
+
+    /// Create a sandbox pool from this factory.
+    ///
+    /// The pool reuses the factory's precompiled artifact, so when the idle
+    /// queue is empty and a new sandbox must be created, it skips component
+    /// deserialization (~1ms with caching enabled). Per-request state
+    /// (callbacks, output handlers, resource limits) is set on each
+    /// ``acquire()`` call and cleared automatically on release.
+    ///
+    /// Args:
+    ///     max_size: Maximum concurrent sandboxes. Default: 10.
+    ///     min_idle: Minimum warm sandboxes to keep ready. Default: 1.
+    ///     acquire_timeout_ms: Max wait for a sandbox in ms. Default: 30000.
+    ///     idle_timeout_ms: Idle sandbox eviction threshold in ms. Default: 300000.
+    ///
+    /// Returns:
+    ///     A ``SandboxPool`` ready to lease sandboxes.
+    ///
+    /// Raises:
+    ///     InitializationError: If pool creation or pre-warming fails.
+    ///
+    /// Example:
+    ///     factory = SandboxFactory(imports=["json"], cache=True)
+    ///     pool = factory.create_pool(max_size=4, min_idle=1)
+    ///     with pool.acquire() as sandbox:
+    ///         result = sandbox.execute('import json; print(json.dumps([1]))')
+    ///     pool.close()
+    #[pyo3(signature = (*, max_size=10, min_idle=1, acquire_timeout_ms=30_000, idle_timeout_ms=300_000))]
+    fn create_pool(
+        &self,
+        py: Python<'_>,
+        max_size: usize,
+        min_idle: usize,
+        acquire_timeout_ms: u64,
+        idle_timeout_ms: u64,
+    ) -> PyResult<crate::pool::SandboxPool> {
+        use std::time::Duration;
+
+        let config = eryx::PoolConfig {
+            max_size,
+            min_idle,
+            acquire_timeout: Duration::from_millis(acquire_timeout_ms),
+            idle_timeout: Duration::from_millis(idle_timeout_ms),
+        };
+
+        let runtime = Arc::clone(&self.runtime);
+
+        // Capture the factory's precompiled artifact and paths into a closure
+        // that can recreate sandboxes. The PrecompiledArtifact's BLAKE3 cache
+        // means deserialization is skipped on repeated calls.
+        let precompiled = self.precompiled.clone();
+        let stdlib_path = self.stdlib_path.clone();
+        let site_packages_path = self.site_packages_path.clone();
+
+        let builder_fn = move || {
+            // SAFETY: the bytes were produced by `PythonExecutor::precompile`
+            // or loaded from a factory file created by the same API.
+            let mut builder = unsafe {
+                eryx::Sandbox::builder()
+                    .with_precompiled_artifact(precompiled.clone())
+                    .with_python_stdlib(&stdlib_path)
+                    .with_trace_collection(false)
+            };
+            if let Some(ref path) = site_packages_path {
+                builder = builder.with_site_packages(path);
+            }
+            builder.build()
+        };
+
+        let rt = runtime.clone();
+        let pool = py.detach(|| {
+            rt.block_on(eryx::SandboxPool::with_builder(builder_fn, config))
+                .map_err(crate::error::pool_error_to_py)
+        })?;
+
+        Ok(crate::pool::SandboxPool::from_inner(
+            pool,
+            runtime,
+            self.callbacks.as_ref().map(|cbs| cbs.clone_ref(py)),
+            Arc::clone(&self.extracted_packages),
+            self.data_files_dir.clone(),
+        ))
     }
 
     fn __repr__(&self) -> String {

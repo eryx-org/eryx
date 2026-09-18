@@ -15,7 +15,7 @@
 //! - **Bounded concurrency**: Limit maximum concurrent sandbox usage via semaphore
 //! - **Statistics tracking**: Monitor pool usage and performance metrics
 //! - **Automatic cleanup**: Evict idle instances after configurable timeout
-//! - **State reset**: Optionally clear session state when returning to pool
+//! - **State reset**: Clear per-request state when returning to pool
 //!
 //! # Example
 //!
@@ -96,14 +96,6 @@ pub struct PoolConfig {
     ///
     /// Default: 30 seconds
     pub acquire_timeout: Duration,
-
-    /// Whether to reset session state when returning a sandbox to the pool.
-    ///
-    /// When enabled, `InProcessSession::reset()` is called before returning
-    /// the sandbox to ensure a clean state for the next user.
-    ///
-    /// Default: true
-    pub reset_on_release: bool,
 }
 
 impl Default for PoolConfig {
@@ -113,7 +105,6 @@ impl Default for PoolConfig {
             min_idle: 1,
             idle_timeout: Duration::from_secs(300),
             acquire_timeout: Duration::from_secs(30),
-            reset_on_release: true,
         }
     }
 }
@@ -153,10 +144,19 @@ impl From<Error> for PoolError {
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct PoolStats {
-    /// Total number of sandboxes (in use + available).
+    /// Total number of sandboxes tracked by the pool (in use + idle).
     pub total: usize,
 
-    /// Number of sandboxes currently available in the pool.
+    /// Number of warm sandboxes sitting idle in the pool queue,
+    /// ready for immediate acquisition without creation.
+    pub idle: usize,
+
+    /// Number of remaining semaphore permits (concurrency capacity).
+    ///
+    /// This is *not* the same as idle sandboxes — it includes permits
+    /// that have never been used. For example, a pool with `max_size=10`
+    /// and 1 sandbox in use has `available=9` even if only 1 sandbox
+    /// was ever created.
     pub available: usize,
 
     /// Number of sandboxes currently in use.
@@ -180,10 +180,11 @@ impl PoolStats {
     #[must_use]
     pub fn average_wait_time(&self) -> Duration {
         if self.wait_count == 0 {
-            Duration::ZERO
-        } else {
-            self.total_wait_time / self.wait_count as u32
+            return Duration::ZERO;
         }
+        let total_nanos = self.total_wait_time.as_nanos();
+        let avg_nanos = total_nanos / self.wait_count as u128;
+        Duration::from_nanos(avg_nanos as u64)
     }
 }
 
@@ -514,7 +515,8 @@ impl SandboxPool {
         // Try to acquire a semaphore permit without blocking
         let permit = match self.semaphore.clone().try_acquire_owned() {
             Ok(permit) => permit,
-            Err(_) => return Ok(None), // No permit available
+            Err(tokio::sync::TryAcquireError::NoPermits) => return Ok(None),
+            Err(tokio::sync::TryAcquireError::Closed) => return Err(PoolError::Closed),
         };
 
         // Try to get an existing sandbox from the pool
@@ -551,11 +553,13 @@ impl SandboxPool {
     #[must_use]
     pub fn stats(&self) -> PoolStats {
         let current_size = self.current_size.load(Ordering::Relaxed);
+        let idle = self.pool.lock().unwrap().len();
         let available = self.semaphore.available_permits();
         let in_use = self.config.max_size - available;
 
         PoolStats {
             total: current_size,
+            idle,
             available,
             in_use,
             total_acquisitions: self.stats.total_acquisitions.load(Ordering::Relaxed),
@@ -575,10 +579,17 @@ impl SandboxPool {
 
     /// Close the pool, preventing new acquisitions.
     ///
-    /// Existing `PooledSandbox` instances will continue to work, but they
-    /// will not be returned to the pool when dropped.
+    /// Blocked `acquire()` calls are woken with [`PoolError::Closed`].
+    /// Idle sandboxes are drained and dropped. Existing `PooledSandbox`
+    /// leases continue to work but are not returned to the pool on drop.
     pub fn close(&self) {
         self.closed.store(1, Ordering::Relaxed);
+        self.semaphore.close();
+
+        let mut pool = self.pool.lock().unwrap();
+        let drained = pool.len();
+        pool.clear();
+        self.current_size.fetch_sub(drained, Ordering::Relaxed);
     }
 
     /// Check if the pool is closed.
@@ -631,14 +642,14 @@ struct PoolHandle {
 impl PoolHandle {
     /// Return a sandbox to the pool.
     fn return_sandbox(&self, sandbox: Sandbox) {
-        // Don't return to pool if closed
+        let mut pool = self.pool.lock().unwrap();
+        // Re-check closed under the lock to avoid racing with close(),
+        // which drains the queue then decrements current_size.
         if self.closed.load(Ordering::Relaxed) != 0 {
+            drop(pool);
             self.current_size.fetch_sub(1, Ordering::Relaxed);
             return;
         }
-
-        // Return to pool using std::sync::Mutex (safe in Drop context)
-        let mut pool = self.pool.lock().unwrap();
         pool.push_back(PoolEntry {
             sandbox,
             last_used: Instant::now(),
@@ -710,12 +721,14 @@ impl PooledSandbox {
     /// Detach the sandbox from the pool, preventing it from being returned.
     ///
     /// This consumes the `PooledSandbox` and returns the underlying `Sandbox`.
-    /// The sandbox will not be returned to the pool.
+    /// The sandbox will not be returned to the pool and `current_size` is
+    /// decremented to reflect that the pool no longer tracks it.
     ///
     /// Note: This still releases the semaphore permit, so another sandbox
     /// can be created to take its place in the pool.
     #[must_use]
     pub fn detach(mut self) -> Sandbox {
+        self.pool.current_size.fetch_sub(1, Ordering::Relaxed);
         self.sandbox.take().expect("sandbox already taken")
     }
 
@@ -780,13 +793,13 @@ mod tests {
         assert_eq!(config.min_idle, 1);
         assert_eq!(config.idle_timeout, Duration::from_secs(300));
         assert_eq!(config.acquire_timeout, Duration::from_secs(30));
-        assert!(config.reset_on_release);
     }
 
     #[test]
     fn pool_stats_average_wait_time_zero_waits() {
         let stats = PoolStats {
             total: 5,
+            idle: 3,
             available: 3,
             in_use: 2,
             total_acquisitions: 100,
@@ -801,6 +814,7 @@ mod tests {
     fn pool_stats_average_wait_time_with_waits() {
         let stats = PoolStats {
             total: 5,
+            idle: 3,
             available: 3,
             in_use: 2,
             total_acquisitions: 100,
@@ -844,6 +858,7 @@ mod tests {
             let pool = pool.unwrap();
             let stats = pool.stats();
             assert_eq!(stats.total, 1); // Pre-warmed with min_idle
+            assert_eq!(stats.idle, 1); // All pre-warmed sandboxes are idle
             assert_eq!(stats.total_creations, 1);
         }
 
@@ -865,12 +880,14 @@ mod tests {
             let stats = pool.stats();
             assert_eq!(stats.total_acquisitions, 1);
             assert_eq!(stats.in_use, 1);
+            assert_eq!(stats.idle, 0);
 
             // Release it
             drop(sandbox);
 
             let stats = pool.stats();
             assert_eq!(stats.in_use, 0);
+            assert_eq!(stats.idle, 1);
             assert_eq!(stats.available, 3); // Permit released
         }
 
@@ -985,6 +1002,61 @@ mod tests {
         }
 
         #[tokio::test]
+        async fn pool_close_wakes_blocked_acquirers() {
+            let config = PoolConfig {
+                min_idle: 1,
+                max_size: 1,
+                acquire_timeout: Duration::from_secs(30),
+                ..Default::default()
+            };
+
+            let pool = Arc::new(
+                SandboxPool::new(Sandbox::embedded(), config)
+                    .await
+                    .expect("Failed to create pool"),
+            );
+
+            // Acquire the only sandbox
+            let _s1 = pool.acquire().await.expect("Failed to acquire sandbox");
+
+            // Spawn a task that will block on acquire
+            let pool_clone = Arc::clone(&pool);
+            let handle = tokio::spawn(async move { pool_clone.acquire().await });
+
+            // Give the spawned task time to start waiting
+            tokio::time::sleep(Duration::from_millis(50)).await;
+
+            // Close the pool — should wake the blocked acquirer
+            pool.close();
+
+            let result = handle.await.unwrap();
+            assert!(matches!(result, Err(PoolError::Closed)));
+        }
+
+        #[tokio::test]
+        async fn pool_close_drains_idle() {
+            let config = PoolConfig {
+                min_idle: 2,
+                max_size: 3,
+                ..Default::default()
+            };
+
+            let pool = SandboxPool::new(Sandbox::embedded(), config)
+                .await
+                .expect("Failed to create pool");
+
+            let stats = pool.stats();
+            assert_eq!(stats.idle, 2);
+            assert_eq!(stats.total, 2);
+
+            pool.close();
+
+            let stats = pool.stats();
+            assert_eq!(stats.idle, 0);
+            assert_eq!(stats.total, 0);
+        }
+
+        #[tokio::test]
         async fn pool_detach_sandbox() {
             let config = PoolConfig {
                 min_idle: 1,
@@ -996,8 +1068,15 @@ mod tests {
                 .await
                 .expect("Failed to create pool");
 
+            let stats_before = pool.stats();
+            let initial_total = stats_before.total;
+
             let pooled = pool.acquire().await.expect("Failed to acquire sandbox");
             let sandbox = pooled.detach();
+
+            // current_size should be decremented
+            let stats_after = pool.stats();
+            assert_eq!(stats_after.total, initial_total - 1);
 
             // Sandbox is now independent
             let result = sandbox.execute("print('detached')").await;
@@ -1024,6 +1103,24 @@ mod tests {
             // Second try_acquire should return None (pool exhausted)
             let s2 = pool.try_acquire().expect("try_acquire failed");
             assert!(s2.is_none());
+        }
+
+        #[tokio::test]
+        async fn pool_try_acquire_on_closed_pool() {
+            let config = PoolConfig {
+                min_idle: 1,
+                max_size: 2,
+                ..Default::default()
+            };
+
+            let pool = SandboxPool::new(Sandbox::embedded(), config)
+                .await
+                .expect("Failed to create pool");
+
+            pool.close();
+
+            let result = pool.try_acquire();
+            assert!(matches!(result, Err(PoolError::Closed)));
         }
 
         #[tokio::test]
@@ -1058,6 +1155,35 @@ mod tests {
                 "Expected at least 1 eviction, got {}",
                 evicted
             );
+        }
+
+        #[tokio::test]
+        async fn pool_idle_count_reflects_queue() {
+            let config = PoolConfig {
+                min_idle: 1,
+                max_size: 3,
+                ..Default::default()
+            };
+
+            let pool = SandboxPool::new(Sandbox::embedded(), config)
+                .await
+                .expect("Failed to create pool");
+
+            // Initially min_idle sandboxes are idle
+            assert_eq!(pool.stats().idle, 1);
+
+            // Acquire one — it comes from the queue
+            let s1 = pool.acquire().await.unwrap();
+            assert_eq!(pool.stats().idle, 0);
+
+            // Acquire a second — created on demand, not from queue
+            let s2 = pool.acquire().await.unwrap();
+            assert_eq!(pool.stats().idle, 0);
+
+            // Release both — both go back to queue
+            drop(s1);
+            drop(s2);
+            assert_eq!(pool.stats().idle, 2);
         }
     }
 }
