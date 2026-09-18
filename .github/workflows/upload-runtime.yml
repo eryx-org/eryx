@@ -12,7 +12,7 @@ permissions:
 
 jobs:
   upload-runtime:
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     # Only the main eryx release gets the runtime asset. Without this the job ran
     # for all four release-plz releases, rebuilding runtime.wasm each time and
     # attaching it to releases that have no use for it. See the note in
