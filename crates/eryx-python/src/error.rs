@@ -2,6 +2,8 @@
 //!
 //! Maps Eryx errors to Python exceptions with appropriate types.
 
+use std::sync::Arc;
+
 use pyo3::exceptions::{PyException, PyRuntimeError, PyTimeoutError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::{PyErr, create_exception};
@@ -76,6 +78,15 @@ pub fn eryx_error_to_py(err: eryx::Error) -> PyErr {
         // generic Eryx error rather than failing to compile.
         other => EryxError::new_err(other.to_string()),
     }
+}
+
+pub fn make_runtime() -> PyResult<Arc<tokio::runtime::Runtime>> {
+    Ok(Arc::new(
+        tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .map_err(|e| InitializationError::new_err(format!("failed to create runtime: {e}")))?,
+    ))
 }
 
 /// Register exception types with the Python module.

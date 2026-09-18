@@ -11,7 +11,7 @@ use pyo3::types::PyDict;
 use eryx::OutputHandler;
 
 use crate::callback::extract_callbacks;
-use crate::error::{InitializationError, eryx_error_to_py};
+use crate::error::eryx_error_to_py;
 use crate::net_config::NetConfig;
 use crate::resource_limits::ResourceLimits;
 use crate::result::ExecuteResult;
@@ -161,15 +161,7 @@ impl Sandbox {
         on_stderr: Option<Py<PyAny>>,
         result_variable: Option<String>,
     ) -> PyResult<Self> {
-        // Create a tokio runtime for async execution
-        let runtime = Arc::new(
-            tokio::runtime::Builder::new_multi_thread()
-                .enable_all()
-                .build()
-                .map_err(|e| {
-                    InitializationError::new_err(format!("failed to create runtime: {e}"))
-                })?,
-        );
+        let runtime = crate::error::make_runtime()?;
 
         // Build the eryx sandbox with embedded runtime. Trace collection
         // (sys.settrace) is always off: the Python ExecuteResult does not
@@ -297,23 +289,11 @@ const _: () = {
 };
 
 impl Sandbox {
-    /// Create a Sandbox from an existing eryx::Sandbox.
-    ///
-    /// This is used internally by SandboxFactory to create sandboxes.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the tokio runtime cannot be created.
-    pub(crate) fn from_inner(inner: eryx::Sandbox) -> PyResult<Self> {
-        let runtime = Arc::new(
-            tokio::runtime::Builder::new_multi_thread()
-                .enable_all()
-                .build()
-                .map_err(|e| {
-                    InitializationError::new_err(format!("failed to create runtime: {e}"))
-                })?,
-        );
-        Ok(Self { inner, runtime })
+    /// Create a Sandbox from an existing eryx::Sandbox, sharing the caller's
+    /// Tokio runtime. Used by `SandboxFactory` so every child reuses one
+    /// runtime instead of creating its own.
+    pub(crate) fn from_inner(inner: eryx::Sandbox, runtime: Arc<tokio::runtime::Runtime>) -> Self {
+        Self { inner, runtime }
     }
 }
 
