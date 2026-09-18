@@ -1211,8 +1211,11 @@ dependencies = [
  "pythonize",
  "rmcp",
  "serde_json",
+ "tar",
+ "tempfile",
  "tokio",
  "walkdir",
+ "zstd 0.14.0",
 ]
 
 [[package]]
