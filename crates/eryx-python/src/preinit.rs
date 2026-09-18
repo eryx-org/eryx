@@ -867,6 +867,7 @@ fn copy_directory_contents(src: &Path, dst: &Path) -> PyResult<()> {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
 
