@@ -101,7 +101,7 @@ print(f"Results: {result1}, {result2}, {result3}")
     let sequential_duration = start.elapsed();
 
     println!("  Duration: {sequential_duration:?}");
-    println!("  Output: {}", result.stdout);
+    println!("  Output: {}", result.stdout_text());
     println!("  Callbacks invoked: {}", result.stats.callback_invocations);
     println!();
 
@@ -124,7 +124,7 @@ print(f"Results: {results}")
     let parallel_duration = start.elapsed();
 
     println!("  Duration: {parallel_duration:?}");
-    println!("  Output: {}", result.stdout);
+    println!("  Output: {}", result.stdout_text());
     println!("  Callbacks invoked: {}", result.stats.callback_invocations);
     println!(
         "  Peak concurrent callbacks: {}",

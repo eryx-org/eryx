@@ -257,7 +257,7 @@ pub async fn run_output_collector(
             };
 
             let data = if should_scrub && !secrets.is_empty() {
-                crate::secrets::scrub_placeholders(&request.data, &secrets)
+                crate::secrets::scrub_placeholders_bytes(&request.data, &secrets)
             } else {
                 request.data
             };

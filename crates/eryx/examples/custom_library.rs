@@ -395,7 +395,7 @@ print(f"(3 + 4) * 5 = {step2}")
         )
         .await?;
 
-    println!("Output:\n{}", result.stdout);
+    println!("Output:\n{}", result.stdout_text());
     println!("Callbacks invoked: {}\n", result.stats.callback_invocations);
 
     // Example 2: Using the Storage library wrapper class
@@ -431,7 +431,7 @@ print(f"Missing key returns: {missing}")
         )
         .await?;
 
-    println!("Output:\n{}", result.stdout);
+    println!("Output:\n{}", result.stdout_text());
     println!("Callbacks invoked: {}\n", result.stats.callback_invocations);
 
     // Example 3: Using both libraries together
@@ -468,7 +468,7 @@ print(f"\nAll stored keys: {keys}")
         )
         .await?;
 
-    println!("Output:\n{}", result.stdout);
+    println!("Output:\n{}", result.stdout_text());
     println!("Callbacks invoked: {}\n", result.stats.callback_invocations);
 
     // Example 4: Parallel operations with both libraries
@@ -497,7 +497,7 @@ print(f"  100 + 200 = {results[3]}")
         )
         .await?;
 
-    println!("Output:\n{}", result.stdout);
+    println!("Output:\n{}", result.stdout_text());
     println!(
         "Callbacks invoked: {} (executed in parallel!)\n",
         result.stats.callback_invocations

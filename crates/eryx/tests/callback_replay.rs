@@ -178,9 +178,9 @@ async fn replay_serves_cached_callbacks_without_invoking() {
     assert_eq!(second.journal.entries.len(), 2);
     // The replayed values are the cached ones from the first run (live_call 1 and 2).
     assert!(
-        output.stdout.contains("a=1 b=2"),
+        output.stdout_text().contains("a=1 b=2"),
         "replayed cached values, got: {}",
-        output.stdout
+        output.stdout_text()
     );
 }
 
@@ -228,7 +228,11 @@ print(f"a={a['live_call']} b={b['live_call']}")
         "one new live call for the divergent callback"
     );
     // a is replayed (cached live_call=1); b is a fresh live call (3rd overall).
-    assert!(output.stdout.contains("a=1 b=3"), "got: {}", output.stdout);
+    assert!(
+        output.stdout_text().contains("a=1 b=3"),
+        "got: {}",
+        output.stdout_text()
+    );
 }
 
 /// `execute_with_journal` works without a configured previous journal: it simply
@@ -288,9 +292,9 @@ async fn concurrent_gather_callbacks_replay_regardless_of_order() {
     let first = sandbox.execute_with_journal(GATHER_SCRIPT).await;
     let first_out = first.result.expect("first run succeeds");
     assert!(
-        first_out.stdout.contains("a=slow_a b=slow_b"),
+        first_out.stdout_text().contains("a=slow_a b=slow_b"),
         "got: {}",
-        first_out.stdout
+        first_out.stdout_text()
     );
     assert_eq!(a_calls.load(Ordering::SeqCst), 1, "slow_a ran live once");
     assert_eq!(b_calls.load(Ordering::SeqCst), 1, "slow_b ran live once");
@@ -320,9 +324,9 @@ async fn concurrent_gather_callbacks_replay_regardless_of_order() {
         "slow_b must not be invoked live again"
     );
     assert!(
-        second_out.stdout.contains("a=slow_a b=slow_b"),
+        second_out.stdout_text().contains("a=slow_a b=slow_b"),
         "replayed output mismatch, got: {}",
-        second_out.stdout
+        second_out.stdout_text()
     );
 }
 
@@ -514,8 +518,8 @@ print(f"fetched={data['live_call']} approved={ok['approved']}")
     );
     assert_eq!(second.replayed_callbacks, 1, "fetch replayed");
     assert!(
-        output.stdout.contains("approved=True"),
+        output.stdout_text().contains("approved=True"),
         "approve succeeded on resume, got: {}",
-        output.stdout
+        output.stdout_text()
     );
 }

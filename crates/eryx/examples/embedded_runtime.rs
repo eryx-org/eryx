@@ -43,7 +43,7 @@ fn main() -> anyhow::Result<()> {
             .execute("print('Hello from embedded runtime sandbox!')")
             .await
     })?;
-    println!("Output: {}", result.stdout);
+    println!("Output: {}", result.stdout_text());
 
     // Step 4: Show per-execution overhead
     println!("\n--- Per-execution overhead (10x) ---");

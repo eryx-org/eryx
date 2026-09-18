@@ -182,7 +182,8 @@ async fn run_base_benchmark() -> Result<(), Box<dyn std::error::Error>> {
     // Verify sandboxes work
     println!("\nVerifying sandboxes work...");
     let result = sandboxes[0].execute("print(1 + 1)").await?;
-    println!("  Sandbox 0: {}", result.stdout.trim());
+    let stdout = result.stdout_text();
+    println!("  Sandbox 0: {}", stdout.trim());
 
     Ok(())
 }
@@ -407,7 +408,8 @@ async fn run_numpy_benchmark() -> Result<(), Box<dyn std::error::Error>> {
     let result = sandboxes[0]
         .execute("import numpy as np; print(np.array([1,2,3]).sum())")
         .await?;
-    println!("  Sandbox 0 (numpy sum): {}", result.stdout.trim());
+    let stdout = result.stdout_text();
+    println!("  Sandbox 0 (numpy sum): {}", stdout.trim());
 
     Ok(())
 }

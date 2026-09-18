@@ -368,11 +368,8 @@ print(f"Result: {result}")
 
     assert!(result.is_ok(), "Should succeed: {:?}", result);
     let output = result.unwrap();
-    assert!(
-        output.stdout.contains("ok"),
-        "Should contain 'ok': {}",
-        output.stdout
-    );
+    let stdout = output.stdout_text();
+    assert!(stdout.contains("ok"), "Should contain 'ok': {}", stdout);
     assert_eq!(output.stats.callback_invocations, 1);
 }
 
@@ -394,10 +391,11 @@ print(f"Echoed: {result['echoed']}")
 
     assert!(result.is_ok(), "Should succeed: {:?}", result);
     let output = result.unwrap();
+    let stdout = output.stdout_text();
     assert!(
-        output.stdout.contains("Hello, World!"),
+        stdout.contains("Hello, World!"),
         "Should echo the message: {}",
-        output.stdout
+        stdout
     );
 }
 
@@ -419,10 +417,11 @@ print(f"Echoed: {result['echoed']}")
 
     assert!(result.is_ok(), "Unicode should work: {:?}", result);
     let output = result.unwrap();
+    let stdout = output.stdout_text();
     assert!(
-        output.stdout.contains("世界") || output.stdout.contains("echoed"),
+        stdout.contains("世界") || stdout.contains("echoed"),
         "Should handle unicode: {}",
-        output.stdout
+        stdout
     );
 }
 
@@ -446,7 +445,7 @@ for i in range(5):
     assert!(result.is_ok(), "Should succeed: {:?}", result);
     let output = result.unwrap();
     assert_eq!(output.stats.callback_invocations, 5);
-    assert!(output.stdout.contains("Message 4"));
+    assert!(output.stdout_text().contains("Message 4"));
 }
 
 // =============================================================================
@@ -479,12 +478,12 @@ except Exception as e:
     );
     let output = result.unwrap();
     assert!(
-        output.stdout.contains("CAUGHT"),
+        output.stdout_text().contains("CAUGHT"),
         "Should have caught exception: {}",
-        output.stdout
+        output.stdout_text()
     );
     assert!(
-        !output.stdout.contains("UNEXPECTED SUCCESS"),
+        !output.stdout_text().contains("UNEXPECTED SUCCESS"),
         "Should not have succeeded"
     );
 }
@@ -540,9 +539,9 @@ except Exception as e:
     );
     let output = result.unwrap();
     assert!(
-        output.stdout.contains("CAUGHT"),
+        output.stdout_text().contains("CAUGHT"),
         "Should catch validation error: {}",
-        output.stdout
+        output.stdout_text()
     );
 }
 
@@ -572,9 +571,9 @@ except Exception as e:
     );
     let output = result.unwrap();
     assert!(
-        output.stdout.contains("CAUGHT"),
+        output.stdout_text().contains("CAUGHT"),
         "Should catch validation error: {}",
-        output.stdout
+        output.stdout_text()
     );
 }
 
@@ -604,9 +603,9 @@ except Exception as e:
     );
     let output = result.unwrap();
     assert!(
-        output.stdout.contains("CAUGHT"),
+        output.stdout_text().contains("CAUGHT"),
         "Should catch missing argument: {}",
-        output.stdout
+        output.stdout_text()
     );
 }
 
@@ -636,9 +635,9 @@ except Exception as e:
     );
     let output = result.unwrap();
     assert!(
-        output.stdout.contains("CAUGHT"),
+        output.stdout_text().contains("CAUGHT"),
         "Should catch type error: {}",
-        output.stdout
+        output.stdout_text()
     );
 }
 
@@ -672,8 +671,8 @@ print(f"Second result: {result}")
         result
     );
     let output = result.unwrap();
-    assert!(output.stdout.contains("caught first error"));
-    assert!(output.stdout.contains("ok"));
+    assert!(output.stdout_text().contains("caught first error"));
+    assert!(output.stdout_text().contains("ok"));
     assert_eq!(output.stats.callback_invocations, 2);
 }
 
@@ -696,7 +695,7 @@ print("callback API ready")
         .await
         .expect("Empty callback fast path should preserve the callback API");
 
-    assert_eq!(output.stdout, "callback API ready");
+    assert_eq!(output.stdout, b"callback API ready");
 }
 
 #[tokio::test]
@@ -721,9 +720,9 @@ for cb in callbacks:
 
     assert!(result.is_ok(), "Should list callbacks: {:?}", result);
     let output = result.unwrap();
-    assert!(output.stdout.contains("echo"));
-    assert!(output.stdout.contains("succeed"));
-    assert!(output.stdout.contains("validate"));
+    assert!(output.stdout_text().contains("echo"));
+    assert!(output.stdout_text().contains("succeed"));
+    assert!(output.stdout_text().contains("validate"));
 }
 
 #[tokio::test]
@@ -757,15 +756,15 @@ for cb in callbacks:
     let output = result.unwrap();
     // EchoCallback has a 'message' parameter - schema should include it
     assert!(
-        output.stdout.contains("message"),
+        output.stdout_text().contains("message"),
         "Echo callback schema should contain 'message' field: {}",
-        output.stdout
+        output.stdout_text()
     );
     // ValidatingCallback has a 'value' parameter - schema should include it
     assert!(
-        output.stdout.contains("value"),
+        output.stdout_text().contains("value"),
         "Validate callback schema should contain 'value' field: {}",
-        output.stdout
+        output.stdout_text()
     );
 }
 
@@ -789,9 +788,9 @@ print(f"Result: {result}")
     assert!(result.is_ok(), "Should invoke by name: {:?}", result);
     let output = result.unwrap();
     assert!(
-        output.stdout.contains("dynamic call"),
+        output.stdout_text().contains("dynamic call"),
         "Should echo message: {}",
-        output.stdout
+        output.stdout_text()
     );
 }
 
@@ -816,7 +815,7 @@ except Exception as e:
 
     assert!(result.is_ok(), "Should catch not found: {:?}", result);
     let output = result.unwrap();
-    assert!(output.stdout.contains("CAUGHT"));
+    assert!(output.stdout_text().contains("CAUGHT"));
 }
 
 // =============================================================================
@@ -855,10 +854,10 @@ for r in results:
     );
     let output = result.unwrap();
     // First 3 should succeed, rest should fail
-    assert!(output.stdout.contains("Success 0"));
-    assert!(output.stdout.contains("Success 1"));
-    assert!(output.stdout.contains("Success 2"));
-    assert!(output.stdout.contains("Error 3") || output.stdout.contains("Error 4"));
+    assert!(output.stdout_text().contains("Success 0"));
+    assert!(output.stdout_text().contains("Success 1"));
+    assert!(output.stdout_text().contains("Success 2"));
+    assert!(output.stdout_text().contains("Error 3") || output.stdout_text().contains("Error 4"));
 }
 
 #[tokio::test]
@@ -897,14 +896,15 @@ except Exception as e:
     assert!(result.is_ok(), "Should handle timeout: {:?}", result);
     let output = result.unwrap();
     assert!(
-        output.stdout.contains("Short sleep:") && output.stdout.contains("slept_ms"),
+        output.stdout_text().contains("Short sleep:") && output.stdout_text().contains("slept_ms"),
         "Short sleep should succeed: {}",
-        output.stdout
+        output.stdout_text()
     );
     assert!(
-        output.stdout.contains("timeout") || output.stdout.contains("Long sleep timeout"),
+        output.stdout_text().contains("timeout")
+            || output.stdout_text().contains("Long sleep timeout"),
         "Long sleep should timeout: {}",
-        output.stdout
+        output.stdout_text()
     );
 }
 
@@ -942,9 +942,9 @@ for i, r in enumerate(results):
         result
     );
     let output = result.unwrap();
-    assert!(output.stdout.contains("first"));
-    assert!(output.stdout.contains("second"));
-    assert!(output.stdout.contains("third"));
+    assert!(output.stdout_text().contains("first"));
+    assert!(output.stdout_text().contains("second"));
+    assert!(output.stdout_text().contains("third"));
     assert_eq!(output.stats.callback_invocations, 3);
 }
 
@@ -987,9 +987,9 @@ for i, r in enumerate(results):
 
     assert!(result.is_ok(), "Mixed parallel should work: {:?}", result);
     let output = result.unwrap();
-    assert!(output.stdout.contains("success1"));
-    assert!(output.stdout.contains("success2"));
-    assert!(output.stdout.contains("error"));
+    assert!(output.stdout_text().contains("success1"));
+    assert!(output.stdout_text().contains("success2"));
+    assert!(output.stdout_text().contains("error"));
 }
 
 // =============================================================================
@@ -1051,10 +1051,10 @@ print(f"nested.a: {result['nested']['a']}")
 
     assert!(result.is_ok(), "Complex JSON should work: {:?}", result);
     let output = result.unwrap();
-    assert!(output.stdout.contains("string: hello"));
-    assert!(output.stdout.contains("number: 42"));
-    assert!(output.stdout.contains("[1, 2, 3]"));
-    assert!(output.stdout.contains("nested.a: b"));
+    assert!(output.stdout_text().contains("string: hello"));
+    assert!(output.stdout_text().contains("number: 42"));
+    assert!(output.stdout_text().contains("[1, 2, 3]"));
+    assert!(output.stdout_text().contains("nested.a: b"));
 }
 
 #[tokio::test]
@@ -1075,7 +1075,7 @@ print(f"Echoed empty: '{result['echoed']}'")
 
     assert!(result.is_ok(), "Empty string should work: {:?}", result);
     let output = result.unwrap();
-    assert!(output.stdout.contains("Echoed empty: ''"));
+    assert!(output.stdout_text().contains("Echoed empty: ''"));
 }
 
 #[tokio::test]
@@ -1096,7 +1096,7 @@ print(f"Got: {result['echoed']}")
 
     assert!(result.is_ok(), "Special chars should work: {:?}", result);
     let output = result.unwrap();
-    assert!(output.stdout.contains("Line1"));
+    assert!(output.stdout_text().contains("Line1"));
 }
 
 #[tokio::test]
@@ -1184,15 +1184,15 @@ for item in result['items']:
     );
     let output = result.unwrap();
     assert!(
-        output.stdout.contains("count=3"),
+        output.stdout_text().contains("count=3"),
         "should return all 3 items when no filters: {}",
-        output.stdout
+        output.stdout_text()
     );
     // Verify item with triple quotes in name is handled correctly
     assert!(
-        output.stdout.contains("item'''3"),
+        output.stdout_text().contains("item'''3"),
         "should handle triple quotes in data: {}",
-        output.stdout
+        output.stdout_text()
     );
 }
 
@@ -1221,9 +1221,9 @@ for item in result['items']:
     );
     let output = result.unwrap();
     assert!(
-        output.stdout.contains("count=1"),
+        output.stdout_text().contains("count=1"),
         "should return 1 item with prometheus filter: {}",
-        output.stdout
+        output.stdout_text()
     );
 }
 
@@ -1254,7 +1254,7 @@ for cb in cbs:
         .await;
 
     match &result {
-        Ok(output) => eprintln!("SCHEMA STDOUT:\n{}", output.stdout),
+        Ok(output) => eprintln!("SCHEMA STDOUT:\n{}", output.stdout_text()),
         Err(e) => eprintln!("SCHEMA ERROR: {e:?}"),
     }
 
@@ -1275,8 +1275,8 @@ except Exception as e:
 
     match &result2 {
         Ok(output) => {
-            eprintln!("POSITIONAL STDOUT:\n{}", output.stdout);
-            eprintln!("POSITIONAL STDERR:\n{}", output.stderr);
+            eprintln!("POSITIONAL STDOUT:\n{}", output.stdout_text());
+            eprintln!("POSITIONAL STDERR:\n{}", output.stderr_text());
         }
         Err(e) => eprintln!("POSITIONAL ERROR: {e:?}"),
     }
@@ -1302,9 +1302,9 @@ print(f"Echoed: {result['echoed']}")
     assert!(result.is_ok(), "Positional arg should work: {:?}", result);
     let output = result.unwrap();
     assert!(
-        output.stdout.contains("Hello positional!"),
+        output.stdout_text().contains("Hello positional!"),
         "Should echo the positional message: {}",
-        output.stdout
+        output.stdout_text()
     );
 }
 
@@ -1331,9 +1331,9 @@ print(f"Result: {result['result']}")
     );
     let output = result.unwrap();
     assert!(
-        output.stdout.contains("Result: 42"),
+        output.stdout_text().contains("Result: 42"),
         "add(10, 32) should return 42: {}",
-        output.stdout
+        output.stdout_text()
     );
 }
 
@@ -1360,9 +1360,9 @@ print(f"Result: {result['result']}")
     );
     let output = result.unwrap();
     assert!(
-        output.stdout.contains("Result: 42"),
+        output.stdout_text().contains("Result: 42"),
         "add(10, b=32) should return 42: {}",
-        output.stdout
+        output.stdout_text()
     );
 }
 
@@ -1391,9 +1391,9 @@ print(f"Dashboards: {result['dashboards']}")
     );
     let output = result.unwrap();
     assert!(
-        output.stdout.contains("overview"),
+        output.stdout_text().contains("overview"),
         "search.dashboards('overview') should return results: {}",
-        output.stdout
+        output.stdout_text()
     );
 }
 
@@ -1420,9 +1420,9 @@ print(f"Result: {result['result']}")
     );
     let output = result.unwrap();
     assert!(
-        output.stdout.contains("Result: 300"),
+        output.stdout_text().contains("Result: 300"),
         "add(a=100, b=200) should return 300: {}",
-        output.stdout
+        output.stdout_text()
     );
 }
 
@@ -1450,9 +1450,9 @@ print(f"Dashboards: {result['dashboards']}")
     );
     let output = result.unwrap();
     assert!(
-        output.stdout.contains("metrics"),
+        output.stdout_text().contains("metrics"),
         "search.dashboards(query='metrics') should return results: {}",
-        output.stdout
+        output.stdout_text()
     );
 }
 
@@ -1483,16 +1483,16 @@ except TypeError as e:
     assert!(result.is_ok(), "Execution should succeed: {:?}", result);
     let output = result.unwrap();
     assert!(
-        output.stdout.contains("TypeError"),
+        output.stdout_text().contains("TypeError"),
         "Should raise TypeError for duplicate arg: {}",
-        output.stdout
+        output.stdout_text()
     );
     assert!(
         output
-            .stdout
+            .stdout_text()
             .contains("got multiple values for argument 'a'"),
         "Error message should mention the parameter name: {}",
-        output.stdout
+        output.stdout_text()
     );
 }
 
@@ -1519,15 +1519,15 @@ except TypeError as e:
     assert!(result.is_ok(), "Execution should succeed: {:?}", result);
     let output = result.unwrap();
     assert!(
-        output.stdout.contains("TypeError"),
+        output.stdout_text().contains("TypeError"),
         "Should raise TypeError for duplicate arg in namespace callback: {}",
-        output.stdout
+        output.stdout_text()
     );
     assert!(
         output
-            .stdout
+            .stdout_text()
             .contains("got multiple values for argument 'query'"),
         "Error message should mention the parameter name: {}",
-        output.stdout
+        output.stdout_text()
     );
 }

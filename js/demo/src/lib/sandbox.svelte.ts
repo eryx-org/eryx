@@ -118,7 +118,8 @@ class DynamicSandbox implements Sandbox {
     if (output.tag === "error") {
       throw new Error(output.val);
     }
-    return { stdout: output.stdout, stderr: output.stderr };
+    const decoder = new TextDecoder("utf-8", { fatal: false, ignoreBOM: true });
+    return { stdout: decoder.decode(output.stdout), stderr: decoder.decode(output.stderr) };
   }
 
   async snapshotState(): Promise<Uint8Array> {

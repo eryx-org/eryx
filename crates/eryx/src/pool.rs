@@ -891,7 +891,7 @@ mod tests {
             assert!(result.is_ok(), "Execution failed: {:?}", result.err());
 
             let output = result.unwrap();
-            assert_eq!(output.stdout.trim(), "Hello from pool!");
+            assert_eq!(output.stdout_text().trim(), "Hello from pool!");
         }
 
         #[tokio::test]
@@ -960,7 +960,7 @@ mod tests {
             let sandbox = pool.acquire().await.expect("Failed to acquire sandbox");
             let result = sandbox.execute("print(2 + 2)").await;
             assert!(result.is_ok());
-            assert_eq!(result.unwrap().stdout.trim(), "4");
+            assert_eq!(result.unwrap().stdout_text().trim(), "4");
         }
 
         #[tokio::test]

@@ -499,7 +499,7 @@ class TestMCPSandboxIntegration:
         result = sandbox.execute(
             'r = await mcp.mock.echo(message="hello world"); print(r["text"])'
         )
-        assert "hello world" in result.stdout
+        assert b"hello world" in result.stdout
 
     def test_add_tool(self, mcp_manager):
         """Test calling the add MCP tool from sandbox."""
@@ -507,7 +507,7 @@ class TestMCPSandboxIntegration:
         result = sandbox.execute(
             'r = await mcp.mock.add(a=3, b=5); print(r["result"])'
         )
-        assert "8" in result.stdout
+        assert b"8" in result.stdout
 
     def test_list_callbacks_includes_mcp(self, mcp_manager):
         """Test that list_callbacks() shows MCP tools."""
@@ -520,8 +520,8 @@ class TestMCPSandboxIntegration:
                 print(n)
             """)
         )
-        assert "mcp.mock.echo" in result.stdout
-        assert "mcp.mock.add" in result.stdout
+        assert b"mcp.mock.echo" in result.stdout
+        assert b"mcp.mock.add" in result.stdout
 
     def test_mcp_with_python_callbacks(self, mcp_manager):
         """Test MCP tools alongside Python callbacks."""
@@ -542,8 +542,8 @@ class TestMCPSandboxIntegration:
             print(f"mcp={mcp_r['result']}, py={py_r['result']}")
             """)
         )
-        assert "mcp=30" in result.stdout
-        assert "py=30" in result.stdout
+        assert b"mcp=30" in result.stdout
+        assert b"py=30" in result.stdout
 
     def test_invoke_style(self, mcp_manager):
         """Test calling MCP tool via invoke() style."""
@@ -554,7 +554,7 @@ class TestMCPSandboxIntegration:
             print(r["text"])
             """)
         )
-        assert "invoked" in result.stdout
+        assert b"invoked" in result.stdout
 
     def test_dict_access_style(self, mcp_manager):
         """Test calling MCP tool via dict-access on namespace."""
@@ -565,7 +565,7 @@ class TestMCPSandboxIntegration:
             print(r["text"])
             """)
         )
-        assert "dict-style" in result.stdout
+        assert b"dict-style" in result.stdout
 
     def test_dict_access_hyphenated_server(self):
         """Test dict-access with hyphenated server name (invalid Python identifier)."""
@@ -579,7 +579,7 @@ class TestMCPSandboxIntegration:
                 print(r["text"])
                 """)
             )
-            assert "hyphen-test" in result.stdout
+            assert b"hyphen-test" in result.stdout
         finally:
             manager.close()
 
@@ -592,7 +592,7 @@ class TestMCPSandboxIntegration:
             print(r["text"])
             """)
         )
-        assert "mixed-style" in result.stdout
+        assert b"mixed-style" in result.stdout
 
 
 # =============================================================================
@@ -617,7 +617,7 @@ class TestMCPSessionIntegration:
         result = session.execute(
             'r = await mcp.mock.echo(message="session test"); print(r["text"])'
         )
-        assert "session test" in result.stdout
+        assert b"session test" in result.stdout
 
     def test_session_state_with_mcp(self, mcp_manager):
         """Test that session state persists while using MCP tools."""
@@ -630,11 +630,11 @@ class TestMCPSessionIntegration:
             print(y)
             """)
         )
-        assert "15" in result.stdout
+        assert b"15" in result.stdout
 
         # State persists
         result = session.execute("print(y)")
-        assert "15" in result.stdout
+        assert b"15" in result.stdout
 
     def test_session_mcp_with_callbacks(self, mcp_manager):
         """Test Session with both MCP and Python callbacks."""
@@ -655,8 +655,8 @@ class TestMCPSessionIntegration:
             print(f"echo={echo_r['text']}, greet={greet_r['greeting']}")
             """)
         )
-        assert "echo=world" in result.stdout
-        assert "greet=Hello, world!" in result.stdout
+        assert b"echo=world" in result.stdout
+        assert b"greet=Hello, world!" in result.stdout
 
 
 # =============================================================================

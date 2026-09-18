@@ -18,7 +18,7 @@ async fn main() -> Result<(), eryx::Error> {
     // Execute code in the session
     session.execute("x = 42").await?;
     let result = session.execute("print(x)").await?;
-    println!("{}", result.stdout);  // "42"
+    println!("{}", result.stdout_text());  // "42"
 
     Ok(())
 }
@@ -32,7 +32,7 @@ session = eryx.Session()
 # Execute code in the session
 session.execute("x = 42")
 result = session.execute("print(x)")
-print(result.stdout)  # "42"
+print(result.stdout_text)  # "42"
 ```
 <!-- langtabs-end -->
 
@@ -56,7 +56,7 @@ async fn main() -> Result<(), eryx::Error> {
     session.execute("x = 42").await?;
     session.execute("y = x * 2").await?;
     let result = session.execute("print(f'{x}, {y}')").await?;
-    println!("{}", result.stdout);  // "42, 84"
+    println!("{}", result.stdout_text());  // "42, 84"
 
     Ok(())
 }
@@ -70,7 +70,7 @@ session = eryx.Session()
 session.execute("x = 42")
 session.execute("y = x * 2")
 result = session.execute("print(f'{x}, {y}')")
-print(result.stdout)  # "42, 84"
+print(result.stdout_text)  # "42, 84"
 ```
 <!-- langtabs-end -->
 
@@ -95,7 +95,7 @@ def greet(name):
 
     // Use it later
     let result = session.execute("print(greet('World'))").await?;
-    println!("{}", result.stdout);  // "Hello, World!"
+    println!("{}", result.stdout_text());  // "Hello, World!"
 
     // Define a class
     session.execute(r#"
@@ -110,7 +110,7 @@ class Counter:
     // Create and use instances
     session.execute("c = Counter()").await?;
     let result = session.execute("print(c.increment(), c.increment(), c.increment())").await?;
-    println!("{}", result.stdout);  // "1 2 3"
+    println!("{}", result.stdout_text());  // "1 2 3"
 
     Ok(())
 }
@@ -129,7 +129,7 @@ def greet(name):
 
 # Use it later
 result = session.execute("print(greet('World'))")
-print(result.stdout)  # "Hello, World!"
+print(result.stdout_text)  # "Hello, World!"
 
 # Define a class
 session.execute("""
@@ -144,7 +144,7 @@ class Counter:
 # Create and use instances
 session.execute("c = Counter()")
 result = session.execute("print(c.increment(), c.increment(), c.increment())")
-print(result.stdout)  # "1 2 3"
+print(result.stdout_text)  # "1 2 3"
 ```
 <!-- langtabs-end -->
 
@@ -163,7 +163,7 @@ async fn main() -> Result<(), eryx::Error> {
 
     session.execute("import json").await?;
     let result = session.execute(r#"print(json.dumps({"a": 1}))"#).await?;
-    println!("{}", result.stdout);  // '{"a": 1}'
+    println!("{}", result.stdout_text());  // '{"a": 1}'
 
     Ok(())
 }
@@ -176,7 +176,7 @@ session = eryx.Session()
 
 session.execute("import json")
 result = session.execute('print(json.dumps({"a": 1}))')
-print(result.stdout)  # '{"a": 1}'
+print(result.stdout_text)  # '{"a": 1}'
 ```
 <!-- langtabs-end -->
 
@@ -244,7 +244,7 @@ async fn main() -> Result<(), eryx::Error> {
 
     // x is no longer defined
     let result = session.execute("print('x' in dir())").await?;
-    println!("{}", result.stdout);  // "False"
+    println!("{}", result.stdout_text());  // "False"
 
     Ok(())
 }
@@ -260,7 +260,7 @@ session.clear_state()
 
 # x is no longer defined
 result = session.execute("print('x' in dir())")
-print(result.stdout)  # "False"
+print(result.stdout_text)  # "False"
 ```
 <!-- langtabs-end -->
 
@@ -289,7 +289,7 @@ try:
 except NameError:
     print("x not defined")
     "#).await?;
-    println!("{}", result.stdout);  // "x not defined"
+    println!("{}", result.stdout_text());  // "x not defined"
 
     Ok(())
 }
@@ -310,7 +310,7 @@ try:
 except NameError:
     print("x not defined")
 """)
-print(result.stdout)  # "x not defined"
+print(result.stdout_text)  # "x not defined"
 ```
 <!-- langtabs-end -->
 
@@ -375,12 +375,12 @@ async fn main() -> Result<(), eryx::Error> {
     // Modify the state
     session.execute("x = 999").await?;
     let result = session.execute("print(x)").await?;
-    println!("{}", result.stdout);  // "999"
+    println!("{}", result.stdout_text());  // "999"
 
     // Restore the snapshot
     session.restore_state(&snapshot).await?;
     let result = session.execute("print(x)").await?;
-    println!("{}", result.stdout);  // "10"
+    println!("{}", result.stdout_text());  // "10"
 
     Ok(())
 }
@@ -397,12 +397,12 @@ snapshot = session.snapshot_state()
 # Modify the state
 session.execute("x = 999")
 result = session.execute("print(x)")
-print(result.stdout)  # "999"
+print(result.stdout_text)  # "999"
 
 # Restore the snapshot
 session.restore_state(snapshot)
 result = session.execute("print(x)")
-print(result.stdout)  # "10"
+print(result.stdout_text)  # "10"
 ```
 <!-- langtabs-end -->
 
@@ -424,7 +424,7 @@ session2 = eryx.Session()
 session2.restore_state(snapshot)
 
 result = session2.execute("print(f'{data}, {total}')")
-print(result.stdout)  # "[1, 2, 3], 6"
+print(result.stdout_text)  # "[1, 2, 3], 6"
 ```
 
 ## Session with VFS
@@ -440,7 +440,7 @@ session = eryx.Session(vfs=storage)
 # Files written in the session persist
 session.execute("open('/data/test.txt', 'w').write('hello')")
 result = session.execute("print(open('/data/test.txt').read())")
-print(result.stdout)  # "hello"
+print(result.stdout_text)  # "hello"
 ```
 
 ## Execution Timeout
@@ -513,7 +513,7 @@ session = eryx.Session(
 session.execute("c1 = await increment()")
 session.execute("c2 = await increment()")
 result = session.execute("c3 = await increment(); print(c3['count'])")
-print(result.stdout)  # "3"
+print(result.stdout_text)  # "3"
 ```
 
 ## Next Steps

@@ -22,7 +22,7 @@ x = 2 + 2
 print(f"2 + 2 = {x}")
     "#).await?;
 
-    println!("{}", result.stdout);
+    println!("{}", result.stdout_text());
     // Output:
     // Hello from Python!
     // 2 + 2 = 4
@@ -46,7 +46,7 @@ x = 2 + 2
 print(f"2 + 2 = {x}")
 ''')
 
-print(result.stdout)
+print(result.stdout_text)
 # Output:
 # Hello from the sandbox!
 # 2 + 2 = 4
@@ -86,7 +86,7 @@ response = await echo(message="Hello!")
 print(f"Echo: {response}")
     "#).await?;
 
-    println!("{}", result.stdout);
+    println!("{}", result.stdout_text());
     Ok(())
 }
 ```
@@ -108,7 +108,7 @@ t = await get_time()
 print(f"Time: {t['timestamp']}")
 """)
 
-print(result.stdout)
+print(result.stdout_text)
 ```
 <!-- langtabs-end -->
 
@@ -132,7 +132,7 @@ async fn main() -> Result<(), eryx::Error> {
     // State persists across executions
     session.execute("x = 42").await?;
     let result = session.execute("print(x * 2)").await?;
-    println!("{}", result.stdout); // "84"
+    println!("{}", result.stdout_text()); // "84"
 
     Ok(())
 }
@@ -147,7 +147,7 @@ session = eryx.Session()
 session.execute("x = 42")
 session.execute("y = x * 2")
 result = session.execute("print(f'{x} * 2 = {y}')")
-print(result.stdout)  # "42 * 2 = 84"
+print(result.stdout_text)  # "42 * 2 = 84"
 ```
 <!-- langtabs-end -->
 

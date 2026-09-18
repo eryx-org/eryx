@@ -8,6 +8,20 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+/// Extension trait for bytes fields in proto messages to enable string-like operations.
+trait BytesExt {
+    fn to_lossy(&self) -> String;
+    fn contains_str(&self, needle: &str) -> bool;
+}
+impl BytesExt for Vec<u8> {
+    fn to_lossy(&self) -> String {
+        String::from_utf8_lossy(self).into_owned()
+    }
+    fn contains_str(&self, needle: &str) -> bool {
+        String::from_utf8_lossy(self).contains(needle)
+    }
+}
+
 use eryx::{PoolConfig, Sandbox, SandboxPool};
 use eryx_server::proto::eryx::v1::eryx_client::EryxClient;
 use eryx_server::proto::eryx::v1::eryx_server::EryxServer;
@@ -93,7 +107,7 @@ async fn execute_simple_print() {
         if let Some(server_message::Message::ExecuteResult(result)) = msg.message {
             assert!(result.success, "execution failed: {}", result.error);
             assert!(
-                result.stdout.contains("hello from eryx"),
+                result.stdout.contains_str("hello from eryx"),
                 "stdout missing expected output: {:?}",
                 result.stdout
             );
@@ -147,7 +161,7 @@ async fn execute_uncaught_exception_returns_error_not_stderr() {
         .into_inner();
 
     let mut got_result = false;
-    let mut stderr_events: Vec<String> = Vec::new();
+    let mut stderr_events: Vec<Vec<u8>> = Vec::new();
     while let Some(msg) = stream.message().await.unwrap() {
         match msg.message {
             Some(server_message::Message::OutputEvent(event)) => {
@@ -174,13 +188,14 @@ async fn execute_uncaught_exception_returns_error_not_stderr() {
                 );
                 // The traceback is surfaced through stderr (matching the stream).
                 assert!(
-                    result.stderr.contains("Traceback") && result.stderr.contains("Exception"),
+                    result.stderr.contains_str("Traceback")
+                        && result.stderr.contains_str("Exception"),
                     "stderr field should carry the traceback, got: {:?}",
                     result.stderr
                 );
                 // stdout produced before the exception is preserved too.
                 assert!(
-                    result.stdout.contains("before the boom"),
+                    result.stdout.contains_str("before the boom"),
                     "stdout field should carry pre-exception output, got: {:?}",
                     result.stdout
                 );
@@ -194,7 +209,7 @@ async fn execute_uncaught_exception_returns_error_not_stderr() {
     // The traceback IS delivered live as STDERR output events during execution.
     let streamed = stderr_events.concat();
     assert!(
-        streamed.contains("Traceback") && streamed.contains("Exception"),
+        streamed.contains_str("Traceback") && streamed.contains_str("Exception"),
         "expected the traceback to be streamed as STDERR events, got: {:?}",
         stderr_events
     );
@@ -362,7 +377,7 @@ async fn execute_secret_in_uncaught_exception_is_scrubbed() {
         .into_inner();
 
     let mut got_result = false;
-    let mut stderr_events: Vec<String> = Vec::new();
+    let mut stderr_events: Vec<Vec<u8>> = Vec::new();
     while let Some(msg) = stream.message().await.unwrap() {
         match msg.message {
             Some(server_message::Message::OutputEvent(event)) => {
@@ -376,17 +391,17 @@ async fn execute_secret_in_uncaught_exception_is_scrubbed() {
                 // The real secret never reaches Python, so it cannot appear
                 // anywhere, and the placeholder must be scrubbed from stderr.
                 assert!(
-                    !result.stderr.contains(REAL_SECRET),
+                    !result.stderr.contains_str(REAL_SECRET),
                     "real secret leaked into stderr: {:?}",
                     result.stderr
                 );
                 assert!(
-                    !result.stderr.contains("ERYX_SECRET_PLACEHOLDER_"),
+                    !result.stderr.contains_str("ERYX_SECRET_PLACEHOLDER_"),
                     "unscrubbed placeholder leaked into stderr: {:?}",
                     result.stderr
                 );
                 assert!(
-                    result.stderr.contains("[REDACTED]"),
+                    result.stderr.contains_str("[REDACTED]"),
                     "expected the placeholder to be redacted in the traceback: {:?}",
                     result.stderr
                 );
@@ -405,7 +420,7 @@ async fn execute_secret_in_uncaught_exception_is_scrubbed() {
     // two writes. The final `stderr` field, scrubbed whole, is the guarantee.)
     let streamed = stderr_events.concat();
     assert!(
-        !streamed.contains(REAL_SECRET),
+        !streamed.contains_str(REAL_SECRET),
         "real secret leaked into streamed stderr events: {:?}",
         stderr_events
     );
@@ -484,12 +499,12 @@ print(f"got: {result}")
             Some(server_message::Message::ExecuteResult(result)) => {
                 assert!(result.success, "execution failed: {}", result.error);
                 assert!(
-                    result.stdout.contains("got:"),
+                    result.stdout.contains_str("got:"),
                     "stdout missing callback result: {:?}",
                     result.stdout
                 );
                 assert!(
-                    result.stdout.contains("echoed"),
+                    result.stdout.contains_str("echoed"),
                     "stdout missing echoed value: {:?}",
                     result.stdout
                 );
@@ -575,7 +590,7 @@ except Exception as e:
                     "execution should succeed (error was caught)"
                 );
                 assert!(
-                    result.stdout.contains("caught:"),
+                    result.stdout.contains_str("caught:"),
                     "stdout should contain caught error: {:?}",
                     result.stdout
                 );
@@ -636,8 +651,8 @@ for i in range(3):
             Some(server_message::Message::ExecuteResult(result)) => {
                 assert!(result.success, "execution failed: {}", result.error);
                 // Final result should also have the complete stdout.
-                assert!(result.stdout.contains("line 0"));
-                assert!(result.stdout.contains("line 2"));
+                assert!(result.stdout.contains_str("line 0"));
+                assert!(result.stdout.contains_str("line 2"));
                 got_result = true;
             }
             _ => {}
@@ -647,11 +662,11 @@ for i in range(3):
     assert!(got_result, "never received ExecuteResult");
     // We should have received at least one output event.
     assert!(!output_events.is_empty(), "expected output events");
-    let all_output: String = output_events.concat();
+    let all_output: Vec<u8> = output_events.concat();
     assert!(
-        all_output.contains("line 0"),
+        all_output.contains_str("line 0"),
         "output events missing expected content: {:?}",
-        all_output
+        String::from_utf8_lossy(&all_output)
     );
 }
 
@@ -745,7 +760,7 @@ print(x + y)
             Some(server_message::Message::ExecuteResult(result)) => {
                 assert!(result.success, "execution failed: {}", result.error);
                 assert!(
-                    result.stdout.contains("3"),
+                    result.stdout.contains_str("3"),
                     "stdout missing expected output: {:?}",
                     result.stdout
                 );
@@ -967,7 +982,7 @@ async fn execute_trace_linenos_adjusted_with_leading_newline() {
             }
             Some(server_message::Message::ExecuteResult(result)) => {
                 assert!(result.success, "execution failed: {}", result.error);
-                assert!(result.stdout.contains("42"));
+                assert!(result.stdout.contains_str("42"));
                 got_result = true;
             }
             _ => {}
@@ -1080,7 +1095,7 @@ print(f"alpha: {result}")
                 Some(server_message::Message::ExecuteResult(result)) => {
                     assert!(result.success, "request 1 failed: {}", result.error);
                     assert!(
-                        result.stdout.contains("alpha"),
+                        result.stdout.contains_str("alpha"),
                         "request 1 stdout missing alpha: {:?}",
                         result.stdout
                     );
@@ -1165,10 +1180,11 @@ print(f"beta: {result}")
                     assert!(
                         result.success,
                         "request 2 failed: {} | stdout: {}",
-                        result.error, result.stdout
+                        result.error,
+                        result.stdout.to_lossy()
                     );
                     assert!(
-                        result.stdout.contains("beta"),
+                        result.stdout.contains_str("beta"),
                         "request 2 stdout missing beta: {:?}",
                         result.stdout
                     );
@@ -1261,15 +1277,18 @@ print(f"path={result['path']}")
                 assert!(
                     result.success,
                     "execution failed: {} (stderr: {})",
-                    result.error, result.stderr
+                    result.error,
+                    result.stderr.to_lossy()
                 );
                 assert!(
-                    result.stdout.contains("name=test'''datasource"),
+                    result.stdout.contains_str("name=test'''datasource"),
                     "stdout missing name with triple quotes: {:?}",
                     result.stdout
                 );
                 assert!(
-                    result.stdout.contains("path=C:\\Users\\test\\config.yaml"),
+                    result
+                        .stdout
+                        .contains_str("path=C:\\Users\\test\\config.yaml"),
                     "stdout missing path with backslashes: {:?}",
                     result.stdout
                 );
@@ -1555,7 +1574,7 @@ print(f"got: {result}")
             Some(server_message::Message::ExecuteResult(result)) => {
                 assert!(result.success, "run 2 failed: {}", result.error);
                 assert!(
-                    result.stdout.contains("echoed"),
+                    result.stdout.contains_str("echoed"),
                     "replayed value missing from stdout: {:?}",
                     result.stdout
                 );

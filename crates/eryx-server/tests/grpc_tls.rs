@@ -143,7 +143,7 @@ async fn assert_hello_round_trip(channel: tonic::transport::Channel) {
         if let Some(server_message::Message::ExecuteResult(result)) = msg.message {
             assert!(result.success, "execution failed: {}", result.error);
             assert!(
-                result.stdout.contains("hello over tls"),
+                String::from_utf8_lossy(&result.stdout).contains("hello over tls"),
                 "stdout missing expected output: {:?}",
                 result.stdout
             );

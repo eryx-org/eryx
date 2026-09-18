@@ -710,7 +710,7 @@ async fn test_trace_print() {
     assert!(result.is_ok(), "Execution should succeed");
 
     let output = result.unwrap();
-    assert_eq!(output.stdout, "hello");
+    assert_eq!(output.stdout, b"hello");
 
     let events = trace.simple_events();
 

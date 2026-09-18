@@ -42,4 +42,4 @@ def test_unclosed_file_is_flushed_on_finalization():
     session.execute("open('/data/unclosed.txt', 'w').write('flushed')")
     result = session.execute("print(open('/data/unclosed.txt').read())")
 
-    assert result.stdout == "flushed"
+    assert result.stdout == b"flushed"

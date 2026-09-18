@@ -72,7 +72,7 @@ msg = await echo(message="hi", repeat=3)
 print(msg['echoed'])  # "hihihi"
     "#).await?;
 
-    println!("{}", result.stdout);
+    println!("{}", result.stdout_text());
     Ok(())
 }
 ```

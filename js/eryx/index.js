@@ -106,10 +106,12 @@ function _parseResultJson(json) {
  * @param {Object} output
  * @returns {ExecuteResult}
  */
+const _decoder = new TextDecoder("utf-8", { fatal: false, ignoreBOM: true });
+
 function _toResult(output) {
   return {
-    stdout: output.stdout,
-    stderr: output.stderr,
+    stdout: _decoder.decode(output.stdout),
+    stderr: _decoder.decode(output.stderr),
     result: output.resultJson ? _parseResultJson(output.resultJson) : undefined,
     resultJson: output.resultJson || undefined,
     resultError: output.resultError || undefined,

@@ -112,16 +112,17 @@ print(f"Response received: {response[:50]}")
         .expect("Failed to execute Python code");
 
     // Verify placeholder was scrubbed from stdout
+    let stdout = result.stdout_text();
     assert!(
-        result.stdout.contains("[REDACTED]"),
+        stdout.contains("[REDACTED]"),
         "Placeholder should be scrubbed from stdout"
     );
     assert!(
-        !result.stdout.contains("ERYX_SECRET_PLACEHOLDER_"),
+        !stdout.contains("ERYX_SECRET_PLACEHOLDER_"),
         "Placeholder should not appear in stdout"
     );
     assert!(
-        !result.stdout.contains("real-secret-value-12345"),
+        !stdout.contains("real-secret-value-12345"),
         "Real secret should never appear in stdout"
     );
 
@@ -194,7 +195,7 @@ except Exception as e:
 
     // Should see an error in output (connection refused or similar)
     assert!(
-        output.stdout.contains("Expected error") || output.stderr.contains("error"),
+        output.stdout_text().contains("Expected error") || output.stderr_text().contains("error"),
         "Should see error when secret is blocked for host"
     );
 }
@@ -221,12 +222,13 @@ sys.stderr.write(f"Error with key: {key}\n")
         .expect("Failed to execute");
 
     // Verify placeholder is scrubbed from stderr
+    let stderr = result.stderr_text();
     assert!(
-        result.stderr.contains("[REDACTED]"),
+        stderr.contains("[REDACTED]"),
         "Placeholder should be scrubbed from stderr"
     );
     assert!(
-        !result.stderr.contains("ERYX_SECRET_PLACEHOLDER_"),
+        !stderr.contains("ERYX_SECRET_PLACEHOLDER_"),
         "Placeholder should not appear in stderr"
     );
 }
@@ -256,8 +258,9 @@ print(f"Key2: {key2}")
         .expect("Failed to execute");
 
     // Both placeholders should be scrubbed
+    let stdout = result.stdout_text();
     assert_eq!(
-        result.stdout.matches("[REDACTED]").count(),
+        stdout.matches("[REDACTED]").count(),
         2,
         "Both secrets should be scrubbed"
     );
@@ -283,12 +286,13 @@ print(f"Debug key: {key}")
         .expect("Failed to execute");
 
     // Placeholder should NOT be scrubbed when disabled
+    let stdout = result.stdout_text();
     assert!(
-        result.stdout.contains("ERYX_SECRET_PLACEHOLDER_"),
+        stdout.contains("ERYX_SECRET_PLACEHOLDER_"),
         "Placeholder should appear when scrubbing is disabled"
     );
     assert!(
-        !result.stdout.contains("[REDACTED]"),
+        !stdout.contains("[REDACTED]"),
         "Should not see [REDACTED] when scrubbing is disabled"
     );
 }
@@ -420,10 +424,11 @@ result = {"leaked": os.environ.get("TEST_KEY", "")}
         .expect("Failed to execute");
 
     // stdout is NOT scrubbed (placeholder visible), but result IS.
+    let stdout = out.stdout_text();
     assert!(
-        out.stdout.contains("ERYX_SECRET_PLACEHOLDER_"),
+        stdout.contains("ERYX_SECRET_PLACEHOLDER_"),
         "stdout should keep the placeholder when scrub_stdout is off: {}",
-        out.stdout
+        stdout
     );
     let result = out.result.expect("expected a result");
     assert!(
