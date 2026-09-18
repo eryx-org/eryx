@@ -297,22 +297,13 @@ const _: () = {
 };
 
 impl Sandbox {
-    /// Create a Sandbox from an existing eryx::Sandbox.
-    ///
-    /// This is used internally by SandboxFactory to create sandboxes.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the tokio runtime cannot be created.
-    pub(crate) fn from_inner(inner: eryx::Sandbox) -> PyResult<Self> {
-        let runtime = Arc::new(
-            tokio::runtime::Builder::new_multi_thread()
-                .enable_all()
-                .build()
-                .map_err(|e| {
-                    InitializationError::new_err(format!("failed to create runtime: {e}"))
-                })?,
-        );
+    /// Create a Sandbox from an existing eryx::Sandbox, sharing the caller's
+    /// Tokio runtime. Used by `SandboxFactory` so every child reuses one
+    /// runtime instead of creating its own.
+    pub(crate) fn from_inner(
+        inner: eryx::Sandbox,
+        runtime: Arc<tokio::runtime::Runtime>,
+    ) -> PyResult<Self> {
         Ok(Self { inner, runtime })
     }
 }

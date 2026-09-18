@@ -63,6 +63,10 @@ pub struct SandboxFactory {
     /// Holds the temp directory for data files extracted during `load()`.
     #[allow(dead_code)]
     data_files_dir: Option<tempfile::TempDir>,
+    /// Tokio runtime shared across all sandboxes and sessions created by this
+    /// factory. Children hold an `Arc` clone, so the runtime outlives the
+    /// factory when children still exist.
+    runtime: Arc<tokio::runtime::Runtime>,
 }
 
 /// Construct a pre-compiled artifact with optional content-safe caching.
@@ -130,11 +134,14 @@ impl SandboxFactory {
         callbacks: Option<Bound<'_, PyAny>>,
         cache: bool,
     ) -> PyResult<Self> {
-        // Create tokio runtime for async pre-initialization
-        let runtime = tokio::runtime::Builder::new_multi_thread()
-            .enable_all()
-            .build()
-            .map_err(|e| InitializationError::new_err(format!("failed to create runtime: {e}")))?;
+        let runtime = Arc::new(
+            tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()
+                .map_err(|e| {
+                    InitializationError::new_err(format!("failed to create runtime: {e}"))
+                })?,
+        );
 
         // Get embedded resources for stdlib path
         let embedded = eryx::embedded::EmbeddedResources::get().map_err(eryx_error_to_py)?;
@@ -186,6 +193,7 @@ impl SandboxFactory {
             extracted_packages: Arc::new(extracted_packages),
             callbacks: callbacks.map(Bound::unbind),
             data_files_dir: None,
+            runtime,
         })
     }
 
@@ -222,6 +230,15 @@ impl SandboxFactory {
         callbacks: Option<Bound<'_, PyAny>>,
         cache: bool,
     ) -> PyResult<Self> {
+        let runtime = Arc::new(
+            tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()
+                .map_err(|e| {
+                    InitializationError::new_err(format!("failed to create runtime: {e}"))
+                })?,
+        );
+
         // Get embedded resources for stdlib path
         let embedded = eryx::embedded::EmbeddedResources::get().map_err(eryx_error_to_py)?;
         let stdlib_path = embedded.stdlib().to_path_buf();
@@ -252,6 +269,7 @@ impl SandboxFactory {
             extracted_packages: Arc::new(Vec::new()),
             callbacks: callbacks.map(Bound::unbind),
             data_files_dir,
+            runtime,
         })
     }
 
@@ -336,14 +354,6 @@ impl SandboxFactory {
         on_stderr: Option<Py<PyAny>>,
         result_variable: Option<String>,
     ) -> PyResult<Session> {
-        let runtime = Arc::new(
-            tokio::runtime::Builder::new_multi_thread()
-                .enable_all()
-                .build()
-                .map_err(|e| {
-                    InitializationError::new_err(format!("failed to create runtime: {e}"))
-                })?,
-        );
         // SAFETY: the bytes were produced by `PythonExecutor::precompile` or
         // loaded from a factory file created by this same API.
         let mut executor = unsafe { self.precompiled.to_executor() }.map_err(|e| {
@@ -369,7 +379,7 @@ impl SandboxFactory {
         Session::from_executor(
             py,
             Arc::new(executor),
-            runtime,
+            Arc::clone(&self.runtime),
             vfs,
             vfs_mount_path,
             limits,
@@ -515,7 +525,7 @@ impl SandboxFactory {
 
         let inner = builder.build().map_err(eryx_error_to_py)?;
 
-        Sandbox::from_inner(inner)
+        Sandbox::from_inner(inner, Arc::clone(&self.runtime))
     }
 
     /// Get the size of the pre-compiled runtime in bytes.
