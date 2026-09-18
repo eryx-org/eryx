@@ -393,6 +393,10 @@ impl TraceHandler for VisualTraceHandler {
                 format!("[{:2}] ← CALLBACK {} ({}ms)", count, name, duration_ms),
                 Color::Cyan,
             ),
+            _ => (
+                format!("[{:2}] TRACE {}", count, event.lineno),
+                Color::White,
+            ),
         };
 
         self.events.lock().expect("lock events").push((desc, color));

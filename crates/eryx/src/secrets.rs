@@ -37,6 +37,7 @@ impl std::fmt::Debug for SecretConfig {
 
 /// File scrubbing policy for preventing secret leakage via file writes.
 #[derive(Debug, Clone, Default)]
+#[non_exhaustive]
 pub enum FileScrubPolicy {
     /// Scrub all files (default when secrets configured)
     #[default]
@@ -101,6 +102,7 @@ impl FileScrubPolicy {
 
 /// Output stream scrubbing policy for preventing secret leakage via stdout/stderr.
 #[derive(Debug, Clone, Default)]
+#[non_exhaustive]
 pub enum OutputScrubPolicy {
     /// Scrub output (default when secrets configured)
     #[default]

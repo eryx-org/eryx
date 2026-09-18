@@ -66,6 +66,7 @@ impl From<&TraceEvent> for SimpleEvent {
             TraceEventKind::Exception { message } => format!("exception:{}", message),
             TraceEventKind::CallbackStart { name } => format!("callback_start:{}", name),
             TraceEventKind::CallbackEnd { name, .. } => format!("callback_end:{}", name),
+            _ => "unknown".to_string(),
         };
         Self {
             lineno: event.lineno,

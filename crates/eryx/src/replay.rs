@@ -142,6 +142,7 @@ use crate::schema::Schema;
 /// terminates execution before an entry is recorded, so the suspended call is
 /// re-attempted live on the resuming run.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub enum CallbackOutcome {
     /// The callback succeeded. The value is returned to Python and journaled.
     Ok(serde_json::Value),

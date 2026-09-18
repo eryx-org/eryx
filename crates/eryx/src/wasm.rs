@@ -194,6 +194,7 @@ fn classify_epoch_interrupt(
 /// **suspension**, which causes the import to poison the store's fuel and halt
 /// the guest synchronously.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub enum CallbackHostResult {
     /// The callback succeeded; the JSON value is returned to Python.
     Ok(String),
@@ -241,6 +242,7 @@ pub struct OutputRequest {
 /// [`mpsc`](tokio::sync::mpsc) channel. Each request that expects a reply
 /// carries a oneshot `response_tx` for the handler to send the result back.
 #[derive(Debug)]
+#[non_exhaustive]
 pub enum NetRequest {
     // TCP operations
     /// Connect to a host over TCP.

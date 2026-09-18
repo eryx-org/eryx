@@ -19,6 +19,7 @@ pub struct TraceEvent {
 /// The kind of trace event.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum TraceEventKind {
     /// About to execute a line (from `sys.settrace` 'line' event).
     Line,
