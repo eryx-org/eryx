@@ -134,14 +134,7 @@ impl SandboxFactory {
         callbacks: Option<Bound<'_, PyAny>>,
         cache: bool,
     ) -> PyResult<Self> {
-        let runtime = Arc::new(
-            tokio::runtime::Builder::new_multi_thread()
-                .enable_all()
-                .build()
-                .map_err(|e| {
-                    InitializationError::new_err(format!("failed to create runtime: {e}"))
-                })?,
-        );
+        let runtime = crate::error::make_runtime()?;
 
         // Get embedded resources for stdlib path
         let embedded = eryx::embedded::EmbeddedResources::get().map_err(eryx_error_to_py)?;
@@ -230,14 +223,7 @@ impl SandboxFactory {
         callbacks: Option<Bound<'_, PyAny>>,
         cache: bool,
     ) -> PyResult<Self> {
-        let runtime = Arc::new(
-            tokio::runtime::Builder::new_multi_thread()
-                .enable_all()
-                .build()
-                .map_err(|e| {
-                    InitializationError::new_err(format!("failed to create runtime: {e}"))
-                })?,
-        );
+        let runtime = crate::error::make_runtime()?;
 
         // Get embedded resources for stdlib path
         let embedded = eryx::embedded::EmbeddedResources::get().map_err(eryx_error_to_py)?;
@@ -525,7 +511,7 @@ impl SandboxFactory {
 
         let inner = builder.build().map_err(eryx_error_to_py)?;
 
-        Sandbox::from_inner(inner, Arc::clone(&self.runtime))
+        Ok(Sandbox::from_inner(inner, Arc::clone(&self.runtime)))
     }
 
     /// Get the size of the pre-compiled runtime in bytes.

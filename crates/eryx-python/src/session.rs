@@ -252,15 +252,7 @@ impl Session {
         on_stderr: Option<Py<PyAny>>,
         result_variable: Option<String>,
     ) -> PyResult<Self> {
-        // Create a tokio runtime for async execution
-        let runtime = Arc::new(
-            tokio::runtime::Builder::new_multi_thread()
-                .enable_all()
-                .build()
-                .map_err(|e| {
-                    InitializationError::new_err(format!("failed to create runtime: {e}"))
-                })?,
-        );
+        let runtime = crate::error::make_runtime()?;
 
         // Create the PythonExecutor from embedded runtime
         let mut executor = eryx::PythonExecutor::from_embedded_runtime()

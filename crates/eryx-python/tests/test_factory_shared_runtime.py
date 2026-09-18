@@ -57,7 +57,7 @@ class TestSharedRuntime:
         for i, result in enumerate(results):
             assert result.stdout.strip() == str(i + 10).encode()
 
-    def test_factory_dropped_children_survive(self, factory):
+    def test_factory_dropped_children_survive(self):
         """Sandboxes and sessions remain usable after the factory is dropped."""
         local_factory = eryx.SandboxFactory(callbacks=CALLBACKS)
         sandbox = local_factory.create_sandbox()
