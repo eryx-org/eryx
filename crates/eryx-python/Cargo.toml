@@ -23,8 +23,11 @@ pyo3 = { workspace = true } #unified
 pythonize.workspace = true
 rmcp = { workspace = true, features = ["client", "transport-child-process", "transport-io"] }
 serde_json.workspace = true
+tar.workspace = true
+tempfile.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread"] }
 walkdir.workspace = true
+zstd.workspace = true
 
 [build-dependencies]
 pyo3-build-config = "0.29"

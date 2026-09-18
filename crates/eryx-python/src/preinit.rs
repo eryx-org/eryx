@@ -3,6 +3,7 @@
 //! Provides the `SandboxFactory` class for creating sandboxes with custom packages.
 //! The factory bundles packages and pre-imports into a reusable snapshot.
 
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -15,6 +16,9 @@ use crate::net_config::NetConfig;
 use crate::resource_limits::ResourceLimits;
 use crate::sandbox::{PyOutputHandler, Sandbox, apply_secrets};
 use crate::session::Session;
+
+const FACTORY_MAGIC: &[u8; 4] = b"ERYX";
+const FACTORY_VERSION: u32 = 2;
 
 /// A factory for creating sandboxes with custom packages.
 ///
@@ -56,6 +60,9 @@ pub struct SandboxFactory {
     /// loaded factory, the ones the caller says were). `create_sandbox()` and
     /// `create_session()` register them when given no callbacks of their own.
     callbacks: Option<Py<PyAny>>,
+    /// Holds the temp directory for data files extracted during `load()`.
+    #[allow(dead_code)]
+    data_files_dir: Option<tempfile::TempDir>,
 }
 
 /// Construct a pre-compiled artifact with optional content-safe caching.
@@ -178,6 +185,7 @@ impl SandboxFactory {
             site_packages_path: final_site_packages,
             extracted_packages: Arc::new(extracted_packages),
             callbacks: callbacks.map(Bound::unbind),
+            data_files_dir: None,
         })
     }
 
@@ -218,21 +226,32 @@ impl SandboxFactory {
         let embedded = eryx::embedded::EmbeddedResources::get().map_err(eryx_error_to_py)?;
         let stdlib_path = embedded.stdlib().to_path_buf();
 
-        // Load precompiled bytes from file
-        let precompiled = std::fs::read(&path).map_err(|e| {
+        let file_bytes = std::fs::read(&path).map_err(|e| {
             InitializationError::new_err(format!(
                 "failed to load factory from {}: {e}",
                 path.display()
             ))
         })?;
-        let precompiled = make_precompiled_artifact(precompiled, cache);
+
+        let (precompiled_bytes, data_files_dir, data_files_path) = parse_factory_file(&file_bytes)
+            .map_err(|e| {
+                InitializationError::new_err(format!(
+                    "failed to parse factory file {}: {e}",
+                    path.display()
+                ))
+            })?;
+
+        let precompiled = make_precompiled_artifact(precompiled_bytes, cache);
+
+        let site_packages_path = site_packages.or(data_files_path);
 
         Ok(Self {
             precompiled,
             stdlib_path,
-            site_packages_path: site_packages,
+            site_packages_path,
             extracted_packages: Arc::new(Vec::new()),
             callbacks: callbacks.map(Bound::unbind),
+            data_files_dir,
         })
     }
 
@@ -251,7 +270,22 @@ impl SandboxFactory {
     ///     factory = SandboxFactory(packages=[...], imports=["jinja2"])
     ///     factory.save("/path/to/jinja2-factory.bin")
     fn save(&self, path: PathBuf) -> PyResult<()> {
-        std::fs::write(&path, self.precompiled.as_bytes()).map_err(|e| {
+        let data_files = self
+            .site_packages_path
+            .as_ref()
+            .map(|p| collect_data_files(p))
+            .transpose()
+            .map_err(|e| {
+                InitializationError::new_err(format!("failed to collect data files: {e}"))
+            })?
+            .unwrap_or_default();
+
+        let factory_bytes =
+            build_factory_file(self.precompiled.as_bytes(), &data_files).map_err(|e| {
+                InitializationError::new_err(format!("failed to build factory file: {e}"))
+            })?;
+
+        std::fs::write(&path, factory_bytes).map_err(|e| {
             InitializationError::new_err(format!(
                 "failed to save factory to {}: {e}",
                 path.display()
@@ -528,6 +562,197 @@ impl std::fmt::Debug for SandboxFactory {
     }
 }
 
+// =============================================================================
+// Factory file format (v2 envelope)
+// =============================================================================
+//
+// [4 bytes: magic "ERYX"]
+// [4 bytes: version (2, little-endian)]
+// [8 bytes: precompiled_len (little-endian)]
+// [precompiled_len bytes: Wasmtime precompiled module]
+// [8 bytes: data_files_len (little-endian)]
+// [data_files_len bytes: zstd-compressed tar of data files]
+//
+// Version 1 (legacy): raw precompiled bytes with no envelope. Detected by
+// checking whether the first 4 bytes match the magic; if not, treat as v1.
+
+/// Collect non-Python data files from a site-packages directory.
+///
+/// Returns a list of (relative_path, file_contents) pairs. Skips `.py` and
+/// `.pyc` files since those are already in the interpreter snapshot.
+fn collect_data_files(site_packages: &Path) -> Result<Vec<(String, Vec<u8>)>, std::io::Error> {
+    let mut files = Vec::new();
+    if !site_packages.exists() {
+        return Ok(files);
+    }
+    for entry in walkdir::WalkDir::new(site_packages) {
+        let entry = entry?;
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        if path
+            .extension()
+            .is_some_and(|ext| ext == "py" || ext == "pyc")
+        {
+            continue;
+        }
+        let relative = path
+            .strip_prefix(site_packages)
+            .map_err(std::io::Error::other)?;
+        let relative_str = relative
+            .components()
+            .map(|c| c.as_os_str().to_string_lossy())
+            .collect::<Vec<_>>()
+            .join("/");
+        let contents = std::fs::read(path)?;
+        files.push((relative_str, contents));
+    }
+    Ok(files)
+}
+
+/// Build a v2 factory file with the envelope format.
+fn build_factory_file(
+    precompiled: &[u8],
+    data_files: &[(String, Vec<u8>)],
+) -> Result<Vec<u8>, std::io::Error> {
+    let data_files_tar_zst = if data_files.is_empty() {
+        Vec::new()
+    } else {
+        let mut tar_builder = tar::Builder::new(Vec::new());
+        for (rel_path, contents) in data_files {
+            let mut header = tar::Header::new_gnu();
+            header.set_size(contents.len() as u64);
+            header.set_mode(0o644);
+            header.set_cksum();
+            tar_builder.append_data(&mut header, rel_path, contents.as_slice())?;
+        }
+        let tar_bytes = tar_builder.into_inner()?;
+        zstd::encode_all(tar_bytes.as_slice(), 3)?
+    };
+
+    let precompiled_len = precompiled.len() as u64;
+    let data_files_len = data_files_tar_zst.len() as u64;
+
+    let total = 4 + 4 + 8 + precompiled.len() + 8 + data_files_tar_zst.len();
+    let mut buf = Vec::with_capacity(total);
+
+    buf.write_all(FACTORY_MAGIC)?;
+    buf.write_all(&FACTORY_VERSION.to_le_bytes())?;
+    buf.write_all(&precompiled_len.to_le_bytes())?;
+    buf.write_all(precompiled)?;
+    buf.write_all(&data_files_len.to_le_bytes())?;
+    buf.write_all(&data_files_tar_zst)?;
+
+    Ok(buf)
+}
+
+type ParsedFactory = (Vec<u8>, Option<tempfile::TempDir>, Option<PathBuf>);
+
+/// Parse a factory file, handling both v1 (raw) and v2 (envelope) formats.
+///
+/// Returns (precompiled_bytes, optional_temp_dir, optional_site_packages_path).
+fn parse_factory_file(bytes: &[u8]) -> Result<ParsedFactory, std::io::Error> {
+    if bytes.len() >= 4 && &bytes[..4] == FACTORY_MAGIC {
+        parse_factory_v2(bytes)
+    } else {
+        Ok((bytes.to_vec(), None, None))
+    }
+}
+
+fn read_le_u32(buf: &[u8]) -> Result<u32, std::io::Error> {
+    let arr: [u8; 4] = buf.try_into().map_err(|_| {
+        std::io::Error::new(std::io::ErrorKind::InvalidData, "not enough bytes for u32")
+    })?;
+    Ok(u32::from_le_bytes(arr))
+}
+
+fn read_le_u64(buf: &[u8]) -> Result<u64, std::io::Error> {
+    let arr: [u8; 8] = buf.try_into().map_err(|_| {
+        std::io::Error::new(std::io::ErrorKind::InvalidData, "not enough bytes for u64")
+    })?;
+    Ok(u64::from_le_bytes(arr))
+}
+
+fn parse_factory_v2(bytes: &[u8]) -> Result<ParsedFactory, std::io::Error> {
+    let header_size = 4 + 4 + 8; // magic + version + precompiled_len
+    if bytes.len() < header_size {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "factory file too short for v2 header",
+        ));
+    }
+
+    let version = read_le_u32(&bytes[4..8])?;
+    if version != FACTORY_VERSION {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("unsupported factory file version: {version}"),
+        ));
+    }
+
+    let precompiled_len = read_le_u64(&bytes[8..16])? as usize;
+
+    let precompiled_end = 16 + precompiled_len;
+    if bytes.len() < precompiled_end + 8 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "factory file truncated (missing data files length)",
+        ));
+    }
+
+    let precompiled_bytes = bytes[16..precompiled_end].to_vec();
+
+    let data_files_len = read_le_u64(&bytes[precompiled_end..precompiled_end + 8])? as usize;
+
+    if data_files_len == 0 {
+        return Ok((precompiled_bytes, None, None));
+    }
+
+    let data_start = precompiled_end + 8;
+    let data_end = data_start + data_files_len;
+    if bytes.len() < data_end {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "factory file truncated (data files section)",
+        ));
+    }
+
+    let compressed = &bytes[data_start..data_end];
+    let tar_bytes = zstd::decode_all(compressed)?;
+    let mut archive = tar::Archive::new(tar_bytes.as_slice());
+
+    let temp_dir = tempfile::TempDir::new()?;
+    let extract_path = temp_dir.path();
+
+    for entry in archive.entries()? {
+        let mut entry = entry?;
+        let path = entry.path()?.into_owned();
+
+        // Reject absolute or parent-traversal paths
+        if path.is_absolute()
+            || path
+                .components()
+                .any(|c| c == std::path::Component::ParentDir)
+        {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("unsafe path in data files archive: {}", path.display()),
+            ));
+        }
+
+        let out_path = extract_path.join(&path);
+        if let Some(parent) = out_path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let mut outfile = std::fs::File::create(&out_path)?;
+        std::io::copy(&mut entry, &mut outfile)?;
+    }
+
+    let site_packages_path = extract_path.to_path_buf();
+    Ok((precompiled_bytes, Some(temp_dir), Some(site_packages_path)))
+}
+
 /// Process packages to extract site-packages path and native extensions.
 ///
 /// Returns (site_packages_path, native_extensions, extracted_packages).
@@ -639,4 +864,101 @@ fn copy_directory_contents(src: &Path, dst: &Path) -> PyResult<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn v1_round_trip() {
+        let raw = b"some precompiled bytes";
+        let (parsed, temp_dir, path) = parse_factory_file(raw).unwrap();
+        assert_eq!(parsed, raw);
+        assert!(temp_dir.is_none());
+        assert!(path.is_none());
+    }
+
+    #[test]
+    fn v2_no_data_files() {
+        let precompiled = b"precompiled wasm module";
+        let factory_bytes = build_factory_file(precompiled, &[]).unwrap();
+
+        assert_eq!(&factory_bytes[..4], FACTORY_MAGIC);
+        let version = u32::from_le_bytes(factory_bytes[4..8].try_into().unwrap());
+        assert_eq!(version, FACTORY_VERSION);
+
+        let (parsed, temp_dir, path) = parse_factory_file(&factory_bytes).unwrap();
+        assert_eq!(parsed, precompiled);
+        assert!(temp_dir.is_none());
+        assert!(path.is_none());
+    }
+
+    #[test]
+    fn v2_with_data_files() {
+        let precompiled = b"precompiled wasm module";
+        let data_files = vec![
+            ("tzdata/zoneinfo/UTC".to_string(), b"TZif data".to_vec()),
+            (
+                "tzdata/zoneinfo/Asia/Tokyo".to_string(),
+                b"TZif tokyo data".to_vec(),
+            ),
+        ];
+        let factory_bytes = build_factory_file(precompiled, &data_files).unwrap();
+        let (parsed, temp_dir, path) = parse_factory_file(&factory_bytes).unwrap();
+
+        assert_eq!(parsed, precompiled);
+        assert!(temp_dir.is_some());
+        let path = path.unwrap();
+
+        let utc = std::fs::read(path.join("tzdata/zoneinfo/UTC")).unwrap();
+        assert_eq!(utc, b"TZif data");
+
+        let tokyo = std::fs::read(path.join("tzdata/zoneinfo/Asia/Tokyo")).unwrap();
+        assert_eq!(tokyo, b"TZif tokyo data");
+    }
+
+    #[test]
+    fn v2_rejects_truncated_header() {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(FACTORY_MAGIC);
+        // Too short — missing version and lengths
+        assert!(parse_factory_file(&bytes).is_err());
+    }
+
+    #[test]
+    fn v2_rejects_bad_version() {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(FACTORY_MAGIC);
+        bytes.extend_from_slice(&99u32.to_le_bytes());
+        bytes.extend_from_slice(&0u64.to_le_bytes());
+        bytes.extend_from_slice(&0u64.to_le_bytes());
+        assert!(parse_factory_file(&bytes).is_err());
+    }
+
+    #[test]
+    fn collect_data_files_skips_py() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let base = dir.path();
+
+        std::fs::create_dir_all(base.join("pkg")).unwrap();
+        std::fs::write(base.join("pkg/__init__.py"), "# python").unwrap();
+        std::fs::write(base.join("pkg/module.pyc"), "bytecode").unwrap();
+        std::fs::write(base.join("pkg/data.bin"), "binary data").unwrap();
+        std::fs::write(base.join("pkg/config.json"), "{}").unwrap();
+
+        let files = collect_data_files(base).unwrap();
+        let names: Vec<&str> = files.iter().map(|(n, _)| n.as_str()).collect();
+        assert!(!names.contains(&"pkg/__init__.py"));
+        assert!(!names.contains(&"pkg/module.pyc"));
+        assert!(names.contains(&"pkg/data.bin"));
+        assert!(names.contains(&"pkg/config.json"));
+    }
+
+    #[test]
+    fn collect_data_files_nonexistent_dir() {
+        let files = collect_data_files(Path::new("/nonexistent/path")).unwrap();
+        assert!(files.is_empty());
+    }
 }
