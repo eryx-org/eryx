@@ -7,6 +7,172 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## v0.8.0 — Bytes-native output
+
+**Release date:** 2026-09-19
+
+This release changes stdout and stderr from strings to raw bytes across every
+layer of the stack. Python code can emit arbitrary binary data and it will
+arrive intact — no more silent UTF-8 replacement at the sandbox boundary.
+Convenience helpers make the common "just give me text" path a one-line change.
+
+This release also adds `SandboxPool` to the Python bindings, giving you bounded
+concurrent execution with automatic lease lifecycle management.
+
+### Highlights
+
+- **stdout/stderr are now bytes** ([#448](https://github.com/eryx-org/eryx/pull/448)) —
+  `ExecuteResult.stdout` and `.stderr` carry raw bytes everywhere: `Vec<u8>` in
+  Rust, `bytes` in Python, `bytes` in the gRPC proto, and `Uint8Array` at the
+  WIT boundary. The JS wrapper still decodes to `string` for you.
+- **SandboxPool** ([#456](https://github.com/eryx-org/eryx/pull/456)) —
+  factory-backed pool with bounded concurrency, automatic warm-up, per-request
+  callbacks/limits, and context-manager lease lifecycle. Available in Rust and
+  Python.
+- **`NetRequest` is `#[non_exhaustive]`** ([#447](https://github.com/eryx-org/eryx/pull/447)) —
+  future fields won't be breaking.
+- **Explicit connection cleanup** ([#446](https://github.com/eryx-org/eryx/pull/446)) —
+  reused sessions now release outbound connections between executions.
+
+### Migration guide — Rust (`eryx` crate)
+
+**`ExecuteResult.stdout` / `.stderr`: `String` → `Vec<u8>`**
+
+```rust
+// Before (0.7.x)
+println!("{}", result.stdout);
+if result.stderr.contains("Warning") { /* ... */ }
+
+// After (0.8.0) — quick migration
+println!("{}", result.stdout_text());
+if result.stderr_text().contains("Warning") { /* ... */ }
+
+// After (0.8.0) — strict UTF-8
+let output = result.stdout_utf8()?;
+```
+
+**`OutputHandler` trait: `&str` → `&[u8]`**
+
+```rust
+// Before
+async fn on_output(&self, chunk: &str) { /* ... */ }
+async fn on_stderr(&self, chunk: &str) { /* ... */ }
+
+// After
+async fn on_output(&self, chunk: &[u8]) {
+    let text = std::str::from_utf8(chunk).unwrap_or("�");
+    // ...
+}
+async fn on_stderr(&self, chunk: &[u8]) { /* ... */ }
+```
+
+**`NetRequest` is `#[non_exhaustive]`** — add a `..` rest pattern if you
+construct it directly:
+
+```rust
+// Before
+let req = NetRequest { url, method, headers, body };
+
+// After
+let req = NetRequest { url, method, headers, body, ..Default::default() };
+```
+
+**`TraceEventKind` is `#[non_exhaustive]`** — add a wildcard arm to exhaustive
+matches:
+
+```rust
+match event.kind {
+    TraceEventKind::Line => { /* ... */ }
+    TraceEventKind::Call { .. } => { /* ... */ }
+    TraceEventKind::Return { .. } => { /* ... */ }
+    _ => { /* future variants */ }
+}
+```
+
+### Migration guide — Python (`pyeryx`)
+
+**`ExecuteResult.stdout` / `.stderr`: `str` → `bytes`**
+
+```python
+# Before (0.7.x)
+print(result.stdout)
+if "error" in result.stderr:
+    ...
+
+# After (0.8.0) — quick migration (UTF-8 with replacement)
+print(result.stdout_text)
+if "error" in result.stderr_text:
+    ...
+
+# After (0.8.0) — raw bytes
+sys.stdout.buffer.write(result.stdout)
+```
+
+**Streaming callbacks: `str` → `bytes`**
+
+```python
+# Before
+def on_stdout(chunk: str) -> None:
+    sys.stdout.write(chunk)
+
+# After
+def on_stdout(chunk: bytes) -> None:
+    sys.stdout.buffer.write(chunk)
+```
+
+### Migration guide — JavaScript (`@bsull/eryx`)
+
+**No breaking changes for most consumers.** The JS wrapper decodes
+`Uint8Array` from the WASM boundary to `string` internally, so
+`result.stdout` and `result.stderr` remain strings.
+
+If you use the **streaming `outputHandler`**, the callback signature is
+unchanged — it still receives `(stream: number, data: string)`. The decoding
+now happens inside the shim via `TextDecoder` with proper multi-byte sequence
+handling across chunks.
+
+**If you access the raw WASM bindings directly** (bypassing the wrapper), the
+WIT-level `report-output` import changed from `string` to `list<u8>`, and
+`execute-output.stdout` / `.stderr` changed similarly.
+
+### Migration guide — gRPC (`eryx.v1`)
+
+**`ExecuteResult` and `OutputEvent` fields changed from `string` to `bytes`:**
+
+```diff
+ message OutputEvent {
+   OutputStream stream = 1;
+-  string data = 2;
++  bytes data = 2;
+ }
+
+ message ExecuteResult {
+   bool success = 1;
+-  string stdout = 2;
+-  string stderr = 3;
++  bytes stdout = 2;
++  bytes stderr = 3;
+   ...
+ }
+```
+
+In most languages the generated types change from `string` to `bytes`/`[]byte`/
+`ByteString`. For Go clients:
+
+```go
+// Before
+fmt.Println(result.Stdout)
+
+// After
+fmt.Println(string(result.Stdout))
+```
+
+The wire format is backwards-compatible (protobuf `string` and `bytes` share
+the same encoding), but **recompiling your client against the new proto is
+required** to get the correct generated types.
+
+---
+
 ## `eryx-precompile` - [0.8.0](https://github.com/eryx-org/eryx/compare/eryx-precompile-v0.7.2...eryx-precompile-v0.8.0) - 2026-09-19
 
 ### Added
