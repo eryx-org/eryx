@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## `eryx-precompile` - [0.8.0](https://github.com/eryx-org/eryx/compare/eryx-precompile-v0.7.2...eryx-precompile-v0.8.0) - 2026-09-19
+
+### Added
+- [**breaking**] change stdout/stderr from string to bytes across the full stack ([#448](https://github.com/eryx-org/eryx/pull/448))
+
+## `eryx` - [0.8.0](https://github.com/eryx-org/eryx/compare/eryx-v0.7.2...eryx-v0.8.0) - 2026-09-19
+
+### Added
+- *(python)* expose factory-backed SandboxPool with safe lease lifecycle ([#456](https://github.com/eryx-org/eryx/pull/456))
+- [**breaking**] change stdout/stderr from string to bytes across the full stack ([#448](https://github.com/eryx-org/eryx/pull/448))
+- *(net)* add explicit connection cleanup for reused sessions ([#446](https://github.com/eryx-org/eryx/pull/446))
+
+### Other
+- *(net)* make NetRequest non-exhaustive ([#447](https://github.com/eryx-org/eryx/pull/447))
+
+## `eryx-vfs` - [0.8.0](https://github.com/eryx-org/eryx/compare/eryx-vfs-v0.7.2...eryx-vfs-v0.8.0) - 2026-09-19
+
+### Other
+- *(vfs)* replace cap-std with cap-primitives ([#436](https://github.com/eryx-org/eryx/pull/436))
+
+## `eryx-runtime` - [0.8.0](https://github.com/eryx-org/eryx/compare/eryx-runtime-v0.7.2...eryx-runtime-v0.8.0) - 2026-09-19
+
+### Added
+- [**breaking**] change stdout/stderr from string to bytes across the full stack ([#448](https://github.com/eryx-org/eryx/pull/448))
+
 ## `eryx-precompile` - [0.7.2](https://github.com/eryx-org/eryx/compare/eryx-precompile-v0.7.1...eryx-precompile-v0.7.2) - 2026-09-11
 
 ### Other
