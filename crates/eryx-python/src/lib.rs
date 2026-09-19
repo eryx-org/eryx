@@ -17,6 +17,7 @@ mod callback;
 mod error;
 mod mcp;
 mod net_config;
+pub(crate) mod pool;
 mod preinit;
 mod resource_limits;
 mod result;
@@ -62,6 +63,9 @@ fn _eryx(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<vfs::VfsStorage>()?;
     m.add_class::<callback::CallbackRegistry>()?;
     m.add_class::<mcp::MCPManager>()?;
+    m.add_class::<pool::SandboxPool>()?;
+    m.add_class::<pool::PooledSandbox>()?;
+    m.add_class::<pool::PoolStats>()?;
 
     // Register exceptions
     error::register_exceptions(m)?;

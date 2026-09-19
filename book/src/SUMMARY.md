@@ -14,6 +14,7 @@
 - [Callbacks](./guide/callbacks.md)
 - [Callback Replay & Suspension](./guide/callback-replay.md)
 - [Sessions](./guide/sessions.md)
+- [Sandbox Pool](./guide/sandbox-pool.md)
 - [VFS and File Persistence](./guide/vfs.md)
 - [Resource Limits](./guide/resource-limits.md)
 - [Networking](./guide/networking.md)

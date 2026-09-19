@@ -623,7 +623,7 @@ impl Sandbox {
     /// Set the registered callbacks (replacing any existing ones).
     ///
     /// Used by the pool to configure per-request callbacks on a reused sandbox.
-    pub(crate) fn set_callbacks(&mut self, callbacks: Vec<Box<dyn Callback>>) {
+    pub fn set_callbacks(&mut self, callbacks: Vec<Box<dyn Callback>>) {
         let mut map = HashMap::new();
         for callback in callbacks {
             map.insert(callback.name().to_string(), Arc::from(callback));
@@ -641,14 +641,14 @@ impl Sandbox {
     /// Set the output handler for streaming stdout/stderr.
     ///
     /// Used by the pool to configure per-request output streaming on a reused sandbox.
-    pub(crate) fn set_output_handler(&mut self, handler: impl OutputHandler + 'static) {
+    pub fn set_output_handler(&mut self, handler: impl OutputHandler + 'static) {
         self.output_handler = Some(Arc::new(handler));
     }
 
     /// Set resource limits for execution.
     ///
     /// Used by the pool to configure per-request limits on a reused sandbox.
-    pub(crate) fn set_resource_limits(&mut self, limits: ResourceLimits) {
+    pub fn set_resource_limits(&mut self, limits: ResourceLimits) {
         self.resource_limits = limits;
     }
 

@@ -9,6 +9,9 @@ For detailed API documentation, see [docs.eryx.run/latest/api/python/](https://d
 - `Sandbox` - Main class for isolated Python execution
 - `Session` - Persistent state across executions
 - `SandboxFactory` - Pre-initialize sandboxes with packages
+- `SandboxPool` - Bounded pool of warm sandboxes for concurrent execution
+- `PooledSandbox` - A sandbox lease from a pool (context manager)
+- `PoolStats` - Pool usage statistics
 - `VfsStorage` - Virtual filesystem storage
 - `ResourceLimits` - Configure execution constraints
 - `NetConfig` - Configure network access

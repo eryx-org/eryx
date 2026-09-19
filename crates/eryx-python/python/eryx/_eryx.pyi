@@ -616,6 +616,30 @@ class TimeoutError(builtins.TimeoutError, EryxError):
     ...
 
 
+class PoolError(EryxError):
+    """Base exception for pool operations."""
+
+    ...
+
+
+class PoolExhaustedError(PoolError):
+    """All sandboxes in the pool are in use."""
+
+    ...
+
+
+class PoolTimeoutError(PoolError):
+    """Timed out waiting for an available sandbox."""
+
+    ...
+
+
+class PoolClosedError(PoolError):
+    """Pool has been closed."""
+
+    ...
+
+
 class SandboxFactory:
     """A factory for creating sandboxes with custom packages.
 
@@ -854,6 +878,42 @@ class SandboxFactory:
                 secrets={"API_KEY": {"value": "sk-xxx", "allowed_hosts": ["api.example.com"]}},
                 network=NetConfig(allowed_hosts=["api.example.com"]),
             )
+        """
+        ...
+
+    def create_pool(
+        self,
+        *,
+        max_size: int = 10,
+        min_idle: int = 1,
+        acquire_timeout_ms: int = 30000,
+        idle_timeout_ms: int = 300000,
+    ) -> SandboxPool:
+        """Create a sandbox pool from this factory.
+
+        The pool reuses the factory's precompiled artifact, so when the idle
+        queue is empty and a new sandbox must be created, it skips component
+        deserialization. Per-request state (callbacks, output handlers, resource
+        limits) is set on each ``acquire()`` call and cleared on release.
+
+        Args:
+            max_size: Maximum concurrent sandboxes. Default: 10.
+            min_idle: Minimum warm sandboxes to keep ready. Default: 1.
+            acquire_timeout_ms: Max wait for a sandbox in ms. Default: 30000.
+            idle_timeout_ms: Idle sandbox eviction threshold in ms. Default: 300000.
+
+        Returns:
+            A ``SandboxPool`` ready to lease sandboxes.
+
+        Raises:
+            InitializationError: If pool creation or pre-warming fails.
+
+        Example:
+            factory = SandboxFactory(imports=["json"], cache=True)
+            pool = factory.create_pool(max_size=4, min_idle=1)
+            with pool.acquire() as sandbox:
+                result = sandbox.execute('import json; print(json.dumps([1]))')
+            pool.close()
         """
         ...
 
@@ -1100,6 +1160,199 @@ class VfsStorage:
     def __init__(self) -> None:
         """Create a new empty VFS storage."""
         ...
+
+
+class PoolStats:
+    """Statistics about pool usage.
+
+    Returned by ``SandboxPool.stats()``.
+    """
+
+    @property
+    def total(self) -> int:
+        """Total number of sandboxes tracked by the pool (in use + idle)."""
+        ...
+
+    @property
+    def idle(self) -> int:
+        """Number of warm sandboxes sitting idle in the pool queue."""
+        ...
+
+    @property
+    def available(self) -> int:
+        """Remaining semaphore permits (concurrency capacity)."""
+        ...
+
+    @property
+    def in_use(self) -> int:
+        """Number of sandboxes currently in use."""
+        ...
+
+    @property
+    def total_acquisitions(self) -> int:
+        """Total successful acquisitions since pool creation."""
+        ...
+
+    @property
+    def total_creations(self) -> int:
+        """Total sandbox creations (initial + on-demand)."""
+        ...
+
+    @property
+    def wait_count(self) -> int:
+        """Number of acquisitions that had to wait for a sandbox."""
+        ...
+
+    @property
+    def total_wait_time_ms(self) -> float:
+        """Cumulative wait time in milliseconds."""
+        ...
+
+    @property
+    def average_wait_time_ms(self) -> float:
+        """Average wait time in milliseconds (0.0 if no waits)."""
+        ...
+
+
+class PooledSandbox:
+    """A sandbox lease acquired from a pool.
+
+    Returns to the pool automatically when the context manager exits or
+    ``release()`` is called. Use-after-release raises ``ValueError``.
+
+    Example:
+        with pool.acquire() as sandbox:
+            result = sandbox.execute('print("Hello!")')
+        # sandbox is returned to the pool here
+    """
+
+    def execute(self, code: str) -> ExecuteResult:
+        """Execute Python code in the sandboxed lease.
+
+        Args:
+            code: Python source code to execute.
+
+        Returns:
+            ExecuteResult containing stdout, timing info, and statistics.
+
+        Raises:
+            ValueError: If the sandbox has already been released.
+            ExecutionError: If the Python code raises an exception.
+            TimeoutError: If execution exceeds the timeout limit.
+            ResourceLimitError: If a resource limit is exceeded.
+        """
+        ...
+
+    def release(self) -> None:
+        """Release the sandbox back to the pool.
+
+        Idempotent -- calling release() on an already-released sandbox is a no-op.
+        """
+        ...
+
+    def __enter__(self) -> PooledSandbox: ...
+    def __exit__(
+        self,
+        exc_type: Optional[type[BaseException]],
+        exc_val: Optional[BaseException],
+        exc_tb: Any,
+    ) -> None: ...
+
+
+class SandboxPool:
+    """A managed pool of warm sandbox instances.
+
+    Provides bounded concurrent execution with automatic lease lifecycle.
+    Create via ``SandboxFactory.create_pool()``.
+
+    Example:
+        factory = SandboxFactory(imports=["json"], cache=True)
+        pool = factory.create_pool(max_size=4, min_idle=1)
+
+        with pool.acquire(resource_limits=ResourceLimits(execution_timeout_ms=1000)) as sandbox:
+            result = sandbox.execute('import json; print(json.dumps([1, 2]))')
+
+        pool.close()
+    """
+
+    def acquire(
+        self,
+        *,
+        resource_limits: Optional[ResourceLimits] = None,
+        callbacks: Optional[Union[CallbackRegistry, Sequence[CallbackDict]]] = None,
+        on_stdout: Optional[Callable[[bytes], None]] = None,
+        on_stderr: Optional[Callable[[bytes], None]] = None,
+    ) -> PooledSandbox:
+        """Acquire a sandbox from the pool.
+
+        Blocks until a sandbox is available or the acquire timeout is reached.
+        The GIL is released while waiting so other Python threads can make
+        progress (including releasing their own leases).
+
+        Args:
+            resource_limits: Optional per-request resource limits.
+            callbacks: Optional per-request callbacks.
+            on_stdout: Optional per-request stdout streaming callback.
+            on_stderr: Optional per-request stderr streaming callback.
+
+        Returns:
+            A ``PooledSandbox`` that should be used as a context manager.
+
+        Raises:
+            PoolClosedError: If the pool has been closed.
+            PoolTimeoutError: If the acquire timeout is reached.
+        """
+        ...
+
+    def try_acquire(
+        self,
+        *,
+        resource_limits: Optional[ResourceLimits] = None,
+        callbacks: Optional[Union[CallbackRegistry, Sequence[CallbackDict]]] = None,
+        on_stdout: Optional[Callable[[bytes], None]] = None,
+        on_stderr: Optional[Callable[[bytes], None]] = None,
+    ) -> Optional[PooledSandbox]:
+        """Try to acquire a sandbox without blocking.
+
+        Returns ``None`` if no sandbox is immediately available.
+
+        Raises:
+            PoolClosedError: If the pool has been closed.
+        """
+        ...
+
+    def stats(self) -> PoolStats:
+        """Get current pool statistics."""
+        ...
+
+    def evict_idle(self) -> int:
+        """Evict idle sandboxes that have exceeded the idle timeout.
+
+        Maintains at least ``min_idle`` instances. Returns the number evicted.
+        """
+        ...
+
+    def close(self) -> None:
+        """Close the pool, preventing new acquisitions.
+
+        Blocked ``acquire()`` calls are woken with ``PoolClosedError``.
+        Idle sandboxes are dropped. Existing leases continue to work
+        but are not returned to the pool on release.
+        """
+        ...
+
+    @property
+    def is_closed(self) -> bool:
+        """Whether the pool has been closed."""
+        ...
+
+    def __enter__(self) -> SandboxPool: ...
+    def __exit__(
+        self,
+        exc_type: Optional[type[BaseException]],
+        exc_val: Optional[BaseException],
+        exc_tb: Any,
+    ) -> None: ...
 
 
 __version__: str
