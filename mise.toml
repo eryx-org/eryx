@@ -9,7 +9,7 @@ version = "0.9.145"
 version = "1.259.0"
 
 [tools."cargo:cargo-rail"]
-version = "0.28.1"
+version = "0.29.0"
 
 [tools."cargo:cargo-all-features"]
 version = "1.12.0"
@@ -85,16 +85,12 @@ description = "Run all CI checks"
 depends = ["fmt-check", "lint", "test"]
 
 [tasks.unify]
-description = "Unify workspace dependencies and prune dead features"
+description = "Preview workspace dependency unification changes"
 run = "cargo rail unify"
 
 [tasks.unify-check]
 description = "Check for dependency drift (CI)"
 run = "cargo rail unify --check"
-
-[tasks.affected]
-description = "List affected crates"
-run = "cargo rail affected"
 
 [tasks.check-all-features]
 description = "Check all feature combinations compile"
