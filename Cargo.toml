@@ -74,10 +74,10 @@ wasm-encoder = "0.259"
 wasmparser = "0.259"
 # wasmtime v40+ required for the async component model.
 # 44.0.2 patches GHSA-2r75-cxrj-cmph (WASI path_open TRUNCATE bypasses FilePerms::WRITE).
-wasmtime = { version = "48.0.0", features = ["component-model", "async"] }
-wasmtime-wasi = "48.0.0"
-wasmtime-wasi-io = "48.0.0"
-wasmtime-wizer = { version = "48.0.0", features = ["component-model", "wasmtime"] }
+wasmtime = { version = "49.0.0", features = ["component-model", "async"] }
+wasmtime-wasi = "49.0.0"
+wasmtime-wasi-io = "49.0.0"
+wasmtime-wizer = { version = "49.0.0", features = ["component-model", "wasmtime"] }
 webpki-roots = "1.0"   # TLS trust roots
 wit-component = "0.259"
 wit-dylib = "0.259"
