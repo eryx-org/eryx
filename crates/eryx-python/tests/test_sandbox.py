@@ -291,7 +291,7 @@ class TestExecuteResult:
         """Test that str(result) returns stdout."""
         sandbox = eryx.Sandbox()
         result = sandbox.execute('print("test output")')
-        assert str(result) == "test output"
+        assert str(result) == "test output\n"
 
     def test_result_repr(self):
         """Test that repr(result) is informative."""
