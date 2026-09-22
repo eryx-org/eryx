@@ -879,12 +879,10 @@ print("chunk3")
         chunks
     );
 
-    // Combined output should equal final stdout
-    // (result.stdout has trailing newlines stripped, handler output is raw)
     let combined = output_handler.combined_output();
     let result = result.unwrap();
     assert_eq!(
-        combined.trim_end_matches('\n'),
+        combined,
         result.stdout_text(),
         "Streamed chunks should combine to match final stdout"
     );
