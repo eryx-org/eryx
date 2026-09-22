@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## `eryx-precompile` - [0.9.0](https://github.com/eryx-org/eryx/compare/eryx-precompile-v0.8.0...eryx-precompile-v0.9.0) - 2026-09-22
+
+### Other
+- update Cargo.lock dependencies
+
+## `eryx` - [0.9.0](https://github.com/eryx-org/eryx/compare/eryx-v0.8.0...eryx-v0.9.0) - 2026-09-22
+
+### Fixed
+- [**breaking**] stop stripping trailing newlines from stdout and stderr ([#468](https://github.com/eryx-org/eryx/pull/468))
+
+## `eryx-vfs` - [0.9.0](https://github.com/eryx-org/eryx/compare/eryx-vfs-v0.8.0...eryx-vfs-v0.9.0) - 2026-09-22
+
+### Other
+- update Cargo.toml dependencies
+
+## `eryx-runtime` - [0.9.0](https://github.com/eryx-org/eryx/compare/eryx-runtime-v0.8.0...eryx-runtime-v0.9.0) - 2026-09-22
+
+### Fixed
+- [**breaking**] stop stripping trailing newlines from stdout and stderr ([#468](https://github.com/eryx-org/eryx/pull/468))
+
 ## v0.8.0 — Bytes-native output
 
 **Release date:** 2026-09-19
