@@ -1,26 +1,6 @@
-# cargo-rail configuration
-# Documentation: https://github.com/loadingalias/cargo-rail
-
-# Targets for multi-platform validation
-# Include common host targets and WASM for the runtime
 targets = ["x86_64-unknown-linux-gnu"]
 
 [unify]
-include_paths = true
-include_renamed = false
-
-strict_version_compat = true
-exact_pin_handling = "warn"
-major_version_conflict = "warn"
-preserve_features = []
-skip_undeclared_patterns = [
-  "default",
-  "std",
-  "alloc",
-  "*_backend",
-  "*_impl",
-]
-
 # eryx-wasm-runtime: a staticlib for WASM, not a normal crate.
 #
 # eryx-macros: its dev-dependency on eryx must stay a bare path dep with no
@@ -34,13 +14,4 @@ skip_undeclared_patterns = [
 # does not prevent this - it still converts the member dep - so the crate has to
 # be excluded from unification outright.
 exclude = ["eryx-wasm-runtime", "eryx-macros"]
-include = []
-max_backups = 3
-msrv_policy = { mode = "compute", source = "workspace" }
-
-
-[release]
-tag_prefix = "v"
-tag_format = "{crate}-{prefix}{version}"
-sign_tags = false
-require_changelog_entries = false
+msrv_policy = { source = "workspace" }
