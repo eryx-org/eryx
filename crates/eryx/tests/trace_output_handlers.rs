@@ -532,11 +532,9 @@ for i in range(5):
     assert!(result.is_ok(), "Execution should succeed");
     let output = result.unwrap();
 
-    // The output handler's combined output should match result.stdout
-    // (result.stdout has trailing newlines stripped, handler output is raw)
     let handler_output = output_handler.combined_output();
     assert_eq!(
-        handler_output.trim_end_matches('\n'),
+        handler_output,
         output.stdout_text(),
         "Handler output should match result stdout"
     );
@@ -629,9 +627,8 @@ for i in range(100):
         "Should have substantial output: {} chars",
         combined.len()
     );
-    // result.stdout has trailing newlines stripped, handler output is raw
     assert_eq!(
-        combined.trim_end_matches('\n'),
+        combined,
         output.stdout_text(),
         "Handler output should match stdout"
     );
