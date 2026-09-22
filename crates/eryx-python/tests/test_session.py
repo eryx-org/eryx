@@ -16,7 +16,7 @@ class TestSession:
         """Test simple code execution."""
         session = eryx.Session()
         result = session.execute('print("hello")')
-        assert result.stdout == b"hello"
+        assert result.stdout == b"hello\n"
 
     def test_state_persistence(self):
         """Test that state persists across executions."""
@@ -24,7 +24,7 @@ class TestSession:
         session.execute("x = 42")
         session.execute("y = x * 2")
         result = session.execute("print(f'{x}, {y}')")
-        assert result.stdout == b"42, 84"
+        assert result.stdout == b"42, 84\n"
 
     def test_function_persistence(self):
         """Test that functions persist across executions."""
@@ -34,7 +34,7 @@ def greet(name):
     return f"Hello, {name}!"
 """)
         result = session.execute('print(greet("World"))')
-        assert result.stdout == b"Hello, World!"
+        assert result.stdout == b"Hello, World!\n"
 
     def test_class_persistence(self):
         """Test that classes persist across executions."""
@@ -49,7 +49,7 @@ class Counter:
 """)
         session.execute("c = Counter()")
         result = session.execute("print(c.increment(), c.increment(), c.increment())")
-        assert result.stdout == b"1 2 3"
+        assert result.stdout == b"1 2 3\n"
 
     def test_import_persistence(self):
         """Test that imports persist across executions."""
@@ -127,7 +127,7 @@ class Counter:
         session.restore_state(snapshot)
 
         result = session.execute("print(f'{x}, {y}')")
-        assert result.stdout == b"42, hello"
+        assert result.stdout == b"42, hello\n"
 
     def test_snapshot_restore_functions(self):
         """Test that user-defined functions survive snapshot/restore."""
@@ -140,10 +140,10 @@ class Counter:
         session.restore_state(snapshot)
 
         result = session.execute("print(greet('World'))")
-        assert result.stdout == b"Hello, World!"
+        assert result.stdout == b"Hello, World!\n"
 
         result = session.execute("print(fn(21))")
-        assert result.stdout == b"42"
+        assert result.stdout == b"42\n"
 
     def test_snapshot_restore_classes(self):
         """Test that user-defined classes and instances survive snapshot/restore."""
@@ -163,11 +163,11 @@ class Counter:
         session.restore_state(snapshot)
 
         result = session.execute("print(p.distance())")
-        assert result.stdout == b"5.0"
+        assert result.stdout == b"5.0\n"
 
         # Can create new instances of the restored class
         result = session.execute("print(Point(5, 12).distance())")
-        assert result.stdout == b"13.0"
+        assert result.stdout == b"13.0\n"
 
     def test_snapshot_restore_across_sessions(self):
         """Test that snapshot can be restored in a different session."""
@@ -179,7 +179,7 @@ class Counter:
         session2 = eryx.Session()
         session2.restore_state(snapshot)
         result = session2.execute("print(f'{data}, {total}')")
-        assert result.stdout == b"[1, 2, 3], 6"
+        assert result.stdout == b"[1, 2, 3], 6\n"
 
 
 class TestSessionWithVfs:
@@ -224,7 +224,7 @@ with open('/data/test.txt', 'w') as f:
 with open('/data/test.txt', 'r') as f:
     print(f.read())
 """)
-        assert result.stdout == b"hello world"
+        assert result.stdout == b"hello world\n"
 
     def test_file_persistence_across_executions(self):
         """Test that files persist across multiple executions."""
@@ -234,7 +234,7 @@ with open('/data/test.txt', 'r') as f:
         session.execute("open('/data/file.txt', 'w').write('first')")
         session.execute("open('/data/file.txt', 'a').write(' second')")
         result = session.execute("print(open('/data/file.txt').read())")
-        assert result.stdout == b"first second"
+        assert result.stdout == b"first second\n"
 
     def test_storage_shared_between_sessions(self):
         """Test that storage can be shared between multiple sessions."""
@@ -245,7 +245,7 @@ with open('/data/test.txt', 'r') as f:
 
         session2 = eryx.Session(vfs=storage)
         result = session2.execute("print(open('/data/shared.txt').read())")
-        assert result.stdout == b"from session 1"
+        assert result.stdout == b"from session 1\n"
 
     def test_create_directory(self):
         """Test creating directories in VFS."""
@@ -260,7 +260,7 @@ with open('/data/nested/dir/file.txt', 'w') as f:
 """)
 
         result = session.execute("print(open('/data/nested/dir/file.txt').read())")
-        assert result.stdout == b"nested content"
+        assert result.stdout == b"nested content\n"
 
     def test_list_directory(self):
         """Test listing directory contents."""
@@ -324,7 +324,7 @@ p.write_text('pathlib content')
 from pathlib import Path
 print(Path('/data/pathlib_test.txt').read_text())
 """)
-        assert result.stdout == b"pathlib content"
+        assert result.stdout == b"pathlib content\n"
 
     def test_binary_file(self):
         """Test reading and writing binary files."""
@@ -342,7 +342,7 @@ with open('/data/binary.bin', 'rb') as f:
     data = f.read()
 print(list(data))
 """)
-        assert result.stdout == b"[0, 1, 2, 255, 254, 253]"
+        assert result.stdout == b"[0, 1, 2, 255, 254, 253]\n"
 
     def test_vfs_isolation_from_host(self):
         """Test that VFS doesn't expose host filesystem."""
@@ -378,7 +378,7 @@ except Exception as e:
         session.reset()
 
         result = session.execute("print(open('/data/persist.txt').read())")
-        assert result.stdout == b"before reset"
+        assert result.stdout == b"before reset\n"
 
     def test_custom_mount_path(self):
         """Test using a custom mount path."""
@@ -387,7 +387,7 @@ except Exception as e:
 
         session.execute("open('/myfs/test.txt', 'w').write('custom path')")
         result = session.execute("print(open('/myfs/test.txt').read())")
-        assert result.stdout == b"custom path"
+        assert result.stdout == b"custom path\n"
 
     def test_session_isolation_without_shared_storage(self):
         """Test that sessions without shared storage are isolated."""
@@ -470,7 +470,7 @@ name = cursor.fetchone()[0]
 conn.close()
 print(name)
 """)
-        assert result.stdout == b"alice"
+        assert result.stdout == b"alice\n"
 
     def test_sqlite3_persistence_across_reset(self):
         """Test that SQLite database persists across session reset."""
@@ -501,7 +501,7 @@ value = cursor.fetchone()[0]
 conn.close()
 print(value)
 """)
-        assert result.stdout == b"before_reset"
+        assert result.stdout == b"before_reset\n"
 
     def test_sqlite3_shared_between_sessions(self):
         """Test that SQLite database can be shared between sessions."""
@@ -530,7 +530,7 @@ msg = cursor.fetchone()[0]
 conn.close()
 print(msg)
 """)
-        assert result.stdout == b"from_session_1"
+        assert result.stdout == b"from_session_1\n"
 
     def test_sqlite3_transaction_rollback(self):
         """Test SQLite3 transaction rollback."""
@@ -554,7 +554,7 @@ count = cursor.fetchone()[0]
 conn.close()
 print(count)
 """)
-        assert result.stdout == b"1"
+        assert result.stdout == b"1\n"
 
 
 class TestSessionRepr:

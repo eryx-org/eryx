@@ -237,6 +237,6 @@ async fn stateless_sandboxes_with_callbacks_work_repeatedly() {
             .execute(&format!("print(await echo(data={i}))"))
             .await
             .unwrap();
-        assert_eq!(output.stdout, i.to_string().into_bytes());
+        assert_eq!(output.stdout, format!("{i}\n").into_bytes());
     }
 }

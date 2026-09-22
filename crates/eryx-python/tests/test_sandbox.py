@@ -16,7 +16,7 @@ class TestSandbox:
         """Test simple code execution."""
         sandbox = eryx.Sandbox()
         result = sandbox.execute('print("hello")')
-        assert result.stdout == b"hello"
+        assert result.stdout == b"hello\n"
 
     def test_execute_returns_result(self):
         """Test that execute returns an ExecuteResult."""
@@ -42,7 +42,7 @@ print("line 1")
 print("line 2")
 print("line 3")
 """)
-        assert result.stdout == b"line 1\nline 2\nline 3"
+        assert result.stdout == b"line 1\nline 2\nline 3\n"
 
     def test_arithmetic(self):
         """Test arithmetic operations."""
@@ -52,7 +52,7 @@ x = 2 + 3
 y = x * 4
 print(f"{x}, {y}")
 """)
-        assert result.stdout == b"5, 20"
+        assert result.stdout == b"5, 20\n"
 
     def test_data_structures(self):
         """Test Python data structures work in sandbox."""
@@ -86,10 +86,10 @@ except Exception as e:
         sandbox = eryx.Sandbox()
 
         result1 = sandbox.execute('print("first")')
-        assert result1.stdout == b"first"
+        assert result1.stdout == b"first\n"
 
         result2 = sandbox.execute('print("second")')
-        assert result2.stdout == b"second"
+        assert result2.stdout == b"second\n"
 
     def test_stdout_returns_bytes(self):
         """Test that stdout is bytes and stdout_text is str."""
@@ -99,8 +99,8 @@ except Exception as e:
         assert isinstance(result.stderr, bytes)
         assert isinstance(result.stdout_text, str)
         assert isinstance(result.stderr_text, str)
-        assert result.stdout == b"hello"
-        assert result.stdout_text == "hello"
+        assert result.stdout == b"hello\n"
+        assert result.stdout_text == "hello\n"
 
     def test_surrogate_roundtrip(self):
         """Test that unpaired surrogates survive the stdout pipeline via surrogateescape."""
@@ -187,14 +187,14 @@ class TestNetConfig:
         config = eryx.NetConfig(allowed_hosts=["api.example.com"])
         sandbox = eryx.Sandbox(network=config)
         result = sandbox.execute('print("ok")')
-        assert result.stdout == b"ok"
+        assert result.stdout == b"ok\n"
 
     def test_sandbox_with_permissive_network(self):
         """Test creating sandbox with permissive network config."""
         config = eryx.NetConfig.permissive()
         sandbox = eryx.Sandbox(network=config)
         result = sandbox.execute('print("permissive ok")')
-        assert result.stdout == b"permissive ok"
+        assert result.stdout == b"permissive ok\n"
 
     def test_repr(self):
         """Test NetConfig repr."""
@@ -237,7 +237,7 @@ class TestResourceLimits:
         limits = eryx.ResourceLimits(execution_timeout_ms=10000)
         sandbox = eryx.Sandbox(resource_limits=limits)
         result = sandbox.execute('print("ok")')
-        assert result.stdout == b"ok"
+        assert result.stdout == b"ok\n"
 
     def test_execution_timeout(self):
         """Test that execution timeout works."""
@@ -352,7 +352,7 @@ class TestSandboxFactory:
         assert sandbox is not None
 
         result = sandbox.execute("print('hello')")
-        assert result.stdout == b"hello"
+        assert result.stdout == b"hello\n"
 
     def test_factory_multiple_sandboxes(self, sandbox_factory):
         """Test creating multiple sandboxes from same factory."""
@@ -362,8 +362,8 @@ class TestSandboxFactory:
         result1 = sandbox1.execute("print('sandbox1')")
         result2 = sandbox2.execute("print('sandbox2')")
 
-        assert result1.stdout == b"sandbox1"
-        assert result2.stdout == b"sandbox2"
+        assert result1.stdout == b"sandbox1\n"
+        assert result2.stdout == b"sandbox2\n"
 
     def test_factory_sandboxes_isolated(self, sandbox_factory):
         """Test that sandboxes from same factory are isolated."""
@@ -392,7 +392,7 @@ except NameError:
         result = second.execute(
             "print('clean' if 'cached_state' not in globals() else 'dirty')"
         )
-        assert result.stdout == b"clean"
+        assert result.stdout == b"clean\n"
 
     def test_factory_save_and_load(self, sandbox_factory, tmp_path):
         """Test saving and loading a sandbox factory."""
@@ -408,7 +408,7 @@ except NameError:
 
         sandbox = loaded.create_sandbox()
         result = sandbox.execute("import json; print(json.dumps([1,2]))")
-        assert result.stdout == b"[1, 2]"
+        assert result.stdout == b"[1, 2]\n"
 
     def test_factory_to_bytes(self, sandbox_factory):
         """Test getting factory as bytes."""
@@ -444,7 +444,7 @@ except NameError:
 
         # Just verify we can create and use the sandbox
         result = sandbox.execute("print('ok')")
-        assert result.stdout == b"ok"
+        assert result.stdout == b"ok\n"
 
     def test_factory_stdlib_imports_work(self, sandbox_factory):
         """Test that stdlib imports work with factory."""
@@ -478,7 +478,7 @@ from jinja2 import Template
 t = Template("Hello {{ name }}")
 print(t.render(name="PreInit"))
 """)
-        assert result.stdout == b"Hello PreInit"
+        assert result.stdout == b"Hello PreInit\n"
 
 
 class TestNetworkIntegration:
