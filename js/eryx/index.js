@@ -9,7 +9,7 @@
  *   import { Sandbox } from '@bsull/eryx';
  *   const sandbox = new Sandbox();
  *   const result = await sandbox.execute('print("hello")');
- *   console.log(result.stdout);  // "hello"
+ *   console.log(result.stdout);  // "hello\n"
  *   ```
  */
 
@@ -167,7 +167,7 @@ export class Sandbox {
    *
    * @example
    * const result = await sandbox.execute('print("hello")');
-   * console.log(result.stdout);  // "hello"
+   * console.log(result.stdout);  // "hello\n"
    */
   async execute(code) {
     const output = await _execute(code);

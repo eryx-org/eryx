@@ -36,7 +36,7 @@
 //! session.execute("x = 1").await?;
 //! session.execute("y = 2").await?;
 //! let result = session.execute("print(x + y)").await?;
-//! assert_eq!(result.stdout, b"3");
+//! assert_eq!(result.stdout, b"3\n");
 //!
 //! // Reset clears all state
 //! session.reset().await?;

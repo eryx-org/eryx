@@ -6,7 +6,7 @@ describe("Sandbox", () => {
 
   it("executes simple print", async () => {
     const result = await sandbox.execute('print("hello")');
-    expect(result.stdout).toBe("hello");
+    expect(result.stdout).toBe("hello\n");
   });
 
   it("captures stdout from multiple prints", async () => {
@@ -15,7 +15,7 @@ print("line 1")
 print("line 2")
 print("line 3")
 `);
-    expect(result.stdout).toBe("line 1\nline 2\nline 3");
+    expect(result.stdout).toBe("line 1\nline 2\nline 3\n");
   });
 
   it("handles arithmetic", async () => {
@@ -24,7 +24,7 @@ x = 2 + 3
 y = x * 4
 print(f"{x}, {y}")
 `);
-    expect(result.stdout).toBe("5, 20");
+    expect(result.stdout).toBe("5, 20\n");
   });
 
   it("handles data structures", async () => {
@@ -50,7 +50,7 @@ import json
 data = {"key": "value", "num": 42}
 print(json.dumps(data, sort_keys=True))
 `);
-    expect(result.stdout).toBe('{"key": "value", "num": 42}');
+    expect(result.stdout).toBe('{"key": "value", "num": 42}\n');
   });
 
   it("imports non-pre-initialized stdlib modules", async () => {
@@ -72,13 +72,13 @@ describe("state persistence", () => {
   it("persists variables across execute calls", async () => {
     await sandbox.execute("x = 42");
     const result = await sandbox.execute("print(x)");
-    expect(result.stdout).toBe("42");
+    expect(result.stdout).toBe("42\n");
   });
 
   it("persists functions across execute calls", async () => {
     await sandbox.execute("def greet(name): return f'Hello, {name}!'");
     const result = await sandbox.execute("print(greet('World'))");
-    expect(result.stdout).toBe("Hello, World!");
+    expect(result.stdout).toBe("Hello, World!\n");
   });
 
   it("clears state", async () => {
@@ -101,7 +101,7 @@ describe("state persistence", () => {
     // Restore snapshot - variable should be back
     await fresh.restoreState(snapshot);
     const restored = await fresh.execute("print(counter)");
-    expect(restored.stdout).toBe("10");
+    expect(restored.stdout).toBe("10\n");
   });
 
   it("snapshots and restores functions", async () => {
@@ -116,9 +116,9 @@ describe("state persistence", () => {
 
     await fresh.restoreState(snapshot);
     const restored = await fresh.execute("print(greet('eryx'))");
-    expect(restored.stdout).toBe("Hello, eryx!");
+    expect(restored.stdout).toBe("Hello, eryx!\n");
     const counter = await fresh.execute("print(counter)");
-    expect(counter.stdout).toBe("42");
+    expect(counter.stdout).toBe("42\n");
   });
 
   it("snapshots and restores classes and instances", async () => {
@@ -140,10 +140,10 @@ p = Point(3, 4)
 
     await fresh.restoreState(snapshot);
     const result = await fresh.execute("print(p.distance())");
-    expect(result.stdout).toBe("5.0");
+    expect(result.stdout).toBe("5.0\n");
     // Can also create new instances of the restored class
     const result2 = await fresh.execute("print(Point(5, 12).distance())");
-    expect(result2.stdout).toBe("13.0");
+    expect(result2.stdout).toBe("13.0\n");
   });
 
   it("captures the result variable as a parsed value", async () => {

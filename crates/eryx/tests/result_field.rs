@@ -155,7 +155,7 @@ async fn result_variable_name_is_not_injectable() {
         .unwrap();
     // Execution succeeds normally; the weird name matches nothing, so no result.
     let out = sandbox.execute("result = 1\nprint('alive')").await.unwrap();
-    assert_eq!(out.stdout, b"alive");
+    assert_eq!(out.stdout, b"alive\n");
     assert!(out.result.is_none());
     assert!(out.result_error.is_none());
 }

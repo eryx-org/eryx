@@ -1785,8 +1785,8 @@ impl Interpreter for EryxInterpreter {
                     // WIT defines: execute-output { stdout: list<u8>, stderr: list<u8>,
                     //               result-json: string, result-error: string }
                     cx.stack.push(Value::Record(vec![
-                        Value::Bytes(python::trim_trailing_newline(stdout)),
-                        Value::Bytes(python::trim_trailing_newline(stderr)),
+                        Value::Bytes(stdout),
+                        Value::Bytes(stderr),
                         Value::String(result),
                         Value::String(result_error),
                     ]));

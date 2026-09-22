@@ -49,7 +49,7 @@ describe("callbacks", () => {
 result = await get_time()
 print(result["timestamp"])
 `);
-    expect(result.stdout).toBe("1234567890");
+    expect(result.stdout).toBe("1234567890\n");
   });
 
   it.skip("lists available callbacks", async () => {

@@ -412,8 +412,8 @@ async fn test_instantiate_component() -> Result<(), Box<dyn std::error::Error>> 
             println!("  OK: {output:?}");
             assert_eq!(
                 String::from_utf8_lossy(&output.stdout),
-                "2",
-                "print(1+1) should output '2'"
+                "2\n",
+                "print(1+1) should output '2\\n'"
             );
         }
         Err(error) => {
@@ -431,7 +431,7 @@ async fn test_instantiate_component() -> Result<(), Box<dyn std::error::Error>> 
         Ok(output) => {
             println!("  OK: {output:?}");
             assert_eq!(
-                output.stdout, b"hello\nworld",
+                output.stdout, b"hello\nworld\n",
                 "Should have two lines of output"
             );
         }
@@ -532,7 +532,7 @@ async fn test_instantiate_component() -> Result<(), Box<dyn std::error::Error>> 
             println!("  OK: {output:?}");
             assert_eq!(
                 String::from_utf8_lossy(&output.stdout),
-                "persisted",
+                "persisted\n",
                 "Variable should persist between calls"
             );
         }
@@ -863,12 +863,12 @@ print("to stderr", file=sys.stderr)
             println!("  stderr: {:?}", output.stderr);
             assert_eq!(
                 String::from_utf8_lossy(&output.stdout),
-                "to stdout",
+                "to stdout\n",
                 "stdout should capture print()"
             );
             assert_eq!(
                 String::from_utf8_lossy(&output.stderr),
-                "to stderr",
+                "to stderr\n",
                 "stderr should capture print(..., file=sys.stderr)"
             );
         }

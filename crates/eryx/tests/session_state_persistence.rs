@@ -143,7 +143,7 @@ async fn test_session_refreshes_empty_callbacks_after_callback_execution() {
         .run()
         .await
         .expect("Failed callback-bearing execution");
-    assert_eq!(output.stdout, b"['session_callback']");
+    assert_eq!(output.stdout, b"['session_callback']\n");
 
     let output = session
         .execute("print(list_callbacks())")
@@ -151,7 +151,7 @@ async fn test_session_refreshes_empty_callbacks_after_callback_execution() {
         .await
         .expect("Failed empty-callback execution");
     assert_eq!(
-        output.stdout, b"[]",
+        output.stdout, b"[]\n",
         "persistent sessions must not reuse stale callback metadata"
     );
 }
@@ -176,7 +176,7 @@ async fn test_variable_persistence() {
         .await
         .unwrap_or_else(|e| panic!("Failed to execute print(x): {}", e));
     assert_eq!(
-        output.stdout, b"42",
+        output.stdout, b"42\n",
         "Variable x should persist and equal 42"
     );
 
@@ -195,7 +195,7 @@ async fn test_variable_persistence() {
         .await
         .unwrap_or_else(|e| panic!("Failed to execute print(x) after modification: {}", e));
     assert_eq!(
-        output.stdout, b"43",
+        output.stdout, b"43\n",
         "Variable x should be 43 after increment"
     );
 }
@@ -228,7 +228,7 @@ def greet(name):
         .await
         .unwrap_or_else(|e| panic!("Failed to call greet function: {}", e));
     assert_eq!(
-        output.stdout, b"Hello, World!",
+        output.stdout, b"Hello, World!\n",
         "Function should be callable"
     );
 }
@@ -276,14 +276,14 @@ class MyCounter:
         .run()
         .await
         .unwrap_or_else(|e| panic!("Failed to call increment: {}", e));
-    assert_eq!(output.stdout, b"11", "First increment should return 11");
+    assert_eq!(output.stdout, b"11\n", "First increment should return 11");
 
     let output = session
         .execute("print(counter.increment())")
         .run()
         .await
         .unwrap_or_else(|e| panic!("Failed to call second increment: {}", e));
-    assert_eq!(output.stdout, b"12", "Second increment should return 12");
+    assert_eq!(output.stdout, b"12\n", "Second increment should return 12");
 }
 
 /// Test that clear_state() clears persistent variables.
@@ -304,7 +304,7 @@ async fn test_clear_state() {
         .run()
         .await
         .unwrap_or_else(|e| panic!("Failed to print x: {}", e));
-    assert_eq!(output.stdout, b"100");
+    assert_eq!(output.stdout, b"100\n");
 
     // Clear the state
     session
@@ -339,7 +339,7 @@ async fn test_reset_clears_state() {
         .run()
         .await
         .unwrap_or_else(|e| panic!("Failed to print x: {}", e));
-    assert_eq!(output.stdout, b"100");
+    assert_eq!(output.stdout, b"100\n");
 
     // Reset the session
     session
@@ -392,14 +392,14 @@ async fn test_complex_state_persistence() {
         .run()
         .await
         .unwrap_or_else(|e| panic!("Failed to sum data: {}", e));
-    assert_eq!(output.stdout, b"6", "Sum of [1, 2, 3] should be 6");
+    assert_eq!(output.stdout, b"6\n", "Sum of [1, 2, 3] should be 6");
 
     let output = session
         .execute("print(len(data))")
         .run()
         .await
         .unwrap_or_else(|e| panic!("Failed to get len: {}", e));
-    assert_eq!(output.stdout, b"3", "Length should be 3");
+    assert_eq!(output.stdout, b"3\n", "Length should be 3");
 }
 
 /// Test execution count tracking.
@@ -485,7 +485,7 @@ async fn test_snapshot_and_restore() {
         .run()
         .await
         .unwrap_or_else(|e| panic!("Failed to print x: {}", e));
-    assert_eq!(output.stdout, b"999");
+    assert_eq!(output.stdout, b"999\n");
 
     // Restore the snapshot
     session
@@ -499,21 +499,21 @@ async fn test_snapshot_and_restore() {
         .run()
         .await
         .expect("Failed to read x");
-    assert_eq!(output.stdout, b"10", "x should be restored to 10");
+    assert_eq!(output.stdout, b"10\n", "x should be restored to 10");
 
     let output = session
         .execute("print(y)")
         .run()
         .await
         .expect("Failed to read y");
-    assert_eq!(output.stdout, b"20", "y should be restored to 20");
+    assert_eq!(output.stdout, b"20\n", "y should be restored to 20");
 
     let output = session
         .execute("print(data)")
         .run()
         .await
         .expect("Failed to read data");
-    assert_eq!(output.stdout, b"[1, 2, 3]", "data should be restored");
+    assert_eq!(output.stdout, b"[1, 2, 3]\n", "data should be restored");
 }
 
 /// Test snapshot serialization roundtrip.
@@ -568,7 +568,7 @@ async fn test_snapshot_serialization() {
         .run()
         .await
         .unwrap_or_else(|e| panic!("Failed to print value: {}", e));
-    assert_eq!(output.stdout, b"42");
+    assert_eq!(output.stdout, b"42\n");
 }
 
 /// Test that unserializable objects (e.g. modules) are skipped gracefully.
@@ -604,7 +604,7 @@ async fn test_snapshot_with_unserializable() {
         .run()
         .await
         .unwrap_or_else(|e| panic!("Failed to print num: {}", e));
-    assert_eq!(output.stdout, b"100", "num should be restored");
+    assert_eq!(output.stdout, b"100\n", "num should be restored");
 }
 
 /// Test that user-defined functions survive snapshot/restore.
@@ -645,14 +645,14 @@ async fn test_snapshot_with_functions() {
         .run()
         .await
         .unwrap_or_else(|e| panic!("Failed to call greet: {}", e));
-    assert_eq!(output.stdout, b"Hello, World!");
+    assert_eq!(output.stdout, b"Hello, World!\n");
 
     let output = session
         .execute("print(fn(21))")
         .run()
         .await
         .unwrap_or_else(|e| panic!("Failed to call lambda: {}", e));
-    assert_eq!(output.stdout, b"42");
+    assert_eq!(output.stdout, b"42\n");
 }
 
 /// Test that user-defined classes and instances survive snapshot/restore.
@@ -699,7 +699,7 @@ class Point:
         .run()
         .await
         .unwrap_or_else(|e| panic!("Failed to call method: {}", e));
-    assert_eq!(output.stdout, b"5.0");
+    assert_eq!(output.stdout, b"5.0\n");
 
     // Can create new instances of the restored class
     let output = session
@@ -707,7 +707,7 @@ class Point:
         .run()
         .await
         .unwrap_or_else(|e| panic!("Failed to create new instance: {}", e));
-    assert_eq!(output.stdout, b"13.0");
+    assert_eq!(output.stdout, b"13.0\n");
 }
 
 /// The `result` variable is captured per-execution and consumed afterward, so a
@@ -757,7 +757,7 @@ async fn test_result_discarded_on_error_does_not_leak() {
         .run()
         .await
         .unwrap_or_else(|e| panic!("Failed post-error execute: {}", e));
-    assert_eq!(output.stdout, b"after error");
+    assert_eq!(output.stdout, b"after error\n");
     assert!(
         output.result.is_none(),
         "stale result leaked across an erroring execution: {:?}",

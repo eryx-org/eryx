@@ -3128,15 +3128,6 @@ impl ExecHelpers {
     }
 }
 
-/// Trim all trailing newline bytes from output, matching the old
-/// `trim_end_matches('\n')` behavior on the string path.
-pub fn trim_trailing_newline(mut bytes: Vec<u8>) -> Vec<u8> {
-    while bytes.last() == Some(&b'\n') {
-        bytes.pop();
-    }
-    bytes
-}
-
 fn format_execution_error(stderr_output: &[u8], exception_msg: String) -> String {
     let stderr_str = String::from_utf8_lossy(stderr_output);
     if !stderr_output.is_empty() && exception_msg != "Unknown error" {
@@ -3177,8 +3168,8 @@ unsafe fn execute_python_direct(
         let (stdout, stderr) = helpers.get_output();
         let (result, result_error) = helpers.capture_result();
         ExecuteResult::Complete(ExecuteOutput {
-            stdout: trim_trailing_newline(stdout),
-            stderr: trim_trailing_newline(stderr),
+            stdout,
+            stderr,
             result,
             result_error,
         })
@@ -3271,8 +3262,8 @@ pub fn execute_python(code: &str, trace_enabled: bool) -> ExecuteResult {
         let (result, result_error) = capture_result();
 
         ExecuteResult::Complete(ExecuteOutput {
-            stdout: trim_trailing_newline(stdout),
-            stderr: trim_trailing_newline(stderr),
+            stdout,
+            stderr,
             result,
             result_error,
         })

@@ -695,7 +695,7 @@ print("callback API ready")
         .await
         .expect("Empty callback fast path should preserve the callback API");
 
-    assert_eq!(output.stdout, b"callback API ready");
+    assert_eq!(output.stdout, b"callback API ready\n");
 }
 
 #[tokio::test]
