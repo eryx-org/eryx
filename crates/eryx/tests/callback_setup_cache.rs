@@ -131,7 +131,7 @@ async fn wrappers_keep_working_when_the_callback_set_is_unchanged() {
         let code = format!("print(await echo(data={i}))");
         assert_eq!(
             run(&mut session, &callbacks, &code).await,
-            i.to_string().into_bytes()
+            format!("{i}\n").into_bytes()
         );
     }
 }
@@ -149,7 +149,7 @@ async fn a_changed_callback_set_is_installed() {
             "print(sorted(c['name'] for c in list_callbacks()))"
         )
         .await,
-        b"['echo']"
+        b"['echo']\n"
     );
 
     // Adding a callback exposes its wrapper and updates introspection.
@@ -160,7 +160,7 @@ async fn a_changed_callback_set_is_installed() {
             "print(sorted(c['name'] for c in list_callbacks()), await ping())"
         )
         .await,
-        b"['echo', 'ping'] pong"
+        b"['echo', 'ping'] pong\n"
     );
 
     // Going back to the smaller set is picked up too.
@@ -171,7 +171,7 @@ async fn a_changed_callback_set_is_installed() {
             "print(sorted(c['name'] for c in list_callbacks()))"
         )
         .await,
-        b"['echo']"
+        b"['echo']\n"
     );
 }
 
@@ -187,7 +187,7 @@ async fn callbacks_survive_clear_state() {
             "x = 1\nprint(await echo(data='a'))"
         )
         .await,
-        b"a"
+        b"a\n"
     );
     session.clear_state().await.unwrap();
     assert_eq!(
@@ -197,7 +197,7 @@ async fn callbacks_survive_clear_state() {
             "print('x' in globals(), await echo(data='b'))"
         )
         .await,
-        b"False b"
+        b"False b\n"
     );
 }
 
@@ -213,7 +213,7 @@ async fn callbacks_survive_snapshot_and_restore() {
             "x = 41\nprint(await echo(data=x))"
         )
         .await,
-        b"41"
+        b"41\n"
     );
     let snapshot = session.snapshot_state().await.unwrap();
 
@@ -221,7 +221,7 @@ async fn callbacks_survive_snapshot_and_restore() {
     restored.restore_state(&snapshot).await.unwrap();
     assert_eq!(
         run(&mut restored, &callbacks, "print(await echo(data=x + 1))").await,
-        b"42"
+        b"42\n"
     );
 }
 

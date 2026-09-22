@@ -297,10 +297,10 @@ def test_cached_loaded_factory_sessions_are_isolated_and_equivalent(
     first = loaded.create_session()
     second = loaded.create_session()
     assert first.execute("print('clean' if 'state' not in globals() else 'dirty')").stdout == (
-        b"clean"
+        b"clean\n"
     )
     assert second.execute("print('clean' if 'state' not in globals() else 'dirty')").stdout == (
-        b"clean"
+        b"clean\n"
     )
 
     first.execute("state = 'first'")

@@ -56,7 +56,7 @@ class Counter:
         session = eryx.Session()
         session.execute("import json")
         result = session.execute('print(json.dumps({"a": 1}))')
-        assert result.stdout == b'{"a": 1}'
+        assert result.stdout == b'{"a": 1}\n'
 
     def test_execution_count(self):
         """Test execution count tracking."""
