@@ -43,4 +43,3 @@ msrv_policy = { mode = "compute", source = "workspace" }
 tag_prefix = "v"
 tag_format = "{crate}-{prefix}{version}"
 sign_tags = false
-require_changelog_entries = false
