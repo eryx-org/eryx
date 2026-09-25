@@ -2,10 +2,11 @@
 //!
 //! These run JavaScript through the *unmodified* eryx host, which proves the
 //! host and WIT contract are language-agnostic. The component is only built on
-//! request, so every test is a no-op unless it exists:
+//! request, so every test is a no-op unless it exists (CI builds it and sets
+//! `ERYX_REQUIRE_JS_RUNTIME=1`, which turns a missing component into a failure):
 //!
 //! ```sh
-//! BUILD_ERYX_JS_RUNTIME=1 cargo build -p eryx-runtime   # writes runtime-js.wasm
+//! mise run build-eryx-js-runtime   # writes crates/eryx-runtime/runtime-js.wasm
 //! cargo nextest run -p eryx --test js_guest
 //! ```
 #![allow(clippy::unwrap_used, clippy::expect_used)]
@@ -27,6 +28,11 @@ fn js_runtime_path() -> Option<PathBuf> {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../eryx-runtime/runtime-js.wasm");
     if path.exists() {
         Some(path)
+    } else if std::env::var_os("ERYX_REQUIRE_JS_RUNTIME").is_some() {
+        panic!(
+            "{} not built, but ERYX_REQUIRE_JS_RUNTIME is set",
+            path.display()
+        );
     } else {
         eprintln!("skipping: {} not built", path.display());
         None
