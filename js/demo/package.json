@@ -10,7 +10,7 @@
   },
   "dependencies": {
     "@bsull/eryx": "file:../eryx",
-    "@bytecodealliance/jco": "1.34.0",
+    "@bytecodealliance/jco": "1.35.0",
     "@bytecodealliance/preview2-shim": "^0.26.0",
     "fzstd": "^0.1.1"
   },
