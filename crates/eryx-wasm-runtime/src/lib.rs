@@ -1661,7 +1661,9 @@ impl Interpreter for EryxInterpreter {
                 // Call task_return to signal async completion.
                 if let Some(task_return) = func.task_return() {
                     unsafe {
-                        task_return(Box::into_raw(cx).cast());
+                        // Borrow, don't leak: task_return only lifts the return value
+                        // off `cx`; `cx` drops afterwards, freeing its deferred buffers.
+                        task_return((&raw mut *cx).cast());
                     }
                 }
                 0
@@ -1796,7 +1798,9 @@ impl Interpreter for EryxInterpreter {
                 // Call task_return
                 if let Some(task_return) = state.task_return {
                     unsafe {
-                        task_return(Box::into_raw(cx).cast());
+                        // Borrow, don't leak: task_return only lifts the return value
+                        // off `cx`; `cx` drops afterwards, freeing its deferred buffers.
+                        task_return((&raw mut *cx).cast());
                     }
                 }
             }
