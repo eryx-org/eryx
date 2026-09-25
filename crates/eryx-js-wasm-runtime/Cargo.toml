@@ -1,0 +1,25 @@
+[package]
+name = "eryx-js-wasm-runtime"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "SPIKE: WASM guest runtime for eryx sandbox - implements the eryx WIT exports via QuickJS"
+publish = false
+
+# Built as a PIC staticlib for wasm32-wasip1 and linked into a shared library
+# with WASI SDK clang, exactly like the CPython guest (see eryx-runtime/build.rs,
+# `BUILD_ERYX_JS_RUNTIME`).
+[lib]
+crate-type = ["staticlib"]
+
+[dependencies]
+# rquickjs vendors quickjs-ng (not Bellard's QuickJS) and ships pregenerated
+# bindings for wasm32-wasip1, so no bindgen/libclang is needed.
+rquickjs.workspace = true
+wit-dylib-ffi.workspace = true
+
+[lints]
+workspace = true

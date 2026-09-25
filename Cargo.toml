@@ -83,6 +83,7 @@ wit-component = "0.259"
 wit-dylib = "0.259"
 # wit-dylib FFI for implementing the interpreter interface (inlined from wasm-tools).
 wit-dylib-ffi = { path = "crates/wit-dylib-ffi" }
+rquickjs = { version = "0.14", default-features = false, features = ["std"] }
 wit-parser = "0.259"
 zip = "8.0"
 zstd = "0.14"
