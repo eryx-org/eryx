@@ -2,11 +2,15 @@
 #![cfg(feature = "embedded")]
 #![allow(clippy::expect_used, clippy::unwrap_used)]
 
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::{Arc, OnceLock};
 
 use eryx::{
-    Error, InProcessSession, PythonExecutor, ResourceLimits, Sandbox, Session, SessionExecutor,
+    CallbackError, Error, InProcessSession, PythonExecutor, ResourceLimits, Sandbox, Session,
+    SessionExecutor, TypedCallback,
 };
+use serde_json::{Value, json};
 
 static EXECUTOR: OnceLock<Arc<PythonExecutor>> = OnceLock::new();
 
@@ -289,4 +293,70 @@ async fn owned_vfs_quota_survives_reset() {
         .run()
         .await
         .expect("owned data should survive reset");
+}
+
+struct Noop;
+
+impl TypedCallback for Noop {
+    type Args = ();
+
+    fn name(&self) -> &str {
+        "noop"
+    }
+
+    fn description(&self) -> &str {
+        "Forces the async export to suspend and resume"
+    }
+
+    fn invoke_typed(
+        &self,
+        _args: (),
+    ) -> Pin<Box<dyn Future<Output = Result<Value, CallbackError>> + Send + '_>> {
+        Box::pin(async { Ok(json!(null)) })
+    }
+}
+
+async fn peak_after(session: &mut InProcessSession<'_>, code: &str) -> u64 {
+    session
+        .execute(code)
+        .await
+        .expect("execute")
+        .stats
+        .peak_memory_bytes
+        .expect("peak memory")
+}
+
+/// Regression test for #478: the guest leaked each async export's call
+/// context, so a long-lived session grew by roughly its stdout per execute.
+/// Covers both the sync-complete path and the callback-resume path.
+#[tokio::test]
+async fn session_memory_plateaus_across_executes() {
+    let sandbox = Sandbox::builder()
+        .with_embedded_runtime()
+        .with_callback(Noop)
+        .build()
+        .expect("sandbox construction");
+    let mut session = InProcessSession::new(&sandbox)
+        .await
+        .expect("session construction");
+
+    for code in [
+        "print('x' * 1_000_000)",
+        "await noop()\nprint('x' * 1_000_000)",
+    ] {
+        // Warm up so allocator growth from the first few runs is excluded.
+        for _ in 0..3 {
+            peak_after(&mut session, code).await;
+        }
+        let before = peak_after(&mut session, code).await;
+        for _ in 0..20 {
+            peak_after(&mut session, code).await;
+        }
+        let after = peak_after(&mut session, code).await;
+        // A leak grows ~1 MB per execute (~21 MB here).
+        assert!(
+            after - before < 4_000_000,
+            "{code:?}: peak memory grew from {before} to {after}"
+        );
+    }
 }
