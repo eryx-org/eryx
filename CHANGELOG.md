@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## `eryx-precompile` - [0.9.1](https://github.com/eryx-org/eryx/compare/eryx-precompile-v0.9.0...eryx-precompile-v0.9.1) - 2026-09-26
+
+### Other
+- update Cargo.lock dependencies
+
+## `eryx` - [0.9.1](https://github.com/eryx-org/eryx/compare/eryx-v0.9.0...eryx-v0.9.1) - 2026-09-26
+
+### Fixed
+- *(wasm-runtime)* free async export call context after task_return ([#480](https://github.com/eryx-org/eryx/pull/480))
+
+## `eryx-runtime` - [0.9.1](https://github.com/eryx-org/eryx/compare/eryx-runtime-v0.9.0...eryx-runtime-v0.9.1) - 2026-09-26
+
+### Fixed
+- *(wasm-runtime)* free async export call context after task_return ([#480](https://github.com/eryx-org/eryx/pull/480))
+
 ## `eryx-precompile` - [0.9.0](https://github.com/eryx-org/eryx/compare/eryx-precompile-v0.8.0...eryx-precompile-v0.9.0) - 2026-09-22
 
 ### Other
