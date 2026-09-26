@@ -32,6 +32,7 @@
 
 # WebAssembly build artifacts
 crates/eryx-runtime/runtime.wasm
+crates/eryx-runtime/runtime-js.wasm
 crates/eryx-runtime/guest_bindings/
 crates/eryx-runtime/__pycache__/
 
