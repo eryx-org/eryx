@@ -1,5 +1,6 @@
 """Tests for the eryx CLI (__main__.py)."""
 
+import os
 import subprocess
 import sys
 import textwrap
@@ -8,6 +9,7 @@ from unittest.mock import patch
 import pytest
 
 from eryx.__main__ import main
+from eryx._cli import make_secrets
 
 
 class TestCliCommandExecution:
@@ -197,3 +199,99 @@ class TestCliPipedInput:
             assert result == 0
             captured = capsys.readouterr()
             assert "piped" in captured.out
+
+
+class TestMakeSecrets:
+    """Tests for the make_secrets helper."""
+
+    def test_no_env_returns_none(self):
+        args = _make_args(env=[])
+        assert make_secrets(args) is None
+
+    def test_explicit_key_value(self):
+        args = _make_args(env=["MY_KEY=my_value"])
+        secrets = make_secrets(args)
+        assert secrets == {"MY_KEY": {"value": "my_value"}}
+
+    def test_value_with_equals(self):
+        args = _make_args(env=["DSN=postgres://user:pass@host/db"])
+        secrets = make_secrets(args)
+        assert secrets == {"DSN": {"value": "postgres://user:pass@host/db"}}
+
+    def test_empty_value(self):
+        args = _make_args(env=["EMPTY="])
+        secrets = make_secrets(args)
+        assert secrets == {"EMPTY": {"value": ""}}
+
+    def test_inherit_from_host(self):
+        with patch.dict(os.environ, {"HOST_VAR": "host_value"}):
+            args = _make_args(env=["HOST_VAR"])
+            secrets = make_secrets(args)
+            assert secrets == {"HOST_VAR": {"value": "host_value"}}
+
+    def test_inherit_missing_var_raises(self):
+        # Ensure the var is not set
+        env = os.environ.copy()
+        env.pop("DEFINITELY_NOT_SET_12345", None)
+        with patch.dict(os.environ, env, clear=True):
+            args = _make_args(env=["DEFINITELY_NOT_SET_12345"])
+            with pytest.raises(Exception, match="not set"):
+                make_secrets(args)
+
+    def test_multiple_env_vars(self):
+        args = _make_args(env=["A=1", "B=2"])
+        secrets = make_secrets(args)
+        assert secrets == {"A": {"value": "1"}, "B": {"value": "2"}}
+
+
+class TestCliEnvFlag:
+    """Integration tests for -e/--env CLI flag."""
+
+    def test_env_var_available_in_sandbox(self, capsys):
+        result = main(["-e", "TEST_VAR=hello_sandbox", "-c", "import os; print(os.environ['TEST_VAR'])"])
+        assert result == 0
+        captured = capsys.readouterr()
+        # Value should be scrubbed (it's a secret)
+        assert "hello_sandbox" not in captured.out
+        assert "[REDACTED]" in captured.out
+
+    def test_env_var_value_is_scrubbed(self, capsys):
+        result = main(["-e", "SECRET=super_secret_42", "-c", "import os; print(os.environ['SECRET'])"])
+        assert result == 0
+        captured = capsys.readouterr()
+        assert "super_secret_42" not in captured.out
+        assert "[REDACTED]" in captured.out
+
+    def test_multiple_env_vars(self, capsys):
+        result = main([
+            "-e", "VAR_A=aaa",
+            "-e", "VAR_B=bbb",
+            "-c", "import os; print(os.environ['VAR_A'], os.environ['VAR_B'])",
+        ])
+        assert result == 0
+        captured = capsys.readouterr()
+        assert "aaa" not in captured.out
+        assert "bbb" not in captured.out
+
+    def test_env_inherit_from_host(self, capsys):
+        with patch.dict(os.environ, {"MY_HOST_VAR": "from_host"}):
+            result = main(["-e", "MY_HOST_VAR", "-c", "import os; print(os.environ['MY_HOST_VAR'])"])
+            assert result == 0
+            captured = capsys.readouterr()
+            assert "from_host" not in captured.out
+            assert "[REDACTED]" in captured.out
+
+    def test_long_form_env_flag(self, capsys):
+        result = main(["--env", "LONGFORM=works", "-c", "import os; print(os.environ['LONGFORM'])"])
+        assert result == 0
+        captured = capsys.readouterr()
+        assert "works" not in captured.out
+        assert "[REDACTED]" in captured.out
+
+
+def _make_args(**kwargs):
+    """Create a minimal argparse.Namespace for testing."""
+    import argparse
+    defaults = {"env": []}
+    defaults.update(kwargs)
+    return argparse.Namespace(**defaults)
