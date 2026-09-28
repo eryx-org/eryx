@@ -6,8 +6,7 @@
  *   1. Fetching + decompressing base libraries (libc, libpython, etc.)
  *   2. Linking extensions using the eryx-linker-wasm crate (wit-component)
  *   3. Transpiling the linked component via jco's browser API
- *   4. Applying jco 1.16.1 patches (ported from js/patch-jco.cjs)
- *   5. Dynamically loading the transpiled sandbox via blob URLs
+ *   4. Dynamically loading the transpiled sandbox via blob URLs
  */
 
 import type { DynamicSandboxExports } from "./sandbox.svelte";
@@ -184,116 +183,6 @@ async function transpileComponent(
 }
 
 // --------------------------------------------------------------------------
-// jco 1.16.1 patches (ported from js/patch-jco.cjs to in-memory transforms)
-// --------------------------------------------------------------------------
-
-function applyJcoPatches(code: string): string {
-  // Patch 1: webpack compat for node:fs/promises (not needed for blob URLs,
-  // but apply for consistency)
-  {
-    const fsOriginal = `  if (isNode) {
-    _fs = _fs || await import('node:fs/promises');
-    return WebAssembly.compile(await _fs.readFile(url));
-  }`;
-    const fsPatched = `  if (isNode) {
-    if (!_fs) {
-      try {
-        _fs = await import('node:fs/promises');
-      } catch {}
-    }
-    if (_fs) {
-      return WebAssembly.compile(await _fs.readFile(url));
-    }
-  }`;
-    code = code.replace(fsOriginal, fsPatched);
-  }
-
-  // Patch 2: for...in -> for...of in record lifting
-  code = code.replace(
-    "for (const [key, liftFn, alignment32] in keysAndLiftFns)",
-    "for (const [key, liftFn, alignment32] of keysAndLiftFns)",
-  );
-
-  // Patch 3: Fix _liftFlatStringUTF8 variable references
-  {
-    const bug = `const start = new DataView(ctx.memory.buffer).getUint32(ctx.storagePtr, params[0], true);
-    const codeUnits = new DataView(memory.buffer).getUint32(ctx.storagePtr, params[0] + 4, true);
-    val = TEXT_DECODER_UTF8.decode(new Uint8Array(ctx.memory.buffer, start, codeUnits));
-    ctx.storagePtr += codeUnits;
-    ctx.storageLen -= codeUnits;`;
-    const fix = `const start = new DataView(ctx.memory.buffer).getUint32(ctx.storagePtr, true);
-    const codeUnits = new DataView(ctx.memory.buffer).getUint32(ctx.storagePtr + 4, true);
-    val = TEXT_DECODER_UTF8.decode(new Uint8Array(ctx.memory.buffer, start, codeUnits));
-    ctx.storagePtr += 8;
-    ctx.storageLen -= 8;`;
-    code = code.replace(bug, fix);
-  }
-
-  // Patch 4: Fix _liftFlatRecordInner return value
-  {
-    const bug = `    return res;\n  }\n}`;
-    code = code.replace(bug, `    return [res, ctx];\n  }\n}`);
-  }
-
-  // Patch 5: Fix const destructuring + reassignment in _liftFlatRecordInner
-  {
-    const re =
-      /const \{ memory, useDirectParams, storagePtr, storageLen, params \} = ctx;\s+if \(useDirectParams\) \{\s+storagePtr = params\[0\]\s+\}/;
-    code = code.replace(
-      re,
-      `const { memory, useDirectParams, storagePtr, storageLen, params } = ctx;`,
-    );
-  }
-
-  // Patch 6: Fix useDirectParams: false -> true in taskReturn trampoline
-  {
-    const re = /useDirectParams: false,\n\s+getMemoryFn:/;
-    code = code.replace(re, "useDirectParams: true,\n  getMemoryFn:");
-  }
-
-  // Patch 7: Fix task-return map using raw WASM exports instead of lifting trampolines
-  {
-    const executeTramp = code.match(
-      /const (trampoline\d+) = taskReturn\.bind\([^;]*?'stdout'[^;]*?\);/s,
-    )?.[1];
-    const snapshotTramp = code.match(
-      /const (trampoline\d+) = taskReturn\.bind\([^;]*?_liftFlatList[^;]*?\);/s,
-    )?.[1];
-    const restoreTramp = code.match(
-      /const (trampoline\d+) = taskReturn\.bind\([^;]*?'ok', null, null[^;]*?\);/s,
-    )?.[1];
-
-    if (executeTramp && snapshotTramp && restoreTramp) {
-      const re =
-        /'\[task-return\](execute|snapshot-state|restore-state)':\s*exports0\['\d+'\]/g;
-      code = code.replace(re, (match: string, name: string) => {
-        switch (name) {
-          case "execute":
-            return `'[task-return]execute': ${executeTramp}`;
-          case "snapshot-state":
-            return `'[task-return]snapshot-state': ${snapshotTramp}`;
-          case "restore-state":
-            return `'[task-return]restore-state': ${restoreTramp}`;
-          default:
-            return match;
-        }
-      });
-    }
-  }
-
-  // Patch 9: Fix _liftFlatList for list<u8> in snapshot-state result lifting
-  {
-    const bug =
-      "_liftFlatResult([['ok', _liftFlatList.bind(null, 4), 8]";
-    const fix =
-      "_liftFlatResult([['ok', function(ctx){const[p,c]=_liftFlatU32(ctx);const[l,c2]=_liftFlatU32(c);return[new Uint8Array(c2.memory.buffer.slice(p,p+l)),c2];}, 8]";
-    code = code.replace(bug, fix);
-  }
-
-  return code;
-}
-
-// --------------------------------------------------------------------------
 // Dynamic sandbox loading via blob URLs
 // --------------------------------------------------------------------------
 
@@ -311,11 +200,7 @@ async function loadDynamicSandbox(
 
   for (const [name, content] of transpiled.files) {
     if (name.endsWith(".js")) {
-      // Decode and apply patches to the main JS file
-      let jsCode = new TextDecoder().decode(content);
-      jsCode = applyJcoPatches(jsCode);
-
-      mainJsSource = jsCode;
+      mainJsSource = new TextDecoder().decode(content);
     } else {
       fileMap.set(name, content);
     }
