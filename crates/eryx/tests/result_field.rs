@@ -181,6 +181,21 @@ async fn unicode_result_round_trips_escaped() {
     assert_eq!(parsed["msg"], "café 😀");
 }
 
+/// Lone UTF-16 surrogates (valid in a Python `str`, e.g. a truncated emoji from a
+/// JSON payload) have no UTF-8 encoding, so they can't cross the WIT `string`
+/// boundary raw. ensure_ascii=True escapes them to plain ASCII, which is the only
+/// lossless way to return such a string: dropping it would make capture fail here.
+#[tokio::test]
+async fn lone_surrogate_result_is_ascii_escaped() {
+    let sandbox = Sandbox::embedded().build().unwrap();
+    let out = sandbox
+        .execute("result = 'a\\ud83d\\udc80b'")
+        .await
+        .unwrap();
+    assert!(out.result_error.is_none(), "{:?}", out.result_error);
+    assert_eq!(out.result.as_deref(), Some("\"a\\ud83d\\udc80b\""));
+}
+
 /// A large integer is preserved exactly in the JSON string at the Rust layer
 /// (no float coercion — that risk only exists in JS's JSON.parse).
 #[tokio::test]
