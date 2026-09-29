@@ -74,7 +74,7 @@ jobs:
         run: rustup toolchain install nightly --component rust-src
 
       - name: Install mise
-        uses: jdx/mise-action@v4
+        uses: jdx/mise-action@v5
 
       - name: Build and test JS bindings
         working-directory: js
