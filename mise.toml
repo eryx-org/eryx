@@ -9,7 +9,7 @@ version = "0.9.146"
 version = "1.259.0"
 
 [tools."cargo:cargo-rail"]
-version = "0.30.0"
+version = "0.30.1"
 
 [tools."cargo:cargo-all-features"]
 version = "1.12.0"
