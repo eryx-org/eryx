@@ -49,6 +49,10 @@ name = "profile_execution"
 required-features = ["embedded"]
 
 [[example]]
+name = "profile_stateless"
+required-features = ["embedded"]
+
+[[example]]
 name = "resource_limits"
 required-features = ["embedded"]
 
@@ -115,7 +119,7 @@ tar.workspace = true
 target-lexicon = "0.13"
 tempfile.workspace = true
 thiserror.workspace = true
-tokio = { workspace = true, features = ["sync", "net", "io-util", "time"] }
+tokio = { workspace = true, features = ["sync", "net", "io-util", "time", "rt"] }
 tokio-rustls.workspace = true
 tokio-util.workspace = true
 tracing.workspace = true

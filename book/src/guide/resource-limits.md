@@ -260,6 +260,10 @@ Fuel limits provide fine-grained control over execution by limiting the number o
 - Billing based on actual computation performed
 - Preventing CPU-intensive attacks
 
+Fuel counts the instructions your code executes; instantiating the sandbox's
+WebAssembly instance is not charged, so the number does not depend on whether
+the execution ran on a fresh or a pre-instantiated instance.
+
 <!-- langtabs-start -->
 ```rust
 # extern crate eryx;
