@@ -115,7 +115,13 @@ fn build_component() -> Result<Vec<u8>, Box<dyn std::error::Error>> {
     };
 
     let mut bindings = wit_dylib::create(&resolve, world_id, Some(&mut opts))?;
-    embed_component_metadata(&mut bindings, &resolve, world_id, StringEncoding::UTF8)?;
+    embed_component_metadata(
+        &mut bindings,
+        &resolve,
+        world_id,
+        StringEncoding::UTF8,
+        false,
+    )?;
 
     // Link - order matters! Dependencies must come before dependents
     // wit-component 0.257 turned `Linker` into a `&mut self` builder and moved

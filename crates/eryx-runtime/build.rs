@@ -360,8 +360,14 @@ fn build_component(manifest_dir: &std::path::Path, runtime_so: &std::path::Path)
 
     let mut bindings =
         wit_dylib::create(&resolve, world_id, Some(&mut opts)).expect("failed to create bindings");
-    embed_component_metadata(&mut bindings, &resolve, world_id, StringEncoding::UTF8)
-        .expect("failed to embed component metadata");
+    embed_component_metadata(
+        &mut bindings,
+        &resolve,
+        world_id,
+        StringEncoding::UTF8,
+        false,
+    )
+    .expect("failed to embed component metadata");
 
     // Also compress bindings for late-linking support
     let out_dir = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR not set"));

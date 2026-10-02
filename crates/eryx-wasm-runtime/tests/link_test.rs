@@ -91,7 +91,13 @@ fn test_link_runtime() -> Result<(), Box<dyn std::error::Error>> {
     let mut bindings = wit_dylib::create(&resolve, world_id, Some(&mut opts))?;
 
     // Embed component metadata
-    embed_component_metadata(&mut bindings, &resolve, world_id, StringEncoding::UTF8)?;
+    embed_component_metadata(
+        &mut bindings,
+        &resolve,
+        world_id,
+        StringEncoding::UTF8,
+        false,
+    )?;
     println!("Bindings size: {} bytes", bindings.len());
 
     // Link all libraries together
