@@ -396,6 +396,20 @@ find target -path "*/build/eryx-runtime-*/out/*.so.zst" -delete 2>/dev/null || t
 echo "✓ Artifacts cleaned. Run 'mise run setup' to rebuild."
 """
 
+[tasks.build-eryx-js-runtime]
+description = "SPIKE: build the QuickJS guest into crates/eryx-runtime/runtime-js.wasm"
+depends = ["ensure-wasi-sdk"]
+run = """
+export WASI_SDK_PATH=$(mise where "github:WebAssembly/wasi-sdk@{{vars.wasi_sdk_version}}")
+BUILD_ERYX_JS_RUNTIME=1 cargo build --package eryx-runtime --release
+"""
+sources = [
+  "crates/eryx-js-wasm-runtime/src/**/*",
+  "crates/eryx-js-wasm-runtime/Cargo.toml",
+  "crates/eryx-runtime/wit/**/*.wit",
+]
+outputs = ["crates/eryx-runtime/runtime-js.wasm"]
+
 [tasks.build-eryx-runtime]
 description = "Build the eryx-wasm-runtime and runtime.wasm"
 depends = ["ensure-wasi-sdk"]

@@ -45,6 +45,7 @@ jobs:
               - 'crates/eryx/**'
               - 'crates/eryx-vfs/**'
               - 'crates/eryx-wasm-runtime/**'
+              - 'crates/eryx-js-wasm-runtime/**'
               - 'crates/eryx-runtime/**'
               - 'crates/eryx-precompile/**'
               - 'Cargo.lock'
@@ -116,6 +117,7 @@ jobs:
           path: |
             crates/eryx-runtime/runtime.wasm
             crates/eryx-runtime/runtime.cwasm
+            crates/eryx-runtime/runtime-js.wasm
             crates/eryx-runtime/prebuilt/
             crates/eryx-wasm-runtime/target/liberyx_runtime.so
           # NOTE: this key does not cover the cwasm's CPU-feature configuration,
@@ -123,8 +125,9 @@ jobs:
           # crates/eryx/src/wasm.rs (compiled into the `precompile` example).
           # Changing either without busting the version prefix silently reuses a
           # cwasm built with the old settings. Bumped v3 -> v4 for the
-          # stdout bytes migration (list<u8> WIT change).
-          key: wasm-runtime-v4-${{ hashFiles('crates/eryx-wasm-runtime/src/**', 'crates/eryx-wasm-runtime/clock_stubs.c', 'crates/eryx-wasm-runtime/Cargo.toml', 'crates/eryx-runtime/build.rs', 'crates/eryx-runtime/wit/runtime.wit', 'crates/eryx-runtime/libs/*.zst', 'Cargo.lock') }}
+          # stdout bytes migration (list<u8> WIT change); v4 -> v5 for adding
+          # runtime-js.wasm (the QuickJS guest spike, #250) to the cached set.
+          key: wasm-runtime-v5-${{ hashFiles('crates/eryx-wasm-runtime/src/**', 'crates/eryx-wasm-runtime/clock_stubs.c', 'crates/eryx-wasm-runtime/Cargo.toml', 'crates/eryx-js-wasm-runtime/src/**', 'crates/eryx-js-wasm-runtime/Cargo.toml', 'crates/eryx-runtime/build.rs', 'crates/eryx-runtime/wit/runtime.wit', 'crates/eryx-runtime/libs/*.zst', 'Cargo.lock') }}
 
       - name: Touch cached artifacts
         if: steps.wasm-cache.outputs.cache-hit == 'true'
@@ -132,6 +135,7 @@ jobs:
           # Touch all cached files so mise/make consider them current
           touch crates/eryx-runtime/runtime.wasm
           touch crates/eryx-runtime/runtime.cwasm
+          touch crates/eryx-runtime/runtime-js.wasm
           touch crates/eryx-runtime/prebuilt/*
           touch crates/eryx-wasm-runtime/target/liberyx_runtime.so
 
@@ -143,6 +147,7 @@ jobs:
           path: |
             crates/eryx-runtime/runtime.wasm
             crates/eryx-runtime/runtime.cwasm
+            crates/eryx-runtime/runtime-js.wasm
             crates/eryx-runtime/prebuilt/
             crates/eryx-wasm-runtime/target/liberyx_runtime.so
           retention-days: 1
@@ -167,15 +172,21 @@ jobs:
           find crates/eryx-wasm-runtime/src -name "*.rs" -exec touch {} +
           touch crates/eryx-wasm-runtime/clock_stubs.c
           touch crates/eryx-wasm-runtime/Cargo.toml
+          find crates/eryx-js-wasm-runtime/src -type f -exec touch {} +
           # Remove outputs (mise checks mtime, not existence)
-          rm -f crates/eryx-runtime/runtime.wasm crates/eryx-runtime/runtime.cwasm
+          rm -f crates/eryx-runtime/runtime.wasm crates/eryx-runtime/runtime.cwasm crates/eryx-runtime/runtime-js.wasm
           # Clean nested build-std target dirs to avoid stale std artifacts
           # when the nightly toolchain updates between runs
           rm -rf target/release/build/eryx-runtime-*/out/wasm-runtime-target
+          rm -rf target/release/build/eryx-runtime-*/out/wasm-js-runtime-target
 
       - name: Build eryx-runtime
         if: steps.wasm-cache.outputs.cache-hit != 'true'
         run: mise run build-eryx-runtime
+
+      - name: Build QuickJS guest (runtime-js.wasm)
+        if: steps.wasm-cache.outputs.cache-hit != 'true'
+        run: mise run build-eryx-js-runtime
 
       - name: Copy prebuilt late-linking artifacts
         if: steps.wasm-cache.outputs.cache-hit != 'true'
@@ -216,6 +227,7 @@ jobs:
           path: |
             crates/eryx-runtime/runtime.wasm
             crates/eryx-runtime/runtime.cwasm
+            crates/eryx-runtime/runtime-js.wasm
             crates/eryx-runtime/prebuilt/
             crates/eryx-wasm-runtime/target/liberyx_runtime.so
           retention-days: 1
@@ -331,6 +343,10 @@ jobs:
         # - liberyx_runtime.so and python-stdlib are provided for eryx-wasm-runtime tests
         # Use --profile ci for longer timeouts on slow WASM component tests
         run: cargo nextest run --workspace --all-features --profile ci
+        env:
+          # runtime-js.wasm comes from the artifact too; make its tests fail
+          # rather than skip if it's missing.
+          ERYX_REQUIRE_JS_RUNTIME: "1"
 
   msrv:
     name: MSRV

@@ -60,6 +60,16 @@ fn main() {
     );
     // Rerun if docs.rs env changes
     println!("cargo::rerun-if-env-changed=DOCS_RS");
+    // SPIKE: the QuickJS guest, built only on request.
+    println!("cargo::rerun-if-env-changed=BUILD_ERYX_JS_RUNTIME");
+    println!(
+        "cargo::rerun-if-changed={}",
+        manifest_dir
+            .parent()
+            .unwrap()
+            .join("eryx-js-wasm-runtime/src")
+            .display()
+    );
 
     // docs.rs sandbox: no WASM build tools available, write empty placeholders
     if env::var("DOCS_RS").is_ok() {
@@ -88,6 +98,10 @@ fn main() {
     let out_runtime_zst = out_dir.join("liberyx_runtime.so.zst");
     let out_bindings_zst = out_dir.join("liberyx_bindings.so.zst");
     let has_out_artifacts = out_runtime_zst.exists() && out_bindings_zst.exists();
+
+    if env::var("BUILD_ERYX_JS_RUNTIME").is_ok() {
+        build_js_runtime(&manifest_dir);
+    }
 
     if build_requested {
         // Full build requested - build everything from scratch
@@ -466,4 +480,156 @@ fn find_wasi_sdk() -> Option<PathBuf> {
     }
 
     None
+}
+
+/// SPIKE: build the QuickJS guest (`eryx-js-wasm-runtime`) into `runtime-js.wasm`.
+///
+/// Same pipeline as the CPython guest — PIC staticlib for wasm32-wasip1, linked
+/// into a shared library with WASI SDK clang, then `wit_component::Linker` —
+/// against the same vendored libc, minus libpython/libc++. Kept separate from
+/// `build_wasm_runtime`/`build_component` so the Python build is untouched.
+fn build_js_runtime(manifest_dir: &std::path::Path) {
+    let crate_dir = manifest_dir.parent().unwrap().join("eryx-js-wasm-runtime");
+    let out_dir = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR not set"));
+    let nested_target_dir = out_dir.join("wasm-js-runtime-target");
+
+    let wasi_sdk = find_wasi_sdk().expect("WASI SDK not found");
+    let clang = wasi_sdk.join("bin/clang");
+    let sysroot = wasi_sdk.join("share/wasi-sysroot");
+
+    let mut cmd = Command::new("rustup");
+    cmd.current_dir(&crate_dir).args([
+        "run",
+        "nightly",
+        "cargo",
+        "build",
+        "-Z",
+        "build-std=panic_abort,std",
+        "--target",
+        "wasm32-wasip1",
+        "--release",
+    ]);
+    for (key, _) in env::vars_os() {
+        if let Some(key_str) = key.to_str()
+            && (key_str.starts_with("RUST") || key_str.starts_with("CARGO"))
+        {
+            cmd.env_remove(&key);
+        }
+    }
+    cmd.env("RUSTFLAGS", "-C relocation-model=pic");
+    cmd.env("CARGO_TARGET_DIR", &nested_target_dir);
+    // rquickjs-sys compiles quickjs-ng with `$WASI_SDK/bin/clang` and would
+    // otherwise download its own (older) WASI SDK. It overwrites `CFLAGS`, but
+    // the cc crate prefers the target-specific variable, which also lets us add
+    // -fPIC so the C objects can go into a shared library.
+    cmd.env("WASI_SDK", &wasi_sdk);
+    cmd.env(
+        "CFLAGS_wasm32_wasip1",
+        format!("--sysroot={} -fPIC", sysroot.display()),
+    );
+    let status = cmd
+        .status()
+        .expect("failed to run cargo build for eryx-js-wasm-runtime");
+    assert!(
+        status.success(),
+        "cargo build for eryx-js-wasm-runtime failed"
+    );
+    let staticlib = nested_target_dir.join("wasm32-wasip1/release/liberyx_js_wasm_runtime.a");
+
+    let clock_stubs_o = out_dir.join("js_clock_stubs.o");
+    let status = Command::new(&clang)
+        .arg("--target=wasm32-wasip1")
+        .arg(format!("--sysroot={}", sysroot.display()))
+        .arg("-fPIC")
+        .arg("-c")
+        .arg(
+            manifest_dir
+                .parent()
+                .unwrap()
+                .join("eryx-wasm-runtime/clock_stubs.c"),
+        )
+        .arg("-o")
+        .arg(&clock_stubs_o)
+        .status()
+        .expect("failed to run clang");
+    assert!(status.success(), "clang failed to compile clock_stubs.c");
+
+    let runtime_so = out_dir.join("liberyx_js_runtime.so");
+    let status = Command::new(&clang)
+        .arg("--target=wasm32-wasip1")
+        .arg(format!("--sysroot={}", sysroot.display()))
+        .arg("-shared")
+        .arg("-Wl,--allow-undefined")
+        .arg("-o")
+        .arg(&runtime_so)
+        .arg("-Wl,--whole-archive")
+        .arg(&staticlib)
+        .arg("-Wl,--no-whole-archive")
+        .arg(&clock_stubs_o)
+        .status()
+        .expect("failed to link shared library");
+    assert!(
+        status.success(),
+        "clang failed to link liberyx_js_runtime.so"
+    );
+
+    decompress_libs(manifest_dir);
+    let libs_dir = manifest_dir.join("libs/decompressed");
+    let read_lib = |name: &str| {
+        std::fs::read(libs_dir.join(name)).unwrap_or_else(|e| panic!("failed to read {name}: {e}"))
+    };
+
+    let mut resolve = wit_parser::Resolve::default();
+    let (pkg_id, _) = resolve
+        .push_dir(manifest_dir.join("wit"))
+        .expect("failed to parse WIT directory");
+    let world_id = resolve
+        .select_world(&[pkg_id], Some("sandbox"))
+        .expect("failed to select world");
+    let mut opts = wit_dylib::DylibOpts {
+        interpreter: Some("liberyx_js_runtime.so".to_string()),
+        async_: wit_dylib::AsyncFilterSet::default(),
+        stack_pointer: wit_dylib::StackPointer::Global,
+    };
+    let mut bindings =
+        wit_dylib::create(&resolve, world_id, Some(&mut opts)).expect("failed to create bindings");
+    embed_component_metadata(&mut bindings, &resolve, world_id, StringEncoding::UTF8)
+        .expect("failed to embed component metadata");
+
+    let runtime = std::fs::read(&runtime_so).expect("failed to read liberyx_js_runtime.so");
+    let mut linker = wit_component::Linker::default();
+    linker.use_built_in_libdl(true);
+    linker.encoder().validate(true);
+    for lib in [
+        "libwasi-emulated-process-clocks.so",
+        "libwasi-emulated-signal.so",
+        "libwasi-emulated-mman.so",
+        "libwasi-emulated-getpid.so",
+        "libc.so",
+    ] {
+        linker
+            .library(lib, &read_lib(lib), false)
+            .unwrap_or_else(|e| panic!("failed to add {lib}: {e:?}"));
+    }
+    linker
+        .library("liberyx_js_runtime.so", &runtime, false)
+        .expect("failed to add JS runtime")
+        .library("liberyx_bindings.so", &bindings, false)
+        .expect("failed to add bindings");
+    linker
+        .encoder()
+        .adapter(
+            "wasi_snapshot_preview1",
+            &read_lib("wasi_snapshot_preview1.reactor.wasm"),
+        )
+        .expect("failed to add WASI adapter");
+    let component = linker.encode().expect("failed to encode JS component");
+
+    let component_path = manifest_dir.join("runtime-js.wasm");
+    std::fs::write(&component_path, &component).expect("failed to write runtime-js.wasm");
+    eprintln!(
+        "Built JS component: {} ({} bytes)",
+        component_path.display(),
+        component.len()
+    );
 }
