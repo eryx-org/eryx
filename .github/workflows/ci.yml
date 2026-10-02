@@ -347,7 +347,7 @@ jobs:
         with:
           mise_toml: |
             [tools]
-            rust = "1.98"
+            rust = "1.99"
 
       - name: Configure Rust cache
         uses: Swatinem/rust-cache@v2
