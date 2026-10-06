@@ -140,32 +140,42 @@ async fn session_usable_after_abandoned_callbacks() {
 }
 
 /// Cancelling the guest's wait must not cancel the callback itself: it may be
-/// side-effecting, so it still runs to completion on the host and is journaled,
-/// and a replay serves it from the journal instead of running it again.
+/// side-effecting, so it still runs to completion on the host, exactly once, and
+/// is journaled; a replay serves it from the journal instead of running it again.
 #[tokio::test]
 async fn abandoned_callbacks_complete_and_are_journaled() {
-    for code in [NEVER_AWAITED, CANCELLED] {
+    // (script, host runs in total, whether the script succeeds)
+    for (code, runs, ok) in [
+        (NEVER_AWAITED, 1, true),
+        (CANCELLED, 2, true), // the cancelled 300ms call plus the 1ms one
+        (GATHER_FAILURE, 1, false),
+    ] {
         let slow = Slow::default();
         let build = || {
             Sandbox::builder()
                 .with_embedded_runtime()
                 .with_callback(slow.clone())
         };
+        let check = |r: Result<eryx::ExecuteResult, Error>| {
+            if ok {
+                r.unwrap();
+            } else {
+                assert_gather_failure(r);
+            }
+        };
 
         let first = tokio::time::timeout(HANG, build().build().unwrap().execute_with_journal(code))
             .await
             .unwrap();
-        first.result.unwrap();
-        let runs = slow.0.load(Ordering::SeqCst);
-        assert!(
-            first
-                .journal
-                .entries
-                .iter()
-                .any(|e| e.name == "slow" && e.result == Ok(json!({"slept": 300}))),
-            "abandoned callback missing from journal: {:?}",
-            first.journal.entries
-        );
+        check(first.result);
+        assert_eq!(slow.0.load(Ordering::SeqCst), runs);
+        let abandoned = first
+            .journal
+            .entries
+            .iter()
+            .filter(|e| e.name == "slow" && e.result == Ok(json!({"slept": 300})))
+            .count();
+        assert_eq!(abandoned, 1, "journal: {:?}", first.journal.entries);
 
         let replay = build()
             .with_replay_journal(first.journal.clone())
@@ -174,7 +184,7 @@ async fn abandoned_callbacks_complete_and_are_journaled() {
         let second = tokio::time::timeout(HANG, replay.execute_with_journal(code))
             .await
             .unwrap();
-        second.result.unwrap();
+        check(second.result);
         assert_eq!(
             slow.0.load(Ordering::SeqCst),
             runs,
