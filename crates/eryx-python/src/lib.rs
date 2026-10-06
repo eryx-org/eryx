@@ -58,6 +58,8 @@ fn _eryx(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<session::Session>()?;
     m.add_class::<preinit::SandboxFactory>()?;
     m.add_class::<result::ExecuteResult>()?;
+    m.add_class::<result::ReplayOutcome>()?;
+    m.add_class::<result::SuspendedCallback>()?;
     m.add_class::<resource_limits::ResourceLimits>()?;
     m.add_class::<net_config::NetConfig>()?;
     m.add_class::<vfs::VfsStorage>()?;

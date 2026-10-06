@@ -265,7 +265,14 @@ fn json_to_py_kwargs<'py>(
 }
 
 /// Format a Python exception with traceback for error messages.
+///
+/// A raised `SuspendCallback` maps to `CallbackError::Suspend` with the
+/// exception's string as the reason.
 fn format_python_error(py: Python<'_>, err: PyErr) -> CallbackError {
+    if err.is_instance_of::<crate::error::SuspendCallback>(py) {
+        return CallbackError::Suspend(err.value(py).to_string());
+    }
+
     // Try to get the full traceback
     let traceback = err
         .traceback(py)

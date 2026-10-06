@@ -40,6 +40,14 @@ create_exception!(
     "Execution timed out."
 );
 create_exception!(eryx, CancelledError, EryxError, "Execution was cancelled.");
+// Raised by user callbacks (not by eryx), so it derives from Exception rather
+// than EryxError.
+create_exception!(
+    eryx,
+    SuspendCallback,
+    PyException,
+    "Raise from a callback to suspend execution; the argument is an opaque reason string."
+);
 
 // Pool-specific exceptions
 create_exception!(eryx, PoolError, EryxError, "Base pool error.");
@@ -135,6 +143,7 @@ pub fn register_exceptions(m: &Bound<'_, PyModule>) -> PyResult<()> {
     )?;
     m.add("TimeoutError", m.py().get_type::<SandboxTimeoutError>())?;
     m.add("CancelledError", m.py().get_type::<CancelledError>())?;
+    m.add("SuspendCallback", m.py().get_type::<SuspendCallback>())?;
     m.add("PoolError", m.py().get_type::<PoolError>())?;
     m.add(
         "PoolExhaustedError",

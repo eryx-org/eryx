@@ -142,6 +142,109 @@ impl ExecuteResult {
     }
 }
 
+/// Result of `Sandbox.execute_with_journal()`.
+///
+/// Exactly one of `result` and `error` is set. `journal` is always present,
+/// even when execution failed or suspended, so a later run can replay every
+/// callback that completed. When `suspended` is set, `error` holds the
+/// resulting `ExecutionError`; branch on `suspended` first.
+#[pyclass(frozen, module = "eryx")]
+#[derive(Debug)]
+pub struct ReplayOutcome {
+    /// The execution result, or `None` if execution failed or suspended.
+    #[pyo3(get)]
+    result: Option<ExecuteResult>,
+
+    /// The exception `execute()` would have raised, or `None` on success.
+    #[pyo3(get)]
+    error: Option<Py<PyAny>>,
+
+    /// The callback journal recorded during this run, as a JSON-compatible
+    /// dict. Pass it as `replay_journal=` to a new `Sandbox` to replay it.
+    #[pyo3(get)]
+    journal: Py<PyAny>,
+
+    /// How many callbacks were served from the replay journal.
+    #[pyo3(get)]
+    replayed_callbacks: u32,
+
+    /// The callback that suspended execution, or `None`.
+    #[pyo3(get)]
+    suspended: Option<SuspendedCallback>,
+}
+
+#[pymethods]
+impl ReplayOutcome {
+    fn __repr__(&self, py: Python<'_>) -> String {
+        let entries = self
+            .journal
+            .bind(py)
+            .get_item("entries")
+            .map_or(0, |e| e.len().unwrap_or(0));
+        format!(
+            "ReplayOutcome(ok={}, journal_entries={}, replayed_callbacks={}, suspended={:?})",
+            self.error.is_none(),
+            entries,
+            self.replayed_callbacks,
+            self.suspended.as_ref().map(|s| &s.name),
+        )
+    }
+}
+
+impl ReplayOutcome {
+    /// Convert an `eryx::ReplayOutcome`, mapping any error to its Python exception.
+    pub(crate) fn from_outcome(py: Python<'_>, outcome: eryx::ReplayOutcome) -> PyResult<Self> {
+        let (result, error) = match outcome.result {
+            Ok(r) => (Some(ExecuteResult::from(r)), None),
+            Err(e) => (
+                None,
+                Some(crate::error::eryx_error_to_py(e).into_value(py).into_any()),
+            ),
+        };
+        let journal = pythonize::pythonize(py, &outcome.journal)
+            .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?
+            .unbind();
+        Ok(Self {
+            result,
+            error,
+            journal,
+            replayed_callbacks: outcome.replayed_callbacks,
+            suspended: outcome.suspended.map(|s| SuspendedCallback {
+                name: s.name,
+                args_json: s.args_json,
+                reason: s.reason,
+            }),
+        })
+    }
+}
+
+/// Details of the callback that suspended execution by raising `SuspendCallback`.
+#[pyclass(frozen, module = "eryx", from_py_object)]
+#[derive(Debug, Clone)]
+pub struct SuspendedCallback {
+    /// Name of the callback that suspended.
+    #[pyo3(get)]
+    pub name: String,
+
+    /// Canonicalized JSON arguments the callback was invoked with.
+    #[pyo3(get)]
+    pub args_json: String,
+
+    /// The reason string passed to `SuspendCallback`.
+    #[pyo3(get)]
+    pub reason: String,
+}
+
+#[pymethods]
+impl SuspendedCallback {
+    fn __repr__(&self) -> String {
+        format!(
+            "SuspendedCallback(name={:?}, args_json={:?}, reason={:?})",
+            self.name, self.args_json, self.reason
+        )
+    }
+}
+
 /// Truncate a string for display, adding "..." if truncated.
 fn truncate_string(s: &str, max_len: usize) -> String {
     if s.len() <= max_len {

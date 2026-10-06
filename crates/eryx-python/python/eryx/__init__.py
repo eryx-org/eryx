@@ -34,11 +34,13 @@ from eryx._eryx import (
     NetConfig,
     PooledSandbox,
     PoolStats,
+    ReplayOutcome,
     ResourceLimits,
     Sandbox,
     SandboxFactory,
     SandboxPool,
     Session,
+    SuspendedCallback,
     VfsStorage,
     # Exceptions
     EryxError,
@@ -49,6 +51,7 @@ from eryx._eryx import (
     PoolExhaustedError,
     PoolTimeoutError,
     ResourceLimitError,
+    SuspendCallback,
     TimeoutError,
     # Module metadata
     __version__,
@@ -62,11 +65,13 @@ __all__ = [
     "NetConfig",
     "PooledSandbox",
     "PoolStats",
+    "ReplayOutcome",
     "ResourceLimits",
     "Sandbox",
     "SandboxFactory",
     "SandboxPool",
     "Session",
+    "SuspendedCallback",
     "VfsStorage",
     # Exceptions
     "EryxError",
@@ -77,6 +82,7 @@ __all__ = [
     "PoolExhaustedError",
     "PoolTimeoutError",
     "ResourceLimitError",
+    "SuspendCallback",
     "TimeoutError",
     # Metadata
     "__version__",
