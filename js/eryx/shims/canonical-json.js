@@ -128,8 +128,11 @@ function compareCodePoints(a, b) {
   return x.length - y.length;
 }
 
+const SPACE = /\s*/y;
+// Strings are scanned by hand in parseJson (linear by construction, and
+// guest-controlled input never meets a backtracking string pattern).
 const TOKEN =
-  /\s*(?:("[^"\\]*(?:\\.[^"\\]*)*")|(-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)|([{}[\]:,])|(true|false|null))/y;
+  /(-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)|([{}[\]:,])|(true|false|null)/y;
 
 /**
  * A parsed JSON value that keeps its source text.
@@ -153,12 +156,28 @@ const TOKEN =
  */
 export function parseJson(text) {
   let pos = 0;
+  // Returns [text consumed, string, number, punctuation, literal].
   const next = () => {
-    TOKEN.lastIndex = pos;
+    const from = pos;
+    SPACE.lastIndex = pos;
+    SPACE.exec(text);
+    const start = SPACE.lastIndex;
+    if (text[start] === '"') {
+      let end = start + 1;
+      while (end < text.length && text[end] !== '"') {
+        end += text[end] === "\\" ? 2 : 1;
+      }
+      if (end >= text.length) {
+        throw new SyntaxError(`Unterminated string at position ${start}`);
+      }
+      pos = end + 1;
+      return [text.slice(from, pos), text.slice(start, pos)];
+    }
+    TOKEN.lastIndex = start;
     const m = TOKEN.exec(text);
-    if (!m) throw new SyntaxError(`Invalid JSON at position ${pos}`);
+    if (!m) throw new SyntaxError(`Invalid JSON at position ${start}`);
     pos = TOKEN.lastIndex;
-    return m;
+    return [text.slice(from, pos), undefined, m[1], m[2], m[3]];
   };
   const expect = (m, punct) => {
     if (m[3] !== punct) {
