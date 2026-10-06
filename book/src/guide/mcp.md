@@ -110,8 +110,6 @@ python -m eryx --mcp-config global.json --mcp-config project.json -c '...'
 
 The `eryx.mcp` module provides a high-level helper that discovers and connects to servers:
 
-<!-- langtabs-start -->
-
 ```python,no_test
 import eryx
 from eryx.mcp import connect_servers
@@ -136,13 +134,9 @@ print(f"Found {len(r['items'])} repos")
     manager.close()
 ```
 
-<!-- langtabs-end -->
-
 ### Using `MCPManager` (Low-Level)
 
 For more control, create and configure the `MCPManager` directly:
-
-<!-- langtabs-start -->
 
 ```python,no_test
 import eryx
@@ -169,13 +163,9 @@ session = eryx.Session(mcp=manager)
 manager.close()
 ```
 
-<!-- langtabs-end -->
-
 ### Combining MCP with Python Callbacks
 
 MCP tools and Python callbacks can be used together:
-
-<!-- langtabs-start -->
 
 ```python,no_test
 import eryx
@@ -202,8 +192,6 @@ upper = await transform(text=data["text"])
 print(upper["result"])
 """)
 ```
-
-<!-- langtabs-end -->
 
 ## Tool Naming
 
