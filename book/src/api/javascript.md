@@ -53,7 +53,7 @@ different variable name.
 
 ### `executeWithJournal(code: string, options?): Promise<ReplayOutcome>`
 
-Execute code while journaling callback results, so a later run can replay them instead of re-invoking the callbacks. Pass a previously recorded journal as `options.journal` to replay it. A callback handler can throw `SuspendCallback` to halt execution. See [Callback Replay & Suspension](../guide/callback-replay.md#javascript).
+Execute code while journaling callback results, so a later run can replay them instead of re-invoking the callbacks. Pass a previously recorded journal as `options.journal` to replay it. A callback handler can throw `SuspendCallback` to halt execution. See [Callback Replay & Suspension](../guide/callback-replay.md).
 
 ```javascript
 import { Sandbox, SuspendCallback } from "@bsull/eryx";
@@ -64,7 +64,9 @@ const second = await sandbox.executeWithJournal(code, { journal: first.journal }
 console.log(second.replayedCallbacks);
 ```
 
-`ReplayOutcome` has `result` (the `ExecuteResult`, or `undefined` on failure), `error`, `journal` (always present; plain JSON in the same shape as the Rust `CallbackJournal`), `replayedCallbacks`, and `suspended` (`{ name, argsJson, reason }` if a callback suspended). It never rejects for script failures — check `suspended`, then `error`.
+`ReplayOutcome` has `result` (the `ExecuteResult`, or `undefined` on failure), `error`, `journal`, `replayedCallbacks`, and `suspended` (`{ name, argsJson, reason }` if a callback suspended). It never rejects for script failures — check `suspended`, then `error`.
+
+`journal` is always present. It is a JSON string in the same format as the Rust `CallbackJournal`; store it and pass it back unmodified, since results are kept as their exact JSON text.
 
 A top-level `executeWithJournal(code, options?)` convenience function is also exported.
 

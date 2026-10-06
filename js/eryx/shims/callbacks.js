@@ -12,6 +12,8 @@
  * and setOutputHandler().
  */
 
+import { canonicalJson, parseJson } from "./canonical-json.js";
+
 /** @type {((name: string, argsJson: string) => string | Promise<string>) | null} */
 let _callbackHandler = null;
 
@@ -91,23 +93,67 @@ export class SuspendCallback extends Error {
 }
 
 /**
+ * A recorded callback outcome. `ok` is the handler's exact JSON result text (not
+ * re-parsed, so replay returns byte-for-byte what Python saw live); `err` is a
+ * Python-visible error message, or the message of a thrown Error when `thrown`.
+ * @typedef {{ok: string} | {err: string, thrown?: boolean}} RecordedResult
+ */
+
+/**
  * Replay state for the current executeWithJournal() run, or null when not
  * journaling. Mirrors the Rust `ReplayState` (crates/eryx/src/replay.rs): cached
  * results bucketed by (name, canonical args) as a FIFO multiset, a sticky
  * divergence guard, and a gate that rejects every call after a suspension.
- * @type {{cached: Map<string, Array<{Ok: *} | {Err: string}>>, liveMode: boolean, nextSeq: number, entries: Array<Object|undefined>, suspended: Object|null, suspendSeq: number|null, replayedCount: number}|null}
+ * @type {{cached: Map<string, RecordedResult[]>, liveMode: boolean, nextSeq: number, entries: Array<{name: string, argsJson: string, result: RecordedResult}|undefined>, suspended: Object|null, suspendSeq: number|null, replayedCount: number}|null}
  */
 let _replay = null;
 
 /**
+ * Parse a serialized journal into its entries.
+ *
+ * Parsed with {@link parseJson} rather than `JSON.parse` so each `Ok` value
+ * keeps its exact text (`1.0` stays a float, large integers stay exact).
+ * @param {string} journal
+ * @returns {Array<{name: string, argsJson: string, result: RecordedResult}>}
+ */
+function _parseJournal(journal) {
+  if (typeof journal !== "string") {
+    throw new TypeError(
+      "journal must be the JSON string from a previous executeWithJournal() outcome",
+    );
+  }
+  const invalid = () =>
+    new TypeError("journal is not a valid callback journal");
+  const field = (node, key, kind) => {
+    const value = node?.kind === "object" ? node.value.get(key) : undefined;
+    if (value?.kind !== kind) throw invalid();
+    return value;
+  };
+  const entries = field(parseJson(journal), "entries", "array").value;
+  return entries.map((entry) => {
+    const result = field(entry, "result", "object").value;
+    const ok = result.get("Ok");
+    const err = result.get("Err");
+    if (!(ok || err?.kind === "string")) throw invalid();
+    return {
+      name: field(entry, "name", "string").value,
+      argsJson: field(entry, "args_json", "string").value,
+      result: ok
+        ? { ok: ok.raw }
+        : { err: err.value, thrown: entry.value.get("thrown")?.raw === "true" },
+    };
+  });
+}
+
+/**
  * Start journaling callbacks, replaying results from `journal` if given.
  * @internal Used by executeWithJournal().
- * @param {{entries: Array<{name: string, args_json: string, result: *}>}} [journal]
+ * @param {string} [journal] - A journal string from a previous outcome
  */
 export function _beginReplay(journal) {
   const cached = new Map();
-  for (const entry of journal?.entries ?? []) {
-    const key = `${entry.name}\0${entry.args_json}`;
+  for (const entry of journal === undefined ? [] : _parseJournal(journal)) {
+    const key = `${entry.name}\0${entry.argsJson}`;
     if (!cached.has(key)) cached.set(key, []);
     cached.get(key).push(entry.result);
   }
@@ -122,71 +168,71 @@ export function _beginReplay(journal) {
   };
 }
 
-/**
- * Stop journaling and return what was recorded.
- *
- * The journal keeps entries in dispatch order and, if a callback suspended,
- * drops everything dispatched at or after the suspending call so it is a clean
- * prefix ending before the suspension point.
- * @internal Used by executeWithJournal().
- * @param {string} code - The script that produced the journal
- */
-export function _endReplay(code) {
-  const state = _replay;
-  _replay = null;
-  const entries = state.entries.filter(
-    (entry) =>
-      entry !== undefined &&
-      (state.suspendSeq === null || entry.index < state.suspendSeq),
-  );
-  return {
-    journal: { code, entries },
-    replayedCallbacks: state.replayedCount,
-    suspended: state.suspended ?? undefined,
-  };
-}
-
-/** Rebuild `value` with object keys sorted recursively. */
-function _canonicalize(value) {
-  if (Array.isArray(value)) return value.map(_canonicalize);
-  if (value !== null && typeof value === "object") {
-    return Object.fromEntries(
-      Object.keys(value)
-        .sort()
-        .map((key) => [key, _canonicalize(value[key])]),
-    );
-  }
-  return value;
-}
-
 /** 64-bit FNV-1a, matching the Rust journal's `args_hash`. */
 function _fnv1a64(text) {
   let hash = 0xcbf29ce484222325n;
   for (const byte of new TextEncoder().encode(text)) {
     hash = BigInt.asUintN(64, (hash ^ BigInt(byte)) * 0x100000001b3n);
   }
-  // ponytail: lossy above 2^53; the hash is informational only (matching uses
-  // name + args_json, as in Rust), and a number keeps the journal JSON-safe.
-  return Number(hash);
+  return hash;
+}
+
+/**
+ * Stop journaling and return what was recorded.
+ *
+ * The journal is serialized in the Rust `CallbackJournal` serde shape. Entries
+ * keep dispatch order and, if a callback suspended, everything dispatched at or
+ * after the suspending call is dropped so the journal is a clean prefix ending
+ * before the suspension point.
+ * @internal Used by executeWithJournal().
+ * @param {string} code - The script that produced the journal
+ */
+export function _endReplay(code) {
+  const state = _replay;
+  _replay = null;
+  const entries = [];
+  state.entries.forEach((entry, index) => {
+    if (entry === undefined) return;
+    if (state.suspendSeq !== null && index >= state.suspendSeq) return;
+    const { name, argsJson, result } = entry;
+    const recorded =
+      "ok" in result
+        ? `{"Ok":${result.ok}}`
+        : `{"Err":${JSON.stringify(result.err)}}`;
+    // `thrown` is a JS-only extension (serde ignores unknown fields): the Error
+    // halted the guest instead of reaching Python, so replay throws it again.
+    const thrown = result.thrown ? `,"thrown":true` : "";
+    entries.push(
+      `{"index":${index},"name":${JSON.stringify(name)},"args_hash":${_fnv1a64(argsJson)},` +
+        `"args_json":${JSON.stringify(argsJson)},"result":${recorded}${thrown}}`,
+    );
+  });
+  return {
+    journal: `{"code":${JSON.stringify(code)},"entries":[${entries.join(",")}]}`,
+    replayedCallbacks: state.replayedCount,
+    suspended: state.suspended ?? undefined,
+  };
+}
+
+/** Deliver a recorded result to the guest exactly as it was delivered live. */
+function _replayResult(result) {
+  if ("ok" in result) return result.ok;
+  if (result.thrown) throw new Error(result.err);
+  return { tag: "err", val: result.err };
 }
 
 /**
  * Run a live callback, recording its outcome into `state` at `seq`.
  *
- * A string result is journaled as `{Ok: value}`, an `{tag: "err"}` result (or a
- * thrown non-Error) as `{Err: message}`. A SuspendCallback records the
- * suspension (not journaled) and is rethrown, which halts the guest. Any other
- * thrown Error also halts the guest and is not journaled.
+ * Every outcome of a call that actually ran is journaled, so replay never runs
+ * it twice: a JSON result as `Ok` (its exact text), an `{tag: "err"}` result or
+ * thrown non-Error as `Err`, and a thrown Error as `Err` marked `thrown` (it
+ * halts the guest; replay halts it the same way). Only a SuspendCallback is not
+ * journaled: the call re-runs live on resume, as in Rust.
  */
 async function _invokeLive(state, seq, name, argsJson, argumentsJson) {
   const record = (result) => {
-    state.entries[seq] = {
-      index: seq,
-      name,
-      args_hash: _fnv1a64(argsJson),
-      args_json: argsJson,
-      result,
-    };
+    state.entries[seq] = { name, argsJson, result };
   };
   let ret;
   try {
@@ -197,20 +243,23 @@ async function _invokeLive(state, seq, name, argsJson, argumentsJson) {
         state.suspended = { name, argsJson, reason: e.reason };
         state.suspendSeq = seq;
       }
-    } else if (!(e instanceof Error)) {
-      record({ Err: e });
+    } else if (e instanceof Error) {
+      record({ err: e.message, thrown: true });
+    } else {
+      record({ err: String(e) });
     }
     throw e;
   }
   if (ret !== null && typeof ret === "object" && ret.tag === "err") {
-    record({ Err: ret.val });
+    record({ err: String(ret.val) });
   } else {
-    const json = ret?.tag === "ok" ? ret.val : ret;
+    const json = ret !== null && typeof ret === "object" ? ret.val : ret;
     try {
-      record({ Ok: JSON.parse(json) });
+      parseJson(json);
+      record({ ok: json });
     } catch {
-      // Not valid JSON: not representable in the journal, so leave it out and
-      // let the call re-run live on replay.
+      // ponytail: a non-JSON result breaks the handler contract and can't be
+      // stored as an `Ok` value, so it stays unjournaled (re-runs on replay).
     }
   }
   return ret;
@@ -241,22 +290,14 @@ export function invoke(name, argumentsJson) {
       "execution already suspended by a previous callback",
     );
   }
-  const argsJson = JSON.stringify(_canonicalize(JSON.parse(argumentsJson)));
+  const argsJson = canonicalJson(argumentsJson);
   const seq = state.nextSeq++;
   if (!state.liveMode) {
     const result = state.cached.get(`${name}\0${argsJson}`)?.shift();
     if (result !== undefined) {
       state.replayedCount++;
-      state.entries[seq] = {
-        index: seq,
-        name,
-        args_hash: _fnv1a64(argsJson),
-        args_json: argsJson,
-        result,
-      };
-      return "Err" in result
-        ? { tag: "err", val: result.Err }
-        : JSON.stringify(result.Ok);
+      state.entries[seq] = { name, argsJson, result };
+      return _replayResult(result);
     }
     // First miss: the run has diverged from the journal, so this call and every
     // later one runs live (prevents replaying a now-stale cached result).

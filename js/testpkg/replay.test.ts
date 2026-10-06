@@ -4,9 +4,11 @@ import {
   executeWithJournal,
   Sandbox,
   SuspendCallback,
-  type CallbackJournal,
 } from "@bsull/eryx";
 import { setCallbackHandler, setCallbacks } from "@bsull/eryx/callbacks";
+
+/** Inspect a journal string (lossy number parsing is fine for assertions). */
+const entries = (journal: string) => JSON.parse(journal).entries;
 
 const CODE = `
 a = await fetch(id=1)
@@ -35,8 +37,8 @@ describe("callback replay", () => {
     expect(first.error).toBeUndefined();
     expect(first.result?.stdout).toBe("30\n");
     expect(first.replayedCallbacks).toBe(0);
-    expect(first.journal.code).toBe(CODE);
-    expect(first.journal.entries).toMatchObject([
+    expect(JSON.parse(first.journal).code).toBe(CODE);
+    expect(entries(first.journal)).toMatchObject([
       {
         index: 0,
         name: "fetch",
@@ -52,20 +54,18 @@ describe("callback replay", () => {
     ]);
     expect(calls).toHaveLength(2);
 
-    // The journal is plain JSON, so it survives persistence.
-    const journal: CallbackJournal = JSON.parse(JSON.stringify(first.journal));
     calls = [];
-    const second = await executeWithJournal(CODE, { journal });
+    const second = await executeWithJournal(CODE, { journal: first.journal });
     expect(second.result?.stdout).toBe("30\n");
     expect(second.replayedCallbacks).toBe(2);
-    expect(second.journal.entries).toEqual(first.journal.entries);
+    expect(second.journal).toBe(first.journal);
     expect(calls).toEqual([]);
   });
 
   it("matches on canonical args regardless of key order", async () => {
     const code = `print((await fetch(id=1, x=2))["v"])`;
     const first = await executeWithJournal(code);
-    expect(first.journal.entries[0].args_json).toBe('{"id":1,"x":2}');
+    expect(entries(first.journal)[0].args_json).toBe('{"id":1,"x":2}');
     calls = [];
     const second = await executeWithJournal(
       `print((await fetch(x=2, id=1))["v"])`,
@@ -103,7 +103,7 @@ except Exception as e:
 `;
     const first = await executeWithJournal(code);
     expect(first.result?.stdout).toBe("caught not found\n");
-    expect(first.journal.entries[0].result).toEqual({ Err: "not found" });
+    expect(entries(first.journal)[0].result).toEqual({ Err: "not found" });
 
     calls = [];
     const second = await executeWithJournal(code, { journal: first.journal });
@@ -131,6 +131,79 @@ print(a["v"] + b["v"])
     ).toEqual([3, 2]);
   });
 
+  it("canonicalizes args byte-identically to serde_json", async () => {
+    const outcome = await executeWithJournal(
+      `await fetch(id=1, b=1.0, a=10**20, c=1e16, d=-0.0, e=0.1, f=[2.50, -7], g="é😀")`,
+    );
+    // Expected value produced by serde_json 1.0.151 (the Rust journal's format).
+    expect(entries(outcome.journal)[0].args_json).toBe(
+      '{"a":1e+20,"b":1.0,"c":1e+16,"d":-0.0,"e":0.1,"f":[2.5,-7],"g":"é😀","id":1}',
+    );
+  });
+
+  it("replays results byte-for-byte, keeping floats and large integers", async () => {
+    setCallbackHandler((name) => {
+      calls.push(name);
+      return '{"v": 1.0, "big": 12345678901234567890}';
+    });
+    const code = `
+r = await fetch(id=1)
+print(type(r["v"]).__name__, r["big"])
+`;
+    const first = await executeWithJournal(code);
+    expect(first.result?.stdout).toBe("float 12345678901234567890\n");
+    calls = [];
+    const second = await executeWithJournal(code, { journal: first.journal });
+    expect(second.result?.stdout).toBe("float 12345678901234567890\n");
+    expect(calls).toEqual([]);
+  });
+
+  it("replays a journal recorded by the Rust host", async () => {
+    // serde_json output of a Rust `CallbackJournal` (u64 hash beyond 2^53).
+    const journal =
+      '{"code":"","entries":[{"index":0,"name":"fetch","args_hash":14695981039346656037,' +
+      '"args_json":"{\\"id\\":1}","result":{"Ok":{"v":7}}}]}';
+    const outcome = await executeWithJournal(
+      `print((await fetch(id=1))["v"])`,
+      {
+        journal,
+      },
+    );
+    expect(outcome.result?.stdout).toBe("7\n");
+    expect(outcome.replayedCallbacks).toBe(1);
+    expect(calls).toEqual([]);
+  });
+
+  it("rejects a journal that is not a journal string", async () => {
+    await expect(
+      executeWithJournal(CODE, { journal: {} as unknown as string }),
+    ).rejects.toThrow(TypeError);
+    await expect(executeWithJournal(CODE, { journal: "{}" })).rejects.toThrow(
+      TypeError,
+    );
+  });
+
+  it("journals a thrown Error so the call is not re-run", async () => {
+    setCallbackHandler((name) => {
+      calls.push(name);
+      throw new Error("charge failed after side effects");
+    });
+    const code = `await fetch(id=1)`;
+    const first = await executeWithJournal(code);
+    expect(first.error?.message).toBe("charge failed after side effects");
+    expect(entries(first.journal)[0]).toMatchObject({
+      result: { Err: "charge failed after side effects" },
+      thrown: true,
+    });
+
+    calls = [];
+    const second = await executeWithJournal(code, { journal: first.journal });
+    // Replay halts the guest the same way, without calling the handler.
+    expect(second.error?.message).toBe("charge failed after side effects");
+    expect(second.replayedCallbacks).toBe(1);
+    expect(calls).toEqual([]);
+  });
+
   it("suspends, then resumes from the recorded journal", async () => {
     let approved = false;
     setCallbackHandler((name, argsJson) => {
@@ -154,7 +227,9 @@ print("after", ok)
     });
     expect(first.error).toBeInstanceOf(SuspendCallback);
     // The suspended call is not journaled; only the prefix before it is.
-    expect(first.journal.entries.map((e) => e.name)).toEqual(["fetch"]);
+    expect(entries(first.journal).map((e: { name: string }) => e.name)).toEqual(
+      ["fetch"],
+    );
     expect(calls).toEqual(["fetch", "approve"]);
 
     approved = true;
@@ -203,6 +278,6 @@ raise ValueError("boom")
     expect(outcome.result).toBeUndefined();
     expect(outcome.error?.message).toContain("boom");
     expect(outcome.suspended).toBeUndefined();
-    expect(outcome.journal.entries).toHaveLength(1);
+    expect(entries(outcome.journal)).toHaveLength(1);
   });
 });

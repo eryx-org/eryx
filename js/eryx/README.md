@@ -104,7 +104,7 @@ setCallbackHandler((name, argsJson) => {
 const sandbox = new Sandbox();
 const first = await sandbox.executeWithJournal(code);
 if (first.suspended) {
-  save(JSON.stringify(first.journal)); // resume later
+  save(first.journal); // a JSON string; store it as-is to resume later
 }
 
 // Later: completed callbacks replay from the journal; the rest run live.

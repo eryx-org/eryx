@@ -43,35 +43,6 @@ export interface ExecuteResult {
   resultError?: string;
 }
 
-/**
- * A single recorded callback invocation. Same JSON shape as the Rust
- * `CallbackJournalEntry`.
- */
-export interface CallbackJournalEntry {
-  /** Position in the invocation sequence (0-indexed, in dispatch order). */
-  index: number;
-  /** Callback name. */
-  name: string;
-  /** FNV-1a hash of `args_json` (informational; may be imprecise above 2^53). */
-  args_hash: number;
-  /** Canonical arguments JSON (object keys sorted). */
-  args_json: string;
-  /** The recorded success value, or the error message Python observed. */
-  result: { Ok: unknown } | { Err: string };
-}
-
-/**
- * The callbacks completed during one execution. Plain JSON: persist it with
- * `JSON.stringify` and pass it back via `executeWithJournal(code, { journal })`.
- * Same shape as the Rust `CallbackJournal`.
- */
-export interface CallbackJournal {
-  /** The script that produced this journal. */
-  code: string;
-  /** Recorded invocations, in dispatch order. */
-  entries: CallbackJournalEntry[];
-}
-
 /** The callback that suspended execution. */
 export interface SuspendedCallback {
   /** Name of the callback that suspended. */
@@ -84,8 +55,12 @@ export interface SuspendedCallback {
 
 /** Options for {@link Sandbox.executeWithJournal}. */
 export interface ExecuteWithJournalOptions {
-  /** A journal from a previous run whose results should be replayed. */
-  journal?: CallbackJournal;
+  /**
+   * The `journal` string from a previous run's outcome, whose results should be
+   * replayed. Pass it back unmodified (don't round-trip it through
+   * `JSON.parse`/`JSON.stringify`, which would lose number precision in results).
+   */
+  journal?: string;
 }
 
 /** The outcome of {@link Sandbox.executeWithJournal}. */
@@ -97,8 +72,13 @@ export interface ReplayOutcome {
    * halted it — or `undefined` on success. Check `suspended` first.
    */
   error?: Error;
-  /** Callbacks completed during this run. Always present, even on error. */
-  journal: CallbackJournal;
+  /**
+   * Callbacks completed during this run, serialized as JSON in the same shape as
+   * the Rust `CallbackJournal`
+   * (`{"code", "entries": [{"index", "name", "args_hash", "args_json", "result": {"Ok": value} | {"Err": message}}]}`).
+   * Always present, even on error. Store it as-is.
+   */
+  journal: string;
   /** How many callbacks were served from the supplied journal. */
   replayedCallbacks: number;
   /** Set if a callback threw `SuspendCallback`. */

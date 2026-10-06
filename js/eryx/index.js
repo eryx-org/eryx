@@ -144,8 +144,9 @@ export function setResultVariable(name) {
  * @property {ExecuteResult} [result] - The execution result, or undefined if it failed
  * @property {Error} [error] - Why execution failed (Python exception, or the
  *   SuspendCallback that halted it), or undefined on success
- * @property {Object} journal - Callbacks completed during this run, in the same
- *   JSON shape as the Rust `CallbackJournal`. Always present, even on error.
+ * @property {string} journal - Callbacks completed during this run, serialized
+ *   as JSON in the same shape as the Rust `CallbackJournal`. Always present, even
+ *   on error. Store it as-is and pass it back via `options.journal`.
  * @property {number} replayedCallbacks - How many callbacks were served from
  *   the supplied journal instead of running live
  * @property {{name: string, argsJson: string, reason: string}} [suspended] -
@@ -155,7 +156,7 @@ export function setResultVariable(name) {
 /**
  * Execute code while journaling callback results, replaying from `journal`.
  * @param {string} code
- * @param {{journal?: Object}} [options]
+ * @param {{journal?: string}} [options]
  * @returns {Promise<ReplayOutcome>}
  */
 async function _executeWithJournal(code, options) {
@@ -225,7 +226,7 @@ export class Sandbox {
    * Never throws for script failures: check `suspended`, then `error`.
    *
    * @param {string} code - Python source code to execute
-   * @param {{journal?: Object}} [options] - A journal from a previous run to replay
+   * @param {{journal?: string}} [options] - A journal from a previous run to replay
    * @returns {Promise<ReplayOutcome>}
    */
   async executeWithJournal(code, options) {
@@ -300,7 +301,7 @@ export async function execute(code) {
  * callback results. See {@link Sandbox#executeWithJournal}.
  *
  * @param {string} code - Python source code to execute
- * @param {{journal?: Object}} [options] - A journal from a previous run to replay
+ * @param {{journal?: string}} [options] - A journal from a previous run to replay
  * @returns {Promise<ReplayOutcome>}
  */
 export async function executeWithJournal(code, options) {
