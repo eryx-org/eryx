@@ -27,6 +27,14 @@ world sandbox {
     /// or an error message on failure.
     import invoke: async func(name: string, arguments-json: string) -> result<string, string>;
 
+    /// Complete after `duration-ns` nanoseconds.
+    ///
+    /// Backs the guest event loop's timers (`asyncio.sleep`, `wait_for`,
+    /// `asyncio.timeout`): each pending timer is one in-flight call, joined to
+    /// the loop's waitable set like `invoke`. The guest cancels the subtask
+    /// when the timer is cancelled or the execution ends.
+    import sleep: async func(duration-ns: u64);
+
     /// List all available callbacks for introspection.
     ///
     /// Python code can discover what callbacks are available:

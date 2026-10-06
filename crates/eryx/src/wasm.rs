@@ -761,6 +761,16 @@ impl<T> SandboxImportsWithStore<T> for HasSelf<ExecutorState> {
             }
         }
     }
+
+    /// Back an event-loop timer. The guest is suspended meanwhile, so it burns
+    /// no fuel; the execution timeout still applies because this future runs
+    /// inside the timed `run_concurrent`, and is dropped with it.
+    fn sleep(
+        _accessor: &Accessor<T, Self>,
+        duration_ns: u64,
+    ) -> impl ::core::future::Future<Output = ()> + Send {
+        tokio::time::sleep(Duration::from_nanos(duration_ns))
+    }
 }
 
 impl SandboxImports for ExecutorState {
@@ -2580,16 +2590,27 @@ impl PythonExecutor {
         // Wrap in tokio::time::timeout so that blocking WASI host calls (e.g. poll_oneoff
         // used by time.sleep) are cancelled when the future is dropped, not just CPU-bound
         // loops caught by epoch interruption.
+        //
+        // Also race the cancellation token: the epoch callback only observes it
+        // while guest code runs, so a guest suspended on a timer or callback
+        // would otherwise ignore cancellation until that completes.
         let mut async_timeout_elapsed = false;
+        let run = store
+            .run_concurrent(async |accessor| bindings.call_execute(accessor, code_owned).await);
+        let run = async {
+            let Some(token) = cancellation_token.as_ref() else {
+                return run.await;
+            };
+            tokio::select! {
+                result = run => result,
+                () = token.cancelled() => {
+                    was_cancelled.store(true, Ordering::Relaxed);
+                    Err(wasmtime::Error::msg("cancelled while suspended"))
+                }
+            }
+        };
         let wasmtime_result = if let Some(timeout) = execution_timeout {
-            match tokio::time::timeout(
-                timeout,
-                store.run_concurrent(async |accessor| {
-                    bindings.call_execute(accessor, code_owned).await
-                }),
-            )
-            .await
-            {
+            match tokio::time::timeout(timeout, run).await {
                 Ok(result) => result,
                 Err(_elapsed) => {
                     async_timeout_elapsed = true;
@@ -2597,16 +2618,16 @@ impl PythonExecutor {
                 }
             }
         } else {
-            store
-                .run_concurrent(async |accessor| bindings.call_execute(accessor, code_owned).await)
-                .await
+            run.await
         };
 
         // Classify errors using proper type matching. wasmtime::Error is anyhow::Error,
         // so we downcast to wasmtime::Trap for WASM-level traps (Interrupt, OutOfFuel).
         // The async_timeout_elapsed flag covers blocking WASI host calls (e.g. time.sleep).
         let wasmtime_result = wasmtime_result.map_err(|e| {
+            // `was_cancelled` is set only by an interrupt or the select above.
             if async_timeout_elapsed
+                || was_cancelled.load(Ordering::Relaxed)
                 || e.downcast_ref::<wasmtime::Trap>() == Some(&wasmtime::Trap::Interrupt)
             {
                 classify_epoch_interrupt(was_cancelled.load(Ordering::Relaxed), execution_timeout)

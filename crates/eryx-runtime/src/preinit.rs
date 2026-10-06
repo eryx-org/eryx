@@ -622,6 +622,12 @@ fn add_sandbox_stubs(linker: &mut Linker<PreInitCtx>) -> Result<()> {
         },
     )?;
 
+    // sleep: async func(duration-ns: u64). Pre-init schedules no timers.
+    linker.root().func_wrap_concurrent(
+        "sleep",
+        |_accessor: &Accessor<PreInitCtx>, (_duration_ns,): (u64,)| Box::pin(async move { Ok(()) }),
+    )?;
+
     // list-callbacks: func() -> list<callback-info>
     //
     // Answers with the declarations from `PreInitOptions::callbacks` so the

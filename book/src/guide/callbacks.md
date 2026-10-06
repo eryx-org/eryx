@@ -228,6 +228,22 @@ results = await asyncio.gather(
 user1, user2, posts = results
 ```
 
+### Timers
+
+`asyncio.sleep`, `asyncio.wait_for` and `asyncio.timeout` work inside the sandbox, so scripts can bound their own callbacks or back off between retries:
+
+```python,no_test
+# Inside the sandbox
+import asyncio
+
+try:
+    user = await asyncio.wait_for(fetch_user(id=1), timeout=2)
+except TimeoutError:
+    user = None
+```
+
+Each pending timer is a host-side sleep; the guest is suspended while it waits. Timers fire only when the event loop regains control, so blocking code (`time.sleep`, a CPU-bound loop) delays them rather than being interrupted. Timers still pending when an execution finishes are cancelled with it, and never extend the [execution timeout](resource-limits.md#execution-timeout).
+
 ## Introspection
 
 The sandbox can discover available callbacks at runtime:

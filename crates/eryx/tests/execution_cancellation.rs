@@ -326,3 +326,28 @@ async fn test_syntax_error_not_confused_with_cancellation() {
         Ok(_) => panic!("Expected error, got success"),
     }
 }
+
+/// Cancellation reaches a guest suspended on a timer: the epoch callback only
+/// observes the token while guest code runs, so the host races it too.
+#[tokio::test]
+async fn test_cancel_while_sleeping() {
+    let sandbox = sandbox_builder_with_short_timeout()
+        .build()
+        .expect("Failed to build sandbox");
+    let start = std::time::Instant::now();
+    let handle = sandbox.execute_cancellable("import asyncio\nawait asyncio.sleep(60)");
+    let cancel_handle = handle.cancellation_token();
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        cancel_handle.cancel();
+    });
+
+    let result = handle.wait().await;
+    assert!(matches!(result, Err(Error::Cancelled)), "{result:?}");
+    // Well before the 3s execution timeout would have fired.
+    assert!(
+        start.elapsed() < Duration::from_secs(2),
+        "{:?}",
+        start.elapsed()
+    );
+}

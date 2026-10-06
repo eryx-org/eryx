@@ -3,6 +3,7 @@
  *
  * These provide the host-side implementations of the sandbox's callback imports:
  * - invoke: call a registered callback by name with JSON arguments
+ * - sleep: back the sandbox event loop's timers (asyncio.sleep, wait_for)
  * - listCallbacks: list all registered callbacks
  * - getExecutionOptions: return per-execution behavior options
  * - reportTrace: receive trace events from the Python runtime
@@ -88,6 +89,24 @@ export function invoke(name, argumentsJson) {
     );
   }
   return _callbackHandler(name, argumentsJson);
+}
+
+/** Longest delay setTimeout accepts; larger values fire immediately. */
+const MAX_TIMEOUT_MS = 2 ** 31 - 1;
+
+/**
+ * Complete after the given number of nanoseconds.
+ * This backs the sandbox event loop's timers (asyncio.sleep, wait_for, ...).
+ *
+ * @param {bigint} durationNs - Delay in nanoseconds
+ * @returns {Promise<void>}
+ */
+export function sleep(durationNs) {
+  // Round up so a timer never fires early.
+  const ms = Number((BigInt(durationNs) + 999_999n) / 1_000_000n);
+  return new Promise((resolve) =>
+    setTimeout(resolve, Math.min(ms, MAX_TIMEOUT_MS)),
+  );
 }
 
 /**

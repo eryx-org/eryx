@@ -132,6 +132,7 @@ const JCO_MAP: [string, string][] = [
   ["eryx:net/tcp", "./shims/net.js#tcp"],
   ["eryx:net/tls", "./shims/net.js#tls"],
   ["invoke", "./shims/callbacks.js#invoke"],
+  ["sleep", "./shims/callbacks.js#sleep"],
   ["list-callbacks", "./shims/callbacks.js#listCallbacks"],
   ["get-execution-options", "./shims/callbacks.js#getExecutionOptions"],
   ["report-trace", "./shims/callbacks.js#reportTrace"],
@@ -168,7 +169,7 @@ async function transpileComponent(
     asyncMode: {
       tag: "jspi",
       val: {
-        imports: ["invoke"],
+        imports: ["invoke", "sleep"],
         exports: [
           "execute",
           "snapshot-state",
