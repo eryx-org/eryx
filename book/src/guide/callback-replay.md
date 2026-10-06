@@ -4,7 +4,7 @@ When an LLM iterates on a Python script that drives expensive [callbacks](./call
 
 **Suspension** is the companion feature: a callback can return [`CallbackError::Suspend`] to halt execution ("I can't answer yet — retry later"). Eryx records what was waiting on, stops the guest immediately, and the recorded journal lets you resume from where you left off once the dependency is ready.
 
-> **Availability.** This guide covers the **Rust library API** and the **Python bindings** (`Sandbox` only; journals on `SandboxFactory`, `Session` and `SandboxPool`, and per-execute journals, are tracked in [issue #521](https://github.com/eryx-org/eryx/issues/521)). The [gRPC server](./grpc-server.md) also implements both features — including HMAC-signed journals — over its `callback_journal` field and `CALLBACK_OUTCOME_SUSPEND` outcome; see the [gRPC Server](./grpc-server.md#callback-replay) guide for the wire-level details. JavaScript bindings are tracked in [issue #241](https://github.com/eryx-org/eryx/issues/241).
+> **Availability.** This guide covers the **Rust library API**, the **Python bindings** (`Sandbox` only; journals on `SandboxFactory`, `Session` and `SandboxPool`, and per-execute journals, are tracked in [issue #521](https://github.com/eryx-org/eryx/issues/521)) and the **JavaScript bindings** (`@bsull/eryx`, which implement the same matching, divergence guard and suspension semantics in the JS host). The [gRPC server](./grpc-server.md) also implements both features — including HMAC-signed journals — over its `callback_journal` field and `CALLBACK_OUTCOME_SUSPEND` outcome; see the [gRPC Server](./grpc-server.md#callback-replay) guide for the wire-level details.
 
 ## How replay works
 
@@ -27,7 +27,7 @@ A caller that signs journals and binds the signature to the exact script (as the
 
 ## Recording a journal
 
-Use [`Sandbox::execute_with_journal`] instead of `execute`. It returns a [`ReplayOutcome`] whose `journal` field holds every callback that completed — even if the script itself errored partway through.
+Use [`Sandbox::execute_with_journal`] instead of `execute` (`executeWithJournal` in JavaScript). It returns a [`ReplayOutcome`] whose `journal` field holds every callback that completed — even if the script itself errored partway through.
 
 <!-- langtabs-start -->
 
@@ -78,6 +78,20 @@ saved = json.dumps(outcome.journal)
 print(f"recorded {len(outcome.journal['entries'])} callbacks")
 ```
 
+### JavaScript
+
+```javascript
+import { Sandbox } from "@bsull/eryx";
+
+const sandbox = new Sandbox();
+
+// Never rejects for execution failures: check outcome.error instead.
+const outcome = await sandbox.executeWithJournal(code);
+
+// `journal` is a JSON string, always populated, even on error. Store it as-is.
+await db.save("journal", outcome.journal);
+```
+
 <!-- langtabs-end -->
 
 [`ReplayOutcome`] carries:
@@ -93,9 +107,16 @@ The [`CallbackJournal`] derives `serde::Serialize`/`Deserialize`, so you can per
 
 In Python, `ReplayOutcome` has `result` (an `ExecuteResult`, or `None` on failure), `error` (the exception `execute()` would have raised, or `None`), `journal` (a dict; treat it as opaque), `replayed_callbacks`, and `suspended` (a `SuspendedCallback` or `None`).
 
+In JavaScript, the outcome has the same fields in camelCase: `result` (an `ExecuteResult`, or `undefined`), `error`, `journal`, `replayedCallbacks` and `suspended` (`{ name, argsJson, reason }`). `journal` is a JSON string in the serde format of [`CallbackJournal`], so journals are portable between hosts. Pass it back unmodified: results are stored as their exact JSON text, which a `JSON.parse`/`JSON.stringify` round trip could alter (`1.0` would become `1`, and large integers would lose precision). A JavaScript handler's outcome is journaled as follows:
+
+- A returned JSON string becomes `{"Ok": value}`, byte-for-byte.
+- A Python-visible error (throwing a non-`Error` value, such as a string) becomes `{"Err": message}` and replays as the same Python exception.
+- A thrown `Error` halts the guest instead of reaching Python. It is recorded as `{"Err": message}` with `"thrown": true`, and replay throws it again, halting at the same point instead of re-running the call. (Remove that entry from the journal to retry the call.)
+- Only `SuspendCallback` is not journaled (see [Suspension](#suspension)).
+
 ## Replaying a journal
 
-Supply the previously-recorded journal with [`with_replay_journal`] (`replay_journal=` in Python) when building the sandbox, then call `execute_with_journal` again with the same code:
+Supply the previously-recorded journal with [`with_replay_journal`] (`replay_journal=` in Python) when building the sandbox — in JavaScript, pass it to `executeWithJournal` as `options.journal` — then execute the same code again:
 
 <!-- langtabs-start -->
 
@@ -141,9 +162,21 @@ outcome = sandbox.execute_with_journal(code)
 print(f"replayed {outcome.replayed_callbacks} callbacks")
 ```
 
+### JavaScript
+
+```javascript
+const outcome = await sandbox.executeWithJournal(code, {
+  journal: await db.load("journal"), // the string recorded earlier
+});
+
+// Callbacks that matched the journal returned cached results instead of
+// running live.
+console.log(`replayed ${outcome.replayedCallbacks} callbacks`);
+```
+
 <!-- langtabs-end -->
 
-`with_replay_journal` (`replay_journal=`) only affects `execute_with_journal`; plain [`Sandbox::execute`] ignores it. Each call to `execute_with_journal` uses fresh replay state, so the same sandbox can be executed repeatedly without the journal cursor leaking between runs.
+`with_replay_journal` (`replay_journal=`) only affects `execute_with_journal`; plain [`Sandbox::execute`] ignores it (likewise, JavaScript's `execute` never journals or replays). Each call to `execute_with_journal` uses fresh replay state, so the same sandbox can be executed repeatedly without the journal cursor leaking between runs.
 
 ### Concurrent identity
 
@@ -151,7 +184,7 @@ The replay identity is exactly `(callback name, canonical args)`. FIFO ordering 
 
 ## Suspension
 
-A callback can defer its work by returning [`CallbackError::Suspend`] (raising `eryx.SuspendCallback` in Python, from a sync or async callback) with an opaque reason string:
+A callback can defer its work by returning [`CallbackError::Suspend`] (raising `eryx.SuspendCallback` in Python, from a sync or async callback; throwing `SuspendCallback` in JavaScript) with an opaque reason string:
 
 <!-- langtabs-start -->
 
@@ -187,16 +220,35 @@ def request_approval(action: str):
     return {"approved": action}
 ```
 
+### JavaScript
+
+```javascript
+import { SuspendCallback, setCallbackHandler } from "@bsull/eryx";
+
+const approved = new Set(); // stand-in for your approval store
+
+setCallbackHandler((name, argsJson) => {
+  if (name === "request_approval") {
+    const { action } = JSON.parse(argsJson);
+    if (!approved.has(action)) {
+      throw new SuspendCallback(`awaiting approval for ${action}`);
+    }
+    return JSON.stringify({ approved: action });
+  }
+  // ... other callbacks ...
+});
+```
+
 <!-- langtabs-end -->
 
 When a callback suspends, eryx:
 
 1. Records a [`SuspendedCallback`] (callback name, arguments, reason) — but does **not** journal the call, so it re-runs live on resume.
-2. Poisons the WASM fuel to **halt the guest synchronously**, so no further Python runs, no further callbacks dispatch, and no I/O happens after the suspension point.
+2. **Halts the guest synchronously**, so no further Python runs, no further callbacks dispatch, and no I/O happens after the suspension point. The Rust host poisons the WASM fuel; in JavaScript the thrown `SuspendCallback` propagates out of the host import, which rejects the execution immediately (Python cannot catch it).
 
-Two layers guarantee nothing runs after a suspension: a synchronous gate rejects any callback dispatched after the first suspension (covering later `gather` siblings), and the fuel-poison halt traps the guest before it can do anything else.
+Two layers guarantee nothing runs after a suspension: a synchronous gate rejects any callback dispatched after the first suspension (covering later `gather` siblings), and the halt stops the guest before it can do anything else.
 
-Because the guest is halted, `outcome.result` will be an `Err` (in Python, `result` is `None` and `error` is an `ExecutionError`) when a suspension occurs — **branch on `suspended` first** and treat that error as the expected consequence of the suspend rather than a failure:
+Because the guest is halted, `outcome.result` will be an `Err` (in Python, `result` is `None` and `error` is an `ExecutionError`; in JavaScript, `result` is `undefined` and `error` is the `SuspendCallback`) when a suspension occurs — **branch on `suspended` first** and treat that error as the expected consequence of the suspend rather than a failure:
 
 <!-- langtabs-start -->
 
@@ -236,11 +288,27 @@ else:
     print(outcome.result.stdout_text)
 ```
 
+### JavaScript
+
+```javascript
+const outcome = await sandbox.executeWithJournal(code);
+
+if (outcome.suspended) {
+  // Persist outcome.journal, wait for the dependency named by
+  // suspended.reason / suspended.name / suspended.argsJson, then resume.
+  console.log("suspended:", outcome.suspended.reason);
+} else if (outcome.error) {
+  throw outcome.error;
+} else {
+  console.log(outcome.result.stdout);
+}
+```
+
 <!-- langtabs-end -->
 
 ### Resuming
 
-To resume, rebuild the sandbox with the journal from the suspended run via `with_replay_journal` (`eryx.Sandbox(..., replay_journal=outcome.journal)` in Python) and execute the same code again. The recorded prefix replays from cache; the previously-suspended callback re-runs live (it was never journaled) and, assuming its dependency is now ready, returns a real value so the script continues past the suspension point.
+To resume, rebuild the sandbox with the journal from the suspended run via `with_replay_journal` (`eryx.Sandbox(..., replay_journal=outcome.journal)` in Python, `executeWithJournal(code, { journal: outcome.journal })` in JavaScript) and execute the same code again. The recorded prefix replays from cache; the previously-suspended callback re-runs live (it was never journaled) and, assuming its dependency is now ready, returns a real value so the script continues past the suspension point.
 
 ### Live re-runs and idempotency
 
@@ -250,7 +318,9 @@ Replay never replays a stale result, but it also does not guarantee that a callb
 - the previously-suspended call, on resume (it was never journaled);
 - any call that was **in flight** when the run halted (a suspension, timeout or crash) and so never completed into the journal, and any call started after the suspending call (the journal is truncated at the suspension point) — for example a `gather` sibling of the suspending call.
 
-Callbacks with side effects (charging a card, sending a message, writing a record) must therefore be **idempotent**, or deduplicate on their side — for example with an idempotency key passed in the callback args.
+Callbacks with side effects (charging a card, sending a message, writing a record) must therefore be **idempotent**, or deduplicate on their side — for example with an idempotency key passed in the callback args. Because a suspending callback is invoked again on resume, it should only check readiness before suspending, and perform its side effects only on the call that returns a value.
+
+Every call that *completed* is journaled, including failures: an error result replays as the same error instead of re-running the callback. In JavaScript this includes a handler that threw an `Error` (which halts the run): replay halts at the same point without calling the handler again.
 
 ## Determinism and limitations
 
@@ -277,6 +347,7 @@ The core `eryx` crate is agnostic to signing and trusts whatever journal it rece
 - [Callbacks](./callbacks.md) — defining the callbacks that replay records.
 - [Rust API Reference](../api/rust.md) — full type documentation for [`ReplayOutcome`], [`CallbackJournal`], and [`SuspendedCallback`].
 - [Python API Reference](../api/python.md#callback-replay--suspension) — `Sandbox.execute_with_journal`, `ReplayOutcome`, `SuspendedCallback`, `SuspendCallback`.
+- [JavaScript API Reference](../api/javascript.md) — `executeWithJournal`, `ReplayOutcome`, `SuspendCallback`.
 
 [`Sandbox::execute`]: https://docs.eryx.run/latest/api/rust/eryx/struct.Sandbox.html#method.execute
 [`Sandbox::execute_with_journal`]: https://docs.eryx.run/latest/api/rust/eryx/struct.Sandbox.html#method.execute_with_journal

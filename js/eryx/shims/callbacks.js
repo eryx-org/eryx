@@ -74,6 +74,149 @@ export function setOutputHandler(handler) {
 }
 
 /**
+ * Thrown by a callback handler to suspend execution ("retry later").
+ *
+ * The guest halts immediately: no further Python runs and no further callbacks
+ * dispatch. Under executeWithJournal() the suspension is surfaced as
+ * `outcome.suspended` and the call is not journaled, so it re-runs live when the
+ * recorded journal is replayed. Under plain execute() it rejects like any error.
+ */
+export class SuspendCallback extends Error {
+  /** @param {string} reason - Opaque reason, surfaced to the caller */
+  constructor(reason) {
+    super(reason);
+    this.name = "SuspendCallback";
+    this.reason = reason;
+  }
+}
+
+/**
+ * Replay state for the current executeWithJournal() run, or null when not
+ * journaling. Mirrors the Rust `ReplayState` (crates/eryx/src/replay.rs): cached
+ * results bucketed by (name, canonical args) as a FIFO multiset, a sticky
+ * divergence guard, and a gate that rejects every call after a suspension.
+ * @type {{cached: Map<string, Array<{Ok: *} | {Err: string}>>, liveMode: boolean, nextSeq: number, entries: Array<Object|undefined>, suspended: Object|null, suspendSeq: number|null, replayedCount: number}|null}
+ */
+let _replay = null;
+
+/**
+ * Start journaling callbacks, replaying results from `journal` if given.
+ * @internal Used by executeWithJournal().
+ * @param {{entries: Array<{name: string, args_json: string, result: *}>}} [journal]
+ */
+export function _beginReplay(journal) {
+  const cached = new Map();
+  for (const entry of journal?.entries ?? []) {
+    const key = `${entry.name}\0${entry.args_json}`;
+    if (!cached.has(key)) cached.set(key, []);
+    cached.get(key).push(entry.result);
+  }
+  _replay = {
+    cached,
+    liveMode: false,
+    nextSeq: 0,
+    entries: [],
+    suspended: null,
+    suspendSeq: null,
+    replayedCount: 0,
+  };
+}
+
+/**
+ * Stop journaling and return what was recorded.
+ *
+ * The journal keeps entries in dispatch order and, if a callback suspended,
+ * drops everything dispatched at or after the suspending call so it is a clean
+ * prefix ending before the suspension point.
+ * @internal Used by executeWithJournal().
+ * @param {string} code - The script that produced the journal
+ */
+export function _endReplay(code) {
+  const state = _replay;
+  _replay = null;
+  const entries = state.entries.filter(
+    (entry) =>
+      entry !== undefined &&
+      (state.suspendSeq === null || entry.index < state.suspendSeq),
+  );
+  return {
+    journal: { code, entries },
+    replayedCallbacks: state.replayedCount,
+    suspended: state.suspended ?? undefined,
+  };
+}
+
+/** Rebuild `value` with object keys sorted recursively. */
+function _canonicalize(value) {
+  if (Array.isArray(value)) return value.map(_canonicalize);
+  if (value !== null && typeof value === "object") {
+    return Object.fromEntries(
+      Object.keys(value)
+        .sort()
+        .map((key) => [key, _canonicalize(value[key])]),
+    );
+  }
+  return value;
+}
+
+/** 64-bit FNV-1a, matching the Rust journal's `args_hash`. */
+function _fnv1a64(text) {
+  let hash = 0xcbf29ce484222325n;
+  for (const byte of new TextEncoder().encode(text)) {
+    hash = BigInt.asUintN(64, (hash ^ BigInt(byte)) * 0x100000001b3n);
+  }
+  // ponytail: lossy above 2^53; the hash is informational only (matching uses
+  // name + args_json, as in Rust), and a number keeps the journal JSON-safe.
+  return Number(hash);
+}
+
+/**
+ * Run a live callback, recording its outcome into `state` at `seq`.
+ *
+ * A string result is journaled as `{Ok: value}`, an `{tag: "err"}` result (or a
+ * thrown non-Error) as `{Err: message}`. A SuspendCallback records the
+ * suspension (not journaled) and is rethrown, which halts the guest. Any other
+ * thrown Error also halts the guest and is not journaled.
+ */
+async function _invokeLive(state, seq, name, argsJson, argumentsJson) {
+  const record = (result) => {
+    state.entries[seq] = {
+      index: seq,
+      name,
+      args_hash: _fnv1a64(argsJson),
+      args_json: argsJson,
+      result,
+    };
+  };
+  let ret;
+  try {
+    ret = await _callbackHandler(name, argumentsJson);
+  } catch (e) {
+    if (e instanceof SuspendCallback) {
+      if (state.suspended === null) {
+        state.suspended = { name, argsJson, reason: e.reason };
+        state.suspendSeq = seq;
+      }
+    } else if (!(e instanceof Error)) {
+      record({ Err: e });
+    }
+    throw e;
+  }
+  if (ret !== null && typeof ret === "object" && ret.tag === "err") {
+    record({ Err: ret.val });
+  } else {
+    const json = ret?.tag === "ok" ? ret.val : ret;
+    try {
+      record({ Ok: JSON.parse(json) });
+    } catch {
+      // Not valid JSON: not representable in the journal, so leave it out and
+      // let the call re-run live on replay.
+    }
+  }
+  return ret;
+}
+
+/**
  * Invoke a callback by name with JSON arguments.
  * This is called by the sandbox runtime when Python code calls invoke().
  *
@@ -87,7 +230,39 @@ export function invoke(name, argumentsJson) {
       `No callback handler registered. Call setCallbackHandler() before executing code that uses callbacks. Attempted to invoke: ${name}`,
     );
   }
-  return _callbackHandler(name, argumentsJson);
+  const state = _replay;
+  if (!state) {
+    return _callbackHandler(name, argumentsJson);
+  }
+
+  // Decide synchronously, before any await, exactly as the Rust ReplayCallback.
+  if (state.suspended !== null) {
+    throw new SuspendCallback(
+      "execution already suspended by a previous callback",
+    );
+  }
+  const argsJson = JSON.stringify(_canonicalize(JSON.parse(argumentsJson)));
+  const seq = state.nextSeq++;
+  if (!state.liveMode) {
+    const result = state.cached.get(`${name}\0${argsJson}`)?.shift();
+    if (result !== undefined) {
+      state.replayedCount++;
+      state.entries[seq] = {
+        index: seq,
+        name,
+        args_hash: _fnv1a64(argsJson),
+        args_json: argsJson,
+        result,
+      };
+      return "Err" in result
+        ? { tag: "err", val: result.Err }
+        : JSON.stringify(result.Ok);
+    }
+    // First miss: the run has diverged from the journal, so this call and every
+    // later one runs live (prevents replaying a now-stale cached result).
+    state.liveMode = true;
+  }
+  return _invokeLive(state, seq, name, argsJson, argumentsJson);
 }
 
 /**

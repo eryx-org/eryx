@@ -28,12 +28,7 @@ describe("callbacks", () => {
     });
   });
 
-  // Skipped: jco 1.16.1 has bugs in async import lowering that prevent callbacks from working.
-  // The issues are: (1) moduleIdx is null for all lowered imports so GlobalComponentAsyncLowers
-  // lookup fails, (2) _lowerImport's deferred call lacks WebAssembly.promising wrapper,
-  // (3) driver loop result unpacking expects a number but gets an object.
-  // See ~/jco-1.16.1-bugs.md for details.
-  it.skip("invokes a registered callback", async () => {
+  it("invokes a registered callback", async () => {
     setCallbackHandler((name, argsJson) => {
       if (name === "get_time") {
         return JSON.stringify({ timestamp: 1234567890 });
@@ -52,7 +47,7 @@ print(result["timestamp"])
     expect(result.stdout).toBe("1234567890\n");
   });
 
-  it.skip("lists available callbacks", async () => {
+  it("lists available callbacks", async () => {
     setCallbacks([
       { name: "alpha", description: "First callback" },
       { name: "beta", description: "Second callback" },
