@@ -129,7 +129,7 @@ function compareCodePoints(a, b) {
 }
 
 const TOKEN =
-  /\s*(?:("(?:[^"\\]|\\.)*")|(-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)|([{}[\]:,])|(true|false|null))/y;
+  /\s*(?:("[^"\\]*(?:\\.[^"\\]*)*")|(-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)|([{}[\]:,])|(true|false|null))/y;
 
 /**
  * A parsed JSON value that keeps its source text.
