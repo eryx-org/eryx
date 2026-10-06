@@ -14,7 +14,8 @@
  *
  * ponytail: pinned to serde_json's current number parsing/formatting; if a
  * serde_json bump changes either, update this and re-run the differential check
- * against a real serde_json build.
+ * against a real serde_json build. #524 removes this port by keying every host
+ * on the guest's raw canonical args JSON instead.
  */
 
 const U64_MAX = 2n ** 64n - 1n;
