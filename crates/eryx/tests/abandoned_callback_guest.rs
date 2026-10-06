@@ -7,6 +7,8 @@
 
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 
 use eryx::{CallbackError, Error, InProcessSession, JsonSchema, Sandbox, Session, TypedCallback};
@@ -19,7 +21,9 @@ struct SleepArgs {
     ms: u64,
 }
 
-struct Slow;
+/// Counts completed host runs, so tests can tell a callback ran to the end.
+#[derive(Clone, Default)]
+struct Slow(Arc<AtomicU32>);
 
 impl TypedCallback for Slow {
     type Args = SleepArgs;
@@ -35,6 +39,7 @@ impl TypedCallback for Slow {
     ) -> Pin<Box<dyn Future<Output = Result<Value, CallbackError>> + Send + '_>> {
         Box::pin(async move {
             tokio::time::sleep(Duration::from_millis(args.ms)).await;
+            self.0.fetch_add(1, Ordering::SeqCst);
             Ok(json!({"slept": args.ms}))
         })
     }
@@ -43,7 +48,7 @@ impl TypedCallback for Slow {
 fn sandbox() -> Sandbox {
     Sandbox::builder()
         .with_embedded_runtime()
-        .with_callback(Slow)
+        .with_callback(Slow::default())
         .build()
         .unwrap()
 }
@@ -131,5 +136,53 @@ async fn session_usable_after_abandoned_callbacks() {
             .unwrap()
             .unwrap();
         assert_eq!(next.stdout_text(), "{'slept': 1}\n");
+    }
+}
+
+/// Cancelling the guest's wait must not cancel the callback itself: it may be
+/// side-effecting, so it still runs to completion on the host and is journaled,
+/// and a replay serves it from the journal instead of running it again.
+#[tokio::test]
+async fn abandoned_callbacks_complete_and_are_journaled() {
+    for code in [NEVER_AWAITED, CANCELLED] {
+        let slow = Slow::default();
+        let build = || {
+            Sandbox::builder()
+                .with_embedded_runtime()
+                .with_callback(slow.clone())
+        };
+
+        let first = tokio::time::timeout(HANG, build().build().unwrap().execute_with_journal(code))
+            .await
+            .unwrap();
+        first.result.unwrap();
+        let runs = slow.0.load(Ordering::SeqCst);
+        assert!(
+            first
+                .journal
+                .entries
+                .iter()
+                .any(|e| e.name == "slow" && e.result == Ok(json!({"slept": 300}))),
+            "abandoned callback missing from journal: {:?}",
+            first.journal.entries
+        );
+
+        let replay = build()
+            .with_replay_journal(first.journal.clone())
+            .build()
+            .unwrap();
+        let second = tokio::time::timeout(HANG, replay.execute_with_journal(code))
+            .await
+            .unwrap();
+        second.result.unwrap();
+        assert_eq!(
+            slow.0.load(Ordering::SeqCst),
+            runs,
+            "replay re-ran a callback"
+        );
+        assert_eq!(
+            second.replayed_callbacks as usize,
+            first.journal.entries.len()
+        );
     }
 }
