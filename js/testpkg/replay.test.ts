@@ -131,6 +131,17 @@ print(a["v"] + b["v"])
     ).toEqual([3, 2]);
   });
 
+  it("returns the error and journal when the script fails", async () => {
+    const outcome = await executeWithJournal(`
+await fetch(id=1)
+raise ValueError("boom")
+`);
+    expect(outcome.result).toBeUndefined();
+    expect(outcome.error?.message).toContain("boom");
+    expect(outcome.suspended).toBeUndefined();
+    expect(entries(outcome.journal)).toHaveLength(1);
+  });
+
   it("canonicalizes args byte-identically to serde_json", async () => {
     const outcome = await executeWithJournal(
       `await fetch(id=1, b=1.0, a=10**20, c=1e16, d=-0.0, e=0.1, f=[2.50, -7], g="é😀")`,
@@ -267,17 +278,5 @@ await fetch(id=1)
     calls = [];
     await execute(CODE);
     expect(calls).toHaveLength(2);
-  });
-  // Kept last: after a script raises, the guest event loop re-raises that
-  // exception on the next callback-awaiting execution of the shared instance.
-  it("returns the error and journal when the script fails", async () => {
-    const outcome = await executeWithJournal(`
-await fetch(id=1)
-raise ValueError("boom")
-`);
-    expect(outcome.result).toBeUndefined();
-    expect(outcome.error?.message).toContain("boom");
-    expect(outcome.suspended).toBeUndefined();
-    expect(entries(outcome.journal)).toHaveLength(1);
   });
 });
