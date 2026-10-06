@@ -33,7 +33,7 @@ Use [`Sandbox::execute_with_journal`] instead of `execute`. It returns a [`Repla
 
 ### Rust
 
-```rust,ignore
+```rs
 use eryx::Sandbox;
 
 let sandbox = Sandbox::embedded()
@@ -53,6 +53,17 @@ println!("recorded {} callbacks", journal.len());
 ```python
 import json
 import eryx
+
+def fetch_user(id: int):
+    return {"id": id, "name": "Ada"}
+
+def charge_card(user_id: int, cents: int):
+    return {"charged": cents}
+
+code = """
+user = await fetch_user(id=1)
+await charge_card(user_id=user["id"], cents=500)
+"""
 
 sandbox = eryx.Sandbox(callbacks=[
     {"name": "fetch_user", "fn": fetch_user},
@@ -90,7 +101,7 @@ Supply the previously-recorded journal with [`with_replay_journal`] (`replay_jou
 
 ### Rust
 
-```rust,ignore
+```rs
 use eryx::Sandbox;
 
 let sandbox = Sandbox::embedded()
@@ -109,9 +120,18 @@ println!("replayed {} callbacks", outcome.replayed_callbacks);
 ### Python
 
 ```python
+import eryx
+
+def fetch_user(id: int):
+    return {"id": id, "name": "Ada"}
+
+callbacks = [{"name": "fetch_user", "fn": fetch_user}]
+code = "user = await fetch_user(id=1)"
+previous = eryx.Sandbox(callbacks=callbacks).execute_with_journal(code).journal
+
 sandbox = eryx.Sandbox(
     callbacks=callbacks,
-    replay_journal=json.loads(saved),  # results recorded earlier
+    replay_journal=previous,  # results recorded earlier
 )
 
 outcome = sandbox.execute_with_journal(code)
@@ -137,7 +157,7 @@ A callback can defer its work by returning [`CallbackError::Suspend`] (raising `
 
 ### Rust
 
-```rust,ignore
+```rs
 use eryx::{callback, CallbackError};
 use serde_json::Value;
 
@@ -158,12 +178,13 @@ async fn request_approval(action: String) -> Result<Value, CallbackError> {
 ```python
 import eryx
 
+APPROVED: set[str] = set()  # stand-in for your approval store
+
 def request_approval(action: str):
     """Requests human approval for an action."""
-    status = approval_status(action)
-    if status.pending:
+    if action not in APPROVED:
         raise eryx.SuspendCallback(f"awaiting approval for {action}")
-    return status.value
+    return {"approved": action}
 ```
 
 <!-- langtabs-end -->
@@ -181,7 +202,7 @@ Because the guest is halted, `outcome.result` will be an `Err` (in Python, `resu
 
 ### Rust
 
-```rust,ignore
+```rs
 let outcome = sandbox.execute_with_journal(code).await;
 
 if let Some(suspended) = &outcome.suspended {
@@ -197,16 +218,22 @@ let result = outcome.result?; // only reached if not suspended
 ### Python
 
 ```python
-outcome = sandbox.execute_with_journal(code)
+import eryx
+
+def request_approval(action: str):
+    raise eryx.SuspendCallback(f"awaiting approval for {action}")
+
+sandbox = eryx.Sandbox(callbacks=[{"name": "request_approval", "fn": request_approval}])
+outcome = sandbox.execute_with_journal('await request_approval(action="deploy")')
 
 if outcome.suspended:
     # Persist outcome.journal, wait for the dependency named by
     # suspended.reason / suspended.name / suspended.args_json, then resume.
-    save_for_later(outcome.journal, outcome.suspended)
+    print("suspended:", outcome.suspended.reason)
 elif outcome.error:
     raise outcome.error
 else:
-    result = outcome.result
+    print(outcome.result.stdout_text)
 ```
 
 <!-- langtabs-end -->
