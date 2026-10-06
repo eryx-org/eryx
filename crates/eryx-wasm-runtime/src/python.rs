@@ -1089,7 +1089,10 @@ class _EryxLoop(asyncio.AbstractEventLoop):
                 if not h._cancelled:
                     h._run()
             if self.exception is not None:
-                raise self.exception
+                # Clear before raising: the loop outlives the execution, and a
+                # retained exception would be re-raised by every later poll.
+                exc, self.exception = self.exception, None
+                raise exc
             if not handles and not state.handles:
                 return
 
@@ -1156,6 +1159,9 @@ async def _return_result(coroutine: Any) -> None:
 
 def run_async(coro) -> int:
     """Run a coroutine, return callback code (EXIT or WAIT|waitable_set<<4)."""
+    # Drop anything reported via call_exception_handler outside a poll (e.g. a
+    # never-retrieved task exception collected after a previous execution).
+    _loop.exception = None
     ctx = Context()
     state = _AsyncState(None, {}, [], 1)
     ctx.run(_set_async_state, state)

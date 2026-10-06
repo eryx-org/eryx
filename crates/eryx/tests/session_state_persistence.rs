@@ -17,14 +17,17 @@
 //! cargo nextest run --workspace --features precompiled
 //! ```
 
+use std::collections::HashMap;
 use std::future::Future;
 #[cfg(not(feature = "embedded"))]
 use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::{Arc, OnceLock};
 
+use eryx::callback_handler::run_callback_handler;
 use eryx::{
-    Callback, CallbackError, PythonExecutor, PythonStateSnapshot, SessionExecutor, TypedCallback,
+    Callback, CallbackError, PythonExecutor, PythonStateSnapshot, ResourceLimits, SessionExecutor,
+    TypedCallback,
 };
 use serde_json::{Value, json};
 
@@ -763,4 +766,59 @@ async fn test_result_discarded_on_error_does_not_leak() {
         "stale result leaked across an erroring execution: {:?}",
         output.result
     );
+}
+
+/// An exception raised by one async execution must not be re-raised by later
+/// async executions of the same persistent session. The guest event loop used
+/// to keep the exception around forever, so every later run that awaited a
+/// callback failed with the stale error.
+#[tokio::test]
+async fn test_async_exception_does_not_leak_into_later_executions() {
+    let callbacks: Vec<Arc<dyn Callback>> = vec![Arc::new(SessionCallback)];
+    let mut session = SessionExecutor::new(get_shared_executor(), &callbacks)
+        .await
+        .expect("Failed to create session");
+
+    async fn run(
+        session: &mut SessionExecutor,
+        callbacks: &[Arc<dyn Callback>],
+        code: &str,
+    ) -> Result<Vec<u8>, eryx::Error> {
+        let (callback_tx, callback_rx) = tokio::sync::mpsc::channel(4);
+        let callbacks_map = callbacks
+            .iter()
+            .map(|cb| (cb.name().to_string(), Arc::clone(cb)))
+            .collect();
+        let handler = tokio::spawn(run_callback_handler(
+            callback_rx,
+            Arc::new(callbacks_map),
+            ResourceLimits::unlimited(),
+            Arc::new(HashMap::new()),
+        ));
+        let output = session
+            .execute(code)
+            .with_callbacks(callbacks, callback_tx)
+            .run()
+            .await;
+        handler.await.unwrap();
+        output.map(|o| o.stdout)
+    }
+
+    let err = run(
+        &mut session,
+        &callbacks,
+        "await session_callback()\nraise ValueError('stale')",
+    )
+    .await;
+    assert!(err.is_err(), "expected the erroring run to fail: {err:?}");
+
+    let stdout = run(&mut session, &callbacks, "print('sync ok')")
+        .await
+        .unwrap_or_else(|e| panic!("Failed sync execute after error: {e}"));
+    assert_eq!(stdout, b"sync ok\n");
+
+    let stdout = run(&mut session, &callbacks, "print(await session_callback())")
+        .await
+        .unwrap_or_else(|e| panic!("stale exception re-raised by later async execute: {e}"));
+    assert_eq!(stdout, b"{'ok': True}\n");
 }
