@@ -64,6 +64,12 @@ unsafe extern "C" {
     /// Drop a completed subtask to release resources.
     #[link_name = "[subtask-drop]"]
     pub fn subtask_drop(task: u32);
+
+    /// Cancel an in-flight subtask. Synchronous: blocks until the callee has
+    /// stopped and returns its terminal status. The subtask must not be in a
+    /// waitable set.
+    #[link_name = "[subtask-cancel]"]
+    pub fn subtask_cancel(task: u32) -> u32;
 }
 
 /// Our call context - holds a stack for passing values between wit-dylib and our code.
@@ -634,6 +640,24 @@ unsafe impl Sync for PendingImportState {}
 std::thread_local! {
     static PENDING_IMPORTS: std::cell::RefCell<std::collections::HashMap<u32, PendingImportState>> =
         std::cell::RefCell::new(std::collections::HashMap::new());
+}
+
+/// Cancel a pending async import (see [`subtask_cancel`]) and discard its
+/// pending state. Returns the subtask's terminal status.
+pub(crate) fn cancel_pending_import(subtask: u32) -> u32 {
+    /// The host finished before the cancel took effect; a result was lowered.
+    const STATUS_RETURNED: u32 = 2;
+
+    let status = unsafe { subtask_cancel(subtask) };
+    if let Some(state) = PENDING_IMPORTS.with(|cell| cell.borrow_mut().remove(&subtask))
+        && status == STATUS_RETURNED
+    {
+        // Lift the result as the normal path would, then discard it.
+        let mut cx = EryxCall::new();
+        // Safety: async_lift_impl and buffer were set by call_import_async
+        unsafe { (state.async_lift_impl)((&raw mut cx).cast(), state.buffer.cast()) };
+    }
+    status
 }
 
 /// Call the invoke import with the given callback name and JSON arguments.

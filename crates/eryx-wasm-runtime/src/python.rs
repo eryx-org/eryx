@@ -706,6 +706,13 @@ fn subtask_drop_(task: u32) {
     unsafe { crate::subtask_drop(task) }
 }
 
+/// Cancel an in-flight subtask, blocking until the host has stopped it.
+/// Remove it from its waitable set first, and drop it afterwards.
+#[pyfunction]
+fn subtask_cancel_(task: u32) -> u32 {
+    crate::cancel_pending_import(task)
+}
+
 /// Get result from a completed async promise.
 ///
 /// This retrieves the result JSON stored in `__main__._eryx_async_import_results[subtask]`
@@ -1000,6 +1007,7 @@ fn eryx_module(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(context_set_, m)?)?;
     m.add_function(wrap_pyfunction!(context_get_, m)?)?;
     m.add_function(wrap_pyfunction!(subtask_drop_, m)?)?;
+    m.add_function(wrap_pyfunction!(subtask_cancel_, m)?)?;
     m.add_function(wrap_pyfunction!(promise_get_result_, m)?)?;
     // TCP networking functions
     m.add_function(wrap_pyfunction!(_eryx_tcp_connect, m)?)?;
@@ -1178,7 +1186,10 @@ def resume(event0: int, event1: int, event2: int) -> int:
     if event0 == _EVENT_SUBTASK and event2 == _STATUS_RETURNED:
         _eryx.waitable_join_(event1, 0)
         _eryx.subtask_drop_(event1)
-        state.futures.pop(event1).set_result(event2)
+        future = state.futures.pop(event1)
+        # The awaiting task may have been cancelled since the callback returned.
+        if not future.cancelled():
+            future.set_result(event2)
     elif event0 == _EVENT_NONE:
         pass  # Just poll again
     # Other events (streams, futures) would go here if we supported them
@@ -1186,17 +1197,43 @@ def resume(event0: int, event1: int, event2: int) -> int:
     return _poll(state)
 
 
+def _cancel_subtask(state: _AsyncState, waitable: int) -> None:
+    """Cancel an in-flight subtask and release it. No-op once it has resolved."""
+    if state.futures.pop(waitable, None) is None:
+        return
+    _eryx.waitable_join_(waitable, 0)
+    _eryx.subtask_cancel_(waitable)
+    _eryx.subtask_drop_(waitable)
+
+
+def _finish(state: _AsyncState) -> None:
+    """Release the execution's async resources once it is over.
+
+    Subtasks still in flight were abandoned (a never-awaited task, or a
+    `gather` sibling of a failure). They must be cancelled before the waitable
+    set can be dropped, and must not outlive this execution.
+    """
+    for waitable in list(state.futures):
+        _cancel_subtask(state, waitable)
+    if state.waitable_set is not None:
+        _eryx.waitable_set_drop_(state.waitable_set)
+        state.waitable_set = None
+
+
 def _poll(state: _AsyncState) -> int:
     """Poll the event loop and return callback code."""
-    _loop.poll(state)
-    if state.pending_count == 0:
-        if state.waitable_set is not None:
-            _eryx.waitable_set_drop_(state.waitable_set)
+    done = True  # stays True if poll raises: the execution is over either way
+    try:
+        _loop.poll(state)
+        done = state.pending_count == 0
+    finally:
+        if done:
+            _finish(state)
+    if done:
         return EXIT
-    else:
-        assert state.waitable_set is not None, "pending but no waitable_set"
-        _eryx.context_set_(state)
-        return WAIT | (state.waitable_set << 4)
+    assert state.waitable_set is not None, "pending but no waitable_set"
+    _eryx.context_set_(state)
+    return WAIT | (state.waitable_set << 4)
 
 
 async def await_invoke(name: str, args_json: str) -> str:
@@ -1219,7 +1256,11 @@ async def await_invoke(name: str, args_json: str) -> str:
             state.waitable_set = _eryx.waitable_set_new_()
         _eryx.waitable_join_(waitable, state.waitable_set)
 
-        await future
+        try:
+            await future
+        except asyncio.CancelledError:
+            _cancel_subtask(state, waitable)
+            raise
 
         # Get the result wrapper and parse it.
         # Use waitable (the subtask ID) as the key, not promise (which is always 0).
