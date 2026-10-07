@@ -51,6 +51,25 @@ If the value is not JSON-serializable, `result.result` is `undefined` and
 `result.resultError` explains why. Use `setResultVariable("name")` to capture a
 different variable name.
 
+### `executeWithJournal(code: string, options?): Promise<ReplayOutcome>`
+
+Execute code while journaling callback results, so a later run can replay them instead of re-invoking the callbacks. Pass a previously recorded journal as `options.journal` to replay it. A callback handler can throw `SuspendCallback` to halt execution. See [Callback Replay & Suspension](../guide/callback-replay.md).
+
+```javascript
+import { Sandbox, SuspendCallback } from "@bsull/eryx";
+
+const first = await sandbox.executeWithJournal(code);
+// Later, with the same code:
+const second = await sandbox.executeWithJournal(code, { journal: first.journal });
+console.log(second.replayedCallbacks);
+```
+
+`ReplayOutcome` has `result` (the `ExecuteResult`, or `undefined` on failure), `error`, `journal`, `replayedCallbacks`, and `suspended` (`{ name, argsJson, reason }` if a callback suspended). It never rejects for script failures — check `suspended`, then `error`.
+
+`journal` is always present. It is a JSON string in the same format as the Rust `CallbackJournal`; store it and pass it back unmodified, since results are kept as their exact JSON text.
+
+A top-level `executeWithJournal(code, options?)` convenience function is also exported.
+
 ### `snapshotState(): Promise<Uint8Array>`
 
 Capture a snapshot of the current Python session state. Returns serialized state that can be restored later.
@@ -114,8 +133,6 @@ setCallbackHandler((name, argsJson) => {
   throw new Error(`Unknown callback: ${name}`);
 });
 ```
-
-> **Note:** Due to a limitation in jco 1.16.1, async import lowering for callbacks is not yet functional. Callback handlers are registered but will not be invoked at runtime. This will be resolved in a future release.
 
 ### `setOutputHandler(handler)`
 

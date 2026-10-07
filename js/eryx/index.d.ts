@@ -9,6 +9,7 @@ export {
   setCallbacks,
   setTraceHandler,
   setOutputHandler,
+  SuspendCallback,
 } from "./shims/callbacks.js";
 
 /**
@@ -42,6 +43,48 @@ export interface ExecuteResult {
   resultError?: string;
 }
 
+/** The callback that suspended execution. */
+export interface SuspendedCallback {
+  /** Name of the callback that suspended. */
+  name: string;
+  /** Canonical arguments JSON it was invoked with. */
+  argsJson: string;
+  /** The reason passed to `SuspendCallback`. */
+  reason: string;
+}
+
+/** Options for {@link Sandbox.executeWithJournal}. */
+export interface ExecuteWithJournalOptions {
+  /**
+   * The `journal` string from a previous run's outcome, whose results should be
+   * replayed. Pass it back unmodified (don't round-trip it through
+   * `JSON.parse`/`JSON.stringify`, which would lose number precision in results).
+   */
+  journal?: string;
+}
+
+/** The outcome of {@link Sandbox.executeWithJournal}. */
+export interface ReplayOutcome {
+  /** The execution result, or `undefined` if execution failed. */
+  result?: ExecuteResult;
+  /**
+   * Why execution failed — a Python exception, or the `SuspendCallback` that
+   * halted it — or `undefined` on success. Check `suspended` first.
+   */
+  error?: Error;
+  /**
+   * Callbacks completed during this run, serialized as JSON in the same shape as
+   * the Rust `CallbackJournal`
+   * (`{"code", "entries": [{"index", "name", "args_hash", "args_json", "result": {"Ok": value} | {"Err": message}}]}`).
+   * Always present, even on error. Store it as-is.
+   */
+  journal: string;
+  /** How many callbacks were served from the supplied journal. */
+  replayedCallbacks: number;
+  /** Set if a callback threw `SuspendCallback`. */
+  suspended?: SuspendedCallback;
+}
+
 /**
  * A Python sandbox powered by WebAssembly.
  *
@@ -73,6 +116,22 @@ export class Sandbox {
    * @throws If the Python code raises an unhandled exception
    */
   execute(code: string): Promise<ExecuteResult>;
+
+  /**
+   * Execute Python code, journaling callback results so a later run can replay
+   * them instead of re-invoking the callbacks.
+   *
+   * Callbacks matching an entry of `options.journal` (by name and canonical
+   * arguments, FIFO) return the recorded result without calling the handler;
+   * the first miss switches the rest of the run to live calls. A handler can
+   * throw {@link SuspendCallback} to halt execution.
+   *
+   * Never rejects for script failures: check `suspended`, then `error`.
+   */
+  executeWithJournal(
+    code: string,
+    options?: ExecuteWithJournalOptions,
+  ): Promise<ReplayOutcome>;
 
   /**
    * Capture a snapshot of the current Python session state.
@@ -110,6 +169,15 @@ export class Sandbox {
  * @throws If the Python code raises an unhandled exception
  */
 export function execute(code: string): Promise<ExecuteResult>;
+
+/**
+ * Execute Python code using the shared global sandbox state, journaling
+ * callback results. See {@link Sandbox.executeWithJournal}.
+ */
+export function executeWithJournal(
+  code: string,
+  options?: ExecuteWithJournalOptions,
+): Promise<ReplayOutcome>;
 
 /**
  * Set the name of the variable captured as the structured result.

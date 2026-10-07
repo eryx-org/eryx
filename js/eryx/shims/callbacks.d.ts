@@ -56,3 +56,17 @@ export function getExecutionOptions(): ExecutionOptions;
 export function setOutputHandler(
   handler: ((stream: number, data: string) => void) | null,
 ): void;
+
+/**
+ * Thrown by a callback handler to suspend execution ("retry later").
+ *
+ * The guest halts immediately. Under `executeWithJournal()` the suspension is
+ * surfaced as `outcome.suspended` and the call is not journaled, so it re-runs
+ * live when the recorded journal is replayed. Under plain `execute()` it
+ * rejects like any other error.
+ */
+export class SuspendCallback extends Error {
+  constructor(reason: string);
+  /** Opaque reason, surfaced as `outcome.suspended.reason`. */
+  readonly reason: string;
+}

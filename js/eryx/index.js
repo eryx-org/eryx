@@ -56,7 +56,10 @@ export {
   setCallbacks,
   setTraceHandler,
   setOutputHandler,
+  SuspendCallback,
 } from "./shims/callbacks.js";
+
+import { _beginReplay, _endReplay } from "./shims/callbacks.js";
 
 /**
  * Result from executing Python code in the sandbox.
@@ -136,6 +139,39 @@ export function setResultVariable(name) {
 }
 
 /**
+ * The outcome of executeWithJournal().
+ * @typedef {Object} ReplayOutcome
+ * @property {ExecuteResult} [result] - The execution result, or undefined if it failed
+ * @property {Error} [error] - Why execution failed (Python exception, or the
+ *   SuspendCallback that halted it), or undefined on success
+ * @property {string} journal - Callbacks completed during this run, serialized
+ *   as JSON in the same shape as the Rust `CallbackJournal`. Always present, even
+ *   on error. Store it as-is and pass it back via `options.journal`.
+ * @property {number} replayedCallbacks - How many callbacks were served from
+ *   the supplied journal instead of running live
+ * @property {{name: string, argsJson: string, reason: string}} [suspended] -
+ *   Set if a callback threw SuspendCallback
+ */
+
+/**
+ * Execute code while journaling callback results, replaying from `journal`.
+ * @param {string} code
+ * @param {{journal?: string}} [options]
+ * @returns {Promise<ReplayOutcome>}
+ */
+async function _executeWithJournal(code, options) {
+  _beginReplay(options?.journal);
+  let result;
+  let error;
+  try {
+    result = await execute(code);
+  } catch (e) {
+    error = e;
+  }
+  return { result, error, ..._endReplay(code) };
+}
+
+/**
  * A Python sandbox powered by WebAssembly.
  *
  * The sandbox executes Python code in complete isolation. Each Sandbox
@@ -175,6 +211,26 @@ export class Sandbox {
       throw new Error(output.val);
     }
     return _toResult(output);
+  }
+
+  /**
+   * Execute Python code, journaling callback results so a later run can replay
+   * them instead of re-invoking the callbacks.
+   *
+   * Callbacks matching an entry of `options.journal` (by name and canonical
+   * arguments, FIFO) return the recorded result without calling the handler;
+   * the first miss switches the rest of the run to live calls. A handler can
+   * throw SuspendCallback to halt execution; the outcome then has `suspended`
+   * set and a journal to resume from.
+   *
+   * Never throws for script failures: check `suspended`, then `error`.
+   *
+   * @param {string} code - Python source code to execute
+   * @param {{journal?: string}} [options] - A journal from a previous run to replay
+   * @returns {Promise<ReplayOutcome>}
+   */
+  async executeWithJournal(code, options) {
+    return _executeWithJournal(code, options);
   }
 
   /**
@@ -238,4 +294,16 @@ export async function execute(code) {
     throw new Error(output.val);
   }
   return _toResult(output);
+}
+
+/**
+ * Execute Python code using the shared global sandbox state, journaling
+ * callback results. See {@link Sandbox#executeWithJournal}.
+ *
+ * @param {string} code - Python source code to execute
+ * @param {{journal?: string}} [options] - A journal from a previous run to replay
+ * @returns {Promise<ReplayOutcome>}
+ */
+export async function executeWithJournal(code, options) {
+  return _executeWithJournal(code, options);
 }

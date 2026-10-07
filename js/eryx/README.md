@@ -87,6 +87,32 @@ print(f"Temperature in {result['city']}: {result['temp']}°{result['unit']}")
 `);
 ```
 
+### Callback replay & suspension
+
+Journal callback results so a re-run of the same script replays them instead of calling your handler again, and let a handler suspend execution until it can answer:
+
+```js
+import { Sandbox, SuspendCallback, setCallbackHandler } from "@bsull/eryx";
+
+setCallbackHandler((name, argsJson) => {
+  if (name === "approve" && !isApproved()) {
+    throw new SuspendCallback("awaiting approval"); // halts the script
+  }
+  return JSON.stringify(handle(name, JSON.parse(argsJson)));
+});
+
+const sandbox = new Sandbox();
+const first = await sandbox.executeWithJournal(code);
+if (first.suspended) {
+  save(first.journal); // a JSON string; store it as-is to resume later
+}
+
+// Later: completed callbacks replay from the journal; the rest run live.
+const resumed = await sandbox.executeWithJournal(code, { journal: load() });
+```
+
+See the [Callback Replay & Suspension guide](https://docs.eryx.run/latest/guide/callback-replay.html) for the matching rules and caveats.
+
 ### Streaming output
 
 Get stdout/stderr in real-time instead of waiting for execution to complete:
@@ -129,6 +155,7 @@ export default defineConfig({
 | Method | Returns | Description |
 |--------|---------|-------------|
 | `execute(code)` | `Promise<{ stdout, stderr }>` | Run Python code |
+| `executeWithJournal(code, { journal? })` | `Promise<ReplayOutcome>` | Run with callback journaling/replay |
 | `snapshotState()` | `Promise<Uint8Array>` | Serialize interpreter state |
 | `restoreState(data)` | `Promise<void>` | Restore from snapshot |
 | `clearState()` | `Promise<void>` | Reset all user state |
@@ -141,6 +168,7 @@ export default defineConfig({
 | `setCallbacks(infos)` | Register callbacks visible to Python's `list_callbacks()` |
 | `setTraceHandler(fn)` | Receive line-level execution trace events |
 | `setOutputHandler(fn)` | Receive streaming stdout/stderr |
+| `SuspendCallback` | Throw from a handler to suspend execution |
 
 ## How it works
 
