@@ -722,8 +722,14 @@ impl<T> SandboxImportsWithStore<T> for HasSelf<ExecutorState> {
                     response_tx,
                 };
 
-                // Send request to the callback handler
-                if tx.send(request).await.is_err() {
+                // Send request to the callback handler, then release our sender
+                // clone before awaiting the response. If the guest returns with
+                // this call still in flight, a session's long-lived store keeps
+                // this future parked; a sender held here would keep the channel
+                // open and the caller's wait on the handler would never end.
+                let sent = tx.send(request).await;
+                drop(tx);
+                if sent.is_err() {
                     Err("Callback channel closed".to_string())
                 } else {
                     // Wait for the handler's response.
