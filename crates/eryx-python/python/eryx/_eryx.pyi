@@ -241,6 +241,62 @@ class ExecuteResult:
         ...
 
 
+class SuspendedCallback:
+    """Details of the callback that suspended execution by raising ``SuspendCallback``."""
+
+    @property
+    def name(self) -> str:
+        """Name of the callback that suspended."""
+        ...
+
+    @property
+    def args_json(self) -> str:
+        """Canonicalized JSON arguments the callback was invoked with."""
+        ...
+
+    @property
+    def reason(self) -> str:
+        """The reason string passed to ``SuspendCallback``."""
+        ...
+
+
+class ReplayOutcome:
+    """Result of ``Sandbox.execute_with_journal()``.
+
+    Exactly one of ``result`` and ``error`` is set. ``journal`` is always present,
+    even when execution failed or suspended. When ``suspended`` is set, ``error``
+    holds the resulting ``ExecutionError``; branch on ``suspended`` first.
+    """
+
+    @property
+    def result(self) -> Optional[ExecuteResult]:
+        """The execution result, or ``None`` if execution failed or suspended."""
+        ...
+
+    @property
+    def error(self) -> Optional[EryxError]:
+        """The exception ``execute()`` would have raised, or ``None`` on success."""
+        ...
+
+    @property
+    def journal(self) -> dict[str, Any]:
+        """The callback journal recorded during this run, as a JSON-compatible dict.
+
+        Persist it with ``json.dumps`` and pass it back as ``replay_journal=`` to a
+        new ``Sandbox``. Treat it as opaque and as a trusted input."""
+        ...
+
+    @property
+    def replayed_callbacks(self) -> int:
+        """How many callbacks were served from the replay journal."""
+        ...
+
+    @property
+    def suspended(self) -> Optional[SuspendedCallback]:
+        """The callback that suspended execution, or ``None``."""
+        ...
+
+
 class NetConfig:
     """Network configuration for sandbox execution.
 
@@ -495,6 +551,7 @@ class Sandbox:
         on_stdout: Optional[Callable[[bytes], None]] = None,
         on_stderr: Optional[Callable[[bytes], None]] = None,
         result_variable: Optional[str] = None,
+        replay_journal: Optional[dict[str, Any]] = None,
     ) -> None:
         """Create a new sandbox with the embedded Python runtime.
 
@@ -530,6 +587,10 @@ class Sandbox:
                 waiting for execution to complete. Receives the output chunk as bytes.
             result_variable: Name of the variable captured from the script and exposed
                 as ``ExecuteResult.result`` (JSON-serialized). Defaults to ``"result"``.
+            replay_journal: A journal from a previous ``ReplayOutcome.journal``.
+                ``execute_with_journal()`` returns matching callback results from it
+                instead of invoking the callbacks live; ``execute()`` ignores it.
+                Trusted input: replayed results reach the sandbox verbatim.
 
         Raises:
             InitializationError: If the sandbox fails to initialize.
@@ -580,6 +641,33 @@ class Sandbox:
             print(result.stdout)  # "2 + 2 = 4\\n"
         """
         ...
+
+    def execute_with_journal(self, code: str) -> ReplayOutcome:
+        """Execute code, journaling callback results and replaying them from
+        ``replay_journal`` if one was given.
+
+        Unlike ``execute()``, this does not raise for execution failures: the error
+        is returned on the outcome alongside the journal, which is always populated.
+
+        Example:
+            outcome = sandbox.execute_with_journal(code)
+            if outcome.suspended:
+                save(outcome.journal)  # resume later with Sandbox(replay_journal=...)
+            elif outcome.error:
+                raise outcome.error
+        """
+        ...
+
+
+class SuspendCallback(Exception):
+    """Raise from a callback to suspend execution.
+
+    The argument is an opaque reason string, surfaced as
+    ``ReplayOutcome.suspended.reason``. The guest halts immediately and the
+    suspended call is not journaled, so it runs live again on resume.
+    """
+
+    ...
 
 
 class EryxError(Exception):

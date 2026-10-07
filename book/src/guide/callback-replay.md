@@ -4,7 +4,7 @@ When an LLM iterates on a Python script that drives expensive [callbacks](./call
 
 **Suspension** is the companion feature: a callback can return [`CallbackError::Suspend`] to halt execution ("I can't answer yet — retry later"). Eryx records what was waiting on, stops the guest immediately, and the recorded journal lets you resume from where you left off once the dependency is ready.
 
-> **Availability.** This guide describes the **Rust library API**. The [gRPC server](./grpc-server.md) also implements both features — including HMAC-signed journals — over its `callback_journal` field and `CALLBACK_OUTCOME_SUSPEND` outcome; see the [gRPC Server](./grpc-server.md#callback-replay) guide for the wire-level details. Python and JavaScript bindings are tracked in [issue #241](https://github.com/eryx-org/eryx/issues/241).
+> **Availability.** This guide covers the **Rust library API** and the **Python bindings** (`Sandbox` only; journals on `SandboxFactory`, `Session` and `SandboxPool`, and per-execute journals, are tracked in [issue #521](https://github.com/eryx-org/eryx/issues/521)). The [gRPC server](./grpc-server.md) also implements both features — including HMAC-signed journals — over its `callback_journal` field and `CALLBACK_OUTCOME_SUSPEND` outcome; see the [gRPC Server](./grpc-server.md#callback-replay) guide for the wire-level details. JavaScript bindings are tracked in [issue #241](https://github.com/eryx-org/eryx/issues/241).
 
 ## How replay works
 
@@ -21,7 +21,7 @@ Callbacks are matched by their **name plus canonicalized arguments**, treated as
 
 ### Divergence guard
 
-The first invocation that does **not** match a remaining cached result for its key — a *miss* — is treated as a divergence from the recorded run: replay stops, and that call *and every subsequent call* run live for the rest of the execution. This is the key safety property: it prevents a stale cached result from being replayed across a real divergence (for example, a script edited to write before it reads).
+The first invocation that does **not** match a remaining cached result for its key — a *miss* — is treated as a divergence from the recorded run: replay stops, and that call *and every subsequent call* run live for the rest of the execution. This prevents a stale cached result from being replayed across a real divergence (for example, a script edited to write before it reads). It does **not** prevent re-execution: see [Live re-runs and idempotency](#live-re-runs-and-idempotency).
 
 A caller that signs journals and binds the signature to the exact script (as the [gRPC server layer](./grpc-server.md#journal-signing-and-the-trust-boundary) does) rejects an edited script's journal *before* matching even runs, restricting replay to re-runs of the same script.
 
@@ -29,7 +29,11 @@ A caller that signs journals and binds the signature to the exact script (as the
 
 Use [`Sandbox::execute_with_journal`] instead of `execute`. It returns a [`ReplayOutcome`] whose `journal` field holds every callback that completed — even if the script itself errored partway through.
 
-```rust,ignore
+<!-- langtabs-start -->
+
+### Rust
+
+```rs
 use eryx::Sandbox;
 
 let sandbox = Sandbox::embedded()
@@ -44,6 +48,38 @@ let journal = outcome.journal;
 println!("recorded {} callbacks", journal.len());
 ```
 
+### Python
+
+```python
+import json
+import eryx
+
+def fetch_user(id: int):
+    return {"id": id, "name": "Ada"}
+
+def charge_card(user_id: int, cents: int):
+    return {"charged": cents}
+
+code = """
+user = await fetch_user(id=1)
+await charge_card(user_id=user["id"], cents=500)
+"""
+
+sandbox = eryx.Sandbox(callbacks=[
+    {"name": "fetch_user", "fn": fetch_user},
+    {"name": "charge_card", "fn": charge_card},
+])
+
+# Never raises for execution failures: check outcome.error instead.
+outcome = sandbox.execute_with_journal(code)
+
+# `journal` is a JSON-compatible dict, always populated, even on error.
+saved = json.dumps(outcome.journal)
+print(f"recorded {len(outcome.journal['entries'])} callbacks")
+```
+
+<!-- langtabs-end -->
+
 [`ReplayOutcome`] carries:
 
 | Field | Meaning |
@@ -55,11 +91,17 @@ println!("recorded {} callbacks", journal.len());
 
 The [`CallbackJournal`] derives `serde::Serialize`/`Deserialize`, so you can persist it (database, cache, etc.) between runs.
 
+In Python, `ReplayOutcome` has `result` (an `ExecuteResult`, or `None` on failure), `error` (the exception `execute()` would have raised, or `None`), `journal` (a dict; treat it as opaque), `replayed_callbacks`, and `suspended` (a `SuspendedCallback` or `None`).
+
 ## Replaying a journal
 
-Supply the previously-recorded journal with [`with_replay_journal`] when building the sandbox, then call `execute_with_journal` again with the same code:
+Supply the previously-recorded journal with [`with_replay_journal`] (`replay_journal=` in Python) when building the sandbox, then call `execute_with_journal` again with the same code:
 
-```rust,ignore
+<!-- langtabs-start -->
+
+### Rust
+
+```rs
 use eryx::Sandbox;
 
 let sandbox = Sandbox::embedded()
@@ -75,7 +117,33 @@ let outcome = sandbox.execute_with_journal(code).await;
 println!("replayed {} callbacks", outcome.replayed_callbacks);
 ```
 
-`with_replay_journal` only affects `execute_with_journal`; plain [`Sandbox::execute`] ignores it. Each call to `execute_with_journal` uses fresh replay state, so the same sandbox can be executed repeatedly without the journal cursor leaking between runs.
+### Python
+
+```python
+import eryx
+
+def fetch_user(id: int):
+    return {"id": id, "name": "Ada"}
+
+callbacks = [{"name": "fetch_user", "fn": fetch_user}]
+code = "user = await fetch_user(id=1)"
+previous = eryx.Sandbox(callbacks=callbacks).execute_with_journal(code).journal
+
+sandbox = eryx.Sandbox(
+    callbacks=callbacks,
+    replay_journal=previous,  # results recorded earlier
+)
+
+outcome = sandbox.execute_with_journal(code)
+
+# Callbacks that matched the journal returned cached results instead of
+# running live.
+print(f"replayed {outcome.replayed_callbacks} callbacks")
+```
+
+<!-- langtabs-end -->
+
+`with_replay_journal` (`replay_journal=`) only affects `execute_with_journal`; plain [`Sandbox::execute`] ignores it. Each call to `execute_with_journal` uses fresh replay state, so the same sandbox can be executed repeatedly without the journal cursor leaking between runs.
 
 ### Concurrent identity
 
@@ -83,9 +151,13 @@ The replay identity is exactly `(callback name, canonical args)`. FIFO ordering 
 
 ## Suspension
 
-A callback can defer its work by returning [`CallbackError::Suspend`] with an opaque reason string:
+A callback can defer its work by returning [`CallbackError::Suspend`] (raising `eryx.SuspendCallback` in Python, from a sync or async callback) with an opaque reason string:
 
-```rust,ignore
+<!-- langtabs-start -->
+
+### Rust
+
+```rs
 use eryx::{callback, CallbackError};
 use serde_json::Value;
 
@@ -101,6 +173,22 @@ async fn request_approval(action: String) -> Result<Value, CallbackError> {
 }
 ```
 
+### Python
+
+```python
+import eryx
+
+APPROVED: set[str] = set()  # stand-in for your approval store
+
+def request_approval(action: str):
+    """Requests human approval for an action."""
+    if action not in APPROVED:
+        raise eryx.SuspendCallback(f"awaiting approval for {action}")
+    return {"approved": action}
+```
+
+<!-- langtabs-end -->
+
 When a callback suspends, eryx:
 
 1. Records a [`SuspendedCallback`] (callback name, arguments, reason) — but does **not** journal the call, so it re-runs live on resume.
@@ -108,9 +196,13 @@ When a callback suspends, eryx:
 
 Two layers guarantee nothing runs after a suspension: a synchronous gate rejects any callback dispatched after the first suspension (covering later `gather` siblings), and the fuel-poison halt traps the guest before it can do anything else.
 
-Because the guest is halted, `outcome.result` will be an `Err` when a suspension occurs — **branch on `suspended` first** and treat that error as the expected consequence of the suspend rather than a failure:
+Because the guest is halted, `outcome.result` will be an `Err` (in Python, `result` is `None` and `error` is an `ExecutionError`) when a suspension occurs — **branch on `suspended` first** and treat that error as the expected consequence of the suspend rather than a failure:
 
-```rust,ignore
+<!-- langtabs-start -->
+
+### Rust
+
+```rs
 let outcome = sandbox.execute_with_journal(code).await;
 
 if let Some(suspended) = &outcome.suspended {
@@ -123,9 +215,42 @@ if let Some(suspended) = &outcome.suspended {
 let result = outcome.result?; // only reached if not suspended
 ```
 
+### Python
+
+```python
+import eryx
+
+def request_approval(action: str):
+    raise eryx.SuspendCallback(f"awaiting approval for {action}")
+
+sandbox = eryx.Sandbox(callbacks=[{"name": "request_approval", "fn": request_approval}])
+outcome = sandbox.execute_with_journal('await request_approval(action="deploy")')
+
+if outcome.suspended:
+    # Persist outcome.journal, wait for the dependency named by
+    # suspended.reason / suspended.name / suspended.args_json, then resume.
+    print("suspended:", outcome.suspended.reason)
+elif outcome.error:
+    raise outcome.error
+else:
+    print(outcome.result.stdout_text)
+```
+
+<!-- langtabs-end -->
+
 ### Resuming
 
-To resume, rebuild the sandbox with the journal from the suspended run via `with_replay_journal` and execute the same code again. The recorded prefix replays from cache; the previously-suspended callback re-runs live (it was never journaled) and, assuming its dependency is now ready, returns a real value so the script continues past the suspension point.
+To resume, rebuild the sandbox with the journal from the suspended run via `with_replay_journal` (`eryx.Sandbox(..., replay_journal=outcome.journal)` in Python) and execute the same code again. The recorded prefix replays from cache; the previously-suspended callback re-runs live (it was never journaled) and, assuming its dependency is now ready, returns a real value so the script continues past the suspension point.
+
+### Live re-runs and idempotency
+
+Replay never replays a stale result, but it also does not guarantee that a callback runs **at most once**. A call runs live again whenever it is not served from the journal:
+
+- calls that *miss* — the first divergent call and every call after it;
+- the previously-suspended call, on resume (it was never journaled);
+- any call that was **in flight** when the run halted (a suspension, timeout or crash) and so never completed into the journal, and any call started after the suspending call (the journal is truncated at the suspension point) — for example a `gather` sibling of the suspending call.
+
+Callbacks with side effects (charging a card, sending a message, writing a record) must therefore be **idempotent**, or deduplicate on their side — for example with an idempotency key passed in the callback args.
 
 ## Determinism and limitations
 
@@ -135,7 +260,7 @@ Replay short-circuits *callbacks* — the Python **between** callbacks always re
 - **If it drives control flow**, the replayed run may take a different path than the recorded one, dispatching a different set of callbacks.
 - **Non-callback output is not reproduced** — values the script computes itself rather than via a callback are recomputed, so stdout or the [result variable](../guide/callbacks.md) can differ even when every callback replayed.
 
-The divergence guard keeps this **safe**: a recomputed argument that misses falls back to live execution rather than injecting a stale cached result. But replay is only fully *transparent* for scripts whose callback names, arguments, and control flow are deterministic given the same callback results.
+The divergence guard ensures a recomputed argument that misses falls back to live execution rather than injecting a stale cached result — which means that call, and everything after it, runs live again (see [Live re-runs and idempotency](#live-re-runs-and-idempotency)). But replay is only fully *transparent* for scripts whose callback names, arguments, and control flow are deterministic given the same callback results.
 
 To make a nondeterministic input replayable, **route it through a callback** so it lands in the journal — fetch the current time or a random seed via a callback rather than reading it inside the sandbox, and it will replay deterministically like any other recorded result.
 
@@ -151,6 +276,7 @@ The core `eryx` crate is agnostic to signing and trusts whatever journal it rece
 
 - [Callbacks](./callbacks.md) — defining the callbacks that replay records.
 - [Rust API Reference](../api/rust.md) — full type documentation for [`ReplayOutcome`], [`CallbackJournal`], and [`SuspendedCallback`].
+- [Python API Reference](../api/python.md#callback-replay--suspension) — `Sandbox.execute_with_journal`, `ReplayOutcome`, `SuspendedCallback`, `SuspendCallback`.
 
 [`Sandbox::execute`]: https://docs.eryx.run/latest/api/rust/eryx/struct.Sandbox.html#method.execute
 [`Sandbox::execute_with_journal`]: https://docs.eryx.run/latest/api/rust/eryx/struct.Sandbox.html#method.execute_with_journal
