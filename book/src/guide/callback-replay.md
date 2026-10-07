@@ -248,7 +248,7 @@ Replay never replays a stale result, but it also does not guarantee that a callb
 
 - calls that *miss* — the first divergent call and every call after it;
 - the previously-suspended call, on resume (it was never journaled);
-- any call that was **in flight** when the run halted (a suspension, timeout or crash) and so never completed into the journal, and any call started after the suspending call (the journal is truncated at the suspension point) — for example a `gather` sibling of the suspending call.
+- calls that never completed into the journal: those cut off by the host's callback timeout, those that never reached the handler, and any call started after the suspending call (the journal is truncated at the suspension point) — for example a `gather` sibling of the suspending call. A call still in flight when the run fails, times out or suspends is otherwise awaited by the host and journaled, as is one the script stopped waiting for (`wait_for`, `task.cancel()`).
 
 Callbacks with side effects (charging a card, sending a message, writing a record) must therefore be **idempotent**, or deduplicate on their side — for example with an idempotency key passed in the callback args.
 
