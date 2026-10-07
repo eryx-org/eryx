@@ -6,6 +6,8 @@ use std::future::Future;
 #[cfg(not(feature = "embedded"))]
 use std::path::PathBuf;
 use std::pin::Pin;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, Instant};
 
 use eryx::{CallbackError, Error, ResourceLimits, Sandbox, TypedCallback};
@@ -47,8 +49,9 @@ async fn run(code: &str) -> String {
     result.expect("execution failed").stdout_text()
 }
 
-/// A callback that takes a while, to overlap with timers.
-struct SlowCallback;
+/// A callback that takes a while, to overlap with timers. Counts completed runs.
+#[derive(Clone, Default)]
+struct SlowCallback(Arc<AtomicU32>);
 
 impl TypedCallback for SlowCallback {
     type Args = ();
@@ -67,6 +70,7 @@ impl TypedCallback for SlowCallback {
     ) -> Pin<Box<dyn Future<Output = Result<Value, CallbackError>> + Send + '_>> {
         Box::pin(async move {
             tokio::time::sleep(Duration::from_millis(100)).await;
+            self.0.fetch_add(1, Ordering::SeqCst);
             Ok(json!("done"))
         })
     }
@@ -220,7 +224,7 @@ print("end")
 #[tokio::test]
 async fn timer_and_callback_overlap() {
     let sandbox = sandbox_builder()
-        .with_callback(SlowCallback)
+        .with_callback(SlowCallback::default())
         .build()
         .expect("Failed to build sandbox");
     let out = sandbox
@@ -242,7 +246,7 @@ print(r, loop.time() - t0 < 0.5)
 #[tokio::test]
 async fn wait_for_bounds_a_callback() {
     let sandbox = sandbox_builder()
-        .with_callback(SlowCallback)
+        .with_callback(SlowCallback::default())
         .build()
         .expect("Failed to build sandbox");
     let out = sandbox
@@ -294,4 +298,46 @@ async fn sleeping_burns_no_fuel() {
     let short = fuel("0.001").await;
     let long = fuel("0.3").await;
     assert!(long < short * 2, "short={short} long={long}");
+}
+
+/// A `wait_for` timeout only stops Python waiting: the host callback still
+/// completes and is journaled, so on replay it returns instantly from cache
+/// and the same `wait_for` no longer times out.
+#[tokio::test]
+async fn timed_out_callback_is_still_journaled() {
+    let code = r#"
+import asyncio
+try:
+    print(await asyncio.wait_for(slow(), timeout=0.01))
+except TimeoutError:
+    print("timed out")
+"#;
+    let slow = SlowCallback::default();
+    let build = || sandbox_builder().with_callback(slow.clone());
+
+    let first = build().build().unwrap().execute_with_journal(code).await;
+    assert_eq!(first.result.unwrap().stdout_text(), "timed out\n");
+    assert_eq!(slow.0.load(Ordering::SeqCst), 1);
+    assert!(
+        first
+            .journal
+            .entries
+            .iter()
+            .any(|e| e.name == "slow" && e.result == Ok(json!("done"))),
+        "journal: {:?}",
+        first.journal.entries
+    );
+
+    let replay = build()
+        .with_replay_journal(first.journal)
+        .build()
+        .unwrap()
+        .execute_with_journal(code)
+        .await;
+    assert_eq!(replay.result.unwrap().stdout_text(), "done\n");
+    assert_eq!(
+        slow.0.load(Ordering::SeqCst),
+        1,
+        "replay re-ran the callback"
+    );
 }
