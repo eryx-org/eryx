@@ -148,7 +148,11 @@ async fn search_users(
 
 ### Python
 
-```python,no_test
+```python
+import eryx
+
+registry = eryx.CallbackRegistry()
+
 @registry.callback(description="Searches for users")
 def search_users(
     query: str,
@@ -193,7 +197,11 @@ Error variants:
 
 ### Python
 
-```python,no_test
+```python
+import eryx
+
+registry = eryx.CallbackRegistry()
+
 @registry.callback(description="Divides two numbers")
 def divide(a: float, b: float):
     if b == 0:
@@ -206,8 +214,6 @@ def divide(a: float, b: float):
 ## Parallel Execution
 
 Multiple callbacks can run concurrently using `asyncio.gather()`:
-
-<!-- langtabs-start -->
 
 ```python,no_test
 # Inside the sandbox
@@ -222,13 +228,9 @@ results = await asyncio.gather(
 user1, user2, posts = results
 ```
 
-<!-- langtabs-end -->
-
 ## Introspection
 
 The sandbox can discover available callbacks at runtime:
-
-<!-- langtabs-start -->
 
 ```python,no_test
 # Inside the sandbox
@@ -239,8 +241,6 @@ for name in dir(eryx_callbacks):
     callback = getattr(eryx_callbacks, name)
     print(f"{name}: {callback.__doc__}")
 ```
-
-<!-- langtabs-end -->
 
 ## Alternative APIs
 

@@ -74,7 +74,11 @@ drop(sandbox);
 # }
 ```
 
-```python,no_test
+```python
+import eryx
+
+pool = eryx.SandboxFactory(cache=True).create_pool(max_size=1)
+
 with pool.acquire() as sandbox:
     result = sandbox.execute('print("Hello from pool!")')
     print(result.stdout_text)
@@ -123,7 +127,11 @@ let result = sandbox.execute("print('with limits')").await?;
 # }
 ```
 
-```python,no_test
+```python
+import eryx
+
+pool = eryx.SandboxFactory(cache=True).create_pool(max_size=1)
+
 def handle_output(chunk: bytes):
     print(f"[stdout] {chunk.decode()}", end="")
 
@@ -158,7 +166,11 @@ if let Some(sandbox) = pool.try_acquire()? {
 # }
 ```
 
-```python,no_test
+```python
+import eryx
+
+pool = eryx.SandboxFactory(cache=True).create_pool(max_size=1)
+
 sandbox = pool.try_acquire()
 if sandbox is not None:
     with sandbox:
@@ -190,7 +202,11 @@ println!("evicted {} idle sandboxes", evicted);
 # }
 ```
 
-```python,no_test
+```python
+import eryx
+
+pool = eryx.SandboxFactory(cache=True).create_pool(max_size=1)
+
 stats = pool.stats()
 print(f"idle={stats.idle}, in_use={stats.in_use}, total={stats.total}")
 print(f"acquisitions={stats.total_acquisitions}, avg_wait={stats.average_wait_time_ms:.1f}ms")
@@ -223,9 +239,17 @@ match pool.acquire().await {
 # }
 ```
 
-```python,no_test
+```python
+import eryx
+
+factory = eryx.SandboxFactory(cache=True)
+pool = factory.create_pool(max_size=1)
+
 pool.close()
-pool.acquire()  # raises eryx.PoolClosedError
+try:
+    pool.acquire()
+except eryx.PoolClosedError:
+    print("pool is closed")
 
 # The pool is also a context manager:
 with factory.create_pool(max_size=4) as pool:
