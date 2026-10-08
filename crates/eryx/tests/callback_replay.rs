@@ -238,6 +238,41 @@ async fn journal_keys_on_guest_args_verbatim() {
     assert_eq!(live_calls.load(Ordering::SeqCst), 1, "replayed, not re-run");
 }
 
+/// Mixed int/str dict keys can't be sorted, so the guest falls back to
+/// insertion order; the call still succeeds and replays.
+#[tokio::test]
+async fn mixed_key_dict_args_replay() {
+    const SCRIPT: &str = "r = await tick(d={1: 'a', 'b': 2})\nprint(r['live_call'])";
+    let live_calls = Arc::new(AtomicU32::new(0));
+    let build = || {
+        sandbox_builder().with_callback(CountingCallback {
+            name: "tick".to_string(),
+            live_calls: Arc::clone(&live_calls),
+        })
+    };
+
+    let first = build()
+        .build()
+        .expect("build sandbox")
+        .execute_with_journal(SCRIPT)
+        .await;
+    first.result.expect("first run succeeds");
+    assert_eq!(
+        first.journal.entries[0].args_json,
+        r#"{"d":{"1":"a","b":2}}"#
+    );
+
+    let second = build()
+        .with_replay_journal(first.journal)
+        .build()
+        .expect("build replay sandbox")
+        .execute_with_journal(SCRIPT)
+        .await;
+    second.result.expect("second run succeeds");
+    assert_eq!(second.replayed_callbacks, 1);
+    assert_eq!(live_calls.load(Ordering::SeqCst), 1, "replayed, not re-run");
+}
+
 /// Changing the script so the second callback diverges falls back to live mode
 /// from the point of divergence; the matching prefix is still replayed.
 #[tokio::test]

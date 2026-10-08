@@ -3786,7 +3786,12 @@ async def invoke(_callback_name, **kwargs):
     # Serialize kwargs to canonical JSON (sorted keys, compact, no NaN/inf).
     # Hosts key callback replay journals on this text verbatim, so it must be
     # deterministic for equal arguments.
-    args_json = _json.dumps(kwargs, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False)
+    try:
+        args_json = _json.dumps(kwargs, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False)
+    except TypeError:
+        # Mixed int/str dict keys can't be sorted. Insertion order still keeps
+        # the text deterministic per script, as args were before #529.
+        args_json = _json.dumps(kwargs, sort_keys=False, separators=(",", ":"), ensure_ascii=False, allow_nan=False)
 
     # Report callback start trace event
     _eryx._eryx_report_trace(0, _json.dumps({{"type": "callback_start", "name": _callback_name}}), args_json)
