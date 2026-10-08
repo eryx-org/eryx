@@ -75,11 +75,13 @@ class TestReplay:
     def test_pooled_sandbox_replays(self):
         fetch, calls = counting_fetch()
         pool = eryx.SandboxFactory(cache=True).create_pool(max_size=1, min_idle=0)
-        with pool.acquire(callbacks=[{"name": "fetch", "fn": fetch}]) as sandbox:
-            journal = sandbox.execute_with_journal(CODE).journal
-            assert sandbox.execute_with_journal(CODE, journal).replayed_callbacks == 2
-        assert calls == ["a", "b"]
-        pool.close()
+        try:
+            with pool.acquire(callbacks=[{"name": "fetch", "fn": fetch}]) as sandbox:
+                journal = sandbox.execute_with_journal(CODE).journal
+                assert sandbox.execute_with_journal(CODE, journal).replayed_callbacks == 2
+            assert calls == ["a", "b"]
+        finally:
+            pool.close()
 
     def test_invalid_journal_raises(self):
         with pytest.raises(ValueError, match="Invalid journal"):
@@ -163,3 +165,12 @@ class TestSuspend:
         assert resumed.replayed_callbacks == 1
         assert calls == ["a"], "prefix replays from the journal"
         assert resumed.result.stdout_text == "after A True\nn 1\n"
+
+    def test_session_timeout_rolls_back(self):
+        fetch, _ = counting_fetch()
+        session = eryx.Session(callbacks=[{"name": "fetch", "fn": fetch}])
+        session.execute("n = 0")
+        session.execution_timeout_ms = 500
+        outcome = session.execute_with_journal('n += 1\nawait fetch(q="a")\nwhile True: pass')
+        assert isinstance(outcome.error, eryx.TimeoutError)
+        assert session.execute("print(n)").stdout_text == "0\n"

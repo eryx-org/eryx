@@ -632,3 +632,44 @@ async fn session_plain_execute_after_journaled_call_runs_live() {
         "only this call's callbacks are journaled"
     );
 }
+
+/// A journaled session call that times out is rolled back: the next call in the
+/// same session succeeds and sees the state from before the timed-out call.
+#[tokio::test]
+async fn session_timeout_rolls_back_and_session_stays_usable() {
+    use eryx::session::{InProcessSession, Session};
+
+    let live_calls = Arc::new(AtomicU32::new(0));
+    let sandbox = sandbox_builder()
+        .with_callback(CountingCallback {
+            name: "tick".to_string(),
+            live_calls: Arc::clone(&live_calls),
+        })
+        .with_resource_limits(
+            eryx::ResourceLimits::default()
+                .with_execution_timeout(std::time::Duration::from_millis(500)),
+        )
+        .build()
+        .expect("build sandbox");
+    let mut session = InProcessSession::new(&sandbox).await.expect("session");
+    session.execute("n = 0").await.expect("set state");
+    let count = session.execution_count();
+
+    let timed_out = session
+        .execute_with_journal("n += 1\nawait tick()\nwhile True: pass", None)
+        .await;
+    assert!(
+        matches!(timed_out.result, Err(eryx::Error::Timeout(_))),
+        "got {:?}",
+        timed_out.result
+    );
+    assert_eq!(timed_out.journal.entries.len(), 1, "tick was journaled");
+    assert_eq!(
+        session.execution_count(),
+        count,
+        "count kept across rollback"
+    );
+
+    let output = session.execute("print(n)").await.expect("session usable");
+    assert_eq!(output.stdout_text().trim(), "0", "pre-call state restored");
+}

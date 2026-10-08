@@ -134,149 +134,18 @@ impl<'a> InProcessSession<'a> {
     /// session.execute("x = 1").await?;
     /// session.execute("print(x)").await?;  // prints "1"
     /// ```
-    #[tracing::instrument(
-        name = "InProcessSession::execute",
-        skip(self, code),
-        fields(
-            code_len = code.len(),
-            execution_count = self.executor.execution_count(),
-        )
-    )]
-    async fn execute_internal(
-        &mut self,
-        code: &str,
-        replay_state: Option<Arc<Mutex<ReplayState>>>,
-    ) -> Result<ExecuteResult, Error> {
-        let start = Instant::now();
+    async fn execute_internal(&mut self, code: &str) -> Result<ExecuteResult, Error> {
+        let full_code = self.full_code(code);
+        run_code(self.sandbox, &mut self.executor, &full_code, None).await
+    }
 
-        // Execute preamble on first call if configured
-        let full_code = if !self.preamble_executed && !self.sandbox.preamble().is_empty() {
+    /// Prepend the sandbox preamble on the session's first call.
+    fn full_code(&mut self, code: &str) -> String {
+        if !self.preamble_executed && !self.sandbox.preamble().is_empty() {
             self.preamble_executed = true;
             format!("{}\n\n# User code\n{}", self.sandbox.preamble(), code)
         } else {
             code.to_string()
-        };
-
-        // Create channel for callback requests
-        let (callback_tx, callback_rx) = mpsc::channel::<CallbackRequest>(32);
-
-        // Wrap each callback with a replay wrapper when journaling/replay is
-        // enabled, otherwise use the registered callbacks directly.
-        let callbacks_arc = match &replay_state {
-            Some(state) => Arc::new(wrap_callbacks(self.sandbox.callbacks(), state)),
-            None => self.sandbox.callbacks_arc(),
-        };
-        let callbacks: Vec<Arc<dyn Callback>> = callbacks_arc.values().cloned().collect();
-
-        // Spawn task to handle callback requests concurrently
-        let resource_limits = self.sandbox.resource_limits().clone();
-        let secrets_arc = std::sync::Arc::new(self.sandbox.secrets().clone());
-        let callback_secrets = std::sync::Arc::clone(&secrets_arc);
-        let callback_handler = tokio::spawn(async move {
-            run_callback_handler(
-                callback_rx,
-                callbacks_arc,
-                resource_limits,
-                callback_secrets,
-            )
-            .await
-        });
-
-        // Create the trace channel and collector only when tracing is enabled.
-        let tracing_enabled = self.sandbox.tracing_enabled();
-        let (trace_tx, trace_collector) = if tracing_enabled {
-            let (trace_tx, trace_rx) = mpsc::unbounded_channel::<TraceRequest>();
-            let trace_handler = self.sandbox.trace_handler().clone();
-            let collect_trace = self.sandbox.trace_collection_enabled();
-            let trace_secrets = self.sandbox.secrets().clone();
-            let trace_collector = tokio::spawn(async move {
-                run_trace_collector(trace_rx, trace_handler, collect_trace, trace_secrets).await
-            });
-            (Some(trace_tx), Some(trace_collector))
-        } else {
-            (None, None)
-        };
-
-        // Spawn task to handle streaming output
-        let (output_tx, output_rx) = mpsc::unbounded_channel::<OutputRequest>();
-        let output_handler_ref = self.sandbox.output_handler().clone();
-        let output_secrets = self.sandbox.secrets().clone();
-        let scrub_stdout = self.sandbox.scrub_stdout();
-        let scrub_stderr = self.sandbox.scrub_stderr();
-        let output_collector = tokio::spawn(async move {
-            run_output_collector(
-                output_rx,
-                output_handler_ref,
-                output_secrets,
-                scrub_stdout,
-                scrub_stderr,
-            )
-            .await
-        });
-
-        // Execute using the session executor (keeps instance alive!)
-        // Timeout is handled via epoch-based interruption inside the executor
-        let mut execute_builder = self
-            .executor
-            .execute(&full_code)
-            .with_callbacks(&callbacks, callback_tx)
-            .with_output_streaming(output_tx);
-        if let Some(trace_tx) = trace_tx {
-            execute_builder = execute_builder.with_tracing(trace_tx);
-        }
-        let execution_result = execute_builder.run().await;
-
-        // Wait for the handler tasks to complete
-        let callback_invocations = callback_handler.await.unwrap_or(0);
-        let trace_events = match trace_collector {
-            Some(trace_collector) => trace_collector.await.unwrap_or_default(),
-            None => Vec::new(),
-        };
-        let _ = output_collector.await;
-
-        let duration = start.elapsed();
-
-        match execution_result {
-            Ok(output) => {
-                tracing::info!(
-                    duration_ms = duration.as_millis() as u64,
-                    callback_invocations,
-                    peak_memory_bytes = output.peak_memory_bytes,
-                    fuel_consumed = ?output.fuel_consumed,
-                    "Session execution completed"
-                );
-
-                // Scrub the structured result only when opted in (it's a
-                // programmatic side channel); scrub the error message too.
-                let (result, result_error) = if self.sandbox.scrub_result() {
-                    let secrets = self.sandbox.secrets();
-                    (
-                        output
-                            .result
-                            .map(|r| crate::secrets::scrub_placeholders(&r, secrets)),
-                        output
-                            .result_error
-                            .map(|e| crate::secrets::scrub_placeholders(&e, secrets)),
-                    )
-                } else {
-                    (output.result, output.result_error)
-                };
-
-                Ok(ExecuteResult {
-                    stdout: output.stdout,
-                    stderr: output.stderr,
-                    trace: trace_events,
-                    result,
-                    result_error,
-                    stats: ExecuteStats {
-                        duration,
-                        callback_invocations,
-                        peak_memory_bytes: Some(output.peak_memory_bytes),
-                        fuel_consumed: output.fuel_consumed,
-                    },
-                })
-            }
-            Err(error) => Err(error),
         }
     }
 
@@ -289,23 +158,34 @@ impl<'a> InProcessSession<'a> {
     /// call uses fresh replay state, so different calls can pass different
     /// journals.
     ///
-    /// # Suspension
+    /// # Suspension and rollback
     ///
-    /// A suspension halts the guest, which would leave the session unusable.
-    /// To allow resuming in the same session, the session state is snapshotted
-    /// before the call and, if a callback suspends, the instance is reset and
-    /// the snapshot restored. The session is then back where it was before the
-    /// call, so resuming with the returned journal does not apply the replayed
-    /// prefix's side effects twice. As with [`snapshot_state`](Self::snapshot_state),
-    /// only serializable globals survive the rollback (imported modules and
-    /// open handles do not). If the snapshot fails, the code is not run; if
-    /// the rollback fails, the session is unusable. Either error is returned
-    /// in [`ReplayOutcome::result`].
+    /// A suspension (or a timeout, fuel exhaustion or trap) halts the guest,
+    /// which would leave the session unusable. The call therefore runs under
+    /// [`SessionExecutor::run_with_rollback`]: the session state is snapshotted
+    /// first (one [`snapshot_state`](Self::snapshot_state) per call, skipped
+    /// when the sandbox has no callbacks), and if the run halts, the instance is
+    /// reset and the snapshot restored. The session is then back where it was
+    /// before the call, so resuming with the returned journal in the same
+    /// session does not apply the replayed prefix's effects on Python globals
+    /// twice. VFS/volume writes and network calls are not rolled back, and only
+    /// serializable globals survive (as with `snapshot_state`).
+    ///
+    /// If the snapshot fails (e.g. it exceeds the size limit), a warning is
+    /// logged and the call runs unprotected: a halt still resets the session so
+    /// it stays usable, but its state is lost. If the rollback itself fails, the
+    /// session is unusable: the error is returned in [`ReplayOutcome::result`]
+    /// and [`ReplayOutcome::suspended`] is cleared so the call doesn't look
+    /// resumable here. The journal is still valid for resuming in a fresh
+    /// session.
     ///
     /// # Preamble
     ///
     /// The sandbox preamble runs as part of the session's first call. If that
-    /// call is journaled, callbacks the preamble invokes are journaled too.
+    /// call is journaled, callbacks the preamble invokes are journaled too. A
+    /// rollback of that first call re-runs the preamble on the next call, but a
+    /// rollback of a later call does not, so any preamble setup that cannot be
+    /// serialized is lost.
     ///
     /// # Security
     ///
@@ -317,29 +197,35 @@ impl<'a> InProcessSession<'a> {
         journal: Option<CallbackJournal>,
     ) -> ReplayOutcome {
         let state = ReplayState::shared(code, journal);
-        let snapshot = match self.executor.snapshot_state().await {
-            Ok(snapshot) => snapshot,
-            Err(e) => return ReplayOutcome::from_state(&state, code, Err(e)),
-        };
         let preamble_executed = self.preamble_executed;
+        let full_code = self.full_code(code);
+        let sandbox = self.sandbox;
+        let callbacks: Vec<Arc<dyn Callback>> = sandbox.callbacks().values().cloned().collect();
 
-        let mut result = self.execute_internal(code, Some(Arc::clone(&state))).await;
+        let run = self
+            .executor
+            .run_with_rollback(
+                &callbacks,
+                || lock_suspended(&state),
+                async |executor| {
+                    run_code(sandbox, executor, &full_code, Some(Arc::clone(&state))).await
+                },
+            )
+            .await;
 
-        if matches!(result, Err(Error::Suspended(_))) {
-            let callbacks: Vec<Arc<dyn Callback>> =
-                self.sandbox.callbacks().values().cloned().collect();
-            self.preamble_executed = preamble_executed;
-            let rollback = async {
-                self.executor.reset(&callbacks).await?;
-                self.executor.restore_state(&snapshot).await
-            };
-            // A failed rollback leaves the session unusable; report that instead
-            // of the suspension (`suspended` is still set on the outcome).
-            if let Err(e) = rollback.await {
-                result = Err(e);
+        match run {
+            Ok((result, rolled_back)) => {
+                if rolled_back {
+                    self.preamble_executed = preamble_executed;
+                }
+                ReplayOutcome::from_state(&state, code, result)
+            }
+            Err(rollback_error) => {
+                let mut outcome = ReplayOutcome::from_state(&state, code, Err(rollback_error));
+                outcome.suspended = None;
+                outcome
             }
         }
-        ReplayOutcome::from_state(&state, code, result)
     }
 
     /// Get the number of executions performed in this session.
@@ -383,10 +269,159 @@ impl<'a> InProcessSession<'a> {
     }
 }
 
+/// Whether a callback suspended the run that used `state`.
+fn lock_suspended(state: &Mutex<ReplayState>) -> bool {
+    state
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .suspended()
+        .is_some()
+}
+
+/// Run `full_code` on `executor` with `sandbox`'s callbacks, handlers and
+/// limits, wrapping callbacks for replay when `replay_state` is set.
+#[tracing::instrument(
+    name = "InProcessSession::execute",
+    skip(sandbox, executor, full_code, replay_state),
+    fields(
+        code_len = full_code.len(),
+        execution_count = executor.execution_count(),
+    )
+)]
+async fn run_code(
+    sandbox: &Sandbox,
+    executor: &mut SessionExecutor,
+    full_code: &str,
+    replay_state: Option<Arc<Mutex<ReplayState>>>,
+) -> Result<ExecuteResult, Error> {
+    let start = Instant::now();
+
+    // Create channel for callback requests
+    let (callback_tx, callback_rx) = mpsc::channel::<CallbackRequest>(32);
+
+    // Wrap each callback with a replay wrapper when journaling/replay is
+    // enabled, otherwise use the registered callbacks directly.
+    let callbacks_arc = match &replay_state {
+        Some(state) => Arc::new(wrap_callbacks(sandbox.callbacks(), state)),
+        None => sandbox.callbacks_arc(),
+    };
+    let callbacks: Vec<Arc<dyn Callback>> = callbacks_arc.values().cloned().collect();
+
+    // Spawn task to handle callback requests concurrently
+    let resource_limits = sandbox.resource_limits().clone();
+    let secrets_arc = std::sync::Arc::new(sandbox.secrets().clone());
+    let callback_secrets = std::sync::Arc::clone(&secrets_arc);
+    let callback_handler = tokio::spawn(async move {
+        run_callback_handler(
+            callback_rx,
+            callbacks_arc,
+            resource_limits,
+            callback_secrets,
+        )
+        .await
+    });
+
+    // Create the trace channel and collector only when tracing is enabled.
+    let tracing_enabled = sandbox.tracing_enabled();
+    let (trace_tx, trace_collector) = if tracing_enabled {
+        let (trace_tx, trace_rx) = mpsc::unbounded_channel::<TraceRequest>();
+        let trace_handler = sandbox.trace_handler().clone();
+        let collect_trace = sandbox.trace_collection_enabled();
+        let trace_secrets = sandbox.secrets().clone();
+        let trace_collector = tokio::spawn(async move {
+            run_trace_collector(trace_rx, trace_handler, collect_trace, trace_secrets).await
+        });
+        (Some(trace_tx), Some(trace_collector))
+    } else {
+        (None, None)
+    };
+
+    // Spawn task to handle streaming output
+    let (output_tx, output_rx) = mpsc::unbounded_channel::<OutputRequest>();
+    let output_handler_ref = sandbox.output_handler().clone();
+    let output_secrets = sandbox.secrets().clone();
+    let scrub_stdout = sandbox.scrub_stdout();
+    let scrub_stderr = sandbox.scrub_stderr();
+    let output_collector = tokio::spawn(async move {
+        run_output_collector(
+            output_rx,
+            output_handler_ref,
+            output_secrets,
+            scrub_stdout,
+            scrub_stderr,
+        )
+        .await
+    });
+
+    // Execute using the session executor (keeps instance alive!)
+    // Timeout is handled via epoch-based interruption inside the executor
+    let mut execute_builder = executor
+        .execute(full_code)
+        .with_callbacks(&callbacks, callback_tx)
+        .with_output_streaming(output_tx);
+    if let Some(trace_tx) = trace_tx {
+        execute_builder = execute_builder.with_tracing(trace_tx);
+    }
+    let execution_result = execute_builder.run().await;
+
+    // Wait for the handler tasks to complete
+    let callback_invocations = callback_handler.await.unwrap_or(0);
+    let trace_events = match trace_collector {
+        Some(trace_collector) => trace_collector.await.unwrap_or_default(),
+        None => Vec::new(),
+    };
+    let _ = output_collector.await;
+
+    let duration = start.elapsed();
+
+    match execution_result {
+        Ok(output) => {
+            tracing::info!(
+                duration_ms = duration.as_millis() as u64,
+                callback_invocations,
+                peak_memory_bytes = output.peak_memory_bytes,
+                fuel_consumed = ?output.fuel_consumed,
+                "Session execution completed"
+            );
+
+            // Scrub the structured result only when opted in (it's a
+            // programmatic side channel); scrub the error message too.
+            let (result, result_error) = if sandbox.scrub_result() {
+                let secrets = sandbox.secrets();
+                (
+                    output
+                        .result
+                        .map(|r| crate::secrets::scrub_placeholders(&r, secrets)),
+                    output
+                        .result_error
+                        .map(|e| crate::secrets::scrub_placeholders(&e, secrets)),
+                )
+            } else {
+                (output.result, output.result_error)
+            };
+
+            Ok(ExecuteResult {
+                stdout: output.stdout,
+                stderr: output.stderr,
+                trace: trace_events,
+                result,
+                result_error,
+                stats: ExecuteStats {
+                    duration,
+                    callback_invocations,
+                    peak_memory_bytes: Some(output.peak_memory_bytes),
+                    fuel_consumed: output.fuel_consumed,
+                },
+            })
+        }
+        Err(error) => Err(error),
+    }
+}
+
 #[async_trait]
 impl Session for InProcessSession<'_> {
     async fn execute(&mut self, code: &str) -> Result<ExecuteResult, Error> {
-        self.execute_internal(code, None).await
+        self.execute_internal(code).await
     }
 
     async fn reset(&mut self) -> Result<(), Error> {

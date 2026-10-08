@@ -4,7 +4,7 @@ When an LLM iterates on a Python script that drives expensive [callbacks](./call
 
 **Suspension** is the companion feature: a callback can return [`CallbackError::Suspend`] to halt execution ("I can't answer yet — retry later"). Eryx records what was waiting on, stops the guest immediately, and the recorded journal lets you resume from where you left off once the dependency is ready.
 
-> **Availability.** This guide covers the **Rust library API**, the **Python bindings** (`Sandbox` only; journals on `SandboxFactory`, `Session` and `SandboxPool`, and per-execute journals, are tracked in [issue #521](https://github.com/eryx-org/eryx/issues/521)) and the **JavaScript bindings** (`@bsull/eryx`, which implement the same matching, divergence guard and suspension semantics in the JS host). The [gRPC server](./grpc-server.md) also implements both features — including HMAC-signed journals — over its `callback_journal` field and `CALLBACK_OUTCOME_SUSPEND` outcome; see the [gRPC Server](./grpc-server.md#callback-replay) guide for the wire-level details.
+> **Availability.** This guide covers the **Rust library API**, the **Python bindings** (`Sandbox`, `Session` and pooled sandboxes) and the **JavaScript bindings** (`@bsull/eryx`, which implement the same matching, divergence guard and suspension semantics in the JS host). The [gRPC server](./grpc-server.md) also implements both features — including HMAC-signed journals — over its `callback_journal` field and `CALLBACK_OUTCOME_SUSPEND` outcome; see the [gRPC Server](./grpc-server.md#callback-replay) guide for the wire-level details.
 
 ## How replay works
 
@@ -174,7 +174,7 @@ console.log(`replayed ${outcome.replayedCallbacks} callbacks`);
 
 <!-- langtabs-end -->
 
-Plain [`Sandbox::execute`] never journals or replays (likewise JavaScript's `execute`). Each call to `execute_with_journal` uses fresh replay state, so one sandbox can record, replay and resume different journals without being rebuilt. Sessions (`InProcessSession` in Rust, `Session` in Python) and pooled sandboxes have the same `execute_with_journal` method. In a session, Python state persists across journaled calls as usual, and a plain `execute` in between runs its callbacks live. If the session's first call is journaled, callbacks invoked by the sandbox preamble (which runs as part of that call) are journaled too.
+Plain [`Sandbox::execute`] never journals or replays (likewise JavaScript's `execute`). Each call to `execute_with_journal` uses fresh replay state, so one sandbox can record, replay and resume different journals without being rebuilt. Sessions (`InProcessSession` in Rust, `Session` in Python) and pooled sandboxes have the same `execute_with_journal` method. In a session, Python state persists across journaled calls as usual, and a plain `execute` in between runs its callbacks live. In Rust, the sandbox preamble runs as part of a session's first call, so if that call is journaled, callbacks the preamble invokes are journaled too.
 
 ### Concurrent identity
 
@@ -308,7 +308,15 @@ if (outcome.suspended) {
 
 To resume, execute the same code again with the journal from the suspended run (`execute_with_journal(code, Some(outcome.journal))` in Rust, `execute_with_journal(code, journal=outcome.journal)` in Python, `executeWithJournal(code, { journal: outcome.journal })` in JavaScript). The recorded prefix replays from cache; the previously-suspended callback re-runs live (it was never journaled) and, assuming its dependency is now ready, returns a real value so the script continues past the suspension point.
 
-A session can resume in place. A suspension halts the guest, so before each journaled call a session snapshots its state, and on suspension it resets the instance and restores that snapshot. The resume then starts from the state before the suspended call, so code that ran before the suspension (such as `n += 1`) is not applied twice. Only serializable globals survive the rollback, as with `snapshot_state`; imported modules and open handles do not, so re-import them in the script rather than relying on earlier calls.
+A session can resume in place. A suspension (like a timeout, fuel exhaustion or a trap) halts the guest, so before each journaled call a session snapshots its Python globals, and if the run halts it resets the instance and restores that snapshot. The resume then starts from the state before the suspended call, so Python code that ran before the suspension (such as `n += 1`) is not applied twice. The rollback covers Python globals only: VFS and volume writes and network calls made before the suspension are not undone.
+
+Some caveats:
+
+- The snapshot behaves like `snapshot_state`: imported modules are restored (re-imported by reference), but objects that can't be serialized, such as open files or sockets, are dropped.
+- Each journaled session call costs one snapshot. Sessions without callbacks skip it, since nothing can suspend.
+- If the snapshot fails (for example, it exceeds the snapshot size limit), the call runs without rollback protection and a warning is logged. A halt then resets the session so it stays usable, but its state is lost.
+- If the rollback itself fails, the session is unusable. The outcome then reports that error and no suspension, so it isn't mistaken for something resumable in place. The journal is still valid for resuming in a new session.
+- In Rust, the preamble is not re-run after rolling back a later call, so preamble setup that can't be serialized is lost.
 
 ### Live re-runs and idempotency
 

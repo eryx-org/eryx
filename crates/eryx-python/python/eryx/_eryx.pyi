@@ -1169,12 +1169,21 @@ class Session:
         """Execute code in the session with callback journaling and replay.
 
         Session state persists as with ``execute()``. See
-        ``Sandbox.execute_with_journal()`` for the journal semantics. If a
-        callback suspends, the session is rolled back to its state from before
-        the call (only serializable globals survive, as with
-        ``snapshot_state()``), so resuming in the same session does not apply
-        the replayed prefix's side effects twice. If the session's first call
-        is journaled, callbacks invoked by the preamble are journaled too.
+        ``Sandbox.execute_with_journal()`` for the journal semantics.
+
+        If the run halts (a callback suspends, or it times out or runs out of
+        fuel), the session is rolled back to its Python globals from before the
+        call, so resuming in the same session does not apply the replayed
+        prefix's effects twice. The rollback works like ``snapshot_state()``
+        (unserializable objects such as open files are dropped) and does not
+        undo VFS writes or network calls. It costs one snapshot per call, which
+        is skipped when the session has no callbacks.
+
+        If the snapshot fails (e.g. it is too large), the call runs unprotected
+        and a halt resets the session, losing its state. If the rollback itself
+        fails, ``error`` is an ``InitializationError``, ``suspended`` is
+        ``None``, and the session is unusable; resume with ``journal`` in a new
+        session.
 
         Args:
             code: Python source code to execute.

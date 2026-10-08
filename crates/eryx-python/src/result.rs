@@ -223,6 +223,17 @@ impl ReplayOutcome {
         )
     }
 
+    /// Mark this outcome as a failed session rollback: `error` becomes the
+    /// session-level `error` and `suspended` is cleared, so it can't be
+    /// mistaken for a suspension that is resumable in the same session. The
+    /// journal is kept for resuming in a new session.
+    pub(crate) fn into_rollback_failure(mut self, py: Python<'_>, error: PyErr) -> Self {
+        self.result = None;
+        self.error = Some(error.into_value(py).into_any());
+        self.suspended = None;
+        self
+    }
+
     fn new(
         py: Python<'_>,
         result: Result<ExecuteResult, eryx::Error>,
