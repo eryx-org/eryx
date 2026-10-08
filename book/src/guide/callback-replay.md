@@ -41,7 +41,7 @@ let sandbox = Sandbox::embedded()
     .with_callback(charge_card)
     .build()?;
 
-let outcome = sandbox.execute_with_journal(code).await;
+let outcome = sandbox.execute_with_journal(code, None).await;
 
 // `journal` is always populated, even on error — persist it to resume later.
 let journal = outcome.journal;
@@ -116,7 +116,7 @@ In JavaScript, the outcome has the same fields in camelCase: `result` (an `Execu
 
 ## Replaying a journal
 
-Supply the previously-recorded journal with [`with_replay_journal`] (`replay_journal=` in Python) when building the sandbox — in JavaScript, pass it to `executeWithJournal` as `options.journal` — then execute the same code again:
+Pass the previously-recorded journal to `execute_with_journal` (`journal=` in Python, `options.journal` in JavaScript) and execute the same code again:
 
 <!-- langtabs-start -->
 
@@ -128,10 +128,12 @@ use eryx::Sandbox;
 let sandbox = Sandbox::embedded()
     .with_callback(fetch_user)
     .with_callback(charge_card)
-    .with_replay_journal(previous_journal) // results recorded earlier
     .build()?;
 
-let outcome = sandbox.execute_with_journal(code).await;
+// `previous_journal` holds the results recorded earlier.
+let outcome = sandbox
+    .execute_with_journal(code, Some(previous_journal))
+    .await;
 
 // Callbacks that matched the journal returned cached results instead of
 // running live.
@@ -148,14 +150,10 @@ def fetch_user(id: int):
 
 callbacks = [{"name": "fetch_user", "fn": fetch_user}]
 code = "user = await fetch_user(id=1)"
-previous = eryx.Sandbox(callbacks=callbacks).execute_with_journal(code).journal
+sandbox = eryx.Sandbox(callbacks=callbacks)
+previous = sandbox.execute_with_journal(code).journal
 
-sandbox = eryx.Sandbox(
-    callbacks=callbacks,
-    replay_journal=previous,  # results recorded earlier
-)
-
-outcome = sandbox.execute_with_journal(code)
+outcome = sandbox.execute_with_journal(code, journal=previous)  # results recorded earlier
 
 # Callbacks that matched the journal returned cached results instead of
 # running live.
@@ -176,7 +174,7 @@ console.log(`replayed ${outcome.replayedCallbacks} callbacks`);
 
 <!-- langtabs-end -->
 
-`with_replay_journal` (`replay_journal=`) only affects `execute_with_journal`; plain [`Sandbox::execute`] ignores it (likewise, JavaScript's `execute` never journals or replays). Each call to `execute_with_journal` uses fresh replay state, so the same sandbox can be executed repeatedly without the journal cursor leaking between runs.
+Plain [`Sandbox::execute`] never journals or replays (likewise JavaScript's `execute`). Each call to `execute_with_journal` uses fresh replay state, so one sandbox can record, replay and resume different journals without being rebuilt. Sessions (`InProcessSession` in Rust, `Session` in Python) and pooled sandboxes have the same `execute_with_journal` method; in a session, Python state persists across journaled calls as usual.
 
 ### Concurrent identity
 
@@ -255,7 +253,7 @@ Because the guest is halted, `outcome.result` will be an `Err` (in Python, `resu
 ### Rust
 
 ```rs
-let outcome = sandbox.execute_with_journal(code).await;
+let outcome = sandbox.execute_with_journal(code, None).await;
 
 if let Some(suspended) = &outcome.suspended {
     // Persist outcome.journal, wait for the dependency named by
@@ -308,7 +306,7 @@ if (outcome.suspended) {
 
 ### Resuming
 
-To resume, rebuild the sandbox with the journal from the suspended run via `with_replay_journal` (`eryx.Sandbox(..., replay_journal=outcome.journal)` in Python, `executeWithJournal(code, { journal: outcome.journal })` in JavaScript) and execute the same code again. The recorded prefix replays from cache; the previously-suspended callback re-runs live (it was never journaled) and, assuming its dependency is now ready, returns a real value so the script continues past the suspension point.
+To resume, execute the same code again with the journal from the suspended run (`execute_with_journal(code, Some(outcome.journal))` in Rust, `execute_with_journal(code, journal=outcome.journal)` in Python, `executeWithJournal(code, { journal: outcome.journal })` in JavaScript). The recorded prefix replays from cache; the previously-suspended callback re-runs live (it was never journaled) and, assuming its dependency is now ready, returns a real value so the script continues past the suspension point.
 
 ### Live re-runs and idempotency
 
@@ -352,7 +350,6 @@ The core `eryx` crate is agnostic to signing and trusts whatever journal it rece
 
 [`Sandbox::execute`]: https://docs.eryx.run/latest/api/rust/eryx/struct.Sandbox.html#method.execute
 [`Sandbox::execute_with_journal`]: https://docs.eryx.run/latest/api/rust/eryx/struct.Sandbox.html#method.execute_with_journal
-[`with_replay_journal`]: https://docs.eryx.run/latest/api/rust/eryx/struct.SandboxBuilder.html#method.with_replay_journal
 [`ReplayOutcome`]: https://docs.eryx.run/latest/api/rust/eryx/struct.ReplayOutcome.html
 [`CallbackJournal`]: https://docs.eryx.run/latest/api/rust/eryx/struct.CallbackJournal.html
 [`SuspendedCallback`]: https://docs.eryx.run/latest/api/rust/eryx/struct.SuspendedCallback.html

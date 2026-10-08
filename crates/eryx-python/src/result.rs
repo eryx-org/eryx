@@ -160,7 +160,7 @@ pub struct ReplayOutcome {
     error: Option<Py<PyAny>>,
 
     /// The callback journal recorded during this run, as a JSON-compatible
-    /// dict. Pass it as `replay_journal=` to a new `Sandbox` to replay it.
+    /// dict. Pass it as `journal=` to a later `execute_with_journal()` to replay it.
     #[pyo3(get)]
     journal: Py<PyAny>,
 
@@ -194,28 +194,77 @@ impl ReplayOutcome {
 impl ReplayOutcome {
     /// Convert an `eryx::ReplayOutcome`, mapping any error to its Python exception.
     pub(crate) fn from_outcome(py: Python<'_>, outcome: eryx::ReplayOutcome) -> PyResult<Self> {
-        let (result, error) = match outcome.result {
-            Ok(r) => (Some(ExecuteResult::from(r)), None),
+        Self::new(
+            py,
+            outcome.result.map(ExecuteResult::from),
+            &outcome.journal,
+            outcome.replayed_callbacks,
+            outcome.suspended,
+        )
+    }
+
+    /// Build an outcome from a run that used `state` (for callers that drive
+    /// the executor themselves, like `Session`).
+    pub(crate) fn from_state(
+        py: Python<'_>,
+        result: Result<ExecuteResult, eryx::Error>,
+        state: &std::sync::Mutex<eryx::ReplayState>,
+        code: &str,
+    ) -> PyResult<Self> {
+        let guard = state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        Self::new(
+            py,
+            result,
+            &guard.build_journal(code),
+            guard.replayed_count(),
+            guard.suspended().cloned(),
+        )
+    }
+
+    fn new(
+        py: Python<'_>,
+        result: Result<ExecuteResult, eryx::Error>,
+        journal: &eryx::CallbackJournal,
+        replayed_callbacks: u32,
+        suspended: Option<eryx::SuspendedCallback>,
+    ) -> PyResult<Self> {
+        let (result, error) = match result {
+            Ok(r) => (Some(r), None),
             Err(e) => (
                 None,
                 Some(crate::error::eryx_error_to_py(e).into_value(py).into_any()),
             ),
         };
-        let journal = pythonize::pythonize(py, &outcome.journal)
+        let journal = pythonize::pythonize(py, journal)
             .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?
             .unbind();
         Ok(Self {
             result,
             error,
             journal,
-            replayed_callbacks: outcome.replayed_callbacks,
-            suspended: outcome.suspended.map(|s| SuspendedCallback {
+            replayed_callbacks,
+            suspended: suspended.map(|s| SuspendedCallback {
                 name: s.name,
                 args_json: s.args_json,
                 reason: s.reason,
             }),
         })
     }
+}
+
+/// Parse an optional `journal=` argument (a `ReplayOutcome.journal` dict).
+pub(crate) fn journal_from_py(
+    journal: Option<&Bound<'_, PyAny>>,
+) -> PyResult<Option<eryx::CallbackJournal>> {
+    journal
+        .map(|j| {
+            pythonize::depythonize(j).map_err(|e| {
+                pyo3::exceptions::PyValueError::new_err(format!("Invalid journal: {e}"))
+            })
+        })
+        .transpose()
 }
 
 /// Details of the callback that suspended execution by raising `SuspendCallback`.

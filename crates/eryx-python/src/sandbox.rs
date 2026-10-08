@@ -98,10 +98,6 @@ impl Sandbox {
     ///     network: Optional network configuration. If provided, enables networking.
     ///     callbacks: Optional callbacks that sandboxed code can invoke.
     ///         Can be a CallbackRegistry or a list of callback dicts.
-    ///     replay_journal: Optional journal (from `ReplayOutcome.journal`) whose
-    ///         callback results `execute_with_journal()` replays instead of
-    ///         invoking callbacks live. Ignored by `execute()`. Trusted input:
-    ///         replayed results are returned to the sandbox verbatim.
     ///
     /// Returns:
     ///     A new Sandbox instance ready to execute Python code.
@@ -147,7 +143,7 @@ impl Sandbox {
     ///     )
     ///     sandbox = factory.create_sandbox()
     #[new]
-    #[pyo3(signature = (*, resource_limits=None, network=None, callbacks=None, mcp=None, secrets=None, scrub_stdout=None, scrub_stderr=None, scrub_result=None, scrub_files=None, volumes=None, on_stdout=None, on_stderr=None, result_variable=None, replay_journal=None))]
+    #[pyo3(signature = (*, resource_limits=None, network=None, callbacks=None, mcp=None, secrets=None, scrub_stdout=None, scrub_stderr=None, scrub_result=None, scrub_files=None, volumes=None, on_stdout=None, on_stderr=None, result_variable=None))]
     #[allow(clippy::too_many_arguments)]
     fn new(
         py: Python<'_>,
@@ -164,7 +160,6 @@ impl Sandbox {
         on_stdout: Option<Py<PyAny>>,
         on_stderr: Option<Py<PyAny>>,
         result_variable: Option<String>,
-        replay_journal: Option<Bound<'_, PyAny>>,
     ) -> PyResult<Self> {
         let runtime = crate::error::make_runtime()?;
 
@@ -238,13 +233,6 @@ impl Sandbox {
             });
         }
 
-        if let Some(ref journal) = replay_journal {
-            let journal: eryx::CallbackJournal = pythonize::depythonize(journal).map_err(|e| {
-                pyo3::exceptions::PyValueError::new_err(format!("Invalid replay_journal: {e}"))
-            })?;
-            builder = builder.with_replay_journal(journal);
-        }
-
         let inner = builder.build().map_err(eryx_error_to_py)?;
 
         Ok(Self { inner, runtime })
@@ -287,7 +275,7 @@ impl Sandbox {
     }
 
     /// Execute Python code, journaling callback results and replaying them
-    /// from `replay_journal` if one was given.
+    /// from `journal` if one was given.
     ///
     /// Unlike `execute()`, this never raises for execution failures: the error
     /// is returned on the outcome alongside the journal, which is always
@@ -295,6 +283,10 @@ impl Sandbox {
     ///
     /// Args:
     ///     code: Python source code to execute.
+    ///     journal: Optional journal (from a previous `ReplayOutcome.journal`)
+    ///         whose callback results are replayed instead of invoking callbacks
+    ///         live. Trusted input: replayed results are returned to the sandbox
+    ///         verbatim.
     ///
     /// Returns:
     ///     ReplayOutcome with the result or error, the recorded journal, the
@@ -303,14 +295,21 @@ impl Sandbox {
     /// Example:
     ///     outcome = sandbox.execute_with_journal(code)
     ///     if outcome.suspended:
-    ///         save(outcome.journal)  # resume later with Sandbox(replay_journal=...)
+    ///         save(outcome.journal)  # resume later with execute_with_journal(code, journal=...)
     ///     elif outcome.error:
     ///         raise outcome.error
-    fn execute_with_journal(&self, py: Python<'_>, code: &str) -> PyResult<ReplayOutcome> {
+    #[pyo3(signature = (code, journal=None))]
+    fn execute_with_journal(
+        &self,
+        py: Python<'_>,
+        code: &str,
+        journal: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<ReplayOutcome> {
+        let journal = crate::result::journal_from_py(journal)?;
         let code = code.to_string();
         let runtime = self.runtime.clone();
         let inner = &self.inner;
-        let outcome = py.detach(|| runtime.block_on(inner.execute_with_journal(&code)));
+        let outcome = py.detach(|| runtime.block_on(inner.execute_with_journal(&code, journal)));
         ReplayOutcome::from_outcome(py, outcome)
     }
 

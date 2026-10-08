@@ -16,7 +16,7 @@ use tokio::sync::mpsc;
 use crate::callback::extract_callbacks;
 use crate::error::{InitializationError, eryx_error_to_py};
 use crate::net_config::NetConfig;
-use crate::result::ExecuteResult;
+use crate::result::{ExecuteResult, ReplayOutcome};
 use crate::sandbox::PyOutputHandler;
 use crate::vfs::VfsStorage;
 
@@ -306,111 +306,48 @@ impl Session {
     ///     result = session.execute('print(x + y)')
     ///     print(result.stdout)  # "3"
     fn execute(&self, py: Python<'_>, code: &str) -> PyResult<ExecuteResult> {
-        let code = code.to_string();
-        let runtime = self.runtime.clone();
-        let callbacks_map = self.callbacks.clone();
-        let output_handler = self.output_handler.clone();
-        let net_config = self.net_config.clone();
-        let callback_limits = self.callback_limits.clone();
+        self.run(py, code, self.callbacks.clone())?
+            .map(ExecuteResult::from_execution_output)
+            .map_err(eryx_error_to_py)
+    }
 
-        // Release the GIL while executing
-        py.detach(|| {
-            let mut guard = self
-                .inner
-                .lock()
-                .map_err(|_| InitializationError::new_err("session lock poisoned"))?;
-            let inner = guard
-                .as_mut()
-                .ok_or_else(|| InitializationError::new_err("session is not initialized"))?;
-
-            // Get callbacks as a vec for with_callbacks
-            let callbacks_vec: Vec<Arc<dyn eryx::Callback>> =
-                callbacks_map.values().cloned().collect();
-
-            runtime
-                .block_on(async {
-                    // Create callback channel
-                    let (callback_tx, callback_rx) = tokio::sync::mpsc::channel(32);
-
-                    // Spawn callback handler task
-                    let handler_callbacks = callbacks_map.clone();
-                    let handler = tokio::spawn(async move {
-                        eryx::callback_handler::run_callback_handler(
-                            callback_rx,
-                            handler_callbacks,
-                            callback_limits,
-                            std::sync::Arc::new(std::collections::HashMap::new()),
-                        )
-                        .await
-                    });
-
-                    // Spawn network handler if networking is enabled
-                    let (net_tx, net_handler) = if let Some(ref config) = net_config {
-                        let (tx, rx) = mpsc::channel::<eryx::NetRequest>(32);
-                        let manager = eryx::net::ConnectionManager::new(
-                            config.clone(),
-                            std::collections::HashMap::new(),
-                        );
-                        let task = tokio::spawn(async move {
-                            eryx::callback_handler::run_net_handler(rx, manager).await;
-                        });
-                        (Some(tx), Some(task))
-                    } else {
-                        (None, None)
-                    };
-
-                    // Spawn output collector for real-time streaming if handler is configured
-                    let (output_tx, output_collector) = if output_handler.is_some() {
-                        let (tx, rx) = mpsc::unbounded_channel::<eryx::OutputRequest>();
-                        let handler = output_handler.clone();
-                        let task = tokio::spawn(async move {
-                            eryx::callback_handler::run_output_collector(
-                                rx,
-                                handler,
-                                std::collections::HashMap::new(),
-                                false,
-                                false,
-                            )
-                            .await;
-                        });
-                        (Some(tx), Some(task))
-                    } else {
-                        (None, None)
-                    };
-
-                    // Execute with callbacks and optional output streaming / networking
-                    let mut builder = inner
-                        .execute(&code)
-                        .with_callbacks(&callbacks_vec, callback_tx);
-
-                    if let Some(tx) = net_tx {
-                        builder = builder.with_network(tx);
-                    }
-
-                    if let Some(tx) = output_tx {
-                        builder = builder.with_output_streaming(tx);
-                    }
-
-                    let result = builder.run().await;
-
-                    // Wait for handler to finish (it will exit when channel closes)
-                    let _callback_count = handler.await.unwrap_or(0);
-
-                    // Wait for network handler to finish
-                    if let Some(handler) = net_handler {
-                        let _ = handler.await;
-                    }
-
-                    // Wait for output collector to finish
-                    if let Some(collector) = output_collector {
-                        let _ = collector.await;
-                    }
-
-                    result
-                })
-                .map(ExecuteResult::from_execution_output)
-                .map_err(eryx_error_to_py)
-        })
+    /// Execute code in the session, journaling callback results and replaying
+    /// them from `journal` if one was given. Session state persists as with
+    /// `execute()`. See `Sandbox.execute_with_journal()`.
+    ///
+    /// Args:
+    ///     code: Python source code to execute.
+    ///     journal: Optional journal from a previous `ReplayOutcome.journal`.
+    ///         Trusted input: replayed results are returned verbatim.
+    ///
+    /// Returns:
+    ///     ReplayOutcome with the result or error, the recorded journal, the
+    ///     number of replayed callbacks, and any suspension details.
+    #[pyo3(signature = (code, journal=None))]
+    fn execute_with_journal(
+        &self,
+        py: Python<'_>,
+        code: &str,
+        journal: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<ReplayOutcome> {
+        let journal = crate::result::journal_from_py(journal)?
+            .unwrap_or_else(|| eryx::CallbackJournal::new(code));
+        let state = Arc::new(Mutex::new(eryx::ReplayState::new(journal)));
+        let wrapped: HashMap<String, Arc<dyn eryx::Callback>> = self
+            .callbacks
+            .iter()
+            .map(|(name, cb)| {
+                let cb: Arc<dyn eryx::Callback> = Arc::new(eryx::ReplayCallback::new(
+                    Arc::clone(cb),
+                    Arc::clone(&state),
+                ));
+                (name.clone(), cb)
+            })
+            .collect();
+        let result = self
+            .run(py, code, Arc::new(wrapped))?
+            .map(ExecuteResult::from_execution_output);
+        ReplayOutcome::from_state(py, result, &state, code)
     }
 
     /// Reset the session to a fresh state.
@@ -646,6 +583,121 @@ impl Session {
             String::new()
         };
         format!("Session(execution_count={}{})", count, vfs_info)
+    }
+}
+
+impl Session {
+    /// Shared body of `execute()` and `execute_with_journal()`.
+    ///
+    /// The outer `PyResult` carries session-level failures; the inner `Result`
+    /// is the execution outcome.
+    fn run(
+        &self,
+        py: Python<'_>,
+        code: &str,
+        callbacks_map: Arc<HashMap<String, Arc<dyn eryx::Callback>>>,
+    ) -> PyResult<Result<eryx::ExecutionOutput, eryx::Error>> {
+        let code = code.to_string();
+        let runtime = self.runtime.clone();
+        let output_handler = self.output_handler.clone();
+        let net_config = self.net_config.clone();
+        let callback_limits = self.callback_limits.clone();
+
+        // Release the GIL while executing
+        py.detach(|| {
+            let mut guard = self
+                .inner
+                .lock()
+                .map_err(|_| InitializationError::new_err("session lock poisoned"))?;
+            let inner = guard
+                .as_mut()
+                .ok_or_else(|| InitializationError::new_err("session is not initialized"))?;
+
+            // Get callbacks as a vec for with_callbacks
+            let callbacks_vec: Vec<Arc<dyn eryx::Callback>> =
+                callbacks_map.values().cloned().collect();
+
+            Ok(runtime.block_on(async {
+                // Create callback channel
+                let (callback_tx, callback_rx) = tokio::sync::mpsc::channel(32);
+
+                // Spawn callback handler task
+                let handler_callbacks = callbacks_map.clone();
+                let handler = tokio::spawn(async move {
+                    eryx::callback_handler::run_callback_handler(
+                        callback_rx,
+                        handler_callbacks,
+                        callback_limits,
+                        std::sync::Arc::new(std::collections::HashMap::new()),
+                    )
+                    .await
+                });
+
+                // Spawn network handler if networking is enabled
+                let (net_tx, net_handler) = if let Some(ref config) = net_config {
+                    let (tx, rx) = mpsc::channel::<eryx::NetRequest>(32);
+                    let manager = eryx::net::ConnectionManager::new(
+                        config.clone(),
+                        std::collections::HashMap::new(),
+                    );
+                    let task = tokio::spawn(async move {
+                        eryx::callback_handler::run_net_handler(rx, manager).await;
+                    });
+                    (Some(tx), Some(task))
+                } else {
+                    (None, None)
+                };
+
+                // Spawn output collector for real-time streaming if handler is configured
+                let (output_tx, output_collector) = if output_handler.is_some() {
+                    let (tx, rx) = mpsc::unbounded_channel::<eryx::OutputRequest>();
+                    let handler = output_handler.clone();
+                    let task = tokio::spawn(async move {
+                        eryx::callback_handler::run_output_collector(
+                            rx,
+                            handler,
+                            std::collections::HashMap::new(),
+                            false,
+                            false,
+                        )
+                        .await;
+                    });
+                    (Some(tx), Some(task))
+                } else {
+                    (None, None)
+                };
+
+                // Execute with callbacks and optional output streaming / networking
+                let mut builder = inner
+                    .execute(&code)
+                    .with_callbacks(&callbacks_vec, callback_tx);
+
+                if let Some(tx) = net_tx {
+                    builder = builder.with_network(tx);
+                }
+
+                if let Some(tx) = output_tx {
+                    builder = builder.with_output_streaming(tx);
+                }
+
+                let result = builder.run().await;
+
+                // Wait for handler to finish (it will exit when channel closes)
+                let _callback_count = handler.await.unwrap_or(0);
+
+                // Wait for network handler to finish
+                if let Some(handler) = net_handler {
+                    let _ = handler.await;
+                }
+
+                // Wait for output collector to finish
+                if let Some(collector) = output_collector {
+                    let _ = collector.await;
+                }
+
+                result
+            }))
+        })
     }
 }
 

@@ -2,6 +2,8 @@
 
 import json
 
+import pytest
+
 import eryx
 
 CODE = """
@@ -36,7 +38,7 @@ class TestReplay:
         # The journal survives a JSON round trip.
         journal = json.loads(json.dumps(first.journal))
 
-        second = eryx.Sandbox(callbacks=cbs, replay_journal=journal).execute_with_journal(CODE)
+        second = eryx.Sandbox(callbacks=cbs).execute_with_journal(CODE, journal=journal)
         assert second.error is None
         assert second.result.stdout_text == "A B\n"
         assert second.replayed_callbacks == 2
@@ -50,13 +52,38 @@ class TestReplay:
         assert isinstance(outcome.error, eryx.ExecutionError)
         assert len(outcome.journal["entries"]) == 2
 
-    def test_execute_ignores_replay_journal(self):
+    def test_one_sandbox_records_and_replays(self):
         fetch, calls = counting_fetch()
-        cbs = [{"name": "fetch", "fn": fetch}]
-        journal = eryx.Sandbox(callbacks=cbs).execute_with_journal(CODE).journal
+        sandbox = eryx.Sandbox(callbacks=[{"name": "fetch", "fn": fetch}])
+        journal = sandbox.execute_with_journal(CODE).journal
 
-        eryx.Sandbox(callbacks=cbs, replay_journal=journal).execute(CODE)
+        assert sandbox.execute_with_journal(CODE, journal).replayed_callbacks == 2
+        assert sandbox.execute_with_journal(CODE).replayed_callbacks == 0
         assert calls == ["a", "b", "a", "b"]
+
+    def test_session_replays_and_keeps_state(self):
+        fetch, calls = counting_fetch()
+        session = eryx.Session(callbacks=[{"name": "fetch", "fn": fetch}])
+        journal = session.execute_with_journal(CODE).journal
+
+        second = session.execute_with_journal(CODE, journal=journal)
+        assert second.error is None
+        assert second.replayed_callbacks == 2
+        assert calls == ["a", "b"]
+        assert session.execute("print(a['v'])").stdout_text == "A\n"
+
+    def test_pooled_sandbox_replays(self):
+        fetch, calls = counting_fetch()
+        pool = eryx.SandboxFactory(cache=True).create_pool(max_size=1, min_idle=0)
+        with pool.acquire(callbacks=[{"name": "fetch", "fn": fetch}]) as sandbox:
+            journal = sandbox.execute_with_journal(CODE).journal
+            assert sandbox.execute_with_journal(CODE, journal).replayed_callbacks == 2
+        assert calls == ["a", "b"]
+        pool.close()
+
+    def test_invalid_journal_raises(self):
+        with pytest.raises(ValueError, match="Invalid journal"):
+            eryx.Sandbox().execute_with_journal(CODE, journal={"nope": 1})
 
 
 SUSPEND_CODE = """
@@ -71,9 +98,8 @@ class TestSuspend:
         fetch, calls = counting_fetch()
         sandbox = eryx.Sandbox(
             callbacks=[{"name": "fetch", "fn": fetch}, {"name": "approve", "fn": approve}],
-            replay_journal=journal,
         )
-        return sandbox.execute_with_journal(SUSPEND_CODE), calls
+        return sandbox.execute_with_journal(SUSPEND_CODE, journal), calls
 
     def test_sync_suspend_then_resume(self):
         def pending(item: str):

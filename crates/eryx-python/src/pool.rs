@@ -161,6 +161,31 @@ impl PooledSandbox {
         })
     }
 
+    /// Execute Python code with callback journaling/replay. See
+    /// `Sandbox.execute_with_journal()`.
+    ///
+    /// Raises:
+    ///     ValueError: If the sandbox has already been released or `journal`
+    ///         is invalid.
+    #[pyo3(signature = (code, journal=None))]
+    fn execute_with_journal(
+        &self,
+        py: Python<'_>,
+        code: &str,
+        journal: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<crate::result::ReplayOutcome> {
+        let sandbox = self
+            .inner
+            .as_ref()
+            .ok_or_else(|| PyValueError::new_err("sandbox has been released back to pool"))?;
+        let journal = crate::result::journal_from_py(journal)?;
+
+        let code = code.to_string();
+        let runtime = self.runtime.clone();
+        let outcome = py.detach(|| runtime.block_on(sandbox.execute_with_journal(&code, journal)));
+        crate::result::ReplayOutcome::from_outcome(py, outcome)
+    }
+
     /// Release the sandbox back to the pool.
     ///
     /// Idempotent — calling release() on an already-released sandbox is a no-op.

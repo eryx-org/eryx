@@ -313,9 +313,12 @@ except TimeoutError:
     print("timed out")
 "#;
     let slow = SlowCallback::default();
-    let build = || sandbox_builder().with_callback(slow.clone());
+    let sandbox = sandbox_builder()
+        .with_callback(slow.clone())
+        .build()
+        .unwrap();
 
-    let first = build().build().unwrap().execute_with_journal(code).await;
+    let first = sandbox.execute_with_journal(code, None).await;
     assert_eq!(first.result.unwrap().stdout_text(), "timed out\n");
     assert_eq!(slow.0.load(Ordering::SeqCst), 1);
     assert!(
@@ -328,11 +331,8 @@ except TimeoutError:
         first.journal.entries
     );
 
-    let replay = build()
-        .with_replay_journal(first.journal)
-        .build()
-        .unwrap()
-        .execute_with_journal(code)
+    let replay = sandbox
+        .execute_with_journal(code, Some(first.journal))
         .await;
     assert_eq!(replay.result.unwrap().stdout_text(), "done\n");
     assert_eq!(

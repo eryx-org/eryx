@@ -42,7 +42,7 @@
 //! session.reset().await?;
 //! ```
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use async_trait::async_trait;
@@ -51,7 +51,8 @@ use tokio::sync::mpsc;
 use crate::callback::Callback;
 use crate::callback_handler::{run_callback_handler, run_output_collector, run_trace_collector};
 use crate::error::Error;
-use crate::sandbox::{ExecuteResult, ExecuteStats, Sandbox};
+use crate::replay::{CallbackJournal, ReplayState, wrap_callbacks};
+use crate::sandbox::{ExecuteResult, ExecuteStats, ReplayOutcome, Sandbox, new_replay_state};
 use crate::wasm::{CallbackRequest, OutputRequest, TraceRequest};
 
 use super::Session;
@@ -141,7 +142,11 @@ impl<'a> InProcessSession<'a> {
             execution_count = self.executor.execution_count(),
         )
     )]
-    async fn execute_internal(&mut self, code: &str) -> Result<ExecuteResult, Error> {
+    async fn execute_internal(
+        &mut self,
+        code: &str,
+        replay_state: Option<Arc<Mutex<ReplayState>>>,
+    ) -> Result<ExecuteResult, Error> {
         let start = Instant::now();
 
         // Execute preamble on first call if configured
@@ -155,8 +160,15 @@ impl<'a> InProcessSession<'a> {
         // Create channel for callback requests
         let (callback_tx, callback_rx) = mpsc::channel::<CallbackRequest>(32);
 
-        // Spawn task to handle callback requests concurrently (Arc clone is cheap)
-        let callbacks_arc = self.sandbox.callbacks_arc();
+        // Wrap each callback with a replay wrapper when journaling/replay is
+        // enabled, otherwise use the registered callbacks directly.
+        let callbacks_arc = match &replay_state {
+            Some(state) => Arc::new(wrap_callbacks(self.sandbox.callbacks(), state)),
+            None => self.sandbox.callbacks_arc(),
+        };
+        let callbacks: Vec<Arc<dyn Callback>> = callbacks_arc.values().cloned().collect();
+
+        // Spawn task to handle callback requests concurrently
         let resource_limits = self.sandbox.resource_limits().clone();
         let secrets_arc = std::sync::Arc::new(self.sandbox.secrets().clone());
         let callback_secrets = std::sync::Arc::clone(&secrets_arc);
@@ -201,10 +213,6 @@ impl<'a> InProcessSession<'a> {
             )
             .await
         });
-
-        // Get callbacks for this execution
-        let callbacks: Vec<Arc<dyn Callback>> =
-            self.sandbox.callbacks().values().cloned().collect();
 
         // Execute using the session executor (keeps instance alive!)
         // Timeout is handled via epoch-based interruption inside the executor
@@ -272,6 +280,29 @@ impl<'a> InProcessSession<'a> {
         }
     }
 
+    /// Execute Python code in the session with callback-result replay and
+    /// journaling, keeping session state between calls.
+    ///
+    /// The session counterpart of [`Sandbox::execute_with_journal`]: callbacks
+    /// matching `journal` replay their recorded results, and the returned
+    /// [`ReplayOutcome`] carries the journal recorded during this call. Each
+    /// call uses fresh replay state, so different calls can pass different
+    /// journals.
+    ///
+    /// # Security
+    ///
+    /// Replayed journal entries are returned to Python verbatim. Only replay
+    /// journals from a trusted source; see the [`replay`](crate::replay) module.
+    pub async fn execute_with_journal(
+        &mut self,
+        code: &str,
+        journal: Option<CallbackJournal>,
+    ) -> ReplayOutcome {
+        let state = new_replay_state(code, journal);
+        let result = self.execute_internal(code, Some(Arc::clone(&state))).await;
+        ReplayOutcome::from_state(&state, code, result)
+    }
+
     /// Get the number of executions performed in this session.
     #[must_use]
     pub fn execution_count(&self) -> u32 {
@@ -316,7 +347,7 @@ impl<'a> InProcessSession<'a> {
 #[async_trait]
 impl Session for InProcessSession<'_> {
     async fn execute(&mut self, code: &str) -> Result<ExecuteResult, Error> {
-        self.execute_internal(code).await
+        self.execute_internal(code, None).await
     }
 
     async fn reset(&mut self) -> Result<(), Error> {
