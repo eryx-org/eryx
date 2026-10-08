@@ -130,7 +130,7 @@ fn create_callback_future(
     let timeout = resource_limits.callback_timeout;
     let secrets = Arc::clone(secrets);
     let fut = async move {
-        let invoke_future = callback.invoke(args);
+        let invoke_future = callback.invoke_with_raw_args(&request.arguments_json, args);
 
         let callback_result = if let Some(timeout) = timeout {
             tokio::time::timeout(timeout, invoke_future)

@@ -18,6 +18,9 @@ Callbacks are matched by their **name plus canonicalized arguments**, treated as
 
 - When a journal is loaded, each recorded result is bucketed by its `(name, args)` key in recorded order. Each live invocation pops the next cached result for its key, so repeated identical calls replay in their original order.
 - While replay is active, matching is **independent of invocation order** — a concurrently launched batch (`asyncio.gather`) replays correctly no matter which future the scheduler polls first, because a call is matched by *what it is*, not by its position.
+- The canonical arguments are the guest's argument JSON **verbatim**: Python emits them with `json.dumps(kwargs, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False)`, and no host re-encodes them. So a journal matches the same way in the Rust, Python and JavaScript hosts and the gRPC server. Passing NaN or infinity as a callback argument raises `ValueError` in the script.
+
+Journals recorded by eryx 0.9 and earlier keyed arguments as `serde_json` re-serialized them. Those still match for strings, booleans, 64-bit integers and most floats; entries whose arguments `serde_json` rewrote (larger integers, floats such as `1e-05`) miss and run live, which the divergence guard keeps safe.
 
 ### Divergence guard
 

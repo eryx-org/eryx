@@ -208,6 +208,36 @@ async fn session_replays_per_call_and_keeps_state() {
     assert_eq!(output.stdout_text().trim(), "1");
 }
 
+/// The journal keys on the guest's argument text verbatim. Values `serde_json`
+/// would rewrite (a >64-bit int becomes an f64, `1e-05` becomes `0.00001`)
+/// keep their exact Python form, and the entry still replays.
+#[tokio::test]
+async fn journal_keys_on_guest_args_verbatim() {
+    const SCRIPT: &str = "r = await tick(x=1e-05, n=2**70 + 1)\nprint(r['live_call'])";
+    let live_calls = Arc::new(AtomicU32::new(0));
+    let sandbox = sandbox_builder()
+        .with_callback(CountingCallback {
+            name: "tick".to_string(),
+            live_calls: Arc::clone(&live_calls),
+        })
+        .build()
+        .expect("build sandbox");
+
+    let first = sandbox.execute_with_journal(SCRIPT, None).await;
+    first.result.expect("first run succeeds");
+    assert_eq!(
+        first.journal.entries[0].args_json,
+        r#"{"n":1180591620717411303425,"x":1e-05}"#
+    );
+
+    let second = sandbox
+        .execute_with_journal(SCRIPT, Some(first.journal))
+        .await;
+    second.result.expect("second run succeeds");
+    assert_eq!(second.replayed_callbacks, 1);
+    assert_eq!(live_calls.load(Ordering::SeqCst), 1, "replayed, not re-run");
+}
+
 /// Changing the script so the second callback diverges falls back to live mode
 /// from the point of divergence; the matching prefix is still replayed.
 #[tokio::test]
