@@ -20,7 +20,7 @@ pyo3 = { workspace = true } #unified
 wit-dylib-ffi.workspace = true
 
 [dev-dependencies]
-tokio = { workspace = true, features = ["rt", "macros"] }
+tokio = { workspace = true, features = ["rt", "macros", "time"] }
 wasmtime.workspace = true
 wasmtime-wasi.workspace = true
 wit-component.workspace = true

@@ -611,11 +611,13 @@ pub enum InvokeResult {
 ///
 /// Note: TCP/TLS operations now use fiber-based async (`call_import_sync` with `func_wrap_async`
 /// on the host), so they complete synchronously from the guest's perspective and don't need
-/// to be tracked as pending imports. Only `invoke` remains async with Component Model async.
+/// to be tracked as pending imports. Only `invoke` and `sleep` use Component Model async.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ImportType {
     /// invoke: result<string, string>
     Invoke,
+    /// sleep: no result
+    Sleep,
 }
 
 /// Stored state for a pending async import call.
@@ -730,6 +732,44 @@ fn call_invoke_async(name: &str, args_json: &str) -> Result<InvokeResult, String
         } else {
             Ok(InvokeResult::Err(value))
         }
+    })
+}
+
+/// Call the sleep import, which completes after `duration_ns` nanoseconds.
+/// Returns the subtask to wait on, or `None` if the host completed it immediately.
+pub(crate) fn call_sleep_async(duration_ns: u64) -> Result<Option<u32>, String> {
+    CURRENT_WIT.with(|cell| {
+        let wit = cell.borrow();
+        let wit = wit
+            .as_ref()
+            .ok_or_else(|| "sleep called outside of execute context".to_string())?;
+        let import_func = wit
+            .get_import(None, "sleep")
+            .ok_or_else(|| "sleep import not found".to_string())?;
+
+        // Boxed and kept alive while pending, as for invoke.
+        let mut cx = Box::new(EryxCall::new());
+        cx.push_u64(duration_ns);
+
+        // Safety: we're in a valid execution context
+        let Some(pending_call) = (unsafe { import_func.call_import_async(&mut *cx) }) else {
+            return Ok(None);
+        };
+        let async_lift_impl = import_func
+            .async_import_lift_impl()
+            .ok_or_else(|| "sleep import has no async lift".to_string())?;
+        PENDING_IMPORTS.with(|cell| {
+            cell.borrow_mut().insert(
+                pending_call.subtask,
+                PendingImportState {
+                    import_type: ImportType::Sleep,
+                    async_lift_impl,
+                    buffer: pending_call.buffer,
+                    _cx: cx,
+                },
+            );
+        });
+        Ok(Some(pending_call.subtask))
     })
 }
 
@@ -1741,7 +1781,7 @@ impl Interpreter for EryxInterpreter {
                 }
 
                 // Handle result based on import type.
-                // Note: Only `invoke` uses Component Model async. TCP/TLS operations
+                // Note: Only `invoke` and `sleep` use Component Model async. TCP/TLS operations
                 // now use fiber-based async and complete synchronously from the guest's
                 // perspective, so they don't appear as pending imports.
                 match pending_state.import_type {
@@ -1764,6 +1804,7 @@ impl Interpreter for EryxInterpreter {
                         };
                         python::set_async_import_result(subtask, &result_json);
                     }
+                    ImportType::Sleep => {}
                 }
             }
         }

@@ -226,6 +226,17 @@ async fn test_instantiate_component() -> Result<(), Box<dyn std::error::Error>> 
     // Add stub implementations for sandbox imports
     use wasmtime::component::{Accessor, Val};
 
+    // sleep: async func(duration-ns: u64)
+    linker.root().func_wrap_concurrent(
+        "sleep",
+        |_accessor: &Accessor<State>, (duration_ns,): (u64,)| {
+            Box::pin(async move {
+                tokio::time::sleep(std::time::Duration::from_nanos(duration_ns)).await;
+                Ok(())
+            })
+        },
+    )?;
+
     // invoke: async func(name: string, arguments-json: string) -> result<string, string>
     // This implementation handles a few test callbacks:
     // - "get_time": returns a fixed timestamp as JSON

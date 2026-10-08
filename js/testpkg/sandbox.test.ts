@@ -64,6 +64,21 @@ print(restored)
     expect(result.stdout).toContain("hello");
     expect(result.stdout).toContain("world");
   });
+
+  it("supports asyncio timers", async () => {
+    const result = await sandbox.execute(`
+import asyncio
+loop = asyncio.get_running_loop()
+t0 = loop.time()
+print(await asyncio.gather(asyncio.sleep(0.05, 1), asyncio.sleep(0.05, 2)))
+print(loop.time() - t0 >= 0.05)
+try:
+    await asyncio.wait_for(asyncio.sleep(30), timeout=0.05)
+except TimeoutError:
+    print("timed out")
+`);
+    expect(result.stdout).toBe("[1, 2]\nTrue\ntimed out\n");
+  });
 });
 
 describe("state persistence", () => {

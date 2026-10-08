@@ -822,3 +822,26 @@ async fn test_async_exception_does_not_leak_into_later_executions() {
         .unwrap_or_else(|e| panic!("stale exception re-raised by later async execute: {e}"));
     assert_eq!(stdout, b"{'ok': True}\n");
 }
+
+/// A timer left pending by one execution is dropped with it; cancelling its
+/// handle in a later execution is a harmless no-op.
+#[tokio::test]
+async fn test_session_pending_timer_dropped_between_executions() {
+    let mut session = create_session().await;
+
+    let start = std::time::Instant::now();
+    session
+        .execute(
+            "import asyncio\nh = asyncio.get_running_loop().call_later(30, print, 'never')\nawait asyncio.sleep(0)",
+        )
+        .run()
+        .await
+        .expect("first execution failed");
+    let output = session
+        .execute("h.cancel()\nawait asyncio.sleep(0.01)\nprint('ok')")
+        .run()
+        .await
+        .expect("second execution failed");
+    assert_eq!(output.stdout, b"ok\n");
+    assert!(start.elapsed() < std::time::Duration::from_secs(5));
+}

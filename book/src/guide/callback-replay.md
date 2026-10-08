@@ -316,7 +316,7 @@ Replay never replays a stale result, but it also does not guarantee that a callb
 
 - calls that *miss* — the first divergent call and every call after it;
 - the previously-suspended call, on resume (it was never journaled);
-- any call that was **in flight** when the run halted (a suspension, timeout or crash) and so never completed into the journal, and any call started after the suspending call (the journal is truncated at the suspension point) — for example a `gather` sibling of the suspending call.
+- calls that never completed into the journal: those cut off by the host's callback timeout, those that never reached the handler, and any call started after the suspending call (the journal is truncated at the suspension point) — for example a `gather` sibling of the suspending call. A call still in flight when the run fails, times out or suspends is otherwise awaited by the host and journaled, as is one the script stopped waiting for (`wait_for`, `task.cancel()`).
 
 Callbacks with side effects (charging a card, sending a message, writing a record) must therefore be **idempotent**, or deduplicate on their side — for example with an idempotency key passed in the callback args. Because a suspending callback is invoked again on resume, it should only check readiness before suspending, and perform its side effects only on the call that returns a value.
 
@@ -324,10 +324,11 @@ Every call that *completed* is journaled, including failures: an error result re
 
 ## Determinism and limitations
 
-Replay short-circuits *callbacks* — the Python **between** callbacks always re-executes live on every run. Replay therefore reproduces callback *results*, not whole-program state, and it assumes the script is deterministic given the same callback results. Nondeterminism in the script itself — an unseeded `random`, wall-clock time (`time.time()`, `datetime.now()`), or anything else that varies run to run — is recomputed fresh each time, with three consequences:
+Replay short-circuits *callbacks* — the Python **between** callbacks always re-executes live on every run. Replay therefore reproduces callback *results*, not whole-program state, and it assumes the script is deterministic given the same callback results. Nondeterminism in the script itself — an unseeded `random`, wall-clock time (`time.time()`, `datetime.now()`), or anything else that varies run to run — is recomputed fresh each time, with these consequences:
 
 - **If it feeds callback arguments**, the recomputed args won't match what was journaled, so those calls *miss* — the divergence guard then runs them, and everything after them, live (re-incurring their cost).
 - **If it drives control flow**, the replayed run may take a different path than the recorded one, dispatching a different set of callbacks.
+- **Timers are not journaled** — `asyncio.sleep`, `wait_for` and `asyncio.timeout` deadlines are not callbacks, so a replayed run waits through its sleeps again in real time, while replayed callbacks return instantly. A timeout (or `task.cancel()`) only stops Python waiting: the host callback still completes and is journaled. On replay it returns instantly from cache, so a `wait_for` that timed out on the recording run can now succeed and take a different path. Only a callback that hit the host's callback timeout, or never reached the handler, is missing from the journal.
 - **Non-callback output is not reproduced** — values the script computes itself rather than via a callback are recomputed, so stdout or the [result variable](../guide/callbacks.md) can differ even when every callback replayed.
 
 The divergence guard ensures a recomputed argument that misses falls back to live execution rather than injecting a stale cached result — which means that call, and everything after it, runs live again (see [Live re-runs and idempotency](#live-re-runs-and-idempotency)). But replay is only fully *transparent* for scripts whose callback names, arguments, and control flow are deterministic given the same callback results.

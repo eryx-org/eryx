@@ -107,6 +107,8 @@ except eryx.TimeoutError:
 ```
 <!-- langtabs-end -->
 
+The timeout covers time spent waiting as well as running: an `await asyncio.sleep(...)` or a slow callback cannot keep an execution alive past it. A sleeping execution is suspended, so it consumes no [fuel](#fuel-limits-instruction-counting) while it waits.
+
 ## Callback Timeout
 
 When sandboxed code calls host callbacks, you can limit how long each callback can take:

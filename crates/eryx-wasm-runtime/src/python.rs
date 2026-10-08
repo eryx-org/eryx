@@ -639,6 +639,15 @@ fn _eryx_invoke_async(
     }
 }
 
+/// Start a host timer for the event loop.
+/// Returns the subtask to wait on, or `None` if it completed immediately.
+///
+/// Python signature: _eryx_sleep_async(duration_ns: int) -> int | None
+#[pyfunction]
+fn _eryx_sleep_async(duration_ns: u64) -> PyResult<Option<u32>> {
+    crate::call_sleep_async(duration_ns).map_err(pyo3::exceptions::PyRuntimeError::new_err)
+}
+
 // =============================================================================
 // Async support FFI functions
 // =============================================================================
@@ -1008,6 +1017,7 @@ fn eryx_module(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(context_get_, m)?)?;
     m.add_function(wrap_pyfunction!(subtask_drop_, m)?)?;
     m.add_function(wrap_pyfunction!(subtask_cancel_, m)?)?;
+    m.add_function(wrap_pyfunction!(_eryx_sleep_async, m)?)?;
     m.add_function(wrap_pyfunction!(promise_get_result_, m)?)?;
     // TCP networking functions
     m.add_function(wrap_pyfunction!(_eryx_tcp_connect, m)?)?;
@@ -1053,6 +1063,8 @@ exec(compile(r'''
 """Eryx async runtime - minimal asyncio event loop for Component Model async."""
 
 import asyncio
+import math
+import time as _time
 import _eryx
 from contextvars import ContextVar, Context
 from dataclasses import dataclass
@@ -1078,11 +1090,19 @@ class _AsyncState:
     pending_count: int
 
 
+class _EryxTimerHandle(asyncio.TimerHandle):
+    """A TimerHandle backed by an in-flight host `sleep` subtask."""
+    __slots__ = ('_eryx_state', '_eryx_subtask', '_eryx_future')
+
+
 class _EryxLoop(asyncio.AbstractEventLoop):
     """Minimal event loop for Component Model async.
 
-    Only implements the methods actually needed by asyncio.Task and our
-    async runtime. All other methods raise NotImplementedError.
+    Only implements the methods actually needed by asyncio.Task, timers and
+    our async runtime. All other methods raise NotImplementedError.
+
+    Timers (call_later/call_at) are host `sleep` subtasks in the waitable set,
+    so they fire only when the loop regains control: blocking code delays them.
     """
 
     def __init__(self):
@@ -1130,8 +1150,46 @@ class _EryxLoop(asyncio.AbstractEventLoop):
     def call_exception_handler(self, context):
         self.exception = context.get('exception')
 
+    def time(self):
+        return _time.monotonic()
+
+    def call_later(self, delay, callback, *args, context=None):
+        return self.call_at(self.time() + delay, callback, *args, context=context)
+
+    def call_at(self, when, callback, *args, context=None):
+        try:
+            state = _async_state.get()
+        except LookupError:
+            raise RuntimeError("timers can only be scheduled while async code is running") from None
+        handle = _EryxTimerHandle(when, callback, args, self, context)
+        handle._eryx_state = state
+        handle._eryx_subtask = None
+        handle._eryx_future = None
+        # Round up so the timer never fires before `when`; clamp to the u64 range.
+        delay_ns = (when - self.time()) * 1e9
+        delay_ns = 2**64 - 1 if delay_ns >= 2**64 else max(0, math.ceil(delay_ns))
+        subtask = _eryx._eryx_sleep_async(delay_ns)
+        if subtask is None:  # completed immediately
+            state.handles.append(handle)
+            return handle
+        future = self.create_future()
+        future.add_done_callback(lambda f: f.cancelled() or state.handles.append(handle))
+        handle._eryx_subtask = subtask
+        handle._eryx_future = future
+        state.futures[subtask] = future
+        if state.waitable_set is None:
+            state.waitable_set = _eryx.waitable_set_new_()
+        _eryx.waitable_join_(subtask, state.waitable_set)
+        return handle
+
+    def _timer_handle_cancelled(self, handle):
+        # Free the host sleeper now. The identity check skips a timer that has
+        # already fired, whose subtask id may since have been reused.
+        state, subtask = handle._eryx_state, handle._eryx_subtask
+        if subtask is not None and state.futures.get(subtask) is handle._eryx_future:
+            _cancel_subtask(state, subtask)
+
     # Stub methods required by AbstractEventLoop
-    def time(self): raise NotImplementedError
     def run_forever(self): raise NotImplementedError
     def run_until_complete(self, future): raise NotImplementedError
     def stop(self): self.running = False
