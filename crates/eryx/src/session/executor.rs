@@ -1133,6 +1133,10 @@ impl SessionExecutor {
                 .await
         };
 
+        // Disarm the deadline so it can't fire during later calls into the
+        // instance (snapshot/restore/clear) made after the timeout window.
+        crate::wasm::arm_epoch_deadline(&mut store, None);
+
         // Clear channels after execution and capture peak memory
         // Capture any suspension reason before the store is restored: a callback
         // that suspended poisons fuel to halt the guest, so the resulting trap

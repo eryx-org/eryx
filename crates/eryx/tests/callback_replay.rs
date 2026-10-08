@@ -673,3 +673,29 @@ async fn session_timeout_rolls_back_and_session_stays_usable() {
     let output = session.execute("print(n)").await.expect("session usable");
     assert_eq!(output.stdout_text().trim(), "0", "pre-call state restored");
 }
+
+/// Regression: an execute arms the epoch deadline for its timeout, and the
+/// deadline must not outlive it. Otherwise a snapshot taken later than the
+/// timeout traps and poisons the session.
+#[tokio::test]
+async fn session_snapshot_after_timeout_window_succeeds() {
+    use eryx::session::{InProcessSession, Session};
+
+    let sandbox = sandbox_builder()
+        .with_resource_limits(
+            eryx::ResourceLimits::default()
+                .with_execution_timeout(std::time::Duration::from_millis(200)),
+        )
+        .build()
+        .expect("build sandbox");
+    let mut session = InProcessSession::new(&sandbox).await.expect("session");
+    session.execute("x = 1").await.expect("execute");
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
+    session
+        .snapshot_state()
+        .await
+        .expect("snapshot after the window");
+    let output = session.execute("print(x)").await.expect("session usable");
+    assert_eq!(output.stdout_text().trim(), "1");
+}
