@@ -3786,7 +3786,8 @@ async def invoke(_callback_name, **kwargs):
     # Serialize kwargs to canonical JSON (sorted keys, compact, no NaN/inf).
     # Hosts key callback replay journals on this text verbatim, so it must be
     # deterministic for equal arguments.
-    # A dict mixing int and str keys can't be sorted; then the whole payload
+    # Dict keys that can't be compared with each other (e.g. int with str,
+    # None with anything) can't be sorted; then the whole payload
     # goes unsorted. Insertion order still keeps the text deterministic per
     # script, as args were before #529. The retry runs outside the handler so
     # a real error (e.g. not JSON serializable) raises once, unchained.

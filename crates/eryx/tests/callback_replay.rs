@@ -244,29 +244,23 @@ async fn journal_keys_on_guest_args_verbatim() {
 async fn mixed_key_dict_args_replay() {
     const SCRIPT: &str = "r = await tick(d={1: 'a', 'b': 2})\nprint(r['live_call'])";
     let live_calls = Arc::new(AtomicU32::new(0));
-    let build = || {
-        sandbox_builder().with_callback(CountingCallback {
+    let sandbox = sandbox_builder()
+        .with_callback(CountingCallback {
             name: "tick".to_string(),
             live_calls: Arc::clone(&live_calls),
         })
-    };
-
-    let first = build()
         .build()
-        .expect("build sandbox")
-        .execute_with_journal(SCRIPT)
-        .await;
+        .expect("build sandbox");
+
+    let first = sandbox.execute_with_journal(SCRIPT, None).await;
     first.result.expect("first run succeeds");
     assert_eq!(
         first.journal.entries[0].args_json,
         r#"{"d":{"1":"a","b":2}}"#
     );
 
-    let second = build()
-        .with_replay_journal(first.journal)
-        .build()
-        .expect("build replay sandbox")
-        .execute_with_journal(SCRIPT)
+    let second = sandbox
+        .execute_with_journal(SCRIPT, Some(first.journal))
         .await;
     second.result.expect("second run succeeds");
     assert_eq!(second.replayed_callbacks, 1);
@@ -284,12 +278,44 @@ async fn int_keyed_dict_args_sort_numerically() {
         .build()
         .expect("build sandbox");
     let outcome = sandbox
-        .execute_with_journal("await tick(d={10: 'a', 9: 'b'})")
+        .execute_with_journal("await tick(d={10: 'a', 9: 'b'})", None)
         .await;
     outcome.result.expect("run succeeds");
     assert_eq!(
         outcome.journal.entries[0].args_json,
         r#"{"d":{"9":"b","10":"a"}}"#
+    );
+}
+
+/// Run `script` against a `tick` callback and return the script's error text.
+async fn script_error(script: &str) -> String {
+    let sandbox = sandbox_builder()
+        .with_callback(CountingCallback {
+            name: "tick".to_string(),
+            live_calls: Arc::new(AtomicU32::new(0)),
+        })
+        .build()
+        .expect("build sandbox");
+    let outcome = sandbox.execute_with_journal(script, None).await;
+    outcome.result.expect_err("script should raise").to_string()
+}
+
+/// NaN has no JSON form, so the guest rejects it before it reaches the host.
+#[tokio::test]
+async fn nan_callback_arg_raises_value_error() {
+    let err = script_error("await tick(x=float('nan'))").await;
+    assert!(err.contains("ValueError"), "got: {err}");
+}
+
+/// A non-serializable arg raises one `TypeError`, not one chained onto the
+/// sorted attempt's.
+#[tokio::test]
+async fn unserializable_callback_arg_raises_single_type_error() {
+    let err = script_error("await tick(x=object())").await;
+    assert!(err.contains("TypeError"), "got: {err}");
+    assert!(
+        !err.contains("During handling of the above exception"),
+        "got: {err}"
     );
 }
 

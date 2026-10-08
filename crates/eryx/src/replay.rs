@@ -33,10 +33,11 @@
 //! or infinity raise in the guest. Hosts never re-encode the text, so a journal
 //! matches the same way in every host (Rust, Python, JavaScript, gRPC).
 //!
-//! If a dict mixes int and str keys, which can't be sorted, the whole payload
-//! is emitted unsorted, in insertion order.
+//! If a dict has keys that can't be compared with each other (e.g. int with
+//! str, `None` with anything), they can't be sorted, so the whole payload is
+//! emitted unsorted, in insertion order.
 //!
-//! Journals recorded before eryx 0.9.2 keyed args as `serde_json`
+//! Journals recorded before #529 keyed args as `serde_json`
 //! re-serialized them. Those entries still match for strings, booleans,
 //! 64-bit integers, str-keyed dicts and most floats, but **miss** when the two
 //! forms differ:
@@ -44,9 +45,11 @@
 //! - integers beyond 64 bits (serde turned them into floats);
 //! - floats with exponents -5 to -9: Python writes `1e-05` / `1e-07` /
 //!   `2.5e-08` where serde wrote `0.00001` / `1e-7` / `2.5e-8`;
-//! - int-keyed dicts with multi-digit keys: Python sorts `{10: .., 9: ..}`
-//!   numerically, serde sorted the keys as strings;
-//! - dicts with mixed int and str keys (now insertion order).
+//! - dicts with non-str keys whose numeric order differs from their string
+//!   order (multi-digit, negative, bool or float keys): Python sorts
+//!   `{10: .., 9: ..}` numerically, serde sorted the keys as strings;
+//! - dicts with keys that can't be compared with each other, e.g. int with
+//!   str or `None` with anything (now insertion order).
 //!
 //! A miss is sticky: it trips the divergence guard, so that call **and every
 //! later callback in the run execute live**, including non-idempotent ones.
