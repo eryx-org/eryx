@@ -50,10 +50,11 @@ explains why — execution still succeeds. Pass `result_variable="name"` to
 
 `Sandbox.execute_with_journal(code)` records every callback result in a
 journal (a JSON-compatible dict). Pass that journal back as
-`Sandbox(replay_journal=...)` and callbacks that match it return the recorded
+`execute_with_journal(code, journal=...)` and callbacks that match it return the recorded
 result instead of running live. A callback can raise
 `eryx.SuspendCallback(reason)` to halt the run; resume later by replaying the
-journal from the suspended run.
+journal from the suspended run. `Session` and pooled sandboxes have the same
+method.
 
 ```python
 import eryx
@@ -64,13 +65,12 @@ def approve(item: str):
     return True
 
 callbacks = [{"name": "fetch", "fn": fetch}, {"name": "approve", "fn": approve}]
-outcome = eryx.Sandbox(callbacks=callbacks).execute_with_journal(code)
+sandbox = eryx.Sandbox(callbacks=callbacks)
+outcome = sandbox.execute_with_journal(code)
 
 if outcome.suspended:
     # Later, once approved: completed callbacks replay, `approve` runs live.
-    outcome = eryx.Sandbox(
-        callbacks=callbacks, replay_journal=outcome.journal
-    ).execute_with_journal(code)
+    outcome = sandbox.execute_with_journal(code, journal=outcome.journal)
 ```
 
 `execute_with_journal` does not raise for execution failures; check

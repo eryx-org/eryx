@@ -1133,6 +1133,10 @@ impl SessionExecutor {
                 .await
         };
 
+        // Disarm the deadline so it can't fire during later calls into the
+        // instance (snapshot/restore/clear) made after the timeout window.
+        crate::wasm::arm_epoch_deadline(&mut store, None);
+
         // Clear channels after execution and capture peak memory
         // Capture any suspension reason before the store is restored: a callback
         // that suspended poisons fuel to halt the guest, so the resulting trap
@@ -1325,6 +1329,79 @@ impl SessionExecutor {
         self.fuel_limit = fuel_limit;
 
         Ok(())
+    }
+
+    /// Run `run` on this session so that a halted run can't leave it unusable.
+    ///
+    /// A suspension, timeout, fuel exhaustion, cancellation or trap halts the
+    /// guest and poisons the instance. When `callbacks` is non-empty the state
+    /// is snapshotted first, costing one [`snapshot_state`](Self::snapshot_state)
+    /// per call. If the run then halts (or `suspended` reports that a callback
+    /// suspended, which also covers a suspension racing a timeout), the
+    /// instance is [`reset`](Self::reset) with `callbacks` and the snapshot
+    /// restored, so the session is back where it was before the call,
+    /// including [`execution_count`](Self::execution_count).
+    ///
+    /// With no callbacks nothing can suspend, so no snapshot is taken. If the
+    /// snapshot fails (e.g. it exceeds the size limit), a warning is logged and
+    /// the run is unprotected. In both cases a halt still resets the instance so
+    /// the session stays usable, but its Python state is lost.
+    ///
+    /// Only serializable globals survive a rollback (as with `snapshot_state`).
+    /// VFS/volume writes and network calls made by the run are not undone.
+    ///
+    /// Returns `run`'s result and whether the session was rolled back.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the rollback itself fails, which leaves the session
+    /// unusable.
+    pub async fn run_with_rollback<T>(
+        &mut self,
+        callbacks: &[Arc<dyn Callback>],
+        suspended: impl FnOnce() -> bool,
+        run: impl AsyncFnOnce(&mut Self) -> Result<T, Error>,
+    ) -> Result<(Result<T, Error>, bool), Error> {
+        let snapshot = if callbacks.is_empty() {
+            None
+        } else {
+            match self.snapshot_state().await {
+                Ok(snapshot) => Some(snapshot),
+                Err(e) => {
+                    tracing::warn!(
+                        error = %e,
+                        "session snapshot failed; running without rollback protection"
+                    );
+                    None
+                }
+            }
+        };
+        let execution_count = self.execution_count;
+
+        let result = run(self).await;
+
+        let halted = suspended()
+            || matches!(
+                result,
+                Err(Error::Suspended(_)
+                    | Error::Timeout(_)
+                    | Error::FuelExhausted { .. }
+                    | Error::Cancelled
+                    | Error::Execution(_))
+            );
+        if !halted {
+            return Ok((result, false));
+        }
+
+        self.reset(callbacks).await?;
+        match &snapshot {
+            Some(snapshot) => self.restore_state(snapshot).await?,
+            None => {
+                tracing::warn!("session reset after a halted run without a snapshot; state lost")
+            }
+        }
+        self.execution_count = execution_count;
+        Ok((result, true))
     }
 
     /// Get a reference to the underlying store.

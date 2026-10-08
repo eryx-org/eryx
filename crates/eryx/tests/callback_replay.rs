@@ -150,23 +150,16 @@ async fn replay_serves_cached_callbacks_without_invoking() {
         .build()
         .expect("build sandbox");
 
-    let first = sandbox.execute_with_journal(TWO_CALL_SCRIPT).await;
+    let first = sandbox.execute_with_journal(TWO_CALL_SCRIPT, None).await;
     first.result.expect("first run succeeds");
     assert_eq!(live_calls.load(Ordering::SeqCst), 2, "two live calls");
     assert_eq!(first.journal.entries.len(), 2, "two journaled callbacks");
     assert_eq!(first.replayed_callbacks, 0, "nothing replayed on first run");
 
-    // ---- Second run: replay from the recorded journal. ----
-    let replay_sandbox = sandbox_builder()
-        .with_callback(CountingCallback {
-            name: "tick".to_string(),
-            live_calls: Arc::clone(&live_calls),
-        })
-        .with_replay_journal(first.journal)
-        .build()
-        .expect("build replay sandbox");
-
-    let second = replay_sandbox.execute_with_journal(TWO_CALL_SCRIPT).await;
+    // ---- Second run: replay from the recorded journal on the same sandbox. ----
+    let second = sandbox
+        .execute_with_journal(TWO_CALL_SCRIPT, Some(first.journal))
+        .await;
     let output = second.result.expect("second run succeeds");
 
     assert_eq!(
@@ -184,6 +177,37 @@ async fn replay_serves_cached_callbacks_without_invoking() {
     );
 }
 
+/// A session replays per call and keeps its Python state between calls.
+#[tokio::test]
+async fn session_replays_per_call_and_keeps_state() {
+    use eryx::session::{InProcessSession, Session};
+
+    let live_calls = Arc::new(AtomicU32::new(0));
+    let sandbox = sandbox_builder()
+        .with_callback(CountingCallback {
+            name: "tick".to_string(),
+            live_calls: Arc::clone(&live_calls),
+        })
+        .build()
+        .expect("build sandbox");
+    let mut session = InProcessSession::new(&sandbox).await.expect("session");
+
+    let first = session.execute_with_journal(TWO_CALL_SCRIPT, None).await;
+    first.result.expect("first run succeeds");
+    assert_eq!(live_calls.load(Ordering::SeqCst), 2);
+
+    let second = session
+        .execute_with_journal(TWO_CALL_SCRIPT, Some(first.journal))
+        .await;
+    second.result.expect("second run succeeds");
+    assert_eq!(second.replayed_callbacks, 2, "both callbacks replayed");
+    assert_eq!(live_calls.load(Ordering::SeqCst), 2, "no new live calls");
+
+    // Session state survives journaled runs: `a` came from the replayed call.
+    let output = session.execute("print(a['live_call'])").await.unwrap();
+    assert_eq!(output.stdout_text().trim(), "1");
+}
+
 /// Changing the script so the second callback diverges falls back to live mode
 /// from the point of divergence; the matching prefix is still replayed.
 #[tokio::test]
@@ -198,7 +222,7 @@ async fn replay_falls_back_to_live_on_divergence() {
         .build()
         .expect("build sandbox");
 
-    let first = sandbox.execute_with_journal(TWO_CALL_SCRIPT).await;
+    let first = sandbox.execute_with_journal(TWO_CALL_SCRIPT, None).await;
     first.result.expect("first run succeeds");
     assert_eq!(live_calls.load(Ordering::SeqCst), 2);
 
@@ -214,11 +238,12 @@ print(f"a={a['live_call']} b={b['live_call']}")
             name: "tick".to_string(),
             live_calls: Arc::clone(&live_calls),
         })
-        .with_replay_journal(first.journal)
         .build()
         .expect("build replay sandbox");
 
-    let second = replay_sandbox.execute_with_journal(divergent_script).await;
+    let second = replay_sandbox
+        .execute_with_journal(divergent_script, Some(first.journal))
+        .await;
     let output = second.result.expect("second run succeeds");
 
     assert_eq!(second.replayed_callbacks, 1, "only the prefix replayed");
@@ -248,7 +273,7 @@ async fn journaling_without_previous_records_fresh() {
         .build()
         .expect("build sandbox");
 
-    let outcome = sandbox.execute_with_journal(TWO_CALL_SCRIPT).await;
+    let outcome = sandbox.execute_with_journal(TWO_CALL_SCRIPT, None).await;
     outcome.result.expect("run succeeds");
     assert_eq!(outcome.replayed_callbacks, 0);
     assert_eq!(outcome.journal.entries.len(), 2);
@@ -289,7 +314,7 @@ async fn concurrent_gather_callbacks_replay_regardless_of_order() {
 
     // ---- Run 1: record the journal. ----
     let sandbox = build(&a_calls, &b_calls).build().expect("build sandbox");
-    let first = sandbox.execute_with_journal(GATHER_SCRIPT).await;
+    let first = sandbox.execute_with_journal(GATHER_SCRIPT, None).await;
     let first_out = first.result.expect("first run succeeds");
     assert!(
         first_out.stdout_text().contains("a=slow_a b=slow_b"),
@@ -303,10 +328,11 @@ async fn concurrent_gather_callbacks_replay_regardless_of_order() {
 
     // ---- Run 2: replay from the recorded journal. ----
     let replay_sandbox = build(&a_calls, &b_calls)
-        .with_replay_journal(first.journal)
         .build()
         .expect("build replay sandbox");
-    let second = replay_sandbox.execute_with_journal(GATHER_SCRIPT).await;
+    let second = replay_sandbox
+        .execute_with_journal(GATHER_SCRIPT, Some(first.journal))
+        .await;
     let second_out = second.result.expect("second run succeeds");
 
     assert_eq!(
@@ -406,7 +432,7 @@ print("AFTER_MARKER")
         .build()
         .expect("build sandbox");
 
-    let outcome = sandbox.execute_with_journal(script).await;
+    let outcome = sandbox.execute_with_journal(script, None).await;
 
     assert_eq!(
         approve_calls.load(Ordering::SeqCst),
@@ -470,7 +496,7 @@ print(f"fetched={data['live_call']} approved={ok['approved']}")
         .build()
         .expect("build sandbox");
 
-    let first = sandbox.execute_with_journal(script).await;
+    let first = sandbox.execute_with_journal(script, None).await;
     assert_eq!(fetch_calls.load(Ordering::SeqCst), 1, "fetch ran live once");
     assert_eq!(
         approve_calls.load(Ordering::SeqCst),
@@ -498,11 +524,12 @@ print(f"fetched={data['live_call']} approved={ok['approved']}")
             live_calls: Arc::clone(&approve_calls),
             resume_after: 1, // already called once in run 1, so this call succeeds
         })
-        .with_replay_journal(first.journal)
         .build()
         .expect("build resume sandbox");
 
-    let second = resume_sandbox.execute_with_journal(script).await;
+    let second = resume_sandbox
+        .execute_with_journal(script, Some(first.journal))
+        .await;
     let output = second.result.expect("resume run succeeds");
 
     assert!(second.suspended.is_none(), "no suspension on resume");
@@ -522,4 +549,153 @@ print(f"fetched={data['live_call']} approved={ok['approved']}")
         "approve succeeded on resume, got: {}",
         output.stdout_text()
     );
+}
+
+/// Suspending inside a session and resuming in the same session leaves the
+/// session usable, and the resume starts from the state before the suspended
+/// call, so side effects of the replayed prefix are not applied twice.
+#[tokio::test]
+async fn session_suspend_then_resume_in_same_session() {
+    use eryx::session::{InProcessSession, Session};
+
+    let fetch_calls = Arc::new(AtomicU32::new(0));
+    let approve_calls = Arc::new(AtomicU32::new(0));
+    let sandbox = sandbox_builder()
+        .with_callback(CountingCallback {
+            name: "fetch".to_string(),
+            live_calls: Arc::clone(&fetch_calls),
+        })
+        .with_callback(SuspendingCallback {
+            name: "approve".to_string(),
+            reason: "awaiting approval".to_string(),
+            live_calls: Arc::clone(&approve_calls),
+            resume_after: 1,
+        })
+        .build()
+        .expect("build sandbox");
+    let mut session = InProcessSession::new(&sandbox).await.expect("session");
+    session.execute("n = 0").await.expect("set state");
+
+    let script = r#"
+n += 1
+await fetch()
+await approve()
+print("n =", n)
+"#;
+    let first = session.execute_with_journal(script, None).await;
+    assert!(first.suspended.is_some(), "first run suspends");
+
+    let second = session
+        .execute_with_journal(script, Some(first.journal))
+        .await;
+    let output = second.result.expect("resume succeeds in the same session");
+    assert_eq!(output.stdout_text().trim(), "n = 1");
+    assert_eq!(second.replayed_callbacks, 1, "fetch replayed");
+    assert_eq!(fetch_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(approve_calls.load(Ordering::SeqCst), 2);
+}
+
+/// Replay wrapping is per call: a plain `execute` after a journaled call in the
+/// same session invokes callbacks live, and nothing it does leaks into a later
+/// journaled call.
+#[tokio::test]
+async fn session_plain_execute_after_journaled_call_runs_live() {
+    use eryx::session::{InProcessSession, Session};
+
+    let live_calls = Arc::new(AtomicU32::new(0));
+    let sandbox = sandbox_builder()
+        .with_callback(CountingCallback {
+            name: "tick".to_string(),
+            live_calls: Arc::clone(&live_calls),
+        })
+        .build()
+        .expect("build sandbox");
+    let mut session = InProcessSession::new(&sandbox).await.expect("session");
+
+    let first = session.execute_with_journal(TWO_CALL_SCRIPT, None).await;
+    first.result.expect("journaled run succeeds");
+    assert_eq!(live_calls.load(Ordering::SeqCst), 2);
+
+    // Same args as the journal's first entry, but plain execute never replays.
+    let output = session
+        .execute(r#"c = await tick(step="one"); print(c['live_call'])"#)
+        .await
+        .expect("plain run succeeds");
+    assert_eq!(output.stdout_text().trim(), "3", "plain execute ran live");
+
+    let again = session.execute_with_journal(TWO_CALL_SCRIPT, None).await;
+    again.result.expect("second journaled run succeeds");
+    assert_eq!(again.replayed_callbacks, 0);
+    assert_eq!(
+        again.journal.entries.len(),
+        2,
+        "only this call's callbacks are journaled"
+    );
+}
+
+/// A journaled session call that times out is rolled back: the next call in the
+/// same session succeeds and sees the state from before the timed-out call.
+#[tokio::test]
+async fn session_timeout_rolls_back_and_session_stays_usable() {
+    use eryx::session::{InProcessSession, Session};
+
+    let live_calls = Arc::new(AtomicU32::new(0));
+    let sandbox = sandbox_builder()
+        .with_callback(CountingCallback {
+            name: "tick".to_string(),
+            live_calls: Arc::clone(&live_calls),
+        })
+        .with_resource_limits(
+            eryx::ResourceLimits::default()
+                .with_execution_timeout(std::time::Duration::from_millis(500)),
+        )
+        .build()
+        .expect("build sandbox");
+    let mut session = InProcessSession::new(&sandbox).await.expect("session");
+    session.execute("n = 0").await.expect("set state");
+    let count = session.execution_count();
+
+    let timed_out = session
+        .execute_with_journal("n += 1\nawait tick()\nwhile True: pass", None)
+        .await;
+    assert!(
+        matches!(timed_out.result, Err(eryx::Error::Timeout(_))),
+        "got {:?}",
+        timed_out.result
+    );
+    assert_eq!(timed_out.journal.entries.len(), 1, "tick was journaled");
+    assert_eq!(
+        session.execution_count(),
+        count,
+        "count kept across rollback"
+    );
+
+    let output = session.execute("print(n)").await.expect("session usable");
+    assert_eq!(output.stdout_text().trim(), "0", "pre-call state restored");
+}
+
+/// Regression: an execute arms the epoch deadline for its timeout, and the
+/// deadline must not outlive it. Otherwise a snapshot taken later than the
+/// timeout traps and poisons the session.
+#[tokio::test]
+async fn session_snapshot_after_timeout_window_succeeds() {
+    use eryx::session::{InProcessSession, Session};
+
+    let sandbox = sandbox_builder()
+        .with_resource_limits(
+            eryx::ResourceLimits::default()
+                .with_execution_timeout(std::time::Duration::from_millis(200)),
+        )
+        .build()
+        .expect("build sandbox");
+    let mut session = InProcessSession::new(&sandbox).await.expect("session");
+    session.execute("x = 1").await.expect("execute");
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
+    session
+        .snapshot_state()
+        .await
+        .expect("snapshot after the window");
+    let output = session.execute("print(x)").await.expect("session usable");
+    assert_eq!(output.stdout_text().trim(), "1");
 }

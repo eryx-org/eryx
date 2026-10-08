@@ -282,8 +282,8 @@ class ReplayOutcome:
     def journal(self) -> dict[str, Any]:
         """The callback journal recorded during this run, as a JSON-compatible dict.
 
-        Persist it with ``json.dumps`` and pass it back as ``replay_journal=`` to a
-        new ``Sandbox``. Treat it as opaque and as a trusted input."""
+        Persist it with ``json.dumps`` and pass it back as ``journal=`` to a later
+        ``execute_with_journal()``. Treat it as opaque and as a trusted input."""
         ...
 
     @property
@@ -551,7 +551,6 @@ class Sandbox:
         on_stdout: Optional[Callable[[bytes], None]] = None,
         on_stderr: Optional[Callable[[bytes], None]] = None,
         result_variable: Optional[str] = None,
-        replay_journal: Optional[dict[str, Any]] = None,
     ) -> None:
         """Create a new sandbox with the embedded Python runtime.
 
@@ -587,10 +586,6 @@ class Sandbox:
                 waiting for execution to complete. Receives the output chunk as bytes.
             result_variable: Name of the variable captured from the script and exposed
                 as ``ExecuteResult.result`` (JSON-serialized). Defaults to ``"result"``.
-            replay_journal: A journal from a previous ``ReplayOutcome.journal``.
-                ``execute_with_journal()`` returns matching callback results from it
-                instead of invoking the callbacks live; ``execute()`` ignores it.
-                Trusted input: replayed results reach the sandbox verbatim.
 
         Raises:
             InitializationError: If the sandbox fails to initialize.
@@ -642,17 +637,28 @@ class Sandbox:
         """
         ...
 
-    def execute_with_journal(self, code: str) -> ReplayOutcome:
+    def execute_with_journal(
+        self, code: str, journal: Optional[dict[str, Any]] = None
+    ) -> ReplayOutcome:
         """Execute code, journaling callback results and replaying them from
-        ``replay_journal`` if one was given.
+        ``journal`` if one was given.
 
         Unlike ``execute()``, this does not raise for execution failures: the error
         is returned on the outcome alongside the journal, which is always populated.
 
+        Args:
+            code: Python source code to execute.
+            journal: A journal from a previous ``ReplayOutcome.journal``. Matching
+                callbacks return their recorded results instead of running live.
+                Trusted input: replayed results reach the sandbox verbatim.
+
+        Raises:
+            ValueError: If ``journal`` is not a valid journal.
+
         Example:
             outcome = sandbox.execute_with_journal(code)
             if outcome.suspended:
-                save(outcome.journal)  # resume later with Sandbox(replay_journal=...)
+                save(outcome.journal)  # resume later with journal=load()
             elif outcome.error:
                 raise outcome.error
         """
@@ -1157,6 +1163,43 @@ class Session:
         """
         ...
 
+    def execute_with_journal(
+        self, code: str, journal: Optional[dict[str, Any]] = None
+    ) -> ReplayOutcome:
+        """Execute code in the session with callback journaling and replay.
+
+        Session state persists as with ``execute()``. See
+        ``Sandbox.execute_with_journal()`` for the journal semantics.
+
+        If the run halts (a callback suspends, or it times out or runs out of
+        fuel), the session is rolled back to its Python globals from before the
+        call, so resuming in the same session does not apply the replayed
+        prefix's effects twice. The rollback works like ``snapshot_state()``
+        (unserializable objects such as open files are dropped) and does not
+        undo VFS writes or network calls. It costs one snapshot per call, which
+        is skipped when the session has no callbacks.
+
+        If the snapshot fails (e.g. it is too large), the call runs unprotected
+        and a halt resets the session, losing its state. If the rollback itself
+        fails, ``error`` is an ``InitializationError``, ``suspended`` is
+        ``None``, and the session is unusable; resume with ``journal`` in a new
+        session.
+
+        Args:
+            code: Python source code to execute.
+            journal: A journal from a previous ``ReplayOutcome.journal``. Matching
+                callbacks return their recorded results instead of running live.
+                Trusted input: replayed results reach the sandbox verbatim.
+
+        Returns:
+            ReplayOutcome with the result or error, the recorded journal, the
+            number of replayed callbacks, and any suspension details.
+
+        Raises:
+            ValueError: If ``journal`` is not a valid journal.
+        """
+        ...
+
     def reset(self) -> None:
         """Reset the session to a fresh state.
 
@@ -1328,6 +1371,28 @@ class PooledSandbox:
             ExecutionError: If the Python code raises an exception.
             TimeoutError: If execution exceeds the timeout limit.
             ResourceLimitError: If a resource limit is exceeded.
+        """
+        ...
+
+    def execute_with_journal(
+        self, code: str, journal: Optional[dict[str, Any]] = None
+    ) -> ReplayOutcome:
+        """Execute code with callback journaling and replay. See
+        ``Sandbox.execute_with_journal()``.
+
+        Args:
+            code: Python source code to execute.
+            journal: A journal from a previous ``ReplayOutcome.journal``. Matching
+                callbacks return their recorded results instead of running live.
+                Trusted input: replayed results reach the sandbox verbatim.
+
+        Returns:
+            ReplayOutcome with the result or error, the recorded journal, the
+            number of replayed callbacks, and any suspension details.
+
+        Raises:
+            ValueError: If the sandbox has already been released or ``journal``
+                is not a valid journal.
         """
         ...
 

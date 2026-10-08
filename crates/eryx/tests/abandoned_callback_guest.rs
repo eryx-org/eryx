@@ -164,9 +164,12 @@ async fn abandoned_callbacks_complete_and_are_journaled() {
             }
         };
 
-        let first = tokio::time::timeout(HANG, build().build().unwrap().execute_with_journal(code))
-            .await
-            .unwrap();
+        let first = tokio::time::timeout(
+            HANG,
+            build().build().unwrap().execute_with_journal(code, None),
+        )
+        .await
+        .unwrap();
         check(first.result);
         assert_eq!(slow.0.load(Ordering::SeqCst), runs);
         let abandoned = first
@@ -177,13 +180,13 @@ async fn abandoned_callbacks_complete_and_are_journaled() {
             .count();
         assert_eq!(abandoned, 1, "journal: {:?}", first.journal.entries);
 
-        let replay = build()
-            .with_replay_journal(first.journal.clone())
-            .build()
-            .unwrap();
-        let second = tokio::time::timeout(HANG, replay.execute_with_journal(code))
-            .await
-            .unwrap();
+        let replay = build().build().unwrap();
+        let second = tokio::time::timeout(
+            HANG,
+            replay.execute_with_journal(code, Some(first.journal.clone())),
+        )
+        .await
+        .unwrap();
         check(second.result);
         assert_eq!(
             slow.0.load(Ordering::SeqCst),
