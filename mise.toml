@@ -3,7 +3,7 @@
 rust = { version = "1.99.0", profile = "default" }
 
 [tools."cargo:cargo-nextest"]
-version = "0.9.146"
+version = "0.9.148"
 
 [tools."cargo:wasm-tools"]
 version = "1.261.0"
