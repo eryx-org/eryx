@@ -611,9 +611,9 @@ async fn execute_with_session(
     let replay_state: Option<Arc<Mutex<ReplayState>>> = params
         .previous_journal
         .as_ref()
-        .map(|journal| Arc::new(Mutex::new(ReplayState::new(journal.clone()))));
+        .map(|journal| ReplayState::shared(params.code, Some(journal.clone())));
     let active_callbacks: HashMap<String, Arc<dyn Callback>> = match &replay_state {
-        Some(state) => crate::replay::wrap_for_replay(callbacks_ref, state),
+        Some(state) => eryx::replay::wrap_callbacks(callbacks_ref, state),
         None => callbacks_ref.clone(),
     };
     let callbacks_arc: Vec<Arc<dyn Callback>> = active_callbacks.values().cloned().collect();

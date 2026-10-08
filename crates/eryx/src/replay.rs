@@ -317,6 +317,14 @@ impl ReplayState {
         }
     }
 
+    /// Fresh shared replay state for one run of `code`, replaying from
+    /// `journal` if given (otherwise recording a fresh journal).
+    #[must_use]
+    pub fn shared(code: &str, journal: Option<CallbackJournal>) -> Arc<Mutex<Self>> {
+        let previous = journal.unwrap_or_else(|| CallbackJournal::new(code));
+        Arc::new(Mutex::new(Self::new(previous)))
+    }
+
     /// Decide how to handle an invocation by matching on `(name, args)`.
     ///
     /// This runs synchronously when the invocation is dispatched. While replay is
@@ -547,8 +555,13 @@ impl Callback for ReplayCallback {
     }
 }
 
-/// Wrap every callback in `callbacks` with a [`ReplayCallback`] sharing `state`.
-pub(crate) fn wrap_callbacks(
+/// Wrap every callback in `callbacks` with a [`ReplayCallback`] sharing `state`,
+/// so journaled invocations replay from cache and live invocations are recorded.
+///
+/// For hosts that drive an executor themselves; [`Sandbox::execute_with_journal`](crate::Sandbox::execute_with_journal)
+/// does this internally.
+#[must_use]
+pub fn wrap_callbacks(
     callbacks: &HashMap<String, Arc<dyn Callback>>,
     state: &Arc<Mutex<ReplayState>>,
 ) -> HashMap<String, Arc<dyn Callback>> {

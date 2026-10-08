@@ -244,7 +244,7 @@ impl Sandbox {
         code: &str,
         journal: Option<CallbackJournal>,
     ) -> ReplayOutcome {
-        let state = new_replay_state(code, journal);
+        let state = ReplayState::shared(code, journal);
         let result = self.run_inner(code, Some(Arc::clone(&state))).await;
         ReplayOutcome::from_state(&state, code, result)
     }
@@ -2634,15 +2634,6 @@ impl ReplayOutcome {
             result,
         }
     }
-}
-
-/// Fresh replay state for one run of `code`, replaying from `journal` if given.
-pub(crate) fn new_replay_state(
-    code: &str,
-    journal: Option<CallbackJournal>,
-) -> Arc<Mutex<ReplayState>> {
-    let previous = journal.unwrap_or_else(|| CallbackJournal::new(code));
-    Arc::new(Mutex::new(ReplayState::new(previous)))
 }
 
 /// Result of executing Python code in the sandbox.

@@ -31,12 +31,7 @@
 //! journals (or those from other replicas) will fail verification and replay
 //! will be rejected before execution.
 
-use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
-
-use eryx::{
-    Callback, CallbackJournal, CallbackJournalEntry, ReplayCallback, ReplayState, SuspendedCallback,
-};
+use eryx::{CallbackJournal, CallbackJournalEntry, SuspendedCallback};
 use hmac::{Hmac, KeyInit, Mac};
 use prost::Message;
 use sha2::Sha256;
@@ -210,24 +205,6 @@ pub fn suspended_to_proto(suspended: &SuspendedCallback) -> pb::SuspendedCallbac
         args_json: suspended.args_json.clone(),
         reason: suspended.reason.clone(),
     }
-}
-
-/// Wrap every callback in `callbacks` with an [`eryx::ReplayCallback`] sharing
-/// `state`, so journaled invocations replay from cache and live invocations are
-/// recorded.
-#[must_use]
-pub fn wrap_for_replay(
-    callbacks: &HashMap<String, Arc<dyn Callback>>,
-    state: &Arc<Mutex<ReplayState>>,
-) -> HashMap<String, Arc<dyn Callback>> {
-    callbacks
-        .iter()
-        .map(|(name, callback)| {
-            let wrapped: Arc<dyn Callback> =
-                Arc::new(ReplayCallback::new(Arc::clone(callback), Arc::clone(state)));
-            (name.clone(), wrapped)
-        })
-        .collect()
 }
 
 #[cfg(test)]

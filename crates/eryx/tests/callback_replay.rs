@@ -550,3 +550,85 @@ print(f"fetched={data['live_call']} approved={ok['approved']}")
         output.stdout_text()
     );
 }
+
+/// Suspending inside a session and resuming in the same session leaves the
+/// session usable, and the resume starts from the state before the suspended
+/// call, so side effects of the replayed prefix are not applied twice.
+#[tokio::test]
+async fn session_suspend_then_resume_in_same_session() {
+    use eryx::session::{InProcessSession, Session};
+
+    let fetch_calls = Arc::new(AtomicU32::new(0));
+    let approve_calls = Arc::new(AtomicU32::new(0));
+    let sandbox = sandbox_builder()
+        .with_callback(CountingCallback {
+            name: "fetch".to_string(),
+            live_calls: Arc::clone(&fetch_calls),
+        })
+        .with_callback(SuspendingCallback {
+            name: "approve".to_string(),
+            reason: "awaiting approval".to_string(),
+            live_calls: Arc::clone(&approve_calls),
+            resume_after: 1,
+        })
+        .build()
+        .expect("build sandbox");
+    let mut session = InProcessSession::new(&sandbox).await.expect("session");
+    session.execute("n = 0").await.expect("set state");
+
+    let script = r#"
+n += 1
+await fetch()
+await approve()
+print("n =", n)
+"#;
+    let first = session.execute_with_journal(script, None).await;
+    assert!(first.suspended.is_some(), "first run suspends");
+
+    let second = session
+        .execute_with_journal(script, Some(first.journal))
+        .await;
+    let output = second.result.expect("resume succeeds in the same session");
+    assert_eq!(output.stdout_text().trim(), "n = 1");
+    assert_eq!(second.replayed_callbacks, 1, "fetch replayed");
+    assert_eq!(fetch_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(approve_calls.load(Ordering::SeqCst), 2);
+}
+
+/// Replay wrapping is per call: a plain `execute` after a journaled call in the
+/// same session invokes callbacks live, and nothing it does leaks into a later
+/// journaled call.
+#[tokio::test]
+async fn session_plain_execute_after_journaled_call_runs_live() {
+    use eryx::session::{InProcessSession, Session};
+
+    let live_calls = Arc::new(AtomicU32::new(0));
+    let sandbox = sandbox_builder()
+        .with_callback(CountingCallback {
+            name: "tick".to_string(),
+            live_calls: Arc::clone(&live_calls),
+        })
+        .build()
+        .expect("build sandbox");
+    let mut session = InProcessSession::new(&sandbox).await.expect("session");
+
+    let first = session.execute_with_journal(TWO_CALL_SCRIPT, None).await;
+    first.result.expect("journaled run succeeds");
+    assert_eq!(live_calls.load(Ordering::SeqCst), 2);
+
+    // Same args as the journal's first entry, but plain execute never replays.
+    let output = session
+        .execute(r#"c = await tick(step="one"); print(c['live_call'])"#)
+        .await
+        .expect("plain run succeeds");
+    assert_eq!(output.stdout_text().trim(), "3", "plain execute ran live");
+
+    let again = session.execute_with_journal(TWO_CALL_SCRIPT, None).await;
+    again.result.expect("second journaled run succeeds");
+    assert_eq!(again.replayed_callbacks, 0);
+    assert_eq!(
+        again.journal.entries.len(),
+        2,
+        "only this call's callbacks are journaled"
+    );
+}

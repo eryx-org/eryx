@@ -306,7 +306,7 @@ impl Session {
     ///     result = session.execute('print(x + y)')
     ///     print(result.stdout)  # "3"
     fn execute(&self, py: Python<'_>, code: &str) -> PyResult<ExecuteResult> {
-        self.run(py, code, self.callbacks.clone())?
+        self.run(py, code, self.callbacks.clone(), false)?
             .map(ExecuteResult::from_execution_output)
             .map_err(eryx_error_to_py)
     }
@@ -320,9 +320,17 @@ impl Session {
     ///     journal: Optional journal from a previous `ReplayOutcome.journal`.
     ///         Trusted input: replayed results are returned verbatim.
     ///
+    /// If a callback suspends, the session is rolled back to its state from
+    /// before the call (only serializable globals survive, as with
+    /// `snapshot_state()`), so resuming in the same session does not apply
+    /// the replayed prefix's side effects twice.
+    ///
     /// Returns:
     ///     ReplayOutcome with the result or error, the recorded journal, the
     ///     number of replayed callbacks, and any suspension details.
+    ///
+    /// Raises:
+    ///     ValueError: If `journal` is not a valid journal.
     #[pyo3(signature = (code, journal=None))]
     fn execute_with_journal(
         &self,
@@ -330,22 +338,11 @@ impl Session {
         code: &str,
         journal: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<ReplayOutcome> {
-        let journal = crate::result::journal_from_py(journal)?
-            .unwrap_or_else(|| eryx::CallbackJournal::new(code));
-        let state = Arc::new(Mutex::new(eryx::ReplayState::new(journal)));
-        let wrapped: HashMap<String, Arc<dyn eryx::Callback>> = self
-            .callbacks
-            .iter()
-            .map(|(name, cb)| {
-                let cb: Arc<dyn eryx::Callback> = Arc::new(eryx::ReplayCallback::new(
-                    Arc::clone(cb),
-                    Arc::clone(&state),
-                ));
-                (name.clone(), cb)
-            })
-            .collect();
+        let journal = crate::result::journal_from_py(journal)?;
+        let state = eryx::ReplayState::shared(code, journal);
+        let wrapped = eryx::replay::wrap_callbacks(&self.callbacks, &state);
         let result = self
-            .run(py, code, Arc::new(wrapped))?
+            .run(py, code, Arc::new(wrapped), true)?
             .map(ExecuteResult::from_execution_output);
         ReplayOutcome::from_state(py, result, &state, code)
     }
@@ -590,12 +587,16 @@ impl Session {
     /// Shared body of `execute()` and `execute_with_journal()`.
     ///
     /// The outer `PyResult` carries session-level failures; the inner `Result`
-    /// is the execution outcome.
+    /// is the execution outcome. With `rollback_on_suspend`, the state is
+    /// snapshotted first and, if a callback suspends (which halts the guest),
+    /// the instance is reset and the snapshot restored so the session can
+    /// resume from its pre-call state.
     fn run(
         &self,
         py: Python<'_>,
         code: &str,
         callbacks_map: Arc<HashMap<String, Arc<dyn eryx::Callback>>>,
+        rollback_on_suspend: bool,
     ) -> PyResult<Result<eryx::ExecutionOutput, eryx::Error>> {
         let code = code.to_string();
         let runtime = self.runtime.clone();
@@ -618,6 +619,12 @@ impl Session {
                 callbacks_map.values().cloned().collect();
 
             Ok(runtime.block_on(async {
+                let snapshot = if rollback_on_suspend {
+                    Some(inner.snapshot_state().await?)
+                } else {
+                    None
+                };
+
                 // Create callback channel
                 let (callback_tx, callback_rx) = tokio::sync::mpsc::channel(32);
 
@@ -693,6 +700,16 @@ impl Session {
                 // Wait for output collector to finish
                 if let Some(collector) = output_collector {
                     let _ = collector.await;
+                }
+
+                if let (Some(snapshot), Err(eryx::Error::Suspended(_))) = (&snapshot, &result) {
+                    let rollback = async {
+                        inner.reset(&[]).await?;
+                        inner.restore_state(snapshot).await
+                    };
+                    // A failed rollback leaves the session unusable; report that
+                    // instead of the suspension (`suspended` is still set).
+                    rollback.await?;
                 }
 
                 result

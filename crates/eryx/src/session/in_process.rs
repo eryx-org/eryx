@@ -52,7 +52,7 @@ use crate::callback::Callback;
 use crate::callback_handler::{run_callback_handler, run_output_collector, run_trace_collector};
 use crate::error::Error;
 use crate::replay::{CallbackJournal, ReplayState, wrap_callbacks};
-use crate::sandbox::{ExecuteResult, ExecuteStats, ReplayOutcome, Sandbox, new_replay_state};
+use crate::sandbox::{ExecuteResult, ExecuteStats, ReplayOutcome, Sandbox};
 use crate::wasm::{CallbackRequest, OutputRequest, TraceRequest};
 
 use super::Session;
@@ -289,6 +289,24 @@ impl<'a> InProcessSession<'a> {
     /// call uses fresh replay state, so different calls can pass different
     /// journals.
     ///
+    /// # Suspension
+    ///
+    /// A suspension halts the guest, which would leave the session unusable.
+    /// To allow resuming in the same session, the session state is snapshotted
+    /// before the call and, if a callback suspends, the instance is reset and
+    /// the snapshot restored. The session is then back where it was before the
+    /// call, so resuming with the returned journal does not apply the replayed
+    /// prefix's side effects twice. As with [`snapshot_state`](Self::snapshot_state),
+    /// only serializable globals survive the rollback (imported modules and
+    /// open handles do not). If the snapshot fails, the code is not run; if
+    /// the rollback fails, the session is unusable. Either error is returned
+    /// in [`ReplayOutcome::result`].
+    ///
+    /// # Preamble
+    ///
+    /// The sandbox preamble runs as part of the session's first call. If that
+    /// call is journaled, callbacks the preamble invokes are journaled too.
+    ///
     /// # Security
     ///
     /// Replayed journal entries are returned to Python verbatim. Only replay
@@ -298,8 +316,29 @@ impl<'a> InProcessSession<'a> {
         code: &str,
         journal: Option<CallbackJournal>,
     ) -> ReplayOutcome {
-        let state = new_replay_state(code, journal);
-        let result = self.execute_internal(code, Some(Arc::clone(&state))).await;
+        let state = ReplayState::shared(code, journal);
+        let snapshot = match self.executor.snapshot_state().await {
+            Ok(snapshot) => snapshot,
+            Err(e) => return ReplayOutcome::from_state(&state, code, Err(e)),
+        };
+        let preamble_executed = self.preamble_executed;
+
+        let mut result = self.execute_internal(code, Some(Arc::clone(&state))).await;
+
+        if matches!(result, Err(Error::Suspended(_))) {
+            let callbacks: Vec<Arc<dyn Callback>> =
+                self.sandbox.callbacks().values().cloned().collect();
+            self.preamble_executed = preamble_executed;
+            let rollback = async {
+                self.executor.reset(&callbacks).await?;
+                self.executor.restore_state(&snapshot).await
+            };
+            // A failed rollback leaves the session unusable; report that instead
+            // of the suspension (`suspended` is still set on the outcome).
+            if let Err(e) = rollback.await {
+                result = Err(e);
+            }
+        }
         ReplayOutcome::from_state(&state, code, result)
     }
 

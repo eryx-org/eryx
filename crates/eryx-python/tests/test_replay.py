@@ -138,3 +138,28 @@ class TestSuspend:
         assert outcome.suspended is not None
         assert outcome.suspended.reason == "later"
         assert outcome.result is None
+
+    def test_session_suspend_then_resume_in_same_session(self):
+        fetch, calls = counting_fetch()
+        approved = []
+
+        def approve(item: str):
+            if not approved:
+                approved.append(item)
+                raise eryx.SuspendCallback("later")
+            return True
+
+        session = eryx.Session(
+            callbacks=[{"name": "fetch", "fn": fetch}, {"name": "approve", "fn": approve}]
+        )
+        session.execute("n = 0")
+        code = "n += 1\n" + SUSPEND_CODE + "print('n', n)\n"
+
+        first = session.execute_with_journal(code)
+        assert first.suspended is not None
+
+        resumed = session.execute_with_journal(code, journal=first.journal)
+        assert resumed.error is None, resumed.error
+        assert resumed.replayed_callbacks == 1
+        assert calls == ["a"], "prefix replays from the journal"
+        assert resumed.result.stdout_text == "after A True\nn 1\n"

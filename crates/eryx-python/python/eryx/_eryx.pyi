@@ -652,6 +652,9 @@ class Sandbox:
                 callbacks return their recorded results instead of running live.
                 Trusted input: replayed results reach the sandbox verbatim.
 
+        Raises:
+            ValueError: If ``journal`` is not a valid journal.
+
         Example:
             outcome = sandbox.execute_with_journal(code)
             if outcome.suspended:
@@ -1166,7 +1169,25 @@ class Session:
         """Execute code in the session with callback journaling and replay.
 
         Session state persists as with ``execute()``. See
-        ``Sandbox.execute_with_journal()`` for the journal semantics.
+        ``Sandbox.execute_with_journal()`` for the journal semantics. If a
+        callback suspends, the session is rolled back to its state from before
+        the call (only serializable globals survive, as with
+        ``snapshot_state()``), so resuming in the same session does not apply
+        the replayed prefix's side effects twice. If the session's first call
+        is journaled, callbacks invoked by the preamble are journaled too.
+
+        Args:
+            code: Python source code to execute.
+            journal: A journal from a previous ``ReplayOutcome.journal``. Matching
+                callbacks return their recorded results instead of running live.
+                Trusted input: replayed results reach the sandbox verbatim.
+
+        Returns:
+            ReplayOutcome with the result or error, the recorded journal, the
+            number of replayed callbacks, and any suspension details.
+
+        Raises:
+            ValueError: If ``journal`` is not a valid journal.
         """
         ...
 
@@ -1350,8 +1371,19 @@ class PooledSandbox:
         """Execute code with callback journaling and replay. See
         ``Sandbox.execute_with_journal()``.
 
+        Args:
+            code: Python source code to execute.
+            journal: A journal from a previous ``ReplayOutcome.journal``. Matching
+                callbacks return their recorded results instead of running live.
+                Trusted input: replayed results reach the sandbox verbatim.
+
+        Returns:
+            ReplayOutcome with the result or error, the recorded journal, the
+            number of replayed callbacks, and any suspension details.
+
         Raises:
-            ValueError: If the sandbox has already been released.
+            ValueError: If the sandbox has already been released or ``journal``
+                is not a valid journal.
         """
         ...
 

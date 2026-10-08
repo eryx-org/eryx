@@ -174,7 +174,7 @@ console.log(`replayed ${outcome.replayedCallbacks} callbacks`);
 
 <!-- langtabs-end -->
 
-Plain [`Sandbox::execute`] never journals or replays (likewise JavaScript's `execute`). Each call to `execute_with_journal` uses fresh replay state, so one sandbox can record, replay and resume different journals without being rebuilt. Sessions (`InProcessSession` in Rust, `Session` in Python) and pooled sandboxes have the same `execute_with_journal` method; in a session, Python state persists across journaled calls as usual.
+Plain [`Sandbox::execute`] never journals or replays (likewise JavaScript's `execute`). Each call to `execute_with_journal` uses fresh replay state, so one sandbox can record, replay and resume different journals without being rebuilt. Sessions (`InProcessSession` in Rust, `Session` in Python) and pooled sandboxes have the same `execute_with_journal` method. In a session, Python state persists across journaled calls as usual, and a plain `execute` in between runs its callbacks live. If the session's first call is journaled, callbacks invoked by the sandbox preamble (which runs as part of that call) are journaled too.
 
 ### Concurrent identity
 
@@ -307,6 +307,8 @@ if (outcome.suspended) {
 ### Resuming
 
 To resume, execute the same code again with the journal from the suspended run (`execute_with_journal(code, Some(outcome.journal))` in Rust, `execute_with_journal(code, journal=outcome.journal)` in Python, `executeWithJournal(code, { journal: outcome.journal })` in JavaScript). The recorded prefix replays from cache; the previously-suspended callback re-runs live (it was never journaled) and, assuming its dependency is now ready, returns a real value so the script continues past the suspension point.
+
+A session can resume in place. A suspension halts the guest, so before each journaled call a session snapshots its state, and on suspension it resets the instance and restores that snapshot. The resume then starts from the state before the suspended call, so code that ran before the suspension (such as `n += 1`) is not applied twice. Only serializable globals survive the rollback, as with `snapshot_state`; imported modules and open handles do not, so re-import them in the script rather than relying on earlier calls.
 
 ### Live re-runs and idempotency
 
