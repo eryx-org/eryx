@@ -273,6 +273,26 @@ async fn mixed_key_dict_args_replay() {
     assert_eq!(live_calls.load(Ordering::SeqCst), 1, "replayed, not re-run");
 }
 
+/// Int keys sort numerically (Python's `sort_keys`), not as strings.
+#[tokio::test]
+async fn int_keyed_dict_args_sort_numerically() {
+    let sandbox = sandbox_builder()
+        .with_callback(CountingCallback {
+            name: "tick".to_string(),
+            live_calls: Arc::new(AtomicU32::new(0)),
+        })
+        .build()
+        .expect("build sandbox");
+    let outcome = sandbox
+        .execute_with_journal("await tick(d={10: 'a', 9: 'b'})")
+        .await;
+    outcome.result.expect("run succeeds");
+    assert_eq!(
+        outcome.journal.entries[0].args_json,
+        r#"{"d":{"9":"b","10":"a"}}"#
+    );
+}
+
 /// Changing the script so the second callback diverges falls back to live mode
 /// from the point of divergence; the matching prefix is still replayed.
 #[tokio::test]

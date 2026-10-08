@@ -33,11 +33,25 @@
 //! or infinity raise in the guest. Hosts never re-encode the text, so a journal
 //! matches the same way in every host (Rust, Python, JavaScript, gRPC).
 //!
-//! Journals recorded by eryx 0.9 and earlier keyed args as `serde_json`
-//! re-serialized them. Those still match for strings, booleans, 64-bit
-//! integers and most floats; entries whose args `serde_json` rewrote (larger
-//! integers, floats such as `1e-05`) miss and run live, which the divergence
-//! guard keeps safe.
+//! If a dict mixes int and str keys, which can't be sorted, the whole payload
+//! is emitted unsorted, in insertion order.
+//!
+//! Journals recorded before eryx 0.9.2 keyed args as `serde_json`
+//! re-serialized them. Those entries still match for strings, booleans,
+//! 64-bit integers, str-keyed dicts and most floats, but **miss** when the two
+//! forms differ:
+//!
+//! - integers beyond 64 bits (serde turned them into floats);
+//! - floats with exponents -5 to -9: Python writes `1e-05` / `1e-07` /
+//!   `2.5e-08` where serde wrote `0.00001` / `1e-7` / `2.5e-8`;
+//! - int-keyed dicts with multi-digit keys: Python sorts `{10: .., 9: ..}`
+//!   numerically, serde sorted the keys as strings;
+//! - dicts with mixed int and str keys (now insertion order).
+//!
+//! A miss is sticky: it trips the divergence guard, so that call **and every
+//! later callback in the run execute live**, including non-idempotent ones.
+//! Nothing stale is replayed, but side effects the old journal had recorded
+//! can happen again.
 //!
 //! While replay is active, matching is **independent of invocation order**: a
 //! concurrently launched batch of callbacks (e.g. `asyncio.gather`) replays
@@ -496,7 +510,8 @@ impl Callback for ReplayCallback {
     }
 
     /// Called directly (outside the sandbox) there is no guest text, so key on
-    /// serde_json's compact serialization, which sorts object keys.
+    /// serde_json's compact serialization. That sorts object keys only while
+    /// serde_json's `preserve_order` feature is off.
     fn invoke(
         &self,
         args: serde_json::Value,
@@ -540,7 +555,7 @@ impl Callback for ReplayCallback {
                 let inner = Arc::clone(&self.inner);
                 let state = Arc::clone(&self.state);
                 Box::pin(async move {
-                    let result = inner.invoke(args).await;
+                    let result = inner.invoke_with_raw_args(&args_json, args).await;
                     let index = u32::try_from(seq).unwrap_or(u32::MAX);
                     match CallbackOutcome::from_invoke(&result) {
                         CallbackOutcome::Ok(value) => {

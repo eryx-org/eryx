@@ -3786,11 +3786,16 @@ async def invoke(_callback_name, **kwargs):
     # Serialize kwargs to canonical JSON (sorted keys, compact, no NaN/inf).
     # Hosts key callback replay journals on this text verbatim, so it must be
     # deterministic for equal arguments.
+    # A dict mixing int and str keys can't be sorted; then the whole payload
+    # goes unsorted. Insertion order still keeps the text deterministic per
+    # script, as args were before #529. The retry runs outside the handler so
+    # a real error (e.g. not JSON serializable) raises once, unchained.
+    _sortable = True
     try:
         args_json = _json.dumps(kwargs, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False)
     except TypeError:
-        # Mixed int/str dict keys can't be sorted. Insertion order still keeps
-        # the text deterministic per script, as args were before #529.
+        _sortable = False
+    if not _sortable:
         args_json = _json.dumps(kwargs, sort_keys=False, separators=(",", ":"), ensure_ascii=False, allow_nan=False)
 
     # Report callback start trace event
