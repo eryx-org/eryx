@@ -148,6 +148,21 @@ pub trait Callback: Send + Sync {
         &self,
         args: serde_json::Value,
     ) -> Pin<Box<dyn Future<Output = Result<serde_json::Value, CallbackError>> + Send + '_>>;
+
+    /// Execute the callback, also given the exact arguments JSON the guest sent.
+    ///
+    /// The sandbox calls this rather than [`invoke`](Self::invoke): `raw_args`
+    /// is the guest's argument text and `args` is that text parsed. The default
+    /// ignores `raw_args` and calls `invoke`. Replay overrides it to key its
+    /// journal on the guest's canonical text verbatim, with no re-encoding.
+    fn invoke_with_raw_args(
+        &self,
+        raw_args: &str,
+        args: serde_json::Value,
+    ) -> Pin<Box<dyn Future<Output = Result<serde_json::Value, CallbackError>> + Send + '_>> {
+        let _ = raw_args;
+        self.invoke(args)
+    }
 }
 
 /// A strongly-typed callback with compile-time schema generation.

@@ -142,13 +142,13 @@ raise ValueError("boom")
     expect(entries(outcome.journal)).toHaveLength(1);
   });
 
-  it("canonicalizes args byte-identically to serde_json", async () => {
+  it("keys on the guest's canonical args text verbatim", async () => {
     const outcome = await executeWithJournal(
       `await fetch(id=1, b=1.0, a=10**20, c=1e16, d=-0.0, e=0.1, f=[2.50, -7], g="é😀")`,
     );
-    // Expected value produced by serde_json 1.0.151 (the Rust journal's format).
+    // Python's json.dumps(sort_keys=True, separators=(",", ":"), ensure_ascii=False).
     expect(entries(outcome.journal)[0].args_json).toBe(
-      '{"a":1e+20,"b":1.0,"c":1e+16,"d":-0.0,"e":0.1,"f":[2.5,-7],"g":"é😀","id":1}',
+      '{"a":100000000000000000000,"b":1.0,"c":1e+16,"d":-0.0,"e":0.1,"f":[2.5,-7],"g":"é😀","id":1}',
     );
   });
 

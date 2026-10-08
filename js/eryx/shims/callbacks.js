@@ -13,7 +13,7 @@
  * and setOutputHandler().
  */
 
-import { canonicalJson, parseJson } from "./canonical-json.js";
+import { parseJson } from "./raw-json.js";
 
 /** @type {((name: string, argsJson: string) => string | Promise<string>) | null} */
 let _callbackHandler = null;
@@ -231,13 +231,13 @@ function _replayResult(result) {
  * halts the guest; replay halts it the same way). Only a SuspendCallback is not
  * journaled: the call re-runs live on resume, as in Rust.
  */
-async function _invokeLive(state, seq, name, argsJson, argumentsJson) {
+async function _invokeLive(state, seq, name, argsJson) {
   const record = (result) => {
     state.entries[seq] = { name, argsJson, result };
   };
   let ret;
   try {
-    ret = await _callbackHandler(name, argumentsJson);
+    ret = await _callbackHandler(name, argsJson);
   } catch (e) {
     if (e instanceof SuspendCallback) {
       if (state.suspended === null) {
@@ -291,20 +291,20 @@ export function invoke(name, argumentsJson) {
       "execution already suspended by a previous callback",
     );
   }
-  const argsJson = canonicalJson(argumentsJson);
   const seq = state.nextSeq++;
   if (!state.liveMode) {
-    const result = state.cached.get(`${name}\0${argsJson}`)?.shift();
+    // Key on the guest's canonical args text verbatim, as the Rust host does.
+    const result = state.cached.get(`${name}\0${argumentsJson}`)?.shift();
     if (result !== undefined) {
       state.replayedCount++;
-      state.entries[seq] = { name, argsJson, result };
+      state.entries[seq] = { name, argsJson: argumentsJson, result };
       return _replayResult(result);
     }
     // First miss: the run has diverged from the journal, so this call and every
     // later one runs live (prevents replaying a now-stale cached result).
     state.liveMode = true;
   }
-  return _invokeLive(state, seq, name, argsJson, argumentsJson);
+  return _invokeLive(state, seq, name, argumentsJson);
 }
 
 /** Longest delay setTimeout accepts; larger values fire immediately. */

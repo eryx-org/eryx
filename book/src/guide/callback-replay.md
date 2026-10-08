@@ -18,6 +18,18 @@ Callbacks are matched by their **name plus canonicalized arguments**, treated as
 
 - When a journal is loaded, each recorded result is bucketed by its `(name, args)` key in recorded order. Each live invocation pops the next cached result for its key, so repeated identical calls replay in their original order.
 - While replay is active, matching is **independent of invocation order** — a concurrently launched batch (`asyncio.gather`) replays correctly no matter which future the scheduler polls first, because a call is matched by *what it is*, not by its position.
+- The canonical arguments are the guest's argument JSON **verbatim**: Python emits them with `json.dumps(kwargs, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False)`, and no host re-encodes them. So a journal matches the same way in the Rust, Python and JavaScript hosts and the gRPC server. Passing NaN or infinity as a callback argument raises `ValueError` in the script.
+
+If a dict has keys that can't be compared with each other (e.g. int with str, `None` with anything), they can't be sorted, so the whole payload is emitted unsorted, in insertion order.
+
+Journals recorded before [#529](https://github.com/eryx-org/eryx/pull/529) keyed arguments as `serde_json` re-serialized them. Those entries still match for strings, booleans, 64-bit integers, str-keyed dicts and most floats, but **miss** where the two forms differ:
+
+- integers beyond 64 bits (serde turned them into floats);
+- floats with exponents -5 to -9: Python writes `1e-05` / `1e-07` / `2.5e-08` where serde wrote `0.00001` / `1e-7` / `2.5e-8`;
+- dicts with non-str keys whose numeric order differs from their string order (multi-digit, negative, bool or float keys): Python sorts `{10: .., 9: ..}` numerically, serde sorted the keys as strings;
+- dicts with keys that can't be compared with each other, e.g. int with str or `None` with anything (now insertion order).
+
+A miss is sticky: it trips the [divergence guard](#divergence-guard), so that call **and every later callback in the run execute live**, including non-idempotent ones. Nothing stale is replayed, but side effects the old journal had recorded can happen again.
 
 ### Divergence guard
 

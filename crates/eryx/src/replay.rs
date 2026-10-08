@@ -24,6 +24,38 @@
 //! cached result for its key. Repeated identical calls therefore replay their
 //! results in the order they were originally recorded.
 //!
+//! ## Canonical arguments
+//!
+//! The canonical arguments are the guest's argument JSON **verbatim**. The
+//! Python guest emits them deterministically, as
+//! `json.dumps(kwargs, sort_keys=True, separators=(",", ":"), ensure_ascii=False,
+//! allow_nan=False)`, so floats use Python's shortest round-trip repr and NaN
+//! or infinity raise in the guest. Hosts never re-encode the text, so a journal
+//! matches the same way in every host (Rust, Python, JavaScript, gRPC).
+//!
+//! If a dict has keys that can't be compared with each other (e.g. int with
+//! str, `None` with anything), they can't be sorted, so the whole payload is
+//! emitted unsorted, in insertion order.
+//!
+//! Journals recorded before #529 keyed args as `serde_json`
+//! re-serialized them. Those entries still match for strings, booleans,
+//! 64-bit integers, str-keyed dicts and most floats, but **miss** when the two
+//! forms differ:
+//!
+//! - integers beyond 64 bits (serde turned them into floats);
+//! - floats with exponents -5 to -9: Python writes `1e-05` / `1e-07` /
+//!   `2.5e-08` where serde wrote `0.00001` / `1e-7` / `2.5e-8`;
+//! - dicts with non-str keys whose numeric order differs from their string
+//!   order (multi-digit, negative, bool or float keys): Python sorts
+//!   `{10: .., 9: ..}` numerically, serde sorted the keys as strings;
+//! - dicts with keys that can't be compared with each other, e.g. int with
+//!   str or `None` with anything (now insertion order).
+//!
+//! A miss is sticky: it trips the divergence guard, so that call **and every
+//! later callback in the run execute live**, including non-idempotent ones.
+//! Nothing stale is replayed, but side effects the old journal had recorded
+//! can happen again.
+//!
 //! While replay is active, matching is **independent of invocation order**: a
 //! concurrently launched batch of callbacks (e.g. `asyncio.gather`) replays
 //! correctly no matter which future the scheduler polls first or which call
@@ -480,12 +512,25 @@ impl Callback for ReplayCallback {
         self.inner.parameters_schema()
     }
 
+    /// Called directly (outside the sandbox) there is no guest text, so key on
+    /// serde_json's compact serialization. That sorts object keys only while
+    /// serde_json's `preserve_order` feature is off.
     fn invoke(
         &self,
         args: serde_json::Value,
     ) -> Pin<Box<dyn Future<Output = Result<serde_json::Value, CallbackError>> + Send + '_>> {
+        self.invoke_with_raw_args(&args.to_string(), args)
+    }
+
+    fn invoke_with_raw_args(
+        &self,
+        raw_args: &str,
+        args: serde_json::Value,
+    ) -> Pin<Box<dyn Future<Output = Result<serde_json::Value, CallbackError>> + Send + '_>> {
         let name = self.inner.name().to_string();
-        let args_json = canonical_json(&args);
+        // Key on the guest's text verbatim: the guest emits it canonically
+        // (sorted keys, compact), so every host matches it without re-encoding.
+        let args_json = raw_args.to_string();
         let args_hash = fnv1a_64(args_json.as_bytes());
 
         // The journal decision runs synchronously, before the future is
@@ -513,7 +558,7 @@ impl Callback for ReplayCallback {
                 let inner = Arc::clone(&self.inner);
                 let state = Arc::clone(&self.state);
                 Box::pin(async move {
-                    let result = inner.invoke(args).await;
+                    let result = inner.invoke_with_raw_args(&args_json, args).await;
                     let index = u32::try_from(seq).unwrap_or(u32::MAX);
                     match CallbackOutcome::from_invoke(&result) {
                         CallbackOutcome::Ok(value) => {
@@ -578,34 +623,6 @@ pub fn wrap_callbacks(
 /// Lock the replay state, recovering from poisoning rather than panicking.
 fn lock_state(state: &Mutex<ReplayState>) -> MutexGuard<'_, ReplayState> {
     state.lock().unwrap_or_else(PoisonError::into_inner)
-}
-
-/// Produce a canonical JSON string for `value` with object keys sorted
-/// recursively, so logically-equal arguments hash identically regardless of key
-/// order.
-fn canonical_json(value: &serde_json::Value) -> String {
-    canonicalize(value).to_string()
-}
-
-/// Recursively rebuild `value` with object keys in sorted order.
-fn canonicalize(value: &serde_json::Value) -> serde_json::Value {
-    match value {
-        serde_json::Value::Object(map) => {
-            let mut keys: Vec<&String> = map.keys().collect();
-            keys.sort();
-            let mut sorted = serde_json::Map::new();
-            for key in keys {
-                if let Some(v) = map.get(key) {
-                    sorted.insert(key.clone(), canonicalize(v));
-                }
-            }
-            serde_json::Value::Object(sorted)
-        }
-        serde_json::Value::Array(items) => {
-            serde_json::Value::Array(items.iter().map(canonicalize).collect())
-        }
-        other => other.clone(),
-    }
 }
 
 /// 64-bit FNV-1a hash — small, dependency-free, and deterministic across runs.
@@ -685,7 +702,7 @@ mod tests {
         args: &serde_json::Value,
         value: serde_json::Value,
     ) -> CallbackJournalEntry {
-        let args_json = canonical_json(args);
+        let args_json = args.to_string();
         CallbackJournalEntry {
             index,
             name: name.to_string(),
@@ -707,19 +724,6 @@ mod tests {
             CallbackOutcome::from_invoke(&Err(CallbackError::ExecutionFailed("x".into()))),
             CallbackOutcome::Err(_)
         ));
-    }
-
-    // ---- canonicalization / hashing -----------------------------------------
-
-    #[test]
-    fn canonicalization_is_key_order_independent() {
-        let a = json!({"a": 1, "b": {"c": 2, "d": 3}});
-        let b = json!({"b": {"d": 3, "c": 2}, "a": 1});
-        assert_eq!(canonical_json(&a), canonical_json(&b));
-        assert_eq!(
-            fnv1a_64(canonical_json(&a).as_bytes()),
-            fnv1a_64(canonical_json(&b).as_bytes())
-        );
     }
 
     // ---- replay behavior ----------------------------------------------------
@@ -932,8 +936,8 @@ mod tests {
             entries: vec![CallbackJournalEntry {
                 index: 0,
                 name: "fail".into(),
-                args_hash: fnv1a_64(canonical_json(&args).as_bytes()),
-                args_json: canonical_json(&args),
+                args_hash: fnv1a_64(args.to_string().as_bytes()),
+                args_json: args.to_string(),
                 result: Err("execution failed: boom".into()),
             }],
         };
@@ -1034,7 +1038,7 @@ mod tests {
         // replay/skip a callback that logically followed the suspension point.
         let mut st = ReplayState::new(CallbackJournal::new("code"));
         let args = json!({});
-        let h = fnv1a_64(canonical_json(&args).as_bytes());
+        let h = fnv1a_64(args.to_string().as_bytes());
 
         assert!(matches!(st.decide("a", h, "{}"), Decision::Miss { seq: 0 }));
         assert!(matches!(st.decide("b", h, "{}"), Decision::Miss { seq: 1 }));
