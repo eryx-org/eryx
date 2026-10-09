@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## `eryx` - [0.10.0](https://github.com/eryx-org/eryx/compare/eryx-v0.9.1...eryx-v0.10.0) - 2026-10-09
+
+### Added
+- [**breaking**] pass the replay journal per execute call ([#530](https://github.com/eryx-org/eryx/pull/530))
+- *(runtime)* asyncio timers in the sandbox event loop ([#528](https://github.com/eryx-org/eryx/pull/528))
+
+### Fixed
+- *(replay)* key journals on the guest's raw argument JSON ([#529](https://github.com/eryx-org/eryx/pull/529))
+- *(runtime)* cancel callback subtasks abandoned by an execution ([#527](https://github.com/eryx-org/eryx/pull/527))
+- *(callbacks)* stop sessions hanging when a callback is abandoned ([#526](https://github.com/eryx-org/eryx/pull/526))
+- *(runtime)* clear the event loop's exception after raising it ([#523](https://github.com/eryx-org/eryx/pull/523))
+
+## `eryx-runtime` - [0.10.0](https://github.com/eryx-org/eryx/compare/eryx-runtime-v0.9.1...eryx-runtime-v0.10.0) - 2026-10-09
+
+### Added
+- *(runtime)* asyncio timers in the sandbox event loop ([#528](https://github.com/eryx-org/eryx/pull/528))
+
+### Fixed
+- *(replay)* key journals on the guest's raw argument JSON ([#529](https://github.com/eryx-org/eryx/pull/529))
+- *(runtime)* cancel callback subtasks abandoned by an execution ([#527](https://github.com/eryx-org/eryx/pull/527))
+- *(runtime)* clear the event loop's exception after raising it ([#523](https://github.com/eryx-org/eryx/pull/523))
+
 ## `eryx-precompile` - [0.9.1](https://github.com/eryx-org/eryx/compare/eryx-precompile-v0.9.0...eryx-precompile-v0.9.1) - 2026-10-05
 
 ### Other
