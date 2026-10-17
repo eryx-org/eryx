@@ -1,0 +1,60 @@
+name: "Export new kache entries"
+description: >-
+  Export the kache entries this job compiled that R2 doesn't have yet, as an
+  artifact for the kache-upload job. The build job only ever holds the
+  read-only R2 key; the write key lives in the kache-write environment, which
+  only the upload job (no checkout of untrusted code, no cargo) can use.
+
+inputs:
+  name:
+    description: "Artifact name suffix (kache-export-<name>)"
+    required: true
+  access-key-id:
+    description: "Read-only R2 access key id"
+    required: true
+  secret-access-key:
+    description: "Read-only R2 secret access key"
+    required: true
+
+runs:
+  using: "composite"
+  steps:
+    - name: Export new kache entries
+      shell: bash
+      env:
+        AWS_ACCESS_KEY_ID: ${{ inputs.access-key-id }}
+        AWS_SECRET_ACCESS_KEY: ${{ inputs.secret-access-key }}
+        SCRIPT: ${{ github.action_path }}/../../scripts/kache-r2.sh
+        NAME: ${{ inputs.name }}
+      run: |
+        set -euo pipefail
+        dir="$RUNNER_TEMP/kache-export"
+        # Placeholders for every key R2 has, so the push below only writes
+        # new entries instead of recompressing the whole local store.
+        "$SCRIPT" seed "$dir"
+        printf '[cache.remote]\ntype = "filesystem"\npath = "%s"\nprefix = "artifacts"\n' "$dir" \
+          >"$RUNNER_TEMP/kache-export.toml"
+        # Outside the workspace, so sync exports dependencies too (inside it
+        # only pushes workspace members). kache-action sets
+        # KACHE_REMOTE_READONLY for the R2 remote; this push targets a local
+        # directory, so drop it for this one command.
+        cd "$RUNNER_TEMP"
+        log="$RUNNER_TEMP/kache-export.log"
+        status=0
+        env -u KACHE_REMOTE_READONLY KACHE_CONFIG="$RUNNER_TEMP/kache-export.toml" \
+          kache sync --push >"$log" 2>&1 || status=$?
+        # Drop the per-entry progress counter, keep everything else.
+        tr '\r' '\n' <"$log" | grep -vE '^\s*Uploading: [0-9]+/' || true
+        [ "$status" -eq 0 ] || exit "$status"
+        "$SCRIPT" strip "$dir"
+        echo "### kache export ($NAME): $(find "$dir" -path '*/packs/*' -type f 2>/dev/null | wc -l) new entries, $(du -sh "$dir" 2>/dev/null | cut -f1)" >>"$GITHUB_STEP_SUMMARY"
+
+    - name: Upload kache export
+      uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+      with:
+        name: kache-export-${{ inputs.name }}
+        path: ${{ runner.temp }}/kache-export
+        retention-days: 1
+        if-no-files-found: ignore
+        # Packs are already zstd.
+        compression-level: 0
