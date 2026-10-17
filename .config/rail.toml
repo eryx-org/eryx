@@ -40,6 +40,5 @@ msrv_policy = { mode = "compute", source = "workspace" }
 
 
 [release]
-tag_prefix = "v"
-tag_format = "{crate}-{prefix}{version}"
+tag_format = "{crate}-v{version}"
 sign_tags = false
