@@ -87,7 +87,11 @@ jco transpile \
   --map 'get-execution-options=./shims/callbacks.js#getExecutionOptions' \
   --map 'report-trace=./shims/callbacks.js#reportTrace' \
   --map 'report-output=./shims/callbacks.js#reportOutput' \
-  --map 'wasi:sockets/*=./shims/sockets.js#*'
+  --map 'wasi:sockets/*=./shims/sockets.js#*' \
+  --async-mode jspi \
+  --async-imports \
+    'eryx:net/tcp@0.1.0#connect' 'eryx:net/tcp@0.1.0#read' 'eryx:net/tcp@0.1.0#write' \
+    'eryx:net/tls@0.1.0#upgrade' 'eryx:net/tls@0.1.0#read' 'eryx:net/tls@0.1.0#write'
 """
 
 [tasks.patch-js]

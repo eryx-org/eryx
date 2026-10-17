@@ -12,6 +12,9 @@ export {
   SuspendCallback,
 } from "./shims/callbacks.js";
 
+export { setNetConfig, DEFAULT_BLOCKED_HOSTS } from "./shims/net.js";
+export type { NetConfig } from "./shims/net.js";
+
 /**
  * Result from executing Python code in the sandbox.
  */

@@ -59,6 +59,9 @@ export {
   SuspendCallback,
 } from "./shims/callbacks.js";
 
+// Re-export network policy configuration
+export { setNetConfig, DEFAULT_BLOCKED_HOSTS } from "./shims/net.js";
+
 import { _beginReplay, _endReplay } from "./shims/callbacks.js";
 
 /**

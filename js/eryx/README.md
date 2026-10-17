@@ -87,6 +87,25 @@ print(f"Temperature in {result['city']}: {result['temp']}°{result['unit']}")
 `);
 ```
 
+### Networking
+
+Networking is off by default. Enable it with a host policy (same rules as the Rust crate's `NetConfig`; localhost and private ranges stay blocked unless you override `blockedHosts`):
+
+```js
+import { Sandbox, setNetConfig } from "@bsull/eryx";
+
+setNetConfig({ allowedHosts: ["api.github.com", "*.example.com"] });
+
+const sandbox = new Sandbox();
+await sandbox.execute(`
+import json, urllib.request
+repo = json.load(urllib.request.urlopen("https://api.github.com/repos/eryx-org/eryx"))
+print(repo["stargazers_count"])
+`);
+```
+
+In Node.js, sandboxed code gets real TCP and TLS sockets. Browsers can't open sockets, so there each request is replayed through `fetch()`: only HTTP(S) works, one request per connection, and the server must allow cross-origin requests.
+
 ### Callback replay & suspension
 
 Journal callback results so a re-run of the same script replays them instead of calling your handler again, and let a handler suspend execution until it can answer:

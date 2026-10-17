@@ -201,3 +201,45 @@ print("/data/")
 print_tree('/data')`,
   },
 };
+
+export const NET_EXAMPLES: Record<string, { label: string; code: string }> = {
+  github: {
+    label: "GitHub API",
+    code: `import json
+import urllib.request
+
+with urllib.request.urlopen("https://api.github.com/repos/eryx-org/eryx") as resp:
+    repo = json.load(resp)
+
+print(f"{repo['full_name']}: {repo['description']}")
+print(f"stars: {repo['stargazers_count']}, language: {repo['language']}")`,
+  },
+  post: {
+    label: "POST JSON",
+    code: `import json
+import urllib.request
+
+req = urllib.request.Request(
+    "https://httpbin.org/post",
+    data=json.dumps({"hello": "from eryx"}).encode(),
+    headers={"Content-Type": "application/json"},
+)
+with urllib.request.urlopen(req) as resp:
+    print(resp.status, json.load(resp)["json"])`,
+  },
+  socket: {
+    label: "Raw socket + TLS",
+    code: `import socket
+import ssl
+
+ctx = ssl.create_default_context()
+with socket.create_connection(("httpbin.org", 443)) as raw:
+    with ctx.wrap_socket(raw, server_hostname="httpbin.org") as sock:
+        sock.sendall(b"GET /uuid HTTP/1.1\\r\\nHost: httpbin.org\\r\\nConnection: close\\r\\n\\r\\n")
+        response = b""
+        while chunk := sock.recv(4096):
+            response += chunk
+
+print(response.decode())`,
+  },
+};

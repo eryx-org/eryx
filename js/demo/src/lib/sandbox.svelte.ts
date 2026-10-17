@@ -30,7 +30,10 @@ export async function initSandbox(): Promise<void> {
 
   const start = performance.now();
   try {
-    const { Sandbox } = await import("@bsull/eryx");
+    const { Sandbox, setNetConfig } = await import("@bsull/eryx");
+    // The browser's CORS rules already limit what sandboxed code can reach;
+    // the default blocklist still keeps it off localhost and private ranges.
+    setNetConfig({ allowAllHosts: true });
     const sandbox = new Sandbox();
     const loadTime = ((performance.now() - start) / 1000).toFixed(1);
     sandboxState = { status: "ready", sandbox, loadTime };

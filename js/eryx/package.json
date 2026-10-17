@@ -30,6 +30,7 @@
       "default": "./shims/callbacks.js"
     },
     "./shims/net": {
+      "types": "./shims/net.d.ts",
       "default": "./shims/net.js"
     },
     "./shims/sockets": {

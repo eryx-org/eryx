@@ -127,7 +127,7 @@ async function linkExtensions(
 // jco transpile + patching
 // --------------------------------------------------------------------------
 
-/** Import maps matching js/mise.toml:69-79. */
+/** Import maps matching the jco transpile task in js/mise.toml. */
 const JCO_MAP: [string, string][] = [
   ["eryx:net/tcp", "./shims/net.js#tcp"],
   ["eryx:net/tls", "./shims/net.js#tls"],
@@ -169,7 +169,17 @@ async function transpileComponent(
     asyncMode: {
       tag: "jspi",
       val: {
-        imports: ["invoke", "sleep"],
+        imports: [
+          "invoke",
+          "sleep",
+          // Keep in sync with --async-imports in js/mise.toml.
+          "eryx:net/tcp@0.1.0#connect",
+          "eryx:net/tcp@0.1.0#read",
+          "eryx:net/tcp@0.1.0#write",
+          "eryx:net/tls@0.1.0#upgrade",
+          "eryx:net/tls@0.1.0#read",
+          "eryx:net/tls@0.1.0#write",
+        ],
         exports: [
           "execute",
           "snapshot-state",
