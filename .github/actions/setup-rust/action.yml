@@ -4,12 +4,13 @@ description: "Install cargo-binstall, mise, and Rust toolchain"
 runs:
   using: "composite"
   steps:
-    - name: Install cargo-binstall
-      shell: bash
-      run: curl -L --proto '=https' --tlsv1.2 -sSf https://raw.githubusercontent.com/cargo-bins/cargo-binstall/main/install-from-binstall-release.sh | bash
+    # mise's cargo backend uses cargo-binstall when it is on PATH, so the
+    # cargo:* tools in mise.toml download prebuilt binaries instead of
+    # compiling from source.
+    - uses: ./.github/actions/setup-binstall
 
     - name: Install mise
-      uses: jdx/mise-action@v5
+      uses: jdx/mise-action@9b200bcecbfd6303e69a4a261b2e09e3757440a7 # v5.2.0
       with:
         # Pinned for reproducibility: mise-action installs the latest mise by
         # default, and an auto-upgrade to 2026.8.2 broke CI (its new aube

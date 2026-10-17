@@ -20,3 +20,13 @@ tag-namespace = "eryx-precompile"
 # This avoids feature unification issues where other packages (like eryx-python)
 # enable features that require build-time artifacts we don't have
 precise-builds = true
+
+# Pin the actions in the generated release workflow to commit SHAs (the tag
+# each one corresponds to is noted alongside). dist's templates reference
+# mutable tags (actions/checkout@v4), which a compromised upstream could move.
+# Renovate is disabled for eryx-precompile-release.yml, so bump these by hand
+# and rerun `dist generate`.
+[dist.github-action-commits]
+"actions/checkout" = "11d5960a326750d5838078e36cf38b85af677262"          # v4.4.0
+"actions/upload-artifact" = "ea165f8d65b6e75b540449e92b4886f43607fa02"   # v4.6.2
+"actions/download-artifact" = "d3f86a106a0bac45b974a628896c90dbdf5c8093" # v4.3.0

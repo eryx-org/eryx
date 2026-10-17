@@ -27,6 +27,11 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
 
+# No GitHub Actions caches anywhere in this workflow (no WASM, rust-cache, mise
+# or npm caching). Everything here ships to users, and a cache entry written by
+# any earlier run on main is restored as-is, so a poisoned entry would flow
+# straight into the published package. See zizmor's cache-poisoning audit.
+
 jobs:
   build-and-test:
     name: Build & Test
@@ -48,25 +53,9 @@ jobs:
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
           sudo docker image prune --all --force
 
-      - uses: actions/checkout@v7
-
-      - name: Cache WASM runtime artifacts
-        id: wasm-cache
-        uses: actions/cache@v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          path: |
-            crates/eryx-runtime/runtime.wasm
-            crates/eryx-runtime/runtime-preinit.wasm
-          key: wasm-runtime-v2-${{ hashFiles('crates/eryx-wasm-runtime/src/**', 'crates/eryx-wasm-runtime/clock_stubs.c', 'crates/eryx-wasm-runtime/Cargo.toml', 'crates/eryx-runtime/build.rs', 'crates/eryx-runtime/wit/runtime.wit', 'crates/eryx-runtime/libs/*.zst', 'Cargo.lock') }}
-
-      - name: Touch cached artifacts
-        if: steps.wasm-cache.outputs.cache-hit == 'true'
-        run: |
-          touch crates/eryx-runtime/runtime.wasm
-          touch crates/eryx-runtime/runtime-preinit.wasm
-
-      - name: Configure Rust cache
-        uses: Swatinem/rust-cache@v2
+          persist-credentials: false
 
       - uses: ./.github/actions/setup-rust
 
@@ -74,14 +63,16 @@ jobs:
         run: rustup toolchain install nightly --component rust-src
 
       - name: Install mise
-        uses: jdx/mise-action@v5
+        uses: jdx/mise-action@9b200bcecbfd6303e69a4a261b2e09e3757440a7 # v5.2.0
+        with:
+          cache: false
 
       - name: Build and test JS bindings
         working-directory: js
         run: mise run test
 
       - name: Upload JS package
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: js-package
           path: js/eryx/
@@ -98,14 +89,15 @@ jobs:
       id-token: write
     steps:
       - name: Download JS package
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: js-package
           path: package/
 
-      - uses: actions/setup-node@v7
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: "24"
+          package-manager-cache: false
           registry-url: "https://registry.npmjs.org"
 
       - name: Publish to npm

@@ -1,0 +1,22 @@
+name: "Setup cargo-binstall"
+description: "Install a pinned, checksum-verified cargo-binstall"
+
+# Fetch a pinned release and check its digest rather than piping the install
+# script from the cargo-binstall main branch, which would run whatever that
+# branch held at the time. Linux x86_64 only: every job using this action runs
+# on ubuntu-latest. To bump, take the new version's
+# cargo-binstall-x86_64-unknown-linux-musl.tgz digest from the release page.
+runs:
+  using: "composite"
+  steps:
+    - name: Install cargo-binstall
+      shell: bash
+      env:
+        BINSTALL_VERSION: v1.26.0
+        BINSTALL_SHA256: dd7ff9451d8ba2e437a8d861889b630746f82f09d931df2d893b0c3f28656f87
+      run: |
+        curl -fsSL --proto '=https' --tlsv1.2 -o "$RUNNER_TEMP/cargo-binstall.tgz" \
+          "https://github.com/cargo-bins/cargo-binstall/releases/download/$BINSTALL_VERSION/cargo-binstall-x86_64-unknown-linux-musl.tgz"
+        echo "$BINSTALL_SHA256  $RUNNER_TEMP/cargo-binstall.tgz" | sha256sum -c -
+        mkdir -p "$HOME/.cargo/bin"
+        tar -xzf "$RUNNER_TEMP/cargo-binstall.tgz" -C "$HOME/.cargo/bin" cargo-binstall

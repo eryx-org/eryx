@@ -2,6 +2,9 @@
   $schema: "https://docs.renovatebot.com/renovate-schema.json",
   extends: [
     "config:recommended",
+    // Pin actions to commit SHAs with a `# vX.Y.Z` comment, and keep both
+    // current. Mutable tags can be moved by whoever controls the upstream repo.
+    "helpers:pinGitHubActionDigests",
     ":dependencyDashboard",
     // Match the existing "build(deps): ..." convention (see recent git log).
     ":semanticCommitTypeAll(build)",

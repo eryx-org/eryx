@@ -6,12 +6,21 @@ on:
     # Release tags (pushed by release-plz via the GitHub App token) so the
     # docker job can publish a version-tagged image, e.g. sd2k/eryx-server:0.5.0.
     tags: ['eryx-v[0-9]+.[0-9]+.[0-9]+']
+    #
+    # Tag builds publish that image, so they must not restore anything from
+    # the Actions cache: an entry written by an earlier run would flow straight
+    # into it. Every cache step below is therefore disabled when github.ref is
+    # a tag (rust-cache via lookup-only, the rest via their own inputs or an
+    # `if:`). See zizmor's cache-poisoning audit.
   pull_request:
     branches: [main]
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
+
+permissions:
+  contents: read
 
 env:
   CARGO_TERM_COLOR: always
@@ -38,8 +47,10 @@ jobs:
       js: ${{ steps.filter.outputs.js }}
       demo: ${{ steps.filter.outputs.demo }}
     steps:
-      - uses: actions/checkout@v7
-      - uses: dorny/paths-filter@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4.0.3
         id: filter
         with:
           filters: |
@@ -82,7 +93,9 @@ jobs:
       github.event_name == 'push'
       || needs.changes.outputs.core == 'true'
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - uses: ./.github/actions/setup-rust
 
@@ -110,11 +123,18 @@ jobs:
       || needs.changes.outputs.js == 'true'
       || needs.changes.outputs.demo == 'true'
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Cache WASM runtime artifacts
         id: wasm-cache
-        uses: actions/cache@v6
+        # Skipped on tag builds (see the note on `on.push.tags`); the cache-hit
+        # checks below then read as a miss and build from scratch. zizmor does
+        # not evaluate a step `if:` for actions/cache, and lookup-only would
+        # report a hit without restoring the files, hence the ignore.
+        if: ${{ !startsWith(github.ref, 'refs/tags/') }} # zizmor: ignore[cache-poisoning]
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             crates/eryx-runtime/runtime.wasm
@@ -140,7 +160,7 @@ jobs:
 
       - name: Upload WASM artifacts (cache hit)
         if: steps.wasm-cache.outputs.cache-hit == 'true'
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: wasm-runtime
           path: |
@@ -155,8 +175,9 @@ jobs:
 
       - name: Configure Rust cache
         if: steps.wasm-cache.outputs.cache-hit != 'true'
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
+          lookup-only: ${{ startsWith(github.ref, 'refs/tags/') }}
           prefix-key: v2
           # PR caches can't be read by other PRs and evict main's (10GB repo limit).
           save-if: ${{ github.ref == 'refs/heads/main' }}
@@ -215,7 +236,7 @@ jobs:
 
       - name: Upload WASM artifacts (cache miss)
         if: steps.wasm-cache.outputs.cache-hit != 'true'
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: wasm-runtime
           path: |
@@ -234,16 +255,18 @@ jobs:
       || needs.changes.outputs.core == 'true'
       || needs.changes.outputs.server == 'true'
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Install protoc
-        uses: arduino/setup-protoc@v3
+        uses: arduino/setup-protoc@c65c819552d16ad3c9b72d9dfd5ba5237b9c906b # v3.0.0
         with:
           version: "36.2"
           repo-token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Download WASM artifacts
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: wasm-runtime
           path: crates/
@@ -253,8 +276,9 @@ jobs:
       - uses: ./.github/actions/setup-rust
 
       - name: Configure Rust cache
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
+          lookup-only: ${{ startsWith(github.ref, 'refs/tags/') }}
           prefix-key: v2
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
@@ -274,10 +298,12 @@ jobs:
       || needs.changes.outputs.core == 'true'
       || needs.changes.outputs.server == 'true'
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Download WASM artifacts
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: wasm-runtime
           path: crates/
@@ -295,7 +321,7 @@ jobs:
           ls crates/eryx-wasm-runtime/tests/python-stdlib/ | head -10
 
       - name: Install protoc
-        uses: arduino/setup-protoc@v3
+        uses: arduino/setup-protoc@c65c819552d16ad3c9b72d9dfd5ba5237b9c906b # v3.0.0
         with:
           version: "36.2"
           repo-token: ${{ secrets.GITHUB_TOKEN }}
@@ -313,7 +339,7 @@ jobs:
       # and gcc, and `-fuse-ld=mold` works with the default gcc driver, so no
       # `linker =` override is required either.
       - name: Install mold linker
-        uses: rui314/setup-mold@v1
+        uses: rui314/setup-mold@339e96b4ff1f3bd865856ba4cbbe8818a7acb038 # v1
 
       - name: Configure mold linker
         run: |
@@ -326,8 +352,9 @@ jobs:
       - uses: ./.github/actions/setup-rust
 
       - name: Configure Rust cache
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
+          lookup-only: ${{ startsWith(github.ref, 'refs/tags/') }}
           prefix-key: v2
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
@@ -347,18 +374,22 @@ jobs:
       github.event_name == 'push'
       || needs.changes.outputs.core == 'true'
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Install mise
-        uses: jdx/mise-action@v5
+        uses: jdx/mise-action@9b200bcecbfd6303e69a4a261b2e09e3757440a7 # v5.2.0
         with:
+          cache: ${{ !startsWith(github.ref, 'refs/tags/') }}
           mise_toml: |
             [tools]
             rust = "1.99"
 
       - name: Configure Rust cache
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
+          lookup-only: ${{ startsWith(github.ref, 'refs/tags/') }}
           prefix-key: v2
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
@@ -377,11 +408,14 @@ jobs:
       matrix:
         os: [windows-latest, macos-latest]
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Configure Rust cache
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
+          lookup-only: ${{ startsWith(github.ref, 'refs/tags/') }}
           prefix-key: v2
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
@@ -415,16 +449,18 @@ jobs:
       github.event_name == 'push'
       || needs.changes.outputs.core == 'true'
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Install protoc
-        uses: arduino/setup-protoc@v3
+        uses: arduino/setup-protoc@c65c819552d16ad3c9b72d9dfd5ba5237b9c906b # v3.0.0
         with:
           version: "36.2"
           repo-token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Download WASM artifacts
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: wasm-runtime
           path: crates/
@@ -434,8 +470,9 @@ jobs:
       - uses: ./.github/actions/setup-rust
 
       - name: Configure Rust cache
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
+          lookup-only: ${{ startsWith(github.ref, 'refs/tags/') }}
           prefix-key: v2
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
@@ -454,14 +491,17 @@ jobs:
       github.event_name == 'push'
       || needs.changes.outputs.core == 'true'
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Install nightly toolchain
         run: rustup toolchain install nightly
 
       - name: Configure Rust cache
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
+          lookup-only: ${{ startsWith(github.ref, 'refs/tags/') }}
           prefix-key: v2
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
@@ -481,10 +521,12 @@ jobs:
     env:
       MISE_DISABLE_TOOLS: ""
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Download WASM artifacts
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: wasm-runtime
           path: crates/
@@ -494,8 +536,9 @@ jobs:
       - uses: ./.github/actions/setup-rust
 
       - name: Configure Rust cache
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
+          lookup-only: ${{ startsWith(github.ref, 'refs/tags/') }}
           prefix-key: v2
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
@@ -523,10 +566,12 @@ jobs:
       || needs.changes.outputs.core == 'true'
       || needs.changes.outputs.examples == 'true'
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Download WASM artifacts
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: wasm-runtime
           path: crates/
@@ -536,8 +581,9 @@ jobs:
       - uses: ./.github/actions/setup-rust
 
       - name: Configure Rust cache
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
+          lookup-only: ${{ startsWith(github.ref, 'refs/tags/') }}
           prefix-key: v2
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
@@ -576,10 +622,12 @@ jobs:
       || needs.changes.outputs.core == 'true'
       || needs.changes.outputs.python == 'true'
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Download WASM artifacts
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: wasm-runtime
           path: crates/
@@ -589,17 +637,20 @@ jobs:
       - uses: ./.github/actions/setup-rust
 
       - name: Configure Rust cache
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
+          lookup-only: ${{ startsWith(github.ref, 'refs/tags/') }}
           prefix-key: v2
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
-      - uses: actions/setup-python@v7
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.15"
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v10.3.0
+        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+        with:
+          enable-cache: false
 
       - name: Build and install eryx-python with dev dependencies
         working-directory: crates/eryx-python
@@ -639,10 +690,12 @@ jobs:
       || needs.changes.outputs.core == 'true'
       || needs.changes.outputs.python == 'true'
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Download WASM artifacts
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: wasm-runtime
           path: crates/
@@ -671,8 +724,9 @@ jobs:
           rustup default "$RUST_VERSION"
 
       - name: Configure Rust cache
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
+          lookup-only: ${{ startsWith(github.ref, 'refs/tags/') }}
           prefix-key: v2
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
@@ -685,12 +739,14 @@ jobs:
           ERYX_PRECOMPILE_BOOTSTRAP: "1"
           ERYX_CPU_FEATURES: "x86-64-v2"
 
-      - uses: actions/setup-python@v7
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.15"
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v10.3.0
+        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+        with:
+          enable-cache: false
 
       - name: Build and install eryx-python with dev dependencies
         shell: bash
@@ -725,10 +781,12 @@ jobs:
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
           sudo docker image prune --all --force
 
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Download WASM artifacts
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: wasm-runtime
           path: crates/
@@ -738,8 +796,9 @@ jobs:
       - uses: ./.github/actions/setup-rust
 
       - name: Configure Rust cache
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
+          lookup-only: ${{ startsWith(github.ref, 'refs/tags/') }}
           prefix-key: v2
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
@@ -816,7 +875,7 @@ jobs:
         run: mdbook test -L ../target/book-deps
         working-directory: book
 
-      - uses: actions/setup-python@v7
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: '3.15'
 
@@ -845,16 +904,16 @@ jobs:
     needs: book-tests
     if: github.ref == 'refs/heads/main'
     permissions:
-      contents: write
+      contents: read
       pages: write
       id-token: write
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          persist-credentials: false
           fetch-depth: 0  # Need full history for version detection
 
-      - name: Install cargo-binstall
-        run: curl -L --proto '=https' --tlsv1.2 -sSf https://raw.githubusercontent.com/cargo-bins/cargo-binstall/main/install-from-binstall-release.sh | bash
+      - uses: ./.github/actions/setup-binstall
 
       - name: Install mdbook tools
         run: |
@@ -873,11 +932,13 @@ jobs:
         run: mdbook build
 
       - name: Prepare deployment directory
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
         run: |
           mkdir -p deploy/latest/book
-          mkdir -p deploy/${{ steps.version.outputs.version }}/book
+          mkdir -p "deploy/$VERSION/book"
           cp -r book/book/* deploy/latest/book/
-          cp -r book/book/* deploy/${{ steps.version.outputs.version }}/book/
+          cp -r book/book/* "deploy/$VERSION/book/"
           echo "docs.eryx.run" > deploy/CNAME
           cat > deploy/index.html << 'HTMLEOF'
           <!DOCTYPE html>
@@ -894,15 +955,15 @@ jobs:
           HTMLEOF
 
       - name: Setup Pages
-        uses: actions/configure-pages@v6
+        uses: actions/configure-pages@45bfe0192ca1faeb007ade9deae92b16b8254a0d # v6.0.0
 
       - name: Upload artifact
-        uses: actions/upload-pages-artifact@v5
+        uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
         with:
           path: 'deploy'
 
       - name: Deploy to GitHub Pages
-        uses: actions/deploy-pages@v5
+        uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5.0.1
 
   # Deploy browser demo to Cloudflare Pages.
   # - On main: production deployment (custom domain)
@@ -924,10 +985,12 @@ jobs:
       deployments: write
       pull-requests: write
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Download WASM artifacts
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: wasm-runtime
           path: crates/
@@ -937,8 +1000,9 @@ jobs:
       - uses: ./.github/actions/setup-rust
 
       - name: Configure Rust cache
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
+          lookup-only: ${{ startsWith(github.ref, 'refs/tags/') }}
           prefix-key: v2
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
@@ -975,7 +1039,7 @@ jobs:
 
       - name: Deploy to Cloudflare Pages
         id: deploy
-        uses: cloudflare/wrangler-action@v4
+        uses: cloudflare/wrangler-action@953926a2e2182532811c01a25e53647d93bf07c0 # v4.1.3
         with:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
@@ -985,12 +1049,15 @@ jobs:
         if: github.event_name == 'pull_request'
         env:
           GH_TOKEN: ${{ github.token }}
+          ALIAS_URL: ${{ steps.deploy.outputs.pages-deployment-alias-url }}
+          DEPLOY_URL: ${{ steps.deploy.outputs.deployment-url }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
         run: |
-          BODY="🌐 **Demo preview:** ${{ steps.deploy.outputs.pages-deployment-alias-url }}
-          📌 **This deploy:** ${{ steps.deploy.outputs.deployment-url }}"
-          gh pr comment ${{ github.event.pull_request.number }} \
+          BODY="🌐 **Demo preview:** $ALIAS_URL
+          📌 **This deploy:** $DEPLOY_URL"
+          gh pr comment "$PR_NUMBER" \
             --body "$BODY" --edit-last || \
-          gh pr comment ${{ github.event.pull_request.number }} \
+          gh pr comment "$PR_NUMBER" \
             --body "$BODY"
 
   # Gate job for the "Deploy Demo" required status check.
@@ -1028,10 +1095,12 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Download WASM artifacts
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: wasm-runtime
           path: crates/
@@ -1041,14 +1110,14 @@ jobs:
 
       - name: Log in to Docker Hub
         if: github.event_name == 'push'
-        uses: docker/login-action@v4
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:
           username: sd2k
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
       - name: Docker meta
         id: meta
-        uses: docker/metadata-action@v6
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
         with:
           images: sd2k/eryx-server
           # On main: sha + branch + latest. On a release tag (eryx-v0.5.0):
@@ -1062,7 +1131,7 @@ jobs:
             type=match,pattern=\d+.\d+,group=0
 
       - name: Build and push
-        uses: docker/build-push-action@v7
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
           file: crates/eryx-server/Dockerfile
