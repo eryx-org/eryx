@@ -571,7 +571,10 @@ fn add_noop_initialize(module_bytes: &[u8]) -> Result<Vec<u8>> {
                 );
                 encoder.section(&exports);
             }
-            wasmparser::Payload::CodeSectionStart { range, .. } => {
+            wasmparser::Payload::CodeSectionStart {
+                unchecked_range: range,
+                ..
+            } => {
                 // Re-parse the code section from the saved range and reencode it,
                 // then append our noop function.
                 let section_data = slice_range(module_bytes, &range)?;
