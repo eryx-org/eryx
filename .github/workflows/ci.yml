@@ -155,6 +155,8 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           prefix-key: v2
+          # PR caches can't be read by other PRs and evict main's (10GB repo limit).
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Install nightly toolchain
         run: rustup toolchain install nightly --component rust-src
@@ -251,6 +253,7 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           prefix-key: v2
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Check formatting
         run: cargo fmt --all -- --check
@@ -323,6 +326,7 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           prefix-key: v2
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Run tests
         # Use --all-features to test everything. This works because:
@@ -353,6 +357,7 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           prefix-key: v2
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Check MSRV
         # Exclude crates that require WASM artifacts or WASI SDK
@@ -375,6 +380,7 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           prefix-key: v2
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Install Rust
         # Install the pinned toolchain rather than trusting the runner image's
@@ -428,6 +434,7 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           prefix-key: v2
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Build documentation
         # Use --all-features now that prebuilt artifacts are available
@@ -453,6 +460,7 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           prefix-key: v2
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Build docs (docs.rs simulation)
         run: DOCS_RS=1 cargo +nightly doc -p eryx -p eryx-runtime --all-features --no-deps
@@ -484,6 +492,7 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           prefix-key: v2
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Check all feature combinations
         # cargo-all-features checks the powerset of feature combinations.
@@ -525,6 +534,7 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           prefix-key: v2
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Run examples
         run: |
@@ -577,6 +587,7 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           prefix-key: v2
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - uses: actions/setup-python@v7
         with:
@@ -658,6 +669,7 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           prefix-key: v2
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Pre-compile WASM for Windows
         shell: bash
@@ -724,6 +736,7 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           prefix-key: v2
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Install mdbook tools
         run: |
@@ -922,6 +935,7 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           prefix-key: v2
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Install wasm32-unknown-unknown target
         run: rustup target add wasm32-unknown-unknown
