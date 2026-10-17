@@ -10,8 +10,8 @@
   },
   "dependencies": {
     "@bsull/eryx": "file:../eryx",
-    "@bytecodealliance/jco": "1.37.0",
-    "@bytecodealliance/preview2-shim": "^0.28.0",
+    "@bytecodealliance/jco": "1.39.0",
+    "@bytecodealliance/preview2-shim": "^0.30.0",
     "fzstd": "^0.1.1"
   },
   "devDependencies": {
