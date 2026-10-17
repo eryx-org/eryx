@@ -86,7 +86,7 @@ print(f"Sum of 0..9 = {result}")`,
 
 <style>
   .share-hint {
-    color: #666;
+    color: var(--text-muted);
     margin-top: 0;
     font-size: 13px;
   }

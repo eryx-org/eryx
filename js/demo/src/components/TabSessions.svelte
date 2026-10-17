@@ -166,7 +166,7 @@ print(f"x={x}, y={y}, items={items}")`,
 
 <style>
   .hint {
-    color: #666;
+    color: var(--text-muted);
     margin-top: 0;
   }
   .status {
@@ -176,14 +176,14 @@ print(f"x={x}, y={y}, items={items}")`,
     font-size: 14px;
   }
   .status.success {
-    background: #d4edda;
-    color: #155724;
-    border: 1px solid #c3e6cb;
+    background: var(--success-bg);
+    color: var(--success);
+    border: 1px solid var(--success-border);
   }
   .status.error {
-    background: #f8d7da;
-    color: #721c24;
-    border: 1px solid #f5c6cb;
+    background: var(--danger-bg);
+    color: var(--danger);
+    border: 1px solid var(--danger-border);
   }
   .snapshots h2 {
     font-size: 15px;
@@ -196,8 +196,8 @@ print(f"x={x}, y={y}, items={items}")`,
     margin-top: 16px;
   }
   .snapshot-card {
-    background: #f8f9fa;
-    border: 1px solid #dee2e6;
+    background: var(--surface-2);
+    border: 1px solid var(--border);
     border-radius: 8px;
     padding: 12px 16px;
     min-width: 180px;
@@ -208,7 +208,7 @@ print(f"x={x}, y={y}, items={items}")`,
   }
   .snapshot-card .meta {
     font-size: 12px;
-    color: #737373;
+    color: var(--text-muted);
     margin: 4px 0 8px;
   }
   .snapshot-card .actions {

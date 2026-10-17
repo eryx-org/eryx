@@ -386,7 +386,7 @@ with open(${JSON.stringify(guestPath)}, 'wb') as f:
 
 <style>
   .hint {
-    color: #666;
+    color: var(--text-muted);
     margin-top: 0;
   }
   .status {
@@ -396,19 +396,19 @@ with open(${JSON.stringify(guestPath)}, 'wb') as f:
     font-size: 14px;
   }
   .status.success {
-    background: #d4edda;
-    color: #155724;
-    border: 1px solid #c3e6cb;
+    background: var(--success-bg);
+    color: var(--success);
+    border: 1px solid var(--success-border);
   }
   .status.error {
-    background: #f8d7da;
-    color: #721c24;
-    border: 1px solid #f5c6cb;
+    background: var(--danger-bg);
+    color: var(--danger);
+    border: 1px solid var(--danger-border);
   }
   .status.info {
-    background: #d1ecf1;
-    color: #0c5460;
-    border: 1px solid #bee5eb;
+    background: var(--info-bg);
+    color: var(--info);
+    border: 1px solid var(--info-border);
   }
 
   .fs-explorer {
@@ -430,13 +430,13 @@ with open(${JSON.stringify(guestPath)}, 'wb') as f:
   }
   .mount-info {
     font-size: 13px;
-    color: #666;
+    color: var(--text-muted);
     margin-bottom: 8px;
   }
 
   .fs-tree {
-    background: #f8f9fa;
-    border: 1px solid #dee2e6;
+    background: var(--surface-2);
+    border: 1px solid var(--border);
     border-radius: 6px;
     padding: 8px 0;
     font-size: 13px;
@@ -446,7 +446,7 @@ with open(${JSON.stringify(guestPath)}, 'wb') as f:
     font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   }
   .tree-placeholder {
-    color: #737373;
+    color: var(--text-muted);
     font-size: 13px;
     padding: 8px 12px;
     display: block;
@@ -454,7 +454,7 @@ with open(${JSON.stringify(guestPath)}, 'wb') as f:
   .fs-empty {
     padding: 16px;
     text-align: center;
-    color: #737373;
+    color: var(--text-muted);
     font-style: italic;
   }
 
@@ -467,7 +467,7 @@ with open(${JSON.stringify(guestPath)}, 'wb') as f:
     transition: background 0.1s;
   }
   .fs-entry:hover {
-    background: #e9ecef;
+    background: var(--surface-3);
   }
   .fs-entry .icon {
     width: 16px;
@@ -481,7 +481,7 @@ with open(${JSON.stringify(guestPath)}, 'wb') as f:
     white-space: nowrap;
   }
   .fs-entry .meta {
-    color: #737373;
+    color: var(--text-muted);
     font-size: 12px;
     flex-shrink: 0;
   }
@@ -498,18 +498,18 @@ with open(${JSON.stringify(guestPath)}, 'wb') as f:
     padding: 1px 6px;
     font-size: 11px;
     border-radius: 3px;
-    border: 1px solid #ccc;
-    background: white;
+    border: 1px solid var(--border);
+    background: var(--surface);
     cursor: pointer;
-    color: #495057;
+    color: var(--text-secondary);
   }
   .act-btn:hover {
-    background: #e9ecef;
+    background: var(--surface-3);
   }
   .act-btn.del:hover {
-    background: #f8d7da;
-    color: #721c24;
-    border-color: #f5c6cb;
+    background: var(--danger-bg);
+    color: var(--danger);
+    border-color: var(--danger-border);
   }
 
   .editor-container {

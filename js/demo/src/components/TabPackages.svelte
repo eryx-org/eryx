@@ -553,7 +553,7 @@
 
 <style>
   .hint {
-    color: #666;
+    color: var(--text-muted);
     margin-top: 0;
   }
   .status {
@@ -563,14 +563,14 @@
     font-size: 14px;
   }
   .status.success {
-    background: #d4edda;
-    color: #155724;
-    border: 1px solid #c3e6cb;
+    background: var(--success-bg);
+    color: var(--success);
+    border: 1px solid var(--success-border);
   }
   .status.error {
-    background: #f8d7da;
-    color: #721c24;
-    border: 1px solid #f5c6cb;
+    background: var(--danger-bg);
+    color: var(--danger);
+    border: 1px solid var(--danger-border);
   }
   .link-progress {
     display: flex;
@@ -579,15 +579,15 @@
     padding: 12px;
     margin-bottom: 16px;
     border-radius: 6px;
-    background: #e8f4fd;
-    color: #0c5460;
-    border: 1px solid #bee5eb;
+    background: var(--accent-muted);
+    color: var(--info);
+    border: 1px solid var(--info-border);
     font-size: 14px;
   }
   .spinner {
     width: 16px;
     height: 16px;
-    border: 2px solid #0c5460;
+    border: 2px solid var(--info);
     border-top-color: transparent;
     border-radius: 50%;
     animation: spin 0.8s linear infinite;
@@ -596,20 +596,20 @@
     to { transform: rotate(360deg); }
   }
   .upload-zone {
-    border: 2px dashed #ccc;
+    border: 2px dashed var(--border);
     border-radius: 8px;
     padding: 40px 20px;
     text-align: center;
-    color: #737373;
+    color: var(--text-muted);
     margin-bottom: 16px;
     transition: all 0.2s;
     cursor: pointer;
   }
   .upload-zone:hover,
   .upload-zone.dragover {
-    border-color: #007bff;
-    color: #007bff;
-    background: #f0f7ff;
+    border-color: var(--accent);
+    color: var(--accent);
+    background: var(--accent-muted);
   }
   .upload-zone input[type="file"] {
     display: none;
@@ -627,40 +627,40 @@
   }
   .pkg-row {
     padding: 8px 12px;
-    background: #f1f3f5;
+    background: var(--surface-2);
     border-radius: 6px;
     margin-bottom: 6px;
     font-size: 14px;
   }
   .pkg-size {
-    color: #737373;
+    color: var(--text-muted);
     margin-left: 8px;
   }
   .pkg-status {
     float: right;
   }
   .pkg-status.installed {
-    color: #28a745;
+    color: var(--success);
   }
   .pkg-status.installing {
-    color: #007bff;
+    color: var(--accent);
   }
   .pkg-status.linking {
-    color: #6f42c1;
+    color: var(--violet);
   }
   .pkg-status.error {
-    color: #dc3545;
+    color: var(--danger);
   }
   .pkg-status.pending {
-    color: #737373;
+    color: var(--text-muted);
   }
   .pkg-hint {
     font-size: 13px;
-    color: #737373;
+    color: var(--text-muted);
     margin-top: 16px;
   }
   .pkg-hint a {
-    color: #007bff;
+    color: var(--accent);
   }
   .example-row {
     display: flex;
@@ -671,18 +671,18 @@
   }
   .example-label {
     font-size: 13px;
-    color: #737373;
+    color: var(--text-muted);
   }
   .pill-meta {
     font-size: 11px;
-    color: #868e96;
+    color: var(--text-muted);
     margin-left: 4px;
   }
   .pill-spinner {
     display: inline-block;
     width: 12px;
     height: 12px;
-    border: 2px solid #adb5bd;
+    border: 2px solid var(--border-hover);
     border-top-color: transparent;
     border-radius: 50%;
     animation: spin 0.8s linear infinite;

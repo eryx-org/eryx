@@ -28,18 +28,18 @@
     font-size: 14px;
   }
   .info {
-    background: #d1ecf1;
-    color: #0c5460;
-    border: 1px solid #bee5eb;
+    background: var(--info-bg);
+    color: var(--info);
+    border: 1px solid var(--info-border);
   }
   .error {
-    background: #f8d7da;
-    color: #721c24;
-    border: 1px solid #f5c6cb;
+    background: var(--danger-bg);
+    color: var(--danger);
+    border: 1px solid var(--danger-border);
   }
   .success {
-    background: #d4edda;
-    color: #155724;
-    border: 1px solid #c3e6cb;
+    background: var(--success-bg);
+    color: var(--success);
+    border: 1px solid var(--success-border);
   }
 </style>
