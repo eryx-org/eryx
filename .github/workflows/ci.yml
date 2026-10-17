@@ -16,6 +16,9 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
+  # cargo-all-features has no prebuilt binary, so mise compiles it (~10s) in
+  # every job. Only check-features uses it; it re-enables it below.
+  MISE_DISABLE_TOOLS: cargo:cargo-all-features
 
 jobs:
   # Detect which paths changed to skip unnecessary jobs.
@@ -467,6 +470,8 @@ jobs:
     if: >-
       github.event_name == 'push'
       || needs.changes.outputs.core == 'true'
+    env:
+      MISE_DISABLE_TOOLS: ""
     steps:
       - uses: actions/checkout@v7
 
