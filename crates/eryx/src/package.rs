@@ -229,7 +229,10 @@ impl ExtractedPackage {
             // Reject entries that are absolute or escape the extraction dir
             // (`../`), which would otherwise write anywhere on the host.
             let enclosed = file.enclosed_name().ok_or_else(|| {
-                Error::Initialization(format!("Archive entry has an unsafe path: {}", file.name()))
+                Error::Initialization(format!(
+                    "Archive entry has an unsafe path: {}",
+                    file.name().unwrap_or_default()
+                ))
             })?;
             let outpath = extract_path.join(enclosed);
 

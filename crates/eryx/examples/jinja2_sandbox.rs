@@ -399,7 +399,7 @@ fn extract_wheels(wheels: &[&Path]) -> anyhow::Result<std::path::PathBuf> {
         for i in 0..archive.len() {
             let mut file = archive.by_index(i)?;
             let Some(enclosed) = file.enclosed_name() else {
-                anyhow::bail!("unsafe path in wheel: {}", file.name());
+                anyhow::bail!("unsafe path in wheel: {}", file.name().unwrap_or_default());
             };
             let outpath = site_packages.join(enclosed);
 

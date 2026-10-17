@@ -97,7 +97,10 @@ pub fn parse_wheel(wheel_bytes: &[u8]) -> Result<WheelInfo, WheelParseError> {
             .by_index(i)
             .map_err(|e| WheelParseError::InvalidZip(e.to_string()))?;
 
-        let file_name = file.name().to_string();
+        let file_name = file
+            .name()
+            .map_err(|e| WheelParseError::InvalidZip(e.to_string()))?
+            .into_owned();
 
         // Extract package info from METADATA
         if file_name.ends_with(".dist-info/METADATA") {
