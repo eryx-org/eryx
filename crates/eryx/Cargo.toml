@@ -93,7 +93,6 @@ name = "jinja2_sandbox"
 required-features = ["native-extensions", "embedded"]
 
 [dependencies]
-anyhow.workspace = true
 async-trait.workspace = true
 blake3 = { workspace = true, optional = true }
 eryx-macros = { workspace = true, optional = true } #unified
@@ -155,6 +154,7 @@ vfs = ["dep:eryx-vfs"]
 
 
 [dev-dependencies]
+anyhow.workspace = true
 async-trait.workspace = true
 criterion.workspace = true
 crossterm.workspace = true
