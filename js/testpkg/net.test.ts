@@ -134,10 +134,14 @@ describe("fetch transport", () => {
 describe("Python HTTP clients over eryx:net", () => {
   let server: HttpServer;
   let port: number;
+  let requestedPath: string | undefined;
 
   beforeAll(async () => {
     setNetConfig(allowLoopback);
-    server = createHttpServer((req, res) => res.end(`you asked for ${req.url}`));
+    server = createHttpServer((req, res) => {
+      requestedPath = req.url;
+      res.end("hello from the host");
+    });
     await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
     port = (server.address() as AddressInfo).port;
   });
@@ -152,6 +156,7 @@ describe("Python HTTP clients over eryx:net", () => {
 import urllib.request
 print(urllib.request.urlopen("http://127.0.0.1:${port}/hi").read().decode())
 `);
-    expect(result.stdout).toBe("you asked for /hi\n");
+    expect(result.stdout).toBe("hello from the host\n");
+    expect(requestedPath).toBe("/hi");
   });
 });
