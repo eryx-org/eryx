@@ -398,7 +398,10 @@ fn extract_wheels(wheels: &[&Path]) -> anyhow::Result<std::path::PathBuf> {
 
         for i in 0..archive.len() {
             let mut file = archive.by_index(i)?;
-            let outpath = site_packages.join(file.name());
+            let Some(enclosed) = file.enclosed_name() else {
+                anyhow::bail!("unsafe path in wheel: {}", file.name());
+            };
+            let outpath = site_packages.join(enclosed);
 
             if file.is_dir() {
                 std::fs::create_dir_all(&outpath)?;

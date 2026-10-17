@@ -226,7 +226,12 @@ impl ExtractedPackage {
                 .by_index(i)
                 .map_err(|e| Error::Initialization(format!("Failed to read archive entry: {e}")))?;
 
-            let outpath = extract_path.join(file.name());
+            // Reject entries that are absolute or escape the extraction dir
+            // (`../`), which would otherwise write anywhere on the host.
+            let enclosed = file.enclosed_name().ok_or_else(|| {
+                Error::Initialization(format!("Archive entry has an unsafe path: {}", file.name()))
+            })?;
+            let outpath = extract_path.join(enclosed);
 
             if file.is_dir() {
                 std::fs::create_dir_all(&outpath).map_err(|e| {
@@ -415,6 +420,26 @@ mod tests {
             PackageFormat::detect(Path::new("package.tgz")),
             Some(PackageFormat::TarGz)
         );
+    }
+
+    #[test]
+    fn wheel_entry_escaping_extract_dir_is_rejected() -> Result<(), Box<dyn std::error::Error>> {
+        use std::io::Write;
+
+        let mut buf = std::io::Cursor::new(Vec::new());
+        let mut writer = zip::ZipWriter::new(&mut buf);
+        writer.start_file("../escaped.txt", zip::write::SimpleFileOptions::default())?;
+        writer.write_all(b"pwned")?;
+        writer.finish()?;
+        buf.set_position(0);
+
+        let result = ExtractedPackage::from_wheel_reader(buf, "evil");
+        assert!(
+            matches!(&result, Err(Error::Initialization(msg)) if msg.contains("unsafe path")),
+            "expected unsafe path error, got {:?}",
+            result.map(|p| p.name)
+        );
+        Ok(())
     }
 
     #[test]
