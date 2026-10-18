@@ -38,6 +38,7 @@ env:
   # across commits, and runner ext4 has no reflink: kache would store a full
   # copy of each (hundreds of MB apiece), which filled the Test runner's disk.
   KACHE_CACHE_EXECUTABLES: "0"
+  KACHE_PREFETCH_ENABLED: "0"
 
 jobs:
   # Detect which paths changed to skip unnecessary jobs.
