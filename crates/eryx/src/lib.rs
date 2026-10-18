@@ -182,3 +182,4 @@ pub mod vfs {
         VfsState, VfsStorage, VfsView,
     };
 }
+// kache measurement, do not merge
