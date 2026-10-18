@@ -1,6 +1,10 @@
 [tools]
 # Profile "default" includes rustc, rust-std, cargo, rust-docs, rustfmt, and clippy
 rust = { version = "1.99.1", profile = "default" }
+# Workflow linting (`mise run lint-actions`). actionlint runs shellcheck over
+# every `run:` script when it finds it on PATH, so pin that too.
+actionlint = "1.7.12"
+shellcheck = "0.11.0"
 
 [tools."cargo:cargo-nextest"]
 version = "0.9.148"
@@ -70,6 +74,10 @@ run = "cargo clippy --fix --allow-dirty --workspace --all-targets --all-features
 [tasks.fmt]
 description = "Format code"
 run = "cargo fmt --all"
+
+[tasks.lint-actions]
+description = "Lint GitHub Actions workflows (actionlint + shellcheck)"
+run = "actionlint"
 
 [tasks.fmt-check]
 description = "Check code formatting"

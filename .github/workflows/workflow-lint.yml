@@ -1,0 +1,41 @@
+# Lint the workflows with actionlint (https://github.com/rhysd/actionlint),
+# which also runs shellcheck over every `run:` script. Both are pinned in
+# mise.toml; run the same check locally with `mise run lint-actions`.
+# Configuration lives in .github/actionlint.yaml.
+
+name: workflow-lint
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/**'
+      - 'mise.toml'
+  pull_request:
+    paths:
+      - '.github/**'
+      - 'mise.toml'
+
+permissions: {}
+
+jobs:
+  actionlint:
+    name: actionlint
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: jdx/mise-action@9b200bcecbfd6303e69a4a261b2e09e3757440a7 # v5.2.0
+        with:
+          # Only the linters; the rest of mise.toml is the Rust toolchain.
+          install_args: actionlint shellcheck
+          cache: false
+
+      # Called directly: `mise run` would first install every tool in
+      # mise.toml, Rust toolchain and cargo installs included.
+      - name: Run actionlint
+        run: actionlint
