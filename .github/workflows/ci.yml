@@ -143,6 +143,7 @@ jobs:
           path: |
             crates/eryx-runtime/runtime.wasm
             crates/eryx-runtime/runtime.cwasm
+            crates/eryx-runtime/runtime-windows.cwasm
             crates/eryx-runtime/prebuilt/
             crates/eryx-wasm-runtime/target/liberyx_runtime.so
           # NOTE: this key does not cover the cwasm's CPU-feature configuration,
@@ -150,8 +151,9 @@ jobs:
           # crates/eryx/src/wasm.rs (compiled into the `precompile` example).
           # Changing either without busting the version prefix silently reuses a
           # cwasm built with the old settings. Bumped v3 -> v4 for the
-          # stdout bytes migration (list<u8> WIT change).
-          key: wasm-runtime-v4-${{ hashFiles('crates/eryx-wasm-runtime/src/**', 'crates/eryx-wasm-runtime/clock_stubs.c', 'crates/eryx-wasm-runtime/Cargo.toml', 'crates/eryx-runtime/build.rs', 'crates/eryx-runtime/wit/runtime.wit', 'crates/eryx-runtime/libs/*.zst', 'Cargo.lock') }}
+          # stdout bytes migration (list<u8> WIT change), v4 -> v5 for the
+          # Windows cwasm built alongside the Linux one.
+          key: wasm-runtime-v5-${{ hashFiles('crates/eryx-wasm-runtime/src/**', 'crates/eryx-wasm-runtime/clock_stubs.c', 'crates/eryx-wasm-runtime/Cargo.toml', 'crates/eryx-runtime/build.rs', 'crates/eryx-runtime/wit/runtime.wit', 'crates/eryx-runtime/libs/*.zst', 'Cargo.lock') }}
 
       - name: Touch cached artifacts
         if: steps.wasm-cache.outputs.cache-hit == 'true'
@@ -159,6 +161,7 @@ jobs:
           # Touch all cached files so mise/make consider them current
           touch crates/eryx-runtime/runtime.wasm
           touch crates/eryx-runtime/runtime.cwasm
+          touch crates/eryx-runtime/runtime-windows.cwasm
           touch crates/eryx-runtime/prebuilt/*
           touch crates/eryx-wasm-runtime/target/liberyx_runtime.so
 
@@ -170,6 +173,7 @@ jobs:
           path: |
             crates/eryx-runtime/runtime.wasm
             crates/eryx-runtime/runtime.cwasm
+            crates/eryx-runtime/runtime-windows.cwasm
             crates/eryx-runtime/prebuilt/
             crates/eryx-wasm-runtime/target/liberyx_runtime.so
           retention-days: 1
@@ -233,6 +237,11 @@ jobs:
           # Use preinit feature for faster sandbox instantiation in downstream jobs
           # (pre-initializes Python interpreter in the snapshot)
           cargo run -p eryx --example precompile --features preinit --release
+          # Cross-compile the Windows cwasm here too, so the Windows job doesn't
+          # need its own release build of eryx just to pre-initialize.
+          cargo run -p eryx --example precompile --features preinit --release -- \
+            --target x86_64-pc-windows-msvc \
+            --output crates/eryx-runtime/runtime-windows.cwasm
         env:
           ERYX_PRECOMPILE_BOOTSTRAP: "1"
           # Use x86-64-v2 for portable cwasm across runner types
@@ -246,6 +255,7 @@ jobs:
           path: |
             crates/eryx-runtime/runtime.wasm
             crates/eryx-runtime/runtime.cwasm
+            crates/eryx-runtime/runtime-windows.cwasm
             crates/eryx-runtime/prebuilt/
             crates/eryx-wasm-runtime/target/liberyx_runtime.so
           retention-days: 1
@@ -736,11 +746,12 @@ jobs:
           touch crates/eryx-runtime/runtime.wasm
           touch crates/eryx-runtime/prebuilt/*
 
-      - name: Set up Python stdlib for preinit
+      - name: Use the Windows cwasm
         shell: bash
         run: |
-          mkdir -p crates/eryx-wasm-runtime/tests/python-stdlib
-          tar -xf crates/eryx/python-stdlib.tar.zst -C crates/eryx-wasm-runtime/tests/
+          # Cross-compiled by build-eryx-runtime; embedded by the eryx build.
+          mv crates/eryx-runtime/runtime-windows.cwasm crates/eryx-runtime/runtime.cwasm
+          touch crates/eryx-runtime/runtime.cwasm
 
       - name: Install Rust
         shell: bash
@@ -759,15 +770,6 @@ jobs:
           lookup-only: ${{ startsWith(github.ref, 'refs/tags/') }}
           prefix-key: v2
           save-if: ${{ github.ref == 'refs/heads/main' }}
-
-      - name: Pre-compile WASM for Windows
-        shell: bash
-        run: |
-          cargo run -p eryx --example precompile --features preinit --release
-          touch crates/eryx-runtime/runtime.cwasm
-        env:
-          ERYX_PRECOMPILE_BOOTSTRAP: "1"
-          ERYX_CPU_FEATURES: "x86-64-v2"
 
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
