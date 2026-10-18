@@ -34,6 +34,10 @@ env:
   # those), so let it fall back to listing keys under the same crate names.
   # Workflow-level so a daemon restarted mid-build sees it too.
   KACHE_REMOTE_KEY_LISTING: "1"
+  # Test and example binaries link the workspace crates, so they never hit
+  # across commits, and runner ext4 has no reflink: kache would store a full
+  # copy of each (hundreds of MB apiece), which filled the Test runner's disk.
+  KACHE_CACHE_EXECUTABLES: "0"
 
 jobs:
   # Detect which paths changed to skip unnecessary jobs.
