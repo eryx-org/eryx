@@ -207,7 +207,9 @@ for y in range(-10, 11):
     </div>
   {/if}
   {#if state.status === "ready" && output != null}
-    <OutputBox {output} {isError} {elapsed} />
+    <div class:nowrap={active === "python"}>
+      <OutputBox {output} {isError} {elapsed} />
+    </div>
   {:else if state.status === "error"}
     <div class="output-box error-output">{state.message}</div>
   {:else}
@@ -231,6 +233,11 @@ for y in range(-10, 11):
   }
   .embed :global(.output-box) {
     max-height: none;
+  }
+  /* ASCII art must not wrap on narrow screens; let it scroll instead. */
+  .nowrap :global(.output-box) {
+    white-space: pre;
+    overflow-x: auto;
   }
   .pill-row {
     align-items: center;
