@@ -2064,7 +2064,7 @@ impl PythonExecutor {
         // Apply CPU feature level preset and custom Cranelift flags.
         // These require unsafe code, so they're only available with embedded or preinit features.
         #[cfg(any(feature = "embedded", feature = "preinit"))]
-        Self::apply_cpu_feature_flags(&mut config)?;
+        Self::apply_cpu_feature_flags(&mut config, effective_target.as_deref())?;
 
         Engine::new(&config).map_err(|e| Error::WasmEngine(e.to_string()))
     }
@@ -2200,14 +2200,17 @@ impl PythonExecutor {
     /// Requires `embedded` or `preinit` feature for the unsafe Cranelift flag APIs.
     #[cfg(any(feature = "embedded", feature = "preinit"))]
     #[allow(unsafe_code)]
-    fn apply_cpu_feature_flags(config: &mut Config) -> std::result::Result<(), Error> {
+    fn apply_cpu_feature_flags(
+        config: &mut Config,
+        target: Option<&str>,
+    ) -> std::result::Result<(), Error> {
         // Apply CPU feature level preset from environment variable.
         // This provides an easy way to target specific x86-64 microarchitecture levels.
         if let Ok(level) = std::env::var("ERYX_CPU_FEATURES") {
             let level: CpuFeatureLevel = level.parse().map_err(Error::WasmEngine)?;
-            // No explicit target here: this is the default engine path, so the
-            // helper pins the host triple itself.
-            Self::apply_cpu_feature_level(config, level, None)?;
+            // Pass the target on: with `None` the helper pins the host triple,
+            // which would silently override a cross-compilation target.
+            Self::apply_cpu_feature_level(config, level, target)?;
         }
 
         // Apply custom Cranelift flags from environment variable.
@@ -2930,5 +2933,38 @@ mod tests {
         unsafe {
             env::remove_var("ERYX_CPU_FEATURES");
         }
+    }
+
+    /// Test that an explicit target survives `ERYX_CPU_FEATURES`.
+    ///
+    /// The preset used to re-pin the host triple, so cross-compiling with a
+    /// CPU level set silently produced a host artifact.
+    #[test]
+    #[cfg(any(feature = "embedded", feature = "preinit"))]
+    #[allow(unsafe_code)]
+    fn test_cpu_feature_level_keeps_explicit_target() {
+        use std::env;
+
+        // An empty component: preamble only.
+        const EMPTY_COMPONENT: &[u8] = b"\0asm\x0d\0\x01\0";
+        let target = "x86_64-pc-windows-msvc";
+
+        // SAFETY: Same as test_cpu_feature_levels_use_valid_cranelift_flags.
+        unsafe {
+            env::set_var("ERYX_CPU_FEATURES", "x86-64-v2");
+            env::remove_var("ERYX_CRANELIFT_FLAGS");
+            env::remove_var("ERYX_TARGET");
+        }
+        let result = PythonExecutor::precompile_with_target(EMPTY_COMPONENT, Some(target));
+        // SAFETY: Same as above - single-threaded test cleanup.
+        unsafe {
+            env::remove_var("ERYX_CPU_FEATURES");
+        }
+
+        let bytes = result.expect("cross-compilation should succeed");
+        assert!(
+            bytes.windows(target.len()).any(|w| w == target.as_bytes()),
+            "precompiled artifact should record the {target} triple"
+        );
     }
 }
