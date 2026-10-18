@@ -118,6 +118,36 @@ cranelift-codegen.opt-level = 3
 regalloc2.opt-level = 3
 wasmtime.opt-level = 3
 wasmparser.opt-level = 3
+# The rest of the compile pipeline, plus pre-init's wizer/wit-component/zstd
+# work. Generic code is compiled in the crate that instantiates it, so these
+# matter even where the hot types come from the crates above. Together they
+# cut a pre-init from ~10s to ~6s on 4 cores.
+cranelift-assembler-x64.opt-level = 3
+cranelift-bforest.opt-level = 3
+cranelift-bitset.opt-level = 3
+cranelift-control.opt-level = 3
+cranelift-entity.opt-level = 3
+cranelift-frontend.opt-level = 3
+cranelift-native.opt-level = 3
+gimli.opt-level = 3
+object.opt-level = 3
+pulley-interpreter.opt-level = 3
+wasm-compose.opt-level = 3
+wasm-encoder.opt-level = 3
+wasm-metadata.opt-level = 3
+wasmtime-environ.opt-level = 3
+wasmtime-internal-component-util.opt-level = 3
+wasmtime-internal-core.opt-level = 3
+wasmtime-internal-cranelift.opt-level = 3
+wasmtime-internal-fiber.opt-level = 3
+wasmtime-internal-unwinder.opt-level = 3
+wasmtime-wasi.opt-level = 3
+wasmtime-wizer.opt-level = 3
+wit-component.opt-level = 3
+wit-dylib.opt-level = 3
+wit-parser.opt-level = 3
+zstd-safe.opt-level = 3
+zstd-sys.opt-level = 3
 # wasmtime-wizer's snapshot_component() debug-asserts that its output is valid,
 # but it strips _initialize exports that the component model still references.
 # Our restore_initialize_exports() post-processing fixes this, but runs after
