@@ -103,6 +103,17 @@ jobs:
 
       - uses: ./.github/actions/setup-rust
 
+      # cargo-rail's compiler evidence is `cargo check` builds of 8 views of
+      # the workspace. Cold, that and the analysis over it take ~13 min; with
+      # a warm target dir the whole check takes under 20s.
+      - name: Configure Rust cache
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          lookup-only: ${{ startsWith(github.ref, 'refs/tags/') }}
+          prefix-key: v2
+          # PR caches can't be read by other PRs and evict main's (10GB repo limit).
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
       - name: Install protoc for eryx-server build.rs
         run: sudo apt-get install -y protobuf-compiler
 
