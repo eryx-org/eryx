@@ -52,9 +52,10 @@ summary() {
 case $mode in
 seed)
   mkdir -p "$dir" && cd "$dir"
-  # list-objects-v2 paginates on its own; keys come back tab-separated.
+  # list-objects-v2 paginates on its own; keys come back tab-separated, or as
+  # "None" for an empty bucket, which grep drops (no match is fine here).
   s3 list-objects-v2 --prefix artifacts/v3/manifests/ --query 'Contents[].Key' --output text |
-    tr '\t' '\n' | grep -E "$valid" | while read -r k; do
+    tr '\t' '\n' | { grep -E "$valid" || true; } | while read -r k; do
       mkdir -p "$(dirname "$k")" && : >"$k"
     done
   echo "seeded $(find . -type f | wc -l) placeholder manifests from R2"
