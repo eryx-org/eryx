@@ -638,6 +638,11 @@ jobs:
       github.event_name == 'push'
       || needs.changes.outputs.core == 'true'
       || needs.changes.outputs.python == 'true'
+    env:
+      # The release profile uses codegen-units = 1 for shipped artifacts, which
+      # makes LLVM single-threaded on the eryx crate. These builds only feed
+      # tests, so trade a little runtime speed for a ~2.5x faster rebuild.
+      CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "16"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -706,6 +711,11 @@ jobs:
       github.event_name == 'push'
       || needs.changes.outputs.core == 'true'
       || needs.changes.outputs.python == 'true'
+    env:
+      # The release profile uses codegen-units = 1 for shipped artifacts, which
+      # makes LLVM single-threaded on the eryx crate. These builds only feed
+      # tests, so trade a little runtime speed for a ~2.5x faster rebuild.
+      CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "16"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -792,6 +802,11 @@ jobs:
       || needs.changes.outputs.core == 'true'
       || needs.changes.outputs.book == 'true'
       || needs.changes.outputs.python == 'true'
+    env:
+      # The release profile uses codegen-units = 1 for shipped artifacts, which
+      # makes LLVM single-threaded on the eryx crate. These builds only feed
+      # tests, so trade a little runtime speed for a ~2.5x faster rebuild.
+      CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "16"
     steps:
       - name: Free disk space
         run: |
