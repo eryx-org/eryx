@@ -76,25 +76,19 @@ upload)
   check
   summary "to upload"
   # Packs before manifests, so a reader never finds a manifest whose pack is
-  # missing. --if-none-match '*' makes every put create-only, like kache's own
-  # put_if_absent: a 412 means the object exists and is left alone.
-  put() {
-    out=$(s3 put-object --key "$1" --body "$1" --if-none-match '*' 2>&1) && { echo created; return; }
-    case $out in
-    *PreconditionFailed* | *"(412)"*) echo exists ;;
-    *) echo "::warning::put $1 failed: $out" >&2 && echo failed ;;
-    esac
-  }
-  export -f put s3
-  results=$(
-    for kind in packs manifests; do
-      [ -d "artifacts/v3/$kind" ] || continue
-      find "artifacts/v3/$kind" -type f -print0 | xargs -0 -r -P 16 -I{} bash -c 'put "$1"' _ {}
-    done
-  )
-  for r in created exists failed; do printf '%s=%s ' "$r" "$(grep -c "^$r\$" <<<"$results" || true)"; done
-  echo
-  ! grep -q '^failed$' <<<"$results"
+  # missing. --no-overwrite (AWS CLI >= 2.33) skips keys R2 already has and
+  # sends every put with If-None-Match: *, so it is create-only like kache's
+  # own put_if_absent. One multithreaded process per kind: a process per
+  # object took 18 minutes for the first 3,582.
+  aws configure set default.s3.max_concurrent_requests 32
+  for kind in packs manifests; do
+    [ -d "artifacts/v3/$kind" ] || continue
+    # A failed put fails the assignment, and set -e the script.
+    out=$(aws s3 cp --recursive --no-overwrite --no-progress \
+      --endpoint-url "${KACHE_R2_ENDPOINT:?}" \
+      "artifacts/v3/$kind" "s3://${KACHE_R2_BUCKET:?}/artifacts/v3/$kind")
+    echo "uploaded $(grep -c '^upload:' <<<"$out" || true) new $kind"
+  done
   ;;
 *)
   echo "unknown mode: $mode" >&2
