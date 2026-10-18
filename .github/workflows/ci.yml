@@ -367,7 +367,10 @@ jobs:
         with:
           version: v1.2.2
           github-cache: true
-          cache-key-prefix: kache-test
+          # Bump the suffix when [profile.dev.package] changes. The key only
+          # hashes Cargo.lock, and an exact hit never re-saves, so rebuilt deps
+          # would otherwise be recompiled every run until the lockfile changes.
+          cache-key-prefix: kache-test-p2
           save-cache: ${{ github.ref == 'refs/heads/main' }}
           pr-comment: false
 
