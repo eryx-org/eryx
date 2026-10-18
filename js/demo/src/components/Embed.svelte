@@ -37,8 +37,8 @@
       label: "Callbacks",
       code: `import asyncio, time
 
-# get_user, get_orders and get_weather are host functions:
-# this page implements them in JavaScript.
+# get_user, get_orders, get_weather: host functions,
+# implemented in JavaScript by this page.
 user = await get_user(id=123)
 print(f"Hello {user['name']} from {user['city']}")
 
@@ -54,20 +54,22 @@ print(f"both lookups: {(time.monotonic() - start) * 1000:.0f}ms")`,
     },
     escape: {
       label: "Try to escape",
-      code: `import os, socket, subprocess
+      code: `import socket, subprocess
+connect = socket.create_connection
 
-def attempt(what, fn):
+attempts = {
+    "read host files": lambda: open("/etc/passwd"),
+    "run a shell": lambda: subprocess.run("id"),
+    "dial localhost": lambda: connect(("127.0.0.1", 22)),
+    "metadata": lambda: connect(("169.254.169.254", 80)),
+    "native code": lambda: __import__("ctypes"),
+}
+for what, attempt in attempts.items():
     try:
-        fn()
+        attempt()
         print(f"allowed  {what}")
     except Exception as e:
-        print(f"blocked  {what}\\n         {type(e).__name__}: {e}")
-
-attempt("read the host's files", lambda: open("/etc/passwd").read())
-attempt("run a shell command", lambda: subprocess.run(["sh", "-c", "id"]))
-attempt("connect to localhost", lambda: socket.create_connection(("127.0.0.1", 22)))
-attempt("reach cloud metadata", lambda: socket.create_connection(("169.254.169.254", 80)))
-attempt("load native code", lambda: __import__("ctypes"))`,
+        print(f"blocked  {what}\\n         {type(e).__name__}: {e}")`,
     },
     python: {
       label: "Plain Python",
@@ -76,13 +78,13 @@ attempt("load native code", lambda: __import__("ctypes"))`,
 # Real CPython, compiled to WebAssembly
 print(sys.version.split()[0], "on", sys.platform)
 
-for y in range(-12, 13):
+for y in range(-10, 11):
     row = ""
-    for x in range(-39, 17):
-        c, z, n = complex(x / 20, y / 10), 0, 0
-        while abs(z) < 2 and n < 40:
+    for x in range(-42, 14):
+        c, z, n = complex(x / 19, y / 8.5), 0, 0
+        while abs(z) < 2 and n < 60:
             z, n = z * z + c, n + 1
-        row += " .:-=+*#%@"[n % 10] if n < 40 else " "
+        row += " .:-=+*#%@"[min(n // 3, 9)] if n < 60 else " "
     print(row)`,
     },
   };
@@ -94,6 +96,7 @@ for y in range(-12, 13):
   let code = $state(examples.callbacks.code);
   let calls: Call[] = $state([]);
   let runStart = 0;
+  let root: HTMLElement;
 
   let state = $derived(getSandboxState());
   let ready = $derived(state.status === "ready");
@@ -150,12 +153,19 @@ for y in range(-12, 13):
       Object.entries(hostFunctions).map(([name, { description }]) => ({ name, description })),
     );
     setCallbackHandler(handleCallback);
+    // Tell the embedding page (eryx.run) how tall we are, so it can size
+    // the iframe instead of making us scroll.
+    if (window.parent !== window) {
+      new ResizeObserver(() =>
+        window.parent.postMessage({ eryxEmbedHeight: root.offsetHeight }, "*"),
+      ).observe(root);
+    }
     await initSandbox();
     await run();
   });
 </script>
 
-<div class="embed">
+<div class="embed" bind:this={root}>
   <div class="pill-row" role="tablist">
     {#each Object.entries(examples) as [key, ex]}
       <button
@@ -210,7 +220,12 @@ for y in range(-12, 13):
     padding: 16px;
   }
   .embed :global(textarea) {
-    min-height: 120px;
+    field-sizing: content;
+    min-height: 0;
+    font-size: 13px;
+    white-space: pre;
+    overflow-x: auto;
+    resize: none;
   }
   .pill-row {
     align-items: center;
