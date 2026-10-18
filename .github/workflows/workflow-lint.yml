@@ -1,7 +1,16 @@
-# Lint the workflows with actionlint (https://github.com/rhysd/actionlint),
-# which also runs shellcheck over every `run:` script. Both are pinned in
-# mise.toml; run the same check locally with `mise run lint-actions`.
+# Lint the workflows and composite actions.
+#
+# actionlint (https://github.com/rhysd/actionlint) checks workflow syntax and
+# expressions, and runs shellcheck over every `run:` script. Both tools are
+# pinned in mise.toml; run the same check locally with `mise run lint-actions`.
 # Configuration lives in .github/actionlint.yaml.
+#
+# zizmor (https://docs.zizmor.sh) audits them for security problems, so an
+# unpinned action, an over-broad token or a cache restored into a release
+# fails CI instead of landing quietly. Findings fail the job (annotated on the
+# PR) rather than going to Code Scanning: a SARIF upload never blocks a merge
+# on its own. Suppressions live in .github/zizmor.yml or as inline
+# `# zizmor: ignore[...]` comments.
 
 name: workflow-lint
 
@@ -10,10 +19,12 @@ on:
     branches: [main]
     paths:
       - '.github/**'
+      - 'dist-workspace.toml'
       - 'mise.toml'
   pull_request:
     paths:
       - '.github/**'
+      - 'dist-workspace.toml'
       - 'mise.toml'
 
 permissions: {}
@@ -39,3 +50,19 @@ jobs:
       # mise.toml, Rust toolchain and cargo installs included.
       - name: Run actionlint
         run: actionlint
+
+  zizmor:
+    name: zizmor
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Run zizmor
+        uses: zizmorcore/zizmor-action@85b2b9fb8e3325e7a23d7d0a9d7ba5ae0f999e3e # v0.7.1
+        with:
+          advanced-security: false
+          annotations: true
