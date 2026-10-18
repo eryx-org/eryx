@@ -938,13 +938,12 @@ print(f"completed {len(results)} tasks")
         assert b"completed 3 tasks" in result.stdout
         assert len(call_times) == 3
 
-        # Verify callbacks ran in parallel (overlapping time ranges)
-        # If sequential, total time would be ~150ms; parallel should be ~50ms
+        # Verify callbacks ran in parallel: every call started before the first
+        # one finished. Sequential calls can't overlap, however slow the
+        # machine, whereas a total-time bound flakes on loaded CI runners.
         starts = [t[1] for t in call_times]
         ends = [t[2] for t in call_times]
-        total_time = max(ends) - min(starts)
-        # Should complete in roughly 50-100ms if parallel, not 150ms+
-        assert total_time < 0.12, f"Callbacks appear sequential: {total_time}s"
+        assert max(starts) < min(ends), f"Callbacks appear sequential: {call_times}"
 
     def test_sync_callback_from_async_context(self):
         """Test that sync callbacks work when called from async context."""
