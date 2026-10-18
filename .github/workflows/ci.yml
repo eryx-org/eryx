@@ -318,7 +318,7 @@ jobs:
           # Create empty site-packages directory (tests expect it)
           mkdir -p crates/eryx-wasm-runtime/tests/site-packages
           ls -la crates/eryx-wasm-runtime/target/
-          ls crates/eryx-wasm-runtime/tests/python-stdlib/ | head -10
+          find crates/eryx-wasm-runtime/tests/python-stdlib/ -mindepth 1 -maxdepth 1 | sort | head -10
 
       - name: Install protoc
         uses: arduino/setup-protoc@c65c819552d16ad3c9b72d9dfd5ba5237b9c906b # v3.0.0
@@ -869,7 +869,7 @@ jobs:
             "$RUNNER_TEMP/cargo-build.json" \
             | while read -r f; do cp -n "$f" "$BOOK_DEPS/"; done
 
-          echo "assembled $(ls "$BOOK_DEPS" | wc -l) artifacts into $BOOK_DEPS"
+          echo "assembled $(find "$BOOK_DEPS" -mindepth 1 -maxdepth 1 | wc -l) artifacts into $BOOK_DEPS"
 
       - name: Test Rust code blocks
         run: mdbook test -L ../target/book-deps
@@ -924,7 +924,7 @@ jobs:
         id: version
         run: |
           VERSION=$(grep '^version = ' Cargo.toml | head -1 | sed 's/version = "\(.*\)"/\1/')
-          echo "version=v$VERSION" >> $GITHUB_OUTPUT
+          echo "version=v$VERSION" >> "$GITHUB_OUTPUT"
           echo "Detected version: v$VERSION"
 
       - name: Build book

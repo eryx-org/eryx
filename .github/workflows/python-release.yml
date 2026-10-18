@@ -236,8 +236,8 @@ jobs:
       - name: Test wheel
         run: |
           docker run --rm \
-            -v $(pwd)/dist:/dist \
-            -v $(pwd)/crates/eryx-python/tests:/tests \
+            -v "$(pwd)/dist:/dist" \
+            -v "$(pwd)/crates/eryx-python/tests:/tests" \
             python:3.12-alpine sh -c "
               pip install 'pyeryx[dev]' --find-links /dist/ --only-binary pyeryx &&
               pytest /tests/ -v
@@ -395,8 +395,8 @@ jobs:
       - name: Test wheel
         run: |
           docker run --rm \
-            -v $(pwd)/dist:/dist \
-            -v $(pwd)/crates/eryx-python/tests:/tests \
+            -v "$(pwd)/dist:/dist" \
+            -v "$(pwd)/crates/eryx-python/tests:/tests" \
             python:3.12-alpine sh -c "
               pip install 'pyeryx[dev]' --find-links /dist/ --only-binary pyeryx &&
               pytest /tests/ -v
@@ -465,7 +465,7 @@ jobs:
       - name: Install Python and add to PATH
         run: |
           uv python install 3.12
-          echo "$(dirname $(uv python find 3.12))" >> $GITHUB_PATH
+          dirname "$(uv python find 3.12)" >> "$GITHUB_PATH"
 
       - name: Build wheels
         uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b # v1.51.0
@@ -546,7 +546,7 @@ jobs:
       - name: Install Python and add to PATH
         run: |
           uv python install 3.12
-          echo "$(dirname $(uv python find 3.12))" >> $GITHUB_PATH
+          dirname "$(uv python find 3.12)" >> "$GITHUB_PATH"
 
       - name: Build wheels
         uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b # v1.51.0
