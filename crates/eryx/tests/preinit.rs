@@ -8,10 +8,11 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 #![cfg(feature = "preinit")]
 
-use eryx::Sandbox;
 use eryx::preinit::pre_initialize;
+use eryx::{PythonExecutor, Sandbox, SandboxBuilder, state};
 use std::collections::HashMap;
 use std::future::Future;
+use std::hash::{DefaultHasher, Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::{Mutex, OnceCell};
@@ -117,8 +118,7 @@ async fn shared_preinit(stdlib: &Path, imports: &[&str]) -> Arc<Vec<u8>> {
         return Arc::clone(bytes);
     }
 
-    let dir = cache_dir();
-    let path = dir.join(format!("{key}.wasm"));
+    let path = cache_dir().join(format!("{key}.wasm"));
 
     let bytes = if let Ok(bytes) = std::fs::read(&path) {
         Arc::new(bytes)
@@ -129,20 +129,50 @@ async fn shared_preinit(stdlib: &Path, imports: &[&str]) -> Arc<Vec<u8>> {
                 .expect("pre-initialization should succeed"),
         );
 
-        // Publish via rename so a concurrent reader never sees a partial file.
-        // Two processes racing here just both do the work, which is no worse
-        // than not caching at all.
-        std::fs::create_dir_all(&dir).expect("cache directory should be creatable");
-        prune_stale_caches(&dir);
-        let tmp = dir.join(format!("{key}.{}.tmp", std::process::id()));
-        std::fs::write(&tmp, bytes.as_slice()).expect("cache entry should be writable");
-        std::fs::rename(&tmp, &path).expect("cache entry should be publishable");
-
+        write_cache_entry(&path, &bytes);
         bytes
     };
 
     cache.insert(key, Arc::clone(&bytes));
     bytes
+}
+
+/// Write an entry into the on-disk cache for the current run.
+fn write_cache_entry(path: &Path, bytes: &[u8]) {
+    let dir = path.parent().expect("cache entry should have a parent");
+    std::fs::create_dir_all(dir).expect("cache directory should be creatable");
+    prune_stale_caches(dir);
+
+    // Publish via rename so a concurrent reader never sees a partial file.
+    // Two processes racing here just both do the work, which is no worse
+    // than not caching at all.
+    let tmp = path.with_extension(format!("{}.tmp", std::process::id()));
+    std::fs::write(&tmp, bytes).expect("cache entry should be writable");
+    std::fs::rename(&tmp, path).expect("cache entry should be publishable");
+}
+
+/// Start a sandbox builder from pre-initialized component bytes.
+///
+/// Building from raw component bytes compiles the whole 34MB component, which
+/// costs more than anything else these tests do (~12s in CI), and several
+/// tests build more than one sandbox from the same bytes. So the component is
+/// compiled once per run and the native code is cached on disk next to the
+/// pre-init bytes, keyed by a hash of the component.
+fn sandbox_builder(wasm: &[u8], stdlib: &Path) -> SandboxBuilder<state::Has, state::Has> {
+    let mut hasher = DefaultHasher::new();
+    wasm.hash(&mut hasher);
+    let path = cache_dir().join(format!("{:016x}.cwasm", hasher.finish()));
+
+    let precompiled = std::fs::read(&path).unwrap_or_else(|_| {
+        let bytes = PythonExecutor::precompile(wasm).expect("precompilation should succeed");
+        write_cache_entry(&path, &bytes);
+        bytes
+    });
+
+    // SAFETY: the bytes were produced by `PythonExecutor::precompile` in this
+    // test run, with this build of wasmtime.
+    let builder = unsafe { Sandbox::builder().with_precompiled_bytes(precompiled) };
+    builder.with_python_stdlib(stdlib)
 }
 
 // =============================================================================
@@ -171,9 +201,7 @@ async fn preinit_can_execute() {
     let preinit_bytes = shared_preinit(&stdlib, &[]).await;
 
     // Create sandbox from pre-initialized bytes
-    let sandbox = Sandbox::builder()
-        .with_wasm_bytes((*preinit_bytes).clone())
-        .with_python_stdlib(&stdlib)
+    let sandbox = sandbox_builder(&preinit_bytes, &stdlib)
         .build()
         .expect("sandbox creation should succeed");
 
@@ -196,9 +224,7 @@ async fn preinit_arbitrary_imports_work() {
     // Pre-initialize with NO imports (empty list)
     let preinit_bytes = shared_preinit(&stdlib, &[]).await;
 
-    let sandbox = Sandbox::builder()
-        .with_wasm_bytes((*preinit_bytes).clone())
-        .with_python_stdlib(&stdlib)
+    let sandbox = sandbox_builder(&preinit_bytes, &stdlib)
         .build()
         .expect("sandbox creation should succeed");
 
@@ -239,9 +265,7 @@ async fn preinit_multiple_sandboxes() {
 
     // Create multiple sandboxes from the same pre-init bytes
     for i in 0..3 {
-        let sandbox = Sandbox::builder()
-            .with_wasm_bytes((*preinit_bytes).clone())
-            .with_python_stdlib(&stdlib)
+        let sandbox = sandbox_builder(&preinit_bytes, &stdlib)
             .build()
             .expect("sandbox creation should succeed");
 
@@ -262,11 +286,7 @@ async fn preinit_sandboxes_isolated() {
     let preinit_bytes = shared_preinit(&stdlib, &[]).await;
 
     // Create first sandbox and set a variable
-    let sandbox1 = Sandbox::builder()
-        .with_wasm_bytes((*preinit_bytes).clone())
-        .with_python_stdlib(&stdlib)
-        .build()
-        .unwrap();
+    let sandbox1 = sandbox_builder(&preinit_bytes, &stdlib).build().unwrap();
 
     sandbox1
         .execute("secret_value = 'sandbox1_secret'")
@@ -274,11 +294,7 @@ async fn preinit_sandboxes_isolated() {
         .unwrap();
 
     // Create second sandbox - should NOT see the variable
-    let sandbox2 = Sandbox::builder()
-        .with_wasm_bytes((*preinit_bytes).clone())
-        .with_python_stdlib(&stdlib)
-        .build()
-        .unwrap();
+    let sandbox2 = sandbox_builder(&preinit_bytes, &stdlib).build().unwrap();
 
     let result = sandbox2
         .execute(
@@ -304,9 +320,7 @@ async fn preinit_with_imports() {
     // This needs its own pre-init: different imports, different component.
     let preinit_bytes = shared_preinit(&stdlib, &["json"]).await;
 
-    let sandbox = Sandbox::builder()
-        .with_wasm_bytes((*preinit_bytes).clone())
-        .with_python_stdlib(&stdlib)
+    let sandbox = sandbox_builder(&preinit_bytes, &stdlib)
         .build()
         .expect("sandbox creation should succeed");
 
@@ -339,11 +353,7 @@ async fn preinit_imports_work_within_execution() {
 
     let preinit_bytes = shared_preinit(&stdlib, &[]).await;
 
-    let sandbox = Sandbox::builder()
-        .with_wasm_bytes((*preinit_bytes).clone())
-        .with_python_stdlib(&stdlib)
-        .build()
-        .unwrap();
+    let sandbox = sandbox_builder(&preinit_bytes, &stdlib).build().unwrap();
 
     // Import and use within same execution
     let result = sandbox
@@ -369,11 +379,7 @@ async fn preinit_file_operations_work() {
 
     let preinit_bytes = shared_preinit(&stdlib, &[]).await;
 
-    let sandbox = Sandbox::builder()
-        .with_wasm_bytes((*preinit_bytes).clone())
-        .with_python_stdlib(&stdlib)
-        .build()
-        .unwrap();
+    let sandbox = sandbox_builder(&preinit_bytes, &stdlib).build().unwrap();
 
     // Test that we can read files (the stdlib directory is mounted)
     let result = sandbox
@@ -412,9 +418,7 @@ async fn preinit_setup_code_defines_variable() {
     .await
     .expect("pre-initialization with setup code should succeed");
 
-    let sandbox = Sandbox::builder()
-        .with_wasm_bytes(preinit_bytes)
-        .with_python_stdlib(&stdlib)
+    let sandbox = sandbox_builder(&preinit_bytes, &stdlib)
         .build()
         .expect("sandbox creation should succeed");
 
@@ -441,9 +445,7 @@ async fn preinit_setup_code_uses_imports() {
     .await
     .expect("pre-initialization with imports + setup code should succeed");
 
-    let sandbox = Sandbox::builder()
-        .with_wasm_bytes(preinit_bytes)
-        .with_python_stdlib(&stdlib)
+    let sandbox = sandbox_builder(&preinit_bytes, &stdlib)
         .build()
         .expect("sandbox creation should succeed");
 
@@ -465,11 +467,7 @@ async fn preinit_setup_code_isolated_between_sandboxes() {
         .expect("pre-initialization should succeed");
 
     // First sandbox: mutate the variable
-    let sandbox1 = Sandbox::builder()
-        .with_wasm_bytes(preinit_bytes.clone())
-        .with_python_stdlib(&stdlib)
-        .build()
-        .unwrap();
+    let sandbox1 = sandbox_builder(&preinit_bytes, &stdlib).build().unwrap();
 
     sandbox1
         .execute("counter += 100\nprint(f'sb1: {counter}')")
@@ -477,11 +475,7 @@ async fn preinit_setup_code_isolated_between_sandboxes() {
         .unwrap();
 
     // Second sandbox: should see the original value, not the mutated one
-    let sandbox2 = Sandbox::builder()
-        .with_wasm_bytes(preinit_bytes)
-        .with_python_stdlib(&stdlib)
-        .build()
-        .unwrap();
+    let sandbox2 = sandbox_builder(&preinit_bytes, &stdlib).build().unwrap();
 
     let result = sandbox2.execute("print(f'sb2: {counter}')").await.unwrap();
 
@@ -581,9 +575,7 @@ async fn preinit_baked_callbacks() {
     let preinit_bytes = preinit_with_callbacks(&stdlib, &[&Echo]).await;
 
     // Same set as baked: the wrapper is already installed and works.
-    let sandbox = Sandbox::builder()
-        .with_wasm_bytes(preinit_bytes.clone())
-        .with_python_stdlib(&stdlib)
+    let sandbox = sandbox_builder(&preinit_bytes, &stdlib)
         .with_callback(Echo)
         .build()
         .expect("sandbox creation should succeed");
@@ -596,9 +588,7 @@ async fn preinit_baked_callbacks() {
     assert_eq!(result.stdout_text().trim(), "['echo']\n7");
 
     // A different set is installed as before, replacing the baked one.
-    let sandbox = Sandbox::builder()
-        .with_wasm_bytes(preinit_bytes.clone())
-        .with_python_stdlib(&stdlib)
+    let sandbox = sandbox_builder(&preinit_bytes, &stdlib)
         .with_callback(Ping)
         .build()
         .expect("sandbox creation should succeed");
@@ -609,9 +599,7 @@ async fn preinit_baked_callbacks() {
     assert_eq!(result.stdout_text().trim(), "['ping'] pong");
 
     // No callbacks registered: the guest reflects the host, not the snapshot.
-    let sandbox = Sandbox::builder()
-        .with_wasm_bytes(preinit_bytes)
-        .with_python_stdlib(&stdlib)
+    let sandbox = sandbox_builder(&preinit_bytes, &stdlib)
         .build()
         .expect("sandbox creation should succeed");
     let result = sandbox
@@ -628,9 +616,7 @@ async fn preinit_baked_callbacks_ignore_registration_order() {
     let stdlib = get_stdlib_path();
     let preinit_bytes = preinit_with_callbacks(&stdlib, &[&Ping, &Echo]).await;
 
-    let sandbox = Sandbox::builder()
-        .with_wasm_bytes(preinit_bytes)
-        .with_python_stdlib(&stdlib)
+    let sandbox = sandbox_builder(&preinit_bytes, &stdlib)
         .with_callback(Echo)
         .with_callback(Ping)
         .build()

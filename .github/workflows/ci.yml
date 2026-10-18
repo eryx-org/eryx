@@ -682,7 +682,7 @@ jobs:
         working-directory: crates/eryx-python
         run: |
           source ../../.venv/bin/activate
-          pytest tests/ -v
+          pytest tests/ -v -n auto
 
       - name: Run Python examples
         working-directory: crates/eryx-python
@@ -780,7 +780,7 @@ jobs:
         working-directory: crates/eryx-python
         run: |
           source ../../.venv/Scripts/activate
-          pytest tests/ -v
+          pytest tests/ -v -n auto
 
   # Test book examples
   book-tests:
