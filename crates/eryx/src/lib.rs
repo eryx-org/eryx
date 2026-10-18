@@ -182,3 +182,5 @@ pub mod vfs {
         VfsState, VfsStorage, VfsView,
     };
 }
+
+// tmp/kache-measure-a: kache measurement PR, do not merge.
