@@ -366,9 +366,15 @@ jobs:
       # ever hold the read-only R2 key: on main they export what they compiled
       # as an artifact, and the kache-upload job (which runs no repo or
       # dependency code) writes it to R2. Fork PRs get no secrets and build cold.
+      - name: Configure Rust cache
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          prefix-key: v2
+          save-if: false
+
       - name: Configure kache
         id: kache
-        if: github.event.pull_request.head.repo.fork != true && !startsWith(github.ref, 'refs/tags/')
+        if: false
         uses: kunobi-ninja/kache-action@ad7317540dcdd71c904f7a60a87b620a0c0e67ed # v1
         with:
           version: v1.2.2
@@ -613,9 +619,15 @@ jobs:
 
       - uses: ./.github/actions/setup-rust
 
+      - name: Configure Rust cache
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          prefix-key: v2
+          save-if: false
+
       - name: Configure kache
         id: kache
-        if: github.event.pull_request.head.repo.fork != true && !startsWith(github.ref, 'refs/tags/')
+        if: false
         uses: kunobi-ninja/kache-action@ad7317540dcdd71c904f7a60a87b620a0c0e67ed # v1
         with:
           version: v1.2.2
