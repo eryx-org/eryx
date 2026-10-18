@@ -50,7 +50,8 @@ orders, weather = await asyncio.gather(
 spent = sum(o["total"] for o in orders)
 print(f"{len(orders)} orders, {spent:.2f} spent")
 print(f"{weather['temp_c']}°C and {weather['sky']}")
-print(f"both lookups: {(time.monotonic() - start) * 1000:.0f}ms")`,
+took = (time.monotonic() - start) * 1000
+print(f"both lookups: {took:.0f}ms")`,
     },
     escape: {
       label: "Try to escape",
@@ -69,7 +70,7 @@ for what, attempt in attempts.items():
         attempt()
         print(f"allowed  {what}")
     except Exception as e:
-        print(f"blocked  {what}\\n         {type(e).__name__}: {e}")`,
+        print(f"blocked  {what}\\n  {type(e).__name__}: {e}")`,
     },
     python: {
       label: "Plain Python",
@@ -77,6 +78,7 @@ for what, attempt in attempts.items():
 
 # Real CPython, compiled to WebAssembly
 print(sys.version.split()[0], "on", sys.platform)
+chars = " .:-=+*#%@"
 
 for y in range(-10, 11):
     row = ""
@@ -84,7 +86,7 @@ for y in range(-10, 11):
         c, z, n = complex(x / 19, y / 8.5), 0, 0
         while abs(z) < 2 and n < 60:
             z, n = z * z + c, n + 1
-        row += " .:-=+*#%@"[min(n // 3, 9)] if n < 60 else " "
+        row += chars[min(n // 3, 9)] if n < 60 else " "
     print(row)`,
     },
   };
@@ -226,6 +228,9 @@ for y in range(-10, 11):
     white-space: pre;
     overflow-x: auto;
     resize: none;
+  }
+  .embed :global(.output-box) {
+    max-height: none;
   }
   .pill-row {
     align-items: center;
