@@ -50,6 +50,7 @@ jobs:
       examples: ${{ steps.filter.outputs.examples }}
       js: ${{ steps.filter.outputs.js }}
       demo: ${{ steps.filter.outputs.demo }}
+      deps: ${{ steps.filter.outputs.deps }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -87,15 +88,26 @@ jobs:
               - 'js/**'
             demo:
               - 'demo/**'
+            # What `cargo rail unify --check` reads. It also uses compiler
+            # evidence for unused deps, so a source-only change can still trip
+            # it; main runs it on every push to catch those after merge.
+            deps:
+              - '**/Cargo.toml'
+              - 'Cargo.lock'
+              - '.config/rail.toml'
+              - 'mise.toml'
+              - '.github/workflows/ci.yml'
 
   # Fast check for dependency drift - runs in parallel with build
   unify-check:
     name: Dependency Check
     runs-on: ubuntu-latest
     needs: changes
+    # ~13 min, almost all in cargo-rail's in-process analysis, which has no
+    # setting to narrow it. Run it on PRs only when what it checks changed.
     if: >-
       github.event_name == 'push'
-      || needs.changes.outputs.core == 'true'
+      || needs.changes.outputs.deps == 'true'
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
