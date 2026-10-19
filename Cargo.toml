@@ -6,7 +6,7 @@ members = ["crates/*"]
 # - cargo-nextest: Fast test runner (`cargo nextest run`)
 
 [workspace.package]
-version = "0.9.1"
+version = "0.10.0"
 edition = "2024"
 rust-version = "1.99.1"
 license = "MIT OR Apache-2.0"
@@ -26,10 +26,10 @@ clap = { version = "^4.6.6", features = ["derive", "env"] } #unified
 criterion = { version = "0.8", features = ["async_tokio"] } # benchmarking
 crossterm = "0.29"                                          # terminal control
 dashmap = "6"                                               # concurrent maps
-eryx = { path = "crates/eryx", version = "^0.9.1" }
-eryx-macros = { path = "crates/eryx-macros", version = "^0.9.1" }
-eryx-runtime = { path = "crates/eryx-runtime", version = "^0.9.1" } #unified
-eryx-vfs = { path = "crates/eryx-vfs", version = "^0.9.1" } #unified
+eryx = { path = "crates/eryx", version = "^0.10.0" }
+eryx-macros = { path = "crates/eryx-macros", version = "^0.10.0" }
+eryx-runtime = { path = "crates/eryx-runtime", version = "^0.10.0" } #unified
+eryx-vfs = { path = "crates/eryx-vfs", version = "^0.10.0" } #unified
 flate2 = "1.0"
 futures = "0.3"
 futures-concurrency = "7.6"
@@ -143,17 +143,17 @@ wasmtime-internal-fiber.opt-level = 3
 wasmtime-internal-unwinder.opt-level = 3
 wasmtime-wasi.opt-level = 3
 wasmtime-wizer.opt-level = 3
-wit-component.opt-level = 3
-wit-dylib.opt-level = 3
-wit-parser.opt-level = 3
-zstd-safe.opt-level = 3
-zstd-sys.opt-level = 3
 # wasmtime-wizer's snapshot_component() debug-asserts that its output is valid,
 # but it strips _initialize exports that the component model still references.
 # Our restore_initialize_exports() post-processing fixes this, but runs after
 # the assertion. Disable debug assertions for this dep since the final output
 # is valid.
 wasmtime-wizer.debug-assertions = false
+wit-component.opt-level = 3
+wit-dylib.opt-level = 3
+wit-parser.opt-level = 3
+zstd-safe.opt-level = 3
+zstd-sys.opt-level = 3
 
 # The profile that 'dist' will build with
 [profile.dist]
