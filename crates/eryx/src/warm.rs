@@ -143,7 +143,9 @@ impl WarmPool {
 
     /// Dispose of a store that has run user code and top the pool back up.
     ///
-    /// Both happen on a background task when the pool is active; otherwise
+    /// Both happen on Tokio's blocking pool when the pool is active, so the
+    /// slot reset and the CPU-bound instantiation (each around a millisecond)
+    /// do not hold up the async workers serving other requests. Otherwise
     /// the store is dropped here.
     pub(crate) fn retire(
         &'static self,
@@ -162,7 +164,8 @@ impl WarmPool {
 
         let (reservation, evicted) = self.reserve(key(pre));
         let pre = pre.clone();
-        tokio::spawn(async move {
+        let handle = Handle::current();
+        tokio::task::spawn_blocking(move || {
             // Dropping first returns the memory slot to wasmtime's pool, so the
             // replacement below can reuse it while it is still cache-hot.
             drop(store);
@@ -170,7 +173,7 @@ impl WarmPool {
             let Some(reservation) = reservation else {
                 return;
             };
-            match instantiate_warm(&pre).await {
+            match handle.block_on(instantiate_warm(&pre)) {
                 Ok(instance) => reservation.fulfil(instance),
                 Err(e) => {
                     tracing::warn!(error = %e, "failed to pre-instantiate a warm instance");
