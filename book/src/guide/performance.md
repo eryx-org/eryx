@@ -54,6 +54,14 @@ pages the previous instance dirtied are reset.
 | `ERYX_POOL_INSTANCES` | `1000` | Maximum instances alive at once. Every running `execute()` and every live session holds one; instantiation fails once the pool is full. |
 | `ERYX_POOL_KEEP_RESIDENT_MB` | `64` | How much of each linear memory to keep mapped between uses. |
 | `ERYX_POOL_PAGEMAP_SCAN` | `1` | `1`: reset only dirty pages (Linux 6.7+, via `PAGEMAP_SCAN`). `0`: `memcpy` the whole keep-resident budget instead, which trades a larger copy for fewer page faults on the next execution. |
+| `ERYX_POOL_IDLE_RELEASE_SECS` | `30` | After this many seconds without a new instance, return the memory kept resident for unused slots to the OS. `0` keeps it resident indefinitely. |
+
+Keeping memory resident is what makes slot reuse cheap, but after a burst of
+concurrent executions every slot the burst used stays resident. The idle
+release returns that memory once the process goes quiet. Live instances,
+including warm ones, are not affected, so the first request after an idle
+period is still served from a warm instance; only the instantiations after it
+start from cold slots.
 
 The pool reserves virtual address space for every slot up front — several
 terabytes with the defaults, which is normal for wasmtime deployments but can

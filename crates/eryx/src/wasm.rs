@@ -537,12 +537,16 @@ impl std::str::FromStr for CpuFeatureLevel {
 ///   pages with Linux's `PAGEMAP_SCAN` ioctl (6.7+) and reset only those;
 ///   `0` resets the whole keep-resident budget with `memcpy` instead, which
 ///   trades a larger copy for fewer page faults on the next execution.
+/// - `ERYX_POOL_IDLE_RELEASE_SECS`: after this many seconds without a new
+///   instance (default 30), release the memory kept resident for unused
+///   slots back to the OS. `0` keeps it resident indefinitely.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct AllocatorSettings {
     pooling: bool,
     pool_instances: u32,
     keep_resident_bytes: usize,
     pagemap_scan: bool,
+    idle_release: Option<Duration>,
 }
 
 impl Default for AllocatorSettings {
@@ -552,6 +556,7 @@ impl Default for AllocatorSettings {
             pool_instances: 1000,
             keep_resident_bytes: 64 << 20,
             pagemap_scan: true,
+            idle_release: Some(Duration::from_secs(30)),
         }
     }
 }
@@ -616,6 +621,15 @@ impl AllocatorSettings {
             None => {}
         }
 
+        if let Some(v) = lookup("ERYX_POOL_IDLE_RELEASE_SECS") {
+            let secs = v.trim().parse::<u64>().map_err(|_| {
+                Error::WasmEngine(format!(
+                    "ERYX_POOL_IDLE_RELEASE_SECS must be a non-negative integer, got '{v}'"
+                ))
+            })?;
+            settings.idle_release = (secs > 0).then(|| Duration::from_secs(secs));
+        }
+
         Ok(settings)
     }
 
@@ -641,6 +655,54 @@ impl AllocatorSettings {
                 Enabled::No
             });
         Some(pooling)
+    }
+}
+
+/// Count of stores created, read by the idle-release thread to tell whether
+/// the pool has been used since its last check.
+static STORES_CREATED: AtomicU64 = AtomicU64::new(0);
+
+/// Create a store, recording the activity for [`start_idle_release`].
+pub(crate) fn new_store<T>(engine: &Engine, state: T) -> Store<T> {
+    STORES_CREATED.fetch_add(1, Ordering::Relaxed);
+    Store::new(engine, state)
+}
+
+/// Release the pooling allocator's resident memory for unused slots once no
+/// store has been created for a whole `interval`.
+///
+/// `linear_memory_keep_resident` keeps each slot's pages mapped after use so
+/// the next instance in it takes no page faults. That is the point under
+/// load, but after a burst of concurrent executions it leaves every slot the
+/// burst touched resident indefinitely. Live instances, including warm ones,
+/// are untouched; only the next instantiation into a released slot is slower.
+///
+/// Does nothing for an engine without the pooling allocator.
+fn start_idle_release(engine: &Engine, interval: Duration) {
+    if engine.pooling_allocator_metrics().is_none() {
+        return;
+    }
+    let engine = engine.clone();
+    let spawned = std::thread::Builder::new()
+        .name("eryx-pool-idle-release".to_string())
+        .spawn(move || {
+            let mut seen = STORES_CREATED.load(Ordering::Relaxed);
+            loop {
+                std::thread::sleep(interval);
+                let now = STORES_CREATED.load(Ordering::Relaxed);
+                let idle = now == seen;
+                seen = now;
+                let resident = engine
+                    .pooling_allocator_metrics()
+                    .map_or(0, |m| m.unused_memory_bytes_resident());
+                if idle && resident > 0 {
+                    let released = engine.release_idle_pool_memory();
+                    tracing::debug!(released, "released idle pooling allocator memory");
+                }
+            }
+        });
+    if let Err(error) = spawned {
+        tracing::warn!(%error, "failed to start the pool idle-release thread");
     }
 }
 
@@ -859,7 +921,7 @@ pub(crate) async fn instantiate_store(
             .map_err(|e| Error::Initialization(format!("Failed to set fuel: {e}")))
     };
 
-    let mut store = Store::new(pre.engine(), state);
+    let mut store = new_store(pre.engine(), state);
     store.limiter(|state| &mut state.memory_tracker);
     store.set_epoch_deadline(u64::MAX / 2);
     set_fuel(&mut store, u64::MAX)?;
@@ -1674,7 +1736,15 @@ impl PythonExecutor {
     pub fn shared_engine() -> std::result::Result<Engine, Error> {
         static SHARED_ENGINE: RetryableOnce<Engine> = RetryableOnce::new();
 
-        SHARED_ENGINE.get_or_try_init(Self::create_engine).cloned()
+        SHARED_ENGINE
+            .get_or_try_init(|| {
+                let engine = Self::create_engine()?;
+                if let Some(interval) = AllocatorSettings::from_env()?.idle_release {
+                    start_idle_release(&engine, interval);
+                }
+                Ok(engine)
+            })
+            .cloned()
     }
 
     /// Create a new executor by loading a WASM component from bytes.
@@ -3209,8 +3279,10 @@ mod tests {
             ("ERYX_POOL_INSTANCES", " 42 "),
             ("ERYX_POOL_KEEP_RESIDENT_MB", "8"),
             ("ERYX_POOL_PAGEMAP_SCAN", "0"),
+            ("ERYX_POOL_IDLE_RELEASE_SECS", "0"),
         ])
         .unwrap();
+        assert_eq!(settings.idle_release, None);
         let pooling = settings.pooling_config().unwrap();
         assert_eq!(pooling.get_total_memories(), 42);
         assert_eq!(pooling.get_total_component_instances(), 42);
@@ -3227,6 +3299,7 @@ mod tests {
             [("ERYX_POOL_INSTANCES", "lots")],
             [("ERYX_POOL_KEEP_RESIDENT_MB", "-1")],
             [("ERYX_POOL_PAGEMAP_SCAN", "yes")],
+            [("ERYX_POOL_IDLE_RELEASE_SECS", "soon")],
         ] {
             let err = allocator_settings(&vars).expect_err("invalid setting must be rejected");
             assert!(matches!(err, Error::WasmEngine(_)), "{vars:?}: {err:?}");
