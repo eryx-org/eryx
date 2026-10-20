@@ -70,14 +70,14 @@ async fn a_replacement_is_prepared_after_each_execution() {
     assert_eq!(sandbox.executor().warm_instances_ready(), 0);
 
     let cold = sandbox.execute("print('cold')").await.unwrap();
-    assert_eq!(cold.stdout, "cold");
+    assert_eq!(cold.stdout_text().trim(), "cold");
     assert_eq!(wait_for_warm(&sandbox).await, 1);
 
     let warm = sandbox
         .execute("import json\nprint(json.dumps({'warm': True}))")
         .await
         .unwrap();
-    assert_eq!(warm.stdout, "{\"warm\": true}");
+    assert_eq!(warm.stdout_text().trim(), "{\"warm\": true}");
     assert_eq!(wait_for_warm(&sandbox).await, 1);
 }
 
@@ -90,7 +90,7 @@ async fn warm_instances_are_shared_between_sandboxes_of_the_same_runtime() {
     let second = Sandbox::embedded().build().unwrap();
     assert_eq!(second.executor().warm_instances_ready(), 1);
     let output = second.execute("print('shared')").await.unwrap();
-    assert_eq!(output.stdout, "shared");
+    assert_eq!(output.stdout_text().trim(), "shared");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -107,7 +107,7 @@ async fn executions_on_warm_instances_are_isolated() {
         .execute("print('leaked' in globals())")
         .await
         .unwrap();
-    assert_eq!(output.stdout, "False");
+    assert_eq!(output.stdout_text().trim(), "False");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -127,7 +127,7 @@ async fn per_execution_configuration_applies_to_a_warm_instance() {
         .execute("outcome = await echo(data={'n': 1})\nprint(outcome)")
         .await
         .unwrap();
-    assert_eq!(output.stdout, "{'n': 1}");
+    assert_eq!(output.stdout_text().trim(), "{'n': 1}");
     assert_eq!(output.result.as_deref(), Some(r#"{"n": 1}"#));
 }
 
@@ -142,7 +142,7 @@ async fn the_virtual_filesystem_is_mounted_on_a_warm_instance() {
         )
         .await
         .unwrap();
-    assert_eq!(output.stdout, "hi");
+    assert_eq!(output.stdout_text().trim(), "hi");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
