@@ -17,6 +17,7 @@ async fn the_pool_holds_exactly_the_configured_number_of_sandboxes() {
     // SAFETY: the current-thread runtime has no other threads yet; this is the
     // only test in the binary.
     unsafe {
+        std::env::set_var("ERYX_ALLOCATOR", "pooling");
         std::env::set_var("ERYX_POOL_INSTANCES", "3");
         std::env::set_var("ERYX_WARM_INSTANCES", "0");
     }

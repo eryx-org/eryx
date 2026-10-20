@@ -15,6 +15,7 @@ use eryx::Sandbox;
 fn idle_pool_memory_is_released() {
     // SAFETY: no other threads exist yet; this is the only test in the binary.
     unsafe {
+        std::env::set_var("ERYX_ALLOCATOR", "pooling");
         std::env::set_var("ERYX_POOL_IDLE_RELEASE_SECS", "1");
         std::env::set_var("ERYX_WARM_INSTANCES", "0");
     }

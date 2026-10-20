@@ -48,13 +48,13 @@ reports how many instances are waiting for that executor's runtime.
 
 Wasmtime can allocate each instance's linear memory, tables, and async stacks
 on demand (a fresh `mmap` per instance) or from a pool of pre-reserved slots.
-Eryx uses the pooling allocator: a slot that has just been released is reused
+Eryx uses the pooling allocator (except on Windows, see below): a slot that has just been released is reused
 by the next instance, so its pages are still mapped, and on Linux only the
 pages the previous instance dirtied are reset.
 
 | Variable | Default | Effect |
 |----------|---------|--------|
-| `ERYX_ALLOCATOR` | `pooling` | `pooling` or `on-demand`. |
+| `ERYX_ALLOCATOR` | `pooling` (`on-demand` on Windows) | `pooling` or `on-demand`. |
 | `ERYX_POOL_INSTANCES` | `1000` | Maximum sandbox instances alive at once. Every running `execute()`, every live session and every warm instance holds one; instantiation fails once the pool is full. |
 | `ERYX_POOL_KEEP_RESIDENT_MB` | `64` | How much of each linear memory to keep mapped between uses. |
 | `ERYX_POOL_PAGEMAP_SCAN` | `1` | `1`: reset only dirty pages (Linux 6.7+, via `PAGEMAP_SCAN`). `0`: `memcpy` the whole keep-resident budget instead, which trades a larger copy for fewer page faults on the next execution. |
@@ -66,6 +66,10 @@ release returns that memory once the process goes quiet. Live instances,
 including warm ones, are not affected, so the first request after an idle
 period is still served from a warm instance; only the instantiations after it
 start from cold slots.
+
+On Windows the default is `on-demand`: Windows has no overcommit, and wasmtime
+commits the whole table pool when the engine is created, which at the default
+limits is gigabytes of commit charge per process.
 
 The pool reserves virtual address space for every slot up front — several
 terabytes with the defaults, which is normal for wasmtime deployments but can

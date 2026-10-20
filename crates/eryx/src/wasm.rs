@@ -525,7 +525,7 @@ impl std::str::FromStr for CpuFeatureLevel {
 /// process-global ([`PythonExecutor::shared_engine`]) and is created before
 /// any sandbox configuration exists.
 ///
-/// - `ERYX_ALLOCATOR`: `pooling` (default) or `on-demand`.
+/// - `ERYX_ALLOCATOR`: `pooling` (default, except on Windows) or `on-demand`.
 /// - `ERYX_POOL_INSTANCES`: maximum concurrently live sandbox instances with
 ///   the pooling allocator (default 1000). Every running `Sandbox::execute()`,
 ///   every live session and every warm instance holds one; instantiation
@@ -553,7 +553,10 @@ pub(crate) struct AllocatorSettings {
 impl Default for AllocatorSettings {
     fn default() -> Self {
         Self {
-            pooling: true,
+            // Windows commits the whole table pool up front (it has no
+            // overcommit), which at the default limits is gigabytes of commit
+            // charge per process.
+            pooling: !cfg!(windows),
             pool_instances: 1000,
             keep_resident_bytes: 64 << 20,
             pagemap_scan: true,
@@ -3304,10 +3307,10 @@ mod tests {
     }
 
     #[test]
-    fn allocator_defaults_to_pooling() {
+    fn allocator_defaults_to_pooling_except_on_windows() {
         let settings = allocator_settings(&[]).unwrap();
         assert_eq!(settings, AllocatorSettings::default());
-        assert!(settings.pooling_config().is_some());
+        assert_eq!(settings.pooling_config().is_some(), !cfg!(windows));
     }
 
     #[test]
@@ -3319,6 +3322,7 @@ mod tests {
     #[test]
     fn allocator_pool_limits_are_applied() {
         let settings = allocator_settings(&[
+            ("ERYX_ALLOCATOR", "pooling"),
             ("ERYX_POOL_INSTANCES", " 42 "),
             ("ERYX_POOL_KEEP_RESIDENT_MB", "8"),
             ("ERYX_POOL_PAGEMAP_SCAN", "0"),
@@ -3359,7 +3363,8 @@ mod tests {
     #[cfg(feature = "embedded")]
     fn pooling_engine_is_constructible() {
         let mut config = PythonExecutor::base_engine_config();
-        let pooling = AllocatorSettings::default().pooling_config().unwrap();
+        let settings = allocator_settings(&[("ERYX_ALLOCATOR", "pooling")]).unwrap();
+        let pooling = settings.pooling_config().unwrap();
         config.allocation_strategy(InstanceAllocationStrategy::Pooling(pooling));
         Engine::new(&config).expect("pooling configuration must be valid");
     }
