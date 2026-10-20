@@ -1,6 +1,6 @@
 //! `ERYX_POOL_INSTANCES` is the number of sandboxes the pooling allocator can
 //! hold at once, whatever each one needs from the pool internally (13 core
-//! instances and 2 tables for the runtime component).
+//! instances, 2 tables and a fiber stack per in-flight guest task).
 //!
 //! The setting is read when the process-global engine is created, so this
 //! binary holds a single test that sets it before anything touches the engine.
@@ -26,8 +26,17 @@ async fn the_pool_holds_exactly_the_configured_number_of_sandboxes() {
     for _ in 0..3 {
         sessions.push(InProcessSession::new(&sandbox).await.unwrap());
     }
+    // Concurrent asyncio work holds several guest-task fibers per sandbox,
+    // which must also fit while every sandbox is alive.
     for session in &mut sessions {
-        session.execute("x = 1").await.unwrap();
+        session
+            .execute(
+                "import asyncio\n\
+                 asyncio.ensure_future(asyncio.sleep(30))\n\
+                 await asyncio.wait_for(asyncio.gather(*(asyncio.sleep(0.01) for _ in range(4))), 5)",
+            )
+            .await
+            .unwrap();
     }
 
     let Err(err) = InProcessSession::new(&sandbox).await else {

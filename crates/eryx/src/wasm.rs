@@ -577,9 +577,17 @@ impl AllocatorSettings {
     /// generous headroom here costs nothing.
     const CORE_INSTANCES_PER_SANDBOX: u32 = 64;
 
-    /// Tables one runtime instance defines (measured; memories and stacks are
-    /// one each). Each table slot reserves address space, so this is exact.
+    /// Tables one runtime instance defines (measured; memories are one
+    /// each). Each table slot reserves address space, so this is exact.
     const TABLES_PER_SANDBOX: u32 = 2;
+
+    /// Fiber stacks one runtime instance may hold at once.
+    ///
+    /// Each guest task the component-model-async runtime has in flight gets
+    /// its own fiber, and Python's `asyncio` timers and `gather` keep several
+    /// alive (the test suite peaks at 4). A stack slot is address space plus
+    /// pages decommitted on release, so headroom is cheap.
+    const STACKS_PER_SANDBOX: u32 = 16;
 
     pub(crate) fn from_env() -> std::result::Result<Self, Error> {
         Self::from_lookup(|name| std::env::var(name).ok())
@@ -619,7 +627,11 @@ impl AllocatorSettings {
                     "ERYX_POOL_KEEP_RESIDENT_MB must be a non-negative integer, got '{v}'"
                 ))
             })?;
-            settings.keep_resident_bytes = mib << 20;
+            settings.keep_resident_bytes = mib.checked_mul(1 << 20).ok_or_else(|| {
+                Error::WasmEngine(format!(
+                    "ERYX_POOL_KEEP_RESIDENT_MB is too large, got '{v}'"
+                ))
+            })?;
         }
 
         match lookup("ERYX_POOL_PAGEMAP_SCAN") {
@@ -660,7 +672,7 @@ impl AllocatorSettings {
             )
             .total_memories(self.pool_instances)
             .total_tables(self.pool_instances.saturating_mul(Self::TABLES_PER_SANDBOX))
-            .total_stacks(self.pool_instances)
+            .total_stacks(self.pool_instances.saturating_mul(Self::STACKS_PER_SANDBOX))
             .table_elements(Self::TABLE_ELEMENTS)
             .linear_memory_keep_resident(self.keep_resident_bytes)
             .table_keep_resident(Self::TABLE_ELEMENTS * std::mem::size_of::<usize>())
@@ -1751,15 +1763,7 @@ impl PythonExecutor {
     pub fn shared_engine() -> std::result::Result<Engine, Error> {
         static SHARED_ENGINE: RetryableOnce<Engine> = RetryableOnce::new();
 
-        SHARED_ENGINE
-            .get_or_try_init(|| {
-                let engine = Self::create_engine()?;
-                if let Some(interval) = AllocatorSettings::from_env()?.idle_release {
-                    start_idle_release(&engine, interval);
-                }
-                Ok(engine)
-            })
-            .cloned()
+        SHARED_ENGINE.get_or_try_init(Self::create_engine).cloned()
     }
 
     /// Create a new executor by loading a WASM component from bytes.
@@ -2154,7 +2158,7 @@ impl PythonExecutor {
     ///
     /// Returns an error if pre-compilation fails.
     pub fn precompile(wasm_bytes: &[u8]) -> std::result::Result<Vec<u8>, Error> {
-        let engine = Self::create_engine()?;
+        let engine = Self::create_engine_with_target(None)?;
         engine
             .precompile_component(wasm_bytes)
             .map_err(|e| Error::WasmEngine(format!("Failed to precompile component: {e}")))
@@ -2423,7 +2427,12 @@ impl PythonExecutor {
 
         config.allocation_strategy(InstanceAllocationStrategy::Pooling(pooling));
         match Engine::new(&config) {
-            Ok(engine) => Ok(engine),
+            Ok(engine) => {
+                if let Some(interval) = allocator.idle_release {
+                    start_idle_release(&engine, interval);
+                }
+                Ok(engine)
+            }
             Err(pooling_err) => {
                 tracing::warn!(
                     error = %pooling_err,
@@ -2870,7 +2879,16 @@ impl PythonExecutor {
             .await;
 
         // Teardown (resetting the memory slot) and re-instantiation happen off
-        // the request path when the warm pool is active.
+        // the request path when the warm pool is active. A failed execution
+        // (timeout, cancellation, trap) may leave host calls suspended in the
+        // store holding channel senders that the caller's handler tasks wait
+        // on, so that store is dropped here, as it would be without the pool.
+        let store = if result.is_ok() {
+            Some(store)
+        } else {
+            drop(store);
+            None
+        };
         WarmPool::global().retire(&self.instance_pre, store);
         result
     }
@@ -3311,7 +3329,10 @@ mod tests {
         let pooling = settings.pooling_config().unwrap();
         assert_eq!(pooling.get_total_memories(), 42);
         assert_eq!(pooling.get_total_component_instances(), 42);
-        assert_eq!(pooling.get_total_stacks(), 42);
+        assert_eq!(
+            pooling.get_total_stacks(),
+            42 * AllocatorSettings::STACKS_PER_SANDBOX
+        );
         assert_eq!(pooling.get_memory_keep_resident(), 8 << 20);
         assert!(matches!(pooling.get_pagemap_scan(), Enabled::No));
     }
@@ -3323,6 +3344,7 @@ mod tests {
             [("ERYX_POOL_INSTANCES", "0")],
             [("ERYX_POOL_INSTANCES", "lots")],
             [("ERYX_POOL_KEEP_RESIDENT_MB", "-1")],
+            [("ERYX_POOL_KEEP_RESIDENT_MB", "17592186044416")],
             [("ERYX_POOL_PAGEMAP_SCAN", "yes")],
             [("ERYX_POOL_IDLE_RELEASE_SECS", "soon")],
         ] {

@@ -141,7 +141,8 @@ impl WarmPool {
             .unwrap_or(0)
     }
 
-    /// Dispose of a store that has run user code and top the pool back up.
+    /// Dispose of a store that has run user code (if the caller has not
+    /// already) and top the pool back up.
     ///
     /// Both happen on Tokio's blocking pool when the pool is active, so the
     /// slot reset and the CPU-bound instantiation (each around a millisecond)
@@ -150,7 +151,7 @@ impl WarmPool {
     pub(crate) fn retire(
         &'static self,
         pre: &SandboxPre<ExecutorState>,
-        mut store: Store<ExecutorState>,
+        mut store: Option<Store<ExecutorState>>,
     ) {
         if !self.active() {
             drop(store);
@@ -160,7 +161,9 @@ impl WarmPool {
         // The caller's handler tasks run until every sender of their channel
         // is gone, so release those now rather than when the background task
         // gets around to dropping the store.
-        store.data_mut().disconnect();
+        if let Some(store) = &mut store {
+            store.data_mut().disconnect();
+        }
 
         let (reservation, evicted) = self.reserve(key(pre));
         let pre = pre.clone();
