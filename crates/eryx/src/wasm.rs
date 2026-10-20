@@ -526,9 +526,10 @@ impl std::str::FromStr for CpuFeatureLevel {
 /// any sandbox configuration exists.
 ///
 /// - `ERYX_ALLOCATOR`: `pooling` (default) or `on-demand`.
-/// - `ERYX_POOL_INSTANCES`: maximum concurrently live instances with the
-///   pooling allocator (default 1000). Every live `Sandbox::execute()` and
-///   every live session holds one; instantiation fails once the pool is full.
+/// - `ERYX_POOL_INSTANCES`: maximum concurrently live sandbox instances with
+///   the pooling allocator (default 1000). Every running `Sandbox::execute()`,
+///   every live session and every warm instance holds one; instantiation
+///   fails once the pool is full.
 /// - `ERYX_POOL_KEEP_RESIDENT_MB`: how much of each linear memory to keep
 ///   mapped between uses (default 64). Dirty pages within this budget are
 ///   restored with `memcpy` instead of being unmapped, so the next instance
@@ -568,6 +569,17 @@ impl AllocatorSettings {
     /// native extensions are `dlopen`ed, so this sits well above wasmtime's
     /// 20k default while still bounding the per-slot address reservation.
     const TABLE_ELEMENTS: usize = 1 << 20;
+
+    /// Core instances one runtime instance needs: 13 for the runtime's own
+    /// modules, plus one per native extension `.so`.
+    ///
+    /// The pool only counts core instances, it reserves nothing per slot, so
+    /// generous headroom here costs nothing.
+    const CORE_INSTANCES_PER_SANDBOX: u32 = 64;
+
+    /// Tables one runtime instance defines (measured; memories and stacks are
+    /// one each). Each table slot reserves address space, so this is exact.
+    const TABLES_PER_SANDBOX: u32 = 2;
 
     pub(crate) fn from_env() -> std::result::Result<Self, Error> {
         Self::from_lookup(|name| std::env::var(name).ok())
@@ -642,9 +654,12 @@ impl AllocatorSettings {
         let mut pooling = PoolingAllocationConfig::new();
         pooling
             .total_component_instances(self.pool_instances)
-            .total_core_instances(self.pool_instances)
+            .total_core_instances(
+                self.pool_instances
+                    .saturating_mul(Self::CORE_INSTANCES_PER_SANDBOX),
+            )
             .total_memories(self.pool_instances)
-            .total_tables(self.pool_instances)
+            .total_tables(self.pool_instances.saturating_mul(Self::TABLES_PER_SANDBOX))
             .total_stacks(self.pool_instances)
             .table_elements(Self::TABLE_ELEMENTS)
             .linear_memory_keep_resident(self.keep_resident_bytes)
@@ -2269,8 +2284,11 @@ impl PythonExecutor {
     ///
     /// Uses copy-on-write heap images to defer memory initialization
     /// from instantiation time to first write, improving startup performance.
+    ///
+    /// This is the engine that runs sandboxes, so it is the only one that uses
+    /// the pooling allocator; the precompile engines only compile.
     fn create_engine() -> std::result::Result<Engine, Error> {
-        Self::create_engine_with_target(None)
+        Self::build_engine(Self::engine_config_with_target(None)?)
     }
 
     /// Create a configured wasmtime engine with an optional target triple.
@@ -2303,6 +2321,13 @@ impl PythonExecutor {
     /// list of `flag=value` pairs. Example:
     /// `ERYX_CRANELIFT_FLAGS=has_avx512f=false,has_avx512bw=false`
     fn create_engine_with_target(target: Option<&str>) -> std::result::Result<Engine, Error> {
+        let config = Self::engine_config_with_target(target)?;
+        Engine::new(&config).map_err(|e| Error::WasmEngine(e.to_string()))
+    }
+
+    /// The configuration [`create_engine_with_target`](Self::create_engine_with_target)
+    /// builds an engine from.
+    fn engine_config_with_target(target: Option<&str>) -> std::result::Result<Config, Error> {
         let mut config = Self::base_engine_config();
 
         // Configure target triple for cross-compilation or portable builds.
@@ -2322,7 +2347,7 @@ impl PythonExecutor {
         #[cfg(any(feature = "embedded", feature = "preinit"))]
         Self::apply_cpu_feature_flags(&mut config, effective_target.as_deref())?;
 
-        Self::build_engine(config)
+        Ok(config)
     }
 
     /// Create a configured wasmtime engine with explicit CPU feature control.
@@ -2340,7 +2365,7 @@ impl PythonExecutor {
         // also what stops Cranelift inferring features from the build machine.
         Self::apply_cpu_feature_level(&mut config, cpu_features, target)?;
 
-        Self::build_engine(config)
+        Engine::new(&config).map_err(|e| Error::WasmEngine(e.to_string()))
     }
 
     /// The engine options shared by every engine eryx creates.
@@ -3306,9 +3331,8 @@ mod tests {
         }
     }
 
-    /// The pooling configuration must be accepted by wasmtime, and instantiation
-    /// must work under it: the pool imposes per-instance limits (table size,
-    /// instance metadata size) that the on-demand allocator does not.
+    /// The pooling configuration must be accepted by wasmtime. That
+    /// `ERYX_POOL_INSTANCES` sandboxes fit in it is `tests/pool_capacity.rs`.
     #[test]
     #[cfg(feature = "embedded")]
     fn pooling_engine_is_constructible() {
