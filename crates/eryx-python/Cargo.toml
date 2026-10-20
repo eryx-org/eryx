@@ -30,7 +30,7 @@ walkdir.workspace = true
 zstd.workspace = true
 
 [build-dependencies]
-pyo3-build-config = "0.29"
+pyo3-build-config = "0.30"
 
 [lints]
 workspace = true
