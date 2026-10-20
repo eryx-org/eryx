@@ -224,3 +224,31 @@ async fn fuel_consumed_is_the_same_on_cold_and_warm_instances() {
         "fuel should not depend on the instance's origin: {fuel:?}"
     );
 }
+
+/// Every separately loaded component gets its own warm instance, but the pool
+/// keeps them for a bounded number of components so loading a fresh copy per
+/// request cannot grow it without limit.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn warm_instances_are_kept_for_a_bounded_number_of_components() {
+    let resources = eryx::embedded::EmbeddedResources::get().unwrap();
+    let mut sandboxes = Vec::new();
+    for _ in 0..6 {
+        // `with_precompiled_file` loads a new component each time.
+        #[allow(unsafe_code)]
+        let sandbox = unsafe { Sandbox::builder().with_precompiled_file(resources.runtime()) }
+            .with_python_stdlib(resources.stdlib())
+            .build()
+            .unwrap();
+        sandbox.execute("pass").await.unwrap();
+        assert_eq!(wait_for_warm(&sandbox).await, 1);
+        sandboxes.push(sandbox);
+    }
+
+    let warm: usize = sandboxes
+        .iter()
+        .map(|sandbox| sandbox.executor().warm_instances_ready())
+        .sum();
+    assert_eq!(warm, 4, "only the most recently used components stay warm");
+    assert_eq!(sandboxes[0].executor().warm_instances_ready(), 0);
+    assert_eq!(sandboxes[5].executor().warm_instances_ready(), 1);
+}

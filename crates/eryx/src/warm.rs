@@ -14,13 +14,18 @@
 //! instance that has never run user code.
 //!
 //! The pool is process-global and keyed by component, so short-lived
-//! `Sandbox` values (the `SandboxFactory` pattern) share it. It is only active
+//! `Sandbox` values (the `SandboxFactory` pattern) share it. It holds
+//! instances for at most [`WarmPool::MAX_COMPONENTS`] components, evicting
+//! the least recently used, because a warm store keeps its component loaded
+//! and executors built with `from_file`/`from_binary` each load their own. It
+//! is only active
 //! on a multi-threaded Tokio runtime, where the background work actually runs
 //! in parallel; on a current-thread runtime it would just be added to the next
 //! request's latency.
 
 use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
+use std::time::Instant;
 
 use tokio::runtime::{Handle, RuntimeFlavor};
 use wasmtime::Store;
@@ -33,11 +38,21 @@ pub(crate) struct WarmInstance {
     pub(crate) bindings: Sandbox,
 }
 
-#[derive(Default)]
 struct Slot {
     ready: Vec<WarmInstance>,
     /// Replacements a background task has committed to instantiate.
     pending: usize,
+    last_used: Instant,
+}
+
+impl Slot {
+    fn new() -> Self {
+        Slot {
+            ready: Vec::new(),
+            pending: 0,
+            last_used: Instant::now(),
+        }
+    }
 }
 
 /// Process-global pool of warm instances, one slot per component.
@@ -55,13 +70,26 @@ impl WarmPool {
     /// callers should raise `ERYX_WARM_INSTANCES` towards their concurrency.
     const DEFAULT_TARGET: usize = 1;
 
+    /// Components to keep warm instances for.
+    ///
+    /// Usually there is one, the embedded runtime; the bound only matters
+    /// when executors keep loading their own copy of a component.
+    const MAX_COMPONENTS: usize = 4;
+
     pub(crate) fn global() -> &'static Self {
         static POOL: OnceLock<WarmPool> = OnceLock::new();
         POOL.get_or_init(|| {
-            let target = std::env::var("ERYX_WARM_INSTANCES")
-                .ok()
-                .and_then(|v| v.trim().parse().ok())
-                .unwrap_or(Self::DEFAULT_TARGET);
+            let target = match std::env::var("ERYX_WARM_INSTANCES") {
+                Ok(v) => v.trim().parse().unwrap_or_else(|_| {
+                    tracing::warn!(
+                        value = %v,
+                        default = Self::DEFAULT_TARGET,
+                        "ignoring invalid ERYX_WARM_INSTANCES, expected a non-negative integer"
+                    );
+                    Self::DEFAULT_TARGET
+                }),
+                Err(_) => Self::DEFAULT_TARGET,
+            };
             WarmPool {
                 target,
                 slots: Mutex::new(HashMap::new()),
@@ -89,7 +117,9 @@ impl WarmPool {
             return None;
         }
         let mut slots = self.slots.lock().ok()?;
-        let ready = &mut slots.get_mut(&key(pre))?.ready;
+        let slot = slots.get_mut(&key(pre))?;
+        slot.last_used = Instant::now();
+        let ready = &mut slot.ready;
         let baseline = ready
             .last()?
             .store
@@ -130,21 +160,20 @@ impl WarmPool {
         // gets around to dropping the store.
         store.data_mut().disconnect();
 
-        let key = key(pre);
-        let replenish = self.reserve(key);
+        let (reservation, evicted) = self.reserve(key(pre));
         let pre = pre.clone();
         tokio::spawn(async move {
             // Dropping first returns the memory slot to wasmtime's pool, so the
             // replacement below can reuse it while it is still cache-hot.
             drop(store);
-            if !replenish {
+            drop(evicted);
+            let Some(reservation) = reservation else {
                 return;
-            }
+            };
             match instantiate_warm(&pre).await {
-                Ok(instance) => self.fulfil(key, Some(instance)),
+                Ok(instance) => reservation.fulfil(instance),
                 Err(e) => {
                     tracing::warn!(error = %e, "failed to pre-instantiate a warm instance");
-                    self.fulfil(key, None);
                 }
             }
         });
@@ -152,26 +181,64 @@ impl WarmPool {
 
     /// Commit to instantiating one more instance for `key` if the slot is
     /// below target, counting instances already in flight.
-    fn reserve(&self, key: usize) -> bool {
+    ///
+    /// Making room for a new component evicts the least recently used idle
+    /// one; its instances are returned so the caller can drop them off the
+    /// request path.
+    fn reserve(&'static self, key: usize) -> (Option<Reservation>, Vec<WarmInstance>) {
         let Ok(mut slots) = self.slots.lock() else {
-            return false;
+            return (None, Vec::new());
         };
-        let slot = slots.entry(key).or_default();
+        let mut evicted = Vec::new();
+        if !slots.contains_key(&key) && slots.len() >= Self::MAX_COMPONENTS {
+            let oldest = slots
+                .iter()
+                .filter(|(_, slot)| slot.pending == 0)
+                .min_by_key(|(_, slot)| slot.last_used)
+                .map(|(key, _)| *key);
+            match oldest.and_then(|oldest| slots.remove(&oldest)) {
+                Some(slot) => evicted = slot.ready,
+                // Every slot is being refilled; try again on a later retire.
+                None => return (None, evicted),
+            }
+        }
+        let slot = slots.entry(key).or_insert_with(Slot::new);
+        slot.last_used = Instant::now();
         if slot.ready.len() + slot.pending >= self.target {
-            return false;
+            return (None, evicted);
         }
         slot.pending += 1;
-        true
+        (Some(Reservation { pool: self, key }), evicted)
     }
+}
 
-    fn fulfil(&self, key: usize, instance: Option<WarmInstance>) {
-        let Ok(mut slots) = self.slots.lock() else {
-            return;
-        };
-        let slot = slots.entry(key).or_default();
-        slot.pending = slot.pending.saturating_sub(1);
-        if let Some(instance) = instance {
+/// A committed replacement for one slot.
+///
+/// Dropping it without [`fulfil`](Self::fulfil) (instantiation failed, or the
+/// task was cancelled by runtime shutdown before it finished) releases the
+/// commitment, so the slot can be refilled later.
+struct Reservation {
+    pool: &'static WarmPool,
+    key: usize,
+}
+
+impl Reservation {
+    fn fulfil(self, instance: WarmInstance) {
+        if let Ok(mut slots) = self.pool.slots.lock()
+            && let Some(slot) = slots.get_mut(&self.key)
+        {
             slot.ready.push(instance);
+        }
+        // `Drop` releases the pending count.
+    }
+}
+
+impl Drop for Reservation {
+    fn drop(&mut self) {
+        if let Ok(mut slots) = self.pool.slots.lock()
+            && let Some(slot) = slots.get_mut(&self.key)
+        {
+            slot.pending = slot.pending.saturating_sub(1);
         }
     }
 }
@@ -188,4 +255,30 @@ async fn instantiate_warm(pre: &SandboxPre<ExecutorState>) -> Result<WarmInstanc
     let (store, bindings) =
         crate::wasm::instantiate_store(pre, ExecutorState::placeholder(), u64::MAX).await?;
     Ok(WarmInstance { store, bindings })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A replacement task that never runs to completion (its runtime shut
+    /// down before polling it, or instantiation failed) must not leave the
+    /// slot thinking one is still on its way.
+    #[test]
+    fn a_dropped_reservation_lets_the_slot_be_refilled() {
+        let pool: &'static WarmPool = Box::leak(Box::new(WarmPool {
+            target: 1,
+            slots: Mutex::new(HashMap::new()),
+        }));
+
+        let (reservation, _) = pool.reserve(7);
+        assert!(reservation.is_some());
+        assert!(
+            pool.reserve(7).0.is_none(),
+            "the slot is already being refilled"
+        );
+
+        drop(reservation);
+        assert!(pool.reserve(7).0.is_some());
+    }
 }

@@ -8,9 +8,10 @@ resetting the memory slot. Running `pass` on a fresh instance takes about
 1.3 ms on a fast workstation; the Python part of that is roughly 0.2 ms.
 
 Eryx hides that cost in two ways, both on by default. This page explains what
-they do and the environment variables that tune them. All of these are read
-once, when the process-wide wasmtime engine is created, so set them in the
-environment of the process that embeds eryx (for `pyeryx`, the Python process).
+they do and the environment variables that tune them. Each is read once, the
+first time the process needs it (the allocator settings when the process-wide
+wasmtime engine is created), so set them in the environment of the process that
+embeds eryx (for `pyeryx`, the Python process).
 
 ## Warm instances
 
@@ -23,7 +24,10 @@ never run user code, so isolation is unchanged; only the timing moves.
 The pool is keyed by runtime component rather than by `Sandbox`, so the common
 pattern of building a short-lived sandbox per request (for example
 `SandboxFactory.create_sandbox()` from Python) benefits from it: the first
-request in a process pays for instantiation, later ones do not.
+request in a process pays for instantiation, later ones do not. Executors that
+load their own copy of a component (`from_file`, `from_binary`,
+`with_precompiled_file`) each get a separate entry, so the pool keeps warm
+instances for at most four components and evicts the least recently used.
 
 | Variable | Default | Effect |
 |----------|---------|--------|
@@ -51,7 +55,7 @@ pages the previous instance dirtied are reset.
 | Variable | Default | Effect |
 |----------|---------|--------|
 | `ERYX_ALLOCATOR` | `pooling` | `pooling` or `on-demand`. |
-| `ERYX_POOL_INSTANCES` | `1000` | Maximum instances alive at once. Every running `execute()` and every live session holds one; instantiation fails once the pool is full. |
+| `ERYX_POOL_INSTANCES` | `1000` | Maximum sandbox instances alive at once. Every running `execute()`, every live session and every warm instance holds one; instantiation fails once the pool is full. |
 | `ERYX_POOL_KEEP_RESIDENT_MB` | `64` | How much of each linear memory to keep mapped between uses. |
 | `ERYX_POOL_PAGEMAP_SCAN` | `1` | `1`: reset only dirty pages (Linux 6.7+, via `PAGEMAP_SCAN`). `0`: `memcpy` the whole keep-resident budget instead, which trades a larger copy for fewer page faults on the next execution. |
 | `ERYX_POOL_IDLE_RELEASE_SECS` | `30` | After this many seconds without a new instance, return the memory kept resident for unused slots to the OS. `0` keeps it resident indefinitely. |
