@@ -28,6 +28,10 @@ request in a process pays for instantiation, later ones do not. Executors that
 load their own copy of a component (`from_file`, `from_binary`,
 `with_precompiled_file`) each get a separate entry, so the pool keeps warm
 instances for at most four components and evicts the least recently used.
+Loading a new copy of the component for every request (for example
+`SandboxFactory(cache=False)`) defeats the pool: each execution warms an
+instance for a component that is never used again. Load the component once and
+reuse it.
 
 | Variable | Default | Effect |
 |----------|---------|--------|
@@ -55,17 +59,17 @@ pages the previous instance dirtied are reset.
 | Variable | Default | Effect |
 |----------|---------|--------|
 | `ERYX_ALLOCATOR` | `pooling` (`on-demand` on Windows) | `pooling` or `on-demand`. |
-| `ERYX_POOL_INSTANCES` | `1000` | Maximum sandbox instances alive at once. Every running `execute()`, every live session and every warm instance holds one; instantiation fails once the pool is full. |
+| `ERYX_POOL_INSTANCES` | `1000` | Maximum sandbox instances alive at once. Every running `execute()`, every live session and every warm instance holds one, and a finished execution keeps its slot until the background task drops it; instantiation fails once the pool is full. Allow at least concurrency + 2 × `ERYX_WARM_INSTANCES` per component. |
 | `ERYX_POOL_KEEP_RESIDENT_MB` | `64` | How much of each linear memory to keep mapped between uses. |
 | `ERYX_POOL_PAGEMAP_SCAN` | `1` | `1`: reset only dirty pages (Linux 6.7+, via `PAGEMAP_SCAN`). `0`: `memcpy` the whole keep-resident budget instead, which trades a larger copy for fewer page faults on the next execution. |
-| `ERYX_POOL_IDLE_RELEASE_SECS` | `30` | After this many seconds without a new instance, return the memory kept resident for unused slots to the OS. `0` keeps it resident indefinitely. |
+| `ERYX_POOL_RELEASE_INTERVAL_SECS` | `30` | Every this many seconds, return the memory kept resident for unused slots to the OS. `0` keeps it resident indefinitely. |
 
 Keeping memory resident is what makes slot reuse cheap, but after a burst of
-concurrent executions every slot the burst used stays resident. The idle
-release returns that memory once the process goes quiet. Live instances,
-including warm ones, are not affected, so the first request after an idle
-period is still served from a warm instance; only the instantiations after it
-start from cold slots.
+concurrent executions every slot the burst used stays resident. The periodic
+release returns that memory. Live instances, including warm ones, are not
+affected; a released slot that is used again pays for its page faults once,
+so under steady traffic the cost is one slower instantiation per slot per
+interval.
 
 On Windows the default is `on-demand`: Windows has no overcommit, and wasmtime
 commits the whole table pool when the engine is created, which at the default

@@ -1,5 +1,5 @@
-//! The pooling allocator's resident memory for unused slots is released once
-//! the pool has been idle for `ERYX_POOL_IDLE_RELEASE_SECS`.
+//! The pooling allocator's resident memory for unused slots is released every
+//! `ERYX_POOL_RELEASE_INTERVAL_SECS`.
 //!
 //! The setting is read when the process-global engine is created, so this
 //! binary holds a single test that sets it before anything touches the engine.
@@ -12,11 +12,11 @@ use std::time::{Duration, Instant};
 use eryx::Sandbox;
 
 #[test]
-fn idle_pool_memory_is_released() {
+fn unused_pool_memory_is_released() {
     // SAFETY: no other threads exist yet; this is the only test in the binary.
     unsafe {
         std::env::set_var("ERYX_ALLOCATOR", "pooling");
-        std::env::set_var("ERYX_POOL_IDLE_RELEASE_SECS", "1");
+        std::env::set_var("ERYX_POOL_RELEASE_INTERVAL_SECS", "1");
         std::env::set_var("ERYX_WARM_INSTANCES", "0");
     }
 
@@ -42,7 +42,7 @@ fn idle_pool_memory_is_released() {
     while resident() > 0 {
         assert!(
             Instant::now() < deadline,
-            "idle memory was not released: {} bytes resident",
+            "unused memory was not released: {} bytes resident",
             resident()
         );
         std::thread::sleep(Duration::from_millis(100));

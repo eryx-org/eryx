@@ -815,7 +815,7 @@ impl SessionExecutor {
         );
 
         // Create store
-        let mut store = crate::wasm::new_store(executor.engine(), state);
+        let mut store = Store::new(executor.engine(), state);
 
         // Register the memory tracker as a resource limiter
         store.limiter(|state| &mut state.memory_tracker);
@@ -885,7 +885,7 @@ impl SessionExecutor {
         );
 
         // Create store
-        let mut store = crate::wasm::new_store(executor.engine(), state);
+        let mut store = Store::new(executor.engine(), state);
 
         // Register the memory tracker as a resource limiter
         store.limiter(|state| &mut state.memory_tracker);
@@ -1282,7 +1282,7 @@ impl SessionExecutor {
         };
 
         // Create new store
-        let mut store = crate::wasm::new_store(self.executor.engine(), state);
+        let mut store = Store::new(self.executor.engine(), state);
 
         // Register the memory tracker as a resource limiter
         store.limiter(|state| &mut state.memory_tracker);
