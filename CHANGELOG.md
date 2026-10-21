@@ -86,7 +86,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 - [**breaking**] stop stripping trailing newlines from stdout and stderr ([#468](https://github.com/eryx-org/eryx/pull/468))
 
-## v0.8.0 — Bytes-native output
+## Bytes-native output (0.8.0 release notes)
 
 **Release date:** 2026-09-19
 
