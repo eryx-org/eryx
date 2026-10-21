@@ -252,3 +252,29 @@ async fn warm_instances_are_kept_for_a_bounded_number_of_components() {
     assert_eq!(sandboxes[0].executor().warm_instances_ready(), 0);
     assert_eq!(sandboxes[5].executor().warm_instances_ready(), 1);
 }
+
+/// A runtime that is not pre-initialized starts Python while it is being
+/// instantiated, so it needs the real stdlib mounts at that point. Warming it
+/// against a placeholder context traps, and executions must still run on a
+/// correctly initialised instance.
+#[tokio::test(flavor = "multi_thread")]
+async fn runtimes_without_preinit_are_not_warmed() {
+    let wasm =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../eryx-runtime/runtime.wasm");
+    let stdlib = eryx::embedded::EmbeddedResources::get().unwrap().stdlib();
+    let sandbox = Sandbox::builder()
+        .with_wasm_file(wasm)
+        .with_python_stdlib(stdlib)
+        .build()
+        .unwrap();
+
+    for _ in 0..3 {
+        let output = sandbox
+            .execute("import json; print(json.dumps([1]))")
+            .await
+            .unwrap();
+        assert_eq!(output.stdout_text().trim(), "[1]");
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+    assert_eq!(sandbox.executor().warm_instances_ready(), 0);
+}

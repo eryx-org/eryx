@@ -24,6 +24,7 @@
 //! request's latency.
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::Instant;
 
@@ -43,6 +44,9 @@ struct Slot {
     /// Replacements a background task has committed to instantiate.
     pending: usize,
     last_used: Instant,
+    /// The component runs guest code while it is instantiated, which a warm
+    /// instance would run against a placeholder context, so it is not warmed.
+    unsupported: bool,
 }
 
 impl Slot {
@@ -51,6 +55,7 @@ impl Slot {
             ready: Vec::new(),
             pending: 0,
             last_used: Instant::now(),
+            unsupported: false,
         }
     }
 }
@@ -157,6 +162,10 @@ impl WarmPool {
             drop(store);
             return;
         }
+        let Some(retiring) = Retiring::enter() else {
+            drop(store);
+            return;
+        };
 
         // The caller's handler tasks run until every sender of their channel
         // is gone, so release those now rather than when the background task
@@ -169,6 +178,7 @@ impl WarmPool {
         let pre = pre.clone();
         let handle = Handle::current();
         tokio::task::spawn_blocking(move || {
+            let _retiring = retiring;
             // Dropping first returns the memory slot to wasmtime's pool, so the
             // replacement below can reuse it while it is still cache-hot.
             drop(store);
@@ -178,6 +188,12 @@ impl WarmPool {
             };
             match handle.block_on(instantiate_warm(&pre)) {
                 Ok(instance) => reservation.fulfil(instance),
+                // A runtime that was not pre-initialized starts Python during
+                // instantiation, which traps without the real stdlib mounts.
+                Err(crate::Error::WasmComponent(e)) if e.is::<wasmtime::Trap>() => {
+                    tracing::debug!(error = %e, "component cannot be pre-instantiated; not warming it");
+                    reservation.mark_unsupported();
+                }
                 Err(e) => {
                     tracing::warn!(error = %e, "failed to pre-instantiate a warm instance");
                 }
@@ -210,11 +226,40 @@ impl WarmPool {
         }
         let slot = slots.entry(key).or_insert_with(Slot::new);
         slot.last_used = Instant::now();
-        if slot.ready.len() + slot.pending >= self.target {
+        if slot.unsupported || slot.ready.len() + slot.pending >= self.target {
             return (None, evicted);
         }
         slot.pending += 1;
         (Some(Reservation { pool: self, key }), evicted)
+    }
+}
+
+/// One retired store waiting for, or running on, the blocking pool. Dropped
+/// when the task finishes, or unrun when the runtime shuts down.
+struct Retiring;
+
+static RETIRING: AtomicUsize = AtomicUsize::new(0);
+
+impl Retiring {
+    /// Retired stores allowed to wait for the blocking pool at once.
+    ///
+    /// Each one still holds its instance slot and memory. Past this, a busy
+    /// blocking pool would let them pile up without bound, so further stores
+    /// are dropped on the caller's thread instead.
+    const MAX: usize = 64;
+
+    fn enter() -> Option<Self> {
+        if RETIRING.fetch_add(1, Ordering::Relaxed) >= Self::MAX {
+            RETIRING.fetch_sub(1, Ordering::Relaxed);
+            return None;
+        }
+        Some(Retiring)
+    }
+}
+
+impl Drop for Retiring {
+    fn drop(&mut self) {
+        RETIRING.fetch_sub(1, Ordering::Relaxed);
     }
 }
 
@@ -236,6 +281,14 @@ impl Reservation {
             slot.ready.push(instance);
         }
         // `Drop` releases the pending count.
+    }
+
+    fn mark_unsupported(self) {
+        if let Ok(mut slots) = self.pool.slots.lock()
+            && let Some(slot) = slots.get_mut(&self.key)
+        {
+            slot.unsupported = true;
+        }
     }
 }
 
@@ -286,5 +339,33 @@ mod tests {
 
         drop(reservation);
         assert!(pool.reserve(7).0.is_some());
+    }
+
+    /// Stores beyond the cap are not queued for the blocking pool.
+    #[test]
+    fn retirements_are_bounded() {
+        let held: Vec<_> = std::iter::from_fn(Retiring::enter)
+            .take(Retiring::MAX + 1)
+            .collect();
+        assert_eq!(held.len(), Retiring::MAX);
+        drop(held);
+        assert!(Retiring::enter().is_some());
+    }
+
+    /// A component that traps while being warmed is not retried on every
+    /// execution.
+    #[test]
+    fn an_unsupported_component_is_not_reserved_again() {
+        let pool: &'static WarmPool = Box::leak(Box::new(WarmPool {
+            target: 1,
+            slots: Mutex::new(HashMap::new()),
+        }));
+
+        let (reservation, _) = pool.reserve(7);
+        assert!(reservation.is_some());
+        if let Some(reservation) = reservation {
+            reservation.mark_unsupported();
+        }
+        assert!(pool.reserve(7).0.is_none());
     }
 }
