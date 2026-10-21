@@ -47,7 +47,7 @@ jobs:
           toolchain: stable
 
       - name: Run release-plz
-        uses: release-plz/action@6caa8d34f74d82b0dc76a18edd1cc3d6801c9baf # v0.5.143
+        uses: release-plz/action@8b5bf233ecb5779f63508db7cd050e948ee77cc2 # v0.5.144
         with:
           command: release
           config: release-plz.toml
@@ -106,7 +106,7 @@ jobs:
           echo "ERYX_RUNTIME_CWASM=$RUNNER_TEMP/runtime.cwasm" >> "$GITHUB_ENV"
 
       - name: Run release-plz
-        uses: release-plz/action@6caa8d34f74d82b0dc76a18edd1cc3d6801c9baf # v0.5.143
+        uses: release-plz/action@8b5bf233ecb5779f63508db7cd050e948ee77cc2 # v0.5.144
         with:
           command: release-pr
           config: release-plz.toml
