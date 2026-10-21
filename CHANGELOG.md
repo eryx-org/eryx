@@ -14,6 +14,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## `eryx` - [0.10.1](https://github.com/eryx-org/eryx/compare/eryx-v0.10.0...eryx-v0.10.1) - 2026-10-21
 
+### Security
+- **Upgrade recommended for anyone using sandboxed networking.** The TLS trust roots now exclude the eMudhra CAs affected by the [eMudhra intermediate key compromise](https://blog.cloudflare.com/emudhra-certificate-compromise/) ([#597](https://github.com/eryx-org/eryx/pull/597)). `webpki-roots` is the only trust store for HTTPS made from inside the sandbox, and its minimum version is raised to `1.0.10` so downstream crates can't resolve an older copy. `rustls-webpki` is also updated to 0.103.16. This affects the `eryx` crate, the `pyeryx` wheels and the `sd2k/eryx-server` image (whose rebuild also refreshes Debian's `ca-certificates`). `@bsull/eryx` (npm) doesn't bundle these trust roots, so it isn't affected.
+
 ### Other
 - update Cargo.toml dependencies
 
