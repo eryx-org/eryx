@@ -78,7 +78,7 @@ wasmtime = { version = "50.0.0", features = ["component-model", "async"] }
 wasmtime-wasi = "50.0.0"
 wasmtime-wasi-io = "50.0.0"
 wasmtime-wizer = { version = "50.0.0", features = ["component-model", "wasmtime"] }
-webpki-roots = "1.0.10" # TLS trust roots (>=1.0.10 drops compromised eMudhra CAs)
+webpki-roots = "1.0.11" # TLS trust roots (>=1.0.11 drops all compromised eMudhra CAs)
 wit-component = "0.262"
 wit-dylib = "0.262"
 # wit-dylib FFI for implementing the interpreter interface (inlined from wasm-tools).
