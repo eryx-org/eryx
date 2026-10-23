@@ -158,8 +158,11 @@ By default `blocked_networks` covers every range that isn't publicly routable:
 loopback, private (`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`,
 `fc00::/7`), link-local (`169.254.0.0/16`, `fe80::/10`, which includes cloud
 metadata endpoints), carrier-grade NAT (`100.64.0.0/10`), `0.0.0.0/8`,
-`::/128`, multicast and reserved ranges. IPv4-mapped IPv6 addresses such as
-`::ffff:127.0.0.1` are checked as IPv4. This applies even with
+`::/128`, multicast, reserved, benchmarking, local-use NAT64 and 6to4 ranges.
+IPv4-mapped (`::ffff:127.0.0.1`) and NAT64 (`64:ff9b::a00:1`) addresses are
+also checked by the IPv4 address they stand for. Refusals tell sandboxed code
+only that the host resolves to a blocked network; the address is logged on the
+host at debug level. This applies even with
 `allow_all_hosts`, and even when a host matches `allowed_hosts`.
 
 ### Allowing Internal Addresses

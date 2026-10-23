@@ -44,9 +44,18 @@ except OSError as e:
 
   it("blocks private addresses that pass the host patterns", async () => {
     setNetConfig({ allowAllHosts: true, blockedHosts: [] });
-    expect((await tryConnect("127.0.0.1")).stdout).toContain("resolves to blocked address 127.0.0.1");
+    expect((await tryConnect("127.0.0.1")).stdout).toContain("resolves to a blocked network");
     // A name is checked by what it resolves to, not how it is spelled.
-    expect((await tryConnect("localhost")).stdout).toContain("resolves to blocked address");
+    expect((await tryConnect("localhost")).stdout).toContain("resolves to a blocked network");
+    // NAT64 addresses are checked by the IPv4 address they embed.
+    expect((await tryConnect("64:ff9b::a9fe:a9fe")).stdout).toContain("resolves to a blocked network");
+  });
+
+  it("rejects malformed CIDRs up front", () => {
+    // `Number("")` is 0: unchecked, this would exempt every IPv4 address.
+    expect(() => setNetConfig({ allowedNetworks: ["10.0.0.0/"] })).toThrow("invalid CIDR '10.0.0.0/'");
+    expect(() => setNetConfig({ blockedNetworks: ["10.0.0.0/33"] })).toThrow(TypeError);
+    expect(() => setNetConfig({ blockedNetworks: ["not-an-ip/8"] })).toThrow();
   });
 });
 

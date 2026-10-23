@@ -138,8 +138,10 @@ pub struct NetConfig {
 ///
 /// Loopback, private (RFC 1918 and IPv6 unique-local), link-local (which
 /// includes cloud metadata endpoints such as `169.254.169.254`), carrier-grade
-/// NAT, "this network", multicast, and reserved/broadcast.
-pub const DEFAULT_BLOCKED_NETWORKS: [IpNet; 14] = {
+/// NAT, "this network", IETF protocol assignments, benchmarking, multicast,
+/// reserved/broadcast, local-use NAT64 and 6to4. Well-known NAT64 addresses
+/// (`64:ff9b::/96`) are checked by the IPv4 address they embed.
+pub const DEFAULT_BLOCKED_NETWORKS: [IpNet; 18] = {
     const fn v4(a: u8, b: u8, c: u8, d: u8, len: u8) -> IpNet {
         IpNet::V4(Ipv4Net::new_assert(Ipv4Addr::new(a, b, c, d), len))
     }
@@ -156,11 +158,18 @@ pub const DEFAULT_BLOCKED_NETWORKS: [IpNet; 14] = {
         v4(127, 0, 0, 0, 8),
         v4(169, 254, 0, 0, 16),
         v4(172, 16, 0, 0, 12),
+        v4(192, 0, 0, 0, 24),
         v4(192, 168, 0, 0, 16),
+        v4(198, 18, 0, 0, 15),
         v4(224, 0, 0, 0, 4),
         v4(240, 0, 0, 0, 4),
         v6(0, 0, 128),
         v6(0, 1, 128),
+        v6(0x2002, 0, 16),
+        IpNet::V6(Ipv6Net::new_assert(
+            Ipv6Addr::new(0x64, 0xff9b, 1, 0, 0, 0, 0, 0),
+            48,
+        )),
         v6(0xfc00, 0, 7),
         v6(0xfe80, 0, 10),
         v6(0xff00, 0, 8),
@@ -623,11 +632,17 @@ impl ConnectionManager {
     }
 
     /// Check a resolved address against `blocked_networks`/`allowed_networks`.
+    ///
+    /// An address matches a network in either its own form or the IPv4
+    /// address it stands for, so `::ffff:10.0.0.0/104` and `10.0.0.0/8` both
+    /// match `::ffff:10.0.0.1`.
     fn is_ip_allowed(&self, ip: IpAddr) -> bool {
-        // `::ffff:127.0.0.1` is 127.0.0.1 on the wire; match it as IPv4.
-        let ip = ip.to_canonical();
-        !self.config.blocked_networks.iter().any(|n| n.contains(&ip))
-            || self.config.allowed_networks.iter().any(|n| n.contains(&ip))
+        let embedded = embedded_ipv4(ip);
+        let matches = |nets: &[IpNet]| {
+            nets.iter()
+                .any(|n| n.contains(&ip) || embedded.is_some_and(|v4| n.contains(&v4)))
+        };
+        !matches(&self.config.blocked_networks) || matches(&self.config.allowed_networks)
     }
 
     /// Resolve `host` and keep the addresses the policy allows.
@@ -664,9 +679,11 @@ impl ConnectionManager {
         let (allowed, blocked): (Vec<_>, Vec<_>) =
             addrs.into_iter().partition(|a| self.is_ip_allowed(a.ip()));
         if allowed.is_empty() {
+            // The address stays in the host's logs: telling the guest would let
+            // it map internal DNS names to addresses.
+            tracing::debug!(host, addr = %blocked[0].ip(), "host resolves to a blocked network");
             return Err(TcpError::NotPermitted(format!(
-                "host '{host}' resolves to blocked address {}",
-                blocked[0].ip()
+                "host '{host}' resolves to a blocked network"
             )));
         }
         Ok(allowed)
@@ -699,11 +716,12 @@ impl ConnectionManager {
         let connect_timeout = Self::effective_timeout(self.config.connect_timeout, timeout_ms);
 
         // 3. DNS resolve + check resolved addresses + TCP connect (with timeout)
-        let addr = tokio::time::timeout(connect_timeout, self.resolve_allowed(host, port))
+        let addrs = tokio::time::timeout(connect_timeout, self.resolve_allowed(host, port))
             .await
-            .map_err(|_| TcpError::TimedOut)??[0];
+            .map_err(|_| TcpError::TimedOut)??;
 
-        let tcp = tokio::time::timeout(connect_timeout, TcpStream::connect(addr))
+        // Tries each checked address in turn, never re-resolving.
+        let tcp = tokio::time::timeout(connect_timeout, TcpStream::connect(&addrs[..]))
             .await
             .map_err(|_| TcpError::TimedOut)?
             .map_err(|e| match e.kind() {
@@ -1128,6 +1146,23 @@ fn is_chunked(headers: &[u8]) -> bool {
         line.to_ascii_lowercase().contains("transfer-encoding")
             && line.to_ascii_lowercase().contains("chunked")
     })
+}
+
+/// The IPv4 address an IPv6 address stands for on the wire, if any:
+/// IPv4-mapped (`::ffff:a.b.c.d`) or well-known-prefix NAT64
+/// (`64:ff9b::a.b.c.d`, RFC 6052), which a NAT64 gateway translates to that
+/// IPv4 destination.
+fn embedded_ipv4(ip: IpAddr) -> Option<IpAddr> {
+    let IpAddr::V6(v6) = ip else { return None };
+    if let Some(v4) = v6.to_ipv4_mapped() {
+        return Some(v4.into());
+    }
+    let [a, b, rest @ ..] = v6.segments();
+    if (a, b) == (0x64, 0xff9b) && rest[..4] == [0, 0, 0, 0] {
+        let [.., w, x, y, z] = v6.octets();
+        return Some(Ipv4Addr::new(w, x, y, z).into());
+    }
+    None
 }
 
 /// Check if a hostname matches a pattern with wildcards.
@@ -2003,10 +2038,21 @@ mod tests {
             // IPv4-mapped IPv6 is the IPv4 address on the wire.
             "::ffff:127.0.0.1",
             "::ffff:169.254.169.254",
+            // So is a well-known NAT64 address, through the gateway.
+            "64:ff9b::a00:1",
+            "64:ff9b::a9fe:a9fe",
+            "64:ff9b:1::1",
+            "2002:a00:1::1",
+            "198.18.0.1",
         ] {
             assert!(!manager.is_ip_allowed(ip(blocked)), "{blocked} allowed");
         }
-        for public in ["8.8.8.8", "172.32.0.1", "2606:4700:4700::1111"] {
+        for public in [
+            "8.8.8.8",
+            "172.32.0.1",
+            "2606:4700:4700::1111",
+            "64:ff9b::808:808",
+        ] {
             assert!(manager.is_ip_allowed(ip(public)), "{public} blocked");
         }
     }
@@ -2016,7 +2062,21 @@ mod tests {
         let config = NetConfig::default().allow_network("10.96.0.0/12".parse().unwrap());
         let manager = ConnectionManager::new(config, HashMap::new());
         assert!(manager.is_ip_allowed(ip("10.96.12.34")));
+        assert!(manager.is_ip_allowed(ip("::ffff:10.96.12.34")));
         assert!(!manager.is_ip_allowed(ip("10.0.0.1")));
+    }
+
+    /// A configured IPv4-mapped CIDR still matches, though addresses are also
+    /// checked as IPv4.
+    #[test]
+    fn test_mapped_ipv6_networks_match() {
+        let config = NetConfig {
+            blocked_networks: vec!["::ffff:8.8.8.0/120".parse().unwrap()],
+            ..NetConfig::default()
+        };
+        let manager = ConnectionManager::new(config, HashMap::new());
+        assert!(!manager.is_ip_allowed(ip("::ffff:8.8.8.8")));
+        assert!(manager.is_ip_allowed(ip("8.8.4.4")));
     }
 
     #[test]
@@ -2044,7 +2104,7 @@ mod tests {
             .await
             .unwrap_err();
         assert!(
-            matches!(&err, TcpError::NotPermitted(m) if m.contains("resolves to blocked address 169.254.169.254")),
+            matches!(&err, TcpError::NotPermitted(m) if m.contains("resolves to a blocked network") && !m.contains("169.254")),
             "{err}"
         );
     }

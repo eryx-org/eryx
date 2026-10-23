@@ -270,13 +270,16 @@ impl NetConfig {
 
     fn __repr__(&self) -> String {
         format!(
-            "NetConfig(max_connections={}, connect_timeout_ms={}, io_timeout_ms={}, allow_all_hosts={}, allowed_hosts={:?}, blocked_hosts=[{} patterns])",
+            "NetConfig(max_connections={}, connect_timeout_ms={}, io_timeout_ms={}, allow_all_hosts={}, allowed_hosts={:?}, blocked_hosts=[{} patterns], blocked_networks=[{} networks], allowed_networks={:?}, internal_hosts={:?})",
             self.max_connections,
             self.connect_timeout_ms,
             self.io_timeout_ms,
             self.allow_all_hosts,
             self.allowed_hosts,
             self.blocked_hosts.len(),
+            self.blocked_networks.len(),
+            self.allowed_networks(),
+            self.internal_hosts,
         )
     }
 }

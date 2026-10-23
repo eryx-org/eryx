@@ -202,6 +202,7 @@ message NetworkConfig {
   bool allow_all_hosts = 6;
   // CIDRs (e.g. "10.0.0.0/8") that resolved addresses must not fall in.
   // Empty = Rust defaults (loopback, private, link-local, CGNAT, multicast, ...).
+  // To disable address filtering, send allowed_networks = ["0.0.0.0/0", "::/0"].
   repeated string blocked_networks = 7;
   // CIDRs exempt from blocked_networks.
   repeated string allowed_networks = 8;
