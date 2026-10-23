@@ -66,7 +66,10 @@ The default `NetConfig` has sensible security defaults:
 | `io_timeout_ms` | 60,000 | Read/write timeout (60 seconds) |
 | `allow_all_hosts` | `false` | When true, all non-blocked hosts are allowed |
 | `allowed_hosts` | `[]` | Whitelist of allowed hosts (used when `allow_all_hosts` is false) |
-| `blocked_hosts` | localhost, private networks | Security blocklist |
+| `blocked_hosts` | localhost, private networks | Host patterns that are always refused |
+| `blocked_networks` | every non-public range | CIDRs that resolved addresses must not fall in |
+| `allowed_networks` | `[]` | CIDRs exempt from `blocked_networks` |
+| `internal_hosts` | `[]` | Host patterns allowed to resolve into `blocked_networks` |
 
 ```python
 import eryx
@@ -140,6 +143,57 @@ print("localhost" in config.blocked_hosts)  # False
 sandbox = eryx.Sandbox(network=config)
 ```
 
+`allow_localhost()` also removes the loopback ranges (`127.0.0.0/8`, `::1/128`)
+from `blocked_networks`.
+
+## Address Filtering
+
+Host patterns only see the name the sandbox asked for. A public name can point
+at an internal address (`evil.example` → `169.254.169.254`), so every
+connection is also checked by the address it resolves to. The sandbox connects
+only to an address that passed the check, so a DNS answer can't swap in a
+different one.
+
+By default `blocked_networks` covers every range that isn't publicly routable:
+loopback, private (`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`,
+`fc00::/7`), link-local (`169.254.0.0/16`, `fe80::/10`, which includes cloud
+metadata endpoints), carrier-grade NAT (`100.64.0.0/10`), `0.0.0.0/8`,
+`::/128`, multicast and reserved ranges. IPv4-mapped IPv6 addresses such as
+`::ffff:127.0.0.1` are checked as IPv4. This applies even with
+`allow_all_hosts`, and even when a host matches `allowed_hosts`.
+
+### Allowing Internal Addresses
+
+To reach an internal service on purpose, either exempt its addresses or trust
+its name:
+
+```python
+import eryx
+
+# Exempt a CIDR, e.g. one internal subnet
+config = eryx.NetConfig(allowed_hosts=["metrics.internal.example.com"])
+config = config.allow_network("10.96.0.0/12")
+
+# Or trust a name routed internally (e.g. through cluster DNS), whatever
+# address it resolves to. Only list names whose DNS you control.
+config = eryx.NetConfig(allowed_hosts=["api.example.com"])
+config = config.allow_internal_host("api.example.com")
+print(config.internal_hosts)  # ['api.example.com']
+```
+
+`internal_hosts` only skips the address check: the host must still pass
+`blocked_hosts` and `allowed_hosts`. Prefer it over `allowed_networks` for
+Kubernetes services, whose cluster IPs can change.
+
+From Rust, `NetConfig::with_resolver` replaces the system resolver with your
+own [`Resolver`](https://docs.rs/eryx/latest/eryx/trait.Resolver.html) (for
+example to use specific nameservers). The address check still applies to
+whatever it returns.
+
+In JavaScript, the same options are `blockedNetworks`, `allowedNetworks` and
+`internalHosts`. They're enforced in Node.js only: browsers don't expose the
+address a request connects to.
+
 ## Permissive Configuration
 
 For testing or trusted environments, use permissive mode:
@@ -151,6 +205,7 @@ import eryx
 config = eryx.NetConfig.permissive()
 print(f"Max connections: {config.max_connections}")  # 100
 print(f"Blocked hosts: {config.blocked_hosts}")      # []
+print(f"Blocked networks: {config.blocked_networks}")  # []
 
 sandbox = eryx.Sandbox(network=config)
 ```

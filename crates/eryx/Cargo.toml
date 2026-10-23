@@ -101,6 +101,8 @@ eryx-vfs = { workspace = true, optional = true } #unified
 flate2.workspace = true
 futures.workspace = true
 hex.workspace = true
+# CIDR matching for the network policy
+ipnet.workspace = true
 # Secrets support
 rand.workspace = true
 # TLS networking

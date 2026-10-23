@@ -333,6 +333,23 @@ class NetConfig:
     blocked_hosts: list[str]
     """Blocked host patterns."""
 
+    blocked_networks: list[str]
+    """CIDRs that a host's resolved addresses must not fall in.
+
+    Checked after DNS resolution, so a public name pointing at an internal
+    address is refused. Assigning an invalid CIDR raises ValueError.
+    """
+
+    allowed_networks: list[str]
+    """CIDRs exempt from blocked_networks."""
+
+    internal_hosts: list[str]
+    """Host patterns allowed to resolve into blocked_networks.
+
+    For trusted names routed internally on purpose (e.g. via cluster DNS).
+    Only list names whose DNS you control.
+    """
+
     def __init__(
         self,
         *,
@@ -341,6 +358,9 @@ class NetConfig:
         io_timeout_ms: int = 60000,
         allowed_hosts: Optional[Sequence[str]] = None,
         blocked_hosts: Optional[Sequence[str]] = None,
+        blocked_networks: Optional[Sequence[str]] = None,
+        allowed_networks: Optional[Sequence[str]] = None,
+        internal_hosts: Optional[Sequence[str]] = None,
     ) -> None:
         """Create new network configuration.
 
@@ -350,6 +370,8 @@ class NetConfig:
         - io_timeout_ms: 60000 (60 seconds)
         - allowed_hosts: [] (allow all external hosts)
         - blocked_hosts: localhost and private networks
+        - blocked_networks: every non-public range (loopback, private,
+          link-local/cloud metadata, CGNAT, multicast, ...)
 
         Args:
             max_connections: Maximum number of concurrent connections.
@@ -357,6 +379,13 @@ class NetConfig:
             io_timeout_ms: Timeout for read/write operations.
             allowed_hosts: List of allowed host patterns (supports wildcards like "*.example.com").
             blocked_hosts: List of blocked host patterns.
+            blocked_networks: CIDRs (e.g. "10.0.0.0/8") that a host's resolved
+                addresses must not fall in.
+            allowed_networks: CIDRs exempt from blocked_networks.
+            internal_hosts: Host patterns allowed to resolve into blocked_networks.
+
+        Raises:
+            ValueError: If a network is not a valid CIDR.
 
         Example:
             # Only allow specific APIs
@@ -395,6 +424,32 @@ class NetConfig:
         """Add a host pattern to the blocked list.
 
         Returns self for method chaining.
+        """
+        ...
+
+    def allow_network(self, cidr: str) -> NetConfig:
+        """Allow addresses in a CIDR even though they fall in blocked_networks.
+
+        Returns self for method chaining.
+
+        Raises:
+            ValueError: If `cidr` is not a valid CIDR.
+
+        Example:
+            net = NetConfig().allow_network("10.96.0.0/12")
+        """
+        ...
+
+    def allow_internal_host(self, pattern: str) -> NetConfig:
+        """Let hosts matching a pattern resolve to internal addresses.
+
+        For trusted names routed internally on purpose (e.g. a service reached
+        through cluster DNS). Only list names whose DNS you control.
+
+        Returns self for method chaining.
+
+        Example:
+            net = NetConfig().allow_internal_host("api.internal.example.com")
         """
         ...
 

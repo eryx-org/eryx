@@ -107,7 +107,9 @@ pub use callback::{
 };
 pub use error::Error;
 pub use library::RuntimeLibrary;
-pub use net::{ConnectionManager, NetConfig, TcpError, TlsError};
+pub use net::{
+    ConnectionManager, DEFAULT_BLOCKED_NETWORKS, IpNet, NetConfig, Resolver, TcpError, TlsError,
+};
 pub use package::{ExtractedPackage, PackageFormat};
 pub use pool::{PoolConfig, PoolError, PoolStats, PooledSandbox, SandboxPool};
 pub use replay::{

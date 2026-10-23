@@ -89,7 +89,7 @@ print(f"Temperature in {result['city']}: {result['temp']}°{result['unit']}")
 
 ### Networking
 
-Networking is off by default. Enable it with a host policy (same rules as the Rust crate's `NetConfig`; localhost and private ranges stay blocked unless you override `blockedHosts`):
+Networking is off by default. Enable it with a host policy (same rules as the Rust crate's `NetConfig`; localhost and private ranges stay blocked unless you override `blockedHosts`, and in Node.js resolved addresses are checked against `blockedNetworks`, with `allowedNetworks` and `internalHosts` as exceptions):
 
 ```js
 import { Sandbox, setNetConfig } from "@bsull/eryx";

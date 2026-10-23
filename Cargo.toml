@@ -36,6 +36,7 @@ futures-concurrency = "7.6"
 futures-lite = "2.6"
 hex = "0.4"
 hmac = "0.13"
+ipnet = "2"
 lending-stream = "1.0"
 metrics = "0.24"
 metrics-exporter-prometheus = { version = "0.18.1", default-features = false, features = ["http-listener"] }

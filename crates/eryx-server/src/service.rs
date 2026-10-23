@@ -144,34 +144,45 @@ impl crate::proto::eryx::v1::eryx_server::Eryx for EryxService {
             .transpose()?;
 
         // Parse network config: present = networking enabled, absent = disabled.
-        let net_config = execute_req.network_config.map(|nc| {
-            let defaults = NetConfig::default();
-            NetConfig {
-                allow_all_hosts: nc.allow_all_hosts,
-                allowed_hosts: nc.allowed_hosts,
-                blocked_hosts: if nc.blocked_hosts.is_empty() {
-                    defaults.blocked_hosts
-                } else {
-                    nc.blocked_hosts
-                },
-                max_connections: if nc.max_connections > 0 {
-                    nc.max_connections
-                } else {
-                    defaults.max_connections
-                },
-                connect_timeout: if nc.connect_timeout_ms > 0 {
-                    Duration::from_millis(nc.connect_timeout_ms)
-                } else {
-                    defaults.connect_timeout
-                },
-                io_timeout: if nc.io_timeout_ms > 0 {
-                    Duration::from_millis(nc.io_timeout_ms)
-                } else {
-                    defaults.io_timeout
-                },
-                custom_root_certs: vec![],
-            }
-        });
+        let net_config = execute_req
+            .network_config
+            .map(|nc| -> Result<NetConfig, Status> {
+                let defaults = NetConfig::default();
+                Ok(NetConfig {
+                    allow_all_hosts: nc.allow_all_hosts,
+                    allowed_hosts: nc.allowed_hosts,
+                    blocked_hosts: if nc.blocked_hosts.is_empty() {
+                        defaults.blocked_hosts
+                    } else {
+                        nc.blocked_hosts
+                    },
+                    max_connections: if nc.max_connections > 0 {
+                        nc.max_connections
+                    } else {
+                        defaults.max_connections
+                    },
+                    connect_timeout: if nc.connect_timeout_ms > 0 {
+                        Duration::from_millis(nc.connect_timeout_ms)
+                    } else {
+                        defaults.connect_timeout
+                    },
+                    io_timeout: if nc.io_timeout_ms > 0 {
+                        Duration::from_millis(nc.io_timeout_ms)
+                    } else {
+                        defaults.io_timeout
+                    },
+                    blocked_networks: if nc.blocked_networks.is_empty() {
+                        defaults.blocked_networks
+                    } else {
+                        parse_networks("blocked_networks", &nc.blocked_networks)?
+                    },
+                    allowed_networks: parse_networks("allowed_networks", &nc.allowed_networks)?,
+                    internal_hosts: nc.internal_hosts,
+                    resolver: None,
+                    custom_root_certs: vec![],
+                })
+            })
+            .transpose()?;
 
         // Parse and validate secrets: generate placeholders and build env preamble.
         let (secrets, secrets_preamble) = {
@@ -488,6 +499,17 @@ const SYS_PATH_INJECT: &str = concat!(
     "if '/eryx/lib' not in _sys.path: _sys.path.insert(0, '/eryx/lib')\n",
     "del _sys, _il\n",
 );
+
+/// Parse a `NetworkConfig` CIDR list, naming the field in the error.
+fn parse_networks(field: &str, cidrs: &[String]) -> Result<Vec<eryx::IpNet>, Status> {
+    cidrs
+        .iter()
+        .map(|c| {
+            c.parse()
+                .map_err(|e| Status::invalid_argument(format!("{field}: invalid CIDR '{c}': {e}")))
+        })
+        .collect()
+}
 
 /// Check whether a secret name is a valid Python environment variable name.
 ///

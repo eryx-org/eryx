@@ -299,7 +299,7 @@ print(response.read().decode())
 
 By default, networking is disabled. When enabled via `with_network()`:
 
-- Localhost and private networks are blocked by default
+- Localhost and private networks are blocked by default, checked against the resolved address
 - Use `allowed_hosts` patterns with wildcards (e.g., `*.example.com`)
 - The host handles DNS resolution and connection management
 - TLS connections use the system certificate store (with optional custom certs)

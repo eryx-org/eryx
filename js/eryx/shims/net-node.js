@@ -1,6 +1,7 @@
 /**
  * Node.js transport for the eryx:net shims: real TCP/TLS via node:net and
- * node:tls. Policy checks happen in net.js before this is reached.
+ * node:tls. Host policy is checked in net.js; the resolved-address check
+ * happens here, since only the transport sees the address it connects to.
  */
 
 const conns = new Map();
@@ -42,6 +43,7 @@ function mapTcpError(e) {
     case "ETIMEDOUT": return { tag: "timed-out" };
     case "ENOTFOUND":
     case "EAI_AGAIN": return { tag: "host-not-found" };
+    case "EERYX_BLOCKED": return { tag: "not-permitted", val: e.message };
     default: return { tag: "io-error", val: String(e?.message ?? e) };
   }
 }
@@ -75,11 +77,63 @@ function close(h) {
   untrack(h)?.socket.destroy();
 }
 
+function blockedError(host, address) {
+  const e = new Error(`host '${host}' resolves to blocked address ${address}`);
+  e.code = "EERYX_BLOCKED";
+  return e;
+}
+
+/**
+ * `(address, family) => allowed` for `blockedNetworks` minus `allowedNetworks`.
+ * Throws on an invalid CIDR, which connect() turns into a refusal.
+ */
+function networkFilter(net, { blockedNetworks, allowedNetworks }) {
+  const list = (cidrs) => {
+    const bl = new net.BlockList();
+    for (const cidr of cidrs) {
+      const [addr, prefix] = cidr.split("/");
+      bl.addSubnet(addr, Number(prefix), net.isIPv6(addr) ? "ipv6" : "ipv4");
+    }
+    return bl;
+  };
+  const blocked = list(blockedNetworks);
+  const allowed = list(allowedNetworks);
+  return (address, family) => {
+    const type = family === 6 ? "ipv6" : "ipv4";
+    // BlockList matches IPv4-mapped IPv6 addresses against IPv4 subnets.
+    return !blocked.check(address, type) || allowed.check(address, type);
+  };
+}
+
 export const tcp = {
-  async connect(host, port, _timeoutMs) {
+  async connect(host, port, _timeoutMs, networks) {
     const net = await import(/* webpackIgnore: true */ "node:net");
+    const dns = await import(/* webpackIgnore: true */ "node:dns");
+    let isAllowed = () => true;
+    if (networks) {
+      try {
+        isAllowed = networkFilter(net, networks);
+      } catch (e) {
+        throw tcpErr({ tag: "not-permitted", val: `invalid network policy: ${e.message}` });
+      }
+    }
+    // Node skips `lookup` for IP literals, so check those here.
+    const literal = net.isIP(host);
+    if (literal && !isAllowed(host, literal)) {
+      throw tcpErr(mapTcpError(blockedError(host, host)));
+    }
+    // Filter the DNS answer before Node picks an address, so the address
+    // connected to is one that was checked.
+    const lookup = (hostname, options, cb) =>
+      dns.lookup(hostname, { ...options, all: true }, (err, addrs) => {
+        if (err) return cb(err);
+        const ok = addrs.filter((a) => isAllowed(a.address, a.family));
+        if (!ok.length) return cb(blockedError(hostname, addrs[0].address));
+        if (options.all) return cb(null, ok);
+        cb(null, ok[0].address, ok[0].family);
+      });
     return new Promise((resolve, reject) => {
-      const s = net.connect({ host, port });
+      const s = net.connect({ host, port, lookup });
       s.once("connect", () => { s.off("error", reject); resolve(track(s)); });
       s.once("error", (e) => reject(tcpErr(mapTcpError(e))));
     });

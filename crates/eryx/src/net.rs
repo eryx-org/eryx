@@ -8,13 +8,17 @@
 //!
 //! - Host controls which hosts are allowed/blocked via [`NetConfig`]
 //! - Certificate verification is handled by the host (cannot be bypassed)
-//! - Private/local networks are blocked by default
+//! - Private/local networks are blocked by default, checked against the
+//!   *resolved* address so a public name pointing at an internal IP is refused
 //! - Connection limits prevent resource exhaustion
 
 use std::collections::HashMap;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
 
+pub use ipnet::IpNet;
+use ipnet::{Ipv4Net, Ipv6Net};
 use rustls::ClientConfig;
 use rustls::pki_types::ServerName;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -40,9 +44,53 @@ fn read_buf_len(len: u32) -> usize {
     (len as usize).min(MAX_READ_LEN)
 }
 
+/// Resolves hostnames to socket addresses for sandbox connections.
+///
+/// Set one with [`NetConfig::with_resolver`] to replace the system resolver
+/// (e.g. to use specific nameservers, or pin names to addresses). The network
+/// policy still applies to whatever it returns: a resolver decides where a
+/// name points, not whether the sandbox may connect there.
+///
+/// # Example
+///
+/// ```
+/// use std::net::SocketAddr;
+///
+/// use eryx::{NetConfig, Resolver};
+///
+/// /// Pins one name to a fixed address; everything else uses the system resolver.
+/// #[derive(Debug)]
+/// struct Pinned(SocketAddr);
+///
+/// #[async_trait::async_trait]
+/// impl Resolver for Pinned {
+///     async fn resolve(&self, host: &str, port: u16) -> std::io::Result<Vec<SocketAddr>> {
+///         if host == "api.example.com" {
+///             return Ok(vec![SocketAddr::new(self.0.ip(), port)]);
+///         }
+///         Ok(tokio::net::lookup_host((host, port)).await?.collect())
+///     }
+/// }
+///
+/// let config = NetConfig::default()
+///     .allow_host("api.example.com")
+///     .with_resolver(Pinned("93.184.215.14:0".parse().unwrap()));
+/// # let _ = config;
+/// ```
+#[async_trait::async_trait]
+pub trait Resolver: Send + Sync + std::fmt::Debug {
+    /// Resolve `host` to the addresses to try, in order of preference.
+    async fn resolve(&self, host: &str, port: u16) -> std::io::Result<Vec<SocketAddr>>;
+}
+
 /// Network configuration for the sandbox.
 ///
 /// Controls which hosts Python code can connect to and sets timeouts.
+///
+/// A connection is checked twice: the requested host against
+/// `blocked_hosts`/`allowed_hosts`, then every address it resolves to against
+/// `blocked_networks`/`allowed_networks`. Only an address that passes is
+/// connected to, so a DNS answer can't swap in an internal one.
 #[derive(Clone, Debug)]
 pub struct NetConfig {
     /// Maximum concurrent connections (0 = unlimited).
@@ -62,11 +110,62 @@ pub struct NetConfig {
     ///
     /// By default, blocks localhost and private networks.
     pub blocked_hosts: Vec<String>,
+    /// Networks that resolved addresses must not fall in.
+    ///
+    /// By default, every non-public range: see [`DEFAULT_BLOCKED_NETWORKS`].
+    /// IPv4-mapped IPv6 addresses are checked as IPv4.
+    pub blocked_networks: Vec<IpNet>,
+    /// Exceptions to `blocked_networks`: an address in one of these is allowed
+    /// even if it also falls in a blocked network.
+    pub allowed_networks: Vec<IpNet>,
+    /// Host patterns allowed to resolve into `blocked_networks`.
+    ///
+    /// For trusted names that are routed internally on purpose (e.g. a
+    /// service reached through cluster DNS). The host must still pass
+    /// `blocked_hosts`/`allowed_hosts`. Only list names whose DNS you control:
+    /// whoever answers for them decides which internal address they reach.
+    pub internal_hosts: Vec<String>,
+    /// Resolver for hostnames; `None` uses the system resolver.
+    pub resolver: Option<Arc<dyn Resolver>>,
     /// Custom root certificates (DER-encoded) to trust in addition to system certs.
     ///
     /// Useful for testing with self-signed certificates.
     pub custom_root_certs: Vec<Vec<u8>>,
 }
+
+/// The default [`NetConfig::blocked_networks`]: every range that isn't
+/// publicly routable unicast.
+///
+/// Loopback, private (RFC 1918 and IPv6 unique-local), link-local (which
+/// includes cloud metadata endpoints such as `169.254.169.254`), carrier-grade
+/// NAT, "this network", multicast, and reserved/broadcast.
+pub const DEFAULT_BLOCKED_NETWORKS: [IpNet; 14] = {
+    const fn v4(a: u8, b: u8, c: u8, d: u8, len: u8) -> IpNet {
+        IpNet::V4(Ipv4Net::new_assert(Ipv4Addr::new(a, b, c, d), len))
+    }
+    const fn v6(first: u16, last: u16, len: u8) -> IpNet {
+        IpNet::V6(Ipv6Net::new_assert(
+            Ipv6Addr::new(first, 0, 0, 0, 0, 0, 0, last),
+            len,
+        ))
+    }
+    [
+        v4(0, 0, 0, 0, 8),
+        v4(10, 0, 0, 0, 8),
+        v4(100, 64, 0, 0, 10),
+        v4(127, 0, 0, 0, 8),
+        v4(169, 254, 0, 0, 16),
+        v4(172, 16, 0, 0, 12),
+        v4(192, 168, 0, 0, 16),
+        v4(224, 0, 0, 0, 4),
+        v4(240, 0, 0, 0, 4),
+        v6(0, 0, 128),
+        v6(0, 1, 128),
+        v6(0xfc00, 0, 7),
+        v6(0xfe80, 0, 10),
+        v6(0xff00, 0, 8),
+    ]
+};
 
 impl Default for NetConfig {
     fn default() -> Self {
@@ -102,6 +201,10 @@ impl Default for NetConfig {
                 "169.254.*".into(),
                 "[::1]".into(),
             ],
+            blocked_networks: DEFAULT_BLOCKED_NETWORKS.to_vec(),
+            allowed_networks: vec![],
+            internal_hosts: vec![],
+            resolver: None,
             custom_root_certs: vec![],
         }
     }
@@ -151,11 +254,41 @@ impl NetConfig {
         self
     }
 
+    /// Allow addresses in `network` even though they fall in `blocked_networks`.
+    #[must_use]
+    pub fn allow_network(mut self, network: IpNet) -> Self {
+        self.allowed_networks.push(network);
+        self
+    }
+
+    /// Add a network to `blocked_networks`.
+    #[must_use]
+    pub fn block_network(mut self, network: IpNet) -> Self {
+        self.blocked_networks.push(network);
+        self
+    }
+
+    /// Let hosts matching `pattern` resolve to internal addresses; see
+    /// [`NetConfig::internal_hosts`].
+    #[must_use]
+    pub fn allow_internal_host(mut self, pattern: impl Into<String>) -> Self {
+        self.internal_hosts.push(pattern.into());
+        self
+    }
+
+    /// Resolve hostnames with `resolver` instead of the system resolver.
+    #[must_use]
+    pub fn with_resolver(mut self, resolver: impl Resolver + 'static) -> Self {
+        self.resolver = Some(Arc::new(resolver));
+        self
+    }
+
     /// Allow connections to localhost (disabled by default).
     #[must_use]
     pub fn allow_localhost(mut self) -> Self {
         self.blocked_hosts
             .retain(|p| !p.contains("localhost") && !p.starts_with("127.") && !p.contains("::1"));
+        self.blocked_networks.retain(|n| !n.addr().is_loopback());
         self
     }
 
@@ -173,6 +306,10 @@ impl NetConfig {
             allow_all_hosts: true,
             allowed_hosts: vec![],
             blocked_hosts: vec![],
+            blocked_networks: vec![],
+            allowed_networks: vec![],
+            internal_hosts: vec![],
+            resolver: None,
             custom_root_certs: vec![],
         }
     }
@@ -485,6 +622,56 @@ impl ConnectionManager {
         Ok(())
     }
 
+    /// Check a resolved address against `blocked_networks`/`allowed_networks`.
+    fn is_ip_allowed(&self, ip: IpAddr) -> bool {
+        // `::ffff:127.0.0.1` is 127.0.0.1 on the wire; match it as IPv4.
+        let ip = ip.to_canonical();
+        !self.config.blocked_networks.iter().any(|n| n.contains(&ip))
+            || self.config.allowed_networks.iter().any(|n| n.contains(&ip))
+    }
+
+    /// Resolve `host` and keep the addresses the policy allows.
+    ///
+    /// Callers must connect to one of the returned addresses, never re-resolve:
+    /// the check is only as good as the address actually used.
+    async fn resolve_allowed(&self, host: &str, port: u16) -> Result<Vec<SocketAddr>, TcpError> {
+        let addrs: Vec<SocketAddr> = match &self.config.resolver {
+            Some(resolver) => resolver.resolve(host, port).await,
+            None => tokio::net::lookup_host((host, port))
+                .await
+                .map(Iterator::collect),
+        }
+        .map_err(|e| {
+            if e.kind() == std::io::ErrorKind::NotFound {
+                TcpError::HostNotFound
+            } else {
+                TcpError::IoError(e.to_string())
+            }
+        })?;
+        if addrs.is_empty() {
+            return Err(TcpError::HostNotFound);
+        }
+
+        let internal = self
+            .config
+            .internal_hosts
+            .iter()
+            .any(|p| host_matches_pattern(host, p));
+        if internal {
+            return Ok(addrs);
+        }
+
+        let (allowed, blocked): (Vec<_>, Vec<_>) =
+            addrs.into_iter().partition(|a| self.is_ip_allowed(a.ip()));
+        if allowed.is_empty() {
+            return Err(TcpError::NotPermitted(format!(
+                "host '{host}' resolves to blocked address {}",
+                blocked[0].ip()
+            )));
+        }
+        Ok(allowed)
+    }
+
     // ========================================================================
     // TCP operations
     // ========================================================================
@@ -511,19 +698,10 @@ impl ConnectionManager {
 
         let connect_timeout = Self::effective_timeout(self.config.connect_timeout, timeout_ms);
 
-        // 3. DNS resolve + TCP connect (with timeout)
-        let addr = tokio::time::timeout(connect_timeout, tokio::net::lookup_host((host, port)))
+        // 3. DNS resolve + check resolved addresses + TCP connect (with timeout)
+        let addr = tokio::time::timeout(connect_timeout, self.resolve_allowed(host, port))
             .await
-            .map_err(|_| TcpError::TimedOut)?
-            .map_err(|e| {
-                if e.kind() == std::io::ErrorKind::NotFound {
-                    TcpError::HostNotFound
-                } else {
-                    TcpError::IoError(e.to_string())
-                }
-            })?
-            .next()
-            .ok_or(TcpError::HostNotFound)?;
+            .map_err(|_| TcpError::TimedOut)??[0];
 
         let tcp = tokio::time::timeout(connect_timeout, TcpStream::connect(addr))
             .await
@@ -1787,5 +1965,127 @@ mod tests {
         );
         assert_ne!(h3, h1);
         assert_ne!(h3, h2);
+    }
+
+    /// Answers every lookup with fixed addresses, standing in for a hostile or
+    /// split-horizon DNS server.
+    #[derive(Debug)]
+    struct FixedResolver(Vec<IpAddr>);
+
+    #[async_trait::async_trait]
+    impl Resolver for FixedResolver {
+        async fn resolve(&self, _host: &str, port: u16) -> std::io::Result<Vec<SocketAddr>> {
+            Ok(self.0.iter().map(|ip| SocketAddr::new(*ip, port)).collect())
+        }
+    }
+
+    fn ip(s: &str) -> IpAddr {
+        s.parse().unwrap()
+    }
+
+    #[test]
+    fn test_default_blocked_networks() {
+        let manager = ConnectionManager::new(NetConfig::default(), HashMap::new());
+        for blocked in [
+            "127.0.0.1",
+            "10.1.2.3",
+            "172.31.255.255",
+            "192.168.0.1",
+            "169.254.169.254",
+            "100.64.0.1",
+            "0.0.0.0",
+            "255.255.255.255",
+            "224.0.0.1",
+            "::",
+            "::1",
+            "fd00:ec2::254",
+            "fe80::1",
+            // IPv4-mapped IPv6 is the IPv4 address on the wire.
+            "::ffff:127.0.0.1",
+            "::ffff:169.254.169.254",
+        ] {
+            assert!(!manager.is_ip_allowed(ip(blocked)), "{blocked} allowed");
+        }
+        for public in ["8.8.8.8", "172.32.0.1", "2606:4700:4700::1111"] {
+            assert!(manager.is_ip_allowed(ip(public)), "{public} blocked");
+        }
+    }
+
+    #[test]
+    fn test_allowed_networks_override_blocked() {
+        let config = NetConfig::default().allow_network("10.96.0.0/12".parse().unwrap());
+        let manager = ConnectionManager::new(config, HashMap::new());
+        assert!(manager.is_ip_allowed(ip("10.96.12.34")));
+        assert!(!manager.is_ip_allowed(ip("10.0.0.1")));
+    }
+
+    #[test]
+    fn test_allow_localhost_unblocks_loopback_networks_only() {
+        let manager =
+            ConnectionManager::new(NetConfig::default().allow_localhost(), HashMap::new());
+        assert!(manager.is_ip_allowed(ip("127.0.0.1")));
+        assert!(manager.is_ip_allowed(ip("::1")));
+        assert!(!manager.is_ip_allowed(ip("10.0.0.1")));
+        assert!(!manager.is_ip_allowed(ip("169.254.169.254")));
+    }
+
+    /// The hostname passes every pattern check, but its DNS answer is internal.
+    #[tokio::test]
+    async fn test_public_name_resolving_to_internal_ip_is_blocked() {
+        let config = NetConfig {
+            allow_all_hosts: true,
+            ..NetConfig::default()
+        }
+        .with_resolver(FixedResolver(vec![ip("169.254.169.254")]));
+        let mut manager = ConnectionManager::new(config, HashMap::new());
+
+        let err = manager
+            .tcp_connect("public.example", 80, 0)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(&err, TcpError::NotPermitted(m) if m.contains("resolves to blocked address 169.254.169.254")),
+            "{err}"
+        );
+    }
+
+    /// A mixed answer is narrowed to the allowed addresses, so the connection
+    /// can't land on the internal one.
+    #[tokio::test]
+    async fn test_mixed_dns_answer_keeps_only_allowed_addresses() {
+        let config =
+            NetConfig::default().with_resolver(FixedResolver(vec![ip("127.0.0.1"), ip("8.8.8.8")]));
+        let manager = ConnectionManager::new(config, HashMap::new());
+
+        let addrs = manager
+            .resolve_allowed("public.example", 443)
+            .await
+            .unwrap();
+        assert_eq!(addrs, vec![SocketAddr::new(ip("8.8.8.8"), 443)]);
+    }
+
+    /// `internal_hosts` lets a trusted name reach an internal address, which
+    /// is how a service routed through cluster DNS stays reachable.
+    #[tokio::test]
+    async fn test_internal_hosts_may_resolve_to_blocked_networks() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let config = NetConfig {
+            allow_all_hosts: true,
+            ..NetConfig::default()
+        }
+        .allow_internal_host("assistant.example.com")
+        .with_resolver(FixedResolver(vec![ip("127.0.0.1")]));
+        let mut manager = ConnectionManager::new(config, HashMap::new());
+
+        manager
+            .tcp_connect("assistant.example.com", port, 0)
+            .await
+            .unwrap();
+        // Other names resolving to the same address are still refused.
+        assert!(matches!(
+            manager.tcp_connect("other.example.com", port, 0).await,
+            Err(TcpError::NotPermitted(_))
+        ));
     }
 }

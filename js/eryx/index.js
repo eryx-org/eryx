@@ -60,7 +60,7 @@ export {
 } from "./shims/callbacks.js";
 
 // Re-export network policy configuration
-export { setNetConfig, DEFAULT_BLOCKED_HOSTS } from "./shims/net.js";
+export { setNetConfig, DEFAULT_BLOCKED_HOSTS, DEFAULT_BLOCKED_NETWORKS } from "./shims/net.js";
 
 import { _beginReplay, _endReplay } from "./shims/callbacks.js";
 

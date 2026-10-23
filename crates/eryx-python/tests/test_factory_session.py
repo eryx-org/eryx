@@ -193,6 +193,7 @@ def test_factory_session_reclaims_closed_socket_handles(http_server, sandbox_fac
         max_connections=1,
         allow_all_hosts=True,
         blocked_hosts=[],
+        blocked_networks=[],
     )
     session = sandbox_factory.create_session(network=net)
     result = session.execute(f"""

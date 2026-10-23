@@ -248,6 +248,12 @@ By default, `NetConfig` blocks localhost and private networks to prevent SSRF at
 - `localhost`, `127.*`, `[::1]`
 - Private networks: `10.*`, `172.16.*`-`172.31.*`, `192.168.*`, `169.254.*`
 
+Those patterns match the hostname. Every connection is also checked by the
+address it **resolves to** against `blocked_networks` (CIDRs; by default every
+non-public range, including cloud metadata), so a public name pointing at an
+internal address is refused too. To reach an internal service on purpose, use
+`allow_network("10.96.0.0/12")` or `allow_internal_host("svc.internal.example.com")`.
+
 #### Permissive Configuration
 
 For testing or development, use `.permissive()` to allow all hosts including localhost:
@@ -283,6 +289,7 @@ config = (eryx.NetConfig()
     .allow_host("api.example.com")
     .allow_host("*.openai.com")
     .allow_localhost()               # Remove localhost from blocked list
+    .allow_network("10.96.0.0/12")   # Exempt a CIDR from blocked_networks
     .with_root_cert(cert_der_bytes)) # Add custom CA cert for self-signed certs
 ```
 

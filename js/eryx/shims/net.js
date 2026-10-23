@@ -3,7 +3,9 @@
  *
  * Networking is disabled until the host calls setNetConfig(). Host policy
  * mirrors the Rust crate's NetConfig: blocked patterns are always enforced,
- * then the host must match allowedHosts unless allowAllHosts is set.
+ * then the host must match allowedHosts unless allowAllHosts is set. In Node,
+ * resolved addresses are also checked against blockedNetworks (minus
+ * allowedNetworks) unless the host matches internalHosts.
  *
  * The transport depends on the environment:
  * - Node.js: real TCP/TLS sockets (net-node.js)
@@ -33,19 +35,40 @@ export const DEFAULT_BLOCKED_HOSTS = [
   "[::1]",
 ];
 
-/** @type {{ allowAllHosts: boolean, allowedHosts: string[], blockedHosts: string[] } | null} */
+/** Same defaults as the Rust crate's `DEFAULT_BLOCKED_NETWORKS`. */
+export const DEFAULT_BLOCKED_NETWORKS = [
+  "0.0.0.0/8",
+  "10.0.0.0/8",
+  "100.64.0.0/10",
+  "127.0.0.0/8",
+  "169.254.0.0/16",
+  "172.16.0.0/12",
+  "192.168.0.0/16",
+  "224.0.0.0/4",
+  "240.0.0.0/4",
+  "::/128",
+  "::1/128",
+  "fc00::/7",
+  "fe80::/10",
+  "ff00::/8",
+];
+
+/** @type {Required<import("./net.js").NetConfig> | null} */
 let config = null;
 
 /**
  * Enable (or, with `null`, disable) networking for sandboxed code.
  *
- * @param {{ allowAllHosts?: boolean, allowedHosts?: string[], blockedHosts?: string[] } | null} netConfig
+ * @param {import("./net.js").NetConfig | null} netConfig
  */
 export function setNetConfig(netConfig) {
   config = netConfig && {
     allowAllHosts: netConfig.allowAllHosts ?? false,
     allowedHosts: netConfig.allowedHosts ?? [],
     blockedHosts: netConfig.blockedHosts ?? DEFAULT_BLOCKED_HOSTS,
+    blockedNetworks: netConfig.blockedNetworks ?? DEFAULT_BLOCKED_NETWORKS,
+    allowedNetworks: netConfig.allowedNetworks ?? [],
+    internalHosts: netConfig.internalHosts ?? [],
   };
 }
 
@@ -73,7 +96,9 @@ export const tcp = {
   ...transport.tcp,
   async connect(host, port, timeoutMs) {
     checkHost(host);
-    return transport.tcp.connect(host, port, timeoutMs);
+    // The transport checks resolved addresses against this; internal hosts skip it.
+    const networks = config.internalHosts.some((p) => hostMatches(host, p)) ? null : config;
+    return transport.tcp.connect(host, port, timeoutMs, networks);
   },
 };
 

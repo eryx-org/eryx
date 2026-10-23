@@ -1956,3 +1956,38 @@ async fn rejects_invalid_replay_before_execution() {
         );
     }
 }
+
+/// A malformed CIDR in `NetworkConfig` is a client error, not a silently
+/// weaker network policy.
+#[tokio::test]
+async fn execute_invalid_network_cidr_is_rejected() {
+    use eryx_server::proto::eryx::v1::NetworkConfig;
+
+    let channel = start_server().await;
+    let mut client = EryxClient::new(channel);
+
+    let (tx, rx) = mpsc::channel(1);
+    tx.send(ClientMessage {
+        message: Some(client_message::Message::ExecuteRequest(Box::new(
+            ExecuteRequest {
+                code: "pass".to_string(),
+                network_config: Some(NetworkConfig {
+                    allowed_networks: vec!["10.0.0.0/99".to_string()],
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+        ))),
+    })
+    .await
+    .unwrap();
+    let error = client.execute(ReceiverStream::new(rx)).await.unwrap_err();
+    assert_eq!(error.code(), tonic::Code::InvalidArgument);
+    assert!(
+        error
+            .message()
+            .contains("allowed_networks: invalid CIDR '10.0.0.0/99'"),
+        "{}",
+        error.message()
+    );
+}

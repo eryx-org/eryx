@@ -170,6 +170,24 @@ class TestNetConfig:
         result = config.allow_localhost()
         assert "localhost" not in result.blocked_hosts
         assert "127.*" not in result.blocked_hosts
+        assert "127.0.0.0/8" not in result.blocked_networks
+        assert "10.0.0.0/8" in result.blocked_networks
+
+    def test_network_policy_fields(self):
+        """Test CIDR fields default, round-trip, and reject invalid input."""
+        config = eryx.NetConfig()
+        assert "169.254.0.0/16" in config.blocked_networks
+        assert config.allowed_networks == []
+        assert eryx.NetConfig.permissive().blocked_networks == []
+
+        result = config.allow_network("10.96.0.0/12").allow_internal_host("svc.internal")
+        assert result.allowed_networks == ["10.96.0.0/12"]
+        assert result.internal_hosts == ["svc.internal"]
+
+        with pytest.raises(ValueError, match="invalid CIDR"):
+            eryx.NetConfig(blocked_networks=["10.0.0.0/99"])
+        with pytest.raises(ValueError, match="invalid CIDR"):
+            config.allowed_networks = ["not-a-cidr"]
 
     def test_with_root_cert(self):
         """Test with_root_cert method."""
