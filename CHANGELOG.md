@@ -14,6 +14,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## `eryx` - [0.11.0](https://github.com/eryx-org/eryx/compare/eryx-v0.10.1...eryx-v0.11.0) - 2026-10-23
 
+### Fixed
+- *(net)* [**breaking**] check resolved addresses against blocked networks ([#606](https://github.com/eryx-org/eryx/pull/606))
+
+### Other
+- *(eryx)* pool instances and pre-instantiate stores for stateless execution ([#411](https://github.com/eryx-org/eryx/pull/411))
+
+## `eryx-precompile` - [0.11.0](https://github.com/eryx-org/eryx/compare/eryx-precompile-v0.10.1...eryx-precompile-v0.11.0) - 2026-10-23
+
+### Other
+- update Cargo.lock dependencies
+
+## `eryx` - [0.11.0](https://github.com/eryx-org/eryx/compare/eryx-v0.10.1...eryx-v0.11.0) - 2026-10-23
+
 ### Security
 - **Upgrade recommended for anyone using sandboxed networking with `allow_all_hosts`.** Before this release, network policy only matched the hostname a script asked for, before DNS. Any name that resolved to a loopback, private, link-local or other non-public address got through, including the cloud metadata endpoint `169.254.169.254`. Host patterns such as `127.*` could not catch it. `pyeryx` turns on `allow_all_hosts` when no allowlist is given, so most `pyeryx` users with networking enabled were exposed. eryx now resolves the name, checks every address against `blocked_networks` (which covers those ranges by default, including IPv4-mapped and NAT64 forms) and connects only to addresses that passed ([#606](https://github.com/eryx-org/eryx/pull/606)). This affects the `eryx` crate, the `pyeryx` wheels and the `sd2k/eryx-server` image. `@bsull/eryx` (npm) applies the same check when running on Node. Browsers can't see resolved addresses, so the check doesn't run there.
 - **Breaking:** hosts that resolve to blocked networks are now refused even when allowlisted. To reach an internal service on purpose, add its hostname to `internal_hosts` (for example a cluster-internal name with no public DNS). You can also allow specific ranges with `allowed_networks`, or turn the check off by clearing `blocked_networks`. In gRPC an empty list means the defaults, so use `allowed_networks = ["0.0.0.0/0", "::/0"]` there instead.
