@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## `eryx-precompile` - [0.11.0](https://github.com/eryx-org/eryx/compare/eryx-precompile-v0.10.1...eryx-precompile-v0.11.0) - 2026-10-23
+
+### Other
+- update Cargo.lock dependencies
+
+## `eryx` - [0.11.0](https://github.com/eryx-org/eryx/compare/eryx-v0.10.1...eryx-v0.11.0) - 2026-10-23
+
+### Fixed
+- *(net)* [**breaking**] check resolved addresses against blocked networks ([#606](https://github.com/eryx-org/eryx/pull/606))
+
+### Other
+- *(eryx)* pool instances and pre-instantiate stores for stateless execution ([#411](https://github.com/eryx-org/eryx/pull/411))
+
 ## `eryx-precompile` - [0.10.1](https://github.com/eryx-org/eryx/compare/eryx-precompile-v0.10.0...eryx-precompile-v0.10.1) - 2026-10-21
 
 ### Other
