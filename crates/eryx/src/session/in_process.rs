@@ -55,7 +55,7 @@ use crate::callback_handler::{
 use crate::error::Error;
 use crate::net::ConnectionManager;
 use crate::replay::{CallbackJournal, ReplayState, wrap_callbacks};
-use crate::sandbox::{ExecuteResult, ExecuteStats, ReplayOutcome, Sandbox};
+use crate::sandbox::{ExecuteResult, ExecuteStats, ReplayOutcome, Sandbox, handler_task_failed};
 use crate::wasm::{CallbackRequest, NetRequest, OutputRequest, TraceRequest};
 
 use super::Session;
@@ -409,16 +409,25 @@ async fn run_code(
     let execution_result = execute_builder.run().await;
 
     // Wait for the handler tasks to complete
-    let callback_invocations = (&mut callback_handler.0).await.unwrap_or(0);
+    let callback_invocations = (&mut callback_handler.0).await;
     let trace_events = match trace_collector {
-        Some(mut trace_collector) => (&mut trace_collector.0).await.unwrap_or_default(),
-        None => Vec::new(),
+        Some(mut trace_collector) => (&mut trace_collector.0).await,
+        None => Ok(Vec::new()),
     };
-    let _ = (&mut output_collector.0).await;
+    let output_result = (&mut output_collector.0).await;
     // Connections don't outlive the call, as with `Sandbox::execute`.
-    if let Some(mut net_handler) = net_handler {
-        let _ = (&mut net_handler.0).await;
-    }
+    let net_result = match net_handler {
+        Some(mut net_handler) => (&mut net_handler.0).await,
+        None => Ok(()),
+    };
+
+    // A handler task only fails by panicking (e.g. in a user callback or
+    // handler), which loses callback results, trace events or output.
+    let callback_invocations =
+        callback_invocations.map_err(|e| handler_task_failed("callback handler", &e))?;
+    let trace_events = trace_events.map_err(|e| handler_task_failed("trace collector", &e))?;
+    net_result.map_err(|e| handler_task_failed("network handler", &e))?;
+    output_result.map_err(|e| handler_task_failed("output handler", &e))?;
 
     let duration = start.elapsed();
 

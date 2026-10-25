@@ -785,7 +785,7 @@ fn python_str_literal(value: &str) -> String {
 }
 
 /// Log and convert the failure of a task spawned to serve an execution.
-fn handler_task_failed(task: &str, error: &tokio::task::JoinError) -> Error {
+pub(crate) fn handler_task_failed(task: &str, error: &tokio::task::JoinError) -> Error {
     tracing::error!(task, %error, "execution handler task failed");
     Error::Execution(format!("{task} task failed: {error}"))
 }
