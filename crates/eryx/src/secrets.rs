@@ -36,6 +36,15 @@ impl std::fmt::Debug for SecretConfig {
 }
 
 /// File scrubbing policy for preventing secret leakage via file writes.
+///
+/// The experimental path-based policies (`Except`, `Only`) match the
+/// normalized path being written against glob patterns: `*` matches any run
+/// of characters other than `/`, `**` any run including `/` (so `/cache/**`
+/// matches everything under `/cache`, and `/a/**/b` also matches `/a/b`),
+/// and `?` one character other than `/`. A path that can't be normalized is
+/// always scrubbed. Scrubbing happens at write time, so under these policies
+/// a file renamed from an unscrubbed path to a scrubbed one is scrubbed
+/// again, and renaming directories is refused.
 #[derive(Debug, Clone, Default)]
 #[non_exhaustive]
 pub enum FileScrubPolicy {
@@ -44,19 +53,15 @@ pub enum FileScrubPolicy {
     All,
     /// Don't scrub any files
     None,
-    /// Scrub all except specified paths (glob patterns supported).
+    /// Scrub all files except those whose path matches any of these glob patterns.
     ///
-    /// **Not yet implemented** - currently behaves the same as `All` (fail closed).
-    /// Do not use until glob matching is implemented in Phase 2.
+    /// **Experimental.** See [`FileScrubPolicy`] for the pattern syntax.
     #[doc(hidden)]
-    #[allow(dead_code)]
     Except(Vec<String>),
-    /// Scrub only specified paths (glob patterns supported).
+    /// Scrub only files whose path matches any of these glob patterns.
     ///
-    /// **Not yet implemented** - currently behaves the same as `All` (fail closed).
-    /// Do not use until glob matching is implemented in Phase 2.
+    /// **Experimental.** See [`FileScrubPolicy`] for the pattern syntax.
     #[doc(hidden)]
-    #[allow(dead_code)]
     Only(Vec<String>),
 }
 
@@ -79,21 +84,19 @@ impl FileScrubPolicy {
         Self::None
     }
 
-    /// Scrub all except specific paths (glob patterns supported).
+    /// Scrub all files except those matching these glob patterns.
     ///
-    /// **Not yet implemented** - do not use until Phase 2.
+    /// **Experimental.** See [`FileScrubPolicy`] for the pattern syntax.
     #[doc(hidden)]
-    #[allow(dead_code)]
     #[must_use]
     pub fn except(paths: Vec<String>) -> Self {
         Self::Except(paths)
     }
 
-    /// Only scrub specific paths (glob patterns supported).
+    /// Only scrub files matching these glob patterns.
     ///
-    /// **Not yet implemented** - do not use until Phase 2.
+    /// **Experimental.** See [`FileScrubPolicy`] for the pattern syntax.
     #[doc(hidden)]
-    #[allow(dead_code)]
     #[must_use]
     pub fn only(paths: Vec<String>) -> Self {
         Self::Only(paths)

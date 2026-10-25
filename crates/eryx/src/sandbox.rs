@@ -1853,7 +1853,7 @@ impl<R, S> SandboxBuilder<R, S> {
     /// // Phase 1: Simple boolean
     /// .scrub_files(true)
     ///
-    /// // Phase 2: Path-based policies (future)
+    /// // Path-based policies (experimental)
     /// .scrub_files(FileScrubPolicy::except(vec!["/tmp/cache/*"]))
     /// ```
     #[must_use]
