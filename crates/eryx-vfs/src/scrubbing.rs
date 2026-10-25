@@ -105,28 +105,26 @@ impl<S> ScrubbingStorage<S> {
     }
 
     /// Scrub secret placeholders from data if policy allows.
-    fn scrub_if_needed(&self, path: &str, data: &[u8]) -> Vec<u8> {
+    ///
+    /// With `keep_len`, each placeholder is replaced by a marker of exactly its
+    /// own length (`[REDACTED]` padded with `*` or truncated), so the data
+    /// keeps its size and byte positions. Positional writes need this: the
+    /// caller has already accounted for `data.len()` bytes at the offset.
+    fn scrub_if_needed(&self, path: &str, data: &[u8], keep_len: bool) -> Vec<u8> {
         if !self.policy.should_scrub(path) || self.secrets.is_empty() {
             return data.to_vec();
         }
 
-        // Try to decode as UTF-8
-        if let Ok(text) = std::str::from_utf8(data) {
-            // Text file - string replacement
-            let mut scrubbed = text.to_string();
-            for secret_config in self.secrets.values() {
-                scrubbed = scrubbed.replace(&secret_config.placeholder, "[REDACTED]");
+        let mut result = data.to_vec();
+        for secret_config in self.secrets.values() {
+            let placeholder = secret_config.placeholder.as_bytes();
+            let mut replacement = b"[REDACTED]".to_vec();
+            if keep_len {
+                replacement.resize(placeholder.len(), b'*');
             }
-            scrubbed.into_bytes()
-        } else {
-            // Binary file - byte sequence search
-            let mut result = data.to_vec();
-            for secret_config in self.secrets.values() {
-                result =
-                    replace_bytes(&result, secret_config.placeholder.as_bytes(), b"[REDACTED]");
-            }
-            result
+            result = replace_bytes(&result, placeholder, &replacement);
         }
+        result
     }
 }
 
@@ -141,12 +139,12 @@ impl<S: VfsStorage> VfsStorage for ScrubbingStorage<S> {
     }
 
     async fn write(&self, path: &str, data: &[u8]) -> VfsResult<()> {
-        let scrubbed = self.scrub_if_needed(path, data);
+        let scrubbed = self.scrub_if_needed(path, data, false);
         self.inner.write(path, &scrubbed).await
     }
 
     async fn write_at(&self, path: &str, offset: u64, data: &[u8]) -> VfsResult<()> {
-        let scrubbed = self.scrub_if_needed(path, data);
+        let scrubbed = self.scrub_if_needed(path, data, true);
         self.inner.write_at(path, offset, &scrubbed).await
     }
 
@@ -279,6 +277,30 @@ mod tests {
         let content = scrubbing.read("/test.txt").await.unwrap();
         let text = String::from_utf8(content).unwrap();
         assert_eq!(text, "Keys: [REDACTED] and [REDACTED]");
+    }
+
+    /// Positional writes must not change length, or the bytes after the
+    /// placeholder land at the wrong offsets.
+    #[tokio::test]
+    async fn test_write_at_keeps_layout() {
+        let mut secrets = HashMap::new();
+        secrets.insert(
+            "KEY".to_string(),
+            SecretConfig {
+                placeholder: "PLACEHOLDER_123".to_string(),
+            },
+        );
+        let scrubbing =
+            ScrubbingStorage::new(InMemoryStorage::new(), secrets, FileScrubPolicy::All);
+
+        scrubbing
+            .write_at("/t", 0, b"a=PLACEHOLDER_123;")
+            .await
+            .unwrap();
+        scrubbing.write_at("/t", 18, b"b=2").await.unwrap();
+
+        let text = String::from_utf8(scrubbing.read("/t").await.unwrap()).unwrap();
+        assert_eq!(text, "a=[REDACTED]*****;b=2");
     }
 
     #[test]
