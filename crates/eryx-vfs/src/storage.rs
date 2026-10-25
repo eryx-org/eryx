@@ -455,6 +455,12 @@ impl InMemoryStorage {
         self.state.read().await
     }
 
+    /// Hold the storage lock exclusively, so tests can contend with readers.
+    #[cfg(test)]
+    pub(crate) async fn hold_write_lock(&self) -> impl Drop + '_ {
+        self.state.write().await
+    }
+
     /// Check if parent directory exists (requires state to already be borrowed).
     fn check_parent_exists_with_state(state: &StorageState, path: &str) -> VfsResult<()> {
         if let Some(parent) = Self::parent_path(path)

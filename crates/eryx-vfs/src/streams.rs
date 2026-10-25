@@ -4,7 +4,7 @@
 //! reading and writing files through the hybrid VFS.
 
 use std::future::Future;
-use std::pin::Pin;
+use std::pin::pin;
 use std::sync::Arc;
 use std::task::{Context, Poll, Waker};
 
@@ -192,20 +192,20 @@ impl OutputStream for RealFileOutputStream {
 // VFS Stream Implementations
 // ============================================================================
 
-/// A storage operation that has been started but may not have finished.
+/// Run a storage operation if it finishes within one poll, else cancel it.
 ///
-/// VFS storage is async while the non-blocking stream methods are sync, so
-/// those methods poll the operation once and, if it can't finish straight
-/// away (e.g. the storage lock is contended), park it here for
-/// [`Pollable::ready`] or the next stream call to drive to completion.
-type Pending<T> = Pin<Box<dyn Future<Output = VfsResult<T>> + Send>>;
-
-/// Poll `fut` once without a real waker.
-///
-/// Used from sync stream methods; whoever later awaits the future registers
-/// a proper waker.
-fn poll_now<T>(fut: &mut Pending<T>) -> Poll<VfsResult<T>> {
-    fut.as_mut().poll(&mut Context::from_waker(Waker::noop()))
+/// VFS storage is async while the non-blocking stream methods are sync. An
+/// operation that can't finish straight away (e.g. the storage lock is
+/// contended) is dropped rather than parked: a parked future would keep its
+/// place in the lock queue while nobody polls it, stalling every other
+/// storage op behind it. [`Pollable::ready`] reruns it to completion instead,
+/// so storage operations must be safe to cancel before they finish.
+fn try_now<T>(fut: impl Future<Output = T>) -> Option<T> {
+    let mut fut = pin!(fut);
+    match fut.as_mut().poll(&mut Context::from_waker(Waker::noop())) {
+        Poll::Ready(result) => Some(result),
+        Poll::Pending => None,
+    }
 }
 
 /// Wrap a storage error so `filesystem-error-code` can map it back to an
@@ -222,8 +222,12 @@ pub struct VfsInputStream<S: VfsStorage + Clone + 'static> {
     path: String,
     /// Current read position.
     position: u64,
-    /// A read started by [`InputStream::read`] that hasn't finished yet.
-    pending: Option<Pending<Vec<u8>>>,
+    /// Size of a read that couldn't finish straight away; [`Pollable::ready`]
+    /// performs it.
+    wanted: Option<usize>,
+    /// Result of a read performed by [`Pollable::ready`], returned by the
+    /// next read.
+    fetched: Option<VfsResult<Vec<u8>>>,
     /// Whether the stream has been closed.
     closed: bool,
 }
@@ -235,26 +239,31 @@ impl<S: VfsStorage + Clone + 'static> VfsInputStream<S> {
             storage,
             path,
             position: offset,
-            pending: None,
+            wanted: None,
+            fetched: None,
             closed: false,
         }
     }
 
-    fn start_read(&self, size: usize) -> Pending<Vec<u8>> {
+    fn start_read(&self, size: usize) -> impl Future<Output = VfsResult<Vec<u8>>> + use<S> {
         let storage = self.storage.clone();
         let path = self.path.clone();
         let position = self.position;
         let size = size.min(MAX_READ_CHUNK) as u64;
-        Box::pin(async move { storage.read_at(&path, position, size).await })
+        async move { storage.read_at(&path, position, size).await }
     }
 
-    /// Turn the outcome of a finished read into the stream result.
-    fn finish_read(&mut self, result: VfsResult<Vec<u8>>) -> StreamResult<Bytes> {
-        let data = result.map_err(stream_error)?;
+    /// Turn the outcome of a finished read into at most `size` bytes of
+    /// stream result.
+    fn finish_read(&mut self, result: VfsResult<Vec<u8>>, size: usize) -> StreamResult<Bytes> {
+        let mut data = result.map_err(stream_error)?;
         if data.is_empty() {
             self.closed = true;
             return Err(StreamError::Closed);
         }
+        // A read fetched by `ready` may be longer than this call asked for;
+        // the rest is read again later.
+        data.truncate(size);
         self.position += data.len() as u64;
         Ok(Bytes::from(data))
     }
@@ -263,11 +272,14 @@ impl<S: VfsStorage + Clone + 'static> VfsInputStream<S> {
 #[async_trait::async_trait]
 impl<S: VfsStorage + Clone + 'static> Pollable for VfsInputStream<S> {
     async fn ready(&mut self) {
-        // Readiness is the parked read (if any) finishing; its result is
+        // Readiness is the outstanding read (if any) finishing; its result is
         // picked up by the next `read`.
-        if let Some(pending) = self.pending.as_mut() {
-            let result = pending.await;
-            self.pending = Some(Box::pin(std::future::ready(result)));
+        if self.fetched.is_none()
+            && let Some(size) = self.wanted
+        {
+            let result = self.start_read(size).await;
+            self.wanted = None;
+            self.fetched = Some(result);
         }
     }
 }
@@ -281,15 +293,17 @@ impl<S: VfsStorage + Clone + 'static> InputStream for VfsInputStream<S> {
         if size == 0 {
             return Ok(Bytes::new());
         }
-        let mut pending = match self.pending.take() {
-            Some(pending) => pending,
-            None => self.start_read(size),
-        };
-        match poll_now(&mut pending) {
-            Poll::Ready(result) => self.finish_read(result),
-            Poll::Pending => {
+        if let Some(result) = self.fetched.take() {
+            return self.finish_read(result, size);
+        }
+        match try_now(self.start_read(size)) {
+            Some(result) => {
+                self.wanted = None;
+                self.finish_read(result, size)
+            }
+            None => {
                 // Nothing available yet: the guest waits on `ready` and retries.
-                self.pending = Some(pending);
+                self.wanted = Some(size);
                 Ok(Bytes::new())
             }
         }
@@ -302,12 +316,12 @@ impl<S: VfsStorage + Clone + 'static> InputStream for VfsInputStream<S> {
         if size == 0 {
             return Ok(Bytes::new());
         }
-        let pending = match self.pending.take() {
-            Some(pending) => pending,
-            None => self.start_read(size),
-        };
-        let result = pending.await;
-        self.finish_read(result)
+        if let Some(result) = self.fetched.take() {
+            return self.finish_read(result, size);
+        }
+        let result = self.start_read(size).await;
+        self.wanted = None;
+        self.finish_read(result, size)
     }
 }
 
@@ -323,9 +337,9 @@ pub struct VfsOutputStream<S: VfsStorage + Clone + 'static> {
     path: String,
     /// Current write position in the file, or None for append mode.
     position: Option<u64>,
-    /// A write started by [`OutputStream::write`] that hasn't finished yet;
-    /// resolves to the position just past the written bytes.
-    pending: Option<Pending<u64>>,
+    /// Bytes accepted by [`OutputStream::write`] whose write couldn't finish
+    /// straight away; retried by the next stream call or [`Pollable::ready`].
+    queued: Option<Bytes>,
     /// Failure of a write that finished after `write` returned, reported by
     /// the next stream call.
     error: Option<VfsError>,
@@ -349,17 +363,18 @@ impl<S: VfsStorage + Clone + 'static> VfsOutputStream<S> {
             storage,
             path,
             position,
-            pending: None,
+            queued: None,
             error: None,
             closed: false,
         }
     }
 
-    fn start_write(&self, bytes: Bytes) -> Pending<u64> {
+    /// Write `bytes`, resolving to the position just past them.
+    fn start_write(&self, bytes: Bytes) -> impl Future<Output = VfsResult<u64>> + use<S> {
         let storage = self.storage.clone();
         let path = self.path.clone();
         let position = self.position;
-        Box::pin(async move {
+        async move {
             let position = match position {
                 Some(pos) => pos,
                 // Append mode: write at the current end of the file, or at 0
@@ -368,7 +383,7 @@ impl<S: VfsStorage + Clone + 'static> VfsOutputStream<S> {
             };
             storage.write_at(&path, position, &bytes).await?;
             Ok(position + bytes.len() as u64)
-        })
+        }
     }
 
     /// Record the outcome of a finished write.
@@ -378,7 +393,8 @@ impl<S: VfsStorage + Clone + 'static> VfsOutputStream<S> {
         Ok(())
     }
 
-    /// Report the result of earlier writes; `Ok(false)` if one is still running.
+    /// Report the result of earlier writes; `Ok(false)` if one still can't
+    /// finish.
     fn check_previous(&mut self) -> StreamResult<bool> {
         if self.closed {
             return Err(StreamError::Closed);
@@ -386,14 +402,12 @@ impl<S: VfsStorage + Clone + 'static> VfsOutputStream<S> {
         if let Some(err) = self.error.take() {
             return Err(stream_error(err));
         }
-        if let Some(mut pending) = self.pending.take() {
-            match poll_now(&mut pending) {
-                Poll::Ready(result) => self.finish_write(result)?,
-                Poll::Pending => {
-                    self.pending = Some(pending);
-                    return Ok(false);
-                }
-            }
+        if let Some(bytes) = self.queued.clone() {
+            let Some(result) = try_now(self.start_write(bytes)) else {
+                return Ok(false);
+            };
+            self.queued = None;
+            self.finish_write(result)?;
         }
         Ok(true)
     }
@@ -402,8 +416,12 @@ impl<S: VfsStorage + Clone + 'static> VfsOutputStream<S> {
 #[async_trait::async_trait]
 impl<S: VfsStorage + Clone + 'static> Pollable for VfsOutputStream<S> {
     async fn ready(&mut self) {
-        if let Some(pending) = self.pending.take() {
-            match pending.await {
+        // `queued` is only cleared once the write is done, so dropping this
+        // future part-way leaves it to be retried.
+        if let Some(bytes) = self.queued.clone() {
+            let result = self.start_write(bytes).await;
+            self.queued = None;
+            match result {
                 Ok(position) => self.position = Some(position),
                 Err(err) => self.error = Some(err),
             }
@@ -422,18 +440,17 @@ impl<S: VfsStorage + Clone + 'static> OutputStream for VfsOutputStream<S> {
         if bytes.is_empty() {
             return Ok(());
         }
-        let mut pending = self.start_write(bytes);
-        match poll_now(&mut pending) {
-            Poll::Ready(result) => self.finish_write(result),
-            Poll::Pending => {
-                self.pending = Some(pending);
+        match try_now(self.start_write(bytes.clone())) {
+            Some(result) => self.finish_write(result),
+            None => {
+                self.queued = Some(bytes);
                 Ok(())
             }
         }
     }
 
     fn flush(&mut self) -> StreamResult<()> {
-        // Nothing is buffered; a still-running write completes via `ready`.
+        // Nothing is buffered; a still-queued write completes via `ready`.
         self.check_previous().map(|_| ())
     }
 
@@ -676,5 +693,46 @@ mod tests {
         stream.ready().await;
         assert!(stream.check_write().unwrap() > 0);
         assert_eq!(inner.read("/f").await.unwrap(), b"hello");
+    }
+
+    /// Give a storage op that should not be blocked a bounded time to finish.
+    async fn finishes<T>(fut: impl Future<Output = T>) -> T {
+        tokio::time::timeout(std::time::Duration::from_secs(5), fut)
+            .await
+            .unwrap_or_else(|_| panic!("storage op stalled behind an unpolled stream operation"))
+    }
+
+    /// A write that hit a contended lock must not keep a place in the lock
+    /// queue while nobody polls it, or the next storage op stalls the store.
+    #[tokio::test]
+    async fn unpolled_stream_write_does_not_stall_storage() {
+        let inner = Arc::new(InMemoryStorage::new());
+        inner.write("/f", b"").await.unwrap();
+        let mut stream = VfsOutputStream::write_at(ArcStorage::new(inner.clone()), "/f".into(), 0);
+
+        let guard = inner.hold_lock().await;
+        stream.write(Bytes::from_static(b"hello")).unwrap();
+        drop(guard);
+
+        finishes(inner.write("/g", b"other")).await.unwrap();
+        finishes(stream.ready()).await;
+        stream.flush().unwrap();
+        assert_eq!(inner.read("/f").await.unwrap(), b"hello");
+    }
+
+    /// Same for a read: a parked read must not block a later writer.
+    #[tokio::test]
+    async fn unpolled_stream_read_does_not_stall_storage() {
+        let inner = Arc::new(InMemoryStorage::new());
+        inner.write("/f", b"hello").await.unwrap();
+        let mut stream = VfsInputStream::new(ArcStorage::new(inner.clone()), "/f".into(), 0);
+
+        let guard = inner.hold_write_lock().await;
+        assert!(stream.read(5).unwrap().is_empty(), "read can't finish yet");
+        drop(guard);
+
+        finishes(inner.write("/g", b"other")).await.unwrap();
+        finishes(stream.ready()).await;
+        assert_eq!(&*stream.read(5).unwrap(), b"hello");
     }
 }
