@@ -41,3 +41,32 @@ async fn executor_keeps_packages_after_sandbox_is_dropped() {
         .unwrap();
     assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "42");
 }
+
+#[tokio::test]
+async fn execution_handle_reports_completion() {
+    let sandbox = Sandbox::embedded().build().unwrap();
+    let handle = sandbox.execute_cancellable("x = 1 + 1");
+    let token = handle.cancellation_token();
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while handle.is_running() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "still running after completing"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    assert!(!token.is_cancelled());
+    handle.wait().await.unwrap();
+    // Waiting to completion must not cancel the shared token.
+    assert!(!token.is_cancelled());
+}
+
+#[tokio::test]
+async fn dropping_execution_handle_cancels_execution() {
+    let sandbox = Sandbox::embedded().build().unwrap();
+    let handle = sandbox.execute_cancellable("while True: pass");
+    let token = handle.cancellation_token();
+    drop(handle);
+    assert!(token.is_cancelled());
+}

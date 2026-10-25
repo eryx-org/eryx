@@ -4,7 +4,10 @@ use std::{
     collections::HashMap,
     marker::PhantomData,
     path::PathBuf,
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
     time::{Duration, Instant},
 };
 
@@ -673,18 +676,20 @@ impl Sandbox {
     /// Execute Python code with cancellation support.
     ///
     /// Returns an [`ExecutionHandle`] that can be used to cancel the execution
-    /// or wait for its completion.
+    /// or wait for its completion. The execution runs on a spawned task, so
+    /// this must be called from within a Tokio runtime. Dropping the handle
+    /// before the execution finishes cancels it.
     ///
     /// # Example
     ///
     /// ```rust,ignore
-    /// let handle = sandbox.execute_cancellable("while True: pass").await?;
+    /// let handle = sandbox.execute_cancellable("while True: pass");
     ///
     /// // Cancel after 5 seconds from another task
-    /// let cancel_handle = handle.clone();
+    /// let cancel_token = handle.cancellation_token();
     /// tokio::spawn(async move {
     ///     tokio::time::sleep(Duration::from_secs(5)).await;
-    ///     cancel_handle.cancel();
+    ///     cancel_token.cancel();
     /// });
     ///
     /// // Wait for result
@@ -694,10 +699,6 @@ impl Sandbox {
     ///     Err(e) => println!("Error: {e}"),
     /// }
     /// ```
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the execution cannot be started.
     #[tracing::instrument(
         skip(self, code),
         fields(code_len = code.len())
@@ -706,18 +707,23 @@ impl Sandbox {
         let cancel_token = CancellationToken::new();
         let (result_tx, result_rx) = oneshot::channel();
 
+        let finished = Arc::new(AtomicBool::new(false));
+
         let sandbox = self.clone_for_task();
         let code = code.to_string();
         let token = cancel_token.clone();
+        let task_finished = Arc::clone(&finished);
 
         tokio::spawn(async move {
             let result = sandbox.run_inner(&code, None, Some(token)).await;
+            task_finished.store(true, Ordering::Release);
             // Send result back (ignore error if receiver dropped)
             let _ = result_tx.send(result);
         });
 
         ExecutionHandle {
             cancel_token,
+            finished,
             result: result_rx,
         }
     }
@@ -753,11 +759,15 @@ impl Sandbox {
 /// Created by [`Sandbox::execute_cancellable`]. Use this handle to cancel
 /// the execution or wait for its completion.
 ///
-/// The handle can be cloned to share cancellation control across tasks.
+/// To cancel from another task, share the token returned by
+/// [`cancellation_token`](Self::cancellation_token). Dropping the handle
+/// before the execution finishes cancels it.
 #[derive(Debug)]
 pub struct ExecutionHandle {
     /// Token used to signal cancellation.
     cancel_token: CancellationToken,
+    /// Set by the execution task once it has produced a result.
+    finished: Arc<AtomicBool>,
     /// Receiver for the execution result.
     result: oneshot::Receiver<Result<ExecuteResult, Error>>,
 }
@@ -780,7 +790,7 @@ impl ExecutionHandle {
     /// or if it has been cancelled.
     #[must_use]
     pub fn is_running(&self) -> bool {
-        !self.cancel_token.is_cancelled()
+        !self.finished.load(Ordering::Acquire) && !self.cancel_token.is_cancelled()
     }
 
     /// Get a clone of the cancellation token.
@@ -803,8 +813,8 @@ impl ExecutionHandle {
     /// - The Python code raised an exception
     /// - A resource limit was exceeded
     /// - The execution timed out
-    pub async fn wait(self) -> Result<ExecuteResult, Error> {
-        match self.result.await {
+    pub async fn wait(mut self) -> Result<ExecuteResult, Error> {
+        match (&mut self.result).await {
             Ok(result) => result,
             Err(_) => {
                 // Channel closed without sending - execution was likely cancelled
@@ -815,6 +825,16 @@ impl ExecutionHandle {
                     Err(Error::Execution("execution task failed".to_string()))
                 }
             }
+        }
+    }
+}
+
+impl Drop for ExecutionHandle {
+    fn drop(&mut self) {
+        // Nobody can observe the result any more, so stop the guest rather
+        // than letting it run to its timeout in the background.
+        if !self.finished.load(Ordering::Acquire) {
+            self.cancel_token.cancel();
         }
     }
 }
