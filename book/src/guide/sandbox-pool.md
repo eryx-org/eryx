@@ -146,6 +146,26 @@ with pool.acquire(
 
 If you don't pass callbacks in Python, the factory's default callbacks (baked into the snapshot) are used.
 
+## Pool-Wide Network and Secrets
+
+Networking and secrets belong to the pool's builder, not to a lease: every
+pooled sandbox gets them, for the pool's lifetime. In Rust, configure them in
+the closure passed to `SandboxPool::with_builder`. In Python, pass them to
+`create_pool`:
+
+```python
+import eryx
+
+pool = eryx.SandboxFactory(cache=True).create_pool(
+    max_size=4,
+    network=eryx.NetConfig(allowed_hosts=["api.example.com"]),
+    secrets={"API_KEY": {"value": "sk-xxx", "allowed_hosts": ["api.example.com"]}},
+)
+```
+
+As with `Sandbox`, `scrub_stdout`, `scrub_stderr` and `scrub_files` default to
+`True` when secrets are given and can be overridden on `create_pool`.
+
 ## Non-Blocking Acquire
 
 <!-- langtabs-start -->
