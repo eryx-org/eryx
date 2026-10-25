@@ -212,6 +212,7 @@ impl crate::proto::eryx::v1::eryx_server::Eryx for EryxService {
                     internal_hosts: nc.internal_hosts,
                     resolver: None,
                     custom_root_certs: vec![],
+                    allow_plaintext_secrets: false,
                 })
             })
             .transpose()?;

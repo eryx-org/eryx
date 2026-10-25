@@ -131,6 +131,13 @@ pub struct NetConfig {
     ///
     /// Useful for testing with self-signed certificates.
     pub custom_root_certs: Vec<Vec<u8>>,
+    /// Substitute secret placeholders on plain TCP connections too.
+    ///
+    /// By default (`false`) placeholders are only replaced after a TLS
+    /// upgrade, so a real secret never crosses the network unencrypted. A
+    /// request over plain TCP (e.g. `http://`) is sent with the placeholder
+    /// left in place.
+    pub allow_plaintext_secrets: bool,
 }
 
 /// The default [`NetConfig::blocked_networks`]: every range that isn't
@@ -215,6 +222,7 @@ impl Default for NetConfig {
             internal_hosts: vec![],
             resolver: None,
             custom_root_certs: vec![],
+            allow_plaintext_secrets: false,
         }
     }
 }
@@ -320,7 +328,16 @@ impl NetConfig {
             internal_hosts: vec![],
             resolver: None,
             custom_root_certs: vec![],
+            allow_plaintext_secrets: false,
         }
+    }
+
+    /// Substitute secret placeholders on plain TCP connections as well as TLS;
+    /// see [`NetConfig::allow_plaintext_secrets`].
+    #[must_use]
+    pub fn allow_plaintext_secrets(mut self, allow: bool) -> Self {
+        self.allow_plaintext_secrets = allow;
+        self
     }
 
     /// Add a custom root certificate (DER-encoded) to trust.
@@ -849,8 +866,10 @@ impl ConnectionManager {
 
     /// Write to a TCP connection.
     ///
-    /// If secrets are configured, this method will parse HTTP requests and
-    /// substitute secret placeholders in headers before sending.
+    /// If secrets are configured and [`NetConfig::allow_plaintext_secrets`] is
+    /// set, this method will parse HTTP requests and substitute secret
+    /// placeholders in headers before sending. Otherwise bytes are sent as
+    /// written, placeholders included.
     pub async fn tcp_write(
         &mut self,
         handle: u32,
@@ -861,8 +880,8 @@ impl ConnectionManager {
             return Err(TcpError::InvalidHandle);
         }
 
-        // Fast path: no secrets = no parsing
-        if self.secrets.is_empty() {
+        // Fast path: nothing to substitute = no parsing
+        if self.secrets.is_empty() || !self.config.allow_plaintext_secrets {
             self.tcp_write_raw(handle, data, timeout_ms).await?;
         } else {
             let bytes = self.process_write_data(handle, data)?;
@@ -2232,7 +2251,10 @@ mod tests {
                 allowed_hosts: vec![],
             },
         );
-        let mut manager = ConnectionManager::new(NetConfig::permissive(), secrets);
+        let mut manager = ConnectionManager::new(
+            NetConfig::permissive().allow_plaintext_secrets(true),
+            secrets,
+        );
         manager
             .connection_hosts
             .insert(1, "api.example.com".to_string());

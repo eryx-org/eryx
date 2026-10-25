@@ -8,7 +8,7 @@ Eryx provides secure secrets handling for sandboxed Python code. Secrets are nev
 2. Eryx generates a random placeholder (e.g., `ERYX_SECRET_PLACEHOLDER_a1b2c3...`)
 3. The placeholder is set as an environment variable inside the sandbox
 4. Python code reads and uses the placeholder like a normal value
-5. When making HTTP requests to an allowed host, Eryx transparently substitutes the real value
+5. When making HTTPS requests to an allowed host, Eryx transparently substitutes the real value
 6. Any placeholders in stdout, stderr, or files are scrubbed to `[REDACTED]`
 
 This design means sandboxed code **cannot** exfiltrate secrets to unauthorized hosts, even if the code is malicious.
@@ -57,6 +57,19 @@ The `with_secret` method takes:
 - `value` — The real secret value (never exposed to sandbox)
 - `allowed_hosts` — Hosts where the real value can be sent
 
+## Plain HTTP
+
+Placeholders are only substituted on TLS connections (`https://`). A request over plain TCP (`http://`) is sent with the placeholder left in place, so the real value never crosses the network unencrypted.
+
+To substitute over plain TCP as well (e.g. for a local test server), opt in on the network config:
+
+```rust,ignore
+let sandbox = Sandbox::embedded()
+    .with_secret("API_KEY", "sk-real-key", vec!["localhost".to_string()])
+    .with_network(NetConfig::default().allow_localhost().allow_plaintext_secrets(true))
+    .build()?;
+```
+
 ## Output Scrubbing
 
 By default, when secrets are configured, Eryx scrubs placeholders from all outputs:
@@ -101,6 +114,7 @@ let sandbox = Sandbox::embedded()
 ## Security Model
 
 - Placeholders are randomly generated on each sandbox creation, making them unpredictable
+- Real values are only sent over TLS unless `allow_plaintext_secrets` is set
 - Host verification uses the TCP connection target, not the HTTP `Host` header (prevents spoofing)
 - Scrubbing is applied to stdout, stderr, and VFS file writes
 - Even if sandboxed code tries to print or write the placeholder, it appears as `[REDACTED]`

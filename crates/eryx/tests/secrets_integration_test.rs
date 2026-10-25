@@ -75,7 +75,7 @@ async fn test_secret_substitution_in_http_request() {
             "real-secret-value-12345",
             vec!["127.0.0.1".to_string()],
         )
-        .with_network(NetConfig::permissive()) // Allow localhost for testing
+        .with_network(NetConfig::permissive().allow_plaintext_secrets(true)) // Allow localhost for testing
         .scrub_stdout(true)
         .scrub_stderr(true)
         .build()
@@ -148,6 +148,55 @@ print(f"Response received: {response[:50]}")
     );
 }
 
+/// Without `allow_plaintext_secrets`, a plain TCP request carries the
+/// placeholder, never the real value.
+#[tokio::test]
+async fn test_secret_not_substituted_over_plain_tcp_by_default() {
+    let server = MockHttpServer::new();
+    let _handle = server.start(18082).await;
+    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+
+    let sandbox = Sandbox::embedded()
+        .with_secret(
+            "TEST_API_KEY",
+            "real-secret-value-12345",
+            vec!["127.0.0.1".to_string()],
+        )
+        .with_network(NetConfig::permissive())
+        .build()
+        .expect("Failed to create sandbox");
+
+    sandbox
+        .execute(
+            r#"
+import os
+import socket
+
+api_key = os.environ["TEST_API_KEY"]
+sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+sock.connect(("127.0.0.1", 18082))
+sock.send(f"GET /test HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {api_key}\r\n\r\n".encode())
+sock.recv(4096)
+sock.close()
+"#,
+        )
+        .await
+        .expect("Failed to execute Python code");
+
+    tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+    let requests = server.get_requests().await;
+    assert_eq!(requests.len(), 1, "Server should have received one request");
+    assert!(
+        requests[0].contains("Authorization: Bearer ERYX_SECRET_PLACEHOLDER_"),
+        "Placeholder should be sent as-is: {}",
+        requests[0]
+    );
+    assert!(
+        !requests[0].contains("real-secret-value-12345"),
+        "Real secret must not be sent over plain TCP"
+    );
+}
+
 #[tokio::test]
 async fn test_secret_blocked_for_unauthorized_host() {
     // Create sandbox with secret restricted to specific host
@@ -157,7 +206,7 @@ async fn test_secret_blocked_for_unauthorized_host() {
             "secret-value",
             vec!["api.example.com".to_string()],
         )
-        .with_network(NetConfig::permissive())
+        .with_network(NetConfig::permissive().allow_plaintext_secrets(true))
         .build()
         .expect("Failed to create sandbox");
 

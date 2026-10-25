@@ -263,7 +263,7 @@ async fn test_exfil_network_unauthorized_host_via_header() {
             REAL_SECRET,
             vec!["api.legitimate.com".to_string()],
         )
-        .with_network(NetConfig::permissive())
+        .with_network(NetConfig::permissive().allow_plaintext_secrets(true))
         .scrub_stdout(true)
         .build()
         .unwrap();
@@ -309,7 +309,7 @@ async fn test_exfil_network_secret_in_body() {
 
     let sandbox = Sandbox::embedded()
         .with_secret("API_KEY", REAL_SECRET, vec!["127.0.0.1".to_string()])
-        .with_network(NetConfig::permissive())
+        .with_network(NetConfig::permissive().allow_plaintext_secrets(true))
         .scrub_stdout(true)
         .build()
         .unwrap();
@@ -353,7 +353,7 @@ async fn test_exfil_network_secret_in_url_path() {
 
     let sandbox = Sandbox::embedded()
         .with_secret("API_KEY", REAL_SECRET, vec!["127.0.0.1".to_string()])
-        .with_network(NetConfig::permissive())
+        .with_network(NetConfig::permissive().allow_plaintext_secrets(true))
         .scrub_stdout(true)
         .build()
         .unwrap();
@@ -397,7 +397,7 @@ async fn test_exfil_network_raw_non_http_protocol() {
 
     let sandbox = Sandbox::embedded()
         .with_secret("API_KEY", REAL_SECRET, vec!["127.0.0.1".to_string()])
-        .with_network(NetConfig::permissive())
+        .with_network(NetConfig::permissive().allow_plaintext_secrets(true))
         .scrub_stdout(true)
         .build()
         .unwrap();
@@ -442,7 +442,7 @@ async fn test_exfil_network_split_tcp_writes() {
 
     let sandbox = Sandbox::embedded()
         .with_secret("API_KEY", REAL_SECRET, vec!["api.openai.com".to_string()])
-        .with_network(NetConfig::permissive())
+        .with_network(NetConfig::permissive().allow_plaintext_secrets(true))
         .scrub_stdout(true)
         .build()
         .unwrap();
@@ -498,7 +498,7 @@ async fn test_exfil_network_http_pipelining() {
             REAL_SECRET,
             vec!["api.legitimate.com".to_string()],
         )
-        .with_network(NetConfig::permissive())
+        .with_network(NetConfig::permissive().allow_plaintext_secrets(true))
         .scrub_stdout(true)
         .build()
         .unwrap();
@@ -790,7 +790,7 @@ async fn test_exfil_cross_secret_host_confusion() {
             "github-real-secret-value",
             vec!["api.github.com".to_string()],
         )
-        .with_network(NetConfig::permissive())
+        .with_network(NetConfig::permissive().allow_plaintext_secrets(true))
         .scrub_stdout(true)
         .build()
         .unwrap();
@@ -855,7 +855,7 @@ async fn test_exfil_spoofed_host_header() {
             REAL_SECRET,
             vec!["api.legitimate.com".to_string()],
         )
-        .with_network(NetConfig::permissive())
+        .with_network(NetConfig::permissive().allow_plaintext_secrets(true))
         .scrub_stdout(true)
         .build()
         .unwrap();
@@ -915,7 +915,7 @@ async fn test_exfil_rapid_connection_cycling() {
             REAL_SECRET,
             vec!["api.legitimate.com".to_string()],
         )
-        .with_network(NetConfig::permissive())
+        .with_network(NetConfig::permissive().allow_plaintext_secrets(true))
         .scrub_stdout(true)
         .build()
         .unwrap();
@@ -966,7 +966,7 @@ async fn test_exfil_header_continuation_smuggling() {
 
     let sandbox = Sandbox::embedded()
         .with_secret("API_KEY", REAL_SECRET, vec!["127.0.0.1".to_string()])
-        .with_network(NetConfig::permissive())
+        .with_network(NetConfig::permissive().allow_plaintext_secrets(true))
         .scrub_stdout(true)
         .build()
         .unwrap();

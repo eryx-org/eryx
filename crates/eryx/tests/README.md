@@ -57,6 +57,10 @@ mise run test
 - Disables stdout scrubbing with `.scrub_stdout(false)`
 - Verifies placeholder appears (useful for debugging)
 
+### `test_secret_not_substituted_over_plain_tcp_by_default`
+- Sends a plain TCP request without `allow_plaintext_secrets(true)`
+- Verifies the server receives the placeholder, not the real secret
+
 ### `test_http2_detection`
 - Attempts to send HTTP/2 connection preface
 - Verifies clear error message (HTTP/2 not supported with secrets)

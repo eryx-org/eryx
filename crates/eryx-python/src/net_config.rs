@@ -338,6 +338,7 @@ impl From<&NetConfig> for eryx::NetConfig {
             internal_hosts: config.internal_hosts.clone(),
             resolver: None,
             custom_root_certs: config.custom_root_certs.clone(),
+            allow_plaintext_secrets: false,
         }
     }
 }
