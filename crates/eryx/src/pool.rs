@@ -415,14 +415,27 @@ impl SandboxPool {
 
     /// Create a sandbox on the blocking thread pool, since building one can
     /// take hundreds of milliseconds.
-    async fn create_sandbox(&self) -> Result<Sandbox, PoolError> {
+    fn create_sandbox(&self) -> impl Future<Output = Result<Sandbox, PoolError>> + Send + 'static {
         let builder_fn = Arc::clone(&self.builder_fn);
-        let sandbox = tokio::task::spawn_blocking(move || builder_fn())
-            .await
-            .map_err(|e| PoolError::Creation(format!("sandbox creation panicked: {e}")))??;
-        self.stats.record_creation();
-        self.current_size.fetch_add(1, Ordering::Relaxed);
-        Ok(sandbox)
+        let stats = Arc::clone(&self.stats);
+        let current_size = Arc::clone(&self.current_size);
+        async move {
+            let sandbox = tokio::task::spawn_blocking(move || builder_fn())
+                .await
+                .map_err(|e| PoolError::Creation(format!("sandbox creation panicked: {e}")))??;
+            stats.record_creation();
+            current_size.fetch_add(1, Ordering::Relaxed);
+            Ok(sandbox)
+        }
+    }
+
+    /// Handle that leased sandboxes use to return to this pool.
+    fn handle(&self) -> Arc<PoolHandle> {
+        Arc::new(PoolHandle {
+            pool: Arc::clone(&self.pool),
+            current_size: Arc::clone(&self.current_size),
+            closed: Arc::clone(&self.closed),
+        })
     }
 
     /// Acquire a sandbox from the pool.
@@ -491,25 +504,45 @@ impl SandboxPool {
             pool.pop_front().map(|entry| entry.sandbox)
         };
 
-        let sandbox = match sandbox {
-            Some(s) => s,
-            // No sandbox available, create a new one
-            None => timeout_at(deadline, self.create_sandbox())
-                .await
-                .map_err(|_| PoolError::Timeout(acquire_timeout))??,
+        let leased = match sandbox {
+            Some(s) => PooledSandbox {
+                sandbox: Some(s),
+                pool: self.handle(),
+                _permit: permit,
+            },
+            // No sandbox available, create a new one. A build can't be
+            // stopped, so it runs in its own task holding the permit: if this
+            // call times out or is dropped first, the finished sandbox joins
+            // the idle queue before the permit is freed, so builds never
+            // exceed `max_size`.
+            None => {
+                let (tx, rx) = tokio::sync::oneshot::channel();
+                let create = self.create_sandbox();
+                let pool = self.handle();
+                tokio::spawn(async move {
+                    let leased = create.await.map(|sandbox| PooledSandbox {
+                        sandbox: Some(sandbox),
+                        pool,
+                        _permit: permit,
+                    });
+                    // Dropping an unreceived lease returns it to the pool.
+                    let _ = tx.send(leased);
+                });
+                match timeout_at(deadline, rx).await {
+                    Ok(Ok(leased)) => leased?,
+                    Ok(Err(_)) => {
+                        return Err(PoolError::Creation(
+                            "sandbox creation task failed".to_string(),
+                        ));
+                    }
+                    Err(_) => return Err(PoolError::Timeout(acquire_timeout)),
+                }
+            }
         };
 
         self.stats.record_acquisition();
 
-        Ok(PooledSandbox {
-            sandbox: Some(sandbox),
-            pool: Arc::new(PoolHandle {
-                pool: Arc::clone(&self.pool),
-                current_size: Arc::clone(&self.current_size),
-                closed: Arc::clone(&self.closed),
-            }),
-            _permit: permit,
-        })
+        Ok(leased)
     }
 
     /// Try to acquire an idle sandbox without blocking.
@@ -544,11 +577,7 @@ impl SandboxPool {
 
         Ok(Some(PooledSandbox {
             sandbox: Some(sandbox),
-            pool: Arc::new(PoolHandle {
-                pool: Arc::clone(&self.pool),
-                current_size: Arc::clone(&self.current_size),
-                closed: Arc::clone(&self.closed),
-            }),
+            pool: self.handle(),
             _permit: permit,
         }))
     }
@@ -961,6 +990,44 @@ mod tests {
             // Try to acquire another - should timeout
             let result = pool.acquire().await;
             assert!(matches!(result, Err(PoolError::Timeout(_))));
+        }
+
+        /// A build still running when its acquire times out keeps its slot:
+        /// the next acquire waits for it instead of starting another build.
+        #[tokio::test]
+        async fn pool_timed_out_build_keeps_its_slot() {
+            let building = Arc::new(AtomicUsize::new(0));
+            let max_building = Arc::new(AtomicUsize::new(0));
+            let (b, m) = (Arc::clone(&building), Arc::clone(&max_building));
+            let config = PoolConfig {
+                min_idle: 0,
+                max_size: 1,
+                acquire_timeout: Duration::from_millis(50),
+                ..Default::default()
+            };
+            let pool = SandboxPool::with_builder(
+                move || {
+                    m.fetch_max(b.fetch_add(1, Ordering::SeqCst) + 1, Ordering::SeqCst);
+                    std::thread::sleep(Duration::from_millis(300));
+                    let sandbox = Sandbox::embedded().build();
+                    b.fetch_sub(1, Ordering::SeqCst);
+                    sandbox
+                },
+                config,
+            )
+            .await
+            .expect("Failed to create pool");
+
+            let result = pool.acquire().await;
+            assert!(matches!(result, Err(PoolError::Timeout(_))));
+
+            let sandbox = pool
+                .acquire_timeout(Duration::from_secs(30))
+                .await
+                .expect("the timed-out build should be handed on");
+            drop(sandbox);
+            assert_eq!(max_building.load(Ordering::SeqCst), 1);
+            assert_eq!(pool.stats().total_creations, 1);
         }
 
         #[tokio::test]
