@@ -246,6 +246,22 @@ except TimeoutError:
 
 Each pending timer is a host-side sleep; the guest is suspended while it waits. Timers fire only when the event loop regains control, so blocking code (`time.sleep`, a CPU-bound loop) delays them rather than being interrupted. Timers still pending when an execution finishes are cancelled with it, and never extend the [execution timeout](resource-limits.md#execution-timeout).
 
+### `asyncio.run()`
+
+Code runs on an event loop that is already running, so top-level `await` is the natural way to call callbacks. Scripts written in the usual `asyncio.run(main())` style work too: a top-level `asyncio.run(coro)` call (including one under `if __name__ == "__main__":`) awaits `coro` on the sandbox's loop and returns its result.
+
+```python,no_test
+# Inside the sandbox
+import asyncio
+
+async def main():
+    return await fetch_user(id=1)
+
+user = asyncio.run(main())
+```
+
+Only calls written as `asyncio.run(...)` at the top level are handled this way. Inside a function, which can't `await`, `asyncio.run()` raises a `RuntimeError`; use `await` there instead.
+
 ## Introspection
 
 The sandbox can discover available callbacks at runtime:
