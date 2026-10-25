@@ -2023,52 +2023,98 @@ impl<R, S> SandboxBuilder<R, S> {
 impl SandboxBuilder<state::Has, state::Has> {
     /// Convert this builder into a reusable factory closure.
     ///
-    /// The factory captures the wasm source and stdlib path so it can create
-    /// fresh sandboxes on demand. Per-request settings (callbacks, packages,
-    /// resource limits, etc.) are NOT captured -- each sandbox starts with
-    /// defaults for those.
+    /// The factory keeps the wasm source, stdlib and site-packages paths,
+    /// result variable and trace-collection setting, and builds fresh
+    /// sandboxes from them on demand. Anything else would be silently lost
+    /// (per-request settings are reset whenever a sandbox returns to the
+    /// pool, and the rest is not carried over), so builders that set it are
+    /// rejected; use [`SandboxPool::with_builder`](crate::SandboxPool::with_builder)
+    /// for those.
     ///
     /// This is used by [`SandboxPool`](crate::SandboxPool) to recreate sandboxes
     /// since `build()` consumes the builder.
-    pub(crate) fn into_factory(self) -> Box<dyn Fn() -> Result<Sandbox, Error> + Send + Sync> {
-        let wasm_source = self.wasm_source;
-        let stdlib_path = self.python_stdlib_path;
+    ///
+    /// # Errors
+    ///
+    /// Returns an error naming the settings the factory would drop.
+    pub(crate) fn into_factory(
+        self,
+    ) -> Result<Box<dyn Fn() -> Result<Sandbox, Error> + Send + Sync>, Error> {
+        let dropped = self.settings_dropped_by_factory();
+        if !dropped.is_empty() {
+            return Err(Error::Initialization(format!(
+                "SandboxPool::new cannot keep these builder settings: {}. Set callbacks, \
+                 handlers and resource limits on each PooledSandbox, or use \
+                 SandboxPool::with_builder to build every sandbox yourself",
+                dropped.join(", ")
+            )));
+        }
 
-        Box::new(move || {
-            // Reconstruct a builder using the public API based on the captured config.
-            let builder = match &wasm_source {
-                #[cfg(feature = "embedded")]
-                WasmSource::EmbeddedRuntime => Sandbox::embedded(),
-                #[cfg(any(feature = "embedded", feature = "preinit"))]
-                WasmSource::PrecompiledFile(path) => {
-                    let stdlib = stdlib_path.as_ref().ok_or_else(|| {
-                        Error::Initialization("stdlib path required for precompiled file".into())
-                    })?;
-                    // SAFETY: The original builder was already constructed with unsafe
-                    // by the caller, who vouched for the .cwasm file's trustworthiness.
-                    #[allow(unsafe_code)]
-                    unsafe {
-                        Sandbox::builder()
-                            .with_precompiled_file(path)
-                            .with_python_stdlib(stdlib)
-                    }
-                }
-                WasmSource::File(path) => {
-                    let stdlib = stdlib_path
-                        .as_ref()
-                        .ok_or_else(|| Error::Initialization("stdlib path required".into()))?;
-                    Sandbox::builder()
-                        .with_wasm_file(path)
-                        .with_python_stdlib(stdlib)
-                }
-                _ => {
-                    return Err(Error::Initialization(
-                        "unsupported wasm source for pool factory".into(),
-                    ));
-                }
-            };
-            builder.build()
-        })
+        let wasm_source = match self.wasm_source {
+            // Share the bytes between sandboxes instead of copying them each time.
+            #[cfg(any(feature = "embedded", feature = "preinit"))]
+            WasmSource::PrecompiledBytes(bytes) => {
+                WasmSource::PrecompiledArtifact(PrecompiledArtifact::new(bytes))
+            }
+            source => source,
+        };
+        let python_stdlib_path = self.python_stdlib_path;
+        let python_site_packages_path = self.python_site_packages_path;
+        let result_variable = self.result_variable;
+        let collect_trace = self.collect_trace;
+
+        Ok(Box::new(move || {
+            let mut builder = SandboxBuilder::new();
+            builder.wasm_source = wasm_source.clone();
+            builder.python_stdlib_path = python_stdlib_path.clone();
+            builder.python_site_packages_path = python_site_packages_path.clone();
+            builder.result_variable = result_variable.clone();
+            builder.collect_trace = collect_trace;
+            builder.transition::<state::Has, state::Has>().build()
+        }))
+    }
+
+    /// Names of the settings [`into_factory`](Self::into_factory) cannot keep.
+    fn settings_dropped_by_factory(&self) -> Vec<&'static str> {
+        let mut dropped = Vec::new();
+        if !self.callbacks.is_empty() {
+            dropped.push("callbacks");
+        }
+        if !self.preamble.is_empty() || !self.type_stubs.is_empty() {
+            dropped.push("libraries/preamble");
+        }
+        if self.trace_handler.is_some() {
+            dropped.push("trace handler");
+        }
+        if self.output_handler.is_some() {
+            dropped.push("output handler");
+        }
+        if self.resource_limits != ResourceLimits::default() {
+            dropped.push("resource limits");
+        }
+        if !self.packages.is_empty() {
+            dropped.push("packages");
+        }
+        #[cfg(feature = "native-extensions")]
+        if !self.native_extensions.is_empty() {
+            dropped.push("native extensions");
+        }
+        #[cfg(feature = "native-extensions")]
+        if self.cache.is_some() || self.filesystem_cache.is_some() {
+            dropped.push("component cache");
+        }
+        if self.net_config.is_some() {
+            dropped.push("network");
+        }
+        // Secrets also add a preamble, and scrub policies only matter with secrets.
+        if !self.secrets.is_empty() {
+            dropped.push("secrets");
+        }
+        #[cfg(feature = "vfs")]
+        if !self.volumes.is_empty() {
+            dropped.push("volumes");
+        }
+        dropped
     }
 
     /// Build the sandbox.
@@ -2522,7 +2568,7 @@ pub struct ExecuteStats {
 /// boundable, so it cannot be built with a struct literal from outside the
 /// crate. Its fields stay public, so reading them - and mutating them on a value
 /// you own - both still work.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct ResourceLimits {
     /// Maximum execution time for the entire script.

@@ -271,12 +271,20 @@ impl std::fmt::Debug for SandboxPool {
 impl SandboxPool {
     /// Create a new sandbox pool with the given builder and configuration.
     ///
-    /// The builder will be used to create new sandbox instances as needed.
-    /// The pool will be pre-warmed with `config.min_idle` instances.
+    /// The builder's runtime source, stdlib and site-packages paths, result
+    /// variable and trace-collection setting are used to create new sandbox
+    /// instances as needed. The pool will be pre-warmed with `config.min_idle`
+    /// instances.
+    ///
+    /// Callbacks, handlers and resource limits are per-request: set them on
+    /// each [`PooledSandbox`]. For sandboxes that need anything else (secrets,
+    /// networking, packages, libraries, volumes, ...), use
+    /// [`with_builder`](Self::with_builder).
     ///
     /// # Errors
     ///
-    /// Returns an error if pre-warming fails (unable to create initial sandboxes).
+    /// Returns an error if the builder carries settings the pool cannot keep,
+    /// or if pre-warming fails (unable to create initial sandboxes).
     ///
     /// # Example
     ///
@@ -304,11 +312,10 @@ impl SandboxPool {
 
         // Extract the reusable sandbox factory from the builder.
         // SandboxBuilder consumes self on build(), so we convert it to a
-        // closure that can recreate sandboxes with the same base configuration
-        // (wasm source + stdlib). Per-request settings like callbacks, packages,
-        // and resource limits are not captured -- those are set by the caller.
+        // closure that can recreate sandboxes with the same base configuration.
+        // It refuses builders carrying settings it would not keep.
         let builder_fn: Arc<dyn Fn() -> Result<Sandbox, Error> + Send + Sync> =
-            Arc::new(builder.into_factory());
+            Arc::from(builder.into_factory()?);
 
         let pool = Arc::new(StdMutex::new(VecDeque::with_capacity(config.max_size)));
         let semaphore = Arc::new(Semaphore::new(config.max_size));

@@ -1,13 +1,15 @@
 //! Regression tests for sandbox construction, execution handles and the pool.
 
 #![cfg(feature = "embedded")]
-#![allow(clippy::unwrap_used, clippy::expect_used)]
+#![allow(unsafe_code, clippy::unwrap_used, clippy::expect_used)]
 
 use std::future::Future;
 use std::io::Write;
 use std::pin::Pin;
 
-use eryx::{CallbackError, Error, PackageFormat, Sandbox, TypedCallback};
+use eryx::{
+    CallbackError, Error, PackageFormat, PoolConfig, PoolError, Sandbox, SandboxPool, TypedCallback,
+};
 
 /// A pure-Python wheel containing a single `corepkg` module.
 fn tiny_wheel() -> Vec<u8> {
@@ -123,4 +125,39 @@ async fn secret_names_needing_escapes_do_not_break_execution() {
         .await
         .unwrap();
     assert_eq!(result.stdout_text().trim(), "True");
+}
+
+fn small_pool() -> PoolConfig {
+    PoolConfig {
+        max_size: 1,
+        min_idle: 1,
+        ..Default::default()
+    }
+}
+
+#[tokio::test]
+async fn pool_rejects_builder_settings_it_would_drop() {
+    let builder = Sandbox::embedded().with_secret("API_KEY", "real", vec![]);
+    let err = SandboxPool::new(builder, small_pool()).await.unwrap_err();
+    assert!(
+        matches!(&err, PoolError::Creation(msg) if msg.contains("secrets")),
+        "unexpected error: {err}"
+    );
+}
+
+#[tokio::test]
+async fn pool_accepts_precompiled_bytes() {
+    let cwasm = std::fs::read(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../eryx-runtime/runtime.cwasm"
+    ))
+    .unwrap();
+    // SAFETY: the workspace's own precompiled runtime.
+    let builder = unsafe { Sandbox::builder().with_precompiled_bytes(cwasm) }
+        .with_embedded_stdlib()
+        .unwrap();
+    let pool = SandboxPool::new(builder, small_pool()).await.unwrap();
+    let sandbox = pool.acquire().await.unwrap();
+    let result = sandbox.execute("print(6 * 7)").await.unwrap();
+    assert_eq!(result.stdout_text().trim(), "42");
 }
