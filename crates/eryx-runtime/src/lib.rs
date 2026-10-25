@@ -31,6 +31,9 @@ pub const WIT_DEFINITION: &str = include_str!("../wit/runtime.wit");
 #[cfg(feature = "preinit")]
 pub mod linker;
 
+#[cfg(feature = "preinit")]
+mod link_order;
+
 /// Pre-initialization support for capturing Python memory state.
 #[cfg(feature = "preinit")]
 pub mod preinit;

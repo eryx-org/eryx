@@ -22,15 +22,12 @@ default = []
 preinit = [
     "dep:wit-component",
     "dep:zstd",
-    "dep:sha2",
-    "dep:zip",
     "dep:wasmtime-wizer",
     "dep:wasmtime",
     "dep:wasmtime-wasi",
     "dep:futures",
     "dep:tempfile",
     "dep:anyhow",
-    "dep:tracing",
     "dep:wasm-encoder",
     "dep:wasmparser",
 ]
@@ -43,15 +40,12 @@ native-extensions = ["preinit"]
 [dependencies]
 wit-component = { workspace = true, optional = true }
 zstd = { workspace = true, optional = true }
-sha2 = { workspace = true, optional = true }
-zip = { workspace = true, optional = true }
 wasmtime-wizer = { workspace = true, optional = true }
 wasmtime = { workspace = true, optional = true }
 wasmtime-wasi = { workspace = true, optional = true }
 futures = { workspace = true, optional = true }
 tempfile = { workspace = true, optional = true }
 anyhow = { workspace = true, optional = true }
-tracing = { workspace = true, optional = true }
 wasm-encoder = { workspace = true, optional = true }
 wasmparser = { workspace = true, optional = true }
 

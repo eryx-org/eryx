@@ -11,6 +11,9 @@
 use wasm_bindgen::prelude::*;
 use wit_component::Linker;
 
+#[path = "../../eryx-runtime/src/link_order.rs"]
+mod link_order;
+
 /// A native extension to be linked.
 ///
 /// Passed from JS as an object with `name` (string) and `bytes` (Uint8Array).
@@ -33,8 +36,8 @@ impl NativeExtension {
 /// Link native extensions with decompressed base libraries to produce a WASM component.
 ///
 /// Base libraries must be passed as already-decompressed bytes (JS handles zstd
-/// decompression via fzstd). The order of base libraries matches
-/// `eryx-runtime/src/linker.rs:268-330`.
+/// decompression via fzstd). They are linked in the same order as
+/// `eryx-runtime`'s linker, from the shared `link_order.rs`.
 ///
 /// # Arguments
 ///
@@ -80,31 +83,23 @@ pub fn link_extensions(
     linker.use_built_in_libdl(true);
     linker.encoder().validate(true);
 
-    // Add base libraries (order matters for symbol resolution)
-    linker
-        .library("libwasi-emulated-process-clocks.so", wasi_clocks, false)
-        .map_err(|e| JsError::new(&format!("libwasi-emulated-process-clocks.so: {e}")))?
-        .library("libwasi-emulated-signal.so", wasi_signal, false)
-        .map_err(|e| JsError::new(&format!("libwasi-emulated-signal.so: {e}")))?
-        .library("libwasi-emulated-mman.so", wasi_mman, false)
-        .map_err(|e| JsError::new(&format!("libwasi-emulated-mman.so: {e}")))?
-        .library("libwasi-emulated-getpid.so", wasi_getpid, false)
-        .map_err(|e| JsError::new(&format!("libwasi-emulated-getpid.so: {e}")))?
-        // C/C++ runtime
-        .library("libc.so", libc, false)
-        .map_err(|e| JsError::new(&format!("libc.so: {e}")))?
-        .library("libc++abi.so", libcxxabi, false)
-        .map_err(|e| JsError::new(&format!("libc++abi.so: {e}")))?
-        .library("libc++.so", libcxx, false)
-        .map_err(|e| JsError::new(&format!("libc++.so: {e}")))?
-        // Python
-        .library("libpython3.14.so", libpython, false)
-        .map_err(|e| JsError::new(&format!("libpython3.14.so: {e}")))?
-        // Our runtime and bindings
-        .library("liberyx_runtime.so", runtime, false)
-        .map_err(|e| JsError::new(&format!("liberyx_runtime.so: {e}")))?
-        .library("liberyx_bindings.so", bindings, false)
-        .map_err(|e| JsError::new(&format!("liberyx_bindings.so: {e}")))?;
+    let libs = link_order::BaseLibraries {
+        wasi_clocks,
+        wasi_signal,
+        wasi_mman,
+        wasi_getpid,
+        libc,
+        libcxxabi,
+        libcxx,
+        libpython,
+        runtime,
+        bindings,
+    };
+    for (name, bytes) in libs.in_link_order() {
+        linker
+            .library(name, bytes, false)
+            .map_err(|e| JsError::new(&format!("{name}: {e}")))?;
+    }
 
     // Add user's native extensions (dl_openable = true for dlopen/dlsym)
     for ext in &extensions {

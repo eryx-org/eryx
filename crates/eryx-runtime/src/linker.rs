@@ -31,7 +31,7 @@
 
 use std::io::Cursor;
 
-use sha2::{Digest, Sha256};
+use crate::link_order::BaseLibraries;
 
 /// A native extension to be linked into the component.
 #[derive(Debug, Clone)]
@@ -52,126 +52,6 @@ impl NativeExtension {
         }
     }
 }
-
-/// Metadata about a Python wheel.
-#[derive(Debug, Clone)]
-#[non_exhaustive]
-pub struct WheelInfo {
-    /// Package name (e.g., "numpy")
-    pub name: String,
-    /// Package version (e.g., "1.26.0")
-    pub version: String,
-    /// Python files in the wheel (path, contents)
-    pub python_files: Vec<(String, Vec<u8>)>,
-    /// Native extensions (.so files) if any
-    pub native_extensions: Vec<NativeExtension>,
-}
-
-impl WheelInfo {
-    /// Returns true if this wheel contains native extensions.
-    #[must_use]
-    pub fn has_native_extensions(&self) -> bool {
-        !self.native_extensions.is_empty()
-    }
-}
-
-/// Parse a Python wheel (ZIP file) and extract its contents.
-///
-/// # Errors
-///
-/// Returns an error if the wheel cannot be parsed.
-pub fn parse_wheel(wheel_bytes: &[u8]) -> Result<WheelInfo, WheelParseError> {
-    use std::io::Read;
-
-    let reader = Cursor::new(wheel_bytes);
-    let mut archive =
-        zip::ZipArchive::new(reader).map_err(|e| WheelParseError::InvalidZip(e.to_string()))?;
-
-    let mut python_files = Vec::new();
-    let mut native_extensions = Vec::new();
-    let mut name = String::new();
-    let mut version = String::new();
-
-    for i in 0..archive.len() {
-        let mut file = archive
-            .by_index(i)
-            .map_err(|e| WheelParseError::InvalidZip(e.to_string()))?;
-
-        let file_name = file
-            .name()
-            .map_err(|e| WheelParseError::InvalidZip(e.to_string()))?
-            .into_owned();
-
-        // Extract package info from METADATA
-        if file_name.ends_with(".dist-info/METADATA") {
-            let mut contents = String::new();
-            file.read_to_string(&mut contents)
-                .map_err(|e| WheelParseError::ReadError(e.to_string()))?;
-
-            for line in contents.lines() {
-                if let Some(n) = line.strip_prefix("Name: ") {
-                    name = n.to_string();
-                } else if let Some(v) = line.strip_prefix("Version: ") {
-                    version = v.to_string();
-                }
-            }
-        }
-        // Check for native extensions (.so files for WASI)
-        else if file_name.ends_with(".so") && file_name.contains("wasm32-wasi") {
-            let mut bytes = Vec::new();
-            file.read_to_end(&mut bytes)
-                .map_err(|e| WheelParseError::ReadError(e.to_string()))?;
-
-            // Extract just the filename from the path
-            let so_name = file_name
-                .rsplit('/')
-                .next()
-                .unwrap_or(&file_name)
-                .to_string();
-
-            native_extensions.push(NativeExtension {
-                name: so_name,
-                bytes,
-            });
-        }
-        // Collect Python files
-        else if file_name.ends_with(".py") || file_name.ends_with(".pyi") {
-            let mut bytes = Vec::new();
-            file.read_to_end(&mut bytes)
-                .map_err(|e| WheelParseError::ReadError(e.to_string()))?;
-
-            python_files.push((file_name, bytes));
-        }
-    }
-
-    Ok(WheelInfo {
-        name,
-        version,
-        python_files,
-        native_extensions,
-    })
-}
-
-/// Errors that can occur when parsing a wheel.
-#[derive(Debug, Clone)]
-#[non_exhaustive]
-pub enum WheelParseError {
-    /// The wheel is not a valid ZIP file.
-    InvalidZip(String),
-    /// Failed to read a file from the wheel.
-    ReadError(String),
-}
-
-impl std::fmt::Display for WheelParseError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::InvalidZip(e) => write!(f, "invalid ZIP file: {e}"),
-            Self::ReadError(e) => write!(f, "failed to read file: {e}"),
-        }
-    }
-}
-
-impl std::error::Error for WheelParseError {}
 
 /// Base libraries embedded in the crate (compressed with zstd).
 pub mod base_libraries {
@@ -234,27 +114,6 @@ pub mod base_libraries {
         include_bytes!(concat!(env!("OUT_DIR"), "/liberyx_bindings.so.zst"));
 }
 
-/// Compute a cache key for a set of native extensions.
-///
-/// The key is a SHA-256 hash of all extension names and contents,
-/// sorted by name for determinism.
-#[must_use]
-pub fn compute_cache_key(extensions: &[NativeExtension]) -> [u8; 32] {
-    let mut hasher = Sha256::new();
-
-    // Sort extensions by name for deterministic hashing
-    let mut sorted: Vec<_> = extensions.iter().collect();
-    sorted.sort_by(|a, b| a.name.cmp(&b.name));
-
-    for ext in sorted {
-        hasher.update(ext.name.as_bytes());
-        hasher.update((ext.bytes.len() as u64).to_le_bytes());
-        hasher.update(&ext.bytes);
-    }
-
-    hasher.finalize().into()
-}
-
 /// Link native extensions with the base libraries to create a new component.
 ///
 /// This uses our custom eryx-wasm-runtime instead of componentize-py's runtime.
@@ -292,34 +151,23 @@ pub fn link_with_extensions(extensions: &[NativeExtension]) -> Result<Vec<u8>, L
     linker.use_built_in_libdl(true);
     linker.encoder().validate(true);
 
-    // Add base libraries (order matters for symbol resolution)
-    linker
-        // WASI emulation libraries
-        .library("libwasi-emulated-process-clocks.so", &wasi_clocks, false)
-        .map_err(|e| {
-            LinkError::Library("libwasi-emulated-process-clocks.so".into(), e.to_string())
-        })?
-        .library("libwasi-emulated-signal.so", &wasi_signal, false)
-        .map_err(|e| LinkError::Library("libwasi-emulated-signal.so".into(), e.to_string()))?
-        .library("libwasi-emulated-mman.so", &wasi_mman, false)
-        .map_err(|e| LinkError::Library("libwasi-emulated-mman.so".into(), e.to_string()))?
-        .library("libwasi-emulated-getpid.so", &wasi_getpid, false)
-        .map_err(|e| LinkError::Library("libwasi-emulated-getpid.so".into(), e.to_string()))?
-        // C/C++ runtime
-        .library("libc.so", &libc, false)
-        .map_err(|e| LinkError::Library("libc.so".into(), e.to_string()))?
-        .library("libc++abi.so", &libcxxabi, false)
-        .map_err(|e| LinkError::Library("libc++abi.so".into(), e.to_string()))?
-        .library("libc++.so", &libcxx, false)
-        .map_err(|e| LinkError::Library("libc++.so".into(), e.to_string()))?
-        // Python
-        .library("libpython3.14.so", &libpython, false)
-        .map_err(|e| LinkError::Library("libpython3.14.so".into(), e.to_string()))?
-        // Our runtime and bindings
-        .library("liberyx_runtime.so", &runtime, false)
-        .map_err(|e| LinkError::Library("liberyx_runtime.so".into(), e.to_string()))?
-        .library("liberyx_bindings.so", &bindings, false)
-        .map_err(|e| LinkError::Library("liberyx_bindings.so".into(), e.to_string()))?;
+    let libs = BaseLibraries {
+        wasi_clocks: &wasi_clocks,
+        wasi_signal: &wasi_signal,
+        wasi_mman: &wasi_mman,
+        wasi_getpid: &wasi_getpid,
+        libc: &libc,
+        libcxxabi: &libcxxabi,
+        libcxx: &libcxx,
+        libpython: &libpython,
+        runtime: &runtime,
+        bindings: &bindings,
+    };
+    for (name, bytes) in libs.in_link_order() {
+        linker
+            .library(name, bytes, false)
+            .map_err(|e| LinkError::Library(name.into(), e.to_string()))?;
+    }
 
     // Add user's native extensions (dl_openable = true for dlopen/dlsym)
     for ext in extensions {
@@ -372,25 +220,3 @@ impl std::fmt::Display for LinkError {
 }
 
 impl std::error::Error for LinkError {}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_cache_key_determinism() {
-        let ext1 = NativeExtension::new("a.so", vec![1, 2, 3]);
-        let ext2 = NativeExtension::new("b.so", vec![4, 5, 6]);
-
-        // Same extensions in different order should produce same key
-        let key1 = compute_cache_key(&[ext1.clone(), ext2.clone()]);
-        let key2 = compute_cache_key(&[ext2, ext1]);
-        assert_eq!(key1, key2);
-    }
-
-    #[test]
-    fn test_wheel_parse_error_display() {
-        let err = WheelParseError::InvalidZip("test error".to_string());
-        assert!(err.to_string().contains("test error"));
-    }
-}
