@@ -71,3 +71,29 @@ async fn no_site_packages_without_packages() {
         .unwrap();
     assert_eq!(out.stdout, b"[]\n");
 }
+
+#[tokio::test]
+async fn packages_do_not_shadow_the_standard_library() {
+    let out = sandbox_with_two_packages()
+        .execute("import sys\nprint(sys.path.index('/python-stdlib') < sys.path.index('/site-packages'))")
+        .await
+        .unwrap();
+    assert_eq!(out.stdout, b"True\n");
+}
+
+#[tokio::test]
+async fn restoring_a_snapshot_that_uses_a_package_before_any_execution() {
+    let sandbox = sandbox_with_two_packages();
+    let mut session = InProcessSession::new(&sandbox).await.unwrap();
+    session
+        .execute("import firstpkg\nmodule = firstpkg")
+        .await
+        .unwrap();
+    let snapshot = session.snapshot_state().await.unwrap();
+
+    // A fresh session restores before it has executed anything.
+    let mut restored = InProcessSession::new(&sandbox).await.unwrap();
+    restored.restore_state(&snapshot).await.unwrap();
+    let out = restored.execute("print(module.VALUE)").await.unwrap();
+    assert_eq!(out.stdout, b"1\n");
+}

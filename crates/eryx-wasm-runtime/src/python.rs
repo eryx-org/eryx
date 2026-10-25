@@ -1489,8 +1489,11 @@ def _eryx_add_site_packages():
         if not os.path.isdir(path):
             break
         mounts.append(path)
-    # Same place PYTHONPATH entries go: ahead of the standard library.
-    _sys.path[0:0] = [p for p in mounts if p not in _sys.path]
+    # Where the host's PYTHONPATH puts them: right after /python-stdlib, so a
+    # package can't shadow the standard library.
+    new = [p for p in mounts if p not in _sys.path]
+    at = _sys.path.index('/python-stdlib') + 1 if '/python-stdlib' in _sys.path else 0
+    _sys.path[at:at] = new
 
 def _eryx_exec(code, trace_enabled):
     '''Execute user code efficiently. Called once per execute().
@@ -3308,8 +3311,12 @@ pub fn restore_state(data: &[u8]) -> Result<(), String> {
         // Set the bytes in Python
         set_python_variable_bytes("_eryx_restore_bytes", data)?;
 
-        // Deserialize with dill and update _eryx_user_globals
+        // Deserialize with dill and update _eryx_user_globals. The snapshot may
+        // reference packages, so they must be importable even before the
+        // instance's first execution.
         let restore_code = c"
+if not _eryx_site_packages_added:
+    _eryx_add_site_packages()
 import dill as _eryx_dill
 import types as _eryx_types
 

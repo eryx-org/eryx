@@ -1616,6 +1616,20 @@ impl<'a> ExecuteBuilder<'a> {
     }
 }
 
+/// Guest mount path for the `index`-th site-packages directory.
+///
+/// Index 0 is `/site-packages`, the path a pre-initialized snapshot may have
+/// baked into `sys.path`; later directories get an index suffix. The guest
+/// looks for mounts in this order, and native extensions' dlopen paths must
+/// use the same scheme.
+pub(crate) fn site_packages_mount_path(index: usize) -> String {
+    if index == 0 {
+        "/site-packages".to_string()
+    } else {
+        format!("/site-packages-{index}")
+    }
+}
+
 /// The Python executor that manages the WASM runtime.
 ///
 /// This struct uses pre-instantiation (`SandboxPre`) to perform as much
@@ -3438,18 +3452,5 @@ mod tests {
             bytes.windows(target.len()).any(|w| w == target.as_bytes()),
             "precompiled artifact should record the {target} triple"
         );
-    }
-}
-/// Guest mount path for the `index`-th site-packages directory.
-///
-/// Index 0 is `/site-packages`, the path a pre-initialized snapshot may have
-/// baked into `sys.path`; later directories get an index suffix. The guest
-/// looks for mounts in this order, and native extensions' dlopen paths must
-/// use the same scheme.
-pub(crate) fn site_packages_mount_path(index: usize) -> String {
-    if index == 0 {
-        "/site-packages".to_string()
-    } else {
-        format!("/site-packages-{index}")
     }
 }
