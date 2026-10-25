@@ -12,12 +12,13 @@
 //! - **[`InProcessSession`]**: High-level session API wrapping the sandbox.
 //!   Provides a simple interface for REPL-style interactive execution.
 //!
-//! ## State Persistence (Coming Soon)
+//! ## State Persistence
 //!
-//! The WIT export approach will enable Python-level state snapshots via
-//! `snapshot_state()` and `restore_state()` exports in the runtime. This
-//! provides serializable state with minimal overhead (~KB vs ~50MB for
-//! WASM-level snapshots).
+//! [`SessionExecutor::snapshot_state`] and [`SessionExecutor::restore_state`]
+//! (also on [`InProcessSession`]) serialize Python-level state through the
+//! runtime's `snapshot_state()` and `restore_state()` exports. This provides
+//! serializable state with minimal overhead (~KB vs ~50MB for WASM-level
+//! snapshots).
 //!
 //! # Example
 //!
@@ -80,48 +81,6 @@ pub trait Session: Send {
     async fn reset(&mut self) -> Result<(), Error>;
 }
 
-/// Trait for sessions that support state snapshots.
-///
-/// Snapshots capture the current state of the session so it can be:
-/// - Persisted to disk or a database
-/// - Sent over the network to another process
-/// - Restored later to continue execution
-///
-/// # Snapshot Timing
-///
-/// Snapshots can only be captured when `execute()` has returned. It is not
-/// possible to snapshot mid-execution (e.g., while Python code is running).
-/// This is a fundamental limitation of JIT-compiled WASM.
-///
-/// # Implementation Note
-///
-/// The recommended approach for snapshots is the WIT export method, where
-/// Python-level state is serialized via `pickle` and exposed through
-/// `snapshot_state()` and `restore_state()` exports in the runtime.
-pub trait SnapshotSession: Session {
-    /// The type of snapshot produced by this session.
-    type Snapshot: Send + Sync;
-
-    /// Capture a snapshot of the current session state.
-    ///
-    /// The snapshot can later be restored using [`SnapshotSession::restore`] or
-    /// used to create a new session with the captured state.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the snapshot cannot be captured.
-    fn snapshot(&self) -> Result<Self::Snapshot, Error>;
-
-    /// Restore session state from a snapshot.
-    ///
-    /// This replaces the current session state with the state from the snapshot.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the snapshot is invalid or incompatible with this session.
-    fn restore(&mut self, snapshot: &Self::Snapshot) -> Result<(), Error>;
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -131,11 +90,5 @@ mod tests {
         // Verify the Session trait can be used as a trait object
         fn _assert_object_safe(_: &dyn Session) {}
         fn _assert_boxed(_: Box<dyn Session>) {}
-    }
-
-    #[test]
-    fn test_snapshot_session_trait_exists() {
-        // Verify SnapshotSession trait is properly defined
-        fn _assert_snapshot_session<T: SnapshotSession>() {}
     }
 }

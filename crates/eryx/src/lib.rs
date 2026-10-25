@@ -129,7 +129,6 @@ pub use secrets::{
 };
 pub use session::{
     InProcessSession, PythonStateSnapshot, Session, SessionExecutor, SnapshotMetadata,
-    SnapshotSession,
 };
 #[cfg(feature = "vfs")]
 pub use session::{VfsConfig, VolumeMount};
