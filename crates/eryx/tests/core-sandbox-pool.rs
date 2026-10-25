@@ -36,10 +36,8 @@ async fn executor_keeps_packages_after_sandbox_is_dropped() {
     let executor = sandbox.executor();
     drop(sandbox);
 
-    // The preinitialized runtime fixes `sys.path` at snapshot time, so add the
-    // mount explicitly; what matters here is that the directory still exists.
     let output = executor
-        .execute("import sys\nsys.path.insert(0, '/site-packages')\nimport corepkg\nprint(corepkg.VALUE)")
+        .execute("import corepkg\nprint(corepkg.VALUE)")
         .run()
         .await
         .unwrap();
