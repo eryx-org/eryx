@@ -34,7 +34,13 @@ impl_extra_traits!(Wit);
 impl Wit {
     pub(crate) unsafe fn from_raw(ptr: *const ffi::wit_t) -> Wit {
         unsafe {
-            assert!((*ptr).version >= ffi::WIT_CURRENT_VERSION);
+            // The layout of `wit_t` and the type codes change between
+            // versions, so anything but an exact match would be misread.
+            assert_eq!(
+                (*ptr).version,
+                ffi::WIT_CURRENT_VERSION,
+                "wit-dylib metadata version does not match these bindings"
+            );
             Wit {
                 ptr: ptr.as_ref().unwrap(),
             }
@@ -250,8 +256,23 @@ impl Wit {
         self.raw_lists().iter().map(|e| List { wit: *self, ptr: e })
     }
 
-    fn raw_fixed_size_lists(&self) -> &'static [ffi::wit_fixed_size_list_t] {
-        unsafe { slice(self.ptr.fixed_size_lists, self.ptr.num_fixed_size_lists) }
+    fn raw_maps(&self) -> &'static [ffi::wit_map_t] {
+        unsafe { slice(self.ptr.maps, self.ptr.num_maps) }
+    }
+
+    pub fn map(&self, index: usize) -> Map {
+        Map {
+            wit: *self,
+            ptr: &self.raw_maps()[index],
+        }
+    }
+
+    pub fn iter_maps(&self) -> impl ExactSizeIterator<Item = Map> + Clone + '_ {
+        self.raw_maps().iter().map(|e| Map { wit: *self, ptr: e })
+    }
+
+    fn raw_fixed_size_lists(&self) -> &'static [ffi::wit_fixed_length_list_t] {
+        unsafe { slice(self.ptr.fixed_length_lists, self.ptr.num_fixed_length_lists) }
     }
 
     pub fn fixed_size_list(&self, index: usize) -> FixedSizeList {
@@ -404,8 +425,18 @@ impl ImportFunction {
             Layout::from_size_align(self.ptr.async_abi_area_size, self.ptr.async_abi_area_align)
                 .unwrap();
         let (status, buffer) = unsafe {
-            let buffer = std::alloc::alloc(layout);
-            cx.defer_deallocate(buffer, layout);
+            // A zero-size area (e.g. a function with no result) needs no
+            // allocation; `alloc` must not be called with a zero size.
+            let buffer = if layout.size() == 0 {
+                std::ptr::without_provenance_mut(layout.align())
+            } else {
+                let buffer = std::alloc::alloc(layout);
+                if buffer.is_null() {
+                    std::alloc::handle_alloc_error(layout);
+                }
+                cx.defer_deallocate(buffer, layout);
+                buffer
+            };
             let status = self.ptr.async_impl.unwrap()((&raw mut *cx).cast(), buffer.cast());
             (status, buffer)
         };
@@ -534,6 +565,7 @@ pub enum Type {
     Option(WitOption),
     Result(WitResult),
     List(List),
+    Map(Map),
     FixedSizeList(FixedSizeList),
     Future(Future),
     Stream(Stream),
@@ -568,7 +600,8 @@ impl Type {
             ffi::WIT_TYPE_OPTION => Self::Option(wit.option(index)),
             ffi::WIT_TYPE_RESULT => Self::Result(wit.result(index)),
             ffi::WIT_TYPE_LIST => Self::List(wit.list(index)),
-            ffi::WIT_TYPE_FIXED_SIZE_LIST => Self::FixedSizeList(wit.fixed_size_list(index)),
+            ffi::WIT_TYPE_MAP => Self::Map(wit.map(index)),
+            ffi::WIT_TYPE_FIXED_LENGTH_LIST => Self::FixedSizeList(wit.fixed_size_list(index)),
             ffi::WIT_TYPE_FUTURE => Self::Future(wit.future(index)),
             ffi::WIT_TYPE_STREAM => Self::Stream(wit.stream(index)),
             ffi::WIT_TYPE_ALIAS => Self::Alias(wit.alias(index)),
@@ -952,16 +985,57 @@ impl fmt::Debug for List {
 }
 
 #[derive(Copy, Clone)]
+pub struct Map {
+    wit: Wit,
+    ptr: &'static ffi::wit_map_t,
+}
+
+impl_extra_traits!(Map);
+
+impl Map {
+    pub fn index(&self) -> usize {
+        unsafe { (&raw const *self.ptr).offset_from_unsigned(self.wit.ptr.maps) }
+    }
+
+    pub fn interface(&self) -> Option<&'static str> {
+        unsafe { opt_str(self.ptr.interface) }
+    }
+
+    pub fn name(&self) -> Option<&'static str> {
+        unsafe { opt_str(self.ptr.name) }
+    }
+
+    pub fn key_ty(&self) -> Type {
+        Type::from_raw(self.wit, self.ptr.key_type)
+    }
+
+    pub fn value_ty(&self) -> Type {
+        Type::from_raw(self.wit, self.ptr.value_type)
+    }
+}
+
+impl fmt::Debug for Map {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Map")
+            .field("interface", &self.interface())
+            .field("name", &self.name())
+            .field("key_ty", &self.key_ty())
+            .field("value_ty", &self.value_ty())
+            .finish()
+    }
+}
+
+#[derive(Copy, Clone)]
 pub struct FixedSizeList {
     wit: Wit,
-    ptr: &'static ffi::wit_fixed_size_list_t,
+    ptr: &'static ffi::wit_fixed_length_list_t,
 }
 
 impl_extra_traits!(FixedSizeList);
 
 impl FixedSizeList {
     pub fn index(&self) -> usize {
-        unsafe { (&raw const *self.ptr).offset_from_unsigned(self.wit.ptr.fixed_size_lists) }
+        unsafe { (&raw const *self.ptr).offset_from_unsigned(self.wit.ptr.fixed_length_lists) }
     }
 
     pub fn interface(&self) -> Option<&'static str> {

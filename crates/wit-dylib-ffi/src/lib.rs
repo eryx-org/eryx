@@ -8,9 +8,6 @@
 //! which is used for test cases here and can also be a possibly-helpful
 //! reference to an implementation.
 
-#![allow(unsafe_code)]
-#![allow(clippy::allow_attributes_without_reason)]
-
 use std::alloc::Layout;
 use std::ptr;
 
@@ -998,7 +995,11 @@ pub trait RawInterpreter: Interpreter {
 
 impl<T: Interpreter + ?Sized> RawInterpreter for T {}
 
-#[allow(dead_code, non_camel_case_types)]
+#[expect(
+    dead_code,
+    non_camel_case_types,
+    reason = "bindgen output mirrors the C header, used or not"
+)]
 mod ffi;
 mod types;
 
