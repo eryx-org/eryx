@@ -2360,7 +2360,11 @@ impl SandboxBuilder<state::Has, state::Has> {
             return PythonExecutor::from_cached_instance_pre(instance_pre);
         }
 
-        // Tier 2: Try filesystem cache (mmap-based, faster than bytes)
+        // Tier 2: Try filesystem cache (mmap-based, faster than bytes).
+        // An entry that fails to load (corrupt, or built by an incompatible
+        // engine) is relinked below, and the fresh `put` replaces it.
+        #[cfg(feature = "embedded")]
+        let mut cached_entry_failed = false;
         #[cfg(feature = "embedded")]
         if let Some(fs_cache) = &self.filesystem_cache
             && let Some(path) = fs_cache.get_path(&cache_key)
@@ -2376,12 +2380,26 @@ impl SandboxBuilder<state::Has, state::Has> {
             // wasmtime will detect it during deserialization.
             // Use with_key to populate InstancePreCache for future calls.
             #[allow(unsafe_code)]
-            return unsafe { PythonExecutor::from_precompiled_file_with_key(&path, cache_key) };
+            match unsafe {
+                PythonExecutor::from_precompiled_file_with_key(&path, cache_key.clone())
+            } {
+                Ok(executor) => return Ok(executor),
+                Err(e) => {
+                    tracing::warn!(
+                        error = %e,
+                        path = %path.display(),
+                        "cached component failed to load - relinking"
+                    );
+                    cached_entry_failed = true;
+                }
+            }
         }
 
         // Tier 2 (continued): Fall back to in-memory byte cache (for InMemoryCache users)
         #[cfg(feature = "embedded")]
-        if let Some(cache) = &self.cache {
+        if let Some(cache) = &self.cache
+            && !cached_entry_failed
+        {
             if let Some(precompiled) = cache.get(&cache_key) {
                 tracing::debug!(
                     key = %cache_key.to_hex(),
@@ -2389,14 +2407,23 @@ impl SandboxBuilder<state::Has, state::Has> {
                 );
                 // Load and populate InstancePreCache for future calls
                 #[allow(unsafe_code)]
-                let executor = unsafe { PythonExecutor::from_precompiled(&precompiled) }?;
-                InstancePreCache::global().put(cache_key, executor.instance_pre().clone());
-                return Ok(executor);
+                match unsafe { PythonExecutor::from_precompiled(&precompiled) } {
+                    Ok(executor) => {
+                        InstancePreCache::global().put(cache_key, executor.instance_pre().clone());
+                        return Ok(executor);
+                    }
+                    Err(e) => tracing::warn!(
+                        error = %e,
+                        key = %cache_key.to_hex(),
+                        "cached component failed to load - relinking"
+                    ),
+                }
+            } else {
+                tracing::debug!(
+                    key = %cache_key.to_hex(),
+                    "component cache miss - will link and compile"
+                );
             }
-            tracing::debug!(
-                key = %cache_key.to_hex(),
-                "component cache miss - will link and compile"
-            );
         }
 
         // Cache miss or no cache - link the component

@@ -143,9 +143,15 @@ impl CacheKey {
     ///
     /// The extensions are sorted by name before hashing to ensure
     /// deterministic keys regardless of insertion order.
+    ///
+    /// The key also covers the base runtime libraries the extensions are
+    /// linked against and the engine's compilation settings (target, CPU
+    /// features, Cranelift flags), so a cache shared between builds or
+    /// machines never hands back a component built from something else.
     #[cfg(feature = "native-extensions")]
     pub fn from_extensions(extensions: &[eryx_runtime::linker::NativeExtension]) -> Self {
         let mut hasher = Sha256::new();
+        hasher.update(link_environment_hash());
 
         // Sort by name for determinism
         let mut sorted: Vec<_> = extensions.iter().collect();
@@ -180,6 +186,46 @@ impl CacheKey {
 
         hex_encode(&full_hash)
     }
+}
+
+/// Hash of everything besides the extensions that determines a linked,
+/// pre-compiled component: the base runtime libraries and the shared engine's
+/// compilation settings. Computed once per process.
+#[cfg(feature = "native-extensions")]
+fn link_environment_hash() -> [u8; 32] {
+    use eryx_runtime::linker::base_libraries as libs;
+    use std::hash::{Hash, Hasher};
+
+    static HASH: OnceLock<[u8; 32]> = OnceLock::new();
+    *HASH.get_or_init(|| {
+        let mut hasher = Sha256::new();
+        for lib in [
+            libs::LIBC,
+            libs::LIBCXX,
+            libs::LIBCXXABI,
+            libs::LIBPYTHON,
+            libs::LIBWASI_EMULATED_MMAN,
+            libs::LIBWASI_EMULATED_PROCESS_CLOCKS,
+            libs::LIBWASI_EMULATED_GETPID,
+            libs::LIBWASI_EMULATED_SIGNAL,
+            libs::WASI_ADAPTER,
+            libs::LIBERYX_RUNTIME,
+            libs::LIBERYX_BINDINGS,
+        ] {
+            hasher.update((lib.len() as u64).to_le_bytes());
+            hasher.update(lib);
+        }
+        hasher.update(crate::wasm::PythonExecutor::ENGINE_CONFIG_VERSION.to_le_bytes());
+        // If the engine can't be created, building the sandbox fails anyway.
+        if let Ok(engine) = crate::wasm::PythonExecutor::shared_engine() {
+            let mut engine_hasher = std::hash::DefaultHasher::new();
+            engine
+                .precompile_compatibility_hash()
+                .hash(&mut engine_hasher);
+            hasher.update(engine_hasher.finish().to_le_bytes());
+        }
+        hasher.finalize().into()
+    })
 }
 
 /// Get the wasmtime version string.
