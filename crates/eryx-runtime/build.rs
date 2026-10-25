@@ -188,11 +188,15 @@ fn build_late_linking(manifest_dir: &Path, wasm_runtime_dir: &Path, sources_hash
     }
 }
 
-/// Hash everything the late-linking artifacts are built from: the files under
-/// [`GUEST_SOURCES`] plus the guest toolchain and WASI SDK pins.
+/// Hash the files under [`GUEST_SOURCES`], which the late-linking artifacts
+/// are built from.
 ///
 /// Returns `None` outside a git checkout (the crates.io package has no guest
 /// sources), where there is nothing to compare `prebuilt/` against.
+///
+/// The toolchain pins in mise.toml are deliberately not hashed: some CI jobs
+/// replace mise.toml, and this runs on every preinit build, so it must never
+/// depend on that file. A pin bump needs `mise run update-prebuilt` by hand.
 ///
 /// Uses FNV-1a rather than `DefaultHasher`, whose output may change between
 /// Rust releases: the hash is committed in `prebuilt/`, so it has to mean the
@@ -224,8 +228,6 @@ fn guest_sources_hash(workspace_root: &Path) -> Option<String> {
         feed(components.join("/").as_bytes());
         feed(&std::fs::read(file).expect("failed to read guest source"));
     }
-    feed(mise_var(workspace_root, "guest_rust_toolchain").as_bytes());
-    feed(mise_var(workspace_root, "wasi_sdk_version").as_bytes());
 
     Some(format!("{hash:016x}"))
 }
@@ -248,7 +250,8 @@ fn read_stamp(path: &Path) -> Option<String> {
 }
 
 /// Read a `[vars]` entry from the workspace `mise.toml`, the single source of
-/// truth for the toolchain pins shared with the mise tasks and CI.
+/// truth for the toolchain pins shared with the mise tasks and CI. Only called
+/// when building the guest, which needs a full checkout anyway.
 fn mise_var(workspace_root: &Path, key: &str) -> String {
     let mise = std::fs::read_to_string(workspace_root.join("mise.toml"))
         .expect("failed to read mise.toml");
