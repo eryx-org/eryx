@@ -53,10 +53,6 @@ pub struct Session {
     /// SessionExecutor is Send but not Sync (due to wasmtime internals),
     /// so we use Mutex to provide the Sync guarantee required by PyO3.
     inner: Mutex<Option<eryx::SessionExecutor>>,
-    /// The PythonExecutor that backs this session.
-    /// Kept for potential future use (e.g., reset with new imports).
-    #[allow(dead_code)]
-    executor: Arc<eryx::PythonExecutor>,
     /// Tokio runtime for executing async code.
     runtime: Arc<tokio::runtime::Runtime>,
     /// VFS storage (kept for sharing across sessions).
@@ -70,8 +66,7 @@ pub struct Session {
     /// Output handler for streaming stdout/stderr.
     output_handler: Option<Arc<dyn OutputHandler>>,
     /// Keep extracted package directories alive for factory-created sessions.
-    #[allow(dead_code)]
-    package_storage_owner: Option<Arc<Vec<eryx::ExtractedPackage>>>,
+    _package_storage_owner: Option<Arc<Vec<eryx::ExtractedPackage>>>,
     /// Limits passed to callback handlers for this session.
     callback_limits: eryx::ResourceLimits,
 }
@@ -182,14 +177,13 @@ impl Session {
         };
         Ok(Self {
             inner: Mutex::new(Some(inner)),
-            executor,
             runtime,
             vfs_storage,
             vfs_mount_path: mount_path,
             callbacks: callbacks_map,
             net_config: network.map(Into::into),
             output_handler,
-            package_storage_owner,
+            _package_storage_owner: package_storage_owner,
             callback_limits,
         })
     }
@@ -487,28 +481,16 @@ impl Session {
 
     /// Get the number of executions performed in this session.
     #[getter]
-    fn execution_count(&self) -> PyResult<u32> {
-        let guard = self
-            .inner
-            .lock()
-            .map_err(|_| InitializationError::new_err("session lock poisoned"))?;
-        let inner = guard
-            .as_ref()
-            .ok_or_else(|| InitializationError::new_err("session is not initialized"))?;
-        Ok(inner.execution_count())
+    fn execution_count(&self, py: Python<'_>) -> PyResult<u32> {
+        py.detach(|| self.with_inner(|inner| inner.execution_count()))
     }
 
     /// Get the current execution timeout in milliseconds, or None if not set.
     #[getter]
-    fn execution_timeout_ms(&self) -> PyResult<Option<u64>> {
-        let guard = self
-            .inner
-            .lock()
-            .map_err(|_| InitializationError::new_err("session lock poisoned"))?;
-        let inner = guard
-            .as_ref()
-            .ok_or_else(|| InitializationError::new_err("session is not initialized"))?;
-        Ok(inner.execution_timeout().map(|d| d.as_millis() as u64))
+    fn execution_timeout_ms(&self, py: Python<'_>) -> PyResult<Option<u64>> {
+        py.detach(|| {
+            self.with_inner(|inner| inner.execution_timeout().map(|d| d.as_millis() as u64))
+        })
     }
 
     /// Set the execution timeout.
@@ -516,30 +498,15 @@ impl Session {
     /// Args:
     ///     timeout_ms: Timeout in milliseconds, or None to disable.
     #[setter]
-    fn set_execution_timeout_ms(&self, timeout_ms: Option<u64>) -> PyResult<()> {
-        let mut guard = self
-            .inner
-            .lock()
-            .map_err(|_| InitializationError::new_err("session lock poisoned"))?;
-        let inner = guard
-            .as_mut()
-            .ok_or_else(|| InitializationError::new_err("session is not initialized"))?;
+    fn set_execution_timeout_ms(&self, py: Python<'_>, timeout_ms: Option<u64>) -> PyResult<()> {
         let timeout = timeout_ms.map(Duration::from_millis);
-        inner.set_execution_timeout(timeout);
-        Ok(())
+        py.detach(|| self.with_inner(|inner| inner.set_execution_timeout(timeout)))
     }
 
     /// Get the current fuel limit, or None if not set.
     #[getter]
-    fn fuel_limit(&self) -> PyResult<Option<u64>> {
-        let guard = self
-            .inner
-            .lock()
-            .map_err(|_| InitializationError::new_err("session lock poisoned"))?;
-        let inner = guard
-            .as_ref()
-            .ok_or_else(|| InitializationError::new_err("session is not initialized"))?;
-        Ok(inner.fuel_limit())
+    fn fuel_limit(&self, py: Python<'_>) -> PyResult<Option<u64>> {
+        py.detach(|| self.with_inner(|inner| inner.fuel_limit()))
     }
 
     /// Set the fuel limit (max WASM instructions per execution).
@@ -547,16 +514,8 @@ impl Session {
     /// Args:
     ///     limit: Fuel limit, or None to disable (fuel is still tracked).
     #[setter]
-    fn set_fuel_limit(&self, limit: Option<u64>) -> PyResult<()> {
-        let mut guard = self
-            .inner
-            .lock()
-            .map_err(|_| InitializationError::new_err("session lock poisoned"))?;
-        let inner = guard
-            .as_mut()
-            .ok_or_else(|| InitializationError::new_err("session is not initialized"))?;
-        inner.set_fuel_limit(limit);
-        Ok(())
+    fn set_fuel_limit(&self, py: Python<'_>, limit: Option<u64>) -> PyResult<()> {
+        py.detach(|| self.with_inner(|inner| inner.set_fuel_limit(limit)))
     }
 
     /// Get the VFS storage used by this session, if any.
@@ -582,12 +541,15 @@ impl Session {
     }
 
     fn __repr__(&self) -> String {
-        let count = self
-            .inner
-            .lock()
-            .ok()
-            .and_then(|guard| guard.as_ref().map(|i| i.execution_count()))
-            .unwrap_or(0);
+        // Don't wait for the lock: another thread may be mid-execution, and
+        // that execution may need the GIL this thread holds.
+        let count = match self.inner.try_lock() {
+            Ok(guard) => guard
+                .as_ref()
+                .map_or(0, |i| i.execution_count())
+                .to_string(),
+            Err(_) => "<busy>".to_string(),
+        };
         let vfs_info = if self.vfs_storage.is_some() {
             let path = self.vfs_mount_path.as_deref().unwrap_or("/data");
             format!(", vfs_mount_path={:?}", path)
@@ -599,6 +561,22 @@ impl Session {
 }
 
 impl Session {
+    /// Run `f` on the session executor under its lock.
+    ///
+    /// `execute()` holds the lock with the GIL released while its callbacks and
+    /// output handlers re-acquire the GIL, so callers holding the GIL must call
+    /// this inside `py.detach` or they can deadlock against a running execution.
+    fn with_inner<T>(&self, f: impl FnOnce(&mut eryx::SessionExecutor) -> T) -> PyResult<T> {
+        let mut guard = self
+            .inner
+            .lock()
+            .map_err(|_| InitializationError::new_err("session lock poisoned"))?;
+        let inner = guard
+            .as_mut()
+            .ok_or_else(|| InitializationError::new_err("session is not initialized"))?;
+        Ok(f(inner))
+    }
+
     /// Shared body of `execute()` and `execute_with_journal()`.
     ///
     /// The `PyResult` carries session-level failures before the run. With

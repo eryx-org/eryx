@@ -1,5 +1,9 @@
 """Tests for the Session class and VFS integration."""
 
+import subprocess
+import sys
+import textwrap
+
 import eryx
 import pytest
 
@@ -582,3 +586,51 @@ class TestSessionRepr:
         session = eryx.Session(vfs=storage, vfs_mount_path="/custom")
         repr_str = repr(session)
         assert "/custom" in repr_str
+
+
+class TestSessionThreading:
+    """Session accessors used from another thread during an execution."""
+
+    def test_accessors_during_execution_do_not_deadlock(self):
+        """Reading attributes while another thread executes must not deadlock.
+
+        The execution's output handler needs the GIL, so an accessor that
+        waits for the session with the GIL held would hang forever. Run it in a
+        subprocess so a regression fails on the timeout instead of hanging.
+        """
+        script = textwrap.dedent(
+            """
+            import threading
+            import eryx
+
+            started = threading.Event()
+            session = eryx.Session(on_stdout=lambda _chunk: started.set())
+
+            def run():
+                session.execute(
+                    "import time\\n"
+                    "print('a', flush=True)\\n"
+                    "time.sleep(0.5)\\n"
+                    "print('b', flush=True)"
+                )
+
+            worker = threading.Thread(target=run)
+            worker.start()
+            assert started.wait(30)
+            repr(session)
+            session.execution_timeout_ms
+            session.execution_timeout_ms = 60_000
+            session.fuel_limit
+            session.execution_count
+            worker.join()
+            print("ok")
+            """
+        )
+        proc = subprocess.run(
+            [sys.executable, "-c", script],
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+        assert proc.returncode == 0, proc.stderr
+        assert proc.stdout.strip() == "ok"
