@@ -180,6 +180,15 @@ impl<S: VfsStorage> VfsStorage for ScrubbingStorage<S> {
         self.inner.rename(from, to).await
     }
 
+    async fn set_times(
+        &self,
+        path: &str,
+        accessed: Option<std::time::SystemTime>,
+        modified: Option<std::time::SystemTime>,
+    ) -> VfsResult<()> {
+        self.inner.set_times(path, accessed, modified).await
+    }
+
     fn mkdir_sync(&self, path: &str) -> VfsResult<()> {
         self.inner.mkdir_sync(path)
     }

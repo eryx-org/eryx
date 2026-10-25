@@ -164,6 +164,7 @@ pub fn vfs_error_to_error_code(err: &crate::VfsError) -> types::ErrorCode {
         VfsError::Storage(_) => types::ErrorCode::Io,
         VfsError::InvalidSeek(_) => types::ErrorCode::InvalidSeek,
         VfsError::Busy(_) => types::ErrorCode::Busy,
+        VfsError::Unsupported(_) => types::ErrorCode::Unsupported,
         // ENOSPC: indistinguishable from a full disk from the guest's side.
         VfsError::QuotaExceeded(_) => types::ErrorCode::InsufficientSpace,
     }
@@ -185,6 +186,36 @@ pub fn systemtime_to_datetime(
     }
 }
 
+/// Convert a WASI datetime to `SystemTime`.
+pub(crate) fn datetime_to_systemtime(
+    dt: wasmtime_wasi::p2::bindings::clocks::wall_clock::Datetime,
+) -> crate::VfsResult<SystemTime> {
+    UNIX_EPOCH
+        .checked_add(std::time::Duration::new(dt.seconds, dt.nanoseconds))
+        .ok_or_else(|| crate::VfsError::InvalidPath("timestamp out of range".to_string()))
+}
+
+/// The form of a VFS path used to decide whether two descriptors refer to
+/// the same object, so `/a/./b` and `/a/b` compare equal.
+pub(crate) fn vfs_identity(path: &str) -> String {
+    crate::InMemoryStorage::normalize_path(path).unwrap_or_else(|_| path.to_string())
+}
+
+/// Metadata hash for a VFS object: stable for the same object, and changes
+/// when a file's size or modification time does.
+pub(crate) fn vfs_metadata_hash(path: &str, meta: &Metadata) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    vfs_identity(path).hash(&mut hasher);
+    meta.is_dir.hash(&mut hasher);
+    // Directory metadata carries no stored times or size.
+    if !meta.is_dir {
+        meta.size.hash(&mut hasher);
+        meta.modified.hash(&mut hasher);
+    }
+    hasher.finish()
+}
+
 /// Convert Metadata to DescriptorStat.
 pub fn metadata_to_stat(meta: &Metadata) -> types::DescriptorStat {
     types::DescriptorStat {
@@ -198,5 +229,33 @@ pub fn metadata_to_stat(meta: &Metadata) -> types::DescriptorStat {
         data_access_timestamp: Some(systemtime_to_datetime(meta.accessed)),
         data_modification_timestamp: Some(systemtime_to_datetime(meta.modified)),
         status_change_timestamp: Some(systemtime_to_datetime(meta.modified)),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn metadata_hash_tracks_identity_and_modification() {
+        let meta = Metadata {
+            size: 3,
+            ..Metadata::default()
+        };
+        assert_eq!(vfs_identity("/a/./b/"), vfs_identity("/a/b"));
+        assert_eq!(
+            vfs_metadata_hash("/a/./b", &meta),
+            vfs_metadata_hash("/a/b", &meta)
+        );
+
+        // Same size, later modification: the hash must change.
+        let touched = Metadata {
+            modified: meta.modified + std::time::Duration::from_secs(1),
+            ..meta.clone()
+        };
+        assert_ne!(
+            vfs_metadata_hash("/a/b", &meta),
+            vfs_metadata_hash("/a/b", &touched)
+        );
     }
 }

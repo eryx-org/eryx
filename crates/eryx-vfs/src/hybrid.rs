@@ -145,6 +145,31 @@ impl RestrictedDir {
         )
     }
 
+    /// Set the access and/or modification time of a child path.
+    pub fn set_times(
+        &self,
+        guest_path: &str,
+        atime: Option<std::time::SystemTime>,
+        mtime: Option<std::time::SystemTime>,
+        follow: bool,
+    ) -> std::io::Result<()> {
+        self.check_allowed(guest_path)?;
+        let spec = |t: std::time::SystemTime| {
+            capfs::SystemTimeSpec::Absolute(cap_primitives::time::SystemTime::from_std(t))
+        };
+        let path = self.translate(guest_path).as_ref();
+        if follow {
+            capfs::set_times(&self.inner, path, atime.map(spec), mtime.map(spec))
+        } else {
+            capfs::set_times_nofollow(&self.inner, path, atime.map(spec), mtime.map(spec))
+        }
+    }
+
+    /// Set the times of the directory itself (no child path, no filter).
+    pub fn set_dir_times(&self, times: std::fs::FileTimes) -> std::io::Result<()> {
+        self.inner.set_times(times)
+    }
+
     /// Get metadata for the directory itself (no child path, no filter).
     pub fn dir_metadata(&self) -> std::io::Result<capfs::Metadata> {
         capfs::Metadata::from_file(&self.inner)

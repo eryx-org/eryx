@@ -9,8 +9,18 @@ use crate::bindings::{DirPerms, FilePerms, VfsFsError, VfsFsResult, preopens, ty
 use crate::storage::VfsStorage;
 use crate::streams::{VfsInputStream, VfsOutputStream};
 use crate::wasi_impl::{
-    VfsDescriptor, VfsReaddirIterator, VfsState, metadata_to_stat, vfs_error_to_error_code,
+    VfsDescriptor, VfsReaddirIterator, VfsState, datetime_to_systemtime, metadata_to_stat,
+    vfs_error_to_error_code, vfs_identity, vfs_metadata_hash,
 };
+
+/// Convert a WASI timestamp update to the time to set, if any.
+fn new_timestamp(ts: types::NewTimestamp) -> crate::VfsResult<Option<std::time::SystemTime>> {
+    match ts {
+        types::NewTimestamp::NoChange => Ok(None),
+        types::NewTimestamp::Now => Ok(Some(std::time::SystemTime::now())),
+        types::NewTimestamp::Timestamp(dt) => datetime_to_systemtime(dt).map(Some),
+    }
+}
 
 // ============================================================================
 // preopens::Host Implementation
@@ -136,11 +146,23 @@ impl<S: VfsStorage + Clone + 'static> types::HostDescriptor for VfsState<'_, S> 
 
     async fn set_times(
         &mut self,
-        _fd: Resource<VfsDescriptor>,
-        _atim: types::NewTimestamp,
-        _mtim: types::NewTimestamp,
+        fd: Resource<VfsDescriptor>,
+        atim: types::NewTimestamp,
+        mtim: types::NewTimestamp,
     ) -> VfsFsResult<()> {
-        // Times are not fully supported in our simple VFS
+        let atime = new_timestamp(atim)?;
+        let mtime = new_timestamp(mtim)?;
+        let descriptor = self.table.get(&fd)?;
+        let allowed = if descriptor.is_dir {
+            descriptor.dir_perms.contains(DirPerms::MUTATE)
+        } else {
+            descriptor.file_perms.contains(FilePerms::WRITE)
+        };
+        if !allowed {
+            return Err(crate::VfsError::PermissionDenied("write".to_string()).into());
+        }
+        let path = descriptor.path.clone();
+        self.ctx.storage.set_times(&path, atime, mtime).await?;
         Ok(())
     }
 
@@ -245,13 +267,23 @@ impl<S: VfsStorage + Clone + 'static> types::HostDescriptor for VfsState<'_, S> 
 
     async fn set_times_at(
         &mut self,
-        _fd: Resource<VfsDescriptor>,
+        fd: Resource<VfsDescriptor>,
         _path_flags: types::PathFlags,
-        _path: String,
-        _atim: types::NewTimestamp,
-        _mtim: types::NewTimestamp,
+        path: String,
+        atim: types::NewTimestamp,
+        mtim: types::NewTimestamp,
     ) -> VfsFsResult<()> {
-        // Times are not fully supported
+        let atime = new_timestamp(atim)?;
+        let mtime = new_timestamp(mtim)?;
+        let descriptor = self.table.get(&fd)?;
+        if !descriptor.is_dir {
+            return Err(crate::VfsError::NotDirectory(descriptor.path.clone()).into());
+        }
+        if !descriptor.dir_perms.contains(DirPerms::MUTATE) {
+            return Err(crate::VfsError::PermissionDenied("mutate".to_string()).into());
+        }
+        let full_path = descriptor.resolve_path(&path);
+        self.ctx.storage.set_times(&full_path, atime, mtime).await?;
         Ok(())
     }
 
@@ -505,7 +537,7 @@ impl<S: VfsStorage + Clone + 'static> types::HostDescriptor for VfsState<'_, S> 
     ) -> wasmtime::Result<bool> {
         let desc_a = self.table.get(&a)?;
         let desc_b = self.table.get(&b)?;
-        Ok(desc_a.path == desc_b.path)
+        Ok(vfs_identity(&desc_a.path) == vfs_identity(&desc_b.path))
     }
 
     async fn metadata_hash(
@@ -514,14 +546,7 @@ impl<S: VfsStorage + Clone + 'static> types::HostDescriptor for VfsState<'_, S> 
     ) -> VfsFsResult<types::MetadataHashValue> {
         let descriptor = self.table.get(&fd)?;
         let meta = self.ctx.storage.stat(&descriptor.path).await?;
-        // Simple hash based on path and size
-        let hash = {
-            use std::hash::{Hash, Hasher};
-            let mut hasher = std::collections::hash_map::DefaultHasher::new();
-            descriptor.path.hash(&mut hasher);
-            meta.size.hash(&mut hasher);
-            hasher.finish()
-        };
+        let hash = vfs_metadata_hash(&descriptor.path, &meta);
         Ok(types::MetadataHashValue {
             lower: hash,
             upper: 0,
@@ -537,13 +562,7 @@ impl<S: VfsStorage + Clone + 'static> types::HostDescriptor for VfsState<'_, S> 
         let descriptor = self.table.get(&fd)?;
         let full_path = descriptor.resolve_path(&path);
         let meta = self.ctx.storage.stat(&full_path).await?;
-        let hash = {
-            use std::hash::{Hash, Hasher};
-            let mut hasher = std::collections::hash_map::DefaultHasher::new();
-            full_path.hash(&mut hasher);
-            meta.size.hash(&mut hasher);
-            hasher.finish()
-        };
+        let hash = vfs_metadata_hash(&full_path, &meta);
         Ok(types::MetadataHashValue {
             lower: hash,
             upper: 0,

@@ -98,6 +98,20 @@ pub trait VfsStorage: Send + Sync {
     /// Rename/move a file or directory.
     async fn rename(&self, from: &str, to: &str) -> VfsResult<()>;
 
+    /// Set the access and/or modification time of a file or directory;
+    /// `None` leaves that time unchanged.
+    ///
+    /// The default implementation reports the operation as unsupported.
+    async fn set_times(
+        &self,
+        path: &str,
+        accessed: Option<SystemTime>,
+        modified: Option<SystemTime>,
+    ) -> VfsResult<()> {
+        let _ = (accessed, modified);
+        Err(VfsError::Unsupported(format!("set_times: {path}")))
+    }
+
     /// Synchronously create a directory.
     ///
     /// This is useful for setup code that runs before the async runtime
@@ -192,6 +206,15 @@ impl VfsStorage for ArcStorage {
 
     async fn rename(&self, from: &str, to: &str) -> VfsResult<()> {
         self.0.rename(from, to).await
+    }
+
+    async fn set_times(
+        &self,
+        path: &str,
+        accessed: Option<SystemTime>,
+        modified: Option<SystemTime>,
+    ) -> VfsResult<()> {
+        self.0.set_times(path, accessed, modified).await
     }
 
     fn mkdir_sync(&self, path: &str) -> VfsResult<()> {
@@ -335,7 +358,7 @@ impl InMemoryStorage {
     }
 
     /// Normalize a path (remove trailing slashes, handle . and ..).
-    fn normalize_path(path: &str) -> VfsResult<String> {
+    pub(crate) fn normalize_path(path: &str) -> VfsResult<String> {
         if !path.starts_with('/') {
             return Err(VfsError::InvalidPath(format!(
                 "path must be absolute: {path}"
@@ -837,6 +860,31 @@ impl VfsStorage for InMemoryStorage {
         Err(VfsError::NotFound(from))
     }
 
+    async fn set_times(
+        &self,
+        path: &str,
+        accessed: Option<SystemTime>,
+        modified: Option<SystemTime>,
+    ) -> VfsResult<()> {
+        let path = Self::normalize_path(path)?;
+        let mut state = self.state.write().await;
+        if let Some(file) = state.files.get_mut(&path) {
+            if let Some(t) = accessed {
+                file.accessed = t;
+            }
+            if let Some(t) = modified {
+                file.modified = t;
+            }
+            Ok(())
+        } else if state.directories.contains(&path) {
+            // Directories don't store timestamps (stat reports none), so
+            // there is nothing to update.
+            Ok(())
+        } else {
+            Err(VfsError::NotFound(path))
+        }
+    }
+
     fn mkdir_sync(&self, path: &str) -> VfsResult<()> {
         let path = Self::normalize_path(path)?;
 
@@ -1245,5 +1293,19 @@ mod tests {
         assert!(state.directories.contains("/data"));
         assert!(state.directories.contains("/data/subdir"));
         assert!(state.directories.contains("/data/subdir/nested"));
+    }
+
+    #[tokio::test]
+    async fn set_times_updates_file_metadata() {
+        let storage = InMemoryStorage::new();
+        storage.write("/f", b"x").await.unwrap();
+        let t = SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000);
+
+        storage.set_times("/f", None, Some(t)).await.unwrap();
+        assert_eq!(storage.stat("/f").await.unwrap().modified, t);
+        assert!(matches!(
+            storage.set_times("/missing", Some(t), None).await,
+            Err(VfsError::NotFound(_))
+        ));
     }
 }

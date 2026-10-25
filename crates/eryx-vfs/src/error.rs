@@ -56,6 +56,10 @@ pub enum VfsError {
     #[error("invalid seek: {0}")]
     InvalidSeek(String),
 
+    /// The storage backend doesn't support this operation.
+    #[error("unsupported: {0}")]
+    Unsupported(String),
+
     /// Resource busy.
     #[error("resource busy: {0}")]
     Busy(String),
