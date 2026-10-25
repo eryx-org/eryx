@@ -633,7 +633,7 @@ impl Sandbox {
     pub fn set_callbacks(&mut self, callbacks: Vec<Box<dyn Callback>>) {
         let mut map = HashMap::new();
         for callback in callbacks {
-            map.insert(callback.name().to_string(), Arc::from(callback));
+            insert_callback(&mut map, Arc::from(callback));
         }
         self.callbacks = Arc::new(map);
     }
@@ -761,6 +761,20 @@ impl Sandbox {
             #[cfg(feature = "vfs")]
             vfs_storage: self.vfs_storage.clone(),
         }
+    }
+}
+
+/// Register `callback` under its name, warning when that replaces another.
+fn insert_callback(
+    callbacks: &mut HashMap<String, Arc<dyn Callback>>,
+    callback: Arc<dyn Callback>,
+) {
+    let name = callback.name().to_string();
+    if callbacks.insert(name.clone(), callback).is_some() {
+        tracing::warn!(
+            callback = %name,
+            "duplicate callback name; the later registration replaces the earlier one"
+        );
     }
 }
 
@@ -1571,8 +1585,7 @@ impl<R, S> SandboxBuilder<R, S> {
     pub fn with_library(mut self, library: RuntimeLibrary) -> Self {
         // Add callbacks from the library
         for callback in library.callbacks {
-            self.callbacks
-                .insert(callback.name().to_string(), Arc::from(callback));
+            insert_callback(&mut self.callbacks, Arc::from(callback));
         }
 
         // Append preamble
@@ -1598,8 +1611,7 @@ impl<R, S> SandboxBuilder<R, S> {
     #[must_use]
     pub fn with_callbacks(mut self, callbacks: Vec<Box<dyn Callback>>) -> Self {
         for callback in callbacks {
-            self.callbacks
-                .insert(callback.name().to_string(), Arc::from(callback));
+            insert_callback(&mut self.callbacks, Arc::from(callback));
         }
         self
     }
@@ -1607,9 +1619,7 @@ impl<R, S> SandboxBuilder<R, S> {
     /// Add a single callback.
     #[must_use]
     pub fn with_callback(mut self, callback: impl Callback + 'static) -> Self {
-        let boxed: Box<dyn Callback> = Box::new(callback);
-        self.callbacks
-            .insert(boxed.name().to_string(), Arc::from(boxed));
+        insert_callback(&mut self.callbacks, Arc::new(callback));
         self
     }
 
