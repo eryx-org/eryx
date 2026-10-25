@@ -118,9 +118,10 @@ export default defineConfig({
     alias: [
       // Vite resolves bare imports relative to the importing file. Since
       // @bsull/eryx is symlinked from ../eryx/ (outside demo/),
-      // Vite can't find preview2-shim from there. Alias it to our copy.
+      // Vite can't find preview2-shim from there. Alias it to our copy, along
+      // with eryx's own `#preview2/*` package imports of it.
       {
-        find: /^@bytecodealliance\/preview2-shim\/(.+)$/,
+        find: /^(?:@bytecodealliance\/preview2-shim|#preview2)\/(.+)$/,
         replacement: resolve(shimDir, "$1.js"),
       },
     ],

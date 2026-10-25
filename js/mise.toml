@@ -88,6 +88,11 @@ jco transpile \
   --map 'report-trace=./shims/callbacks.js#reportTrace' \
   --map 'report-output=./shims/callbacks.js#reportOutput' \
   --map 'wasi:sockets/*=./shims/sockets.js#*' \
+  --map 'wasi:cli/*=#preview2/cli#*' \
+  --map 'wasi:clocks/*=#preview2/clocks#*' \
+  --map 'wasi:filesystem/*=#preview2/filesystem#*' \
+  --map 'wasi:io/*=#preview2/io#*' \
+  --map 'wasi:random/*=#preview2/random#*' \
   --async-mode jspi \
   --async-imports \
     'eryx:net/tcp@0.1.0#connect' 'eryx:net/tcp@0.1.0#read' 'eryx:net/tcp@0.1.0#write' \

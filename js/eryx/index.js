@@ -24,7 +24,7 @@ import {
 } from "./eryx-sandbox.js";
 
 // Import filesystem shim to populate with Python stdlib
-import { _setFileData } from "@bytecodealliance/preview2-shim/filesystem";
+import { _setFileData } from "#preview2/filesystem";
 
 // Import stdlib loader
 import { loadStdlib } from "./stdlib-loader.js";

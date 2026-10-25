@@ -41,6 +41,28 @@
       "default": "./eryx-sandbox.js"
     }
   },
+  "imports": {
+    "#preview2/cli": {
+      "node": "./shims/preview2-node.js",
+      "default": "@bytecodealliance/preview2-shim/cli"
+    },
+    "#preview2/clocks": {
+      "node": "./shims/preview2-node.js",
+      "default": "@bytecodealliance/preview2-shim/clocks"
+    },
+    "#preview2/filesystem": {
+      "node": "./shims/preview2-node.js",
+      "default": "@bytecodealliance/preview2-shim/filesystem"
+    },
+    "#preview2/io": {
+      "node": "./shims/preview2-node.js",
+      "default": "@bytecodealliance/preview2-shim/io"
+    },
+    "#preview2/random": {
+      "node": "./shims/preview2-node.js",
+      "default": "@bytecodealliance/preview2-shim/random"
+    }
+  },
   "keywords": [
     "python",
     "sandbox",
