@@ -99,10 +99,19 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
   ca-certificates \
   && rm -rf /var/lib/apt/lists/*
 
+# Run as a dedicated unprivileged user. The numeric UID lets Kubernetes'
+# `runAsNonRoot` verify it without looking up the name. Both ports are above
+# 1024, so no capabilities are needed. The embedded runtime is extracted to
+# the system temp dir, which stays writable for this user.
+RUN groupadd --system --gid 10001 eryx \
+  && useradd --system --uid 10001 --gid eryx --no-create-home --shell /usr/sbin/nologin eryx
+
 COPY --from=builder /usr/local/bin/eryx-server /usr/local/bin/eryx-server
 
 ENV ERYX_LISTEN_ADDR="[::]:50051"
 
-EXPOSE 50051
+EXPOSE 50051 9090
+
+USER 10001:10001
 
 ENTRYPOINT ["eryx-server"]
