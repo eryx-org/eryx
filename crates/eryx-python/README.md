@@ -545,7 +545,8 @@ sandbox = factory.create_sandbox()
 
 Factory sessions default to no execution-time, memory, or fuel limit, with a
 10-second callback timeout and a maximum of 1000 callback invocations. A
-caller-provided `VfsStorage` retains its own quota; `max_vfs_bytes` applies to
+caller-provided `VfsStorage` retains its own quota (`VfsStorage(max_bytes=...)`,
+64 MiB by default); `max_vfs_bytes` applies to
 storage created internally for the session. Extracted package storage is kept
 alive by each session, so imports continue to work after dropping the factory.
 
@@ -692,6 +693,10 @@ storage = eryx.VfsStorage()
 
 # Use with Session
 session = eryx.Session(vfs=storage)
+
+# Cap the total size of all files (default 64 MiB); writes past it raise
+# OSError inside the sandbox
+small = eryx.VfsStorage(max_bytes=1024 * 1024)
 ```
 
 The VFS supports standard Python file operations:

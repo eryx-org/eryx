@@ -216,11 +216,20 @@ limits = eryx.ResourceLimits(max_vfs_bytes=256 * 1024 * 1024)
 This applies to the storage eryx creates for you. If you construct storage
 yourself, set the limit there instead:
 
+<!-- langtabs-start -->
 ```rust,ignore
 use eryx::vfs::InMemoryStorage;
 
 let storage = InMemoryStorage::with_max_bytes(256 * 1024 * 1024);
 ```
+
+```python
+import eryx
+
+storage = eryx.VfsStorage(max_bytes=256 * 1024 * 1024)
+session = eryx.Session(vfs=storage)
+```
+<!-- langtabs-end -->
 
 Because the cap protects host memory rather than the guest, it is not disabled by
 `ResourceLimits::unlimited()`; raise it explicitly if you need more.

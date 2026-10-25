@@ -1412,8 +1412,15 @@ class VfsStorage:
         print(result.stdout)  # "hello"
     """
 
-    def __new__(cls) -> VfsStorage:
-        """Create a new empty VFS storage."""
+    def __new__(cls, *, max_bytes: Optional[int] = None) -> VfsStorage:
+        """Create a new empty VFS storage.
+
+        Args:
+            max_bytes: Cap on the total size of all file contents combined.
+                Writes that would exceed it fail inside the sandbox with
+                ``OSError``. ``None`` (the default) means 64 MiB. The storage owns
+                this cap, so ``ResourceLimits.max_vfs_bytes`` does not apply.
+        """
         ...
 
 
