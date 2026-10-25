@@ -647,6 +647,22 @@ class TestCallbackSchemaInference:
         assert "count" in props
         assert "enabled" in props
 
+    def test_uninspectable_signature_warns(self):
+        """A signature that can't be inspected warns instead of passing silently."""
+
+        class Uninspectable:
+            # inspect.signature() raises TypeError for a non-Signature value.
+            __signature__ = "not a signature"
+
+            def __call__(self):
+                return {}
+
+        registry = eryx.CallbackRegistry()
+        with pytest.warns(UserWarning, match="could not infer a parameter schema"):
+            registry.add(Uninspectable(), name="uninspectable")
+        with pytest.warns(UserWarning, match="could not infer a parameter schema"):
+            eryx.Sandbox(callbacks=[{"name": "uninspectable", "fn": Uninspectable()}])
+
     def test_required_vs_optional_params(self):
         """Test that required/optional parameters are correctly identified."""
         registry = eryx.CallbackRegistry()

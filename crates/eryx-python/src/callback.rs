@@ -528,25 +528,25 @@ impl CallbackRegistryIter {
         slf
     }
 
-    fn __next__(&mut self, py: Python<'_>) -> Option<Py<PyAny>> {
-        if self.index < self.callbacks.len() {
-            let def = &self.callbacks[self.index];
-            self.index += 1;
+    fn __next__(&mut self, py: Python<'_>) -> PyResult<Option<Py<PyAny>>> {
+        let Some(def) = self.callbacks.get(self.index) else {
+            return Ok(None);
+        };
+        self.index += 1;
 
-            // Convert to a dict for Python consumption
-            let dict = PyDict::new(py);
-            dict.set_item("name", &def.name).ok()?;
-            dict.set_item("fn", def.callable.clone_ref(py)).ok()?;
-            dict.set_item("description", &def.description).ok()?;
-            if let Some(schema) = &def.schema {
-                let py_schema = pythonize::pythonize(py, schema).ok()?;
-                dict.set_item("schema", py_schema).ok()?;
-            }
-
-            Some(dict.into_any().unbind())
-        } else {
-            None
+        // Convert to a dict for Python consumption
+        let dict = PyDict::new(py);
+        dict.set_item("name", &def.name)?;
+        dict.set_item("fn", def.callable.clone_ref(py))?;
+        dict.set_item("description", &def.description)?;
+        if let Some(schema) = &def.schema {
+            let py_schema = pythonize::pythonize(py, schema).map_err(|e| {
+                pyo3::exceptions::PyValueError::new_err(format!("Invalid schema: {e}"))
+            })?;
+            dict.set_item("schema", py_schema)?;
         }
+
+        Ok(Some(dict.into_any().unbind()))
     }
 }
 
@@ -581,9 +581,7 @@ fn create_callback_def(
     // Auto-infer schema if not provided
     let schema: Option<Value> = match schema {
         Some(s) => Some(s),
-        None => infer_schema_from_callable(py, &callable)
-            .ok()
-            .and_then(|m| serde_json::to_value(m).ok()),
+        None => infer_schema_or_warn(py, &callable, &name)?,
     };
 
     // Detect if this is an async function
@@ -603,6 +601,31 @@ fn detect_async_function(py: Python<'_>, callable: &Py<PyAny>) -> PyResult<bool>
     let inspect = py.import("inspect")?;
     let is_coro_func = inspect.call_method1("iscoroutinefunction", (callable,))?;
     is_coro_func.extract::<bool>()
+}
+
+/// Infer a callback's parameter schema, warning (rather than silently falling
+/// back to an empty schema) when the signature can't be inspected.
+///
+/// Errors only if the warning itself is raised, e.g. under `-W error`.
+fn infer_schema_or_warn(
+    py: Python<'_>,
+    callable: &Py<PyAny>,
+    name: &str,
+) -> PyResult<Option<Value>> {
+    match infer_schema_from_callable(py, callable) {
+        Ok(schema) => Ok(serde_json::to_value(schema).ok()),
+        Err(e) => {
+            let message = format!(
+                "could not infer a parameter schema for callback {name:?} ({e}); \
+                 it will accept any arguments. Pass `schema` explicitly to silence this."
+            );
+            py.import("warnings")?.call_method1(
+                "warn",
+                (message, py.get_type::<pyo3::exceptions::PyUserWarning>()),
+            )?;
+            Ok(None)
+        }
+    }
 }
 
 /// Infer a JSON Schema from a Python callable's signature.
@@ -813,9 +836,7 @@ fn dict_to_python_callback(py: Python<'_>, dict: &Bound<'_, PyDict>) -> PyResult
     // If no schema provided, try to infer from callable
     let schema_value: Option<Value> = match schema_value {
         Some(s) => Some(s),
-        None => infer_schema_from_callable(py, &callable)
-            .ok()
-            .and_then(|m| serde_json::to_value(m).ok()),
+        None => infer_schema_or_warn(py, &callable, &name)?,
     };
 
     let schema = if let Some(schema_val) = schema_value {
