@@ -716,6 +716,12 @@ jobs:
           source ../../.venv/bin/activate
           pytest tests/ -v -n auto
 
+      - name: Check type stubs match the extension module
+        working-directory: crates/eryx-python
+        run: |
+          source ../../.venv/bin/activate
+          python -m mypy.stubtest eryx._eryx --allowlist stubtest-allowlist.txt
+
       - name: Run Python examples
         working-directory: crates/eryx-python
         run: |

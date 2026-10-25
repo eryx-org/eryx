@@ -2,7 +2,7 @@
 
 import builtins
 from pathlib import Path
-from typing import Any, Callable, Iterator, Optional, Sequence, TypedDict, Union
+from typing import Any, Callable, Iterator, Optional, Sequence, TypedDict, Union, final
 
 PathLike = Union[str, Path]
 
@@ -37,6 +37,7 @@ class CallbackDict(TypedDict, total=False):
     """Optional JSON Schema for parameters."""
 
 
+@final
 class MCPManager:
     """Manager for MCP (Model Context Protocol) server connections.
 
@@ -59,7 +60,7 @@ class MCPManager:
         """Names of all connected MCP servers."""
         ...
 
-    def __init__(self) -> None:
+    def __new__(cls) -> MCPManager:
         """Create a new empty MCP manager."""
         ...
 
@@ -67,8 +68,8 @@ class MCPManager:
         self,
         name: str,
         command: str,
-        args: list[str] = [],
-        env: dict[str, str] = {},
+        args: list[str] = ...,
+        env: dict[str, str] = ...,
         timeout_secs: float = 30.0,
     ) -> int:
         """Connect to an MCP server by spawning a child process.
@@ -78,7 +79,8 @@ class MCPManager:
             command: The command to spawn (e.g., "npx", "uvx").
             args: Arguments to pass to the command.
             env: Environment variables to set for the child process.
-            timeout_secs: Timeout in seconds for the connection handshake.
+            timeout_secs: Timeout in seconds for the connection handshake and
+                the initial tool listing.
 
         Returns:
             The number of tools available from this server.
@@ -101,6 +103,7 @@ class MCPManager:
         ...
 
 
+@final
 class CallbackRegistry:
     """A registry for collecting callbacks using the decorator pattern.
 
@@ -119,7 +122,7 @@ class CallbackRegistry:
         sandbox = eryx.Sandbox(callbacks=registry)
     """
 
-    def __init__(self) -> None:
+    def __new__(cls) -> CallbackRegistry:
         """Create a new empty callback registry."""
         ...
 
@@ -148,7 +151,7 @@ class CallbackRegistry:
 
     def add(
         self,
-        fn: Callable[..., Any],
+        callable: Callable[..., Any],
         *,
         name: Optional[str] = None,
         description: Optional[str] = None,
@@ -157,9 +160,9 @@ class CallbackRegistry:
         """Add a callback directly without using the decorator pattern.
 
         Args:
-            fn: The callable to register.
-            name: Optional name. Defaults to fn.__name__.
-            description: Optional description. Defaults to fn.__doc__ or empty string.
+            callable: The callable to register.
+            name: Optional name. Defaults to callable.__name__.
+            description: Optional description. Defaults to callable.__doc__ or empty string.
             schema: Optional JSON Schema dict.
         """
         ...
@@ -173,6 +176,7 @@ class CallbackRegistry:
         ...
 
 
+@final
 class ExecuteResult:
     """Result of executing Python code in the sandbox."""
 
@@ -241,6 +245,7 @@ class ExecuteResult:
         ...
 
 
+@final
 class SuspendedCallback:
     """Details of the callback that suspended execution by raising ``SuspendCallback``."""
 
@@ -260,6 +265,7 @@ class SuspendedCallback:
         ...
 
 
+@final
 class ReplayOutcome:
     """Result of ``Sandbox.execute_with_journal()``.
 
@@ -476,6 +482,7 @@ class NetConfig:
         ...
 
 
+@final
 class ResourceLimits:
     """Resource limits for sandbox execution.
 
@@ -512,16 +519,16 @@ class ResourceLimits:
     picks its own write offsets. `None` uses the default (64 MB).
     """
 
-    def __init__(
-        self,
+    def __new__(
+        cls,
         *,
-        execution_timeout_ms: Optional[int] = None,
-        callback_timeout_ms: Optional[int] = None,
-        max_memory_bytes: Optional[int] = None,
-        max_callback_invocations: Optional[int] = None,
+        execution_timeout_ms: Optional[int] = 30000,
+        callback_timeout_ms: Optional[int] = 10000,
+        max_memory_bytes: Optional[int] = 134217728,
+        max_callback_invocations: Optional[int] = 1000,
         max_fuel: Optional[int] = None,
         max_vfs_bytes: Optional[int] = None,
-    ) -> None:
+    ) -> ResourceLimits:
         """Create new resource limits.
 
         All parameters are optional. If not specified, defaults are used:
@@ -550,6 +557,7 @@ class ResourceLimits:
         ...
 
 
+@final
 class Sandbox:
     """A Python sandbox powered by WebAssembly.
 
@@ -590,8 +598,8 @@ class Sandbox:
         sandbox = factory.create_sandbox()
     """
 
-    def __init__(
-        self,
+    def __new__(
+        cls,
         *,
         resource_limits: Optional[ResourceLimits] = None,
         network: Optional[NetConfig] = None,
@@ -606,7 +614,7 @@ class Sandbox:
         on_stdout: Optional[Callable[[bytes], None]] = None,
         on_stderr: Optional[Callable[[bytes], None]] = None,
         result_variable: Optional[str] = None,
-    ) -> None:
+    ) -> Sandbox:
         """Create a new sandbox with the embedded Python runtime.
 
         Args:
@@ -743,6 +751,16 @@ class ExecutionError(EryxError):
     ...
 
 
+class PythonExceptionError(ExecutionError):
+    """The sandboxed Python code raised an uncaught exception.
+
+    A subclass of ExecutionError, so ``except ExecutionError`` still catches
+    it; catch this instead to tell a script error apart from a sandbox failure.
+    """
+
+    ...
+
+
 class InitializationError(EryxError):
     """Error during sandbox initialization."""
 
@@ -761,6 +779,12 @@ class TimeoutError(builtins.TimeoutError, EryxError):
     This exception inherits from both Python's built-in TimeoutError
     and EryxError, so it can be caught with either.
     """
+
+    ...
+
+
+class CancelledError(EryxError):
+    """Execution was cancelled."""
 
     ...
 
@@ -789,6 +813,7 @@ class PoolClosedError(PoolError):
     ...
 
 
+@final
 class SandboxFactory:
     """A factory for creating sandboxes with custom packages.
 
@@ -822,8 +847,8 @@ class SandboxFactory:
         """Size of the pre-compiled runtime in bytes."""
         ...
 
-    def __init__(
-        self,
+    def __new__(
+        cls,
         *,
         site_packages: Optional[PathLike] = None,
         packages: Optional[Sequence[PathLike]] = None,
@@ -831,7 +856,7 @@ class SandboxFactory:
         setup_code: Optional[str] = None,
         callbacks: Optional[Union[CallbackRegistry, Sequence[CallbackDict]]] = None,
         cache: bool = True,
-    ) -> None:
+    ) -> SandboxFactory:
         """Create a new sandbox factory with custom packages.
 
         This performs one-time initialization that can take 3-5 seconds,
@@ -1074,6 +1099,7 @@ class SandboxFactory:
         ...
 
 
+@final
 class Session:
     """A session that maintains persistent Python state across executions.
 
@@ -1129,6 +1155,16 @@ class Session:
         ...
 
     @property
+    def fuel_limit(self) -> Optional[int]:
+        """Current fuel limit (max WASM instructions per execution), or None if not set."""
+        ...
+
+    @fuel_limit.setter
+    def fuel_limit(self, value: Optional[int]) -> None:
+        """Set the fuel limit, or None to disable it (fuel is still tracked)."""
+        ...
+
+    @property
     def vfs(self) -> Optional[VfsStorage]:
         """VFS storage used by this session, if any."""
         ...
@@ -1138,12 +1174,13 @@ class Session:
         """VFS mount path, if VFS is enabled."""
         ...
 
-    def __init__(
-        self,
+    def __new__(
+        cls,
         *,
         vfs: Optional[VfsStorage] = None,
         vfs_mount_path: Optional[str] = None,
         execution_timeout_ms: Optional[int] = None,
+        max_fuel: Optional[int] = None,
         network: Optional[NetConfig] = None,
         callbacks: Optional[Union[CallbackRegistry, Sequence[CallbackDict]]] = None,
         mcp: Optional[MCPManager] = None,
@@ -1151,7 +1188,7 @@ class Session:
         on_stdout: Optional[Callable[[bytes], None]] = None,
         on_stderr: Optional[Callable[[bytes], None]] = None,
         result_variable: Optional[str] = None,
-    ) -> None:
+    ) -> Session:
         """Create a new session with the embedded Python runtime.
 
         Sessions maintain persistent Python state across `execute()` calls,
@@ -1162,6 +1199,7 @@ class Session:
                 Files written to `/data/*` will persist across executions.
             vfs_mount_path: Custom mount path for VFS (default: "/data").
             execution_timeout_ms: Optional timeout in milliseconds for each execution.
+            max_fuel: Optional fuel limit (max WASM instructions) for each execution.
             network: Optional network configuration. If provided, enables networking.
             callbacks: Optional callbacks that sandboxed code can invoke.
                 Can be a CallbackRegistry or a list of callback dicts.
@@ -1322,6 +1360,7 @@ class Session:
         ...
 
 
+@final
 class VfsStorage:
     """In-memory virtual filesystem storage.
 
@@ -1343,11 +1382,12 @@ class VfsStorage:
         print(result.stdout)  # "hello"
     """
 
-    def __init__(self) -> None:
+    def __new__(cls) -> VfsStorage:
         """Create a new empty VFS storage."""
         ...
 
 
+@final
 class PoolStats:
     """Statistics about pool usage.
 
@@ -1400,6 +1440,7 @@ class PoolStats:
         ...
 
 
+@final
 class PooledSandbox:
     """A sandbox lease acquired from a pool.
 
@@ -1467,6 +1508,7 @@ class PooledSandbox:
     ) -> None: ...
 
 
+@final
 class SandboxPool:
     """A managed pool of warm sandbox instances.
 

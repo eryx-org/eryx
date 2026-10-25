@@ -1,0 +1,10 @@
+# Entries mypy.stubtest should not flag for the eryx._eryx stub.
+
+# Stub-only typing helpers with no runtime counterpart.
+eryx\._eryx\.CallbackDict
+eryx\._eryx\.SecretDict
+eryx\._eryx\.PathLike
+# PyO3 generates a module __all__.
+eryx\._eryx\.__all__
+# NetConfig's stub is maintained separately.
+eryx\._eryx\.NetConfig(\..*)?
