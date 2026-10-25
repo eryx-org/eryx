@@ -35,8 +35,13 @@ version = "0.2.129"
 # breaks host compilation (Rust picks up wasm clang for proc-macro builds).
 # Instead, we install it on-demand via the ensure-wasi-sdk task.
 
+# Toolchain pins for the WASM guest build. crates/eryx-runtime/build.rs reads
+# these lines too, so keep each as a plain `key = "value"`.
 [vars]
 wasi_sdk_version = "wasi-sdk-33"
+# The guest needs nightly for -Z build-std. Bumping this (or the WASI SDK)
+# changes the late-linking artifacts: run `mise run update-prebuilt` after.
+guest_rust_toolchain = "nightly-2026-10-21"
 
 [tasks.check]
 description = "Run cargo check"
@@ -410,7 +415,7 @@ echo "✓ Artifacts cleaned. Run 'mise run setup' to rebuild."
 
 [tasks.build-eryx-runtime]
 description = "Build the eryx-wasm-runtime and runtime.wasm"
-depends = ["ensure-wasi-sdk"]
+depends = ["ensure-wasi-sdk", "ensure-guest-toolchain"]
 run = """
 export WASI_SDK_PATH=$(mise where "github:WebAssembly/wasi-sdk@{{vars.wasi_sdk_version}}")
 BUILD_ERYX_RUNTIME=1 cargo build --package eryx-runtime --release
@@ -419,9 +424,29 @@ sources = [
   "crates/eryx-wasm-runtime/src/**/*.rs",
   "crates/eryx-wasm-runtime/clock_stubs.c",
   "crates/eryx-wasm-runtime/Cargo.toml",
+  "crates/wit-dylib-ffi/src/**/*.rs",
+  "crates/wit-dylib-ffi/Cargo.toml",
   "crates/eryx-runtime/wit/**/*.wit",
 ]
 outputs = ["crates/eryx-runtime/runtime.wasm"]
+
+[tasks.update-prebuilt]
+description = "Rebuild the committed late-linking artifacts in crates/eryx-runtime/prebuilt/"
+depends = ["build-eryx-runtime"]
+run = """
+#!/usr/bin/env bash
+set -euo pipefail
+# The newest OUT_DIR is the one build-eryx-runtime just wrote.
+OUT_DIR=$(dirname "$(ls -t "${CARGO_TARGET_DIR:-target}"/release/build/eryx-runtime-*/out/liberyx_runtime.so | head -1)")
+PREBUILT=crates/eryx-runtime/prebuilt
+mkdir -p "$PREBUILT"
+if ! cmp -s "$OUT_DIR/guest-sources.hash" "$PREBUILT/guest-sources.hash"; then
+  msg="$PREBUILT was stale: it was not built from the current guest sources"
+  if [[ -n "${GITHUB_ACTIONS:-}" ]]; then echo "::warning::$msg"; else echo "$msg"; fi
+fi
+cp "$OUT_DIR"/liberyx_runtime.so.zst "$OUT_DIR"/liberyx_bindings.so.zst "$OUT_DIR"/guest-sources.hash "$PREBUILT/"
+echo "Updated $PREBUILT from $OUT_DIR"
+"""
 
 [tasks.build-preinit]
 description = "Build preinit artifacts (liberyx_runtime.so.zst, etc.)"
@@ -545,6 +570,15 @@ echo ""
 echo "✓ All examples completed!"
 """
 
+[tasks.ensure-guest-toolchain]
+description = "Install the pinned nightly toolchain used to build the WASM guest"
+run = """
+TOOLCHAIN="{{vars.guest_rust_toolchain}}"
+if ! rustup component list --installed --toolchain "$TOOLCHAIN" 2>/dev/null | grep -q '^rust-src'; then
+    rustup toolchain install "$TOOLCHAIN" --profile minimal --component rust-src
+fi
+"""
+
 [tasks.ensure-wasi-sdk]
 description = "Install WASI SDK if not present"
 run = """
@@ -642,7 +676,11 @@ if command -v wasm-opt &>/dev/null; then
     -o js/demo/src/lib/linker-wasm/linker_bg.wasm
 fi
 """
-sources = ["crates/eryx-linker-wasm/src/**/*.rs", "crates/eryx-linker-wasm/Cargo.toml"]
+sources = [
+  "crates/eryx-linker-wasm/src/**/*.rs",
+  "crates/eryx-linker-wasm/Cargo.toml",
+  "crates/eryx-runtime/src/link_order.rs",
+]
 outputs = ["js/demo/src/lib/linker-wasm/linker_bg.wasm", "js/demo/src/lib/linker-wasm/linker.js"]
 
 [tasks.copy-base-libs]

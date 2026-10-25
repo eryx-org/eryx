@@ -16,34 +16,51 @@
 //! 5. Link all libraries into final runtime.wasm component
 
 use std::env;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use wit_component::{StringEncoding, embed_component_metadata};
 
+#[path = "src/link_order.rs"]
+mod link_order;
+
+/// Everything the late-linking artifacts are built from, relative to the
+/// workspace root. These only exist in a git checkout, not in the crates.io
+/// package.
+const GUEST_SOURCES: [&str; 6] = [
+    "crates/eryx-wasm-runtime/src",
+    "crates/eryx-wasm-runtime/clock_stubs.c",
+    "crates/eryx-wasm-runtime/Cargo.toml",
+    "crates/wit-dylib-ffi/src",
+    "crates/wit-dylib-ffi/Cargo.toml",
+    "crates/eryx-runtime/wit",
+];
+
+/// Records which guest sources a set of late-linking artifacts was built from,
+/// next to the artifacts in `prebuilt/` and in OUT_DIR. See [`guest_sources_hash`].
+const SOURCES_STAMP: &str = "guest-sources.hash";
+
 fn main() {
     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
-    let wasm_runtime_dir = manifest_dir.parent().unwrap().join("eryx-wasm-runtime");
+    let workspace_root = manifest_dir.parent().unwrap().parent().unwrap();
+    let wasm_runtime_dir = workspace_root.join("crates/eryx-wasm-runtime");
     let out_dir = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR not set"));
 
-    // Rerun if eryx-wasm-runtime sources change
-    println!(
-        "cargo::rerun-if-changed={}",
-        wasm_runtime_dir.join("src").display()
-    );
-    println!(
-        "cargo::rerun-if-changed={}",
-        wasm_runtime_dir.join("clock_stubs.c").display()
-    );
-    println!(
-        "cargo::rerun-if-changed={}",
-        wasm_runtime_dir.join("Cargo.toml").display()
-    );
-    // Rerun if WIT changes
-    println!(
-        "cargo::rerun-if-changed={}",
-        manifest_dir.join("wit").display()
-    );
+    let sources_hash = guest_sources_hash(workspace_root);
+    if sources_hash.is_some() {
+        // Rerun if anything the guest is built from changes: its sources, its
+        // dependencies, the workspace profiles, and the toolchain pins.
+        for source in GUEST_SOURCES
+            .iter()
+            .chain(&["Cargo.lock", "Cargo.toml", "mise.toml"])
+        {
+            println!(
+                "cargo::rerun-if-changed={}",
+                workspace_root.join(source).display()
+            );
+        }
+        println!("cargo::rerun-if-env-changed=WASI_SDK_PATH");
+    }
     // Rerun if the build flag changes
     println!("cargo::rerun-if-env-changed=BUILD_ERYX_RUNTIME");
     // Rerun if pre-built artifacts change
@@ -89,33 +106,54 @@ fn main() {
     let out_bindings_zst = out_dir.join("liberyx_bindings.so.zst");
     let has_out_artifacts = out_runtime_zst.exists() && out_bindings_zst.exists();
 
+    let out_stamp = out_dir.join(SOURCES_STAMP);
+
     if build_requested {
         // Full build requested - build everything from scratch
-        let runtime_so = build_wasm_runtime(&wasm_runtime_dir);
-        build_component(&manifest_dir, &runtime_so);
+        build_late_linking(&manifest_dir, &wasm_runtime_dir, sources_hash.as_deref());
     } else if preinit {
         // preinit feature (and native-extensions which implies it) needs .so.zst files in OUT_DIR
         //
         // IMPORTANT: Always prefer prebuilt/ artifacts over cached OUT_DIR artifacts!
         // The Rust cache may contain stale OUT_DIR artifacts from a previous build
         // (e.g., from main branch) that don't match the current branch's WIT.
-        // Since prebuilt/ comes from the same CI run's build-eryx-runtime job,
-        // it's guaranteed to match the current branch.
+        // CI overwrites prebuilt/ with the output of the same run's
+        // build-eryx-runtime job, so there it always matches the current branch.
         if has_prebuilt {
-            // Use pre-built artifacts from prebuilt/ directory (CI)
             eprintln!("Using pre-built late-linking artifacts from prebuilt/");
             std::fs::copy(&prebuilt_runtime, &out_runtime_zst)
                 .expect("failed to copy prebuilt runtime");
             std::fs::copy(&prebuilt_bindings, &out_bindings_zst)
                 .expect("failed to copy prebuilt bindings");
-        } else if has_out_artifacts {
+            // Keep OUT_DIR's stamp describing what is now in OUT_DIR.
+            let prebuilt_stamp = read_stamp(&prebuilt_dir.join(SOURCES_STAMP));
+            match &prebuilt_stamp {
+                Some(stamp) => std::fs::write(&out_stamp, stamp),
+                None => std::fs::remove_file(&out_stamp).or(Ok(())),
+            }
+            .expect("failed to update OUT_DIR sources stamp");
+            // A committed prebuilt/ is an input, not a build output, so a
+            // guest change that forgot to refresh it would otherwise silently
+            // run the old guest code. Warn rather than fail: the check is only
+            // as good as the stamp, and a stale snapshot still links.
+            if let Some(hash) = &sources_hash
+                && prebuilt_stamp.as_ref() != Some(hash)
+            {
+                println!(
+                    "cargo::warning=crates/eryx-runtime/prebuilt/ was not built from the current \
+                     guest sources, so preinit builds will use stale guest code. \
+                     Run `mise run update-prebuilt` to rebuild it."
+                );
+            }
+        } else if has_out_artifacts
+            && (sources_hash.is_none() || read_stamp(&out_stamp) == sources_hash)
+        {
             // No prebuilt available, use existing OUT_DIR artifacts (local dev)
             eprintln!("Using existing late-linking artifacts from OUT_DIR");
         } else {
-            // No artifacts anywhere, need to build from scratch
+            // No usable artifacts anywhere, need to build from scratch
             eprintln!("Building late-linking artifacts from scratch...");
-            let runtime_so = build_wasm_runtime(&wasm_runtime_dir);
-            build_component(&manifest_dir, &runtime_so);
+            build_late_linking(&manifest_dir, &wasm_runtime_dir, sources_hash.as_deref());
         }
     }
 
@@ -139,9 +177,91 @@ fn main() {
     }
 }
 
+/// Build the late-linking artifacts and runtime.wasm, and stamp OUT_DIR with
+/// the hash of the guest sources they were built from.
+fn build_late_linking(manifest_dir: &Path, wasm_runtime_dir: &Path, sources_hash: Option<&str>) {
+    let runtime_so = build_wasm_runtime(wasm_runtime_dir);
+    build_component(manifest_dir, &runtime_so);
+    if let Some(hash) = sources_hash {
+        let out_dir = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR not set"));
+        std::fs::write(out_dir.join(SOURCES_STAMP), hash).expect("failed to write sources stamp");
+    }
+}
+
+/// Hash everything the late-linking artifacts are built from: the files under
+/// [`GUEST_SOURCES`] plus the guest toolchain and WASI SDK pins.
+///
+/// Returns `None` outside a git checkout (the crates.io package has no guest
+/// sources), where there is nothing to compare `prebuilt/` against.
+///
+/// Uses FNV-1a rather than `DefaultHasher`, whose output may change between
+/// Rust releases: the hash is committed in `prebuilt/`, so it has to mean the
+/// same thing on every toolchain and platform. Carriage returns are skipped so
+/// a CRLF checkout hashes like an LF one.
+fn guest_sources_hash(workspace_root: &Path) -> Option<String> {
+    if !workspace_root.join(GUEST_SOURCES[0]).exists() {
+        return None;
+    }
+
+    let mut files = Vec::new();
+    for source in GUEST_SOURCES {
+        collect_files(&workspace_root.join(source), &mut files);
+    }
+    files.sort();
+
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    let mut feed = |bytes: &[u8]| {
+        for &byte in bytes.iter().filter(|&&b| b != b'\r') {
+            hash ^= u64::from(byte);
+            hash = hash.wrapping_mul(0x0100_0000_01b3);
+        }
+        hash ^= 0xff;
+    };
+    for file in &files {
+        let relative = file.strip_prefix(workspace_root).unwrap();
+        // Hash the path with `/` separators so Windows agrees with Unix.
+        let components: Vec<_> = relative.iter().map(|c| c.to_string_lossy()).collect();
+        feed(components.join("/").as_bytes());
+        feed(&std::fs::read(file).expect("failed to read guest source"));
+    }
+    feed(mise_var(workspace_root, "guest_rust_toolchain").as_bytes());
+    feed(mise_var(workspace_root, "wasi_sdk_version").as_bytes());
+
+    Some(format!("{hash:016x}"))
+}
+
+/// Push `path` if it is a file, or every file under it if it is a directory.
+fn collect_files(path: &Path, files: &mut Vec<PathBuf>) {
+    if path.is_dir() {
+        for entry in std::fs::read_dir(path).expect("failed to read guest source dir") {
+            collect_files(&entry.expect("failed to read dir entry").path(), files);
+        }
+    } else {
+        files.push(path.to_path_buf());
+    }
+}
+
+fn read_stamp(path: &Path) -> Option<String> {
+    std::fs::read_to_string(path)
+        .ok()
+        .map(|s| s.trim().to_string())
+}
+
+/// Read a `[vars]` entry from the workspace `mise.toml`, the single source of
+/// truth for the toolchain pins shared with the mise tasks and CI.
+fn mise_var(workspace_root: &Path, key: &str) -> String {
+    let mise = std::fs::read_to_string(workspace_root.join("mise.toml"))
+        .expect("failed to read mise.toml");
+    let prefix = format!("{key} = \"");
+    mise.lines()
+        .find_map(|line| line.strip_prefix(&prefix)?.strip_suffix('"'))
+        .unwrap_or_else(|| panic!("mise.toml has no `{key} = \"...\"` in [vars]"))
+        .to_string()
+}
+
 /// Build the eryx-wasm-runtime shared library.
 /// Returns the path to the built liberyx_runtime.so.
-fn build_wasm_runtime(wasm_runtime_dir: &PathBuf) -> PathBuf {
+fn build_wasm_runtime(wasm_runtime_dir: &Path) -> PathBuf {
     // Use a separate target directory inside OUT_DIR to avoid cargo lock contention
     // This is the key insight from componentize-py - nested cargo must use different target
     let out_dir = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR not set"));
@@ -149,34 +269,45 @@ fn build_wasm_runtime(wasm_runtime_dir: &PathBuf) -> PathBuf {
 
     std::fs::create_dir_all(&out_dir).expect("failed to create output directory");
 
+    let workspace_root = wasm_runtime_dir.parent().unwrap().parent().unwrap();
+    let toolchain = mise_var(workspace_root, "guest_rust_toolchain");
+    let wasi_sdk_version = mise_var(workspace_root, "wasi_sdk_version");
+
     // Find WASI SDK
-    let wasi_sdk = find_wasi_sdk().expect(
-        "WASI SDK not found. Install with: mise install github:WebAssembly/wasi-sdk@wasi-sdk-27",
-    );
+    let wasi_sdk = find_wasi_sdk(&wasi_sdk_version).unwrap_or_else(|| {
+        panic!(
+            "WASI SDK not found. Set WASI_SDK_PATH, or install it with: \
+             mise install github:WebAssembly/wasi-sdk@{wasi_sdk_version}"
+        )
+    });
     let clang = wasi_sdk.join("bin/clang");
     let sysroot = wasi_sdk.join("share/wasi-sysroot");
 
     eprintln!("Building eryx-wasm-runtime...");
     eprintln!("  WASI SDK: {}", wasi_sdk.display());
 
-    // Build eryx-wasm-runtime staticlib with PIC for wasm32-wasip1
-    // Strip RUST*/CARGO* env vars to avoid cargo lock contention
+    // Build eryx-wasm-runtime staticlib with PIC for wasm32-wasip1, with the
+    // nightly pinned in mise.toml (build-std needs nightly).
     let mut cmd = Command::new("rustup");
     cmd.current_dir(wasm_runtime_dir)
         .arg("run")
-        .arg("nightly")
+        .arg(&toolchain)
         .arg("cargo")
         .arg("build")
+        .arg("--locked")
         .arg("-Z")
         .arg("build-std=panic_abort,std")
         .arg("--target")
         .arg("wasm32-wasip1")
         .arg("--release");
 
-    // Strip inherited Rust/Cargo env vars to prevent lock contention
+    // Strip inherited Rust/Cargo env vars to prevent lock contention, but keep
+    // the ones that locate the toolchains and registry, and offline mode.
+    const KEEP_ENV: [&str; 3] = ["CARGO_HOME", "RUSTUP_HOME", "CARGO_NET_OFFLINE"];
     for (key, _) in env::vars_os() {
         if let Some(key_str) = key.to_str()
             && (key_str.starts_with("RUST") || key_str.starts_with("CARGO"))
+            && !KEEP_ENV.contains(&key_str)
         {
             cmd.env_remove(&key);
         }
@@ -246,9 +377,6 @@ fn build_wasm_runtime(wasm_runtime_dir: &PathBuf) -> PathBuf {
     eprintln!("Built: {}", runtime_so.display());
     eprintln!("Copied to: {}", stable_location.display());
 
-    // Export the path for downstream use
-    println!("cargo::rustc-env=ERYX_RUNTIME_SO={}", runtime_so.display());
-
     // Also compress for late-linking support
     let runtime_bytes = std::fs::read(&runtime_so).expect("failed to read runtime.so");
     let compressed = zstd::encode_all(runtime_bytes.as_slice(), 19).expect("compress failed");
@@ -263,79 +391,27 @@ fn build_wasm_runtime(wasm_runtime_dir: &PathBuf) -> PathBuf {
     runtime_so
 }
 
-/// Decompress .zst files in libs/ to libs/decompressed/
-fn decompress_libs(manifest_dir: &std::path::Path) {
-    let libs_dir = manifest_dir.join("libs");
-    let decompressed_dir = libs_dir.join("decompressed");
-
-    std::fs::create_dir_all(&decompressed_dir).expect("failed to create decompressed dir");
-
-    // List of files to decompress
-    let files = [
-        "libc.so",
-        "libc++.so",
-        "libc++abi.so",
-        "libpython3.14.so",
-        "libwasi-emulated-process-clocks.so",
-        "libwasi-emulated-signal.so",
-        "libwasi-emulated-mman.so",
-        "libwasi-emulated-getpid.so",
-        "wasi_snapshot_preview1.reactor.wasm",
-    ];
-
-    for file in &files {
-        let compressed_path = libs_dir.join(format!("{}.zst", file));
-        let decompressed_path = decompressed_dir.join(file);
-
-        // Skip if already decompressed and newer than compressed
-        if decompressed_path.exists() {
-            let compressed_meta = std::fs::metadata(&compressed_path).ok();
-            let decompressed_meta = std::fs::metadata(&decompressed_path).ok();
-
-            if let (Some(c), Some(d)) = (compressed_meta, decompressed_meta)
-                && let (Ok(c_time), Ok(d_time)) = (c.modified(), d.modified())
-                && d_time >= c_time
-            {
-                continue;
-            }
-        }
-
-        eprintln!("Decompressing {}...", file);
-        let compressed = std::fs::read(&compressed_path)
-            .unwrap_or_else(|e| panic!("failed to read {}: {}", compressed_path.display(), e));
-        let decompressed = zstd::decode_all(compressed.as_slice())
-            .unwrap_or_else(|e| panic!("failed to decompress {}: {}", file, e));
-        std::fs::write(&decompressed_path, &decompressed)
-            .unwrap_or_else(|e| panic!("failed to write {}: {}", decompressed_path.display(), e));
-    }
-}
-
 /// Build the WASM component by linking all libraries together.
-fn build_component(manifest_dir: &std::path::Path, runtime_so: &std::path::Path) {
+fn build_component(manifest_dir: &Path, runtime_so: &Path) {
     eprintln!("Building WASM component...");
 
-    // Ensure libs are decompressed
-    decompress_libs(manifest_dir);
-
-    let libs_dir = manifest_dir.join("libs/decompressed");
-
-    // Load required shared libraries
-    let libc = std::fs::read(libs_dir.join("libc.so")).expect("failed to read libc.so");
-    let libcxx = std::fs::read(libs_dir.join("libc++.so")).expect("failed to read libc++.so");
-    let libcxxabi =
-        std::fs::read(libs_dir.join("libc++abi.so")).expect("failed to read libc++abi.so");
-    let wasi_clocks = std::fs::read(libs_dir.join("libwasi-emulated-process-clocks.so"))
-        .expect("failed to read libwasi-emulated-process-clocks.so");
-    let wasi_signal = std::fs::read(libs_dir.join("libwasi-emulated-signal.so"))
-        .expect("failed to read libwasi-emulated-signal.so");
-    let wasi_mman = std::fs::read(libs_dir.join("libwasi-emulated-mman.so"))
-        .expect("failed to read libwasi-emulated-mman.so");
-    let wasi_getpid = std::fs::read(libs_dir.join("libwasi-emulated-getpid.so"))
-        .expect("failed to read libwasi-emulated-getpid.so");
-    let libpython =
-        std::fs::read(libs_dir.join("libpython3.14.so")).expect("failed to read libpython3.14.so");
-    let adapter = std::fs::read(libs_dir.join("wasi_snapshot_preview1.reactor.wasm"))
-        .expect("failed to read wasi_snapshot_preview1.reactor.wasm");
+    // Load the vendored libraries, decompressing them in memory.
+    let read_lib = |file: &str| {
+        let path = manifest_dir.join("libs").join(format!("{file}.zst"));
+        let compressed = std::fs::read(&path)
+            .unwrap_or_else(|e| panic!("failed to read {}: {e}", path.display()));
+        zstd::decode_all(compressed.as_slice())
+            .unwrap_or_else(|e| panic!("failed to decompress {}: {e}", path.display()))
+    };
+    let libc = read_lib("libc.so");
+    let libcxx = read_lib("libc++.so");
+    let libcxxabi = read_lib("libc++abi.so");
+    let wasi_clocks = read_lib("libwasi-emulated-process-clocks.so");
+    let wasi_signal = read_lib("libwasi-emulated-signal.so");
+    let wasi_mman = read_lib("libwasi-emulated-mman.so");
+    let wasi_getpid = read_lib("libwasi-emulated-getpid.so");
+    let libpython = read_lib("libpython3.14.so");
+    let adapter = read_lib("wasi_snapshot_preview1.reactor.wasm");
 
     // Load our runtime
     let runtime = std::fs::read(runtime_so).expect("failed to read liberyx_runtime.so");
@@ -381,37 +457,28 @@ fn build_component(manifest_dir: &std::path::Path, runtime_so: &std::path::Path)
     );
 
     // Link all libraries together
-    // Order matters! Dependencies must come before dependents
     // wit-component 0.257 turned `Linker` into a `&mut self` builder and moved
     // `validate`/`adapter` onto the inner `ComponentEncoder`.
     let mut linker = wit_component::Linker::default();
     linker.use_built_in_libdl(true);
     linker.encoder().validate(true);
-    linker
-        // WASI emulation libs
-        .library("libwasi-emulated-process-clocks.so", &wasi_clocks, false)
-        .expect("failed to add wasi-clocks")
-        .library("libwasi-emulated-signal.so", &wasi_signal, false)
-        .expect("failed to add wasi-signal")
-        .library("libwasi-emulated-mman.so", &wasi_mman, false)
-        .expect("failed to add wasi-mman")
-        .library("libwasi-emulated-getpid.so", &wasi_getpid, false)
-        .expect("failed to add wasi-getpid")
-        // C/C++ runtime
-        .library("libc.so", &libc, false)
-        .expect("failed to add libc")
-        .library("libc++abi.so", &libcxxabi, false)
-        .expect("failed to add libc++abi")
-        .library("libc++.so", &libcxx, false)
-        .expect("failed to add libc++")
-        // Python
-        .library("libpython3.14.so", &libpython, false)
-        .expect("failed to add libpython")
-        // Our runtime and bindings
-        .library("liberyx_runtime.so", &runtime, false)
-        .expect("failed to add eryx runtime")
-        .library("liberyx_bindings.so", &bindings, false)
-        .expect("failed to add bindings");
+    let libs = link_order::BaseLibraries {
+        wasi_clocks: &wasi_clocks,
+        wasi_signal: &wasi_signal,
+        wasi_mman: &wasi_mman,
+        wasi_getpid: &wasi_getpid,
+        libc: &libc,
+        libcxxabi: &libcxxabi,
+        libcxx: &libcxx,
+        libpython: &libpython,
+        runtime: &runtime,
+        bindings: &bindings,
+    };
+    for (name, bytes) in libs.in_link_order() {
+        linker
+            .library(name, bytes, false)
+            .unwrap_or_else(|e| panic!("failed to add {name}: {e}"));
+    }
 
     // WASI adapter
     linker
@@ -430,20 +497,11 @@ fn build_component(manifest_dir: &std::path::Path, runtime_so: &std::path::Path)
         component_path.display(),
         component.len()
     );
-
-    // Export the path for downstream use
-    println!(
-        "cargo::rustc-env=ERYX_RUNTIME_WASM={}",
-        component_path.display()
-    );
 }
 
-/// Find WASI SDK in order of preference:
-/// 1. WASI_SDK_PATH environment variable
-/// 2. mise-managed installation
-/// 3. Local project installation
-fn find_wasi_sdk() -> Option<PathBuf> {
-    // Check explicit env var
+/// Find the WASI SDK: `WASI_SDK_PATH` if set, else the mise-managed install of
+/// the version pinned in mise.toml.
+fn find_wasi_sdk(version: &str) -> Option<PathBuf> {
     if let Ok(path) = env::var("WASI_SDK_PATH") {
         let path = PathBuf::from(path);
         if path.join("bin/clang").exists() {
@@ -451,25 +509,10 @@ fn find_wasi_sdk() -> Option<PathBuf> {
         }
     }
 
-    // Try mise-managed WASI SDK
-    if let Ok(output) = Command::new("mise")
-        .args(["where", "github:WebAssembly/wasi-sdk"])
+    let output = Command::new("mise")
+        .args(["where", &format!("github:WebAssembly/wasi-sdk@{version}")])
         .output()
-        && output.status.success()
-    {
-        let path = PathBuf::from(String::from_utf8_lossy(&output.stdout).trim());
-        if path.join("bin/clang").exists() {
-            return Some(path);
-        }
-    }
-
-    // Try local project installation
-    let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").ok()?);
-    let workspace_root = manifest_dir.parent()?.parent()?;
-    let local_path = workspace_root.join(".wasi-sdk/wasi-sdk-27.0-x86_64-linux");
-    if local_path.join("bin/clang").exists() {
-        return Some(local_path);
-    }
-
-    None
+        .ok()?;
+    let path = PathBuf::from(String::from_utf8_lossy(&output.stdout).trim());
+    (output.status.success() && path.join("bin/clang").exists()).then_some(path)
 }
