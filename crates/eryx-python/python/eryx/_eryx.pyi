@@ -795,12 +795,6 @@ class PoolError(EryxError):
     ...
 
 
-class PoolExhaustedError(PoolError):
-    """All sandboxes in the pool are in use."""
-
-    ...
-
-
 class PoolTimeoutError(PoolError):
     """Timed out waiting for an available sandbox."""
 

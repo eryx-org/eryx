@@ -58,12 +58,6 @@ create_exception!(
 create_exception!(eryx, PoolError, EryxError, "Base pool error.");
 create_exception!(
     eryx,
-    PoolExhaustedError,
-    PoolError,
-    "All sandboxes in the pool are in use."
-);
-create_exception!(
-    eryx,
     PoolTimeoutError,
     PoolError,
     "Timed out waiting for an available sandbox."
@@ -183,10 +177,6 @@ pub fn register_exceptions(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("CancelledError", m.py().get_type::<CancelledError>())?;
     m.add("SuspendCallback", m.py().get_type::<SuspendCallback>())?;
     m.add("PoolError", m.py().get_type::<PoolError>())?;
-    m.add(
-        "PoolExhaustedError",
-        m.py().get_type::<PoolExhaustedError>(),
-    )?;
     m.add("PoolTimeoutError", m.py().get_type::<PoolTimeoutError>())?;
     m.add("PoolClosedError", m.py().get_type::<PoolClosedError>())?;
     Ok(())

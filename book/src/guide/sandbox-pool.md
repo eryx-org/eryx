@@ -283,7 +283,6 @@ for t in threads:
 |-----------|------|
 | `PoolTimeoutError` | `acquire()` timed out waiting for a sandbox |
 | `PoolClosedError` | Pool has been closed |
-| `PoolExhaustedError` | All sandboxes in use (non-blocking path) |
 
 All inherit from `PoolError` (Rust: `eryx::PoolError`, Python: `eryx.PoolError`).
 
