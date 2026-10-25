@@ -6,9 +6,10 @@
 //! ## When to use this vs `bindings`
 //!
 //! - Use **this module** (`hybrid_bindings`) when you need to mix VFS storage with
-//!   real filesystem passthrough. Paths are routed based on prefix:
-//!   - VFS paths (e.g., `/data/*`) go to in-memory `VfsStorage`
-//!   - Real paths (e.g., `/python-stdlib/*`) pass through to the host filesystem
+//!   real filesystem passthrough. Each preopen is one or the other, and
+//!   descriptors opened beneath it stay on the same side:
+//!   - VFS preopens (e.g., `/data`) are served from in-memory `VfsStorage`
+//!   - Real preopens (e.g., `/python-stdlib`) pass through to the host filesystem
 //!
 //!   This is what `SessionExecutor` uses to allow Python stdlib access while
 //!   keeping user data sandboxed in the VFS.

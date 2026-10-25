@@ -759,7 +759,6 @@ impl<S: VfsStorage + Clone + 'static> types::HostDescriptor for HybridVfsState<'
                         dir: restricted_sub,
                         dir_perms: dir.dir_perms,
                         file_perms: dir.file_perms,
-                        allow_blocking: dir.allow_blocking,
                     };
                     let new_descriptor = HybridDescriptor::RealDir {
                         dir: new_real_dir,
@@ -822,7 +821,6 @@ impl<S: VfsStorage + Clone + 'static> types::HostDescriptor for HybridVfsState<'
                         perms: dir.file_perms,
                         readable,
                         writable,
-                        allow_blocking: dir.allow_blocking,
                     };
                     let new_descriptor = HybridDescriptor::RealFile {
                         file: new_real_file,

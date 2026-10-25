@@ -87,8 +87,8 @@ where
 /// Marker trait for types that provide hybrid VFS access.
 ///
 /// This trait is used to get access to the hybrid VFS context from the store state.
-/// Similar to `VfsView`, but for hybrid VFS that routes to either VFS storage or
-/// real filesystem based on path.
+/// Similar to `VfsView`, but for hybrid VFS that serves each preopen from either
+/// VFS storage or the real filesystem.
 pub trait HybridVfsView: Send {
     /// The storage backend type for VFS paths.
     type Storage: VfsStorage + Clone + 'static;
@@ -100,9 +100,9 @@ pub trait HybridVfsView: Send {
 /// Add hybrid VFS filesystem interfaces to a linker.
 ///
 /// This adds the `wasi:filesystem/types` and `wasi:filesystem/preopens` interfaces
-/// using the hybrid VFS implementation, which routes filesystem operations to either
-/// VFS storage (for sandboxed paths like `/data/*`) or real filesystem (for system
-/// paths like `/python-stdlib/*`).
+/// using the hybrid VFS implementation, which serves each preopen from either
+/// VFS storage (for sandboxed preopens like `/data`) or the real filesystem (for
+/// system preopens like `/python-stdlib`).
 ///
 /// As with [`add_vfs_to_linker`], this only overrides `wasmtime-wasi`'s
 /// filesystem while our `wit/deps` packages carry the same `wasi:filesystem`

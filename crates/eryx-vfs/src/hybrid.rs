@@ -1,8 +1,8 @@
-//! Hybrid VFS that routes paths to either VFS storage or real filesystem.
+//! Hybrid VFS that serves each preopen from either VFS storage or the real filesystem.
 //!
 //! This module provides a filesystem implementation that combines:
-//! - VFS storage for sandboxed paths (e.g., `/eryx/*`)
-//! - Real filesystem passthrough for system paths (e.g., `/python-stdlib/*`)
+//! - VFS storage for sandboxed preopens (e.g., `/eryx`)
+//! - Real filesystem passthrough for system preopens (e.g., `/python-stdlib`)
 //!
 //! This allows Python to access its stdlib while still providing an isolated
 //! writable filesystem area for user code.
@@ -294,8 +294,6 @@ pub struct RealDir {
     pub dir_perms: DirPerms,
     /// Default file permissions for files in this directory.
     pub file_perms: FilePerms,
-    /// Whether to allow blocking the current thread.
-    pub allow_blocking: bool,
 }
 
 impl std::fmt::Debug for RealDir {
@@ -315,7 +313,6 @@ impl RealDir {
             dir: RestrictedDir::new(dir),
             dir_perms,
             file_perms,
-            allow_blocking: false,
         }
     }
 
@@ -340,8 +337,6 @@ pub struct RealFile {
     pub readable: bool,
     /// Whether the file is open for writing.
     pub writable: bool,
-    /// Whether to allow blocking the current thread.
-    pub allow_blocking: bool,
 }
 
 impl std::fmt::Debug for RealFile {
@@ -488,28 +483,20 @@ impl HybridPreopen {
 
 /// Context for hybrid VFS operations.
 ///
-/// This combines VFS storage with real filesystem passthrough, routing
-/// operations based on path prefixes.
+/// This combines VFS storage with real filesystem passthrough. Each preopen
+/// is either VFS-backed or a real directory, and every descriptor opened
+/// beneath it stays on the same side.
 pub struct HybridVfsCtx<S: VfsStorage + Clone> {
     /// The VFS storage backend for virtual paths.
     pub storage: S,
-    /// Path prefixes that should be handled by VFS (e.g., ["/data"]).
-    pub vfs_prefixes: Vec<String>,
     /// Preopened directories (both VFS and real).
     pub preopens: Vec<HybridPreopen>,
-    /// Whether to allow blocking the current thread for filesystem operations.
-    pub allow_blocking_current_thread: bool,
 }
 
 impl<S: VfsStorage + Clone> std::fmt::Debug for HybridVfsCtx<S> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("HybridVfsCtx")
-            .field("vfs_prefixes", &self.vfs_prefixes)
             .field("preopens", &self.preopens.len())
-            .field(
-                "allow_blocking_current_thread",
-                &self.allow_blocking_current_thread,
-            )
             .finish_non_exhaustive()
     }
 }
@@ -522,15 +509,13 @@ impl<S: VfsStorage + Clone> HybridVfsCtx<S> {
     pub fn new(storage: S) -> Self {
         Self {
             storage,
-            vfs_prefixes: Vec::new(),
             preopens: Vec::new(),
-            allow_blocking_current_thread: false,
         }
     }
 
     /// Add a VFS-managed preopen directory.
     ///
-    /// Paths under `guest_path` will be handled by VFS storage.
+    /// Descriptors opened under this preopen are handled by VFS storage.
     /// The directory will be created in storage if it doesn't exist.
     pub fn add_vfs_preopen(
         &mut self,
@@ -551,7 +536,6 @@ impl<S: VfsStorage + Clone> HybridVfsCtx<S> {
             );
         }
 
-        self.vfs_prefixes.push(guest_path.clone());
         self.preopens.push(HybridPreopen::Vfs {
             guest_path,
             dir_perms,
@@ -642,22 +626,9 @@ impl<S: VfsStorage + Clone> HybridVfsCtx<S> {
             dir: restricted,
             dir_perms,
             file_perms,
-            allow_blocking: false,
         };
         self.add_real_preopen(guest_parent, dir);
         Ok(())
-    }
-
-    /// Check if a path should be handled by VFS.
-    pub fn is_vfs_path(&self, path: &str) -> bool {
-        self.vfs_prefixes
-            .iter()
-            .any(|prefix| path == prefix || path.starts_with(&format!("{}/", prefix)))
-    }
-
-    /// Set whether to allow blocking the current thread for filesystem operations.
-    pub fn allow_blocking_current_thread(&mut self, allow: bool) {
-        self.allow_blocking_current_thread = allow;
     }
 }
 
@@ -682,18 +653,12 @@ impl<'a, S: VfsStorage + Clone> HybridVfsState<'a, S> {
     pub fn new(ctx: &'a mut HybridVfsCtx<S>, table: &'a mut ResourceTable) -> Self {
         Self { ctx, table }
     }
-
-    /// Check if a path should be handled by VFS.
-    pub fn is_vfs_path(&self, path: &str) -> bool {
-        self.ctx.is_vfs_path(path)
-    }
 }
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
-    use crate::{ArcStorage, InMemoryStorage};
 
     #[test]
     fn test_symlink_relative_to_translated_destination() {
@@ -726,20 +691,6 @@ mod tests {
             std::fs::read(temp.path().join("nested/file_link")).unwrap(),
             b"hello"
         );
-    }
-
-    #[test]
-    fn test_is_vfs_path() {
-        let storage = ArcStorage::new(Arc::new(InMemoryStorage::new()));
-        let mut ctx = HybridVfsCtx::new(storage);
-        ctx.add_vfs_preopen("/data", DirPerms::all(), FilePerms::all());
-
-        assert!(ctx.is_vfs_path("/data"));
-        assert!(ctx.is_vfs_path("/data/foo"));
-        assert!(ctx.is_vfs_path("/data/foo/bar"));
-        assert!(!ctx.is_vfs_path("/python-stdlib"));
-        assert!(!ctx.is_vfs_path("/datafile")); // Not a prefix match
-        assert!(!ctx.is_vfs_path("/"));
     }
 
     #[test]
