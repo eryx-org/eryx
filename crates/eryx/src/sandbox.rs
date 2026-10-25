@@ -212,7 +212,7 @@ impl Sandbox {
     ///
     /// Returns an error if the Python code fails to execute or a resource limit is exceeded.
     pub async fn execute(&self, code: &str) -> Result<ExecuteResult, Error> {
-        self.run_inner(code, None).await
+        self.run_inner(code, None, None).await
     }
 
     /// Execute Python code with callback-result replay and journaling.
@@ -243,17 +243,19 @@ impl Sandbox {
         journal: Option<CallbackJournal>,
     ) -> ReplayOutcome {
         let state = ReplayState::shared(code, journal);
-        let result = self.run_inner(code, Some(Arc::clone(&state))).await;
+        let result = self.run_inner(code, Some(Arc::clone(&state)), None).await;
         ReplayOutcome::from_state(&state, code, result)
     }
 
-    /// Shared execution body for [`execute`](Self::execute) and
-    /// [`execute_with_journal`](Self::execute_with_journal).
+    /// Shared execution body for [`execute`](Self::execute),
+    /// [`execute_with_journal`](Self::execute_with_journal) and
+    /// [`execute_cancellable`](Self::execute_cancellable).
     ///
     /// When `replay_state` is `Some`, every registered callback is wrapped with
     /// a [`ReplayCallback`](crate::replay::ReplayCallback) sharing that state.
+    /// When `cancel_token` is `Some`, cancelling it interrupts the execution.
     #[tracing::instrument(
-        skip(self, code, replay_state),
+        skip(self, code, replay_state, cancel_token),
         fields(
             code_len = code.len(),
             callbacks = self.callbacks.len(),
@@ -267,6 +269,7 @@ impl Sandbox {
         &self,
         code: &str,
         replay_state: Option<Arc<Mutex<ReplayState>>>,
+        cancel_token: Option<CancellationToken>,
     ) -> Result<ExecuteResult, Error> {
         let start = Instant::now();
 
@@ -351,6 +354,9 @@ impl Sandbox {
             .executor
             .execute(&full_code)
             .with_callbacks(&callbacks, callback_tx);
+        if let Some(token) = cancel_token {
+            execute_builder = execute_builder.with_cancellation(token);
+        }
         if let Some(trace_tx) = trace_tx {
             execute_builder = execute_builder.with_tracing(trace_tx);
         }
@@ -700,54 +706,12 @@ impl Sandbox {
         let cancel_token = CancellationToken::new();
         let (result_tx, result_rx) = oneshot::channel();
 
-        // Clone what we need for the spawned task
-        let executor = Arc::clone(&self.executor);
-        let callbacks = Arc::clone(&self.callbacks);
-        let preamble = self.preamble.clone();
-        let trace_handler = self.trace_handler.clone();
-        let collect_trace = self.collect_trace;
-        let tracing_enabled = self.tracing_enabled();
-        let output_handler = self.output_handler.clone();
-        let resource_limits = self.resource_limits.clone();
-        let net_config = self.net_config.clone();
-        let secrets = self.secrets.clone();
-        let scrub_stdout = self.scrub_stdout.clone();
-        let scrub_stderr = self.scrub_stderr.clone();
-        let scrub_result = self.scrub_result;
-        let scrub_files = self.scrub_files.clone();
-        #[cfg(feature = "vfs")]
-        let volumes = self.volumes.clone();
-        #[cfg(feature = "vfs")]
-        let vfs_storage = self.vfs_storage.clone();
+        let sandbox = self.clone_for_task();
         let code = code.to_string();
         let token = cancel_token.clone();
 
-        // Spawn the execution task
         tokio::spawn(async move {
-            let result = Self::execute_with_cancellation(
-                executor,
-                callbacks,
-                &preamble,
-                trace_handler,
-                collect_trace,
-                tracing_enabled,
-                output_handler,
-                resource_limits,
-                net_config,
-                secrets,
-                scrub_stdout,
-                scrub_stderr,
-                scrub_result,
-                scrub_files,
-                #[cfg(feature = "vfs")]
-                volumes,
-                #[cfg(feature = "vfs")]
-                vfs_storage,
-                &code,
-                token,
-            )
-            .await;
-
+            let result = sandbox.run_inner(&code, None, Some(token)).await;
             // Send result back (ignore error if receiver dropped)
             let _ = result_tx.send(result);
         });
@@ -758,257 +722,28 @@ impl Sandbox {
         }
     }
 
-    /// Internal execution with cancellation support.
-    #[allow(clippy::too_many_arguments, unused_variables)]
-    async fn execute_with_cancellation(
-        executor: Arc<PythonExecutor>,
-        callbacks: Arc<HashMap<String, Arc<dyn Callback>>>,
-        preamble: &str,
-        trace_handler: Option<Arc<dyn TraceHandler>>,
-        collect_trace: bool,
-        tracing_enabled: bool,
-        output_handler: Option<Arc<dyn OutputHandler>>,
-        resource_limits: ResourceLimits,
-        net_config: Option<NetConfig>,
-        secrets: HashMap<String, crate::secrets::SecretConfig>,
-        scrub_stdout: crate::secrets::OutputScrubPolicy,
-        scrub_stderr: crate::secrets::OutputScrubPolicy,
-        scrub_result: bool,
-        scrub_files: crate::secrets::FileScrubPolicy,
-        #[cfg(feature = "vfs")] volumes: Vec<crate::session::VolumeMount>,
-        #[cfg(feature = "vfs")] vfs_storage_override: Option<
-            std::sync::Arc<dyn eryx_vfs::VfsStorage>,
-        >,
-        code: &str,
-        cancel_token: CancellationToken,
-    ) -> Result<ExecuteResult, Error> {
-        let start = Instant::now();
-
-        // Prepend preamble to user code if present
-        let full_code = if preamble.is_empty() {
-            code.to_string()
-        } else {
-            format!(
-                "{}
-
-# User code
-{}",
-                preamble, code
-            )
-        };
-
-        // Create channel for callback requests
-        let (callback_tx, callback_rx) = mpsc::channel::<CallbackRequest>(32);
-
-        // Collect callbacks as a Vec for the executor
-        let callbacks_vec: Vec<Arc<dyn Callback>> = callbacks.values().cloned().collect();
-
-        // Spawn task to handle callback requests concurrently
-        let callbacks_arc = Arc::clone(&callbacks);
-        let resource_limits_clone = resource_limits.clone();
-        let secrets_arc = Arc::new(secrets.clone());
-        let callback_secrets = Arc::clone(&secrets_arc);
-        let callback_handler = tokio::spawn(async move {
-            run_callback_handler(
-                callback_rx,
-                callbacks_arc,
-                resource_limits_clone,
-                callback_secrets,
-            )
-            .await
-        });
-
-        // Create the trace channel and collector only when tracing is enabled.
-        let (trace_tx, trace_collector) = if tracing_enabled {
-            let (trace_tx, trace_rx) = mpsc::unbounded_channel::<TraceRequest>();
-            let trace_handler = trace_handler.clone();
-            let trace_secrets = secrets.clone();
-            let trace_collector = tokio::spawn(async move {
-                run_trace_collector(trace_rx, trace_handler, collect_trace, trace_secrets).await
-            });
-            (Some(trace_tx), Some(trace_collector))
-        } else {
-            (None, None)
-        };
-
-        // Spawn output collector for real-time streaming if handler is configured
-        let (output_tx, output_handler_task) = if output_handler.is_some() {
-            let (tx, rx) = mpsc::unbounded_channel::<OutputRequest>();
-            let handler = output_handler.clone();
-            let output_secrets = secrets.clone();
-            let scrub_out = matches!(scrub_stdout, crate::secrets::OutputScrubPolicy::All);
-            let scrub_err = matches!(scrub_stderr, crate::secrets::OutputScrubPolicy::All);
-            let task = tokio::spawn(async move {
-                run_output_collector(rx, handler, output_secrets, scrub_out, scrub_err).await
-            });
-            (Some(tx), Some(task))
-        } else {
-            (None, None)
-        };
-
-        // Spawn network handler if networking is enabled
-        let (net_tx, net_handler) = if let Some(ref config) = net_config {
-            let (tx, rx) = mpsc::channel::<crate::wasm::NetRequest>(32);
-            let manager = ConnectionManager::new(config.clone(), secrets.clone());
-            let handler = tokio::spawn(async move { run_net_handler(rx, manager).await });
-            (Some(tx), Some(handler))
-        } else {
-            (None, None)
-        };
-
-        // Execute the Python code using the builder API with cancellation.
-        let mut execute_builder = executor
-            .execute(&full_code)
-            .with_callbacks(&callbacks_vec, callback_tx)
-            .with_cancellation(cancel_token.clone());
-        if let Some(trace_tx) = trace_tx {
-            execute_builder = execute_builder.with_tracing(trace_tx);
-        }
-
-        // Add output streaming channel if handler is configured
-        if let Some(tx) = output_tx {
-            execute_builder = execute_builder.with_output_streaming(tx);
-        }
-
-        // Add network channel if networking is enabled
-        if let Some(tx) = net_tx {
-            execute_builder = execute_builder.with_network(tx);
-        }
-
-        // Add VFS storage — use per-request override if set, otherwise create
-        // a scrubbing storage from the secrets configuration.
-        #[cfg(feature = "vfs")]
-        {
-            let vfs_storage = if let Some(storage) = vfs_storage_override {
-                eryx_vfs::ArcStorage::new(storage)
-            } else {
-                let vfs_secrets = secrets
-                    .iter()
-                    .map(|(k, v)| {
-                        (
-                            k.clone(),
-                            eryx_vfs::VfsSecretConfig {
-                                placeholder: v.placeholder.clone(),
-                            },
-                        )
-                    })
-                    .collect();
-                let vfs_policy = match &scrub_files {
-                    crate::secrets::FileScrubPolicy::All => eryx_vfs::VfsFileScrubPolicy::All,
-                    crate::secrets::FileScrubPolicy::None => eryx_vfs::VfsFileScrubPolicy::None,
-                    crate::secrets::FileScrubPolicy::Except(paths) => {
-                        eryx_vfs::VfsFileScrubPolicy::Except(paths.clone())
-                    }
-                    crate::secrets::FileScrubPolicy::Only(paths) => {
-                        eryx_vfs::VfsFileScrubPolicy::Only(paths.clone())
-                    }
-                };
-                let scrubbing_storage = eryx_vfs::ScrubbingStorage::new(
-                    eryx_vfs::InMemoryStorage::with_max_bytes(
-                        resource_limits
-                            .max_vfs_bytes
-                            .unwrap_or(eryx_vfs::DEFAULT_MAX_BYTES),
-                    ),
-                    vfs_secrets,
-                    vfs_policy,
-                );
-                eryx_vfs::ArcStorage::new(std::sync::Arc::new(scrubbing_storage))
-            };
-            execute_builder = execute_builder.with_vfs_storage(vfs_storage);
-        }
-
-        // Add volume mounts if configured
-        #[cfg(feature = "vfs")]
-        if !volumes.is_empty() {
-            execute_builder = execute_builder.with_volumes(volumes);
-        }
-
-        // Add memory limit if configured
-        if let Some(limit) = resource_limits.max_memory_bytes {
-            execute_builder = execute_builder.with_memory_limit(limit);
-        }
-
-        // Add timeout if configured
-        if let Some(timeout) = resource_limits.execution_timeout {
-            execute_builder = execute_builder.with_timeout(timeout);
-        }
-
-        // Add fuel limit if configured
-        if let Some(fuel) = resource_limits.max_fuel {
-            execute_builder = execute_builder.with_fuel_limit(fuel);
-        }
-
-        let execution_result = execute_builder.run().await;
-
-        // Wait for the handler tasks to complete
-        let callback_invocations = callback_handler.await.unwrap_or(0);
-        let trace_events = match trace_collector {
-            Some(trace_collector) => trace_collector.await.unwrap_or_default(),
-            None => Vec::new(),
-        };
-
-        // Output handler completes when its channel is dropped
-        if let Some(task) = output_handler_task {
-            let _ = task.await;
-        }
-
-        // Network handler completes when its channel is dropped
-        if let Some(handler) = net_handler {
-            let _ = handler.await;
-        }
-
-        let duration = start.elapsed();
-
-        match execution_result {
-            Ok(output) => {
-                // Scrub secret placeholders from final output based on policy
-                let stdout = if matches!(scrub_stdout, crate::secrets::OutputScrubPolicy::All) {
-                    crate::secrets::scrub_placeholders_bytes(&output.stdout, &secrets)
-                } else {
-                    output.stdout
-                };
-
-                let stderr = if matches!(scrub_stderr, crate::secrets::OutputScrubPolicy::All) {
-                    crate::secrets::scrub_placeholders_bytes(&output.stderr, &secrets)
-                } else {
-                    output.stderr
-                };
-
-                // The structured result is scrubbed only when explicitly opted in
-                // (it's a programmatic side channel). Scrub the error message too.
-                let (result, result_error) = if scrub_result {
-                    (
-                        output
-                            .result
-                            .map(|r| crate::secrets::scrub_placeholders(&r, &secrets)),
-                        output
-                            .result_error
-                            .map(|e| crate::secrets::scrub_placeholders(&e, &secrets)),
-                    )
-                } else {
-                    (output.result, output.result_error)
-                };
-
-                Ok(ExecuteResult {
-                    stdout,
-                    stderr,
-                    trace: trace_events,
-                    result,
-                    result_error,
-                    stats: ExecuteStats {
-                        duration,
-                        callback_invocations,
-                        peak_memory_bytes: Some(output.peak_memory_bytes),
-                        fuel_consumed: output.fuel_consumed,
-                    },
-                })
-            }
-            Err(error) => {
-                // The executor captures cancellation at the epoch interrupt.
-                // Do not re-read the live token here: it may have been
-                // cancelled after a timeout trap and would misclassify it.
-                Err(error)
-            }
+    /// A copy of this sandbox sharing its executor and callbacks, so an
+    /// execution can run on a spawned task.
+    fn clone_for_task(&self) -> Self {
+        Self {
+            executor: Arc::clone(&self.executor),
+            callbacks: Arc::clone(&self.callbacks),
+            preamble: self.preamble.clone(),
+            type_stubs: self.type_stubs.clone(),
+            trace_handler: self.trace_handler.clone(),
+            collect_trace: self.collect_trace,
+            output_handler: self.output_handler.clone(),
+            resource_limits: self.resource_limits.clone(),
+            net_config: self.net_config.clone(),
+            secrets: self.secrets.clone(),
+            scrub_stdout: self.scrub_stdout.clone(),
+            scrub_stderr: self.scrub_stderr.clone(),
+            scrub_result: self.scrub_result,
+            scrub_files: self.scrub_files.clone(),
+            #[cfg(feature = "vfs")]
+            volumes: self.volumes.clone(),
+            #[cfg(feature = "vfs")]
+            vfs_storage: self.vfs_storage.clone(),
         }
     }
 }
