@@ -51,6 +51,12 @@ pub struct DirEntry {
 ///
 /// Implementations must be thread-safe and support async operations.
 /// All paths are absolute paths starting with `/`.
+///
+/// Operations must be cancel-safe: the guest's non-blocking file streams poll
+/// an operation once and, if it returns `Pending`, drop it and run it again
+/// later from the start. A dropped operation must therefore leave no partial
+/// effect that the rerun would duplicate (for example an append applied
+/// twice), and must not keep holding any resource such as a lock.
 #[async_trait]
 pub trait VfsStorage: Send + Sync {
     /// Downcasting hook for storage-specific operations (e.g. capturing an
@@ -120,9 +126,8 @@ pub trait VfsStorage: Send + Sync {
     /// should override this if they support sync directory creation.
     ///
     /// Implementations must not deadlock when called from inside a tokio
-    /// runtime: [`InMemoryStorage`] waits for a contended lock only on a
-    /// multi-thread runtime (or outside any runtime) and otherwise returns an
-    /// error.
+    /// runtime: on a current-thread runtime, [`InMemoryStorage`] waits for a
+    /// contended lock for a bounded time and then returns [`VfsError::Busy`].
     fn mkdir_sync(&self, _path: &str) -> VfsResult<()> {
         Err(VfsError::Storage(
             "mkdir_sync not implemented for this storage backend".to_string(),
@@ -241,6 +246,10 @@ struct StorageState {
     /// Directory markers: set of directory paths
     directories: HashSet<String>,
 }
+
+/// How long [`InMemoryStorage::mkdir_sync`] waits for a contended lock on a
+/// current-thread runtime before giving up.
+const MKDIR_SYNC_WAIT: std::time::Duration = std::time::Duration::from_secs(3);
 
 /// Default limit on the total bytes of file content an [`InMemoryStorage`]
 /// will hold: 64 MiB.
@@ -927,12 +936,23 @@ impl VfsStorage for InMemoryStorage {
             Ok(RuntimeFlavor::MultiThread) => {
                 tokio::task::block_in_place(|| create_all(&mut self.state.blocking_write()))
             }
-            // Elsewhere the lock holder can only run on this thread, so
-            // waiting for it would deadlock.
-            Ok(_) => Err(VfsError::Busy(format!(
-                "mkdir_sync {path}: storage is locked and waiting would block the \
-                 only runtime thread; use the async mkdir instead"
-            ))),
+            // Elsewhere a holder on this runtime can't run while this thread
+            // blocks, so only poll for a while: a lock held briefly by another
+            // thread still succeeds, and a same-runtime holder gets an error
+            // instead of a deadlock.
+            Ok(_) => {
+                let deadline = std::time::Instant::now() + MKDIR_SYNC_WAIT;
+                while std::time::Instant::now() < deadline {
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                    if let Ok(mut state) = self.state.try_write() {
+                        return create_all(&mut state);
+                    }
+                }
+                Err(VfsError::Busy(format!(
+                    "mkdir_sync {path}: storage stayed locked for {MKDIR_SYNC_WAIT:?}; \
+                     use the async mkdir from inside a current-thread runtime"
+                )))
+            }
         }
     }
 }
@@ -1289,8 +1309,8 @@ mod tests {
         assert!(storage.exists("/data/sub").await.unwrap());
     }
 
-    /// On a current-thread runtime the lock holder can only run on the thread
-    /// `mkdir_sync` would block, so waiting would hang forever.
+    /// On a current-thread runtime a holder on the same runtime can't run
+    /// while `mkdir_sync` blocks, so waiting for it would hang forever.
     #[tokio::test(flavor = "current_thread")]
     async fn mkdir_sync_fails_instead_of_deadlocking_on_current_thread_runtime() {
         let storage = InMemoryStorage::new();
@@ -1301,6 +1321,22 @@ mod tests {
 
         storage.mkdir_sync("/data").unwrap();
         assert!(storage.exists("/data").await.unwrap());
+    }
+
+    /// A lock held briefly by another thread is still waited for on a
+    /// current-thread runtime.
+    #[tokio::test(flavor = "current_thread")]
+    async fn mkdir_sync_waits_for_other_thread_on_current_thread_runtime() {
+        let storage = InMemoryStorage::new();
+        let guard = storage.state.read().await;
+        std::thread::scope(|s| {
+            s.spawn(move || {
+                std::thread::sleep(std::time::Duration::from_millis(50));
+                drop(guard);
+            });
+            storage.mkdir_sync("/data/sub").unwrap();
+        });
+        assert!(storage.exists("/data/sub").await.unwrap());
     }
 
     #[tokio::test]
