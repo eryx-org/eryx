@@ -381,8 +381,10 @@ function _resetOutputDecoders() {
 /**
  * Deliver any incomplete multi-byte sequence left at the end of an execution
  * (as U+FFFD) and reset the decoders, so it can't merge with the next
- * execution's output.
- * @internal Called by execute() when each execution finishes.
+ * execution's output. Only call it between executions: mid-run it would cut a
+ * character the guest is still writing.
+ * @internal Called by index.js once each execution's guest call returns, while
+ *   it still holds the execution queue.
  */
 export function _flushOutput() {
   const stdoutTail = _stdoutDecoder.decode();

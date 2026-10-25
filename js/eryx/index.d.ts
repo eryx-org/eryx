@@ -114,6 +114,11 @@ export class Sandbox {
    * and stderr is captured and returned. Variables and imports persist
    * across calls on the same Sandbox instance.
    *
+   * Calls on the shared instance run one at a time, in call order; an
+   * execute() made while another call is running waits for it to finish.
+   * Don't await execute() from inside a callback handler: it would wait for
+   * the execution that invoked the handler, which never finishes.
+   *
    * @param code - Python source code to execute
    * @returns Captured stdout and stderr
    * @throws If the Python code raises an unhandled exception
@@ -129,9 +134,9 @@ export class Sandbox {
    * the first miss switches the rest of the run to live calls. A handler can
    * throw {@link SuspendCallback} to halt execution.
    *
-   * Never rejects for script failures: check `suspended`, then `error`. Rejects
-   * if another execution is in progress, and other executions reject while this
-   * one runs, since the callback journal is shared.
+   * Never rejects for script failures: check `suspended`, then `error`. Like
+   * every call on the shared instance, it waits for earlier calls to finish
+   * first.
    */
   executeWithJournal(
     code: string,

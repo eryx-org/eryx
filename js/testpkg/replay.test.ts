@@ -280,38 +280,69 @@ await fetch(id=1)
     expect(calls).toHaveLength(2);
   });
 
-  it("rejects executions that overlap a journaled run", async () => {
+  it("queues executions that overlap a journaled run", async () => {
     let release!: () => void;
     const gate = new Promise<void>((resolve) => (release = resolve));
     setCallbackHandler(async (name, argsJson) => {
       calls.push(`${name} ${argsJson}`);
-      await gate;
-      return JSON.stringify({ v: 1 });
+      if (calls.length === 1) await gate;
+      return JSON.stringify({ v: JSON.parse(argsJson).id * 10 });
     });
 
-    const running = executeWithJournal(`print((await fetch(id=1))["v"])`);
-    await expect(executeWithJournal(CODE)).rejects.toThrow(/in progress/);
-    await expect(execute(CODE)).rejects.toThrow(/executeWithJournal/);
+    const order: string[] = [];
+    const first = executeWithJournal(`print((await fetch(id=1))["v"])`).then(
+      (o) => (order.push("first"), o),
+    );
+    const second = executeWithJournal(CODE).then(
+      (o) => (order.push("second"), o),
+    );
+    const plain = execute(CODE).then((r) => (order.push("plain"), r));
+    // Let the queued calls get as far as they can while the first is blocked.
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(calls).toEqual(['fetch {"id":1}']);
     release();
 
-    const outcome = await running;
-    expect(outcome.error).toBeUndefined();
-    expect(outcome.result?.stdout).toBe("1\n");
-    expect(entries(outcome.journal)).toHaveLength(1);
-    expect(calls).toEqual(['fetch {"id":1}']);
+    const [a, b, c] = await Promise.all([first, second, plain]);
+    expect(order).toEqual(["first", "second", "plain"]);
+    expect(a.error).toBeUndefined();
+    expect(a.result?.stdout).toBe("10\n");
+    expect(entries(a.journal)).toHaveLength(1);
+    // Each journaled run records only its own callbacks.
+    expect(b.error).toBeUndefined();
+    expect(b.result?.stdout).toBe("30\n");
+    expect(entries(b.journal)).toHaveLength(2);
+    expect(c.stdout).toBe("30\n");
+    expect(calls).toHaveLength(5);
   });
 
-  it("rejects a journaled run while another execution is in progress", async () => {
+  it("queues a journaled run behind a plain execution", async () => {
     let release!: () => void;
     const gate = new Promise<void>((resolve) => (release = resolve));
-    setCallbackHandler(async () => {
-      await gate;
-      return JSON.stringify({ v: 1 });
+    setCallbackHandler(async (name, argsJson) => {
+      calls.push(`${name} ${argsJson}`);
+      if (calls.length === 1) await gate;
+      return JSON.stringify({ v: JSON.parse(argsJson).id * 10 });
     });
 
-    const running = execute(`await fetch(id=1)`);
-    await expect(executeWithJournal(CODE)).rejects.toThrow(/in progress/);
+    const running = execute(`await fetch(id=9)`);
+    const journaled = executeWithJournal(CODE);
+    await new Promise((resolve) => setTimeout(resolve, 50));
     release();
     await running;
+
+    // The plain run's callback isn't recorded into the journaled run.
+    const outcome = await journaled;
+    expect(outcome.result?.stdout).toBe("30\n");
+    const args = entries(outcome.journal).map(
+      (e: { args_json: string }) => e.args_json,
+    );
+    expect(args).toEqual(['{"id":1}', '{"id":2}']);
+  });
+
+  it("keeps the queue going after a failed execution", async () => {
+    const failed = execute(`raise ValueError("boom")`);
+    const next = execute(`print("next")`);
+    await expect(failed).rejects.toThrow();
+    expect((await next).stdout).toBe("next\n");
   });
 });

@@ -156,22 +156,35 @@ export function setResultVariable(name) {
  *   Set if a callback threw SuspendCallback
  */
 
-// Executions in flight, and whether one of them is journaling. The callback
-// journal is global, so a journaled run can't overlap any other execution.
-let _running = 0;
-let _journaling = false;
+// The tail of the queue of calls into the shared instance. Each call starts
+// only after the previous one settles, so executions never overlap: the
+// callback journal and the streaming output decoders are module-global, and
+// jco can't run two calls on one instance at once.
+let _queue = Promise.resolve();
+
+/**
+ * Run `fn` once every call queued before it has settled.
+ * @template T
+ * @param {() => Promise<T>} fn
+ * @returns {Promise<T>}
+ */
+function _serialized(fn) {
+  const run = _queue.then(fn);
+  _queue = run.catch(() => {});
+  return run;
+}
 
 /**
  * Run code on the shared instance, flushing streamed output when it finishes.
+ * Callers must hold the queue, so the flush can't cut into another execution's
+ * output.
  * @param {string} code
  * @returns {Promise<ExecuteResult>}
  */
 async function _run(code) {
-  _running++;
   try {
     return _toResult(await _execute(code));
   } finally {
-    _running--;
     _flushOutput();
   }
 }
@@ -181,11 +194,8 @@ async function _run(code) {
  * @param {string} code
  * @returns {Promise<ExecuteResult>}
  */
-async function _executePlain(code) {
-  if (_journaling) {
-    throw new Error("cannot execute while executeWithJournal() is running");
-  }
-  return _run(code);
+function _executePlain(code) {
+  return _serialized(() => _run(code));
 }
 
 /**
@@ -194,24 +204,18 @@ async function _executePlain(code) {
  * @param {{journal?: string}} [options]
  * @returns {Promise<ReplayOutcome>}
  */
-async function _executeWithJournal(code, options) {
-  if (_running > 0) {
-    throw new Error(
-      "executeWithJournal() cannot run while another execution is in progress",
-    );
-  }
-  _beginReplay(options?.journal);
-  _journaling = true;
-  let result;
-  let error;
-  try {
-    result = await _run(code);
-  } catch (e) {
-    error = e;
-  } finally {
-    _journaling = false;
-  }
-  return { result, error, ..._endReplay(code) };
+function _executeWithJournal(code, options) {
+  return _serialized(async () => {
+    _beginReplay(options?.journal);
+    let result;
+    let error;
+    try {
+      result = await _run(code);
+    } catch (e) {
+      error = e;
+    }
+    return { result, error, ..._endReplay(code) };
+  });
 }
 
 /**
@@ -240,6 +244,11 @@ export class Sandbox {
    * and stderr is captured and returned. Variables and imports persist
    * across calls on the same Sandbox instance.
    *
+   * Calls on the shared instance run one at a time, in call order; an
+   * execute() made while another call is running waits for it to finish.
+   * Don't await execute() from inside a callback handler: it would wait for
+   * the execution that invoked the handler, which never finishes.
+   *
    * @param {string} code - Python source code to execute
    * @returns {Promise<ExecuteResult>} Captured stdout and stderr
    * @throws {Error} If the Python code raises an unhandled exception
@@ -262,9 +271,9 @@ export class Sandbox {
    * throw SuspendCallback to halt execution; the outcome then has `suspended`
    * set and a journal to resume from.
    *
-   * Never throws for script failures: check `suspended`, then `error`. Throws
-   * if another execution is in progress, and other executions throw while this
-   * one runs, since the callback journal is shared.
+   * Never throws for script failures: check `suspended`, then `error`. Like
+   * every call on the shared instance, it waits for earlier calls to finish
+   * first.
    *
    * @param {string} code - Python source code to execute
    * @param {{journal?: string}} [options] - A journal from a previous run to replay
@@ -284,7 +293,7 @@ export class Sandbox {
    * @throws {Error} If serialization fails (e.g., unpicklable objects)
    */
   async snapshotState() {
-    return _snapshotState();
+    return _serialized(() => _snapshotState());
   }
 
   /**
@@ -297,7 +306,7 @@ export class Sandbox {
    * @throws {Error} If deserialization fails
    */
   async restoreState(data) {
-    await _restoreState(data);
+    await _serialized(() => _restoreState(data));
   }
 
   /**
@@ -307,7 +316,7 @@ export class Sandbox {
    * namespace (no user-defined variables from previous calls).
    */
   async clearState() {
-    await _clearState();
+    await _serialized(() => _clearState());
   }
 }
 
