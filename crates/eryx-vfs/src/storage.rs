@@ -834,44 +834,35 @@ impl VfsStorage for InMemoryStorage {
     fn mkdir_sync(&self, path: &str) -> VfsResult<()> {
         let path = Self::normalize_path(path)?;
 
-        // Collect all directories to create first.
-        let mut dirs_to_create = Vec::new();
-        let mut current = String::new();
-        for component in path.split('/').filter(|s| !s.is_empty()) {
-            current = format!("{}/{}", current, component);
-            dirs_to_create.push(current.clone());
-        }
-
-        // Try to acquire the lock without blocking first.
-        // This handles the common case where no contention exists.
-        if let Ok(mut state) = self.state.try_write() {
-            for dir in dirs_to_create {
-                state.directories.insert(dir);
-            }
-            return Ok(());
-        }
-
-        // If try_write fails, we need to use a blocking approach.
-        // Check if we're in an async runtime context.
-        if let Ok(handle) = tokio::runtime::Handle::try_current() {
-            // We're in an async runtime - use block_on with async write.
-            // This is safe because mkdir_sync is only called during setup,
-            // before the store starts processing async WASM calls.
-            handle.block_on(async {
-                let mut state = self.state.write().await;
-                for dir in dirs_to_create {
-                    state.directories.insert(dir);
+        // Creates every missing ancestor, like `mkdir -p`.
+        let create_all = |state: &mut StorageState| {
+            let mut current = String::new();
+            for component in path.split('/').filter(|s| !s.is_empty()) {
+                current = format!("{current}/{component}");
+                if state.files.contains_key(&current) {
+                    return Err(VfsError::NotDirectory(current));
                 }
-            });
-        } else {
-            // Not in an async runtime - safe to use blocking_write.
-            let mut state = self.state.blocking_write();
-            for dir in dirs_to_create {
-                state.directories.insert(dir);
+                state.directories.insert(current.clone());
             }
+            Ok(())
+        };
+
+        // Uncontended: take the lock without blocking.
+        if let Ok(mut state) = self.state.try_write() {
+            return create_all(&mut state);
         }
 
-        Ok(())
+        // `blocking_write` panics when called from inside a tokio runtime, so
+        // in that case wait for the lock on a separate thread.
+        if tokio::runtime::Handle::try_current().is_ok() {
+            std::thread::scope(|s| {
+                s.spawn(|| create_all(&mut self.state.blocking_write()))
+                    .join()
+                    .unwrap_or_else(|e| std::panic::resume_unwind(e))
+            })
+        } else {
+            create_all(&mut self.state.blocking_write())
+        }
     }
 }
 
@@ -1209,6 +1200,31 @@ mod tests {
         // Verify using blocking read
         let state = storage.state.blocking_read();
         assert!(state.directories.contains("/data"));
+    }
+
+    /// `blocking_write` and `Handle::block_on` both panic inside a runtime, so
+    /// a contended lock used to take the host down.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn mkdir_sync_waits_for_contended_lock_inside_runtime() {
+        let storage = InMemoryStorage::new();
+        let guard = storage.state.read().await;
+        std::thread::scope(|s| {
+            s.spawn(move || {
+                std::thread::sleep(std::time::Duration::from_millis(50));
+                drop(guard);
+            });
+            storage.mkdir_sync("/data/sub").unwrap();
+        });
+        assert!(storage.exists("/data/sub").await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn mkdir_sync_refuses_to_shadow_a_file() {
+        let storage = InMemoryStorage::new();
+        storage.write("/data", b"x").await.unwrap();
+        let err = storage.mkdir_sync("/data/sub").unwrap_err();
+        assert!(matches!(err, VfsError::NotDirectory(_)), "{err:?}");
+        assert!(!storage.exists("/data/sub").await.unwrap());
     }
 
     #[test]
