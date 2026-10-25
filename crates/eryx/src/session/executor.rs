@@ -467,6 +467,11 @@ pub struct SessionExecutor {
     /// Maximum guest memory, preserved when the store is recreated.
     memory_limit: Option<u64>,
 
+    /// Peak memory and fuel consumed by the most recent execution, kept so
+    /// callers can report them when the execution failed.
+    last_peak_memory_bytes: u64,
+    last_fuel_consumed: Option<u64>,
+
     /// VFS storage that persists across resets.
     #[cfg(feature = "vfs")]
     vfs_storage: Option<eryx_vfs::ArcStorage>,
@@ -846,6 +851,8 @@ impl SessionExecutor {
             execution_timeout: limits.execution_timeout,
             fuel_limit: limits.max_fuel,
             memory_limit: limits.max_memory_bytes,
+            last_peak_memory_bytes: 0,
+            last_fuel_consumed: None,
             vfs_storage: Some(vfs_storage),
             vfs_config: Some(vfs_config),
             vfs_max_bytes: limits.max_vfs_bytes,
@@ -914,6 +921,8 @@ impl SessionExecutor {
             execution_timeout: limits.execution_timeout,
             fuel_limit: limits.max_fuel,
             memory_limit: limits.max_memory_bytes,
+            last_peak_memory_bytes: 0,
+            last_fuel_consumed: None,
         })
     }
 
@@ -991,6 +1000,23 @@ impl SessionExecutor {
         self.fuel_limit
     }
 
+    /// Peak guest memory, in bytes, reached during the most recent execution.
+    ///
+    /// Unlike [`ExecutionOutput::peak_memory_bytes`], this is also available
+    /// when the execution failed (e.g. a Python exception or a timeout). It is
+    /// 0 if the last call failed before the guest ran.
+    #[must_use]
+    pub fn last_peak_memory_bytes(&self) -> u64 {
+        self.last_peak_memory_bytes
+    }
+
+    /// Fuel consumed by the most recent execution, also available when the
+    /// execution failed. `None` if the last call failed before the guest ran.
+    #[must_use]
+    pub fn last_fuel_consumed(&self) -> Option<u64> {
+        self.last_fuel_consumed
+    }
+
     /// Execute Python code with a fluent builder API.
     ///
     /// State from previous executions is preserved - variables defined in
@@ -1029,6 +1055,8 @@ impl SessionExecutor {
         output_tx: Option<mpsc::UnboundedSender<crate::wasm::OutputRequest>>,
         per_execute_fuel_limit: Option<u64>,
     ) -> Result<ExecutionOutput, Error> {
+        self.last_peak_memory_bytes = 0;
+        self.last_fuel_consumed = None;
         crate::error::validate_user_code(code)?;
 
         let execution_timeout = self.execution_timeout;
@@ -1152,6 +1180,8 @@ impl SessionExecutor {
 
         // Calculate fuel consumed during execution
         let fuel_consumed = Some(initial_fuel.saturating_sub(remaining_fuel));
+        self.last_peak_memory_bytes = peak_memory;
+        self.last_fuel_consumed = fuel_consumed;
 
         // Restore store and bindings before handling result
         self.store = Some(store);
