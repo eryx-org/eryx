@@ -753,6 +753,15 @@ except eryx.TimeoutError as e:
     print(f"Timed out: {e}")
 ```
 
+## Using eryx with `os.fork()`
+
+Sandboxes, sessions, factories, pools and MCP managers run on a process-wide
+async runtime whose worker threads don't survive `fork()`. A forked child gets
+a fresh runtime the first time it creates one of these objects, so create new
+ones in the child; objects inherited from the parent must not be used there.
+The same applies to multiprocessing's `fork` start method; `spawn` and
+`forkserver` children start clean.
+
 ## Development
 
 ### Building
