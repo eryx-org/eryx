@@ -11,11 +11,14 @@
 //!
 //! # Features
 //!
-//! - **Pre-warming**: Maintain minimum idle instances for immediate availability
+//! - **Pre-warming**: Create `min_idle` instances up front for immediate availability
 //! - **Bounded concurrency**: Limit maximum concurrent sandbox usage via semaphore
 //! - **Statistics tracking**: Monitor pool usage and performance metrics
-//! - **Automatic cleanup**: Evict idle instances after configurable timeout
-//! - **State reset**: Clear per-request state when returning to pool
+//! - **Idle eviction**: [`SandboxPool::evict_idle`] drops instances idle longer
+//!   than `idle_timeout`; call it periodically, the pool does not run it itself
+//! - **Per-request settings**: Callbacks, handlers, resource limits and VFS
+//!   storage set on a [`PooledSandbox`] are cleared when it returns to the pool.
+//!   Python state is not shared: each execution runs in a fresh instance.
 //!
 //! # Example
 //!
@@ -72,19 +75,20 @@ pub struct PoolConfig {
     /// Default: 10
     pub max_size: usize,
 
-    /// Minimum number of idle sandboxes to maintain.
+    /// Number of sandboxes to pre-warm on creation.
     ///
-    /// The pool will pre-warm this many sandboxes on creation and maintain
-    /// at least this many idle instances for immediate availability.
+    /// The pool creates this many sandboxes up front, and
+    /// [`SandboxPool::evict_idle`] never evicts below it. The pool does not
+    /// create replacements on its own when idle instances are acquired.
     ///
     /// Default: 1
     pub min_idle: usize,
 
-    /// How long to keep idle sandboxes before evicting them.
+    /// How long an idle sandbox is kept before [`SandboxPool::evict_idle`]
+    /// may evict it.
     ///
-    /// Sandboxes that have been idle longer than this duration may be
-    /// evicted to free resources. This only applies to sandboxes beyond
-    /// the `min_idle` threshold.
+    /// Eviction only happens when `evict_idle` is called, and only applies
+    /// to sandboxes beyond the `min_idle` threshold.
     ///
     /// Default: 300 seconds (5 minutes)
     pub idle_timeout: Duration,
@@ -113,10 +117,6 @@ impl Default for PoolConfig {
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum PoolError {
-    /// Pool has reached maximum capacity and no sandboxes are available.
-    #[error("pool exhausted: all {0} sandboxes are in use")]
-    Exhausted(usize),
-
     /// Timed out waiting for an available sandbox.
     #[error("acquire timeout after {0:?}")]
     Timeout(Duration),
@@ -124,10 +124,6 @@ pub enum PoolError {
     /// Failed to create a new sandbox instance.
     #[error("sandbox creation failed: {0}")]
     Creation(String),
-
-    /// Failed to reset sandbox state.
-    #[error("sandbox reset failed: {0}")]
-    Reset(String),
 
     /// Pool has been shut down.
     #[error("pool is closed")]
@@ -835,9 +831,6 @@ mod tests {
 
     #[test]
     fn pool_error_display() {
-        let err = PoolError::Exhausted(10);
-        assert!(err.to_string().contains("10"));
-
         let err = PoolError::Timeout(Duration::from_secs(5));
         assert!(err.to_string().contains("5s"));
 

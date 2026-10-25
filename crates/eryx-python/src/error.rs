@@ -127,15 +127,11 @@ pub fn make_runtime() -> PyResult<Arc<tokio::runtime::Runtime>> {
 /// Convert an `eryx::PoolError` to a Python exception.
 pub fn pool_error_to_py(err: eryx::PoolError) -> PyErr {
     match err {
-        eryx::PoolError::Exhausted(n) => {
-            PoolExhaustedError::new_err(format!("all {n} sandboxes are in use"))
-        }
         eryx::PoolError::Timeout(d) => {
             PoolTimeoutError::new_err(format!("acquire timed out after {d:?}"))
         }
         eryx::PoolError::Closed => PoolClosedError::new_err("pool is closed"),
         eryx::PoolError::Creation(msg) => InitializationError::new_err(msg),
-        eryx::PoolError::Reset(msg) => PoolError::new_err(msg),
         other => PoolError::new_err(other.to_string()),
     }
 }
