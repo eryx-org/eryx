@@ -45,7 +45,7 @@ impl From<wasmtime::component::ResourceTableError> for HybridFsError {
 
 impl From<std::io::Error> for HybridFsError {
     fn from(err: std::io::Error) -> Self {
-        HybridFsError(crate::VfsError::Io(err.to_string()))
+        HybridFsError(crate::VfsError::HostIo(err))
     }
 }
 
@@ -95,11 +95,34 @@ pub fn vfs_error_to_error_code(err: &crate::VfsError) -> types::ErrorCode {
         crate::VfsError::PermissionDenied(_) => types::ErrorCode::NotPermitted,
         crate::VfsError::InvalidPath(_) => types::ErrorCode::Invalid,
         crate::VfsError::Io(_) => types::ErrorCode::Io,
+        crate::VfsError::HostIo(err) => io_error_to_error_code(err),
         crate::VfsError::Storage(_) => types::ErrorCode::Io,
         crate::VfsError::InvalidSeek(_) => types::ErrorCode::Invalid,
         crate::VfsError::Busy(_) => types::ErrorCode::Busy,
         // ENOSPC: indistinguishable from a full disk from the guest's side.
         crate::VfsError::QuotaExceeded(_) => types::ErrorCode::InsufficientSpace,
+    }
+}
+
+/// Convert std::io::Error to WASI ErrorCode.
+pub(crate) fn io_error_to_error_code(err: &std::io::Error) -> types::ErrorCode {
+    match err.kind() {
+        std::io::ErrorKind::NotFound => types::ErrorCode::NoEntry,
+        std::io::ErrorKind::PermissionDenied => types::ErrorCode::NotPermitted,
+        std::io::ErrorKind::AlreadyExists => types::ErrorCode::Exist,
+        std::io::ErrorKind::WouldBlock => types::ErrorCode::WouldBlock,
+        std::io::ErrorKind::InvalidInput => types::ErrorCode::Invalid,
+        std::io::ErrorKind::InvalidData => types::ErrorCode::Invalid,
+        std::io::ErrorKind::Interrupted => types::ErrorCode::Interrupted,
+        std::io::ErrorKind::NotADirectory => types::ErrorCode::NotDirectory,
+        std::io::ErrorKind::IsADirectory => types::ErrorCode::IsDirectory,
+        std::io::ErrorKind::DirectoryNotEmpty => types::ErrorCode::NotEmpty,
+        std::io::ErrorKind::ReadOnlyFilesystem => types::ErrorCode::ReadOnly,
+        std::io::ErrorKind::FileTooLarge => types::ErrorCode::FileTooLarge,
+        std::io::ErrorKind::ResourceBusy => types::ErrorCode::Busy,
+        std::io::ErrorKind::StorageFull => types::ErrorCode::InsufficientSpace,
+        std::io::ErrorKind::Unsupported => types::ErrorCode::Unsupported,
+        _ => types::ErrorCode::Io,
     }
 }
 
@@ -173,4 +196,24 @@ pub struct HybridFilesystem<S: VfsStorage + Clone + 'static>(std::marker::Phanto
 
 impl<S: VfsStorage + Clone + 'static> HasData for HybridFilesystem<S> {
     type Data<'a> = HybridVfsState<'a, S>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn host_io_errors_keep_their_error_code() {
+        use std::io::{Error, ErrorKind};
+        for (kind, code) in [
+            (ErrorKind::NotFound, types::ErrorCode::NoEntry),
+            (ErrorKind::AlreadyExists, types::ErrorCode::Exist),
+            (ErrorKind::DirectoryNotEmpty, types::ErrorCode::NotEmpty),
+            (ErrorKind::ReadOnlyFilesystem, types::ErrorCode::ReadOnly),
+            (ErrorKind::StorageFull, types::ErrorCode::InsufficientSpace),
+        ] {
+            let err = HybridFsError::from(Error::from(kind));
+            assert_eq!(err.downcast().ok(), Some(code), "{kind:?}");
+        }
+    }
 }

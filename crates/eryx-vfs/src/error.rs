@@ -41,6 +41,13 @@ pub enum VfsError {
     #[error("I/O error: {0}")]
     Io(String),
 
+    /// I/O error from the host filesystem behind a real-directory mount.
+    ///
+    /// Keeps the original error so its kind (not found, permission denied,
+    /// ...) reaches the guest as the matching error code rather than `EIO`.
+    #[error("I/O error: {0}")]
+    HostIo(#[from] std::io::Error),
+
     /// Storage backend error.
     #[error("storage error: {0}")]
     Storage(String),

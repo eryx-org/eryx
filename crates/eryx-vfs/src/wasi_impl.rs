@@ -159,6 +159,8 @@ pub fn vfs_error_to_error_code(err: &crate::VfsError) -> types::ErrorCode {
         VfsError::DirectoryNotEmpty(_) => types::ErrorCode::NotEmpty,
         VfsError::InvalidPath(_) => types::ErrorCode::Invalid,
         VfsError::Io(_) => types::ErrorCode::Io,
+        // Only real-directory mounts produce host errors; pure VFS never does.
+        VfsError::HostIo(_) => types::ErrorCode::Io,
         VfsError::Storage(_) => types::ErrorCode::Io,
         VfsError::InvalidSeek(_) => types::ErrorCode::InvalidSeek,
         VfsError::Busy(_) => types::ErrorCode::Busy,
