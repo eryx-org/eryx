@@ -63,6 +63,7 @@ fn main() {
     }
     // Rerun if the build flag changes
     println!("cargo::rerun-if-env-changed=BUILD_ERYX_RUNTIME");
+    println!("cargo::rerun-if-env-changed=ERYX_REQUIRE_FRESH_PREBUILT");
     // Rerun if pre-built artifacts change
     println!(
         "cargo::rerun-if-changed={}",
@@ -108,6 +109,27 @@ fn main() {
 
     let out_stamp = out_dir.join(SOURCES_STAMP);
 
+    // A committed prebuilt/ is an input, not a build output, so a guest change
+    // that forgot to refresh it would otherwise silently run the old guest
+    // code. Warn by default: the check is only as good as the stamp, and a
+    // stale snapshot still links. CI sets ERYX_REQUIRE_FRESH_PREBUILT to fail
+    // instead, and to check even builds that don't use prebuilt/ themselves,
+    // since its later jobs replace prebuilt/ with freshly built artifacts.
+    let require_fresh = env::var("ERYX_REQUIRE_FRESH_PREBUILT").is_ok();
+    let uses_prebuilt = !build_requested && preinit && has_prebuilt;
+    if let Some(hash) = &sources_hash
+        && (require_fresh || uses_prebuilt)
+        && read_stamp(&prebuilt_dir.join(SOURCES_STAMP)).as_ref() != Some(hash)
+    {
+        let msg = "crates/eryx-runtime/prebuilt/ was not built from the current guest sources, \
+                   so preinit builds will use stale guest code. \
+                   Run `mise run update-prebuilt` to rebuild it.";
+        if require_fresh {
+            panic!("{msg} (failing because ERYX_REQUIRE_FRESH_PREBUILT is set)");
+        }
+        println!("cargo::warning={msg}");
+    }
+
     if build_requested {
         // Full build requested - build everything from scratch
         build_late_linking(&manifest_dir, &wasm_runtime_dir, sources_hash.as_deref());
@@ -132,19 +154,6 @@ fn main() {
                 None => std::fs::remove_file(&out_stamp).or(Ok(())),
             }
             .expect("failed to update OUT_DIR sources stamp");
-            // A committed prebuilt/ is an input, not a build output, so a
-            // guest change that forgot to refresh it would otherwise silently
-            // run the old guest code. Warn rather than fail: the check is only
-            // as good as the stamp, and a stale snapshot still links.
-            if let Some(hash) = &sources_hash
-                && prebuilt_stamp.as_ref() != Some(hash)
-            {
-                println!(
-                    "cargo::warning=crates/eryx-runtime/prebuilt/ was not built from the current \
-                     guest sources, so preinit builds will use stale guest code. \
-                     Run `mise run update-prebuilt` to rebuild it."
-                );
-            }
         } else if has_out_artifacts
             && (sources_hash.is_none() || read_stamp(&out_stamp) == sources_hash)
         {
