@@ -279,4 +279,39 @@ await fetch(id=1)
     await execute(CODE);
     expect(calls).toHaveLength(2);
   });
+
+  it("rejects executions that overlap a journaled run", async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    setCallbackHandler(async (name, argsJson) => {
+      calls.push(`${name} ${argsJson}`);
+      await gate;
+      return JSON.stringify({ v: 1 });
+    });
+
+    const running = executeWithJournal(`print((await fetch(id=1))["v"])`);
+    await expect(executeWithJournal(CODE)).rejects.toThrow(/in progress/);
+    await expect(execute(CODE)).rejects.toThrow(/executeWithJournal/);
+    release();
+
+    const outcome = await running;
+    expect(outcome.error).toBeUndefined();
+    expect(outcome.result?.stdout).toBe("1\n");
+    expect(entries(outcome.journal)).toHaveLength(1);
+    expect(calls).toEqual(['fetch {"id":1}']);
+  });
+
+  it("rejects a journaled run while another execution is in progress", async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    setCallbackHandler(async () => {
+      await gate;
+      return JSON.stringify({ v: 1 });
+    });
+
+    const running = execute(`await fetch(id=1)`);
+    await expect(executeWithJournal(CODE)).rejects.toThrow(/in progress/);
+    release();
+    await running;
+  });
 });

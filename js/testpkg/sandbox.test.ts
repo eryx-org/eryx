@@ -41,7 +41,12 @@ print(f"dict: {dct}")
   it("returns stderr on errors", async () => {
     await expect(
       sandbox.execute('raise ValueError("test error")'),
-    ).rejects.toThrow();
+    ).rejects.toThrow(/ValueError: test error/);
+  });
+
+  it("rejects with an Error", async () => {
+    const error = await sandbox.execute("raise ValueError()").catch((e) => e);
+    expect(error).toBeInstanceOf(Error);
   });
 
   it("supports stdlib imports", async () => {

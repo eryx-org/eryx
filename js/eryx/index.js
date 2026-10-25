@@ -156,6 +156,37 @@ export function setResultVariable(name) {
  *   Set if a callback threw SuspendCallback
  */
 
+// Executions in flight, and whether one of them is journaling. The callback
+// journal is global, so a journaled run can't overlap any other execution.
+let _running = 0;
+let _journaling = false;
+
+/**
+ * Run code on the shared instance.
+ * @param {string} code
+ * @returns {Promise<ExecuteResult>}
+ */
+async function _run(code) {
+  _running++;
+  try {
+    return _toResult(await _execute(code));
+  } finally {
+    _running--;
+  }
+}
+
+/**
+ * Execute code without journaling.
+ * @param {string} code
+ * @returns {Promise<ExecuteResult>}
+ */
+async function _executePlain(code) {
+  if (_journaling) {
+    throw new Error("cannot execute while executeWithJournal() is running");
+  }
+  return _run(code);
+}
+
 /**
  * Execute code while journaling callback results, replaying from `journal`.
  * @param {string} code
@@ -163,13 +194,21 @@ export function setResultVariable(name) {
  * @returns {Promise<ReplayOutcome>}
  */
 async function _executeWithJournal(code, options) {
+  if (_running > 0) {
+    throw new Error(
+      "executeWithJournal() cannot run while another execution is in progress",
+    );
+  }
   _beginReplay(options?.journal);
+  _journaling = true;
   let result;
   let error;
   try {
-    result = await execute(code);
+    result = await _run(code);
   } catch (e) {
     error = e;
+  } finally {
+    _journaling = false;
   }
   return { result, error, ..._endReplay(code) };
 }
@@ -209,11 +248,7 @@ export class Sandbox {
    * console.log(result.stdout);  // "hello\n"
    */
   async execute(code) {
-    const output = await _execute(code);
-    if (output.tag === "error") {
-      throw new Error(output.val);
-    }
-    return _toResult(output);
+    return _executePlain(code);
   }
 
   /**
@@ -226,7 +261,9 @@ export class Sandbox {
    * throw SuspendCallback to halt execution; the outcome then has `suspended`
    * set and a journal to resume from.
    *
-   * Never throws for script failures: check `suspended`, then `error`.
+   * Never throws for script failures: check `suspended`, then `error`. Throws
+   * if another execution is in progress, and other executions throw while this
+   * one runs, since the callback journal is shared.
    *
    * @param {string} code - Python source code to execute
    * @param {{journal?: string}} [options] - A journal from a previous run to replay
@@ -292,11 +329,7 @@ export class Sandbox {
  * console.log(result.stdout);  // "hello"
  */
 export async function execute(code) {
-  const output = await _execute(code);
-  if (output.tag === "error") {
-    throw new Error(output.val);
-  }
-  return _toResult(output);
+  return _executePlain(code);
 }
 
 /**

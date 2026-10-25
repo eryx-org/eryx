@@ -129,7 +129,9 @@ export class Sandbox {
    * the first miss switches the rest of the run to live calls. A handler can
    * throw {@link SuspendCallback} to halt execution.
    *
-   * Never rejects for script failures: check `suspended`, then `error`.
+   * Never rejects for script failures: check `suspended`, then `error`. Rejects
+   * if another execution is in progress, and other executions reject while this
+   * one runs, since the callback journal is shared.
    */
   executeWithJournal(
     code: string,
