@@ -27,6 +27,12 @@ use std::path::{Path, PathBuf};
 
 use crate::error::Error;
 
+/// Most bytes a package archive may extract to.
+const MAX_EXTRACTED_BYTES: u64 = 1024 * 1024 * 1024;
+
+/// Most entries a package archive may contain.
+const MAX_ARCHIVE_ENTRIES: usize = 100_000;
+
 /// Detected package format.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PackageFormat {
@@ -162,7 +168,6 @@ impl ExtractedPackage {
     fn from_tar_gz_bytes(bytes: &[u8], name_hint: &str) -> Result<Self, Error> {
         let cursor = std::io::Cursor::new(bytes);
         let decoder = flate2::read::GzDecoder::new(cursor);
-        let mut archive = tar::Archive::new(decoder);
 
         // Create temp directory for extraction
         let temp_dir = tempfile::TempDir::new()
@@ -170,9 +175,7 @@ impl ExtractedPackage {
 
         let extract_path = temp_dir.path();
 
-        archive
-            .unpack(extract_path)
-            .map_err(|e| Error::Initialization(format!("Failed to extract tar.gz: {e}")))?;
+        unpack_tar(decoder, extract_path)?;
 
         // Find native extensions and package name
         let (native_extensions, name) = Self::scan_for_extensions(extract_path)?;
@@ -220,6 +223,14 @@ impl ExtractedPackage {
 
         let extract_path = temp_dir.path();
 
+        if archive.len() > MAX_ARCHIVE_ENTRIES {
+            return Err(Error::Initialization(format!(
+                "Archive has {} entries, more than the limit of {MAX_ARCHIVE_ENTRIES}",
+                archive.len()
+            )));
+        }
+        let mut remaining_bytes = MAX_EXTRACTED_BYTES;
+
         // Extract all files
         for i in 0..archive.len() {
             let mut file = archive
@@ -236,6 +247,13 @@ impl ExtractedPackage {
             })?;
             let outpath = extract_path.join(enclosed);
 
+            if file.is_symlink() {
+                return Err(Error::Initialization(format!(
+                    "Archive entry is a symlink: {}",
+                    file.name().unwrap_or_default()
+                )));
+            }
+
             if file.is_dir() {
                 std::fs::create_dir_all(&outpath).map_err(|e| {
                     Error::Initialization(format!("Failed to create directory: {e}"))
@@ -250,8 +268,18 @@ impl ExtractedPackage {
                 let mut outfile = std::fs::File::create(&outpath)
                     .map_err(|e| Error::Initialization(format!("Failed to create file: {e}")))?;
 
-                std::io::copy(&mut file, &mut outfile)
-                    .map_err(|e| Error::Initialization(format!("Failed to extract file: {e}")))?;
+                // Read one byte past the budget so an oversized entry is
+                // detected without trusting its declared size.
+                let copied =
+                    std::io::copy(&mut (&mut file).take(remaining_bytes + 1), &mut outfile)
+                        .map_err(|e| {
+                            Error::Initialization(format!("Failed to extract file: {e}"))
+                        })?;
+                remaining_bytes = remaining_bytes.checked_sub(copied).ok_or_else(|| {
+                    Error::Initialization(format!(
+                        "Archive extracts to more than the limit of {MAX_EXTRACTED_BYTES} bytes"
+                    ))
+                })?;
             }
         }
 
@@ -281,7 +309,6 @@ impl ExtractedPackage {
             .map_err(|e| Error::Initialization(format!("Failed to open tar.gz: {e}")))?;
 
         let decoder = flate2::read::GzDecoder::new(file);
-        let mut archive = tar::Archive::new(decoder);
 
         // Create temp directory for extraction
         let temp_dir = tempfile::TempDir::new()
@@ -289,9 +316,7 @@ impl ExtractedPackage {
 
         let extract_path = temp_dir.path();
 
-        archive
-            .unpack(extract_path)
-            .map_err(|e| Error::Initialization(format!("Failed to extract tar.gz: {e}")))?;
+        unpack_tar(decoder, extract_path)?;
 
         // Find native extensions and package name
         let (native_extensions, name) = Self::scan_for_extensions(extract_path)?;
@@ -361,8 +386,9 @@ impl ExtractedPackage {
 
             let path = entry.path();
 
-            // Look for .so files (native extensions)
-            if path.extension().is_some_and(|ext| ext == "so") {
+            // Look for .so files (native extensions). Only regular files: the
+            // walk does not follow symlinks, and neither should reading them.
+            if entry.file_type().is_file() && path.extension().is_some_and(|ext| ext == "so") {
                 // Compute the relative path within the package directory
                 let relative = path.strip_prefix(dir).map_err(|e| {
                     Error::Initialization(format!("Failed to compute relative path: {e}"))
@@ -399,6 +425,50 @@ impl ExtractedPackage {
 
         Ok((extensions, package_name))
     }
+}
+
+/// Extract a tar archive into `dest`, accepting only regular files and
+/// directories that stay inside it, within the size and entry limits.
+fn unpack_tar<R: Read>(reader: R, dest: &Path) -> Result<(), Error> {
+    let extract_error =
+        |e: std::io::Error| Error::Initialization(format!("Failed to extract tar.gz: {e}"));
+    let mut archive = tar::Archive::new(reader);
+    let mut remaining_bytes = MAX_EXTRACTED_BYTES;
+
+    for (index, entry) in archive.entries().map_err(extract_error)?.enumerate() {
+        let mut entry = entry.map_err(extract_error)?;
+        let path = entry.path().map_err(extract_error)?.display().to_string();
+
+        if index >= MAX_ARCHIVE_ENTRIES {
+            return Err(Error::Initialization(format!(
+                "Archive has more than the limit of {MAX_ARCHIVE_ENTRIES} entries"
+            )));
+        }
+
+        let kind = entry.header().entry_type();
+        if kind.is_pax_global_extensions() {
+            continue;
+        }
+        if !kind.is_file() && !kind.is_dir() {
+            return Err(Error::Initialization(format!(
+                "Archive entry is not a regular file or directory: {path}"
+            )));
+        }
+
+        remaining_bytes = remaining_bytes.checked_sub(entry.size()).ok_or_else(|| {
+            Error::Initialization(format!(
+                "Archive extracts to more than the limit of {MAX_EXTRACTED_BYTES} bytes"
+            ))
+        })?;
+
+        // `unpack_in` refuses (returns false for) paths escaping `dest`.
+        if !entry.unpack_in(dest).map_err(extract_error)? {
+            return Err(Error::Initialization(format!(
+                "Archive entry has an unsafe path: {path}"
+            )));
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -442,6 +512,43 @@ mod tests {
             "expected unsafe path error, got {:?}",
             result.map(|p| p.name)
         );
+        Ok(())
+    }
+
+    #[test]
+    fn tar_symlink_entry_is_rejected() -> Result<(), Box<dyn std::error::Error>> {
+        let mut builder = tar::Builder::new(Vec::new());
+        let mut header = tar::Header::new_gnu();
+        header.set_entry_type(tar::EntryType::Symlink);
+        header.set_size(0);
+        builder.append_link(&mut header, "pkg/evil.so", "/etc/passwd")?;
+        let tar = builder.into_inner()?;
+
+        let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+        std::io::Write::write_all(&mut gz, &tar)?;
+        let result = ExtractedPackage::from_tar_gz_bytes(&gz.finish()?, "evil");
+        assert!(
+            matches!(&result, Err(Error::Initialization(msg)) if msg.contains("not a regular file")),
+            "expected symlink rejection, got {:?}",
+            result.map(|p| p.name)
+        );
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn directory_scan_skips_symlinked_extensions() -> Result<(), Box<dyn std::error::Error>> {
+        let dir = tempfile::TempDir::new()?;
+        std::fs::write(dir.path().join("real.so"), b"\0asm")?;
+        std::os::unix::fs::symlink("/etc/passwd", dir.path().join("link.so"))?;
+
+        let package = ExtractedPackage::from_directory(dir.path())?;
+        let names: Vec<_> = package
+            .native_extensions
+            .iter()
+            .map(|ext| ext.relative_path.as_str())
+            .collect();
+        assert_eq!(names, ["real.so"]);
         Ok(())
     }
 
