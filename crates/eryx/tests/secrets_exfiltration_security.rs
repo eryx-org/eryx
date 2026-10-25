@@ -518,9 +518,12 @@ sock.connect(("127.0.0.1", 19106))
 # 2. Exfiltration attempt with the secret
 request1 = "GET /innocent HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n"
 request2 = f"GET /exfil HTTP/1.1\r\nHost: 127.0.0.1\r\nX-Stolen: {key}\r\n\r\n"
-sock.send((request1 + request2).encode())
-
-response = sock.recv(4096)
+try:
+    sock.send((request1 + request2).encode())
+    response = sock.recv(4096)
+except Exception as e:
+    # The second request's headers are checked like the first one's.
+    print(f"BLOCKED: {e}")
 sock.close()
 print("PIPELINE_EXFIL: sent")
 "#,
