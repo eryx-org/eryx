@@ -3,10 +3,12 @@
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 
 use clap::Parser;
 use eryx::{PoolConfig, Sandbox, SandboxPool};
-use eryx_server::service::EryxService;
+use eryx_server::proto::eryx::v1::eryx_server::EryxServer;
+use eryx_server::service::{EryxService, MAX_MESSAGE_SIZE};
 use eryx_server::telemetry::setup_tracing;
 use futures::StreamExt;
 use tonic::transport::server::{ServerTlsConfig, TcpIncoming};
@@ -30,6 +32,37 @@ struct Args {
     /// Minimum number of idle sandboxes to keep warm.
     #[arg(long, default_value_t = 1, env = "ERYX_POOL_MIN_IDLE")]
     pool_min_idle: usize,
+
+    /// Seconds a request waits for a free sandbox before failing with
+    /// `UNAVAILABLE`.
+    #[arg(long, default_value_t = 30, env = "ERYX_POOL_ACQUIRE_TIMEOUT_SECS")]
+    pool_acquire_timeout_secs: u64,
+
+    /// Seconds an idle sandbox beyond `--pool-min-idle` is kept before it is
+    /// evicted.
+    #[arg(long, default_value_t = 300, env = "ERYX_POOL_IDLE_TIMEOUT_SECS")]
+    pool_idle_timeout_secs: u64,
+
+    /// Largest gRPC message, in bytes, the server accepts or sends.
+    ///
+    /// Clients must raise their own limits to match (e.g. grpc-go's
+    /// `MaxCallRecvMsgSize`).
+    #[arg(long, default_value_t = MAX_MESSAGE_SIZE, env = "ERYX_MAX_MESSAGE_SIZE")]
+    max_message_size: usize,
+
+    /// Maximum concurrent RPCs (HTTP/2 streams) per client connection.
+    #[arg(long, default_value_t = 200, env = "ERYX_MAX_CONCURRENT_STREAMS")]
+    max_concurrent_streams: u32,
+
+    /// Seconds between HTTP/2 keepalive pings sent to each client; 0 disables
+    /// them.
+    #[arg(long, default_value_t = 60, env = "ERYX_HTTP2_KEEPALIVE_INTERVAL_SECS")]
+    http2_keepalive_interval_secs: u64,
+
+    /// Seconds to wait for a keepalive ping acknowledgement before closing the
+    /// connection.
+    #[arg(long, default_value_t = 20, env = "ERYX_HTTP2_KEEPALIVE_TIMEOUT_SECS")]
+    http2_keepalive_timeout_secs: u64,
 
     /// Address for the Prometheus metrics endpoint.
     #[arg(long, default_value = "0.0.0.0:9090", env = "ERYX_METRICS_ADDR")]
@@ -107,12 +140,17 @@ fn build_tls_config(args: &Args) -> Result<Option<ServerTlsConfig>, Box<dyn std:
     Ok(Some(tls))
 }
 
-/// Spawn a background task that periodically records pool gauge metrics.
-fn spawn_pool_stats_recorder(pool: Arc<SandboxPool>) {
+/// Spawn a background task that periodically evicts idle sandboxes and
+/// records pool gauge metrics.
+fn spawn_pool_maintenance(pool: Arc<SandboxPool>) {
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(5));
         loop {
             interval.tick().await;
+            let evicted = pool.evict_idle();
+            if evicted > 0 {
+                tracing::debug!(evicted, "evicted idle sandboxes");
+            }
             let stats = pool.stats();
             metrics::gauge!("eryx_sandbox_pool_in_use").set(stats.in_use as f64);
             metrics::gauge!("eryx_sandbox_pool_available").set(stats.available as f64);
@@ -180,13 +218,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let pool_config = PoolConfig {
         max_size: args.pool_max_size,
         min_idle: args.pool_min_idle,
-        ..Default::default()
+        acquire_timeout: Duration::from_secs(args.pool_acquire_timeout_secs),
+        idle_timeout: Duration::from_secs(args.pool_idle_timeout_secs),
     };
 
     tracing::info!(
         %addr,
         pool_max_size = pool_config.max_size,
         pool_min_idle = pool_config.min_idle,
+        pool_acquire_timeout = ?pool_config.acquire_timeout,
+        pool_idle_timeout = ?pool_config.idle_timeout,
+        max_message_size = args.max_message_size,
+        max_concurrent_streams = args.max_concurrent_streams,
+        http2_keepalive_interval_secs = args.http2_keepalive_interval_secs,
+        http2_keepalive_timeout_secs = args.http2_keepalive_timeout_secs,
         runtime_cwasm = ?args.runtime_cwasm,
         stdlib = ?args.stdlib,
         metrics_addr = %args.metrics_addr,
@@ -235,8 +280,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let pool = SandboxPool::new(builder, pool_config).await?;
     let pool = Arc::new(pool);
 
-    // Record pool gauge metrics every 5 seconds.
-    spawn_pool_stats_recorder(Arc::clone(&pool));
+    // Evict idle sandboxes and record pool gauge metrics every 5 seconds.
+    spawn_pool_maintenance(Arc::clone(&pool));
 
     let signer = match &args.journal_signing_key {
         Some(hex_key) => {
@@ -259,9 +304,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             eryx_server::replay::JournalSigner::random()
         }
     };
-    let service = EryxService::with_signer(pool, signer);
+    let service =
+        EryxService::with_signer(pool, signer).with_max_message_size(args.max_message_size);
 
-    let mut server = Server::builder();
+    // The overall ("") status starts as SERVING; the pool is already warm here.
+    // Once shutdown starts the listener closes, so new probes fail to connect.
+    let (health_reporter, health_service) = tonic_health::server::health_reporter();
+    health_reporter
+        .set_serving::<EryxServer<EryxService>>()
+        .await;
+
+    let mut server = Server::builder()
+        .max_concurrent_streams(args.max_concurrent_streams)
+        .http2_keepalive_interval(
+            (args.http2_keepalive_interval_secs > 0)
+                .then(|| Duration::from_secs(args.http2_keepalive_interval_secs)),
+        )
+        .http2_keepalive_timeout(Some(Duration::from_secs(args.http2_keepalive_timeout_secs)));
     match build_tls_config(&args)? {
         Some(tls) => {
             let mtls = args.tls_client_ca.is_some();
@@ -290,6 +349,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
 
     server
+        .add_service(health_service)
         .add_service(service.into_server())
         .serve_with_incoming_shutdown(incoming, async {
             let _ = stopped_rx.await;

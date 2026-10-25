@@ -14,7 +14,7 @@ The easiest way to run the server is the published Docker image, [`sd2k/eryx-ser
 docker run -p 50051:50051 sd2k/eryx-server
 ```
 
-The image sets `ENTRYPOINT ["eryx-server"]` and listens on `[::]:50051`; it's built from `crates/eryx-server/Dockerfile`.
+The image sets `ENTRYPOINT ["eryx-server"]` and listens on `[::]:50051` (metrics on `9090`); it's built from `crates/eryx-server/Dockerfile`. It runs as the unprivileged user `eryx` (UID/GID `10001`), so it works under Kubernetes' `runAsNonRoot`. The embedded runtime is extracted to the system temp dir at startup, so if you use a read-only root filesystem, mount a writable `/tmp`.
 
 To build from source instead, the server is the `eryx-server` binary in the `eryx-server` crate. Build it with the `embedded` and `preinit` features so the runtime and stdlib are baked in:
 
@@ -30,6 +30,12 @@ Every flag also has an environment variable, so the server is easy to configure 
 | `--listen-addr` | `ERYX_LISTEN_ADDR` | `[::1]:50051` | Address the gRPC service binds to. |
 | `--pool-max-size` | `ERYX_POOL_MAX_SIZE` | `10` | Maximum sandboxes in the pool. |
 | `--pool-min-idle` | `ERYX_POOL_MIN_IDLE` | `1` | Idle sandboxes kept warm for low-latency acquisition. |
+| `--pool-acquire-timeout-secs` | `ERYX_POOL_ACQUIRE_TIMEOUT_SECS` | `30` | How long a request waits for a free sandbox before failing with `UNAVAILABLE`. |
+| `--pool-idle-timeout-secs` | `ERYX_POOL_IDLE_TIMEOUT_SECS` | `300` | How long a sandbox beyond `--pool-min-idle` may sit idle before it is evicted. |
+| `--max-message-size` | `ERYX_MAX_MESSAGE_SIZE` | `33554432` (32 MiB) | Largest gRPC message accepted or sent, in bytes. Clients must raise their own limits to match. |
+| `--max-concurrent-streams` | `ERYX_MAX_CONCURRENT_STREAMS` | `200` | Concurrent RPCs per client connection. Further RPCs on that connection wait for a free stream. |
+| `--http2-keepalive-interval-secs` | `ERYX_HTTP2_KEEPALIVE_INTERVAL_SECS` | `60` | Interval between HTTP/2 keepalive pings to each client; `0` disables them. |
+| `--http2-keepalive-timeout-secs` | `ERYX_HTTP2_KEEPALIVE_TIMEOUT_SECS` | `20` | How long to wait for a ping acknowledgement before closing the connection. |
 | `--metrics-addr` | `ERYX_METRICS_ADDR` | `0.0.0.0:9090` | Address of the Prometheus `/metrics` endpoint. |
 | `--runtime-cwasm` | `ERYX_RUNTIME_CWASM` | *(embedded)* | Path to a [pre-compiled runtime](./precompile.md) (e.g. with numpy/polars baked in). |
 | `--stdlib` | `ERYX_STDLIB` | *(embedded)* | Python stdlib directory; only used with `--runtime-cwasm`. |
@@ -37,6 +43,18 @@ Every flag also has an environment variable, so the server is easy to configure 
 | `--tls-cert` | `ERYX_TLS_CERT` | *(off)* | PEM certificate chain; enables TLS. Requires `--tls-key`. |
 | `--tls-key` | `ERYX_TLS_KEY` | *(off)* | PEM private key for `--tls-cert`. |
 | `--tls-client-ca` | `ERYX_TLS_CLIENT_CA` | *(off)* | PEM CA bundle to verify client certs; enables mutual TLS. See [Transport security](#transport-security-tls--mtls). |
+
+### Health checks
+
+The server implements the standard [`grpc.health.v1.Health`](https://github.com/grpc/grpc/blob/master/doc/health-checking.md) service. Both the overall status (service `""`) and `eryx.v1.Eryx` report `SERVING` once the sandbox pool is warm, so Kubernetes' built-in gRPC probes or `grpc_health_probe` work directly:
+
+```yaml
+readinessProbe:
+  grpc:
+    port: 50051
+```
+
+During shutdown the listener closes, so new probes fail to connect.
 
 ### Shutdown
 
@@ -62,7 +80,7 @@ It is **bidirectional streaming**. A `ClientMessage` is either an `ExecuteReques
 4. The client handles the callback and replies with a **`CallbackResponse`** echoing the same `request_id`. Multiple callbacks can be in flight at once (e.g. from `asyncio.gather`), so responses are matched by `request_id`, not by order.
 5. When execution finishes, the server sends a single **`ExecuteResult`** and closes the stream.
 
-If the client disconnects, the server cancels the in-flight execution and returns the sandbox to the pool promptly instead of waiting for timeouts.
+If the client disconnects, the server cancels the in-flight execution and returns the sandbox to the pool promptly instead of waiting for timeouts. A client may instead half-close its side of the stream (e.g. grpc-go's `CloseSend()`) and keep reading: execution then runs to completion, but any callback the script awaits after that fails immediately, since no response can arrive.
 
 ## Configuring a request
 
@@ -93,7 +111,7 @@ If the client disconnects, the server cancels the in-flight execution and return
 | `error` | Human-readable message for a **sandbox** failure. Empty for a script exception and on success — branch on `failure_kind`, not on this string. |
 | `failure_kind` | A `FailureKind` enum classifying *why* a run failed (see below). |
 | `result` / `result_error` | The captured result variable (JSON), or why capture failed. |
-| `stats` | Duration, callback count, peak memory, fuel consumed, and `replayed_callbacks`. |
+| `stats` | Duration, callback count, peak memory, fuel consumed, and `replayed_callbacks`. Also filled in for failed runs (fuel is 0 for a suspended run). |
 | `state_snapshot` | Post-execution state, when `persist_state` was set. |
 | `callback_journal` | The recorded replay journal, when the request opted in. |
 | `suspended` / `suspended_callback` | Set when a callback [suspended](#suspension) execution. |

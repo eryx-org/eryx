@@ -52,7 +52,8 @@ impl Extractor for MetadataExtractor<'_> {
     }
 }
 
-/// Largest gRPC message the server accepts or sends.
+/// Default for the largest gRPC message the server accepts or sends
+/// (configurable with [`EryxService::with_max_message_size`]).
 ///
 /// An `ExecuteRequest` can carry a state snapshot of up to 10 MiB (eryx's
 /// snapshot size cap) plus code and supporting files, and the final
@@ -68,6 +69,7 @@ pub const MAX_MESSAGE_SIZE: usize = 32 * 1024 * 1024;
 pub struct EryxService {
     pool: Arc<SandboxPool>,
     journal_signer: crate::replay::JournalSigner,
+    max_message_size: usize,
 }
 
 impl EryxService {
@@ -82,7 +84,16 @@ impl EryxService {
         Self {
             pool,
             journal_signer: signer,
+            max_message_size: MAX_MESSAGE_SIZE,
         }
+    }
+
+    /// Set the largest gRPC message the server accepts or sends, in bytes.
+    /// Defaults to [`MAX_MESSAGE_SIZE`].
+    #[must_use]
+    pub fn with_max_message_size(mut self, bytes: usize) -> Self {
+        self.max_message_size = bytes;
+        self
     }
 
     /// Create a new service with a random ephemeral signing key.
@@ -94,13 +105,14 @@ impl EryxService {
         Self::with_signer(pool, crate::replay::JournalSigner::random())
     }
 
-    /// Wrap the service in a tonic server with [`MAX_MESSAGE_SIZE`] applied to
-    /// both decoding and encoding.
+    /// Wrap the service in a tonic server with the maximum message size applied
+    /// to both decoding and encoding.
     #[must_use]
     pub fn into_server(self) -> EryxServer<Self> {
+        let max = self.max_message_size;
         EryxServer::new(self)
-            .max_decoding_message_size(MAX_MESSAGE_SIZE)
-            .max_encoding_message_size(MAX_MESSAGE_SIZE)
+            .max_decoding_message_size(max)
+            .max_encoding_message_size(max)
     }
 }
 
@@ -333,8 +345,13 @@ impl crate::proto::eryx::v1::eryx_server::Eryx for EryxService {
 
         // 4. Build callbacks from declarations.
         let pending: PendingCallbacks = Arc::new(DashMap::new());
-        let cbs =
-            callbacks::build_callbacks(&declarations, server_tx.clone(), Arc::clone(&pending));
+        let inbound_closed = CancellationToken::new();
+        let cbs = callbacks::build_callbacks(
+            &declarations,
+            server_tx.clone(),
+            Arc::clone(&pending),
+            inbound_closed.clone(),
+        );
 
         // 5. Acquire sandbox from pool and configure for this request.
         let acquire_start = Instant::now();
@@ -426,9 +443,10 @@ impl crate::proto::eryx::v1::eryx_server::Eryx for EryxService {
                         );
                     }
                 };
-                // No further callback responses can arrive — cancel pending
-                // callbacks so their oneshot receivers error immediately instead
-                // of waiting for callback_timeout.
+                // No further callback responses can arrive — fail pending and
+                // future callbacks immediately instead of letting them wait for
+                // callback_timeout.
+                inbound_closed.cancel();
                 let remaining = pending_dispatch.len();
                 if remaining > 0 {
                     tracing::warn!(
@@ -1168,12 +1186,16 @@ async fn execute_with_session(
                 stats: Some(ExecuteStats {
                     duration_ms: duration.as_millis() as u64,
                     callback_invocations,
-                    // peak_memory_bytes and fuel_consumed come from the
-                    // execution `output`, which we don't have on the error path;
-                    // they are intentionally 0 here (unavailable), unlike the
-                    // success path which populates them.
-                    peak_memory_bytes: 0,
-                    fuel_consumed: 0,
+                    // There is no `output` on the error path, so read the
+                    // stats the session kept for its last execution. A
+                    // suspension poisons the remaining fuel, so the consumed
+                    // figure would be meaningless there.
+                    peak_memory_bytes: session.last_peak_memory_bytes(),
+                    fuel_consumed: if suspended {
+                        0
+                    } else {
+                        session.last_fuel_consumed().unwrap_or(0)
+                    },
                     replayed_callbacks,
                 }),
                 // Still return the snapshot — the Go service decides whether to keep it.

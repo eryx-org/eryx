@@ -2150,12 +2150,84 @@ async fn failed_execution_reports_stats() {
     let result = execute_half_closed(
         &mut client,
         ExecuteRequest {
-            code: "raise ValueError('boom')".to_string(),
+            // Grow guest memory first so peak memory is non-zero.
+            code: "x = 'a' * (64 * 1024 * 1024)\nraise ValueError('boom')".to_string(),
             ..Default::default()
         },
     )
     .await
     .unwrap();
     assert!(!result.success);
-    assert!(result.stats.is_some(), "stats missing on failure");
+    let stats = result.stats.expect("stats missing on failure");
+    assert!(stats.peak_memory_bytes > 0, "{stats:?}");
+    assert!(stats.fuel_consumed > 0, "{stats:?}");
+}
+
+/// A callback invoked after the client half-closed its request stream can never
+/// get a response, so it fails at once instead of waiting for callback_timeout.
+#[tokio::test]
+async fn callback_after_half_close_fails_fast() {
+    let mut client = EryxClient::new(start_server().await);
+    let started = std::time::Instant::now();
+    let result = execute_half_closed(
+        &mut client,
+        ExecuteRequest {
+            code: "import time\ntime.sleep(0.2)\nawait echo(message='hi')".to_string(),
+            callbacks: vec![echo_declaration()],
+            resource_limits: Some(ResourceLimits {
+                execution_timeout_ms: 60_000,
+                callback_timeout_ms: 60_000,
+                ..Default::default()
+            }),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    assert!(!result.success);
+    assert!(
+        result
+            .stderr
+            .contains_str("client closed the request stream"),
+        "{:?}",
+        result.stderr.to_lossy()
+    );
+    assert!(started.elapsed() < Duration::from_secs(20));
+}
+
+/// The message size limit is configurable.
+#[tokio::test]
+async fn max_message_size_is_configurable() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let pool = SandboxPool::new(Sandbox::embedded(), PoolConfig::default())
+        .await
+        .unwrap();
+    let service = EryxService::new(Arc::new(pool)).with_max_message_size(1024);
+    tokio::spawn(
+        Server::builder()
+            .add_service(service.into_server())
+            .serve_with_incoming(tokio_stream::wrappers::TcpListenerStream::new(listener)),
+    );
+    let mut client = EryxClient::connect(format!("http://{addr}")).await.unwrap();
+    let ok = execute_half_closed(
+        &mut client,
+        ExecuteRequest {
+            code: "pass".to_string(),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    assert!(ok.success, "{}", ok.error);
+    let err = execute_half_closed(
+        &mut client,
+        ExecuteRequest {
+            code: format!("x = '{}'", "a".repeat(2048)),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(err.code(), tonic::Code::OutOfRange, "{err}");
 }

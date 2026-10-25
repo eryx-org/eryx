@@ -11,6 +11,7 @@ use std::time::Instant;
 use dashmap::DashMap;
 use eryx::{CallbackError, DynamicCallback};
 use tokio::sync::{mpsc, oneshot};
+use tokio_util::sync::CancellationToken;
 use tracing_opentelemetry::OpenTelemetrySpanExt;
 use uuid::Uuid;
 
@@ -29,6 +30,10 @@ pub enum CallbackResult {
     Suspend(String),
 }
 
+/// Error returned by callbacks once the client can no longer respond.
+const CLIENT_CLOSED: &str =
+    "client closed the request stream; callback responses can no longer arrive";
+
 /// Map of pending callback requests, keyed by request ID.
 pub type PendingCallbacks = Arc<DashMap<String, oneshot::Sender<CallbackResult>>>;
 
@@ -40,10 +45,15 @@ pub type PendingCallbacks = Arc<DashMap<String, oneshot::Sender<CallbackResult>>
 /// 3. Inserts a oneshot sender into the pending map
 /// 4. Awaits the oneshot receiver for the Go client's response
 /// 5. Returns the parsed JSON result or a [`CallbackError`]
+///
+/// `inbound_closed` is cancelled once the client stops sending (half-close or
+/// disconnect). No response can arrive after that, so a callback invoked then,
+/// or still waiting, fails immediately instead of waiting for its timeout.
 pub fn build_callbacks(
     declarations: &[CallbackDeclaration],
     grpc_tx: mpsc::Sender<ServerMessage>,
     pending: PendingCallbacks,
+    inbound_closed: CancellationToken,
 ) -> Vec<Box<dyn eryx::Callback>> {
     tracing::debug!(callback_count = declarations.len(), "building callbacks");
     declarations
@@ -51,6 +61,7 @@ pub fn build_callbacks(
         .map(|decl| {
             let tx = grpc_tx.clone();
             let pending = Arc::clone(&pending);
+            let inbound_closed = inbound_closed.clone();
             let name = decl.name.clone();
 
             let mut builder = DynamicCallback::builder(
@@ -59,6 +70,7 @@ pub fn build_callbacks(
                 move |args| {
                     let tx = tx.clone();
                     let pending = Arc::clone(&pending);
+                    let inbound_closed = inbound_closed.clone();
                     let name = name.clone();
 
                     Box::pin(async move {
@@ -66,6 +78,14 @@ pub fn build_callbacks(
                         let request_id = Uuid::new_v4().to_string();
                         let arguments_json = serde_json::to_string(&args)
                             .map_err(|e| CallbackError::ExecutionFailed(e.to_string()))?;
+
+                        if inbound_closed.is_cancelled() {
+                            tracing::warn!(
+                                callback_name = %name,
+                                "callback invoked after the client stopped sending"
+                            );
+                            return Err(CallbackError::ExecutionFailed(CLIENT_CLOSED.to_string()));
+                        }
 
                         tracing::info!(
                             callback_name = %name,
@@ -115,8 +135,25 @@ pub fn build_callbacks(
                             )
                         })?;
 
-                        // Wait for the Go client to respond.
-                        let result = resp_rx.await.map_err(|e| {
+                        // Wait for the Go client to respond. `biased` so a
+                        // response delivered just before the client stopped
+                        // sending still wins.
+                        let result = tokio::select! {
+                            biased;
+                            result = resp_rx => result,
+                            () = inbound_closed.cancelled() => {
+                                pending.remove(&request_id);
+                                tracing::warn!(
+                                    callback_name = %name,
+                                    %request_id,
+                                    "client stopped sending before responding to callback"
+                                );
+                                return Err(CallbackError::ExecutionFailed(
+                                    CLIENT_CLOSED.to_string(),
+                                ));
+                            }
+                        };
+                        let result = result.map_err(|e| {
                             let elapsed_ms = started.elapsed().as_millis() as u64;
                             tracing::warn!(
                                 callback_name = %name,
@@ -276,7 +313,7 @@ mod tests {
             },
         ];
 
-        let callbacks = build_callbacks(&decls, tx, pending);
+        let callbacks = build_callbacks(&decls, tx, pending, CancellationToken::new());
         assert_eq!(callbacks.len(), 2);
         assert_eq!(callbacks[0].name(), "echo");
         assert_eq!(callbacks[1].name(), "noop");
@@ -287,7 +324,12 @@ mod tests {
         let (tx, mut rx) = mpsc::channel(16);
         let pending: PendingCallbacks = Arc::new(DashMap::new());
 
-        let callbacks = build_callbacks(&[make_echo_declaration()], tx, Arc::clone(&pending));
+        let callbacks = build_callbacks(
+            &[make_echo_declaration()],
+            tx,
+            Arc::clone(&pending),
+            CancellationToken::new(),
+        );
         let echo = &callbacks[0];
 
         // Spawn a task that responds to the callback request.
@@ -318,7 +360,12 @@ mod tests {
         let (tx, mut rx) = mpsc::channel(16);
         let pending: PendingCallbacks = Arc::new(DashMap::new());
 
-        let callbacks = build_callbacks(&[make_echo_declaration()], tx, Arc::clone(&pending));
+        let callbacks = build_callbacks(
+            &[make_echo_declaration()],
+            tx,
+            Arc::clone(&pending),
+            CancellationToken::new(),
+        );
         let echo = &callbacks[0];
 
         let pending_clone = Arc::clone(&pending);
@@ -341,6 +388,34 @@ mod tests {
         );
 
         responder.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn callback_fails_fast_once_client_stopped_sending() {
+        let (tx, mut rx) = mpsc::channel(16);
+        let pending: PendingCallbacks = Arc::new(DashMap::new());
+        let closed = CancellationToken::new();
+        let callbacks = build_callbacks(
+            &[make_echo_declaration()],
+            tx,
+            Arc::clone(&pending),
+            closed.clone(),
+        );
+
+        // Already waiting when the client stops sending.
+        let waiting = callbacks[0].invoke(json!({"message": "a"}));
+        let cancel = async {
+            assert!(rx.recv().await.is_some());
+            closed.cancel();
+        };
+        let (result, ()) = tokio::join!(waiting, cancel);
+        assert!(matches!(result, Err(CallbackError::ExecutionFailed(_))));
+
+        // Invoked afterwards: fails without sending a request.
+        let result = callbacks[0].invoke(json!({"message": "b"})).await;
+        assert!(matches!(result, Err(CallbackError::ExecutionFailed(_))));
+        assert!(rx.try_recv().is_err());
+        assert!(pending.is_empty());
     }
 
     #[test]

@@ -17,16 +17,23 @@ use tokio::sync::mpsc;
 use tokio::time::{sleep, timeout};
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::transport::Channel;
+use tonic_health::pb::HealthCheckRequest;
+use tonic_health::pb::health_check_response::ServingStatus;
+use tonic_health::pb::health_client::HealthClient;
 
-async fn connect(child: &mut Child, addr: SocketAddr) -> EryxClient<Channel> {
+async fn connect(child: &mut Child, addr: SocketAddr) -> Channel {
     timeout(Duration::from_secs(15), async {
         loop {
             assert!(
                 child.try_wait().unwrap().is_none(),
                 "server exited at startup"
             );
-            if let Ok(client) = EryxClient::connect(format!("http://{addr}")).await {
-                return client;
+            if let Ok(channel) = Channel::from_shared(format!("http://{addr}"))
+                .unwrap()
+                .connect()
+                .await
+            {
+                return channel;
             }
             sleep(Duration::from_millis(20)).await;
         }
@@ -56,7 +63,20 @@ async fn drain_active_call(signal: &str) {
         .kill_on_drop(true)
         .spawn()
         .unwrap();
-    let mut client = connect(&mut child, addr).await;
+    let channel = connect(&mut child, addr).await;
+    let mut health = HealthClient::new(channel.clone());
+    for service in ["", "eryx.v1.Eryx"] {
+        let status = health
+            .check(HealthCheckRequest {
+                service: service.into(),
+            })
+            .await
+            .unwrap()
+            .into_inner()
+            .status;
+        assert_eq!(status, ServingStatus::Serving as i32, "{service:?}");
+    }
+    let mut client = EryxClient::new(channel);
     let (tx, rx) = mpsc::channel(4);
     tx.send(ClientMessage {
         message: Some(client_message::Message::ExecuteRequest(Box::new(

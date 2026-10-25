@@ -29,6 +29,7 @@ tokio = { workspace = true } #unified
 tokio-stream.workspace = true
 tokio-util.workspace = true
 tonic = { workspace = true, features = ["tls-aws-lc"] }
+tonic-health.workspace = true
 tonic-prost.workspace = true
 tracing.workspace = true
 tracing-error.workspace = true
