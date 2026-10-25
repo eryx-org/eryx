@@ -2730,11 +2730,7 @@ impl PythonExecutor {
             pythonpath_parts.push("/python-stdlib".to_string());
         }
         for i in 0..self.python_site_packages_paths.len() {
-            if i == 0 {
-                pythonpath_parts.push("/site-packages".to_string());
-            } else {
-                pythonpath_parts.push(format!("/site-packages-{i}"));
-            }
+            pythonpath_parts.push(site_packages_mount_path(i));
         }
 
         // Mount Python stdlib if configured (required for eryx-wasm-runtime)
@@ -2756,11 +2752,7 @@ impl PythonExecutor {
         // Mount each site-packages directory
         // First one at /site-packages (for preinit compatibility), rest at /site-packages-N
         for (i, site_packages_path) in self.python_site_packages_paths.iter().enumerate() {
-            let mount_path = if i == 0 {
-                "/site-packages".to_string()
-            } else {
-                format!("/site-packages-{i}")
-            };
+            let mount_path = site_packages_mount_path(i);
             wasi_builder
                 .preopened_dir(site_packages_path, &mount_path, FsPerms::ReadOnly)
                 .map_err(|e| Error::Initialization(format!("Failed to mount {mount_path}: {e}")))?;
@@ -2803,11 +2795,7 @@ impl PythonExecutor {
 
             // Add site-packages directories as read-only real filesystem preopens
             for (i, site_packages_path) in self.python_site_packages_paths.iter().enumerate() {
-                let mount_path = if i == 0 {
-                    "/site-packages".to_string()
-                } else {
-                    format!("/site-packages-{i}")
-                };
+                let mount_path = site_packages_mount_path(i);
                 ctx.add_real_preopen_path(
                     &mount_path,
                     site_packages_path,
@@ -3450,5 +3438,18 @@ mod tests {
             bytes.windows(target.len()).any(|w| w == target.as_bytes()),
             "precompiled artifact should record the {target} triple"
         );
+    }
+}
+/// Guest mount path for the `index`-th site-packages directory.
+///
+/// Index 0 is `/site-packages`, the path a pre-initialized snapshot may have
+/// baked into `sys.path`; later directories get an index suffix. The guest
+/// looks for mounts in this order, and native extensions' dlopen paths must
+/// use the same scheme.
+pub(crate) fn site_packages_mount_path(index: usize) -> String {
+    if index == 0 {
+        "/site-packages".to_string()
+    } else {
+        format!("/site-packages-{index}")
     }
 }

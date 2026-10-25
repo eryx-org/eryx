@@ -2157,8 +2157,11 @@ impl SandboxBuilder<state::Has, state::Has> {
             for (pkg_idx, package) in self.packages.iter().enumerate() {
                 let mount_index = start_index + pkg_idx;
                 for ext in &package.native_extensions {
-                    let dlopen_path =
-                        format!("/site-packages-{}/{}", mount_index, ext.relative_path);
+                    let dlopen_path = format!(
+                        "{}/{}",
+                        crate::wasm::site_packages_mount_path(mount_index),
+                        ext.relative_path
+                    );
                     self.native_extensions
                         .push(eryx_runtime::linker::NativeExtension::new(
                             dlopen_path,

@@ -506,19 +506,6 @@ fn build_callback_infos(callbacks: &[Arc<dyn Callback>]) -> Vec<HostCallbackInfo
         .collect()
 }
 
-/// Guest mount path for the `index`-th site-packages directory.
-///
-/// Index 0 is mounted at `/site-packages` because the preinitialized snapshot
-/// bakes that path into `sys.path`; later directories get an index suffix.
-/// This matches the sandbox mount scheme in [`crate::wasm`].
-fn site_packages_mount_path(index: usize) -> String {
-    if index == 0 {
-        "/site-packages".to_string()
-    } else {
-        format!("/site-packages-{index}")
-    }
-}
-
 /// Build WASI context with Python stdlib and site-packages mounts.
 fn build_wasi_context(executor: &PythonExecutor) -> Result<WasiCtx, Error> {
     let mut wasi_builder = WasiCtxBuilder::new();
@@ -531,7 +518,7 @@ fn build_wasi_context(executor: &PythonExecutor) -> Result<WasiCtx, Error> {
         pythonpath_parts.push("/python-stdlib".to_string());
     }
     for i in 0..site_packages_paths.len() {
-        pythonpath_parts.push(site_packages_mount_path(i));
+        pythonpath_parts.push(crate::wasm::site_packages_mount_path(i));
     }
 
     // Mount Python stdlib if configured (required for eryx-wasm-runtime)
@@ -547,7 +534,7 @@ fn build_wasi_context(executor: &PythonExecutor) -> Result<WasiCtx, Error> {
 
     // Mount each site-packages directory (index 0 keeps the baked sys.path)
     for (i, site_packages_path) in site_packages_paths.iter().enumerate() {
-        let mount_path = site_packages_mount_path(i);
+        let mount_path = crate::wasm::site_packages_mount_path(i);
         wasi_builder
             .preopened_dir(site_packages_path, &mount_path, FsPerms::ReadOnly)
             .map_err(|e| Error::WasmEngine(format!("Failed to mount {mount_path}: {e}")))?;
@@ -580,7 +567,7 @@ fn build_hybrid_vfs_context(
         ctx.add_real_preopen("/python-stdlib", real_dir);
     }
     for (i, site_packages_path) in executor.python_site_packages_paths().iter().enumerate() {
-        let mount_path = site_packages_mount_path(i);
+        let mount_path = crate::wasm::site_packages_mount_path(i);
         if let Ok(real_dir) =
             eryx_vfs::RealDir::open_ambient(site_packages_path, DirPerms::READ, FilePerms::READ)
         {
