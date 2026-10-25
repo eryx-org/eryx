@@ -123,9 +123,12 @@ pub trait Callback: Send + Sync {
     ///
     /// This schema describes the structure of keyword arguments that should be
     /// passed to the callback. It's used for:
-    /// - Runtime validation (optional)
     /// - Introspection via `list_callbacks()`
     /// - LLM context for generating correct invocations
+    ///
+    /// The sandbox does not validate arguments against it: `invoke` receives
+    /// whatever the guest passed and must check its arguments itself.
+    /// [`TypedCallback`] does this by deserializing into its `Args` type.
     ///
     /// Returns a [`Schema`] which provides a strongly-typed
     /// representation of JSON Schema. Use [`Schema::for_type`] to generate
@@ -420,6 +423,10 @@ pub type DynamicHandler = Arc<
 /// The builder constructs a JSON Schema automatically from the parameter
 /// definitions. For more complex schemas, use [`DynamicCallbackBuilder::schema`]
 /// to provide a custom schema.
+///
+/// The schema is descriptive only: the handler receives the guest's arguments
+/// unvalidated, so it must check required parameters and types itself, as
+/// the example above does.
 #[derive(Clone)]
 pub struct DynamicCallback {
     name: String,
