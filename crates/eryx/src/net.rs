@@ -414,28 +414,93 @@ impl From<TcpError> for TlsError {
 // Connection Manager
 // ============================================================================
 
-/// HTTP parsing state for a single connection.
-#[derive(Debug, Clone, Default)]
+/// HTTP request framing state for a single connection.
+#[derive(Debug, Default)]
 struct HttpParsingState {
-    /// Buffer for accumulating request data until headers are complete
+    /// Request bytes buffered until the headers are complete.
     buffer: Vec<u8>,
-    /// Have we seen complete headers (\r\n\r\n)?
-    headers_complete: bool,
-    /// Total bytes of the current request body we've sent
-    body_bytes_sent: usize,
-    /// Expected content-length (if any)
-    content_length: Option<usize>,
+    /// How much of the current request's body is still to come.
+    body: Body,
 }
 
-/// Result of processing write data through the HTTP parser.
+/// The body of the request currently being written.
+#[derive(Debug, Default)]
+enum Body {
+    /// No request in progress: the next bytes start a request's headers.
+    #[default]
+    None,
+    /// A `Content-Length` body with this many bytes left.
+    Length(usize),
+    /// A chunked body, at this point in its framing.
+    Chunked(Chunked),
+}
+
+/// Position within a `Transfer-Encoding: chunked` body.
 #[derive(Debug)]
-enum WriteAction {
-    /// Pass data through without modification.
-    Passthrough(Vec<u8>),
-    /// Data was parsed and should be written as multiple segments.
-    Segments(Vec<Vec<u8>>),
-    /// Data is being buffered (headers not yet complete).
-    Buffering,
+enum Chunked {
+    /// On a chunk-size line; `ext` once past the hex digits.
+    Size { size: usize, ext: bool },
+    /// Inside chunk data, with this many bytes left.
+    Data(usize),
+    /// On the line break after chunk data.
+    DataEnd,
+    /// In the trailer section; `line` is the current line's length so far.
+    Trailer { line: usize },
+}
+
+impl Chunked {
+    const START: Self = Self::Size {
+        size: 0,
+        ext: false,
+    };
+
+    /// Advance over `data`, returning the length of the prefix that ends the
+    /// body if it ends within `data`.
+    fn advance(&mut self, data: &[u8]) -> Result<Option<usize>, TcpError> {
+        let malformed = || TcpError::IoError("malformed chunked request body".into());
+        let mut i = 0;
+        while i < data.len() {
+            let byte = data[i];
+            match self {
+                Self::Data(left) => {
+                    let n = (*left).min(data.len() - i);
+                    *left -= n;
+                    i += n;
+                    if *left == 0 {
+                        *self = Self::DataEnd;
+                    }
+                    continue;
+                }
+                Self::Size { size, ext } => match byte {
+                    b'\n' if *size == 0 => *self = Self::Trailer { line: 0 },
+                    b'\n' => *self = Self::Data(*size),
+                    b'\r' => {}
+                    _ if *ext => {}
+                    b';' | b' ' | b'\t' => *ext = true,
+                    _ => {
+                        let digit = char::from(byte).to_digit(16).ok_or_else(malformed)?;
+                        *size = size
+                            .checked_mul(16)
+                            .and_then(|s| s.checked_add(digit as usize))
+                            .ok_or_else(malformed)?;
+                    }
+                },
+                Self::DataEnd => {
+                    if byte == b'\n' {
+                        *self = Self::START;
+                    }
+                }
+                Self::Trailer { line } => match byte {
+                    b'\n' if *line == 0 => return Ok(Some(i + 1)),
+                    b'\n' => *line = 0,
+                    b'\r' => {}
+                    _ => *line += 1,
+                },
+            }
+            i += 1;
+        }
+        Ok(None)
+    }
 }
 
 /// Manages TCP and TLS connections for a sandbox instance.
@@ -468,8 +533,9 @@ impl ConnectionManager {
         // Add custom root certificates if any
         for cert_der in &config.custom_root_certs {
             let cert = rustls::pki_types::CertificateDer::from(cert_der.as_slice());
-            // Ignore errors adding individual certs - log in production
-            let _ = root_store.add(cert);
+            if let Err(e) = root_store.add(cert) {
+                tracing::warn!(error = %e, "ignoring invalid custom root certificate");
+            }
         }
 
         let tls_config = ClientConfig::builder()
@@ -518,88 +584,97 @@ impl ConnectionManager {
         handle
     }
 
-    /// Process write data through the HTTP parser for secret substitution.
+    /// Run guest-written bytes through HTTP request framing, substituting
+    /// secret placeholders in each request's headers.
     ///
     /// This is the shared logic used by both `tcp_write()` and `tls_write()`.
-    /// Returns a `WriteAction` indicating how the data should be written.
-    fn process_write_data(&mut self, handle: u32, data: &[u8]) -> Result<WriteAction, TcpError> {
-        // Get current state (borrow ends here)
-        let mut state = self.http_states.entry(handle).or_default().clone();
+    /// Returns the bytes to send now: empty while a request's headers are
+    /// still incomplete.
+    fn process_write_data(&mut self, handle: u32, data: &[u8]) -> Result<Vec<u8>, TcpError> {
+        let mut state = self.http_states.remove(&handle).unwrap_or_default();
+        let result = self.frame_requests(handle, &mut state, data);
+        self.http_states.insert(handle, state);
+        result
+    }
 
-        // Add new data to buffer
-        state.buffer.extend_from_slice(data);
+    /// Advance `state` over `data`, one request at a time, so every request
+    /// on a keep-alive connection gets its headers processed.
+    fn frame_requests(
+        &self,
+        handle: u32,
+        state: &mut HttpParsingState,
+        data: &[u8],
+    ) -> Result<Vec<u8>, TcpError> {
+        let mut out = Vec::new();
+        let mut input = data.to_vec();
+        let mut pos = 0;
+        loop {
+            match &mut state.body {
+                Body::None => {
+                    state.buffer.extend_from_slice(&input[pos..]);
+                    let Some(header_end) = find_header_end(&state.buffer) else {
+                        break;
+                    };
+                    input = state.buffer.split_off(header_end);
+                    pos = 0;
+                    let headers = std::mem::take(&mut state.buffer);
 
-        if !state.headers_complete {
-            // Look for end of headers (\r\n\r\n)
-            if let Some(header_end) = find_header_end(&state.buffer) {
-                let headers_bytes = state.buffer[..header_end].to_vec();
-                let remaining = state.buffer[header_end..].to_vec();
-
-                // Check if this looks like HTTP
-                if !is_http_request(&headers_bytes) {
                     // Not HTTP - pass through everything
-                    let all_data = state.buffer.clone();
-                    state.buffer.clear();
-                    self.http_states.insert(handle, state);
-                    return Ok(WriteAction::Passthrough(all_data));
-                }
-
-                // Check for HTTP/2 (not supported with secrets)
-                if is_http2(&headers_bytes) {
-                    return Err(TcpError::NotPermitted(
-                        "HTTP/2 with secrets not supported. Use HTTP/1.1.".into(),
-                    ));
-                }
-
-                // Parse headers and substitute secrets
-                let substituted = self.substitute_http_headers(&headers_bytes, handle)?;
-
-                // Extract Content-Length for body tracking
-                state.content_length = extract_content_length(&substituted);
-                state.headers_complete = true;
-
-                // Build segments: headers first, then any buffered body data
-                let mut segments = vec![substituted.clone()];
-                if !remaining.is_empty() {
-                    state.body_bytes_sent += remaining.len();
-                    segments.push(remaining);
-                }
-
-                // Check if request is complete (for pipelining)
-                if let Some(cl) = state.content_length {
-                    if state.body_bytes_sent >= cl {
-                        // Request complete - reset for next request
-                        state = HttpParsingState::default();
+                    if !is_http_request(&headers) {
+                        out.extend_from_slice(&headers);
+                        out.extend_from_slice(&input);
+                        break;
                     }
-                } else if is_chunked(&substituted) {
-                    // Chunked encoding - keep state
-                } else {
-                    // No Content-Length and not chunked, assume request complete
-                    state.buffer.clear();
+
+                    // Check for HTTP/2 (not supported with secrets)
+                    if is_http2(&headers) {
+                        return Err(TcpError::NotPermitted(
+                            "HTTP/2 with secrets not supported. Use HTTP/1.1.".into(),
+                        ));
+                    }
+
+                    let substituted = self.substitute_http_headers(&headers, handle)?;
+                    // Chunked framing takes precedence over Content-Length.
+                    state.body = if is_chunked(&substituted) {
+                        Body::Chunked(Chunked::START)
+                    } else {
+                        match extract_content_length(&substituted) {
+                            Some(len) if len > 0 => Body::Length(len),
+                            _ => Body::None,
+                        }
+                    };
+                    out.extend_from_slice(&substituted);
                 }
-
-                self.http_states.insert(handle, state);
-                Ok(WriteAction::Segments(segments))
-            } else {
-                // Headers not complete yet - keep buffering
-                self.http_states.insert(handle, state);
-                Ok(WriteAction::Buffering)
+                Body::Length(left) => {
+                    if pos == input.len() {
+                        break;
+                    }
+                    let n = (*left).min(input.len() - pos);
+                    out.extend_from_slice(&input[pos..pos + n]);
+                    pos += n;
+                    *left -= n;
+                    if *left == 0 {
+                        state.body = Body::None;
+                    }
+                }
+                Body::Chunked(chunked) => {
+                    if pos == input.len() {
+                        break;
+                    }
+                    let rest = &input[pos..];
+                    let n = match chunked.advance(rest)? {
+                        Some(n) => {
+                            state.body = Body::None;
+                            n
+                        }
+                        None => rest.len(),
+                    };
+                    out.extend_from_slice(&rest[..n]);
+                    pos += n;
+                }
             }
-        } else {
-            // Headers already sent, this is body data - pass through
-            state.body_bytes_sent += data.len();
-
-            // Check if request is complete
-            if let Some(cl) = state.content_length
-                && state.body_bytes_sent >= cl
-            {
-                // Request complete - reset for pipelining
-                state = HttpParsingState::default();
-            }
-
-            self.http_states.insert(handle, state);
-            Ok(WriteAction::Passthrough(data.to_vec()))
         }
+        Ok(out)
     }
 
     /// Check if a host is allowed by the current policy.
@@ -782,46 +857,44 @@ impl ConnectionManager {
         data: &[u8],
         timeout_ms: u32,
     ) -> Result<u32, TcpError> {
+        if !self.tcp_connections.contains_key(&handle) {
+            return Err(TcpError::InvalidHandle);
+        }
+
         // Fast path: no secrets = no parsing
         if self.secrets.is_empty() {
-            return self.tcp_write_raw(handle, data, timeout_ms).await;
-        }
-
-        match self.process_write_data(handle, data)? {
-            WriteAction::Passthrough(bytes) => self.tcp_write_raw(handle, &bytes, timeout_ms).await,
-            WriteAction::Segments(segments) => {
-                for segment in &segments {
-                    self.tcp_write_raw(handle, segment, timeout_ms).await?;
-                }
-                Ok(data.len() as u32)
+            self.tcp_write_raw(handle, data, timeout_ms).await?;
+        } else {
+            let bytes = self.process_write_data(handle, data)?;
+            if !bytes.is_empty() {
+                self.tcp_write_raw(handle, &bytes, timeout_ms).await?;
             }
-            WriteAction::Buffering => Ok(data.len() as u32),
         }
+        // Report what the guest wrote: substitution changes the length on the wire.
+        Ok(data.len() as u32)
     }
 
-    /// Write raw data to a TCP connection without HTTP parsing.
+    /// Write all of `data` to a TCP connection without HTTP parsing.
     async fn tcp_write_raw(
         &mut self,
         handle: u32,
         data: &[u8],
         timeout_ms: u32,
-    ) -> Result<u32, TcpError> {
+    ) -> Result<(), TcpError> {
         let io_timeout = Self::effective_timeout(self.config.io_timeout, timeout_ms);
         let stream = self
             .tcp_connections
             .get_mut(&handle)
             .ok_or(TcpError::InvalidHandle)?;
 
-        let n = tokio::time::timeout(io_timeout, stream.write(data))
+        tokio::time::timeout(io_timeout, stream.write_all(data))
             .await
             .map_err(|_| TcpError::TimedOut)?
             .map_err(|e| match e.kind() {
                 std::io::ErrorKind::ConnectionReset => TcpError::ConnectionReset,
                 std::io::ErrorKind::TimedOut => TcpError::TimedOut,
                 _ => TcpError::IoError(e.to_string()),
-            })?;
-
-        Ok(n as u32)
+            })
     }
 
     /// Substitute secret placeholders in HTTP headers.
@@ -836,8 +909,8 @@ impl ConnectionManager {
 
         // Process line by line
         for line in text.lines() {
+            // The blank line ending the headers is re-added below.
             if line.is_empty() {
-                result.push_str("\r\n");
                 continue;
             }
 
@@ -938,11 +1011,14 @@ impl ConnectionManager {
     ) -> Result<u32, TlsError> {
         let connect_timeout = Self::effective_timeout(self.config.connect_timeout, timeout_ms);
 
-        // Remove the TCP connection (we're taking ownership)
+        // Remove the TCP connection (we're taking ownership). Its handle is
+        // gone whether or not the handshake succeeds, so drop its state now.
         let tcp = self
             .tcp_connections
             .remove(&tcp_handle)
             .ok_or(TlsError::InvalidHandle)?;
+        let host = self.connection_hosts.remove(&tcp_handle);
+        self.http_states.remove(&tcp_handle);
 
         // TLS handshake
         let connector = TlsConnector::from(self.tls_config.clone());
@@ -959,11 +1035,10 @@ impl ConnectionManager {
         let handle = self.alloc_handle();
         self.tls_connections.insert(handle, tls);
 
-        // Carry over host mapping and clean up old TCP state
-        if let Some(host) = self.connection_hosts.remove(&tcp_handle) {
+        // Carry over the host mapping from the TCP connection
+        if let Some(host) = host {
             self.connection_hosts.insert(handle, host);
         }
-        self.http_states.remove(&tcp_handle);
 
         tracing::debug!(
             handle,
@@ -1017,49 +1092,50 @@ impl ConnectionManager {
         data: &[u8],
         timeout_ms: u32,
     ) -> Result<u32, TlsError> {
+        if !self.tls_connections.contains_key(&handle) {
+            return Err(TlsError::InvalidHandle);
+        }
+
         // Fast path: no secrets = no parsing
         if self.secrets.is_empty() {
-            return self.tls_write_raw(handle, data, timeout_ms).await;
-        }
-
-        match self
-            .process_write_data(handle, data)
-            .map_err(TlsError::Tcp)?
-        {
-            WriteAction::Passthrough(bytes) => self.tls_write_raw(handle, &bytes, timeout_ms).await,
-            WriteAction::Segments(segments) => {
-                for segment in &segments {
-                    self.tls_write_raw(handle, segment, timeout_ms).await?;
-                }
-                Ok(data.len() as u32)
+            self.tls_write_raw(handle, data, timeout_ms).await?;
+        } else {
+            let bytes = self.process_write_data(handle, data)?;
+            if !bytes.is_empty() {
+                self.tls_write_raw(handle, &bytes, timeout_ms).await?;
             }
-            WriteAction::Buffering => Ok(data.len() as u32),
         }
+        // Report what the guest wrote: substitution changes the length on the wire.
+        Ok(data.len() as u32)
     }
 
-    /// Write raw data to a TLS connection without HTTP parsing.
+    /// Write all of `data` to a TLS connection without HTTP parsing.
+    ///
+    /// Flushes too, so no TLS records stay buffered once the call returns.
     async fn tls_write_raw(
         &mut self,
         handle: u32,
         data: &[u8],
         timeout_ms: u32,
-    ) -> Result<u32, TlsError> {
+    ) -> Result<(), TlsError> {
         let io_timeout = Self::effective_timeout(self.config.io_timeout, timeout_ms);
         let stream = self
             .tls_connections
             .get_mut(&handle)
             .ok_or(TlsError::InvalidHandle)?;
 
-        let n = tokio::time::timeout(io_timeout, stream.write(data))
+        let write = async {
+            stream.write_all(data).await?;
+            stream.flush().await
+        };
+        tokio::time::timeout(io_timeout, write)
             .await
             .map_err(|_| TlsError::Tcp(TcpError::TimedOut))?
             .map_err(|e| match e.kind() {
                 std::io::ErrorKind::ConnectionReset => TlsError::Tcp(TcpError::ConnectionReset),
                 std::io::ErrorKind::TimedOut => TlsError::Tcp(TcpError::TimedOut),
                 _ => TlsError::Tcp(TcpError::IoError(e.to_string())),
-            })?;
-
-        Ok(n as u32)
+            })
     }
 
     /// Close a TLS connection.
@@ -1180,36 +1256,23 @@ fn host_matches_pattern(host: &str, pattern: &str) -> bool {
         return host.eq_ignore_ascii_case(pattern);
     }
 
-    // Simple glob matching with * as wildcard
+    // Glob matching with * as wildcard: the first part anchors at the
+    // start, the last at the end, and the parts between match left to right.
+    let host = host.to_ascii_lowercase();
+    let pattern = pattern.to_ascii_lowercase();
     let parts: Vec<&str> = pattern.split('*').collect();
-    let host_lower = host.to_ascii_lowercase();
-    let mut pos = 0;
-
-    for (i, part) in parts.iter().enumerate() {
-        if part.is_empty() {
-            continue;
-        }
-        let part_lower = part.to_ascii_lowercase();
-        match host_lower[pos..].find(&part_lower) {
-            Some(idx) => {
-                // First part must match at start
-                if i == 0 && idx != 0 {
-                    return false;
-                }
-                pos += idx + part.len();
-            }
-            None => return false,
-        }
-    }
-
-    // If pattern ends with literal (not *), must match to end
-    if let Some(last) = parts.last()
-        && !last.is_empty()
-        && pos != host.len()
-    {
+    let (first, last) = (parts[0], parts[parts.len() - 1]);
+    if host.len() < first.len() + last.len() || !host.starts_with(first) || !host.ends_with(last) {
         return false;
     }
 
+    let mut rest = &host[first.len()..host.len() - last.len()];
+    for part in &parts[1..parts.len() - 1] {
+        match rest.find(part) {
+            Some(idx) => rest = &rest[idx + part.len()..],
+            None => return false,
+        }
+    }
     true
 }
 
@@ -1307,6 +1370,14 @@ mod tests {
         assert!(host_matches_pattern("localhost", "localhost"));
         assert!(host_matches_pattern("foo.localhost", "*.localhost"));
         assert!(host_matches_pattern("127.0.0.1", "127.*"));
+
+        // The trailing literal anchors at the end, even when it also occurs earlier
+        assert!(host_matches_pattern(
+            "a.example.com.example.com",
+            "*.example.com"
+        ));
+        assert!(host_matches_pattern("api.com.foo.com", "api.*.com"));
+        assert!(!host_matches_pattern("api.com", "api.*.com"));
     }
 
     #[test]
@@ -2147,5 +2218,149 @@ mod tests {
             manager.tcp_connect("other.example.com", port, 0).await,
             Err(TcpError::NotPermitted(_))
         ));
+    }
+
+    /// A manager with one secret (`PH` -> `real`) and a fake connection to
+    /// `api.example.com` on handle 1, for driving `process_write_data`.
+    fn framing_manager() -> ConnectionManager {
+        let mut secrets = HashMap::new();
+        secrets.insert(
+            "KEY".to_string(),
+            crate::secrets::SecretConfig {
+                real_value: "real".to_string(),
+                placeholder: "PH".to_string(),
+                allowed_hosts: vec![],
+            },
+        );
+        let mut manager = ConnectionManager::new(NetConfig::permissive(), secrets);
+        manager
+            .connection_hosts
+            .insert(1, "api.example.com".to_string());
+        manager
+    }
+
+    /// Feed each write through the framing and concatenate what goes out.
+    fn frame(manager: &mut ConnectionManager, writes: &[&[u8]]) -> String {
+        let mut out = Vec::new();
+        for write in writes {
+            out.extend(manager.process_write_data(1, write).unwrap());
+        }
+        String::from_utf8(out).unwrap()
+    }
+
+    const GET: &[u8] = b"GET / HTTP/1.1\r\nAuthorization: PH\r\n\r\n";
+    const GET_OUT: &str = "GET / HTTP/1.1\r\nAuthorization: real\r\n\r\n";
+
+    /// Every request on a keep-alive connection gets its headers processed,
+    /// whatever framing the request before it used.
+    #[test]
+    fn test_keep_alive_requests_all_substituted() {
+        let mut m = framing_manager();
+        assert_eq!(frame(&mut m, &[GET, GET]), format!("{GET_OUT}{GET_OUT}"));
+
+        let mut m = framing_manager();
+        let post = b"POST / HTTP/1.1\r\nContent-Length: 5\r\n\r\n";
+        assert_eq!(
+            frame(&mut m, &[post, b"he", b"llo", GET]),
+            format!("POST / HTTP/1.1\r\nContent-Length: 5\r\n\r\nhello{GET_OUT}")
+        );
+
+        let mut m = framing_manager();
+        let chunked = b"POST / HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n";
+        let body = "5;ext=1\r\nPH PH\r\na\r\n0123456789\r\n0\r\nX-Trailer: PH\r\n\r\n";
+        // Split the body at every byte to exercise each framing state.
+        let pieces: Vec<&[u8]> = body.as_bytes().chunks(1).collect();
+        let mut writes = vec![&chunked[..]];
+        writes.extend(pieces);
+        writes.push(GET);
+        assert_eq!(
+            frame(&mut m, &writes),
+            format!("POST / HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n{body}{GET_OUT}")
+        );
+    }
+
+    /// Pipelined requests in a single write are framed one by one.
+    #[test]
+    fn test_pipelined_requests_in_one_write() {
+        let mut m = framing_manager();
+        let mut write = b"POST / HTTP/1.1\r\nContent-Length: 2\r\n\r\nhi".to_vec();
+        write.extend_from_slice(GET);
+        write.extend_from_slice(b"GET /next");
+        assert_eq!(
+            frame(&mut m, &[&write]),
+            format!("POST / HTTP/1.1\r\nContent-Length: 2\r\n\r\nhi{GET_OUT}")
+        );
+        // The partial third request waits for the rest of its headers.
+        assert_eq!(
+            frame(&mut m, &[b" HTTP/1.1\r\nAuthorization: PH\r\n\r\n"]),
+            "GET /next HTTP/1.1\r\nAuthorization: real\r\n\r\n"
+        );
+    }
+
+    #[test]
+    fn test_malformed_chunk_size_is_rejected() {
+        let mut m = framing_manager();
+        frame(
+            &mut m,
+            &[b"POST / HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n"],
+        );
+        assert!(m.process_write_data(1, b"zz\r\n").is_err());
+    }
+
+    /// A write reports the guest's own length, all of the (substituted) bytes
+    /// reach the peer, and a write to an unknown handle leaves no state behind.
+    #[tokio::test]
+    async fn test_tcp_write_reports_guest_length() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let mut m = framing_manager();
+        let (handle, server) = tokio::join!(m.tcp_connect("127.0.0.1", port, 0), async {
+            listener.accept().await.unwrap().0
+        });
+        let handle = handle.unwrap();
+
+        // Substitution makes the request longer on the wire than the guest's.
+        let written = m.tcp_write(handle, b"GET / HTTP/1.1\r\nX: PHPH", 0).await;
+        assert_eq!(written.unwrap(), 23);
+        let written = m.tcp_write(handle, b"PHPH\r\n\r\n", 0).await;
+        assert_eq!(written.unwrap(), 8);
+        // Buffered non-HTTP bytes go out with a later write, which still
+        // reports only its own length.
+        assert_eq!(m.tcp_write(handle, b"hello", 0).await.unwrap(), 5);
+        assert_eq!(m.tcp_write(handle, b"\r\n\r\n", 0).await.unwrap(), 4);
+        m.tcp_close(handle);
+
+        let mut received = String::new();
+        let mut server = server;
+        server.read_to_string(&mut received).await.unwrap();
+        assert_eq!(
+            received,
+            "GET / HTTP/1.1\r\nX: realrealrealreal\r\n\r\nhello\r\n\r\n"
+        );
+
+        assert!(matches!(
+            m.tcp_write(99, b"GET / HTTP/1.1\r\n", 0).await,
+            Err(TcpError::InvalidHandle)
+        ));
+        assert!(m.http_states.is_empty());
+    }
+
+    /// A failed upgrade invalidates the TCP handle, so its state goes too.
+    #[tokio::test]
+    async fn test_failed_tls_upgrade_cleans_up_state() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let mut m = framing_manager();
+        let (handle, _server) = tokio::join!(m.tcp_connect("127.0.0.1", port, 0), async {
+            listener.accept().await.unwrap().0
+        });
+        let handle = handle.unwrap();
+        m.tcp_write(handle, b"GET /", 0).await.unwrap();
+
+        // An empty hostname fails before any handshake.
+        assert!(m.tls_upgrade(handle, "", 0).await.is_err());
+        assert_eq!(m.connection_count(), 0);
+        assert!(!m.connection_hosts.contains_key(&handle));
+        assert!(m.http_states.is_empty());
     }
 }
