@@ -33,18 +33,15 @@ impl_extra_traits!(Wit);
 
 impl Wit {
     pub(crate) unsafe fn from_raw(ptr: *const ffi::wit_t) -> Wit {
-        unsafe {
-            // The layout of `wit_t` and the type codes change between
-            // versions, so anything but an exact match would be misread.
-            assert_eq!(
-                (*ptr).version,
-                ffi::WIT_CURRENT_VERSION,
-                "wit-dylib metadata version does not match these bindings"
-            );
-            Wit {
-                ptr: ptr.as_ref().unwrap(),
-            }
-        }
+        let wit = unsafe { ptr.as_ref() }.expect("wit-dylib metadata pointer is null");
+        // The layout of `wit_t` and the type codes change between versions,
+        // so anything but an exact match would be misread.
+        assert_eq!(
+            wit.version,
+            ffi::WIT_CURRENT_VERSION,
+            "wit-dylib metadata version does not match these bindings"
+        );
+        Wit { ptr: wit }
     }
 
     fn raw_import_funcs(&self) -> &'static [ffi::wit_import_func_t] {
