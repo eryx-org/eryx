@@ -21,9 +21,11 @@ Classes:
 Exceptions:
     EryxError: Base exception for all Eryx errors.
     ExecutionError: Error during Python code execution.
+    PythonExceptionError: The sandboxed code raised (subclass of ExecutionError).
     InitializationError: Error during sandbox initialization.
     ResourceLimitError: Resource limit exceeded during execution.
-    TimeoutError: Execution timed out (also accessible as eryx.TimeoutError).
+    TimeoutError: Execution timed out (subclass of both EryxError and the
+        built-in TimeoutError).
 """
 
 from eryx._eryx import (
@@ -43,6 +45,7 @@ from eryx._eryx import (
     SuspendedCallback,
     VfsStorage,
     # Exceptions
+    CancelledError,
     EryxError,
     ExecutionError,
     InitializationError,
@@ -50,6 +53,7 @@ from eryx._eryx import (
     PoolError,
     PoolExhaustedError,
     PoolTimeoutError,
+    PythonExceptionError,
     ResourceLimitError,
     SuspendCallback,
     TimeoutError,
@@ -74,6 +78,7 @@ __all__ = [
     "SuspendedCallback",
     "VfsStorage",
     # Exceptions
+    "CancelledError",
     "EryxError",
     "ExecutionError",
     "InitializationError",
@@ -81,6 +86,7 @@ __all__ = [
     "PoolError",
     "PoolExhaustedError",
     "PoolTimeoutError",
+    "PythonExceptionError",
     "ResourceLimitError",
     "SuspendCallback",
     "TimeoutError",

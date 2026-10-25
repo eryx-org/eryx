@@ -293,6 +293,23 @@ class TestExceptions:
         with pytest.raises(eryx.EryxError):
             sandbox.execute("raise RuntimeError('test')")
 
+    def test_script_exception_is_python_exception_error(self):
+        """A script raising is a PythonExceptionError, still an ExecutionError."""
+        assert issubclass(eryx.PythonExceptionError, eryx.ExecutionError)
+        sandbox = eryx.Sandbox()
+        with pytest.raises(eryx.PythonExceptionError, match="boom"):
+            sandbox.execute("raise ValueError('boom')")
+
+    def test_timeout_error_is_eryx_error(self):
+        """TimeoutError is caught by `except eryx.EryxError`."""
+        assert issubclass(eryx.TimeoutError, eryx.EryxError)
+        assert issubclass(eryx.TimeoutError, TimeoutError)
+        limits = eryx.ResourceLimits(execution_timeout_ms=500)
+        sandbox = eryx.Sandbox(resource_limits=limits)
+
+        with pytest.raises(eryx.EryxError):
+            sandbox.execute("while True: pass")
+
     def test_timeout_error_is_catchable_as_builtin(self):
         """Test that TimeoutError can be caught as Python's TimeoutError."""
         limits = eryx.ResourceLimits(execution_timeout_ms=500)

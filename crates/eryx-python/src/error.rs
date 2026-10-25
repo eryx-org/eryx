@@ -6,7 +6,8 @@ use std::sync::Arc;
 
 use pyo3::exceptions::{PyException, PyRuntimeError, PyTimeoutError, PyValueError};
 use pyo3::prelude::*;
-use pyo3::{PyErr, create_exception};
+use pyo3::types::PyDict;
+use pyo3::{PyErr, create_exception, import_exception};
 
 // Define custom exception types that mirror the Rust error hierarchy
 create_exception!(
@@ -23,6 +24,12 @@ create_exception!(
 );
 create_exception!(
     eryx,
+    PythonExceptionError,
+    ExecutionError,
+    "The sandboxed Python code raised an uncaught exception."
+);
+create_exception!(
+    eryx,
     InitializationError,
     EryxError,
     "Error during sandbox initialization."
@@ -33,12 +40,10 @@ create_exception!(
     EryxError,
     "Resource limit exceeded during execution."
 );
-create_exception!(
-    eryx,
-    SandboxTimeoutError,
-    PyTimeoutError,
-    "Execution timed out."
-);
+// `TimeoutError` derives from both the built-in `TimeoutError` and
+// `EryxError`. `create_exception!` only supports a single base, so the class is
+// built in `register_exceptions` and looked up from the module when raised.
+import_exception!(eryx._eryx, TimeoutError);
 create_exception!(eryx, CancelledError, EryxError, "Execution was cancelled.");
 // Raised by user callbacks (not by eryx), so it derives from Exception rather
 // than EryxError.
@@ -77,13 +82,13 @@ pub fn eryx_error_to_py(err: eryx::Error) -> PyErr {
         eryx::Error::EpochTicker(msg) => ExecutionError::new_err(msg),
         eryx::Error::WasmComponent(e) => InitializationError::new_err(e.to_string()),
         eryx::Error::Execution(msg) => ExecutionError::new_err(msg),
-        // A script raising an uncaught exception is also an execution error from
-        // the Python caller's perspective; keep it mapped to ExecutionError.
-        eryx::Error::PythonException(msg) => ExecutionError::new_err(msg),
+        // A subclass of ExecutionError, so callers can tell a script error from
+        // a sandbox failure while `except ExecutionError` still catches both.
+        eryx::Error::PythonException(msg) => PythonExceptionError::new_err(msg),
         eryx::Error::Callback(e) => ExecutionError::new_err(e.to_string()),
         eryx::Error::ResourceLimit(msg) => ResourceLimitError::new_err(msg),
         eryx::Error::Timeout(duration) => {
-            SandboxTimeoutError::new_err(format!("execution timed out after {duration:?}"))
+            TimeoutError::new_err(format!("execution timed out after {duration:?}"))
         }
         eryx::Error::Serialization(msg) => PyValueError::new_err(msg),
         eryx::Error::MissingPythonStdlib => InitializationError::new_err(
@@ -134,6 +139,10 @@ pub fn register_exceptions(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("EryxError", m.py().get_type::<EryxError>())?;
     m.add("ExecutionError", m.py().get_type::<ExecutionError>())?;
     m.add(
+        "PythonExceptionError",
+        m.py().get_type::<PythonExceptionError>(),
+    )?;
+    m.add(
         "InitializationError",
         m.py().get_type::<InitializationError>(),
     )?;
@@ -141,7 +150,16 @@ pub fn register_exceptions(m: &Bound<'_, PyModule>) -> PyResult<()> {
         "ResourceLimitError",
         m.py().get_type::<ResourceLimitError>(),
     )?;
-    m.add("TimeoutError", m.py().get_type::<SandboxTimeoutError>())?;
+    let py = m.py();
+    let namespace = PyDict::new(py);
+    namespace.set_item("__module__", "eryx")?;
+    namespace.set_item("__doc__", "Execution timed out.")?;
+    let timeout_error = py.get_type::<pyo3::types::PyType>().call1((
+        "TimeoutError",
+        (py.get_type::<PyTimeoutError>(), py.get_type::<EryxError>()),
+        namespace,
+    ))?;
+    m.add("TimeoutError", timeout_error)?;
     m.add("CancelledError", m.py().get_type::<CancelledError>())?;
     m.add("SuspendCallback", m.py().get_type::<SuspendCallback>())?;
     m.add("PoolError", m.py().get_type::<PoolError>())?;

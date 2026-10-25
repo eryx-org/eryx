@@ -41,6 +41,7 @@ use pyo3::prelude::*;
 /// Exceptions:
 ///     EryxError: Base exception for all Eryx errors.
 ///     ExecutionError: Error during Python code execution.
+///     PythonExceptionError: The sandboxed code raised (subclass of ExecutionError).
 ///     InitializationError: Error during sandbox initialization.
 ///     ResourceLimitError: Resource limit exceeded during execution.
 ///     TimeoutError: Execution timed out.

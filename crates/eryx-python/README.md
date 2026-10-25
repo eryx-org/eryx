@@ -703,10 +703,12 @@ The VFS supports standard Python file operations:
 ### Exceptions
 
 - `eryx.EryxError` - Base exception for all Eryx errors
-- `eryx.ExecutionError` - Python code raised an exception
+- `eryx.ExecutionError` - Execution failed, either because the code raised or the sandbox failed
+  - `eryx.PythonExceptionError` - The sandboxed Python code raised an uncaught exception
 - `eryx.InitializationError` - Sandbox failed to initialize
 - `eryx.ResourceLimitError` - Resource limit exceeded
-- `eryx.TimeoutError` - Execution timed out
+- `eryx.TimeoutError` - Execution timed out (also a built-in `TimeoutError`)
+- `eryx.CancelledError` - Execution was cancelled
 
 ## Package Loading
 
