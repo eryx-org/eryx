@@ -764,6 +764,12 @@ impl Sandbox {
     }
 }
 
+/// Quote `value` as a Python string literal.
+fn python_str_literal(value: &str) -> String {
+    // Serializing a `str` cannot fail.
+    serde_json::to_string(value).unwrap_or_default()
+}
+
 /// Log and convert the failure of a task spawned to serve an execution.
 fn handler_task_failed(task: &str, error: &tokio::task::JoinError) -> Error {
     tracing::error!(task, %error, "execution handler task failed");
@@ -1768,9 +1774,15 @@ impl<R, S> SandboxBuilder<R, S> {
             },
         );
 
-        // Set placeholder as environment variable via preamble
-        // TODO: Find proper way to set env vars in executor
-        let env_code = format!("import os\nos.environ[{:?}] = {:?}\n", name, placeholder);
+        // Set the placeholder as an environment variable via the preamble. The
+        // preinitialized runtime snapshots `os.environ`, so WASI env vars set
+        // per execution would not show up. JSON string literals are valid
+        // Python string literals, unlike Rust's `{:?}` escapes (`\u{1b}`).
+        let env_code = format!(
+            "import os\nos.environ[{}] = {}\n",
+            python_str_literal(&name),
+            python_str_literal(&placeholder)
+        );
         self.preamble.push_str(&env_code);
 
         self

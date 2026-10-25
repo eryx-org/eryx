@@ -110,3 +110,17 @@ async fn panicking_callback_fails_the_execution() {
         "expected a callback handler failure, got {result:?}"
     );
 }
+
+#[tokio::test]
+async fn secret_names_needing_escapes_do_not_break_execution() {
+    let sandbox = Sandbox::embedded()
+        .with_secret("ODD\u{1b}\"NAME\n", "real-value", vec![])
+        .scrub_stdout(false)
+        .build()
+        .unwrap();
+    let result = sandbox
+        .execute("import os\nprint(os.environ['ODD\\x1b\"NAME\\n'].startswith('ERYX_SECRET_PLACEHOLDER_'))")
+        .await
+        .unwrap();
+    assert_eq!(result.stdout_text().trim(), "True");
+}
