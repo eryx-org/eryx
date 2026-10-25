@@ -114,6 +114,8 @@ print(msg['echoed'])  # "hihihi"
 
 <!-- langtabs-end -->
 
+Callback names must be unique: building a sandbox with two callbacks of the same name (including those added by libraries) fails with an error naming it.
+
 ## Parameters and Types
 
 Callback parameters are passed as JSON from the sandbox. Parameters must be deserializable types.

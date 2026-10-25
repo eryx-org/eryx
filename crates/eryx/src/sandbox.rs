@@ -630,12 +630,20 @@ impl Sandbox {
     /// Set the registered callbacks (replacing any existing ones).
     ///
     /// Used by the pool to configure per-request callbacks on a reused sandbox.
-    pub fn set_callbacks(&mut self, callbacks: Vec<Box<dyn Callback>>) {
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Initialization`] naming the callback if two share a
+    /// name; the existing callbacks are left unchanged.
+    pub fn set_callbacks(&mut self, callbacks: Vec<Box<dyn Callback>>) -> Result<(), Error> {
         let mut map = HashMap::new();
+        let mut duplicate = None;
         for callback in callbacks {
-            insert_callback(&mut map, Arc::from(callback));
+            insert_callback(&mut map, &mut duplicate, Arc::from(callback));
         }
+        check_duplicate_callback(duplicate)?;
         self.callbacks = Arc::new(map);
+        Ok(())
     }
 
     /// Set the trace handler for execution events.
@@ -764,17 +772,28 @@ impl Sandbox {
     }
 }
 
-/// Register `callback` under its name, warning when that replaces another.
+/// Register `callback` under its name, recording the first name registered
+/// twice in `duplicate` (the earlier registration is kept).
 fn insert_callback(
     callbacks: &mut HashMap<String, Arc<dyn Callback>>,
+    duplicate: &mut Option<String>,
     callback: Arc<dyn Callback>,
 ) {
-    let name = callback.name().to_string();
-    if callbacks.insert(name.clone(), callback).is_some() {
-        tracing::warn!(
-            callback = %name,
-            "duplicate callback name; the later registration replaces the earlier one"
-        );
+    let name = callback.name();
+    if callbacks.contains_key(name) {
+        duplicate.get_or_insert_with(|| name.to_string());
+    } else {
+        callbacks.insert(name.to_string(), callback);
+    }
+}
+
+/// Fail if [`insert_callback`] saw a name registered twice.
+fn check_duplicate_callback(duplicate: Option<String>) -> Result<(), Error> {
+    match duplicate {
+        Some(name) => Err(Error::Initialization(format!(
+            "callback '{name}' is registered more than once"
+        ))),
+        None => Ok(()),
     }
 }
 
@@ -1023,6 +1042,8 @@ enum WasmSource {
 pub struct SandboxBuilder<Runtime = state::Needs, Stdlib = state::Needs> {
     wasm_source: WasmSource,
     callbacks: HashMap<String, Arc<dyn Callback>>,
+    /// First callback name registered twice; `build()` fails if set.
+    duplicate_callback: Option<String>,
     preamble: String,
     type_stubs: String,
     trace_handler: Option<Arc<dyn TraceHandler>>,
@@ -1103,6 +1124,7 @@ impl SandboxBuilder<state::Needs, state::Needs> {
         Self {
             wasm_source: WasmSource::None,
             callbacks: HashMap::new(),
+            duplicate_callback: None,
             preamble: String::new(),
             type_stubs: String::new(),
             trace_handler: None,
@@ -1140,6 +1162,7 @@ impl SandboxBuilder<state::Needs, state::Needs> {
         SandboxBuilder {
             wasm_source: WasmSource::EmbeddedRuntime,
             callbacks: HashMap::new(),
+            duplicate_callback: None,
             preamble: String::new(),
             type_stubs: String::new(),
             trace_handler: None,
@@ -1177,6 +1200,7 @@ impl<R, S> SandboxBuilder<R, S> {
         SandboxBuilder {
             wasm_source: self.wasm_source,
             callbacks: self.callbacks,
+            duplicate_callback: self.duplicate_callback,
             preamble: self.preamble,
             type_stubs: self.type_stubs,
             trace_handler: self.trace_handler,
@@ -1581,11 +1605,17 @@ impl<R, S> SandboxBuilder<R, S> {
     }
 
     /// Add a runtime library (callbacks + preamble + stubs).
+    ///
+    /// A callback name registered twice makes [`build`](Self::build) fail.
     #[must_use]
     pub fn with_library(mut self, library: RuntimeLibrary) -> Self {
         // Add callbacks from the library
         for callback in library.callbacks {
-            insert_callback(&mut self.callbacks, Arc::from(callback));
+            insert_callback(
+                &mut self.callbacks,
+                &mut self.duplicate_callback,
+                Arc::from(callback),
+            );
         }
 
         // Append preamble
@@ -1608,18 +1638,30 @@ impl<R, S> SandboxBuilder<R, S> {
     }
 
     /// Add individual callbacks.
+    ///
+    /// A callback name registered twice makes [`build`](Self::build) fail.
     #[must_use]
     pub fn with_callbacks(mut self, callbacks: Vec<Box<dyn Callback>>) -> Self {
         for callback in callbacks {
-            insert_callback(&mut self.callbacks, Arc::from(callback));
+            insert_callback(
+                &mut self.callbacks,
+                &mut self.duplicate_callback,
+                Arc::from(callback),
+            );
         }
         self
     }
 
     /// Add a single callback.
+    ///
+    /// A callback name registered twice makes [`build`](Self::build) fail.
     #[must_use]
     pub fn with_callback(mut self, callback: impl Callback + 'static) -> Self {
-        insert_callback(&mut self.callbacks, Arc::new(callback));
+        insert_callback(
+            &mut self.callbacks,
+            &mut self.duplicate_callback,
+            Arc::new(callback),
+        );
         self
     }
 
@@ -2125,6 +2167,7 @@ impl SandboxBuilder<state::Has, state::Has> {
     /// - No WASM component was specified and no default is available
     /// - The WASM component cannot be loaded
     /// - The WebAssembly runtime fails to initialize
+    /// - Two callbacks (including those from libraries) share a name
     ///
     /// # Native Extensions
     ///
@@ -2145,6 +2188,8 @@ impl SandboxBuilder<state::Has, state::Has> {
         )
     )]
     pub fn build(mut self) -> Result<Sandbox, Error> {
+        check_duplicate_callback(self.duplicate_callback.take())?;
+
         // First, compute mount indices and register native extensions from packages
         // with correct dlopen paths. Mount index 0 is reserved for explicit site-packages.
         #[cfg(feature = "native-extensions")]
@@ -3128,6 +3173,29 @@ mod tests {
     fn sandbox_builder_with_wasm_bytes_accepts_vec() {
         // Just test that the builder accepts bytes - actual loading tested elsewhere
         let _builder = SandboxBuilder::new().with_wasm_bytes(vec![0u8; 10]);
+    }
+
+    #[test]
+    fn sandbox_builder_rejects_duplicate_callback_names() {
+        let builder = || {
+            SandboxBuilder::new()
+                .with_wasm_bytes(vec![])
+                .with_python_stdlib("/fake/stdlib")
+        };
+        let library = RuntimeLibrary::new().with_callback(TestCallback);
+        for result in [
+            builder()
+                .with_callback(TestCallback)
+                .with_callback(TestCallback)
+                .build(),
+            builder()
+                .with_library(library)
+                .with_callback(TestCallback)
+                .build(),
+        ] {
+            let err = result.expect_err("duplicate callback should fail build");
+            assert!(err.to_string().contains("'test'"), "{err}");
+        }
     }
 
     #[test]

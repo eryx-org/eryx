@@ -9,7 +9,7 @@ use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 
 use crate::callback::extract_callbacks;
-use crate::error::pool_error_to_py;
+use crate::error::{eryx_error_to_py, pool_error_to_py};
 use crate::resource_limits::ResourceLimits;
 use crate::result::ExecuteResult;
 use crate::sandbox::PyOutputHandler;
@@ -155,7 +155,7 @@ impl PooledSandbox {
             runtime
                 .block_on(sandbox.execute(&code))
                 .map(ExecuteResult::from)
-                .map_err(crate::error::eryx_error_to_py)
+                .map_err(eryx_error_to_py)
         })
     }
 
@@ -407,7 +407,10 @@ impl SandboxPool {
                 .into_iter()
                 .map(|cb| Box::new(cb) as Box<dyn eryx::Callback>)
                 .collect();
-            pooled.sandbox_mut().set_callbacks(boxed);
+            pooled
+                .sandbox_mut()
+                .set_callbacks(boxed)
+                .map_err(eryx_error_to_py)?;
         }
 
         if let Some(limits) = resource_limits {

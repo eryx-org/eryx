@@ -768,10 +768,13 @@ impl PooledSandbox {
     /// Set callbacks for this request.
     ///
     /// These will be cleared automatically when the sandbox is returned to the pool.
-    #[must_use]
-    pub fn with_callbacks(mut self, callbacks: Vec<Box<dyn Callback>>) -> Self {
-        self.sandbox_mut().set_callbacks(callbacks);
-        self
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Initialization`] if two callbacks share a name.
+    pub fn with_callbacks(mut self, callbacks: Vec<Box<dyn Callback>>) -> Result<Self, Error> {
+        self.sandbox_mut().set_callbacks(callbacks)?;
+        Ok(self)
     }
 
     /// Set a trace handler for this request.
