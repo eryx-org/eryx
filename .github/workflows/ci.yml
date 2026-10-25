@@ -319,6 +319,10 @@ jobs:
         # Use --all-features now that prebuilt artifacts are available
         run: cargo clippy --workspace --all-targets --all-features -- -D warnings
 
+      - name: Run clippy (eryx, embedded without vfs)
+        # Catches code that is only used under `vfs` (warnings --all-features hides).
+        run: cargo clippy -p eryx --all-targets --features embedded -- -D warnings
+
   test:
     name: Test
     runs-on: ubuntu-latest

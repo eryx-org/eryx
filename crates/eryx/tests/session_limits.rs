@@ -54,6 +54,7 @@ fn assert_memory_limit_error(error: Error) {
 /// rejection currently reaches CPython's close path as a generic `OSError`.
 /// This asserts only that the write failed, because the errno classification is
 /// pre-existing behavior unrelated to limit propagation.
+#[cfg(feature = "vfs")]
 fn assert_vfs_quota_rejected(error: &Error) {
     assert!(
         matches!(error, Error::PythonException(_)) && error.to_string().contains("OSError"),
