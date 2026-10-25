@@ -146,7 +146,10 @@ world sandbox {
     /// index" errors at runtime).
     ///
     /// This is only meant to be called during wasmtime-wizer
-    /// pre-initialization. Calling it at runtime has no useful effect.
+    /// pre-initialization. On a live instance it would make the guest forget
+    /// its open WASI handles and preopens, breaking file access, so only the
+    /// first call has any effect: instances restored from a pre-init snapshot
+    /// ignore it.
     export finalize-preinit: func();
 
     /// Set the name of the user variable captured as the structured result.

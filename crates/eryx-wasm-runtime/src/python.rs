@@ -40,10 +40,9 @@ pub use pyo3::ffi::{
     PyDict_Update,
     // Exception handling
     PyErr_Clear,
+    PyErr_DisplayException,
     PyErr_GetRaisedException,
     PyErr_Occurred,
-    PyErr_Print,
-    PyErr_PrintEx,
     PyErr_SetString,
     // Exception types
     PyExc_AttributeError,
@@ -91,7 +90,12 @@ pub use pyo3::ffi::{
 
 // Functions not available in pyo3-ffi stable ABI (abi3)
 unsafe extern "C" {
-    pub fn PyRun_SimpleString(command: *const c_char) -> std::ffi::c_int;
+    pub fn PyRun_String(
+        str: *const c_char,
+        start: std::ffi::c_int,
+        globals: *mut PyObject,
+        locals: *mut PyObject,
+    ) -> *mut PyObject;
     pub fn PyUnicode_AsUTF8(unicode: *mut PyObject) -> *const c_char;
     pub fn PyObject_CallMethod(
         obj: *mut PyObject,
@@ -101,13 +105,52 @@ unsafe extern "C" {
     ) -> *mut PyObject;
 }
 
+/// `Py_file_input`: compile `PyRun_String` source as a sequence of statements.
+const PY_FILE_INPUT: std::ffi::c_int = 257;
+
+/// Run `code` in `__main__`'s namespace.
+///
+/// Unlike `PyRun_SimpleString` this never calls `PyErr_Print`, which handles
+/// `SystemExit` by finalizing the interpreter and exiting the instance. A raised
+/// exception is cleared and returned as its message instead.
+///
+/// # Safety
+/// Python must be initialized.
+unsafe fn run_in_main(code: &std::ffi::CStr) -> Result<(), String> {
+    unsafe {
+        let main_module = PyImport_AddModule(c"__main__".as_ptr());
+        if main_module.is_null() {
+            return Err(get_last_error_message());
+        }
+        let main_dict = PyModule_GetDict(main_module);
+        let ret = PyRun_String(code.as_ptr(), PY_FILE_INPUT, main_dict, main_dict);
+        if ret.is_null() {
+            return Err(get_last_error_message());
+        }
+        Py_DecRef(ret);
+        Ok(())
+    }
+}
+
+/// Print the raised exception's traceback to `sys.stderr` and clear it.
+///
+/// Used instead of `PyErr_Print`, which exits the process for `SystemExit`.
+///
+/// # Safety
+/// Python must be initialized and an exception must be set.
+unsafe fn print_raised_exception() {
+    unsafe {
+        let exc = PyErr_GetRaisedException();
+        if !exc.is_null() {
+            PyErr_DisplayException(exc);
+            Py_DecRef(exc);
+        }
+    }
+}
+
 // =============================================================================
 // Invoke callback mechanism
 // =============================================================================
-
-/// Type for the invoke callback function.
-/// Takes (name, args_json) and returns Result<result_json, error_message>.
-pub type InvokeCallback = fn(&str, &str) -> Result<String, String>;
 
 /// Type for the async invoke callback function.
 /// Takes (name, args_json) and returns InvokeResult (Ok/Err/Pending).
@@ -128,19 +171,12 @@ use std::cell::RefCell;
 // These are set by lib.rs during export execution.
 // Note: WASM is single-threaded, so RefCell is sufficient and avoids lock overhead.
 thread_local! {
-    static INVOKE_CALLBACK: RefCell<Option<InvokeCallback>> = const { RefCell::new(None) };
     static INVOKE_ASYNC_CALLBACK: RefCell<Option<InvokeAsyncCallback>> = const { RefCell::new(None) };
     static REPORT_TRACE_CALLBACK: RefCell<Option<ReportTraceCallback>> = const { RefCell::new(None) };
     static REPORT_OUTPUT_CALLBACK: RefCell<Option<ReportOutputCallback>> = const { RefCell::new(None) };
     /// Stores the last callback error if Python callback execution failed.
     /// This allows export_async_callback to detect uncaught exceptions.
     static LAST_CALLBACK_ERROR: RefCell<Option<String>> = const { RefCell::new(None) };
-}
-
-/// Set the invoke callback function.
-/// This should be called by lib.rs before executing Python code.
-pub fn set_invoke_callback(callback: Option<InvokeCallback>) {
-    INVOKE_CALLBACK.with(|cell| *cell.borrow_mut() = callback);
 }
 
 /// Set the async invoke callback function.
@@ -164,18 +200,6 @@ pub fn take_last_callback_error() -> Option<String> {
 /// Store a callback error.
 fn set_last_callback_error(error: String) {
     LAST_CALLBACK_ERROR.with(|cell| *cell.borrow_mut() = Some(error));
-}
-
-/// Call the registered invoke callback.
-/// Returns Err if no callback is registered or if the callback fails.
-pub fn do_invoke(name: &str, args_json: &str) -> Result<String, String> {
-    INVOKE_CALLBACK.with(|cell| {
-        let callback = cell.borrow();
-        let callback = callback.as_ref().ok_or_else(|| {
-            "invoke() called outside of execute context - callbacks can only be called during code execution".to_string()
-        })?;
-        callback(name, args_json)
-    })
 }
 
 /// Call the registered async invoke callback.
@@ -308,44 +332,44 @@ fn get_python_callback_code() -> u32 {
 /// If Python raises an uncaught exception, the error is stored and can be retrieved
 /// with `take_last_callback_error()`.
 pub fn call_python_callback(event0: u32, event1: u32, event2: u32) -> u32 {
-    use std::ffi::CString;
-
-    let code = format!(
-        r#"
-import _eryx_async
-_eryx_callback_code = _eryx_async.resume({event0}, {event1}, {event2})
-"#
-    );
-
-    let code_cstr = match CString::new(code) {
-        Ok(s) => s,
-        Err(_) => return callback_code::EXIT,
-    };
-
     unsafe {
-        if PyRun_SimpleString(code_cstr.as_ptr()) != 0 {
-            // Python callback raised an uncaught exception.
-            //
-            // NOTE: PyRun_SimpleString calls PyErr_Print() before returning -1,
-            // which clears the error indicator and prints the traceback to stderr.
-            // Since stderr is captured by _eryx_stderr, we can read the traceback
-            // from there instead of relying on get_last_error_message() which
-            // would always return "Unknown error" (PyErr_Occurred is already null).
-            let error = get_captured_stderr_error();
-            set_last_callback_error(error);
-            PyErr_Clear(); // Clear any residual error state
+        let module = PyImport_ImportModule(c"_eryx_async".as_ptr());
+        let ret = if module.is_null() {
+            std::ptr::null_mut()
+        } else {
+            let ret = PyObject_CallMethod(
+                module,
+                c"resume".as_ptr(),
+                c"III".as_ptr(),
+                std::ffi::c_uint::from(event0),
+                std::ffi::c_uint::from(event1),
+                std::ffi::c_uint::from(event2),
+            );
+            Py_DecRef(module);
+            ret
+        };
+        if ret.is_null() {
+            // Python callback raised an uncaught exception. Print the traceback
+            // into the captured stderr and report that as the error.
+            print_raised_exception();
+            set_last_callback_error(get_captured_stderr_error());
             return callback_code::EXIT;
         }
+        let code = PyLong_AsLong(ret);
+        Py_DecRef(ret);
+        if code < 0 && !PyErr_Occurred().is_null() {
+            set_last_callback_error(get_last_error_message());
+            return callback_code::EXIT;
+        }
+        code as u32
     }
-
-    get_python_callback_code()
 }
 
 /// Get the error message from captured stderr.
 ///
-/// When `PyRun_SimpleString` fails, it calls `PyErr_Print()` which prints
-/// the traceback to `sys.stderr`. Since we redirect stderr to `_eryx_stderr`,
-/// the traceback is captured there. This function reads it.
+/// [`print_raised_exception`] prints the traceback to `sys.stderr`. Since we
+/// redirect stderr to `_eryx_stderr`, the traceback is captured there. This
+/// function reads it.
 ///
 /// Falls back to `get_last_error_message()` if stderr is empty.
 ///
@@ -353,7 +377,7 @@ _eryx_callback_code = _eryx_async.resume({event0}, {event1}, {event2})
 ///
 /// Python must be initialized.
 unsafe fn get_captured_stderr_error() -> String {
-    // Try to get the error from _eryx_stderr (where PyErr_Print wrote it)
+    // Try to get the error from _eryx_stderr (where the traceback was printed)
     let stderr_content = unsafe {
         // Read _eryx_stderr.getvalue() directly
         let main_module = PyImport_AddModule(c"__main__".as_ptr());
@@ -419,9 +443,7 @@ unsafe fn get_captured_stderr_error() -> String {
 pub fn recapture_stdout() {
     // Capture the output and restore original stdout/stderr using our helper
     unsafe {
-        if PyRun_SimpleString(c"_eryx_output, _eryx_errors = _eryx_get_output()".as_ptr()) != 0 {
-            PyErr_Clear();
-        }
+        let _ = run_in_main(c"_eryx_output, _eryx_errors = _eryx_get_output()");
     }
 }
 
@@ -435,8 +457,7 @@ pub fn recapture_stdout() {
 /// Must be called with the Python interpreter initialized.
 pub unsafe fn capture_result() -> (String, String) {
     unsafe {
-        if PyRun_SimpleString(c"_eryx_capture_result()".as_ptr()) != 0 {
-            PyErr_Clear();
+        if run_in_main(c"_eryx_capture_result()").is_err() {
             return (String::new(), String::new());
         }
         let result = get_python_variable_string("_eryx_result").unwrap_or_default();
@@ -455,9 +476,7 @@ pub unsafe fn capture_result() -> (String, String) {
 /// Must be called with the Python interpreter initialized.
 pub unsafe fn discard_result() {
     unsafe {
-        if PyRun_SimpleString(c"_eryx_discard_result()".as_ptr()) != 0 {
-            PyErr_Clear();
-        }
+        let _ = run_in_main(c"_eryx_discard_result()");
     }
 }
 
@@ -522,61 +541,12 @@ pub fn set_async_import_result(subtask: u32, result_json: &str) {
     }
 }
 
-/// Store the result of a TLS async operation for Python to retrieve.
-///
-/// - `subtask`: The subtask ID (used as key)
-/// - `status`: 0 = Ok, 1 = Error
-/// - `value`: For Ok: the handle/u32 value. For Error: error discriminant.
-/// - `message`: Optional error message for errors.
-pub fn set_net_result(subtask: u32, status: i32, value: i64, message: Option<String>) {
-    use std::ffi::CString;
-
-    let code = match (status, message) {
-        (0, _) => format!("_eryx_net_results[{subtask}] = (0, {value})"),
-        (1, Some(msg)) => {
-            let escaped = msg.replace('\\', "\\\\").replace("'''", "\\'''");
-            format!("_eryx_net_results[{subtask}] = (1, '''{escaped}''')")
-        }
-        (1, None) => format!("_eryx_net_results[{subtask}] = (1, 'unknown error')"),
-        _ => return,
-    };
-
-    if let Ok(code_cstr) = CString::new(code) {
-        unsafe {
-            if PyRun_SimpleString(code_cstr.as_ptr()) != 0 {
-                PyErr_Clear();
-            }
-        }
-    }
-}
-
-/// Store the result of a network read operation (bytes result).
-pub fn set_net_bytes_result(subtask: u32, status: i32, data: Vec<u8>) {
-    use std::ffi::CString;
-
-    let code = if status == 0 {
-        // Encode bytes as a Python bytes literal
-        let hex: String = data.iter().map(|b| format!("\\x{b:02x}")).collect();
-        format!("_eryx_net_results[{subtask}] = (0, b'{hex}')")
-    } else {
-        format!("_eryx_net_results[{subtask}] = (1, 'unknown error')")
-    };
-
-    if let Ok(code_cstr) = CString::new(code) {
-        unsafe {
-            if PyRun_SimpleString(code_cstr.as_ptr()) != 0 {
-                PyErr_Clear();
-            }
-        }
-    }
-}
-
 // =============================================================================
 // _eryx built-in module (PyO3-based)
 // =============================================================================
 //
-// This module provides the low-level `_eryx_invoke` function that Python code
-// uses to call host callbacks. It uses PyO3 macros to generate a proper C
+// This module provides the low-level `_eryx_invoke_async` function that Python
+// code uses to call host callbacks. It uses PyO3 macros to generate a proper C
 // extension module that works correctly in WASM.
 //
 // Note: We use PyO3 instead of manual CPython FFI because manual PyModuleDef
@@ -584,16 +554,6 @@ pub fn set_net_bytes_result(subtask: u32, status: i32, data: Vec<u8>) {
 // allocated by our .so module.
 
 use pyo3::prelude::*;
-
-/// Low-level invoke function exposed to Python.
-/// Python signature: _eryx_invoke(name: str, args_json: str) -> str
-#[pyfunction]
-fn _eryx_invoke(name: String, args_json: String) -> PyResult<String> {
-    match do_invoke(&name, &args_json) {
-        Ok(result) => Ok(result),
-        Err(e) => Err(pyo3::exceptions::PyRuntimeError::new_err(e)),
-    }
-}
 
 /// Report a trace event to the host.
 /// This is called by sys.settrace to report line/call/return/exception events.
@@ -675,38 +635,23 @@ fn waitable_join_(waitable: u32, set: u32) {
 }
 
 /// Store a context value (Python object) for async resumption.
-/// The object reference count is incremented to keep it alive.
+/// The slot holds its own reference, which `context_get_` hands back.
 #[pyfunction]
-fn context_set_(value: Option<Py<PyAny>>) {
-    let ptr = match value {
-        Some(obj) => {
-            // Increment ref count so it stays alive while stored
-            let ptr = obj.as_ptr();
-            unsafe {
-                pyo3::ffi::Py_IncRef(ptr);
-            }
-            ptr as u32
-        }
-        None => 0,
-    };
-    unsafe { crate::context_set(ptr) }
+fn context_set_(value: Py<PyAny>) {
+    unsafe { crate::context_set(value.into_ptr() as u32) }
 }
 
-/// Retrieve the stored context value.
+/// Take the stored context value, leaving the slot empty.
 /// Returns None if no context was stored (ptr was 0).
 #[pyfunction]
 fn context_get_(py: Python<'_>) -> Option<Py<PyAny>> {
     let ptr = unsafe { crate::context_get() };
     if ptr == 0 {
-        None
-    } else {
-        // Convert raw pointer back to PyObject
-        // The object was incref'd when stored, so we borrow it here
-        let obj_ptr = ptr as *mut pyo3::ffi::PyObject;
-        // Create a Bound<PyAny> from the raw pointer (borrows, incrementing refcount)
-        // then unbind to get Py<PyAny>
-        Some(unsafe { Bound::from_borrowed_ptr(py, obj_ptr) }.unbind())
+        return None;
     }
+    unsafe { crate::context_set(0) };
+    // Take over the reference `context_set_` stored with the pointer.
+    Some(unsafe { Bound::from_owned_ptr(py, ptr as *mut pyo3::ffi::PyObject) }.unbind())
 }
 
 /// Drop a completed subtask to release resources.
@@ -759,142 +704,103 @@ fn promise_get_result_(py: Python<'_>, subtask: u32) -> PyResult<String> {
 }
 
 // =============================================================================
-// TCP functions exposed to Python
+// TCP/TLS functions exposed to Python
 // =============================================================================
 //
-// These functions call the WIT TCP interface for networking.
-// They are used by the socket shim for plain HTTP connections.
+// These call the WIT network interface for the socket and ssl shims. They
+// return the operation's value, or raise the exception CPython's own socket
+// and ssl modules would raise for the host's error.
 
-/// Connect to a host:port over TCP.
-/// Returns a tuple: (result_type, value)
-/// - result_type 0: Ok - value is the TCP handle (int)
-/// - result_type 1: Err - value is the error message (str)
-/// - result_type 2: Pending - value is a tuple (waitable_id, promise_id)
-///
-/// Python signature: _eryx_tcp_connect(host: str, port: int, timeout_ms: int = 0) -> tuple[int, Any]
+/// Convert a host network error to the matching Python exception.
+fn net_error_to_py(py: Python<'_>, err: crate::NetError) -> PyErr {
+    let (module, class, errno) = match err.kind {
+        "connection-refused" => ("builtins", "ConnectionRefusedError", Some("ECONNREFUSED")),
+        "connection-reset" => ("builtins", "ConnectionResetError", Some("ECONNRESET")),
+        "timed-out" => ("builtins", "TimeoutError", Some("ETIMEDOUT")),
+        "not-permitted" => ("builtins", "PermissionError", Some("EACCES")),
+        "invalid-handle" => ("builtins", "OSError", Some("EBADF")),
+        "host-not-found" => ("socket", "gaierror", None),
+        "handshake-failed" => ("ssl", "SSLError", None),
+        "certificate-error" => ("ssl", "SSLCertVerificationError", None),
+        _ => ("builtins", "OSError", None),
+    };
+    // urllib3 and friends match on CPython's "timed out" text as well as the type.
+    let kind = if err.kind == "timed-out" {
+        "timed out"
+    } else {
+        err.kind
+    };
+    let message = match err.message {
+        Some(m) => format!("{kind}: {m}"),
+        None => kind.to_string(),
+    };
+    let build = || -> PyResult<PyErr> {
+        let cls = py.import(module)?.getattr(class)?;
+        let exc = match errno {
+            Some(name) => {
+                let errno = py.import("errno")?.getattr(name)?;
+                cls.call1((errno, message.clone()))?
+            }
+            None => cls.call1((message.clone(),))?,
+        };
+        Ok(PyErr::from_value(exc))
+    };
+    build().unwrap_or_else(|_| pyo3::exceptions::PyOSError::new_err(message))
+}
+
+/// Flatten a network call result into a value or a raised exception.
+fn net_result<T>(
+    py: Python<'_>,
+    result: Result<Result<T, crate::NetError>, String>,
+) -> PyResult<T> {
+    match result {
+        Ok(Ok(value)) => Ok(value),
+        Ok(Err(err)) => Err(net_error_to_py(py, err)),
+        Err(e) => Err(pyo3::exceptions::PyRuntimeError::new_err(e)),
+    }
+}
+
+/// Connect to a host:port over TCP and return the TCP handle.
 ///
 /// `timeout_ms` is the guest-requested connect timeout in milliseconds, or `0`
 /// to defer to the host's configured timeout. The host always clamps it to its
 /// own ceiling.
+///
+/// Python signature: _eryx_tcp_connect(host: str, port: int, timeout_ms: int = 0) -> int
 #[pyfunction]
 #[pyo3(signature = (host, port, timeout_ms=0))]
-fn _eryx_tcp_connect(
-    py: Python<'_>,
-    host: String,
-    port: u16,
-    timeout_ms: u32,
-) -> PyResult<(i32, Py<PyAny>)> {
-    match crate::do_tcp_connect(&host, port, timeout_ms) {
-        Ok((status, value)) => match value {
-            crate::NetResultValue::Handle(h) => {
-                Ok((status, h.into_pyobject(py)?.into_any().unbind()))
-            }
-            crate::NetResultValue::Error(e) => {
-                Ok((status, e.into_pyobject(py)?.into_any().unbind()))
-            }
-            crate::NetResultValue::Pending(waitable, promise) => {
-                let tuple = (waitable, promise);
-                Ok((status, tuple.into_pyobject(py)?.into_any().unbind()))
-            }
-            crate::NetResultValue::Bytes(_) => Err(pyo3::exceptions::PyRuntimeError::new_err(
-                "unexpected bytes result from connect",
-            )),
-        },
-        Err(e) => Err(pyo3::exceptions::PyRuntimeError::new_err(e)),
-    }
+fn _eryx_tcp_connect(py: Python<'_>, host: String, port: u16, timeout_ms: u32) -> PyResult<u32> {
+    net_result(py, crate::tcp_connect(&host, port, timeout_ms))
 }
 
-/// Read from a TCP connection.
-/// Returns a tuple: (result_type, value)
-/// - result_type 0: Ok - value is the bytes read
-/// - result_type 1: Err - value is the error message (str)
-/// - result_type 2: Pending - value is a tuple (waitable_id, promise_id)
+/// Read up to `length` bytes from a TCP connection.
 ///
-/// Python signature: _eryx_tcp_read(handle: int, length: int, timeout_ms: int = 0) -> tuple[int, Any]
+/// Python signature: _eryx_tcp_read(handle: int, length: int, timeout_ms: int = 0) -> bytes
 #[pyfunction]
 #[pyo3(signature = (handle, length, timeout_ms=0))]
-fn _eryx_tcp_read(
-    py: Python<'_>,
-    handle: u32,
-    length: u32,
-    timeout_ms: u32,
-) -> PyResult<(i32, Py<PyAny>)> {
-    match crate::do_tcp_read(handle, length, timeout_ms) {
-        Ok((status, value)) => match value {
-            crate::NetResultValue::Bytes(b) => {
-                Ok((status, b.into_pyobject(py)?.into_any().unbind()))
-            }
-            crate::NetResultValue::Error(e) => {
-                Ok((status, e.into_pyobject(py)?.into_any().unbind()))
-            }
-            crate::NetResultValue::Pending(waitable, promise) => {
-                let tuple = (waitable, promise);
-                Ok((status, tuple.into_pyobject(py)?.into_any().unbind()))
-            }
-            crate::NetResultValue::Handle(_) => Err(pyo3::exceptions::PyRuntimeError::new_err(
-                "unexpected handle result from read",
-            )),
-        },
-        Err(e) => Err(pyo3::exceptions::PyRuntimeError::new_err(e)),
-    }
+fn _eryx_tcp_read(py: Python<'_>, handle: u32, length: u32, timeout_ms: u32) -> PyResult<Vec<u8>> {
+    net_result(py, crate::net_read(false, handle, length, timeout_ms))
 }
 
-/// Write to a TCP connection.
-/// Returns a tuple: (result_type, value)
-/// - result_type 0: Ok - value is the number of bytes written (int)
-/// - result_type 1: Err - value is the error message (str)
-/// - result_type 2: Pending - value is a tuple (waitable_id, promise_id)
+/// Write to a TCP connection and return the number of bytes written.
 ///
-/// Python signature: _eryx_tcp_write(handle: int, data: bytes, timeout_ms: int = 0) -> tuple[int, Any]
+/// Python signature: _eryx_tcp_write(handle: int, data: bytes, timeout_ms: int = 0) -> int
 #[pyfunction]
 #[pyo3(signature = (handle, data, timeout_ms=0))]
-fn _eryx_tcp_write(
-    py: Python<'_>,
-    handle: u32,
-    data: Vec<u8>,
-    timeout_ms: u32,
-) -> PyResult<(i32, Py<PyAny>)> {
-    match crate::do_tcp_write(handle, &data, timeout_ms) {
-        Ok((status, value)) => match value {
-            crate::NetResultValue::Handle(n) => {
-                Ok((status, n.into_pyobject(py)?.into_any().unbind()))
-            }
-            crate::NetResultValue::Error(e) => {
-                Ok((status, e.into_pyobject(py)?.into_any().unbind()))
-            }
-            crate::NetResultValue::Pending(waitable, promise) => {
-                let tuple = (waitable, promise);
-                Ok((status, tuple.into_pyobject(py)?.into_any().unbind()))
-            }
-            crate::NetResultValue::Bytes(_) => Err(pyo3::exceptions::PyRuntimeError::new_err(
-                "unexpected bytes result from write",
-            )),
-        },
-        Err(e) => Err(pyo3::exceptions::PyRuntimeError::new_err(e)),
-    }
+fn _eryx_tcp_write(py: Python<'_>, handle: u32, data: Vec<u8>, timeout_ms: u32) -> PyResult<u32> {
+    net_result(py, crate::net_write(false, handle, &data, timeout_ms))
 }
 
 /// Close a TCP connection.
 /// Python signature: _eryx_tcp_close(handle: int) -> None
 #[pyfunction]
 fn _eryx_tcp_close(handle: u32) {
-    crate::do_tcp_close(handle);
+    crate::net_close(false, handle);
 }
 
-// =============================================================================
-// TLS functions exposed to Python
-// =============================================================================
-//
-// These functions call the WIT TLS interface for networking.
-// TLS upgrade takes a TCP handle and returns a TLS handle.
-
-/// Upgrade a TCP connection to TLS.
-/// Returns a tuple: (result_type, value)
-/// - result_type 0: Ok - value is the TLS handle (int)
-/// - result_type 1: Err - value is the error message (str)
-/// - result_type 2: Pending - value is a tuple (waitable_id, promise_id)
+/// Upgrade a TCP connection to TLS and return the TLS handle.
 ///
-/// Python signature: _eryx_tls_upgrade(tcp_handle: int, hostname: str, timeout_ms: int = 0) -> tuple[int, Any]
+/// Python signature: _eryx_tls_upgrade(tcp_handle: int, hostname: str, timeout_ms: int = 0) -> int
 #[pyfunction]
 #[pyo3(signature = (tcp_handle, hostname, timeout_ms=0))]
 fn _eryx_tls_upgrade(
@@ -902,102 +808,33 @@ fn _eryx_tls_upgrade(
     tcp_handle: u32,
     hostname: String,
     timeout_ms: u32,
-) -> PyResult<(i32, Py<PyAny>)> {
-    match crate::do_tls_upgrade(tcp_handle, &hostname, timeout_ms) {
-        Ok((status, value)) => match value {
-            crate::NetResultValue::Handle(h) => {
-                Ok((status, h.into_pyobject(py)?.into_any().unbind()))
-            }
-            crate::NetResultValue::Error(e) => {
-                Ok((status, e.into_pyobject(py)?.into_any().unbind()))
-            }
-            crate::NetResultValue::Pending(waitable, promise) => {
-                let tuple = (waitable, promise);
-                Ok((status, tuple.into_pyobject(py)?.into_any().unbind()))
-            }
-            crate::NetResultValue::Bytes(_) => Err(pyo3::exceptions::PyRuntimeError::new_err(
-                "unexpected bytes result from tls upgrade",
-            )),
-        },
-        Err(e) => Err(pyo3::exceptions::PyRuntimeError::new_err(e)),
-    }
+) -> PyResult<u32> {
+    net_result(py, crate::tls_upgrade(tcp_handle, &hostname, timeout_ms))
 }
 
-/// Read from a TLS connection.
-/// Returns a tuple: (result_type, value)
-/// - result_type 0: Ok - value is the bytes read
-/// - result_type 1: Err - value is the error message (str)
-/// - result_type 2: Pending - value is a tuple (waitable_id, promise_id)
+/// Read up to `length` bytes from a TLS connection.
 ///
-/// Python signature: _eryx_tls_read(handle: int, length: int, timeout_ms: int = 0) -> tuple[int, Any]
+/// Python signature: _eryx_tls_read(handle: int, length: int, timeout_ms: int = 0) -> bytes
 #[pyfunction]
 #[pyo3(signature = (handle, length, timeout_ms=0))]
-fn _eryx_tls_read(
-    py: Python<'_>,
-    handle: u32,
-    length: u32,
-    timeout_ms: u32,
-) -> PyResult<(i32, Py<PyAny>)> {
-    match crate::do_tls_read(handle, length, timeout_ms) {
-        Ok((status, value)) => match value {
-            crate::NetResultValue::Bytes(b) => {
-                Ok((status, b.into_pyobject(py)?.into_any().unbind()))
-            }
-            crate::NetResultValue::Error(e) => {
-                Ok((status, e.into_pyobject(py)?.into_any().unbind()))
-            }
-            crate::NetResultValue::Pending(waitable, promise) => {
-                let tuple = (waitable, promise);
-                Ok((status, tuple.into_pyobject(py)?.into_any().unbind()))
-            }
-            crate::NetResultValue::Handle(_) => Err(pyo3::exceptions::PyRuntimeError::new_err(
-                "unexpected handle result from read",
-            )),
-        },
-        Err(e) => Err(pyo3::exceptions::PyRuntimeError::new_err(e)),
-    }
+fn _eryx_tls_read(py: Python<'_>, handle: u32, length: u32, timeout_ms: u32) -> PyResult<Vec<u8>> {
+    net_result(py, crate::net_read(true, handle, length, timeout_ms))
 }
 
-/// Write to a TLS connection.
-/// Returns a tuple: (result_type, value)
-/// - result_type 0: Ok - value is the number of bytes written (int)
-/// - result_type 1: Err - value is the error message (str)
-/// - result_type 2: Pending - value is a tuple (waitable_id, promise_id)
+/// Write to a TLS connection and return the number of bytes written.
 ///
-/// Python signature: _eryx_tls_write(handle: int, data: bytes, timeout_ms: int = 0) -> tuple[int, Any]
+/// Python signature: _eryx_tls_write(handle: int, data: bytes, timeout_ms: int = 0) -> int
 #[pyfunction]
 #[pyo3(signature = (handle, data, timeout_ms=0))]
-fn _eryx_tls_write(
-    py: Python<'_>,
-    handle: u32,
-    data: Vec<u8>,
-    timeout_ms: u32,
-) -> PyResult<(i32, Py<PyAny>)> {
-    match crate::do_tls_write(handle, &data, timeout_ms) {
-        Ok((status, value)) => match value {
-            crate::NetResultValue::Handle(n) => {
-                Ok((status, n.into_pyobject(py)?.into_any().unbind()))
-            }
-            crate::NetResultValue::Error(e) => {
-                Ok((status, e.into_pyobject(py)?.into_any().unbind()))
-            }
-            crate::NetResultValue::Pending(waitable, promise) => {
-                let tuple = (waitable, promise);
-                Ok((status, tuple.into_pyobject(py)?.into_any().unbind()))
-            }
-            crate::NetResultValue::Bytes(_) => Err(pyo3::exceptions::PyRuntimeError::new_err(
-                "unexpected bytes result from write",
-            )),
-        },
-        Err(e) => Err(pyo3::exceptions::PyRuntimeError::new_err(e)),
-    }
+fn _eryx_tls_write(py: Python<'_>, handle: u32, data: Vec<u8>, timeout_ms: u32) -> PyResult<u32> {
+    net_result(py, crate::net_write(true, handle, &data, timeout_ms))
 }
 
 /// Close a TLS connection.
 /// Python signature: _eryx_tls_close(handle: int) -> None
 #[pyfunction]
 fn _eryx_tls_close(handle: u32) {
-    crate::do_tls_close(handle);
+    crate::net_close(true, handle);
 }
 
 /// The _eryx module definition.
@@ -1005,7 +842,6 @@ fn _eryx_tls_close(handle: u32) {
 #[pymodule]
 #[pyo3(name = "_eryx")]
 fn eryx_module(m: &Bound<'_, PyModule>) -> PyResult<()> {
-    m.add_function(wrap_pyfunction!(_eryx_invoke, m)?)?;
     m.add_function(wrap_pyfunction!(_eryx_invoke_async, m)?)?;
     m.add_function(wrap_pyfunction!(_eryx_report_trace, m)?)?;
     m.add_function(wrap_pyfunction!(_eryx_report_output, m)?)?;
@@ -1050,7 +886,7 @@ fn eryx_module(m: &Bound<'_, PyModule>) -> PyResult<()> {
 /// - `run_async(coro)`: Entry point for async execution, returns callback code
 /// - `resume(e0, e1, e2)`: Resume suspended execution after callback completes
 /// - `await_invoke(name, args_json)`: Invoke a callback and await its result
-const ERYX_ASYNC_INJECT_CODE: &str = r#"
+const ERYX_ASYNC_INJECT_CODE: &std::ffi::CStr = cr#"
 import sys, types
 
 _eryx_async = types.ModuleType('_eryx_async')
@@ -1064,9 +900,10 @@ exec(compile(r'''
 
 import asyncio
 import math
+import sys
 import time as _time
 import _eryx
-from contextvars import ContextVar, Context
+from contextvars import ContextVar, Context, copy_context
 from dataclasses import dataclass
 from typing import Any, Optional
 
@@ -1077,6 +914,7 @@ WAIT = 2   # Execution pending, need to wait
 # Event types (from Component Model)
 _EVENT_NONE = 0
 _EVENT_SUBTASK = 1
+_EVENT_TASK_CANCELLED = 6
 
 # Status codes (for subtask events)
 _STATUS_RETURNED = 2
@@ -1127,7 +965,7 @@ class _EryxLoop(asyncio.AbstractEventLoop):
     # Required methods for asyncio.Task to work
     def call_soon(self, callback, *args, context=None):
         if context is None:
-            raise AssertionError("context required for call_soon")
+            context = copy_context()
         handle = asyncio.Handle(callback, args, self, context)
         context[_async_state].handles.append(handle)
         return handle
@@ -1213,12 +1051,24 @@ def _set_async_state(state: _AsyncState) -> None:
     _async_state.set(state)
 
 
+def is_success_exit(e: SystemExit) -> bool:
+    """Whether `sys.exit()` was called with a successful status (None or 0).
+
+    `sys.exit()` ends the script, not the interpreter: a successful status
+    completes the execution normally, any other is reported as an error.
+    """
+    return e.code is None or e.code == 0
+
+
 async def _return_result(coroutine: Any) -> None:
     """Wrapper that decrements pending_count when coroutine completes."""
     global _async_state
     try:
         await coroutine
-    except Exception as e:
+    except SystemExit as e:
+        if not is_success_exit(e):
+            _loop.exception = e
+    except BaseException as e:
         _loop.exception = e
     _async_state.get().pending_count -= 1
 
@@ -1238,7 +1088,6 @@ def run_async(coro) -> int:
 def resume(event0: int, event1: int, event2: int) -> int:
     """Resume suspended execution after callback completes."""
     state = _eryx.context_get_()
-    _eryx.context_set_(None)
 
     # Handle subtask completion
     if event0 == _EVENT_SUBTASK and event2 == _STATUS_RETURNED:
@@ -1250,6 +1099,11 @@ def resume(event0: int, event1: int, event2: int) -> int:
             future.set_result(event2)
     elif event0 == _EVENT_NONE:
         pass  # Just poll again
+    elif event0 == _EVENT_TASK_CANCELLED:
+        # The host cancelled the execution: unwind it like a cancelled task,
+        # so it finishes (with a CancelledError) instead of waiting forever.
+        for task in asyncio.all_tasks(_loop):
+            task.cancel()
     # Other events (streams, futures) would go here if we supported them
 
     return _poll(state)
@@ -1276,6 +1130,8 @@ def _finish(state: _AsyncState) -> None:
     if state.waitable_set is not None:
         _eryx.waitable_set_drop_(state.waitable_set)
         state.waitable_set = None
+    # Python tracing (if enabled) spans the whole execution, suspensions included.
+    sys.settrace(None)
 
 
 def _poll(state: _AsyncState) -> int:
@@ -1339,54 +1195,21 @@ async def await_invoke(name: str, args_json: str) -> str:
             raise RuntimeError(error)
 
 
-async def _await_net_result(result_type: int, value: Any) -> Any:
-    """Helper to await a network (TCP or TLS) operation result."""
-    import __main__
-    if result_type == 0:  # Ok - immediate completion
-        return value
-    elif result_type == 1:  # Err - immediate error
-        raise OSError(value)
-    else:  # Pending - need to wait
-        waitable, _promise = value
-        future = _loop.create_future()
-        state = _async_state.get()
-        state.futures[waitable] = future
-
-        if state.waitable_set is None:
-            state.waitable_set = _eryx.waitable_set_new_()
-        _eryx.waitable_join_(waitable, state.waitable_set)
-
-        await future
-
-        # Get result from _eryx_net_results dict (set by Rust during resume)
-        net_results = getattr(__main__, '_eryx_net_results', {})
-        if waitable in net_results:
-            status, result_value = net_results.pop(waitable)
-            if status == 0:
-                return result_value
-            else:
-                raise OSError(result_value)
-        else:
-            raise OSError("Network result not found")
-
-
-# TCP functions
+# Network functions. The host completes these synchronously (on a fiber), so
+# the coroutines never suspend; they raise OSError subclasses on failure.
 async def await_tcp_connect(host: str, port: int) -> int:
     """Connect to a host over TCP and return the handle."""
-    result_type, value = _eryx._eryx_tcp_connect(host, port)
-    return await _await_net_result(result_type, value)
+    return _eryx._eryx_tcp_connect(host, port)
 
 
 async def await_tcp_read(handle: int, length: int) -> bytes:
     """Read from a TCP connection."""
-    result_type, value = _eryx._eryx_tcp_read(handle, length)
-    return await _await_net_result(result_type, value)
+    return _eryx._eryx_tcp_read(handle, length)
 
 
 async def await_tcp_write(handle: int, data: bytes) -> int:
     """Write to a TCP connection, return bytes written."""
-    result_type, value = _eryx._eryx_tcp_write(handle, data)
-    return await _await_net_result(result_type, value)
+    return _eryx._eryx_tcp_write(handle, data)
 
 
 def tcp_close(handle: int):
@@ -1394,23 +1217,19 @@ def tcp_close(handle: int):
     _eryx._eryx_tcp_close(handle)
 
 
-# TLS functions (upgrade from TCP)
 async def await_tls_upgrade(tcp_handle: int, hostname: str) -> int:
     """Upgrade a TCP connection to TLS and return the TLS handle."""
-    result_type, value = _eryx._eryx_tls_upgrade(tcp_handle, hostname)
-    return await _await_net_result(result_type, value)
+    return _eryx._eryx_tls_upgrade(tcp_handle, hostname)
 
 
 async def await_tls_read(handle: int, length: int) -> bytes:
     """Read from a TLS connection."""
-    result_type, value = _eryx._eryx_tls_read(handle, length)
-    return await _await_net_result(result_type, value)
+    return _eryx._eryx_tls_read(handle, length)
 
 
 async def await_tls_write(handle: int, data: bytes) -> int:
     """Write to a TLS connection, return bytes written."""
-    result_type, value = _eryx._eryx_tls_write(handle, data)
-    return await _await_net_result(result_type, value)
+    return _eryx._eryx_tls_write(handle, data)
 
 
 def tls_close(handle: int):
@@ -1468,7 +1287,7 @@ fn invalidate_installed_callbacks() {
 /// - Socket patching for asyncio compatibility
 /// - The _eryx_exec() function that runs user code efficiently
 /// - User globals namespace (isolated from infrastructure)
-const ERYX_EXEC_INFRASTRUCTURE: &str = r#"
+const ERYX_EXEC_INFRASTRUCTURE: &std::ffi::CStr = cr#"
 import sys as _sys
 import ast as _ast
 import types as _types
@@ -1516,14 +1335,21 @@ class _EryxStreamingWriter:
         self.encoding = 'utf-8'
         self.errors = 'surrogateescape'
         self.newlines = None
+        self.name = '<stderr>' if stream_id else '<stdout>'
+        self.mode = 'w'
+        self.buffer = _EryxStreamingBuffer(self)
+    def _emit(self, data):
+        self._buffer.append(data)
+        _eryx_mod._eryx_report_output(self._stream_id, data)
     def write(self, s):
         if not isinstance(s, str):
             raise TypeError("write() argument must be str")
         if s:
-            encoded = s.encode('utf-8', 'surrogateescape')
-            self._buffer.append(encoded)
-            _eryx_mod._eryx_report_output(self._stream_id, encoded)
+            self._emit(s.encode('utf-8', 'surrogateescape'))
         return len(s)
+    def writelines(self, lines):
+        for line in lines:
+            self.write(line)
     def getvalue(self):
         return b''.join(self._buffer)
     def reset(self):
@@ -1534,6 +1360,39 @@ class _EryxStreamingWriter:
         return False
     def readable(self):
         return False
+    def isatty(self):
+        return False
+    def fileno(self):
+        import io
+        raise io.UnsupportedOperation("fileno")
+    def flush(self):
+        pass
+    @property
+    def closed(self):
+        return False
+
+# Binary view of a streaming writer, like sys.stdout.buffer.
+class _EryxStreamingBuffer:
+    def __init__(self, writer):
+        self._writer = writer
+    def write(self, b):
+        data = bytes(b)
+        if data:
+            self._writer._emit(data)
+        return len(data)
+    def writelines(self, lines):
+        for line in lines:
+            self.write(line)
+    def writable(self):
+        return True
+    def seekable(self):
+        return False
+    def readable(self):
+        return False
+    def isatty(self):
+        return False
+    def fileno(self):
+        return self._writer.fileno()
     def flush(self):
         pass
     @property
@@ -1546,17 +1405,13 @@ _eryx_stderr = _EryxStreamingWriter(1)
 _eryx_old_stdout = _sys.stdout
 _eryx_old_stderr = _sys.stderr
 
-# User globals namespace - isolated from infrastructure
-# User code cannot see _eryx_* variables because they're in module globals, not here
+# User globals namespace, kept separate from the infrastructure's module globals
+# so _eryx_* names don't appear in it (they remain reachable via `import __main__`)
 _eryx_user_globals = {'__builtins__': __builtins__, '__name__': '__main__'}
-
-# Network async results storage - keyed by subtask ID
-# Used by set_net_result/set_net_bytes_result to store results for Python to retrieve
-_eryx_net_results = {}
 
 # Async import results storage - keyed by subtask ID
 # Used by set_async_import_result/promise_get_result_ for concurrent callback safety
-# This MUST be in __main__ for PyRun_SimpleString and PyO3 getattr to find it
+# This MUST be in __main__ for PyO3 getattr to find it
 _eryx_async_import_results = {}
 
 # Import async infrastructure
@@ -1617,15 +1472,15 @@ def _eryx_trace_func(frame, event, arg):
 def _eryx_exec(code, trace_enabled):
     '''Execute user code efficiently. Called once per execute().
 
-    This function is pre-compiled and runs user code in an isolated namespace.
-    Infrastructure variables (_eryx_*) are not visible to user code.
+    This function is pre-compiled and runs user code in its own namespace, so
+    infrastructure variables (_eryx_*) don't clutter the user's globals. They
+    are not hidden: user code can still reach them via `import __main__`.
     '''
     global _eryx_callback_code
     _eryx_callback_code = 0
 
-    # Clear async result dicts from any previous execution (critical for preinit)
+    # Clear async results from any previous execution (critical for preinit)
     _eryx_async_import_results.clear()
-    _eryx_net_results.clear()
 
     # Clear and redirect stdout/stderr
     _eryx_stdout.reset()
@@ -1641,15 +1496,19 @@ def _eryx_exec(code, trace_enabled):
     if trace_enabled:
         _sys.settrace(_eryx_trace_func)
 
+    # Check if the compiled code is a coroutine (has top-level await)
+    if compiled.co_flags & 0x80:  # CO_COROUTINE
+        # _eryx_async stops tracing once the execution finishes, which is after
+        # this returns if it suspends on a callback.
+        fn = _types.FunctionType(compiled, _eryx_user_globals)
+        _eryx_run_async(fn())
+        return
     try:
-        # Check if the compiled code is a coroutine (has top-level await)
-        if compiled.co_flags & 0x80:  # CO_COROUTINE
-            fn = _types.FunctionType(compiled, _eryx_user_globals)
-            coro = fn()
-            _eryx_run_async(coro)
-        else:
-            # Regular synchronous code - execute in user namespace
-            exec(compiled, _eryx_user_globals, _eryx_user_globals)
+        # Regular synchronous code - execute in user namespace
+        exec(compiled, _eryx_user_globals, _eryx_user_globals)
+    except SystemExit as e:
+        if not _eryx_async.is_success_exit(e):
+            raise
     finally:
         if trace_enabled:
             _sys.settrace(None)
@@ -1727,7 +1586,7 @@ def _eryx_discard_result():
 
 /// Python code to create and inject the ssl_eryx shim module.
 /// This replaces sys.modules['ssl'] with our TLS-backed implementation.
-pub const SSL_SHIM_CODE: &str = r#"
+pub const SSL_SHIM_CODE: &std::ffi::CStr = cr#"
 import sys as _sys
 import types as _types
 
@@ -1907,23 +1766,12 @@ class SSLSocket:
             raise SSLError("No hostname available for TLS handshake")
 
         import _eryx
-        result_type, value = _eryx._eryx_tls_upgrade(
+        # Raises SSLError/SSLCertVerificationError, or an OSError subclass for
+        # a failure of the underlying connection.
+        self._sock._tls_handle = _eryx._eryx_tls_upgrade(
             self._sock._tcp_handle, hostname, self._sock._timeout_ms()
         )
-
-        if result_type == 0:
-            # Success - value is the TLS handle
-            self._sock._tls_handle = value
-            self._connected = True
-        elif result_type == 1:
-            # Error - value is the error message
-            error_str = str(value)
-            if 'handshake' in error_str.lower() or 'certificate' in error_str.lower():
-                raise SSLCertVerificationError(error_str)
-            raise SSLError(error_str)
-        else:
-            # Pending should never happen with ignore_wit
-            raise SSLError("Unexpected pending result in sync context")
+        self._connected = True
 
     def read(self, length=1024, buffer=None):
         if self._closed:
@@ -2182,7 +2030,7 @@ _sys.modules['_ssl'] = _ssl_eryx
 
 /// Python code to create and inject the socket_eryx shim module.
 /// This replaces sys.modules['socket'] with our TLS-backed implementation.
-pub const SOCKET_SHIM_CODE: &str = r#"
+pub const SOCKET_SHIM_CODE: &std::ffi::CStr = cr#"
 import sys as _sys
 import types as _types
 
@@ -2222,14 +2070,9 @@ has_dualstack_ipv6 = lambda: False
 _GLOBAL_DEFAULT_TIMEOUT = object()
 
 
-class timeout(OSError):
-    """Socket timeout exception."""
-    pass
-
-
-class error(OSError):
-    """Socket error exception."""
-    pass
+# As in CPython: socket.error is OSError and socket.timeout is TimeoutError.
+error = OSError
+timeout = TimeoutError
 
 
 class herror(error):
@@ -2422,25 +2265,16 @@ class socket:
 
         host, port = address
         import _eryx
-        result_type, value = _eryx._eryx_tcp_connect(host, port, self._timeout_ms())
-
-        if result_type == 0:
-            # Success - value is the TCP handle
-            self._tcp_handle = value
-        elif result_type == 1:
-            # Error - value is the error message
-            raise error(value)
-        else:
-            # Pending should never happen with ignore_wit
-            raise error(f"Unexpected pending result in sync context")
+        self._tcp_handle = _eryx._eryx_tcp_connect(host, port, self._timeout_ms())
+        self._pending_address = (host, port)
 
     def connect_ex(self, address):
         """Connect and return error code instead of raising."""
         try:
             self.connect(address)
             return 0
-        except error:
-            return 1
+        except OSError as e:
+            return e.errno or 1
 
     def bind(self, address):
         raise error("bind() not supported in sandbox")
@@ -2508,19 +2342,8 @@ class socket:
         import _eryx
         timeout_ms = self._timeout_ms()
         if self._tls_handle is not None:
-            result_type, value = _eryx._eryx_tls_read(handle, bufsize, timeout_ms)
-        else:
-            result_type, value = _eryx._eryx_tcp_read(handle, bufsize, timeout_ms)
-
-        if result_type == 0:
-            # Success - value is the bytes read
-            return bytes(value) if value else b""
-        elif result_type == 1:
-            # Error - value is the error message
-            raise error(value)
-        else:
-            # Pending should never happen with ignore_wit
-            raise error(f"Unexpected pending result in sync context")
+            return _eryx._eryx_tls_read(handle, bufsize, timeout_ms)
+        return _eryx._eryx_tcp_read(handle, bufsize, timeout_ms)
 
     def recv_into(self, buffer, nbytes=0, flags=0):
         """Receive data into a buffer."""
@@ -2546,19 +2369,8 @@ class socket:
         import _eryx
         timeout_ms = self._timeout_ms()
         if self._tls_handle is not None:
-            result_type, value = _eryx._eryx_tls_write(handle, data, timeout_ms)
-        else:
-            result_type, value = _eryx._eryx_tcp_write(handle, data, timeout_ms)
-
-        if result_type == 0:
-            # Success - value is the number of bytes written
-            return value
-        elif result_type == 1:
-            # Error - value is the error message
-            raise error(value)
-        else:
-            # Pending should never happen with ignore_wit
-            raise error(f"Unexpected pending result in sync context")
+            return _eryx._eryx_tls_write(handle, data, timeout_ms)
+        return _eryx._eryx_tcp_write(handle, data, timeout_ms)
 
     def sendall(self, data, flags=0):
         if isinstance(data, memoryview):
@@ -2771,62 +2583,30 @@ pub fn initialize_python() {
         // Note: PYTHONPATH must be set before this call for Python to find stdlib.
         Py_InitializeEx(0);
 
-        // Ensure __main__ module exists for code execution.
+        // Install the guest infrastructure. Every step is required: a failure
+        // here would otherwise leave a half-initialized interpreter that is
+        // baked into the pre-init snapshot, so abort instead.
         // sys.path is already configured via PYTHONPATH environment variable.
-        let setup_code = c"import __main__";
-        let result = PyRun_SimpleString(setup_code.as_ptr());
-        if result != 0 {
-            // If this fails, Python is in a bad state - not much we can do
-            PyErr_Clear();
-        }
-
-        // Inject the _eryx_async module into sys.modules.
-        // This provides our embedded async runtime without needing external files.
-        let inject_cstr = std::ffi::CString::new(ERYX_ASYNC_INJECT_CODE).unwrap();
-        let result = PyRun_SimpleString(inject_cstr.as_ptr());
-        if result != 0 {
-            // _eryx_async injection failed - this is critical for async support
-            // Log the error but continue (sync code will still work)
-            PyErr_Clear();
-        }
-
-        // Set up execution infrastructure (stdout capture, _eryx_exec, etc.)
-        // This is done ONCE here, not on every execute() call.
-        let infra_cstr = std::ffi::CString::new(ERYX_EXEC_INFRASTRUCTURE).unwrap();
-        let result = PyRun_SimpleString(infra_cstr.as_ptr());
-        if result != 0 {
-            // Infrastructure setup failed - this is critical
-            PyErr_Clear();
+        for (what, code) in [
+            ("__main__", c"import __main__"),
+            ("_eryx_async module", ERYX_ASYNC_INJECT_CODE),
+            ("execution infrastructure", ERYX_EXEC_INFRASTRUCTURE),
+            ("socket shim", SOCKET_SHIM_CODE),
+            ("ssl shim", SSL_SHIM_CODE),
+        ] {
+            if let Err(e) = run_in_main(code) {
+                panic!("failed to install {what}: {e}");
+            }
         }
 
         // Resolve the execute-path helpers once so execute() calls them
         // directly instead of compiling wrapper snippets per request.
         init_exec_helpers();
 
-        // Inject the socket shim module.
-        // This replaces sys.modules['socket'] with our TLS-backed implementation.
-        let socket_cstr = std::ffi::CString::new(SOCKET_SHIM_CODE).unwrap();
-        let result = PyRun_SimpleString(socket_cstr.as_ptr());
-        if result != 0 {
-            // Socket shim injection failed - networking won't work
-            // Note: Can't use tracing here - this runs in WASM context
-            PyErr_Clear();
-        }
-
-        // Inject the ssl shim module.
-        // This replaces sys.modules['ssl'] with our TLS-backed implementation.
-        let ssl_cstr = std::ffi::CString::new(SSL_SHIM_CODE).unwrap();
-        let result = PyRun_SimpleString(ssl_cstr.as_ptr());
-        if result != 0 {
-            // SSL shim injection failed - TLS won't work
-            // Note: Can't use tracing here - this runs in WASM context
-            PyErr_Clear();
-        }
-
         // Install the empty callback infrastructure once so fresh instances
         // with no callbacks do not have to recreate it for every execution.
         if let Err(e) = setup_callbacks(&[]) {
-            eprintln!("WARNING: pre-init setup_callbacks([]) failed: {e}");
+            panic!("failed to install callback infrastructure: {e}");
         }
 
         // Note: We do NOT call reset_wasi_state() here!
@@ -2848,9 +2628,13 @@ pub fn initialize_python() {
 /// snapshot (which would cause "unknown handle index" errors at runtime).
 ///
 /// This is only meant to be called during wasmtime-wizer
-/// pre-initialization. Calling it at runtime has no useful effect.
+/// pre-initialization. Only the first call has any effect, so an instance
+/// restored from the snapshot can't be made to drop its live WASI handles.
 pub fn finalize_preinit() {
-    reset_wasi_state();
+    static FINALIZED: AtomicBool = AtomicBool::new(false);
+    if !FINALIZED.swap(true, Ordering::SeqCst) {
+        reset_wasi_state();
+    }
 }
 
 /// Reset WASI adapter and wasi-libc state.
@@ -2890,29 +2674,6 @@ pub fn is_python_initialized() -> bool {
 // =============================================================================
 // Safe wrappers for common operations
 // =============================================================================
-
-/// Run simple Python code in __main__.
-///
-/// Returns Ok(()) on success, Err with error message on failure.
-///
-/// # Safety
-///
-/// Python must be initialized before calling this.
-pub unsafe fn run_simple_string(code: &str) -> Result<(), String> {
-    use std::ffi::CString;
-
-    let code_cstr = CString::new(code).map_err(|e| format!("Invalid code string: {e}"))?;
-
-    let result = unsafe { PyRun_SimpleString(code_cstr.as_ptr()) };
-
-    if result == 0 {
-        Ok(())
-    } else {
-        // An exception occurred - try to get error info
-        let err_msg = unsafe { get_last_error_message() };
-        Err(err_msg)
-    }
-}
 
 /// Get the last Python error message.
 ///
@@ -2966,11 +2727,10 @@ pub unsafe fn get_python_variable_string(name: &str) -> Result<String, String> {
     use std::ffi::CString;
 
     let name_cstr = CString::new(name).map_err(|e| format!("Invalid variable name: {e}"))?;
-    let main_cstr = CString::new("__main__").unwrap();
 
     unsafe {
         // Get __main__ module
-        let main_module = PyImport_AddModule(main_cstr.as_ptr());
+        let main_module = PyImport_AddModule(c"__main__".as_ptr());
         if main_module.is_null() {
             return Err("Failed to get __main__ module".to_string());
         }
@@ -3013,22 +2773,6 @@ pub unsafe fn get_python_variable_string(name: &str) -> Result<String, String> {
 // Execute Python code with output capture
 // =============================================================================
 
-/// Escape a string for use as a Python string literal (triple-quoted).
-fn python_string_literal(s: &str) -> String {
-    // Use triple double-quotes. We need to escape any triple-quote sequences
-    // and trailing backslashes (which would escape the closing quotes).
-    // Don't use raw strings so that escape sequences like \n work.
-    let mut escaped = s.replace('\\', "\\\\").replace("\"\"\"", r#"\"\"\""#);
-    // A trailing backslash would escape the closing quotes, so add a space and strip it later
-    // Actually, the double-escaping handles this - a trailing \\ becomes \\\\
-    // But we need to handle the case where user has """
-    escaped = escaped
-        .replace('\n', "\\n")
-        .replace('\r', "\\r")
-        .replace('\t', "\\t");
-    format!("\"\"\"{}\"\"\"", escaped)
-}
-
 /// `__main__` objects the execute path calls directly.
 ///
 /// Resolved once by [`init_exec_helpers`] after the execution infrastructure
@@ -3057,50 +2801,29 @@ static EXEC_HELPERS: std::sync::OnceLock<ExecHelpers> = std::sync::OnceLock::new
 
 /// Look up the execute-path helpers in `__main__` and keep owned references.
 ///
-/// Leaves [`EXEC_HELPERS`] unset (so [`execute_python`] falls back to
-/// `PyRun_SimpleString`) if anything is missing.
-///
 /// # Safety
 /// Python must be initialized and `ERYX_EXEC_INFRASTRUCTURE` must have run.
 unsafe fn init_exec_helpers() {
     unsafe {
         let main_module = PyImport_AddModule(c"__main__".as_ptr());
-        if main_module.is_null() {
-            PyErr_Clear();
-            return;
-        }
+        assert!(!main_module.is_null(), "__main__ module missing");
         let main_dict = PyModule_GetDict(main_module);
-        if main_dict.is_null() {
-            PyErr_Clear();
-            return;
-        }
-        let lookup = |name: &std::ffi::CStr| -> Option<*mut PyObject> {
+        let lookup = |name: &std::ffi::CStr| -> *mut PyObject {
             let obj = PyDict_GetItemString(main_dict, name.as_ptr());
-            if obj.is_null() {
-                None
-            } else {
-                Py_IncRef(obj);
-                Some(obj)
-            }
-        };
-        let (Some(exec), Some(get_output), Some(capture_result), Some(discard_result)) = (
-            lookup(c"_eryx_exec"),
-            lookup(c"_eryx_get_output"),
-            lookup(c"_eryx_capture_result"),
-            lookup(c"_eryx_discard_result"),
-        ) else {
-            eprintln!(
-                "WARNING: execute helpers missing from __main__; using PyRun_SimpleString path"
+            assert!(
+                !obj.is_null(),
+                "execute helper {name:?} missing from __main__"
             );
-            return;
+            Py_IncRef(obj);
+            obj
         };
         Py_IncRef(main_dict);
         let _ = EXEC_HELPERS.set(ExecHelpers {
             main_dict,
-            exec,
-            get_output,
-            capture_result,
-            discard_result,
+            exec: lookup(c"_eryx_exec"),
+            get_output: lookup(c"_eryx_get_output"),
+            capture_result: lookup(c"_eryx_capture_result"),
+            discard_result: lookup(c"_eryx_discard_result"),
         });
     }
 }
@@ -3201,8 +2924,7 @@ impl ExecHelpers {
     }
 
     /// Call `_eryx_exec(code, trace_enabled)`. Returns `false` if it raised, in
-    /// which case the traceback has been printed to the (redirected) stderr the
-    /// same way `PyRun_SimpleString` would have.
+    /// which case the traceback has been printed to the (redirected) stderr.
     unsafe fn exec(&self, code: &str, trace_enabled: bool) -> Result<bool, String> {
         unsafe {
             let code_obj = PyUnicode_FromStringAndSize(code.as_ptr().cast(), code.len() as isize);
@@ -3224,7 +2946,7 @@ impl ExecHelpers {
             let ret = PyObject_Call(self.exec, args, std::ptr::null_mut());
             Py_DecRef(args);
             if ret.is_null() {
-                PyErr_Print();
+                print_raised_exception();
                 return Ok(false);
             }
             Py_DecRef(ret);
@@ -3295,101 +3017,50 @@ unsafe fn execute_python_direct(
 /// - `Error(message)` - Error message if execution failed
 /// - `Pending(waitable_set)` - Execution suspended, waiting for async callback
 pub fn execute_python(code: &str, trace_enabled: bool) -> ExecuteResult {
-    use std::ffi::CString;
-
     if !is_python_initialized() {
         return ExecuteResult::Error("Python not initialized".to_string());
     }
 
-    // Validate that code is valid UTF-8 (CString requires this)
-    if CString::new(code).is_err() {
+    // compile() rejects source containing NUL bytes; report it plainly.
+    if code.contains('\0') {
         return ExecuteResult::Error("Invalid code string: contains null bytes".to_string());
     }
 
-    if let Some(helpers) = EXEC_HELPERS.get() {
-        // SAFETY: Python is initialized (checked above).
-        return unsafe { execute_python_direct(helpers, code, trace_enabled) };
-    }
-
-    unsafe {
-        // Call the pre-compiled _eryx_exec() function with the user code.
-        // This is MUCH faster than the old approach because:
-        // 1. All infrastructure (imports, trace func, etc.) is already set up
-        // 2. We only parse/compile the user code, not 100+ lines of wrapper
-        // 3. stdout/stderr capture reuses existing StringIO objects
-        let exec_call = format!(
-            "_eryx_exec({}, {})",
-            python_string_literal(code),
-            if trace_enabled { "True" } else { "False" }
-        );
-
-        let exec_code_cstr = match CString::new(exec_call) {
-            Ok(s) => s,
-            Err(e) => return ExecuteResult::Error(format!("Invalid exec code: {e}")),
-        };
-        let exec_result = PyRun_SimpleString(exec_code_cstr.as_ptr());
-
-        if exec_result != 0 {
-            // Execution failed - get error and output
-            let _ = PyRun_SimpleString(c"_eryx_output, _eryx_errors = _eryx_get_output()".as_ptr());
-
-            let stderr_output = get_python_variable_bytes("_eryx_errors").unwrap_or_default();
-            // get_last_error_message consumes the pending exception, so do this
-            // before discarding the result (PyRun_SimpleString is a no-op while an
-            // exception is pending).
-            let exception_msg = get_last_error_message();
-
-            // Consume the result variable so a value set before the exception can't
-            // leak into a later successful run of a persistent session. Result
-            // capture only runs on the success path, so discard explicitly here.
-            let _ = PyRun_SimpleString(c"_eryx_discard_result()".as_ptr());
-
-            return ExecuteResult::Error(format_execution_error(&stderr_output, exception_msg));
-        }
-
-        // Check the callback code to see if execution is pending
-        let callback_code_value = get_python_callback_code();
-        let code = callback_code::get_code(callback_code_value);
-
-        if code == callback_code::WAIT {
-            // Execution is pending - keep stdout/stderr redirected for async output
-            return ExecuteResult::Pending(callback_code_value);
-        }
-
-        // Execution complete - get output and restore streams
-        let _ = PyRun_SimpleString(c"_eryx_output, _eryx_errors = _eryx_get_output()".as_ptr());
-
-        let stdout = get_python_variable_bytes("_eryx_output").unwrap_or_default();
-        let stderr = get_python_variable_bytes("_eryx_errors").unwrap_or_default();
-
-        // Capture the user's result variable (JSON-serialized into _eryx_result, or
-        // "" if unset; _eryx_result_error holds the reason on serialization failure).
-        let (result, result_error) = capture_result();
-
-        ExecuteResult::Complete(ExecuteOutput {
-            stdout,
-            stderr,
-            result,
-            result_error,
-        })
-    }
+    let Some(helpers) = EXEC_HELPERS.get() else {
+        return ExecuteResult::Error("execute helpers not initialized".to_string());
+    };
+    // SAFETY: Python is initialized (checked above).
+    unsafe { execute_python_direct(helpers, code, trace_enabled) }
 }
 
 /// Set the name of the user variable captured as the structured result.
 ///
-/// Backs the `set-result-variable` WIT export. The name is escaped and assigned
-/// to the guest's `_eryx_result_var_name` global, which defaults to `"result"`.
+/// Backs the `set-result-variable` WIT export. The name is stored as a `str` in
+/// the guest's `_eryx_result_var_name` global, which defaults to `"result"`.
 ///
 /// # Safety
 /// Must be called with the Python interpreter initialized.
 pub unsafe fn set_result_variable_name(name: &str) {
-    use std::ffi::CString;
-
-    let assignment = format!("_eryx_result_var_name = {}", python_string_literal(name));
-    if let Ok(cstr) = CString::new(assignment) {
-        unsafe {
-            PyRun_SimpleString(cstr.as_ptr());
+    unsafe {
+        let main_module = PyImport_AddModule(c"__main__".as_ptr());
+        if main_module.is_null() {
+            PyErr_Clear();
+            return;
         }
+        let value = PyUnicode_FromStringAndSize(name.as_ptr().cast(), name.len() as isize);
+        if value.is_null() {
+            PyErr_Clear();
+            return;
+        }
+        if PyDict_SetItemString(
+            PyModule_GetDict(main_module),
+            c"_eryx_result_var_name".as_ptr(),
+            value,
+        ) != 0
+        {
+            PyErr_Clear();
+        }
+        Py_DecRef(value);
     }
 }
 
@@ -3406,11 +3077,10 @@ pub unsafe fn get_python_variable_bytes(name: &str) -> Result<Vec<u8>, String> {
     use std::ffi::CString;
 
     let name_cstr = CString::new(name).map_err(|e| format!("Invalid variable name: {e}"))?;
-    let main_cstr = CString::new("__main__").unwrap();
 
     unsafe {
         // Get __main__ module
-        let main_module = PyImport_AddModule(main_cstr.as_ptr());
+        let main_module = PyImport_AddModule(c"__main__".as_ptr());
         if main_module.is_null() {
             return Err("Failed to get __main__ module".to_string());
         }
@@ -3454,11 +3124,10 @@ unsafe fn set_python_variable_bytes(name: &str, data: &[u8]) -> Result<(), Strin
     use std::ffi::CString;
 
     let name_cstr = CString::new(name).map_err(|e| format!("Invalid variable name: {e}"))?;
-    let main_cstr = CString::new("__main__").unwrap();
 
     unsafe {
         // Get __main__ module
-        let main_module = PyImport_AddModule(main_cstr.as_ptr());
+        let main_module = PyImport_AddModule(c"__main__".as_ptr());
         if main_module.is_null() {
             return Err("Failed to get __main__ module".to_string());
         }
@@ -3549,39 +3218,41 @@ _eryx_keys = list(_eryx_user_globals.keys())
 
 # Build dict of serializable items
 _eryx_state_dict = {}
+_eryx_skipped = []
 for _k in _eryx_keys:
     if _k not in _eryx_exclude and not _k.startswith('_eryx_'):
         _v = _eryx_user_globals.get(_k)
-        if _v is not None:
-            # Skip callback infrastructure objects
-            if _eryx_is_callback_obj(_v):
-                continue
-            try:
-                # Test if item is serializable with dill
-                _eryx_dill.dumps(_v)
-                _eryx_state_dict[_k] = _v
-            except Exception:
-                # Skip items dill can't serialize (modules, open handles, etc.)
-                pass
+        # Skip callback infrastructure objects
+        if _eryx_is_callback_obj(_v):
+            continue
+        try:
+            # Test if item is serializable with dill
+            _eryx_dill.dumps(_v)
+            _eryx_state_dict[_k] = _v
+        except Exception:
+            # Skip items dill can't serialize (modules, open handles, etc.)
+            _eryx_skipped.append(_k)
+
+if _eryx_skipped:
+    import sys as _eryx_sys
+    print('eryx: snapshot skipped variables that cannot be serialized: '
+          + ', '.join(_eryx_skipped), file=_eryx_sys.__stderr__)
+    del _eryx_sys
 
 # Serialize the filtered dict with dill
 _eryx_state_bytes = _eryx_dill.dumps(_eryx_state_dict)
 
 # Clean up local helpers
-del _eryx_exclude, _eryx_is_callback_obj, _eryx_keys, _eryx_state_dict, _eryx_dill
+del _eryx_exclude, _eryx_is_callback_obj, _eryx_keys, _eryx_state_dict, _eryx_skipped, _eryx_dill
 ";
 
-        if PyRun_SimpleString(pickle_code.as_ptr()) != 0 {
-            let err = get_last_error_message();
-            PyErr_Clear();
-            return Err(format!("Failed to snapshot state: {err}"));
-        }
+        run_in_main(pickle_code).map_err(|err| format!("Failed to snapshot state: {err}"))?;
 
         // Get the serialized bytes
         let state_bytes = get_python_variable_bytes("_eryx_state_bytes")?;
 
         // Clean up
-        let _ = PyRun_SimpleString(c"del _eryx_state_bytes".as_ptr());
+        let _ = run_in_main(c"del _eryx_state_bytes");
 
         Ok(state_bytes)
     }
@@ -3646,9 +3317,8 @@ _eryx_user_globals.update(_eryx_restored_dict)
 del _eryx_restore_bytes, _eryx_restored_dict, _eryx_dill, _eryx_types, _eryx_rebind_globals
 ";
 
-        if PyRun_SimpleString(restore_code.as_ptr()) != 0 {
-            let err = get_last_error_message();
-            let _ = PyRun_SimpleString(c"del _eryx_restore_bytes".as_ptr());
+        if let Err(err) = run_in_main(restore_code) {
+            let _ = run_in_main(c"del _eryx_restore_bytes");
             return Err(format!("Failed to restore state: {err}"));
         }
     }
@@ -3706,10 +3376,8 @@ for _k in _eryx_to_delete:
 del _eryx_keep, _eryx_should_keep, _eryx_to_delete, _k
 ";
 
-        if PyRun_SimpleString(clear_code.as_ptr()) != 0 {
-            // Best effort - clear errors and continue
-            PyErr_Clear();
-        }
+        // Best effort - ignore errors and continue
+        let _ = run_in_main(clear_code);
     }
 
     // The keep-list above is a heuristic; make the next execution reinstall.
@@ -3764,6 +3432,18 @@ pub fn setup_callbacks(callbacks: &[CallbackInfo]) -> Result<(), String> {
 import json as _json
 import _eryx
 import _eryx_async
+
+# Remove the wrappers installed for the previous callback set, so a callback
+# the host no longer provides is not left callable. A name the user has since
+# rebound to something else is theirs and stays.
+for _name, _obj in globals().get('_eryx_installed', {{}}).items():
+    if _eryx_user_globals.get(_name) is _obj:
+        del _eryx_user_globals[_name]
+    if globals().get(_name) is _obj:
+        del globals()[_name]
+_obj = None
+# Wrappers and namespaces installed below, by name.
+_eryx_installed = {{}}
 
 # Callbacks metadata from host
 _eryx_callbacks_json = '''{}'''
@@ -3957,10 +3637,12 @@ for _cb in _eryx_callbacks:
             _wrapper = _eryx_make_callback(_name)
             globals()[_name] = _wrapper
             _eryx_user_globals[_name] = _wrapper
+            _eryx_installed[_name] = _wrapper
 
 # Add namespaces to both module globals and user globals
 globals().update(_eryx_namespaces)
 _eryx_user_globals.update(_eryx_namespaces)
+_eryx_installed.update(_eryx_namespaces)
 
 # Inject core API into user globals so user code can access callbacks
 _eryx_user_globals['invoke'] = invoke
@@ -3981,10 +3663,7 @@ except NameError:
         // Run the setup code
         let setup_cstr =
             std::ffi::CString::new(setup_code).map_err(|e| format!("Invalid setup code: {e}"))?;
-        if PyRun_SimpleString(setup_cstr.as_ptr()) != 0 {
-            let err = get_last_error_message();
-            return Err(format!("Failed to set up callbacks: {err}"));
-        }
+        run_in_main(&setup_cstr).map_err(|err| format!("Failed to set up callbacks: {err}"))?;
     }
 
     if let Ok(mut installed) = INSTALLED_CALLBACKS.lock() {
@@ -4029,6 +3708,7 @@ pub fn escape_json_string(s: &str) -> String {
 }
 
 #[cfg(test)]
+#[expect(clippy::expect_used, reason = "tests fail loudly on malformed output")]
 mod tests {
     use super::escape_json_string;
 

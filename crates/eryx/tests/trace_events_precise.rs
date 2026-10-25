@@ -425,7 +425,10 @@ async fn test_trace_callback_invocation() {
             SimpleEvent::line(1),
             SimpleEvent::callback_start(0, "succeed"),
             SimpleEvent::ret(1, "<module>"),
+            // Tracing stays on across the suspension: the coroutine resumes.
+            SimpleEvent::call(1, "<module>"),
             SimpleEvent::callback_end(0, "succeed"),
+            SimpleEvent::ret(1, "<module>"),
         ]
     );
 }
@@ -457,9 +460,9 @@ b = await succeed()",
 
     let events = trace.simple_events();
 
-    // Note: With async callbacks, the trace shows callback_start/callback_end
-    // for each callback, but the second callback happens after the coroutine
-    // yields and doesn't trigger another line event due to async execution flow.
+    // Tracing spans the whole execution, so the code after the first
+    // suspension is traced too: each await returns from the coroutine and
+    // the resume calls back into it.
     assert_eq!(
         events,
         vec![
@@ -467,9 +470,14 @@ b = await succeed()",
             SimpleEvent::line(1),
             SimpleEvent::callback_start(0, "succeed"),
             SimpleEvent::ret(1, "<module>"),
+            SimpleEvent::call(1, "<module>"),
             SimpleEvent::callback_end(0, "succeed"),
+            SimpleEvent::line(2),
             SimpleEvent::callback_start(0, "succeed"),
+            SimpleEvent::ret(2, "<module>"),
+            SimpleEvent::call(2, "<module>"),
             SimpleEvent::callback_end(0, "succeed"),
+            SimpleEvent::ret(2, "<module>"),
         ]
     );
 }
@@ -504,7 +512,10 @@ async fn test_trace_callback_with_args() {
             SimpleEvent::line(1),
             SimpleEvent::callback_start(0, "echo"),
             SimpleEvent::ret(1, "<module>"),
+            // Tracing stays on across the suspension: the coroutine resumes.
+            SimpleEvent::call(1, "<module>"),
             SimpleEvent::callback_end(0, "echo"),
+            SimpleEvent::ret(1, "<module>"),
         ]
     );
 }
