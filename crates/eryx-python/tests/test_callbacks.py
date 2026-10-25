@@ -46,6 +46,33 @@ class TestCallbackRegistry:
         callbacks = list(registry)
         assert callbacks[0]["name"] == "custom_name"
 
+    def test_reregistering_a_name_replaces_it(self):
+        """Re-registering a name (e.g. re-running a notebook cell) replaces it."""
+        registry = eryx.CallbackRegistry()
+
+        @registry.callback(name="answer")
+        def first():
+            return {"value": 1}
+
+        @registry.callback(name="answer")
+        def second():
+            return {"value": 2}
+
+        registry.add(lambda: {"value": 3}, name="other")
+        registry.add(lambda: {"value": 4}, name="other")
+
+        assert [c["name"] for c in registry] == ["answer", "other"]
+        sandbox = eryx.Sandbox(callbacks=registry)
+        result = sandbox.execute("print((await answer())['value'], (await other())['value'])")
+        assert result.stdout_text.strip() == "2 4"
+
+    def test_same_name_from_registry_and_dict_is_rejected(self):
+        """A name given both by a registry and a separate dict is a genuine conflict."""
+        registry = eryx.CallbackRegistry()
+        registry.add(lambda: {}, name="dup")
+        with pytest.raises(Exception, match="dup"):
+            eryx.Sandbox(callbacks=[registry, {"name": "dup", "fn": lambda: {}}])
+
     def test_decorator_preserves_function(self):
         """Test that the decorator returns the original function."""
         registry = eryx.CallbackRegistry()

@@ -381,6 +381,9 @@ impl CallbackRegistry {
 
     /// Decorator to register a callback function.
     ///
+    /// Registering a name that is already registered replaces the earlier
+    /// callback, as with `add`.
+    ///
     /// Both sync and async functions are supported. Async functions will be
     /// executed using `asyncio.run()`, which creates an isolated event loop
     /// for each invocation. See the class docstring for important limitations
@@ -434,6 +437,9 @@ impl CallbackRegistry {
 
     /// Add a callback directly without using the decorator pattern.
     ///
+    /// Like a dict, adding a name that is already registered replaces the
+    /// earlier callback (e.g. when a notebook cell is re-run).
+    ///
     /// Both sync and async functions are supported. See the class docstring for
     /// important limitations regarding async callbacks and shared state.
     ///
@@ -458,7 +464,7 @@ impl CallbackRegistry {
             .map_err(|e| pyo3::exceptions::PyValueError::new_err(format!("Invalid schema: {e}")))?;
 
         let def = create_callback_def(py, callable, name, description, schema_value)?;
-        self.callbacks.push(def);
+        self.insert(def);
         Ok(())
     }
 
@@ -478,6 +484,16 @@ impl CallbackRegistry {
     fn __repr__(&self) -> String {
         let names: Vec<&str> = self.callbacks.iter().map(|c| c.name.as_str()).collect();
         format!("CallbackRegistry([{}])", names.join(", "))
+    }
+}
+
+impl CallbackRegistry {
+    /// Register `def`, replacing any callback with the same name in place.
+    fn insert(&mut self, def: CallbackDef) {
+        match self.callbacks.iter_mut().find(|c| c.name == def.name) {
+            Some(existing) => *existing = def,
+            None => self.callbacks.push(def),
+        }
     }
 }
 
@@ -503,7 +519,7 @@ impl DecoratorHelper {
             self.description.clone(),
             self.schema.clone(),
         )?;
-        registry.callbacks.push(def);
+        registry.insert(def);
 
         // Return the original function unchanged
         Ok(func)

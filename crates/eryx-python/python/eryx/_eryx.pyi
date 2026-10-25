@@ -134,6 +134,9 @@ class CallbackRegistry:
     ) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
         """Decorator to register a callback function.
 
+        Registering a name that is already registered replaces the earlier
+        callback, as with `add`.
+
         Args:
             name: Optional name for the callback. Defaults to the function's __name__.
             description: Optional description. Defaults to the function's __doc__ or empty string.
@@ -158,6 +161,9 @@ class CallbackRegistry:
         schema: Optional[dict[str, Any]] = None,
     ) -> None:
         """Add a callback directly without using the decorator pattern.
+
+        Like a dict, adding a name that is already registered replaces the
+        earlier callback (e.g. when a notebook cell is re-run).
 
         Args:
             callable: The callable to register.
