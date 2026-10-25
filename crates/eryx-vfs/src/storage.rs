@@ -5,6 +5,7 @@ use std::sync::Arc;
 use std::time::SystemTime;
 
 use async_trait::async_trait;
+use tokio::runtime::RuntimeFlavor;
 use tokio::sync::RwLock;
 
 use crate::error::{VfsError, VfsResult};
@@ -117,6 +118,11 @@ pub trait VfsStorage: Send + Sync {
     /// This is useful for setup code that runs before the async runtime
     /// is available. The default implementation returns an error - implementors
     /// should override this if they support sync directory creation.
+    ///
+    /// Implementations must not deadlock when called from inside a tokio
+    /// runtime: [`InMemoryStorage`] waits for a contended lock only on a
+    /// multi-thread runtime (or outside any runtime) and otherwise returns an
+    /// error.
     fn mkdir_sync(&self, _path: &str) -> VfsResult<()> {
         Err(VfsError::Storage(
             "mkdir_sync not implemented for this storage backend".to_string(),
@@ -906,16 +912,21 @@ impl VfsStorage for InMemoryStorage {
             return create_all(&mut state);
         }
 
-        // `blocking_write` panics when called from inside a tokio runtime, so
-        // in that case wait for the lock on a separate thread.
-        if tokio::runtime::Handle::try_current().is_ok() {
-            std::thread::scope(|s| {
-                s.spawn(|| create_all(&mut self.state.blocking_write()))
-                    .join()
-                    .unwrap_or_else(|e| std::panic::resume_unwind(e))
-            })
-        } else {
-            create_all(&mut self.state.blocking_write())
+        match tokio::runtime::Handle::try_current().map(|h| h.runtime_flavor()) {
+            // Outside a runtime, blocking is fine.
+            Err(_) => create_all(&mut self.state.blocking_write()),
+            // `blocking_write` panics on a runtime thread unless it is inside
+            // `block_in_place`, which also hands this worker's queued tasks
+            // (one of which may hold the lock) to another worker.
+            Ok(RuntimeFlavor::MultiThread) => {
+                tokio::task::block_in_place(|| create_all(&mut self.state.blocking_write()))
+            }
+            // Elsewhere the lock holder can only run on this thread, so
+            // waiting for it would deadlock.
+            Ok(_) => Err(VfsError::Busy(format!(
+                "mkdir_sync {path}: storage is locked and waiting would block the \
+                 only runtime thread; use the async mkdir instead"
+            ))),
         }
     }
 }
@@ -1270,6 +1281,20 @@ mod tests {
             storage.mkdir_sync("/data/sub").unwrap();
         });
         assert!(storage.exists("/data/sub").await.unwrap());
+    }
+
+    /// On a current-thread runtime the lock holder can only run on the thread
+    /// `mkdir_sync` would block, so waiting would hang forever.
+    #[tokio::test(flavor = "current_thread")]
+    async fn mkdir_sync_fails_instead_of_deadlocking_on_current_thread_runtime() {
+        let storage = InMemoryStorage::new();
+        let guard = storage.state.read().await;
+        let err = storage.mkdir_sync("/data").unwrap_err();
+        assert!(matches!(err, VfsError::Busy(_)), "{err:?}");
+        drop(guard);
+
+        storage.mkdir_sync("/data").unwrap();
+        assert!(storage.exists("/data").await.unwrap());
     }
 
     #[tokio::test]
