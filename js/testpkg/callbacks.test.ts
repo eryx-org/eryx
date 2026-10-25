@@ -4,6 +4,7 @@ import {
   getExecutionOptions,
   setCallbackHandler,
   setCallbacks,
+  setOutputHandler,
   setTraceHandler,
 } from "@bsull/eryx/callbacks";
 
@@ -68,5 +69,22 @@ for cb in callbacks:
 result = await invoke("missing", "{}")
 `),
     ).rejects.toThrow();
+  });
+
+  it("does not carry a partial UTF-8 sequence into the next execution", async () => {
+    const chunks: string[] = [];
+    setOutputHandler((stream, data) => {
+      if (stream === 0) chunks.push(data);
+    });
+    try {
+      // Lone halves of "é" (0xC3 0xA9), written via surrogateescape.
+      await execute(`print("\\udcc3", end="")`);
+      const first = chunks.join("");
+      chunks.length = 0;
+      await execute(`print("\\udca9", end="")`);
+      expect([first, chunks.join("")]).toEqual(["\uFFFD", "\uFFFD"]);
+    } finally {
+      setOutputHandler(null);
+    }
   });
 });

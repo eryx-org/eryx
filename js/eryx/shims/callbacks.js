@@ -370,12 +370,26 @@ let _stdoutDecoder = new TextDecoder("utf-8", _decoderOpts);
 let _stderrDecoder = new TextDecoder("utf-8", _decoderOpts);
 
 /**
- * Reset streaming decoders so incomplete multi-byte sequences from one
- * execution don't leak into the next. Called from setOutputHandler.
+ * Reset streaming decoders so incomplete multi-byte sequences written under one
+ * handler don't leak into the next. Called from setOutputHandler.
  */
 function _resetOutputDecoders() {
   _stdoutDecoder = new TextDecoder("utf-8", _decoderOpts);
   _stderrDecoder = new TextDecoder("utf-8", _decoderOpts);
+}
+
+/**
+ * Deliver any incomplete multi-byte sequence left at the end of an execution
+ * (as U+FFFD) and reset the decoders, so it can't merge with the next
+ * execution's output.
+ * @internal Called by execute() when each execution finishes.
+ */
+export function _flushOutput() {
+  const stdoutTail = _stdoutDecoder.decode();
+  const stderrTail = _stderrDecoder.decode();
+  if (!_outputHandler) return;
+  if (stdoutTail) _outputHandler(0, stdoutTail);
+  if (stderrTail) _outputHandler(1, stderrTail);
 }
 
 /**

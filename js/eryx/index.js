@@ -62,7 +62,7 @@ export {
 // Re-export network policy configuration
 export { setNetConfig, DEFAULT_BLOCKED_HOSTS, DEFAULT_BLOCKED_NETWORKS } from "./shims/net.js";
 
-import { _beginReplay, _endReplay } from "./shims/callbacks.js";
+import { _beginReplay, _endReplay, _flushOutput } from "./shims/callbacks.js";
 
 /**
  * Result from executing Python code in the sandbox.
@@ -162,7 +162,7 @@ let _running = 0;
 let _journaling = false;
 
 /**
- * Run code on the shared instance.
+ * Run code on the shared instance, flushing streamed output when it finishes.
  * @param {string} code
  * @returns {Promise<ExecuteResult>}
  */
@@ -172,6 +172,7 @@ async function _run(code) {
     return _toResult(await _execute(code));
   } finally {
     _running--;
+    _flushOutput();
   }
 }
 
