@@ -229,6 +229,21 @@ pub async fn pre_initialize_with_options(options: PreInitOptions) -> Result<Vec<
     // serialized list, so both sides present them in the same (name) order.
     callbacks.sort_by(|a, b| a.name.cmp(&b.name));
 
+    // Check the mounts before the (slow) linking. PYTHONPATH lists
+    // /site-packages whenever one is given, so a missing one must not be
+    // silently left unmounted.
+    if !python_stdlib.exists() {
+        return Err(anyhow!(
+            "Python stdlib not found at {}",
+            python_stdlib.display()
+        ));
+    }
+    if let Some(site_pkg) = site_packages
+        && !site_pkg.exists()
+    {
+        return Err(anyhow!("site-packages not found at {}", site_pkg.display()));
+    }
+
     // Link the component with real WASI adapter.
     let original_component = link_with_extensions(&extensions)
         .map_err(|e| anyhow!("Failed to link component with extensions: {}", e))?;
@@ -266,20 +281,11 @@ pub async fn pre_initialize_with_options(options: PreInitOptions) -> Result<Vec<
         .env("PYTHONUNBUFFERED", "1");
 
     // Mount Python stdlib
-    if python_stdlib.exists() {
-        wasi_builder.preopened_dir(python_stdlib, "python-stdlib", FsPerms::ReadOnly)?;
-    } else {
-        return Err(anyhow!(
-            "Python stdlib not found at {}",
-            python_stdlib.display()
-        ));
-    }
+    wasi_builder.preopened_dir(python_stdlib, "python-stdlib", FsPerms::ReadOnly)?;
 
     // Mount site-packages if provided
     let temp_dir = if let Some(site_pkg) = site_packages {
-        if site_pkg.exists() {
-            wasi_builder.preopened_dir(site_pkg, "site-packages", FsPerms::ReadOnly)?;
-        }
+        wasi_builder.preopened_dir(site_pkg, "site-packages", FsPerms::ReadOnly)?;
         None
     } else {
         // Create empty temp dir for site-packages to avoid errors
@@ -381,37 +387,44 @@ fn restore_initialize_exports(component_bytes: &[u8]) -> Result<Vec<u8>> {
     let mut modules_with_init: HashSet<u32> = HashSet::new();
     let mut any_module_imports_init = false;
     let mut module_index = 0u32;
+    // Pass 2 only rewrites top-level modules, so only those may be counted
+    // here: a module inside a nested component would shift the indices.
+    let mut depth = 0u32;
 
     for payload in wasmparser::Parser::new(0).parse_all(component_bytes) {
-        if let wasmparser::Payload::ModuleSection {
-            unchecked_range: range,
-            ..
-        } = payload?
-        {
-            let module_bytes = slice_range(component_bytes, &range)?;
-            // Use a fresh parser at offset 0 for the module slice
-            for inner in wasmparser::Parser::new(0).parse_all(module_bytes) {
-                match inner? {
-                    wasmparser::Payload::ExportSection(reader) => {
-                        for export in reader {
-                            if export?.name == "_initialize" {
-                                modules_with_init.insert(module_index);
+        match payload? {
+            wasmparser::Payload::Version { .. } => depth += 1,
+            wasmparser::Payload::End { .. } => depth -= 1,
+            wasmparser::Payload::ModuleSection {
+                unchecked_range: range,
+                ..
+            } if depth == 1 => {
+                let module_bytes = slice_range(component_bytes, &range)?;
+                // Use a fresh parser at offset 0 for the module slice
+                for inner in wasmparser::Parser::new(0).parse_all(module_bytes) {
+                    match inner? {
+                        wasmparser::Payload::ExportSection(reader) => {
+                            for export in reader {
+                                if export?.name == "_initialize" {
+                                    modules_with_init.insert(module_index);
+                                }
                             }
                         }
-                    }
-                    wasmparser::Payload::ImportSection(reader) => {
-                        // Each section entry is a *group* since the compact
-                        // imports proposal, so flatten before matching names.
-                        for import in reader.into_imports() {
-                            if import?.name == "_initialize" {
-                                any_module_imports_init = true;
+                        wasmparser::Payload::ImportSection(reader) => {
+                            // Each section entry is a *group* since the compact
+                            // imports proposal, so flatten before matching names.
+                            for import in reader.into_imports() {
+                                if import?.name == "_initialize" {
+                                    any_module_imports_init = true;
+                                }
                             }
                         }
+                        _ => {}
                     }
-                    _ => {}
                 }
+                module_index += 1;
             }
-            module_index += 1;
+            _ => {}
         }
     }
 
@@ -928,10 +941,9 @@ async fn call_execute_code(
         Val::Result(Err(None)) => Err(anyhow!(
             "Pre-init {label} execution failed with unknown error\nCode:\n{code}"
         )),
-        other => {
-            tracing::warn!("Unexpected result type from execute during pre-init: {other:?}");
-            Ok(())
-        }
+        other => Err(anyhow!(
+            "Pre-init {label} execution returned an unexpected value: {other:?}"
+        )),
     }
 }
 
@@ -975,52 +987,75 @@ async fn call_finalize_preinit(store: &mut Store<PreInitCtx>, instance: &Instanc
     Ok(())
 }
 
-/// Errors that can occur during pre-initialization.
-#[derive(Debug, Clone)]
-#[non_exhaustive]
-pub enum PreInitError {
-    /// Failed to create wasmtime engine.
-    Engine(String),
-    /// Failed to compile component.
-    Compile(String),
-    /// Failed to instantiate component.
-    Instantiate(String),
-    /// Python initialization failed.
-    PythonInit(String),
-    /// Import failed during pre-init.
-    Import(String),
-    /// Component transform failed.
-    Transform(String),
-}
-
-impl std::fmt::Display for PreInitError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Engine(e) => write!(f, "failed to create wasmtime engine: {e}"),
-            Self::Compile(e) => write!(f, "failed to compile component: {e}"),
-            Self::Instantiate(e) => write!(f, "failed to instantiate component: {e}"),
-            Self::PythonInit(e) => write!(f, "Python initialization failed: {e}"),
-            Self::Import(e) => write!(f, "import failed during pre-init: {e}"),
-            Self::Transform(e) => write!(f, "component transform failed: {e}"),
-        }
-    }
-}
-
-impl std::error::Error for PreInitError {}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn test_preinit_error_display() {
-        let err = PreInitError::PythonInit("test error".to_string());
-        assert!(err.to_string().contains("test error"));
+    fn missing_site_packages_is_an_error() -> Result<()> {
+        let stdlib = TempDir::new()?;
+        let result = futures::executor::block_on(pre_initialize_with_options(
+            PreInitOptions::new(stdlib.path()).site_packages(stdlib.path().join("missing")),
+        ));
+        let Err(err) = result else {
+            panic!("pre-init succeeded without its site-packages");
+        };
+        assert!(err.to_string().contains("site-packages not found"), "{err}");
+        Ok(())
+    }
+
+    /// A module that imports `_initialize` (as componentize-py's libs do) and
+    /// exports one function, as `_initialize` or as `other`.
+    fn module(export_init: bool) -> wasm_encoder::Module {
+        let mut module = wasm_encoder::Module::new();
+        let mut types = wasm_encoder::TypeSection::new();
+        types.ty().function([], []);
+        module.section(&types);
+        let mut imports = wasm_encoder::ImportSection::new();
+        imports.import("env", "_initialize", wasm_encoder::EntityType::Function(0));
+        module.section(&imports);
+        let mut funcs = wasm_encoder::FunctionSection::new();
+        funcs.function(0);
+        module.section(&funcs);
+        let mut exports = wasm_encoder::ExportSection::new();
+        let name = if export_init { "_initialize" } else { "other" };
+        exports.export(name, wasm_encoder::ExportKind::Func, 1);
+        module.section(&exports);
+        let mut code = wasm_encoder::CodeSection::new();
+        let mut body = wasm_encoder::Function::new([]);
+        body.instructions().end();
+        code.function(&body);
+        module.section(&code);
+        module
     }
 
     #[test]
-    fn test_preinit_error_import_display() {
-        let err = PreInitError::Import("numpy not found".to_string());
-        assert!(err.to_string().contains("numpy not found"));
+    fn restore_initialize_ignores_modules_in_nested_components() -> Result<()> {
+        // A nested component whose module exports `_initialize`, followed by
+        // a top-level module that doesn't: the top-level one must be patched.
+        let mut nested = wasm_encoder::Component::new();
+        nested.section(&wasm_encoder::ModuleSection(&module(true)));
+        let mut component = wasm_encoder::Component::new();
+        component.section(&wasm_encoder::NestedComponentSection(&nested));
+        component.section(&wasm_encoder::ModuleSection(&module(false)));
+
+        let restored = restore_initialize_exports(&component.finish())?;
+
+        let mut depth = 0;
+        let mut top_level_exports = Vec::new();
+        for payload in wasmparser::Parser::new(0).parse_all(&restored) {
+            match payload? {
+                wasmparser::Payload::Version { .. } => depth += 1,
+                wasmparser::Payload::End { .. } => depth -= 1,
+                wasmparser::Payload::ExportSection(reader) if depth == 2 => {
+                    for export in reader {
+                        top_level_exports.push(export?.name.to_string());
+                    }
+                }
+                _ => {}
+            }
+        }
+        assert_eq!(top_level_exports, ["other", "_initialize"]);
+        Ok(())
     }
 }
