@@ -3,9 +3,11 @@
 #![cfg(feature = "embedded")]
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
+use std::future::Future;
 use std::io::Write;
+use std::pin::Pin;
 
-use eryx::{PackageFormat, Sandbox};
+use eryx::{CallbackError, Error, PackageFormat, Sandbox, TypedCallback};
 
 /// A pure-Python wheel containing a single `corepkg` module.
 fn tiny_wheel() -> Vec<u8> {
@@ -69,4 +71,42 @@ async fn dropping_execution_handle_cancels_execution() {
     let token = handle.cancellation_token();
     drop(handle);
     assert!(token.is_cancelled());
+}
+
+struct PanickingCallback;
+
+impl TypedCallback for PanickingCallback {
+    type Args = ();
+
+    fn name(&self) -> &str {
+        "boom"
+    }
+
+    fn description(&self) -> &str {
+        "Panics"
+    }
+
+    fn invoke_typed(
+        &self,
+        _args: (),
+    ) -> Pin<Box<dyn Future<Output = Result<serde_json::Value, CallbackError>> + Send + '_>> {
+        Box::pin(async { panic!("callback panicked") })
+    }
+}
+
+#[tokio::test]
+async fn panicking_callback_fails_the_execution() {
+    let sandbox = Sandbox::embedded()
+        .with_callback(PanickingCallback)
+        .build()
+        .unwrap();
+    // The script swallows the callback error, so only the host can tell that
+    // the callback handler died.
+    let result = sandbox
+        .execute("try:\n    await boom()\nexcept BaseException:\n    pass")
+        .await;
+    assert!(
+        matches!(&result, Err(Error::Execution(msg)) if msg.contains("callback handler")),
+        "expected a callback handler failure, got {result:?}"
+    );
 }

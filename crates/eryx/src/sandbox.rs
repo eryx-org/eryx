@@ -442,21 +442,31 @@ impl Sandbox {
 
         // Wait for the handler tasks to complete
         // The callback channel is closed when execute_future completes (callback_tx dropped)
-        let callback_invocations = callback_handler.await.unwrap_or(0);
+        let callback_invocations = callback_handler.await;
         let trace_events = match trace_collector {
-            Some(trace_collector) => trace_collector.await.unwrap_or_default(),
-            None => Vec::new(),
+            Some(trace_collector) => trace_collector.await,
+            None => Ok(Vec::new()),
         };
 
         // Network handler completes when its channel is dropped (execute_builder dropped)
-        if let Some(handler) = net_handler {
-            let _ = handler.await;
-        }
+        let net_result = match net_handler {
+            Some(handler) => handler.await,
+            None => Ok(()),
+        };
 
         // Output handler completes when its channel is dropped (execute_builder dropped)
-        if let Some(handler) = output_handler_task {
-            let _ = handler.await;
-        }
+        let output_result = match output_handler_task {
+            Some(handler) => handler.await,
+            None => Ok(()),
+        };
+
+        // A handler task only fails by panicking (e.g. in a user callback or
+        // handler), which loses callback results, trace events or output.
+        let callback_invocations =
+            callback_invocations.map_err(|e| handler_task_failed("callback handler", &e))?;
+        let trace_events = trace_events.map_err(|e| handler_task_failed("trace collector", &e))?;
+        net_result.map_err(|e| handler_task_failed("network handler", &e))?;
+        output_result.map_err(|e| handler_task_failed("output handler", &e))?;
 
         let duration = start.elapsed();
 
@@ -752,6 +762,12 @@ impl Sandbox {
             vfs_storage: self.vfs_storage.clone(),
         }
     }
+}
+
+/// Log and convert the failure of a task spawned to serve an execution.
+fn handler_task_failed(task: &str, error: &tokio::task::JoinError) -> Error {
+    tracing::error!(task, %error, "execution handler task failed");
+    Error::Execution(format!("{task} task failed: {error}"))
 }
 
 /// Handle to a cancellable execution.
