@@ -5,7 +5,7 @@
 //!
 //! The `runtime.cwasm` file is located by checking (in order):
 //! 1. `ERYX_RUNTIME_CWASM` env var (explicit path)
-//! 2. `~/.cache/eryx/runtime-v<version>*.cwasm` (populated by `eryx-precompile setup`)
+//! 2. `~/.cache/eryx/runtime-v<version>-<arch>-<os>.cwasm` (populated by `eryx-precompile setup`)
 //! 3. `../eryx-runtime/runtime.cwasm` (workspace dev workflow)
 
 // Build scripts should panic on errors, so expect/unwrap are appropriate here.
@@ -29,8 +29,9 @@ mod embedded_runtime {
 
     /// Find runtime.cwasm in the user's cache directory.
     ///
-    /// Checks `$XDG_CACHE_HOME/eryx/` or `$HOME/.cache/eryx/` for files matching
-    /// `runtime-v<version>*.cwasm` (as written by `eryx-precompile setup`).
+    /// Checks `$XDG_CACHE_HOME/eryx/` or `$HOME/.cache/eryx/` for
+    /// `runtime-v<version>-<arch>-<os>.cwasm` (as written by `eryx-precompile
+    /// setup`) for the target being built.
     fn find_cached_runtime() -> Option<PathBuf> {
         let version = std::env::var("CARGO_PKG_VERSION").ok()?;
         let cache_dir = if let Ok(xdg) = std::env::var("XDG_CACHE_HOME") {
@@ -42,18 +43,15 @@ mod embedded_runtime {
             PathBuf::from(home).join(".cache").join("eryx")
         };
 
-        let prefix = format!("runtime-v{version}");
-        let entries = std::fs::read_dir(&cache_dir).ok()?;
-        for entry in entries.flatten() {
-            let name = entry.file_name();
-            let name_str = name.to_string_lossy();
-            if name_str.starts_with(&prefix) && name_str.ends_with(".cwasm") {
-                let path = entry.path();
-                eprintln!("Found cached runtime: {}", path.display());
-                return Some(path);
-            }
+        let arch = std::env::var("CARGO_CFG_TARGET_ARCH").ok()?;
+        let os = std::env::var("CARGO_CFG_TARGET_OS").ok()?;
+        let path = cache_dir.join(format!("runtime-v{version}-{arch}-{os}.cwasm"));
+        if path.is_file() {
+            eprintln!("Found cached runtime: {}", path.display());
+            Some(path)
+        } else {
+            None
         }
-        None
     }
 
     pub fn prepare() {
@@ -61,6 +59,8 @@ mod embedded_runtime {
 
         // Rebuild when env var or source files change
         println!("cargo::rerun-if-env-changed=ERYX_RUNTIME_CWASM");
+        println!("cargo::rerun-if-env-changed=XDG_CACHE_HOME");
+        println!("cargo::rerun-if-env-changed=HOME");
         println!("cargo::rerun-if-env-changed=DOCS_RS");
         println!("cargo::rerun-if-changed=../eryx-runtime/runtime.cwasm");
 
@@ -71,11 +71,20 @@ mod embedded_runtime {
             return;
         }
 
-        // 1. Explicit env var
+        // 1. Explicit env var. A path that doesn't exist is a mistake, not a
+        // reason to quietly embed some other runtime.
         let cwasm_path = std::env::var("ERYX_RUNTIME_CWASM")
             .ok()
-            .map(PathBuf::from)
-            .filter(|p| p.exists());
+            .filter(|path| !path.is_empty())
+            .map(|path| {
+                let path = PathBuf::from(path);
+                assert!(
+                    path.is_file(),
+                    "ERYX_RUNTIME_CWASM is set to {}, which is not a file",
+                    path.display()
+                );
+                path
+            });
 
         // 2. Cache directory (~/.cache/eryx/)
         let cwasm_path = cwasm_path.or_else(find_cached_runtime);
@@ -87,6 +96,7 @@ mod embedded_runtime {
 
         match cwasm_path {
             Some(path) => {
+                println!("cargo::rerun-if-changed={}", path.display());
                 let dest = out_dir.join("runtime.cwasm");
                 std::fs::copy(&path, &dest).expect("Failed to copy runtime.cwasm");
             }
