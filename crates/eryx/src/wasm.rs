@@ -2789,15 +2789,16 @@ impl PythonExecutor {
             );
 
             // Add Python stdlib as read-only real filesystem preopen
-            if let Some(ref stdlib_path) = self.python_stdlib_path
-                && let Err(e) = ctx.add_real_preopen_path(
+            if let Some(ref stdlib_path) = self.python_stdlib_path {
+                ctx.add_real_preopen_path(
                     "/python-stdlib",
                     stdlib_path,
                     eryx_vfs::DirPerms::READ,
                     eryx_vfs::FilePerms::READ,
                 )
-            {
-                tracing::warn!("Failed to add Python stdlib to hybrid VFS: {e}");
+                .map_err(|e| {
+                    Error::Initialization(format!("Failed to add Python stdlib to VFS: {e}"))
+                })?;
             }
 
             // Add site-packages directories as read-only real filesystem preopens
@@ -2807,14 +2808,15 @@ impl PythonExecutor {
                 } else {
                     format!("/site-packages-{i}")
                 };
-                if let Err(e) = ctx.add_real_preopen_path(
+                ctx.add_real_preopen_path(
                     &mount_path,
                     site_packages_path,
                     eryx_vfs::DirPerms::READ,
                     eryx_vfs::FilePerms::READ,
-                ) {
-                    tracing::warn!("Failed to add {mount_path} to hybrid VFS: {e}");
-                }
+                )
+                .map_err(|e| {
+                    Error::Initialization(format!("Failed to add {mount_path} to VFS: {e}"))
+                })?;
             }
 
             // Add user-specified host filesystem volume mounts
