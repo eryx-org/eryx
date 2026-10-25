@@ -622,6 +622,88 @@ async fn test_session_recovers_after_timeout() {
 }
 
 #[tokio::test]
+async fn test_session_cancellation_interrupts_loop_and_recovers() {
+    use std::time::Duration;
+
+    let executor = get_shared_executor();
+    let mut session = SessionExecutor::new(executor, &[])
+        .await
+        .expect("Failed to create session");
+    session.execute("x = 1").run().await.expect("setup");
+
+    let token = eryx::CancellationToken::new();
+    let canceller = token.clone();
+    // Give the run time to start: a token cancelled before the guest runs
+    // returns early and keeps the instance, which this test isn't about.
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        canceller.cancel();
+    });
+    let result = tokio::time::timeout(
+        Duration::from_secs(10),
+        session
+            .execute("while True: pass")
+            .with_cancellation(token)
+            .run(),
+    )
+    .await
+    .expect("cancellation should interrupt a CPU-bound loop");
+    assert!(
+        matches!(result, Err(eryx::Error::Cancelled)),
+        "expected Cancelled, got {result:?}"
+    );
+
+    // The next call resets the session instead of failing.
+    let output = session
+        .execute("print('x' in globals())")
+        .run()
+        .await
+        .expect("session should be usable after a cancel");
+    assert_eq!(output.stdout_text().trim(), "False");
+    assert!(
+        output.state_was_reset,
+        "the reset after a cancel is reported"
+    );
+}
+
+#[tokio::test]
+async fn test_session_cancellation_interrupts_sleep() {
+    use std::time::Duration;
+
+    let executor = get_shared_executor();
+    let mut session = SessionExecutor::new(executor, &[])
+        .await
+        .expect("Failed to create session");
+
+    let token = eryx::CancellationToken::new();
+    let canceller = token.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        canceller.cancel();
+    });
+    let result = tokio::time::timeout(
+        Duration::from_secs(10),
+        session
+            .execute("import time\ntime.sleep(60)")
+            .with_cancellation(token)
+            .run(),
+    )
+    .await
+    .expect("cancellation should interrupt a guest suspended in a sleep");
+    assert!(
+        matches!(result, Err(eryx::Error::Cancelled)),
+        "expected Cancelled, got {result:?}"
+    );
+
+    let output = session
+        .execute("print('ok')")
+        .run()
+        .await
+        .expect("session should be usable after a cancel");
+    assert_eq!(output.stdout_text().trim(), "ok");
+}
+
+#[tokio::test]
 async fn test_execution_timeout_interrupts_blocking_sleep() {
     use std::time::Duration;
 

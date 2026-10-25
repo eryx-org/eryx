@@ -162,7 +162,7 @@ fn observe_epoch_ticker(ticker: &mut Option<EpochTicker>) -> std::result::Result
     Err(Error::EpochTicker(detail))
 }
 
-fn is_already_cancelled(token: Option<&CancellationToken>) -> bool {
+pub(crate) fn is_already_cancelled(token: Option<&CancellationToken>) -> bool {
     token.is_some_and(CancellationToken::is_cancelled)
 }
 
@@ -190,11 +190,45 @@ pub(crate) fn arm_epoch_deadline<T>(store: &mut Store<T>, timeout: Option<Durati
     store.epoch_deadline_trap();
 }
 
+/// Arm a store-local deadline that interrupts when `cancel_token` is cancelled
+/// (setting `was_cancelled`) or `timeout` elapses.
+///
+/// Cancellation is checked once per epoch tick. The remaining timeout is kept
+/// in this Store's callback so executions share only the clock, not deadline
+/// state. The caller must have started the epoch ticker.
+pub(crate) fn arm_epoch_cancellation<T: 'static>(
+    store: &mut Store<T>,
+    timeout: Option<Duration>,
+    cancel_token: CancellationToken,
+    was_cancelled: Arc<AtomicBool>,
+) {
+    let mut timeout_ticks = timeout.map(epoch_ticks);
+    store.set_epoch_deadline(1);
+    store.epoch_deadline_callback(move |_store| {
+        if cancel_token.is_cancelled() {
+            was_cancelled.store(true, Ordering::Relaxed);
+            return Ok(UpdateDeadline::Interrupt);
+        }
+
+        // Yield on non-interrupt ticks so Tokio can run cancellation
+        // tasks while CPU-bound guest code is executing. Timeout-only
+        // stores use the non-yielding deadline trap path instead.
+        match timeout_ticks.as_mut() {
+            Some(ticks) if *ticks <= 1 => Ok(UpdateDeadline::Interrupt),
+            Some(ticks) => {
+                *ticks -= 1;
+                Ok(UpdateDeadline::Yield(1))
+            }
+            None => Ok(UpdateDeadline::Yield(1)),
+        }
+    });
+}
+
 /// Classify an epoch interrupt from the state captured when it was triggered.
 ///
 /// Do not consult the live cancellation token here: it may be cancelled after
 /// a timeout has already fired, which would misclassify that timeout.
-fn classify_epoch_interrupt(
+pub(crate) fn classify_epoch_interrupt(
     was_cancelled_at_interrupt: bool,
     execution_timeout: Option<Duration>,
 ) -> Error {
@@ -3016,29 +3050,12 @@ impl PythonExecutor {
         }
 
         if let Some(cancel_token) = cancellation_token.clone() {
-            let mut timeout_ticks = execution_timeout.map(epoch_ticks);
-            let was_cancelled_clone = Arc::clone(&was_cancelled);
-            // Check cancellation once per epoch tick. The remaining timeout is kept in
-            // this Store's callback so executions share only the clock, not deadline state.
-            store.set_epoch_deadline(1);
-            store.epoch_deadline_callback(move |_store| {
-                if cancel_token.is_cancelled() {
-                    was_cancelled_clone.store(true, Ordering::Relaxed);
-                    return Ok(UpdateDeadline::Interrupt);
-                }
-
-                // Yield on non-interrupt ticks so Tokio can run cancellation
-                // tasks while CPU-bound guest code is executing. Timeout-only
-                // stores use the non-yielding deadline trap path below.
-                match timeout_ticks.as_mut() {
-                    Some(ticks) if *ticks <= 1 => Ok(UpdateDeadline::Interrupt),
-                    Some(ticks) => {
-                        *ticks -= 1;
-                        Ok(UpdateDeadline::Yield(1))
-                    }
-                    None => Ok(UpdateDeadline::Yield(1)),
-                }
-            });
+            arm_epoch_cancellation(
+                store,
+                execution_timeout,
+                cancel_token,
+                Arc::clone(&was_cancelled),
+            );
         } else {
             arm_epoch_deadline(store, execution_timeout);
         }

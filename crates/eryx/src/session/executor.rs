@@ -35,9 +35,11 @@
 //! persistence to storage. The Python runtime uses pickle for serialization.
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use tokio::sync::mpsc;
+use tokio_util::sync::CancellationToken;
 use wasmtime::Store;
 use wasmtime::component::ResourceTable;
 // wasmtime 48 collapsed DirPerms/FilePerms into FsPerms; the fine-grained
@@ -207,6 +209,7 @@ pub struct SessionExecuteBuilder<'a> {
     net_tx: Option<mpsc::Sender<NetRequest>>,
     output_tx: Option<mpsc::UnboundedSender<crate::wasm::OutputRequest>>,
     fuel_limit: Option<u64>,
+    cancellation_token: Option<CancellationToken>,
 }
 
 impl std::fmt::Debug for SessionExecuteBuilder<'_> {
@@ -219,6 +222,7 @@ impl std::fmt::Debug for SessionExecuteBuilder<'_> {
             .field("has_net_tx", &self.net_tx.is_some())
             .field("has_output_tx", &self.output_tx.is_some())
             .field("fuel_limit", &self.fuel_limit)
+            .field("has_cancellation_token", &self.cancellation_token.is_some())
             .finish_non_exhaustive()
     }
 }
@@ -236,6 +240,7 @@ impl<'a> SessionExecuteBuilder<'a> {
             net_tx: None,
             output_tx: None,
             fuel_limit: None,
+            cancellation_token: None,
         }
     }
 
@@ -307,6 +312,18 @@ impl<'a> SessionExecuteBuilder<'a> {
         self
     }
 
+    /// Set a cancellation token for external cancellation support.
+    ///
+    /// When the token is cancelled, the execution is interrupted and returns
+    /// [`Error::Cancelled`]. The instance is discarded, so the next call on
+    /// the session resets it first: Python state from before the cancelled
+    /// call is lost.
+    #[must_use]
+    pub fn with_cancellation(mut self, token: CancellationToken) -> Self {
+        self.cancellation_token = Some(token);
+        self
+    }
+
     /// Execute the Python code with the configured options.
     ///
     /// # Errors
@@ -331,6 +348,7 @@ impl<'a> SessionExecuteBuilder<'a> {
                 self.net_tx,
                 self.output_tx,
                 self.fuel_limit,
+                self.cancellation_token,
             )
             .await
     }
@@ -1074,13 +1092,17 @@ impl SessionExecutor {
         net_tx: Option<mpsc::Sender<NetRequest>>,
         output_tx: Option<mpsc::UnboundedSender<crate::wasm::OutputRequest>>,
         per_execute_fuel_limit: Option<u64>,
+        cancellation_token: Option<CancellationToken>,
     ) -> Result<ExecutionOutput, Error> {
         self.last_peak_memory_bytes = 0;
         self.last_fuel_consumed = None;
         crate::error::validate_user_code(code)?;
+        if crate::wasm::is_already_cancelled(cancellation_token.as_ref()) {
+            return Err(Error::Cancelled);
+        }
 
         let execution_timeout = self.execution_timeout;
-        if execution_timeout.is_some() {
+        if execution_timeout.is_some() || cancellation_token.is_some() {
             crate::wasm::ensure_epoch_ticker(self.executor.engine())?;
         }
 
@@ -1142,23 +1164,44 @@ impl SessionExecutor {
 
         // Set up epoch-based deadline if timeout is configured.
         // This allows us to interrupt WASM execution even in tight loops.
-        crate::wasm::arm_epoch_deadline(&mut store, execution_timeout);
+        let was_cancelled = Arc::new(AtomicBool::new(false));
+        if let Some(token) = cancellation_token.clone() {
+            crate::wasm::arm_epoch_cancellation(
+                &mut store,
+                execution_timeout,
+                token,
+                Arc::clone(&was_cancelled),
+            );
+        } else {
+            crate::wasm::arm_epoch_deadline(&mut store, execution_timeout);
+        }
 
         // Execute the code.
         // Wrap in tokio::time::timeout so that blocking WASI host calls (e.g. poll_oneoff
         // used by time.sleep) are cancelled when the future is dropped, not just CPU-bound
         // loops caught by epoch interruption.
+        //
+        // Also race the cancellation token: the epoch callback only observes it
+        // while guest code runs, so a guest suspended on a timer or callback
+        // would otherwise ignore cancellation until that completes.
         let code_owned = code.to_string();
         let mut async_timeout_elapsed = false;
+        let run = store
+            .run_concurrent(async |accessor| bindings.call_execute(accessor, code_owned).await);
+        let run = async {
+            let Some(token) = cancellation_token.as_ref() else {
+                return run.await;
+            };
+            tokio::select! {
+                result = run => result,
+                () = token.cancelled() => {
+                    was_cancelled.store(true, Ordering::Relaxed);
+                    Err(wasmtime::Error::msg("cancelled while suspended"))
+                }
+            }
+        };
         let result = if let Some(timeout) = execution_timeout {
-            match tokio::time::timeout(
-                timeout,
-                store.run_concurrent(async |accessor| {
-                    bindings.call_execute(accessor, code_owned).await
-                }),
-            )
-            .await
-            {
+            match tokio::time::timeout(timeout, run).await {
                 Ok(result) => result,
                 Err(_elapsed) => {
                     async_timeout_elapsed = true;
@@ -1166,9 +1209,7 @@ impl SessionExecutor {
                 }
             }
         } else {
-            store
-                .run_concurrent(async |accessor| bindings.call_execute(accessor, code_owned).await)
-                .await
+            run.await
         };
 
         // Disarm the deadline so it can't fire during later calls into the
@@ -1197,6 +1238,12 @@ impl SessionExecutor {
         let fuel_consumed = Some(initial_fuel.saturating_sub(remaining_fuel));
         self.last_peak_memory_bytes = peak_memory;
         self.last_fuel_consumed = fuel_consumed;
+
+        // A cancelled run was interrupted mid-call, so its instance can't be
+        // reused: leave the store out and the next call resets the session.
+        if was_cancelled.load(Ordering::Relaxed) {
+            return Err(Error::Cancelled);
+        }
 
         // Restore store and bindings before handling result
         self.store = Some(store);
