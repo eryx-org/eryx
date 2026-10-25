@@ -147,6 +147,36 @@ sandbox = eryx.Sandbox(
 result = sandbox.execute("print('Hello!')")
 ```
 
+#### Async and Cancellation
+
+`Sandbox`, `Session` and pooled sandboxes have `execute_async()`, which returns
+an `asyncio.Future` so the event loop keeps running while code executes
+(schedule it with `asyncio.ensure_future()`, not `create_task()`).
+Concurrent `execute_async()` calls on one `Session` run one at a time, in call
+order; `reset()`, `clear_state()`, `snapshot_state()` and `restore_state()` also
+wait behind calls made before them.
+
+```python
+result = await sandbox.execute_async("print('Hello!')")
+```
+
+Pass a `CancelToken` as `cancel=` to stop a run from any thread; the call then
+raises `eryx.CancelledError`. Cancelling the asyncio task awaiting
+`execute_async()` also stops the run, and Ctrl-C stops a blocking `execute()`
+and raises `KeyboardInterrupt`.
+
+```python
+token = eryx.CancelToken()
+threading.Timer(5.0, token.cancel).start()
+try:
+    sandbox.execute("while True: pass", cancel=token)
+except eryx.CancelledError:
+    print("cancelled")
+```
+
+A cancelled `Session` run loses its Python state (VFS files are kept), and the
+next call starts from a fresh interpreter.
+
 ### Loading Packages
 
 To use custom packages, use `SandboxFactory` which bundles packages into a reusable
@@ -670,7 +700,8 @@ with open("state.bin", "wb") as f:
 
 #### Session Properties and Methods
 
-- `session.execute(code)` - Execute code, returns `ExecuteResult`
+- `session.execute(code, cancel=None)` - Execute code, returns `ExecuteResult`
+- `session.execute_async(code, cancel=None)` - Awaitable `execute()` for asyncio
 - `session.reset()` - Reset Python state (VFS persists)
 - `session.clear_state()` - Clear variables without full reset
 - `session.snapshot_state()` - Capture state as bytes

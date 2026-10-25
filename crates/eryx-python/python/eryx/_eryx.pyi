@@ -1,5 +1,6 @@
 """Type stubs for the eryx native module."""
 
+import asyncio
 import builtins
 from pathlib import Path
 from typing import Any, Callable, Iterator, Optional, Sequence, TypedDict, Union, final
@@ -680,14 +681,22 @@ class Sandbox:
         """
         ...
 
-    def execute(self, code: str) -> ExecuteResult:
+    def execute(
+        self, code: str, *, cancel: Optional[CancelToken] = None
+    ) -> ExecuteResult:
         """Execute Python code in the sandbox.
 
         The code runs in complete isolation. Any output to stdout is captured
         and returned in the result.
 
+        The GIL is released while the code runs. Ctrl-C (or any signal handler
+        that raises) stops the run and re-raises the handler's exception, e.g.
+        ``KeyboardInterrupt``.
+
         Args:
             code: Python source code to execute.
+            cancel: Optional token; calling ``cancel.cancel()`` from any thread
+                stops the run.
 
         Returns:
             ExecuteResult containing stdout, timing info, and statistics.
@@ -696,6 +705,7 @@ class Sandbox:
             ExecutionError: If the Python code raises an exception.
             TimeoutError: If execution exceeds the timeout limit.
             ResourceLimitError: If a resource limit is exceeded.
+            CancelledError: If ``cancel`` was cancelled.
 
         Example:
             result = sandbox.execute('''
@@ -703,6 +713,26 @@ class Sandbox:
             print(f"2 + 2 = {x}")
             ''')
             print(result.stdout)  # "2 + 2 = 4\\n"
+        """
+        ...
+
+    def execute_async(
+        self, code: str, *, cancel: Optional[CancelToken] = None
+    ) -> asyncio.Future[ExecuteResult]:
+        """Execute Python code in the sandbox from asyncio.
+
+        Like ``execute()``, but returns an ``asyncio.Future``, so the event loop
+        keeps running while the code executes. Cancelling the future (or the
+        task awaiting it) stops the run. It is not a coroutine: wrap it with
+        ``asyncio.ensure_future()`` rather than ``asyncio.create_task()``.
+
+        Args:
+            code: Python source code to execute.
+            cancel: Optional token; cancelling it stops the run and raises
+                ``CancelledError``.
+
+        Example:
+            result = await sandbox.execute_async('print("hi")')
         """
         ...
 
@@ -787,6 +817,36 @@ class TimeoutError(builtins.TimeoutError, EryxError):
     """
 
     ...
+
+
+@final
+class CancelToken:
+    """A token for cancelling executions from any thread.
+
+    Pass it as ``cancel=`` to ``execute()`` or ``execute_async()``; calling
+    ``cancel()`` stops the run, which then raises ``CancelledError``. A token
+    stays cancelled, so later executions given the same token are cancelled
+    before they start. One token may be shared by several executions.
+
+    Example:
+        token = CancelToken()
+        threading.Timer(1.0, token.cancel).start()
+        try:
+            sandbox.execute("while True: pass", cancel=token)
+        except CancelledError:
+            print("stopped")
+    """
+
+    def __init__(self) -> None: ...
+    def cancel(self) -> None:
+        """Cancel every execution using this token. Safe to call from any
+        thread, and more than once."""
+        ...
+
+    @property
+    def cancelled(self) -> bool:
+        """Whether ``cancel()`` has been called."""
+        ...
 
 
 class CancelledError(EryxError):
@@ -1261,15 +1321,25 @@ class Session:
         """
         ...
 
-    def execute(self, code: str) -> ExecuteResult:
+    def execute(
+        self, code: str, *, cancel: Optional[CancelToken] = None
+    ) -> ExecuteResult:
         """Execute Python code in the session.
 
         Unlike `Sandbox.execute()`, state from previous executions is preserved.
         Variables, functions, and classes defined in one call are available in
         subsequent calls.
 
+        The GIL is released while the code runs. Ctrl-C (or any signal handler
+        that raises) stops the run and re-raises the handler's exception.
+
+        A cancelled or interrupted run loses the session's Python state: the
+        next call starts from a fresh interpreter. VFS files are kept.
+
         Args:
             code: Python source code to execute.
+            cancel: Optional token; calling ``cancel.cancel()`` from any thread
+                stops the run.
 
         Returns:
             ExecuteResult containing stdout and execution statistics.
@@ -1277,12 +1347,32 @@ class Session:
         Raises:
             ExecutionError: If the Python code raises an exception.
             TimeoutError: If execution exceeds the timeout limit.
+            CancelledError: If ``cancel`` was cancelled.
 
         Example:
             session.execute('x = 1')
             session.execute('y = 2')
             result = session.execute('print(x + y)')
             print(result.stdout)  # "3"
+        """
+        ...
+
+    def execute_async(
+        self, code: str, *, cancel: Optional[CancelToken] = None
+    ) -> asyncio.Future[ExecuteResult]:
+        """Execute code in the session from asyncio.
+
+        Like ``execute()``, but returns an awaitable, so the event loop keeps
+        running while the code executes. Concurrent calls on one session run
+        one at a time, in call order, and ``reset()``, ``clear_state()``,
+        ``snapshot_state()`` and ``restore_state()`` wait their turn behind
+        calls made before them. Cancelling the awaiting task stops the run,
+        losing session state as with ``cancel``. Raises ``RuntimeError``
+        without running anything when called outside a running event loop.
+
+        Example:
+            await session.execute_async('x = 1')
+            result = await session.execute_async('print(x)')
         """
         ...
 
@@ -1490,11 +1580,14 @@ class PooledSandbox:
         # sandbox is returned to the pool here
     """
 
-    def execute(self, code: str) -> ExecuteResult:
-        """Execute Python code in the sandboxed lease.
+    def execute(
+        self, code: str, *, cancel: Optional[CancelToken] = None
+    ) -> ExecuteResult:
+        """Execute Python code in the sandboxed lease. See ``Sandbox.execute()``.
 
         Args:
             code: Python source code to execute.
+            cancel: Optional token; cancelling it stops the run.
 
         Returns:
             ExecuteResult containing stdout, timing info, and statistics.
@@ -1504,6 +1597,18 @@ class PooledSandbox:
             ExecutionError: If the Python code raises an exception.
             TimeoutError: If execution exceeds the timeout limit.
             ResourceLimitError: If a resource limit is exceeded.
+            CancelledError: If ``cancel`` was cancelled.
+        """
+        ...
+
+    def execute_async(
+        self, code: str, *, cancel: Optional[CancelToken] = None
+    ) -> asyncio.Future[ExecuteResult]:
+        """Execute Python code in the sandboxed lease from asyncio. See
+        ``Sandbox.execute_async()``.
+
+        Raises:
+            ValueError: If the sandbox has already been released.
         """
         ...
 

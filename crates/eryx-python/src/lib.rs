@@ -15,6 +15,7 @@
 
 mod callback;
 mod error;
+mod execution;
 mod mcp;
 mod net_config;
 pub(crate) mod pool;
@@ -69,6 +70,7 @@ fn _eryx(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<pool::SandboxPool>()?;
     m.add_class::<pool::PooledSandbox>()?;
     m.add_class::<pool::PoolStats>()?;
+    m.add_class::<execution::CancelToken>()?;
 
     // Register exceptions
     error::register_exceptions(m)?;

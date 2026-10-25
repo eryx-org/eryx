@@ -2,16 +2,18 @@
 //!
 //! Provides the main `Sandbox` class that Python users interact with.
 
+use std::future::Future;
 use std::sync::Arc;
 
 use async_trait::async_trait;
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 
-use eryx::OutputHandler;
+use eryx::{CancellationToken, OutputHandler};
 
 use crate::callback::extract_callbacks;
 use crate::error::eryx_error_to_py;
+use crate::execution::{CancelToken, call_token, run_async, run_blocking};
 use crate::net_config::NetConfig;
 use crate::resource_limits::ResourceLimits;
 use crate::result::{ExecuteResult, ReplayOutcome};
@@ -243,8 +245,12 @@ impl Sandbox {
     /// The code runs in complete isolation. Any output to stdout is captured
     /// and returned in the result.
     ///
+    /// The GIL is released while the code runs. Ctrl-C (or any signal handler
+    /// that raises) stops the run and re-raises the handler's exception.
+    ///
     /// Args:
     ///     code: Python source code to execute.
+    ///     cancel: Optional CancelToken; cancelling it stops the run.
     ///
     /// Returns:
     ///     ExecuteResult containing stdout, timing info, and statistics.
@@ -253,6 +259,7 @@ impl Sandbox {
     ///     ExecutionError: If the Python code raises an exception.
     ///     TimeoutError: If execution exceeds the timeout limit.
     ///     ResourceLimitError: If a resource limit is exceeded.
+    ///     CancelledError: If `cancel` was cancelled.
     ///
     /// Example:
     ///     result = sandbox.execute('''
@@ -260,17 +267,44 @@ impl Sandbox {
     ///     print(f"2 + 2 = {x}")
     ///     ''')
     ///     print(result.stdout)  # "2 + 2 = 4"
-    fn execute(&self, py: Python<'_>, code: &str) -> PyResult<ExecuteResult> {
-        // Release the GIL while executing in the sandbox
-        // This allows other Python threads to run during sandbox execution
-        let code = code.to_string();
-        let runtime = self.runtime.clone();
-        let inner = &self.inner;
-        py.detach(|| {
-            runtime
-                .block_on(inner.execute(&code))
-                .map(ExecuteResult::from)
-                .map_err(eryx_error_to_py)
+    #[pyo3(signature = (code, *, cancel=None))]
+    fn execute(
+        &self,
+        py: Python<'_>,
+        code: &str,
+        cancel: Option<&CancelToken>,
+    ) -> PyResult<ExecuteResult> {
+        let token = call_token(cancel);
+        let run = run_cancellable(&self.inner, &self.runtime, code, token.clone());
+        run_blocking(py, &self.runtime, &token, run)?
+    }
+
+    /// Execute Python code in the sandbox from asyncio.
+    ///
+    /// Like `execute()`, but returns an awaitable so the event loop keeps
+    /// running while the code executes. Cancelling the awaiting task stops
+    /// the run.
+    ///
+    /// Args:
+    ///     code: Python source code to execute.
+    ///     cancel: Optional CancelToken; cancelling it stops the run.
+    ///
+    /// Returns:
+    ///     An awaitable resolving to an ExecuteResult.
+    ///
+    /// Example:
+    ///     result = await sandbox.execute_async('print("hi")')
+    #[pyo3(signature = (code, *, cancel=None))]
+    fn execute_async<'py>(
+        &self,
+        py: Python<'py>,
+        code: &str,
+        cancel: Option<&CancelToken>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let token = call_token(cancel);
+        let run_token = token.clone();
+        run_async(py, &self.runtime, token, || {
+            run_cancellable(&self.inner, &self.runtime, code, run_token)
         })
     }
 
@@ -341,6 +375,35 @@ impl std::fmt::Debug for Sandbox {
         f.debug_struct("Sandbox")
             .field("resource_limits", self.inner.resource_limits())
             .finish_non_exhaustive()
+    }
+}
+
+/// Start `code` on `sandbox` and return a future for its result that also
+/// stops the run when `token` is cancelled.
+pub(crate) fn run_cancellable(
+    sandbox: &eryx::Sandbox,
+    runtime: &tokio::runtime::Runtime,
+    code: &str,
+    token: CancellationToken,
+) -> impl Future<Output = PyResult<ExecuteResult>> + Send + 'static {
+    // A token cancelled before the call never starts the run.
+    let handle = (!token.is_cancelled()).then(|| {
+        let _guard = runtime.enter();
+        sandbox.execute_cancellable(code)
+    });
+    async move {
+        let handle = handle.ok_or_else(|| eryx_error_to_py(eryx::Error::Cancelled))?;
+        let stop = handle.cancellation_token();
+        let wait = handle.wait();
+        tokio::pin!(wait);
+        let result = tokio::select! {
+            result = &mut wait => result,
+            () = token.cancelled() => {
+                stop.cancel();
+                wait.await
+            }
+        };
+        result.map(ExecuteResult::from).map_err(eryx_error_to_py)
     }
 }
 

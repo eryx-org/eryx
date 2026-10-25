@@ -10,9 +10,10 @@ use pyo3::prelude::*;
 
 use crate::callback::extract_callbacks;
 use crate::error::{eryx_error_to_py, pool_error_to_py};
+use crate::execution::{CancelToken, call_token, run_async, run_blocking};
 use crate::resource_limits::ResourceLimits;
 use crate::result::ExecuteResult;
-use crate::sandbox::PyOutputHandler;
+use crate::sandbox::{PyOutputHandler, run_cancellable};
 
 /// A managed pool of warm sandbox instances.
 ///
@@ -127,6 +128,14 @@ pub struct PooledSandbox {
     runtime: Arc<tokio::runtime::Runtime>,
 }
 
+impl PooledSandbox {
+    fn sandbox(&self) -> PyResult<&eryx::Sandbox> {
+        self.inner
+            .as_deref()
+            .ok_or_else(|| PyValueError::new_err("sandbox has been released back to pool"))
+    }
+}
+
 impl std::fmt::Debug for PooledSandbox {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("PooledSandbox")
@@ -137,25 +146,42 @@ impl std::fmt::Debug for PooledSandbox {
 
 #[pymethods]
 impl PooledSandbox {
-    /// Execute Python code in the sandboxed lease.
+    /// Execute Python code in the sandboxed lease. See `Sandbox.execute()`.
     ///
     /// Raises:
     ///     ValueError: If the sandbox has already been released.
     ///     ExecutionError: If the Python code raises an exception.
     ///     TimeoutError: If execution exceeds the timeout limit.
-    fn execute(&self, py: Python<'_>, code: &str) -> PyResult<ExecuteResult> {
-        let sandbox = self
-            .inner
-            .as_ref()
-            .ok_or_else(|| PyValueError::new_err("sandbox has been released back to pool"))?;
+    ///     CancelledError: If `cancel` was cancelled.
+    #[pyo3(signature = (code, *, cancel=None))]
+    fn execute(
+        &self,
+        py: Python<'_>,
+        code: &str,
+        cancel: Option<&CancelToken>,
+    ) -> PyResult<ExecuteResult> {
+        let token = call_token(cancel);
+        let run = run_cancellable(self.sandbox()?, &self.runtime, code, token.clone());
+        run_blocking(py, &self.runtime, &token, run)?
+    }
 
-        let code = code.to_string();
-        let runtime = self.runtime.clone();
-        py.detach(|| {
-            runtime
-                .block_on(sandbox.execute(&code))
-                .map(ExecuteResult::from)
-                .map_err(eryx_error_to_py)
+    /// Execute Python code in the sandboxed lease from asyncio. See
+    /// `Sandbox.execute_async()`.
+    ///
+    /// Raises:
+    ///     ValueError: If the sandbox has already been released.
+    #[pyo3(signature = (code, *, cancel=None))]
+    fn execute_async<'py>(
+        &self,
+        py: Python<'py>,
+        code: &str,
+        cancel: Option<&CancelToken>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let sandbox = self.sandbox()?;
+        let token = call_token(cancel);
+        let run_token = token.clone();
+        run_async(py, &self.runtime, token, || {
+            run_cancellable(sandbox, &self.runtime, code, run_token)
         })
     }
 

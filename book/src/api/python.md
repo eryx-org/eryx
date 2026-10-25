@@ -16,6 +16,7 @@ For detailed API documentation, see [docs.eryx.run/latest/api/python/](https://d
 - `ResourceLimits` - Configure execution constraints
 - `NetConfig` - Configure network access
 - `CallbackRegistry` - Decorator-based callback registration
+- `CancelToken` - Cancel an execution from any thread
 - `ReplayOutcome` - Result of `Sandbox.execute_with_journal()` (result/error, journal, suspension)
 - `SuspendedCallback` - Details of a callback that suspended execution
 - `SuspendCallback` - Exception a callback raises to suspend execution
@@ -45,6 +46,33 @@ print(out.result)  # {'answer': 42, 'items': [1, 2, 3]}
 If the value is not JSON-serializable, `result` is `None` and `result_error`
 explains why — execution still succeeds. Pass `result_variable="name"` to
 `Sandbox(...)` or `Session(...)` to capture a different variable name.
+
+## Async execution and cancellation
+
+`execute_async()` on `Sandbox`, `Session` and `PooledSandbox` returns an awaitable,
+so the asyncio event loop keeps running while code executes. Concurrent calls on one
+`Session` run one at a time, in call order.
+
+Pass `cancel=CancelToken()` to `execute()` or `execute_async()` and call
+`token.cancel()` from any thread to stop the run; it raises `eryx.CancelledError`.
+Cancelling the asyncio task also stops the run, and Ctrl-C stops a blocking
+`execute()` and raises `KeyboardInterrupt`. A cancelled `Session` run loses its
+Python state, and the next call starts from a fresh interpreter.
+
+```python
+import asyncio
+import eryx
+
+async def main():
+    token = eryx.CancelToken()
+    asyncio.get_running_loop().call_later(1.0, token.cancel)
+    try:
+        await eryx.Sandbox().execute_async("while True: pass", cancel=token)
+    except eryx.CancelledError:
+        print("cancelled")
+
+asyncio.run(main())
+```
 
 ## Callback replay & suspension
 

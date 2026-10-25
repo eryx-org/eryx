@@ -4,17 +4,19 @@
 //! multiple executions, with optional VFS support.
 
 use std::collections::HashMap;
+use std::future::Future;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use eryx::Callback;
-use eryx::OutputHandler;
+use eryx::{CancellationToken, OutputHandler};
 use pyo3::prelude::*;
 use pyo3::types::PyBytes;
 use tokio::sync::mpsc;
 
 use crate::callback::extract_callbacks;
 use crate::error::{InitializationError, eryx_error_to_py};
+use crate::execution::{CancelToken, call_token, run_async, run_blocking};
 use crate::net_config::NetConfig;
 use crate::result::{ExecuteResult, ReplayOutcome};
 use crate::sandbox::PyOutputHandler;
@@ -51,8 +53,13 @@ use crate::vfs::VfsStorage;
 pub struct Session {
     /// The underlying SessionExecutor wrapped in Mutex for thread safety.
     /// SessionExecutor is Send but not Sync (due to wasmtime internals),
-    /// so we use Mutex to provide the Sync guarantee required by PyO3.
-    inner: Mutex<Option<eryx::SessionExecutor>>,
+    /// so we use Mutex to provide the Sync guarantee required by PyO3. It is
+    /// an async mutex so `execute_async()` can wait for it on the runtime.
+    inner: Arc<tokio::sync::Mutex<Option<eryx::SessionExecutor>>>,
+    /// Completes when the most recently queued call finishes. Executions and
+    /// `reset`/`clear_state`/`snapshot_state`/`restore_state` take their
+    /// place here when called, so they run in call order.
+    queue_tail: Mutex<Option<tokio::sync::oneshot::Receiver<()>>>,
     /// Tokio runtime for executing async code.
     runtime: Arc<tokio::runtime::Runtime>,
     /// VFS storage (kept for sharing across sessions).
@@ -176,7 +183,8 @@ impl Session {
             None
         };
         Ok(Self {
-            inner: Mutex::new(Some(inner)),
+            inner: Arc::new(tokio::sync::Mutex::new(Some(inner))),
+            queue_tail: Mutex::new(None),
             runtime,
             vfs_storage,
             vfs_mount_path: mount_path,
@@ -293,17 +301,63 @@ impl Session {
     /// Raises:
     ///     ExecutionError: If the Python code raises an exception.
     ///     TimeoutError: If execution exceeds the timeout limit.
+    ///     CancelledError: If `cancel` was cancelled.
+    ///
+    /// The GIL is released while the code runs. Ctrl-C (or any signal handler
+    /// that raises) stops the run and re-raises the handler's exception.
+    ///
+    /// A cancelled or interrupted run loses the session's Python state: the
+    /// next call starts from a fresh interpreter (VFS files are kept).
     ///
     /// Example:
     ///     session.execute('x = 1')
     ///     session.execute('y = 2')
     ///     result = session.execute('print(x + y)')
     ///     print(result.stdout)  # "3"
-    fn execute(&self, py: Python<'_>, code: &str) -> PyResult<ExecuteResult> {
-        self.run(py, code, self.callbacks.clone(), None)?
-            .and_then(std::convert::identity)
-            .map(ExecuteResult::from_execution_output)
-            .map_err(eryx_error_to_py)
+    #[pyo3(signature = (code, *, cancel=None))]
+    fn execute(
+        &self,
+        py: Python<'_>,
+        code: &str,
+        cancel: Option<&CancelToken>,
+    ) -> PyResult<ExecuteResult> {
+        let token = call_token(cancel);
+        let run = self.run(code, self.callbacks.clone(), None, token.clone());
+        flatten_run(run_blocking(py, &self.runtime, &token, run)??)
+    }
+
+    /// Execute code in the session from asyncio.
+    ///
+    /// Like `execute()`, but returns an awaitable so the event loop keeps
+    /// running while the code executes. Concurrent calls on one session run
+    /// one at a time, in call order, and `reset()`, `clear_state()`,
+    /// `snapshot_state()` and `restore_state()` wait behind calls made before
+    /// them. Cancelling the awaiting task stops the run (losing session state,
+    /// as with `cancel`).
+    ///
+    /// Args:
+    ///     code: Python source code to execute.
+    ///     cancel: Optional CancelToken; cancelling it stops the run.
+    ///
+    /// Returns:
+    ///     An awaitable resolving to an ExecuteResult.
+    ///
+    /// Example:
+    ///     await session.execute_async('x = 1')
+    ///     result = await session.execute_async('print(x)')
+    #[pyo3(signature = (code, *, cancel=None))]
+    fn execute_async<'py>(
+        &self,
+        py: Python<'py>,
+        code: &str,
+        cancel: Option<&CancelToken>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let token = call_token(cancel);
+        let run_token = token.clone();
+        run_async(py, &self.runtime, token, || {
+            let run = self.run(code, self.callbacks.clone(), None, run_token);
+            async move { flatten_run(run.await?) }
+        })
     }
 
     /// Execute code in the session, journaling callback results and replaying
@@ -336,7 +390,9 @@ impl Session {
         let journal = crate::result::journal_from_py(journal)?;
         let state = eryx::ReplayState::shared(code, journal);
         let wrapped = eryx::replay::wrap_callbacks(&self.callbacks, &state);
-        match self.run(py, code, Arc::new(wrapped), Some(&state))? {
+        let token = call_token(None);
+        let run = self.run(code, Arc::new(wrapped), Some(state.clone()), token.clone());
+        match run_blocking(py, &self.runtime, &token, run)?? {
             Ok(result) => ReplayOutcome::from_state(
                 py,
                 result.map(ExecuteResult::from_execution_output),
@@ -367,19 +423,7 @@ impl Session {
     ///     # x is no longer defined
     ///     session.execute('print(x)')  # raises NameError
     fn reset(&self, py: Python<'_>) -> PyResult<()> {
-        let runtime = self.runtime.clone();
-
-        py.detach(|| {
-            let mut guard = self
-                .inner
-                .lock()
-                .map_err(|_| InitializationError::new_err("session lock poisoned"))?;
-            let inner = guard
-                .as_mut()
-                .ok_or_else(|| InitializationError::new_err("session is not initialized"))?;
-
-            runtime.block_on(inner.reset(&[])).map_err(eryx_error_to_py)
-        })
+        self.queued(py, async |inner| inner.reset(&[]).await)
     }
 
     /// Clear Python state without fully resetting the session.
@@ -392,21 +436,7 @@ impl Session {
     ///     session.clear_state()
     ///     # x is no longer defined
     fn clear_state(&self, py: Python<'_>) -> PyResult<()> {
-        let runtime = self.runtime.clone();
-
-        py.detach(|| {
-            let mut guard = self
-                .inner
-                .lock()
-                .map_err(|_| InitializationError::new_err("session lock poisoned"))?;
-            let inner = guard
-                .as_mut()
-                .ok_or_else(|| InitializationError::new_err("session is not initialized"))?;
-
-            runtime
-                .block_on(inner.clear_state())
-                .map_err(eryx_error_to_py)
-        })
+        self.queued(py, async |inner| inner.clear_state().await)
     }
 
     /// Capture a snapshot of the current Python state.
@@ -427,21 +457,7 @@ impl Session {
     ///     with open('state.bin', 'wb') as f:
     ///         f.write(snapshot)
     fn snapshot_state<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyBytes>> {
-        let runtime = self.runtime.clone();
-
-        let snapshot = py.detach(|| {
-            let mut guard = self
-                .inner
-                .lock()
-                .map_err(|_| InitializationError::new_err("session lock poisoned"))?;
-            let inner = guard
-                .as_mut()
-                .ok_or_else(|| InitializationError::new_err("session is not initialized"))?;
-
-            runtime
-                .block_on(inner.snapshot_state())
-                .map_err(eryx_error_to_py)
-        })?;
+        let snapshot = self.queued(py, async |inner| inner.snapshot_state().await)?;
 
         Ok(PyBytes::new(py, snapshot.to_bytes().as_slice()))
     }
@@ -461,22 +477,8 @@ impl Session {
     ///     session.restore_state(snapshot)
     ///     result = session.execute('print(x)')  # x was in the snapshot
     fn restore_state(&self, py: Python<'_>, snapshot: &[u8]) -> PyResult<()> {
-        let runtime = self.runtime.clone();
         let snapshot = eryx::PythonStateSnapshot::from_bytes(snapshot).map_err(eryx_error_to_py)?;
-
-        py.detach(|| {
-            let mut guard = self
-                .inner
-                .lock()
-                .map_err(|_| InitializationError::new_err("session lock poisoned"))?;
-            let inner = guard
-                .as_mut()
-                .ok_or_else(|| InitializationError::new_err("session is not initialized"))?;
-
-            runtime
-                .block_on(inner.restore_state(&snapshot))
-                .map_err(eryx_error_to_py)
-        })
+        self.queued(py, async |inner| inner.restore_state(&snapshot).await)
     }
 
     /// Get the number of executions performed in this session.
@@ -561,23 +563,53 @@ impl Session {
 }
 
 impl Session {
+    /// Take the next place in the call-order queue.
+    fn queue_slot(&self) -> QueueSlot {
+        let (done, queued) = tokio::sync::oneshot::channel();
+        let previous = self
+            .queue_tail
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .replace(queued);
+        QueueSlot { previous, done }
+    }
+
+    /// Run `f` on the session executor once every call queued before it has
+    /// finished, with the GIL released.
+    fn queued<T: Send>(
+        &self,
+        py: Python<'_>,
+        f: impl AsyncFnOnce(&mut eryx::SessionExecutor) -> Result<T, eryx::Error> + Send,
+    ) -> PyResult<T> {
+        let slot = self.queue_slot();
+        py.detach(|| {
+            self.runtime.block_on(async {
+                let _done = slot.wait().await;
+                let mut guard = self.inner.lock().await;
+                let inner = guard
+                    .as_mut()
+                    .ok_or_else(|| InitializationError::new_err("session is not initialized"))?;
+                f(inner).await.map_err(eryx_error_to_py)
+            })
+        })
+    }
+
     /// Run `f` on the session executor under its lock.
     ///
     /// `execute()` holds the lock with the GIL released while its callbacks and
     /// output handlers re-acquire the GIL, so callers holding the GIL must call
     /// this inside `py.detach` or they can deadlock against a running execution.
     fn with_inner<T>(&self, f: impl FnOnce(&mut eryx::SessionExecutor) -> T) -> PyResult<T> {
-        let mut guard = self
-            .inner
-            .lock()
-            .map_err(|_| InitializationError::new_err("session lock poisoned"))?;
+        let mut guard = self.inner.blocking_lock();
         let inner = guard
             .as_mut()
             .ok_or_else(|| InitializationError::new_err("session is not initialized"))?;
         Ok(f(inner))
     }
 
-    /// Shared body of `execute()` and `execute_with_journal()`.
+    /// Shared body of `execute()`, `execute_async()` and
+    /// `execute_with_journal()`, as a future that owns what it needs so it can
+    /// run as its own task. Cancelling `token` stops the run.
     ///
     /// The `PyResult` carries session-level failures before the run. With
     /// `replay` set (a journaled call), the run goes through
@@ -585,23 +617,21 @@ impl Session {
     /// rollback failed; the inner `Result` is the execution outcome.
     fn run(
         &self,
-        py: Python<'_>,
         code: &str,
         callbacks_map: Arc<HashMap<String, Arc<dyn eryx::Callback>>>,
-        replay: Option<&Arc<Mutex<eryx::ReplayState>>>,
-    ) -> PyResult<Result<Result<eryx::ExecutionOutput, eryx::Error>, eryx::Error>> {
+        replay: Option<Arc<Mutex<eryx::ReplayState>>>,
+        token: CancellationToken,
+    ) -> impl Future<Output = PyResult<RunOutcome>> + Send + 'static {
         let code = code.to_string();
-        let runtime = self.runtime.clone();
+        let session = Arc::clone(&self.inner);
         let output_handler = self.output_handler.clone();
         let net_config = self.net_config.clone();
         let callback_limits = self.callback_limits.clone();
+        let slot = self.queue_slot();
 
-        // Release the GIL while executing
-        py.detach(|| {
-            let mut guard = self
-                .inner
-                .lock()
-                .map_err(|_| InitializationError::new_err("session lock poisoned"))?;
+        async move {
+            let _done = slot.wait().await;
+            let mut guard = session.lock_owned().await;
             let inner = guard
                 .as_mut()
                 .ok_or_else(|| InitializationError::new_err("session is not initialized"))?;
@@ -663,7 +693,8 @@ impl Session {
                 // Execute with callbacks and optional output streaming / networking
                 let mut builder = inner
                     .execute(&code)
-                    .with_callbacks(&callbacks_vec, callback_tx);
+                    .with_callbacks(&callbacks_vec, callback_tx)
+                    .with_cancellation(token);
 
                 if let Some(tx) = net_tx {
                     builder = builder.with_network(tx);
@@ -691,34 +722,63 @@ impl Session {
                 result
             };
 
-            Ok(runtime.block_on(async {
-                match replay {
-                    None => Ok(body(inner).await),
-                    Some(state) => inner
-                        .run_with_rollback(
-                            &callbacks_vec,
-                            || {
-                                state
-                                    .lock()
-                                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                                    .suspended()
-                                    .is_some()
-                            },
-                            body,
-                        )
-                        .await
-                        .map(|(result, _rolled_back)| result),
-                }
-            }))
-        })
+            Ok(match replay {
+                None => Ok(body(inner).await),
+                Some(state) => inner
+                    .run_with_rollback(
+                        &callbacks_vec,
+                        || {
+                            state
+                                .lock()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                                .suspended()
+                                .is_some()
+                        },
+                        body,
+                    )
+                    .await
+                    .map(|(result, _rolled_back)| result),
+            })
+        }
     }
+}
+
+/// A place in a session's call-order queue.
+struct QueueSlot {
+    /// Completes (with an error) when the call queued before this one ends.
+    previous: Option<tokio::sync::oneshot::Receiver<()>>,
+    /// Dropped when this call ends, releasing the next one.
+    done: tokio::sync::oneshot::Sender<()>,
+}
+
+impl QueueSlot {
+    /// Wait for the previous call, returning the guard to hold while this
+    /// call runs.
+    async fn wait(self) -> tokio::sync::oneshot::Sender<()> {
+        if let Some(previous) = self.previous {
+            let _ = previous.await;
+        }
+        self.done
+    }
+}
+
+/// What [`Session::run`] produces: the outer `Err` is a failed rollback, the
+/// inner `Result` the execution outcome.
+type RunOutcome = Result<Result<eryx::ExecutionOutput, eryx::Error>, eryx::Error>;
+
+/// Turn a non-journaled [`Session::run`] outcome into `execute()`'s result.
+fn flatten_run(outcome: RunOutcome) -> PyResult<ExecuteResult> {
+    outcome
+        .and_then(std::convert::identity)
+        .map(ExecuteResult::from_execution_output)
+        .map_err(eryx_error_to_py)
 }
 
 impl std::fmt::Debug for Session {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let execution_count = self
             .inner
-            .lock()
+            .try_lock()
             .ok()
             .and_then(|guard| guard.as_ref().map(|i| i.execution_count()));
         f.debug_struct("Session")

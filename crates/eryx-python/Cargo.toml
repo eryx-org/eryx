@@ -20,12 +20,14 @@ crate-type = ["cdylib"]
 async-trait.workspace = true
 eryx = { workspace = true, features = ["embedded", "macros", "native-extensions", "vfs"] }
 pyo3 = { workspace = true } #unified
+pyo3-async-runtimes = { workspace = true, features = ["tokio-runtime"] }
 pythonize.workspace = true
 rmcp = { workspace = true, features = ["client", "transport-child-process", "transport-io"] }
 serde_json.workspace = true
 tar.workspace = true
 tempfile.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread"] }
+tokio-util.workspace = true
 walkdir.workspace = true
 zstd.workspace = true
 
