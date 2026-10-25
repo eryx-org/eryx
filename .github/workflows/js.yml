@@ -13,6 +13,8 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   MISE_EXPERIMENTAL: 1
+  # Fail if the committed crates/eryx-runtime/prebuilt/ is stale (see ci.yml).
+  ERYX_REQUIRE_FRESH_PREBUILT: "1"
 
 permissions: {}
 

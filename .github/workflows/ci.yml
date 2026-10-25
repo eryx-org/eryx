@@ -32,6 +32,12 @@ env:
   # across commits, and runner ext4 has no reflink: kache would store a full
   # copy of each (hundreds of MB apiece), which filled the Test runner's disk.
   KACHE_CACHE_EXECUTABLES: "0"
+  # Fail, rather than warn, when the committed crates/eryx-runtime/prebuilt/
+  # was not built from this commit's guest sources. Jobs that download the
+  # wasm-runtime artifact check the fresh copy, so the jobs that catch a stale
+  # commit are those building from the checkout: Build eryx-runtime on a cache
+  # miss, and the MSRV and platform checks on every core change.
+  ERYX_REQUIRE_FRESH_PREBUILT: "1"
 
 jobs:
   # Detect which paths changed to skip unnecessary jobs.
@@ -64,6 +70,7 @@ jobs:
               - 'crates/eryx-vfs/**'
               - 'crates/eryx-wasm-runtime/**'
               - 'crates/eryx-runtime/**'
+              - 'crates/wit-dylib-ffi/**'
               - 'crates/eryx-precompile/**'
               - 'Cargo.lock'
               - 'Cargo.toml'
@@ -225,7 +232,6 @@ jobs:
       - name: Copy prebuilt late-linking artifacts
         if: steps.wasm-cache.outputs.cache-hit != 'true'
         run: |
-          # Also warns if the committed prebuilt/ is stale for this branch.
           mise run update-prebuilt
           # Find the OUT_DIR that actually contains the built artifacts
           # (not just any OUT_DIR - the preinit build creates a new one without .so files)
