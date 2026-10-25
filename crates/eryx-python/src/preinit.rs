@@ -54,7 +54,6 @@ pub struct SandboxFactory {
     /// Path to site-packages (if any).
     site_packages_path: Option<PathBuf>,
     /// Extracted packages (kept alive to prevent temp dir cleanup).
-    #[allow(dead_code)]
     extracted_packages: Arc<Vec<eryx::ExtractedPackage>>,
     /// Callbacks whose declarations were baked into the snapshot (or, for a
     /// loaded factory, the ones the caller says were). `create_sandbox()` and
@@ -62,7 +61,6 @@ pub struct SandboxFactory {
     callbacks: Option<Py<PyAny>>,
     /// Holds the temp directory for data files extracted during `load()`.
     /// Arc-wrapped so the pool can share ownership and outlive the factory.
-    #[allow(dead_code)]
     data_files_dir: Option<Arc<tempfile::TempDir>>,
     /// Tokio runtime shared across all sandboxes and sessions created by this
     /// factory. Children hold an `Arc` clone, so the runtime outlives the
@@ -166,19 +164,21 @@ impl SandboxFactory {
             options = options.setup_code(code);
         }
 
-        // Run pre-initialization
-        let preinit_bytes = runtime.block_on(async {
-            eryx::preinit::pre_initialize_with_options(options)
-                .await
-                .map_err(|e| {
-                    InitializationError::new_err(format!("pre-initialization failed: {e}"))
-                })
+        // Pre-initialize, then pre-compile to native code for faster
+        // instantiation. Both take seconds, so let other Python threads run.
+        let precompiled = py.detach(|| {
+            let preinit_bytes = runtime.block_on(async {
+                eryx::preinit::pre_initialize_with_options(options)
+                    .await
+                    .map_err(|e| {
+                        InitializationError::new_err(format!("pre-initialization failed: {e}"))
+                    })
+            })?;
+            let precompiled = eryx::PythonExecutor::precompile(&preinit_bytes).map_err(|e| {
+                InitializationError::new_err(format!("pre-compilation failed: {e}"))
+            })?;
+            Ok::<_, PyErr>(make_precompiled_artifact(precompiled, cache))
         })?;
-
-        // Pre-compile to native code for faster instantiation
-        let precompiled = eryx::PythonExecutor::precompile(&preinit_bytes)
-            .map_err(|e| InitializationError::new_err(format!("pre-compilation failed: {e}")))?;
-        let precompiled = make_precompiled_artifact(precompiled, cache);
 
         Ok(Self {
             precompiled,

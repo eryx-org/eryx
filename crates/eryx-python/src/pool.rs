@@ -34,10 +34,8 @@ pub struct SandboxPool {
     /// Factory's default callbacks, used when acquire() is called without callbacks.
     default_callbacks: Option<Py<PyAny>>,
     /// Keep extracted package temp dirs alive for the pool's lifetime.
-    #[allow(dead_code)]
     _extracted_packages: Arc<Vec<eryx::ExtractedPackage>>,
     /// Keep factory data-files temp dir alive for the pool's lifetime.
-    #[allow(dead_code)]
     _data_files_dir: Option<Arc<tempfile::TempDir>>,
 }
 

@@ -1,5 +1,8 @@
 """Tests for SandboxFactory setup_code parameter."""
 
+import threading
+import time
+
 import eryx
 import pytest
 
@@ -87,3 +90,26 @@ class TestSetupCodeSaveLoad:
         sandbox = loaded.create_sandbox()
         result = sandbox.execute("print(setup_value)")
         assert result.stdout.strip() == b"42"
+
+
+
+def test_factory_creation_releases_the_gil():
+    """Other Python threads keep running while a factory pre-initializes."""
+    span = []
+
+    def build():
+        start = time.monotonic()
+        eryx.SandboxFactory(setup_code="x = 1")
+        span.extend([start, time.monotonic()])
+
+    worker = threading.Thread(target=build)
+    worker.start()
+    ticks = []
+    while worker.is_alive():
+        ticks.append(time.monotonic())
+        time.sleep(0.01)
+    worker.join()
+    start, end = span
+    # Holding the GIL through the multi-second pre-init would leave no ticks
+    # inside the build.
+    assert any(start + 0.1 < t < end - 0.1 for t in ticks)
