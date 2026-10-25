@@ -197,6 +197,31 @@ pub fn build_callbacks(
         .collect()
 }
 
+/// Validate callback declarations before they are registered.
+///
+/// Each name must be an identifier or a dot-separated path of identifiers
+/// (`http.get` is exposed as a namespace), and names must be unique.
+///
+/// # Errors
+///
+/// Returns a message describing the first invalid declaration.
+pub fn validate_declarations(declarations: &[CallbackDeclaration]) -> Result<(), String> {
+    let mut names = std::collections::HashSet::new();
+    for decl in declarations {
+        if !decl.name.split('.').all(crate::service::is_identifier) {
+            return Err(format!(
+                "invalid callback name {:?}: must be an identifier or dot-separated \
+                 identifiers ([A-Za-z_][A-Za-z0-9_]*)",
+                decl.name
+            ));
+        }
+        if !names.insert(decl.name.as_str()) {
+            return Err(format!("duplicate callback name {:?}", decl.name));
+        }
+    }
+    Ok(())
+}
+
 /// Dispatch a `CallbackResponse` to its pending oneshot sender.
 ///
 /// Returns `true` if the response was delivered, `false` if no pending
@@ -316,6 +341,27 @@ mod tests {
         );
 
         responder.await.unwrap();
+    }
+
+    #[test]
+    fn validate_declarations_rejects_bad_and_duplicate_names() {
+        let decl = |name: &str| CallbackDeclaration {
+            name: name.to_string(),
+            ..Default::default()
+        };
+        assert!(
+            validate_declarations(&[decl("echo"), decl("http.get"), decl("http.post")]).is_ok()
+        );
+        for bad in [
+            "", "1abc", "has-dash", "a b", "http.", ".get", "a..b", "x\0",
+        ] {
+            assert!(
+                validate_declarations(&[decl(bad)]).is_err(),
+                "{bad:?} accepted"
+            );
+        }
+        let err = validate_declarations(&[decl("echo"), decl("echo")]).unwrap_err();
+        assert!(err.contains("duplicate"), "{err}");
     }
 
     #[test]

@@ -24,10 +24,10 @@ impl BytesExt for Vec<u8> {
 
 use eryx::{PoolConfig, Sandbox, SandboxPool};
 use eryx_server::proto::eryx::v1::eryx_client::EryxClient;
-use eryx_server::proto::eryx::v1::eryx_server::EryxServer;
 use eryx_server::proto::eryx::v1::{
     CallbackDeclaration, CallbackJournal, CallbackOutcome, ClientMessage, ExecuteRequest,
-    ParameterDeclaration, ResourceLimits, callback_response, client_message, server_message,
+    ExecuteResult, ParameterDeclaration, ResourceLimits, callback_response, client_message,
+    server_message,
 };
 use eryx_server::service::EryxService;
 use tokio::net::TcpListener;
@@ -57,7 +57,7 @@ async fn start_server_with_signer(signer: eryx_server::replay::JournalSigner) ->
 
     tokio::spawn(async move {
         Server::builder()
-            .add_service(EryxServer::new(EryxService::with_signer(pool, signer)))
+            .add_service(EryxService::with_signer(pool, signer).into_server())
             .serve_with_incoming(tokio_stream::wrappers::TcpListenerStream::new(listener))
             .await
             .unwrap();
@@ -1599,9 +1599,6 @@ print(f"got: {result}")
         "replayed callback must not be dispatched to the client"
     );
     assert!(got_result, "run 2 never produced a result");
-    // Keep tx2 alive until the stream ends so the server doesn't see a client
-    // disconnect and cancel mid-execution.
-    drop(tx2);
 }
 
 /// A client replying with CALLBACK_OUTCOME_SUSPEND stops execution cleanly: the
@@ -1990,4 +1987,175 @@ async fn execute_invalid_network_cidr_is_rejected() {
         "{}",
         error.message()
     );
+}
+
+/// Send `req` as the only client message, half-closing the request stream
+/// right after it (like grpc-go's `CloseSend()`), and return the final
+/// `ExecuteResult` or the RPC error.
+async fn execute_half_closed(
+    client: &mut EryxClient<Channel>,
+    req: ExecuteRequest,
+) -> Result<ExecuteResult, tonic::Status> {
+    let request = tokio_stream::once(ClientMessage {
+        message: Some(client_message::Message::ExecuteRequest(Box::new(req))),
+    });
+    let mut stream = client.execute(request).await?.into_inner();
+    let mut result = None;
+    while let Some(msg) = stream.message().await? {
+        if let Some(server_message::Message::ExecuteResult(r)) = msg.message {
+            result = Some(*r);
+        }
+    }
+    Ok(result.expect("stream ended without ExecuteResult"))
+}
+
+/// Half-closing the request stream is not a disconnect: the client is still
+/// reading responses, so execution must run to completion.
+#[tokio::test]
+async fn half_closed_request_stream_completes_execution() {
+    let mut client = EryxClient::new(start_server().await);
+    let result = execute_half_closed(
+        &mut client,
+        ExecuteRequest {
+            code: "import time\ntime.sleep(0.2)\nprint('done')".to_string(),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    assert!(result.success, "execution failed: {}", result.error);
+    assert!(result.stdout.contains_str("done"), "{:?}", result.stdout);
+}
+
+/// A state snapshot larger than gRPC's 4 MiB default message size can be both
+/// returned and sent back.
+#[tokio::test]
+async fn large_state_snapshot_round_trips() {
+    let mut client = EryxClient::new(start_server().await)
+        .max_decoding_message_size(eryx_server::service::MAX_MESSAGE_SIZE)
+        .max_encoding_message_size(eryx_server::service::MAX_MESSAGE_SIZE);
+    let first = execute_half_closed(
+        &mut client,
+        ExecuteRequest {
+            code: "big = 'x' * (5 * 1024 * 1024)".to_string(),
+            persist_state: true,
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    assert!(first.success, "step 1 failed: {}", first.error);
+    assert!(first.state_snapshot.len() > 5 * 1024 * 1024);
+
+    let second = execute_half_closed(
+        &mut client,
+        ExecuteRequest {
+            code: "print(len(big))".to_string(),
+            persist_state: true,
+            state_snapshot: first.state_snapshot,
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    assert!(second.success, "step 2 failed: {}", second.error);
+    assert_eq!(second.state_error, "");
+    assert!(second.stdout.contains_str("5242880"), "{:?}", second.stdout);
+}
+
+/// A snapshot that cannot be restored still runs the code against a clean
+/// state, but says so in `state_error`.
+#[tokio::test]
+async fn unrestorable_state_snapshot_reports_state_error() {
+    let mut client = EryxClient::new(start_server().await);
+    for snapshot in [b"short".to_vec(), b"not a real snapshot at all".to_vec()] {
+        let result = execute_half_closed(
+            &mut client,
+            ExecuteRequest {
+                code: "print('ran')".to_string(),
+                persist_state: true,
+                state_snapshot: snapshot,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert!(result.success, "execution failed: {}", result.error);
+        assert!(result.stdout.contains_str("ran"));
+        assert!(
+            result
+                .state_error
+                .contains("failed to restore state snapshot"),
+            "{:?}",
+            result.state_error
+        );
+        // The fresh state is still captured for the caller to keep.
+        assert!(!result.state_snapshot.is_empty());
+    }
+}
+
+/// Invalid supporting files, callback declarations and result variable names
+/// are rejected before execution instead of being silently ignored.
+#[tokio::test]
+async fn invalid_request_inputs_are_rejected() {
+    use eryx_server::proto::eryx::v1::{FileKind, SupportingFile};
+
+    let file = |name: &str| SupportingFile {
+        name: name.to_string(),
+        content: "x = 1".to_string(),
+        kind: FileKind::Module as i32,
+    };
+    let cases = [
+        ExecuteRequest {
+            files: vec![file("../escape.py")],
+            ..Default::default()
+        },
+        ExecuteRequest {
+            files: vec![file("dup.py"), file("dup.py")],
+            ..Default::default()
+        },
+        ExecuteRequest {
+            callbacks: vec![echo_declaration(), echo_declaration()],
+            ..Default::default()
+        },
+        ExecuteRequest {
+            callbacks: vec![CallbackDeclaration {
+                name: "not-an-identifier".to_string(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        },
+        ExecuteRequest {
+            result_variable: "1bad".to_string(),
+            ..Default::default()
+        },
+    ];
+    let mut client = EryxClient::new(start_server().await);
+    for req in cases {
+        let req = ExecuteRequest {
+            code: "pass".to_string(),
+            ..req
+        };
+        let err = execute_half_closed(&mut client, req.clone())
+            .await
+            .expect_err(&format!("{req:?} was accepted"));
+        assert_eq!(err.code(), tonic::Code::InvalidArgument, "{err}");
+    }
+}
+
+/// Failed executions report stats too, not only replay-enabled ones.
+#[tokio::test]
+async fn failed_execution_reports_stats() {
+    let mut client = EryxClient::new(start_server().await);
+    let result = execute_half_closed(
+        &mut client,
+        ExecuteRequest {
+            code: "raise ValueError('boom')".to_string(),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    assert!(!result.success);
+    assert!(result.stats.is_some(), "stats missing on failure");
 }

@@ -16,7 +16,6 @@ use std::time::Duration;
 
 use eryx::{PoolConfig, Sandbox, SandboxPool};
 use eryx_server::proto::eryx::v1::eryx_client::EryxClient;
-use eryx_server::proto::eryx::v1::eryx_server::EryxServer;
 use eryx_server::proto::eryx::v1::{
     ClientMessage, ExecuteRequest, ResourceLimits, client_message, server_message,
 };
@@ -90,7 +89,7 @@ async fn start_tls_server(tls: ServerTlsConfig) -> std::net::SocketAddr {
         Server::builder()
             .tls_config(tls)
             .expect("invalid server TLS config")
-            .add_service(EryxServer::new(EryxService::new(pool)))
+            .add_service(EryxService::new(pool).into_server())
             .serve_with_incoming(TcpListenerStream::new(listener))
             .await
             .unwrap();

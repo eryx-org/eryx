@@ -6,7 +6,6 @@ use std::sync::Arc;
 
 use clap::Parser;
 use eryx::{PoolConfig, Sandbox, SandboxPool};
-use eryx_server::proto::eryx::v1::eryx_server::EryxServer;
 use eryx_server::service::EryxService;
 use eryx_server::telemetry::setup_tracing;
 use futures::StreamExt;
@@ -291,7 +290,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
 
     server
-        .add_service(EryxServer::new(service))
+        .add_service(service.into_server())
         .serve_with_incoming_shutdown(incoming, async {
             let _ = stopped_rx.await;
         })

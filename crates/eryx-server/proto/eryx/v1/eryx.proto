@@ -189,7 +189,10 @@ message ResourceLimits {
 message NetworkConfig {
   // Allowed host patterns (wildcards ok). Only checked when allow_all_hosts is false.
   repeated string allowed_hosts = 1;
-  // Blocked host patterns. Checked before allowed. Private nets always blocked by Rust defaults.
+  // Blocked host patterns. Checked before allowed. Empty = Rust defaults
+  // (localhost and private-range host names); a non-empty list REPLACES the
+  // defaults rather than extending them. Resolved addresses are filtered
+  // separately by blocked_networks.
   repeated string blocked_hosts = 2;
   // Maximum concurrent connections (0 = default 10).
   uint32 max_connections = 3;
@@ -400,6 +403,13 @@ message ExecuteResult {
 
   // Details of the callback that suspended, when `suspended` is true.
   SuspendedCallback suspended_callback = 12;
+
+  // Why state persistence failed, or empty when it succeeded (or persist_state
+  // was false). Set when the request's state_snapshot could not be restored
+  // (the code then ran against a clean state) and/or the post-execution
+  // snapshot could not be captured (state_snapshot is then empty and the
+  // caller should keep its previous snapshot). Independent of `success`.
+  string state_error = 13;
 }
 
 // Why an execution failed, when success is false.

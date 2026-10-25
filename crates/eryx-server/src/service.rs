@@ -1,6 +1,7 @@
 //! gRPC service implementation for the Eryx Execute RPC.
 
 use std::collections::HashMap;
+use std::panic::AssertUnwindSafe;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -13,6 +14,7 @@ use eryx::{
     SessionExecutor, TraceRequest, VfsConfig, generate_placeholder, scrub_placeholders,
     scrub_placeholders_bytes,
 };
+use futures::FutureExt;
 use opentelemetry::propagation::Extractor;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
@@ -23,6 +25,7 @@ use tracing::Instrument;
 use tracing_opentelemetry::OpenTelemetrySpanExt;
 
 use crate::callbacks::{self, CallbackResult, PendingCallbacks};
+use crate::proto::eryx::v1::eryx_server::EryxServer;
 use crate::proto::eryx::v1::{
     CallbackOutcome, ClientMessage, ExecuteResult, ExecuteStats, FailureKind, FileKind,
     ServerMessage, SupportingFile, SuspendedCallback, callback_response, client_message,
@@ -48,6 +51,15 @@ impl Extractor for MetadataExtractor<'_> {
             .collect()
     }
 }
+
+/// Largest gRPC message the server accepts or sends.
+///
+/// An `ExecuteRequest` can carry a state snapshot of up to 10 MiB (eryx's
+/// snapshot size cap) plus code and supporting files, and the final
+/// `ExecuteResult` carries a new snapshot plus the complete stdout/stderr, so
+/// tonic's (and grpc-go's) 4 MiB default is too small. Clients must raise their
+/// receive limit to match (e.g. grpc-go's `MaxCallRecvMsgSize`).
+pub const MAX_MESSAGE_SIZE: usize = 32 * 1024 * 1024;
 
 /// The Eryx gRPC service.
 ///
@@ -81,6 +93,15 @@ impl EryxService {
     pub fn new(pool: Arc<SandboxPool>) -> Self {
         Self::with_signer(pool, crate::replay::JournalSigner::random())
     }
+
+    /// Wrap the service in a tonic server with [`MAX_MESSAGE_SIZE`] applied to
+    /// both decoding and encoding.
+    #[must_use]
+    pub fn into_server(self) -> EryxServer<Self> {
+        EryxServer::new(self)
+            .max_decoding_message_size(MAX_MESSAGE_SIZE)
+            .max_encoding_message_size(MAX_MESSAGE_SIZE)
+    }
 }
 
 #[tonic::async_trait]
@@ -102,8 +123,7 @@ impl crate::proto::eryx::v1::eryx_server::Eryx for EryxService {
         // 1. Read the first message — must be ExecuteRequest.
         let first_msg = inbound
             .message()
-            .await
-            .map_err(|e| Status::internal(format!("failed to read first message: {e}")))?
+            .await?
             .ok_or_else(|| Status::invalid_argument("stream closed before ExecuteRequest"))?;
 
         let execute_req = match first_msg.message {
@@ -193,7 +213,7 @@ impl crate::proto::eryx::v1::eryx_server::Eryx for EryxService {
             }
             for s in &execute_req.secrets {
                 // Validate secret name: must be a valid Python env var name.
-                if !is_valid_secret_name(&s.name) {
+                if !is_identifier(&s.name) {
                     return Err(Status::invalid_argument(format!(
                         "invalid secret name {:?}: must match [A-Za-z_][A-Za-z0-9_]*",
                         s.name
@@ -218,6 +238,18 @@ impl crate::proto::eryx::v1::eryx_server::Eryx for EryxService {
             }
             (map, preamble)
         };
+        callbacks::validate_declarations(&declarations).map_err(Status::invalid_argument)?;
+        if !result_variable.is_empty() && !is_identifier(&result_variable) {
+            return Err(Status::invalid_argument(format!(
+                "invalid result_variable {result_variable:?}: must match [A-Za-z_][A-Za-z0-9_]*"
+            )));
+        }
+        let vfs_storage = if files.is_empty() {
+            None
+        } else {
+            Some(create_vfs_with_files(&files, VFS_MOUNT_PATH).await?)
+        };
+
         let has_secrets = !secrets.is_empty();
         let scrub_stdout = has_secrets && !execute_req.disable_stdout_scrub;
         let scrub_stderr = has_secrets && !execute_req.disable_stderr_scrub;
@@ -340,7 +372,7 @@ impl crate::proto::eryx::v1::eryx_server::Eryx for EryxService {
         metrics::counter!("eryx_sandbox_acquisitions_total").increment(1);
 
         // Create a cancellation token so the dispatch task can signal the
-        // execution task when the client disconnects.
+        // execution task when the inbound stream fails (client disconnected).
         let cancel = CancellationToken::new();
 
         // 6. Spawn callback dispatch task: reads inbound CallbackResponses and
@@ -349,7 +381,15 @@ impl crate::proto::eryx::v1::eryx_server::Eryx for EryxService {
         let cancel_dispatch = cancel.clone();
         tokio::spawn(
             async move {
-                while let Ok(Some(msg)) = inbound.message().await {
+                let disconnected = loop {
+                    let msg = match inbound.message().await {
+                        Ok(Some(msg)) => msg,
+                        // Half-close: the client has nothing more to send
+                        // (e.g. Go's `CloseSend()`), but is still reading the
+                        // response stream, so let the execution finish.
+                        Ok(None) => break false,
+                        Err(_) => break true,
+                    };
                     if let Some(client_message::Message::CallbackResponse(resp)) = msg.message {
                         let request_id = resp.request_id;
                         // A SUSPEND outcome takes precedence over the result oneof:
@@ -385,21 +425,25 @@ impl crate::proto::eryx::v1::eryx_server::Eryx for EryxService {
                             result,
                         );
                     }
-                }
-                // Client disconnected — cancel pending callbacks so their oneshot
-                // receivers error immediately instead of waiting for callback_timeout.
+                };
+                // No further callback responses can arrive — cancel pending
+                // callbacks so their oneshot receivers error immediately instead
+                // of waiting for callback_timeout.
                 let remaining = pending_dispatch.len();
                 if remaining > 0 {
                     tracing::warn!(
                         pending_callbacks = remaining,
-                        "client disconnected with pending callbacks, cancelling"
+                        disconnected,
+                        "client stopped sending with pending callbacks, cancelling them"
                     );
                     pending_dispatch.clear();
                 } else {
-                    tracing::info!("client disconnected cleanly, no pending callbacks");
+                    tracing::info!(disconnected, "client stopped sending");
                 }
-                // Signal the execution task that the client is gone.
-                cancel_dispatch.cancel();
+                if disconnected {
+                    // Signal the execution task that the client is gone.
+                    cancel_dispatch.cancel();
+                }
             }
             .instrument(span.clone()),
         );
@@ -414,7 +458,7 @@ impl crate::proto::eryx::v1::eryx_server::Eryx for EryxService {
             async move {
                 let params = SessionParams {
                     code: &code,
-                    files: &files,
+                    vfs_storage,
                     state: persist_state.then_some(state_snapshot.as_slice()),
                     enable_tracing,
                     resource_limits,
@@ -429,37 +473,43 @@ impl crate::proto::eryx::v1::eryx_server::Eryx for EryxService {
                     journal_signer: journal_signer.clone(),
                 };
 
-                // Race execution against client cancellation. If the client
-                // disconnects, abandon execution and release the sandbox promptly
-                // instead of waiting for timeouts to expire.
+                // Race execution against client disconnection: either the
+                // inbound stream failing or the response stream being dropped.
+                // If the client is gone, abandon execution and release the
+                // sandbox promptly instead of waiting for timeouts to expire.
+                let execution = AssertUnwindSafe(execute_with_session(
+                    &mut sandbox,
+                    &params,
+                    &server_tx_result,
+                ))
+                .catch_unwind();
                 let result_msg = tokio::select! {
-                    result = execute_with_session(&mut sandbox, &params, &server_tx_result) => result,
-                    () = cancel_exec.cancelled() => {
-                        tracing::warn!("client disconnected, aborting execution");
-                        metrics::counter!("eryx_executions_cancelled_total").increment(1);
-                        ExecuteResult {
-                            success: false,
-                            stdout: Vec::new(),
-                            stderr: Vec::new(),
-                            error: "execution cancelled: client disconnected".to_string(),
-                            stats: None,
-                            state_snapshot: Vec::new(),
-                            result: String::new(),
-                            result_error: String::new(),
-                            failure_kind: FailureKind::Cancelled as i32,
-                            callback_journal: None,
-                            suspended: false,
-                            suspended_callback: None,
-                        }
+                    result = execution => result,
+                    () = cancel_exec.cancelled() => Ok(cancelled_result()),
+                    () = resp_tx_final.closed() => Ok(cancelled_result()),
+                };
+
+                match result_msg {
+                    Ok(result_msg) => {
+                        let msg = ServerMessage {
+                            message: Some(server_message::Message::ExecuteResult(Box::new(
+                                result_msg,
+                            ))),
+                        };
+                        // Send via internal channel first, then drop it so the forwarder ends.
+                        let _ = server_tx_result.send(msg).await;
                     }
-                };
-
-                let msg = ServerMessage {
-                    message: Some(server_message::Message::ExecuteResult(Box::new(result_msg))),
-                };
-
-                // Send via internal channel first, then drop it so the forwarder ends.
-                let _ = server_tx_result.send(msg).await;
+                    Err(_) => {
+                        tracing::error!("execution panicked");
+                        metrics::counter!("eryx_executions_total", "status" => "panic")
+                            .increment(1);
+                        // Without this the stream would end with OK status and no
+                        // ExecuteResult.
+                        let _ = resp_tx_final
+                            .send(Err(Status::internal("execution failed unexpectedly")))
+                            .await;
+                    }
+                }
                 drop(server_tx_result);
 
                 // sandbox is dropped here — per-request state cleared, returned to pool.
@@ -478,6 +528,19 @@ impl crate::proto::eryx::v1::eryx_server::Eryx for EryxService {
         );
 
         Ok(Response::new(ReceiverStream::new(resp_rx)))
+    }
+}
+
+/// The result reported when the client disconnects before execution finishes.
+fn cancelled_result() -> ExecuteResult {
+    tracing::warn!("client disconnected, aborting execution");
+    metrics::counter!("eryx_executions_cancelled_total").increment(1);
+    metrics::counter!("eryx_executions_total", "status" => "cancelled").increment(1);
+    ExecuteResult {
+        success: false,
+        error: "execution cancelled: client disconnected".to_string(),
+        failure_kind: FailureKind::Cancelled as i32,
+        ..Default::default()
     }
 }
 
@@ -511,10 +574,11 @@ fn parse_networks(field: &str, cidrs: &[String]) -> Result<Vec<eryx::IpNet>, Sta
         .collect()
 }
 
-/// Check whether a secret name is a valid Python environment variable name.
+/// Check whether a name is an ASCII Python identifier (`[A-Za-z_][A-Za-z0-9_]*`).
 ///
-/// Must match `[A-Za-z_][A-Za-z0-9_]*`.
-fn is_valid_secret_name(name: &str) -> bool {
+/// Used for secret (environment variable) names, callback names and the
+/// result variable.
+pub(crate) fn is_identifier(name: &str) -> bool {
     let mut chars = name.chars();
     match chars.next() {
         Some(c) if c.is_ascii_alphabetic() || c == '_' => {}
@@ -525,11 +589,22 @@ fn is_valid_secret_name(name: &str) -> bool {
 
 /// Check whether a filename is safe for use in VFS paths.
 ///
-/// Rejects names that contain path separators (`/`, `\`) or `..` components,
-/// which could be used to escape the intended directory.
+/// Rejects names that contain path separators (`/`, `\\`), `..` components or
+/// NUL bytes, which could be used to escape the intended directory, and `.`,
+/// which names the directory itself.
 fn is_safe_filename(name: &str) -> bool {
-    !name.is_empty() && !name.contains('/') && !name.contains('\\') && !name.contains("..")
+    !name.is_empty()
+        && name != "."
+        && !name.contains('/')
+        && !name.contains('\\')
+        && !name.contains("..")
+        && !name.contains('\0')
 }
+
+/// Mount point of the VFS holding supporting files. Must match the VFS
+/// preopen path because `VfsDescriptor::resolve_path` prepends it when the
+/// guest accesses files.
+const VFS_MOUNT_PATH: &str = "/eryx";
 
 /// Create a VFS storage pre-populated with the given supporting files.
 ///
@@ -537,9 +612,14 @@ fn is_safe_filename(name: &str) -> bool {
 /// - `MODULE` files go to `{mount_path}/lib/<name>` (added to `sys.path`)
 /// - `DATA` files go to `{mount_path}/data/<name>` (readable but not importable)
 ///
-/// The `mount_path` must match the VFS preopen path (e.g. `/eryx`) because
-/// `VfsDescriptor::resolve_path` prepends it when the guest accesses files.
-async fn create_vfs_with_files(files: &[SupportingFile], mount_path: &str) -> ArcStorage {
+/// # Errors
+///
+/// Returns `INVALID_ARGUMENT` if a file has an unsafe name, two files of the
+/// same kind share a name, or a file cannot be written to the VFS.
+async fn create_vfs_with_files(
+    files: &[SupportingFile],
+    mount_path: &str,
+) -> Result<ArcStorage, Status> {
     let storage = ArcStorage::new(Arc::new(InMemoryStorage::new()) as Arc<dyn VfsStorage>);
 
     let lib_path = format!("{mount_path}/lib");
@@ -551,42 +631,56 @@ async fn create_vfs_with_files(files: &[SupportingFile], mount_path: &str) -> Ar
     let _ = storage.mkdir_sync(&lib_path);
     let _ = storage.mkdir_sync(&data_path);
 
-    let mut mounted_count: usize = 0;
+    let mut paths = std::collections::HashSet::new();
     let mut total_bytes: usize = 0;
 
     for f in files {
         if !is_safe_filename(&f.name) {
-            tracing::warn!(file = %f.name, "skipping supporting file with unsafe name (path separators or '..' not allowed)");
-            continue;
+            return Err(Status::invalid_argument(format!(
+                "invalid supporting file name {:?}: must be a plain file name \
+                 (no path separators, '..', '.' or NUL bytes)",
+                f.name
+            )));
         }
         let dir = match f.kind() {
             FileKind::Module => &lib_path,
             FileKind::Data => &data_path,
         };
         let path = format!("{dir}/{}", f.name);
-        if let Err(e) = storage.write(&path, f.content.as_bytes()).await {
-            tracing::warn!(file = %f.name, kind = ?f.kind(), error = %e, "failed to write supporting file to VFS");
-        } else {
-            tracing::debug!(file = %f.name, kind = ?f.kind(), dir, size = f.content.len(), "wrote supporting file to VFS");
-            mounted_count += 1;
-            total_bytes += f.content.len();
+        if !paths.insert(path.clone()) {
+            return Err(Status::invalid_argument(format!(
+                "duplicate supporting file {:?} of kind {:?}",
+                f.name,
+                f.kind()
+            )));
         }
+        storage
+            .write(&path, f.content.as_bytes())
+            .await
+            .map_err(|e| {
+                Status::invalid_argument(format!(
+                    "failed to write supporting file {:?}: {e}",
+                    f.name
+                ))
+            })?;
+        tracing::debug!(file = %f.name, kind = ?f.kind(), dir, size = f.content.len(), "wrote supporting file to VFS");
+        total_bytes += f.content.len();
     }
 
     tracing::info!(
-        mounted_files = mounted_count,
+        mounted_files = files.len(),
         total_bytes,
-        requested_files = files.len(),
         "VFS file mounting complete"
     );
 
-    storage
+    Ok(storage)
 }
 
 /// Parameters for a single session execution.
 struct SessionParams<'a> {
     code: &'a str,
-    files: &'a [SupportingFile],
+    /// VFS pre-populated with the request's supporting files, if any.
+    vfs_storage: Option<ArcStorage>,
     state: Option<&'a [u8]>,
     enable_tracing: bool,
     resource_limits: ResourceLimits,
@@ -641,14 +735,13 @@ async fn execute_with_session(
     let callbacks_arc: Vec<Arc<dyn Callback>> = active_callbacks.values().cloned().collect();
 
     // Create the session executor, optionally with pre-populated VFS for supporting files.
-    let mut session = if params.files.is_empty() {
-        match SessionExecutor::new(executor, &callbacks_arc).await {
+    let mut session = match params.vfs_storage.clone() {
+        None => match SessionExecutor::new(executor, &callbacks_arc).await {
             Ok(s) => s,
             Err(e) => {
                 tracing::warn!(
                     error = %e,
                     code_len = params.code.len(),
-                    file_count = params.files.len(),
                     "failed to create session executor"
                 );
                 return ExecuteResult {
@@ -658,37 +751,31 @@ async fn execute_with_session(
                     ..Default::default()
                 };
             }
-        }
-    } else {
-        let vfs_mount_path = "/eryx";
-        let vfs_storage = create_vfs_with_files(params.files, vfs_mount_path).await;
-        tracing::info!(
-            file_count = params.files.len(),
-            "created VFS with supporting files"
-        );
-        let vfs_config = VfsConfig::new(vfs_mount_path);
-        match SessionExecutor::new_with_vfs_config(
-            executor,
-            &callbacks_arc,
-            vfs_storage,
-            vfs_config,
-        )
-        .await
-        {
-            Ok(s) => s,
-            Err(e) => {
-                tracing::warn!(
-                    error = %e,
-                    code_len = params.code.len(),
-                    file_count = params.files.len(),
-                    "failed to create session executor with VFS"
-                );
-                return ExecuteResult {
-                    success: false,
-                    error: format!("session creation failed: {e}"),
-                    failure_kind: FailureKind::SandboxError as i32,
-                    ..Default::default()
-                };
+        },
+        Some(vfs_storage) => {
+            let vfs_config = VfsConfig::new(VFS_MOUNT_PATH);
+            match SessionExecutor::new_with_vfs_config(
+                executor,
+                &callbacks_arc,
+                vfs_storage,
+                vfs_config,
+            )
+            .await
+            {
+                Ok(s) => s,
+                Err(e) => {
+                    tracing::warn!(
+                        error = %e,
+                        code_len = params.code.len(),
+                        "failed to create session executor with VFS"
+                    );
+                    return ExecuteResult {
+                        success: false,
+                        error: format!("session creation failed: {e}"),
+                        failure_kind: FailureKind::SandboxError as i32,
+                        ..Default::default()
+                    };
+                }
             }
         }
     };
@@ -697,33 +784,33 @@ async fn execute_with_session(
     session.set_execution_timeout(params.resource_limits.execution_timeout);
     session.set_fuel_limit(params.resource_limits.max_fuel);
 
-    // Restore previous state if provided.
+    // Restore previous state if provided. A snapshot that cannot be restored
+    // (corrupt, or from an incompatible runtime) does not fail the request -
+    // the code runs against a clean state - but is reported in `state_error`
+    // so the caller can tell its state was lost.
+    let mut state_errors = Vec::new();
     if let Some(state_snapshot) = params.state.filter(|s| !s.is_empty()) {
         let restore_start = Instant::now();
-        match PythonStateSnapshot::from_bytes(state_snapshot) {
-            Ok(snapshot) => {
-                if let Err(e) = session.restore_state(&snapshot).await {
-                    tracing::warn!(
-                        error = %e,
-                        restore_ms = restore_start.elapsed().as_millis() as u64,
-                        snapshot_bytes = state_snapshot.len(),
-                        "failed to restore state, proceeding with clean state"
-                    );
-                    // Don't fail — just proceed with a fresh session.
-                } else {
-                    tracing::info!(
-                        restore_ms = restore_start.elapsed().as_millis() as u64,
-                        snapshot_bytes = state_snapshot.len(),
-                        "state restored from snapshot"
-                    );
-                }
-            }
+        let restored = match PythonStateSnapshot::from_bytes(state_snapshot) {
+            Ok(snapshot) => session.restore_state(&snapshot).await,
+            Err(e) => Err(e),
+        };
+        match restored {
+            Ok(()) => tracing::info!(
+                restore_ms = restore_start.elapsed().as_millis() as u64,
+                snapshot_bytes = state_snapshot.len(),
+                "state restored from snapshot"
+            ),
             Err(e) => {
                 tracing::warn!(
                     error = %e,
+                    restore_ms = restore_start.elapsed().as_millis() as u64,
                     snapshot_bytes = state_snapshot.len(),
-                    "invalid state snapshot bytes, proceeding with clean state"
+                    "failed to restore state, proceeding with clean state"
                 );
+                state_errors.push(format!(
+                    "failed to restore state snapshot, executed with a clean state: {e}"
+                ));
             }
         }
     }
@@ -734,7 +821,13 @@ async fn execute_with_session(
     if !params.result_variable.is_empty()
         && let Err(e) = session.set_result_variable(&params.result_variable).await
     {
-        tracing::warn!(error = %e, "failed to set result variable, using default");
+        tracing::warn!(error = %e, "failed to set result variable");
+        return ExecuteResult {
+            success: false,
+            error: format!("failed to set result variable: {e}"),
+            failure_kind: FailureKind::SandboxError as i32,
+            ..Default::default()
+        };
     }
 
     // Set up callback handler channels (mirroring Sandbox::execute pattern).
@@ -753,7 +846,7 @@ async fn execute_with_session(
     // Compute preamble line count so trace events can be adjusted to user code lines.
     let preamble_lines = {
         let mut preamble = params.secrets_preamble.clone();
-        if !params.files.is_empty() {
+        if params.vfs_storage.is_some() {
             preamble.push_str(SYS_PATH_INJECT);
         }
         preamble.push_str(BUILTINS_INJECT);
@@ -868,7 +961,7 @@ async fn execute_with_session(
     // Prepend builtins injection to user code so callbacks are accessible from
     // imported modules. Also prepend sys.path setup when supporting files are
     // present — merged here to avoid a separate WASM execution cycle.
-    let full_code = if !params.files.is_empty() {
+    let full_code = if params.vfs_storage.is_some() {
         format!(
             "{}{SYS_PATH_INJECT}{BUILTINS_INJECT}{}",
             params.secrets_preamble, params.code
@@ -957,6 +1050,7 @@ async fn execute_with_session(
                     snapshot_ms = snapshot_start.elapsed().as_millis() as u64,
                     "failed to capture state snapshot"
                 );
+                state_errors.push(format!("failed to capture state snapshot: {e}"));
                 Vec::new()
             }
         }
@@ -965,6 +1059,7 @@ async fn execute_with_session(
     };
 
     let duration = start.elapsed();
+    let state_error = state_errors.join("; ");
 
     match exec_result {
         Ok(output) => {
@@ -1026,6 +1121,7 @@ async fn execute_with_session(
                 callback_journal: proto_journal,
                 suspended,
                 suspended_callback,
+                state_error,
             }
         }
         Err(e) => {
@@ -1069,10 +1165,7 @@ async fn execute_with_session(
                 stdout,
                 stderr,
                 error,
-                // Provide stats only when replay is active (to surface
-                // replayed_callbacks); otherwise keep the previous behavior of
-                // omitting stats on error.
-                stats: replay_state.is_some().then_some(ExecuteStats {
+                stats: Some(ExecuteStats {
                     duration_ms: duration.as_millis() as u64,
                     callback_invocations,
                     // peak_memory_bytes and fuel_consumed come from the
@@ -1091,6 +1184,7 @@ async fn execute_with_session(
                 callback_journal: proto_journal,
                 suspended,
                 suspended_callback,
+                state_error,
             }
         }
     }
@@ -1217,7 +1311,7 @@ mod tests {
             },
         ];
 
-        let storage = create_vfs_with_files(&files, MOUNT_PATH).await;
+        let storage = create_vfs_with_files(&files, MOUNT_PATH).await.unwrap();
 
         // MODULE files are stored at {mount_path}/lib/<name> in VFS storage.
         let content = storage.read("/eryx/lib/helpers.py").await.unwrap();
@@ -1245,7 +1339,7 @@ mod tests {
             },
         ];
 
-        let storage = create_vfs_with_files(&files, MOUNT_PATH).await;
+        let storage = create_vfs_with_files(&files, MOUNT_PATH).await.unwrap();
 
         // DATA files are stored at {mount_path}/data/<name> in VFS storage.
         let content = storage.read("/eryx/data/config.json").await.unwrap();
@@ -1270,7 +1364,7 @@ mod tests {
             },
         ];
 
-        let storage = create_vfs_with_files(&files, MOUNT_PATH).await;
+        let storage = create_vfs_with_files(&files, MOUNT_PATH).await.unwrap();
 
         // MODULE file goes to {mount_path}/lib/
         let content = storage.read("/eryx/lib/helpers.py").await.unwrap();
@@ -1290,7 +1384,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_create_vfs_with_no_files() {
-        let storage = create_vfs_with_files(&[], MOUNT_PATH).await;
+        let storage = create_vfs_with_files(&[], MOUNT_PATH).await.unwrap();
         // Should have {mount_path}/lib and {mount_path}/data dirs but no files.
         assert!(storage.read("/eryx/lib/helpers.py").await.is_err());
         assert!(storage.read("/eryx/data/config.json").await.is_err());
@@ -1326,34 +1420,48 @@ mod tests {
         assert!(!is_safe_filename(""));
     }
 
+    #[test]
+    fn test_is_safe_filename_rejects_dot_and_nul() {
+        assert!(!is_safe_filename("."));
+        assert!(!is_safe_filename("a\0b.py"));
+    }
+
     #[tokio::test]
-    async fn test_create_vfs_skips_unsafe_filenames() {
-        let files = vec![
-            SupportingFile {
-                name: "good.py".to_string(),
-                content: "x = 1".to_string(),
-                kind: FileKind::Module as i32,
-            },
-            SupportingFile {
-                name: "../../etc/passwd".to_string(),
-                content: "malicious".to_string(),
-                kind: FileKind::Module as i32,
-            },
-            SupportingFile {
-                name: "sub/nested.py".to_string(),
-                content: "nested".to_string(),
-                kind: FileKind::Module as i32,
-            },
-        ];
+    async fn test_create_vfs_rejects_unsafe_filenames() {
+        for name in ["../../etc/passwd", "sub/nested.py", ".", ""] {
+            let files = vec![
+                SupportingFile {
+                    name: "good.py".to_string(),
+                    content: "x = 1".to_string(),
+                    kind: FileKind::Module as i32,
+                },
+                SupportingFile {
+                    name: name.to_string(),
+                    content: "bad".to_string(),
+                    kind: FileKind::Module as i32,
+                },
+            ];
+            let err = create_vfs_with_files(&files, MOUNT_PATH).await.unwrap_err();
+            assert_eq!(err.code(), tonic::Code::InvalidArgument, "{name:?}");
+        }
+    }
 
-        let storage = create_vfs_with_files(&files, MOUNT_PATH).await;
-
-        // Valid file should be written.
-        let content = storage.read("/eryx/lib/good.py").await.unwrap();
-        assert_eq!(String::from_utf8(content).unwrap(), "x = 1");
-
-        // Unsafe files should NOT be written anywhere.
-        assert!(storage.read("/eryx/lib/../../etc/passwd").await.is_err());
-        assert!(storage.read("/eryx/lib/sub/nested.py").await.is_err());
+    #[tokio::test]
+    async fn test_create_vfs_rejects_duplicates_per_kind() {
+        let file = |kind: FileKind| SupportingFile {
+            name: "same.py".to_string(),
+            content: "x = 1".to_string(),
+            kind: kind as i32,
+        };
+        // The same name is fine across kinds (different directories)...
+        create_vfs_with_files(&[file(FileKind::Module), file(FileKind::Data)], MOUNT_PATH)
+            .await
+            .unwrap();
+        // ...but not twice within one.
+        let err = create_vfs_with_files(&[file(FileKind::Data), file(FileKind::Data)], MOUNT_PATH)
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+        assert!(err.message().contains("duplicate"), "{}", err.message());
     }
 }
