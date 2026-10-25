@@ -319,6 +319,13 @@ class TestExecuteResult:
         assert "ExecuteResult" in repr_str
         assert "stdout" in repr_str
 
+    def test_result_repr_truncates_multibyte_output(self):
+        """repr() truncates on a character boundary, not mid-character."""
+        sandbox = eryx.Sandbox()
+        # 'x' then 2-byte characters puts a character across byte 50.
+        result = sandbox.execute('print("x" + "é" * 40)')
+        assert "..." in repr(result)
+
     def test_callback_invocations_zero_without_callbacks(self):
         """Test that callback_invocations is 0 when no callbacks used."""
         sandbox = eryx.Sandbox()
