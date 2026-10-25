@@ -151,6 +151,10 @@ for i in range(5):
 `);
 ```
 
+### Node.js and the WASI shims
+
+Under Node.js, eryx loads the in-memory (browser) build of `@bytecodealliance/preview2-shim`, because the Node.js build backs WASI with the real filesystem. Importing `@bytecodealliance/preview2-shim/*` yourself resolves to the Node.js build, a separate instance from the one eryx uses, so state set through it (such as `_setFileData()`) never reaches the sandbox.
+
 ### Vite / webpack
 
 The package works with Vite and webpack. For Vite, you'll need cross-origin isolation headers for `SharedArrayBuffer`:
@@ -178,6 +182,8 @@ export default defineConfig({
 | `snapshotState()` | `Promise<Uint8Array>` | Serialize interpreter state |
 | `restoreState(data)` | `Promise<void>` | Restore from snapshot |
 | `clearState()` | `Promise<void>` | Reset all user state |
+
+Every `Sandbox` shares one interpreter instance, and calls on it run one at a time, in call order: a call made while another is running waits for it to finish. So don't await `execute()` from inside a callback handler, since it would wait on the execution that called the handler.
 
 ### Callbacks
 
