@@ -576,6 +576,12 @@ impl Sandbox {
         &self.secrets
     }
 
+    /// The network policy, if networking is enabled.
+    #[must_use]
+    pub(crate) fn net_config(&self) -> Option<&NetConfig> {
+        self.net_config.as_ref()
+    }
+
     /// Whether stdout should be scrubbed of secret placeholders.
     #[must_use]
     pub(crate) fn scrub_stdout(&self) -> bool {

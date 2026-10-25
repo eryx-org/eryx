@@ -49,11 +49,14 @@ use async_trait::async_trait;
 use tokio::sync::mpsc;
 
 use crate::callback::Callback;
-use crate::callback_handler::{run_callback_handler, run_output_collector, run_trace_collector};
+use crate::callback_handler::{
+    run_callback_handler, run_net_handler, run_output_collector, run_trace_collector,
+};
 use crate::error::Error;
+use crate::net::ConnectionManager;
 use crate::replay::{CallbackJournal, ReplayState, wrap_callbacks};
 use crate::sandbox::{ExecuteResult, ExecuteStats, ReplayOutcome, Sandbox};
-use crate::wasm::{CallbackRequest, OutputRequest, TraceRequest};
+use crate::wasm::{CallbackRequest, NetRequest, OutputRequest, TraceRequest};
 
 use super::Session;
 use super::executor::{PythonStateSnapshot, SessionExecutor};
@@ -135,8 +138,22 @@ impl<'a> InProcessSession<'a> {
     /// session.execute("print(x)").await?;  // prints "1"
     /// ```
     async fn execute_internal(&mut self, code: &str) -> Result<ExecuteResult, Error> {
+        self.recover_if_cancelled().await?;
         let full_code = self.full_code(code);
         run_code(self.sandbox, &mut self.executor, &full_code, None).await
+    }
+
+    /// Start over if a cancelled call took the instance down with it.
+    ///
+    /// A call whose future is dropped mid-run (e.g. by `tokio::select!` or a
+    /// timeout) loses the instance it was running on. Reset so the session
+    /// stays usable, re-running the preamble on the next call.
+    async fn recover_if_cancelled(&mut self) -> Result<(), Error> {
+        if self.executor.store().is_none() {
+            tracing::warn!("session call was cancelled mid-run; resetting, state lost");
+            self.reset().await?;
+        }
+        Ok(())
     }
 
     /// Prepend the sandbox preamble on the session's first call.
@@ -197,6 +214,9 @@ impl<'a> InProcessSession<'a> {
         journal: Option<CallbackJournal>,
     ) -> ReplayOutcome {
         let state = ReplayState::shared(code, journal);
+        if let Err(e) = self.recover_if_cancelled().await {
+            return ReplayOutcome::from_state(&state, code, Err(e));
+        }
         let preamble_executed = self.preamble_executed;
         let full_code = self.full_code(code);
         let sandbox = self.sandbox;
@@ -269,6 +289,16 @@ impl<'a> InProcessSession<'a> {
     }
 }
 
+/// Aborts its task when dropped, so a cancelled [`run_code`] doesn't leave its
+/// handler tasks (and any callbacks they are running) behind.
+struct AbortOnDrop<T>(tokio::task::JoinHandle<T>);
+
+impl<T> Drop for AbortOnDrop<T> {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
 /// Whether a callback suspended the run that used `state`.
 fn lock_suspended(state: &Mutex<ReplayState>) -> bool {
     state
@@ -311,7 +341,7 @@ async fn run_code(
     let resource_limits = sandbox.resource_limits().clone();
     let secrets_arc = std::sync::Arc::new(sandbox.secrets().clone());
     let callback_secrets = std::sync::Arc::clone(&secrets_arc);
-    let callback_handler = tokio::spawn(async move {
+    let mut callback_handler = AbortOnDrop(tokio::spawn(async move {
         run_callback_handler(
             callback_rx,
             callbacks_arc,
@@ -319,7 +349,7 @@ async fn run_code(
             callback_secrets,
         )
         .await
-    });
+    }));
 
     // Create the trace channel and collector only when tracing is enabled.
     let tracing_enabled = sandbox.tracing_enabled();
@@ -328,9 +358,9 @@ async fn run_code(
         let trace_handler = sandbox.trace_handler().clone();
         let collect_trace = sandbox.trace_collection_enabled();
         let trace_secrets = sandbox.secrets().clone();
-        let trace_collector = tokio::spawn(async move {
+        let trace_collector = AbortOnDrop(tokio::spawn(async move {
             run_trace_collector(trace_rx, trace_handler, collect_trace, trace_secrets).await
-        });
+        }));
         (Some(trace_tx), Some(trace_collector))
     } else {
         (None, None)
@@ -342,7 +372,7 @@ async fn run_code(
     let output_secrets = sandbox.secrets().clone();
     let scrub_stdout = sandbox.scrub_stdout();
     let scrub_stderr = sandbox.scrub_stderr();
-    let output_collector = tokio::spawn(async move {
+    let mut output_collector = AbortOnDrop(tokio::spawn(async move {
         run_output_collector(
             output_rx,
             output_handler_ref,
@@ -351,7 +381,18 @@ async fn run_code(
             scrub_stderr,
         )
         .await
-    });
+    }));
+
+    // Spawn the network handler if networking is enabled
+    let (net_tx, net_handler) = match sandbox.net_config() {
+        Some(config) => {
+            let (tx, rx) = mpsc::channel::<NetRequest>(32);
+            let manager = ConnectionManager::new(config.clone(), sandbox.secrets().clone());
+            let handler = AbortOnDrop(tokio::spawn(run_net_handler(rx, manager)));
+            (Some(tx), Some(handler))
+        }
+        None => (None, None),
+    };
 
     // Execute using the session executor (keeps instance alive!)
     // Timeout is handled via epoch-based interruption inside the executor
@@ -362,15 +403,22 @@ async fn run_code(
     if let Some(trace_tx) = trace_tx {
         execute_builder = execute_builder.with_tracing(trace_tx);
     }
+    if let Some(net_tx) = net_tx {
+        execute_builder = execute_builder.with_network(net_tx);
+    }
     let execution_result = execute_builder.run().await;
 
     // Wait for the handler tasks to complete
-    let callback_invocations = callback_handler.await.unwrap_or(0);
+    let callback_invocations = (&mut callback_handler.0).await.unwrap_or(0);
     let trace_events = match trace_collector {
-        Some(trace_collector) => trace_collector.await.unwrap_or_default(),
+        Some(mut trace_collector) => (&mut trace_collector.0).await.unwrap_or_default(),
         None => Vec::new(),
     };
-    let _ = output_collector.await;
+    let _ = (&mut output_collector.0).await;
+    // Connections don't outlive the call, as with `Sandbox::execute`.
+    if let Some(mut net_handler) = net_handler {
+        let _ = (&mut net_handler.0).await;
+    }
 
     let duration = start.elapsed();
 

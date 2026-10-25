@@ -1051,10 +1051,18 @@ impl SessionExecutor {
 
         let start = Instant::now();
 
+        // A call whose future was dropped mid-run took the instance with it;
+        // start over on a fresh one rather than failing every later call.
+        if self.store.is_none() {
+            tracing::warn!("previous session call was cancelled mid-run; resetting, state lost");
+            self.reset(callbacks).await?;
+        }
+
         // Take ownership of store and bindings for async execution
-        let mut store = self.store.take().ok_or_else(|| {
-            Error::Execution("Store not available (concurrent execution?)".to_string())
-        })?;
+        let mut store = self
+            .store
+            .take()
+            .ok_or_else(|| Error::Execution("Store not available".to_string()))?;
         let bindings = self
             .bindings
             .take()
