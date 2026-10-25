@@ -3076,15 +3076,17 @@ fn format_execution_error(stderr_output: &[u8], exception_msg: String) -> String
     }
 }
 
-/// First line of code that carries a host preamble: `#eryx-preamble:<len>`,
-/// followed by the preamble (`<len>` bytes) and then the user code. The eryx
-/// host frames code this way so the guest can compile the two separately and
-/// keep the user code's line numbers. Must match the host's framing.
+/// First line of framed code: `#eryx-preamble:<len>`, followed by the host
+/// preamble (`<len>` bytes, possibly none) and then the user code. Compiling
+/// the two separately keeps the user code's line numbers. Hosts frame every
+/// execution and only one leading header is split off, so a header-like first
+/// line in user code stays user code. Must match the host's framing.
 const PREAMBLE_HEADER: &str = "#eryx-preamble:";
 
 /// Split `code` into `(preamble, user_code)` per [`PREAMBLE_HEADER`].
 ///
-/// Code without a well-formed header is all user code, with no preamble.
+/// Only one leading header is split off; code without a well-formed header
+/// (from a host that doesn't frame) is all user code, with no preamble.
 fn split_preamble(code: &str) -> (&str, &str) {
     code.strip_prefix(PREAMBLE_HEADER)
         .and_then(|rest| {
@@ -3853,6 +3855,11 @@ mod tests {
         assert_eq!(
             split_preamble("#eryx-preamble:0\nprint(1)"),
             ("", "print(1)")
+        );
+        // Only one header is split off: a second one is user code.
+        assert_eq!(
+            split_preamble("#eryx-preamble:0\n#eryx-preamble:1\nx"),
+            ("", "#eryx-preamble:1\nx")
         );
         // Anything malformed is plain user code.
         for code in [

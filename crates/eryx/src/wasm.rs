@@ -1448,6 +1448,7 @@ impl tls::Host for ExecutorState {
 pub struct ExecuteBuilder<'a> {
     executor: &'a PythonExecutor,
     code: String,
+    preamble: String,
     callbacks: Vec<Arc<dyn Callback>>,
     callback_tx: Option<mpsc::Sender<CallbackRequest>>,
     trace_tx: Option<mpsc::UnboundedSender<TraceRequest>>,
@@ -1491,6 +1492,7 @@ impl<'a> ExecuteBuilder<'a> {
         Self {
             executor,
             code: code.into(),
+            preamble: String::new(),
             callbacks: Vec::new(),
             callback_tx: None,
             trace_tx: None,
@@ -1580,6 +1582,17 @@ impl<'a> ExecuteBuilder<'a> {
         self
     }
 
+    /// Run `preamble` (setup such as libraries or secrets) before the code, in
+    /// the same namespace.
+    ///
+    /// The preamble is compiled separately, so tracebacks and trace events keep
+    /// the code's own line numbers, and the preamble's lines are not traced.
+    #[must_use]
+    pub fn with_preamble(mut self, preamble: impl Into<String>) -> Self {
+        self.preamble = preamble.into();
+        self
+    }
+
     /// Set the maximum fuel (instructions) allowed for execution.
     ///
     /// Fuel provides fine-grained, deterministic execution bounds at the
@@ -1617,7 +1630,7 @@ impl<'a> ExecuteBuilder<'a> {
     pub async fn run(self) -> std::result::Result<ExecutionOutput, Error> {
         self.executor
             .execute_internal(
-                &self.code,
+                &frame_code(&self.preamble, &self.code),
                 &self.callbacks,
                 self.callback_tx,
                 self.trace_tx,
@@ -1634,6 +1647,15 @@ impl<'a> ExecuteBuilder<'a> {
             )
             .await
     }
+}
+
+/// Frame `code` for the guest's `execute` export, with `preamble` to run first.
+///
+/// Every execution is framed, even without a preamble: the guest splits off
+/// exactly one leading header, so a header-like first line in user code is
+/// never mistaken for the framing. Must match the guest's `PREAMBLE_HEADER`.
+pub(crate) fn frame_code(preamble: &str, code: &str) -> String {
+    format!("#eryx-preamble:{}\n{preamble}{code}", preamble.len())
 }
 
 /// Guest mount path for the `index`-th site-packages directory.

@@ -144,3 +144,30 @@ async fn preamble_errors_are_attributed_to_the_preamble() {
     let err = script_error(sandbox.execute("print('unreached')").await);
     assert!(err.contains(r#"File "<preamble>", line 2"#), "{err}");
 }
+
+#[tokio::test]
+async fn header_in_user_code_is_not_mistaken_for_a_preamble() {
+    // Without a host preamble, user code starting with the framing header must
+    // still run, be traced and be numbered entirely as user code.
+    let out = Sandbox::embedded()
+        .build()
+        .unwrap()
+        .execute("#eryx-preamble:6\nx = 1\ny = 2\nprint(x + y)\n")
+        .await
+        .unwrap();
+    assert_eq!(out.stdout, b"3\n");
+    let lines: Vec<u32> = out
+        .trace
+        .iter()
+        .filter(|e| matches!(e.event, eryx::TraceEventKind::Line))
+        .map(|e| e.lineno)
+        .collect();
+    assert_eq!(lines, [2, 3, 4]);
+
+    let err = script_error(
+        sandbox_with_preamble()
+            .execute("#eryx-preamble:6\nx = 1\nraise ValueError('boom')\n")
+            .await,
+    );
+    assert!(err.contains(r#"File "<user>", line 3"#), "{err}");
+}

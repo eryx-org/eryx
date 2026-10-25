@@ -200,6 +200,7 @@ impl PythonStateSnapshot {
 pub struct SessionExecuteBuilder<'a> {
     session: &'a mut SessionExecutor,
     code: String,
+    preamble: String,
     callbacks: Vec<Arc<dyn Callback>>,
     callback_tx: Option<mpsc::Sender<CallbackRequest>>,
     trace_tx: Option<mpsc::UnboundedSender<TraceRequest>>,
@@ -228,6 +229,7 @@ impl<'a> SessionExecuteBuilder<'a> {
         Self {
             session,
             code: code.into(),
+            preamble: String::new(),
             callbacks: Vec::new(),
             callback_tx: None,
             trace_tx: None,
@@ -280,6 +282,17 @@ impl<'a> SessionExecuteBuilder<'a> {
         self
     }
 
+    /// Run `preamble` (setup such as libraries or secrets) before the code, in
+    /// the same namespace.
+    ///
+    /// The preamble is compiled separately, so tracebacks and trace events keep
+    /// the code's own line numbers, and the preamble's lines are not traced.
+    #[must_use]
+    pub fn with_preamble(mut self, preamble: impl Into<String>) -> Self {
+        self.preamble = preamble.into();
+        self
+    }
+
     /// Set the maximum fuel (instructions) allowed for this execution.
     ///
     /// Fuel provides fine-grained, deterministic execution bounds at the
@@ -311,7 +324,7 @@ impl<'a> SessionExecuteBuilder<'a> {
     pub async fn run(self) -> Result<ExecutionOutput, Error> {
         self.session
             .execute_internal(
-                &self.code,
+                &crate::wasm::frame_code(&self.preamble, &self.code),
                 &self.callbacks,
                 self.callback_tx,
                 self.trace_tx,

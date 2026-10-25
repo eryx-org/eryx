@@ -183,7 +183,9 @@ function _serialized(fn) {
  */
 async function _run(code) {
   try {
-    return _toResult(await _execute(code));
+    // Frame the code with an empty preamble (see the guest's PREAMBLE_HEADER),
+    // so a leading header-like line in user code isn't misparsed.
+    return _toResult(await _execute(`#eryx-preamble:0\n${code}`));
   } finally {
     _flushOutput();
   }

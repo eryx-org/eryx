@@ -973,9 +973,9 @@ async fn execute_with_session(
     } else {
         format!("{}{BUILTINS_INJECT}", params.secrets_preamble)
     };
-    let full_code = eryx::with_preamble(&preamble, params.code);
     let mut builder = session
-        .execute(&full_code)
+        .execute(params.code)
+        .with_preamble(preamble)
         .with_callbacks(&callbacks_arc, callback_tx)
         .with_output_streaming(output_tx);
     if let Some(fuel) = fuel_limit {

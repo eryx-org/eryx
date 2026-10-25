@@ -139,8 +139,8 @@ impl<'a> InProcessSession<'a> {
     /// ```
     async fn execute_internal(&mut self, code: &str) -> Result<ExecuteResult, Error> {
         self.recover_if_cancelled().await?;
-        let full_code = self.full_code(code);
-        run_code(self.sandbox, &mut self.executor, &full_code, None).await
+        let preamble = self.take_preamble();
+        run_code(self.sandbox, &mut self.executor, code, preamble, None).await
     }
 
     /// Start over if a cancelled call took the instance down with it.
@@ -157,14 +157,13 @@ impl<'a> InProcessSession<'a> {
         Ok(())
     }
 
-    /// Prepend the sandbox preamble on the session's first call.
-    fn full_code(&mut self, code: &str) -> String {
-        if !self.preamble_executed && !self.sandbox.preamble().is_empty() {
-            self.preamble_executed = true;
-            crate::sandbox::with_preamble(self.sandbox.preamble(), code)
-        } else {
-            code.to_string()
+    /// The sandbox preamble on the session's first call, else `""`.
+    fn take_preamble(&mut self) -> &'a str {
+        if self.preamble_executed {
+            return "";
         }
+        self.preamble_executed = true;
+        self.sandbox.preamble()
     }
 
     /// Execute Python code in the session with callback-result replay and
@@ -219,7 +218,7 @@ impl<'a> InProcessSession<'a> {
             return ReplayOutcome::from_state(&state, code, Err(e));
         }
         let preamble_executed = self.preamble_executed;
-        let full_code = self.full_code(code);
+        let preamble = self.take_preamble();
         let sandbox = self.sandbox;
         let callbacks: Vec<Arc<dyn Callback>> = sandbox.callbacks().values().cloned().collect();
 
@@ -229,7 +228,7 @@ impl<'a> InProcessSession<'a> {
                 &callbacks,
                 || lock_suspended(&state),
                 async |executor| {
-                    run_code(sandbox, executor, &full_code, Some(Arc::clone(&state))).await
+                    run_code(sandbox, executor, code, preamble, Some(Arc::clone(&state))).await
                 },
             )
             .await;
@@ -312,20 +311,21 @@ fn lock_suspended(state: &Mutex<ReplayState>) -> bool {
         .is_some()
 }
 
-/// Run `full_code` on `executor` with `sandbox`'s callbacks, handlers and
-/// limits, wrapping callbacks for replay when `replay_state` is set.
+/// Run `code` (after `preamble`) on `executor` with `sandbox`'s callbacks,
+/// handlers and limits, wrapping callbacks for replay when `replay_state` is set.
 #[tracing::instrument(
     name = "InProcessSession::execute",
-    skip(sandbox, executor, full_code, replay_state),
+    skip(sandbox, executor, code, preamble, replay_state),
     fields(
-        code_len = full_code.len(),
+        code_len = code.len(),
         execution_count = executor.execution_count(),
     )
 )]
 async fn run_code(
     sandbox: &Sandbox,
     executor: &mut SessionExecutor,
-    full_code: &str,
+    code: &str,
+    preamble: &str,
     replay_state: Option<Arc<Mutex<ReplayState>>>,
 ) -> Result<ExecuteResult, Error> {
     let start = Instant::now();
@@ -401,7 +401,8 @@ async fn run_code(
     // Execute using the session executor (keeps instance alive!)
     // Timeout is handled via epoch-based interruption inside the executor
     let mut execute_builder = executor
-        .execute(full_code)
+        .execute(code)
+        .with_preamble(preamble)
         .with_callbacks(&callbacks, callback_tx)
         .with_output_streaming(output_tx);
     if let Some(trace_tx) = trace_tx {
