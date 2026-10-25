@@ -1375,7 +1375,6 @@ impl SessionExecutor {
         self.store = Some(store);
         self.bindings = Some(bindings);
         self.execution_count = 0;
-        self.state_was_reset = false;
         self.execution_timeout = execution_timeout;
         self.fuel_limit = fuel_limit;
 
@@ -1617,7 +1616,6 @@ impl SessionExecutor {
             wasmtime_result.map_err(|e| Error::WasmEngine(format!("WASM restore error: {e}")))?;
 
         inner_result.map_err(Error::Snapshot)?;
-        self.state_was_reset = false;
 
         tracing::debug!("State snapshot restored");
 
@@ -1672,7 +1670,6 @@ impl SessionExecutor {
             result.map_err(|e| Error::WasmEngine(format!("WASM clear state error: {e}")))?;
 
         wasmtime_result.map_err(|e| Error::WasmEngine(format!("WASM clear state error: {e}")))?;
-        self.state_was_reset = false;
 
         tracing::debug!("State cleared");
 

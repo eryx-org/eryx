@@ -7,7 +7,10 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use eryx::{DynamicCallback, InProcessSession, NetConfig, RuntimeLibrary, Sandbox, Session};
+use eryx::{
+    DynamicCallback, Error, InProcessSession, NetConfig, ResourceLimits, RuntimeLibrary, Sandbox,
+    Session,
+};
 use tokio::io::AsyncWriteExt;
 
 /// A session built from a sandbox with networking can use the network.
@@ -125,4 +128,38 @@ async fn session_reports_state_reset_after_cancelled_execute() {
 
     let output = session.execute("pass").await.unwrap();
     assert!(!output.state_was_reset, "the reset is reported only once");
+}
+
+/// A rollback after a halted run doesn't swallow a reset that hasn't been
+/// reported yet.
+#[tokio::test]
+async fn rollback_keeps_an_unreported_state_reset() {
+    let hang = DynamicCallback::builder("hang", "Never returns", |_args| {
+        Box::pin(std::future::pending())
+    })
+    .build();
+    let sandbox = Sandbox::builder()
+        .with_embedded_runtime()
+        .with_callback(hang)
+        .with_resource_limits(
+            ResourceLimits::default().with_execution_timeout(Duration::from_millis(500)),
+        )
+        .build()
+        .unwrap();
+    let mut session = InProcessSession::new(&sandbox).await.unwrap();
+
+    let cancelled =
+        tokio::time::timeout(Duration::from_millis(200), session.execute("await hang()")).await;
+    assert!(cancelled.is_err(), "the call should still be running");
+
+    // Recovers the lost instance, then times out and is rolled back.
+    let outcome = session.execute_with_journal("while True: pass", None).await;
+    assert!(
+        matches!(outcome.result, Err(Error::Timeout(_))),
+        "{:?}",
+        outcome.result
+    );
+
+    let output = session.execute("pass").await.unwrap();
+    assert!(output.state_was_reset, "the reset was never reported");
 }
