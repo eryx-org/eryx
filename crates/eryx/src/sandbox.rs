@@ -2147,17 +2147,18 @@ impl SandboxBuilder<state::Has, state::Has> {
         #[cfg(not(feature = "native-extensions"))]
         let executor = self.build_executor_from_source()?;
 
-        // Determine stdlib path: explicit > embedded > auto-detect > none
+        // Determine stdlib path: explicit > embedded. A failure to extract the
+        // embedded stdlib is an error rather than a reason to go looking for a
+        // possibly mismatched one on disk.
         #[cfg(feature = "embedded")]
-        let stdlib_path = self
-            .python_stdlib_path
-            .clone()
-            .or_else(|| {
-                crate::embedded::EmbeddedResources::get()
-                    .ok()
-                    .map(|r| r.stdlib_path.clone())
-            })
-            .or_else(find_python_stdlib);
+        let stdlib_path = match self.python_stdlib_path.clone() {
+            Some(path) => Some(path),
+            None => Some(
+                crate::embedded::EmbeddedResources::get()?
+                    .stdlib_path
+                    .clone(),
+            ),
+        };
 
         #[cfg(not(feature = "embedded"))]
         let stdlib_path = self.python_stdlib_path.clone().or_else(find_python_stdlib);
