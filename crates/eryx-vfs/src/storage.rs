@@ -763,6 +763,12 @@ impl VfsStorage for InMemoryStorage {
 
         // Handle directory rename
         if state.directories.contains(&from) {
+            if from == "/" {
+                return Err(VfsError::PermissionDenied(
+                    "cannot rename root directory".to_string(),
+                ));
+            }
+
             // Check destination doesn't exist as file
             if state.files.contains_key(&to) {
                 return Err(VfsError::AlreadyExists(to));
@@ -771,6 +777,22 @@ impl VfsStorage for InMemoryStorage {
             // Rename directory and all contents
             let from_prefix = format!("{from}/");
             let to_prefix = format!("{to}/");
+
+            // A directory can't be moved inside itself: the subtree would be
+            // detached from the tree but keep its contents.
+            if to.starts_with(&from_prefix) {
+                return Err(VfsError::InvalidPath(format!(
+                    "cannot move {from} into its own subdirectory {to}"
+                )));
+            }
+
+            // An existing destination directory may only be replaced if empty.
+            if state.directories.contains(&to)
+                && (state.files.keys().any(|p| p.starts_with(&to_prefix))
+                    || state.directories.iter().any(|p| p.starts_with(&to_prefix)))
+            {
+                return Err(VfsError::DirectoryNotEmpty(to));
+            }
 
             // Rename files under the directory
             let files_to_rename: Vec<_> = state
@@ -931,6 +953,43 @@ mod tests {
         // Shrinking is always allowed.
         storage.set_size("/f", 0).await.unwrap();
         assert_eq!(storage.stat("/f").await.unwrap().size, 0);
+    }
+
+    #[tokio::test]
+    async fn rename_dir_into_own_subdirectory_is_refused() {
+        let storage = InMemoryStorage::new();
+        storage.mkdir("/a").await.unwrap();
+        storage.write("/a/f", b"x").await.unwrap();
+
+        let err = storage.rename("/a", "/a/b").await.unwrap_err();
+        assert!(matches!(err, VfsError::InvalidPath(_)), "{err:?}");
+        assert_eq!(storage.read("/a/f").await.unwrap(), b"x");
+    }
+
+    #[tokio::test]
+    async fn rename_dir_onto_dir_requires_empty_target() {
+        let storage = InMemoryStorage::new();
+        storage.mkdir("/a").await.unwrap();
+        storage.write("/a/f", b"from").await.unwrap();
+        storage.mkdir("/b").await.unwrap();
+        storage.write("/b/f", b"to").await.unwrap();
+
+        let err = storage.rename("/a", "/b").await.unwrap_err();
+        assert!(matches!(err, VfsError::DirectoryNotEmpty(_)), "{err:?}");
+        assert_eq!(storage.read("/b/f").await.unwrap(), b"to");
+
+        storage.delete("/b/f").await.unwrap();
+        storage.rename("/a", "/b").await.unwrap();
+        assert_eq!(storage.read("/b/f").await.unwrap(), b"from");
+        assert!(!storage.exists("/a").await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn rename_root_is_refused() {
+        let storage = InMemoryStorage::new();
+        storage.mkdir("/a").await.unwrap();
+        let err = storage.rename("/", "/a").await.unwrap_err();
+        assert!(matches!(err, VfsError::PermissionDenied(_)), "{err:?}");
     }
 
     #[tokio::test]
