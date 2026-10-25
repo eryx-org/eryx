@@ -79,16 +79,23 @@ use syn::{Attribute, FnArg, ItemFn, Pat, Type, parse_macro_input};
 ///     .build()?;
 /// ```
 #[proc_macro_attribute]
-pub fn callback(_attr: TokenStream, item: TokenStream) -> TokenStream {
+pub fn callback(attr: TokenStream, item: TokenStream) -> TokenStream {
     let input = parse_macro_input!(item as ItemFn);
 
-    match generate_callback(input) {
+    match generate_callback(attr.into(), input) {
         Ok(tokens) => tokens.into(),
         Err(err) => err.to_compile_error().into(),
     }
 }
 
-fn generate_callback(input: ItemFn) -> syn::Result<TokenStream2> {
+fn generate_callback(attr: TokenStream2, input: ItemFn) -> syn::Result<TokenStream2> {
+    if !attr.is_empty() {
+        return Err(syn::Error::new_spanned(
+            attr,
+            "#[callback] does not take any arguments",
+        ));
+    }
+
     // Validate: must be async
     if input.sig.asyncness.is_none() {
         return Err(syn::Error::new_spanned(
@@ -122,8 +129,8 @@ fn generate_callback(input: ItemFn) -> syn::Result<TokenStream2> {
     // Extract doc comment for description
     let description = extract_doc_comment(&input.attrs).unwrap_or_else(|| fn_name_str.clone());
 
-    // Extract parameters
-    let params: Vec<_> = input
+    // Extract parameters, each with the identifier it binds
+    let params = input
         .sig
         .inputs
         .iter()
@@ -134,7 +141,8 @@ fn generate_callback(input: ItemFn) -> syn::Result<TokenStream2> {
                 None
             }
         })
-        .collect();
+        .map(|pat_type| Ok((param_name(&pat_type.pat)?, &pat_type.ty)))
+        .collect::<syn::Result<Vec<_>>>()?;
 
     // Generate args struct fields and invoke arguments
     let (args_fields, invoke_args, has_params) = if params.is_empty() {
@@ -143,9 +151,7 @@ fn generate_callback(input: ItemFn) -> syn::Result<TokenStream2> {
     } else {
         let fields: Vec<_> = params
             .iter()
-            .map(|param| {
-                let name = &param.pat;
-                let ty = &param.ty;
+            .map(|(name, ty)| {
                 let is_option = is_option_type(ty);
 
                 if is_option {
@@ -163,10 +169,7 @@ fn generate_callback(input: ItemFn) -> syn::Result<TokenStream2> {
 
         let args: Vec<_> = params
             .iter()
-            .map(|param| {
-                let name = extract_param_name(&param.pat);
-                quote! { __args.#name }
-            })
+            .map(|(name, _)| quote! { __args.#name })
             .collect();
 
         (
@@ -190,11 +193,13 @@ fn generate_callback(input: ItemFn) -> syn::Result<TokenStream2> {
         impl_fn
     };
 
-    // Generate args struct (only if there are parameters)
+    // Generate args struct (only if there are parameters). It is the unit
+    // struct's `TypedCallback::Args`, so it needs at least the same visibility.
     let args_struct = if has_params {
         quote! {
+            #[doc(hidden)]
             #[derive(::serde::Deserialize, ::schemars::JsonSchema)]
-            struct #args_struct_name {
+            #visibility struct #args_struct_name {
                 #args_fields
             }
         }
@@ -290,11 +295,18 @@ fn is_option_type(ty: &Type) -> bool {
     false
 }
 
-/// Extract the identifier from a pattern (e.g., `message` from `message: String`)
-fn extract_param_name(pat: &Pat) -> &syn::Ident {
+/// Extract the identifier from a pattern (e.g., `message` from `message: String`
+/// or `mut message: String`). The identifier doubles as the args struct field
+/// and the JSON key, so anything else (`_`, tuples, `ref`, `x @ ..`) is rejected.
+fn param_name(pat: &Pat) -> syn::Result<&syn::Ident> {
     match pat {
-        Pat::Ident(pat_ident) => &pat_ident.ident,
-        _ => panic!("Expected identifier pattern in function parameter"),
+        Pat::Ident(pat_ident) if pat_ident.by_ref.is_none() && pat_ident.subpat.is_none() => {
+            Ok(&pat_ident.ident)
+        }
+        _ => Err(syn::Error::new_spanned(
+            pat,
+            "#[callback] parameters must be plain identifiers, like `name: Type`",
+        )),
     }
 }
 
@@ -309,4 +321,67 @@ fn to_pascal_case(s: &str) -> String {
             }
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use syn::parse_quote;
+
+    fn error(attr: TokenStream2, input: ItemFn) -> String {
+        match generate_callback(attr, input) {
+            Ok(_) => String::from("expanded without error"),
+            Err(err) => err.to_string(),
+        }
+    }
+
+    #[test]
+    fn rejects_arguments() {
+        let input = parse_quote!(
+            async fn f() -> Result<Value, CallbackError> {}
+        );
+        assert_eq!(
+            error(quote!(name = "g"), input),
+            "#[callback] does not take any arguments"
+        );
+    }
+
+    #[test]
+    fn rejects_non_identifier_params() {
+        let inputs: [ItemFn; 4] = [
+            parse_quote!(
+                async fn f(_: u32) -> Result<Value, CallbackError> {}
+            ),
+            parse_quote!(
+                async fn f((a, b): (u32, u32)) -> Result<Value, CallbackError> {}
+            ),
+            parse_quote!(
+                async fn f(ref a: u32) -> Result<Value, CallbackError> {}
+            ),
+            parse_quote!(
+                async fn f(a @ 0..=9: u32) -> Result<Value, CallbackError> {}
+            ),
+        ];
+        for input in inputs {
+            assert_eq!(
+                error(TokenStream2::new(), input),
+                "#[callback] parameters must be plain identifiers, like `name: Type`"
+            );
+        }
+    }
+
+    #[test]
+    fn mut_param_becomes_plain_field() {
+        let input = parse_quote!(
+            async fn f(mut a: u32) -> Result<Value, CallbackError> {}
+        );
+        let expanded = match generate_callback(TokenStream2::new(), input) {
+            Ok(tokens) => tokens.to_string(),
+            Err(err) => err.to_string(),
+        };
+        assert!(
+            expanded.contains("struct __F_Args { a : u32 }"),
+            "{expanded}"
+        );
+    }
 }
