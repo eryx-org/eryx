@@ -863,36 +863,19 @@ async fn execute_with_session(
             .instrument(tracing::Span::current()),
     );
 
-    // Compute preamble line count so trace events can be adjusted to user code lines.
-    let preamble_lines = {
-        let mut preamble = params.secrets_preamble.clone();
-        if params.vfs_storage.is_some() {
-            preamble.push_str(SYS_PATH_INJECT);
-        }
-        preamble.push_str(BUILTINS_INJECT);
-        preamble.chars().filter(|&c| c == '\n').count() as u32
-    };
-
     // Set up trace channel if tracing is enabled.
     let (trace_tx, mut trace_rx) = mpsc::unbounded_channel::<TraceRequest>();
     if params.enable_tracing {
         let trace_server_tx = server_tx.clone();
         tokio::spawn(async move {
             while let Some(req) = trace_rx.recv().await {
-                // Adjust line numbers to account for injected preamble code.
-                // Trace events from the preamble itself are suppressed.
-                let adjusted_line = req.lineno.saturating_sub(preamble_lines);
-                if adjusted_line == 0 && req.lineno > 0 {
-                    continue;
-                }
-
                 let (event_type, function, message, callback_name, duration_ms) =
                     parse_trace_event_json(&req.event_json);
 
                 let msg = ServerMessage {
                     message: Some(server_message::Message::TraceEvent(
                         crate::proto::eryx::v1::TraceEvent {
-                            lineno: adjusted_line,
+                            lineno: req.lineno,
                             event_type,
                             function,
                             message,
@@ -978,20 +961,19 @@ async fn execute_with_session(
         (None, None)
     };
 
-    // Prepend builtins injection to user code so callbacks are accessible from
-    // imported modules. Also prepend sys.path setup when supporting files are
-    // present — merged here to avoid a separate WASM execution cycle.
-    let full_code = if params.vfs_storage.is_some() {
+    // Run builtins injection before the user code so callbacks are accessible
+    // from imported modules. Also add sys.path setup when supporting files are
+    // present — merged here to avoid a separate WASM execution cycle. As a
+    // preamble, it doesn't shift the user code's line numbers.
+    let preamble = if params.vfs_storage.is_some() {
         format!(
-            "{}{SYS_PATH_INJECT}{BUILTINS_INJECT}{}",
-            params.secrets_preamble, params.code
+            "{}{SYS_PATH_INJECT}{BUILTINS_INJECT}",
+            params.secrets_preamble
         )
     } else {
-        format!(
-            "{}{BUILTINS_INJECT}{}",
-            params.secrets_preamble, params.code
-        )
+        format!("{}{BUILTINS_INJECT}", params.secrets_preamble)
     };
+    let full_code = eryx::with_preamble(&preamble, params.code);
     let mut builder = session
         .execute(&full_code)
         .with_callbacks(&callbacks_arc, callback_tx)
