@@ -161,7 +161,7 @@ impl<'a> InProcessSession<'a> {
     fn full_code(&mut self, code: &str) -> String {
         if !self.preamble_executed && !self.sandbox.preamble().is_empty() {
             self.preamble_executed = true;
-            format!("{}\n\n# User code\n{}", self.sandbox.preamble(), code)
+            crate::sandbox::with_preamble(self.sandbox.preamble(), code)
         } else {
             code.to_string()
         }

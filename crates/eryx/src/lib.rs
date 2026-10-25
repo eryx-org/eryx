@@ -120,7 +120,7 @@ pub use replay::{
 pub use sandbox::PrecompiledArtifact;
 pub use sandbox::{
     ExecuteResult, ExecuteStats, ExecutionHandle, ReplayOutcome, ResourceLimits, Sandbox,
-    SandboxBuilder, state,
+    SandboxBuilder, state, with_preamble,
 };
 pub use secrets::{
     FileScrubPolicy, OutputScrubPolicy, SecretConfig, generate_placeholder, scrub_placeholders,

@@ -165,6 +165,25 @@ impl std::fmt::Debug for Sandbox {
     }
 }
 
+/// Frame `code` with a `preamble` (setup such as libraries or secrets) that runs
+/// first, in the same namespace.
+///
+/// The runtime compiles the two separately, so tracebacks and trace events
+/// report line numbers in `code` as written, and the preamble's own lines are
+/// not traced. [`Sandbox`] and [`InProcessSession`](crate::InProcessSession)
+/// do this for their configured preamble; use it when passing code with your
+/// own preamble to a [`SessionExecutor`](crate::SessionExecutor).
+///
+/// The header must match the guest's `PREAMBLE_HEADER`.
+#[must_use]
+pub fn with_preamble(preamble: &str, code: &str) -> String {
+    if preamble.is_empty() {
+        code.to_string()
+    } else {
+        format!("#eryx-preamble:{}\n{preamble}{code}", preamble.len())
+    }
+}
+
 impl Sandbox {
     /// Create a sandbox builder.
     ///
@@ -276,12 +295,7 @@ impl Sandbox {
     ) -> Result<ExecuteResult, Error> {
         let start = Instant::now();
 
-        // Prepend preamble to user code if present
-        let full_code = if self.preamble.is_empty() {
-            code.to_string()
-        } else {
-            format!("{}\n\n# User code\n{}", self.preamble, code)
-        };
+        let full_code = with_preamble(&self.preamble, code);
 
         // Create channel for callback requests
         let (callback_tx, callback_rx) = mpsc::channel::<CallbackRequest>(32);
