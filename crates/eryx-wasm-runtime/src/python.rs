@@ -3348,8 +3348,11 @@ def _eryx_is_callback_obj(obj):
 # Take a snapshot of the keys first to avoid 'dictionary changed size during iteration'
 _eryx_keys = list(_eryx_user_globals.keys())
 
-# Build dict of serializable items
+# Build dict of serializable items. Names that can't be serialized are kept in
+# _eryx_snapshot_skipped (not printed: no execution's output is being captured
+# here, so a notice could only go to the host process's stderr).
 _eryx_state_dict = {}
+_eryx_snapshot_skipped = []
 for _k in _eryx_keys:
     if _k not in _eryx_exclude and not _k.startswith('_eryx_'):
         _v = _eryx_user_globals.get(_k)
@@ -3361,10 +3364,8 @@ for _k in _eryx_keys:
             _eryx_dill.dumps(_v)
             _eryx_state_dict[_k] = _v
         except Exception:
-            # Skip items dill can't serialize (modules, open handles, etc.).
-            # Silently: no execution's output is being captured here, so a
-            # notice could only go to the host process's stderr.
-            pass
+            # Skip items dill can't serialize (modules, open handles, etc.)
+            _eryx_snapshot_skipped.append(_k)
 
 # Serialize the filtered dict with dill
 _eryx_state_bytes = _eryx_dill.dumps(_eryx_state_dict)
