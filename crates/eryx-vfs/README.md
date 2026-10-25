@@ -74,8 +74,13 @@ let scrubbing_storage = ScrubbingStorage::new(
 
 - `VfsFileScrubPolicy::All` - Scrub all files (default)
 - `VfsFileScrubPolicy::None` - Disable scrubbing
-- `VfsFileScrubPolicy::Except(paths)` - Scrub all except specified paths (future)
-- `VfsFileScrubPolicy::Only(paths)` - Only scrub specified paths (future)
+- `VfsFileScrubPolicy::Except(patterns)` - Scrub all files except those matching a glob pattern (experimental)
+- `VfsFileScrubPolicy::Only(patterns)` - Only scrub files matching a glob pattern (experimental)
+
+Patterns match the normalized path: `*` matches within one path segment, `**`
+across segments (`/cache/**` is everything under `/cache`), and `?` one
+character. Under the path-based policies, renaming a file from an unscrubbed
+path to a scrubbed one scrubs it again, and renaming directories is refused.
 
 ## Testing
 

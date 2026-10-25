@@ -8,7 +8,7 @@ use std::collections::HashMap;
 
 use async_trait::async_trait;
 
-use crate::{DirEntry, Metadata, VfsResult, VfsStorage};
+use crate::{DirEntry, InMemoryStorage, Metadata, VfsError, VfsResult, VfsStorage};
 
 /// Configuration for a secret placeholder.
 #[derive(Clone, Debug)]
@@ -18,48 +18,77 @@ pub struct SecretConfig {
 }
 
 /// Policy for which files should be scrubbed.
+///
+/// `Except` and `Only` match the normalized path being written against glob
+/// patterns: `*` matches any run of characters other than `/`, `**` any run
+/// including `/` (so `/cache/**` matches everything under `/cache`, and
+/// `/a/**/b` also matches `/a/b`), and `?` one character other than `/`.
+/// A path that can't be normalized is always scrubbed.
+///
+/// Scrubbing happens at write time, so under these policies
+/// [`ScrubbingStorage`] re-scrubs a file renamed from an unscrubbed path to a
+/// scrubbed one, and refuses to rename directories.
 #[derive(Debug, Clone)]
 pub enum FileScrubPolicy {
     /// Scrub all files.
     All,
     /// Don't scrub any files.
     None,
-    /// Scrub all except specified paths (glob patterns supported).
-    ///
-    /// **Not yet implemented** - currently behaves the same as `All` (fail closed).
-    /// Do not use until glob matching is implemented.
+    /// Scrub all files except those matching any of these glob patterns.
     #[doc(hidden)]
     Except(Vec<String>),
-    /// Only scrub specified paths (glob patterns supported).
-    ///
-    /// **Not yet implemented** - currently behaves the same as `All` (fail closed).
-    /// Do not use until glob matching is implemented.
+    /// Only scrub files matching any of these glob patterns.
     #[doc(hidden)]
     Only(Vec<String>),
 }
 
 impl FileScrubPolicy {
     /// Check if a given path should be scrubbed according to this policy.
-    ///
-    /// Note: Glob matching is not yet implemented. Both `Except` and `Only`
-    /// policies currently fail closed (scrub everything) for security.
-    pub fn should_scrub(&self, _path: &str) -> bool {
-        match self {
-            Self::All => true,
-            Self::None => false,
-            Self::Except(_patterns) => {
-                // TODO: Implement glob matching
-                // Fail closed: scrub everything until glob matching is implemented
-                true
-            }
-            Self::Only(_patterns) => {
-                // TODO: Implement glob matching
-                // Fail closed: scrub everything until glob matching is implemented
-                // (Previously returned false which was an insecure fail-open default)
-                true
-            }
+    pub fn should_scrub(&self, path: &str) -> bool {
+        let patterns = match self {
+            Self::All => return true,
+            Self::None => return false,
+            Self::Except(patterns) | Self::Only(patterns) => patterns,
+        };
+        let Ok(path) = InMemoryStorage::normalize_path(path) else {
+            return true;
+        };
+        let matched = patterns.iter().any(|pattern| glob_match(pattern, &path));
+        matches!(self, Self::Only(_)) == matched
+    }
+
+    /// Whether which files get scrubbed depends on their path.
+    fn is_path_based(&self) -> bool {
+        matches!(self, Self::Except(_) | Self::Only(_))
+    }
+}
+
+/// Match `path` against a glob `pattern`; see [`FileScrubPolicy`] for the
+/// syntax.
+fn glob_match(pattern: &str, path: &str) -> bool {
+    let (p, s) = (pattern.as_bytes(), path.as_bytes());
+    // m[i][j]: whether p[i..] matches s[j..]. A table rather than
+    // backtracking, since the path is guest-controlled.
+    let mut m = vec![vec![false; s.len() + 1]; p.len() + 1];
+    m[p.len()][s.len()] = true;
+    for i in (0..p.len()).rev() {
+        // For `**`: whether the rest of the pattern matches some suffix of s[j..].
+        let mut rest_matches_suffix = false;
+        for j in (0..=s.len()).rev() {
+            let next = s.get(j);
+            m[i][j] = match p[i] {
+                b'*' if p.get(i + 1) == Some(&b'*') => {
+                    rest_matches_suffix |= m[i + 2][j];
+                    // `**/` may also match no directories at all.
+                    rest_matches_suffix || (p.get(i + 2) == Some(&b'/') && m[i + 3][j])
+                }
+                b'*' => m[i + 1][j] || (next.is_some_and(|&c| c != b'/') && m[i][j + 1]),
+                b'?' => next.is_some_and(|&c| c != b'/') && m[i + 1][j + 1],
+                c => next == Some(&c) && m[i + 1][j + 1],
+            };
         }
     }
+    m[0][0]
 }
 
 /// A VfsStorage wrapper that scrubs secret placeholders from file writes.
@@ -177,6 +206,20 @@ impl<S: VfsStorage> VfsStorage for ScrubbingStorage<S> {
     }
 
     async fn rename(&self, from: &str, to: &str) -> VfsResult<()> {
+        if self.policy.is_path_based() && !self.secrets.is_empty() {
+            // A rename could carry unscrubbed contents to a scrubbed path; for
+            // a directory that means checking everything beneath it.
+            if self.inner.stat(from).await?.is_dir {
+                return Err(VfsError::PermissionDenied(format!(
+                    "renaming directories is not supported with path-based file scrubbing: {from}"
+                )));
+            }
+            if !self.policy.should_scrub(from) && self.policy.should_scrub(to) {
+                let data = self.inner.read(from).await?;
+                self.write(to, &data).await?;
+                return self.inner.delete(from).await;
+            }
+        }
         self.inner.rename(from, to).await
     }
 
@@ -319,108 +362,121 @@ mod tests {
         assert_eq!(result, b"Hello REPLACEMENT World REPLACEMENT!");
     }
 
-    /// Test that the hidden FileScrubPolicy::Only fails closed (scrubs everything).
-    /// This is a security-critical test ensuring defense in depth - if someone uses
-    /// the hidden variant, it must still scrub rather than leak secrets.
-    #[tokio::test]
-    async fn test_policy_only_fails_closed() {
-        let storage = InMemoryStorage::new();
-        let mut secrets = HashMap::new();
-        secrets.insert(
+    fn secrets() -> HashMap<String, SecretConfig> {
+        HashMap::from([(
             "KEY".to_string(),
             SecretConfig {
                 placeholder: "PLACEHOLDER_SECRET".to_string(),
             },
-        );
-
-        // FileScrubPolicy::Only should scrub ALL files until glob matching is implemented
-        // (fail closed for security)
-        let scrubbing = ScrubbingStorage::new(
-            storage,
-            secrets,
-            FileScrubPolicy::Only(vec!["/allowed/*".to_string()]),
-        );
-
-        // Write to a path that would NOT match the "only" pattern
-        // (using root path to avoid needing to create directories)
-        scrubbing
-            .write("/unmatched.txt", b"Secret: PLACEHOLDER_SECRET")
-            .await
-            .unwrap();
-
-        // Should still be scrubbed because we fail closed
-        let content = scrubbing.read("/unmatched.txt").await.unwrap();
-        let text = String::from_utf8(content).unwrap();
-        assert_eq!(
-            text, "Secret: [REDACTED]",
-            "FileScrubPolicy::Only must fail closed and scrub all files until glob matching is implemented"
-        );
+        )])
     }
 
-    /// Test that the hidden FileScrubPolicy::Except also fails closed.
-    /// Defense in depth - if someone uses the hidden variant, it must still scrub.
-    #[tokio::test]
-    async fn test_policy_except_fails_closed() {
-        let storage = InMemoryStorage::new();
-        let mut secrets = HashMap::new();
-        secrets.insert(
-            "KEY".to_string(),
-            SecretConfig {
-                placeholder: "PLACEHOLDER_SECRET".to_string(),
-            },
-        );
-
-        // FileScrubPolicy::Except should scrub ALL files until glob matching is implemented
-        let scrubbing = ScrubbingStorage::new(
-            storage,
-            secrets,
-            FileScrubPolicy::Except(vec!["/excluded/*".to_string()]),
-        );
-
-        // Write to a path that would match the "except" pattern (should be excluded)
-        // (using root path to avoid needing to create directories)
-        scrubbing
-            .write("/excluded.txt", b"Secret: PLACEHOLDER_SECRET")
-            .await
-            .unwrap();
-
-        // Should still be scrubbed because we fail closed
-        let content = scrubbing.read("/excluded.txt").await.unwrap();
-        let text = String::from_utf8(content).unwrap();
-        assert_eq!(
-            text, "Secret: [REDACTED]",
-            "FileScrubPolicy::Except must fail closed and scrub all files until glob matching is implemented"
-        );
+    async fn written(scrubbing: &ScrubbingStorage<InMemoryStorage>, path: &str) -> String {
+        scrubbing.write(path, b"PLACEHOLDER_SECRET").await.unwrap();
+        String::from_utf8(scrubbing.read(path).await.unwrap()).unwrap()
     }
 
-    /// Test that should_scrub correctly returns true for all policies except None.
-    /// Hidden variants (Only, Except) must fail closed for security.
+    #[test]
+    fn test_glob_match() {
+        assert!(glob_match("/a/*", "/a/b"));
+        assert!(!glob_match("/a/*", "/a/b/c"));
+        assert!(glob_match("/a/**", "/a/b/c"));
+        assert!(glob_match("/a/**/c", "/a/c"));
+        assert!(glob_match("/a/**/c", "/a/x/y/c"));
+        assert!(!glob_match("/a/**/c", "/a/x/yc"));
+        assert!(glob_match("/a/*.log", "/a/run.log"));
+        assert!(!glob_match("/a/*.log", "/a/run.txt"));
+        assert!(glob_match("/a/?.txt", "/a/b.txt"));
+        assert!(!glob_match("/a/?.txt", "/a//.txt"));
+        assert!(!glob_match("/a/b", "/a/bc"));
+        assert!(glob_match("**", "/anything/at/all"));
+    }
+
     #[test]
     fn test_should_scrub_policy_behavior() {
-        // All: always scrub
         assert!(FileScrubPolicy::All.should_scrub("/any/path"));
-
-        // None: never scrub
         assert!(!FileScrubPolicy::None.should_scrub("/any/path"));
 
-        // Only: fail closed (scrub everything until glob implemented)
-        assert!(
-            FileScrubPolicy::Only(vec!["/specific/*".to_string()]).should_scrub("/other/path"),
-            "Only policy must fail closed"
-        );
-        assert!(
-            FileScrubPolicy::Only(vec!["/specific/*".to_string()]).should_scrub("/specific/file"),
-            "Only policy must fail closed"
+        let only = FileScrubPolicy::Only(vec!["/out/**".to_string()]);
+        assert!(only.should_scrub("/out/f"));
+        assert!(only.should_scrub("/out/sub/f"));
+        assert!(!only.should_scrub("/tmp/f"));
+
+        let except = FileScrubPolicy::Except(vec!["/cache/*".to_string()]);
+        assert!(!except.should_scrub("/cache/f"));
+        assert!(except.should_scrub("/cache/sub/f"));
+        assert!(except.should_scrub("/data/f"));
+    }
+
+    /// Patterns match the normalized path, so `.`/`..` can't dodge them, and
+    /// a path that can't be normalized is scrubbed.
+    #[test]
+    fn test_policy_matches_normalized_path() {
+        let only = FileScrubPolicy::Only(vec!["/out/*".to_string()]);
+        assert!(only.should_scrub("/out/./f"));
+        assert!(only.should_scrub("/tmp/../out/f"));
+        assert!(only.should_scrub("relative"));
+
+        let except = FileScrubPolicy::Except(vec!["/cache/*".to_string()]);
+        assert!(except.should_scrub("/cache/../f"));
+        assert!(!except.should_scrub("/cache/./f"));
+        assert!(except.should_scrub("/../cache/f"));
+    }
+
+    #[tokio::test]
+    async fn test_policy_only() {
+        let storage = InMemoryStorage::new();
+        storage.mkdir("/out").await.unwrap();
+        let scrubbing = ScrubbingStorage::new(
+            storage,
+            secrets(),
+            FileScrubPolicy::Only(vec!["/out/*".to_string()]),
         );
 
-        // Except: fail closed (scrub everything until glob implemented)
-        assert!(
-            FileScrubPolicy::Except(vec!["/excluded/*".to_string()]).should_scrub("/other/path"),
-            "Except policy must fail closed"
+        assert_eq!(written(&scrubbing, "/out/f").await, "[REDACTED]");
+        assert_eq!(written(&scrubbing, "/f").await, "PLACEHOLDER_SECRET");
+    }
+
+    #[tokio::test]
+    async fn test_policy_except() {
+        let storage = InMemoryStorage::new();
+        storage.mkdir("/cache").await.unwrap();
+        let scrubbing = ScrubbingStorage::new(
+            storage,
+            secrets(),
+            FileScrubPolicy::Except(vec!["/cache/*".to_string()]),
         );
-        assert!(
-            FileScrubPolicy::Except(vec!["/excluded/*".to_string()]).should_scrub("/excluded/file"),
-            "Except policy must fail closed"
+
+        assert_eq!(written(&scrubbing, "/cache/f").await, "PLACEHOLDER_SECRET");
+        assert_eq!(written(&scrubbing, "/f").await, "[REDACTED]");
+    }
+
+    /// Writing under an unscrubbed path and renaming into a scrubbed one must
+    /// still end up scrubbed.
+    #[tokio::test]
+    async fn test_path_policy_rename() {
+        let storage = InMemoryStorage::new();
+        storage.mkdir("/cache").await.unwrap();
+        storage.mkdir("/cache/dir").await.unwrap();
+        let scrubbing = ScrubbingStorage::new(
+            storage,
+            secrets(),
+            FileScrubPolicy::Except(vec!["/cache/**".to_string()]),
         );
+
+        written(&scrubbing, "/cache/f").await;
+        scrubbing.rename("/cache/f", "/f").await.unwrap();
+        assert_eq!(scrubbing.read("/f").await.unwrap(), b"[REDACTED]");
+        assert!(!scrubbing.exists("/cache/f").await.unwrap());
+
+        written(&scrubbing, "/cache/g").await;
+        scrubbing.rename("/cache/g", "/cache/h").await.unwrap();
+        assert_eq!(
+            scrubbing.read("/cache/h").await.unwrap(),
+            b"PLACEHOLDER_SECRET"
+        );
+
+        let err = scrubbing.rename("/cache/dir", "/dir").await.unwrap_err();
+        assert!(matches!(err, VfsError::PermissionDenied(_)), "{err:?}");
     }
 }
