@@ -3210,6 +3210,8 @@ unsafe fn set_python_variable_bytes(name: &str, data: &[u8]) -> Result<(), Strin
 /// - Imported modules (they remain in the session, but aren't serialized)
 /// - Callback infrastructure (re-created on each session)
 /// - Generator/coroutine objects (live iterators with frame state)
+///
+/// Variables that cannot be serialized are left out without notice.
 pub fn snapshot_state() -> Result<Vec<u8>, String> {
     if !is_python_initialized() {
         return Err("Python not initialized".to_string());
@@ -3250,7 +3252,6 @@ _eryx_keys = list(_eryx_user_globals.keys())
 
 # Build dict of serializable items
 _eryx_state_dict = {}
-_eryx_skipped = []
 for _k in _eryx_keys:
     if _k not in _eryx_exclude and not _k.startswith('_eryx_'):
         _v = _eryx_user_globals.get(_k)
@@ -3262,20 +3263,16 @@ for _k in _eryx_keys:
             _eryx_dill.dumps(_v)
             _eryx_state_dict[_k] = _v
         except Exception:
-            # Skip items dill can't serialize (modules, open handles, etc.)
-            _eryx_skipped.append(_k)
-
-if _eryx_skipped:
-    import sys as _eryx_sys
-    print('eryx: snapshot skipped variables that cannot be serialized: '
-          + ', '.join(_eryx_skipped), file=_eryx_sys.__stderr__)
-    del _eryx_sys
+            # Skip items dill can't serialize (modules, open handles, etc.).
+            # Silently: no execution's output is being captured here, so a
+            # notice could only go to the host process's stderr.
+            pass
 
 # Serialize the filtered dict with dill
 _eryx_state_bytes = _eryx_dill.dumps(_eryx_state_dict)
 
 # Clean up local helpers
-del _eryx_exclude, _eryx_is_callback_obj, _eryx_keys, _eryx_state_dict, _eryx_skipped, _eryx_dill
+del _eryx_exclude, _eryx_is_callback_obj, _eryx_keys, _eryx_state_dict, _eryx_dill
 ";
 
         run_in_main(pickle_code).map_err(|err| format!("Failed to snapshot state: {err}"))?;
