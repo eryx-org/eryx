@@ -3,13 +3,16 @@
 //! This module provides InputStream and OutputStream implementations for
 //! reading and writing files through the hybrid VFS.
 
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
+use std::task::{Context, Poll, Waker};
 
 use bytes::Bytes;
-use tokio::sync::RwLock;
 use wasmtime_wasi_io::poll::Pollable;
 use wasmtime_wasi_io::streams::{InputStream, OutputStream, StreamError, StreamResult};
 
+use crate::error::{VfsError, VfsResult};
 use crate::file_io::{read_at, write_at};
 use crate::storage::VfsStorage;
 
@@ -189,6 +192,28 @@ impl OutputStream for RealFileOutputStream {
 // VFS Stream Implementations
 // ============================================================================
 
+/// A storage operation that has been started but may not have finished.
+///
+/// VFS storage is async while the non-blocking stream methods are sync, so
+/// those methods poll the operation once and, if it can't finish straight
+/// away (e.g. the storage lock is contended), park it here for
+/// [`Pollable::ready`] or the next stream call to drive to completion.
+type Pending<T> = Pin<Box<dyn Future<Output = VfsResult<T>> + Send>>;
+
+/// Poll `fut` once without a real waker.
+///
+/// Used from sync stream methods; whoever later awaits the future registers
+/// a proper waker.
+fn poll_now<T>(fut: &mut Pending<T>) -> Poll<VfsResult<T>> {
+    fut.as_mut().poll(&mut Context::from_waker(Waker::noop()))
+}
+
+/// Wrap a storage error so `filesystem-error-code` can map it back to an
+/// error code (e.g. `ENOSPC` for a full filesystem).
+fn stream_error(err: VfsError) -> StreamError {
+    StreamError::LastOperationFailed(wasmtime::Error::new(err))
+}
+
 /// An input stream for reading from a VFS file.
 pub struct VfsInputStream<S: VfsStorage + Clone + 'static> {
     /// The VFS storage backend.
@@ -197,6 +222,8 @@ pub struct VfsInputStream<S: VfsStorage + Clone + 'static> {
     path: String,
     /// Current read position.
     position: u64,
+    /// A read started by [`InputStream::read`] that hasn't finished yet.
+    pending: Option<Pending<Vec<u8>>>,
     /// Whether the stream has been closed.
     closed: bool,
 }
@@ -208,55 +235,40 @@ impl<S: VfsStorage + Clone + 'static> VfsInputStream<S> {
             storage,
             path,
             position: offset,
+            pending: None,
             closed: false,
         }
     }
 
-    /// Read from VFS storage synchronously.
-    fn read_sync(&mut self, size: usize) -> StreamResult<Bytes> {
-        if size == 0 {
-            return Ok(Bytes::new());
-        }
-        let size = size.min(MAX_READ_CHUNK);
-
+    fn start_read(&self, size: usize) -> Pending<Vec<u8>> {
         let storage = self.storage.clone();
         let path = self.path.clone();
         let position = self.position;
+        let size = size.min(MAX_READ_CHUNK) as u64;
+        Box::pin(async move { storage.read_at(&path, position, size).await })
+    }
 
-        // Use a thread to run the async operation to avoid blocking the current runtime
-        let result = std::thread::spawn(move || {
-            let rt = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .map_err(|e| format!("Failed to create runtime: {e}"))?;
-
-            rt.block_on(async { storage.read_at(&path, position, size as u64).await })
-                .map_err(|e| format!("VFS read failed: {:?}", e))
-        })
-        .join()
-        .map_err(|_| StreamError::trap("Thread panicked during VFS read"))?;
-
-        match result {
-            Ok(data) => {
-                if data.is_empty() {
-                    self.closed = true;
-                    Err(StreamError::Closed)
-                } else {
-                    self.position += data.len() as u64;
-                    Ok(Bytes::from(data))
-                }
-            }
-            Err(e) => Err(StreamError::LastOperationFailed(wasmtime::Error::msg(
-                e.to_string(),
-            ))),
+    /// Turn the outcome of a finished read into the stream result.
+    fn finish_read(&mut self, result: VfsResult<Vec<u8>>) -> StreamResult<Bytes> {
+        let data = result.map_err(stream_error)?;
+        if data.is_empty() {
+            self.closed = true;
+            return Err(StreamError::Closed);
         }
+        self.position += data.len() as u64;
+        Ok(Bytes::from(data))
     }
 }
 
 #[async_trait::async_trait]
 impl<S: VfsStorage + Clone + 'static> Pollable for VfsInputStream<S> {
     async fn ready(&mut self) {
-        // VFS reads are always "ready"
+        // Readiness is the parked read (if any) finishing; its result is
+        // picked up by the next `read`.
+        if let Some(pending) = self.pending.as_mut() {
+            let result = pending.await;
+            self.pending = Some(Box::pin(std::future::ready(result)));
+        }
     }
 }
 
@@ -266,28 +278,57 @@ impl<S: VfsStorage + Clone + 'static> InputStream for VfsInputStream<S> {
         if self.closed {
             return Err(StreamError::Closed);
         }
-        self.read_sync(size)
+        if size == 0 {
+            return Ok(Bytes::new());
+        }
+        let mut pending = match self.pending.take() {
+            Some(pending) => pending,
+            None => self.start_read(size),
+        };
+        match poll_now(&mut pending) {
+            Poll::Ready(result) => self.finish_read(result),
+            Poll::Pending => {
+                // Nothing available yet: the guest waits on `ready` and retries.
+                self.pending = Some(pending);
+                Ok(Bytes::new())
+            }
+        }
     }
 
     async fn blocking_read(&mut self, size: usize) -> StreamResult<Bytes> {
-        self.read(size)
+        if self.closed {
+            return Err(StreamError::Closed);
+        }
+        if size == 0 {
+            return Ok(Bytes::new());
+        }
+        let pending = match self.pending.take() {
+            Some(pending) => pending,
+            None => self.start_read(size),
+        };
+        let result = pending.await;
+        self.finish_read(result)
     }
 }
 
 /// An output stream for writing to a VFS file.
 ///
-/// This stream buffers writes and flushes them to VFS storage.
-/// Since VFS operations are async but stream writes are sync, we use
-/// a buffer and flush strategy.
+/// Every write goes straight to storage, so a failure (such as the
+/// filesystem being full) is reported to the guest by the write or flush that
+/// caused it rather than being lost.
 pub struct VfsOutputStream<S: VfsStorage + Clone + 'static> {
     /// The VFS storage backend.
     storage: S,
     /// Path to the file.
     path: String,
-    /// Write buffer.
-    buffer: Arc<RwLock<Vec<u8>>>,
     /// Current write position in the file, or None for append mode.
     position: Option<u64>,
+    /// A write started by [`OutputStream::write`] that hasn't finished yet;
+    /// resolves to the position just past the written bytes.
+    pending: Option<Pending<u64>>,
+    /// Failure of a write that finished after `write` returned, reported by
+    /// the next stream call.
+    error: Option<VfsError>,
     /// Whether the stream has been closed.
     closed: bool,
 }
@@ -295,161 +336,123 @@ pub struct VfsOutputStream<S: VfsStorage + Clone + 'static> {
 impl<S: VfsStorage + Clone + 'static> VfsOutputStream<S> {
     /// Create a new VFS output stream for writing at a specific offset.
     pub fn write_at(storage: S, path: String, offset: u64) -> Self {
-        Self {
-            storage,
-            path,
-            buffer: Arc::new(RwLock::new(Vec::new())),
-            position: Some(offset),
-            closed: false,
-        }
+        Self::new(storage, path, Some(offset))
     }
 
     /// Create a new VFS output stream for appending to a file.
     pub fn append(storage: S, path: String) -> Self {
+        Self::new(storage, path, None)
+    }
+
+    fn new(storage: S, path: String, position: Option<u64>) -> Self {
         Self {
             storage,
             path,
-            buffer: Arc::new(RwLock::new(Vec::new())),
-            position: None, // None indicates append mode
+            position,
+            pending: None,
+            error: None,
             closed: false,
         }
     }
 
-    /// Flush the buffer to VFS storage synchronously.
-    ///
-    /// This is tricky because VFS storage is async but this method is sync.
-    /// We spawn a thread with its own tokio runtime to avoid blocking issues.
-    fn flush_sync(&mut self) -> StreamResult<()> {
-        // Try to get the buffer without blocking
-        let buffer_data = if let Ok(mut buf) = self.buffer.try_write() {
-            std::mem::take(&mut *buf)
-        } else {
-            // If we can't get the lock, try with blocking
-            let mut buf = self.buffer.blocking_write();
-            std::mem::take(&mut *buf)
-        };
-
-        if buffer_data.is_empty() {
-            return Ok(());
-        }
-
-        // Write to VFS storage
-        // We spawn a blocking thread to handle the async operation
+    fn start_write(&self, bytes: Bytes) -> Pending<u64> {
         let storage = self.storage.clone();
         let path = self.path.clone();
-
         let position = self.position;
-        let data_len = buffer_data.len() as u64;
-
-        // Use a thread to run the async operation to avoid blocking the current runtime
-        let result = std::thread::spawn(move || {
-            let rt = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .map_err(|e| format!("Failed to create runtime: {e}"))?;
-
-            rt.block_on(async {
-                // For append mode (position is None), get file size first
-                let write_position = match position {
-                    Some(pos) => pos,
-                    None => {
-                        // Get current file size to append at the end
-                        match storage.stat(&path).await {
-                            Ok(meta) => meta.size,
-                            // If file doesn't exist, start at 0
-                            Err(_) => 0,
-                        }
-                    }
-                };
-                storage
-                    .write_at(&path, write_position, &buffer_data)
-                    .await
-                    .map(|()| write_position)
-            })
-            .map_err(|e| format!("VFS write failed: {:?}", e))
+        Box::pin(async move {
+            let position = match position {
+                Some(pos) => pos,
+                // Append mode: write at the current end of the file, or at 0
+                // if it doesn't exist yet.
+                None => storage.stat(&path).await.map_or(0, |meta| meta.size),
+            };
+            storage.write_at(&path, position, &bytes).await?;
+            Ok(position + bytes.len() as u64)
         })
-        .join()
-        .map_err(|_| StreamError::trap("Thread panicked during VFS write"))?;
+    }
 
-        match result {
-            Ok(write_position) => {
-                // Update position for next write (converts append to positional after first write)
-                self.position = Some(write_position + data_len);
-                Ok(())
-            }
-            Err(e) => Err(StreamError::LastOperationFailed(wasmtime::Error::msg(
-                e.to_string(),
-            ))),
+    /// Record the outcome of a finished write.
+    fn finish_write(&mut self, result: VfsResult<u64>) -> StreamResult<()> {
+        // Appends become positional after the first write.
+        self.position = Some(result.map_err(stream_error)?);
+        Ok(())
+    }
+
+    /// Report the result of earlier writes; `Ok(false)` if one is still running.
+    fn check_previous(&mut self) -> StreamResult<bool> {
+        if self.closed {
+            return Err(StreamError::Closed);
         }
+        if let Some(err) = self.error.take() {
+            return Err(stream_error(err));
+        }
+        if let Some(mut pending) = self.pending.take() {
+            match poll_now(&mut pending) {
+                Poll::Ready(result) => self.finish_write(result)?,
+                Poll::Pending => {
+                    self.pending = Some(pending);
+                    return Ok(false);
+                }
+            }
+        }
+        Ok(true)
     }
 }
 
 #[async_trait::async_trait]
 impl<S: VfsStorage + Clone + 'static> Pollable for VfsOutputStream<S> {
     async fn ready(&mut self) {
-        // VFS writes are always "ready" since we buffer
+        if let Some(pending) = self.pending.take() {
+            match pending.await {
+                Ok(position) => self.position = Some(position),
+                Err(err) => self.error = Some(err),
+            }
+        }
     }
 }
 
 #[async_trait::async_trait]
 impl<S: VfsStorage + Clone + 'static> OutputStream for VfsOutputStream<S> {
     fn write(&mut self, bytes: Bytes) -> StreamResult<()> {
-        if self.closed {
-            return Err(StreamError::Closed);
+        if !self.check_previous()? {
+            return Err(StreamError::trap(
+                "write not permitted: previous write still in progress",
+            ));
         }
-
         if bytes.is_empty() {
             return Ok(());
         }
-
-        // Add to buffer
-        if let Ok(mut buf) = self.buffer.try_write() {
-            buf.extend_from_slice(&bytes);
-        } else {
-            let mut buf = self.buffer.blocking_write();
-            buf.extend_from_slice(&bytes);
+        let mut pending = self.start_write(bytes);
+        match poll_now(&mut pending) {
+            Poll::Ready(result) => self.finish_write(result),
+            Poll::Pending => {
+                self.pending = Some(pending);
+                Ok(())
+            }
         }
-
-        // Flush if buffer is large enough
-        let buf_len = if let Ok(buf) = self.buffer.try_read() {
-            buf.len()
-        } else {
-            let buf = self.buffer.blocking_read();
-            buf.len()
-        };
-
-        if buf_len >= 64 * 1024 {
-            self.flush_sync()?;
-        }
-
-        Ok(())
     }
 
     fn flush(&mut self) -> StreamResult<()> {
-        if self.closed {
-            return Err(StreamError::Closed);
-        }
-        self.flush_sync()
+        // Nothing is buffered; a still-running write completes via `ready`.
+        self.check_previous().map(|_| ())
     }
 
     fn check_write(&mut self) -> StreamResult<usize> {
-        if self.closed {
-            return Err(StreamError::Closed);
+        if self.check_previous()? {
+            Ok(64 * 1024) // 64KB
+        } else {
+            Ok(0)
         }
-        // We can always write - return a reasonable buffer size
-        Ok(64 * 1024) // 64KB
     }
 
     async fn blocking_write_and_flush(&mut self, bytes: Bytes) -> StreamResult<()> {
-        self.write(bytes)?;
-        self.flush()
-    }
-}
-
-impl<S: VfsStorage + Clone + 'static> Drop for VfsOutputStream<S> {
-    fn drop(&mut self) {
-        // Try to flush any remaining buffered data
-        let _ = self.flush_sync();
+        self.ready().await;
+        self.check_previous()?;
+        if bytes.is_empty() {
+            return Ok(());
+        }
+        let result = self.start_write(bytes).await;
+        self.finish_write(result)
     }
 }
 
@@ -603,19 +606,42 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_vfs_output_stream_drop_flushes() {
+    async fn test_vfs_output_stream_write_lands_without_flush() {
         let storage = ArcStorage::new(Arc::new(InMemoryStorage::new()));
         storage.write("/test.txt", b"").await.unwrap();
 
         {
             let mut stream = VfsOutputStream::write_at(storage.clone(), "/test.txt".to_string(), 0);
             stream.write(Bytes::from("hello")).unwrap();
-            // Don't explicitly flush - drop should flush
         }
 
-        // Verify content was flushed on drop
         let content = storage.read("/test.txt").await.unwrap();
         assert_eq!(&content, b"hello");
+    }
+
+    /// A full filesystem must fail the write that overflows it, with an error
+    /// `filesystem-error-code` can map to `ENOSPC`, instead of being dropped.
+    #[tokio::test]
+    async fn test_vfs_output_stream_reports_quota_error() {
+        let storage = ArcStorage::new(Arc::new(InMemoryStorage::with_max_bytes(4)));
+        storage.write("/test.txt", b"").await.unwrap();
+        let mut stream = VfsOutputStream::write_at(storage.clone(), "/test.txt".to_string(), 0);
+
+        let err = stream
+            .blocking_write_and_flush(Bytes::from("too long"))
+            .await
+            .unwrap_err();
+        let StreamError::LastOperationFailed(err) = err else {
+            panic!("expected LastOperationFailed, got {err:?}");
+        };
+        assert!(matches!(
+            err.downcast_ref::<VfsError>(),
+            Some(VfsError::QuotaExceeded(_))
+        ));
+        assert!(matches!(
+            stream.write(Bytes::from("12345")),
+            Err(StreamError::LastOperationFailed(_))
+        ));
     }
 
     #[tokio::test]
@@ -631,5 +657,24 @@ mod tests {
         // Subsequent reads should return Closed
         let err = input.read(100).unwrap_err();
         assert!(matches!(err, StreamError::Closed));
+    }
+
+    /// A stream write that can't take the storage lock straight away finishes
+    /// later; it must not be lost or reported as done early.
+    #[tokio::test]
+    async fn stream_write_completes_after_contention() {
+        let inner = Arc::new(InMemoryStorage::new());
+        inner.write("/f", b"").await.unwrap();
+        let storage = ArcStorage::new(inner.clone());
+        let mut stream = VfsOutputStream::write_at(storage, "/f".to_string(), 0);
+
+        let guard = inner.hold_lock().await;
+        stream.write(Bytes::from_static(b"hello")).unwrap();
+        assert_eq!(stream.check_write().unwrap(), 0, "write still in progress");
+        drop(guard);
+
+        stream.ready().await;
+        assert!(stream.check_write().unwrap() > 0);
+        assert_eq!(inner.read("/f").await.unwrap(), b"hello");
     }
 }
