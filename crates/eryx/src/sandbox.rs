@@ -141,8 +141,6 @@ pub struct Sandbox {
     /// When set, this replaces the default scrubbing storage in `execute()`.
     #[cfg(feature = "vfs")]
     vfs_storage: Option<std::sync::Arc<dyn eryx_vfs::VfsStorage>>,
-    /// Extracted packages (kept alive to prevent temp directory cleanup).
-    _packages: Vec<crate::package::ExtractedPackage>,
 }
 
 impl std::fmt::Debug for Sandbox {
@@ -2402,8 +2400,11 @@ impl SandboxBuilder<state::Has, state::Has> {
             .into_iter()
             .fold(executor, |exec, path| exec.with_site_packages(&path));
 
-        // Apply the configured result-capture variable name.
-        let executor = executor.with_result_variable(self.result_variable);
+        // Apply the configured result-capture variable name, and hand the
+        // executor the packages whose directories it mounts.
+        let executor = executor
+            .with_result_variable(self.result_variable)
+            .with_packages(self.packages);
 
         Ok(Sandbox {
             executor: Arc::new(executor),
@@ -2424,7 +2425,6 @@ impl SandboxBuilder<state::Has, state::Has> {
             volumes: self.volumes,
             #[cfg(feature = "vfs")]
             vfs_storage: None,
-            _packages: self.packages,
         })
     }
 

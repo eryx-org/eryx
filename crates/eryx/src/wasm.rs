@@ -1637,6 +1637,10 @@ pub struct PythonExecutor {
     /// Name of the user variable captured as the structured result after each
     /// execution. Defaults to `"result"`. Configured via [`Self::with_result_variable`].
     result_variable: String,
+    /// Extracted packages backing entries in `python_site_packages_paths`.
+    /// Held here so their temp directories live as long as the executor,
+    /// including when it outlives the `Sandbox` (e.g. in a session).
+    packages: Vec<crate::package::ExtractedPackage>,
 }
 
 impl std::fmt::Debug for PythonExecutor {
@@ -1723,6 +1727,13 @@ impl PythonExecutor {
         self
     }
 
+    /// Keep extracted packages alive for as long as this executor exists.
+    #[must_use]
+    pub(crate) fn with_packages(mut self, packages: Vec<crate::package::ExtractedPackage>) -> Self {
+        self.packages = packages;
+        self
+    }
+
     /// Set the name of the user variable captured as the structured result.
     ///
     /// After each `execute()`, the variable with this name is read from the user
@@ -1787,6 +1798,7 @@ impl PythonExecutor {
             python_stdlib_path: None,
             python_site_packages_paths: Vec::new(),
             result_variable: "result".to_string(),
+            packages: Vec::new(),
         })
     }
 
@@ -1815,6 +1827,7 @@ impl PythonExecutor {
             python_stdlib_path: None,
             python_site_packages_paths: Vec::new(),
             result_variable: "result".to_string(),
+            packages: Vec::new(),
         })
     }
 
@@ -1862,6 +1875,7 @@ impl PythonExecutor {
                 python_stdlib_path: None,
                 python_site_packages_paths: Vec::new(),
                 result_variable: "result".to_string(),
+                packages: Vec::new(),
             })
         }
     }
@@ -1917,6 +1931,7 @@ impl PythonExecutor {
                 python_stdlib_path: None,
                 python_site_packages_paths: Vec::new(),
                 result_variable: "result".to_string(),
+                packages: Vec::new(),
             });
         }
 
@@ -1939,6 +1954,7 @@ impl PythonExecutor {
             python_stdlib_path: None,
             python_site_packages_paths: Vec::new(),
             result_variable: "result".to_string(),
+            packages: Vec::new(),
         })
     }
 
@@ -1987,6 +2003,7 @@ impl PythonExecutor {
                 python_stdlib_path: None,
                 python_site_packages_paths: Vec::new(),
                 result_variable: "result".to_string(),
+                packages: Vec::new(),
             })
         }
     }
@@ -2042,6 +2059,7 @@ impl PythonExecutor {
                 python_stdlib_path: None,
                 python_site_packages_paths: Vec::new(),
                 result_variable: "result".to_string(),
+                packages: Vec::new(),
             });
         }
 
@@ -2064,6 +2082,7 @@ impl PythonExecutor {
             python_stdlib_path: None,
             python_site_packages_paths: Vec::new(),
             result_variable: "result".to_string(),
+            packages: Vec::new(),
         })
     }
 
@@ -2099,6 +2118,7 @@ impl PythonExecutor {
                 python_stdlib_path: stdlib_path,
                 python_site_packages_paths: Vec::new(),
                 result_variable: "result".to_string(),
+                packages: Vec::new(),
             });
         }
 
@@ -2127,6 +2147,7 @@ impl PythonExecutor {
             python_stdlib_path: None,
             python_site_packages_paths: Vec::new(),
             result_variable: "result".to_string(),
+            packages: Vec::new(),
         })
     }
 
