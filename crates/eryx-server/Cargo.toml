@@ -10,7 +10,6 @@ description = "gRPC server for sandboxed Python execution via eryx"
 publish = false
 
 [dependencies]
-async-trait.workspace = true
 clap = { workspace = true } #unified
 dashmap.workspace = true
 eryx = { workspace = true, features = ["embedded", "vfs"] }

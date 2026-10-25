@@ -7,11 +7,9 @@
 #![deny(unsafe_code)]
 
 pub mod callbacks;
-pub mod output;
 pub mod replay;
 pub mod service;
 pub mod telemetry;
-pub mod trace;
 
 /// Generated protobuf types for the eryx gRPC API.
 // `missing_docs`: prost/tonic-generated types carry no doc comments. The large
