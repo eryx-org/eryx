@@ -1,12 +1,16 @@
 """Regression tests for factory-backed persistent sessions."""
 
 import gc
+import sys
 import threading
 import time
 import zipfile
+from pathlib import Path
 
 import eryx
 import pytest
+
+MOCK_MCP_SERVER = str(Path(__file__).parent / "mock_mcp_server.py")
 
 
 def test_factory_session_persistent_state_and_full_reset(sandbox_factory):
@@ -308,3 +312,40 @@ def test_cached_loaded_factory_sessions_are_isolated_and_equivalent(
     second.execute("state = 'second'")
     assert first.execute("print(state)").stdout == b"first\n"
     assert second.execute("print(state)").stdout == b"second\n"
+
+
+def test_factory_session_mcp(sandbox_factory):
+    manager = eryx.MCPManager()
+    manager.connect("mock", sys.executable, [MOCK_MCP_SERVER], {}, 10.0)
+    try:
+        session = sandbox_factory.create_session(mcp=manager)
+        result = session.execute('r = await mcp.mock.add(a=3, b=5); print(r["result"])')
+        assert b"8" in result.stdout
+    finally:
+        manager.close()
+
+
+def test_factory_sandbox_mcp(sandbox_factory):
+    manager = eryx.MCPManager()
+    manager.connect("mock", sys.executable, [MOCK_MCP_SERVER], {}, 10.0)
+    try:
+        sandbox = sandbox_factory.create_sandbox(mcp=manager)
+        result = sandbox.execute('r = await mcp.mock.echo(message="hi"); print(r["text"])')
+        assert b"hi" in result.stdout
+    finally:
+        manager.close()
+
+
+def test_factory_sandbox_result_variable(sandbox_factory):
+    sandbox = sandbox_factory.create_sandbox(result_variable="answer")
+    assert sandbox.execute("answer = [1, 2]\nresult = 'ignored'").result == [1, 2]
+
+
+def test_factory_sandbox_scrub_result(sandbox_factory):
+    secrets = {"TOKEN": {"value": "ghp-real-token"}}
+    code = 'import os\nresult = {"t": os.environ["TOKEN"]}'
+    plain = sandbox_factory.create_sandbox(secrets=secrets).execute(code)
+    assert "ERYX_SECRET_PLACEHOLDER_" in plain.result_json
+    scrubbed = sandbox_factory.create_sandbox(secrets=secrets, scrub_result=True).execute(code)
+    assert "[REDACTED]" in scrubbed.result_json
+    assert "ERYX_SECRET_PLACEHOLDER_" not in scrubbed.result_json

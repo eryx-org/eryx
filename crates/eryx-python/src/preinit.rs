@@ -14,7 +14,7 @@ use crate::callback::extract_callbacks;
 use crate::error::{InitializationError, eryx_error_to_py};
 use crate::net_config::NetConfig;
 use crate::resource_limits::ResourceLimits;
-use crate::sandbox::{PyOutputHandler, Sandbox, apply_secrets};
+use crate::sandbox::{PyOutputHandler, Sandbox, apply_secrets, extract_secrets};
 use crate::session::Session;
 
 const FACTORY_MAGIC: &[u8; 4] = b"ERYX";
@@ -315,6 +315,7 @@ impl SandboxFactory {
     ///         and 1000 callback invocations.
     ///     network: Optional network configuration.
     ///     callbacks: Optional callbacks that sandboxed code can invoke.
+    ///     mcp: Optional MCPManager whose tools are exposed as callbacks.
     ///     volumes: Optional host volume mounts; these enable wrapper-visible
     ///         VFS storage when no caller storage is supplied.
     ///     on_stdout: Optional stdout streaming callback.
@@ -326,7 +327,7 @@ impl SandboxFactory {
     ///
     /// Raises:
     ///     InitializationError: If the session cannot be initialized.
-    #[pyo3(signature = (*, vfs=None, vfs_mount_path=None, resource_limits=None, network=None, callbacks=None, volumes=None, on_stdout=None, on_stderr=None, result_variable=None))]
+    #[pyo3(signature = (*, vfs=None, vfs_mount_path=None, resource_limits=None, network=None, callbacks=None, mcp=None, volumes=None, on_stdout=None, on_stderr=None, result_variable=None))]
     #[allow(clippy::too_many_arguments)]
     fn create_session(
         &self,
@@ -336,6 +337,7 @@ impl SandboxFactory {
         resource_limits: Option<ResourceLimits>,
         network: Option<NetConfig>,
         callbacks: Option<Bound<'_, PyAny>>,
+        mcp: Option<PyRef<'_, crate::mcp::MCPManager>>,
         volumes: Option<Vec<(String, String, bool)>>,
         on_stdout: Option<Py<PyAny>>,
         on_stderr: Option<Py<PyAny>>,
@@ -372,7 +374,7 @@ impl SandboxFactory {
             limits,
             network,
             callbacks,
-            None,
+            mcp,
             volumes,
             on_stdout,
             on_stderr,
@@ -392,6 +394,14 @@ impl SandboxFactory {
     ///     network: Optional network configuration. If provided, enables networking.
     ///     callbacks: Optional callbacks that sandboxed code can invoke.
     ///         Can be a CallbackRegistry or a list of callback dicts.
+    ///     mcp: Optional MCPManager whose tools are exposed as callbacks.
+    ///     secrets: Optional secrets, as for `Sandbox`.
+    ///     scrub_stdout, scrub_stderr, scrub_files: Scrub secret placeholders
+    ///         from that output. Default to True when secrets are provided.
+    ///     scrub_result: Scrub secret placeholders from the structured result.
+    ///         Defaults to False.
+    ///     result_variable: Variable captured as `ExecuteResult.result`.
+    ///         Defaults to `"result"`.
     ///
     /// Returns:
     ///     A new Sandbox ready to execute Python code.
@@ -421,7 +431,7 @@ impl SandboxFactory {
     ///         secrets={"API_KEY": {"value": "sk-xxx", "allowed_hosts": ["api.example.com"]}},
     ///         network=NetConfig(allowed_hosts=["api.example.com"]),
     ///     )
-    #[pyo3(signature = (*, site_packages=None, resource_limits=None, network=None, callbacks=None, secrets=None, scrub_stdout=None, scrub_stderr=None, scrub_files=None, volumes=None, on_stdout=None, on_stderr=None))]
+    #[pyo3(signature = (*, site_packages=None, resource_limits=None, network=None, callbacks=None, mcp=None, secrets=None, scrub_stdout=None, scrub_stderr=None, scrub_result=None, scrub_files=None, volumes=None, on_stdout=None, on_stderr=None, result_variable=None))]
     #[allow(clippy::too_many_arguments)]
     fn create_sandbox(
         &self,
@@ -430,13 +440,16 @@ impl SandboxFactory {
         resource_limits: Option<ResourceLimits>,
         network: Option<NetConfig>,
         callbacks: Option<Bound<'_, PyAny>>,
+        mcp: Option<PyRef<'_, crate::mcp::MCPManager>>,
         secrets: Option<Bound<'_, PyDict>>,
         scrub_stdout: Option<bool>,
         scrub_stderr: Option<bool>,
+        scrub_result: Option<bool>,
         scrub_files: Option<bool>,
         volumes: Option<Vec<(String, String, bool)>>,
         on_stdout: Option<Py<PyAny>>,
         on_stderr: Option<Py<PyAny>>,
+        result_variable: Option<String>,
     ) -> PyResult<Sandbox> {
         // Use provided site_packages or fall back to the one from initialization
         let site_packages_path = site_packages.or_else(|| self.site_packages_path.clone());
@@ -460,6 +473,10 @@ impl SandboxFactory {
             builder = builder.with_resource_limits(limits.into());
         }
 
+        if let Some(name) = result_variable {
+            builder = builder.with_result_variable(name);
+        }
+
         if let Some(net) = network {
             builder = builder.with_network(net.into());
         }
@@ -469,6 +486,12 @@ impl SandboxFactory {
         if let Some(ref cbs) = self.default_callbacks(py, callbacks) {
             let python_callbacks = extract_callbacks(py, cbs)?;
             for callback in python_callbacks {
+                builder = builder.with_callback(callback);
+            }
+        }
+
+        if let Some(ref mcp_mgr) = mcp {
+            for callback in mcp_mgr.as_callbacks() {
                 builder = builder.with_callback(callback);
             }
         }
@@ -488,6 +511,10 @@ impl SandboxFactory {
         }
         if scrub_files.unwrap_or(has_secrets) {
             builder = builder.scrub_files(true);
+        }
+        // Opt-in even with secrets, as for `Sandbox`.
+        if scrub_result.unwrap_or(false) {
+            builder = builder.scrub_result(true);
         }
 
         // Apply volume mounts if provided
@@ -541,6 +568,13 @@ impl SandboxFactory {
     ///     min_idle: Minimum warm sandboxes to keep ready. Default: 1.
     ///     acquire_timeout_ms: Max wait for a sandbox in ms. Default: 30000.
     ///     idle_timeout_ms: Idle sandbox eviction threshold in ms. Default: 300000.
+    ///     network: Optional network configuration for every pooled sandbox.
+    ///     secrets: Optional secrets for every pooled sandbox, as for `Sandbox`.
+    ///     scrub_stdout, scrub_stderr, scrub_files: Scrub secret placeholders
+    ///         from that output. Default to True when secrets are provided.
+    ///
+    /// Network and secrets are fixed for the pool's lifetime, unlike the
+    /// per-request settings passed to ``acquire()``.
     ///
     /// Returns:
     ///     A ``SandboxPool`` ready to lease sandboxes.
@@ -554,7 +588,8 @@ impl SandboxFactory {
     ///     with pool.acquire() as sandbox:
     ///         result = sandbox.execute('import json; print(json.dumps([1]))')
     ///     pool.close()
-    #[pyo3(signature = (*, max_size=10, min_idle=1, acquire_timeout_ms=30_000, idle_timeout_ms=300_000))]
+    #[pyo3(signature = (*, max_size=10, min_idle=1, acquire_timeout_ms=30_000, idle_timeout_ms=300_000, network=None, secrets=None, scrub_stdout=None, scrub_stderr=None, scrub_files=None))]
+    #[allow(clippy::too_many_arguments)]
     fn create_pool(
         &self,
         py: Python<'_>,
@@ -562,6 +597,11 @@ impl SandboxFactory {
         min_idle: usize,
         acquire_timeout_ms: u64,
         idle_timeout_ms: u64,
+        network: Option<NetConfig>,
+        secrets: Option<Bound<'_, PyDict>>,
+        scrub_stdout: Option<bool>,
+        scrub_stderr: Option<bool>,
+        scrub_files: Option<bool>,
     ) -> PyResult<crate::pool::SandboxPool> {
         use std::time::Duration;
 
@@ -580,6 +620,12 @@ impl SandboxFactory {
         let precompiled = self.precompiled.clone();
         let stdlib_path = self.stdlib_path.clone();
         let site_packages_path = self.site_packages_path.clone();
+        let network: Option<eryx::NetConfig> = network.map(Into::into);
+        let secrets = secrets.as_ref().map(extract_secrets).transpose()?;
+        let has_secrets = secrets.as_ref().is_some_and(|s| !s.is_empty());
+        let scrub_stdout = scrub_stdout.unwrap_or(has_secrets);
+        let scrub_stderr = scrub_stderr.unwrap_or(has_secrets);
+        let scrub_files = scrub_files.unwrap_or(has_secrets);
 
         let builder_fn = move || {
             // SAFETY: the bytes were produced by `PythonExecutor::precompile`
@@ -593,7 +639,17 @@ impl SandboxFactory {
             if let Some(ref path) = site_packages_path {
                 builder = builder.with_site_packages(path);
             }
-            builder.build()
+            if let Some(ref net) = network {
+                builder = builder.with_network(net.clone());
+            }
+            for (name, value, allowed_hosts) in secrets.iter().flatten() {
+                builder = builder.with_secret(name, value, allowed_hosts.clone());
+            }
+            builder
+                .scrub_stdout(scrub_stdout)
+                .scrub_stderr(scrub_stderr)
+                .scrub_files(scrub_files)
+                .build()
         };
 
         let rt = runtime.clone();

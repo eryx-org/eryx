@@ -352,6 +352,17 @@ pub(crate) fn apply_secrets<R, S>(
     mut builder: eryx::SandboxBuilder<R, S>,
     secrets_dict: &Bound<'_, PyDict>,
 ) -> PyResult<eryx::SandboxBuilder<R, S>> {
+    for (name, value, allowed_hosts) in extract_secrets(secrets_dict)? {
+        builder = builder.with_secret(name, value, allowed_hosts);
+    }
+    Ok(builder)
+}
+
+/// Parse a Python secrets dict into `(name, value, allowed_hosts)` triples.
+pub(crate) fn extract_secrets(
+    secrets_dict: &Bound<'_, PyDict>,
+) -> PyResult<Vec<(String, String, Vec<String>)>> {
+    let mut secrets = Vec::with_capacity(secrets_dict.len());
     for (key, value) in secrets_dict.iter() {
         let name: String = key
             .extract()
@@ -388,7 +399,7 @@ pub(crate) fn apply_secrets<R, S>(
             })?
             .unwrap_or_default();
 
-        builder = builder.with_secret(name, secret_value, allowed_hosts);
+        secrets.push((name, secret_value, allowed_hosts));
     }
-    Ok(builder)
+    Ok(secrets)
 }

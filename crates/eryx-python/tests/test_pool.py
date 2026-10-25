@@ -306,3 +306,41 @@ class TestPoolGIL:
         assert progress["count"] > 10, (
             "Counter thread should have made progress while acquire blocked"
         )
+
+
+class TestPoolNetworkAndSecrets:
+    def test_pool_network(self, http_server):
+        """Pooled sandboxes get the pool's network config."""
+        host, port = http_server
+        factory = eryx.SandboxFactory(cache=True)
+        pool = factory.create_pool(
+            max_size=1,
+            min_idle=1,
+            network=eryx.NetConfig.permissive().allow_localhost(),
+        )
+        code = f"""
+import socket
+s = socket.create_connection(("{host}", {port}))
+s.sendall(b"GET / HTTP/1.0\\r\\n\\r\\n")
+print(s.recv(12))
+"""
+        with pool.acquire() as sandbox:
+            assert b"HTTP/1.0 200" in sandbox.execute(code).stdout
+        pool.close()
+
+    def test_pool_secrets(self):
+        """Pooled sandboxes see a placeholder for the pool's secrets, scrubbed by default."""
+        factory = eryx.SandboxFactory(cache=True)
+        pool = factory.create_pool(
+            max_size=1,
+            min_idle=1,
+            secrets={"TOKEN": {"value": "real-token-123"}},
+        )
+        with pool.acquire() as sandbox:
+            result = sandbox.execute(
+                'import os\nprint(os.environ["TOKEN"])\nresult = os.environ["TOKEN"]'
+            )
+        assert b"real-token-123" not in result.stdout
+        assert b"[REDACTED]" in result.stdout
+        assert result.result.startswith("ERYX_SECRET_PLACEHOLDER_")
+        pool.close()
