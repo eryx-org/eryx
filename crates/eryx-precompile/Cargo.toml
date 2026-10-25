@@ -20,6 +20,7 @@ rustls = { workspace = true, features = ["aws-lc-rs"] }
 serde.workspace = true      # --callbacks file
 serde_json.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
+tempfile.workspace = true
 tracing.workspace = true
 tracing-subscriber = { version = "0.3", features = ["env-filter", "registry"] }
 walkdir.workspace = true

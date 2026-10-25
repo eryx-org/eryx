@@ -113,7 +113,8 @@ struct CompileArgs {
     ///   x86-64     - Baseline SSE2 (maximum compatibility)
     ///   baseline   - Target architecture baseline, no optional features
     ///
-    /// Defaults to native when omitted.
+    /// Defaults to native when omitted, with a warning, since the result only
+    /// runs on CPUs with the same features as this one.
     #[arg(short = 'c', long, value_name = "LEVEL")]
     cpu_features: Option<CpuFeatureLevel>,
 
@@ -131,16 +132,18 @@ struct CompileArgs {
     /// Path to a site-packages directory
     ///
     /// Mount a directory containing Python packages. Any .so files found
-    /// will be linked as native extensions. Can be combined with --package.
-    #[arg(long)]
+    /// will be linked as native extensions. Can be combined with --package,
+    /// in which case both are merged into a temporary directory and this one
+    /// is left untouched. Requires --preinit.
+    #[arg(long, requires = "preinit")]
     site_packages: Option<PathBuf>,
 
     /// Package file to include (.whl, .tar.gz, or directory)
     ///
     /// Packages are extracted and their contents are made available as
     /// site-packages. Native extensions (.so files) are automatically
-    /// linked. Can be specified multiple times.
-    #[arg(long = "package", value_name = "PATH")]
+    /// linked. Can be specified multiple times. Requires --preinit.
+    #[arg(long = "package", value_name = "PATH", requires = "preinit")]
     packages: Vec<PathBuf>,
 
     /// Module to pre-import during initialization
@@ -148,8 +151,10 @@ struct CompileArgs {
     /// Pre-importing modules captures their initialized state in the snapshot,
     /// making them instantly available at runtime. Can be specified multiple times.
     ///
+    /// Requires --preinit.
+    ///
     /// Example: --import numpy --import pandas
-    #[arg(long = "import", value_name = "MODULE")]
+    #[arg(long = "import", value_name = "MODULE", requires = "preinit")]
     imports: Vec<String>,
 
     /// Output pre-initialized .wasm instead of native .cwasm
@@ -360,8 +365,12 @@ async fn run_setup(args: SetupArgs) -> Result<()> {
     println!("Step 2: Pre-compiling to native code (this may take a minute)...");
     let start = Instant::now();
 
-    let precompiled = eryx::PythonExecutor::precompile(&wasm_bytes)
-        .context("Failed to pre-compile runtime.wasm to native code")?;
+    // The cache file is named for the host platform only, so compile for
+    // exactly that: `precompile` would also honour ERYX_TARGET and friends,
+    // and could cache an artifact under a name that does not describe it.
+    let precompiled =
+        eryx::PythonExecutor::precompile_with_options(&wasm_bytes, None, CpuFeatureLevel::Native)
+            .context("Failed to pre-compile runtime.wasm to native code")?;
 
     let elapsed = start.elapsed();
     println!(
@@ -451,6 +460,17 @@ async fn run_compile(args: CompileArgs) -> Result<()> {
     // Resolve target triple and CPU feature level from the flags.
     let (target_triple, cpu_features) =
         resolve_target_and_features(args.target.as_deref(), args.cpu_features)?;
+    if !args.wasm_only
+        && target_triple.is_none()
+        && args.cpu_features.is_none()
+        && cpu_features == CpuFeatureLevel::Native
+    {
+        eprintln!(
+            "warning: no --cpu-features given, compiling for this machine's CPU (native). \
+             The artifact may not load on other machines; pass --cpu-features \
+             (e.g. baseline or x86-64-v3) for a portable build."
+        );
+    }
 
     println!("eryx-precompile");
     println!("===============");
@@ -549,10 +569,10 @@ async fn run_compile(args: CompileArgs) -> Result<()> {
         }
 
         // Process packages and site-packages
-        let (final_site_packages, extensions, _extracted_packages) =
-            process_packages(args.site_packages.as_ref(), &args.packages)?;
+        let mut packages = process_packages(args.site_packages.as_ref(), &args.packages)?;
+        let extensions = std::mem::take(&mut packages.extensions);
 
-        if let Some(ref sp) = final_site_packages {
+        if let Some(ref sp) = packages.site_packages {
             println!("Site-packages dir: {}", sp.display());
         }
         if !extensions.is_empty() {
@@ -567,7 +587,7 @@ async fn run_compile(args: CompileArgs) -> Result<()> {
             .imports(args.imports.iter().cloned())
             .extensions(extensions)
             .callbacks(callbacks);
-        if let Some(path) = &final_site_packages {
+        if let Some(path) = &packages.site_packages {
             options = options.site_packages(path);
         }
         if let Some(code) = &setup_code {
@@ -631,15 +651,19 @@ async fn run_compile(args: CompileArgs) -> Result<()> {
         // Verify if requested
         if !args.no_verify {
             println!();
-            println!("Step 4: Verifying...");
-            verify_cwasm(
-                &output,
-                args.stdlib.as_deref(),
-                &args.imports,
-                args.verify_code.as_deref(),
-            )
-            .await?;
-            println!("  Verification passed!");
+            if let Some(reason) = unrunnable_reason(target_triple.as_deref(), cpu_features) {
+                println!("Step 4: Skipping verification: {reason}");
+            } else {
+                println!("Step 4: Verifying...");
+                verify_cwasm(
+                    &output,
+                    args.stdlib.as_deref(),
+                    &args.imports,
+                    args.verify_code.as_deref(),
+                )
+                .await?;
+                println!("  Verification passed!");
+            }
         }
     }
 
@@ -648,21 +672,44 @@ async fn run_compile(args: CompileArgs) -> Result<()> {
     Ok(())
 }
 
+/// The result of [`process_packages`].
+struct ProcessedPackages {
+    /// Directory to mount at `/site-packages`, if any.
+    site_packages: Option<PathBuf>,
+    extensions: Vec<eryx::preinit::NativeExtension>,
+    /// Held so the temp directories `site_packages` may point into outlive
+    /// pre-initialization.
+    _extracted_packages: Vec<eryx::ExtractedPackage>,
+    _merged_dir: Option<tempfile::TempDir>,
+}
+
 /// Process packages and site-packages to extract native extensions.
 ///
-/// Returns (site_packages_path, native_extensions, extracted_packages).
-/// The extracted_packages must be kept alive to prevent temp directory cleanup.
+/// With a single source (one `--site-packages` or one `--package`) its
+/// directory is used as is. With several, they are merged into a fresh temp
+/// directory, so no source directory is ever written to.
 fn process_packages(
     site_packages: Option<&PathBuf>,
     packages: &[PathBuf],
-) -> Result<(
-    Option<PathBuf>,
-    Vec<eryx::preinit::NativeExtension>,
-    Vec<eryx::ExtractedPackage>,
-)> {
+) -> Result<ProcessedPackages> {
     let mut extensions = Vec::new();
     let mut extracted_packages = Vec::new();
-    let mut final_site_packages = site_packages.cloned();
+
+    let merged_dir = if usize::from(site_packages.is_some()) + packages.len() > 1 {
+        let dir = tempfile::tempdir().context("Failed to create merged site-packages directory")?;
+        if let Some(site_packages) = site_packages {
+            copy_directory_contents(site_packages, dir.path()).with_context(|| {
+                format!("Failed to copy site-packages: {}", site_packages.display())
+            })?;
+        }
+        Some(dir)
+    } else {
+        None
+    };
+    let mut final_site_packages = merged_dir
+        .as_ref()
+        .map(|dir| dir.path().to_path_buf())
+        .or_else(|| site_packages.cloned());
 
     // Extract each package and collect native extensions
     for path in packages {
@@ -676,13 +723,10 @@ fn process_packages(
             package.native_extensions.len()
         );
 
-        // Use the first package's python_path as site_packages if not already set
-        if final_site_packages.is_none() {
-            final_site_packages = Some(package.python_path.clone());
-        } else if let Some(ref target_dir) = final_site_packages {
-            // Copy this package's contents into the consolidated site-packages directory
-            copy_directory_contents(&package.python_path, target_dir)
-                .with_context(|| format!("Failed to merge package: {}", package.name))?;
+        match &merged_dir {
+            Some(dir) => copy_directory_contents(&package.python_path, dir.path())
+                .with_context(|| format!("Failed to merge package: {}", package.name))?,
+            None => final_site_packages = Some(package.python_path.clone()),
         }
 
         // Collect native extensions with dlopen paths relative to /site-packages
@@ -727,7 +771,12 @@ fn process_packages(
         }
     }
 
-    Ok((final_site_packages, extensions, extracted_packages))
+    Ok(ProcessedPackages {
+        site_packages: final_site_packages,
+        extensions,
+        _extracted_packages: extracted_packages,
+        _merged_dir: merged_dir,
+    })
 }
 
 /// Copy contents of one directory into another.
@@ -784,6 +833,74 @@ fn resolve_target_and_features(
         }
         (Some(t), Some(level)) => Ok((Some(t.to_string()), level)),
     }
+}
+
+/// Why an artifact compiled for `target` and `cpu_features` cannot be loaded
+/// on this machine, or `None` if it can.
+fn unrunnable_reason(target: Option<&str>, cpu_features: CpuFeatureLevel) -> Option<String> {
+    if let Some(target) = target {
+        let host = env!("ERYX_PRECOMPILE_HOST_TARGET");
+        if target != host {
+            return Some(format!(
+                "artifact targets {target}, which cannot run on this host ({host})"
+            ));
+        }
+    }
+    let missing = missing_host_features(cpu_features);
+    if missing.is_empty() {
+        None
+    } else {
+        Some(format!(
+            "this host lacks {} required by --cpu-features {cpu_features}",
+            missing.join(", ")
+        ))
+    }
+}
+
+/// The features of the x86-64 psABI `level` this CPU does not have.
+#[cfg(target_arch = "x86_64")]
+fn missing_host_features(level: CpuFeatureLevel) -> Vec<&'static str> {
+    macro_rules! missing {
+        ($($feature:tt),*) => {
+            [$((std::arch::is_x86_feature_detected!($feature), $feature)),*]
+                .into_iter()
+                .filter_map(|(present, name)| (!present).then_some(name))
+                .collect()
+        };
+    }
+    let mut missing: Vec<&'static str> = Vec::new();
+    // Each level includes the ones below it.
+    if matches!(
+        level,
+        CpuFeatureLevel::X86_64v2 | CpuFeatureLevel::X86_64v3 | CpuFeatureLevel::X86_64v4
+    ) {
+        missing.extend::<Vec<_>>(missing!(
+            "cmpxchg16b",
+            "popcnt",
+            "sse3",
+            "sse4.1",
+            "sse4.2",
+            "ssse3"
+        ));
+    }
+    if matches!(level, CpuFeatureLevel::X86_64v3 | CpuFeatureLevel::X86_64v4) {
+        missing.extend::<Vec<_>>(missing!(
+            "avx", "avx2", "bmi1", "bmi2", "f16c", "fma", "lzcnt", "movbe"
+        ));
+    }
+    if level == CpuFeatureLevel::X86_64v4 {
+        missing.extend::<Vec<_>>(missing!(
+            "avx512f", "avx512bw", "avx512cd", "avx512dq", "avx512vl"
+        ));
+    }
+    missing
+}
+
+/// psABI levels are x86-64 only, and compiling one for a non-x86-64 host is
+/// rejected before verification is reached.
+#[cfg(not(target_arch = "x86_64"))]
+fn missing_host_features(_level: CpuFeatureLevel) -> Vec<&'static str> {
+    Vec::new()
 }
 
 /// Verify that the compiled cwasm file works correctly.
@@ -886,4 +1003,72 @@ async fn verify_cwasm(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn package_flags_require_preinit() {
+        for flag in [
+            ["--site-packages", "sp"],
+            ["--package", "pkg.whl"],
+            ["--import", "numpy"],
+        ] {
+            let base = ["eryx-precompile", "compile", "runtime.wasm"];
+            assert!(Cli::try_parse_from(base.iter().chain(&flag)).is_err());
+            assert!(
+                Cli::try_parse_from(
+                    base.iter()
+                        .chain(&["--preinit", "--stdlib", "stdlib"])
+                        .chain(&flag)
+                )
+                .is_ok()
+            );
+        }
+    }
+
+    #[test]
+    fn merging_packages_leaves_sources_untouched() -> Result<()> {
+        let site_packages = tempfile::tempdir()?;
+        std::fs::write(site_packages.path().join("a.py"), "")?;
+        let package = tempfile::tempdir()?;
+        std::fs::create_dir(package.path().join("b"))?;
+        std::fs::write(package.path().join("b").join("__init__.py"), "")?;
+
+        let packages = process_packages(
+            Some(&site_packages.path().to_path_buf()),
+            &[package.path().to_path_buf()],
+        )?;
+        let merged = packages
+            .site_packages
+            .as_ref()
+            .context("expected a site-packages dir")?;
+
+        assert_ne!(merged, site_packages.path());
+        assert!(merged.join("a.py").is_file());
+        assert!(merged.join("b").join("__init__.py").is_file());
+        assert!(!site_packages.path().join("b").exists());
+        Ok(())
+    }
+
+    #[test]
+    fn verification_skipped_for_foreign_target() {
+        assert!(
+            unrunnable_reason(
+                Some("riscv64gc-unknown-none-elf"),
+                CpuFeatureLevel::Baseline
+            )
+            .is_some()
+        );
+        assert!(unrunnable_reason(None, CpuFeatureLevel::Native).is_none());
+        assert!(
+            unrunnable_reason(
+                Some(env!("ERYX_PRECOMPILE_HOST_TARGET")),
+                CpuFeatureLevel::Baseline
+            )
+            .is_none()
+        );
+    }
 }
