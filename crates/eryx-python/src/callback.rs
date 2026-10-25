@@ -150,11 +150,6 @@ impl PythonCallback {
     }
 }
 
-// SAFETY: `Py<PyAny>` is Send + Sync as long as we only access it with the GIL held.
-// We always use `Python::attach()` when accessing the callable.
-unsafe impl Send for PythonCallback {}
-unsafe impl Sync for PythonCallback {}
-
 impl Callback for PythonCallback {
     fn name(&self) -> &str {
         &self.name

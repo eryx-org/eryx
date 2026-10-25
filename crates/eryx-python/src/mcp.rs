@@ -12,7 +12,7 @@ use std::borrow::Cow;
 use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use eryx::{CallbackError, DynamicCallback, Schema};
 use pyo3::prelude::*;
@@ -60,15 +60,10 @@ impl std::fmt::Debug for MCPConnection {
 pub struct MCPManager {
     /// The process-wide Tokio runtime the MCP connections run on.
     runtime: Arc<tokio::runtime::Runtime>,
-    /// Active MCP server connections.
-    connections: Vec<MCPConnection>,
+    /// Active MCP server connections. `connect()` and `close()` run with the
+    /// GIL released, so the lock is what serializes access.
+    connections: Mutex<Vec<MCPConnection>>,
 }
-
-// SAFETY: RunningService is Send + Sync (it communicates over channels).
-// We only access connections from methods that hold &self or &mut self,
-// and the GIL serializes Python-side access.
-unsafe impl Send for MCPManager {}
-unsafe impl Sync for MCPManager {}
 
 #[pymethods]
 impl MCPManager {
@@ -77,7 +72,7 @@ impl MCPManager {
     fn new() -> PyResult<Self> {
         Ok(Self {
             runtime: crate::error::make_runtime()?,
-            connections: Vec::new(),
+            connections: Mutex::new(Vec::new()),
         })
     }
 
@@ -98,7 +93,7 @@ impl MCPManager {
     ///     InitializationError: If the connection fails.
     #[pyo3(signature = (name, command, args=vec![], env=HashMap::new(), timeout_secs=30.0))]
     fn connect(
-        &mut self,
+        &self,
         py: Python<'_>,
         name: String,
         command: String,
@@ -155,7 +150,7 @@ impl MCPManager {
 
                 let tool_count = tools_resp.tools.len();
 
-                self.connections.push(MCPConnection {
+                self.connections().push(MCPConnection {
                     name,
                     service,
                     tools: tools_resp.tools,
@@ -169,7 +164,7 @@ impl MCPManager {
     /// Get the names of all connected MCP servers.
     #[getter]
     fn server_names(&self) -> Vec<String> {
-        self.connections.iter().map(|c| c.name.clone()).collect()
+        self.connections().iter().map(|c| c.name.clone()).collect()
     }
 
     /// List all available tools across all connected servers.
@@ -178,7 +173,7 @@ impl MCPManager {
     ///     A list of dicts, each with "name", "description", and "schema" keys.
     fn list_tools<'py>(&self, py: Python<'py>) -> PyResult<Vec<Bound<'py, PyDict>>> {
         let mut result = Vec::new();
-        for conn in &self.connections {
+        for conn in self.connections().iter() {
             for tool in &conn.tools {
                 let dict = PyDict::new(py);
                 dict.set_item("name", format!(r#"mcp["{}"].{}"#, conn.name, tool.name))?;
@@ -198,9 +193,9 @@ impl MCPManager {
     }
 
     /// Gracefully shut down all MCP server connections.
-    fn close(&mut self, py: Python<'_>) -> PyResult<()> {
+    fn close(&self, py: Python<'_>) -> PyResult<()> {
         let runtime = self.runtime.clone();
-        let connections = std::mem::take(&mut self.connections);
+        let connections = std::mem::take(&mut *self.connections());
 
         py.detach(|| {
             runtime.block_on(async {
@@ -214,8 +209,9 @@ impl MCPManager {
     }
 
     fn __repr__(&self) -> String {
-        let servers: Vec<&str> = self.connections.iter().map(|c| c.name.as_str()).collect();
-        let tool_count: usize = self.connections.iter().map(|c| c.tools.len()).sum();
+        let connections = self.connections();
+        let servers: Vec<&str> = connections.iter().map(|c| c.name.as_str()).collect();
+        let tool_count: usize = connections.iter().map(|c| c.tools.len()).sum();
         format!(
             "MCPManager(servers=[{}], tools={})",
             servers.join(", "),
@@ -225,6 +221,15 @@ impl MCPManager {
 }
 
 impl MCPManager {
+    /// Lock the connection list. A panic while it was held leaves nothing
+    /// half-written (each operation is a single push or take), so poisoning
+    /// is ignored.
+    fn connections(&self) -> MutexGuard<'_, Vec<MCPConnection>> {
+        self.connections
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+    }
+
     /// Convert all MCP tools into `DynamicCallback` instances.
     ///
     /// Each tool becomes a callback named `mcp.{server}.{tool}` that can be
@@ -232,7 +237,7 @@ impl MCPManager {
     pub(crate) fn as_callbacks(&self) -> Vec<DynamicCallback> {
         let mut callbacks = Vec::new();
 
-        for conn in &self.connections {
+        for conn in self.connections().iter() {
             // Get a peer handle for making RPC calls. The peer communicates
             // over channels so it's runtime-agnostic.
             let peer = conn.service.peer().clone();
@@ -333,7 +338,7 @@ impl MCPManager {
 impl std::fmt::Debug for MCPManager {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("MCPManager")
-            .field("connections", &self.connections.len())
+            .field("connections", &self.connections().len())
             .finish()
     }
 }
