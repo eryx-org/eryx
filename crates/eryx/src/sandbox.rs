@@ -517,6 +517,7 @@ impl Sandbox {
                     trace: trace_events,
                     result,
                     result_error,
+                    state_was_reset: false,
                     stats: ExecuteStats {
                         duration,
                         callback_invocations,
@@ -2578,6 +2579,14 @@ pub struct ExecuteResult {
     /// Why result capture failed (e.g. the value was not JSON-serializable), or
     /// `None` when capture succeeded or no result variable was set.
     pub result_error: Option<String>,
+    /// Whether a session lost its Python state before this run.
+    ///
+    /// An earlier call on the session was cancelled (its future dropped) or
+    /// halted without a snapshot to roll back to, so the instance was reset:
+    /// variables from before that call are gone, and the preamble ran again.
+    /// Reported once, by the first successful run after the reset. Always
+    /// `false` for [`Sandbox::execute`], which keeps no state.
+    pub state_was_reset: bool,
     /// Execution statistics.
     pub stats: ExecuteStats,
 }
@@ -2932,6 +2941,7 @@ mod tests {
             trace: vec![],
             result: None,
             result_error: None,
+            state_was_reset: false,
             stats: ExecuteStats {
                 duration: Duration::from_millis(100),
                 callback_invocations: 5,
@@ -2954,6 +2964,7 @@ mod tests {
             trace: vec![],
             result: None,
             result_error: None,
+            state_was_reset: false,
             stats: ExecuteStats {
                 duration: Duration::from_millis(50),
                 callback_invocations: 2,
@@ -3163,19 +3174,6 @@ mod tests {
     }
 
     #[test]
-    fn sandbox_builder_with_resource_limits_is_chainable() {
-        let limits = ResourceLimits::default().with_max_callback_invocations(5);
-
-        let _builder = SandboxBuilder::new().with_resource_limits(limits);
-    }
-
-    #[test]
-    fn sandbox_builder_with_wasm_bytes_accepts_vec() {
-        // Just test that the builder accepts bytes - actual loading tested elsewhere
-        let _builder = SandboxBuilder::new().with_wasm_bytes(vec![0u8; 10]);
-    }
-
-    #[test]
     fn sandbox_builder_rejects_duplicate_callback_names() {
         let builder = || {
             SandboxBuilder::new()
@@ -3196,6 +3194,19 @@ mod tests {
             let err = result.expect_err("duplicate callback should fail build");
             assert!(err.to_string().contains("'test'"), "{err}");
         }
+    }
+
+    #[test]
+    fn sandbox_builder_with_resource_limits_is_chainable() {
+        let limits = ResourceLimits::default().with_max_callback_invocations(5);
+
+        let _builder = SandboxBuilder::new().with_resource_limits(limits);
+    }
+
+    #[test]
+    fn sandbox_builder_with_wasm_bytes_accepts_vec() {
+        // Just test that the builder accepts bytes - actual loading tested elsewhere
+        let _builder = SandboxBuilder::new().with_wasm_bytes(vec![0u8; 10]);
     }
 
     #[test]
@@ -3305,6 +3316,7 @@ mod tests {
             trace: vec![],
             result: None,
             result_error: None,
+            state_was_reset: false,
             stats: ExecuteStats {
                 duration: Duration::from_millis(1),
                 callback_invocations: 0,
@@ -3340,6 +3352,7 @@ mod tests {
             ],
             result: None,
             result_error: None,
+            state_was_reset: false,
             stats: ExecuteStats {
                 duration: Duration::from_millis(100),
                 callback_invocations: 1,

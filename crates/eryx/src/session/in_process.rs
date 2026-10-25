@@ -149,9 +149,10 @@ impl<'a> InProcessSession<'a> {
     /// timeout) loses the instance it was running on. Reset so the session
     /// stays usable, re-running the preamble on the next call.
     async fn recover_if_cancelled(&mut self) -> Result<(), Error> {
-        if self.executor.store().is_none() {
-            tracing::warn!("session call was cancelled mid-run; resetting, state lost");
-            self.reset().await?;
+        let callbacks: Vec<Arc<dyn Callback>> =
+            self.sandbox.callbacks().values().cloned().collect();
+        if self.executor.recover_lost_store(&callbacks).await? {
+            self.preamble_executed = false;
         }
         Ok(())
     }
@@ -262,6 +263,7 @@ impl<'a> InProcessSession<'a> {
     ///
     /// Returns an error if the snapshot cannot be captured.
     pub async fn snapshot_state(&mut self) -> Result<PythonStateSnapshot, Error> {
+        self.recover_if_cancelled().await?;
         self.executor.snapshot_state().await
     }
 
@@ -273,6 +275,7 @@ impl<'a> InProcessSession<'a> {
     ///
     /// Returns an error if the restore fails.
     pub async fn restore_state(&mut self, snapshot: &PythonStateSnapshot) -> Result<(), Error> {
+        self.recover_if_cancelled().await?;
         self.executor.restore_state(snapshot).await
     }
 
@@ -285,6 +288,7 @@ impl<'a> InProcessSession<'a> {
     ///
     /// Returns an error if the clear fails.
     pub async fn clear_state(&mut self) -> Result<(), Error> {
+        self.recover_if_cancelled().await?;
         self.executor.clear_state().await
     }
 }
@@ -463,6 +467,7 @@ async fn run_code(
                 trace: trace_events,
                 result,
                 result_error,
+                state_was_reset: output.state_was_reset,
                 stats: ExecuteStats {
                     duration,
                     callback_invocations,

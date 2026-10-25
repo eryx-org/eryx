@@ -380,6 +380,11 @@ pub struct ExecutionOutput {
     /// Why result capture failed (e.g. the value was not JSON-serializable), or
     /// `None` when capture succeeded or no result variable was set.
     pub result_error: Option<String>,
+    /// Whether the session lost its Python state before this run: an earlier
+    /// call was cancelled or halted mid-run without a snapshot to roll back
+    /// to, so the instance was reset. Reported once, by the first successful
+    /// run after the reset; always `false` outside sessions.
+    pub state_was_reset: bool,
 }
 
 impl ExecutionOutput {
@@ -405,6 +410,7 @@ impl ExecutionOutput {
             fuel_consumed,
             result: None,
             result_error: None,
+            state_was_reset: false,
         }
     }
 

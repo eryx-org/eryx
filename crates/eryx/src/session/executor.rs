@@ -458,6 +458,11 @@ pub struct SessionExecutor {
     /// Number of executions performed in this session.
     execution_count: u32,
 
+    /// Whether the Python state was lost (and the instance reset) since the
+    /// last successful execution; reported once via
+    /// [`ExecutionOutput::state_was_reset`].
+    state_was_reset: bool,
+
     /// Optional execution timeout for epoch-based interruption.
     execution_timeout: Option<Duration>,
 
@@ -848,6 +853,7 @@ impl SessionExecutor {
             store: Some(store),
             bindings: Some(bindings),
             execution_count: 0,
+            state_was_reset: false,
             execution_timeout: limits.execution_timeout,
             fuel_limit: limits.max_fuel,
             memory_limit: limits.max_memory_bytes,
@@ -918,6 +924,7 @@ impl SessionExecutor {
             store: Some(store),
             bindings: Some(bindings),
             execution_count: 0,
+            state_was_reset: false,
             execution_timeout: limits.execution_timeout,
             fuel_limit: limits.max_fuel,
             memory_limit: limits.max_memory_bytes,
@@ -1066,12 +1073,7 @@ impl SessionExecutor {
 
         let start = Instant::now();
 
-        // A call whose future was dropped mid-run took the instance with it;
-        // start over on a fresh one rather than failing every later call.
-        if self.store.is_none() {
-            tracing::warn!("previous session call was cancelled mid-run; resetting, state lost");
-            self.reset(callbacks).await?;
-        }
+        self.recover_lost_store(callbacks).await?;
 
         // Take ownership of store and bindings for async execution
         let mut store = self
@@ -1234,7 +1236,30 @@ impl SessionExecutor {
         );
         output.result = empty_to_none(wit_output.result_json);
         output.result_error = empty_to_none(wit_output.result_error);
+        output.state_was_reset = std::mem::take(&mut self.state_was_reset);
         Ok(output)
+    }
+
+    /// Start over on a fresh instance if a call whose future was dropped
+    /// mid-run took the instance with it, rather than failing every later call.
+    ///
+    /// Returns whether the instance was reset; the next successful execution
+    /// then reports [`ExecutionOutput::state_was_reset`].
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if re-instantiation fails.
+    pub async fn recover_lost_store(
+        &mut self,
+        callbacks: &[Arc<dyn Callback>],
+    ) -> Result<bool, Error> {
+        if self.store.is_some() {
+            return Ok(false);
+        }
+        tracing::warn!("previous session call was cancelled mid-run; resetting, state lost");
+        self.reset(callbacks).await?;
+        self.state_was_reset = true;
+        Ok(true)
     }
 
     /// Get the number of executions performed in this session.
@@ -1350,6 +1375,7 @@ impl SessionExecutor {
         self.store = Some(store);
         self.bindings = Some(bindings);
         self.execution_count = 0;
+        self.state_was_reset = false;
         self.execution_timeout = execution_timeout;
         self.fuel_limit = fuel_limit;
 
@@ -1422,7 +1448,8 @@ impl SessionExecutor {
         match &snapshot {
             Some(snapshot) => self.restore_state(snapshot).await?,
             None => {
-                tracing::warn!("session reset after a halted run without a snapshot; state lost")
+                tracing::warn!("session reset after a halted run without a snapshot; state lost");
+                self.state_was_reset = true;
             }
         }
         self.execution_count = execution_count;
@@ -1483,6 +1510,8 @@ impl SessionExecutor {
     /// println!("Snapshot size: {} bytes", snapshot.size());
     /// ```
     pub async fn snapshot_state(&mut self) -> Result<PythonStateSnapshot, Error> {
+        self.recover_lost_store(&[]).await?;
+
         // Take ownership of store and bindings
         let mut store = self
             .store
@@ -1553,6 +1582,8 @@ impl SessionExecutor {
     /// session.execute("print(x)", &[], None, None).await?;
     /// ```
     pub async fn restore_state(&mut self, snapshot: &PythonStateSnapshot) -> Result<(), Error> {
+        self.recover_lost_store(&[]).await?;
+
         // Take ownership of store and bindings
         let mut store = self
             .store
@@ -1586,6 +1617,7 @@ impl SessionExecutor {
             wasmtime_result.map_err(|e| Error::WasmEngine(format!("WASM restore error: {e}")))?;
 
         inner_result.map_err(Error::Snapshot)?;
+        self.state_was_reset = false;
 
         tracing::debug!("State snapshot restored");
 
@@ -1612,6 +1644,8 @@ impl SessionExecutor {
     /// // x is no longer defined
     /// ```
     pub async fn clear_state(&mut self) -> Result<(), Error> {
+        self.recover_lost_store(&[]).await?;
+
         // Take ownership of store and bindings
         let mut store = self
             .store
@@ -1638,6 +1672,7 @@ impl SessionExecutor {
             result.map_err(|e| Error::WasmEngine(format!("WASM clear state error: {e}")))?;
 
         wasmtime_result.map_err(|e| Error::WasmEngine(format!("WASM clear state error: {e}")))?;
+        self.state_was_reset = false;
 
         tracing::debug!("State cleared");
 

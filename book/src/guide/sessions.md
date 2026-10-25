@@ -314,6 +314,10 @@ print(result.stdout_text)  # "x not defined"
 ```
 <!-- langtabs-end -->
 
+### Automatic resets
+
+If a call is cancelled mid-run (its future dropped, e.g. by `tokio::select!` or `tokio::time::timeout`), the instance it was running on is lost. The next call on the session, including `snapshot_state()`, `restore_state()` and `clear_state()`, resets the session instead of failing, so its Python state is gone and the preamble runs again. The first successful result after such a reset has `state_was_reset` set to `true` (Rust only for now), so callers can tell their variables are gone.
+
 ## Snapshots
 
 Sessions support snapshotting and restoring state, enabling features like checkpoints or undo:

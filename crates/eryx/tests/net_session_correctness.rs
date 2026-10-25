@@ -87,3 +87,42 @@ async fn session_recovers_after_cancelled_execute() {
     let output = session.execute("print(base + 1)").await.unwrap();
     assert_eq!(output.stdout_text().trim(), "42");
 }
+
+/// After a cancelled call, `snapshot_state` recovers the session instead of
+/// failing, and the next result reports (once) that state was reset.
+#[tokio::test]
+async fn session_reports_state_reset_after_cancelled_execute() {
+    let hang = DynamicCallback::builder("hang", "Never returns", |_args| {
+        Box::pin(std::future::pending())
+    })
+    .build();
+    let sandbox = Sandbox::builder()
+        .with_embedded_runtime()
+        .with_callback(hang)
+        .with_library(RuntimeLibrary::new().with_preamble("base = 41"))
+        .build()
+        .unwrap();
+    let mut session = InProcessSession::new(&sandbox).await.unwrap();
+
+    let output = session.execute("x = 1").await.unwrap();
+    assert!(!output.state_was_reset);
+
+    let cancelled =
+        tokio::time::timeout(Duration::from_millis(500), session.execute("await hang()")).await;
+    assert!(cancelled.is_err(), "the call should still be running");
+
+    session
+        .snapshot_state()
+        .await
+        .expect("snapshot should recover the lost instance");
+
+    let output = session
+        .execute("print(base + 1, 'x' in globals())")
+        .await
+        .unwrap();
+    assert_eq!(output.stdout_text().trim(), "42 False");
+    assert!(output.state_was_reset);
+
+    let output = session.execute("pass").await.unwrap();
+    assert!(!output.state_was_reset, "the reset is reported only once");
+}
