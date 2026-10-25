@@ -57,9 +57,6 @@ jobs:
         with:
           toolchain: stable
 
-      - name: Install nightly toolchain
-        run: rustup toolchain install nightly --component rust-src
-
       - name: Install mise
         uses: jdx/mise-action@8418fedb1110381a0d3ba51a7a415d7c1b884550 # v5.2.2
         with:
@@ -78,11 +75,7 @@ jobs:
       # platforms/architectures.
 
       - name: Copy prebuilt late-linking artifacts
-        run: |
-          OUT_DIR=$(find target/release -path "*/eryx-runtime-*/out" -type d | head -1)
-          mkdir -p crates/eryx-runtime/prebuilt
-          cp "$OUT_DIR/liberyx_runtime.so.zst" crates/eryx-runtime/prebuilt/
-          cp "$OUT_DIR/liberyx_bindings.so.zst" crates/eryx-runtime/prebuilt/
+        run: mise run update-prebuilt
 
       - name: Upload WASM artifacts
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
