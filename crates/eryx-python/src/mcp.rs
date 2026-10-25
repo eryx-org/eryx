@@ -58,9 +58,7 @@ impl std::fmt::Debug for MCPConnection {
 ///     result = sandbox.execute('data = await mcp["filesystem"].read_file(path="README.md")')
 #[pyclass(module = "eryx")]
 pub struct MCPManager {
-    /// Tokio runtime owned by this manager. Kept alive via Arc so that
-    /// DynamicCallback closures can use it even after MCPManager is dropped
-    /// from Python (the Arc prevents the runtime from shutting down).
+    /// The process-wide Tokio runtime the MCP connections run on.
     runtime: Arc<tokio::runtime::Runtime>,
     /// Active MCP server connections.
     connections: Vec<MCPConnection>,
@@ -77,16 +75,8 @@ impl MCPManager {
     /// Create a new empty MCP manager.
     #[new]
     fn new() -> PyResult<Self> {
-        let runtime = Arc::new(
-            tokio::runtime::Builder::new_multi_thread()
-                .enable_all()
-                .build()
-                .map_err(|e| {
-                    InitializationError::new_err(format!("failed to create runtime: {e}"))
-                })?,
-        );
         Ok(Self {
-            runtime,
+            runtime: crate::error::make_runtime()?,
             connections: Vec::new(),
         })
     }
@@ -98,7 +88,8 @@ impl MCPManager {
     ///     command: The command to spawn (e.g., "npx", "uvx").
     ///     args: Arguments to pass to the command.
     ///     env: Environment variables to set for the child process.
-    ///     timeout_secs: Timeout in seconds for the connection handshake.
+    ///     timeout_secs: Timeout in seconds for the connection handshake and
+    ///         the initial tool listing.
     ///
     /// Returns:
     ///     The number of tools available from this server.
@@ -133,14 +124,18 @@ impl MCPManager {
                     ))
                 })?;
 
+                // The handshake and tool listing share one deadline.
+                let deadline = tokio::time::Instant::now() + timeout;
+                let timed_out = || {
+                    InitializationError::new_err(format!(
+                        "MCP server '{name}' connection timed out after {timeout_secs}s"
+                    ))
+                };
+
                 // Connect and perform the MCP handshake
-                let service = tokio::time::timeout(timeout, ().serve(transport))
+                let service = tokio::time::timeout_at(deadline, ().serve(transport))
                     .await
-                    .map_err(|_| {
-                        InitializationError::new_err(format!(
-                            "MCP server '{name}' connection timed out after {timeout_secs}s"
-                        ))
-                    })?
+                    .map_err(|_| timed_out())?
                     .map_err(|e| {
                         InitializationError::new_err(format!(
                             "MCP handshake failed for '{name}': {e}"
@@ -148,9 +143,15 @@ impl MCPManager {
                     })?;
 
                 // List available tools
-                let tools_resp = service.list_tools(Default::default()).await.map_err(|e| {
-                    InitializationError::new_err(format!("failed to list tools from '{name}': {e}"))
-                })?;
+                let tools_resp =
+                    tokio::time::timeout_at(deadline, service.list_tools(Default::default()))
+                        .await
+                        .map_err(|_| timed_out())?
+                        .map_err(|e| {
+                            InitializationError::new_err(format!(
+                                "failed to list tools from '{name}': {e}"
+                            ))
+                        })?;
 
                 let tool_count = tools_resp.tools.len();
 

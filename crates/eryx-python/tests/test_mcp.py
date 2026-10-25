@@ -6,6 +6,7 @@ import json
 import os
 import sys
 import textwrap
+import time
 from pathlib import Path
 from unittest.mock import patch
 
@@ -416,6 +417,21 @@ class TestMCPManager:
         manager = eryx.MCPManager()
         with pytest.raises(eryx.InitializationError):
             manager.connect("bad", "/nonexistent/command", [], {}, 5.0)
+
+    def test_connect_times_out_on_unanswered_tool_listing(self):
+        """The connect timeout also covers listing tools after the handshake."""
+        manager = eryx.MCPManager()
+        start = time.monotonic()
+        with pytest.raises(eryx.InitializationError, match="timed out"):
+            manager.connect(
+                "hang",
+                sys.executable,
+                [MOCK_SERVER],
+                {"MOCK_MCP_HANG_TOOLS_LIST": "1"},
+                1.0,
+            )
+        assert time.monotonic() - start < 10
+        assert manager.server_names == []
 
     def test_connect_multiple_servers(self):
         """Test connecting to multiple mock servers."""

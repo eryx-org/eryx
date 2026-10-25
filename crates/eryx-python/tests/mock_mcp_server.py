@@ -12,6 +12,7 @@ Exposes two tools:
 from __future__ import annotations
 
 import json
+import os
 import sys
 
 
@@ -64,6 +65,10 @@ def _handle_request(msg: dict) -> dict | None:
         }
 
     if method == "tools/list":
+        # Lets tests exercise a server that completes the handshake but
+        # never answers the tool listing.
+        if os.environ.get("MOCK_MCP_HANG_TOOLS_LIST"):
+            return None
         return {
             "jsonrpc": "2.0",
             "id": msg_id,

@@ -2,7 +2,7 @@
 //!
 //! Maps Eryx errors to Python exceptions with appropriate types.
 
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use pyo3::exceptions::{PyException, PyRuntimeError, PyTimeoutError, PyValueError};
 use pyo3::prelude::*;
@@ -109,13 +109,19 @@ pub fn eryx_error_to_py(err: eryx::Error) -> PyErr {
     }
 }
 
+/// Get the process-wide Tokio runtime shared by every sandbox, session,
+/// factory and MCP manager, creating it on first use.
 pub fn make_runtime() -> PyResult<Arc<tokio::runtime::Runtime>> {
-    Ok(Arc::new(
-        tokio::runtime::Builder::new_multi_thread()
-            .enable_all()
-            .build()
-            .map_err(|e| InitializationError::new_err(format!("failed to create runtime: {e}")))?,
-    ))
+    static RUNTIME: OnceLock<Arc<tokio::runtime::Runtime>> = OnceLock::new();
+    if let Some(runtime) = RUNTIME.get() {
+        return Ok(Arc::clone(runtime));
+    }
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .map_err(|e| InitializationError::new_err(format!("failed to create runtime: {e}")))?;
+    // A racing thread may have won; its runtime is kept and ours is dropped.
+    Ok(Arc::clone(RUNTIME.get_or_init(|| Arc::new(runtime))))
 }
 
 /// Convert an `eryx::PoolError` to a Python exception.
