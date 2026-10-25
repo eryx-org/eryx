@@ -54,7 +54,7 @@ use std::sync::{Arc, Mutex as StdMutex};
 use std::time::{Duration, Instant};
 
 use tokio::sync::Semaphore;
-use tokio::time::timeout;
+use tokio::time::timeout_at;
 
 use crate::Error;
 use crate::callback::Callback;
@@ -334,7 +334,7 @@ impl SandboxPool {
         };
 
         // Pre-warm the pool with min_idle instances
-        pool_instance.prewarm(config.min_idle)?;
+        pool_instance.prewarm(config.min_idle).await?;
 
         Ok(pool_instance)
     }
@@ -398,17 +398,15 @@ impl SandboxPool {
         };
 
         // Pre-warm the pool with min_idle instances
-        pool_instance.prewarm(config.min_idle)?;
+        pool_instance.prewarm(config.min_idle).await?;
 
         Ok(pool_instance)
     }
 
     /// Pre-warm the pool with the specified number of instances.
-    fn prewarm(&self, count: usize) -> Result<(), PoolError> {
+    async fn prewarm(&self, count: usize) -> Result<(), PoolError> {
         for _ in 0..count {
-            let sandbox = (self.builder_fn)().map_err(PoolError::from)?;
-            self.stats.record_creation();
-            self.current_size.fetch_add(1, Ordering::Relaxed);
+            let sandbox = self.create_sandbox().await?;
 
             let mut pool = self.pool.lock().unwrap();
             pool.push_back(PoolEntry {
@@ -419,11 +417,25 @@ impl SandboxPool {
         Ok(())
     }
 
+    /// Create a sandbox on the blocking thread pool, since building one can
+    /// take hundreds of milliseconds.
+    async fn create_sandbox(&self) -> Result<Sandbox, PoolError> {
+        let builder_fn = Arc::clone(&self.builder_fn);
+        let sandbox = tokio::task::spawn_blocking(move || builder_fn())
+            .await
+            .map_err(|e| PoolError::Creation(format!("sandbox creation panicked: {e}")))??;
+        self.stats.record_creation();
+        self.current_size.fetch_add(1, Ordering::Relaxed);
+        Ok(sandbox)
+    }
+
     /// Acquire a sandbox from the pool.
     ///
-    /// This method blocks until a sandbox is available or the acquire timeout
-    /// is reached. The returned `PooledSandbox` will automatically return the
-    /// sandbox to the pool when dropped.
+    /// This method waits until a sandbox is available or the acquire timeout
+    /// is reached. When no idle sandbox is ready and the pool is below
+    /// `max_size`, a new one is created; that also counts against the timeout.
+    /// The returned `PooledSandbox` will automatically return the sandbox to
+    /// the pool when dropped.
     ///
     /// # Errors
     ///
@@ -461,9 +473,10 @@ impl SandboxPool {
         }
 
         let start = Instant::now();
+        let deadline = tokio::time::Instant::now() + acquire_timeout;
 
         // Try to acquire a semaphore permit with timeout
-        let permit = match timeout(acquire_timeout, self.semaphore.clone().acquire_owned()).await {
+        let permit = match timeout_at(deadline, self.semaphore.clone().acquire_owned()).await {
             Ok(Ok(permit)) => permit,
             Ok(Err(_)) => return Err(PoolError::Closed), // Semaphore closed
             Err(_) => {
@@ -484,13 +497,10 @@ impl SandboxPool {
 
         let sandbox = match sandbox {
             Some(s) => s,
-            None => {
-                // No sandbox available, create a new one
-                let s = (self.builder_fn)().map_err(PoolError::from)?;
-                self.stats.record_creation();
-                self.current_size.fetch_add(1, Ordering::Relaxed);
-                s
-            }
+            // No sandbox available, create a new one
+            None => timeout_at(deadline, self.create_sandbox())
+                .await
+                .map_err(|_| PoolError::Timeout(acquire_timeout))??,
         };
 
         self.stats.record_acquisition();
@@ -506,9 +516,11 @@ impl SandboxPool {
         })
     }
 
-    /// Try to acquire a sandbox without blocking.
+    /// Try to acquire an idle sandbox without blocking.
     ///
-    /// Returns `None` if no sandbox is immediately available.
+    /// Returns `None` if the pool is at capacity or has no idle sandbox ready.
+    /// Unlike [`acquire`](Self::acquire), this never creates a sandbox, since
+    /// that takes hundreds of milliseconds.
     ///
     /// # Errors
     ///
@@ -526,21 +538,10 @@ impl SandboxPool {
             Err(tokio::sync::TryAcquireError::Closed) => return Err(PoolError::Closed),
         };
 
-        // Try to get an existing sandbox from the pool
-        let sandbox = {
-            let mut pool = self.pool.lock().unwrap();
-            pool.pop_front().map(|entry| entry.sandbox)
-        };
-
-        let sandbox = match sandbox {
-            Some(s) => s,
-            None => {
-                // No sandbox available, create a new one
-                let s = (self.builder_fn)().map_err(PoolError::from)?;
-                self.stats.record_creation();
-                self.current_size.fetch_add(1, Ordering::Relaxed);
-                s
-            }
+        // Take an existing sandbox from the pool; the permit is released if
+        // there is none.
+        let Some(sandbox) = self.pool.lock().unwrap().pop_front().map(|e| e.sandbox) else {
+            return Ok(None);
         };
 
         self.stats.record_acquisition();

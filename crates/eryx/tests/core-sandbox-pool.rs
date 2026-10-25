@@ -161,3 +161,39 @@ async fn pool_accepts_precompiled_bytes() {
     let result = sandbox.execute("print(6 * 7)").await.unwrap();
     assert_eq!(result.stdout_text().trim(), "42");
 }
+
+#[tokio::test]
+async fn pool_acquire_timeout_covers_sandbox_creation() {
+    let config = PoolConfig {
+        max_size: 1,
+        min_idle: 0,
+        acquire_timeout: std::time::Duration::from_millis(100),
+        ..Default::default()
+    };
+    let pool = SandboxPool::with_builder(
+        || {
+            std::thread::sleep(std::time::Duration::from_secs(2));
+            Sandbox::embedded().build()
+        },
+        config,
+    )
+    .await
+    .unwrap();
+
+    let start = std::time::Instant::now();
+    let result = pool.acquire().await;
+    assert!(matches!(result, Err(PoolError::Timeout(_))), "{result:?}");
+    assert!(start.elapsed() < std::time::Duration::from_secs(1));
+}
+
+#[tokio::test]
+async fn pool_try_acquire_never_creates_a_sandbox() {
+    let config = PoolConfig {
+        max_size: 1,
+        min_idle: 0,
+        ..Default::default()
+    };
+    let pool = SandboxPool::new(Sandbox::embedded(), config).await.unwrap();
+    assert!(pool.try_acquire().unwrap().is_none());
+    assert_eq!(pool.stats().total_creations, 0);
+}
