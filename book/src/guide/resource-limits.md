@@ -264,8 +264,9 @@ limits = eryx.ResourceLimits(max_open_host_files=64)
 
 All sandboxes in the process also share one total, so many concurrent sandboxes
 can't use up the process's descriptor limit. It defaults to half the soft
-`RLIMIT_NOFILE` (read the first time a sandbox opens a host file), and Rust
-embedders can change it with `eryx::vfs::set_process_max_open_host_files`. The
+`RLIMIT_NOFILE`, but never less than 256. The limit is read once, the first time a
+sandbox opens a host file, so raise `RLIMIT_NOFILE` before then to get a larger
+default. A forked child starts with its own count. Rust embedders can change it with `eryx::vfs::set_process_max_open_host_files`. The
 gRPC server sets both with `--max-open-host-files` and
 `--max-open-host-files-total`.
 

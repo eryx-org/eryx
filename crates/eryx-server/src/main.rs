@@ -139,7 +139,7 @@ struct Args {
     max_open_host_files: usize,
 
     /// Most host files all executions together may hold open at once.
-    /// Defaults to half the process's soft `RLIMIT_NOFILE`.
+    /// Defaults to half the process's soft `RLIMIT_NOFILE`, at least 256.
     #[arg(long, env = "ERYX_MAX_OPEN_HOST_FILES_TOTAL")]
     max_open_host_files_total: Option<usize>,
 

@@ -33,6 +33,7 @@
 mod bindings;
 mod error;
 mod file_io;
+mod fork_local;
 mod host;
 pub mod hybrid;
 mod hybrid_bindings;

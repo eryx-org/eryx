@@ -495,7 +495,7 @@ A few more rules apply to volumes:
   `EDQUOT` until some are closed. Set `max_open_host_files` in
   [resource limits](./resource-limits.md#open-host-files) to change it. All
   sandboxes in the process also share one total, by default half the soft
-  `RLIMIT_NOFILE`.
+  `RLIMIT_NOFILE` (at least 256).
 - **File size** - `max_vfs_bytes` doesn't apply to volumes, so by default a
   writable volume can fill the host disk. Give the mount a `max_file_size` to
   cap how large any one file in it may grow; writes past it fail. The cap is

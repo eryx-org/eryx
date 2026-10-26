@@ -14,6 +14,7 @@ use std::sync::{Arc, Mutex, Weak};
 
 use cap_primitives::fs as capfs;
 
+use crate::fork_local::ForkLocal;
 use crate::perms::{DirPerms, FilePerms};
 use wasmtime::component::ResourceTable;
 
@@ -565,9 +566,12 @@ const UNSET: usize = usize::MAX;
 /// fail with the same quota error as the per-context
 /// [`with_max_open_host_files`](HybridVfsCtx::with_max_open_host_files) limit.
 ///
-/// The default is half the process's soft `RLIMIT_NOFILE`, read the first time
-/// a guest opens a host file (on non-Unix platforms, or with no limit set,
-/// 4096). Passing `usize::MAX` restores that default.
+/// The default is half the process's soft `RLIMIT_NOFILE`, read once, the
+/// first time a guest opens a host file, and never below
+/// [`DEFAULT_MAX_OPEN_HOST_FILES`] (so a low limit such as macOS's usual 256
+/// doesn't undercut one sandbox's own limit). On non-Unix platforms, or with
+/// no limit set, it is 4096. Raise `RLIMIT_NOFILE` before the first open for a
+/// larger default. Passing `usize::MAX` restores the default.
 pub fn set_process_max_open_host_files(max: usize) {
     PROCESS_HOST_FILES.max.store(max, Ordering::Relaxed);
 }
@@ -583,21 +587,25 @@ const FALLBACK_PROCESS_MAX_OPEN_HOST_FILES: usize = 4096;
 fn default_process_max_open_host_files() -> usize {
     #[cfg(unix)]
     if let Some(soft) = rustix::process::getrlimit(rustix::process::Resource::Nofile).current {
-        return usize::try_from(soft / 2).unwrap_or(usize::MAX).max(1);
+        return usize::try_from(soft / 2)
+            .unwrap_or(usize::MAX)
+            .max(DEFAULT_MAX_OPEN_HOST_FILES);
     }
     FALLBACK_PROCESS_MAX_OPEN_HOST_FILES
 }
 
 /// A limit on host handles shared by several contexts.
 pub(crate) struct HostFileBudget {
-    open: Mutex<Vec<Weak<std::fs::File>>>,
+    /// Per process, so a forked child neither counts the parent's handles nor
+    /// waits on a lock a parent thread held at the fork.
+    open: ForkLocal<Mutex<Vec<Weak<std::fs::File>>>>,
     max: AtomicUsize,
 }
 
 impl HostFileBudget {
     pub(crate) const fn new(max: usize) -> Self {
         Self {
-            open: Mutex::new(Vec::new()),
+            open: ForkLocal::new(|| Mutex::new(Vec::new())),
             max: AtomicUsize::new(max),
         }
     }
@@ -621,7 +629,7 @@ impl HostFileBudget {
         let max = self.max();
         // The list holds no invariant a panic could break, so a poisoned lock
         // is still usable.
-        let mut open = self.open.lock().unwrap_or_else(|e| e.into_inner());
+        let mut open = self.open.get().lock().unwrap_or_else(|e| e.into_inner());
         open.retain(|f| f.strong_count() > 0);
         if open.len() >= max {
             return Err(crate::VfsError::TooManyOpenFiles(format!(
