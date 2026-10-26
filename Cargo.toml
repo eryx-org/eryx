@@ -51,7 +51,7 @@ rand = "0.10"           # secret placeholder generation
 rcgen = "0.14"          # test certificate generation
 reqwest = { version = "0.13", default-features = false, features = ["rustls-no-provider"] }
 rmcp = "3.0"            # Model Context Protocol SDK
-rustix = { version = "1.1", features = ["process"] } # current uid for cache dir checks
+rustix = "^1.1.5" #unified
 rustls = "0.23"
 schemars = "1.0.0-alpha.17" # JSON Schema
 serde = { version = "1.0", features = ["derive"] }

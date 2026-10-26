@@ -9,12 +9,12 @@ authors.workspace = true
 description = "Virtual filesystem implementation for eryx sandbox"
 
 [dependencies]
+ambient-authority = "0.0.2"
 anyhow.workspace = true
 async-trait.workspace = true
 # Vendored DirPerms/FilePerms; see src/perms.rs.
 bitflags = "2"
 bytes = "1"
-ambient-authority = "0.0.2"
 cap-primitives = "4"
 serde = { workspace = true, optional = true }
 thiserror.workspace = true
@@ -25,7 +25,7 @@ wasmtime-wasi.workspace = true
 wasmtime-wasi-io.workspace = true
 
 [target.'cfg(unix)'.dependencies]
-rustix.workspace = true
+rustix = { workspace = true, features = ["process"] } #unified
 
 [features]
 ## Derive serde `Serialize`/`Deserialize` on the snapshot types, enabling
