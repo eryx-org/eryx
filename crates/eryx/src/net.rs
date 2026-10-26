@@ -87,6 +87,15 @@ pub trait Resolver: Send + Sync + std::fmt::Debug {
     async fn resolve(&self, host: &str, port: u16) -> std::io::Result<Vec<SocketAddr>>;
 }
 
+/// Lets one resolver be shared between configs:
+/// `config.with_resolver(Arc::clone(&resolver))`.
+#[async_trait::async_trait]
+impl<R: Resolver + ?Sized> Resolver for Arc<R> {
+    async fn resolve(&self, host: &str, port: u16) -> std::io::Result<Vec<SocketAddr>> {
+        (**self).resolve(host, port).await
+    }
+}
+
 /// Network configuration for the sandbox.
 ///
 /// Controls which hosts Python code can connect to and sets timeouts.
@@ -1693,8 +1702,28 @@ fn host_matches_pattern(host: &str, pattern: &str) -> bool {
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
-    /// `len` is guest-controlled and the buffer lands on the host, outside the
-    /// sandbox's memory limit: `recv(2**32 - 1)` used to allocate 4 GiB per call.
+    #[test]
+    fn one_resolver_can_be_shared_between_configs() {
+        #[derive(Debug)]
+        struct Fixed;
+
+        #[async_trait::async_trait]
+        impl super::Resolver for Fixed {
+            async fn resolve(
+                &self,
+                _host: &str,
+                port: u16,
+            ) -> std::io::Result<Vec<std::net::SocketAddr>> {
+                Ok(vec![([192, 0, 2, 1], port).into()])
+            }
+        }
+
+        let shared: std::sync::Arc<dyn super::Resolver> = std::sync::Arc::new(Fixed);
+        let a = super::NetConfig::default().with_resolver(std::sync::Arc::clone(&shared));
+        let b = super::NetConfig::default().with_resolver(shared);
+        assert!(a.resolver().is_some() && b.resolver().is_some());
+    }
+
     #[test]
     fn replacing_lists_drops_the_defaults() {
         let net: IpNet = "10.0.0.0/8".parse().unwrap();
@@ -1709,6 +1738,8 @@ mod tests {
         assert!(config.allows_all_hosts());
     }
 
+    /// `len` is guest-controlled and the buffer lands on the host, outside the
+    /// sandbox's memory limit: `recv(2**32 - 1)` used to allocate 4 GiB per call.
     #[test]
     fn read_buf_len_is_bounded() {
         use super::{MAX_READ_LEN, read_buf_len};
