@@ -333,6 +333,12 @@ print("Got HTTPS response" if b"HTTP" in response else "Failed")
 """)
 ```
 
+`server_hostname` must be the host passed to `connect()`, ignoring case and a
+trailing dot; any other name fails the upgrade with `PermissionError`. The
+certificate is checked for the host the policy allowed, so a connection to one
+allowed address can't reach a different site behind it. As a result, HTTPS
+through an HTTP `CONNECT` proxy tunnel isn't supported.
+
 ### Custom Root Certificates
 
 Add custom CA certificates for internal services:

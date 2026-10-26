@@ -321,7 +321,7 @@ async fn tls_handshake_timeout_raises_timeout_error() {
         .execute(&format!(
             "import socket, ssl\n\
              s = socket.create_connection(('127.0.0.1', {port}))\n\
-             try:\n    ssl.create_default_context().wrap_socket(s, server_hostname='localhost')\n\
+             try:\n    ssl.create_default_context().wrap_socket(s, server_hostname='127.0.0.1')\n\
              except Exception as e:\n    print(type(e).__name__, 'timed out' in str(e))"
         ))
         .await
