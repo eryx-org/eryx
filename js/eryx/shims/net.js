@@ -3,9 +3,12 @@
  *
  * Networking is disabled until the host calls setNetConfig(). Host policy
  * mirrors the Rust crate's NetConfig: blocked patterns are always enforced,
- * then the host must match allowedHosts unless allowAllHosts is set. In Node,
- * resolved addresses are also checked against blockedNetworks (minus
- * allowedNetworks) unless the host matches internalHosts.
+ * then the host must match allowedHosts unless allowAllHosts is set. Hosts are
+ * matched in their WHATWG URL form too, so `2130706433` and `0x7f.1` read as
+ * `127.0.0.1`. IP addresses are checked against blockedNetworks (minus
+ * allowedNetworks); in Node, so are the addresses a name resolves to, unless
+ * the host matches internalHosts. Browsers don't expose DNS answers, so there
+ * only an allowlist keeps names that resolve to private addresses out.
  *
  * The transport depends on the environment:
  * - Node.js: real TCP/TLS sockets (net-node.js)
@@ -33,6 +36,8 @@ export const DEFAULT_BLOCKED_HOSTS = [
   "192.168.*",
   "169.254.*",
   "[::1]",
+  "0.0.0.0",
+  "[::]",
 ];
 
 /** Same defaults as the Rust crate's `DEFAULT_BLOCKED_NETWORKS`. */
@@ -52,6 +57,11 @@ export const DEFAULT_BLOCKED_NETWORKS = [
   "fe80::/10",
   "ff00::/8",
 ];
+
+/** Same defaults as the Rust crate's `NetConfig::default()`. */
+const DEFAULT_MAX_CONNECTIONS = 10;
+const DEFAULT_CONNECT_TIMEOUT_MS = 30_000;
+const DEFAULT_IO_TIMEOUT_MS = 60_000;
 
 /**
  * The active policy; `isAllowed` checks resolved addresses (null where the
@@ -91,9 +101,41 @@ export function setNetConfig(netConfig) {
     blockedNetworks: checkCidrs(netConfig.blockedNetworks ?? DEFAULT_BLOCKED_NETWORKS),
     allowedNetworks: checkCidrs(netConfig.allowedNetworks ?? []),
     internalHosts: netConfig.internalHosts ?? [],
+    maxConnections: netConfig.maxConnections ?? DEFAULT_MAX_CONNECTIONS,
+    connectTimeoutMs: netConfig.connectTimeoutMs ?? DEFAULT_CONNECT_TIMEOUT_MS,
+    ioTimeoutMs: netConfig.ioTimeoutMs ?? DEFAULT_IO_TIMEOUT_MS,
   };
-  // Only the Node transport sees resolved addresses.
-  config = { ...next, isAllowed: transport.networkFilter?.(next) ?? null };
+  config = { ...next, isAllowed: transport.networkFilter(next) };
+}
+
+/**
+ * Close every connection sandboxed code left open. The sandbox calls this
+ * after each execution.
+ */
+export const closeConnections = transport.closeAll;
+
+/**
+ * The guest's timeout (`0` for none) clamped to the host's, so sandboxed code
+ * can shorten a timeout but never extend it.
+ */
+// setTimeout fires at once for delays past 2^31 - 1 ms.
+const clamp = (hostMs, guestMs) => Math.min(guestMs ? Math.min(guestMs, hostMs) : hostMs, 2 ** 31 - 1);
+const connectTimeout = (ms) => clamp(config?.connectTimeoutMs ?? DEFAULT_CONNECT_TIMEOUT_MS, ms);
+const ioTimeout = (ms) => clamp(config?.ioTimeoutMs ?? DEFAULT_IO_TIMEOUT_MS, ms);
+
+/**
+ * `host` in WHATWG URL form (lower-cased, IPv4 in dotted decimal, IPv6
+ * bracketed and compressed) without a trailing dot, or null if it isn't a
+ * bare host name or address.
+ */
+function canonicalHost(host) {
+  // URL parsing would read these as userinfo, path or port delimiters.
+  if (!host || /[\s/?#@\\]/.test(host)) return null;
+  try {
+    return new URL(`http://${host.includes(":") ? `[${host}]` : host}`).hostname.replace(/\.$/, "");
+  } catch {
+    return null;
+  }
 }
 
 /** Glob match with `*` wildcards, case-insensitive (like the Rust matcher). */
@@ -105,25 +147,45 @@ function hostMatches(host, pattern) {
   return new RegExp(`^${re}$`, "i").test(host);
 }
 
+const notPermitted = (val) => ({ payload: { tag: "not-permitted", val } });
+
+/** Check `host` against the policy and return its canonical form. */
 function checkHost(host) {
-  const notPermitted = (val) => ({ payload: { tag: "not-permitted", val } });
   if (!config) throw notPermitted("networking is disabled; enable it with setNetConfig()");
-  if (config.blockedHosts.some((p) => hostMatches(host, p))) {
+  const canonical = canonicalHost(host);
+  if (canonical === null) throw notPermitted(`host '${host}' is not a valid host name`);
+  const matches = (patterns) => patterns.some((p) => hostMatches(host, p) || hostMatches(canonical, p));
+  if (matches(config.blockedHosts)) {
     throw notPermitted(`host '${host}' is blocked`);
   }
-  if (!config.allowAllHosts && !config.allowedHosts.some((p) => hostMatches(host, p))) {
+  if (!config.allowAllHosts && !matches(config.allowedHosts)) {
     throw notPermitted(`host '${host}' not in allowed list`);
   }
+  return { canonical, internal: matches(config.internalHosts) };
 }
 
 export const tcp = {
-  ...transport.tcp,
   async connect(host, port, timeoutMs) {
-    checkHost(host);
-    // The transport checks resolved addresses with this; internal hosts skip it.
-    const internal = config.internalHosts.some((p) => hostMatches(host, p));
-    return transport.tcp.connect(host, port, timeoutMs, internal ? null : config.isAllowed);
+    const { canonical, internal } = checkHost(host);
+    if (transport.openConnections() >= config.maxConnections) {
+      throw notPermitted(`connection limit reached (${config.maxConnections})`);
+    }
+    // The transport checks the address (Node: the resolved addresses) with
+    // this; internal hosts skip it.
+    const isAllowed = internal ? null : config.isAllowed;
+    // Connect to the form that was checked, unbracketed for the transport.
+    const target = canonical.replace(/^\[(.*)\]$/, "$1");
+    return transport.tcp.connect(target, port, connectTimeout(timeoutMs), isAllowed);
   },
+  read: (h, len, timeoutMs) => transport.tcp.read(h, len, ioTimeout(timeoutMs)),
+  write: (h, timeoutMs, data) => transport.tcp.write(h, ioTimeout(timeoutMs), data),
+  close: transport.tcp.close,
 };
 
-export const tls = transport.tls;
+export const tls = {
+  upgrade: (h, hostname, timeoutMs) =>
+    transport.tls.upgrade(h, hostname, connectTimeout(timeoutMs)),
+  read: (h, len, timeoutMs) => transport.tls.read(h, len, ioTimeout(timeoutMs)),
+  write: (h, timeoutMs, data) => transport.tls.write(h, ioTimeout(timeoutMs), data),
+  close: transport.tls.close,
+};

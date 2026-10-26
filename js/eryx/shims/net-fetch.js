@@ -7,7 +7,10 @@
  * read, and serve the response back as raw HTTP/1.1 bytes.
  *
  * Limits: HTTP only, one request per connection (responses always say
- * `Connection: close`), CORS applies, and fetch() follows redirects itself.
+ * `Connection: close`), and CORS applies. Requests always go to the host the
+ * guest connected to, and redirects aren't followed: the guest's HTTP client
+ * sees the 3xx and connects again, through the policy. Browsers hide a
+ * redirect's target, so there a redirect fails instead.
  */
 
 const conns = new Map();
@@ -31,6 +34,77 @@ const SKIP_REQUEST_HEADERS = new Set([
 const SKIP_RESPONSE_HEADERS = new Set([
   "content-encoding", "content-length", "transfer-encoding", "connection", "keep-alive",
 ]);
+
+/** Bytes of an IPv4 address in dotted decimal, or null. */
+function ipv4Bytes(addr) {
+  const parts = addr.split(".");
+  if (parts.length !== 4 || !parts.every((p) => /^\d{1,3}$/.test(p) && Number(p) <= 255)) return null;
+  return parts.map(Number);
+}
+
+/** Bytes of an IPv6 address (with an optional dotted IPv4 tail), or null. */
+function ipv6Bytes(addr) {
+  const tail = /^(.*:)(\d+\.\d+\.\d+\.\d+)$/.exec(addr);
+  if (tail) {
+    const b = ipv4Bytes(tail[2]);
+    if (!b) return null;
+    addr = `${tail[1]}${((b[0] << 8) | b[1]).toString(16)}:${((b[2] << 8) | b[3]).toString(16)}`;
+  }
+  const halves = addr.split("::");
+  if (halves.length > 2) return null;
+  const groups = (s) => (s ? s.split(":") : []);
+  const head = groups(halves[0]);
+  const rest = halves.length === 2 ? groups(halves[1]) : [];
+  const fill = 8 - head.length - rest.length;
+  if (halves.length === 2 ? fill < 1 : fill !== 0) return null;
+  const all = [...head, ...Array(halves.length === 2 ? fill : 0).fill("0"), ...rest];
+  if (!all.every((g) => /^[0-9a-f]{1,4}$/i.test(g))) return null;
+  return all.flatMap((g) => [parseInt(g, 16) >> 8, parseInt(g, 16) & 255]);
+}
+
+/** The IPv4 address an IPv4-mapped (`::ffff:0:0/96`) or NAT64 (`64:ff9b::/96`) address carries. */
+function embeddedIPv4(b) {
+  const prefix = b.slice(0, 12).join(",");
+  const mapped = "0,0,0,0,0,0,0,0,0,0,255,255";
+  const nat64 = "0,100,255,155,0,0,0,0,0,0,0,0";
+  return prefix === mapped || prefix === nat64 ? b.slice(12) : null;
+}
+
+/**
+ * `(address, family) => allowed` for `blockedNetworks` minus
+ * `allowedNetworks`, matching like the Node transport's BlockList. Throws a
+ * TypeError on an invalid network address.
+ */
+export function networkFilter({ blockedNetworks, allowedNetworks }) {
+  const parse = (cidrs) =>
+    cidrs.map((cidr) => {
+      const [addr, prefix] = cidr.split("/");
+      const bytes = addr.includes(":") ? ipv6Bytes(addr) : ipv4Bytes(addr);
+      if (!bytes) throw new TypeError(`invalid CIDR '${cidr}'`);
+      return { bytes, prefix: Number(prefix) };
+    });
+  const inNet = (b, { bytes, prefix }) => {
+    if (b.length !== bytes.length) return false;
+    for (let bit = 0; bit < prefix; bit++) {
+      const mask = 0x80 >> bit % 8;
+      if ((b[bit >> 3] & mask) !== (bytes[bit >> 3] & mask)) return false;
+    }
+    return true;
+  };
+  const blocked = parse(blockedNetworks);
+  const allowed = parse(allowedNetworks);
+  const matches = (nets, b) => {
+    const v4 = b.length === 16 ? embeddedIPv4(b) : null;
+    return nets.some((n) => inNet(b, n) || (v4 !== null && inNet(v4, n)));
+  };
+  return (address, family) => {
+    const b = family === 6 ? ipv6Bytes(address) : ipv4Bytes(address);
+    return b !== null && (!matches(blocked, b) || matches(allowed, b));
+  };
+}
+
+/** 4 or 6 if `host` is an IP address (in the canonical form net.js passes), else 0. */
+const ipFamily = (host) => (host.includes(":") ? 6 : ipv4Bytes(host) ? 4 : 0);
 
 function open(c) {
   const h = nextHandle++;
@@ -79,8 +153,22 @@ function parseRequest(buf) {
 async function send(c, timeoutMs) {
   const req = parseRequest(concat(c.request));
   const defaultPort = c.scheme === "https" ? 443 : 80;
-  const authority = c.port === defaultPort ? c.host : `${c.host}:${c.port}`;
-  const url = /^https?:\/\//i.test(req.target) ? req.target : `${c.scheme}://${authority}${req.target}`;
+  const host = c.host.includes(":") ? `[${c.host}]` : c.host;
+  const origin = `${c.scheme}://${c.port === defaultPort ? host : `${host}:${c.port}`}`;
+  // The URL always comes from the connection. An absolute-form target (as
+  // sent to a proxy) is only accepted for the connected origin.
+  let path = req.target;
+  if (!path.startsWith("/")) {
+    let target = null;
+    try {
+      target = new URL(path);
+    } catch {}
+    if (target?.origin !== origin) {
+      throw { tag: "not-permitted", val: `request target '${path}' is not on the connected host ${origin}` };
+    }
+    path = target.pathname + target.search;
+  }
+  const url = origin + path;
 
   let resp;
   try {
@@ -90,7 +178,8 @@ async function send(c, timeoutMs) {
       body: req.method === "GET" || req.method === "HEAD" ? undefined : req.body,
       // Never let sandboxed code ride the embedding page's cookies.
       credentials: "omit",
-      redirect: "follow",
+      // Following a redirect would reach hosts the policy never checked.
+      redirect: "manual",
       signal: timeoutMs ? AbortSignal.timeout(timeoutMs) : undefined,
     });
   } catch (e) {
@@ -101,6 +190,9 @@ async function send(c, timeoutMs) {
     };
   }
 
+  if (resp.type === "opaqueredirect") {
+    throw { tag: "io-error", val: `${url} redirected; browsers hide the redirect target, so it can't be followed` };
+  }
   const body = req.method === "HEAD" ? new Uint8Array(0) : new Uint8Array(await resp.arrayBuffer());
   let head = `HTTP/1.1 ${resp.status} ${resp.statusText}\r\n`;
   for (const [name, value] of resp.headers) {
@@ -136,9 +228,19 @@ async function read(h, len, timeoutMs, wrapErr) {
 
 const close = (h) => void conns.delete(h);
 
+export const openConnections = () => conns.size;
+export const closeAll = () => conns.clear();
+
 export const tcp = {
-  connect: async (host, port, _timeoutMs) =>
-    open({ host, port, scheme: "http", request: [], response: null, offset: 0 }),
+  /** `isAllowed` is a networkFilter() result, or null to skip the address check. */
+  async connect(host, port, _timeoutMs, isAllowed) {
+    // Browsers resolve names themselves, so only IP addresses can be checked.
+    const family = ipFamily(host);
+    if (family && isAllowed && !isAllowed(host, family)) {
+      throw tcpErr({ tag: "not-permitted", val: `host '${host}' resolves to a blocked network` });
+    }
+    return open({ host, port, scheme: "http", request: [], response: null, offset: 0 });
+  },
   read: (h, len, timeoutMs) => read(h, len, timeoutMs, tcpErr),
   write: async (h, _timeoutMs, data) => write(h, data, tcpErr),
   close,

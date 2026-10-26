@@ -7,18 +7,27 @@
 const conns = new Map();
 let nextHandle = 1;
 
+// Received bytes buffered per connection before the socket is paused until
+// the guest reads, so a fast peer can't fill host memory.
+const HIGH_WATER_BYTES = 1 << 20;
+
 const tcpErr = (val) => ({ payload: val });
 // tls-error wraps tcp-level failures in its `tcp` case.
 const tlsErr = (val) => ({ payload: { tag: "tcp", val } });
 
 function track(socket) {
-  const c = { socket, chunks: [], ended: false, error: null, wake: null };
+  const c = { socket, chunks: [], buffered: 0, ended: false, error: null, wake: null };
   const notify = () => {
     const w = c.wake;
     c.wake = null;
     w?.();
   };
-  c.onData = (b) => { c.chunks.push(new Uint8Array(b)); notify(); };
+  c.onData = (b) => {
+    c.chunks.push(new Uint8Array(b));
+    c.buffered += b.length;
+    if (c.buffered >= HIGH_WATER_BYTES) socket.pause();
+    notify();
+  };
   c.onEnd = () => { c.ended = true; notify(); };
   c.onError = (e) => { c.error = e; notify(); };
   socket.on("data", c.onData).on("end", c.onEnd).on("error", c.onError);
@@ -48,33 +57,61 @@ function mapTcpError(e) {
   }
 }
 
-// ponytail: guest timeout-ms ignored; honour it (clamped to a host ceiling) before shipping Node support.
-async function read(h, len, wrapErr) {
+/** Resolves true when `c` has news, or false after `ms`. */
+function wait(c, ms) {
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => { c.wake = null; resolve(false); }, ms);
+    c.wake = () => { clearTimeout(timer); resolve(true); };
+  });
+}
+
+/** Reject with `err` if `promise` hasn't settled after `ms`. */
+function withTimeout(promise, ms, err) {
+  let timer;
+  return Promise.race([
+    promise,
+    new Promise((_, reject) => { timer = setTimeout(() => reject(err), ms); }),
+  ]).finally(() => clearTimeout(timer));
+}
+
+// net.js passes timeouts already clamped to the host's.
+async function read(h, len, timeoutMs, wrapErr) {
   const c = conns.get(h);
   if (!c) throw wrapErr({ tag: "invalid-handle" });
+  const deadline = Date.now() + timeoutMs;
   while (!c.chunks.length && !c.ended && !c.error) {
-    await new Promise((r) => { c.wake = r; });
+    if (!(await wait(c, deadline - Date.now()))) throw wrapErr({ tag: "timed-out" });
   }
   if (c.chunks.length) {
     const chunk = c.chunks.shift();
     if (chunk.length > len) c.chunks.unshift(chunk.subarray(len));
-    return chunk.subarray(0, len);
+    const out = chunk.subarray(0, len);
+    c.buffered -= out.length;
+    if (c.buffered < HIGH_WATER_BYTES) c.socket.resume();
+    return out;
   }
   if (c.error) throw wrapErr(mapTcpError(c.error));
   return new Uint8Array(0);
 }
 
-async function write(h, data, wrapErr) {
+async function write(h, data, timeoutMs, wrapErr) {
   const c = conns.get(h);
   if (!c) throw wrapErr({ tag: "invalid-handle" });
-  await new Promise((resolve, reject) =>
+  const written = new Promise((resolve, reject) =>
     c.socket.write(data, (e) => (e ? reject(wrapErr(mapTcpError(e))) : resolve())),
   );
+  await withTimeout(written, timeoutMs, wrapErr({ tag: "timed-out" }));
   return data.length;
 }
 
 function close(h) {
   untrack(h)?.socket.destroy();
+}
+
+export const openConnections = () => conns.size;
+
+export function closeAll() {
+  for (const h of [...conns.keys()]) close(h);
 }
 
 // Synchronous so net.js can build (and so validate) the filter in setNetConfig.
@@ -129,7 +166,7 @@ export function networkFilter({ blockedNetworks, allowedNetworks }) {
 
 export const tcp = {
   /** `isAllowed` is a networkFilter() result, or null to skip the address check. */
-  async connect(host, port, _timeoutMs, isAllowed) {
+  async connect(host, port, timeoutMs, isAllowed) {
     isAllowed ??= () => true;
     // Node skips `lookup` for IP literals, so check those here.
     const literal = net.isIP(host);
@@ -146,29 +183,37 @@ export const tcp = {
         if (options.all) return cb(null, ok);
         cb(null, ok[0].address, ok[0].family);
       });
-    return new Promise((resolve, reject) => {
-      const s = net.connect({ host, port, lookup });
+    const s = net.connect({ host, port, lookup });
+    const connected = new Promise((resolve, reject) => {
       s.once("connect", () => { s.off("error", reject); resolve(track(s)); });
       s.once("error", (e) => reject(tcpErr(mapTcpError(e))));
     });
+    return withTimeout(connected, timeoutMs, tcpErr({ tag: "timed-out" })).catch((e) => {
+      s.destroy();
+      throw e;
+    });
   },
-  read: (h, len, _timeoutMs) => read(h, len, tcpErr),
-  write: (h, _timeoutMs, data) => write(h, data, tcpErr),
+  read: (h, len, timeoutMs) => read(h, len, timeoutMs, tcpErr),
+  write: (h, timeoutMs, data) => write(h, data, timeoutMs, tcpErr),
   close,
 };
 
 export const tls = {
-  async upgrade(tcpHandle, hostname, _timeoutMs) {
+  async upgrade(tcpHandle, hostname, timeoutMs) {
     const c = untrack(tcpHandle);
     if (!c) throw tlsErr({ tag: "invalid-handle" });
     const tlsMod = await import(/* webpackIgnore: true */ "node:tls");
-    return new Promise((resolve, reject) => {
-      const s = tlsMod.connect({ socket: c.socket, servername: hostname });
+    const s = tlsMod.connect({ socket: c.socket, servername: hostname });
+    const handshake = new Promise((resolve, reject) => {
       s.once("secureConnect", () => resolve(track(s)));
       s.once("error", (e) => reject({ payload: { tag: "handshake-failed", val: String(e.message) } }));
     });
+    return withTimeout(handshake, timeoutMs, tlsErr({ tag: "timed-out" })).catch((e) => {
+      s.destroy();
+      throw e;
+    });
   },
-  read: (h, len, _timeoutMs) => read(h, len, tlsErr),
-  write: (h, _timeoutMs, data) => write(h, data, tlsErr),
+  read: (h, len, timeoutMs) => read(h, len, timeoutMs, tlsErr),
+  write: (h, timeoutMs, data) => write(h, data, timeoutMs, tlsErr),
   close,
 };

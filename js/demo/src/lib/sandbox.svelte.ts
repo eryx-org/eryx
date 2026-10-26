@@ -31,8 +31,10 @@ export async function initSandbox(): Promise<void> {
   const start = performance.now();
   try {
     const { Sandbox, setNetConfig } = await import("@bsull/eryx");
-    // The browser's CORS rules already limit what sandboxed code can reach;
-    // the default blocklist still keeps it off localhost and private ranges.
+    // The default blocklists refuse localhost and private addresses, but the
+    // browser resolves names itself, so a name pointing at a private address
+    // isn't refused; CORS and the browser's local-network rules still apply.
+    // An embedder with real data to protect should list allowedHosts instead.
     setNetConfig({ allowAllHosts: true });
     const sandbox = new Sandbox();
     const loadTime = ((performance.now() - start) / 1000).toFixed(1);

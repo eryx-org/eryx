@@ -89,7 +89,7 @@ print(f"Temperature in {result['city']}: {result['temp']}°{result['unit']}")
 
 ### Networking
 
-Networking is off by default. Enable it with a host policy (same rules as the Rust crate's `NetConfig`; localhost and private ranges stay blocked unless you override `blockedHosts`, and in Node.js resolved addresses are checked against `blockedNetworks`, with `allowedNetworks` and `internalHosts` as exceptions):
+Networking is off by default. Enable it with a host policy (same rules as the Rust crate's `NetConfig`; localhost and private ranges stay blocked unless you override `blockedHosts`, IP addresses are checked against `blockedNetworks`, and in Node.js so are the addresses a name resolves to, with `allowedNetworks` and `internalHosts` as exceptions). At most `maxConnections` (default 10) are open at once, timeouts are capped by `connectTimeoutMs` and `ioTimeoutMs`, and connections are closed when an execution finishes. Browsers resolve names themselves, so a name that points at a private address can't be refused there: use `allowedHosts` rather than `allowAllHosts` in browsers.
 
 ```js
 import { Sandbox, setNetConfig } from "@bsull/eryx";

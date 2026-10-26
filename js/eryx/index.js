@@ -61,6 +61,7 @@ export {
 
 // Re-export network policy configuration
 export { setNetConfig, DEFAULT_BLOCKED_HOSTS, DEFAULT_BLOCKED_NETWORKS } from "./shims/net.js";
+import { closeConnections } from "./shims/net.js";
 
 import { _beginReplay, _endReplay, _flushOutput } from "./shims/callbacks.js";
 
@@ -188,6 +189,7 @@ async function _run(code) {
     return _toResult(await _execute(`#eryx-preamble:0\n${code}`));
   } finally {
     _flushOutput();
+    closeConnections();
   }
 }
 
