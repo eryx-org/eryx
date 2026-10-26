@@ -23,6 +23,10 @@
 //!   extensions get a [`FilesystemCache`] in the per-user eryx cache directory
 //!   by default
 //!
+//! Entries are loaded as pre-compiled native code without validation, so
+//! the builder methods that take a cache are `unsafe`: the caller vouches that
+//! nobody else can write to it.
+//!
 //! # Cache Flow
 //!
 //! On sandbox creation:
@@ -40,16 +44,21 @@
 //! let cache = FilesystemCache::new("/var/cache/my-app/eryx")?;
 //!
 //! // First call: ~1000ms (link + compile + cache)
-//! let sandbox1 = Sandbox::builder()
-//!     .with_native_extension("numpy/core/*.so", bytes)
-//!     .with_cache(cache.clone())
-//!     .build()?;
+//! // SAFETY: only this user can write to the cache directory.
+//! let sandbox1 = unsafe {
+//!     Sandbox::builder()
+//!         .with_native_extension("numpy/core/*.so", bytes)
+//!         .with_cache(Arc::new(cache.clone()))
+//! }
+//! .build()?;
 //!
 //! // Second call: ~10ms (cache hit)
-//! let sandbox2 = Sandbox::builder()
-//!     .with_native_extension("numpy/core/*.so", bytes)
-//!     .with_cache(cache.clone())
-//!     .build()?;
+//! let sandbox2 = unsafe {
+//!     Sandbox::builder()
+//!         .with_native_extension("numpy/core/*.so", bytes)
+//!         .with_cache(Arc::new(cache.clone()))
+//! }
+//! .build()?;
 //! ```
 
 use sha2::{Digest, Sha256};

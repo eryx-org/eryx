@@ -100,10 +100,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     for (name, bytes) in &extensions {
         builder = builder.with_native_extension(name.clone(), bytes.clone());
     }
-    let sandbox1 = builder
-        .with_site_packages(site_packages)
-        .with_cache_dir(cache_dir)?
-        .build()?;
+    let builder = builder.with_site_packages(site_packages);
+    // SAFETY: the cache directory was just recreated by this process and
+    // FilesystemCache::new checks only this user can write to it.
+    let sandbox1 = unsafe { builder.with_cache_dir(cache_dir)? }.build()?;
     let cold_time = start.elapsed();
     println!(
         "  Created in {:?} (cache miss - linked + compiled + cached)",
@@ -125,10 +125,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     for (name, bytes) in &extensions {
         builder = builder.with_native_extension(name.clone(), bytes.clone());
     }
-    let sandbox2 = builder
-        .with_site_packages(site_packages)
-        .with_cache_dir(cache_dir)?
-        .build()?;
+    let builder = builder.with_site_packages(site_packages);
+    // SAFETY: the cache directory was just recreated by this process and
+    // FilesystemCache::new checks only this user can write to it.
+    let sandbox2 = unsafe { builder.with_cache_dir(cache_dir)? }.build()?;
     let warm_time = start.elapsed();
     println!(
         "  Created in {:?} (cache hit - loaded precompiled)",
@@ -150,10 +150,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     for (name, bytes) in &extensions {
         builder = builder.with_native_extension(name.clone(), bytes.clone());
     }
-    let sandbox3 = builder
-        .with_site_packages(site_packages)
-        .with_cache_dir(cache_dir)?
-        .build()?;
+    let builder = builder.with_site_packages(site_packages);
+    // SAFETY: the cache directory was just recreated by this process and
+    // FilesystemCache::new checks only this user can write to it.
+    let sandbox3 = unsafe { builder.with_cache_dir(cache_dir)? }.build()?;
     let warm_time2 = start.elapsed();
     println!("  Created in {:?} (cache hit)", warm_time2);
 

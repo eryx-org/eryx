@@ -45,7 +45,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Use cache directory for mmap-based loading (faster + less memory)
     let cache_dir = Path::new("/tmp/eryx-session-bench-cache");
     let _ = std::fs::remove_dir_all(cache_dir); // Clean for accurate benchmarks
-    std::fs::create_dir_all(cache_dir)?;
 
     println!("=== Session Per-Execution Benchmark ===\n");
 
@@ -66,10 +65,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     for (name, bytes) in &extensions {
         builder = builder.with_native_extension(name.clone(), bytes.clone());
     }
-    let sandbox = builder
-        .with_site_packages(site_packages)
-        .with_cache_dir(cache_dir)?
-        .build()?;
+    let builder = builder.with_site_packages(site_packages);
+    // SAFETY: the cache directory was just recreated by this process and
+    // FilesystemCache::new checks only this user can write to it.
+    let sandbox = unsafe { builder.with_cache_dir(cache_dir)? }.build()?;
     println!("  Cold sandbox creation: {:?}\n", start.elapsed());
 
     // Create session
@@ -127,10 +126,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         for (name, bytes) in &extensions {
             builder = builder.with_native_extension(name.clone(), bytes.clone());
         }
-        let _sandbox = builder
-            .with_site_packages(site_packages)
-            .with_cache_dir(cache_dir)?
-            .build()?;
+        let builder = builder.with_site_packages(site_packages);
+        // SAFETY: the cache directory was just recreated by this process and
+        // FilesystemCache::new checks only this user can write to it.
+        let _sandbox = unsafe { builder.with_cache_dir(cache_dir)? }.build()?;
         let elapsed = start.elapsed();
         if i == 0 {
             println!("  First (verifying cache): {:?}", elapsed);

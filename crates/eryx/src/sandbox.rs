@@ -1535,6 +1535,14 @@ impl<R, S> SandboxBuilder<R, S> {
     /// With caching enabled, the linked and pre-compiled component is stored and
     /// reused on subsequent calls, reducing creation time to ~10ms.
     ///
+    /// # Safety
+    ///
+    /// Bytes returned by the cache are deserialized as pre-compiled native code
+    /// without validation, exactly like
+    /// [`with_precompiled_bytes`](SandboxBuilder::with_precompiled_bytes). The
+    /// caller must ensure every entry the cache returns was produced by eryx
+    /// for that key and can't have been modified by anyone else.
+    ///
     /// # Example
     ///
     /// ```rust,ignore
@@ -1543,36 +1551,52 @@ impl<R, S> SandboxBuilder<R, S> {
     /// let cache = InMemoryCache::new();
     ///
     /// // First call: ~1000ms (link + compile + cache)
-    /// let sandbox1 = Sandbox::builder()
-    ///     .with_native_extension("numpy/core/*.so", bytes)
-    ///     .with_cache(Arc::new(cache.clone()))
-    ///     .build()?;
+    /// // SAFETY: the in-memory cache only holds what eryx put into it.
+    /// let sandbox1 = unsafe {
+    ///     Sandbox::builder()
+    ///         .with_native_extension("numpy/core/*.so", bytes)
+    ///         .with_cache(Arc::new(cache.clone()))
+    /// }
+    /// .build()?;
     ///
     /// // Second call: ~10ms (cache hit)
-    /// let sandbox2 = Sandbox::builder()
-    ///     .with_native_extension("numpy/core/*.so", bytes)
-    ///     .with_cache(Arc::new(cache))
-    ///     .build()?;
+    /// let sandbox2 = unsafe {
+    ///     Sandbox::builder()
+    ///         .with_native_extension("numpy/core/*.so", bytes)
+    ///         .with_cache(Arc::new(cache))
+    /// }
+    /// .build()?;
     /// ```
     #[cfg(feature = "native-extensions")]
     #[must_use]
-    pub fn with_cache(mut self, cache: Arc<dyn ComponentCache>) -> Self {
+    #[expect(unsafe_code, reason = "cache entries are deserialized as native code")]
+    pub unsafe fn with_cache(mut self, cache: Arc<dyn ComponentCache>) -> Self {
         self.cache = Some(cache);
         self
     }
 
     /// Set a custom filesystem cache directory for late-linked components.
     ///
-    /// **Note:** You usually don't need to call this. A default cache at
-    /// `$TMPDIR/eryx-cache` is used automatically when native extensions are present.
-    /// Use this method only if you need a specific cache location.
+    /// **Note:** You usually don't need to call this. A default cache in the
+    /// per-user eryx cache directory (`components/` under `$XDG_CACHE_HOME/eryx`,
+    /// `~/.cache/eryx` or `$TMPDIR/eryx-<uid>`) is used automatically when
+    /// native extensions are present. Use this method only if you need a
+    /// specific cache location.
     ///
     /// The cache stores pre-compiled WASM components to avoid expensive
     /// re-linking on subsequent sandbox creations with the same extensions.
+    /// The directory is checked as described in [`FilesystemCache::new`].
+    ///
+    /// # Safety
+    ///
+    /// Cached files are loaded as pre-compiled native code without validation.
+    /// The caller must ensure nobody but this user can modify the directory or
+    /// its contents (see [`with_cache`](SandboxBuilder::with_cache)).
     ///
     /// # Errors
     ///
-    /// Returns an error if the cache directory cannot be created.
+    /// Returns an error if the cache directory cannot be created, or is owned
+    /// by another user or writable by other users.
     ///
     /// # Example
     ///
@@ -1580,23 +1604,31 @@ impl<R, S> SandboxBuilder<R, S> {
     /// // Usually not needed - default cache is automatic
     /// let sandbox = Sandbox::builder()
     ///     .with_package("/path/to/numpy.tar.gz")?
-    ///     .build()?;  // Uses $TMPDIR/eryx-cache automatically
+    ///     .build()?;  // Uses the per-user cache directory automatically
     ///
     /// // Only if you need a specific location:
-    /// let sandbox = Sandbox::builder()
-    ///     .with_package("/path/to/numpy.tar.gz")?
-    ///     .with_cache_dir("/custom/cache/path")?
-    ///     .build()?;
+    /// // SAFETY: the directory is private to this service's user.
+    /// let sandbox = unsafe {
+    ///     Sandbox::builder()
+    ///         .with_package("/path/to/numpy.tar.gz")?
+    ///         .with_cache_dir("/var/cache/my-app/eryx")?
+    /// }
+    /// .build()?;
     /// ```
     ///
-    /// [`FilesystemCache`]: crate::cache::FilesystemCache
+    /// [`FilesystemCache::new`]: crate::cache::FilesystemCache::new
     #[cfg(feature = "native-extensions")]
-    pub fn with_cache_dir(mut self, path: impl AsRef<std::path::Path>) -> Result<Self, Error> {
+    #[expect(unsafe_code, reason = "cache entries are deserialized as native code")]
+    pub unsafe fn with_cache_dir(
+        mut self,
+        path: impl AsRef<std::path::Path>,
+    ) -> Result<Self, Error> {
         let cache = crate::cache::FilesystemCache::new(path)
             .map_err(|e| Error::Initialization(format!("failed to create cache directory: {e}")))?;
         // Store filesystem cache for mmap-based loading (3x faster than bytes)
         self.filesystem_cache = Some(cache.clone());
-        Ok(self.with_cache(Arc::new(cache)))
+        self.cache = Some(Arc::new(cache));
+        Ok(self)
     }
 
     /// Add a runtime library (callbacks + preamble + stubs).
@@ -2422,10 +2454,13 @@ impl SandboxBuilder<state::Has, state::Has> {
                 path = %path.display(),
                 "component cache hit - loading via mmap"
             );
-            // SAFETY: The cached pre-compiled file was created by us (from
-            // `PythonExecutor::precompile()`) in a previous call. We trust our
-            // own cache directory. If the cache is corrupted or tampered with,
-            // wasmtime will detect it during deserialization.
+            // SAFETY: wasmtime does not validate pre-compiled code, so this
+            // relies on the directory being trustworthy: either the default
+            // cache, which `FilesystemCache::new` checked is private to this
+            // user (and `get_path` skips entries others could have written),
+            // or a directory the caller vouched for via the unsafe
+            // `with_cache_dir`. Truncated or engine-incompatible entries are
+            // rejected by wasmtime's header checks and relinked below.
             // Use with_key to populate InstancePreCache for future calls.
             #[allow(unsafe_code)]
             match unsafe {
@@ -2454,6 +2489,8 @@ impl SandboxBuilder<state::Has, state::Has> {
                     "component cache hit - loading from bytes"
                 );
                 // Load and populate InstancePreCache for future calls
+                // SAFETY: the cache is the default private one or one the
+                // caller vouched for via the unsafe `with_cache`/`with_cache_dir`.
                 #[allow(unsafe_code)]
                 match unsafe { PythonExecutor::from_precompiled(&precompiled) } {
                     Ok(executor) => {
