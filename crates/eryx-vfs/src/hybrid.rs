@@ -484,16 +484,6 @@ impl std::fmt::Debug for HybridPreopen {
     }
 }
 
-impl HybridPreopen {
-    /// Get the guest path for this preopen.
-    pub fn guest_path(&self) -> &str {
-        match self {
-            HybridPreopen::Vfs { guest_path, .. } => guest_path,
-            HybridPreopen::Real { guest_path, .. } => guest_path,
-        }
-    }
-}
-
 /// Context for hybrid VFS operations.
 ///
 /// This combines VFS storage with real filesystem passthrough. Each preopen
@@ -503,7 +493,7 @@ pub struct HybridVfsCtx<S: VfsStorage + Clone> {
     /// The VFS storage backend for virtual paths.
     pub storage: S,
     /// Preopened directories (both VFS and real).
-    pub preopens: Vec<HybridPreopen>,
+    pub(crate) preopens: Vec<HybridPreopen>,
     /// Host files and directories the guest has opened. A handle stays open
     /// while any descriptor or stream holds it, so dead entries are pruned
     /// when the count is checked.
@@ -857,15 +847,5 @@ mod tests {
             opts.read(true);
             assert!(dir.open_with("f", &opts).is_err());
         }
-    }
-
-    #[test]
-    fn test_hybrid_preopen_guest_path() {
-        let preopen = HybridPreopen::Vfs {
-            guest_path: "/data".to_string(),
-            dir_perms: DirPerms::all(),
-            file_perms: FilePerms::all(),
-        };
-        assert_eq!(preopen.guest_path(), "/data");
     }
 }
