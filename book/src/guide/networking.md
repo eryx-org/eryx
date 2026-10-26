@@ -146,8 +146,8 @@ print("localhost" in config.blocked_hosts)  # False
 sandbox = eryx.Sandbox(network=config)
 ```
 
-`allow_localhost()` also removes the loopback ranges (`127.0.0.0/8`, `::1/128`)
-from `blocked_networks`.
+`allow_localhost()` also removes the IPv4 loopback range (`127.0.0.0/8`) from
+`blocked_networks` and adds `::1/128` to `allowed_networks`.
 
 ## Address Filtering
 
@@ -161,9 +161,12 @@ By default `blocked_networks` covers every range that isn't publicly routable:
 loopback, private (`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`,
 `fc00::/7`), link-local (`169.254.0.0/16`, `fe80::/10`, which includes cloud
 metadata endpoints), carrier-grade NAT (`100.64.0.0/10`), `0.0.0.0/8`,
-`::/128`, multicast, reserved, benchmarking, local-use NAT64 and 6to4 ranges.
-IPv4-mapped (`::ffff:127.0.0.1`) and NAT64 (`64:ff9b::a00:1`) addresses are
-also checked by the IPv4 address they stand for. Refusals tell sandboxed code
+IPv4-compatible (`::/96`, which includes `::` and `::1`), site-local
+(`fec0::/10`), Teredo (`2001::/32`), documentation (`2001:db8::/32`),
+multicast, reserved, benchmarking, local-use NAT64 and 6to4 ranges.
+IPv4-mapped (`::ffff:127.0.0.1`), IPv4-compatible (`::a00:1`), NAT64
+(`64:ff9b::a00:1`) and Teredo addresses are also checked by the IPv4 address
+they stand for. Refusals tell sandboxed code
 only that the host resolves to a blocked network; the address is logged on the
 host at debug level. This applies even with
 `allow_all_hosts`, and even when a host matches `allowed_hosts`.

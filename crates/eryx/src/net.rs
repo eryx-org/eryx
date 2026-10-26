@@ -44,6 +44,10 @@ fn read_buf_len(len: u32) -> usize {
     (len as usize).min(MAX_READ_LEN)
 }
 
+/// Largest HTTP request header block buffered while waiting for its end
+/// (64 KiB). The buffer lives on the host, outside the sandbox's memory limit.
+const MAX_HEADER_LEN: usize = 64 * 1024;
+
 /// Resolves hostnames to socket addresses for sandbox connections.
 ///
 /// Set one with [`NetConfig::with_resolver`] to replace the system resolver
@@ -146,9 +150,11 @@ pub struct NetConfig {
 /// Loopback, private (RFC 1918 and IPv6 unique-local), link-local (which
 /// includes cloud metadata endpoints such as `169.254.169.254`), carrier-grade
 /// NAT, "this network", IETF protocol assignments, benchmarking, multicast,
-/// reserved/broadcast, local-use NAT64 and 6to4. Well-known NAT64 addresses
-/// (`64:ff9b::/96`) are checked by the IPv4 address they embed.
-pub const DEFAULT_BLOCKED_NETWORKS: [IpNet; 18] = {
+/// reserved/broadcast, local-use NAT64, 6to4, IPv4-compatible (`::/96`, which
+/// includes `::` and `::1`), site-local, Teredo and documentation. Well-known
+/// NAT64 (`64:ff9b::/96`), IPv4-compatible and Teredo addresses are also
+/// checked by the IPv4 address they embed.
+pub const DEFAULT_BLOCKED_NETWORKS: [IpNet; 20] = {
     const fn v4(a: u8, b: u8, c: u8, d: u8, len: u8) -> IpNet {
         IpNet::V4(Ipv4Net::new_assert(Ipv4Addr::new(a, b, c, d), len))
     }
@@ -170,8 +176,15 @@ pub const DEFAULT_BLOCKED_NETWORKS: [IpNet; 18] = {
         v4(198, 18, 0, 0, 15),
         v4(224, 0, 0, 0, 4),
         v4(240, 0, 0, 0, 4),
-        v6(0, 0, 128),
-        v6(0, 1, 128),
+        v6(0, 0, 96),
+        IpNet::V6(Ipv6Net::new_assert(
+            Ipv6Addr::new(0x2001, 0, 0, 0, 0, 0, 0, 0),
+            32,
+        )),
+        IpNet::V6(Ipv6Net::new_assert(
+            Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 0),
+            32,
+        )),
         v6(0x2002, 0, 16),
         IpNet::V6(Ipv6Net::new_assert(
             Ipv6Addr::new(0x64, 0xff9b, 1, 0, 0, 0, 0, 0),
@@ -179,6 +192,7 @@ pub const DEFAULT_BLOCKED_NETWORKS: [IpNet; 18] = {
         )),
         v6(0xfc00, 0, 7),
         v6(0xfe80, 0, 10),
+        v6(0xfec0, 0, 10),
         v6(0xff00, 0, 8),
     ]
 };
@@ -306,6 +320,9 @@ impl NetConfig {
         self.blocked_hosts
             .retain(|p| !p.contains("localhost") && !p.starts_with("127.") && !p.contains("::1"));
         self.blocked_networks.retain(|n| !n.addr().is_loopback());
+        // `::1` is also inside the default `::/96` block.
+        self.allowed_networks
+            .push(IpNet::from(IpAddr::V6(Ipv6Addr::LOCALHOST)));
         self
     }
 
@@ -338,6 +355,49 @@ impl NetConfig {
     pub fn allow_plaintext_secrets(mut self, allow: bool) -> Self {
         self.allow_plaintext_secrets = allow;
         self
+    }
+
+    /// Host patterns `secret` may be sent to: its own `allowed_hosts`, or
+    /// failing that this config's `allowed_hosts` unless `allow_all_hosts` is
+    /// set (when that list doesn't restrict connections). Empty means the
+    /// secret is never substituted.
+    #[must_use]
+    pub fn secret_hosts<'a>(&'a self, secret: &'a crate::secrets::SecretConfig) -> &'a [String] {
+        if !secret.allowed_hosts.is_empty() {
+            &secret.allowed_hosts
+        } else if self.allow_all_hosts {
+            &[]
+        } else {
+            &self.allowed_hosts
+        }
+    }
+
+    /// Fail if a secret has no host it could be sent to; see
+    /// [`NetConfig::secret_hosts`].
+    ///
+    /// [`SandboxBuilder::build`](crate::SandboxBuilder::build) runs this
+    /// check when networking is enabled.
+    ///
+    /// # Errors
+    ///
+    /// Names the first such secret.
+    pub fn check_secret_hosts(
+        &self,
+        secrets: &HashMap<String, crate::secrets::SecretConfig>,
+    ) -> Result<(), String> {
+        let mut names: Vec<&String> = secrets
+            .iter()
+            .filter(|(_, s)| self.secret_hosts(s).is_empty())
+            .map(|(name, _)| name)
+            .collect();
+        names.sort();
+        match names.first() {
+            Some(name) => Err(format!(
+                "secret '{name}' has no allowed hosts: give it allowed_hosts, or list the hosts \
+                 in NetConfig.allowed_hosts with allow_all_hosts off"
+            )),
+            None => Ok(()),
+        }
     }
 
     /// Add a custom root certificate (DER-encoded) to trust.
@@ -537,6 +597,81 @@ pub struct ConnectionManager {
     connection_hosts: HashMap<u32, String>,
     /// Secrets configuration for substitution
     secrets: HashMap<String, crate::secrets::SecretConfig>,
+    /// `(real value, placeholder)` of each secret, for masking reads.
+    read_masks: Vec<(Vec<u8>, Vec<u8>)>,
+    /// Per-connection read buffering for that masking.
+    read_states: HashMap<u32, ReadState>,
+}
+
+/// Read data held back from the guest by one connection.
+#[derive(Debug, Default)]
+struct ReadState {
+    /// Masked bytes the guest hasn't read yet.
+    ready: Vec<u8>,
+    /// Trailing bytes that may be the start of a secret split across reads.
+    carry: Vec<u8>,
+}
+
+/// How long a read waits for more data before releasing bytes held back as
+/// the possible start of a secret.
+const CARRY_GRACE: Duration = Duration::from_millis(100);
+
+/// Read up to `len` bytes from `stream`, replacing each real secret value in
+/// `masks` with its placeholder, including values split across reads.
+async fn read_masked<S: tokio::io::AsyncRead + Unpin>(
+    stream: &mut S,
+    state: &mut ReadState,
+    masks: &[(Vec<u8>, Vec<u8>)],
+    len: u32,
+    io_timeout: Duration,
+) -> std::io::Result<Vec<u8>> {
+    let want = read_buf_len(len);
+    if want == 0 {
+        return Ok(Vec::new());
+    }
+    while state.ready.is_empty() {
+        let timeout = if state.carry.is_empty() {
+            io_timeout
+        } else {
+            CARRY_GRACE.min(io_timeout)
+        };
+        let mut buf = vec![0u8; want];
+        let n = match tokio::time::timeout(timeout, stream.read(&mut buf)).await {
+            Ok(n) => n?,
+            // Nothing followed: the held-back bytes weren't a secret after all.
+            Err(_) if !state.carry.is_empty() => 0,
+            Err(_) => return Err(std::io::ErrorKind::TimedOut.into()),
+        };
+        let mut data = std::mem::take(&mut state.carry);
+        data.extend_from_slice(&buf[..n]);
+        if n > 0 {
+            for (real, placeholder) in masks {
+                data = crate::secrets::replace_bytes(&data, real, placeholder);
+            }
+            let keep = partial_secret_len(&data, masks);
+            state.carry = data.split_off(data.len() - keep);
+        }
+        state.ready = data;
+        if n == 0 {
+            break;
+        }
+    }
+    let rest = state.ready.split_off(want.min(state.ready.len()));
+    Ok(std::mem::replace(&mut state.ready, rest))
+}
+
+/// Length of the longest suffix of `data` that is a proper prefix of a
+/// secret value in `masks`.
+fn partial_secret_len(data: &[u8], masks: &[(Vec<u8>, Vec<u8>)]) -> usize {
+    let longest = masks.iter().map(|(real, _)| real.len()).max().unwrap_or(0);
+    (1..longest.min(data.len() + 1))
+        .rev()
+        .find(|&k| {
+            masks
+                .iter()
+                .any(|(real, _)| real.len() > k && data.ends_with(&real[..k]))
+        })
+        .unwrap_or(0)
 }
 
 impl ConnectionManager {
@@ -567,6 +702,17 @@ impl ConnectionManager {
             next_handle: 1,
             http_states: HashMap::new(),
             connection_hosts: HashMap::new(),
+            read_masks: secrets
+                .values()
+                .filter(|s| !s.real_value.is_empty())
+                .map(|s| {
+                    (
+                        s.real_value.clone().into_bytes(),
+                        s.placeholder.clone().into_bytes(),
+                    )
+                })
+                .collect(),
+            read_states: HashMap::new(),
             secrets,
         }
     }
@@ -610,7 +756,10 @@ impl ConnectionManager {
     fn process_write_data(&mut self, handle: u32, data: &[u8]) -> Result<Vec<u8>, TcpError> {
         let mut state = self.http_states.remove(&handle).unwrap_or_default();
         let result = self.frame_requests(handle, &mut state, data);
-        self.http_states.insert(handle, state);
+        // After an error the buffered bytes are dropped, not kept growing.
+        if result.is_ok() {
+            self.http_states.insert(handle, state);
+        }
         result
     }
 
@@ -628,8 +777,22 @@ impl ConnectionManager {
         loop {
             match &mut state.body {
                 Body::None => {
+                    // Only the new bytes (plus 3 for a split terminator) can
+                    // complete the terminator.
+                    let searched = state.buffer.len().saturating_sub(3);
                     state.buffer.extend_from_slice(&input[pos..]);
-                    let Some(header_end) = find_header_end(&state.buffer) else {
+                    if !could_be_http_request(&state.buffer) {
+                        out.append(&mut state.buffer);
+                        break;
+                    }
+                    let Some(header_end) =
+                        find_header_end(&state.buffer[searched..]).map(|end| searched + end)
+                    else {
+                        if state.buffer.len() > MAX_HEADER_LEN {
+                            return Err(TcpError::NotPermitted(format!(
+                                "HTTP request headers exceed {MAX_HEADER_LEN} bytes"
+                            )));
+                        }
                         break;
                     };
                     input = state.buffer.split_off(header_end);
@@ -837,7 +1000,8 @@ impl ConnectionManager {
     /// (`0` = use the host default); see `effective_timeout`.
     ///
     /// `len` is capped at 1 MiB; like any socket read, this may return fewer
-    /// bytes than requested.
+    /// bytes than requested. Real secret values in the data are replaced with
+    /// their placeholders, so the guest never sees them.
     pub async fn tcp_read(
         &mut self,
         handle: u32,
@@ -850,18 +1014,14 @@ impl ConnectionManager {
             .get_mut(&handle)
             .ok_or(TcpError::InvalidHandle)?;
 
-        let mut buf = vec![0u8; read_buf_len(len)];
-        let n = tokio::time::timeout(io_timeout, stream.read(&mut buf))
+        let state = self.read_states.entry(handle).or_default();
+        read_masked(stream, state, &self.read_masks, len, io_timeout)
             .await
-            .map_err(|_| TcpError::TimedOut)?
             .map_err(|e| match e.kind() {
                 std::io::ErrorKind::ConnectionReset => TcpError::ConnectionReset,
                 std::io::ErrorKind::TimedOut => TcpError::TimedOut,
                 _ => TcpError::IoError(e.to_string()),
-            })?;
-
-        buf.truncate(n);
-        Ok(buf)
+            })
     }
 
     /// Write to a TCP connection.
@@ -924,6 +1084,16 @@ impl ConnectionManager {
             .get(&handle)
             .ok_or(TcpError::InvalidHandle)?;
 
+        // The server routes by the Host header (or an absolute-form target),
+        // so a request naming another host must not carry secrets.
+        if !request_authorities(&text).all(|a| same_host(strip_port(a), target_host))
+            && self.secrets.values().any(|s| text.contains(&s.placeholder))
+        {
+            return Err(TcpError::NotPermitted(
+                "Secret not allowed: request names a different host than the connection".into(),
+            ));
+        }
+
         let mut result = String::new();
 
         // Process line by line
@@ -954,12 +1124,9 @@ impl ConnectionManager {
 
     /// Substitute secret placeholders in text.
     ///
-    /// # Host Authorization Logic
-    ///
-    /// 1. If `secret.allowed_hosts` is non-empty, use that list
-    /// 2. Otherwise, fall back to `NetConfig.allowed_hosts`
-    /// 3. If both are empty, the secret is allowed for ANY host
-    ///    (⚠️ this may be surprising - always specify allowed_hosts for production)
+    /// A secret is only substituted for a host matching
+    /// [`NetConfig::secret_hosts`]; a secret with no hosts there is never
+    /// substituted.
     fn substitute_secrets_in_text(
         &self,
         text: &str,
@@ -972,24 +1139,11 @@ impl ConnectionManager {
                 continue;
             }
 
-            // Check if secret is allowed for this host
-            // Falls back to NetConfig.allowed_hosts if secret has no explicit restrictions
-            let allowed_hosts = if secret_config.allowed_hosts.is_empty() {
-                &self.config.allowed_hosts
-            } else {
-                &secret_config.allowed_hosts
-            };
-
-            // ⚠️ If both secret and NetConfig have empty allowed_hosts,
-            // the secret can go to ANY host. This is intentional for flexibility
-            // but users should always specify allowed_hosts for production.
-            let host_allowed = if allowed_hosts.is_empty() {
-                true
-            } else {
-                allowed_hosts
-                    .iter()
-                    .any(|p| host_matches_pattern(target_host, p))
-            };
+            let host_allowed = self
+                .config
+                .secret_hosts(secret_config)
+                .iter()
+                .any(|p| host_matches_pattern(target_host, p));
 
             if !host_allowed {
                 return Err(TcpError::NotPermitted(
@@ -1012,6 +1166,7 @@ impl ConnectionManager {
         // Clean up HTTP parsing state and host tracking
         self.http_states.remove(&handle);
         self.connection_hosts.remove(&handle);
+        self.read_states.remove(&handle);
     }
 
     // ========================================================================
@@ -1022,6 +1177,10 @@ impl ConnectionManager {
     ///
     /// Takes ownership of the TCP connection and performs a TLS handshake.
     /// After upgrade, the original tcp_handle is invalid.
+    ///
+    /// `hostname` (the SNI name the certificate is verified against) must be
+    /// the host passed to [`tcp_connect`](Self::tcp_connect), ignoring ASCII
+    /// case and a trailing dot.
     pub async fn tls_upgrade(
         &mut self,
         tcp_handle: u32,
@@ -1038,6 +1197,15 @@ impl ConnectionManager {
             .ok_or(TlsError::InvalidHandle)?;
         let host = self.connection_hosts.remove(&tcp_handle);
         self.http_states.remove(&tcp_handle);
+        self.read_states.remove(&tcp_handle);
+
+        // The certificate is checked against `hostname`, and secrets against
+        // the connected host, so the two must be the same host.
+        if !host.as_deref().is_some_and(|h| same_host(h, hostname)) {
+            return Err(TlsError::Tcp(TcpError::NotPermitted(format!(
+                "TLS hostname '{hostname}' does not match the connected host"
+            ))));
+        }
 
         // TLS handshake
         let connector = TlsConnector::from(self.tls_config.clone());
@@ -1074,7 +1242,8 @@ impl ConnectionManager {
     /// (`0` = use the host default); see `effective_timeout`.
     ///
     /// `len` is capped at 1 MiB; like any socket read, this may return fewer
-    /// bytes than requested.
+    /// bytes than requested. Real secret values in the data are replaced with
+    /// their placeholders, so the guest never sees them.
     pub async fn tls_read(
         &mut self,
         handle: u32,
@@ -1087,18 +1256,14 @@ impl ConnectionManager {
             .get_mut(&handle)
             .ok_or(TlsError::InvalidHandle)?;
 
-        let mut buf = vec![0u8; read_buf_len(len)];
-        let n = tokio::time::timeout(io_timeout, stream.read(&mut buf))
+        let state = self.read_states.entry(handle).or_default();
+        read_masked(stream, state, &self.read_masks, len, io_timeout)
             .await
-            .map_err(|_| TlsError::Tcp(TcpError::TimedOut))?
             .map_err(|e| match e.kind() {
                 std::io::ErrorKind::ConnectionReset => TlsError::Tcp(TcpError::ConnectionReset),
                 std::io::ErrorKind::TimedOut => TlsError::Tcp(TcpError::TimedOut),
                 _ => TlsError::Tcp(TcpError::IoError(e.to_string())),
-            })?;
-
-        buf.truncate(n);
-        Ok(buf)
+            })
     }
 
     /// Write to a TLS connection.
@@ -1165,6 +1330,7 @@ impl ConnectionManager {
         // Clean up HTTP parsing state and host tracking
         self.http_states.remove(&handle);
         self.connection_hosts.remove(&handle);
+        self.read_states.remove(&handle);
         // TLS shutdown happens on drop
     }
 
@@ -1184,6 +1350,7 @@ impl ConnectionManager {
         self.tls_connections.clear();
         self.http_states.clear();
         self.connection_hosts.clear();
+        self.read_states.clear();
         tracing::debug!(tcp_count, tls_count, "all connections closed");
     }
 }
@@ -1199,21 +1366,73 @@ fn find_header_end(data: &[u8]) -> Option<usize> {
         .map(|pos| pos + 4)
 }
 
+/// Request-line prefixes recognised as the start of an HTTP request.
+const HTTP_METHODS: [&[u8]; 9] = [
+    b"GET ",
+    b"POST ",
+    b"PUT ",
+    b"DELETE ",
+    b"PATCH ",
+    b"HEAD ",
+    b"OPTIONS ",
+    b"CONNECT ",
+    b"TRACE ",
+];
+
 /// Check if data starts with an HTTP request method.
 fn is_http_request(data: &[u8]) -> bool {
-    if data.len() < 4 {
-        return false;
-    }
+    HTTP_METHODS.iter().any(|m| data.starts_with(m))
+}
 
-    data.starts_with(b"GET ")
-        || data.starts_with(b"POST ")
-        || data.starts_with(b"PUT ")
-        || data.starts_with(b"DELETE ")
-        || data.starts_with(b"PATCH ")
-        || data.starts_with(b"HEAD ")
-        || data.starts_with(b"OPTIONS ")
-        || data.starts_with(b"CONNECT ")
-        || data.starts_with(b"TRACE ")
+/// Whether `data` is, or may still become, the start of an HTTP request.
+/// Anything else is passed through without waiting for a blank line.
+fn could_be_http_request(data: &[u8]) -> bool {
+    HTTP_METHODS
+        .iter()
+        .any(|m| data.starts_with(m) || m.starts_with(data))
+}
+
+/// The hosts a request names: its absolute-form target's authority (e.g.
+/// `GET https://host/ HTTP/1.1`) and each `Host` header's value.
+fn request_authorities(headers: &str) -> impl Iterator<Item = &str> {
+    let mut lines = headers.lines();
+    let target = lines.next().and_then(|line| line.split(' ').nth(1));
+    let absolute = target
+        .and_then(|t| t.split_once("://"))
+        .map(|(_, rest)| rest.split(['/', '?', '#']).next().unwrap_or(""))
+        .map(|authority| authority.rsplit('@').next().unwrap_or(""));
+    let host_headers = lines.filter_map(|line| {
+        let (name, value) = line.split_once(':')?;
+        name.trim()
+            .eq_ignore_ascii_case("host")
+            .then(|| value.trim())
+    });
+    absolute.into_iter().chain(host_headers)
+}
+
+/// `authority` without a trailing `:port`.
+fn strip_port(authority: &str) -> &str {
+    if let Some(end) = authority.strip_prefix('[').and_then(|a| a.find(']')) {
+        return &authority[..end + 2];
+    }
+    match authority.split_once(':') {
+        // More than one colon: a bare IPv6 address, not host:port.
+        Some((host, port)) if !port.contains(':') => host,
+        _ => authority,
+    }
+}
+
+/// Whether two host names refer to the same host: ASCII case, a trailing dot
+/// and IPv6 brackets are ignored.
+fn same_host(a: &str, b: &str) -> bool {
+    let norm = |h: &str| {
+        let h = h
+            .strip_prefix('[')
+            .and_then(|h| h.strip_suffix(']'))
+            .unwrap_or(h);
+        h.strip_suffix('.').unwrap_or(h).to_ascii_lowercase()
+    };
+    !a.is_empty() && norm(a) == norm(b)
 }
 
 /// Check if data is an HTTP/2 connection preface.
@@ -1244,18 +1463,22 @@ fn is_chunked(headers: &[u8]) -> bool {
 }
 
 /// The IPv4 address an IPv6 address stands for on the wire, if any:
-/// IPv4-mapped (`::ffff:a.b.c.d`) or well-known-prefix NAT64
-/// (`64:ff9b::a.b.c.d`, RFC 6052), which a NAT64 gateway translates to that
-/// IPv4 destination.
+/// IPv4-mapped (`::ffff:a.b.c.d`), IPv4-compatible (`::a.b.c.d`),
+/// well-known-prefix NAT64 (`64:ff9b::a.b.c.d`, RFC 6052), which a NAT64
+/// gateway translates to that IPv4 destination, or the client address of a
+/// Teredo address (`2001::/32`, RFC 4380: the last 32 bits, inverted).
 fn embedded_ipv4(ip: IpAddr) -> Option<IpAddr> {
     let IpAddr::V6(v6) = ip else { return None };
     if let Some(v4) = v6.to_ipv4_mapped() {
         return Some(v4.into());
     }
     let [a, b, rest @ ..] = v6.segments();
-    if (a, b) == (0x64, 0xff9b) && rest[..4] == [0, 0, 0, 0] {
-        let [.., w, x, y, z] = v6.octets();
+    let [.., w, x, y, z] = v6.octets();
+    if matches!((a, b), (0x64, 0xff9b) | (0, 0)) && rest[..4] == [0, 0, 0, 0] {
         return Some(Ipv4Addr::new(w, x, y, z).into());
+    }
+    if (a, b) == (0x2001, 0) {
+        return Some(Ipv4Addr::new(!w, !x, !y, !z).into());
     }
     None
 }
@@ -1535,25 +1758,56 @@ mod tests {
         assert!(result.is_err());
     }
 
+    /// A secret without hosts of its own uses the network allowlist, and is
+    /// never substituted when that doesn't restrict anything.
     #[test]
-    fn test_secret_substitution_empty_allowed_hosts() {
-        let config = NetConfig::permissive();
-        let mut secrets = HashMap::new();
-        secrets.insert(
-            "API_KEY".to_string(),
-            crate::secrets::SecretConfig {
-                real_value: "real-secret-value".to_string(),
-                placeholder: "PLACEHOLDER_XYZ".to_string(),
-                allowed_hosts: vec![], // Empty = allow all
-            },
+    fn secret_without_hosts_is_not_sent_anywhere() {
+        let secret = |hosts: Vec<String>| {
+            HashMap::from([(
+                "API_KEY".to_string(),
+                crate::secrets::SecretConfig {
+                    real_value: "real-secret-value".to_string(),
+                    placeholder: "PLACEHOLDER_XYZ".to_string(),
+                    allowed_hosts: hosts,
+                },
+            )])
+        };
+
+        let permissive = NetConfig::permissive();
+        assert!(permissive.check_secret_hosts(&secret(vec![])).is_err());
+        let manager = ConnectionManager::new(permissive, secret(vec![]));
+        assert!(
+            manager
+                .substitute_secrets_in_text("Bearer PLACEHOLDER_XYZ", "any-host.com")
+                .is_err()
         );
 
-        let manager = ConnectionManager::new(config, secrets);
+        // An allowlist that's ignored for connections doesn't count either.
+        let allow_all = NetConfig {
+            allow_all_hosts: true,
+            ..NetConfig::default().allow_host("api.example.com")
+        };
+        assert!(allow_all.check_secret_hosts(&secret(vec![])).is_err());
 
-        // Should work for any host when allowed_hosts is empty
-        let result = manager.substitute_secrets_in_text("Bearer PLACEHOLDER_XYZ", "any-host.com");
-        assert!(result.is_ok());
-        assert_eq!(result.unwrap(), "Bearer real-secret-value");
+        let allowlist = NetConfig::default().allow_host("api.example.com");
+        assert!(allowlist.check_secret_hosts(&secret(vec![])).is_ok());
+        assert!(
+            NetConfig::permissive()
+                .check_secret_hosts(&secret(vec!["api.example.com".into()]))
+                .is_ok()
+        );
+        let manager = ConnectionManager::new(allowlist, secret(vec![]));
+        assert_eq!(
+            manager
+                .substitute_secrets_in_text("Bearer PLACEHOLDER_XYZ", "api.example.com")
+                .unwrap(),
+            "Bearer real-secret-value"
+        );
+        assert!(
+            manager
+                .substitute_secrets_in_text("Bearer PLACEHOLDER_XYZ", "other.example.com")
+                .is_err()
+        );
     }
 
     // ========================================================================
@@ -2134,6 +2388,12 @@ mod tests {
             "64:ff9b:1::1",
             "2002:a00:1::1",
             "198.18.0.1",
+            "::a00:1",
+            "::8.8.8.8",
+            "fec0::1",
+            "2001::1",
+            "2001:0:4136:e378:8000:63bf:3fff:fdd2",
+            "2001:db8::1",
         ] {
             assert!(!manager.is_ip_allowed(ip(blocked)), "{blocked} allowed");
         }
@@ -2167,6 +2427,22 @@ mod tests {
         let manager = ConnectionManager::new(config, HashMap::new());
         assert!(!manager.is_ip_allowed(ip("::ffff:8.8.8.8")));
         assert!(manager.is_ip_allowed(ip("8.8.4.4")));
+    }
+
+    /// IPv4-compatible and Teredo addresses are checked as the IPv4 address
+    /// they embed, like NAT64.
+    #[test]
+    fn ipv4_compatible_and_teredo_match_embedded_ipv4() {
+        let config = NetConfig {
+            blocked_networks: vec!["10.0.0.0/8".parse().unwrap()],
+            ..NetConfig::default()
+        };
+        let manager = ConnectionManager::new(config, HashMap::new());
+        assert!(!manager.is_ip_allowed(ip("::10.0.0.1")));
+        // Teredo stores the client address inverted: !10.0.0.1 = f5ff:fffe.
+        assert!(!manager.is_ip_allowed(ip("2001:0:1:2:3:4:f5ff:fffe")));
+        assert!(manager.is_ip_allowed(ip("::8.8.8.8")));
+        assert!(manager.is_ip_allowed(ip("2001:0:1:2:3:4:f7f7:f7f7")));
     }
 
     #[test]
@@ -2248,7 +2524,7 @@ mod tests {
             crate::secrets::SecretConfig {
                 real_value: "real".to_string(),
                 placeholder: "PH".to_string(),
-                allowed_hosts: vec![],
+                allowed_hosts: vec!["api.example.com".to_string(), "127.0.0.1".to_string()],
             },
         );
         let mut manager = ConnectionManager::new(
@@ -2384,5 +2660,125 @@ mod tests {
         assert_eq!(m.connection_count(), 0);
         assert!(!m.connection_hosts.contains_key(&handle));
         assert!(m.http_states.is_empty());
+    }
+
+    #[test]
+    fn same_host_ignores_case_trailing_dot_and_brackets() {
+        assert!(same_host("API.example.com", "api.example.com."));
+        assert!(same_host("[::1]", "::1"));
+        assert!(!same_host("api.example.com", "example.com"));
+        assert!(!same_host("", ""));
+        assert_eq!(strip_port("example.com:443"), "example.com");
+        assert_eq!(strip_port("[::1]:443"), "[::1]");
+        assert_eq!(strip_port("::1"), "::1");
+    }
+
+    /// The certificate must be checked for the host the connection was made
+    /// to, so a different TLS name is refused before any handshake.
+    #[tokio::test]
+    async fn tls_hostname_must_match_connect_host() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let mut m = framing_manager();
+        let (handle, _server) = tokio::join!(m.tcp_connect("127.0.0.1", port, 0), async {
+            listener.accept().await.unwrap().0
+        });
+        let err = m
+            .tls_upgrade(handle.unwrap(), "api.example.com", 0)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(&err, TlsError::Tcp(TcpError::NotPermitted(m)) if m.contains("does not match")),
+            "{err}"
+        );
+        assert_eq!(m.connection_count(), 0);
+    }
+
+    /// A request carrying a placeholder must name the connected host, in its
+    /// `Host` header and in an absolute-form target.
+    #[test]
+    fn host_header_must_match_connect_host() {
+        let mut m = framing_manager();
+        for request in [
+            &b"GET / HTTP/1.1\r\nHost: other.example.com\r\nAuthorization: PH\r\n\r\n"[..],
+            b"GET https://other.example.com/ HTTP/1.1\r\nAuthorization: PH\r\n\r\n",
+            b"GET / HTTP/1.1\r\nHost: api.example.com\r\nHost: other.example.com\r\nAuthorization: PH\r\n\r\n",
+        ] {
+            assert!(m.process_write_data(1, request).is_err());
+            m.http_states.clear();
+        }
+
+        let ok = frame(
+            &mut m,
+            &[b"GET https://api.example.com:443/x HTTP/1.1\r\nHost: API.Example.com.:443\r\nAuthorization: PH\r\n\r\n"],
+        );
+        assert!(ok.contains("Authorization: real"), "{ok}");
+        // Without a placeholder, nothing is sent that the server shouldn't see.
+        let plain = frame(
+            &mut m,
+            &[b"GET / HTTP/1.1\r\nHost: other.example.com\r\n\r\n"],
+        );
+        assert!(plain.starts_with("GET / HTTP/1.1"), "{plain}");
+    }
+
+    /// Headers are buffered only up to a cap, and bytes that can't start a
+    /// request go out at once instead of waiting for a blank line.
+    #[test]
+    fn header_buffer_is_capped() {
+        let mut m = framing_manager();
+        let line = b"X-Pad: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\r\n";
+        assert!(
+            m.process_write_data(1, b"GET / HTTP/1.1\r\n")
+                .unwrap()
+                .is_empty()
+        );
+        let result = (0..MAX_HEADER_LEN / line.len() + 1)
+            .map(|_| m.process_write_data(1, line))
+            .find(Result::is_err);
+        assert!(result.is_some(), "headers were buffered past the cap");
+
+        let mut m = framing_manager();
+        assert_eq!(frame(&mut m, &[b"G", b"E"]), "");
+        assert_eq!(frame(&mut m, &[b"x hello PH"]), "GEx hello PH");
+        assert_eq!(frame(&mut m, &[b"\x16\x03\x01"]), "\x16\x03\x01");
+    }
+
+    /// The guest reads the placeholder where the server sent a real secret
+    /// value, even when the value arrives split across reads.
+    #[tokio::test]
+    async fn reads_replace_secret_values_with_placeholders() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let mut m = framing_manager();
+        let (handle, server) = tokio::join!(m.tcp_connect("127.0.0.1", port, 0), async {
+            listener.accept().await.unwrap().0
+        });
+        let handle = handle.unwrap();
+        let mut server = server;
+
+        async fn read_until(m: &mut ConnectionManager, handle: u32, want: usize) -> String {
+            let mut got = Vec::new();
+            while got.len() < want {
+                let chunk = m.tcp_read(handle, 2, 0).await.unwrap();
+                assert!(!chunk.is_empty(), "unexpected EOF");
+                got.extend(chunk);
+            }
+            String::from_utf8(got).unwrap()
+        }
+
+        server.write_all(b"a re").await.unwrap();
+        server.flush().await.unwrap();
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        server.write_all(b"al b real").await.unwrap();
+        server.flush().await.unwrap();
+        assert_eq!(
+            read_until(&mut m, handle, "a PH b PH".len()).await,
+            "a PH b PH"
+        );
+
+        // A possible start of a secret that nothing completes is still delivered.
+        server.write_all(b" re").await.unwrap();
+        server.flush().await.unwrap();
+        assert_eq!(read_until(&mut m, handle, 3).await, " re");
     }
 }

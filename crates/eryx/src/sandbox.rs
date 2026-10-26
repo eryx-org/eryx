@@ -1773,18 +1773,21 @@ impl<R, S> SandboxBuilder<R, S> {
     /// * `allowed_hosts` - Host patterns where this secret can be used.
     ///   Supports wildcards: `*.example.com`, `api.*.com`.
     ///
-    /// # ⚠️ Important: `allowed_hosts` Behavior
+    /// # `allowed_hosts` Behavior
     ///
-    /// - **Empty `allowed_hosts`**: Falls back to `NetConfig.allowed_hosts`. If that
-    ///   is also empty, the secret can be sent to **ANY host** (subject to blocked_hosts).
-    /// - **Always specify `allowed_hosts`** for production use to prevent accidental
-    ///   exfiltration to unauthorized hosts.
+    /// - **Empty `allowed_hosts`**: Falls back to `NetConfig.allowed_hosts`, as
+    ///   long as `allow_all_hosts` is off.
+    /// - A secret with no hosts either way makes [`build`](Self::build) fail
+    ///   when networking is enabled: it is never sent to "any host".
     ///
     /// # Security
     ///
     /// - Python code only sees a placeholder like `ERYX_SECRET_PLACEHOLDER_abc123`
-    /// - Real value is substituted transparently when making HTTP requests
-    /// - Host checks use the TCP connection target, NOT the HTTP Host header (prevents spoofing)
+    /// - Real value is substituted transparently when making HTTPS requests
+    /// - Host checks use the TCP connection target; the TLS server name and any
+    ///   HTTP `Host` header must name that same host
+    /// - The real value is replaced by the placeholder in data read back from
+    ///   the network
     /// - Placeholders are scrubbed from all outputs by default
     /// - Secrets are ephemeral (regenerated on each sandbox creation)
     ///
@@ -2184,6 +2187,10 @@ impl SandboxBuilder<state::Has, state::Has> {
     )]
     pub fn build(mut self) -> Result<Sandbox, Error> {
         check_duplicate_callback(self.duplicate_callback.take())?;
+        if let Some(net) = &self.net_config {
+            net.check_secret_hosts(&self.secrets)
+                .map_err(Error::Initialization)?;
+        }
 
         // First, compute mount indices and register native extensions from packages
         // with correct dlopen paths. Mount index 0 is reserved for explicit site-packages.

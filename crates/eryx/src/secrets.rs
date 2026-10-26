@@ -18,10 +18,10 @@ pub struct SecretConfig {
     pub placeholder: String,
     /// Host restrictions for this secret.
     ///
-    /// **⚠️ Security Note:**
-    /// - If empty, falls back to `NetConfig.allowed_hosts`
-    /// - If both are empty, the secret can be sent to ANY host (except blocked_hosts)
-    /// - Always specify explicit hosts for production use
+    /// If empty, falls back to `NetConfig.allowed_hosts`, but only while
+    /// `allow_all_hosts` is off. A secret with no hosts either way is never
+    /// substituted, and the sandbox refuses to build with it; see
+    /// [`NetConfig::secret_hosts`](crate::NetConfig::secret_hosts).
     pub allowed_hosts: Vec<String>,
 }
 
@@ -161,7 +161,7 @@ pub fn scrub_placeholders_bytes(data: &[u8], secrets: &HashMap<String, SecretCon
 }
 
 /// Replace all occurrences of a byte sequence with another.
-fn replace_bytes(haystack: &[u8], needle: &[u8], replacement: &[u8]) -> Vec<u8> {
+pub(crate) fn replace_bytes(haystack: &[u8], needle: &[u8], replacement: &[u8]) -> Vec<u8> {
     let mut result = Vec::with_capacity(haystack.len());
     let mut i = 0;
 

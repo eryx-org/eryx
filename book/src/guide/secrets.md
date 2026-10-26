@@ -57,6 +57,26 @@ The `with_secret` method takes:
 - `value` — The real secret value (never exposed to sandbox)
 - `allowed_hosts` — Hosts where the real value can be sent
 
+A secret with an empty `allowed_hosts` uses `NetConfig.allowed_hosts` instead,
+but only while `allow_all_hosts` is off. A secret left with no hosts either way
+is never sent anywhere, so building a sandbox with networking enabled fails.
+
+## Host Binding
+
+The real value is only sent to the host the connection was opened to:
+
+- The TLS server name must be that host (ignoring case and a trailing dot);
+  `wrap_socket(sock, server_hostname=...)` with any other name fails.
+- A request whose `Host` header or absolute-form target names a different host
+  is refused if it carries a placeholder.
+
+## Responses
+
+If a server sends the real value back (an echo endpoint, or an error message
+quoting the key), the sandbox sees the placeholder instead. This also works
+when the value is split across reads. Compressed or otherwise encoded bodies
+are passed through unchanged.
+
 ## Plain HTTP
 
 Placeholders are only substituted on TLS connections (`https://`). A request over plain TCP (`http://`) is sent with the placeholder left in place, so the real value never crosses the network unencrypted.
@@ -106,7 +126,7 @@ let sandbox = Sandbox::embedded()
 
 ## Best Practices
 
-1. **Always specify `allowed_hosts`** — Without explicit hosts, the secret may fall back to the network config's allowed hosts, which could be broader than intended.
+1. **Always specify `allowed_hosts`** — Without explicit hosts, the secret falls back to the network config's allowed hosts, which could be broader than intended.
 2. **Combine with `NetConfig`** — Secrets require networking to be useful. Configure both together.
 3. **Use separate secrets per service** — Each secret should have its own allowed hosts list.
 4. **Don't disable scrubbing in production** — Scrubbing prevents accidental leakage through logs and output.
@@ -115,7 +135,8 @@ let sandbox = Sandbox::embedded()
 
 - Placeholders are randomly generated on each sandbox creation, making them unpredictable
 - Real values are only sent over TLS unless `allow_plaintext_secrets` is set
-- Host verification uses the TCP connection target, not the HTTP `Host` header (prevents spoofing)
+- Host verification uses the TCP connection target; the TLS server name and the HTTP `Host` header must match it
+- Real values in responses are replaced with the placeholder before the sandbox reads them
 - Scrubbing is applied to stdout, stderr, and VFS file writes
 - Even if sandboxed code tries to print or write the placeholder, it appears as `[REDACTED]`
 
