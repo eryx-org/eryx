@@ -1,9 +1,10 @@
 /**
  * Network shims for the eryx sandbox (eryx:net/tcp and eryx:net/tls).
  *
- * Networking is disabled until the host calls setNetConfig(). Host policy
- * mirrors the Rust crate's NetConfig: blocked patterns are always enforced,
- * then the host must match allowedHosts unless allowAllHosts is set. Hosts are
+ * Networking is disabled until the host sets a policy, per sandbox or as the
+ * default with setNetConfig(). Host policy mirrors the Rust crate's NetConfig:
+ * blocked patterns are always enforced, then the host must match allowedHosts
+ * unless allowAllHosts is set. Hosts are
  * matched in their WHATWG URL form too, so `2130706433` and `0x7f.1` read as
  * `127.0.0.1`. IP addresses are checked against blockedNetworks (minus
  * allowedNetworks); in Node, so are the addresses a name resolves to, unless
@@ -73,12 +74,17 @@ const DEFAULT_CONNECT_TIMEOUT_MS = 30_000;
 const DEFAULT_IO_TIMEOUT_MS = 60_000;
 
 /**
- * The active policy; `isAllowed` checks resolved addresses (null where the
+ * A checked policy; `isAllowed` checks resolved addresses (null where the
  * transport can't see them).
  *
- * @type {(Required<import("./net.js").NetConfig> & { isAllowed: ((address: string, family: number) => boolean) | null }) | null}
+ * @typedef {Required<import("./net.js").NetConfig> & { isAllowed: ((address: string, family: number) => boolean) | null }} Policy
  */
-let config = null;
+
+/**
+ * The policy new instances start with, set by setNetConfig().
+ * @type {Policy | null}
+ */
+let defaultPolicy = null;
 
 /** Strict CIDR syntax, so a typo can't parse as a wider network (`10.0.0.0/` as `/0`). */
 function checkCidrs(cidrs) {
@@ -100,18 +106,16 @@ function checkCount(name, value) {
 }
 
 /**
- * Enable (or, with `null`, disable) networking for sandboxed code.
+ * Check `netConfig` and fill in the defaults; null disables networking.
  *
  * Throws a TypeError if a network is not a valid CIDR or maxConnections is
  * not a non-negative integer.
  *
  * @param {import("./net.js").NetConfig | null} netConfig
+ * @returns {Policy | null}
  */
-export function setNetConfig(netConfig) {
-  if (!netConfig) {
-    config = null;
-    return;
-  }
+function toPolicy(netConfig) {
+  if (!netConfig) return null;
   const next = {
     allowAllHosts: netConfig.allowAllHosts ?? false,
     allowedHosts: netConfig.allowedHosts ?? [],
@@ -123,7 +127,18 @@ export function setNetConfig(netConfig) {
     connectTimeoutMs: netConfig.connectTimeoutMs ?? DEFAULT_CONNECT_TIMEOUT_MS,
     ioTimeoutMs: netConfig.ioTimeoutMs ?? DEFAULT_IO_TIMEOUT_MS,
   };
-  config = { ...next, isAllowed: transport.networkFilter(next) };
+  return { ...next, isAllowed: transport.networkFilter(next) };
+}
+
+/**
+ * Set the default policy (`null` disables networking), which each sandbox
+ * copies when it is created; sandboxes that already exist keep theirs.
+ *
+ * @param {import("./net.js").NetConfig | null} netConfig
+ */
+export function setNetConfig(netConfig) {
+  defaultPolicy = toPolicy(netConfig);
+  defaultNet.setNetConfig(netConfig);
 }
 
 /**
@@ -132,8 +147,6 @@ export function setNetConfig(netConfig) {
  */
 // setTimeout fires at once for delays past 2^31 - 1 ms.
 const clamp = (hostMs, guestMs) => Math.min(guestMs ? Math.min(guestMs, hostMs) : hostMs, 2 ** 31 - 1);
-const connectTimeout = (ms) => clamp(config?.connectTimeoutMs ?? DEFAULT_CONNECT_TIMEOUT_MS, ms);
-const ioTimeout = (ms) => clamp(config?.ioTimeoutMs ?? DEFAULT_IO_TIMEOUT_MS, ms);
 
 /**
  * `host` in WHATWG URL form (lower-cased, IPv4 in dotted decimal, IPv6
@@ -161,8 +174,8 @@ function hostMatches(host, pattern) {
 
 const notPermitted = (val) => ({ payload: { tag: "not-permitted", val } });
 
-/** Check `host` against the policy and return its canonical form. */
-function checkHost(host) {
+/** Check `host` against `config` and return its canonical form. */
+function checkHost(config, host) {
   if (!config) throw notPermitted("networking is disabled; enable it with setNetConfig()");
   const canonical = canonicalHost(host);
   if (canonical === null) throw notPermitted(`host '${host}' is not a valid host name`);
@@ -179,17 +192,22 @@ function checkHost(host) {
 
 /**
  * The eryx:net imports for one sandbox instance, with its own connection
- * table. The policy set with setNetConfig() applies to all of them.
+ * table and policy. The policy starts as the default set with setNetConfig();
+ * `setNetConfig()` on the result replaces it for this instance only, for
+ * connections opened after the call.
  *
  * `closeConnections()` closes every connection the instance's code left open;
- * the sandbox calls it after each execution.
+ * the sandbox calls it after each call into the instance.
  */
 export function createNet() {
   const t = transport.createTransport();
+  let config = defaultPolicy;
+  const connectTimeout = (ms) => clamp(config?.connectTimeoutMs ?? DEFAULT_CONNECT_TIMEOUT_MS, ms);
+  const ioTimeout = (ms) => clamp(config?.ioTimeoutMs ?? DEFAULT_IO_TIMEOUT_MS, ms);
   return {
     tcp: {
       async connect(host, port, timeoutMs) {
-        const { canonical, internal } = checkHost(host);
+        const { canonical, internal } = checkHost(config, host);
         // 0 means no limit, as in the Rust crate.
         if (config.maxConnections > 0 && t.openConnections() >= config.maxConnections) {
           throw notPermitted(`connection limit reached (${config.maxConnections})`);
@@ -212,8 +230,16 @@ export function createNet() {
       close: t.tls.close,
     },
     closeConnections: t.closeAll,
+    /** @param {import("./net.js").NetConfig | null} netConfig */
+    setNetConfig(netConfig) {
+      config = toPolicy(netConfig);
+    },
   };
 }
 
-/** The default instance's imports, for the module-level sandbox. */
-export const { tcp, tls, closeConnections } = createNet();
+/**
+ * The default instance, for code that imports the shims directly. It follows
+ * setNetConfig().
+ */
+const defaultNet = createNet();
+export const { tcp, tls, closeConnections } = defaultNet;

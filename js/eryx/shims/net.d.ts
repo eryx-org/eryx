@@ -7,7 +7,7 @@
  * address can't be refused there. Use `allowedHosts` rather than
  * `allowAllHosts` in browsers.
  *
- * Connections still open when an execution finishes are closed.
+ * Connections still open when a call into the sandbox finishes are closed.
  */
 export interface NetConfig {
   /** Allow every host not matched by `blockedHosts` (default false). */
@@ -54,13 +54,16 @@ export const DEFAULT_BLOCKED_HOSTS: string[];
 export const DEFAULT_BLOCKED_NETWORKS: string[];
 
 /**
- * Enable networking for sandboxed code, or disable it again with `null`.
- * Networking is disabled by default. Throws a TypeError if a network isn't a
- * valid CIDR or `maxConnections` isn't a non-negative integer.
+ * Set the default policy, or disable networking again with `null` (the
+ * initial default). Each instance from {@link createNet} copies it when it is
+ * created; existing instances keep theirs. It also applies to the default
+ * instance behind {@link closeConnections} and the `tcp`/`tls` exports.
+ * Throws a TypeError if a network isn't a valid CIDR or `maxConnections`
+ * isn't a non-negative integer.
  */
 export function setNetConfig(config: NetConfig | null): void;
 
-/** Close every connection sandboxed code left open. Executions do this when they finish. */
+/** Close every connection the default instance's code left open. */
 export function closeConnections(): void;
 
 /** A transport's TCP and TLS imports. Internal: the shapes follow the eryx:net WIT. */
@@ -68,6 +71,13 @@ type NetImports = Record<string, (...args: any[]) => unknown>;
 
 /**
  * The eryx:net imports for one sandbox instance, with its own connection
- * table. The policy set with {@link setNetConfig} applies to every instance.
+ * table and policy. The policy starts as the default from
+ * {@link setNetConfig}; the instance's `setNetConfig()` replaces it for that
+ * instance only, for connections opened after the call.
  */
-export function createNet(): { tcp: NetImports; tls: NetImports; closeConnections(): void };
+export function createNet(): {
+  tcp: NetImports;
+  tls: NetImports;
+  closeConnections(): void;
+  setNetConfig(config: NetConfig | null): void;
+};

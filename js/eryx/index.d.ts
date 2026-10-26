@@ -12,10 +12,21 @@ export {
   SuspendCallback,
 } from "./shims/callbacks.js";
 
-export { setNetConfig, DEFAULT_BLOCKED_HOSTS, DEFAULT_BLOCKED_NETWORKS } from "./shims/net.js";
+export { DEFAULT_BLOCKED_HOSTS, DEFAULT_BLOCKED_NETWORKS } from "./shims/net.js";
 export type { NetConfig } from "./shims/net.js";
 
 import type { CallbackInfo } from "./shims/callbacks.js";
+import type { NetConfig } from "./shims/net.js";
+
+/**
+ * Set the default network policy, or disable networking again with `null`
+ * (the initial default). Each {@link Sandbox} copies it when it is created,
+ * unless given its own `netConfig`; sandboxes that already exist keep their
+ * policy. It also applies to the default sandbox behind the module-level
+ * helpers. Throws a TypeError if a network isn't a valid CIDR or
+ * `maxConnections` isn't a non-negative integer.
+ */
+export function setNetConfig(config: NetConfig | null): void;
 
 /**
  * Result from executing Python code in the sandbox.
@@ -110,6 +121,12 @@ export interface SandboxOptions {
     | null;
   /** Handler for streaming output: stream 0 = stdout, 1 = stderr. */
   outputHandler?: ((stream: number, data: string) => void) | null;
+  /**
+   * This sandbox's network policy (`null` disables networking). Omitted, the
+   * sandbox copies the default set with {@link setNetConfig} when it is
+   * created; later {@link setNetConfig} calls don't change it.
+   */
+  netConfig?: NetConfig | null;
   /**
    * Run the sandbox in its own Worker (a `worker_threads` Worker in Node.js)
    * and reject any call that takes longer than this many milliseconds with a
@@ -219,6 +236,15 @@ export class Sandbox {
    * @param name - The variable name to capture
    */
   setResultVariable(name: string): Promise<void>;
+
+  /**
+   * Replace this sandbox's network policy (`null` disables networking). It
+   * applies to connections opened after the call, and doesn't change the
+   * default set with the module-level {@link setNetConfig} or other
+   * sandboxes. Throws a TypeError if a network isn't a valid CIDR or
+   * `maxConnections` isn't a non-negative integer.
+   */
+  setNetConfig(config: NetConfig | null): void;
 
   /**
    * Stop using this sandbox. Its open connections are closed, and every later

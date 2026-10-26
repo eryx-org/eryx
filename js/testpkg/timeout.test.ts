@@ -63,10 +63,14 @@ except OSError as e:
 `;
     try {
       expect((await sandbox.execute(code)).stdout).toContain("networking is disabled");
-      setNetConfig({ allowedHosts: ["127.0.0.1"], blockedHosts: [], allowedNetworks: ["127.0.0.0/8"] });
+      sandbox.setNetConfig({ allowedHosts: ["127.0.0.1"], blockedHosts: [], allowedNetworks: ["127.0.0.0/8"] });
+      expect((await sandbox.execute(code)).stdout).toBe("b'ping'\n");
+      // The module default doesn't reach a sandbox that already exists.
+      setNetConfig(null);
       expect((await sandbox.execute(code)).stdout).toBe("b'ping'\n");
     } finally {
       setNetConfig(null);
+      sandbox.close();
       server.close();
     }
   });
