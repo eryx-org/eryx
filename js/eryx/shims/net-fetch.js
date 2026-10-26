@@ -15,6 +15,8 @@
 
 // windows-1252 maps every byte to one UTF-16 unit, so string offsets of the
 // decoded request are byte offsets into it.
+import { embeddedIPv4, ipv4Bytes, ipv6Bytes } from "./ip.js";
+
 const latin1 = new TextDecoder("latin1");
 const utf8 = new TextEncoder();
 
@@ -31,41 +33,6 @@ const SKIP_REQUEST_HEADERS = new Set([
 const SKIP_RESPONSE_HEADERS = new Set([
   "content-encoding", "content-length", "transfer-encoding", "connection", "keep-alive",
 ]);
-
-/** Bytes of an IPv4 address in dotted decimal, or null. */
-function ipv4Bytes(addr) {
-  const parts = addr.split(".");
-  if (parts.length !== 4 || !parts.every((p) => /^\d{1,3}$/.test(p) && Number(p) <= 255)) return null;
-  return parts.map(Number);
-}
-
-/** Bytes of an IPv6 address (with an optional dotted IPv4 tail), or null. */
-function ipv6Bytes(addr) {
-  const tail = /^(.*:)(\d+\.\d+\.\d+\.\d+)$/.exec(addr);
-  if (tail) {
-    const b = ipv4Bytes(tail[2]);
-    if (!b) return null;
-    addr = `${tail[1]}${((b[0] << 8) | b[1]).toString(16)}:${((b[2] << 8) | b[3]).toString(16)}`;
-  }
-  const halves = addr.split("::");
-  if (halves.length > 2) return null;
-  const groups = (s) => (s ? s.split(":") : []);
-  const head = groups(halves[0]);
-  const rest = halves.length === 2 ? groups(halves[1]) : [];
-  const fill = 8 - head.length - rest.length;
-  if (halves.length === 2 ? fill < 1 : fill !== 0) return null;
-  const all = [...head, ...Array(halves.length === 2 ? fill : 0).fill("0"), ...rest];
-  if (!all.every((g) => /^[0-9a-f]{1,4}$/i.test(g))) return null;
-  return all.flatMap((g) => [parseInt(g, 16) >> 8, parseInt(g, 16) & 255]);
-}
-
-/** The IPv4 address an IPv4-mapped (`::ffff:0:0/96`) or NAT64 (`64:ff9b::/96`) address carries. */
-function embeddedIPv4(b) {
-  const prefix = b.slice(0, 12).join(",");
-  const mapped = "0,0,0,0,0,0,0,0,0,0,255,255";
-  const nat64 = "0,100,255,155,0,0,0,0,0,0,0,0";
-  return prefix === mapped || prefix === nat64 ? b.slice(12) : null;
-}
 
 /**
  * `(address, family) => allowed` for `blockedNetworks` minus

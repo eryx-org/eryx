@@ -4,6 +4,8 @@
  * happens here, since only the transport sees the address it connects to.
  */
 
+import { embeddedIPv4, ipv6Bytes } from "./ip.js";
+
 // Received bytes buffered per connection before the socket is paused until
 // the guest reads, so a fast peer can't fill host memory.
 const HIGH_WATER_BYTES = 1 << 20;
@@ -118,16 +120,10 @@ function blockedError(host) {
   return e;
 }
 
-/**
- * The IPv4 address a well-known-prefix NAT64 address (`64:ff9b::a.b.c.d`,
- * RFC 6052) is translated to, in the compressed form `dns.lookup` returns.
- */
-function nat64ToIPv4(address) {
-  const m = /^64:ff9b::(?:([0-9a-f]{1,4}):)?([0-9a-f]{1,4})$/i.exec(address);
-  if (!m) return null;
-  const hi = parseInt(m[1] ?? "0", 16);
-  const lo = parseInt(m[2], 16);
-  return [hi >> 8, hi & 255, lo >> 8, lo & 255].join(".");
+/** The IPv4 address an IPv6 address stands for on the wire (see ip.js), or null. */
+function embeddedIPv4Address(address) {
+  const b = ipv6Bytes(address);
+  return (b && embeddedIPv4(b)?.join(".")) ?? null;
 }
 
 /**
@@ -145,9 +141,8 @@ export function networkFilter({ blockedNetworks, allowedNetworks }) {
   };
   const blocked = list(blockedNetworks);
   const allowed = list(allowedNetworks);
-  // BlockList already matches IPv4-mapped IPv6 addresses against IPv4 subnets.
   const matches = (bl, address, type) => {
-    const v4 = type === "ipv6" ? nat64ToIPv4(address) : null;
+    const v4 = type === "ipv6" ? embeddedIPv4Address(address) : null;
     return bl.check(address, type) || (v4 !== null && bl.check(v4, "ipv4"));
   };
   return (address, family) => {

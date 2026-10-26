@@ -40,7 +40,10 @@ export const DEFAULT_BLOCKED_HOSTS = [
   "[::]",
 ];
 
-/** Same defaults as the Rust crate's `DEFAULT_BLOCKED_NETWORKS`. */
+/**
+ * The Rust crate's `DEFAULT_BLOCKED_NETWORKS`. IPv4-mapped, IPv4-compatible,
+ * NAT64 and Teredo addresses are also checked by the IPv4 address they embed.
+ */
 export const DEFAULT_BLOCKED_NETWORKS = [
   "0.0.0.0/8",
   "10.0.0.0/8",
@@ -48,13 +51,19 @@ export const DEFAULT_BLOCKED_NETWORKS = [
   "127.0.0.0/8",
   "169.254.0.0/16",
   "172.16.0.0/12",
+  "192.0.0.0/24",
   "192.168.0.0/16",
+  "198.18.0.0/15",
   "224.0.0.0/4",
   "240.0.0.0/4",
-  "::/128",
-  "::1/128",
+  "::/96",
+  "2001::/32",
+  "2001:db8::/32",
+  "2002::/16",
+  "64:ff9b:1::/48",
   "fc00::/7",
   "fe80::/10",
+  "fec0::/10",
   "ff00::/8",
 ];
 

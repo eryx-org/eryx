@@ -3,12 +3,13 @@ import { createServer, type Server, type Socket } from "node:net";
 import { createServer as createHttpServer, type Server as HttpServer } from "node:http";
 import type { AddressInfo } from "node:net";
 import { gzipSync } from "node:zlib";
+import { readFileSync } from "node:fs";
 import { Sandbox, setNetConfig } from "@bsull/eryx";
 // The browser transport, exercised directly: Node has fetch() but no CORS.
 // @ts-expect-error -- untyped internal module
 import { createTransport as createFetchTransport, networkFilter as fetchNetworkFilter } from "../eryx/shims/net-fetch.js";
 // @ts-expect-error -- untyped internal module
-import { createTransport as createNodeTransport } from "../eryx/shims/net-node.js";
+import { createTransport as createNodeTransport, networkFilter as nodeNetworkFilter } from "../eryx/shims/net-node.js";
 import { DEFAULT_BLOCKED_NETWORKS } from "@bsull/eryx";
 import { createNet } from "@bsull/eryx/shims/net";
 
@@ -81,6 +82,41 @@ except OSError as e:
     expect(() => setNetConfig({ maxConnections: -1 })).toThrow(TypeError);
     expect(() => setNetConfig({ maxConnections: NaN })).toThrow(TypeError);
   });
+});
+
+describe("default blocked networks", () => {
+  const filters = {
+    node: nodeNetworkFilter,
+    browser: fetchNetworkFilter,
+  } as Record<string, (c: object) => (address: string, family: number) => boolean>;
+
+  it("has as many ranges as the Rust crate's list", () => {
+    const rust = readFileSync(new URL("../../crates/eryx/src/net.rs", import.meta.url), "utf8");
+    const len = /pub const DEFAULT_BLOCKED_NETWORKS: \[IpNet; (\d+)\]/.exec(rust)?.[1];
+    expect(DEFAULT_BLOCKED_NETWORKS.length).toBe(Number(len));
+  });
+
+  for (const [name, filter] of Object.entries(filters)) {
+    it(`blocks the non-public ranges (${name})`, () => {
+      const isAllowed = filter({ blockedNetworks: DEFAULT_BLOCKED_NETWORKS, allowedNetworks: [] });
+      for (const v4 of ["192.0.0.8", "198.18.0.1", "198.19.255.255"]) expect(isAllowed(v4, 4), v4).toBe(false);
+      for (const v6 of ["::1.2.3.4", "2001::1", "2001:db8::1", "2002:c000:204::1", "64:ff9b:1::1", "fec0::1"]) {
+        expect(isAllowed(v6, 6), v6).toBe(false);
+      }
+      expect(isAllowed("93.184.215.14", 4)).toBe(true);
+      expect(isAllowed("2606:2800:21f:cb07:6820:80da:af6b:8b2c", 6)).toBe(true);
+    });
+
+    it(`checks IPv6 addresses by the IPv4 address they embed (${name})`, () => {
+      const isAllowed = filter({ blockedNetworks: ["169.254.0.0/16"], allowedNetworks: [] });
+      // IPv4-mapped, IPv4-compatible, NAT64 and Teredo (inverted) forms of 169.254.169.254.
+      for (const v6 of ["::ffff:a9fe:a9fe", "::a9fe:a9fe", "64:ff9b::a9fe:a9fe", "2001:0:1:2:3:4:5601:5601"]) {
+        expect(isAllowed(v6, 6), v6).toBe(false);
+      }
+      expect(isAllowed("2001:0:1:2:3:4:a9fe:a9fe", 6)).toBe(true);
+      expect(isAllowed("2606::a9fe:a9fe", 6)).toBe(true);
+    });
+  }
 });
 
 describe("Node socket transport", () => {
