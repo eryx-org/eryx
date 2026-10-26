@@ -967,27 +967,23 @@ print(f"final count: {r3['count']}")
 
     def test_async_callback_parallel_execution(self):
         """Test that multiple async callbacks can run in parallel via tokio."""
-        import asyncio
-        import time
+        import threading
 
-        call_times = []
-        lock = __import__("threading").Lock()
+        # Each call waits until all three have started, so the run only
+        # succeeds if they overlap. Unlike comparing timestamps, this can't
+        # flake on a slow runner; sequential calls break the barrier instead.
+        barrier = threading.Barrier(3, timeout=30)
 
-        async def timed_work(task_id: int):
-            """Callback that records when it runs."""
-            start = time.time()
-            await asyncio.sleep(0.05)
-            end = time.time()
-            with lock:
-                call_times.append((task_id, start, end))
+        async def wait_for_all(task_id: int):
+            barrier.wait()
             return {"task_id": task_id}
 
         sandbox = eryx.Sandbox(
             callbacks=[
                 {
-                    "name": "timed_work",
-                    "fn": timed_work,
-                    "description": "Timed work",
+                    "name": "wait_for_all",
+                    "fn": wait_for_all,
+                    "description": "Waits for all calls to start",
                 }
             ]
         )
@@ -995,21 +991,13 @@ print(f"final count: {r3['count']}")
         result = sandbox.execute("""
 import asyncio
 results = await asyncio.gather(
-    timed_work(task_id=1),
-    timed_work(task_id=2),
-    timed_work(task_id=3),
+    wait_for_all(task_id=1),
+    wait_for_all(task_id=2),
+    wait_for_all(task_id=3),
 )
-print(f"completed {len(results)} tasks")
+print(sorted(r["task_id"] for r in results))
 """)
-        assert b"completed 3 tasks" in result.stdout
-        assert len(call_times) == 3
-
-        # Verify callbacks ran in parallel: every call started before the first
-        # one finished. Sequential calls can't overlap, however slow the
-        # machine, whereas a total-time bound flakes on loaded CI runners.
-        starts = [t[1] for t in call_times]
-        ends = [t[2] for t in call_times]
-        assert max(starts) < min(ends), f"Callbacks appear sequential: {call_times}"
+        assert result.stdout == b"[1, 2, 3]\n"
 
     def test_sync_callback_from_async_context(self):
         """Test that sync callbacks work when called from async context."""
