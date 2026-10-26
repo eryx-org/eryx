@@ -13,9 +13,6 @@
  * redirect's target, so there a redirect fails instead.
  */
 
-const conns = new Map();
-let nextHandle = 1;
-
 // windows-1252 maps every byte to one UTF-16 unit, so string offsets of the
 // decoded request are byte offsets into it.
 const latin1 = new TextDecoder("latin1");
@@ -106,8 +103,8 @@ export function networkFilter({ blockedNetworks, allowedNetworks }) {
 /** 4 or 6 if `host` is an IP address (in the canonical form net.js passes), else 0. */
 const ipFamily = (host) => (host.includes(":") ? 6 : ipv4Bytes(host) ? 4 : 0);
 
-function open(c) {
-  const h = nextHandle++;
+function open(conns, c) {
+  const h = conns.next++;
   conns.set(h, c);
   return h;
 }
@@ -203,7 +200,7 @@ async function send(c, timeoutMs) {
   return concat([utf8.encode(head), body]);
 }
 
-function write(h, data, wrapErr) {
+function write(conns, h, data, wrapErr) {
   const c = conns.get(h);
   if (!c) throw wrapErr({ tag: "invalid-handle" });
   if (c.response) throw wrapErr({ tag: "io-error", val: "only one HTTP request per connection is supported in the browser" });
@@ -211,7 +208,7 @@ function write(h, data, wrapErr) {
   return data.length;
 }
 
-async function read(h, len, timeoutMs, wrapErr) {
+async function read(conns, h, len, timeoutMs, wrapErr) {
   const c = conns.get(h);
   if (!c) throw wrapErr({ tag: "invalid-handle" });
   c.response ??= send(c, timeoutMs);
@@ -226,37 +223,48 @@ async function read(h, len, timeoutMs, wrapErr) {
   return out;
 }
 
-const close = (h) => void conns.delete(h);
+/** `isAllowed` is a networkFilter() result, or null to skip the address check. */
+function connect(conns, host, port, isAllowed) {
+  // Browsers resolve names themselves, so only IP addresses can be checked.
+  const family = ipFamily(host);
+  if (family && isAllowed && !isAllowed(host, family)) {
+    throw tcpErr({ tag: "not-permitted", val: `host '${host}' resolves to a blocked network` });
+  }
+  return open(conns, { host, port, scheme: "http", request: [], response: null, offset: 0 });
+}
 
-export const openConnections = () => conns.size;
-export const closeAll = () => conns.clear();
+// The SNI hostname is ignored: fetch() verifies the certificate against the
+// URL host, and keeping the connect() host stops an upgrade from retargeting
+// an allowed connection at a host the policy never checked.
+function upgrade(conns, tcpHandle) {
+  const c = conns.get(tcpHandle);
+  if (!c) throw tlsErr({ tag: "invalid-handle" });
+  conns.delete(tcpHandle);
+  return open(conns, { ...c, scheme: "https" });
+}
 
-export const tcp = {
-  /** `isAllowed` is a networkFilter() result, or null to skip the address check. */
-  async connect(host, port, _timeoutMs, isAllowed) {
-    // Browsers resolve names themselves, so only IP addresses can be checked.
-    const family = ipFamily(host);
-    if (family && isAllowed && !isAllowed(host, family)) {
-      throw tcpErr({ tag: "not-permitted", val: `host '${host}' resolves to a blocked network` });
-    }
-    return open({ host, port, scheme: "http", request: [], response: null, offset: 0 });
-  },
-  read: (h, len, timeoutMs) => read(h, len, timeoutMs, tcpErr),
-  write: async (h, _timeoutMs, data) => write(h, data, tcpErr),
-  close,
-};
-
-export const tls = {
-  // The SNI hostname is ignored: fetch() verifies the certificate against the
-  // URL host, and keeping the connect() host stops an upgrade from retargeting
-  // an allowed connection at a host the policy never checked.
-  async upgrade(tcpHandle, _hostname, _timeoutMs) {
-    const c = conns.get(tcpHandle);
-    if (!c) throw tlsErr({ tag: "invalid-handle" });
-    conns.delete(tcpHandle);
-    return open({ ...c, scheme: "https" });
-  },
-  read: (h, len, timeoutMs) => read(h, len, timeoutMs, tlsErr),
-  write: async (h, _timeoutMs, data) => write(h, data, tlsErr),
-  close,
-};
+/**
+ * A transport with its own connection table, so each sandbox instance only
+ * sees (and closes) its own handles.
+ */
+export function createTransport() {
+  const conns = new Map();
+  conns.next = 1;
+  const close = (h) => void conns.delete(h);
+  return {
+    openConnections: () => conns.size,
+    closeAll: () => conns.clear(),
+    tcp: {
+      connect: async (host, port, _timeoutMs, isAllowed) => connect(conns, host, port, isAllowed),
+      read: (h, len, timeoutMs) => read(conns, h, len, timeoutMs, tcpErr),
+      write: async (h, _timeoutMs, data) => write(conns, h, data, tcpErr),
+      close,
+    },
+    tls: {
+      upgrade: async (h, _hostname, _timeoutMs) => upgrade(conns, h),
+      read: (h, len, timeoutMs) => read(conns, h, len, timeoutMs, tlsErr),
+      write: async (h, _timeoutMs, data) => write(conns, h, data, tlsErr),
+      close,
+    },
+  };
+}

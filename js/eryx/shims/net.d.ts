@@ -60,3 +60,12 @@ export function setNetConfig(config: NetConfig | null): void;
 
 /** Close every connection sandboxed code left open. Executions do this when they finish. */
 export function closeConnections(): void;
+
+/** A transport's TCP and TLS imports. Internal: the shapes follow the eryx:net WIT. */
+type NetImports = Record<string, (...args: any[]) => unknown>;
+
+/**
+ * The eryx:net imports for one sandbox instance, with its own connection
+ * table. The policy set with {@link setNetConfig} applies to every instance.
+ */
+export function createNet(): { tcp: NetImports; tls: NetImports; closeConnections(): void };

@@ -6,10 +6,14 @@ import { gzipSync } from "node:zlib";
 import { Sandbox, setNetConfig } from "@bsull/eryx";
 // The browser transport, exercised directly: Node has fetch() but no CORS.
 // @ts-expect-error -- untyped internal module
-import { tcp as fetchTcp, networkFilter as fetchNetworkFilter } from "../eryx/shims/net-fetch.js";
+import { createTransport as createFetchTransport, networkFilter as fetchNetworkFilter } from "../eryx/shims/net-fetch.js";
 // @ts-expect-error -- untyped internal module
-import { tcp as nodeTcp } from "../eryx/shims/net-node.js";
+import { createTransport as createNodeTransport } from "../eryx/shims/net-node.js";
 import { DEFAULT_BLOCKED_NETWORKS } from "@bsull/eryx";
+import { createNet } from "@bsull/eryx/shims/net";
+
+const { tcp: fetchTcp } = createFetchTransport();
+const { tcp: nodeTcp } = createNodeTransport();
 
 const sandbox = new Sandbox();
 // Tests talk to 127.0.0.1, which the default blocklists refuse.
@@ -149,6 +153,17 @@ for timeout in (0.1, None, 600):
 import socket
 conns = [socket.create_connection(("127.0.0.1", ${port})) for _ in range(3)]
 `);
+    await expect.poll(() => open.size).toBe(0);
+  });
+
+  it("keeps each instance's connections to itself", async () => {
+    const [a, b] = [createNet(), createNet()];
+    const h = await a.tcp.connect("127.0.0.1", port, 0);
+    await expect(b.tcp.read(h, 10, 0)).rejects.toEqual({ payload: { tag: "invalid-handle" } });
+    b.closeConnections();
+    await a.tcp.write(h, 0, new TextEncoder().encode("still open"));
+    expect(new TextDecoder().decode((await a.tcp.read(h, 100, 0)) as Uint8Array)).toBe("STILL OPEN");
+    a.closeConnections();
     await expect.poll(() => open.size).toBe(0);
   });
 

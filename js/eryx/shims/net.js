@@ -109,12 +109,6 @@ export function setNetConfig(netConfig) {
 }
 
 /**
- * Close every connection sandboxed code left open. The sandbox calls this
- * after each execution.
- */
-export const closeConnections = transport.closeAll;
-
-/**
  * The guest's timeout (`0` for none) clamped to the host's, so sandboxed code
  * can shorten a timeout but never extend it.
  */
@@ -164,28 +158,42 @@ function checkHost(host) {
   return { canonical, internal: matches(config.internalHosts) };
 }
 
-export const tcp = {
-  async connect(host, port, timeoutMs) {
-    const { canonical, internal } = checkHost(host);
-    if (transport.openConnections() >= config.maxConnections) {
-      throw notPermitted(`connection limit reached (${config.maxConnections})`);
-    }
-    // The transport checks the address (Node: the resolved addresses) with
-    // this; internal hosts skip it.
-    const isAllowed = internal ? null : config.isAllowed;
-    // Connect to the form that was checked, unbracketed for the transport.
-    const target = canonical.replace(/^\[(.*)\]$/, "$1");
-    return transport.tcp.connect(target, port, connectTimeout(timeoutMs), isAllowed);
-  },
-  read: (h, len, timeoutMs) => transport.tcp.read(h, len, ioTimeout(timeoutMs)),
-  write: (h, timeoutMs, data) => transport.tcp.write(h, ioTimeout(timeoutMs), data),
-  close: transport.tcp.close,
-};
+/**
+ * The eryx:net imports for one sandbox instance, with its own connection
+ * table. The policy set with setNetConfig() applies to all of them.
+ *
+ * `closeConnections()` closes every connection the instance's code left open;
+ * the sandbox calls it after each execution.
+ */
+export function createNet() {
+  const t = transport.createTransport();
+  return {
+    tcp: {
+      async connect(host, port, timeoutMs) {
+        const { canonical, internal } = checkHost(host);
+        if (t.openConnections() >= config.maxConnections) {
+          throw notPermitted(`connection limit reached (${config.maxConnections})`);
+        }
+        // The transport checks the address (Node: the resolved addresses)
+        // with this; internal hosts skip it.
+        const isAllowed = internal ? null : config.isAllowed;
+        // Connect to the form that was checked, unbracketed for the transport.
+        const target = canonical.replace(/^\[(.*)\]$/, "$1");
+        return t.tcp.connect(target, port, connectTimeout(timeoutMs), isAllowed);
+      },
+      read: (h, len, timeoutMs) => t.tcp.read(h, len, ioTimeout(timeoutMs)),
+      write: (h, timeoutMs, data) => t.tcp.write(h, ioTimeout(timeoutMs), data),
+      close: t.tcp.close,
+    },
+    tls: {
+      upgrade: (h, hostname, timeoutMs) => t.tls.upgrade(h, hostname, connectTimeout(timeoutMs)),
+      read: (h, len, timeoutMs) => t.tls.read(h, len, ioTimeout(timeoutMs)),
+      write: (h, timeoutMs, data) => t.tls.write(h, ioTimeout(timeoutMs), data),
+      close: t.tls.close,
+    },
+    closeConnections: t.closeAll,
+  };
+}
 
-export const tls = {
-  upgrade: (h, hostname, timeoutMs) =>
-    transport.tls.upgrade(h, hostname, connectTimeout(timeoutMs)),
-  read: (h, len, timeoutMs) => transport.tls.read(h, len, ioTimeout(timeoutMs)),
-  write: (h, timeoutMs, data) => transport.tls.write(h, ioTimeout(timeoutMs), data),
-  close: transport.tls.close,
-};
+/** The default instance's imports, for the module-level sandbox. */
+export const { tcp, tls, closeConnections } = createNet();
