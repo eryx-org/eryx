@@ -1024,12 +1024,14 @@ impl FdOutput {
 }
 
 /// Most bytes one execution may queue for each of the trace and output
-/// streams. The imports that feed them can't wait for a slow consumer, so
+/// streams, each queued event or chunk also being charged a small fixed
+/// overhead. The imports that feed them can't wait for a slow consumer, so
 /// anything past this is dropped from the stream (captured stdout/stderr in
 /// the final result are unaffected) and the execution reports
-/// [`ExecutionOutput::stream_truncated`].
+/// [`ExecutionOutput::stream_truncated`]. A consumer that builds its output
+/// from the stream, like `eryx-server`, can't keep more than this.
 // ponytail: fixed per-execution cap; make it configurable if a consumer needs more.
-pub(crate) const STREAM_BYTES_LIMIT: usize = 16 * 1024 * 1024;
+pub const STREAM_BYTES_LIMIT: usize = 16 * 1024 * 1024;
 
 /// What each queued trace event or output chunk is charged on top of its
 /// payload, for its allocation and channel slot. With [`STREAM_BYTES_LIMIT`]

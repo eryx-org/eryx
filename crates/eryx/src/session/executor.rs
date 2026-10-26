@@ -63,6 +63,10 @@ use crate::wasm::{
 /// The Python runtime enforces the same limit.
 pub const MAX_SNAPSHOT_SIZE: usize = 10 * 1024 * 1024;
 
+/// Time bound for snapshot, restore and clear when the session has no
+/// execution timeout.
+pub const DEFAULT_STATE_OP_TIMEOUT: Duration = Duration::from_secs(30);
+
 /// Smallest time bound for snapshot, restore and clear. The first snapshot
 /// loads the serializer, which can take longer than a tight execution timeout.
 pub const MIN_STATE_OP_TIMEOUT: Duration = Duration::from_secs(5);
@@ -512,6 +516,10 @@ pub struct SessionExecutor {
     /// from `execution_timeout`.
     state_op_timeout: Option<Duration>,
 
+    /// Cancels snapshot/restore/clear; see
+    /// [`set_state_op_cancellation`](SessionExecutor::set_state_op_cancellation).
+    state_op_cancellation: Option<CancellationToken>,
+
     /// Maximum guest memory, preserved when the store is recreated.
     memory_limit: Option<u64>,
 
@@ -522,6 +530,10 @@ pub struct SessionExecutor {
     /// callers can report them when the execution failed.
     last_peak_memory_bytes: u64,
     last_fuel_consumed: Option<u64>,
+
+    /// Whether the most recent execution dropped streamed output or trace
+    /// events; see [`ExecutionOutput::stream_truncated`].
+    last_stream_truncated: bool,
 
     /// VFS storage that persists across resets.
     #[cfg(feature = "vfs")]
@@ -904,10 +916,12 @@ impl SessionExecutor {
             execution_timeout: limits.execution_timeout,
             fuel_limit: limits.max_fuel,
             state_op_timeout: None,
+            state_op_cancellation: None,
             memory_limit: limits.max_memory_bytes,
             fd_output,
             last_peak_memory_bytes: 0,
             last_fuel_consumed: None,
+            last_stream_truncated: false,
             vfs_storage: Some(vfs_storage),
             vfs_config: Some(vfs_config),
             vfs_max_bytes: limits.max_vfs_bytes,
@@ -978,10 +992,12 @@ impl SessionExecutor {
             execution_timeout: limits.execution_timeout,
             fuel_limit: limits.max_fuel,
             state_op_timeout: None,
+            state_op_cancellation: None,
             memory_limit: limits.max_memory_bytes,
             fd_output,
             last_peak_memory_bytes: 0,
             last_fuel_consumed: None,
+            last_stream_truncated: false,
         })
     }
 
@@ -1009,18 +1025,33 @@ impl SessionExecutor {
     /// [`clear_state`](Self::clear_state).
     ///
     /// By default (`None`) it is the execution timeout raised to at least
-    /// [`MIN_STATE_OP_TIMEOUT`], or unbounded when there is no execution
-    /// timeout. `Some` uses the given duration as is.
+    /// [`MIN_STATE_OP_TIMEOUT`], or [`DEFAULT_STATE_OP_TIMEOUT`] when there
+    /// is no execution timeout. `Some` uses the given duration as is.
     pub fn set_state_op_timeout(&mut self, timeout: Option<Duration>) {
         self.state_op_timeout = timeout;
+    }
+
+    /// Let `token` stop [`snapshot_state`](Self::snapshot_state),
+    /// [`restore_state`](Self::restore_state) and
+    /// [`clear_state`](Self::clear_state), as
+    /// [`SessionExecuteBuilder::with_cancellation`] does for an execution.
+    ///
+    /// A cancelled operation returns [`Error::Cancelled`] and discards the
+    /// instance, so the next call resets the session. While a token is set,
+    /// CPU-bound guest code in these operations also yields to the async
+    /// runtime regularly, so the caller can drop the future.
+    pub fn set_state_op_cancellation(&mut self, token: Option<CancellationToken>) {
+        self.state_op_cancellation = token;
     }
 
     /// The time bound applied to state operations; see
     /// [`set_state_op_timeout`](Self::set_state_op_timeout).
     #[must_use]
-    pub fn state_op_timeout(&self) -> Option<Duration> {
-        self.state_op_timeout
-            .or_else(|| self.execution_timeout.map(|t| t.max(MIN_STATE_OP_TIMEOUT)))
+    pub fn state_op_timeout(&self) -> Duration {
+        self.state_op_timeout.unwrap_or_else(|| {
+            self.execution_timeout
+                .map_or(DEFAULT_STATE_OP_TIMEOUT, |t| t.max(MIN_STATE_OP_TIMEOUT))
+        })
     }
 
     /// Set the fuel limit for all executions in this session.
@@ -1049,10 +1080,14 @@ impl SessionExecutor {
     /// reuses the current instance) but is reset to the executor's configured name
     /// whenever the instance is re-created (e.g. by `reset`/reinstantiation).
     ///
+    /// If an earlier call lost the instance (e.g. a state operation timed
+    /// out), the session is reset first, as [`execute`](Self::execute) would.
+    ///
     /// # Errors
     ///
-    /// Returns an error if the session instance is unavailable or the guest call fails.
+    /// Returns an error if re-instantiation or the guest call fails.
     pub async fn set_result_variable(&mut self, name: &str) -> Result<(), Error> {
+        self.recover_lost_store(&[]).await?;
         let store = self
             .store
             .as_mut()
@@ -1093,6 +1128,15 @@ impl SessionExecutor {
     #[must_use]
     pub fn last_fuel_consumed(&self) -> Option<u64> {
         self.last_fuel_consumed
+    }
+
+    /// Whether the most recent execution dropped streamed output or trace
+    /// events for exceeding the per-execution stream budget. Unlike
+    /// [`ExecutionOutput::stream_truncated`], this is also available when the
+    /// execution failed.
+    #[must_use]
+    pub fn last_stream_truncated(&self) -> bool {
+        self.last_stream_truncated
     }
 
     /// Execute Python code with a fluent builder API.
@@ -1136,6 +1180,7 @@ impl SessionExecutor {
     ) -> Result<ExecutionOutput, Error> {
         self.last_peak_memory_bytes = 0;
         self.last_fuel_consumed = None;
+        self.last_stream_truncated = false;
         crate::error::validate_user_code(code)?;
         if crate::wasm::is_already_cancelled(cancellation_token.as_ref()) {
             return Err(Error::Cancelled);
@@ -1269,6 +1314,7 @@ impl SessionExecutor {
         // channel is dropped.
         let (fd_stdout, fd_stderr) = self.fd_output.take(store.data().output_tx.as_ref());
         let stream_truncated = store.data().stream_budget.truncated;
+        self.last_stream_truncated = stream_truncated;
 
         let peak_memory = {
             let state = store.data_mut();
@@ -1615,7 +1661,8 @@ impl SessionExecutor {
     /// - Serialization fails (e.g., unpicklable objects)
     /// - The snapshot exceeds the size limit
     /// - It runs past [`state_op_timeout`](Self::state_op_timeout) or the
-    ///   fuel limit (at least [`MIN_STATE_OP_FUEL`]), which also discards
+    ///   fuel limit (at least [`MIN_STATE_OP_FUEL`]), or is
+    ///   [cancelled](Self::set_state_op_cancellation), which also discards
     ///   the instance so the next call resets the session
     ///
     /// # Example
@@ -1664,7 +1711,8 @@ impl SessionExecutor {
     /// - The WASM call fails
     /// - Deserialization fails (e.g., corrupted data)
     /// - It runs past [`state_op_timeout`](Self::state_op_timeout) or the
-    ///   fuel limit (at least [`MIN_STATE_OP_FUEL`]), which also discards
+    ///   fuel limit (at least [`MIN_STATE_OP_FUEL`]), or is
+    ///   [cancelled](Self::set_state_op_cancellation), which also discards
     ///   the instance so the next call resets the session
     ///
     /// # Example
@@ -1707,8 +1755,9 @@ impl SessionExecutor {
     ///
     /// Returns an error if the WASM call fails, or if it runs past
     /// [`state_op_timeout`](Self::state_op_timeout) or the fuel limit (at
-    /// least [`MIN_STATE_OP_FUEL`]), which also discards the instance so the
-    /// next call resets the session.
+    /// least [`MIN_STATE_OP_FUEL`]) or is
+    /// [cancelled](Self::set_state_op_cancellation), which also discards the
+    /// instance so the next call resets the session.
     ///
     /// # Example
     ///
@@ -1731,8 +1780,9 @@ impl SessionExecutor {
     }
 
     /// Run a state export (snapshot/restore/clear) under
-    /// [`state_op_timeout`](Self::state_op_timeout) and the session's fuel
-    /// limit raised to at least [`MIN_STATE_OP_FUEL`].
+    /// [`state_op_timeout`](Self::state_op_timeout), the session's fuel
+    /// limit raised to at least [`MIN_STATE_OP_FUEL`], and the
+    /// [state-op cancellation token](Self::set_state_op_cancellation).
     ///
     /// These exports run guest code (e.g. `__reduce__`), so they need a
     /// bound. If it runs out the instance is discarded and the next call
@@ -1742,12 +1792,14 @@ impl SessionExecutor {
         what: &str,
         call: impl AsyncFnOnce(&Accessor<ExecutorState>, &SandboxBindings) -> wasmtime::Result<R>,
     ) -> Result<R, Error> {
+        let cancellation_token = self.state_op_cancellation.clone();
+        if crate::wasm::is_already_cancelled(cancellation_token.as_ref()) {
+            return Err(Error::Cancelled);
+        }
         self.recover_lost_store(&[]).await?;
 
         let timeout = self.state_op_timeout();
-        if timeout.is_some() {
-            crate::wasm::ensure_epoch_ticker(self.executor.engine())?;
-        }
+        crate::wasm::ensure_epoch_ticker(self.executor.engine())?;
 
         // Take ownership of store and bindings
         let mut store = self
@@ -1765,15 +1817,35 @@ impl SessionExecutor {
         store
             .set_fuel(fuel)
             .map_err(|e| Error::WasmEngine(format!("Failed to set fuel: {e}")))?;
-        crate::wasm::arm_epoch_deadline(&mut store, timeout);
+        let was_cancelled = Arc::new(AtomicBool::new(false));
+        match cancellation_token.clone() {
+            Some(token) => crate::wasm::arm_epoch_cancellation(
+                &mut store,
+                Some(timeout),
+                token,
+                Arc::clone(&was_cancelled),
+            ),
+            None => crate::wasm::arm_epoch_deadline(&mut store, Some(timeout)),
+        }
 
         let run = store.run_concurrent(async |accessor| call(accessor, &bindings).await);
-        let result = match timeout {
-            Some(timeout) => tokio::time::timeout(timeout, run)
-                .await
-                .unwrap_or_else(|_elapsed| Err(wasmtime::Error::from(wasmtime::Trap::Interrupt))),
-            None => run.await,
+        // As in `execute_internal`: also race the token, which the epoch
+        // callback only sees while guest code runs.
+        let run = async {
+            let Some(token) = cancellation_token.as_ref() else {
+                return run.await;
+            };
+            tokio::select! {
+                result = run => result,
+                () = token.cancelled() => {
+                    was_cancelled.store(true, Ordering::Relaxed);
+                    Err(wasmtime::Error::from(wasmtime::Trap::Interrupt))
+                }
+            }
         };
+        let result = tokio::time::timeout(timeout, run)
+            .await
+            .unwrap_or_else(|_elapsed| Err(wasmtime::Error::from(wasmtime::Trap::Interrupt)));
         crate::wasm::arm_epoch_deadline(&mut store, None);
 
         let result = result.and_then(|r| r);
@@ -1782,7 +1854,10 @@ impl SessionExecutor {
         {
             // The guest was halted mid-call: drop the instance so the next
             // call starts from a fresh one.
-            return Err(Error::Timeout(timeout.unwrap_or_default()));
+            return Err(crate::wasm::classify_epoch_interrupt(
+                was_cancelled.load(Ordering::Relaxed),
+                Some(timeout),
+            ));
         }
         if let Err(e) = &result
             && e.downcast_ref::<wasmtime::Trap>() == Some(&wasmtime::Trap::OutOfFuel)

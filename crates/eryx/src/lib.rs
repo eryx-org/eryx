@@ -137,7 +137,7 @@ pub use trace::{OutputHandler, TraceEvent, TraceEventKind, TraceHandler};
 // Re-export precompilation utilities and internal types
 pub use wasm::{
     CallbackRequest, CpuFeatureLevel, ExecutionOutput, NetRequest, OutputRequest, PythonExecutor,
-    TraceRequest,
+    STREAM_BYTES_LIMIT, TraceRequest,
 };
 
 // Re-export schema types at top level for convenience

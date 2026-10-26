@@ -51,7 +51,8 @@ use crate::error::Error;
 use crate::sandbox::ExecuteResult;
 
 pub use executor::{
-    MIN_STATE_OP_FUEL, MIN_STATE_OP_TIMEOUT, PythonStateSnapshot, SessionExecutor, SnapshotMetadata,
+    DEFAULT_STATE_OP_TIMEOUT, MIN_STATE_OP_FUEL, MIN_STATE_OP_TIMEOUT, PythonStateSnapshot,
+    SessionExecutor, SnapshotMetadata,
 };
 #[cfg(feature = "vfs")]
 pub use executor::{VfsConfig, VolumeMount};

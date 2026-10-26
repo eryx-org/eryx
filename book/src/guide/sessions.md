@@ -437,12 +437,15 @@ print(result.stdout_text)  # "[1, 2, 3], 6"
 (`__reduce__`, `__setstate__`, `__del__`, ...), so they are bounded like an
 execution. The time bound is the session's execution timeout raised to at
 least 5 seconds (`eryx::session::MIN_STATE_OP_TIMEOUT`), because the first
-snapshot loads the serializer. The fuel bound is the session's fuel limit
-raised to at least `eryx::session::MIN_STATE_OP_FUEL`. In Rust,
-`SessionExecutor::set_state_op_timeout` sets the time bound directly. A
-state operation that overruns returns `Error::Timeout` or
-`Error::FuelExhausted`, and the next call resets the session, as after a
-cancelled call.
+snapshot loads the serializer. A session with no execution timeout uses 30
+seconds (`eryx::session::DEFAULT_STATE_OP_TIMEOUT`). The fuel bound is the
+session's fuel limit raised to at least `eryx::session::MIN_STATE_OP_FUEL`.
+In Rust, `SessionExecutor::set_state_op_timeout` sets the time bound
+directly, and `SessionExecutor::set_state_op_cancellation` lets a
+`CancellationToken` stop a state operation (`Error::Cancelled`). A state
+operation that overruns returns `Error::Timeout` or `Error::FuelExhausted`,
+and the next call resets the session, as after a cancelled call. The gRPC
+server cancels the restore and snapshot when the client disconnects.
 
 ## Session with VFS
 
