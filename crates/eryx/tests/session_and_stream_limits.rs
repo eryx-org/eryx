@@ -82,6 +82,55 @@ async fn clear_state_is_bounded_by_execution_timeout() {
         .expect("session recovers");
 }
 
+const SPIN_ON_SNAPSHOT: &str =
+    "class Spin:\n    def __reduce__(self):\n        while True:\n            pass\nspin = Spin()";
+
+#[tokio::test]
+async fn state_op_timeout_can_be_set_separately() {
+    let mut session = SessionExecutor::new(executor(), &[])
+        .await
+        .expect("session construction");
+    assert_eq!(session.state_op_timeout(), None);
+    session.set_execution_timeout(Some(Duration::from_millis(100)));
+    assert_eq!(
+        session.state_op_timeout(),
+        Some(eryx::session::MIN_STATE_OP_TIMEOUT)
+    );
+    session.set_execution_timeout(None);
+    session.set_state_op_timeout(Some(Duration::from_millis(300)));
+    session
+        .execute(SPIN_ON_SNAPSHOT)
+        .run()
+        .await
+        .expect("setup");
+
+    let err = bounded(session.snapshot_state())
+        .await
+        .expect_err("snapshot should time out");
+    assert!(matches!(err, Error::Timeout(_)), "got {err:?}");
+}
+
+#[tokio::test]
+async fn state_ops_are_bounded_by_fuel() {
+    let limits = ResourceLimits::unlimited().with_max_fuel(1_000);
+    let mut session = SessionExecutor::new_with_limits(executor(), &[], &limits)
+        .await
+        .expect("session construction");
+    session.set_fuel_limit(None);
+    session
+        .execute(SPIN_ON_SNAPSHOT)
+        .run()
+        .await
+        .expect("setup");
+    session.set_fuel_limit(Some(1_000));
+
+    let err = tokio::time::timeout(Duration::from_secs(120), session.snapshot_state())
+        .await
+        .expect("bounded by fuel")
+        .expect_err("snapshot should run out of fuel");
+    assert!(matches!(err, Error::FuelExhausted { .. }), "got {err:?}");
+}
+
 const FD_WRITES: &str = "import os, sys\nos.write(1, b'fd-out\\n')\nos.write(2, b'fd-err\\n')\nsys.__stdout__.write('dunder-out\\n')\nsys.__stdout__.flush()";
 
 fn assert_fd_writes_captured(stdout: &[u8], stderr: &[u8]) {

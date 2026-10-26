@@ -67,6 +67,10 @@ pub const MAX_SNAPSHOT_SIZE: usize = 10 * 1024 * 1024;
 /// loads the serializer, which can take longer than a tight execution timeout.
 pub const MIN_STATE_OP_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// Smallest fuel bound for snapshot, restore and clear, about ten times what
+/// loading the serializer costs.
+pub const MIN_STATE_OP_FUEL: u64 = 20_000_000_000;
+
 /// A snapshot of Python session state.
 ///
 /// This captures all user-defined variables from the Python session,
@@ -504,6 +508,10 @@ pub struct SessionExecutor {
     /// Optional fuel limit for instruction tracking/limiting.
     fuel_limit: Option<u64>,
 
+    /// Time bound for snapshot/restore/clear, overriding the one derived
+    /// from `execution_timeout`.
+    state_op_timeout: Option<Duration>,
+
     /// Maximum guest memory, preserved when the store is recreated.
     memory_limit: Option<u64>,
 
@@ -895,6 +903,7 @@ impl SessionExecutor {
             state_was_reset: false,
             execution_timeout: limits.execution_timeout,
             fuel_limit: limits.max_fuel,
+            state_op_timeout: None,
             memory_limit: limits.max_memory_bytes,
             fd_output,
             last_peak_memory_bytes: 0,
@@ -968,6 +977,7 @@ impl SessionExecutor {
             state_was_reset: false,
             execution_timeout: limits.execution_timeout,
             fuel_limit: limits.max_fuel,
+            state_op_timeout: None,
             memory_limit: limits.max_memory_bytes,
             fd_output,
             last_peak_memory_bytes: 0,
@@ -992,6 +1002,25 @@ impl SessionExecutor {
     #[must_use]
     pub fn execution_timeout(&self) -> Option<Duration> {
         self.execution_timeout
+    }
+
+    /// Set the time bound for [`snapshot_state`](Self::snapshot_state),
+    /// [`restore_state`](Self::restore_state) and
+    /// [`clear_state`](Self::clear_state).
+    ///
+    /// By default (`None`) it is the execution timeout raised to at least
+    /// [`MIN_STATE_OP_TIMEOUT`], or unbounded when there is no execution
+    /// timeout. `Some` uses the given duration as is.
+    pub fn set_state_op_timeout(&mut self, timeout: Option<Duration>) {
+        self.state_op_timeout = timeout;
+    }
+
+    /// The time bound applied to state operations; see
+    /// [`set_state_op_timeout`](Self::set_state_op_timeout).
+    #[must_use]
+    pub fn state_op_timeout(&self) -> Option<Duration> {
+        self.state_op_timeout
+            .or_else(|| self.execution_timeout.map(|t| t.max(MIN_STATE_OP_TIMEOUT)))
     }
 
     /// Set the fuel limit for all executions in this session.
@@ -1580,9 +1609,9 @@ impl SessionExecutor {
     /// - The WASM call fails
     /// - Serialization fails (e.g., unpicklable objects)
     /// - The snapshot exceeds the size limit
-    /// - It runs past the session's execution timeout (at least
-    ///   [`MIN_STATE_OP_TIMEOUT`]), which also discards the instance so the
-    ///   next call resets the session
+    /// - It runs past [`state_op_timeout`](Self::state_op_timeout) or the
+    ///   fuel limit (at least [`MIN_STATE_OP_FUEL`]), which also discards
+    ///   the instance so the next call resets the session
     ///
     /// # Example
     ///
@@ -1629,9 +1658,9 @@ impl SessionExecutor {
     /// Returns an error if:
     /// - The WASM call fails
     /// - Deserialization fails (e.g., corrupted data)
-    /// - It runs past the session's execution timeout (at least
-    ///   [`MIN_STATE_OP_TIMEOUT`]), which also discards the instance so the
-    ///   next call resets the session
+    /// - It runs past [`state_op_timeout`](Self::state_op_timeout) or the
+    ///   fuel limit (at least [`MIN_STATE_OP_FUEL`]), which also discards
+    ///   the instance so the next call resets the session
     ///
     /// # Example
     ///
@@ -1671,9 +1700,10 @@ impl SessionExecutor {
     ///
     /// # Errors
     ///
-    /// Returns an error if the WASM call fails, or if it runs past the
-    /// session's execution timeout, at least [`MIN_STATE_OP_TIMEOUT`] (which
-    /// also discards the instance so the next call resets the session).
+    /// Returns an error if the WASM call fails, or if it runs past
+    /// [`state_op_timeout`](Self::state_op_timeout) or the fuel limit (at
+    /// least [`MIN_STATE_OP_FUEL`]), which also discards the instance so the
+    /// next call resets the session.
     ///
     /// # Example
     ///
@@ -1695,13 +1725,13 @@ impl SessionExecutor {
         Ok(())
     }
 
-    /// Run a state export (snapshot/restore/clear) under the session's
-    /// execution timeout, raised to at least [`MIN_STATE_OP_TIMEOUT`].
+    /// Run a state export (snapshot/restore/clear) under
+    /// [`state_op_timeout`](Self::state_op_timeout) and the session's fuel
+    /// limit raised to at least [`MIN_STATE_OP_FUEL`].
     ///
-    /// These exports run guest code (e.g. `__reduce__`), so they need a time
+    /// These exports run guest code (e.g. `__reduce__`), so they need a
     /// bound. If it runs out the instance is discarded and the next call
-    /// resets the session. The session's fuel limit is not applied: it is
-    /// sized for user code, and the time bound already stops a guest loop.
+    /// resets the session.
     async fn run_state_op<R>(
         &mut self,
         what: &str,
@@ -1709,7 +1739,7 @@ impl SessionExecutor {
     ) -> Result<R, Error> {
         self.recover_lost_store(&[]).await?;
 
-        let timeout = self.execution_timeout.map(|t| t.max(MIN_STATE_OP_TIMEOUT));
+        let timeout = self.state_op_timeout();
         if timeout.is_some() {
             crate::wasm::ensure_epoch_ticker(self.executor.engine())?;
         }
@@ -1724,9 +1754,11 @@ impl SessionExecutor {
             .take()
             .ok_or_else(|| Error::WasmEngine("Bindings not available".to_string()))?;
 
-        // Execute's fuel limit may have left the store almost empty.
+        let fuel = self
+            .fuel_limit
+            .map_or(u64::MAX, |f| f.max(MIN_STATE_OP_FUEL));
         store
-            .set_fuel(u64::MAX)
+            .set_fuel(fuel)
             .map_err(|e| Error::WasmEngine(format!("Failed to set fuel: {e}")))?;
         crate::wasm::arm_epoch_deadline(&mut store, timeout);
 
@@ -1746,6 +1778,15 @@ impl SessionExecutor {
             // The guest was halted mid-call: drop the instance so the next
             // call starts from a fresh one.
             return Err(Error::Timeout(timeout.unwrap_or_default()));
+        }
+        if let Err(e) = &result
+            && e.downcast_ref::<wasmtime::Trap>() == Some(&wasmtime::Trap::OutOfFuel)
+        {
+            let consumed = fuel.saturating_sub(store.get_fuel().unwrap_or(0));
+            return Err(Error::FuelExhausted {
+                consumed,
+                limit: fuel,
+            });
         }
 
         // Restore store and bindings
