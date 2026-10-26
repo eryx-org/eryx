@@ -260,6 +260,11 @@ impl NetConfig {
         self.blocked_hosts
             .retain(|p| !p.contains("localhost") && !p.starts_with("127.") && !p.contains("::1"));
         self.blocked_networks.retain(|n| !n.addr().is_loopback());
+        // `::1` is also inside the default `::/96` block.
+        let loopback = IpNet::from(std::net::IpAddr::V6(std::net::Ipv6Addr::LOCALHOST));
+        if !self.allowed_networks.contains(&loopback) {
+            self.allowed_networks.push(loopback);
+        }
         self.clone()
     }
 

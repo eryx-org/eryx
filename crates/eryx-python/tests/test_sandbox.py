@@ -195,6 +195,29 @@ except OSError as e:
         assert "127.*" not in result.blocked_hosts
         assert "127.0.0.0/8" not in result.blocked_networks
         assert "10.0.0.0/8" in result.blocked_networks
+        assert "::1/128" in result.allowed_networks
+
+    def test_allow_localhost_reaches_ipv6_loopback(self):
+        """`::1` is reachable after allow_localhost(), though `::/96` is blocked."""
+        import socket
+        import threading
+
+        try:
+            server = socket.create_server(("::1", 0), family=socket.AF_INET6)
+        except OSError:
+            pytest.skip("IPv6 loopback unavailable")
+        port = server.getsockname()[1]
+        accepted = threading.Thread(target=lambda: server.accept()[0].close(), daemon=True)
+        accepted.start()
+
+        config = eryx.NetConfig(allowed_hosts=["::1"]).allow_localhost()
+        sandbox = eryx.Sandbox(network=config)
+        result = sandbox.execute(
+            f"import socket\nsocket.create_connection(('::1', {port})).close()\nprint('ok')"
+        )
+        assert result.stdout == b"ok\n"
+        accepted.join(5)
+        server.close()
 
     def test_network_policy_fields(self):
         """Test CIDR fields default, round-trip, and reject invalid input."""
