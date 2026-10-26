@@ -1236,7 +1236,6 @@ dependencies = [
  "tar",
  "tempfile",
  "tokio",
- "tokio-util",
  "walkdir",
  "zstd 0.14.3",
 ]

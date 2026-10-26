@@ -31,8 +31,8 @@ use std::time::Duration;
 #[cfg(feature = "embedded")]
 use crate::cache::{CacheKey, InstancePreCache};
 
+use crate::CancellationToken;
 use tokio::sync::{mpsc, oneshot};
-use tokio_util::sync::CancellationToken;
 use wasmtime::component::{Accessor, Component, HasSelf, Linker, ResourceTable};
 use wasmtime::{
     AsContextMut, Config, Enabled, Engine, InstanceAllocationStrategy, PoolingAllocationConfig,

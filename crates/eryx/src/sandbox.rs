@@ -11,8 +11,8 @@ use std::{
     time::{Duration, Instant},
 };
 
+use crate::CancellationToken;
 use tokio::sync::{mpsc, oneshot};
-use tokio_util::sync::CancellationToken;
 
 use crate::replay::{CallbackJournal, ReplayState, SuspendedCallback, wrap_callbacks};
 

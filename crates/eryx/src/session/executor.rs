@@ -38,8 +38,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use crate::CancellationToken;
 use tokio::sync::mpsc;
-use tokio_util::sync::CancellationToken;
 use wasmtime::Store;
 use wasmtime::component::{Accessor, ResourceTable};
 // wasmtime 48 collapsed DirPerms/FilePerms into FsPerms; the fine-grained

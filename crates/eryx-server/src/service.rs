@@ -497,7 +497,7 @@ impl crate::proto::eryx::v1::eryx_server::Eryx for EryxService {
 
         // Create a cancellation token so the dispatch task can signal the
         // execution task when the inbound stream fails (client disconnected).
-        let cancel = CancellationToken::new();
+        let cancel = eryx::CancellationToken::new();
 
         // 6. Spawn callback dispatch task: reads inbound CallbackResponses and
         //    routes them to the pending oneshot senders.
@@ -858,7 +858,7 @@ async fn execute_with_session(
     sandbox: &mut eryx::PooledSandbox,
     params: &SessionParams<'_>,
     server_tx: &mpsc::Sender<ServerMessage>,
-    cancel: &CancellationToken,
+    cancel: &eryx::CancellationToken,
 ) -> ExecuteResult {
     let start = Instant::now();
 

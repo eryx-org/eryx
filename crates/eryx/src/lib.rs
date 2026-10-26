@@ -53,6 +53,7 @@
 pub mod cache;
 mod callback;
 pub mod callback_handler;
+mod cancel;
 #[cfg(feature = "embedded")]
 pub mod embedded;
 #[cfg(feature = "embedded-stdlib")]
@@ -143,8 +144,7 @@ pub use wasm::{
 // Re-export schema types at top level for convenience
 pub use schema::{JsonSchema, Schema};
 
-// Re-export CancellationToken for convenient use with execute_cancellable
-pub use tokio_util::sync::CancellationToken;
+pub use cancel::CancellationToken;
 
 // Re-export the callback proc macro when the macros feature is enabled
 #[cfg(feature = "macros")]

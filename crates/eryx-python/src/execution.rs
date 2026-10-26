@@ -9,10 +9,10 @@ use std::future::Future;
 use std::pin::Pin;
 use std::time::Duration;
 
+use eryx::CancellationToken;
 use pyo3::prelude::*;
 use pyo3_async_runtimes::TaskLocals;
 use pyo3_async_runtimes::generic::{ContextExt, Runtime};
-use tokio_util::sync::CancellationToken;
 
 use crate::error::ExecutionError;
 
@@ -100,6 +100,15 @@ pub(crate) fn run_blocking<T: Send + 'static>(
     }
 }
 
+/// Cancels its token when dropped.
+struct CancelOnDrop(CancellationToken);
+
+impl Drop for CancelOnDrop {
+    fn drop(&mut self) {
+        self.0.cancel();
+    }
+}
+
 /// Start the future `start` returns on `runtime` and return an asyncio
 /// awaitable for its result.
 ///
@@ -123,7 +132,7 @@ where
         locals,
         async move {
             // Dropped without completing when the asyncio task is cancelled.
-            let _cancel_on_drop = cancel.drop_guard();
+            let _cancel_on_drop = CancelOnDrop(cancel);
             task.await.map_err(task_failed)?
         },
     )
