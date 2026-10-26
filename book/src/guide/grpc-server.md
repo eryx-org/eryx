@@ -44,11 +44,11 @@ Every flag also has an environment variable, so the server is easy to configure 
 | `--max-execution-timeout-ms` | `ERYX_MAX_EXECUTION_TIMEOUT_MS` | `300000` | Ceiling on `resource_limits.execution_timeout_ms`. |
 | `--max-callback-timeout-ms` | `ERYX_MAX_CALLBACK_TIMEOUT_MS` | `300000` | Ceiling on `resource_limits.callback_timeout_ms`. |
 | `--max-memory-bytes` | `ERYX_MAX_MEMORY_BYTES` | `536870912` (512 MiB) | Ceiling on `resource_limits.max_memory_bytes`. |
-| `--max-fuel` | `ERYX_MAX_FUEL` | *(none)* | Ceiling on `resource_limits.max_fuel`; when set, also the budget for requests that set none. |
+| `--max-fuel` | `ERYX_MAX_FUEL` | *(none)* | Optional ceiling on `resource_limits.max_fuel`; when set, also the budget for requests that set none. Without it fuel is unlimited and the execution timeout is the CPU bound. |
 | `--max-callback-invocations` | `ERYX_MAX_CALLBACK_INVOCATIONS` | `10000` | Ceiling on `resource_limits.max_callback_invocations`. |
 | `--max-connections` | `ERYX_MAX_CONNECTIONS` | `100` | Ceiling on `network_config.max_connections`. |
 | `--max-io-timeout-ms` | `ERYX_MAX_IO_TIMEOUT_MS` | `300000` | Ceiling on `network_config.io_timeout_ms` and `connect_timeout_ms`. |
-| `--max-output-bytes` | `ERYX_MAX_OUTPUT_BYTES` | `16777216` (16 MiB) | Most stdout plus stderr bytes kept and streamed per execution. See [Output cap](#output-cap). |
+| `--max-output-bytes` | `ERYX_MAX_OUTPUT_BYTES` | `16777216` (16 MiB) | Most stdout plus stderr bytes kept and streamed per execution, at most 16 MiB. See [Output cap](#output-cap). |
 | `--tls-cert` | `ERYX_TLS_CERT` | *(off)* | PEM certificate chain; enables TLS. Requires `--tls-key`. |
 | `--tls-key` | `ERYX_TLS_KEY` | *(off)* | PEM private key for `--tls-cert`. |
 | `--tls-client-ca` | `ERYX_TLS_CLIENT_CA` | *(off)* | PEM CA bundle to verify client certs; enables mutual TLS. See [Transport security](#transport-security-tls--mtls). |
@@ -56,6 +56,8 @@ Every flag also has an environment variable, so the server is easy to configure 
 ### Request limits
 
 Each request sets its own limits in `resource_limits` (and, for networking, `network_config`). A zero field takes the default documented in the proto (30 s execution timeout, 10 s callback timeout, 128 MiB memory, 1000 callback invocations, unlimited fuel). The `--max-*` flags cap what a request can ask for: **a value above its ceiling is clamped down to it, not rejected**, so clients written for a more generous server keep working. Every ceiling must be greater than zero; the server refuses to start otherwise. The memory limit is enforced on the guest, so an allocation past it raises `MemoryError` inside Python.
+
+Fuel is optional. Without `--max-fuel`, requests that set no `max_fuel` run with unlimited fuel, and the execution timeout (capped by `--max-execution-timeout-ms`) is what bounds CPU use. There is no fuel value that suits every workload, so set `--max-fuel` only if you need instruction-level bounds.
 
 ### Health checks
 
@@ -128,11 +130,13 @@ If the client disconnects, the server cancels the in-flight execution, including
 | `state_snapshot` | Post-execution state, when `persist_state` was set. |
 | `callback_journal` | The recorded replay journal, when the request opted in. |
 | `suspended` / `suspended_callback` | Set when a callback [suspended](#suspension) execution. |
-| `output_truncated` | Set when stdout plus stderr went past the server's [output cap](#output-cap). |
+| `output_truncated` | Set when output was dropped: stdout plus stderr went past the [output cap](#output-cap). |
 
 ### Output cap
 
 The server keeps and streams at most `--max-output-bytes` (16 MiB by default) of stdout plus stderr per execution. Output past the cap is dropped from both the `OutputEvent` stream and the final `stdout`/`stderr`. The stream that crossed the cap gets a `[output truncated: exceeded N bytes]` marker, and `output_truncated` is set. The script itself keeps running.
+
+The sandbox also limits how much output one execution can stream: 16 MiB, with a small overhead charged per write, so a script making very many tiny writes can reach it before the server's cap. Output past that limit is dropped too and `output_truncated` is set, but without a marker. That limit is why `--max-output-bytes` can't be set above 16 MiB.
 
 ### Failure classification
 

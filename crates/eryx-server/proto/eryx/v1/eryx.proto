@@ -429,7 +429,9 @@ message ExecuteResult {
   // True if stdout plus stderr exceeded the server's output cap
   // (--max-output-bytes). Output past the cap was dropped, both from the
   // OutputEvent stream and from `stdout`/`stderr`, and a truncation marker was
-  // appended to the stream that crossed it.
+  // appended to the stream that crossed it. Also true, without a marker, when
+  // the sandbox's own per-execution output stream limit (16 MiB, charging a
+  // small overhead per write) dropped output first.
   bool output_truncated = 14;
 }
 

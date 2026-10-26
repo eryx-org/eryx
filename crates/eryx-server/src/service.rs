@@ -88,6 +88,10 @@ pub struct ServerLimits {
     /// Most stdout plus stderr bytes kept and streamed per execution. Output
     /// past this is dropped, a truncation marker is appended, and
     /// `ExecuteResult.output_truncated` is set.
+    ///
+    /// Values above [`eryx::STREAM_BYTES_LIMIT`] have no effect: the sandbox
+    /// stops streaming output there (counting a small overhead per write),
+    /// which also sets `output_truncated`, without a marker.
     pub max_output_bytes: usize,
 }
 
@@ -922,6 +926,9 @@ async fn execute_with_session(
         }
     };
 
+    // A disconnect also stops guest code run by the restore and snapshot.
+    session.set_state_op_cancellation(Some(cancel.clone()));
+
     // Restore previous state if provided. A snapshot that cannot be restored
     // (corrupt, or from an incompatible runtime) does not fail the request -
     // the code runs against a clean state - but is reported in `state_error`
@@ -1107,7 +1114,8 @@ async fn execute_with_session(
     let output = output_accumulator
         .await
         .unwrap_or_else(|_| CappedOutput::new(0));
-    let output_truncated = output.truncated;
+    // The sandbox's own stream budget can also drop output.
+    let output_truncated = output.truncated || session.last_stream_truncated();
     let stdout = if params.scrub_stdout {
         scrub_placeholders_bytes(&output.stdout, &params.secrets)
     } else {

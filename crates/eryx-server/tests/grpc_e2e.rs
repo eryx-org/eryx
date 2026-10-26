@@ -2403,6 +2403,73 @@ async fn output_is_capped() {
     );
 }
 
+/// Output the sandbox's own stream limit dropped (here, many tiny writes,
+/// each charged an overhead) is reported as truncated even below the
+/// server's cap.
+#[tokio::test]
+async fn sandbox_stream_limit_sets_output_truncated() {
+    let mut client = EryxClient::new(start_server().await);
+    let result = execute_half_closed(
+        &mut client,
+        ExecuteRequest {
+            code: "import _eryx\nfor _ in range(400_000):\n    _eryx._eryx_report_output(0, b'x')"
+                .to_string(),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    assert!(result.success, "{}", result.error);
+    assert!(result.stdout.len() < 400_000, "{}", result.stdout.len());
+    assert!(result.output_truncated);
+}
+
+/// A snapshot whose restore runs past the time bound loses the session's
+/// state, but a request that also overrides `result_variable` still runs on a
+/// clean state rather than failing.
+#[tokio::test]
+async fn restore_timeout_with_result_variable_runs_on_clean_state() {
+    let mut client = EryxClient::new(start_server().await);
+    let first = execute_half_closed(
+        &mut client,
+        ExecuteRequest {
+            code: "class Spin:\n    def __reduce__(self):\n        return (exec, ('while True: pass',))\nspin = Spin()"
+                .to_string(),
+            persist_state: true,
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    assert!(first.success, "step 1 failed: {}", first.error);
+
+    let second = execute_half_closed(
+        &mut client,
+        ExecuteRequest {
+            code: "out = 'spin' in globals()".to_string(),
+            persist_state: true,
+            state_snapshot: first.state_snapshot,
+            result_variable: "out".to_string(),
+            resource_limits: Some(ResourceLimits {
+                execution_timeout_ms: 1_000,
+                ..Default::default()
+            }),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    assert!(second.success, "step 2 failed: {}", second.error);
+    assert_eq!(second.result, "false");
+    assert!(
+        second
+            .state_error
+            .contains("failed to restore state snapshot"),
+        "{:?}",
+        second.state_error
+    );
+}
+
 /// A client disconnect stops CPU-bound code instead of leaving it to run
 /// until the execution timeout.
 #[tokio::test]
@@ -2450,6 +2517,68 @@ async fn disconnect_cancels_cpu_bound_execution() {
     .unwrap();
     assert!(result.success, "{}", result.error);
     assert!(started.elapsed() < Duration::from_secs(25));
+}
+
+/// A client disconnect also stops a slow state restore.
+#[tokio::test]
+async fn disconnect_cancels_state_restore() {
+    let mut client = EryxClient::new(start_server_with(1, EryxService::new).await);
+    let first = execute_half_closed(
+        &mut client,
+        ExecuteRequest {
+            code: "class Spin:\n    def __reduce__(self):\n        return (exec, ('while True: pass',))\nspin = Spin()"
+                .to_string(),
+            persist_state: true,
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    assert!(first.success, "step 1 failed: {}", first.error);
+
+    let (tx, rx) = mpsc::channel(1);
+    tx.send(ClientMessage {
+        message: Some(client_message::Message::ExecuteRequest(Box::new(
+            ExecuteRequest {
+                code: "pass".to_string(),
+                persist_state: true,
+                state_snapshot: first.state_snapshot,
+                resource_limits: Some(ResourceLimits {
+                    execution_timeout_ms: 120_000,
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+        ))),
+    })
+    .await
+    .unwrap();
+    let stream = client
+        .execute(ReceiverStream::new(rx))
+        .await
+        .unwrap()
+        .into_inner();
+    // Let the restore start, then drop both directions.
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    drop(stream);
+    drop(tx);
+
+    // The pool's only sandbox must come back well before the restore's
+    // 120 s bound.
+    let result = tokio::time::timeout(
+        Duration::from_secs(25),
+        execute_half_closed(
+            &mut client,
+            ExecuteRequest {
+                code: "print('next')".to_string(),
+                ..Default::default()
+            },
+        ),
+    )
+    .await
+    .expect("sandbox was not released after disconnect")
+    .unwrap();
+    assert!(result.success, "{}", result.error);
 }
 
 /// A secret needs a host it can be sent to: with no `allowed_hosts` of its own

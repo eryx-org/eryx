@@ -127,7 +127,9 @@ struct Args {
     max_io_timeout_ms: u64,
 
     /// Most stdout plus stderr bytes kept and streamed per execution; the rest
-    /// is dropped and the result marked `output_truncated`.
+    /// is dropped and the result marked `output_truncated`. At most 16 MiB,
+    /// the sandbox's own per-execution output stream limit, which also
+    /// charges each write a small overhead and sets `output_truncated` too.
     #[arg(long, default_value_t = 16 * 1024 * 1024, env = "ERYX_MAX_OUTPUT_BYTES")]
     max_output_bytes: usize,
 
@@ -273,6 +275,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         if value == 0 {
             return Err(format!("{flag} must be greater than 0").into());
         }
+    }
+    if args.max_output_bytes > eryx::STREAM_BYTES_LIMIT {
+        return Err(format!(
+            "--max-output-bytes must be at most {}, the sandbox's output stream limit",
+            eryx::STREAM_BYTES_LIMIT
+        )
+        .into());
     }
     let addr = args.listen_addr.parse()?;
 
