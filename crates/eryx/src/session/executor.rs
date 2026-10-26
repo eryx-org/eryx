@@ -1323,7 +1323,10 @@ impl SessionExecutor {
         // that is always an uncaught Python exception (its traceback).
         let wit_output = wasmtime_result
             .map_err(|e| Error::Execution(format!("WASM execution error: {e:?}")))?
-            .map_err(Error::PythonException)?;
+            .map_err(|mut traceback| {
+                crate::wasm::append_fd_stderr(&mut traceback, &fd_stderr);
+                Error::PythonException(traceback)
+            })?;
 
         let duration = start.elapsed();
 

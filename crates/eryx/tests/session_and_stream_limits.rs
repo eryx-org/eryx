@@ -163,6 +163,34 @@ async fn session_captures_direct_fd_writes_per_execution() {
     assert_eq!(output.stdout_text().trim(), "next");
 }
 
+const FD_WRITE_THEN_RAISE: &str = "import os\nos.write(2, b'fd-err\\n')\nraise ValueError('boom')";
+
+fn assert_traceback_has_fd_write(err: Error) {
+    let Error::PythonException(traceback) = err else {
+        panic!("expected a Python exception, got {err:?}");
+    };
+    assert!(traceback.contains("ValueError"), "{traceback:?}");
+    assert!(traceback.contains("fd-err"), "{traceback:?}");
+}
+
+#[tokio::test]
+async fn direct_fd_writes_are_kept_when_the_script_raises() {
+    let sandbox = eryx::Sandbox::embedded().build().expect("sandbox");
+    let err = sandbox
+        .execute(FD_WRITE_THEN_RAISE)
+        .await
+        .expect_err("raises");
+    assert_traceback_has_fd_write(err);
+
+    let mut session = session_with_timeout(Duration::from_secs(10)).await;
+    let err = session
+        .execute(FD_WRITE_THEN_RAISE)
+        .run()
+        .await
+        .expect_err("raises");
+    assert_traceback_has_fd_write(err);
+}
+
 #[tokio::test]
 async fn pooled_sandbox_keeps_builder_limits_across_leases() {
     let limits = ResourceLimits::default()

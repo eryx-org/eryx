@@ -3187,9 +3187,16 @@ impl PythonExecutor {
             )
             .await;
         let (fd_stdout, fd_stderr) = fd_output.take(store.data().output_tx.as_ref());
-        if let Ok(output) = &mut result {
-            output.stdout.extend(fd_stdout);
-            output.stderr.extend(fd_stderr);
+        match &mut result {
+            Ok(output) => {
+                output.stdout.extend(fd_stdout);
+                output.stderr.extend(fd_stderr);
+            }
+            // The traceback is the error's stderr.
+            Err(Error::PythonException(traceback)) => {
+                append_fd_stderr(traceback, &fd_stderr);
+            }
+            Err(_) => {}
         }
 
         // Teardown (resetting the memory slot) and re-instantiation happen off
@@ -3389,6 +3396,12 @@ impl PythonExecutor {
         output.stream_truncated = store.data().stream_budget.truncated;
         Ok(output)
     }
+}
+
+/// Append the guest's direct fd 2 writes to an uncaught exception's
+/// traceback, the way a successful run appends them to stderr.
+pub(crate) fn append_fd_stderr(traceback: &mut String, fd_stderr: &[u8]) {
+    traceback.push_str(&String::from_utf8_lossy(fd_stderr));
 }
 
 /// Parse a trace request into a `TraceEvent`.
