@@ -12,7 +12,7 @@ npm install @bsull/eryx
 
 ## Sandbox Class
 
-The `Sandbox` class provides an isolated Python environment. Each instance is its own WebAssembly instance, with its own interpreter, filesystem, callback handlers and journal, and keeps its state across `execute()` calls. The compiled code is shared, but each instance has its own memory (tens of megabytes), so drop sandboxes you no longer need.
+The `Sandbox` class provides an isolated Python environment. Each instance is its own WebAssembly instance, with its own interpreter, filesystem, callback handlers and journal, and keeps its state across `execute()` calls. The compiled code is shared, but each instance has its own memory (about 20 MB idle on Node.js 24), so drop sandboxes you no longer need.
 
 ```javascript
 import { Sandbox } from "@bsull/eryx";
@@ -21,6 +21,13 @@ const sandbox = new Sandbox();
 ```
 
 `new Sandbox(options)` can give the sandbox its own `callbackHandler`, `callbacks`, `traceHandler` and `outputHandler`. Any it omits follow the module-wide defaults set by the [handler functions](#handler-functions).
+
+`timeoutMs` runs the sandbox in its own Worker (`worker_threads` in Node.js) and terminates it when a call takes longer. The call rejects with a `TimeoutError` (`executeWithJournal()` reports it as `outcome.error`), and the sandbox starts over with fresh Python state. Without it, nothing interrupts a call that never finishes. The Worker costs about 70 MB on top of the sandbox's memory.
+
+```javascript
+const sandbox = new Sandbox({ timeoutMs: 5_000 });
+await sandbox.execute("while True: pass"); // rejects with TimeoutError
+```
 
 ### `execute(code: string): Promise<ExecuteResult>`
 

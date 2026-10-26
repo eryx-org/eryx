@@ -110,6 +110,23 @@ export interface SandboxOptions {
     | null;
   /** Handler for streaming output: stream 0 = stdout, 1 = stderr. */
   outputHandler?: ((stream: number, data: string) => void) | null;
+  /**
+   * Run the sandbox in its own Worker (a `worker_threads` Worker in Node.js)
+   * and reject any call that takes longer than this many milliseconds with a
+   * {@link TimeoutError}. The Worker is then terminated and replaced, so the
+   * sandbox's Python state is lost. The deadline is wall-clock time and
+   * includes time spent in callbacks; instantiation doesn't count.
+   *
+   * Each such sandbox also holds a Worker with its own JavaScript heap and its
+   * own copy of the Python stdlib tree, about 70 MB on top of the instance's
+   * memory. Without `timeoutMs`, nothing interrupts a call that never finishes.
+   */
+  timeoutMs?: number;
+}
+
+/** Rejects a call that ran past its Sandbox's `timeoutMs`. */
+export class TimeoutError extends Error {
+  constructor(timeoutMs: number);
 }
 
 /**
@@ -122,8 +139,10 @@ export interface SandboxOptions {
  *
  * The compiled code is shared, but every instance has its own linear memory
  * (the pre-initialized interpreter image plus whatever the code allocates), so
- * each live Sandbox costs tens of megabytes. Drop references to sandboxes you
- * no longer need so they can be garbage collected.
+ * each live Sandbox costs tens of megabytes (about 20 MB idle on Node.js 24).
+ * One created with `timeoutMs` also runs in its own Worker, which adds about
+ * 70 MB. Drop references to sandboxes you no longer need so they can be
+ * garbage collected.
  *
  * @example
  * const sandbox = new Sandbox();
@@ -145,11 +164,12 @@ export class Sandbox {
 
   /**
    * This sandbox's own file tree (a copy of the module's `_fileTree`). Changes
-   * to it are visible to the sandbox's next filesystem access.
+   * to it are visible to the sandbox's next filesystem access. Undefined for a
+   * sandbox with `timeoutMs`, whose files live in its Worker.
    *
    * @internal For the demo app and advanced integrations.
    */
-  readonly _fileTree: { dir: Record<string, unknown> };
+  readonly _fileTree: { dir: Record<string, unknown> } | undefined;
 
   /**
    * Execute Python code in the sandbox.

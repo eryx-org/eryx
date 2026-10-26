@@ -16,4 +16,20 @@ describe("plain Node.js", () => {
     );
     expect(stdout).toBe("['python-stdlib', 'site-packages']\n");
   });
+
+  it("runs a sandbox with timeoutMs in a Worker and exits when idle", () => {
+    const script = `
+      const { Sandbox } = await import("@bsull/eryx");
+      const sandbox = new Sandbox({ timeoutMs: 1000 });
+      process.stdout.write((await sandbox.execute("print(1 + 1)")).stdout);
+      const error = await sandbox.execute("while True: pass").catch((e) => e);
+      process.stdout.write(error.name + "\\n");
+    `;
+    const stdout = execFileSync(
+      process.execPath,
+      ["--experimental-wasm-jspi", "--input-type=module", "-e", script],
+      { cwd: import.meta.dirname, encoding: "utf8", timeout: 20_000 },
+    );
+    expect(stdout).toBe("2\nTimeoutError\n");
+  });
 });
