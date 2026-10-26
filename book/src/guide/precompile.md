@@ -38,7 +38,7 @@ export ERYX_RUNTIME_CWASM=/path/to/runtime.cwasm
 
 ```bash
 # Use a specific version (defaults to the installed binary's version)
-eryx-precompile setup --version 0.4.5
+eryx-precompile setup --version 0.12.0
 
 # Releases before 0.12.0 don't publish runtime.wasm.sha256; pass the expected hash instead
 eryx-precompile setup --version 0.11.0 --sha256 <hex>
