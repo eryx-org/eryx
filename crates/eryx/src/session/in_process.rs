@@ -446,28 +446,14 @@ async fn run_code(
                 "Session execution completed"
             );
 
-            // Scrub the structured result only when opted in (it's a
-            // programmatic side channel); scrub the error message too.
-            let (result, result_error) = if sandbox.scrub_result() {
-                let secrets = sandbox.secrets();
-                (
-                    output
-                        .result
-                        .map(|r| crate::secrets::scrub_placeholders(&r, secrets)),
-                    output
-                        .result_error
-                        .map(|e| crate::secrets::scrub_placeholders(&e, secrets)),
-                )
-            } else {
-                (output.result, output.result_error)
-            };
+            let output = sandbox.scrub_output(output);
 
             Ok(ExecuteResult {
                 stdout: output.stdout,
                 stderr: output.stderr,
                 trace: trace_events,
-                result,
-                result_error,
+                result: output.result,
+                result_error: output.result_error,
                 state_was_reset: output.state_was_reset,
                 stats: ExecuteStats {
                     duration,
@@ -477,7 +463,7 @@ async fn run_code(
                 },
             })
         }
-        Err(error) => Err(error),
+        Err(error) => Err(sandbox.scrub_error(error)),
     }
 }
 

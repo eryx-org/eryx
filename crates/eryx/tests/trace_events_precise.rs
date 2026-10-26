@@ -195,7 +195,7 @@ fn sandbox_builder() -> eryx::SandboxBuilder<eryx::state::Has, eryx::state::Has>
     // When embedded feature is available, use it (more reliable)
     #[cfg(feature = "embedded")]
     {
-        Sandbox::embedded()
+        Sandbox::embedded().with_trace_collection(true)
     }
 
     // Fallback to explicit paths for testing without embedded feature
@@ -205,6 +205,7 @@ fn sandbox_builder() -> eryx::SandboxBuilder<eryx::state::Has, eryx::state::Has>
         Sandbox::builder()
             .with_wasm_file(runtime_wasm_path())
             .with_python_stdlib(&stdlib_path)
+            .with_trace_collection(true)
     }
 }
 

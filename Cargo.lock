@@ -1173,6 +1173,7 @@ dependencies = [
  "walkdir",
  "wasmtime",
  "wasmtime-wasi",
+ "wasmtime-wasi-io",
  "wat",
  "webpki-roots",
  "zip",

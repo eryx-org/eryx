@@ -103,7 +103,9 @@ use crate::error::Error;
 use crate::library::RuntimeLibrary;
 use crate::net::{ConnectionManager, NetConfig};
 use crate::trace::{OutputHandler, TraceEvent, TraceHandler};
-use crate::wasm::{CallbackRequest, NetRequest, OutputRequest, PythonExecutor, TraceRequest};
+use crate::wasm::{
+    CallbackRequest, ExecutionOutput, NetRequest, OutputRequest, PythonExecutor, TraceRequest,
+};
 
 /// A sandboxed Python execution environment.
 pub struct Sandbox {
@@ -144,6 +146,17 @@ pub struct Sandbox {
     /// When set, this replaces the default scrubbing storage in `execute()`.
     #[cfg(feature = "vfs")]
     vfs_storage: Option<std::sync::Arc<dyn eryx_vfs::VfsStorage>>,
+    /// The per-request settings as built, restored by
+    /// [`clear_per_request_state`](Self::clear_per_request_state).
+    built: Arc<PerRequestSettings>,
+}
+
+/// The settings a [`PooledSandbox`](crate::PooledSandbox) may override per request.
+struct PerRequestSettings {
+    callbacks: Arc<HashMap<String, Arc<dyn Callback>>>,
+    trace_handler: Option<Arc<dyn TraceHandler>>,
+    output_handler: Option<Arc<dyn OutputHandler>>,
+    resource_limits: ResourceLimits,
 }
 
 impl std::fmt::Debug for Sandbox {
@@ -466,37 +479,7 @@ impl Sandbox {
 
         match execution_result {
             Ok(output) => {
-                // Scrub secret placeholders from output based on policy
-                let stdout = if matches!(self.scrub_stdout, crate::secrets::OutputScrubPolicy::All)
-                {
-                    crate::secrets::scrub_placeholders_bytes(&output.stdout, &self.secrets)
-                } else {
-                    output.stdout
-                };
-
-                let stderr = if matches!(self.scrub_stderr, crate::secrets::OutputScrubPolicy::All)
-                {
-                    crate::secrets::scrub_placeholders_bytes(&output.stderr, &self.secrets)
-                } else {
-                    output.stderr
-                };
-
-                // The structured result is an output channel too, but scrubbing is
-                // opt-in (it's a programmatic side channel). When enabled, scrub both
-                // the result and its error message.
-                let (result, result_error) = if self.scrub_result {
-                    (
-                        output
-                            .result
-                            .map(|r| crate::secrets::scrub_placeholders(&r, &self.secrets)),
-                        output
-                            .result_error
-                            .map(|e| crate::secrets::scrub_placeholders(&e, &self.secrets)),
-                    )
-                } else {
-                    (output.result, output.result_error)
-                };
-
+                let output = self.scrub_output(output);
                 tracing::info!(
                     duration_ms = duration.as_millis() as u64,
                     callback_invocations,
@@ -506,11 +489,11 @@ impl Sandbox {
                 );
 
                 Ok(ExecuteResult {
-                    stdout,
-                    stderr,
+                    stdout: output.stdout,
+                    stderr: output.stderr,
                     trace: trace_events,
-                    result,
-                    result_error,
+                    result: output.result,
+                    result_error: output.result_error,
                     state_was_reset: false,
                     stats: ExecuteStats {
                         duration,
@@ -520,7 +503,7 @@ impl Sandbox {
                     },
                 })
             }
-            Err(error) => Err(error),
+            Err(error) => Err(self.scrub_error(error)),
         }
     }
 
@@ -606,11 +589,37 @@ impl Sandbox {
         matches!(self.scrub_stderr, crate::secrets::OutputScrubPolicy::All)
     }
 
-    /// Whether the structured `result` channel should be scrubbed of secret
-    /// placeholders. Opt-in (defaults to `false`).
-    #[must_use]
-    pub(crate) fn scrub_result(&self) -> bool {
-        self.scrub_result
+    /// Scrub secret placeholders from an execution's output per the
+    /// configured policies.
+    pub(crate) fn scrub_output(&self, mut output: ExecutionOutput) -> ExecutionOutput {
+        use crate::secrets::{scrub_placeholders, scrub_placeholders_bytes};
+        if self.scrub_stdout() {
+            output.stdout = scrub_placeholders_bytes(&output.stdout, &self.secrets);
+        }
+        if self.scrub_stderr() {
+            output.stderr = scrub_placeholders_bytes(&output.stderr, &self.secrets);
+        }
+        // The structured result is an output channel too, but scrubbing is
+        // opt-in (it's a programmatic side channel). When enabled, scrub both
+        // the result and its error message.
+        if self.scrub_result {
+            output.result = output.result.map(|r| scrub_placeholders(&r, &self.secrets));
+            output.result_error = output
+                .result_error
+                .map(|e| scrub_placeholders(&e, &self.secrets));
+        }
+        output
+    }
+
+    /// Scrub secret placeholders from a Python traceback, which the guest
+    /// would otherwise print to stderr.
+    pub(crate) fn scrub_error(&self, error: Error) -> Error {
+        match error {
+            Error::PythonException(traceback) if self.scrub_stderr() => Error::PythonException(
+                crate::secrets::scrub_placeholders(&traceback, &self.secrets),
+            ),
+            error => error,
+        }
     }
 
     /// Get a reference to the Python executor.
@@ -673,13 +682,13 @@ impl Sandbox {
 
     /// Clear per-request state so the sandbox can be returned to the pool.
     ///
-    /// Resets callbacks, handlers, and resource limits to defaults while
-    /// preserving the executor and other long-lived state.
+    /// Restores the callbacks, handlers and resource limits the sandbox was
+    /// built with, while preserving the executor and other long-lived state.
     pub(crate) fn clear_per_request_state(&mut self) {
-        self.callbacks = Arc::new(HashMap::new());
-        self.trace_handler = None;
-        self.output_handler = None;
-        self.resource_limits = ResourceLimits::default();
+        self.callbacks = Arc::clone(&self.built.callbacks);
+        self.trace_handler.clone_from(&self.built.trace_handler);
+        self.output_handler.clone_from(&self.built.output_handler);
+        self.resource_limits.clone_from(&self.built.resource_limits);
         #[cfg(feature = "vfs")]
         {
             self.vfs_storage = None;
@@ -763,6 +772,7 @@ impl Sandbox {
             volumes: self.volumes.clone(),
             #[cfg(feature = "vfs")]
             vfs_storage: self.vfs_storage.clone(),
+            built: Arc::clone(&self.built),
         }
     }
 }
@@ -1123,7 +1133,7 @@ impl SandboxBuilder<state::Needs, state::Needs> {
             preamble: String::new(),
             type_stubs: String::new(),
             trace_handler: None,
-            collect_trace: true,
+            collect_trace: false,
             output_handler: None,
             resource_limits: ResourceLimits::default(),
             result_variable: "result".to_string(),
@@ -1161,7 +1171,7 @@ impl SandboxBuilder<state::Needs, state::Needs> {
             preamble: String::new(),
             type_stubs: String::new(),
             trace_handler: None,
-            collect_trace: true,
+            collect_trace: false,
             output_handler: None,
             resource_limits: ResourceLimits::default(),
             result_variable: "result".to_string(),
@@ -1701,11 +1711,11 @@ impl<R, S> SandboxBuilder<R, S> {
 
     /// Configure whether execution trace events are collected in the result.
     ///
-    /// Trace collection is enabled by default for backward compatibility. It
-    /// installs Python's `sys.settrace` hook, which fires on every line, call
-    /// and return in the guest, so its cost scales with the amount of Python
-    /// executed rather than with sandbox setup. Measured on a Ryzen 9 7950X
-    /// (wasmtime 48, fresh instance per call), enabled vs disabled:
+    /// Trace collection is disabled by default. It installs Python's
+    /// `sys.settrace` hook, which fires on every line, call and return in the
+    /// guest, so its cost scales with the amount of Python executed rather
+    /// than with sandbox setup. Measured on a Ryzen 9 7950X (wasmtime 48,
+    /// fresh instance per call), enabled vs disabled:
     ///
     /// | Workload | On | Off |
     /// |---|---|---|
@@ -1713,11 +1723,14 @@ impl<R, S> SandboxBuilder<R, S> {
     /// | `json.loads` + `string.Template(...).substitute(...)` | 3.7 ms | 0.9 ms |
     /// | `sum(i * i for i in range(20_000))` | 369 ms | 3.8 ms |
     ///
-    /// Disable it unless you read [`ExecuteResult::trace`]:
+    /// Enable it only if you read [`ExecuteResult::trace`]:
     ///
     /// ```rust,ignore
-    /// let sandbox = Sandbox::embedded().with_trace_collection(false).build()?;
+    /// let sandbox = Sandbox::embedded().with_trace_collection(true).build()?;
     /// ```
+    ///
+    /// Each execution keeps at most 16 MiB of trace events; later events
+    /// are dropped.
     ///
     /// This also applies to [`InProcessSession`](crate::session::InProcessSession)s
     /// created from the sandbox. A configured [`TraceHandler`] always keeps
@@ -2333,15 +2346,21 @@ impl SandboxBuilder<state::Has, state::Has> {
             .with_result_variable(self.result_variable)
             .with_packages(self.packages);
 
-        Ok(Sandbox {
-            executor: Arc::new(executor),
+        let built = Arc::new(PerRequestSettings {
             callbacks: Arc::new(self.callbacks),
-            preamble: self.preamble,
-            type_stubs: self.type_stubs,
             trace_handler: self.trace_handler,
-            collect_trace: self.collect_trace,
             output_handler: self.output_handler,
             resource_limits: self.resource_limits,
+        });
+        Ok(Sandbox {
+            executor: Arc::new(executor),
+            callbacks: Arc::clone(&built.callbacks),
+            preamble: self.preamble,
+            type_stubs: self.type_stubs,
+            trace_handler: built.trace_handler.clone(),
+            collect_trace: self.collect_trace,
+            output_handler: built.output_handler.clone(),
+            resource_limits: built.resource_limits.clone(),
             net_config: self.net_config,
             secrets: self.secrets,
             scrub_stdout: self.scrub_stdout,
@@ -2352,6 +2371,7 @@ impl SandboxBuilder<state::Has, state::Has> {
             volumes: self.volumes,
             #[cfg(feature = "vfs")]
             vfs_storage: None,
+            built,
         })
     }
 
@@ -2609,7 +2629,9 @@ pub struct ExecuteResult {
     pub stdout: Vec<u8>,
     /// Complete stderr output as raw bytes (also streamed via `OutputHandler` if configured).
     pub stderr: Vec<u8>,
-    /// Collected trace events (also streamed via `TraceHandler` if configured).
+    /// Collected trace events, empty unless enabled with
+    /// [`SandboxBuilder::with_trace_collection`] (also streamed via
+    /// `TraceHandler` if configured).
     pub trace: Vec<TraceEvent>,
     /// JSON-serialized value of the script's result variable (default name
     /// `result`, configurable via [`SandboxBuilder::with_result_variable`]), or

@@ -41,7 +41,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use wasmtime::Store;
-use wasmtime::component::ResourceTable;
+use wasmtime::component::{Accessor, ResourceTable};
 // wasmtime 48 collapsed DirPerms/FilePerms into FsPerms; the fine-grained
 // flags the VFS enforces now live in eryx-vfs. Only `build_hybrid_vfs_context`
 // uses them, so the import carries that function's feature gate.
@@ -53,8 +53,8 @@ use crate::callback::Callback;
 use crate::error::Error;
 use crate::sandbox::ResourceLimits;
 use crate::wasm::{
-    CallbackRequest, ExecutionOutput, ExecutorState, HostCallbackInfo, MemoryTracker, NetRequest,
-    PythonExecutor, Sandbox as SandboxBindings, TraceRequest,
+    CallbackRequest, ExecutionOutput, ExecutorState, FdOutput, HostCallbackInfo, MemoryTracker,
+    NetRequest, PythonExecutor, Sandbox as SandboxBindings, StreamBudget, TraceRequest,
 };
 
 /// Maximum snapshot size in bytes (10 MB).
@@ -62,6 +62,10 @@ use crate::wasm::{
 /// This limit prevents abuse and ensures snapshots remain manageable.
 /// The Python runtime enforces the same limit.
 pub const MAX_SNAPSHOT_SIZE: usize = 10 * 1024 * 1024;
+
+/// Smallest time bound for snapshot, restore and clear. The first snapshot
+/// loads the serializer, which can take longer than a tight execution timeout.
+pub const MIN_STATE_OP_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// A snapshot of Python session state.
 ///
@@ -503,6 +507,9 @@ pub struct SessionExecutor {
     /// Maximum guest memory, preserved when the store is recreated.
     memory_limit: Option<u64>,
 
+    /// The guest's direct fd 1/2 writes, appended to each execution's output.
+    fd_output: FdOutput,
+
     /// Peak memory and fuel consumed by the most recent execution, kept so
     /// callers can report them when the execution failed.
     last_peak_memory_bytes: u64,
@@ -548,9 +555,9 @@ fn build_callback_infos(callbacks: &[Arc<dyn Callback>]) -> Vec<HostCallbackInfo
 }
 
 /// Build WASI context with Python stdlib and site-packages mounts.
-fn build_wasi_context(executor: &PythonExecutor) -> Result<WasiCtx, Error> {
+fn build_wasi_context(executor: &PythonExecutor, fd_output: &FdOutput) -> Result<WasiCtx, Error> {
     let mut wasi_builder = WasiCtxBuilder::new();
-    wasi_builder.inherit_stdout().inherit_stderr();
+    fd_output.attach(&mut wasi_builder);
 
     // Build PYTHONPATH from stdlib and all site-packages directories
     let site_packages_paths = executor.python_site_packages_paths();
@@ -813,7 +820,8 @@ impl SessionExecutor {
         limits: &ResourceLimits,
     ) -> Result<Self, Error> {
         let callback_infos = build_callback_infos(callbacks);
-        let wasi = build_wasi_context(&executor)?;
+        let fd_output = FdOutput::default();
+        let wasi = build_wasi_context(&executor, &fd_output)?;
 
         // Use provided storage/config or create defaults. A storage supplied by
         // the caller owns its own quota; max_vfs_bytes applies only here.
@@ -888,6 +896,7 @@ impl SessionExecutor {
             execution_timeout: limits.execution_timeout,
             fuel_limit: limits.max_fuel,
             memory_limit: limits.max_memory_bytes,
+            fd_output,
             last_peak_memory_bytes: 0,
             last_fuel_consumed: None,
             vfs_storage: Some(vfs_storage),
@@ -904,7 +913,8 @@ impl SessionExecutor {
         limits: &ResourceLimits,
     ) -> Result<Self, Error> {
         let callback_infos = build_callback_infos(callbacks);
-        let wasi = build_wasi_context(&executor)?;
+        let fd_output = FdOutput::default();
+        let wasi = build_wasi_context(&executor, &fd_output)?;
 
         let state = ExecutorState::new(
             wasi,
@@ -959,6 +969,7 @@ impl SessionExecutor {
             execution_timeout: limits.execution_timeout,
             fuel_limit: limits.max_fuel,
             memory_limit: limits.max_memory_bytes,
+            fd_output,
             last_peak_memory_bytes: 0,
             last_fuel_consumed: None,
         })
@@ -1109,6 +1120,8 @@ impl SessionExecutor {
         let start = Instant::now();
 
         self.recover_lost_store(callbacks).await?;
+        // Drop fd writes made outside an execution (e.g. during a snapshot).
+        self.fd_output.take(None);
 
         // Take ownership of store and bindings for async execution
         let mut store = self
@@ -1140,6 +1153,7 @@ impl SessionExecutor {
             state.set_output_tx(output_tx);
             state.set_callbacks(callback_infos);
             state.reset_memory_tracker();
+            state.stream_budget = StreamBudget::default();
             // A reused store keeps its ExecutorState across runs; clear any stale
             // suspension flag so it does not misclassify this run's trap.
             state.clear_suspended();
@@ -1222,6 +1236,10 @@ impl SessionExecutor {
         // must be classified as a suspension rather than fuel-limit exhaustion.
         let suspended_reason = store.data().suspended.clone();
 
+        // Stream and keep the guest's direct fd writes before the output
+        // channel is dropped.
+        let (fd_stdout, fd_stderr) = self.fd_output.take(store.data().output_tx.as_ref());
+
         let peak_memory = {
             let state = store.data_mut();
             state.set_callback_tx(None);
@@ -1297,6 +1315,8 @@ impl SessionExecutor {
         output.result = empty_to_none(wit_output.result_json);
         output.result_error = empty_to_none(wit_output.result_error);
         output.state_was_reset = std::mem::take(&mut self.state_was_reset);
+        output.stdout.extend(fd_stdout);
+        output.stderr.extend(fd_stderr);
         Ok(output)
     }
 
@@ -1350,7 +1370,7 @@ impl SessionExecutor {
     )]
     pub async fn reset(&mut self, callbacks: &[Arc<dyn Callback>]) -> Result<(), Error> {
         let callback_infos = build_callback_infos(callbacks);
-        let wasi = build_wasi_context(&self.executor)?;
+        let wasi = build_wasi_context(&self.executor, &self.fd_output)?;
 
         #[cfg(not(feature = "vfs"))]
         let state = ExecutorState::new(
@@ -1560,6 +1580,9 @@ impl SessionExecutor {
     /// - The WASM call fails
     /// - Serialization fails (e.g., unpicklable objects)
     /// - The snapshot exceeds the size limit
+    /// - It runs past the session's execution timeout (at least
+    ///   [`MIN_STATE_OP_TIMEOUT`]), which also discards the instance so the
+    ///   next call resets the session
     ///
     /// # Example
     ///
@@ -1569,37 +1592,14 @@ impl SessionExecutor {
     /// println!("Snapshot size: {} bytes", snapshot.size());
     /// ```
     pub async fn snapshot_state(&mut self) -> Result<PythonStateSnapshot, Error> {
-        self.recover_lost_store(&[]).await?;
-
-        // Take ownership of store and bindings
-        let mut store = self
-            .store
-            .take()
-            .ok_or_else(|| Error::WasmEngine("Store not available".to_string()))?;
-        let bindings = self
-            .bindings
-            .take()
-            .ok_or_else(|| Error::WasmEngine("Bindings not available".to_string()))?;
-
         tracing::debug!("SessionExecutor: capturing state snapshot");
 
-        // Call the snapshot_state export using run_concurrent (async function)
-        let result = store
-            .run_concurrent(async |accessor| bindings.call_snapshot_state(accessor).await)
-            .await;
-
-        // Restore store and bindings
-        self.store = Some(store);
-        self.bindings = Some(bindings);
-
-        // Process result
-        let wasmtime_result =
-            result.map_err(|e| Error::WasmEngine(format!("WASM snapshot error: {e}")))?;
-
-        let inner_result =
-            wasmtime_result.map_err(|e| Error::WasmEngine(format!("WASM snapshot error: {e}")))?;
-
-        let data = inner_result.map_err(Error::Snapshot)?;
+        let data = self
+            .run_state_op("snapshot", async |accessor, bindings| {
+                bindings.call_snapshot_state(accessor).await
+            })
+            .await?
+            .map_err(Error::Snapshot)?;
 
         // Check size limit
         if data.len() > MAX_SNAPSHOT_SIZE {
@@ -1629,6 +1629,9 @@ impl SessionExecutor {
     /// Returns an error if:
     /// - The WASM call fails
     /// - Deserialization fails (e.g., corrupted data)
+    /// - It runs past the session's execution timeout (at least
+    ///   [`MIN_STATE_OP_TIMEOUT`]), which also discards the instance so the
+    ///   next call resets the session
     ///
     /// # Example
     ///
@@ -1641,41 +1644,17 @@ impl SessionExecutor {
     /// session.execute("print(x)", &[], None, None).await?;
     /// ```
     pub async fn restore_state(&mut self, snapshot: &PythonStateSnapshot) -> Result<(), Error> {
-        self.recover_lost_store(&[]).await?;
-
-        // Take ownership of store and bindings
-        let mut store = self
-            .store
-            .take()
-            .ok_or_else(|| Error::WasmEngine("Store not available".to_string()))?;
-        let bindings = self
-            .bindings
-            .take()
-            .ok_or_else(|| Error::WasmEngine("Bindings not available".to_string()))?;
-
         tracing::debug!(
             size_bytes = snapshot.size(),
             "SessionExecutor: restoring state snapshot"
         );
 
-        // Call the restore_state export using run_concurrent (async function)
         let data = snapshot.data().to_vec();
-        let result = store
-            .run_concurrent(async |accessor| bindings.call_restore_state(accessor, data).await)
-            .await;
-
-        // Restore store and bindings
-        self.store = Some(store);
-        self.bindings = Some(bindings);
-
-        // Process result
-        let wasmtime_result =
-            result.map_err(|e| Error::WasmEngine(format!("WASM restore error: {e}")))?;
-
-        let inner_result =
-            wasmtime_result.map_err(|e| Error::WasmEngine(format!("WASM restore error: {e}")))?;
-
-        inner_result.map_err(Error::Snapshot)?;
+        self.run_state_op("restore", async |accessor, bindings| {
+            bindings.call_restore_state(accessor, data).await
+        })
+        .await?
+        .map_err(Error::Snapshot)?;
 
         tracing::debug!("State snapshot restored");
 
@@ -1692,7 +1671,9 @@ impl SessionExecutor {
     ///
     /// # Errors
     ///
-    /// Returns an error if the WASM call fails.
+    /// Returns an error if the WASM call fails, or if it runs past the
+    /// session's execution timeout, at least [`MIN_STATE_OP_TIMEOUT`] (which
+    /// also discards the instance so the next call resets the session).
     ///
     /// # Example
     ///
@@ -1702,7 +1683,36 @@ impl SessionExecutor {
     /// // x is no longer defined
     /// ```
     pub async fn clear_state(&mut self) -> Result<(), Error> {
+        tracing::debug!("SessionExecutor: clearing state");
+
+        self.run_state_op("clear state", async |accessor, bindings| {
+            bindings.call_clear_state(accessor).await
+        })
+        .await?;
+
+        tracing::debug!("State cleared");
+
+        Ok(())
+    }
+
+    /// Run a state export (snapshot/restore/clear) under the session's
+    /// execution timeout, raised to at least [`MIN_STATE_OP_TIMEOUT`].
+    ///
+    /// These exports run guest code (e.g. `__reduce__`), so they need a time
+    /// bound. If it runs out the instance is discarded and the next call
+    /// resets the session. The session's fuel limit is not applied: it is
+    /// sized for user code, and the time bound already stops a guest loop.
+    async fn run_state_op<R>(
+        &mut self,
+        what: &str,
+        call: impl AsyncFnOnce(&Accessor<ExecutorState>, &SandboxBindings) -> wasmtime::Result<R>,
+    ) -> Result<R, Error> {
         self.recover_lost_store(&[]).await?;
+
+        let timeout = self.execution_timeout.map(|t| t.max(MIN_STATE_OP_TIMEOUT));
+        if timeout.is_some() {
+            crate::wasm::ensure_epoch_ticker(self.executor.engine())?;
+        }
 
         // Take ownership of store and bindings
         let mut store = self
@@ -1714,26 +1724,35 @@ impl SessionExecutor {
             .take()
             .ok_or_else(|| Error::WasmEngine("Bindings not available".to_string()))?;
 
-        tracing::debug!("SessionExecutor: clearing state");
+        // Execute's fuel limit may have left the store almost empty.
+        store
+            .set_fuel(u64::MAX)
+            .map_err(|e| Error::WasmEngine(format!("Failed to set fuel: {e}")))?;
+        crate::wasm::arm_epoch_deadline(&mut store, timeout);
 
-        // Call the clear_state export using run_concurrent (async function)
-        let result = store
-            .run_concurrent(async |accessor| bindings.call_clear_state(accessor).await)
-            .await;
+        let run = store.run_concurrent(async |accessor| call(accessor, &bindings).await);
+        let result = match timeout {
+            Some(timeout) => tokio::time::timeout(timeout, run)
+                .await
+                .unwrap_or_else(|_elapsed| Err(wasmtime::Error::from(wasmtime::Trap::Interrupt))),
+            None => run.await,
+        };
+        crate::wasm::arm_epoch_deadline(&mut store, None);
+
+        let result = result.and_then(|r| r);
+        if let Err(e) = &result
+            && e.downcast_ref::<wasmtime::Trap>() == Some(&wasmtime::Trap::Interrupt)
+        {
+            // The guest was halted mid-call: drop the instance so the next
+            // call starts from a fresh one.
+            return Err(Error::Timeout(timeout.unwrap_or_default()));
+        }
 
         // Restore store and bindings
         self.store = Some(store);
         self.bindings = Some(bindings);
 
-        // Process result
-        let wasmtime_result =
-            result.map_err(|e| Error::WasmEngine(format!("WASM clear state error: {e}")))?;
-
-        wasmtime_result.map_err(|e| Error::WasmEngine(format!("WASM clear state error: {e}")))?;
-
-        tracing::debug!("State cleared");
-
-        Ok(())
+        result.map_err(|e| Error::WasmEngine(format!("WASM {what} error: {e}")))
     }
 }
 
@@ -1766,6 +1785,7 @@ impl ExecutorState {
             output_tx: None, // Set via set_output_tx() when output handler is running
             suspended: None,
             reuse_empty_callbacks: false,
+            stream_budget: StreamBudget::default(),
         }
     }
 
@@ -1792,6 +1812,7 @@ impl ExecutorState {
             hybrid_vfs_ctx,
             suspended: None,
             reuse_empty_callbacks: false,
+            stream_budget: StreamBudget::default(),
         }
     }
 

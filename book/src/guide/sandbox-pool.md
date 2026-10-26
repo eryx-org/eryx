@@ -26,7 +26,7 @@ async fn main() -> Result<(), eryx::PoolError> {
 
     // Or with a custom builder for more control:
     let pool = SandboxPool::with_builder(
-        || Sandbox::embedded().with_trace_collection(false).build(),
+        || Sandbox::embedded().with_trace_collection(true).build(),
         PoolConfig::default(),
     ).await?;
 

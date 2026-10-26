@@ -150,6 +150,7 @@ async fn header_in_user_code_is_not_mistaken_for_a_preamble() {
     // Without a host preamble, user code starting with the framing header must
     // still run, be traced and be numbered entirely as user code.
     let out = Sandbox::embedded()
+        .with_trace_collection(true)
         .build()
         .unwrap()
         .execute("#eryx-preamble:6\nx = 1\ny = 2\nprint(x + y)\n")

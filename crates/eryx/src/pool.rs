@@ -17,7 +17,8 @@
 //! - **Idle eviction**: [`SandboxPool::evict_idle`] drops instances idle longer
 //!   than `idle_timeout`; call it periodically, the pool does not run it itself
 //! - **Per-request settings**: Callbacks, handlers, resource limits and VFS
-//!   storage set on a [`PooledSandbox`] are cleared when it returns to the pool.
+//!   storage set on a [`PooledSandbox`] are reverted to what the sandbox was
+//!   built with when it returns to the pool.
 //!   Python state is not shared: each execution runs in a fresh instance.
 //!
 //! # Example
@@ -729,8 +730,8 @@ impl DerefMut for PooledSandbox {
 impl Drop for PooledSandbox {
     fn drop(&mut self) {
         if let Some(mut sandbox) = self.sandbox.take() {
-            // Clear per-request state (callbacks, handlers, limits) before
-            // returning to the pool so the next user gets a clean sandbox.
+            // Revert per-request state (callbacks, handlers, limits) to the
+            // built settings so the next user gets a clean sandbox.
             sandbox.clear_per_request_state();
             self.pool.return_sandbox(sandbox);
         }
@@ -767,7 +768,7 @@ impl PooledSandbox {
 
     /// Set callbacks for this request.
     ///
-    /// These will be cleared automatically when the sandbox is returned to the pool.
+    /// These replace the built callbacks until the sandbox is returned to the pool.
     ///
     /// # Errors
     ///
@@ -779,7 +780,7 @@ impl PooledSandbox {
 
     /// Set a trace handler for this request.
     ///
-    /// This will be cleared automatically when the sandbox is returned to the pool.
+    /// This replaces the built handler until the sandbox is returned to the pool.
     #[must_use]
     pub fn with_trace_handler<H: TraceHandler + 'static>(mut self, handler: H) -> Self {
         self.sandbox_mut().set_trace_handler(handler);
@@ -788,7 +789,7 @@ impl PooledSandbox {
 
     /// Set an output handler for this request.
     ///
-    /// This will be cleared automatically when the sandbox is returned to the pool.
+    /// This replaces the built handler until the sandbox is returned to the pool.
     #[must_use]
     pub fn with_output_handler<H: OutputHandler + 'static>(mut self, handler: H) -> Self {
         self.sandbox_mut().set_output_handler(handler);
@@ -797,7 +798,7 @@ impl PooledSandbox {
 
     /// Set resource limits for this request.
     ///
-    /// These will be reset to defaults when the sandbox is returned to the pool.
+    /// These replace the built limits until the sandbox is returned to the pool.
     #[must_use]
     pub fn with_resource_limits(mut self, limits: ResourceLimits) -> Self {
         self.sandbox_mut().set_resource_limits(limits);

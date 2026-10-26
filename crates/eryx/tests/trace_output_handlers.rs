@@ -420,7 +420,10 @@ result = await sleep(ms=50)
 
 #[tokio::test]
 async fn test_trace_events_in_result() {
-    let sandbox = sandbox_builder().build().expect("Failed to build sandbox");
+    let sandbox = sandbox_builder()
+        .with_trace_collection(true)
+        .build()
+        .expect("Failed to build sandbox");
 
     let result = sandbox
         .execute(

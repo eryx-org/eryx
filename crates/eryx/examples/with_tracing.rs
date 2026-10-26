@@ -107,6 +107,7 @@ async fn main() -> anyhow::Result<()> {
     let sandbox = Sandbox::embedded()
         .with_callback(SlowCallback { delay_ms: 50 })
         .with_trace_handler(PrintingTraceHandler::new())
+        .with_trace_collection(true)
         .with_output_handler(StreamingOutputHandler)
         .build()?;
 
