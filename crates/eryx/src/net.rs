@@ -321,8 +321,10 @@ impl NetConfig {
             .retain(|p| !p.contains("localhost") && !p.starts_with("127.") && !p.contains("::1"));
         self.blocked_networks.retain(|n| !n.addr().is_loopback());
         // `::1` is also inside the default `::/96` block.
-        self.allowed_networks
-            .push(IpNet::from(IpAddr::V6(Ipv6Addr::LOCALHOST)));
+        let loopback = IpNet::from(IpAddr::V6(Ipv6Addr::LOCALHOST));
+        if !self.allowed_networks.contains(&loopback) {
+            self.allowed_networks.push(loopback);
+        }
         self
     }
 
@@ -1000,8 +1002,10 @@ impl ConnectionManager {
     /// (`0` = use the host default); see `effective_timeout`.
     ///
     /// `len` is capped at 1 MiB; like any socket read, this may return fewer
-    /// bytes than requested. Real secret values in the data are replaced with
-    /// their placeholders, so the guest never sees them.
+    /// bytes than requested. Real secret values that appear verbatim in the
+    /// data (even split across reads) are replaced with their placeholders;
+    /// compressed or otherwise encoded copies are not. Bytes that may start a
+    /// secret are held back for up to 100 ms waiting for the rest.
     pub async fn tcp_read(
         &mut self,
         handle: u32,
@@ -1086,9 +1090,9 @@ impl ConnectionManager {
 
         // The server routes by the Host header (or an absolute-form target),
         // so a request naming another host must not carry secrets.
-        if !request_authorities(&text).all(|a| same_host(strip_port(a), target_host))
-            && self.secrets.values().any(|s| text.contains(&s.placeholder))
-        {
+        let names_target = request_authorities(&text)
+            .is_some_and(|hosts| hosts.iter().all(|a| same_host(strip_port(a), target_host)));
+        if !names_target && self.secrets.values().any(|s| text.contains(&s.placeholder)) {
             return Err(TcpError::NotPermitted(
                 "Secret not allowed: request names a different host than the connection".into(),
             ));
@@ -1096,8 +1100,13 @@ impl ConnectionManager {
 
         let mut result = String::new();
 
-        // Process line by line
-        for line in text.lines() {
+        let mut lines = text.lines();
+        // Request line (GET /path HTTP/1.1), passed through as is.
+        if let Some(line) = lines.next() {
+            result.push_str(line);
+            result.push_str("\r\n");
+        }
+        for line in lines {
             // The blank line ending the headers is re-added below.
             if line.is_empty() {
                 continue;
@@ -1112,7 +1121,6 @@ impl ConnectionManager {
                 let substituted_value = self.substitute_secrets_in_text(value, target_host)?;
                 result.push_str(&format!("{name}: {substituted_value}\r\n"));
             } else {
-                // Request line (GET /path HTTP/1.1)
                 result.push_str(line);
                 result.push_str("\r\n");
             }
@@ -1242,8 +1250,10 @@ impl ConnectionManager {
     /// (`0` = use the host default); see `effective_timeout`.
     ///
     /// `len` is capped at 1 MiB; like any socket read, this may return fewer
-    /// bytes than requested. Real secret values in the data are replaced with
-    /// their placeholders, so the guest never sees them.
+    /// bytes than requested. Real secret values that appear verbatim in the
+    /// data (even split across reads) are replaced with their placeholders;
+    /// compressed or otherwise encoded copies are not. Bytes that may start a
+    /// secret are held back for up to 100 ms waiting for the rest.
     pub async fn tls_read(
         &mut self,
         handle: u32,
@@ -1394,20 +1404,37 @@ fn could_be_http_request(data: &[u8]) -> bool {
 
 /// The hosts a request names: its absolute-form target's authority (e.g.
 /// `GET https://host/ HTTP/1.1`) and each `Host` header's value.
-fn request_authorities(headers: &str) -> impl Iterator<Item = &str> {
+///
+/// `None` if the request line isn't exactly `METHOD SP target SP version`,
+/// the target contains whitespace or `\`, or an absolute-form target has an
+/// empty authority or userinfo.
+fn request_authorities(headers: &str) -> Option<Vec<&str>> {
     let mut lines = headers.lines();
-    let target = lines.next().and_then(|line| line.split(' ').nth(1));
-    let absolute = target
-        .and_then(|t| t.split_once("://"))
-        .map(|(_, rest)| rest.split(['/', '?', '#']).next().unwrap_or(""))
-        .map(|authority| authority.rsplit('@').next().unwrap_or(""));
-    let host_headers = lines.filter_map(|line| {
+    let mut parts = lines.next()?.split(' ');
+    let (method, target, version) = (parts.next()?, parts.next()?, parts.next()?);
+    if parts.next().is_some()
+        || method.is_empty()
+        || version.is_empty()
+        || target.is_empty()
+        || target.contains(|c: char| c.is_whitespace() || c == '\\')
+    {
+        return None;
+    }
+    let mut hosts = Vec::new();
+    if let Some((_, rest)) = target.split_once("://") {
+        let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+        if authority.is_empty() || authority.contains('@') {
+            return None;
+        }
+        hosts.push(authority);
+    }
+    hosts.extend(lines.filter_map(|line| {
         let (name, value) = line.split_once(':')?;
         name.trim()
             .eq_ignore_ascii_case("host")
             .then(|| value.trim())
-    });
-    absolute.into_iter().chain(host_headers)
+    }));
+    Some(hosts)
 }
 
 /// `authority` without a trailing `:port`.
@@ -2703,6 +2730,10 @@ mod tests {
             &b"GET / HTTP/1.1\r\nHost: other.example.com\r\nAuthorization: PH\r\n\r\n"[..],
             b"GET https://other.example.com/ HTTP/1.1\r\nAuthorization: PH\r\n\r\n",
             b"GET / HTTP/1.1\r\nHost: api.example.com\r\nHost: other.example.com\r\nAuthorization: PH\r\n\r\n",
+            b"GET https://evil.com\\@api.example.com/ HTTP/1.1\r\nHost: api.example.com\r\nAuthorization: PH\r\n\r\n",
+            b"GET https://user@api.example.com/ HTTP/1.1\r\nHost: api.example.com\r\nAuthorization: PH\r\n\r\n",
+            b"GET  / HTTP/1.1\r\nHost: api.example.com\r\nAuthorization: PH\r\n\r\n",
+            b"GET https:/// HTTP/1.1\r\nHost: api.example.com\r\nAuthorization: PH\r\n\r\n",
         ] {
             assert!(m.process_write_data(1, request).is_err());
             m.http_states.clear();
@@ -2713,6 +2744,11 @@ mod tests {
             &[b"GET https://api.example.com:443/x HTTP/1.1\r\nHost: API.Example.com.:443\r\nAuthorization: PH\r\n\r\n"],
         );
         assert!(ok.contains("Authorization: real"), "{ok}");
+        // The request line is passed through, not parsed as a header.
+        assert!(
+            ok.starts_with("GET https://api.example.com:443/x HTTP/1.1\r\n"),
+            "{ok}"
+        );
         // Without a placeholder, nothing is sent that the server shouldn't see.
         let plain = frame(
             &mut m,

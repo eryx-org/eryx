@@ -68,14 +68,17 @@ The real value is only sent to the host the connection was opened to:
 - The TLS server name must be that host (ignoring case and a trailing dot);
   `wrap_socket(sock, server_hostname=...)` with any other name fails.
 - A request whose `Host` header or absolute-form target names a different host
-  is refused if it carries a placeholder.
+  is refused if it carries a placeholder, as is one with a malformed request
+  line or a target containing whitespace, `\` or userinfo (`user@host`).
 
 ## Responses
 
 If a server sends the real value back (an echo endpoint, or an error message
 quoting the key), the sandbox sees the placeholder instead. This also works
-when the value is split across reads. Compressed or otherwise encoded bodies
-are passed through unchanged.
+when the value is split across reads: bytes that may be the start of a secret
+are held back for up to 100 ms waiting for the rest. Only verbatim copies are
+replaced; compressed, chunk-split or otherwise encoded copies are passed through
+unchanged.
 
 ## Plain HTTP
 
