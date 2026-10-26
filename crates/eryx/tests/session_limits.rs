@@ -207,18 +207,28 @@ async fn in_process_session_applies_memory_limit_at_instantiation() {
     assert_memory_limit_error(error);
 }
 
+/// A VFS size limit with room for `/data` and a four-byte `/data/file`, so a
+/// fifth byte doesn't fit.
+#[cfg(feature = "vfs")]
+fn room_for_four_byte_file() -> u64 {
+    let entry = |path: &str| eryx::vfs::ENTRY_OVERHEAD_BYTES + path.len() as u64;
+    entry("/data") + entry("/data/file") + 4
+}
+
 #[cfg(feature = "vfs")]
 #[tokio::test]
 async fn caller_owned_vfs_quota_is_not_replaced_by_resource_limits() {
     use eryx::vfs::{ArcStorage, InMemoryStorage, VfsStorage};
 
-    let storage = ArcStorage::new(Arc::new(InMemoryStorage::with_max_bytes(4)));
+    let storage = ArcStorage::new(Arc::new(InMemoryStorage::with_max_bytes(
+        room_for_four_byte_file(),
+    )));
     let mut session = SessionExecutor::new_with_vfs_config_and_limits(
         executor(),
         &[],
         storage.clone(),
         eryx::VfsConfig::default(),
-        &ResourceLimits::unlimited().with_max_vfs_bytes(1024),
+        &ResourceLimits::unlimited().with_max_vfs_bytes(1024 * 1024),
     )
     .await
     .expect("session construction");
@@ -262,7 +272,7 @@ async fn caller_owned_vfs_quota_is_not_replaced_by_resource_limits() {
 #[cfg(feature = "vfs")]
 #[tokio::test]
 async fn owned_vfs_quota_survives_reset() {
-    let limits = ResourceLimits::unlimited().with_max_vfs_bytes(4);
+    let limits = ResourceLimits::unlimited().with_max_vfs_bytes(room_for_four_byte_file());
     let mut session = SessionExecutor::new_with_limits(executor(), &[], &limits)
         .await
         .expect("session construction");

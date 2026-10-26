@@ -17,6 +17,24 @@ pub enum VfsError {
     #[error("permission denied: {0}")]
     PermissionDenied(String),
 
+    /// The descriptor's permissions don't allow the requested access, such as
+    /// opening a file for writing beneath a read-only mount. Guests see
+    /// `EACCES`.
+    #[error("access denied: {0}")]
+    AccessDenied(String),
+
+    /// A path, or one of its components, is longer than the filesystem
+    /// accepts. Guests see `ENAMETOOLONG`.
+    #[error("name too long: {0}")]
+    NameTooLong(String),
+
+    /// The sandbox already holds as many open host files and directories as
+    /// it is allowed.
+    ///
+    /// WASI has no `EMFILE`, so guests see the closest code, `EDQUOT`.
+    #[error("too many open files: {0}")]
+    TooManyOpenFiles(String),
+
     /// File already exists.
     #[error("already exists: {0}")]
     AlreadyExists(String),

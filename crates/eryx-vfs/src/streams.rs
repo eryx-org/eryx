@@ -14,6 +14,7 @@ use wasmtime_wasi_io::streams::{InputStream, OutputStream, StreamError, StreamRe
 
 use crate::error::{VfsError, VfsResult};
 use crate::file_io::{read_at, write_at};
+use crate::hybrid::check_file_size;
 use crate::storage::VfsStorage;
 
 /// Largest buffer a single stream read will allocate, regardless of the length
@@ -21,7 +22,7 @@ use crate::storage::VfsStorage;
 ///
 /// WASI streams are allowed to return short reads, so a guest that wants more
 /// simply reads again.
-const MAX_READ_CHUNK: usize = 1024 * 1024;
+pub(crate) const MAX_READ_CHUNK: usize = 1024 * 1024;
 
 /// An input stream for reading from a real filesystem file.
 pub struct RealFileInputStream {
@@ -97,29 +98,39 @@ pub struct RealFileOutputStream {
     position: u64,
     /// Whether to append to the file.
     append: bool,
+    /// Largest size a write may grow the file to.
+    max_size: Option<u64>,
     /// Whether the stream has been closed.
     closed: bool,
 }
 
 impl RealFileOutputStream {
     /// Create a new file output stream for writing at a specific offset.
-    pub fn write_at(file: Arc<std::fs::File>, offset: u64) -> Self {
+    pub fn write_at(file: Arc<std::fs::File>, offset: u64, max_size: Option<u64>) -> Self {
         Self {
             file,
             position: offset,
             append: false,
+            max_size,
             closed: false,
         }
     }
 
     /// Create a new file output stream for appending.
-    pub fn append(file: Arc<std::fs::File>) -> Self {
+    pub fn append(file: Arc<std::fs::File>, max_size: Option<u64>) -> Self {
         Self {
             file,
             position: 0, // Position doesn't matter for append
             append: true,
+            max_size,
             closed: false,
         }
+    }
+
+    /// Write `bytes` at `offset`, unless that grows the file past its limit.
+    fn write_checked(&self, bytes: &[u8], offset: u64) -> std::io::Result<usize> {
+        check_file_size(self.max_size, offset.saturating_add(bytes.len() as u64))?;
+        write_at(&self.file, bytes, offset)
     }
 }
 
@@ -145,14 +156,11 @@ impl OutputStream for RealFileOutputStream {
             // For append mode, get the file length and write there
             // since there's no direct append_at method
             match self.file.metadata() {
-                Ok(meta) => {
-                    let len = meta.len();
-                    write_at(&self.file, &bytes, len)
-                }
+                Ok(meta) => self.write_checked(&bytes, meta.len()),
                 Err(e) => Err(e),
             }
         } else {
-            write_at(&self.file, &bytes, self.position)
+            self.write_checked(&bytes, self.position)
         };
 
         match result {
@@ -485,8 +493,8 @@ mod tests {
         write_at(&file, b"hello world", 0).unwrap();
         let mut first = RealFileInputStream::new(Arc::clone(&file), 0);
         let mut second = RealFileInputStream::new(Arc::clone(&file), 6);
-        let mut output = RealFileOutputStream::write_at(Arc::clone(&file), 6);
-        let mut append = RealFileOutputStream::append(Arc::clone(&file));
+        let mut output = RealFileOutputStream::write_at(Arc::clone(&file), 6, None);
+        let mut append = RealFileOutputStream::append(Arc::clone(&file), None);
 
         assert_eq!(&*first.read(5).unwrap(), b"hello");
         output.write(Bytes::from_static(b"Rust")).unwrap();
@@ -495,6 +503,17 @@ mod tests {
         assert_eq!(&*second.read(6).unwrap(), b"Rust?!");
         assert_eq!(&*first.read(7).unwrap(), b" Rust?!");
         assert!(matches!(second.read(1), Err(StreamError::Closed)));
+    }
+
+    #[test]
+    fn real_output_stream_respects_max_size() {
+        let file = Arc::new(tempfile::tempfile().unwrap());
+        let mut output = RealFileOutputStream::write_at(Arc::clone(&file), 0, Some(4));
+        output.write(Bytes::from_static(b"1234")).unwrap();
+        assert!(output.write(Bytes::from_static(b"5")).is_err());
+        let mut append = RealFileOutputStream::append(Arc::clone(&file), Some(4));
+        assert!(append.write(Bytes::from_static(b"5")).is_err());
+        assert_eq!(file.metadata().unwrap().len(), 4);
     }
 
     #[tokio::test]
@@ -640,7 +659,9 @@ mod tests {
     /// `filesystem-error-code` can map to `ENOSPC`, instead of being dropped.
     #[tokio::test]
     async fn test_vfs_output_stream_reports_quota_error() {
-        let storage = ArcStorage::new(Arc::new(InMemoryStorage::with_max_bytes(4)));
+        // Room for the file entry plus four bytes.
+        let max_bytes = crate::ENTRY_OVERHEAD_BYTES + "/test.txt".len() as u64 + 4;
+        let storage = ArcStorage::new(Arc::new(InMemoryStorage::with_max_bytes(max_bytes)));
         storage.write("/test.txt", b"").await.unwrap();
         let mut stream = VfsOutputStream::write_at(storage.clone(), "/test.txt".to_string(), 0);
 

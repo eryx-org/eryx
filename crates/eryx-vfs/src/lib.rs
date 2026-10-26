@@ -46,7 +46,8 @@ mod wasi_impl;
 
 pub use error::{VfsError, VfsResult};
 pub use hybrid::{
-    HybridDescriptor, HybridPreopen, HybridVfsCtx, HybridVfsState, RealDir, RealFile, RestrictedDir,
+    DEFAULT_MAX_OPEN_HOST_FILES, HybridDescriptor, HybridPreopen, HybridVfsCtx, HybridVfsState,
+    RealDir, RealFile, RestrictedDir,
 };
 pub use hybrid_bindings::HybridReaddirIterator;
 pub use linker::{HybridVfsView, VfsView, add_hybrid_vfs_to_linker, add_vfs_to_linker};
@@ -54,8 +55,8 @@ pub use scrubbing::{
     FileScrubPolicy as VfsFileScrubPolicy, ScrubbingStorage, SecretConfig as VfsSecretConfig,
 };
 pub use storage::{
-    ArcStorage, DEFAULT_MAX_BYTES, DirEntry, InMemorySnapshot, InMemoryStorage, Metadata,
-    VfsStorage,
+    ArcStorage, DEFAULT_MAX_BYTES, DirEntry, ENTRY_OVERHEAD_BYTES, InMemorySnapshot,
+    InMemoryStorage, MAX_ENTRIES, Metadata, VfsStorage,
 };
 pub use wasi_impl::{VfsCtx, VfsDescriptor, VfsReaddirIterator, VfsState};
 

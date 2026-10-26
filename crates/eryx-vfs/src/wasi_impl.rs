@@ -66,6 +66,9 @@ impl<S: VfsStorage + Clone> std::fmt::Debug for VfsState<'_, S> {
 pub struct VfsDescriptor {
     /// Absolute path within the VFS.
     pub path: String,
+    /// The preopen this descriptor was opened beneath. Paths resolved against
+    /// the descriptor must stay inside it.
+    pub root: String,
     /// Whether this is a directory.
     pub is_dir: bool,
     /// Directory permissions (for directory descriptors).
@@ -75,35 +78,59 @@ pub struct VfsDescriptor {
 }
 
 impl VfsDescriptor {
-    /// Create a new directory descriptor.
+    /// Create a preopen directory descriptor, which is its own root.
     pub fn dir(path: impl Into<String>, dir_perms: DirPerms, file_perms: FilePerms) -> Self {
+        let path = path.into();
         Self {
-            path: path.into(),
+            root: path.clone(),
+            path,
             is_dir: true,
             dir_perms,
             file_perms,
         }
     }
 
-    /// Create a new file descriptor.
+    /// Create a file descriptor.
     pub fn file(path: impl Into<String>, file_perms: FilePerms) -> Self {
+        let path = path.into();
         Self {
-            path: path.into(),
+            root: path.clone(),
+            path,
             is_dir: false,
             dir_perms: DirPerms::empty(),
             file_perms,
         }
     }
 
-    /// Resolve a relative path against this descriptor.
-    pub fn resolve_path(&self, path: &str) -> String {
-        if path.starts_with('/') {
-            path.to_string()
-        } else if self.path == "/" {
-            format!("/{path}")
-        } else {
-            format!("{}/{path}", self.path)
+    /// A descriptor for `path` (already resolved) beneath the same root, with
+    /// this descriptor's permissions.
+    pub(crate) fn child_dir(&self, path: String) -> Self {
+        Self {
+            path,
+            root: self.root.clone(),
+            ..self.clone()
         }
+    }
+
+    /// Resolve a guest path relative to this descriptor.
+    ///
+    /// The result is normalized and must stay inside the descriptor's root:
+    /// absolute paths and `..` components that climb out of it are refused,
+    /// as they are for the host filesystem's preopens.
+    pub fn resolve_path(&self, path: &str) -> crate::VfsResult<String> {
+        let outside = || crate::VfsError::PermissionDenied(format!("path outside preopen: {path}"));
+        if path.starts_with('/') {
+            return Err(outside());
+        }
+        let joined = format!("{}/{path}", self.path.trim_end_matches('/'));
+        let resolved = crate::InMemoryStorage::normalize_path(&joined).map_err(|_| outside())?;
+        let root = vfs_identity(&self.root);
+        let inside = root == "/"
+            || resolved == root
+            || resolved
+                .strip_prefix(root.as_str())
+                .is_some_and(|rest| rest.starts_with('/'));
+        if inside { Ok(resolved) } else { Err(outside()) }
     }
 }
 
@@ -153,6 +180,9 @@ pub fn vfs_error_to_error_code(err: &crate::VfsError) -> types::ErrorCode {
     match err {
         VfsError::NotFound(_) => types::ErrorCode::NoEntry,
         VfsError::PermissionDenied(_) => types::ErrorCode::NotPermitted,
+        VfsError::AccessDenied(_) => types::ErrorCode::Access,
+        VfsError::NameTooLong(_) => types::ErrorCode::NameTooLong,
+        VfsError::TooManyOpenFiles(_) => types::ErrorCode::Quota,
         VfsError::AlreadyExists(_) => types::ErrorCode::Exist,
         VfsError::NotDirectory(_) => types::ErrorCode::NotDirectory,
         VfsError::NotFile(_) => types::ErrorCode::IsDirectory,
@@ -233,8 +263,39 @@ pub fn metadata_to_stat(meta: &Metadata) -> types::DescriptorStat {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn resolve_path_stays_inside_root() {
+        let data = VfsDescriptor::dir("/data", DirPerms::all(), FilePerms::all());
+        let sub = data.child_dir("/data/sub".to_string());
+        assert_eq!(sub.resolve_path("a/./b").unwrap(), "/data/sub/a/b");
+        assert_eq!(sub.resolve_path("../x").unwrap(), "/data/x");
+        assert_eq!(sub.resolve_path("..").unwrap(), "/data");
+        for path in [
+            "../../x",
+            "../../data2/x",
+            "/etc/passwd",
+            "/data/x",
+            "a/../../../x",
+        ] {
+            assert!(
+                matches!(
+                    sub.resolve_path(path),
+                    Err(crate::VfsError::PermissionDenied(_))
+                ),
+                "{path}"
+            );
+        }
+        // A sibling that merely shares the root's prefix is outside it.
+        assert!(data.resolve_path("../data2").is_err());
+        // Everything is inside "/".
+        let root = VfsDescriptor::dir("/", DirPerms::all(), FilePerms::all());
+        assert_eq!(root.resolve_path("a/../b").unwrap(), "/b");
+        assert!(root.resolve_path("..").is_err());
+    }
 
     #[test]
     fn metadata_hash_tracks_identity_and_modification() {

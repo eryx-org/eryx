@@ -245,19 +245,87 @@ struct StorageState {
     files: HashMap<String, FileData>,
     /// Directory markers: set of directory paths
     directories: HashSet<String>,
+    /// Bytes charged against the size limit, kept up to date by every change
+    /// so checking the limit doesn't rescan the filesystem. Recomputed when a
+    /// snapshot is applied.
+    #[cfg_attr(feature = "serde", serde(skip))]
+    used: u64,
+}
+
+impl StorageState {
+    /// The bytes charged for the current contents, summed from scratch.
+    fn usage(&self) -> u64 {
+        let files = self
+            .files
+            .iter()
+            .map(|(path, f)| file_cost(path, f.content.len()))
+            .fold(0u64, u64::saturating_add);
+        self.directories
+            .iter()
+            .filter(|path| path.as_str() != "/")
+            .map(|path| entry_cost(path))
+            .fold(files, u64::saturating_add)
+    }
+
+    fn entries(&self) -> usize {
+        self.files.len() + self.directories.len()
+    }
+}
+
+/// Bytes charged for a file or directory's existence, on top of its path and
+/// any content.
+///
+/// Names and entries live in host memory just as file contents do, so they
+/// count towards [`InMemoryStorage::max_bytes`]: otherwise empty files and
+/// directories with long names would be free.
+pub const ENTRY_OVERHEAD_BYTES: u64 = 64;
+
+/// Most files and directories an [`InMemoryStorage`] holds, whatever its
+/// size limit.
+///
+/// Some operations (listing, removing or renaming a directory) visit every
+/// entry, so this keeps each of them cheap.
+pub const MAX_ENTRIES: usize = 65_536;
+
+/// Longest file or directory name accepted, in bytes (POSIX `NAME_MAX`).
+const MAX_NAME_LEN: usize = 255;
+
+/// Longest absolute path accepted, in bytes (POSIX `PATH_MAX`).
+const MAX_PATH_LEN: usize = 4096;
+
+/// Bytes charged for a directory, or for a file apart from its content.
+fn entry_cost(path: &str) -> u64 {
+    (path.len() as u64).saturating_add(ENTRY_OVERHEAD_BYTES)
+}
+
+/// Bytes charged for a file holding `len` bytes.
+fn file_cost(path: &str, len: usize) -> u64 {
+    entry_cost(path).saturating_add(len as u64)
+}
+
+/// Refuse a path too long to create (`ENAMETOOLONG`).
+fn check_name_len(path: &str) -> VfsResult<()> {
+    if path.len() > MAX_PATH_LEN || path.split('/').any(|c| c.len() > MAX_NAME_LEN) {
+        return Err(VfsError::NameTooLong(format!(
+            "{} byte path, limits are {MAX_NAME_LEN} per name and {MAX_PATH_LEN} in all",
+            path.len()
+        )));
+    }
+    Ok(())
 }
 
 /// How long [`InMemoryStorage::mkdir_sync`] waits for a contended lock on a
 /// current-thread runtime before giving up.
 const MKDIR_SYNC_WAIT: std::time::Duration = std::time::Duration::from_secs(3);
 
-/// Default limit on the total bytes of file content an [`InMemoryStorage`]
-/// will hold: 64 MiB.
+/// Default limit on the bytes an [`InMemoryStorage`] will hold: 64 MiB.
 ///
 /// File contents live in host memory, and a sandboxed guest chooses both the
 /// offsets it writes at and the sizes it truncates to. Without a limit, a
 /// one-byte write at a large offset turns into an arbitrarily large host
-/// allocation. Override with [`InMemoryStorage::with_max_bytes`].
+/// allocation. Paths count too: each file and directory is charged its path
+/// length plus [`ENTRY_OVERHEAD_BYTES`]. Override with
+/// [`InMemoryStorage::with_max_bytes`].
 pub const DEFAULT_MAX_BYTES: u64 = 64 * 1024 * 1024;
 
 /// In-memory VFS storage implementation.
@@ -265,14 +333,18 @@ pub const DEFAULT_MAX_BYTES: u64 = 64 * 1024 * 1024;
 /// Stores files and directories in memory using `HashMap` and `HashSet`.
 /// Thread-safe via a single `RwLock` over the combined state.
 ///
-/// Total file content is capped at [`DEFAULT_MAX_BYTES`] unless changed with
-/// [`InMemoryStorage::with_max_bytes`]; operations that would exceed the cap
-/// fail with [`VfsError::QuotaExceeded`], which guests see as `ENOSPC`.
+/// Total size (file contents plus a charge per entry, see
+/// [`ENTRY_OVERHEAD_BYTES`]) is capped at [`DEFAULT_MAX_BYTES`] unless changed
+/// with [`InMemoryStorage::with_max_bytes`], and there are at most
+/// [`MAX_ENTRIES`] files and directories. Operations that would exceed either
+/// fail with [`VfsError::QuotaExceeded`], which guests see as `ENOSPC`. Names
+/// longer than POSIX `NAME_MAX` (255 bytes) or paths longer than `PATH_MAX`
+/// (4096 bytes) fail with [`VfsError::NameTooLong`].
 #[derive(Debug)]
 pub struct InMemoryStorage {
     /// Combined state under a single lock to prevent deadlocks.
     state: RwLock<StorageState>,
-    /// Maximum total bytes of file content, across all files.
+    /// Maximum total bytes charged, across all files and directories.
     max_bytes: u64,
 }
 
@@ -299,6 +371,14 @@ struct FileData {
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct InMemorySnapshot {
     state: StorageState,
+    /// The size limit of the storage the snapshot was taken from.
+    #[cfg_attr(feature = "serde", serde(default = "default_max_bytes"))]
+    max_bytes: u64,
+}
+
+#[cfg(feature = "serde")]
+fn default_max_bytes() -> u64 {
+    DEFAULT_MAX_BYTES
 }
 
 impl Default for InMemoryStorage {
@@ -318,7 +398,8 @@ impl InMemoryStorage {
 
     /// Create a new empty in-memory storage with an explicit size cap.
     ///
-    /// `max_bytes` bounds the total content of all files combined. Because the
+    /// `max_bytes` bounds the total content of all files combined, plus the
+    /// per-entry charge described on [`DEFAULT_MAX_BYTES`]. Because the
     /// contents live in host memory and a sandboxed guest picks its own write
     /// offsets, this is a limit on how much memory the guest can make the host
     /// allocate - keep it well below what the host can afford to lose.
@@ -330,12 +411,13 @@ impl InMemoryStorage {
             state: RwLock::new(StorageState {
                 files: HashMap::new(),
                 directories,
+                used: 0,
             }),
             max_bytes,
         }
     }
 
-    /// The total-content cap, in bytes.
+    /// The size cap, in bytes.
     #[must_use]
     pub fn max_bytes(&self) -> u64 {
         self.max_bytes
@@ -348,6 +430,7 @@ impl InMemoryStorage {
     pub async fn snapshot(&self) -> InMemorySnapshot {
         InMemorySnapshot {
             state: self.state.read().await.clone(),
+            max_bytes: self.max_bytes,
         }
     }
 
@@ -355,21 +438,47 @@ impl InMemoryStorage {
     ///
     /// The storage's identity is preserved, so any `Arc<dyn VfsStorage>` handles
     /// (e.g. those wired into a running sandbox) continue to refer to it and see
-    /// the restored contents.
-    pub async fn restore(&self, snapshot: &InMemorySnapshot) {
-        *self.state.write().await = snapshot.state.clone();
+    /// the restored contents. This storage keeps its own size limit.
+    ///
+    /// # Errors
+    ///
+    /// [`VfsError::QuotaExceeded`] if the snapshot doesn't fit within this
+    /// storage's limits; the storage is left unchanged.
+    pub async fn restore(&self, snapshot: &InMemorySnapshot) -> VfsResult<()> {
+        let state = Self::checked_state(snapshot, self.max_bytes)?;
+        *self.state.write().await = state;
+        Ok(())
     }
 
-    /// Create a new, independent storage initialized from a snapshot.
+    /// Create a new, independent storage initialized from a snapshot, with
+    /// the size limit of the storage the snapshot was taken from.
     ///
     /// Useful for forking a session: the returned storage shares no state with
     /// the original, so the two can diverge freely.
-    #[must_use]
-    pub fn from_snapshot(snapshot: &InMemorySnapshot) -> Self {
-        Self {
-            state: RwLock::new(snapshot.state.clone()),
-            max_bytes: DEFAULT_MAX_BYTES,
+    ///
+    /// # Errors
+    ///
+    /// [`VfsError::QuotaExceeded`] if the snapshot's contents exceed its own
+    /// size limit or [`MAX_ENTRIES`], as a deserialized snapshot might.
+    pub fn from_snapshot(snapshot: &InMemorySnapshot) -> VfsResult<Self> {
+        Ok(Self {
+            state: RwLock::new(Self::checked_state(snapshot, snapshot.max_bytes)?),
+            max_bytes: snapshot.max_bytes,
+        })
+    }
+
+    /// The snapshot's state with its usage recomputed, if it fits the limits.
+    fn checked_state(snapshot: &InMemorySnapshot, max_bytes: u64) -> VfsResult<StorageState> {
+        let mut state = snapshot.state.clone();
+        state.used = state.usage();
+        if state.used > max_bytes || state.entries() > MAX_ENTRIES {
+            return Err(VfsError::QuotaExceeded(format!(
+                "snapshot holds {} entries and {} bytes, over the limit of {MAX_ENTRIES} entries and {max_bytes} bytes",
+                state.entries(),
+                state.used
+            )));
         }
+        Ok(state)
     }
 
     /// Normalize a path (remove trailing slashes, handle . and ..).
@@ -417,37 +526,22 @@ impl InMemoryStorage {
         }
     }
 
-    /// Check that resizing `path` to `new_len` keeps total content within
-    /// `max_bytes`, returning `new_len` as a `usize` ready to resize with.
+    /// Check that resizing file `path` to `new_len` (creating it if needed)
+    /// stays within the limits, returning `new_len` as a `usize` ready to
+    /// resize with.
     ///
     /// Called before every allocation so that a guest-chosen offset or length
-    /// can never turn into an unbounded host allocation. The current total is
-    /// summed on the spot rather than tracked incrementally: it is only needed
-    /// on the growth paths, and a running counter is one missed update away
-    /// from being wrong.
+    /// can never turn into an unbounded host allocation.
     fn check_budget(&self, state: &StorageState, path: &str, new_len: u64) -> VfsResult<usize> {
-        let current_len = state
-            .files
-            .get(path)
-            .map_or(0, |f| f.content.len().try_into().unwrap_or(u64::MAX));
-
-        // Only growth needs checking; shrinking always fits.
-        if new_len > current_len {
-            let others: u64 = state
-                .files
-                .iter()
-                .filter(|(p, _)| p.as_str() != path)
-                .map(|(_, f)| f.content.len().try_into().unwrap_or(u64::MAX))
-                .fold(0u64, u64::saturating_add);
-
-            let total = others.saturating_add(new_len);
-            if total > self.max_bytes {
-                return Err(VfsError::QuotaExceeded(format!(
-                    "{path}: {new_len} bytes would put the filesystem at {total} bytes, over the {} byte limit",
-                    self.max_bytes
-                )));
+        let current = match state.files.get(path) {
+            Some(f) => file_cost(path, f.content.len()),
+            None => {
+                self.check_new_entry(state, path)?;
+                0
             }
-        }
+        };
+        let new = entry_cost(path).saturating_add(new_len);
+        self.check_growth(state, path, current, new)?;
 
         // new_len <= max_bytes, which is a u64 the host was willing to allocate,
         // so this only fails on a 32-bit host with an oversized cap.
@@ -456,6 +550,48 @@ impl InMemoryStorage {
                 "{path}: {new_len} bytes exceeds host addressable size"
             ))
         })
+    }
+
+    /// Check that replacing something charged `current` bytes with something
+    /// charged `new` bytes stays within `max_bytes`. Shrinking always fits.
+    fn check_growth(
+        &self,
+        state: &StorageState,
+        path: &str,
+        current: u64,
+        new: u64,
+    ) -> VfsResult<()> {
+        if new > current {
+            let total = state.used.saturating_sub(current).saturating_add(new);
+            if total > self.max_bytes {
+                return Err(VfsError::QuotaExceeded(format!(
+                    "{path}: the filesystem would grow to {total} bytes, over the {} byte limit",
+                    self.max_bytes
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    /// Check that a new file or directory at `path` may be created.
+    fn check_new_entry(&self, state: &StorageState, path: &str) -> VfsResult<()> {
+        check_name_len(path)?;
+        if state.entries() >= MAX_ENTRIES {
+            return Err(VfsError::QuotaExceeded(format!(
+                "{path}: the filesystem already holds {MAX_ENTRIES} entries"
+            )));
+        }
+        Ok(())
+    }
+
+    /// Record that file `path` changed from `old_len` bytes (`None`: it
+    /// didn't exist) to `new_len`.
+    fn charge_file(state: &mut StorageState, path: &str, old_len: Option<usize>, new_len: usize) {
+        let old = old_len.map_or(0, |len| file_cost(path, len));
+        state.used = state
+            .used
+            .saturating_sub(old)
+            .saturating_add(file_cost(path, new_len));
     }
 
     /// Hold the storage lock, so tests can exercise contention.
@@ -542,6 +678,8 @@ impl VfsStorage for InMemoryStorage {
 
         self.check_budget(&state, &path, data.len().try_into().unwrap_or(u64::MAX))?;
 
+        let old_len = state.files.get(&path).map(|f| f.content.len());
+        Self::charge_file(&mut state, &path, old_len, data.len());
         let now = SystemTime::now();
         let file_data = state.files.entry(path).or_insert_with(|| FileData {
             content: Vec::new(),
@@ -577,6 +715,9 @@ impl VfsStorage for InMemoryStorage {
         })?;
         let needed_len = self.check_budget(&state, &path, end)?;
 
+        let old_len = state.files.get(&path).map(|f| f.content.len());
+        let new_len = old_len.unwrap_or(0).max(needed_len);
+        Self::charge_file(&mut state, &path, old_len, new_len);
         let now = SystemTime::now();
         let file_data = state.files.entry(path).or_insert_with(|| FileData {
             content: Vec::new(),
@@ -607,6 +748,8 @@ impl VfsStorage for InMemoryStorage {
         // abort the host on allocation failure or panic on capacity overflow.
         let size = self.check_budget(&state, &path, size)?;
 
+        let old_len = state.files.get(&path).map(|f| f.content.len());
+        Self::charge_file(&mut state, &path, old_len, size);
         match state.files.get_mut(&path) {
             Some(data) => {
                 data.content.resize(size, 0);
@@ -620,7 +763,10 @@ impl VfsStorage for InMemoryStorage {
     async fn delete(&self, path: &str) -> VfsResult<()> {
         let path = Self::normalize_path(path)?;
         let mut state = self.state.write().await;
-        if state.files.remove(&path).is_some() {
+        if let Some(data) = state.files.remove(&path) {
+            state.used = state
+                .used
+                .saturating_sub(file_cost(&path, data.content.len()));
             Ok(())
         } else if state.directories.contains(&path) {
             Err(VfsError::NotFile(path))
@@ -745,6 +891,9 @@ impl VfsStorage for InMemoryStorage {
             return Err(VfsError::AlreadyExists(path));
         }
 
+        self.check_new_entry(&state, &path)?;
+        self.check_growth(&state, &path, 0, entry_cost(&path))?;
+        state.used = state.used.saturating_add(entry_cost(&path));
         state.directories.insert(path);
         Ok(())
     }
@@ -783,6 +932,7 @@ impl VfsStorage for InMemoryStorage {
         }
 
         state.directories.remove(&path);
+        state.used = state.used.saturating_sub(entry_cost(&path));
         Ok(())
     }
 
@@ -805,8 +955,18 @@ impl VfsStorage for InMemoryStorage {
                 return Err(VfsError::AlreadyExists(to));
             }
 
+            check_name_len(&to)?;
+            let len = state.files[&from].content.len();
+            let replaced = state
+                .files
+                .get(&to)
+                .map_or(0, |f| file_cost(&to, f.content.len()));
+            let (current, new) = (file_cost(&from, len) + replaced, file_cost(&to, len));
+            self.check_growth(&state, &to, current, new)?;
+
             if let Some(data) = state.files.remove(&from) {
                 state.files.insert(to, data);
+                state.used = state.used.saturating_sub(current).saturating_add(new);
                 return Ok(());
             }
         }
@@ -844,13 +1004,47 @@ impl VfsStorage for InMemoryStorage {
                 return Err(VfsError::DirectoryNotEmpty(to));
             }
 
-            // Rename files under the directory
             let files_to_rename: Vec<_> = state
                 .files
                 .keys()
                 .filter(|p| p.starts_with(&from_prefix))
                 .cloned()
                 .collect();
+
+            let dirs_to_rename: Vec<_> = state
+                .directories
+                .iter()
+                .filter(|p| *p == &from || p.starts_with(&from_prefix))
+                .cloned()
+                .collect();
+
+            // Every moved path changes length by the same amount; an existing
+            // (empty) destination directory is replaced.
+            check_name_len(&to)?;
+            let longest = files_to_rename
+                .iter()
+                .chain(&dirs_to_rename)
+                .map(String::len)
+                .max()
+                .unwrap_or(0);
+            if longest - from.len() + to.len() > MAX_PATH_LEN {
+                return Err(VfsError::NameTooLong(format!(
+                    "moving {from} to {to} makes paths longer than {MAX_PATH_LEN} bytes"
+                )));
+            }
+            let moved = (files_to_rename.len() + dirs_to_rename.len()) as u64;
+            let replaced = if state.directories.contains(&to) {
+                entry_cost(&to)
+            } else {
+                0
+            };
+            let current = (from.len() as u64)
+                .saturating_mul(moved)
+                .saturating_add(replaced);
+            let new = (to.len() as u64).saturating_mul(moved);
+            self.check_growth(&state, &to, current, new)?;
+            state.used = state.used.saturating_sub(current).saturating_add(new);
+
             for old_path in files_to_rename {
                 if let Some(data) = state.files.remove(&old_path) {
                     let new_path = old_path.replacen(&from_prefix, &to_prefix, 1);
@@ -859,12 +1053,6 @@ impl VfsStorage for InMemoryStorage {
             }
 
             // Rename subdirectories
-            let dirs_to_rename: Vec<_> = state
-                .directories
-                .iter()
-                .filter(|p| *p == &from || p.starts_with(&from_prefix))
-                .cloned()
-                .collect();
             for old_path in dirs_to_rename {
                 state.directories.remove(&old_path);
                 let new_path = if old_path == from {
@@ -917,7 +1105,12 @@ impl VfsStorage for InMemoryStorage {
                 if state.files.contains_key(&current) {
                     return Err(VfsError::NotDirectory(current));
                 }
-                state.directories.insert(current.clone());
+                if !state.directories.contains(&current) {
+                    self.check_new_entry(state, &current)?;
+                    self.check_growth(state, &current, 0, entry_cost(&current))?;
+                    state.used = state.used.saturating_add(entry_cost(&current));
+                    state.directories.insert(current.clone());
+                }
             }
             Ok(())
         };
@@ -1118,8 +1311,108 @@ mod tests {
         storage.write("/b", &vec![0u8; 600]).await.unwrap();
 
         // Overwriting a file counts its new size, not the sum of both.
-        storage.write("/b", &vec![0u8; 1024]).await.unwrap();
-        assert_eq!(storage.stat("/b").await.unwrap().size, 1024);
+        storage.write("/b", &vec![0u8; 900]).await.unwrap();
+        assert_eq!(storage.stat("/b").await.unwrap().size, 900);
+    }
+
+    /// Empty files and directories, and their names, are charged too, so
+    /// they can't grow host memory past the limit for free.
+    #[tokio::test]
+    async fn entries_and_names_count_towards_the_limit() {
+        let storage = InMemoryStorage::with_max_bytes(10 * (ENTRY_OVERHEAD_BYTES + 3));
+        for i in 0..10 {
+            storage.mkdir(&format!("/d{i}")).await.unwrap();
+        }
+        let err = storage.write("/d", b"").await.unwrap_err();
+        assert!(matches!(err, VfsError::QuotaExceeded(_)), "{err:?}");
+        let err = storage.mkdir("/dx").await.unwrap_err();
+        assert!(matches!(err, VfsError::QuotaExceeded(_)), "{err:?}");
+        // A longer name needs more room.
+        let err = storage.rename("/d1", "/d10").await.unwrap_err();
+        assert!(matches!(err, VfsError::QuotaExceeded(_)), "{err:?}");
+        storage.rmdir("/d0").await.unwrap();
+        storage.write("/f", b"").await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn overlong_names_are_refused() {
+        let storage = InMemoryStorage::new();
+        let name = "n".repeat(MAX_NAME_LEN + 1);
+        for result in [
+            storage.write(&format!("/{name}"), b"").await,
+            storage.mkdir(&format!("/{name}")).await,
+            storage.mkdir_sync(&format!("/ok/{name}")),
+        ] {
+            assert!(
+                matches!(result, Err(VfsError::NameTooLong(_))),
+                "{result:?}"
+            );
+        }
+
+        // Each name fits, but the path is too long.
+        let mut path = String::new();
+        let part = "p".repeat(MAX_NAME_LEN);
+        while path.len() + part.len() < MAX_PATH_LEN {
+            path = format!("{path}/{part}");
+            storage.mkdir(&path).await.unwrap();
+        }
+        let err = storage.mkdir(&format!("{path}/{part}")).await.unwrap_err();
+        assert!(matches!(err, VfsError::NameTooLong(_)), "{err:?}");
+        // Moving the deep tree under a longer name would overflow it too.
+        storage.mkdir("/long-parent-name").await.unwrap();
+        let err = storage
+            .rename(&format!("/{part}"), &format!("/long-parent-name/{part}"))
+            .await
+            .unwrap_err();
+        assert!(matches!(err, VfsError::NameTooLong(_)), "{err:?}");
+    }
+
+    #[tokio::test]
+    async fn entry_count_is_capped() {
+        let storage = InMemoryStorage::with_max_bytes(u64::MAX);
+        // The root directory is the first entry.
+        for i in 1..MAX_ENTRIES {
+            storage.write(&format!("/{i}"), b"").await.unwrap();
+        }
+        let err = storage.mkdir("/one-more").await.unwrap_err();
+        assert!(matches!(err, VfsError::QuotaExceeded(_)), "{err:?}");
+        storage.delete("/1").await.unwrap();
+        storage.mkdir("/one-more").await.unwrap();
+    }
+
+    /// The running total must match a recount after every kind of change.
+    #[tokio::test]
+    async fn running_usage_matches_recount() {
+        let storage = InMemoryStorage::new();
+        let check = || async {
+            let state = storage.state.read().await;
+            assert_eq!(state.used, state.usage());
+        };
+        storage.mkdir("/a").await.unwrap();
+        storage.write("/a/f", b"hello").await.unwrap();
+        storage.write("/a/f", b"hi").await.unwrap();
+        storage.write_at("/a/g", 10, b"x").await.unwrap();
+        storage.write_at("/a/g", 0, b"y").await.unwrap();
+        storage.set_size("/a/f", 100).await.unwrap();
+        check().await;
+        storage.rename("/a/f", "/a/longer-name").await.unwrap();
+        storage.rename("/a/g", "/a/longer-name").await.unwrap();
+        storage.mkdir("/b").await.unwrap();
+        storage.rename("/a", "/b").await.unwrap();
+        storage.rename("/b", "/c-is-longer").await.unwrap();
+        check().await;
+        storage.mkdir_sync("/x/y/z").unwrap();
+        storage.mkdir_sync("/x/y/z/w").unwrap();
+        storage.delete("/c-is-longer/longer-name").await.unwrap();
+        storage.rmdir("/c-is-longer").await.unwrap();
+        check().await;
+        assert_eq!(
+            storage.state.read().await.used,
+            ["/x", "/x/y", "/x/y/z", "/x/y/z/w"]
+                .iter()
+                .map(|p| entry_cost(p))
+                .sum::<u64>()
+        );
     }
 
     #[tokio::test]
@@ -1140,15 +1433,35 @@ mod tests {
         storage.write("/data/b.txt", b"new").await.unwrap();
 
         // Restore in place: back to the snapshot, b.txt gone.
-        storage.restore(&snap).await;
+        storage.restore(&snap).await.unwrap();
         assert_eq!(storage.read("/data/a.txt").await.unwrap(), b"original");
         assert!(storage.read("/data/b.txt").await.is_err());
 
         // Fork: an independent copy that diverges without affecting the original.
-        let forked = InMemoryStorage::from_snapshot(&snap);
+        let forked = InMemoryStorage::from_snapshot(&snap).unwrap();
         forked.write("/data/a.txt", b"forked").await.unwrap();
         assert_eq!(forked.read("/data/a.txt").await.unwrap(), b"forked");
         assert_eq!(storage.read("/data/a.txt").await.unwrap(), b"original");
+    }
+
+    #[tokio::test]
+    async fn snapshots_keep_and_respect_the_size_limit() {
+        let storage = InMemoryStorage::with_max_bytes(4096);
+        storage.write("/f", &[0u8; 2048]).await.unwrap();
+        let snap = storage.snapshot().await;
+
+        // A fork keeps the original's limit.
+        let forked = InMemoryStorage::from_snapshot(&snap).unwrap();
+        assert_eq!(forked.max_bytes(), 4096);
+        let err = forked.write("/g", &[0u8; 2048]).await.unwrap_err();
+        assert!(matches!(err, VfsError::QuotaExceeded(_)), "{err:?}");
+
+        // A storage with a smaller limit refuses the snapshot and stays as it was.
+        let small = InMemoryStorage::with_max_bytes(1024);
+        small.write("/kept", b"x").await.unwrap();
+        let err = small.restore(&snap).await.unwrap_err();
+        assert!(matches!(err, VfsError::QuotaExceeded(_)), "{err:?}");
+        assert_eq!(small.read("/kept").await.unwrap(), b"x");
     }
 
     #[cfg(feature = "serde")]
@@ -1162,7 +1475,7 @@ mod tests {
         let bytes = serde_json::to_vec(&snap).unwrap();
         let restored: InMemorySnapshot = serde_json::from_slice(&bytes).unwrap();
 
-        let fresh = InMemoryStorage::from_snapshot(&restored);
+        let fresh = InMemoryStorage::from_snapshot(&restored).unwrap();
         assert_eq!(fresh.read("/d/f.txt").await.unwrap(), b"payload");
     }
 

@@ -11,8 +11,9 @@ The VFS provides:
 - **Shared storage** - Multiple sessions can share the same VFS storage
 - **Full filesystem API** - Standard Python file operations work (open, read, write, mkdir, etc.)
 - **SQLite support** - SQLite databases can be stored in the VFS
-- **Bounded size** - Total file content is capped (64 MB by default) so scripts
-  cannot exhaust host memory; see
+- **Bounded size** - Total size is capped (64 MB by default, counting file
+  contents plus a small charge per file and directory) so scripts cannot
+  exhaust host memory; see
   [Virtual Filesystem Size](./resource-limits.md#virtual-filesystem-size)
 
 ## Creating a Session with VFS
@@ -481,6 +482,20 @@ python -m eryx -v ./input:/input:ro -v ./output:/output script.py
 Volume mounts use capability-based security (cap-std) to provide controlled access to host directories. The sandbox can only access the specific directories that were explicitly mounted — it cannot traverse outside the mount point or access other host paths.
 
 Read-only mounts enforce that sandboxed code cannot modify any files in the mounted directory.
+
+A few more rules apply to volumes:
+
+- **Single files** - Mounting a host file (rather than a directory) exposes just
+  that file. The script can read, write, replace or delete it, as the mount
+  allows, but can't list, open or create anything else next to it on the host.
+- **No symlinks** - Scripts can't create symbolic links in a volume, just as in
+  the VFS.
+- **Open files** - A sandbox holds at most 256 host files and directories open
+  at once (across the stdlib, packages and volumes); opening more fails until
+  some are closed.
+- **Unmetered writes** - `max_vfs_bytes` doesn't apply to volumes: a writable
+  volume can fill the host disk. Embedders using `eryx-vfs` directly can cap
+  each file's size with `RealDir::with_max_file_size`.
 
 ## Best Practices
 

@@ -28,7 +28,10 @@ use crate::wasi_impl::VfsDescriptor;
 ///
 /// When `file_map` is `None`, all child paths are allowed (normal directory
 /// mount). When `file_map` is `Some`, only mapped guest filenames can be
-/// accessed, and they are transparently translated to host filenames.
+/// accessed, and they are transparently translated to host filenames. Such a
+/// handle exposes files only: the mapped names can't be opened as or turned
+/// into directories, renamed, or followed if they are symlinks, so the rest
+/// of the host directory stays out of reach.
 #[derive(Clone)]
 pub struct RestrictedDir {
     inner: Arc<std::fs::File>,
@@ -69,6 +72,22 @@ impl RestrictedDir {
         Ok(Self::new(dir))
     }
 
+    /// Refuse an operation that a file-only (mapped) handle doesn't allow.
+    fn check_unrestricted(&self, guest_rel_path: &str) -> Result<(), std::io::Error> {
+        if self.file_map.is_some() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                format!("not allowed on a single-file mount: {guest_rel_path}"),
+            ));
+        }
+        Ok(())
+    }
+
+    /// The host directory handle, for counting open host descriptors.
+    pub(crate) fn handle(&self) -> &Arc<std::fs::File> {
+        &self.inner
+    }
+
     /// Check whether a guest-relative path is allowed.
     fn check_allowed(&self, guest_rel_path: &str) -> Result<(), std::io::Error> {
         match &self.file_map {
@@ -105,19 +124,27 @@ impl RestrictedDir {
     // ========================================================================
 
     /// Open a file within this directory.
+    ///
+    /// On a single-file mount the mapped name is opened without following a
+    /// symlink, so replacing it with a link can't redirect the open.
     pub fn open_with(
         &self,
         guest_path: &str,
         opts: &capfs::OpenOptions,
     ) -> std::io::Result<std::fs::File> {
         self.check_allowed(guest_path)?;
+        if self.file_map.is_some() {
+            let mut opts = opts.clone();
+            opts._cap_fs_ext_follow(capfs::FollowSymlinks::No);
+            return capfs::open(&self.inner, self.translate(guest_path).as_ref(), &opts);
+        }
         capfs::open(&self.inner, self.translate(guest_path).as_ref(), opts)
     }
 
-    /// Open a subdirectory. The returned `RestrictedDir` is unrestricted
-    /// (subdirectories don't inherit single-file restrictions).
+    /// Open a subdirectory. Not allowed on a single-file mount.
     pub fn open_dir(&self, guest_path: &str) -> std::io::Result<RestrictedDir> {
         self.check_allowed(guest_path)?;
+        self.check_unrestricted(guest_path)?;
         let sub = capfs::open_dir(&self.inner, self.translate(guest_path).as_ref())?;
         Ok(RestrictedDir {
             inner: Arc::new(sub),
@@ -125,9 +152,10 @@ impl RestrictedDir {
         })
     }
 
-    /// Create a subdirectory.
+    /// Create a subdirectory. Not allowed on a single-file mount.
     pub fn create_dir(&self, guest_path: &str) -> std::io::Result<()> {
         self.check_allowed(guest_path)?;
+        self.check_unrestricted(guest_path)?;
         capfs::create_dir(
             &self.inner,
             self.translate(guest_path).as_ref(),
@@ -193,7 +221,8 @@ impl RestrictedDir {
         capfs::remove_file(&self.inner, self.translate(guest_path).as_ref())
     }
 
-    /// Rename a file or directory. Both source and destination are checked.
+    /// Rename a file or directory. Both source and destination are checked,
+    /// and neither may be a single-file mount.
     pub fn rename(
         &self,
         old_guest: &str,
@@ -202,38 +231,14 @@ impl RestrictedDir {
     ) -> std::io::Result<()> {
         self.check_allowed(old_guest)?;
         dest.check_allowed(new_guest)?;
+        self.check_unrestricted(old_guest)?;
+        dest.check_unrestricted(new_guest)?;
         capfs::rename(
             &self.inner,
             self.translate(old_guest).as_ref(),
             &dest.inner,
             dest.translate(new_guest).as_ref(),
         )
-    }
-
-    /// Create a symbolic link.
-    ///
-    /// On Windows, the target must exist so its file or directory type can be
-    /// determined before creating the link.
-    pub fn symlink(&self, src_path: &str, dest_guest: &str) -> std::io::Result<()> {
-        self.check_allowed(dest_guest)?;
-        let dest_path = Path::new(self.translate(dest_guest));
-        #[cfg(not(windows))]
-        {
-            capfs::symlink(src_path.as_ref(), &self.inner, dest_path)
-        }
-        #[cfg(windows)]
-        {
-            // Windows requires the link type at creation time. Resolve the
-            // target relative to the translated link's parent, within the
-            // same capability boundary as the other directory operations.
-            let target = dest_path.parent().unwrap_or(Path::new("")).join(src_path);
-            let metadata = capfs::stat(&self.inner, &target, capfs::FollowSymlinks::Yes)?;
-            if metadata.is_dir() {
-                capfs::symlink_dir(src_path.as_ref(), &self.inner, dest_path)
-            } else {
-                capfs::symlink_file(src_path.as_ref(), &self.inner, dest_path)
-            }
-        }
     }
 
     /// List directory entries, filtered and translated through the file map.
@@ -294,6 +299,10 @@ pub struct RealDir {
     pub dir_perms: DirPerms,
     /// Default file permissions for files in this directory.
     pub file_perms: FilePerms,
+    /// Largest size, in bytes, a guest may grow a file beneath this directory
+    /// to, by writing or truncating. `None` (the default) leaves writes
+    /// unmetered: a writable host directory can then fill the host disk.
+    pub max_file_size: Option<u64>,
 }
 
 impl std::fmt::Debug for RealDir {
@@ -302,6 +311,7 @@ impl std::fmt::Debug for RealDir {
             .field("dir", &self.dir)
             .field("dir_perms", &self.dir_perms)
             .field("file_perms", &self.file_perms)
+            .field("max_file_size", &self.max_file_size)
             .finish_non_exhaustive()
     }
 }
@@ -313,7 +323,18 @@ impl RealDir {
             dir: RestrictedDir::new(dir),
             dir_perms,
             file_perms,
+            max_file_size: None,
         }
+    }
+
+    /// Limit how large a guest may make any file beneath this directory.
+    ///
+    /// Writes or truncations past `bytes` fail with `EFBIG`. Short of this,
+    /// guest writes to a writable host directory are not metered.
+    #[must_use]
+    pub fn with_max_file_size(mut self, bytes: u64) -> Self {
+        self.max_file_size = Some(bytes);
+        self
     }
 
     /// Open a directory from a path.
@@ -337,6 +358,27 @@ pub struct RealFile {
     pub readable: bool,
     /// Whether the file is open for writing.
     pub writable: bool,
+    /// Largest size a guest may grow the file to; see
+    /// [`RealDir::max_file_size`].
+    pub max_size: Option<u64>,
+}
+
+impl RealFile {
+    /// Fail if writing up to `end` would grow the file past its size limit.
+    pub(crate) fn check_size(&self, end: u64) -> std::io::Result<()> {
+        check_file_size(self.max_size, end)
+    }
+}
+
+/// Fail with `EFBIG` if `end` is past `max_size`.
+pub(crate) fn check_file_size(max_size: Option<u64>, end: u64) -> std::io::Result<()> {
+    match max_size {
+        Some(max) if end > max => Err(std::io::Error::new(
+            std::io::ErrorKind::FileTooLarge,
+            format!("file would grow to {end} bytes, over the {max} byte limit"),
+        )),
+        _ => Ok(()),
+    }
 }
 
 impl std::fmt::Debug for RealFile {
@@ -345,6 +387,7 @@ impl std::fmt::Debug for RealFile {
             .field("perms", &self.perms)
             .field("readable", &self.readable)
             .field("writable", &self.writable)
+            .field("max_size", &self.max_size)
             .finish_non_exhaustive()
     }
 }
@@ -491,7 +534,20 @@ pub struct HybridVfsCtx<S: VfsStorage + Clone> {
     pub storage: S,
     /// Preopened directories (both VFS and real).
     pub preopens: Vec<HybridPreopen>,
+    /// Host files and directories the guest has opened. A handle stays open
+    /// while any descriptor or stream holds it, so dead entries are pruned
+    /// when the count is checked.
+    open_host_files: Vec<std::sync::Weak<std::fs::File>>,
+    /// Limit on `open_host_files`.
+    max_open_host_files: usize,
 }
+
+/// Default limit on host files and directories one guest can hold open at
+/// once beneath real-directory preopens.
+///
+/// Every open is a host file descriptor, and the process's descriptor limit is
+/// shared with everything else running in it.
+pub const DEFAULT_MAX_OPEN_HOST_FILES: usize = 256;
 
 impl<S: VfsStorage + Clone> std::fmt::Debug for HybridVfsCtx<S> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -510,7 +566,35 @@ impl<S: VfsStorage + Clone> HybridVfsCtx<S> {
         Self {
             storage,
             preopens: Vec::new(),
+            open_host_files: Vec::new(),
+            max_open_host_files: DEFAULT_MAX_OPEN_HOST_FILES,
         }
+    }
+
+    /// Set how many host files and directories the guest may hold open at
+    /// once (default [`DEFAULT_MAX_OPEN_HOST_FILES`]). Opens past the limit
+    /// fail until the guest closes some.
+    #[must_use]
+    pub fn with_max_open_host_files(mut self, max: usize) -> Self {
+        self.max_open_host_files = max;
+        self
+    }
+
+    /// Fail if the guest already holds the maximum number of host handles.
+    pub(crate) fn check_open_host_files(&mut self) -> crate::VfsResult<()> {
+        self.open_host_files.retain(|f| f.strong_count() > 0);
+        if self.open_host_files.len() >= self.max_open_host_files {
+            return Err(crate::VfsError::TooManyOpenFiles(format!(
+                "limit of {} open host files reached",
+                self.max_open_host_files
+            )));
+        }
+        Ok(())
+    }
+
+    /// Count a newly opened host handle against the limit.
+    pub(crate) fn track_open_host_file(&mut self, file: &Arc<std::fs::File>) {
+        self.open_host_files.push(Arc::downgrade(file));
     }
 
     /// Add a VFS-managed preopen directory.
@@ -575,6 +659,9 @@ impl<S: VfsStorage + Clone> HybridVfsCtx<S> {
     ///
     /// For example, mounting host `/home/ben/fetch.py` at guest `/mnt/fetch.py`
     /// opens `/home/ben/` at `/mnt/` but only allows access to `fetch.py`.
+    /// The guest can read, write, replace or remove that file (as the
+    /// permissions allow) but can't list, open or create anything else in the
+    /// host directory. A `host_path` that is a symlink is resolved here, once.
     pub fn add_real_file_preopen_path(
         &mut self,
         guest_path: impl Into<String>,
@@ -582,7 +669,9 @@ impl<S: VfsStorage + Clone> HybridVfsCtx<S> {
         dir_perms: DirPerms,
         file_perms: FilePerms,
     ) -> std::io::Result<()> {
-        let host_path = host_path.as_ref();
+        // Resolve symlinks now: the mapped name is later opened without
+        // following one.
+        let host_path = &std::fs::canonicalize(host_path.as_ref())?;
         let guest_path = guest_path.into();
 
         let host_parent = host_path.parent().ok_or_else(|| {
@@ -626,6 +715,7 @@ impl<S: VfsStorage + Clone> HybridVfsCtx<S> {
             dir: restricted,
             dir_perms,
             file_perms,
+            max_file_size: None,
         };
         self.add_real_preopen(guest_parent, dir);
         Ok(())
@@ -661,36 +751,35 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_symlink_relative_to_translated_destination() {
+    fn single_file_mount_exposes_only_the_file() {
         let temp = tempfile::tempdir().unwrap();
-        std::fs::create_dir(temp.path().join("nested")).unwrap();
-        std::fs::create_dir(temp.path().join("nested/target_dir")).unwrap();
-        std::fs::write(temp.path().join("nested/target_file"), b"hello").unwrap();
+        std::fs::write(temp.path().join("mapped"), b"mapped").unwrap();
+        std::fs::write(temp.path().join("sibling"), b"sibling").unwrap();
         let handle =
             capfs::open_ambient_dir(temp.path(), ambient_authority::ambient_authority()).unwrap();
-        let dir = RestrictedDir::with_file_map(
-            handle,
-            HashMap::from([
-                ("file_link".into(), "nested/file_link".into()),
-                ("dir_link".into(), "nested/dir_link".into()),
-            ]),
+        let dir =
+            RestrictedDir::with_file_map(handle, HashMap::from([("f".into(), "mapped".into())]));
+        let denied = |r: std::io::Result<()>| {
+            assert_eq!(r.unwrap_err().kind(), std::io::ErrorKind::PermissionDenied);
+        };
+
+        denied(dir.open_dir("f").map(drop));
+        denied(dir.create_dir("f"));
+        denied(dir.rename("f", &dir, "f"));
+        denied(
+            dir.open_with("sibling", &capfs::OpenOptions::new())
+                .map(drop),
         );
-        assert_eq!(
-            dir.symlink("target_file", "denied").unwrap_err().kind(),
-            std::io::ErrorKind::PermissionDenied
-        );
-        dir.symlink("target_file", "file_link").unwrap();
-        dir.symlink("target_dir", "dir_link").unwrap();
-        assert_eq!(
-            dir.read_link("file_link").unwrap(),
-            Path::new("target_file")
-        );
-        assert!(dir.metadata("file_link").unwrap().is_file());
-        assert!(dir.metadata("dir_link").unwrap().is_dir());
-        assert_eq!(
-            std::fs::read(temp.path().join("nested/file_link")).unwrap(),
-            b"hello"
-        );
+
+        // A symlink planted at the mapped name is not followed.
+        std::fs::remove_file(temp.path().join("mapped")).unwrap();
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink("sibling", temp.path().join("mapped")).unwrap();
+            let mut opts = capfs::OpenOptions::new();
+            opts.read(true);
+            assert!(dir.open_with("f", &opts).is_err());
+        }
     }
 
     #[test]

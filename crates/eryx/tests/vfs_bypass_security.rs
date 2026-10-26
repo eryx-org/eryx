@@ -283,35 +283,50 @@ except FileNotFoundError:
 // =============================================================================
 
 /// Test that .. cannot escape the /data directory
+///
+/// The storage holds a file outside the mount, so a path that climbed out of
+/// `/data` would find something to read.
 #[tokio::test]
 async fn test_path_traversal_dot_dot() {
-    let (safe, output) = run_adversarial_test(
-        r#"
+    use eryx::vfs::VfsStorage;
+
+    let storage = ArcStorage::new(Arc::new(InMemoryStorage::new()));
+    storage.write("/outside.txt", b"outside").await.unwrap();
+    let mut session = SessionExecutor::new_with_vfs(create_executor().await, &[], storage)
+        .await
+        .expect("Failed to create session");
+    let output = session
+        .execute(
+            r#"
 import os
+os.makedirs('/data/subdir', exist_ok=True)
 
-# Attack: Try to escape /data using ..
-paths_to_try = [
-    '/data/../etc/passwd',
-    '/data/../../etc/passwd',
-    '/data/../../../etc/passwd',
-    '/data/subdir/../../etc/passwd',
-    '/data/./../../etc/passwd',
-]
-
-for path in paths_to_try:
+for path in [
+    '/data/../outside.txt',
+    '/data/../../outside.txt',
+    '/data/subdir/../../outside.txt',
+    '/data/./../outside.txt',
+]:
     try:
-        with open(path, 'r') as f:
-            content = f.read(100)
-        print(f"SECURITY ISSUE: Read {path}: {content[:50]}")
-    except (FileNotFoundError, PermissionError, OSError) as e:
+        with open(path) as f:
+            print(f"SECURITY ISSUE: Read {path}: {f.read()}")
+    except OSError as e:
         print(f"EXPECTED: Cannot read {path}: {type(e).__name__}")
-    except Exception as e:
-        print(f"EXPECTED: Blocked {path}: {type(e).__name__}: {e}")
+
+try:
+    print(f"SECURITY ISSUE: Listed {os.listdir('/data/..')}")
+except OSError as e:
+    print(f"EXPECTED: Cannot list /data/..: {type(e).__name__}")
 "#,
-        "path_traversal_dot_dot",
-    )
-    .await;
-    assert!(safe, "Path traversal with .. should be blocked: {}", output);
+        )
+        .run()
+        .await
+        .expect("execution");
+    let stdout = output.stdout_text();
+    assert!(
+        !stdout.contains("SECURITY ISSUE") && stdout.matches("EXPECTED").count() == 5,
+        "Path traversal with .. should be blocked: {stdout}"
+    );
 }
 
 /// Test that absolute paths outside /data are blocked

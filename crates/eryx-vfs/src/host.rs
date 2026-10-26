@@ -22,6 +22,18 @@ fn new_timestamp(ts: types::NewTimestamp) -> crate::VfsResult<Option<std::time::
     }
 }
 
+/// The file permissions an `open-at` call asks for.
+fn requested_file_perms(flags: types::DescriptorFlags) -> FilePerms {
+    let mut perms = FilePerms::empty();
+    if flags.contains(types::DescriptorFlags::READ) {
+        perms |= FilePerms::READ;
+    }
+    if flags.contains(types::DescriptorFlags::WRITE) {
+        perms |= FilePerms::WRITE;
+    }
+    perms
+}
+
 // ============================================================================
 // preopens::Host Implementation
 // ============================================================================
@@ -239,7 +251,7 @@ impl<S: VfsStorage + Clone + 'static> types::HostDescriptor for VfsState<'_, S> 
         if !descriptor.dir_perms.contains(DirPerms::MUTATE) {
             return Err(crate::VfsError::PermissionDenied("mutate".to_string()).into());
         }
-        let full_path = descriptor.resolve_path(&path);
+        let full_path = descriptor.resolve_path(&path)?;
         self.ctx.storage.mkdir(&full_path).await?;
         Ok(())
     }
@@ -260,7 +272,7 @@ impl<S: VfsStorage + Clone + 'static> types::HostDescriptor for VfsState<'_, S> 
         if !descriptor.is_dir {
             return Err(crate::VfsError::NotDirectory(descriptor.path.clone()).into());
         }
-        let full_path = descriptor.resolve_path(&path);
+        let full_path = descriptor.resolve_path(&path)?;
         let meta = self.ctx.storage.stat(&full_path).await?;
         Ok(metadata_to_stat(&meta))
     }
@@ -282,7 +294,7 @@ impl<S: VfsStorage + Clone + 'static> types::HostDescriptor for VfsState<'_, S> 
         if !descriptor.dir_perms.contains(DirPerms::MUTATE) {
             return Err(crate::VfsError::PermissionDenied("mutate".to_string()).into());
         }
-        let full_path = descriptor.resolve_path(&path);
+        let full_path = descriptor.resolve_path(&path)?;
         self.ctx.storage.set_times(&full_path, atime, mtime).await?;
         Ok(())
     }
@@ -312,22 +324,16 @@ impl<S: VfsStorage + Clone + 'static> types::HostDescriptor for VfsState<'_, S> 
             return Err(crate::VfsError::NotDirectory(descriptor.path.clone()).into());
         }
 
-        let full_path = descriptor.resolve_path(&path);
+        let full_path = descriptor.resolve_path(&path)?;
 
         // Check if we're opening a directory
         let is_directory = oflags.contains(types::OpenFlags::DIRECTORY);
 
-        // Determine permissions based on flags
-        let file_perms = {
-            let mut perms = FilePerms::empty();
-            if flags.contains(types::DescriptorFlags::READ) {
-                perms |= FilePerms::READ;
-            }
-            if flags.contains(types::DescriptorFlags::WRITE) {
-                perms |= FilePerms::WRITE;
-            }
-            perms
-        };
+        // The requested access must be within what the preopen grants.
+        let file_perms = requested_file_perms(flags);
+        if !descriptor.file_perms.contains(file_perms) {
+            return Err(crate::VfsError::AccessDenied(full_path).into());
+        }
 
         // Check if the path exists
         let exists = self.ctx.storage.exists(&full_path).await?;
@@ -341,8 +347,7 @@ impl<S: VfsStorage + Clone + 'static> types::HostDescriptor for VfsState<'_, S> 
             if !meta.is_dir {
                 return Err(crate::VfsError::NotDirectory(full_path).into());
             }
-            let new_descriptor =
-                VfsDescriptor::dir(full_path, descriptor.dir_perms, descriptor.file_perms);
+            let new_descriptor = descriptor.child_dir(full_path);
             let resource = self.table.push(new_descriptor)?;
             Ok(resource)
         } else {
@@ -374,6 +379,9 @@ impl<S: VfsStorage + Clone + 'static> types::HostDescriptor for VfsState<'_, S> 
                 if truncate {
                     if !descriptor.dir_perms.contains(DirPerms::MUTATE) {
                         return Err(crate::VfsError::PermissionDenied("mutate".to_string()).into());
+                    }
+                    if !descriptor.file_perms.contains(FilePerms::WRITE) {
+                        return Err(crate::VfsError::AccessDenied(full_path).into());
                     }
                     self.ctx.storage.write(&full_path, &[]).await?;
                 }
@@ -411,7 +419,7 @@ impl<S: VfsStorage + Clone + 'static> types::HostDescriptor for VfsState<'_, S> 
         if !descriptor.dir_perms.contains(DirPerms::MUTATE) {
             return Err(crate::VfsError::PermissionDenied("mutate".to_string()).into());
         }
-        let full_path = descriptor.resolve_path(&path);
+        let full_path = descriptor.resolve_path(&path)?;
         self.ctx.storage.rmdir(&full_path).await?;
         Ok(())
     }
@@ -435,8 +443,8 @@ impl<S: VfsStorage + Clone + 'static> types::HostDescriptor for VfsState<'_, S> 
             return Err(crate::VfsError::PermissionDenied("mutate".to_string()).into());
         }
 
-        let old_full_path = old_descriptor.resolve_path(&old_path);
-        let new_full_path = new_descriptor.resolve_path(&new_path);
+        let old_full_path = old_descriptor.resolve_path(&old_path)?;
+        let new_full_path = new_descriptor.resolve_path(&new_path)?;
         self.ctx
             .storage
             .rename(&old_full_path, &new_full_path)
@@ -466,7 +474,7 @@ impl<S: VfsStorage + Clone + 'static> types::HostDescriptor for VfsState<'_, S> 
         if !descriptor.dir_perms.contains(DirPerms::MUTATE) {
             return Err(crate::VfsError::PermissionDenied("mutate".to_string()).into());
         }
-        let full_path = descriptor.resolve_path(&path);
+        let full_path = descriptor.resolve_path(&path)?;
         self.ctx.storage.delete(&full_path).await?;
         Ok(())
     }
@@ -560,7 +568,7 @@ impl<S: VfsStorage + Clone + 'static> types::HostDescriptor for VfsState<'_, S> 
         path: String,
     ) -> VfsFsResult<types::MetadataHashValue> {
         let descriptor = self.table.get(&fd)?;
-        let full_path = descriptor.resolve_path(&path);
+        let full_path = descriptor.resolve_path(&path)?;
         let meta = self.ctx.storage.stat(&full_path).await?;
         let hash = vfs_metadata_hash(&full_path, &meta);
         Ok(types::MetadataHashValue {
@@ -586,5 +594,62 @@ impl<S: VfsStorage + Clone + 'static> types::HostDirectoryEntryStream for VfsSta
     fn drop(&mut self, stream: Resource<VfsReaddirIterator>) -> wasmtime::Result<()> {
         self.table.delete(stream)?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+    use crate::wasi_impl::VfsCtx;
+    use crate::{ArcStorage, InMemoryStorage, VfsError};
+    use std::sync::Arc;
+    use types::HostDescriptor;
+    use wasmtime::component::ResourceTable;
+
+    #[tokio::test]
+    async fn open_at_enforces_preopen_perms_and_root() {
+        let storage = Arc::new(InMemoryStorage::new());
+        storage.mkdir("/data").await.unwrap();
+        storage.write("/data/f", b"x").await.unwrap();
+        storage.write("/outside", b"secret").await.unwrap();
+        let mut ctx = VfsCtx::new_empty(ArcStorage::new(storage));
+        ctx.preopen("/data", DirPerms::all(), FilePerms::READ);
+        let mut table = ResourceTable::new();
+        let mut state = VfsState {
+            ctx: &mut ctx,
+            table: &mut table,
+        };
+        let dirs = preopens::Host::get_directories(&mut state).unwrap();
+        let data = dirs[0].0.rep();
+        let mut open = async |path: &str, flags| {
+            state
+                .open_at(
+                    Resource::new_borrow(data),
+                    types::PathFlags::empty(),
+                    path.to_string(),
+                    types::OpenFlags::empty(),
+                    flags,
+                )
+                .await
+                .map(drop)
+                .map_err(|e| e.0)
+        };
+
+        let write = types::DescriptorFlags::WRITE;
+        let read = types::DescriptorFlags::READ;
+        assert!(matches!(
+            open("f", write).await,
+            Err(VfsError::AccessDenied(_))
+        ));
+        assert!(matches!(
+            open("../outside", read).await,
+            Err(VfsError::PermissionDenied(_))
+        ));
+        assert!(matches!(
+            open("/outside", read).await,
+            Err(VfsError::PermissionDenied(_))
+        ));
+        open("f", read).await.unwrap();
     }
 }
