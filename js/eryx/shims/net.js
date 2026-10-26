@@ -28,7 +28,7 @@ const isNode =
 const transport = isNode ? await import("./net-node.js") : await import("./net-fetch.js");
 
 /** The Rust crate's `NetConfig::default().blocked_hosts`, plus `0.0.0.0` and `[::]`. */
-export const DEFAULT_BLOCKED_HOSTS = [
+export const DEFAULT_BLOCKED_HOSTS = Object.freeze([
   "localhost",
   "*.localhost",
   "127.*",
@@ -39,13 +39,13 @@ export const DEFAULT_BLOCKED_HOSTS = [
   "[::1]",
   "0.0.0.0",
   "[::]",
-];
+]);
 
 /**
  * The Rust crate's `DEFAULT_BLOCKED_NETWORKS`. IPv4-mapped, IPv4-compatible,
  * NAT64 and Teredo addresses are also checked by the IPv4 address they embed.
  */
-export const DEFAULT_BLOCKED_NETWORKS = [
+export const DEFAULT_BLOCKED_NETWORKS = Object.freeze([
   "0.0.0.0/8",
   "10.0.0.0/8",
   "100.64.0.0/10",
@@ -66,7 +66,7 @@ export const DEFAULT_BLOCKED_NETWORKS = [
   "fe80::/10",
   "fec0::/10",
   "ff00::/8",
-];
+]);
 
 /** Same defaults as the Rust crate's `NetConfig::default()`. */
 const DEFAULT_MAX_CONNECTIONS = 10;
@@ -116,18 +116,20 @@ function checkCount(name, value) {
  */
 function toPolicy(netConfig) {
   if (!netConfig) return null;
+  // Copies, so changing the caller's arrays later can't change the policy.
+  const list = (xs, fallback) => Object.freeze([...(xs ?? fallback)]);
   const next = {
     allowAllHosts: netConfig.allowAllHosts ?? false,
-    allowedHosts: netConfig.allowedHosts ?? [],
-    blockedHosts: netConfig.blockedHosts ?? DEFAULT_BLOCKED_HOSTS,
-    blockedNetworks: checkCidrs(netConfig.blockedNetworks ?? DEFAULT_BLOCKED_NETWORKS),
-    allowedNetworks: checkCidrs(netConfig.allowedNetworks ?? []),
-    internalHosts: netConfig.internalHosts ?? [],
+    allowedHosts: list(netConfig.allowedHosts, []),
+    blockedHosts: list(netConfig.blockedHosts, DEFAULT_BLOCKED_HOSTS),
+    blockedNetworks: checkCidrs(list(netConfig.blockedNetworks, DEFAULT_BLOCKED_NETWORKS)),
+    allowedNetworks: checkCidrs(list(netConfig.allowedNetworks, [])),
+    internalHosts: list(netConfig.internalHosts, []),
     maxConnections: checkCount("maxConnections", netConfig.maxConnections ?? DEFAULT_MAX_CONNECTIONS),
     connectTimeoutMs: netConfig.connectTimeoutMs ?? DEFAULT_CONNECT_TIMEOUT_MS,
     ioTimeoutMs: netConfig.ioTimeoutMs ?? DEFAULT_IO_TIMEOUT_MS,
   };
-  return { ...next, isAllowed: transport.networkFilter(next) };
+  return Object.freeze({ ...next, isAllowed: transport.networkFilter(next) });
 }
 
 /**

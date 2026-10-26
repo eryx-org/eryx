@@ -13,14 +13,14 @@ export interface NetConfig {
   /** Allow every host not matched by `blockedHosts` (default false). */
   allowAllHosts?: boolean;
   /** Host patterns to allow; `*` is a wildcard (e.g. `*.example.com`). */
-  allowedHosts?: string[];
+  allowedHosts?: readonly string[];
   /**
    * Host patterns always refused. Defaults to {@link DEFAULT_BLOCKED_HOSTS}.
    * Hosts are matched as written and in WHATWG URL form, so `2130706433` and
    * `0x7f.1` match `127.*`. `allowedHosts` and `internalHosts` match the URL
    * form only.
    */
-  blockedHosts?: string[];
+  blockedHosts?: readonly string[];
   /**
    * CIDRs (e.g. `"10.0.0.0/8"`) that an IP address host, or (in Node.js) the
    * addresses a host name resolves to, must not fall in, so a public name
@@ -28,14 +28,14 @@ export interface NetConfig {
    * {@link DEFAULT_BLOCKED_NETWORKS}. Browsers don't expose resolved
    * addresses, so there only IP address hosts are checked.
    */
-  blockedNetworks?: string[];
+  blockedNetworks?: readonly string[];
   /** CIDRs exempt from `blockedNetworks`. */
-  allowedNetworks?: string[];
+  allowedNetworks?: readonly string[];
   /**
    * Host patterns allowed to resolve into `blockedNetworks`, for trusted names
    * routed internally on purpose. Only list names whose DNS you control.
    */
-  internalHosts?: string[];
+  internalHosts?: readonly string[];
   /** Most connections open at once (default 10; `0` for no limit). */
   maxConnections?: number;
   /**
@@ -47,11 +47,11 @@ export interface NetConfig {
   ioTimeoutMs?: number;
 }
 
-/** Localhost and private network ranges, blocked unless `blockedHosts` is overridden. */
-export const DEFAULT_BLOCKED_HOSTS: string[];
+/** Localhost and private network ranges, blocked unless `blockedHosts` is overridden (frozen). */
+export const DEFAULT_BLOCKED_HOSTS: readonly string[];
 
-/** Every non-public address range, blocked unless `blockedNetworks` is overridden. */
-export const DEFAULT_BLOCKED_NETWORKS: string[];
+/** Every non-public address range, blocked unless `blockedNetworks` is overridden (frozen). */
+export const DEFAULT_BLOCKED_NETWORKS: readonly string[];
 
 /**
  * Set the default policy, or disable networking again with `null` (the

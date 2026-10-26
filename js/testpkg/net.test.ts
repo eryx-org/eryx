@@ -10,7 +10,7 @@ import { Sandbox, setNetConfig } from "@bsull/eryx";
 import { createTransport as createFetchTransport, networkFilter as fetchNetworkFilter } from "../eryx/shims/net-fetch.js";
 // @ts-expect-error -- untyped internal module
 import { createTransport as createNodeTransport, networkFilter as nodeNetworkFilter } from "../eryx/shims/net-node.js";
-import { DEFAULT_BLOCKED_NETWORKS } from "@bsull/eryx";
+import { DEFAULT_BLOCKED_HOSTS, DEFAULT_BLOCKED_NETWORKS } from "@bsull/eryx";
 import { createNet } from "@bsull/eryx/shims/net";
 
 const { tcp: fetchTcp } = createFetchTransport();
@@ -83,6 +83,24 @@ except OSError as e:
     expect(() => sandbox.setNetConfig({ maxConnections: NaN })).toThrow(TypeError);
     expect(() => setNetConfig({ maxConnections: -1 })).toThrow(TypeError);
     expect(() => new Sandbox({ netConfig: { blockedNetworks: ["10.0.0.0/33"] } })).toThrow(TypeError);
+  });
+
+  it("copies the config it is given", async () => {
+    const allowedHosts = ["*.example.com"];
+    const blockedHosts = ["*.example.com"];
+    const own = new Sandbox({ netConfig: { allowedHosts } });
+    sandbox.setNetConfig({ allowAllHosts: true, blockedHosts });
+    try {
+      allowedHosts.push("example.org");
+      blockedHosts.length = 0;
+      expect((await own.execute(probe("example.org"))).stdout).toContain("not in allowed list");
+      expect((await tryConnect("api.example.com")).stdout).toContain("is blocked");
+      // The defaults can't be changed either.
+      expect(() => (DEFAULT_BLOCKED_HOSTS as string[]).push("example.org")).toThrow(TypeError);
+      expect(() => (DEFAULT_BLOCKED_NETWORKS as string[]).pop()).toThrow(TypeError);
+    } finally {
+      own.close();
+    }
   });
 
   it("gives each sandbox its own policy", async () => {
