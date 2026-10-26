@@ -329,9 +329,9 @@ impl<S: VfsStorage + Clone + 'static> types::HostDescriptor for VfsState<'_, S> 
         // Check if we're opening a directory
         let is_directory = oflags.contains(types::OpenFlags::DIRECTORY);
 
-        // The requested access must be within what the preopen grants.
+        // The requested file access must be within what the preopen grants.
         let file_perms = requested_file_perms(flags);
-        if !descriptor.file_perms.contains(file_perms) {
+        if !is_directory && !descriptor.file_perms.contains(file_perms) {
             return Err(crate::VfsError::AccessDenied(full_path).into());
         }
 

@@ -690,9 +690,10 @@ impl<S: VfsStorage + Clone + 'static> types::HostDescriptor for HybridVfsState<'
                 let full_path = vfs_desc.resolve_path(&path)?;
                 let is_directory = oflags.contains(types::OpenFlags::DIRECTORY);
 
-                // The requested access must be within what the preopen grants.
+                // The requested file access must be within what the preopen
+                // grants.
                 let file_perms = requested_file_perms(flags);
-                if !vfs_desc.file_perms.contains(file_perms) {
+                if !is_directory && !vfs_desc.file_perms.contains(file_perms) {
                     return Err(crate::VfsError::AccessDenied(full_path).into());
                 }
 
@@ -1316,6 +1317,18 @@ mod tests {
             Err(crate::VfsError::AccessDenied(_))
         ));
         assert_eq!(state.ctx.storage.read("/data/f").await.unwrap(), b"x");
+
+        // File permissions don't apply to opening subdirectories.
+        state.ctx.storage.mkdir("/data/sub").await.unwrap();
+        open(
+            &mut state,
+            &data,
+            "sub",
+            types::OpenFlags::DIRECTORY,
+            types::DescriptorFlags::READ | types::DescriptorFlags::WRITE,
+        )
+        .await
+        .unwrap();
 
         open(
             &mut state,

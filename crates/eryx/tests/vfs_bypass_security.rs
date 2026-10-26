@@ -309,12 +309,12 @@ for path in [
 ]:
     try:
         with open(path) as f:
-            print(f"SECURITY ISSUE: Read {path}: {f.read()}")
+            print(f"UNEXPECTED: Read {path}: {f.read()}")
     except OSError as e:
         print(f"EXPECTED: Cannot read {path}: {type(e).__name__}")
 
 try:
-    print(f"SECURITY ISSUE: Listed {os.listdir('/data/..')}")
+    print(f"UNEXPECTED: Listed {os.listdir('/data/..')}")
 except OSError as e:
     print(f"EXPECTED: Cannot list /data/..: {type(e).__name__}")
 "#,
@@ -324,7 +324,7 @@ except OSError as e:
         .expect("execution");
     let stdout = output.stdout_text();
     assert!(
-        !stdout.contains("SECURITY ISSUE") && stdout.matches("EXPECTED").count() == 5,
+        !stdout.contains("UNEXPECTED") && stdout.matches("EXPECTED").count() == 5,
         "Path traversal with .. should be blocked: {stdout}"
     );
 }

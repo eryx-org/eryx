@@ -622,8 +622,7 @@ fn is_safe_filename(name: &str) -> bool {
 }
 
 /// Mount point of the VFS holding supporting files. Must match the VFS
-/// preopen path because `VfsDescriptor::resolve_path` prepends it when the
-/// guest accesses files.
+/// preopen path, since guest paths resolve beneath the preopen they use.
 const VFS_MOUNT_PATH: &str = "/eryx";
 
 /// Create a VFS storage pre-populated with the given supporting files.
