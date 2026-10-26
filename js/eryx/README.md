@@ -166,9 +166,9 @@ for i in range(5):
 `);
 ```
 
-### Timeouts
+### Timeouts and memory
 
-Nothing interrupts a call by default, so `while True: pass` never returns. Pass `timeoutMs` to run the sandbox in its own Worker (`worker_threads` in Node.js) that is terminated when a call runs too long:
+Timeouts are opt-in in JavaScript. Unlike the Rust crate and the Python bindings, which stop an execution after 30 seconds by default, nothing interrupts a call here unless you ask, so `while True: pass` never returns. Pass `timeoutMs` to run the sandbox in its own Worker (`worker_threads` in Node.js) that is terminated when a call runs too long:
 
 ```js
 import { Sandbox, TimeoutError } from "@bsull/eryx";
@@ -182,6 +182,8 @@ try {
 ```
 
 The call rejects with a `TimeoutError` (or `executeWithJournal()` reports it as `outcome.error`) and the sandbox starts over with fresh Python state. Callbacks, output and networking still run on the creating thread. The Worker costs about 70 MB on top of the sandbox's own memory, and the sandbox's `_fileTree` isn't available. `close()` terminates the Worker at once; otherwise it lives until the sandbox is garbage collected.
+
+There is no memory limit, with or without `timeoutMs` (the Rust crate and the Python bindings cap memory at 128 MB by default). A sandbox's memory grows as its code allocates, up to the WebAssembly 4 GiB maximum or what the JavaScript engine allows, and its in-memory filesystem has no size cap either. Run untrusted code that might allocate without bound in a process you can afford to lose.
 
 ### Node.js and the WASI shims
 

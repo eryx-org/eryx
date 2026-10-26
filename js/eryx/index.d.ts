@@ -136,7 +136,13 @@ export interface SandboxOptions {
    *
    * Each such sandbox also holds a Worker with its own JavaScript heap and its
    * own copy of the Python stdlib tree, about 70 MB on top of the instance's
-   * memory. Without `timeoutMs`, nothing interrupts a call that never finishes.
+   * memory.
+   *
+   * Opt-in: there is no default timeout, unlike the Rust crate and the Python
+   * bindings (30 seconds). Without `timeoutMs`, nothing interrupts a call that
+   * never finishes, such as `while True: pass`. There is no memory limit
+   * either way: an instance's memory grows as its code allocates, up to the
+   * WebAssembly 4 GiB maximum or what the JavaScript engine allows.
    */
   timeoutMs?: number;
 }
