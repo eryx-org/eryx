@@ -2451,3 +2451,49 @@ async fn disconnect_cancels_cpu_bound_execution() {
     assert!(result.success, "{}", result.error);
     assert!(started.elapsed() < Duration::from_secs(25));
 }
+
+/// A secret needs a host it can be sent to: with no `allowed_hosts` of its own
+/// under `allow_all_hosts`, the request is rejected before execution.
+#[tokio::test]
+async fn secret_without_allowed_hosts_is_rejected() {
+    use eryx_server::proto::eryx::v1::{NetworkConfig, SecretConfig};
+
+    let secret = |allowed_hosts: Vec<String>| SecretConfig {
+        name: "TOKEN".to_string(),
+        value: "value".to_string(),
+        allowed_hosts,
+    };
+    let request = |secret, network_config| ExecuteRequest {
+        code: "print('ran')".to_string(),
+        secrets: vec![secret],
+        network_config: Some(network_config),
+        ..Default::default()
+    };
+    let allow_all = NetworkConfig {
+        allow_all_hosts: true,
+        ..Default::default()
+    };
+    let mut client = EryxClient::new(start_server().await);
+
+    let err = execute_half_closed(&mut client, request(secret(vec![]), allow_all.clone()))
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), tonic::Code::InvalidArgument, "{err}");
+    assert!(err.message().contains("TOKEN"), "{}", err.message());
+
+    // Its own host list, or the network allow list, is enough.
+    let ok = [
+        request(secret(vec!["api.example.com".to_string()]), allow_all),
+        request(
+            secret(vec![]),
+            NetworkConfig {
+                allowed_hosts: vec!["api.example.com".to_string()],
+                ..Default::default()
+            },
+        ),
+    ];
+    for req in ok {
+        let result = execute_half_closed(&mut client, req).await.unwrap();
+        assert!(result.success, "{}", result.error);
+    }
+}

@@ -105,7 +105,7 @@ If the client disconnects, the server cancels the in-flight execution, including
 | `callbacks` | [Callback](./callbacks.md) declarations (name, description, parameters) that become `async` functions in Python. |
 | `resource_limits` | Execution timeout, callback timeout, memory cap, max callback count, and [fuel limit](./resource-limits.md). Zero means "use the default". |
 | `network_config` | [Networking](./networking.md) policy. **Absent disables networking entirely**; present enables it with the configured host allow/block lists and timeouts. |
-| `secrets` | [Secrets](./secrets.md) injected as environment variables with placeholder values; real values are substituted only in HTTP headers to allowed hosts. |
+| `secrets` | [Secrets](./secrets.md) injected as environment variables with placeholder values; real values are substituted only in HTTP headers to allowed hosts. With networking on, a secret that has no `allowed_hosts` of its own and no `network_config.allowed_hosts` to fall back on (e.g. under `allow_all_hosts`) is rejected with `INVALID_ARGUMENT`. |
 | `disable_stdout_scrub` / `disable_stderr_scrub` | Turn off placeholder scrubbing on stdout/stderr (scrubbing is **on** by default when secrets are present). |
 | `files` | [Supporting files](./vfs.md) written into the sandbox VFS — `FILE_KIND_MODULE` files go on `sys.path`, `FILE_KIND_DATA` files are readable but not importable. |
 | `persist_state` / `state_snapshot` | [Session state](./sessions.md): when `persist_state` is true the server snapshots state into `ExecuteResult.state_snapshot`; supplying `state_snapshot` restores it before execution. |
