@@ -43,10 +43,13 @@ jobs:
         env:
           BUILD_ERYX_RUNTIME: "1"
 
+      # `eryx-precompile setup` verifies the download against runtime.wasm.sha256.
       - name: Upload runtime.wasm to release
         run: |
+          (cd crates/eryx-runtime && sha256sum runtime.wasm > runtime.wasm.sha256)
           gh release upload "$TAG_NAME" \
             crates/eryx-runtime/runtime.wasm \
+            crates/eryx-runtime/runtime.wasm.sha256 \
             --clobber
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
