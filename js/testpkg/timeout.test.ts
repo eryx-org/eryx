@@ -95,6 +95,22 @@ while True: pass
     }
   });
 
+  it("keeps the result variable name after a restart", async () => {
+    const sandbox = new Sandbox({ timeoutMs: 1000 });
+    await sandbox.setResultVariable("out");
+    await sandbox.execute("while True: pass").catch(() => {});
+    expect((await sandbox.execute("out = 1\nresult = 2")).result).toBe(1);
+  });
+
+  it("rejects calls after close()", async () => {
+    for (const sandbox of [new Sandbox(), new Sandbox({ timeoutMs: 1000 })]) {
+      await sandbox.execute("pass");
+      sandbox.close();
+      sandbox.close();
+      await expect(sandbox.execute("pass")).rejects.toThrow("sandbox is closed");
+    }
+  });
+
   it("rejects an invalid value", () => {
     expect(() => new Sandbox({ timeoutMs: 0 })).toThrow(TypeError);
   });

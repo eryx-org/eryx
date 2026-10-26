@@ -142,8 +142,9 @@ export class TimeoutError extends Error {
  * (the pre-initialized interpreter image plus whatever the code allocates), so
  * each live Sandbox costs tens of megabytes (about 20 MB idle on Node.js 24).
  * One created with `timeoutMs` also runs in its own Worker, which adds about
- * 70 MB. Drop references to sandboxes you no longer need so they can be
- * garbage collected.
+ * 70 MB. Call close() (or use `using`) when you're done with a sandbox: it
+ * stops the Worker at once and closes the sandbox's connections. A sandbox
+ * that is only dropped is freed whenever the garbage collector gets to it.
  *
  * @example
  * const sandbox = new Sandbox();
@@ -218,6 +219,17 @@ export class Sandbox {
    * @param name - The variable name to capture
    */
   setResultVariable(name: string): Promise<void>;
+
+  /**
+   * Stop using this sandbox. Its open connections are closed, and every later
+   * call rejects. For a `timeoutMs` sandbox the Worker is terminated at once,
+   * so a call in flight rejects too; without `timeoutMs` a call in flight runs
+   * to the end. Calling it again does nothing. `using` and `await using` call
+   * it at the end of their scope.
+   */
+  close(): void;
+  [Symbol.dispose](): void;
+  [Symbol.asyncDispose](): void;
 
   /**
    * Capture a snapshot of the current Python session state.

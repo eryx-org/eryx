@@ -314,7 +314,7 @@ export function createCallbackHost(options = {}) {
   let replay = null;
 
   // Streaming decoders, tied to the output handler they were created under so
-  // an incomplete multi-byte sequence written under one handler doesn't leak
+  // an incomplete multi-byte sequence written under one handler isn't carried
   // into the next.
   let decodersFor = null;
   let stdoutDecoder = new TextDecoder("utf-8", _decoderOpts);

@@ -12,7 +12,7 @@ npm install @bsull/eryx
 
 ## Sandbox Class
 
-The `Sandbox` class provides an isolated Python environment. Each instance is its own WebAssembly instance, with its own interpreter, filesystem, callback handlers and journal, and keeps its state across `execute()` calls. The compiled code is shared, but each instance has its own memory (about 20 MB idle on Node.js 24), so drop sandboxes you no longer need.
+The `Sandbox` class provides an isolated Python environment. Each instance is its own WebAssembly instance, with its own interpreter, filesystem, network connections, callback handlers and journal, and keeps its state across `execute()` calls. The compiled code is shared, but each instance has its own memory (about 20 MB idle on Node.js 24). Call `sandbox.close()` (or declare it with `using`) when you're done: it closes the sandbox's connections, terminates its Worker if it has one, and makes later calls reject. A sandbox that is only dropped is freed whenever the garbage collector gets to it.
 
 ```javascript
 import { Sandbox } from "@bsull/eryx";

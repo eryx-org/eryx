@@ -77,8 +77,9 @@ async function instantiateInWorker(host, net) {
   const started = new Promise((resolve, reject) => (ready = { resolve, reject }));
   // Once the Worker is gone, nothing will close what its code left open.
   const fail = (error) => {
+    if (failure) return;
+    failure = error;
     net.closeConnections();
-    failure ??= error;
     ready.reject(failure);
     for (const { reject } of pending.values()) reject(failure);
     pending.clear();
@@ -102,14 +103,22 @@ async function instantiateInWorker(host, net) {
         break;
       }
       case "notify":
-        targets[message.target](...message.args);
+        if (!failure) targets[message.target](...message.args);
         break;
       case "request":
+        // A dead Worker's queued requests mustn't reach handlers or the network.
+        if (failure) break;
         try {
           const value = await targets[message.target](...message.args);
+          if (failure) {
+            // Opened after the Worker was stopped: nothing would ever close it.
+            if (message.target === "tcp.connect") net.tcp.close(value);
+            else if (message.target === "tls.upgrade") net.tls.close(value);
+            break;
+          }
           worker.postMessage({ type: "reply", id: message.id, value });
         } catch (e) {
-          worker.postMessage({ type: "reply", id: message.id, ...encodeError(e) });
+          if (!failure) worker.postMessage({ type: "reply", id: message.id, ...encodeError(e) });
         }
         break;
     }
@@ -153,6 +162,16 @@ async function instantiateInWorker(host, net) {
     },
   };
 }
+
+/**
+ * Terminates the Worker of a `timeoutMs` sandbox that was garbage collected
+ * without close(). Holds only the sandbox's Worker slot, never the sandbox.
+ * @type {FinalizationRegistry<{worker: any, closed: Error | null}>}
+ */
+const _workerReaper = new FinalizationRegistry((slot) => {
+  slot.closed ??= new Error("sandbox was garbage collected");
+  slot.worker?.terminate(slot.closed);
+});
 
 // Re-export callback configuration
 export {
@@ -271,8 +290,9 @@ function _toResult(output) {
  * (the pre-initialized interpreter image plus whatever the code allocates), so
  * each live Sandbox costs tens of megabytes (about 20 MB idle on Node.js 24).
  * One created with `timeoutMs` also runs in its own Worker, which adds about
- * 70 MB. Drop references to sandboxes you no longer need so they can be
- * garbage collected.
+ * 70 MB. Call close() (or use `using`) when you're done with a sandbox: it
+ * stops the Worker at once and closes the sandbox's connections. A sandbox
+ * that is only dropped is freed whenever the garbage collector gets to it.
  *
  * @example
  * const sandbox = new Sandbox();
@@ -294,6 +314,10 @@ export class Sandbox {
   #timeoutMs;
   /** @type {Promise<any>} */
   #instance;
+  /** The Worker of a `timeoutMs` sandbox, and why the sandbox was closed. */
+  #slot = { worker: null, closed: /** @type {Error | null} */ (null) };
+  /** The last name passed to setResultVariable(), re-applied after a restart. */
+  #resultVariable;
   // The tail of the queue of calls into this instance. Each call starts only
   // after the previous one settles, so executions never overlap: the journal
   // and the streaming output decoders belong to the instance, and jco can't
@@ -320,16 +344,40 @@ export class Sandbox {
      */
     this._fileTree = timeoutMs === undefined ? forkTree(_fileTree) : undefined;
     this.#host = createCallbackHost(options);
+    if (timeoutMs !== undefined) _workerReaper.register(this, this.#slot, this.#slot);
     this.#start();
   }
 
   #start() {
-    this.#instance =
-      this.#timeoutMs === undefined
-        ? instantiateSandbox(this._fileTree, this.#host.imports, this.#net)
-        : instantiateInWorker(this.#host, this.#net);
+    if (this.#timeoutMs === undefined) {
+      this.#instance = instantiateSandbox(this._fileTree, this.#host.imports, this.#net);
+    } else {
+      const slot = this.#slot;
+      const name = this.#resultVariable;
+      this.#instance = instantiateInWorker(this.#host, this.#net).then(async (worker) => {
+        slot.worker = worker;
+        if (slot.closed) worker.terminate(slot.closed);
+        // A restarted Worker starts with the default result variable.
+        else if (name !== undefined) await worker.setResultVariable(name);
+        return worker;
+      });
+    }
     // Surfaced by the first call instead.
     this.#instance.catch(() => {});
+  }
+
+  /**
+   * Stop using this sandbox. Its open connections are closed, and every later
+   * call rejects. For a `timeoutMs` sandbox the Worker is terminated at once,
+   * so a call in flight rejects too; without `timeoutMs` a call in flight
+   * runs to the end. Calling it again does nothing.
+   */
+  close() {
+    if (this.#slot.closed) return;
+    this.#slot.closed = new Error("sandbox is closed");
+    _workerReaper.unregister(this.#slot);
+    this.#slot.worker?.terminate(this.#slot.closed);
+    this.#net.closeConnections();
   }
 
   /**
@@ -339,7 +387,10 @@ export class Sandbox {
    * @returns {Promise<T>}
    */
   #serialized(fn) {
-    const run = this.#queue.then(() => this.#call(fn));
+    const run = this.#queue.then(() => {
+      if (this.#slot.closed) throw this.#slot.closed;
+      return this.#call(fn);
+    });
     this.#queue = run.catch(() => {});
     return run;
   }
@@ -454,6 +505,7 @@ export class Sandbox {
    */
   async setResultVariable(name) {
     await this.#serialized((instance) => instance.setResultVariable(name));
+    this.#resultVariable = name;
   }
 
   /**
@@ -490,6 +542,20 @@ export class Sandbox {
    */
   async clearState() {
     await this.#serialized((instance) => instance.clearState());
+  }
+}
+
+// `using sandbox = new Sandbox()` closes it at the end of the scope, where the
+// runtime has explicit resource management.
+for (const symbol of [Symbol.dispose, Symbol.asyncDispose]) {
+  if (symbol) {
+    Object.defineProperty(Sandbox.prototype, symbol, {
+      value() {
+        this.close();
+      },
+      configurable: true,
+      writable: true,
+    });
   }
 }
 

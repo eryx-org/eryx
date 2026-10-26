@@ -178,7 +178,7 @@ try {
 }
 ```
 
-The call rejects with a `TimeoutError` (or `executeWithJournal()` reports it as `outcome.error`) and the sandbox starts over with fresh Python state. Callbacks, output and networking still run on the creating thread. The Worker costs about 70 MB on top of the sandbox's own memory, and the sandbox's `_fileTree` isn't available.
+The call rejects with a `TimeoutError` (or `executeWithJournal()` reports it as `outcome.error`) and the sandbox starts over with fresh Python state. Callbacks, output and networking still run on the creating thread. The Worker costs about 70 MB on top of the sandbox's own memory, and the sandbox's `_fileTree` isn't available. `close()` terminates the Worker at once; otherwise it lives until the sandbox is garbage collected.
 
 ### Node.js and the WASI shims
 
@@ -210,11 +210,12 @@ export default defineConfig({
 | `execute(code)` | `Promise<{ stdout, stderr }>` | Run Python code |
 | `executeWithJournal(code, { journal? })` | `Promise<ReplayOutcome>` | Run with callback journaling/replay |
 | `setResultVariable(name)` | `Promise<void>` | Change the captured result variable |
+| `close()` | `void` | Close connections, stop a `timeoutMs` Worker, reject later calls (also `using`) |
 | `snapshotState()` | `Promise<Uint8Array>` | Serialize interpreter state |
 | `restoreState(data)` | `Promise<void>` | Restore from snapshot |
 | `clearState()` | `Promise<void>` | Reset all user state |
 
-Each `Sandbox` is its own WebAssembly instance, with its own interpreter, filesystem, network connections, callbacks and journal; code in one can't see another's state. The compiled code is shared, but each instance has its own memory (about 20 MB idle on Node.js 24), so drop sandboxes you no longer need. The module-level `execute()`, `executeWithJournal()` and `setResultVariable()` use one default sandbox, created on first use.
+Each `Sandbox` is its own WebAssembly instance, with its own interpreter, filesystem, network connections, callbacks and journal; code in one can't see another's state. The compiled code is shared, but each instance has its own memory (about 20 MB idle on Node.js 24). Call `sandbox.close()` (or declare it with `using`) when you're done; a sandbox that is only dropped is freed whenever the garbage collector gets to it. The module-level `execute()`, `executeWithJournal()` and `setResultVariable()` use one default sandbox, created on first use.
 
 Calls on one sandbox run one at a time, in call order: a call made while another is running waits for it to finish. So don't await `execute()` on the same sandbox from inside its callback handler, since it would wait on the execution that called the handler. Different sandboxes run independently.
 
