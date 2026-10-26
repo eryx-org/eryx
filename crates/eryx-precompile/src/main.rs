@@ -469,9 +469,13 @@ async fn run_setup(args: SetupArgs) -> Result<()> {
     println!("Cache:    {}", cache.display());
     println!();
 
-    // Check if already cached. A file without a matching checksum (from an
-    // interrupted run or an older version of this tool) is rebuilt.
-    if cached_runtime_is_valid(&cwasm_path) {
+    // Check if already cached. A file another user could have written, or one
+    // without a matching checksum (from an interrupted run or an older version
+    // of this tool), is rebuilt.
+    if std::fs::symlink_metadata(&cwasm_path)
+        .is_ok_and(|meta| meta.is_file() && eryx::cache::is_private(&meta))
+        && cached_runtime_is_valid(&cwasm_path)
+    {
         println!("Already cached: {}", cwasm_path.display());
         println!();
         println!(
@@ -521,7 +525,9 @@ async fn run_setup(args: SetupArgs) -> Result<()> {
     // Step 3: Write to cache
     println!();
     println!("Step 3: Writing to cache...");
-    std::fs::create_dir_all(&cache)
+    // The library extracts its embedded runtime here too, so create it with
+    // the same owner-only permissions it requires.
+    eryx::cache::ensure_private_dir(&cache)
         .with_context(|| format!("Failed to create cache directory: {}", cache.display()))?;
     write_cached_runtime(&cwasm_path, &precompiled)?;
     println!("  Saved to: {}", cwasm_path.display());

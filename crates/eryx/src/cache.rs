@@ -328,7 +328,12 @@ fn cache_root_candidates() -> Vec<PathBuf> {
 /// New directories are created with mode `0700` on Unix. Existing ones must be
 /// owned by the current user and not group- or world-writable. On other
 /// platforms the directory is only created.
-pub(crate) fn ensure_private_dir(dir: &Path) -> io::Result<PathBuf> {
+///
+/// # Errors
+///
+/// Returns an error if the directory can't be created or inspected, or if it
+/// fails the ownership and mode checks.
+pub fn ensure_private_dir(dir: &Path) -> io::Result<PathBuf> {
     if let Some(parent) = dir.parent() {
         fs::create_dir_all(parent)?;
     }
@@ -356,7 +361,8 @@ pub(crate) fn ensure_private_dir(dir: &Path) -> io::Result<PathBuf> {
 
 /// Whether a file or directory is owned by the current user and not group- or
 /// world-writable. Always true on platforms without Unix permissions.
-pub(crate) fn is_private(meta: &fs::Metadata) -> bool {
+#[must_use]
+pub fn is_private(meta: &fs::Metadata) -> bool {
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;

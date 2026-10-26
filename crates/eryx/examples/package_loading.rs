@@ -80,7 +80,7 @@ print("\nNumpy loaded via with_package()!")
     println!("  Executed in {:?}", start.elapsed());
     println!("\nOutput:\n{}", result.stdout_text());
 
-    // Test warm cache (automatic at $TMPDIR/eryx-cache)
+    // Test warm cache (automatic in the per-user eryx cache directory)
     println!("--- Second sandbox (cache hit) ---\n");
 
     let start = Instant::now();
@@ -103,7 +103,7 @@ print("\nNumpy loaded via with_package()!")
     println!("\n=== Summary ===");
     println!("  with_package() auto-detects format (tar.gz, whl, directory)");
     println!("  Native extensions are auto-registered for late-linking");
-    println!("  Caching is automatic at $TMPDIR/eryx-cache");
+    println!("  Caching is automatic in ~/.cache/eryx/components (or $TMPDIR/eryx-<uid>)");
 
     Ok(())
 }

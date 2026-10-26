@@ -196,6 +196,11 @@ impl SandboxFactory {
     /// This loads a previously saved factory, which is much faster than
     /// creating a new one (~10ms vs ~3-5s).
     ///
+    /// The file contains pre-compiled native code that is loaded without
+    /// validation, so only load factory files you created yourself (with
+    /// ``save()``) and that nobody else can modify. On Unix, files writable by
+    /// other users, or owned by a user other than you or root, are refused.
+    ///
     /// Args:
     ///     path: Path to the saved factory file.
     ///     callbacks: The callbacks the factory was created with, if any. The
@@ -230,7 +235,7 @@ impl SandboxFactory {
         let embedded = eryx::embedded::EmbeddedResources::get().map_err(eryx_error_to_py)?;
         let stdlib_path = embedded.stdlib().to_path_buf();
 
-        let file_bytes = std::fs::read(&path).map_err(|e| {
+        let file_bytes = read_trusted_factory_file(&path).map_err(|e| {
             InitializationError::new_err(format!(
                 "failed to load factory from {}: {e}",
                 path.display()
@@ -772,6 +777,31 @@ fn build_factory_file(
     buf.write_all(&data_files_tar_zst)?;
 
     Ok(buf)
+}
+
+/// Read a factory file, refusing one that another user could have written.
+///
+/// The file holds native code, so on Unix it must be owned by the current
+/// user or root and not be group- or world-writable.
+fn read_trusted_factory_file(path: &std::path::Path) -> std::io::Result<Vec<u8>> {
+    use std::io::Read;
+
+    let mut file = std::fs::File::open(path)?;
+    let meta = file.metadata()?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let root_owned = meta.uid() == 0 && meta.mode() & 0o022 == 0;
+        if !(eryx::cache::is_private(&meta) || root_owned) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "file is owned by another user or writable by other users",
+            ));
+        }
+    }
+    let mut bytes = Vec::with_capacity(usize::try_from(meta.len()).unwrap_or(0));
+    file.read_to_end(&mut bytes)?;
+    Ok(bytes)
 }
 
 type ParsedFactory = (Vec<u8>, Option<tempfile::TempDir>, Option<PathBuf>);

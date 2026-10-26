@@ -14,7 +14,7 @@ The easiest way to run the server is the published Docker image, [`sd2k/eryx-ser
 docker run -p 50051:50051 sd2k/eryx-server
 ```
 
-The image sets `ENTRYPOINT ["eryx-server"]` and listens on `[::]:50051` (metrics on `9090`); it's built from `crates/eryx-server/Dockerfile`. It runs as the unprivileged user `eryx` (UID/GID `10001`), so it works under Kubernetes' `runAsNonRoot`. The embedded runtime is extracted to the system temp dir at startup, so if you use a read-only root filesystem, mount a writable `/tmp`.
+The image sets `ENTRYPOINT ["eryx-server"]` and listens on `[::]:50051` (metrics on `9090`); it's built from `crates/eryx-server/Dockerfile`. It runs as the unprivileged user `eryx` (UID/GID `10001`), so it works under Kubernetes' `runAsNonRoot`. The embedded runtime and stdlib are extracted at startup to `$XDG_CACHE_HOME/eryx` or `~/.cache/eryx`, falling back to `$TMPDIR/eryx-<uid>` when those can't be created. With a read-only root filesystem, mount a writable `/tmp` (or set `XDG_CACHE_HOME` to a writable directory).
 
 To build from source instead, the server is the `eryx-server` binary in the `eryx-server` crate. Build it with the `embedded` and `preinit` features so the runtime and stdlib are baked in:
 

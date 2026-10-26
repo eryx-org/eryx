@@ -1000,6 +1000,11 @@ class SandboxFactory:
         This loads a previously saved factory, which is much faster than
         creating a new one (~10ms vs ~3-5s).
 
+        The file contains pre-compiled native code that is loaded without
+        validation, so only load factory files you created yourself (with
+        ``save()``) and that nobody else can modify. On Unix, files writable by
+        other users, or owned by a user other than you or root, are refused.
+
         Args:
             path: Path to the saved factory file.
             site_packages: Optional path to site-packages directory.
