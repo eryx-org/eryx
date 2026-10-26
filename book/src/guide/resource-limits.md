@@ -13,6 +13,7 @@ By default, sandboxes have sensible limits applied:
 | Memory | 128 MB |
 | Callback invocations | 1000 |
 | Virtual filesystem | 64 MB |
+| Fuel | Unlimited (opt-in, see [Fuel Limits](#fuel-limits-instruction-counting)) |
 
 ## Configuring Resource Limits
 
@@ -273,6 +274,13 @@ Fuel limits provide fine-grained control over execution by limiting the number o
 - Deterministic execution bounds (time limits vary with system load, fuel doesn't)
 - Billing based on actual computation performed
 - Preventing CPU-intensive attacks
+
+Fuel is opt-in everywhere: `ResourceLimits::default()`, the Python bindings and
+the gRPC server (unless started with `--max-fuel`) leave it unset. How much fuel
+a script needs depends entirely on the workload, so no default value suits
+everyone. The default bound on CPU use is wall-clock time, the
+[execution timeout](#execution-timeout); add a fuel limit when you need
+deterministic or metered bounds.
 
 Fuel counts the instructions your code executes; instantiating the sandbox's
 WebAssembly instance is not charged, so the number does not depend on whether

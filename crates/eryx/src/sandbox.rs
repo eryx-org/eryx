@@ -2745,6 +2745,11 @@ pub struct ResourceLimits {
     ///
     /// When `None`, fuel is set to `u64::MAX` for tracking-only mode (fuel
     /// consumed is still reported in [`ExecuteStats`]).
+    ///
+    /// Fuel is opt-in: it is `None` in [`ResourceLimits::default()`], because
+    /// how much fuel a script needs depends entirely on the workload, so no
+    /// default value suits everyone. The default CPU bound is wall-clock
+    /// time, [`execution_timeout`](Self::execution_timeout).
     pub max_fuel: Option<u64>,
     /// Maximum total bytes the in-memory virtual filesystem may hold.
     ///
