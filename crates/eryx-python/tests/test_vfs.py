@@ -29,9 +29,11 @@ class TestVfsStorage:
         assert "VfsStorage" in repr(storage)
 
     def test_storage_max_bytes(self):
-        """VfsStorage(max_bytes=...) caps total file content."""
+        """VfsStorage(max_bytes=...) caps total size, including a per-entry charge."""
         session = eryx.Session(vfs=eryx.VfsStorage(max_bytes=1024))
-        session.execute('open("/data/small.bin", "wb").write(b"x" * 1000)')
+        session.execute('open("/data/small.bin", "wb").write(b"x" * 800)')
+        size = session.execute('import os; print(os.path.getsize("/data/small.bin"))')
+        assert size.stdout == b"800\n"
         with pytest.raises(eryx.PythonExceptionError, match="OSError"):
             session.execute(WRITE_BIG)
         # The default cap leaves room for the same writes.

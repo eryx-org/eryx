@@ -48,8 +48,9 @@ impl VfsStorage {
     /// in a sandbox configured with this storage.
     ///
     /// Args:
-    ///     max_bytes: Cap on the total size of all file contents combined.
-    ///         Writes that would exceed it fail inside the sandbox with
+    ///     max_bytes: Cap on the total size of all file contents combined,
+    ///         plus a charge of the path length and 64 bytes for each file and
+    ///         directory. Writes that would exceed it fail inside the sandbox with
     ///         `OSError`. `None` (the default) means 64 MiB. The storage owns this
     ///         cap, so `ResourceLimits.max_vfs_bytes` does not apply to it.
     ///
