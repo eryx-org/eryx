@@ -310,9 +310,8 @@ impl SandboxFactory {
     ///         owned by the caller.
     ///     vfs_mount_path: Mount path used when `vfs` or `volumes` enable a
     ///         wrapper-visible VFS; alone it does not expose `Session.vfs`.
-    ///     resource_limits: Optional session limits. Factory defaults are no
-    ///         execution, memory, or fuel limit, a 10-second callback timeout,
-    ///         and 1000 callback invocations.
+    ///     resource_limits: Optional session limits. Defaults to
+    ///         `ResourceLimits()` (30-second execution timeout, 128 MB memory).
     ///     network: Optional network configuration.
     ///     callbacks: Optional callbacks that sandboxed code can invoke.
     ///     mcp: Optional MCPManager whose tools are exposed as callbacks.
@@ -355,15 +354,7 @@ impl SandboxFactory {
         if let Some(name) = result_variable {
             executor = executor.with_result_variable(name);
         }
-        let limits = resource_limits.unwrap_or(ResourceLimits {
-            execution_timeout_ms: None,
-            callback_timeout_ms: Some(10_000),
-            max_memory_bytes: None,
-            max_callback_invocations: Some(1000),
-            max_fuel: None,
-            max_vfs_bytes: None,
-        });
-        let limits: eryx::ResourceLimits = (&limits).into();
+        let limits: eryx::ResourceLimits = resource_limits.unwrap_or_default().into();
         let callbacks = self.default_callbacks(py, callbacks);
         Session::from_executor(
             py,

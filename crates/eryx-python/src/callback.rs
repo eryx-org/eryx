@@ -259,7 +259,10 @@ fn json_to_py_kwargs<'py>(
     Ok(kwargs)
 }
 
-/// Format a Python exception with traceback for error messages.
+/// Turn a Python exception raised by a callback into a `CallbackError`.
+///
+/// The sandboxed code only sees `TypeName: message`. The traceback names host
+/// files and source lines, so it goes to the `eryx` logger (at INFO) instead.
 ///
 /// A raised `SuspendCallback` maps to `CallbackError::Suspend` with the
 /// exception's string as the reason.
@@ -268,22 +271,19 @@ fn format_python_error(py: Python<'_>, err: PyErr) -> CallbackError {
         return CallbackError::Suspend(err.value(py).to_string());
     }
 
-    // Try to get the full traceback
-    let traceback = err
-        .traceback(py)
-        .map(|tb| {
-            tb.format()
-                .unwrap_or_else(|_| "<traceback unavailable>".to_string())
-        })
-        .unwrap_or_default();
+    // Logging is best effort: a broken logging setup must not change the
+    // error the guest sees.
+    let _ = py.import("logging").and_then(|logging| {
+        let kwargs = PyDict::new(py);
+        kwargs.set_item("exc_info", err.value(py))?;
+        logging.call_method1("getLogger", ("eryx",))?.call_method(
+            "info",
+            ("host callback raised",),
+            Some(&kwargs),
+        )
+    });
 
-    let error_msg = if traceback.is_empty() {
-        format!("{err}")
-    } else {
-        format!("{err}\n{traceback}")
-    };
-
-    CallbackError::ExecutionFailed(error_msg)
+    CallbackError::ExecutionFailed(err.to_string())
 }
 
 /// A registry for collecting callbacks using the decorator pattern.

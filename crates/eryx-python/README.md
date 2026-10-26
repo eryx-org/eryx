@@ -259,12 +259,14 @@ unlimited = eryx.ResourceLimits.unlimited()
 ### `NetConfig`
 
 Configure network access for sandboxed code. By default, **all network access is disabled**.
-Enable networking by creating a `NetConfig` and passing it to the sandbox.
+Enable networking by creating a `NetConfig` and passing it to the sandbox. A `NetConfig`
+allows only the hosts in `allowed_hosts`; pass `allow_all_hosts=True` to allow any
+host that isn't blocked.
 
 ```python
 import eryx
 
-# Default config - allows external hosts, blocks localhost/private networks
+# Allowlist specific hosts; localhost/private networks stay blocked
 config = eryx.NetConfig(
     max_connections=10,                    # Max concurrent connections
     connect_timeout_ms=30000,              # Connection timeout (30s)
@@ -317,7 +319,12 @@ config = eryx.NetConfig(
 )
 ```
 
-When `allowed_hosts` is non-empty, only matching hosts are allowed. Blocked hosts are checked first.
+Only matching hosts are allowed (`allow_host()` and assigning `allowed_hosts` both turn
+`allow_all_hosts` off). Blocked hosts are checked first. To allow any public host:
+
+```python
+config = eryx.NetConfig(allow_all_hosts=True)
+```
 
 #### Builder Methods
 
@@ -467,9 +474,12 @@ result = sandbox.execute("""
 try:
     await may_fail(should_fail=True)
 except Exception as e:
-    print(f"Caught: {e}")
+    print(f"Caught: {e}")  # Caught: execution failed: ValueError: Operation failed!
 """)
 ```
+
+Sandboxed code sees only the exception type and message. The host-side
+traceback is logged on the `eryx` logger at INFO level.
 
 ### `SandboxFactory`
 
@@ -573,8 +583,8 @@ sandbox = factory.create_sandbox()
 - `factory.to_bytes()` - Get factory as bytes
 - `SandboxFactory.load(path)` - Load factory from a file
 
-Factory sessions default to no execution-time, memory, or fuel limit, with a
-10-second callback timeout and a maximum of 1000 callback invocations. A
+Factory sessions default to `ResourceLimits()` (30-second execution timeout,
+128 MB memory, 10-second callback timeout, 1000 callback invocations). A
 caller-provided `VfsStorage` retains its own quota (`VfsStorage(max_bytes=...)`,
 64 MiB by default); `max_vfs_bytes` applies to
 storage created internally for the session. Extracted package storage is kept
@@ -588,6 +598,9 @@ persistent Python state across multiple `execute()` calls. This is useful for:
 - Interactive REPL-style execution
 - Building up state incrementally
 - Faster subsequent executions (no Python initialization overhead per call)
+
+Like `Sandbox`, a `Session` takes `resource_limits=` and defaults to
+`ResourceLimits()` (30-second execution timeout, 128 MB memory).
 
 ```python
 import eryx

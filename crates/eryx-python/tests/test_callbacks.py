@@ -270,6 +270,29 @@ print(f"dict: {d}")
         # Note: The specific error message may not always propagate through
         # the WASM boundary, so we just verify that an error is raised.
 
+    def test_callback_exception_message_only(self, caplog):
+        """The guest sees `Type: message`; the traceback is logged on the host."""
+
+        def failing_callback():
+            raise ValueError("callback failed")
+
+        sandbox = eryx.Sandbox(
+            callbacks=[{"name": "fail", "fn": failing_callback, "description": ""}]
+        )
+        with caplog.at_level("INFO", logger="eryx"):
+            result = sandbox.execute("""
+try:
+    await fail()
+except Exception as e:
+    print(repr(str(e)))
+""")
+        assert b"ValueError: callback failed" in result.stdout
+        assert b"Traceback" not in result.stdout
+        assert b"failing_callback" not in result.stdout
+        assert any(
+            r.exc_info and "failing_callback" in caplog.text for r in caplog.records
+        )
+
     def test_callback_with_registry(self):
         """Test using a CallbackRegistry with Sandbox."""
         registry = eryx.CallbackRegistry()

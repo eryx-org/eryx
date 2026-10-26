@@ -13,7 +13,9 @@ use std::time::Duration;
 /// set timeouts, and add custom certificates.
 ///
 /// By default, network access is **disabled**. To enable networking,
-/// create a `NetConfig` and pass it to the Sandbox.
+/// create a `NetConfig` and pass it to the Sandbox. A default `NetConfig()`
+/// allows no hosts: list them in `allowed_hosts` (or with `allow_host()`),
+/// or set `allow_all_hosts=True` to allow every non-blocked host.
 ///
 /// Example:
 ///     # Allow connections to external APIs only
@@ -45,7 +47,8 @@ pub struct NetConfig {
     pub allow_all_hosts: bool,
 
     /// Allowed host patterns (only checked when allow_all_hosts is false).
-    #[pyo3(get, set)]
+    /// Assigning it turns allow_all_hosts off (see `set_allowed_hosts`).
+    #[pyo3(get)]
     pub allowed_hosts: Vec<String>,
 
     /// Blocked host patterns.
@@ -75,8 +78,8 @@ impl NetConfig {
     /// - max_connections: 10
     /// - connect_timeout_ms: 30000 (30 seconds)
     /// - io_timeout_ms: 60000 (60 seconds)
-    /// - allow_all_hosts: true (all external hosts allowed)
-    /// - allowed_hosts: [] (only used when allow_all_hosts is false)
+    /// - allow_all_hosts: false (only allowed_hosts may be reached)
+    /// - allowed_hosts: [] (no hosts allowed)
     /// - blocked_hosts: localhost and private networks
     /// - blocked_networks: every non-public range (loopback, private,
     ///   link-local/cloud metadata, CGNAT, multicast, ...)
@@ -87,7 +90,6 @@ impl NetConfig {
     ///     io_timeout_ms: Timeout for read/write operations.
     ///     allow_all_hosts: When true, all non-blocked hosts are allowed (allowed_hosts is ignored).
     ///     allowed_hosts: List of allowed host patterns (supports wildcards like "*.example.com").
-    ///         Setting this implicitly sets allow_all_hosts to false.
     ///     blocked_hosts: List of blocked host patterns.
     ///     blocked_networks: CIDRs (e.g. "10.0.0.0/8") that a host's resolved
     ///         addresses must not fall in. Checked after DNS, so a public name
@@ -103,31 +105,27 @@ impl NetConfig {
     ///     # Only allow specific APIs
     ///     net = NetConfig(allowed_hosts=["api.example.com", "*.openai.com"])
     ///
-    ///     # Custom timeouts
-    ///     net = NetConfig(connect_timeout_ms=5000, io_timeout_ms=10000)
+    ///     # Any public host, with the default blocks
+    ///     net = NetConfig(allow_all_hosts=True)
     #[new]
-    #[pyo3(signature = (*, max_connections=10, connect_timeout_ms=30000, io_timeout_ms=60000, allow_all_hosts=None, allowed_hosts=None, blocked_hosts=None, blocked_networks=None, allowed_networks=None, internal_hosts=None))]
+    #[pyo3(signature = (*, max_connections=10, connect_timeout_ms=30000, io_timeout_ms=60000, allow_all_hosts=false, allowed_hosts=None, blocked_hosts=None, blocked_networks=None, allowed_networks=None, internal_hosts=None))]
     #[allow(clippy::too_many_arguments)]
     fn new(
         max_connections: u32,
         connect_timeout_ms: u64,
         io_timeout_ms: u64,
-        allow_all_hosts: Option<bool>,
+        allow_all_hosts: bool,
         allowed_hosts: Option<Vec<String>>,
         blocked_hosts: Option<Vec<String>>,
         blocked_networks: Option<Vec<String>>,
         allowed_networks: Option<Vec<String>>,
         internal_hosts: Option<Vec<String>>,
     ) -> PyResult<Self> {
-        // If allowed_hosts is provided and allow_all_hosts wasn't explicitly set,
-        // default to false (allowlist mode).
-        let allow_all =
-            allow_all_hosts.unwrap_or_else(|| allowed_hosts.as_ref().is_none_or(|h| h.is_empty()));
         Ok(Self {
             max_connections,
             connect_timeout_ms,
             io_timeout_ms,
-            allow_all_hosts: allow_all,
+            allow_all_hosts,
             allowed_hosts: allowed_hosts.unwrap_or_default(),
             blocked_hosts: blocked_hosts.unwrap_or_else(default_blocked_hosts),
             blocked_networks: match blocked_networks {
@@ -161,6 +159,12 @@ impl NetConfig {
             internal_hosts: vec![],
             custom_root_certs: vec![],
         }
+    }
+
+    #[setter]
+    fn set_allowed_hosts(&mut self, patterns: Vec<String>) {
+        self.allowed_hosts = patterns;
+        self.allow_all_hosts = false;
     }
 
     /// CIDRs that a host's resolved addresses must not fall in.
@@ -223,7 +227,8 @@ impl NetConfig {
 
     /// Add a host pattern to the allowed list.
     ///
-    /// Patterns support wildcards: `*.example.com`, `api.*.com`
+    /// Patterns support wildcards: `*.example.com`, `api.*.com`.
+    /// Turns allow_all_hosts off, so only the allowed hosts can be reached.
     ///
     /// Returns self for method chaining.
     ///
@@ -231,6 +236,7 @@ impl NetConfig {
     ///     net = NetConfig().allow_host("api.example.com").allow_host("*.openai.com")
     fn allow_host(&mut self, pattern: String) -> Self {
         self.allowed_hosts.push(pattern);
+        self.allow_all_hosts = false;
         self.clone()
     }
 

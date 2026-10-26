@@ -114,6 +114,20 @@ impl ResourceLimits {
     }
 }
 
+/// The same defaults as `ResourceLimits()` in Python.
+impl Default for ResourceLimits {
+    fn default() -> Self {
+        Self::new(
+            Some(30_000),
+            Some(10_000),
+            Some(134_217_728),
+            Some(1000),
+            None,
+            None,
+        )
+    }
+}
+
 impl From<&ResourceLimits> for eryx::ResourceLimits {
     fn from(limits: &ResourceLimits) -> Self {
         // Every field is set explicitly, so the starting point does not matter;

@@ -16,6 +16,18 @@ class TestSession:
         session = eryx.Session()
         assert session is not None
 
+    def test_resource_limits_memory_limit_is_enforced(self):
+        """max_memory_bytes from resource_limits applies to the session."""
+        limits = eryx.ResourceLimits(max_memory_bytes=64 * 1024 * 1024)
+        session = eryx.Session(resource_limits=limits)
+        with pytest.raises(eryx.EryxError):
+            session.execute("x = bytearray(80 * 1024 * 1024)")
+
+    def test_execution_timeout_overrides_resource_limits(self):
+        limits = eryx.ResourceLimits(execution_timeout_ms=1000)
+        session = eryx.Session(resource_limits=limits, execution_timeout_ms=2000)
+        assert session.execution_timeout_ms == 2000
+
     def test_simple_execution(self):
         """Test simple code execution."""
         session = eryx.Session()
@@ -90,7 +102,7 @@ class Counter:
     def test_execution_timeout(self):
         """Test that execution timeout can be set and retrieved."""
         session = eryx.Session()
-        assert session.execution_timeout_ms is None
+        assert session.execution_timeout_ms == 30000
 
         session.execution_timeout_ms = 5000
         assert session.execution_timeout_ms == 5000

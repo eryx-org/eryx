@@ -310,6 +310,7 @@ class ReplayOutcome:
         ...
 
 
+@final
 class NetConfig:
     """Network configuration for sandbox execution.
 
@@ -317,7 +318,9 @@ class NetConfig:
     set timeouts, and add custom certificates.
 
     By default, network access is **disabled**. To enable networking,
-    create a `NetConfig` and pass it to the Sandbox.
+    create a `NetConfig` and pass it to the Sandbox. A default `NetConfig()`
+    allows no hosts: list them in `allowed_hosts` (or with `allow_host()`),
+    or set `allow_all_hosts=True` to allow every non-blocked host.
 
     Example:
         # Allow connections to external APIs only
@@ -340,8 +343,14 @@ class NetConfig:
     io_timeout_ms: int
     """I/O timeout in milliseconds."""
 
+    allow_all_hosts: bool
+    """When true, all non-blocked hosts are allowed (allowed_hosts is ignored)."""
+
     allowed_hosts: list[str]
-    """Allowed host patterns (empty = allow all external hosts)."""
+    """Allowed host patterns (only checked when allow_all_hosts is false).
+
+    Assigning this turns allow_all_hosts off.
+    """
 
     blocked_hosts: list[str]
     """Blocked host patterns."""
@@ -363,25 +372,27 @@ class NetConfig:
     Only list names whose DNS you control.
     """
 
-    def __init__(
-        self,
+    def __new__(
+        cls,
         *,
         max_connections: int = 10,
         connect_timeout_ms: int = 30000,
         io_timeout_ms: int = 60000,
+        allow_all_hosts: bool = False,
         allowed_hosts: Optional[Sequence[str]] = None,
         blocked_hosts: Optional[Sequence[str]] = None,
         blocked_networks: Optional[Sequence[str]] = None,
         allowed_networks: Optional[Sequence[str]] = None,
         internal_hosts: Optional[Sequence[str]] = None,
-    ) -> None:
+    ) -> NetConfig:
         """Create new network configuration.
 
         By default:
         - max_connections: 10
         - connect_timeout_ms: 30000 (30 seconds)
         - io_timeout_ms: 60000 (60 seconds)
-        - allowed_hosts: [] (allow all external hosts)
+        - allow_all_hosts: False (only allowed_hosts may be reached)
+        - allowed_hosts: [] (no hosts allowed)
         - blocked_hosts: localhost and private networks
         - blocked_networks: every non-public range (loopback, private,
           link-local/cloud metadata, CGNAT, multicast, ...)
@@ -390,6 +401,8 @@ class NetConfig:
             max_connections: Maximum number of concurrent connections.
             connect_timeout_ms: Timeout for establishing connections.
             io_timeout_ms: Timeout for read/write operations.
+            allow_all_hosts: When true, all non-blocked hosts are allowed
+                (allowed_hosts is ignored).
             allowed_hosts: List of allowed host patterns (supports wildcards like "*.example.com").
             blocked_hosts: List of blocked host patterns.
             blocked_networks: CIDRs (e.g. "10.0.0.0/8") that a host's resolved
@@ -404,8 +417,8 @@ class NetConfig:
             # Only allow specific APIs
             net = NetConfig(allowed_hosts=["api.example.com", "*.openai.com"])
 
-            # Custom timeouts
-            net = NetConfig(connect_timeout_ms=5000, io_timeout_ms=10000)
+            # Any public host, with the default blocks
+            net = NetConfig(allow_all_hosts=True)
         """
         ...
 
@@ -424,7 +437,8 @@ class NetConfig:
     def allow_host(self, pattern: str) -> NetConfig:
         """Add a host pattern to the allowed list.
 
-        Patterns support wildcards: `*.example.com`, `api.*.com`
+        Patterns support wildcards: `*.example.com`, `api.*.com`.
+        Turns allow_all_hosts off, so only the allowed hosts can be reached.
 
         Returns self for method chaining.
 
@@ -1054,8 +1068,9 @@ class SandboxFactory:
         Supported options include VFS storage and mounts, resource limits,
         networking, callbacks, MCP tools, volumes, output handlers, and a result
         variable.
-        Defaults are no execution, memory, or fuel limit, a 10-second callback
-        timeout, and 1000 callback invocations.
+        `resource_limits` defaults to `ResourceLimits()` (30-second execution
+        timeout, 128 MB memory, 10-second callback timeout, 1000 callback
+        invocations).
 
         Returns a persistent `Session`. Raises `InitializationError` if it
         cannot be initialized.
@@ -1269,6 +1284,7 @@ class Session:
         *,
         vfs: Optional[VfsStorage] = None,
         vfs_mount_path: Optional[str] = None,
+        resource_limits: Optional[ResourceLimits] = None,
         execution_timeout_ms: Optional[int] = None,
         max_fuel: Optional[int] = None,
         network: Optional[NetConfig] = None,
@@ -1288,8 +1304,10 @@ class Session:
             vfs: Optional VfsStorage for persistent file storage.
                 Files written to `/data/*` will persist across executions.
             vfs_mount_path: Custom mount path for VFS (default: "/data").
-            execution_timeout_ms: Optional timeout in milliseconds for each execution.
-            max_fuel: Optional fuel limit (max WASM instructions) for each execution.
+            resource_limits: Optional limits for each execution. Defaults to
+                `ResourceLimits()` (30-second execution timeout, 128 MB memory).
+            execution_timeout_ms: Overrides `resource_limits.execution_timeout_ms`.
+            max_fuel: Overrides `resource_limits.max_fuel` (max WASM instructions).
             network: Optional network configuration. If provided, enables networking.
             callbacks: Optional callbacks that sandboxed code can invoke.
                 Can be a CallbackRegistry or a list of callback dicts.

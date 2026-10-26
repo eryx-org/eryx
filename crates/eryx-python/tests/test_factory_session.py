@@ -15,7 +15,7 @@ MOCK_MCP_SERVER = str(Path(__file__).parent / "mock_mcp_server.py")
 
 def test_factory_session_persistent_state_and_full_reset(sandbox_factory):
     session = sandbox_factory.create_session()
-    assert session.execution_timeout_ms is None
+    assert session.execution_timeout_ms == 30000
     assert session.fuel_limit is None
     session.execute("value = 41")
     assert session.execute("print(value + 1)").stdout == b"42\n"
@@ -64,9 +64,9 @@ def test_factory_session_timeout_and_fuel_limits(sandbox_factory):
         fuel.execute("while True: pass")
 
 
-def test_ordinary_session_defaults_remain_unchanged():
+def test_ordinary_session_defaults():
     session = eryx.Session()
-    assert session.execution_timeout_ms is None
+    assert session.execution_timeout_ms == 30000
     assert session.vfs is None
 
     # vfs_mount_path relocates caller-supplied storage; alone it must not

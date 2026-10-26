@@ -6,5 +6,3 @@ eryx\._eryx\.SecretDict
 eryx\._eryx\.PathLike
 # PyO3 generates a module __all__.
 eryx\._eryx\.__all__
-# NetConfig's stub is maintained separately.
-eryx\._eryx\.NetConfig(\..*)?

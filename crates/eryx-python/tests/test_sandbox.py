@@ -123,6 +123,7 @@ class TestNetConfig:
         assert config.connect_timeout_ms == 30000
         assert config.io_timeout_ms == 60000
         assert config.allowed_hosts == []
+        assert config.allow_all_hosts is False
         # Blocked hosts should contain localhost and private networks
         assert "localhost" in config.blocked_hosts
         assert "127.*" in config.blocked_hosts
@@ -154,6 +155,28 @@ class TestNetConfig:
         result = config.allow_host("api.example.com").allow_host("*.openai.com")
         assert "api.example.com" in result.allowed_hosts
         assert "*.openai.com" in result.allowed_hosts
+
+    def test_allow_host_turns_off_allow_all(self):
+        """allow_host() and assigning allowed_hosts restrict to the allowlist."""
+        config = eryx.NetConfig(allow_all_hosts=True)
+        assert config.allow_host("api.example.com").allow_all_hosts is False
+
+        config = eryx.NetConfig(allow_all_hosts=True)
+        config.allowed_hosts = ["api.example.com"]
+        assert config.allow_all_hosts is False
+
+    def test_default_config_allows_no_hosts(self):
+        """A default NetConfig refuses public hosts as well as private ones."""
+        sandbox = eryx.Sandbox(network=eryx.NetConfig())
+        result = sandbox.execute("""
+import _eryx_async
+try:
+    await _eryx_async.await_tcp_connect("example.com", 80)
+    print("CONNECTED")
+except OSError as e:
+    print(f"REFUSED: {e}")
+""")
+        assert b"REFUSED" in result.stdout, result.stdout
 
     def test_block_host_chaining(self):
         """Test block_host method chaining."""

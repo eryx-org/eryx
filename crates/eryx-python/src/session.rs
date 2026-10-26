@@ -18,6 +18,7 @@ use crate::callback::extract_callbacks;
 use crate::error::{InitializationError, eryx_error_to_py};
 use crate::execution::{CancelToken, call_token, run_async, run_blocking};
 use crate::net_config::NetConfig;
+use crate::resource_limits::ResourceLimits;
 use crate::result::{ExecuteResult, ReplayOutcome};
 use crate::sandbox::PyOutputHandler;
 use crate::vfs::VfsStorage;
@@ -208,7 +209,10 @@ impl Session {
     ///     vfs: Optional VfsStorage for persistent file storage.
     ///         Files written to `/data/*` will persist across executions.
     ///     vfs_mount_path: Custom mount path for VFS (default: "/data").
-    ///     execution_timeout_ms: Optional timeout in milliseconds for each execution.
+    ///     resource_limits: Optional limits for each execution. Defaults to
+    ///         `ResourceLimits()` (30-second execution timeout, 128 MB memory).
+    ///     execution_timeout_ms: Overrides `resource_limits.execution_timeout_ms`.
+    ///     max_fuel: Overrides `resource_limits.max_fuel`.
     ///     callbacks: Optional callbacks that sandboxed code can invoke.
     ///         Can be a CallbackRegistry or a list of callback dicts.
     ///
@@ -238,12 +242,13 @@ impl Session {
     ///         {"name": "get_time", "fn": get_time, "description": "Returns current time"}
     ///     ])
     #[new]
-    #[pyo3(signature = (*, vfs=None, vfs_mount_path=None, execution_timeout_ms=None, max_fuel=None, network=None, callbacks=None, mcp=None, volumes=None, on_stdout=None, on_stderr=None, result_variable=None))]
+    #[pyo3(signature = (*, vfs=None, vfs_mount_path=None, resource_limits=None, execution_timeout_ms=None, max_fuel=None, network=None, callbacks=None, mcp=None, volumes=None, on_stdout=None, on_stderr=None, result_variable=None))]
     #[allow(clippy::too_many_arguments)]
     fn new(
         py: Python<'_>,
         vfs: Option<VfsStorage>,
         vfs_mount_path: Option<String>,
+        resource_limits: Option<ResourceLimits>,
         execution_timeout_ms: Option<u64>,
         max_fuel: Option<u64>,
         network: Option<NetConfig>,
@@ -264,18 +269,20 @@ impl Session {
         }
         let executor = Arc::new(executor);
 
-        let limits = eryx::ResourceLimits::unlimited()
-            .with_execution_timeout(execution_timeout_ms.map(Duration::from_millis))
-            .with_max_fuel(max_fuel)
-            .with_callback_timeout(Some(Duration::from_secs(10)))
-            .with_max_callback_invocations(Some(1000));
+        let mut limits = resource_limits.unwrap_or_default();
+        if execution_timeout_ms.is_some() {
+            limits.execution_timeout_ms = execution_timeout_ms;
+        }
+        if max_fuel.is_some() {
+            limits.max_fuel = max_fuel;
+        }
         Self::from_executor(
             py,
             executor,
             runtime,
             vfs,
             vfs_mount_path,
-            limits,
+            (&limits).into(),
             network,
             callbacks,
             mcp,
