@@ -62,6 +62,98 @@ impl Extractor for MetadataExtractor<'_> {
 /// receive limit to match (e.g. grpc-go's `MaxCallRecvMsgSize`).
 pub const MAX_MESSAGE_SIZE: usize = 32 * 1024 * 1024;
 
+/// Operator-set ceilings on what a request may ask for.
+///
+/// A request value above its ceiling is clamped down to it, not rejected, so
+/// clients written against a more generous server keep working. A request that
+/// leaves a limit unset gets the documented default (see the proto), which is
+/// also clamped; for fuel, which is unlimited by default, the ceiling itself
+/// becomes the default when one is configured.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ServerLimits {
+    /// Longest wall-clock execution time a request may set.
+    pub max_execution_timeout: Duration,
+    /// Longest single-callback timeout a request may set.
+    pub max_callback_timeout: Duration,
+    /// Largest guest memory a request may set.
+    pub max_memory_bytes: u64,
+    /// Largest fuel budget a request may set, or `None` for no ceiling.
+    pub max_fuel: Option<u64>,
+    /// Most callback invocations a request may allow.
+    pub max_callback_invocations: u32,
+    /// Most concurrent network connections a request may allow.
+    pub max_connections: u32,
+    /// Longest network I/O timeout a request may set.
+    pub max_io_timeout: Duration,
+    /// Most stdout plus stderr bytes kept and streamed per execution. Output
+    /// past this is dropped, a truncation marker is appended, and
+    /// `ExecuteResult.output_truncated` is set.
+    pub max_output_bytes: usize,
+}
+
+impl Default for ServerLimits {
+    fn default() -> Self {
+        Self {
+            max_execution_timeout: Duration::from_secs(300),
+            max_callback_timeout: Duration::from_secs(300),
+            max_memory_bytes: 512 * 1024 * 1024,
+            max_fuel: None,
+            max_callback_invocations: 10_000,
+            max_connections: 100,
+            max_io_timeout: Duration::from_secs(300),
+            max_output_bytes: 16 * 1024 * 1024,
+        }
+    }
+}
+
+impl ServerLimits {
+    /// Resolve a request's limits: zero fields take the defaults, then every
+    /// value is clamped to its ceiling.
+    fn resource_limits(
+        &self,
+        request: Option<&crate::proto::eryx::v1::ResourceLimits>,
+    ) -> ResourceLimits {
+        // `max_vfs_bytes` is deliberately absent from the proto and so never
+        // client-controllable - it bounds *host* memory (VFS contents live
+        // outside the guest's linear memory), so letting a request raise it
+        // would hand the DoS back.
+        let defaults = ResourceLimits::default();
+        let request = request.copied().unwrap_or_default();
+        let ms = |ms: u64| (ms > 0).then(|| Duration::from_millis(ms));
+        let nonzero = |v: u64| (v > 0).then_some(v);
+        defaults
+            .clone()
+            .with_execution_timeout(
+                ms(request.execution_timeout_ms)
+                    .or(defaults.execution_timeout)
+                    .map(|t| t.min(self.max_execution_timeout)),
+            )
+            .with_callback_timeout(
+                ms(request.callback_timeout_ms)
+                    .or(defaults.callback_timeout)
+                    .map(|t| t.min(self.max_callback_timeout)),
+            )
+            .with_max_memory_bytes(
+                nonzero(request.max_memory_bytes)
+                    .or(defaults.max_memory_bytes)
+                    .map(|b| b.min(self.max_memory_bytes)),
+            )
+            .with_max_callback_invocations(
+                (request.max_callback_invocations > 0)
+                    .then_some(request.max_callback_invocations)
+                    .or(defaults.max_callback_invocations)
+                    .map(|n| n.min(self.max_callback_invocations)),
+            )
+            .with_max_fuel(match (nonzero(request.max_fuel), self.max_fuel) {
+                (Some(fuel), Some(ceiling)) => Some(fuel.min(ceiling)),
+                (fuel, ceiling) => fuel.or(ceiling),
+            })
+    }
+}
+
+/// Default for how long a signed callback journal can be replayed (7 days).
+pub const DEFAULT_JOURNAL_TTL: Duration = Duration::from_secs(7 * 24 * 60 * 60);
+
 /// The Eryx gRPC service.
 ///
 /// Holds a shared [`SandboxPool`] for efficient sandbox reuse across requests.
@@ -70,6 +162,8 @@ pub struct EryxService {
     pool: Arc<SandboxPool>,
     journal_signer: crate::replay::JournalSigner,
     max_message_size: usize,
+    limits: ServerLimits,
+    journal_ttl: Duration,
 }
 
 impl EryxService {
@@ -85,7 +179,25 @@ impl EryxService {
             pool,
             journal_signer: signer,
             max_message_size: MAX_MESSAGE_SIZE,
+            limits: ServerLimits::default(),
+            journal_ttl: DEFAULT_JOURNAL_TTL,
         }
+    }
+
+    /// Set the ceilings applied to every request's limits. Defaults to
+    /// [`ServerLimits::default`].
+    #[must_use]
+    pub fn with_limits(mut self, limits: ServerLimits) -> Self {
+        self.limits = limits;
+        self
+    }
+
+    /// Set how long a signed callback journal stays valid for replay.
+    /// Defaults to [`DEFAULT_JOURNAL_TTL`].
+    #[must_use]
+    pub fn with_journal_ttl(mut self, ttl: Duration) -> Self {
+        self.journal_ttl = ttl;
+        self
     }
 
     /// Set the largest gRPC message the server accepts or sends, in bytes.
@@ -158,6 +270,11 @@ impl crate::proto::eryx::v1::eryx_server::Eryx for EryxService {
         let result_variable = execute_req.result_variable;
         let scrub_result = execute_req.scrub_result;
 
+        let binding = crate::replay::JournalBinding {
+            code: &code,
+            state: persist_state.then_some(state_snapshot.as_slice()),
+            callbacks: &declarations,
+        };
         // A rejected replay must not become a fresh run: completed callbacks
         // and direct script effects may already have happened.
         let previous_journal: Option<CallbackJournal> = execute_req
@@ -165,10 +282,11 @@ impl crate::proto::eryx::v1::eryx_server::Eryx for EryxService {
             .as_ref()
             .map(|journal| {
                 if (!journal.entries.is_empty() || !journal.signature.is_empty())
-                    && !self.journal_signer.verify(journal, &code)
+                    && !self.journal_signer.verify(journal, binding)
                 {
                     return Err(Status::failed_precondition(
-                        "callback journal signature verification failed; replay was not executed",
+                        "callback journal signature verification failed (expired, or signed \
+                         for a different script, state or callback set); replay was not executed",
                     ));
                 }
                 Ok(crate::replay::journal_from_proto(&code, journal))
@@ -192,7 +310,8 @@ impl crate::proto::eryx::v1::eryx_server::Eryx for EryxService {
                         nc.max_connections
                     } else {
                         defaults.max_connections
-                    },
+                    }
+                    .min(self.limits.max_connections),
                     connect_timeout: if nc.connect_timeout_ms > 0 {
                         Duration::from_millis(nc.connect_timeout_ms)
                     } else {
@@ -202,7 +321,8 @@ impl crate::proto::eryx::v1::eryx_server::Eryx for EryxService {
                         Duration::from_millis(nc.io_timeout_ms)
                     } else {
                         defaults.io_timeout
-                    },
+                    }
+                    .min(self.limits.max_io_timeout),
                     blocked_networks: if nc.blocked_networks.is_empty() {
                         defaults.blocked_networks
                     } else {
@@ -281,43 +401,10 @@ impl crate::proto::eryx::v1::eryx_server::Eryx for EryxService {
             tracing::debug!("failed to set parent trace context: {e}");
         }
 
-        // 2. Parse resource limits.
-        let resource_limits = if let Some(limits) = execute_req.resource_limits {
-            // A zero in the request means "unset": keep the default. `max_vfs_bytes`
-            // is deliberately absent from the proto and so never client-controllable
-            // - it bounds *host* memory (VFS contents live outside the guest's
-            // linear memory), so letting a request raise it would hand the DoS back.
-            let defaults = ResourceLimits::default();
-            defaults
-                .clone()
-                .with_execution_timeout(if limits.execution_timeout_ms > 0 {
-                    Some(Duration::from_millis(limits.execution_timeout_ms))
-                } else {
-                    defaults.execution_timeout
-                })
-                .with_callback_timeout(if limits.callback_timeout_ms > 0 {
-                    Some(Duration::from_millis(limits.callback_timeout_ms))
-                } else {
-                    defaults.callback_timeout
-                })
-                .with_max_memory_bytes(if limits.max_memory_bytes > 0 {
-                    Some(limits.max_memory_bytes)
-                } else {
-                    defaults.max_memory_bytes
-                })
-                .with_max_callback_invocations(if limits.max_callback_invocations > 0 {
-                    Some(limits.max_callback_invocations)
-                } else {
-                    defaults.max_callback_invocations
-                })
-                .with_max_fuel(if limits.max_fuel > 0 {
-                    Some(limits.max_fuel)
-                } else {
-                    None
-                })
-        } else {
-            ResourceLimits::default()
-        };
+        // 2. Parse resource limits, clamped to the server's ceilings.
+        let resource_limits = self
+            .limits
+            .resource_limits(execute_req.resource_limits.as_ref());
 
         span.in_scope(|| {
             tracing::info!(
@@ -470,6 +557,8 @@ impl crate::proto::eryx::v1::eryx_server::Eryx for EryxService {
 
         // 7. Spawn execution task.
         let journal_signer = self.journal_signer.clone();
+        let max_output_bytes = self.limits.max_output_bytes;
+        let journal_ttl = self.journal_ttl;
         let server_tx_result = server_tx;
         let resp_tx_final = resp_tx;
         let cancel_exec = cancel;
@@ -491,6 +580,9 @@ impl crate::proto::eryx::v1::eryx_server::Eryx for EryxService {
                     result_variable,
                     previous_journal,
                     journal_signer: journal_signer.clone(),
+                    journal_ttl,
+                    declarations: &declarations,
+                    max_output_bytes,
                 };
 
                 // Race execution against client disconnection: either the
@@ -501,6 +593,7 @@ impl crate::proto::eryx::v1::eryx_server::Eryx for EryxService {
                     &mut sandbox,
                     &params,
                     &server_tx_result,
+                    &cancel_exec,
                 ))
                 .catch_unwind();
                 let result_msg = tokio::select! {
@@ -508,6 +601,7 @@ impl crate::proto::eryx::v1::eryx_server::Eryx for EryxService {
                     () = cancel_exec.cancelled() => Ok(cancelled_result()),
                     () = resp_tx_final.closed() => Ok(cancelled_result()),
                 };
+                let panicked = result_msg.is_err();
 
                 match result_msg {
                     Ok(result_msg) => {
@@ -532,13 +626,20 @@ impl crate::proto::eryx::v1::eryx_server::Eryx for EryxService {
                 }
                 drop(server_tx_result);
 
-                // sandbox is dropped here — per-request state cleared, returned to pool.
                 let sandbox_held_ms = sandbox_held_start.elapsed().as_millis() as u64;
-                tracing::debug!(
-                    sandbox_held_ms,
-                    "execution task finished, returning sandbox to pool"
-                );
-                drop(sandbox);
+                if panicked {
+                    // The panic may have left the sandbox half-configured, so
+                    // keep it out of the pool; the pool builds a fresh one.
+                    tracing::debug!(sandbox_held_ms, "discarding sandbox after panic");
+                    drop(sandbox.detach());
+                } else {
+                    // Per-request state is cleared and the sandbox returns to the pool.
+                    tracing::debug!(
+                        sandbox_held_ms,
+                        "execution task finished, returning sandbox to pool"
+                    );
+                    drop(sandbox);
+                }
 
                 // The resp_tx_final is kept alive to ensure the response stream stays
                 // open until this task completes. Dropping it signals stream end.
@@ -718,6 +819,12 @@ struct SessionParams<'a> {
     previous_journal: Option<CallbackJournal>,
     /// Signer for HMAC-signing outgoing journals.
     journal_signer: crate::replay::JournalSigner,
+    /// How long a signed outgoing journal stays valid.
+    journal_ttl: Duration,
+    /// The request's callback declarations, which outgoing journals are bound to.
+    declarations: &'a [crate::proto::eryx::v1::CallbackDeclaration],
+    /// Cap on stdout plus stderr bytes kept and streamed.
+    max_output_bytes: usize,
 }
 
 /// Execute Python code using a session executor.
@@ -734,6 +841,7 @@ async fn execute_with_session(
     sandbox: &mut eryx::PooledSandbox,
     params: &SessionParams<'_>,
     server_tx: &mpsc::Sender<ServerMessage>,
+    cancel: &CancellationToken,
 ) -> ExecuteResult {
     let start = Instant::now();
 
@@ -756,7 +864,13 @@ async fn execute_with_session(
 
     // Create the session executor, optionally with pre-populated VFS for supporting files.
     let mut session = match params.vfs_storage.clone() {
-        None => match SessionExecutor::new(executor, &callbacks_arc).await {
+        None => match SessionExecutor::new_with_limits(
+            executor,
+            &callbacks_arc,
+            &params.resource_limits,
+        )
+        .await
+        {
             Ok(s) => s,
             Err(e) => {
                 tracing::warn!(
@@ -774,11 +888,12 @@ async fn execute_with_session(
         },
         Some(vfs_storage) => {
             let vfs_config = VfsConfig::new(VFS_MOUNT_PATH);
-            match SessionExecutor::new_with_vfs_config(
+            match SessionExecutor::new_with_vfs_config_and_limits(
                 executor,
                 &callbacks_arc,
                 vfs_storage,
                 vfs_config,
+                &params.resource_limits,
             )
             .await
             {
@@ -799,10 +914,6 @@ async fn execute_with_session(
             }
         }
     };
-
-    // Apply resource limits to the session so they take effect for all executions.
-    session.set_execution_timeout(params.resource_limits.execution_timeout);
-    session.set_fuel_limit(params.resource_limits.max_fuel);
 
     // Restore previous state if provided. A snapshot that cannot be restored
     // (corrupt, or from an incompatible runtime) does not fail the request -
@@ -867,23 +978,14 @@ async fn execute_with_session(
     let (trace_tx, mut trace_rx) = mpsc::unbounded_channel::<TraceRequest>();
     if params.enable_tracing {
         let trace_server_tx = server_tx.clone();
+        let trace_secrets = params.secrets.clone();
         tokio::spawn(async move {
             while let Some(req) = trace_rx.recv().await {
-                let (event_type, function, message, callback_name, duration_ms) =
-                    parse_trace_event_json(&req.event_json);
-
                 let msg = ServerMessage {
-                    message: Some(server_message::Message::TraceEvent(
-                        crate::proto::eryx::v1::TraceEvent {
-                            lineno: req.lineno,
-                            event_type,
-                            function,
-                            message,
-                            name: callback_name,
-                            duration_ms,
-                            context_json: String::new(),
-                        },
-                    )),
+                    message: Some(server_message::Message::TraceEvent(trace_event(
+                        &req,
+                        &trace_secrets,
+                    ))),
                 };
                 if trace_server_tx.send(msg).await.is_err() {
                     break;
@@ -892,7 +994,8 @@ async fn execute_with_session(
         });
     }
 
-    // Set up output streaming channel with optional secret scrubbing.
+    // Stream output to the client as it arrives, and keep the raw (pre-scrub)
+    // bytes for the final ExecuteResult. Both stop at `max_output_bytes`.
     let (output_tx, mut output_rx) = mpsc::unbounded_channel::<OutputRequest>();
     let output_server_tx = server_tx.clone();
     let output_scrub_stdout = params.scrub_stdout;
@@ -902,34 +1005,31 @@ async fn execute_with_session(
     } else {
         None
     };
-    // Accumulate the raw (pre-scrub) streamed output so the final ExecuteResult
-    // can carry it. The error path otherwise loses captured output entirely
-    // because no ExecutionOutput is produced; accumulating here lets the final
-    // stdout/stderr fields match what was streamed (and the success path).
+    let max_output_bytes = params.max_output_bytes;
     let output_accumulator = tokio::spawn(async move {
         use crate::proto::eryx::v1::{OutputEvent, OutputStream};
-        let mut stdout_buf = Vec::<u8>::new();
-        let mut stderr_buf = Vec::<u8>::new();
+        let mut output = CappedOutput::new(max_output_bytes);
+        // Once the client stops reading, keep draining so the cap still applies.
+        let mut forwarding = true;
         while let Some(req) = output_rx.recv().await {
             let stream = if req.stream == 0 {
-                stdout_buf.extend_from_slice(&req.data);
                 OutputStream::Stdout
             } else {
-                stderr_buf.extend_from_slice(&req.data);
                 OutputStream::Stderr
             };
-            let data = if let Some(ref secrets) = output_secrets {
-                let should_scrub = match req.stream {
-                    0 => output_scrub_stdout,
-                    _ => output_scrub_stderr,
-                };
-                if should_scrub {
-                    scrub_placeholders_bytes(&req.data, secrets)
-                } else {
-                    req.data
-                }
-            } else {
-                req.data
+            let Some(chunk) = output.push(stream, &req.data) else {
+                continue;
+            };
+            if !forwarding {
+                continue;
+            }
+            let should_scrub = match stream {
+                OutputStream::Stdout => output_scrub_stdout,
+                OutputStream::Stderr => output_scrub_stderr,
+            };
+            let data = match &output_secrets {
+                Some(secrets) if should_scrub => scrub_placeholders_bytes(&chunk, secrets),
+                _ => chunk,
             };
             let msg = ServerMessage {
                 message: Some(server_message::Message::OutputEvent(OutputEvent {
@@ -937,11 +1037,9 @@ async fn execute_with_session(
                     data,
                 })),
             };
-            if output_server_tx.send(msg).await.is_err() {
-                break;
-            }
+            forwarding = output_server_tx.send(msg).await.is_ok();
         }
-        (stdout_buf, stderr_buf)
+        output
     });
 
     // Spawn network handler if networking is enabled (mirrors Sandbox::execute pattern).
@@ -977,7 +1075,10 @@ async fn execute_with_session(
         .execute(params.code)
         .with_preamble(preamble)
         .with_callbacks(&callbacks_arc, callback_tx)
-        .with_output_streaming(output_tx);
+        .with_output_streaming(output_tx)
+        // Lets a disconnect interrupt CPU-bound code too; without a token the
+        // guest only stops at the execution timeout.
+        .with_cancellation(cancel.clone());
     if let Some(fuel) = fuel_limit {
         builder = builder.with_fuel_limit(fuel);
     }
@@ -994,8 +1095,22 @@ async fn execute_with_session(
 
     // The output channel sender is dropped once execution completes, so the
     // accumulator task has now (or will shortly) finish draining. Its captured
-    // stdout/stderr are used to populate the error-path result below.
-    let (streamed_stdout, streamed_stderr) = output_accumulator.await.unwrap_or_default();
+    // stdout/stderr populate the result on both paths; the copy the guest
+    // returns on success is dropped, so the output is held only once.
+    let output = output_accumulator
+        .await
+        .unwrap_or_else(|_| CappedOutput::new(0));
+    let output_truncated = output.truncated;
+    let stdout = if params.scrub_stdout {
+        scrub_placeholders_bytes(&output.stdout, &params.secrets)
+    } else {
+        output.stdout
+    };
+    let stderr = if params.scrub_stderr {
+        scrub_placeholders_bytes(&output.stderr, &params.secrets)
+    } else {
+        output.stderr
+    };
 
     // Extract the recorded replay journal. Read regardless of success/failure so
     // the caller can replay completed callbacks even when a later one errored or
@@ -1006,7 +1121,14 @@ async fn execute_with_session(
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             let mut journal = crate::replay::journal_to_proto(&guard.build_journal(params.code));
-            params.journal_signer.sign(&mut journal, params.code);
+            let binding = crate::replay::JournalBinding {
+                code: params.code,
+                state: params.state,
+                callbacks: params.declarations,
+            };
+            params
+                .journal_signer
+                .sign(&mut journal, binding, params.journal_ttl);
             let suspended = guard.suspended().map(crate::replay::suspended_to_proto);
             (Some(journal), guard.replayed_count(), suspended)
         }
@@ -1064,7 +1186,7 @@ async fn execute_with_session(
     let state_error = state_errors.join("; ");
 
     match exec_result {
-        Ok(output) => {
+        Ok(exec_output) => {
             tracing::info!(
                 success = true,
                 duration_ms = duration.as_millis() as u64,
@@ -1074,34 +1196,24 @@ async fn execute_with_session(
             );
             metrics::counter!("eryx_executions_total", "status" => "success").increment(1);
             metrics::histogram!("eryx_execution_duration_seconds").record(duration.as_secs_f64());
-            let stdout = if params.scrub_stdout {
-                scrub_placeholders_bytes(&output.stdout, &params.secrets)
-            } else {
-                output.stdout
-            };
-            let stderr = if params.scrub_stderr {
-                scrub_placeholders_bytes(&output.stderr, &params.secrets)
-            } else {
-                output.stderr
-            };
             // The structured result is a programmatic side channel, so scrubbing is
             // opt-in (params.scrub_result), independent of the stdout/stderr policy.
             // When enabled, scrub both the result and its error message.
             let (result, result_error) = if params.scrub_result {
                 (
-                    output
+                    exec_output
                         .result
                         .map(|r| scrub_placeholders(&r, &params.secrets))
                         .unwrap_or_default(),
-                    output
+                    exec_output
                         .result_error
                         .map(|e| scrub_placeholders(&e, &params.secrets))
                         .unwrap_or_default(),
                 )
             } else {
                 (
-                    output.result.unwrap_or_default(),
-                    output.result_error.unwrap_or_default(),
+                    exec_output.result.unwrap_or_default(),
+                    exec_output.result_error.unwrap_or_default(),
                 )
             };
             ExecuteResult {
@@ -1112,8 +1224,8 @@ async fn execute_with_session(
                 stats: Some(ExecuteStats {
                     duration_ms: duration.as_millis() as u64,
                     callback_invocations,
-                    peak_memory_bytes: output.peak_memory_bytes,
-                    fuel_consumed: output.fuel_consumed.unwrap_or(0),
+                    peak_memory_bytes: exec_output.peak_memory_bytes,
+                    fuel_consumed: exec_output.fuel_consumed.unwrap_or(0),
                     replayed_callbacks,
                 }),
                 state_snapshot: snapshot_bytes,
@@ -1124,6 +1236,7 @@ async fn execute_with_session(
                 suspended,
                 suspended_callback,
                 state_error,
+                output_truncated,
             }
         }
         Err(e) => {
@@ -1136,20 +1249,6 @@ async fn execute_with_session(
             );
             metrics::counter!("eryx_executions_total", "status" => "error").increment(1);
             metrics::histogram!("eryx_execution_duration_seconds").record(duration.as_secs_f64());
-            // Surface output captured before the failure (e.g. an uncaught
-            // exception's traceback, which Python writes to stderr) so the
-            // stdout/stderr fields match what was streamed and the success path.
-            // Scrub the whole buffer, consistent with the Ok arm.
-            let stdout = if params.scrub_stdout {
-                scrub_placeholders_bytes(&streamed_stdout, &params.secrets)
-            } else {
-                streamed_stdout
-            };
-            let stderr = if params.scrub_stderr {
-                scrub_placeholders_bytes(&streamed_stderr, &params.secrets)
-            } else {
-                streamed_stderr
-            };
             // For a script exception the traceback is already in `stderr`
             // (CPython-style); `error` is reserved for sandbox failures, so leave
             // it empty and let callers branch on `failure_kind`. For machinery
@@ -1191,8 +1290,61 @@ async fn execute_with_session(
                 suspended,
                 suspended_callback,
                 state_error,
+                output_truncated,
             }
         }
+    }
+}
+
+/// Appended to the stream whose output crossed `max_output_bytes`.
+fn truncation_marker(max: usize) -> Vec<u8> {
+    format!("\n[output truncated: exceeded {max} bytes]\n").into_bytes()
+}
+
+/// Stdout and stderr captured for one execution, capped at a combined size.
+#[derive(Debug)]
+struct CappedOutput {
+    stdout: Vec<u8>,
+    stderr: Vec<u8>,
+    remaining: usize,
+    max: usize,
+    truncated: bool,
+}
+
+impl CappedOutput {
+    fn new(max: usize) -> Self {
+        Self {
+            stdout: Vec::new(),
+            stderr: Vec::new(),
+            remaining: max,
+            max,
+            truncated: false,
+        }
+    }
+
+    /// Record a chunk and return the bytes to stream for it: the part that
+    /// fits, plus the truncation marker on the chunk that crosses the cap.
+    /// Returns `None` once output has been truncated.
+    fn push(
+        &mut self,
+        stream: crate::proto::eryx::v1::OutputStream,
+        data: &[u8],
+    ) -> Option<Vec<u8>> {
+        if self.truncated {
+            return None;
+        }
+        let mut chunk = data[..data.len().min(self.remaining)].to_vec();
+        self.remaining -= chunk.len();
+        if chunk.len() < data.len() {
+            self.truncated = true;
+            chunk.extend(truncation_marker(self.max));
+        }
+        match stream {
+            crate::proto::eryx::v1::OutputStream::Stdout => &mut self.stdout,
+            crate::proto::eryx::v1::OutputStream::Stderr => &mut self.stderr,
+        }
+        .extend_from_slice(&chunk);
+        Some(chunk)
     }
 }
 
@@ -1212,6 +1364,32 @@ fn classify_failure(error: &Error) -> FailureKind {
         Error::Cancelled => FailureKind::Cancelled,
         Error::Suspended(_) => FailureKind::Suspended,
         _ => FailureKind::SandboxError,
+    }
+}
+
+/// Convert a guest trace event to its proto form, scrubbing secret
+/// placeholders from its text fields.
+fn trace_event(
+    req: &TraceRequest,
+    secrets: &HashMap<String, SecretConfig>,
+) -> crate::proto::eryx::v1::TraceEvent {
+    let (event_type, function, message, name, duration_ms) =
+        parse_trace_event_json(&req.event_json);
+    let scrub = |s: String| {
+        if secrets.is_empty() {
+            s
+        } else {
+            scrub_placeholders(&s, secrets)
+        }
+    };
+    crate::proto::eryx::v1::TraceEvent {
+        lineno: req.lineno,
+        event_type: scrub(event_type),
+        function: scrub(function),
+        message: scrub(message),
+        name: scrub(name),
+        duration_ms,
+        context_json: String::new(),
     }
 }
 
@@ -1301,6 +1479,72 @@ mod tests {
     use super::*;
 
     const MOUNT_PATH: &str = "/eryx";
+
+    #[test]
+    fn trace_events_are_scrubbed() {
+        let placeholder = generate_placeholder("TOKEN");
+        let secrets = HashMap::from([(
+            "TOKEN".to_string(),
+            SecretConfig {
+                real_value: "real".to_string(),
+                placeholder: placeholder.clone(),
+                allowed_hosts: vec![],
+            },
+        )]);
+        let req = TraceRequest {
+            lineno: 1,
+            event_json:
+                serde_json::json!({"type": "exception", "message": format!("bad {placeholder}")})
+                    .to_string(),
+            context_json: String::new(),
+        };
+        let event = trace_event(&req, &secrets);
+        assert_eq!(event.event_type, "exception");
+        assert!(!event.message.contains(&placeholder), "{}", event.message);
+        assert!(event.message.starts_with("bad "), "{}", event.message);
+    }
+
+    #[test]
+    fn server_limits_fill_defaults_and_clamp() {
+        use crate::proto::eryx::v1::ResourceLimits as ProtoLimits;
+
+        let ceilings = ServerLimits {
+            max_execution_timeout: Duration::from_secs(10),
+            max_memory_bytes: 64,
+            max_fuel: Some(1000),
+            ..Default::default()
+        };
+        let unset = ceilings.resource_limits(None);
+        assert_eq!(unset.execution_timeout, Some(Duration::from_secs(10)));
+        assert_eq!(unset.max_memory_bytes, Some(64));
+        assert_eq!(
+            unset.max_fuel,
+            Some(1000),
+            "the fuel ceiling is the default"
+        );
+        assert_eq!(
+            unset.callback_timeout,
+            ResourceLimits::default().callback_timeout
+        );
+
+        let request = ProtoLimits {
+            execution_timeout_ms: 5_000,
+            max_memory_bytes: 1 << 40,
+            max_fuel: 10,
+            ..Default::default()
+        };
+        let limits = ceilings.resource_limits(Some(&request));
+        assert_eq!(limits.execution_timeout, Some(Duration::from_secs(5)));
+        assert_eq!(limits.max_memory_bytes, Some(64));
+        assert_eq!(limits.max_fuel, Some(10));
+
+        let no_fuel_ceiling = ServerLimits::default().resource_limits(None);
+        assert_eq!(no_fuel_ceiling.max_fuel, None);
+        assert_eq!(
+            no_fuel_ceiling.max_memory_bytes,
+            ResourceLimits::default().max_memory_bytes
+        );
+    }
 
     #[tokio::test]
     async fn test_create_vfs_with_files() {

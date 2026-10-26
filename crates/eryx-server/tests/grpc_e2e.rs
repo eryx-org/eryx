@@ -41,11 +41,20 @@ async fn start_server() -> Channel {
 }
 
 async fn start_server_with_signer(signer: eryx_server::replay::JournalSigner) -> Channel {
+    start_server_with(4, |pool| EryxService::with_signer(pool, signer)).await
+}
+
+/// Start a server whose pool holds at most `max_size` sandboxes, with the
+/// service built by `service`.
+async fn start_server_with(
+    max_size: usize,
+    service: impl FnOnce(Arc<SandboxPool>) -> EryxService,
+) -> Channel {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
 
     let pool_config = PoolConfig {
-        max_size: 4,
+        max_size,
         min_idle: 1,
         ..Default::default()
     };
@@ -55,9 +64,10 @@ async fn start_server_with_signer(signer: eryx_server::replay::JournalSigner) ->
         .expect("failed to create sandbox pool");
     let pool = Arc::new(pool);
 
+    let service = service(pool).into_server();
     tokio::spawn(async move {
         Server::builder()
-            .add_service(EryxService::with_signer(pool, signer).into_server())
+            .add_service(service)
             .serve_with_incoming(tokio_stream::wrappers::TcpListenerStream::new(listener))
             .await
             .unwrap();
@@ -1497,7 +1507,7 @@ print(f"got: {result}")
                 // Presence of the (empty) journal opts into replay/journaling.
                 callback_journal: Some(CallbackJournal {
                     entries: vec![],
-                    signature: vec![],
+                    ..Default::default()
                 }),
                 ..Default::default()
             },
@@ -1648,7 +1658,7 @@ print("should not reach here")
                 callbacks: vec![echo_declaration(), approve_decl, marker_decl],
                 callback_journal: Some(CallbackJournal {
                     entries: vec![],
-                    signature: vec![],
+                    ..Default::default()
                 }),
                 ..Default::default()
             },
@@ -1843,7 +1853,7 @@ print("should not reach here")
                 persist_state: true,
                 callback_journal: Some(CallbackJournal {
                     entries: vec![],
-                    signature: vec![],
+                    ..Default::default()
                 }),
                 ..Default::default()
             },
@@ -1896,7 +1906,7 @@ print("should not reach here")
 #[tokio::test]
 async fn rejects_invalid_replay_before_execution() {
     use eryx_server::proto::eryx::v1::CallbackJournalEntry;
-    use eryx_server::replay::JournalSigner;
+    use eryx_server::replay::{JournalBinding, JournalSigner};
 
     let signer = JournalSigner::from_key([7; 32]);
     let channel = start_server_with_signer(signer.clone()).await;
@@ -1909,27 +1919,61 @@ async fn rejects_invalid_replay_before_execution() {
             value: "42".to_string(),
             ..Default::default()
         }],
-        signature: vec![],
+        ..Default::default()
     };
+    let ttl = Duration::from_secs(60);
+    let bound = |code| JournalBinding {
+        code,
+        state: None,
+        callbacks: &[],
+    };
+    let echo = [echo_declaration()];
     for scenario in [
         "unsigned",
         "other replica",
         "empty signed journal",
         "changed script",
         "changed result",
+        "changed state",
+        "changed callbacks",
+        "expired",
+        "extended expiry",
     ] {
         let mut journal = original.clone();
         match scenario {
             "unsigned" => {}
-            "other replica" => JournalSigner::from_key([8; 32]).sign(&mut journal, code),
+            "other replica" => {
+                JournalSigner::from_key([8; 32]).sign(&mut journal, bound(code), ttl)
+            }
             "empty signed journal" => {
                 journal.entries.clear();
-                JournalSigner::from_key([8; 32]).sign(&mut journal, code);
+                JournalSigner::from_key([8; 32]).sign(&mut journal, bound(code), ttl);
             }
-            "changed script" => signer.sign(&mut journal, "different script"),
+            "changed script" => signer.sign(&mut journal, bound("different script"), ttl),
             "changed result" => {
-                signer.sign(&mut journal, code);
+                signer.sign(&mut journal, bound(code), ttl);
                 journal.entries[0].value = "43".to_string();
+            }
+            "changed state" => signer.sign(
+                &mut journal,
+                JournalBinding {
+                    state: Some(b"other state"),
+                    ..bound(code)
+                },
+                ttl,
+            ),
+            "changed callbacks" => signer.sign(
+                &mut journal,
+                JournalBinding {
+                    callbacks: &echo,
+                    ..bound(code)
+                },
+                ttl,
+            ),
+            "expired" => signer.sign(&mut journal, bound(code), Duration::ZERO),
+            "extended expiry" => {
+                signer.sign(&mut journal, bound(code), ttl);
+                journal.expires_at_unix_secs += 3600;
             }
             _ => unreachable!(),
         }
@@ -2230,4 +2274,182 @@ async fn max_message_size_is_configurable() {
     .await
     .unwrap_err();
     assert_eq!(err.code(), tonic::Code::OutOfRange, "{err}");
+}
+
+/// Run `code` with `limits` and return the result.
+async fn run_with_limits(
+    client: &mut EryxClient<Channel>,
+    code: &str,
+    limits: ResourceLimits,
+) -> ExecuteResult {
+    execute_half_closed(
+        client,
+        ExecuteRequest {
+            code: code.to_string(),
+            resource_limits: Some(limits),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap()
+}
+
+const ALLOCATE_200_MIB: &str = "x = bytearray(200 * 1024 * 1024)\nprint('allocated')";
+
+/// The request's `max_memory_bytes` bounds guest memory.
+#[tokio::test]
+async fn memory_limit_is_enforced() {
+    let mut client = EryxClient::new(start_server().await);
+    let small = ResourceLimits {
+        max_memory_bytes: 64 * 1024 * 1024,
+        ..Default::default()
+    };
+    let result = run_with_limits(&mut client, ALLOCATE_200_MIB, small).await;
+    assert!(!result.success, "allocation should fail: {result:?}");
+    assert!(
+        result.stderr.contains_str("MemoryError"),
+        "{:?}",
+        result.stderr.to_lossy()
+    );
+
+    let large = ResourceLimits {
+        max_memory_bytes: 512 * 1024 * 1024,
+        ..Default::default()
+    };
+    let result = run_with_limits(&mut client, ALLOCATE_200_MIB, large).await;
+    assert!(
+        result.success,
+        "{}: {}",
+        result.error,
+        result.stderr.to_lossy()
+    );
+}
+
+/// Request limits above the server's ceilings are clamped down to them.
+#[tokio::test]
+async fn request_limits_are_clamped_to_server_ceilings() {
+    let limits = eryx_server::service::ServerLimits {
+        max_memory_bytes: 64 * 1024 * 1024,
+        max_execution_timeout: Duration::from_secs(1),
+        ..Default::default()
+    };
+    let mut client = EryxClient::new(
+        start_server_with(2, |pool| EryxService::new(pool).with_limits(limits)).await,
+    );
+    let generous = ResourceLimits {
+        max_memory_bytes: 4 * 1024 * 1024 * 1024,
+        execution_timeout_ms: 600_000,
+        ..Default::default()
+    };
+    let result = run_with_limits(&mut client, ALLOCATE_200_MIB, generous).await;
+    assert!(!result.success, "allocation should fail: {result:?}");
+    assert!(
+        result.stderr.contains_str("MemoryError"),
+        "{:?}",
+        result.stderr.to_lossy()
+    );
+
+    let started = std::time::Instant::now();
+    let result = run_with_limits(&mut client, "while True: pass", generous).await;
+    assert_eq!(
+        result.failure_kind,
+        eryx_server::proto::eryx::v1::FailureKind::Timeout as i32,
+        "{result:?}"
+    );
+    assert!(started.elapsed() < Duration::from_secs(20));
+}
+
+/// Output past the server's cap is dropped from both the stream and the
+/// result, with a marker and `output_truncated` set.
+#[tokio::test]
+async fn output_is_capped() {
+    use eryx_server::proto::eryx::v1::OutputEvent;
+
+    let limits = eryx_server::service::ServerLimits {
+        max_output_bytes: 1000,
+        ..Default::default()
+    };
+    let mut client = EryxClient::new(
+        start_server_with(2, |pool| EryxService::new(pool).with_limits(limits)).await,
+    );
+    let request = tokio_stream::once(ClientMessage {
+        message: Some(client_message::Message::ExecuteRequest(Box::new(
+            ExecuteRequest {
+                code: "for _ in range(100):\n    print('x' * 99)".to_string(),
+                ..Default::default()
+            },
+        ))),
+    });
+    let mut stream = client.execute(request).await.unwrap().into_inner();
+    let mut streamed = Vec::new();
+    let mut result = None;
+    while let Some(msg) = stream.message().await.unwrap() {
+        match msg.message {
+            Some(server_message::Message::OutputEvent(OutputEvent { data, .. })) => {
+                streamed.extend(data);
+            }
+            Some(server_message::Message::ExecuteResult(r)) => result = Some(*r),
+            _ => {}
+        }
+    }
+    let result = result.unwrap();
+    assert!(result.success, "{}", result.error);
+    assert!(result.output_truncated);
+    assert_eq!(streamed, result.stdout);
+    let marker = b"\n[output truncated: exceeded 1000 bytes]\n";
+    assert_eq!(result.stdout.len(), 1000 + marker.len());
+    assert!(
+        result.stdout.ends_with(marker),
+        "{:?}",
+        result.stdout.to_lossy()
+    );
+}
+
+/// A client disconnect stops CPU-bound code instead of leaving it to run
+/// until the execution timeout.
+#[tokio::test]
+async fn disconnect_cancels_cpu_bound_execution() {
+    let mut client = EryxClient::new(start_server_with(1, EryxService::new).await);
+    let (tx, rx) = mpsc::channel(1);
+    tx.send(ClientMessage {
+        message: Some(client_message::Message::ExecuteRequest(Box::new(
+            ExecuteRequest {
+                code: "print('spinning', flush=True)\nwhile True: pass".to_string(),
+                resource_limits: Some(ResourceLimits {
+                    execution_timeout_ms: 120_000,
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+        ))),
+    })
+    .await
+    .unwrap();
+    let mut stream = client
+        .execute(ReceiverStream::new(rx))
+        .await
+        .unwrap()
+        .into_inner();
+    // Wait until the script is running, then drop both directions.
+    stream.message().await.unwrap().unwrap();
+    drop(stream);
+    drop(tx);
+
+    // The pool's only sandbox must come back well before the timeout.
+    let started = std::time::Instant::now();
+    let result = tokio::time::timeout(
+        Duration::from_secs(25),
+        execute_half_closed(
+            &mut client,
+            ExecuteRequest {
+                code: "print('next')".to_string(),
+                ..Default::default()
+            },
+        ),
+    )
+    .await
+    .expect("sandbox was not released after disconnect")
+    .unwrap();
+    assert!(result.success, "{}", result.error);
+    assert!(started.elapsed() < Duration::from_secs(25));
 }

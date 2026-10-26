@@ -17,12 +17,14 @@
 //! different script after the fact.
 //!
 //! [`JournalSigner`] provides HMAC-SHA256 signing and verification. The MAC
-//! covers both the journal entries (via deterministic protobuf encoding) and the
-//! script code, so a journal is bound to the exact script that produced it.
-//! This is correct for the primary replay use case (re-running the same
-//! script); for edit-and-retry, the signature won't verify and the server
-//! rejects the replay before executing the script. Starting an edited script
-//! requires a new execution without the old journal.
+//! covers the journal entries (via deterministic protobuf encoding), its expiry
+//! time, and the [`JournalBinding`]: the script code, the state snapshot the run
+//! started from, and the declared callback names. A journal therefore only
+//! replays into the same script, starting state and callback set that produced
+//! it, and only until it expires. This is correct for the primary replay use
+//! case (re-running the same script); for edit-and-retry, the signature won't
+//! verify and the server rejects the replay before executing the script.
+//! Starting an edited script requires a new execution without the old journal.
 //!
 //! The signing key should be injected at server startup (via
 //! `ERYX_JOURNAL_SIGNING_KEY`) so that all replicas share the same key and
@@ -30,6 +32,8 @@
 //! ephemeral key is generated and a warning is logged — previously-signed
 //! journals (or those from other replicas) will fail verification and replay
 //! will be rejected before execution.
+
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use eryx::{CallbackJournal, CallbackJournalEntry, SuspendedCallback};
 use hmac::{Hmac, KeyInit, Mac};
@@ -40,11 +44,33 @@ use crate::proto::eryx::v1 as pb;
 
 type HmacSha256 = Hmac<Sha256>;
 
+/// Versions the MAC input layout, so journals signed under an older layout
+/// fail verification instead of being read under the new one.
+const MAC_DOMAIN: &[u8] = b"eryx-journal-v2";
+
+/// The request context a journal is bound to, besides its entries.
+#[derive(Debug, Clone, Copy)]
+pub struct JournalBinding<'a> {
+    /// The script code.
+    pub code: &'a str,
+    /// The state snapshot the run started from, or `None` when state is not
+    /// persisted.
+    pub state: Option<&'a [u8]>,
+    /// The declared callbacks; their names are bound, in any order.
+    pub callbacks: &'a [pb::CallbackDeclaration],
+}
+
+fn now_unix_secs() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs())
+}
+
 /// HMAC-SHA256 signer/verifier for callback journals.
 ///
-/// The MAC covers both the journal entries (deterministic protobuf encoding,
-/// which naturally length-prefixes all variable-length fields) and the script
-/// code that produced them, so a journal is bound to its originating script.
+/// The MAC covers the journal entries (deterministic protobuf encoding, which
+/// naturally length-prefixes all variable-length fields), the expiry time and
+/// the [`JournalBinding`] of the run that produced them.
 ///
 /// Create with [`from_key`](Self::from_key) for production (shared key across
 /// replicas) or [`random`](Self::random) for tests/dev.
@@ -85,46 +111,61 @@ impl JournalSigner {
         Self { key }
     }
 
-    /// Sign a proto journal in place, binding it to `code`.
-    pub fn sign(&self, journal: &mut pb::CallbackJournal, code: &str) {
-        journal.signature = self.compute_mac(&journal.entries, code);
+    /// Sign a proto journal in place, binding it to `binding` and making it
+    /// expire `ttl` from now.
+    pub fn sign(
+        &self,
+        journal: &mut pb::CallbackJournal,
+        binding: JournalBinding<'_>,
+        ttl: Duration,
+    ) {
+        journal.expires_at_unix_secs = now_unix_secs().saturating_add(ttl.as_secs());
+        let mut mac = self.new_mac();
+        Self::feed_mac(&mut mac, journal, binding);
+        journal.signature = mac.finalize().into_bytes().to_vec();
     }
 
-    /// Verify a proto journal's signature against `code`. Returns `true` if the
-    /// signature is present and valid, `false` otherwise.
+    /// Verify a proto journal's signature against `binding`. Returns `true` if
+    /// the signature is present and valid and the journal has not expired.
     #[must_use]
-    pub fn verify(&self, journal: &pb::CallbackJournal, code: &str) -> bool {
-        if journal.signature.is_empty() {
+    pub fn verify(&self, journal: &pb::CallbackJournal, binding: JournalBinding<'_>) -> bool {
+        if journal.signature.is_empty() || journal.expires_at_unix_secs <= now_unix_secs() {
             return false;
         }
         let mut mac = self.new_mac();
-        self.feed_mac(&mut mac, &journal.entries, code);
+        Self::feed_mac(&mut mac, journal, binding);
         mac.verify_slice(&journal.signature).is_ok()
     }
 
-    fn compute_mac(&self, entries: &[pb::CallbackJournalEntry], code: &str) -> Vec<u8> {
-        let mut mac = self.new_mac();
-        self.feed_mac(&mut mac, entries, code);
-        mac.finalize().into_bytes().to_vec()
-    }
-
-    fn feed_mac(&self, mac: &mut HmacSha256, entries: &[pb::CallbackJournalEntry], code: &str) {
-        // Length-prefix the code so the boundary between the code and the first
-        // entry is unambiguous. Without this, `code || <entry stream>` could be
-        // re-split — a script whose bytes happen to embed an entry's encoding
-        // could feed-collide with a different (code, entries) pair. The key is
-        // secret so forgery is infeasible regardless, but framing every
-        // variable-length input keeps the MAC injective over (code, entries).
-        mac.update(&(code.len() as u64).to_le_bytes());
-        mac.update(code.as_bytes());
-        // Deterministic protobuf encoding of each entry. Prost's `encode_to_vec`
-        // length-prefixes all variable-length fields on the wire, so there is no
-        // concatenation ambiguity between entries — but we also prefix each
-        // entry's encoded length for belt-and-suspenders clarity.
-        for entry in entries {
-            let encoded = entry.encode_to_vec();
-            mac.update(&(encoded.len() as u32).to_le_bytes());
-            mac.update(&encoded);
+    fn feed_mac(mac: &mut HmacSha256, journal: &pb::CallbackJournal, binding: JournalBinding<'_>) {
+        // Every variable-length input is length-prefixed so the boundaries are
+        // unambiguous and the MAC stays injective over its inputs. Without
+        // that, e.g. `code || <entry stream>` could be re-split - a script
+        // whose bytes happen to embed an entry's encoding could feed-collide
+        // with a different (code, entries) pair.
+        let mut feed = |bytes: &[u8]| {
+            mac.update(&(bytes.len() as u64).to_le_bytes());
+            mac.update(bytes);
+        };
+        feed(MAC_DOMAIN);
+        feed(&journal.expires_at_unix_secs.to_le_bytes());
+        feed(binding.code.as_bytes());
+        match binding.state {
+            None => feed(&[0]),
+            Some(state) => {
+                feed(&[1]);
+                feed(state);
+            }
+        }
+        let mut names: Vec<&str> = binding.callbacks.iter().map(|c| c.name.as_str()).collect();
+        names.sort_unstable();
+        feed(&(names.len() as u64).to_le_bytes());
+        for name in names {
+            feed(name.as_bytes());
+        }
+        // Deterministic protobuf encoding of each entry.
+        for entry in &journal.entries {
+            feed(&entry.encode_to_vec());
         }
     }
 
@@ -178,7 +219,7 @@ fn entry_from_proto(entry: &pb::CallbackJournalEntry) -> CallbackJournalEntry {
 pub fn journal_to_proto(journal: &CallbackJournal) -> pb::CallbackJournal {
     pb::CallbackJournal {
         entries: journal.entries.iter().map(entry_to_proto).collect(),
-        signature: Vec::new(),
+        ..Default::default()
     }
 }
 
@@ -250,15 +291,14 @@ mod tests {
 
     #[test]
     fn empty_proto_journal_yields_empty_eryx_journal() {
-        let proto = pb::CallbackJournal {
-            entries: vec![],
-            signature: Vec::new(),
-        };
+        let proto = pb::CallbackJournal::default();
         let journal = journal_from_proto("code", &proto);
         assert!(journal.is_empty());
     }
 
     // -- JournalSigner tests --
+
+    const TTL: Duration = Duration::from_secs(60);
 
     fn test_entry() -> pb::CallbackJournalEntry {
         pb::CallbackJournalEntry {
@@ -271,23 +311,39 @@ mod tests {
         }
     }
 
+    fn binding(code: &str) -> JournalBinding<'_> {
+        JournalBinding {
+            code,
+            state: None,
+            callbacks: &[],
+        }
+    }
+
+    fn signed(signer: &JournalSigner, binding: JournalBinding<'_>) -> pb::CallbackJournal {
+        let mut journal = pb::CallbackJournal {
+            entries: vec![test_entry()],
+            ..Default::default()
+        };
+        signer.sign(&mut journal, binding, TTL);
+        journal
+    }
+
     #[test]
     fn sign_and_verify_roundtrip() {
         let signer = JournalSigner::random();
-        let mut journal = pb::CallbackJournal {
+        let unsigned = pb::CallbackJournal {
             entries: vec![test_entry()],
-            signature: Vec::new(),
+            ..Default::default()
         };
-
         assert!(
-            !signer.verify(&journal, "code"),
+            !signer.verify(&unsigned, binding("code")),
             "unsigned journal should not verify"
         );
 
-        signer.sign(&mut journal, "code");
+        let journal = signed(&signer, binding("code"));
         assert!(!journal.signature.is_empty());
         assert!(
-            signer.verify(&journal, "code"),
+            signer.verify(&journal, binding("code")),
             "signed journal should verify"
         );
     }
@@ -295,16 +351,10 @@ mod tests {
     #[test]
     fn tampered_entry_fails_verification() {
         let signer = JournalSigner::random();
-        let mut journal = pb::CallbackJournal {
-            entries: vec![test_entry()],
-            signature: Vec::new(),
-        };
-        signer.sign(&mut journal, "code");
-        assert!(signer.verify(&journal, "code"));
-
+        let mut journal = signed(&signer, binding("code"));
         journal.entries[0].value = r#"{"v":999}"#.into();
         assert!(
-            !signer.verify(&journal, "code"),
+            !signer.verify(&journal, binding("code")),
             "tampered journal should not verify"
         );
     }
@@ -312,30 +362,68 @@ mod tests {
     #[test]
     fn different_code_fails_verification() {
         let signer = JournalSigner::random();
-        let mut journal = pb::CallbackJournal {
-            entries: vec![test_entry()],
-            signature: Vec::new(),
-        };
-        signer.sign(&mut journal, "original script");
-        assert!(signer.verify(&journal, "original script"));
+        let journal = signed(&signer, binding("original script"));
+        assert!(signer.verify(&journal, binding("original script")));
         assert!(
-            !signer.verify(&journal, "different script"),
+            !signer.verify(&journal, binding("different script")),
             "journal signed for one script should not verify against a different one"
         );
     }
 
     #[test]
-    fn different_signer_fails_verification() {
-        let signer1 = JournalSigner::random();
-        let signer2 = JournalSigner::random();
+    fn journal_is_bound_to_starting_state() {
+        let signer = JournalSigner::random();
+        let with_state = |state| JournalBinding {
+            state,
+            ..binding("code")
+        };
+        let journal = signed(&signer, with_state(Some(b"state-a")));
+        assert!(signer.verify(&journal, with_state(Some(b"state-a"))));
+        assert!(!signer.verify(&journal, with_state(Some(b"state-b"))));
+        assert!(!signer.verify(&journal, with_state(None)));
+        assert!(!signer.verify(&journal, with_state(Some(b""))));
+    }
+
+    #[test]
+    fn journal_is_bound_to_callback_names() {
+        let decl = |name: &str| pb::CallbackDeclaration {
+            name: name.into(),
+            ..Default::default()
+        };
+        let ab = [decl("a"), decl("b")];
+        let ba = [decl("b"), decl("a")];
+        let ac = [decl("a"), decl("c")];
+        let with = |callbacks| JournalBinding {
+            callbacks,
+            ..binding("code")
+        };
+        let signer = JournalSigner::random();
+        let journal = signed(&signer, with(&ab));
+        assert!(signer.verify(&journal, with(&ba)), "order must not matter");
+        assert!(!signer.verify(&journal, with(&ac)));
+        assert!(!signer.verify(&journal, with(&ab[..1])));
+    }
+
+    #[test]
+    fn expired_journal_fails_verification() {
+        let signer = JournalSigner::random();
         let mut journal = pb::CallbackJournal {
             entries: vec![test_entry()],
-            signature: Vec::new(),
+            ..Default::default()
         };
-        signer1.sign(&mut journal, "code");
-        assert!(signer1.verify(&journal, "code"));
+        signer.sign(&mut journal, binding("code"), Duration::ZERO);
+        assert!(!signer.verify(&journal, binding("code")));
+
+        // Pushing the expiry forward breaks the signature.
+        journal.expires_at_unix_secs += 3600;
+        assert!(!signer.verify(&journal, binding("code")));
+    }
+
+    #[test]
+    fn different_signer_fails_verification() {
+        let journal = signed(&JournalSigner::random(), binding("code"));
         assert!(
-            !signer2.verify(&journal, "code"),
+            !JournalSigner::random().verify(&journal, binding("code")),
             "different key should not verify"
         );
     }
@@ -343,26 +431,17 @@ mod tests {
     #[test]
     fn empty_journal_signs_and_verifies() {
         let signer = JournalSigner::random();
-        let mut journal = pb::CallbackJournal {
-            entries: vec![],
-            signature: Vec::new(),
-        };
-        signer.sign(&mut journal, "code");
-        assert!(signer.verify(&journal, "code"));
+        let mut journal = pb::CallbackJournal::default();
+        signer.sign(&mut journal, binding("code"), TTL);
+        assert!(signer.verify(&journal, binding("code")));
     }
 
     #[test]
     fn from_key_is_deterministic() {
         let key = [42u8; 32];
-        let signer1 = JournalSigner::from_key(key);
-        let signer2 = JournalSigner::from_key(key);
-        let mut journal = pb::CallbackJournal {
-            entries: vec![test_entry()],
-            signature: Vec::new(),
-        };
-        signer1.sign(&mut journal, "code");
+        let journal = signed(&JournalSigner::from_key(key), binding("code"));
         assert!(
-            signer2.verify(&journal, "code"),
+            JournalSigner::from_key(key).verify(&journal, binding("code")),
             "same key should verify across instances"
         );
     }

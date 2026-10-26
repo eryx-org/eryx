@@ -8,7 +8,7 @@ use std::time::Duration;
 use clap::Parser;
 use eryx::{PoolConfig, Sandbox, SandboxPool};
 use eryx_server::proto::eryx::v1::eryx_server::EryxServer;
-use eryx_server::service::{EryxService, MAX_MESSAGE_SIZE};
+use eryx_server::service::{DEFAULT_JOURNAL_TTL, EryxService, MAX_MESSAGE_SIZE, ServerLimits};
 use eryx_server::telemetry::setup_tracing;
 use futures::StreamExt;
 use tonic::transport::server::{ServerTlsConfig, TcpIncoming};
@@ -87,8 +87,49 @@ struct Args {
     /// All server replicas must share the same key so that journals are portable
     /// across instances. If not set, a random ephemeral key is generated (journals
     /// signed by one process cannot be verified by another or after a restart).
-    #[arg(long, env = "ERYX_JOURNAL_SIGNING_KEY", hide = true)]
+    /// Prefer the environment variable over the flag, so the key stays out of
+    /// the process list.
+    #[arg(long, env = "ERYX_JOURNAL_SIGNING_KEY", hide_env_values = true)]
     journal_signing_key: Option<String>,
+
+    /// Seconds a signed callback journal stays valid for replay.
+    #[arg(long, default_value_t = DEFAULT_JOURNAL_TTL.as_secs(), env = "ERYX_JOURNAL_TTL_SECS")]
+    journal_ttl_secs: u64,
+
+    /// Ceiling on a request's execution timeout, in milliseconds. Larger
+    /// request values are clamped to it.
+    #[arg(long, default_value_t = 300_000, env = "ERYX_MAX_EXECUTION_TIMEOUT_MS")]
+    max_execution_timeout_ms: u64,
+
+    /// Ceiling on a request's callback timeout, in milliseconds.
+    #[arg(long, default_value_t = 300_000, env = "ERYX_MAX_CALLBACK_TIMEOUT_MS")]
+    max_callback_timeout_ms: u64,
+
+    /// Ceiling on a request's guest memory limit, in bytes.
+    #[arg(long, default_value_t = 512 * 1024 * 1024, env = "ERYX_MAX_MEMORY_BYTES")]
+    max_memory_bytes: u64,
+
+    /// Ceiling on a request's fuel budget. When set, it is also the budget for
+    /// requests that set none. Unset means no ceiling.
+    #[arg(long, env = "ERYX_MAX_FUEL")]
+    max_fuel: Option<u64>,
+
+    /// Ceiling on a request's callback invocation limit.
+    #[arg(long, default_value_t = 10_000, env = "ERYX_MAX_CALLBACK_INVOCATIONS")]
+    max_callback_invocations: u32,
+
+    /// Ceiling on a request's concurrent network connections.
+    #[arg(long, default_value_t = 100, env = "ERYX_MAX_CONNECTIONS")]
+    max_connections: u32,
+
+    /// Ceiling on a request's network I/O timeout, in milliseconds.
+    #[arg(long, default_value_t = 300_000, env = "ERYX_MAX_IO_TIMEOUT_MS")]
+    max_io_timeout_ms: u64,
+
+    /// Most stdout plus stderr bytes kept and streamed per execution; the rest
+    /// is dropped and the result marked `output_truncated`.
+    #[arg(long, default_value_t = 16 * 1024 * 1024, env = "ERYX_MAX_OUTPUT_BYTES")]
+    max_output_bytes: usize,
 
     /// Path to a PEM-encoded TLS certificate chain.
     ///
@@ -304,8 +345,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             eryx_server::replay::JournalSigner::random()
         }
     };
-    let service =
-        EryxService::with_signer(pool, signer).with_max_message_size(args.max_message_size);
+    let limits = ServerLimits {
+        max_execution_timeout: Duration::from_millis(args.max_execution_timeout_ms),
+        max_callback_timeout: Duration::from_millis(args.max_callback_timeout_ms),
+        max_memory_bytes: args.max_memory_bytes,
+        max_fuel: args.max_fuel,
+        max_callback_invocations: args.max_callback_invocations,
+        max_connections: args.max_connections,
+        max_io_timeout: Duration::from_millis(args.max_io_timeout_ms),
+        max_output_bytes: args.max_output_bytes,
+    };
+    tracing::info!(
+        ?limits,
+        journal_ttl_secs = args.journal_ttl_secs,
+        "request ceilings"
+    );
+    let service = EryxService::with_signer(pool, signer)
+        .with_max_message_size(args.max_message_size)
+        .with_limits(limits)
+        .with_journal_ttl(Duration::from_secs(args.journal_ttl_secs));
 
     // The overall ("") status starts as SERVING; the pool is already warm here.
     // Once shutdown starts the listener closes, so new probes fail to connect.

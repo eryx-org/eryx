@@ -167,6 +167,10 @@ message ParameterDeclaration {
 }
 
 // Resource limits for sandbox execution.
+//
+// Every value is clamped to the server's configured ceiling (the
+// `--max-*` flags), so a request can lower a limit but never raise it past the
+// operator's maximum. Values above a ceiling are clamped, not rejected.
 message ResourceLimits {
   // Maximum execution time in milliseconds (0 = default 30s).
   uint64 execution_timeout_ms = 1;
@@ -174,13 +178,14 @@ message ResourceLimits {
   // Maximum callback timeout in milliseconds (0 = default 10s).
   uint64 callback_timeout_ms = 2;
 
-  // Maximum memory in bytes (0 = default 128MB).
+  // Maximum guest memory in bytes (0 = default 128MB). Enforced: an allocation
+  // past it fails inside Python with MemoryError.
   uint64 max_memory_bytes = 3;
 
   // Maximum number of callback invocations (0 = default 1000).
   uint32 max_callback_invocations = 4;
 
-  // Maximum fuel/instructions (0 = unlimited).
+  // Maximum fuel/instructions (0 = the server's --max-fuel, unlimited if unset).
   uint64 max_fuel = 5;
 }
 
@@ -194,11 +199,13 @@ message NetworkConfig {
   // defaults rather than extending them. Resolved addresses are filtered
   // separately by blocked_networks.
   repeated string blocked_hosts = 2;
-  // Maximum concurrent connections (0 = default 10).
+  // Maximum concurrent connections (0 = default 10). Clamped to the server's
+  // --max-connections.
   uint32 max_connections = 3;
   // Connection timeout in milliseconds (0 = default 30s).
   uint64 connect_timeout_ms = 4;
-  // I/O read/write timeout in milliseconds (0 = default 60s).
+  // I/O read/write timeout in milliseconds (0 = default 60s). Clamped to the
+  // server's --max-io-timeout-ms.
   uint64 io_timeout_ms = 5;
   // When true, all non-blocked hosts are allowed (allowed_hosts is ignored).
   // When false (default), only hosts matching allowed_hosts are permitted.
@@ -319,7 +326,10 @@ message CallbackJournalEntry {
 // journals before execution with FAILED_PRECONDITION (except an empty, unsigned
 // journal starting a new session). The MAC covers
 // both the entries and the script code, so a journal cannot be replayed against
-// a different script.
+// a different script. It also covers the state snapshot the run started from,
+// the declared callback names and `expires_at_unix_secs`: a journal replays only
+// into the same script, starting state and callback set, and only until it
+// expires (the server's --journal-ttl-secs after signing).
 //
 // MATCHING: replay matches callbacks by (name, canonical args). Concurrent calls
 // with identical (name, args) are indistinguishable to replay; include a
@@ -327,10 +337,14 @@ message CallbackJournalEntry {
 message CallbackJournal {
   // Ordered callback invocations, in the order they were initiated.
   repeated CallbackJournalEntry entries = 1;
-  // HMAC-SHA256 over the journal entries + script code. Produced by the server
-  // using a configured signing key. Empty on the first request (no journal to
-  // sign yet); the server returns a signed journal in the result.
+  // HMAC-SHA256 over the journal entries, script code, starting state,
+  // callback names and expiry. Produced by the server using a configured
+  // signing key. Empty on the first request (no journal to sign yet); the
+  // server returns a signed journal in the result.
   bytes signature = 2;
+  // Unix time (seconds) after which the server rejects this journal. Set by
+  // the server when signing; echo it back unchanged.
+  uint64 expires_at_unix_secs = 3;
 }
 
 // Streaming output event from the sandbox.
@@ -410,6 +424,12 @@ message ExecuteResult {
   // snapshot could not be captured (state_snapshot is then empty and the
   // caller should keep its previous snapshot). Independent of `success`.
   string state_error = 13;
+
+  // True if stdout plus stderr exceeded the server's output cap
+  // (--max-output-bytes). Output past the cap was dropped, both from the
+  // OutputEvent stream and from `stdout`/`stderr`, and a truncation marker was
+  // appended to the stream that crossed it.
+  bool output_truncated = 14;
 }
 
 // Why an execution failed, when success is false.
