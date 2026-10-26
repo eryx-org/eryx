@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { Sandbox, setResultVariable } from "@bsull/eryx";
+import { Sandbox, execute, setResultVariable } from "@bsull/eryx";
 
 describe("Sandbox", () => {
   const sandbox = new Sandbox();
@@ -187,9 +187,22 @@ p = Point(3, 4)
   });
 
   it("honors a custom result variable name", async () => {
-    await setResultVariable("out");
+    await sandbox.setResultVariable("out");
     try {
       const result = await sandbox.execute("out = 42\nresult = 1");
+      expect(result.result).toBe(42);
+      // Other sandboxes keep their own name.
+      const other = await new Sandbox().execute("out = 42\nresult = 1");
+      expect(other.result).toBe(1);
+    } finally {
+      await sandbox.setResultVariable("result");
+    }
+  });
+
+  it("sets the default sandbox's result variable name", async () => {
+    await setResultVariable("out");
+    try {
+      const result = await execute("out = 42\nresult = 1");
       expect(result.result).toBe(42);
     } finally {
       await setResultVariable("result");

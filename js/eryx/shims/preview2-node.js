@@ -29,6 +29,7 @@ export const {
   terminalStdout,
 } = await load("cli");
 export const { monotonicClock, wallClock } = await load("clocks");
-export const { preopens, types, _setFileData } = await load("filesystem");
+export const { preopens, types, _setFileData, createFilesystem, InMemoryFilesystemAdapter } =
+  await load("filesystem");
 export const { error, poll, streams } = await load("io");
 export const { random } = await load("random");
