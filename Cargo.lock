@@ -1304,6 +1304,7 @@ dependencies = [
  "bitflags",
  "bytes",
  "cap-primitives",
+ "rustix",
  "serde",
  "serde_json",
  "tempfile",

@@ -775,7 +775,7 @@ impl<S: VfsStorage + Clone + 'static> types::HostDescriptor for HybridVfsState<'
                             crate::VfsError::from(e)
                         }
                     })?;
-                    self.ctx.track_open_host_file(restricted_sub.handle());
+                    self.ctx.track_open_host_file(restricted_sub.handle())?;
                     let new_real_dir = RealDir {
                         dir: restricted_sub,
                         dir_perms: dir.dir_perms,
@@ -831,7 +831,7 @@ impl<S: VfsStorage + Clone + 'static> types::HostDescriptor for HybridVfsState<'
                     })?;
 
                     let file = Arc::new(file);
-                    self.ctx.track_open_host_file(&file);
+                    self.ctx.track_open_host_file(&file)?;
                     let new_real_file = RealFile {
                         file,
                         perms: dir.file_perms,
@@ -1444,6 +1444,67 @@ mod tests {
         state.table.delete(stream).unwrap();
         open(&mut state, &mnt, "f", none, read).await.unwrap();
         HostDescriptor::drop(&mut state, dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn open_host_files_are_limited_across_contexts() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::write(temp.path().join("f"), b"x").unwrap();
+        let budget = Box::leak(Box::new(crate::hybrid::HostFileBudget::new(2)));
+        let read = types::DescriptorFlags::READ;
+        let none = types::OpenFlags::empty();
+
+        let mut a = real_ctx(temp.path(), |d| d).with_process_budget(budget);
+        let mut a_table = ResourceTable::new();
+        let mut a = HybridVfsState::new(&mut a, &mut a_table);
+        let a_mnt = preopen(&mut a, 0);
+        let mut b = real_ctx(temp.path(), |d| d).with_process_budget(budget);
+        let mut b_table = ResourceTable::new();
+        let mut b = HybridVfsState::new(&mut b, &mut b_table);
+        let b_mnt = preopen(&mut b, 0);
+
+        let first = open(&mut a, &a_mnt, "f", none, read).await.unwrap();
+        open(&mut b, &b_mnt, "f", none, read).await.unwrap();
+        // Each context is far below its own limit, but together they hold the
+        // whole shared budget.
+        let err = open(&mut b, &b_mnt, "f", none, read).await;
+        assert!(matches!(
+            err.map(drop).map_err(vfs_err),
+            Err(crate::VfsError::TooManyOpenFiles(_))
+        ));
+        HostDescriptor::drop(&mut a, first).unwrap();
+        open(&mut b, &b_mnt, "f", none, read).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn file_mount_honours_max_file_size() {
+        let temp = tempfile::tempdir().unwrap();
+        let host = temp.path().join("f");
+        std::fs::write(&host, b"").unwrap();
+        let mut ctx = HybridVfsCtx::new(storage());
+        ctx.add_real_file_preopen_path("/mnt/f", &host, DirPerms::all(), FilePerms::all(), Some(4))
+            .unwrap();
+        let mut table = ResourceTable::new();
+        let mut state = HybridVfsState::new(&mut ctx, &mut table);
+        let mnt = preopen(&mut state, 0);
+        let file = open(
+            &mut state,
+            &mnt,
+            "f",
+            types::OpenFlags::empty(),
+            types::DescriptorFlags::WRITE,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            state
+                .write(borrow(&file), b"1234".to_vec(), 0)
+                .await
+                .unwrap(),
+            4
+        );
+        assert!(state.write(borrow(&file), b"5".to_vec(), 4).await.is_err());
     }
 
     #[tokio::test]

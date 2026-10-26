@@ -192,6 +192,9 @@ impl<S: VfsStorage + Clone + 'static> types::HostDescriptor for VfsState<'_, S> 
             return Err(crate::VfsError::PermissionDenied("read".to_string()).into());
         }
         let path = descriptor.path.clone();
+        // Cap the guest-chosen length, as the other read paths do, so a
+        // storage backend never sizes a buffer from it.
+        let len = len.min(crate::streams::MAX_READ_CHUNK as u64);
         let data = self.ctx.storage.read_at(&path, offset, len).await?;
         let eof = data.len() < len as usize;
         Ok((data, eof))
@@ -606,6 +609,38 @@ mod tests {
     use std::sync::Arc;
     use types::HostDescriptor;
     use wasmtime::component::ResourceTable;
+
+    #[tokio::test]
+    async fn read_caps_its_length() {
+        let storage = Arc::new(InMemoryStorage::new());
+        storage.mkdir("/data").await.unwrap();
+        let size = crate::streams::MAX_READ_CHUNK + 10;
+        storage.write("/data/big", &vec![1u8; size]).await.unwrap();
+        let mut ctx = VfsCtx::new_empty(ArcStorage::new(storage));
+        ctx.preopen("/data", DirPerms::all(), FilePerms::all());
+        let mut table = ResourceTable::new();
+        let mut state = VfsState {
+            ctx: &mut ctx,
+            table: &mut table,
+        };
+        let dirs = preopens::Host::get_directories(&mut state).unwrap();
+        let file = state
+            .open_at(
+                Resource::new_borrow(dirs[0].0.rep()),
+                types::PathFlags::empty(),
+                "big".to_string(),
+                types::OpenFlags::empty(),
+                types::DescriptorFlags::READ,
+            )
+            .await
+            .unwrap();
+
+        let (data, eof) = state
+            .read(Resource::new_borrow(file.rep()), u64::MAX, 0)
+            .await
+            .unwrap();
+        assert_eq!((data.len(), eof), (crate::streams::MAX_READ_CHUNK, false));
+    }
 
     #[tokio::test]
     async fn open_at_enforces_preopen_perms_and_root() {

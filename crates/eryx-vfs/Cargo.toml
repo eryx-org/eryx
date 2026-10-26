@@ -24,6 +24,9 @@ wasmtime.workspace = true
 wasmtime-wasi.workspace = true
 wasmtime-wasi-io.workspace = true
 
+[target.'cfg(unix)'.dependencies]
+rustix.workspace = true
+
 [features]
 ## Derive serde `Serialize`/`Deserialize` on the snapshot types, enabling
 ## persistence of an `InMemoryStorage` snapshot to bytes.

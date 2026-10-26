@@ -9,7 +9,8 @@
 
 use std::collections::HashMap;
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, Weak};
 
 use cap_primitives::fs as capfs;
 
@@ -537,9 +538,11 @@ pub struct HybridVfsCtx<S: VfsStorage + Clone> {
     /// Host files and directories the guest has opened. A handle stays open
     /// while any descriptor or stream holds it, so dead entries are pruned
     /// when the count is checked.
-    open_host_files: Vec<std::sync::Weak<std::fs::File>>,
+    open_host_files: Vec<Weak<std::fs::File>>,
     /// Limit on `open_host_files`.
     max_open_host_files: usize,
+    /// Budget shared with every other context in the process.
+    process_budget: &'static HostFileBudget,
 }
 
 /// Default limit on host files and directories one guest can hold open at
@@ -548,6 +551,87 @@ pub struct HybridVfsCtx<S: VfsStorage + Clone> {
 /// Every open is a host file descriptor, and the process's descriptor limit is
 /// shared with everything else running in it.
 pub const DEFAULT_MAX_OPEN_HOST_FILES: usize = 256;
+
+/// Host files and directories open across every [`HybridVfsCtx`] in the
+/// process, so many concurrent guests can't exhaust the process's descriptor
+/// limit between them.
+static PROCESS_HOST_FILES: HostFileBudget = HostFileBudget::new(UNSET);
+
+/// `max` value meaning "derive the default on first use".
+const UNSET: usize = usize::MAX;
+
+/// Set how many host files and directories all guests in this process may
+/// hold open at once, summed over every [`HybridVfsCtx`]. Opens past the limit
+/// fail with the same quota error as the per-context
+/// [`with_max_open_host_files`](HybridVfsCtx::with_max_open_host_files) limit.
+///
+/// The default is half the process's soft `RLIMIT_NOFILE`, read the first time
+/// a guest opens a host file (on non-Unix platforms, or with no limit set,
+/// 4096). Passing `usize::MAX` restores that default.
+pub fn set_process_max_open_host_files(max: usize) {
+    PROCESS_HOST_FILES.max.store(max, Ordering::Relaxed);
+}
+
+/// The current process-wide limit; see [`set_process_max_open_host_files`].
+pub fn process_max_open_host_files() -> usize {
+    PROCESS_HOST_FILES.max()
+}
+
+/// Fallback process-wide limit when no descriptor limit can be read.
+const FALLBACK_PROCESS_MAX_OPEN_HOST_FILES: usize = 4096;
+
+fn default_process_max_open_host_files() -> usize {
+    #[cfg(unix)]
+    if let Some(soft) = rustix::process::getrlimit(rustix::process::Resource::Nofile).current {
+        return usize::try_from(soft / 2).unwrap_or(usize::MAX).max(1);
+    }
+    FALLBACK_PROCESS_MAX_OPEN_HOST_FILES
+}
+
+/// A limit on host handles shared by several contexts.
+pub(crate) struct HostFileBudget {
+    open: Mutex<Vec<Weak<std::fs::File>>>,
+    max: AtomicUsize,
+}
+
+impl HostFileBudget {
+    pub(crate) const fn new(max: usize) -> Self {
+        Self {
+            open: Mutex::new(Vec::new()),
+            max: AtomicUsize::new(max),
+        }
+    }
+
+    fn max(&self) -> usize {
+        match self.max.load(Ordering::Relaxed) {
+            UNSET => {
+                let max = default_process_max_open_host_files();
+                // A concurrent explicit set wins over the derived default.
+                let _ = self
+                    .max
+                    .compare_exchange(UNSET, max, Ordering::Relaxed, Ordering::Relaxed);
+                self.max.load(Ordering::Relaxed)
+            }
+            max => max,
+        }
+    }
+
+    /// Count `file` against the budget, or fail if it is used up.
+    fn admit(&self, file: &Arc<std::fs::File>) -> crate::VfsResult<()> {
+        let max = self.max();
+        // The list holds no invariant a panic could break, so a poisoned lock
+        // is still usable.
+        let mut open = self.open.lock().unwrap_or_else(|e| e.into_inner());
+        open.retain(|f| f.strong_count() > 0);
+        if open.len() >= max {
+            return Err(crate::VfsError::TooManyOpenFiles(format!(
+                "process-wide limit of {max} open host files reached"
+            )));
+        }
+        open.push(Arc::downgrade(file));
+        Ok(())
+    }
+}
 
 impl<S: VfsStorage + Clone> std::fmt::Debug for HybridVfsCtx<S> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -568,6 +652,7 @@ impl<S: VfsStorage + Clone> HybridVfsCtx<S> {
             preopens: Vec::new(),
             open_host_files: Vec::new(),
             max_open_host_files: DEFAULT_MAX_OPEN_HOST_FILES,
+            process_budget: &PROCESS_HOST_FILES,
         }
     }
 
@@ -592,9 +677,23 @@ impl<S: VfsStorage + Clone> HybridVfsCtx<S> {
         Ok(())
     }
 
-    /// Count a newly opened host handle against the limit.
-    pub(crate) fn track_open_host_file(&mut self, file: &Arc<std::fs::File>) {
+    /// Count a newly opened host handle against this context's limit and the
+    /// process-wide one. On error the caller drops `file`, closing it.
+    pub(crate) fn track_open_host_file(
+        &mut self,
+        file: &Arc<std::fs::File>,
+    ) -> crate::VfsResult<()> {
+        self.process_budget.admit(file)?;
         self.open_host_files.push(Arc::downgrade(file));
+        Ok(())
+    }
+
+    /// Share `budget` instead of the process-wide one, so tests can use a
+    /// small limit without affecting each other.
+    #[cfg(test)]
+    pub(crate) fn with_process_budget(mut self, budget: &'static HostFileBudget) -> Self {
+        self.process_budget = budget;
+        self
     }
 
     /// Add a VFS-managed preopen directory.
@@ -662,12 +761,14 @@ impl<S: VfsStorage + Clone> HybridVfsCtx<S> {
     /// The guest can read, write, replace or remove that file (as the
     /// permissions allow) but can't list, open or create anything else in the
     /// host directory. A `host_path` that is a symlink is resolved here, once.
+    /// `max_file_size` works as in [`RealDir::with_max_file_size`].
     pub fn add_real_file_preopen_path(
         &mut self,
         guest_path: impl Into<String>,
         host_path: impl AsRef<Path>,
         dir_perms: DirPerms,
         file_perms: FilePerms,
+        max_file_size: Option<u64>,
     ) -> std::io::Result<()> {
         // Resolve symlinks now: the mapped name is later opened without
         // following one.
@@ -715,7 +816,7 @@ impl<S: VfsStorage + Clone> HybridVfsCtx<S> {
             dir: restricted,
             dir_perms,
             file_perms,
-            max_file_size: None,
+            max_file_size,
         };
         self.add_real_preopen(guest_parent, dir);
         Ok(())
