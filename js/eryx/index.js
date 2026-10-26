@@ -13,159 +13,142 @@
  *   ```
  */
 
-// The jco-generated component, transpiled with `--instantiation async` so each
-// Sandbox gets its own instance and imports.
-import { instantiate } from "./eryx-sandbox.js";
-
-import {
-  environment,
-  exit,
-  stderr,
-  stdin,
-  stdout,
-  terminalInput,
-  terminalOutput,
-  terminalStderr,
-  terminalStdin,
-  terminalStdout,
-} from "#preview2/cli";
-import { monotonicClock, wallClock } from "#preview2/clocks";
-import { createFilesystem, InMemoryFilesystemAdapter } from "#preview2/filesystem";
-import { error, poll, streams } from "#preview2/io";
-import { random } from "#preview2/random";
-import * as sockets from "./shims/sockets.js";
-import { tcp, tls } from "./shims/net.js";
 import { createCallbackHost } from "./shims/callbacks.js";
+import { tcp, tls } from "./shims/net.js";
+import {
+  _fileTree,
+  decodeError,
+  encodeError,
+  forkTree,
+  getCoreModule,
+  instantiateSandbox,
+  isNode,
+} from "./instance.js";
 
-// Import stdlib loader
-import { loadStdlib } from "./stdlib-loader.js";
+export { _fileTree } from "./instance.js";
 
-// Load the Python stdlib once; every Sandbox gets its own copy-on-access view of it.
-const stdlibTree = await loadStdlib();
-
-// The stdlib tar extracts to python-stdlib/*, but the WASM expects
-// files at the root of the preopen (mounted as /python-stdlib).
-const stdlibDir = stdlibTree.dir?.["python-stdlib"] || stdlibTree;
-
-/**
- * The template file tree each new Sandbox copies: the stdlib and an empty
- * site-packages directory. Files added here are visible to sandboxes created
- * afterwards; use a Sandbox's own `_fileTree` to change one that exists.
- */
-export const _fileTree = {
-  dir: { "python-stdlib": stdlibDir, "site-packages": { dir: {} } },
-};
-
-/**
- * Copy a file tree for one instance. Directories are copied up front; a file's
- * bytes are copied the first time the instance touches them, so writes (which
- * the in-memory filesystem makes in place) never reach the template or another
- * instance, and untouched stdlib files cost nothing.
- * @param {Object} node
- * @returns {Object}
- */
-function forkTree(node) {
-  if (node.dir) {
-    const dir = {};
-    for (const [name, child] of Object.entries(node.dir)) dir[name] = forkTree(child);
-    return { ...node, dir };
+/** Rejects a call that ran past its Sandbox's `timeoutMs`. */
+export class TimeoutError extends Error {
+  /** @param {number} timeoutMs */
+  constructor(timeoutMs) {
+    super(`execution timed out after ${timeoutMs} ms`);
+    this.name = "TimeoutError";
   }
-  if (!("source" in node)) return { ...node };
-  const shared = node.source;
-  let own;
-  return {
-    get source() {
-      // Not `slice()`: on a Node Buffer that returns a view, not a copy.
-      return (own ??= typeof shared === "string" ? shared : new Uint8Array(shared));
-    },
-    set source(value) {
-      own = value;
-    },
-  };
 }
 
-const isNode =
-  typeof globalThis.process !== "undefined" &&
-  typeof globalThis.process.versions?.node !== "undefined";
-
-/** Compiled core modules, shared by every instance. */
-const _coreModules = new Map();
-
 /**
- * Compile (once) a core wasm module of the component.
- * @param {string} name
- * @returns {Promise<WebAssembly.Module>}
- */
-function getCoreModule(name) {
-  if (!_coreModules.has(name)) {
-    const url = new URL(`./${name}`, import.meta.url);
-    _coreModules.set(
-      name,
-      isNode
-        ? import(/* webpackIgnore: true */ "node:fs/promises").then(async (fs) =>
-            WebAssembly.compile(await fs.readFile(url)),
-          )
-        : WebAssembly.compileStreaming(fetch(url)),
-    );
-  }
-  return _coreModules.get(name);
-}
-
-const _sockets = {
-  "wasi:sockets/instance-network": sockets.instanceNetwork,
-  "wasi:sockets/ip-name-lookup": sockets.ipNameLookup,
-  "wasi:sockets/network": sockets.network,
-  "wasi:sockets/tcp": sockets.tcp,
-  "wasi:sockets/tcp-create-socket": sockets.tcpCreateSocket,
-  "wasi:sockets/udp": sockets.udp,
-  "wasi:sockets/udp-create-socket": sockets.udpCreateSocket,
-};
-
-/**
- * Instantiate the component with its own filesystem and callback imports, then
- * finish the pre-initialized interpreter's setup.
- * @param {Object} fileTree - The instance's own file tree
+ * Start a sandbox instance in its own Worker and return a proxy with the
+ * instance's methods, plus `terminate()`. The handlers, journal and network
+ * stay on this thread; the Worker forwards to them (see worker.js).
  * @param {ReturnType<typeof createCallbackHost>} host
  */
-async function _instantiate(fileTree, host) {
-  const fs = createFilesystem({
-    adapter: new InMemoryFilesystemAdapter(),
-    preopens: { "/": fileTree },
-  });
-  const cb = host.imports;
-  const instance = await instantiate(getCoreModule, {
-    invoke: { default: cb.invoke },
-    sleep: { default: cb.sleep },
-    "list-callbacks": { default: cb.listCallbacks },
-    "get-execution-options": { default: cb.getExecutionOptions },
-    "report-trace": { default: cb.reportTrace },
-    "report-output": { default: cb.reportOutput },
-    "eryx:net/tcp": tcp,
-    "eryx:net/tls": tls,
-    "wasi:cli/environment": environment,
-    "wasi:cli/exit": exit,
-    "wasi:cli/stderr": stderr,
-    "wasi:cli/stdin": stdin,
-    "wasi:cli/stdout": stdout,
-    "wasi:cli/terminal-input": terminalInput,
-    "wasi:cli/terminal-output": terminalOutput,
-    "wasi:cli/terminal-stderr": terminalStderr,
-    "wasi:cli/terminal-stdin": terminalStdin,
-    "wasi:cli/terminal-stdout": terminalStdout,
-    "wasi:clocks/monotonic-clock": monotonicClock,
-    "wasi:clocks/wall-clock": wallClock,
-    "wasi:filesystem/preopens": fs.preopens,
-    "wasi:filesystem/types": fs.types,
-    "wasi:io/error": error,
-    "wasi:io/poll": poll,
-    "wasi:io/streams": streams,
-    "wasi:random/random": random,
-    ..._sockets,
-  });
-  // The pre-initialized WASM has Python's core state baked in, but
-  // finalizePreinit() must still be called to finish setup.
-  instance.finalizePreinit();
-  return instance;
+async function instantiateInWorker(host) {
+  const url = new URL("./worker.js", import.meta.url);
+  const worker = isNode
+    ? // Not the parent's execArgv, which can hold `-e`/`--input-type` a Worker
+      // rejects. V8 flags such as --experimental-wasm-jspi are process-wide,
+      // so the Worker keeps them.
+      new (await import(/* webpackIgnore: true */ "node:worker_threads")).Worker(url, {
+        execArgv: [],
+      })
+    : new Worker(url, { type: "module" });
+  const targets = {
+    module: getCoreModule,
+    invoke: host.imports.invoke,
+    reportTrace: host.imports.reportTrace,
+    reportOutput: host.imports.reportOutput,
+    "tcp.connect": tcp.connect,
+    "tcp.read": tcp.read,
+    "tcp.write": tcp.write,
+    "tcp.close": tcp.close,
+    "tls.upgrade": tls.upgrade,
+    "tls.read": tls.read,
+    "tls.write": tls.write,
+    "tls.close": tls.close,
+  };
+
+  let nextId = 0;
+  const pending = new Map();
+  // An idle Worker mustn't keep Node running, but a busy one must.
+  const busy = (yes) => isNode && (yes ? worker.ref() : worker.unref());
+  let failure = null;
+  let ready;
+  const started = new Promise((resolve, reject) => (ready = { resolve, reject }));
+  const fail = (error) => {
+    failure ??= error;
+    ready.reject(failure);
+    for (const { reject } of pending.values()) reject(failure);
+    pending.clear();
+  };
+
+  const onMessage = async (message) => {
+    switch (message.type) {
+      case "ready":
+        busy(false);
+        ready.resolve();
+        break;
+      case "failed":
+        fail(decodeError(message));
+        break;
+      case "result": {
+        const call = pending.get(message.id);
+        pending.delete(message.id);
+        if (pending.size === 0) busy(false);
+        if ("value" in message) call?.resolve(message.value);
+        else call?.reject(decodeError(message));
+        break;
+      }
+      case "notify":
+        targets[message.target](...message.args);
+        break;
+      case "request":
+        try {
+          const value = await targets[message.target](...message.args);
+          worker.postMessage({ type: "reply", id: message.id, value });
+        } catch (e) {
+          worker.postMessage({ type: "reply", id: message.id, ...encodeError(e) });
+        }
+        break;
+    }
+  };
+  const onError = (e) => fail(e instanceof Error ? e : new Error(e.message ?? "sandbox worker failed"));
+  if (isNode) {
+    worker.on("message", onMessage);
+    worker.on("error", onError);
+    worker.on("exit", () => fail(new Error("sandbox worker exited")));
+  } else {
+    worker.addEventListener("message", (e) => onMessage(e.data));
+    worker.addEventListener("error", onError);
+  }
+
+  const call = (method, ...args) => {
+    if (failure) return Promise.reject(failure);
+    const id = nextId++;
+    busy(true);
+    worker.postMessage({
+      type: "call",
+      id,
+      method,
+      args,
+      callbacks: host.imports.listCallbacks(),
+      options: host.imports.getExecutionOptions(),
+    });
+    return new Promise((resolve, reject) => pending.set(id, { resolve, reject }));
+  };
+
+  await started;
+  return {
+    execute: (code) => call("execute", code),
+    snapshotState: () => call("snapshotState"),
+    restoreState: (data) => call("restoreState", data),
+    clearState: () => call("clearState"),
+    setResultVariable: (name) => call("setResultVariable", name),
+    /** Stop the Worker, rejecting anything still pending with `error`. */
+    terminate(error) {
+      fail(error);
+      worker.terminate();
+    },
+  };
 }
 
 // Re-export callback configuration
@@ -264,6 +247,12 @@ function _toResult(output) {
  * @property {Array<{name: string, description: string, parametersSchemaJson?: string}>} [callbacks]
  * @property {((lineno: number, eventJson: string, contextJson: string) => void) | null} [traceHandler]
  * @property {((stream: number, data: string) => void) | null} [outputHandler]
+ * @property {number} [timeoutMs] - Run the sandbox in its own Worker and
+ *   reject any call that takes longer than this many milliseconds with a
+ *   {@link TimeoutError}. The Worker is then terminated and replaced, so the
+ *   sandbox's Python state is lost. The deadline is wall-clock time, including
+ *   callbacks; instantiation doesn't count. The Worker costs about 70 MB.
+ *   Without it, nothing interrupts a call.
  */
 
 /**
@@ -276,8 +265,10 @@ function _toResult(output) {
  *
  * The compiled code is shared, but every instance has its own linear memory
  * (the pre-initialized interpreter image plus whatever the code allocates), so
- * each live Sandbox costs tens of megabytes. Drop references to sandboxes you
- * no longer need so they can be garbage collected.
+ * each live Sandbox costs tens of megabytes (about 20 MB idle on Node.js 24).
+ * One created with `timeoutMs` also runs in its own Worker, which adds about
+ * 70 MB. Drop references to sandboxes you no longer need so they can be
+ * garbage collected.
  *
  * @example
  * const sandbox = new Sandbox();
@@ -293,7 +284,9 @@ function _toResult(output) {
 export class Sandbox {
   /** @type {ReturnType<typeof createCallbackHost>} */
   #host;
-  /** @type {Promise<Awaited<ReturnType<typeof _instantiate>>>} */
+  /** @type {number | undefined} */
+  #timeoutMs;
+  /** @type {Promise<any>} */
   #instance;
   // The tail of the queue of calls into this instance. Each call starts only
   // after the previous one settles, so executions never overlap: the journal
@@ -308,14 +301,27 @@ export class Sandbox {
    * @param {SandboxOptions} [options]
    */
   constructor(options = {}) {
+    const { timeoutMs } = options;
+    if (timeoutMs !== undefined && !(Number.isFinite(timeoutMs) && timeoutMs > 0)) {
+      throw new TypeError("timeoutMs must be a positive number of milliseconds");
+    }
+    this.#timeoutMs = timeoutMs;
     /**
      * This sandbox's own file tree (a copy of the module's `_fileTree`).
      * Changes to it are visible to the sandbox's next filesystem access.
+     * Undefined for a sandbox with `timeoutMs`, whose files live in its Worker.
      * @internal For the demo app and advanced integrations.
      */
-    this._fileTree = forkTree(_fileTree);
+    this._fileTree = timeoutMs === undefined ? forkTree(_fileTree) : undefined;
     this.#host = createCallbackHost(options);
-    this.#instance = _instantiate(this._fileTree, this.#host);
+    this.#start();
+  }
+
+  #start() {
+    this.#instance =
+      this.#timeoutMs === undefined
+        ? instantiateSandbox(this._fileTree, this.#host.imports)
+        : instantiateInWorker(this.#host);
     // Surfaced by the first call instead.
     this.#instance.catch(() => {});
   }
@@ -323,19 +329,42 @@ export class Sandbox {
   /**
    * Run `fn` on the instance once every call queued before it has settled.
    * @template T
-   * @param {(instance: Awaited<ReturnType<typeof _instantiate>>) => Promise<T>} fn
+   * @param {(instance: any) => Promise<T>} fn
    * @returns {Promise<T>}
    */
   #serialized(fn) {
-    const run = this.#queue.then(() => this.#instance).then(fn);
+    const run = this.#queue.then(() => this.#call(fn));
     this.#queue = run.catch(() => {});
     return run;
   }
 
   /**
+   * Run `fn` on the instance, under the deadline if there is one. On timeout,
+   * the Worker is terminated and a fresh one started for later calls.
+   * @template T
+   * @param {(instance: any) => Promise<T>} fn
+   * @returns {Promise<T>}
+   */
+  async #call(fn) {
+    const instance = await this.#instance;
+    if (this.#timeoutMs === undefined) return fn(instance);
+    // Terminating the Worker rejects the call in flight with the TimeoutError,
+    // which executeWithJournal() then reports like any other failure.
+    const timer = setTimeout(() => {
+      instance.terminate(new TimeoutError(this.#timeoutMs));
+      this.#start();
+    }, this.#timeoutMs);
+    try {
+      return await fn(instance);
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  /**
    * Run code, flushing streamed output when it finishes. Callers must hold the
    * queue, so the flush can't cut into another execution's output.
-   * @param {Awaited<ReturnType<typeof _instantiate>>} instance
+   * @param {any} instance
    * @param {string} code
    * @returns {Promise<ExecuteResult>}
    */

@@ -163,6 +163,23 @@ for i in range(5):
 `);
 ```
 
+### Timeouts
+
+Nothing interrupts a call by default, so `while True: pass` never returns. Pass `timeoutMs` to run the sandbox in its own Worker (`worker_threads` in Node.js) that is terminated when a call runs too long:
+
+```js
+import { Sandbox, TimeoutError } from "@bsull/eryx";
+
+const sandbox = new Sandbox({ timeoutMs: 5_000 });
+try {
+  await sandbox.execute("while True: pass");
+} catch (e) {
+  console.log(e instanceof TimeoutError); // true
+}
+```
+
+The call rejects with a `TimeoutError` (or `executeWithJournal()` reports it as `outcome.error`) and the sandbox starts over with fresh Python state. Callbacks, output and networking still run on the creating thread. The Worker costs about 70 MB on top of the sandbox's own memory, and the sandbox's `_fileTree` isn't available.
+
 ### Node.js and the WASI shims
 
 Under Node.js, eryx loads the in-memory (browser) build of `@bytecodealliance/preview2-shim`, because the Node.js build backs WASI with the real filesystem. Each sandbox gets its own in-memory filesystem, so state set through the shim's module-wide functions (such as `_setFileData()`) never reaches a sandbox.
@@ -189,7 +206,7 @@ export default defineConfig({
 
 | Method | Returns | Description |
 |--------|---------|-------------|
-| `new Sandbox(options?)` | `Sandbox` | Create an isolated sandbox; `options` can set its own `callbackHandler`, `callbacks`, `traceHandler` and `outputHandler` |
+| `new Sandbox(options?)` | `Sandbox` | Create an isolated sandbox; `options` can set its own `callbackHandler`, `callbacks`, `traceHandler`, `outputHandler` and `timeoutMs` |
 | `execute(code)` | `Promise<{ stdout, stderr }>` | Run Python code |
 | `executeWithJournal(code, { journal? })` | `Promise<ReplayOutcome>` | Run with callback journaling/replay |
 | `setResultVariable(name)` | `Promise<void>` | Change the captured result variable |
@@ -197,7 +214,7 @@ export default defineConfig({
 | `restoreState(data)` | `Promise<void>` | Restore from snapshot |
 | `clearState()` | `Promise<void>` | Reset all user state |
 
-Each `Sandbox` is its own WebAssembly instance, with its own interpreter, filesystem, callbacks and journal; code in one can't see another's state. The compiled code is shared, but each instance has its own memory (tens of megabytes), so drop sandboxes you no longer need. The module-level `execute()`, `executeWithJournal()` and `setResultVariable()` use one default sandbox, created on first use.
+Each `Sandbox` is its own WebAssembly instance, with its own interpreter, filesystem, callbacks and journal; code in one can't see another's state. The compiled code is shared, but each instance has its own memory (about 20 MB idle on Node.js 24), so drop sandboxes you no longer need. The module-level `execute()`, `executeWithJournal()` and `setResultVariable()` use one default sandbox, created on first use.
 
 Calls on one sandbox run one at a time, in call order: a call made while another is running waits for it to finish. So don't await `execute()` on the same sandbox from inside its callback handler, since it would wait on the execution that called the handler. Different sandboxes run independently.
 
