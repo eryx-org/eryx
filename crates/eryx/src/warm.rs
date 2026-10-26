@@ -64,7 +64,22 @@ impl Slot {
 pub(crate) struct WarmPool {
     /// Instances to keep ready per component; `0` disables the pool.
     target: usize,
-    slots: Mutex<HashMap<usize, Slot>>,
+    slots: Mutex<Slots>,
+}
+
+/// The slots of the process that filled them.
+struct Slots {
+    pid: u32,
+    map: HashMap<usize, Slot>,
+}
+
+impl Slots {
+    fn new() -> Self {
+        Self {
+            pid: std::process::id(),
+            map: HashMap::new(),
+        }
+    }
 }
 
 impl WarmPool {
@@ -97,9 +112,26 @@ impl WarmPool {
             };
             WarmPool {
                 target,
-                slots: Mutex::new(HashMap::new()),
+                slots: Mutex::new(Slots::new()),
             }
         })
+    }
+
+    /// Lock the slots, starting empty in a forked child.
+    ///
+    /// A child inherits the parent's warm stores and refill counts but none
+    /// of the threads finishing them, so it would never refill a slot and
+    /// would reuse stores cloned from the parent. The inherited stores are
+    /// leaked rather than dropped: their teardown belongs to the parent.
+    fn lock_slots(&self) -> Option<std::sync::MutexGuard<'_, Slots>> {
+        let mut slots = self.slots.lock().ok()?;
+        let pid = std::process::id();
+        if slots.pid != pid {
+            std::mem::forget(std::mem::take(&mut slots.map));
+            slots.pid = pid;
+            RETIRING.store(0, Ordering::Relaxed);
+        }
+        Some(slots)
     }
 
     /// Whether this call site can use the pool.
@@ -121,8 +153,8 @@ impl WarmPool {
         if !self.active() {
             return None;
         }
-        let mut slots = self.slots.lock().ok()?;
-        let slot = slots.get_mut(&key(pre))?;
+        let mut slots = self.lock_slots()?;
+        let slot = slots.map.get_mut(&key(pre))?;
         slot.last_used = Instant::now();
         let ready = &mut slot.ready;
         let baseline = ready
@@ -139,10 +171,8 @@ impl WarmPool {
 
     /// Number of ready instances for `pre`.
     pub(crate) fn ready(&self, pre: &SandboxPre<ExecutorState>) -> usize {
-        self.slots
-            .lock()
-            .ok()
-            .and_then(|slots| slots.get(&key(pre)).map(|slot| slot.ready.len()))
+        self.lock_slots()
+            .and_then(|slots| slots.map.get(&key(pre)).map(|slot| slot.ready.len()))
             .unwrap_or(0)
     }
 
@@ -208,9 +238,10 @@ impl WarmPool {
     /// one; its instances are returned so the caller can drop them off the
     /// request path.
     fn reserve(&'static self, key: usize) -> (Option<Reservation>, Vec<WarmInstance>) {
-        let Ok(mut slots) = self.slots.lock() else {
+        let Some(mut guard) = self.lock_slots() else {
             return (None, Vec::new());
         };
+        let slots = &mut guard.map;
         let mut evicted = Vec::new();
         if !slots.contains_key(&key) && slots.len() >= Self::MAX_COMPONENTS {
             let oldest = slots
@@ -275,8 +306,8 @@ struct Reservation {
 
 impl Reservation {
     fn fulfil(self, instance: WarmInstance) {
-        if let Ok(mut slots) = self.pool.slots.lock()
-            && let Some(slot) = slots.get_mut(&self.key)
+        if let Some(mut slots) = self.pool.lock_slots()
+            && let Some(slot) = slots.map.get_mut(&self.key)
         {
             slot.ready.push(instance);
         }
@@ -284,8 +315,8 @@ impl Reservation {
     }
 
     fn mark_unsupported(self) {
-        if let Ok(mut slots) = self.pool.slots.lock()
-            && let Some(slot) = slots.get_mut(&self.key)
+        if let Some(mut slots) = self.pool.lock_slots()
+            && let Some(slot) = slots.map.get_mut(&self.key)
         {
             slot.unsupported = true;
         }
@@ -294,8 +325,8 @@ impl Reservation {
 
 impl Drop for Reservation {
     fn drop(&mut self) {
-        if let Ok(mut slots) = self.pool.slots.lock()
-            && let Some(slot) = slots.get_mut(&self.key)
+        if let Some(mut slots) = self.pool.lock_slots()
+            && let Some(slot) = slots.map.get_mut(&self.key)
         {
             slot.pending = slot.pending.saturating_sub(1);
         }
@@ -327,7 +358,7 @@ mod tests {
     fn a_dropped_reservation_lets_the_slot_be_refilled() {
         let pool: &'static WarmPool = Box::leak(Box::new(WarmPool {
             target: 1,
-            slots: Mutex::new(HashMap::new()),
+            slots: Mutex::new(Slots::new()),
         }));
 
         let (reservation, _) = pool.reserve(7);
@@ -339,6 +370,30 @@ mod tests {
 
         drop(reservation);
         assert!(pool.reserve(7).0.is_some());
+    }
+
+    /// A forked child starts with empty slots instead of the parent's
+    /// stores and in-flight refills.
+    #[test]
+    fn a_forked_child_starts_with_empty_slots() {
+        let pool: &'static WarmPool = Box::leak(Box::new(WarmPool {
+            target: 1,
+            slots: Mutex::new(Slots::new()),
+        }));
+
+        let (reservation, _) = pool.reserve(7);
+        assert!(reservation.is_some());
+        std::mem::forget(reservation);
+        assert!(pool.reserve(7).0.is_none(), "a refill is in flight");
+
+        // What a child sees: state recorded under its parent's pid.
+        if let Ok(mut slots) = pool.slots.lock() {
+            slots.pid = std::process::id().wrapping_add(1);
+        }
+        assert!(
+            pool.reserve(7).0.is_some(),
+            "the parent's in-flight refill does not block the child"
+        );
     }
 
     /// Stores beyond the cap are not queued for the blocking pool.
@@ -358,7 +413,7 @@ mod tests {
     fn an_unsupported_component_is_not_reserved_again() {
         let pool: &'static WarmPool = Box::leak(Box::new(WarmPool {
             target: 1,
-            slots: Mutex::new(HashMap::new()),
+            slots: Mutex::new(Slots::new()),
         }));
 
         let (reservation, _) = pool.reserve(7);
