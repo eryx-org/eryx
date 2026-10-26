@@ -206,11 +206,12 @@ echo ""
 """
 
 [tasks.check-embedded-cache]
-description = "Check embedded runtime cache in /tmp/eryx-embedded"
+description = "Check embedded runtime cache in ~/.cache/eryx"
 run = """
 echo "━━━ Embedded Runtime Cache ━━━"
 
-CACHE_DIR="${TMPDIR:-/tmp}/eryx-embedded"
+CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/eryx"
+[[ -d "$CACHE_DIR" ]] || CACHE_DIR="${TMPDIR:-/tmp}/eryx-$(id -u)"
 
 if [[ ! -d "$CACHE_DIR" ]]; then
     echo "✓ No embedded cache directory (will be created on first use)"
@@ -235,10 +236,11 @@ else
     fi
 
     # Check stdlib
-    if [[ -d "$CACHE_DIR/python-stdlib" ]]; then
-        STDLIB_SIZE=$(du -sh "$CACHE_DIR/python-stdlib" 2>/dev/null | cut -f1)
-        echo "Python stdlib: $STDLIB_SIZE"
-    fi
+    for STDLIB_DIR in "$CACHE_DIR"/python-stdlib-*; do
+        [[ -d "$STDLIB_DIR" ]] || continue
+        STDLIB_SIZE=$(du -sh "$STDLIB_DIR" 2>/dev/null | cut -f1)
+        echo "Python stdlib ($(basename "$STDLIB_DIR")): $STDLIB_SIZE"
+    done
 
     # Total size
     TOTAL_SIZE=$(du -sh "$CACHE_DIR" 2>/dev/null | cut -f1)
@@ -405,7 +407,7 @@ rm -rf crates/eryx-wasm-runtime/tests/site-packages
 rm -f crates/eryx-wasm-runtime/target/liberyx_runtime.so
 
 echo "Removing system temp extracted resources..."
-rm -rf "${TMPDIR:-/tmp}/eryx-embedded"
+rm -rf "${XDG_CACHE_HOME:-$HOME/.cache}/eryx" "${TMPDIR:-/tmp}/eryx-$(id -u)"
 
 echo "Removing late-linking artifacts from cargo OUT_DIR..."
 find target -path "*/build/eryx-runtime-*/out/*.so.zst" -delete 2>/dev/null || true

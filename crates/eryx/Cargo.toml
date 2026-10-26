@@ -133,6 +133,9 @@ zip.workspace = true
 # Embedded runtime/stdlib (optional)
 zstd = { workspace = true, optional = true }
 
+[target.'cfg(unix)'.dependencies]
+rustix.workspace = true
+
 [features]
 default = []
 # Proc macro for simplified callback definitions.

@@ -1953,7 +1953,7 @@ impl<R, S> SandboxBuilder<R, S> {
     ///
     /// For packages containing native extensions (like numpy), the extensions are
     /// automatically registered for late-linking. A cache is set up automatically
-    /// at `$TMPDIR/eryx-cache` for fast subsequent sandbox creations:
+    /// in the per-user eryx cache directory for fast subsequent sandbox creations:
     ///
     /// ```rust,ignore
     /// let sandbox = Sandbox::builder()
@@ -2218,11 +2218,16 @@ impl SandboxBuilder<state::Has, state::Has> {
             && self.filesystem_cache.is_none()
             && self.cache.is_none()
         {
-            let default_cache_dir = std::env::temp_dir().join("eryx-cache");
-            if let Ok(cache) = crate::cache::FilesystemCache::new(&default_cache_dir) {
-                tracing::debug!(path = %default_cache_dir.display(), "Using default cache directory");
-                self.filesystem_cache = Some(cache.clone());
-                self.cache = Some(Arc::new(cache));
+            match crate::cache::default_cache_root().and_then(|root| {
+                crate::cache::FilesystemCache::new(root.join("components"))
+                    .map_err(|e| Error::Initialization(e.to_string()))
+            }) {
+                Ok(cache) => {
+                    tracing::debug!(?cache, "Using default cache directory");
+                    self.filesystem_cache = Some(cache.clone());
+                    self.cache = Some(Arc::new(cache));
+                }
+                Err(e) => tracing::warn!(error = %e, "Component cache disabled"),
             }
         }
 

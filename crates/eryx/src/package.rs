@@ -16,9 +16,9 @@
 //!     .build()?;
 //!
 //! // Package with native extensions - auto late-links
+//! // (cached automatically in the per-user eryx cache directory)
 //! let sandbox = Sandbox::builder()
 //!     .with_package("/path/to/numpy-wasi.tar.gz")?
-//!     .with_cache_dir("/tmp/cache")?
 //!     .build()?;
 //! ```
 

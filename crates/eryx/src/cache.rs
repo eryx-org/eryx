@@ -19,7 +19,9 @@
 //!
 //! - Key: [`CacheKey`] (same as Tier 1)
 //! - Lifetime: Persistent (filesystem) or process duration (in-memory)
-//! - Use: User-configured via [`FilesystemCache`] or [`InMemoryCache`]
+//! - Use: User-configured via [`FilesystemCache`] or [`InMemoryCache`]; native
+//!   extensions get a [`FilesystemCache`] in the per-user eryx cache directory
+//!   by default
 //!
 //! # Cache Flow
 //!
@@ -35,7 +37,7 @@
 //! ```rust,ignore
 //! use eryx::{Sandbox, cache::FilesystemCache};
 //!
-//! let cache = FilesystemCache::new("/tmp/eryx-cache")?;
+//! let cache = FilesystemCache::new("/var/cache/my-app/eryx")?;
 //!
 //! // First call: ~1000ms (link + compile + cache)
 //! let sandbox1 = Sandbox::builder()
@@ -255,6 +257,116 @@ fn hex_encode(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
+/// The per-user directory eryx keeps its on-disk caches in.
+///
+/// This is the first of `$XDG_CACHE_HOME/eryx`, the platform cache directory
+/// (`~/.cache/eryx`, `~/Library/Caches/eryx`, `%LOCALAPPDATA%\eryx`) and a
+/// temp-dir fallback (`$TMPDIR/eryx-<uid>` on Unix) that can be created and
+/// passes the same checks as [`FilesystemCache::new`]. Resolved once per
+/// process.
+pub(crate) fn default_cache_root() -> Result<&'static Path, crate::Error> {
+    static ROOT: OnceLock<Result<PathBuf, String>> = OnceLock::new();
+    ROOT.get_or_init(|| {
+        let mut errors = Vec::new();
+        for candidate in cache_root_candidates() {
+            match ensure_private_dir(&candidate) {
+                Ok(dir) => return Ok(dir),
+                Err(e) => errors.push(format!("{}: {e}", candidate.display())),
+            }
+        }
+        Err(format!("no usable cache directory ({})", errors.join("; ")))
+    })
+    .as_deref()
+    .map_err(|e| crate::Error::Initialization(e.clone()))
+}
+
+fn cache_root_candidates() -> Vec<PathBuf> {
+    let env_dir = |name: &str| {
+        std::env::var_os(name)
+            .map(PathBuf::from)
+            .filter(|path| path.is_absolute())
+    };
+    let mut candidates = Vec::new();
+    if let Some(dir) = env_dir("XDG_CACHE_HOME") {
+        candidates.push(dir.join("eryx"));
+    }
+    #[cfg(windows)]
+    if let Some(dir) = env_dir("LOCALAPPDATA") {
+        candidates.push(dir.join("eryx"));
+    }
+    #[cfg(target_os = "macos")]
+    if let Some(home) = env_dir("HOME") {
+        candidates.push(home.join("Library/Caches/eryx"));
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    if let Some(home) = env_dir("HOME") {
+        candidates.push(home.join(".cache/eryx"));
+    }
+    #[cfg(unix)]
+    candidates
+        .push(std::env::temp_dir().join(format!("eryx-{}", rustix::process::geteuid().as_raw())));
+    #[cfg(not(unix))]
+    candidates.push(std::env::temp_dir().join("eryx"));
+    candidates
+}
+
+/// Create `dir` if needed and check that only the current user can write to
+/// it. Returns the canonical path, so later lookups can't be redirected by
+/// swapping a symlink.
+///
+/// New directories are created with mode `0700` on Unix. Existing ones must be
+/// owned by the current user and not group- or world-writable. On other
+/// platforms the directory is only created.
+pub(crate) fn ensure_private_dir(dir: &Path) -> io::Result<PathBuf> {
+    if let Some(parent) = dir.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let mut builder = fs::DirBuilder::new();
+    #[cfg(unix)]
+    std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
+    match builder.create(dir) {
+        Ok(()) => {}
+        Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
+        Err(e) => return Err(e),
+    }
+    let dir = fs::canonicalize(dir)?;
+    let meta = fs::metadata(&dir)?;
+    if !meta.is_dir() {
+        return Err(io::Error::other("not a directory"));
+    }
+    if !is_private(&meta) {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "directory is owned by another user or writable by other users",
+        ));
+    }
+    Ok(dir)
+}
+
+/// Whether a file or directory is owned by the current user and not group- or
+/// world-writable. Always true on platforms without Unix permissions.
+pub(crate) fn is_private(meta: &fs::Metadata) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        meta.uid() == rustix::process::geteuid().as_raw() && meta.mode() & 0o022 == 0
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = meta;
+        true
+    }
+}
+
+/// Create a new file readable and writable only by the current user.
+fn create_private_file(path: &Path) -> io::Result<fs::File> {
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+    options.open(path)
+}
+
 /// Filesystem-based component cache.
 ///
 /// Caches pre-compiled components as `.cwasm` files in a directory.
@@ -265,7 +377,7 @@ fn hex_encode(bytes: &[u8]) -> String {
 /// ```rust,ignore
 /// use eryx::cache::FilesystemCache;
 ///
-/// let cache = FilesystemCache::new("/tmp/eryx-cache")?;
+/// let cache = FilesystemCache::new("/var/cache/my-app/eryx")?;
 /// ```
 #[derive(Debug, Clone)]
 pub struct FilesystemCache {
@@ -275,26 +387,30 @@ pub struct FilesystemCache {
 impl FilesystemCache {
     /// Create a new filesystem cache at the given directory.
     ///
-    /// Creates the directory if it doesn't exist.
+    /// Creates the directory (mode `0700` on Unix) if it doesn't exist.
+    /// On Unix the directory must be owned by the current user and not be
+    /// group- or world-writable, since its entries are loaded as native code.
     ///
     /// # Errors
     ///
-    /// Returns an error if the directory cannot be created.
+    /// Returns an error if the directory cannot be created, or if it is owned
+    /// by another user or writable by other users.
     pub fn new(cache_dir: impl AsRef<Path>) -> Result<Self, CacheError> {
-        let cache_dir = cache_dir.as_ref().to_path_buf();
-        fs::create_dir_all(&cache_dir)?;
+        let cache_dir = ensure_private_dir(cache_dir.as_ref())?;
         Ok(Self { cache_dir })
     }
 
     /// Get the file path for a cache entry (for mmap-based loading).
     ///
     /// Returns `Some(path)` if the cache entry exists, `None` otherwise.
+    /// Entries owned by another user or writable by other users are ignored.
     /// Using the file path directly with `Component::deserialize_file`
     /// enables memory-mapped loading which is faster for large components.
     #[must_use]
     pub fn get_path(&self, key: &CacheKey) -> Option<PathBuf> {
         let path = self.cache_path(key);
-        if path.exists() { Some(path) } else { None }
+        let meta = fs::symlink_metadata(&path).ok()?;
+        (meta.is_file() && is_private(&meta)).then_some(path)
     }
 
     /// Get the path for a cache entry.
@@ -305,8 +421,16 @@ impl FilesystemCache {
 
 impl ComponentCache for FilesystemCache {
     fn get(&self, key: &CacheKey) -> Option<Vec<u8>> {
-        let path = self.cache_path(key);
-        fs::read(&path).ok()
+        use std::io::Read;
+
+        let mut file = fs::File::open(self.cache_path(key)).ok()?;
+        let meta = file.metadata().ok()?;
+        if !(meta.is_file() && is_private(&meta)) {
+            return None;
+        }
+        let mut bytes = Vec::new();
+        file.read_to_end(&mut bytes).ok()?;
+        Some(bytes)
     }
 
     fn put(&self, key: &CacheKey, precompiled: Vec<u8>) -> Result<(), CacheError> {
@@ -321,7 +445,7 @@ impl ComponentCache for FilesystemCache {
             std::process::id(),
             rand::random::<u64>()
         ));
-        let written = fs::File::create(&temp_path).and_then(|mut file| {
+        let written = create_private_file(&temp_path).and_then(|mut file| {
             file.write_all(&precompiled)?;
             file.sync_all()?;
             fs::rename(&temp_path, &path)
@@ -688,6 +812,44 @@ mod tests {
 
         // Clean up
         let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn filesystem_cache_dir_must_be_private() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let fresh = temp_dir.path().join("fresh");
+        FilesystemCache::new(&fresh).unwrap();
+        let mode = fs::metadata(&fresh).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o700);
+
+        let shared = temp_dir.path().join("shared");
+        fs::create_dir(&shared).unwrap();
+        fs::set_permissions(&shared, fs::Permissions::from_mode(0o777)).unwrap();
+        assert!(FilesystemCache::new(&shared).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn filesystem_cache_skips_entries_writable_by_others() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let cache = FilesystemCache::new(temp_dir.path()).unwrap();
+        let key = CacheKey {
+            extensions_hash: [5u8; 32],
+            eryx_version: "0.1.0",
+            wasmtime_version: "39.0.0",
+        };
+        cache.put(&key, vec![1, 2, 3]).unwrap();
+        assert!(cache.get(&key).is_some());
+        assert!(cache.get_path(&key).is_some());
+
+        fs::set_permissions(cache.cache_path(&key), fs::Permissions::from_mode(0o666)).unwrap();
+        assert!(cache.get(&key).is_none());
+        assert!(cache.get_path(&key).is_none());
     }
 
     #[test]

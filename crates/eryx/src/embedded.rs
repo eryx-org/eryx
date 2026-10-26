@@ -2,8 +2,15 @@
 //!
 //! This module provides automatic extraction and caching of embedded resources:
 //!
-//! - **Python stdlib**: Compressed stdlib extracted to a temp directory on first use
+//! - **Python stdlib**: Compressed stdlib extracted to the cache directory on first use
 //! - **Pre-compiled runtime**: Written to disk for mmap-based loading (10x less memory)
+//!
+//! Both go into a per-user cache directory: `$XDG_CACHE_HOME/eryx`, else the
+//! platform cache directory (`~/.cache/eryx`, `~/Library/Caches/eryx`,
+//! `%LOCALAPPDATA%\eryx`), else `$TMPDIR/eryx-<uid>`. On Unix the directory is
+//! created with mode `0700` and must be owned by the current user and not be
+//! writable by others. An extracted runtime is compared against the embedded
+//! bytes before it is used, and rewritten if it differs.
 //!
 //! # Features
 //!
@@ -59,7 +66,7 @@ pub struct EmbeddedResources {
     /// Path to the pre-compiled runtime file (for mmap loading).
     pub runtime_path: PathBuf,
 
-    /// The temp directory (kept alive to prevent cleanup).
+    /// The cache directory the resources were extracted to.
     #[allow(dead_code)]
     temp_dir: PathBuf,
 }
@@ -67,8 +74,9 @@ pub struct EmbeddedResources {
 impl EmbeddedResources {
     /// Get the embedded resources, extracting them on first call.
     ///
-    /// Resources are extracted to a persistent temp directory that survives
-    /// for the lifetime of the process. Subsequent calls return the same paths.
+    /// Resources are extracted to the per-user cache directory described in
+    /// the [module docs](self) and reused by later processes. Subsequent calls
+    /// return the same paths.
     ///
     /// # Errors
     ///
@@ -82,11 +90,9 @@ impl EmbeddedResources {
             .map_err(|e| Error::Initialization(e.clone()))
     }
 
-    /// Extract all embedded resources to a temp directory.
+    /// Extract all embedded resources to the cache directory.
     fn extract() -> Result<Self, Error> {
-        let temp_base = std::env::temp_dir().join("eryx-embedded");
-        std::fs::create_dir_all(&temp_base)
-            .map_err(|e| Error::Initialization(format!("Failed to create temp directory: {e}")))?;
+        let temp_base = crate::cache::default_cache_root()?.to_path_buf();
 
         // Delegate stdlib extraction to EmbeddedStdlib (shared with embedded-stdlib feature)
         let stdlib = EmbeddedStdlib::get()?;
@@ -100,7 +106,7 @@ impl EmbeddedResources {
         })
     }
 
-    /// Extract the embedded runtime to the temp directory.
+    /// Extract the embedded runtime to the cache directory.
     fn extract_runtime(temp_dir: &Path) -> Result<PathBuf, Error> {
         // Include version AND content hash in filename to handle both version upgrades
         // and development rebuilds (where version stays the same but content changes)
@@ -108,8 +114,9 @@ impl EmbeddedResources {
         let content_hash = runtime_content_hash();
         let runtime_path = temp_dir.join(format!("runtime-{version}-{content_hash}.cwasm"));
 
-        // Check if already extracted - the hash in the filename guarantees content match
-        if runtime_path.exists() {
+        // Reuse a previous extraction only if it's ours and byte-identical:
+        // the file is loaded as native code, so the name alone proves nothing.
+        if matches_embedded_runtime(&runtime_path) {
             tracing::debug!(path = %runtime_path.display(), "Using cached runtime");
             return Ok(runtime_path);
         }
@@ -148,7 +155,7 @@ impl EmbeddedResources {
         // persist() returns the temp file back on error so we can handle it.
         match temp_file.persist(&runtime_path) {
             Ok(_) => {}
-            Err(e) if runtime_path.exists() => {
+            Err(e) if matches_embedded_runtime(&runtime_path) => {
                 // Another process won the race - that's fine, our temp file is cleaned up
                 tracing::debug!("Runtime extracted by another process");
                 // The PersistError contains the temp file, which will be cleaned up on drop
@@ -178,9 +185,55 @@ impl EmbeddedResources {
     }
 }
 
+/// Whether `path` is a regular file owned by this user, not writable by
+/// others, and identical to [`EMBEDDED_RUNTIME`].
+fn matches_embedded_runtime(path: &Path) -> bool {
+    use std::io::Read;
+
+    let Ok(mut file) = std::fs::File::open(path) else {
+        return false;
+    };
+    let Ok(meta) = file.metadata() else {
+        return false;
+    };
+    if !meta.is_file()
+        || !crate::cache::is_private(&meta)
+        || meta.len() != EMBEDDED_RUNTIME.len() as u64
+    {
+        return false;
+    }
+    let mut buf = vec![0u8; 1 << 20];
+    let mut expected = EMBEDDED_RUNTIME;
+    while !expected.is_empty() {
+        let n = match file.read(&mut buf) {
+            Ok(0) | Err(_) => return false,
+            Ok(n) => n.min(expected.len()),
+        };
+        if buf[..n] != expected[..n] {
+            return false;
+        }
+        expected = &expected[n..];
+    }
+    true
+}
+
 #[cfg(test)]
+#[expect(clippy::unwrap_used, reason = "tests")]
 mod tests {
     use super::*;
+
+    #[test]
+    fn extracted_runtime_must_match_embedded_bytes() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let first = EmbeddedResources::extract_runtime(temp_dir.path()).unwrap();
+        assert!(matches_embedded_runtime(&first));
+
+        // Same name, different contents: rewritten rather than reused.
+        std::fs::write(&first, b"not the runtime").unwrap();
+        let second = EmbeddedResources::extract_runtime(temp_dir.path()).unwrap();
+        assert_eq!(first, second);
+        assert!(std::fs::read(&second).unwrap() == EMBEDDED_RUNTIME);
+    }
 
     #[test]
     fn embedded_runtime_is_included() {

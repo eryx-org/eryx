@@ -423,7 +423,7 @@ mise run check-caches
 # Clean all caches and rebuild
 mise run clean-artifacts
 cargo clean
-rm -rf /tmp/eryx-embedded
+rm -rf "${XDG_CACHE_HOME:-$HOME/.cache}/eryx" "${TMPDIR:-/tmp}/eryx-$(id -u)"
 mise run setup
 
 # For Python binding work specifically

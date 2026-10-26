@@ -27,6 +27,8 @@
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
+use sha2::{Digest, Sha256};
+
 use crate::error::Error;
 
 /// Embedded Python standard library (zstd-compressed tar archive).
@@ -42,8 +44,10 @@ pub struct EmbeddedStdlib {
 impl EmbeddedStdlib {
     /// Get the embedded stdlib, extracting it on first call.
     ///
-    /// The stdlib is extracted to a persistent temp directory that survives
-    /// for the lifetime of the process. Subsequent calls return the same path.
+    /// The stdlib is extracted once into the per-user eryx cache directory
+    /// (`$XDG_CACHE_HOME/eryx` or the platform cache directory, falling back
+    /// to `$TMPDIR/eryx-<uid>`) and reused by later processes. Subsequent calls return the
+    /// same path.
     ///
     /// # Errors
     ///
@@ -57,36 +61,43 @@ impl EmbeddedStdlib {
             .map_err(|e| Error::Initialization(e.clone()))
     }
 
-    /// Extract the embedded stdlib to a temp directory.
+    /// Extract the embedded stdlib to the cache directory.
     fn extract() -> Result<Self, Error> {
-        let temp_base = std::env::temp_dir().join("eryx-embedded");
-        std::fs::create_dir_all(&temp_base)
-            .map_err(|e| Error::Initialization(format!("Failed to create temp directory: {e}")))?;
-
-        let stdlib_path = Self::extract_stdlib(&temp_base)?;
+        let cache_root = crate::cache::default_cache_root()?;
+        let stdlib_path = Self::extract_stdlib(cache_root)?;
         Ok(Self { stdlib_path })
     }
 
-    /// Extract the embedded stdlib to the temp directory.
-    fn extract_stdlib(temp_dir: &Path) -> Result<PathBuf, Error> {
-        let stdlib_path = temp_dir.join("python-stdlib");
+    /// Extract the embedded stdlib into `cache_dir`.
+    fn extract_stdlib(cache_dir: &Path) -> Result<PathBuf, Error> {
+        // The cache directory outlives upgrades, so key the extracted copy by
+        // version and content rather than reusing whatever is there.
+        let content_hash = hex::encode(&Sha256::digest(EMBEDDED_STDLIB)[..8]);
+        let stdlib_path = cache_dir.join(format!(
+            "python-stdlib-{}-{content_hash}",
+            env!("CARGO_PKG_VERSION")
+        ));
 
-        // Check if already extracted (quick validation: directory exists with some files)
-        if stdlib_path.exists() {
-            // Verify it looks valid (has encodings/ which is required for Python init)
-            if stdlib_path.join("encodings").exists() {
+        // Reuse a previous extraction if it's ours and looks complete (has
+        // encodings/, which Python needs to start).
+        if let Ok(meta) = std::fs::symlink_metadata(&stdlib_path) {
+            if meta.is_dir()
+                && crate::cache::is_private(&meta)
+                && stdlib_path.join("encodings").exists()
+            {
                 tracing::debug!(path = %stdlib_path.display(), "Using cached stdlib");
                 return Ok(stdlib_path);
             }
             // Invalid, remove and re-extract
             let _ = std::fs::remove_dir_all(&stdlib_path);
+            let _ = std::fs::remove_file(&stdlib_path);
         }
 
         tracing::info!(path = %stdlib_path.display(), "Extracting embedded Python stdlib");
 
         // Use tempfile to create a unique temp directory for extraction.
         // This avoids race conditions when multiple processes extract simultaneously.
-        let temp_extract_dir = tempfile::TempDir::with_prefix_in("python-stdlib-", temp_dir)
+        let temp_extract_dir = tempfile::TempDir::with_prefix_in(".python-stdlib-", cache_dir)
             .map_err(|e| {
                 Error::Initialization(format!("Failed to create temp extract directory: {e}"))
             })?;
@@ -109,6 +120,16 @@ impl EmbeddedStdlib {
             return Err(Error::Initialization(
                 "Stdlib extraction failed: encodings/ not found".to_string(),
             ));
+        }
+
+        // Keep the tree private to this user whatever modes the archive carries.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&extracted_stdlib, std::fs::Permissions::from_mode(0o700))
+                .map_err(|e| {
+                    Error::Initialization(format!("Failed to set stdlib permissions: {e}"))
+                })?;
         }
 
         // Atomically rename to final location
@@ -138,8 +159,29 @@ impl EmbeddedStdlib {
 }
 
 #[cfg(test)]
+#[expect(clippy::unwrap_used, reason = "tests")]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn stdlib_writable_by_others_is_reextracted() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let stdlib = EmbeddedStdlib::extract_stdlib(temp_dir.path()).unwrap();
+        assert!(stdlib.join("encodings").exists());
+
+        let marker = stdlib.join("planted.py");
+        std::fs::write(&marker, b"").unwrap();
+        std::fs::set_permissions(&stdlib, std::fs::Permissions::from_mode(0o777)).unwrap();
+
+        let again = EmbeddedStdlib::extract_stdlib(temp_dir.path()).unwrap();
+        assert_eq!(stdlib, again);
+        assert!(!marker.exists());
+        let mode = std::fs::metadata(&again).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o700);
+    }
 
     #[test]
     fn embedded_stdlib_is_included() {

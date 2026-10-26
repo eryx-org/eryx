@@ -1145,10 +1145,10 @@ A two-tier caching system is now implemented:
 let sandbox1 = Sandbox::builder().build()?;  // ~3ms (cold)
 let sandbox2 = Sandbox::builder().build()?;  // ~745ns (Tier 1 hit!)
 
-// With native extensions:
+// With native extensions (Tier 2 defaults to the per-user cache dir,
+// e.g. ~/.cache/eryx/components):
 let sandbox = Sandbox::builder()
     .with_native_extension("numpy", bytes)
-    .with_cache_dir("/tmp/eryx-cache")?  // Enable Tier 2
     .build()?;
 ```
 

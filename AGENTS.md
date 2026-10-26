@@ -118,7 +118,7 @@ This project has multiple layers of caching that can cause confusing "stale buil
 |-------|----------|--------------|-------------------|
 | **Cargo target/** | `target/` | Automatic (mtime) | After `git checkout`, cache restore, or clock skew |
 | **mise task cache** | Internal | mtime of sources vs outputs | When cargo cache has newer timestamps than sources |
-| **Embedded runtime** | `/tmp/eryx-embedded/` | Content hash in filename | Old versions accumulate; shouldn't cause staleness |
+| **Embedded runtime** | `~/.cache/eryx/` (`$XDG_CACHE_HOME/eryx`, else `$TMPDIR/eryx-<uid>`) | Content hash in filename | Old versions accumulate; shouldn't cause staleness |
 | **Python extension** | `_eryx.abi3.so` | `maturin develop` | After changing `eryx-wasm-runtime` Rust code |
 | **WASM artifacts** | `crates/eryx-runtime/runtime.{wasm,cwasm}` | `mise run build-eryx-runtime` | After changing `eryx-wasm-runtime` code |
 | **Late-linking artifacts** | `target/*/build/eryx-runtime-*/out/*.so.zst` | Rebuild eryx-runtime | WIT interface changes (e.g., TCP/TLS) not reflected |
@@ -139,7 +139,7 @@ mise run check-caches
 
 # Check individual layers
 mise run check-wasm-artifacts        # WASM/CWASM vs source timestamps
-mise run check-embedded-cache        # /tmp/eryx-embedded state
+mise run check-embedded-cache        # ~/.cache/eryx state
 mise run check-python-extension      # .so vs Rust source timestamps
 mise run check-cargo-timestamps      # .rlib vs source timestamps
 mise run check-late-linking-cache    # OUT_DIR .so.zst vs prebuilt
@@ -148,7 +148,7 @@ mise run check-late-linking-cache    # OUT_DIR .so.zst vs prebuilt
 ### Recovery Commands
 
 ```bash
-# Nuclear option - clean everything (includes late-linking cache and /tmp/eryx-embedded)
+# Nuclear option - clean everything (includes late-linking cache and ~/.cache/eryx)
 mise run clean-artifacts
 cargo clean
 
