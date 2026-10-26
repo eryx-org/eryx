@@ -71,6 +71,9 @@ The default `NetConfig` has sensible security defaults:
 | `allowed_networks` | `[]` | CIDRs exempt from `blocked_networks` |
 | `internal_hosts` | `[]` | Host patterns allowed to resolve into `blocked_networks` |
 
+A bare `NetConfig()` allows no hosts: list them in `allowed_hosts`, or pass
+`allow_all_hosts=True` to allow any host that isn't blocked.
+
 ```python
 import eryx
 
@@ -119,8 +122,8 @@ Block specific hosts while allowing others:
 ```python
 import eryx
 
-# Start fresh with no blocked hosts, then add some
-config = eryx.NetConfig(blocked_hosts=[])
+# Allow any host, start fresh with no blocked hosts, then add some
+config = eryx.NetConfig(allow_all_hosts=True, blocked_hosts=[])
 config = config.block_host("*.internal.corp").block_host("*.local")
 
 sandbox = eryx.Sandbox(network=config)
@@ -133,7 +136,7 @@ By default, localhost is blocked for security. You can explicitly allow it:
 ```python
 import eryx
 
-config = eryx.NetConfig()
+config = eryx.NetConfig(allowed_hosts=["localhost"])
 print("localhost" in config.blocked_hosts)  # True
 
 # Allow localhost connections
@@ -221,6 +224,7 @@ Configure connection and I/O timeouts:
 import eryx
 
 config = eryx.NetConfig(
+    allowed_hosts=["api.example.com"],
     connect_timeout_ms=5000,   # 5 second connection timeout
     io_timeout_ms=10000,       # 10 second read/write timeout
 )
@@ -337,7 +341,7 @@ import eryx
 with open("internal-ca.pem", "rb") as f:
     ca_cert = f.read()
 
-config = eryx.NetConfig().with_root_cert(ca_cert)
+config = eryx.NetConfig(allowed_hosts=["internal.example.com"]).with_root_cert(ca_cert)
 sandbox = eryx.Sandbox(network=config)
 ```
 
@@ -408,7 +412,7 @@ Limit the number of simultaneous connections:
 ```python
 import eryx
 
-config = eryx.NetConfig(max_connections=5)
+config = eryx.NetConfig(allow_all_hosts=True, max_connections=5)
 sandbox = eryx.Sandbox(network=config)
 
 # Attempting more than 5 connections will fail

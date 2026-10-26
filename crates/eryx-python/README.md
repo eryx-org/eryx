@@ -348,7 +348,7 @@ Add custom root certificates for testing with self-signed certificates:
 with open("ca-cert.der", "rb") as f:
     cert_der = f.read()
 
-config = eryx.NetConfig().with_root_cert(cert_der)
+config = eryx.NetConfig(allowed_hosts=["internal.example.com"]).with_root_cert(cert_der)
 sandbox = eryx.Sandbox(network=config)
 ```
 

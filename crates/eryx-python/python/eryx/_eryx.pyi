@@ -463,7 +463,7 @@ class NetConfig:
             ValueError: If `cidr` is not a valid CIDR.
 
         Example:
-            net = NetConfig().allow_network("10.96.0.0/12")
+            net = NetConfig(allowed_hosts=["svc.cluster.local"]).allow_network("10.96.0.0/12")
         """
         ...
 
@@ -476,7 +476,9 @@ class NetConfig:
         Returns self for method chaining.
 
         Example:
-            net = NetConfig().allow_internal_host("api.internal.example.com")
+            net = NetConfig(allowed_hosts=["api.internal.example.com"]).allow_internal_host(
+                "api.internal.example.com"
+            )
         """
         ...
 
@@ -486,7 +488,7 @@ class NetConfig:
         Returns self for method chaining.
 
         Example:
-            net = NetConfig().allow_localhost()
+            net = NetConfig(allowed_hosts=["localhost"]).allow_localhost()
         """
         ...
 

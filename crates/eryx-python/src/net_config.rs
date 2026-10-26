@@ -205,7 +205,7 @@ impl NetConfig {
     ///     ValueError: If `cidr` is not a valid CIDR.
     ///
     /// Example:
-    ///     net = NetConfig().allow_network("10.96.0.0/12")
+    ///     net = NetConfig(allowed_hosts=["svc.cluster.local"]).allow_network("10.96.0.0/12")
     fn allow_network(&mut self, cidr: String) -> PyResult<Self> {
         self.allowed_networks.extend(parse_networks(&[cidr])?);
         Ok(self.clone())
@@ -219,7 +219,9 @@ impl NetConfig {
     /// Returns self for method chaining.
     ///
     /// Example:
-    ///     net = NetConfig().allow_internal_host("api.internal.example.com")
+    ///     net = NetConfig(allowed_hosts=["api.internal.example.com"]).allow_internal_host(
+    ///         "api.internal.example.com"
+    ///     )
     fn allow_internal_host(&mut self, pattern: String) -> Self {
         self.internal_hosts.push(pattern);
         self.clone()
@@ -253,7 +255,7 @@ impl NetConfig {
     /// Returns self for method chaining.
     ///
     /// Example:
-    ///     net = NetConfig().allow_localhost()
+    ///     net = NetConfig(allowed_hosts=["localhost"]).allow_localhost()
     fn allow_localhost(&mut self) -> Self {
         self.blocked_hosts
             .retain(|p| !p.contains("localhost") && !p.starts_with("127.") && !p.contains("::1"));
