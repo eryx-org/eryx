@@ -7,7 +7,7 @@ actionlint = "1.7.12"
 shellcheck = "0.11.0"
 
 [tools."cargo:cargo-nextest"]
-version = "0.9.149"
+version = "0.9.150"
 
 [tools."cargo:wasm-tools"]
 version = "1.262.0"
