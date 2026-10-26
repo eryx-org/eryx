@@ -431,6 +431,19 @@ result = session2.execute("print(f'{data}, {total}')")
 print(result.stdout_text)  # "[1, 2, 3], 6"
 ```
 
+### Time and Fuel Bounds
+
+`snapshot_state()`, `restore_state()` and `clear_state()` run Python code
+(`__reduce__`, `__setstate__`, `__del__`, ...), so they are bounded like an
+execution. The time bound is the session's execution timeout raised to at
+least 5 seconds (`eryx::session::MIN_STATE_OP_TIMEOUT`), because the first
+snapshot loads the serializer. The fuel bound is the session's fuel limit
+raised to at least `eryx::session::MIN_STATE_OP_FUEL`. In Rust,
+`SessionExecutor::set_state_op_timeout` sets the time bound directly. A
+state operation that overruns returns `Error::Timeout` or
+`Error::FuelExhausted`, and the next call resets the session, as after a
+cancelled call.
+
 ## Session with VFS
 
 Sessions can be configured with a virtual filesystem for persistent file storage. See [VFS and File Persistence](./vfs.md) for details.

@@ -495,6 +495,7 @@ impl Sandbox {
                     result: output.result,
                     result_error: output.result_error,
                     state_was_reset: false,
+                    stream_truncated: output.stream_truncated,
                     stats: ExecuteStats {
                         duration,
                         callback_invocations,
@@ -2652,6 +2653,11 @@ pub struct ExecuteResult {
     /// Reported once, by the first successful run after the reset. Always
     /// `false` for [`Sandbox::execute`], which keeps no state.
     pub state_was_reset: bool,
+    /// Whether trace events or streamed output chunks were dropped because
+    /// the execution reached the per-stream limit (16 MiB of queued events
+    /// each), so handlers and [`trace`](Self::trace) saw only part of it.
+    /// `stdout`/`stderr` here are complete.
+    pub stream_truncated: bool,
     /// Execution statistics.
     pub stats: ExecuteStats,
 }
@@ -3007,6 +3013,7 @@ mod tests {
             result: None,
             result_error: None,
             state_was_reset: false,
+            stream_truncated: false,
             stats: ExecuteStats {
                 duration: Duration::from_millis(100),
                 callback_invocations: 5,
@@ -3030,6 +3037,7 @@ mod tests {
             result: None,
             result_error: None,
             state_was_reset: false,
+            stream_truncated: false,
             stats: ExecuteStats {
                 duration: Duration::from_millis(50),
                 callback_invocations: 2,
@@ -3382,6 +3390,7 @@ mod tests {
             result: None,
             result_error: None,
             state_was_reset: false,
+            stream_truncated: false,
             stats: ExecuteStats {
                 duration: Duration::from_millis(1),
                 callback_invocations: 0,
@@ -3418,6 +3427,7 @@ mod tests {
             result: None,
             result_error: None,
             state_was_reset: false,
+            stream_truncated: false,
             stats: ExecuteStats {
                 duration: Duration::from_millis(100),
                 callback_invocations: 1,

@@ -443,6 +443,7 @@ async fn run_visual_example(
     // Build sandbox with embedded runtime for fast loading
     let sandbox = Sandbox::embedded()
         .with_trace_handler(handler.clone())
+        .with_trace_collection(true)
         .with_callbacks(callbacks)
         .build()?;
     let result = sandbox.execute(script).await?;
@@ -729,7 +730,7 @@ async fn run_demo() -> anyhow::Result<()> {
         SetForegroundColor(Color::Green),
         Print("  • "),
         ResetColor,
-        Print("All trace events are also collected in "),
+        Print("With trace collection on, all events are also collected in "),
         SetForegroundColor(Color::Cyan),
         Print("result.trace[]"),
         ResetColor,

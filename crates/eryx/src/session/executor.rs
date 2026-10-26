@@ -1268,6 +1268,7 @@ impl SessionExecutor {
         // Stream and keep the guest's direct fd writes before the output
         // channel is dropped.
         let (fd_stdout, fd_stderr) = self.fd_output.take(store.data().output_tx.as_ref());
+        let stream_truncated = store.data().stream_budget.truncated;
 
         let peak_memory = {
             let state = store.data_mut();
@@ -1343,6 +1344,7 @@ impl SessionExecutor {
         );
         output.result = empty_to_none(wit_output.result_json);
         output.result_error = empty_to_none(wit_output.result_error);
+        output.stream_truncated = stream_truncated;
         output.state_was_reset = std::mem::take(&mut self.state_was_reset);
         output.stdout.extend(fd_stdout);
         output.stderr.extend(fd_stderr);

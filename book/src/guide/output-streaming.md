@@ -1,6 +1,6 @@
 # Output Streaming
 
-By default, Eryx captures stdout and stderr and returns them in the `ExecuteResult` after execution completes. Output streaming lets you receive output in real-time as Python code runs, which is useful for long-running scripts, progress reporting, and interactive interfaces.
+By default, Eryx captures stdout and stderr and returns them in the `ExecuteResult` after execution completes. This includes writes straight to file descriptors 1 and 2 (`os.write(1, ...)`, `sys.__stdout__`): they are captured (up to 1 MiB per stream per execution) and appended after the regular output, instead of reaching the host process's stdout/stderr. Output streaming lets you receive output in real-time as Python code runs, which is useful for long-running scripts, progress reporting, and interactive interfaces.
 
 ## Python API
 

@@ -149,9 +149,13 @@ let sandbox = Sandbox::embedded().with_trace_collection(true).build()?;
 # }
 ```
 
-Each execution streams at most 16 MiB of trace events and 16 MiB of
-streamed output to handlers; past that, further events are dropped (the
-captured stdout/stderr in the result are complete).
+Each execution queues at most 16 MiB of trace events and 16 MiB of
+streamed output for handlers, counting a fixed 64-byte overhead per event
+or chunk. Past that, further events are dropped and `ExecuteResult::stream_truncated`
+is set; the captured stdout/stderr in the result are complete. Direct fd
+1/2 writes are captured separately, up to 1 MiB per stream, and streamed
+once at the end of the execution, so a handler receives at most
+16 MiB + 2 × 1 MiB of output per execution.
 
 A `TraceHandler` set with `with_trace_handler` still receives events when
 collection is disabled. Sessions created from the sandbox inherit the setting.

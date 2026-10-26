@@ -122,7 +122,7 @@ impl WarmPool {
     /// A child inherits the parent's warm stores and refill counts but none
     /// of the threads finishing them, so it would never refill a slot and
     /// would reuse stores cloned from the parent. The inherited stores are
-    /// leaked rather than dropped: their teardown belongs to the parent.
+    /// forgotten rather than dropped: their teardown belongs to the parent.
     fn lock_slots(&self) -> Option<std::sync::MutexGuard<'_, Slots>> {
         let mut slots = self.slots.lock().ok()?;
         let pid = std::process::id();

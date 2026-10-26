@@ -289,3 +289,43 @@ async fn streamed_output_is_capped_per_execution() {
         "streamed {streamed} bytes"
     );
 }
+
+/// Counts the chunks delivered to the output handler.
+struct ChunkCounter(Arc<std::sync::atomic::AtomicUsize>);
+
+#[async_trait::async_trait]
+impl eryx::OutputHandler for ChunkCounter {
+    async fn on_output(&self, _chunk: &[u8]) {
+        self.0.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+#[tokio::test]
+async fn streamed_output_message_count_is_bounded() {
+    let chunks = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let sandbox = eryx::Sandbox::embedded()
+        .with_output_handler(ChunkCounter(Arc::clone(&chunks)))
+        .build()
+        .expect("sandbox");
+
+    // Empty chunks are not queued at all.
+    let result = sandbox
+        .execute("import _eryx\nfor _ in range(100_000):\n    _eryx._eryx_report_output(0, b'')")
+        .await
+        .expect("execute");
+    assert_eq!(chunks.load(std::sync::atomic::Ordering::Relaxed), 0);
+    assert!(!result.stream_truncated);
+
+    // One-byte chunks are charged a per-message overhead, so far fewer than
+    // 16 Mi of them fit.
+    let result = sandbox
+        .execute("import _eryx\nfor _ in range(400_000):\n    _eryx._eryx_report_output(0, b'x')")
+        .await
+        .expect("execute");
+    let delivered = chunks.load(std::sync::atomic::Ordering::Relaxed);
+    assert!(
+        delivered > 0 && delivered < 300_000,
+        "delivered {delivered}"
+    );
+    assert!(result.stream_truncated);
+}

@@ -433,6 +433,10 @@ pub struct ExecutionOutput {
     /// to, so the instance was reset. Reported once, by the first successful
     /// run after the reset; always `false` outside sessions.
     pub state_was_reset: bool,
+    /// Whether trace events or streamed output chunks were dropped because
+    /// the execution reached the per-stream limit (16 MiB of queued events
+    /// each). The captured `stdout`/`stderr` here are unaffected.
+    pub stream_truncated: bool,
 }
 
 impl ExecutionOutput {
@@ -459,6 +463,7 @@ impl ExecutionOutput {
             result: None,
             result_error: None,
             state_was_reset: false,
+            stream_truncated: false,
         }
     }
 
@@ -876,7 +881,9 @@ wasmtime::component::bindgen!({
     },
 });
 
-/// Most bytes kept per stream per execution from direct fd 1/2 writes.
+/// Most bytes kept per stream per execution from direct fd 1/2 writes. These
+/// are streamed once at the end of the execution, on top of
+/// [`STREAM_BYTES_LIMIT`].
 // ponytail: fixed cap, excess dropped; make it a ResourceLimits field if anyone needs more.
 const FD_CAPTURE_LIMIT: usize = 1024 * 1024;
 
@@ -1015,15 +1022,23 @@ impl FdOutput {
 /// Most bytes one execution may queue for each of the trace and output
 /// streams. The imports that feed them can't wait for a slow consumer, so
 /// anything past this is dropped from the stream (captured stdout/stderr in
-/// the final result are unaffected).
+/// the final result are unaffected) and the execution reports
+/// [`ExecutionOutput::stream_truncated`].
 // ponytail: fixed per-execution cap; make it configurable if a consumer needs more.
 pub(crate) const STREAM_BYTES_LIMIT: usize = 16 * 1024 * 1024;
 
-/// Bytes left in this execution's trace and output stream budgets.
+/// What each queued trace event or output chunk is charged on top of its
+/// payload, for its allocation and channel slot. With [`STREAM_BYTES_LIMIT`]
+/// this also caps the number of queued messages per stream.
+const STREAM_MESSAGE_OVERHEAD: usize = 64;
+
+/// What is left of this execution's trace and output stream budgets.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct StreamBudget {
     trace: usize,
     output: usize,
+    /// Whether anything was dropped for lack of budget.
+    pub(crate) truncated: bool,
 }
 
 impl Default for StreamBudget {
@@ -1031,26 +1046,39 @@ impl Default for StreamBudget {
         Self {
             trace: STREAM_BYTES_LIMIT,
             output: STREAM_BYTES_LIMIT,
+            truncated: false,
         }
     }
 }
 
-/// Spend `n` bytes from `left`, or return `false` (spending nothing) if
-/// that would overrun it. Warns once, when the budget first runs out.
-fn spend(left: &mut usize, n: usize, stream: &str) -> bool {
-    if let Some(rest) = left.checked_sub(n) {
-        *left = rest;
-        return true;
+impl StreamBudget {
+    /// Charge one trace event with `payload` bytes; `false` means drop it.
+    fn spend_trace(&mut self, payload: usize) -> bool {
+        Self::spend(&mut self.trace, &mut self.truncated, payload, "trace")
     }
-    if *left != 0 {
-        *left = 0;
-        tracing::warn!(
-            stream,
-            limit = STREAM_BYTES_LIMIT,
-            "stream limit reached; dropping further events"
-        );
+
+    /// Charge one output chunk with `payload` bytes; `false` means drop it.
+    fn spend_output(&mut self, payload: usize) -> bool {
+        Self::spend(&mut self.output, &mut self.truncated, payload, "output")
     }
-    false
+
+    fn spend(left: &mut usize, truncated: &mut bool, payload: usize, stream: &str) -> bool {
+        let cost = payload.saturating_add(STREAM_MESSAGE_OVERHEAD);
+        if let Some(rest) = left.checked_sub(cost) {
+            *left = rest;
+            return true;
+        }
+        if *left != 0 {
+            *left = 0;
+            tracing::warn!(
+                stream,
+                limit = STREAM_BYTES_LIMIT,
+                "stream limit reached; dropping further events"
+            );
+        }
+        *truncated = true;
+        false
+    }
 }
 
 /// State for a single execution, implementing WASI and callback channels.
@@ -1310,7 +1338,7 @@ impl SandboxImports for ExecutorState {
     fn report_trace(&mut self, lineno: u32, event_json: String, context_json: String) {
         if let Some(tx) = &self.trace_tx {
             let size = event_json.len() + context_json.len();
-            if !spend(&mut self.stream_budget.trace, size, "trace") {
+            if !self.stream_budget.spend_trace(size) {
                 return;
             }
             let request = TraceRequest {
@@ -1330,7 +1358,7 @@ impl SandboxImports for ExecutorState {
             return;
         }
         if let Some(tx) = &self.output_tx {
-            if !spend(&mut self.stream_budget.output, data.len(), "output") {
+            if data.is_empty() || !self.stream_budget.spend_output(data.len()) {
                 return;
             }
             let request = OutputRequest {
@@ -3354,6 +3382,7 @@ impl PythonExecutor {
         );
         output.result = empty_to_none(wit_output.result_json);
         output.result_error = empty_to_none(wit_output.result_error);
+        output.stream_truncated = store.data().stream_budget.truncated;
         Ok(output)
     }
 }

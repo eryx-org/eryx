@@ -455,6 +455,7 @@ async fn run_code(
                 result: output.result,
                 result_error: output.result_error,
                 state_was_reset: output.state_was_reset,
+                stream_truncated: output.stream_truncated,
                 stats: ExecuteStats {
                     duration,
                     callback_invocations,
