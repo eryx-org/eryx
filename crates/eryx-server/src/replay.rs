@@ -438,7 +438,7 @@ mod tests {
 
     #[test]
     fn from_key_is_deterministic() {
-        let key = [42u8; 32];
+        let key: [u8; 32] = rand::random();
         let journal = signed(&JournalSigner::from_key(key), binding("code"));
         assert!(
             JournalSigner::from_key(key).verify(&journal, binding("code")),

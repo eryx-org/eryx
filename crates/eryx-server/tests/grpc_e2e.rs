@@ -1488,7 +1488,7 @@ fn echo_declaration() -> CallbackDeclaration {
 /// that journal replays it — the server never dispatches the callback again.
 #[tokio::test]
 async fn replay_across_requests_skips_live_callback() {
-    let signer = eryx_server::replay::JournalSigner::from_key([3; 32]);
+    let signer = eryx_server::replay::JournalSigner::random();
     let channel = start_server_with_signer(signer.clone()).await;
     let mut client = EryxClient::new(channel);
 
@@ -1908,7 +1908,7 @@ async fn rejects_invalid_replay_before_execution() {
     use eryx_server::proto::eryx::v1::CallbackJournalEntry;
     use eryx_server::replay::{JournalBinding, JournalSigner};
 
-    let signer = JournalSigner::from_key([7; 32]);
+    let signer = JournalSigner::random();
     let channel = start_server_with_signer(signer.clone()).await;
     let mut client = EryxClient::new(channel);
     let code = "print('script must not execute')";
@@ -1942,12 +1942,10 @@ async fn rejects_invalid_replay_before_execution() {
         let mut journal = original.clone();
         match scenario {
             "unsigned" => {}
-            "other replica" => {
-                JournalSigner::from_key([8; 32]).sign(&mut journal, bound(code), ttl)
-            }
+            "other replica" => JournalSigner::random().sign(&mut journal, bound(code), ttl),
             "empty signed journal" => {
                 journal.entries.clear();
-                JournalSigner::from_key([8; 32]).sign(&mut journal, bound(code), ttl);
+                JournalSigner::random().sign(&mut journal, bound(code), ttl);
             }
             "changed script" => signer.sign(&mut journal, bound("different script"), ttl),
             "changed result" => {
