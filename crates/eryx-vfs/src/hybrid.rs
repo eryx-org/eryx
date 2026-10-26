@@ -430,6 +430,18 @@ impl std::fmt::Debug for HybridDescriptor {
     }
 }
 
+impl HybridDescriptor {
+    /// Get the path this descriptor refers to.
+    #[cfg(not(unix))]
+    pub(crate) fn path(&self) -> &str {
+        match self {
+            HybridDescriptor::Vfs(d) => &d.path,
+            HybridDescriptor::RealDir { guest_path, .. } => guest_path,
+            HybridDescriptor::RealFile { guest_path, .. } => guest_path,
+        }
+    }
+}
+
 /// Configuration for a preopen directory.
 pub enum HybridPreopen {
     /// A VFS-managed preopen (virtual storage).
