@@ -430,50 +430,6 @@ impl std::fmt::Debug for HybridDescriptor {
     }
 }
 
-impl HybridDescriptor {
-    /// Get the path this descriptor refers to.
-    pub fn path(&self) -> &str {
-        match self {
-            HybridDescriptor::Vfs(d) => &d.path,
-            HybridDescriptor::RealDir { guest_path, .. } => guest_path,
-            HybridDescriptor::RealFile { guest_path, .. } => guest_path,
-        }
-    }
-
-    /// Check if this is a directory.
-    pub fn is_dir(&self) -> bool {
-        match self {
-            HybridDescriptor::Vfs(d) => d.is_dir,
-            HybridDescriptor::RealDir { .. } => true,
-            HybridDescriptor::RealFile { .. } => false,
-        }
-    }
-
-    /// Get as VFS descriptor, if it is one.
-    pub fn as_vfs(&self) -> Option<&VfsDescriptor> {
-        match self {
-            HybridDescriptor::Vfs(d) => Some(d),
-            _ => None,
-        }
-    }
-
-    /// Get as real directory, if it is one.
-    pub fn as_real_dir(&self) -> Option<&RealDir> {
-        match self {
-            HybridDescriptor::RealDir { dir, .. } => Some(dir),
-            _ => None,
-        }
-    }
-
-    /// Get as real file, if it is one.
-    pub fn as_real_file(&self) -> Option<&RealFile> {
-        match self {
-            HybridDescriptor::RealFile { file, .. } => Some(file),
-            _ => None,
-        }
-    }
-}
-
 /// Configuration for a preopen directory.
 pub enum HybridPreopen {
     /// A VFS-managed preopen (virtual storage).
