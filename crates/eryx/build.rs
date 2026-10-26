@@ -58,12 +58,15 @@ mod embedded_runtime {
         if std::fs::symlink_metadata(&path).is_err() {
             return None;
         }
-        // Rebuild once `setup` repairs or replaces the cached runtime.
+        // Rebuild once `setup` repairs or replaces the cached runtime. A
+        // missing path would count as always changed, so the checksum file is
+        // only watched if it exists; `setup` rewrites the runtime whenever it
+        // adds one.
         println!("cargo::rerun-if-changed={}", path.display());
-        println!(
-            "cargo::rerun-if-changed={}",
-            cached_runtime::checksum_path(&path).display()
-        );
+        let checksum = cached_runtime::checksum_path(&path);
+        if std::fs::symlink_metadata(&checksum).is_ok() {
+            println!("cargo::rerun-if-changed={}", checksum.display());
+        }
         match cached_runtime::read_verified(&path) {
             Ok(bytes) => {
                 eprintln!("Found cached runtime: {}", path.display());
