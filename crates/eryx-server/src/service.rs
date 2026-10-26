@@ -83,7 +83,7 @@ pub struct ServerLimits {
     pub max_callback_invocations: u32,
     /// Most concurrent network connections a request may allow.
     pub max_connections: u32,
-    /// Longest network I/O timeout a request may set.
+    /// Longest network connect or I/O timeout a request may set.
     pub max_io_timeout: Duration,
     /// Most stdout plus stderr bytes kept and streamed per execution. Output
     /// past this is dropped, a truncation marker is appended, and
@@ -316,7 +316,8 @@ impl crate::proto::eryx::v1::eryx_server::Eryx for EryxService {
                         Duration::from_millis(nc.connect_timeout_ms)
                     } else {
                         defaults.connect_timeout
-                    },
+                    }
+                    .min(self.limits.max_io_timeout),
                     io_timeout: if nc.io_timeout_ms > 0 {
                         Duration::from_millis(nc.io_timeout_ms)
                     } else {

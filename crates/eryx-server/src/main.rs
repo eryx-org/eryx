@@ -122,7 +122,7 @@ struct Args {
     #[arg(long, default_value_t = 100, env = "ERYX_MAX_CONNECTIONS")]
     max_connections: u32,
 
-    /// Ceiling on a request's network I/O timeout, in milliseconds.
+    /// Ceiling on a request's network connect and I/O timeouts, in milliseconds.
     #[arg(long, default_value_t = 300_000, env = "ERYX_MAX_IO_TIMEOUT_MS")]
     max_io_timeout_ms: u64,
 
@@ -254,6 +254,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let tracer_provider = setup_tracing()?;
 
     let args = Args::parse();
+    // A zero ceiling would fail (or forbid) every request rather than mean
+    // "unlimited", so refuse it up front.
+    for (flag, value) in [
+        ("--max-execution-timeout-ms", args.max_execution_timeout_ms),
+        ("--max-callback-timeout-ms", args.max_callback_timeout_ms),
+        ("--max-memory-bytes", args.max_memory_bytes),
+        ("--max-fuel", args.max_fuel.unwrap_or(1)),
+        (
+            "--max-callback-invocations",
+            args.max_callback_invocations.into(),
+        ),
+        ("--max-connections", args.max_connections.into()),
+        ("--max-io-timeout-ms", args.max_io_timeout_ms),
+        ("--max-output-bytes", args.max_output_bytes as u64),
+        ("--journal-ttl-secs", args.journal_ttl_secs),
+    ] {
+        if value == 0 {
+            return Err(format!("{flag} must be greater than 0").into());
+        }
+    }
     let addr = args.listen_addr.parse()?;
 
     let pool_config = PoolConfig {

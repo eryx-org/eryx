@@ -202,7 +202,8 @@ message NetworkConfig {
   // Maximum concurrent connections (0 = default 10). Clamped to the server's
   // --max-connections.
   uint32 max_connections = 3;
-  // Connection timeout in milliseconds (0 = default 30s).
+  // Connection timeout in milliseconds (0 = default 30s). Clamped to the
+  // server's --max-io-timeout-ms.
   uint64 connect_timeout_ms = 4;
   // I/O read/write timeout in milliseconds (0 = default 60s). Clamped to the
   // server's --max-io-timeout-ms.

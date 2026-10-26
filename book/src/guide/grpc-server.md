@@ -47,7 +47,7 @@ Every flag also has an environment variable, so the server is easy to configure 
 | `--max-fuel` | `ERYX_MAX_FUEL` | *(none)* | Ceiling on `resource_limits.max_fuel`; when set, also the budget for requests that set none. |
 | `--max-callback-invocations` | `ERYX_MAX_CALLBACK_INVOCATIONS` | `10000` | Ceiling on `resource_limits.max_callback_invocations`. |
 | `--max-connections` | `ERYX_MAX_CONNECTIONS` | `100` | Ceiling on `network_config.max_connections`. |
-| `--max-io-timeout-ms` | `ERYX_MAX_IO_TIMEOUT_MS` | `300000` | Ceiling on `network_config.io_timeout_ms`. |
+| `--max-io-timeout-ms` | `ERYX_MAX_IO_TIMEOUT_MS` | `300000` | Ceiling on `network_config.io_timeout_ms` and `connect_timeout_ms`. |
 | `--max-output-bytes` | `ERYX_MAX_OUTPUT_BYTES` | `16777216` (16 MiB) | Most stdout plus stderr bytes kept and streamed per execution. See [Output cap](#output-cap). |
 | `--tls-cert` | `ERYX_TLS_CERT` | *(off)* | PEM certificate chain; enables TLS. Requires `--tls-key`. |
 | `--tls-key` | `ERYX_TLS_KEY` | *(off)* | PEM private key for `--tls-cert`. |
@@ -55,7 +55,7 @@ Every flag also has an environment variable, so the server is easy to configure 
 
 ### Request limits
 
-Each request sets its own limits in `resource_limits` (and, for networking, `network_config`). A zero field takes the default documented in the proto (30 s execution timeout, 10 s callback timeout, 128 MiB memory, 1000 callback invocations, unlimited fuel). The `--max-*` flags cap what a request can ask for: **a value above its ceiling is clamped down to it, not rejected**, so clients written for a more generous server keep working. The memory limit is enforced on the guest, so an allocation past it raises `MemoryError` inside Python.
+Each request sets its own limits in `resource_limits` (and, for networking, `network_config`). A zero field takes the default documented in the proto (30 s execution timeout, 10 s callback timeout, 128 MiB memory, 1000 callback invocations, unlimited fuel). The `--max-*` flags cap what a request can ask for: **a value above its ceiling is clamped down to it, not rejected**, so clients written for a more generous server keep working. Every ceiling must be greater than zero; the server refuses to start otherwise. The memory limit is enforced on the guest, so an allocation past it raises `MemoryError` inside Python.
 
 ### Health checks
 
