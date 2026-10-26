@@ -58,6 +58,7 @@ pub mod embedded;
 #[cfg(feature = "embedded-stdlib")]
 pub mod embedded_stdlib;
 mod error;
+mod fork_local;
 mod library;
 pub mod net;
 pub mod package;

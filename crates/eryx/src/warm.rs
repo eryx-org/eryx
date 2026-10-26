@@ -31,6 +31,7 @@ use std::time::Instant;
 use tokio::runtime::{Handle, RuntimeFlavor};
 use wasmtime::Store;
 
+use crate::fork_local::ForkLocal;
 use crate::wasm::{ExecutorState, Sandbox, SandboxPre};
 
 /// An instantiated store that has not run user code yet.
@@ -64,7 +65,8 @@ impl Slot {
 pub(crate) struct WarmPool {
     /// Instances to keep ready per component; `0` disables the pool.
     target: usize,
-    slots: Mutex<Slots>,
+    /// Per process, so a forked child never waits on a lock it inherited.
+    slots: ForkLocal<Mutex<Slots>>,
 }
 
 /// The slots of the process that filled them.
@@ -112,24 +114,26 @@ impl WarmPool {
             };
             WarmPool {
                 target,
-                slots: Mutex::new(Slots::new()),
+                slots: ForkLocal::new(|| Mutex::new(Slots::new())),
             }
         })
     }
 
-    /// Lock the slots, starting empty in a forked child.
+    /// Lock this process's slots, starting empty in a forked child.
     ///
     /// A child inherits the parent's warm stores and refill counts but none
     /// of the threads finishing them, so it would never refill a slot and
-    /// would reuse stores cloned from the parent. The inherited stores are
-    /// forgotten rather than dropped: their teardown belongs to the parent.
+    /// would reuse stores cloned from the parent. [`ForkLocal`] gives it
+    /// fresh slots; the pid check here covers descendants past its depth
+    /// limit, which share slots. Inherited stores are forgotten rather than
+    /// dropped: their teardown belongs to the parent.
     fn lock_slots(&self) -> Option<std::sync::MutexGuard<'_, Slots>> {
-        let mut slots = self.slots.lock().ok()?;
+        let mut slots = self.slots.get().lock().ok()?;
         let pid = std::process::id();
         if slots.pid != pid {
             std::mem::forget(std::mem::take(&mut slots.map));
             slots.pid = pid;
-            RETIRING.store(0, Ordering::Relaxed);
+            RETIRING.get().store(0, Ordering::Relaxed);
         }
         Some(slots)
     }
@@ -267,9 +271,10 @@ impl WarmPool {
 
 /// One retired store waiting for, or running on, the blocking pool. Dropped
 /// when the task finishes, or unrun when the runtime shuts down.
-struct Retiring;
+struct Retiring(&'static AtomicUsize);
 
-static RETIRING: AtomicUsize = AtomicUsize::new(0);
+/// Per process: a forked child's count must not include the parent's.
+static RETIRING: ForkLocal<AtomicUsize> = ForkLocal::new(|| AtomicUsize::new(0));
 
 impl Retiring {
     /// Retired stores allowed to wait for the blocking pool at once.
@@ -280,17 +285,18 @@ impl Retiring {
     const MAX: usize = 64;
 
     fn enter() -> Option<Self> {
-        if RETIRING.fetch_add(1, Ordering::Relaxed) >= Self::MAX {
-            RETIRING.fetch_sub(1, Ordering::Relaxed);
+        let count = RETIRING.get();
+        if count.fetch_add(1, Ordering::Relaxed) >= Self::MAX {
+            count.fetch_sub(1, Ordering::Relaxed);
             return None;
         }
-        Some(Retiring)
+        Some(Retiring(count))
     }
 }
 
 impl Drop for Retiring {
     fn drop(&mut self) {
-        RETIRING.fetch_sub(1, Ordering::Relaxed);
+        self.0.fetch_sub(1, Ordering::Relaxed);
     }
 }
 
@@ -358,7 +364,7 @@ mod tests {
     fn a_dropped_reservation_lets_the_slot_be_refilled() {
         let pool: &'static WarmPool = Box::leak(Box::new(WarmPool {
             target: 1,
-            slots: Mutex::new(Slots::new()),
+            slots: ForkLocal::new(|| Mutex::new(Slots::new())),
         }));
 
         let (reservation, _) = pool.reserve(7);
@@ -378,7 +384,7 @@ mod tests {
     fn a_forked_child_starts_with_empty_slots() {
         let pool: &'static WarmPool = Box::leak(Box::new(WarmPool {
             target: 1,
-            slots: Mutex::new(Slots::new()),
+            slots: ForkLocal::new(|| Mutex::new(Slots::new())),
         }));
 
         let (reservation, _) = pool.reserve(7);
@@ -387,7 +393,7 @@ mod tests {
         assert!(pool.reserve(7).0.is_none(), "a refill is in flight");
 
         // What a child sees: state recorded under its parent's pid.
-        if let Ok(mut slots) = pool.slots.lock() {
+        if let Ok(mut slots) = pool.slots.get().lock() {
             slots.pid = std::process::id().wrapping_add(1);
         }
         assert!(
@@ -413,7 +419,7 @@ mod tests {
     fn an_unsupported_component_is_not_reserved_again() {
         let pool: &'static WarmPool = Box::leak(Box::new(WarmPool {
             target: 1,
-            slots: Mutex::new(Slots::new()),
+            slots: ForkLocal::new(|| Mutex::new(Slots::new())),
         }));
 
         let (reservation, _) = pool.reserve(7);

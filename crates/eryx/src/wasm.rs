@@ -42,6 +42,7 @@ use wasmtime_wasi::{FsPerms, WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView};
 
 use crate::callback::Callback;
 use crate::error::Error;
+use crate::fork_local::ForkLocal;
 use crate::trace::TraceEvent;
 use crate::warm::{WarmInstance, WarmPool};
 
@@ -168,9 +169,12 @@ pub(crate) fn is_already_cancelled(token: Option<&CancellationToken>) -> bool {
 
 /// Start or restart the process-lifetime epoch ticker for the shared engine.
 pub(crate) fn ensure_epoch_ticker(engine: &Engine) -> std::result::Result<(), Error> {
-    static EPOCH_TICKER: Mutex<Option<EpochTicker>> = Mutex::new(None);
+    // Per process, so a forked child never waits on a lock it inherited.
+    static EPOCH_TICKER: ForkLocal<Mutex<Option<EpochTicker>>> =
+        ForkLocal::new(|| Mutex::new(None));
 
     let mut ticker = EPOCH_TICKER
+        .get()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     if observe_epoch_ticker(&mut ticker)? {
