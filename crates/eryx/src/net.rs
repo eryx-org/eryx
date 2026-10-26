@@ -98,50 +98,50 @@ pub trait Resolver: Send + Sync + std::fmt::Debug {
 #[derive(Clone, Debug)]
 pub struct NetConfig {
     /// Maximum concurrent connections (0 = unlimited).
-    pub max_connections: u32,
+    max_connections: u32,
     /// Connection timeout for TCP connect.
-    pub connect_timeout: Duration,
+    connect_timeout: Duration,
     /// Read/write timeout for I/O operations.
-    pub io_timeout: Duration,
+    io_timeout: Duration,
     /// When true, all non-blocked hosts are allowed (`allowed_hosts` is ignored).
     /// When false (default), only hosts matching `allowed_hosts` are permitted.
-    pub allow_all_hosts: bool,
+    allow_all_hosts: bool,
     /// Allowed host patterns (only checked when `allow_all_hosts` is false).
     ///
     /// Patterns support wildcards: `*.example.com`, `api.*.com`, `exact.host.com`
-    pub allowed_hosts: Vec<String>,
+    allowed_hosts: Vec<String>,
     /// Blocked host patterns (checked after allowed).
     ///
     /// By default, blocks localhost and private networks.
-    pub blocked_hosts: Vec<String>,
+    blocked_hosts: Vec<String>,
     /// Networks that resolved addresses must not fall in.
     ///
     /// By default, every non-public range: see [`DEFAULT_BLOCKED_NETWORKS`].
     /// IPv4-mapped IPv6 addresses are checked as IPv4.
-    pub blocked_networks: Vec<IpNet>,
+    blocked_networks: Vec<IpNet>,
     /// Exceptions to `blocked_networks`: an address in one of these is allowed
     /// even if it also falls in a blocked network.
-    pub allowed_networks: Vec<IpNet>,
+    allowed_networks: Vec<IpNet>,
     /// Host patterns allowed to resolve into `blocked_networks`.
     ///
     /// For trusted names that are routed internally on purpose (e.g. a
     /// service reached through cluster DNS). The host must still pass
     /// `blocked_hosts`/`allowed_hosts`. Only list names whose DNS you control:
     /// whoever answers for them decides which internal address they reach.
-    pub internal_hosts: Vec<String>,
+    internal_hosts: Vec<String>,
     /// Resolver for hostnames; `None` uses the system resolver.
-    pub resolver: Option<Arc<dyn Resolver>>,
+    resolver: Option<Arc<dyn Resolver>>,
     /// Custom root certificates (DER-encoded) to trust in addition to system certs.
     ///
     /// Useful for testing with self-signed certificates.
-    pub custom_root_certs: Vec<Vec<u8>>,
+    custom_root_certs: Vec<Vec<u8>>,
     /// Substitute secret placeholders on plain TCP connections too.
     ///
     /// By default (`false`) placeholders are only replaced after a TLS
     /// upgrade, so a real secret never crosses the network unencrypted. A
     /// request over plain TCP (e.g. `http://`) is sent with the placeholder
     /// left in place.
-    pub allow_plaintext_secrets: bool,
+    allow_plaintext_secrets: bool,
 }
 
 /// The default [`NetConfig::blocked_networks`]: every range that isn't
@@ -352,7 +352,7 @@ impl NetConfig {
     }
 
     /// Substitute secret placeholders on plain TCP connections as well as TLS;
-    /// see [`NetConfig::allow_plaintext_secrets`].
+    /// see [`NetConfig::allows_plaintext_secrets`].
     #[must_use]
     pub fn allow_plaintext_secrets(mut self, allow: bool) -> Self {
         self.allow_plaintext_secrets = allow;
@@ -409,6 +409,151 @@ impl NetConfig {
     pub fn with_root_cert(mut self, cert_der: impl Into<Vec<u8>>) -> Self {
         self.custom_root_certs.push(cert_der.into());
         self
+    }
+
+    /// Allow every host that isn't blocked, ignoring `allowed_hosts`; see
+    /// [`NetConfig::allows_all_hosts`].
+    #[must_use]
+    pub fn allow_all_hosts(mut self, allow: bool) -> Self {
+        self.allow_all_hosts = allow;
+        self
+    }
+
+    /// Replace the allowed host patterns; see [`NetConfig::allowed_hosts`].
+    #[must_use]
+    pub fn with_allowed_hosts(
+        mut self,
+        patterns: impl IntoIterator<Item = impl Into<String>>,
+    ) -> Self {
+        self.allowed_hosts = patterns.into_iter().map(Into::into).collect();
+        self
+    }
+
+    /// Replace the blocked host patterns, including the defaults; see
+    /// [`NetConfig::blocked_hosts`].
+    #[must_use]
+    pub fn with_blocked_hosts(
+        mut self,
+        patterns: impl IntoIterator<Item = impl Into<String>>,
+    ) -> Self {
+        self.blocked_hosts = patterns.into_iter().map(Into::into).collect();
+        self
+    }
+
+    /// Replace the blocked networks, including the defaults; see
+    /// [`NetConfig::blocked_networks`].
+    #[must_use]
+    pub fn with_blocked_networks(mut self, networks: impl IntoIterator<Item = IpNet>) -> Self {
+        self.blocked_networks = networks.into_iter().collect();
+        self
+    }
+
+    /// Replace the allowed networks; see [`NetConfig::allowed_networks`].
+    #[must_use]
+    pub fn with_allowed_networks(mut self, networks: impl IntoIterator<Item = IpNet>) -> Self {
+        self.allowed_networks = networks.into_iter().collect();
+        self
+    }
+
+    /// Replace the internal host patterns; see [`NetConfig::internal_hosts`].
+    #[must_use]
+    pub fn with_internal_hosts(
+        mut self,
+        patterns: impl IntoIterator<Item = impl Into<String>>,
+    ) -> Self {
+        self.internal_hosts = patterns.into_iter().map(Into::into).collect();
+        self
+    }
+
+    /// Maximum concurrent connections (0 = unlimited).
+    #[must_use]
+    pub fn max_connections(&self) -> u32 {
+        self.max_connections
+    }
+
+    /// Connection timeout for TCP connect.
+    #[must_use]
+    pub fn connect_timeout(&self) -> Duration {
+        self.connect_timeout
+    }
+
+    /// Read/write timeout for I/O operations.
+    #[must_use]
+    pub fn io_timeout(&self) -> Duration {
+        self.io_timeout
+    }
+
+    /// When true, all non-blocked hosts are allowed (`allowed_hosts` is ignored).
+    /// When false (default), only hosts matching `allowed_hosts` are permitted.
+    #[must_use]
+    pub fn allows_all_hosts(&self) -> bool {
+        self.allow_all_hosts
+    }
+
+    /// Allowed host patterns (only checked when `allow_all_hosts` is false).
+    ///
+    /// Patterns support wildcards: `*.example.com`, `api.*.com`, `exact.host.com`
+    #[must_use]
+    pub fn allowed_hosts(&self) -> &[String] {
+        &self.allowed_hosts
+    }
+
+    /// Blocked host patterns (checked after allowed).
+    ///
+    /// By default, blocks localhost and private networks.
+    #[must_use]
+    pub fn blocked_hosts(&self) -> &[String] {
+        &self.blocked_hosts
+    }
+
+    /// Networks that resolved addresses must not fall in.
+    ///
+    /// By default, every non-public range: see [`DEFAULT_BLOCKED_NETWORKS`].
+    /// IPv4-mapped IPv6 addresses are checked as IPv4.
+    #[must_use]
+    pub fn blocked_networks(&self) -> &[IpNet] {
+        &self.blocked_networks
+    }
+
+    /// Exceptions to `blocked_networks`: an address in one of these is allowed
+    /// even if it also falls in a blocked network.
+    #[must_use]
+    pub fn allowed_networks(&self) -> &[IpNet] {
+        &self.allowed_networks
+    }
+
+    /// Host patterns allowed to resolve into `blocked_networks`.
+    ///
+    /// For trusted names that are routed internally on purpose (e.g. a
+    /// service reached through cluster DNS). The host must still pass
+    /// `blocked_hosts`/`allowed_hosts`. Only list names whose DNS you control:
+    /// whoever answers for them decides which internal address they reach.
+    #[must_use]
+    pub fn internal_hosts(&self) -> &[String] {
+        &self.internal_hosts
+    }
+
+    /// Resolver for hostnames; `None` uses the system resolver.
+    #[must_use]
+    pub fn resolver(&self) -> Option<&Arc<dyn Resolver>> {
+        self.resolver.as_ref()
+    }
+
+    /// Custom root certificates (DER-encoded) trusted in addition to system certs.
+    #[must_use]
+    pub fn custom_root_certs(&self) -> &[Vec<u8>] {
+        &self.custom_root_certs
+    }
+
+    /// Whether secret placeholders are substituted on plain TCP connections
+    /// too, not only after a TLS upgrade.
+    ///
+    /// By default (`false`) a real secret never crosses the network
+    /// unencrypted: a request over plain TCP (e.g. `http://`) is sent with the
+    /// placeholder left in place.
+    #[must_use]
+    pub fn allows_plaintext_secrets(&self) -> bool {
+        self.allow_plaintext_secrets
     }
 }
 
@@ -1550,6 +1695,20 @@ fn host_matches_pattern(host: &str, pattern: &str) -> bool {
 mod tests {
     /// `len` is guest-controlled and the buffer lands on the host, outside the
     /// sandbox's memory limit: `recv(2**32 - 1)` used to allocate 4 GiB per call.
+    #[test]
+    fn replacing_lists_drops_the_defaults() {
+        let net: IpNet = "10.0.0.0/8".parse().unwrap();
+        let config = NetConfig::default()
+            .with_blocked_hosts(["evil.example"])
+            .with_blocked_networks([net])
+            .with_allowed_hosts(["a.example", "b.example"])
+            .allow_all_hosts(true);
+        assert_eq!(config.blocked_hosts(), ["evil.example"]);
+        assert_eq!(config.blocked_networks(), [net]);
+        assert_eq!(config.allowed_hosts(), ["a.example", "b.example"]);
+        assert!(config.allows_all_hosts());
+    }
+
     #[test]
     fn read_buf_len_is_bounded() {
         use super::{MAX_READ_LEN, read_buf_len};

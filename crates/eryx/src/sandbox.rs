@@ -1863,17 +1863,9 @@ impl<R, S> SandboxBuilder<R, S> {
         allowed_hosts: Vec<String>,
     ) -> Self {
         let name = name.into();
-        let value = value.into();
-        let placeholder = crate::secrets::generate_placeholder(&name);
-
-        self.secrets.insert(
-            name.clone(),
-            crate::secrets::SecretConfig {
-                real_value: value,
-                placeholder: placeholder.clone(),
-                allowed_hosts,
-            },
-        );
+        let secret = crate::secrets::SecretConfig::new(value, allowed_hosts);
+        let placeholder = secret.placeholder().to_string();
+        self.secrets.insert(name.clone(), secret);
 
         // Set the placeholder as an environment variable via the preamble. The
         // preinitialized runtime snapshots `os.environ`, so WASI env vars set

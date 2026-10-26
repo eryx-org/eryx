@@ -339,20 +339,21 @@ fn default_blocked_hosts() -> Vec<String> {
 
 impl From<&NetConfig> for eryx::NetConfig {
     fn from(config: &NetConfig) -> Self {
-        Self {
-            max_connections: config.max_connections,
-            connect_timeout: Duration::from_millis(config.connect_timeout_ms),
-            io_timeout: Duration::from_millis(config.io_timeout_ms),
-            allow_all_hosts: config.allow_all_hosts,
-            allowed_hosts: config.allowed_hosts.clone(),
-            blocked_hosts: config.blocked_hosts.clone(),
-            blocked_networks: config.blocked_networks.clone(),
-            allowed_networks: config.allowed_networks.clone(),
-            internal_hosts: config.internal_hosts.clone(),
-            resolver: None,
-            custom_root_certs: config.custom_root_certs.clone(),
-            allow_plaintext_secrets: false,
-        }
+        let net = Self::default()
+            .with_max_connections(config.max_connections)
+            .with_connect_timeout(Duration::from_millis(config.connect_timeout_ms))
+            .with_io_timeout(Duration::from_millis(config.io_timeout_ms))
+            .allow_all_hosts(config.allow_all_hosts)
+            .with_allowed_hosts(config.allowed_hosts.clone())
+            .with_blocked_hosts(config.blocked_hosts.clone())
+            .with_blocked_networks(config.blocked_networks.clone())
+            .with_allowed_networks(config.allowed_networks.clone())
+            .with_internal_hosts(config.internal_hosts.clone());
+        config
+            .custom_root_certs
+            .iter()
+            .cloned()
+            .fold(net, Self::with_root_cert)
     }
 }
 

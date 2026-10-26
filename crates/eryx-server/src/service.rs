@@ -11,8 +11,7 @@ use eryx::vfs::{ArcStorage, InMemoryStorage, VfsStorage};
 use eryx::{
     Callback, CallbackJournal, CallbackRequest, ConnectionManager, Error, NetConfig, NetRequest,
     OutputRequest, PythonStateSnapshot, ReplayState, ResourceLimits, SandboxPool, SecretConfig,
-    SessionExecutor, TraceRequest, VfsConfig, generate_placeholder, scrub_placeholders,
-    scrub_placeholders_bytes,
+    SessionExecutor, TraceRequest, VfsConfig, scrub_placeholders, scrub_placeholders_bytes,
 };
 use futures::FutureExt;
 use opentelemetry::propagation::Extractor;
@@ -308,43 +307,48 @@ impl crate::proto::eryx::v1::eryx_server::Eryx for EryxService {
             .network_config
             .map(|nc| -> Result<NetConfig, Status> {
                 let defaults = NetConfig::default();
-                Ok(NetConfig {
-                    allow_all_hosts: nc.allow_all_hosts,
-                    allowed_hosts: nc.allowed_hosts,
-                    blocked_hosts: if nc.blocked_hosts.is_empty() {
-                        defaults.blocked_hosts
-                    } else {
-                        nc.blocked_hosts
-                    },
-                    max_connections: if nc.max_connections > 0 {
-                        nc.max_connections
-                    } else {
-                        defaults.max_connections
-                    }
-                    .min(self.limits.max_connections),
-                    connect_timeout: if nc.connect_timeout_ms > 0 {
-                        Duration::from_millis(nc.connect_timeout_ms)
-                    } else {
-                        defaults.connect_timeout
-                    }
-                    .min(self.limits.max_io_timeout),
-                    io_timeout: if nc.io_timeout_ms > 0 {
-                        Duration::from_millis(nc.io_timeout_ms)
-                    } else {
-                        defaults.io_timeout
-                    }
-                    .min(self.limits.max_io_timeout),
-                    blocked_networks: if nc.blocked_networks.is_empty() {
-                        defaults.blocked_networks
-                    } else {
-                        parse_networks("blocked_networks", &nc.blocked_networks)?
-                    },
-                    allowed_networks: parse_networks("allowed_networks", &nc.allowed_networks)?,
-                    internal_hosts: nc.internal_hosts,
-                    resolver: None,
-                    custom_root_certs: vec![],
-                    allow_plaintext_secrets: false,
-                })
+                let mut config = NetConfig::default()
+                    .allow_all_hosts(nc.allow_all_hosts)
+                    .with_allowed_hosts(nc.allowed_hosts)
+                    .with_max_connections(
+                        if nc.max_connections > 0 {
+                            nc.max_connections
+                        } else {
+                            defaults.max_connections()
+                        }
+                        .min(self.limits.max_connections),
+                    )
+                    .with_connect_timeout(
+                        if nc.connect_timeout_ms > 0 {
+                            Duration::from_millis(nc.connect_timeout_ms)
+                        } else {
+                            defaults.connect_timeout()
+                        }
+                        .min(self.limits.max_io_timeout),
+                    )
+                    .with_io_timeout(
+                        if nc.io_timeout_ms > 0 {
+                            Duration::from_millis(nc.io_timeout_ms)
+                        } else {
+                            defaults.io_timeout()
+                        }
+                        .min(self.limits.max_io_timeout),
+                    )
+                    .with_allowed_networks(parse_networks(
+                        "allowed_networks",
+                        &nc.allowed_networks,
+                    )?)
+                    .with_internal_hosts(nc.internal_hosts);
+                if !nc.blocked_hosts.is_empty() {
+                    config = config.with_blocked_hosts(nc.blocked_hosts);
+                }
+                if !nc.blocked_networks.is_empty() {
+                    config = config.with_blocked_networks(parse_networks(
+                        "blocked_networks",
+                        &nc.blocked_networks,
+                    )?);
+                }
+                Ok(config)
             })
             .transpose()?;
 
@@ -369,16 +373,13 @@ impl crate::proto::eryx::v1::eryx_server::Eryx for EryxService {
                         s.name
                     )));
                 }
-                let placeholder = generate_placeholder(&s.name);
-                preamble.push_str(&format!("os.environ[{:?}] = {:?}\n", s.name, placeholder));
-                map.insert(
-                    s.name.clone(),
-                    SecretConfig {
-                        real_value: s.value.clone(),
-                        placeholder,
-                        allowed_hosts: s.allowed_hosts.clone(),
-                    },
-                );
+                let secret = SecretConfig::new(s.value.clone(), s.allowed_hosts.clone());
+                preamble.push_str(&format!(
+                    "os.environ[{:?}] = {:?}\n",
+                    s.name,
+                    secret.placeholder()
+                ));
+                map.insert(s.name.clone(), secret);
             }
             (map, preamble)
         };
@@ -1065,8 +1066,8 @@ async fn execute_with_session(
     // Spawn network handler if networking is enabled (mirrors Sandbox::execute pattern).
     let (net_tx, _net_handler) = if let Some(config) = params.net_config.clone() {
         let (tx, rx) = mpsc::channel::<NetRequest>(32);
-        let allowed_hosts = config.allowed_hosts.len();
-        let max_connections = config.max_connections;
+        let allowed_hosts = config.allowed_hosts().len();
+        let max_connections = config.max_connections();
         let manager = ConnectionManager::new(config, params.secrets.clone());
         tracing::info!(allowed_hosts, max_connections, "network handler started");
         let handler = tokio::spawn(async move {
@@ -1503,15 +1504,9 @@ mod tests {
 
     #[test]
     fn trace_events_are_scrubbed() {
-        let placeholder = generate_placeholder("TOKEN");
-        let secrets = HashMap::from([(
-            "TOKEN".to_string(),
-            SecretConfig {
-                real_value: "real".to_string(),
-                placeholder: placeholder.clone(),
-                allowed_hosts: vec![],
-            },
-        )]);
+        let secret = SecretConfig::new("real", vec![]);
+        let placeholder = secret.placeholder().to_string();
+        let secrets = HashMap::from([("TOKEN".to_string(), secret)]);
         let req = TraceRequest {
             lineno: 1,
             event_json:

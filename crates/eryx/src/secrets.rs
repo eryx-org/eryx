@@ -13,16 +13,46 @@ use std::collections::HashMap;
 #[derive(Clone)]
 pub struct SecretConfig {
     /// The real secret value (never exposed to sandbox)
-    pub real_value: String,
+    pub(crate) real_value: String,
     /// Generated placeholder (what Python sees)
-    pub placeholder: String,
+    pub(crate) placeholder: String,
     /// Host restrictions for this secret.
     ///
     /// If empty, falls back to `NetConfig.allowed_hosts`, but only while
     /// `allow_all_hosts` is off. A secret with no hosts either way is never
     /// substituted, and the sandbox refuses to build with it; see
     /// [`NetConfig::secret_hosts`](crate::NetConfig::secret_hosts).
-    pub allowed_hosts: Vec<String>,
+    pub(crate) allowed_hosts: Vec<String>,
+}
+
+impl SecretConfig {
+    /// A secret with the real value `real_value`, which may only be sent to
+    /// hosts matching `allowed_hosts`, and a newly generated placeholder.
+    ///
+    /// If `allowed_hosts` is empty, the secret falls back to
+    /// `NetConfig`'s allowed hosts; see
+    /// [`NetConfig::secret_hosts`](crate::NetConfig::secret_hosts).
+    #[must_use]
+    pub fn new(real_value: impl Into<String>, allowed_hosts: Vec<String>) -> Self {
+        Self {
+            real_value: real_value.into(),
+            placeholder: random_placeholder(),
+            allowed_hosts,
+        }
+    }
+
+    /// The placeholder the sandbox sees in place of the real value.
+    #[must_use]
+    pub fn placeholder(&self) -> &str {
+        &self.placeholder
+    }
+
+    /// Host patterns this secret may be sent to. Empty means it falls back to
+    /// `NetConfig`'s allowed hosts.
+    #[must_use]
+    pub fn allowed_hosts(&self) -> &[String] {
+        &self.allowed_hosts
+    }
 }
 
 impl std::fmt::Debug for SecretConfig {
@@ -126,6 +156,10 @@ impl From<bool> for OutputScrubPolicy {
 ///
 /// Placeholders are ephemeral (regenerated on each use) for better security.
 pub fn generate_placeholder(_secret_name: &str) -> String {
+    random_placeholder()
+}
+
+fn random_placeholder() -> String {
     use rand::RngExt;
     let mut rng = rand::rng();
     let random: [u8; 16] = rng.random();
@@ -190,6 +224,16 @@ mod tests {
         assert!(p1.starts_with("ERYX_SECRET_PLACEHOLDER_"));
         assert!(p2.starts_with("ERYX_SECRET_PLACEHOLDER_"));
         assert_ne!(p1, p2, "Placeholders should be unique");
+    }
+
+    #[test]
+    fn new_secret_gets_a_fresh_placeholder_and_hides_its_value() {
+        let a = SecretConfig::new("real-secret", vec!["api.example.com".into()]);
+        let b = SecretConfig::new("real-secret", vec![]);
+        assert!(a.placeholder().starts_with("ERYX_SECRET_PLACEHOLDER_"));
+        assert_ne!(a.placeholder(), b.placeholder());
+        assert_eq!(a.allowed_hosts(), ["api.example.com"]);
+        assert!(!format!("{a:?}").contains("real-secret"));
     }
 
     #[test]
