@@ -31,7 +31,7 @@ def _build_parser() -> argparse.ArgumentParser:
             examples:
               eryx serve                              basic sandbox server
               eryx serve --timeout 60000              60s execution timeout
-              eryx serve --net                        with network access
+              eryx serve --net                        with access to public hosts
               eryx serve --mcp                        with inner MCP tools
               eryx serve --mcp-config mcp.json        with explicit MCP config
         """),
@@ -86,10 +86,8 @@ def serve(argv: list[str] | None = None) -> int:
     mcp_manager = make_mcp_manager(args)
 
     # Build session kwargs
-    session_kwargs: dict = {}
     limits = make_resource_limits(args)
-    if limits is not None:
-        session_kwargs["execution_timeout_ms"] = limits.execution_timeout_ms
+    session_kwargs: dict = {"resource_limits": limits}
     net = make_net_config(args)
     if net is not None:
         session_kwargs["network"] = net
@@ -115,7 +113,9 @@ def serve(argv: list[str] | None = None) -> int:
         """Execute Python code in the eryx sandbox."""
         old_timeout = session.execution_timeout_ms
         if timeout_ms is not None:
-            session.execution_timeout_ms = timeout_ms
+            # The caller may shorten the timeout but not raise it past --timeout.
+            ceiling = limits.execution_timeout_ms
+            session.execution_timeout_ms = timeout_ms if ceiling is None else min(timeout_ms, ceiling)
 
         stdout_chunks.clear()
         stderr_chunks.clear()

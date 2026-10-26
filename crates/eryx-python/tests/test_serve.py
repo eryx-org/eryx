@@ -7,13 +7,14 @@ Requires the ``mcp`` package (``pip install 'pyeryx[serve]'``).
 from __future__ import annotations
 
 import sys
+import time
 
 import pytest
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 
 
-async def _run_with_session(fn):
+async def _run_with_session(fn, *extra_args):
     """Start ``eryx serve``, connect a client, run *fn(session)*, then tear down.
 
     Uses anyio directly to avoid pytest-asyncio fixture teardown issues with
@@ -21,7 +22,7 @@ async def _run_with_session(fn):
     """
     params = StdioServerParameters(
         command=sys.executable,
-        args=["-m", "eryx", "serve"],
+        args=["-m", "eryx", "serve", *extra_args],
     )
     async with stdio_client(params) as (read_stream, write_stream):
         async with ClientSession(read_stream, write_stream) as session:
@@ -121,3 +122,20 @@ async def test_timeout_override():
         assert "timed out" in text.lower() or "timeout" in text.lower()
 
     await _run_with_session(body)
+
+
+@pytest.mark.asyncio
+async def test_timeout_override_capped_at_cli_timeout():
+    """A ``timeout_ms`` above ``--timeout`` is capped at ``--timeout``."""
+
+    async def body(session):
+        start = time.monotonic()
+        result = await session.call_tool(
+            "run_python",
+            {"code": "while True: pass", "timeout_ms": 600_000},
+        )
+        assert time.monotonic() - start < 60
+        text = result.content[0].text
+        assert "timed out" in text.lower() or "timeout" in text.lower()
+
+    await _run_with_session(body, "--timeout", "500")

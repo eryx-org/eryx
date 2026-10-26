@@ -30,7 +30,7 @@ print(result["text"])
 
 ## Config Discovery
 
-When `--mcp` is passed (or `MCPManager` is used programmatically), Eryx searches for MCP server configurations from multiple IDEs and tools. Only `stdio`-type servers are supported.
+When `--mcp` is passed (or `connect_servers()` is called), Eryx searches the user-wide MCP server configurations of multiple IDEs and tools. Project configs in the current directory are read only with `--mcp-project` (or `include_project=True`), since they name commands that run on your machine. Only `stdio`-type servers are supported.
 
 ### Supported Config Files
 
@@ -45,7 +45,7 @@ When `--mcp` is passed (or `MCPManager` is used programmatically), Eryx searches
 | Gemini CLI | `~/.gemini/settings.json` | `mcpServers` |
 | Codex | `~/.codex/config.toml` | `mcp_servers` |
 
-**Project (cwd-relative):**
+**Project (cwd-relative, only with `--mcp-project`):**
 
 | Tool | Path | Key |
 |------|------|-----|
@@ -56,7 +56,7 @@ When `--mcp` is passed (or `MCPManager` is used programmatically), Eryx searches
 | Gemini CLI | `.gemini/settings.json` | `mcpServers` |
 | Codex | `.codex/config.toml` | `mcp_servers` |
 
-Later sources override earlier ones, so project-level configs take precedence over global ones.
+Later sources override earlier ones, except that a project config never replaces a global server of the same name.
 
 ### Config Format
 
@@ -101,7 +101,8 @@ python -m eryx --mcp-config global.json --mcp-config project.json -c '...'
 
 | Flag | Description |
 |------|-------------|
-| `--mcp` | Enable MCP server integration (auto-discovers from all supported configs) |
+| `--mcp` | Enable MCP server integration (auto-discovers from user-wide configs) |
+| `--mcp-project` | Also read project configs in the current directory (implies `--mcp`) |
 | `--mcp-config PATH` | Path to MCP config file (implies `--mcp`, can be repeated) |
 
 ## Python API
@@ -249,7 +250,7 @@ for tool in mcp_tools:
 
 ## Best Practices
 
-1. **Use auto-discovery for convenience** — `--mcp` finds servers from all your IDE configs automatically
+1. **Use auto-discovery for convenience** — `--mcp` finds servers from your user-wide IDE configs automatically; add `--mcp-project` only in directories you trust
 2. **Use explicit configs for reproducibility** — `--mcp-config` ensures consistent behavior across machines
 3. **Close the manager** — Always call `manager.close()` when done to terminate MCP server processes
 4. **Handle missing tools gracefully** — Not all servers may be available in every environment

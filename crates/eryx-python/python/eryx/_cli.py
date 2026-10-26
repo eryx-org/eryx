@@ -48,14 +48,14 @@ def add_sandbox_args(parser: argparse.ArgumentParser) -> None:
         "--net",
         action="store_true",
         default=False,
-        help="enable network access",
+        help="enable network access to any public host (localhost and private networks stay blocked)",
     )
     net.add_argument(
         "--allow-host",
         action="append",
         default=[],
         metavar="PATTERN",
-        help="allow network access to hosts matching PATTERN (implies --net)",
+        help="allow network access only to hosts matching PATTERN (repeatable, implies --net)",
     )
 
     mcp_group = parser.add_argument_group("MCP (Model Context Protocol)")
@@ -63,7 +63,14 @@ def add_sandbox_args(parser: argparse.ArgumentParser) -> None:
         "--mcp",
         action="store_true",
         default=False,
-        help="enable MCP server integration (discovers servers from Claude, Cursor, VS Code, Zed, Windsurf, Codex, Gemini configs)",
+        help="enable MCP server integration (discovers servers from the user-wide Claude, Cursor, Zed, Windsurf, Codex, Gemini configs)",
+    )
+    mcp_group.add_argument(
+        "--mcp-project",
+        action="store_true",
+        default=False,
+        help="also read MCP configs in the current directory (.mcp.json, .vscode/mcp.json, ...); "
+        "they run commands on this machine, so only use in trusted directories (implies --mcp)",
     )
     mcp_group.add_argument(
         "--mcp-config",
@@ -85,10 +92,8 @@ def add_sandbox_args(parser: argparse.ArgumentParser) -> None:
     )
 
 
-def make_resource_limits(args: argparse.Namespace) -> eryx.ResourceLimits | None:
-    """Build ResourceLimits from parsed CLI args, or None if defaults."""
-    if args.timeout is None and args.max_memory is None:
-        return None
+def make_resource_limits(args: argparse.Namespace) -> eryx.ResourceLimits:
+    """Build ResourceLimits from parsed CLI args, starting from the defaults."""
     limits = eryx.ResourceLimits()
     if args.timeout is not None:
         limits.execution_timeout_ms = args.timeout
@@ -98,21 +103,24 @@ def make_resource_limits(args: argparse.Namespace) -> eryx.ResourceLimits | None
 
 
 def make_net_config(args: argparse.Namespace) -> eryx.NetConfig | None:
-    """Build NetConfig from parsed CLI args, or None if networking is disabled."""
-    if not args.net and not args.allow_host:
-        return None
-    config = eryx.NetConfig.permissive()
-    for pattern in args.allow_host:
-        config.allow_host(pattern)
-    return config
+    """Build NetConfig from parsed CLI args, or None if networking is disabled.
+
+    ``--allow-host`` gives an allowlist; a bare ``--net`` allows any host.
+    Both keep the default blocks on localhost and private networks.
+    """
+    if args.allow_host:
+        return eryx.NetConfig(allowed_hosts=args.allow_host)
+    if args.net:
+        return eryx.NetConfig(allow_all_hosts=True)
+    return None
 
 
 def make_mcp_manager(args: argparse.Namespace) -> object | None:
-    """Create an MCP manager if --mcp or --mcp-config is specified."""
-    if not args.mcp and not args.mcp_config:
+    """Create an MCP manager if --mcp, --mcp-project or --mcp-config is specified."""
+    if not args.mcp and not args.mcp_project and not args.mcp_config:
         return None
 
     from eryx.mcp import connect_servers
 
     config_paths = args.mcp_config if args.mcp_config else None
-    return connect_servers(config_paths=config_paths)
+    return connect_servers(config_paths=config_paths, include_project=args.mcp_project)

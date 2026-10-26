@@ -294,11 +294,13 @@ enabled = false
         assert "http_tool" not in servers
 
     def test_default_sources_structure(self):
-        """Test that _default_sources returns expected structure."""
-        from eryx.mcp import _default_sources
+        """Test that the global and project sources have the expected structure."""
+        from eryx.mcp import _global_sources, _project_sources
 
-        sources = _default_sources()
-        # Should have both global and project sources
+        home = str(Path.home())
+        global_sources = _global_sources()
+        assert all(str(s.path).startswith(home) for s in global_sources)
+        sources = global_sources + _project_sources()
         assert len(sources) >= 10
 
         # Check some expected entries exist
@@ -322,6 +324,35 @@ enabled = false
         assert "toml" in fmts
         # VS Code uses "servers"
         assert "servers" in keys
+
+    def test_project_configs_are_opt_in(self, tmp_path, monkeypatch):
+        """cwd configs are read only with include_project, and never replace global ones."""
+        from eryx.mcp import discover_servers
+
+        home = tmp_path / "home"
+        project = tmp_path / "project"
+        home.mkdir()
+        project.mkdir()
+        (home / ".claude.json").write_text(
+            json.dumps({"mcpServers": {"shared": {"command": "global-cmd"}}})
+        )
+        (project / ".mcp.json").write_text(
+            json.dumps(
+                {
+                    "mcpServers": {
+                        "shared": {"command": "project-cmd"},
+                        "local": {"command": "local-cmd"},
+                    }
+                }
+            )
+        )
+        monkeypatch.setattr(Path, "home", lambda: home)
+        monkeypatch.chdir(project)
+
+        assert set(discover_servers()) == {"shared"}
+        servers = discover_servers(include_project=True)
+        assert servers["shared"]["command"] == "global-cmd"
+        assert servers["local"]["command"] == "local-cmd"
 
 
 class TestEnvVarExpansion:

@@ -39,7 +39,6 @@ Or with sandbox options:
       "args": [
         "--with", "pyeryx[serve]", "eryx", "serve",
         "--timeout", "60000",
-        "--net",
         "--allow-host", "*.example.com"
       ]
     }
@@ -55,10 +54,11 @@ Or with sandbox options:
 |------|-------------|---------|
 | `--timeout MS` | Execution timeout in milliseconds | 30000 |
 | `--max-memory BYTES` | Maximum memory in bytes | 128MB |
-| `--net` | Enable network access | off |
-| `--allow-host PATTERN` | Allow access to matching hosts (implies `--net`) | |
+| `--net` | Allow access to any public host | off |
+| `--allow-host PATTERN` | Allow access only to matching hosts (implies `--net`) | |
 | `-v SRC:DST[:ro]` | Mount host directory at sandbox path | |
-| `--mcp` | Enable inner MCP tools (auto-discovers from IDE configs) | off |
+| `--mcp` | Enable inner MCP tools (auto-discovers from user-wide IDE configs) | off |
+| `--mcp-project` | Also read MCP configs in the current directory (implies `--mcp`) | off |
 | `--mcp-config PATH` | Path to inner MCP config file (implies `--mcp`) | |
 
 ## The `run_python` Tool
@@ -68,7 +68,7 @@ The server exposes a single tool:
 | Parameter | Type | Description |
 |-----------|------|-------------|
 | `code` | `string` | Python code to execute (required) |
-| `timeout_ms` | `integer` | Per-execution timeout override in milliseconds (optional) |
+| `timeout_ms` | `integer` | Per-execution timeout in milliseconds (optional, capped at `--timeout`) |
 
 The tool uses a persistent `Session` under the hood, so variables, imports, and function definitions persist across calls. Output is captured from `print()` statements and returned as the tool result. Errors (execution errors, timeouts, resource limits) are returned as text rather than MCP errors, so the AI can see and react to them.
 
@@ -105,11 +105,11 @@ eryx serve
 # With a 60-second timeout
 eryx serve --timeout 60000
 
-# With network access
+# With access to any public host
 eryx serve --net
 
 # With network access restricted to specific hosts
-eryx serve --net --allow-host 'api.example.com' --allow-host '*.internal.dev'
+eryx serve --allow-host 'api.example.com' --allow-host '*.example.dev'
 
 # With a mounted directory
 eryx serve -v /path/to/data:/data:ro

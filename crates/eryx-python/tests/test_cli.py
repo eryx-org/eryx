@@ -111,6 +111,54 @@ class TestCliNetworking:
         assert "ok" in captured.out
 
 
+class TestCliNetConfig:
+    """Tests for the NetConfig the CLI builds from networking flags."""
+
+    @staticmethod
+    def _net(argv):
+        from eryx.__main__ import _build_parser
+        from eryx._cli import make_net_config
+
+        return make_net_config(_build_parser().parse_args(argv))
+
+    def test_no_flags_disable_network(self):
+        assert self._net([]) is None
+
+    def test_allow_host_is_an_allowlist(self):
+        config = self._net(["--allow-host", "api.example.com", "--allow-host", "*.x.com"])
+        assert config.allow_all_hosts is False
+        assert config.allowed_hosts == ["api.example.com", "*.x.com"]
+        assert "localhost" in config.blocked_hosts
+        assert "169.254.0.0/16" in config.blocked_networks
+
+    def test_net_keeps_default_blocks(self):
+        config = self._net(["--net"])
+        assert config.allow_all_hosts is True
+        assert "localhost" in config.blocked_hosts
+        assert "169.254.0.0/16" in config.blocked_networks
+
+
+class TestCliResourceLimitsConfig:
+    """Tests for the ResourceLimits the CLI builds."""
+
+    @staticmethod
+    def _limits(argv):
+        from eryx.__main__ import _build_parser
+        from eryx._cli import make_resource_limits
+
+        return make_resource_limits(_build_parser().parse_args(argv))
+
+    def test_defaults(self):
+        limits = self._limits([])
+        assert limits.execution_timeout_ms == 30000
+        assert limits.max_memory_bytes == 128 * 1024 * 1024
+
+    def test_flags_override(self):
+        limits = self._limits(["--timeout", "5", "--max-memory", "1000"])
+        assert limits.execution_timeout_ms == 5
+        assert limits.max_memory_bytes == 1000
+
+
 class TestCliVolume:
     """Tests for volume mount flag."""
 

@@ -10,7 +10,7 @@ Usage:
 Examples:
     uvx --with pyeryx eryx -c 'import sys; print(sys.version)'
     uvx --with pyeryx eryx --timeout 5000 -c 'print("hello")'
-    uvx --with pyeryx eryx --net --allow-host '*.example.com' -c 'import urllib.request; ...'
+    uvx --with pyeryx eryx --allow-host '*.example.com' -c 'import urllib.request; ...'
     uvx --with 'pyeryx[serve]' eryx serve --mcp
 """
 
@@ -37,7 +37,8 @@ def _build_parser() -> argparse.ArgumentParser:
               eryx -c 'print("hello")'          execute a string
               echo 'print(1+1)' | eryx -        read code from stdin
               eryx --timeout 5000 script.py     set execution timeout
-              eryx --net -c 'import requests'   enable network access
+              eryx --net -c 'import requests'   allow any public host
+              eryx --allow-host api.x.com ...   allow only api.x.com
               eryx serve                        start MCP server
               eryx serve --mcp                  MCP server with inner tools
         """),
@@ -93,11 +94,8 @@ def _write_stderr(chunk: bytes) -> None:
 
 def _run_once(code: str, args: argparse.Namespace, mcp_manager: object | None = None) -> int:
     """Execute code in a stateless Sandbox and print the result."""
-    limits = make_resource_limits(args)
     net = make_net_config(args)
-    kwargs = {}
-    if limits is not None:
-        kwargs["resource_limits"] = limits
+    kwargs: dict = {"resource_limits": make_resource_limits(args)}
     if net is not None:
         kwargs["network"] = net
     if args.volume:
@@ -130,10 +128,7 @@ def _run_once(code: str, args: argparse.Namespace, mcp_manager: object | None = 
 
 def _repl(args: argparse.Namespace, mcp_manager: object | None = None) -> int:
     """Run an interactive REPL using Session for persistent state."""
-    kwargs = {}
-    limits = make_resource_limits(args)
-    if limits is not None:
-        kwargs["execution_timeout_ms"] = limits.execution_timeout_ms
+    kwargs: dict = {"resource_limits": make_resource_limits(args)}
     net = make_net_config(args)
     if net is not None:
         kwargs["network"] = net

@@ -13,13 +13,16 @@ Supported config sources (searched in order, later entries override earlier):
 - ``~/.gemini/settings.json`` — Gemini CLI (key: ``mcpServers``)
 - ``~/.codex/config.toml`` — OpenAI Codex (key: ``mcp_servers``, TOML)
 
-**Project (cwd-relative):**
+**Project (cwd-relative, only with** ``include_project=True`` **):**
 - ``.mcp.json`` — Claude Code (key: ``mcpServers``)
 - ``.cursor/mcp.json`` — Cursor (key: ``mcpServers``)
 - ``.vscode/mcp.json`` — VS Code (key: ``servers``)
 - ``.zed/settings.json`` — Zed (key: ``context_servers``)
 - ``.gemini/settings.json`` — Gemini CLI (key: ``mcpServers``)
 - ``.codex/config.toml`` — OpenAI Codex (key: ``mcp_servers``, TOML)
+
+Project configs come with the working directory, so they are read only on
+request, and a project entry never replaces a global entry of the same name.
 
 Example:
     from eryx.mcp import connect_servers
@@ -53,10 +56,9 @@ class _ConfigSource:
     fmt: str = "json"  # "json" or "toml"
 
 
-def _default_sources() -> list[_ConfigSource]:
-    """Return the default config sources to search."""
+def _global_sources() -> list[_ConfigSource]:
+    """Return the user-wide config sources to search."""
     home = Path.home()
-    cwd = Path.cwd()
     return [
         # Global (user-wide) configs
         _ConfigSource(home / ".claude.json", "mcpServers"),
@@ -65,7 +67,13 @@ def _default_sources() -> list[_ConfigSource]:
         _ConfigSource(home / ".config" / "zed" / "settings.json", "context_servers"),
         _ConfigSource(home / ".gemini" / "settings.json", "mcpServers"),
         _ConfigSource(home / ".codex" / "config.toml", "mcp_servers", "toml"),
-        # Project (cwd-relative) configs — later overrides earlier
+    ]
+
+
+def _project_sources() -> list[_ConfigSource]:
+    """Return the cwd-relative config sources to search."""
+    cwd = Path.cwd()
+    return [
         _ConfigSource(cwd / ".mcp.json", "mcpServers"),
         _ConfigSource(cwd / ".cursor" / "mcp.json", "mcpServers"),
         _ConfigSource(cwd / ".vscode" / "mcp.json", "servers"),
@@ -170,13 +178,16 @@ def _extract_stdio_servers(
 
 def discover_servers(
     config_paths: Sequence[str | Path] | None = None,
+    *,
+    include_project: bool = False,
 ) -> dict[str, dict[str, Any]]:
     """Discover MCP server configurations from config files.
 
-    When *config_paths* is ``None`` (the default), searches config files
-    from multiple IDEs and tools.  See the module docstring for the full
-    list.  Later sources override earlier ones, so project-level configs
-    take precedence over global ones.
+    When *config_paths* is ``None`` (the default), searches the user-wide
+    config files of multiple IDEs and tools, plus the project configs in
+    the current directory if *include_project* is true.  See the module
+    docstring for the full list.  Later sources override earlier ones,
+    except that a project entry never replaces a global one.
 
     Only servers with ``"type": "stdio"`` (or no ``type`` key, assumed
     stdio) are included.  Servers with ``"disabled": true`` or
@@ -186,19 +197,27 @@ def discover_servers(
         config_paths: Optional explicit config file paths to read instead
             of the default locations.  All are treated as JSON with key
             ``mcpServers``.
+        include_project: Also read the project configs in the current
+            directory.  Only enable this for directories you trust: their
+            configs name commands that are run on the host.
 
     Returns:
         Dict mapping server name → config dict with ``command``, ``args``,
         and ``env`` keys.
     """
-    servers: dict[str, dict[str, Any]] = {}
-
     if config_paths is not None:
         # Explicit paths — all treated as JSON with "mcpServers" key
-        sources = [_ConfigSource(Path(p), "mcpServers") for p in config_paths]
-    else:
-        sources = _default_sources()
+        return _read_sources([_ConfigSource(Path(p), "mcpServers") for p in config_paths])
 
+    servers = _read_sources(_global_sources())
+    if include_project:
+        servers = {**_read_sources(_project_sources()), **servers}
+    return servers
+
+
+def _read_sources(sources: Sequence[_ConfigSource]) -> dict[str, dict[str, Any]]:
+    """Read stdio servers from *sources*, later sources overriding earlier."""
+    servers: dict[str, dict[str, Any]] = {}
     for source in sources:
         if source.fmt == "toml":
             data = _read_toml(source.path)
@@ -216,19 +235,23 @@ def discover_servers(
 def connect_servers(
     config_paths: Sequence[str | Path] | None = None,
     connect_timeout: float = 30.0,
+    *,
+    include_project: bool = False,
 ) -> Optional[_RustMCPManager]:
     """Discover and connect to MCP servers.
 
     Args:
-        config_paths: Optional explicit config file paths. Defaults to
-            ``~/.claude.json`` and ``.mcp.json`` in cwd.
+        config_paths: Optional explicit config file paths. Defaults to the
+            user-wide configs listed in the module docstring.
         connect_timeout: Timeout in seconds for each server connection.
+        include_project: Also read the project configs in the current
+            directory (see ``discover_servers``).
 
     Returns:
         An ``MCPManager`` with all successfully connected servers, or ``None``
         if no servers were discovered or all connections failed.
     """
-    servers = discover_servers(config_paths)
+    servers = discover_servers(config_paths, include_project=include_project)
     if not servers:
         return None
 

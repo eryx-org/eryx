@@ -77,10 +77,12 @@ python -m eryx --max-memory 67108864 script.py   # 64MB limit
 
 ### Networking
 
-| Flag                   | Description                                              |
-| ---------------------- | -------------------------------------------------------- |
-| `--net`                | Enable network access                                    |
-| `--allow-host PATTERN` | Allow access to hosts matching pattern (implies `--net`) |
+| Flag                   | Description                                                                 |
+| ---------------------- | --------------------------------------------------------------------------- |
+| `--net`                | Allow access to any public host                                             |
+| `--allow-host PATTERN` | Allow access only to hosts matching pattern (repeatable, implies `--net`)   |
+
+Either way, localhost and private networks stay blocked (the default `NetConfig` blocks).
 
 ```bash
 python -m eryx --net -c 'import urllib.request; ...'
@@ -105,12 +107,16 @@ python -m eryx -v /path/to/files:/input:ro -c 'print(open("/input/data.txt").rea
 
 | Flag               | Description                                                            |
 | ------------------ | ---------------------------------------------------------------------- |
-| `--mcp`            | Enable MCP server integration (auto-discovers from IDE configs)        |
-| `--mcp-config PATH`| Path to MCP config file (implies `--mcp`, can be repeated)            |
+| `--mcp`            | Enable MCP server integration (auto-discovers from user-wide IDE configs) |
+| `--mcp-project`    | Also read MCP configs in the current directory (implies `--mcp`)          |
+| `--mcp-config PATH`| Path to MCP config file (implies `--mcp`, can be repeated)               |
 
 ```bash
-# Auto-discover MCP servers from Claude, Cursor, VS Code, Zed, Windsurf, Codex, Gemini configs
+# Auto-discover MCP servers from user-wide Claude, Cursor, Zed, Windsurf, Codex, Gemini configs
 python -m eryx --mcp -c 'r = await mcp["github"].search_repos(query="test"); print(r)'
+
+# Also use .mcp.json, .vscode/mcp.json, ... in the current (trusted) directory
+python -m eryx --mcp-project -c '...'
 
 # Use a specific config file
 python -m eryx --mcp-config .mcp.json -c '...'
@@ -149,7 +155,7 @@ uvx --with pyeryx eryx -c 'import sys; print(f"Python {sys.version}")'
 uvx --with pyeryx eryx --timeout 5000 script.py
 
 # Network-enabled execution
-uvx --with pyeryx eryx --net --allow-host 'httpbin.org' -c '
+uvx --with pyeryx eryx --allow-host 'httpbin.org' -c '
 import urllib.request
 resp = urllib.request.urlopen("https://httpbin.org/get")
 print(resp.read().decode())
