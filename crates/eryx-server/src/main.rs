@@ -133,6 +133,16 @@ struct Args {
     #[arg(long, default_value_t = 16 * 1024 * 1024, env = "ERYX_MAX_OUTPUT_BYTES")]
     max_output_bytes: usize,
 
+    /// Most host files one execution may hold open at once; opens past it
+    /// fail with EDQUOT.
+    #[arg(long, default_value_t = eryx::vfs::DEFAULT_MAX_OPEN_HOST_FILES, env = "ERYX_MAX_OPEN_HOST_FILES")]
+    max_open_host_files: usize,
+
+    /// Most host files all executions together may hold open at once.
+    /// Defaults to half the process's soft `RLIMIT_NOFILE`.
+    #[arg(long, env = "ERYX_MAX_OPEN_HOST_FILES_TOTAL")]
+    max_open_host_files_total: Option<usize>,
+
     /// Path to a PEM-encoded TLS certificate chain.
     ///
     /// Enables TLS for the gRPC transport. Must be provided together with
@@ -270,6 +280,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         ("--max-connections", args.max_connections.into()),
         ("--max-io-timeout-ms", args.max_io_timeout_ms),
         ("--max-output-bytes", args.max_output_bytes as u64),
+        ("--max-open-host-files", args.max_open_host_files as u64),
+        (
+            "--max-open-host-files-total",
+            args.max_open_host_files_total.unwrap_or(1) as u64,
+        ),
         ("--journal-ttl-secs", args.journal_ttl_secs),
     ] {
         if value == 0 {
@@ -383,7 +398,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         max_connections: args.max_connections,
         max_io_timeout: Duration::from_millis(args.max_io_timeout_ms),
         max_output_bytes: args.max_output_bytes,
+        max_open_host_files: args.max_open_host_files,
     };
+    if let Some(total) = args.max_open_host_files_total {
+        eryx::vfs::set_process_max_open_host_files(total);
+    }
     tracing::info!(
         ?limits,
         journal_ttl_secs = args.journal_ttl_secs,

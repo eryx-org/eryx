@@ -93,6 +93,10 @@ pub struct ServerLimits {
     /// stops streaming output there (counting a small overhead per write),
     /// which also sets `output_truncated`, without a marker.
     pub max_output_bytes: usize,
+    /// Most host files (stdlib and site-packages modules) one execution may
+    /// hold open at once. Not client-controllable: descriptors are a shared
+    /// process resource.
+    pub max_open_host_files: usize,
 }
 
 impl Default for ServerLimits {
@@ -106,6 +110,7 @@ impl Default for ServerLimits {
             max_connections: 100,
             max_io_timeout: Duration::from_secs(300),
             max_output_bytes: 16 * 1024 * 1024,
+            max_open_host_files: eryx::vfs::DEFAULT_MAX_OPEN_HOST_FILES,
         }
     }
 }
@@ -152,6 +157,7 @@ impl ServerLimits {
                 (Some(fuel), Some(ceiling)) => Some(fuel.min(ceiling)),
                 (fuel, ceiling) => fuel.or(ceiling),
             })
+            .with_max_open_host_files(self.max_open_host_files)
     }
 }
 
@@ -1549,6 +1555,10 @@ mod tests {
             ..Default::default()
         };
         let limits = ceilings.resource_limits(Some(&request));
+        assert_eq!(
+            limits.max_open_host_files,
+            Some(eryx::vfs::DEFAULT_MAX_OPEN_HOST_FILES)
+        );
         assert_eq!(limits.execution_timeout, Some(Duration::from_secs(5)));
         assert_eq!(limits.max_memory_bytes, Some(64));
         assert_eq!(limits.max_fuel, Some(10));
