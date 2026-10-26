@@ -167,6 +167,24 @@ conns = [socket.create_connection(("127.0.0.1", ${port})) for _ in range(3)]
     await expect.poll(() => open.size).toBe(0);
   });
 
+  it("closes connections that are still handshaking", async () => {
+    // Accepts and never answers, so the TLS handshake stays pending.
+    const silent = createServer();
+    await new Promise<void>((r) => silent.listen(0, "127.0.0.1", r));
+    let peerClosed = false;
+    silent.on("connection", (sock) => sock.resume().on("close", () => (peerClosed = true)));
+    try {
+      const net = createNet();
+      const h = await net.tcp.connect("127.0.0.1", (silent.address() as AddressInfo).port, 0);
+      const handshake = net.tls.upgrade(h, "example.com", 0);
+      net.closeConnections();
+      await expect(handshake).rejects.toBeDefined();
+      await expect.poll(() => peerClosed).toBe(true);
+    } finally {
+      silent.close();
+    }
+  });
+
   it("caps open connections at maxConnections", async () => {
     setNetConfig({ ...allowLoopback, maxConnections: 2 });
     try {

@@ -108,6 +108,7 @@ function close(conns, h) {
 // Synchronous so net.js can build (and so validate) the filter in setNetConfig.
 const net = await import(/* webpackIgnore: true */ "node:net");
 const dns = await import(/* webpackIgnore: true */ "node:dns");
+const tlsMod = await import(/* webpackIgnore: true */ "node:tls");
 
 // The address stays out of the message: telling the guest would let it map
 // internal DNS names to addresses.
@@ -174,29 +175,39 @@ async function connect(conns, host, port, timeoutMs, isAllowed) {
       cb(null, ok[0].address, ok[0].family);
     });
   const s = net.connect({ host, port, lookup });
+  conns.pending.add(s);
   const connected = new Promise((resolve, reject) => {
     s.once("connect", () => { s.off("error", reject); resolve(track(conns, s)); });
     s.once("error", (e) => reject(tcpErr(mapTcpError(e))));
+    s.once("close", () => reject(tcpErr({ tag: "connection-reset" })));
   });
-  return withTimeout(connected, timeoutMs, tcpErr({ tag: "timed-out" })).catch((e) => {
-    s.destroy();
-    throw e;
-  });
+  return withTimeout(connected, timeoutMs, tcpErr({ tag: "timed-out" }))
+    .catch((e) => {
+      s.destroy();
+      throw e;
+    })
+    .finally(() => conns.pending.delete(s));
 }
 
 async function upgrade(conns, tcpHandle, hostname, timeoutMs) {
   const c = untrack(conns, tcpHandle);
   if (!c) throw tlsErr({ tag: "invalid-handle" });
-  const tlsMod = await import(/* webpackIgnore: true */ "node:tls");
   const s = tlsMod.connect({ socket: c.socket, servername: hostname });
+  conns.pending.add(c.socket).add(s);
   const handshake = new Promise((resolve, reject) => {
     s.once("secureConnect", () => resolve(track(conns, s)));
     s.once("error", (e) => reject({ payload: { tag: "handshake-failed", val: String(e.message) } }));
+    s.once("close", () => reject(tlsErr({ tag: "connection-reset" })));
   });
-  return withTimeout(handshake, timeoutMs, tlsErr({ tag: "timed-out" })).catch((e) => {
-    s.destroy();
-    throw e;
-  });
+  return withTimeout(handshake, timeoutMs, tlsErr({ tag: "timed-out" }))
+    .catch((e) => {
+      s.destroy();
+      throw e;
+    })
+    .finally(() => {
+      conns.pending.delete(c.socket);
+      conns.pending.delete(s);
+    });
 }
 
 /**
@@ -206,10 +217,13 @@ async function upgrade(conns, tcpHandle, hostname, timeoutMs) {
 export function createTransport() {
   const conns = new Map();
   conns.next = 1;
+  // Sockets still connecting or handshaking, which have no handle yet.
+  conns.pending = new Set();
   return {
     openConnections: () => conns.size,
     closeAll() {
       for (const h of [...conns.keys()]) close(conns, h);
+      for (const s of conns.pending) s.destroy();
     },
     tcp: {
       connect: (host, port, timeoutMs, isAllowed) => connect(conns, host, port, timeoutMs, isAllowed),

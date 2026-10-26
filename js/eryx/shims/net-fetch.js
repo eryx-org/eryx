@@ -177,7 +177,7 @@ async function send(c, timeoutMs) {
       credentials: "omit",
       // Following a redirect would reach hosts the policy never checked.
       redirect: "manual",
-      signal: timeoutMs ? AbortSignal.timeout(timeoutMs) : undefined,
+      signal: timeoutMs ? AbortSignal.any([c.abort.signal, AbortSignal.timeout(timeoutMs)]) : c.abort.signal,
     });
   } catch (e) {
     if (e?.name === "TimeoutError") throw { tag: "timed-out" };
@@ -230,7 +230,8 @@ function connect(conns, host, port, isAllowed) {
   if (family && isAllowed && !isAllowed(host, family)) {
     throw tcpErr({ tag: "not-permitted", val: `host '${host}' resolves to a blocked network` });
   }
-  return open(conns, { host, port, scheme: "http", request: [], response: null, offset: 0 });
+  const abort = new AbortController();
+  return open(conns, { host, port, scheme: "http", request: [], response: null, offset: 0, abort });
 }
 
 // The SNI hostname is ignored: fetch() verifies the certificate against the
@@ -250,10 +251,15 @@ function upgrade(conns, tcpHandle) {
 export function createTransport() {
   const conns = new Map();
   conns.next = 1;
-  const close = (h) => void conns.delete(h);
+  const close = (h) => {
+    conns.get(h)?.abort.abort();
+    conns.delete(h);
+  };
   return {
     openConnections: () => conns.size,
-    closeAll: () => conns.clear(),
+    closeAll() {
+      for (const h of [...conns.keys()]) close(h);
+    },
     tcp: {
       connect: async (host, port, _timeoutMs, isAllowed) => connect(conns, host, port, isAllowed),
       read: (h, len, timeoutMs) => read(conns, h, len, timeoutMs, tcpErr),
