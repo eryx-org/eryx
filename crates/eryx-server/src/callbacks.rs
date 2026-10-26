@@ -9,9 +9,9 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use dashmap::DashMap;
+use eryx::CancellationToken;
 use eryx::{CallbackError, DynamicCallback};
 use tokio::sync::{mpsc, oneshot};
-use tokio_util::sync::CancellationToken;
 use tracing_opentelemetry::OpenTelemetrySpanExt;
 use uuid::Uuid;
 

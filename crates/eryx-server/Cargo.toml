@@ -27,7 +27,6 @@ sha2.workspace = true
 futures.workspace = true
 tokio = { workspace = true } #unified
 tokio-stream.workspace = true
-tokio-util.workspace = true
 tonic = { workspace = true, features = ["tls-aws-lc"] }
 tonic-health.workspace = true
 tonic-prost.workspace = true

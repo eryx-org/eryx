@@ -1280,7 +1280,6 @@ dependencies = [
  "sha2 0.11.1",
  "tokio",
  "tokio-stream",
- "tokio-util",
  "tonic",
  "tonic-health",
  "tonic-prost",

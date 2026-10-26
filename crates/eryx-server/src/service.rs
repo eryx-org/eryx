@@ -6,6 +6,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use dashmap::DashMap;
+use eryx::CancellationToken;
 use eryx::callback_handler::{run_callback_handler, run_net_handler};
 use eryx::vfs::{ArcStorage, InMemoryStorage, VfsStorage};
 use eryx::{
@@ -17,7 +18,6 @@ use futures::FutureExt;
 use opentelemetry::propagation::Extractor;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
-use tokio_util::sync::CancellationToken;
 use tonic::metadata::MetadataMap;
 use tonic::{Request, Response, Status, Streaming};
 use tracing::Instrument;
@@ -306,34 +306,28 @@ impl crate::proto::eryx::v1::eryx_server::Eryx for EryxService {
         let net_config = execute_req
             .network_config
             .map(|nc| -> Result<NetConfig, Status> {
-                let defaults = NetConfig::default();
-                let mut config = NetConfig::default()
+                let base = NetConfig::default();
+                let max_connections = if nc.max_connections > 0 {
+                    nc.max_connections
+                } else {
+                    base.max_connections()
+                };
+                let connect_timeout = if nc.connect_timeout_ms > 0 {
+                    Duration::from_millis(nc.connect_timeout_ms)
+                } else {
+                    base.connect_timeout()
+                };
+                let io_timeout = if nc.io_timeout_ms > 0 {
+                    Duration::from_millis(nc.io_timeout_ms)
+                } else {
+                    base.io_timeout()
+                };
+                let mut config = base
                     .allow_all_hosts(nc.allow_all_hosts)
                     .with_allowed_hosts(nc.allowed_hosts)
-                    .with_max_connections(
-                        if nc.max_connections > 0 {
-                            nc.max_connections
-                        } else {
-                            defaults.max_connections()
-                        }
-                        .min(self.limits.max_connections),
-                    )
-                    .with_connect_timeout(
-                        if nc.connect_timeout_ms > 0 {
-                            Duration::from_millis(nc.connect_timeout_ms)
-                        } else {
-                            defaults.connect_timeout()
-                        }
-                        .min(self.limits.max_io_timeout),
-                    )
-                    .with_io_timeout(
-                        if nc.io_timeout_ms > 0 {
-                            Duration::from_millis(nc.io_timeout_ms)
-                        } else {
-                            defaults.io_timeout()
-                        }
-                        .min(self.limits.max_io_timeout),
-                    )
+                    .with_max_connections(max_connections.min(self.limits.max_connections))
+                    .with_connect_timeout(connect_timeout.min(self.limits.max_io_timeout))
+                    .with_io_timeout(io_timeout.min(self.limits.max_io_timeout))
                     .with_allowed_networks(parse_networks(
                         "allowed_networks",
                         &nc.allowed_networks,
@@ -498,7 +492,7 @@ impl crate::proto::eryx::v1::eryx_server::Eryx for EryxService {
 
         // Create a cancellation token so the dispatch task can signal the
         // execution task when the inbound stream fails (client disconnected).
-        let cancel = eryx::CancellationToken::new();
+        let cancel = CancellationToken::new();
 
         // 6. Spawn callback dispatch task: reads inbound CallbackResponses and
         //    routes them to the pending oneshot senders.
@@ -859,7 +853,7 @@ async fn execute_with_session(
     sandbox: &mut eryx::PooledSandbox,
     params: &SessionParams<'_>,
     server_tx: &mpsc::Sender<ServerMessage>,
-    cancel: &eryx::CancellationToken,
+    cancel: &CancellationToken,
 ) -> ExecuteResult {
     let start = Instant::now();
 
