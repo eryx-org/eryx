@@ -118,6 +118,10 @@ impl PreInitOptions {
     /// Python code to run after the imports, baked into the snapshot. Use
     /// this to pre-create objects (e.g. a Jinja2 `SandboxedEnvironment`) so
     /// every sandbox starts with them in copy-on-write memory.
+    ///
+    /// Imports and setup code get a writable `/tmp` that is discarded after
+    /// pre-init: paths created there and files left open won't work in
+    /// restored sandboxes.
     #[must_use]
     pub fn setup_code(mut self, code: impl Into<String>) -> Self {
         self.setup_code = Some(code.into());
@@ -138,14 +142,6 @@ impl PreInitOptions {
 struct PreInitCtx {
     wasi: WasiCtx,
     table: ResourceTable,
-    /// Temp directory for dummy files - must be kept alive during pre-init
-    #[allow(dead_code)]
-    temp_dir: Option<TempDir>,
-    /// Writable guest `/tmp` used while imports are pre-initialized.
-    /// Kept alive until after snapshotting, but its handles are reset before
-    /// the snapshot is taken.
-    #[allow(dead_code)]
-    tmp_dir: TempDir,
     /// What the `list-callbacks` import answers, sorted by name.
     callbacks: Vec<CallbackDeclaration>,
 }
@@ -288,8 +284,9 @@ pub async fn pre_initialize_with_options(options: PreInitOptions) -> Result<Vec<
     // Mount Python stdlib
     wasi_builder.preopened_dir(python_stdlib, "python-stdlib", FsPerms::ReadOnly)?;
 
-    // Mount site-packages if provided
-    let temp_dir = if let Some(site_pkg) = site_packages {
+    // Mount site-packages if provided. The placeholder dir must outlive pre-init,
+    // so it stays bound until this function returns.
+    let _site_packages_placeholder = if let Some(site_pkg) = site_packages {
         wasi_builder.preopened_dir(site_pkg, "site-packages", FsPerms::ReadOnly)?;
         None
     } else {
@@ -314,8 +311,6 @@ pub async fn pre_initialize_with_options(options: PreInitOptions) -> Result<Vec<
         PreInitCtx {
             wasi,
             table,
-            temp_dir,
-            tmp_dir,
             callbacks,
         },
     );
@@ -348,6 +343,19 @@ pub async fn pre_initialize_with_options(options: PreInitOptions) -> Result<Vec<
     // still lands in the snapshot.
     if has_callbacks && imports.is_empty() && setup_code.is_none() {
         call_execute_code(&mut store, &instance, "pass", "callback installation").await?;
+    }
+
+    // `tempfile` caches the directory it picked from the pre-init `/tmp`, which
+    // restored sandboxes don't have. Forget it so `TMPDIR` is honoured at
+    // runtime. Only touches the module if pre-init already imported it.
+    if !imports.is_empty() || setup_code.is_some() {
+        call_execute_code(
+            &mut store,
+            &instance,
+            "(lambda m: m and setattr(m, 'tempdir', None))(__import__('sys').modules.get('tempfile'))",
+            "tempfile reset",
+        )
+        .await?;
     }
 
     // CRITICAL: Call finalize-preinit to reset WASI state AFTER all imports.
