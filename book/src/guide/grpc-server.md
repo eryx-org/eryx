@@ -39,10 +39,23 @@ Every flag also has an environment variable, so the server is easy to configure 
 | `--metrics-addr` | `ERYX_METRICS_ADDR` | `0.0.0.0:9090` | Address of the Prometheus `/metrics` endpoint. |
 | `--runtime-cwasm` | `ERYX_RUNTIME_CWASM` | *(embedded)* | Path to a [pre-compiled runtime](./precompile.md) (e.g. with numpy/polars baked in). |
 | `--stdlib` | `ERYX_STDLIB` | *(embedded)* | Python stdlib directory; only used with `--runtime-cwasm`. |
-| `--journal-signing-key` | `ERYX_JOURNAL_SIGNING_KEY` | *(random)* | Hex-encoded 32-byte HMAC key for signing replay journals. See [Journal signing](#journal-signing-and-the-trust-boundary). |
+| `--journal-signing-key` | `ERYX_JOURNAL_SIGNING_KEY` | *(random)* | Hex-encoded 32-byte HMAC key for signing replay journals. Prefer the env var, which keeps the key out of the process list. See [Journal signing](#journal-signing-and-the-trust-boundary). |
+| `--journal-ttl-secs` | `ERYX_JOURNAL_TTL_SECS` | `604800` (7 days) | How long a signed journal can be replayed. |
+| `--max-execution-timeout-ms` | `ERYX_MAX_EXECUTION_TIMEOUT_MS` | `300000` | Ceiling on `resource_limits.execution_timeout_ms`. |
+| `--max-callback-timeout-ms` | `ERYX_MAX_CALLBACK_TIMEOUT_MS` | `300000` | Ceiling on `resource_limits.callback_timeout_ms`. |
+| `--max-memory-bytes` | `ERYX_MAX_MEMORY_BYTES` | `536870912` (512 MiB) | Ceiling on `resource_limits.max_memory_bytes`. |
+| `--max-fuel` | `ERYX_MAX_FUEL` | *(none)* | Ceiling on `resource_limits.max_fuel`; when set, also the budget for requests that set none. |
+| `--max-callback-invocations` | `ERYX_MAX_CALLBACK_INVOCATIONS` | `10000` | Ceiling on `resource_limits.max_callback_invocations`. |
+| `--max-connections` | `ERYX_MAX_CONNECTIONS` | `100` | Ceiling on `network_config.max_connections`. |
+| `--max-io-timeout-ms` | `ERYX_MAX_IO_TIMEOUT_MS` | `300000` | Ceiling on `network_config.io_timeout_ms`. |
+| `--max-output-bytes` | `ERYX_MAX_OUTPUT_BYTES` | `16777216` (16 MiB) | Most stdout plus stderr bytes kept and streamed per execution. See [Output cap](#output-cap). |
 | `--tls-cert` | `ERYX_TLS_CERT` | *(off)* | PEM certificate chain; enables TLS. Requires `--tls-key`. |
 | `--tls-key` | `ERYX_TLS_KEY` | *(off)* | PEM private key for `--tls-cert`. |
 | `--tls-client-ca` | `ERYX_TLS_CLIENT_CA` | *(off)* | PEM CA bundle to verify client certs; enables mutual TLS. See [Transport security](#transport-security-tls--mtls). |
+
+### Request limits
+
+Each request sets its own limits in `resource_limits` (and, for networking, `network_config`). A zero field takes the default documented in the proto (30 s execution timeout, 10 s callback timeout, 128 MiB memory, 1000 callback invocations, unlimited fuel). The `--max-*` flags cap what a request can ask for: **a value above its ceiling is clamped down to it, not rejected**, so clients written for a more generous server keep working. The memory limit is enforced on the guest, so an allocation past it raises `MemoryError` inside Python.
 
 ### Health checks
 
@@ -80,7 +93,7 @@ It is **bidirectional streaming**. A `ClientMessage` is either an `ExecuteReques
 4. The client handles the callback and replies with a **`CallbackResponse`** echoing the same `request_id`. Multiple callbacks can be in flight at once (e.g. from `asyncio.gather`), so responses are matched by `request_id`, not by order.
 5. When execution finishes, the server sends a single **`ExecuteResult`** and closes the stream.
 
-If the client disconnects, the server cancels the in-flight execution and returns the sandbox to the pool promptly instead of waiting for timeouts. A client may instead half-close its side of the stream (e.g. grpc-go's `CloseSend()`) and keep reading: execution then runs to completion, but any callback the script awaits after that fails immediately, since no response can arrive.
+If the client disconnects, the server cancels the in-flight execution, including CPU-bound code, and returns the sandbox to the pool promptly instead of waiting for timeouts. A client may instead half-close its side of the stream (e.g. grpc-go's `CloseSend()`) and keep reading: execution then runs to completion, but any callback the script awaits after that fails immediately, since no response can arrive.
 
 ## Configuring a request
 
@@ -115,6 +128,11 @@ If the client disconnects, the server cancels the in-flight execution and return
 | `state_snapshot` | Post-execution state, when `persist_state` was set. |
 | `callback_journal` | The recorded replay journal, when the request opted in. |
 | `suspended` / `suspended_callback` | Set when a callback [suspended](#suspension) execution. |
+| `output_truncated` | Set when stdout plus stderr went past the server's [output cap](#output-cap). |
+
+### Output cap
+
+The server keeps and streams at most `--max-output-bytes` (16 MiB by default) of stdout plus stderr per execution. Output past the cap is dropped from both the `OutputEvent` stream and the final `stdout`/`stderr`. The stream that crossed the cap gets a `[output truncated: exceeded N bytes]` marker, and `output_truncated` is set. The script itself keeps running.
 
 ### Failure classification
 
@@ -173,13 +191,13 @@ When a callback suspends, the server **halts the guest immediately** (no further
 
 Replayed journal entries are returned to Python **verbatim** — the server does not re-execute the callback to validate them. A journal is therefore a **trusted input**: a crafted journal could inject arbitrary values into a script. Because the server hands a recorded journal back to the client (who echoes it on the next run), it must defend against tampering when that journal round-trips through storage or an intermediary.
 
-The server signs every outgoing journal with **HMAC-SHA256** (`CallbackJournal.signature`). The MAC covers both the journal entries and the script `code`, so a signature binds a journal to the exact script that produced it. On an incoming replay request the server:
+The server signs every outgoing journal with **HMAC-SHA256** (`CallbackJournal.signature`). The MAC covers the journal entries, the script `code`, the `state_snapshot` the run started from (when `persist_state` is set), the declared callback names, and an expiry time (`CallbackJournal.expires_at_unix_secs`, `--journal-ttl-secs` after signing). A signature therefore binds a journal to the exact script, starting state and callback set that produced it. On an incoming replay request the server:
 
-- **Verifies** the signature against the request's `code` before matching.
-- **Rejects** an unsigned non-empty, mis-signed, or wrong-script journal with `FAILED_PRECONDITION` before executing Python. A rejected replay never becomes a fresh run: completed callbacks may already have produced external effects.
+- **Verifies** the signature against the request's `code`, `state_snapshot` and callback names before matching, and checks the journal has not expired.
+- **Rejects** an unsigned non-empty, mis-signed, expired, or mismatched journal with `FAILED_PRECONDITION` before executing Python. A rejected replay never becomes a fresh run: completed callbacks may already have produced external effects.
 - Accepts an empty, unsigned journal to start a new journaling session. An empty journal that carries a signature must still pass verification.
 
-To run an edited script, explicitly start a new execution without the old journal.
+To run an edited script, explicitly start a new execution without the old journal. To resume a suspended run, send the same `code`, callbacks and `state_snapshot` as the run that suspended, and echo the journal back unchanged (including `expires_at_unix_secs`). Journals signed by servers before this binding was added fail verification and must be discarded.
 
 Configure the signing key explicitly so journals are portable:
 
