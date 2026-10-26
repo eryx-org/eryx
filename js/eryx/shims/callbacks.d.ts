@@ -11,10 +11,11 @@ export interface CallbackInfo {
 }
 
 /**
- * Set the callback handler for sandbox code to invoke.
+ * Set the default callback handler for sandbox code to invoke.
  *
  * The handler receives a callback name and JSON-encoded arguments,
- * and should return a JSON-encoded result (or a Promise of one).
+ * and should return a JSON-encoded result (or a Promise of one). Applies to
+ * every Sandbox that wasn't given its own `callbackHandler` option.
  */
 export function setCallbackHandler(
   handler:
@@ -23,12 +24,14 @@ export function setCallbackHandler(
 ): void;
 
 /**
- * Register callbacks that will be visible to sandbox code via list_callbacks().
+ * Register the default callbacks visible to sandbox code via list_callbacks(),
+ * for every Sandbox that wasn't given its own `callbacks` option.
  */
 export function setCallbacks(callbacks: CallbackInfo[]): void;
 
 /**
- * Set a handler for trace events from the Python runtime.
+ * Set the default handler for trace events from the Python runtime, for every
+ * Sandbox that wasn't given its own `traceHandler` option.
  */
 export function setTraceHandler(
   handler:
@@ -42,11 +45,12 @@ export interface ExecutionOptions {
   reuseEmptyCallbacks: boolean;
 }
 
-/** Return the current JavaScript host execution behavior. */
+/** Return the default sandbox host's execution behavior. */
 export function getExecutionOptions(): ExecutionOptions;
 
 /**
- * Set a handler for streaming output (stdout/stderr) from the Python runtime.
+ * Set the default handler for streaming output (stdout/stderr) from the Python
+ * runtime, for every Sandbox that wasn't given its own `outputHandler` option.
  *
  * The handler is called in real-time as Python code writes to stdout or stderr,
  * rather than waiting for execution to complete.

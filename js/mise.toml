@@ -70,7 +70,7 @@ cd .. && cargo run -p eryx-precompile --release -- compile \
 """
 
 [tasks.transpile]
-description = "Transpile WASM component to JavaScript using jco"
+description = "Transpile WASM component to JavaScript using jco (imports are supplied per instance by index.js)"
 depends = ["preinit"]
 sources = ["../crates/eryx-runtime/runtime-preinit.wasm"]
 outputs = ["eryx/eryx-sandbox.js", "eryx/eryx-sandbox.core.wasm"]
@@ -79,20 +79,7 @@ jco transpile \
   ../crates/eryx-runtime/runtime-preinit.wasm \
   --name eryx-sandbox \
   --out-dir eryx \
-  --map 'eryx:net/tcp=./shims/net.js#tcp' \
-  --map 'eryx:net/tls=./shims/net.js#tls' \
-  --map 'invoke=./shims/callbacks.js#invoke' \
-  --map 'sleep=./shims/callbacks.js#sleep' \
-  --map 'list-callbacks=./shims/callbacks.js#listCallbacks' \
-  --map 'get-execution-options=./shims/callbacks.js#getExecutionOptions' \
-  --map 'report-trace=./shims/callbacks.js#reportTrace' \
-  --map 'report-output=./shims/callbacks.js#reportOutput' \
-  --map 'wasi:sockets/*=./shims/sockets.js#*' \
-  --map 'wasi:cli/*=#preview2/cli#*' \
-  --map 'wasi:clocks/*=#preview2/clocks#*' \
-  --map 'wasi:filesystem/*=#preview2/filesystem#*' \
-  --map 'wasi:io/*=#preview2/io#*' \
-  --map 'wasi:random/*=#preview2/random#*' \
+  --instantiation async \
   --async-mode jspi \
   --async-imports \
     'eryx:net/tcp@0.1.0#connect' 'eryx:net/tcp@0.1.0#read' 'eryx:net/tcp@0.1.0#write' \
@@ -193,7 +180,7 @@ run = "npx vite preview --open"
 [tasks.clean]
 description = "Clean JavaScript build artifacts (generated files only)"
 dir = "eryx"
-run = "rm -rf eryx-sandbox.js eryx-sandbox.d.ts eryx-sandbox.core*.wasm interfaces"
+run = "rm -rf eryx-sandbox.js eryx-sandbox.d.ts eryx-sandbox.*.wasm interfaces"
 
 [tasks.publish]
 description = "Publish JavaScript package to npm"

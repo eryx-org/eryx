@@ -9,43 +9,32 @@
  * - reportTrace: receive trace events from the Python runtime
  * - reportOutput: receive streaming stdout/stderr output from the Python runtime
  *
- * Users can register callbacks via setCallbackHandler(), setTraceHandler(),
- * and setOutputHandler().
+ * Each sandbox instance gets its own set from createCallbackHost(), with its
+ * own replay state and output decoders. Handlers come from that sandbox's
+ * options, falling back to the module-wide defaults set by
+ * setCallbackHandler(), setCallbacks(), setTraceHandler() and
+ * setOutputHandler().
  */
 
 import { parseJson } from "./raw-json.js";
 
-/** @type {((name: string, argsJson: string) => string | Promise<string>) | null} */
-let _callbackHandler = null;
-
-/** @type {((lineno: number, eventJson: string, contextJson: string) => void) | null} */
-let _traceHandler = null;
-
-/** @type {((stream: number, data: string) => void) | null} */
-let _outputHandler = null;
-
-/** @type {Array<{name: string, description: string, parametersSchemaJson: string}>} */
-let _registeredCallbacks = [];
-
 /**
- * Set the callback handler for sandbox code to invoke.
- *
- * The handler receives a callback name and JSON-encoded arguments,
- * and should return a JSON-encoded result (or a Promise of one).
- *
- * @param {((name: string, argsJson: string) => string | Promise<string>) | null} handler
+ * Module-wide handlers, used by every sandbox that doesn't set its own.
+ * @type {{callbackHandler: ((name: string, argsJson: string) => string | Promise<string>) | null, callbacks: Array<{name: string, description: string, parametersSchemaJson: string}>, traceHandler: ((lineno: number, eventJson: string, contextJson: string) => void) | null, outputHandler: ((stream: number, data: string) => void) | null}}
  */
-export function setCallbackHandler(handler) {
-  _callbackHandler = handler;
-}
+const defaults = {
+  callbackHandler: null,
+  callbacks: [],
+  traceHandler: null,
+  outputHandler: null,
+};
 
 /**
- * Register callbacks that will be visible to sandbox code via list_callbacks().
- *
+ * Fill in the optional fields of callback infos.
  * @param {Array<{name: string, description: string, parametersSchemaJson?: string}>} callbacks
  */
-export function setCallbacks(callbacks) {
-  _registeredCallbacks = callbacks.map((cb) => ({
+function normalizeCallbacks(callbacks) {
+  return callbacks.map((cb) => ({
     name: cb.name,
     description: cb.description,
     parametersSchemaJson: cb.parametersSchemaJson ?? "{}",
@@ -53,16 +42,39 @@ export function setCallbacks(callbacks) {
 }
 
 /**
- * Set a handler for trace events from the Python runtime.
+ * Set the default callback handler for sandbox code to invoke.
+ *
+ * The handler receives a callback name and JSON-encoded arguments,
+ * and should return a JSON-encoded result (or a Promise of one). Applies to
+ * every sandbox that wasn't given its own `callbackHandler` option.
+ *
+ * @param {((name: string, argsJson: string) => string | Promise<string>) | null} handler
+ */
+export function setCallbackHandler(handler) {
+  defaults.callbackHandler = handler;
+}
+
+/**
+ * Register the default callbacks visible to sandbox code via list_callbacks().
+ *
+ * @param {Array<{name: string, description: string, parametersSchemaJson?: string}>} callbacks
+ */
+export function setCallbacks(callbacks) {
+  defaults.callbacks = normalizeCallbacks(callbacks);
+}
+
+/**
+ * Set the default handler for trace events from the Python runtime.
  *
  * @param {((lineno: number, eventJson: string, contextJson: string) => void) | null} handler
  */
 export function setTraceHandler(handler) {
-  _traceHandler = handler;
+  defaults.traceHandler = handler;
 }
 
 /**
- * Set a handler for streaming output (stdout/stderr) from the Python runtime.
+ * Set the default handler for streaming output (stdout/stderr) from the Python
+ * runtime.
  *
  * The handler is called in real-time as Python code writes to stdout or stderr,
  * rather than waiting for execution to complete.
@@ -72,8 +84,7 @@ export function setTraceHandler(handler) {
  *   data: the text written
  */
 export function setOutputHandler(handler) {
-  _outputHandler = handler;
-  _resetOutputDecoders();
+  defaults.outputHandler = handler;
 }
 
 /**
@@ -101,13 +112,12 @@ export class SuspendCallback extends Error {
  */
 
 /**
- * Replay state for the current executeWithJournal() run, or null when not
- * journaling. Mirrors the Rust `ReplayState` (crates/eryx/src/replay.rs): cached
- * results bucketed by (name, canonical args) as a FIFO multiset, a sticky
- * divergence guard, and a gate that rejects every call after a suspension.
- * @type {{cached: Map<string, RecordedResult[]>, liveMode: boolean, nextSeq: number, entries: Array<{name: string, argsJson: string, result: RecordedResult}|undefined>, suspended: Object|null, suspendSeq: number|null, replayedCount: number}|null}
+ * Replay state for an executeWithJournal() run. Mirrors the Rust `ReplayState`
+ * (crates/eryx/src/replay.rs): cached results bucketed by (name, canonical
+ * args) as a FIFO multiset, a sticky divergence guard, and a gate that rejects
+ * every call after a suspension.
+ * @typedef {{cached: Map<string, RecordedResult[]>, liveMode: boolean, nextSeq: number, entries: Array<{name: string, argsJson: string, result: RecordedResult}|undefined>, suspended: Object|null, suspendSeq: number|null, replayedCount: number}} ReplayState
  */
-let _replay = null;
 
 /**
  * Parse a serialized journal into its entries.
@@ -147,18 +157,18 @@ function _parseJournal(journal) {
 }
 
 /**
- * Start journaling callbacks, replaying results from `journal` if given.
- * @internal Used by executeWithJournal().
+ * Build the replay state for a run, replaying results from `journal` if given.
  * @param {string} [journal] - A journal string from a previous outcome
+ * @returns {ReplayState}
  */
-export function _beginReplay(journal) {
+function _newReplay(journal) {
   const cached = new Map();
   for (const entry of journal === undefined ? [] : _parseJournal(journal)) {
     const key = `${entry.name}\0${entry.argsJson}`;
     if (!cached.has(key)) cached.set(key, []);
     cached.get(key).push(entry.result);
   }
-  _replay = {
+  return {
     cached,
     liveMode: false,
     nextSeq: 0,
@@ -179,18 +189,16 @@ function _fnv1a64(text) {
 }
 
 /**
- * Stop journaling and return what was recorded.
+ * Serialize what a run recorded.
  *
  * The journal is serialized in the Rust `CallbackJournal` serde shape. Entries
  * keep dispatch order and, if a callback suspended, everything dispatched at or
  * after the suspending call is dropped so the journal is a clean prefix ending
  * before the suspension point.
- * @internal Used by executeWithJournal().
+ * @param {ReplayState} state
  * @param {string} code - The script that produced the journal
  */
-export function _endReplay(code) {
-  const state = _replay;
-  _replay = null;
+function _finishReplay(state, code) {
   const entries = [];
   state.entries.forEach((entry, index) => {
     if (entry === undefined) return;
@@ -231,13 +239,13 @@ function _replayResult(result) {
  * halts the guest; replay halts it the same way). Only a SuspendCallback is not
  * journaled: the call re-runs live on resume, as in Rust.
  */
-async function _invokeLive(state, seq, name, argsJson) {
+async function _invokeLive(handler, state, seq, name, argsJson) {
   const record = (result) => {
     state.entries[seq] = { name, argsJson, result };
   };
   let ret;
   try {
-    ret = await _callbackHandler(name, argsJson);
+    ret = await handler(name, argsJson);
   } catch (e) {
     if (e instanceof SuspendCallback) {
       if (state.suspended === null) {
@@ -266,47 +274,6 @@ async function _invokeLive(state, seq, name, argsJson) {
   return ret;
 }
 
-/**
- * Invoke a callback by name with JSON arguments.
- * This is called by the sandbox runtime when Python code calls invoke().
- *
- * @param {string} name - Callback name
- * @param {string} argumentsJson - JSON-encoded arguments
- * @returns {string} JSON-encoded result
- */
-export function invoke(name, argumentsJson) {
-  if (!_callbackHandler) {
-    throw new Error(
-      `No callback handler registered. Call setCallbackHandler() before executing code that uses callbacks. Attempted to invoke: ${name}`,
-    );
-  }
-  const state = _replay;
-  if (!state) {
-    return _callbackHandler(name, argumentsJson);
-  }
-
-  // Decide synchronously, before any await, exactly as the Rust ReplayCallback.
-  if (state.suspended !== null) {
-    throw new SuspendCallback(
-      "execution already suspended by a previous callback",
-    );
-  }
-  const seq = state.nextSeq++;
-  if (!state.liveMode) {
-    // Key on the guest's canonical args text verbatim, as the Rust host does.
-    const result = state.cached.get(`${name}\0${argumentsJson}`)?.shift();
-    if (result !== undefined) {
-      state.replayedCount++;
-      state.entries[seq] = { name, argsJson: argumentsJson, result };
-      return _replayResult(result);
-    }
-    // First miss: the run has diverged from the journal, so this call and every
-    // later one runs live (prevents replaying a now-stale cached result).
-    state.liveMode = true;
-  }
-  return _invokeLive(state, seq, name, argumentsJson);
-}
-
 /** Longest delay setTimeout accepts; larger values fire immediately. */
 const MAX_TIMEOUT_MS = 2 ** 31 - 1;
 
@@ -325,85 +292,162 @@ export function sleep(durationNs) {
   );
 }
 
-/**
- * List all registered callbacks.
- * This is called by the sandbox runtime when Python code calls list_callbacks().
- *
- * @returns {Array<{name: string, description: string, parametersSchemaJson: string}>}
- */
-export function listCallbacks() {
-  return _registeredCallbacks;
-}
+const _decoderOpts = { fatal: false, ignoreBOM: true };
 
 /**
- * Return execution behavior options for the JavaScript host.
+ * Create the callback imports for one sandbox instance.
  *
- * JavaScript instances may execute repeatedly with different callbacks, so
- * callback setup is not reused. Tracing is enabled only while a trace handler
- * is registered.
+ * Each handler option overrides the module-wide default from the matching
+ * setter; an omitted (undefined) option follows the default, including later
+ * changes to it. Replay state and streaming output decoders belong to the
+ * returned host alone.
  *
- * @returns {{pythonTracing: boolean, reuseEmptyCallbacks: boolean}}
+ * @internal Used by index.js for each Sandbox.
+ * @param {{callbackHandler?: ((name: string, argsJson: string) => string | Promise<string>) | null, callbacks?: Array<{name: string, description: string, parametersSchemaJson?: string}>, traceHandler?: ((lineno: number, eventJson: string, contextJson: string) => void) | null, outputHandler?: ((stream: number, data: string) => void) | null}} [options]
  */
-export function getExecutionOptions() {
+export function createCallbackHost(options = {}) {
+  const callbacks =
+    options.callbacks === undefined ? undefined : normalizeCallbacks(options.callbacks);
+  const pick = (key) => (options[key] === undefined ? defaults[key] : options[key]);
+
+  /** @type {ReplayState | null} */
+  let replay = null;
+
+  // Streaming decoders, tied to the output handler they were created under so
+  // an incomplete multi-byte sequence written under one handler doesn't leak
+  // into the next.
+  let decodersFor = null;
+  let stdoutDecoder = new TextDecoder("utf-8", _decoderOpts);
+  let stderrDecoder = new TextDecoder("utf-8", _decoderOpts);
+  const outputHandler = () => {
+    const handler = pick("outputHandler");
+    if (handler !== decodersFor) {
+      decodersFor = handler;
+      stdoutDecoder = new TextDecoder("utf-8", _decoderOpts);
+      stderrDecoder = new TextDecoder("utf-8", _decoderOpts);
+    }
+    return handler;
+  };
+
+  /**
+   * Invoke a callback by name with JSON arguments.
+   * This is called by the sandbox runtime when Python code calls invoke().
+   *
+   * @param {string} name - Callback name
+   * @param {string} argumentsJson - JSON-encoded arguments
+   * @returns {string} JSON-encoded result
+   */
+  function invoke(name, argumentsJson) {
+    const handler = pick("callbackHandler");
+    if (!handler) {
+      throw new Error(
+        `No callback handler registered. Pass callbackHandler to the Sandbox or call setCallbackHandler() before executing code that uses callbacks. Attempted to invoke: ${name}`,
+      );
+    }
+    const state = replay;
+    if (!state) {
+      return handler(name, argumentsJson);
+    }
+
+    // Decide synchronously, before any await, exactly as the Rust ReplayCallback.
+    if (state.suspended !== null) {
+      throw new SuspendCallback(
+        "execution already suspended by a previous callback",
+      );
+    }
+    const seq = state.nextSeq++;
+    if (!state.liveMode) {
+      // Key on the guest's canonical args text verbatim, as the Rust host does.
+      const result = state.cached.get(`${name}\0${argumentsJson}`)?.shift();
+      if (result !== undefined) {
+        state.replayedCount++;
+        state.entries[seq] = { name, argsJson: argumentsJson, result };
+        return _replayResult(result);
+      }
+      // First miss: the run has diverged from the journal, so this call and every
+      // later one runs live (prevents replaying a now-stale cached result).
+      state.liveMode = true;
+    }
+    return _invokeLive(handler, state, seq, name, argumentsJson);
+  }
+
   return {
-    pythonTracing: _traceHandler !== null,
-    reuseEmptyCallbacks: false,
+    imports: {
+      invoke,
+      sleep,
+      /**
+       * List all registered callbacks.
+       * This is called by the sandbox runtime when Python code calls list_callbacks().
+       */
+      listCallbacks: () => callbacks ?? defaults.callbacks,
+      /**
+       * Return execution behavior options for the JavaScript host.
+       *
+       * JavaScript instances may execute repeatedly with different callbacks, so
+       * callback setup is not reused. Tracing is enabled only while a trace
+       * handler is registered.
+       */
+      getExecutionOptions: () => ({
+        pythonTracing: pick("traceHandler") !== null,
+        reuseEmptyCallbacks: false,
+      }),
+      /** Report a trace event from the Python runtime's sys.settrace hook. */
+      reportTrace(lineno, eventJson, contextJson) {
+        pick("traceHandler")?.(lineno, eventJson, contextJson);
+      },
+      /**
+       * Report streaming output from the Python runtime.
+       * This is called by the sandbox runtime on every sys.stdout/stderr.write().
+       *
+       * @param {number} stream - 0 = stdout, 1 = stderr
+       * @param {Uint8Array} data - The raw bytes written
+       */
+      reportOutput(stream, data) {
+        const handler = outputHandler();
+        if (handler) {
+          const decoder = stream === 0 ? stdoutDecoder : stderrDecoder;
+          handler(stream, decoder.decode(data, { stream: true }));
+        }
+      },
+    },
+
+    /**
+     * Start journaling callbacks, replaying results from `journal` if given.
+     * @param {string} [journal] - A journal string from a previous outcome
+     */
+    beginReplay(journal) {
+      replay = _newReplay(journal);
+    },
+
+    /**
+     * Stop journaling and return what was recorded.
+     * @param {string} code - The script that produced the journal
+     */
+    endReplay(code) {
+      const state = replay;
+      replay = null;
+      return _finishReplay(state, code);
+    },
+
+    /**
+     * Deliver any incomplete multi-byte sequence left at the end of an
+     * execution (as U+FFFD) and reset the decoders, so it can't merge with the
+     * next execution's output. Only call it between executions: mid-run it
+     * would cut a character the guest is still writing.
+     */
+    flushOutput() {
+      const handler = outputHandler();
+      const stdoutTail = stdoutDecoder.decode();
+      const stderrTail = stderrDecoder.decode();
+      if (!handler) return;
+      if (stdoutTail) handler(0, stdoutTail);
+      if (stderrTail) handler(1, stderrTail);
+    },
   };
 }
 
-/**
- * Report a trace event from the Python runtime.
- * This is called by the sandbox runtime's sys.settrace hook.
- *
- * @param {number} lineno - Line number
- * @param {string} eventJson - Event type as JSON
- * @param {string} contextJson - Context data as JSON
- */
-export function reportTrace(lineno, eventJson, contextJson) {
-  if (_traceHandler) {
-    _traceHandler(lineno, eventJson, contextJson);
-  }
-}
-
-const _decoderOpts = { fatal: false, ignoreBOM: true };
-let _stdoutDecoder = new TextDecoder("utf-8", _decoderOpts);
-let _stderrDecoder = new TextDecoder("utf-8", _decoderOpts);
-
-/**
- * Reset streaming decoders so incomplete multi-byte sequences written under one
- * handler don't leak into the next. Called from setOutputHandler.
- */
-function _resetOutputDecoders() {
-  _stdoutDecoder = new TextDecoder("utf-8", _decoderOpts);
-  _stderrDecoder = new TextDecoder("utf-8", _decoderOpts);
-}
-
-/**
- * Deliver any incomplete multi-byte sequence left at the end of an execution
- * (as U+FFFD) and reset the decoders, so it can't merge with the next
- * execution's output. Only call it between executions: mid-run it would cut a
- * character the guest is still writing.
- * @internal Called by index.js once each execution's guest call returns, while
- *   it still holds the execution queue.
- */
-export function _flushOutput() {
-  const stdoutTail = _stdoutDecoder.decode();
-  const stderrTail = _stderrDecoder.decode();
-  if (!_outputHandler) return;
-  if (stdoutTail) _outputHandler(0, stdoutTail);
-  if (stderrTail) _outputHandler(1, stderrTail);
-}
-
-/**
- * Report streaming output from the Python runtime.
- * This is called by the sandbox runtime on every sys.stdout/stderr.write().
- *
- * @param {number} stream - 0 = stdout, 1 = stderr
- * @param {Uint8Array} data - The raw bytes written
- */
-export function reportOutput(stream, data) {
-  if (_outputHandler) {
-    const decoder = stream === 0 ? _stdoutDecoder : _stderrDecoder;
-    _outputHandler(stream, decoder.decode(data, { stream: true }));
-  }
-}
+// Imports bound to the module-wide defaults, for embedders that instantiate the
+// low-level component themselves.
+const _defaultHost = createCallbackHost();
+export const { invoke, listCallbacks, getExecutionOptions, reportTrace, reportOutput } =
+  _defaultHost.imports;

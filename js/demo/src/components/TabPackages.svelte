@@ -187,8 +187,12 @@
       return;
     }
 
-    // Pure Python wheel: install directly into the filesystem
-    const sitePackages = fileTree!.dir["site-packages"];
+    // Pure Python wheel: install directly into the filesystem. A Sandbox has
+    // its own file tree; a dynamically linked sandbox uses the shared one.
+    const current = getSandboxState();
+    const ownTree =
+      current.status === "ready" ? (current.sandbox as any)._fileTree : undefined;
+    const sitePackages = (ownTree ?? fileTree!).dir["site-packages"];
     let fileCount = 0;
 
     for (const [path, data] of entries) {
@@ -213,7 +217,7 @@
     }
 
     pkg.fileCount = fileCount;
-    _setFileData!(fileTree);
+    if (!ownTree) _setFileData!(fileTree);
   }
 
   async function installWithNativeExtensions(

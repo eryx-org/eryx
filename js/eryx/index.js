@@ -13,42 +13,160 @@
  *   ```
  */
 
-// Import the jco-generated bindings
-import {
-  execute as _execute,
-  snapshotState as _snapshotState,
-  restoreState as _restoreState,
-  clearState as _clearState,
-  finalizePreinit as _finalizePreinit,
-  setResultVariable as _setResultVariable,
-} from "./eryx-sandbox.js";
+// The jco-generated component, transpiled with `--instantiation async` so each
+// Sandbox gets its own instance and imports.
+import { instantiate } from "./eryx-sandbox.js";
 
-// Import filesystem shim to populate with Python stdlib
-import { _setFileData } from "#preview2/filesystem";
+import {
+  environment,
+  exit,
+  stderr,
+  stdin,
+  stdout,
+  terminalInput,
+  terminalOutput,
+  terminalStderr,
+  terminalStdin,
+  terminalStdout,
+} from "#preview2/cli";
+import { monotonicClock, wallClock } from "#preview2/clocks";
+import { createFilesystem, InMemoryFilesystemAdapter } from "#preview2/filesystem";
+import { error, poll, streams } from "#preview2/io";
+import { random } from "#preview2/random";
+import * as sockets from "./shims/sockets.js";
+import { tcp, tls } from "./shims/net.js";
+import { createCallbackHost } from "./shims/callbacks.js";
 
 // Import stdlib loader
 import { loadStdlib } from "./stdlib-loader.js";
 
-// Load the Python stdlib into the preview2-shim virtual filesystem.
-// This must happen before _finalizePreinit() so Python can find stdlib modules.
+// Load the Python stdlib once; every Sandbox gets its own copy-on-access view of it.
 const stdlibTree = await loadStdlib();
 
 // The stdlib tar extracts to python-stdlib/*, but the WASM expects
 // files at the root of the preopen (mounted as /python-stdlib).
-// So we set the root fileData to contain the stdlib directory contents.
 const stdlibDir = stdlibTree.dir?.["python-stdlib"] || stdlibTree;
 
-// Build the file tree with stdlib and an empty site-packages directory.
-// This tree is exported so consumers (e.g., the demo) can add packages to it.
+/**
+ * The template file tree each new Sandbox copies: the stdlib and an empty
+ * site-packages directory. Files added here are visible to sandboxes created
+ * afterwards; use a Sandbox's own `_fileTree` to change one that exists.
+ */
 export const _fileTree = {
   dir: { "python-stdlib": stdlibDir, "site-packages": { dir: {} } },
 };
-_setFileData(_fileTree);
 
-// Complete Python interpreter initialization.
-// The pre-initialized WASM has Python's core state baked in, but
-// finalizePreinit() must still be called to finish setup.
-_finalizePreinit();
+/**
+ * Copy a file tree for one instance. Directories are copied up front; a file's
+ * bytes are copied the first time the instance touches them, so writes (which
+ * the in-memory filesystem makes in place) never reach the template or another
+ * instance, and untouched stdlib files cost nothing.
+ * @param {Object} node
+ * @returns {Object}
+ */
+function forkTree(node) {
+  if (node.dir) {
+    const dir = {};
+    for (const [name, child] of Object.entries(node.dir)) dir[name] = forkTree(child);
+    return { ...node, dir };
+  }
+  if (!("source" in node)) return { ...node };
+  const shared = node.source;
+  let own;
+  return {
+    get source() {
+      // Not `slice()`: on a Node Buffer that returns a view, not a copy.
+      return (own ??= typeof shared === "string" ? shared : new Uint8Array(shared));
+    },
+    set source(value) {
+      own = value;
+    },
+  };
+}
+
+const isNode =
+  typeof globalThis.process !== "undefined" &&
+  typeof globalThis.process.versions?.node !== "undefined";
+
+/** Compiled core modules, shared by every instance. */
+const _coreModules = new Map();
+
+/**
+ * Compile (once) a core wasm module of the component.
+ * @param {string} name
+ * @returns {Promise<WebAssembly.Module>}
+ */
+function getCoreModule(name) {
+  if (!_coreModules.has(name)) {
+    const url = new URL(`./${name}`, import.meta.url);
+    _coreModules.set(
+      name,
+      isNode
+        ? import(/* webpackIgnore: true */ "node:fs/promises").then(async (fs) =>
+            WebAssembly.compile(await fs.readFile(url)),
+          )
+        : WebAssembly.compileStreaming(fetch(url)),
+    );
+  }
+  return _coreModules.get(name);
+}
+
+const _sockets = {
+  "wasi:sockets/instance-network": sockets.instanceNetwork,
+  "wasi:sockets/ip-name-lookup": sockets.ipNameLookup,
+  "wasi:sockets/network": sockets.network,
+  "wasi:sockets/tcp": sockets.tcp,
+  "wasi:sockets/tcp-create-socket": sockets.tcpCreateSocket,
+  "wasi:sockets/udp": sockets.udp,
+  "wasi:sockets/udp-create-socket": sockets.udpCreateSocket,
+};
+
+/**
+ * Instantiate the component with its own filesystem and callback imports, then
+ * finish the pre-initialized interpreter's setup.
+ * @param {Object} fileTree - The instance's own file tree
+ * @param {ReturnType<typeof createCallbackHost>} host
+ */
+async function _instantiate(fileTree, host) {
+  const fs = createFilesystem({
+    adapter: new InMemoryFilesystemAdapter(),
+    preopens: { "/": fileTree },
+  });
+  const cb = host.imports;
+  const instance = await instantiate(getCoreModule, {
+    invoke: { default: cb.invoke },
+    sleep: { default: cb.sleep },
+    "list-callbacks": { default: cb.listCallbacks },
+    "get-execution-options": { default: cb.getExecutionOptions },
+    "report-trace": { default: cb.reportTrace },
+    "report-output": { default: cb.reportOutput },
+    "eryx:net/tcp": tcp,
+    "eryx:net/tls": tls,
+    "wasi:cli/environment": environment,
+    "wasi:cli/exit": exit,
+    "wasi:cli/stderr": stderr,
+    "wasi:cli/stdin": stdin,
+    "wasi:cli/stdout": stdout,
+    "wasi:cli/terminal-input": terminalInput,
+    "wasi:cli/terminal-output": terminalOutput,
+    "wasi:cli/terminal-stderr": terminalStderr,
+    "wasi:cli/terminal-stdin": terminalStdin,
+    "wasi:cli/terminal-stdout": terminalStdout,
+    "wasi:clocks/monotonic-clock": monotonicClock,
+    "wasi:clocks/wall-clock": wallClock,
+    "wasi:filesystem/preopens": fs.preopens,
+    "wasi:filesystem/types": fs.types,
+    "wasi:io/error": error,
+    "wasi:io/poll": poll,
+    "wasi:io/streams": streams,
+    "wasi:random/random": random,
+    ..._sockets,
+  });
+  // The pre-initialized WASM has Python's core state baked in, but
+  // finalizePreinit() must still be called to finish setup.
+  instance.finalizePreinit();
+  return instance;
+}
 
 // Re-export callback configuration
 export {
@@ -61,9 +179,6 @@ export {
 
 // Re-export network policy configuration
 export { setNetConfig, DEFAULT_BLOCKED_HOSTS, DEFAULT_BLOCKED_NETWORKS } from "./shims/net.js";
-import { closeConnections } from "./shims/net.js";
-
-import { _beginReplay, _endReplay, _flushOutput } from "./shims/callbacks.js";
 
 /**
  * Result from executing Python code in the sandbox.
@@ -126,23 +241,6 @@ function _toResult(output) {
 }
 
 /**
- * Set the name of the variable captured as the structured result.
- *
- * After each execute(), the variable with this name is read from the script's
- * namespace, JSON-serialized, and returned as `ExecuteResult.result`. Applies to
- * the shared sandbox instance. Defaults to "result".
- *
- * The underlying export is async; await the returned promise before calling
- * execute() if you need the new name to take effect for the next execution.
- *
- * @param {string} name - The variable name to capture
- * @returns {Promise<void>}
- */
-export function setResultVariable(name) {
-  return _setResultVariable(name);
-}
-
-/**
  * The outcome of executeWithJournal().
  * @typedef {Object} ReplayOutcome
  * @property {ExecuteResult} [result] - The execution result, or undefined if it failed
@@ -157,77 +255,29 @@ export function setResultVariable(name) {
  *   Set if a callback threw SuspendCallback
  */
 
-// The tail of the queue of calls into the shared instance. Each call starts
-// only after the previous one settles, so executions never overlap: the
-// callback journal and the streaming output decoders are module-global, and
-// jco can't run two calls on one instance at once.
-let _queue = Promise.resolve();
-
 /**
- * Run `fn` once every call queued before it has settled.
- * @template T
- * @param {() => Promise<T>} fn
- * @returns {Promise<T>}
+ * Options for a {@link Sandbox}. Each handler option overrides, for this
+ * sandbox only, the module-wide default set by the setter of the same name
+ * (`setCallbackHandler()` and so on); an omitted option follows that default.
+ * @typedef {Object} SandboxOptions
+ * @property {((name: string, argsJson: string) => string | Promise<string>) | null} [callbackHandler]
+ * @property {Array<{name: string, description: string, parametersSchemaJson?: string}>} [callbacks]
+ * @property {((lineno: number, eventJson: string, contextJson: string) => void) | null} [traceHandler]
+ * @property {((stream: number, data: string) => void) | null} [outputHandler]
  */
-function _serialized(fn) {
-  const run = _queue.then(fn);
-  _queue = run.catch(() => {});
-  return run;
-}
-
-/**
- * Run code on the shared instance, flushing streamed output when it finishes.
- * Callers must hold the queue, so the flush can't cut into another execution's
- * output.
- * @param {string} code
- * @returns {Promise<ExecuteResult>}
- */
-async function _run(code) {
-  try {
-    // Frame the code with an empty preamble (see the guest's PREAMBLE_HEADER),
-    // so a leading header-like line in user code isn't misparsed.
-    return _toResult(await _execute(`#eryx-preamble:0\n${code}`));
-  } finally {
-    _flushOutput();
-    closeConnections();
-  }
-}
-
-/**
- * Execute code without journaling.
- * @param {string} code
- * @returns {Promise<ExecuteResult>}
- */
-function _executePlain(code) {
-  return _serialized(() => _run(code));
-}
-
-/**
- * Execute code while journaling callback results, replaying from `journal`.
- * @param {string} code
- * @param {{journal?: string}} [options]
- * @returns {Promise<ReplayOutcome>}
- */
-function _executeWithJournal(code, options) {
-  return _serialized(async () => {
-    _beginReplay(options?.journal);
-    let result;
-    let error;
-    try {
-      result = await _run(code);
-    } catch (e) {
-      error = e;
-    }
-    return { result, error, ..._endReplay(code) };
-  });
-}
 
 /**
  * A Python sandbox powered by WebAssembly.
  *
- * The sandbox executes Python code in complete isolation. Each Sandbox
- * instance maintains its own Python state (variables, imports, etc.)
- * across multiple execute() calls.
+ * Each Sandbox is its own WebAssembly instance, with its own Python
+ * interpreter, filesystem, callback handlers and journal, so code run in one
+ * can't see or change another's state. Python state (variables, imports,
+ * etc.) persists across execute() calls on the same Sandbox.
+ *
+ * The compiled code is shared, but every instance has its own linear memory
+ * (the pre-initialized interpreter image plus whatever the code allocates), so
+ * each live Sandbox costs tens of megabytes. Drop references to sandboxes you
+ * no longer need so they can be garbage collected.
  *
  * @example
  * const sandbox = new Sandbox();
@@ -241,6 +291,64 @@ function _executeWithJournal(code, options) {
  * await sandbox.clearState();
  */
 export class Sandbox {
+  /** @type {ReturnType<typeof createCallbackHost>} */
+  #host;
+  /** @type {Promise<Awaited<ReturnType<typeof _instantiate>>>} */
+  #instance;
+  // The tail of the queue of calls into this instance. Each call starts only
+  // after the previous one settles, so executions never overlap: the journal
+  // and the streaming output decoders belong to the instance, and jco can't
+  // run two calls on one instance at once.
+  #queue = Promise.resolve();
+
+  /**
+   * Create a sandbox. Instantiation starts right away and finishes in the
+   * background; the first call waits for it, and rejects if it failed.
+   *
+   * @param {SandboxOptions} [options]
+   */
+  constructor(options = {}) {
+    /**
+     * This sandbox's own file tree (a copy of the module's `_fileTree`).
+     * Changes to it are visible to the sandbox's next filesystem access.
+     * @internal For the demo app and advanced integrations.
+     */
+    this._fileTree = forkTree(_fileTree);
+    this.#host = createCallbackHost(options);
+    this.#instance = _instantiate(this._fileTree, this.#host);
+    // Surfaced by the first call instead.
+    this.#instance.catch(() => {});
+  }
+
+  /**
+   * Run `fn` on the instance once every call queued before it has settled.
+   * @template T
+   * @param {(instance: Awaited<ReturnType<typeof _instantiate>>) => Promise<T>} fn
+   * @returns {Promise<T>}
+   */
+  #serialized(fn) {
+    const run = this.#queue.then(() => this.#instance).then(fn);
+    this.#queue = run.catch(() => {});
+    return run;
+  }
+
+  /**
+   * Run code, flushing streamed output when it finishes. Callers must hold the
+   * queue, so the flush can't cut into another execution's output.
+   * @param {Awaited<ReturnType<typeof _instantiate>>} instance
+   * @param {string} code
+   * @returns {Promise<ExecuteResult>}
+   */
+  async #run(instance, code) {
+    try {
+      // Frame the code with an empty preamble (see the guest's PREAMBLE_HEADER),
+      // so a leading header-like line in user code isn't misparsed.
+      return _toResult(await instance.execute(`#eryx-preamble:0\n${code}`));
+    } finally {
+      this.#host.flushOutput();
+    }
+  }
+
   /**
    * Execute Python code in the sandbox.
    *
@@ -248,10 +356,10 @@ export class Sandbox {
    * and stderr is captured and returned. Variables and imports persist
    * across calls on the same Sandbox instance.
    *
-   * Calls on the shared instance run one at a time, in call order; an
-   * execute() made while another call is running waits for it to finish.
-   * Don't await execute() from inside a callback handler: it would wait for
-   * the execution that invoked the handler, which never finishes.
+   * Calls on one Sandbox run one at a time, in call order; an execute() made
+   * while another call on it is running waits for it to finish. Don't await
+   * execute() on the same Sandbox from inside its callback handler: it would
+   * wait for the execution that invoked the handler, which never finishes.
    *
    * @param {string} code - Python source code to execute
    * @returns {Promise<ExecuteResult>} Captured stdout and stderr
@@ -262,7 +370,7 @@ export class Sandbox {
    * console.log(result.stdout);  // "hello\n"
    */
   async execute(code) {
-    return _executePlain(code);
+    return this.#serialized((instance) => this.#run(instance, code));
   }
 
   /**
@@ -276,15 +384,39 @@ export class Sandbox {
    * set and a journal to resume from.
    *
    * Never throws for script failures: check `suspended`, then `error`. Like
-   * every call on the shared instance, it waits for earlier calls to finish
-   * first.
+   * every call on this Sandbox, it waits for earlier calls to finish first.
    *
    * @param {string} code - Python source code to execute
    * @param {{journal?: string}} [options] - A journal from a previous run to replay
    * @returns {Promise<ReplayOutcome>}
    */
   async executeWithJournal(code, options) {
-    return _executeWithJournal(code, options);
+    return this.#serialized(async (instance) => {
+      this.#host.beginReplay(options?.journal);
+      let result;
+      let error;
+      try {
+        result = await this.#run(instance, code);
+      } catch (e) {
+        error = e;
+      }
+      return { result, error, ...this.#host.endReplay(code) };
+    });
+  }
+
+  /**
+   * Set the name of the variable captured as the structured result.
+   *
+   * After each execute(), the variable with this name is read from the
+   * script's namespace, JSON-serialized, and returned as
+   * `ExecuteResult.result`. Defaults to "result". Takes effect for calls made
+   * after it.
+   *
+   * @param {string} name - The variable name to capture
+   * @returns {Promise<void>}
+   */
+  async setResultVariable(name) {
+    await this.#serialized((instance) => instance.setResultVariable(name));
   }
 
   /**
@@ -297,7 +429,7 @@ export class Sandbox {
    * @throws {Error} If serialization fails (e.g., unpicklable objects)
    */
   async snapshotState() {
-    return _serialized(() => _snapshotState());
+    return this.#serialized((instance) => instance.snapshotState());
   }
 
   /**
@@ -310,7 +442,7 @@ export class Sandbox {
    * @throws {Error} If deserialization fails
    */
   async restoreState(data) {
-    await _serialized(() => _restoreState(data));
+    await this.#serialized((instance) => instance.restoreState(data));
   }
 
   /**
@@ -320,19 +452,25 @@ export class Sandbox {
    * namespace (no user-defined variables from previous calls).
    */
   async clearState() {
-    await _serialized(() => _clearState());
+    await this.#serialized((instance) => instance.clearState());
   }
 }
 
+/** @type {Sandbox | undefined} */
+let _defaultSandbox;
+
+/** The sandbox behind the module-level helpers, created on first use. */
+function _default() {
+  return (_defaultSandbox ??= new Sandbox());
+}
+
 /**
- * Execute Python code in a fresh sandbox.
+ * Execute Python code in the default sandbox.
  *
- * This is a convenience function that uses the shared global sandbox state.
- * For isolated execution, create a Sandbox instance instead.
- *
- * Note: Unlike the Sandbox class, state from previous execute() calls
- * persists because this uses the same underlying WASM instance. Call
- * clearState() on a Sandbox instance to reset.
+ * This is a convenience function backed by one module-wide Sandbox, created
+ * on first use, so state from previous execute() calls persists. It shares
+ * nothing with Sandbox instances you create yourself; use one of those for
+ * isolated execution.
  *
  * @param {string} code - Python source code to execute
  * @returns {Promise<ExecuteResult>} Captured stdout and stderr
@@ -343,17 +481,28 @@ export class Sandbox {
  * console.log(result.stdout);  // "hello"
  */
 export async function execute(code) {
-  return _executePlain(code);
+  return _default().execute(code);
 }
 
 /**
- * Execute Python code using the shared global sandbox state, journaling
- * callback results. See {@link Sandbox#executeWithJournal}.
+ * Execute Python code in the default sandbox, journaling callback results.
+ * See {@link Sandbox#executeWithJournal}.
  *
  * @param {string} code - Python source code to execute
  * @param {{journal?: string}} [options] - A journal from a previous run to replay
  * @returns {Promise<ReplayOutcome>}
  */
 export async function executeWithJournal(code, options) {
-  return _executeWithJournal(code, options);
+  return _default().executeWithJournal(code, options);
+}
+
+/**
+ * Set the name of the variable captured as the structured result in the
+ * default sandbox. See {@link Sandbox#setResultVariable}.
+ *
+ * @param {string} name - The variable name to capture
+ * @returns {Promise<void>}
+ */
+export function setResultVariable(name) {
+  return _default().setResultVariable(name);
 }
