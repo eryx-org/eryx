@@ -2424,6 +2424,42 @@ async fn sandbox_stream_limit_sets_output_truncated() {
     assert!(result.output_truncated);
 }
 
+/// Trace events dropped by the sandbox's stream limit do not mark complete
+/// output as truncated.
+#[tokio::test]
+async fn dropped_trace_events_do_not_set_output_truncated() {
+    let mut client = EryxClient::new(start_server().await);
+    let request = tokio_stream::once(ClientMessage {
+        message: Some(client_message::Message::ExecuteRequest(Box::new(
+            ExecuteRequest {
+                code: "for i in range(300_000):\n    x = i\nprint('done')".to_string(),
+                enable_tracing: true,
+                resource_limits: Some(ResourceLimits {
+                    execution_timeout_ms: 120_000,
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+        ))),
+    });
+    let mut stream = client.execute(request).await.unwrap().into_inner();
+    let mut trace_events = 0usize;
+    let mut result = None;
+    while let Some(msg) = stream.message().await.unwrap() {
+        match msg.message {
+            Some(server_message::Message::TraceEvent(_)) => trace_events += 1,
+            Some(server_message::Message::ExecuteResult(r)) => result = Some(*r),
+            _ => {}
+        }
+    }
+    let result = result.unwrap();
+    assert!(result.success, "{}", result.error);
+    // Two line events per iteration would be 600k; the budget stops far short.
+    assert!(trace_events < 300_000, "{trace_events} trace events");
+    assert_eq!(result.stdout.to_lossy().trim(), "done");
+    assert!(!result.output_truncated);
+}
+
 /// A snapshot whose restore runs past the time bound loses the session's
 /// state, but a request that also overrides `result_variable` still runs on a
 /// clean state rather than failing.

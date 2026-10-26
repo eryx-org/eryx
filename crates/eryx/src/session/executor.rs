@@ -531,9 +531,9 @@ pub struct SessionExecutor {
     last_peak_memory_bytes: u64,
     last_fuel_consumed: Option<u64>,
 
-    /// Whether the most recent execution dropped streamed output or trace
-    /// events; see [`ExecutionOutput::stream_truncated`].
-    last_stream_truncated: bool,
+    /// Whether the most recent execution dropped streamed output (not trace
+    /// events) for exceeding the stream budget.
+    last_output_truncated: bool,
 
     /// VFS storage that persists across resets.
     #[cfg(feature = "vfs")]
@@ -921,7 +921,7 @@ impl SessionExecutor {
             fd_output,
             last_peak_memory_bytes: 0,
             last_fuel_consumed: None,
-            last_stream_truncated: false,
+            last_output_truncated: false,
             vfs_storage: Some(vfs_storage),
             vfs_config: Some(vfs_config),
             vfs_max_bytes: limits.max_vfs_bytes,
@@ -997,7 +997,7 @@ impl SessionExecutor {
             fd_output,
             last_peak_memory_bytes: 0,
             last_fuel_consumed: None,
-            last_stream_truncated: false,
+            last_output_truncated: false,
         })
     }
 
@@ -1130,13 +1130,13 @@ impl SessionExecutor {
         self.last_fuel_consumed
     }
 
-    /// Whether the most recent execution dropped streamed output or trace
-    /// events for exceeding the per-execution stream budget. Unlike
-    /// [`ExecutionOutput::stream_truncated`], this is also available when the
-    /// execution failed.
+    /// Whether the most recent execution dropped streamed stdout/stderr for
+    /// exceeding the per-execution stream budget. Unlike
+    /// [`ExecutionOutput::stream_truncated`], it ignores dropped trace events
+    /// and is also available when the execution failed.
     #[must_use]
-    pub fn last_stream_truncated(&self) -> bool {
-        self.last_stream_truncated
+    pub fn last_output_truncated(&self) -> bool {
+        self.last_output_truncated
     }
 
     /// Execute Python code with a fluent builder API.
@@ -1180,7 +1180,7 @@ impl SessionExecutor {
     ) -> Result<ExecutionOutput, Error> {
         self.last_peak_memory_bytes = 0;
         self.last_fuel_consumed = None;
-        self.last_stream_truncated = false;
+        self.last_output_truncated = false;
         crate::error::validate_user_code(code)?;
         if crate::wasm::is_already_cancelled(cancellation_token.as_ref()) {
             return Err(Error::Cancelled);
@@ -1314,7 +1314,7 @@ impl SessionExecutor {
         // channel is dropped.
         let (fd_stdout, fd_stderr) = self.fd_output.take(store.data().output_tx.as_ref());
         let stream_truncated = store.data().stream_budget.truncated;
-        self.last_stream_truncated = stream_truncated;
+        self.last_output_truncated = store.data().stream_budget.output_truncated;
 
         let peak_memory = {
             let state = store.data_mut();

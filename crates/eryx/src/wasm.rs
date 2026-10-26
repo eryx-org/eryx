@@ -1045,6 +1045,8 @@ pub(crate) struct StreamBudget {
     output: usize,
     /// Whether anything was dropped for lack of budget.
     pub(crate) truncated: bool,
+    /// Whether output chunks (not trace events) were dropped.
+    pub(crate) output_truncated: bool,
 }
 
 impl Default for StreamBudget {
@@ -1053,6 +1055,7 @@ impl Default for StreamBudget {
             trace: STREAM_BYTES_LIMIT,
             output: STREAM_BYTES_LIMIT,
             truncated: false,
+            output_truncated: false,
         }
     }
 }
@@ -1065,7 +1068,9 @@ impl StreamBudget {
 
     /// Charge one output chunk with `payload` bytes; `false` means drop it.
     fn spend_output(&mut self, payload: usize) -> bool {
-        Self::spend(&mut self.output, &mut self.truncated, payload, "output")
+        let spent = Self::spend(&mut self.output, &mut self.truncated, payload, "output");
+        self.output_truncated |= !spent;
+        spent
     }
 
     fn spend(left: &mut usize, truncated: &mut bool, payload: usize, stream: &str) -> bool {

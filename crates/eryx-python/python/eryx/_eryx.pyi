@@ -1226,6 +1226,11 @@ class Session:
     Sessions can optionally use a virtual filesystem (VFS) for persistent file
     storage that survives across executions and even session resets.
 
+    `snapshot_state()`, `restore_state()` and `clear_state()` run under the
+    execution timeout raised to at least 5 seconds, or 30 seconds when the
+    session has no execution timeout. That state-operation bound can't be set
+    separately from Python yet.
+
     Example:
         # Basic session usage
         session = Session()
