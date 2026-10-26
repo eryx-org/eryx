@@ -14,7 +14,7 @@
  */
 
 import { createCallbackHost } from "./shims/callbacks.js";
-import { tcp, tls } from "./shims/net.js";
+import { createNet } from "./shims/net.js";
 import {
   _fileTree,
   decodeError,
@@ -41,8 +41,9 @@ export class TimeoutError extends Error {
  * instance's methods, plus `terminate()`. The handlers, journal and network
  * stay on this thread; the Worker forwards to them (see worker.js).
  * @param {ReturnType<typeof createCallbackHost>} host
+ * @param {ReturnType<typeof createNet>} net - The sandbox's connection table
  */
-async function instantiateInWorker(host) {
+async function instantiateInWorker(host, net) {
   const url = new URL("./worker.js", import.meta.url);
   const worker = isNode
     ? // Not the parent's execArgv, which can hold `-e`/`--input-type` a Worker
@@ -57,14 +58,14 @@ async function instantiateInWorker(host) {
     invoke: host.imports.invoke,
     reportTrace: host.imports.reportTrace,
     reportOutput: host.imports.reportOutput,
-    "tcp.connect": tcp.connect,
-    "tcp.read": tcp.read,
-    "tcp.write": tcp.write,
-    "tcp.close": tcp.close,
-    "tls.upgrade": tls.upgrade,
-    "tls.read": tls.read,
-    "tls.write": tls.write,
-    "tls.close": tls.close,
+    "tcp.connect": net.tcp.connect,
+    "tcp.read": net.tcp.read,
+    "tcp.write": net.tcp.write,
+    "tcp.close": net.tcp.close,
+    "tls.upgrade": net.tls.upgrade,
+    "tls.read": net.tls.read,
+    "tls.write": net.tls.write,
+    "tls.close": net.tls.close,
   };
 
   let nextId = 0;
@@ -74,7 +75,9 @@ async function instantiateInWorker(host) {
   let failure = null;
   let ready;
   const started = new Promise((resolve, reject) => (ready = { resolve, reject }));
+  // Once the Worker is gone, nothing will close what its code left open.
   const fail = (error) => {
+    net.closeConnections();
     failure ??= error;
     ready.reject(failure);
     for (const { reject } of pending.values()) reject(failure);
@@ -259,9 +262,10 @@ function _toResult(output) {
  * A Python sandbox powered by WebAssembly.
  *
  * Each Sandbox is its own WebAssembly instance, with its own Python
- * interpreter, filesystem, callback handlers and journal, so code run in one
- * can't see or change another's state. Python state (variables, imports,
- * etc.) persists across execute() calls on the same Sandbox.
+ * interpreter, filesystem, network connections, callback handlers and
+ * journal, so code run in one can't see or change another's state. Python
+ * state (variables, imports, etc.) persists across execute() calls on the same
+ * Sandbox; connections are closed when each call finishes.
  *
  * The compiled code is shared, but every instance has its own linear memory
  * (the pre-initialized interpreter image plus whatever the code allocates), so
@@ -284,6 +288,8 @@ function _toResult(output) {
 export class Sandbox {
   /** @type {ReturnType<typeof createCallbackHost>} */
   #host;
+  /** @type {ReturnType<typeof createNet>} */
+  #net = createNet();
   /** @type {number | undefined} */
   #timeoutMs;
   /** @type {Promise<any>} */
@@ -320,8 +326,8 @@ export class Sandbox {
   #start() {
     this.#instance =
       this.#timeoutMs === undefined
-        ? instantiateSandbox(this._fileTree, this.#host.imports)
-        : instantiateInWorker(this.#host);
+        ? instantiateSandbox(this._fileTree, this.#host.imports, this.#net)
+        : instantiateInWorker(this.#host, this.#net);
     // Surfaced by the first call instead.
     this.#instance.catch(() => {});
   }
@@ -375,6 +381,8 @@ export class Sandbox {
       return _toResult(await instance.execute(`#eryx-preamble:0\n${code}`));
     } finally {
       this.#host.flushOutput();
+      // Connections don't outlive the execution that opened them.
+      this.#net.closeConnections();
     }
   }
 

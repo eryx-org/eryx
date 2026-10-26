@@ -91,11 +91,9 @@ onMessage(async (message) => {
 // Instantiate as soon as the listener is up; the creating thread waits for
 // "ready" before its first call.
 try {
-  instance = await instantiateSandbox(_fileTree, cb, {
-    net,
-    // Compiled by the creating thread, so workers don't compile again.
-    getModule: (name) => request("module", [name]),
-  });
+  // Core modules are compiled by the creating thread, so workers don't
+  // compile them again.
+  instance = await instantiateSandbox(_fileTree, cb, net, (name) => request("module", [name]));
   post({ type: "ready" });
 } catch (e) {
   post({ type: "failed", ...encodeError(e) });

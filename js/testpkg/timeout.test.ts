@@ -71,6 +71,30 @@ except OSError as e:
     }
   });
 
+  it("closes a timed-out sandbox's connections", async () => {
+    let closed!: () => void;
+    const socketClosed = new Promise<void>((resolve) => (closed = resolve));
+    const server = createServer((socket) => socket.on("close", closed));
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const { port } = server.address() as AddressInfo;
+    setNetConfig({ allowedHosts: ["127.0.0.1"], blockedHosts: [], allowedNetworks: ["127.0.0.0/8"] });
+    const sandbox = new Sandbox({ timeoutMs: 1000 });
+    try {
+      const error = await sandbox
+        .execute(`
+import socket
+s = socket.create_connection(("127.0.0.1", ${port}))
+while True: pass
+`)
+        .catch((e) => e);
+      expect(error).toBeInstanceOf(TimeoutError);
+      await socketClosed;
+    } finally {
+      setNetConfig(null);
+      server.close();
+    }
+  });
+
   it("rejects an invalid value", () => {
     expect(() => new Sandbox({ timeoutMs: 0 })).toThrow(TypeError);
   });

@@ -25,7 +25,6 @@ import { createFilesystem, InMemoryFilesystemAdapter } from "#preview2/filesyste
 import { error, poll, streams } from "#preview2/io";
 import { random } from "#preview2/random";
 import * as sockets from "./shims/sockets.js";
-import { tcp, tls } from "./shims/net.js";
 
 // Import stdlib loader
 import { loadStdlib } from "./stdlib-loader.js";
@@ -116,10 +115,11 @@ const _sockets = {
  * finish the pre-initialized interpreter's setup.
  * @param {Object} fileTree - The instance's own file tree
  * @param {ReturnType<typeof import("./shims/callbacks.js").createCallbackHost>["imports"]} cb - Callback imports
- * @param {{net?: {tcp: Object, tls: Object}, getModule?: (name: string) => WebAssembly.Module | Promise<WebAssembly.Module>}} [overrides] -
- *   Network imports and core-module source, when not the module-level ones
+ * @param {{tcp: Object, tls: Object}} net - The instance's eryx:net imports
+ * @param {(name: string) => WebAssembly.Module | Promise<WebAssembly.Module>} [getModule] -
+ *   Core-module source, when not this thread's cache
  */
-export async function instantiateSandbox(fileTree, cb, { net = { tcp, tls }, getModule = getCoreModule } = {}) {
+export async function instantiateSandbox(fileTree, cb, net, getModule = getCoreModule) {
   const fs = createFilesystem({
     adapter: new InMemoryFilesystemAdapter(),
     preopens: { "/": fileTree },

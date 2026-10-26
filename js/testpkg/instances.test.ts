@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
-import { Sandbox, execute } from "@bsull/eryx";
+import { createServer } from "node:net";
+import type { AddressInfo } from "node:net";
+import { Sandbox, execute, setNetConfig } from "@bsull/eryx";
 
 describe("separate Sandbox instances", () => {
   it("don't share variables", async () => {
@@ -71,5 +73,52 @@ print(names, await whoami())
     await new Sandbox().execute("print('other')");
     await sandbox.execute("print('mine')");
     expect(chunks.join("")).toBe("mine\n");
+  });
+
+  it("can't use each other's connection handles", async () => {
+    const received: string[] = [];
+    const server = createServer((socket) => socket.on("data", (d) => received.push(d.toString())));
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const { port } = server.address() as AddressInfo;
+    setNetConfig({ allowedHosts: ["127.0.0.1"], blockedHosts: [], allowedNetworks: ["127.0.0.0/8"] });
+
+    // `a` holds a connection open while it waits on its callback.
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => (release = resolve));
+    let opened!: () => void;
+    const isOpen = new Promise<void>((resolve) => (opened = resolve));
+    const a = new Sandbox({
+      callbacks: [{ name: "hold", description: "Wait for the test" }],
+      callbackHandler: async () => {
+        opened();
+        await held;
+        return "null";
+      },
+    });
+    try {
+      const running = a.execute(`
+import _eryx
+handle = _eryx._eryx_tcp_connect("127.0.0.1", ${port})
+await hold()
+`);
+      await isOpen;
+      const b = await new Sandbox().execute(`
+import _eryx
+for handle in range(64):
+    try:
+        _eryx._eryx_tcp_write(handle, b"from b")
+        print("wrote", handle)
+    except OSError:
+        pass
+`);
+      release();
+      await running;
+      expect(b.stdout).toBe("");
+      expect(received).toEqual([]);
+    } finally {
+      release();
+      setNetConfig(null);
+      server.close();
+    }
   });
 });

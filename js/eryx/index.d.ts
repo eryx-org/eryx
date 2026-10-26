@@ -133,9 +133,10 @@ export class TimeoutError extends Error {
  * A Python sandbox powered by WebAssembly.
  *
  * Each Sandbox is its own WebAssembly instance, with its own Python
- * interpreter, filesystem, callback handlers and journal, so code run in one
- * can't see or change another's state. Python state (variables, imports,
- * etc.) persists across execute() calls on the same Sandbox.
+ * interpreter, filesystem, network connections, callback handlers and
+ * journal, so code run in one can't see or change another's state. Python
+ * state (variables, imports, etc.) persists across execute() calls on the same
+ * Sandbox; connections are closed when each call finishes.
  *
  * The compiled code is shared, but every instance has its own linear memory
  * (the pre-initialized interpreter image plus whatever the code allocates), so
