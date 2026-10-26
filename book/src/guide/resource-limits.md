@@ -238,6 +238,37 @@ session = eryx.Session(vfs=storage)
 Because the cap protects host memory rather than the guest, it is not disabled by
 `ResourceLimits::unlimited()`; raise it explicitly if you need more.
 
+## Open Host Files
+
+Every file or directory a script opens under a host mount (the stdlib,
+site-packages and [volumes](./vfs.md#host-volume-mounts)) holds a host file
+descriptor until the script closes it. `max_open_host_files` caps how many one
+sandbox may hold at once (256 by default); opens past it fail with `EDQUOT`
+(`OSError`). Like `max_vfs_bytes`, it is not disabled by
+`ResourceLimits::unlimited()`.
+
+<!-- langtabs-start -->
+```rust
+# extern crate eryx;
+use eryx::ResourceLimits;
+
+let limits = ResourceLimits::default().with_max_open_host_files(64);
+```
+
+```python
+import eryx
+
+limits = eryx.ResourceLimits(max_open_host_files=64)
+```
+<!-- langtabs-end -->
+
+All sandboxes in the process also share one total, so many concurrent sandboxes
+can't use up the process's descriptor limit. It defaults to half the soft
+`RLIMIT_NOFILE` (read the first time a sandbox opens a host file), and Rust
+embedders can change it with `eryx::vfs::set_process_max_open_host_files`. The
+gRPC server sets both with `--max-open-host-files` and
+`--max-open-host-files-total`.
+
 ## Callback Invocation Limits
 
 Limit the total number of callback invocations to prevent abuse:

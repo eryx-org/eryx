@@ -491,11 +491,33 @@ A few more rules apply to volumes:
 - **No symlinks** - Scripts can't create symbolic links in a volume, just as in
   the VFS.
 - **Open files** - A sandbox holds at most 256 host files and directories open
-  at once (across the stdlib, packages and volumes); opening more fails until
-  some are closed.
-- **Unmetered writes** - `max_vfs_bytes` doesn't apply to volumes: a writable
-  volume can fill the host disk. Embedders using `eryx-vfs` directly can cap
-  each file's size with `RealDir::with_max_file_size`.
+  at once (across the stdlib, packages and volumes); opening more fails with
+  `EDQUOT` until some are closed. Set `max_open_host_files` in
+  [resource limits](./resource-limits.md#open-host-files) to change it. All
+  sandboxes in the process also share one total, by default half the soft
+  `RLIMIT_NOFILE`.
+- **File size** - `max_vfs_bytes` doesn't apply to volumes, so by default a
+  writable volume can fill the host disk. Give the mount a `max_file_size` to
+  cap how large any one file in it may grow; writes past it fail. The cap is
+  per file, not a total for the volume.
+
+<!-- langtabs-start -->
+```rust,ignore
+use eryx::VolumeMount;
+
+let volume = VolumeMount::new("/home/user/out", "/mnt/out")
+    .with_max_file_size(16 * 1024 * 1024); // 16 MiB per file
+```
+
+```python
+import eryx
+
+# (host_path, guest_path, read_only, max_file_size)
+sandbox = eryx.Sandbox(volumes=[("/home/user/out", "/mnt/out", False, 16 * 1024 * 1024)])
+```
+<!-- langtabs-end -->
+
+The `eryx` CLI takes `--volume-max-file-size BYTES`, applied to every `--volume`.
 
 ## Best Practices
 
