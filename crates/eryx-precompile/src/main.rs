@@ -36,12 +36,20 @@
 //!   --verify-code "import numpy; print(numpy.array(\[1,2,3\]).sum())"
 //! ```
 
+use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use eryx::{CpuFeatureLevel, Session}; // For execute() method and CPU features
+use sha2::{Digest, Sha256};
+
+/// Largest `runtime.wasm` that `setup` will download (the real one is ~50 MB).
+const MAX_RUNTIME_WASM_BYTES: u64 = 256 * 1024 * 1024;
+
+/// Largest `runtime.wasm.sha256` that `setup` will download.
+const MAX_CHECKSUM_BYTES: u64 = 1024;
 
 /// Pre-compile eryx WASM runtimes for fast sandbox creation.
 #[derive(Parser, Debug)]
@@ -77,6 +85,14 @@ struct SetupArgs {
     /// Must match an existing GitHub Release with a runtime.wasm asset.
     #[arg(long)]
     version: Option<String>,
+
+    /// Expected SHA-256 of runtime.wasm, as hex
+    ///
+    /// By default the checksum comes from the `runtime.wasm.sha256` asset of
+    /// the same release. Releases before 0.12.0 don't publish one, so pass the
+    /// hash here to set them up.
+    #[arg(long, value_name = "HEX")]
+    sha256: Option<String>,
 
     /// Verbose output
     #[arg(short, long)]
@@ -262,13 +278,20 @@ fn platform_target() -> String {
     format!("{arch}-{os}")
 }
 
-/// Try to download runtime.wasm from a GitHub Release.
+/// Try to download runtime.wasm from a GitHub Release and verify its SHA-256.
 ///
 /// Tries multiple tag patterns since the naming convention has changed over time:
 /// - `v{version}` (cargo-dist releases, used for v0.3.0 and earlier)
 /// - `eryx-v{version}` (release-plz releases, used from v0.4.0+)
 /// - `eryx-precompile-v{version}` (upload-runtime attaches to whichever release triggers it)
-async fn download_runtime_wasm(client: &reqwest::Client, version: &str) -> Result<Vec<u8>> {
+///
+/// The expected hash is `expected_sha256` if given, otherwise the
+/// `runtime.wasm.sha256` asset next to `runtime.wasm` in the same release.
+async fn download_runtime_wasm(
+    client: &reqwest::Client,
+    version: &str,
+    expected_sha256: Option<&str>,
+) -> Result<Vec<u8>> {
     let tag_patterns = [
         format!("eryx-v{version}"),
         format!("eryx-precompile-v{version}"),
@@ -283,11 +306,16 @@ async fn download_runtime_wasm(client: &reqwest::Client, version: &str) -> Resul
         match client.get(&url).send().await {
             Ok(resp) if resp.status().is_success() => {
                 println!("  Found runtime.wasm in release {tag}");
-                let bytes = resp
-                    .bytes()
+                let expected = match expected_sha256 {
+                    Some(hex) => parse_sha256(hex)?,
+                    None => fetch_sha256(client, &format!("{url}.sha256")).await?,
+                };
+                let bytes = read_capped(resp, MAX_RUNTIME_WASM_BYTES)
                     .await
                     .context("Failed to download runtime.wasm body")?;
-                return Ok(bytes.to_vec());
+                verify_sha256(&bytes, &expected)?;
+                println!("  Verified SHA-256 {}", hex::encode(expected));
+                return Ok(bytes);
             }
             Ok(resp) => {
                 last_error = Some(anyhow::anyhow!("GET {url} returned HTTP {}", resp.status()));
@@ -304,6 +332,114 @@ async fn download_runtime_wasm(client: &reqwest::Client, version: &str) -> Resul
              Check https://github.com/eryx-org/eryx/releases for available versions.",
         tag_patterns.join(", ")
     ))
+}
+
+/// Download the checksum published at `url`.
+async fn fetch_sha256(client: &reqwest::Client, url: &str) -> Result<[u8; 32]> {
+    let resp = client
+        .get(url)
+        .send()
+        .await
+        .with_context(|| format!("Failed to fetch {url}"))?;
+    if !resp.status().is_success() {
+        anyhow::bail!(
+            "GET {url} returned HTTP {}. Releases before 0.12.0 don't publish a checksum; \
+             pass the expected hash with --sha256",
+            resp.status()
+        );
+    }
+    let body = read_capped(resp, MAX_CHECKSUM_BYTES)
+        .await
+        .with_context(|| format!("Failed to download {url}"))?;
+    parse_sha256(&String::from_utf8_lossy(&body))
+        .with_context(|| format!("Invalid checksum in {url}"))
+}
+
+/// Read a response body, failing once it grows past `max` bytes.
+async fn read_capped(mut resp: reqwest::Response, max: u64) -> Result<Vec<u8>> {
+    if let Some(len) = resp.content_length()
+        && len > max
+    {
+        anyhow::bail!("response is {len} bytes, more than the {max} byte limit");
+    }
+    let mut body = Vec::new();
+    while let Some(chunk) = resp.chunk().await? {
+        if (body.len() + chunk.len()) as u64 > max {
+            anyhow::bail!("response is more than the {max} byte limit");
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Ok(body)
+}
+
+/// Parse a SHA-256 from hex, or from `sha256sum` output (`<hex>  <file>`).
+fn parse_sha256(text: &str) -> Result<[u8; 32]> {
+    let hex = text.split_whitespace().next().unwrap_or_default();
+    let mut hash = [0u8; 32];
+    hex::decode_to_slice(hex, &mut hash)
+        .with_context(|| format!("expected a 64-character hex SHA-256, got {hex:?}"))?;
+    Ok(hash)
+}
+
+fn verify_sha256(bytes: &[u8], expected: &[u8; 32]) -> Result<()> {
+    let actual: [u8; 32] = Sha256::digest(bytes).into();
+    if actual != *expected {
+        anyhow::bail!(
+            "SHA-256 mismatch: expected {}, got {}",
+            hex::encode(expected),
+            hex::encode(actual)
+        );
+    }
+    Ok(())
+}
+
+/// Path of the checksum file kept next to a cached runtime.
+fn checksum_path(path: &Path) -> PathBuf {
+    let mut name = path.as_os_str().to_owned();
+    name.push(".sha256");
+    PathBuf::from(name)
+}
+
+/// Whether `path` holds a complete runtime written by `setup`, according to
+/// the checksum file stored next to it.
+fn cached_runtime_is_valid(path: &Path) -> bool {
+    let (Ok(bytes), Ok(checksum)) = (
+        std::fs::read(path),
+        std::fs::read_to_string(checksum_path(path)),
+    ) else {
+        return false;
+    };
+    parse_sha256(&checksum).is_ok_and(|expected| verify_sha256(&bytes, &expected).is_ok())
+}
+
+/// Write `bytes` to `path` through a temp file in the same directory, so
+/// readers see either the old file or the complete new one.
+fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
+    let dir = path.parent().context("path has no parent directory")?;
+    let mut tmp = tempfile::NamedTempFile::new_in(dir)
+        .with_context(|| format!("Failed to create a temp file in {}", dir.display()))?;
+    tmp.write_all(bytes)?;
+    tmp.as_file().sync_all()?;
+    tmp.persist(path)
+        .with_context(|| format!("Failed to write {}", path.display()))?;
+    Ok(())
+}
+
+/// Cache `cwasm` at `path`, with its checksum next to it. The checksum is
+/// written last, so an interrupted run leaves an entry that fails validation.
+fn write_cached_runtime(path: &Path, cwasm: &[u8]) -> Result<()> {
+    let checksum = checksum_path(path);
+    // Drop any stale checksum first, so it can never vouch for the new file
+    // if the checksum write below doesn't happen.
+    if let Err(e) = std::fs::remove_file(&checksum)
+        && e.kind() != std::io::ErrorKind::NotFound
+    {
+        return Err(e).with_context(|| format!("Failed to remove {}", checksum.display()));
+    }
+    write_atomic(path, cwasm)?;
+    let hash = hex::encode(Sha256::digest(cwasm));
+    let file_name = path.file_name().unwrap_or_default().to_string_lossy();
+    write_atomic(&checksum, format!("{hash}  {file_name}\n").as_bytes())
 }
 
 async fn run_setup(args: SetupArgs) -> Result<()> {
@@ -333,8 +469,9 @@ async fn run_setup(args: SetupArgs) -> Result<()> {
     println!("Cache:    {}", cache.display());
     println!();
 
-    // Check if already cached
-    if cwasm_path.exists() {
+    // Check if already cached. A file without a matching checksum (from an
+    // interrupted run or an older version of this tool) is rebuilt.
+    if cached_runtime_is_valid(&cwasm_path) {
         println!("Already cached: {}", cwasm_path.display());
         println!();
         println!(
@@ -349,10 +486,12 @@ async fn run_setup(args: SetupArgs) -> Result<()> {
     let client = reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::limited(10))
         .user_agent(format!("eryx-precompile/{version}"))
+        .connect_timeout(Duration::from_secs(30))
+        .read_timeout(Duration::from_secs(60))
         .build()
         .context("Failed to create HTTP client")?;
 
-    let wasm_bytes = download_runtime_wasm(&client, &version).await?;
+    let wasm_bytes = download_runtime_wasm(&client, &version, args.sha256.as_deref()).await?;
 
     println!(
         "  Downloaded {} bytes ({:.1} MB)",
@@ -384,8 +523,7 @@ async fn run_setup(args: SetupArgs) -> Result<()> {
     println!("Step 3: Writing to cache...");
     std::fs::create_dir_all(&cache)
         .with_context(|| format!("Failed to create cache directory: {}", cache.display()))?;
-    std::fs::write(&cwasm_path, &precompiled)
-        .with_context(|| format!("Failed to write {}", cwasm_path.display()))?;
+    write_cached_runtime(&cwasm_path, &precompiled)?;
     println!("  Saved to: {}", cwasm_path.display());
 
     println!();
@@ -1008,6 +1146,75 @@ async fn verify_cwasm(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Serve one HTTP response with a chunked body of `len` bytes, and return its URL.
+    async fn serve_chunked_body(len: usize) -> Result<String> {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let addr = listener.local_addr()?;
+        tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await?;
+            let mut request = [0u8; 1024];
+            let _ = stream.read(&mut request).await?;
+            let mut response = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n".to_vec();
+            response.extend_from_slice(format!("{len:x}\r\n").as_bytes());
+            response.resize(response.len() + len, b'x');
+            response.extend_from_slice(b"\r\n0\r\n\r\n");
+            stream.write_all(&response).await?;
+            stream.shutdown().await
+        });
+        Ok(format!("http://{addr}/"))
+    }
+
+    #[tokio::test]
+    async fn download_size_limit_is_enforced() -> Result<()> {
+        let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+        let client = reqwest::Client::new();
+
+        let resp = client.get(serve_chunked_body(100).await?).send().await?;
+        assert_eq!(read_capped(resp, 100).await?.len(), 100);
+
+        let resp = client.get(serve_chunked_body(101).await?).send().await?;
+        assert!(read_capped(resp, 100).await.is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn checksum_parsing_accepts_sha256sum_output() -> Result<()> {
+        let hex = "ab".repeat(32);
+        assert_eq!(parse_sha256(&hex)?, [0xab; 32]);
+        assert_eq!(parse_sha256(&format!("{hex}  runtime.wasm\n"))?, [0xab; 32]);
+        assert!(parse_sha256(&hex[..62]).is_err());
+        assert!(parse_sha256("").is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn checksum_mismatch_is_rejected() {
+        let expected: [u8; 32] = Sha256::digest(b"runtime").into();
+        assert!(verify_sha256(b"runtime", &expected).is_ok());
+        assert!(verify_sha256(b"runtim", &expected).is_err());
+    }
+
+    #[test]
+    fn cached_runtime_must_match_its_checksum() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("runtime.cwasm");
+        assert!(!cached_runtime_is_valid(&path));
+
+        write_cached_runtime(&path, b"compiled runtime")?;
+        assert!(cached_runtime_is_valid(&path));
+
+        // A truncated file no longer counts as cached.
+        std::fs::write(&path, b"compiled")?;
+        assert!(!cached_runtime_is_valid(&path));
+
+        // Nor does a file whose checksum is missing.
+        write_cached_runtime(&path, b"compiled runtime")?;
+        std::fs::remove_file(checksum_path(&path))?;
+        assert!(!cached_runtime_is_valid(&path));
+        Ok(())
+    }
 
     #[test]
     fn package_flags_require_preinit() {

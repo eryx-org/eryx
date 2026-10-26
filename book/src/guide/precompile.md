@@ -22,9 +22,11 @@ eryx-precompile setup
 
 This will:
 
-1. Download `runtime.wasm` from the matching GitHub Release
+1. Download `runtime.wasm` from the matching GitHub Release and check it against the release's `runtime.wasm.sha256`
 2. Pre-compile it to native code for your platform
-3. Cache the result in `~/.cache/eryx/`
+3. Cache the result in `~/.cache/eryx/`, with a checksum file next to it
+
+Running `setup` again reuses the cached runtime only if it still matches its checksum, so an interrupted run is repaired by running it again.
 
 After this one-time setup, `cargo build` with `features = ["embedded"]` finds the cached runtime automatically. You can also point to a specific file:
 
@@ -37,6 +39,9 @@ export ERYX_RUNTIME_CWASM=/path/to/runtime.cwasm
 ```bash
 # Use a specific version (defaults to the installed binary's version)
 eryx-precompile setup --version 0.4.5
+
+# Releases before 0.12.0 don't publish runtime.wasm.sha256; pass the expected hash instead
+eryx-precompile setup --version 0.11.0 --sha256 <hex>
 
 # Verbose output for debugging
 eryx-precompile setup --verbose
