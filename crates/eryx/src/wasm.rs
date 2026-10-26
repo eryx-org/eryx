@@ -263,6 +263,7 @@ pub enum CallbackHostResult {
 
 /// Request to invoke a callback from Python code.
 #[derive(Debug)]
+#[non_exhaustive]
 pub struct CallbackRequest {
     /// Name of the callback to invoke.
     pub name: String,
@@ -285,6 +286,7 @@ pub struct TraceRequest {
 
 /// Request to stream output from Python code in real-time.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct OutputRequest {
     /// Stream identifier: 0 = stdout, 1 = stderr.
     pub stream: u32,

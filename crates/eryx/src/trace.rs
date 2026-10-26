@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 
 /// An execution trace event.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct TraceEvent {
     /// Line number in the source code.
     pub lineno: u32,

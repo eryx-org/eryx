@@ -2587,6 +2587,7 @@ impl SandboxBuilder<state::Has, state::Has> {
 /// [`result`](Self::result) is an error or the run suspended — so a later
 /// resubmission can replay every callback that completed.
 #[derive(Debug)]
+#[non_exhaustive]
 pub struct ReplayOutcome {
     /// The execution result, exactly as [`Sandbox::execute`] would return it.
     ///

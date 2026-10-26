@@ -252,6 +252,7 @@ impl CallbackJournal {
 /// caller (e.g. via [`ReplayOutcome::suspended`](crate::ReplayOutcome::suspended))
 /// so it can act on the reason and later resume by re-executing with the journal.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct SuspendedCallback {
     /// Name of the callback that suspended.
     pub name: String,
