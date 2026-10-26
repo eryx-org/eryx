@@ -17,7 +17,8 @@ export interface NetConfig {
   /**
    * Host patterns always refused. Defaults to {@link DEFAULT_BLOCKED_HOSTS}.
    * Hosts are matched as written and in WHATWG URL form, so `2130706433` and
-   * `0x7f.1` match `127.*`.
+   * `0x7f.1` match `127.*`. `allowedHosts` and `internalHosts` match the URL
+   * form only.
    */
   blockedHosts?: string[];
   /**
@@ -35,7 +36,7 @@ export interface NetConfig {
    * routed internally on purpose. Only list names whose DNS you control.
    */
   internalHosts?: string[];
-  /** Most connections open at once (default 10). */
+  /** Most connections open at once (default 10; `0` for no limit). */
   maxConnections?: number;
   /**
    * Ceiling for connect and TLS handshake timeouts, in milliseconds (default
@@ -54,7 +55,8 @@ export const DEFAULT_BLOCKED_NETWORKS: string[];
 
 /**
  * Enable networking for sandboxed code, or disable it again with `null`.
- * Networking is disabled by default.
+ * Networking is disabled by default. Throws a TypeError if a network isn't a
+ * valid CIDR or `maxConnections` isn't a non-negative integer.
  */
 export function setNetConfig(config: NetConfig | null): void;
 

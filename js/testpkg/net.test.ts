@@ -68,11 +68,18 @@ except OSError as e:
     expect((await tryConnect("evil.com@example.com")).stdout).toContain("not a valid host name");
   });
 
+  it("matches allowedHosts against the URL form only", async () => {
+    setNetConfig({ allowedHosts: ["0x7f.1"], blockedHosts: [] });
+    expect((await tryConnect("0x7f.1")).stdout).toContain("not in allowed list");
+  });
+
   it("rejects malformed CIDRs up front", () => {
     // `Number("")` is 0: unchecked, this would exempt every IPv4 address.
     expect(() => setNetConfig({ allowedNetworks: ["10.0.0.0/"] })).toThrow("invalid CIDR '10.0.0.0/'");
     expect(() => setNetConfig({ blockedNetworks: ["10.0.0.0/33"] })).toThrow(TypeError);
     expect(() => setNetConfig({ blockedNetworks: ["not-an-ip/8"] })).toThrow();
+    expect(() => setNetConfig({ maxConnections: -1 })).toThrow(TypeError);
+    expect(() => setNetConfig({ maxConnections: NaN })).toThrow(TypeError);
   });
 });
 
@@ -203,6 +210,20 @@ socket.create_connection(("127.0.0.1", ${port})).close()
 print("ok")
 `);
       expect(result.stdout).toMatch(/^2 .*connection limit reached \(2\)\nok\n$/);
+    } finally {
+      setNetConfig(allowLoopback);
+    }
+  });
+
+  it("treats maxConnections 0 as no limit", async () => {
+    setNetConfig({ ...allowLoopback, maxConnections: 0 });
+    try {
+      const result = await sandbox.execute(`
+import socket
+conns = [socket.create_connection(("127.0.0.1", ${port})) for _ in range(12)]
+print(len(conns))
+`);
+      expect(result.stdout).toBe("12\n");
     } finally {
       setNetConfig(allowLoopback);
     }

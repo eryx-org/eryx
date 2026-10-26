@@ -177,7 +177,7 @@ async function connect(conns, host, port, timeoutMs, isAllowed) {
   const s = net.connect({ host, port, lookup });
   conns.pending.add(s);
   const connected = new Promise((resolve, reject) => {
-    s.once("connect", () => { s.off("error", reject); resolve(track(conns, s)); });
+    s.once("connect", () => resolve(track(conns, s)));
     s.once("error", (e) => reject(tcpErr(mapTcpError(e))));
     s.once("close", () => reject(tcpErr({ tag: "connection-reset" })));
   });

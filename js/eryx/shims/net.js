@@ -26,7 +26,7 @@ const isNode =
 
 const transport = isNode ? await import("./net-node.js") : await import("./net-fetch.js");
 
-/** Same defaults as the Rust crate's `NetConfig::default().blocked_hosts`. */
+/** The Rust crate's `NetConfig::default().blocked_hosts`, plus `0.0.0.0` and `[::]`. */
 export const DEFAULT_BLOCKED_HOSTS = [
   "localhost",
   "*.localhost",
@@ -82,10 +82,19 @@ function checkCidrs(cidrs) {
   return cidrs;
 }
 
+/** A non-negative integer, or a TypeError. */
+function checkCount(name, value) {
+  if (!Number.isInteger(value) || value < 0) {
+    throw new TypeError(`${name} must be a non-negative integer, got ${value}`);
+  }
+  return value;
+}
+
 /**
  * Enable (or, with `null`, disable) networking for sandboxed code.
  *
- * Throws a TypeError if a network is not a valid CIDR.
+ * Throws a TypeError if a network is not a valid CIDR or maxConnections is
+ * not a non-negative integer.
  *
  * @param {import("./net.js").NetConfig | null} netConfig
  */
@@ -101,7 +110,7 @@ export function setNetConfig(netConfig) {
     blockedNetworks: checkCidrs(netConfig.blockedNetworks ?? DEFAULT_BLOCKED_NETWORKS),
     allowedNetworks: checkCidrs(netConfig.allowedNetworks ?? []),
     internalHosts: netConfig.internalHosts ?? [],
-    maxConnections: netConfig.maxConnections ?? DEFAULT_MAX_CONNECTIONS,
+    maxConnections: checkCount("maxConnections", netConfig.maxConnections ?? DEFAULT_MAX_CONNECTIONS),
     connectTimeoutMs: netConfig.connectTimeoutMs ?? DEFAULT_CONNECT_TIMEOUT_MS,
     ioTimeoutMs: netConfig.ioTimeoutMs ?? DEFAULT_IO_TIMEOUT_MS,
   };
@@ -148,8 +157,9 @@ function checkHost(host) {
   if (!config) throw notPermitted("networking is disabled; enable it with setNetConfig()");
   const canonical = canonicalHost(host);
   if (canonical === null) throw notPermitted(`host '${host}' is not a valid host name`);
-  const matches = (patterns) => patterns.some((p) => hostMatches(host, p) || hostMatches(canonical, p));
-  if (matches(config.blockedHosts)) {
+  // Refusals match either spelling; allowances only the canonical one.
+  const matches = (patterns) => patterns.some((p) => hostMatches(canonical, p));
+  if (config.blockedHosts.some((p) => hostMatches(host, p)) || matches(config.blockedHosts)) {
     throw notPermitted(`host '${host}' is blocked`);
   }
   if (!config.allowAllHosts && !matches(config.allowedHosts)) {
@@ -171,7 +181,8 @@ export function createNet() {
     tcp: {
       async connect(host, port, timeoutMs) {
         const { canonical, internal } = checkHost(host);
-        if (t.openConnections() >= config.maxConnections) {
+        // 0 means no limit, as in the Rust crate.
+        if (config.maxConnections > 0 && t.openConnections() >= config.maxConnections) {
           throw notPermitted(`connection limit reached (${config.maxConnections})`);
         }
         // The transport checks the address (Node: the resolved addresses)
