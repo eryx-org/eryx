@@ -164,6 +164,13 @@ pub use eryx_macros::callback;
 /// VFS is available on `SessionExecutor` for persistent file storage across
 /// multiple executions within a session.
 ///
+/// # Stability
+///
+/// This module is **not covered by eryx's semver guarantees**. It re-exports
+/// types from `eryx-vfs`, some of which wrap `wasmtime-wasi` types, and those
+/// change with every wasmtime major release. Items here may change in any
+/// minor or patch release.
+///
 /// # Example
 ///
 /// ```rust,ignore
