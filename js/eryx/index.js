@@ -405,9 +405,14 @@ export class Sandbox {
    * @returns {Promise<T>}
    */
   #serialized(fn) {
-    const run = this.#queue.then(() => {
+    const run = this.#queue.then(async () => {
       if (this.#slot.closed) throw this.#slot.closed;
-      return this.#call(fn);
+      try {
+        return await this.#call(fn);
+      } finally {
+        // Connections don't outlive the call that opened them.
+        this.#net.closeConnections();
+      }
     });
     this.#queue = run.catch(() => {});
     return run;
@@ -450,8 +455,6 @@ export class Sandbox {
       return _toResult(await instance.execute(`#eryx-preamble:0\n${code}`));
     } finally {
       this.#host.flushOutput();
-      // Connections don't outlive the execution that opened them.
-      this.#net.closeConnections();
     }
   }
 
