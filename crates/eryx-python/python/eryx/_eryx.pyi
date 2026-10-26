@@ -7,6 +7,11 @@ from typing import Any, Callable, Iterator, Optional, Sequence, TypedDict, Union
 
 PathLike = Union[str, Path]
 
+VolumeSpec = Union[tuple[str, str, bool], tuple[str, str, bool, Optional[int]]]
+"""A host volume mount: `(host_path, guest_path, read_only)`, optionally with a
+fourth `max_file_size` in bytes. Writes that would grow any file in the mount
+past it fail. Without it, writes to a writable volume are unmetered."""
+
 
 class SecretDict(TypedDict, total=False):
     """Dictionary format for configuring a secret.
@@ -542,6 +547,13 @@ class ResourceLimits:
     picks its own write offsets. `None` uses the default (64 MB).
     """
 
+    max_open_host_files: Optional[int]
+    """Maximum host files (stdlib, site-packages and volume files) a script
+    may hold open at once.
+
+    Opens past it fail with `EDQUOT`. `None` uses the default (256).
+    """
+
     def __new__(
         cls,
         *,
@@ -551,6 +563,7 @@ class ResourceLimits:
         max_callback_invocations: Optional[int] = 1000,
         max_fuel: Optional[int] = None,
         max_vfs_bytes: Optional[int] = None,
+        max_open_host_files: Optional[int] = None,
     ) -> ResourceLimits:
         """Create new resource limits.
 
@@ -561,10 +574,11 @@ class ResourceLimits:
         - max_callback_invocations: 1000
         - max_fuel: None (unlimited)
         - max_vfs_bytes: None (64 MB)
+        - max_open_host_files: None (256)
 
-        Pass `None` to disable a specific limit. `max_vfs_bytes` is the
-        exception: `None` means the default cap, since an uncapped in-memory
-        filesystem lets a script exhaust host memory.
+        Pass `None` to disable a specific limit. `max_vfs_bytes` and
+        `max_open_host_files` are the exceptions: `None` means the default
+        cap, since both bound host resources.
         """
         ...
 
@@ -633,7 +647,7 @@ class Sandbox:
         scrub_stderr: Optional[bool] = None,
         scrub_result: Optional[bool] = None,
         scrub_files: Optional[bool] = None,
-        volumes: Optional[Sequence[tuple[str, str, bool]]] = None,
+        volumes: Optional[Sequence[VolumeSpec]] = None,
         on_stdout: Optional[Callable[[bytes], None]] = None,
         on_stderr: Optional[Callable[[bytes], None]] = None,
         result_variable: Optional[str] = None,
@@ -1056,7 +1070,7 @@ class SandboxFactory:
         network: Optional[NetConfig] = None,
         callbacks: Optional[Union[CallbackRegistry, Sequence[CallbackDict]]] = None,
         mcp: Optional[MCPManager] = None,
-        volumes: Optional[Sequence[tuple[str, str, bool]]] = None,
+        volumes: Optional[Sequence[VolumeSpec]] = None,
         on_stdout: Optional[Callable[[bytes], None]] = None,
         on_stderr: Optional[Callable[[bytes], None]] = None,
         result_variable: Optional[str] = None,
@@ -1097,7 +1111,7 @@ class SandboxFactory:
         scrub_stderr: Optional[bool] = None,
         scrub_result: Optional[bool] = None,
         scrub_files: Optional[bool] = None,
-        volumes: Optional[Sequence[tuple[str, str, bool]]] = None,
+        volumes: Optional[Sequence[VolumeSpec]] = None,
         on_stdout: Optional[Callable[[bytes], None]] = None,
         on_stderr: Optional[Callable[[bytes], None]] = None,
         result_variable: Optional[str] = None,
@@ -1302,7 +1316,7 @@ class Session:
         network: Optional[NetConfig] = None,
         callbacks: Optional[Union[CallbackRegistry, Sequence[CallbackDict]]] = None,
         mcp: Optional[MCPManager] = None,
-        volumes: Optional[Sequence[tuple[str, str, bool]]] = None,
+        volumes: Optional[Sequence[VolumeSpec]] = None,
         on_stdout: Optional[Callable[[bytes], None]] = None,
         on_stderr: Optional[Callable[[bytes], None]] = None,
         result_variable: Optional[str] = None,

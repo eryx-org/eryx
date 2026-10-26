@@ -186,6 +186,18 @@ class TestCliVolume:
         # The write should fail with a permission or OS error
         assert "Error" in captured.err or "error" in captured.err
 
+    def test_volume_max_file_size(self, tmp_path):
+        """Test that --volume-max-file-size caps files written to a volume."""
+        result = main(
+            [
+                "-v", f"{tmp_path}:/mnt/data",
+                "--volume-max-file-size", "4",
+                "-c", 'with open("/mnt/data/out.txt", "w") as f: f.write("too long")',
+            ]
+        )
+        assert result == 1
+        assert (tmp_path / "out.txt").stat().st_size <= 4
+
     def test_volume_write_file(self, tmp_path, capsys):
         """Test that a writable volume allows writing back to host."""
         result = main(

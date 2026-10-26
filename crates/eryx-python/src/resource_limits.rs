@@ -45,6 +45,12 @@ pub struct ResourceLimits {
     /// picks its own write offsets. `None` uses the default (64 MiB).
     #[pyo3(get, set)]
     pub max_vfs_bytes: Option<u64>,
+
+    /// Maximum host files (stdlib, site-packages and volume files) a script
+    /// may hold open at once. Opens past it fail with `EDQUOT`. `None` uses
+    /// the default (256).
+    #[pyo3(get, set)]
+    pub max_open_host_files: Option<usize>,
 }
 
 #[pymethods]
@@ -58,12 +64,13 @@ impl ResourceLimits {
     /// - max_callback_invocations: 1000
     /// - max_fuel: None (unlimited)
     /// - max_vfs_bytes: None (64 MB)
+    /// - max_open_host_files: None (256)
     ///
     /// Set a parameter to `None` explicitly to disable that specific limit.
-    /// `max_vfs_bytes` is the exception: `None` means the default cap, since an
-    /// uncapped in-memory filesystem lets a script exhaust host memory.
+    /// `max_vfs_bytes` and `max_open_host_files` are the exceptions: `None`
+    /// means the default cap, since both bound host resources.
     #[new]
-    #[pyo3(signature = (*, execution_timeout_ms=30000, callback_timeout_ms=10000, max_memory_bytes=134217728, max_callback_invocations=1000, max_fuel=None, max_vfs_bytes=None))]
+    #[pyo3(signature = (*, execution_timeout_ms=30000, callback_timeout_ms=10000, max_memory_bytes=134217728, max_callback_invocations=1000, max_fuel=None, max_vfs_bytes=None, max_open_host_files=None))]
     fn new(
         execution_timeout_ms: Option<u64>,
         callback_timeout_ms: Option<u64>,
@@ -71,6 +78,7 @@ impl ResourceLimits {
         max_callback_invocations: Option<u32>,
         max_fuel: Option<u64>,
         max_vfs_bytes: Option<u64>,
+        max_open_host_files: Option<usize>,
     ) -> Self {
         Self {
             execution_timeout_ms,
@@ -79,6 +87,7 @@ impl ResourceLimits {
             max_callback_invocations,
             max_fuel,
             max_vfs_bytes,
+            max_open_host_files,
         }
     }
 
@@ -98,18 +107,20 @@ impl ResourceLimits {
             max_callback_invocations: None,
             max_fuel: None,
             max_vfs_bytes: None,
+            max_open_host_files: None,
         }
     }
 
     fn __repr__(&self) -> String {
         format!(
-            "ResourceLimits(execution_timeout_ms={:?}, callback_timeout_ms={:?}, max_memory_bytes={:?}, max_callback_invocations={:?}, max_fuel={:?}, max_vfs_bytes={:?})",
+            "ResourceLimits(execution_timeout_ms={:?}, callback_timeout_ms={:?}, max_memory_bytes={:?}, max_callback_invocations={:?}, max_fuel={:?}, max_vfs_bytes={:?}, max_open_host_files={:?})",
             self.execution_timeout_ms,
             self.callback_timeout_ms,
             self.max_memory_bytes,
             self.max_callback_invocations,
             self.max_fuel,
             self.max_vfs_bytes,
+            self.max_open_host_files,
         )
     }
 }
@@ -122,6 +133,7 @@ impl Default for ResourceLimits {
             Some(10_000),
             Some(134_217_728),
             Some(1000),
+            None,
             None,
             None,
         )
@@ -139,6 +151,7 @@ impl From<&ResourceLimits> for eryx::ResourceLimits {
             .with_max_callback_invocations(limits.max_callback_invocations)
             .with_max_fuel(limits.max_fuel)
             .with_max_vfs_bytes(limits.max_vfs_bytes)
+            .with_max_open_host_files(limits.max_open_host_files)
     }
 }
 

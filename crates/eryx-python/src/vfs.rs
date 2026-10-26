@@ -80,3 +80,30 @@ impl std::fmt::Debug for VfsStorage {
         f.debug_struct("VfsStorage").finish_non_exhaustive()
     }
 }
+
+/// A host volume mount from Python: `(host_path, guest_path, read_only)`, or
+/// `(host_path, guest_path, read_only, max_file_size)` to limit how large the
+/// sandbox may make any file in the mount.
+#[derive(FromPyObject)]
+pub(crate) enum VolumeSpec {
+    Sized(String, String, bool, Option<u64>),
+    Plain(String, String, bool),
+}
+
+impl From<VolumeSpec> for eryx::VolumeMount {
+    fn from(spec: VolumeSpec) -> Self {
+        let (host, guest, read_only, max_file_size) = match spec {
+            VolumeSpec::Sized(host, guest, read_only, max) => (host, guest, read_only, max),
+            VolumeSpec::Plain(host, guest, read_only) => (host, guest, read_only, None),
+        };
+        let mount = if read_only {
+            Self::read_only(host, guest)
+        } else {
+            Self::new(host, guest)
+        };
+        match max_file_size {
+            Some(bytes) => mount.with_max_file_size(bytes),
+            None => mount,
+        }
+    }
+}

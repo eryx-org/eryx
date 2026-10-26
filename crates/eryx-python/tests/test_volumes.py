@@ -136,6 +136,41 @@ print(files)
         )
         assert host_file.read_text() == "updated from sandbox"
 
+    def test_max_file_size_limits_writes(self, tmp_path):
+        """A fourth tuple element caps how large any file in the mount may grow."""
+        sandbox = eryx.Sandbox(volumes=[(str(tmp_path), "/mnt/data", False, 8)])
+        result = sandbox.execute(
+            """
+with open("/mnt/data/out.bin", "wb", buffering=0) as f:
+    f.write(b"12345678")
+    try:
+        f.write(b"9")
+        print("grew")
+    except OSError:
+        print("refused")
+"""
+        )
+        assert result.stdout.strip() == b"refused"
+        assert (tmp_path / "out.bin").stat().st_size == 8
+
+    def test_max_open_host_files_limits_opens(self):
+        """ResourceLimits.max_open_host_files caps concurrently open host files."""
+        sandbox = eryx.Sandbox(
+            resource_limits=eryx.ResourceLimits(max_open_host_files=5)
+        )
+        result = sandbox.execute(
+            """
+import errno
+held = []
+try:
+    for _ in range(50):
+        held.append(open("/python-stdlib/os.py", "rb"))
+except OSError as e:
+    print(len(held), errno.errorcode[e.errno])
+"""
+        )
+        assert result.stdout.strip() == b"5 EDQUOT"
+
     def test_single_file_mount_renamed(self, tmp_path):
         """A file can be mounted with a different guest name than host name."""
         host_file = tmp_path / "source.py"

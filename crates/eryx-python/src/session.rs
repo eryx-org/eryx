@@ -98,7 +98,7 @@ impl Session {
         network: Option<NetConfig>,
         callbacks: Option<Bound<'_, PyAny>>,
         mcp: Option<PyRef<'_, crate::mcp::MCPManager>>,
-        volumes: Option<Vec<(String, String, bool)>>,
+        volumes: Option<Vec<crate::vfs::VolumeSpec>>,
         on_stdout: Option<Py<PyAny>>,
         on_stderr: Option<Py<PyAny>>,
         package_storage_owner: Option<Arc<Vec<eryx::ExtractedPackage>>>,
@@ -124,13 +124,7 @@ impl Session {
         let volume_mounts = volumes
             .unwrap_or_default()
             .into_iter()
-            .map(|(host, guest, ro)| {
-                if ro {
-                    eryx::VolumeMount::read_only(host, guest)
-                } else {
-                    eryx::VolumeMount::new(host, guest)
-                }
-            })
+            .map(eryx::VolumeMount::from)
             .collect::<Vec<_>>();
         let vfs_storage = vfs.map(VfsStorage::into_arc_storage);
         let mount_path = vfs_mount_path.clone();
@@ -259,7 +253,7 @@ impl Session {
         network: Option<NetConfig>,
         callbacks: Option<Bound<'_, PyAny>>,
         mcp: Option<PyRef<'_, crate::mcp::MCPManager>>,
-        volumes: Option<Vec<(String, String, bool)>>,
+        volumes: Option<Vec<crate::vfs::VolumeSpec>>,
         on_stdout: Option<Py<PyAny>>,
         on_stderr: Option<Py<PyAny>>,
         result_variable: Option<String>,

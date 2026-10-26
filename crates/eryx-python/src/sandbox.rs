@@ -158,7 +158,7 @@ impl Sandbox {
         scrub_stderr: Option<bool>,
         scrub_result: Option<bool>,
         scrub_files: Option<bool>,
-        volumes: Option<Vec<(String, String, bool)>>,
+        volumes: Option<Vec<crate::vfs::VolumeSpec>>,
         on_stdout: Option<Py<PyAny>>,
         on_stderr: Option<Py<PyAny>>,
         result_variable: Option<String>,
@@ -217,14 +217,7 @@ impl Sandbox {
 
         // Apply volume mounts if provided
         if let Some(vols) = volumes {
-            for (host_path, guest_path, read_only) in vols {
-                let volume = if read_only {
-                    eryx::VolumeMount::read_only(host_path, guest_path)
-                } else {
-                    eryx::VolumeMount::new(host_path, guest_path)
-                };
-                builder = builder.with_volume(volume);
-            }
+            builder = builder.with_volumes(vols.into_iter().map(eryx::VolumeMount::from));
         }
 
         // Apply output handler if stdout/stderr callbacks are provided

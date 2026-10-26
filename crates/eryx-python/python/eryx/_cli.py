@@ -90,6 +90,19 @@ def add_sandbox_args(parser: argparse.ArgumentParser) -> None:
         metavar="SRC:DST[:ro]",
         help="mount host directory SRC at sandbox path DST (append :ro for read-only)",
     )
+    fs.add_argument(
+        "--volume-max-file-size",
+        type=int,
+        default=None,
+        metavar="BYTES",
+        help="largest size the sandbox may grow any file in a --volume to "
+        "(default: unlimited)",
+    )
+
+
+def make_volumes(args: argparse.Namespace) -> list[tuple[str, str, bool, int | None]]:
+    """Build the `volumes` argument from parsed CLI args."""
+    return [(*volume, args.volume_max_file_size) for volume in args.volume]
 
 
 def make_resource_limits(args: argparse.Namespace) -> eryx.ResourceLimits:
