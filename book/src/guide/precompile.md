@@ -28,11 +28,15 @@ This will:
 
 Running `setup` again reuses the cached runtime only if it still matches its checksum, so an interrupted run is repaired by running it again.
 
-After this one-time setup, `cargo build` with `features = ["embedded"]` finds the cached runtime automatically. You can also point to a specific file:
+After this one-time setup, `cargo build` with `features = ["embedded"]` finds the cached runtime automatically. The build uses it only if it still matches its checksum file and, on Unix, the file, its checksum file and the cache directory are owned by you and not writable by your group or others. Otherwise it prints a warning, falls back as if no cache existed, and running `setup` again fixes it.
+
+You can also point to a specific file:
 
 ```bash
 export ERYX_RUNTIME_CWASM=/path/to/runtime.cwasm
 ```
+
+A file given through `ERYX_RUNTIME_CWASM` is embedded as is, without those checks, so only point it at a runtime you trust.
 
 ### Setup Options
 

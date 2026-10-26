@@ -137,6 +137,14 @@ zstd = { workspace = true, optional = true }
 [target.'cfg(unix)'.dependencies]
 rustix.workspace = true
 
+# build.rs checks a cached runtime against its checksum file (build/cached_runtime.rs).
+[build-dependencies]
+hex.workspace = true
+sha2.workspace = true
+
+[target.'cfg(unix)'.build-dependencies]
+rustix.workspace = true
+
 [features]
 default = []
 # Proc macro for simplified callback definitions.

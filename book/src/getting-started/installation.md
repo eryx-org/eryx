@@ -21,7 +21,7 @@ cargo binstall eryx-precompile   # install the pre-compile tool
 eryx-precompile setup            # download runtime + pre-compile for your platform
 ```
 
-After this one-time setup, `cargo build` will find the cached runtime automatically. You can also set `ERYX_RUNTIME_CWASM=/path/to/runtime.cwasm` to use a specific file. See [Pre-compiling Runtimes](../guide/precompile.md) for advanced options like cross-compilation, CPU targeting, and bundling packages.
+After this one-time setup, `cargo build` will find the cached runtime automatically. You can also set `ERYX_RUNTIME_CWASM=/path/to/runtime.cwasm` to use a specific file, which is embedded without the checksum and ownership checks applied to the cached runtime. See [Pre-compiling Runtimes](../guide/precompile.md) for advanced options like cross-compilation, CPU targeting, and bundling packages.
 
 ### Feature Flags
 
