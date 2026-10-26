@@ -179,8 +179,9 @@ pub use eryx_macros::callback;
 #[cfg(feature = "vfs")]
 pub mod vfs {
     pub use eryx_vfs::{
-        ArcStorage, DEFAULT_MAX_BYTES, DirEntry, DirPerms, ENTRY_OVERHEAD_BYTES, FilePerms,
-        InMemoryStorage, MAX_ENTRIES, Metadata, ScrubbingStorage, VfsCtx, VfsError,
-        VfsFileScrubPolicy, VfsResult, VfsSecretConfig, VfsState, VfsStorage, VfsView,
+        ArcStorage, DEFAULT_MAX_BYTES, DEFAULT_MAX_OPEN_HOST_FILES, DirEntry, DirPerms,
+        ENTRY_OVERHEAD_BYTES, FilePerms, InMemoryStorage, MAX_ENTRIES, Metadata, ScrubbingStorage,
+        VfsCtx, VfsError, VfsFileScrubPolicy, VfsResult, VfsSecretConfig, VfsState, VfsStorage,
+        VfsView, process_max_open_host_files, set_process_max_open_host_files,
     };
 }

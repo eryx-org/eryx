@@ -379,6 +379,12 @@ pub struct VolumeMount {
     pub guest_path: String,
     /// If true, the mount is read-only.
     pub read_only: bool,
+    /// Largest size, in bytes, the sandbox may grow any file in a writable
+    /// mount to. Writes or truncations past it fail with `EFBIG`.
+    ///
+    /// `None` (the default) leaves writes unmetered, so a writable mount can
+    /// fill the host disk. The limit is per file, not a total for the mount.
+    pub max_file_size: Option<u64>,
 }
 
 #[cfg(feature = "vfs")]
@@ -390,6 +396,7 @@ impl VolumeMount {
             host_path: host_path.into(),
             guest_path: guest_path.into(),
             read_only: false,
+            max_file_size: None,
         }
     }
 
@@ -403,7 +410,16 @@ impl VolumeMount {
             host_path: host_path.into(),
             guest_path: guest_path.into(),
             read_only: true,
+            max_file_size: None,
         }
+    }
+
+    /// Limit how large the sandbox may make any file in this mount; see
+    /// [`max_file_size`](Self::max_file_size).
+    #[must_use]
+    pub fn with_max_file_size(mut self, bytes: u64) -> Self {
+        self.max_file_size = Some(bytes);
+        self
     }
 }
 
@@ -546,6 +562,10 @@ pub struct SessionExecutor {
     /// Quota used when creating the session's own VFS storage.
     #[cfg(feature = "vfs")]
     vfs_max_bytes: Option<u64>,
+
+    /// Limit on host files the session may hold open, kept for resets.
+    #[cfg(feature = "vfs")]
+    max_open_host_files: Option<usize>,
 }
 
 impl std::fmt::Debug for SessionExecutor {
@@ -611,14 +631,20 @@ fn build_wasi_context(executor: &PythonExecutor, fd_output: &FdOutput) -> Result
     Ok(wasi_builder.build())
 }
 
-/// Build hybrid VFS context with VFS storage and real filesystem preopens.
+/// Build the hybrid VFS context: VFS storage at `vfs_config.mount_path`, the
+/// Python stdlib and site-packages as read-only host preopens, and the
+/// configured volumes. Stateless and session executions both use this, so they
+/// share one set of mounts and limits.
 #[cfg(feature = "vfs")]
-fn build_hybrid_vfs_context(
+pub(crate) fn build_hybrid_vfs_context(
     executor: &PythonExecutor,
     vfs_storage: eryx_vfs::ArcStorage,
     vfs_config: &VfsConfig,
+    max_open_host_files: Option<usize>,
 ) -> std::result::Result<eryx_vfs::HybridVfsCtx<eryx_vfs::ArcStorage>, Error> {
-    let mut ctx = eryx_vfs::HybridVfsCtx::new(vfs_storage);
+    let mut ctx = eryx_vfs::HybridVfsCtx::new(vfs_storage).with_max_open_host_files(
+        max_open_host_files.unwrap_or(eryx_vfs::DEFAULT_MAX_OPEN_HOST_FILES),
+    );
 
     // Add a writable VFS directory backed by VFS storage
     ctx.add_vfs_preopen(
@@ -628,19 +654,24 @@ fn build_hybrid_vfs_context(
     );
 
     // Add real filesystem preopens that mirror the WASI preopens
-    if let Some(stdlib_path) = executor.python_stdlib_path()
-        && let Ok(real_dir) =
-            eryx_vfs::RealDir::open_ambient(stdlib_path, DirPerms::READ, FilePerms::READ)
-    {
-        ctx.add_real_preopen("/python-stdlib", real_dir);
+    if let Some(stdlib_path) = executor.python_stdlib_path() {
+        ctx.add_real_preopen_path(
+            "/python-stdlib",
+            stdlib_path,
+            DirPerms::READ,
+            FilePerms::READ,
+        )
+        .map_err(|e| Error::Initialization(format!("Failed to add Python stdlib to VFS: {e}")))?;
     }
     for (i, site_packages_path) in executor.python_site_packages_paths().iter().enumerate() {
         let mount_path = crate::wasm::site_packages_mount_path(i);
-        if let Ok(real_dir) =
-            eryx_vfs::RealDir::open_ambient(site_packages_path, DirPerms::READ, FilePerms::READ)
-        {
-            ctx.add_real_preopen(&mount_path, real_dir);
-        }
+        ctx.add_real_preopen_path(
+            &mount_path,
+            site_packages_path,
+            DirPerms::READ,
+            FilePerms::READ,
+        )
+        .map_err(|e| Error::Initialization(format!("Failed to add {mount_path} to VFS: {e}")))?;
     }
 
     // Add user-specified host filesystem volume mounts
@@ -656,9 +687,16 @@ fn build_hybrid_vfs_context(
                 &volume.host_path,
                 dir_perms,
                 file_perms,
+                volume.max_file_size,
             )
         } else {
-            ctx.add_real_preopen_path(&volume.guest_path, &volume.host_path, dir_perms, file_perms)
+            eryx_vfs::RealDir::open_ambient(&volume.host_path, dir_perms, file_perms).map(|dir| {
+                let dir = match volume.max_file_size {
+                    Some(bytes) => dir.with_max_file_size(bytes),
+                    None => dir,
+                };
+                ctx.add_real_preopen(&volume.guest_path, dir);
+            })
         };
         result.map_err(|e| {
             Error::WasmEngine(format!(
@@ -858,6 +896,7 @@ impl SessionExecutor {
             &executor,
             vfs_storage.clone(),
             &vfs_config,
+            limits.max_open_host_files,
         )?);
 
         let state = ExecutorState::new(
@@ -925,6 +964,7 @@ impl SessionExecutor {
             vfs_storage: Some(vfs_storage),
             vfs_config: Some(vfs_config),
             vfs_max_bytes: limits.max_vfs_bytes,
+            max_open_host_files: limits.max_open_host_files,
         })
     }
 
@@ -1487,6 +1527,7 @@ impl SessionExecutor {
                     &self.executor,
                     vfs_storage,
                     &vfs_config,
+                    self.max_open_host_files,
                 )?),
             )
         };

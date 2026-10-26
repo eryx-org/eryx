@@ -1722,6 +1722,8 @@ pub struct ExecuteBuilder<'a> {
     vfs_storage: Option<eryx_vfs::ArcStorage>,
     #[cfg(feature = "vfs")]
     volumes: Vec<crate::session::VolumeMount>,
+    #[cfg(feature = "vfs")]
+    max_open_host_files: Option<usize>,
 }
 
 impl std::fmt::Debug for ExecuteBuilder<'_> {
@@ -1766,6 +1768,8 @@ impl<'a> ExecuteBuilder<'a> {
             vfs_storage: None,
             #[cfg(feature = "vfs")]
             volumes: Vec::new(),
+            #[cfg(feature = "vfs")]
+            max_open_host_files: None,
         }
     }
 
@@ -1882,6 +1886,15 @@ impl<'a> ExecuteBuilder<'a> {
         self
     }
 
+    /// Limit how many host files the execution may hold open (default
+    /// [`eryx_vfs::DEFAULT_MAX_OPEN_HOST_FILES`]).
+    #[cfg(feature = "vfs")]
+    #[must_use]
+    pub fn with_max_open_host_files(mut self, max: Option<usize>) -> Self {
+        self.max_open_host_files = max;
+        self
+    }
+
     /// Execute the Python code with the configured options.
     ///
     /// # Errors
@@ -1904,6 +1917,8 @@ impl<'a> ExecuteBuilder<'a> {
                 self.vfs_storage,
                 #[cfg(feature = "vfs")]
                 self.volumes,
+                #[cfg(feature = "vfs")]
+                self.max_open_host_files,
             )
             .await
     }
@@ -3013,6 +3028,7 @@ impl PythonExecutor {
         fuel_limit: Option<u64>,
         #[cfg(feature = "vfs")] vfs_storage: Option<eryx_vfs::ArcStorage>,
         #[cfg(feature = "vfs")] volumes: Vec<crate::session::VolumeMount>,
+        #[cfg(feature = "vfs")] max_open_host_files: Option<usize>,
     ) -> std::result::Result<ExecutionOutput, Error> {
         crate::error::validate_user_code(code)?;
 
@@ -3088,74 +3104,12 @@ impl PythonExecutor {
             let storage = vfs_storage.unwrap_or_else(|| {
                 eryx_vfs::ArcStorage::new(std::sync::Arc::new(eryx_vfs::InMemoryStorage::new()))
             });
-            let mut ctx = eryx_vfs::HybridVfsCtx::new(storage);
-
-            // Add a writable /data directory backed by VFS storage
-            ctx.add_vfs_preopen(
-                "/data",
-                eryx_vfs::DirPerms::all(),
-                eryx_vfs::FilePerms::all(),
-            );
-
-            // Add Python stdlib as read-only real filesystem preopen
-            if let Some(ref stdlib_path) = self.python_stdlib_path {
-                ctx.add_real_preopen_path(
-                    "/python-stdlib",
-                    stdlib_path,
-                    eryx_vfs::DirPerms::READ,
-                    eryx_vfs::FilePerms::READ,
-                )
-                .map_err(|e| {
-                    Error::Initialization(format!("Failed to add Python stdlib to VFS: {e}"))
-                })?;
-            }
-
-            // Add site-packages directories as read-only real filesystem preopens
-            for (i, site_packages_path) in self.python_site_packages_paths.iter().enumerate() {
-                let mount_path = site_packages_mount_path(i);
-                ctx.add_real_preopen_path(
-                    &mount_path,
-                    site_packages_path,
-                    eryx_vfs::DirPerms::READ,
-                    eryx_vfs::FilePerms::READ,
-                )
-                .map_err(|e| {
-                    Error::Initialization(format!("Failed to add {mount_path} to VFS: {e}"))
-                })?;
-            }
-
-            // Add user-specified host filesystem volume mounts
-            for volume in &volumes {
-                let (dir_perms, file_perms) = if volume.read_only {
-                    (eryx_vfs::DirPerms::READ, eryx_vfs::FilePerms::READ)
-                } else {
-                    (eryx_vfs::DirPerms::all(), eryx_vfs::FilePerms::all())
-                };
-                let result = if volume.host_path.is_file() {
-                    ctx.add_real_file_preopen_path(
-                        &volume.guest_path,
-                        &volume.host_path,
-                        dir_perms,
-                        file_perms,
-                    )
-                } else {
-                    ctx.add_real_preopen_path(
-                        &volume.guest_path,
-                        &volume.host_path,
-                        dir_perms,
-                        file_perms,
-                    )
-                };
-                result.map_err(|e| {
-                    Error::WasmEngine(format!(
-                        "Failed to mount volume {} -> {}: {e}",
-                        volume.host_path.display(),
-                        volume.guest_path,
-                    ))
-                })?;
-            }
-
-            Some(ctx)
+            Some(crate::session::executor::build_hybrid_vfs_context(
+                self,
+                storage,
+                &crate::session::VfsConfig::default().with_volumes(volumes),
+                max_open_host_files,
+            )?)
         };
 
         let state = ExecutorState {

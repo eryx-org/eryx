@@ -429,6 +429,11 @@ impl Sandbox {
         if !self.volumes.is_empty() {
             execute_builder = execute_builder.with_volumes(self.volumes.clone());
         }
+        #[cfg(feature = "vfs")]
+        {
+            execute_builder =
+                execute_builder.with_max_open_host_files(self.resource_limits.max_open_host_files);
+        }
 
         // Add memory limit if configured
         if let Some(limit) = self.resource_limits.max_memory_bytes {
@@ -2764,6 +2769,15 @@ pub struct ResourceLimits {
     /// `eryx::vfs::InMemoryStorage::with_max_bytes`). `None` uses the `eryx-vfs`
     /// default of 64 MiB.
     pub max_vfs_bytes: Option<u64>,
+    /// Maximum host files and directories a script may hold open at once
+    /// beneath host mounts (the stdlib, site-packages and volumes).
+    ///
+    /// Each one is a host file descriptor. Opens past the limit fail with
+    /// `EDQUOT` until the script closes some. Only applies with the `vfs`
+    /// feature. `None` uses the `eryx-vfs` default of 256. All sandboxes in
+    /// the process also share one total; see
+    /// `eryx::vfs::set_process_max_open_host_files`.
+    pub max_open_host_files: Option<usize>,
 }
 
 impl Default for ResourceLimits {
@@ -2773,8 +2787,9 @@ impl Default for ResourceLimits {
             callback_timeout: Some(Duration::from_secs(10)),
             max_memory_bytes: Some(128 * 1024 * 1024), // 128 MB
             max_callback_invocations: Some(1000),
-            max_fuel: None,      // Unlimited by default, but still tracked
-            max_vfs_bytes: None, // eryx-vfs default (64 MiB)
+            max_fuel: None,            // Unlimited by default, but still tracked
+            max_vfs_bytes: None,       // eryx-vfs default (64 MiB)
+            max_open_host_files: None, // eryx-vfs default (256)
         }
     }
 }
@@ -2789,6 +2804,8 @@ impl ResourceLimits {
     /// default. It bounds *host* memory rather than the guest, so clearing it
     /// would let a script abort the process rather than merely outstay its
     /// welcome; raise it explicitly if you need more room.
+    /// [`max_open_host_files`](Self::max_open_host_files) likewise stays at its
+    /// default, since host descriptors are shared with the whole process.
     #[must_use]
     pub fn unlimited() -> Self {
         Self {
@@ -2798,6 +2815,7 @@ impl ResourceLimits {
             max_callback_invocations: None,
             max_fuel: None,
             max_vfs_bytes: None,
+            max_open_host_files: None,
         }
     }
 
@@ -2854,6 +2872,16 @@ impl ResourceLimits {
     #[must_use]
     pub fn with_max_vfs_bytes(mut self, bytes: impl Into<Option<u64>>) -> Self {
         self.max_vfs_bytes = bytes.into();
+        self
+    }
+
+    /// Set how many host files a script may hold open at once.
+    ///
+    /// Pass `None` to use the `eryx-vfs` default of 256; see
+    /// [`max_open_host_files`](Self::max_open_host_files).
+    #[must_use]
+    pub fn with_max_open_host_files(mut self, max: impl Into<Option<usize>>) -> Self {
+        self.max_open_host_files = max.into();
         self
     }
 }

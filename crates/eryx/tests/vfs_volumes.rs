@@ -104,3 +104,95 @@ for target in ['/etc/passwd', '../outside', 'inside']:
     assert!(!stdout.contains("created"), "{stdout}");
     assert_eq!(std::fs::read_dir(host.path()).unwrap().count(), 0);
 }
+
+/// Grows `path` past an 8-byte limit and prints whether the write went through.
+fn grow_file(path: &str) -> String {
+    // The guest's libc reports a refused stream write as EIO rather than
+    // EFBIG, so only check that it fails.
+    format!(
+        r#"
+with open('{path}', 'wb', buffering=0) as f:
+    f.write(b'12345678')
+    try:
+        f.write(b'9')
+        print('grew')
+    except OSError:
+        print('refused')
+"#
+    )
+}
+
+#[tokio::test]
+async fn volume_max_file_size_is_enforced() {
+    let host = tempfile::tempdir().unwrap();
+    std::fs::write(host.path().join("single.txt"), b"").unwrap();
+
+    // A single-file mount, through a session.
+    let stdout = run_with_volume(
+        VolumeMount::new(host.path().join("single.txt"), "/mnt/single.txt").with_max_file_size(8),
+        &grow_file("/mnt/single.txt"),
+    )
+    .await;
+    assert_eq!(stdout.trim(), "refused");
+    assert_eq!(
+        std::fs::metadata(host.path().join("single.txt"))
+            .unwrap()
+            .len(),
+        8
+    );
+
+    // A directory mount, through a stateless sandbox.
+    let sandbox = eryx::Sandbox::embedded()
+        .with_volume(VolumeMount::new(host.path(), "/mnt").with_max_file_size(8))
+        .build()
+        .unwrap();
+    let result = sandbox.execute(&grow_file("/mnt/dir.txt")).await.unwrap();
+    assert_eq!(result.stdout_text().trim(), "refused");
+    assert_eq!(
+        std::fs::metadata(host.path().join("dir.txt"))
+            .unwrap()
+            .len(),
+        8
+    );
+}
+
+/// Holds host files open until one is refused and prints how many succeeded.
+const HOLD_OPEN_FILES: &str = r#"
+import errno
+held = []
+try:
+    for _ in range(50):
+        held.append(open('/python-stdlib/os.py', 'rb'))
+except OSError as e:
+    print(len(held), errno.errorcode[e.errno])
+"#;
+
+#[tokio::test]
+async fn open_host_file_limit_is_enforced() {
+    let limits = eryx::ResourceLimits::default().with_max_open_host_files(5);
+
+    let storage = ArcStorage::new(Arc::new(InMemoryStorage::new()));
+    let mut session = SessionExecutor::new_with_vfs_config_and_limits(
+        executor(),
+        &[],
+        storage,
+        VfsConfig::default(),
+        &limits,
+    )
+    .await
+    .unwrap();
+    let stdout = session
+        .execute(HOLD_OPEN_FILES)
+        .run()
+        .await
+        .unwrap()
+        .stdout_text();
+    assert_eq!(stdout.trim(), "5 EDQUOT");
+
+    let sandbox = eryx::Sandbox::embedded()
+        .with_resource_limits(limits)
+        .build()
+        .unwrap();
+    let result = sandbox.execute(HOLD_OPEN_FILES).await.unwrap();
+    assert_eq!(result.stdout_text().trim(), "5 EDQUOT");
+}
