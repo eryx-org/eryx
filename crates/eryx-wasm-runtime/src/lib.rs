@@ -1152,7 +1152,6 @@ pub fn net_close(tls: bool, handle: u32) {
 ///
 /// This is called on every execute to ensure callbacks are always in sync
 /// with the host's current per-request state. This is essential for:
-/// - Pool reuse: different requests may have different callbacks
 /// - Session reuse: callbacks may change between executions
 /// - Error recovery: a previous failed setup won't prevent future attempts
 ///

@@ -1,10 +1,11 @@
 //! Coverage for the guest's idempotent callback installation.
 //!
-//! The guest only runs its callback setup script when the host's callback
-//! declarations differ from the ones already installed. These tests check
-//! that the wrappers keep working across executions that reuse the same set,
-//! that changes to the set are picked up, and that the installation is
-//! refreshed after the operations that can disturb it.
+//! The guest only reinstalls its callbacks when the host's callback
+//! declarations differ from the ones already installed, and installing
+//! compiles no Python. These tests check that the wrappers keep working
+//! across executions that reuse the same set, that changes to the set are
+//! picked up, and that the installation is refreshed after the operations
+//! that can disturb it.
 #![cfg(feature = "embedded")]
 #![allow(clippy::expect_used, clippy::unwrap_used)]
 
@@ -211,8 +212,85 @@ async fn callbacks_survive_clear_state() {
     );
 }
 
+/// Installs an audit hook that records the source of every compile other
+/// than the user's own code, i.e. compiles done by the runtime on the user's
+/// behalf, in `sys._eryx_runtime_compiles`.
+///
+/// Executions measured with it don't await callbacks: resuming a suspended
+/// execution runs small snippets that have nothing to do with setup.
+const RECORD_RUNTIME_COMPILES: &str = r#"
+import sys
+sys._eryx_runtime_compiles = []
+def _eryx_record_runtime_compiles(event, args, _sys=sys):
+    if event == 'compile' and args[1] not in ('<user>', '<preamble>'):
+        _sys._eryx_runtime_compiles.append(args[0])
+sys.addaudithook(_eryx_record_runtime_compiles)
+"#;
+
 #[tokio::test]
-async fn clear_state_reuses_compiled_empty_callback_setup() {
+async fn callback_setup_compiles_nothing_after_the_first_install() {
+    let initial_callbacks = echo_only();
+    let changed_callbacks = echo_and_ping();
+    let mut session = SessionExecutor::new(executor(), &initial_callbacks)
+        .await
+        .unwrap();
+    run(&mut session, &initial_callbacks, RECORD_RUNTIME_COMPILES).await;
+
+    // Same set.
+    assert_eq!(
+        run(&mut session, &initial_callbacks, "print(callable(echo))").await,
+        b"True\n"
+    );
+    // Same set after clear.
+    session.clear_state().await.unwrap();
+    assert_eq!(
+        run(&mut session, &initial_callbacks, "print(callable(echo))").await,
+        b"True\n"
+    );
+    // Changed set.
+    assert_eq!(
+        run(&mut session, &changed_callbacks, "print(callable(ping))").await,
+        b"True\n"
+    );
+    // Changed set after clear, then check the hook does see compiles.
+    session.clear_state().await.unwrap();
+    assert_eq!(
+        run(
+            &mut session,
+            &changed_callbacks,
+            "import sys\nbefore = len(sys._eryx_runtime_compiles)\ncompile('1', '<probe>', 'exec')\nprint(before, len(sys._eryx_runtime_compiles), callable(ping))"
+        )
+        .await,
+        b"0 1 True\n"
+    );
+}
+
+#[tokio::test]
+async fn callback_setup_compiles_nothing_after_restore() {
+    let callbacks = echo_only();
+    let mut session = SessionExecutor::new(executor(), &callbacks).await.unwrap();
+    run(&mut session, &callbacks, "x = 41").await;
+    let snapshot = session.snapshot_state().await.unwrap();
+
+    let mut restored = SessionExecutor::new(executor(), &callbacks).await.unwrap();
+    // Import dill up front so restoring doesn't compile it.
+    let setup = format!("import dill\n{RECORD_RUNTIME_COMPILES}");
+    run(&mut restored, &callbacks, &setup).await;
+    restored.restore_state(&snapshot).await.unwrap();
+    // restore_state still compiles its own script; nothing else may compile.
+    assert_eq!(
+        run(
+            &mut restored,
+            &callbacks,
+            "import sys\nprint([s for s in sys._eryx_runtime_compiles if b'_eryx_restore_bytes' not in s], callable(echo), x + 1)"
+        )
+        .await,
+        b"[] True 42\n"
+    );
+}
+
+#[tokio::test]
+async fn callback_setup_does_not_use_the_exec_builtin() {
     let callbacks: Vec<Arc<dyn Callback>> = Vec::new();
     let mut session = SessionExecutor::new(executor(), &callbacks).await.unwrap();
 
@@ -222,18 +300,6 @@ async fn clear_state_reuses_compiled_empty_callback_setup() {
         r#"
 import sys
 import builtins
-sys._eryx_callback_setup_compiles = 0
-def _eryx_track_callback_setup(event, args, _sys=sys):
-    if event == 'compile':
-        source = args[0]
-        if isinstance(source, str):
-            source = source.encode('utf-8', 'replace')
-        if b'_eryx_callbacks_json' in source:
-            _sys._eryx_callback_setup_compiles += 1
-    elif event == 'exec' and '_eryx_callbacks_json' in args[0].co_names:
-        _sys._eryx_probe_builtins.exec = _sys._eryx_original_exec
-sys.addaudithook(_eryx_track_callback_setup)
-sys._eryx_probe_builtins = builtins
 sys._eryx_original_exec = builtins.exec
 builtins.exec = lambda *args: None
 invoke = None
@@ -243,99 +309,42 @@ list_callbacks = None
     .await;
 
     session.clear_state().await.unwrap();
+    // Top-level await runs the code as a coroutine, without builtins.exec.
     assert_eq!(
         run(
             &mut session,
             &callbacks,
-            "import sys; print(callable(invoke), list_callbacks(), sys._eryx_callback_setup_compiles)"
+            r#"
+import asyncio, builtins, sys
+builtins.exec = sys._eryx_original_exec
+await asyncio.sleep(0)
+print(callable(invoke), list_callbacks())
+"#
         )
         .await,
-        b"True [] 0\n"
+        b"True []\n"
     );
 }
 
 #[tokio::test]
-async fn changed_callback_setup_code_is_cached_and_reinstalled() {
-    let initial_callbacks = echo_only();
-    let changed_callbacks = echo_and_ping();
-    let mut session = SessionExecutor::new(executor(), &initial_callbacks)
-        .await
-        .unwrap();
-
-    run(
-        &mut session,
-        &initial_callbacks,
-        r#"
-import sys
-sys._eryx_callback_setup_compiles = 0
-def _eryx_track_callback_setup(event, args, _sys=sys):
-    if event == 'compile':
-        source = args[0]
-        if isinstance(source, str):
-            source = source.encode('utf-8', 'replace')
-        if b'_eryx_callbacks_json' in source:
-            _sys._eryx_callback_setup_compiles += 1
-sys.addaudithook(_eryx_track_callback_setup)
-"#,
-    )
-    .await;
-
-    session.clear_state().await.unwrap();
-    assert_eq!(
-        run(
-            &mut session,
-            &initial_callbacks,
-            "print(await echo(data='same set after clear'))"
-        )
-        .await,
-        b"same set after clear\n"
-    );
-
-    session.clear_state().await.unwrap();
-    assert_eq!(
-        run(&mut session, &changed_callbacks, "print(await ping())").await,
-        b"pong\n"
-    );
-
-    session.clear_state().await.unwrap();
-    assert_eq!(
-        run(
-            &mut session,
-            &changed_callbacks,
-            "import sys; print(sys._eryx_callback_setup_compiles, await ping())"
-        )
-        .await,
-        b"1 pong\n"
-    );
-}
-
-#[tokio::test]
-async fn failed_callback_setup_can_retry_from_the_cached_code() {
+async fn failed_callback_setup_is_retried() {
     let empty_callbacks: Vec<Arc<dyn Callback>> = Vec::new();
     let callbacks = echo_only();
     let mut session = SessionExecutor::new(executor(), &empty_callbacks)
         .await
         .unwrap();
 
+    // Setup parses the callback declarations with json.loads; fail it once.
     run(
         &mut session,
         &empty_callbacks,
         r#"
-import sys
-sys._eryx_callback_setup_compiles = 0
-sys._eryx_fail_callback_setup_once = True
-def _eryx_track_callback_setup(event, args, _sys=sys):
-    if event == 'compile':
-        source = args[0]
-        if isinstance(source, str):
-            source = source.encode('utf-8', 'replace')
-        if b'_eryx_callbacks_json' in source:
-            _sys._eryx_callback_setup_compiles += 1
-    elif event == 'exec' and '_eryx_callbacks_json' in args[0].co_names:
-        if _sys._eryx_fail_callback_setup_once:
-            _sys._eryx_fail_callback_setup_once = False
-            raise RuntimeError('fail setup once')
-sys.addaudithook(_eryx_track_callback_setup)
+import json
+_original_loads = json.loads
+def _fail_once(*args, **kwargs):
+    json.loads = _original_loads
+    raise RuntimeError('fail setup once')
+json.loads = _fail_once
 "#,
     )
     .await;
@@ -347,15 +356,6 @@ sys.addaudithook(_eryx_track_callback_setup)
     assert_eq!(
         run(&mut session, &callbacks, "print(await echo(data='retry'))").await,
         b"retry\n"
-    );
-    assert_eq!(
-        run(
-            &mut session,
-            &callbacks,
-            "import sys; print(sys._eryx_callback_setup_compiles, sys._eryx_fail_callback_setup_once)"
-        )
-        .await,
-        b"1 False\n"
     );
 }
 

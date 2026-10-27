@@ -334,6 +334,15 @@ fn bench_session_execution(c: &mut Criterion) {
         });
     });
 
+    // Clearing state makes the next execution reinstall the callbacks.
+    group.bench_function("clear_then_pass", |b| {
+        b.to_async(&rt).iter(|| async {
+            let mut session = session.borrow_mut();
+            session.clear_state().await.expect("Clear failed");
+            session.execute("pass").await.expect("Execution failed")
+        });
+    });
+
     group.finish();
 }
 

@@ -14,8 +14,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 // Re-export pyo3::ffi types and functions available in the stable ABI
 pub use pyo3::ffi::{
-    // Compile/evaluate cached callback setup code
-    Py_CompileString,
     // Reference counting
     Py_DecRef,
     // Interpreter lifecycle
@@ -46,8 +44,6 @@ pub use pyo3::ffi::{
     PyErr_GetRaisedException,
     PyErr_Occurred,
     PyErr_SetString,
-    PyEval_EvalCode,
-    PyEval_GetBuiltins,
     // Exception types
     PyExc_AttributeError,
     PyExc_BaseException,
@@ -94,7 +90,6 @@ pub use pyo3::ffi::{
 
 // Functions not available in pyo3-ffi stable ABI (abi3)
 unsafe extern "C" {
-    pub fn PySys_Audit(event: *const c_char, arg_format: *const c_char, ...) -> std::ffi::c_int;
     pub fn PyRun_String(
         str: *const c_char,
         start: std::ffi::c_int,
@@ -1271,110 +1266,18 @@ sys.modules['_eryx_async'] = _eryx_async
 static PYTHON_INITIALIZED: AtomicBool = AtomicBool::new(false);
 
 /// The callback declarations whose wrappers are currently installed, in the
-/// JSON form handed to the setup script.
+/// JSON form handed to `_eryx_install_callbacks`.
 ///
 /// `None` means the installation is unknown or may have been disturbed, so
 /// the next [`setup_callbacks`] reinstalls unconditionally. Pre-initialization
 /// installs the empty set, and that value is carried in the snapshot, so a
-/// fresh instance with no callbacks never runs the setup script.
+/// fresh instance with no callbacks never reinstalls.
 static INSTALLED_CALLBACKS: Mutex<Option<String>> = Mutex::new(None);
-
-/// The most recently compiled callback setup script. Keeping this separate
-/// from `INSTALLED_CALLBACKS` lets clear/restore invalidate the installed
-/// wrappers without recompiling the same setup source on the next execute.
-/// `code` owns one CPython reference in the current interpreter snapshot.
-struct CallbackSetupCode {
-    callbacks_json: String,
-    code: *mut PyObject,
-}
-
-// SAFETY: guest execution is single-threaded. The pointer owns a reference in
-// the current CPython heap, which is snapshot along with the guest memory.
-unsafe impl Send for CallbackSetupCode {}
-
-static CALLBACK_SETUP_CODE: Mutex<Option<CallbackSetupCode>> = Mutex::new(None);
 
 /// Forget which callbacks are installed so the next setup reinstalls them.
 fn invalidate_installed_callbacks() {
     if let Ok(mut installed) = INSTALLED_CALLBACKS.lock() {
         *installed = None;
-    }
-}
-
-/// Return a temporary owned reference to the compiled setup code for this
-/// callback set, compiling and replacing the one-entry cache when necessary.
-///
-/// No Python API calls that can execute guest code happen while the cache lock
-/// is held: compilation can invoke audit hooks, and decref may run finalizers.
-///
-/// # Safety
-/// Python must be initialized, and the source must be valid Python setup code.
-unsafe fn callback_setup_code(
-    callbacks_json: &str,
-    source: &std::ffi::CStr,
-) -> Result<*mut PyObject, String> {
-    if let Ok(cache) = CALLBACK_SETUP_CODE.lock()
-        && let Some(cached) = cache.as_ref()
-        && cached.callbacks_json == callbacks_json
-    {
-        let code = cached.code;
-        unsafe { Py_IncRef(code) };
-        return Ok(code);
-    }
-
-    let code = unsafe { Py_CompileString(source.as_ptr(), c"<string>".as_ptr(), PY_FILE_INPUT) };
-    if code.is_null() {
-        return Err(unsafe { get_last_error_message() });
-    }
-
-    let replaced = if let Ok(mut cache) = CALLBACK_SETUP_CODE.lock() {
-        // The reference returned by Py_CompileString belongs to the caller;
-        // keep a second reference for the cache across clear/restore calls.
-        unsafe { Py_IncRef(code) };
-        cache.replace(CallbackSetupCode {
-            callbacks_json: callbacks_json.to_owned(),
-            code,
-        })
-    } else {
-        None
-    };
-    if let Some(replaced) = replaced {
-        unsafe { Py_DecRef(replaced.code) };
-    }
-
-    Ok(code)
-}
-
-/// Evaluate compiled callback setup code in `__main__`'s namespace, preserving
-/// the `exec` audit event emitted by `PyRun_String` without looking up the
-/// mutable Python `exec` builtin.
-///
-/// # Safety
-/// Python must be initialized and `code` must be a live code object.
-unsafe fn eval_callback_setup(code: *mut PyObject) -> Result<(), String> {
-    unsafe {
-        if PySys_Audit(c"exec".as_ptr(), c"O".as_ptr(), code) != 0 {
-            return Err(get_last_error_message());
-        }
-        let main_module = PyImport_AddModule(c"__main__".as_ptr());
-        if main_module.is_null() {
-            return Err(get_last_error_message());
-        }
-        let main_dict = PyModule_GetDict(main_module);
-        if main_dict.is_null() {
-            return Err(get_last_error_message());
-        }
-        if PyDict_GetItemString(main_dict, c"__builtins__".as_ptr()).is_null()
-            && PyDict_SetItemString(main_dict, c"__builtins__".as_ptr(), PyEval_GetBuiltins()) != 0
-        {
-            return Err(get_last_error_message());
-        }
-        let result = PyEval_EvalCode(code, main_dict, main_dict);
-        if result.is_null() {
-            return Err(get_last_error_message());
-        }
-        Py_DecRef(result);
-        Ok(())
     }
 }
 
@@ -1401,6 +1304,7 @@ unsafe fn eval_callback_setup(code: *mut PyObject) -> Result<(), String> {
 /// - Persistent stdout/stderr capture (reused across executions)
 /// - Socket patching for asyncio compatibility
 /// - The _eryx_exec() function that runs user code efficiently
+/// - The _eryx_install_callbacks() and _eryx_clear_state() helpers
 /// - User globals namespace (isolated from infrastructure)
 const ERYX_EXEC_INFRASTRUCTURE: &std::ffi::CStr = cr#"
 import sys as _sys
@@ -1760,6 +1664,271 @@ def _eryx_discard_result():
     _eryx_result = ''
     _eryx_result_error = ''
     _eryx_user_globals.pop(_eryx_result_var_name, None)
+
+def _eryx_install_callbacks(callbacks_json):
+    '''Install the callback API and wrappers for the host's callback set.
+
+    Called by the host's setup_callbacks() whenever the declared set differs
+    from the installed one. Everything is defined fresh on each call, so user
+    changes to a previous install (e.g. invoke.__code__, class attributes) do
+    not survive a reinstall, and nothing is compiled per call.
+    '''
+    global _eryx_installed
+    import json as _json
+    import _eryx
+    import _eryx_async
+
+    # Remove the wrappers installed for the previous callback set, so a callback
+    # the host no longer provides is not left callable. A name the user has since
+    # rebound to something else is theirs and stays.
+    for _name, _obj in globals().get('_eryx_installed', {}).items():
+        if _eryx_user_globals.get(_name) is _obj:
+            del _eryx_user_globals[_name]
+        if globals().get(_name) is _obj:
+            del globals()[_name]
+    _obj = None
+    # Wrappers and namespaces installed below, by name.
+    _eryx_installed = {}
+
+    # Callbacks metadata from host
+    _eryx_callbacks = _json.loads(callbacks_json)
+
+    async def invoke(_callback_name, **kwargs):
+        """Invoke a host callback by name with keyword arguments (async).
+
+        Args:
+            _callback_name: Name of the callback (e.g., "sleep", "http.get")
+            **kwargs: Arguments to pass to the callback
+
+        Returns:
+            The callback result (parsed from JSON)
+
+        Example:
+            result = await invoke("get_time")
+            data = await invoke("http.get", url="https://example.com")
+        """
+        # Serialize kwargs to canonical JSON (sorted keys, compact, no NaN/inf).
+        # Hosts key callback replay journals on this text verbatim, so it must be
+        # deterministic for equal arguments.
+        # Dict keys that can't be compared with each other (e.g. int with str,
+        # None with anything) can't be sorted; then the whole payload
+        # goes unsorted. Insertion order still keeps the text deterministic per
+        # script, as args were before #529. The retry runs outside the handler so
+        # a real error (e.g. not JSON serializable) raises once, unchained.
+        _sortable = True
+        try:
+            args_json = _json.dumps(kwargs, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False)
+        except TypeError:
+            _sortable = False
+        if not _sortable:
+            args_json = _json.dumps(kwargs, sort_keys=False, separators=(",", ":"), ensure_ascii=False, allow_nan=False)
+
+        # Report callback start trace event
+        _eryx._eryx_report_trace(0, _json.dumps({"type": "callback_start", "name": _callback_name}), args_json)
+
+        try:
+            # Use _eryx_async.await_invoke for proper async handling
+            result_json = await _eryx_async.await_invoke(_callback_name, args_json)
+            # Report callback end trace event
+            _eryx._eryx_report_trace(0, _json.dumps({"type": "callback_end", "name": _callback_name}), "")
+            if result_json:
+                return _json.loads(result_json)
+            return None
+        except Exception as e:
+            # Report callback error trace event
+            _eryx._eryx_report_trace(0, _json.dumps({"type": "callback_end", "name": _callback_name, "error": str(e)}), "")
+            raise
+
+    def list_callbacks():
+        """List all available callbacks for introspection.
+
+        Returns:
+            List of callback info dicts with 'name', 'description',
+            and 'parameters_schema' keys.
+        """
+        return [
+            {
+                'name': cb['name'],
+                'description': cb['description'],
+                'parameters_schema': _json.loads(cb['parameters_schema_json']) if cb['parameters_schema_json'] else None
+            }
+            for cb in _eryx_callbacks
+        ]
+
+    # Reserved names that shouldn't be shadowed by callbacks
+    _eryx_reserved = set(dir(__builtins__)) | {
+        'invoke', 'list_callbacks', 'asyncio', 'json', 'math', 're',
+        'os', 'subprocess', 'socket', '__import__'
+    }
+
+    # Helper to create async callback wrappers
+    def _eryx_make_callback(_cb_name):
+        # Extract ordered parameter names from schema so positional args work
+        _param_names = []
+        for _cb in _eryx_callbacks:
+            if _cb['name'] == _cb_name and _cb.get('parameters_schema_json'):
+                _schema = _json.loads(_cb['parameters_schema_json'])
+                if 'properties' in _schema:
+                    _param_names = list(_schema['properties'].keys())
+                break
+
+        async def callback(*args, **kwargs):
+            # Map positional args to parameter names
+            for _i, _arg in enumerate(args):
+                if _i < len(_param_names):
+                    if _param_names[_i] in kwargs:
+                        raise TypeError(f"{_cb_name}() got multiple values for argument '{_param_names[_i]}'")
+                    kwargs[_param_names[_i]] = _arg
+            return await invoke(_cb_name, **kwargs)
+        callback.__name__ = _cb_name
+        callback.__doc__ = f"Invoke the '{_cb_name}' callback (async)."
+        return callback
+
+    # Namespace class for dotted callbacks like http.get
+    class _EryxNamespace:
+        def __init__(self, invoke_fn, prefix=''):
+            self._invoke = invoke_fn
+            self._prefix = prefix
+            self._children = {}
+            # Cache param names from schema at construction time
+            self._param_names = []
+            if prefix:
+                _full = prefix.rstrip('.')
+                for _cb in _eryx_callbacks:
+                    if _cb['name'] == _full and _cb.get('parameters_schema_json'):
+                        _s = _json.loads(_cb['parameters_schema_json'])
+                        self._param_names = list(_s.get('properties', {}).keys())
+                        break
+
+        def _add_callback(self, parts):
+            if len(parts) == 1:
+                pass  # Leaf - handled by __getattr__
+            else:
+                child = parts[0]
+                if child not in self._children:
+                    new_prefix = f"{self._prefix}{child}." if self._prefix else f"{child}."
+                    self._children[child] = _EryxNamespace(self._invoke, new_prefix)
+                self._children[child]._add_callback(parts[1:])
+
+        def _resolve(self, name):
+            if name in self._children:
+                return self._children[name]
+            full_name = f"{self._prefix}{name}"
+            return _EryxCallbackLeaf(self._invoke, full_name)
+
+        def __getattr__(self, name):
+            if name.startswith('_'):
+                raise AttributeError(name)
+            return self._resolve(name)
+
+        def __getitem__(self, name):
+            return self._resolve(name)
+
+        async def __call__(self, *args, **kwargs):
+            if self._prefix:
+                _full = self._prefix.rstrip('.')
+                # Map positional args to cached parameter names
+                for _i, _a in enumerate(args):
+                    if _i < len(self._param_names):
+                        if self._param_names[_i] in kwargs:
+                            raise TypeError(f"{_full}() got multiple values for argument '{self._param_names[_i]}'")
+                        kwargs[self._param_names[_i]] = _a
+                return await self._invoke(_full, **kwargs)
+            raise TypeError("Cannot call root namespace")
+
+        def __repr__(self):
+            return f"<EryxNamespace '{self._prefix.rstrip('.')}'>"
+
+    class _EryxCallbackLeaf:
+        def __init__(self, invoke_fn, name):
+            self._invoke = invoke_fn
+            self._name = name
+            # Cache param names from schema at construction time
+            self._param_names = []
+            for _cb in _eryx_callbacks:
+                if _cb['name'] == name and _cb.get('parameters_schema_json'):
+                    _s = _json.loads(_cb['parameters_schema_json'])
+                    self._param_names = list(_s.get('properties', {}).keys())
+                    break
+
+        async def __call__(self, *args, **kwargs):
+            # Map positional args to parameter names from cached schema
+            for _i, _a in enumerate(args):
+                if _i < len(self._param_names):
+                    if self._param_names[_i] in kwargs:
+                        raise TypeError(f"{self._name}() got multiple values for argument '{self._param_names[_i]}'")
+                    kwargs[self._param_names[_i]] = _a
+            return await self._invoke(self._name, **kwargs)
+
+        def __repr__(self):
+            return f"<EryxCallback '{self._name}'>"
+
+    # Generate callback wrappers - add to both module globals and user globals
+    _eryx_namespaces = {}
+    for _cb in _eryx_callbacks:
+        _name = _cb['name']
+        if '.' in _name:
+            _parts = _name.split('.')
+            _root = _parts[0]
+            if _root not in _eryx_reserved:
+                if _root not in _eryx_namespaces:
+                    # Create root namespace with prefix=root+'.' so children get full path
+                    _eryx_namespaces[_root] = _EryxNamespace(invoke, _root + '.')
+                # Skip the root part since we've already accounted for it in the prefix
+                _eryx_namespaces[_root]._add_callback(_parts[1:])
+        else:
+            if _name not in _eryx_reserved:
+                _wrapper = _eryx_make_callback(_name)
+                globals()[_name] = _wrapper
+                _eryx_user_globals[_name] = _wrapper
+                _eryx_installed[_name] = _wrapper
+
+    # Add namespaces to both module globals and user globals
+    globals().update(_eryx_namespaces)
+    _eryx_user_globals.update(_eryx_namespaces)
+    _eryx_installed.update(_eryx_namespaces)
+
+    # Inject core API into user globals so user code can access callbacks
+    _eryx_user_globals['invoke'] = invoke
+    _eryx_user_globals['list_callbacks'] = list_callbacks
+    _eryx_user_globals['_EryxNamespace'] = _EryxNamespace
+    _eryx_user_globals['_EryxCallbackLeaf'] = _EryxCallbackLeaf
+
+def _eryx_clear_state():
+    '''Remove all user-defined state from _eryx_user_globals.
+
+    Keeps builtins, module metadata and the callback infrastructure; the host
+    reinstalls the callbacks on the next execution regardless.
+    '''
+    # Items to keep (builtins and metadata)
+    _eryx_keep = {
+        '__builtins__', '__name__', '__doc__', '__package__',
+        '__loader__', '__spec__', '__cached__', '__file__',
+        # Preserve callback infrastructure
+        'invoke', 'list_callbacks', '_EryxNamespace', '_EryxCallbackLeaf',
+        '_eryx_make_callback', '_eryx_reserved', '_eryx_callbacks',
+    }
+
+    # Also keep callback wrappers and namespace objects
+    def _eryx_should_keep(k, v):
+        if k in _eryx_keep:
+            return True
+        # Keep callback wrapper functions
+        if callable(v) and hasattr(v, '__closure__') and v.__closure__:
+            for cell in v.__closure__:
+                try:
+                    if 'invoke' in _eryx_user_globals and cell.cell_contents == _eryx_user_globals['invoke']:
+                        return True
+                except (ValueError, NameError):
+                    pass
+        # Keep namespace objects
+        if type(v).__name__ in ('_EryxNamespace', '_EryxCallbackLeaf'):
+            return True
+        return False
+
+    # Collect keys to delete (can't modify dict during iteration), then delete
+    for _k in [k for k, v in list(_eryx_user_globals.items()) if not _eryx_should_keep(k, v)]:
+        del _eryx_user_globals[_k]
 "#;
 
 // =============================================================================
@@ -2987,6 +3156,10 @@ struct ExecHelpers {
     capture_result: *mut PyObject,
     /// `_eryx_discard_result()`.
     discard_result: *mut PyObject,
+    /// `_eryx_install_callbacks(callbacks_json)`.
+    install_callbacks: *mut PyObject,
+    /// `_eryx_clear_state()`.
+    clear_state: *mut PyObject,
 }
 
 // SAFETY: the guest is single-threaded; these are plain pointers into the
@@ -3021,6 +3194,8 @@ unsafe fn init_exec_helpers() {
             get_output: lookup(c"_eryx_get_output"),
             capture_result: lookup(c"_eryx_capture_result"),
             discard_result: lookup(c"_eryx_discard_result"),
+            install_callbacks: lookup(c"_eryx_install_callbacks"),
+            clear_state: lookup(c"_eryx_clear_state"),
         });
     }
 }
@@ -3112,6 +3287,45 @@ impl ExecHelpers {
     unsafe fn discard_result(&self) {
         unsafe {
             let ret = PyObject_CallNoArgs(self.discard_result);
+            if ret.is_null() {
+                PyErr_Clear();
+            } else {
+                Py_DecRef(ret);
+            }
+        }
+    }
+
+    /// Call `_eryx_install_callbacks(callbacks_json)`.
+    unsafe fn install_callbacks(&self, callbacks_json: &str) -> Result<(), String> {
+        unsafe {
+            let json_obj = PyUnicode_FromStringAndSize(
+                callbacks_json.as_ptr().cast(),
+                callbacks_json.len() as isize,
+            );
+            if json_obj.is_null() {
+                return Err(get_last_error_message());
+            }
+            let args = PyTuple_New(1);
+            if args.is_null() {
+                Py_DecRef(json_obj);
+                return Err(get_last_error_message());
+            }
+            // PyTuple_SetItem steals the reference.
+            PyTuple_SetItem(args, 0, json_obj);
+            let ret = PyObject_Call(self.install_callbacks, args, std::ptr::null_mut());
+            Py_DecRef(args);
+            if ret.is_null() {
+                return Err(get_last_error_message());
+            }
+            Py_DecRef(ret);
+            Ok(())
+        }
+    }
+
+    /// Call `_eryx_clear_state()`, ignoring any error.
+    unsafe fn clear_state(&self) {
+        unsafe {
+            let ret = PyObject_CallNoArgs(self.clear_state);
             if ret.is_null() {
                 PyErr_Clear();
             } else {
@@ -3568,50 +3782,13 @@ pub fn clear_state() {
         return;
     }
 
-    unsafe {
-        let clear_code = c"
-# Items to keep (builtins and metadata)
-_eryx_keep = {
-    '__builtins__', '__name__', '__doc__', '__package__',
-    '__loader__', '__spec__', '__cached__', '__file__',
-    # Preserve callback infrastructure
-    'invoke', 'list_callbacks', '_EryxNamespace', '_EryxCallbackLeaf',
-    '_eryx_make_callback', '_eryx_reserved', '_eryx_callbacks',
-}
-
-# Also keep callback wrappers and namespace objects
-def _eryx_should_keep(k, v):
-    if k in _eryx_keep:
-        return True
-    # Keep callback wrapper functions
-    if callable(v) and hasattr(v, '__closure__') and v.__closure__:
-        for cell in v.__closure__:
-            try:
-                if 'invoke' in _eryx_user_globals and cell.cell_contents == _eryx_user_globals['invoke']:
-                    return True
-            except (ValueError, NameError):
-                pass
-    # Keep namespace objects
-    if type(v).__name__ in ('_EryxNamespace', '_EryxCallbackLeaf'):
-        return True
-    return False
-
-# Collect keys to delete (can't modify dict during iteration)
-_eryx_to_delete = [k for k, v in list(_eryx_user_globals.items()) if not _eryx_should_keep(k, v)]
-
-# Delete the keys
-for _k in _eryx_to_delete:
-    del _eryx_user_globals[_k]
-
-# Clean up our temporaries
-del _eryx_keep, _eryx_should_keep, _eryx_to_delete, _k
-";
-
+    if let Some(helpers) = EXEC_HELPERS.get() {
         // Best effort - ignore errors and continue
-        let _ = run_in_main(clear_code);
+        // SAFETY: Python is initialized (checked above).
+        unsafe { helpers.clear_state() };
     }
 
-    // The keep-list above is a heuristic; make the next execution reinstall.
+    // The keep-list is a heuristic; make the next execution reinstall.
     invalidate_installed_callbacks();
 }
 
@@ -3635,9 +3812,10 @@ pub struct CallbackInfo {
 /// 3. Direct wrapper functions for each callback (e.g., `sleep(ms=100)`)
 /// 4. Namespace objects for dotted callbacks (e.g., `http.get(url="...")`)
 ///
-/// Setup is skipped while these declarations remain installed. Clear or
-/// restore invalidates the installation so wrappers are restored; the most
-/// recently compiled setup script is reused to avoid recompiling it.
+/// The setup is `_eryx_install_callbacks`, defined once with the execution
+/// infrastructure, so installing compiles nothing. It is skipped while these
+/// declarations remain installed; clear or restore invalidates the
+/// installation so wrappers are restored.
 pub fn setup_callbacks(callbacks: &[CallbackInfo]) -> Result<(), String> {
     if !is_python_initialized() {
         return Err("Python not initialized".to_string());
@@ -3654,249 +3832,12 @@ pub fn setup_callbacks(callbacks: &[CallbackInfo]) -> Result<(), String> {
     }
     invalidate_installed_callbacks();
 
-    unsafe {
-        // Inject the callback setup code
-        let setup_code = format!(
-            r#"
-import json as _json
-import _eryx
-import _eryx_async
-
-# Remove the wrappers installed for the previous callback set, so a callback
-# the host no longer provides is not left callable. A name the user has since
-# rebound to something else is theirs and stays.
-for _name, _obj in globals().get('_eryx_installed', {{}}).items():
-    if _eryx_user_globals.get(_name) is _obj:
-        del _eryx_user_globals[_name]
-    if globals().get(_name) is _obj:
-        del globals()[_name]
-_obj = None
-# Wrappers and namespaces installed below, by name.
-_eryx_installed = {{}}
-
-# Callbacks metadata from host
-_eryx_callbacks_json = '''{}'''
-_eryx_callbacks = _json.loads(_eryx_callbacks_json)
-
-async def invoke(_callback_name, **kwargs):
-    """Invoke a host callback by name with keyword arguments (async).
-
-    Args:
-        _callback_name: Name of the callback (e.g., "sleep", "http.get")
-        **kwargs: Arguments to pass to the callback
-
-    Returns:
-        The callback result (parsed from JSON)
-
-    Example:
-        result = await invoke("get_time")
-        data = await invoke("http.get", url="https://example.com")
-    """
-    # Serialize kwargs to canonical JSON (sorted keys, compact, no NaN/inf).
-    # Hosts key callback replay journals on this text verbatim, so it must be
-    # deterministic for equal arguments.
-    # Dict keys that can't be compared with each other (e.g. int with str,
-    # None with anything) can't be sorted; then the whole payload
-    # goes unsorted. Insertion order still keeps the text deterministic per
-    # script, as args were before #529. The retry runs outside the handler so
-    # a real error (e.g. not JSON serializable) raises once, unchained.
-    _sortable = True
-    try:
-        args_json = _json.dumps(kwargs, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False)
-    except TypeError:
-        _sortable = False
-    if not _sortable:
-        args_json = _json.dumps(kwargs, sort_keys=False, separators=(",", ":"), ensure_ascii=False, allow_nan=False)
-
-    # Report callback start trace event
-    _eryx._eryx_report_trace(0, _json.dumps({{"type": "callback_start", "name": _callback_name}}), args_json)
-
-    try:
-        # Use _eryx_async.await_invoke for proper async handling
-        result_json = await _eryx_async.await_invoke(_callback_name, args_json)
-        # Report callback end trace event
-        _eryx._eryx_report_trace(0, _json.dumps({{"type": "callback_end", "name": _callback_name}}), "")
-        if result_json:
-            return _json.loads(result_json)
-        return None
-    except Exception as e:
-        # Report callback error trace event
-        _eryx._eryx_report_trace(0, _json.dumps({{"type": "callback_end", "name": _callback_name, "error": str(e)}}), "")
-        raise
-
-def list_callbacks():
-    """List all available callbacks for introspection.
-
-    Returns:
-        List of callback info dicts with 'name', 'description',
-        and 'parameters_schema' keys.
-    """
-    return [
-        {{
-            'name': cb['name'],
-            'description': cb['description'],
-            'parameters_schema': _json.loads(cb['parameters_schema_json']) if cb['parameters_schema_json'] else None
-        }}
-        for cb in _eryx_callbacks
-    ]
-
-# Reserved names that shouldn't be shadowed by callbacks
-_eryx_reserved = set(dir(__builtins__)) | {{
-    'invoke', 'list_callbacks', 'asyncio', 'json', 'math', 're',
-    'os', 'subprocess', 'socket', '__import__'
-}}
-
-# Helper to create async callback wrappers
-def _eryx_make_callback(_cb_name):
-    # Extract ordered parameter names from schema so positional args work
-    _param_names = []
-    for _cb in _eryx_callbacks:
-        if _cb['name'] == _cb_name and _cb.get('parameters_schema_json'):
-            _schema = _json.loads(_cb['parameters_schema_json'])
-            if 'properties' in _schema:
-                _param_names = list(_schema['properties'].keys())
-            break
-
-    async def callback(*args, **kwargs):
-        # Map positional args to parameter names
-        for _i, _arg in enumerate(args):
-            if _i < len(_param_names):
-                if _param_names[_i] in kwargs:
-                    raise TypeError(f"{{_cb_name}}() got multiple values for argument '{{_param_names[_i]}}'")
-                kwargs[_param_names[_i]] = _arg
-        return await invoke(_cb_name, **kwargs)
-    callback.__name__ = _cb_name
-    callback.__doc__ = f"Invoke the '{{_cb_name}}' callback (async)."
-    return callback
-
-# Namespace class for dotted callbacks like http.get
-class _EryxNamespace:
-    def __init__(self, invoke_fn, prefix=''):
-        self._invoke = invoke_fn
-        self._prefix = prefix
-        self._children = {{}}
-        # Cache param names from schema at construction time
-        self._param_names = []
-        if prefix:
-            _full = prefix.rstrip('.')
-            for _cb in _eryx_callbacks:
-                if _cb['name'] == _full and _cb.get('parameters_schema_json'):
-                    _s = _json.loads(_cb['parameters_schema_json'])
-                    self._param_names = list(_s.get('properties', {{}}).keys())
-                    break
-
-    def _add_callback(self, parts):
-        if len(parts) == 1:
-            pass  # Leaf - handled by __getattr__
-        else:
-            child = parts[0]
-            if child not in self._children:
-                new_prefix = f"{{self._prefix}}{{child}}." if self._prefix else f"{{child}}."
-                self._children[child] = _EryxNamespace(self._invoke, new_prefix)
-            self._children[child]._add_callback(parts[1:])
-
-    def _resolve(self, name):
-        if name in self._children:
-            return self._children[name]
-        full_name = f"{{self._prefix}}{{name}}"
-        return _EryxCallbackLeaf(self._invoke, full_name)
-
-    def __getattr__(self, name):
-        if name.startswith('_'):
-            raise AttributeError(name)
-        return self._resolve(name)
-
-    def __getitem__(self, name):
-        return self._resolve(name)
-
-    async def __call__(self, *args, **kwargs):
-        if self._prefix:
-            _full = self._prefix.rstrip('.')
-            # Map positional args to cached parameter names
-            for _i, _a in enumerate(args):
-                if _i < len(self._param_names):
-                    if self._param_names[_i] in kwargs:
-                        raise TypeError(f"{{_full}}() got multiple values for argument '{{self._param_names[_i]}}'")
-                    kwargs[self._param_names[_i]] = _a
-            return await self._invoke(_full, **kwargs)
-        raise TypeError("Cannot call root namespace")
-
-    def __repr__(self):
-        return f"<EryxNamespace '{{self._prefix.rstrip('.')}}'>"
-
-class _EryxCallbackLeaf:
-    def __init__(self, invoke_fn, name):
-        self._invoke = invoke_fn
-        self._name = name
-        # Cache param names from schema at construction time
-        self._param_names = []
-        for _cb in _eryx_callbacks:
-            if _cb['name'] == name and _cb.get('parameters_schema_json'):
-                _s = _json.loads(_cb['parameters_schema_json'])
-                self._param_names = list(_s.get('properties', {{}}).keys())
-                break
-
-    async def __call__(self, *args, **kwargs):
-        # Map positional args to parameter names from cached schema
-        for _i, _a in enumerate(args):
-            if _i < len(self._param_names):
-                if self._param_names[_i] in kwargs:
-                    raise TypeError(f"{{self._name}}() got multiple values for argument '{{self._param_names[_i]}}'")
-                kwargs[self._param_names[_i]] = _a
-        return await self._invoke(self._name, **kwargs)
-
-    def __repr__(self):
-        return f"<EryxCallback '{{self._name}}'>"
-
-# Generate callback wrappers - add to both module globals and user globals
-_eryx_namespaces = {{}}
-for _cb in _eryx_callbacks:
-    _name = _cb['name']
-    if '.' in _name:
-        _parts = _name.split('.')
-        _root = _parts[0]
-        if _root not in _eryx_reserved:
-            if _root not in _eryx_namespaces:
-                # Create root namespace with prefix=root+'.' so children get full path
-                _eryx_namespaces[_root] = _EryxNamespace(invoke, _root + '.')
-            # Skip the root part since we've already accounted for it in the prefix
-            _eryx_namespaces[_root]._add_callback(_parts[1:])
-    else:
-        if _name not in _eryx_reserved:
-            _wrapper = _eryx_make_callback(_name)
-            globals()[_name] = _wrapper
-            _eryx_user_globals[_name] = _wrapper
-            _eryx_installed[_name] = _wrapper
-
-# Add namespaces to both module globals and user globals
-globals().update(_eryx_namespaces)
-_eryx_user_globals.update(_eryx_namespaces)
-_eryx_installed.update(_eryx_namespaces)
-
-# Inject core API into user globals so user code can access callbacks
-_eryx_user_globals['invoke'] = invoke
-_eryx_user_globals['list_callbacks'] = list_callbacks
-_eryx_user_globals['_EryxNamespace'] = _EryxNamespace
-_eryx_user_globals['_EryxCallbackLeaf'] = _EryxCallbackLeaf
-
-# Clean up temporary variables
-del _eryx_callbacks_json, _eryx_namespaces
-try:
-    del _cb, _name, _parts, _root
-except NameError:
-    pass
-"#,
-            callbacks_json.replace('\\', "\\\\").replace('\'', "\\'")
-        );
-
-        let setup_cstr =
-            std::ffi::CString::new(setup_code).map_err(|e| format!("Invalid setup code: {e}"))?;
-        let code = callback_setup_code(&callbacks_json, &setup_cstr)
-            .map_err(|err| format!("Failed to set up callbacks: {err}"))?;
-        let result = eval_callback_setup(code);
-        Py_DecRef(code);
-        result.map_err(|err| format!("Failed to set up callbacks: {err}"))?;
-    }
+    let Some(helpers) = EXEC_HELPERS.get() else {
+        return Err("execute helpers not initialized".to_string());
+    };
+    // SAFETY: Python is initialized (checked above).
+    unsafe { helpers.install_callbacks(&callbacks_json) }
+        .map_err(|err| format!("Failed to set up callbacks: {err}"))?;
 
     if let Ok(mut installed) = INSTALLED_CALLBACKS.lock() {
         *installed = Some(callbacks_json);
