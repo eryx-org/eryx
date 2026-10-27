@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## `eryx` - [0.12.1](https://github.com/eryx-org/eryx/compare/eryx-v0.12.0...eryx-v0.12.1) - 2026-10-27
+
+### Fixed
+- *(eryx)* use Unix signals on macOS so forked children can run wasm ([#682](https://github.com/eryx-org/eryx/pull/682))
+- *(eryx)* raise pooling allocator instance size limits ([#680](https://github.com/eryx-org/eryx/pull/680))
+
+### Other
+- *(runtime)* install callbacks and clear state via init-time helpers ([#681](https://github.com/eryx-org/eryx/pull/681))
+
+## `eryx-runtime` - [0.12.1](https://github.com/eryx-org/eryx/compare/eryx-runtime-v0.12.0...eryx-runtime-v0.12.1) - 2026-10-27
+
+### Fixed
+- *(eryx)* use Unix signals on macOS so forked children can run wasm ([#682](https://github.com/eryx-org/eryx/pull/682))
+
+### Other
+- *(runtime)* install callbacks and clear state via init-time helpers ([#681](https://github.com/eryx-org/eryx/pull/681))
+- *(wit-dylib-ffi)* use underscore clippy lint names ([#675](https://github.com/eryx-org/eryx/pull/675))
+
 ## `eryx-precompile` - [0.12.0](https://github.com/eryx-org/eryx/compare/eryx-precompile-v0.11.0...eryx-precompile-v0.12.0) - 2026-10-27
 
 ### Security
