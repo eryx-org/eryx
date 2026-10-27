@@ -30,7 +30,7 @@ all = { level = "warn", priority = -1 }
 # These are expected in FFI/vendored code
 unwrap_used = "allow"
 expect_used = "allow"
-missing-safety-doc = "allow"
-new-ret-no-self = "allow"
-boxed-local = "allow"
-len-without-is-empty = "allow"
+missing_safety_doc = "allow"
+new_ret_no_self = "allow"
+boxed_local = "allow"
+len_without_is_empty = "allow"
