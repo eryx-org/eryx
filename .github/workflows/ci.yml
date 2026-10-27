@@ -354,6 +354,13 @@ jobs:
           ls -la crates/eryx-wasm-runtime/target/
           find crates/eryx-wasm-runtime/tests/python-stdlib/ -mindepth 1 -maxdepth 1 | sort | head -10
 
+      # For crates/eryx/tests/pooling_native_extensions.rs.
+      - name: Download numpy-wasi
+        run: |
+          curl -fSL -o "$RUNNER_TEMP/numpy-wasi.tar.gz" \
+            "https://github.com/eryx-org/eryx/releases/download/demo-assets/numpy-wasi.tar.gz"
+          echo "ERYX_TEST_NUMPY_WASI=$RUNNER_TEMP/numpy-wasi.tar.gz" >> "$GITHUB_ENV"
+
       - name: Install protoc
         uses: arduino/setup-protoc@c65c819552d16ad3c9b72d9dfd5ba5237b9c906b # v3.0.0
         with:

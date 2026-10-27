@@ -686,6 +686,25 @@ impl AllocatorSettings {
     /// pages decommitted on release, so headroom is cheap.
     const STACKS_PER_SANDBOX: u32 = 16;
 
+    /// Upper bound on one core instance's `VMContext` metadata.
+    ///
+    /// The largest with numpy linked in needs 242,088 bytes
+    /// (measured), so wasmtime's 1 MiB default leaves headroom for bigger
+    /// extensions. Like the component limit below, this is only checked at
+    /// instantiation: the metadata is heap-allocated at its actual size, never
+    /// reserved per slot.
+    const CORE_INSTANCE_SIZE: usize = 1 << 20;
+
+    /// Upper bound on one runtime instance's metadata: its
+    /// `VMComponentContext` plus every core instance's `VMContext`.
+    ///
+    /// Each native extension adds a core instance, so this grows with the
+    /// extensions linked in. numpy needs 1,170,088 bytes (measured), past
+    /// wasmtime's 1 MiB default, which failed every numpy instantiation.
+    /// 64 MiB is over 50x that; nothing is reserved, so the headroom costs
+    /// nothing.
+    const COMPONENT_INSTANCE_SIZE: usize = 64 << 20;
+
     pub(crate) fn from_env() -> std::result::Result<Self, Error> {
         Self::from_lookup(|name| std::env::var(name).ok())
     }
@@ -770,6 +789,8 @@ impl AllocatorSettings {
             .total_memories(self.pool_instances)
             .total_tables(self.pool_instances.saturating_mul(Self::TABLES_PER_SANDBOX))
             .total_stacks(self.pool_instances.saturating_mul(Self::STACKS_PER_SANDBOX))
+            .max_component_instance_size(Self::COMPONENT_INSTANCE_SIZE)
+            .max_core_instance_size(Self::CORE_INSTANCE_SIZE)
             .table_elements(Self::TABLE_ELEMENTS)
             .linear_memory_keep_resident(self.keep_resident_bytes)
             .table_keep_resident(Self::TABLE_ELEMENTS * std::mem::size_of::<usize>())
