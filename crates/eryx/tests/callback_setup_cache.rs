@@ -384,6 +384,45 @@ async fn callbacks_survive_snapshot_and_restore() {
 }
 
 #[tokio::test]
+async fn clear_state_removes_user_aliases_of_wrappers() {
+    let callbacks = echo_only();
+    let mut session = SessionExecutor::new(executor(), &callbacks).await.unwrap();
+
+    run(&mut session, &callbacks, "my_echo = echo\nnothing = None").await;
+    session.clear_state().await.unwrap();
+    assert_eq!(
+        run(
+            &mut session,
+            &callbacks,
+            "print('my_echo' in globals(), 'nothing' in globals(), await echo(data='still here'))"
+        )
+        .await,
+        b"False False still here\n"
+    );
+}
+
+#[tokio::test]
+async fn user_aliases_of_wrappers_survive_snapshot_and_restore() {
+    let callbacks = echo_only();
+    let mut session = SessionExecutor::new(executor(), &callbacks).await.unwrap();
+
+    run(&mut session, &callbacks, "my_echo = echo").await;
+    let snapshot = session.snapshot_state().await.unwrap();
+
+    let mut restored = SessionExecutor::new(executor(), &callbacks).await.unwrap();
+    restored.restore_state(&snapshot).await.unwrap();
+    assert_eq!(
+        run(
+            &mut restored,
+            &callbacks,
+            "print(await my_echo(data='alias'))"
+        )
+        .await,
+        b"alias\n"
+    );
+}
+
+#[tokio::test]
 async fn stateless_sandboxes_with_callbacks_work_repeatedly() {
     let sandbox = Sandbox::embedded()
         .with_callback(EchoCallback)

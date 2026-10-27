@@ -1686,7 +1686,6 @@ def _eryx_install_callbacks(callbacks_json):
             del _eryx_user_globals[_name]
         if globals().get(_name) is _obj:
             del globals()[_name]
-    _obj = None
     # Wrappers and namespaces installed below, by name.
     _eryx_installed = {}
 
@@ -1906,21 +1905,16 @@ def _eryx_clear_state():
         '__loader__', '__spec__', '__cached__', '__file__',
         # Preserve callback infrastructure
         'invoke', 'list_callbacks', '_EryxNamespace', '_EryxCallbackLeaf',
-        '_eryx_make_callback', '_eryx_reserved', '_eryx_callbacks',
     }
 
     # Also keep callback wrappers and namespace objects
     def _eryx_should_keep(k, v):
         if k in _eryx_keep:
             return True
-        # Keep callback wrapper functions
-        if callable(v) and hasattr(v, '__closure__') and v.__closure__:
-            for cell in v.__closure__:
-                try:
-                    if 'invoke' in _eryx_user_globals and cell.cell_contents == _eryx_user_globals['invoke']:
-                        return True
-                except (ValueError, NameError):
-                    pass
+        # Keep callback wrappers under the name they were installed as; a user
+        # alias of one is user state.
+        if k in _eryx_installed and _eryx_installed[k] is v:
+            return True
         # Keep namespace objects
         if type(v).__name__ in ('_EryxNamespace', '_EryxCallbackLeaf'):
             return True
@@ -3639,19 +3633,14 @@ _eryx_exclude = {
     '__loader__', '__spec__', '__cached__', '__file__',
     # Exclude callback infrastructure (set up fresh on each run)
     'invoke', 'list_callbacks', '_EryxNamespace', '_EryxCallbackLeaf',
-    '_eryx_make_callback', '_eryx_reserved',
 }
 
 # Check if an object is part of the callback infrastructure
-def _eryx_is_callback_obj(obj):
-    # Check for callback wrapper functions (created by _eryx_make_callback)
-    if callable(obj) and hasattr(obj, '__closure__') and obj.__closure__:
-        for cell in obj.__closure__:
-            try:
-                if 'invoke' in _eryx_user_globals and cell.cell_contents == _eryx_user_globals['invoke']:
-                    return True
-            except (ValueError, NameError):
-                pass
+def _eryx_is_callback_obj(name, obj):
+    # Check for callback wrappers under the name they were installed as; a
+    # user alias of one is user state
+    if name in _eryx_installed and _eryx_installed[name] is obj:
+        return True
     # Check for namespace objects
     obj_type = type(obj).__name__
     if obj_type in ('_EryxNamespace', '_EryxCallbackLeaf'):
@@ -3670,7 +3659,7 @@ for _k in _eryx_keys:
     if _k not in _eryx_exclude and not _k.startswith('_eryx_'):
         _v = _eryx_user_globals.get(_k)
         # Skip callback infrastructure objects
-        if _eryx_is_callback_obj(_v):
+        if _eryx_is_callback_obj(_k, _v):
             continue
         try:
             # Test if item is serializable with dill
