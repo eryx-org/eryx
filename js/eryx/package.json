@@ -72,6 +72,6 @@
     "interpreter"
   ],
   "dependencies": {
-    "@bytecodealliance/preview2-shim": "^0.30.0"
+    "@bytecodealliance/preview2-shim": "^0.31.0"
   }
 }
