@@ -273,6 +273,23 @@ pub struct CallbackRequest {
     pub response_tx: oneshot::Sender<CallbackHostResult>,
 }
 
+impl CallbackRequest {
+    /// A request to invoke callback `name` with `arguments_json`, answered on
+    /// `response_tx`. Useful for testing a callback handler.
+    #[must_use]
+    pub fn new(
+        name: impl Into<String>,
+        arguments_json: impl Into<String>,
+        response_tx: oneshot::Sender<CallbackHostResult>,
+    ) -> Self {
+        Self {
+            name: name.into(),
+            arguments_json: arguments_json.into(),
+            response_tx,
+        }
+    }
+}
+
 /// Request to report a trace event from Python code.
 #[derive(Debug, Clone)]
 pub struct TraceRequest {
@@ -292,6 +309,18 @@ pub struct OutputRequest {
     pub stream: u32,
     /// The raw bytes that were written.
     pub data: Vec<u8>,
+}
+
+impl OutputRequest {
+    /// A chunk of output `data` on `stream` (0 = stdout, 1 = stderr). Useful
+    /// for testing an output handler.
+    #[must_use]
+    pub fn new(stream: u32, data: impl Into<Vec<u8>>) -> Self {
+        Self {
+            stream,
+            data: data.into(),
+        }
+    }
 }
 
 /// Request for a network operation from Python code.
