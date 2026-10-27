@@ -2779,6 +2779,15 @@ impl PythonExecutor {
         // Python scripts don't need deep call stacks
         config.async_stack_size(512 * 1024);
 
+        // Use Unix signals rather than Mach ports for trap handling on macOS.
+        // The Mach port handler thread does not survive `fork()`, so a forked
+        // child (e.g. a Python multiprocessing worker) would panic on its
+        // first wasm call. This only picks the host trap handler and is not
+        // part of the compiled artifact, so it needs no version bump.
+        // Trap handling is process-global, so every engine in the process,
+        // including the pre-init one, must use the same setting.
+        config.macos_use_mach_ports(false);
+
         config
     }
 

@@ -261,6 +261,9 @@ pub async fn pre_initialize_with_options(options: PreInitOptions) -> Result<Vec<
     let mut config = Config::new();
     config.wasm_component_model(true);
     config.wasm_component_model_async(true);
+    // Must match the runtime engines: trap handling is process-global and
+    // Wasmtime panics if engines in one process disagree on it.
+    config.macos_use_mach_ports(false);
 
     let engine = Engine::new(&config)?;
     let component = Component::new(&engine, &instrumented_wasm)?;
