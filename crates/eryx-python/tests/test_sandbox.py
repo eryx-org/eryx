@@ -1,5 +1,9 @@
 """Tests for the eryx Python bindings."""
 
+import os
+import stat
+import sys
+
 import eryx
 import pytest
 
@@ -497,6 +501,23 @@ except NameError:
         sandbox = loaded.create_sandbox()
         result = sandbox.execute("import json; print(json.dumps([1,2]))")
         assert result.stdout == b"[1, 2]\n"
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="Unix file modes")
+    def test_factory_save_ignores_umask(self, sandbox_factory, tmp_path):
+        """A saved factory loads under a group-writable umask, even over an
+        existing group-writable file."""
+        save_path = tmp_path / "factory.bin"
+        old_umask = os.umask(0o002)
+        try:
+            save_path.write_bytes(b"stale")
+            save_path.chmod(0o664)
+            sandbox_factory.save(save_path)
+            assert stat.S_IMODE(save_path.stat().st_mode) == 0o644
+            loaded = eryx.SandboxFactory.load(save_path)
+        finally:
+            os.umask(old_umask)
+        result = loaded.create_sandbox().execute("print(1)")
+        assert result.stdout == b"1\n"
 
     def test_factory_to_bytes(self, sandbox_factory):
         """Test getting factory as bytes."""

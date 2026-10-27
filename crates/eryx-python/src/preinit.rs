@@ -295,7 +295,7 @@ impl SandboxFactory {
                 InitializationError::new_err(format!("failed to build factory file: {e}"))
             })?;
 
-        std::fs::write(&path, factory_bytes).map_err(|e| {
+        write_factory_file(&path, &factory_bytes).map_err(|e| {
             InitializationError::new_err(format!(
                 "failed to save factory to {}: {e}",
                 path.display()
@@ -772,6 +772,29 @@ fn build_factory_file(
     Ok(buf)
 }
 
+/// Write a factory file that [`read_trusted_factory_file`] accepts whatever the
+/// umask, replacing any existing file atomically.
+///
+/// On Unix the file is mode `0644`: not `0600`, because images bake in a
+/// root-owned factory that a non-root user loads.
+fn write_factory_file(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
+    let dir = match path.parent() {
+        Some(dir) if !dir.as_os_str().is_empty() => dir,
+        _ => std::path::Path::new("."),
+    };
+    let mut tmp = tempfile::NamedTempFile::new_in(dir)?;
+    tmp.write_all(bytes)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        tmp.as_file()
+            .set_permissions(std::fs::Permissions::from_mode(0o644))?;
+    }
+    tmp.as_file().sync_all()?;
+    tmp.persist(path).map_err(|e| e.error)?;
+    Ok(())
+}
+
 /// Read a factory file, refusing one that another user could have written.
 ///
 /// The file holds native code, so on Unix it must be owned by the current
@@ -1110,5 +1133,22 @@ mod tests {
     fn collect_data_files_nonexistent_dir() {
         let files = collect_data_files(Path::new("/nonexistent/path")).unwrap();
         assert!(files.is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_factory_file_replaces_group_writable_file() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("factory.bin");
+        std::fs::write(&path, b"stale").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o666)).unwrap();
+
+        write_factory_file(&path, b"factory").unwrap();
+
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o644);
+        assert_eq!(read_trusted_factory_file(&path).unwrap(), b"factory");
     }
 }
