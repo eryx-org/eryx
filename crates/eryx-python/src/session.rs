@@ -103,6 +103,10 @@ impl Session {
         on_stderr: Option<Py<PyAny>>,
         package_storage_owner: Option<Arc<Vec<eryx::ExtractedPackage>>>,
     ) -> PyResult<Self> {
+        let net_config: Option<eryx::NetConfig> = network.map(Into::into);
+        if let Some(net) = &net_config {
+            net.validate().map_err(InitializationError::new_err)?;
+        }
         let callbacks_map: Arc<HashMap<String, Arc<dyn eryx::Callback>>> = {
             let mut map = if let Some(ref cbs) = callbacks {
                 extract_callbacks(py, cbs)?
@@ -189,7 +193,7 @@ impl Session {
             vfs_storage,
             vfs_mount_path: mount_path,
             callbacks: callbacks_map,
-            net_config: network.map(Into::into),
+            net_config,
             output_handler,
             _package_storage_owner: package_storage_owner,
             callback_limits,

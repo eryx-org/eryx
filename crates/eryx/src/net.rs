@@ -411,6 +411,25 @@ impl NetConfig {
         }
     }
 
+    /// Fail if a setting can't work: a zero connect or I/O timeout would
+    /// make every connection time out immediately.
+    ///
+    /// [`SandboxBuilder::build`](crate::SandboxBuilder::build) runs this
+    /// check when networking is enabled.
+    ///
+    /// # Errors
+    ///
+    /// Names the first invalid setting.
+    pub fn validate(&self) -> Result<(), String> {
+        if self.connect_timeout.is_zero() {
+            return Err("NetConfig connect_timeout must be greater than zero".to_string());
+        }
+        if self.io_timeout.is_zero() {
+            return Err("NetConfig io_timeout must be greater than zero".to_string());
+        }
+        Ok(())
+    }
+
     /// Add a custom root certificate (DER-encoded) to trust.
     ///
     /// This is useful for testing with self-signed certificates.
@@ -1722,6 +1741,23 @@ mod tests {
         let a = super::NetConfig::default().with_resolver(std::sync::Arc::clone(&shared));
         let b = super::NetConfig::default().with_resolver(shared);
         assert!(a.resolver().is_some() && b.resolver().is_some());
+    }
+
+    #[test]
+    fn zero_timeouts_are_rejected() {
+        use std::time::Duration;
+
+        let config = super::NetConfig::default();
+        assert!(config.validate().is_ok());
+        let zero_connect = config.clone().with_connect_timeout(Duration::ZERO);
+        assert!(
+            zero_connect
+                .validate()
+                .unwrap_err()
+                .contains("connect_timeout")
+        );
+        let zero_io = config.with_io_timeout(Duration::ZERO);
+        assert!(zero_io.validate().unwrap_err().contains("io_timeout"));
     }
 
     #[test]

@@ -2231,6 +2231,7 @@ impl SandboxBuilder<state::Has, state::Has> {
     pub fn build(mut self) -> Result<Sandbox, Error> {
         check_duplicate_callback(self.duplicate_callback.take())?;
         if let Some(net) = &self.net_config {
+            net.validate().map_err(Error::Initialization)?;
             net.check_secret_hosts(&self.secrets)
                 .map_err(Error::Initialization)?;
         }

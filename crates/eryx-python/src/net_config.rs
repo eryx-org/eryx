@@ -86,8 +86,8 @@ impl NetConfig {
     ///
     /// Args:
     ///     max_connections: Maximum number of concurrent connections.
-    ///     connect_timeout_ms: Timeout for establishing connections.
-    ///     io_timeout_ms: Timeout for read/write operations.
+    ///     connect_timeout_ms: Timeout for establishing connections. Must be greater than zero.
+    ///     io_timeout_ms: Timeout for read/write operations. Must be greater than zero.
     ///     allow_all_hosts: When true, all non-blocked hosts are allowed (allowed_hosts is ignored).
     ///     allowed_hosts: List of allowed host patterns (supports wildcards like "*.example.com").
     ///     blocked_hosts: List of blocked host patterns.

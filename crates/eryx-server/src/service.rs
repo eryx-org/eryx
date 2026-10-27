@@ -380,6 +380,7 @@ impl crate::proto::eryx::v1::eryx_server::Eryx for EryxService {
         // A secret with no host to go to would never be substituted; say so
         // now rather than letting the script fail later.
         if let Some(config) = &net_config {
+            config.validate().map_err(Status::invalid_argument)?;
             config
                 .check_secret_hosts(&secrets)
                 .map_err(Status::invalid_argument)?;
