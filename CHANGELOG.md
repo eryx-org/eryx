@@ -9,12 +9,99 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## `eryx-precompile` - [0.12.0](https://github.com/eryx-org/eryx/compare/eryx-precompile-v0.11.0...eryx-precompile-v0.12.0) - 2026-10-27
 
+### Security
+- `setup` checks the download against the release's `runtime.wasm.sha256` asset (or `--sha256`), caps its size, and writes the cache atomically to a private per-user directory, reusing an entry only if it matches its checksum ([#651](https://github.com/eryx-org/eryx/pull/651), [#655](https://github.com/eryx-org/eryx/pull/655)). See the `eryx` 0.12.0 notes for details.
+
 ### Fixed
 - *(eryx)* [**breaking**] per-user cache directories and unsafe cache configuration ([#655](https://github.com/eryx-org/eryx/pull/655))
 - *(precompile)* [**breaking**] verify and bound the setup download, write the cache atomically ([#651](https://github.com/eryx-org/eryx/pull/651))
 - precompile CLI flag handling and #[callback] macro edge cases ([#614](https://github.com/eryx-org/eryx/pull/614))
 
 ## `eryx` - [0.12.0](https://github.com/eryx-org/eryx/compare/eryx-v0.11.0...eryx-v0.12.0) - 2026-10-27
+
+This is a hardening release: it closes several ways sandboxed code could get past secret, network, filesystem and resource policy, and almost every package has breaking changes. Read **Security** and **Upgrade notes** before upgrading.
+
+### Security
+- **Upgrade recommended for anyone using secrets.** A script could get a secret to a host it wasn't meant for, or read the real value, in several ways ([#656](https://github.com/eryx-org/eryx/pull/656), [#637](https://github.com/eryx-org/eryx/pull/637), [#661](https://github.com/eryx-org/eryx/pull/661)):
+  - A secret with no `allowed_hosts` of its own, under a `NetConfig` with no `allowed_hosts` (for example `allow_all_hosts`, which was the `pyeryx` default), was substituted for every host. It is now never substituted, and `SandboxBuilder::build` fails when networking is on. `eryx-server` rejects such requests with `INVALID_ARGUMENT`.
+  - Substitution checked the host passed to `connect`, but the TLS server name and the `Host` header were up to the script. Behind a shared front end (a CDN or cloud load balancer) that let a script connect to an allowed host and have the request routed to a different site. Both must now name the connected host. One side effect: HTTPS through a `CONNECT` proxy no longer works.
+  - An allowed host that echoes request headers back (a debug endpoint, some error pages) handed the real value to the script. Data read from a connection now has every real secret value replaced with its placeholder, including values split across reads.
+  - Secrets were substituted on plain `http://` connections, so the real value crossed the network in cleartext. They are now substituted only after a TLS upgrade. `NetConfig::allow_plaintext_secrets(true)` restores the old behaviour (Rust only).
+  - Placeholders are now also scrubbed from `InProcessSession` output, uncaught-exception tracebacks and the server's trace events ([#660](https://github.com/eryx-org/eryx/pull/660), [#657](https://github.com/eryx-org/eryx/pull/657)).
+
+  Affects the `eryx` crate, the `pyeryx` wheels and the `sd2k/eryx-server` image.
+- **Upgrade recommended on shared machines.** The embedded runtime and the native-extension component cache were extracted to fixed names in the shared temp directory (`$TMPDIR/eryx-embedded`, `$TMPDIR/eryx-cache`), and a file already there was reused because it existed. wasmtime loads these files as native code without validating them, so another local user who created that directory first could run code in any process using eryx. The cache now lives in a per-user directory (`$XDG_CACHE_HOME/eryx`, else `~/.cache/eryx` or the platform equivalent, else `$TMPDIR/eryx-<uid>`), which must be owned by you and not group- or world-writable, and an extracted runtime is compared with the embedded copy before reuse ([#655](https://github.com/eryx-org/eryx/pull/655)). `with_cache` / `with_cache_dir` are now `unsafe fn`, since the caller has to vouch for what is in the cache. `pyeryx`'s `SandboxFactory.load` refuses files other users can write. The `embedded` build only embeds a runtime cached by `eryx-precompile setup` if it matches its checksum and has safe permissions ([#662](https://github.com/eryx-org/eryx/pull/662)), and `setup` checks the download against the new `runtime.wasm.sha256` release asset, caps its size and writes the cache atomically ([#651](https://github.com/eryx-org/eryx/pull/651)). Affects the `eryx` crate with the `embedded` feature, the `pyeryx` wheels and `eryx-precompile`. Single-user machines and containers aren't exposed in practice.
+- **`pyeryx` and its CLI allowed more network access than documented** ([#654](https://github.com/eryx-org/eryx/pull/654)):
+  - `NetConfig()` allowed every public host by default. It is now an allowlist like the Rust `NetConfig::default()`: only `allowed_hosts` can be reached, and `allow_host()` turns `allow_all_hosts` off.
+  - `eryx --net`, `eryx --allow-host` and `eryx serve` used `NetConfig.permissive()`, which has no blocked networks. Sandboxed code run through the CLI could reach localhost, private networks and the cloud metadata endpoint, and `--allow-host` didn't restrict anything. Both now keep the default blocks, and `--allow-host` is an allowlist.
+  - `--mcp` also loaded MCP server configs from the current directory, so running `eryx --mcp` inside an untrusted checkout started whatever servers it listed. Project configs now need `--mcp-project`, and never replace a user-wide server with the same name.
+  - `Session()` and `SandboxFactory.create_session()` ran with no resource limits. They now default to `ResourceLimits()` (30 s, 128 MB).
+  - An exception raised by a host callback reached sandboxed code with its full host traceback. The script now sees `Type: message` only, and the traceback is logged on the `eryx` logger.
+- **`@bsull/eryx` network policy could be bypassed** ([#650](https://github.com/eryx-org/eryx/pull/650), [#663](https://github.com/eryx-org/eryx/pull/663)):
+  - The browser (fetch) transport built the request URL from what the script wrote, so an absolute-form request target could send the request to a host the policy never checked. Redirects were also followed to unchecked hosts. URLs are now built from the connection's host, and the transport no longer follows redirects, so a client that follows one has to connect again and goes through the policy.
+  - Numeric host spellings such as `2130706433` and `0x7f.1` got past patterns like `127.*`. Hosts are now matched in WHATWG URL form as well.
+  - `0.0.0.0` and `[::]` are now blocked by default, and `DEFAULT_BLOCKED_NETWORKS` matches the Rust list, including IPv4-compatible and Teredo addresses.
+  - There were no connection limits or timeouts. `maxConnections` (10), `connectTimeoutMs` and `ioTimeoutMs` now match the Rust defaults, and connections are closed after each call.
+- **`@bsull/eryx` sandboxes weren't isolated from each other.** Every `Sandbox` in a process drove one shared WebAssembly instance, so one sandbox could read and change another's Python state, files and handlers, and use its open connections. Each `Sandbox` now has its own instance, filesystem, handlers, connection table and network policy ([#652](https://github.com/eryx-org/eryx/pull/652), [#663](https://github.com/eryx-org/eryx/pull/663)). Nothing could interrupt a running call either; `new Sandbox({ timeoutMs })` now runs the sandbox in a Worker that is terminated on timeout. Timeouts are opt-in in JS, and there is still no memory limit.
+- **Virtual filesystem and volume escapes** ([#658](https://github.com/eryx-org/eryx/pull/658)):
+  - `..` and absolute paths could climb out of a VFS preopen into the rest of the VFS storage. They are now refused, as they already were for host directories.
+  - `open_at` didn't check the preopen's `file_perms`, so files in a read-only VFS preopen could be opened for writing. It now returns `EACCES`.
+  - Single-file volume mounts could be replaced by a directory, renamed, or followed as a symlink. Only the mapped file is exposed now, and its host path is resolved once at mount time.
+  - Guests could create symlinks in writable host-directory volumes, which host programs reading that directory later might follow. Symlink creation on host directories is now refused.
+- **Resource limits that weren't enforced, or didn't exist.** These let a script use up host memory, CPU, file descriptors or a worker:
+  - `eryx-server` parsed the request's `max_memory_bytes` but didn't apply it, and a client disconnect didn't stop CPU-bound code, which kept a worker and a pooled sandbox busy until the timeout. Both are fixed. Operators can now cap every request limit with `--max-*` ceilings (requests above a ceiling are clamped), and output is capped at 16 MiB per execution ([#657](https://github.com/eryx-org/eryx/pull/657), [#665](https://github.com/eryx-org/eryx/pull/665)).
+  - `snapshot_state`, `restore_state` and `clear_state` run guest code (`__reduce__`, `__del__`) with no time or fuel bound, so they could hang forever. They now always have a time bound and can be cancelled ([#660](https://github.com/eryx-org/eryx/pull/660), [#665](https://github.com/eryx-org/eryx/pull/665)).
+  - Trace events and streamed output were queued without bound. Each execution now queues at most 16 MiB of each ([#660](https://github.com/eryx-org/eryx/pull/660)).
+  - Writes to fd 1 and 2 (`os.write(1, ...)`, `sys.__stdout__`) went straight to the host process's stdout and stderr, unscrubbed. They are now captured into the execution's output ([#660](https://github.com/eryx-org/eryx/pull/660), [#665](https://github.com/eryx-org/eryx/pull/665)).
+  - Open host files and directories are capped at 256 per sandbox and at a process-wide budget (half the soft `RLIMIT_NOFILE` by default). In-memory VFS entries are capped in count, name and path length and charged a per-entry overhead, so many empty files can't get around `max_bytes`. Volume file size can be capped with `VolumeMount::with_max_file_size` ([#658](https://github.com/eryx-org/eryx/pull/658), [#664](https://github.com/eryx-org/eryx/pull/664)).
+  - HTTP request header buffering is capped at 64 KiB, and the header scan is no longer quadratic ([#656](https://github.com/eryx-org/eryx/pull/656)).
+  - Package extraction rejects tar symlink and special entries and caps archives at 100k entries and 1 GiB extracted ([#620](https://github.com/eryx-org/eryx/pull/620)).
+- **Callback replay journals were bound to too little.** The journal MAC didn't cover the starting `state_snapshot`, the declared callback names or an expiry, so a signed journal could be replayed against different state, with different callbacks, indefinitely. It now covers all three; journals expire after 7 days by default (`--journal-ttl-secs`) ([#657](https://github.com/eryx-org/eryx/pull/657)).
+- The `sd2k/eryx-server` image now runs as a non-root user (UID/GID 10001) ([#635](https://github.com/eryx-org/eryx/pull/635)).
+- More default blocked networks in Rust: `::/96` (replacing `::/128` and `::1/128`), `fec0::/10`, `2001::/32` and `2001:db8::/32`. IPv4-compatible and Teredo addresses are checked by the IPv4 address they embed, like NAT64 ([#656](https://github.com/eryx-org/eryx/pull/656)).
+
+### Highlights
+- **`asyncio.run()` works in the sandbox** ([#639](https://github.com/eryx-org/eryx/pull/639)). Top-level `asyncio.run(main())` is run on the sandbox's event loop, so sync-style scripts work as written. Traceback line numbers in user code are no longer shifted by the preamble.
+- **`pyeryx` async and cancellation** ([#641](https://github.com/eryx-org/eryx/pull/641)). `execute_async()` on `Sandbox`, `Session` and `PooledSandbox`, a `CancelToken` that can stop a run from any thread, and Ctrl-C now interrupts a blocking `execute()`. Rust sessions gain `SessionExecuteBuilder::with_cancellation`.
+- **Per-instance JS sandboxes with timeouts** ([#652](https://github.com/eryx-org/eryx/pull/652), [#663](https://github.com/eryx-org/eryx/pull/663)). See Security above.
+- **`eryx-server` operations** ([#635](https://github.com/eryx-org/eryx/pull/635), [#657](https://github.com/eryx-org/eryx/pull/657)). A `grpc.health.v1.Health` service, HTTP/2 keepalive, a per-connection stream limit, idle sandbox eviction, operator ceilings on request limits and `ExecuteResult.output_truncated`.
+- **API stability pass before 1.0** ([#667](https://github.com/eryx-org/eryx/pull/667)). `NetConfig` and `SecretConfig` fields are private, `eryx::CancellationToken` is a newtype, output types are `#[non_exhaustive]` and `eryx::vfs` is documented as outside semver, so after 1.0 new fields and dependency upgrades won't be breaking.
+- **Session state reset reporting** ([#637](https://github.com/eryx-org/eryx/pull/637)). `ExecuteResult::state_was_reset` is `true` on the first run after a session lost its state.
+
+### Upgrade notes
+
+**Rust (`eryx` crate)**
+- A secret needs `allowed_hosts`, of its own or on the `NetConfig` (without `allow_all_hosts`), or `build()` fails. Secrets are substituted only over TLS; use `NetConfig::allow_plaintext_secrets(true)` if you really need `http://` ([#656](https://github.com/eryx-org/eryx/pull/656), [#637](https://github.com/eryx-org/eryx/pull/637)).
+- `NetConfig` and `SecretConfig` can't be built with struct literals. Use the builders, `SecretConfig::new(value, hosts)` and the read accessors. `generate_placeholder` is removed. A zero connect or I/O timeout now fails `build()` ([#667](https://github.com/eryx-org/eryx/pull/667)).
+- `with_cache` and `with_cache_dir` are `unsafe fn`. The default cache needs no `unsafe`. If `~/.cache/eryx` already exists and is group- or world-writable, eryx falls back to `$TMPDIR/eryx-<uid>`; run `chmod 700 ~/.cache/eryx` to use it again. Old `$TMPDIR/eryx-embedded` and `$TMPDIR/eryx-cache` directories are no longer used or cleaned up ([#655](https://github.com/eryx-org/eryx/pull/655)).
+- `SandboxBuilder` now defaults to `with_trace_collection(false)` ([#660](https://github.com/eryx-org/eryx/pull/660)).
+- Duplicate callback names fail `build()`. `Sandbox::set_callbacks` and `PooledSandbox::with_callbacks` return `Result` ([#637](https://github.com/eryx-org/eryx/pull/637)).
+- Session state ops can return `Error::Timeout`, `Error::FuelExhausted` or `Error::Cancelled`, and default to a 30 s bound without an execution timeout. `SessionExecutor::state_op_timeout()` returns `Duration` ([#660](https://github.com/eryx-org/eryx/pull/660), [#665](https://github.com/eryx-org/eryx/pull/665)).
+- `eryx::CancellationToken` is no longer the tokio-util type. `ReplayOutcome`, `TraceEvent`, `SuspendedCallback`, `CallbackRequest` and `OutputRequest` are `#[non_exhaustive]`; use `CallbackRequest::new` / `OutputRequest::new` in tests ([#667](https://github.com/eryx-org/eryx/pull/667)).
+- `SandboxPool::new` rejects builder settings it can't keep, `try_acquire` no longer creates sandboxes, and `PoolError::Exhausted` / `PoolError::Reset` are removed. Dropping an unfinished `ExecutionHandle` cancels it ([#620](https://github.com/eryx-org/eryx/pull/620)).
+- `VolumeMount` has a new `max_file_size` field. `SnapshotSession` is removed ([#664](https://github.com/eryx-org/eryx/pull/664), [#615](https://github.com/eryx-org/eryx/pull/615)).
+
+**Python (`pyeryx`)**
+- `NetConfig()` allows no hosts unless you set `allowed_hosts` or pass `allow_all_hosts=True` ([#654](https://github.com/eryx-org/eryx/pull/654)).
+- `Session()` and `create_session()` apply `ResourceLimits()`; pass `resource_limits=ResourceLimits.unlimited()` for the old behaviour ([#654](https://github.com/eryx-org/eryx/pull/654)).
+- `--net` and `--allow-host` no longer reach localhost or private networks, and `--mcp` needs `--mcp-project` for project configs ([#654](https://github.com/eryx-org/eryx/pull/654)).
+- `PoolExhaustedError` is removed. `eryx.TimeoutError` is now an `EryxError`, and uncaught script exceptions raise the new `PythonExceptionError` (still an `ExecutionError`) ([#638](https://github.com/eryx-org/eryx/pull/638), [#617](https://github.com/eryx-org/eryx/pull/617)).
+
+**JavaScript (`@bsull/eryx`)**
+- Sandboxes no longer share interpreter state with each other or with the module-level `execute()`. The module-level `setResultVariable()` and `setNetConfig()` only affect the default sandbox and sandboxes created afterwards; use `new Sandbox({ netConfig })`, `sandbox.setNetConfig()` and `sandbox.setResultVariable()` ([#652](https://github.com/eryx-org/eryx/pull/652), [#663](https://github.com/eryx-org/eryx/pull/663)).
+- The fetch transport no longer follows redirects. At most 10 connections are open by default, and connections are closed after each call ([#650](https://github.com/eryx-org/eryx/pull/650)).
+- `./low-level` now exports jco's `instantiate()` ([#652](https://github.com/eryx-org/eryx/pull/652)).
+
+**gRPC server (`sd2k/eryx-server`)**
+- The image runs as UID 10001. Files it reads (`--runtime-cwasm`, `--stdlib`, TLS keys) must be readable by that UID, and with a read-only root filesystem `/tmp` must be writable ([#635](https://github.com/eryx-org/eryx/pull/635)).
+- `max_memory_bytes` is now enforced; scripts that used more fail with `MemoryError`. The server's `--max-memory-bytes` ceiling defaults to 512 MiB ([#657](https://github.com/eryx-org/eryx/pull/657)).
+- Callback journals signed by an older server no longer verify (`FAILED_PRECONDITION`), so re-run any suspended executions pending at deploy time. Resumes must use the same callback names and `state_snapshot`, within the TTL, and echo the journal back whole ([#657](https://github.com/eryx-org/eryx/pull/657)).
+- Secrets with no allowed hosts are rejected with `INVALID_ARGUMENT`. Requests with unsafe or duplicate file names, invalid or duplicate callback names, or an invalid `result_variable` are rejected too ([#661](https://github.com/eryx-org/eryx/pull/661), [#616](https://github.com/eryx-org/eryx/pull/616)).
+- Messages up to 32 MiB are accepted and sent; clients receiving large snapshots need to raise their receive limit (grpc-go `MaxCallRecvMsgSize`). At most 200 concurrent streams per connection, and sandboxes beyond `--pool-min-idle` are evicted after 5 minutes idle ([#616](https://github.com/eryx-org/eryx/pull/616), [#635](https://github.com/eryx-org/eryx/pull/635)).
+- `--max-output-bytes` above 16 MiB is refused at startup ([#665](https://github.com/eryx-org/eryx/pull/665)).
+
+**`eryx-precompile`**
+- `setup --version <x>` needs `--sha256 <hex>` for releases without a `runtime.wasm.sha256` asset (0.11.0 and earlier). `--site-packages`, `--package` and `--import` require `--preinit` ([#651](https://github.com/eryx-org/eryx/pull/651), [#614](https://github.com/eryx-org/eryx/pull/614)).
 
 ### Added
 - [**breaking**] API stability pass before 1.0 ([#667](https://github.com/eryx-org/eryx/pull/667))
@@ -41,6 +128,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - *(vfs)* [**breaking**] VFS correctness fixes (renames, streams, host errors, set_times) ([#619](https://github.com/eryx-org/eryx/pull/619))
 
 ## `eryx-vfs` - [0.12.0](https://github.com/eryx-org/eryx/compare/eryx-vfs-v0.11.0...eryx-vfs-v0.12.0) - 2026-10-27
+
+### Security
+- VFS paths can no longer climb out of their preopen, `open_at` enforces the preopen's `file_perms`, single-file mounts expose only the mapped file, and guests can't create symlinks in host directories. Open host files, in-memory entry counts and name and path lengths are now capped ([#658](https://github.com/eryx-org/eryx/pull/658), [#664](https://github.com/eryx-org/eryx/pull/664)). See the `eryx` 0.12.0 notes for details.
 
 ### Added
 - [**breaking**] API stability pass before 1.0 ([#667](https://github.com/eryx-org/eryx/pull/667))
