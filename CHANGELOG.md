@@ -67,6 +67,7 @@ This is a hardening release: it closes several ways sandboxed code could get pas
 - **`eryx-server` operations** ([#635](https://github.com/eryx-org/eryx/pull/635), [#657](https://github.com/eryx-org/eryx/pull/657)). A `grpc.health.v1.Health` service, HTTP/2 keepalive, a per-connection stream limit, idle sandbox eviction, operator ceilings on request limits and `ExecuteResult.output_truncated`.
 - **API stability pass before 1.0** ([#667](https://github.com/eryx-org/eryx/pull/667)). `NetConfig` and `SecretConfig` fields are private, `eryx::CancellationToken` is a newtype, output types are `#[non_exhaustive]` and `eryx::vfs` is documented as outside semver, so after 1.0 new fields and dependency upgrades won't be breaking.
 - **Session state reset reporting** ([#637](https://github.com/eryx-org/eryx/pull/637)). `ExecuteResult::state_was_reset` is `true` on the first run after a session lost its state.
+- **Faster `clear_state()` then execute** ([#674](https://github.com/eryx-org/eryx/pull/674)). Clearing or restoring session state no longer recompiles the callback setup script, it reuses the compiled copy for the current callback declarations. In a focused benchmark, clearing state and then executing went from 7.96 ms to 1.27 ms.
 
 ### Upgrade notes
 
