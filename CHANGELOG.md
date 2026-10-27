@@ -7,6 +7,69 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## `eryx-precompile` - [0.12.0](https://github.com/eryx-org/eryx/compare/eryx-precompile-v0.11.0...eryx-precompile-v0.12.0) - 2026-10-27
+
+### Fixed
+- *(eryx)* [**breaking**] per-user cache directories and unsafe cache configuration ([#655](https://github.com/eryx-org/eryx/pull/655))
+- *(precompile)* [**breaking**] verify and bound the setup download, write the cache atomically ([#651](https://github.com/eryx-org/eryx/pull/651))
+- precompile CLI flag handling and #[callback] macro edge cases ([#614](https://github.com/eryx-org/eryx/pull/614))
+
+## `eryx` - [0.12.0](https://github.com/eryx-org/eryx/compare/eryx-v0.11.0...eryx-v0.12.0) - 2026-10-27
+
+### Added
+- [**breaking**] API stability pass before 1.0 ([#667](https://github.com/eryx-org/eryx/pull/667))
+- *(vfs)* [**breaking**] make volume file size and open host file limits configurable ([#664](https://github.com/eryx-org/eryx/pull/664))
+- [**breaking**] bound and cancel session state ops, report all output truncation ([#665](https://github.com/eryx-org/eryx/pull/665))
+- *(python)* execute_async() and CancelToken with Ctrl-C support ([#641](https://github.com/eryx-org/eryx/pull/641))
+- *(guest)* support asyncio.run() and keep user-code line numbers after a preamble ([#639](https://github.com/eryx-org/eryx/pull/639))
+- *(eryx)* [**breaking**] TLS-only secret substitution, unique callback names, session reset reporting ([#637](https://github.com/eryx-org/eryx/pull/637))
+- *(vfs)* path-based scrub policies, stream and mkdir_sync lock fixes ([#636](https://github.com/eryx-org/eryx/pull/636))
+- *(server)* [**breaking**] health service, keepalive, stream limits and non-root image ([#635](https://github.com/eryx-org/eryx/pull/635))
+
+### Fixed
+- *(eryx)* check the cached runtime before embedding it ([#662](https://github.com/eryx-org/eryx/pull/662))
+- *(eryx)* [**breaking**] bound session state ops, capture fd output, limit trace and output streams ([#660](https://github.com/eryx-org/eryx/pull/660))
+- *(eryx)* [**breaking**] per-user cache directories and unsafe cache configuration ([#655](https://github.com/eryx-org/eryx/pull/655))
+- *(net)* [**breaking**] bind secret substitution to the connected host ([#656](https://github.com/eryx-org/eryx/pull/656))
+- *(vfs)* [**breaking**] tighten path handling and limits in the virtual filesystem ([#658](https://github.com/eryx-org/eryx/pull/658))
+- *(runtime)* provide writable tmp during pre-initialization ([#649](https://github.com/eryx-org/eryx/pull/649))
+- *(guest)* make mounted site-packages importable on the pre-initialized runtime ([#631](https://github.com/eryx-org/eryx/pull/631))
+- *(guest)* keep the interpreter alive on SystemExit and tidy the runtime ([#621](https://github.com/eryx-org/eryx/pull/621))
+- *(build)* [**breaking**] detect stale late-linking artifacts, pin the guest toolchain, tidy preinit ([#618](https://github.com/eryx-org/eryx/pull/618))
+- *(eryx)* [**breaking**] sandbox, pool, cache and package correctness fixes ([#620](https://github.com/eryx-org/eryx/pull/620))
+- [**breaking**] networking and session correctness fixes ([#615](https://github.com/eryx-org/eryx/pull/615))
+- *(vfs)* [**breaking**] VFS correctness fixes (renames, streams, host errors, set_times) ([#619](https://github.com/eryx-org/eryx/pull/619))
+
+## `eryx-vfs` - [0.12.0](https://github.com/eryx-org/eryx/compare/eryx-vfs-v0.11.0...eryx-vfs-v0.12.0) - 2026-10-27
+
+### Added
+- [**breaking**] API stability pass before 1.0 ([#667](https://github.com/eryx-org/eryx/pull/667))
+- *(vfs)* [**breaking**] make volume file size and open host file limits configurable ([#664](https://github.com/eryx-org/eryx/pull/664))
+- *(vfs)* path-based scrub policies, stream and mkdir_sync lock fixes ([#636](https://github.com/eryx-org/eryx/pull/636))
+
+### Fixed
+- *(vfs)* [**breaking**] tighten path handling and limits in the virtual filesystem ([#658](https://github.com/eryx-org/eryx/pull/658))
+- *(vfs)* [**breaking**] VFS correctness fixes (renames, streams, host errors, set_times) ([#619](https://github.com/eryx-org/eryx/pull/619))
+
+## `eryx-runtime` - [0.12.0](https://github.com/eryx-org/eryx/compare/eryx-runtime-v0.11.0...eryx-runtime-v0.12.0) - 2026-10-27
+
+### Added
+- *(guest)* support asyncio.run() and keep user-code line numbers after a preamble ([#639](https://github.com/eryx-org/eryx/pull/639))
+
+### Fixed
+- *(runtime)* provide writable tmp during pre-initialization ([#649](https://github.com/eryx-org/eryx/pull/649))
+- *(guest)* make mounted site-packages importable on the pre-initialized runtime ([#631](https://github.com/eryx-org/eryx/pull/631))
+- *(guest)* keep the interpreter alive on SystemExit and tidy the runtime ([#621](https://github.com/eryx-org/eryx/pull/621))
+- *(build)* [**breaking**] detect stale late-linking artifacts, pin the guest toolchain, tidy preinit ([#618](https://github.com/eryx-org/eryx/pull/618))
+
+### Other
+- fail the build when the committed prebuilt/ is stale ([#633](https://github.com/eryx-org/eryx/pull/633))
+
+## `eryx-macros` - [0.12.0](https://github.com/eryx-org/eryx/compare/eryx-macros-v0.11.0...eryx-macros-v0.12.0) - 2026-10-27
+
+### Fixed
+- precompile CLI flag handling and #[callback] macro edge cases ([#614](https://github.com/eryx-org/eryx/pull/614))
+
 ## `eryx-precompile` - [0.11.0](https://github.com/eryx-org/eryx/compare/eryx-precompile-v0.10.1...eryx-precompile-v0.11.0) - 2026-10-23
 
 ### Other
