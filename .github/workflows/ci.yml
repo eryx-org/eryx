@@ -165,6 +165,7 @@ jobs:
             crates/eryx-runtime/runtime.wasm
             crates/eryx-runtime/runtime.cwasm
             crates/eryx-runtime/runtime-windows.cwasm
+            crates/eryx-runtime/runtime-macos.cwasm
             crates/eryx-runtime/prebuilt/
             crates/eryx-wasm-runtime/target/liberyx_runtime.so
           # NOTE: this key does not cover the cwasm's CPU-feature configuration,
@@ -173,8 +174,8 @@ jobs:
           # Changing either without busting the version prefix silently reuses a
           # cwasm built with the old settings. Bumped v3 -> v4 for the
           # stdout bytes migration (list<u8> WIT change), v4 -> v5 for the
-          # Windows cwasm built alongside the Linux one.
-          key: wasm-runtime-v5-${{ hashFiles('crates/eryx-wasm-runtime/src/**', 'crates/eryx-wasm-runtime/clock_stubs.c', 'crates/eryx-wasm-runtime/Cargo.toml', 'crates/wit-dylib-ffi/**', 'crates/eryx-runtime/build.rs', 'crates/eryx-runtime/src/**', 'crates/eryx-runtime/wit/**', 'crates/eryx-runtime/libs/*.zst', 'Cargo.lock', 'Cargo.toml', 'mise.toml') }}
+          # Windows cwasm built alongside the Linux one, v5 -> v6 for the macOS one.
+          key: wasm-runtime-v6-${{ hashFiles('crates/eryx-wasm-runtime/src/**', 'crates/eryx-wasm-runtime/clock_stubs.c', 'crates/eryx-wasm-runtime/Cargo.toml', 'crates/wit-dylib-ffi/**', 'crates/eryx-runtime/build.rs', 'crates/eryx-runtime/src/**', 'crates/eryx-runtime/wit/**', 'crates/eryx-runtime/libs/*.zst', 'Cargo.lock', 'Cargo.toml', 'mise.toml') }}
 
       - name: Touch cached artifacts
         if: steps.wasm-cache.outputs.cache-hit == 'true'
@@ -183,6 +184,7 @@ jobs:
           touch crates/eryx-runtime/runtime.wasm
           touch crates/eryx-runtime/runtime.cwasm
           touch crates/eryx-runtime/runtime-windows.cwasm
+          touch crates/eryx-runtime/runtime-macos.cwasm
           touch crates/eryx-runtime/prebuilt/*
           touch crates/eryx-wasm-runtime/target/liberyx_runtime.so
 
@@ -195,6 +197,7 @@ jobs:
             crates/eryx-runtime/runtime.wasm
             crates/eryx-runtime/runtime.cwasm
             crates/eryx-runtime/runtime-windows.cwasm
+            crates/eryx-runtime/runtime-macos.cwasm
             crates/eryx-runtime/prebuilt/
             crates/eryx-wasm-runtime/target/liberyx_runtime.so
           retention-days: 1
@@ -258,6 +261,11 @@ jobs:
           cargo run -p eryx --example precompile --features preinit --release -- \
             --target x86_64-pc-windows-msvc \
             --output crates/eryx-runtime/runtime-windows.cwasm
+          # Same for the macOS job. aarch64 has no psABI presets, so "baseline"
+          # is the portable setting (as in python-release.yml).
+          ERYX_CPU_FEATURES=baseline cargo run -p eryx --example precompile --features preinit --release -- \
+            --target aarch64-apple-darwin \
+            --output crates/eryx-runtime/runtime-macos.cwasm
         env:
           ERYX_PRECOMPILE_BOOTSTRAP: "1"
           # Use x86-64-v2 for portable cwasm across runner types
@@ -272,6 +280,7 @@ jobs:
             crates/eryx-runtime/runtime.wasm
             crates/eryx-runtime/runtime.cwasm
             crates/eryx-runtime/runtime-windows.cwasm
+            crates/eryx-runtime/runtime-macos.cwasm
             crates/eryx-runtime/prebuilt/
             crates/eryx-wasm-runtime/target/liberyx_runtime.so
           retention-days: 1
@@ -821,6 +830,85 @@ jobs:
         working-directory: crates/eryx-python
         run: |
           source ../../.venv/Scripts/activate
+          pytest tests/ -v -n auto
+
+  # Test Python bindings on macOS. Wasmtime's trap handling differs there
+  # (Mach ports vs Unix signals), which broke forked children (test_fork.py)
+  # and was only caught by the 0.12.0 release workflow.
+  python-bindings-macos:
+    name: Python Bindings (macOS)
+    runs-on: macos-latest
+    needs: [changes, build-eryx-runtime]
+    if: >-
+      github.event_name == 'push'
+      || needs.changes.outputs.core == 'true'
+      || needs.changes.outputs.python == 'true'
+    env:
+      # The release profile uses codegen-units = 1 for shipped artifacts, which
+      # makes LLVM single-threaded on the eryx crate. These builds only feed
+      # tests, so trade a little runtime speed for a ~2.5x faster rebuild.
+      CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "16"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Download WASM artifacts
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: wasm-runtime
+          path: crates/
+
+      - name: Mark WASM artifacts as current
+        run: |
+          touch crates/eryx-runtime/runtime.wasm
+          touch crates/eryx-runtime/prebuilt/*
+
+      - name: Use the macOS cwasm
+        run: |
+          # Cross-compiled by build-eryx-runtime; embedded by the eryx build.
+          mv crates/eryx-runtime/runtime-macos.cwasm crates/eryx-runtime/runtime.cwasm
+          touch crates/eryx-runtime/runtime.cwasm
+
+      - name: Install Rust
+        run: |
+          RUST_VERSION=$(sed -n 's/^rust = { version = "\([^"]*\)".*/\1/p' mise.toml)
+          if [ -z "$RUST_VERSION" ]; then
+            echo "could not read the rust pin from mise.toml" >&2
+            exit 1
+          fi
+          rustup toolchain install "$RUST_VERSION" --profile minimal
+          rustup default "$RUST_VERSION"
+
+      - name: Configure Rust cache
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          lookup-only: ${{ startsWith(github.ref, 'refs/tags/') }}
+          prefix-key: v2
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.15"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
+        with:
+          enable-cache: false
+
+      - name: Build and install eryx-python with dev dependencies
+        working-directory: crates/eryx-python
+        run: |
+          uv venv ../../.venv
+          source ../../.venv/bin/activate
+          uv pip install maturin
+          maturin develop --release
+          uv export --extra dev --no-dev --no-hashes --no-emit-project --frozen | uv pip install -r -
+
+      - name: Run Python tests
+        working-directory: crates/eryx-python
+        run: |
+          source ../../.venv/bin/activate
           pytest tests/ -v -n auto
 
   # Test book examples
