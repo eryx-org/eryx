@@ -155,10 +155,6 @@ impl From<bool> for OutputScrubPolicy {
 /// Format: `ERYX_SECRET_PLACEHOLDER_{random_hex}`
 ///
 /// Placeholders are ephemeral (regenerated on each use) for better security.
-pub fn generate_placeholder(_secret_name: &str) -> String {
-    random_placeholder()
-}
-
 fn random_placeholder() -> String {
     use rand::RngExt;
     let mut rng = rand::rng();
@@ -215,16 +211,6 @@ pub(crate) fn replace_bytes(haystack: &[u8], needle: &[u8], replacement: &[u8]) 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_placeholder_generation() {
-        let p1 = generate_placeholder("API_KEY");
-        let p2 = generate_placeholder("API_KEY");
-
-        assert!(p1.starts_with("ERYX_SECRET_PLACEHOLDER_"));
-        assert!(p2.starts_with("ERYX_SECRET_PLACEHOLDER_"));
-        assert_ne!(p1, p2, "Placeholders should be unique");
-    }
 
     #[test]
     fn new_secret_gets_a_fresh_placeholder_and_hides_its_value() {

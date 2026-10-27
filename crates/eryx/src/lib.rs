@@ -125,8 +125,7 @@ pub use sandbox::{
     SandboxBuilder, state,
 };
 pub use secrets::{
-    FileScrubPolicy, OutputScrubPolicy, SecretConfig, generate_placeholder, scrub_placeholders,
-    scrub_placeholders_bytes,
+    FileScrubPolicy, OutputScrubPolicy, SecretConfig, scrub_placeholders, scrub_placeholders_bytes,
 };
 pub use session::{
     InProcessSession, PythonStateSnapshot, Session, SessionExecutor, SnapshotMetadata,
