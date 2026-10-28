@@ -4,7 +4,7 @@
   "private": true,
   "devDependencies": {
     "@bsull/eryx": "../eryx",
-    "@types/node": "^24.0.0",
+    "@types/node": "^26.0.0",
     "typescript": "^7.0.0",
     "vitest": "^5.0.0"
   },
