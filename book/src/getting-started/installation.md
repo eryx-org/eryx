@@ -68,12 +68,12 @@ Install from npm:
 npm install @bsull/eryx
 ```
 
-> **Note:** JavaScript bindings require WebAssembly JSPI support. In Node.js, pass `--experimental-wasm-jspi`. In browsers, Chrome 133+ and Edge 133+ are supported.
+> **Note:** JavaScript bindings require WebAssembly JSPI support. In Node.js 24–25, pass `--experimental-wasm-jspi` (on by default in Node.js 26+). In browsers, Chrome 133+ and Edge 133+ are supported.
 
 ### Node.js
 
 ```bash
-node --experimental-wasm-jspi your-script.js
+node --experimental-wasm-jspi your-script.js   # flag not needed on Node.js 26+
 ```
 
 ```javascript

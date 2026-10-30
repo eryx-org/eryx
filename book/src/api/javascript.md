@@ -8,7 +8,7 @@ Eryx provides JavaScript bindings via WebAssembly, allowing you to run sandboxed
 npm install @bsull/eryx
 ```
 
-> **Requirement:** WebAssembly JSPI (JavaScript Promise Integration) support is required. In Node.js, use `--experimental-wasm-jspi`. In browsers, Chrome 133+ and Edge 133+ are supported.
+> **Requirement:** WebAssembly JSPI (JavaScript Promise Integration) support is required. In Node.js 24–25, use `--experimental-wasm-jspi` (on by default in Node.js 26+). In browsers, Chrome 133+ and Edge 133+ are supported.
 
 ## Sandbox Class
 
@@ -200,7 +200,7 @@ A live demo is available at [eryx.bsull.dev](https://eryx.bsull.dev).
 
 ## Node.js Usage
 
-Node.js requires the `--experimental-wasm-jspi` flag:
+Node.js 24–25 require the `--experimental-wasm-jspi` flag (Node.js 26+ enables JSPI by default):
 
 ```bash
 node --experimental-wasm-jspi your-script.mjs

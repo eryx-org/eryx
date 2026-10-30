@@ -11,7 +11,7 @@ describe("plain Node.js", () => {
     `;
     const stdout = execFileSync(
       process.execPath,
-      ["--experimental-wasm-jspi", "--input-type=module", "-e", script],
+      ["--input-type=module", "-e", script],
       { cwd: import.meta.dirname, encoding: "utf8" },
     );
     expect(stdout).toBe("['python-stdlib', 'site-packages']\n");
@@ -27,7 +27,7 @@ describe("plain Node.js", () => {
     `;
     const stdout = execFileSync(
       process.execPath,
-      ["--experimental-wasm-jspi", "--input-type=module", "-e", script],
+      ["--input-type=module", "-e", script],
       { cwd: import.meta.dirname, encoding: "utf8", timeout: 20_000 },
     );
     expect(stdout).toBe("2\nTimeoutError\n");
@@ -46,7 +46,7 @@ describe("plain Node.js", () => {
     `;
     const stdout = execFileSync(
       process.execPath,
-      ["--experimental-wasm-jspi", "--input-type=module", "-e", script],
+      ["--input-type=module", "-e", script],
       { cwd: import.meta.dirname, encoding: "utf8", timeout: 20_000 },
     );
     expect(stdout).toBe("sandbox is closed\nsandbox is closed\n");
