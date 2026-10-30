@@ -577,16 +577,17 @@ except NameError:
             assert loaded.create_sandbox().execute("print(1)").stdout == b"1\n"
 
     @pytest.mark.skipif(sys.platform == "win32", reason="Unix file modes")
-    def test_factory_load_refuses_group_writable_dir(self, sandbox_factory, tmp_path):
-        """Someone else who can write the directory could swap the file."""
+    def test_factory_load_in_group_writable_dir(self, sandbox_factory, tmp_path):
+        """A umask-002 directory is fine: only the file itself is checked, and
+        the checked handle is what gets mapped."""
         shared = tmp_path / "shared"
         shared.mkdir()
         save_path = shared / "factory.bin"
         sandbox_factory.save(save_path)
         shared.chmod(0o775)
 
-        with pytest.raises(eryx.InitializationError, match="writable by other users"):
-            eryx.SandboxFactory.load(save_path)
+        loaded = eryx.SandboxFactory.load(save_path)
+        assert loaded.create_sandbox().execute("print(1)").stdout == b"1\n"
 
     def test_factory_to_bytes(self, sandbox_factory):
         """Test getting factory as bytes."""

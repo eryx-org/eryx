@@ -2361,19 +2361,20 @@ impl PythonExecutor {
     }
 
     /// Create a new executor from a component returned by
-    /// [`Self::deserialize_component_file`], consulting [`InstancePreCache`]
-    /// when a cache key is provided.
-    #[cfg(feature = "embedded")]
+    /// [`Self::deserialize_component_file`], consulting the process-global
+    /// instance-pre cache when a cache key is provided (`embedded` only).
+    #[cfg(any(feature = "embedded", feature = "preinit"))]
     pub(crate) fn from_deserialized_component(
         component: &Component,
-        cache_key: Option<CacheKey>,
+        cache_key: Option<crate::cache::CacheKey>,
     ) -> std::result::Result<Self, Error> {
         let engine = Self::shared_engine()?;
 
-        let cached = cache_key
+        #[cfg(feature = "embedded")]
+        let instance_pre = match cache_key
             .as_ref()
-            .and_then(|key| InstancePreCache::global().get(key));
-        let instance_pre = match cached {
+            .and_then(|key| InstancePreCache::global().get(key))
+        {
             Some(instance_pre) => instance_pre,
             None => {
                 let instance_pre = Self::create_instance_pre(&engine, component)?;
@@ -2383,25 +2384,12 @@ impl PythonExecutor {
                 instance_pre
             }
         };
+        #[cfg(not(feature = "embedded"))]
+        let instance_pre = {
+            let _ = cache_key;
+            Self::create_instance_pre(&engine, component)?
+        };
 
-        Ok(Self {
-            engine,
-            instance_pre,
-            python_stdlib_path: None,
-            python_site_packages_paths: Vec::new(),
-            result_variable: "result".to_string(),
-            packages: Vec::new(),
-        })
-    }
-
-    /// Create a new executor from a component returned by
-    /// [`Self::deserialize_component_file`].
-    #[cfg(all(feature = "preinit", not(feature = "embedded")))]
-    pub(crate) fn from_deserialized_component(
-        component: &Component,
-    ) -> std::result::Result<Self, Error> {
-        let engine = Self::shared_engine()?;
-        let instance_pre = Self::create_instance_pre(&engine, component)?;
         Ok(Self {
             engine,
             instance_pre,

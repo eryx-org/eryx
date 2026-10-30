@@ -929,8 +929,8 @@ enum ArtifactComponent {
 #[cfg(any(feature = "embedded", feature = "preinit"))]
 struct MappedComponent {
     component: wasmtime::component::Component,
-    /// Kept open so [`PrecompiledArtifact::write_to`] reads the file that was
-    /// mapped even if the path is later replaced.
+    /// The mapped file, kept so [`PrecompiledArtifact::write_to`] reads it
+    /// even if its path is later replaced.
     file: Mutex<std::fs::File>,
     len: u64,
 }
@@ -961,26 +961,33 @@ impl PrecompiledArtifact {
     }
 
     /// Create an uncached artifact by memory-mapping a pre-compiled component
-    /// from a file, without reading it into memory.
+    /// from an open file, without reading it into memory.
     ///
     /// The component occupies the first `len` bytes of the file; anything
-    /// after it is ignored. The file is mapped once, here, so its code pages
-    /// are file-backed and shared with other processes mapping the same file.
+    /// after it is ignored. The file is mapped once, here, through the open
+    /// handle (via `/dev/fd`), so the mapped component is exactly the file the
+    /// caller opened and checked, however its path changes afterwards. Its code
+    /// pages are file-backed and shared with other processes mapping the same
+    /// file.
+    ///
+    /// Where the handle cannot be mapped (Windows, which also refuses to
+    /// replace a mapped file, or a Unix system without `/dev/fd`), the
+    /// component is read into memory instead.
     ///
     /// # Safety
     ///
     /// The file must hold trusted output of [`PythonExecutor::precompile`],
-    /// and must not be modified in place while the artifact is alive. Replacing
-    /// it by renaming a new file over the path is safe.
+    /// and must not be modified in place while the artifact is alive.
+    /// Replacing its path by renaming a new file over it is safe.
     ///
     /// # Errors
     ///
-    /// Returns an error if the file cannot be opened, is shorter than `len`,
-    /// or does not hold a component compatible with the current engine.
+    /// Returns an error if the file cannot be read, is shorter than `len`, or
+    /// does not hold a component compatible with the current engine.
     #[allow(unsafe_code)]
-    pub unsafe fn from_file(path: impl AsRef<std::path::Path>, len: u64) -> Result<Self, Error> {
+    pub unsafe fn from_file(file: std::fs::File, len: u64) -> Result<Self, Error> {
         // SAFETY: The caller guarantees the file is trusted and unmodified.
-        unsafe { Self::from_file_inner(path.as_ref(), len, false) }
+        unsafe { Self::from_file_inner(file, len, None) }
     }
 
     /// Like [`Self::from_file`], but also computes a content-derived cache key
@@ -998,58 +1005,59 @@ impl PrecompiledArtifact {
     /// Same as [`Self::from_file`].
     #[cfg(feature = "embedded")]
     #[allow(unsafe_code)]
-    pub unsafe fn from_file_cached(
-        path: impl AsRef<std::path::Path>,
-        len: u64,
-    ) -> Result<Self, Error> {
+    pub unsafe fn from_file_cached(file: std::fs::File, len: u64) -> Result<Self, Error> {
+        use std::io::{Read as _, Seek as _};
+
+        let key = (&file)
+            .seek(std::io::SeekFrom::Start(0))
+            .and_then(|_| crate::cache::CacheKey::from_precompiled_reader((&file).take(len)))
+            .map_err(component_read_error)?;
         // SAFETY: The caller guarantees the file is trusted and unmodified.
-        unsafe { Self::from_file_inner(path.as_ref(), len, true) }
+        unsafe { Self::from_file_inner(file, len, Some(key)) }
     }
 
     #[allow(unsafe_code)]
     unsafe fn from_file_inner(
-        path: &std::path::Path,
+        file: std::fs::File,
         len: u64,
-        cached: bool,
+        cache_key: Option<crate::cache::CacheKey>,
     ) -> Result<Self, Error> {
-        let io_err = |e: std::io::Error| {
-            Error::Initialization(format!(
-                "failed to read pre-compiled component {}: {e}",
-                path.display()
-            ))
-        };
-        let file = std::fs::File::open(path).map_err(io_err)?;
-        let file_len = file.metadata().map_err(io_err)?.len();
+        use std::io::{Read as _, Seek as _};
+
+        let file_len = file.metadata().map_err(component_read_error)?.len();
         if file_len < len {
             return Err(Error::Initialization(format!(
-                "pre-compiled component {} is {file_len} bytes, expected at least {len}",
-                path.display()
+                "pre-compiled component file is {file_len} bytes, expected at least {len}"
             )));
         }
 
-        #[cfg(feature = "embedded")]
-        let cache_key = if cached {
-            use std::io::Read as _;
-            let key = crate::cache::CacheKey::from_precompiled_reader((&file).take(len));
-            Some(key.map_err(io_err)?)
-        } else {
-            None
-        };
-        #[cfg(not(feature = "embedded"))]
-        let cache_key = {
-            let _ = cached;
-            None
-        };
+        #[cfg(unix)]
+        if std::path::Path::new("/dev/fd").is_dir() {
+            use std::os::fd::AsRawFd as _;
 
-        // SAFETY: The caller guarantees the file is trusted and unmodified.
-        let component = unsafe { PythonExecutor::deserialize_component_file(path)? };
+            // Opening `/dev/fd/N` reopens the file `file` refers to, not
+            // whatever its path now points at.
+            let fd_path = format!("/dev/fd/{}", file.as_raw_fd());
+            // SAFETY: The caller guarantees the file is trusted and unmodified.
+            let component =
+                unsafe { PythonExecutor::deserialize_component_file(fd_path.as_ref())? };
+            return Ok(Self {
+                component: ArtifactComponent::Mapped(Arc::new(MappedComponent {
+                    component,
+                    file: Mutex::new(file),
+                    len,
+                })),
+                cache_key,
+            });
+        }
 
+        let mut bytes = Vec::new();
+        (&file)
+            .seek(std::io::SeekFrom::Start(0))
+            .and_then(|_| (&file).take(len).read_to_end(&mut bytes))
+            .map_err(component_read_error)?;
         Ok(Self {
-            component: ArtifactComponent::Mapped(Arc::new(MappedComponent {
-                component,
-                file: Mutex::new(file),
-                len,
-            })),
+            component: ArtifactComponent::Bytes(Arc::new(bytes)),
             cache_key,
         })
     }
@@ -1119,13 +1127,10 @@ impl PrecompiledArtifact {
         let bytes = match &self.component {
             ArtifactComponent::Bytes(bytes) => bytes,
             ArtifactComponent::Mapped(mapped) => {
-                #[cfg(feature = "embedded")]
                 return PythonExecutor::from_deserialized_component(
                     &mapped.component,
                     self.cache_key.clone(),
                 );
-                #[cfg(not(feature = "embedded"))]
-                return PythonExecutor::from_deserialized_component(&mapped.component);
             }
         };
 
@@ -1142,6 +1147,11 @@ impl PrecompiledArtifact {
             PythonExecutor::from_precompiled(bytes)
         }
     }
+}
+
+#[cfg(any(feature = "embedded", feature = "preinit"))]
+fn component_read_error(e: std::io::Error) -> Error {
+    Error::Initialization(format!("failed to read pre-compiled component file: {e}"))
 }
 
 #[cfg(any(feature = "embedded", feature = "preinit"))]

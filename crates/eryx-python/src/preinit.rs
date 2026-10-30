@@ -84,8 +84,8 @@ type LoadedFactory = (
     Option<PathBuf>,
 );
 
-/// Load a factory file: map its component (v1, v3; read on Windows) or read
-/// it into memory (legacy v2), and extract its data files.
+/// Load a factory file: map its component (v1, v3) or read it into memory
+/// (legacy v2), and extract its data files.
 fn load_factory_file(path: &Path, cache: bool) -> PyResult<LoadedFactory> {
     use std::io::{Read as _, Seek as _};
 
@@ -95,7 +95,7 @@ fn load_factory_file(path: &Path, cache: bool) -> PyResult<LoadedFactory> {
             path.display()
         ))
     };
-    let (canonical, mut file) = open_trusted_factory_file(path).map_err(load_err)?;
+    let mut file = open_trusted_factory_file(path).map_err(load_err)?;
 
     match read_factory_layout(&mut file).map_err(load_err)? {
         FactoryLayout::V2 => {
@@ -129,29 +129,15 @@ fn load_factory_file(path: &Path, cache: bool) -> PyResult<LoadedFactory> {
                 Some(extract_data_files(&compressed).map_err(load_err)?)
             };
 
-            // Windows refuses to replace a file while it is mapped, which would
-            // make `save()` over a loaded factory fail, so read the component
-            // into memory there instead.
-            #[cfg(windows)]
-            let precompiled = {
-                let _ = canonical;
-                let mut bytes = Vec::new();
-                file.seek(std::io::SeekFrom::Start(0))
-                    .and_then(|_| (&mut file).take(component_len).read_to_end(&mut bytes))
-                    .map_err(load_err)?;
-                make_precompiled_artifact(bytes, cache)
-            };
-
             // SAFETY: `open_trusted_factory_file` checked that only this user
-            // or root can modify or replace the file, and `save()` only ever
-            // replaces factory files by renaming a new file over them.
-            #[cfg(not(windows))]
+            // or root can modify this file, and `save()` only ever replaces
+            // factory files by renaming a new file over them.
             #[allow(unsafe_code)]
             let precompiled = unsafe {
                 if cache {
-                    eryx::PrecompiledArtifact::from_file_cached(&canonical, component_len)
+                    eryx::PrecompiledArtifact::from_file_cached(file, component_len)
                 } else {
-                    eryx::PrecompiledArtifact::from_file(&canonical, component_len)
+                    eryx::PrecompiledArtifact::from_file(file, component_len)
                 }
             }
             .map_err(eryx_error_to_py)?;
@@ -284,8 +270,7 @@ impl SandboxFactory {
     /// The file contains pre-compiled native code that is loaded without
     /// validation, so only load factory files you created yourself (with
     /// ``save()``) and that nobody else can modify. On Unix, files writable by
-    /// other users, or owned by a user other than you or root, are refused, and
-    /// so are files in a directory that other users could replace them in.
+    /// other users, or owned by a user other than you or root, are refused.
     ///
     /// The pre-compiled component is memory-mapped rather than read into
     /// memory, so processes loading the same file share its pages (except on
@@ -616,11 +601,11 @@ impl SandboxFactory {
     ///
     /// This can be used for custom serialization or inspection.
     fn to_bytes<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyBytes>> {
-        let mut bytes = Vec::with_capacity(self.precompiled.len());
-        self.precompiled.write_to(&mut bytes).map_err(|e| {
-            InitializationError::new_err(format!("failed to read factory component: {e}"))
-        })?;
-        Ok(PyBytes::new(py, &bytes))
+        PyBytes::new_with(py, self.precompiled.len(), |mut buf| {
+            self.precompiled.write_to(&mut buf).map_err(|e| {
+                InitializationError::new_err(format!("failed to read factory component: {e}"))
+            })
+        })
     }
 
     /// Create a sandbox pool from this factory.
@@ -886,19 +871,13 @@ fn write_factory_file(
     Ok(())
 }
 
-/// Open a factory file, refusing one that another user could have written or
-/// replaced.
+/// Open a factory file, refusing one that another user could have written.
 ///
 /// The file holds native code, so on Unix it must be owned by the current
-/// user or root and not be group- or world-writable. Its directory must pass
-/// the same check (or be a root-owned sticky directory like `/tmp`), because
-/// the component is mapped by path after this check, so nobody else may be
-/// able to swap the file in between.
-///
-/// Returns the canonical path, which is what must be mapped.
-fn open_trusted_factory_file(path: &std::path::Path) -> std::io::Result<(PathBuf, std::fs::File)> {
-    let path = std::fs::canonicalize(path)?;
-    let file = std::fs::File::open(&path)?;
+/// user or root and not be group- or world-writable. The returned handle is
+/// what gets mapped, so a path swapped after this check is never loaded.
+fn open_trusted_factory_file(path: &std::path::Path) -> std::io::Result<std::fs::File> {
+    let file = std::fs::File::open(path)?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;
@@ -911,22 +890,8 @@ fn open_trusted_factory_file(path: &std::path::Path) -> std::io::Result<(PathBuf
                 "file is owned by another user or writable by other users",
             ));
         }
-        if let Some(dir) = path.parent() {
-            let meta = std::fs::metadata(dir)?;
-            let sticky = meta.mode() & 0o1000 != 0;
-            let root_owned = meta.uid() == 0 && (meta.mode() & 0o022 == 0 || sticky);
-            if !(eryx::cache::is_private(&meta) || root_owned) {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::PermissionDenied,
-                    format!(
-                        "directory {} is owned by another user or writable by other users",
-                        dir.display()
-                    ),
-                ));
-            }
-        }
     }
-    Ok((path, file))
+    Ok(file)
 }
 
 /// How a factory file is laid out, from [`read_factory_layout`].
@@ -1412,7 +1377,7 @@ mod tests {
 
         let mode = std::fs::metadata(&path).unwrap().permissions().mode();
         assert_eq!(mode & 0o777, 0o644);
-        let (_, file) = open_trusted_factory_file(&path).unwrap();
+        let file = open_trusted_factory_file(&path).unwrap();
         let mut contents = Vec::new();
         std::io::Read::read_to_end(&mut &file, &mut contents).unwrap();
         assert_eq!(contents, b"factory");
@@ -1430,39 +1395,5 @@ mod tests {
 
         let err = open_trusted_factory_file(&path).unwrap_err();
         assert_eq!(err.kind(), std::io::ErrorKind::PermissionDenied);
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn open_trusted_factory_file_refuses_group_writable_dir() {
-        use std::os::unix::fs::PermissionsExt;
-
-        let dir = tempfile::TempDir::new().unwrap();
-        let shared = dir.path().join("shared");
-        std::fs::create_dir(&shared).unwrap();
-        let path = shared.join("factory.bin");
-        write_factory_file(&path, |w| w.write_all(b"factory")).unwrap();
-        std::fs::set_permissions(&shared, std::fs::Permissions::from_mode(0o775)).unwrap();
-
-        let err = open_trusted_factory_file(&path).unwrap_err();
-        assert_eq!(err.kind(), std::io::ErrorKind::PermissionDenied);
-        assert!(err.to_string().contains("directory"), "{err}");
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn open_trusted_factory_file_checks_the_symlink_target_dir() {
-        use std::os::unix::fs::PermissionsExt;
-
-        let dir = tempfile::TempDir::new().unwrap();
-        let shared = dir.path().join("shared");
-        std::fs::create_dir(&shared).unwrap();
-        let target = shared.join("factory.bin");
-        write_factory_file(&target, |w| w.write_all(b"factory")).unwrap();
-        std::fs::set_permissions(&shared, std::fs::Permissions::from_mode(0o777)).unwrap();
-        let link = dir.path().join("factory.bin");
-        std::os::unix::fs::symlink(&target, &link).unwrap();
-
-        assert!(open_trusted_factory_file(&link).is_err());
     }
 }

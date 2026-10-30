@@ -1017,8 +1017,7 @@ class SandboxFactory:
         The file contains pre-compiled native code that is loaded without
         validation, so only load factory files you created yourself (with
         ``save()``) and that nobody else can modify. On Unix, files writable by
-        other users, or owned by a user other than you or root, are refused, and
-        so are files in a directory that other users could replace them in.
+        other users, or owned by a user other than you or root, are refused.
 
         The pre-compiled component is memory-mapped rather than read into
         memory, so processes loading the same file share its pages (except on

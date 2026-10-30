@@ -38,9 +38,13 @@ async fn file_backed_artifact_ignores_trailing_data() {
     let len = component.len() as u64;
 
     #[allow(unsafe_code)]
-    let uncached = unsafe { PrecompiledArtifact::from_file(&path, len) }.unwrap();
+    let uncached =
+        unsafe { PrecompiledArtifact::from_file(std::fs::File::open(&path).unwrap(), len) }
+            .unwrap();
     #[allow(unsafe_code)]
-    let cached = unsafe { PrecompiledArtifact::from_file_cached(&path, len) }.unwrap();
+    let cached =
+        unsafe { PrecompiledArtifact::from_file_cached(std::fs::File::open(&path).unwrap(), len) }
+            .unwrap();
 
     for artifact in [&uncached, &cached] {
         assert_eq!(artifact.len(), component.len());
@@ -55,25 +59,28 @@ async fn write_to_returns_only_the_component() {
     let (_dir, path, component) = component_file(b"trailer");
 
     #[allow(unsafe_code)]
-    let artifact =
-        unsafe { PrecompiledArtifact::from_file(&path, component.len() as u64) }.unwrap();
+    let artifact = unsafe {
+        PrecompiledArtifact::from_file(std::fs::File::open(&path).unwrap(), component.len() as u64)
+    }
+    .unwrap();
 
     let mut written = Vec::new();
     artifact.write_to(&mut written).unwrap();
     assert!(written == component, "write_to returned different bytes");
 }
 
-// Windows refuses to rename over a file that is mapped.
-#[cfg(not(windows))]
 #[tokio::test]
 async fn write_to_reads_the_mapped_file_after_the_path_is_replaced() {
     let (dir, path, component) = component_file(b"");
 
     #[allow(unsafe_code)]
-    let artifact =
-        unsafe { PrecompiledArtifact::from_file(&path, component.len() as u64) }.unwrap();
+    let artifact = unsafe {
+        PrecompiledArtifact::from_file(std::fs::File::open(&path).unwrap(), component.len() as u64)
+    }
+    .unwrap();
 
-    // Replace the path by renaming, as pyeryx's `save()` does.
+    // Replace the path by renaming, as pyeryx's `save()` does. The artifact
+    // keeps the file it was given, both for executing and for `write_to`.
     let replacement = dir.path().join("replacement.bin");
     std::fs::write(&replacement, b"a different factory").unwrap();
     std::fs::rename(&replacement, &path).unwrap();
@@ -89,6 +96,26 @@ async fn from_file_rejects_a_file_shorter_than_the_component() {
     let (_dir, path, component) = component_file(b"");
 
     #[allow(unsafe_code)]
-    let result = unsafe { PrecompiledArtifact::from_file(&path, component.len() as u64 + 1) };
+    let result = unsafe {
+        PrecompiledArtifact::from_file(
+            std::fs::File::open(&path).unwrap(),
+            component.len() as u64 + 1,
+        )
+    };
     assert!(result.is_err());
+}
+
+#[tokio::test]
+async fn from_file_maps_the_open_handle_not_the_path() {
+    let (dir, path, component) = component_file(b"");
+    let file = std::fs::File::open(&path).unwrap();
+
+    // Swap the path between opening (and checking) the file and mapping it.
+    let replacement = dir.path().join("replacement.bin");
+    std::fs::write(&replacement, b"not a component").unwrap();
+    std::fs::rename(&replacement, &path).unwrap();
+
+    #[allow(unsafe_code)]
+    let artifact = unsafe { PrecompiledArtifact::from_file(file, component.len() as u64) }.unwrap();
+    assert_eq!(run(&artifact).await, b"42\n");
 }
