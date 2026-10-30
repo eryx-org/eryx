@@ -10,7 +10,7 @@ Eryx runs **CPython 3.14** inside a WASM sandbox with full isolation — no netw
 npm install @bsull/eryx
 ```
 
-**Requirements:** Chrome 133+ or Node.js 24+ (requires [JSPI](https://v8.dev/blog/jspi) via `--experimental-wasm-jspi` in Node).
+**Requirements:** Chrome 133+ or Node.js 24+ (requires [JSPI](https://v8.dev/blog/jspi); Node.js 24–25 need `--experimental-wasm-jspi`, Node.js 26+ has it on by default).
 
 ## Usage
 

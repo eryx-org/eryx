@@ -5,7 +5,6 @@ export default defineConfig({
     environment: "node",
     // Run tests serially since sandbox state is global
     maxWorkers: 1,
-    execArgv: ["--experimental-wasm-jspi"],
     sequence: {
       shuffle: false,
     },

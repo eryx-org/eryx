@@ -1,5 +1,5 @@
 [tools]
-node = "24"
+node = "26"
 # trust_policy_excludes: mise 2026.8.2's aube npm backend added a "no-downgrade"
 # supply-chain trust gate. jco's transitive dep @oxc-parser/binding-*@0.76.0
 # dropped its provenance attestation (0.13.3 had it; oxc restored it in 0.90.0+),
