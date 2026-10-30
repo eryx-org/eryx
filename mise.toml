@@ -10,7 +10,7 @@ shellcheck = "0.11.0"
 version = "0.9.150"
 
 [tools."cargo:wasm-tools"]
-version = "1.262.0"
+version = "1.263.0"
 
 [tools."cargo:cargo-rail"]
 version = "0.32.0"
