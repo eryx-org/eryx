@@ -84,8 +84,8 @@ type LoadedFactory = (
     Option<PathBuf>,
 );
 
-/// Load a factory file: map its component (v1, v3) or read it into memory
-/// (legacy v2), and extract its data files.
+/// Load a factory file: map its component (v1, v3; read on Windows) or read
+/// it into memory (legacy v2), and extract its data files.
 fn load_factory_file(path: &Path, cache: bool) -> PyResult<LoadedFactory> {
     use std::io::{Read as _, Seek as _};
 
@@ -129,9 +129,23 @@ fn load_factory_file(path: &Path, cache: bool) -> PyResult<LoadedFactory> {
                 Some(extract_data_files(&compressed).map_err(load_err)?)
             };
 
+            // Windows refuses to replace a file while it is mapped, which would
+            // make `save()` over a loaded factory fail, so read the component
+            // into memory there instead.
+            #[cfg(windows)]
+            let precompiled = {
+                let _ = canonical;
+                let mut bytes = Vec::new();
+                file.seek(std::io::SeekFrom::Start(0))
+                    .and_then(|_| (&mut file).take(component_len).read_to_end(&mut bytes))
+                    .map_err(load_err)?;
+                make_precompiled_artifact(bytes, cache)
+            };
+
             // SAFETY: `open_trusted_factory_file` checked that only this user
             // or root can modify or replace the file, and `save()` only ever
             // replaces factory files by renaming a new file over them.
+            #[cfg(not(windows))]
             #[allow(unsafe_code)]
             let precompiled = unsafe {
                 if cache {
@@ -274,7 +288,8 @@ impl SandboxFactory {
     /// so are files in a directory that other users could replace them in.
     ///
     /// The pre-compiled component is memory-mapped rather than read into
-    /// memory, so processes loading the same file share its pages. Don't
+    /// memory, so processes loading the same file share its pages (except on
+    /// Windows, which can't replace a mapped file, so it is read there). Don't
     /// modify a factory file in place while it is loaded; ``save()`` replaces
     /// it atomically, which is safe.
     ///

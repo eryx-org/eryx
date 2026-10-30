@@ -1021,7 +1021,8 @@ class SandboxFactory:
         so are files in a directory that other users could replace them in.
 
         The pre-compiled component is memory-mapped rather than read into
-        memory, so processes loading the same file share its pages. Don't
+        memory, so processes loading the same file share its pages (except on
+        Windows, which can't replace a mapped file, so it is read there). Don't
         modify a factory file in place while it is loaded; ``save()`` replaces
         it atomically, which is safe.
 

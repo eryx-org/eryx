@@ -63,6 +63,8 @@ async fn write_to_returns_only_the_component() {
     assert!(written == component, "write_to returned different bytes");
 }
 
+// Windows refuses to rename over a file that is mapped.
+#[cfg(not(windows))]
 #[tokio::test]
 async fn write_to_reads_the_mapped_file_after_the_path_is_replaced() {
     let (dir, path, component) = component_file(b"");
