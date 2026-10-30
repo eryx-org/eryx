@@ -519,6 +519,75 @@ except NameError:
         result = loaded.create_sandbox().execute("print(1)")
         assert result.stdout == b"1\n"
 
+    def test_factory_file_puts_component_first(self, sandbox_factory, tmp_path):
+        """The v3 format starts with the component, so it can be mapped."""
+        save_path = tmp_path / "factory.bin"
+        sandbox_factory.save(save_path)
+
+        data = save_path.read_bytes()
+        component = sandbox_factory.to_bytes()
+        assert data.startswith(component)
+        assert data.endswith(b"ERYXFCT3")
+
+    @pytest.mark.skipif(sys.platform != "linux", reason="reads /proc/self/maps")
+    @pytest.mark.parametrize("cache", [True, False])
+    def test_factory_load_maps_component(self, sandbox_factory, tmp_path, cache):
+        """Loading maps the factory file instead of reading it into memory."""
+        save_path = tmp_path / "mapped-factory.bin"
+        sandbox_factory.save(save_path)
+
+        loaded = eryx.SandboxFactory.load(save_path, cache=cache)
+        with open("/proc/self/maps") as maps:
+            assert str(save_path.resolve()) in maps.read()
+
+        assert loaded.to_bytes() == sandbox_factory.to_bytes()
+        result = loaded.create_sandbox().execute("print(1)")
+        assert result.stdout == b"1\n"
+
+    def test_factory_save_over_loaded_factory(self, sandbox_factory, tmp_path):
+        """Re-saving a loaded factory to its own path keeps both usable."""
+        save_path = tmp_path / "factory.bin"
+        sandbox_factory.save(save_path)
+        loaded = eryx.SandboxFactory.load(save_path)
+
+        loaded.save(save_path)
+
+        assert loaded.create_sandbox().execute("print(1)").stdout == b"1\n"
+        reloaded = eryx.SandboxFactory.load(save_path)
+        assert reloaded.to_bytes() == sandbox_factory.to_bytes()
+        assert reloaded.create_sandbox().execute("print(2)").stdout == b"2\n"
+
+    def test_factory_loads_legacy_formats(self, sandbox_factory, tmp_path):
+        """v1 (raw component) and v2 (envelope) factory files still load."""
+        component = sandbox_factory.to_bytes()
+        v1 = tmp_path / "v1.bin"
+        v1.write_bytes(component)
+        v2 = tmp_path / "v2.bin"
+        v2.write_bytes(
+            b"ERYX"
+            + (2).to_bytes(4, "little")
+            + len(component).to_bytes(8, "little")
+            + component
+            + (0).to_bytes(8, "little")
+        )
+
+        for path in (v1, v2):
+            path.chmod(0o644)
+            loaded = eryx.SandboxFactory.load(path)
+            assert loaded.create_sandbox().execute("print(1)").stdout == b"1\n"
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="Unix file modes")
+    def test_factory_load_refuses_group_writable_dir(self, sandbox_factory, tmp_path):
+        """Someone else who can write the directory could swap the file."""
+        shared = tmp_path / "shared"
+        shared.mkdir()
+        save_path = shared / "factory.bin"
+        sandbox_factory.save(save_path)
+        shared.chmod(0o775)
+
+        with pytest.raises(eryx.InitializationError, match="writable by other users"):
+            eryx.SandboxFactory.load(save_path)
+
     def test_factory_to_bytes(self, sandbox_factory):
         """Test getting factory as bytes."""
         data = sandbox_factory.to_bytes()

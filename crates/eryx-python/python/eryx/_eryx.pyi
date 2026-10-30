@@ -1017,7 +1017,13 @@ class SandboxFactory:
         The file contains pre-compiled native code that is loaded without
         validation, so only load factory files you created yourself (with
         ``save()``) and that nobody else can modify. On Unix, files writable by
-        other users, or owned by a user other than you or root, are refused.
+        other users, or owned by a user other than you or root, are refused, and
+        so are files in a directory that other users could replace them in.
+
+        The pre-compiled component is memory-mapped rather than read into
+        memory, so processes loading the same file share its pages. Don't
+        modify a factory file in place while it is loaded; ``save()`` replaces
+        it atomically, which is safe.
 
         Args:
             path: Path to the saved factory file.
@@ -1028,8 +1034,8 @@ class SandboxFactory:
                 the same callbacks here to keep the setup-free fast path.
             cache: Whether to cache the pre-compiled component in the process-global
                 cache. When enabled, a BLAKE3 content hash is computed once during
-                loading and subsequent ``create_sandbox()`` calls skip component
-                deserialization entirely (~0.8ms vs ~8ms per call). Defaults to True.
+                loading and subsequent ``create_sandbox()`` calls reuse the linked
+                component instead of re-linking it per call. Defaults to True.
 
         Returns:
             A SandboxFactory loaded from the file.

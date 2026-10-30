@@ -18,7 +18,7 @@ use crate::sandbox::{PyOutputHandler, Sandbox, apply_secrets, extract_secrets};
 use crate::session::Session;
 
 const FACTORY_MAGIC: &[u8; 4] = b"ERYX";
-const FACTORY_VERSION: u32 = 2;
+const FACTORY_VERSION: u32 = 3;
 
 /// A factory for creating sandboxes with custom packages.
 ///
@@ -74,6 +74,77 @@ fn make_precompiled_artifact(bytes: Vec<u8>, cache: bool) -> eryx::PrecompiledAr
         eryx::PrecompiledArtifact::new_cached(bytes)
     } else {
         eryx::PrecompiledArtifact::new(bytes)
+    }
+}
+
+/// The pre-compiled artifact and extracted data files of a loaded factory.
+type LoadedFactory = (
+    eryx::PrecompiledArtifact,
+    Option<tempfile::TempDir>,
+    Option<PathBuf>,
+);
+
+/// Load a factory file: map its component (v1, v3) or read it into memory
+/// (legacy v2), and extract its data files.
+fn load_factory_file(path: &Path, cache: bool) -> PyResult<LoadedFactory> {
+    use std::io::{Read as _, Seek as _};
+
+    let load_err = |e: std::io::Error| {
+        InitializationError::new_err(format!(
+            "failed to load factory from {}: {e}",
+            path.display()
+        ))
+    };
+    let (canonical, mut file) = open_trusted_factory_file(path).map_err(load_err)?;
+
+    match read_factory_layout(&mut file).map_err(load_err)? {
+        FactoryLayout::V2 => {
+            let mut bytes = Vec::new();
+            file.seek(std::io::SeekFrom::Start(0))
+                .and_then(|_| file.read_to_end(&mut bytes))
+                .map_err(load_err)?;
+            let (precompiled, data_files_dir, data_files_path) =
+                parse_factory_v2(&bytes).map_err(load_err)?;
+            Ok((
+                make_precompiled_artifact(precompiled, cache),
+                data_files_dir,
+                data_files_path,
+            ))
+        }
+        FactoryLayout::Mapped {
+            component_len,
+            data_files_len,
+        } => {
+            let data_files = if data_files_len == 0 {
+                None
+            } else {
+                let mut compressed = Vec::new();
+                file.seek(std::io::SeekFrom::Start(component_len))
+                    .and_then(|_| {
+                        (&mut file)
+                            .take(data_files_len)
+                            .read_to_end(&mut compressed)
+                    })
+                    .map_err(load_err)?;
+                Some(extract_data_files(&compressed).map_err(load_err)?)
+            };
+
+            // SAFETY: `open_trusted_factory_file` checked that only this user
+            // or root can modify or replace the file, and `save()` only ever
+            // replaces factory files by renaming a new file over them.
+            #[allow(unsafe_code)]
+            let precompiled = unsafe {
+                if cache {
+                    eryx::PrecompiledArtifact::from_file_cached(&canonical, component_len)
+                } else {
+                    eryx::PrecompiledArtifact::from_file(&canonical, component_len)
+                }
+            }
+            .map_err(eryx_error_to_py)?;
+
+            let (data_files_dir, data_files_path) = data_files.unzip();
+            Ok((precompiled, data_files_dir, data_files_path))
+        }
     }
 }
 
@@ -199,7 +270,13 @@ impl SandboxFactory {
     /// The file contains pre-compiled native code that is loaded without
     /// validation, so only load factory files you created yourself (with
     /// ``save()``) and that nobody else can modify. On Unix, files writable by
-    /// other users, or owned by a user other than you or root, are refused.
+    /// other users, or owned by a user other than you or root, are refused, and
+    /// so are files in a directory that other users could replace them in.
+    ///
+    /// The pre-compiled component is memory-mapped rather than read into
+    /// memory, so processes loading the same file share its pages. Don't
+    /// modify a factory file in place while it is loaded; ``save()`` replaces
+    /// it atomically, which is safe.
     ///
     /// Args:
     ///     path: Path to the saved factory file.
@@ -209,8 +286,8 @@ impl SandboxFactory {
     ///         a different set still works, it just installs per sandbox.
     ///     cache: Whether to cache the pre-compiled component in the process-global
     ///         cache. When enabled, a BLAKE3 content hash is computed once during
-    ///         loading and subsequent ``create_sandbox()`` calls skip component
-    ///         deserialization entirely (~0.8ms vs ~8ms per call). Defaults to True.
+    ///         loading and subsequent ``create_sandbox()`` calls reuse the linked
+    ///         component instead of re-linking it per call. Defaults to True.
     ///
     /// Returns:
     ///     A SandboxFactory loaded from the file.
@@ -235,22 +312,7 @@ impl SandboxFactory {
         let embedded = eryx::embedded::EmbeddedResources::get().map_err(eryx_error_to_py)?;
         let stdlib_path = embedded.stdlib().to_path_buf();
 
-        let file_bytes = read_trusted_factory_file(&path).map_err(|e| {
-            InitializationError::new_err(format!(
-                "failed to load factory from {}: {e}",
-                path.display()
-            ))
-        })?;
-
-        let (precompiled_bytes, data_files_dir, data_files_path) = parse_factory_file(&file_bytes)
-            .map_err(|e| {
-                InitializationError::new_err(format!(
-                    "failed to parse factory file {}: {e}",
-                    path.display()
-                ))
-            })?;
-
-        let precompiled = make_precompiled_artifact(precompiled_bytes, cache);
+        let (precompiled, data_files_dir, data_files_path) = load_factory_file(&path, cache)?;
 
         let site_packages_path = site_packages.or(data_files_path);
 
@@ -290,12 +352,10 @@ impl SandboxFactory {
             })?
             .unwrap_or_default();
 
-        let factory_bytes =
-            build_factory_file(self.precompiled.as_bytes(), &data_files).map_err(|e| {
-                InitializationError::new_err(format!("failed to build factory file: {e}"))
-            })?;
-
-        write_factory_file(&path, &factory_bytes).map_err(|e| {
+        write_factory_file(&path, |w| {
+            write_factory_v3(&self.precompiled, &data_files, w)
+        })
+        .map_err(|e| {
             InitializationError::new_err(format!(
                 "failed to save factory to {}: {e}",
                 path.display()
@@ -540,8 +600,12 @@ impl SandboxFactory {
     /// Get the pre-compiled runtime as bytes.
     ///
     /// This can be used for custom serialization or inspection.
-    fn to_bytes<'py>(&self, py: Python<'py>) -> Bound<'py, PyBytes> {
-        PyBytes::new(py, self.precompiled.as_bytes())
+    fn to_bytes<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyBytes>> {
+        let mut bytes = Vec::with_capacity(self.precompiled.len());
+        self.precompiled.write_to(&mut bytes).map_err(|e| {
+            InitializationError::new_err(format!("failed to read factory component: {e}"))
+        })?;
+        Ok(PyBytes::new(py, &bytes))
     }
 
     /// Create a sandbox pool from this factory.
@@ -688,18 +752,29 @@ impl std::fmt::Debug for SandboxFactory {
 }
 
 // =============================================================================
-// Factory file format (v2 envelope)
+// Factory file format (v3)
 // =============================================================================
 //
-// [4 bytes: magic "ERYX"]
-// [4 bytes: version (2, little-endian)]
-// [8 bytes: precompiled_len (little-endian)]
-// [precompiled_len bytes: Wasmtime precompiled module]
-// [8 bytes: data_files_len (little-endian)]
+// [component_len bytes: Wasmtime precompiled component, starting at offset 0]
 // [data_files_len bytes: zstd-compressed tar of data files]
+// [8 bytes: component_len (little-endian)]
+// [8 bytes: data_files_len (little-endian)]
+// [4 bytes: version (3, little-endian)]
+// [8 bytes: magic "ERYXFCT3"]
+//
+// The component comes first because Wasmtime can only memory-map a component
+// that starts at offset 0 of a file; it ignores the bytes after it. `load()`
+// reads just the footer and data files, and maps the component.
+//
+// Version 2 (legacy): [magic "ERYX"][version 2 u32][component_len u64]
+// [component][data_files_len u64][data files]. Read into memory; re-save to
+// upgrade.
 //
 // Version 1 (legacy): raw precompiled bytes with no envelope. Detected by
-// checking whether the first 4 bytes match the magic; if not, treat as v1.
+// neither the v3 footer nor the v2 magic matching. Mapped like v3.
+
+const FACTORY_FOOTER_MAGIC: &[u8; 8] = b"ERYXFCT3";
+const FACTORY_FOOTER_LEN: u64 = 8 + 8 + 4 + 8;
 
 /// Collect non-Python data files from a site-packages directory.
 ///
@@ -736,11 +811,12 @@ fn collect_data_files(site_packages: &Path) -> Result<Vec<(String, Vec<u8>)>, st
     Ok(files)
 }
 
-/// Build a v2 factory file with the envelope format.
-fn build_factory_file(
-    precompiled: &[u8],
+/// Write a v3 factory file to `writer`.
+fn write_factory_v3(
+    precompiled: &eryx::PrecompiledArtifact,
     data_files: &[(String, Vec<u8>)],
-) -> Result<Vec<u8>, std::io::Error> {
+    writer: &mut impl std::io::Write,
+) -> Result<(), std::io::Error> {
     let data_files_tar_zst = if data_files.is_empty() {
         Vec::new()
     } else {
@@ -756,34 +832,34 @@ fn build_factory_file(
         zstd::encode_all(tar_bytes.as_slice(), 3)?
     };
 
-    let precompiled_len = precompiled.len() as u64;
-    let data_files_len = data_files_tar_zst.len() as u64;
-
-    let total = 4 + 4 + 8 + precompiled.len() + 8 + data_files_tar_zst.len();
-    let mut buf = Vec::with_capacity(total);
-
-    buf.write_all(FACTORY_MAGIC)?;
-    buf.write_all(&FACTORY_VERSION.to_le_bytes())?;
-    buf.write_all(&precompiled_len.to_le_bytes())?;
-    buf.write_all(precompiled)?;
-    buf.write_all(&data_files_len.to_le_bytes())?;
-    buf.write_all(&data_files_tar_zst)?;
-
-    Ok(buf)
+    precompiled.write_to(writer)?;
+    writer.write_all(&data_files_tar_zst)?;
+    writer.write_all(&(precompiled.len() as u64).to_le_bytes())?;
+    writer.write_all(&(data_files_tar_zst.len() as u64).to_le_bytes())?;
+    writer.write_all(&FACTORY_VERSION.to_le_bytes())?;
+    writer.write_all(FACTORY_FOOTER_MAGIC)?;
+    Ok(())
 }
 
-/// Write a factory file that [`read_trusted_factory_file`] accepts whatever the
+/// Write a factory file that [`open_trusted_factory_file`] accepts whatever the
 /// umask, replacing any existing file atomically.
 ///
-/// On Unix the file is mode `0644`: not `0600`, because images bake in a
-/// root-owned factory that a non-root user loads.
-fn write_factory_file(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
+/// The rename also keeps processes that have the old file mapped safe: they
+/// keep the old inode. On Unix the file is mode `0644`: not `0600`, because
+/// images bake in a root-owned factory that a non-root user loads.
+fn write_factory_file(
+    path: &std::path::Path,
+    write: impl FnOnce(&mut std::io::BufWriter<&std::fs::File>) -> std::io::Result<()>,
+) -> std::io::Result<()> {
     let dir = match path.parent() {
         Some(dir) if !dir.as_os_str().is_empty() => dir,
         _ => std::path::Path::new("."),
     };
-    let mut tmp = tempfile::NamedTempFile::new_in(dir)?;
-    tmp.write_all(bytes)?;
+    let tmp = tempfile::NamedTempFile::new_in(dir)?;
+    let mut writer = std::io::BufWriter::new(tmp.as_file());
+    write(&mut writer)?;
+    writer.flush()?;
+    drop(writer);
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -795,18 +871,24 @@ fn write_factory_file(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<(
     Ok(())
 }
 
-/// Read a factory file, refusing one that another user could have written.
+/// Open a factory file, refusing one that another user could have written or
+/// replaced.
 ///
 /// The file holds native code, so on Unix it must be owned by the current
-/// user or root and not be group- or world-writable.
-fn read_trusted_factory_file(path: &std::path::Path) -> std::io::Result<Vec<u8>> {
-    use std::io::Read;
-
-    let mut file = std::fs::File::open(path)?;
-    let meta = file.metadata()?;
+/// user or root and not be group- or world-writable. Its directory must pass
+/// the same check (or be a root-owned sticky directory like `/tmp`), because
+/// the component is mapped by path after this check, so nobody else may be
+/// able to swap the file in between.
+///
+/// Returns the canonical path, which is what must be mapped.
+fn open_trusted_factory_file(path: &std::path::Path) -> std::io::Result<(PathBuf, std::fs::File)> {
+    let path = std::fs::canonicalize(path)?;
+    let file = std::fs::File::open(&path)?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;
+
+        let meta = file.metadata()?;
         let root_owned = meta.uid() == 0 && meta.mode() & 0o022 == 0;
         if !(eryx::cache::is_private(&meta) || root_owned) {
             return Err(std::io::Error::new(
@@ -814,24 +896,92 @@ fn read_trusted_factory_file(path: &std::path::Path) -> std::io::Result<Vec<u8>>
                 "file is owned by another user or writable by other users",
             ));
         }
+        if let Some(dir) = path.parent() {
+            let meta = std::fs::metadata(dir)?;
+            let sticky = meta.mode() & 0o1000 != 0;
+            let root_owned = meta.uid() == 0 && (meta.mode() & 0o022 == 0 || sticky);
+            if !(eryx::cache::is_private(&meta) || root_owned) {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    format!(
+                        "directory {} is owned by another user or writable by other users",
+                        dir.display()
+                    ),
+                ));
+            }
+        }
     }
-    let mut bytes = Vec::with_capacity(usize::try_from(meta.len()).unwrap_or(0));
-    file.read_to_end(&mut bytes)?;
-    Ok(bytes)
+    Ok((path, file))
+}
+
+/// How a factory file is laid out, from [`read_factory_layout`].
+#[derive(Debug, PartialEq, Eq)]
+enum FactoryLayout {
+    /// The component is the first `component_len` bytes; the data files
+    /// archive (if `data_files_len > 0`) follows it.
+    Mapped {
+        component_len: u64,
+        data_files_len: u64,
+    },
+    /// A legacy v2 envelope, which has to be read into memory.
+    V2,
+}
+
+/// Work out a factory file's layout from its footer and header.
+fn read_factory_layout(
+    file: &mut (impl std::io::Read + std::io::Seek),
+) -> Result<FactoryLayout, std::io::Error> {
+    use std::io::SeekFrom;
+
+    let invalid = |msg: String| std::io::Error::new(std::io::ErrorKind::InvalidData, msg);
+    let file_len = file.seek(SeekFrom::End(0))?;
+
+    if file_len >= FACTORY_FOOTER_LEN {
+        let mut footer = [0u8; FACTORY_FOOTER_LEN as usize];
+        file.seek(SeekFrom::End(-(FACTORY_FOOTER_LEN as i64)))?;
+        file.read_exact(&mut footer)?;
+        if &footer[20..] == FACTORY_FOOTER_MAGIC {
+            let version = read_le_u32(&footer[16..20])?;
+            if version != FACTORY_VERSION {
+                return Err(invalid(format!(
+                    "unsupported factory file version: {version}"
+                )));
+            }
+            let component_len = read_le_u64(&footer[..8])?;
+            let data_files_len = read_le_u64(&footer[8..16])?;
+            let expected = component_len
+                .checked_add(data_files_len)
+                .and_then(|len| len.checked_add(FACTORY_FOOTER_LEN));
+            if expected != Some(file_len) {
+                return Err(invalid(format!(
+                    "factory file is {file_len} bytes but its footer describes \
+                     {component_len} + {data_files_len} + {FACTORY_FOOTER_LEN}"
+                )));
+            }
+            return Ok(FactoryLayout::Mapped {
+                component_len,
+                data_files_len,
+            });
+        }
+    }
+
+    let mut magic = [0u8; 4];
+    file.seek(SeekFrom::Start(0))?;
+    if file_len >= 4 {
+        file.read_exact(&mut magic)?;
+    }
+    if &magic == FACTORY_MAGIC {
+        Ok(FactoryLayout::V2)
+    } else {
+        // v1: the whole file is the component.
+        Ok(FactoryLayout::Mapped {
+            component_len: file_len,
+            data_files_len: 0,
+        })
+    }
 }
 
 type ParsedFactory = (Vec<u8>, Option<tempfile::TempDir>, Option<PathBuf>);
-
-/// Parse a factory file, handling both v1 (raw) and v2 (envelope) formats.
-///
-/// Returns (precompiled_bytes, optional_temp_dir, optional_site_packages_path).
-fn parse_factory_file(bytes: &[u8]) -> Result<ParsedFactory, std::io::Error> {
-    if bytes.len() >= 4 && &bytes[..4] == FACTORY_MAGIC {
-        parse_factory_v2(bytes)
-    } else {
-        Ok((bytes.to_vec(), None, None))
-    }
-}
 
 fn read_le_u32(buf: &[u8]) -> Result<u32, std::io::Error> {
     let arr: [u8; 4] = buf.try_into().map_err(|_| {
@@ -847,6 +997,9 @@ fn read_le_u64(buf: &[u8]) -> Result<u64, std::io::Error> {
     Ok(u64::from_le_bytes(arr))
 }
 
+/// Parse a legacy v2 factory file.
+///
+/// Returns (precompiled_bytes, optional_temp_dir, optional_site_packages_path).
 fn parse_factory_v2(bytes: &[u8]) -> Result<ParsedFactory, std::io::Error> {
     let header_size = 4 + 4 + 8; // magic + version + precompiled_len
     if bytes.len() < header_size {
@@ -857,7 +1010,7 @@ fn parse_factory_v2(bytes: &[u8]) -> Result<ParsedFactory, std::io::Error> {
     }
 
     let version = read_le_u32(&bytes[4..8])?;
-    if version != FACTORY_VERSION {
+    if version != 2 {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
             format!("unsupported factory file version: {version}"),
@@ -891,7 +1044,14 @@ fn parse_factory_v2(bytes: &[u8]) -> Result<ParsedFactory, std::io::Error> {
         ));
     }
 
-    let compressed = &bytes[data_start..data_end];
+    let (temp_dir, site_packages_path) = extract_data_files(&bytes[data_start..data_end])?;
+    Ok((precompiled_bytes, Some(temp_dir), Some(site_packages_path)))
+}
+
+/// Extract a zstd-compressed tar of data files into a new temp directory.
+///
+/// Returns the temp directory (which must be kept alive) and its path.
+fn extract_data_files(compressed: &[u8]) -> Result<(tempfile::TempDir, PathBuf), std::io::Error> {
     let tar_bytes = zstd::decode_all(compressed)?;
     let mut archive = tar::Archive::new(tar_bytes.as_slice());
 
@@ -923,7 +1083,7 @@ fn parse_factory_v2(bytes: &[u8]) -> Result<ParsedFactory, std::io::Error> {
     }
 
     let site_packages_path = extract_path.to_path_buf();
-    Ok((precompiled_bytes, Some(temp_dir), Some(site_packages_path)))
+    Ok((temp_dir, site_packages_path))
 }
 
 /// Process packages to extract site-packages path and native extensions.
@@ -1043,26 +1203,124 @@ fn copy_directory_contents(src: &Path, dst: &Path) -> PyResult<()> {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+    use std::io::Cursor;
 
-    #[test]
-    fn v1_round_trip() {
-        let raw = b"some precompiled bytes";
-        let (parsed, temp_dir, path) = parse_factory_file(raw).unwrap();
-        assert_eq!(parsed, raw);
-        assert!(temp_dir.is_none());
-        assert!(path.is_none());
+    fn tz_data_files() -> Vec<(String, Vec<u8>)> {
+        vec![
+            ("tzdata/zoneinfo/UTC".to_string(), b"TZif data".to_vec()),
+            (
+                "tzdata/zoneinfo/Asia/Tokyo".to_string(),
+                b"TZif tokyo data".to_vec(),
+            ),
+        ]
+    }
+
+    fn build_v3(precompiled: &[u8], data_files: &[(String, Vec<u8>)]) -> Vec<u8> {
+        let artifact = eryx::PrecompiledArtifact::new(precompiled.to_vec());
+        let mut bytes = Vec::new();
+        write_factory_v3(&artifact, data_files, &mut bytes).unwrap();
+        bytes
+    }
+
+    /// Build a legacy v2 envelope, as `save()` wrote before v3.
+    fn build_v2(precompiled: &[u8], data_files_tar_zst: &[u8]) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(FACTORY_MAGIC);
+        bytes.extend_from_slice(&2u32.to_le_bytes());
+        bytes.extend_from_slice(&(precompiled.len() as u64).to_le_bytes());
+        bytes.extend_from_slice(precompiled);
+        bytes.extend_from_slice(&(data_files_tar_zst.len() as u64).to_le_bytes());
+        bytes.extend_from_slice(data_files_tar_zst);
+        bytes
     }
 
     #[test]
-    fn v2_no_data_files() {
+    fn v1_is_mapped_whole() {
+        let raw = b"\x7fELF some precompiled bytes";
+        let layout = read_factory_layout(&mut Cursor::new(raw)).unwrap();
+        assert_eq!(
+            layout,
+            FactoryLayout::Mapped {
+                component_len: raw.len() as u64,
+                data_files_len: 0,
+            }
+        );
+    }
+
+    #[test]
+    fn v3_component_starts_at_offset_zero() {
+        let precompiled = b"precompiled wasm component";
+        let bytes = build_v3(precompiled, &[]);
+
+        assert_eq!(&bytes[..precompiled.len()], precompiled);
+        assert_eq!(&bytes[bytes.len() - 8..], FACTORY_FOOTER_MAGIC);
+        assert_eq!(
+            read_factory_layout(&mut Cursor::new(&bytes)).unwrap(),
+            FactoryLayout::Mapped {
+                component_len: precompiled.len() as u64,
+                data_files_len: 0,
+            }
+        );
+    }
+
+    #[test]
+    fn v3_with_data_files() {
+        let precompiled = b"precompiled wasm component";
+        let bytes = build_v3(precompiled, &tz_data_files());
+
+        let FactoryLayout::Mapped {
+            component_len,
+            data_files_len,
+        } = read_factory_layout(&mut Cursor::new(&bytes)).unwrap()
+        else {
+            panic!("expected a mapped layout");
+        };
+        assert_eq!(component_len, precompiled.len() as u64);
+
+        let start = usize::try_from(component_len).unwrap();
+        let end = start + usize::try_from(data_files_len).unwrap();
+        let (_temp_dir, path) = extract_data_files(&bytes[start..end]).unwrap();
+
+        let utc = std::fs::read(path.join("tzdata/zoneinfo/UTC")).unwrap();
+        assert_eq!(utc, b"TZif data");
+        let tokyo = std::fs::read(path.join("tzdata/zoneinfo/Asia/Tokyo")).unwrap();
+        assert_eq!(tokyo, b"TZif tokyo data");
+    }
+
+    #[test]
+    fn v3_rejects_footer_lengths_that_do_not_match() {
+        let mut bytes = build_v3(b"precompiled", &tz_data_files());
+        // Dropping a leading byte keeps the footer but breaks its lengths.
+        bytes.remove(0);
+        assert!(read_factory_layout(&mut Cursor::new(&bytes)).is_err());
+    }
+
+    #[test]
+    fn v3_rejects_overflowing_footer_lengths() {
+        let mut bytes = build_v3(b"precompiled", &[]);
+        let footer = bytes.len() - FACTORY_FOOTER_LEN as usize;
+        bytes[footer..footer + 8].copy_from_slice(&u64::MAX.to_le_bytes());
+        assert!(read_factory_layout(&mut Cursor::new(&bytes)).is_err());
+    }
+
+    #[test]
+    fn v3_rejects_bad_version() {
+        let mut bytes = build_v3(b"precompiled", &[]);
+        let version = bytes.len() - 12;
+        bytes[version..version + 4].copy_from_slice(&99u32.to_le_bytes());
+        assert!(read_factory_layout(&mut Cursor::new(&bytes)).is_err());
+    }
+
+    #[test]
+    fn v2_is_still_read() {
         let precompiled = b"precompiled wasm module";
-        let factory_bytes = build_factory_file(precompiled, &[]).unwrap();
+        let bytes = build_v2(precompiled, &[]);
+        assert_eq!(
+            read_factory_layout(&mut Cursor::new(&bytes)).unwrap(),
+            FactoryLayout::V2
+        );
 
-        assert_eq!(&factory_bytes[..4], FACTORY_MAGIC);
-        let version = u32::from_le_bytes(factory_bytes[4..8].try_into().unwrap());
-        assert_eq!(version, FACTORY_VERSION);
-
-        let (parsed, temp_dir, path) = parse_factory_file(&factory_bytes).unwrap();
+        let (parsed, temp_dir, path) = parse_factory_v2(&bytes).unwrap();
         assert_eq!(parsed, precompiled);
         assert!(temp_dir.is_none());
         assert!(path.is_none());
@@ -1071,25 +1329,15 @@ mod tests {
     #[test]
     fn v2_with_data_files() {
         let precompiled = b"precompiled wasm module";
-        let data_files = vec![
-            ("tzdata/zoneinfo/UTC".to_string(), b"TZif data".to_vec()),
-            (
-                "tzdata/zoneinfo/Asia/Tokyo".to_string(),
-                b"TZif tokyo data".to_vec(),
-            ),
-        ];
-        let factory_bytes = build_factory_file(precompiled, &data_files).unwrap();
-        let (parsed, temp_dir, path) = parse_factory_file(&factory_bytes).unwrap();
+        let v3 = build_v3(b"", &tz_data_files());
+        let tar_zst = &v3[..v3.len() - FACTORY_FOOTER_LEN as usize];
+        let bytes = build_v2(precompiled, tar_zst);
 
+        let (parsed, temp_dir, path) = parse_factory_v2(&bytes).unwrap();
         assert_eq!(parsed, precompiled);
         assert!(temp_dir.is_some());
-        let path = path.unwrap();
-
-        let utc = std::fs::read(path.join("tzdata/zoneinfo/UTC")).unwrap();
+        let utc = std::fs::read(path.unwrap().join("tzdata/zoneinfo/UTC")).unwrap();
         assert_eq!(utc, b"TZif data");
-
-        let tokyo = std::fs::read(path.join("tzdata/zoneinfo/Asia/Tokyo")).unwrap();
-        assert_eq!(tokyo, b"TZif tokyo data");
     }
 
     #[test]
@@ -1097,7 +1345,7 @@ mod tests {
         let mut bytes = Vec::new();
         bytes.extend_from_slice(FACTORY_MAGIC);
         // Too short — missing version and lengths
-        assert!(parse_factory_file(&bytes).is_err());
+        assert!(parse_factory_v2(&bytes).is_err());
     }
 
     #[test]
@@ -1107,7 +1355,7 @@ mod tests {
         bytes.extend_from_slice(&99u32.to_le_bytes());
         bytes.extend_from_slice(&0u64.to_le_bytes());
         bytes.extend_from_slice(&0u64.to_le_bytes());
-        assert!(parse_factory_file(&bytes).is_err());
+        assert!(parse_factory_v2(&bytes).is_err());
     }
 
     #[test]
@@ -1145,10 +1393,61 @@ mod tests {
         std::fs::write(&path, b"stale").unwrap();
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o666)).unwrap();
 
-        write_factory_file(&path, b"factory").unwrap();
+        write_factory_file(&path, |w| w.write_all(b"factory")).unwrap();
 
         let mode = std::fs::metadata(&path).unwrap().permissions().mode();
         assert_eq!(mode & 0o777, 0o644);
-        assert_eq!(read_trusted_factory_file(&path).unwrap(), b"factory");
+        let (_, file) = open_trusted_factory_file(&path).unwrap();
+        let mut contents = Vec::new();
+        std::io::Read::read_to_end(&mut &file, &mut contents).unwrap();
+        assert_eq!(contents, b"factory");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn open_trusted_factory_file_refuses_group_writable_file() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("factory.bin");
+        std::fs::write(&path, b"factory").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o664)).unwrap();
+
+        let err = open_trusted_factory_file(&path).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::PermissionDenied);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn open_trusted_factory_file_refuses_group_writable_dir() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::TempDir::new().unwrap();
+        let shared = dir.path().join("shared");
+        std::fs::create_dir(&shared).unwrap();
+        let path = shared.join("factory.bin");
+        write_factory_file(&path, |w| w.write_all(b"factory")).unwrap();
+        std::fs::set_permissions(&shared, std::fs::Permissions::from_mode(0o775)).unwrap();
+
+        let err = open_trusted_factory_file(&path).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::PermissionDenied);
+        assert!(err.to_string().contains("directory"), "{err}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn open_trusted_factory_file_checks_the_symlink_target_dir() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::TempDir::new().unwrap();
+        let shared = dir.path().join("shared");
+        std::fs::create_dir(&shared).unwrap();
+        let target = shared.join("factory.bin");
+        write_factory_file(&target, |w| w.write_all(b"factory")).unwrap();
+        std::fs::set_permissions(&shared, std::fs::Permissions::from_mode(0o777)).unwrap();
+        let link = dir.path().join("factory.bin");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+
+        assert!(open_trusted_factory_file(&link).is_err());
     }
 }
