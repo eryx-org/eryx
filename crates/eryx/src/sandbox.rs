@@ -905,15 +905,34 @@ impl Drop for ExecutionHandle {
     }
 }
 
-/// Shared pre-compiled component bytes with an optional content-derived cache key.
+/// A shared pre-compiled component with an optional content-derived cache key.
 ///
-/// This type keeps the bytes and cache key together so callers cannot associate
-/// a cache entry with different component bytes.
+/// The component is either held as bytes in memory or memory-mapped from a
+/// file (see [`Self::from_file`]). This type keeps the component and cache key
+/// together so callers cannot associate a cache entry with a different
+/// component.
 #[cfg(any(feature = "embedded", feature = "preinit"))]
 #[derive(Clone)]
 pub struct PrecompiledArtifact {
-    bytes: Arc<Vec<u8>>,
+    component: ArtifactComponent,
     cache_key: Option<crate::cache::CacheKey>,
+}
+
+#[cfg(any(feature = "embedded", feature = "preinit"))]
+#[derive(Clone)]
+enum ArtifactComponent {
+    Bytes(Arc<Vec<u8>>),
+    Mapped(Arc<MappedComponent>),
+}
+
+/// A component memory-mapped from the first `len` bytes of `file`.
+#[cfg(any(feature = "embedded", feature = "preinit"))]
+struct MappedComponent {
+    component: wasmtime::component::Component,
+    /// Kept open so [`PrecompiledArtifact::write_to`] reads the file that was
+    /// mapped even if the path is later replaced.
+    file: Mutex<std::fs::File>,
+    len: u64,
 }
 
 #[cfg(any(feature = "embedded", feature = "preinit"))]
@@ -922,7 +941,7 @@ impl PrecompiledArtifact {
     #[must_use]
     pub fn new(bytes: Vec<u8>) -> Self {
         Self {
-            bytes: Arc::new(bytes),
+            component: ArtifactComponent::Bytes(Arc::new(bytes)),
             cache_key: None,
         }
     }
@@ -936,27 +955,149 @@ impl PrecompiledArtifact {
     pub fn new_cached(bytes: Vec<u8>) -> Self {
         let cache_key = crate::cache::CacheKey::from_precompiled(&bytes);
         Self {
-            bytes: Arc::new(bytes),
+            component: ArtifactComponent::Bytes(Arc::new(bytes)),
             cache_key: Some(cache_key),
         }
     }
 
-    /// Access the pre-compiled component bytes.
-    #[must_use]
-    pub fn as_bytes(&self) -> &[u8] {
-        self.bytes.as_slice()
+    /// Create an uncached artifact by memory-mapping a pre-compiled component
+    /// from a file, without reading it into memory.
+    ///
+    /// The component occupies the first `len` bytes of the file; anything
+    /// after it is ignored. The file is mapped once, here, so its code pages
+    /// are file-backed and shared with other processes mapping the same file.
+    ///
+    /// # Safety
+    ///
+    /// The file must hold trusted output of [`PythonExecutor::precompile`],
+    /// and must not be modified in place while the artifact is alive. Replacing
+    /// it by renaming a new file over the path is safe.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the file cannot be opened, is shorter than `len`,
+    /// or does not hold a component compatible with the current engine.
+    #[allow(unsafe_code)]
+    pub unsafe fn from_file(path: impl AsRef<std::path::Path>, len: u64) -> Result<Self, Error> {
+        // SAFETY: The caller guarantees the file is trusted and unmodified.
+        unsafe { Self::from_file_inner(path.as_ref(), len, false) }
+    }
+
+    /// Like [`Self::from_file`], but also computes a content-derived cache key
+    /// (streaming the component through the hash), so equivalent artifacts
+    /// share the process-global [`crate::cache::InstancePreCache`].
+    ///
+    /// The key matches [`Self::new_cached`] for the same component bytes.
+    ///
+    /// # Safety
+    ///
+    /// Same as [`Self::from_file`].
+    ///
+    /// # Errors
+    ///
+    /// Same as [`Self::from_file`].
+    #[cfg(feature = "embedded")]
+    #[allow(unsafe_code)]
+    pub unsafe fn from_file_cached(
+        path: impl AsRef<std::path::Path>,
+        len: u64,
+    ) -> Result<Self, Error> {
+        // SAFETY: The caller guarantees the file is trusted and unmodified.
+        unsafe { Self::from_file_inner(path.as_ref(), len, true) }
+    }
+
+    #[allow(unsafe_code)]
+    unsafe fn from_file_inner(
+        path: &std::path::Path,
+        len: u64,
+        cached: bool,
+    ) -> Result<Self, Error> {
+        let io_err = |e: std::io::Error| {
+            Error::Initialization(format!(
+                "failed to read pre-compiled component {}: {e}",
+                path.display()
+            ))
+        };
+        let file = std::fs::File::open(path).map_err(io_err)?;
+        let file_len = file.metadata().map_err(io_err)?.len();
+        if file_len < len {
+            return Err(Error::Initialization(format!(
+                "pre-compiled component {} is {file_len} bytes, expected at least {len}",
+                path.display()
+            )));
+        }
+
+        #[cfg(feature = "embedded")]
+        let cache_key = if cached {
+            use std::io::Read as _;
+            let key = crate::cache::CacheKey::from_precompiled_reader((&file).take(len));
+            Some(key.map_err(io_err)?)
+        } else {
+            None
+        };
+        #[cfg(not(feature = "embedded"))]
+        let cache_key = {
+            let _ = cached;
+            None
+        };
+
+        // SAFETY: The caller guarantees the file is trusted and unmodified.
+        let component = unsafe { PythonExecutor::deserialize_component_file(path)? };
+
+        Ok(Self {
+            component: ArtifactComponent::Mapped(Arc::new(MappedComponent {
+                component,
+                file: Mutex::new(file),
+                len,
+            })),
+            cache_key,
+        })
+    }
+
+    /// Write the pre-compiled component bytes to `writer`.
+    ///
+    /// For a file-backed artifact this streams from the mapped file without
+    /// buffering the whole component.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if reading the backing file or writing fails.
+    pub fn write_to(&self, writer: &mut impl std::io::Write) -> std::io::Result<()> {
+        use std::io::{Read as _, Seek as _};
+
+        match &self.component {
+            ArtifactComponent::Bytes(bytes) => writer.write_all(bytes),
+            ArtifactComponent::Mapped(mapped) => {
+                let mut file = mapped
+                    .file
+                    .lock()
+                    .map_err(|_| std::io::Error::other("artifact file lock poisoned"))?;
+                file.seek(std::io::SeekFrom::Start(0))?;
+                let copied = std::io::copy(&mut (&mut *file).take(mapped.len), writer)?;
+                if copied != mapped.len {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::UnexpectedEof,
+                        "pre-compiled component file was truncated",
+                    ));
+                }
+                Ok(())
+            }
+        }
     }
 
     /// Return the size of the pre-compiled component in bytes.
     #[must_use]
     pub fn len(&self) -> usize {
-        self.bytes.len()
+        match &self.component {
+            ArtifactComponent::Bytes(bytes) => bytes.len(),
+            ArtifactComponent::Mapped(mapped) => usize::try_from(mapped.len).unwrap_or(usize::MAX),
+        }
     }
 
     /// Return whether the pre-compiled component is empty.
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.bytes.is_empty()
+        self.len() == 0
     }
 
     /// Build a [`PythonExecutor`] from this artifact, consulting the
@@ -964,7 +1105,9 @@ impl PrecompiledArtifact {
     /// cache key.
     ///
     /// On a cache hit this skips deserializing the component bytes. Artifacts
-    /// without a cache key use the uncached loading path.
+    /// without a cache key use the uncached loading path. File-backed
+    /// artifacts never deserialize again: they reuse the component mapped in
+    /// [`Self::from_file`].
     ///
     /// # Safety
     ///
@@ -973,19 +1116,30 @@ impl PrecompiledArtifact {
     /// trusted components.
     #[allow(unsafe_code)]
     pub unsafe fn to_executor(&self) -> std::result::Result<PythonExecutor, Error> {
+        let bytes = match &self.component {
+            ArtifactComponent::Bytes(bytes) => bytes,
+            ArtifactComponent::Mapped(mapped) => {
+                #[cfg(feature = "embedded")]
+                return PythonExecutor::from_deserialized_component(
+                    &mapped.component,
+                    self.cache_key.clone(),
+                );
+                #[cfg(not(feature = "embedded"))]
+                return PythonExecutor::from_deserialized_component(&mapped.component);
+            }
+        };
+
         #[cfg(feature = "embedded")]
         if let Some(key) = &self.cache_key {
             // SAFETY: The caller guarantees that the artifact bytes are trusted.
             #[allow(unsafe_code)]
-            return unsafe {
-                PythonExecutor::from_precompiled_with_key(self.as_bytes(), key.clone())
-            };
+            return unsafe { PythonExecutor::from_precompiled_with_key(bytes, key.clone()) };
         }
 
         // SAFETY: The caller guarantees that the artifact bytes are trusted.
         #[allow(unsafe_code)]
         unsafe {
-            PythonExecutor::from_precompiled(self.as_bytes())
+            PythonExecutor::from_precompiled(bytes)
         }
     }
 }
@@ -994,7 +1148,11 @@ impl PrecompiledArtifact {
 impl std::fmt::Debug for PrecompiledArtifact {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("PrecompiledArtifact")
-            .field("size_bytes", &self.bytes.len())
+            .field("size_bytes", &self.len())
+            .field(
+                "mapped",
+                &matches!(self.component, ArtifactComponent::Mapped(_)),
+            )
             .field("cached", &self.cache_key.is_some())
             .finish()
     }

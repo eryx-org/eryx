@@ -140,12 +140,29 @@ impl CacheKey {
     #[cfg(feature = "embedded")]
     #[must_use]
     pub(crate) fn from_precompiled(precompiled: &[u8]) -> Self {
-        let mut hasher = blake3::Hasher::new_derive_key("eryx precompiled component cache key v1");
+        let mut hasher = Self::precompiled_hasher();
         hasher.update(precompiled);
-        let extensions_hash = *hasher.finalize().as_bytes();
+        Self::from_precompiled_hasher(&hasher)
+    }
 
+    /// Compute the same key as [`Self::from_precompiled`] by streaming the
+    /// component bytes from `reader`, without buffering them in memory.
+    #[cfg(feature = "embedded")]
+    pub(crate) fn from_precompiled_reader(reader: impl io::Read) -> io::Result<Self> {
+        let mut hasher = Self::precompiled_hasher();
+        hasher.update_reader(reader)?;
+        Ok(Self::from_precompiled_hasher(&hasher))
+    }
+
+    #[cfg(feature = "embedded")]
+    fn precompiled_hasher() -> blake3::Hasher {
+        blake3::Hasher::new_derive_key("eryx precompiled component cache key v1")
+    }
+
+    #[cfg(feature = "embedded")]
+    fn from_precompiled_hasher(hasher: &blake3::Hasher) -> Self {
         Self {
-            extensions_hash,
+            extensions_hash: *hasher.finalize().as_bytes(),
             eryx_version: env!("CARGO_PKG_VERSION"),
             wasmtime_version: wasmtime_version(),
         }
@@ -716,6 +733,13 @@ mod tests {
         assert_ne!(key1, key3);
         // Different length with shared prefix -> different key
         assert_ne!(key1, key4);
+    }
+
+    #[cfg(feature = "embedded")]
+    #[test]
+    fn from_precompiled_reader_matches_bytes_key() {
+        let key = CacheKey::from_precompiled_reader(&b"abc"[..]).unwrap();
+        assert_eq!(key, CacheKey::from_precompiled(b"abc"));
     }
 
     #[test]

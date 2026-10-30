@@ -2341,6 +2341,77 @@ impl PythonExecutor {
         })
     }
 
+    /// Memory-map a pre-compiled component from a file with the shared engine.
+    ///
+    /// Wasmtime ignores any bytes after the component, so the file may carry
+    /// trailing data.
+    ///
+    /// # Safety
+    ///
+    /// The file must hold trusted output of `precompile()`, and must not be
+    /// modified while the returned component is alive.
+    #[cfg(any(feature = "embedded", feature = "preinit"))]
+    #[allow(unsafe_code)]
+    pub(crate) unsafe fn deserialize_component_file(
+        path: &std::path::Path,
+    ) -> std::result::Result<Component, Error> {
+        let engine = Self::shared_engine()?;
+        // SAFETY: Caller guarantees the file is trusted and stays unmodified.
+        unsafe { Component::deserialize_file(&engine, path) }.map_err(Error::WasmComponent)
+    }
+
+    /// Create a new executor from a component returned by
+    /// [`Self::deserialize_component_file`], consulting [`InstancePreCache`]
+    /// when a cache key is provided.
+    #[cfg(feature = "embedded")]
+    pub(crate) fn from_deserialized_component(
+        component: &Component,
+        cache_key: Option<CacheKey>,
+    ) -> std::result::Result<Self, Error> {
+        let engine = Self::shared_engine()?;
+
+        let cached = cache_key
+            .as_ref()
+            .and_then(|key| InstancePreCache::global().get(key));
+        let instance_pre = match cached {
+            Some(instance_pre) => instance_pre,
+            None => {
+                let instance_pre = Self::create_instance_pre(&engine, component)?;
+                if let Some(key) = cache_key {
+                    InstancePreCache::global().put(key, instance_pre.clone());
+                }
+                instance_pre
+            }
+        };
+
+        Ok(Self {
+            engine,
+            instance_pre,
+            python_stdlib_path: None,
+            python_site_packages_paths: Vec::new(),
+            result_variable: "result".to_string(),
+            packages: Vec::new(),
+        })
+    }
+
+    /// Create a new executor from a component returned by
+    /// [`Self::deserialize_component_file`].
+    #[cfg(all(feature = "preinit", not(feature = "embedded")))]
+    pub(crate) fn from_deserialized_component(
+        component: &Component,
+    ) -> std::result::Result<Self, Error> {
+        let engine = Self::shared_engine()?;
+        let instance_pre = Self::create_instance_pre(&engine, component)?;
+        Ok(Self {
+            engine,
+            instance_pre,
+            python_stdlib_path: None,
+            python_site_packages_paths: Vec::new(),
+            result_variable: "result".to_string(),
+            packages: Vec::new(),
+        })
+    }
+
     /// Create a new executor by loading a pre-compiled component from a file.
     ///
     /// This is much faster than `from_file` because it skips compilation.
