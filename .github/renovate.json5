@@ -90,6 +90,13 @@
 
     // ------------------------------------------------------------------
     // wasm-bindgen crate (Cargo) and CLI (mise) must match exactly.
+    //
+    // js-sys, web-sys and wasm-bindgen-futures (transitive, via reqwest) pin
+    // wasm-bindgen with `=`, so a lock-only bump can't move it: Renovate runs
+    // one `cargo update --precise` per dep and each fails on the others' pins
+    // (#697). The workspace dep is therefore `=`-pinned too; a pin change
+    // makes Renovate run `cargo update --workspace`, which re-resolves the
+    // whole family together.
     // ------------------------------------------------------------------
     {
       groupName: "wasm-bindgen",
