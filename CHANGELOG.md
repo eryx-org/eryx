@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## `eryx-precompile` - [0.13.0](https://github.com/eryx-org/eryx/compare/eryx-precompile-v0.12.1...eryx-precompile-v0.13.0) - 2026-10-31
+
+### Other
+- update Cargo.lock dependencies
+
+## `eryx` - [0.13.0](https://github.com/eryx-org/eryx/compare/eryx-v0.12.1...eryx-v0.13.0) - 2026-10-31
+
+### Added
+- [**breaking**] memory-map pre-compiled factory and runtime files ([#699](https://github.com/eryx-org/eryx/pull/699))
+
+## `eryx-runtime` - [0.13.0](https://github.com/eryx-org/eryx/compare/eryx-runtime-v0.12.1...eryx-runtime-v0.13.0) - 2026-10-31
+
+### Other
+- update Cargo.toml dependencies
+
 ## `eryx` - [0.12.1](https://github.com/eryx-org/eryx/compare/eryx-v0.12.0...eryx-v0.12.1) - 2026-10-27
 
 ### Fixed
