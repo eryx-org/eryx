@@ -199,6 +199,9 @@ export { DEFAULT_BLOCKED_HOSTS, DEFAULT_BLOCKED_NETWORKS } from "./shims/net.js"
  *   and want to parse them yourself.
  * @property {string} [resultError] - Why result capture failed (e.g. the value was
  *   not JSON-serializable), or undefined on success.
+ * @property {boolean} stateWasReset - Whether the sandbox lost its Python state
+ *   before this run because an earlier call hit `timeoutMs` and its Worker was
+ *   replaced. Reported once, by the first successful run after the reset.
  */
 
 /**
@@ -329,6 +332,8 @@ export class Sandbox {
   #slot = { worker: null, closed: /** @type {Error | null} */ (null) };
   /** The last name passed to setResultVariable(), re-applied after a restart. */
   #resultVariable;
+  /** Set when a timeout restarts the Worker; reported by the next execution. */
+  #stateWasReset = false;
   // The tail of the queue of calls into this instance. Each call starts only
   // after the previous one settles, so executions never overlap: the journal
   // and the streaming output decoders belong to the instance, and jco can't
@@ -440,6 +445,7 @@ export class Sandbox {
     // which executeWithJournal() then reports like any other failure.
     const timer = setTimeout(() => {
       instance.terminate(new TimeoutError(this.#timeoutMs));
+      this.#stateWasReset = true;
       this.#start();
     }, this.#timeoutMs);
     try {
@@ -460,7 +466,10 @@ export class Sandbox {
     try {
       // Frame the code with an empty preamble (see the guest's PREAMBLE_HEADER),
       // so a leading header-like line in user code isn't misparsed.
-      return _toResult(await instance.execute(`#eryx-preamble:0\n${code}`));
+      const result = _toResult(await instance.execute(`#eryx-preamble:0\n${code}`));
+      result.stateWasReset = this.#stateWasReset;
+      this.#stateWasReset = false;
+      return result;
     } finally {
       this.#host.flushOutput();
     }
