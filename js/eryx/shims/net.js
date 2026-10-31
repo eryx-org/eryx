@@ -105,11 +105,19 @@ function checkCount(name, value) {
   return value;
 }
 
+/** A timeout above zero, or a TypeError: zero would time out every connection, as in Rust. */
+function checkTimeout(name, value) {
+  if (typeof value !== "number" || !(value > 0)) {
+    throw new TypeError(`${name} must be greater than zero, got ${value}`);
+  }
+  return value;
+}
+
 /**
  * Check `netConfig` and fill in the defaults; null disables networking.
  *
- * Throws a TypeError if a network is not a valid CIDR or maxConnections is
- * not a non-negative integer.
+ * Throws a TypeError if a network is not a valid CIDR, maxConnections is
+ * not a non-negative integer, or a timeout is not greater than zero.
  *
  * @param {import("./net.js").NetConfig | null} netConfig
  * @returns {Policy | null}
@@ -126,8 +134,8 @@ function toPolicy(netConfig) {
     allowedNetworks: checkCidrs(list(netConfig.allowedNetworks, [])),
     internalHosts: list(netConfig.internalHosts, []),
     maxConnections: checkCount("maxConnections", netConfig.maxConnections ?? DEFAULT_MAX_CONNECTIONS),
-    connectTimeoutMs: netConfig.connectTimeoutMs ?? DEFAULT_CONNECT_TIMEOUT_MS,
-    ioTimeoutMs: netConfig.ioTimeoutMs ?? DEFAULT_IO_TIMEOUT_MS,
+    connectTimeoutMs: checkTimeout("connectTimeoutMs", netConfig.connectTimeoutMs ?? DEFAULT_CONNECT_TIMEOUT_MS),
+    ioTimeoutMs: checkTimeout("ioTimeoutMs", netConfig.ioTimeoutMs ?? DEFAULT_IO_TIMEOUT_MS),
   };
   return Object.freeze({ ...next, isAllowed: transport.networkFilter(next) });
 }

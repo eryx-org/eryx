@@ -41,9 +41,10 @@ export interface NetConfig {
   /**
    * Ceiling for connect and TLS handshake timeouts, in milliseconds (default
    * 30000). Sandboxed code can set a shorter timeout, never a longer one.
+   * Must be greater than zero.
    */
   connectTimeoutMs?: number;
-  /** Ceiling for read and write timeouts, in milliseconds (default 60000). */
+  /** Ceiling for read and write timeouts, in milliseconds (default 60000; greater than zero). */
   ioTimeoutMs?: number;
 }
 
