@@ -928,7 +928,7 @@ enum ArtifactComponent {
 /// A component memory-mapped from the first `len` bytes of `file`.
 #[cfg(any(feature = "embedded", feature = "preinit"))]
 struct MappedComponent {
-    component: wasmtime::component::Component,
+    component: crate::wasm::DeserializedComponent,
     /// The mapped file, kept so [`PrecompiledArtifact::write_to`] reads it
     /// even if its path is later replaced.
     file: Mutex<std::fs::File>,
@@ -1228,11 +1228,11 @@ impl PrecompiledFileSource {
                 ))
             })?;
             let len = file.metadata().map_err(component_read_error)?.len();
+            // No cache key: hashing the whole file would cost more than the
+            // mapping it could save, and the artifact already shares its
+            // linked component with every clone of this builder.
             // SAFETY: The caller guarantees the file is trusted and unmodified.
-            #[cfg(feature = "embedded")]
-            return unsafe { PrecompiledArtifact::from_file_cached(file, len) };
-            #[cfg(not(feature = "embedded"))]
-            return unsafe { PrecompiledArtifact::from_file(file, len) };
+            unsafe { PrecompiledArtifact::from_file(file, len) }
         })?;
         // SAFETY: The caller guarantees the file is trusted.
         unsafe { artifact.to_executor() }
