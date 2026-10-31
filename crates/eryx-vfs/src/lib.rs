@@ -59,7 +59,7 @@ pub use storage::{
     ArcStorage, DEFAULT_MAX_BYTES, DirEntry, ENTRY_OVERHEAD_BYTES, InMemorySnapshot,
     InMemoryStorage, MAX_ENTRIES, Metadata, VfsStorage,
 };
-pub use wasi_impl::{VfsCtx, VfsDescriptor, VfsReaddirIterator, VfsState};
+pub use wasi_impl::{VfsCtx, VfsReaddirIterator, VfsState};
 
 // Permission types. Vendored rather than re-exported from wasmtime-wasi, which
 // collapsed them into a coarse `FsPerms` in wasmtime 48 — see `perms`.

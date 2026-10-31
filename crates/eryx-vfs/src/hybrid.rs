@@ -485,7 +485,7 @@ impl std::fmt::Debug for HybridPreopen {
 /// beneath it stays on the same side.
 pub struct HybridVfsCtx<S: VfsStorage + Clone> {
     /// The VFS storage backend for virtual paths.
-    pub storage: S,
+    pub(crate) storage: S,
     /// Preopened directories (both VFS and real).
     pub(crate) preopens: Vec<HybridPreopen>,
     /// Host files and directories the guest has opened. A handle stays open
