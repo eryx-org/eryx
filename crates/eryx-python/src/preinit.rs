@@ -66,6 +66,9 @@ pub struct SandboxFactory {
     /// factory. Children hold an `Arc` clone, so the runtime outlives the
     /// factory when children still exist.
     runtime: Arc<tokio::runtime::Runtime>,
+    /// The engine every sandbox, session and pool from this factory runs on;
+    /// `None` is the shared engine.
+    engine: Option<eryx::Engine>,
 }
 
 /// Construct a pre-compiled artifact with optional content-safe caching.
@@ -86,7 +89,7 @@ type LoadedFactory = (
 
 /// Load a factory file: map its component (v1, v3) or read it into memory
 /// (legacy v2), and extract its data files.
-fn load_factory_file(path: &Path, cache: bool) -> PyResult<LoadedFactory> {
+fn load_factory_file(engine: &eryx::Engine, path: &Path, cache: bool) -> PyResult<LoadedFactory> {
     use std::io::{Read as _, Seek as _};
 
     let load_err = |e: std::io::Error| {
@@ -137,13 +140,16 @@ fn load_factory_file(path: &Path, cache: bool) -> PyResult<LoadedFactory> {
             #[allow(unsafe_code)]
             let precompiled = unsafe {
                 match (cache, component_hash) {
-                    (true, Some(hash)) => {
-                        eryx::PrecompiledArtifact::from_file_with_hash(file, component_len, hash)
-                    }
+                    (true, Some(hash)) => eryx::PrecompiledArtifact::from_file_with_hash(
+                        engine,
+                        file,
+                        component_len,
+                        hash,
+                    ),
                     (true, None) => {
-                        eryx::PrecompiledArtifact::from_file_cached(file, component_len)
+                        eryx::PrecompiledArtifact::from_file_cached(engine, file, component_len)
                     }
-                    (false, _) => eryx::PrecompiledArtifact::from_file(file, component_len),
+                    (false, _) => eryx::PrecompiledArtifact::from_file(engine, file, component_len),
                 }
             }
             .map_err(eryx_error_to_py)?;
@@ -177,6 +183,8 @@ impl SandboxFactory {
     ///         factory construction and subsequent ``create_sandbox()`` calls skip
     ///         component deserialization entirely (~0.8ms vs ~8ms per call).
     ///         Defaults to True.
+    ///     engine: Optional `Engine` for every sandbox, session and pool this
+    ///         factory creates, instead of the shared one.
     ///
     /// Returns:
     ///     A SandboxFactory ready to create sandboxes with packages.
@@ -200,7 +208,8 @@ impl SandboxFactory {
     ///     ])
     ///     sandbox = factory.create_sandbox()  # get_time() available, no setup cost
     #[new]
-    #[pyo3(signature = (*, site_packages=None, packages=None, imports=None, setup_code=None, callbacks=None, cache=true))]
+    #[pyo3(signature = (*, site_packages=None, packages=None, imports=None, setup_code=None, callbacks=None, cache=true, engine=None))]
+    #[allow(clippy::too_many_arguments)] // one parameter per Python keyword argument
     fn new(
         py: Python<'_>,
         site_packages: Option<PathBuf>,
@@ -209,6 +218,7 @@ impl SandboxFactory {
         setup_code: Option<String>,
         callbacks: Option<Bound<'_, PyAny>>,
         cache: bool,
+        engine: Option<PyRef<'_, crate::engine::Engine>>,
     ) -> PyResult<Self> {
         let runtime = crate::error::make_runtime()?;
 
@@ -265,6 +275,7 @@ impl SandboxFactory {
             callbacks: callbacks.map(Bound::unbind),
             data_files_dir: None,
             runtime,
+            engine: engine.map(|engine| engine.inner.clone()),
         })
     }
 
@@ -295,6 +306,9 @@ impl SandboxFactory {
     ///         cache. When enabled, a BLAKE3 content hash is computed once during
     ///         loading and subsequent ``create_sandbox()`` calls reuse the linked
     ///         component instead of re-linking it per call. Defaults to True.
+    ///     engine: Optional `Engine` for every sandbox, session and pool this
+    ///         factory creates, instead of the shared one. The file is mapped
+    ///         into it.
     ///
     /// Returns:
     ///     A SandboxFactory loaded from the file.
@@ -306,12 +320,13 @@ impl SandboxFactory {
     ///     factory = SandboxFactory.load("/path/to/jinja2-factory.bin")
     ///     sandbox = factory.create_sandbox()
     #[staticmethod]
-    #[pyo3(signature = (path, *, site_packages=None, callbacks=None, cache=true))]
+    #[pyo3(signature = (path, *, site_packages=None, callbacks=None, cache=true, engine=None))]
     fn load(
         path: PathBuf,
         site_packages: Option<PathBuf>,
         callbacks: Option<Bound<'_, PyAny>>,
         cache: bool,
+        engine: Option<PyRef<'_, crate::engine::Engine>>,
     ) -> PyResult<Self> {
         let runtime = crate::error::make_runtime()?;
 
@@ -319,7 +334,10 @@ impl SandboxFactory {
         let embedded = eryx::embedded::EmbeddedResources::get().map_err(eryx_error_to_py)?;
         let stdlib_path = embedded.stdlib().to_path_buf();
 
-        let (precompiled, data_files_dir, data_files_path) = load_factory_file(&path, cache)?;
+        // The component is mapped into the engine here, so it must be known now.
+        let engine = crate::engine::resolve(engine.as_deref())?;
+        let (precompiled, data_files_dir, data_files_path) =
+            load_factory_file(&engine, &path, cache)?;
 
         let site_packages_path = site_packages.or(data_files_path);
 
@@ -331,6 +349,7 @@ impl SandboxFactory {
             callbacks: callbacks.map(Bound::unbind),
             data_files_dir: data_files_dir.map(Arc::new),
             runtime,
+            engine: Some(engine),
         })
     }
 
@@ -416,7 +435,8 @@ impl SandboxFactory {
     ) -> PyResult<Session> {
         // SAFETY: the bytes were produced by `PythonExecutor::precompile` or
         // loaded from a factory file created by this same API.
-        let mut executor = unsafe { self.precompiled.to_executor() }.map_err(|e| {
+        let engine = crate::engine::resolve_shared(self.engine.as_ref())?;
+        let mut executor = unsafe { self.precompiled.to_executor(&engine) }.map_err(|e| {
             InitializationError::new_err(format!("failed to load factory runtime: {e}"))
         })?;
         executor = executor.with_python_stdlib(&self.stdlib_path);
@@ -527,6 +547,9 @@ impl SandboxFactory {
                 .with_python_stdlib(&self.stdlib_path)
                 .with_trace_collection(false)
         };
+        if let Some(engine) = &self.engine {
+            builder = builder.with_engine(engine.clone());
+        }
 
         if let Some(path) = site_packages_path {
             builder = builder.with_site_packages(path);
@@ -621,7 +644,8 @@ impl SandboxFactory {
     /// queue is empty and a new sandbox must be created, it skips component
     /// deserialization (~1ms with caching enabled). Per-request state
     /// (callbacks, output handlers, resource limits) is set on each
-    /// ``acquire()`` call and cleared automatically on release.
+    /// ``acquire()`` call and cleared automatically on release. The pool's
+    /// sandboxes run on the factory's ``engine``.
     ///
     /// Args:
     ///     max_size: Maximum concurrent sandboxes. Default: 10.
@@ -678,6 +702,7 @@ impl SandboxFactory {
         // that can recreate sandboxes. The PrecompiledArtifact's BLAKE3 cache
         // means deserialization is skipped on repeated calls.
         let precompiled = self.precompiled.clone();
+        let engine = self.engine.clone();
         let stdlib_path = self.stdlib_path.clone();
         let site_packages_path = self.site_packages_path.clone();
         let network: Option<eryx::NetConfig> = network.map(Into::into);
@@ -696,6 +721,9 @@ impl SandboxFactory {
                     .with_python_stdlib(&stdlib_path)
                     .with_trace_collection(false)
             };
+            if let Some(ref engine) = engine {
+                builder = builder.with_engine(engine.clone());
+            }
             if let Some(ref path) = site_packages_path {
                 builder = builder.with_site_packages(path);
             }

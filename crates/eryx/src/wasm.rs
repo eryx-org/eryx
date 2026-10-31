@@ -44,7 +44,7 @@ use crate::callback::Callback;
 use crate::error::Error;
 use crate::fork_local::ForkLocal;
 use crate::trace::TraceEvent;
-use crate::warm::{WarmInstance, WarmPool};
+use crate::warm::WarmInstance;
 
 /// Interval between increments of the process-wide epoch ticker.
 pub(crate) const EPOCH_TICK_INTERVAL: Duration = Duration::from_millis(10);
@@ -102,21 +102,32 @@ impl<T> RetryableOnce<T> {
 /// executor has been built from it.
 #[cfg(any(feature = "embedded", feature = "preinit"))]
 pub(crate) struct DeserializedComponent {
+    engine: crate::Engine,
     component: Component,
     instance_pre: RetryableOnce<SandboxPre<ExecutorState>>,
 }
 
-/// A process-lifetime epoch ticker.
+#[cfg(any(feature = "embedded", feature = "preinit"))]
+impl DeserializedComponent {
+    /// The engine the component was mapped into.
+    pub(crate) fn engine(&self) -> &crate::Engine {
+        &self.engine
+    }
+}
+
+/// A process-lifetime epoch ticker, advancing every registered engine.
 struct EpochTicker {
     handle: std::thread::JoinHandle<()>,
+    /// The engines to tick; dropped engines are pruned as the thread finds them.
+    engines: Arc<Mutex<Vec<wasmtime::EngineWeak>>>,
     /// The process that started the thread: a forked child inherits this
     /// handle but not the thread, so its epochs would never advance.
     pid: u32,
 }
 
 impl EpochTicker {
-    fn start(engine: &Engine) -> std::result::Result<Self, Error> {
-        let ticker_engine = engine.clone();
+    fn start(engines: Arc<Mutex<Vec<wasmtime::EngineWeak>>>) -> std::result::Result<Self, Error> {
+        let ticker_engines = Arc::clone(&engines);
 
         // Use a dedicated OS thread because guest execution can block the Tokio
         // runtime. Epochs must continue advancing independently of async scheduling.
@@ -125,7 +136,15 @@ impl EpochTicker {
             .spawn(move || {
                 loop {
                     std::thread::sleep(EPOCH_TICK_INTERVAL);
-                    ticker_engine.increment_epoch();
+                    ticker_engines
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .retain(|engine| {
+                            engine
+                                .upgrade()
+                                .map(|engine| engine.increment_epoch())
+                                .is_some()
+                        });
                 }
             })
             .map_err(|error| {
@@ -134,8 +153,24 @@ impl EpochTicker {
 
         Ok(Self {
             handle,
+            engines,
             pid: std::process::id(),
         })
+    }
+
+    /// Start ticking `engine` too, if it is not already.
+    fn register(&self, engine: &Engine) {
+        let mut engines = self
+            .engines
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let registered = engines.iter().any(|weak| {
+            weak.upgrade()
+                .is_some_and(|other| Engine::same(&other, engine))
+        });
+        if !registered {
+            engines.push(engine.weak());
+        }
     }
 }
 
@@ -180,7 +215,8 @@ pub(crate) fn is_already_cancelled(token: Option<&CancellationToken>) -> bool {
     token.is_some_and(CancellationToken::is_cancelled)
 }
 
-/// Start or restart the process-lifetime epoch ticker for the shared engine.
+/// Start or restart the process-lifetime epoch ticker, and have it tick
+/// `engine`.
 pub(crate) fn ensure_epoch_ticker(engine: &Engine) -> std::result::Result<(), Error> {
     // Per process, so a forked child never waits on a lock it inherited.
     static EPOCH_TICKER: ForkLocal<Mutex<Option<EpochTicker>>> =
@@ -190,12 +226,13 @@ pub(crate) fn ensure_epoch_ticker(engine: &Engine) -> std::result::Result<(), Er
         .get()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    if observe_epoch_ticker(&mut ticker)? {
-        return Ok(());
+    if !observe_epoch_ticker(&mut ticker)? {
+        // Spawn errors are deliberately not cached. A later execution can retry.
+        *ticker = Some(EpochTicker::start(Arc::default())?);
     }
-
-    // Spawn errors are deliberately not cached. A later execution can retry.
-    *ticker = Some(EpochTicker::start(engine)?);
+    if let Some(ticker) = ticker.as_ref() {
+        ticker.register(engine);
+    }
     Ok(())
 }
 
@@ -628,9 +665,9 @@ impl std::str::FromStr for CpuFeatureLevel {
 /// How the shared engine allocates instance resources (linear memories,
 /// tables, and async stacks).
 ///
-/// Read from the environment rather than a builder because the engine is
-/// process-global ([`PythonExecutor::shared_engine`]) and is created before
-/// any sandbox configuration exists.
+/// Each [`Engine`](crate::Engine) has its own: [`Engine::shared`](crate::Engine::shared)
+/// reads it from the environment, [`Engine::new`](crate::Engine::new) from an
+/// [`EngineConfig`](crate::EngineConfig) with the same names and parsing.
 ///
 /// - `ERYX_ALLOCATOR`: `pooling` (default, except on Windows) or `on-demand`.
 /// - `ERYX_POOL_INSTANCES`: maximum concurrently live sandbox instances with
@@ -718,12 +755,10 @@ impl AllocatorSettings {
     /// nothing.
     const COMPONENT_INSTANCE_SIZE: usize = 64 << 20;
 
-    pub(crate) fn from_env() -> std::result::Result<Self, Error> {
-        Self::from_lookup(|name| std::env::var(name).ok())
-    }
-
     /// Parse the settings from `lookup`, a view of the environment.
-    fn from_lookup(lookup: impl Fn(&str) -> Option<String>) -> std::result::Result<Self, Error> {
+    pub(crate) fn from_lookup(
+        lookup: impl Fn(&str) -> Option<String>,
+    ) -> std::result::Result<Self, Error> {
         let mut settings = Self::default();
 
         match lookup("ERYX_ALLOCATOR") {
@@ -826,17 +861,21 @@ impl AllocatorSettings {
 /// are untouched; a slot released while traffic continues costs one slower
 /// instantiation per interval.
 ///
-/// Does nothing for an engine without the pooling allocator.
+/// Does nothing for an engine without the pooling allocator. The thread
+/// exits once the engine has been dropped.
 fn start_pool_release(engine: &Engine, interval: Duration) {
     if engine.pooling_allocator_metrics().is_none() {
         return;
     }
-    let engine = engine.clone();
+    let engine = engine.weak();
     let spawned = std::thread::Builder::new()
         .name("eryx-pool-release".to_string())
         .spawn(move || {
             loop {
                 std::thread::sleep(interval);
+                let Some(engine) = engine.upgrade() else {
+                    return;
+                };
                 let released = engine.release_idle_pool_memory();
                 if released > 0 {
                     tracing::debug!(released, "released unused pooling allocator memory");
@@ -2020,8 +2059,8 @@ pub(crate) fn site_packages_mount_path(index: usize) -> String {
 /// call only needs to create a new store and instantiate from the
 /// pre-compiled template, which is much faster.
 pub struct PythonExecutor {
-    /// The wasmtime engine (shared configuration).
-    engine: Engine,
+    /// The engine the component was loaded into.
+    engine: crate::Engine,
     /// Pre-instantiated component - linking is already done.
     instance_pre: SandboxPre<ExecutorState>,
     /// Path to the Python standard library directory.
@@ -2058,6 +2097,12 @@ impl PythonExecutor {
     /// Get a reference to the wasmtime engine.
     #[must_use]
     pub fn engine(&self) -> &Engine {
+        self.engine.wasmtime()
+    }
+
+    /// The [`Engine`](crate::Engine) this executor runs on.
+    #[must_use]
+    pub fn sandbox_engine(&self) -> &crate::Engine {
         &self.engine
     }
 
@@ -2071,13 +2116,15 @@ impl PythonExecutor {
     /// executor's component.
     ///
     /// Stateless executions take one of these instead of instantiating, and a
-    /// background task replaces it afterwards. The pool is shared by every
-    /// executor loading the same component and sized by `ERYX_WARM_INSTANCES`
-    /// (default 1, `0` disables it); it is only used on a multi-threaded Tokio
-    /// runtime.
+    /// background task replaces it afterwards. The pool belongs to the
+    /// executor's [`Engine`](crate::Engine), is shared by every executor on it
+    /// loading the same component, and is sized by
+    /// [`EngineConfig::with_warm_instances`](crate::EngineConfig::with_warm_instances)
+    /// or, for the shared engine, `ERYX_WARM_INSTANCES` (default 1, `0`
+    /// disables it); it is only used on a multi-threaded Tokio runtime.
     #[must_use]
     pub fn warm_instances_ready(&self) -> usize {
-        WarmPool::global().ready(&self.instance_pre)
+        self.engine.warm_pool().ready(&self.instance_pre)
     }
 
     /// Get the Python stdlib path if configured.
@@ -2155,9 +2202,42 @@ impl PythonExecutor {
     /// Returns an error if engine creation fails. A later call will retry
     /// initialization after a transient failure.
     pub fn shared_engine() -> std::result::Result<Engine, Error> {
-        static SHARED_ENGINE: RetryableOnce<Engine> = RetryableOnce::new();
+        Ok(crate::Engine::shared()?.wasmtime().clone())
+    }
 
-        SHARED_ENGINE.get_or_try_init(Self::create_engine).cloned()
+    /// An executor for `instance_pre`, which was built on `engine`.
+    fn on_engine(engine: &crate::Engine, instance_pre: SandboxPre<ExecutorState>) -> Self {
+        Self {
+            engine: engine.clone(),
+            instance_pre,
+            python_stdlib_path: None,
+            python_site_packages_paths: Vec::new(),
+            result_variable: "result".to_string(),
+            packages: Vec::new(),
+        }
+    }
+
+    /// The cached linked component for `key` on `engine`, if any.
+    #[cfg(feature = "embedded")]
+    fn cached(engine: &crate::Engine, key: Option<&CacheKey>) -> Option<Self> {
+        let instance_pre = InstancePreCache::global().get(engine, key?)?;
+        Some(Self::on_engine(engine, instance_pre))
+    }
+
+    /// Link `component` on `engine`, caching the result under `key`.
+    fn link(
+        engine: &crate::Engine,
+        component: &Component,
+        key: Option<crate::cache::CacheKey>,
+    ) -> std::result::Result<Self, Error> {
+        let instance_pre = Self::create_instance_pre(engine.wasmtime(), component)?;
+        #[cfg(feature = "embedded")]
+        if let Some(key) = key {
+            InstancePreCache::global().put(engine, key, instance_pre.clone());
+        }
+        #[cfg(not(feature = "embedded"))]
+        let _ = key;
+        Ok(Self::on_engine(engine, instance_pre))
     }
 
     /// Create a new executor by loading a WASM component from bytes.
@@ -2168,7 +2248,7 @@ impl PythonExecutor {
     /// - Linking WASI and sandbox imports
     /// - Creating a pre-instantiated template
     ///
-    /// Uses the global shared Engine automatically for memory efficiency.
+    /// Uses the [shared engine](crate::Engine::shared).
     ///
     /// Subsequent calls to `execute()` will be fast because they only
     /// need to instantiate from the pre-compiled template.
@@ -2183,25 +2263,27 @@ impl PythonExecutor {
         fields(wasm_bytes_len = wasm_bytes.len())
     )]
     pub fn from_binary(wasm_bytes: &[u8]) -> std::result::Result<Self, Error> {
-        let engine = Self::shared_engine()?;
-        let component =
-            Component::from_binary(&engine, wasm_bytes).map_err(Error::WasmComponent)?;
-        let instance_pre = Self::create_instance_pre(&engine, &component)?;
+        Self::from_binary_on(&crate::Engine::shared()?, wasm_bytes)
+    }
 
-        Ok(Self {
-            engine,
-            instance_pre,
-            python_stdlib_path: None,
-            python_site_packages_paths: Vec::new(),
-            result_variable: "result".to_string(),
-            packages: Vec::new(),
-        })
+    /// Like [`Self::from_binary`], on `engine`.
+    ///
+    /// # Errors
+    ///
+    /// Same as [`Self::from_binary`].
+    pub fn from_binary_on(
+        engine: &crate::Engine,
+        wasm_bytes: &[u8],
+    ) -> std::result::Result<Self, Error> {
+        let component =
+            Component::from_binary(engine.wasmtime(), wasm_bytes).map_err(Error::WasmComponent)?;
+        Self::link(engine, &component, None)
     }
 
     /// Create a new executor by loading a WASM component from a file.
     ///
     /// This performs all expensive operations upfront (see `from_binary`).
-    /// Uses the global shared Engine automatically.
+    /// Uses the [shared engine](crate::Engine::shared).
     ///
     /// # Errors
     ///
@@ -2212,19 +2294,21 @@ impl PythonExecutor {
         fields(path = %path.as_ref().display())
     )]
     pub fn from_file(path: impl AsRef<std::path::Path>) -> std::result::Result<Self, Error> {
-        let engine = Self::shared_engine()?;
-        let component =
-            Component::from_file(&engine, path.as_ref()).map_err(Error::WasmComponent)?;
-        let instance_pre = Self::create_instance_pre(&engine, &component)?;
+        Self::from_file_on(&crate::Engine::shared()?, path)
+    }
 
-        Ok(Self {
-            engine,
-            instance_pre,
-            python_stdlib_path: None,
-            python_site_packages_paths: Vec::new(),
-            result_variable: "result".to_string(),
-            packages: Vec::new(),
-        })
+    /// Like [`Self::from_file`], on `engine`.
+    ///
+    /// # Errors
+    ///
+    /// Same as [`Self::from_file`].
+    pub fn from_file_on(
+        engine: &crate::Engine,
+        path: impl AsRef<std::path::Path>,
+    ) -> std::result::Result<Self, Error> {
+        let component =
+            Component::from_file(engine.wasmtime(), path.as_ref()).map_err(Error::WasmComponent)?;
+        Self::link(engine, &component, None)
     }
 
     /// Create a new executor by loading a pre-compiled component from bytes.
@@ -2232,7 +2316,7 @@ impl PythonExecutor {
     /// This is much faster than `from_binary` because it skips compilation.
     /// The pre-compiled bytes must have been created by `precompile()` with
     /// a compatible engine configuration.
-    /// Uses the global shared Engine automatically.
+    /// Uses the [shared engine](crate::Engine::shared).
     ///
     /// # Safety
     ///
@@ -2247,114 +2331,40 @@ impl PythonExecutor {
     #[cfg(any(feature = "embedded", feature = "preinit"))]
     #[allow(unsafe_code)]
     pub unsafe fn from_precompiled(precompiled_bytes: &[u8]) -> std::result::Result<Self, Error> {
-        // With embedded feature, delegate to internal method for caching support
-        #[cfg(feature = "embedded")]
-        {
-            #[allow(unsafe_code)]
-            unsafe {
-                Self::from_precompiled_internal(precompiled_bytes, None)
-            }
-        }
-        // With preinit-only, load directly without caching
-        #[cfg(not(feature = "embedded"))]
-        {
-            let engine = Self::shared_engine()?;
-            // SAFETY: Caller guarantees the precompiled bytes are trusted and were
-            // created by `precompile()` with a compatible engine configuration.
-            let component = unsafe { Component::deserialize(&engine, precompiled_bytes) }
-                .map_err(Error::WasmComponent)?;
-            let instance_pre = Self::create_instance_pre(&engine, &component)?;
-
-            Ok(Self {
-                engine,
-                instance_pre,
-                python_stdlib_path: None,
-                python_site_packages_paths: Vec::new(),
-                result_variable: "result".to_string(),
-                packages: Vec::new(),
-            })
-        }
+        // SAFETY: Forwarded from the caller.
+        unsafe { Self::from_precompiled_on(&crate::Engine::shared()?, precompiled_bytes, None) }
     }
 
-    /// Create a new executor by loading a pre-compiled component from bytes,
-    /// with caching via [`InstancePreCache`].
-    ///
-    /// When a `cache_key` is provided:
-    /// - First checks the global [`InstancePreCache`] for a cached `SandboxPre`
-    /// - On cache hit, returns immediately without deserializing (~0ms)
-    /// - On cache miss, deserializes the bytes and stores in cache for future use
-    ///
-    /// This is the internal method used by the sandbox builder for cached
-    /// executor creation from pre-compiled bytes.
+    /// Create a new executor on `engine` from pre-compiled bytes, using the
+    /// process-global [`InstancePreCache`] when `cache_key` is given
+    /// (`embedded` only; it is ignored otherwise).
     ///
     /// # Safety
     ///
-    /// This function is unsafe because Wasmtime cannot fully validate pre-compiled
-    /// components for safety. Only use this with bytes you control and trust.
+    /// Same as [`Self::from_precompiled`].
     ///
     /// # Errors
     ///
-    /// Returns an error if the pre-compiled bytes are invalid or incompatible
-    /// with the current engine configuration.
-    #[cfg(feature = "embedded")]
+    /// Same as [`Self::from_precompiled`].
+    #[cfg(any(feature = "embedded", feature = "preinit"))]
     #[allow(unsafe_code)]
-    pub(crate) unsafe fn from_precompiled_with_key(
+    pub(crate) unsafe fn from_precompiled_on(
+        engine: &crate::Engine,
         precompiled_bytes: &[u8],
-        cache_key: CacheKey,
+        cache_key: Option<crate::cache::CacheKey>,
     ) -> std::result::Result<Self, Error> {
-        #[allow(unsafe_code)]
-        unsafe {
-            Self::from_precompiled_internal(precompiled_bytes, Some(cache_key))
+        #[cfg(feature = "embedded")]
+        if let Some(executor) = Self::cached(engine, cache_key.as_ref()) {
+            return Ok(executor);
         }
-    }
-
-    /// Internal implementation for loading from pre-compiled bytes with optional caching.
-    #[cfg(feature = "embedded")]
-    #[allow(unsafe_code)]
-    unsafe fn from_precompiled_internal(
-        precompiled_bytes: &[u8],
-        cache_key: Option<CacheKey>,
-    ) -> std::result::Result<Self, Error> {
-        let engine = Self::shared_engine()?;
-
-        // Check InstancePreCache if we have a cache key
-        if let Some(ref key) = cache_key
-            && let Some(instance_pre) = InstancePreCache::global().get(key)
-        {
-            return Ok(Self {
-                engine,
-                instance_pre,
-                python_stdlib_path: None,
-                python_site_packages_paths: Vec::new(),
-                result_variable: "result".to_string(),
-                packages: Vec::new(),
-            });
-        }
-
-        // Cache miss - deserialize from bytes and create instance_pre
         // SAFETY: Caller guarantees the precompiled bytes are trusted and were
         // created by `precompile()` with a compatible engine configuration.
-        #[allow(unsafe_code)]
-        let component = unsafe { Component::deserialize(&engine, precompiled_bytes) }
+        let component = unsafe { Component::deserialize(engine.wasmtime(), precompiled_bytes) }
             .map_err(Error::WasmComponent)?;
-        let instance_pre = Self::create_instance_pre(&engine, &component)?;
-
-        // Store in cache if we have a key
-        if let Some(key) = cache_key {
-            InstancePreCache::global().put(key, instance_pre.clone());
-        }
-
-        Ok(Self {
-            engine,
-            instance_pre,
-            python_stdlib_path: None,
-            python_site_packages_paths: Vec::new(),
-            result_variable: "result".to_string(),
-            packages: Vec::new(),
-        })
+        Self::link(engine, &component, cache_key)
     }
 
-    /// Memory-map a pre-compiled component from a file with the shared engine.
+    /// Memory-map a pre-compiled component from a file into `engine`.
     ///
     /// Wasmtime ignores any bytes after the component, so the file may carry
     /// trailing data.
@@ -2366,20 +2376,21 @@ impl PythonExecutor {
     #[cfg(any(feature = "embedded", feature = "preinit"))]
     #[allow(unsafe_code)]
     pub(crate) unsafe fn deserialize_component_file(
+        engine: &crate::Engine,
         path: &std::path::Path,
     ) -> std::result::Result<DeserializedComponent, Error> {
-        let engine = Self::shared_engine()?;
         // SAFETY: Caller guarantees the file is trusted and stays unmodified.
-        let component =
-            unsafe { Component::deserialize_file(&engine, path) }.map_err(Error::WasmComponent)?;
+        let component = unsafe { Component::deserialize_file(engine.wasmtime(), path) }
+            .map_err(Error::WasmComponent)?;
         Ok(DeserializedComponent {
+            engine: engine.clone(),
             component,
             instance_pre: RetryableOnce::new(),
         })
     }
 
     /// Create a new executor from a component returned by
-    /// [`Self::deserialize_component_file`].
+    /// [`Self::deserialize_component_file`], on the engine it was mapped into.
     ///
     /// The component is linked once and the result reused by every later
     /// call. With a cache key (`embedded` only) the process-global
@@ -2389,48 +2400,30 @@ impl PythonExecutor {
         deserialized: &DeserializedComponent,
         cache_key: Option<crate::cache::CacheKey>,
     ) -> std::result::Result<Self, Error> {
-        let engine = Self::shared_engine()?;
-
+        let engine = &deserialized.engine;
         #[cfg(feature = "embedded")]
-        let cached = cache_key
-            .as_ref()
-            .and_then(|key| InstancePreCache::global().get(key));
+        if let Some(executor) = Self::cached(engine, cache_key.as_ref()) {
+            return Ok(executor);
+        }
+        let instance_pre = deserialized
+            .instance_pre
+            .get_or_try_init(|| {
+                Self::create_instance_pre(engine.wasmtime(), &deserialized.component)
+            })?
+            .clone();
+        #[cfg(feature = "embedded")]
+        if let Some(key) = cache_key {
+            InstancePreCache::global().put(engine, key, instance_pre.clone());
+        }
         #[cfg(not(feature = "embedded"))]
-        let cached = None;
-
-        let instance_pre = match cached {
-            Some(instance_pre) => instance_pre,
-            None => {
-                let instance_pre = deserialized
-                    .instance_pre
-                    .get_or_try_init(|| {
-                        Self::create_instance_pre(&engine, &deserialized.component)
-                    })?
-                    .clone();
-                #[cfg(feature = "embedded")]
-                if let Some(key) = cache_key {
-                    InstancePreCache::global().put(key, instance_pre.clone());
-                }
-                #[cfg(not(feature = "embedded"))]
-                let _ = cache_key;
-                instance_pre
-            }
-        };
-
-        Ok(Self {
-            engine,
-            instance_pre,
-            python_stdlib_path: None,
-            python_site_packages_paths: Vec::new(),
-            result_variable: "result".to_string(),
-            packages: Vec::new(),
-        })
+        let _ = cache_key;
+        Ok(Self::on_engine(engine, instance_pre))
     }
 
     /// Create a new executor by loading a pre-compiled component from a file.
     ///
     /// This is much faster than `from_file` because it skips compilation.
-    /// Uses the global shared Engine automatically.
+    /// Uses the [shared engine](crate::Engine::shared).
     /// The file must have been created by `precompile()` with a compatible
     /// engine configuration.
     ///
@@ -2449,116 +2442,43 @@ impl PythonExecutor {
     pub unsafe fn from_precompiled_file(
         path: impl AsRef<std::path::Path>,
     ) -> std::result::Result<Self, Error> {
-        // With embedded feature, delegate to internal method for caching support
-        #[cfg(feature = "embedded")]
-        {
-            #[allow(unsafe_code)]
-            unsafe {
-                Self::from_precompiled_file_internal(path.as_ref(), None)
-            }
-        }
-        // With preinit-only, load directly without caching
-        #[cfg(not(feature = "embedded"))]
-        {
-            let engine = Self::shared_engine()?;
-            // SAFETY: Caller guarantees the precompiled file is trusted
-            #[allow(unsafe_code)]
-            let component = unsafe { Component::deserialize_file(&engine, path.as_ref()) }
-                .map_err(Error::WasmComponent)?;
-            let instance_pre = Self::create_instance_pre(&engine, &component)?;
-            Ok(Self {
-                engine,
-                instance_pre,
-                python_stdlib_path: None,
-                python_site_packages_paths: Vec::new(),
-                result_variable: "result".to_string(),
-                packages: Vec::new(),
-            })
-        }
+        // SAFETY: Forwarded from the caller.
+        unsafe { Self::from_precompiled_file_on(&crate::Engine::shared()?, path.as_ref(), None) }
     }
 
-    /// Create a new executor by loading a pre-compiled component from a file,
-    /// with optional caching via [`InstancePreCache`].
-    ///
-    /// When a `cache_key` is provided:
-    /// - First checks the global [`InstancePreCache`] for a cached `SandboxPre`
-    /// - On cache hit, returns immediately without disk I/O (~0ms)
-    /// - On cache miss, loads from file and stores in cache for future use
-    ///
-    /// This is the internal method used by [`Self::from_embedded_runtime`] and
-    /// the sandbox builder for cached executor creation.
+    /// Create a new executor on `engine` from a pre-compiled file, using the
+    /// process-global [`InstancePreCache`] when `cache_key` is given
+    /// (`embedded` only; it is ignored otherwise).
     ///
     /// # Safety
     ///
-    /// This function is unsafe because Wasmtime cannot fully validate pre-compiled
-    /// components for safety. Only use this with files you control and trust.
+    /// Same as [`Self::from_precompiled_file`].
     ///
     /// # Errors
     ///
-    /// Returns an error if the file cannot be read or the pre-compiled component
-    /// is invalid or incompatible with the current engine configuration.
-    #[cfg(feature = "embedded")]
+    /// Same as [`Self::from_precompiled_file`].
+    #[cfg(any(feature = "embedded", feature = "preinit"))]
     #[allow(unsafe_code)]
-    pub(crate) unsafe fn from_precompiled_file_with_key(
-        path: impl AsRef<std::path::Path>,
-        cache_key: CacheKey,
-    ) -> std::result::Result<Self, Error> {
-        #[allow(unsafe_code)]
-        unsafe {
-            Self::from_precompiled_file_internal(path.as_ref(), Some(cache_key))
-        }
-    }
-
-    /// Internal implementation for loading from precompiled file with optional caching.
-    #[cfg(feature = "embedded")]
-    #[allow(unsafe_code)]
-    unsafe fn from_precompiled_file_internal(
+    pub(crate) unsafe fn from_precompiled_file_on(
+        engine: &crate::Engine,
         path: &std::path::Path,
-        cache_key: Option<CacheKey>,
+        cache_key: Option<crate::cache::CacheKey>,
     ) -> std::result::Result<Self, Error> {
-        let engine = Self::shared_engine()?;
-
-        // Check InstancePreCache if we have a cache key
-        if let Some(ref key) = cache_key
-            && let Some(instance_pre) = InstancePreCache::global().get(key)
-        {
-            return Ok(Self {
-                engine,
-                instance_pre,
-                python_stdlib_path: None,
-                python_site_packages_paths: Vec::new(),
-                result_variable: "result".to_string(),
-                packages: Vec::new(),
-            });
+        #[cfg(feature = "embedded")]
+        if let Some(executor) = Self::cached(engine, cache_key.as_ref()) {
+            return Ok(executor);
         }
-
-        // Cache miss - load from file and create instance_pre
         // SAFETY: Caller guarantees the precompiled file is trusted and was
         // created by `precompile()` with a compatible engine configuration.
-        #[allow(unsafe_code)]
-        let component =
-            unsafe { Component::deserialize_file(&engine, path) }.map_err(Error::WasmComponent)?;
-        let instance_pre = Self::create_instance_pre(&engine, &component)?;
-
-        // Store in cache if we have a key
-        if let Some(key) = cache_key {
-            InstancePreCache::global().put(key, instance_pre.clone());
-        }
-
-        Ok(Self {
-            engine,
-            instance_pre,
-            python_stdlib_path: None,
-            python_site_packages_paths: Vec::new(),
-            result_variable: "result".to_string(),
-            packages: Vec::new(),
-        })
+        let component = unsafe { Component::deserialize_file(engine.wasmtime(), path) }
+            .map_err(Error::WasmComponent)?;
+        Self::link(engine, &component, cache_key)
     }
 
     /// Create a new executor from the embedded runtime.
     ///
     /// This is the fastest way to create an executor:
-    /// - Uses the global shared [`Engine`]
+    /// - Uses the [shared engine](crate::Engine::shared)
     /// - Uses the global [`InstancePreCache`] with a sentinel key
     /// - Only loads from disk on first call; subsequent calls return cached instance
     ///
@@ -2571,53 +2491,47 @@ impl PythonExecutor {
     /// Returns an error if the embedded resources cannot be extracted or
     /// the component cannot be loaded.
     #[cfg(feature = "embedded")]
-    #[tracing::instrument(name = "PythonExecutor::from_embedded_runtime")]
     pub fn from_embedded_runtime() -> std::result::Result<Self, Error> {
+        Self::from_embedded_runtime_on(&crate::Engine::shared()?)
+    }
+
+    /// Like [`Self::from_embedded_runtime`], on `engine`.
+    ///
+    /// # Errors
+    ///
+    /// Same as [`Self::from_embedded_runtime`].
+    #[cfg(feature = "embedded")]
+    #[tracing::instrument(name = "PythonExecutor::from_embedded_runtime", skip(engine))]
+    pub fn from_embedded_runtime_on(engine: &crate::Engine) -> std::result::Result<Self, Error> {
         let cache_key = CacheKey::embedded_runtime();
 
         // Get embedded resources (extracts stdlib on first call)
         let resources = crate::embedded::EmbeddedResources::get()?;
         let stdlib_path = Some(resources.stdlib_path.clone());
 
-        // Check InstancePreCache first (fast path)
-        if let Some(instance_pre) = InstancePreCache::global().get(&cache_key) {
-            return Ok(Self {
-                engine: Self::shared_engine()?,
-                instance_pre,
-                python_stdlib_path: stdlib_path,
-                python_site_packages_paths: Vec::new(),
-                result_variable: "result".to_string(),
-                packages: Vec::new(),
-            });
-        }
-
-        // Cache miss - load from embedded resources
-        // SAFETY: The embedded runtime was pre-compiled at build time from our own
-        // trusted runtime.wasm, so we know it's safe to deserialize.
-        #[allow(unsafe_code)]
-        let mut executor =
-            unsafe { Self::from_precompiled_file_with_key(resources.runtime(), cache_key)? };
-
+        let mut executor = match Self::cached(engine, Some(&cache_key)) {
+            Some(executor) => executor,
+            // SAFETY: The embedded runtime was pre-compiled at build time from
+            // our own trusted runtime.wasm, so we know it's safe to deserialize.
+            #[allow(unsafe_code)]
+            None => unsafe {
+                Self::from_precompiled_file_on(engine, resources.runtime(), Some(cache_key))?
+            },
+        };
         executor.python_stdlib_path = stdlib_path;
         Ok(executor)
     }
 
-    /// Create a new executor from a cached `SandboxPre`.
+    /// Create a new executor on `engine` from a cached `SandboxPre`.
     ///
     /// This is used internally when an `InstancePreCache` hit occurs.
-    /// The `SandboxPre` must have been created with a compatible engine.
+    /// The `SandboxPre` must have been created on `engine`.
     #[cfg(all(feature = "embedded", feature = "native-extensions"))]
     pub(crate) fn from_cached_instance_pre(
+        engine: &crate::Engine,
         instance_pre: SandboxPre<ExecutorState>,
-    ) -> std::result::Result<Self, Error> {
-        Ok(Self {
-            engine: Self::shared_engine()?,
-            instance_pre,
-            python_stdlib_path: None,
-            python_site_packages_paths: Vec::new(),
-            result_variable: "result".to_string(),
-            packages: Vec::new(),
-        })
+    ) -> Self {
+        Self::on_engine(engine, instance_pre)
     }
 
     /// Pre-compile the WASM component to native code for faster loading.
@@ -2768,8 +2682,10 @@ impl PythonExecutor {
     ///
     /// This is the engine that runs sandboxes, so it is the only one that uses
     /// the pooling allocator; the precompile engines only compile.
-    fn create_engine() -> std::result::Result<Engine, Error> {
-        Self::build_engine(Self::engine_config_with_target(None)?)
+    pub(crate) fn create_runtime_engine(
+        allocator: &AllocatorSettings,
+    ) -> std::result::Result<Engine, Error> {
+        Self::build_engine(Self::engine_config_with_target(None)?, allocator)
     }
 
     /// Create a configured wasmtime engine with an optional target triple.
@@ -2801,7 +2717,9 @@ impl PythonExecutor {
     /// For fine-grained control, set `ERYX_CRANELIFT_FLAGS` to a comma-separated
     /// list of `flag=value` pairs. Example:
     /// `ERYX_CRANELIFT_FLAGS=has_avx512f=false,has_avx512bw=false`
-    fn create_engine_with_target(target: Option<&str>) -> std::result::Result<Engine, Error> {
+    pub(crate) fn create_engine_with_target(
+        target: Option<&str>,
+    ) -> std::result::Result<Engine, Error> {
         let config = Self::engine_config_with_target(target)?;
         Engine::new(&config).map_err(|e| Error::WasmEngine(e.to_string()))
     }
@@ -2905,8 +2823,10 @@ impl PythonExecutor {
     /// front (terabytes with the default limits), which a host with a low
     /// `ulimit -v` or an exotic kernel can refuse. Execution works identically
     /// on either allocator, so that refusal only costs instantiation latency.
-    fn build_engine(mut config: Config) -> std::result::Result<Engine, Error> {
-        let allocator = AllocatorSettings::from_env()?;
+    fn build_engine(
+        mut config: Config,
+        allocator: &AllocatorSettings,
+    ) -> std::result::Result<Engine, Error> {
         let Some(pooling) = allocator.pooling_config() else {
             return Engine::new(&config).map_err(|e| Error::WasmEngine(e.to_string()));
         };
@@ -3318,7 +3238,7 @@ impl PythonExecutor {
             drop(store);
             None
         };
-        WarmPool::global().retire(&self.instance_pre, store);
+        self.engine.warm_pool().retire(&self.instance_pre, store);
         result
     }
 
@@ -3335,7 +3255,10 @@ impl PythonExecutor {
         if let Some(WarmInstance {
             mut store,
             bindings,
-        }) = WarmPool::global().take(&self.instance_pre, memory_limit)
+        }) = self
+            .engine
+            .warm_pool()
+            .take(&self.instance_pre, memory_limit)
         {
             // The placeholder's tracker saw the memory instantiation mapped;
             // carry that into this execution's peak.
@@ -3387,7 +3310,7 @@ impl PythonExecutor {
         // Untimed executions do not need the epoch clock. Once started, the single
         // process-lifetime ticker is shared by all timed and cancellable executions.
         if execution_timeout.is_some() || cancellation_token.is_some() {
-            ensure_epoch_ticker(&self.engine)?;
+            ensure_epoch_ticker(self.engine.wasmtime())?;
         }
 
         if let Some(cancel_token) = cancellation_token.clone() {
@@ -3618,6 +3541,7 @@ mod tests {
     #[test]
     fn test_epoch_ticker_dead_worker_is_reported_and_slot_is_retryable() {
         let mut ticker = Some(EpochTicker {
+            engines: Arc::default(),
             handle: std::thread::spawn(|| {}),
             pid: std::process::id(),
         });
@@ -3633,6 +3557,7 @@ mod tests {
         // worker keeps the test self-contained and does not spawn a permanent
         // ticker thread.
         ticker = Some(EpochTicker {
+            engines: Arc::default(),
             handle: std::thread::spawn(|| {}),
             pid: std::process::id(),
         });
@@ -3648,6 +3573,7 @@ mod tests {
         // A live worker that "belongs" to another process, as after a fork.
         let (stop, stopped) = std::sync::mpsc::channel::<()>();
         let mut ticker = Some(EpochTicker {
+            engines: Arc::default(),
             handle: std::thread::spawn(move || {
                 let _ = stopped.recv();
             }),

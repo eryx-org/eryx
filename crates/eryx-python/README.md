@@ -91,8 +91,11 @@ in the background and handing it to the next execution; the environment
 variables that tune this (`ERYX_WARM_INSTANCES`, `ERYX_ALLOCATOR`, ...) are
 documented in the
 [Performance Tuning](https://docs.eryx.run/guide/performance.html)
-guide. Set them in the environment of the Python process before importing
-`eryx`.
+guide. Set them in the environment of the Python process before creating the
+first sandbox. To configure from code, create an `eryx.Engine(...)` (for
+example `eryx.Engine(warm_instances=4)`) and pass it as `engine=` to
+`Sandbox`, `Session` or `SandboxFactory`; an `Engine` ignores the environment
+variables.
 
 ## API Reference
 

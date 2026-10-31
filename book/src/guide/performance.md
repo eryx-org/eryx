@@ -8,15 +8,52 @@ resetting the memory slot. Running `pass` on a fresh instance takes about
 1.3 ms on a fast workstation; the Python part of that is roughly 0.2 ms.
 
 Eryx hides that cost in two ways, both on by default. This page explains what
-they do and the environment variables that tune them. Each is read once, the
-first time the process needs it (the allocator settings when the process-wide
-wasmtime engine is created), so set them in the environment of the process that
-embeds eryx (for `pyeryx`, the Python process).
+they do and the settings that tune them.
+
+## Engines
+
+Both belong to an *engine*: the wasmtime engine sandboxes run on, with its
+instance allocator and its pool of warm instances. By default every sandbox in
+the process shares one engine, created on first use and configured by the
+environment variables below. They are read once, when it is created, so set
+them in the environment of the process that embeds eryx (for `pyeryx`, the
+Python process).
+
+To configure from code instead, build your own engine and pass it to the
+sandboxes that should use it:
+
+```rust,ignore
+let engine = eryx::Engine::new(
+    eryx::EngineConfig::default()
+        .with_warm_instances(4)
+        .with_pool_instances(256),
+)?;
+let sandbox = eryx::Sandbox::embedded().with_engine(engine.clone()).build()?;
+```
+
+```python
+engine = eryx.Engine(warm_instances=4, pool_instances=256)
+sandbox = eryx.Sandbox(engine=engine)
+factory = eryx.SandboxFactory(engine=engine)  # its sandboxes, sessions and pools too
+```
+
+Every variable below has a matching `EngineConfig::with_*` method and
+`eryx.Engine` keyword argument (`ERYX_POOL_INSTANCES` is `with_pool_instances` /
+`pool_instances`, and so on). An engine you build **ignores the environment
+entirely**: a setting you leave out takes the default in the tables, not the
+variable's value. The variables only configure the shared engine.
+
+Each engine compiles its own copy of the runtime and keeps its own warm
+instances, and with the pooling allocator it reserves virtual address space for
+every slot up front (terabytes with the defaults, out of 128 TiB per process).
+Run one or two engines per process, not one per tenant or request. A factory
+file loaded into one engine is mapped into it, so its sandboxes must use that
+engine too; `pyeryx` factories pass theirs on automatically.
 
 ## Warm instances
 
 After every stateless execution, a background task instantiates a replacement
-store for the same runtime and parks it in a process-wide pool. The next
+store for the same runtime and parks it in the engine's pool. The next
 `execute()` takes it instead of instantiating, and the used store is dropped on
 the background task too. Every execution still runs on an instance that has
 never run user code, so isolation is unchanged; only the timing moves.

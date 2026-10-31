@@ -217,6 +217,7 @@ impl Session {
     ///     max_fuel: Overrides `resource_limits.max_fuel`.
     ///     callbacks: Optional callbacks that sandboxed code can invoke.
     ///         Can be a CallbackRegistry or a list of callback dicts.
+    ///     engine: Optional `Engine` to run on instead of the shared one.
     ///
     /// Returns:
     ///     A new Session instance ready to execute Python code.
@@ -244,7 +245,7 @@ impl Session {
     ///         {"name": "get_time", "fn": get_time, "description": "Returns current time"}
     ///     ])
     #[new]
-    #[pyo3(signature = (*, vfs=None, vfs_mount_path=None, resource_limits=None, execution_timeout_ms=None, max_fuel=None, network=None, callbacks=None, mcp=None, volumes=None, on_stdout=None, on_stderr=None, result_variable=None))]
+    #[pyo3(signature = (*, vfs=None, vfs_mount_path=None, resource_limits=None, execution_timeout_ms=None, max_fuel=None, network=None, callbacks=None, mcp=None, volumes=None, on_stdout=None, on_stderr=None, result_variable=None, engine=None))]
     #[allow(clippy::too_many_arguments)]
     fn new(
         py: Python<'_>,
@@ -260,11 +261,13 @@ impl Session {
         on_stdout: Option<Py<PyAny>>,
         on_stderr: Option<Py<PyAny>>,
         result_variable: Option<String>,
+        engine: Option<PyRef<'_, crate::engine::Engine>>,
     ) -> PyResult<Self> {
         let runtime = crate::error::make_runtime()?;
 
         // Create the PythonExecutor from embedded runtime
-        let mut executor = eryx::PythonExecutor::from_embedded_runtime()
+        let engine = crate::engine::resolve(engine.as_deref())?;
+        let mut executor = eryx::PythonExecutor::from_embedded_runtime_on(&engine)
             .map_err(|e| InitializationError::new_err(format!("failed to create executor: {e}")))?;
         if let Some(name) = result_variable {
             executor = executor.with_result_variable(name);

@@ -9,6 +9,10 @@
 
 use eryx::PrecompiledArtifact;
 
+fn shared() -> eryx::Engine {
+    eryx::Engine::shared().unwrap()
+}
+
 /// Write the embedded runtime's component followed by `trailer` to a new file.
 fn component_file(trailer: &[u8]) -> (tempfile::TempDir, std::path::PathBuf, Vec<u8>) {
     let resources = eryx::embedded::EmbeddedResources::get().unwrap();
@@ -38,13 +42,15 @@ async fn file_backed_artifact_ignores_trailing_data() {
     let len = component.len() as u64;
 
     #[allow(unsafe_code)]
-    let uncached =
-        unsafe { PrecompiledArtifact::from_file(std::fs::File::open(&path).unwrap(), len) }
-            .unwrap();
+    let uncached = unsafe {
+        PrecompiledArtifact::from_file(&shared(), std::fs::File::open(&path).unwrap(), len)
+    }
+    .unwrap();
     #[allow(unsafe_code)]
-    let cached =
-        unsafe { PrecompiledArtifact::from_file_cached(std::fs::File::open(&path).unwrap(), len) }
-            .unwrap();
+    let cached = unsafe {
+        PrecompiledArtifact::from_file_cached(&shared(), std::fs::File::open(&path).unwrap(), len)
+    }
+    .unwrap();
 
     for artifact in [&uncached, &cached] {
         assert_eq!(artifact.len(), component.len());
@@ -60,7 +66,11 @@ async fn write_to_returns_only_the_component() {
 
     #[allow(unsafe_code)]
     let artifact = unsafe {
-        PrecompiledArtifact::from_file(std::fs::File::open(&path).unwrap(), component.len() as u64)
+        PrecompiledArtifact::from_file(
+            &shared(),
+            std::fs::File::open(&path).unwrap(),
+            component.len() as u64,
+        )
     }
     .unwrap();
 
@@ -75,7 +85,11 @@ async fn write_to_reads_the_mapped_file_after_the_path_is_replaced() {
 
     #[allow(unsafe_code)]
     let artifact = unsafe {
-        PrecompiledArtifact::from_file(std::fs::File::open(&path).unwrap(), component.len() as u64)
+        PrecompiledArtifact::from_file(
+            &shared(),
+            std::fs::File::open(&path).unwrap(),
+            component.len() as u64,
+        )
     }
     .unwrap();
 
@@ -98,6 +112,7 @@ async fn from_file_rejects_a_file_shorter_than_the_component() {
     #[allow(unsafe_code)]
     let result = unsafe {
         PrecompiledArtifact::from_file(
+            &shared(),
             std::fs::File::open(&path).unwrap(),
             component.len() as u64 + 1,
         )
@@ -116,7 +131,8 @@ async fn from_file_maps_the_open_handle_not_the_path() {
     std::fs::rename(&replacement, &path).unwrap();
 
     #[allow(unsafe_code)]
-    let artifact = unsafe { PrecompiledArtifact::from_file(file, component.len() as u64) }.unwrap();
+    let artifact =
+        unsafe { PrecompiledArtifact::from_file(&shared(), file, component.len() as u64) }.unwrap();
     assert_eq!(run(&artifact).await, b"42\n");
 }
 
@@ -163,22 +179,78 @@ async fn from_file_with_hash_matches_the_computed_key() {
         .content_hash()
         .unwrap();
     #[allow(unsafe_code)]
-    let mapped =
-        unsafe { PrecompiledArtifact::from_file(std::fs::File::open(&path).unwrap(), len) }
-            .unwrap();
+    let mapped = unsafe {
+        PrecompiledArtifact::from_file(&shared(), std::fs::File::open(&path).unwrap(), len)
+    }
+    .unwrap();
     assert_eq!(mapped.content_hash().unwrap(), hash);
 
     #[allow(unsafe_code)]
-    let cached =
-        unsafe { PrecompiledArtifact::from_file_cached(std::fs::File::open(&path).unwrap(), len) }
-            .unwrap();
+    let cached = unsafe {
+        PrecompiledArtifact::from_file_cached(&shared(), std::fs::File::open(&path).unwrap(), len)
+    }
+    .unwrap();
     assert_eq!(cached.content_hash().unwrap(), hash);
 
     #[allow(unsafe_code)]
     let stored = unsafe {
-        PrecompiledArtifact::from_file_with_hash(std::fs::File::open(&path).unwrap(), len, hash)
+        PrecompiledArtifact::from_file_with_hash(
+            &shared(),
+            std::fs::File::open(&path).unwrap(),
+            len,
+            hash,
+        )
     }
     .unwrap();
     assert_eq!(stored.content_hash().unwrap(), hash);
     assert_eq!(run(&stored).await, b"42\n");
+}
+
+/// A file-backed artifact is bound to the engine it was mapped into, so a
+/// sandbox on any other engine is refused rather than silently remapped.
+#[tokio::test]
+async fn file_backed_artifact_rejects_another_engine() {
+    let (_dir, path, component) = component_file(b"");
+    let other = eryx::Engine::new(
+        eryx::EngineConfig::default()
+            .with_allocator(eryx::InstanceAllocator::OnDemand)
+            .with_warm_instances(0),
+    )
+    .unwrap();
+    #[allow(unsafe_code)]
+    let artifact = unsafe {
+        PrecompiledArtifact::from_file(
+            &other,
+            std::fs::File::open(&path).unwrap(),
+            component.len() as u64,
+        )
+    }
+    .unwrap();
+    let resources = eryx::embedded::EmbeddedResources::get().unwrap();
+
+    #[allow(unsafe_code)]
+    let on_shared = unsafe {
+        eryx::Sandbox::builder()
+            .with_precompiled_artifact(artifact.clone())
+            .with_python_stdlib(resources.stdlib())
+    }
+    .build();
+    let Err(err) = on_shared else {
+        panic!("an artifact mapped into another engine must be refused");
+    };
+    assert!(err.to_string().contains("different engine"), "{err}");
+
+    #[allow(unsafe_code)]
+    let on_other = unsafe {
+        eryx::Sandbox::builder()
+            .with_precompiled_artifact(artifact)
+            .with_python_stdlib(resources.stdlib())
+    }
+    .with_engine(other)
+    .build()
+    .unwrap();
+    assert_eq!(
+        on_other.execute("print(6 * 7)").await.unwrap().stdout,
+        b"42\n"
+    );
 }

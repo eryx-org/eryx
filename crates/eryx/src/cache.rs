@@ -9,7 +9,8 @@
 //! Caches `SandboxPre<ExecutorState>` - the fully linked, pre-instantiated component.
 //! This is the fastest tier, returning a cached instance in ~0ms (just a Clone).
 //!
-//! - Key: [`CacheKey`] (extension hash + version info)
+//! - Key: [`CacheKey`] (extension hash + version info) and the
+//!   [`Engine`] the component was linked on
 //! - Lifetime: Process duration
 //! - Use: Automatic for embedded runtime and native extensions
 //!
@@ -69,6 +70,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, RwLock};
 
+use crate::Engine;
 use crate::wasm::{ExecutorState, SandboxPre};
 
 /// Error type for cache operations.
@@ -231,8 +233,10 @@ impl CacheKey {
 }
 
 /// Hash of everything besides the extensions that determines a linked,
-/// pre-compiled component: the base runtime libraries and the shared engine's
-/// compilation settings. Computed once per process.
+/// pre-compiled component: the base runtime libraries and the compilation
+/// settings [`PythonExecutor::precompile`](crate::PythonExecutor::precompile)
+/// uses (every [`Engine`](crate::Engine) shares them). Computed once per
+/// process.
 #[cfg(feature = "native-extensions")]
 fn link_environment_hash() -> [u8; 32] {
     use eryx_runtime::linker::base_libraries as libs;
@@ -259,7 +263,7 @@ fn link_environment_hash() -> [u8; 32] {
         }
         hasher.update(crate::wasm::PythonExecutor::ENGINE_CONFIG_VERSION.to_le_bytes());
         // If the engine can't be created, building the sandbox fails anyway.
-        if let Ok(engine) = crate::wasm::PythonExecutor::shared_engine() {
+        if let Ok(engine) = crate::wasm::PythonExecutor::create_engine_with_target(None) {
             let mut engine_hasher = std::hash::DefaultHasher::new();
             engine
                 .precompile_compatibility_hash()
@@ -585,8 +589,10 @@ impl ComponentCache for NoCache {
 /// Global in-memory cache for pre-instantiated WASM components.
 ///
 /// This is Tier 1 of the two-tier caching system. It stores pre-initialized
-/// instances keyed by [`CacheKey`], eliminating the need to re-link imports
-/// on repeated sandbox creations with the same component.
+/// instances keyed by [`CacheKey`] and [`Engine`], eliminating the need to
+/// re-link imports on repeated sandbox creations with the same component. A
+/// component linked on one engine cannot be instantiated on another, so each
+/// engine has its own entries.
 ///
 /// The cache is process-global and thread-safe. It holds at most
 /// [`MAX_ENTRIES`](Self::MAX_ENTRIES) components (each can pin tens of
@@ -609,12 +615,12 @@ impl ComponentCache for NoCache {
 /// let key = CacheKey::embedded_runtime();
 ///
 /// // Check if cached
-/// if let Some(pre) = cache.get(&key) {
+/// if let Some(pre) = cache.get(&eryx::Engine::shared()?, &key) {
 ///     // Use cached SandboxPre
 /// }
 /// ```
 pub struct InstancePreCache {
-    cache: RwLock<HashMap<CacheKey, InstancePreEntry>>,
+    cache: RwLock<HashMap<(u64, CacheKey), InstancePreEntry>>,
     /// Logical clock for least-recently-used eviction.
     clock: AtomicU64,
 }
@@ -644,25 +650,30 @@ impl InstancePreCache {
         })
     }
 
-    /// Get a cached `SandboxPre` for the given key.
+    /// Get the `SandboxPre` cached for `key` on `engine`.
     ///
     /// Returns `Some(pre)` if found, `None` otherwise.
     /// The returned `SandboxPre` is cloned (cheap - it's internally reference-counted).
     #[must_use]
-    pub fn get(&self, key: &CacheKey) -> Option<SandboxPre<ExecutorState>> {
+    pub fn get(&self, engine: &Engine, key: &CacheKey) -> Option<SandboxPre<ExecutorState>> {
         let cache = self.cache.read().ok()?;
-        let entry = cache.get(key)?;
+        let entry = cache.get(&(engine.id(), key.clone()))?;
         entry.last_used.store(self.tick(), Ordering::Relaxed);
         tracing::trace!(key = %key.to_hex(), "instance_pre cache hit");
         Some(entry.pre.clone())
     }
 
-    /// Store a `SandboxPre` in the cache.
+    /// Store a `SandboxPre` linked on `engine` in the cache.
     ///
     /// If an entry already exists for this key (race condition), the
     /// existing entry is kept (first writer wins). When the cache is full,
     /// the least recently used entry is evicted to make room.
-    pub fn put(&self, key: CacheKey, pre: SandboxPre<ExecutorState>) {
+    pub fn put(&self, engine: &Engine, key: CacheKey, pre: SandboxPre<ExecutorState>) {
+        debug_assert!(
+            wasmtime::Engine::same(pre.instance_pre().engine(), engine.wasmtime()),
+            "the component was linked on a different engine"
+        );
+        let key = (engine.id(), key);
         if let Ok(mut cache) = self.cache.write() {
             if cache.contains_key(&key) {
                 return;
@@ -673,10 +684,10 @@ impl InstancePreCache {
                     .min_by_key(|(_, entry)| entry.last_used.load(Ordering::Relaxed))
                     .map(|(key, _)| key.clone())
             {
-                tracing::debug!(key = %oldest.to_hex(), "instance_pre cache evict");
+                tracing::debug!(key = %oldest.1.to_hex(), "instance_pre cache evict");
                 cache.remove(&oldest);
             }
-            tracing::debug!(key = %key.to_hex(), "instance_pre cache store");
+            tracing::debug!(key = %key.1.to_hex(), "instance_pre cache store");
             cache.insert(
                 key,
                 InstancePreEntry {
@@ -939,6 +950,7 @@ mod tests {
     #[cfg(feature = "embedded")]
     #[test]
     fn instance_pre_cache_evicts_least_recently_used() {
+        let engine = Engine::shared().unwrap();
         let pre = crate::wasm::PythonExecutor::from_embedded_runtime()
             .unwrap()
             .instance_pre()
@@ -954,16 +966,61 @@ mod tests {
         };
 
         for i in 0..InstancePreCache::MAX_ENTRIES as u8 {
-            cache.put(key(i), pre.clone());
+            cache.put(&engine, key(i), pre.clone());
         }
         // Touch the oldest entry so the second-oldest becomes the LRU one.
-        assert!(cache.get(&key(0)).is_some());
-        cache.put(key(200), pre);
+        assert!(cache.get(&engine, &key(0)).is_some());
+        cache.put(&engine, key(200), pre);
 
         assert_eq!(cache.len(), InstancePreCache::MAX_ENTRIES);
-        assert!(cache.get(&key(0)).is_some());
-        assert!(cache.get(&key(1)).is_none());
-        assert!(cache.get(&key(200)).is_some());
+        assert!(cache.get(&engine, &key(0)).is_some());
+        assert!(cache.get(&engine, &key(1)).is_none());
+        assert!(cache.get(&engine, &key(200)).is_some());
+    }
+
+    /// A component linked on one engine is never handed to another: each
+    /// engine links the embedded runtime itself, under the same key.
+    #[cfg(feature = "embedded")]
+    #[test]
+    fn instance_pre_cache_entries_are_per_engine() {
+        use crate::wasm::PythonExecutor;
+
+        let shared = Engine::shared().unwrap();
+        let other = Engine::new(
+            crate::EngineConfig::default()
+                .with_allocator(crate::InstanceAllocator::OnDemand)
+                .with_warm_instances(0),
+        )
+        .unwrap();
+        let on_shared = PythonExecutor::from_embedded_runtime_on(&shared).unwrap();
+        let on_other = PythonExecutor::from_embedded_runtime_on(&other).unwrap();
+
+        let engine_of =
+            |executor: &PythonExecutor| executor.instance_pre().instance_pre().engine().clone();
+        assert!(wasmtime::Engine::same(
+            &engine_of(&on_shared),
+            shared.wasmtime()
+        ));
+        assert!(wasmtime::Engine::same(
+            &engine_of(&on_other),
+            other.wasmtime()
+        ));
+
+        let key = CacheKey::embedded_runtime();
+        let global = InstancePreCache::global();
+        let cached_shared = global.get(&shared, &key).unwrap();
+        let cached_other = global.get(&other, &key).unwrap();
+        assert!(!wasmtime::Engine::same(
+            cached_shared.instance_pre().engine(),
+            cached_other.instance_pre().engine()
+        ));
+
+        let cache = InstancePreCache {
+            cache: RwLock::new(HashMap::new()),
+            clock: AtomicU64::new(0),
+        };
+        cache.put(&shared, key.clone(), on_shared.instance_pre().clone());
+        assert!(cache.get(&other, &key).is_none());
     }
 
     #[test]

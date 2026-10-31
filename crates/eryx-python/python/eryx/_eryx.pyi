@@ -3,7 +3,17 @@
 import asyncio
 import builtins
 from pathlib import Path
-from typing import Any, Callable, Iterator, Optional, Sequence, TypedDict, Union, final
+from typing import (
+    Any,
+    Callable,
+    Iterator,
+    Literal,
+    Optional,
+    Sequence,
+    TypedDict,
+    Union,
+    final,
+)
 
 PathLike = Union[str, Path]
 
@@ -14,6 +24,61 @@ past it fail. Without it, writes to a writable volume are unmetered.
 
 Never mount a directory holding a factory file writable: the sandbox's writes
 change the host file in place, including native code a loaded factory runs."""
+
+
+@final
+class Engine:
+    """The engine sandboxes run on: compiled code, the instance allocator and
+    the pool of warm instances kept ready.
+
+    Sandboxes, sessions and factories use a process-wide shared engine unless
+    given one with ``engine=``. The shared engine is configured by the
+    ``ERYX_WARM_INSTANCES``, ``ERYX_ALLOCATOR`` and ``ERYX_POOL_*``
+    environment variables. An ``Engine`` you create ignores those variables
+    entirely: anything not passed here takes the built-in default.
+
+    Each engine loads its own copy of the runtime and keeps its own warm
+    instances, and with the pooling allocator it reserves virtual address
+    space for every slot up front (terabytes with the defaults). Run one or
+    two per process, not one per sandbox.
+
+    Example:
+        engine = Engine(warm_instances=4, pool_instances=256)
+        sandbox = Sandbox(engine=engine)
+    """
+
+    def __new__(
+        cls,
+        *,
+        warm_instances: Optional[int] = None,
+        allocator: Optional[Literal["pooling", "on-demand"]] = None,
+        pool_instances: Optional[int] = None,
+        pool_keep_resident_mb: Optional[int] = None,
+        pool_pagemap_scan: Optional[bool] = None,
+        pool_release_interval_secs: Optional[int] = None,
+    ) -> Engine:
+        """Create an engine.
+
+        Args:
+            warm_instances: Instances to keep ready per runtime (default 1);
+                0 disables the warm pool.
+            allocator: ``"pooling"`` (the default, except on Windows) or
+                ``"on-demand"``.
+            pool_instances: Maximum sandbox instances alive at once with the
+                pooling allocator (default 1000).
+            pool_keep_resident_mb: MiB of each linear memory kept mapped
+                between uses (default 64).
+            pool_pagemap_scan: Find dirty pages with Linux's ``PAGEMAP_SCAN``
+                (default True).
+            pool_release_interval_secs: How often to release memory kept
+                resident for unused slots (default 30); 0 never releases it.
+
+        Raises:
+            ValueError: If ``allocator`` is not a known allocator.
+            InitializationError: If a setting is invalid or the engine cannot
+                be created.
+        """
+        ...
 
 
 class SecretDict(TypedDict, total=False):
@@ -673,6 +738,7 @@ class Sandbox:
         on_stdout: Optional[Callable[[bytes], None]] = None,
         on_stderr: Optional[Callable[[bytes], None]] = None,
         result_variable: Optional[str] = None,
+        engine: Optional[Engine] = None,
     ) -> Sandbox:
         """Create a new sandbox with the embedded Python runtime.
 
@@ -708,6 +774,7 @@ class Sandbox:
                 waiting for execution to complete. Receives the output chunk as bytes.
             result_variable: Name of the variable captured from the script and exposed
                 as ``ExecuteResult.result`` (JSON-serialized). Defaults to ``"result"``.
+            engine: Optional ``Engine`` to run on instead of the shared one.
 
         Raises:
             InitializationError: If the sandbox fails to initialize.
@@ -968,6 +1035,7 @@ class SandboxFactory:
         setup_code: Optional[str] = None,
         callbacks: Optional[Union[CallbackRegistry, Sequence[CallbackDict]]] = None,
         cache: bool = True,
+        engine: Optional[Engine] = None,
     ) -> SandboxFactory:
         """Create a new sandbox factory with custom packages.
 
@@ -997,6 +1065,8 @@ class SandboxFactory:
                 factory construction and subsequent ``create_sandbox()`` calls skip
                 component deserialization entirely (~0.8ms vs ~8ms per call).
                 Defaults to True.
+            engine: Optional ``Engine`` for every sandbox, session and pool this
+                factory creates, instead of the shared one.
 
         Raises:
             InitializationError: If initialization fails.
@@ -1030,6 +1100,7 @@ class SandboxFactory:
         site_packages: Optional[PathLike] = None,
         callbacks: Optional[Union[CallbackRegistry, Sequence[CallbackDict]]] = None,
         cache: bool = True,
+        engine: Optional[Engine] = None,
     ) -> SandboxFactory:
         """Load a sandbox factory from a file.
 
@@ -1059,6 +1130,9 @@ class SandboxFactory:
                 cache. When enabled, a BLAKE3 content hash is computed once during
                 loading and subsequent ``create_sandbox()`` calls reuse the linked
                 component instead of re-linking it per call. Defaults to True.
+            engine: Optional ``Engine`` for every sandbox, session and pool this
+                factory creates, instead of the shared one. The file is mapped
+                into it.
 
         Returns:
             A SandboxFactory loaded from the file.
@@ -1213,6 +1287,8 @@ class SandboxFactory:
         deserialization. Per-request state (callbacks, output handlers, resource
         limits) is set on each ``acquire()`` call and cleared on release.
 
+        The pool's sandboxes run on the factory's ``engine``.
+
         Args:
             max_size: Maximum concurrent sandboxes. Default: 10.
             min_idle: Minimum warm sandboxes to keep ready. Default: 1.
@@ -1350,6 +1426,7 @@ class Session:
         on_stdout: Optional[Callable[[bytes], None]] = None,
         on_stderr: Optional[Callable[[bytes], None]] = None,
         result_variable: Optional[str] = None,
+        engine: Optional[Engine] = None,
     ) -> Session:
         """Create a new session with the embedded Python runtime.
 
@@ -1370,6 +1447,7 @@ class Session:
             mcp: Optional MCPManager with connected MCP servers.
             on_stdout: Optional callback for streaming stdout output in real-time.
             on_stderr: Optional callback for streaming stderr output in real-time.
+            engine: Optional ``Engine`` to run on instead of the shared one.
 
         Raises:
             InitializationError: If the session fails to initialize.

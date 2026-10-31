@@ -32,6 +32,7 @@ from eryx._eryx import (
     # Classes
     CallbackRegistry,
     CancelToken,
+    Engine,
     ExecuteResult,
     MCPManager,
     NetConfig,
@@ -66,6 +67,7 @@ __all__ = [
     # Classes
     "CallbackRegistry",
     "CancelToken",
+    "Engine",
     "ExecuteResult",
     "MCPManager",
     "NetConfig",

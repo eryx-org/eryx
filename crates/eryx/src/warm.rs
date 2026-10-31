@@ -13,8 +13,9 @@
 //! request path. Isolation is unchanged: every execution still runs on an
 //! instance that has never run user code.
 //!
-//! The pool is process-global and keyed by component, so short-lived
-//! `Sandbox` values (the `SandboxFactory` pattern) share it. It holds
+//! Each [`Engine`](crate::Engine) has one pool, keyed by component, so
+//! short-lived `Sandbox` values on the same engine (the `SandboxFactory`
+//! pattern) share it. It holds
 //! instances for at most [`WarmPool::MAX_COMPONENTS`] components, evicting
 //! the least recently used, because a warm store keeps its component loaded
 //! and executors built with `from_file`/`from_binary` each load their own. It
@@ -25,7 +26,7 @@
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use tokio::runtime::{Handle, RuntimeFlavor};
@@ -61,7 +62,7 @@ impl Slot {
     }
 }
 
-/// Process-global pool of warm instances, one slot per component.
+/// An engine's pool of warm instances, one slot per component.
 pub(crate) struct WarmPool {
     /// Instances to keep ready per component; `0` disables the pool.
     target: usize,
@@ -85,37 +86,16 @@ impl Slots {
 }
 
 impl WarmPool {
-    /// Default number of ready instances per component.
-    ///
-    /// One is enough to hide instantiation from a caller that executes
-    /// serially, which is the `SandboxFactory` render pattern; concurrent
-    /// callers should raise `ERYX_WARM_INSTANCES` towards their concurrency.
-    const DEFAULT_TARGET: usize = 1;
-
     /// Components to keep warm instances for.
     ///
     /// Usually there is one, the embedded runtime; the bound only matters
     /// when executors keep loading their own copy of a component.
     const MAX_COMPONENTS: usize = 4;
 
-    pub(crate) fn global() -> &'static Self {
-        static POOL: OnceLock<WarmPool> = OnceLock::new();
-        POOL.get_or_init(|| {
-            let target = match std::env::var("ERYX_WARM_INSTANCES") {
-                Ok(v) => v.trim().parse().unwrap_or_else(|_| {
-                    tracing::warn!(
-                        value = %v,
-                        default = Self::DEFAULT_TARGET,
-                        "ignoring invalid ERYX_WARM_INSTANCES, expected a non-negative integer"
-                    );
-                    Self::DEFAULT_TARGET
-                }),
-                Err(_) => Self::DEFAULT_TARGET,
-            };
-            WarmPool {
-                target,
-                slots: ForkLocal::new(|| Mutex::new(Slots::new())),
-            }
+    pub(crate) fn new(target: usize) -> Arc<Self> {
+        Arc::new(WarmPool {
+            target,
+            slots: ForkLocal::new(|| Mutex::new(Slots::new())),
         })
     }
 
@@ -188,7 +168,7 @@ impl WarmPool {
     /// do not hold up the async workers serving other requests. Otherwise
     /// the store is dropped here.
     pub(crate) fn retire(
-        &'static self,
+        self: &Arc<Self>,
         pre: &SandboxPre<ExecutorState>,
         mut store: Option<Store<ExecutorState>>,
     ) {
@@ -241,7 +221,7 @@ impl WarmPool {
     /// Making room for a new component evicts the least recently used idle
     /// one; its instances are returned so the caller can drop them off the
     /// request path.
-    fn reserve(&'static self, key: usize) -> (Option<Reservation>, Vec<WarmInstance>) {
+    fn reserve(self: &Arc<Self>, key: usize) -> (Option<Reservation>, Vec<WarmInstance>) {
         let Some(mut guard) = self.lock_slots() else {
             return (None, Vec::new());
         };
@@ -265,7 +245,13 @@ impl WarmPool {
             return (None, evicted);
         }
         slot.pending += 1;
-        (Some(Reservation { pool: self, key }), evicted)
+        (
+            Some(Reservation {
+                pool: Arc::clone(self),
+                key,
+            }),
+            evicted,
+        )
     }
 }
 
@@ -306,7 +292,7 @@ impl Drop for Retiring {
 /// task was cancelled by runtime shutdown before it finished) releases the
 /// commitment, so the slot can be refilled later.
 struct Reservation {
-    pool: &'static WarmPool,
+    pool: Arc<WarmPool>,
     key: usize,
 }
 
@@ -362,10 +348,7 @@ mod tests {
     /// slot thinking one is still on its way.
     #[test]
     fn a_dropped_reservation_lets_the_slot_be_refilled() {
-        let pool: &'static WarmPool = Box::leak(Box::new(WarmPool {
-            target: 1,
-            slots: ForkLocal::new(|| Mutex::new(Slots::new())),
-        }));
+        let pool = WarmPool::new(1);
 
         let (reservation, _) = pool.reserve(7);
         assert!(reservation.is_some());
@@ -382,10 +365,7 @@ mod tests {
     /// stores and in-flight refills.
     #[test]
     fn a_forked_child_starts_with_empty_slots() {
-        let pool: &'static WarmPool = Box::leak(Box::new(WarmPool {
-            target: 1,
-            slots: ForkLocal::new(|| Mutex::new(Slots::new())),
-        }));
+        let pool = WarmPool::new(1);
 
         let (reservation, _) = pool.reserve(7);
         assert!(reservation.is_some());
@@ -417,10 +397,7 @@ mod tests {
     /// execution.
     #[test]
     fn an_unsupported_component_is_not_reserved_again() {
-        let pool: &'static WarmPool = Box::leak(Box::new(WarmPool {
-            target: 1,
-            slots: ForkLocal::new(|| Mutex::new(Slots::new())),
-        }));
+        let pool = WarmPool::new(1);
 
         let (reservation, _) = pool.reserve(7);
         assert!(reservation.is_some());

@@ -12,6 +12,7 @@ use std::{
 };
 
 use crate::CancellationToken;
+use crate::Engine;
 use tokio::sync::{mpsc, oneshot};
 
 use crate::replay::{CallbackJournal, ReplayState, SuspendedCallback, wrap_callbacks};
@@ -961,7 +962,11 @@ impl PrecompiledArtifact {
     }
 
     /// Create an uncached artifact by memory-mapping a pre-compiled component
-    /// from an open file, without reading it into memory.
+    /// from an open file into `engine`, without reading it into memory.
+    ///
+    /// Mapping binds the component to `engine`: [`Self::to_executor`] only
+    /// accepts that engine (or a clone of it) afterwards. Pass
+    /// [`Engine::shared`] unless the sandboxes will use their own engine.
     ///
     /// The component occupies the first `len` bytes of the file; anything
     /// after it is ignored. The file is mapped once, here, through the open
@@ -985,9 +990,9 @@ impl PrecompiledArtifact {
     /// Returns an error if the file cannot be read, is shorter than `len`, or
     /// does not hold a component compatible with the current engine.
     #[allow(unsafe_code)]
-    pub unsafe fn from_file(file: std::fs::File, len: u64) -> Result<Self, Error> {
+    pub unsafe fn from_file(engine: &Engine, file: std::fs::File, len: u64) -> Result<Self, Error> {
         // SAFETY: The caller guarantees the file is trusted and unmodified.
-        unsafe { Self::from_file_inner(file, len, None) }
+        unsafe { Self::from_file_inner(engine, file, len, None) }
     }
 
     /// Like [`Self::from_file`], but also computes a content-derived cache key
@@ -1005,7 +1010,11 @@ impl PrecompiledArtifact {
     /// Same as [`Self::from_file`].
     #[cfg(feature = "embedded")]
     #[allow(unsafe_code)]
-    pub unsafe fn from_file_cached(file: std::fs::File, len: u64) -> Result<Self, Error> {
+    pub unsafe fn from_file_cached(
+        engine: &Engine,
+        file: std::fs::File,
+        len: u64,
+    ) -> Result<Self, Error> {
         use std::io::{Read as _, Seek as _};
 
         let key = (&file)
@@ -1013,7 +1022,7 @@ impl PrecompiledArtifact {
             .and_then(|_| crate::cache::CacheKey::from_precompiled_reader((&file).take(len)))
             .map_err(component_read_error)?;
         // SAFETY: The caller guarantees the file is trusted and unmodified.
-        unsafe { Self::from_file_inner(file, len, Some(key)) }
+        unsafe { Self::from_file_inner(engine, file, len, Some(key)) }
     }
 
     /// Like [`Self::from_file_cached`], but takes the component's content hash
@@ -1034,13 +1043,14 @@ impl PrecompiledArtifact {
     #[cfg(feature = "embedded")]
     #[allow(unsafe_code)]
     pub unsafe fn from_file_with_hash(
+        engine: &Engine,
         file: std::fs::File,
         len: u64,
         hash: [u8; 32],
     ) -> Result<Self, Error> {
         let key = crate::cache::CacheKey::from_precompiled_hash(hash);
         // SAFETY: The caller guarantees the file and hash are trusted.
-        unsafe { Self::from_file_inner(file, len, Some(key)) }
+        unsafe { Self::from_file_inner(engine, file, len, Some(key)) }
     }
 
     /// The component's content hash, for [`Self::from_file_with_hash`].
@@ -1074,6 +1084,7 @@ impl PrecompiledArtifact {
 
     #[allow(unsafe_code)]
     unsafe fn from_file_inner(
+        engine: &Engine,
         file: std::fs::File,
         len: u64,
         cache_key: Option<crate::cache::CacheKey>,
@@ -1096,7 +1107,7 @@ impl PrecompiledArtifact {
             let fd_path = format!("/dev/fd/{}", file.as_raw_fd());
             // SAFETY: The caller guarantees the file is trusted and unmodified.
             let component =
-                unsafe { PythonExecutor::deserialize_component_file(fd_path.as_ref())? };
+                unsafe { PythonExecutor::deserialize_component_file(engine, fd_path.as_ref())? };
             return Ok(Self {
                 component: ArtifactComponent::Mapped(Arc::new(MappedComponent {
                     component,
@@ -1164,8 +1175,8 @@ impl PrecompiledArtifact {
         self.len() == 0
     }
 
-    /// Build a [`PythonExecutor`] from this artifact, consulting the
-    /// process-global [`crate::cache::InstancePreCache`] when it carries a
+    /// Build a [`PythonExecutor`] on `engine` from this artifact, consulting
+    /// the process-global [`crate::cache::InstancePreCache`] when it carries a
     /// cache key.
     ///
     /// On a cache hit this skips deserializing the component bytes. Artifacts
@@ -1178,29 +1189,36 @@ impl PrecompiledArtifact {
     /// Pre-compiled bytes cannot be fully validated by Wasmtime. Only construct
     /// executors from artifacts created by [`PythonExecutor::precompile`] from
     /// trusted components.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the component cannot be loaded, or if this is a
+    /// file-backed artifact mapped into an engine other than `engine`.
     #[allow(unsafe_code)]
-    pub unsafe fn to_executor(&self) -> std::result::Result<PythonExecutor, Error> {
-        let bytes = match &self.component {
-            ArtifactComponent::Bytes(bytes) => bytes,
+    pub unsafe fn to_executor(
+        &self,
+        engine: &Engine,
+    ) -> std::result::Result<PythonExecutor, Error> {
+        match &self.component {
+            ArtifactComponent::Bytes(bytes) => {
+                // SAFETY: The caller guarantees that the artifact bytes are trusted.
+                unsafe {
+                    PythonExecutor::from_precompiled_on(engine, bytes, self.cache_key.clone())
+                }
+            }
             ArtifactComponent::Mapped(mapped) => {
-                return PythonExecutor::from_deserialized_component(
+                if !mapped.component.engine().same(engine) {
+                    return Err(Error::Initialization(
+                        "this pre-compiled artifact was mapped into a different engine; \
+                         build its sandboxes on the engine it was loaded with"
+                            .to_string(),
+                    ));
+                }
+                PythonExecutor::from_deserialized_component(
                     &mapped.component,
                     self.cache_key.clone(),
-                );
+                )
             }
-        };
-
-        #[cfg(feature = "embedded")]
-        if let Some(key) = &self.cache_key {
-            // SAFETY: The caller guarantees that the artifact bytes are trusted.
-            #[allow(unsafe_code)]
-            return unsafe { PythonExecutor::from_precompiled_with_key(bytes, key.clone()) };
-        }
-
-        // SAFETY: The caller guarantees that the artifact bytes are trusted.
-        #[allow(unsafe_code)]
-        unsafe {
-            PythonExecutor::from_precompiled(bytes)
         }
     }
 }
@@ -1275,7 +1293,7 @@ impl PrecompiledFileSource {
     /// The file must hold trusted output of [`PythonExecutor::precompile`] and
     /// must not be modified in place while the mapping is alive.
     #[allow(unsafe_code)]
-    unsafe fn to_executor(&self) -> std::result::Result<PythonExecutor, Error> {
+    unsafe fn to_executor(&self, engine: &Engine) -> std::result::Result<PythonExecutor, Error> {
         let artifact = self.artifact.get_or_try_init(|| {
             let file = std::fs::File::open(&self.path).map_err(|e| {
                 Error::Initialization(format!(
@@ -1288,10 +1306,10 @@ impl PrecompiledFileSource {
             // mapping it could save, and the artifact already shares its
             // linked component with every clone of this builder.
             // SAFETY: The caller guarantees the file is trusted and unmodified.
-            unsafe { PrecompiledArtifact::from_file(file, len) }
+            unsafe { PrecompiledArtifact::from_file(engine, file, len) }
         })?;
         // SAFETY: The caller guarantees the file is trusted.
-        unsafe { artifact.to_executor() }
+        unsafe { artifact.to_executor(engine) }
     }
 }
 
@@ -1329,6 +1347,8 @@ impl std::fmt::Debug for PrecompiledFileSource {
 /// ```
 pub struct SandboxBuilder<Runtime = state::Needs, Stdlib = state::Needs> {
     wasm_source: WasmSource,
+    /// The engine to load the runtime into; `None` is [`Engine::shared`].
+    engine: Option<Engine>,
     callbacks: HashMap<String, Arc<dyn Callback>>,
     /// First callback name registered twice; `build()` fails if set.
     duplicate_callback: Option<String>,
@@ -1411,6 +1431,7 @@ impl SandboxBuilder<state::Needs, state::Needs> {
     pub fn new() -> Self {
         Self {
             wasm_source: WasmSource::None,
+            engine: None,
             callbacks: HashMap::new(),
             duplicate_callback: None,
             preamble: String::new(),
@@ -1449,6 +1470,7 @@ impl SandboxBuilder<state::Needs, state::Needs> {
     fn new_embedded() -> SandboxBuilder<state::Has, state::Has> {
         SandboxBuilder {
             wasm_source: WasmSource::EmbeddedRuntime,
+            engine: None,
             callbacks: HashMap::new(),
             duplicate_callback: None,
             preamble: String::new(),
@@ -1487,6 +1509,7 @@ impl<R, S> SandboxBuilder<R, S> {
     fn transition<R2, S2>(self) -> SandboxBuilder<R2, S2> {
         SandboxBuilder {
             wasm_source: self.wasm_source,
+            engine: self.engine,
             callbacks: self.callbacks,
             duplicate_callback: self.duplicate_callback,
             preamble: self.preamble,
@@ -2002,6 +2025,18 @@ impl<R, S> SandboxBuilder<R, S> {
         self
     }
 
+    /// Run the sandbox on `engine` instead of [`Engine::shared`].
+    ///
+    /// The engine owns the instance allocator and warm-instance pool, so a
+    /// sandbox built this way uses `engine`'s limits, not the `ERYX_*`
+    /// environment variables. A pre-compiled artifact memory-mapped into one
+    /// engine cannot be used with another; building fails instead.
+    #[must_use]
+    pub fn with_engine(mut self, engine: Engine) -> Self {
+        self.engine = Some(engine);
+        self
+    }
+
     /// Configure whether execution trace events are collected in the result.
     ///
     /// Trace collection is disabled by default. It installs Python's
@@ -2428,6 +2463,7 @@ impl SandboxBuilder<state::Has, state::Has> {
             }
             source => source,
         };
+        let engine = self.engine;
         let python_stdlib_path = self.python_stdlib_path;
         let python_site_packages_path = self.python_site_packages_path;
         let result_variable = self.result_variable;
@@ -2436,6 +2472,7 @@ impl SandboxBuilder<state::Has, state::Has> {
         Ok(Box::new(move || {
             let mut builder = SandboxBuilder::new();
             builder.wasm_source = wasm_source.clone();
+            builder.engine = engine.clone();
             builder.python_stdlib_path = python_stdlib_path.clone();
             builder.python_site_packages_path = python_site_packages_path.clone();
             builder.result_variable = result_variable.clone();
@@ -2572,6 +2609,11 @@ impl SandboxBuilder<state::Has, state::Has> {
         // If native extensions are specified, use late-linking to create the component.
         // This OVERRIDES any wasm_source setting (including embedded runtime) because
         // native extensions must be linked into the runtime at this point.
+        let engine = match &self.engine {
+            Some(engine) => engine.clone(),
+            None => Engine::shared()?,
+        };
+
         #[cfg(feature = "native-extensions")]
         let executor = if !self.native_extensions.is_empty() {
             // Warn if user explicitly set embedded runtime - it will be ignored
@@ -2581,13 +2623,13 @@ impl SandboxBuilder<state::Has, state::Has> {
                     "Native extensions detected - using late-linking instead of embedded runtime"
                 );
             }
-            self.build_executor_with_extensions()?
+            self.build_executor_with_extensions(&engine)?
         } else {
-            self.build_executor_from_source()?
+            self.build_executor_from_source(&engine)?
         };
 
         #[cfg(not(feature = "native-extensions"))]
-        let executor = self.build_executor_from_source()?;
+        let executor = self.build_executor_from_source(&engine)?;
 
         // Determine stdlib path: explicit > embedded. A failure to extract the
         // embedded stdlib is an error rather than a reason to go looking for a
@@ -2662,10 +2704,10 @@ impl SandboxBuilder<state::Has, state::Has> {
     }
 
     /// Build executor from the configured WASM source.
-    fn build_executor_from_source(&self) -> Result<PythonExecutor, Error> {
+    fn build_executor_from_source(&self, engine: &Engine) -> Result<PythonExecutor, Error> {
         let executor = match &self.wasm_source {
-            WasmSource::Bytes(bytes) => PythonExecutor::from_binary(bytes)?,
-            WasmSource::File(path) => PythonExecutor::from_file(path)?,
+            WasmSource::Bytes(bytes) => PythonExecutor::from_binary_on(engine, bytes)?,
+            WasmSource::File(path) => PythonExecutor::from_file_on(engine, path)?,
 
             #[cfg(any(feature = "embedded", feature = "preinit"))]
             WasmSource::PrecompiledBytes(bytes) => {
@@ -2674,7 +2716,7 @@ impl SandboxBuilder<state::Has, state::Has> {
                 // caller has acknowledged this responsibility.
                 #[allow(unsafe_code)]
                 unsafe {
-                    PythonExecutor::from_precompiled(bytes)?
+                    PythonExecutor::from_precompiled_on(engine, bytes, None)?
                 }
             }
 
@@ -2685,7 +2727,7 @@ impl SandboxBuilder<state::Has, state::Has> {
                 // the caller has acknowledged this responsibility.
                 #[allow(unsafe_code)]
                 unsafe {
-                    artifact.to_executor()?
+                    artifact.to_executor(engine)?
                 }
             }
 
@@ -2696,14 +2738,14 @@ impl SandboxBuilder<state::Has, state::Has> {
                 // caller has acknowledged this responsibility.
                 #[allow(unsafe_code)]
                 unsafe {
-                    source.to_executor()?
+                    source.to_executor(engine)?
                 }
             }
 
             #[cfg(feature = "embedded")]
             WasmSource::EmbeddedRuntime => {
                 // Use the optimized path that leverages InstancePreCache
-                PythonExecutor::from_embedded_runtime()?
+                PythonExecutor::from_embedded_runtime_on(engine)?
             }
 
             WasmSource::None => {
@@ -2712,7 +2754,7 @@ impl SandboxBuilder<state::Has, state::Has> {
                 {
                     tracing::debug!("No WASM source specified, using embedded runtime");
                     // Use the optimized path that leverages InstancePreCache
-                    PythonExecutor::from_embedded_runtime()?
+                    PythonExecutor::from_embedded_runtime_on(engine)?
                 }
 
                 #[cfg(not(feature = "embedded"))]
@@ -2736,7 +2778,7 @@ impl SandboxBuilder<state::Has, state::Has> {
     /// 2. If found, load from cache (fast path)
     /// 3. If not found, link extensions, pre-compile, cache, and return
     #[cfg(feature = "native-extensions")]
-    fn build_executor_with_extensions(&self) -> Result<PythonExecutor, Error> {
+    fn build_executor_with_extensions(&self, engine: &Engine) -> Result<PythonExecutor, Error> {
         #[cfg(feature = "embedded")]
         use crate::cache::{CacheKey, InstancePreCache};
 
@@ -2745,12 +2787,15 @@ impl SandboxBuilder<state::Has, state::Has> {
 
         // Tier 1: Check InstancePreCache first (fastest - just Clone)
         #[cfg(feature = "embedded")]
-        if let Some(instance_pre) = InstancePreCache::global().get(&cache_key) {
+        if let Some(instance_pre) = InstancePreCache::global().get(engine, &cache_key) {
             tracing::debug!(
                 key = %cache_key.to_hex(),
                 "instance_pre cache hit - returning cached executor"
             );
-            return PythonExecutor::from_cached_instance_pre(instance_pre);
+            return Ok(PythonExecutor::from_cached_instance_pre(
+                engine,
+                instance_pre,
+            ));
         }
 
         // Tier 2: Try filesystem cache (mmap-based, faster than bytes).
@@ -2777,7 +2822,7 @@ impl SandboxBuilder<state::Has, state::Has> {
             // Use with_key to populate InstancePreCache for future calls.
             #[allow(unsafe_code)]
             match unsafe {
-                PythonExecutor::from_precompiled_file_with_key(&path, cache_key.clone())
+                PythonExecutor::from_precompiled_file_on(engine, &path, Some(cache_key.clone()))
             } {
                 Ok(executor) => return Ok(executor),
                 Err(e) => {
@@ -2805,11 +2850,14 @@ impl SandboxBuilder<state::Has, state::Has> {
                 // SAFETY: the cache is the default private one or one the
                 // caller vouched for via the unsafe `with_cache`/`with_cache_dir`.
                 #[allow(unsafe_code)]
-                match unsafe { PythonExecutor::from_precompiled(&precompiled) } {
-                    Ok(executor) => {
-                        InstancePreCache::global().put(cache_key, executor.instance_pre().clone());
-                        return Ok(executor);
-                    }
+                match unsafe {
+                    PythonExecutor::from_precompiled_on(
+                        engine,
+                        &precompiled,
+                        Some(cache_key.clone()),
+                    )
+                } {
+                    Ok(executor) => return Ok(executor),
                     Err(e) => tracing::warn!(
                         error = %e,
                         key = %cache_key.to_hex(),
@@ -2851,13 +2899,13 @@ impl SandboxBuilder<state::Has, state::Has> {
             // Load from pre-compiled bytes and populate InstancePreCache
             // SAFETY: We just created these bytes from `precompile()` above.
             #[allow(unsafe_code)]
-            let executor = unsafe { PythonExecutor::from_precompiled(&precompiled) }?;
-            InstancePreCache::global().put(cache_key, executor.instance_pre().clone());
-            return Ok(executor);
+            return unsafe {
+                PythonExecutor::from_precompiled_on(engine, &precompiled, Some(cache_key))
+            };
         }
 
         // No cache or embedded feature - create executor directly from linked bytes
-        PythonExecutor::from_binary(&component_bytes)
+        PythonExecutor::from_binary_on(engine, &component_bytes)
     }
 }
 

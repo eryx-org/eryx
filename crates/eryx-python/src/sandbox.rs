@@ -100,6 +100,7 @@ impl Sandbox {
     ///     network: Optional network configuration. If provided, enables networking.
     ///     callbacks: Optional callbacks that sandboxed code can invoke.
     ///         Can be a CallbackRegistry or a list of callback dicts.
+    ///     engine: Optional `Engine` to run on instead of the shared one.
     ///
     /// Returns:
     ///     A new Sandbox instance ready to execute Python code.
@@ -145,7 +146,7 @@ impl Sandbox {
     ///     )
     ///     sandbox = factory.create_sandbox()
     #[new]
-    #[pyo3(signature = (*, resource_limits=None, network=None, callbacks=None, mcp=None, secrets=None, scrub_stdout=None, scrub_stderr=None, scrub_result=None, scrub_files=None, volumes=None, on_stdout=None, on_stderr=None, result_variable=None))]
+    #[pyo3(signature = (*, resource_limits=None, network=None, callbacks=None, mcp=None, secrets=None, scrub_stdout=None, scrub_stderr=None, scrub_result=None, scrub_files=None, volumes=None, on_stdout=None, on_stderr=None, result_variable=None, engine=None))]
     #[allow(clippy::too_many_arguments)]
     fn new(
         py: Python<'_>,
@@ -162,6 +163,7 @@ impl Sandbox {
         on_stdout: Option<Py<PyAny>>,
         on_stderr: Option<Py<PyAny>>,
         result_variable: Option<String>,
+        engine: Option<PyRef<'_, crate::engine::Engine>>,
     ) -> PyResult<Self> {
         let runtime = crate::error::make_runtime()?;
 
@@ -170,6 +172,9 @@ impl Sandbox {
         // expose trace events, and the hook makes instruction-heavy scripts
         // orders of magnitude slower.
         let mut builder = eryx::Sandbox::embedded().with_trace_collection(false);
+        if let Some(engine) = engine {
+            builder = builder.with_engine(engine.inner.clone());
+        }
 
         // Apply resource limits if provided
         if let Some(limits) = resource_limits {

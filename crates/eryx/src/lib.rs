@@ -58,6 +58,7 @@ mod cancel;
 pub mod embedded;
 #[cfg(feature = "embedded-stdlib")]
 pub mod embedded_stdlib;
+mod engine;
 mod error;
 mod fork_local;
 mod library;
@@ -107,6 +108,7 @@ pub mod preinit {
 pub use callback::{
     Callback, CallbackError, DynamicCallback, DynamicCallbackBuilder, TypedCallback, empty_schema,
 };
+pub use engine::{Engine, EngineConfig, InstanceAllocator};
 pub use error::Error;
 pub use library::RuntimeLibrary;
 pub use net::{
