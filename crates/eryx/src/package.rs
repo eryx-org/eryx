@@ -35,6 +35,7 @@ const MAX_ARCHIVE_ENTRIES: usize = 100_000;
 
 /// Detected package format.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum PackageFormat {
     /// Standard Python wheel (.whl) - a zip file.
     Wheel,
