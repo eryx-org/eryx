@@ -97,8 +97,8 @@ pub struct ServerLimits {
     /// process resource.
     pub max_open_host_files: usize,
     /// Whether a request may set `network_config.allow_plaintext_secrets`,
-    /// which sends real secret values over unencrypted connections. When
-    /// `false`, such a request is rejected with `INVALID_ARGUMENT` rather than
+    /// which sends real secret values over unencrypted connections. Off by
+    /// default: such a request is rejected with `INVALID_ARGUMENT` rather than
     /// run with the field ignored.
     pub allow_plaintext_secrets: bool,
 }
@@ -115,7 +115,7 @@ impl Default for ServerLimits {
             max_io_timeout: Duration::from_secs(300),
             max_output_bytes: 16 * 1024 * 1024,
             max_open_host_files: eryx::vfs::DEFAULT_MAX_OPEN_HOST_FILES,
-            allow_plaintext_secrets: true,
+            allow_plaintext_secrets: false,
         }
     }
 }
@@ -314,8 +314,8 @@ impl crate::proto::eryx::v1::eryx_server::Eryx for EryxService {
             .map(|nc| -> Result<NetConfig, Status> {
                 if nc.allow_plaintext_secrets && !self.limits.allow_plaintext_secrets {
                     return Err(Status::invalid_argument(
-                        "network_config.allow_plaintext_secrets is disabled on this server \
-                         (--disallow-plaintext-secrets)",
+                        "network_config.allow_plaintext_secrets is not enabled on this server \
+                         (start it with --allow-plaintext-secrets)",
                     ));
                 }
                 let base = NetConfig::default();

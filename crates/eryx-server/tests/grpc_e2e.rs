@@ -2682,15 +2682,22 @@ async fn secret_without_allowed_hosts_is_rejected() {
     }
 }
 
-/// Secrets go over plain TCP with the placeholder in place unless the request
-/// sets `allow_plaintext_secrets`.
+/// On a server started with `--allow-plaintext-secrets`, secrets go over plain
+/// TCP with the placeholder in place unless the request sets
+/// `allow_plaintext_secrets`.
 #[tokio::test]
 async fn plaintext_secret_substitution_is_opt_in() {
     use eryx_server::proto::eryx::v1::{NetworkConfig, SecretConfig};
     use tokio::io::AsyncReadExt;
 
     const REAL_SECRET: &str = "plaintext-real-secret-77";
-    let mut client = EryxClient::new(start_server().await);
+    let limits = eryx_server::service::ServerLimits {
+        allow_plaintext_secrets: true,
+        ..Default::default()
+    };
+    let mut client = EryxClient::new(
+        start_server_with(2, |pool| EryxService::new(pool).with_limits(limits)).await,
+    );
 
     for allow_plaintext_secrets in [false, true] {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -2745,10 +2752,10 @@ async fn plaintext_secret_substitution_is_opt_in() {
     }
 }
 
-/// A server started with `--disallow-plaintext-secrets` rejects a request
-/// that opts in, instead of running it with the field ignored.
+/// By default the server rejects a request that sets
+/// `allow_plaintext_secrets`, instead of running it with the field ignored.
 #[tokio::test]
-async fn disallowed_plaintext_secrets_are_rejected() {
+async fn plaintext_secrets_are_rejected_by_default() {
     use eryx_server::proto::eryx::v1::NetworkConfig;
 
     let request = |allow_plaintext_secrets| ExecuteRequest {
@@ -2760,20 +2767,14 @@ async fn disallowed_plaintext_secrets_are_rejected() {
         }),
         ..Default::default()
     };
-    let limits = eryx_server::service::ServerLimits {
-        allow_plaintext_secrets: false,
-        ..Default::default()
-    };
-    let mut client = EryxClient::new(
-        start_server_with(2, |pool| EryxService::new(pool).with_limits(limits)).await,
-    );
+    let mut client = EryxClient::new(start_server().await);
 
     let err = execute_half_closed(&mut client, request(true))
         .await
         .unwrap_err();
     assert_eq!(err.code(), tonic::Code::InvalidArgument, "{err}");
     assert!(
-        err.message().contains("allow_plaintext_secrets"),
+        err.message().contains("--allow-plaintext-secrets"),
         "{}",
         err.message()
     );

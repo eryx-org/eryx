@@ -225,8 +225,8 @@ message NetworkConfig {
   // upgrade, and a plain TCP request goes out with the placeholder left in
   // place. Enabling this sends the real secret value unencrypted, readable by
   // anyone on the network path; only use it for trusted local test servers.
-  // A server started with --disallow-plaintext-secrets rejects a request that
-  // sets it with INVALID_ARGUMENT.
+  // The server rejects a request that sets it with INVALID_ARGUMENT unless it
+  // was started with --allow-plaintext-secrets.
   bool allow_plaintext_secrets = 10;
 }
 
