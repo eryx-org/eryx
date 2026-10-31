@@ -50,7 +50,6 @@ pub use hybrid::{
     DEFAULT_MAX_OPEN_HOST_FILES, HybridVfsCtx, HybridVfsState, RealDir,
     process_max_open_host_files, set_process_max_open_host_files,
 };
-pub use hybrid_bindings::HybridReaddirIterator;
 pub use linker::{HybridVfsView, VfsView, add_hybrid_vfs_to_linker, add_vfs_to_linker};
 pub use scrubbing::{
     FileScrubPolicy as VfsFileScrubPolicy, ScrubbingStorage, SecretConfig as VfsSecretConfig,
@@ -59,7 +58,7 @@ pub use storage::{
     ArcStorage, DEFAULT_MAX_BYTES, DirEntry, ENTRY_OVERHEAD_BYTES, InMemorySnapshot,
     InMemoryStorage, MAX_ENTRIES, Metadata, VfsStorage,
 };
-pub use wasi_impl::{VfsCtx, VfsReaddirIterator, VfsState};
+pub use wasi_impl::{VfsCtx, VfsState};
 
 // Permission types. Vendored rather than re-exported from wasmtime-wasi, which
 // collapsed them into a coarse `FsPerms` in wasmtime 48 — see `perms`.
