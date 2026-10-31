@@ -202,6 +202,14 @@ export { DEFAULT_BLOCKED_HOSTS, DEFAULT_BLOCKED_NETWORKS } from "./shims/net.js"
  */
 
 /**
+ * A captured Python session state, from {@link Sandbox#snapshotState}.
+ * @typedef {Object} StateSnapshot
+ * @property {Uint8Array} data - The serialized state, accepted by restoreState()
+ * @property {string[]} skippedGlobals - Names of the globals left out because
+ *   they could not be serialized (e.g. open sockets, generators)
+ */
+
+/**
  * Parse the captured result JSON, promoting integers outside the IEEE-754 safe
  * range to BigInt so they round-trip without precision loss.
  *
@@ -321,8 +329,6 @@ export class Sandbox {
   #slot = { worker: null, closed: /** @type {Error | null} */ (null) };
   /** The last name passed to setResultVariable(), re-applied after a restart. */
   #resultVariable;
-  /** @type {string[]} */
-  #lastSnapshotSkippedGlobals = [];
   // The tail of the queue of calls into this instance. Each call starts only
   // after the previous one settles, so executions never overlap: the journal
   // and the streaming output decoders belong to the instance, and jco can't
@@ -536,28 +542,13 @@ export class Sandbox {
    *
    * Returns serialized state (via pickle) that can be restored later
    * with restoreState(). This captures all user-defined variables that can
-   * be serialized; the names of the others are in
-   * {@link lastSnapshotSkippedGlobals} afterwards.
+   * be serialized, and names the others in `skippedGlobals`.
    *
-   * @returns {Promise<Uint8Array>} Serialized Python state
+   * @returns {Promise<StateSnapshot>} Serialized Python state
    * @throws {Error} If serialization fails
    */
   async snapshotState() {
-    const snapshot = await this.#serialized((instance) => instance.snapshotState());
-    this.#lastSnapshotSkippedGlobals = snapshot.skippedGlobals;
-    return snapshot.data;
-  }
-
-  /**
-   * Names of the globals the most recent snapshotState() left out because
-   * they could not be serialized (e.g. open sockets, generators). They raise
-   * NameError after that snapshot is restored. Empty before the first
-   * snapshot.
-   *
-   * @returns {string[]}
-   */
-  get lastSnapshotSkippedGlobals() {
-    return [...this.#lastSnapshotSkippedGlobals];
+    return this.#serialized((instance) => instance.snapshotState());
   }
 
   /**
@@ -566,10 +557,12 @@ export class Sandbox {
    * After restore, subsequent execute() calls will have access to all
    * variables that were present when the snapshot was taken.
    *
-   * @param {Uint8Array} data - Serialized state from snapshotState()
+   * @param {StateSnapshot | Uint8Array} snapshot - A snapshot from
+   *   snapshotState(), or its `data`
    * @throws {Error} If deserialization fails
    */
-  async restoreState(data) {
+  async restoreState(snapshot) {
+    const data = snapshot instanceof Uint8Array ? snapshot : snapshot.data;
     await this.#serialized((instance) => instance.restoreState(data));
   }
 

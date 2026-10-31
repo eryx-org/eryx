@@ -111,7 +111,7 @@ describe("state persistence", () => {
     const fresh = new Sandbox();
     await fresh.execute("counter = 10");
 
-    const snapshot = new Uint8Array(await fresh.snapshotState());
+    const snapshot = (await fresh.snapshotState()).data;
     expect(snapshot.length).toBeGreaterThan(0);
 
     // Clear state - variable should be gone
@@ -126,12 +126,16 @@ describe("state persistence", () => {
 
   it("names the globals a snapshot skips", async () => {
     const fresh = new Sandbox();
-    expect(fresh.lastSnapshotSkippedGlobals).toEqual([]);
     await fresh.execute("x = 1\ngen = (i for i in range(3))");
 
-    const snapshot = new Uint8Array(await fresh.snapshotState());
-    expect(snapshot.length).toBeGreaterThan(0);
-    expect(fresh.lastSnapshotSkippedGlobals).toEqual(["gen"]);
+    const snapshot = await fresh.snapshotState();
+    expect(snapshot.data.length).toBeGreaterThan(0);
+    expect(snapshot.skippedGlobals).toEqual(["gen"]);
+
+    // The snapshot object restores too, not just its bytes.
+    await fresh.clearState();
+    await fresh.restoreState(snapshot);
+    expect((await fresh.execute("print(x)")).stdout).toBe("1\n");
   });
 
   it("snapshots and restores functions", async () => {
@@ -139,7 +143,7 @@ describe("state persistence", () => {
     await fresh.execute("def greet(name): return f'Hello, {name}!'");
     await fresh.execute("counter = 42");
 
-    const snapshot = new Uint8Array(await fresh.snapshotState());
+    const snapshot = (await fresh.snapshotState()).data;
 
     await fresh.clearState();
     await expect(fresh.execute("print(greet('x'))")).rejects.toThrow();
@@ -163,7 +167,7 @@ class Point:
 p = Point(3, 4)
 `);
 
-    const snapshot = new Uint8Array(await fresh.snapshotState());
+    const snapshot = (await fresh.snapshotState()).data;
 
     await fresh.clearState();
     await expect(fresh.execute("print(p)")).rejects.toThrow();

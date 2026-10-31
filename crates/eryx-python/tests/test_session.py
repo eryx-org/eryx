@@ -135,8 +135,9 @@ class Counter:
         session.execute("y = 'hello'")
 
         snapshot = session.snapshot_state()
-        assert isinstance(snapshot, bytes)
-        assert len(snapshot) > 0
+        assert isinstance(snapshot, eryx.StateSnapshot)
+        assert len(snapshot.data) > 0
+        assert snapshot.skipped_globals == []
 
         # Clear and restore
         session.clear_state()
@@ -146,13 +147,17 @@ class Counter:
         assert result.stdout == b"42, hello\n"
 
     def test_snapshot_reports_skipped_globals(self):
-        """Globals that can't be serialized are named after a snapshot."""
+        """Globals that can't be serialized are named on the snapshot."""
         session = eryx.Session()
-        assert session.last_snapshot_skipped_globals == []
         session.execute("x = 1\ngen = (i for i in range(3))")
 
-        session.snapshot_state()
-        assert session.last_snapshot_skipped_globals == ["gen"]
+        snapshot = session.snapshot_state()
+        assert snapshot.skipped_globals == ["gen"]
+
+        # The bytes alone restore too, as when loaded from a file.
+        session.clear_state()
+        session.restore_state(snapshot.data)
+        assert session.execute("print(x)").stdout == b"1\n"
 
     def test_snapshot_restore_functions(self):
         """Test that user-defined functions survive snapshot/restore."""

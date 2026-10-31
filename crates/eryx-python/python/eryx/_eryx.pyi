@@ -281,6 +281,25 @@ class SuspendedCallback:
 
 
 @final
+class StateSnapshot:
+    """A captured session state, returned by ``Session.snapshot_state()``."""
+
+    @property
+    def data(self) -> bytes:
+        """The serialized state, as accepted by ``Session.restore_state()``."""
+        ...
+
+    @property
+    def skipped_globals(self) -> list[str]:
+        """Names of the globals left out because they could not be serialized.
+
+        These (e.g. open sockets, generators) raise ``NameError`` after the
+        snapshot is restored.
+        """
+        ...
+
+
+@final
 class ReplayOutcome:
     """Result of ``Sandbox.execute_with_journal()``.
 
@@ -1285,15 +1304,6 @@ class Session:
         """Number of executions performed in this session."""
         ...
 
-    @property
-    def last_snapshot_skipped_globals(self) -> list[str]:
-        """Names of the globals the most recent ``snapshot_state()`` left out.
-
-        These could not be serialized (e.g. open sockets, generators), so they
-        raise ``NameError`` after that snapshot is restored. Empty before the
-        first snapshot.
-        """
-        ...
 
     @property
     def execution_timeout_ms(self) -> Optional[int]:
@@ -1504,16 +1514,16 @@ class Session:
         """
         ...
 
-    def snapshot_state(self) -> bytes:
+    def snapshot_state(self) -> StateSnapshot:
         """Capture a snapshot of the current Python state.
 
         The snapshot contains all user-defined variables, serialized using pickle.
         It can be saved to disk and restored later. Variables that can't be
-        serialized are left out; their names are in
-        ``last_snapshot_skipped_globals`` afterwards.
+        serialized are left out, and named in ``skipped_globals``.
 
         Returns:
-            The serialized snapshot data as bytes.
+            The serialized state (``data``) and the names of the globals left
+            out (``skipped_globals``).
 
         Raises:
             ExecutionError: If the state cannot be serialized.
@@ -1523,15 +1533,15 @@ class Session:
             snapshot = session.snapshot_state()
             # Save snapshot to file
             with open('state.bin', 'wb') as f:
-                f.write(snapshot)
+                f.write(snapshot.data)
         """
         ...
 
-    def restore_state(self, snapshot: bytes) -> None:
+    def restore_state(self, snapshot: StateSnapshot | bytes) -> None:
         """Restore Python state from a previously captured snapshot.
 
         Args:
-            snapshot: The serialized snapshot data (bytes).
+            snapshot: A ``StateSnapshot``, or its ``data`` bytes.
 
         Raises:
             ExecutionError: If the snapshot cannot be restored.

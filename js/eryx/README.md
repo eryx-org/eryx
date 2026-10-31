@@ -217,8 +217,8 @@ export default defineConfig({
 | `setResultVariable(name)` | `Promise<void>` | Change the captured result variable |
 | `setNetConfig(config)` | `void` | Replace this sandbox's network policy (`null` disables networking) |
 | `close()` | `void` | Close connections, stop a `timeoutMs` Worker, reject later calls (also `using`) |
-| `snapshotState()` | `Promise<Uint8Array>` | Serialize interpreter state |
-| `restoreState(data)` | `Promise<void>` | Restore from snapshot |
+| `snapshotState()` | `Promise<StateSnapshot>` | Serialize interpreter state (`data`) and name the globals left out (`skippedGlobals`) |
+| `restoreState(snapshot)` | `Promise<void>` | Restore from a snapshot or its `data` |
 | `clearState()` | `Promise<void>` | Reset all user state |
 
 Each `Sandbox` is its own WebAssembly instance, with its own interpreter, filesystem, network connections, callbacks and journal; code in one can't see another's state. The compiled code is shared, but each instance has its own memory (about 20 MB idle on Node.js 24). Call `sandbox.close()` (or declare it with `using`) when you're done; a sandbox that is only dropped is freed whenever the garbage collector gets to it. The module-level `execute()`, `executeWithJournal()` and `setResultVariable()` use one default sandbox, created on first use.
