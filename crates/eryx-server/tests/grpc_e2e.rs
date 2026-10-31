@@ -2732,7 +2732,10 @@ async fn plaintext_secret_substitution_is_opt_in() {
         .unwrap();
         assert!(result.success, "{}", result.error);
 
-        let received = server.await.unwrap();
+        let received = tokio::time::timeout(Duration::from_secs(30), server)
+            .await
+            .expect("the sandbox never connected")
+            .unwrap();
         assert_eq!(
             received.contains_str(REAL_SECRET),
             allow_plaintext_secrets,

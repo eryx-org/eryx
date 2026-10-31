@@ -242,17 +242,19 @@ function _parseResultJson(json) {
  * Map a raw jco execute-output record into the public ExecuteResult shape,
  * parsing the captured result variable from JSON.
  * @param {Object} output
+ * @param {boolean} stateWasReset
  * @returns {ExecuteResult}
  */
 const _decoder = new TextDecoder("utf-8", { fatal: false, ignoreBOM: true });
 
-function _toResult(output) {
+function _toResult(output, stateWasReset) {
   return {
     stdout: _decoder.decode(output.stdout),
     stderr: _decoder.decode(output.stderr),
     result: output.resultJson ? _parseResultJson(output.resultJson) : undefined,
     resultJson: output.resultJson || undefined,
     resultError: output.resultError || undefined,
+    stateWasReset,
   };
 }
 
@@ -466,8 +468,8 @@ export class Sandbox {
     try {
       // Frame the code with an empty preamble (see the guest's PREAMBLE_HEADER),
       // so a leading header-like line in user code isn't misparsed.
-      const result = _toResult(await instance.execute(`#eryx-preamble:0\n${code}`));
-      result.stateWasReset = this.#stateWasReset;
+      const output = await instance.execute(`#eryx-preamble:0\n${code}`);
+      const result = _toResult(output, this.#stateWasReset);
       this.#stateWasReset = false;
       return result;
     } finally {
