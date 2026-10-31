@@ -119,3 +119,37 @@ async fn from_file_maps_the_open_handle_not_the_path() {
     let artifact = unsafe { PrecompiledArtifact::from_file(file, component.len() as u64) }.unwrap();
     assert_eq!(run(&artifact).await, b"42\n");
 }
+
+#[tokio::test]
+async fn precompiled_file_builder_maps_once_for_a_pool() {
+    let (dir, path, _component) = component_file(b"");
+    let resources = eryx::embedded::EmbeddedResources::get().unwrap();
+    #[allow(unsafe_code)]
+    let builder = unsafe {
+        eryx::Sandbox::builder()
+            .with_precompiled_file(&path)
+            .with_python_stdlib(resources.stdlib())
+    };
+    let config = eryx::PoolConfig {
+        max_size: 2,
+        min_idle: 0,
+        ..eryx::PoolConfig::default()
+    };
+    let pool = eryx::SandboxPool::new(builder, config).await.unwrap();
+
+    let first = pool.acquire().await.unwrap();
+    assert_eq!(first.execute("print(6 * 7)").await.unwrap().stdout, b"42\n");
+
+    // Replacing the file only affects new builders: the pool's next sandbox
+    // reuses the component mapped for the first one.
+    let replacement = dir.path().join("replacement.bin");
+    std::fs::write(&replacement, b"not a component").unwrap();
+    std::fs::rename(&replacement, &path).unwrap();
+
+    let second = pool.acquire().await.unwrap();
+    assert_eq!(
+        second.execute("print(6 * 7)").await.unwrap().stdout,
+        b"42\n"
+    );
+    assert_eq!(pool.stats().total_creations, 2);
+}

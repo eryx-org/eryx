@@ -59,20 +59,25 @@ pub(crate) fn epoch_ticks(timeout: Duration) -> u64 {
 ///
 /// Successful reads are lock-free. The mutex serializes only initialization
 /// attempts, allowing a later caller to retry after a transient error or panic.
-struct RetryableOnce<T> {
+pub(crate) struct RetryableOnce<T> {
     value: OnceLock<T>,
     init_lock: Mutex<()>,
 }
 
 impl<T> RetryableOnce<T> {
-    const fn new() -> Self {
+    pub(crate) const fn new() -> Self {
         Self {
             value: OnceLock::new(),
             init_lock: Mutex::new(()),
         }
     }
 
-    fn get_or_try_init<E>(
+    /// The value, if it has been initialized.
+    pub(crate) fn get(&self) -> Option<&T> {
+        self.value.get()
+    }
+
+    pub(crate) fn get_or_try_init<E>(
         &self,
         init: impl FnOnce() -> std::result::Result<T, E>,
     ) -> std::result::Result<&T, E> {

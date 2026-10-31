@@ -1189,11 +1189,64 @@ enum WasmSource {
     #[cfg(any(feature = "embedded", feature = "preinit"))]
     PrecompiledArtifact(PrecompiledArtifact),
     /// Path to a pre-compiled component file (skip compilation, unsafe).
+    ///
+    /// Shared between clones of the builder, so the file is mapped once and
+    /// every sandbox built from it (e.g. by a pool) reuses that component.
     #[cfg(any(feature = "embedded", feature = "preinit"))]
-    PrecompiledFile(std::path::PathBuf),
+    PrecompiledFile(Arc<PrecompiledFileSource>),
     /// Use the embedded pre-compiled runtime (safe, fast).
     #[cfg(feature = "embedded")]
     EmbeddedRuntime,
+}
+
+/// A pre-compiled component file, mapped on first use.
+///
+/// The mapping is kept for the life of the builder and its clones, so changes
+/// to the file on disk take effect only for builders created afterwards (in
+/// practice, after a restart).
+#[cfg(any(feature = "embedded", feature = "preinit"))]
+struct PrecompiledFileSource {
+    path: std::path::PathBuf,
+    artifact: crate::wasm::RetryableOnce<PrecompiledArtifact>,
+}
+
+#[cfg(any(feature = "embedded", feature = "preinit"))]
+impl PrecompiledFileSource {
+    /// Map the file on first use and build an executor from it.
+    ///
+    /// # Safety
+    ///
+    /// The file must hold trusted output of [`PythonExecutor::precompile`] and
+    /// must not be modified in place while the mapping is alive.
+    #[allow(unsafe_code)]
+    unsafe fn to_executor(&self) -> std::result::Result<PythonExecutor, Error> {
+        let artifact = self.artifact.get_or_try_init(|| {
+            let file = std::fs::File::open(&self.path).map_err(|e| {
+                Error::Initialization(format!(
+                    "failed to open pre-compiled component {}: {e}",
+                    self.path.display()
+                ))
+            })?;
+            let len = file.metadata().map_err(component_read_error)?.len();
+            // SAFETY: The caller guarantees the file is trusted and unmodified.
+            #[cfg(feature = "embedded")]
+            return unsafe { PrecompiledArtifact::from_file_cached(file, len) };
+            #[cfg(not(feature = "embedded"))]
+            return unsafe { PrecompiledArtifact::from_file(file, len) };
+        })?;
+        // SAFETY: The caller guarantees the file is trusted.
+        unsafe { artifact.to_executor() }
+    }
+}
+
+#[cfg(any(feature = "embedded", feature = "preinit"))]
+impl std::fmt::Debug for PrecompiledFileSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PrecompiledFileSource")
+            .field("path", &self.path)
+            .field("artifact", &self.artifact.get())
+            .finish()
+    }
 }
 
 /// Builder for constructing a [`Sandbox`].
@@ -1552,11 +1605,18 @@ impl<S> SandboxBuilder<state::Needs, S> {
     /// (~50x faster sandbox creation). Create pre-compiled files using
     /// `PythonExecutor::precompile_file()`.
     ///
+    /// The file is memory-mapped by the first `build()`, and that mapping is
+    /// shared by every later `build()` of this builder and its clones (such as
+    /// the sandboxes a [`crate::SandboxPool`] creates). Replacing the file on
+    /// disk therefore only takes effect for new builders, e.g. after a restart.
+    ///
     /// # Safety
     ///
     /// This function is unsafe because wasmtime cannot fully validate
     /// pre-compiled components for safety. Loading untrusted pre-compiled
-    /// files can lead to **arbitrary code execution**.
+    /// files can lead to **arbitrary code execution**. The file must not be
+    /// modified in place while sandboxes built from it are alive; replacing
+    /// it by renaming a new file over it is safe.
     ///
     /// Only call this with pre-compiled files that:
     /// - Were created by `PythonExecutor::precompile()` or `precompile_file()`
@@ -1585,7 +1645,10 @@ impl<S> SandboxBuilder<state::Needs, S> {
         mut self,
         path: impl Into<std::path::PathBuf>,
     ) -> SandboxBuilder<state::Has, S> {
-        self.wasm_source = WasmSource::PrecompiledFile(path.into());
+        self.wasm_source = WasmSource::PrecompiledFile(Arc::new(PrecompiledFileSource {
+            path: path.into(),
+            artifact: crate::wasm::RetryableOnce::new(),
+        }));
         self.transition()
     }
 }
@@ -2571,13 +2634,13 @@ impl SandboxBuilder<state::Has, state::Has> {
             }
 
             #[cfg(any(feature = "embedded", feature = "preinit"))]
-            WasmSource::PrecompiledFile(path) => {
+            WasmSource::PrecompiledFile(source) => {
                 // SAFETY: User is responsible for only using trusted pre-compiled files.
                 // The `with_precompiled_file` method is already marked unsafe, so the
                 // caller has acknowledged this responsibility.
                 #[allow(unsafe_code)]
                 unsafe {
-                    PythonExecutor::from_precompiled_file(path)?
+                    source.to_executor()?
                 }
             }
 
