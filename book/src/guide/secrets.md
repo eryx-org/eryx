@@ -93,7 +93,7 @@ let sandbox = Sandbox::embedded()
     .build()?;
 ```
 
-In Python, pass `allow_plaintext_secrets=True` to `NetConfig` (or set the attribute); over gRPC, set `network_config.allow_plaintext_secrets`. The real value then crosses the network unencrypted, readable by anyone on the path, so only enable it for servers you trust on a network you trust. The JavaScript bindings have no secrets support, so there is nothing to opt in to.
+In Python, pass `allow_plaintext_secrets=True` to `NetConfig` (or set the attribute); over gRPC, set `network_config.allow_plaintext_secrets` (a server started with `--disallow-plaintext-secrets` rejects such requests). The real value then crosses the network unencrypted, readable by anyone on the path, so only enable it for servers you trust on a network you trust. The JavaScript bindings have no secrets support, so there is nothing to opt in to.
 
 ## Output Scrubbing
 

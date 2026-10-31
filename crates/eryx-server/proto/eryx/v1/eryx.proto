@@ -225,6 +225,8 @@ message NetworkConfig {
   // upgrade, and a plain TCP request goes out with the placeholder left in
   // place. Enabling this sends the real secret value unencrypted, readable by
   // anyone on the network path; only use it for trusted local test servers.
+  // A server started with --disallow-plaintext-secrets rejects a request that
+  // sets it with INVALID_ARGUMENT.
   bool allow_plaintext_secrets = 10;
 }
 
@@ -445,6 +447,12 @@ message ExecuteResult {
   // the snapshot is restored. Empty when nothing was skipped or no snapshot
   // was captured.
   repeated string state_skipped_globals = 15;
+
+  // True if the session lost its Python state before the code ran, so it ran
+  // against a fresh interpreter: restoring `state_snapshot` was interrupted
+  // (e.g. it hit the execution timeout), which discarded the instance. Also
+  // reported in `state_error`. Always false when `success` is false.
+  bool state_was_reset = 16;
 }
 
 // Why an execution failed, when success is false.

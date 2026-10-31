@@ -2744,3 +2744,87 @@ async fn plaintext_secret_substitution_is_opt_in() {
         );
     }
 }
+
+/// A server started with `--disallow-plaintext-secrets` rejects a request
+/// that opts in, instead of running it with the field ignored.
+#[tokio::test]
+async fn disallowed_plaintext_secrets_are_rejected() {
+    use eryx_server::proto::eryx::v1::NetworkConfig;
+
+    let request = |allow_plaintext_secrets| ExecuteRequest {
+        code: "print('ran')".to_string(),
+        network_config: Some(NetworkConfig {
+            allowed_hosts: vec!["api.example.com".to_string()],
+            allow_plaintext_secrets,
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    let limits = eryx_server::service::ServerLimits {
+        allow_plaintext_secrets: false,
+        ..Default::default()
+    };
+    let mut client = EryxClient::new(
+        start_server_with(2, |pool| EryxService::new(pool).with_limits(limits)).await,
+    );
+
+    let err = execute_half_closed(&mut client, request(true))
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), tonic::Code::InvalidArgument, "{err}");
+    assert!(
+        err.message().contains("allow_plaintext_secrets"),
+        "{}",
+        err.message()
+    );
+
+    let result = execute_half_closed(&mut client, request(false))
+        .await
+        .unwrap();
+    assert!(result.success, "{}", result.error);
+}
+
+/// `state_was_reset` is set when restoring the snapshot was interrupted and
+/// the code ran on a fresh interpreter, and is false otherwise.
+#[tokio::test]
+async fn state_was_reset_reports_an_interrupted_restore() {
+    let mut client = EryxClient::new(start_server().await);
+    // Unpickling this object runs `while True: pass`, so restoring it times out.
+    let first = execute_half_closed(
+        &mut client,
+        ExecuteRequest {
+            code: "class Spin:\n    def __reduce__(self):\n        return (exec, ('while True: pass',))\nspin = Spin()".to_string(),
+            persist_state: true,
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    assert!(first.success, "{}", first.error);
+    assert!(!first.state_was_reset);
+    assert!(!first.state_snapshot.is_empty());
+
+    let second = execute_half_closed(
+        &mut client,
+        ExecuteRequest {
+            code: "print('spin' in globals())".to_string(),
+            persist_state: true,
+            state_snapshot: first.state_snapshot,
+            resource_limits: Some(ResourceLimits {
+                execution_timeout_ms: 1000,
+                ..Default::default()
+            }),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    assert!(second.success, "{}", second.error);
+    assert!(!second.state_error.is_empty());
+    assert!(
+        second.stdout.contains_str("False"),
+        "{:?}",
+        second.stdout.to_lossy()
+    );
+    assert!(second.state_was_reset);
+}

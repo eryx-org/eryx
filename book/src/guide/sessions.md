@@ -316,7 +316,7 @@ print(result.stdout_text)  # "x not defined"
 
 ### Automatic resets
 
-If a call is cancelled mid-run (its future dropped, e.g. by `tokio::select!` or `tokio::time::timeout`), the instance it was running on is lost. The next call on the session, including `snapshot_state()`, `restore_state()` and `clear_state()`, resets the session instead of failing, so its Python state is gone and the preamble runs again. The first successful result after such a reset has `state_was_reset` set to `true` (`ExecuteResult.state_was_reset` in Python), so callers can tell their variables are gone.
+If a call is cancelled mid-run (its future dropped, e.g. by `tokio::select!` or `tokio::time::timeout`), the instance it was running on is lost. The next call on the session, including `snapshot_state()`, `restore_state()` and `clear_state()`, resets the session instead of failing, so its Python state is gone and the preamble runs again. The first successful result after such a reset has `state_was_reset` set to `true` (`ExecuteResult.state_was_reset` in Python and over gRPC, `stateWasReset` in JavaScript), so callers can tell their variables are gone.
 
 ## Snapshots
 
