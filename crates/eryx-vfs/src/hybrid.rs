@@ -284,9 +284,9 @@ impl RestrictedDir {
 
 /// A real filesystem directory handle.
 ///
-/// This wraps a [`RestrictedDir`] with permissions and configuration.
-/// The underlying directory fd is not directly accessible — all
-/// filesystem operations go through `RestrictedDir`'s access control.
+/// This wraps a restricted directory handle with permissions and
+/// configuration. The underlying directory fd is not directly accessible —
+/// all filesystem operations go through the handle's access control.
 #[derive(Clone)]
 pub struct RealDir {
     /// The restricted directory handle (enforces file_map at type level).
