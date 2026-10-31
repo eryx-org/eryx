@@ -58,6 +58,8 @@ from eryx._eryx import (
     ResourceLimitError,
     SuspendCallback,
     TimeoutError,
+    # Functions
+    configure_shared_engine,
     # Module metadata
     __version__,
 )
@@ -92,6 +94,8 @@ __all__ = [
     "ResourceLimitError",
     "SuspendCallback",
     "TimeoutError",
+    # Functions
+    "configure_shared_engine",
     # Metadata
     "__version__",
 ]

@@ -89,7 +89,7 @@ impl WarmPool {
     ///
     /// One is enough to hide instantiation from a caller that executes
     /// serially, which is the `SandboxFactory` render pattern; concurrent
-    /// callers should raise `ERYX_WARM_INSTANCES` towards their concurrency.
+    /// callers should raise the warm-instance count towards their concurrency.
     const DEFAULT_TARGET: usize = 1;
 
     /// Components to keep warm instances for.
@@ -101,8 +101,8 @@ impl WarmPool {
     pub(crate) fn global() -> &'static Self {
         static POOL: OnceLock<WarmPool> = OnceLock::new();
         POOL.get_or_init(|| {
-            let target = match std::env::var("ERYX_WARM_INSTANCES") {
-                Ok(v) => v.trim().parse().unwrap_or_else(|_| {
+            let target = match crate::wasm::SharedEngineConfig::current().warm_instances() {
+                Some(v) => v.trim().parse().unwrap_or_else(|_| {
                     tracing::warn!(
                         value = %v,
                         default = Self::DEFAULT_TARGET,
@@ -110,7 +110,7 @@ impl WarmPool {
                     );
                     Self::DEFAULT_TARGET
                 }),
-                Err(_) => Self::DEFAULT_TARGET,
+                None => Self::DEFAULT_TARGET,
             };
             WarmPool {
                 target,

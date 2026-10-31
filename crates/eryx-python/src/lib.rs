@@ -14,6 +14,7 @@
 //! ```
 
 mod callback;
+mod engine;
 mod error;
 mod execution;
 mod mcp;
@@ -72,6 +73,7 @@ fn _eryx(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<pool::PooledSandbox>()?;
     m.add_class::<pool::PoolStats>()?;
     m.add_class::<execution::CancelToken>()?;
+    m.add_function(wrap_pyfunction!(engine::configure_shared_engine, m)?)?;
 
     // Register exceptions
     error::register_exceptions(m)?;
