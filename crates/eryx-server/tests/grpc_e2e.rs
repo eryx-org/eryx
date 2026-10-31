@@ -2681,3 +2681,63 @@ async fn secret_without_allowed_hosts_is_rejected() {
         assert!(result.success, "{}", result.error);
     }
 }
+
+/// Secrets go over plain TCP with the placeholder in place unless the request
+/// sets `allow_plaintext_secrets`.
+#[tokio::test]
+async fn plaintext_secret_substitution_is_opt_in() {
+    use eryx_server::proto::eryx::v1::{NetworkConfig, SecretConfig};
+    use tokio::io::AsyncReadExt;
+
+    const REAL_SECRET: &str = "plaintext-real-secret-77";
+    let mut client = EryxClient::new(start_server().await);
+
+    for allow_plaintext_secrets in [false, true] {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = tokio::spawn(async move {
+            let (mut sock, _) = listener.accept().await.unwrap();
+            let mut buf = vec![0; 4096];
+            let n = sock.read(&mut buf).await.unwrap();
+            buf.truncate(n);
+            buf
+        });
+
+        let code = format!(
+            "import os, socket\n\
+             s = socket.create_connection(('127.0.0.1', {port}))\n\
+             s.sendall(f\"GET / HTTP/1.1\\r\\nHost: 127.0.0.1\\r\\nAuthorization: {{os.environ['TOKEN']}}\\r\\n\\r\\n\".encode())\n\
+             s.close()"
+        );
+        let result = execute_half_closed(
+            &mut client,
+            ExecuteRequest {
+                code,
+                secrets: vec![SecretConfig {
+                    name: "TOKEN".to_string(),
+                    value: REAL_SECRET.to_string(),
+                    allowed_hosts: vec!["127.0.0.1".to_string()],
+                }],
+                network_config: Some(NetworkConfig {
+                    allow_all_hosts: true,
+                    blocked_hosts: vec!["blocked.invalid".to_string()],
+                    allowed_networks: vec!["127.0.0.0/8".to_string()],
+                    allow_plaintext_secrets,
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert!(result.success, "{}", result.error);
+
+        let received = server.await.unwrap();
+        assert_eq!(
+            received.contains_str(REAL_SECRET),
+            allow_plaintext_secrets,
+            "allow_plaintext_secrets={allow_plaintext_secrets}: {:?}",
+            received.to_lossy()
+        );
+    }
+}

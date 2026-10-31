@@ -332,7 +332,8 @@ impl crate::proto::eryx::v1::eryx_server::Eryx for EryxService {
                         "allowed_networks",
                         &nc.allowed_networks,
                     )?)
-                    .with_internal_hosts(nc.internal_hosts);
+                    .with_internal_hosts(nc.internal_hosts)
+                    .allow_plaintext_secrets(nc.allow_plaintext_secrets);
                 if !nc.blocked_hosts.is_empty() {
                     config = config.with_blocked_hosts(nc.blocked_hosts);
                 }

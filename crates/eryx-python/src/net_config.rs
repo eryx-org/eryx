@@ -66,6 +66,12 @@ pub struct NetConfig {
     #[pyo3(get, set)]
     pub internal_hosts: Vec<String>,
 
+    /// Substitute secret placeholders on plain TCP connections too, not only
+    /// after a TLS upgrade. Off by default: turning it on sends real secret
+    /// values unencrypted over `http://`.
+    #[pyo3(get, set)]
+    pub allow_plaintext_secrets: bool,
+
     /// Custom root certificates (DER-encoded bytes).
     custom_root_certs: Vec<Vec<u8>>,
 }
@@ -83,6 +89,7 @@ impl NetConfig {
     /// - blocked_hosts: localhost and private networks
     /// - blocked_networks: every non-public range (loopback, private,
     ///   link-local/cloud metadata, CGNAT, multicast, ...)
+    /// - allow_plaintext_secrets: false (secrets substituted only over TLS)
     ///
     /// Args:
     ///     max_connections: Maximum number of concurrent connections.
@@ -97,6 +104,10 @@ impl NetConfig {
     ///     allowed_networks: CIDRs exempt from blocked_networks.
     ///     internal_hosts: Host patterns allowed to resolve into blocked_networks.
     ///         Only list names whose DNS you control.
+    ///     allow_plaintext_secrets: Also substitute secret placeholders on plain
+    ///         TCP (e.g. `http://`), not only after a TLS upgrade. This sends the
+    ///         real secret value unencrypted, where anyone on the network path
+    ///         can read it; only enable it for trusted local test servers.
     ///
     /// Raises:
     ///     ValueError: If a network is not a valid CIDR.
@@ -108,7 +119,7 @@ impl NetConfig {
     ///     # Any public host, with the default blocks
     ///     net = NetConfig(allow_all_hosts=True)
     #[new]
-    #[pyo3(signature = (*, max_connections=10, connect_timeout_ms=30000, io_timeout_ms=60000, allow_all_hosts=false, allowed_hosts=None, blocked_hosts=None, blocked_networks=None, allowed_networks=None, internal_hosts=None))]
+    #[pyo3(signature = (*, max_connections=10, connect_timeout_ms=30000, io_timeout_ms=60000, allow_all_hosts=false, allowed_hosts=None, blocked_hosts=None, blocked_networks=None, allowed_networks=None, internal_hosts=None, allow_plaintext_secrets=false))]
     #[allow(clippy::too_many_arguments)]
     fn new(
         max_connections: u32,
@@ -120,6 +131,7 @@ impl NetConfig {
         blocked_networks: Option<Vec<String>>,
         allowed_networks: Option<Vec<String>>,
         internal_hosts: Option<Vec<String>>,
+        allow_plaintext_secrets: bool,
     ) -> PyResult<Self> {
         Ok(Self {
             max_connections,
@@ -134,6 +146,7 @@ impl NetConfig {
             },
             allowed_networks: parse_networks(&allowed_networks.unwrap_or_default())?,
             internal_hosts: internal_hosts.unwrap_or_default(),
+            allow_plaintext_secrets,
             custom_root_certs: vec![],
         })
     }
@@ -157,6 +170,7 @@ impl NetConfig {
             blocked_networks: vec![],
             allowed_networks: vec![],
             internal_hosts: vec![],
+            allow_plaintext_secrets: false,
             custom_root_certs: vec![],
         }
     }
@@ -283,7 +297,7 @@ impl NetConfig {
 
     fn __repr__(&self) -> String {
         format!(
-            "NetConfig(max_connections={}, connect_timeout_ms={}, io_timeout_ms={}, allow_all_hosts={}, allowed_hosts={:?}, blocked_hosts=[{} patterns], blocked_networks=[{} networks], allowed_networks={:?}, internal_hosts={:?})",
+            "NetConfig(max_connections={}, connect_timeout_ms={}, io_timeout_ms={}, allow_all_hosts={}, allowed_hosts={:?}, blocked_hosts=[{} patterns], blocked_networks=[{} networks], allowed_networks={:?}, internal_hosts={:?}, allow_plaintext_secrets={})",
             self.max_connections,
             self.connect_timeout_ms,
             self.io_timeout_ms,
@@ -293,6 +307,7 @@ impl NetConfig {
             self.blocked_networks.len(),
             self.allowed_networks(),
             self.internal_hosts,
+            self.allow_plaintext_secrets,
         )
     }
 }
@@ -348,7 +363,8 @@ impl From<&NetConfig> for eryx::NetConfig {
             .with_blocked_hosts(config.blocked_hosts.clone())
             .with_blocked_networks(config.blocked_networks.clone())
             .with_allowed_networks(config.allowed_networks.clone())
-            .with_internal_hosts(config.internal_hosts.clone());
+            .with_internal_hosts(config.internal_hosts.clone())
+            .allow_plaintext_secrets(config.allow_plaintext_secrets);
         config
             .custom_root_certs
             .iter()

@@ -529,3 +529,45 @@ print(f"B={b}")
         """Secret dict must contain a 'value' key."""
         with pytest.raises(ValueError):
             eryx.Sandbox(secrets={"KEY": {"allowed_hosts": ["example.com"]}})
+
+
+class TestPlaintextSecrets:
+    """Secrets are substituted over plain TCP only with allow_plaintext_secrets."""
+
+    REAL = "sk-plaintext-real-777"
+
+    def _send_secret(self, port, net):
+        sandbox = eryx.Sandbox(
+            secrets={"KEY": {"value": self.REAL, "allowed_hosts": ["127.0.0.1"]}},
+            network=net,
+        )
+        sandbox.execute(f"""
+import os, socket
+sock = socket.create_connection(("127.0.0.1", {port}))
+sock.sendall(f"GET / HTTP/1.1\\r\\nHost: 127.0.0.1\\r\\nAuthorization: {{os.environ['KEY']}}\\r\\n\\r\\n".encode())
+sock.recv(4096)
+sock.close()
+""")
+
+    def test_default_is_off(self):
+        assert eryx.NetConfig().allow_plaintext_secrets is False
+        assert eryx.NetConfig.permissive().allow_plaintext_secrets is False
+
+    def test_plain_tcp_keeps_placeholder_by_default(self, exfil_server):
+        _, port, received = exfil_server
+        self._send_secret(port, eryx.NetConfig.permissive())
+        assert received, "request never reached the server"
+        assert self.REAL not in received[0]["headers"]["Authorization"]
+
+    def test_opt_in_substitutes_over_plain_tcp(self, exfil_server):
+        _, port, received = exfil_server
+        net = eryx.NetConfig.permissive()
+        net.allow_plaintext_secrets = True
+        self._send_secret(port, net)
+        assert received, "request never reached the server"
+        assert received[0]["headers"]["Authorization"] == self.REAL
+
+    def test_constructor_kwarg(self):
+        net = eryx.NetConfig(allow_plaintext_secrets=True)
+        assert net.allow_plaintext_secrets is True
+        assert "allow_plaintext_secrets=true" in repr(net)
