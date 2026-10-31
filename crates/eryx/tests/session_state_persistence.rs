@@ -519,6 +519,28 @@ async fn test_snapshot_and_restore() {
     assert_eq!(output.stdout, b"[1, 2, 3]\n", "data should be restored");
 }
 
+/// Globals that can't be serialized are named on the snapshot.
+#[tokio::test]
+async fn test_snapshot_reports_skipped_globals() {
+    let mut session = create_session().await;
+
+    session
+        .execute("x = 1\ngen = (i for i in range(3))")
+        .run()
+        .await
+        .unwrap_or_else(|e| panic!("Failed to set state: {}", e));
+
+    let snapshot = session
+        .snapshot_state()
+        .await
+        .unwrap_or_else(|e| panic!("Failed to snapshot: {}", e));
+    assert_eq!(snapshot.skipped_globals(), ["gen"]);
+
+    // Not serialized with the snapshot bytes.
+    let restored = PythonStateSnapshot::from_bytes(&snapshot.to_bytes()).unwrap();
+    assert!(restored.skipped_globals().is_empty());
+}
+
 /// Test snapshot serialization roundtrip.
 #[tokio::test]
 async fn test_snapshot_serialization() {

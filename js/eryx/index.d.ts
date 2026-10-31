@@ -267,12 +267,22 @@ export class Sandbox {
    * Capture a snapshot of the current Python session state.
    *
    * Returns serialized state (via pickle) that can be restored later
-   * with restoreState(). This captures all user-defined variables.
+   * with restoreState(). This captures all user-defined variables that can
+   * be serialized; the names of the others are in
+   * {@link lastSnapshotSkippedGlobals} afterwards.
    *
    * @returns Serialized Python state
-   * @throws If serialization fails (e.g., unpicklable objects)
+   * @throws If serialization fails
    */
   snapshotState(): Promise<Uint8Array>;
+
+  /**
+   * Names of the globals the most recent `snapshotState()` left out because
+   * they could not be serialized (e.g. open sockets, generators). They raise
+   * `NameError` after that snapshot is restored. Empty before the first
+   * snapshot.
+   */
+  readonly lastSnapshotSkippedGlobals: string[];
 
   /**
    * Restore Python session state from a previously captured snapshot.

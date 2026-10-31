@@ -82,7 +82,7 @@ The runtime exposes the `eryx:sandbox` world with:
 ### Exports (Guest → Host)
 
 - `execute(code) -> result<string, string>` - Execute Python code with top-level await support
-- `snapshot-state() -> result<list<u8>, string>` - Capture session state
+- `snapshot-state() -> result<state-snapshot, string>` - Capture session state
 - `restore-state(data) -> result<_, string>` - Restore session state
 - `clear-state()` - Clear all persistent state
 

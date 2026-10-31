@@ -51,7 +51,7 @@ This crate must implement wit-dylib's interpreter interface:
 ## Exports implemented
 
 - `execute(code: string) -> result<string, string>` - Run Python code
-- `snapshot-state() -> result<list<u8>, string>` - Pickle globals
+- `snapshot-state() -> result<state-snapshot, string>` - Pickle globals
 - `restore-state(data: list<u8>) -> result<_, string>` - Restore globals
 - `clear-state()` - Clear globals
 

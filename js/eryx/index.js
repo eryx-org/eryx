@@ -321,6 +321,8 @@ export class Sandbox {
   #slot = { worker: null, closed: /** @type {Error | null} */ (null) };
   /** The last name passed to setResultVariable(), re-applied after a restart. */
   #resultVariable;
+  /** @type {string[]} */
+  #lastSnapshotSkippedGlobals = [];
   // The tail of the queue of calls into this instance. Each call starts only
   // after the previous one settles, so executions never overlap: the journal
   // and the streaming output decoders belong to the instance, and jco can't
@@ -533,13 +535,29 @@ export class Sandbox {
    * Capture a snapshot of the current Python session state.
    *
    * Returns serialized state (via pickle) that can be restored later
-   * with restoreState(). This captures all user-defined variables.
+   * with restoreState(). This captures all user-defined variables that can
+   * be serialized; the names of the others are in
+   * {@link lastSnapshotSkippedGlobals} afterwards.
    *
    * @returns {Promise<Uint8Array>} Serialized Python state
-   * @throws {Error} If serialization fails (e.g., unpicklable objects)
+   * @throws {Error} If serialization fails
    */
   async snapshotState() {
-    return this.#serialized((instance) => instance.snapshotState());
+    const snapshot = await this.#serialized((instance) => instance.snapshotState());
+    this.#lastSnapshotSkippedGlobals = snapshot.skippedGlobals;
+    return snapshot.data;
+  }
+
+  /**
+   * Names of the globals the most recent snapshotState() left out because
+   * they could not be serialized (e.g. open sockets, generators). They raise
+   * NameError after that snapshot is restored. Empty before the first
+   * snapshot.
+   *
+   * @returns {string[]}
+   */
+  get lastSnapshotSkippedGlobals() {
+    return [...this.#lastSnapshotSkippedGlobals];
   }
 
   /**

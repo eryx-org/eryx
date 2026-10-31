@@ -145,6 +145,15 @@ class Counter:
         result = session.execute("print(f'{x}, {y}')")
         assert result.stdout == b"42, hello\n"
 
+    def test_snapshot_reports_skipped_globals(self):
+        """Globals that can't be serialized are named after a snapshot."""
+        session = eryx.Session()
+        assert session.last_snapshot_skipped_globals == []
+        session.execute("x = 1\ngen = (i for i in range(3))")
+
+        session.snapshot_state()
+        assert session.last_snapshot_skipped_globals == ["gen"]
+
     def test_snapshot_restore_functions(self):
         """Test that user-defined functions survive snapshot/restore."""
         session = eryx.Session()

@@ -82,6 +82,8 @@ pub struct Session {
     _package_storage_owner: Option<Arc<Vec<eryx::ExtractedPackage>>>,
     /// Limits passed to callback handlers for this session.
     callback_limits: eryx::ResourceLimits,
+    /// Globals the most recent `snapshot_state()` left out.
+    last_snapshot_skipped_globals: Mutex<Vec<String>>,
 }
 
 impl Session {
@@ -197,6 +199,7 @@ impl Session {
             output_handler,
             _package_storage_owner: package_storage_owner,
             callback_limits,
+            last_snapshot_skipped_globals: Mutex::new(Vec::new()),
         })
     }
 }
@@ -452,7 +455,9 @@ impl Session {
     /// Capture a snapshot of the current Python state.
     ///
     /// The snapshot contains all user-defined variables, serialized using pickle.
-    /// It can be saved to disk and restored later.
+    /// It can be saved to disk and restored later. Variables that can't be
+    /// serialized are left out; their names are in
+    /// `last_snapshot_skipped_globals` afterwards.
     ///
     /// Returns:
     ///     bytes: The serialized snapshot data.
@@ -468,6 +473,11 @@ impl Session {
     ///         f.write(snapshot)
     fn snapshot_state<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyBytes>> {
         let snapshot = self.queued(py, async |inner| inner.snapshot_state().await)?;
+        *self
+            .last_snapshot_skipped_globals
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) =
+            snapshot.skipped_globals().to_vec();
 
         Ok(PyBytes::new(py, snapshot.to_bytes().as_slice()))
     }
@@ -489,6 +499,18 @@ impl Session {
     fn restore_state(&self, py: Python<'_>, snapshot: &[u8]) -> PyResult<()> {
         let snapshot = eryx::PythonStateSnapshot::from_bytes(snapshot).map_err(eryx_error_to_py)?;
         self.queued(py, async |inner| inner.restore_state(&snapshot).await)
+    }
+
+    /// Names of the globals the most recent `snapshot_state()` left out
+    /// because they could not be serialized (e.g. open sockets, generators).
+    /// They raise `NameError` after that snapshot is restored. Empty before
+    /// the first snapshot.
+    #[getter]
+    fn last_snapshot_skipped_globals(&self) -> Vec<String> {
+        self.last_snapshot_skipped_globals
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
     }
 
     /// Get the number of executions performed in this session.

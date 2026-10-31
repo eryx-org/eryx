@@ -2105,6 +2105,25 @@ async fn large_state_snapshot_round_trips() {
     assert!(second.stdout.contains_str("5242880"), "{:?}", second.stdout);
 }
 
+/// Globals the snapshot leaves out are named in `state_skipped_globals`.
+#[tokio::test]
+async fn state_snapshot_reports_skipped_globals() {
+    let mut client = EryxClient::new(start_server().await);
+    let result = execute_half_closed(
+        &mut client,
+        ExecuteRequest {
+            code: "x = 1\ngen = (i for i in range(3))".to_string(),
+            persist_state: true,
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    assert!(result.success, "execution failed: {}", result.error);
+    assert!(!result.state_snapshot.is_empty());
+    assert_eq!(result.state_skipped_globals, ["gen"]);
+}
+
 /// A snapshot that cannot be restored still runs the code against a clean
 /// state, but says so in `state_error`.
 #[tokio::test]

@@ -104,7 +104,7 @@ export async function runCode(
 /** Shape of exports from a dynamically linked + transpiled sandbox. */
 export interface DynamicSandboxExports {
   execute: (code: string) => Promise<any>;
-  snapshotState: () => Promise<Uint8Array>;
+  snapshotState: () => Promise<{ data: Uint8Array; skippedGlobals: string[] }>;
   restoreState: (data: Uint8Array) => Promise<void>;
   clearState: () => Promise<void>;
   finalizePreinit: () => void;
@@ -128,7 +128,7 @@ class DynamicSandbox implements Sandbox {
   }
 
   async snapshotState(): Promise<Uint8Array> {
-    return this.#exports.snapshotState();
+    return (await this.#exports.snapshotState()).data;
   }
 
   async restoreState(data: Uint8Array): Promise<void> {

@@ -1286,6 +1286,16 @@ class Session:
         ...
 
     @property
+    def last_snapshot_skipped_globals(self) -> list[str]:
+        """Names of the globals the most recent ``snapshot_state()`` left out.
+
+        These could not be serialized (e.g. open sockets, generators), so they
+        raise ``NameError`` after that snapshot is restored. Empty before the
+        first snapshot.
+        """
+        ...
+
+    @property
     def execution_timeout_ms(self) -> Optional[int]:
         """Current execution timeout in milliseconds, or None if not set."""
         ...
@@ -1498,7 +1508,9 @@ class Session:
         """Capture a snapshot of the current Python state.
 
         The snapshot contains all user-defined variables, serialized using pickle.
-        It can be saved to disk and restored later.
+        It can be saved to disk and restored later. Variables that can't be
+        serialized are left out; their names are in
+        ``last_snapshot_skipped_globals`` afterwards.
 
         Returns:
             The serialized snapshot data as bytes.

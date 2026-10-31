@@ -1173,7 +1173,7 @@ async fn execute_with_session(
     // (OutOfFuel) and yield a misleading empty snapshot — which could clobber
     // prior session state. Resume goes through journal replay, not the snapshot,
     // so the snapshot is not needed here anyway.)
-    let snapshot_bytes = if params.state.is_some() && !suspended {
+    let (snapshot_bytes, state_skipped_globals) = if params.state.is_some() && !suspended {
         let snapshot_start = Instant::now();
         match session.snapshot_state().await {
             Ok(snapshot) => {
@@ -1181,9 +1181,10 @@ async fn execute_with_session(
                 tracing::info!(
                     snapshot_bytes = bytes.len(),
                     snapshot_ms = snapshot_start.elapsed().as_millis() as u64,
+                    skipped_globals = ?snapshot.skipped_globals(),
                     "state snapshot captured"
                 );
-                bytes
+                (bytes, snapshot.skipped_globals().to_vec())
             }
             Err(e) => {
                 tracing::warn!(
@@ -1192,11 +1193,11 @@ async fn execute_with_session(
                     "failed to capture state snapshot"
                 );
                 state_errors.push(format!("failed to capture state snapshot: {e}"));
-                Vec::new()
+                (Vec::new(), Vec::new())
             }
         }
     } else {
-        Vec::new()
+        (Vec::new(), Vec::new())
     };
 
     let duration = start.elapsed();
@@ -1254,6 +1255,7 @@ async fn execute_with_session(
                 suspended_callback,
                 state_error,
                 output_truncated,
+                state_skipped_globals,
             }
         }
         Err(e) => {
@@ -1308,6 +1310,7 @@ async fn execute_with_session(
                 suspended_callback,
                 state_error,
                 output_truncated,
+                state_skipped_globals,
             }
         }
     }

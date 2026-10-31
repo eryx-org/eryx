@@ -124,6 +124,16 @@ describe("state persistence", () => {
     expect(restored.stdout).toBe("10\n");
   });
 
+  it("names the globals a snapshot skips", async () => {
+    const fresh = new Sandbox();
+    expect(fresh.lastSnapshotSkippedGlobals).toEqual([]);
+    await fresh.execute("x = 1\ngen = (i for i in range(3))");
+
+    const snapshot = new Uint8Array(await fresh.snapshotState());
+    expect(snapshot.length).toBeGreaterThan(0);
+    expect(fresh.lastSnapshotSkippedGlobals).toEqual(["gen"]);
+  });
+
   it("snapshots and restores functions", async () => {
     const fresh = new Sandbox();
     await fresh.execute("def greet(name): return f'Hello, {name}!'");

@@ -45,6 +45,16 @@ struct ExecuteOutput {
     result_error: String,
 }
 
+/// Mirror of the WIT `state-snapshot` record returned by `snapshot-state`.
+#[derive(Debug, Clone, wasmtime::component::ComponentType, wasmtime::component::Lift)]
+#[component(record)]
+struct StateSnapshot {
+    #[component(name = "data")]
+    data: Vec<u8>,
+    #[component(name = "skipped-globals")]
+    skipped_globals: Vec<String>,
+}
+
 struct State {
     ctx: WasiCtx,
     table: ResourceTable,
@@ -583,9 +593,12 @@ async fn test_instantiate_component() -> Result<(), Box<dyn std::error::Error>> 
 
     // Get the state management functions
     let snapshot_state = instance
-        .get_typed_func::<(), (Result<Vec<u8>, String>,)>(&mut store, "[async]snapshot-state")
+        .get_typed_func::<(), (Result<StateSnapshot, String>,)>(&mut store, "[async]snapshot-state")
         .or_else(|_| {
-            instance.get_typed_func::<(), (Result<Vec<u8>, String>,)>(&mut store, "snapshot-state")
+            instance.get_typed_func::<(), (Result<StateSnapshot, String>,)>(
+                &mut store,
+                "snapshot-state",
+            )
         })?;
 
     let restore_state = instance
@@ -614,10 +627,14 @@ async fn test_instantiate_component() -> Result<(), Box<dyn std::error::Error>> 
     let (snapshot_result,) = snapshot_state.call_async(&mut store, ()).await?;
 
     let snapshot_data = match snapshot_result {
-        Ok(data) => {
-            println!("  OK: Snapshot taken, {} bytes", data.len());
-            assert!(!data.is_empty(), "Snapshot should not be empty");
-            data
+        Ok(snapshot) => {
+            println!("  OK: Snapshot taken, {} bytes", snapshot.data.len());
+            assert!(!snapshot.data.is_empty(), "Snapshot should not be empty");
+            assert!(
+                snapshot.skipped_globals.is_empty(),
+                "Nothing should be skipped"
+            );
+            snapshot.data
         }
         Err(error) => {
             panic!("Test 8 failed: {error}");
