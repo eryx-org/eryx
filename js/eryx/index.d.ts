@@ -29,6 +29,19 @@ import type { NetConfig } from "./shims/net.js";
 export function setNetConfig(config: NetConfig | null): void;
 
 /**
+ * A captured Python session state, from {@link Sandbox.snapshotState}.
+ */
+export interface StateSnapshot {
+  /** The serialized state, accepted by `restoreState()`. */
+  data: Uint8Array;
+  /**
+   * Names of the globals left out because they could not be serialized (e.g.
+   * open sockets, generators). They raise `NameError` after a restore.
+   */
+  skippedGlobals: string[];
+}
+
+/**
  * Result from executing Python code in the sandbox.
  */
 export interface ExecuteResult {
@@ -267,20 +280,21 @@ export class Sandbox {
    * Capture a snapshot of the current Python session state.
    *
    * Returns serialized state (via pickle) that can be restored later
-   * with restoreState(). This captures all user-defined variables.
+   * with restoreState(). This captures all user-defined variables that can
+   * be serialized, and names the others in `skippedGlobals`.
    *
    * @returns Serialized Python state
-   * @throws If serialization fails (e.g., unpicklable objects)
+   * @throws If serialization fails
    */
-  snapshotState(): Promise<Uint8Array>;
+  snapshotState(): Promise<StateSnapshot>;
 
   /**
    * Restore Python session state from a previously captured snapshot.
    *
-   * @param data - Serialized state from snapshotState()
+   * @param snapshot - A snapshot from snapshotState(), or its `data`
    * @throws If deserialization fails
    */
-  restoreState(data: Uint8Array): Promise<void>;
+  restoreState(snapshot: StateSnapshot | Uint8Array): Promise<void>;
 
   /**
    * Clear all persistent state from the session.

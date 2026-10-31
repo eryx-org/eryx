@@ -112,16 +112,25 @@ world sandbox {
     /// Returns captured stdout and stderr on success, or an error message on failure.
     export execute: async func(code: string) -> result<execute-output, string>;
 
+    /// A captured Python session state.
+    record state-snapshot {
+        /// The serialized state (using dill internally).
+        data: list<u8>,
+        /// Names of the globals left out because they could not be
+        /// serialized (e.g. open sockets, generators).
+        skipped-globals: list<string>,
+    }
+
     /// Capture a snapshot of the current Python session state.
     ///
-    /// Returns the serialized state as bytes (using pickle internally).
-    /// This captures all user-defined variables from previous execute() calls.
+    /// This captures all user-defined variables from previous execute() calls
+    /// that can be serialized, and names the ones that can't.
     ///
     /// The snapshot can be restored later using restore-state to continue
     /// execution with the same variables available.
     ///
-    /// Returns an error if serialization fails (e.g., unpicklable objects).
-    export snapshot-state: async func() -> result<list<u8>, string>;
+    /// Returns an error if serialization fails.
+    export snapshot-state: async func() -> result<state-snapshot, string>;
 
     /// Restore Python session state from a previously captured snapshot.
     ///

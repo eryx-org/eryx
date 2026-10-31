@@ -433,6 +433,12 @@ message ExecuteResult {
   // the sandbox's own per-execution output stream limit (16 MiB, charging a
   // small overhead per write) dropped output first.
   bool output_truncated = 14;
+
+  // Names of the globals left out of `state_snapshot` because they could not
+  // be serialized (e.g. open sockets, generators). They raise NameError after
+  // the snapshot is restored. Empty when nothing was skipped or no snapshot
+  // was captured.
+  repeated string state_skipped_globals = 15;
 }
 
 // Why an execution failed, when success is false.

@@ -57,12 +57,14 @@ print(f"x={x}, y={y}, items={items}")`,
     const name = prompt("Snapshot name:", `snapshot-${snapshots.size + 1}`);
     if (!name) return;
     try {
-      const raw = await state.sandbox.snapshotState();
-      const data = new Uint8Array(raw);
+      const { data, skippedGlobals } = await state.sandbox.snapshotState();
       snapshots.set(name, { data, time: new Date() });
       snapshots = new Map(snapshots); // trigger reactivity
+      const skipped = skippedGlobals.length
+        ? `; skipped ${skippedGlobals.join(", ")}`
+        : "";
       showStatus(
-        `Snapshot "${name}" saved (${(data.byteLength / 1024).toFixed(1)} KB)`,
+        `Snapshot "${name}" saved (${(data.byteLength / 1024).toFixed(1)} KB${skipped})`,
       );
     } catch (e) {
       showStatus("Snapshot failed: " + (e as Error).message, "error");

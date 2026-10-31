@@ -11,7 +11,6 @@ use std::time::Duration;
 use eryx::Callback;
 use eryx::{CancellationToken, OutputHandler};
 use pyo3::prelude::*;
-use pyo3::types::PyBytes;
 use tokio::sync::mpsc;
 
 use crate::callback::extract_callbacks;
@@ -19,7 +18,7 @@ use crate::error::{InitializationError, eryx_error_to_py};
 use crate::execution::{CancelToken, call_token, run_async, run_blocking};
 use crate::net_config::NetConfig;
 use crate::resource_limits::ResourceLimits;
-use crate::result::{ExecuteResult, ReplayOutcome};
+use crate::result::{ExecuteResult, ReplayOutcome, StateSnapshot};
 use crate::sandbox::PyOutputHandler;
 use crate::vfs::VfsStorage;
 
@@ -452,10 +451,12 @@ impl Session {
     /// Capture a snapshot of the current Python state.
     ///
     /// The snapshot contains all user-defined variables, serialized using pickle.
-    /// It can be saved to disk and restored later.
+    /// It can be saved to disk and restored later. Variables that can't be
+    /// serialized are left out, and named in `skipped_globals`.
     ///
     /// Returns:
-    ///     bytes: The serialized snapshot data.
+    ///     StateSnapshot: The serialized state (`data`) and the names of the
+    ///     globals left out (`skipped_globals`).
     ///
     /// Raises:
     ///     ExecutionError: If the state cannot be serialized.
@@ -465,17 +466,20 @@ impl Session {
     ///     snapshot = session.snapshot_state()
     ///     # Save snapshot to file
     ///     with open('state.bin', 'wb') as f:
-    ///         f.write(snapshot)
-    fn snapshot_state<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyBytes>> {
+    ///         f.write(snapshot.data)
+    fn snapshot_state(&self, py: Python<'_>) -> PyResult<StateSnapshot> {
         let snapshot = self.queued(py, async |inner| inner.snapshot_state().await)?;
 
-        Ok(PyBytes::new(py, snapshot.to_bytes().as_slice()))
+        Ok(StateSnapshot {
+            data: snapshot.to_bytes(),
+            skipped_globals: snapshot.skipped_globals().to_vec(),
+        })
     }
 
     /// Restore Python state from a previously captured snapshot.
     ///
     /// Args:
-    ///     snapshot: The serialized snapshot data (bytes).
+    ///     snapshot: A `StateSnapshot`, or its `data` bytes.
     ///
     /// Raises:
     ///     ExecutionError: If the snapshot cannot be restored.
@@ -486,8 +490,12 @@ impl Session {
     ///         snapshot = f.read()
     ///     session.restore_state(snapshot)
     ///     result = session.execute('print(x)')  # x was in the snapshot
-    fn restore_state(&self, py: Python<'_>, snapshot: &[u8]) -> PyResult<()> {
-        let snapshot = eryx::PythonStateSnapshot::from_bytes(snapshot).map_err(eryx_error_to_py)?;
+    fn restore_state(&self, py: Python<'_>, snapshot: &Bound<'_, PyAny>) -> PyResult<()> {
+        let snapshot = match snapshot.cast::<StateSnapshot>() {
+            Ok(snapshot) => eryx::PythonStateSnapshot::from_bytes(&snapshot.get().data),
+            Err(_) => eryx::PythonStateSnapshot::from_bytes(snapshot.extract::<&[u8]>()?),
+        }
+        .map_err(eryx_error_to_py)?;
         self.queued(py, async |inner| inner.restore_state(&snapshot).await)
     }
 

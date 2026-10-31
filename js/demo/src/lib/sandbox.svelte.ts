@@ -1,4 +1,4 @@
-import type { Sandbox, ExecuteResult } from "@bsull/eryx";
+import type { Sandbox, ExecuteResult, StateSnapshot } from "@bsull/eryx";
 
 export type SandboxState =
   | { status: "loading" }
@@ -104,7 +104,7 @@ export async function runCode(
 /** Shape of exports from a dynamically linked + transpiled sandbox. */
 export interface DynamicSandboxExports {
   execute: (code: string) => Promise<any>;
-  snapshotState: () => Promise<Uint8Array>;
+  snapshotState: () => Promise<StateSnapshot>;
   restoreState: (data: Uint8Array) => Promise<void>;
   clearState: () => Promise<void>;
   finalizePreinit: () => void;
@@ -127,12 +127,12 @@ class DynamicSandbox implements Sandbox {
     return { stdout: decoder.decode(output.stdout), stderr: decoder.decode(output.stderr) };
   }
 
-  async snapshotState(): Promise<Uint8Array> {
+  async snapshotState(): Promise<StateSnapshot> {
     return this.#exports.snapshotState();
   }
 
-  async restoreState(data: Uint8Array): Promise<void> {
-    await this.#exports.restoreState(data);
+  async restoreState(snapshot: StateSnapshot | Uint8Array): Promise<void> {
+    await this.#exports.restoreState(snapshot instanceof Uint8Array ? snapshot : snapshot.data);
   }
 
   async clearState(): Promise<void> {

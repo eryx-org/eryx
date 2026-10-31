@@ -305,6 +305,35 @@ impl SuspendedCallback {
     }
 }
 
+/// A captured session state, returned by `Session.snapshot_state()`.
+#[pyclass(frozen, module = "eryx", from_py_object)]
+#[derive(Debug, Clone)]
+pub struct StateSnapshot {
+    /// The serialized state, as accepted by `Session.restore_state()`.
+    pub data: Vec<u8>,
+
+    /// Names of the globals left out because they could not be serialized.
+    #[pyo3(get)]
+    pub skipped_globals: Vec<String>,
+}
+
+#[pymethods]
+impl StateSnapshot {
+    /// The serialized state as raw bytes.
+    #[getter]
+    fn data(&self) -> &[u8] {
+        &self.data
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "StateSnapshot(size={}, skipped_globals={:?})",
+            self.data.len(),
+            self.skipped_globals
+        )
+    }
+}
+
 /// Truncate a string for display, adding "..." if truncated.
 fn truncate_string(s: &str, max_len: usize) -> String {
     if s.len() <= max_len {

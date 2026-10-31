@@ -356,9 +356,11 @@ session.execute("y = 20")
 
 # Take a snapshot
 snapshot = session.snapshot_state()
-print(f"Snapshot size: {len(snapshot)} bytes")
+print(f"Snapshot size: {len(snapshot.data)} bytes")
 ```
 <!-- langtabs-end -->
+
+Globals that can't be serialized (open sockets, generators, objects dill rejects) are left out of the snapshot, so they raise `NameError` after a restore. The snapshot names them: `snapshot.skipped_globals()` in Rust, `snapshot.skipped_globals` in Python, `snapshot.skippedGlobals` in JavaScript, and `ExecuteResult.state_skipped_globals` from the gRPC server. The serialized bytes to store are `snapshot.to_bytes()` in Rust and `snapshot.data` in Python and JavaScript. `restore_state()`/`restoreState()` take either the snapshot or those bytes.
 
 ### Restoring a Snapshot
 

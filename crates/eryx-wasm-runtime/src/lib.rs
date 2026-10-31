@@ -16,7 +16,7 @@
 //! # Exports
 //!
 //! - `execute(code: string) -> result<string, string>` - Run Python code
-//! - `snapshot-state() -> result<list<u8>, string>` - Pickle globals
+//! - `snapshot-state() -> result<state-snapshot, string>` - Pickle globals
 //! - `restore-state(data: list<u8>) -> result<_, string>` - Restore globals
 //! - `clear-state()` - Clear globals
 
@@ -1245,10 +1245,13 @@ fn handle_export(wit: Wit, func_index: usize, cx: &mut EryxCall) -> HandleExport
             }
         }
         EXPORT_SNAPSHOT_STATE => {
-            // snapshot-state() -> result<list<u8>, string>
+            // snapshot-state() -> result<state-snapshot, string>
             match python::snapshot_state() {
-                Ok(state) => {
-                    cx.stack.push(Value::Bytes(state));
+                Ok((data, skipped)) => {
+                    cx.stack.push(Value::Record(vec![
+                        Value::Bytes(data),
+                        Value::GenericList(skipped.into_iter().map(Value::String).collect()),
+                    ]));
                     cx.stack.push(Value::ResultDiscriminant(true));
                 }
                 Err(error) => {

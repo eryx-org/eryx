@@ -202,6 +202,14 @@ export { DEFAULT_BLOCKED_HOSTS, DEFAULT_BLOCKED_NETWORKS } from "./shims/net.js"
  */
 
 /**
+ * A captured Python session state, from {@link Sandbox#snapshotState}.
+ * @typedef {Object} StateSnapshot
+ * @property {Uint8Array} data - The serialized state, accepted by restoreState()
+ * @property {string[]} skippedGlobals - Names of the globals left out because
+ *   they could not be serialized (e.g. open sockets, generators)
+ */
+
+/**
  * Parse the captured result JSON, promoting integers outside the IEEE-754 safe
  * range to BigInt so they round-trip without precision loss.
  *
@@ -533,10 +541,11 @@ export class Sandbox {
    * Capture a snapshot of the current Python session state.
    *
    * Returns serialized state (via pickle) that can be restored later
-   * with restoreState(). This captures all user-defined variables.
+   * with restoreState(). This captures all user-defined variables that can
+   * be serialized, and names the others in `skippedGlobals`.
    *
-   * @returns {Promise<Uint8Array>} Serialized Python state
-   * @throws {Error} If serialization fails (e.g., unpicklable objects)
+   * @returns {Promise<StateSnapshot>} Serialized Python state
+   * @throws {Error} If serialization fails
    */
   async snapshotState() {
     return this.#serialized((instance) => instance.snapshotState());
@@ -548,10 +557,12 @@ export class Sandbox {
    * After restore, subsequent execute() calls will have access to all
    * variables that were present when the snapshot was taken.
    *
-   * @param {Uint8Array} data - Serialized state from snapshotState()
+   * @param {StateSnapshot | Uint8Array} snapshot - A snapshot from
+   *   snapshotState(), or its `data`
    * @throws {Error} If deserialization fails
    */
-  async restoreState(data) {
+  async restoreState(snapshot) {
+    const data = snapshot instanceof Uint8Array ? snapshot : snapshot.data;
     await this.#serialized((instance) => instance.restoreState(data));
   }
 

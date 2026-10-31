@@ -3616,8 +3616,9 @@ unsafe fn set_python_variable_bytes(name: &str, data: &[u8]) -> Result<(), Strin
 /// - Callback infrastructure (re-created on each session)
 /// - Generator/coroutine objects (live iterators with frame state)
 ///
-/// Variables that cannot be serialized are left out without notice.
-pub fn snapshot_state() -> Result<Vec<u8>, String> {
+/// Variables that cannot be serialized are left out, and their names are
+/// returned alongside the serialized state.
+pub fn snapshot_state() -> Result<(Vec<u8>, Vec<String>), String> {
     if !is_python_initialized() {
         return Err("Python not initialized".to_string());
     }
@@ -3651,8 +3652,8 @@ def _eryx_is_callback_obj(name, obj):
 _eryx_keys = list(_eryx_user_globals.keys())
 
 # Build dict of serializable items. Names that can't be serialized are kept in
-# _eryx_snapshot_skipped (not printed: no execution's output is being captured
-# here, so a notice could only go to the host process's stderr).
+# _eryx_snapshot_skipped and returned to the host (not printed: no execution's
+# output is being captured here).
 _eryx_state_dict = {}
 _eryx_snapshot_skipped = []
 for _k in _eryx_keys:
@@ -3671,6 +3672,7 @@ for _k in _eryx_keys:
 
 # Serialize the filtered dict with dill
 _eryx_state_bytes = _eryx_dill.dumps(_eryx_state_dict)
+_eryx_snapshot_skipped = '\\x00'.join(_eryx_snapshot_skipped)
 
 # Clean up local helpers
 del _eryx_exclude, _eryx_is_callback_obj, _eryx_keys, _eryx_state_dict, _eryx_dill
@@ -3678,13 +3680,19 @@ del _eryx_exclude, _eryx_is_callback_obj, _eryx_keys, _eryx_state_dict, _eryx_di
 
         run_in_main(pickle_code).map_err(|err| format!("Failed to snapshot state: {err}"))?;
 
-        // Get the serialized bytes
+        // Get the serialized bytes and the NUL-separated skipped names
         let state_bytes = get_python_variable_bytes("_eryx_state_bytes")?;
+        let skipped = get_python_variable_string("_eryx_snapshot_skipped")?;
 
         // Clean up
-        let _ = run_in_main(c"del _eryx_state_bytes");
+        let _ = run_in_main(c"del _eryx_state_bytes, _eryx_snapshot_skipped");
 
-        Ok(state_bytes)
+        let skipped = if skipped.is_empty() {
+            Vec::new()
+        } else {
+            skipped.split('\0').map(str::to_string).collect()
+        };
+        Ok((state_bytes, skipped))
     }
 }
 

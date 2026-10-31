@@ -130,6 +130,7 @@ If the client disconnects, the server cancels the in-flight execution, including
 | `result` / `result_error` | The captured result variable (JSON), or why capture failed. |
 | `stats` | Duration, callback count, peak memory, fuel consumed, and `replayed_callbacks`. Also filled in for failed runs (fuel is 0 for a suspended run). |
 | `state_snapshot` | Post-execution state, when `persist_state` was set. |
+| `state_skipped_globals` | Names of the globals `state_snapshot` left out because they could not be serialized. |
 | `callback_journal` | The recorded replay journal, when the request opted in. |
 | `suspended` / `suspended_callback` | Set when a callback [suspended](#suspension) execution. |
 | `output_truncated` | Set when output was dropped: stdout plus stderr went past the [output cap](#output-cap). |

@@ -695,8 +695,9 @@ session = eryx.Session()
 session.execute("x = 42")
 session.execute("data = [1, 2, 3]")
 
-# Capture state as bytes (uses pickle internally)
+# Capture state (uses pickle internally)
 snapshot = session.snapshot_state()
+print(snapshot.skipped_globals)  # [] - names of globals that couldn't be pickled
 
 # Clear state
 session.clear_state()
@@ -708,7 +709,7 @@ print(result.stdout)  # "42 [1, 2, 3]"
 
 # Snapshots can be saved to disk and restored in new sessions
 with open("state.bin", "wb") as f:
-    f.write(snapshot)
+    f.write(snapshot.data)
 ```
 
 #### Session Properties and Methods
@@ -717,8 +718,8 @@ with open("state.bin", "wb") as f:
 - `session.execute_async(code, cancel=None)` - Awaitable `execute()` for asyncio
 - `session.reset()` - Reset Python state (VFS persists)
 - `session.clear_state()` - Clear variables without full reset
-- `session.snapshot_state()` - Capture state as bytes
-- `session.restore_state(snapshot)` - Restore from snapshot
+- `session.snapshot_state()` - Capture state as a `StateSnapshot` (`data` bytes, `skipped_globals` names)
+- `session.restore_state(snapshot)` - Restore from a `StateSnapshot` or its `data` bytes
 - `session.execution_count` - Number of executions performed
 - `session.execution_timeout_ms` - Get/set timeout in milliseconds
 - `session.vfs` - Get the `VfsStorage` (if enabled)

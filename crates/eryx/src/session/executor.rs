@@ -107,6 +107,9 @@ pub struct PythonStateSnapshot {
 
     /// Metadata about when the snapshot was captured.
     metadata: SnapshotMetadata,
+
+    /// Globals left out because they could not be serialized.
+    skipped_globals: Vec<String>,
 }
 
 /// Metadata about a state snapshot.
@@ -122,7 +125,7 @@ pub struct SnapshotMetadata {
 
 impl PythonStateSnapshot {
     /// Create a new snapshot from raw pickle data.
-    fn new(data: Vec<u8>) -> Self {
+    fn new(data: Vec<u8>, skipped_globals: Vec<String>) -> Self {
         let timestamp_ms = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map(|d| d.as_millis() as u64)
@@ -136,6 +139,7 @@ impl PythonStateSnapshot {
                 timestamp_ms,
                 size_bytes,
             },
+            skipped_globals,
         }
     }
 
@@ -155,6 +159,17 @@ impl PythonStateSnapshot {
     #[must_use]
     pub fn size(&self) -> usize {
         self.data.len()
+    }
+
+    /// Names of the globals left out of the snapshot because they could not
+    /// be serialized (e.g. open sockets, generators). They raise `NameError`
+    /// after a restore.
+    ///
+    /// Not part of [`to_bytes`](Self::to_bytes), so always empty for a
+    /// snapshot from [`from_bytes`](Self::from_bytes).
+    #[must_use]
+    pub fn skipped_globals(&self) -> &[String] {
+        &self.skipped_globals
     }
 
     /// Convert the snapshot to bytes for storage or transmission.
@@ -193,6 +208,7 @@ impl PythonStateSnapshot {
                 timestamp_ms,
                 size_bytes,
             },
+            skipped_globals: Vec::new(),
         })
     }
 }
@@ -1722,12 +1738,13 @@ impl SessionExecutor {
     pub async fn snapshot_state(&mut self) -> Result<PythonStateSnapshot, Error> {
         tracing::debug!("SessionExecutor: capturing state snapshot");
 
-        let data = self
+        let snapshot = self
             .run_state_op("snapshot", async |accessor, bindings| {
                 bindings.call_snapshot_state(accessor).await
             })
             .await?
             .map_err(Error::Snapshot)?;
+        let data = snapshot.data;
 
         // Check size limit
         if data.len() > MAX_SNAPSHOT_SIZE {
@@ -1738,9 +1755,13 @@ impl SessionExecutor {
             )));
         }
 
-        tracing::debug!(size_bytes = data.len(), "State snapshot captured");
+        tracing::debug!(
+            size_bytes = data.len(),
+            skipped_globals = ?snapshot.skipped_globals,
+            "State snapshot captured"
+        );
 
-        Ok(PythonStateSnapshot::new(data))
+        Ok(PythonStateSnapshot::new(data, snapshot.skipped_globals))
     }
 
     /// Restore Python session state from a previously captured snapshot.
@@ -2046,7 +2067,7 @@ mod tests {
     #[test]
     fn test_python_state_snapshot_roundtrip() {
         let data = vec![1, 2, 3, 4, 5];
-        let snapshot = PythonStateSnapshot::new(data.clone());
+        let snapshot = PythonStateSnapshot::new(data.clone(), Vec::new());
 
         assert_eq!(snapshot.data(), &data);
         assert_eq!(snapshot.size(), 5);
@@ -2072,7 +2093,7 @@ mod tests {
 
     #[test]
     fn test_snapshot_metadata() {
-        let snapshot = PythonStateSnapshot::new(vec![0; 100]);
+        let snapshot = PythonStateSnapshot::new(vec![0; 100], Vec::new());
         let meta = snapshot.metadata();
 
         assert_eq!(meta.size_bytes, 100);

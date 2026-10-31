@@ -79,19 +79,20 @@ console.log(second.replayedCallbacks);
 
 A top-level `executeWithJournal(code, options?)` convenience function is also exported.
 
-### `snapshotState(): Promise<Uint8Array>`
+### `snapshotState(): Promise<StateSnapshot>`
 
-Capture a snapshot of the current Python session state. Returns serialized state that can be restored later.
+Capture a snapshot of the current Python session state. Returns `{ data, skippedGlobals }`: the serialized state (a `Uint8Array`) that can be restored later, and the names of the globals left out because they could not be serialized.
 
 ```javascript
 await sandbox.execute('x = 42');
 const snapshot = await sandbox.snapshotState();
-// Save snapshot for later use
+console.log(snapshot.skippedGlobals);  // []
+// Save snapshot.data for later use
 ```
 
-### `restoreState(data: Uint8Array): Promise<void>`
+### `restoreState(snapshot: StateSnapshot | Uint8Array): Promise<void>`
 
-Restore Python session state from a previously captured snapshot.
+Restore Python session state from a previously captured snapshot, or from its `data`.
 
 ```javascript
 await sandbox.restoreState(snapshot);

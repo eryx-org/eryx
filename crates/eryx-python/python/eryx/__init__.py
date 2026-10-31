@@ -43,6 +43,7 @@ from eryx._eryx import (
     SandboxFactory,
     SandboxPool,
     Session,
+    StateSnapshot,
     SuspendedCallback,
     VfsStorage,
     # Exceptions
@@ -76,6 +77,7 @@ __all__ = [
     "SandboxFactory",
     "SandboxPool",
     "Session",
+    "StateSnapshot",
     "SuspendedCallback",
     "VfsStorage",
     # Exceptions
