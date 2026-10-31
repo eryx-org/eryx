@@ -47,7 +47,7 @@ mod wasi_impl;
 
 pub use error::{VfsError, VfsResult};
 pub use hybrid::{
-    DEFAULT_MAX_OPEN_HOST_FILES, HybridVfsCtx, HybridVfsState, RealDir, RealFile, RestrictedDir,
+    DEFAULT_MAX_OPEN_HOST_FILES, HybridVfsCtx, HybridVfsState, RealDir,
     process_max_open_host_files, set_process_max_open_host_files,
 };
 pub use hybrid_bindings::HybridReaddirIterator;

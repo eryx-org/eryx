@@ -68,12 +68,6 @@ impl RestrictedDir {
         }
     }
 
-    /// Open an ambient directory as an unrestricted handle.
-    pub fn open_ambient(path: impl AsRef<Path>) -> std::io::Result<Self> {
-        let dir = capfs::open_ambient_dir(path.as_ref(), ambient_authority::ambient_authority())?;
-        Ok(Self::new(dir))
-    }
-
     /// Refuse an operation that a file-only (mapped) handle doesn't allow.
     fn check_unrestricted(&self, guest_rel_path: &str) -> Result<(), std::io::Error> {
         if self.file_map.is_some() {
@@ -296,15 +290,15 @@ impl RestrictedDir {
 #[derive(Clone)]
 pub struct RealDir {
     /// The restricted directory handle (enforces file_map at type level).
-    pub dir: RestrictedDir,
+    pub(crate) dir: RestrictedDir,
     /// Directory permissions.
-    pub dir_perms: DirPerms,
+    pub(crate) dir_perms: DirPerms,
     /// Default file permissions for files in this directory.
-    pub file_perms: FilePerms,
+    pub(crate) file_perms: FilePerms,
     /// Largest size, in bytes, a guest may grow a file beneath this directory
     /// to, by writing or truncating. `None` (the default) leaves writes
     /// unmetered: a writable host directory can then fill the host disk.
-    pub max_file_size: Option<u64>,
+    pub(crate) max_file_size: Option<u64>,
 }
 
 impl std::fmt::Debug for RealDir {
@@ -353,16 +347,16 @@ impl RealDir {
 /// A real filesystem file handle.
 pub struct RealFile {
     /// The underlying file.
-    pub file: Arc<std::fs::File>,
+    pub(crate) file: Arc<std::fs::File>,
     /// File permissions.
-    pub perms: FilePerms,
+    pub(crate) perms: FilePerms,
     /// Whether the file is open for reading.
-    pub readable: bool,
+    pub(crate) readable: bool,
     /// Whether the file is open for writing.
-    pub writable: bool,
+    pub(crate) writable: bool,
     /// Largest size a guest may grow the file to; see
-    /// [`RealDir::max_file_size`].
-    pub max_size: Option<u64>,
+    /// [`RealDir::with_max_file_size`].
+    pub(crate) max_size: Option<u64>,
 }
 
 impl RealFile {
