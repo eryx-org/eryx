@@ -1,4 +1,4 @@
-import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { createServer, type Server, type Socket } from "node:net";
 import { createServer as createHttpServer, type Server as HttpServer } from "node:http";
 import type { AddressInfo } from "node:net";
@@ -82,6 +82,10 @@ except OSError as e:
     expect(() => sandbox.setNetConfig({ maxConnections: -1 })).toThrow(TypeError);
     expect(() => sandbox.setNetConfig({ maxConnections: NaN })).toThrow(TypeError);
     expect(() => setNetConfig({ maxConnections: -1 })).toThrow(TypeError);
+    // Like the Rust NetConfig, a zero ceiling is refused rather than failing every connection.
+    expect(() => sandbox.setNetConfig({ connectTimeoutMs: 0 })).toThrow("connectTimeoutMs must be greater than zero");
+    expect(() => sandbox.setNetConfig({ ioTimeoutMs: -1 })).toThrow(TypeError);
+    expect(() => sandbox.setNetConfig({ ioTimeoutMs: NaN })).toThrow(TypeError);
     expect(() => new Sandbox({ netConfig: { blockedNetworks: ["10.0.0.0/33"] } })).toThrow(TypeError);
   });
 
@@ -231,6 +235,37 @@ for timeout in (0.1, None, 600):
       expect(result.stdout).toBe("TimeoutError\nTimeoutError\nTimeoutError\n");
     } finally {
       sandbox.setNetConfig(allowLoopback);
+    }
+  });
+
+  it("times out connects to a black-holed address, capped by connectTimeoutMs", async (ctx) => {
+    // TEST-NET-1 is never routed, so the SYN goes unanswered.
+    const net = createNet();
+    net.setNetConfig({ allowedHosts: ["192.0.2.1"], blockedNetworks: [], connectTimeoutMs: 200 });
+    for (const guestMs of [0, 600_000]) {
+      const start = Date.now();
+      const err: any = await (net.tcp.connect("192.0.2.1", 81, guestMs) as Promise<unknown>).catch((e) => e);
+      // A host with no route at all refuses at once instead.
+      if (err?.payload?.tag !== "timed-out" && Date.now() - start < 100) ctx.skip();
+      expect(err).toEqual({ payload: { tag: "timed-out" } });
+      expect(Date.now() - start).toBeLessThan(5_000);
+    }
+  });
+
+  it("times out TLS handshakes, capped by connectTimeoutMs", async () => {
+    // Accepts and never answers, so the handshake never completes.
+    const silent = createServer((sock) => sock.resume());
+    await new Promise<void>((r) => silent.listen(0, "127.0.0.1", r));
+    try {
+      const net = createNet();
+      net.setNetConfig({ ...allowLoopback, connectTimeoutMs: 200 });
+      const h = await net.tcp.connect("127.0.0.1", (silent.address() as AddressInfo).port, 0);
+      await expect(net.tls.upgrade(h, "example.com", 600_000)).rejects.toEqual({
+        payload: { tag: "tcp", val: { tag: "timed-out" } },
+      });
+      net.closeConnections();
+    } finally {
+      silent.close();
     }
   });
 
@@ -420,6 +455,21 @@ describe("fetch transport", () => {
     const exempt = fetchNetworkFilter({ blockedNetworks: ["10.0.0.0/8"], allowedNetworks: ["10.1.0.0/16"] });
     expect(exempt("10.1.2.3", 4)).toBe(true);
     expect(exempt("10.2.0.1", 4)).toBe(false);
+  });
+
+  it("fills in the reason phrase that HTTP/2 responses lack", async () => {
+    // Node's HTTP/1.1 server always sends a reason, so stub fetch() to get none.
+    try {
+      for (const [status, line] of [
+        [404, "HTTP/1.1 404 Not Found\r\n"],
+        [599, "HTTP/1.1 599 \r\n"],
+      ] as const) {
+        vi.stubGlobal("fetch", async () => new Response("x", { status }));
+        expect((await exchange("GET / HTTP/1.1\r\n\r\n")).slice(0, line.length)).toBe(line);
+      }
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 
   it("rejects non-HTTP traffic", async () => {
