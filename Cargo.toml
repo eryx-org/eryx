@@ -73,7 +73,9 @@ tracing-error = "0.2"
 tracing-opentelemetry = "0.34"
 uuid = "1"
 walkdir = "2.5"
-wasm-bindgen = "0.2"    # browser WASM bindings
+# Browser WASM bindings. Exact pin: must match the mise `cargo:wasm-bindgen-cli`
+# version, and lets Renovate move the =-pinned js-sys/web-sys family with it.
+wasm-bindgen = "=0.2.130"
 wasm-encoder = "0.263"
 wasmparser = "0.263"
 # wasmtime v40+ required for the async component model.
