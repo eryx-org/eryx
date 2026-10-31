@@ -1016,6 +1016,62 @@ impl PrecompiledArtifact {
         unsafe { Self::from_file_inner(file, len, Some(key)) }
     }
 
+    /// Like [`Self::from_file_cached`], but takes the component's content hash
+    /// instead of computing it, so loading does not read the whole file.
+    ///
+    /// `hash` must be what [`Self::content_hash`] returned for this exact
+    /// component, typically stored alongside it when it was saved.
+    ///
+    /// # Safety
+    ///
+    /// Same as [`Self::from_file`], and `hash` must be correct: a wrong hash
+    /// makes this artifact share the process-global
+    /// [`crate::cache::InstancePreCache`] entry of a different component.
+    ///
+    /// # Errors
+    ///
+    /// Same as [`Self::from_file`].
+    #[cfg(feature = "embedded")]
+    #[allow(unsafe_code)]
+    pub unsafe fn from_file_with_hash(
+        file: std::fs::File,
+        len: u64,
+        hash: [u8; 32],
+    ) -> Result<Self, Error> {
+        let key = crate::cache::CacheKey::from_precompiled_hash(hash);
+        // SAFETY: The caller guarantees the file and hash are trusted.
+        unsafe { Self::from_file_inner(file, len, Some(key)) }
+    }
+
+    /// The component's content hash, for [`Self::from_file_with_hash`].
+    ///
+    /// Free for artifacts built with a cache key; otherwise the component is
+    /// hashed (streaming, for a file-backed artifact).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if reading a file-backed component fails.
+    #[cfg(feature = "embedded")]
+    pub fn content_hash(&self) -> std::io::Result<[u8; 32]> {
+        if let Some(key) = &self.cache_key {
+            return Ok(key.precompiled_hash());
+        }
+        let key = match &self.component {
+            ArtifactComponent::Bytes(bytes) => crate::cache::CacheKey::from_precompiled(bytes),
+            ArtifactComponent::Mapped(mapped) => {
+                use std::io::{Read as _, Seek as _};
+
+                let mut file = mapped
+                    .file
+                    .lock()
+                    .map_err(|_| std::io::Error::other("artifact file lock poisoned"))?;
+                file.seek(std::io::SeekFrom::Start(0))?;
+                crate::cache::CacheKey::from_precompiled_reader((&mut *file).take(mapped.len))?
+            }
+        };
+        Ok(key.precompiled_hash())
+    }
+
     #[allow(unsafe_code)]
     unsafe fn from_file_inner(
         file: std::fs::File,

@@ -114,6 +114,7 @@ fn load_factory_file(path: &Path, cache: bool) -> PyResult<LoadedFactory> {
         FactoryLayout::Mapped {
             component_len,
             data_files_len,
+            component_hash,
         } => {
             let data_files = if data_files_len == 0 {
                 None
@@ -130,14 +131,19 @@ fn load_factory_file(path: &Path, cache: bool) -> PyResult<LoadedFactory> {
             };
 
             // SAFETY: `open_trusted_factory_file` checked that only this user
-            // or root can modify this file, and `save()` only ever replaces
-            // factory files by renaming a new file over them.
+            // or root can modify this file (so its stored hash is as trusted
+            // as its code), and `save()` only ever replaces factory files by
+            // renaming a new file over them.
             #[allow(unsafe_code)]
             let precompiled = unsafe {
-                if cache {
-                    eryx::PrecompiledArtifact::from_file_cached(file, component_len)
-                } else {
-                    eryx::PrecompiledArtifact::from_file(file, component_len)
+                match (cache, component_hash) {
+                    (true, Some(hash)) => {
+                        eryx::PrecompiledArtifact::from_file_with_hash(file, component_len, hash)
+                    }
+                    (true, None) => {
+                        eryx::PrecompiledArtifact::from_file_cached(file, component_len)
+                    }
+                    (false, _) => eryx::PrecompiledArtifact::from_file(file, component_len),
                 }
             }
             .map_err(eryx_error_to_py)?;
@@ -759,12 +765,15 @@ impl std::fmt::Debug for SandboxFactory {
 // [data_files_len bytes: zstd-compressed tar of data files]
 // [8 bytes: component_len (little-endian)]
 // [8 bytes: data_files_len (little-endian)]
+// [32 bytes: component content hash, for the instance-pre cache key]
 // [4 bytes: version (3, little-endian)]
 // [8 bytes: magic "ERYXFCT3"]
 //
 // The component comes first because Wasmtime can only memory-map a component
 // that starts at offset 0 of a file; it ignores the bytes after it. `load()`
-// reads just the footer and data files, and maps the component.
+// reads just the footer and data files, and maps the component. The stored
+// hash spares `load(cache=True)` from reading the whole component to compute
+// its cache key; it is trusted like the component itself.
 //
 // Version 2 (legacy): [magic "ERYX"][version 2 u32][component_len u64]
 // [component][data_files_len u64][data files]. Read into memory; re-save to
@@ -774,7 +783,7 @@ impl std::fmt::Debug for SandboxFactory {
 // neither the v3 footer nor the v2 magic matching. Mapped like v3.
 
 const FACTORY_FOOTER_MAGIC: &[u8; 8] = b"ERYXFCT3";
-const FACTORY_FOOTER_LEN: u64 = 8 + 8 + 4 + 8;
+const FACTORY_FOOTER_LEN: u64 = 8 + 8 + 32 + 4 + 8;
 
 /// Collect non-Python data files from a site-packages directory.
 ///
@@ -832,10 +841,12 @@ fn write_factory_v3(
         zstd::encode_all(tar_bytes.as_slice(), 3)?
     };
 
+    let component_hash = precompiled.content_hash()?;
     precompiled.write_to(writer)?;
     writer.write_all(&data_files_tar_zst)?;
     writer.write_all(&(precompiled.len() as u64).to_le_bytes())?;
     writer.write_all(&(data_files_tar_zst.len() as u64).to_le_bytes())?;
+    writer.write_all(&component_hash)?;
     writer.write_all(&FACTORY_VERSION.to_le_bytes())?;
     writer.write_all(FACTORY_FOOTER_MAGIC)?;
     Ok(())
@@ -898,10 +909,12 @@ fn open_trusted_factory_file(path: &std::path::Path) -> std::io::Result<std::fs:
 #[derive(Debug, PartialEq, Eq)]
 enum FactoryLayout {
     /// The component is the first `component_len` bytes; the data files
-    /// archive (if `data_files_len > 0`) follows it.
+    /// archive (if `data_files_len > 0`) follows it. v3 files carry the
+    /// component's content hash; v1 files don't.
     Mapped {
         component_len: u64,
         data_files_len: u64,
+        component_hash: Option<[u8; 32]>,
     },
     /// A legacy v2 envelope, which has to be read into memory.
     V2,
@@ -920,8 +933,8 @@ fn read_factory_layout(
         let mut footer = [0u8; FACTORY_FOOTER_LEN as usize];
         file.seek(SeekFrom::End(-(FACTORY_FOOTER_LEN as i64)))?;
         file.read_exact(&mut footer)?;
-        if &footer[20..] == FACTORY_FOOTER_MAGIC {
-            let version = read_le_u32(&footer[16..20])?;
+        if &footer[52..] == FACTORY_FOOTER_MAGIC {
+            let version = read_le_u32(&footer[48..52])?;
             if version != FACTORY_VERSION {
                 return Err(invalid(format!(
                     "unsupported factory file version: {version}"
@@ -938,9 +951,12 @@ fn read_factory_layout(
                      {component_len} + {data_files_len} + {FACTORY_FOOTER_LEN}"
                 )));
             }
+            let mut component_hash = [0u8; 32];
+            component_hash.copy_from_slice(&footer[16..48]);
             return Ok(FactoryLayout::Mapped {
                 component_len,
                 data_files_len,
+                component_hash: Some(component_hash),
             });
         }
     }
@@ -957,6 +973,7 @@ fn read_factory_layout(
         Ok(FactoryLayout::Mapped {
             component_len: file_len,
             data_files_len: 0,
+            component_hash: None,
         })
     }
 }
@@ -1223,6 +1240,7 @@ mod tests {
             FactoryLayout::Mapped {
                 component_len: raw.len() as u64,
                 data_files_len: 0,
+                component_hash: None,
             }
         );
     }
@@ -1234,11 +1252,15 @@ mod tests {
 
         assert_eq!(&bytes[..precompiled.len()], precompiled);
         assert_eq!(&bytes[bytes.len() - 8..], FACTORY_FOOTER_MAGIC);
+        let hash = eryx::PrecompiledArtifact::new(precompiled.to_vec())
+            .content_hash()
+            .unwrap();
         assert_eq!(
             read_factory_layout(&mut Cursor::new(&bytes)).unwrap(),
             FactoryLayout::Mapped {
                 component_len: precompiled.len() as u64,
                 data_files_len: 0,
+                component_hash: Some(hash),
             }
         );
     }
@@ -1251,6 +1273,7 @@ mod tests {
         let FactoryLayout::Mapped {
             component_len,
             data_files_len,
+            ..
         } = read_factory_layout(&mut Cursor::new(&bytes)).unwrap()
         else {
             panic!("expected a mapped layout");

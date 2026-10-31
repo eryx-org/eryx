@@ -153,3 +153,32 @@ async fn precompiled_file_builder_maps_once_for_a_pool() {
     );
     assert_eq!(pool.stats().total_creations, 2);
 }
+
+#[tokio::test]
+async fn from_file_with_hash_matches_the_computed_key() {
+    let (_dir, path, component) = component_file(b"trailer");
+    let len = component.len() as u64;
+
+    let hash = PrecompiledArtifact::new(component.clone())
+        .content_hash()
+        .unwrap();
+    #[allow(unsafe_code)]
+    let mapped =
+        unsafe { PrecompiledArtifact::from_file(std::fs::File::open(&path).unwrap(), len) }
+            .unwrap();
+    assert_eq!(mapped.content_hash().unwrap(), hash);
+
+    #[allow(unsafe_code)]
+    let cached =
+        unsafe { PrecompiledArtifact::from_file_cached(std::fs::File::open(&path).unwrap(), len) }
+            .unwrap();
+    assert_eq!(cached.content_hash().unwrap(), hash);
+
+    #[allow(unsafe_code)]
+    let stored = unsafe {
+        PrecompiledArtifact::from_file_with_hash(std::fs::File::open(&path).unwrap(), len, hash)
+    }
+    .unwrap();
+    assert_eq!(stored.content_hash().unwrap(), hash);
+    assert_eq!(run(&stored).await, b"42\n");
+}
