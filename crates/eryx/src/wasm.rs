@@ -59,20 +59,25 @@ pub(crate) fn epoch_ticks(timeout: Duration) -> u64 {
 ///
 /// Successful reads are lock-free. The mutex serializes only initialization
 /// attempts, allowing a later caller to retry after a transient error or panic.
-struct RetryableOnce<T> {
+pub(crate) struct RetryableOnce<T> {
     value: OnceLock<T>,
     init_lock: Mutex<()>,
 }
 
 impl<T> RetryableOnce<T> {
-    const fn new() -> Self {
+    pub(crate) const fn new() -> Self {
         Self {
             value: OnceLock::new(),
             init_lock: Mutex::new(()),
         }
     }
 
-    fn get_or_try_init<E>(
+    /// The value, if it has been initialized.
+    pub(crate) fn get(&self) -> Option<&T> {
+        self.value.get()
+    }
+
+    pub(crate) fn get_or_try_init<E>(
         &self,
         init: impl FnOnce() -> std::result::Result<T, E>,
     ) -> std::result::Result<&T, E> {
@@ -91,6 +96,14 @@ impl<T> RetryableOnce<T> {
         let value = init()?;
         Ok(self.value.get_or_init(|| value))
     }
+}
+
+/// A pre-compiled component mapped from a file, and its linked form once an
+/// executor has been built from it.
+#[cfg(any(feature = "embedded", feature = "preinit"))]
+pub(crate) struct DeserializedComponent {
+    component: Component,
+    instance_pre: RetryableOnce<SandboxPre<ExecutorState>>,
 }
 
 /// A process-lifetime epoch ticker.
@@ -2330,6 +2343,79 @@ impl PythonExecutor {
         if let Some(key) = cache_key {
             InstancePreCache::global().put(key, instance_pre.clone());
         }
+
+        Ok(Self {
+            engine,
+            instance_pre,
+            python_stdlib_path: None,
+            python_site_packages_paths: Vec::new(),
+            result_variable: "result".to_string(),
+            packages: Vec::new(),
+        })
+    }
+
+    /// Memory-map a pre-compiled component from a file with the shared engine.
+    ///
+    /// Wasmtime ignores any bytes after the component, so the file may carry
+    /// trailing data.
+    ///
+    /// # Safety
+    ///
+    /// The file must hold trusted output of `precompile()`, and must not be
+    /// modified while the returned component is alive.
+    #[cfg(any(feature = "embedded", feature = "preinit"))]
+    #[allow(unsafe_code)]
+    pub(crate) unsafe fn deserialize_component_file(
+        path: &std::path::Path,
+    ) -> std::result::Result<DeserializedComponent, Error> {
+        let engine = Self::shared_engine()?;
+        // SAFETY: Caller guarantees the file is trusted and stays unmodified.
+        let component =
+            unsafe { Component::deserialize_file(&engine, path) }.map_err(Error::WasmComponent)?;
+        Ok(DeserializedComponent {
+            component,
+            instance_pre: RetryableOnce::new(),
+        })
+    }
+
+    /// Create a new executor from a component returned by
+    /// [`Self::deserialize_component_file`].
+    ///
+    /// The component is linked once and the result reused by every later
+    /// call. With a cache key (`embedded` only) the process-global
+    /// instance-pre cache is consulted first and filled afterwards.
+    #[cfg(any(feature = "embedded", feature = "preinit"))]
+    pub(crate) fn from_deserialized_component(
+        deserialized: &DeserializedComponent,
+        cache_key: Option<crate::cache::CacheKey>,
+    ) -> std::result::Result<Self, Error> {
+        let engine = Self::shared_engine()?;
+
+        #[cfg(feature = "embedded")]
+        let cached = cache_key
+            .as_ref()
+            .and_then(|key| InstancePreCache::global().get(key));
+        #[cfg(not(feature = "embedded"))]
+        let cached = None;
+
+        let instance_pre = match cached {
+            Some(instance_pre) => instance_pre,
+            None => {
+                let instance_pre = deserialized
+                    .instance_pre
+                    .get_or_try_init(|| {
+                        Self::create_instance_pre(&engine, &deserialized.component)
+                    })?
+                    .clone();
+                #[cfg(feature = "embedded")]
+                if let Some(key) = cache_key {
+                    InstancePreCache::global().put(key, instance_pre.clone());
+                }
+                #[cfg(not(feature = "embedded"))]
+                let _ = cache_key;
+                instance_pre
+            }
+        };
 
         Ok(Self {
             engine,

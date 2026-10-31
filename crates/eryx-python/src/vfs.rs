@@ -83,7 +83,8 @@ impl std::fmt::Debug for VfsStorage {
 
 /// A host volume mount from Python: `(host_path, guest_path, read_only)`, or
 /// `(host_path, guest_path, read_only, max_file_size)` to limit how large the
-/// sandbox may make any file in the mount.
+/// sandbox may make any file in the mount. A writable mount must not contain a
+/// factory file (see [`eryx::VolumeMount`]).
 #[derive(FromPyObject)]
 pub(crate) enum VolumeSpec {
     Sized(String, String, bool, Option<u64>),

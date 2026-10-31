@@ -10,7 +10,10 @@ PathLike = Union[str, Path]
 VolumeSpec = Union[tuple[str, str, bool], tuple[str, str, bool, Optional[int]]]
 """A host volume mount: `(host_path, guest_path, read_only)`, optionally with a
 fourth `max_file_size` in bytes. Writes that would grow any file in the mount
-past it fail. Without it, writes to a writable volume are unmetered."""
+past it fail. Without it, writes to a writable volume are unmetered.
+
+Never mount a directory holding a factory file writable: the sandbox's writes
+change the host file in place, including native code a loaded factory runs."""
 
 
 class SecretDict(TypedDict, total=False):
@@ -1019,6 +1022,13 @@ class SandboxFactory:
         ``save()``) and that nobody else can modify. On Unix, files writable by
         other users, or owned by a user other than you or root, are refused.
 
+        The pre-compiled component is memory-mapped rather than read into
+        memory, so processes loading the same file share its pages (except on
+        Windows, which can't replace a mapped file, so it is read there). Don't
+        modify a factory file in place while it is loaded; ``save()`` replaces
+        it atomically, which is safe. For the same reason, never keep a factory
+        file in a directory mounted into a sandbox as a writable volume.
+
         Args:
             path: Path to the saved factory file.
             site_packages: Optional path to site-packages directory.
@@ -1028,8 +1038,8 @@ class SandboxFactory:
                 the same callbacks here to keep the setup-free fast path.
             cache: Whether to cache the pre-compiled component in the process-global
                 cache. When enabled, a BLAKE3 content hash is computed once during
-                loading and subsequent ``create_sandbox()`` calls skip component
-                deserialization entirely (~0.8ms vs ~8ms per call). Defaults to True.
+                loading and subsequent ``create_sandbox()`` calls reuse the linked
+                component instead of re-linking it per call. Defaults to True.
 
         Returns:
             A SandboxFactory loaded from the file.
