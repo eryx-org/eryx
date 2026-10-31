@@ -282,7 +282,8 @@ impl SandboxFactory {
     /// memory, so processes loading the same file share its pages (except on
     /// Windows, which can't replace a mapped file, so it is read there). Don't
     /// modify a factory file in place while it is loaded; ``save()`` replaces
-    /// it atomically, which is safe.
+    /// it atomically, which is safe. For the same reason, never keep a factory
+    /// file in a directory mounted into a sandbox as a writable volume.
     ///
     /// Args:
     ///     path: Path to the saved factory file.

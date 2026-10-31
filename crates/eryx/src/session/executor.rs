@@ -370,6 +370,12 @@ impl<'a> SessionExecuteBuilder<'a> {
 ///
 /// Maps a host directory into the sandbox at a specified guest path,
 /// using cap-std for capability-based security.
+///
+/// A writable mount must never contain a pre-compiled runtime or factory file
+/// that is (or will be) loaded: the sandbox's writes go to the host file in
+/// place, so they would change native code the host runs, or truncate a
+/// mapped file and crash the process. File permissions don't prevent this,
+/// because the host process itself performs the writes.
 #[cfg(feature = "vfs")]
 #[derive(Debug, Clone)]
 pub struct VolumeMount {

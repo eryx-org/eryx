@@ -10,7 +10,10 @@ PathLike = Union[str, Path]
 VolumeSpec = Union[tuple[str, str, bool], tuple[str, str, bool, Optional[int]]]
 """A host volume mount: `(host_path, guest_path, read_only)`, optionally with a
 fourth `max_file_size` in bytes. Writes that would grow any file in the mount
-past it fail. Without it, writes to a writable volume are unmetered."""
+past it fail. Without it, writes to a writable volume are unmetered.
+
+Never mount a directory holding a factory file writable: the sandbox's writes
+change the host file in place, including native code a loaded factory runs."""
 
 
 class SecretDict(TypedDict, total=False):
@@ -1023,7 +1026,8 @@ class SandboxFactory:
         memory, so processes loading the same file share its pages (except on
         Windows, which can't replace a mapped file, so it is read there). Don't
         modify a factory file in place while it is loaded; ``save()`` replaces
-        it atomically, which is safe.
+        it atomically, which is safe. For the same reason, never keep a factory
+        file in a directory mounted into a sandbox as a writable volume.
 
         Args:
             path: Path to the saved factory file.
