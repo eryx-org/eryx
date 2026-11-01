@@ -1141,7 +1141,7 @@ dependencies = [
 
 [[package]]
 name = "eryx"
-version = "0.13.0"
+version = "0.13.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1183,7 +1183,7 @@ dependencies = [
 
 [[package]]
 name = "eryx-linker-wasm"
-version = "0.13.0"
+version = "0.13.1"
 dependencies = [
  "wasm-bindgen",
  "wit-component 0.263.0",
@@ -1191,7 +1191,7 @@ dependencies = [
 
 [[package]]
 name = "eryx-macros"
-version = "0.13.0"
+version = "0.13.1"
 dependencies = [
  "eryx",
  "proc-macro2",
@@ -1204,7 +1204,7 @@ dependencies = [
 
 [[package]]
 name = "eryx-precompile"
-version = "0.13.0"
+version = "0.13.1"
 dependencies = [
  "anyhow",
  "clap",
@@ -1224,7 +1224,7 @@ dependencies = [
 
 [[package]]
 name = "eryx-python"
-version = "0.13.0"
+version = "0.13.1"
 dependencies = [
  "async-trait",
  "blake3",
@@ -1244,7 +1244,7 @@ dependencies = [
 
 [[package]]
 name = "eryx-runtime"
-version = "0.13.0"
+version = "0.13.1"
 dependencies = [
  "anyhow",
  "futures",
@@ -1262,7 +1262,7 @@ dependencies = [
 
 [[package]]
 name = "eryx-server"
-version = "0.13.0"
+version = "0.13.1"
 dependencies = [
  "clap",
  "dashmap",
@@ -1318,7 +1318,7 @@ dependencies = [
 
 [[package]]
 name = "eryx-wasm-runtime"
-version = "0.13.0"
+version = "0.13.1"
 dependencies = [
  "pyo3",
  "tokio",
@@ -5316,7 +5316,7 @@ dependencies = [
 
 [[package]]
 name = "wit-dylib-ffi"
-version = "0.13.0"
+version = "0.13.1"
 
 [[package]]
 name = "wit-parser"
