@@ -35,27 +35,15 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
-use sha2::{Digest, Sha256};
-
 use crate::embedded_stdlib::EmbeddedStdlib;
 use crate::error::Error;
 
 /// Embedded pre-compiled runtime.
 const EMBEDDED_RUNTIME: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/runtime.cwasm"));
 
-/// Compute a short hash of the embedded runtime for cache validation.
-/// Returns the first 16 hex characters of SHA-256.
-fn runtime_content_hash() -> String {
-    static HASH: OnceLock<String> = OnceLock::new();
-    HASH.get_or_init(|| {
-        let mut hasher = Sha256::new();
-        hasher.update(EMBEDDED_RUNTIME);
-        let result = hasher.finalize();
-        // Use first 8 bytes (16 hex chars) for a reasonably unique but short identifier
-        result[..8].iter().map(|b| format!("{b:02x}")).collect()
-    })
-    .clone()
-}
+/// Short hash of [`EMBEDDED_RUNTIME`] for naming its cached copy: the first
+/// 16 hex characters of SHA-256, computed by the build script.
+const RUNTIME_CONTENT_HASH: &str = env!("ERYX_EMBEDDED_RUNTIME_HASH");
 
 /// Paths to extracted embedded resources.
 #[derive(Debug, Clone)]
@@ -111,7 +99,7 @@ impl EmbeddedResources {
         // Include version AND content hash in filename to handle both version upgrades
         // and development rebuilds (where version stays the same but content changes)
         let version = env!("CARGO_PKG_VERSION");
-        let content_hash = runtime_content_hash();
+        let content_hash = RUNTIME_CONTENT_HASH;
         let runtime_path = temp_dir.join(format!("runtime-{version}-{content_hash}.cwasm"));
 
         // Reuse a previous extraction only if it's ours and byte-identical:

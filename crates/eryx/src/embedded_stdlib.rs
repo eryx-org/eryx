@@ -27,8 +27,6 @@
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
-use sha2::{Digest, Sha256};
-
 use crate::error::Error;
 
 /// Embedded Python standard library (zstd-compressed tar archive).
@@ -72,7 +70,8 @@ impl EmbeddedStdlib {
     fn extract_stdlib(cache_dir: &Path) -> Result<PathBuf, Error> {
         // The cache directory outlives upgrades, so key the extracted copy by
         // version and content rather than reusing whatever is there.
-        let content_hash = hex::encode(&Sha256::digest(EMBEDDED_STDLIB)[..8]);
+        // Hashed by the build script, so startup doesn't hash the archive
+        let content_hash = env!("ERYX_EMBEDDED_STDLIB_HASH");
         let stdlib_path = cache_dir.join(format!(
             "python-stdlib-{}-{content_hash}",
             env!("CARGO_PKG_VERSION")
