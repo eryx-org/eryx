@@ -50,6 +50,8 @@
 #![cfg_attr(any(feature = "embedded", feature = "preinit"), deny(unsafe_code))]
 #![cfg_attr(docsrs, feature(doc_cfg))]
 
+#[cfg(feature = "preinit")]
+pub mod bundle;
 pub mod cache;
 mod callback;
 pub mod callback_handler;

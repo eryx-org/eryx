@@ -596,6 +596,9 @@ result:
 Factories saved before pyeryx 0.13.0 don't store their build inputs, so
 recreate those once.
 
+From the command line, `python -m eryx factory upgrade OLD NEW` does the same
+and saves the rebuilt factory to `NEW`, leaving `OLD` alone.
+
 #### Properties and Methods
 
 - `factory.size_bytes` - Size of the pre-compiled factory in bytes

@@ -77,8 +77,9 @@ pub struct Session {
     net_config: Option<eryx::NetConfig>,
     /// Output handler for streaming stdout/stderr.
     output_handler: Option<Arc<dyn OutputHandler>>,
-    /// Keep extracted package directories alive for factory-created sessions.
-    _package_storage_owner: Option<Arc<Vec<eryx::ExtractedPackage>>>,
+    /// Keep a factory's site-packages directories alive for sessions it
+    /// created.
+    _factory_files: Option<crate::preinit::FactoryFiles>,
     /// Limits passed to callback handlers for this session.
     callback_limits: eryx::ResourceLimits,
 }
@@ -100,7 +101,7 @@ impl Session {
         volumes: Option<Vec<crate::vfs::VolumeSpec>>,
         on_stdout: Option<Py<PyAny>>,
         on_stderr: Option<Py<PyAny>>,
-        package_storage_owner: Option<Arc<Vec<eryx::ExtractedPackage>>>,
+        factory_files: Option<crate::preinit::FactoryFiles>,
     ) -> PyResult<Self> {
         let net_config: Option<eryx::NetConfig> = network.map(Into::into);
         if let Some(net) = &net_config {
@@ -194,7 +195,7 @@ impl Session {
             callbacks: callbacks_map,
             net_config,
             output_handler,
-            _package_storage_owner: package_storage_owner,
+            _factory_files: factory_files,
             callback_limits,
         })
     }

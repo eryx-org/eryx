@@ -137,7 +137,7 @@ impl CacheKey {
     /// (e.g. factories pre-initialized with different packages) never share a
     /// cached `SandboxPre`. Computing the key costs one BLAKE3 pass over the
     /// artifact, so callers should compute it once and reuse it.
-    #[cfg(feature = "embedded")]
+    #[cfg(any(feature = "embedded", feature = "preinit"))]
     #[must_use]
     pub(crate) fn from_precompiled(precompiled: &[u8]) -> Self {
         let mut hasher = Self::precompiled_hasher();
@@ -147,26 +147,26 @@ impl CacheKey {
 
     /// Compute the same key as [`Self::from_precompiled`] by streaming the
     /// component bytes from `reader`, without buffering them in memory.
-    #[cfg(feature = "embedded")]
+    #[cfg(any(feature = "embedded", feature = "preinit"))]
     pub(crate) fn from_precompiled_reader(reader: impl io::Read) -> io::Result<Self> {
         let mut hasher = Self::precompiled_hasher();
         hasher.update_reader(reader)?;
         Ok(Self::from_precompiled_hasher(&hasher))
     }
 
-    #[cfg(feature = "embedded")]
+    #[cfg(any(feature = "embedded", feature = "preinit"))]
     fn precompiled_hasher() -> blake3::Hasher {
         blake3::Hasher::new_derive_key("eryx precompiled component cache key v1")
     }
 
-    #[cfg(feature = "embedded")]
+    #[cfg(any(feature = "embedded", feature = "preinit"))]
     fn from_precompiled_hasher(hasher: &blake3::Hasher) -> Self {
         Self::from_precompiled_hash(*hasher.finalize().as_bytes())
     }
 
     /// Rebuild the key [`Self::from_precompiled`] would compute, from the
     /// content hash a previous key returned from [`Self::precompiled_hash`].
-    #[cfg(feature = "embedded")]
+    #[cfg(any(feature = "embedded", feature = "preinit"))]
     pub(crate) fn from_precompiled_hash(hash: [u8; 32]) -> Self {
         Self {
             extensions_hash: hash,
@@ -176,7 +176,7 @@ impl CacheKey {
     }
 
     /// The content hash of a key from [`Self::from_precompiled`].
-    #[cfg(feature = "embedded")]
+    #[cfg(any(feature = "embedded", feature = "preinit"))]
     pub(crate) fn precompiled_hash(&self) -> [u8; 32] {
         self.extensions_hash
     }
