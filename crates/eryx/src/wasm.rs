@@ -1460,7 +1460,7 @@ pub(crate) async fn instantiate_store(
     let bindings = pre
         .instantiate_async(&mut store)
         .await
-        .map_err(ErrorKind::WasmComponent)?;
+        .map_err(ErrorKind::wasm_component)?;
 
     set_fuel(&mut store, initial_fuel)?;
     Ok((store, bindings))
@@ -2365,7 +2365,7 @@ impl PythonExecutor {
     pub fn from_binary(wasm_bytes: &[u8]) -> std::result::Result<Self, Error> {
         let engine = Self::shared_engine()?;
         let component =
-            Component::from_binary(&engine, wasm_bytes).map_err(ErrorKind::WasmComponent)?;
+            Component::from_binary(&engine, wasm_bytes).map_err(ErrorKind::wasm_component)?;
         let instance_pre = Self::create_instance_pre(&engine, &component)?;
 
         Ok(Self {
@@ -2394,7 +2394,7 @@ impl PythonExecutor {
     pub fn from_file(path: impl AsRef<std::path::Path>) -> std::result::Result<Self, Error> {
         let engine = Self::shared_engine()?;
         let component =
-            Component::from_file(&engine, path.as_ref()).map_err(ErrorKind::WasmComponent)?;
+            Component::from_file(&engine, path.as_ref()).map_err(ErrorKind::wasm_component)?;
         let instance_pre = Self::create_instance_pre(&engine, &component)?;
 
         Ok(Self {
@@ -3592,7 +3592,7 @@ impl PythonExecutor {
                 })
                 .await
                 .map_err(|e| ErrorKind::Execution(format!("set-result-variable failed: {e:?}")))?
-                .map_err(ErrorKind::WasmComponent)?;
+                .map_err(ErrorKind::wasm_component)?;
         }
 
         tracing::debug!(code_len = code.len(), "Executing Python code");
@@ -3824,7 +3824,7 @@ fn deserialize_error(err: wasmtime::Error) -> Error {
         }
         .into();
     }
-    ErrorKind::WasmComponent(err).into()
+    ErrorKind::wasm_component(err).into()
 }
 
 #[cfg(test)]
