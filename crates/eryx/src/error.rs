@@ -26,6 +26,29 @@ pub enum Error {
     #[error("wasm component error: {0}")]
     WasmComponent(#[from] wasmtime::Error),
 
+    /// A precompiled runtime (a `.cwasm` file, embedded runtime or saved
+    /// factory) was built by a different eryx version.
+    ///
+    /// Precompiled files only load in the eryx version that built them, so
+    /// they have to be rebuilt after every eryx upgrade: with the matching
+    /// `eryx-precompile`, or by re-saving the factory.
+    #[error(
+        "this precompiled runtime was built by {}, but this is {expected}. \
+         Precompiled runtimes and saved factories only load in the eryx version \
+         that built them: rebuild it with eryx-precompile {}, or re-save the factory",
+        describe_built_by(built_by),
+        env!("CARGO_PKG_VERSION")
+    )]
+    #[non_exhaustive]
+    IncompatiblePrecompiled {
+        /// The version string stored in the file, e.g. `eryx 0.13.0 (wasmtime 50)`.
+        /// Files from eryx releases before 0.13.0 store only wasmtime's major
+        /// version.
+        built_by: String,
+        /// The version string this eryx build expects.
+        expected: String,
+    },
+
     /// Error during Python execution machinery (e.g. a WASM trap, the store or
     /// bindings being unavailable, or invalid input). This is a *sandbox* failure
     /// — the runtime could not faithfully execute the script. An uncaught
@@ -98,6 +121,18 @@ pub enum Error {
     /// I/O error.
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
+}
+
+/// Name the eryx version recorded in a precompiled file.
+///
+/// Since 0.13.0, eryx stores its own version in the file. Earlier releases
+/// stored wasmtime's major version alone, e.g. `50`.
+fn describe_built_by(built_by: &str) -> String {
+    if built_by.starts_with("eryx ") {
+        built_by.to_owned()
+    } else {
+        format!("an eryx release before 0.13.0 (wasmtime {built_by})")
+    }
 }
 
 impl From<serde_json::Error> for Error {

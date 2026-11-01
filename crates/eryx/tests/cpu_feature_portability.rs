@@ -44,9 +44,21 @@ fn reference_engine(level: CpuFeatureLevel) -> Engine {
     Engine::new(&reference_config(level)).expect("reference engine should build")
 }
 
+/// Store the version string eryx puts in every precompiled component.
+fn set_eryx_module_version(config: &mut Config) {
+    config
+        .module_version(wasmtime::ModuleVersionStrategy::Custom(format!(
+            "eryx {} (wasmtime {})",
+            env!("CARGO_PKG_VERSION"),
+            wasmtime::ModuleVersionStrategy::default().as_str()
+        )))
+        .expect("the eryx module version should fit in 255 bytes");
+}
+
 /// The config behind [`reference_engine`], exposed so a test can add flags.
 fn reference_config(level: CpuFeatureLevel) -> Config {
     let mut config = Config::new();
+    set_eryx_module_version(&mut config);
     config.wasm_component_model(true);
     config.wasm_component_model_async(true);
     config.epoch_interruption(true);
@@ -220,6 +232,7 @@ mod aarch64 {
 
     fn pinned_config() -> Config {
         let mut config = Config::new();
+        super::set_eryx_module_version(&mut config);
         config.wasm_component_model(true);
         config.wasm_component_model_async(true);
         config.epoch_interruption(true);

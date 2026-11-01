@@ -174,8 +174,11 @@ jobs:
           # Changing either without busting the version prefix silently reuses a
           # cwasm built with the old settings. Bumped v3 -> v4 for the
           # stdout bytes migration (list<u8> WIT change), v4 -> v5 for the
-          # Windows cwasm built alongside the Linux one, v5 -> v6 for the macOS one.
-          key: wasm-runtime-v6-${{ hashFiles('crates/eryx-wasm-runtime/src/**', 'crates/eryx-wasm-runtime/clock_stubs.c', 'crates/eryx-wasm-runtime/Cargo.toml', 'crates/wit-dylib-ffi/**', 'crates/eryx-runtime/build.rs', 'crates/eryx-runtime/src/**', 'crates/eryx-runtime/wit/**', 'crates/eryx-runtime/libs/*.zst', 'Cargo.lock', 'Cargo.toml', 'mise.toml') }}
+          # Windows cwasm built alongside the Linux one, v5 -> v6 for the macOS one,
+          # v6 -> v7 for the eryx version stored in every cwasm (engine config in
+          # crates/eryx/src/wasm.rs). The version itself comes from Cargo.toml,
+          # which the key covers.
+          key: wasm-runtime-v7-${{ hashFiles('crates/eryx-wasm-runtime/src/**', 'crates/eryx-wasm-runtime/clock_stubs.c', 'crates/eryx-wasm-runtime/Cargo.toml', 'crates/wit-dylib-ffi/**', 'crates/eryx-runtime/build.rs', 'crates/eryx-runtime/src/**', 'crates/eryx-runtime/wit/**', 'crates/eryx-runtime/libs/*.zst', 'Cargo.lock', 'Cargo.toml', 'mise.toml') }}
 
       - name: Touch cached artifacts
         if: steps.wasm-cache.outputs.cache-hit == 'true'

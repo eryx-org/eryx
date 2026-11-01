@@ -35,8 +35,8 @@ use crate::CancellationToken;
 use tokio::sync::{mpsc, oneshot};
 use wasmtime::component::{Accessor, Component, HasSelf, Linker, ResourceTable};
 use wasmtime::{
-    AsContextMut, Config, Enabled, Engine, InstanceAllocationStrategy, PoolingAllocationConfig,
-    ResourceLimiter, Store, UpdateDeadline,
+    AsContextMut, Config, Enabled, Engine, InstanceAllocationStrategy, ModuleVersionStrategy,
+    PoolingAllocationConfig, ResourceLimiter, Store, UpdateDeadline,
 };
 use wasmtime_wasi::{FsPerms, WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView};
 
@@ -2262,7 +2262,7 @@ impl PythonExecutor {
             // SAFETY: Caller guarantees the precompiled bytes are trusted and were
             // created by `precompile()` with a compatible engine configuration.
             let component = unsafe { Component::deserialize(&engine, precompiled_bytes) }
-                .map_err(Error::WasmComponent)?;
+                .map_err(deserialize_error)?;
             let instance_pre = Self::create_instance_pre(&engine, &component)?;
 
             Ok(Self {
@@ -2336,7 +2336,7 @@ impl PythonExecutor {
         // created by `precompile()` with a compatible engine configuration.
         #[allow(unsafe_code)]
         let component = unsafe { Component::deserialize(&engine, precompiled_bytes) }
-            .map_err(Error::WasmComponent)?;
+            .map_err(deserialize_error)?;
         let instance_pre = Self::create_instance_pre(&engine, &component)?;
 
         // Store in cache if we have a key
@@ -2371,7 +2371,7 @@ impl PythonExecutor {
         let engine = Self::shared_engine()?;
         // SAFETY: Caller guarantees the file is trusted and stays unmodified.
         let component =
-            unsafe { Component::deserialize_file(&engine, path) }.map_err(Error::WasmComponent)?;
+            unsafe { Component::deserialize_file(&engine, path) }.map_err(deserialize_error)?;
         Ok(DeserializedComponent {
             component,
             instance_pre: RetryableOnce::new(),
@@ -2464,7 +2464,7 @@ impl PythonExecutor {
             // SAFETY: Caller guarantees the precompiled file is trusted
             #[allow(unsafe_code)]
             let component = unsafe { Component::deserialize_file(&engine, path.as_ref()) }
-                .map_err(Error::WasmComponent)?;
+                .map_err(deserialize_error)?;
             let instance_pre = Self::create_instance_pre(&engine, &component)?;
             Ok(Self {
                 engine,
@@ -2537,7 +2537,7 @@ impl PythonExecutor {
         // created by `precompile()` with a compatible engine configuration.
         #[allow(unsafe_code)]
         let component =
-            unsafe { Component::deserialize_file(&engine, path) }.map_err(Error::WasmComponent)?;
+            unsafe { Component::deserialize_file(&engine, path) }.map_err(deserialize_error)?;
         let instance_pre = Self::create_instance_pre(&engine, &component)?;
 
         // Store in cache if we have a key
@@ -2624,6 +2624,10 @@ impl PythonExecutor {
     ///
     /// The returned bytes can be saved to a file (conventionally with `.cwasm`
     /// extension) and later loaded with `from_precompiled` or `from_precompiled_file`.
+    ///
+    /// The output records this eryx version and only loads in it. Loading it
+    /// in any other version fails with [`Error::IncompatiblePrecompiled`], so
+    /// precompiled files must be rebuilt after every eryx upgrade.
     ///
     /// # Benefits
     ///
@@ -2759,7 +2763,25 @@ impl PythonExecutor {
     /// - v1: Initial configuration
     /// - v2: Added epoch_interruption(true) for execution timeouts
     /// - v3: Added consume_fuel(true) for instruction tracking/limiting
-    pub const ENGINE_CONFIG_VERSION: u32 = 3;
+    /// - v4: Store eryx's version in precompiled components
+    pub const ENGINE_CONFIG_VERSION: u32 = 4;
+
+    /// The version string eryx stores in every precompiled component, e.g.
+    /// `eryx 0.13.0 (wasmtime 50)`.
+    ///
+    /// wasmtime refuses to load a component whose stored string differs from
+    /// the engine's. Its default string is only wasmtime's major version, but a
+    /// precompiled runtime also depends on eryx's WIT interface, linked
+    /// libraries and engine config, any of which can change in an eryx
+    /// release. Naming the eryx version makes a stale file fail with
+    /// [`Error::IncompatiblePrecompiled`] instead of a type-checking error.
+    pub(crate) fn module_version() -> String {
+        format!(
+            "eryx {} (wasmtime {})",
+            env!("CARGO_PKG_VERSION"),
+            ModuleVersionStrategy::default().as_str()
+        )
+    }
 
     /// Create a configured wasmtime engine.
     ///
@@ -2809,7 +2831,7 @@ impl PythonExecutor {
     /// The configuration [`create_engine_with_target`](Self::create_engine_with_target)
     /// builds an engine from.
     fn engine_config_with_target(target: Option<&str>) -> std::result::Result<Config, Error> {
-        let mut config = Self::base_engine_config();
+        let mut config = Self::base_engine_config()?;
 
         // Configure target triple for cross-compilation or portable builds.
         // Check explicit parameter first, then environment variable, then use native.
@@ -2840,7 +2862,7 @@ impl PythonExecutor {
         target: Option<&str>,
         cpu_features: CpuFeatureLevel,
     ) -> std::result::Result<Engine, Error> {
-        let mut config = Self::base_engine_config();
+        let mut config = Self::base_engine_config()?;
 
         // Target triple and CPU features are set together: pinning a triple is
         // also what stops Cranelift inferring features from the build machine.
@@ -2854,8 +2876,11 @@ impl PythonExecutor {
     /// Everything here except the allocation strategy affects the generated
     /// code, so a change to this function must be paired with a bump of
     /// [`ENGINE_CONFIG_VERSION`](Self::ENGINE_CONFIG_VERSION).
-    fn base_engine_config() -> Config {
+    fn base_engine_config() -> std::result::Result<Config, Error> {
         let mut config = Config::new();
+        config
+            .module_version(ModuleVersionStrategy::Custom(Self::module_version()))
+            .map_err(|e| Error::WasmEngine(e.to_string()))?;
         config.wasm_component_model(true);
         // Enable component model async for the `invoke` callback function.
         // The invoke function is async because Python code awaits on it.
@@ -2895,7 +2920,7 @@ impl PythonExecutor {
         // including the pre-init one, must use the same setting.
         config.macos_use_mach_ports(false);
 
-        config
+        Ok(config)
     }
 
     /// Build the engine, falling back to on-demand allocation if the pool
@@ -3588,6 +3613,24 @@ pub fn parse_trace_event(request: &TraceRequest) -> std::result::Result<TraceEve
     })
 }
 
+/// Map an error from loading a precompiled component, reporting a file built
+/// by another eryx version as [`Error::IncompatiblePrecompiled`].
+fn deserialize_error(err: wasmtime::Error) -> Error {
+    // wasmtime only reports the stored version as text. If the wording ever
+    // changes, callers just get the raw error again.
+    const PREFIX: &str = "Module was compiled with incompatible version '";
+    let message = format!("{err:#}");
+    if let Some((_, rest)) = message.split_once(PREFIX)
+        && let Some((built_by, _)) = rest.split_once('\'')
+    {
+        return Error::IncompatiblePrecompiled {
+            built_by: built_by.to_owned(),
+            expected: PythonExecutor::module_version(),
+        };
+    }
+    Error::WasmComponent(err)
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
@@ -3796,7 +3839,7 @@ mod tests {
     #[test]
     #[cfg(feature = "embedded")]
     fn pooling_engine_is_constructible() {
-        let mut config = PythonExecutor::base_engine_config();
+        let mut config = PythonExecutor::base_engine_config().unwrap();
         let settings = allocator_settings(&[("ERYX_ALLOCATOR", "pooling")]).unwrap();
         let pooling = settings.pooling_config().unwrap();
         config.allocation_strategy(InstanceAllocationStrategy::Pooling(pooling));
