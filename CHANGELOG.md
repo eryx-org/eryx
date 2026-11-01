@@ -7,6 +7,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## `eryx-precompile` - [0.13.0](https://github.com/eryx-org/eryx/compare/eryx-precompile-v0.12.1...eryx-precompile-v0.13.0) - 2026-11-01
+
+### Added
+- [**breaking**] rebuild precompiled runtimes with `eryx-precompile upgrade` ([#717](https://github.com/eryx-org/eryx/pull/717))
+- [**breaking**] record the eryx version in every precompiled component ([#714](https://github.com/eryx-org/eryx/pull/714))
+
+## `eryx` - [0.13.0](https://github.com/eryx-org/eryx/compare/eryx-v0.12.1...eryx-v0.13.0) - 2026-11-01
+
+### Added
+- [**breaking**] rebuild precompiled runtimes with `eryx-precompile upgrade` ([#717](https://github.com/eryx-org/eryx/pull/717))
+- *(python)* [**breaking**] rebuild factories saved by another pyeryx version ([#715](https://github.com/eryx-org/eryx/pull/715))
+- *(engine)* configure the shared engine and warm pool from code ([#707](https://github.com/eryx-org/eryx/pull/707))
+- [**breaking**] record the eryx version in every precompiled component ([#714](https://github.com/eryx-org/eryx/pull/714))
+- [**breaking**] rename the `vfs` feature to `unstable-vfs` ([#712](https://github.com/eryx-org/eryx/pull/712))
+- *(session)* [**breaking**] report the globals session snapshots skip ([#709](https://github.com/eryx-org/eryx/pull/709))
+- *(package)* [**breaking**] mark PackageFormat non_exhaustive ([#704](https://github.com/eryx-org/eryx/pull/704))
+- [**breaking**] memory-map pre-compiled factory and runtime files ([#699](https://github.com/eryx-org/eryx/pull/699))
+
+## `eryx-vfs` - [0.13.0](https://github.com/eryx-org/eryx/compare/eryx-vfs-v0.12.1...eryx-vfs-v0.13.0) - 2026-11-01
+
+### Added
+- *(vfs)* [**breaking**] shrink eryx-vfs public surface ([#711](https://github.com/eryx-org/eryx/pull/711))
+
+### Other
+- *(vfs)* version eryx-vfs independently of the workspace ([#713](https://github.com/eryx-org/eryx/pull/713))
+
+## `eryx-runtime` - [0.13.0](https://github.com/eryx-org/eryx/compare/eryx-runtime-v0.12.1...eryx-runtime-v0.13.0) - 2026-11-01
+
+### Added
+- *(session)* [**breaking**] report the globals session snapshots skip ([#709](https://github.com/eryx-org/eryx/pull/709))
+
+## `eryx-macros` - [0.13.0](https://github.com/eryx-org/eryx/compare/eryx-macros-v0.12.1...eryx-macros-v0.13.0) - 2026-11-01
+
+### Added
+- [**breaking**] rename the `vfs` feature to `unstable-vfs` ([#712](https://github.com/eryx-org/eryx/pull/712))
+
 ## `eryx` - [0.12.1](https://github.com/eryx-org/eryx/compare/eryx-v0.12.0...eryx-v0.12.1) - 2026-10-27
 
 ### Fixed
