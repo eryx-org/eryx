@@ -220,6 +220,14 @@ message NetworkConfig {
   // Host patterns allowed to resolve into blocked_networks, for trusted names
   // routed internally on purpose (e.g. via cluster DNS).
   repeated string internal_hosts = 9;
+  // Also substitute secret placeholders on plain TCP connections (e.g.
+  // http://). When false (default), they are replaced only after a TLS
+  // upgrade, and a plain TCP request goes out with the placeholder left in
+  // place. Enabling this sends the real secret value unencrypted, readable by
+  // anyone on the network path; only use it for trusted local test servers.
+  // The server rejects a request that sets it with INVALID_ARGUMENT unless it
+  // was started with --allow-plaintext-secrets.
+  bool allow_plaintext_secrets = 10;
 }
 
 // A secret to inject into the sandbox environment.
@@ -439,6 +447,12 @@ message ExecuteResult {
   // the snapshot is restored. Empty when nothing was skipped or no snapshot
   // was captured.
   repeated string state_skipped_globals = 15;
+
+  // True if the session lost its Python state before the code ran, so it ran
+  // against a fresh interpreter: restoring `state_snapshot` was interrupted
+  // (e.g. it hit the execution timeout), which discarded the instance. Also
+  // reported in `state_error`. Always false when `success` is false.
+  bool state_was_reset = 16;
 }
 
 // Why an execution failed, when success is false.

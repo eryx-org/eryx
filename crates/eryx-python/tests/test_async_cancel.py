@@ -103,6 +103,7 @@ def test_cancelled_token_cancels_before_start():
 
 def test_session_usable_after_cancel():
     session = eryx.Session()
+    assert not session.execute("pass").state_was_reset
     session.execute("x = 1")
     token = eryx.CancelToken()
     cancel_after(token)
@@ -111,6 +112,8 @@ def test_session_usable_after_cancel():
     # State is lost, but the session works again.
     result = session.execute("print('x' in globals())")
     assert result.stdout == b"False\n"
+    assert result.state_was_reset
+    assert not session.execute("pass").state_was_reset
 
 
 def test_cancelling_asyncio_task_frees_session():

@@ -181,7 +181,7 @@ try {
 }
 ```
 
-The call rejects with a `TimeoutError` (or `executeWithJournal()` reports it as `outcome.error`) and the sandbox starts over with fresh Python state. Callbacks, output and networking still run on the creating thread. The Worker costs about 70 MB on top of the sandbox's own memory, and the sandbox's `_fileTree` isn't available. `close()` terminates the Worker at once; otherwise it lives until the sandbox is garbage collected.
+The call rejects with a `TimeoutError` (or `executeWithJournal()` reports it as `outcome.error`) and the sandbox starts over with fresh Python state; the next successful result has `stateWasReset: true`. Callbacks, output and networking still run on the creating thread. The Worker costs about 70 MB on top of the sandbox's own memory, and the sandbox's `_fileTree` isn't available. `close()` terminates the Worker at once; otherwise it lives until the sandbox is garbage collected.
 
 There is no memory limit, with or without `timeoutMs` (the Rust crate and the Python bindings cap memory at 128 MB by default). A sandbox's memory grows as its code allocates, up to the WebAssembly 4 GiB maximum or what the JavaScript engine allows, and its in-memory filesystem has no size cap either. Run untrusted code that might allocate without bound in a process you can afford to lose.
 

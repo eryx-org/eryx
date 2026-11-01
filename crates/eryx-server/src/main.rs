@@ -143,6 +143,12 @@ struct Args {
     #[arg(long, env = "ERYX_MAX_OPEN_HOST_FILES_TOTAL")]
     max_open_host_files_total: Option<usize>,
 
+    /// Let requests set `network_config.allow_plaintext_secrets`, which sends
+    /// real secret values over unencrypted connections. Without it, such
+    /// requests are rejected and secrets are only substituted over TLS.
+    #[arg(long, env = "ERYX_ALLOW_PLAINTEXT_SECRETS")]
+    allow_plaintext_secrets: bool,
+
     /// Path to a PEM-encoded TLS certificate chain.
     ///
     /// Enables TLS for the gRPC transport. Must be provided together with
@@ -399,6 +405,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         max_io_timeout: Duration::from_millis(args.max_io_timeout_ms),
         max_output_bytes: args.max_output_bytes,
         max_open_host_files: args.max_open_host_files,
+        allow_plaintext_secrets: args.allow_plaintext_secrets,
     };
     if let Some(total) = args.max_open_host_files_total {
         eryx::vfs::set_process_max_open_host_files(total);

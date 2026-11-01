@@ -2681,3 +2681,151 @@ async fn secret_without_allowed_hosts_is_rejected() {
         assert!(result.success, "{}", result.error);
     }
 }
+
+/// On a server started with `--allow-plaintext-secrets`, secrets go over plain
+/// TCP with the placeholder in place unless the request sets
+/// `allow_plaintext_secrets`.
+#[tokio::test]
+async fn plaintext_secret_substitution_is_opt_in() {
+    use eryx_server::proto::eryx::v1::{NetworkConfig, SecretConfig};
+    use tokio::io::AsyncReadExt;
+
+    const REAL_SECRET: &str = "plaintext-real-secret-77";
+    let limits = eryx_server::service::ServerLimits {
+        allow_plaintext_secrets: true,
+        ..Default::default()
+    };
+    let mut client = EryxClient::new(
+        start_server_with(2, |pool| EryxService::new(pool).with_limits(limits)).await,
+    );
+
+    for allow_plaintext_secrets in [false, true] {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = tokio::spawn(async move {
+            let (mut sock, _) = listener.accept().await.unwrap();
+            let mut buf = vec![0; 4096];
+            let n = sock.read(&mut buf).await.unwrap();
+            buf.truncate(n);
+            buf
+        });
+
+        let code = format!(
+            "import os, socket\n\
+             s = socket.create_connection(('127.0.0.1', {port}))\n\
+             s.sendall(f\"GET / HTTP/1.1\\r\\nHost: 127.0.0.1\\r\\nAuthorization: {{os.environ['TOKEN']}}\\r\\n\\r\\n\".encode())\n\
+             s.close()"
+        );
+        let result = execute_half_closed(
+            &mut client,
+            ExecuteRequest {
+                code,
+                secrets: vec![SecretConfig {
+                    name: "TOKEN".to_string(),
+                    value: REAL_SECRET.to_string(),
+                    allowed_hosts: vec!["127.0.0.1".to_string()],
+                }],
+                network_config: Some(NetworkConfig {
+                    allow_all_hosts: true,
+                    blocked_hosts: vec!["blocked.invalid".to_string()],
+                    allowed_networks: vec!["127.0.0.0/8".to_string()],
+                    allow_plaintext_secrets,
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert!(result.success, "{}", result.error);
+
+        let received = tokio::time::timeout(Duration::from_secs(30), server)
+            .await
+            .expect("the sandbox never connected")
+            .unwrap();
+        assert_eq!(
+            received.contains_str(REAL_SECRET),
+            allow_plaintext_secrets,
+            "allow_plaintext_secrets={allow_plaintext_secrets}: {:?}",
+            received.to_lossy()
+        );
+    }
+}
+
+/// By default the server rejects a request that sets
+/// `allow_plaintext_secrets`, instead of running it with the field ignored.
+#[tokio::test]
+async fn plaintext_secrets_are_rejected_by_default() {
+    use eryx_server::proto::eryx::v1::NetworkConfig;
+
+    let request = |allow_plaintext_secrets| ExecuteRequest {
+        code: "print('ran')".to_string(),
+        network_config: Some(NetworkConfig {
+            allowed_hosts: vec!["api.example.com".to_string()],
+            allow_plaintext_secrets,
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    let mut client = EryxClient::new(start_server().await);
+
+    let err = execute_half_closed(&mut client, request(true))
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), tonic::Code::InvalidArgument, "{err}");
+    assert!(
+        err.message().contains("--allow-plaintext-secrets"),
+        "{}",
+        err.message()
+    );
+
+    let result = execute_half_closed(&mut client, request(false))
+        .await
+        .unwrap();
+    assert!(result.success, "{}", result.error);
+}
+
+/// `state_was_reset` is set when restoring the snapshot was interrupted and
+/// the code ran on a fresh interpreter, and is false otherwise.
+#[tokio::test]
+async fn state_was_reset_reports_an_interrupted_restore() {
+    let mut client = EryxClient::new(start_server().await);
+    // Unpickling this object runs `while True: pass`, so restoring it times out.
+    let first = execute_half_closed(
+        &mut client,
+        ExecuteRequest {
+            code: "class Spin:\n    def __reduce__(self):\n        return (exec, ('while True: pass',))\nspin = Spin()".to_string(),
+            persist_state: true,
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    assert!(first.success, "{}", first.error);
+    assert!(!first.state_was_reset);
+    assert!(!first.state_snapshot.is_empty());
+
+    let second = execute_half_closed(
+        &mut client,
+        ExecuteRequest {
+            code: "print('spin' in globals())".to_string(),
+            persist_state: true,
+            state_snapshot: first.state_snapshot,
+            resource_limits: Some(ResourceLimits {
+                execution_timeout_ms: 1000,
+                ..Default::default()
+            }),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    assert!(second.success, "{}", second.error);
+    assert!(!second.state_error.is_empty());
+    assert!(
+        second.stdout.contains_str("False"),
+        "{:?}",
+        second.stdout.to_lossy()
+    );
+    assert!(second.state_was_reset);
+}

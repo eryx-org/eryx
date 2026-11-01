@@ -51,6 +51,7 @@ Every flag also has an environment variable, so the server is easy to configure 
 | `--max-output-bytes` | `ERYX_MAX_OUTPUT_BYTES` | `16777216` (16 MiB) | Most stdout plus stderr bytes kept and streamed per execution, at most 16 MiB. See [Output cap](#output-cap). |
 | `--max-open-host-files` | `ERYX_MAX_OPEN_HOST_FILES` | `256` | Most host files (stdlib and site-packages) one execution may hold open; opens past it fail with `EDQUOT`. Not settable per request. |
 | `--max-open-host-files-total` | `ERYX_MAX_OPEN_HOST_FILES_TOTAL` | *(half the soft `RLIMIT_NOFILE`, at least 256)* | Most host files all executions in the server may hold open together. |
+| `--allow-plaintext-secrets` | `ERYX_ALLOW_PLAINTEXT_SECRETS` | *(off)* | Let requests set `network_config.allow_plaintext_secrets`, which sends real secret values over unencrypted connections. Off by default: such requests are rejected with `INVALID_ARGUMENT`, so secrets are only substituted over TLS. See [Plain HTTP](./secrets.md#plain-http). |
 | `--tls-cert` | `ERYX_TLS_CERT` | *(off)* | PEM certificate chain; enables TLS. Requires `--tls-key`. |
 | `--tls-key` | `ERYX_TLS_KEY` | *(off)* | PEM private key for `--tls-cert`. |
 | `--tls-client-ca` | `ERYX_TLS_CLIENT_CA` | *(off)* | PEM CA bundle to verify client certs; enables mutual TLS. See [Transport security](#transport-security-tls--mtls). |
@@ -131,6 +132,7 @@ If the client disconnects, the server cancels the in-flight execution, including
 | `stats` | Duration, callback count, peak memory, fuel consumed, and `replayed_callbacks`. Also filled in for failed runs (fuel is 0 for a suspended run). |
 | `state_snapshot` | Post-execution state, when `persist_state` was set. |
 | `state_skipped_globals` | Names of the globals `state_snapshot` left out because they could not be serialized. |
+| `state_was_reset` | Set when restoring `state_snapshot` was interrupted (e.g. by the execution timeout), so the code ran on a fresh interpreter. The reason is in `state_error`. |
 | `callback_journal` | The recorded replay journal, when the request opted in. |
 | `suspended` / `suspended_callback` | Set when a callback [suspended](#suspension) execution. |
 | `output_truncated` | Set when output was dropped: stdout plus stderr went past the [output cap](#output-cap). |

@@ -259,6 +259,16 @@ class ExecuteResult:
         ``None`` when capture succeeded or no result variable was set."""
         ...
 
+    @property
+    def state_was_reset(self) -> bool:
+        """Whether a ``Session`` lost its Python state before this run.
+
+        An earlier call was cancelled or halted with no snapshot to roll back
+        to, so the session was reset: variables from before that call are gone
+        and the preamble ran again. Reported once, by the first successful run
+        after the reset. Always ``False`` for ``Sandbox.execute()``."""
+        ...
+
 
 @final
 class SuspendedCallback:
@@ -399,6 +409,15 @@ class NetConfig:
     Only list names whose DNS you control.
     """
 
+    allow_plaintext_secrets: bool
+    """Also substitute secret placeholders on plain TCP connections.
+
+    Off by default: placeholders are only replaced after a TLS upgrade, so a
+    request over ``http://`` goes out with the placeholder left in place.
+    Turning this on sends the real secret value unencrypted, where anyone on
+    the network path can read it. Only enable it for trusted local test servers.
+    """
+
     def __new__(
         cls,
         *,
@@ -411,6 +430,7 @@ class NetConfig:
         blocked_networks: Optional[Sequence[str]] = None,
         allowed_networks: Optional[Sequence[str]] = None,
         internal_hosts: Optional[Sequence[str]] = None,
+        allow_plaintext_secrets: bool = False,
     ) -> NetConfig:
         """Create new network configuration.
 
@@ -423,6 +443,7 @@ class NetConfig:
         - blocked_hosts: localhost and private networks
         - blocked_networks: every non-public range (loopback, private,
           link-local/cloud metadata, CGNAT, multicast, ...)
+        - allow_plaintext_secrets: False (secrets substituted only over TLS)
 
         Args:
             max_connections: Maximum number of concurrent connections.
@@ -436,6 +457,10 @@ class NetConfig:
                 addresses must not fall in.
             allowed_networks: CIDRs exempt from blocked_networks.
             internal_hosts: Host patterns allowed to resolve into blocked_networks.
+            allow_plaintext_secrets: Also substitute secret placeholders on plain
+                TCP (e.g. ``http://``), not only after a TLS upgrade. This sends
+                the real secret value unencrypted; only enable it for trusted
+                local test servers.
 
         Raises:
             ValueError: If a network is not a valid CIDR.

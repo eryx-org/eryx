@@ -70,6 +70,13 @@ export interface ExecuteResult {
    * `undefined` when capture succeeded or no result variable was set.
    */
   resultError?: string;
+  /**
+   * Whether the sandbox lost its Python state before this run: an earlier call
+   * hit `timeoutMs`, so its Worker was replaced and variables from before then
+   * are gone. Reported once, by the first successful run after the reset.
+   * Always `false` for a sandbox without `timeoutMs`.
+   */
+  stateWasReset: boolean;
 }
 
 /** The callback that suspended execution. */

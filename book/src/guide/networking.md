@@ -70,6 +70,7 @@ The default `NetConfig` has sensible security defaults:
 | `blocked_networks` | every non-public range | CIDRs that resolved addresses must not fall in |
 | `allowed_networks` | `[]` | CIDRs exempt from `blocked_networks` |
 | `internal_hosts` | `[]` | Host patterns allowed to resolve into `blocked_networks` |
+| `allow_plaintext_secrets` | `false` | Also substitute [secrets](./secrets.md#plain-http) over plain TCP (sends them unencrypted) |
 
 A bare `NetConfig()` allows no hosts: list them in `allowed_hosts`, or pass
 `allow_all_hosts=True` to allow any host that isn't blocked.

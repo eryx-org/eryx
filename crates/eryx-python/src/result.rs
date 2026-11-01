@@ -42,6 +42,13 @@ pub struct ExecuteResult {
     /// or `None` when capture succeeded or no result variable was set.
     #[pyo3(get)]
     pub result_error: Option<String>,
+
+    /// Whether a session lost its Python state before this run (an earlier
+    /// call was cancelled or halted with no snapshot to roll back to), so
+    /// variables from before then are gone. Reported once, by the first
+    /// successful run after the reset. Always false for `Sandbox.execute()`.
+    #[pyo3(get)]
+    pub state_was_reset: bool,
 }
 
 #[pymethods]
@@ -94,7 +101,7 @@ impl ExecuteResult {
         let stdout_str = String::from_utf8_lossy(&self.stdout);
         let stderr_str = String::from_utf8_lossy(&self.stderr);
         format!(
-            "ExecuteResult(stdout={:?}, stderr={:?}, duration_ms={:.2}, callback_invocations={}, peak_memory_bytes={:?}, fuel_consumed={:?}, result={:?}, result_error={:?})",
+            "ExecuteResult(stdout={:?}, stderr={:?}, duration_ms={:.2}, callback_invocations={}, peak_memory_bytes={:?}, fuel_consumed={:?}, result={:?}, result_error={:?}, state_was_reset={})",
             truncate_string(&stdout_str, 50),
             truncate_string(&stderr_str, 50),
             self.duration_ms,
@@ -103,6 +110,7 @@ impl ExecuteResult {
             self.fuel_consumed,
             self.result_json.as_deref().map(|s| truncate_string(s, 50)),
             self.result_error,
+            self.state_was_reset,
         )
     }
 
@@ -122,6 +130,7 @@ impl From<eryx::ExecuteResult> for ExecuteResult {
             fuel_consumed: result.stats.fuel_consumed,
             result_json: result.result,
             result_error: result.result_error,
+            state_was_reset: result.state_was_reset,
         }
     }
 }
@@ -138,6 +147,7 @@ impl ExecuteResult {
             fuel_consumed: output.fuel_consumed,
             result_json: output.result,
             result_error: output.result_error,
+            state_was_reset: output.state_was_reset,
         }
     }
 }

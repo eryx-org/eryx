@@ -6,11 +6,13 @@ import { Sandbox, TimeoutError, setNetConfig } from "@bsull/eryx";
 describe("timeoutMs", () => {
   it("rejects a call that runs too long, then starts fresh", async () => {
     const sandbox = new Sandbox({ timeoutMs: 1000 });
-    await sandbox.execute("x = 1");
+    expect((await sandbox.execute("x = 1")).stateWasReset).toBe(false);
     const error = await sandbox.execute("while True: pass").catch((e) => e);
     expect(error).toBeInstanceOf(TimeoutError);
     const after = await sandbox.execute("print('x' in globals())");
     expect(after.stdout).toBe("False\n");
+    expect(after.stateWasReset).toBe(true);
+    expect((await sandbox.execute("pass")).stateWasReset).toBe(false);
   });
 
   it("reports a timeout from executeWithJournal as the outcome's error", async () => {
