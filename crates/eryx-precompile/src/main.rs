@@ -76,6 +76,38 @@ enum Command {
     ///
     /// For direct control over pre-initialization and AOT compilation.
     Compile(Box<CompileArgs>),
+
+    /// Rebuild a pre-initialized runtime for this version of eryx.
+    ///
+    /// A precompiled runtime only loads in the eryx version that built it.
+    /// Output of `compile --preinit` stores what it was built from (its
+    /// site-packages, imports, setup code, callback declarations and compile
+    /// options), so this rebuilds it with this binary's eryx version, without
+    /// the original packages or flags. pyeryx's saved factories are the same
+    /// format and can be rebuilt too.
+    Upgrade(UpgradeArgs),
+}
+
+#[derive(Parser, Debug)]
+struct UpgradeArgs {
+    /// Precompiled runtime to rebuild
+    #[arg(required = true)]
+    input: PathBuf,
+
+    /// Where to write the rebuilt runtime
+    ///
+    /// Must differ from the input: processes running the old version may
+    /// still have it mapped, and keeping it lets you roll back.
+    #[arg(short, long, required = true)]
+    output: PathBuf,
+
+    /// Skip verification step
+    #[arg(long)]
+    no_verify: bool,
+
+    /// Verbose output
+    #[arg(short, long)]
+    verbose: bool,
 }
 
 #[derive(Parser, Debug)]
@@ -142,8 +174,11 @@ struct CompileArgs {
     #[arg(long)]
     preinit: bool,
 
-    /// Path to Python stdlib (required with --preinit)
-    #[arg(long, required_if_eq("preinit", "true"))]
+    /// Path to Python stdlib
+    ///
+    /// Defaults to the stdlib embedded in this binary, which matches its
+    /// runtime.
+    #[arg(long)]
     stdlib: Option<PathBuf>,
 
     /// Path to a site-packages directory
@@ -228,6 +263,17 @@ struct CompileArgs {
     #[arg(long, value_name = "PATH", requires = "preinit")]
     callbacks: Option<PathBuf>,
 
+    /// Don't store the build inputs in the output
+    ///
+    /// With --preinit, the output stores what it was built from (the
+    /// site-packages, imports, setup code, callback declarations and compile
+    /// options) after the component, so `eryx-precompile upgrade` can rebuild
+    /// it for a later eryx version. That adds about the compressed size of
+    /// the packages to the file, but nothing to memory use. Pass this to
+    /// write the bare component instead.
+    #[arg(long, requires = "preinit")]
+    no_build_inputs: bool,
+
     /// Python code to execute during verification
     ///
     /// Runs after the standard import verification. Useful for testing that
@@ -256,6 +302,7 @@ async fn main() -> Result<()> {
     match cli.command {
         Command::Setup(args) => run_setup(args).await,
         Command::Compile(args) => run_compile(*args).await,
+        Command::Upgrade(args) => run_upgrade(args).await,
     }
 }
 
@@ -444,15 +491,7 @@ fn write_cached_runtime(path: &Path, cwasm: &[u8]) -> Result<()> {
 }
 
 async fn run_setup(args: SetupArgs) -> Result<()> {
-    let filter = if args.verbose {
-        "eryx=debug,eryx_precompile=debug"
-    } else {
-        "eryx=warn,eryx_precompile=info"
-    };
-    tracing_subscriber::fmt()
-        .with_env_filter(filter)
-        .with_target(false)
-        .init();
+    init_tracing(args.verbose);
 
     let own_version = env!("CARGO_PKG_VERSION");
     let version = args.version.unwrap_or_else(|| own_version.to_string());
@@ -590,15 +629,7 @@ fn read_callback_declarations(path: &Path) -> Result<Vec<eryx::preinit::Callback
 
 async fn run_compile(args: CompileArgs) -> Result<()> {
     // Set up tracing
-    let filter = if args.verbose {
-        "eryx=debug,eryx_precompile=debug"
-    } else {
-        "eryx=warn,eryx_precompile=info"
-    };
-    tracing_subscriber::fmt()
-        .with_env_filter(filter)
-        .with_target(false)
-        .init();
+    init_tracing(args.verbose);
 
     // Determine output path
     let output = args.output.unwrap_or_else(|| {
@@ -637,13 +668,9 @@ async fn run_compile(args: CompileArgs) -> Result<()> {
         }
         println!("CPU:     {cpu_features}");
     }
+    let stdlib = resolve_stdlib(args.stdlib.as_deref())?;
     if args.preinit {
-        println!(
-            "Stdlib:  {}",
-            args.stdlib
-                .as_ref()
-                .map_or("-", |p| p.to_str().unwrap_or("-"))
-        );
+        println!("Stdlib:  {}", stdlib.display());
     }
     if let Some(ref site_pkg) = args.site_packages {
         println!("Site-packages: {}", site_pkg.display());
@@ -707,58 +734,26 @@ async fn run_compile(args: CompileArgs) -> Result<()> {
         wasm_bytes.len() as f64 / 1_000_000.0
     );
 
+    // What an upgrade needs to rebuild the output; only stored with
+    // --preinit, since without it there's nothing to rebuild from.
+    let build_inputs = eryx::bundle::BuildInputs::new()
+        .with_imports(args.imports.iter().cloned())
+        .with_setup_code(setup_code)
+        .with_callbacks(callbacks)
+        .with_target(target_triple.clone())
+        .with_cpu_features(Some(cpu_features));
+
     // Step 1: Pre-initialize Python if requested
-    let component_bytes = if args.preinit {
-        let stdlib = args
-            .stdlib
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("--stdlib required with --preinit"))?;
-
-        // Validate stdlib exists
-        if !stdlib.exists() || !stdlib.join("encodings").exists() {
-            anyhow::bail!(
-                "Invalid Python stdlib at {}: expected 'encodings' subdirectory",
-                stdlib.display()
-            );
-        }
-
-        // Process packages and site-packages
-        let mut packages = process_packages(args.site_packages.as_ref(), &args.packages)?;
-        let extensions = std::mem::take(&mut packages.extensions);
-
-        if let Some(ref sp) = packages.site_packages {
-            println!("Site-packages dir: {}", sp.display());
-        }
-        if !extensions.is_empty() {
-            println!("Native extensions: {}", extensions.len());
-        }
-
-        println!();
-        println!("Step 1: Pre-initializing Python...");
-        let start = Instant::now();
-
-        let mut options = eryx::preinit::PreInitOptions::new(stdlib)
-            .imports(args.imports.iter().cloned())
-            .extensions(extensions)
-            .callbacks(callbacks);
-        if let Some(path) = &packages.site_packages {
-            options = options.site_packages(path);
-        }
-        if let Some(code) = &setup_code {
-            options = options.setup_code(code.clone());
-        }
-        let preinit_bytes = eryx::preinit::pre_initialize_with_options(options)
-            .await
-            .context("Failed to pre-initialize Python")?;
-
-        let elapsed = start.elapsed();
-        println!(
-            "  Done in {elapsed:?} ({} bytes, {:.1} MB)",
-            preinit_bytes.len(),
-            preinit_bytes.len() as f64 / 1_000_000.0
-        );
-
-        preinit_bytes
+    let packages = if args.preinit {
+        Some(process_packages(
+            args.site_packages.as_ref(),
+            &args.packages,
+        )?)
+    } else {
+        None
+    };
+    let component_bytes = if let Some(packages) = &packages {
+        preinitialize(&stdlib, packages, &build_inputs).await?
     } else {
         println!();
         println!("Step 1: Skipping pre-initialization (use --preinit to enable)");
@@ -798,8 +793,14 @@ async fn run_compile(args: CompileArgs) -> Result<()> {
         // Write output
         println!();
         println!("Step 3: Writing output...");
-        std::fs::write(&output, &precompiled)
-            .with_context(|| format!("Failed to write output: {}", output.display()))?;
+        let bundle = match &packages {
+            Some(packages) if !args.no_build_inputs => Some(BundleContents {
+                site_packages: packages.site_packages.as_deref(),
+                build_inputs: build_inputs.to_json()?,
+            }),
+            _ => None,
+        };
+        write_precompiled(&output, precompiled, bundle.as_ref())?;
         println!("  Saved to: {}", output.display());
 
         // Verify if requested
@@ -809,13 +810,7 @@ async fn run_compile(args: CompileArgs) -> Result<()> {
                 println!("Step 4: Skipping verification: {reason}");
             } else {
                 println!("Step 4: Verifying...");
-                verify_cwasm(
-                    &output,
-                    args.stdlib.as_deref(),
-                    &args.imports,
-                    args.verify_code.as_deref(),
-                )
-                .await?;
+                verify_cwasm(&output, &stdlib, &args.imports, args.verify_code.as_deref()).await?;
                 println!("  Verification passed!");
             }
         }
@@ -824,6 +819,218 @@ async fn run_compile(args: CompileArgs) -> Result<()> {
     println!();
     println!("Success!");
     Ok(())
+}
+
+/// The stdlib to pre-initialize and verify with: `stdlib`, or the one
+/// embedded in this binary.
+fn resolve_stdlib(stdlib: Option<&Path>) -> Result<PathBuf> {
+    let stdlib = match stdlib {
+        Some(path) => path.to_path_buf(),
+        None => eryx::embedded_stdlib::EmbeddedStdlib::get()
+            .context("Failed to extract the embedded Python stdlib")?
+            .path()
+            .to_path_buf(),
+    };
+    if !stdlib.join("encodings").exists() {
+        anyhow::bail!(
+            "Invalid Python stdlib at {}: expected 'encodings' subdirectory",
+            stdlib.display()
+        );
+    }
+    Ok(stdlib)
+}
+
+/// Pre-initialize Python with `inputs` and `packages`.
+///
+/// Pre-initialization links this binary's own runtime, so the result is for
+/// this eryx version whatever the input file was.
+async fn preinitialize(
+    stdlib: &Path,
+    packages: &ProcessedPackages,
+    inputs: &eryx::bundle::BuildInputs,
+) -> Result<Vec<u8>> {
+    if let Some(ref sp) = packages.site_packages {
+        println!("Site-packages dir: {}", sp.display());
+    }
+    if !packages.extensions.is_empty() {
+        println!("Native extensions: {}", packages.extensions.len());
+    }
+
+    println!();
+    println!("Step 1: Pre-initializing Python...");
+    let start = Instant::now();
+
+    let mut options = eryx::preinit::PreInitOptions::new(stdlib)
+        .imports(inputs.imports.iter().cloned())
+        .extensions(packages.extensions.clone())
+        .callbacks(inputs.callbacks.clone());
+    if let Some(path) = &packages.site_packages {
+        options = options.site_packages(path);
+    }
+    if let Some(code) = &inputs.setup_code {
+        options = options.setup_code(code.clone());
+    }
+    let preinit_bytes = eryx::preinit::pre_initialize_with_options(options)
+        .await
+        .context("Failed to pre-initialize Python")?;
+
+    let elapsed = start.elapsed();
+    println!(
+        "  Done in {elapsed:?} ({} bytes, {:.1} MB)",
+        preinit_bytes.len(),
+        preinit_bytes.len() as f64 / 1_000_000.0
+    );
+    Ok(preinit_bytes)
+}
+
+/// What a bundle stores after the component, for [`write_precompiled`].
+struct BundleContents<'a> {
+    site_packages: Option<&'a Path>,
+    /// [`eryx::bundle::BuildInputs::to_json`]'s output.
+    build_inputs: Vec<u8>,
+}
+
+/// Write a precompiled component to `path`: bare, or as a bundle that
+/// `upgrade` can rebuild.
+fn write_precompiled(
+    path: &Path,
+    precompiled: Vec<u8>,
+    bundle: Option<&BundleContents<'_>>,
+) -> Result<()> {
+    let write = || -> std::io::Result<()> {
+        let Some(bundle) = bundle else {
+            return std::fs::write(path, &precompiled);
+        };
+        let data_files = bundle
+            .site_packages
+            .map(eryx::bundle::collect_data_files)
+            .transpose()?
+            .unwrap_or_default();
+        let mut writer = std::io::BufWriter::new(std::fs::File::create(path)?);
+        eryx::bundle::write(
+            &eryx::PrecompiledArtifact::new(precompiled.clone()),
+            &data_files,
+            &bundle.build_inputs,
+            &mut writer,
+        )?;
+        writer.flush()
+    };
+    write().with_context(|| format!("Failed to write output: {}", path.display()))
+}
+
+async fn run_upgrade(args: UpgradeArgs) -> Result<()> {
+    init_tracing(args.verbose);
+
+    if args.output.exists()
+        && std::fs::canonicalize(&args.output)? == std::fs::canonicalize(&args.input)?
+    {
+        anyhow::bail!(
+            "--output must differ from the input: processes running the old version \
+             may still have {} mapped, and keeping it lets you roll back",
+            args.input.display()
+        );
+    }
+
+    let read_err = || format!("Failed to read {}", args.input.display());
+    let mut file = std::fs::File::open(&args.input).with_context(read_err)?;
+    let layout = eryx::bundle::read_layout(&mut file).with_context(read_err)?;
+    let Some((data_files, build_inputs)) = layout
+        .sections()
+        .filter(|(_, build_inputs)| !build_inputs.is_empty())
+    else {
+        anyhow::bail!(
+            "{} doesn't store its build inputs, so it can't be rebuilt. Only output of \
+             `eryx-precompile compile --preinit` (without --no-build-inputs) and pyeryx \
+             factories from eryx 0.13.0 on store them: build it again with \
+             `eryx-precompile compile` instead",
+            args.input.display()
+        );
+    };
+    let data_files = read_range(&mut file, &data_files).with_context(read_err)?;
+    let build_inputs = read_range(&mut file, &build_inputs).with_context(read_err)?;
+    let inputs = eryx::bundle::BuildInputs::from_json(&build_inputs).with_context(read_err)?;
+
+    let target_triple = inputs.target.clone();
+    let cpu_features = inputs.cpu_features.unwrap_or(CpuFeatureLevel::Native);
+    println!("eryx-precompile upgrade");
+    println!("=======================");
+    println!();
+    println!("Input:   {}", args.input.display());
+    println!("Output:  {}", args.output.display());
+    println!("Version: {}", env!("CARGO_PKG_VERSION"));
+    println!("Target:  {}", target_triple.as_deref().unwrap_or("host"));
+    println!("CPU:     {}", cpu_features.as_str());
+    if !inputs.imports.is_empty() {
+        println!("Imports: {}", inputs.imports.join(", "));
+    }
+
+    let site_packages_dir =
+        tempfile::tempdir().context("Failed to create site-packages directory")?;
+    eryx::bundle::extract_data_files(&data_files, site_packages_dir.path())
+        .with_context(read_err)?;
+    let site_packages = (!data_files.is_empty()).then(|| site_packages_dir.path().to_path_buf());
+    let packages = process_packages(site_packages.as_ref(), &[])?;
+    let stdlib = resolve_stdlib(None)?;
+
+    let preinit_bytes = preinitialize(&stdlib, &packages, &inputs).await?;
+
+    println!();
+    println!("Step 2: AOT compiling to native code...");
+    let start = Instant::now();
+    let precompiled = eryx::PythonExecutor::precompile_with_options(
+        &preinit_bytes,
+        target_triple.as_deref(),
+        cpu_features,
+    )
+    .context("Failed to AOT compile")?;
+    println!("  Done in {:?}", start.elapsed());
+
+    println!();
+    println!("Step 3: Writing output...");
+    let bundle = BundleContents {
+        site_packages: packages.site_packages.as_deref(),
+        build_inputs,
+    };
+    write_precompiled(&args.output, precompiled, Some(&bundle))?;
+    println!("  Saved to: {}", args.output.display());
+
+    if !args.no_verify {
+        println!();
+        if let Some(reason) = unrunnable_reason(target_triple.as_deref(), cpu_features) {
+            println!("Step 4: Skipping verification: {reason}");
+        } else {
+            println!("Step 4: Verifying...");
+            verify_cwasm(&args.output, &stdlib, &inputs.imports, None).await?;
+            println!("  Verification passed!");
+        }
+    }
+
+    println!();
+    println!("Success!");
+    Ok(())
+}
+
+/// Read `range` of `file`.
+fn read_range(file: &mut std::fs::File, range: &std::ops::Range<u64>) -> std::io::Result<Vec<u8>> {
+    use std::io::{Read as _, Seek as _};
+
+    file.seek(std::io::SeekFrom::Start(range.start))?;
+    let mut bytes = Vec::new();
+    file.take(range.end - range.start).read_to_end(&mut bytes)?;
+    Ok(bytes)
+}
+
+/// Set up tracing for a subcommand.
+fn init_tracing(verbose: bool) {
+    let filter = if verbose {
+        "eryx=debug,eryx_precompile=debug"
+    } else {
+        "eryx=warn,eryx_precompile=info"
+    };
+    tracing_subscriber::fmt()
+        .with_env_filter(filter)
+        .with_target(false)
+        .init();
 }
 
 /// The result of [`process_packages`].
@@ -1059,35 +1266,18 @@ fn missing_host_features(_level: CpuFeatureLevel) -> Vec<&'static str> {
 
 /// Verify that the compiled cwasm file works correctly.
 async fn verify_cwasm(
-    cwasm_path: &PathBuf,
-    stdlib: Option<&std::path::Path>,
+    cwasm_path: &Path,
+    stdlib_path: &Path,
     imports: &[String],
     verify_code: Option<&str>,
 ) -> Result<()> {
-    let stdlib_path = if let Some(path) = stdlib {
-        path.to_path_buf()
-    } else {
-        // Try to find stdlib in common locations
-        let candidates = [
-            "crates/eryx-wasm-runtime/tests/python-stdlib",
-            "../eryx-wasm-runtime/tests/python-stdlib",
-        ];
-        candidates
-            .iter()
-            .map(PathBuf::from)
-            .find(|p| p.exists() && p.join("encodings").exists())
-            .ok_or_else(|| {
-                anyhow::anyhow!("Cannot verify: stdlib not found. Use --no-verify or --stdlib")
-            })?
-    };
-
     // Create a sandbox using the compiled cwasm
     // SAFETY: We just created this file from PythonExecutor::precompile()
     #[allow(unsafe_code)]
     let sandbox = unsafe {
         eryx::Sandbox::builder()
             .with_precompiled_file(cwasm_path)
-            .with_python_stdlib(&stdlib_path)
+            .with_python_stdlib(stdlib_path)
             .build()
             .context("Failed to create sandbox from compiled cwasm")?
     };

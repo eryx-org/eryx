@@ -41,15 +41,14 @@ A file given through `ERYX_RUNTIME_CWASM` is embedded as is, without those check
 ### Setup Options
 
 ```bash
-# Use a specific version (defaults to the installed binary's version)
-eryx-precompile setup --version 0.12.0
-
-# Releases before 0.12.0 don't publish runtime.wasm.sha256; pass the expected hash instead
-eryx-precompile setup --version 0.11.0 --sha256 <hex>
+# Check the download against a known hash instead of the release's checksum file
+eryx-precompile setup --sha256 <hex>
 
 # Verbose output for debugging
 eryx-precompile setup --verbose
 ```
+
+A precompiled runtime only loads in the eryx version that built it, so `setup` always sets up its own version. To set up another, install the matching binary, for example `cargo binstall eryx-precompile@0.13.0`.
 
 ## Advanced: The `compile` Subcommand
 
@@ -67,6 +66,8 @@ Pre-initialization runs Python's interpreter startup and captures the memory sta
 eryx-precompile compile runtime.wasm -o runtime.cwasm \
   --preinit --stdlib ./python-stdlib
 ```
+
+`--stdlib` is optional: it defaults to the Python stdlib embedded in `eryx-precompile`, which matches its runtime.
 
 To produce an architecture-independent `.wasm` (for later compilation on different targets):
 
@@ -190,6 +191,25 @@ eryx-precompile compile runtime.wasm -o numpy.cwasm \
 # Skip verification (faster, use when you know the input is good)
 eryx-precompile compile runtime.wasm -o runtime.cwasm --no-verify
 ```
+
+## Upgrading to a New eryx Version
+
+A precompiled runtime records the eryx version that built it and only loads in that version. Loading it in any other fails with an error naming both versions, so precompiled runtimes have to be rebuilt after every eryx upgrade, patch releases included.
+
+The output of `compile --preinit` stores what it was built from after the component: its site-packages, imports, setup code, callback declarations, target and CPU feature level. `upgrade` rebuilds it with the installed `eryx-precompile`'s version, without the original packages or flags:
+
+```bash
+cargo binstall eryx-precompile@0.13.0
+eryx-precompile upgrade numpy-runtime.cwasm -o numpy-runtime-0.13.0.cwasm
+```
+
+The output must be a new file: processes still on the old version may have the old file mapped, and keeping it lets you roll back. Pre-initialization uses the runtime built into `eryx-precompile` and its embedded stdlib, so `upgrade` needs no download.
+
+Storing the build inputs adds about the compressed size of the packages to the file (around 9 MB for numpy, whose native extensions are most of it, and a few hundred bytes without packages). It adds nothing to memory use, because only the component is mapped. Pass `--no-build-inputs` to `compile` to write the bare component instead; `upgrade` then can't rebuild it.
+
+pyeryx's saved factories are the same format, so `upgrade` rebuilds them too. pyeryx also has its own command, `python -m eryx factory upgrade OLD NEW`, and `SandboxFactory.load(path, rebuild_if_incompatible=True)`.
+
+Runtimes precompiled before eryx 0.13.0 don't store their build inputs: build those once more with `compile`.
 
 ## Common Recipes
 

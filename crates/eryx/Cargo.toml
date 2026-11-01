@@ -161,7 +161,7 @@ embedded = ["embedded-stdlib", "dep:blake3"]
 # Pre-initialization support for capturing Python memory state.
 # Provides ~25x speedup for sandbox creation by snapshotting initialized Python.
 # Works with or without native extensions - can pre-import stdlib modules only.
-preinit = ["dep:eryx-runtime", "eryx-runtime/preinit"]
+preinit = ["dep:eryx-runtime", "eryx-runtime/preinit", "dep:zstd", "dep:blake3"]
 # Native Python extension support via late-linking.
 # Allows adding extensions like numpy at sandbox creation time.
 # Implies preinit since the linker infrastructure is shared.

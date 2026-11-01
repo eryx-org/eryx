@@ -7,6 +7,7 @@ once per process, so those tests run in a child process with
 ``XDG_CACHE_HOME`` pointing at a temporary directory.
 """
 
+import gc
 import json
 import os
 import re
@@ -204,6 +205,19 @@ class TestSaveLoadRoundTrip:
         )
         assert result.stdout == b"42\n"
 
+    @pytest.mark.parametrize("create", ["create_sandbox", "create_session"])
+    def test_children_outlive_a_loaded_factory(self, site_packages, tmp_path, create):
+        # A loaded factory extracts its files to a temporary directory, which
+        # sandboxes and sessions mount when they execute.
+        factory = eryx.SandboxFactory(site_packages=str(site_packages), imports=["mypkg"])
+        path = tmp_path / "factory.bin"
+        factory.save(str(path))
+
+        child = getattr(eryx.SandboxFactory.load(str(path)), create)()
+        gc.collect()
+        result = child.execute("import mypkg.extra; print(mypkg.extra.answer())")
+        assert result.stdout == b"42\n"
+
     def test_loaded_factory_resaves_its_build_inputs(self, site_packages, tmp_path):
         factory = eryx.SandboxFactory(site_packages=str(site_packages), imports=["mypkg"])
         first = tmp_path / "first.bin"
@@ -219,3 +233,47 @@ class TestSaveLoadRoundTrip:
         # another version has a different hash.
         with pytest.raises(eryx.InitializationError, match="rebuild_if_incompatible=True"):
             eryx.SandboxFactory.load(str(second), cache=False)
+
+
+class TestUpgradeCommand:
+    """`python -m eryx factory upgrade OLD NEW`."""
+
+    def test_upgrade_saves_a_rebuilt_copy(self, saved_factory, cache_home, tmp_path):
+        original = saved_factory.read_bytes()
+        new = tmp_path / "upgraded.bin"
+        result = subprocess.run(
+            [sys.executable, "-m", "eryx", "factory", "upgrade", str(saved_factory), str(new)],
+            env=dict(os.environ, XDG_CACHE_HOME=str(cache_home)),
+            capture_output=True,
+            text=True,
+            timeout=600,
+        )
+        assert result.returncode == 0, result.stderr
+        assert result.stdout.strip() == f"Saved {new}"
+
+        # NEW loads in this version as it is, with everything the factory had.
+        upgraded = eryx.SandboxFactory.load(str(new))
+        out = upgraded.create_sandbox().execute(
+            "import mypkg, mypkg.extra, os\n"
+            "print(mypkg.VALUE, mypkg.extra.answer(), greet('x'))\n"
+            "print(open(os.path.join(mypkg.__path__[0], 'data.json')).read())\n"
+        )
+        assert out.stdout.decode() == '41 42 hello x\n{"key": "value"}\n'
+        assert saved_factory.read_bytes() == original
+
+    def test_upgrade_refuses_to_overwrite_the_old_file(self, saved_factory, capsys):
+        from eryx.__main__ import main
+
+        assert main(["factory", "upgrade", str(saved_factory), str(saved_factory)]) == 1
+        assert "NEW must differ from OLD" in capsys.readouterr().err
+
+    def test_upgrade_reports_a_factory_that_cannot_be_rebuilt(self, tmp_path, capsys):
+        from eryx.__main__ import main
+
+        old = tmp_path / "v1.bin"
+        old.write_bytes(eryx.SandboxFactory(imports=["json"]).to_bytes())
+        _forge_other_version(old)
+
+        assert main(["factory", "upgrade", str(old), str(tmp_path / "new.bin")]) == 1
+        assert "recreate it" in capsys.readouterr().err
+        assert not (tmp_path / "new.bin").exists()

@@ -1051,7 +1051,7 @@ impl PrecompiledArtifact {
     /// # Errors
     ///
     /// Returns an error if reading a file-backed component fails.
-    #[cfg(feature = "embedded")]
+    #[cfg(any(feature = "embedded", feature = "preinit"))]
     pub fn content_hash(&self) -> std::io::Result<[u8; 32]> {
         if let Some(key) = &self.cache_key {
             return Ok(key.precompiled_hash());

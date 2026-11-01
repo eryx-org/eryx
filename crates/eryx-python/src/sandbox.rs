@@ -76,6 +76,10 @@ pub struct Sandbox {
     /// Tokio runtime for executing async code.
     /// We use Arc<Runtime> to allow sharing with SandboxFactory.
     runtime: Arc<tokio::runtime::Runtime>,
+    /// Keeps the site-packages directories of the factory that created this
+    /// sandbox alive: they're mounted when it executes, which can be after the
+    /// factory is gone.
+    _factory_files: Option<crate::preinit::FactoryFiles>,
 }
 
 #[pymethods]
@@ -230,7 +234,11 @@ impl Sandbox {
 
         let inner = builder.build().map_err(eryx_error_to_py)?;
 
-        Ok(Self { inner, runtime })
+        Ok(Self {
+            inner,
+            runtime,
+            _factory_files: None,
+        })
     }
 
     /// Execute Python code in the sandbox.
@@ -358,8 +366,16 @@ impl Sandbox {
     /// Create a Sandbox from an existing eryx::Sandbox, sharing the caller's
     /// Tokio runtime. Used by `SandboxFactory` so every child reuses one
     /// runtime instead of creating its own.
-    pub(crate) fn from_inner(inner: eryx::Sandbox, runtime: Arc<tokio::runtime::Runtime>) -> Self {
-        Self { inner, runtime }
+    pub(crate) fn from_factory(
+        inner: eryx::Sandbox,
+        runtime: Arc<tokio::runtime::Runtime>,
+        factory_files: crate::preinit::FactoryFiles,
+    ) -> Self {
+        Self {
+            inner,
+            runtime,
+            _factory_files: Some(factory_files),
+        }
     }
 }
 

@@ -14,7 +14,7 @@ path = "src/main.rs"
 [dependencies]
 anyhow.workspace = true
 clap = { workspace = true } #unified
-eryx = { workspace = true, features = ["preinit"] }
+eryx = { workspace = true, features = ["preinit", "embedded-stdlib"] }
 hex.workspace = true
 reqwest.workspace = true
 rustls = { workspace = true, features = ["aws-lc-rs"] }

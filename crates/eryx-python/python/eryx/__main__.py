@@ -6,6 +6,7 @@ Usage:
     python -m eryx -c 'print("hi")'   # Execute a string
     echo 'print("hi")' | python -m eryx -  # Execute from stdin
     python -m eryx serve               # Start MCP server
+    python -m eryx factory upgrade OLD NEW  # Rebuild a saved factory
 
 Examples:
     uvx --with pyeryx eryx -c 'import sys; print(sys.version)'
@@ -17,6 +18,7 @@ Examples:
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 import textwrap
 
@@ -47,6 +49,7 @@ def _build_parser() -> argparse.ArgumentParser:
               eryx --allow-host api.x.com ...   allow only api.x.com
               eryx serve                        start MCP server
               eryx serve --mcp                  MCP server with inner tools
+              eryx factory upgrade OLD NEW      rebuild a saved factory
         """),
     )
 
@@ -201,6 +204,40 @@ def _repl(args: argparse.Namespace, mcp_manager: object | None = None) -> int:
     return 0
 
 
+def _factory(argv: list[str]) -> int:
+    """`eryx factory`: manage saved sandbox factories."""
+    parser = argparse.ArgumentParser(
+        prog="eryx factory",
+        description="Manage sandbox factories saved with SandboxFactory.save().",
+    )
+    actions = parser.add_subparsers(dest="action", required=True)
+    upgrade = actions.add_parser(
+        "upgrade",
+        help="rebuild a factory saved by another pyeryx version",
+        description=(
+            "Rebuild a factory saved by another pyeryx version, from the build "
+            "inputs it stores, and save it to NEW. A saved factory only loads "
+            "in the pyeryx version that saved it. OLD is left as it is, so "
+            "processes still on the old version can keep using it."
+        ),
+    )
+    upgrade.add_argument("old", metavar="OLD", help="factory file to rebuild")
+    upgrade.add_argument("new", metavar="NEW", help="where to save the rebuilt factory")
+    args = parser.parse_args(argv)
+
+    if os.path.exists(args.new) and os.path.samefile(args.old, args.new):
+        print("eryx factory upgrade: NEW must differ from OLD", file=sys.stderr)
+        return 1
+    try:
+        factory = eryx.SandboxFactory.load(args.old, rebuild_if_incompatible=True)
+        factory.save(args.new)
+    except (eryx.EryxError, OSError) as exc:
+        print(f"eryx factory upgrade: {exc}", file=sys.stderr)
+        return 1
+    print(f"Saved {args.new}")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     raw_args = argv if argv is not None else sys.argv[1:]
 
@@ -209,6 +246,10 @@ def main(argv: list[str] | None = None) -> int:
         from eryx.serve import serve
 
         return serve(raw_args[1:])
+
+    # Subcommand: eryx factory
+    if raw_args and raw_args[0] == "factory":
+        return _factory(raw_args[1:])
 
     parser = _build_parser()
     args = parser.parse_args(argv)
