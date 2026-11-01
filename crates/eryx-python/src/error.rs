@@ -125,7 +125,9 @@ fn kind_to_py(kind: eryx::ErrorKind) -> PyErr {
         eryx::ErrorKind::Suspended(reason) => {
             ExecutionError::new_err(format!("execution suspended: {reason}"))
         }
-        eryx::ErrorKind::FuelExhausted { consumed, limit } => ResourceLimitError::new_err(format!(
+        eryx::ErrorKind::FuelExhausted {
+            consumed, limit, ..
+        } => ResourceLimitError::new_err(format!(
             "execution ran out of fuel after {consumed} instructions (limit: {limit})"
         )),
         eryx::ErrorKind::Io(e) => PyRuntimeError::new_err(e.to_string()),

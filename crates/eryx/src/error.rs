@@ -222,6 +222,7 @@ pub enum ErrorKind {
 
     /// Execution ran out of fuel (instruction limit exceeded).
     #[error("execution ran out of fuel after {consumed} instructions (limit: {limit})")]
+    #[non_exhaustive]
     FuelExhausted {
         /// Number of instructions consumed before exhaustion.
         consumed: u64,

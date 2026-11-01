@@ -25,26 +25,31 @@ pub enum TraceEventKind {
     /// About to execute a line (from `sys.settrace` 'line' event).
     Line,
     /// Function call (from `sys.settrace` 'call' event).
+    #[non_exhaustive]
     Call {
         /// Name of the function being called.
         function: String,
     },
     /// Function return (from `sys.settrace` 'return' event).
+    #[non_exhaustive]
     Return {
         /// Name of the function returning.
         function: String,
     },
     /// Exception raised (from `sys.settrace` 'exception' event).
+    #[non_exhaustive]
     Exception {
         /// Exception message.
         message: String,
     },
     /// Callback invocation started (emitted when a callback is called).
+    #[non_exhaustive]
     CallbackStart {
         /// Name of the callback being invoked.
         name: String,
     },
     /// Callback invocation completed (emitted when a callback returns).
+    #[non_exhaustive]
     CallbackEnd {
         /// Name of the callback that completed.
         name: String,

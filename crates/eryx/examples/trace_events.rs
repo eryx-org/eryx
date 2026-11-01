@@ -377,19 +377,21 @@ impl TraceHandler for VisualTraceHandler {
                 format!("[{:2}] LINE {}", count, event.lineno),
                 Color::Yellow,
             ),
-            TraceEventKind::Call { function } => {
+            TraceEventKind::Call { function, .. } => {
                 (format!("[{:2}] CALL {}()", count, function), Color::Green)
             }
-            TraceEventKind::Return { function } => {
+            TraceEventKind::Return { function, .. } => {
                 (format!("[{:2}] RETURN {}()", count, function), Color::Blue)
             }
-            TraceEventKind::Exception { message } => {
+            TraceEventKind::Exception { message, .. } => {
                 (format!("[{:2}] EXCEPTION: {}", count, message), Color::Red)
             }
-            TraceEventKind::CallbackStart { name } => {
+            TraceEventKind::CallbackStart { name, .. } => {
                 (format!("[{:2}] → CALLBACK {}", count, name), Color::Magenta)
             }
-            TraceEventKind::CallbackEnd { name, duration_ms } => (
+            TraceEventKind::CallbackEnd {
+                name, duration_ms, ..
+            } => (
                 format!("[{:2}] ← CALLBACK {} ({}ms)", count, name, duration_ms),
                 Color::Cyan,
             ),

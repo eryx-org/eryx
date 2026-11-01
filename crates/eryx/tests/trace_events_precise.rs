@@ -61,10 +61,10 @@ impl From<&TraceEvent> for SimpleEvent {
     fn from(event: &TraceEvent) -> Self {
         let kind = match &event.event {
             TraceEventKind::Line => "line".to_string(),
-            TraceEventKind::Call { function } => format!("call:{}", function),
-            TraceEventKind::Return { function } => format!("return:{}", function),
-            TraceEventKind::Exception { message } => format!("exception:{}", message),
-            TraceEventKind::CallbackStart { name } => format!("callback_start:{}", name),
+            TraceEventKind::Call { function, .. } => format!("call:{}", function),
+            TraceEventKind::Return { function, .. } => format!("return:{}", function),
+            TraceEventKind::Exception { message, .. } => format!("exception:{}", message),
+            TraceEventKind::CallbackStart { name, .. } => format!("callback_start:{}", name),
             TraceEventKind::CallbackEnd { name, .. } => format!("callback_end:{}", name),
             _ => "unknown".to_string(),
         };

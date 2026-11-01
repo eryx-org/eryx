@@ -74,11 +74,13 @@ impl TraceHandler for PrintingTraceHandler {
 
         let event_desc = match &event.event {
             TraceEventKind::Line => format!("line {}", event.lineno),
-            TraceEventKind::Call { function } => format!("call {function}()"),
-            TraceEventKind::Return { function } => format!("return from {function}()"),
-            TraceEventKind::Exception { message } => format!("exception: {message}"),
-            TraceEventKind::CallbackStart { name } => format!("callback START: {name}"),
-            TraceEventKind::CallbackEnd { name, duration_ms } => {
+            TraceEventKind::Call { function, .. } => format!("call {function}()"),
+            TraceEventKind::Return { function, .. } => format!("return from {function}()"),
+            TraceEventKind::Exception { message, .. } => format!("exception: {message}"),
+            TraceEventKind::CallbackStart { name, .. } => format!("callback START: {name}"),
+            TraceEventKind::CallbackEnd {
+                name, duration_ms, ..
+            } => {
                 format!("callback END: {name} ({duration_ms}ms)")
             }
             _ => format!("trace event at line {}", event.lineno),
