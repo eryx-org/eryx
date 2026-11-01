@@ -82,15 +82,16 @@ enum Command {
 struct SetupArgs {
     /// Version to download (default: version of this binary)
     ///
-    /// Must match an existing GitHub Release with a runtime.wasm asset.
+    /// Must be this binary's own version: a precompiled runtime only loads in
+    /// the eryx version that built it. Install `eryx-precompile@<version>` to
+    /// set up a different one.
     #[arg(long)]
     version: Option<String>,
 
     /// Expected SHA-256 of runtime.wasm, as hex
     ///
-    /// By default the checksum comes from the `runtime.wasm.sha256` asset of
-    /// the same release. Releases before 0.12.0 don't publish one, so pass the
-    /// hash here to set them up.
+    /// By default the checksum comes from the release's `runtime.wasm.sha256`
+    /// asset. Pass a hash here to check the download against it instead.
     #[arg(long, value_name = "HEX")]
     sha256: Option<String>,
 
@@ -453,9 +454,18 @@ async fn run_setup(args: SetupArgs) -> Result<()> {
         .with_target(false)
         .init();
 
-    let version = args
-        .version
-        .unwrap_or_else(|| env!("CARGO_PKG_VERSION").to_string());
+    let own_version = env!("CARGO_PKG_VERSION");
+    let version = args.version.unwrap_or_else(|| own_version.to_string());
+    // The runtime is compiled by the eryx inside this binary, and a precompiled
+    // runtime only loads in the eryx version that compiled it.
+    if version != own_version {
+        anyhow::bail!(
+            "eryx-precompile {own_version} can only set up the runtime for eryx {own_version}, \
+             because a precompiled runtime only loads in the eryx version that built it. \
+             To set up {version}, install the matching binary: \
+             cargo binstall eryx-precompile@{version}"
+        );
+    }
     let target = platform_target();
     let cache = cache_dir()?;
     let cwasm_name = format!("runtime-v{version}-{target}.cwasm");
