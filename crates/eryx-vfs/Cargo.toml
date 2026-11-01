@@ -1,6 +1,9 @@
 [package]
 name = "eryx-vfs"
-version.workspace = true
+# Versioned independently of the workspace: eryx re-exports this crate only
+# behind `unstable-vfs`, so eryx-vfs can break without bumping eryx, and
+# eryx releases don't bump eryx-vfs unless it changed (#706).
+version = "0.12.1"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
