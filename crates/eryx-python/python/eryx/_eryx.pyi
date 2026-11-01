@@ -1055,6 +1055,7 @@ class SandboxFactory:
         site_packages: Optional[PathLike] = None,
         callbacks: Optional[Union[CallbackRegistry, Sequence[CallbackDict]]] = None,
         cache: bool = True,
+        rebuild_if_incompatible: bool = False,
     ) -> SandboxFactory:
         """Load a sandbox factory from a file.
 
@@ -1084,12 +1085,24 @@ class SandboxFactory:
                 cache. When enabled, a BLAKE3 content hash is computed once during
                 loading and subsequent ``create_sandbox()`` calls reuse the linked
                 component instead of re-linking it per call. Defaults to True.
+            rebuild_if_incompatible: What to do with a file saved by another pyeryx
+                version, which can't be loaded as is. When False (the default),
+                raise ``InitializationError``. When True, rebuild the factory from
+                the build inputs the file stores (its packages, imports, setup code
+                and callback declarations), which takes as long as creating it did.
+                The rebuilt copy is saved to the per-user eryx cache directory, so
+                later loads with this flag reuse it; the file at ``path`` is never
+                modified. If the copy can't be saved, a ``RuntimeWarning`` is
+                emitted and the rebuilt factory is still returned. Factories saved
+                before pyeryx 0.13.0 don't store their build inputs and can't be
+                rebuilt.
 
         Returns:
             A SandboxFactory loaded from the file.
 
         Raises:
-            InitializationError: If loading fails.
+            InitializationError: If loading fails, including when another pyeryx
+                version saved the file and it isn't rebuilt.
 
         Example:
             factory = SandboxFactory.load("/path/to/jinja2-factory.bin")

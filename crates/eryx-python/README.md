@@ -575,9 +575,24 @@ sandbox = factory.create_sandbox()
 ```
 
 A saved factory only loads in the pyeryx version that saved it, because it
-contains code compiled for that exact version. After upgrading pyeryx,
-recreate and re-save your factories. Loading one saved by another version
-raises `InitializationError` naming both versions.
+contains code compiled for that exact version. Loading one saved by another
+version raises `InitializationError` naming both versions. To survive
+upgrades, pass `rebuild_if_incompatible=True`:
+
+```python
+factory = eryx.SandboxFactory.load(path, rebuild_if_incompatible=True)
+```
+
+A factory file stores what it was built from (its packages, imports, setup
+code and callback declarations), so after an upgrade this rebuilds it, which
+takes as long as creating it did. The rebuilt copy goes to the per-user eryx
+cache directory (`$XDG_CACHE_HOME/eryx`, else the platform cache directory)
+and later loads reuse it; the original file is never modified. In a container
+whose cache doesn't persist, rebuild at image build time instead and ship the
+result:
+`SandboxFactory.load(old_path, rebuild_if_incompatible=True).save(new_path)`.
+Factories saved before pyeryx 0.13.0 don't store their build inputs, so
+recreate those once.
 
 #### Properties and Methods
 

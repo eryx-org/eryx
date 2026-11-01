@@ -1227,6 +1227,7 @@ name = "eryx-python"
 version = "0.12.1"
 dependencies = [
  "async-trait",
+ "blake3",
  "eryx",
  "pyo3",
  "pyo3-async-runtimes",

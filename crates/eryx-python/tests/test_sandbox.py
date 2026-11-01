@@ -520,14 +520,14 @@ except NameError:
         assert result.stdout == b"1\n"
 
     def test_factory_file_puts_component_first(self, sandbox_factory, tmp_path):
-        """The v3 format starts with the component, so it can be mapped."""
+        """The v4 format starts with the component, so it can be mapped."""
         save_path = tmp_path / "factory.bin"
         sandbox_factory.save(save_path)
 
         data = save_path.read_bytes()
         component = sandbox_factory.to_bytes()
         assert data.startswith(component)
-        assert data.endswith(b"ERYXFCT3")
+        assert data.endswith(b"ERYXFCT4")
 
     @pytest.mark.skipif(sys.platform != "linux", reason="reads /proc/self/maps")
     @pytest.mark.parametrize("cache", [True, False])
