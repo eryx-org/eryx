@@ -50,7 +50,7 @@ use eryx_vfs::{DirPerms, FilePerms};
 use wasmtime_wasi::{FsPerms, WasiCtx, WasiCtxBuilder};
 
 use crate::callback::Callback;
-use crate::error::Error;
+use crate::error::{Error, ErrorKind};
 use crate::sandbox::ResourceLimits;
 use crate::wasm::{
     CallbackRequest, ExecutionOutput, ExecutorState, FdOutput, HostCallbackInfo, MemoryTracker,
@@ -190,13 +190,13 @@ impl PythonStateSnapshot {
     /// Returns an error if the data is too short or corrupted.
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, Error> {
         if bytes.len() < 8 {
-            return Err(Error::Snapshot("Snapshot data too short".to_string()));
+            return Err(ErrorKind::Snapshot("Snapshot data too short".to_string()).into());
         }
 
         let timestamp_ms = u64::from_le_bytes(
             bytes[..8]
                 .try_into()
-                .map_err(|_| Error::Snapshot("Invalid timestamp".to_string()))?,
+                .map_err(|_| ErrorKind::Snapshot("Invalid timestamp".to_string()))?,
         );
 
         let data = bytes[8..].to_vec();
@@ -343,7 +343,7 @@ impl<'a> SessionExecuteBuilder<'a> {
     /// Set a cancellation token for external cancellation support.
     ///
     /// When the token is cancelled, the execution is interrupted and returns
-    /// [`Error::Cancelled`]. The instance is discarded, so the next call on
+    /// [`ErrorKind::Cancelled`]. The instance is discarded, so the next call on
     /// the session resets it first: Python state from before the cancelled
     /// call is lost.
     #[must_use]
@@ -639,7 +639,7 @@ fn build_wasi_context(executor: &PythonExecutor, fd_output: &FdOutput) -> Result
         }
         wasi_builder
             .preopened_dir(stdlib_path, "/python-stdlib", FsPerms::ReadOnly)
-            .map_err(|e| Error::WasmEngine(format!("Failed to mount Python stdlib: {e}")))?;
+            .map_err(|e| ErrorKind::WasmEngine(format!("Failed to mount Python stdlib: {e}")))?;
     }
 
     // Mount each site-packages directory (index 0 keeps the baked sys.path)
@@ -647,7 +647,7 @@ fn build_wasi_context(executor: &PythonExecutor, fd_output: &FdOutput) -> Result
         let mount_path = crate::wasm::site_packages_mount_path(i);
         wasi_builder
             .preopened_dir(site_packages_path, &mount_path, FsPerms::ReadOnly)
-            .map_err(|e| Error::WasmEngine(format!("Failed to mount {mount_path}: {e}")))?;
+            .map_err(|e| ErrorKind::WasmEngine(format!("Failed to mount {mount_path}: {e}")))?;
     }
 
     Ok(wasi_builder.build())
@@ -683,7 +683,9 @@ pub(crate) fn build_hybrid_vfs_context(
             DirPerms::READ,
             FilePerms::READ,
         )
-        .map_err(|e| Error::Initialization(format!("Failed to add Python stdlib to VFS: {e}")))?;
+        .map_err(|e| {
+            ErrorKind::Initialization(format!("Failed to add Python stdlib to VFS: {e}"))
+        })?;
     }
     for (i, site_packages_path) in executor.python_site_packages_paths().iter().enumerate() {
         let mount_path = crate::wasm::site_packages_mount_path(i);
@@ -693,7 +695,9 @@ pub(crate) fn build_hybrid_vfs_context(
             DirPerms::READ,
             FilePerms::READ,
         )
-        .map_err(|e| Error::Initialization(format!("Failed to add {mount_path} to VFS: {e}")))?;
+        .map_err(|e| {
+            ErrorKind::Initialization(format!("Failed to add {mount_path} to VFS: {e}"))
+        })?;
     }
 
     // Add user-specified host filesystem volume mounts
@@ -721,7 +725,7 @@ pub(crate) fn build_hybrid_vfs_context(
             })
         };
         result.map_err(|e| {
-            Error::WasmEngine(format!(
+            ErrorKind::WasmEngine(format!(
                 "Failed to mount volume {} -> {}: {e}",
                 volume.host_path.display(),
                 volume.guest_path,
@@ -946,14 +950,14 @@ impl SessionExecutor {
         // We use u64::MAX for tracking-only mode; actual limits are applied per-execution.
         store
             .set_fuel(u64::MAX)
-            .map_err(|e| Error::WasmEngine(format!("Failed to set fuel: {e}")))?;
+            .map_err(|e| ErrorKind::WasmEngine(format!("Failed to set fuel: {e}")))?;
 
         // Instantiate the component
         let bindings = executor
             .instance_pre()
             .instantiate_async(&mut store)
             .await
-            .map_err(|e| Error::WasmEngine(format!("Failed to instantiate component: {e}")))?;
+            .map_err(|e| ErrorKind::WasmEngine(format!("Failed to instantiate component: {e}")))?;
 
         // Configure the result-capture variable name once for the session
         // (the guest defaults to "result", so only call for a custom name).
@@ -964,8 +968,10 @@ impl SessionExecutor {
                     bindings.call_set_result_variable(accessor, name).await
                 })
                 .await
-                .map_err(|e| Error::WasmEngine(format!("Failed to set result variable: {e}")))?
-                .map_err(|e| Error::WasmEngine(format!("Failed to set result variable: {e}")))?;
+                .map_err(|e| ErrorKind::WasmEngine(format!("Failed to set result variable: {e}")))?
+                .map_err(|e| {
+                    ErrorKind::WasmEngine(format!("Failed to set result variable: {e}"))
+                })?;
         }
 
         Ok(Self {
@@ -1023,14 +1029,14 @@ impl SessionExecutor {
         // We use u64::MAX for tracking-only mode; actual limits are applied per-execution.
         store
             .set_fuel(u64::MAX)
-            .map_err(|e| Error::WasmEngine(format!("Failed to set fuel: {e}")))?;
+            .map_err(|e| ErrorKind::WasmEngine(format!("Failed to set fuel: {e}")))?;
 
         // Instantiate the component
         let bindings = executor
             .instance_pre()
             .instantiate_async(&mut store)
             .await
-            .map_err(|e| Error::WasmEngine(format!("Failed to instantiate component: {e}")))?;
+            .map_err(|e| ErrorKind::WasmEngine(format!("Failed to instantiate component: {e}")))?;
 
         // Configure the result-capture variable name once for the session
         // (the guest defaults to "result", so only call for a custom name).
@@ -1041,8 +1047,10 @@ impl SessionExecutor {
                     bindings.call_set_result_variable(accessor, name).await
                 })
                 .await
-                .map_err(|e| Error::WasmEngine(format!("Failed to set result variable: {e}")))?
-                .map_err(|e| Error::WasmEngine(format!("Failed to set result variable: {e}")))?;
+                .map_err(|e| ErrorKind::WasmEngine(format!("Failed to set result variable: {e}")))?
+                .map_err(|e| {
+                    ErrorKind::WasmEngine(format!("Failed to set result variable: {e}"))
+                })?;
         }
 
         Ok(Self {
@@ -1098,7 +1106,7 @@ impl SessionExecutor {
     /// [`clear_state`](Self::clear_state), as
     /// [`SessionExecuteBuilder::with_cancellation`] does for an execution.
     ///
-    /// A cancelled operation returns [`Error::Cancelled`] and discards the
+    /// A cancelled operation returns [`ErrorKind::Cancelled`] and discards the
     /// instance, so the next call resets the session. While a token is set,
     /// CPU-bound guest code in these operations also yields to the async
     /// runtime regularly, so the caller can drop the future.
@@ -1153,19 +1161,19 @@ impl SessionExecutor {
         let store = self
             .store
             .as_mut()
-            .ok_or_else(|| Error::Execution("session store unavailable".to_string()))?;
+            .ok_or_else(|| ErrorKind::Execution("session store unavailable".to_string()))?;
         let bindings = self
             .bindings
             .as_ref()
-            .ok_or_else(|| Error::Execution("session bindings unavailable".to_string()))?;
+            .ok_or_else(|| ErrorKind::Execution("session bindings unavailable".to_string()))?;
         let name = name.to_string();
         store
             .run_concurrent(async |accessor| {
                 bindings.call_set_result_variable(accessor, name).await
             })
             .await
-            .map_err(|e| Error::WasmEngine(format!("Failed to set result variable: {e}")))?
-            .map_err(|e| Error::WasmEngine(format!("Failed to set result variable: {e}")))?;
+            .map_err(|e| ErrorKind::WasmEngine(format!("Failed to set result variable: {e}")))?
+            .map_err(|e| ErrorKind::WasmEngine(format!("Failed to set result variable: {e}")))?;
         Ok(())
     }
 
@@ -1245,7 +1253,7 @@ impl SessionExecutor {
         self.last_output_truncated = false;
         crate::error::validate_user_code(code)?;
         if crate::wasm::is_already_cancelled(cancellation_token.as_ref()) {
-            return Err(Error::Cancelled);
+            return Err(ErrorKind::Cancelled.into());
         }
 
         let execution_timeout = self.execution_timeout;
@@ -1263,11 +1271,11 @@ impl SessionExecutor {
         let mut store = self
             .store
             .take()
-            .ok_or_else(|| Error::Execution("Store not available".to_string()))?;
+            .ok_or_else(|| ErrorKind::Execution("Store not available".to_string()))?;
         let bindings = self
             .bindings
             .take()
-            .ok_or_else(|| Error::Execution("Bindings not available".to_string()))?;
+            .ok_or_else(|| ErrorKind::Execution("Bindings not available".to_string()))?;
 
         // Update the executor state with new channels and callbacks
         let callback_infos: Vec<HostCallbackInfo> = callbacks
@@ -1303,7 +1311,7 @@ impl SessionExecutor {
         let initial_fuel = fuel_limit.unwrap_or(u64::MAX);
         store
             .set_fuel(initial_fuel)
-            .map_err(|e| Error::Initialization(format!("Failed to set fuel: {e}")))?;
+            .map_err(|e| ErrorKind::Initialization(format!("Failed to set fuel: {e}")))?;
 
         tracing::debug!(
             code_len = code.len(),
@@ -1398,7 +1406,7 @@ impl SessionExecutor {
         // A cancelled run was interrupted mid-call, so its instance can't be
         // reused: leave the store out and the next call resets the session.
         if was_cancelled.load(Ordering::Relaxed) {
-            return Err(Error::Cancelled);
+            return Err(ErrorKind::Cancelled.into());
         }
 
         // Restore store and bindings before handling result
@@ -1412,17 +1420,17 @@ impl SessionExecutor {
             if async_timeout_elapsed
                 || e.downcast_ref::<wasmtime::Trap>() == Some(&wasmtime::Trap::Interrupt)
             {
-                Error::Timeout(execution_timeout.unwrap_or_default())
+                ErrorKind::Timeout(execution_timeout.unwrap_or_default())
             } else if e.downcast_ref::<wasmtime::Trap>() == Some(&wasmtime::Trap::OutOfFuel) {
                 if let Some(reason) = suspended_reason.clone() {
-                    Error::Suspended(reason)
+                    ErrorKind::Suspended(reason)
                 } else {
                     let consumed = initial_fuel.saturating_sub(remaining_fuel);
                     let limit = fuel_limit.unwrap_or(u64::MAX);
-                    Error::FuelExhausted { consumed, limit }
+                    ErrorKind::FuelExhausted { consumed, limit }
                 }
             } else {
-                Error::Execution(format!("WASM execution error: {e:?}"))
+                ErrorKind::Execution(format!("WASM execution error: {e:?}"))
             }
         })?;
         // wasmtime_result is Result<Result<ExecuteOutput, String>, wasmtime::Error>
@@ -1430,10 +1438,10 @@ impl SessionExecutor {
         // The inner Err is the guest's logical execution error — for real input
         // that is always an uncaught Python exception (its traceback).
         let wit_output = wasmtime_result
-            .map_err(|e| Error::Execution(format!("WASM execution error: {e:?}")))?
+            .map_err(|e| ErrorKind::Execution(format!("WASM execution error: {e:?}")))?
             .map_err(|mut traceback| {
                 crate::wasm::append_fd_stderr(&mut traceback, &fd_stderr);
-                Error::PythonException(traceback)
+                ErrorKind::PythonException(traceback)
             })?;
 
         let duration = start.elapsed();
@@ -1569,7 +1577,7 @@ impl SessionExecutor {
         // We use u64::MAX for tracking-only mode; actual limits are applied per-execution.
         store
             .set_fuel(u64::MAX)
-            .map_err(|e| Error::WasmEngine(format!("Failed to set fuel: {e}")))?;
+            .map_err(|e| ErrorKind::WasmEngine(format!("Failed to set fuel: {e}")))?;
 
         // Preserve settings across reset
         let execution_timeout = self.execution_timeout;
@@ -1581,7 +1589,9 @@ impl SessionExecutor {
             .instance_pre()
             .instantiate_async(&mut store)
             .await
-            .map_err(|e| Error::WasmEngine(format!("Failed to reinstantiate component: {e}")))?;
+            .map_err(|e| {
+                ErrorKind::WasmEngine(format!("Failed to reinstantiate component: {e}"))
+            })?;
 
         // Re-apply the result-capture variable name on the fresh instance.
         if self.executor.result_variable() != "result" {
@@ -1591,8 +1601,10 @@ impl SessionExecutor {
                     bindings.call_set_result_variable(accessor, name).await
                 })
                 .await
-                .map_err(|e| Error::WasmEngine(format!("Failed to set result variable: {e}")))?
-                .map_err(|e| Error::WasmEngine(format!("Failed to set result variable: {e}")))?;
+                .map_err(|e| ErrorKind::WasmEngine(format!("Failed to set result variable: {e}")))?
+                .map_err(|e| {
+                    ErrorKind::WasmEngine(format!("Failed to set result variable: {e}"))
+                })?;
         }
 
         self.store = Some(store);
@@ -1656,11 +1668,14 @@ impl SessionExecutor {
         let halted = suspended()
             || matches!(
                 result,
-                Err(Error::Suspended(_)
-                    | Error::Timeout(_)
-                    | Error::FuelExhausted { .. }
-                    | Error::Cancelled
-                    | Error::Execution(_))
+                Err(ref e) if matches!(
+                    e.kind(),
+                    ErrorKind::Suspended(_)
+                        | ErrorKind::Timeout(_)
+                        | ErrorKind::FuelExhausted { .. }
+                        | ErrorKind::Cancelled
+                        | ErrorKind::Execution(_)
+                )
             );
         if !halted {
             return Ok((result, false));
@@ -1743,16 +1758,17 @@ impl SessionExecutor {
                 bindings.call_snapshot_state(accessor).await
             })
             .await?
-            .map_err(Error::Snapshot)?;
+            .map_err(ErrorKind::Snapshot)?;
         let data = snapshot.data;
 
         // Check size limit
         if data.len() > MAX_SNAPSHOT_SIZE {
-            return Err(Error::Snapshot(format!(
+            return Err(ErrorKind::Snapshot(format!(
                 "Snapshot too large: {} bytes (max {} bytes)",
                 data.len(),
                 MAX_SNAPSHOT_SIZE
-            )));
+            ))
+            .into());
         }
 
         tracing::debug!(
@@ -1804,7 +1820,7 @@ impl SessionExecutor {
             bindings.call_restore_state(accessor, data).await
         })
         .await?
-        .map_err(Error::Snapshot)?;
+        .map_err(ErrorKind::Snapshot)?;
 
         tracing::debug!("State snapshot restored");
 
@@ -1862,7 +1878,7 @@ impl SessionExecutor {
     ) -> Result<R, Error> {
         let cancellation_token = self.state_op_cancellation.clone();
         if crate::wasm::is_already_cancelled(cancellation_token.as_ref()) {
-            return Err(Error::Cancelled);
+            return Err(ErrorKind::Cancelled.into());
         }
         self.recover_lost_store(&[]).await?;
 
@@ -1873,18 +1889,18 @@ impl SessionExecutor {
         let mut store = self
             .store
             .take()
-            .ok_or_else(|| Error::WasmEngine("Store not available".to_string()))?;
+            .ok_or_else(|| ErrorKind::WasmEngine("Store not available".to_string()))?;
         let bindings = self
             .bindings
             .take()
-            .ok_or_else(|| Error::WasmEngine("Bindings not available".to_string()))?;
+            .ok_or_else(|| ErrorKind::WasmEngine("Bindings not available".to_string()))?;
 
         let fuel = self
             .fuel_limit
             .map_or(u64::MAX, |f| f.max(MIN_STATE_OP_FUEL));
         store
             .set_fuel(fuel)
-            .map_err(|e| Error::WasmEngine(format!("Failed to set fuel: {e}")))?;
+            .map_err(|e| ErrorKind::WasmEngine(format!("Failed to set fuel: {e}")))?;
         let was_cancelled = Arc::new(AtomicBool::new(false));
         match cancellation_token.clone() {
             Some(token) => crate::wasm::arm_epoch_cancellation(
@@ -1931,17 +1947,18 @@ impl SessionExecutor {
             && e.downcast_ref::<wasmtime::Trap>() == Some(&wasmtime::Trap::OutOfFuel)
         {
             let consumed = fuel.saturating_sub(store.get_fuel().unwrap_or(0));
-            return Err(Error::FuelExhausted {
+            return Err(ErrorKind::FuelExhausted {
                 consumed,
                 limit: fuel,
-            });
+            }
+            .into());
         }
 
         // Restore store and bindings
         self.store = Some(store);
         self.bindings = Some(bindings);
 
-        result.map_err(|e| Error::WasmEngine(format!("WASM {what} error: {e}")))
+        result.map_err(|e| ErrorKind::WasmEngine(format!("WASM {what} error: {e}")).into())
     }
 }
 

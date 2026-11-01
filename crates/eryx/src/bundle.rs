@@ -1,7 +1,7 @@
 //! The file format for a precompiled runtime that can be rebuilt.
 //!
 //! A precompiled component only loads in the eryx version that built it (see
-//! [`Error::IncompatiblePrecompiled`](crate::Error::IncompatiblePrecompiled)).
+//! [`ErrorKind::IncompatiblePrecompiled`](crate::ErrorKind::IncompatiblePrecompiled)).
 //! A bundle stores what the component was built from next to it, so another
 //! eryx version can build it again. `eryx-precompile compile --preinit` and
 //! pyeryx's `SandboxFactory.save()` write bundles, and `eryx-precompile

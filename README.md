@@ -237,7 +237,7 @@ Cancel long-running or infinite executions using `ExecutionHandle`:
 
 ```rust
 use std::time::Duration;
-use eryx::{Sandbox, Error};
+use eryx::{Sandbox, Error, ErrorKind};
 
 #[tokio::main]
 async fn main() -> Result<(), Error> {
@@ -254,9 +254,9 @@ async fn main() -> Result<(), Error> {
     });
 
     // Wait for result
-    match handle.wait().await {
+    match handle.wait().await.map_err(eryx::Error::into_kind) {
         Ok(result) => println!("Completed: {}", result.stdout),
-        Err(Error::Cancelled) => println!("Execution was cancelled"),
+        Err(ErrorKind::Cancelled) => println!("Execution was cancelled"),
         Err(e) => println!("Error: {e}"),
     }
 

@@ -322,7 +322,7 @@ pub fn default_cache_root() -> Result<&'static Path, crate::Error> {
         Err(format!("no usable cache directory ({})", errors.join("; ")))
     })
     .as_deref()
-    .map_err(|e| crate::Error::Initialization(e.clone()))
+    .map_err(|e| crate::ErrorKind::Initialization(e.clone()).into())
 }
 
 #[cfg(feature = "embedded-stdlib")]

@@ -171,18 +171,18 @@ Sandbox execution can fail for various reasons. Eryx provides typed errors to he
 ```rust
 # extern crate eryx;
 # extern crate tokio;
-use eryx::{Sandbox, Error};
+use eryx::{Sandbox, ErrorKind};
 
 #[tokio::main]
 async fn main() -> Result<(), eryx::Error> {
     let sandbox = Sandbox::embedded().build()?;
 
-    match sandbox.execute("raise ValueError('oops')").await {
+    match sandbox.execute("raise ValueError('oops')").await.map_err(eryx::Error::into_kind) {
         Ok(result) => println!("Success: {}", result.stdout_text()),
-        Err(Error::Execution(message)) => {
+        Err(ErrorKind::Execution(message)) => {
             println!("Python error: {}", message);
         }
-        Err(Error::Timeout(duration)) => {
+        Err(ErrorKind::Timeout(duration)) => {
             println!("Execution timed out after {:?}", duration);
         }
         Err(e) => println!("Other error: {}", e),

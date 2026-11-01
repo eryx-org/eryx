@@ -70,36 +70,36 @@ create_exception!(eryx, PoolClosedError, PoolError, "Pool has been closed.");
 /// we can't implement `From<eryx::Error> for PyErr` since neither type is
 /// defined in this crate.
 pub fn eryx_error_to_py(err: eryx::Error) -> PyErr {
-    match err {
-        eryx::Error::Initialization(msg) => InitializationError::new_err(msg),
-        eryx::Error::WasmEngine(msg) => InitializationError::new_err(msg),
-        eryx::Error::EpochTicker(msg) => ExecutionError::new_err(msg),
-        eryx::Error::WasmComponent(e) => InitializationError::new_err(e.to_string()),
-        err @ eryx::Error::IncompatiblePrecompiled { .. } => {
+    match err.into_kind() {
+        eryx::ErrorKind::Initialization(msg) => InitializationError::new_err(msg),
+        eryx::ErrorKind::WasmEngine(msg) => InitializationError::new_err(msg),
+        eryx::ErrorKind::EpochTicker(msg) => ExecutionError::new_err(msg),
+        eryx::ErrorKind::WasmComponent(e) => InitializationError::new_err(e.to_string()),
+        err @ eryx::ErrorKind::IncompatiblePrecompiled { .. } => {
             InitializationError::new_err(err.to_string())
         }
-        eryx::Error::Execution(msg) => ExecutionError::new_err(msg),
+        eryx::ErrorKind::Execution(msg) => ExecutionError::new_err(msg),
         // A subclass of ExecutionError, so callers can tell a script error from
         // a sandbox failure while `except ExecutionError` still catches both.
-        eryx::Error::PythonException(msg) => PythonExceptionError::new_err(msg),
-        eryx::Error::Callback(e) => ExecutionError::new_err(e.to_string()),
-        eryx::Error::ResourceLimit(msg) => ResourceLimitError::new_err(msg),
-        eryx::Error::Timeout(duration) => {
+        eryx::ErrorKind::PythonException(msg) => PythonExceptionError::new_err(msg),
+        eryx::ErrorKind::Callback(e) => ExecutionError::new_err(e.to_string()),
+        eryx::ErrorKind::ResourceLimit(msg) => ResourceLimitError::new_err(msg),
+        eryx::ErrorKind::Timeout(duration) => {
             TimeoutError::new_err(format!("execution timed out after {duration:?}"))
         }
-        eryx::Error::Serialization(msg) => PyValueError::new_err(msg),
-        eryx::Error::MissingPythonStdlib => InitializationError::new_err(
+        eryx::ErrorKind::Serialization(msg) => PyValueError::new_err(msg),
+        eryx::ErrorKind::MissingPythonStdlib => InitializationError::new_err(
             "Python stdlib not found. Use Sandbox() which includes embedded runtime.",
         ),
-        eryx::Error::Snapshot(msg) => InitializationError::new_err(msg),
-        eryx::Error::Cancelled => CancelledError::new_err("execution was cancelled"),
-        eryx::Error::Suspended(reason) => {
+        eryx::ErrorKind::Snapshot(msg) => InitializationError::new_err(msg),
+        eryx::ErrorKind::Cancelled => CancelledError::new_err("execution was cancelled"),
+        eryx::ErrorKind::Suspended(reason) => {
             ExecutionError::new_err(format!("execution suspended: {reason}"))
         }
-        eryx::Error::FuelExhausted { consumed, limit } => ResourceLimitError::new_err(format!(
+        eryx::ErrorKind::FuelExhausted { consumed, limit } => ResourceLimitError::new_err(format!(
             "execution ran out of fuel after {consumed} instructions (limit: {limit})"
         )),
-        eryx::Error::Io(e) => PyRuntimeError::new_err(e.to_string()),
+        eryx::ErrorKind::Io(e) => PyRuntimeError::new_err(e.to_string()),
         // `eryx::Error` is `#[non_exhaustive]`; map any future variants to a
         // generic Eryx error rather than failing to compile.
         other => EryxError::new_err(other.to_string()),

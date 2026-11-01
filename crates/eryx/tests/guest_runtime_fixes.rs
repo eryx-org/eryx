@@ -9,8 +9,8 @@ use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use eryx::{
-    Callback, CallbackError, Error, InProcessSession, NetConfig, PythonExecutor, Sandbox, Session,
-    SessionExecutor, TypedCallback,
+    Callback, CallbackError, Error, ErrorKind, InProcessSession, NetConfig, PythonExecutor,
+    Sandbox, Session, SessionExecutor, TypedCallback,
 };
 use serde_json::{Value, json};
 use tokio::net::TcpListener;
@@ -32,7 +32,7 @@ fn network_sandbox(connect_timeout: Duration, io_timeout: Duration) -> Sandbox {
 
 fn assert_script_error(result: Result<eryx::ExecuteResult, Error>, needle: &str) {
     match result {
-        Err(e @ Error::PythonException(_)) => {
+        Err(e) if matches!(e.kind(), ErrorKind::PythonException(_)) => {
             assert!(e.to_string().contains(needle), "{needle:?} not in: {e}");
         }
         other => panic!("expected a script exception containing {needle:?}, got {other:?}"),

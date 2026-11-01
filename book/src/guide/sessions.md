@@ -444,8 +444,8 @@ seconds (`eryx::session::DEFAULT_STATE_OP_TIMEOUT`). The fuel bound is the
 session's fuel limit raised to at least `eryx::session::MIN_STATE_OP_FUEL`.
 In Rust, `SessionExecutor::set_state_op_timeout` sets the time bound
 directly, and `SessionExecutor::set_state_op_cancellation` lets a
-`CancellationToken` stop a state operation (`Error::Cancelled`). A state
-operation that overruns returns `Error::Timeout` or `Error::FuelExhausted`,
+`CancellationToken` stop a state operation (`ErrorKind::Cancelled`). A state
+operation that overruns returns `ErrorKind::Timeout` or `ErrorKind::FuelExhausted`,
 and the next call resets the session, as after a cancelled call. The gRPC
 server cancels the restore and snapshot when the client disconnects.
 
@@ -489,8 +489,8 @@ async fn main() -> Result<(), eryx::Error> {
     let mut session = InProcessSession::new(&sandbox).await?;
 
     // This will timeout
-    match session.execute("while True: pass").await {
-        Err(eryx::Error::Timeout(_)) => {
+    match session.execute("while True: pass").await.map_err(eryx::Error::into_kind) {
+        Err(eryx::ErrorKind::Timeout(_)) => {
             println!("Execution timed out as expected");
         }
         _ => {}

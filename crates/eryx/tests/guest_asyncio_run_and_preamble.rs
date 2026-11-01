@@ -8,7 +8,8 @@ use std::pin::Pin;
 use std::time::Duration;
 
 use eryx::{
-    CallbackError, Error, InProcessSession, RuntimeLibrary, Sandbox, Session, TypedCallback,
+    CallbackError, Error, ErrorKind, InProcessSession, RuntimeLibrary, Sandbox, Session,
+    TypedCallback,
 };
 use serde_json::{Value, json};
 
@@ -43,7 +44,7 @@ fn sandbox() -> Sandbox {
 
 fn script_error(result: Result<eryx::ExecuteResult, Error>) -> String {
     match result {
-        Err(e @ Error::PythonException(_)) => e.to_string(),
+        Err(e) if matches!(e.kind(), ErrorKind::PythonException(_)) => e.to_string(),
         other => panic!("expected a script exception, got {other:?}"),
     }
 }

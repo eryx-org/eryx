@@ -8,8 +8,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use eryx::{
-    DynamicCallback, Error, InProcessSession, NetConfig, ResourceLimits, RuntimeLibrary, Sandbox,
-    Session,
+    DynamicCallback, ErrorKind, InProcessSession, NetConfig, ResourceLimits, RuntimeLibrary,
+    Sandbox, Session,
 };
 use tokio::io::AsyncWriteExt;
 
@@ -155,7 +155,10 @@ async fn rollback_keeps_an_unreported_state_reset() {
     // Recovers the lost instance, then times out and is rolled back.
     let outcome = session.execute_with_journal("while True: pass", None).await;
     assert!(
-        matches!(outcome.result, Err(Error::Timeout(_))),
+        matches!(
+            outcome.result.as_ref().map_err(|e| e.kind()),
+            Err(ErrorKind::Timeout(_))
+        ),
         "{:?}",
         outcome.result
     );

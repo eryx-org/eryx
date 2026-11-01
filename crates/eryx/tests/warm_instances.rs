@@ -192,7 +192,7 @@ async fn fuel_limits_apply_to_a_warm_instance() {
         .await
         .expect_err("the loop needs far more than 10k fuel");
     assert!(
-        matches!(error, eryx::Error::FuelExhausted { .. }),
+        matches!(error.kind(), eryx::ErrorKind::FuelExhausted { .. }),
         "unexpected error: {error:?}"
     );
 }

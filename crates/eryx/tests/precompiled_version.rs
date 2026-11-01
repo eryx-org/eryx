@@ -1,5 +1,5 @@
 //! A precompiled runtime records the eryx version that built it, and loading
-//! it in any other version fails with [`eryx::Error::IncompatiblePrecompiled`]
+//! it in any other version fails with [`eryx::ErrorKind::IncompatiblePrecompiled`]
 //! rather than a wasmtime or type-checking error.
 #![cfg(feature = "embedded")]
 #![allow(clippy::expect_used, clippy::unwrap_used)]
@@ -76,7 +76,7 @@ fn runtime_from_another_eryx_version_is_rejected() {
 
     let err = load(&path);
     assert!(
-        matches!(err, eryx::Error::IncompatiblePrecompiled { .. }),
+        matches!(err.kind(), eryx::ErrorKind::IncompatiblePrecompiled { .. }),
         "unexpected error: {err:?}"
     );
     let message = err.to_string();

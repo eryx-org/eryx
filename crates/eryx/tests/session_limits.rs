@@ -7,8 +7,8 @@ use std::pin::Pin;
 use std::sync::{Arc, OnceLock};
 
 use eryx::{
-    CallbackError, Error, InProcessSession, PythonExecutor, ResourceLimits, Sandbox, Session,
-    SessionExecutor, TypedCallback,
+    CallbackError, Error, ErrorKind, InProcessSession, PythonExecutor, ResourceLimits, Sandbox,
+    Session, SessionExecutor, TypedCallback,
 };
 use serde_json::{Value, json};
 
@@ -57,7 +57,8 @@ fn assert_memory_limit_error(error: Error) {
 #[cfg(feature = "unstable-vfs")]
 fn assert_vfs_quota_rejected(error: &Error) {
     assert!(
-        matches!(error, Error::PythonException(_)) && error.to_string().contains("OSError"),
+        matches!(error.kind(), ErrorKind::PythonException(_))
+            && error.to_string().contains("OSError"),
         "expected a guest-visible VFS quota rejection, got {error:?}"
     );
 }
@@ -118,16 +119,24 @@ async fn fuel_limit_is_applied_at_construction_and_reset() {
     let mut session = limited_session(ResourceLimits::unlimited().with_max_fuel(1)).await;
     assert!(
         matches!(
-            session.execute("x = 1").run().await,
-            Err(Error::FuelExhausted { limit: 1, .. })
+            session
+                .execute("x = 1")
+                .run()
+                .await
+                .map_err(Error::into_kind),
+            Err(ErrorKind::FuelExhausted { limit: 1, .. })
         ),
         "fuel limit should be applied at construction"
     );
     session.reset(&[]).await.expect("reset");
     assert!(
         matches!(
-            session.execute("x = 1").run().await,
-            Err(Error::FuelExhausted { limit: 1, .. })
+            session
+                .execute("x = 1")
+                .run()
+                .await
+                .map_err(Error::into_kind),
+            Err(ErrorKind::FuelExhausted { limit: 1, .. })
         ),
         "fuel limit should survive reset"
     );
@@ -140,16 +149,16 @@ async fn timeout_limit_is_applied_at_construction_and_reset() {
     let mut session = limited_session(limits).await;
     assert!(
         matches!(
-            session.execute("while True: pass").run().await,
-            Err(Error::Timeout(duration)) if duration == std::time::Duration::from_millis(100)
+            session.execute("while True: pass").run().await.map_err(Error::into_kind),
+            Err(ErrorKind::Timeout(duration)) if duration == std::time::Duration::from_millis(100)
         ),
         "timeout should be applied at construction"
     );
     session.reset(&[]).await.expect("reset");
     assert!(
         matches!(
-            session.execute("while True: pass").run().await,
-            Err(Error::Timeout(duration)) if duration == std::time::Duration::from_millis(100)
+            session.execute("while True: pass").run().await.map_err(Error::into_kind),
+            Err(ErrorKind::Timeout(duration)) if duration == std::time::Duration::from_millis(100)
         ),
         "timeout should survive reset"
     );
@@ -179,16 +188,16 @@ async fn in_process_session_receives_sandbox_limits() {
 
     assert!(
         matches!(
-            session.execute("x = 1").await,
-            Err(Error::FuelExhausted { limit: 1, .. })
+            session.execute("x = 1").await.map_err(Error::into_kind),
+            Err(ErrorKind::FuelExhausted { limit: 1, .. })
         ),
         "InProcessSession must apply the sandbox fuel limit"
     );
     session.reset().await.expect("reset");
     assert!(
         matches!(
-            session.execute("x = 1").await,
-            Err(Error::FuelExhausted { limit: 1, .. })
+            session.execute("x = 1").await.map_err(Error::into_kind),
+            Err(ErrorKind::FuelExhausted { limit: 1, .. })
         ),
         "InProcessSession must preserve the fuel limit after reset"
     );

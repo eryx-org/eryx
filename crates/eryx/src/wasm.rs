@@ -41,7 +41,7 @@ use wasmtime::{
 use wasmtime_wasi::{FsPerms, WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView};
 
 use crate::callback::Callback;
-use crate::error::Error;
+use crate::error::{Error, ErrorKind};
 use crate::fork_local::ForkLocal;
 use crate::trace::TraceEvent;
 use crate::warm::{WarmInstance, WarmPool};
@@ -129,7 +129,7 @@ impl EpochTicker {
                 }
             })
             .map_err(|error| {
-                Error::EpochTicker(format!("Failed to start epoch ticker: {error}"))
+                ErrorKind::EpochTicker(format!("Failed to start epoch ticker: {error}"))
             })?;
 
         Ok(Self {
@@ -173,7 +173,7 @@ fn observe_epoch_ticker(ticker: &mut Option<EpochTicker>) -> std::result::Result
             format!("epoch ticker worker panicked: {panic}")
         }
     };
-    Err(Error::EpochTicker(detail))
+    Err(ErrorKind::EpochTicker(detail).into())
 }
 
 pub(crate) fn is_already_cancelled(token: Option<&CancellationToken>) -> bool {
@@ -250,9 +250,9 @@ pub(crate) fn classify_epoch_interrupt(
     execution_timeout: Option<Duration>,
 ) -> Error {
     if was_cancelled_at_interrupt {
-        Error::Cancelled
+        ErrorKind::Cancelled.into()
     } else {
-        Error::Timeout(execution_timeout.unwrap_or_default())
+        ErrorKind::Timeout(execution_timeout.unwrap_or_default()).into()
     }
 }
 
@@ -765,18 +765,19 @@ static ENGINE_CONFIG: OnceLock<SharedEngineConfig> = OnceLock::new();
 ///
 /// # Errors
 ///
-/// Returns [`Error::WasmEngine`] if a setting (explicit or from the
+/// Returns [`ErrorKind::WasmEngine`] if a setting (explicit or from the
 /// environment) is invalid, or if the configuration was already fixed by an
 /// earlier call or by the shared engine being created. A rejected call
 /// changes nothing.
 pub fn configure_shared_engine(config: SharedEngineConfig) -> std::result::Result<(), Error> {
     config.allocator_settings()?;
     ENGINE_CONFIG.set(config).map_err(|_| {
-        Error::WasmEngine(
+        ErrorKind::WasmEngine(
             "the shared engine configuration is already fixed: configure_shared_engine must \
              be called once, before any sandbox is created"
                 .to_string(),
         )
+        .into()
     })
 }
 
@@ -881,9 +882,10 @@ impl AllocatorSettings {
             Some(v) if v.eq_ignore_ascii_case("pooling") => settings.pooling = true,
             Some(v) if v.eq_ignore_ascii_case("on-demand") => settings.pooling = false,
             Some(v) => {
-                return Err(Error::WasmEngine(format!(
+                return Err(ErrorKind::WasmEngine(format!(
                     "Unknown allocator '{v}' in ERYX_ALLOCATOR. Valid values: pooling, on-demand"
-                )));
+                ))
+                .into());
             }
             None => {}
         }
@@ -895,7 +897,7 @@ impl AllocatorSettings {
                     .ok()
                     .filter(|n| *n > 0)
                     .ok_or_else(|| {
-                        Error::WasmEngine(format!(
+                        ErrorKind::WasmEngine(format!(
                             "ERYX_POOL_INSTANCES must be a positive integer, got '{v}'"
                         ))
                     })?;
@@ -903,12 +905,12 @@ impl AllocatorSettings {
 
         if let Some(v) = lookup("ERYX_POOL_KEEP_RESIDENT_MB") {
             let mib = v.trim().parse::<usize>().map_err(|_| {
-                Error::WasmEngine(format!(
+                ErrorKind::WasmEngine(format!(
                     "ERYX_POOL_KEEP_RESIDENT_MB must be a non-negative integer, got '{v}'"
                 ))
             })?;
             settings.keep_resident_bytes = mib.checked_mul(1 << 20).ok_or_else(|| {
-                Error::WasmEngine(format!(
+                ErrorKind::WasmEngine(format!(
                     "ERYX_POOL_KEEP_RESIDENT_MB is too large, got '{v}'"
                 ))
             })?;
@@ -918,16 +920,17 @@ impl AllocatorSettings {
             Some(v) if v.trim() == "0" => settings.pagemap_scan = false,
             Some(v) if v.trim() == "1" => settings.pagemap_scan = true,
             Some(v) => {
-                return Err(Error::WasmEngine(format!(
+                return Err(ErrorKind::WasmEngine(format!(
                     "ERYX_POOL_PAGEMAP_SCAN must be 0 or 1, got '{v}'"
-                )));
+                ))
+                .into());
             }
             None => {}
         }
 
         if let Some(v) = lookup("ERYX_POOL_RELEASE_INTERVAL_SECS") {
             let secs = v.trim().parse::<u64>().map_err(|_| {
-                Error::WasmEngine(format!(
+                ErrorKind::WasmEngine(format!(
                     "ERYX_POOL_RELEASE_INTERVAL_SECS must be a non-negative integer, got '{v}'"
                 ))
             })?;
@@ -1421,7 +1424,7 @@ pub(crate) async fn instantiate_store(
     let set_fuel = |store: &mut Store<ExecutorState>, fuel: u64| {
         store
             .set_fuel(fuel)
-            .map_err(|e| Error::Initialization(format!("Failed to set fuel: {e}")))
+            .map_err(|e| ErrorKind::Initialization(format!("Failed to set fuel: {e}")))
     };
 
     let mut store = Store::new(pre.engine(), state);
@@ -1432,7 +1435,7 @@ pub(crate) async fn instantiate_store(
     let bindings = pre
         .instantiate_async(&mut store)
         .await
-        .map_err(Error::WasmComponent)?;
+        .map_err(ErrorKind::WasmComponent)?;
 
     set_fuel(&mut store, initial_fuel)?;
     Ok((store, bindings))
@@ -2337,7 +2340,7 @@ impl PythonExecutor {
     pub fn from_binary(wasm_bytes: &[u8]) -> std::result::Result<Self, Error> {
         let engine = Self::shared_engine()?;
         let component =
-            Component::from_binary(&engine, wasm_bytes).map_err(Error::WasmComponent)?;
+            Component::from_binary(&engine, wasm_bytes).map_err(ErrorKind::WasmComponent)?;
         let instance_pre = Self::create_instance_pre(&engine, &component)?;
 
         Ok(Self {
@@ -2366,7 +2369,7 @@ impl PythonExecutor {
     pub fn from_file(path: impl AsRef<std::path::Path>) -> std::result::Result<Self, Error> {
         let engine = Self::shared_engine()?;
         let component =
-            Component::from_file(&engine, path.as_ref()).map_err(Error::WasmComponent)?;
+            Component::from_file(&engine, path.as_ref()).map_err(ErrorKind::WasmComponent)?;
         let instance_pre = Self::create_instance_pre(&engine, &component)?;
 
         Ok(Self {
@@ -2778,7 +2781,7 @@ impl PythonExecutor {
     /// extension) and later loaded with `from_precompiled` or `from_precompiled_file`.
     ///
     /// The output records this eryx version and only loads in it. Loading it
-    /// in any other version fails with [`Error::IncompatiblePrecompiled`], so
+    /// in any other version fails with [`ErrorKind::IncompatiblePrecompiled`], so
     /// precompiled files must be rebuilt after every eryx upgrade.
     ///
     /// # Benefits
@@ -2792,9 +2795,9 @@ impl PythonExecutor {
     /// Returns an error if pre-compilation fails.
     pub fn precompile(wasm_bytes: &[u8]) -> std::result::Result<Vec<u8>, Error> {
         let engine = Self::create_engine_with_target(None)?;
-        engine
-            .precompile_component(wasm_bytes)
-            .map_err(|e| Error::WasmEngine(format!("Failed to precompile component: {e}")))
+        engine.precompile_component(wasm_bytes).map_err(|e| {
+            ErrorKind::WasmEngine(format!("Failed to precompile component: {e}")).into()
+        })
     }
 
     /// Pre-compile a WASM component file to native code.
@@ -2808,7 +2811,7 @@ impl PythonExecutor {
         path: impl AsRef<std::path::Path>,
     ) -> std::result::Result<Vec<u8>, Error> {
         let wasm_bytes = std::fs::read(path.as_ref())
-            .map_err(|e| Error::WasmEngine(format!("Failed to read WASM file: {e}")))?;
+            .map_err(|e| ErrorKind::WasmEngine(format!("Failed to read WASM file: {e}")))?;
         Self::precompile(&wasm_bytes)
     }
 
@@ -2843,9 +2846,9 @@ impl PythonExecutor {
         target: Option<&str>,
     ) -> std::result::Result<Vec<u8>, Error> {
         let engine = Self::create_engine_with_target(target)?;
-        engine
-            .precompile_component(wasm_bytes)
-            .map_err(|e| Error::WasmEngine(format!("Failed to precompile component: {e}")))
+        engine.precompile_component(wasm_bytes).map_err(|e| {
+            ErrorKind::WasmEngine(format!("Failed to precompile component: {e}")).into()
+        })
     }
 
     /// Pre-compile a WASM component file to native code for a specific target.
@@ -2860,7 +2863,7 @@ impl PythonExecutor {
         target: Option<&str>,
     ) -> std::result::Result<Vec<u8>, Error> {
         let wasm_bytes = std::fs::read(path.as_ref())
-            .map_err(|e| Error::WasmEngine(format!("Failed to read WASM file: {e}")))?;
+            .map_err(|e| ErrorKind::WasmEngine(format!("Failed to read WASM file: {e}")))?;
         Self::precompile_with_target(&wasm_bytes, target)
     }
 
@@ -2898,9 +2901,9 @@ impl PythonExecutor {
         cpu_features: CpuFeatureLevel,
     ) -> std::result::Result<Vec<u8>, Error> {
         let engine = Self::create_engine_with_options(target, cpu_features)?;
-        engine
-            .precompile_component(wasm_bytes)
-            .map_err(|e| Error::WasmEngine(format!("Failed to precompile component: {e}")))
+        engine.precompile_component(wasm_bytes).map_err(|e| {
+            ErrorKind::WasmEngine(format!("Failed to precompile component: {e}")).into()
+        })
     }
 
     /// Create a configured wasmtime engine.
@@ -2926,7 +2929,7 @@ impl PythonExecutor {
     /// precompiled runtime also depends on eryx's WIT interface, linked
     /// libraries and engine config, any of which can change in an eryx
     /// release. Naming the eryx version makes a stale file fail with
-    /// [`Error::IncompatiblePrecompiled`] instead of a type-checking error.
+    /// [`ErrorKind::IncompatiblePrecompiled`] instead of a type-checking error.
     pub(crate) fn module_version() -> String {
         format!(
             "eryx {} (wasmtime {})",
@@ -2977,7 +2980,7 @@ impl PythonExecutor {
     /// `ERYX_CRANELIFT_FLAGS=has_avx512f=false,has_avx512bw=false`
     fn create_engine_with_target(target: Option<&str>) -> std::result::Result<Engine, Error> {
         let config = Self::engine_config_with_target(target)?;
-        Engine::new(&config).map_err(|e| Error::WasmEngine(e.to_string()))
+        Engine::new(&config).map_err(|e| ErrorKind::WasmEngine(e.to_string()).into())
     }
 
     /// The configuration [`create_engine_with_target`](Self::create_engine_with_target)
@@ -2992,9 +2995,9 @@ impl PythonExecutor {
             .or_else(|| std::env::var("ERYX_TARGET").ok());
 
         if let Some(ref target_str) = effective_target {
-            config
-                .target(target_str)
-                .map_err(|e| Error::WasmEngine(format!("Invalid target '{target_str}': {e}")))?;
+            config.target(target_str).map_err(|e| {
+                ErrorKind::WasmEngine(format!("Invalid target '{target_str}': {e}"))
+            })?;
         }
 
         // Apply CPU feature level preset and custom Cranelift flags.
@@ -3020,7 +3023,7 @@ impl PythonExecutor {
         // also what stops Cranelift inferring features from the build machine.
         Self::apply_cpu_feature_level(&mut config, cpu_features, target)?;
 
-        Engine::new(&config).map_err(|e| Error::WasmEngine(e.to_string()))
+        Engine::new(&config).map_err(|e| ErrorKind::WasmEngine(e.to_string()).into())
     }
 
     /// The engine options shared by every engine eryx creates.
@@ -3032,7 +3035,7 @@ impl PythonExecutor {
         let mut config = Config::new();
         config
             .module_version(ModuleVersionStrategy::Custom(Self::module_version()))
-            .map_err(|e| Error::WasmEngine(e.to_string()))?;
+            .map_err(|e| ErrorKind::WasmEngine(e.to_string()))?;
         config.wasm_component_model(true);
         // Enable component model async for the `invoke` callback function.
         // The invoke function is async because Python code awaits on it.
@@ -3085,7 +3088,7 @@ impl PythonExecutor {
     fn build_engine(mut config: Config) -> std::result::Result<Engine, Error> {
         let allocator = SharedEngineConfig::current().allocator_settings()?;
         let Some(pooling) = allocator.pooling_config() else {
-            return Engine::new(&config).map_err(|e| Error::WasmEngine(e.to_string()));
+            return Engine::new(&config).map_err(|e| ErrorKind::WasmEngine(e.to_string()).into());
         };
 
         config.allocation_strategy(InstanceAllocationStrategy::Pooling(pooling));
@@ -3103,7 +3106,7 @@ impl PythonExecutor {
                      falling back to on-demand allocation"
                 );
                 config.allocation_strategy(InstanceAllocationStrategy::OnDemand);
-                Engine::new(&config).map_err(|e| Error::WasmEngine(e.to_string()))
+                Engine::new(&config).map_err(|e| ErrorKind::WasmEngine(e.to_string()).into())
             }
         }
     }
@@ -3158,7 +3161,7 @@ impl PythonExecutor {
         if level == CpuFeatureLevel::Native {
             if let Some(target_str) = explicit_target {
                 config.target(target_str).map_err(|e| {
-                    Error::WasmEngine(format!("Invalid target '{target_str}': {e}"))
+                    ErrorKind::WasmEngine(format!("Invalid target '{target_str}': {e}"))
                 })?;
             }
             return Ok(());
@@ -3167,16 +3170,16 @@ impl PythonExecutor {
         let triple = match explicit_target {
             Some(target_str) => {
                 config.target(target_str).map_err(|e| {
-                    Error::WasmEngine(format!("Invalid target '{target_str}': {e}"))
+                    ErrorKind::WasmEngine(format!("Invalid target '{target_str}': {e}"))
                 })?;
-                target_str
-                    .parse::<target_lexicon::Triple>()
-                    .map_err(|e| Error::WasmEngine(format!("Invalid target '{target_str}': {e}")))?
+                target_str.parse::<target_lexicon::Triple>().map_err(|e| {
+                    ErrorKind::WasmEngine(format!("Invalid target '{target_str}': {e}"))
+                })?
             }
             None => {
                 let host = target_lexicon::Triple::host();
                 config.target(&host.to_string()).map_err(|e| {
-                    Error::WasmEngine(format!("Failed to pin host target '{host}': {e}"))
+                    ErrorKind::WasmEngine(format!("Failed to pin host target '{host}': {e}"))
                 })?;
                 host
             }
@@ -3193,11 +3196,12 @@ impl PythonExecutor {
         // presets for x86, so reject other architectures with something more
         // useful than "unknown setting" out of Engine::new.
         if triple.architecture != target_lexicon::Architecture::X86_64 {
-            return Err(Error::WasmEngine(format!(
+            return Err(ErrorKind::WasmEngine(format!(
                 "CPU feature level '{level}' is an x86-64 psABI level and does not \
                  apply to target '{triple}'. Use 'baseline' for a portable build \
                  or 'native' to use this machine's features."
-            )));
+            ))
+            .into());
         }
 
         // SAFETY: `as_str` yields one of Cranelift's x86 psABI preset names.
@@ -3221,7 +3225,7 @@ impl PythonExecutor {
         // Apply CPU feature level preset from environment variable.
         // This provides an easy way to target specific x86-64 microarchitecture levels.
         if let Ok(level) = std::env::var("ERYX_CPU_FEATURES") {
-            let level: CpuFeatureLevel = level.parse().map_err(Error::WasmEngine)?;
+            let level: CpuFeatureLevel = level.parse().map_err(ErrorKind::WasmEngine)?;
             // Pass the target on: with `None` the helper pins the host triple,
             // which would silently override a cross-compilation target.
             Self::apply_cpu_feature_level(config, level, target)?;
@@ -3263,7 +3267,7 @@ impl PythonExecutor {
 
         // Add WASI support (p2 = preview 2)
         wasmtime_wasi::p2::add_to_linker_async(&mut linker)
-            .map_err(|e| Error::WasmEngine(format!("Failed to add WASI to linker: {e}")))?;
+            .map_err(|e| ErrorKind::WasmEngine(format!("Failed to add WASI to linker: {e}")))?;
 
         // Add hybrid VFS filesystem support (overrides WASI filesystem bindings)
         // The hybrid VFS routes:
@@ -3275,7 +3279,7 @@ impl PythonExecutor {
             // Allow shadowing to override WASI filesystem bindings
             linker.allow_shadowing(true);
             eryx_vfs::add_hybrid_vfs_to_linker(&mut linker).map_err(|e| {
-                Error::WasmEngine(format!("Failed to add hybrid VFS to linker: {e}"))
+                ErrorKind::WasmEngine(format!("Failed to add hybrid VFS to linker: {e}"))
             })?;
             linker.allow_shadowing(false);
         }
@@ -3283,18 +3287,18 @@ impl PythonExecutor {
         // Add sandbox bindings (includes TCP/TLS interfaces)
         tracing::debug!("Adding sandbox bindings to linker");
         Sandbox::add_to_linker::<_, HasSelf<ExecutorState>>(&mut linker, |state| state)
-            .map_err(|e| Error::WasmEngine(format!("Failed to add sandbox to linker: {e}")))?;
+            .map_err(|e| ErrorKind::WasmEngine(format!("Failed to add sandbox to linker: {e}")))?;
         tracing::debug!("Sandbox bindings added successfully");
 
         // Create pre-instantiated component
         // This validates that all imports are satisfied and prepares for fast instantiation
         let instance_pre = linker
             .instantiate_pre(component)
-            .map_err(|e| Error::WasmEngine(format!("Failed to create instance_pre: {e}")))?;
+            .map_err(|e| ErrorKind::WasmEngine(format!("Failed to create instance_pre: {e}")))?;
 
         // Wrap in SandboxPre for typed access to exports
         SandboxPre::new(instance_pre)
-            .map_err(|e| Error::WasmEngine(format!("Failed to create SandboxPre: {e}")))
+            .map_err(|e| ErrorKind::WasmEngine(format!("Failed to create SandboxPre: {e}")).into())
     }
 
     /// Execute Python code with a fluent builder API.
@@ -3360,7 +3364,7 @@ impl PythonExecutor {
         // tick. Cancellation that races this check is still observed by the
         // Store-local deadline callback below.
         if is_already_cancelled(cancellation_token.as_ref()) {
-            return Err(Error::Cancelled);
+            return Err(ErrorKind::Cancelled.into());
         }
 
         // Build callback info for introspection
@@ -3397,7 +3401,7 @@ impl PythonExecutor {
             wasi_builder
                 .preopened_dir(stdlib_path, "/python-stdlib", FsPerms::ReadOnly)
                 .map_err(|e| {
-                    Error::Initialization(format!("Failed to mount Python stdlib: {e}"))
+                    ErrorKind::Initialization(format!("Failed to mount Python stdlib: {e}"))
                 })?;
         }
 
@@ -3412,7 +3416,9 @@ impl PythonExecutor {
             let mount_path = site_packages_mount_path(i);
             wasi_builder
                 .preopened_dir(site_packages_path, &mount_path, FsPerms::ReadOnly)
-                .map_err(|e| Error::Initialization(format!("Failed to mount {mount_path}: {e}")))?;
+                .map_err(|e| {
+                    ErrorKind::Initialization(format!("Failed to mount {mount_path}: {e}"))
+                })?;
         }
 
         let wasi = wasi_builder.build();
@@ -3478,12 +3484,12 @@ impl PythonExecutor {
                 output.stderr.extend(fd_stderr);
             }
             // The traceback is the error's stderr.
-            Err(Error::PythonException(traceback)) => {
-                append_fd_stderr(traceback, &fd_stderr);
+            Err(e) => {
+                if let ErrorKind::PythonException(traceback) = e.kind_mut() {
+                    append_fd_stderr(traceback, &fd_stderr);
+                }
             }
-            Err(_) => {}
         }
-
         // Teardown (resetting the memory slot) and re-instantiation happen off
         // the request path when the warm pool is active. A failed execution
         // (timeout, cancellation, trap) may leave host calls suspended in the
@@ -3521,7 +3527,7 @@ impl PythonExecutor {
             *store.data_mut() = state;
             store
                 .set_fuel(initial_fuel)
-                .map_err(|e| Error::Initialization(format!("Failed to set fuel: {e}")))?;
+                .map_err(|e| ErrorKind::Initialization(format!("Failed to set fuel: {e}")))?;
             return Ok((store, bindings));
         }
 
@@ -3549,8 +3555,8 @@ impl PythonExecutor {
                     bindings.call_set_result_variable(accessor, name).await
                 })
                 .await
-                .map_err(|e| Error::Execution(format!("set-result-variable failed: {e:?}")))?
-                .map_err(Error::WasmComponent)?;
+                .map_err(|e| ErrorKind::Execution(format!("set-result-variable failed: {e:?}")))?
+                .map_err(ErrorKind::WasmComponent)?;
         }
 
         tracing::debug!(code_len = code.len(), "Executing Python code");
@@ -3632,15 +3638,15 @@ impl PythonExecutor {
                 // suspension rather than a real fuel-limit overrun (the suspended
                 // flag is only set on the suspension path).
                 if let Some(reason) = store.data().suspended.clone() {
-                    Error::Suspended(reason)
+                    ErrorKind::Suspended(reason).into()
                 } else {
                     let remaining = store.get_fuel().unwrap_or(0);
                     let consumed = initial_fuel.saturating_sub(remaining);
                     let limit = fuel_limit.unwrap_or(u64::MAX);
-                    Error::FuelExhausted { consumed, limit }
+                    ErrorKind::FuelExhausted { consumed, limit }.into()
                 }
             } else {
-                Error::Execution(format!("WASM execution error: {e:?}"))
+                ErrorKind::Execution(format!("WASM execution error: {e:?}")).into()
             }
         })?;
 
@@ -3650,8 +3656,8 @@ impl PythonExecutor {
         // The inner WIT Err is the guest's logical execution error — for real
         // input that is always an uncaught Python exception (its traceback).
         let wit_output = wasmtime_result
-            .map_err(|e| Error::Execution(format!("WASM execution error: {e:?}")))?
-            .map_err(Error::PythonException)?;
+            .map_err(|e| ErrorKind::Execution(format!("WASM execution error: {e:?}")))?
+            .map_err(ErrorKind::PythonException)?;
 
         // Get peak memory from the store before it's dropped
         let peak_memory_bytes = store.data().memory_tracker.peak_memory_bytes();
@@ -3696,7 +3702,7 @@ pub(crate) fn append_fd_stderr(traceback: &mut String, fd_stderr: &[u8]) {
 /// Returns an error if the event JSON cannot be parsed.
 pub fn parse_trace_event(request: &TraceRequest) -> std::result::Result<TraceEvent, Error> {
     let event_data: serde_json::Value = serde_json::from_str(&request.event_json)
-        .map_err(|e| Error::Serialization(e.to_string()))?;
+        .map_err(|e| ErrorKind::Serialization(e.to_string()))?;
 
     let event_type = event_data
         .get("type")
@@ -3766,7 +3772,7 @@ pub fn parse_trace_event(request: &TraceRequest) -> std::result::Result<TraceEve
 }
 
 /// Map an error from loading a precompiled component, reporting a file built
-/// by another eryx version as [`Error::IncompatiblePrecompiled`].
+/// by another eryx version as [`ErrorKind::IncompatiblePrecompiled`].
 fn deserialize_error(err: wasmtime::Error) -> Error {
     // wasmtime only reports the stored version as text. If the wording ever
     // changes, callers just get the raw error again.
@@ -3775,12 +3781,13 @@ fn deserialize_error(err: wasmtime::Error) -> Error {
     if let Some((_, rest)) = message.split_once(PREFIX)
         && let Some((built_by, _)) = rest.split_once('\'')
     {
-        return Error::IncompatiblePrecompiled {
+        return ErrorKind::IncompatiblePrecompiled {
             built_by: built_by.to_owned(),
             expected: PythonExecutor::module_version(),
-        };
+        }
+        .into();
     }
-    Error::WasmComponent(err)
+    ErrorKind::WasmComponent(err).into()
 }
 
 #[cfg(test)]
@@ -3821,7 +3828,9 @@ mod tests {
         }
 
         let error = observe_epoch_ticker(&mut ticker).unwrap_err();
-        assert!(matches!(error, Error::EpochTicker(message) if message.contains("exited")));
+        assert!(
+            matches!(error.kind(), ErrorKind::EpochTicker(message) if message.contains("exited"))
+        );
         assert!(ticker.is_none());
 
         // The cleared slot is ready for a later startup attempt. This short
@@ -3871,12 +3880,12 @@ mod tests {
         token.cancel();
 
         assert!(matches!(
-            classify_epoch_interrupt(was_cancelled_at_interrupt, Some(timeout)),
-            Error::Timeout(duration) if duration == timeout
+            classify_epoch_interrupt(was_cancelled_at_interrupt, Some(timeout)).kind(),
+            ErrorKind::Timeout(duration) if *duration == timeout
         ));
         assert!(matches!(
-            classify_epoch_interrupt(true, Some(timeout)),
-            Error::Cancelled
+            classify_epoch_interrupt(true, Some(timeout)).kind(),
+            ErrorKind::Cancelled
         ));
     }
 
@@ -3982,7 +3991,10 @@ mod tests {
             [("ERYX_POOL_RELEASE_INTERVAL_SECS", "soon")],
         ] {
             let err = allocator_settings(&vars).expect_err("invalid setting must be rejected");
-            assert!(matches!(err, Error::WasmEngine(_)), "{vars:?}: {err:?}");
+            assert!(
+                matches!(err.kind(), ErrorKind::WasmEngine(_)),
+                "{vars:?}: {err:?}"
+            );
         }
     }
 
@@ -4024,7 +4036,7 @@ mod tests {
         let config = SharedEngineConfig::default().with_pool_instances(0);
         let err = AllocatorSettings::from_lookup(|name| config.lookup(name, |_| None))
             .expect_err("zero pool instances must be rejected");
-        assert!(matches!(err, Error::WasmEngine(_)), "{err:?}");
+        assert!(matches!(err.kind(), ErrorKind::WasmEngine(_)), "{err:?}");
     }
 
     /// The pooling configuration must be accepted by wasmtime. That

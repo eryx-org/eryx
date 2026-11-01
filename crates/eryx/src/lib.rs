@@ -109,7 +109,7 @@ pub mod preinit {
 pub use callback::{
     Callback, CallbackError, DynamicCallback, DynamicCallbackBuilder, TypedCallback, empty_schema,
 };
-pub use error::Error;
+pub use error::{Error, ErrorKind};
 pub use library::RuntimeLibrary;
 pub use net::{
     ConnectionManager, DEFAULT_BLOCKED_NETWORKS, IpNet, NetConfig, Resolver, TcpError, TlsError,

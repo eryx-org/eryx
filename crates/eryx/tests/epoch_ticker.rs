@@ -55,7 +55,10 @@ async fn test_epoch_ticker_starts_lazily_and_is_shared() {
         .with_timeout(std::time::Duration::from_millis(100))
         .run()
         .await;
-    assert!(matches!(timed, Err(eryx::Error::Timeout(_))));
+    assert!(matches!(
+        timed.as_ref().map_err(|e| e.kind()),
+        Err(eryx::ErrorKind::Timeout(_))
+    ));
     assert_eq!(wait_for_ticker_count(1).await, Some(1));
 
     for _ in 0..3 {
@@ -64,14 +67,20 @@ async fn test_epoch_ticker_starts_lazily_and_is_shared() {
             .with_timeout(std::time::Duration::from_millis(50))
             .run()
             .await;
-        assert!(matches!(timed, Err(eryx::Error::Timeout(_))));
+        assert!(matches!(
+            timed.as_ref().map_err(|e| e.kind()),
+            Err(eryx::ErrorKind::Timeout(_))
+        ));
 
         let python_error = executor
             .execute("raise ValueError('unwind')")
             .with_timeout(std::time::Duration::from_millis(50))
             .run()
             .await;
-        assert!(matches!(python_error, Err(eryx::Error::PythonException(_))));
+        assert!(matches!(
+            python_error.as_ref().map_err(|e| e.kind()),
+            Err(eryx::ErrorKind::PythonException(_))
+        ));
         assert_eq!(epoch_ticker_thread_count(), Some(1));
     }
 }

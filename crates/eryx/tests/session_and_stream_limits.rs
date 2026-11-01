@@ -5,7 +5,7 @@
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
-use eryx::{Error, PythonExecutor, ResourceLimits, Session as _, SessionExecutor};
+use eryx::{Error, ErrorKind, PythonExecutor, ResourceLimits, Session as _, SessionExecutor};
 
 static EXECUTOR: OnceLock<Arc<PythonExecutor>> = OnceLock::new();
 
@@ -51,7 +51,7 @@ async fn snapshot_state_is_bounded_by_execution_timeout() {
     let err = bounded(session.snapshot_state())
         .await
         .expect_err("snapshot should time out");
-    assert!(matches!(err, Error::Timeout(_)), "got {err:?}");
+    assert!(matches!(err.kind(), ErrorKind::Timeout(_)), "got {err:?}");
 
     // The session is usable again, from a fresh state.
     let output = bounded(session.execute("print('spin' in globals())").run())
@@ -75,7 +75,7 @@ async fn clear_state_is_bounded_by_execution_timeout() {
     let err = bounded(session.clear_state())
         .await
         .expect_err("clear should time out");
-    assert!(matches!(err, Error::Timeout(_)), "got {err:?}");
+    assert!(matches!(err.kind(), ErrorKind::Timeout(_)), "got {err:?}");
 
     bounded(session.execute("x = 1").run())
         .await
@@ -111,7 +111,7 @@ async fn state_op_timeout_can_be_set_separately() {
     let err = bounded(session.snapshot_state())
         .await
         .expect_err("snapshot should time out");
-    assert!(matches!(err, Error::Timeout(_)), "got {err:?}");
+    assert!(matches!(err.kind(), ErrorKind::Timeout(_)), "got {err:?}");
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -135,12 +135,15 @@ async fn state_ops_can_be_cancelled() {
     let err = bounded(session.snapshot_state())
         .await
         .expect_err("snapshot should be cancelled");
-    assert!(matches!(err, Error::Cancelled), "got {err:?}");
+    assert!(matches!(err.kind(), ErrorKind::Cancelled), "got {err:?}");
     assert!(started.elapsed() < Duration::from_secs(10));
 
     // A cancelled token stops later state ops up front; without one the
     // session resets and carries on.
-    assert!(matches!(session.clear_state().await, Err(Error::Cancelled)));
+    assert!(matches!(
+        session.clear_state().await.map_err(Error::into_kind),
+        Err(ErrorKind::Cancelled)
+    ));
     session.set_state_op_cancellation(None);
     let output = bounded(session.execute("print('spin' in globals())").run())
         .await
@@ -166,7 +169,10 @@ async fn state_ops_are_bounded_by_fuel() {
         .await
         .expect("bounded by fuel")
         .expect_err("snapshot should run out of fuel");
-    assert!(matches!(err, Error::FuelExhausted { .. }), "got {err:?}");
+    assert!(
+        matches!(err.kind(), ErrorKind::FuelExhausted { .. }),
+        "got {err:?}"
+    );
 }
 
 const FD_WRITES: &str = "import os, sys\nos.write(1, b'fd-out\\n')\nos.write(2, b'fd-err\\n')\nsys.__stdout__.write('dunder-out\\n')\nsys.__stdout__.flush()";
@@ -204,7 +210,7 @@ async fn session_captures_direct_fd_writes_per_execution() {
 const FD_WRITE_THEN_RAISE: &str = "import os\nos.write(2, b'fd-err\\n')\nraise ValueError('boom')";
 
 fn assert_traceback_has_fd_write(err: Error) {
-    let Error::PythonException(traceback) = err else {
+    let ErrorKind::PythonException(traceback) = err.kind() else {
         panic!("expected a Python exception, got {err:?}");
     };
     assert!(traceback.contains("ValueError"), "{traceback:?}");
@@ -277,19 +283,19 @@ async fn python_exception_text_is_redacted() {
     let code = "import os\nraise RuntimeError(os.environ['API_KEY'])";
 
     let err = sandbox.execute(code).await.expect_err("raises");
-    let Error::PythonException(traceback) = err else {
+    let ErrorKind::PythonException(traceback) = err.kind() else {
         panic!("expected a Python exception, got {err:?}");
     };
-    assert_placeholder_redacted(&traceback);
+    assert_placeholder_redacted(traceback);
 
     let mut session = eryx::InProcessSession::new(&sandbox)
         .await
         .expect("session");
     let err = session.execute(code).await.expect_err("raises");
-    let Error::PythonException(traceback) = err else {
+    let ErrorKind::PythonException(traceback) = err.kind() else {
         panic!("expected a Python exception, got {err:?}");
     };
-    assert_placeholder_redacted(&traceback);
+    assert_placeholder_redacted(traceback);
 }
 
 #[tokio::test]

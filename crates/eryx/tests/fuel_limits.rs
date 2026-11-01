@@ -152,7 +152,7 @@ async fn test_fuel_limit_exceeded_produces_error() {
     assert!(result.is_err(), "Should fail when fuel is exhausted");
     let error = result.unwrap_err();
     assert!(
-        matches!(error, eryx::Error::FuelExhausted { .. }),
+        matches!(error.kind(), eryx::ErrorKind::FuelExhausted { .. }),
         "Error should be FuelExhausted variant: {:?}",
         error
     );

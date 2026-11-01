@@ -3,9 +3,81 @@
 use crate::callback::CallbackError;
 
 /// The main error type for Eryx operations.
+///
+/// An `Error` says what went wrong: match on [`kind`](Self::kind).
+///
+/// ```
+/// # use eryx::{Error, ErrorKind};
+/// # fn classify(err: &Error) {
+/// match err.kind() {
+///     ErrorKind::Timeout(_) | ErrorKind::Cancelled => println!("stopped early"),
+///     other => println!("failed: {other}"),
+/// }
+/// # }
+/// ```
+#[derive(Debug)]
+#[non_exhaustive]
+pub struct Error {
+    kind: ErrorKind,
+}
+
+impl Error {
+    /// What went wrong.
+    #[must_use]
+    pub fn kind(&self) -> &ErrorKind {
+        &self.kind
+    }
+
+    pub(crate) fn kind_mut(&mut self) -> &mut ErrorKind {
+        &mut self.kind
+    }
+
+    /// Consume the error, keeping only its [`ErrorKind`].
+    #[must_use]
+    pub fn into_kind(self) -> ErrorKind {
+        self.kind
+    }
+}
+
+impl std::fmt::Display for Error {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.kind.fmt(f)
+    }
+}
+
+impl std::error::Error for Error {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        std::error::Error::source(&self.kind)
+    }
+}
+
+impl From<ErrorKind> for Error {
+    fn from(kind: ErrorKind) -> Self {
+        Self { kind }
+    }
+}
+
+/// Let `?` convert the source errors `ErrorKind` wraps straight into `Error`.
+macro_rules! error_from {
+    ($($source:ty),+) => {$(
+        impl From<$source> for Error {
+            fn from(err: $source) -> Self {
+                ErrorKind::from(err).into()
+            }
+        }
+    )+};
+}
+error_from!(
+    wasmtime::Error,
+    CallbackError,
+    std::io::Error,
+    serde_json::Error
+);
+
+/// What went wrong, as a matchable category. See [`Error::kind`].
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
-pub enum Error {
+pub enum ErrorKind {
     /// Error during sandbox initialization.
     #[error("initialization failed: {0}")]
     Initialization(String),
@@ -52,7 +124,7 @@ pub enum Error {
     /// Error during Python execution machinery (e.g. a WASM trap, the store or
     /// bindings being unavailable, or invalid input). This is a *sandbox* failure
     /// — the runtime could not faithfully execute the script. An uncaught
-    /// exception raised *by* the script is [`Error::PythonException`] instead.
+    /// exception raised *by* the script is [`ErrorKind::PythonException`] instead.
     #[error("execution failed: {0}")]
     Execution(String),
 
@@ -135,7 +207,7 @@ fn describe_built_by(built_by: &str) -> String {
     }
 }
 
-impl From<serde_json::Error> for Error {
+impl From<serde_json::Error> for ErrorKind {
     fn from(err: serde_json::Error) -> Self {
         Self::Serialization(err.to_string())
     }
@@ -146,13 +218,14 @@ impl From<serde_json::Error> for Error {
 /// Currently this rejects embedded NUL bytes: the code is handed to the guest
 /// as a C string, so a NUL would be caught there and surface as an opaque guest
 /// error. Validating host-side keeps it classified as a sandbox/input failure
-/// ([`Error::Execution`]) rather than being mistaken for an uncaught Python
-/// exception ([`Error::PythonException`]).
+/// ([`ErrorKind::Execution`]) rather than being mistaken for an uncaught Python
+/// exception ([`ErrorKind::PythonException`]).
 pub(crate) fn validate_user_code(code: &str) -> Result<(), Error> {
     if code.contains('\0') {
-        return Err(Error::Execution(
+        return Err(ErrorKind::Execution(
             "code contains NUL bytes, which cannot be executed".to_string(),
-        ));
+        )
+        .into());
     }
     Ok(())
 }
