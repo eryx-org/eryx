@@ -28,12 +28,10 @@
 //! use std::time::Duration;
 //!
 //! // Create a pool with custom configuration
-//! let config = PoolConfig {
-//!     max_size: 10,
-//!     min_idle: 2,
-//!     idle_timeout: Duration::from_secs(300),
-//!     ..Default::default()
-//! };
+//! let config = PoolConfig::default()
+//!     .with_max_size(10)
+//!     .with_min_idle(2)
+//!     .with_idle_timeout(Duration::from_secs(300));
 //!
 //! let pool = SandboxPool::new(Sandbox::embedded(), config).await?;
 //!
@@ -67,6 +65,7 @@ use crate::trace::{OutputHandler, TraceHandler};
 
 /// Configuration for a sandbox pool.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct PoolConfig {
     /// Maximum number of sandboxes in the pool.
     ///
@@ -101,6 +100,36 @@ pub struct PoolConfig {
     ///
     /// Default: 30 seconds
     pub acquire_timeout: Duration,
+}
+
+impl PoolConfig {
+    /// Set [`max_size`](Self::max_size).
+    #[must_use]
+    pub fn with_max_size(mut self, max_size: usize) -> Self {
+        self.max_size = max_size;
+        self
+    }
+
+    /// Set [`min_idle`](Self::min_idle).
+    #[must_use]
+    pub fn with_min_idle(mut self, min_idle: usize) -> Self {
+        self.min_idle = min_idle;
+        self
+    }
+
+    /// Set [`idle_timeout`](Self::idle_timeout).
+    #[must_use]
+    pub fn with_idle_timeout(mut self, idle_timeout: Duration) -> Self {
+        self.idle_timeout = idle_timeout;
+        self
+    }
+
+    /// Set [`acquire_timeout`](Self::acquire_timeout).
+    #[must_use]
+    pub fn with_acquire_timeout(mut self, acquire_timeout: Duration) -> Self {
+        self.acquire_timeout = acquire_timeout;
+        self
+    }
 }
 
 impl Default for PoolConfig {

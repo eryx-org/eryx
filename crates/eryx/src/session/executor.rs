@@ -394,6 +394,7 @@ impl<'a> SessionExecuteBuilder<'a> {
 /// because the host process itself performs the writes.
 #[cfg(feature = "unstable-vfs")]
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct VolumeMount {
     /// Absolute path on the host filesystem.
     pub host_path: std::path::PathBuf,
@@ -450,6 +451,7 @@ impl VolumeMount {
 /// This allows customizing the VFS mount path and permissions.
 #[cfg(feature = "unstable-vfs")]
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct VfsConfig {
     /// The guest path where VFS storage is mounted (default: "/data").
     pub mount_path: String,

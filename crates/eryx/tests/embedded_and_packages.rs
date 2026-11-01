@@ -178,11 +178,7 @@ fn filesystem_cache_basic() {
 
     let cache = FilesystemCache::new(&temp_dir).unwrap();
 
-    let key = CacheKey {
-        extensions_hash: [1u8; 32],
-        eryx_version: "test",
-        wasmtime_version: "test",
-    };
+    let key = CacheKey::new([1u8; 32], "test", "test");
 
     // Initially empty
     assert!(cache.get(&key).is_none());
@@ -203,11 +199,7 @@ fn in_memory_cache_basic() {
 
     let cache = InMemoryCache::new();
 
-    let key = CacheKey {
-        extensions_hash: [2u8; 32],
-        eryx_version: "test",
-        wasmtime_version: "test",
-    };
+    let key = CacheKey::new([2u8; 32], "test", "test");
 
     // Initially empty
     assert!(cache.get(&key).is_none());
@@ -225,11 +217,7 @@ fn no_cache_never_stores() {
 
     let cache = NoCache;
 
-    let key = CacheKey {
-        extensions_hash: [3u8; 32],
-        eryx_version: "test",
-        wasmtime_version: "test",
-    };
+    let key = CacheKey::new([3u8; 32], "test", "test");
 
     // Store something
     cache.put(&key, vec![1, 2, 3]).unwrap();

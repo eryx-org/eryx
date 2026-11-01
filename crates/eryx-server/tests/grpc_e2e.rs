@@ -53,11 +53,9 @@ async fn start_server_with(
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
 
-    let pool_config = PoolConfig {
-        max_size,
-        min_idle: 1,
-        ..Default::default()
-    };
+    let pool_config = PoolConfig::default()
+        .with_max_size(max_size)
+        .with_min_idle(1);
 
     let pool = SandboxPool::new(Sandbox::embedded(), pool_config)
         .await

@@ -11,6 +11,7 @@ use crate::callback::Callback;
 /// - Python preamble code (wrapper classes, helpers, etc.)
 /// - Type stubs (.pyi content) for LLM context windows
 #[derive(Default)]
+#[non_exhaustive]
 pub struct RuntimeLibrary {
     /// Callbacks provided by this library.
     pub callbacks: Vec<Box<dyn Callback>>,

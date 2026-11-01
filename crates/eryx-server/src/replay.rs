@@ -189,10 +189,9 @@ impl Default for JournalSigner {
 /// matches on callback name + canonical args (FIFO per key), not the code.
 #[must_use]
 pub fn journal_from_proto(code: &str, proto: &pb::CallbackJournal) -> CallbackJournal {
-    CallbackJournal {
-        code: code.to_string(),
-        entries: proto.entries.iter().map(entry_from_proto).collect(),
-    }
+    let mut journal = CallbackJournal::new(code);
+    journal.entries = proto.entries.iter().map(entry_from_proto).collect();
+    journal
 }
 
 fn entry_from_proto(entry: &pb::CallbackJournalEntry) -> CallbackJournalEntry {
@@ -203,13 +202,13 @@ fn entry_from_proto(entry: &pb::CallbackJournalEntry) -> CallbackJournalEntry {
         _ => Ok(serde_json::from_str(&entry.value)
             .unwrap_or_else(|_| serde_json::Value::String(entry.value.clone()))),
     };
-    CallbackJournalEntry {
-        index: entry.index,
-        name: entry.name.clone(),
-        args_hash: entry.args_hash,
-        args_json: entry.args_json.clone(),
+    CallbackJournalEntry::new(
+        entry.index,
+        entry.name.clone(),
+        entry.args_hash,
+        entry.args_json.clone(),
         result,
-    }
+    )
 }
 
 /// Convert an eryx [`CallbackJournal`] recorded during a run into its proto form
@@ -256,25 +255,11 @@ mod tests {
 
     #[test]
     fn proto_roundtrip_ok_and_err_entries() {
-        let journal = CallbackJournal {
-            code: "code".into(),
-            entries: vec![
-                CallbackJournalEntry {
-                    index: 0,
-                    name: "fetch".into(),
-                    args_hash: 42,
-                    args_json: r#"{"q":"x"}"#.into(),
-                    result: Ok(json!({"v": 1})),
-                },
-                CallbackJournalEntry {
-                    index: 1,
-                    name: "fail".into(),
-                    args_hash: 7,
-                    args_json: "{}".into(),
-                    result: Err("execution failed: boom".into()),
-                },
-            ],
-        };
+        let mut journal = CallbackJournal::new("code");
+        journal.entries = vec![
+            CallbackJournalEntry::new(0, "fetch", 42, r#"{"q":"x"}"#, Ok(json!({"v": 1}))),
+            CallbackJournalEntry::new(1, "fail", 7, "{}", Err("execution failed: boom".into())),
+        ];
 
         let proto = journal_to_proto(&journal);
         assert_eq!(proto.entries.len(), 2);

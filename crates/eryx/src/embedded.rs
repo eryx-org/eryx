@@ -47,6 +47,7 @@ const RUNTIME_CONTENT_HASH: &str = env!("ERYX_EMBEDDED_RUNTIME_HASH");
 
 /// Paths to extracted embedded resources.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct EmbeddedResources {
     /// Path to the extracted Python standard library directory.
     pub stdlib_path: PathBuf,

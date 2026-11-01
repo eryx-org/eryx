@@ -75,11 +75,7 @@ async fn start_tls_server(tls: ServerTlsConfig) -> std::net::SocketAddr {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
 
-    let pool_config = PoolConfig {
-        max_size: 4,
-        min_idle: 1,
-        ..Default::default()
-    };
+    let pool_config = PoolConfig::default().with_max_size(4).with_min_idle(1);
     let pool = SandboxPool::new(Sandbox::embedded(), pool_config)
         .await
         .expect("failed to create sandbox pool");

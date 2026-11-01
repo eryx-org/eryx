@@ -108,6 +108,7 @@ pub trait ComponentCache: Send + Sync {
 /// - eryx-runtime version (for base library changes)
 /// - wasmtime version (for compilation compatibility)
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub struct CacheKey {
     /// Hash of the inputs identifying the pre-compiled component.
     pub extensions_hash: [u8; 32],
@@ -118,6 +119,20 @@ pub struct CacheKey {
 }
 
 impl CacheKey {
+    /// A cache key for the given inputs.
+    #[must_use]
+    pub fn new(
+        extensions_hash: [u8; 32],
+        eryx_version: &'static str,
+        wasmtime_version: &'static str,
+    ) -> Self {
+        Self {
+            extensions_hash,
+            eryx_version,
+            wasmtime_version,
+        }
+    }
+
     /// Cache key for the base embedded runtime with no extensions.
     ///
     /// This is a sentinel key used to cache the `SandboxPre` for the

@@ -200,6 +200,7 @@ impl CallbackOutcome {
 
 /// A single recorded callback invocation.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct CallbackJournalEntry {
     /// Position in the invocation sequence (0-indexed, in initiation order).
     pub index: u32,
@@ -214,8 +215,29 @@ pub struct CallbackJournalEntry {
     pub result: Result<serde_json::Value, String>,
 }
 
+impl CallbackJournalEntry {
+    /// A recorded invocation of the callback `name`.
+    #[must_use]
+    pub fn new(
+        index: u32,
+        name: impl Into<String>,
+        args_hash: u64,
+        args_json: impl Into<String>,
+        result: Result<serde_json::Value, String>,
+    ) -> Self {
+        Self {
+            index,
+            name: name.into(),
+            args_hash,
+            args_json: args_json.into(),
+            result,
+        }
+    }
+}
+
 /// An ordered journal of callback invocations from a single execution.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct CallbackJournal {
     /// The script that produced this journal.
     pub code: String,

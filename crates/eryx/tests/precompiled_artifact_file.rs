@@ -130,11 +130,9 @@ async fn precompiled_file_builder_maps_once_for_a_pool() {
             .with_precompiled_file(&path)
             .with_python_stdlib(resources.stdlib())
     };
-    let config = eryx::PoolConfig {
-        max_size: 2,
-        min_idle: 0,
-        ..eryx::PoolConfig::default()
-    };
+    let config = eryx::PoolConfig::default()
+        .with_max_size(2)
+        .with_min_idle(0);
     let pool = eryx::SandboxPool::new(builder, config).await.unwrap();
 
     let first = pool.acquire().await.unwrap();
