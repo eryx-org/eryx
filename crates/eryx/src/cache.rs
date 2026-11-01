@@ -303,8 +303,13 @@ fn hex_encode(bytes: &[u8]) -> String {
 /// temp-dir fallback (`$TMPDIR/eryx-<uid>` on Unix) that can be created and
 /// passes the same checks as [`FilesystemCache::new`]. Resolved once per
 /// process.
+///
+/// # Errors
+///
+/// Returns an error if none of the candidates can be created or passes the
+/// checks.
 #[cfg(feature = "embedded-stdlib")]
-pub(crate) fn default_cache_root() -> Result<&'static Path, crate::Error> {
+pub fn default_cache_root() -> Result<&'static Path, crate::Error> {
     static ROOT: OnceLock<Result<PathBuf, String>> = OnceLock::new();
     ROOT.get_or_init(|| {
         let mut errors = Vec::new();

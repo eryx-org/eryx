@@ -4,8 +4,9 @@
 //! The factory bundles packages and pre-imports into a reusable snapshot.
 
 use std::io::Write as _;
+use std::ops::Range;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyDict};
@@ -18,7 +19,7 @@ use crate::sandbox::{PyOutputHandler, Sandbox, apply_secrets, extract_secrets};
 use crate::session::Session;
 
 const FACTORY_MAGIC: &[u8; 4] = b"ERYX";
-const FACTORY_VERSION: u32 = 3;
+const FACTORY_VERSION: u32 = 4;
 
 /// A factory for creating sandboxes with custom packages.
 ///
@@ -62,6 +63,9 @@ pub struct SandboxFactory {
     /// Holds the temp directory for data files extracted during `load()`.
     /// Arc-wrapped so the pool can share ownership and outlive the factory.
     data_files_dir: Option<Arc<tempfile::TempDir>>,
+    /// What `save()` stores so that another pyeryx version can rebuild the
+    /// factory.
+    build_inputs: BuildInputs,
     /// Tokio runtime shared across all sandboxes and sessions created by this
     /// factory. Children hold an `Arc` clone, so the runtime outlives the
     /// factory when children still exist.
@@ -77,16 +81,19 @@ fn make_precompiled_artifact(bytes: Vec<u8>, cache: bool) -> eryx::PrecompiledAr
     }
 }
 
-/// The pre-compiled artifact and extracted data files of a loaded factory.
-type LoadedFactory = (
-    eryx::PrecompiledArtifact,
-    Option<tempfile::TempDir>,
-    Option<PathBuf>,
-);
+/// A factory file opened by [`load_factory_file`].
+struct FactoryFile {
+    /// The component, or why it can't be used, for example because another
+    /// eryx version built it.
+    precompiled: Result<eryx::PrecompiledArtifact, eryx::Error>,
+    data_files_dir: Option<tempfile::TempDir>,
+    data_files_path: Option<PathBuf>,
+    build_inputs: BuildInputs,
+}
 
-/// Load a factory file: map its component (v1, v3) or read it into memory
-/// (legacy v2), and extract its data files.
-fn load_factory_file(path: &Path, cache: bool) -> PyResult<LoadedFactory> {
+/// Load a factory file: map its component (v1, v3, v4) or read it into
+/// memory (legacy v2), and extract its data files.
+fn load_factory_file(path: &Path, cache: bool) -> PyResult<FactoryFile> {
     use std::io::{Read as _, Seek as _};
 
     let load_err = |e: std::io::Error| {
@@ -105,15 +112,17 @@ fn load_factory_file(path: &Path, cache: bool) -> PyResult<LoadedFactory> {
                 .map_err(load_err)?;
             let (precompiled, data_files_dir, data_files_path) =
                 parse_factory_v2(&bytes).map_err(load_err)?;
-            Ok((
-                make_precompiled_artifact(precompiled, cache),
+            Ok(FactoryFile {
+                precompiled: Ok(make_precompiled_artifact(precompiled, cache)),
                 data_files_dir,
                 data_files_path,
-            ))
+                build_inputs: BuildInputs::Missing,
+            })
         }
         FactoryLayout::Mapped {
             component_len,
             data_files_len,
+            build_inputs_len,
             component_hash,
         } => {
             let data_files = if data_files_len == 0 {
@@ -128,6 +137,36 @@ fn load_factory_file(path: &Path, cache: bool) -> PyResult<LoadedFactory> {
                     })
                     .map_err(load_err)?;
                 Some(extract_data_files(&compressed).map_err(load_err)?)
+            };
+
+            // The build inputs are only needed to save or rebuild the
+            // factory, so they're read from this same file then rather than
+            // kept in memory.
+            let build_inputs = if build_inputs_len == 0 {
+                BuildInputs::Missing
+            } else {
+                let data_files_end = component_len + data_files_len;
+                let backing = if cfg!(unix) {
+                    SectionsBacking::File(Mutex::new(file.try_clone().map_err(load_err)?))
+                } else {
+                    let mut bytes = Vec::new();
+                    file.seek(std::io::SeekFrom::Start(component_len))
+                        .and_then(|_| {
+                            (&mut file)
+                                .take(data_files_len + build_inputs_len)
+                                .read_to_end(&mut bytes)
+                        })
+                        .map_err(load_err)?;
+                    SectionsBacking::Memory {
+                        base: component_len,
+                        bytes,
+                    }
+                };
+                BuildInputs::InFile(StoredSections {
+                    backing,
+                    data_files: component_len..data_files_end,
+                    build_inputs: data_files_end..data_files_end + build_inputs_len,
+                })
             };
 
             // SAFETY: `open_trusted_factory_file` checked that only this user
@@ -145,13 +184,126 @@ fn load_factory_file(path: &Path, cache: bool) -> PyResult<LoadedFactory> {
                     }
                     (false, _) => eryx::PrecompiledArtifact::from_file(file, component_len),
                 }
-            }
-            .map_err(eryx_error_to_py)?;
+            };
 
             let (data_files_dir, data_files_path) = data_files.unzip();
-            Ok((precompiled, data_files_dir, data_files_path))
+            Ok(FactoryFile {
+                precompiled,
+                data_files_dir,
+                data_files_path,
+                build_inputs,
+            })
         }
     }
+}
+
+/// Check that a loaded component works with this eryx version.
+///
+/// On Unix a file-backed component is already deserialized, and this links
+/// it once; elsewhere it deserializes the component too. Either way a
+/// component from another eryx version fails here rather than in the first
+/// `create_sandbox()`.
+fn check_compatible(precompiled: &eryx::PrecompiledArtifact) -> Result<(), eryx::Error> {
+    // SAFETY: the artifact came from a file `open_trusted_factory_file`
+    // accepted, or from a build in this process.
+    #[allow(unsafe_code)]
+    unsafe { precompiled.to_executor() }.map(drop)
+}
+
+/// The error for a factory file that another eryx version built.
+fn incompatible_error(path: &Path, err: &eryx::Error, build_inputs: &BuildInputs) -> PyErr {
+    let hint = if matches!(build_inputs, BuildInputs::Missing) {
+        "It was saved before factories stored their build inputs, so it can't \
+         be rebuilt automatically: recreate it with SandboxFactory(...) and \
+         save it again"
+    } else {
+        "Pass rebuild_if_incompatible=True to SandboxFactory.load() to rebuild \
+         it from the build inputs it stores"
+    };
+    InitializationError::new_err(format!(
+        "failed to load factory from {}: {err}. {hint}",
+        path.display()
+    ))
+}
+
+/// Where a rebuilt copy of a factory file is cached: the per-user eryx cache
+/// directory, keyed by the file's data files and build inputs and by this
+/// pyeryx version.
+///
+/// pyeryx shares eryx's version, which is what a saved factory's
+/// compatibility follows. Keying by version keeps processes of different
+/// versions sharing a cache directory from replacing each other's copies.
+fn rebuilt_factory_path(data_files: &[u8], build_inputs: &[u8]) -> Result<PathBuf, eryx::Error> {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(&(data_files.len() as u64).to_le_bytes());
+    hasher.update(data_files);
+    hasher.update(build_inputs);
+    Ok(eryx::cache::default_cache_root()?
+        .join("factories")
+        .join(format!(
+            "{}-pyeryx-{}.bin",
+            hasher.finalize().to_hex(),
+            env!("CARGO_PKG_VERSION")
+        )))
+}
+
+/// Everything [`SandboxFactory::rebuild`] needs from a failed `load()`.
+struct RebuildRequest<'a> {
+    path: &'a Path,
+    error: eryx::Error,
+    data_files_dir: Option<tempfile::TempDir>,
+    data_files_path: Option<PathBuf>,
+    build_inputs: BuildInputs,
+    site_packages: Option<PathBuf>,
+    cache: bool,
+}
+
+/// Pre-initialize and pre-compile a factory's component: the slow part of
+/// creating a factory, shared by `SandboxFactory(...)` and rebuilding a saved
+/// one.
+fn build_component(
+    py: Python<'_>,
+    runtime: &tokio::runtime::Runtime,
+    stdlib_path: &Path,
+    site_packages: Option<&Path>,
+    extensions: Vec<eryx::preinit::NativeExtension>,
+    recipe: &FactoryRecipe,
+    cache: bool,
+) -> PyResult<eryx::PrecompiledArtifact> {
+    let mut options = eryx::preinit::PreInitOptions::new(stdlib_path)
+        .imports(recipe.imports.clone())
+        .extensions(extensions)
+        .callbacks(recipe.callbacks.clone());
+    if let Some(path) = site_packages {
+        options = options.site_packages(path);
+    }
+    if let Some(code) = &recipe.setup_code {
+        options = options.setup_code(code.clone());
+    }
+
+    // Pre-initialize, then pre-compile to native code for faster
+    // instantiation. Both take seconds, so let other Python threads run.
+    py.detach(|| {
+        let preinit_bytes = runtime.block_on(async {
+            eryx::preinit::pre_initialize_with_options(options)
+                .await
+                .map_err(|e| {
+                    InitializationError::new_err(format!("pre-initialization failed: {e}"))
+                })
+        })?;
+        let precompiled = eryx::PythonExecutor::precompile(&preinit_bytes)
+            .map_err(|e| InitializationError::new_err(format!("pre-compilation failed: {e}")))?;
+        Ok(make_precompiled_artifact(precompiled, cache))
+    })
+}
+
+/// Emit a Python `RuntimeWarning`.
+fn warn(py: Python<'_>, message: String) -> PyResult<()> {
+    py.import("warnings")?.call_method1(
+        "warn",
+        (message, py.get_type::<pyo3::exceptions::PyRuntimeWarning>()),
+    )?;
+    Ok(())
 }
 
 #[pymethods]
@@ -230,32 +382,20 @@ impl SandboxFactory {
             None => Vec::new(),
         };
 
-        let mut options = eryx::preinit::PreInitOptions::new(&stdlib_path)
-            .imports(imports.unwrap_or_default())
-            .extensions(extensions)
-            .callbacks(declarations);
-        if let Some(path) = &final_site_packages {
-            options = options.site_packages(path);
-        }
-        if let Some(code) = setup_code {
-            options = options.setup_code(code);
-        }
-
-        // Pre-initialize, then pre-compile to native code for faster
-        // instantiation. Both take seconds, so let other Python threads run.
-        let precompiled = py.detach(|| {
-            let preinit_bytes = runtime.block_on(async {
-                eryx::preinit::pre_initialize_with_options(options)
-                    .await
-                    .map_err(|e| {
-                        InitializationError::new_err(format!("pre-initialization failed: {e}"))
-                    })
-            })?;
-            let precompiled = eryx::PythonExecutor::precompile(&preinit_bytes).map_err(|e| {
-                InitializationError::new_err(format!("pre-compilation failed: {e}"))
-            })?;
-            Ok::<_, PyErr>(make_precompiled_artifact(precompiled, cache))
-        })?;
+        let recipe = FactoryRecipe {
+            imports: imports.unwrap_or_default(),
+            setup_code,
+            callbacks: declarations,
+        };
+        let precompiled = build_component(
+            py,
+            &runtime,
+            &stdlib_path,
+            final_site_packages.as_deref(),
+            extensions,
+            &recipe,
+            cache,
+        )?;
 
         Ok(Self {
             precompiled,
@@ -265,6 +405,7 @@ impl SandboxFactory {
             callbacks: callbacks.map(Bound::unbind),
             data_files_dir: None,
             runtime,
+            build_inputs: BuildInputs::Recipe(recipe),
         })
     }
 
@@ -295,42 +436,85 @@ impl SandboxFactory {
     ///         cache. When enabled, a BLAKE3 content hash is computed once during
     ///         loading and subsequent ``create_sandbox()`` calls reuse the linked
     ///         component instead of re-linking it per call. Defaults to True.
+    ///     rebuild_if_incompatible: What to do with a file saved by another
+    ///         pyeryx version, which can't be loaded as is. When False (the
+    ///         default), raise ``InitializationError``. When True, rebuild the
+    ///         factory from the build inputs the file stores (its packages,
+    ///         imports, setup code and callback declarations), which takes as
+    ///         long as creating it did. The rebuilt copy is saved to the per-user
+    ///         eryx cache directory, so later loads with this flag reuse it; the
+    ///         file at ``path`` is never modified. If the copy can't be saved, a
+    ///         ``RuntimeWarning`` is emitted and the rebuilt factory is still
+    ///         returned. Factories saved before pyeryx 0.13.0 don't store their
+    ///         build inputs and can't be rebuilt.
     ///
     /// Returns:
     ///     A SandboxFactory loaded from the file.
     ///
     /// Raises:
-    ///     InitializationError: If loading fails.
+    ///     InitializationError: If loading fails, including when another
+    ///         pyeryx version saved the file and it isn't rebuilt.
     ///
     /// Example:
     ///     factory = SandboxFactory.load("/path/to/jinja2-factory.bin")
     ///     sandbox = factory.create_sandbox()
+    ///
+    ///     # Survive pyeryx upgrades without recreating the factory by hand
+    ///     factory = SandboxFactory.load(path, rebuild_if_incompatible=True)
     #[staticmethod]
-    #[pyo3(signature = (path, *, site_packages=None, callbacks=None, cache=true))]
+    #[pyo3(signature = (path, *, site_packages=None, callbacks=None, cache=true, rebuild_if_incompatible=false))]
     fn load(
+        py: Python<'_>,
         path: PathBuf,
         site_packages: Option<PathBuf>,
         callbacks: Option<Bound<'_, PyAny>>,
         cache: bool,
+        rebuild_if_incompatible: bool,
     ) -> PyResult<Self> {
+        let FactoryFile {
+            precompiled,
+            data_files_dir,
+            data_files_path,
+            build_inputs,
+        } = load_factory_file(&path, cache)?;
+
+        // Catch a mismatch now, not in the first `create_sandbox()`: where a
+        // component is only deserialized lazily, it would surface there.
+        let precompiled = precompiled.and_then(|precompiled| {
+            check_compatible(&precompiled)?;
+            Ok(precompiled)
+        });
+        let precompiled = match precompiled {
+            Ok(precompiled) => precompiled,
+            Err(error @ eryx::Error::IncompatiblePrecompiled { .. }) if rebuild_if_incompatible => {
+                let request = RebuildRequest {
+                    path: &path,
+                    error,
+                    data_files_dir,
+                    data_files_path,
+                    build_inputs,
+                    site_packages,
+                    cache,
+                };
+                return Self::rebuild(py, request, callbacks);
+            }
+            Err(error @ eryx::Error::IncompatiblePrecompiled { .. }) => {
+                return Err(incompatible_error(&path, &error, &build_inputs));
+            }
+            Err(error) => return Err(eryx_error_to_py(error)),
+        };
+
         let runtime = crate::error::make_runtime()?;
-
-        // Get embedded resources for stdlib path
         let embedded = eryx::embedded::EmbeddedResources::get().map_err(eryx_error_to_py)?;
-        let stdlib_path = embedded.stdlib().to_path_buf();
-
-        let (precompiled, data_files_dir, data_files_path) = load_factory_file(&path, cache)?;
-
-        let site_packages_path = site_packages.or(data_files_path);
-
         Ok(Self {
             precompiled,
-            stdlib_path,
-            site_packages_path,
+            stdlib_path: embedded.stdlib().to_path_buf(),
+            site_packages_path: site_packages.or(data_files_path),
             extracted_packages: Arc::new(Vec::new()),
             callbacks: callbacks.map(Bound::unbind),
             data_files_dir: data_files_dir.map(Arc::new),
             runtime,
+            build_inputs,
         })
     }
 
@@ -351,26 +535,12 @@ impl SandboxFactory {
     ///     factory = SandboxFactory(packages=[...], imports=["jinja2"])
     ///     factory.save("/path/to/jinja2-factory.bin")
     fn save(&self, path: PathBuf) -> PyResult<()> {
-        let data_files = self
-            .site_packages_path
-            .as_ref()
-            .map(|p| collect_data_files(p))
-            .transpose()
-            .map_err(|e| {
-                InitializationError::new_err(format!("failed to collect data files: {e}"))
-            })?
-            .unwrap_or_default();
-
-        write_factory_file(&path, |w| {
-            write_factory_v3(&self.precompiled, &data_files, w)
-        })
-        .map_err(|e| {
+        self.save_to(&path).map_err(|e| {
             InitializationError::new_err(format!(
                 "failed to save factory to {}: {e}",
                 path.display()
             ))
-        })?;
-        Ok(())
+        })
     }
 
     /// Create a persistent Python session from this factory's preinitialized
@@ -739,6 +909,124 @@ impl SandboxFactory {
 }
 
 impl SandboxFactory {
+    /// Write this factory to `path` in the current format.
+    fn save_to(&self, path: &Path) -> std::io::Result<()> {
+        let data_files = self
+            .site_packages_path
+            .as_ref()
+            .map(|p| collect_data_files(p))
+            .transpose()?
+            .unwrap_or_default();
+        let build_inputs = self.build_inputs.encode()?;
+        write_factory_file(path, |w| {
+            write_factory(&self.precompiled, &data_files, &build_inputs, w)
+        })
+    }
+
+    /// Rebuild a factory that another pyeryx version saved, from the build
+    /// inputs its file stores, reusing a copy cached by an earlier rebuild if
+    /// there is one.
+    fn rebuild(
+        py: Python<'_>,
+        request: RebuildRequest<'_>,
+        callbacks: Option<Bound<'_, PyAny>>,
+    ) -> PyResult<Self> {
+        let RebuildRequest {
+            path,
+            error,
+            data_files_dir,
+            data_files_path,
+            build_inputs,
+            site_packages,
+            cache,
+        } = request;
+        let BuildInputs::InFile(stored) = &build_inputs else {
+            return Err(incompatible_error(path, &error, &build_inputs));
+        };
+        let read_err = |e: std::io::Error| {
+            InitializationError::new_err(format!(
+                "failed to read the build inputs of {}: {e}",
+                path.display()
+            ))
+        };
+        let inputs = stored.read(&stored.build_inputs).map_err(read_err)?;
+        let data_files = stored.read(&stored.data_files).map_err(read_err)?;
+        let callbacks = callbacks.map(Bound::unbind);
+        let runtime = crate::error::make_runtime()?;
+        let embedded = eryx::embedded::EmbeddedResources::get().map_err(eryx_error_to_py)?;
+        let stdlib_path = embedded.stdlib().to_path_buf();
+
+        let cached_path = rebuilt_factory_path(&data_files, &inputs);
+        if let Ok(cached_path) = &cached_path
+            && cached_path.exists()
+            && let Ok(cached) = load_factory_file(cached_path, cache)
+            && let Ok(precompiled) = cached
+                .precompiled
+                .and_then(|p| check_compatible(&p).map(|()| p))
+        {
+            return Ok(Self {
+                precompiled,
+                stdlib_path,
+                site_packages_path: site_packages.or(cached.data_files_path),
+                extracted_packages: Arc::new(Vec::new()),
+                callbacks,
+                data_files_dir: cached.data_files_dir.map(Arc::new),
+                runtime,
+                build_inputs: cached.build_inputs,
+            });
+        }
+
+        // The data files are the site-packages the factory was created with.
+        let recipe = decode_build_inputs(&inputs).map_err(read_err)?;
+        let (_, extensions, _) = process_packages(data_files_path.as_ref(), None)?;
+        let precompiled = build_component(
+            py,
+            &runtime,
+            &stdlib_path,
+            data_files_path.as_deref(),
+            extensions,
+            &recipe,
+            cache,
+        )?;
+        let mut factory = Self {
+            precompiled,
+            stdlib_path,
+            site_packages_path: data_files_path,
+            extracted_packages: Arc::new(Vec::new()),
+            callbacks,
+            data_files_dir: data_files_dir.map(Arc::new),
+            runtime,
+            build_inputs: BuildInputs::Bytes(inputs),
+        };
+
+        let saved = cached_path
+            .map_err(|e| e.to_string())
+            .and_then(|cached_path| {
+                let saved = cached_path
+                    .parent()
+                    .map_or(Ok(()), std::fs::create_dir_all)
+                    .and_then(|()| factory.save_to(&cached_path));
+                saved.map_err(|e| format!("{}: {e}", cached_path.display()))
+            });
+        if let Err(e) = saved {
+            warn(
+                py,
+                format!(
+                    "rebuilt the factory from {}, but couldn't cache the rebuilt \
+                     copy ({e}), so the next load will rebuild it again",
+                    path.display()
+                ),
+            )?;
+        }
+
+        // Only now apply an override, so the cached copy holds the factory's
+        // own site-packages.
+        if site_packages.is_some() {
+            factory.site_packages_path = site_packages;
+        }
+        Ok(factory)
+    }
+
     /// The callbacks a sandbox or session gets when the caller passes none:
     /// the factory's own.
     fn default_callbacks<'py>(
@@ -761,16 +1049,18 @@ impl std::fmt::Debug for SandboxFactory {
 }
 
 // =============================================================================
-// Factory file format (v3)
+// Factory file format (v4)
 // =============================================================================
 //
 // [component_len bytes: Wasmtime precompiled component, starting at offset 0]
 // [data_files_len bytes: zstd-compressed tar of data files]
+// [build_inputs_len bytes: JSON build inputs, see `encode_build_inputs`]
 // [8 bytes: component_len (little-endian)]
 // [8 bytes: data_files_len (little-endian)]
+// [8 bytes: build_inputs_len (little-endian)]
 // [32 bytes: component content hash, for the instance-pre cache key]
-// [4 bytes: version (3, little-endian)]
-// [8 bytes: magic "ERYXFCT3"]
+// [4 bytes: version (4, little-endian)]
+// [8 bytes: magic "ERYXFCT4"]
 //
 // The component comes first because Wasmtime can only memory-map a component
 // that starts at offset 0 of a file; it ignores the bytes after it. `load()`
@@ -778,20 +1068,190 @@ impl std::fmt::Debug for SandboxFactory {
 // hash spares `load(cache=True)` from reading the whole component to compute
 // its cache key; it is trusted like the component itself.
 //
+// The data files are the factory's site-packages, minus `.pyc` files. The
+// build inputs are the rest of what it was created from: its imports, setup
+// code and callback declarations. A component only loads in the eryx version
+// that built it, so the two together are what lets another version rebuild
+// the factory. An empty build inputs section means it can't be rebuilt.
+//
+// Version 3 files also leave out `.py` files, so after loading one, a module
+// that wasn't imported while it was created can't be imported.
+//
+// Version 3: as version 4 without the build inputs, with footer
+// [component_len u64][data_files_len u64][hash 32][version 3 u32]
+// [magic "ERYXFCT3"].
+//
 // Version 2 (legacy): [magic "ERYX"][version 2 u32][component_len u64]
 // [component][data_files_len u64][data files]. Read into memory; re-save to
 // upgrade.
 //
 // Version 1 (legacy): raw precompiled bytes with no envelope. Detected by
-// neither the v3 footer nor the v2 magic matching. Mapped like v3.
+// neither footer nor the v2 magic matching. Mapped like v4.
 
-const FACTORY_FOOTER_MAGIC: &[u8; 8] = b"ERYXFCT3";
-const FACTORY_FOOTER_LEN: u64 = 8 + 8 + 32 + 4 + 8;
+const FACTORY_FOOTER_MAGIC: &[u8; 8] = b"ERYXFCT4";
+const FACTORY_FOOTER_LEN: u64 = 8 + 8 + 8 + 32 + 4 + 8;
+const FACTORY_V3_FOOTER_MAGIC: &[u8; 8] = b"ERYXFCT3";
+const FACTORY_V3_FOOTER_LEN: u64 = 8 + 8 + 32 + 4 + 8;
 
-/// Collect non-Python data files from a site-packages directory.
+/// What a factory was created from, apart from its site-packages files.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct FactoryRecipe {
+    imports: Vec<String>,
+    setup_code: Option<String>,
+    callbacks: Vec<eryx::preinit::CallbackDeclaration>,
+}
+
+/// A factory's build inputs, in whichever form it has them.
+#[derive(Debug)]
+enum BuildInputs {
+    /// Created with `SandboxFactory(...)`.
+    Recipe(FactoryRecipe),
+    /// Stored in the file the factory was loaded from.
+    InFile(StoredSections),
+    /// Already encoded, for a rebuilt factory.
+    Bytes(Vec<u8>),
+    /// Loaded from a file saved before factories stored their build inputs.
+    Missing,
+}
+
+impl BuildInputs {
+    /// The encoded section to save, or an empty one if there's none.
+    fn encode(&self) -> std::io::Result<Vec<u8>> {
+        match self {
+            Self::Recipe(recipe) => encode_build_inputs(recipe),
+            Self::InFile(stored) => stored.read(&stored.build_inputs),
+            Self::Bytes(bytes) => Ok(bytes.clone()),
+            Self::Missing => Ok(Vec::new()),
+        }
+    }
+}
+
+/// The data files and build inputs sections of a loaded factory file, read
+/// from the same trusted handle that `load()` checked.
+#[derive(Debug)]
+struct StoredSections {
+    backing: SectionsBacking,
+    data_files: Range<u64>,
+    build_inputs: Range<u64>,
+}
+
+/// Where a [`StoredSections`] reads from.
+#[derive(Debug)]
+enum SectionsBacking {
+    /// The handle `load()` opened.
+    File(Mutex<std::fs::File>),
+    /// The bytes from the start of the data files section, for platforms where
+    /// an open handle stops `save()` renaming a new file over the old one.
+    #[cfg_attr(unix, allow(dead_code))]
+    Memory { base: u64, bytes: Vec<u8> },
+}
+
+impl StoredSections {
+    fn read(&self, range: &Range<u64>) -> std::io::Result<Vec<u8>> {
+        use std::io::{Read as _, Seek as _};
+
+        let file = match &self.backing {
+            SectionsBacking::File(file) => file,
+            SectionsBacking::Memory { base, bytes } => {
+                return Ok(
+                    bytes[(range.start - base) as usize..(range.end - base) as usize].to_vec(),
+                );
+            }
+        };
+        let mut file = file
+            .lock()
+            .map_err(|_| std::io::Error::other("factory file lock poisoned"))?;
+        file.seek(std::io::SeekFrom::Start(range.start))?;
+        let mut bytes = Vec::new();
+        (&mut *file)
+            .take(range.end - range.start)
+            .read_to_end(&mut bytes)?;
+        Ok(bytes)
+    }
+}
+
+/// Encode a factory's build inputs as JSON.
+fn encode_build_inputs(recipe: &FactoryRecipe) -> std::io::Result<Vec<u8>> {
+    let callbacks: Vec<_> = recipe
+        .callbacks
+        .iter()
+        .map(|cb| {
+            serde_json::json!({
+                "name": cb.name,
+                "description": cb.description,
+                "parameters_schema_json": cb.parameters_schema_json,
+            })
+        })
+        .collect();
+    serde_json::to_vec(&serde_json::json!({
+        "imports": recipe.imports,
+        "setup_code": recipe.setup_code,
+        "callbacks": callbacks,
+    }))
+    .map_err(std::io::Error::other)
+}
+
+/// Decode [`encode_build_inputs`]' output.
+fn decode_build_inputs(encoded: &[u8]) -> std::io::Result<FactoryRecipe> {
+    let invalid = |msg: &str| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("invalid build inputs: {msg}"),
+        )
+    };
+    let manifest: serde_json::Value =
+        serde_json::from_slice(encoded).map_err(|e| invalid(&e.to_string()))?;
+
+    let string = |value: &serde_json::Value, name: &str| {
+        value
+            .get(name)
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned)
+            .ok_or_else(|| invalid(&format!("`{name}` is not a string")))
+    };
+    let array = |name: &str| {
+        manifest
+            .get(name)
+            .and_then(serde_json::Value::as_array)
+            .ok_or_else(|| invalid(&format!("`{name}` is not an array")))
+    };
+    let imports = array("imports")?
+        .iter()
+        .map(|import| {
+            import
+                .as_str()
+                .map(str::to_owned)
+                .ok_or_else(|| invalid("an import is not a string"))
+        })
+        .collect::<Result<_, _>>()?;
+    let setup_code = match manifest.get("setup_code") {
+        None | Some(serde_json::Value::Null) => None,
+        Some(_) => Some(string(&manifest, "setup_code")?),
+    };
+    let callbacks = array("callbacks")?
+        .iter()
+        .map(|cb| {
+            Ok(eryx::preinit::CallbackDeclaration {
+                name: string(cb, "name")?,
+                description: string(cb, "description")?,
+                parameters_schema_json: string(cb, "parameters_schema_json")?,
+            })
+        })
+        .collect::<std::io::Result<_>>()?;
+
+    Ok(FactoryRecipe {
+        imports,
+        setup_code,
+        callbacks,
+    })
+}
+
+/// Collect the files of a site-packages directory to save with a factory.
 ///
-/// Returns a list of (relative_path, file_contents) pairs. Skips `.py` and
-/// `.pyc` files since those are already in the interpreter snapshot.
+/// Returns a list of (relative_path, file_contents) pairs. `.py` files are
+/// kept: the snapshot only holds the modules imported while the factory was
+/// created, so the others are imported from these files. `.pyc` files are
+/// skipped, since the interpreter recompiles them.
 fn collect_data_files(site_packages: &Path) -> Result<Vec<(String, Vec<u8>)>, std::io::Error> {
     let mut files = Vec::new();
     if !site_packages.exists() {
@@ -800,13 +1260,7 @@ fn collect_data_files(site_packages: &Path) -> Result<Vec<(String, Vec<u8>)>, st
     for entry in walkdir::WalkDir::new(site_packages) {
         let entry = entry?;
         let path = entry.path();
-        if !path.is_file() {
-            continue;
-        }
-        if path
-            .extension()
-            .is_some_and(|ext| ext == "py" || ext == "pyc")
-        {
+        if !path.is_file() || path.extension().is_some_and(|ext| ext == "pyc") {
             continue;
         }
         let relative = path
@@ -823,32 +1277,38 @@ fn collect_data_files(site_packages: &Path) -> Result<Vec<(String, Vec<u8>)>, st
     Ok(files)
 }
 
-/// Write a v3 factory file to `writer`.
-fn write_factory_v3(
+/// A zstd-compressed tar of `files`, or nothing if there are none.
+fn tar_zst(files: &[(String, Vec<u8>)]) -> std::io::Result<Vec<u8>> {
+    if files.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut tar_builder = tar::Builder::new(Vec::new());
+    for (rel_path, contents) in files {
+        let mut header = tar::Header::new_gnu();
+        header.set_size(contents.len() as u64);
+        header.set_mode(0o644);
+        header.set_cksum();
+        tar_builder.append_data(&mut header, rel_path, contents.as_slice())?;
+    }
+    let tar_bytes = tar_builder.into_inner()?;
+    zstd::encode_all(tar_bytes.as_slice(), 3)
+}
+
+/// Write a v4 factory file to `writer`.
+fn write_factory(
     precompiled: &eryx::PrecompiledArtifact,
     data_files: &[(String, Vec<u8>)],
+    build_inputs: &[u8],
     writer: &mut impl std::io::Write,
 ) -> Result<(), std::io::Error> {
-    let data_files_tar_zst = if data_files.is_empty() {
-        Vec::new()
-    } else {
-        let mut tar_builder = tar::Builder::new(Vec::new());
-        for (rel_path, contents) in data_files {
-            let mut header = tar::Header::new_gnu();
-            header.set_size(contents.len() as u64);
-            header.set_mode(0o644);
-            header.set_cksum();
-            tar_builder.append_data(&mut header, rel_path, contents.as_slice())?;
-        }
-        let tar_bytes = tar_builder.into_inner()?;
-        zstd::encode_all(tar_bytes.as_slice(), 3)?
-    };
-
+    let data_files_tar_zst = tar_zst(data_files)?;
     let component_hash = precompiled.content_hash()?;
     precompiled.write_to(writer)?;
     writer.write_all(&data_files_tar_zst)?;
+    writer.write_all(build_inputs)?;
     writer.write_all(&(precompiled.len() as u64).to_le_bytes())?;
     writer.write_all(&(data_files_tar_zst.len() as u64).to_le_bytes())?;
+    writer.write_all(&(build_inputs.len() as u64).to_le_bytes())?;
     writer.write_all(&component_hash)?;
     writer.write_all(&FACTORY_VERSION.to_le_bytes())?;
     writer.write_all(FACTORY_FOOTER_MAGIC)?;
@@ -912,11 +1372,13 @@ fn open_trusted_factory_file(path: &std::path::Path) -> std::io::Result<std::fs:
 #[derive(Debug, PartialEq, Eq)]
 enum FactoryLayout {
     /// The component is the first `component_len` bytes; the data files
-    /// archive (if `data_files_len > 0`) follows it. v3 files carry the
-    /// component's content hash; v1 files don't.
+    /// archive and the build inputs follow it, each absent if its length is
+    /// zero. v3 and v4 files carry the component's content hash; v1 files
+    /// don't.
     Mapped {
         component_len: u64,
         data_files_len: u64,
+        build_inputs_len: u64,
         component_hash: Option<[u8; 32]>,
     },
     /// A legacy v2 envelope, which has to be read into memory.
@@ -932,36 +1394,55 @@ fn read_factory_layout(
     let invalid = |msg: String| std::io::Error::new(std::io::ErrorKind::InvalidData, msg);
     let file_len = file.seek(SeekFrom::End(0))?;
 
-    if file_len >= FACTORY_FOOTER_LEN {
-        let mut footer = [0u8; FACTORY_FOOTER_LEN as usize];
-        file.seek(SeekFrom::End(-(FACTORY_FOOTER_LEN as i64)))?;
+    let mut magic = [0u8; 8];
+    if file_len >= 8 {
+        file.seek(SeekFrom::End(-8))?;
+        file.read_exact(&mut magic)?;
+    }
+    // (footer length, expected version, whether it records build inputs)
+    let footer = match &magic {
+        m if m == FACTORY_FOOTER_MAGIC => Some((FACTORY_FOOTER_LEN, FACTORY_VERSION, true)),
+        m if m == FACTORY_V3_FOOTER_MAGIC => Some((FACTORY_V3_FOOTER_LEN, 3, false)),
+        _ => None,
+    };
+    if let Some((footer_len, expected_version, has_build_inputs)) = footer
+        && file_len >= footer_len
+    {
+        let mut footer = vec![0u8; footer_len as usize];
+        file.seek(SeekFrom::End(-(footer_len as i64)))?;
         file.read_exact(&mut footer)?;
-        if &footer[52..] == FACTORY_FOOTER_MAGIC {
-            let version = read_le_u32(&footer[48..52])?;
-            if version != FACTORY_VERSION {
-                return Err(invalid(format!(
-                    "unsupported factory file version: {version}"
-                )));
-            }
-            let component_len = read_le_u64(&footer[..8])?;
-            let data_files_len = read_le_u64(&footer[8..16])?;
-            let expected = component_len
-                .checked_add(data_files_len)
-                .and_then(|len| len.checked_add(FACTORY_FOOTER_LEN));
-            if expected != Some(file_len) {
-                return Err(invalid(format!(
-                    "factory file is {file_len} bytes but its footer describes \
-                     {component_len} + {data_files_len} + {FACTORY_FOOTER_LEN}"
-                )));
-            }
-            let mut component_hash = [0u8; 32];
-            component_hash.copy_from_slice(&footer[16..48]);
-            return Ok(FactoryLayout::Mapped {
-                component_len,
-                data_files_len,
-                component_hash: Some(component_hash),
-            });
+        let version_at = footer.len() - 12;
+        let version = read_le_u32(&footer[version_at..version_at + 4])?;
+        if version != expected_version {
+            return Err(invalid(format!(
+                "unsupported factory file version: {version}"
+            )));
         }
+        let component_len = read_le_u64(&footer[..8])?;
+        let data_files_len = read_le_u64(&footer[8..16])?;
+        let (build_inputs_len, hash_at) = if has_build_inputs {
+            (read_le_u64(&footer[16..24])?, 24)
+        } else {
+            (0, 16)
+        };
+        let expected = component_len
+            .checked_add(data_files_len)
+            .and_then(|len| len.checked_add(build_inputs_len))
+            .and_then(|len| len.checked_add(footer_len));
+        if expected != Some(file_len) {
+            return Err(invalid(format!(
+                "factory file is {file_len} bytes but its footer describes \
+                 {component_len} + {data_files_len} + {build_inputs_len} + {footer_len}"
+            )));
+        }
+        let mut component_hash = [0u8; 32];
+        component_hash.copy_from_slice(&footer[hash_at..hash_at + 32]);
+        return Ok(FactoryLayout::Mapped {
+            component_len,
+            data_files_len,
+            build_inputs_len,
+            component_hash: Some(component_hash),
+        });
     }
 
     let mut magic = [0u8; 4];
@@ -976,6 +1457,7 @@ fn read_factory_layout(
         Ok(FactoryLayout::Mapped {
             component_len: file_len,
             data_files_len: 0,
+            build_inputs_len: 0,
             component_hash: None,
         })
     }
@@ -1215,11 +1697,40 @@ mod tests {
         ]
     }
 
-    fn build_v3(precompiled: &[u8], data_files: &[(String, Vec<u8>)]) -> Vec<u8> {
+    fn build_v4(
+        precompiled: &[u8],
+        data_files: &[(String, Vec<u8>)],
+        build_inputs: &[u8],
+    ) -> Vec<u8> {
         let artifact = eryx::PrecompiledArtifact::new(precompiled.to_vec());
         let mut bytes = Vec::new();
-        write_factory_v3(&artifact, data_files, &mut bytes).unwrap();
+        write_factory(&artifact, data_files, build_inputs, &mut bytes).unwrap();
         bytes
+    }
+
+    /// Build a v3 file, as `save()` wrote before build inputs were stored.
+    fn build_v3(precompiled: &[u8], data_files: &[(String, Vec<u8>)]) -> Vec<u8> {
+        let data_files = tar_zst(data_files).unwrap();
+        let mut bytes = precompiled.to_vec();
+        bytes.extend_from_slice(&data_files);
+        bytes.extend_from_slice(&(precompiled.len() as u64).to_le_bytes());
+        bytes.extend_from_slice(&(data_files.len() as u64).to_le_bytes());
+        bytes.extend_from_slice(&[7u8; 32]);
+        bytes.extend_from_slice(&3u32.to_le_bytes());
+        bytes.extend_from_slice(FACTORY_V3_FOOTER_MAGIC);
+        bytes
+    }
+
+    fn recipe() -> FactoryRecipe {
+        FactoryRecipe {
+            imports: vec!["mypkg".to_string(), "json".to_string()],
+            setup_code: Some("ready = True\n".to_string()),
+            callbacks: vec![eryx::preinit::CallbackDeclaration {
+                name: "get_time".to_string(),
+                description: "Returns the time".to_string(),
+                parameters_schema_json: r#"{"type":"object"}"#.to_string(),
+            }],
+        }
     }
 
     /// Build a legacy v2 envelope, as `save()` wrote before v3.
@@ -1243,15 +1754,16 @@ mod tests {
             FactoryLayout::Mapped {
                 component_len: raw.len() as u64,
                 data_files_len: 0,
+                build_inputs_len: 0,
                 component_hash: None,
             }
         );
     }
 
     #[test]
-    fn v3_component_starts_at_offset_zero() {
+    fn v4_component_starts_at_offset_zero() {
         let precompiled = b"precompiled wasm component";
-        let bytes = build_v3(precompiled, &[]);
+        let bytes = build_v4(precompiled, &[], &[]);
 
         assert_eq!(&bytes[..precompiled.len()], precompiled);
         assert_eq!(&bytes[bytes.len() - 8..], FACTORY_FOOTER_MAGIC);
@@ -1263,15 +1775,16 @@ mod tests {
             FactoryLayout::Mapped {
                 component_len: precompiled.len() as u64,
                 data_files_len: 0,
+                build_inputs_len: 0,
                 component_hash: Some(hash),
             }
         );
     }
 
     #[test]
-    fn v3_with_data_files() {
+    fn v4_with_data_files() {
         let precompiled = b"precompiled wasm component";
-        let bytes = build_v3(precompiled, &tz_data_files());
+        let bytes = build_v4(precompiled, &tz_data_files(), &[]);
 
         let FactoryLayout::Mapped {
             component_len,
@@ -1294,27 +1807,103 @@ mod tests {
     }
 
     #[test]
-    fn v3_rejects_footer_lengths_that_do_not_match() {
-        let mut bytes = build_v3(b"precompiled", &tz_data_files());
+    fn v4_rejects_footer_lengths_that_do_not_match() {
+        let mut bytes = build_v4(b"precompiled", &tz_data_files(), b"inputs");
         // Dropping a leading byte keeps the footer but breaks its lengths.
         bytes.remove(0);
         assert!(read_factory_layout(&mut Cursor::new(&bytes)).is_err());
     }
 
     #[test]
-    fn v3_rejects_overflowing_footer_lengths() {
-        let mut bytes = build_v3(b"precompiled", &[]);
+    fn v4_rejects_overflowing_footer_lengths() {
+        let mut bytes = build_v4(b"precompiled", &[], &[]);
         let footer = bytes.len() - FACTORY_FOOTER_LEN as usize;
         bytes[footer..footer + 8].copy_from_slice(&u64::MAX.to_le_bytes());
         assert!(read_factory_layout(&mut Cursor::new(&bytes)).is_err());
     }
 
     #[test]
-    fn v3_rejects_bad_version() {
-        let mut bytes = build_v3(b"precompiled", &[]);
+    fn v4_rejects_bad_version() {
+        let mut bytes = build_v4(b"precompiled", &[], &[]);
         let version = bytes.len() - 12;
         bytes[version..version + 4].copy_from_slice(&99u32.to_le_bytes());
         assert!(read_factory_layout(&mut Cursor::new(&bytes)).is_err());
+    }
+
+    #[test]
+    fn v4_records_the_build_inputs_after_the_data_files() {
+        let precompiled = b"precompiled wasm component";
+        let bytes = build_v4(precompiled, &tz_data_files(), b"build inputs");
+
+        let FactoryLayout::Mapped {
+            component_len,
+            data_files_len,
+            build_inputs_len,
+            ..
+        } = read_factory_layout(&mut Cursor::new(&bytes)).unwrap()
+        else {
+            panic!("expected a mapped layout");
+        };
+        let start = usize::try_from(component_len + data_files_len).unwrap();
+        let end = start + usize::try_from(build_inputs_len).unwrap();
+        assert_eq!(&bytes[start..end], b"build inputs");
+    }
+
+    #[test]
+    fn v3_is_still_read() {
+        let precompiled = b"precompiled wasm component";
+        let bytes = build_v3(precompiled, &tz_data_files());
+
+        let FactoryLayout::Mapped {
+            component_len,
+            data_files_len,
+            build_inputs_len,
+            component_hash,
+        } = read_factory_layout(&mut Cursor::new(&bytes)).unwrap()
+        else {
+            panic!("expected a mapped layout");
+        };
+        assert_eq!(component_len, precompiled.len() as u64);
+        assert_eq!(build_inputs_len, 0);
+        assert_eq!(component_hash, Some([7u8; 32]));
+
+        let start = usize::try_from(component_len).unwrap();
+        let end = start + usize::try_from(data_files_len).unwrap();
+        let (_temp_dir, path) = extract_data_files(&bytes[start..end]).unwrap();
+        assert_eq!(
+            std::fs::read(path.join("tzdata/zoneinfo/UTC")).unwrap(),
+            b"TZif data"
+        );
+    }
+
+    #[test]
+    fn v3_rejects_bad_version() {
+        let mut bytes = build_v3(b"precompiled", &[]);
+        let version = bytes.len() - 12;
+        bytes[version..version + 4].copy_from_slice(&4u32.to_le_bytes());
+        assert!(read_factory_layout(&mut Cursor::new(&bytes)).is_err());
+    }
+
+    #[test]
+    fn build_inputs_round_trip() {
+        let encoded = encode_build_inputs(&recipe()).unwrap();
+        assert_eq!(decode_build_inputs(&encoded).unwrap(), recipe());
+
+        let empty = FactoryRecipe {
+            imports: Vec::new(),
+            setup_code: None,
+            callbacks: Vec::new(),
+        };
+        let encoded = encode_build_inputs(&empty).unwrap();
+        assert_eq!(decode_build_inputs(&encoded).unwrap(), empty);
+    }
+
+    #[test]
+    fn decode_build_inputs_rejects_malformed_sections() {
+        assert!(decode_build_inputs(b"not json").is_err());
+        assert!(decode_build_inputs(br#"{"imports": [1], "callbacks": []}"#).is_err());
+        assert!(decode_build_inputs(br#"{"imports": [], "callbacks": [{}]}"#).is_err());
+        assert!(decode_build_inputs(br#"{"callbacks": []}"#).is_err());
     }
 
     #[test]
@@ -1335,8 +1924,7 @@ mod tests {
     #[test]
     fn v2_with_data_files() {
         let precompiled = b"precompiled wasm module";
-        let v3 = build_v3(b"", &tz_data_files());
-        let tar_zst = &v3[..v3.len() - FACTORY_FOOTER_LEN as usize];
+        let tar_zst = &tar_zst(&tz_data_files()).unwrap();
         let bytes = build_v2(precompiled, tar_zst);
 
         let (parsed, temp_dir, path) = parse_factory_v2(&bytes).unwrap();
@@ -1365,7 +1953,7 @@ mod tests {
     }
 
     #[test]
-    fn collect_data_files_skips_py() {
+    fn collect_data_files_keeps_py_and_skips_pyc() {
         let dir = tempfile::TempDir::new().unwrap();
         let base = dir.path();
 
@@ -1377,7 +1965,7 @@ mod tests {
 
         let files = collect_data_files(base).unwrap();
         let names: Vec<&str> = files.iter().map(|(n, _)| n.as_str()).collect();
-        assert!(!names.contains(&"pkg/__init__.py"));
+        assert!(names.contains(&"pkg/__init__.py"));
         assert!(!names.contains(&"pkg/module.pyc"));
         assert!(names.contains(&"pkg/data.bin"));
         assert!(names.contains(&"pkg/config.json"));
