@@ -62,6 +62,11 @@ pub enum TraceEventKind {
 ///
 /// Receives events from Python's `sys.settrace` plus callback start/end events.
 /// Useful for UI visualization of script execution progress.
+///
+/// # Stability
+///
+/// This trait can be implemented outside this crate. Methods added to it later
+/// will have default implementations, so existing implementations keep compiling.
 #[async_trait]
 pub trait TraceHandler: Send + Sync {
     /// Called when a trace event occurs.
@@ -69,6 +74,11 @@ pub trait TraceHandler: Send + Sync {
 }
 
 /// Handler for streaming output during execution.
+///
+/// # Stability
+///
+/// This trait can be implemented outside this crate. Methods added to it later
+/// will have default implementations, so existing implementations keep compiling.
 #[async_trait]
 pub trait OutputHandler: Send + Sync {
     /// Called when stdout output is produced (raw bytes).

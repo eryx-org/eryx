@@ -81,6 +81,11 @@ const MAX_HEADER_LEN: usize = 64 * 1024;
 ///     .with_resolver(Pinned("93.184.215.14:0".parse().unwrap()));
 /// # let _ = config;
 /// ```
+///
+/// # Stability
+///
+/// This trait can be implemented outside this crate. Methods added to it later
+/// will have default implementations, so existing implementations keep compiling.
 #[async_trait::async_trait]
 pub trait Resolver: Send + Sync + std::fmt::Debug {
     /// Resolve `host` to the addresses to try, in order of preference.

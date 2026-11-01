@@ -89,6 +89,11 @@ pub enum CacheError {
 /// Implementations of this trait can cache pre-compiled WASM components
 /// to avoid expensive linking and JIT compilation on repeated sandbox
 /// creations.
+///
+/// # Stability
+///
+/// This trait can be implemented outside this crate. Methods added to it later
+/// will have default implementations, so existing implementations keep compiling.
 pub trait ComponentCache: Send + Sync {
     /// Get pre-compiled component bytes for the given cache key.
     ///
