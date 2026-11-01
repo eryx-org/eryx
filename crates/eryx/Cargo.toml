@@ -166,9 +166,11 @@ preinit = ["dep:eryx-runtime", "eryx-runtime/preinit"]
 # Allows adding extensions like numpy at sandbox creation time.
 # Implies preinit since the linker infrastructure is shared.
 native-extensions = ["preinit", "eryx-runtime/native-extensions"]
-# Virtual filesystem support.
+# Virtual filesystem and host volume support.
 # Provides a sandboxed in-memory filesystem that can be persisted.
-vfs = ["dep:eryx-vfs"]
+# Outside semver: the API exposes eryx-vfs/wasmtime-wasi types, and the
+# `unstable-` prefix keeps cargo-semver-checks from checking it.
+unstable-vfs = ["dep:eryx-vfs"]
 
 
 [dev-dependencies]

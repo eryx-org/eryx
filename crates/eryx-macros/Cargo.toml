@@ -26,7 +26,7 @@ syn = { version = "3", features = ["full", "parsing", "extra-traits"] }
 # version is specified. With a version, publishing eryx-macros has to resolve
 # `eryx` from the registry at a version that does not exist yet, because eryx is
 # published after it. That is what broke the v0.6.0 release.
-eryx = { path = "../eryx", features = ["macros", "native-extensions", "vfs"] }
+eryx = { path = "../eryx", features = ["macros", "native-extensions", "unstable-vfs"] }
 schemars = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

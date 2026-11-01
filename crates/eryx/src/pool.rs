@@ -810,7 +810,7 @@ impl PooledSandbox {
     /// This will be cleared automatically when the sandbox is returned to the pool.
     /// The provided storage replaces the default scrubbing storage created during
     /// execution, allowing pre-populated files to be available to Python code.
-    #[cfg(feature = "vfs")]
+    #[cfg(feature = "unstable-vfs")]
     #[must_use]
     pub fn with_vfs_storage(mut self, storage: std::sync::Arc<dyn eryx_vfs::VfsStorage>) -> Self {
         self.sandbox_mut().set_vfs_storage(storage);

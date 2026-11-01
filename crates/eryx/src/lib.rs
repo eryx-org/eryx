@@ -130,7 +130,7 @@ pub use secrets::{
 pub use session::{
     InProcessSession, PythonStateSnapshot, Session, SessionExecutor, SnapshotMetadata,
 };
-#[cfg(feature = "vfs")]
+#[cfg(feature = "unstable-vfs")]
 pub use session::{VfsConfig, VolumeMount};
 pub use trace::{OutputHandler, TraceEvent, TraceEventKind, TraceHandler};
 
@@ -151,7 +151,7 @@ pub use eryx_macros::callback;
 
 /// Virtual filesystem support for sandboxed file operations.
 ///
-/// When the `vfs` feature is enabled, sandboxes can use an in-memory filesystem
+/// When the `unstable-vfs` feature is enabled, sandboxes can use an in-memory filesystem
 /// that persists across executions. This is useful for:
 ///
 /// - Allowing Python code to read/write files without host filesystem access
@@ -165,10 +165,13 @@ pub use eryx_macros::callback;
 ///
 /// # Stability
 ///
-/// This module is **not covered by eryx's semver guarantees**. It re-exports
-/// types from `eryx-vfs`, some of which wrap `wasmtime-wasi` types, and those
-/// change with every wasmtime major release. Items here may change in any
-/// minor or patch release.
+/// This module, and everything else behind the `unstable-vfs` feature (the
+/// volume and VFS-config APIs on the builders and [`SessionExecutor`]), is
+/// **not covered by eryx's semver guarantees**. It re-exports types from
+/// `eryx-vfs`, some of which wrap `wasmtime-wasi` types, and those change with
+/// every wasmtime major release. Items here may change in any minor or patch
+/// release. The `unstable-` prefix also keeps the feature out of
+/// cargo-semver-checks' default feature set.
 ///
 /// # Example
 ///
@@ -182,7 +185,7 @@ pub use eryx_macros::callback;
 /// session.execute("open('/data/test.txt', 'w').write('hello')").run().await?;
 /// session.execute("print(open('/data/test.txt').read())").run().await?;  // prints "hello"
 /// ```
-#[cfg(feature = "vfs")]
+#[cfg(feature = "unstable-vfs")]
 pub mod vfs {
     pub use eryx_vfs::{
         ArcStorage, DEFAULT_MAX_BYTES, DEFAULT_MAX_OPEN_HOST_FILES, DirEntry, DirPerms,

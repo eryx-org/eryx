@@ -54,7 +54,7 @@ pub use executor::{
     DEFAULT_STATE_OP_TIMEOUT, MIN_STATE_OP_FUEL, MIN_STATE_OP_TIMEOUT, PythonStateSnapshot,
     SessionExecutor, SnapshotMetadata,
 };
-#[cfg(feature = "vfs")]
+#[cfg(feature = "unstable-vfs")]
 pub use executor::{VfsConfig, VolumeMount};
 pub use in_process::InProcessSession;
 

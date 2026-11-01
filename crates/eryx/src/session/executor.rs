@@ -45,7 +45,7 @@ use wasmtime::component::{Accessor, ResourceTable};
 // wasmtime 48 collapsed DirPerms/FilePerms into FsPerms; the fine-grained
 // flags the VFS enforces now live in eryx-vfs. Only `build_hybrid_vfs_context`
 // uses them, so the import carries that function's feature gate.
-#[cfg(feature = "vfs")]
+#[cfg(feature = "unstable-vfs")]
 use eryx_vfs::{DirPerms, FilePerms};
 use wasmtime_wasi::{FsPerms, WasiCtx, WasiCtxBuilder};
 
@@ -392,7 +392,7 @@ impl<'a> SessionExecuteBuilder<'a> {
 /// place, so they would change native code the host runs, or truncate a
 /// mapped file and crash the process. File permissions don't prevent this,
 /// because the host process itself performs the writes.
-#[cfg(feature = "vfs")]
+#[cfg(feature = "unstable-vfs")]
 #[derive(Debug, Clone)]
 pub struct VolumeMount {
     /// Absolute path on the host filesystem.
@@ -409,7 +409,7 @@ pub struct VolumeMount {
     pub max_file_size: Option<u64>,
 }
 
-#[cfg(feature = "vfs")]
+#[cfg(feature = "unstable-vfs")]
 impl VolumeMount {
     /// Create a new read-write volume mount.
     #[must_use]
@@ -448,7 +448,7 @@ impl VolumeMount {
 /// Configuration for the virtual filesystem (VFS) in a session.
 ///
 /// This allows customizing the VFS mount path and permissions.
-#[cfg(feature = "vfs")]
+#[cfg(feature = "unstable-vfs")]
 #[derive(Debug, Clone)]
 pub struct VfsConfig {
     /// The guest path where VFS storage is mounted (default: "/data").
@@ -461,7 +461,7 @@ pub struct VfsConfig {
     pub volumes: Vec<VolumeMount>,
 }
 
-#[cfg(feature = "vfs")]
+#[cfg(feature = "unstable-vfs")]
 impl Default for VfsConfig {
     fn default() -> Self {
         Self {
@@ -473,7 +473,7 @@ impl Default for VfsConfig {
     }
 }
 
-#[cfg(feature = "vfs")]
+#[cfg(feature = "unstable-vfs")]
 impl VfsConfig {
     /// Create a new VFS config with the given mount path.
     ///
@@ -574,19 +574,19 @@ pub struct SessionExecutor {
     last_output_truncated: bool,
 
     /// VFS storage that persists across resets.
-    #[cfg(feature = "vfs")]
+    #[cfg(feature = "unstable-vfs")]
     vfs_storage: Option<eryx_vfs::ArcStorage>,
 
     /// VFS configuration that persists across resets.
-    #[cfg(feature = "vfs")]
+    #[cfg(feature = "unstable-vfs")]
     vfs_config: Option<VfsConfig>,
 
     /// Quota used when creating the session's own VFS storage.
-    #[cfg(feature = "vfs")]
+    #[cfg(feature = "unstable-vfs")]
     vfs_max_bytes: Option<u64>,
 
     /// Limit on host files the session may hold open, kept for resets.
-    #[cfg(feature = "vfs")]
+    #[cfg(feature = "unstable-vfs")]
     max_open_host_files: Option<usize>,
 }
 
@@ -657,7 +657,7 @@ fn build_wasi_context(executor: &PythonExecutor, fd_output: &FdOutput) -> Result
 /// Python stdlib and site-packages as read-only host preopens, and the
 /// configured volumes. Stateless and session executions both use this, so they
 /// share one set of mounts and limits.
-#[cfg(feature = "vfs")]
+#[cfg(feature = "unstable-vfs")]
 pub(crate) fn build_hybrid_vfs_context(
     executor: &PythonExecutor,
     vfs_storage: eryx_vfs::ArcStorage,
@@ -774,11 +774,11 @@ impl SessionExecutor {
         callbacks: &[Arc<dyn Callback>],
         limits: &ResourceLimits,
     ) -> Result<Self, Error> {
-        #[cfg(feature = "vfs")]
+        #[cfg(feature = "unstable-vfs")]
         {
             Self::new_internal(executor, callbacks, None, None, limits).await
         }
-        #[cfg(not(feature = "vfs"))]
+        #[cfg(not(feature = "unstable-vfs"))]
         {
             Self::new_internal(executor, callbacks, limits).await
         }
@@ -799,7 +799,7 @@ impl SessionExecutor {
     /// # Errors
     ///
     /// Returns an error if the WASM component cannot be instantiated.
-    #[cfg(feature = "vfs")]
+    #[cfg(feature = "unstable-vfs")]
     pub async fn new_with_vfs(
         executor: Arc<PythonExecutor>,
         callbacks: &[Arc<dyn Callback>],
@@ -846,7 +846,7 @@ impl SessionExecutor {
     /// # Errors
     ///
     /// Returns an error if the WASM component cannot be instantiated.
-    #[cfg(feature = "vfs")]
+    #[cfg(feature = "unstable-vfs")]
     pub async fn new_with_vfs_config(
         executor: Arc<PythonExecutor>,
         callbacks: &[Arc<dyn Callback>],
@@ -872,7 +872,7 @@ impl SessionExecutor {
     ///
     /// Returns an error if the WASM component cannot be instantiated or a VFS
     /// mount cannot be created.
-    #[cfg(feature = "vfs")]
+    #[cfg(feature = "unstable-vfs")]
     pub async fn new_with_vfs_config_and_limits(
         executor: Arc<PythonExecutor>,
         callbacks: &[Arc<dyn Callback>],
@@ -891,7 +891,7 @@ impl SessionExecutor {
     }
 
     /// Internal constructor with optional VFS storage and config.
-    #[cfg(feature = "vfs")]
+    #[cfg(feature = "unstable-vfs")]
     async fn new_internal(
         executor: Arc<PythonExecutor>,
         callbacks: &[Arc<dyn Callback>],
@@ -991,7 +991,7 @@ impl SessionExecutor {
     }
 
     /// Internal constructor without VFS.
-    #[cfg(not(feature = "vfs"))]
+    #[cfg(not(feature = "unstable-vfs"))]
     async fn new_internal(
         executor: Arc<PythonExecutor>,
         callbacks: &[Arc<dyn Callback>],
@@ -1514,7 +1514,7 @@ impl SessionExecutor {
         let callback_infos = build_callback_infos(callbacks);
         let wasi = build_wasi_context(&self.executor, &self.fd_output)?;
 
-        #[cfg(not(feature = "vfs"))]
+        #[cfg(not(feature = "unstable-vfs"))]
         let state = ExecutorState::new(
             wasi,
             ResourceTable::new(),
@@ -1524,7 +1524,7 @@ impl SessionExecutor {
             MemoryTracker::new(self.memory_limit),
         );
 
-        #[cfg(feature = "vfs")]
+        #[cfg(feature = "unstable-vfs")]
         let state = {
             // Reuse existing VFS storage and config so files persist across resets
             let vfs_storage = self.vfs_storage.clone().unwrap_or_else(|| {
@@ -1954,7 +1954,7 @@ impl SessionExecutor {
 
 impl ExecutorState {
     /// Create a new ExecutorState with the given configuration.
-    #[cfg(not(feature = "vfs"))]
+    #[cfg(not(feature = "unstable-vfs"))]
     pub(crate) fn new(
         wasi: WasiCtx,
         table: ResourceTable,
@@ -1979,7 +1979,7 @@ impl ExecutorState {
     }
 
     /// Create a new ExecutorState with the given configuration.
-    #[cfg(feature = "vfs")]
+    #[cfg(feature = "unstable-vfs")]
     pub(crate) fn new(
         wasi: WasiCtx,
         table: ResourceTable,

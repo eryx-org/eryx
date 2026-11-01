@@ -131,7 +131,7 @@ async fn per_execution_configuration_applies_to_a_warm_instance() {
     assert_eq!(output.result.as_deref(), Some(r#"{"n": 1}"#));
 }
 
-#[cfg(feature = "vfs")]
+#[cfg(feature = "unstable-vfs")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn the_virtual_filesystem_is_mounted_on_a_warm_instance() {
     let sandbox = sandbox_with_warm_instance().await;
