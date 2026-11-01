@@ -180,8 +180,12 @@ class TestRebuild:
         assert result.stdout == b"41\n"
         # ... and still stores what's needed to rebuild it next time.
         _forge_other_version(resaved)
+        # `cache=False`: forging leaves the footer's content hash alone, and this
+        # process has already cached a component under it, which a cached load
+        # would reuse without looking at the forged file. A file really built by
+        # another version has a different hash.
         with pytest.raises(eryx.InitializationError, match="rebuild_if_incompatible=True"):
-            eryx.SandboxFactory.load(str(resaved))
+            eryx.SandboxFactory.load(str(resaved), cache=False)
 
 
 class TestSaveLoadRoundTrip:
@@ -209,5 +213,9 @@ class TestSaveLoadRoundTrip:
         eryx.SandboxFactory.load(str(first)).save(str(second))
 
         _forge_other_version(second)
+        # `cache=False`: forging leaves the footer's content hash alone, and this
+        # process has already cached a component under it, which a cached load
+        # would reuse without looking at the forged file. A file really built by
+        # another version has a different hash.
         with pytest.raises(eryx.InitializationError, match="rebuild_if_incompatible=True"):
-            eryx.SandboxFactory.load(str(second))
+            eryx.SandboxFactory.load(str(second), cache=False)
