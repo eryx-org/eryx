@@ -61,7 +61,8 @@ def test_invalid_settings_are_rejected():
                 eryx.configure_shared_engine(**kwargs)
             except (ValueError, eryx.InitializationError) as e:
                 print("REJECTED", type(e).__name__)
-        eryx.configure_shared_engine(warm_instances=0)
+        # Allocator names are case-insensitive, like ERYX_ALLOCATOR.
+        eryx.configure_shared_engine(allocator="On-Demand", warm_instances=0)
         print("OK")
         """
     )

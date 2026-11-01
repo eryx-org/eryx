@@ -59,6 +59,7 @@ def configure_shared_engine(
 
     Raises:
         ValueError: If ``allocator`` is not a known allocator.
+        OverflowError: If a numeric setting is negative or too large.
         InitializationError: If a setting is invalid, or the configuration was
             already fixed by an earlier call or by creating a sandbox.
     """

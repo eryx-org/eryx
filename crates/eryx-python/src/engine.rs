@@ -29,6 +29,7 @@ use crate::error::eryx_error_to_py;
 ///
 /// Raises:
 ///     ValueError: If ``allocator`` is not a known allocator.
+///     OverflowError: If a numeric setting is negative or too large.
 ///     InitializationError: If a setting is invalid, or the configuration was
 ///         already fixed by an earlier call or by creating a sandbox.
 #[pyfunction]
@@ -54,7 +55,8 @@ pub fn configure_shared_engine(
         config = config.with_warm_instances(n);
     }
     if let Some(name) = allocator {
-        config = config.with_allocator(match name {
+        // Case-insensitive, like `ERYX_ALLOCATOR`.
+        config = config.with_allocator(match name.to_ascii_lowercase().as_str() {
             "pooling" => eryx::InstanceAllocator::Pooling,
             "on-demand" => eryx::InstanceAllocator::OnDemand,
             _ => {

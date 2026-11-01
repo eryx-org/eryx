@@ -758,15 +758,17 @@ static ENGINE_CONFIG: OnceLock<SharedEngineConfig> = OnceLock::new();
 ///
 /// Like rayon's `ThreadPoolBuilder::build_global`, this configures a global
 /// that is created lazily: call it once, before creating any sandbox. The
-/// settings are read when the shared engine or the warm pool is first used,
-/// and cannot change after that. Explicit settings take precedence over the
+/// settings are read when the shared engine or the warm pool is first used
+/// (building a sandbox, or calling [`PythonExecutor::shared_engine`]), and
+/// cannot change after that. Explicit settings take precedence over the
 /// `ERYX_*` environment variables, which still apply to anything left unset.
 ///
 /// # Errors
 ///
 /// Returns [`Error::WasmEngine`] if a setting (explicit or from the
 /// environment) is invalid, or if the configuration was already fixed by an
-/// earlier call or by creating a sandbox. A rejected call changes nothing.
+/// earlier call or by the shared engine being created. A rejected call
+/// changes nothing.
 pub fn configure_shared_engine(config: SharedEngineConfig) -> std::result::Result<(), Error> {
     config.allocator_settings()?;
     ENGINE_CONFIG.set(config).map_err(|_| {
