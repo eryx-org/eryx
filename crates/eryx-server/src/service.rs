@@ -1304,16 +1304,15 @@ async fn execute_with_session(
                 stats: Some(ExecuteStats {
                     duration_ms: duration.as_millis() as u64,
                     callback_invocations,
-                    // There is no `output` on the error path, so read the
-                    // stats the session kept for its last execution. A
-                    // suspension poisons the remaining fuel, so the consumed
-                    // figure would be meaningless there.
-                    peak_memory_bytes: session.last_peak_memory_bytes(),
-                    fuel_consumed: if suspended {
-                        0
-                    } else {
-                        session.last_fuel_consumed().unwrap_or(0)
-                    },
+                    // There is no `output` on the error path, so read what the
+                    // run used from the error. A suspension has none: it
+                    // poisons the remaining fuel, so the figure would be
+                    // meaningless.
+                    peak_memory_bytes: e
+                        .stats()
+                        .and_then(|stats| stats.peak_memory_bytes)
+                        .unwrap_or(0),
+                    fuel_consumed: e.stats().and_then(|stats| stats.fuel_consumed).unwrap_or(0),
                     replayed_callbacks,
                 }),
                 // Still return the snapshot — the Go service decides whether to keep it.

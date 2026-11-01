@@ -564,11 +564,6 @@ pub struct SessionExecutor {
     /// The guest's direct fd 1/2 writes, appended to each execution's output.
     fd_output: FdOutput,
 
-    /// Peak memory and fuel consumed by the most recent execution, kept so
-    /// callers can report them when the execution failed.
-    last_peak_memory_bytes: u64,
-    last_fuel_consumed: Option<u64>,
-
     /// Whether the most recent execution dropped streamed output (not trace
     /// events) for exceeding the stream budget.
     last_output_truncated: bool,
@@ -987,8 +982,6 @@ impl SessionExecutor {
             state_op_cancellation: None,
             memory_limit: limits.max_memory_bytes,
             fd_output,
-            last_peak_memory_bytes: 0,
-            last_fuel_consumed: None,
             last_output_truncated: false,
             vfs_storage: Some(vfs_storage),
             vfs_config: Some(vfs_config),
@@ -1067,8 +1060,6 @@ impl SessionExecutor {
             state_op_cancellation: None,
             memory_limit: limits.max_memory_bytes,
             fd_output,
-            last_peak_memory_bytes: 0,
-            last_fuel_consumed: None,
             last_output_truncated: false,
         })
     }
@@ -1185,23 +1176,6 @@ impl SessionExecutor {
         self.fuel_limit
     }
 
-    /// Peak guest memory, in bytes, reached during the most recent execution.
-    ///
-    /// Unlike [`ExecutionOutput::peak_memory_bytes`], this is also available
-    /// when the execution failed (e.g. a Python exception or a timeout). It is
-    /// 0 if the last call failed before the guest ran.
-    #[must_use]
-    pub fn last_peak_memory_bytes(&self) -> u64 {
-        self.last_peak_memory_bytes
-    }
-
-    /// Fuel consumed by the most recent execution, also available when the
-    /// execution failed. `None` if the last call failed before the guest ran.
-    #[must_use]
-    pub fn last_fuel_consumed(&self) -> Option<u64> {
-        self.last_fuel_consumed
-    }
-
     /// Whether the most recent execution dropped streamed stdout/stderr for
     /// exceeding the per-execution stream budget. Unlike
     /// [`ExecutionOutput::stream_truncated`], it ignores dropped trace events
@@ -1250,8 +1224,6 @@ impl SessionExecutor {
         per_execute_fuel_limit: Option<u64>,
         cancellation_token: Option<CancellationToken>,
     ) -> Result<ExecutionOutput, Error> {
-        self.last_peak_memory_bytes = 0;
-        self.last_fuel_consumed = None;
         self.last_output_truncated = false;
         crate::error::validate_user_code(code)?;
         if crate::wasm::is_already_cancelled(cancellation_token.as_ref()) {
@@ -1402,8 +1374,6 @@ impl SessionExecutor {
 
         // Calculate fuel consumed during execution
         let fuel_consumed = Some(initial_fuel.saturating_sub(remaining_fuel));
-        self.last_peak_memory_bytes = peak_memory;
-        self.last_fuel_consumed = fuel_consumed;
         // What a failed run used is still the host's to meter.
         let with_stats =
             move |e: Error| e.with_run_stats(start.elapsed(), peak_memory, fuel_consumed);
