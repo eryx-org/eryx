@@ -158,6 +158,9 @@ wasmtime-wizer.debug-assertions = false
 wit-component.opt-level = 3
 wit-dylib.opt-level = 3
 wit-parser.opt-level = 3
+# build.rs hashes the embedded runtime (~47 MB, ~1s unoptimized) and cache.rs
+# hashes native extensions and the base libraries.
+sha2.opt-level = 3
 zstd-safe.opt-level = 3
 zstd-sys.opt-level = 3
 

@@ -18,8 +18,33 @@
 mod cached_runtime;
 
 fn main() {
+    #[cfg(feature = "embedded-stdlib")]
+    embedded_stdlib::prepare();
     #[cfg(feature = "embedded")]
     embedded_runtime::prepare();
+}
+
+/// First 16 hex characters of SHA-256, used to name the extracted copies of
+/// embedded files. Hashing here instead of at startup saves every process a
+/// hash of the file, which for the runtime takes ~1s in unoptimized builds.
+#[cfg(feature = "embedded-stdlib")]
+fn short_sha256(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+
+    hex::encode(&Sha256::digest(bytes)[..8])
+}
+
+#[cfg(feature = "embedded-stdlib")]
+mod embedded_stdlib {
+    pub fn prepare() {
+        let path = "python-stdlib.tar.zst";
+        println!("cargo::rerun-if-changed={path}");
+        let bytes = std::fs::read(path).expect("Failed to read python-stdlib.tar.zst");
+        println!(
+            "cargo::rustc-env=ERYX_EMBEDDED_STDLIB_HASH={}",
+            crate::short_sha256(&bytes)
+        );
+    }
 }
 
 #[cfg(feature = "embedded")]
@@ -27,6 +52,17 @@ mod embedded_runtime {
     use std::path::PathBuf;
 
     use crate::cached_runtime;
+
+    /// Write the runtime to embed and export its [`crate::short_sha256`] as
+    /// `ERYX_EMBEDDED_RUNTIME_HASH`.
+    fn write_runtime(out_dir: &std::path::Path, bytes: &[u8]) {
+        std::fs::write(out_dir.join("runtime.cwasm"), bytes)
+            .expect("Failed to write runtime.cwasm");
+        println!(
+            "cargo::rustc-env=ERYX_EMBEDDED_RUNTIME_HASH={}",
+            crate::short_sha256(bytes)
+        );
+    }
 
     /// Check if we're building the precompile example (which bootstraps without runtime.cwasm).
     fn is_precompile_bootstrap() -> bool {
@@ -94,8 +130,7 @@ mod embedded_runtime {
 
         // docs.rs sandbox: no WASM artifacts available, write empty placeholder
         if std::env::var("DOCS_RS").is_ok() {
-            let dest = out_dir.join("runtime.cwasm");
-            std::fs::write(&dest, b"").expect("Failed to write docs.rs placeholder runtime.cwasm");
+            write_runtime(&out_dir, b"");
             return;
         }
 
@@ -134,14 +169,12 @@ mod embedded_runtime {
         match cwasm {
             Some((path, bytes)) => {
                 println!("cargo::rerun-if-changed={}", path.display());
-                let dest = out_dir.join("runtime.cwasm");
-                std::fs::write(&dest, bytes).expect("Failed to write runtime.cwasm");
+                write_runtime(&out_dir, &bytes);
             }
             None => {
                 if is_precompile_bootstrap() {
                     // Precompile bootstrap: create empty placeholder
-                    let dest = out_dir.join("runtime.cwasm");
-                    std::fs::write(&dest, b"").expect("Failed to write placeholder runtime.cwasm");
+                    write_runtime(&out_dir, b"");
                     return;
                 }
                 panic!(
