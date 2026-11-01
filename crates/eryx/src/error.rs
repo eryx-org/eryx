@@ -28,6 +28,7 @@ use std::time::Duration;
 pub struct Error {
     kind: ErrorKind,
     stats: Option<Box<ExecuteStats>>,
+    output_truncated: bool,
 }
 
 impl Error {
@@ -58,6 +59,22 @@ impl Error {
     #[must_use]
     pub fn stats(&self) -> Option<&ExecuteStats> {
         self.stats.as_deref()
+    }
+
+    /// Whether the run dropped streamed stdout/stderr chunks for exceeding the
+    /// per-execution stream budget before it failed. Unlike
+    /// [`ExecuteResult::stream_truncated`](crate::ExecuteResult::stream_truncated)
+    /// it ignores dropped trace events.
+    #[must_use]
+    pub fn output_truncated(&self) -> bool {
+        self.output_truncated
+    }
+
+    /// Record that the failed run dropped streamed output.
+    #[must_use]
+    pub(crate) fn with_output_truncated(mut self, truncated: bool) -> Self {
+        self.output_truncated = truncated;
+        self
     }
 
     /// Attach the statistics of the run that failed.
@@ -105,7 +122,11 @@ impl std::error::Error for Error {
 
 impl From<ErrorKind> for Error {
     fn from(kind: ErrorKind) -> Self {
-        Self { kind, stats: None }
+        Self {
+            kind,
+            stats: None,
+            output_truncated: false,
+        }
     }
 }
 

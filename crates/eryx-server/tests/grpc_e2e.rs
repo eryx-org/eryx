@@ -2443,6 +2443,25 @@ async fn sandbox_stream_limit_sets_output_truncated() {
     assert!(result.output_truncated);
 }
 
+/// A run that fails after the sandbox's stream limit dropped output is still
+/// reported as truncated.
+#[tokio::test]
+async fn failed_execution_reports_output_truncated() {
+    let mut client = EryxClient::new(start_server().await);
+    let result = execute_half_closed(
+        &mut client,
+        ExecuteRequest {
+            code: "import _eryx\nfor _ in range(400_000):\n    _eryx._eryx_report_output(0, b'x')\nraise ValueError('boom')"
+                .to_string(),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    assert!(!result.success);
+    assert!(result.output_truncated);
+}
+
 /// Trace events dropped by the sandbox's stream limit do not mark complete
 /// output as truncated.
 #[tokio::test]

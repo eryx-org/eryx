@@ -564,10 +564,6 @@ pub struct SessionExecutor {
     /// The guest's direct fd 1/2 writes, appended to each execution's output.
     fd_output: FdOutput,
 
-    /// Whether the most recent execution dropped streamed output (not trace
-    /// events) for exceeding the stream budget.
-    last_output_truncated: bool,
-
     /// VFS storage that persists across resets.
     #[cfg(feature = "unstable-vfs")]
     vfs_storage: Option<eryx_vfs::ArcStorage>,
@@ -982,7 +978,6 @@ impl SessionExecutor {
             state_op_cancellation: None,
             memory_limit: limits.max_memory_bytes,
             fd_output,
-            last_output_truncated: false,
             vfs_storage: Some(vfs_storage),
             vfs_config: Some(vfs_config),
             vfs_max_bytes: limits.max_vfs_bytes,
@@ -1060,7 +1055,6 @@ impl SessionExecutor {
             state_op_cancellation: None,
             memory_limit: limits.max_memory_bytes,
             fd_output,
-            last_output_truncated: false,
         })
     }
 
@@ -1176,15 +1170,6 @@ impl SessionExecutor {
         self.fuel_limit
     }
 
-    /// Whether the most recent execution dropped streamed stdout/stderr for
-    /// exceeding the per-execution stream budget. Unlike
-    /// [`ExecutionOutput::stream_truncated`], it ignores dropped trace events
-    /// and is also available when the execution failed.
-    #[must_use]
-    pub fn last_output_truncated(&self) -> bool {
-        self.last_output_truncated
-    }
-
     /// Execute Python code with a fluent builder API.
     ///
     /// State from previous executions is preserved - variables defined in
@@ -1224,7 +1209,6 @@ impl SessionExecutor {
         per_execute_fuel_limit: Option<u64>,
         cancellation_token: Option<CancellationToken>,
     ) -> Result<ExecutionOutput, Error> {
-        self.last_output_truncated = false;
         crate::error::validate_user_code(code)?;
         if crate::wasm::is_already_cancelled(cancellation_token.as_ref()) {
             return Err(ErrorKind::Cancelled.into());
@@ -1358,7 +1342,7 @@ impl SessionExecutor {
         // channel is dropped.
         let (fd_stdout, fd_stderr) = self.fd_output.take(store.data().output_tx.as_ref());
         let stream_truncated = store.data().stream_budget.truncated;
-        self.last_output_truncated = store.data().stream_budget.output_truncated;
+        let output_truncated = store.data().stream_budget.output_truncated;
 
         let peak_memory = {
             let state = store.data_mut();
@@ -1375,8 +1359,10 @@ impl SessionExecutor {
         // Calculate fuel consumed during execution
         let fuel_consumed = Some(initial_fuel.saturating_sub(remaining_fuel));
         // What a failed run used is still the host's to meter.
-        let with_stats =
-            move |e: Error| e.with_run_stats(start.elapsed(), peak_memory, fuel_consumed);
+        let with_stats = move |e: Error| {
+            e.with_run_stats(start.elapsed(), peak_memory, fuel_consumed)
+                .with_output_truncated(output_truncated)
+        };
 
         // A cancelled run was interrupted mid-call, so its instance can't be
         // reused: leave the store out and the next call resets the session.
@@ -1444,6 +1430,7 @@ impl SessionExecutor {
         output.result = empty_to_none(wit_output.result_json);
         output.result_error = empty_to_none(wit_output.result_error);
         output.stream_truncated = stream_truncated;
+        output.output_truncated = output_truncated;
         output.state_was_reset = std::mem::take(&mut self.state_was_reset);
         output.stdout.extend(fd_stdout);
         output.stderr.extend(fd_stderr);

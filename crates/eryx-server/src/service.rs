@@ -1131,7 +1131,11 @@ async fn execute_with_session(
         .await
         .unwrap_or_else(|_| CappedOutput::new(0));
     // The sandbox's own stream budget can also drop output.
-    let output_truncated = output.truncated || session.last_output_truncated();
+    let output_truncated = output.truncated
+        || match &exec_result {
+            Ok(done) => done.output_truncated,
+            Err(failed) => failed.output_truncated(),
+        };
     let stdout = if params.scrub_stdout {
         scrub_placeholders_bytes(&output.stdout, &params.secrets)
     } else {

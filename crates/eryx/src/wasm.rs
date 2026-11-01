@@ -503,6 +503,11 @@ pub struct ExecutionOutput {
     /// the execution reached the per-stream limit (16 MiB of queued events
     /// each). The captured `stdout`/`stderr` here are unaffected.
     pub stream_truncated: bool,
+    /// Whether streamed stdout/stderr chunks were dropped because the
+    /// execution reached the per-stream limit. Unlike
+    /// [`stream_truncated`](Self::stream_truncated) this ignores dropped trace
+    /// events. Also reported by [`Error::output_truncated`] when the run fails.
+    pub output_truncated: bool,
 }
 
 impl ExecutionOutput {
@@ -530,6 +535,7 @@ impl ExecutionOutput {
             result_error: None,
             state_was_reset: false,
             stream_truncated: false,
+            output_truncated: false,
         }
     }
 
@@ -3517,6 +3523,7 @@ impl PythonExecutor {
                 store.data().memory_tracker.peak_memory_bytes(),
                 Some(initial_fuel.saturating_sub(remaining)),
             )
+            .with_output_truncated(store.data().stream_budget.output_truncated)
         });
 
         // Teardown (resetting the memory slot) and re-instantiation happen off
@@ -3714,6 +3721,7 @@ impl PythonExecutor {
         output.result = empty_to_none(wit_output.result_json);
         output.result_error = empty_to_none(wit_output.result_error);
         output.stream_truncated = store.data().stream_budget.truncated;
+        output.output_truncated = store.data().stream_budget.output_truncated;
         Ok(output)
     }
 }
