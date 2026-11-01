@@ -171,9 +171,20 @@ native-extensions = ["preinit", "eryx-runtime/native-extensions"]
 # Outside semver: the API exposes eryx-vfs/wasmtime-wasi types, and the
 # `unstable-` prefix keeps cargo-semver-checks from checking it.
 unstable-vfs = ["dep:eryx-vfs"]
+# The low-level execution plumbing: the request/response channels between the
+# guest and the host (`CallbackRequest`, `NetRequest`, `OutputRequest`,
+# `TraceRequest`, `CallbackHostResult`), the `callback_handler` module that
+# serves them, and the `SessionExecuteBuilder`/`PythonExecutor` builder methods
+# that take them. `Sandbox` and `InProcessSession` are the stable way to run
+# code; this is for hosts that drive the executor themselves, like eryx-server.
+# Outside semver, like `unstable-vfs`.
+unstable-internals = []
 
 
 [dev-dependencies]
+# Enables `unstable-internals` for this crate's own tests and examples, which
+# exercise the executor plumbing directly.
+eryx = { path = ".", features = ["unstable-internals"] }
 anyhow.workspace = true
 async-trait.workspace = true
 criterion.workspace = true

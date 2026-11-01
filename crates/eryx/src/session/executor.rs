@@ -272,13 +272,14 @@ impl<'a> SessionExecuteBuilder<'a> {
         }
     }
 
+    unstable_pub! {
     /// Set callbacks that Python code can invoke.
     ///
     /// The `callback_tx` channel is used to send callback requests from
     /// the WASM guest to the host for processing. Both the callbacks and
     /// the channel are required together since they work in tandem.
     #[must_use]
-    pub fn with_callbacks(
+    fn with_callbacks(
         mut self,
         callbacks: &[Arc<dyn Callback>],
         callback_tx: mpsc::Sender<CallbackRequest>,
@@ -287,32 +288,39 @@ impl<'a> SessionExecuteBuilder<'a> {
         self.callback_tx = Some(callback_tx);
         self
     }
+    }
 
+    unstable_pub! {
     /// Set the trace channel for receiving execution trace events.
     #[must_use]
-    pub fn with_tracing(mut self, trace_tx: mpsc::UnboundedSender<TraceRequest>) -> Self {
+    fn with_tracing(mut self, trace_tx: mpsc::UnboundedSender<TraceRequest>) -> Self {
         self.trace_tx = Some(trace_tx);
         self
     }
+    }
 
+    unstable_pub! {
     /// Enable networking for this execution.
     ///
     /// The `net_tx` channel is used to send network requests (TCP/TLS) from
     /// the WASM guest to the host for processing.
     #[must_use]
-    pub fn with_network(mut self, net_tx: mpsc::Sender<NetRequest>) -> Self {
+    fn with_network(mut self, net_tx: mpsc::Sender<NetRequest>) -> Self {
         self.net_tx = Some(net_tx);
         self
     }
+    }
 
+    unstable_pub! {
     /// Enable real-time output streaming for this execution.
     #[must_use]
-    pub fn with_output_streaming(
+    fn with_output_streaming(
         mut self,
         output_tx: mpsc::UnboundedSender<crate::wasm::OutputRequest>,
     ) -> Self {
         self.output_tx = Some(output_tx);
         self
+    }
     }
 
     /// Run `preamble` (setup such as libraries or secrets) before the code, in

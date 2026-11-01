@@ -19,7 +19,7 @@ crate-type = ["cdylib"]
 [dependencies]
 async-trait.workspace = true
 blake3.workspace = true
-eryx = { workspace = true, features = ["embedded", "macros", "native-extensions", "unstable-vfs"] }
+eryx = { workspace = true, features = ["embedded", "macros", "native-extensions", "unstable-vfs", "unstable-internals"] }
 pyo3 = { workspace = true } #unified
 pyo3-async-runtimes = { workspace = true, features = ["tokio-runtime"] }
 pythonize.workspace = true

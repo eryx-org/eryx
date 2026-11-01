@@ -347,6 +347,7 @@ pub async fn run_net_handler(
                 manager.tls_close(handle);
             }
 
+            #[cfg(feature = "unstable-internals")]
             NetRequest::CloseAll { response_tx } => {
                 manager.close_all_connections();
                 let _ = response_tx.send(());
@@ -363,6 +364,7 @@ pub async fn run_net_handler(
 /// handles will receive `InvalidHandle` errors on subsequent use.
 ///
 /// Returns `Err` if the net handler has already exited (channel closed).
+#[cfg(feature = "unstable-internals")]
 pub async fn close_all_connections(
     net_tx: &mpsc::Sender<NetRequest>,
 ) -> Result<(), mpsc::error::SendError<NetRequest>> {
