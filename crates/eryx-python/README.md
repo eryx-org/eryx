@@ -574,6 +574,11 @@ factory = eryx.SandboxFactory.load("/path/to/jinja2-factory.bin")
 sandbox = factory.create_sandbox()
 ```
 
+A saved factory only loads in the pyeryx version that saved it, because it
+contains code compiled for that exact version. After upgrading pyeryx,
+recreate and re-save your factories. Loading one saved by another version
+raises `InitializationError` naming both versions.
+
 #### Properties and Methods
 
 - `factory.size_bytes` - Size of the pre-compiled factory in bytes

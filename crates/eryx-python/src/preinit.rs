@@ -337,7 +337,9 @@ impl SandboxFactory {
     /// Save the sandbox factory to a file.
     ///
     /// The saved file can be loaded later with `SandboxFactory.load()`,
-    /// which is much faster than creating a new factory.
+    /// which is much faster than creating a new factory. It only loads in
+    /// the pyeryx version that saved it: after upgrading pyeryx, recreate
+    /// and re-save the factory.
     ///
     /// Args:
     ///     path: Path where the factory should be saved.
