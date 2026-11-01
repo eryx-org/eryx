@@ -146,8 +146,24 @@ fn load_factory_file(path: &Path, cache: bool) -> PyResult<FactoryFile> {
                 BuildInputs::Missing
             } else {
                 let data_files_end = component_len + data_files_len;
+                let backing = if cfg!(unix) {
+                    SectionsBacking::File(Mutex::new(file.try_clone().map_err(load_err)?))
+                } else {
+                    let mut bytes = Vec::new();
+                    file.seek(std::io::SeekFrom::Start(component_len))
+                        .and_then(|_| {
+                            (&mut file)
+                                .take(data_files_len + build_inputs_len)
+                                .read_to_end(&mut bytes)
+                        })
+                        .map_err(load_err)?;
+                    SectionsBacking::Memory {
+                        base: component_len,
+                        bytes,
+                    }
+                };
                 BuildInputs::InFile(StoredSections {
-                    file: Mutex::new(file.try_clone().map_err(load_err)?),
+                    backing,
                     data_files: component_len..data_files_end,
                     build_inputs: data_files_end..data_files_end + build_inputs_len,
                 })
@@ -462,12 +478,10 @@ impl SandboxFactory {
             build_inputs,
         } = load_factory_file(&path, cache)?;
 
-        // Without the flag a mismatch can surface later, in the first
-        // `create_sandbox()`, as it always has. With it, catch it now.
+        // Catch a mismatch now, not in the first `create_sandbox()`: where a
+        // component is only deserialized lazily, it would surface there.
         let precompiled = precompiled.and_then(|precompiled| {
-            if rebuild_if_incompatible {
-                check_compatible(&precompiled)?;
-            }
+            check_compatible(&precompiled)?;
             Ok(precompiled)
         });
         let precompiled = match precompiled {
@@ -1116,17 +1130,35 @@ impl BuildInputs {
 /// from the same trusted handle that `load()` checked.
 #[derive(Debug)]
 struct StoredSections {
-    file: Mutex<std::fs::File>,
+    backing: SectionsBacking,
     data_files: Range<u64>,
     build_inputs: Range<u64>,
+}
+
+/// Where a [`StoredSections`] reads from.
+#[derive(Debug)]
+enum SectionsBacking {
+    /// The handle `load()` opened.
+    File(Mutex<std::fs::File>),
+    /// The bytes from the start of the data files section, for platforms where
+    /// an open handle stops `save()` renaming a new file over the old one.
+    #[cfg_attr(unix, allow(dead_code))]
+    Memory { base: u64, bytes: Vec<u8> },
 }
 
 impl StoredSections {
     fn read(&self, range: &Range<u64>) -> std::io::Result<Vec<u8>> {
         use std::io::{Read as _, Seek as _};
 
-        let mut file = self
-            .file
+        let file = match &self.backing {
+            SectionsBacking::File(file) => file,
+            SectionsBacking::Memory { base, bytes } => {
+                return Ok(
+                    bytes[(range.start - base) as usize..(range.end - base) as usize].to_vec(),
+                );
+            }
+        };
+        let mut file = file
             .lock()
             .map_err(|_| std::io::Error::other("factory file lock poisoned"))?;
         file.seek(std::io::SeekFrom::Start(range.start))?;
