@@ -575,6 +575,47 @@ jobs:
         env:
           RUSTDOCFLAGS: "--cfg docsrs -D warnings"
 
+  # Report public API changes against the PR's base. Informational only: a
+  # breaking change is expected to be marked `!` in its commit, and release-plz
+  # runs the authoritative check when it prepares a release.
+  semver:
+    name: Semver Check (report only)
+    runs-on: ubuntu-latest
+    needs: changes
+    if: >-
+      github.event_name == 'pull_request'
+      && needs.changes.outputs.core == 'true'
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      - uses: ./.github/actions/setup-rust
+
+      - name: Configure Rust cache
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          prefix-key: v2
+          save-if: "false"
+
+      - name: Install cargo-semver-checks
+        run: cargo install --locked --version 0.51.0 cargo-semver-checks
+
+      # The `embedded` feature's build script needs a runtime.cwasm, which
+      # rustdoc only embeds as bytes. An empty placeholder is enough (see the
+      # same step in release-plz.yml).
+      - name: Provide placeholder runtime.cwasm
+        run: |
+          : > "$RUNNER_TEMP/runtime.cwasm"
+          echo "ERYX_RUNTIME_CWASM=$RUNNER_TEMP/runtime.cwasm" >> "$GITHUB_ENV"
+
+      - name: Check public API against the base branch
+        run: cargo semver-checks check-release -p eryx --baseline-rev "$BASE_SHA"
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+
   # Check that all feature combinations compile
   check-features:
     name: Check Feature Combinations
