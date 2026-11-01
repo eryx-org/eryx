@@ -8,10 +8,35 @@ resetting the memory slot. Running `pass` on a fresh instance takes about
 1.3 ms on a fast workstation; the Python part of that is roughly 0.2 ms.
 
 Eryx hides that cost in two ways, both on by default. This page explains what
-they do and the environment variables that tune them. Each is read once, the
-first time the process needs it (the allocator settings when the process-wide
-wasmtime engine is created), so set them in the environment of the process that
-embeds eryx (for `pyeryx`, the Python process).
+they do and the settings that tune them.
+
+Every sandbox in a process runs on one shared wasmtime engine and one shared
+pool of warm instances, created the first time the process needs them. Their
+settings are read once, at that point, so set them in the environment of the
+process that embeds eryx (for `pyeryx`, the Python process), or from code
+before the first sandbox is created. Like rayon's `build_global`, this
+configures the process-wide instance; it cannot be changed afterwards:
+
+```rust,ignore
+eryx::configure_shared_engine(
+    eryx::SharedEngineConfig::default()
+        .with_warm_instances(4)
+        .with_pool_instances(256),
+)?;
+```
+
+```python
+eryx.configure_shared_engine(warm_instances=4, pool_instances=256)
+```
+
+Every variable below has a matching `SharedEngineConfig::with_*` method and
+`configure_shared_engine` keyword argument (`ERYX_POOL_INSTANCES` is
+`with_pool_instances` / `pool_instances`, and so on). An explicit setting takes
+precedence over its variable; anything left unset still falls back to the
+environment. `configure_shared_engine` fails if a setting is invalid, if it was
+already called, or once a sandbox has been created. Per-sandbox engines with
+their own settings are not supported yet; the "shared" naming leaves room for
+an explicit engine handle later.
 
 ## Warm instances
 

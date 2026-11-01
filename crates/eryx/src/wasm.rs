@@ -625,12 +625,167 @@ impl std::str::FromStr for CpuFeatureLevel {
     }
 }
 
+/// How wasmtime allocates sandbox instances. See [`SharedEngineConfig::with_allocator`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum InstanceAllocator {
+    /// Reuse pre-reserved slots (the default, except on Windows).
+    Pooling,
+    /// A fresh `mmap` per instance.
+    OnDemand,
+}
+
+/// Settings for the process-wide shared engine and its warm-instance pool.
+///
+/// Every sandbox in the process runs on one engine
+/// ([`PythonExecutor::shared_engine`]) and shares one warm pool, so these are
+/// set once for the process with [`configure_shared_engine`], not per
+/// sandbox. Each setting left unset falls back to its environment variable,
+/// then to the default; the variables and defaults are documented in the
+/// performance guide.
+///
+/// ```
+/// let config = eryx::SharedEngineConfig::default()
+///     .with_warm_instances(4)
+///     .with_pool_instances(256);
+/// # let _ = config;
+/// ```
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct SharedEngineConfig {
+    warm_instances: Option<usize>,
+    allocator: Option<InstanceAllocator>,
+    pool_instances: Option<u32>,
+    pool_keep_resident_mb: Option<usize>,
+    pool_pagemap_scan: Option<bool>,
+    pool_release_interval_secs: Option<u64>,
+}
+
+impl SharedEngineConfig {
+    /// Instances to keep ready per runtime (`ERYX_WARM_INSTANCES`, default 1);
+    /// `0` disables the warm pool.
+    #[must_use]
+    pub fn with_warm_instances(mut self, n: usize) -> Self {
+        self.warm_instances = Some(n);
+        self
+    }
+
+    /// The instance allocator (`ERYX_ALLOCATOR`).
+    #[must_use]
+    pub fn with_allocator(mut self, allocator: InstanceAllocator) -> Self {
+        self.allocator = Some(allocator);
+        self
+    }
+
+    /// Maximum sandbox instances alive at once with the pooling allocator
+    /// (`ERYX_POOL_INSTANCES`, default 1000). Must be positive.
+    #[must_use]
+    pub fn with_pool_instances(mut self, n: u32) -> Self {
+        self.pool_instances = Some(n);
+        self
+    }
+
+    /// How much of each linear memory to keep mapped between uses, in MiB
+    /// (`ERYX_POOL_KEEP_RESIDENT_MB`, default 64).
+    #[must_use]
+    pub fn with_pool_keep_resident_mb(mut self, mib: usize) -> Self {
+        self.pool_keep_resident_mb = Some(mib);
+        self
+    }
+
+    /// Whether to find dirty pages with Linux's `PAGEMAP_SCAN`
+    /// (`ERYX_POOL_PAGEMAP_SCAN`, default on).
+    #[must_use]
+    pub fn with_pool_pagemap_scan(mut self, enabled: bool) -> Self {
+        self.pool_pagemap_scan = Some(enabled);
+        self
+    }
+
+    /// How often to release memory kept resident for unused slots, in seconds
+    /// (`ERYX_POOL_RELEASE_INTERVAL_SECS`, default 30); `0` never releases it.
+    #[must_use]
+    pub fn with_pool_release_interval_secs(mut self, secs: u64) -> Self {
+        self.pool_release_interval_secs = Some(secs);
+        self
+    }
+
+    /// The value for environment variable `name`: the explicit setting if
+    /// there is one, otherwise `env`'s.
+    ///
+    /// Explicit settings go through the same parsing as the variables, so
+    /// both are validated identically.
+    fn lookup(&self, name: &str, env: impl Fn(&str) -> Option<String>) -> Option<String> {
+        let explicit = match name {
+            "ERYX_WARM_INSTANCES" => self.warm_instances.map(|n| n.to_string()),
+            "ERYX_ALLOCATOR" => self.allocator.map(|a| {
+                match a {
+                    InstanceAllocator::Pooling => "pooling",
+                    InstanceAllocator::OnDemand => "on-demand",
+                }
+                .to_string()
+            }),
+            "ERYX_POOL_INSTANCES" => self.pool_instances.map(|n| n.to_string()),
+            "ERYX_POOL_KEEP_RESIDENT_MB" => self.pool_keep_resident_mb.map(|n| n.to_string()),
+            "ERYX_POOL_PAGEMAP_SCAN" => self.pool_pagemap_scan.map(|b| u8::from(b).to_string()),
+            "ERYX_POOL_RELEASE_INTERVAL_SECS" => {
+                self.pool_release_interval_secs.map(|n| n.to_string())
+            }
+            _ => None,
+        };
+        explicit.or_else(|| env(name))
+    }
+
+    pub(crate) fn allocator_settings(&self) -> std::result::Result<AllocatorSettings, Error> {
+        AllocatorSettings::from_lookup(|name| self.lookup(name, |name| std::env::var(name).ok()))
+    }
+
+    pub(crate) fn warm_instances(&self) -> Option<String> {
+        self.lookup("ERYX_WARM_INSTANCES", |name| std::env::var(name).ok())
+    }
+
+    /// The configuration the shared engine and warm pool use.
+    ///
+    /// The first call fixes it: whatever [`configure_shared_engine`] set, or the
+    /// defaults, after which `configure_shared_engine` fails.
+    pub(crate) fn current() -> &'static Self {
+        ENGINE_CONFIG.get_or_init(Self::default)
+    }
+}
+
+static ENGINE_CONFIG: OnceLock<SharedEngineConfig> = OnceLock::new();
+
+/// Configure the process-wide shared engine and its warm-instance pool.
+///
+/// Like rayon's `ThreadPoolBuilder::build_global`, this configures a global
+/// that is created lazily: call it once, before creating any sandbox. The
+/// settings are read when the shared engine or the warm pool is first used
+/// (building a sandbox, or calling [`PythonExecutor::shared_engine`]), and
+/// cannot change after that. Explicit settings take precedence over the
+/// `ERYX_*` environment variables, which still apply to anything left unset.
+///
+/// # Errors
+///
+/// Returns [`Error::WasmEngine`] if a setting (explicit or from the
+/// environment) is invalid, or if the configuration was already fixed by an
+/// earlier call or by the shared engine being created. A rejected call
+/// changes nothing.
+pub fn configure_shared_engine(config: SharedEngineConfig) -> std::result::Result<(), Error> {
+    config.allocator_settings()?;
+    ENGINE_CONFIG.set(config).map_err(|_| {
+        Error::WasmEngine(
+            "the shared engine configuration is already fixed: configure_shared_engine must \
+             be called once, before any sandbox is created"
+                .to_string(),
+        )
+    })
+}
+
 /// How the shared engine allocates instance resources (linear memories,
 /// tables, and async stacks).
 ///
-/// Read from the environment rather than a builder because the engine is
-/// process-global ([`PythonExecutor::shared_engine`]) and is created before
-/// any sandbox configuration exists.
+/// Set by [`SharedEngineConfig`], falling back to the environment, because the
+/// engine is process-global ([`PythonExecutor::shared_engine`]) and is
+/// created before any sandbox configuration exists.
 ///
 /// - `ERYX_ALLOCATOR`: `pooling` (default, except on Windows) or `on-demand`.
 /// - `ERYX_POOL_INSTANCES`: maximum concurrently live sandbox instances with
@@ -717,10 +872,6 @@ impl AllocatorSettings {
     /// 64 MiB is over 50x that; nothing is reserved, so the headroom costs
     /// nothing.
     const COMPONENT_INSTANCE_SIZE: usize = 64 << 20;
-
-    pub(crate) fn from_env() -> std::result::Result<Self, Error> {
-        Self::from_lookup(|name| std::env::var(name).ok())
-    }
 
     /// Parse the settings from `lookup`, a view of the environment.
     fn from_lookup(lookup: impl Fn(&str) -> Option<String>) -> std::result::Result<Self, Error> {
@@ -2072,8 +2223,9 @@ impl PythonExecutor {
     ///
     /// Stateless executions take one of these instead of instantiating, and a
     /// background task replaces it afterwards. The pool is shared by every
-    /// executor loading the same component and sized by `ERYX_WARM_INSTANCES`
-    /// (default 1, `0` disables it); it is only used on a multi-threaded Tokio
+    /// executor loading the same component and sized by
+    /// [`SharedEngineConfig::with_warm_instances`] or `ERYX_WARM_INSTANCES` (default 1,
+    /// `0` disables it); it is only used on a multi-threaded Tokio
     /// runtime.
     #[must_use]
     pub fn warm_instances_ready(&self) -> usize {
@@ -2931,7 +3083,7 @@ impl PythonExecutor {
     /// `ulimit -v` or an exotic kernel can refuse. Execution works identically
     /// on either allocator, so that refusal only costs instantiation latency.
     fn build_engine(mut config: Config) -> std::result::Result<Engine, Error> {
-        let allocator = AllocatorSettings::from_env()?;
+        let allocator = SharedEngineConfig::current().allocator_settings()?;
         let Some(pooling) = allocator.pooling_config() else {
             return Engine::new(&config).map_err(|e| Error::WasmEngine(e.to_string()));
         };
@@ -3832,6 +3984,47 @@ mod tests {
             let err = allocator_settings(&vars).expect_err("invalid setting must be rejected");
             assert!(matches!(err, Error::WasmEngine(_)), "{vars:?}: {err:?}");
         }
+    }
+
+    #[test]
+    fn explicit_engine_config_beats_the_environment() {
+        let env = |name: &str| match name {
+            "ERYX_WARM_INSTANCES" => Some("5".to_string()),
+            "ERYX_ALLOCATOR" => Some("pooling".to_string()),
+            "ERYX_POOL_INSTANCES" => Some("7".to_string()),
+            "ERYX_POOL_KEEP_RESIDENT_MB" => Some("16".to_string()),
+            _ => None,
+        };
+        let config = SharedEngineConfig::default()
+            .with_warm_instances(0)
+            .with_allocator(InstanceAllocator::OnDemand)
+            .with_pool_instances(3)
+            .with_pool_pagemap_scan(false)
+            .with_pool_release_interval_secs(0);
+        assert_eq!(
+            config.lookup("ERYX_WARM_INSTANCES", env).as_deref(),
+            Some("0")
+        );
+        let settings = AllocatorSettings::from_lookup(|name| config.lookup(name, env)).unwrap();
+        assert_eq!(
+            settings,
+            AllocatorSettings {
+                pooling: false,
+                pool_instances: 3,
+                // Unset explicitly, so the environment's value applies.
+                keep_resident_bytes: 16 << 20,
+                pagemap_scan: false,
+                release_interval: None,
+            }
+        );
+    }
+
+    #[test]
+    fn explicit_engine_config_is_validated_like_the_environment() {
+        let config = SharedEngineConfig::default().with_pool_instances(0);
+        let err = AllocatorSettings::from_lookup(|name| config.lookup(name, |_| None))
+            .expect_err("zero pool instances must be rejected");
+        assert!(matches!(err, Error::WasmEngine(_)), "{err:?}");
     }
 
     /// The pooling configuration must be accepted by wasmtime. That

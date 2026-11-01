@@ -91,8 +91,10 @@ in the background and handing it to the next execution; the environment
 variables that tune this (`ERYX_WARM_INSTANCES`, `ERYX_ALLOCATOR`, ...) are
 documented in the
 [Performance Tuning](https://docs.eryx.run/guide/performance.html)
-guide. Set them in the environment of the Python process before importing
-`eryx`.
+guide. They configure the process-wide shared engine: set them in the
+environment of the Python process, or call `eryx.configure_shared_engine(...)`
+(for example `eryx.configure_shared_engine(warm_instances=4)`) before creating
+the first sandbox.
 
 ## API Reference
 
