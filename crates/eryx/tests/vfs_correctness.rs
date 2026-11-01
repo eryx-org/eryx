@@ -1,6 +1,6 @@
 //! End-to-end checks that sandboxed Python sees POSIX-like behaviour from the
 //! in-memory VFS mounted at `/data`.
-#![cfg(all(feature = "embedded", feature = "vfs"))]
+#![cfg(all(feature = "embedded", feature = "unstable-vfs"))]
 #![allow(clippy::expect_used, clippy::unwrap_used)]
 
 use std::sync::{Arc, OnceLock};

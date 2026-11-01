@@ -140,11 +140,11 @@ pub struct Sandbox {
     /// File scrubbing policy for VFS integration.
     scrub_files: crate::secrets::FileScrubPolicy,
     /// Host filesystem volume mounts.
-    #[cfg(feature = "vfs")]
+    #[cfg(feature = "unstable-vfs")]
     volumes: Vec<crate::session::VolumeMount>,
     /// Per-request VFS storage override (set via pool's `with_vfs_storage`).
     /// When set, this replaces the default scrubbing storage in `execute()`.
-    #[cfg(feature = "vfs")]
+    #[cfg(feature = "unstable-vfs")]
     vfs_storage: Option<std::sync::Arc<dyn eryx_vfs::VfsStorage>>,
     /// The per-request settings as built, restored by
     /// [`clear_per_request_state`](Self::clear_per_request_state).
@@ -383,7 +383,7 @@ impl Sandbox {
 
         // Add VFS storage — use per-request override if set, otherwise create
         // a scrubbing storage from the sandbox's secrets configuration.
-        #[cfg(feature = "vfs")]
+        #[cfg(feature = "unstable-vfs")]
         {
             let vfs_max_bytes = self
                 .resource_limits
@@ -425,11 +425,11 @@ impl Sandbox {
         }
 
         // Add volume mounts if configured
-        #[cfg(feature = "vfs")]
+        #[cfg(feature = "unstable-vfs")]
         if !self.volumes.is_empty() {
             execute_builder = execute_builder.with_volumes(self.volumes.clone());
         }
-        #[cfg(feature = "vfs")]
+        #[cfg(feature = "unstable-vfs")]
         {
             execute_builder =
                 execute_builder.with_max_open_host_files(self.resource_limits.max_open_host_files);
@@ -681,7 +681,7 @@ impl Sandbox {
     ///
     /// When set, this replaces the default scrubbing storage created in `execute()`.
     /// Used by the pool to inject pre-populated VFS storage (e.g., supporting files).
-    #[cfg(feature = "vfs")]
+    #[cfg(feature = "unstable-vfs")]
     pub(crate) fn set_vfs_storage(&mut self, storage: std::sync::Arc<dyn eryx_vfs::VfsStorage>) {
         self.vfs_storage = Some(storage);
     }
@@ -695,7 +695,7 @@ impl Sandbox {
         self.trace_handler.clone_from(&self.built.trace_handler);
         self.output_handler.clone_from(&self.built.output_handler);
         self.resource_limits.clone_from(&self.built.resource_limits);
-        #[cfg(feature = "vfs")]
+        #[cfg(feature = "unstable-vfs")]
         {
             self.vfs_storage = None;
         }
@@ -774,9 +774,9 @@ impl Sandbox {
             scrub_stderr: self.scrub_stderr.clone(),
             scrub_result: self.scrub_result,
             scrub_files: self.scrub_files.clone(),
-            #[cfg(feature = "vfs")]
+            #[cfg(feature = "unstable-vfs")]
             volumes: self.volumes.clone(),
-            #[cfg(feature = "vfs")]
+            #[cfg(feature = "unstable-vfs")]
             vfs_storage: self.vfs_storage.clone(),
             built: Arc::clone(&self.built),
         }
@@ -1370,7 +1370,7 @@ pub struct SandboxBuilder<Runtime = state::Needs, Stdlib = state::Needs> {
     /// File scrubbing policy for VFS integration.
     scrub_files: crate::secrets::FileScrubPolicy,
     /// Host filesystem volume mounts.
-    #[cfg(feature = "vfs")]
+    #[cfg(feature = "unstable-vfs")]
     volumes: Vec<crate::session::VolumeMount>,
     /// Phantom data for Runtime type parameter.
     _runtime: PhantomData<Runtime>,
@@ -1435,7 +1435,7 @@ impl SandboxBuilder<state::Needs, state::Needs> {
             scrub_stderr: crate::secrets::OutputScrubPolicy::default(),
             scrub_result: false,
             scrub_files: crate::secrets::FileScrubPolicy::default(),
-            #[cfg(feature = "vfs")]
+            #[cfg(feature = "unstable-vfs")]
             volumes: Vec::new(),
             _runtime: PhantomData,
             _stdlib: PhantomData,
@@ -1473,7 +1473,7 @@ impl SandboxBuilder<state::Needs, state::Needs> {
             scrub_stderr: crate::secrets::OutputScrubPolicy::default(),
             scrub_result: false,
             scrub_files: crate::secrets::FileScrubPolicy::default(),
-            #[cfg(feature = "vfs")]
+            #[cfg(feature = "unstable-vfs")]
             volumes: Vec::new(),
             _runtime: PhantomData,
             _stdlib: PhantomData,
@@ -1511,7 +1511,7 @@ impl<R, S> SandboxBuilder<R, S> {
             scrub_stderr: self.scrub_stderr,
             scrub_result: self.scrub_result,
             scrub_files: self.scrub_files,
-            #[cfg(feature = "vfs")]
+            #[cfg(feature = "unstable-vfs")]
             volumes: self.volumes,
             _runtime: PhantomData,
             _stdlib: PhantomData,
@@ -2236,7 +2236,7 @@ impl<R, S> SandboxBuilder<R, S> {
     ///
     /// Mounts a host directory into the sandbox at the specified guest path,
     /// using cap-std for capability-based security.
-    #[cfg(feature = "vfs")]
+    #[cfg(feature = "unstable-vfs")]
     #[must_use]
     pub fn with_volume(mut self, volume: crate::session::VolumeMount) -> Self {
         self.volumes.push(volume);
@@ -2244,7 +2244,7 @@ impl<R, S> SandboxBuilder<R, S> {
     }
 
     /// Add multiple host filesystem volume mounts.
-    #[cfg(feature = "vfs")]
+    #[cfg(feature = "unstable-vfs")]
     #[must_use]
     pub fn with_volumes(
         mut self,
@@ -2480,7 +2480,7 @@ impl SandboxBuilder<state::Has, state::Has> {
         if !self.secrets.is_empty() {
             dropped.push("secrets");
         }
-        #[cfg(feature = "vfs")]
+        #[cfg(feature = "unstable-vfs")]
         if !self.volumes.is_empty() {
             dropped.push("volumes");
         }
@@ -2653,9 +2653,9 @@ impl SandboxBuilder<state::Has, state::Has> {
             scrub_stderr: self.scrub_stderr,
             scrub_result: self.scrub_result,
             scrub_files: self.scrub_files,
-            #[cfg(feature = "vfs")]
+            #[cfg(feature = "unstable-vfs")]
             volumes: self.volumes,
-            #[cfg(feature = "vfs")]
+            #[cfg(feature = "unstable-vfs")]
             vfs_storage: None,
             built,
         })
@@ -3045,7 +3045,7 @@ pub struct ResourceLimits {
     /// allocate arbitrarily much via `f.seek(2**40); f.write(b'X')`. Scripts see
     /// the limit as `ENOSPC`.
     ///
-    /// Only applies with the `vfs` feature, and only to the storage eryx creates
+    /// Only applies with the `unstable-vfs` feature, and only to the storage eryx creates
     /// itself; storage you construct and pass in carries its own limit (see
     /// `eryx::vfs::InMemoryStorage::with_max_bytes`). `None` uses the `eryx-vfs`
     /// default of 64 MiB.
@@ -3054,8 +3054,8 @@ pub struct ResourceLimits {
     /// beneath host mounts (the stdlib, site-packages and volumes).
     ///
     /// Each one is a host file descriptor. Opens past the limit fail with
-    /// `EDQUOT` until the script closes some. Only applies with the `vfs`
-    /// feature. `None` uses the `eryx-vfs` default of 256. All sandboxes in
+    /// `EDQUOT` until the script closes some. Only applies with the
+    /// `unstable-vfs` feature. `None` uses the `eryx-vfs` default of 256. All sandboxes in
     /// the process also share one total; see
     /// `eryx::vfs::set_process_max_open_host_files`.
     pub max_open_host_files: Option<usize>,

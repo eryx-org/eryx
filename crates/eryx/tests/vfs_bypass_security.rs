@@ -5,7 +5,7 @@
 //!
 //! Think like an attacker: what are all the ways to escape a filesystem sandbox?
 #![allow(clippy::unwrap_used, clippy::expect_used)]
-#![cfg(feature = "vfs")]
+#![cfg(feature = "unstable-vfs")]
 
 #[cfg(not(feature = "embedded"))]
 use std::path::PathBuf;

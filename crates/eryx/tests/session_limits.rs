@@ -54,7 +54,7 @@ fn assert_memory_limit_error(error: Error) {
 /// rejection currently reaches CPython's close path as a generic `OSError`.
 /// This asserts only that the write failed, because the errno classification is
 /// pre-existing behavior unrelated to limit propagation.
-#[cfg(feature = "vfs")]
+#[cfg(feature = "unstable-vfs")]
 fn assert_vfs_quota_rejected(error: &Error) {
     assert!(
         matches!(error, Error::PythonException(_)) && error.to_string().contains("OSError"),
@@ -209,13 +209,13 @@ async fn in_process_session_applies_memory_limit_at_instantiation() {
 
 /// A VFS size limit with room for `/data` and a four-byte `/data/file`, so a
 /// fifth byte doesn't fit.
-#[cfg(feature = "vfs")]
+#[cfg(feature = "unstable-vfs")]
 fn room_for_four_byte_file() -> u64 {
     let entry = |path: &str| eryx::vfs::ENTRY_OVERHEAD_BYTES + path.len() as u64;
     entry("/data") + entry("/data/file") + 4
 }
 
-#[cfg(feature = "vfs")]
+#[cfg(feature = "unstable-vfs")]
 #[tokio::test]
 async fn caller_owned_vfs_quota_is_not_replaced_by_resource_limits() {
     use eryx::vfs::{ArcStorage, InMemoryStorage, VfsStorage};
@@ -269,7 +269,7 @@ async fn caller_owned_vfs_quota_is_not_replaced_by_resource_limits() {
     assert_vfs_quota_rejected(&error);
 }
 
-#[cfg(feature = "vfs")]
+#[cfg(feature = "unstable-vfs")]
 #[tokio::test]
 async fn owned_vfs_quota_survives_reset() {
     let limits = ResourceLimits::unlimited().with_max_vfs_bytes(room_for_four_byte_file());

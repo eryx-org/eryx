@@ -12,7 +12,7 @@ publish = false
 [dependencies]
 clap = { workspace = true } #unified
 dashmap.workspace = true
-eryx = { workspace = true, features = ["embedded", "vfs"] }
+eryx = { workspace = true, features = ["embedded", "unstable-vfs"] }
 hex.workspace = true
 hmac.workspace = true
 metrics.workspace = true

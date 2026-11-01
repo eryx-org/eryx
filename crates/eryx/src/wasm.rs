@@ -1175,10 +1175,10 @@ pub struct ExecutorState {
     pub(crate) net_tx: Option<mpsc::Sender<NetRequest>>,
     /// Channel to stream output (stdout/stderr) to the host in real-time.
     pub(crate) output_tx: Option<mpsc::UnboundedSender<OutputRequest>>,
-    /// Hybrid virtual filesystem context (when vfs feature is enabled).
+    /// Hybrid virtual filesystem context (when the `unstable-vfs` feature is enabled).
     /// Routes /data/* to VFS storage, other paths to real filesystem.
     /// Uses ScrubbingStorage to scrub secret placeholders from file writes.
-    #[cfg(feature = "vfs")]
+    #[cfg(feature = "unstable-vfs")]
     pub(crate) hybrid_vfs_ctx: Option<eryx_vfs::HybridVfsCtx<eryx_vfs::ArcStorage>>,
     /// Set when a callback requested suspension (`CallbackError::Suspend`).
     ///
@@ -1213,7 +1213,7 @@ impl std::fmt::Debug for ExecutorState {
             )
             .field("net_tx", &self.net_tx.is_some())
             .field("output_tx", &self.output_tx.is_some());
-        #[cfg(feature = "vfs")]
+        #[cfg(feature = "unstable-vfs")]
         debug.field("hybrid_vfs_ctx", &self.hybrid_vfs_ctx.is_some());
         debug.finish()
     }
@@ -1236,7 +1236,7 @@ impl ExecutorState {
             memory_tracker: MemoryTracker::new(None),
             net_tx: None,
             output_tx: None,
-            #[cfg(feature = "vfs")]
+            #[cfg(feature = "unstable-vfs")]
             hybrid_vfs_ctx: None,
             suspended: None,
             reuse_empty_callbacks: true,
@@ -1296,7 +1296,7 @@ impl WasiView for ExecutorState {
     }
 }
 
-#[cfg(feature = "vfs")]
+#[cfg(feature = "unstable-vfs")]
 impl eryx_vfs::HybridVfsView for ExecutorState {
     type Storage = eryx_vfs::ArcStorage;
 
@@ -1783,11 +1783,11 @@ pub struct ExecuteBuilder<'a> {
     execution_timeout: Option<Duration>,
     cancellation_token: Option<CancellationToken>,
     fuel_limit: Option<u64>,
-    #[cfg(feature = "vfs")]
+    #[cfg(feature = "unstable-vfs")]
     vfs_storage: Option<eryx_vfs::ArcStorage>,
-    #[cfg(feature = "vfs")]
+    #[cfg(feature = "unstable-vfs")]
     volumes: Vec<crate::session::VolumeMount>,
-    #[cfg(feature = "vfs")]
+    #[cfg(feature = "unstable-vfs")]
     max_open_host_files: Option<usize>,
 }
 
@@ -1805,9 +1805,9 @@ impl std::fmt::Debug for ExecuteBuilder<'_> {
             .field("execution_timeout", &self.execution_timeout)
             .field("has_cancellation_token", &self.cancellation_token.is_some())
             .field("fuel_limit", &self.fuel_limit);
-        #[cfg(feature = "vfs")]
+        #[cfg(feature = "unstable-vfs")]
         debug.field("has_vfs_storage", &self.vfs_storage.is_some());
-        #[cfg(feature = "vfs")]
+        #[cfg(feature = "unstable-vfs")]
         debug.field("volumes_count", &self.volumes.len());
         debug.finish_non_exhaustive()
     }
@@ -1829,11 +1829,11 @@ impl<'a> ExecuteBuilder<'a> {
             execution_timeout: None,
             cancellation_token: None,
             fuel_limit: None,
-            #[cfg(feature = "vfs")]
+            #[cfg(feature = "unstable-vfs")]
             vfs_storage: None,
-            #[cfg(feature = "vfs")]
+            #[cfg(feature = "unstable-vfs")]
             volumes: Vec::new(),
-            #[cfg(feature = "vfs")]
+            #[cfg(feature = "unstable-vfs")]
             max_open_host_files: None,
         }
     }
@@ -1936,7 +1936,7 @@ impl<'a> ExecuteBuilder<'a> {
     }
 
     /// Set VFS storage with scrubbing for secret placeholders.
-    #[cfg(feature = "vfs")]
+    #[cfg(feature = "unstable-vfs")]
     #[must_use]
     pub fn with_vfs_storage(mut self, storage: eryx_vfs::ArcStorage) -> Self {
         self.vfs_storage = Some(storage);
@@ -1944,7 +1944,7 @@ impl<'a> ExecuteBuilder<'a> {
     }
 
     /// Set host filesystem volume mounts.
-    #[cfg(feature = "vfs")]
+    #[cfg(feature = "unstable-vfs")]
     #[must_use]
     pub fn with_volumes(mut self, volumes: Vec<crate::session::VolumeMount>) -> Self {
         self.volumes = volumes;
@@ -1953,7 +1953,7 @@ impl<'a> ExecuteBuilder<'a> {
 
     /// Limit how many host files the execution may hold open (default
     /// [`eryx_vfs::DEFAULT_MAX_OPEN_HOST_FILES`]).
-    #[cfg(feature = "vfs")]
+    #[cfg(feature = "unstable-vfs")]
     #[must_use]
     pub fn with_max_open_host_files(mut self, max: Option<usize>) -> Self {
         self.max_open_host_files = max;
@@ -1978,11 +1978,11 @@ impl<'a> ExecuteBuilder<'a> {
                 self.execution_timeout,
                 self.cancellation_token,
                 self.fuel_limit,
-                #[cfg(feature = "vfs")]
+                #[cfg(feature = "unstable-vfs")]
                 self.vfs_storage,
-                #[cfg(feature = "vfs")]
+                #[cfg(feature = "unstable-vfs")]
                 self.volumes,
-                #[cfg(feature = "vfs")]
+                #[cfg(feature = "unstable-vfs")]
                 self.max_open_host_files,
             )
             .await
@@ -3093,7 +3093,7 @@ impl PythonExecutor {
         // - /data/* paths to VFS storage (sandboxed in-memory/KV store)
         // - Other paths (like /python-stdlib/*) to real filesystem via WASI
         // This allows Python to access its stdlib while providing sandboxed storage.
-        #[cfg(feature = "vfs")]
+        #[cfg(feature = "unstable-vfs")]
         {
             // Allow shadowing to override WASI filesystem bindings
             linker.allow_shadowing(true);
@@ -3173,9 +3173,9 @@ impl PythonExecutor {
         execution_timeout: Option<Duration>,
         cancellation_token: Option<CancellationToken>,
         fuel_limit: Option<u64>,
-        #[cfg(feature = "vfs")] vfs_storage: Option<eryx_vfs::ArcStorage>,
-        #[cfg(feature = "vfs")] volumes: Vec<crate::session::VolumeMount>,
-        #[cfg(feature = "vfs")] max_open_host_files: Option<usize>,
+        #[cfg(feature = "unstable-vfs")] vfs_storage: Option<eryx_vfs::ArcStorage>,
+        #[cfg(feature = "unstable-vfs")] volumes: Vec<crate::session::VolumeMount>,
+        #[cfg(feature = "unstable-vfs")] max_open_host_files: Option<usize>,
     ) -> std::result::Result<ExecutionOutput, Error> {
         crate::error::validate_user_code(code)?;
 
@@ -3240,12 +3240,12 @@ impl PythonExecutor {
 
         let wasi = wasi_builder.build();
 
-        // Build hybrid VFS context when vfs feature is enabled.
+        // Build hybrid VFS context when the `unstable-vfs` feature is enabled.
         // The hybrid VFS routes /data/* to VFS storage while passing through
         // other paths (like /python-stdlib/*) to the real filesystem.
         // When no VFS storage is provided, we still configure the hybrid VFS
         // with real filesystem preopens to satisfy the linker bindings.
-        #[cfg(feature = "vfs")]
+        #[cfg(feature = "unstable-vfs")]
         let hybrid_vfs_ctx = {
             // Use provided storage or create a plain in-memory storage (no scrubbing)
             let storage = vfs_storage.unwrap_or_else(|| {
@@ -3268,7 +3268,7 @@ impl PythonExecutor {
             memory_tracker: MemoryTracker::new(memory_limit),
             net_tx,
             output_tx,
-            #[cfg(feature = "vfs")]
+            #[cfg(feature = "unstable-vfs")]
             hybrid_vfs_ctx,
             suspended: None,
             reuse_empty_callbacks: true,

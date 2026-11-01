@@ -1,5 +1,5 @@
 //! End-to-end checks of host volume mounts as sandboxed Python sees them.
-#![cfg(all(feature = "embedded", feature = "vfs"))]
+#![cfg(all(feature = "embedded", feature = "unstable-vfs"))]
 #![allow(clippy::expect_used, clippy::unwrap_used)]
 
 use std::sync::{Arc, OnceLock};
