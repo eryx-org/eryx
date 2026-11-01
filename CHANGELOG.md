@@ -7,6 +7,76 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## `eryx-precompile` - [0.13.0](https://github.com/eryx-org/eryx/compare/eryx-precompile-v0.12.1...eryx-precompile-v0.13.0) - 2026-11-01
+
+### Added
+- [**breaking**] rebuild precompiled runtimes with `eryx-precompile upgrade` ([#717](https://github.com/eryx-org/eryx/pull/717))
+- [**breaking**] record the eryx version in every precompiled component ([#714](https://github.com/eryx-org/eryx/pull/714))
+
+## `eryx` - [0.13.0](https://github.com/eryx-org/eryx/compare/eryx-v0.12.1...eryx-v0.13.0) - 2026-11-01
+
+Precompiled runtimes and saved factories now record the eryx version that built them and store what they were built from, so after an upgrade they fail with a clear error and can be rebuilt automatically (`eryx-precompile upgrade`, `python -m eryx factory upgrade`). Factories and runtimes are memory-mapped instead of copied into memory, and the remaining pre-1.0 API cleanup lands. Existing precompiled files and saved factories need rebuilding once, as they would have for this release anyway, and session snapshots change shape in pyeryx and JavaScript. Read **Upgrade notes** before upgrading.
+
+### Upgrade notes
+
+**Precompiled runtimes and saved factories record the eryx version that built them.** This makes an existing requirement explicit rather than adding a new one. Precompiled files (`eryx-precompile` output, `--runtime-cwasm` files, `with_precompiled_file`/`with_precompiled_bytes` inputs, pyeryx `SandboxFactory.save()` files) never loaded after a wasmtime upgrade, and could also break when an eryx release changed the runtime's interface, usually with an unhelpful error. Now loading one in a different eryx version fails with an error that names both versions and says how to rebuild (`Error::IncompatiblePrecompiled`, or `InitializationError` in pyeryx). Files from 0.12.x need rebuilding once for 0.13.0, which this release's session snapshot change ([#709](https://github.com/eryx-org/eryx/pull/709)) would have required anyway: rebuild them with `eryx-precompile` 0.13.0, or recreate and re-save the factory. From 0.13.0 on, these files store what they were built from, so later upgrades can rebuild them automatically: `eryx-precompile upgrade OLD -o NEW` for `compile --preinit` output, and `python -m eryx factory upgrade OLD NEW` or `SandboxFactory.load(..., rebuild_if_incompatible=True)` for pyeryx factories ([#717](https://github.com/eryx-org/eryx/pull/717)). `eryx-precompile setup --version` now only accepts the binary's own version; install `eryx-precompile@<version>` to set up another one ([#714](https://github.com/eryx-org/eryx/pull/714)).
+
+**`eryx-precompile`**
+- `compile --preinit` now writes a bundle: the component followed by its site-packages files and build inputs (imports, setup code, callback declarations, target and CPU level). Everything that loads a precompiled file loads a bundle unchanged. It's larger on disk by about the compressed size of the packages (around 9 MB for numpy) but uses no extra memory; pass `--no-build-inputs` for the bare component ([#717](https://github.com/eryx-org/eryx/pull/717)).
+- New `upgrade OLD -o NEW` rebuilds a bundle (or a pyeryx factory) for the binary's own eryx version, without the original packages or flags ([#717](https://github.com/eryx-org/eryx/pull/717)).
+- `compile --stdlib` is optional and defaults to the stdlib embedded in the binary ([#717](https://github.com/eryx-org/eryx/pull/717)).
+
+**Rust (`eryx` crate)**
+- The `vfs` cargo feature is now `unstable-vfs`. Change `features = ["vfs"]` to `features = ["unstable-vfs"]`. The API is unchanged, but everything behind the feature (`eryx::vfs`, `VfsConfig`, `VolumeMount`, `SessionExecutor::new_with_vfs*` and the builders' volume and VFS-storage methods) is now outside semver, because it exposes eryx-vfs and wasmtime-wasi types ([#712](https://github.com/eryx-org/eryx/pull/712)).
+- `PrecompiledArtifact::as_bytes()` is replaced by `write_to(&mut impl Write)`, because a file-backed artifact has no bytes in memory to borrow ([#699](https://github.com/eryx-org/eryx/pull/699)).
+- `SandboxBuilder::with_precompiled_file` maps the file once and shares it with every clone of the builder and every pooled sandbox. Replacing the file on disk now takes effect only after a restart. Replace it by renaming a new file over it; don't rewrite it in place while it's mapped ([#699](https://github.com/eryx-org/eryx/pull/699)).
+- `PackageFormat` is `#[non_exhaustive]`, so a `match` on it needs a wildcard arm ([#704](https://github.com/eryx-org/eryx/pull/704)).
+
+**Python (`pyeryx`)**
+- `Session.snapshot_state()` returns an `eryx.StateSnapshot` instead of `bytes`. Store `snapshot.data`. `restore_state()` accepts the snapshot or the stored bytes, so snapshots already on disk still load. `snapshot.skipped_globals` lists the globals that won't exist after a restore ([#709](https://github.com/eryx-org/eryx/pull/709)).
+- `SandboxFactory.save()` writes a new format (v4) that `load()` memory-maps, and that stores the factory's build inputs (imports, setup code, callback declarations) next to its packages. Older files still load; re-saving one upgrades it. pyeryx 0.12.x and earlier can't load v4 files, so re-save factories if you roll back ([#699](https://github.com/eryx-org/eryx/pull/699), [#715](https://github.com/eryx-org/eryx/pull/715)).
+- `SandboxFactory.load(path, rebuild_if_incompatible=True)` rebuilds a factory saved by another pyeryx version from its stored build inputs, instead of raising. The rebuilt copy is cached in the per-user eryx cache directory and reused by later loads; the original file isn't modified. Off by default, since a rebuild takes as long as creating the factory. Factories saved before 0.13.0 don't store their build inputs, so recreate those once ([#715](https://github.com/eryx-org/eryx/pull/715)).
+- `python -m eryx factory upgrade OLD NEW` rebuilds a factory saved by another pyeryx version into `NEW` ([#717](https://github.com/eryx-org/eryx/pull/717)).
+- Fixed: a sandbox or session created from a loaded factory failed with `Failed to mount /site-packages` once the factory was garbage-collected, e.g. `SandboxFactory.load(p).create_sandbox().execute(...)` ([#717](https://github.com/eryx-org/eryx/pull/717)).
+- Saved factories now keep their `.py` files. Before, a module that wasn't imported while the factory was created raised `ModuleNotFoundError` after `load()`. Loading now extracts those files too, so it takes longer for factories with large packages ([#715](https://github.com/eryx-org/eryx/pull/715)).
+
+**JavaScript (`@bsull/eryx`)**
+- `snapshotState()` resolves to a `StateSnapshot` (`{ data, skippedGlobals }`) instead of a `Uint8Array`. Store `snapshot.data`. `restoreState()` accepts the snapshot or the bytes. Code like `new Uint8Array(await sandbox.snapshotState())` now silently produces an empty array, so it must switch to `.data` ([#709](https://github.com/eryx-org/eryx/pull/709)).
+
+**gRPC server (`sd2k/eryx-server`)**
+- `ExecuteResult.state_skipped_globals` (field 15) lists the globals a snapshot skipped. The change is additive on the wire ([#709](https://github.com/eryx-org/eryx/pull/709)).
+- A file passed to `--runtime-cwasm` is mapped once and shared by every pooled sandbox. Replacing it now needs a restart ([#699](https://github.com/eryx-org/eryx/pull/699)).
+
+### Added
+- [**breaking**] rebuild precompiled runtimes with `eryx-precompile upgrade` ([#717](https://github.com/eryx-org/eryx/pull/717))
+- *(python)* [**breaking**] rebuild factories saved by another pyeryx version ([#715](https://github.com/eryx-org/eryx/pull/715))
+- *(engine)* configure the shared engine and warm pool from code ([#707](https://github.com/eryx-org/eryx/pull/707))
+- [**breaking**] record the eryx version in every precompiled component ([#714](https://github.com/eryx-org/eryx/pull/714))
+- [**breaking**] rename the `vfs` feature to `unstable-vfs` ([#712](https://github.com/eryx-org/eryx/pull/712))
+- *(session)* [**breaking**] report the globals session snapshots skip ([#709](https://github.com/eryx-org/eryx/pull/709))
+- *(package)* [**breaking**] mark PackageFormat non_exhaustive ([#704](https://github.com/eryx-org/eryx/pull/704))
+- [**breaking**] memory-map pre-compiled factory and runtime files ([#699](https://github.com/eryx-org/eryx/pull/699))
+
+## `eryx-vfs` - [0.13.0](https://github.com/eryx-org/eryx/compare/eryx-vfs-v0.12.1...eryx-vfs-v0.13.0) - 2026-11-01
+
+Starting with this release, eryx-vfs is versioned independently of eryx. eryx re-exports it only behind the `unstable-vfs` feature, which is outside semver ([#713](https://github.com/eryx-org/eryx/pull/713)).
+
+### Added
+- *(vfs)* [**breaking**] shrink eryx-vfs public surface ([#711](https://github.com/eryx-org/eryx/pull/711))
+
+### Other
+- *(vfs)* version eryx-vfs independently of the workspace ([#713](https://github.com/eryx-org/eryx/pull/713))
+
+## `eryx-runtime` - [0.13.0](https://github.com/eryx-org/eryx/compare/eryx-runtime-v0.12.1...eryx-runtime-v0.13.0) - 2026-11-01
+
+### Added
+- *(session)* [**breaking**] report the globals session snapshots skip ([#709](https://github.com/eryx-org/eryx/pull/709))
+
+## `eryx-macros` - [0.13.0](https://github.com/eryx-org/eryx/compare/eryx-macros-v0.12.1...eryx-macros-v0.13.0) - 2026-11-01
+
+### Added
+- [**breaking**] rename the `vfs` feature to `unstable-vfs` ([#712](https://github.com/eryx-org/eryx/pull/712))
+
 ## `eryx` - [0.12.1](https://github.com/eryx-org/eryx/compare/eryx-v0.12.0...eryx-v0.12.1) - 2026-10-27
 
 ### Fixed
