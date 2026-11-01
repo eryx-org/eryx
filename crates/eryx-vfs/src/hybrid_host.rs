@@ -10,9 +10,9 @@ use cap_primitives::fs as capfs;
 use wasmtime::component::Resource;
 use wasmtime_wasi_io::streams::{DynInputStream, DynOutputStream};
 
-use crate::HybridReaddirIterator;
 use crate::file_io::{read_at, write_at};
 use crate::hybrid::{HybridDescriptor, HybridPreopen, HybridVfsState, RealDir, RealFile};
+use crate::hybrid_bindings::HybridReaddirIterator;
 use crate::hybrid_bindings::{DirPerms, FilePerms, HybridFsError, HybridFsResult, preopens, types};
 use crate::storage::VfsStorage;
 use crate::streams::{

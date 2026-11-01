@@ -29,6 +29,7 @@ pub struct SecretConfig {
 /// [`ScrubbingStorage`] re-scrubs a file renamed from an unscrubbed path to a
 /// scrubbed one, and refuses to rename directories.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub enum FileScrubPolicy {
     /// Scrub all files.
     All,

@@ -12,9 +12,9 @@ use crate::storage::{DirEntry, Metadata, VfsStorage};
 #[derive(Debug)]
 pub struct VfsCtx<S: VfsStorage + Clone> {
     /// The storage backend.
-    pub storage: S,
+    pub(crate) storage: S,
     /// Preopened directories (path, dir_perms, file_perms).
-    pub preopens: Vec<(String, DirPerms, FilePerms)>,
+    pub(crate) preopens: Vec<(String, DirPerms, FilePerms)>,
 }
 
 impl<S: VfsStorage + Clone> VfsCtx<S> {
@@ -65,16 +65,16 @@ impl<S: VfsStorage + Clone> std::fmt::Debug for VfsState<'_, S> {
 #[derive(Debug, Clone)]
 pub struct VfsDescriptor {
     /// Absolute path within the VFS.
-    pub path: String,
+    pub(crate) path: String,
     /// The preopen this descriptor was opened beneath. Paths resolved against
     /// the descriptor must stay inside it.
-    pub root: String,
+    pub(crate) root: String,
     /// Whether this is a directory.
-    pub is_dir: bool,
+    pub(crate) is_dir: bool,
     /// Directory permissions (for directory descriptors).
-    pub dir_perms: DirPerms,
+    pub(crate) dir_perms: DirPerms,
     /// File permissions.
-    pub file_perms: FilePerms,
+    pub(crate) file_perms: FilePerms,
 }
 
 impl VfsDescriptor {
