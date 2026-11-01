@@ -58,12 +58,23 @@ pub use executor::{
 pub use executor::{VfsConfig, VolumeMount};
 pub use in_process::InProcessSession;
 
-/// Common trait for all session implementations.
+/// Keeps [`Session`] from being implemented outside this crate.
+pub(crate) mod sealed {
+    /// Implemented by the session types in this crate.
+    pub trait Sealed {}
+}
+
+/// Common trait for session implementations.
 ///
 /// A session maintains persistent state across multiple `execute()` calls,
 /// avoiding the ~1.5ms Python interpreter initialization overhead on each call.
+///
+/// This trait is sealed: it exists so code can be generic over the session
+/// types in this crate, not as an extension point, so methods can be added to
+/// it without breaking anyone. To mock a session, put your own trait in front
+/// of [`InProcessSession`].
 #[async_trait]
-pub trait Session: Send {
+pub trait Session: sealed::Sealed + Send {
     /// Execute Python code within this session.
     ///
     /// State from previous executions is preserved. For example:
