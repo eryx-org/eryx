@@ -1,16 +1,24 @@
 //! Error types for the Eryx sandbox.
 
 use crate::callback::CallbackError;
+use crate::sandbox::ExecuteStats;
+use std::time::Duration;
 
 /// The main error type for Eryx operations.
 ///
-/// An `Error` says what went wrong: match on [`kind`](Self::kind).
+/// An `Error` says what went wrong ([`kind`](Self::kind)) and, when the guest
+/// had started running, what the run used up to the point it failed
+/// ([`stats`](Self::stats)). The statistics matter for metering: a run that
+/// times out, raises or is cancelled has still spent its fuel.
 ///
 /// ```
 /// # use eryx::{Error, ErrorKind};
 /// # fn classify(err: &Error) {
 /// match err.kind() {
-///     ErrorKind::Timeout(_) | ErrorKind::Cancelled => println!("stopped early"),
+///     ErrorKind::Timeout(_) | ErrorKind::Cancelled => {
+///         let fuel = err.stats().and_then(|s| s.fuel_consumed);
+///         println!("stopped after {fuel:?} instructions");
+///     }
 ///     other => println!("failed: {other}"),
 /// }
 /// # }
@@ -19,6 +27,7 @@ use crate::callback::CallbackError;
 #[non_exhaustive]
 pub struct Error {
     kind: ErrorKind,
+    stats: Option<Box<ExecuteStats>>,
 }
 
 impl Error {
@@ -37,6 +46,49 @@ impl Error {
     pub fn into_kind(self) -> ErrorKind {
         self.kind
     }
+
+    /// What the run used before it failed.
+    ///
+    /// `None` when the failure happened before the guest ran (invalid code,
+    /// initialization, a token cancelled up front) or when the run was
+    /// suspended: a suspension halts the guest by poisoning its fuel, so the
+    /// figures would be meaningless. `fuel_consumed` is always set otherwise.
+    /// For a run stopped by a timeout or a cancellation it is accurate to
+    /// within a few million instructions, not to the instruction.
+    #[must_use]
+    pub fn stats(&self) -> Option<&ExecuteStats> {
+        self.stats.as_deref()
+    }
+
+    /// Attach the statistics of the run that failed.
+    #[must_use]
+    pub(crate) fn with_stats(mut self, stats: ExecuteStats) -> Self {
+        self.stats = Some(Box::new(stats));
+        self
+    }
+
+    /// Attach what a run that reached the guest had used when it failed.
+    ///
+    /// A suspension is left without statistics, as its fuel was poisoned to
+    /// halt the guest. `callback_invocations` is 0: it is counted by the
+    /// caller's callback handler, which fills it in.
+    #[must_use]
+    pub(crate) fn with_run_stats(
+        self,
+        duration: Duration,
+        peak_memory_bytes: u64,
+        fuel_consumed: Option<u64>,
+    ) -> Self {
+        if matches!(self.kind, ErrorKind::Suspended(_)) {
+            return self;
+        }
+        self.with_stats(ExecuteStats {
+            duration,
+            callback_invocations: 0,
+            peak_memory_bytes: Some(peak_memory_bytes),
+            fuel_consumed,
+        })
+    }
 }
 
 impl std::fmt::Display for Error {
@@ -53,7 +105,7 @@ impl std::error::Error for Error {
 
 impl From<ErrorKind> for Error {
     fn from(kind: ErrorKind) -> Self {
-        Self { kind }
+        Self { kind, stats: None }
     }
 }
 

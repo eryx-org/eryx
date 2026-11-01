@@ -108,3 +108,29 @@ for i in range(10000):
     total += i
 """)
         assert result_large.fuel_consumed > result_small.fuel_consumed
+
+
+class TestFailedRunsReportUsage:
+    """A run that fails after the guest started still reports what it used."""
+
+    def test_timeout_reports_fuel(self):
+        limits = eryx.ResourceLimits(execution_timeout_ms=500)
+        sandbox = eryx.Sandbox(resource_limits=limits)
+        with pytest.raises(eryx.TimeoutError) as excinfo:
+            sandbox.execute("while True: pass")
+        assert excinfo.value.fuel_consumed > 100_000_000
+        assert excinfo.value.duration_ms >= 400
+        assert excinfo.value.peak_memory_bytes > 0
+
+    def test_exception_reports_fuel(self):
+        sandbox = eryx.Sandbox()
+        with pytest.raises(eryx.PythonExceptionError) as excinfo:
+            sandbox.execute("sum(range(100000))\nraise ValueError('late')")
+        assert excinfo.value.fuel_consumed > 0
+
+    def test_no_usage_when_the_guest_never_ran(self):
+        sandbox = eryx.Sandbox()
+        with pytest.raises(eryx.EryxError) as excinfo:
+            sandbox.execute("x = 1\0")
+        assert excinfo.value.fuel_consumed is None
+        assert excinfo.value.duration_ms is None

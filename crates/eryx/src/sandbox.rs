@@ -509,7 +509,18 @@ impl Sandbox {
                     },
                 })
             }
-            Err(error) => Err(self.scrub_error(error)),
+            Err(error) => {
+                // The executor can't see the callbacks or the whole run's duration.
+                let error = match error.stats().cloned() {
+                    Some(stats) => error.with_stats(ExecuteStats {
+                        duration,
+                        callback_invocations,
+                        ..stats
+                    }),
+                    None => error,
+                };
+                Err(self.scrub_error(error))
+            }
         }
     }
 

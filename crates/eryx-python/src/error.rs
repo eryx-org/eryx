@@ -69,8 +69,37 @@ create_exception!(eryx, PoolClosedError, PoolError, "Pool has been closed.");
 /// This is a free function rather than a `From` impl due to the orphan rule:
 /// we can't implement `From<eryx::Error> for PyErr` since neither type is
 /// defined in this crate.
+///
+/// What the run used before it failed is set on the exception as
+/// `duration_ms`, `callback_invocations`, `peak_memory_bytes` and
+/// `fuel_consumed`, like on `ExecuteResult`. All four are `None` if the failure
+/// happened before the guest ran.
 pub fn eryx_error_to_py(err: eryx::Error) -> PyErr {
-    match err.into_kind() {
+    let stats = err.stats().cloned();
+    let py_err = kind_to_py(err.into_kind());
+    Python::attach(|py| set_stats(py, &py_err, stats.as_ref()));
+    py_err
+}
+
+/// Attach the statistics of a failed run to its exception.
+fn set_stats(py: Python<'_>, err: &PyErr, stats: Option<&eryx::ExecuteStats>) {
+    let value = err.value(py);
+    // Best effort: every exception raised here accepts attributes, and a
+    // failure to set one must not replace the error being reported.
+    let _ = value.setattr(
+        "duration_ms",
+        stats.map(|s| s.duration.as_secs_f64() * 1000.0),
+    );
+    let _ = value.setattr(
+        "callback_invocations",
+        stats.map(|s| s.callback_invocations),
+    );
+    let _ = value.setattr("peak_memory_bytes", stats.and_then(|s| s.peak_memory_bytes));
+    let _ = value.setattr("fuel_consumed", stats.and_then(|s| s.fuel_consumed));
+}
+
+fn kind_to_py(kind: eryx::ErrorKind) -> PyErr {
+    match kind {
         eryx::ErrorKind::Initialization(msg) => InitializationError::new_err(msg),
         eryx::ErrorKind::WasmEngine(msg) => InitializationError::new_err(msg),
         eryx::ErrorKind::EpochTicker(msg) => ExecutionError::new_err(msg),

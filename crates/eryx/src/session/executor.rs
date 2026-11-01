@@ -951,6 +951,7 @@ impl SessionExecutor {
         store
             .set_fuel(u64::MAX)
             .map_err(|e| ErrorKind::WasmEngine(format!("Failed to set fuel: {e}")))?;
+        crate::wasm::sync_fuel_periodically(&mut store)?;
 
         // Instantiate the component
         let bindings = executor
@@ -1030,6 +1031,7 @@ impl SessionExecutor {
         store
             .set_fuel(u64::MAX)
             .map_err(|e| ErrorKind::WasmEngine(format!("Failed to set fuel: {e}")))?;
+        crate::wasm::sync_fuel_periodically(&mut store)?;
 
         // Instantiate the component
         let bindings = executor
@@ -1402,11 +1404,14 @@ impl SessionExecutor {
         let fuel_consumed = Some(initial_fuel.saturating_sub(remaining_fuel));
         self.last_peak_memory_bytes = peak_memory;
         self.last_fuel_consumed = fuel_consumed;
+        // What a failed run used is still the host's to meter.
+        let with_stats =
+            move |e: Error| e.with_run_stats(start.elapsed(), peak_memory, fuel_consumed);
 
         // A cancelled run was interrupted mid-call, so its instance can't be
         // reused: leave the store out and the next call resets the session.
         if was_cancelled.load(Ordering::Relaxed) {
-            return Err(ErrorKind::Cancelled.into());
+            return Err(with_stats(ErrorKind::Cancelled.into()));
         }
 
         // Restore store and bindings before handling result
@@ -1416,33 +1421,38 @@ impl SessionExecutor {
         // Classify errors using proper type matching. wasmtime::Error is anyhow::Error,
         // so we downcast to wasmtime::Trap for WASM-level traps (Interrupt, OutOfFuel).
         // The async_timeout_elapsed flag covers blocking WASI host calls (e.g. time.sleep).
-        let wasmtime_result = result.map_err(|e| {
-            if async_timeout_elapsed
-                || e.downcast_ref::<wasmtime::Trap>() == Some(&wasmtime::Trap::Interrupt)
-            {
-                ErrorKind::Timeout(execution_timeout.unwrap_or_default())
-            } else if e.downcast_ref::<wasmtime::Trap>() == Some(&wasmtime::Trap::OutOfFuel) {
-                if let Some(reason) = suspended_reason.clone() {
-                    ErrorKind::Suspended(reason)
+        let wasmtime_result = result
+            .map_err(|e| {
+                if async_timeout_elapsed
+                    || e.downcast_ref::<wasmtime::Trap>() == Some(&wasmtime::Trap::Interrupt)
+                {
+                    ErrorKind::Timeout(execution_timeout.unwrap_or_default())
+                } else if e.downcast_ref::<wasmtime::Trap>() == Some(&wasmtime::Trap::OutOfFuel) {
+                    if let Some(reason) = suspended_reason.clone() {
+                        ErrorKind::Suspended(reason)
+                    } else {
+                        let consumed = initial_fuel.saturating_sub(remaining_fuel);
+                        let limit = fuel_limit.unwrap_or(u64::MAX);
+                        ErrorKind::FuelExhausted { consumed, limit }
+                    }
                 } else {
-                    let consumed = initial_fuel.saturating_sub(remaining_fuel);
-                    let limit = fuel_limit.unwrap_or(u64::MAX);
-                    ErrorKind::FuelExhausted { consumed, limit }
+                    ErrorKind::Execution(format!("WASM execution error: {e:?}"))
                 }
-            } else {
-                ErrorKind::Execution(format!("WASM execution error: {e:?}"))
-            }
-        })?;
+            })
+            .map_err(|kind| with_stats(kind.into()))?;
         // wasmtime_result is Result<Result<ExecuteOutput, String>, wasmtime::Error>
         // The outer Result is from wasmtime, the inner is the WIT-generated result.
         // The inner Err is the guest's logical execution error — for real input
         // that is always an uncaught Python exception (its traceback).
         let wit_output = wasmtime_result
-            .map_err(|e| ErrorKind::Execution(format!("WASM execution error: {e:?}")))?
-            .map_err(|mut traceback| {
-                crate::wasm::append_fd_stderr(&mut traceback, &fd_stderr);
-                ErrorKind::PythonException(traceback)
-            })?;
+            .map_err(|e| ErrorKind::Execution(format!("WASM execution error: {e:?}")).into())
+            .and_then(|output| {
+                output.map_err(|mut traceback| {
+                    crate::wasm::append_fd_stderr(&mut traceback, &fd_stderr);
+                    Error::from(ErrorKind::PythonException(traceback))
+                })
+            })
+            .map_err(with_stats)?;
 
         let duration = start.elapsed();
 
@@ -1578,6 +1588,7 @@ impl SessionExecutor {
         store
             .set_fuel(u64::MAX)
             .map_err(|e| ErrorKind::WasmEngine(format!("Failed to set fuel: {e}")))?;
+        crate::wasm::sync_fuel_periodically(&mut store)?;
 
         // Preserve settings across reset
         let execution_timeout = self.execution_timeout;

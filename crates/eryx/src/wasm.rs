@@ -49,6 +49,24 @@ use crate::warm::{WarmInstance, WarmPool};
 /// Interval between increments of the process-wide epoch ticker.
 pub(crate) const EPOCH_TICK_INTERVAL: Duration = Duration::from_millis(10);
 
+/// How many instructions a guest runs between points where wasmtime writes its
+/// fuel count back to the store.
+///
+/// Compiled code keeps the count in a register and writes it back only at
+/// calls and at some traps. Without this, a run stopped by an epoch interrupt
+/// (a timeout or a cancellation) reads back the count from the last write-back,
+/// however long it ran. Refuelling every `FUEL_SYNC_INTERVAL` instructions
+/// bounds that error by the interval. It also yields to the async runtime.
+const FUEL_SYNC_INTERVAL: u64 = 10_000_000;
+
+/// Make `store` write its fuel count back every [`FUEL_SYNC_INTERVAL`]
+/// instructions, so the count is readable after the guest is interrupted.
+pub(crate) fn sync_fuel_periodically<T>(store: &mut Store<T>) -> std::result::Result<(), Error> {
+    store
+        .fuel_async_yield_interval(Some(FUEL_SYNC_INTERVAL))
+        .map_err(|e| ErrorKind::WasmEngine(format!("Failed to set fuel sync interval: {e}")).into())
+}
+
 /// Convert an execution timeout into a number of epoch ticks.
 pub(crate) fn epoch_ticks(timeout: Duration) -> u64 {
     let ticks = timeout.as_millis() / EPOCH_TICK_INTERVAL.as_millis();
@@ -1431,6 +1449,7 @@ pub(crate) async fn instantiate_store(
     store.limiter(|state| &mut state.memory_tracker);
     store.set_epoch_deadline(u64::MAX / 2);
     set_fuel(&mut store, u64::MAX)?;
+    sync_fuel_periodically(&mut store)?;
 
     let bindings = pre
         .instantiate_async(&mut store)
@@ -3490,6 +3509,16 @@ impl PythonExecutor {
                 }
             }
         }
+        // The fuel and memory a failed run used are still the host's to meter.
+        let result = result.map_err(|e| {
+            let remaining = store.get_fuel().unwrap_or(0);
+            e.with_run_stats(
+                Duration::ZERO, // Duration tracked by higher-level APIs (Sandbox, Session)
+                store.data().memory_tracker.peak_memory_bytes(),
+                Some(initial_fuel.saturating_sub(remaining)),
+            )
+        });
+
         // Teardown (resetting the memory slot) and re-instantiation happen off
         // the request path when the warm pool is active. A failed execution
         // (timeout, cancellation, trap) may leave host calls suspended in the
