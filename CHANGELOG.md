@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## `eryx` - [0.13.1](https://github.com/eryx-org/eryx/compare/eryx-v0.13.0...eryx-v0.13.1) - 2026-11-01
+
+### Other
+- *(embedded)* hash the embedded runtime and stdlib at build time ([#720](https://github.com/eryx-org/eryx/pull/720))
+
 ## `eryx-precompile` - [0.13.0](https://github.com/eryx-org/eryx/compare/eryx-precompile-v0.12.1...eryx-precompile-v0.13.0) - 2026-11-01
 
 ### Added
