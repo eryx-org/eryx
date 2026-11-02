@@ -192,4 +192,25 @@ mod tests {
             "Embedded stdlib should be > 1MB"
         );
     }
+
+    /// The stdlib is mounted read-only, so Python can't write its own `.pyc`
+    /// files; imports outside the pre-init snapshot recompile from source
+    /// unless the archive ships bytecode. Regenerate with
+    /// `scripts/compile-stdlib.sh`.
+    #[test]
+    fn embedded_stdlib_ships_bytecode() {
+        let cache = tempfile::tempdir().unwrap();
+        let path = EmbeddedStdlib::extract_stdlib(cache.path()).unwrap();
+        let pyc =
+            std::fs::read(path.join("__pycache__/fractions.cpython-314.pyc")).unwrap_or_else(|e| {
+                panic!("stdlib archive has no bytecode ({e}); run scripts/compile-stdlib.sh")
+            });
+        // CPython 3.14's magic number, then flags 0b01: hash-based and
+        // unchecked. Anything else is silently recompiled by the guest.
+        assert_eq!(
+            pyc[..8],
+            [0x2b, 0x0e, 0x0d, 0x0a, 1, 0, 0, 0],
+            "bytecode is for the wrong CPython or not unchecked-hash; run scripts/compile-stdlib.sh"
+        );
+    }
 }

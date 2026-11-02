@@ -132,6 +132,26 @@ jobs:
         env:
           ERYX_PRECOMPILE_BOOTSTRAP: "1"
 
+  # The bundled stdlib ships precompiled bytecode (the sandbox mounts it
+  # read-only, so Python can't cache it). Fail if it drifts from the sources.
+  stdlib-bytecode:
+    name: Stdlib bytecode
+    # Cheap (no Rust build), so it runs on every change, including edits to
+    # the script itself, which the `core` path filter doesn't cover.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          # Exact patch version: other releases can marshal different bytecode.
+          python-version: "3.14.8"
+
+      - name: Check stdlib bytecode is up to date
+        run: scripts/compile-stdlib.sh --check
+
   # Build eryx-wasm-runtime and precompile it - other jobs depend on this.
   # Runs when core paths change, or when any downstream job needs WASM artifacts.
   build-eryx-runtime:
