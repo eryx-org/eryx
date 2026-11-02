@@ -199,9 +199,14 @@ mod tests {
     fn embedded_stdlib_ships_bytecode() {
         let cache = tempfile::tempdir().unwrap();
         let path = EmbeddedStdlib::extract_stdlib(cache.path()).unwrap();
-        assert!(
-            path.join("__pycache__/fractions.cpython-314.pyc").exists(),
-            "stdlib archive has no bytecode; run scripts/compile-stdlib.sh"
+        let pyc = std::fs::read(path.join("__pycache__/fractions.cpython-314.pyc"))
+            .expect("stdlib archive has no bytecode; run scripts/compile-stdlib.sh");
+        // CPython 3.14's magic number, then flags 0b01: hash-based and
+        // unchecked. Anything else is silently recompiled by the guest.
+        assert_eq!(
+            pyc[..8],
+            [0x2b, 0x0e, 0x0d, 0x0a, 1, 0, 0, 0],
+            "bytecode is for the wrong CPython or not unchecked-hash; run scripts/compile-stdlib.sh"
         );
     }
 }

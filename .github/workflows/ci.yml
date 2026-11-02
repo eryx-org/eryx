@@ -136,11 +136,9 @@ jobs:
   # read-only, so Python can't cache it). Fail if it drifts from the sources.
   stdlib-bytecode:
     name: Stdlib bytecode
+    # Cheap (no Rust build), so it runs on every change, including edits to
+    # the script itself, which the `core` path filter doesn't cover.
     runs-on: ubuntu-latest
-    needs: changes
-    if: >-
-      github.event_name == 'push'
-      || needs.changes.outputs.core == 'true'
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
