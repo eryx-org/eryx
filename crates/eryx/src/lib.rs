@@ -50,11 +50,27 @@
 #![cfg_attr(any(feature = "embedded", feature = "preinit"), deny(unsafe_code))]
 #![cfg_attr(docsrs, feature(doc_cfg))]
 
+/// Define a method that is `pub` with the `unstable-internals` feature and
+/// `pub(crate)` without it, for builder methods that take the plumbing types.
+macro_rules! unstable_pub {
+    ($(#[$meta:meta])* fn $name:ident $($rest:tt)*) => {
+        $(#[$meta])*
+        #[cfg(feature = "unstable-internals")]
+        pub fn $name $($rest)*
+        $(#[$meta])*
+        #[cfg(not(feature = "unstable-internals"))]
+        pub(crate) fn $name $($rest)*
+    };
+}
+
 #[cfg(feature = "preinit")]
 pub mod bundle;
 pub mod cache;
 mod callback;
+#[cfg(feature = "unstable-internals")]
 pub mod callback_handler;
+#[cfg(not(feature = "unstable-internals"))]
+mod callback_handler;
 mod cancel;
 #[cfg(feature = "embedded")]
 pub mod embedded;
@@ -137,10 +153,11 @@ pub use session::{VfsConfig, VolumeMount};
 pub use trace::{OutputHandler, TraceEvent, TraceEventKind, TraceHandler};
 
 // Re-export precompilation utilities and internal types
+#[cfg(feature = "unstable-internals")]
+pub use wasm::{CallbackHostResult, CallbackRequest, NetRequest, OutputRequest, TraceRequest};
 pub use wasm::{
-    CallbackHostResult, CallbackRequest, CpuFeatureLevel, ExecutionOutput, InstanceAllocator,
-    NetRequest, OutputRequest, PythonExecutor, STREAM_BYTES_LIMIT, SharedEngineConfig,
-    TraceRequest, configure_shared_engine,
+    CpuFeatureLevel, ExecutionOutput, InstanceAllocator, PythonExecutor, STREAM_BYTES_LIMIT,
+    SharedEngineConfig, configure_shared_engine,
 };
 
 // Re-export schema types at top level for convenience

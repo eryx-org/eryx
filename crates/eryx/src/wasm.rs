@@ -308,6 +308,7 @@ impl CallbackRequest {
     /// A request to invoke callback `name` with `arguments_json`, answered on
     /// `response_tx`. Useful for testing a callback handler.
     #[must_use]
+    #[cfg(feature = "unstable-internals")]
     pub fn new(
         name: impl Into<String>,
         arguments_json: impl Into<String>,
@@ -346,6 +347,7 @@ impl OutputRequest {
     /// A chunk of output `data` on `stream` (0 = stdout, 1 = stderr). Useful
     /// for testing an output handler.
     #[must_use]
+    #[cfg(feature = "unstable-internals")]
     pub fn new(stream: u32, data: impl Into<Vec<u8>>) -> Self {
         Self {
             stream,
@@ -448,6 +450,7 @@ pub enum NetRequest {
     /// preserving network configuration, secrets, and monotonic handle
     /// allocation. Intended for application-controlled cleanup between
     /// executions on a reused session.
+    #[cfg(feature = "unstable-internals")]
     CloseAll {
         /// Channel for signalling completion.
         response_tx: oneshot::Sender<()>,
@@ -1460,7 +1463,7 @@ pub(crate) async fn instantiate_store(
     let bindings = pre
         .instantiate_async(&mut store)
         .await
-        .map_err(ErrorKind::WasmComponent)?;
+        .map_err(ErrorKind::wasm_component)?;
 
     set_fuel(&mut store, initial_fuel)?;
     Ok((store, bindings))
@@ -2017,13 +2020,14 @@ impl<'a> ExecuteBuilder<'a> {
         }
     }
 
+    unstable_pub! {
     /// Set callbacks that Python code can invoke.
     ///
     /// The `callback_tx` channel is used to send callback requests from
     /// the WASM guest to the host for processing. Both the callbacks and
     /// the channel are required together since they work in tandem.
     #[must_use]
-    pub fn with_callbacks(
+    fn with_callbacks(
         mut self,
         callbacks: &[Arc<dyn Callback>],
         callback_tx: mpsc::Sender<CallbackRequest>,
@@ -2032,35 +2036,42 @@ impl<'a> ExecuteBuilder<'a> {
         self.callback_tx = Some(callback_tx);
         self
     }
+    }
 
+    unstable_pub! {
     /// Set the trace channel for receiving execution trace events.
     #[must_use]
-    pub fn with_tracing(mut self, trace_tx: mpsc::UnboundedSender<TraceRequest>) -> Self {
+    fn with_tracing(mut self, trace_tx: mpsc::UnboundedSender<TraceRequest>) -> Self {
         self.trace_tx = Some(trace_tx);
         self
     }
+    }
 
+    unstable_pub! {
     /// Enable networking for this execution.
     ///
     /// The `net_tx` channel is used to send network requests (TCP/TLS) from
     /// the WASM guest to the host for processing.
     #[must_use]
-    pub fn with_network(mut self, net_tx: mpsc::Sender<NetRequest>) -> Self {
+    fn with_network(mut self, net_tx: mpsc::Sender<NetRequest>) -> Self {
         self.net_tx = Some(net_tx);
         self
     }
+    }
 
+    unstable_pub! {
     /// Enable real-time output streaming for this execution.
     ///
     /// The `output_tx` channel receives `OutputRequest`s for every
     /// `sys.stdout.write()` / `sys.stderr.write()` call in Python.
     #[must_use]
-    pub fn with_output_streaming(
+    fn with_output_streaming(
         mut self,
         output_tx: mpsc::UnboundedSender<OutputRequest>,
     ) -> Self {
         self.output_tx = Some(output_tx);
         self
+    }
     }
 
     /// Set the maximum memory usage in bytes.
@@ -2365,7 +2376,7 @@ impl PythonExecutor {
     pub fn from_binary(wasm_bytes: &[u8]) -> std::result::Result<Self, Error> {
         let engine = Self::shared_engine()?;
         let component =
-            Component::from_binary(&engine, wasm_bytes).map_err(ErrorKind::WasmComponent)?;
+            Component::from_binary(&engine, wasm_bytes).map_err(ErrorKind::wasm_component)?;
         let instance_pre = Self::create_instance_pre(&engine, &component)?;
 
         Ok(Self {
@@ -2394,7 +2405,7 @@ impl PythonExecutor {
     pub fn from_file(path: impl AsRef<std::path::Path>) -> std::result::Result<Self, Error> {
         let engine = Self::shared_engine()?;
         let component =
-            Component::from_file(&engine, path.as_ref()).map_err(ErrorKind::WasmComponent)?;
+            Component::from_file(&engine, path.as_ref()).map_err(ErrorKind::wasm_component)?;
         let instance_pre = Self::create_instance_pre(&engine, &component)?;
 
         Ok(Self {
@@ -3592,7 +3603,7 @@ impl PythonExecutor {
                 })
                 .await
                 .map_err(|e| ErrorKind::Execution(format!("set-result-variable failed: {e:?}")))?
-                .map_err(ErrorKind::WasmComponent)?;
+                .map_err(ErrorKind::wasm_component)?;
         }
 
         tracing::debug!(code_len = code.len(), "Executing Python code");
@@ -3824,7 +3835,7 @@ fn deserialize_error(err: wasmtime::Error) -> Error {
         }
         .into();
     }
-    ErrorKind::WasmComponent(err).into()
+    ErrorKind::wasm_component(err).into()
 }
 
 #[cfg(test)]

@@ -468,6 +468,8 @@ async fn run_code(
     }
 }
 
+impl super::sealed::Sealed for InProcessSession<'_> {}
+
 #[async_trait]
 impl Session for InProcessSession<'_> {
     async fn execute(&mut self, code: &str) -> Result<ExecuteResult, Error> {

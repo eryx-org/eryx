@@ -100,6 +100,11 @@ use crate::schema::{JsonSchema, Schema};
 ///     }
 /// }
 /// ```
+///
+/// # Stability
+///
+/// This trait can be implemented outside this crate. Methods added to it later
+/// will have default implementations, so existing implementations keep compiling.
 pub trait Callback: Send + Sync {
     /// Unique name for this callback (e.g., "get_time", "echo").
     ///
@@ -229,6 +234,11 @@ pub trait Callback: Send + Sync {
 /// // Echo can now be used anywhere a Callback is expected:
 /// // let callbacks: Vec<Box<dyn Callback>> = vec![Box::new(Echo)];
 /// ```
+///
+/// # Stability
+///
+/// This trait can be implemented outside this crate. Methods added to it later
+/// will have default implementations, so existing implementations keep compiling.
 pub trait TypedCallback: Send + Sync {
     /// The strongly-typed arguments for this callback.
     ///

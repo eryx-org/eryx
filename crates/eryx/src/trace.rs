@@ -25,26 +25,31 @@ pub enum TraceEventKind {
     /// About to execute a line (from `sys.settrace` 'line' event).
     Line,
     /// Function call (from `sys.settrace` 'call' event).
+    #[non_exhaustive]
     Call {
         /// Name of the function being called.
         function: String,
     },
     /// Function return (from `sys.settrace` 'return' event).
+    #[non_exhaustive]
     Return {
         /// Name of the function returning.
         function: String,
     },
     /// Exception raised (from `sys.settrace` 'exception' event).
+    #[non_exhaustive]
     Exception {
         /// Exception message.
         message: String,
     },
     /// Callback invocation started (emitted when a callback is called).
+    #[non_exhaustive]
     CallbackStart {
         /// Name of the callback being invoked.
         name: String,
     },
     /// Callback invocation completed (emitted when a callback returns).
+    #[non_exhaustive]
     CallbackEnd {
         /// Name of the callback that completed.
         name: String,
@@ -57,6 +62,11 @@ pub enum TraceEventKind {
 ///
 /// Receives events from Python's `sys.settrace` plus callback start/end events.
 /// Useful for UI visualization of script execution progress.
+///
+/// # Stability
+///
+/// This trait can be implemented outside this crate. Methods added to it later
+/// will have default implementations, so existing implementations keep compiling.
 #[async_trait]
 pub trait TraceHandler: Send + Sync {
     /// Called when a trace event occurs.
@@ -64,6 +74,11 @@ pub trait TraceHandler: Send + Sync {
 }
 
 /// Handler for streaming output during execution.
+///
+/// # Stability
+///
+/// This trait can be implemented outside this crate. Methods added to it later
+/// will have default implementations, so existing implementations keep compiling.
 #[async_trait]
 pub trait OutputHandler: Send + Sync {
     /// Called when stdout output is produced (raw bytes).

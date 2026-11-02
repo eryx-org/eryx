@@ -299,7 +299,7 @@ result = my_function()
     let call_events: Vec<_> = events
         .iter()
         .filter(
-            |e| matches!(&e.event, TraceEventKind::Call { function } if function == "my_function"),
+            |e| matches!(&e.event, TraceEventKind::Call { function, .. } if function == "my_function"),
         )
         .collect();
 
@@ -312,7 +312,7 @@ result = my_function()
     // Check for return event
     let return_events: Vec<_> = events
         .iter()
-        .filter(|e| matches!(&e.event, TraceEventKind::Return { function } if function == "my_function"))
+        .filter(|e| matches!(&e.event, TraceEventKind::Return { function, .. } if function == "my_function"))
         .collect();
 
     assert!(
@@ -348,7 +348,9 @@ print(result)
     // Check for callback start event
     let callback_starts: Vec<_> = events
         .iter()
-        .filter(|e| matches!(&e.event, TraceEventKind::CallbackStart { name } if name == "succeed"))
+        .filter(
+            |e| matches!(&e.event, TraceEventKind::CallbackStart { name, .. } if name == "succeed"),
+        )
         .collect();
 
     assert!(
@@ -410,7 +412,9 @@ result = await sleep(ms=50)
     // Note: Duration tracking depends on the Python runtime implementation.
     // We verify the event exists; duration may or may not be accurate.
     if let Some(event) = callback_end
-        && let TraceEventKind::CallbackEnd { duration_ms, name } = &event.event
+        && let TraceEventKind::CallbackEnd {
+            duration_ms, name, ..
+        } = &event.event
     {
         assert_eq!(name, "sleep", "Callback name should be 'sleep'");
         // Duration is informational - just verify it's a valid u64

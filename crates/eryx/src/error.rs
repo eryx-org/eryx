@@ -70,6 +70,16 @@ impl Error {
         self.output_truncated
     }
 
+    /// Whether this is a component error caused by a wasm trap.
+    pub(crate) fn is_wasm_trap(&self) -> bool {
+        match &self.kind {
+            ErrorKind::WasmComponent(source) => source
+                .downcast_ref::<WasmtimeSource>()
+                .is_some_and(|source| source.0.is::<wasmtime::Trap>()),
+            _ => false,
+        }
+    }
+
     /// Record that the failed run dropped streamed output.
     #[must_use]
     pub(crate) fn with_output_truncated(mut self, truncated: bool) -> Self {
@@ -140,12 +150,27 @@ macro_rules! error_from {
         }
     )+};
 }
-error_from!(
-    wasmtime::Error,
-    CallbackError,
-    std::io::Error,
-    serde_json::Error
-);
+error_from!(CallbackError, std::io::Error, serde_json::Error);
+
+/// A wasmtime error carried by [`ErrorKind::WasmComponent`], so the crate can
+/// still look at it (e.g. for a trap) while the public type stays opaque.
+#[derive(Debug)]
+pub(crate) struct WasmtimeSource(pub(crate) wasmtime::Error);
+
+impl std::fmt::Display for WasmtimeSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+impl std::error::Error for WasmtimeSource {}
+
+impl ErrorKind {
+    /// A [`WasmComponent`](Self::WasmComponent) error from wasmtime.
+    pub(crate) fn wasm_component(err: wasmtime::Error) -> Self {
+        Self::WasmComponent(Box::new(WasmtimeSource(err)))
+    }
+}
 
 /// What went wrong, as a matchable category. See [`Error::kind`].
 #[derive(Debug, thiserror::Error)]
@@ -168,8 +193,11 @@ pub enum ErrorKind {
     EpochTicker(String),
 
     /// Error during WASM component loading or instantiation.
+    ///
+    /// The source is boxed so the underlying engine's error type is not part
+    /// of this crate's API.
     #[error("wasm component error: {0}")]
-    WasmComponent(#[from] wasmtime::Error),
+    WasmComponent(#[source] Box<dyn std::error::Error + Send + Sync>),
 
     /// A precompiled runtime (a `.cwasm` file, embedded runtime or saved
     /// factory) was built by a different eryx version.
@@ -222,6 +250,7 @@ pub enum ErrorKind {
 
     /// Execution ran out of fuel (instruction limit exceeded).
     #[error("execution ran out of fuel after {consumed} instructions (limit: {limit})")]
+    #[non_exhaustive]
     FuelExhausted {
         /// Number of instructions consumed before exhaustion.
         consumed: u64,

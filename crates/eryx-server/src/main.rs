@@ -306,12 +306,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     let addr = args.listen_addr.parse()?;
 
-    let pool_config = PoolConfig {
-        max_size: args.pool_max_size,
-        min_idle: args.pool_min_idle,
-        acquire_timeout: Duration::from_secs(args.pool_acquire_timeout_secs),
-        idle_timeout: Duration::from_secs(args.pool_idle_timeout_secs),
-    };
+    let pool_config = PoolConfig::default()
+        .with_max_size(args.pool_max_size)
+        .with_min_idle(args.pool_min_idle)
+        .with_acquire_timeout(Duration::from_secs(args.pool_acquire_timeout_secs))
+        .with_idle_timeout(Duration::from_secs(args.pool_idle_timeout_secs));
 
     tracing::info!(
         %addr,

@@ -864,12 +864,11 @@ impl SandboxFactory {
     ) -> PyResult<crate::pool::SandboxPool> {
         use std::time::Duration;
 
-        let config = eryx::PoolConfig {
-            max_size,
-            min_idle,
-            acquire_timeout: Duration::from_millis(acquire_timeout_ms),
-            idle_timeout: Duration::from_millis(idle_timeout_ms),
-        };
+        let config = eryx::PoolConfig::default()
+            .with_max_size(max_size)
+            .with_min_idle(min_idle)
+            .with_acquire_timeout(Duration::from_millis(acquire_timeout_ms))
+            .with_idle_timeout(Duration::from_millis(idle_timeout_ms));
 
         let runtime = Arc::clone(&self.runtime);
 

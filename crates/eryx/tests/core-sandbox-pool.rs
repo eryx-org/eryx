@@ -127,11 +127,7 @@ async fn secret_names_needing_escapes_do_not_break_execution() {
 }
 
 fn small_pool() -> PoolConfig {
-    PoolConfig {
-        max_size: 1,
-        min_idle: 1,
-        ..Default::default()
-    }
+    PoolConfig::default().with_max_size(1).with_min_idle(1)
 }
 
 #[tokio::test]
@@ -163,12 +159,10 @@ async fn pool_accepts_precompiled_bytes() {
 
 #[tokio::test]
 async fn pool_acquire_timeout_covers_sandbox_creation() {
-    let config = PoolConfig {
-        max_size: 1,
-        min_idle: 0,
-        acquire_timeout: std::time::Duration::from_millis(100),
-        ..Default::default()
-    };
+    let config = PoolConfig::default()
+        .with_max_size(1)
+        .with_min_idle(0)
+        .with_acquire_timeout(std::time::Duration::from_millis(100));
     let pool = SandboxPool::with_builder(
         || {
             std::thread::sleep(std::time::Duration::from_secs(2));
@@ -187,11 +181,7 @@ async fn pool_acquire_timeout_covers_sandbox_creation() {
 
 #[tokio::test]
 async fn pool_try_acquire_never_creates_a_sandbox() {
-    let config = PoolConfig {
-        max_size: 1,
-        min_idle: 0,
-        ..Default::default()
-    };
+    let config = PoolConfig::default().with_max_size(1).with_min_idle(0);
     let pool = SandboxPool::new(Sandbox::embedded(), config).await.unwrap();
     assert!(pool.try_acquire().unwrap().is_none());
     assert_eq!(pool.stats().total_creations, 0);

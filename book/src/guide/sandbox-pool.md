@@ -15,12 +15,11 @@ use std::time::Duration;
 
 #[tokio::main]
 async fn main() -> Result<(), eryx::PoolError> {
-    let config = PoolConfig {
-        max_size: 4,
-        min_idle: 1,
-        acquire_timeout: Duration::from_secs(5),
-        idle_timeout: Duration::from_secs(300),
-    };
+    let config = PoolConfig::default()
+        .with_max_size(4)
+        .with_min_idle(1)
+        .with_acquire_timeout(Duration::from_secs(5))
+        .with_idle_timeout(Duration::from_secs(300));
 
     let pool = SandboxPool::new(Sandbox::embedded(), config).await?;
 

@@ -247,11 +247,9 @@ async fn pooled_sandbox_keeps_builder_limits_across_leases() {
                 .with_resource_limits(limits.clone())
                 .build()
         },
-        eryx::PoolConfig {
-            max_size: 1,
-            min_idle: 1,
-            ..Default::default()
-        },
+        eryx::PoolConfig::default()
+            .with_max_size(1)
+            .with_min_idle(1),
     )
     .await
     .expect("pool");

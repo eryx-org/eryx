@@ -1148,6 +1148,7 @@ dependencies = [
  "blake3",
  "criterion",
  "crossterm",
+ "eryx",
  "eryx-macros",
  "eryx-runtime",
  "eryx-vfs",
