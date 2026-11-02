@@ -1497,6 +1497,53 @@ except TypeError as e:
 }
 
 #[tokio::test]
+async fn test_callback_surplus_positional_args_raise_typeerror() {
+    let no_schema = |name: &str| {
+        eryx::DynamicCallback::builder(name, "No parameters", |_| Box::pin(async { Ok(json!({})) }))
+            .build()
+    };
+    let sandbox = sandbox_builder()
+        .with_callback(no_schema("get_user"))
+        .with_callback(no_schema("users.fetch"))
+        .with_callback(AddCallback)
+        .build()
+        .expect("Failed to build sandbox");
+
+    let result = sandbox
+        .execute(
+            r#"
+for call in (
+    lambda: get_user(123),
+    lambda: users.fetch(1, 2),
+    lambda: add(1, 2, 3),
+):
+    try:
+        await call()
+        print("ERROR: no TypeError")
+    except TypeError as e:
+        print(f"TypeError: {e}")
+"#,
+        )
+        .await;
+
+    let output = result.expect("Execution should succeed");
+    let out = output.stdout_text();
+    assert!(!out.contains("ERROR"), "Surplus args must raise: {out}");
+    assert!(
+        out.contains("get_user() takes 0 positional arguments but 1 was given"),
+        "{out}"
+    );
+    assert!(
+        out.contains("users.fetch() takes 0 positional arguments but 2 were given"),
+        "{out}"
+    );
+    assert!(
+        out.contains("add() takes 2 positional arguments but 3 were given"),
+        "{out}"
+    );
+}
+
+#[tokio::test]
 async fn test_callback_namespace_positional_and_keyword_duplicate_raises_typeerror() {
     let sandbox = sandbox_builder()
         .with_callback(SearchDashboardsCallback)

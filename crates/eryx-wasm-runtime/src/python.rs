@@ -1760,6 +1760,19 @@ def _eryx_install_callbacks(callbacks_json):
         'os', 'subprocess', 'socket', '__import__'
     }
 
+    # Map positional args onto schema parameter names, like a Python function would
+    def _eryx_bind_positional(_name, _param_names, _args, _kwargs):
+        if len(_args) > len(_param_names):
+            raise TypeError(
+                f"{_name}() takes {len(_param_names)} positional argument"
+                f"{'' if len(_param_names) == 1 else 's'} but {len(_args)} "
+                f"{'was' if len(_args) == 1 else 'were'} given"
+            )
+        for _p, _a in zip(_param_names, _args):
+            if _p in _kwargs:
+                raise TypeError(f"{_name}() got multiple values for argument '{_p}'")
+            _kwargs[_p] = _a
+
     # Helper to create async callback wrappers
     def _eryx_make_callback(_cb_name):
         # Extract ordered parameter names from schema so positional args work
@@ -1772,12 +1785,7 @@ def _eryx_install_callbacks(callbacks_json):
                 break
 
         async def callback(*args, **kwargs):
-            # Map positional args to parameter names
-            for _i, _arg in enumerate(args):
-                if _i < len(_param_names):
-                    if _param_names[_i] in kwargs:
-                        raise TypeError(f"{_cb_name}() got multiple values for argument '{_param_names[_i]}'")
-                    kwargs[_param_names[_i]] = _arg
+            _eryx_bind_positional(_cb_name, _param_names, args, kwargs)
             return await invoke(_cb_name, **kwargs)
         callback.__name__ = _cb_name
         callback.__doc__ = f"Invoke the '{_cb_name}' callback (async)."
@@ -1826,12 +1834,7 @@ def _eryx_install_callbacks(callbacks_json):
         async def __call__(self, *args, **kwargs):
             if self._prefix:
                 _full = self._prefix.rstrip('.')
-                # Map positional args to cached parameter names
-                for _i, _a in enumerate(args):
-                    if _i < len(self._param_names):
-                        if self._param_names[_i] in kwargs:
-                            raise TypeError(f"{_full}() got multiple values for argument '{self._param_names[_i]}'")
-                        kwargs[self._param_names[_i]] = _a
+                _eryx_bind_positional(_full, self._param_names, args, kwargs)
                 return await self._invoke(_full, **kwargs)
             raise TypeError("Cannot call root namespace")
 
@@ -1851,12 +1854,7 @@ def _eryx_install_callbacks(callbacks_json):
                     break
 
         async def __call__(self, *args, **kwargs):
-            # Map positional args to parameter names from cached schema
-            for _i, _a in enumerate(args):
-                if _i < len(self._param_names):
-                    if self._param_names[_i] in kwargs:
-                        raise TypeError(f"{self._name}() got multiple values for argument '{self._param_names[_i]}'")
-                    kwargs[self._param_names[_i]] = _a
+            _eryx_bind_positional(self._name, self._param_names, args, kwargs)
             return await self._invoke(self._name, **kwargs)
 
         def __repr__(self):
