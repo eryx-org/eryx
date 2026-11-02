@@ -11,7 +11,9 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 
-use eryx::{CallbackError, Error, InProcessSession, JsonSchema, Sandbox, Session, TypedCallback};
+use eryx::{
+    CallbackError, Error, ErrorKind, InProcessSession, JsonSchema, Sandbox, Session, TypedCallback,
+};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
@@ -85,8 +87,8 @@ await asyncio.gather(slow(ms=300), boom())
 const HANG: Duration = Duration::from_secs(8);
 
 fn assert_gather_failure(r: Result<eryx::ExecuteResult, Error>) {
-    match r {
-        Err(Error::PythonException(tb)) => assert!(tb.contains("fast failure"), "{tb}"),
+    match r.map_err(Error::into_kind) {
+        Err(ErrorKind::PythonException(tb)) => assert!(tb.contains("fast failure"), "{tb}"),
         other => panic!("expected the script's ValueError, got {other:?}"),
     }
 }

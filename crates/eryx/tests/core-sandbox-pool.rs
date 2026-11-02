@@ -8,7 +8,8 @@ use std::io::Write;
 use std::pin::Pin;
 
 use eryx::{
-    CallbackError, Error, PackageFormat, PoolConfig, PoolError, Sandbox, SandboxPool, TypedCallback,
+    CallbackError, ErrorKind, PackageFormat, PoolConfig, PoolError, Sandbox, SandboxPool,
+    TypedCallback,
 };
 
 /// A pure-Python wheel containing a single `corepkg` module.
@@ -106,7 +107,7 @@ async fn panicking_callback_fails_the_execution() {
         .execute("try:\n    await boom()\nexcept BaseException:\n    pass")
         .await;
     assert!(
-        matches!(&result, Err(Error::Execution(msg)) if msg.contains("callback handler")),
+        matches!(result.as_ref().map_err(|e| e.kind()), Err(ErrorKind::Execution(msg)) if msg.contains("callback handler")),
         "expected a callback handler failure, got {result:?}"
     );
 }

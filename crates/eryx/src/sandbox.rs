@@ -99,7 +99,7 @@ use crate::callback::Callback;
 use crate::callback_handler::{
     run_callback_handler, run_net_handler, run_output_collector, run_trace_collector,
 };
-use crate::error::Error;
+use crate::error::{Error, ErrorKind};
 use crate::library::RuntimeLibrary;
 use crate::net::{ConnectionManager, NetConfig};
 use crate::trace::{OutputHandler, TraceEvent, TraceHandler};
@@ -509,7 +509,18 @@ impl Sandbox {
                     },
                 })
             }
-            Err(error) => Err(self.scrub_error(error)),
+            Err(error) => {
+                // The executor can't see the callbacks or the whole run's duration.
+                let error = match error.stats().cloned() {
+                    Some(stats) => error.with_stats(ExecuteStats {
+                        duration,
+                        callback_invocations,
+                        ..stats
+                    }),
+                    None => error,
+                };
+                Err(self.scrub_error(error))
+            }
         }
     }
 
@@ -619,13 +630,13 @@ impl Sandbox {
 
     /// Scrub secret placeholders from a Python traceback, which the guest
     /// would otherwise print to stderr.
-    pub(crate) fn scrub_error(&self, error: Error) -> Error {
-        match error {
-            Error::PythonException(traceback) if self.scrub_stderr() => Error::PythonException(
-                crate::secrets::scrub_placeholders(&traceback, &self.secrets),
-            ),
-            error => error,
+    pub(crate) fn scrub_error(&self, mut error: Error) -> Error {
+        if self.scrub_stderr()
+            && let ErrorKind::PythonException(traceback) = error.kind_mut()
+        {
+            *traceback = crate::secrets::scrub_placeholders(traceback, &self.secrets);
         }
+        error
     }
 
     /// Get a reference to the Python executor.
@@ -643,7 +654,7 @@ impl Sandbox {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::Initialization`] naming the callback if two share a
+    /// Returns [`ErrorKind::Initialization`] naming the callback if two share a
     /// name; the existing callbacks are left unchanged.
     pub fn set_callbacks(&mut self, callbacks: Vec<Box<dyn Callback>>) -> Result<(), Error> {
         let mut map = HashMap::new();
@@ -721,9 +732,9 @@ impl Sandbox {
     /// });
     ///
     /// // Wait for result
-    /// match handle.wait().await {
+    /// match handle.wait().await.map_err(Error::into_kind) {
     ///     Ok(result) => println!("Completed: {}", result.stdout_text()),
-    ///     Err(Error::Cancelled) => println!("Cancelled"),
+    ///     Err(ErrorKind::Cancelled) => println!("Cancelled"),
     ///     Err(e) => println!("Error: {e}"),
     /// }
     /// ```
@@ -801,9 +812,10 @@ fn insert_callback(
 /// Fail if [`insert_callback`] saw a name registered twice.
 fn check_duplicate_callback(duplicate: Option<String>) -> Result<(), Error> {
     match duplicate {
-        Some(name) => Err(Error::Initialization(format!(
+        Some(name) => Err(ErrorKind::Initialization(format!(
             "callback '{name}' is registered more than once"
-        ))),
+        ))
+        .into()),
         None => Ok(()),
     }
 }
@@ -817,7 +829,7 @@ fn python_str_literal(value: &str) -> String {
 /// Log and convert the failure of a task spawned to serve an execution.
 pub(crate) fn handler_task_failed(task: &str, error: &tokio::task::JoinError) -> Error {
     tracing::error!(task, %error, "execution handler task failed");
-    Error::Execution(format!("{task} task failed: {error}"))
+    ErrorKind::Execution(format!("{task} task failed: {error}")).into()
 }
 
 /// Handle to a cancellable execution.
@@ -870,12 +882,12 @@ impl ExecutionHandle {
     /// Wait for the execution to complete.
     ///
     /// Returns the execution result or an error. If the execution was cancelled,
-    /// returns [`Error::Cancelled`].
+    /// returns [`ErrorKind::Cancelled`].
     ///
     /// # Errors
     ///
     /// Returns an error if:
-    /// - The execution was cancelled ([`Error::Cancelled`])
+    /// - The execution was cancelled ([`ErrorKind::Cancelled`])
     /// - The Python code raised an exception
     /// - A resource limit was exceeded
     /// - The execution timed out
@@ -886,9 +898,9 @@ impl ExecutionHandle {
                 // Channel closed without sending - execution was likely cancelled
                 // or the task panicked
                 if self.cancel_token.is_cancelled() {
-                    Err(Error::Cancelled)
+                    Err(ErrorKind::Cancelled.into())
                 } else {
-                    Err(Error::Execution("execution task failed".to_string()))
+                    Err(ErrorKind::Execution("execution task failed".to_string()).into())
                 }
             }
         }
@@ -1082,9 +1094,10 @@ impl PrecompiledArtifact {
 
         let file_len = file.metadata().map_err(component_read_error)?.len();
         if file_len < len {
-            return Err(Error::Initialization(format!(
+            return Err(ErrorKind::Initialization(format!(
                 "pre-compiled component file is {file_len} bytes, expected at least {len}"
-            )));
+            ))
+            .into());
         }
 
         #[cfg(unix)]
@@ -1207,7 +1220,7 @@ impl PrecompiledArtifact {
 
 #[cfg(any(feature = "embedded", feature = "preinit"))]
 fn component_read_error(e: std::io::Error) -> Error {
-    Error::Initialization(format!("failed to read pre-compiled component file: {e}"))
+    ErrorKind::Initialization(format!("failed to read pre-compiled component file: {e}")).into()
 }
 
 #[cfg(any(feature = "embedded", feature = "preinit"))]
@@ -1278,7 +1291,7 @@ impl PrecompiledFileSource {
     unsafe fn to_executor(&self) -> std::result::Result<PythonExecutor, Error> {
         let artifact = self.artifact.get_or_try_init(|| {
             let file = std::fs::File::open(&self.path).map_err(|e| {
-                Error::Initialization(format!(
+                ErrorKind::Initialization(format!(
                     "failed to open pre-compiled component {}: {e}",
                     self.path.display()
                 ))
@@ -1737,7 +1750,7 @@ impl<R> SandboxBuilder<R, state::Needs> {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::MissingPythonStdlib`] if no valid stdlib directory is found.
+    /// Returns [`ErrorKind::MissingPythonStdlib`] if no valid stdlib directory is found.
     ///
     /// # Example
     ///
@@ -1748,7 +1761,7 @@ impl<R> SandboxBuilder<R, state::Needs> {
     ///     .build()?;
     /// ```
     pub fn with_auto_stdlib(self) -> Result<SandboxBuilder<R, state::Has>, Error> {
-        let path = find_python_stdlib().ok_or(Error::MissingPythonStdlib)?;
+        let path = find_python_stdlib().ok_or(ErrorKind::MissingPythonStdlib)?;
         Ok(self.with_python_stdlib(path))
     }
 
@@ -1926,8 +1939,9 @@ impl<R, S> SandboxBuilder<R, S> {
         mut self,
         path: impl AsRef<std::path::Path>,
     ) -> Result<Self, Error> {
-        let cache = crate::cache::FilesystemCache::new(path)
-            .map_err(|e| Error::Initialization(format!("failed to create cache directory: {e}")))?;
+        let cache = crate::cache::FilesystemCache::new(path).map_err(|e| {
+            ErrorKind::Initialization(format!("failed to create cache directory: {e}"))
+        })?;
         // Store filesystem cache for mmap-based loading (3x faster than bytes)
         self.filesystem_cache = Some(cache.clone());
         self.cache = Some(Arc::new(cache));
@@ -2311,11 +2325,11 @@ impl<R, S> SandboxBuilder<R, S> {
         // Check for incompatible configuration
         #[cfg(not(feature = "native-extensions"))]
         if package.has_native_extensions {
-            return Err(Error::Initialization(format!(
+            return Err(ErrorKind::Initialization(format!(
                 "Package '{}' contains native extensions but the 'native-extensions' feature is not enabled. \
                  Either use a pure-Python package or enable the 'native-extensions' feature.",
                 package.name
-            )));
+            )).into());
         }
 
         // Store the extracted package - native extensions will be registered at build()
@@ -2374,11 +2388,11 @@ impl<R, S> SandboxBuilder<R, S> {
         // Check for incompatible configuration
         #[cfg(not(feature = "native-extensions"))]
         if package.has_native_extensions {
-            return Err(Error::Initialization(format!(
+            return Err(ErrorKind::Initialization(format!(
                 "Package '{}' contains native extensions but the 'native-extensions' feature is not enabled. \
                  Either use a pure-Python package or enable the 'native-extensions' feature.",
                 package.name
-            )));
+            )).into());
         }
 
         // Store the extracted package - native extensions will be registered at build()
@@ -2412,12 +2426,13 @@ impl SandboxBuilder<state::Has, state::Has> {
     ) -> Result<Box<dyn Fn() -> Result<Sandbox, Error> + Send + Sync>, Error> {
         let dropped = self.settings_dropped_by_factory();
         if !dropped.is_empty() {
-            return Err(Error::Initialization(format!(
+            return Err(ErrorKind::Initialization(format!(
                 "SandboxPool::new cannot keep these builder settings: {}. Set callbacks, \
                  handlers and resource limits on each PooledSandbox, or use \
                  SandboxPool::with_builder to build every sandbox yourself",
                 dropped.join(", ")
-            )));
+            ))
+            .into());
         }
 
         let wasm_source = match self.wasm_source {
@@ -2518,9 +2533,9 @@ impl SandboxBuilder<state::Has, state::Has> {
     pub fn build(mut self) -> Result<Sandbox, Error> {
         check_duplicate_callback(self.duplicate_callback.take())?;
         if let Some(net) = &self.net_config {
-            net.validate().map_err(Error::Initialization)?;
+            net.validate().map_err(ErrorKind::Initialization)?;
             net.check_secret_hosts(&self.secrets)
-                .map_err(Error::Initialization)?;
+                .map_err(ErrorKind::Initialization)?;
         }
 
         // First, compute mount indices and register native extensions from packages
@@ -2558,7 +2573,7 @@ impl SandboxBuilder<state::Has, state::Has> {
         {
             match crate::cache::default_cache_root().and_then(|root| {
                 crate::cache::FilesystemCache::new(root.join("components"))
-                    .map_err(|e| Error::Initialization(e.to_string()))
+                    .map_err(|e| ErrorKind::Initialization(e.to_string()).into())
             }) {
                 Ok(cache) => {
                     tracing::debug!(?cache, "Using default cache directory");
@@ -2720,7 +2735,7 @@ impl SandboxBuilder<state::Has, state::Has> {
                     let msg = "No WASM component specified. Use with_wasm_bytes() or with_wasm_file(). \
                                Or enable the `embedded` feature for automatic runtime loading.";
 
-                    return Err(Error::Initialization(msg.to_string()));
+                    return Err(ErrorKind::Initialization(msg.to_string()).into());
                 }
             }
         };
@@ -2827,7 +2842,7 @@ impl SandboxBuilder<state::Has, state::Has> {
         // Cache miss or no cache - link the component
         let component_bytes =
             eryx_runtime::linker::link_with_extensions(&self.native_extensions)
-                .map_err(|e| Error::Initialization(format!("late-linking failed: {e}")))?;
+                .map_err(|e| ErrorKind::Initialization(format!("late-linking failed: {e}")))?;
 
         // Pre-compile and cache if available
         #[cfg(feature = "embedded")]

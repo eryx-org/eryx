@@ -36,7 +36,7 @@ use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
 use crate::embedded_stdlib::EmbeddedStdlib;
-use crate::error::Error;
+use crate::error::{Error, ErrorKind};
 
 /// Embedded pre-compiled runtime.
 const EMBEDDED_RUNTIME: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/runtime.cwasm"));
@@ -75,7 +75,7 @@ impl EmbeddedResources {
         RESOURCES
             .get_or_init(|| Self::extract().map_err(|e| e.to_string()))
             .as_ref()
-            .map_err(|e| Error::Initialization(e.clone()))
+            .map_err(|e| ErrorKind::Initialization(e.clone()).into())
     }
 
     /// Extract all embedded resources to the cache directory.
@@ -128,16 +128,16 @@ impl EmbeddedResources {
         // This avoids race conditions when multiple processes extract simultaneously.
         // We use NamedTempFile so we can persist it after writing.
         let mut temp_file = tempfile::NamedTempFile::with_prefix_in("runtime-", temp_dir)
-            .map_err(|e| Error::Initialization(format!("Failed to create temp file: {e}")))?;
+            .map_err(|e| ErrorKind::Initialization(format!("Failed to create temp file: {e}")))?;
 
         temp_file
             .write_all(EMBEDDED_RUNTIME)
-            .map_err(|e| Error::Initialization(format!("Failed to write runtime file: {e}")))?;
+            .map_err(|e| ErrorKind::Initialization(format!("Failed to write runtime file: {e}")))?;
 
         temp_file
             .as_file()
             .sync_all()
-            .map_err(|e| Error::Initialization(format!("Failed to sync runtime file: {e}")))?;
+            .map_err(|e| ErrorKind::Initialization(format!("Failed to sync runtime file: {e}")))?;
 
         // Try to persist (rename) to the final location.
         // persist() returns the temp file back on error so we can handle it.
@@ -150,10 +150,11 @@ impl EmbeddedResources {
                 drop(e);
             }
             Err(e) => {
-                return Err(Error::Initialization(format!(
+                return Err(ErrorKind::Initialization(format!(
                     "Failed to persist runtime file: {}",
                     e.error
-                )));
+                ))
+                .into());
             }
         }
 

@@ -289,7 +289,7 @@ async fn test_python_value_error() {
 }
 
 /// An uncaught exception surfaces the full Python traceback as a
-/// [`eryx::Error::PythonException`] — a *script* failure, distinct from
+/// [`eryx::ErrorKind::PythonException`] — a *script* failure, distinct from
 /// sandbox failures.
 ///
 /// Regression guard for a user report that `raise Exception()` "does not return
@@ -308,7 +308,7 @@ async fn test_python_uncaught_exception_returns_traceback() {
         .await
         .expect_err("raise Exception() should be an error");
     assert!(
-        matches!(bare, eryx::Error::PythonException(_)),
+        matches!(bare.kind(), eryx::ErrorKind::PythonException(_)),
         "a raise should be a PythonException, got: {bare:?}"
     );
     let bare = bare.to_string();
@@ -329,7 +329,7 @@ async fn test_python_uncaught_exception_returns_traceback() {
         .await
         .expect_err(r#"raise ValueError("boom") should be an error"#);
     assert!(
-        matches!(with_msg, eryx::Error::PythonException(_)),
+        matches!(with_msg.kind(), eryx::ErrorKind::PythonException(_)),
         "a raise should be a PythonException, got: {with_msg:?}"
     );
     let with_msg = with_msg.to_string();
@@ -340,7 +340,7 @@ async fn test_python_uncaught_exception_returns_traceback() {
 }
 
 /// NUL bytes in the code are rejected host-side as a sandbox/input failure
-/// ([`eryx::Error::Execution`]), NOT mistaken for a script exception.
+/// ([`eryx::ErrorKind::Execution`]), NOT mistaken for a script exception.
 #[tokio::test]
 async fn test_null_bytes_in_code_is_not_python_exception() {
     let mut session = create_session().await;
@@ -351,11 +351,11 @@ async fn test_null_bytes_in_code_is_not_python_exception() {
         .await
         .expect_err("code with NUL bytes should be rejected");
     assert!(
-        matches!(err, eryx::Error::Execution(_)),
+        matches!(err.kind(), eryx::ErrorKind::Execution(_)),
         "NUL bytes should be a sandbox Execution error, not PythonException, got: {err:?}"
     );
     assert!(
-        !matches!(err, eryx::Error::PythonException(_)),
+        !matches!(err.kind(), eryx::ErrorKind::PythonException(_)),
         "NUL bytes must not be classified as a script exception"
     );
 }
@@ -518,7 +518,7 @@ async fn test_execution_timeout_with_infinite_loop() {
     assert!(result.is_err(), "Infinite loop should timeout");
     let error = result.unwrap_err();
     assert!(
-        matches!(error, eryx::Error::Timeout(_)),
+        matches!(error.kind(), eryx::ErrorKind::Timeout(_)),
         "Error should be Timeout variant: {:?}",
         error
     );
@@ -577,7 +577,7 @@ async fn test_concurrent_timeouts_use_one_shared_epoch_clock() {
             .expect("Execution task should not panic")
             .unwrap_err();
         assert!(
-            matches!(error, eryx::Error::Timeout(_)),
+            matches!(error.kind(), eryx::ErrorKind::Timeout(_)),
             "Expected timeout, got {error:?}"
         );
     }
@@ -649,7 +649,10 @@ async fn test_session_cancellation_interrupts_loop_and_recovers() {
     .await
     .expect("cancellation should interrupt a CPU-bound loop");
     assert!(
-        matches!(result, Err(eryx::Error::Cancelled)),
+        matches!(
+            result.as_ref().map_err(|e| e.kind()),
+            Err(eryx::ErrorKind::Cancelled)
+        ),
         "expected Cancelled, got {result:?}"
     );
 
@@ -691,7 +694,10 @@ async fn test_session_cancellation_interrupts_sleep() {
     .await
     .expect("cancellation should interrupt a guest suspended in a sleep");
     assert!(
-        matches!(result, Err(eryx::Error::Cancelled)),
+        matches!(
+            result.as_ref().map_err(|e| e.kind()),
+            Err(eryx::ErrorKind::Cancelled)
+        ),
         "expected Cancelled, got {result:?}"
     );
 
@@ -722,7 +728,7 @@ async fn test_execution_timeout_interrupts_blocking_sleep() {
     assert!(result.is_err(), "Sleep should be interrupted by timeout");
     let error = result.unwrap_err();
     assert!(
-        matches!(error, eryx::Error::Timeout(_)),
+        matches!(error.kind(), eryx::ErrorKind::Timeout(_)),
         "Error should be Timeout variant: {:?}",
         error
     );

@@ -27,7 +27,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
-use crate::error::Error;
+use crate::error::{Error, ErrorKind};
 
 /// Embedded Python standard library (zstd-compressed tar archive).
 const EMBEDDED_STDLIB: &[u8] = include_bytes!("../python-stdlib.tar.zst");
@@ -56,7 +56,7 @@ impl EmbeddedStdlib {
         STDLIB
             .get_or_init(|| Self::extract().map_err(|e| e.to_string()))
             .as_ref()
-            .map_err(|e| Error::Initialization(e.clone()))
+            .map_err(|e| ErrorKind::Initialization(e.clone()).into())
     }
 
     /// Extract the embedded stdlib to the cache directory.
@@ -98,27 +98,29 @@ impl EmbeddedStdlib {
         // This avoids race conditions when multiple processes extract simultaneously.
         let temp_extract_dir = tempfile::TempDir::with_prefix_in(".python-stdlib-", cache_dir)
             .map_err(|e| {
-                Error::Initialization(format!("Failed to create temp extract directory: {e}"))
+                ErrorKind::Initialization(format!("Failed to create temp extract directory: {e}"))
             })?;
 
         // Decompress zstd
-        let decoder = zstd::Decoder::new(EMBEDDED_STDLIB)
-            .map_err(|e| Error::Initialization(format!("Failed to create zstd decoder: {e}")))?;
+        let decoder = zstd::Decoder::new(EMBEDDED_STDLIB).map_err(|e| {
+            ErrorKind::Initialization(format!("Failed to create zstd decoder: {e}"))
+        })?;
 
         // Extract tar archive to temp directory
         let mut archive = tar::Archive::new(decoder);
-        archive
-            .unpack(temp_extract_dir.path())
-            .map_err(|e| Error::Initialization(format!("Failed to extract stdlib archive: {e}")))?;
+        archive.unpack(temp_extract_dir.path()).map_err(|e| {
+            ErrorKind::Initialization(format!("Failed to extract stdlib archive: {e}"))
+        })?;
 
         // The archive extracts to python-stdlib/ inside the temp dir
         let extracted_stdlib = temp_extract_dir.path().join("python-stdlib");
 
         // Verify extraction
         if !extracted_stdlib.join("encodings").exists() {
-            return Err(Error::Initialization(
+            return Err(ErrorKind::Initialization(
                 "Stdlib extraction failed: encodings/ not found".to_string(),
-            ));
+            )
+            .into());
         }
 
         // Keep the tree private to this user whatever modes the archive carries.
@@ -127,7 +129,7 @@ impl EmbeddedStdlib {
             use std::os::unix::fs::PermissionsExt;
             std::fs::set_permissions(&extracted_stdlib, std::fs::Permissions::from_mode(0o700))
                 .map_err(|e| {
-                    Error::Initialization(format!("Failed to set stdlib permissions: {e}"))
+                    ErrorKind::Initialization(format!("Failed to set stdlib permissions: {e}"))
                 })?;
         }
 
@@ -141,9 +143,10 @@ impl EmbeddedStdlib {
                 tracing::debug!("Stdlib extracted by another process");
             }
             Err(e) => {
-                return Err(Error::Initialization(format!(
+                return Err(ErrorKind::Initialization(format!(
                     "Failed to rename stdlib directory: {e}"
-                )));
+                ))
+                .into());
             }
         }
 

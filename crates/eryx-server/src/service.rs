@@ -10,9 +10,10 @@ use eryx::CancellationToken;
 use eryx::callback_handler::{run_callback_handler, run_net_handler};
 use eryx::vfs::{ArcStorage, InMemoryStorage, VfsStorage};
 use eryx::{
-    Callback, CallbackJournal, CallbackRequest, ConnectionManager, Error, NetConfig, NetRequest,
-    OutputRequest, PythonStateSnapshot, ReplayState, ResourceLimits, SandboxPool, SecretConfig,
-    SessionExecutor, TraceRequest, VfsConfig, scrub_placeholders, scrub_placeholders_bytes,
+    Callback, CallbackJournal, CallbackRequest, ConnectionManager, Error, ErrorKind, NetConfig,
+    NetRequest, OutputRequest, PythonStateSnapshot, ReplayState, ResourceLimits, SandboxPool,
+    SecretConfig, SessionExecutor, TraceRequest, VfsConfig, scrub_placeholders,
+    scrub_placeholders_bytes,
 };
 use futures::FutureExt;
 use opentelemetry::propagation::Extractor;
@@ -1130,7 +1131,11 @@ async fn execute_with_session(
         .await
         .unwrap_or_else(|_| CappedOutput::new(0));
     // The sandbox's own stream budget can also drop output.
-    let output_truncated = output.truncated || session.last_output_truncated();
+    let output_truncated = output.truncated
+        || match &exec_result {
+            Ok(done) => done.output_truncated,
+            Err(failed) => failed.output_truncated(),
+        };
     let stdout = if params.scrub_stdout {
         scrub_placeholders_bytes(&output.stdout, &params.secrets)
     } else {
@@ -1166,18 +1171,19 @@ async fn execute_with_session(
     };
     // A client can reply CALLBACK_OUTCOME_SUSPEND even without opting into replay.
     // In that case there is no ReplayState to record the suspended callback's
-    // name/args, but the executor still returns Error::Suspended. Derive the
+    // name/args, but the executor still returns ErrorKind::Suspended. Derive the
     // suspension from the error so the outcome is reported as a suspension (with
     // its reason) rather than mis-surfaced as an ordinary sandbox error. There is
     // no prefix journal to resume from in this mode, but the signal is honest.
-    let suspended_callback = suspended_callback.or_else(|| match &exec_result {
-        Err(Error::Suspended(reason)) => Some(SuspendedCallback {
-            name: String::new(),
-            args_json: String::new(),
-            reason: reason.clone(),
-        }),
-        _ => None,
-    });
+    let suspended_callback =
+        suspended_callback.or_else(|| match exec_result.as_ref().err().map(Error::kind) {
+            Some(ErrorKind::Suspended(reason)) => Some(SuspendedCallback {
+                name: String::new(),
+                args_json: String::new(),
+                reason: reason.clone(),
+            }),
+            _ => None,
+        });
     let suspended = suspended_callback.is_some();
 
     // Snapshot state after execution (only when persistence is requested, and not
@@ -1302,16 +1308,15 @@ async fn execute_with_session(
                 stats: Some(ExecuteStats {
                     duration_ms: duration.as_millis() as u64,
                     callback_invocations,
-                    // There is no `output` on the error path, so read the
-                    // stats the session kept for its last execution. A
-                    // suspension poisons the remaining fuel, so the consumed
-                    // figure would be meaningless there.
-                    peak_memory_bytes: session.last_peak_memory_bytes(),
-                    fuel_consumed: if suspended {
-                        0
-                    } else {
-                        session.last_fuel_consumed().unwrap_or(0)
-                    },
+                    // There is no `output` on the error path, so read what the
+                    // run used from the error. A suspension has none: it
+                    // poisons the remaining fuel, so the figure would be
+                    // meaningless.
+                    peak_memory_bytes: e
+                        .stats()
+                        .and_then(|stats| stats.peak_memory_bytes)
+                        .unwrap_or(0),
+                    fuel_consumed: e.stats().and_then(|stats| stats.fuel_consumed).unwrap_or(0),
                     replayed_callbacks,
                 }),
                 // Still return the snapshot — the Go service decides whether to keep it.
@@ -1385,19 +1390,19 @@ impl CappedOutput {
 
 /// Classify a library [`Error`] into the proto [`FailureKind`].
 ///
-/// [`Error::PythonException`] is a *script* failure — its traceback is surfaced
+/// [`ErrorKind::PythonException`] is a *script* failure — its traceback is surfaced
 /// in `stderr` — so it maps to [`FailureKind::ScriptException`].
-/// [`Error::Suspended`] is an expected control outcome (a callback deferred), not
+/// [`ErrorKind::Suspended`] is an expected control outcome (a callback deferred), not
 /// a failure, so it maps to [`FailureKind::Suspended`]; callers should branch on
 /// the `suspended` flag first. Everything else is a sandbox-level failure whose
 /// message belongs in the `error` field.
 fn classify_failure(error: &Error) -> FailureKind {
-    match error {
-        Error::PythonException(_) => FailureKind::ScriptException,
-        Error::Timeout(_) => FailureKind::Timeout,
-        Error::FuelExhausted { .. } => FailureKind::FuelExhausted,
-        Error::Cancelled => FailureKind::Cancelled,
-        Error::Suspended(_) => FailureKind::Suspended,
+    match error.kind() {
+        ErrorKind::PythonException(_) => FailureKind::ScriptException,
+        ErrorKind::Timeout(_) => FailureKind::Timeout,
+        ErrorKind::FuelExhausted { .. } => FailureKind::FuelExhausted,
+        ErrorKind::Cancelled => FailureKind::Cancelled,
+        ErrorKind::Suspended(_) => FailureKind::Suspended,
         _ => FailureKind::SandboxError,
     }
 }

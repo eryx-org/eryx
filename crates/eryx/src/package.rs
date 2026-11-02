@@ -25,7 +25,7 @@
 use std::io::{Read, Seek};
 use std::path::{Path, PathBuf};
 
-use crate::error::Error;
+use crate::error::{Error, ErrorKind};
 
 /// Most bytes a package archive may extract to.
 const MAX_EXTRACTED_BYTES: u64 = 1024 * 1024 * 1024;
@@ -109,7 +109,7 @@ impl ExtractedPackage {
         let path = path.as_ref();
 
         let format = PackageFormat::detect(path).ok_or_else(|| {
-            Error::Initialization(format!(
+            ErrorKind::Initialization(format!(
                 "Cannot detect package format for '{}'. Expected .whl, .tar.gz, or directory.",
                 path.display()
             ))
@@ -153,9 +153,10 @@ impl ExtractedPackage {
         match format {
             PackageFormat::Wheel => Self::from_wheel_bytes(bytes, &name_hint),
             PackageFormat::TarGz => Self::from_tar_gz_bytes(bytes, &name_hint),
-            PackageFormat::Directory => Err(Error::Initialization(
+            PackageFormat::Directory => Err(ErrorKind::Initialization(
                 "Cannot load directory package from bytes. Use from_path() instead.".to_string(),
-            )),
+            )
+            .into()),
         }
     }
 
@@ -172,7 +173,7 @@ impl ExtractedPackage {
 
         // Create temp directory for extraction
         let temp_dir = tempfile::TempDir::new()
-            .map_err(|e| Error::Initialization(format!("Failed to create temp dir: {e}")))?;
+            .map_err(|e| ErrorKind::Initialization(format!("Failed to create temp dir: {e}")))?;
 
         let extract_path = temp_dir.path();
 
@@ -201,7 +202,7 @@ impl ExtractedPackage {
     /// Extract a standard wheel (.whl) file.
     fn from_wheel(path: &Path) -> Result<Self, Error> {
         let file = std::fs::File::open(path)
-            .map_err(|e| Error::Initialization(format!("Failed to open wheel: {e}")))?;
+            .map_err(|e| ErrorKind::Initialization(format!("Failed to open wheel: {e}")))?;
 
         // Extract name hint from path (e.g., "requests-2.31.0-py3-none-any.whl" -> "requests")
         let name_hint = path
@@ -216,32 +217,33 @@ impl ExtractedPackage {
     /// Extract a wheel from a reader.
     fn from_wheel_reader<R: Read + Seek>(reader: R, name_hint: &str) -> Result<Self, Error> {
         let mut archive = zip::ZipArchive::new(reader)
-            .map_err(|e| Error::Initialization(format!("Failed to read wheel archive: {e}")))?;
+            .map_err(|e| ErrorKind::Initialization(format!("Failed to read wheel archive: {e}")))?;
 
         // Create temp directory for extraction
         let temp_dir = tempfile::TempDir::new()
-            .map_err(|e| Error::Initialization(format!("Failed to create temp dir: {e}")))?;
+            .map_err(|e| ErrorKind::Initialization(format!("Failed to create temp dir: {e}")))?;
 
         let extract_path = temp_dir.path();
 
         if archive.len() > MAX_ARCHIVE_ENTRIES {
-            return Err(Error::Initialization(format!(
+            return Err(ErrorKind::Initialization(format!(
                 "Archive has {} entries, more than the limit of {MAX_ARCHIVE_ENTRIES}",
                 archive.len()
-            )));
+            ))
+            .into());
         }
         let mut remaining_bytes = MAX_EXTRACTED_BYTES;
 
         // Extract all files
         for i in 0..archive.len() {
-            let mut file = archive
-                .by_index(i)
-                .map_err(|e| Error::Initialization(format!("Failed to read archive entry: {e}")))?;
+            let mut file = archive.by_index(i).map_err(|e| {
+                ErrorKind::Initialization(format!("Failed to read archive entry: {e}"))
+            })?;
 
             // Reject entries that are absolute or escape the extraction dir
             // (`../`), which would otherwise write anywhere on the host.
             let enclosed = file.enclosed_name().ok_or_else(|| {
-                Error::Initialization(format!(
+                ErrorKind::Initialization(format!(
                     "Archive entry has an unsafe path: {}",
                     file.name().unwrap_or_default()
                 ))
@@ -249,35 +251,37 @@ impl ExtractedPackage {
             let outpath = extract_path.join(enclosed);
 
             if file.is_symlink() {
-                return Err(Error::Initialization(format!(
+                return Err(ErrorKind::Initialization(format!(
                     "Archive entry is a symlink: {}",
                     file.name().unwrap_or_default()
-                )));
+                ))
+                .into());
             }
 
             if file.is_dir() {
                 std::fs::create_dir_all(&outpath).map_err(|e| {
-                    Error::Initialization(format!("Failed to create directory: {e}"))
+                    ErrorKind::Initialization(format!("Failed to create directory: {e}"))
                 })?;
             } else {
                 if let Some(parent) = outpath.parent() {
                     std::fs::create_dir_all(parent).map_err(|e| {
-                        Error::Initialization(format!("Failed to create parent directory: {e}"))
+                        ErrorKind::Initialization(format!("Failed to create parent directory: {e}"))
                     })?;
                 }
 
-                let mut outfile = std::fs::File::create(&outpath)
-                    .map_err(|e| Error::Initialization(format!("Failed to create file: {e}")))?;
+                let mut outfile = std::fs::File::create(&outpath).map_err(|e| {
+                    ErrorKind::Initialization(format!("Failed to create file: {e}"))
+                })?;
 
                 // Read one byte past the budget so an oversized entry is
                 // detected without trusting its declared size.
                 let copied =
                     std::io::copy(&mut (&mut file).take(remaining_bytes + 1), &mut outfile)
                         .map_err(|e| {
-                            Error::Initialization(format!("Failed to extract file: {e}"))
+                            ErrorKind::Initialization(format!("Failed to extract file: {e}"))
                         })?;
                 remaining_bytes = remaining_bytes.checked_sub(copied).ok_or_else(|| {
-                    Error::Initialization(format!(
+                    ErrorKind::Initialization(format!(
                         "Archive extracts to more than the limit of {MAX_EXTRACTED_BYTES} bytes"
                     ))
                 })?;
@@ -307,13 +311,13 @@ impl ExtractedPackage {
     /// Extract a tar.gz archive (wasi-wheels format).
     fn from_tar_gz(path: &Path) -> Result<Self, Error> {
         let file = std::fs::File::open(path)
-            .map_err(|e| Error::Initialization(format!("Failed to open tar.gz: {e}")))?;
+            .map_err(|e| ErrorKind::Initialization(format!("Failed to open tar.gz: {e}")))?;
 
         let decoder = flate2::read::GzDecoder::new(file);
 
         // Create temp directory for extraction
         let temp_dir = tempfile::TempDir::new()
-            .map_err(|e| Error::Initialization(format!("Failed to create temp dir: {e}")))?;
+            .map_err(|e| ErrorKind::Initialization(format!("Failed to create temp dir: {e}")))?;
 
         let extract_path = temp_dir.path();
 
@@ -347,10 +351,11 @@ impl ExtractedPackage {
     /// Use a directory directly (no extraction needed).
     fn from_directory(path: &Path) -> Result<Self, Error> {
         if !path.is_dir() {
-            return Err(Error::Initialization(format!(
+            return Err(ErrorKind::Initialization(format!(
                 "Path is not a directory: {}",
                 path.display()
-            )));
+            ))
+            .into());
         }
 
         // Find native extensions and package name
@@ -383,7 +388,7 @@ impl ExtractedPackage {
         // Walk the directory tree
         for entry in walkdir::WalkDir::new(dir) {
             let entry = entry
-                .map_err(|e| Error::Initialization(format!("Failed to walk directory: {e}")))?;
+                .map_err(|e| ErrorKind::Initialization(format!("Failed to walk directory: {e}")))?;
 
             let path = entry.path();
 
@@ -392,7 +397,7 @@ impl ExtractedPackage {
             if entry.file_type().is_file() && path.extension().is_some_and(|ext| ext == "so") {
                 // Compute the relative path within the package directory
                 let relative = path.strip_prefix(dir).map_err(|e| {
-                    Error::Initialization(format!("Failed to compute relative path: {e}"))
+                    ErrorKind::Initialization(format!("Failed to compute relative path: {e}"))
                 })?;
 
                 let relative_path = relative
@@ -401,8 +406,9 @@ impl ExtractedPackage {
                     .collect::<Vec<_>>()
                     .join("/");
 
-                let bytes = std::fs::read(path)
-                    .map_err(|e| Error::Initialization(format!("Failed to read .so file: {e}")))?;
+                let bytes = std::fs::read(path).map_err(|e| {
+                    ErrorKind::Initialization(format!("Failed to read .so file: {e}"))
+                })?;
 
                 extensions.push(NativeExtension {
                     relative_path,
@@ -432,7 +438,7 @@ impl ExtractedPackage {
 /// directories that stay inside it, within the size and entry limits.
 fn unpack_tar<R: Read>(reader: R, dest: &Path) -> Result<(), Error> {
     let extract_error =
-        |e: std::io::Error| Error::Initialization(format!("Failed to extract tar.gz: {e}"));
+        |e: std::io::Error| ErrorKind::Initialization(format!("Failed to extract tar.gz: {e}"));
     let mut archive = tar::Archive::new(reader);
     let mut remaining_bytes = MAX_EXTRACTED_BYTES;
 
@@ -441,9 +447,10 @@ fn unpack_tar<R: Read>(reader: R, dest: &Path) -> Result<(), Error> {
         let path = entry.path().map_err(extract_error)?.display().to_string();
 
         if index >= MAX_ARCHIVE_ENTRIES {
-            return Err(Error::Initialization(format!(
+            return Err(ErrorKind::Initialization(format!(
                 "Archive has more than the limit of {MAX_ARCHIVE_ENTRIES} entries"
-            )));
+            ))
+            .into());
         }
 
         let kind = entry.header().entry_type();
@@ -451,22 +458,24 @@ fn unpack_tar<R: Read>(reader: R, dest: &Path) -> Result<(), Error> {
             continue;
         }
         if !kind.is_file() && !kind.is_dir() {
-            return Err(Error::Initialization(format!(
+            return Err(ErrorKind::Initialization(format!(
                 "Archive entry is not a regular file or directory: {path}"
-            )));
+            ))
+            .into());
         }
 
         remaining_bytes = remaining_bytes.checked_sub(entry.size()).ok_or_else(|| {
-            Error::Initialization(format!(
+            ErrorKind::Initialization(format!(
                 "Archive extracts to more than the limit of {MAX_EXTRACTED_BYTES} bytes"
             ))
         })?;
 
         // `unpack_in` refuses (returns false for) paths escaping `dest`.
         if !entry.unpack_in(dest).map_err(extract_error)? {
-            return Err(Error::Initialization(format!(
+            return Err(ErrorKind::Initialization(format!(
                 "Archive entry has an unsafe path: {path}"
-            )));
+            ))
+            .into());
         }
     }
     Ok(())
@@ -509,7 +518,7 @@ mod tests {
 
         let result = ExtractedPackage::from_wheel_reader(buf, "evil");
         assert!(
-            matches!(&result, Err(Error::Initialization(msg)) if msg.contains("unsafe path")),
+            matches!(result.as_ref().map_err(|e| e.kind()), Err(ErrorKind::Initialization(msg)) if msg.contains("unsafe path")),
             "expected unsafe path error, got {:?}",
             result.map(|p| p.name)
         );
@@ -529,7 +538,7 @@ mod tests {
         std::io::Write::write_all(&mut gz, &tar)?;
         let result = ExtractedPackage::from_tar_gz_bytes(&gz.finish()?, "evil");
         assert!(
-            matches!(&result, Err(Error::Initialization(msg)) if msg.contains("not a regular file")),
+            matches!(result.as_ref().map_err(|e| e.kind()), Err(ErrorKind::Initialization(msg)) if msg.contains("not a regular file")),
             "expected symlink rejection, got {:?}",
             result.map(|p| p.name)
         );

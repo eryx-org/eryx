@@ -10,7 +10,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, Instant};
 
-use eryx::{CallbackError, Error, ResourceLimits, Sandbox, TypedCallback};
+use eryx::{CallbackError, ErrorKind, ResourceLimits, Sandbox, TypedCallback};
 use serde_json::{Value, json};
 
 #[cfg(not(feature = "embedded"))]
@@ -278,7 +278,13 @@ async fn execution_timeout_wins_over_sleep() {
     let result = sandbox
         .execute("import asyncio\nawait asyncio.sleep(60)")
         .await;
-    assert!(matches!(result, Err(Error::Timeout(_))), "{result:?}");
+    assert!(
+        matches!(
+            result.as_ref().map_err(|e| e.kind()),
+            Err(ErrorKind::Timeout(_))
+        ),
+        "{result:?}"
+    );
     assert!(
         start.elapsed() < Duration::from_secs(5),
         "{:?}",

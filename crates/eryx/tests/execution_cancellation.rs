@@ -8,7 +8,7 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
-use eryx::{Error, ResourceLimits, Sandbox};
+use eryx::{Error, ErrorKind, ResourceLimits, Sandbox};
 
 // =============================================================================
 // Helper Functions
@@ -106,8 +106,8 @@ async fn test_execute_cancellable_cancel_infinite_loop() {
 
     let result = handle.wait().await;
     assert!(result.is_err(), "Should be cancelled");
-    match result {
-        Err(Error::Cancelled) => {} // Expected
+    match result.map_err(Error::into_kind) {
+        Err(ErrorKind::Cancelled) => {} // Expected
         Err(e) => panic!("Expected Cancelled error, got: {:?}", e),
         Ok(_) => panic!("Expected error, got success"),
     }
@@ -137,8 +137,8 @@ for i in range(1000):
 
     let result = handle.wait().await;
     assert!(result.is_err(), "Should be cancelled");
-    match result {
-        Err(Error::Cancelled) => {} // Expected
+    match result.map_err(Error::into_kind) {
+        Err(ErrorKind::Cancelled) => {} // Expected
         Err(e) => panic!("Expected Cancelled error, got: {:?}", e),
         Ok(_) => panic!("Expected error, got success"),
     }
@@ -193,8 +193,8 @@ async fn test_cancel_multiple_times_is_idempotent() {
 
     let result = handle.wait().await;
     assert!(result.is_err(), "Should be cancelled");
-    match result {
-        Err(Error::Cancelled) => {} // Expected
+    match result.map_err(Error::into_kind) {
+        Err(ErrorKind::Cancelled) => {} // Expected
         Err(e) => panic!("Expected Cancelled error, got: {:?}", e),
         Ok(_) => panic!("Expected error, got success"),
     }
@@ -218,8 +218,8 @@ async fn test_cancellation_token_can_be_shared() {
 
     let result = handle.wait().await;
     assert!(result.is_err(), "Should be cancelled via shared token");
-    match result {
-        Err(Error::Cancelled) => {} // Expected
+    match result.map_err(Error::into_kind) {
+        Err(ErrorKind::Cancelled) => {} // Expected
         Err(e) => panic!("Expected Cancelled error, got: {:?}", e),
         Ok(_) => panic!("Expected error, got success"),
     }
@@ -254,9 +254,9 @@ print(result)
 
     let result = handle.wait().await;
     // Should either complete or be cancelled
-    match result {
-        Ok(_) => {}                 // Completed before cancellation
-        Err(Error::Cancelled) => {} // Cancelled as expected
+    match result.map_err(Error::into_kind) {
+        Ok(_) => {}                     // Completed before cancellation
+        Err(ErrorKind::Cancelled) => {} // Cancelled as expected
         Err(e) => panic!("Unexpected error: {:?}", e),
     }
 }
@@ -297,9 +297,9 @@ async fn test_python_error_not_confused_with_cancellation() {
 
     let result = handle.wait().await;
     assert!(result.is_err(), "Should fail with Python error");
-    match result {
-        Err(Error::Cancelled) => panic!("Should not be Cancelled error"),
-        Err(Error::PythonException(msg)) => {
+    match result.map_err(Error::into_kind) {
+        Err(ErrorKind::Cancelled) => panic!("Should not be Cancelled error"),
+        Err(ErrorKind::PythonException(msg)) => {
             assert!(
                 msg.contains("ValueError") || msg.contains("test error"),
                 "Error should mention ValueError: {}",
@@ -319,9 +319,9 @@ async fn test_syntax_error_not_confused_with_cancellation() {
 
     let result = handle.wait().await;
     assert!(result.is_err(), "Should fail with syntax error");
-    match result {
-        Err(Error::Cancelled) => panic!("Should not be Cancelled error"),
-        Err(Error::PythonException(_)) => {} // Expected: syntax error raises in-guest
+    match result.map_err(Error::into_kind) {
+        Err(ErrorKind::Cancelled) => panic!("Should not be Cancelled error"),
+        Err(ErrorKind::PythonException(_)) => {} // Expected: syntax error raises in-guest
         Err(e) => panic!("Unexpected error type: {:?}", e),
         Ok(_) => panic!("Expected error, got success"),
     }
@@ -343,11 +343,85 @@ async fn test_cancel_while_sleeping() {
     });
 
     let result = handle.wait().await;
-    assert!(matches!(result, Err(Error::Cancelled)), "{result:?}");
+    assert!(
+        matches!(
+            result.as_ref().map_err(|e| e.kind()),
+            Err(ErrorKind::Cancelled)
+        ),
+        "{result:?}"
+    );
     // Well before the 3s execution timeout would have fired.
     assert!(
         start.elapsed() < Duration::from_secs(2),
         "{:?}",
         start.elapsed()
+    );
+}
+
+// =============================================================================
+// Cancelled runs still report what they used
+// =============================================================================
+
+#[tokio::test]
+async fn test_cancelled_execution_reports_fuel_and_duration() {
+    let sandbox = sandbox_builder_with_short_timeout().build().unwrap();
+
+    let handle = sandbox.execute_cancellable("while True: pass");
+    let token = handle.cancellation_token();
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        token.cancel();
+    });
+
+    let error = handle.wait().await.expect_err("cancelled");
+
+    assert!(matches!(error.kind(), ErrorKind::Cancelled), "{error:?}");
+    let stats = error.stats().expect("a cancelled run reports its stats");
+    assert!(
+        stats.fuel_consumed.is_some_and(|fuel| fuel > 100_000_000),
+        "{stats:?}"
+    );
+    assert!(stats.duration >= Duration::from_millis(300), "{stats:?}");
+    assert!(
+        stats.peak_memory_bytes.is_some_and(|bytes| bytes > 0),
+        "{stats:?}"
+    );
+}
+
+#[tokio::test]
+async fn test_sandbox_timeout_and_exception_report_stats() {
+    let sandbox = sandbox_builder()
+        .with_resource_limits(
+            ResourceLimits::default().with_execution_timeout(Duration::from_millis(500)),
+        )
+        .build()
+        .unwrap();
+
+    let timed_out = sandbox.execute("while True: pass").await.unwrap_err();
+    assert!(
+        matches!(timed_out.kind(), ErrorKind::Timeout(_)),
+        "{timed_out:?}"
+    );
+    assert!(
+        timed_out
+            .stats()
+            .and_then(|stats| stats.fuel_consumed)
+            .is_some_and(|fuel| fuel > 100_000_000),
+        "{timed_out:?}"
+    );
+
+    let raised = sandbox
+        .execute("sum(range(1000))\nraise ValueError('x')")
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(raised.kind(), ErrorKind::PythonException(_)),
+        "{raised:?}"
+    );
+    assert!(
+        raised
+            .stats()
+            .is_some_and(|stats| stats.fuel_consumed.is_some_and(|fuel| fuel > 0)),
+        "{raised:?}"
     );
 }

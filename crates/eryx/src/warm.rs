@@ -224,13 +224,15 @@ impl WarmPool {
                 Ok(instance) => reservation.fulfil(instance),
                 // A runtime that was not pre-initialized starts Python during
                 // instantiation, which traps without the real stdlib mounts.
-                Err(crate::Error::WasmComponent(e)) if e.is::<wasmtime::Trap>() => {
-                    tracing::debug!(error = %e, "component cannot be pre-instantiated; not warming it");
-                    reservation.mark_unsupported();
-                }
-                Err(e) => {
-                    tracing::warn!(error = %e, "failed to pre-instantiate a warm instance");
-                }
+                Err(e) => match e.kind() {
+                    crate::ErrorKind::WasmComponent(source) if source.is::<wasmtime::Trap>() => {
+                        tracing::debug!(error = %source, "component cannot be pre-instantiated; not warming it");
+                        reservation.mark_unsupported();
+                    }
+                    _ => {
+                        tracing::warn!(error = %e, "failed to pre-instantiate a warm instance");
+                    }
+                },
             }
         });
     }

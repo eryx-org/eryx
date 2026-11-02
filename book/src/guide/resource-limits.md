@@ -72,7 +72,7 @@ The execution timeout limits how long Python code can run before being terminate
 ```rust
 # extern crate eryx;
 # extern crate tokio;
-use eryx::{Sandbox, ResourceLimits, Error};
+use eryx::{Sandbox, ResourceLimits, ErrorKind};
 use std::time::Duration;
 
 #[tokio::main]
@@ -84,8 +84,8 @@ async fn main() -> Result<(), eryx::Error> {
         .with_resource_limits(limits)
         .build()?;
 
-    match sandbox.execute("while True: pass").await {
-        Err(Error::Timeout(duration)) => {
+    match sandbox.execute("while True: pass").await.map_err(eryx::Error::into_kind) {
+        Err(ErrorKind::Timeout(duration)) => {
             println!("Timed out after {:?}", duration);
         }
         _ => {}
@@ -341,8 +341,8 @@ async fn main() -> Result<(), eryx::Error> {
     // Large loops may exhaust fuel
     let result = sandbox.execute("for i in range(1000000): pass").await;
 
-    match result {
-        Err(eryx::Error::FuelExhausted { consumed, limit }) => {
+    match result.map_err(eryx::Error::into_kind) {
+        Err(eryx::ErrorKind::FuelExhausted { consumed, limit }) => {
             println!("Fuel exhausted: consumed {}, limit {}", consumed, limit);
         }
         Ok(r) => println!("Completed with fuel: {:?}", r.stats.fuel_consumed),

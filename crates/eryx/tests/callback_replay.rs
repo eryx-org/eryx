@@ -567,8 +567,8 @@ print("AFTER_MARKER")
         .result
         .expect_err("suspended run yields an error result");
     assert!(
-        matches!(err, eryx::Error::Suspended(_)),
-        "expected Error::Suspended, got: {err:?}"
+        matches!(err.kind(), eryx::ErrorKind::Suspended(_)),
+        "expected ErrorKind::Suspended, got: {err:?}"
     );
 
     // The suspended callback itself is not journaled.
@@ -770,7 +770,10 @@ async fn session_timeout_rolls_back_and_session_stays_usable() {
         .execute_with_journal("n += 1\nawait tick()\nwhile True: pass", None)
         .await;
     assert!(
-        matches!(timed_out.result, Err(eryx::Error::Timeout(_))),
+        matches!(
+            timed_out.result.as_ref().map_err(|e| e.kind()),
+            Err(eryx::ErrorKind::Timeout(_))
+        ),
         "got {:?}",
         timed_out.result
     );

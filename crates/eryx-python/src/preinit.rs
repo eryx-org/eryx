@@ -498,7 +498,13 @@ impl SandboxFactory {
         });
         let precompiled = match precompiled {
             Ok(precompiled) => precompiled,
-            Err(error @ eryx::Error::IncompatiblePrecompiled { .. }) if rebuild_if_incompatible => {
+            Err(error)
+                if rebuild_if_incompatible
+                    && matches!(
+                        error.kind(),
+                        eryx::ErrorKind::IncompatiblePrecompiled { .. }
+                    ) =>
+            {
                 let request = RebuildRequest {
                     path: &path,
                     error,
@@ -510,7 +516,12 @@ impl SandboxFactory {
                 };
                 return Self::rebuild(py, request, callbacks);
             }
-            Err(error @ eryx::Error::IncompatiblePrecompiled { .. }) => {
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    eryx::ErrorKind::IncompatiblePrecompiled { .. }
+                ) =>
+            {
                 return Err(incompatible_error(&path, &error, &build_inputs));
             }
             Err(error) => return Err(eryx_error_to_py(error)),

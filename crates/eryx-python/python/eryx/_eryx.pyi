@@ -903,9 +903,23 @@ class SuspendCallback(Exception):
 
 
 class EryxError(Exception):
-    """Base exception for all Eryx errors."""
+    """Base exception for all Eryx errors.
 
-    ...
+    When a run fails after the guest started (a timeout, cancellation, resource
+    limit or exception in the script), the exception carries what the run used
+    up to that point, so a host can meter it. These are `None` if the failure
+    happened before the guest ran.
+    """
+
+    duration_ms: Optional[float]
+    """Execution duration in milliseconds."""
+    callback_invocations: Optional[int]
+    """Number of callback invocations during execution."""
+    peak_memory_bytes: Optional[int]
+    """Peak memory usage in bytes."""
+    fuel_consumed: Optional[int]
+    """Fuel (WASM instructions) used when the run stopped. For a timeout or
+    cancellation it is accurate to within a few million instructions."""
 
 
 class ExecutionError(EryxError):

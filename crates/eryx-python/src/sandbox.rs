@@ -401,7 +401,7 @@ pub(crate) fn run_cancellable(
         sandbox.execute_cancellable(code)
     });
     async move {
-        let handle = handle.ok_or_else(|| eryx_error_to_py(eryx::Error::Cancelled))?;
+        let handle = handle.ok_or_else(|| eryx_error_to_py(eryx::ErrorKind::Cancelled.into()))?;
         let stop = handle.cancellation_token();
         let wait = handle.wait();
         tokio::pin!(wait);

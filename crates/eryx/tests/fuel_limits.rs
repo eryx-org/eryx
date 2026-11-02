@@ -152,7 +152,7 @@ async fn test_fuel_limit_exceeded_produces_error() {
     assert!(result.is_err(), "Should fail when fuel is exhausted");
     let error = result.unwrap_err();
     assert!(
-        matches!(error, eryx::Error::FuelExhausted { .. }),
+        matches!(error.kind(), eryx::ErrorKind::FuelExhausted { .. }),
         "Error should be FuelExhausted variant: {:?}",
         error
     );
@@ -263,4 +263,87 @@ async fn test_fuel_consumption_is_deterministic() {
         "Fuel consumption should be deterministic: {:?}",
         fuel_values
     );
+}
+
+// =============================================================================
+// Failed Runs Report Fuel
+// =============================================================================
+
+#[tokio::test]
+async fn test_fuel_is_reported_when_execution_times_out() {
+    let mut session = create_session().await;
+    session.set_execution_timeout(Some(std::time::Duration::from_millis(500)));
+
+    let error = session
+        .execute("while True: pass")
+        .run()
+        .await
+        .expect_err("an infinite loop times out");
+
+    assert!(
+        matches!(error.kind(), eryx::ErrorKind::Timeout(_)),
+        "{error:?}"
+    );
+    let fuel = error.stats().and_then(|stats| stats.fuel_consumed);
+    assert!(
+        fuel.is_some_and(|fuel| fuel > 100_000_000),
+        "a run that spun until its timeout has used fuel: {fuel:?}"
+    );
+}
+
+#[tokio::test]
+async fn test_fuel_is_reported_when_script_raises() {
+    let mut session = create_session().await;
+    let cheap = session
+        .execute("raise ValueError('early')")
+        .run()
+        .await
+        .expect_err("raises");
+    let heavy = session
+        .execute("sum(range(200_000))\nraise ValueError('late')")
+        .run()
+        .await
+        .expect_err("raises");
+
+    let fuel = |error: &eryx::Error| error.stats().and_then(|stats| stats.fuel_consumed);
+    assert!(matches!(heavy.kind(), eryx::ErrorKind::PythonException(_)));
+    assert!(
+        fuel(&heavy) > fuel(&cheap) && fuel(&cheap).is_some(),
+        "heavy work before raising must show up in the fuel: {:?} vs {:?}",
+        fuel(&heavy),
+        fuel(&cheap)
+    );
+}
+
+#[tokio::test]
+async fn test_fuel_exhaustion_stats_agree_with_the_variant() {
+    let mut session = create_session().await;
+
+    let error = session
+        .execute("while True: pass")
+        .with_fuel_limit(5_000_000)
+        .run()
+        .await
+        .expect_err("runs out of fuel");
+
+    let eryx::ErrorKind::FuelExhausted { consumed, .. } = error.kind() else {
+        panic!("expected FuelExhausted, got {error:?}");
+    };
+    assert_eq!(
+        error.stats().and_then(|stats| stats.fuel_consumed),
+        Some(*consumed)
+    );
+}
+
+#[tokio::test]
+async fn test_no_stats_when_the_guest_never_ran() {
+    let mut session = create_session().await;
+
+    let error = session
+        .execute("x = 1\0")
+        .run()
+        .await
+        .expect_err("NUL bytes are rejected");
+
+    assert!(error.stats().is_none(), "{error:?}");
 }
