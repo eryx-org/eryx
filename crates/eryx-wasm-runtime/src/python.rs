@@ -1799,12 +1799,17 @@ def _eryx_install_callbacks(callbacks_json):
             self._children = {}
             # Cache param names from schema at construction time
             self._param_names = []
+            # A namespace like `a.b` is only callable-with-arguments when it is
+            # also a registered callback; otherwise let invoke() report it unknown
+            self._is_callback = False
             if prefix:
                 _full = prefix.rstrip('.')
                 for _cb in _eryx_callbacks:
-                    if _cb['name'] == _full and _cb.get('parameters_schema_json'):
-                        _s = _json.loads(_cb['parameters_schema_json'])
-                        self._param_names = list(_s.get('properties', {}).keys())
+                    if _cb['name'] == _full:
+                        self._is_callback = True
+                        if _cb.get('parameters_schema_json'):
+                            _s = _json.loads(_cb['parameters_schema_json'])
+                            self._param_names = list(_s.get('properties', {}).keys())
                         break
 
         def _add_callback(self, parts):
@@ -1834,7 +1839,8 @@ def _eryx_install_callbacks(callbacks_json):
         async def __call__(self, *args, **kwargs):
             if self._prefix:
                 _full = self._prefix.rstrip('.')
-                _eryx_bind_positional(_full, self._param_names, args, kwargs)
+                if self._is_callback:
+                    _eryx_bind_positional(_full, self._param_names, args, kwargs)
                 return await self._invoke(_full, **kwargs)
             raise TypeError("Cannot call root namespace")
 

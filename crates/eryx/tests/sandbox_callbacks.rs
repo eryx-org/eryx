@@ -1544,6 +1544,52 @@ for call in (
 }
 
 #[tokio::test]
+async fn test_callback_surplus_positional_args_namespace_and_singular() {
+    let no_schema = |name: &str| {
+        eryx::DynamicCallback::builder(name, "No parameters", |_| Box::pin(async { Ok(json!({})) }))
+            .build()
+    };
+    // `a.b` is both a callback and the namespace holding `a.b.c`.
+    let sandbox = sandbox_builder()
+        .with_callback(no_schema("a.b"))
+        .with_callback(no_schema("a.b.c"))
+        .with_callback(SearchDashboardsCallback)
+        .build()
+        .expect("Failed to build sandbox");
+
+    let result = sandbox
+        .execute(
+            r#"
+for call in (
+    lambda: a.b(1),
+    lambda: search.dashboards("x", "y"),
+    lambda: a(1),
+):
+    try:
+        await call()
+        print("ERROR: no TypeError")
+    except Exception as e:
+        print(f"{type(e).__name__}: {e}")
+"#,
+        )
+        .await;
+
+    let output = result.expect("Execution should succeed");
+    let out = output.stdout_text();
+    assert!(!out.contains("ERROR"), "Surplus args must raise: {out}");
+    assert!(
+        out.contains("TypeError: a.b() takes 0 positional arguments but 1 was given"),
+        "{out}"
+    );
+    assert!(
+        out.contains("search.dashboards() takes 1 positional argument but 2 were given"),
+        "{out}"
+    );
+    // `a` is only a namespace: not reported as a zero-argument callable.
+    assert!(!out.contains("a() takes"), "{out}");
+}
+
+#[tokio::test]
 async fn test_callback_namespace_positional_and_keyword_duplicate_raises_typeerror() {
     let sandbox = sandbox_builder()
         .with_callback(SearchDashboardsCallback)
