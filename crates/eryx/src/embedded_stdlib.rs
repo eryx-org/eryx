@@ -190,4 +190,18 @@ mod tests {
             "Embedded stdlib should be > 1MB"
         );
     }
+
+    /// The stdlib is mounted read-only, so Python can't write its own `.pyc`
+    /// files; imports outside the pre-init snapshot recompile from source
+    /// unless the archive ships bytecode. Regenerate with
+    /// `scripts/compile-stdlib.sh`.
+    #[test]
+    fn embedded_stdlib_ships_bytecode() {
+        let cache = tempfile::tempdir().unwrap();
+        let path = EmbeddedStdlib::extract_stdlib(cache.path()).unwrap();
+        assert!(
+            path.join("__pycache__/fractions.cpython-314.pyc").exists(),
+            "stdlib archive has no bytecode; run scripts/compile-stdlib.sh"
+        );
+    }
 }

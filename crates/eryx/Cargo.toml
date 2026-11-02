@@ -10,6 +10,8 @@ description = "A Python sandbox with async callbacks powered by WebAssembly"
 readme = "README.md"
 keywords = ["python", "sandbox", "wasm", "webassembly", "async"]
 categories = ["development-tools", "wasm"]
+# Only the JS package uses the .gz copy; leaving it out keeps the crate under the 10 MB crates.io limit.
+exclude = ["python-stdlib.tar.gz"]
 
 [[bench]]
 name = "execution"
