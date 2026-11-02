@@ -342,7 +342,7 @@ async fn main() -> Result<(), eryx::Error> {
     let result = sandbox.execute("for i in range(1000000): pass").await;
 
     match result.map_err(eryx::Error::into_kind) {
-        Err(eryx::ErrorKind::FuelExhausted { consumed, limit }) => {
+        Err(eryx::ErrorKind::FuelExhausted { consumed, limit, .. }) => {
             println!("Fuel exhausted: consumed {}, limit {}", consumed, limit);
         }
         Ok(r) => println!("Completed with fuel: {:?}", r.stats.fuel_consumed),
