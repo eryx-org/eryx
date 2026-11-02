@@ -2994,6 +2994,20 @@ pub fn initialize_python() {
 pub fn finalize_preinit() {
     static FINALIZED: AtomicBool = AtomicBool::new(false);
     if !FINALIZED.swap(true, Ordering::SeqCst) {
+        // Session snapshots and restores use dill: import it into the snapshot
+        // so a fresh instance's first state operation doesn't spend ~20ms
+        // importing it. Before the WASI reset, which forgets the files the
+        // import opened. Best effort: a custom stdlib may not have dill, and
+        // then state operations fail with a clearer error of their own.
+        // Importing dill caches tempfile's directory from the pre-init `/tmp`,
+        // which restored sandboxes don't have, so forget it again (as the host
+        // does after pre-init's imports) so `TMPDIR` is honoured at runtime.
+        let _ = unsafe {
+            run_in_main(
+                c"__import__('dill')
+(lambda m: m and setattr(m, 'tempdir', None))(__import__('sys').modules.get('tempfile'))",
+            )
+        };
         reset_wasi_state();
         // Pre-init executions ran with the pre-init mounts; each instance
         // restored from the snapshot must look for its own.
@@ -3668,14 +3682,17 @@ for _k in _eryx_keys:
             continue
         try:
             # Test if item is serializable with dill
-            _eryx_dill.dumps(_v)
+            _eryx_dill.dumps(_v, recurse=True)
             _eryx_state_dict[_k] = _v
         except Exception:
             # Skip items dill can't serialize (modules, open handles, etc.)
             _eryx_snapshot_skipped.append(_k)
 
-# Serialize the filtered dict with dill
-_eryx_state_bytes = _eryx_dill.dumps(_eryx_state_dict)
+# Serialize the filtered dict with dill. recurse=True saves only the globals a
+# function uses: by default dill saves a function's whole globals dict (the user
+# namespace), so one unserializable global would drop every function, or the
+# whole snapshot. Restoring rebinds functions to the user namespace anyway.
+_eryx_state_bytes = _eryx_dill.dumps(_eryx_state_dict, recurse=True)
 _eryx_snapshot_skipped = '\\x00'.join(_eryx_snapshot_skipped)
 
 # Clean up local helpers
