@@ -9,6 +9,10 @@
 # .pyc magic number must match the guest's CPython, or imports silently fall
 # back to compiling). Rewrites both archives in crates/eryx/.
 #
+# Only the .zst (embedded in the Rust crate) gets bytecode. The .gz is
+# downloaded whole by the JS package, so it stays source-only to keep that
+# download small.
+#
 # Needs GNU tar and zstd.
 #
 # Uses unchecked-hash .pyc files: they are never revalidated against the
@@ -47,16 +51,21 @@ if [[ $check == 1 ]]; then
     for archive in zst gz; do
         old="$(mktemp -d -p "$work")"
         tar -xf "python-stdlib.tar.$archive" -C "$old"
-        diff -r "$old/python-stdlib" "$work/python-stdlib" > /dev/null \
-            || { echo "python-stdlib.tar.$archive is out of date; run scripts/compile-stdlib.sh"; rc=1; }
+        # The .gz must not carry bytecode, so ignore __pycache__ only for it.
+        if [[ $archive == gz ]]; then
+            ! find "$old" -name __pycache__ | grep -q . \
+                && diff -r -x __pycache__ "$old/python-stdlib" "$work/python-stdlib" > /dev/null
+        else
+            diff -r "$old/python-stdlib" "$work/python-stdlib" > /dev/null
+        fi || { echo "python-stdlib.tar.$archive is out of date; run scripts/compile-stdlib.sh"; rc=1; }
     done
     exit $rc
 fi
 
 # Sorted names + fixed owner/mtime keep the archives reproducible.
 pack() {
-    tar -C "$work" --sort=name --owner=0 --group=0 --numeric-owner \
+    tar -C "$work" "$@" --sort=name --owner=0 --group=0 --numeric-owner \
         --mtime='2020-01-01 00:00:00' -cf - python-stdlib
 }
 pack | zstd -q -19 -f -o python-stdlib.tar.zst
-pack | gzip -9n > python-stdlib.tar.gz
+pack --exclude=__pycache__ | gzip -9n > python-stdlib.tar.gz
