@@ -801,7 +801,7 @@ impl PooledSandbox {
     ///
     /// # Errors
     ///
-    /// Returns [`ErrorKind::Initialization`] if two callbacks share a name.
+    /// Returns [`ErrorKind::Initialization`](crate::ErrorKind::Initialization) if two callbacks share a name.
     pub fn with_callbacks(mut self, callbacks: Vec<Box<dyn Callback>>) -> Result<Self, Error> {
         self.sandbox_mut().set_callbacks(callbacks)?;
         Ok(self)
