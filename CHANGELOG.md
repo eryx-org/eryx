@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## `eryx-precompile` - [0.14.0](https://github.com/eryx-org/eryx/compare/eryx-precompile-v0.13.0...eryx-precompile-v0.14.0) - 2026-11-02
+
+### Other
+- update Cargo.lock dependencies
+
+## `eryx` - [0.14.0](https://github.com/eryx-org/eryx/compare/eryx-v0.13.0...eryx-v0.14.0) - 2026-11-02
+
+### Added
+- *(eryx)* [**breaking**] report fuel and run statistics when an execution fails ([#724](https://github.com/eryx-org/eryx/pull/724))
+
+### Fixed
+- *(runtime)* raise TypeError for surplus positional callback args ([#730](https://github.com/eryx-org/eryx/pull/730))
+
+### Other
+- *(eryx)* [**breaking**] stabilise the public API surface ([#725](https://github.com/eryx-org/eryx/pull/725))
+- ship precompiled bytecode in the bundled stdlib ([#729](https://github.com/eryx-org/eryx/pull/729))
+- *(embedded)* hash the embedded runtime and stdlib at build time ([#720](https://github.com/eryx-org/eryx/pull/720))
+
+## `eryx-runtime` - [0.14.0](https://github.com/eryx-org/eryx/compare/eryx-runtime-v0.13.0...eryx-runtime-v0.14.0) - 2026-11-02
+
+### Fixed
+- *(runtime)* raise TypeError for surplus positional callback args ([#730](https://github.com/eryx-org/eryx/pull/730))
+
 ## `eryx-precompile` - [0.13.0](https://github.com/eryx-org/eryx/compare/eryx-precompile-v0.12.1...eryx-precompile-v0.13.0) - 2026-11-01
 
 ### Added
