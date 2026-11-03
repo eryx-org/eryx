@@ -867,3 +867,53 @@ async fn test_session_pending_timer_dropped_between_executions() {
     assert_eq!(output.stdout, b"ok\n");
     assert!(start.elapsed() < std::time::Duration::from_secs(5));
 }
+
+/// An unserializable global doesn't take the functions with it: dill would
+/// otherwise save each function's whole globals dict, so the generator made
+/// every function (or the whole snapshot) fail to serialize.
+#[tokio::test]
+async fn test_snapshot_keeps_functions_beside_unserializable_globals() {
+    for code in [
+        "def f(n): return n * x\nx = 2\ngen = (i for i in range(3))",
+        "gen = (i for i in range(3))\nx = 2\ndef f(n): return n * x",
+    ] {
+        let mut session = create_session().await;
+        session
+            .execute(code)
+            .run()
+            .await
+            .unwrap_or_else(|e| panic!("Failed to set state: {}", e));
+        let snapshot = session
+            .snapshot_state()
+            .await
+            .unwrap_or_else(|e| panic!("Failed to snapshot: {}", e));
+        assert_eq!(snapshot.skipped_globals(), ["gen"], "{code:?}");
+
+        let mut restored = create_session().await;
+        restored
+            .restore_state(&snapshot)
+            .await
+            .unwrap_or_else(|e| panic!("Failed to restore: {}", e));
+        let output = restored
+            .execute("x = 5\nprint(f(3))")
+            .run()
+            .await
+            .unwrap_or_else(|e| panic!("Failed to call f: {}", e));
+        // f sees the session's current x, not a copy from the snapshot
+        assert_eq!(output.stdout, b"15\n", "{code:?}");
+    }
+}
+
+/// Pre-init imports dill, so the first snapshot or restore in a fresh
+/// instance doesn't have to.
+#[cfg(feature = "embedded")]
+#[tokio::test]
+async fn test_preinit_imports_dill() {
+    let mut session = create_session().await;
+    let output = session
+        .execute("import sys\nprint('dill' in sys.modules)")
+        .run()
+        .await
+        .unwrap_or_else(|e| panic!("Failed to execute: {}", e));
+    assert_eq!(output.stdout, b"True\n");
+}
