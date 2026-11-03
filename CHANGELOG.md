@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## `eryx-precompile` - [0.14.1](https://github.com/eryx-org/eryx/compare/eryx-precompile-v0.14.0...eryx-precompile-v0.14.1) - 2026-11-03
+
+### Other
+- update Cargo.lock dependencies
+
+## `eryx` - [0.14.1](https://github.com/eryx-org/eryx/compare/eryx-v0.14.0...eryx-v0.14.1) - 2026-11-03
+
+### Fixed
+- *(runtime)* keep functions in snapshots beside unserializable globals ([#736](https://github.com/eryx-org/eryx/pull/736))
+
+## `eryx-runtime` - [0.14.1](https://github.com/eryx-org/eryx/compare/eryx-runtime-v0.14.0...eryx-runtime-v0.14.1) - 2026-11-03
+
+### Fixed
+- *(runtime)* keep functions in snapshots beside unserializable globals ([#736](https://github.com/eryx-org/eryx/pull/736))
+
 ## `eryx-precompile` - [0.14.0](https://github.com/eryx-org/eryx/compare/eryx-precompile-v0.13.0...eryx-precompile-v0.14.0) - 2026-11-02
 
 ### Other
