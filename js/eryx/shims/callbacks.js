@@ -335,9 +335,12 @@ export function createCallbackHost(options = {}) {
    *
    * @param {string} name - Callback name
    * @param {string} argumentsJson - JSON-encoded arguments
-   * @returns {string} JSON-encoded result
+   * @returns {Promise<string>} JSON-encoded result
    */
-  function invoke(name, argumentsJson) {
+  // Always async: jco 1.41 doesn't turn a synchronous throw from an async-lowered
+  // import into an `err` result, leaving the guest stuck mid-invoke so the next
+  // execute panics ("RefCell already borrowed"). A rejection is handled correctly.
+  async function invoke(name, argumentsJson) {
     const handler = pick("callbackHandler");
     if (!handler) {
       throw new Error(
