@@ -147,7 +147,7 @@ jobs:
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           # Exact patch version: other releases can marshal different bytecode.
-          python-version: "3.14.8"
+          python-version: "3.15.2"
 
       - name: Check stdlib bytecode is up to date
         run: scripts/compile-stdlib.sh --check
@@ -464,7 +464,7 @@ jobs:
           persist-credentials: false
 
       - name: Install mise
-        uses: jdx/mise-action@6612f0ef07ed2a736cd1e00a94a065522dd41195 # v5.2.5
+        uses: jdx/mise-action@f5be966e4a917d54244728e6a5fdcd1d93a35e6c # v5.2.6
         with:
           cache: ${{ !startsWith(github.ref, 'refs/tags/') }}
           mise_toml: |
