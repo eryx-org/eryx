@@ -284,6 +284,16 @@
     },
 
     // ------------------------------------------------------------------
+    // CPython: the stdlib bytecode check needs exactly 3.14.x (see
+    // scripts/compile-stdlib.sh), so only patch bumps are allowed.
+    // ------------------------------------------------------------------
+    {
+      matchDepNames: ["python"],
+      matchManagers: ["github-actions"],
+      allowedVersions: "<3.15",
+    },
+
+    // ------------------------------------------------------------------
     // Rust toolchain: mise `rust` + Docker `rust:*` base images + the
     // Cargo.toml MSRV (via the customManager below, which surfaces as a
     // docker `rust` dep) all move together in one PR.
