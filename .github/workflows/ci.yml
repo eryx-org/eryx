@@ -389,7 +389,7 @@ jobs:
       # For crates/eryx/tests/pooling_native_extensions.rs.
       - name: Download numpy-wasi
         run: |
-          curl -fSL -o "$RUNNER_TEMP/numpy-wasi.tar.gz" \
+          curl -fSL --retry 5 --retry-all-errors -o "$RUNNER_TEMP/numpy-wasi.tar.gz" \
             "https://github.com/eryx-org/eryx/releases/download/demo-assets/numpy-wasi.tar.gz"
           echo "ERYX_TEST_NUMPY_WASI=$RUNNER_TEMP/numpy-wasi.tar.gz" >> "$GITHUB_ENV"
 
@@ -1245,9 +1245,9 @@ jobs:
         working-directory: js/demo/public
         run: |
           mkdir -p examples
-          curl -fSL -o examples/humanize-4.15.0-py3-none-any.whl \
+          curl -fSL --retry 5 --retry-all-errors -o examples/humanize-4.15.0-py3-none-any.whl \
             "https://files.pythonhosted.org/packages/c5/7b/bca5613a0c3b542420cf92bd5e5fb8ebd5435ce1011a091f66bb7693285e/humanize-4.15.0-py3-none-any.whl"
-          curl -fSL -o examples/numpy-wasi.tar.gz \
+          curl -fSL --retry 5 --retry-all-errors -o examples/numpy-wasi.tar.gz \
             "https://github.com/eryx-org/eryx/releases/download/demo-assets/numpy-wasi.tar.gz"
           ls -lh examples/
 
