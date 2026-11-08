@@ -15,7 +15,7 @@ runs:
         BINSTALL_VERSION: v1.26.0
         BINSTALL_SHA256: dd7ff9451d8ba2e437a8d861889b630746f82f09d931df2d893b0c3f28656f87
       run: |
-        curl -fsSL --proto '=https' --tlsv1.2 -o "$RUNNER_TEMP/cargo-binstall.tgz" \
+        curl -fsSL --retry 5 --retry-all-errors --proto '=https' --tlsv1.2 -o "$RUNNER_TEMP/cargo-binstall.tgz" \
           "https://github.com/cargo-bins/cargo-binstall/releases/download/$BINSTALL_VERSION/cargo-binstall-x86_64-unknown-linux-musl.tgz"
         echo "$BINSTALL_SHA256  $RUNNER_TEMP/cargo-binstall.tgz" | sha256sum -c -
         mkdir -p "$HOME/.cargo/bin"
