@@ -1200,8 +1200,6 @@ enum HandleExportResult {
     Pending(u32),
 }
 
-/// Handle an export call by dispatching to the appropriate Python function.
-/// Returns whether the export completed or is pending.
 /// Push `result<_, execute-error>`'s error case:
 /// `execute-error { message, stdout, stderr }`.
 fn push_execute_error(cx: &mut EryxCall, failure: python::ExecuteFailure) {
@@ -1213,6 +1211,8 @@ fn push_execute_error(cx: &mut EryxCall, failure: python::ExecuteFailure) {
     cx.stack.push(Value::ResultDiscriminant(false));
 }
 
+/// Handle an export call by dispatching to the appropriate Python function.
+/// Returns whether the export completed or is pending.
 fn handle_export(wit: Wit, func_index: usize, cx: &mut EryxCall) -> HandleExportResult {
     match func_index {
         EXPORT_EXECUTE => {

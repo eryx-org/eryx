@@ -472,6 +472,17 @@ export class Sandbox {
       const result = _toResult(output, this.#stateWasReset);
       this.#stateWasReset = false;
       return result;
+    } catch (e) {
+      // A failed run's payload is an execute-error record: surface its
+      // traceback as the message, with the output captured before it failed.
+      const payload = e?.payload;
+      if (payload && typeof payload.message === "string") {
+        throw Object.assign(new Error(payload.message, { cause: e }), {
+          stdout: payload.stdout,
+          stderr: payload.stderr,
+        });
+      }
+      throw e;
     } finally {
       this.#host.flushOutput();
     }
