@@ -123,7 +123,8 @@ pub mod preinit {
 }
 
 pub use callback::{
-    Callback, CallbackError, DynamicCallback, DynamicCallbackBuilder, TypedCallback, empty_schema,
+    Callback, CallbackError, DynamicCallback, DynamicCallbackBuilder, PrefixCallback,
+    PrefixHandler, TypedCallback, empty_schema,
 };
 pub use error::{Error, ErrorKind};
 pub use library::RuntimeLibrary;

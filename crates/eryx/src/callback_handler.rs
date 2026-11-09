@@ -106,8 +106,9 @@ fn create_callback_future(
         return None;
     }
 
-    // Find the callback
-    let Some(callback) = callbacks_map.get(&request.name).cloned() else {
+    // Find the callback: the exact name, else the longest prefix (`a.b.*`) it is under
+    let Some(callback) = crate::callback::find_callback(callbacks_map, &request.name).cloned()
+    else {
         let _ = request.response_tx.send(CallbackHostResult::Err(format!(
             "Callback '{}' not found",
             request.name
@@ -130,7 +131,7 @@ fn create_callback_future(
     let timeout = resource_limits.callback_timeout;
     let secrets = Arc::clone(secrets);
     let fut = async move {
-        let invoke_future = callback.invoke_with_raw_args(&request.arguments_json, args);
+        let invoke_future = callback.invoke_named(&request.name, &request.arguments_json, args);
 
         let callback_result = if let Some(timeout) = timeout {
             tokio::time::timeout(timeout, invoke_future)

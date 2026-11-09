@@ -550,7 +550,18 @@ impl Callback for ReplayCallback {
         raw_args: &str,
         args: serde_json::Value,
     ) -> Pin<Box<dyn Future<Output = Result<serde_json::Value, CallbackError>> + Send + '_>> {
-        let name = self.inner.name().to_string();
+        self.invoke_named(self.inner.name(), raw_args, args)
+    }
+
+    /// Journal under the invoked `name`, so each name under a prefix callback
+    /// gets its own entries.
+    fn invoke_named(
+        &self,
+        name: &str,
+        raw_args: &str,
+        args: serde_json::Value,
+    ) -> Pin<Box<dyn Future<Output = Result<serde_json::Value, CallbackError>> + Send + '_>> {
+        let name = name.to_string();
         // Key on the guest's text verbatim: the guest emits it canonically
         // (sorted keys, compact), so every host matches it without re-encoding.
         let args_json = raw_args.to_string();
@@ -581,7 +592,7 @@ impl Callback for ReplayCallback {
                 let inner = Arc::clone(&self.inner);
                 let state = Arc::clone(&self.state);
                 Box::pin(async move {
-                    let result = inner.invoke_with_raw_args(&args_json, args).await;
+                    let result = inner.invoke_named(&name, &args_json, args).await;
                     let index = u32::try_from(seq).unwrap_or(u32::MAX);
                     match CallbackOutcome::from_invoke(&result) {
                         CallbackOutcome::Ok(value) => {
