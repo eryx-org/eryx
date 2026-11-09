@@ -127,6 +127,21 @@ fn create_callback_future(
         }
     };
 
+    // Only a prefix callback (`a.b.*`) takes positional args: the guest binds
+    // an exact callback's from its schema, so this key means a confused guest.
+    // Checked before `invoke_named`, which replay uses to consume the journal.
+    if !callback.name().ends_with(".*") && args.get(crate::callback::POSITIONAL_ARGS_KEY).is_some()
+    {
+        let error = CallbackError::InvalidArguments(format!(
+            "{}() takes keyword arguments only",
+            request.name
+        ));
+        let _ = request
+            .response_tx
+            .send(CallbackHostResult::Err(error.to_string()));
+        return None;
+    }
+
     // Create the future
     let timeout = resource_limits.callback_timeout;
     let secrets = Arc::clone(secrets);

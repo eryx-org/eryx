@@ -12,10 +12,13 @@ use eryx::{
 };
 use serde_json::json;
 
-/// A prefix callback that returns `"{tag}:{name}"` plus the kwargs it got.
+/// A prefix callback that returns `"{tag}:{name}"` plus the kwargs and
+/// positional args it got.
 fn tagged_prefix(prefix: &str, tag: &'static str) -> PrefixCallback {
-    PrefixCallback::new(prefix, format!("{tag} tools"), move |name, args| {
-        Box::pin(async move { Ok(json!({ "hit": format!("{tag}:{name}"), "args": args })) })
+    PrefixCallback::new(prefix, format!("{tag} tools"), move |name, args, pos| {
+        Box::pin(
+            async move { Ok(json!({ "hit": format!("{tag}:{name}"), "args": args, "pos": pos })) },
+        )
     })
 }
 
@@ -112,25 +115,83 @@ print((await tool())['hit'])
 }
 
 #[tokio::test]
-async fn positional_args_under_a_prefix_are_rejected() {
+async fn positional_args_reach_the_prefix_handler() {
     let sandbox = Sandbox::embedded()
         .with_callback(tagged_prefix("mcp.grafana", "g"))
+        .with_callback(exact("mcp.grafana.search"))
         .build()
         .unwrap();
 
     let out = run(
         &sandbox,
         r#"
+r = await mcp.grafana.user_info(1, "two", [3])
+print(r['args'], r['pos'])
+r = await mcp.grafana["search-docs"]("cpu", limit=5)
+print(r['args'], r['pos'])
+r = await mcp.grafana.user_info(id=1)
+print(r['args'], r['pos'])
+r = await invoke("mcp.grafana.direct", 9, k=1)
+print(r['args'], r['pos'])
+# An exact callback under the prefix still binds from its own schema
+r = await mcp.grafana.search("pos")
+print(r['hit'], r['args'])
+"#,
+    )
+    .await;
+    assert_eq!(
+        out,
+        "{} [1, 'two', [3]]\n\
+         {'limit': 5} ['cpu']\n\
+         {'id': 1} []\n\
+         {'k': 1} [9]\n\
+         exact:mcp.grafana.search {'q': 'pos'}"
+    );
+}
+
+#[tokio::test]
+async fn reserved_positional_key_is_rejected() {
+    let sandbox = Sandbox::embedded()
+        .with_callback(tagged_prefix("mcp.grafana", "g"))
+        .with_callback(exact("plain"))
+        .build()
+        .unwrap();
+
+    let out = run(
+        &sandbox,
+        r#"
+for call in [
+    lambda: mcp.grafana.user_info(__eryx_args__=[1]),
+    lambda: mcp.grafana.user_info(1, __eryx_args__=[1]),
+    lambda: plain(__eryx_args__=[1]),
+    lambda: invoke("plain", __eryx_args__=[1]),
+]:
+    try:
+        await call()
+        print("UNEXPECTED")
+    except TypeError as e:
+        print(e)
+# A positional arg sent to an exact callback, bypassing its wrapper, is
+# rejected by the host without calling it
 try:
-    await mcp.grafana.user_info(1)
-except TypeError as e:
+    await invoke("plain", 1)
+    print("UNEXPECTED")
+except Exception as e:
     print(e)
 "#,
     )
     .await;
-    assert!(
-        out.starts_with("mcp.grafana.user_info() takes keyword arguments only"),
-        "got: {out}"
+    let reserved =
+        "got the keyword argument '__eryx_args__', which is reserved for positional arguments";
+    assert_eq!(
+        out,
+        format!(
+            "mcp.grafana.user_info() {reserved}\n\
+             mcp.grafana.user_info() {reserved}\n\
+             plain() {reserved}\n\
+             plain() {reserved}\n\
+             invalid arguments: plain() takes keyword arguments only"
+        )
     );
 }
 
@@ -165,7 +226,7 @@ for name in ["mcp.github.issues", "mcp.grafana", "mcp.grafana.*", "mcp.grafana."
 
 #[tokio::test]
 async fn handler_errors_and_list_callbacks() {
-    let strict = PrefixCallback::new("tools", "Known tools only", |name, _args| {
+    let strict = PrefixCallback::new("tools", "Known tools only", |name, _args, _pos| {
         Box::pin(async move {
             match name.as_str() {
                 "tools.ping" => Ok(json!("pong")),
@@ -199,7 +260,7 @@ print([(c['name'], c['description']) for c in list_callbacks()])
 async fn trace_and_journal_use_the_full_name() {
     let calls = Arc::new(AtomicU32::new(0));
     let counter = Arc::clone(&calls);
-    let prefix = PrefixCallback::new("mcp.grafana", "g", move |name, _args| {
+    let prefix = PrefixCallback::new("mcp.grafana", "g", move |name, _args, _pos| {
         let n = counter.fetch_add(1, Ordering::SeqCst) + 1;
         Box::pin(async move { Ok(json!(format!("{name}#{n}"))) })
     });
@@ -244,6 +305,62 @@ async fn trace_and_journal_use_the_full_name() {
     );
     assert_eq!(second.replayed_callbacks, 2);
     assert_eq!(calls.load(Ordering::SeqCst), 2);
+}
+
+#[tokio::test]
+async fn replay_keys_on_positional_args() {
+    let calls = Arc::new(AtomicU32::new(0));
+    let counter = Arc::clone(&calls);
+    let prefix = PrefixCallback::new("mcp.grafana", "g", move |name, args, pos| {
+        let n = counter.fetch_add(1, Ordering::SeqCst) + 1;
+        Box::pin(async move { Ok(json!(format!("{name}{pos:?}{args}#{n}"))) })
+    });
+    let sandbox = Sandbox::embedded().with_callback(prefix).build().unwrap();
+
+    let code = "print(await mcp.grafana.a(1, k=2), await mcp.grafana.a(2, k=2))";
+    let first = sandbox.execute_with_journal(code, None).await;
+    let output = first.result.expect("first run succeeds");
+    let expected = r#"mcp.grafana.a[Number(1)]{"k":2}#1 mcp.grafana.a[Number(2)]{"k":2}#2"#;
+    assert_eq!(output.stdout_text().trim(), expected);
+    let args: Vec<_> = first
+        .journal
+        .entries
+        .iter()
+        .map(|e| e.args_json.as_str())
+        .collect();
+    assert_eq!(
+        args,
+        [
+            r#"{"__eryx_args__":[1],"k":2}"#,
+            r#"{"__eryx_args__":[2],"k":2}"#
+        ]
+    );
+
+    // Identical calls replay from the journal.
+    let second = sandbox
+        .execute_with_journal(code, Some(first.journal.clone()))
+        .await;
+    assert_eq!(
+        second.result.expect("replay succeeds").stdout_text().trim(),
+        expected
+    );
+    assert_eq!(second.replayed_callbacks, 2);
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+
+    // Different positional values don't match: the changed call runs live.
+    let changed = "print(await mcp.grafana.a(1, k=2), await mcp.grafana.a(3, k=2))";
+    let third = sandbox
+        .execute_with_journal(changed, Some(first.journal))
+        .await;
+    let out = third.result.expect("changed run succeeds");
+    assert!(
+        out.stdout_text()
+            .trim()
+            .ends_with(r#"mcp.grafana.a[Number(3)]{"k":2}#3"#),
+        "got: {}",
+        out.stdout_text()
+    );
+    assert_eq!(calls.load(Ordering::SeqCst), 3);
 }
 
 #[tokio::test]
@@ -328,10 +445,13 @@ async fn pooled_prefix_callback_is_cheap() {
         .with_callbacks(prefix())
         .unwrap();
     let out = sandbox
-        .execute("print((await mcp.grafana.tool_3(query='x'))['hit'])")
+        .execute("r = await mcp.grafana.tool_3('x', limit=2)\nprint(r['hit'], r['args'], r['pos'])")
         .await
         .unwrap();
-    assert_eq!(out.stdout_text().trim(), "g:mcp.grafana.tool_3");
+    assert_eq!(
+        out.stdout_text().trim(),
+        "g:mcp.grafana.tool_3 {'limit': 2} ['x']"
+    );
     drop(sandbox);
 
     eprintln!(

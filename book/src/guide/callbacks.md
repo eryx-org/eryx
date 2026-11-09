@@ -399,7 +399,8 @@ sandbox = eryx.Sandbox(
 ## Prefix Callbacks
 
 A prefix callback handles every dotted name under a prefix with one handler,
-which receives the full name the sandbox called. Use it for large or lazily
+which receives the full name the sandbox called, its keyword arguments and its
+positional arguments. Use it for large or lazily
 discovered tool sets, where registering each tool separately would be costly:
 the sandbox installs one callback however many names it serves, and nothing
 under the prefix is looked up until it is called.
@@ -416,11 +417,15 @@ use serde_json::json;
 # #[tokio::main]
 # async fn main() -> Result<(), eryx::Error> {
 // Registers `mcp.grafana.*`.
-let tools = PrefixCallback::new("mcp.grafana", "Grafana MCP tools", |name, args| {
+let tools = PrefixCallback::new("mcp.grafana", "Grafana MCP tools", |name, kwargs, args| {
     Box::pin(async move {
         match name.as_str() {
             "mcp.grafana.user_info" => Ok(json!({ "login": "admin" })),
-            "mcp.grafana.search-docs" => Ok(json!({ "query": args["query"] })),
+            // Bind a positional query, or take it by keyword.
+            "mcp.grafana.search-docs" => {
+                let query = args.first().unwrap_or(&kwargs["query"]).clone();
+                Ok(json!({ "query": query }))
+            }
             _ => Err(CallbackError::NotFound(name)),
         }
     })
@@ -432,11 +437,12 @@ let output = sandbox
         r#"
 user = await mcp.grafana.user_info()
 docs = await mcp.grafana["search-docs"](query="alerts")
-print(user["login"], docs["query"])
+more = await mcp.grafana["search-docs"]("panels")
+print(user["login"], docs["query"], more["query"])
 "#,
     )
     .await?;
-assert_eq!(output.stdout_text().trim(), "admin alerts");
+assert_eq!(output.stdout_text().trim(), "admin alerts panels");
 #     Ok(())
 # }
 ```
@@ -446,16 +452,28 @@ assert_eq!(output.stdout_text().trim(), "admin alerts");
 - A name registered as an ordinary callback is called directly, so exact
   callbacks win over prefixes. Other names go to the longest matching prefix
   (`mcp.grafana.*` before `mcp.*`); a name under no prefix fails as unknown.
-- Names under a prefix take keyword arguments only, since the sandbox has no
-  schema to bind positional ones to.
+- The sandbox has no schema for the names under a prefix, so it passes
+  positional arguments to the handler, in order, rather than binding them. The
+  handler can bind them itself (e.g. to an MCP tool's input schema properties,
+  in declared order) or reject them with `CallbackError::InvalidArguments`. A
+  keyword-only call gets an empty list. An exact callback under the prefix
+  still binds positional arguments from its own schema.
 - `list_callbacks()` lists the prefix (`mcp.grafana.*`) with its description,
   not the names under it.
 - Any callback whose name ends in `.*` is a prefix callback, and gets the
   invoked name through `Callback::invoke_named`. In the JavaScript package,
   declare a callback named `mcp.grafana.*`: the callback handler already
   receives every call's full name.
+- On the wire, positional arguments travel in the arguments object under
+  the reserved key `__eryx_args__` (`eryx::POSITIONAL_ARGS_KEY`), only when
+  there are any: `f(1, k=2)` sends `{"__eryx_args__":[1],"k":2}`.
+  `PrefixCallback` takes the key out; a custom prefix callback, or a
+  JavaScript handler, sees it as is. Python code can't pass a keyword
+  argument of that name (it's a `TypeError`), and an ordinary callback that
+  receives the key fails with `InvalidArguments` without being called.
 - Journals, trace events and `max_callback_invocations` see the full name of
-  each call.
+  each call. Journals key on the arguments text, positional ones included, so
+  only identical calls replay.
 
 ## MCP Tools as Callbacks
 

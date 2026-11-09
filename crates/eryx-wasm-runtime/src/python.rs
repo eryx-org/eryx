@@ -1689,14 +1689,19 @@ def _eryx_install_callbacks(callbacks_json):
     # Wrappers and namespaces installed below, by name.
     _eryx_installed = {}
 
+    # The payload key positional args are sent under (see invoke)
+    _eryx_args_key = '__eryx_args__'
+
     # Callbacks metadata from host
     _eryx_callbacks = _json.loads(callbacks_json)
 
-    async def invoke(_callback_name, **kwargs):
+    async def invoke(_callback_name, *args, **kwargs):
         """Invoke a host callback by name with keyword arguments (async).
 
         Args:
             _callback_name: Name of the callback (e.g., "sleep", "http.get")
+            *args: Positional arguments, for a name under a prefix callback,
+                whose host binds them
             **kwargs: Arguments to pass to the callback
 
         Returns:
@@ -1706,6 +1711,16 @@ def _eryx_install_callbacks(callbacks_json):
             result = await invoke("get_time")
             data = await invoke("http.get", url="https://example.com")
         """
+        # Positional args travel under a reserved key, since the payload is
+        # one JSON object; a kwarg of that name would be mistaken for them
+        if _eryx_args_key in kwargs:
+            raise TypeError(
+                f"{_callback_name}() got the keyword argument '{_eryx_args_key}', "
+                f"which is reserved for positional arguments"
+            )
+        if args:
+            kwargs[_eryx_args_key] = list(args)
+
         # Serialize kwargs to canonical JSON (sorted keys, compact, no NaN/inf).
         # Hosts key callback replay journals on this text verbatim, so it must be
         # deterministic for equal arguments.
@@ -1792,18 +1807,14 @@ def _eryx_install_callbacks(callbacks_json):
                 raise TypeError(f"{_name}() got multiple values for argument '{_p}'")
             _kwargs[_p] = _a
 
-    # Bind positional args for a call of `_name`. A name under a prefix callback
-    # that isn't also its own callback has no schema, so it takes keywords only.
+    # Bind positional args for a call of `_name`, returning those left unbound.
+    # A name under a prefix callback that isn't also its own callback has no
+    # schema here, so its positional args go to the host, which binds them.
     def _eryx_bind_args(_name, _args, _kwargs, _under_prefix):
-        if not _args:
-            return
-        if _under_prefix and _name not in _eryx_by_name:
-            raise TypeError(
-                f"{_name}() takes keyword arguments only: a prefix callback "
-                f"handles it, so there are no parameter names to bind "
-                f"positional arguments to"
-            )
+        if not _args or (_under_prefix and _name not in _eryx_by_name):
+            return _args
         _eryx_bind_positional(_name, _eryx_param_names(_name), _args, _kwargs)
+        return ()
 
     # Helper to create async callback wrappers
     def _eryx_make_callback(_cb_name):
@@ -1866,8 +1877,8 @@ def _eryx_install_callbacks(callbacks_json):
                 # A namespace like `a.b` binds positional args only when it is
                 # also a callback; otherwise let invoke() report it unknown
                 if self._under_prefix or _full in _eryx_by_name:
-                    _eryx_bind_args(_full, args, kwargs, self._under_prefix)
-                return await self._invoke(_full, **kwargs)
+                    args = _eryx_bind_args(_full, args, kwargs, self._under_prefix)
+                return await self._invoke(_full, *args, **kwargs)
             raise TypeError("Cannot call root namespace")
 
         def __repr__(self):
