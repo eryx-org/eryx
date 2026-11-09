@@ -569,12 +569,26 @@ impl Callback for DynamicCallback {
 // PrefixCallback - one handler for every name under a dotted prefix
 // =============================================================================
 
+/// The key a call under a prefix callback carries its positional arguments
+/// under, in the arguments object the guest sends: `{"__eryx_args__": [1, 2],
+/// "kw": 3}` for `f(1, 2, kw=3)`. It is present only when there are any, and
+/// the guest rejects a keyword argument of this name.
+///
+/// [`PrefixCallback`] takes it out and passes the positional arguments to its
+/// handler separately. A custom prefix callback (a [`Callback`] whose name ends
+/// in `.*`) receives it in its `args` and `raw_args` as is. Any other callback
+/// that receives it fails with [`CallbackError::InvalidArguments`] without
+/// being called.
+pub const POSITIONAL_ARGS_KEY: &str = "__eryx_args__";
+
 /// A boxed async handler for a [`PrefixCallback`]: it receives the full name
-/// the guest called and its keyword arguments.
+/// the guest called, its keyword arguments (an object) and its positional
+/// arguments.
 pub type PrefixHandler = Arc<
     dyn Fn(
             String,
             serde_json::Value,
+            Vec<serde_json::Value>,
         )
             -> Pin<Box<dyn Future<Output = Result<serde_json::Value, CallbackError>> + Send>>
         + Send
@@ -585,11 +599,13 @@ pub type PrefixHandler = Arc<
 ///
 /// `PrefixCallback::new("mcp.grafana", ...)` registers the callback
 /// `mcp.grafana.*`. Python code can then call any name under it, and each
-/// call reaches the handler with the full name it used:
+/// call reaches the handler with the full name it used, its keyword arguments
+/// and its positional arguments:
 ///
 /// ```python
-/// user = await mcp.grafana.user_info()            # "mcp.grafana.user_info"
-/// docs = await mcp.grafana["search-docs"](q="x")  # "mcp.grafana.search-docs"
+/// user = await mcp.grafana.user_info()            # "mcp.grafana.user_info", {}, []
+/// docs = await mcp.grafana["search-docs"](q="x")  # "mcp.grafana.search-docs", {"q": "x"}, []
+/// page = await mcp.grafana.search("cpu", limit=5) # "mcp.grafana.search", {"limit": 5}, ["cpu"]
 /// ```
 ///
 /// The guest knows nothing about the names under the prefix, so registering
@@ -605,9 +621,14 @@ pub type PrefixHandler = Arc<
 /// handler should check it against the names it serves and reject the rest
 /// with [`CallbackError::NotFound`].
 ///
-/// Names under a prefix take keyword arguments only, since the guest has no
-/// schema to bind positional ones to. `list_callbacks()` lists the prefix
-/// itself (`mcp.grafana.*`), with its description.
+/// The guest has no schema for the names under a prefix, so it can't bind
+/// positional arguments to parameter names. It passes them to the handler
+/// instead, in order, which can bind them itself (e.g. to an MCP tool's
+/// input schema properties, in declared order) or reject them with
+/// [`CallbackError::InvalidArguments`]. A keyword-only call gets an empty
+/// list. An exact callback under the prefix still binds positional arguments
+/// from its own schema. `list_callbacks()` lists the prefix itself
+/// (`mcp.grafana.*`), with its description.
 ///
 /// Any [`Callback`] whose [`name`](Callback::name) ends in `.*` is a prefix
 /// callback; this type is the ready-made one. Such a callback receives the
@@ -619,10 +640,10 @@ pub type PrefixHandler = Arc<
 /// use eryx::{CallbackError, PrefixCallback, Sandbox};
 /// use serde_json::json;
 ///
-/// let tools = PrefixCallback::new("mcp.grafana", "Grafana MCP tools", |name, args| {
+/// let tools = PrefixCallback::new("mcp.grafana", "Grafana MCP tools", |name, kwargs, args| {
 ///     Box::pin(async move {
 ///         let tool = name.strip_prefix("mcp.grafana.").unwrap_or(&name).to_string();
-///         Ok(json!({ "tool": tool, "args": args }))
+///         Ok(json!({ "tool": tool, "kwargs": kwargs, "positional": args }))
 ///     })
 /// });
 ///
@@ -655,6 +676,7 @@ impl PrefixCallback {
         F: Fn(
                 String,
                 serde_json::Value,
+                Vec<serde_json::Value>,
             )
                 -> Pin<Box<dyn Future<Output = Result<serde_json::Value, CallbackError>> + Send>>
             + Send
@@ -702,9 +724,23 @@ impl Callback for PrefixCallback {
         &self,
         name: &str,
         _raw_args: &str,
-        args: serde_json::Value,
+        mut args: serde_json::Value,
     ) -> Pin<Box<dyn Future<Output = Result<serde_json::Value, CallbackError>> + Send + '_>> {
-        (self.handler)(name.to_string(), args)
+        let positional = match args
+            .as_object_mut()
+            .and_then(|o| o.remove(POSITIONAL_ARGS_KEY))
+        {
+            None => Vec::new(),
+            Some(serde_json::Value::Array(positional)) => positional,
+            Some(_) => {
+                return Box::pin(async {
+                    Err(CallbackError::InvalidArguments(format!(
+                        "'{POSITIONAL_ARGS_KEY}' must be an array"
+                    )))
+                });
+            }
+        };
+        (self.handler)(name.to_string(), args, positional)
     }
 }
 
@@ -1531,8 +1567,8 @@ mod tests {
 
     #[tokio::test]
     async fn prefix_callback_gets_the_invoked_name() {
-        let cb = PrefixCallback::new("mcp.grafana", "tools", |name, args| {
-            Box::pin(async move { Ok(json!({ "name": name, "args": args })) })
+        let cb = PrefixCallback::new("mcp.grafana", "tools", |name, args, positional| {
+            Box::pin(async move { Ok(json!({ "name": name, "args": args, "pos": positional })) })
         });
         assert_eq!(cb.name(), "mcp.grafana.*");
         assert_eq!(cb.prefix(), "mcp.grafana");
@@ -1543,8 +1579,21 @@ mod tests {
             .unwrap();
         assert_eq!(
             out,
-            json!({ "name": "mcp.grafana.user_info", "args": {"id": 1} })
+            json!({ "name": "mcp.grafana.user_info", "args": {"id": 1}, "pos": [] })
         );
+        // Positional args come out of the reserved key, separately.
+        let raw = r#"{"__eryx_args__":[2,"x"],"id":1}"#;
+        let out = cb
+            .invoke_named("mcp.grafana.f", raw, serde_json::from_str(raw).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(out["args"], json!({"id": 1}));
+        assert_eq!(out["pos"], json!([2, "x"]));
+        assert!(matches!(
+            cb.invoke_named("mcp.grafana.f", "", json!({ POSITIONAL_ARGS_KEY: 1 }))
+                .await,
+            Err(CallbackError::InvalidArguments(_))
+        ));
         // Without a name there is nothing to call.
         assert!(matches!(
             cb.invoke(json!({})).await,
