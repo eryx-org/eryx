@@ -12,6 +12,7 @@
 //! |------|----------|--------|-------------|
 //! | [`TypedCallback`] | Compile-time known args | Auto-generated | Full |
 //! | [`DynamicCallback`] | Runtime-defined callbacks | Runtime-constructed | Partial |
+//! | [`PrefixCallback`] | Every name under a dotted prefix (`mcp.grafana.*`) | None | Manual |
 //! | [`Callback`] trait | Maximum flexibility | Manual | Manual |
 //!
 //! ## Quick Examples
@@ -116,6 +117,11 @@ pub trait Callback: Send + Sync {
     ///
     /// For dot-separated names like "http.get", a namespace is created
     /// (unless it conflicts with Python builtins like `math`).
+    ///
+    /// A name ending in `.*` (e.g. "mcp.grafana.*") makes this a prefix
+    /// callback, which handles every dotted name under the part before it and
+    /// receives the invoked name through [`invoke_named`](Self::invoke_named).
+    /// See [`PrefixCallback`].
     fn name(&self) -> &str;
 
     /// Human-readable description of what this callback does.
@@ -170,6 +176,25 @@ pub trait Callback: Send + Sync {
     ) -> Pin<Box<dyn Future<Output = Result<serde_json::Value, CallbackError>> + Send + '_>> {
         let _ = raw_args;
         self.invoke(args)
+    }
+
+    /// Execute an invocation of `name`, a name this callback handles.
+    ///
+    /// The sandbox calls this rather than
+    /// [`invoke_with_raw_args`](Self::invoke_with_raw_args). For an ordinary
+    /// callback `name` is [`name`](Self::name). For a prefix callback (one
+    /// whose name ends in `.*`, such as [`PrefixCallback`]) it is the full
+    /// dotted name the guest called, e.g. `mcp.grafana.user_info` for
+    /// `mcp.grafana.*`. The default ignores `name` and calls
+    /// `invoke_with_raw_args`.
+    fn invoke_named(
+        &self,
+        name: &str,
+        raw_args: &str,
+        args: serde_json::Value,
+    ) -> Pin<Box<dyn Future<Output = Result<serde_json::Value, CallbackError>> + Send + '_>> {
+        let _ = name;
+        self.invoke_with_raw_args(raw_args, args)
     }
 }
 
@@ -538,6 +563,179 @@ impl Callback for DynamicCallback {
     ) -> Pin<Box<dyn Future<Output = Result<serde_json::Value, CallbackError>> + Send + '_>> {
         (self.handler)(args)
     }
+}
+
+// =============================================================================
+// PrefixCallback - one handler for every name under a dotted prefix
+// =============================================================================
+
+/// A boxed async handler for a [`PrefixCallback`]: it receives the full name
+/// the guest called and its keyword arguments.
+pub type PrefixHandler = Arc<
+    dyn Fn(
+            String,
+            serde_json::Value,
+        )
+            -> Pin<Box<dyn Future<Output = Result<serde_json::Value, CallbackError>> + Send>>
+        + Send
+        + Sync,
+>;
+
+/// One callback that handles every dotted name under a prefix.
+///
+/// `PrefixCallback::new("mcp.grafana", ...)` registers the callback
+/// `mcp.grafana.*`. Python code can then call any name under it, and each
+/// call reaches the handler with the full name it used:
+///
+/// ```python
+/// user = await mcp.grafana.user_info()            # "mcp.grafana.user_info"
+/// docs = await mcp.grafana["search-docs"](q="x")  # "mcp.grafana.search-docs"
+/// ```
+///
+/// The guest knows nothing about the names under the prefix, so registering
+/// one costs about as much as one ordinary callback, however many names the
+/// handler serves, and nothing is resolved until a name is called. This suits
+/// large or lazily discovered tool sets, such as an MCP server's tools.
+///
+/// Routing: a name registered as an ordinary callback is always called
+/// directly, so exact callbacks win over prefixes. Any other dotted name goes
+/// to the longest registered prefix that contains it (`a.b.*` before `a.*`),
+/// and a name under no prefix fails as an unknown callback, as before. The
+/// name comes from the sandboxed code, so treat it as untrusted input: the
+/// handler should check it against the names it serves and reject the rest
+/// with [`CallbackError::NotFound`].
+///
+/// Names under a prefix take keyword arguments only, since the guest has no
+/// schema to bind positional ones to. `list_callbacks()` lists the prefix
+/// itself (`mcp.grafana.*`), with its description.
+///
+/// Any [`Callback`] whose [`name`](Callback::name) ends in `.*` is a prefix
+/// callback; this type is the ready-made one. Such a callback receives the
+/// invoked name through [`Callback::invoke_named`].
+///
+/// # Example
+///
+/// ```rust,ignore
+/// use eryx::{CallbackError, PrefixCallback, Sandbox};
+/// use serde_json::json;
+///
+/// let tools = PrefixCallback::new("mcp.grafana", "Grafana MCP tools", |name, args| {
+///     Box::pin(async move {
+///         let tool = name.strip_prefix("mcp.grafana.").unwrap_or(&name).to_string();
+///         Ok(json!({ "tool": tool, "args": args }))
+///     })
+/// });
+///
+/// let sandbox = Sandbox::embedded().with_callback(tools).build()?;
+/// ```
+#[derive(Clone)]
+pub struct PrefixCallback {
+    /// The registered name: the prefix followed by `.*`.
+    name: String,
+    description: String,
+    handler: PrefixHandler,
+}
+
+impl std::fmt::Debug for PrefixCallback {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PrefixCallback")
+            .field("name", &self.name)
+            .field("description", &self.description)
+            .field("handler", &"<handler>")
+            .finish()
+    }
+}
+
+impl PrefixCallback {
+    /// Create a callback for every name under `prefix` (e.g. `mcp.grafana`,
+    /// without the trailing `.*`).
+    #[must_use]
+    pub fn new<F>(prefix: impl Into<String>, description: impl Into<String>, handler: F) -> Self
+    where
+        F: Fn(
+                String,
+                serde_json::Value,
+            )
+                -> Pin<Box<dyn Future<Output = Result<serde_json::Value, CallbackError>> + Send>>
+            + Send
+            + Sync
+            + 'static,
+    {
+        Self {
+            name: format!("{}.*", prefix.into()),
+            description: description.into(),
+            handler: Arc::new(handler),
+        }
+    }
+
+    /// The prefix this callback handles, without the trailing `.*`.
+    #[must_use]
+    pub fn prefix(&self) -> &str {
+        self.name.strip_suffix(".*").unwrap_or(&self.name)
+    }
+}
+
+impl Callback for PrefixCallback {
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn description(&self) -> &str {
+        &self.description
+    }
+
+    fn parameters_schema(&self) -> Schema {
+        Schema::empty()
+    }
+
+    /// Without a full name there is nothing to call: use
+    /// [`invoke_named`](Callback::invoke_named).
+    fn invoke(
+        &self,
+        _args: serde_json::Value,
+    ) -> Pin<Box<dyn Future<Output = Result<serde_json::Value, CallbackError>> + Send + '_>> {
+        let name = self.name.clone();
+        Box::pin(async move { Err(CallbackError::NotFound(name)) })
+    }
+
+    fn invoke_named(
+        &self,
+        name: &str,
+        _raw_args: &str,
+        args: serde_json::Value,
+    ) -> Pin<Box<dyn Future<Output = Result<serde_json::Value, CallbackError>> + Send + '_>> {
+        (self.handler)(name.to_string(), args)
+    }
+}
+
+/// Find the callback that handles an invocation of `name`: the callback
+/// registered under exactly that name, else the prefix callback (`p.*`) for
+/// the longest `p` that `name` is under.
+///
+/// A name ending in `.*` never matches: the guest calls the names under a
+/// prefix, not the prefix itself. Nor does a name ending in `.` match a
+/// prefix, since it names nothing under it.
+pub(crate) fn find_callback<'a, C>(
+    callbacks: &'a std::collections::HashMap<String, C>,
+    name: &str,
+) -> Option<&'a C> {
+    if name.ends_with(".*") {
+        return None;
+    }
+    if let Some(callback) = callbacks.get(name) {
+        return Some(callback);
+    }
+    if name.ends_with('.') {
+        return None;
+    }
+    let mut end = name.len();
+    while let Some(dot) = name[..end].rfind('.') {
+        if let Some(callback) = callbacks.get(&format!("{}.*", &name[..dot])) {
+            return Some(callback);
+        }
+        end = dot;
+    }
+    None
 }
 
 /// Builder for [`DynamicCallback`].
@@ -1297,5 +1495,60 @@ mod tests {
             properties["field"]["description"],
             "This is a detailed description"
         );
+    }
+
+    // ==========================================================================
+    // Prefix callback routing
+    // ==========================================================================
+
+    #[test]
+    fn find_callback_prefers_exact_then_longest_prefix() {
+        let map: std::collections::HashMap<String, &str> = [
+            ("mcp.*", "outer"),
+            ("mcp.grafana.*", "inner"),
+            ("mcp.grafana.search", "exact"),
+            ("plain", "plain"),
+        ]
+        .into_iter()
+        .map(|(k, v)| (k.to_string(), v))
+        .collect();
+        let find = |name| find_callback(&map, name).copied();
+
+        assert_eq!(find("mcp.grafana.search"), Some("exact"));
+        assert_eq!(find("plain"), Some("plain"));
+        assert_eq!(find("mcp.grafana.other"), Some("inner"));
+        assert_eq!(find("mcp.grafana.deep.er"), Some("inner"));
+        assert_eq!(find("mcp.github.issues"), Some("outer"));
+        assert_eq!(find("mcp.grafana"), Some("outer"));
+        // The prefixes themselves and names under no prefix match nothing.
+        assert_eq!(find("mcp"), None);
+        assert_eq!(find("mcp.*"), None);
+        assert_eq!(find("mcp.grafana.*"), None);
+        assert_eq!(find("mcp.grafana."), None);
+        assert_eq!(find("other.tool"), None);
+        assert_eq!(find("plain.sub"), None);
+    }
+
+    #[tokio::test]
+    async fn prefix_callback_gets_the_invoked_name() {
+        let cb = PrefixCallback::new("mcp.grafana", "tools", |name, args| {
+            Box::pin(async move { Ok(json!({ "name": name, "args": args })) })
+        });
+        assert_eq!(cb.name(), "mcp.grafana.*");
+        assert_eq!(cb.prefix(), "mcp.grafana");
+
+        let out = cb
+            .invoke_named("mcp.grafana.user_info", "{\"id\":1}", json!({"id": 1}))
+            .await
+            .unwrap();
+        assert_eq!(
+            out,
+            json!({ "name": "mcp.grafana.user_info", "args": {"id": 1} })
+        );
+        // Without a name there is nothing to call.
+        assert!(matches!(
+            cb.invoke(json!({})).await,
+            Err(CallbackError::NotFound(_))
+        ));
     }
 }

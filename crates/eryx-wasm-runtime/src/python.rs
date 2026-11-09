@@ -1760,6 +1760,25 @@ def _eryx_install_callbacks(callbacks_json):
         'os', 'subprocess', 'socket', '__import__'
     }
 
+    # Callback declarations by name. A name ending in `.*` declares a prefix
+    # callback: the host routes every name under the part before it to that one
+    # callback, so nothing is known here about the names under it.
+    _eryx_by_name = {_cb['name']: _cb for _cb in _eryx_callbacks}
+    _eryx_param_cache = {}
+
+    # Ordered parameter names from a callback's schema, parsed on first use
+    def _eryx_param_names(_name):
+        _names = _eryx_param_cache.get(_name)
+        if _names is None:
+            _names = []
+            _cb = _eryx_by_name.get(_name)
+            if _cb is not None and _cb.get('parameters_schema_json'):
+                _s = _json.loads(_cb['parameters_schema_json'])
+                if isinstance(_s, dict):
+                    _names = list(_s.get('properties', {}).keys())
+            _eryx_param_cache[_name] = _names
+        return _names
+
     # Map positional args onto schema parameter names, like a Python function would
     def _eryx_bind_positional(_name, _param_names, _args, _kwargs):
         if len(_args) > len(_param_names):
@@ -1773,44 +1792,37 @@ def _eryx_install_callbacks(callbacks_json):
                 raise TypeError(f"{_name}() got multiple values for argument '{_p}'")
             _kwargs[_p] = _a
 
+    # Bind positional args for a call of `_name`. A name under a prefix callback
+    # that isn't also its own callback has no schema, so it takes keywords only.
+    def _eryx_bind_args(_name, _args, _kwargs, _under_prefix):
+        if not _args:
+            return
+        if _under_prefix and _name not in _eryx_by_name:
+            raise TypeError(
+                f"{_name}() takes keyword arguments only: a prefix callback "
+                f"handles it, so there are no parameter names to bind "
+                f"positional arguments to"
+            )
+        _eryx_bind_positional(_name, _eryx_param_names(_name), _args, _kwargs)
+
     # Helper to create async callback wrappers
     def _eryx_make_callback(_cb_name):
-        # Extract ordered parameter names from schema so positional args work
-        _param_names = []
-        for _cb in _eryx_callbacks:
-            if _cb['name'] == _cb_name and _cb.get('parameters_schema_json'):
-                _schema = _json.loads(_cb['parameters_schema_json'])
-                if 'properties' in _schema:
-                    _param_names = list(_schema['properties'].keys())
-                break
-
         async def callback(*args, **kwargs):
-            _eryx_bind_positional(_cb_name, _param_names, args, kwargs)
+            _eryx_bind_args(_cb_name, args, kwargs, False)
             return await invoke(_cb_name, **kwargs)
         callback.__name__ = _cb_name
         callback.__doc__ = f"Invoke the '{_cb_name}' callback (async)."
         return callback
 
-    # Namespace class for dotted callbacks like http.get
+    # Namespace class for dotted callbacks like http.get. Under a prefix
+    # callback (`_under_prefix`), any child resolves to another namespace, so
+    # names of any depth can be called.
     class _EryxNamespace:
-        def __init__(self, invoke_fn, prefix=''):
+        def __init__(self, invoke_fn, prefix='', under_prefix=False):
             self._invoke = invoke_fn
             self._prefix = prefix
             self._children = {}
-            # Cache param names from schema at construction time
-            self._param_names = []
-            # A namespace like `a.b` is only callable-with-arguments when it is
-            # also a registered callback; otherwise let invoke() report it unknown
-            self._is_callback = False
-            if prefix:
-                _full = prefix.rstrip('.')
-                for _cb in _eryx_callbacks:
-                    if _cb['name'] == _full:
-                        self._is_callback = True
-                        if _cb.get('parameters_schema_json'):
-                            _s = _json.loads(_cb['parameters_schema_json'])
-                            self._param_names = list(_s.get('properties', {}).keys())
-                        break
+            self._under_prefix = under_prefix
 
         def _add_callback(self, parts):
             if len(parts) == 1:
@@ -1822,10 +1834,22 @@ def _eryx_install_callbacks(callbacks_json):
                     self._children[child] = _EryxNamespace(self._invoke, new_prefix)
                 self._children[child]._add_callback(parts[1:])
 
+        def _mark_prefix(self, parts):
+            # Mark the namespace `parts` names, and everything below it, as
+            # handled by a prefix callback
+            if parts:
+                self._children[parts[0]]._mark_prefix(parts[1:])
+                return
+            self._under_prefix = True
+            for _c in self._children.values():
+                _c._mark_prefix(())
+
         def _resolve(self, name):
             if name in self._children:
                 return self._children[name]
             full_name = f"{self._prefix}{name}"
+            if self._under_prefix:
+                return _EryxNamespace(self._invoke, full_name + '.', True)
             return _EryxCallbackLeaf(self._invoke, full_name)
 
         def __getattr__(self, name):
@@ -1839,8 +1863,10 @@ def _eryx_install_callbacks(callbacks_json):
         async def __call__(self, *args, **kwargs):
             if self._prefix:
                 _full = self._prefix.rstrip('.')
-                if self._is_callback:
-                    _eryx_bind_positional(_full, self._param_names, args, kwargs)
+                # A namespace like `a.b` binds positional args only when it is
+                # also a callback; otherwise let invoke() report it unknown
+                if self._under_prefix or _full in _eryx_by_name:
+                    _eryx_bind_args(_full, args, kwargs, self._under_prefix)
                 return await self._invoke(_full, **kwargs)
             raise TypeError("Cannot call root namespace")
 
@@ -1851,16 +1877,9 @@ def _eryx_install_callbacks(callbacks_json):
         def __init__(self, invoke_fn, name):
             self._invoke = invoke_fn
             self._name = name
-            # Cache param names from schema at construction time
-            self._param_names = []
-            for _cb in _eryx_callbacks:
-                if _cb['name'] == name and _cb.get('parameters_schema_json'):
-                    _s = _json.loads(_cb['parameters_schema_json'])
-                    self._param_names = list(_s.get('properties', {}).keys())
-                    break
 
         async def __call__(self, *args, **kwargs):
-            _eryx_bind_positional(self._name, self._param_names, args, kwargs)
+            _eryx_bind_args(self._name, args, kwargs, False)
             return await self._invoke(self._name, **kwargs)
 
         def __repr__(self):
@@ -1868,6 +1887,7 @@ def _eryx_install_callbacks(callbacks_json):
 
     # Generate callback wrappers - add to both module globals and user globals
     _eryx_namespaces = {}
+    _eryx_prefix_parts = []
     for _cb in _eryx_callbacks:
         _name = _cb['name']
         if '.' in _name:
@@ -1879,12 +1899,18 @@ def _eryx_install_callbacks(callbacks_json):
                     _eryx_namespaces[_root] = _EryxNamespace(invoke, _root + '.')
                 # Skip the root part since we've already accounted for it in the prefix
                 _eryx_namespaces[_root]._add_callback(_parts[1:])
+                if _parts[-1] == '*':
+                    _eryx_prefix_parts.append(_parts[:-1])
         else:
             if _name not in _eryx_reserved:
                 _wrapper = _eryx_make_callback(_name)
                 globals()[_name] = _wrapper
                 _eryx_user_globals[_name] = _wrapper
                 _eryx_installed[_name] = _wrapper
+    # Mark prefixes once the tree is built, so namespaces created for other
+    # callbacks under a prefix are marked too
+    for _parts in _eryx_prefix_parts:
+        _eryx_namespaces[_parts[0]]._mark_prefix(_parts[1:])
 
     # Add namespaces to both module globals and user globals
     globals().update(_eryx_namespaces)
@@ -3828,7 +3854,9 @@ pub struct CallbackInfo {
 /// 1. An `invoke(name, **kwargs)` function that calls host callbacks via `_eryx`
 /// 2. A `list_callbacks()` function for introspection
 /// 3. Direct wrapper functions for each callback (e.g., `sleep(ms=100)`)
-/// 4. Namespace objects for dotted callbacks (e.g., `http.get(url="...")`)
+/// 4. Namespace objects for dotted callbacks (e.g., `http.get(url="...")`),
+///    and for prefix callbacks (`mcp.grafana.*`), whose namespace resolves any
+///    child to a call of its full dotted name
 ///
 /// The setup is `_eryx_install_callbacks`, defined once with the execution
 /// infrastructure, so installing compiles nothing. It is skipped while these
@@ -3882,7 +3910,19 @@ fn serde_json_mini_serialize_callbacks(callbacks: &[CallbackInfo]) -> String {
 /// Escape a string for JSON
 pub fn escape_json_string(s: &str) -> String {
     let mut result = String::with_capacity(s.len());
-    for c in s.chars() {
+    let mut rest = s;
+    // Copy runs of printable ASCII other than `"` and `\` in one go, and
+    // escape the rest a char at a time. Callback metadata is mostly such runs,
+    // and copying it char by char costs guest fuel on every install.
+    while let Some(i) = rest
+        .bytes()
+        .position(|b| !(0x20..0x7f).contains(&b) || b == b'"' || b == b'\\')
+    {
+        result.push_str(&rest[..i]);
+        // `i` is a char boundary: every byte before it is ASCII.
+        let Some(c) = rest[i..].chars().next() else {
+            break;
+        };
         match c {
             '"' => result.push_str("\\\""),
             '\\' => result.push_str("\\\\"),
@@ -3894,7 +3934,9 @@ pub fn escape_json_string(s: &str) -> String {
             }
             c => result.push(c),
         }
+        rest = &rest[i + c.len_utf8()..];
     }
+    result.push_str(rest);
     result
 }
 

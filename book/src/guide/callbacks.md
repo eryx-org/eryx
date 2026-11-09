@@ -396,6 +396,67 @@ sandbox = eryx.Sandbox(
 
 <!-- langtabs-end -->
 
+## Prefix Callbacks
+
+A prefix callback handles every dotted name under a prefix with one handler,
+which receives the full name the sandbox called. Use it for large or lazily
+discovered tool sets, where registering each tool separately would be costly:
+the sandbox installs one callback however many names it serves, and nothing
+under the prefix is looked up until it is called.
+
+<!-- langtabs-start -->
+
+```rust
+# extern crate eryx;
+# extern crate tokio;
+# extern crate serde_json;
+use eryx::{CallbackError, PrefixCallback, Sandbox};
+use serde_json::json;
+
+# #[tokio::main]
+# async fn main() -> Result<(), eryx::Error> {
+// Registers `mcp.grafana.*`.
+let tools = PrefixCallback::new("mcp.grafana", "Grafana MCP tools", |name, args| {
+    Box::pin(async move {
+        match name.as_str() {
+            "mcp.grafana.user_info" => Ok(json!({ "login": "admin" })),
+            "mcp.grafana.search-docs" => Ok(json!({ "query": args["query"] })),
+            _ => Err(CallbackError::NotFound(name)),
+        }
+    })
+});
+
+let sandbox = Sandbox::embedded().with_callback(tools).build()?;
+let output = sandbox
+    .execute(
+        r#"
+user = await mcp.grafana.user_info()
+docs = await mcp.grafana["search-docs"](query="alerts")
+print(user["login"], docs["query"])
+"#,
+    )
+    .await?;
+assert_eq!(output.stdout_text().trim(), "admin alerts");
+#     Ok(())
+# }
+```
+
+<!-- langtabs-end -->
+
+- A name registered as an ordinary callback is called directly, so exact
+  callbacks win over prefixes. Other names go to the longest matching prefix
+  (`mcp.grafana.*` before `mcp.*`); a name under no prefix fails as unknown.
+- Names under a prefix take keyword arguments only, since the sandbox has no
+  schema to bind positional ones to.
+- `list_callbacks()` lists the prefix (`mcp.grafana.*`) with its description,
+  not the names under it.
+- Any callback whose name ends in `.*` is a prefix callback, and gets the
+  invoked name through `Callback::invoke_named`. In the JavaScript package,
+  declare a callback named `mcp.grafana.*`: the callback handler already
+  receives every call's full name.
+- Journals, trace events and `max_callback_invocations` see the full name of
+  each call.
+
 ## MCP Tools as Callbacks
 
 Eryx can also bridge [MCP (Model Context Protocol)](https://modelcontextprotocol.io/) servers into the sandbox as callbacks. This lets sandboxed code call tools from external MCP servers (GitHub, filesystem, databases, etc.) using the same async callback mechanism.
