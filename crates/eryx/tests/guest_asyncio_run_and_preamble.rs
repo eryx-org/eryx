@@ -44,7 +44,7 @@ fn sandbox() -> Sandbox {
 
 fn script_error(result: Result<eryx::ExecuteResult, Error>) -> String {
     match result {
-        Err(e) if matches!(e.kind(), ErrorKind::PythonException(_)) => e.to_string(),
+        Err(e) if matches!(e.kind(), ErrorKind::PythonException { .. }) => e.to_string(),
         other => panic!("expected a script exception, got {other:?}"),
     }
 }

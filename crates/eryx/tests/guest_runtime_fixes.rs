@@ -32,7 +32,7 @@ fn network_sandbox(connect_timeout: Duration, io_timeout: Duration) -> Sandbox {
 
 fn assert_script_error(result: Result<eryx::ExecuteResult, Error>, needle: &str) {
     match result {
-        Err(e) if matches!(e.kind(), ErrorKind::PythonException(_)) => {
+        Err(e) if matches!(e.kind(), ErrorKind::PythonException { .. }) => {
             assert!(e.to_string().contains(needle), "{needle:?} not in: {e}");
         }
         other => panic!("expected a script exception containing {needle:?}, got {other:?}"),

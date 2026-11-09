@@ -3521,8 +3521,15 @@ impl PythonExecutor {
             }
             // The traceback is the error's stderr.
             Err(e) => {
-                if let ErrorKind::PythonException(traceback) = e.kind_mut() {
+                if let ErrorKind::PythonException {
+                    traceback,
+                    stdout,
+                    stderr,
+                } = e.kind_mut()
+                {
                     append_fd_stderr(traceback, &fd_stderr);
+                    stdout.extend(fd_stdout);
+                    stderr.extend(fd_stderr);
                 }
             }
         }
@@ -3697,14 +3704,18 @@ impl PythonExecutor {
             }
         })?;
 
-        // wasmtime_result is Result<Result<ExecuteOutput, String>, wasmtime::Error> from the WIT layer
+        // wasmtime_result is Result<Result<ExecuteOutput, ExecuteError>, wasmtime::Error> from the WIT layer
         // The outer Result is from wasmtime, the inner is the WIT-generated result
         // where ExecuteOutput is the WIT-generated record with stdout and stderr
         // The inner WIT Err is the guest's logical execution error — for real
         // input that is always an uncaught Python exception (its traceback).
         let wit_output = wasmtime_result
             .map_err(|e| ErrorKind::Execution(format!("WASM execution error: {e:?}")))?
-            .map_err(ErrorKind::PythonException)?;
+            .map_err(|failure| ErrorKind::PythonException {
+                traceback: failure.message,
+                stdout: failure.stdout,
+                stderr: failure.stderr,
+            })?;
 
         // Get peak memory from the store before it's dropped
         let peak_memory_bytes = store.data().memory_tracker.peak_memory_bytes();

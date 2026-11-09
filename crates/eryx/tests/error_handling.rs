@@ -308,7 +308,7 @@ async fn test_python_uncaught_exception_returns_traceback() {
         .await
         .expect_err("raise Exception() should be an error");
     assert!(
-        matches!(bare.kind(), eryx::ErrorKind::PythonException(_)),
+        matches!(bare.kind(), eryx::ErrorKind::PythonException { .. }),
         "a raise should be a PythonException, got: {bare:?}"
     );
     let bare = bare.to_string();
@@ -329,7 +329,7 @@ async fn test_python_uncaught_exception_returns_traceback() {
         .await
         .expect_err(r#"raise ValueError("boom") should be an error"#);
     assert!(
-        matches!(with_msg.kind(), eryx::ErrorKind::PythonException(_)),
+        matches!(with_msg.kind(), eryx::ErrorKind::PythonException { .. }),
         "a raise should be a PythonException, got: {with_msg:?}"
     );
     let with_msg = with_msg.to_string();
@@ -355,7 +355,7 @@ async fn test_null_bytes_in_code_is_not_python_exception() {
         "NUL bytes should be a sandbox Execution error, not PythonException, got: {err:?}"
     );
     assert!(
-        !matches!(err.kind(), eryx::ErrorKind::PythonException(_)),
+        !matches!(err.kind(), eryx::ErrorKind::PythonException { .. }),
         "NUL bytes must not be classified as a script exception"
     );
 }
@@ -739,4 +739,40 @@ async fn test_execution_timeout_interrupts_blocking_sleep() {
         "Timeout should interrupt blocking sleep promptly. Elapsed: {:?}",
         elapsed
     );
+}
+
+/// Output written before an uncaught exception travels with the error, with no
+/// output handler set. stderr is what the script wrote, then the traceback.
+#[tokio::test]
+async fn test_python_exception_keeps_stdout_and_stderr() {
+    let mut session = create_session().await;
+
+    let err = session
+        .execute(
+            "import sys\nprint('loading data')\nprint(40 + 2)\n\
+             print('warned', file=sys.stderr)\n1 / 0",
+        )
+        .run()
+        .await
+        .expect_err("division by zero should be an error");
+
+    assert_eq!(err.stdout(), Some(&b"loading data\n42\n"[..]));
+    let stderr = String::from_utf8(err.stderr().unwrap().to_vec()).unwrap();
+    assert!(stderr.starts_with("warned\nTraceback"), "{stderr}");
+    assert!(err.to_string().contains("ZeroDivisionError"), "{err}");
+}
+
+/// A failure that never ran the script has no output to report.
+#[tokio::test]
+async fn test_sandbox_failure_has_no_output() {
+    let mut session = create_session().await;
+
+    let err = session
+        .execute("print('x')\0")
+        .run()
+        .await
+        .expect_err("NUL bytes should be rejected");
+
+    assert_eq!(err.stdout(), None);
+    assert_eq!(err.stderr(), None);
 }

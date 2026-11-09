@@ -629,12 +629,22 @@ impl Sandbox {
     }
 
     /// Scrub secret placeholders from a Python traceback, which the guest
-    /// would otherwise print to stderr.
+    /// would otherwise print to stderr, and from the output captured with it.
     pub(crate) fn scrub_error(&self, mut error: Error) -> Error {
-        if self.scrub_stderr()
-            && let ErrorKind::PythonException(traceback) = error.kind_mut()
+        if let ErrorKind::PythonException {
+            traceback,
+            stdout,
+            stderr,
+        } = error.kind_mut()
         {
-            *traceback = crate::secrets::scrub_placeholders(traceback, &self.secrets);
+            use crate::secrets::{scrub_placeholders, scrub_placeholders_bytes};
+            if self.scrub_stderr() {
+                *traceback = scrub_placeholders(traceback, &self.secrets);
+                *stderr = scrub_placeholders_bytes(stderr, &self.secrets);
+            }
+            if self.scrub_stdout() {
+                *stdout = scrub_placeholders_bytes(stdout, &self.secrets);
+            }
         }
         error
     }

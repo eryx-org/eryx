@@ -6,7 +6,7 @@ use std::sync::{Arc, Mutex};
 
 use pyo3::exceptions::{PyException, PyRuntimeError, PyTimeoutError, PyValueError};
 use pyo3::prelude::*;
-use pyo3::types::PyDict;
+use pyo3::types::{PyBytes, PyDict};
 use pyo3::{PyErr, create_exception, import_exception};
 
 // Define custom exception types that mirror the Rust error hierarchy
@@ -110,7 +110,23 @@ fn kind_to_py(kind: eryx::ErrorKind) -> PyErr {
         eryx::ErrorKind::Execution(msg) => ExecutionError::new_err(msg),
         // A subclass of ExecutionError, so callers can tell a script error from
         // a sandbox failure while `except ExecutionError` still catches both.
-        eryx::ErrorKind::PythonException(msg) => PythonExceptionError::new_err(msg),
+        // `stdout` and `stderr` carry what the script wrote before it raised.
+        eryx::ErrorKind::PythonException {
+            traceback,
+            stdout,
+            stderr,
+            ..
+        } => {
+            let err = PythonExceptionError::new_err(traceback);
+            Python::attach(|py| {
+                let value = err.value(py);
+                // Setting an attribute on a fresh exception instance cannot
+                // realistically fail; if it does, the traceback still raises.
+                let _ = value.setattr("stdout", PyBytes::new(py, &stdout));
+                let _ = value.setattr("stderr", PyBytes::new(py, &stderr));
+            });
+            err
+        }
         eryx::ErrorKind::Callback(e) => ExecutionError::new_err(e.to_string()),
         eryx::ErrorKind::ResourceLimit(msg) => ResourceLimitError::new_err(msg),
         eryx::ErrorKind::Timeout(duration) => {
