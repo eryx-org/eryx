@@ -601,8 +601,9 @@ pub type PrefixHandler = Arc<
 /// directly, so exact callbacks win over prefixes. Any other dotted name goes
 /// to the longest registered prefix that contains it (`a.b.*` before `a.*`),
 /// and a name under no prefix fails as an unknown callback, as before. The
-/// handler should reject names it doesn't serve with
-/// [`CallbackError::NotFound`].
+/// name comes from the sandboxed code, so treat it as untrusted input: the
+/// handler should check it against the names it serves and reject the rest
+/// with [`CallbackError::NotFound`].
 ///
 /// Names under a prefix take keyword arguments only, since the guest has no
 /// schema to bind positional ones to. `list_callbacks()` lists the prefix
