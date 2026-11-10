@@ -136,3 +136,33 @@ async fn stateless_sandbox_has_tmp() {
         .expect("execution");
     assert_eq!(result.stdout_text().trim(), "/tmp");
 }
+
+/// Over-quota writes fail with `ENOSPC` when positional, but the guest's libc
+/// flattens stream write errors to `EIO` (eryx-org/eryx#762). Tighten the
+/// stream cases to `ENOSPC` once libc translates them.
+#[tokio::test]
+async fn write_over_quota_errnos() {
+    let out = run(
+        InMemoryStorage::with_max_bytes(64 * 1024),
+        r#"
+import errno, os
+for name, write in [
+    ('write', lambda f: f.write(b'x' * 200_000)),
+    ('os.write', lambda f: os.write(f.fileno(), b'x' * 200_000)),
+    ('os.pwrite', lambda f: os.pwrite(f.fileno(), b'x' * 200_000, 0)),
+]:
+    with open('/data/big_' + name, 'wb', buffering=0) as f:
+        try:
+            write(f)
+            print(name, 'ok')
+        except OSError as e:
+            print(name, errno.errorcode[e.errno])
+"#,
+    )
+    .await;
+    assert_eq!(
+        out.trim(),
+        "write EIO\nos.write EIO\nos.pwrite ENOSPC",
+        "unexpected output: {out}"
+    );
+}
