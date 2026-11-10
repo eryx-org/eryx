@@ -97,6 +97,11 @@ impl<'a> InProcessSession<'a> {
     /// timeout and invocation-count limits continue to be enforced by the
     /// callback handler.
     ///
+    /// With the `unstable-vfs` feature, a pooled sandbox given storage with
+    /// `PooledSandbox::with_vfs_storage` lends it to the session, so the caller
+    /// can restore and snapshot the session's files; otherwise the session has
+    /// its own empty storage.
+    ///
     /// # Errors
     ///
     /// Returns an error if the session cannot be initialized.
@@ -114,6 +119,27 @@ impl<'a> InProcessSession<'a> {
         // Construct the store with the sandbox's execution, memory, and VFS
         // limits so memory growth is constrained during instantiation, not
         // only execution. Callback limits remain handler-owned below.
+        #[cfg(feature = "unstable-vfs")]
+        let executor = if let Some(storage) = sandbox.vfs_storage() {
+            // Storage set with `PooledSandbox::with_vfs_storage`, so the caller
+            // can restore and snapshot the session's files.
+            SessionExecutor::new_with_vfs_config_and_limits(
+                sandbox.executor().clone(),
+                &callbacks,
+                eryx_vfs::ArcStorage::new(Arc::clone(storage)),
+                super::executor::VfsConfig::default(),
+                sandbox.resource_limits(),
+            )
+            .await?
+        } else {
+            SessionExecutor::new_with_limits(
+                sandbox.executor().clone(),
+                &callbacks,
+                sandbox.resource_limits(),
+            )
+            .await?
+        };
+        #[cfg(not(feature = "unstable-vfs"))]
         let executor = SessionExecutor::new_with_limits(
             sandbox.executor().clone(),
             &callbacks,

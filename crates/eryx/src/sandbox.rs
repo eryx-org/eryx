@@ -697,6 +697,12 @@ impl Sandbox {
         self.vfs_storage = Some(storage);
     }
 
+    /// The VFS storage set for this request, if any.
+    #[cfg(feature = "unstable-vfs")]
+    pub(crate) fn vfs_storage(&self) -> Option<&std::sync::Arc<dyn eryx_vfs::VfsStorage>> {
+        self.vfs_storage.as_ref()
+    }
+
     /// Clear per-request state so the sandbox can be returned to the pool.
     ///
     /// Restores the callbacks, handlers and resource limits the sandbox was
