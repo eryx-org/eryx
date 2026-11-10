@@ -79,7 +79,7 @@ async fn test_epoch_ticker_starts_lazily_and_is_shared() {
             .await;
         assert!(matches!(
             python_error.as_ref().map_err(|e| e.kind()),
-            Err(eryx::ErrorKind::PythonException(_))
+            Err(eryx::ErrorKind::PythonException { .. })
         ));
         assert_eq!(epoch_ticker_thread_count(), Some(1));
     }

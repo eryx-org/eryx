@@ -954,8 +954,12 @@ async fn call_execute_code(
     match &results[0] {
         Val::Result(Ok(_)) => Ok(()),
         Val::Result(Err(Some(error_val))) => {
+            // execute-error { message, stdout, stderr }
             let error_msg = match error_val.as_ref() {
-                Val::String(s) => s.clone(),
+                Val::Record(fields) => match fields.first() {
+                    Some((_, Val::String(s))) => s.clone(),
+                    other => format!("unexpected error message: {other:?}"),
+                },
                 other => format!("unexpected error value: {other:?}"),
             };
             Err(anyhow!(

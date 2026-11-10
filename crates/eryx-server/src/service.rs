@@ -1398,7 +1398,7 @@ impl CappedOutput {
 /// message belongs in the `error` field.
 fn classify_failure(error: &Error) -> FailureKind {
     match error.kind() {
-        ErrorKind::PythonException(_) => FailureKind::ScriptException,
+        ErrorKind::PythonException { .. } => FailureKind::ScriptException,
         ErrorKind::Timeout(_) => FailureKind::Timeout,
         ErrorKind::FuelExhausted { .. } => FailureKind::FuelExhausted,
         ErrorKind::Cancelled => FailureKind::Cancelled,

@@ -1424,16 +1424,25 @@ impl SessionExecutor {
                 }
             })
             .map_err(|kind| with_stats(kind.into()))?;
-        // wasmtime_result is Result<Result<ExecuteOutput, String>, wasmtime::Error>
+        // wasmtime_result is Result<Result<ExecuteOutput, ExecuteError>, wasmtime::Error>
         // The outer Result is from wasmtime, the inner is the WIT-generated result.
         // The inner Err is the guest's logical execution error — for real input
         // that is always an uncaught Python exception (its traceback).
         let wit_output = wasmtime_result
             .map_err(|e| ErrorKind::Execution(format!("WASM execution error: {e:?}")).into())
             .and_then(|output| {
-                output.map_err(|mut traceback| {
+                output.map_err(|failure| {
+                    let mut traceback = failure.message;
                     crate::wasm::append_fd_stderr(&mut traceback, &fd_stderr);
-                    Error::from(ErrorKind::PythonException(traceback))
+                    let mut stdout = failure.stdout;
+                    let mut stderr = failure.stderr;
+                    stdout.extend(&fd_stdout);
+                    stderr.extend(&fd_stderr);
+                    Error::from(ErrorKind::PythonException {
+                        traceback,
+                        stdout,
+                        stderr,
+                    })
                 })
             })
             .map_err(with_stats)?;

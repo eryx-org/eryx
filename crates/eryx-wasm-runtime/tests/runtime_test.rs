@@ -45,6 +45,24 @@ struct ExecuteOutput {
     result_error: String,
 }
 
+/// Mirror of the WIT `execute-error` record returned when `execute` fails.
+#[derive(Debug, Clone, wasmtime::component::ComponentType, wasmtime::component::Lift)]
+#[component(record)]
+struct ExecuteError {
+    #[component(name = "message")]
+    message: String,
+    #[component(name = "stdout")]
+    stdout: Vec<u8>,
+    #[component(name = "stderr")]
+    stderr: Vec<u8>,
+}
+
+impl std::fmt::Display for ExecuteError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
 /// Mirror of the WIT `state-snapshot` record returned by `snapshot-state`.
 #[derive(Debug, Clone, wasmtime::component::ComponentType, wasmtime::component::Lift)]
 #[component(record)]
@@ -417,13 +435,16 @@ async fn test_instantiate_component() -> Result<(), Box<dyn std::error::Error>> 
     println!("SUCCESS! Component instantiated");
 
     // Get the execute function
-    // execute: async func(code: string) -> result<execute-output, string>
+    // execute: async func(code: string) -> result<execute-output, execute-error>
     println!("Looking for execute function...");
 
     let execute = instance
-        .get_typed_func::<(String,), (Result<ExecuteOutput, String>,)>(&mut store, "[async]execute")
+        .get_typed_func::<(String,), (Result<ExecuteOutput, ExecuteError>,)>(
+            &mut store,
+            "[async]execute",
+        )
         .or_else(|_| {
-            instance.get_typed_func::<(String,), (Result<ExecuteOutput, String>,)>(
+            instance.get_typed_func::<(String,), (Result<ExecuteOutput, ExecuteError>,)>(
                 &mut store, "execute",
             )
         })?;
@@ -515,8 +536,24 @@ async fn test_instantiate_component() -> Result<(), Box<dyn std::error::Error>> 
         Err(error) => {
             println!("  Expected error: {error}");
             assert!(
-                error.contains("SyntaxError") || error.contains("syntax"),
+                error.message.contains("SyntaxError") || error.message.contains("syntax"),
                 "Error should mention syntax: {error}"
+            );
+        }
+    }
+
+    // Test 4b: a failed run keeps the output it captured before failing
+    println!("Test 4b: output before an exception...");
+    let (result,) = execute
+        .call_async(&mut store, ("print('before')\n1 / 0".to_string(),))
+        .await?;
+    match &result {
+        Ok(output) => panic!("Test 4b should have failed, but got: {output:?}"),
+        Err(error) => {
+            assert_eq!(String::from_utf8_lossy(&error.stdout), "before\n");
+            assert!(
+                String::from_utf8_lossy(&error.stderr).contains("ZeroDivisionError"),
+                "stderr should carry the traceback"
             );
         }
     }
@@ -534,7 +571,7 @@ async fn test_instantiate_component() -> Result<(), Box<dyn std::error::Error>> 
         Err(error) => {
             println!("  Expected error: {error}");
             assert!(
-                error.contains("NameError") || error.contains("undefined"),
+                error.message.contains("NameError") || error.message.contains("undefined"),
                 "Error should mention NameError: {error}"
             );
         }
@@ -657,7 +694,7 @@ async fn test_instantiate_component() -> Result<(), Box<dyn std::error::Error>> 
         Err(error) => {
             println!("  OK: Variable x is cleared (error: {error})");
             assert!(
-                error.contains("NameError") || error.contains("not defined"),
+                error.message.contains("NameError") || error.message.contains("not defined"),
                 "Error should indicate x is not defined: {error}"
             );
         }

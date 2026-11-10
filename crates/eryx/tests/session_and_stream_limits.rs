@@ -210,7 +210,7 @@ async fn session_captures_direct_fd_writes_per_execution() {
 const FD_WRITE_THEN_RAISE: &str = "import os\nos.write(2, b'fd-err\\n')\nraise ValueError('boom')";
 
 fn assert_traceback_has_fd_write(err: Error) {
-    let ErrorKind::PythonException(traceback) = err.kind() else {
+    let ErrorKind::PythonException { traceback, .. } = err.kind() else {
         panic!("expected a Python exception, got {err:?}");
     };
     assert!(traceback.contains("ValueError"), "{traceback:?}");
@@ -281,7 +281,7 @@ async fn python_exception_text_is_redacted() {
     let code = "import os\nraise RuntimeError(os.environ['API_KEY'])";
 
     let err = sandbox.execute(code).await.expect_err("raises");
-    let ErrorKind::PythonException(traceback) = err.kind() else {
+    let ErrorKind::PythonException { traceback, .. } = err.kind() else {
         panic!("expected a Python exception, got {err:?}");
     };
     assert_placeholder_redacted(traceback);
@@ -290,7 +290,7 @@ async fn python_exception_text_is_redacted() {
         .await
         .expect("session");
     let err = session.execute(code).await.expect_err("raises");
-    let ErrorKind::PythonException(traceback) = err.kind() else {
+    let ErrorKind::PythonException { traceback, .. } = err.kind() else {
         panic!("expected a Python exception, got {err:?}");
     };
     assert_placeholder_redacted(traceback);

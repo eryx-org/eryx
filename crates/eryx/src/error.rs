@@ -229,12 +229,24 @@ pub enum ErrorKind {
     #[error("execution failed: {0}")]
     Execution(String),
 
-    /// The script raised an uncaught Python exception. The contained string is
-    /// the traceback exactly as CPython would have written it to stderr. This is
+    /// The script raised an uncaught Python exception. `traceback` is the
+    /// traceback exactly as CPython would have written it to stderr. This is
     /// a *script* failure, not a sandbox failure: the runtime ran the code
     /// faithfully and the code itself errored.
-    #[error("{0}")]
-    PythonException(String),
+    ///
+    /// The output the script wrote before it raised is kept in `stdout` and
+    /// `stderr` (also via [`Error::stdout`] and [`Error::stderr`]); `stderr`
+    /// includes the traceback, as for a successful run.
+    #[error("{traceback}")]
+    #[non_exhaustive]
+    PythonException {
+        /// The traceback, as CPython would have written it to stderr.
+        traceback: String,
+        /// Raw stdout captured before the exception.
+        stdout: Vec<u8>,
+        /// Raw stderr captured up to the exception, including the traceback.
+        stderr: Vec<u8>,
+    },
 
     /// A callback error occurred during execution.
     #[error("callback error: {0}")]
@@ -295,6 +307,29 @@ pub enum ErrorKind {
     /// I/O error.
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
+}
+
+impl Error {
+    /// The stdout the script wrote before it raised, or `None` if the guest
+    /// did not get as far as running it (and for a timeout, fuel limit or
+    /// cancellation, which stop the guest before it can report its output).
+    #[must_use]
+    pub fn stdout(&self) -> Option<&[u8]> {
+        match &self.kind {
+            ErrorKind::PythonException { stdout, .. } => Some(stdout),
+            _ => None,
+        }
+    }
+
+    /// The stderr captured up to the exception, including the traceback;
+    /// `None` in the same cases as [`Error::stdout`].
+    #[must_use]
+    pub fn stderr(&self) -> Option<&[u8]> {
+        match &self.kind {
+            ErrorKind::PythonException { stderr, .. } => Some(stderr),
+            _ => None,
+        }
+    }
 }
 
 /// Name the eryx version recorded in a precompiled file.

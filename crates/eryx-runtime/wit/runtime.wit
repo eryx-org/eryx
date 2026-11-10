@@ -103,14 +103,27 @@ world sandbox {
         result-error: string,
     }
 
+    /// Why an execution failed, with the output captured before it did.
+    record execute-error {
+        /// The uncaught exception's traceback, or the reason the guest could
+        /// not run the code.
+        message: string,
+        /// Captured stdout up to the failure (raw bytes).
+        stdout: list<u8>,
+        /// Captured stderr up to the failure (raw bytes). For an uncaught
+        /// exception this includes the traceback, as on a successful run.
+        stderr: list<u8>,
+    }
+
     /// Execute Python code in the sandbox.
     ///
     /// The code can use top-level await directly:
     ///   result = await invoke("get_time", "{}")
     ///   print(result)
     ///
-    /// Returns captured stdout and stderr on success, or an error message on failure.
-    export execute: async func(code: string) -> result<execute-output, string>;
+    /// Returns captured stdout and stderr on success, or an error message and
+    /// the output captured so far on failure.
+    export execute: async func(code: string) -> result<execute-output, execute-error>;
 
     /// A captured Python session state.
     record state-snapshot {

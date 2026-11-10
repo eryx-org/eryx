@@ -306,7 +306,10 @@ async fn test_fuel_is_reported_when_script_raises() {
         .expect_err("raises");
 
     let fuel = |error: &eryx::Error| error.stats().and_then(|stats| stats.fuel_consumed);
-    assert!(matches!(heavy.kind(), eryx::ErrorKind::PythonException(_)));
+    assert!(matches!(
+        heavy.kind(),
+        eryx::ErrorKind::PythonException { .. }
+    ));
     assert!(
         fuel(&heavy) > fuel(&cheap) && fuel(&cheap).is_some(),
         "heavy work before raising must show up in the fuel: {:?} vs {:?}",

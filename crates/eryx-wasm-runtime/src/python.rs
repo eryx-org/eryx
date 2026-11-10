@@ -279,13 +279,34 @@ pub struct ExecuteOutput {
     pub result_error: String,
 }
 
+/// A failed execution: the message plus the output captured before it failed.
+#[derive(Debug, Clone, Default)]
+pub struct ExecuteFailure {
+    /// The traceback, or why the code could not run.
+    pub message: String,
+    /// Captured stdout up to the failure (raw bytes).
+    pub stdout: Vec<u8>,
+    /// Captured stderr up to the failure (raw bytes), including any traceback.
+    pub stderr: Vec<u8>,
+}
+
+impl From<String> for ExecuteFailure {
+    /// A failure before any user code ran, so there is no output.
+    fn from(message: String) -> Self {
+        Self {
+            message,
+            ..Self::default()
+        }
+    }
+}
+
 /// Result of executing Python code.
 #[derive(Debug)]
 pub enum ExecuteResult {
     /// Execution completed successfully with output (stdout and stderr).
     Complete(ExecuteOutput),
     /// Execution completed with an error.
-    Error(String),
+    Error(ExecuteFailure),
     /// Execution is pending, waiting for async callback.
     /// Contains the raw callback code from first_poll (WAIT | waitable_set << 4).
     Pending(u32),
@@ -3469,12 +3490,16 @@ unsafe fn execute_python_direct(
     let (preamble, code) = split_preamble(code);
     unsafe {
         match helpers.exec(code, trace_enabled, preamble) {
-            Err(e) => return ExecuteResult::Error(e),
+            Err(e) => return ExecuteResult::Error(e.into()),
             Ok(false) => {
-                let (_, stderr_output) = helpers.get_output();
+                let (stdout, stderr) = helpers.get_output();
                 let exception_msg = get_last_error_message();
                 helpers.discard_result();
-                return ExecuteResult::Error(format_execution_error(&stderr_output, exception_msg));
+                return ExecuteResult::Error(ExecuteFailure {
+                    message: format_execution_error(&stderr, exception_msg),
+                    stdout,
+                    stderr,
+                });
             }
             Ok(true) => {}
         }
@@ -3510,16 +3535,20 @@ unsafe fn execute_python_direct(
 /// - `Pending(waitable_set)` - Execution suspended, waiting for async callback
 pub fn execute_python(code: &str, trace_enabled: bool) -> ExecuteResult {
     if !is_python_initialized() {
-        return ExecuteResult::Error("Python not initialized".to_string());
+        return ExecuteResult::Error("Python not initialized".to_string().into());
     }
 
     // compile() rejects source containing NUL bytes; report it plainly.
     if code.contains('\0') {
-        return ExecuteResult::Error("Invalid code string: contains null bytes".to_string());
+        return ExecuteResult::Error(
+            "Invalid code string: contains null bytes"
+                .to_string()
+                .into(),
+        );
     }
 
     let Some(helpers) = EXEC_HELPERS.get() else {
-        return ExecuteResult::Error("execute helpers not initialized".to_string());
+        return ExecuteResult::Error("execute helpers not initialized".to_string().into());
     };
     // SAFETY: Python is initialized (checked above).
     unsafe { execute_python_direct(helpers, code, trace_enabled) }

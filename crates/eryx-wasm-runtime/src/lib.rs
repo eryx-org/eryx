@@ -1200,12 +1200,23 @@ enum HandleExportResult {
     Pending(u32),
 }
 
+/// Push `result<_, execute-error>`'s error case:
+/// `execute-error { message, stdout, stderr }`.
+fn push_execute_error(cx: &mut EryxCall, failure: python::ExecuteFailure) {
+    cx.stack.push(Value::Record(vec![
+        Value::String(failure.message),
+        Value::Bytes(failure.stdout),
+        Value::Bytes(failure.stderr),
+    ]));
+    cx.stack.push(Value::ResultDiscriminant(false));
+}
+
 /// Handle an export call by dispatching to the appropriate Python function.
 /// Returns whether the export completed or is pending.
 fn handle_export(wit: Wit, func_index: usize, cx: &mut EryxCall) -> HandleExportResult {
     match func_index {
         EXPORT_EXECUTE => {
-            // execute(code: string) -> result<string, string>
+            // execute(code: string) -> result<execute-output, execute-error>
             let code = cx.pop_string().to_string();
 
             // Set up callbacks from the host's current per-request state.
@@ -1217,7 +1228,7 @@ fn handle_export(wit: Wit, func_index: usize, cx: &mut EryxCall) -> HandleExport
                 Ok(()) => with_wit(wit, || {
                     python::execute_python(&code, options.python_tracing)
                 }),
-                Err(e) => python::ExecuteResult::Error(e),
+                Err(e) => python::ExecuteResult::Error(e.into()),
             };
 
             match result {
@@ -1233,9 +1244,8 @@ fn handle_export(wit: Wit, func_index: usize, cx: &mut EryxCall) -> HandleExport
                     cx.stack.push(Value::ResultDiscriminant(true));
                     HandleExportResult::Complete
                 }
-                python::ExecuteResult::Error(error) => {
-                    cx.push_string(error);
-                    cx.stack.push(Value::ResultDiscriminant(false));
+                python::ExecuteResult::Error(failure) => {
+                    push_execute_error(cx, failure);
                     HandleExportResult::Complete
                 }
                 python::ExecuteResult::Pending(callback_code) => {
@@ -1444,9 +1454,20 @@ impl Interpreter for EryxInterpreter {
                     // can't leak into a later successful run (mirrors the sync error
                     // path in execute_python).
                     unsafe { python::discard_result() };
-                    // Push error result
-                    cx.push_string(error);
-                    cx.stack.push(Value::ResultDiscriminant(false));
+                    let stdout = unsafe {
+                        python::get_python_variable_bytes("_eryx_output").unwrap_or_default()
+                    };
+                    let stderr = unsafe {
+                        python::get_python_variable_bytes("_eryx_errors").unwrap_or_default()
+                    };
+                    push_execute_error(
+                        &mut cx,
+                        python::ExecuteFailure {
+                            message: error,
+                            stdout,
+                            stderr,
+                        },
+                    );
                 } else {
                     // Get the output from Python (both stdout and stderr)
                     let stdout = unsafe {

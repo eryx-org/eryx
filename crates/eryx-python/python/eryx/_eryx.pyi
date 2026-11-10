@@ -933,9 +933,15 @@ class PythonExceptionError(ExecutionError):
 
     A subclass of ExecutionError, so ``except ExecutionError`` still catches
     it; catch this instead to tell a script error apart from a sandbox failure.
+
+    Attributes:
+        stdout: Raw bytes the code wrote to stdout before it raised.
+        stderr: Raw bytes captured from stderr up to the exception,
+            including the traceback.
     """
 
-    ...
+    stdout: bytes
+    stderr: bytes
 
 
 class InitializationError(EryxError):

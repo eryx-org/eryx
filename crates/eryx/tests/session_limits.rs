@@ -57,7 +57,7 @@ fn assert_memory_limit_error(error: Error) {
 #[cfg(feature = "unstable-vfs")]
 fn assert_vfs_quota_rejected(error: &Error) {
     assert!(
-        matches!(error.kind(), ErrorKind::PythonException(_))
+        matches!(error.kind(), ErrorKind::PythonException { .. })
             && error.to_string().contains("OSError"),
         "expected a guest-visible VFS quota rejection, got {error:?}"
     );
