@@ -690,10 +690,14 @@ impl Sandbox {
 
     /// Set VFS storage for this request.
     ///
-    /// When set, this replaces the default scrubbing storage created in `execute()`.
-    /// Used by the pool to inject pre-populated VFS storage (e.g., supporting files).
+    /// When set, this replaces the default scrubbing storage created in
+    /// `execute()`, and an [`InProcessSession`](crate::session::InProcessSession)
+    /// created from the sandbox uses it instead of its own, so the caller can
+    /// restore and snapshot the files. The caller's storage keeps its own size
+    /// limit. A pool clears it when the sandbox goes back; on a pooled sandbox
+    /// use `PooledSandbox::with_vfs_storage`.
     #[cfg(feature = "unstable-vfs")]
-    pub(crate) fn set_vfs_storage(&mut self, storage: std::sync::Arc<dyn eryx_vfs::VfsStorage>) {
+    pub fn set_vfs_storage(&mut self, storage: std::sync::Arc<dyn eryx_vfs::VfsStorage>) {
         self.vfs_storage = Some(storage);
     }
 

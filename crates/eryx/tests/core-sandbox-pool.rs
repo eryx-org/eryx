@@ -220,3 +220,36 @@ async fn session_uses_the_requests_vfs_storage() {
     assert_eq!(result.stdout_text().trim(), "restored!");
     assert_eq!(storage.read("/data/out.txt").await.unwrap(), b"restored!");
 }
+
+/// A built sandbox given storage with `set_vfs_storage` uses it for
+/// `execute` and for sessions, so a caller can keep files without a pool.
+#[cfg(feature = "unstable-vfs")]
+#[tokio::test]
+async fn built_sandbox_uses_its_vfs_storage() {
+    use eryx::session::{InProcessSession, Session};
+    use eryx::vfs::{InMemoryStorage, VfsStorage};
+    use std::sync::Arc;
+
+    let storage = Arc::new(InMemoryStorage::new());
+    storage.mkdir("/data").await.unwrap();
+    storage.write("/data/in.txt", b"restored").await.unwrap();
+    let mut sandbox = Sandbox::embedded().build().unwrap();
+    sandbox.set_vfs_storage(storage.clone());
+
+    let result = sandbox
+        .execute("open('/data/run.txt', 'w').write(open('/data/in.txt').read() + '!')")
+        .await
+        .unwrap();
+    assert!(result.stderr_text().is_empty(), "{}", result.stderr_text());
+    assert_eq!(storage.read("/data/run.txt").await.unwrap(), b"restored!");
+
+    let mut session = InProcessSession::new(&sandbox).await.unwrap();
+    session
+        .execute("open('/data/session.txt', 'w').write(open('/data/run.txt').read() + '?')")
+        .await
+        .unwrap();
+    assert_eq!(
+        storage.read("/data/session.txt").await.unwrap(),
+        b"restored!?"
+    );
+}
