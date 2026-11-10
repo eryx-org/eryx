@@ -62,6 +62,11 @@ print(session2.vfs_mount_path)  # "/myfiles"
 session2.execute("open('/myfiles/test.txt', 'w').write('custom path')")
 ```
 
+The same storage is also mounted at `/tmp`, so `tempfile` and code that
+writes to `/tmp` work. Files there are kept apart from the mount path's, under
+their own `/tmp/...` paths, but count towards the same size limit. A volume
+mounted at `/tmp` replaces it.
+
 ## File Operations
 
 The VFS supports standard Python file operations:

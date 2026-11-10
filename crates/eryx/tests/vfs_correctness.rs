@@ -80,3 +80,59 @@ print(sorted(os.listdir('/data/a')), sorted(os.listdir('/data/b')))
         "unexpected output: {out}"
     );
 }
+
+#[tokio::test]
+async fn tmp_is_writable_and_separate_from_data() {
+    let out = run(
+        InMemoryStorage::new(),
+        r#"
+import os, tempfile
+with tempfile.NamedTemporaryFile('w') as f:
+    f.write('scratch')
+    f.flush()
+    print(os.path.dirname(f.name))
+with open('/tmp/x', 'w') as f:
+    f.write('tmp')
+with open('/data/x', 'w') as f:
+    f.write('data')
+print(open('/tmp/x').read(), open('/data/x').read())
+"#,
+    )
+    .await;
+    assert_eq!(out.trim(), "/tmp\ntmp data");
+}
+
+#[tokio::test]
+async fn tmp_and_data_share_one_quota() {
+    // Room for the two mounts' entries and a little more, not for 8 KiB.
+    let out = run(
+        InMemoryStorage::with_max_bytes(4096),
+        r#"
+with open('/data/a', 'wb') as f:
+    f.write(b'x' * 3000)
+with open('/tmp/b', 'wb') as f:
+    f.write(b'x' * 100)
+print('small fits')
+try:
+    with open('/tmp/c', 'wb') as f:
+        f.write(b'x' * 3000)
+    print('fit')
+except OSError:
+    print('full')
+"#,
+    )
+    .await;
+    assert_eq!(out.trim(), "small fits\nfull");
+}
+
+#[tokio::test]
+async fn stateless_sandbox_has_tmp() {
+    let sandbox = eryx::Sandbox::embedded()
+        .build()
+        .expect("should build sandbox");
+    let result = sandbox
+        .execute("import tempfile\nprint(tempfile.gettempdir())")
+        .await
+        .expect("execution");
+    assert_eq!(result.stdout_text().trim(), "/tmp");
+}

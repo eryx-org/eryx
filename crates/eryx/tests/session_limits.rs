@@ -216,12 +216,12 @@ async fn in_process_session_applies_memory_limit_at_instantiation() {
     assert_memory_limit_error(error);
 }
 
-/// A VFS size limit with room for `/data` and a four-byte `/data/file`, so a
-/// fifth byte doesn't fit.
+/// A VFS size limit with room for the `/data` and `/tmp` mounts and a
+/// four-byte `/data/file`, so a fifth byte doesn't fit.
 #[cfg(feature = "unstable-vfs")]
 fn room_for_four_byte_file() -> u64 {
     let entry = |path: &str| eryx::vfs::ENTRY_OVERHEAD_BYTES + path.len() as u64;
-    entry("/data") + entry("/data/file") + 4
+    entry("/data") + entry("/tmp") + entry("/data/file") + 4
 }
 
 #[cfg(feature = "unstable-vfs")]
