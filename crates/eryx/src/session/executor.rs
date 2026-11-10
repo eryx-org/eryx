@@ -454,9 +454,15 @@ impl VolumeMount {
     }
 }
 
+/// Where the VFS storage is also mounted, as a scratch directory.
+#[cfg(feature = "unstable-vfs")]
+const TMP_MOUNT_PATH: &str = "/tmp";
+
 /// Configuration for the virtual filesystem (VFS) in a session.
 ///
-/// This allows customizing the VFS mount path and permissions.
+/// This allows customizing the VFS mount path and permissions. The same
+/// storage is also mounted at `/tmp`, with the same permissions, unless the
+/// mount path or a volume is already there.
 #[cfg(feature = "unstable-vfs")]
 #[derive(Debug, Clone)]
 #[non_exhaustive]
@@ -675,6 +681,18 @@ pub(crate) fn build_hybrid_vfs_context(
         vfs_config.dir_perms,
         vfs_config.file_perms,
     );
+
+    // Serve /tmp from the same storage, so `tempfile` and code that writes
+    // there work. Paths are stored in full, so /tmp and the mount stay separate
+    // trees sharing one quota. A volume (or the mount itself) at /tmp wins.
+    let tmp_taken = vfs_config.mount_path == TMP_MOUNT_PATH
+        || vfs_config
+            .volumes
+            .iter()
+            .any(|volume| volume.guest_path == TMP_MOUNT_PATH);
+    if !tmp_taken {
+        ctx.add_vfs_preopen(TMP_MOUNT_PATH, vfs_config.dir_perms, vfs_config.file_perms);
+    }
 
     // Add real filesystem preopens that mirror the WASI preopens
     if let Some(stdlib_path) = executor.python_stdlib_path() {

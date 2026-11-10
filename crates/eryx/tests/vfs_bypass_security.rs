@@ -1507,13 +1507,14 @@ import os
 with open('/data/myfile.txt', 'w') as f:
     f.write('sensitive data')
 
-# Attack: Try to rename/move file outside the sandbox
+# Attack: Try to rename/move file outside the sandbox. (/tmp is the
+# sandbox's own storage, like /data, so it isn't a target.)
 escape_targets = [
     '/etc/cron.d/evil',
-    '/tmp/escaped.txt',
-    '/data/../tmp/escaped.txt',
-    '/data/../../../tmp/escaped.txt',
-    '../../../tmp/escaped.txt',
+    '/var/escaped.txt',
+    '/data/../var/escaped.txt',
+    '/data/../../../var/escaped.txt',
+    '../../../var/escaped.txt',
 ]
 
 for target in escape_targets:
@@ -1536,7 +1537,7 @@ import shutil
 try:
     with open('/data/moveme.txt', 'w') as f:
         f.write('data')
-    shutil.move('/data/moveme.txt', '/tmp/escaped.txt')
+    shutil.move('/data/moveme.txt', '/var/escaped.txt')
     print("SECURITY ISSUE: shutil.move escaped sandbox")
 except (OSError, PermissionError, FileNotFoundError) as e:
     print(f"EXPECTED: shutil.move blocked: {type(e).__name__}")

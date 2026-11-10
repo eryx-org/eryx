@@ -186,3 +186,37 @@ async fn pool_try_acquire_never_creates_a_sandbox() {
     assert!(pool.try_acquire().unwrap().is_none());
     assert_eq!(pool.stats().total_creations, 0);
 }
+
+/// A session on a pooled sandbox reads and writes the storage set with
+/// `with_vfs_storage`, so the caller can restore and save its files.
+#[cfg(feature = "unstable-vfs")]
+#[tokio::test]
+async fn session_uses_the_requests_vfs_storage() {
+    use eryx::session::{InProcessSession, Session};
+    use eryx::vfs::{InMemoryStorage, VfsStorage};
+    use std::sync::Arc;
+
+    let pool = SandboxPool::new(Sandbox::embedded(), small_pool())
+        .await
+        .unwrap();
+    let storage = Arc::new(InMemoryStorage::new());
+    storage.mkdir("/data").await.unwrap();
+    storage.write("/data/in.txt", b"restored").await.unwrap();
+
+    let sandbox = pool
+        .acquire()
+        .await
+        .unwrap()
+        .with_vfs_storage(storage.clone());
+    let mut session = InProcessSession::new(&sandbox).await.unwrap();
+    session
+        .execute("open('/data/out.txt', 'w').write(open('/data/in.txt').read() + '!')")
+        .await
+        .unwrap();
+    let result = session
+        .execute("print(open('/data/out.txt').read())")
+        .await
+        .unwrap();
+    assert_eq!(result.stdout_text().trim(), "restored!");
+    assert_eq!(storage.read("/data/out.txt").await.unwrap(), b"restored!");
+}
