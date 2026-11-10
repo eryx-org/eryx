@@ -294,6 +294,34 @@ result = session.execute("print(open('/data/persist.txt').read())")
 print(result.stdout_text)  # "before reset"
 ```
 
+## Bringing Your Own Storage (Rust)
+
+With the `unstable-vfs` feature, a Rust caller can give a sandbox the storage
+for its next executions, for example to restore files saved from an earlier
+run and save them again afterwards. `execute()` and any `InProcessSession`
+created from the sandbox use it instead of a fresh, empty one:
+
+```rust,ignore
+use std::sync::Arc;
+use eryx::Sandbox;
+use eryx::vfs::{InMemoryStorage, VfsStorage};
+
+let storage = Arc::new(InMemoryStorage::new());
+storage.mkdir("/data").await?;
+storage.write("/data/input.txt", b"saved earlier").await?;
+
+let mut sandbox = Sandbox::embedded().build()?;
+sandbox.set_vfs_storage(storage.clone());
+sandbox.execute("open('/data/output.txt', 'w').write('new')").await?;
+
+let saved = storage.snapshot().await; // e.g. to persist it
+```
+
+The storage keeps its own size limit (`InMemoryStorage::with_max_bytes`);
+`max_vfs_bytes` only applies to storage eryx creates. On a pooled sandbox,
+use `PooledSandbox::with_vfs_storage`, which the pool clears when the sandbox
+goes back.
+
 ## SQLite Databases in VFS
 
 The VFS supports SQLite databases, allowing persistent structured data:
