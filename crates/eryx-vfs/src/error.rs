@@ -82,6 +82,12 @@ pub enum VfsError {
     #[error("resource busy: {0}")]
     Busy(String),
 
+    /// A rename between two mounts with different backends (two storages,
+    /// or a storage and the host filesystem). Guests see `EXDEV`, as for a
+    /// rename between filesystems, so code that copies instead can tell.
+    #[error("cross-device rename: {0}")]
+    CrossDevice(String),
+
     /// The operation would grow the filesystem past its size limit.
     ///
     /// In-memory storage keeps file contents in host memory, so an unbounded

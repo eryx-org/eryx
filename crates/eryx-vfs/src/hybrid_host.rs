@@ -954,8 +954,8 @@ impl<S: VfsStorage + Clone + 'static> types::HostDescriptor for HybridVfsState<'
                     return Err(crate::VfsError::PermissionDenied("mutate".to_string()).into());
                 }
                 if old_vfs.storage != new_vfs.storage {
-                    return Err(crate::VfsError::PermissionDenied(
-                        "cross-filesystem rename not supported".to_string(),
+                    return Err(crate::VfsError::CrossDevice(
+                        "rename between storages".to_string(),
                     )
                     .into());
                 }
@@ -982,10 +982,7 @@ impl<S: VfsStorage + Clone + 'static> types::HostDescriptor for HybridVfsState<'
             }
             _ => {
                 // Cross-filesystem rename not supported
-                Err(crate::VfsError::PermissionDenied(
-                    "cross-filesystem rename not supported".to_string(),
-                )
-                .into())
+                Err(crate::VfsError::CrossDevice("rename between filesystems".to_string()).into())
             }
         }
     }
@@ -1459,7 +1456,7 @@ mod tests {
             .await;
         assert!(matches!(
             err.map_err(vfs_err),
-            Err(crate::VfsError::PermissionDenied(_))
+            Err(crate::VfsError::CrossDevice(_))
         ));
         state
             .rename_at(borrow(&src), "b.py".into(), borrow(&repo), "b.py".into())
@@ -1507,6 +1504,13 @@ mod tests {
         );
         assert_eq!(mounted.read("/mnt/f").await.unwrap(), b"x");
         assert!(!mounted.exists("/mnt/new").await.unwrap());
+
+        // Mounting doesn't create a read-only storage's directory either.
+        let empty = storage();
+        state
+            .ctx
+            .add_storage_preopen("/ro", empty.clone(), DirPerms::READ, FilePerms::READ);
+        assert!(!empty.exists("/ro").await.unwrap());
     }
 
     fn real_ctx(

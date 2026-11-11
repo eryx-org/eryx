@@ -329,12 +329,12 @@ async fn volumes_sharing_a_path_are_refused() {
 
     let mut sandbox = Sandbox::embedded().build().unwrap();
     sandbox.add_volume(VolumeMount::storage(
-        "/data",
+        "/data/",
         Arc::new(InMemoryStorage::new()),
     ));
     let err = sandbox.execute("pass").await.unwrap_err();
     assert!(
-        err.to_string().contains("more than one mount at /data"),
+        err.to_string().contains("more than one mount at /data/"),
         "{err}"
     );
 }

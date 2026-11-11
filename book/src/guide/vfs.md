@@ -571,9 +571,13 @@ let sandbox = Sandbox::embedded()
     .build()?;
 ```
 
-The storage's own limits apply, not `max_vfs_bytes` or `max_file_size`.
-Renaming a file between a storage volume and another mount fails, as a rename
-between filesystems does (Python's `shutil.move` copies instead).
+The storage's own limits apply, not `max_vfs_bytes` or `max_file_size`, and
+files written to it aren't [scrubbed of secrets](./secrets.md), as with storage
+given to `set_vfs_storage`. A writable volume's directory is created in the
+storage if it's missing; a read-only volume's storage is never changed, so it
+should already contain the directory. Renaming a file between a storage volume
+and another mount fails with `EXDEV`, as a rename between filesystems does
+(Python's `shutil.move` copies instead).
 
 Volumes can also be added for a single request, alongside the built ones: with
 `Sandbox::add_volume`, or `PooledSandbox::with_volume` on a pooled sandbox,

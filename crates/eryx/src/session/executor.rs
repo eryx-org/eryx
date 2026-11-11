@@ -516,7 +516,7 @@ pub struct VfsConfig {
     pub dir_perms: eryx_vfs::DirPerms,
     /// File permissions for files in the VFS mount.
     pub file_perms: eryx_vfs::FilePerms,
-    /// Host filesystem volume mounts.
+    /// Volume mounts, from the host filesystem or a storage.
     pub volumes: Vec<VolumeMount>,
 }
 
@@ -559,14 +559,14 @@ impl VfsConfig {
         self
     }
 
-    /// Add a host filesystem volume mount.
+    /// Add a volume mount.
     #[must_use]
     pub fn with_volume(mut self, volume: VolumeMount) -> Self {
         self.volumes.push(volume);
         self
     }
 
-    /// Add multiple host filesystem volume mounts.
+    /// Add multiple volume mounts.
     #[must_use]
     pub fn with_volumes(mut self, volumes: impl IntoIterator<Item = VolumeMount>) -> Self {
         self.volumes.extend(volumes);
@@ -714,6 +714,21 @@ pub(crate) fn build_hybrid_vfs_context(
     vfs_config: &VfsConfig,
     max_open_host_files: Option<usize>,
 ) -> std::result::Result<eryx_vfs::HybridVfsCtx<eryx_vfs::ArcStorage>, Error> {
+    // Two mounts at one path would leave the guest choosing between them.
+    // Checked before mounting anything, since mounting a storage can create
+    // its directory.
+    let mount_key = |path: &str| path.trim_end_matches('/').to_string();
+    let mut paths = std::collections::HashSet::from([mount_key(&vfs_config.mount_path)]);
+    for volume in &vfs_config.volumes {
+        if !paths.insert(mount_key(&volume.guest_path)) {
+            return Err(ErrorKind::Initialization(format!(
+                "more than one mount at {}",
+                volume.guest_path
+            ))
+            .into());
+        }
+    }
+
     let mut ctx = eryx_vfs::HybridVfsCtx::new(vfs_storage).with_max_open_host_files(
         max_open_host_files.unwrap_or(eryx_vfs::DEFAULT_MAX_OPEN_HOST_FILES),
     );
@@ -763,19 +778,7 @@ pub(crate) fn build_hybrid_vfs_context(
     }
 
     // Add user-specified volume mounts
-    for (i, volume) in vfs_config.volumes.iter().enumerate() {
-        // Two mounts at one path would leave the guest choosing between them.
-        if volume.guest_path == vfs_config.mount_path
-            || vfs_config.volumes[..i]
-                .iter()
-                .any(|other| other.guest_path == volume.guest_path)
-        {
-            return Err(ErrorKind::Initialization(format!(
-                "more than one mount at {}",
-                volume.guest_path
-            ))
-            .into());
-        }
+    for volume in &vfs_config.volumes {
         let (dir_perms, file_perms) = if volume.read_only {
             (DirPerms::READ, FilePerms::READ)
         } else {

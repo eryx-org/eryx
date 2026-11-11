@@ -685,7 +685,11 @@ impl<S: VfsStorage + Clone> HybridVfsCtx<S> {
     /// The guest sees `guest_path` and everything beneath it in `storage`,
     /// under their full guest paths (as with the context's storage), so one
     /// storage can back several preopens. Renames between it and another
-    /// storage fail, like renames between filesystems.
+    /// storage fail with `EXDEV`, like renames between filesystems.
+    ///
+    /// `guest_path` is created in a writable `storage` if it's missing; a
+    /// read-only one (`dir_perms` without `MUTATE`) is left untouched, so it
+    /// should already contain it.
     pub fn add_storage_preopen(
         &mut self,
         guest_path: impl Into<String>,
@@ -705,10 +709,13 @@ impl<S: VfsStorage + Clone> HybridVfsCtx<S> {
         dir_perms: DirPerms,
         file_perms: FilePerms,
     ) {
-        // Ensure the directory exists in storage.
+        // Ensure the directory exists in storage, unless the guest can't
+        // change it: then neither should we.
         // We use the sync method since this is called during setup before
         // the async runtime might be fully available.
-        if let Err(e) = self.storages[storage].mkdir_sync(&guest_path) {
+        if dir_perms.contains(DirPerms::MUTATE)
+            && let Err(e) = self.storages[storage].mkdir_sync(&guest_path)
+        {
             tracing::warn!(
                 "Failed to create VFS preopen directory {}: {}",
                 guest_path,
