@@ -1,5 +1,5 @@
 """The hosted API: HTTP for plain runs and sessions, ``/v1/stream`` for runs
-with callbacks."""
+with callbacks or volumes."""
 
 from __future__ import annotations
 
@@ -15,6 +15,7 @@ import websockets
 from websockets.protocol import State
 
 from ._callbacks import CallbackDict, invoke
+from ._mounts import Mount, answer as answer_fs
 from ._errors import (
     APIConnectionError,
     APIError,
@@ -125,16 +126,21 @@ class Connection:
         raise _error_response(response)
 
     async def stream(
-        self, body: dict[str, Any], callbacks: dict[str, CallbackDict]
+        self,
+        body: dict[str, Any],
+        callbacks: dict[str, CallbackDict],
+        mounts: Optional[dict[str, Mount]] = None,
     ) -> dict[str, Any]:
         """Run ``body`` (an ``execute`` message) over ``/v1/stream``, answering
-        the code's callbacks, and return the ``completed`` message.
+        the code's callbacks and file operations on ``mounts``, and return the
+        ``completed`` message.
 
         A socket goes back to the pool after a run that completed or was
         refused (the server keeps it open), and is dropped otherwise. A run on
         a kept socket that fails isn't retried: the server may have started
         it.
         """
+        mounts = mounts or {}
         url = "ws" + self.base_url.removeprefix("http") + "/v1/stream"
         message = {
             "type": "execute",
@@ -144,6 +150,8 @@ class Connection:
                 for name, cb in callbacks.items()
             ],
         }
+        if mounts:
+            message["mounts"] = [{"path": path} for path in mounts]
         pool = self._pool()
         ws = pool.take()
         try:
@@ -155,7 +163,7 @@ class Connection:
                     max_size=None,
                 )
             await ws.send(json.dumps(message))
-            completed = await _serve(ws, callbacks)
+            completed = await _serve(ws, callbacks, mounts)
         except APIConnectionError:
             if ws is not None:
                 _drop(ws)
@@ -181,9 +189,11 @@ class Connection:
 
 
 async def _serve(
-    ws: websockets.ClientConnection, callbacks: dict[str, CallbackDict]
+    ws: websockets.ClientConnection,
+    callbacks: dict[str, CallbackDict],
+    mounts: dict[str, Mount],
 ) -> dict[str, Any]:
-    """Answer callbacks until the run completes."""
+    """Answer callbacks and file operations until the run completes."""
     lock = asyncio.Lock()
     tasks: set[asyncio.Task[None]] = set()
 
@@ -201,6 +211,17 @@ async def _serve(
             except websockets.ConnectionClosed:
                 pass  # the run is over; `_serve` reports why
 
+    async def answer_file(message: dict[str, Any]) -> None:
+        reply, data = await asyncio.to_thread(answer_fs, mounts, message)
+        # The data must come straight after its reply
+        async with lock:
+            try:
+                await ws.send(json.dumps(reply))
+                if data:
+                    await ws.send(data)
+            except websockets.ConnectionClosed:
+                pass
+
     try:
         async for raw in ws:
             message = json.loads(raw)
@@ -209,6 +230,10 @@ async def _serve(
                 task = asyncio.create_task(
                     answer(message["call_id"], message["name"], message.get("args") or {})
                 )
+                tasks.add(task)
+                task.add_done_callback(tasks.discard)
+            elif kind == "fs":
+                task = asyncio.create_task(answer_file(message))
                 tasks.add(task)
                 task.add_done_callback(tasks.discard)
             elif kind == "completed":

@@ -10,11 +10,13 @@ between running sandboxes yourself and on eryx.run is an import:
     4
 
 Callbacks work as in pyeryx: sandboxed code ``await``s them, and they run
-here, in your process.
+here, in your process. So do ``volumes``: their directories are served from
+here, read-only, as the code reads them.
 """
 
 from ._callbacks import CallbackDict, CallbackRegistry
 from ._client import DEFAULT_URL, PROTOCOL
+from ._mounts import DEFAULT_HIDDEN
 from ._errors import (
     APIConnectionError,
     APIError,
@@ -45,6 +47,7 @@ __all__ = [
     "CallbackRegistry",
     "CancelledError",
     "ConflictError",
+    "DEFAULT_HIDDEN",
     "DEFAULT_URL",
     "EryxError",
     "ExecuteResult",

@@ -11,6 +11,7 @@ from typing import Any, Optional, TypeVar
 
 from ._callbacks import Callbacks, normalize
 from ._client import Connection, finish
+from ._mounts import DEFAULT_HIDDEN, mounts
 from ._errors import ConflictError
 from ._types import ExecuteResult, ResourceLimits
 
@@ -26,7 +27,6 @@ _LOCAL_ONLY = {
     "scrub_stderr": "secrets are scrubbed by their network policy",
     "scrub_result": "secrets are scrubbed by their network policy",
     "scrub_files": "secrets are scrubbed by their network policy",
-    "volumes": "mounting local directories isn't supported yet",
     "on_stdout": "streaming output isn't supported yet",
     "on_stderr": "streaming output isn't supported yet",
 }
@@ -73,6 +73,8 @@ class _Runner:
         connections: Optional[Sequence[str]],
         network_policies: Optional[Sequence[str]],
         result_variable: Optional[str],
+        volumes: Optional[Sequence[Sequence[Any]]],
+        hidden: Optional[Sequence[str]],
         api_key: Optional[str],
         base_url: Optional[str],
         local_only: dict[str, Any],
@@ -86,6 +88,7 @@ class _Runner:
             raise ValueError("eryx.run captures the `result` variable only")
         self._connection = Connection(api_key, base_url)
         self._callbacks = normalize(callbacks)
+        self._mounts = mounts(volumes, DEFAULT_HIDDEN if hidden is None else hidden)
         self._limits = resource_limits or ResourceLimits()
         self._options: dict[str, Any] = {}
         if environment is not None:
@@ -97,6 +100,12 @@ class _Runner:
 
     def _body(self, code: str) -> dict[str, Any]:
         return {"code": code, **self._limits.hosted_request(), **self._options}
+
+    @property
+    def _streams(self) -> bool:
+        """Whether runs need ``/v1/stream``: callbacks and volumes are served
+        over it."""
+        return bool(self._callbacks or self._mounts)
 
     @staticmethod
     def _check_cancel(cancel: object) -> None:
@@ -147,6 +156,13 @@ class Sandbox(_Runner):
     ``network_policies`` pick an uploaded environment, MCP connections and
     network policies, as in the API. Each ``execute`` is a fresh run.
 
+    ``volumes`` takes pyeryx's ``(host_path, guest_path, read_only)`` tuples,
+    read-only and under ``/mnt/`` for now. The directory is served from this
+    process as the code reads it, and the code can ask for any path in it, so
+    it never gets ``..``, symlinks out of the directory, or files matching
+    ``hidden`` (default ``DEFAULT_HIDDEN``: ``.env``, keys, ``.git/config``
+    and so on; ``hidden=()`` serves everything).
+
     Example:
         >>> import eryx_run as eryx
         >>> sandbox = eryx.Sandbox()
@@ -163,6 +179,8 @@ class Sandbox(_Runner):
         environment: Optional[str] = None,
         connections: Optional[Sequence[str]] = None,
         network_policies: Optional[Sequence[str]] = None,
+        volumes: Optional[Sequence[Sequence[Any]]] = None,
+        hidden: Optional[Sequence[str]] = None,
         api_key: Optional[str] = None,
         base_url: Optional[str] = None,
         **local_only: Any,
@@ -174,6 +192,8 @@ class Sandbox(_Runner):
             connections=connections,
             network_policies=network_policies,
             result_variable=result_variable,
+            volumes=volumes,
+            hidden=hidden,
             api_key=api_key,
             base_url=base_url,
             local_only=local_only,
@@ -194,8 +214,8 @@ class Sandbox(_Runner):
         """Like ``execute``, from asyncio."""
         self._check_cancel(cancel)
         body = self._body(code)
-        if self._callbacks:
-            return finish(await self._connection.stream(body, self._callbacks))
+        if self._streams:
+            return finish(await self._connection.stream(body, self._callbacks, self._mounts))
         return finish(await self._connection.request("POST", "/v1/execute", body))
 
 
@@ -224,6 +244,8 @@ class Session(_Runner):
         environment: Optional[str] = None,
         connections: Optional[Sequence[str]] = None,
         network_policies: Optional[Sequence[str]] = None,
+        volumes: Optional[Sequence[Sequence[Any]]] = None,
+        hidden: Optional[Sequence[str]] = None,
         ttl_secs: Optional[int] = None,
         id: Optional[str] = None,
         api_key: Optional[str] = None,
@@ -237,6 +259,8 @@ class Session(_Runner):
             connections=connections,
             network_policies=network_policies,
             result_variable=result_variable,
+            volumes=volumes,
+            hidden=hidden,
             api_key=api_key,
             base_url=base_url,
             local_only=local_only,
@@ -287,9 +311,9 @@ class Session(_Runner):
         self._check_cancel(cancel)
         session_id = await self._ensure()
         body = self._body(code)
-        if self._callbacks:
+        if self._streams:
             response = await self._connection.stream(
-                {**body, "session_id": session_id}, self._callbacks
+                {**body, "session_id": session_id}, self._callbacks, self._mounts
             )
         else:
             response = await self._connection.request(

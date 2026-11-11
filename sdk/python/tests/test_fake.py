@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import json
 from collections.abc import AsyncIterator, Callable
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -16,6 +17,7 @@ import pytest
 import websockets
 
 import eryx_run as eryx
+from eryx_run._mounts import answer, mounts
 
 KEY = "eryx_test_key"
 
@@ -559,3 +561,110 @@ async def test_sync_calls_from_async_callbacks_are_refused(
     # The callback runs on the sync loop when the outer run is sync
     with pytest.raises(RuntimeError, match="_async"):
         eryx._sandbox._run_sync(call_sync())
+
+
+# -- Volumes --------------------------------------------------------------------
+
+
+
+@pytest.fixture
+def repo(tmp_path: Path) -> Path:
+    """A directory to mount, with secrets beside it and in it."""
+    root = tmp_path / "repo"
+    (root / "src").mkdir(parents=True)
+    (root / "README.md").write_text("# hello\n")
+    (root / "src" / "big.bin").write_bytes(bytes(100_000))
+    (root / ".env").write_text("TOKEN=not-a-real-token\n")
+    (root / ".git").mkdir()
+    (root / ".git" / "config").write_text("[remote]\n")
+    (root / ".git" / "HEAD").write_text("ref: refs/heads/main\n")
+    (tmp_path / "outside.txt").write_text("outside\n")
+    (root / "out").symlink_to(tmp_path / "outside.txt")
+    (root / "env-link").symlink_to(root / ".env")
+    (root / "readme-link").symlink_to(root / "README.md")
+    return root
+
+
+def fs(served: Any, op: str, path: str, **extra: Any) -> tuple[dict[str, Any], bytes]:
+    message = {"type": "fs", "op_id": "1", "op": op, "mount": "/mnt/repo", "path": path, **extra}
+    return answer(served, message)
+
+
+def test_volumes_serve_files_and_listings(repo: Path) -> None:
+    served = mounts([(str(repo), "/mnt/repo", True)], eryx.DEFAULT_HIDDEN)
+
+    reply, data = fs(served, "list", "")
+    names = [e["name"] for e in reply["entries"]]
+    assert names == [".git", "README.md", "readme-link", "src"]
+    readme = next(e for e in reply["entries"] if e["name"] == "README.md")
+    assert readme["inline"] and readme["size"] == 8 and not readme["is_dir"]
+    # Inline contents come in the entries' order
+    assert data == b"# hello\n# hello\n" and reply["data"] == len(data)
+
+    reply, _ = fs(served, "stat", "src/big.bin")
+    assert reply["stat"]["size"] == 100_000
+    reply, data = fs(served, "read", "src/big.bin", offset=99_990, len=100)
+    assert data == bytes(10) and reply["data"] == 10
+    reply, _ = fs(served, "list", "src")
+    [big] = reply["entries"]
+    assert "inline" not in big
+    assert fs(served, "list", ".git")[0]["entries"][0]["name"] == "HEAD"
+    assert fs(served, "list", "README.md")[0]["error"] == "not_a_directory"
+    assert fs(served, "stat", "missing")[0]["error"] == "not_found"
+
+
+def test_volumes_refuse_what_they_mustnt_serve(repo: Path) -> None:
+    served = mounts([(str(repo), "/mnt/repo", True)], eryx.DEFAULT_HIDDEN)
+    for path in ["..", "../outside.txt", "src/../../outside.txt", "/etc/passwd", "./README.md", "src//big.bin"]:
+        assert fs(served, "stat", path)[0]["error"] == "permission_denied", path
+    # Out of the mount, hidden, or a link to a hidden file: as if missing
+    for path in ["out", ".env", ".git/config", "env-link"]:
+        reply, data = fs(served, "read", path, offset=0, len=100)
+        assert reply["error"] == "not_found" and data == b"", path
+    assert answer(served, {"op_id": "1", "op": "stat", "mount": "/mnt/other", "path": ""})[0][
+        "error"
+    ] == "not_found"
+
+    everything = mounts([(str(repo), "/mnt/repo", True)], ())
+    assert fs(everything, "read", ".env", offset=0, len=5)[1] == b"TOKEN"
+    assert fs(everything, "stat", "out")[0]["error"] == "not_found"
+
+
+def test_volumes_are_read_only_under_mnt(repo: Path) -> None:
+    with pytest.raises(ValueError, match="read-only"):
+        sandbox(volumes=[(str(repo), "/mnt/repo", False)])
+    with pytest.raises(ValueError, match="/mnt/"):
+        sandbox(volumes=[(str(repo), "/data/repo", True)])
+    with pytest.raises(ValueError, match="directory"):
+        sandbox(volumes=[(str(repo / "README.md"), "/mnt/readme", True)])
+
+
+async def test_volumes_are_served_over_the_stream(repo: Path) -> None:
+    seen: dict[str, Any] = {}
+
+    async def serve(ws: websockets.ServerConnection) -> None:
+        seen["execute"] = json.loads(await ws.recv())
+        for i, (op, path) in enumerate([("list", ""), ("read", "src/big.bin")]):
+            message = {"type": "fs", "op_id": str(i), "op": op, "mount": "/mnt/repo", "path": path}
+            await ws.send(json.dumps({**message, "offset": 0, "len": 4}))
+        replies = {}
+        for _ in range(2):
+            reply = json.loads(await ws.recv())
+            replies[reply["op_id"]] = (reply, await ws.recv() if reply.get("data") else b"")
+        seen["replies"] = replies
+        await ws.send(json.dumps({"type": "completed", **SUCCESS}))
+
+    async with websockets.serve(serve, "127.0.0.1", 0) as server:
+        port = server.sockets[0].getsockname()[1]
+        box = eryx.Sandbox(
+            api_key=KEY,
+            base_url=f"http://127.0.0.1:{port}",
+            volumes=[(str(repo), "/mnt/repo", True)],
+        )
+        await box.execute_async("...")
+
+    assert seen["execute"]["mounts"] == [{"path": "/mnt/repo"}]
+    listing, inline = seen["replies"]["0"]
+    assert [e["name"] for e in listing["entries"]][:2] == [".git", "README.md"]
+    assert inline == b"# hello\n# hello\n"
+    assert seen["replies"]["1"] == ({"type": "fs_response", "op_id": "1", "data": 4}, bytes(4))
