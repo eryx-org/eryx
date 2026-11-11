@@ -668,3 +668,31 @@ async def test_volumes_are_served_over_the_stream(repo: Path) -> None:
     assert [e["name"] for e in listing["entries"]][:2] == [".git", "README.md"]
     assert inline == b"# hello\n# hello\n"
     assert seen["replies"]["1"] == ({"type": "fs_response", "op_id": "1", "data": 4}, bytes(4))
+
+
+def test_volumes_answer_bad_messages_and_bound_reads(repo: Path) -> None:
+    served = mounts([(str(repo), "/mnt/repo", True)], eryx.DEFAULT_HIDDEN)
+    assert fs(served, "read", "README.md", offset=-1, len=4)[0]["error"] == "io"
+    assert fs(served, "read", "README.md", offset=0, len=-1)[0]["error"] == "io"
+    assert answer(served, {"op_id": "1", "op": "read", "mount": "/mnt/repo", "path": None})[0][
+        "error"
+    ] == "io"
+    assert fs(served, "read", "src/big.bin", offset=0, len=2**40)[1] == bytes(100_000)
+    # Hidden names ignore case, as macOS's filesystem does
+    assert fs(served, "stat", ".ENV")[0]["error"] == "not_found"
+
+
+def test_listings_inline_at_most_a_megabyte(tmp_path: Path) -> None:
+    for i in range(20):
+        (tmp_path / f"{i:02}.bin").write_bytes(bytes(60_000))
+    served = mounts([(str(tmp_path), "/mnt/d", True)], ())
+    reply, data = answer(served, {"op_id": "1", "op": "list", "mount": "/mnt/d", "path": ""})
+    inline = [e for e in reply["entries"] if e.get("inline")]
+    assert len(inline) == 17 and len(data) == 17 * 60_000
+
+
+def test_volume_arguments_are_checked(repo: Path) -> None:
+    with pytest.raises(TypeError, match="list of patterns"):
+        sandbox(volumes=[(str(repo), "/mnt/repo", True)], hidden=".env")
+    with pytest.raises(ValueError, match="two volumes"):
+        sandbox(volumes=[(str(repo), "/mnt/repo", True), (str(repo), "/mnt/repo", True)])

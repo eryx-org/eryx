@@ -15,11 +15,21 @@ from typing import Any, Optional
 #: Files and directories a mount doesn't serve unless ``hidden=`` says
 #: otherwise. A pattern without ``/`` matches any path component; one with
 #: ``/`` matches a path from the mount's root, or a directory above it.
+#: Matching ignores case, as the filesystem may (``.ENV`` opens ``.env`` on
+#: macOS).
 DEFAULT_HIDDEN: tuple[str, ...] = (
     ".env",
     ".env.*",
     "*.pem",
     "*.key",
+    "*.p12",
+    "*.pfx",
+    "*.tfstate",
+    "*.tfstate.*",
+    "*.tfvars",
+    ".pgpass",
+    ".htpasswd",
+    ".kube",
     "id_rsa*",
     "id_ecdsa*",
     "id_ed25519*",
@@ -36,6 +46,10 @@ DEFAULT_HIDDEN: tuple[str, ...] = (
 
 #: Files up to this size come with their directory's listing
 INLINE_MAX = 64 * 1024
+#: Most file data one listing sends; the rest is read when the code asks
+INLINE_TOTAL = 1024 * 1024
+#: Most one read sends, whatever it asks for
+READ_MAX = 4 * 1024 * 1024
 
 #: Guest paths are under this
 _MOUNT_ROOT = "/mnt/"
@@ -50,8 +64,8 @@ class _Refused(Exception):
 
 
 def _hidden(rel: str, patterns: Sequence[str]) -> bool:
-    parts = rel.split("/")
-    for pattern in patterns:
+    parts = rel.lower().split("/")
+    for pattern in (p.lower() for p in patterns):
         if "/" in pattern:
             if any(fnmatch.fnmatchcase("/".join(parts[:i]), pattern) for i in range(1, len(parts) + 1)):
                 return True
@@ -68,6 +82,8 @@ class Mount:
         if not os.path.isdir(self.root):
             raise ValueError(f"volume {host_path!r} isn't a directory")
         self.guest_path = guest_path
+        if isinstance(hidden, str):
+            raise TypeError("hidden= is a list of patterns, e.g. ['.env']")
         self.hidden = tuple(hidden)
 
     def resolve(self, rel: str) -> str:
@@ -105,13 +121,14 @@ class Mount:
                     entry = {"name": item.name, **_stat(st)}
                 except (_Refused, OSError):
                     continue  # hidden, outside the mount, special or gone
-                if not entry["is_dir"] and entry["size"] <= INLINE_MAX:
+                room = INLINE_TOTAL - len(data)
+                if not entry["is_dir"] and entry["size"] <= min(INLINE_MAX, room):
                     try:
                         with open(real, "rb") as f:
                             contents = f.read(INLINE_MAX + 1)
                     except OSError:
                         contents = None
-                    if contents is not None and len(contents) <= INLINE_MAX:
+                    if contents is not None and len(contents) <= min(INLINE_MAX, room):
                         entry["size"] = len(contents)
                         entry["inline"] = True
                         data += contents
@@ -119,11 +136,13 @@ class Mount:
         return entries, bytes(data)
 
     def read(self, rel: str, offset: int, length: int) -> bytes:
+        if offset < 0 or length < 0:
+            raise _Refused("io", "negative offset or length")
         path = self.resolve(rel)
         _stat(os.stat(path))  # refuse special files, which could block
         with open(path, "rb") as f:
             f.seek(offset)
-            return f.read(length)
+            return f.read(min(length, READ_MAX))
 
 
 def _stat(st: os.stat_result) -> dict[str, Any]:
@@ -146,6 +165,8 @@ def mounts(volumes: Optional[Sequence[Sequence[Any]]], hidden: Sequence[str]) ->
             raise ValueError("eryx.run mounts are read-only for now: pass read_only=True")
         if not str(guest_path).startswith(_MOUNT_ROOT):
             raise ValueError(f"volume guest path {guest_path!r} must be under /mnt/")
+        if guest_path in result:
+            raise ValueError(f"two volumes at {guest_path!r}")
         result[guest_path] = Mount(host_path, guest_path, hidden)
     return result
 
@@ -179,7 +200,7 @@ def answer(mounts: dict[str, Mount], message: dict[str, Any]) -> tuple[dict[str,
         return {**reply, "error": "is_a_directory"}, b""
     except PermissionError:
         return {**reply, "error": "permission_denied"}, b""
-    except (OSError, ValueError, KeyError) as e:
+    except Exception as e:  # a bad message too: the code must get an answer
         return {**reply, "error": "io", "message": str(e)}, b""
     reply["data"] = len(data)
     return reply, data
