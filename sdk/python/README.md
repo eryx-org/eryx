@@ -60,7 +60,8 @@ A run that fails raises what pyeryx raises: `PythonExceptionError` (with
 `ResourceLimitError`. Requests eryx.run refuses raise an `APIError` subclass:
 `AuthenticationError`, `RateLimitError` (with `retry_after`),
 `NotFoundError`, `ConflictError`, `InvalidRequestError` or
-`ServiceUnavailableError`. All of them are `EryxError`s.
+`ServiceUnavailableError`; `APIConnectionError` if eryx.run can't be reached or
+the connection drops mid-run. All of them are `EryxError`s.
 
 From asyncio, use `await sandbox.execute_async(code)`.
 
