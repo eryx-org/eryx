@@ -49,7 +49,7 @@
 //! println!("Total acquisitions: {}", stats.total_acquisitions);
 //! ```
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::ops::{Deref, DerefMut};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
@@ -832,6 +832,25 @@ impl PooledSandbox {
     pub fn with_resource_limits(mut self, limits: ResourceLimits) -> Self {
         self.sandbox_mut().set_resource_limits(limits);
         self
+    }
+
+    /// Set the network configuration and secrets for this request.
+    ///
+    /// These replace the built ones (by default no network) until the sandbox
+    /// is returned to the pool. Each [`SecretConfig`](crate::SecretConfig)
+    /// has its own placeholder, so create new ones for each request.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ErrorKind::Initialization`](crate::ErrorKind::Initialization)
+    /// if `config` is invalid or a secret has no host it could be sent to.
+    pub fn with_network(
+        mut self,
+        config: crate::NetConfig,
+        secrets: HashMap<String, crate::SecretConfig>,
+    ) -> Result<Self, Error> {
+        self.sandbox_mut().set_network(config, secrets)?;
+        Ok(self)
     }
 
     /// Set VFS storage for this request.

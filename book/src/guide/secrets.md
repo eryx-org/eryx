@@ -61,6 +61,25 @@ A secret with an empty `allowed_hosts` uses `NetConfig.allowed_hosts` instead,
 but only while `allow_all_hosts` is off. A secret left with no hosts either way
 is never sent anywhere, so building a sandbox with networking enabled fails.
 
+To only send a secret in one header, build its `SecretConfig` with
+`only_in_header` and add it with `with_secret_config`:
+
+```rust,ignore
+use eryx::{Sandbox, NetConfig, SecretConfig};
+
+let sandbox = Sandbox::embedded()
+    .with_secret_config(
+        "API_KEY",
+        SecretConfig::new("sk-real-key", vec!["api.example.com".to_string()])
+            .only_in_header("X-Api-Key"),
+    )
+    .with_network(NetConfig::default().allow_host("api.example.com"))
+    .build()?;
+```
+
+The header name is compared ignoring case. A request with the placeholder in
+any other header is refused, as for a host the secret isn't allowed for.
+
 ## Host Binding
 
 The real value is only sent to the host the connection was opened to:

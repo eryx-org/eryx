@@ -407,6 +407,7 @@ mod tests {
                 real_value: "real-secret".to_string(),
                 placeholder: "ERYX_SECRET_PLACEHOLDER_abc123".to_string(),
                 allowed_hosts: vec![],
+                header: None,
             },
         );
         secrets

@@ -145,12 +145,28 @@ with pool.acquire(
 
 If you don't pass callbacks in Python, the factory's default callbacks (baked into the snapshot) are used.
 
-## Pool-Wide Network and Secrets
+## Network and Secrets
 
-Networking and secrets belong to the pool's builder, not to a lease: every
-pooled sandbox gets them, for the pool's lifetime. In Rust, configure them in
-the closure passed to `SandboxPool::with_builder`. In Python, pass them to
-`create_pool`:
+In Rust, a lease can have its own network configuration and secrets, which
+replace the pool's (by default, no network) until it's returned:
+
+```rust,ignore
+use std::collections::HashMap;
+use eryx::{NetConfig, SecretConfig};
+
+let secret = SecretConfig::new("sk-xxx", vec!["api.example.com".to_string()]);
+let sandbox = pool.acquire().await?.with_network(
+    NetConfig::default().allow_host("api.example.com"),
+    HashMap::from([("API_KEY".to_string(), secret)]),
+)?;
+```
+
+`with_network` checks them as `build` does. Create new `SecretConfig`s for each
+lease, so each gets its own placeholder.
+
+For networking and secrets that every pooled sandbox gets, for the pool's
+lifetime, configure them in the closure passed to `SandboxPool::with_builder`.
+In Python, that's the only way: pass them to `create_pool`:
 
 ```python
 import eryx

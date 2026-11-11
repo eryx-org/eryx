@@ -113,8 +113,11 @@ pub struct Sandbox {
     executor: Arc<PythonExecutor>,
     /// Registered callbacks that Python code can invoke (wrapped in Arc to avoid cloning the map on each execute).
     callbacks: Arc<HashMap<String, Arc<dyn Callback>>>,
-    /// Python preamble code injected before user code.
+    /// Python preamble code injected before user code: the secrets'
+    /// environment variables, then `library_preamble`.
     preamble: String,
+    /// The libraries' preamble code.
+    library_preamble: String,
     /// Combined type stubs from all libraries.
     type_stubs: String,
     /// Handler for execution trace events.
@@ -157,6 +160,9 @@ struct PerRequestSettings {
     trace_handler: Option<Arc<dyn TraceHandler>>,
     output_handler: Option<Arc<dyn OutputHandler>>,
     resource_limits: ResourceLimits,
+    net_config: Option<NetConfig>,
+    secrets: HashMap<String, crate::secrets::SecretConfig>,
+    preamble: String,
 }
 
 impl std::fmt::Debug for Sandbox {
@@ -698,6 +704,33 @@ impl Sandbox {
         self.resource_limits = limits;
     }
 
+    /// Set the network configuration and secrets, replacing those the
+    /// sandbox was built with.
+    ///
+    /// Used by the pool to configure per-request networking on a reused
+    /// sandbox. The secrets' placeholders are set in `os.environ` from the
+    /// next execution, as with [`SandboxBuilder::with_secret`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ErrorKind::Initialization`] if `config` is invalid or a
+    /// secret has no host it could be sent to, as
+    /// [`SandboxBuilder::build`] does; the sandbox is left unchanged.
+    pub fn set_network(
+        &mut self,
+        config: NetConfig,
+        secrets: HashMap<String, crate::secrets::SecretConfig>,
+    ) -> Result<(), Error> {
+        config.validate().map_err(ErrorKind::Initialization)?;
+        config
+            .check_secret_hosts(&secrets)
+            .map_err(ErrorKind::Initialization)?;
+        self.preamble = full_preamble(&secrets, &self.library_preamble);
+        self.net_config = Some(config);
+        self.secrets = secrets;
+        Ok(())
+    }
+
     /// Set VFS storage for this request.
     ///
     /// When set, this replaces the default scrubbing storage created in
@@ -726,6 +759,9 @@ impl Sandbox {
         self.trace_handler.clone_from(&self.built.trace_handler);
         self.output_handler.clone_from(&self.built.output_handler);
         self.resource_limits.clone_from(&self.built.resource_limits);
+        self.net_config.clone_from(&self.built.net_config);
+        self.secrets.clone_from(&self.built.secrets);
+        self.preamble.clone_from(&self.built.preamble);
         #[cfg(feature = "unstable-vfs")]
         {
             self.vfs_storage = None;
@@ -794,6 +830,7 @@ impl Sandbox {
             executor: Arc::clone(&self.executor),
             callbacks: Arc::clone(&self.callbacks),
             preamble: self.preamble.clone(),
+            library_preamble: self.library_preamble.clone(),
             type_stubs: self.type_stubs.clone(),
             trace_handler: self.trace_handler.clone(),
             collect_trace: self.collect_trace,
@@ -812,6 +849,33 @@ impl Sandbox {
             built: Arc::clone(&self.built),
         }
     }
+}
+
+/// The preamble setting each secret's placeholder in `os.environ`, followed
+/// by `library_preamble`.
+///
+/// The preinitialized runtime snapshots `os.environ`, so WASI env vars set per
+/// execution would not show up. JSON string literals are valid Python string
+/// literals, unlike Rust's `{:?}` escapes (`\u{1b}`).
+fn full_preamble(
+    secrets: &HashMap<String, crate::secrets::SecretConfig>,
+    library_preamble: &str,
+) -> String {
+    let mut names: Vec<&String> = secrets.keys().collect();
+    names.sort();
+    let mut preamble = String::new();
+    if !names.is_empty() {
+        preamble.push_str("import os\n");
+    }
+    for name in names {
+        preamble.push_str(&format!(
+            "os.environ[{}] = {}\n",
+            python_str_literal(name),
+            python_str_literal(secrets[name].placeholder())
+        ));
+    }
+    preamble.push_str(library_preamble);
+    preamble
 }
 
 /// Register `callback` under its name, recording the first name registered
@@ -2178,27 +2242,28 @@ impl<R, S> SandboxBuilder<R, S> {
     /// ```
     #[must_use]
     pub fn with_secret(
-        mut self,
+        self,
         name: impl Into<String>,
         value: impl Into<String>,
         allowed_hosts: Vec<String>,
     ) -> Self {
-        let name = name.into();
-        let secret = crate::secrets::SecretConfig::new(value, allowed_hosts);
-        let placeholder = secret.placeholder().to_string();
-        self.secrets.insert(name.clone(), secret);
+        self.with_secret_config(
+            name,
+            crate::secrets::SecretConfig::new(value, allowed_hosts),
+        )
+    }
 
-        // Set the placeholder as an environment variable via the preamble. The
-        // preinitialized runtime snapshots `os.environ`, so WASI env vars set
-        // per execution would not show up. JSON string literals are valid
-        // Python string literals, unlike Rust's `{:?}` escapes (`\u{1b}`).
-        let env_code = format!(
-            "import os\nos.environ[{}] = {}\n",
-            python_str_literal(&name),
-            python_str_literal(&placeholder)
-        );
-        self.preamble.push_str(&env_code);
-
+    /// Add a secret configured with [`SecretConfig`](crate::SecretConfig),
+    /// e.g. one limited to a header with
+    /// [`only_in_header`](crate::SecretConfig::only_in_header). Otherwise as
+    /// [`with_secret`](Self::with_secret).
+    #[must_use]
+    pub fn with_secret_config(
+        mut self,
+        name: impl Into<String>,
+        secret: crate::secrets::SecretConfig,
+    ) -> Self {
+        self.secrets.insert(name.into(), secret);
         self
     }
 
@@ -2511,7 +2576,7 @@ impl SandboxBuilder<state::Has, state::Has> {
         if self.net_config.is_some() {
             dropped.push("network");
         }
-        // Secrets also add a preamble, and scrub policies only matter with secrets.
+        // Scrub policies only matter with secrets.
         if !self.secrets.is_empty() {
             dropped.push("secrets");
         }
@@ -2672,18 +2737,22 @@ impl SandboxBuilder<state::Has, state::Has> {
             trace_handler: self.trace_handler,
             output_handler: self.output_handler,
             resource_limits: self.resource_limits,
+            preamble: full_preamble(&self.secrets, &self.preamble),
+            net_config: self.net_config,
+            secrets: self.secrets,
         });
         Ok(Sandbox {
             executor: Arc::new(executor),
             callbacks: Arc::clone(&built.callbacks),
-            preamble: self.preamble,
+            preamble: built.preamble.clone(),
+            library_preamble: self.preamble,
             type_stubs: self.type_stubs,
             trace_handler: built.trace_handler.clone(),
             collect_trace: self.collect_trace,
             output_handler: built.output_handler.clone(),
             resource_limits: built.resource_limits.clone(),
-            net_config: self.net_config,
-            secrets: self.secrets,
+            net_config: built.net_config.clone(),
+            secrets: built.secrets.clone(),
             scrub_stdout: self.scrub_stdout,
             scrub_stderr: self.scrub_stderr,
             scrub_result: self.scrub_result,

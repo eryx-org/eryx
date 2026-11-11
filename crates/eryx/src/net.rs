@@ -1296,7 +1296,8 @@ impl ConnectionManager {
                 let value = line[colon_pos + 1..].trim_start();
 
                 // Substitute secrets in header value
-                let substituted_value = self.substitute_secrets_in_text(value, target_host)?;
+                let substituted_value =
+                    self.substitute_secrets_in_text(value, name, target_host)?;
                 result.push_str(&format!("{name}: {substituted_value}\r\n"));
             } else {
                 result.push_str(line);
@@ -1308,14 +1309,16 @@ impl ConnectionManager {
         Ok(result.into_bytes())
     }
 
-    /// Substitute secret placeholders in text.
+    /// Substitute secret placeholders in the value `text` of the header
+    /// `header`.
     ///
     /// A secret is only substituted for a host matching
     /// [`NetConfig::secret_hosts`]; a secret with no hosts there is never
-    /// substituted.
+    /// substituted. A secret limited to one header is only substituted there.
     fn substitute_secrets_in_text(
         &self,
         text: &str,
+        header: &str,
         target_host: &str,
     ) -> Result<String, TcpError> {
         let mut result = text.to_string();
@@ -1335,6 +1338,13 @@ impl ConnectionManager {
                 return Err(TcpError::NotPermitted(
                     "Secret not allowed for the target host".into(),
                 ));
+            }
+            if let Some(allowed) = &secret_config.header
+                && !allowed.eq_ignore_ascii_case(header)
+            {
+                return Err(TcpError::NotPermitted(format!(
+                    "Secret not allowed in the {header} header"
+                )));
             }
 
             // Substitute
@@ -1999,21 +2009,55 @@ mod tests {
                 real_value: "real-secret-value".to_string(),
                 placeholder: "ERYX_SECRET_PLACEHOLDER_abc123".to_string(),
                 allowed_hosts: vec!["api.example.com".to_string()],
+                header: None,
             },
         );
 
         let manager = ConnectionManager::new(config, secrets);
 
         // Test substitution for allowed host
-        let result = manager
-            .substitute_secrets_in_text("Bearer ERYX_SECRET_PLACEHOLDER_abc123", "api.example.com");
+        let result = manager.substitute_secrets_in_text(
+            "Bearer ERYX_SECRET_PLACEHOLDER_abc123",
+            "Authorization",
+            "api.example.com",
+        );
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), "Bearer real-secret-value");
 
         // Test rejection for disallowed host
-        let result =
-            manager.substitute_secrets_in_text("Bearer ERYX_SECRET_PLACEHOLDER_abc123", "evil.com");
+        let result = manager.substitute_secrets_in_text(
+            "Bearer ERYX_SECRET_PLACEHOLDER_abc123",
+            "Authorization",
+            "evil.com",
+        );
         assert!(result.is_err());
+    }
+
+    /// A secret limited to one header is only substituted there, whatever
+    /// the header's case, and a request with it elsewhere is refused.
+    #[test]
+    fn secret_limited_to_a_header() {
+        let secret = crate::secrets::SecretConfig {
+            placeholder: "PH_HEADER".to_string(),
+            ..crate::secrets::SecretConfig::new("real-secret-value", vec!["api.example.com".into()])
+                .only_in_header("X-Api-Key")
+        };
+        let manager = ConnectionManager::new(
+            NetConfig::permissive(),
+            HashMap::from([("KEY".into(), secret)]),
+        );
+
+        assert_eq!(
+            manager
+                .substitute_secrets_in_text("PH_HEADER", "x-api-key", "api.example.com")
+                .unwrap(),
+            "real-secret-value"
+        );
+        assert!(
+            manager
+                .substitute_secrets_in_text("Bearer PH_HEADER", "Authorization", "api.example.com")
+                .is_err()
+        );
     }
 
     /// A secret without hosts of its own uses the network allowlist, and is
@@ -2027,6 +2071,7 @@ mod tests {
                     real_value: "real-secret-value".to_string(),
                     placeholder: "PLACEHOLDER_XYZ".to_string(),
                     allowed_hosts: hosts,
+                    header: None,
                 },
             )])
         };
@@ -2036,7 +2081,11 @@ mod tests {
         let manager = ConnectionManager::new(permissive, secret(vec![]));
         assert!(
             manager
-                .substitute_secrets_in_text("Bearer PLACEHOLDER_XYZ", "any-host.com")
+                .substitute_secrets_in_text(
+                    "Bearer PLACEHOLDER_XYZ",
+                    "Authorization",
+                    "any-host.com"
+                )
                 .is_err()
         );
 
@@ -2057,13 +2106,21 @@ mod tests {
         let manager = ConnectionManager::new(allowlist, secret(vec![]));
         assert_eq!(
             manager
-                .substitute_secrets_in_text("Bearer PLACEHOLDER_XYZ", "api.example.com")
+                .substitute_secrets_in_text(
+                    "Bearer PLACEHOLDER_XYZ",
+                    "Authorization",
+                    "api.example.com"
+                )
                 .unwrap(),
             "Bearer real-secret-value"
         );
         assert!(
             manager
-                .substitute_secrets_in_text("Bearer PLACEHOLDER_XYZ", "other.example.com")
+                .substitute_secrets_in_text(
+                    "Bearer PLACEHOLDER_XYZ",
+                    "Authorization",
+                    "other.example.com"
+                )
                 .is_err()
         );
     }
@@ -2083,6 +2140,7 @@ mod tests {
                 real_value: "top-secret".to_string(),
                 placeholder: "PH_AUTH".to_string(),
                 allowed_hosts: vec!["api.openai.com".to_string()],
+                header: None,
             },
         );
 
@@ -2091,20 +2149,24 @@ mod tests {
         // All of these unauthorized hosts must be rejected
         assert!(
             manager
-                .substitute_secrets_in_text("PH_AUTH", "evil.com")
+                .substitute_secrets_in_text("PH_AUTH", "Authorization", "evil.com")
                 .is_err()
         );
         assert!(
             manager
-                .substitute_secrets_in_text("PH_AUTH", "127.0.0.1")
+                .substitute_secrets_in_text("PH_AUTH", "Authorization", "127.0.0.1")
                 .is_err()
         );
         assert!(
             manager
-                .substitute_secrets_in_text("PH_AUTH", "localhost")
+                .substitute_secrets_in_text("PH_AUTH", "Authorization", "localhost")
                 .is_err()
         );
-        assert!(manager.substitute_secrets_in_text("PH_AUTH", "").is_err());
+        assert!(
+            manager
+                .substitute_secrets_in_text("PH_AUTH", "Authorization", "")
+                .is_err()
+        );
     }
 
     /// Test that multiple secrets with different host restrictions are independently enforced.
@@ -2118,6 +2180,7 @@ mod tests {
                 real_value: "openai-secret".to_string(),
                 placeholder: "PH_OPENAI".to_string(),
                 allowed_hosts: vec!["api.openai.com".to_string()],
+                header: None,
             },
         );
         secrets.insert(
@@ -2126,6 +2189,7 @@ mod tests {
                 real_value: "github-secret".to_string(),
                 placeholder: "PH_GITHUB".to_string(),
                 allowed_hosts: vec!["api.github.com".to_string()],
+                header: None,
             },
         );
 
@@ -2134,25 +2198,25 @@ mod tests {
         // OpenAI key for OpenAI host: OK
         assert!(
             manager
-                .substitute_secrets_in_text("PH_OPENAI", "api.openai.com")
+                .substitute_secrets_in_text("PH_OPENAI", "Authorization", "api.openai.com")
                 .is_ok()
         );
         // OpenAI key for GitHub host: REJECTED
         assert!(
             manager
-                .substitute_secrets_in_text("PH_OPENAI", "api.github.com")
+                .substitute_secrets_in_text("PH_OPENAI", "Authorization", "api.github.com")
                 .is_err()
         );
         // GitHub key for GitHub host: OK
         assert!(
             manager
-                .substitute_secrets_in_text("PH_GITHUB", "api.github.com")
+                .substitute_secrets_in_text("PH_GITHUB", "Authorization", "api.github.com")
                 .is_ok()
         );
         // GitHub key for OpenAI host: REJECTED
         assert!(
             manager
-                .substitute_secrets_in_text("PH_GITHUB", "api.openai.com")
+                .substitute_secrets_in_text("PH_GITHUB", "Authorization", "api.openai.com")
                 .is_err()
         );
     }
@@ -2168,6 +2232,7 @@ mod tests {
                 real_value: "secret".to_string(),
                 placeholder: "PH_GLOB".to_string(),
                 allowed_hosts: vec!["*.openai.com".to_string()],
+                header: None,
             },
         );
 
@@ -2175,18 +2240,18 @@ mod tests {
 
         assert!(
             manager
-                .substitute_secrets_in_text("PH_GLOB", "api.openai.com")
+                .substitute_secrets_in_text("PH_GLOB", "Authorization", "api.openai.com")
                 .is_ok()
         );
         // Bare domain doesn't match *.openai.com
         assert!(
             manager
-                .substitute_secrets_in_text("PH_GLOB", "openai.com")
+                .substitute_secrets_in_text("PH_GLOB", "Authorization", "openai.com")
                 .is_err()
         );
         assert!(
             manager
-                .substitute_secrets_in_text("PH_GLOB", "evil.com")
+                .substitute_secrets_in_text("PH_GLOB", "Authorization", "evil.com")
                 .is_err()
         );
     }
@@ -2202,6 +2267,7 @@ mod tests {
                 real_value: "secret".to_string(),
                 placeholder: "PH_DECEPTIVE".to_string(),
                 allowed_hosts: vec!["api.openai.com".to_string()],
+                header: None,
             },
         );
 
@@ -2210,22 +2276,26 @@ mod tests {
         // Deceptive domains that look similar but shouldn't match
         assert!(
             manager
-                .substitute_secrets_in_text("PH_DECEPTIVE", "api.openai.com.evil.com")
+                .substitute_secrets_in_text(
+                    "PH_DECEPTIVE",
+                    "Authorization",
+                    "api.openai.com.evil.com"
+                )
                 .is_err()
         );
         assert!(
             manager
-                .substitute_secrets_in_text("PH_DECEPTIVE", "api-openai.com")
+                .substitute_secrets_in_text("PH_DECEPTIVE", "Authorization", "api-openai.com")
                 .is_err()
         );
         assert!(
             manager
-                .substitute_secrets_in_text("PH_DECEPTIVE", "evil-api.openai.com")
+                .substitute_secrets_in_text("PH_DECEPTIVE", "Authorization", "evil-api.openai.com")
                 .is_err()
         );
         assert!(
             manager
-                .substitute_secrets_in_text("PH_DECEPTIVE", "xapi.openai.com")
+                .substitute_secrets_in_text("PH_DECEPTIVE", "Authorization", "xapi.openai.com")
                 .is_err()
         );
     }
@@ -2241,6 +2311,7 @@ mod tests {
                 real_value: "secret".to_string(),
                 placeholder: "PH_IP".to_string(),
                 allowed_hosts: vec!["api.openai.com".to_string()],
+                header: None,
             },
         );
 
@@ -2249,12 +2320,12 @@ mod tests {
         // IP address should NOT match hostname restriction
         assert!(
             manager
-                .substitute_secrets_in_text("PH_IP", "104.18.7.192")
+                .substitute_secrets_in_text("PH_IP", "Authorization", "104.18.7.192")
                 .is_err()
         );
         assert!(
             manager
-                .substitute_secrets_in_text("PH_IP", "1.2.3.4")
+                .substitute_secrets_in_text("PH_IP", "Authorization", "1.2.3.4")
                 .is_err()
         );
     }
@@ -2270,6 +2341,7 @@ mod tests {
                 real_value: "secret".to_string(),
                 placeholder: "PH_CASE".to_string(),
                 allowed_hosts: vec!["api.openai.com".to_string()],
+                header: None,
             },
         );
 
@@ -2278,12 +2350,12 @@ mod tests {
         // DNS is case-insensitive, so these should all work
         assert!(
             manager
-                .substitute_secrets_in_text("PH_CASE", "API.OPENAI.COM")
+                .substitute_secrets_in_text("PH_CASE", "Authorization", "API.OPENAI.COM")
                 .is_ok()
         );
         assert!(
             manager
-                .substitute_secrets_in_text("PH_CASE", "Api.OpenAI.Com")
+                .substitute_secrets_in_text("PH_CASE", "Authorization", "Api.OpenAI.Com")
                 .is_ok()
         );
     }
@@ -2299,13 +2371,18 @@ mod tests {
                 real_value: "secret".to_string(),
                 placeholder: "PH_NOOP".to_string(),
                 allowed_hosts: vec!["restricted.com".to_string()],
+                header: None,
             },
         );
 
         let manager = ConnectionManager::new(config, secrets);
 
         // Text without any placeholder should pass through unchanged, for any host
-        let result = manager.substitute_secrets_in_text("Bearer some-other-token", "evil.com");
+        let result = manager.substitute_secrets_in_text(
+            "Bearer some-other-token",
+            "Authorization",
+            "evil.com",
+        );
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), "Bearer some-other-token");
     }
@@ -2355,6 +2432,7 @@ mod tests {
                 real_value: "real-secret-value".to_string(),
                 placeholder: "PLACEHOLDER_LARGE".to_string(),
                 allowed_hosts: vec!["api.example.com".to_string()],
+                header: None,
             },
         );
 
@@ -2418,6 +2496,7 @@ mod tests {
                 real_value: "real-secret-value".to_string(),
                 placeholder: "PLACEHOLDER_SNI".to_string(),
                 allowed_hosts: vec!["api.openai.com".to_string()],
+                header: None,
             },
         );
 
@@ -2459,6 +2538,7 @@ mod tests {
                 real_value: "real-secret-value".to_string(),
                 placeholder: "PLACEHOLDER_BLOCKED".to_string(),
                 allowed_hosts: vec!["api.legitimate.com".to_string()],
+                header: None,
             },
         );
 
@@ -2502,6 +2582,7 @@ mod tests {
                 real_value: "secret".to_string(),
                 placeholder: "PH".to_string(),
                 allowed_hosts: vec![],
+                header: None,
             },
         );
 
@@ -2783,6 +2864,7 @@ mod tests {
                 real_value: "real".to_string(),
                 placeholder: "PH".to_string(),
                 allowed_hosts: vec!["api.example.com".to_string(), "127.0.0.1".to_string()],
+                header: None,
             },
         );
         let mut manager = ConnectionManager::new(
