@@ -446,6 +446,8 @@ pub enum HybridPreopen {
         dir_perms: DirPerms,
         /// File permissions for files in this directory
         file_perms: FilePerms,
+        /// Which of the context's storages backs it (0 is the default)
+        storage: usize,
     },
     /// A real filesystem preopen.
     Real {
@@ -463,11 +465,13 @@ impl std::fmt::Debug for HybridPreopen {
                 guest_path,
                 dir_perms,
                 file_perms,
+                storage,
             } => f
                 .debug_struct("Vfs")
                 .field("guest_path", guest_path)
                 .field("dir_perms", dir_perms)
                 .field("file_perms", file_perms)
+                .field("storage", storage)
                 .finish(),
             HybridPreopen::Real { guest_path, dir } => f
                 .debug_struct("Real")
@@ -484,8 +488,9 @@ impl std::fmt::Debug for HybridPreopen {
 /// is either VFS-backed or a real directory, and every descriptor opened
 /// beneath it stays on the same side.
 pub struct HybridVfsCtx<S: VfsStorage + Clone> {
-    /// The VFS storage backend for virtual paths.
-    pub(crate) storage: S,
+    /// The VFS storage backends for virtual paths: the default one first,
+    /// then one per [`add_storage_preopen`](Self::add_storage_preopen).
+    pub(crate) storages: Vec<S>,
     /// Preopened directories (both VFS and real).
     pub(crate) preopens: Vec<HybridPreopen>,
     /// Host files and directories the guest has opened. A handle stays open
@@ -608,7 +613,7 @@ impl<S: VfsStorage + Clone> HybridVfsCtx<S> {
     /// `add_real_preopen` to configure paths.
     pub fn new(storage: S) -> Self {
         Self {
-            storage,
+            storages: vec![storage],
             preopens: Vec::new(),
             open_host_files: Vec::new(),
             max_open_host_files: DEFAULT_MAX_OPEN_HOST_FILES,
@@ -656,7 +661,12 @@ impl<S: VfsStorage + Clone> HybridVfsCtx<S> {
         self
     }
 
-    /// Add a VFS-managed preopen directory.
+    /// The storage backing a VFS descriptor.
+    pub(crate) fn storage_for(&self, desc: &crate::wasi_impl::VfsDescriptor) -> &S {
+        &self.storages[desc.storage]
+    }
+
+    /// Add a VFS-managed preopen directory, backed by the context's storage.
     ///
     /// Descriptors opened under this preopen are handled by VFS storage.
     /// The directory will be created in storage if it doesn't exist.
@@ -666,12 +676,39 @@ impl<S: VfsStorage + Clone> HybridVfsCtx<S> {
         dir_perms: DirPerms,
         file_perms: FilePerms,
     ) {
-        let guest_path = guest_path.into();
+        self.add_preopen_on(0, guest_path.into(), dir_perms, file_perms);
+    }
 
+    /// Add a preopen directory backed by its own `storage`, instead of the
+    /// context's.
+    ///
+    /// The guest sees `guest_path` and everything beneath it in `storage`,
+    /// under their full guest paths (as with the context's storage), so one
+    /// storage can back several preopens. Renames between it and another
+    /// storage fail, like renames between filesystems.
+    pub fn add_storage_preopen(
+        &mut self,
+        guest_path: impl Into<String>,
+        storage: S,
+        dir_perms: DirPerms,
+        file_perms: FilePerms,
+    ) {
+        self.storages.push(storage);
+        let index = self.storages.len() - 1;
+        self.add_preopen_on(index, guest_path.into(), dir_perms, file_perms);
+    }
+
+    fn add_preopen_on(
+        &mut self,
+        storage: usize,
+        guest_path: String,
+        dir_perms: DirPerms,
+        file_perms: FilePerms,
+    ) {
         // Ensure the directory exists in storage.
         // We use the sync method since this is called during setup before
         // the async runtime might be fully available.
-        if let Err(e) = self.storage.mkdir_sync(&guest_path) {
+        if let Err(e) = self.storages[storage].mkdir_sync(&guest_path) {
             tracing::warn!(
                 "Failed to create VFS preopen directory {}: {}",
                 guest_path,
@@ -683,6 +720,7 @@ impl<S: VfsStorage + Clone> HybridVfsCtx<S> {
             guest_path,
             dir_perms,
             file_perms,
+            storage,
         });
     }
 

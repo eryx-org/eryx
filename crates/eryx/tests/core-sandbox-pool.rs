@@ -254,6 +254,91 @@ async fn built_sandbox_uses_its_vfs_storage() {
     );
 }
 
+/// A pooled sandbox mounts storage volumes for one request, in executions
+/// and sessions, apart from `/data`, and the next request doesn't see them.
+#[cfg(feature = "unstable-vfs")]
+#[tokio::test]
+async fn pooled_sandbox_mounts_storage_volumes_per_request() {
+    use eryx::VolumeMount;
+    use eryx::session::{InProcessSession, Session};
+    use eryx::vfs::{InMemoryStorage, VfsStorage};
+    use std::sync::Arc;
+
+    let pool = SandboxPool::new(Sandbox::embedded(), small_pool())
+        .await
+        .unwrap();
+    let repo = Arc::new(InMemoryStorage::new());
+    repo.mkdir("/mnt").await.unwrap();
+    repo.mkdir("/mnt/repo").await.unwrap();
+    repo.write("/mnt/repo/in.txt", b"repo").await.unwrap();
+    let out = Arc::new(InMemoryStorage::new());
+
+    let sandbox = pool
+        .acquire()
+        .await
+        .unwrap()
+        .with_volume(VolumeMount::read_only_storage("/mnt/repo", repo.clone()))
+        .with_volume(VolumeMount::storage("/mnt/out", out.clone()));
+    let result = sandbox
+        .execute(
+            r#"
+import os
+open('/mnt/out/out.txt', 'w').write(open('/mnt/repo/in.txt').read() + '!')
+open('/data/scratch.txt', 'w').write('scratch')
+print(sorted(os.listdir('/mnt/repo')))
+try:
+    open('/mnt/repo/new.txt', 'w')
+    print('wrote')
+except OSError as e:
+    print(type(e).__name__)
+"#,
+        )
+        .await
+        .unwrap();
+    assert!(result.stderr_text().is_empty(), "{}", result.stderr_text());
+    assert_eq!(result.stdout_text().trim(), "['in.txt']\nPermissionError");
+    assert_eq!(out.read("/mnt/out/out.txt").await.unwrap(), b"repo!");
+    assert!(!out.exists("/data/scratch.txt").await.unwrap());
+    assert!(!repo.exists("/mnt/repo/new.txt").await.unwrap());
+
+    let mut session = InProcessSession::new(&sandbox).await.unwrap();
+    let result = session
+        .execute("print(open('/mnt/out/out.txt').read())")
+        .await
+        .unwrap();
+    assert_eq!(result.stdout_text().trim(), "repo!");
+    drop(session);
+    drop(sandbox);
+
+    let sandbox = pool.acquire().await.unwrap();
+    let result = sandbox
+        .execute("import os; print(os.path.exists('/mnt/out/out.txt'))")
+        .await
+        .unwrap();
+    assert_eq!(result.stdout_text().trim(), "False");
+}
+
+/// Two mounts at one guest path fail the execution instead of leaving the
+/// guest to pick one.
+#[cfg(feature = "unstable-vfs")]
+#[tokio::test]
+async fn volumes_sharing_a_path_are_refused() {
+    use eryx::VolumeMount;
+    use eryx::vfs::InMemoryStorage;
+    use std::sync::Arc;
+
+    let mut sandbox = Sandbox::embedded().build().unwrap();
+    sandbox.add_volume(VolumeMount::storage(
+        "/data",
+        Arc::new(InMemoryStorage::new()),
+    ));
+    let err = sandbox.execute("pass").await.unwrap_err();
+    assert!(
+        err.to_string().contains("more than one mount at /data"),
+        "{err}"
+    );
+}
+
 /// A pooled sandbox takes networking and secrets for one request, a secret
 /// limited to a header is only sent there, and the next request on the same
 /// sandbox has neither.

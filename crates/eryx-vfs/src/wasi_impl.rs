@@ -75,6 +75,9 @@ pub struct VfsDescriptor {
     pub(crate) dir_perms: DirPerms,
     /// File permissions.
     pub(crate) file_perms: FilePerms,
+    /// Which storage it's in, for contexts with more than one (see
+    /// `HybridVfsCtx::add_storage_preopen`); 0 is the default storage.
+    pub(crate) storage: usize,
 }
 
 impl VfsDescriptor {
@@ -87,6 +90,7 @@ impl VfsDescriptor {
             is_dir: true,
             dir_perms,
             file_perms,
+            storage: 0,
         }
     }
 
@@ -99,6 +103,7 @@ impl VfsDescriptor {
             is_dir: false,
             dir_perms: DirPerms::empty(),
             file_perms,
+            storage: 0,
         }
     }
 
