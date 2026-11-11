@@ -15,6 +15,16 @@ from typing import (
     final,
 )
 
+from eryx_run import (
+    CancelledError as CancelledError,
+    EryxError as EryxError,
+    ExecutionError as ExecutionError,
+    InitializationError as InitializationError,
+    PythonExceptionError as PythonExceptionError,
+    ResourceLimitError as ResourceLimitError,
+    TimeoutError as TimeoutError,
+)
+
 PathLike = Union[str, Path]
 
 VolumeSpec = Union[tuple[str, str, bool], tuple[str, str, bool, Optional[int]]]
@@ -317,6 +327,21 @@ class ExecuteResult:
         to, so the session was reset: variables from before that call are gone
         and the preamble ran again. Reported once, by the first successful run
         after the reset. Always ``False`` for ``Sandbox.execute()``."""
+        ...
+
+    @property
+    def network_bytes(self) -> None:
+        """Hosted runs only (``eryx_run``): always ``None`` here."""
+        ...
+
+    @property
+    def trace_id(self) -> None:
+        """Hosted runs only (``eryx_run``): always ``None`` here."""
+        ...
+
+    @property
+    def unsaved_variables(self) -> list[str]:
+        """Hosted sessions only (``eryx_run``): always empty here."""
         ...
 
 
@@ -902,70 +927,6 @@ class SuspendCallback(Exception):
     ...
 
 
-class EryxError(Exception):
-    """Base exception for all Eryx errors.
-
-    When a run fails after the guest started (a timeout, cancellation, resource
-    limit or exception in the script), the exception carries what the run used
-    up to that point, so a host can meter it. These are `None` if the failure
-    happened before the guest ran.
-    """
-
-    duration_ms: Optional[float]
-    """Execution duration in milliseconds."""
-    callback_invocations: Optional[int]
-    """Number of callback invocations during execution."""
-    peak_memory_bytes: Optional[int]
-    """Peak memory usage in bytes."""
-    fuel_consumed: Optional[int]
-    """Fuel (WASM instructions) used when the run stopped. For a timeout or
-    cancellation it is accurate to within a few million instructions."""
-
-
-class ExecutionError(EryxError):
-    """Error during Python code execution in the sandbox."""
-
-    ...
-
-
-class PythonExceptionError(ExecutionError):
-    """The sandboxed Python code raised an uncaught exception.
-
-    A subclass of ExecutionError, so ``except ExecutionError`` still catches
-    it; catch this instead to tell a script error apart from a sandbox failure.
-
-    Attributes:
-        stdout: Raw bytes the code wrote to stdout before it raised.
-        stderr: Raw bytes captured from stderr up to the exception,
-            including the traceback.
-    """
-
-    stdout: bytes
-    stderr: bytes
-
-
-class InitializationError(EryxError):
-    """Error during sandbox initialization."""
-
-    ...
-
-
-class ResourceLimitError(EryxError):
-    """Resource limit exceeded during execution."""
-
-    ...
-
-
-class TimeoutError(builtins.TimeoutError, EryxError):
-    """Execution timed out.
-
-    This exception inherits from both Python's built-in TimeoutError
-    and EryxError, so it can be caught with either.
-    """
-
-    ...
-
-
 @final
 class CancelToken:
     """A token for cancelling executions from any thread.
@@ -994,12 +955,6 @@ class CancelToken:
     def cancelled(self) -> bool:
         """Whether ``cancel()`` has been called."""
         ...
-
-
-class CancelledError(EryxError):
-    """Execution was cancelled."""
-
-    ...
 
 
 class PoolError(EryxError):

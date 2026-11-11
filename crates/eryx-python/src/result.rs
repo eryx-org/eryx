@@ -97,6 +97,24 @@ impl ExecuteResult {
         self.result_json.clone()
     }
 
+    /// Hosted runs only (`eryx_run`'s `ExecuteResult`): always `None` here.
+    #[getter]
+    fn network_bytes(&self) -> Option<u64> {
+        None
+    }
+
+    /// Hosted runs only (`eryx_run`'s `ExecuteResult`): always `None` here.
+    #[getter]
+    fn trace_id(&self) -> Option<String> {
+        None
+    }
+
+    /// Hosted sessions only (`eryx_run`'s `ExecuteResult`): always empty here.
+    #[getter]
+    fn unsaved_variables(&self) -> Vec<String> {
+        Vec::new()
+    }
+
     fn __repr__(&self) -> String {
         let stdout_str = String::from_utf8_lossy(&self.stdout);
         let stderr_str = String::from_utf8_lossy(&self.stderr);

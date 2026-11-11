@@ -87,6 +87,8 @@ jobs:
               - 'crates/eryx-server/**'
             python:
               - 'crates/eryx-python/**'
+              # pyeryx depends on it for the exceptions it shares
+              - 'sdk/python/**'
             python-sdk:
               - 'sdk/python/**'
               - '.github/workflows/ci.yml'
@@ -798,6 +800,8 @@ jobs:
           uv venv ../../.venv
           source ../../.venv/bin/activate
           uv pip install maturin
+          # pyeryx depends on eryx-run, from this repo until it's on PyPI
+          uv pip install -e ../../sdk/python
           maturin develop --release
           uv export --extra dev --no-dev --no-hashes --no-emit-project --frozen | uv pip install -r -
 
@@ -898,6 +902,8 @@ jobs:
           uv venv ../../.venv
           source ../../.venv/Scripts/activate
           uv pip install maturin
+          # pyeryx depends on eryx-run, from this repo until it's on PyPI
+          uv pip install -e ../../sdk/python
           maturin develop --release
           uv export --extra dev --no-dev --no-hashes --no-emit-project --frozen | uv pip install -r -
 
@@ -978,6 +984,8 @@ jobs:
           uv venv ../../.venv
           source ../../.venv/bin/activate
           uv pip install maturin
+          # pyeryx depends on eryx-run, from this repo until it's on PyPI
+          uv pip install -e ../../sdk/python
           maturin develop --release
           uv export --extra dev --no-dev --no-hashes --no-emit-project --frozen | uv pip install -r -
 
@@ -1155,6 +1163,8 @@ jobs:
         working-directory: crates/eryx-python
         run: |
           source ../../.venv/bin/activate
+          # pyeryx depends on eryx-run, from this repo until it's on PyPI
+          uv pip install -e ../../sdk/python
           maturin develop --release
 
       - name: Test Python code blocks

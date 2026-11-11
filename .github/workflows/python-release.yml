@@ -159,6 +159,7 @@ jobs:
         run: |
           uv venv
           source .venv/bin/activate
+          uv pip install ./sdk/python  # pyeryx's eryx-run, as in this commit
           uv pip install dist/*.whl --force-reinstall
           cd crates/eryx-python && uv export --extra dev --no-dev --no-hashes --no-emit-project --frozen | uv pip install -r - && cd ../..
           pytest crates/eryx-python/tests/ -v
@@ -313,6 +314,7 @@ jobs:
         run: |
           uv venv
           source .venv/bin/activate
+          uv pip install ./sdk/python  # pyeryx's eryx-run, as in this commit
           uv pip install dist/*.whl --force-reinstall
           cd crates/eryx-python && uv export --extra dev --no-dev --no-hashes --no-emit-project --frozen | uv pip install -r - && cd ../..
           pytest crates/eryx-python/tests/ -v
@@ -476,6 +478,7 @@ jobs:
         run: |
           uv venv
           source .venv/bin/activate
+          uv pip install ./sdk/python  # pyeryx's eryx-run, as in this commit
           uv pip install dist/*.whl --force-reinstall
           cd crates/eryx-python && uv export --extra dev --no-dev --no-hashes --no-emit-project --frozen | uv pip install -r - && cd ../..
           pytest crates/eryx-python/tests/ -v
@@ -557,6 +560,7 @@ jobs:
         run: |
           uv venv
           source .venv/bin/activate
+          uv pip install ./sdk/python  # pyeryx's eryx-run, as in this commit
           uv pip install dist/*.whl --force-reinstall
           cd crates/eryx-python && uv export --extra dev --no-dev --no-hashes --no-emit-project --frozen | uv pip install -r - && cd ../..
           pytest crates/eryx-python/tests/ -v
@@ -641,6 +645,7 @@ jobs:
         run: |
           uv venv
           source .venv/Scripts/activate
+          uv pip install ./sdk/python  # pyeryx's eryx-run, as in this commit
           uv pip install dist/*.whl --force-reinstall
           cd crates/eryx-python && uv export --extra dev --no-dev --no-hashes --no-emit-project --frozen | uv pip install -r - && cd ../..
           pytest crates/eryx-python/tests/ -v
