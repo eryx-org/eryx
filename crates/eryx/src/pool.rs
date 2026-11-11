@@ -49,7 +49,7 @@
 //! println!("Total acquisitions: {}", stats.total_acquisitions);
 //! ```
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::ops::{Deref, DerefMut};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
@@ -302,10 +302,10 @@ impl SandboxPool {
     /// instances as needed. The pool will be pre-warmed with `config.min_idle`
     /// instances.
     ///
-    /// Callbacks, handlers and resource limits are per-request: set them on
-    /// each [`PooledSandbox`]. For sandboxes that need anything else (secrets,
-    /// networking, packages, libraries, volumes, ...), use
-    /// [`with_builder`](Self::with_builder).
+    /// Callbacks, handlers, resource limits, networking and secrets are
+    /// per-request: set them on each [`PooledSandbox`]. For sandboxes that
+    /// need anything else (packages, libraries, volumes, ...), or the same
+    /// network on every lease, use [`with_builder`](Self::with_builder).
     ///
     /// # Errors
     ///
@@ -832,6 +832,29 @@ impl PooledSandbox {
     pub fn with_resource_limits(mut self, limits: ResourceLimits) -> Self {
         self.sandbox_mut().set_resource_limits(limits);
         self
+    }
+
+    /// Set the network configuration and secrets for this request.
+    ///
+    /// These replace the built ones (by default no network) until the sandbox
+    /// is returned to the pool. Each [`SecretConfig`](crate::SecretConfig)
+    /// has its own placeholder: create new ones for each request, or give
+    /// them the same one with
+    /// [`with_placeholder`](crate::SecretConfig::with_placeholder) where
+    /// state that may hold it is kept between requests (a session).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ErrorKind::Initialization`](crate::ErrorKind::Initialization)
+    /// if `config` is invalid, a secret has no host it could be sent to, or
+    /// placeholders overlap.
+    pub fn with_network(
+        mut self,
+        config: crate::NetConfig,
+        secrets: HashMap<String, crate::SecretConfig>,
+    ) -> Result<Self, Error> {
+        self.sandbox_mut().set_network(config, secrets)?;
+        Ok(self)
     }
 
     /// Set VFS storage for this request.

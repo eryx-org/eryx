@@ -23,6 +23,9 @@ pub struct SecretConfig {
     /// substituted, and the sandbox refuses to build with it; see
     /// [`NetConfig::secret_hosts`](crate::NetConfig::secret_hosts).
     pub(crate) allowed_hosts: Vec<String>,
+    /// The only HTTP header the real value may be sent in, if set (compared
+    /// ignoring case).
+    pub(crate) header: Option<String>,
 }
 
 impl SecretConfig {
@@ -38,7 +41,43 @@ impl SecretConfig {
             real_value: real_value.into(),
             placeholder: random_placeholder(),
             allowed_hosts,
+            header: None,
         }
+    }
+
+    /// Only substitute the real value in the HTTP header `name` (compared
+    /// ignoring case). A request with the placeholder in any other header is
+    /// refused, as for a host the secret isn't allowed for.
+    #[must_use]
+    pub fn only_in_header(mut self, name: impl Into<String>) -> Self {
+        self.header = Some(name.into());
+        self
+    }
+
+    /// Use `placeholder` instead of a newly generated one, e.g. to keep the
+    /// same one across executions that share state, such as a session's.
+    ///
+    /// It should be unguessable, like the generated ones, since code that
+    /// knows it can have the secret substituted without reading it.
+    ///
+    /// # Errors
+    ///
+    /// Fails unless `placeholder` is at least 32 ASCII letters, digits and
+    /// underscores, so it can't match ordinary text in headers or output.
+    pub fn with_placeholder(mut self, placeholder: impl Into<String>) -> Result<Self, String> {
+        let placeholder = placeholder.into();
+        if placeholder.len() < MIN_PLACEHOLDER_LEN
+            || !placeholder
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'_')
+        {
+            return Err(format!(
+                "a secret placeholder must be at least {MIN_PLACEHOLDER_LEN} ASCII letters, \
+                 digits and underscores"
+            ));
+        }
+        self.placeholder = placeholder;
+        Ok(self)
     }
 
     /// The placeholder the sandbox sees in place of the real value.
@@ -53,6 +92,12 @@ impl SecretConfig {
     pub fn allowed_hosts(&self) -> &[String] {
         &self.allowed_hosts
     }
+
+    /// The only HTTP header the real value may be sent in, if limited to one.
+    #[must_use]
+    pub fn header(&self) -> Option<&str> {
+        self.header.as_deref()
+    }
 }
 
 impl std::fmt::Debug for SecretConfig {
@@ -61,6 +106,7 @@ impl std::fmt::Debug for SecretConfig {
             .field("real_value", &"[REDACTED]")
             .field("placeholder", &self.placeholder)
             .field("allowed_hosts", &self.allowed_hosts)
+            .field("header", &self.header)
             .finish()
     }
 }
@@ -150,6 +196,30 @@ impl From<bool> for OutputScrubPolicy {
     }
 }
 
+/// The shortest placeholder [`SecretConfig::with_placeholder`] accepts.
+const MIN_PLACEHOLDER_LEN: usize = 32;
+
+/// Fail if one secret's placeholder contains another's, so substituting or
+/// scrubbing one could change the other.
+///
+/// # Errors
+///
+/// Names the first such pair of secrets.
+pub(crate) fn check_placeholders(secrets: &HashMap<String, SecretConfig>) -> Result<(), String> {
+    let mut names: Vec<&String> = secrets.keys().collect();
+    names.sort();
+    for a in &names {
+        for b in &names {
+            if a != b && secrets[*a].placeholder.contains(&secrets[*b].placeholder) {
+                return Err(format!(
+                    "secrets '{a}' and '{b}' have overlapping placeholders"
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Generate a unique placeholder for a secret.
 ///
 /// Format: `ERYX_SECRET_PLACEHOLDER_{random_hex}`
@@ -231,6 +301,7 @@ mod tests {
                 real_value: "real-secret".to_string(),
                 placeholder: "ERYX_SECRET_PLACEHOLDER_abc123".to_string(),
                 allowed_hosts: vec![],
+                header: None,
             },
         );
 
@@ -248,6 +319,7 @@ mod tests {
                 real_value: "secret1".to_string(),
                 placeholder: "PLACEHOLDER_1".to_string(),
                 allowed_hosts: vec![],
+                header: None,
             },
         );
         secrets.insert(
@@ -256,6 +328,7 @@ mod tests {
                 real_value: "secret2".to_string(),
                 placeholder: "PLACEHOLDER_2".to_string(),
                 allowed_hosts: vec![],
+                header: None,
             },
         );
 
@@ -280,6 +353,7 @@ mod tests {
                 real_value: "secret".to_string(),
                 placeholder: "PLACEHOLDER".to_string(),
                 allowed_hosts: vec![],
+                header: None,
             },
         );
 
@@ -304,5 +378,46 @@ mod tests {
 
         assert!(matches!(policy_true, OutputScrubPolicy::All));
         assert!(matches!(policy_false, OutputScrubPolicy::None));
+    }
+
+    #[test]
+    fn with_placeholder_needs_a_long_plain_placeholder() {
+        let secret = || SecretConfig::new("real", vec!["api.example.com".into()]);
+        let long = "P".repeat(MIN_PLACEHOLDER_LEN);
+        assert_eq!(
+            secret()
+                .with_placeholder(&long)
+                .map(|s| s.placeholder().to_string()),
+            Ok(long.clone())
+        );
+        assert!(
+            secret()
+                .with_placeholder("P".repeat(MIN_PLACEHOLDER_LEN - 1))
+                .is_err()
+        );
+        assert!(secret().with_placeholder(format!("{long} x")).is_err());
+    }
+
+    #[test]
+    fn overlapping_placeholders_are_refused() {
+        let with = |placeholder: &str| SecretConfig {
+            placeholder: placeholder.to_string(),
+            ..SecretConfig::new("real", vec![])
+        };
+        let base = "P".repeat(MIN_PLACEHOLDER_LEN);
+        let distinct = HashMap::from([
+            ("A".to_string(), with(&format!("{base}_A"))),
+            ("B".to_string(), with(&format!("{base}_B"))),
+        ]);
+        assert!(check_placeholders(&distinct).is_ok());
+
+        let overlapping = HashMap::from([
+            ("A".to_string(), with(&base)),
+            ("B".to_string(), with(&format!("{base}_B"))),
+        ]);
+        let Err(err) = check_placeholders(&overlapping) else {
+            panic!("overlapping placeholders were accepted");
+        };
+        assert!(err.contains("'A'") && err.contains("'B'"), "{err}");
     }
 }

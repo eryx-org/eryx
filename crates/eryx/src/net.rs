@@ -149,6 +149,8 @@ pub struct NetConfig {
     ///
     /// Useful for testing with self-signed certificates.
     custom_root_certs: Vec<Vec<u8>>,
+    /// Most bytes the execution may send and receive in all, if limited.
+    max_bytes: Option<u64>,
     /// Substitute secret placeholders on plain TCP connections too.
     ///
     /// By default (`false`) placeholders are only replaced after a TLS
@@ -250,6 +252,7 @@ impl Default for NetConfig {
             internal_hosts: vec![],
             resolver: None,
             custom_root_certs: vec![],
+            max_bytes: None,
             allow_plaintext_secrets: false,
         }
     }
@@ -328,6 +331,21 @@ impl NetConfig {
         self
     }
 
+    /// Limit the bytes the execution may send and receive, in all, across
+    /// every connection. Past it, reads and writes fail with
+    /// [`TcpError::NotPermitted`].
+    #[must_use]
+    pub fn with_max_bytes(mut self, max: u64) -> Self {
+        self.max_bytes = Some(max);
+        self
+    }
+
+    /// The most bytes the execution may send and receive, if limited.
+    #[must_use]
+    pub fn max_bytes(&self) -> Option<u64> {
+        self.max_bytes
+    }
+
     /// Allow connections to localhost (disabled by default).
     #[must_use]
     pub fn allow_localhost(mut self) -> Self {
@@ -361,6 +379,7 @@ impl NetConfig {
             internal_hosts: vec![],
             resolver: None,
             custom_root_certs: vec![],
+            max_bytes: None,
             allow_plaintext_secrets: false,
         }
     }
@@ -775,12 +794,30 @@ pub struct ConnectionManager {
     http_states: HashMap<u32, HttpParsingState>,
     /// Track which host each connection is connected to
     connection_hosts: HashMap<u32, String>,
+    /// Bytes sent and received so far, across all connections
+    traffic: NetTraffic,
     /// Secrets configuration for substitution
     secrets: HashMap<String, crate::secrets::SecretConfig>,
     /// `(real value, placeholder)` of each secret, for masking reads.
     read_masks: Vec<(Vec<u8>, Vec<u8>)>,
     /// Per-connection read buffering for that masking.
     read_states: HashMap<u32, ReadState>,
+}
+
+/// Bytes an execution sent and received over the network, as the guest
+/// wrote and read them (TLS and substitution don't count).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct NetTraffic {
+    /// Bytes the guest wrote to its connections.
+    pub sent: u64,
+    /// Bytes the guest read from its connections.
+    pub received: u64,
+}
+
+impl NetTraffic {
+    fn total(self) -> u64 {
+        self.sent.saturating_add(self.received)
+    }
 }
 
 /// Read data held back from the guest by one connection.
@@ -855,6 +892,47 @@ fn partial_secret_len(data: &[u8], masks: &[(Vec<u8>, Vec<u8>)]) -> usize {
 }
 
 impl ConnectionManager {
+    /// Bytes sent and received so far.
+    #[must_use]
+    pub fn traffic(&self) -> NetTraffic {
+        self.traffic
+    }
+
+    /// How many more bytes the execution may move, if it's limited; `Err`
+    /// once it can't move any.
+    fn remaining(&self) -> Result<Option<u64>, TcpError> {
+        let Some(max) = self.config.max_bytes else {
+            return Ok(None);
+        };
+        match max.saturating_sub(self.traffic.total()) {
+            0 => Err(self.over_limit()),
+            left => Ok(Some(left)),
+        }
+    }
+
+    fn over_limit(&self) -> TcpError {
+        TcpError::NotPermitted(format!(
+            "network limit reached: {} bytes sent and received",
+            self.config.max_bytes.unwrap_or_default()
+        ))
+    }
+
+    /// Refuse a write of `len` bytes that would go over the limit.
+    fn check_write(&self, len: usize) -> Result<(), TcpError> {
+        match self.remaining()? {
+            Some(left) if len as u64 > left => Err(self.over_limit()),
+            _ => Ok(()),
+        }
+    }
+
+    /// `len` capped at what's left of the limit.
+    fn read_len(&self, len: u32) -> Result<u32, TcpError> {
+        Ok(match self.remaining()? {
+            Some(left) => len.min(u32::try_from(left).unwrap_or(u32::MAX)),
+            None => len,
+        })
+    }
+
     /// Create a new connection manager with the given config and secrets.
     #[must_use]
     pub fn new(config: NetConfig, secrets: HashMap<String, crate::secrets::SecretConfig>) -> Self {
@@ -882,6 +960,7 @@ impl ConnectionManager {
             next_handle: 1,
             http_states: HashMap::new(),
             connection_hosts: HashMap::new(),
+            traffic: NetTraffic::default(),
             read_masks: secrets
                 .values()
                 .filter(|s| !s.real_value.is_empty())
@@ -1191,19 +1270,22 @@ impl ConnectionManager {
         timeout_ms: u32,
     ) -> Result<Vec<u8>, TcpError> {
         let io_timeout = Self::effective_timeout(self.config.io_timeout, timeout_ms);
+        let len = self.read_len(len)?;
         let stream = self
             .tcp_connections
             .get_mut(&handle)
             .ok_or(TcpError::InvalidHandle)?;
 
         let state = self.read_states.entry(handle).or_default();
-        read_masked(stream, state, &self.read_masks, len, io_timeout)
+        let data = read_masked(stream, state, &self.read_masks, len, io_timeout)
             .await
             .map_err(|e| match e.kind() {
                 std::io::ErrorKind::ConnectionReset => TcpError::ConnectionReset,
                 std::io::ErrorKind::TimedOut => TcpError::TimedOut,
                 _ => TcpError::IoError(e.to_string()),
-            })
+            })?;
+        self.traffic.received += data.len() as u64;
+        Ok(data)
     }
 
     /// Write to a TCP connection.
@@ -1221,6 +1303,7 @@ impl ConnectionManager {
         if !self.tcp_connections.contains_key(&handle) {
             return Err(TcpError::InvalidHandle);
         }
+        self.check_write(data.len())?;
 
         // Fast path: nothing to substitute = no parsing
         if self.secrets.is_empty() || !self.config.allow_plaintext_secrets {
@@ -1231,6 +1314,7 @@ impl ConnectionManager {
                 self.tcp_write_raw(handle, &bytes, timeout_ms).await?;
             }
         }
+        self.traffic.sent += data.len() as u64;
         // Report what the guest wrote: substitution changes the length on the wire.
         Ok(data.len() as u32)
     }
@@ -1296,7 +1380,8 @@ impl ConnectionManager {
                 let value = line[colon_pos + 1..].trim_start();
 
                 // Substitute secrets in header value
-                let substituted_value = self.substitute_secrets_in_text(value, target_host)?;
+                let substituted_value =
+                    self.substitute_secrets_in_text(value, name, target_host)?;
                 result.push_str(&format!("{name}: {substituted_value}\r\n"));
             } else {
                 result.push_str(line);
@@ -1308,14 +1393,16 @@ impl ConnectionManager {
         Ok(result.into_bytes())
     }
 
-    /// Substitute secret placeholders in text.
+    /// Substitute secret placeholders in the value `text` of the header
+    /// `header`.
     ///
     /// A secret is only substituted for a host matching
     /// [`NetConfig::secret_hosts`]; a secret with no hosts there is never
-    /// substituted.
+    /// substituted. A secret limited to one header is only substituted there.
     fn substitute_secrets_in_text(
         &self,
         text: &str,
+        header: &str,
         target_host: &str,
     ) -> Result<String, TcpError> {
         let mut result = text.to_string();
@@ -1335,6 +1422,13 @@ impl ConnectionManager {
                 return Err(TcpError::NotPermitted(
                     "Secret not allowed for the target host".into(),
                 ));
+            }
+            if let Some(allowed) = &secret_config.header
+                && !allowed.eq_ignore_ascii_case(header)
+            {
+                return Err(TcpError::NotPermitted(format!(
+                    "Secret not allowed in the {header} header"
+                )));
             }
 
             // Substitute
@@ -1439,19 +1533,22 @@ impl ConnectionManager {
         timeout_ms: u32,
     ) -> Result<Vec<u8>, TlsError> {
         let io_timeout = Self::effective_timeout(self.config.io_timeout, timeout_ms);
+        let len = self.read_len(len).map_err(TlsError::Tcp)?;
         let stream = self
             .tls_connections
             .get_mut(&handle)
             .ok_or(TlsError::InvalidHandle)?;
 
         let state = self.read_states.entry(handle).or_default();
-        read_masked(stream, state, &self.read_masks, len, io_timeout)
+        let data = read_masked(stream, state, &self.read_masks, len, io_timeout)
             .await
             .map_err(|e| match e.kind() {
                 std::io::ErrorKind::ConnectionReset => TlsError::Tcp(TcpError::ConnectionReset),
                 std::io::ErrorKind::TimedOut => TlsError::Tcp(TcpError::TimedOut),
                 _ => TlsError::Tcp(TcpError::IoError(e.to_string())),
-            })
+            })?;
+        self.traffic.received += data.len() as u64;
+        Ok(data)
     }
 
     /// Write to a TLS connection.
@@ -1467,6 +1564,7 @@ impl ConnectionManager {
         if !self.tls_connections.contains_key(&handle) {
             return Err(TlsError::InvalidHandle);
         }
+        self.check_write(data.len()).map_err(TlsError::Tcp)?;
 
         // Fast path: no secrets = no parsing
         if self.secrets.is_empty() {
@@ -1477,6 +1575,7 @@ impl ConnectionManager {
                 self.tls_write_raw(handle, &bytes, timeout_ms).await?;
             }
         }
+        self.traffic.sent += data.len() as u64;
         // Report what the guest wrote: substitution changes the length on the wire.
         Ok(data.len() as u32)
     }
@@ -1999,21 +2098,55 @@ mod tests {
                 real_value: "real-secret-value".to_string(),
                 placeholder: "ERYX_SECRET_PLACEHOLDER_abc123".to_string(),
                 allowed_hosts: vec!["api.example.com".to_string()],
+                header: None,
             },
         );
 
         let manager = ConnectionManager::new(config, secrets);
 
         // Test substitution for allowed host
-        let result = manager
-            .substitute_secrets_in_text("Bearer ERYX_SECRET_PLACEHOLDER_abc123", "api.example.com");
+        let result = manager.substitute_secrets_in_text(
+            "Bearer ERYX_SECRET_PLACEHOLDER_abc123",
+            "Authorization",
+            "api.example.com",
+        );
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), "Bearer real-secret-value");
 
         // Test rejection for disallowed host
-        let result =
-            manager.substitute_secrets_in_text("Bearer ERYX_SECRET_PLACEHOLDER_abc123", "evil.com");
+        let result = manager.substitute_secrets_in_text(
+            "Bearer ERYX_SECRET_PLACEHOLDER_abc123",
+            "Authorization",
+            "evil.com",
+        );
         assert!(result.is_err());
+    }
+
+    /// A secret limited to one header is only substituted there, whatever
+    /// the header's case, and a request with it elsewhere is refused.
+    #[test]
+    fn secret_limited_to_a_header() {
+        let secret = crate::secrets::SecretConfig {
+            placeholder: "PH_HEADER".to_string(),
+            ..crate::secrets::SecretConfig::new("real-secret-value", vec!["api.example.com".into()])
+                .only_in_header("X-Api-Key")
+        };
+        let manager = ConnectionManager::new(
+            NetConfig::permissive(),
+            HashMap::from([("KEY".into(), secret)]),
+        );
+
+        assert_eq!(
+            manager
+                .substitute_secrets_in_text("PH_HEADER", "x-api-key", "api.example.com")
+                .unwrap(),
+            "real-secret-value"
+        );
+        assert!(
+            manager
+                .substitute_secrets_in_text("Bearer PH_HEADER", "Authorization", "api.example.com")
+                .is_err()
+        );
     }
 
     /// A secret without hosts of its own uses the network allowlist, and is
@@ -2027,6 +2160,7 @@ mod tests {
                     real_value: "real-secret-value".to_string(),
                     placeholder: "PLACEHOLDER_XYZ".to_string(),
                     allowed_hosts: hosts,
+                    header: None,
                 },
             )])
         };
@@ -2036,7 +2170,11 @@ mod tests {
         let manager = ConnectionManager::new(permissive, secret(vec![]));
         assert!(
             manager
-                .substitute_secrets_in_text("Bearer PLACEHOLDER_XYZ", "any-host.com")
+                .substitute_secrets_in_text(
+                    "Bearer PLACEHOLDER_XYZ",
+                    "Authorization",
+                    "any-host.com"
+                )
                 .is_err()
         );
 
@@ -2057,13 +2195,21 @@ mod tests {
         let manager = ConnectionManager::new(allowlist, secret(vec![]));
         assert_eq!(
             manager
-                .substitute_secrets_in_text("Bearer PLACEHOLDER_XYZ", "api.example.com")
+                .substitute_secrets_in_text(
+                    "Bearer PLACEHOLDER_XYZ",
+                    "Authorization",
+                    "api.example.com"
+                )
                 .unwrap(),
             "Bearer real-secret-value"
         );
         assert!(
             manager
-                .substitute_secrets_in_text("Bearer PLACEHOLDER_XYZ", "other.example.com")
+                .substitute_secrets_in_text(
+                    "Bearer PLACEHOLDER_XYZ",
+                    "Authorization",
+                    "other.example.com"
+                )
                 .is_err()
         );
     }
@@ -2083,6 +2229,7 @@ mod tests {
                 real_value: "top-secret".to_string(),
                 placeholder: "PH_AUTH".to_string(),
                 allowed_hosts: vec!["api.openai.com".to_string()],
+                header: None,
             },
         );
 
@@ -2091,20 +2238,24 @@ mod tests {
         // All of these unauthorized hosts must be rejected
         assert!(
             manager
-                .substitute_secrets_in_text("PH_AUTH", "evil.com")
+                .substitute_secrets_in_text("PH_AUTH", "Authorization", "evil.com")
                 .is_err()
         );
         assert!(
             manager
-                .substitute_secrets_in_text("PH_AUTH", "127.0.0.1")
+                .substitute_secrets_in_text("PH_AUTH", "Authorization", "127.0.0.1")
                 .is_err()
         );
         assert!(
             manager
-                .substitute_secrets_in_text("PH_AUTH", "localhost")
+                .substitute_secrets_in_text("PH_AUTH", "Authorization", "localhost")
                 .is_err()
         );
-        assert!(manager.substitute_secrets_in_text("PH_AUTH", "").is_err());
+        assert!(
+            manager
+                .substitute_secrets_in_text("PH_AUTH", "Authorization", "")
+                .is_err()
+        );
     }
 
     /// Test that multiple secrets with different host restrictions are independently enforced.
@@ -2118,6 +2269,7 @@ mod tests {
                 real_value: "openai-secret".to_string(),
                 placeholder: "PH_OPENAI".to_string(),
                 allowed_hosts: vec!["api.openai.com".to_string()],
+                header: None,
             },
         );
         secrets.insert(
@@ -2126,6 +2278,7 @@ mod tests {
                 real_value: "github-secret".to_string(),
                 placeholder: "PH_GITHUB".to_string(),
                 allowed_hosts: vec!["api.github.com".to_string()],
+                header: None,
             },
         );
 
@@ -2134,25 +2287,25 @@ mod tests {
         // OpenAI key for OpenAI host: OK
         assert!(
             manager
-                .substitute_secrets_in_text("PH_OPENAI", "api.openai.com")
+                .substitute_secrets_in_text("PH_OPENAI", "Authorization", "api.openai.com")
                 .is_ok()
         );
         // OpenAI key for GitHub host: REJECTED
         assert!(
             manager
-                .substitute_secrets_in_text("PH_OPENAI", "api.github.com")
+                .substitute_secrets_in_text("PH_OPENAI", "Authorization", "api.github.com")
                 .is_err()
         );
         // GitHub key for GitHub host: OK
         assert!(
             manager
-                .substitute_secrets_in_text("PH_GITHUB", "api.github.com")
+                .substitute_secrets_in_text("PH_GITHUB", "Authorization", "api.github.com")
                 .is_ok()
         );
         // GitHub key for OpenAI host: REJECTED
         assert!(
             manager
-                .substitute_secrets_in_text("PH_GITHUB", "api.openai.com")
+                .substitute_secrets_in_text("PH_GITHUB", "Authorization", "api.openai.com")
                 .is_err()
         );
     }
@@ -2168,6 +2321,7 @@ mod tests {
                 real_value: "secret".to_string(),
                 placeholder: "PH_GLOB".to_string(),
                 allowed_hosts: vec!["*.openai.com".to_string()],
+                header: None,
             },
         );
 
@@ -2175,18 +2329,18 @@ mod tests {
 
         assert!(
             manager
-                .substitute_secrets_in_text("PH_GLOB", "api.openai.com")
+                .substitute_secrets_in_text("PH_GLOB", "Authorization", "api.openai.com")
                 .is_ok()
         );
         // Bare domain doesn't match *.openai.com
         assert!(
             manager
-                .substitute_secrets_in_text("PH_GLOB", "openai.com")
+                .substitute_secrets_in_text("PH_GLOB", "Authorization", "openai.com")
                 .is_err()
         );
         assert!(
             manager
-                .substitute_secrets_in_text("PH_GLOB", "evil.com")
+                .substitute_secrets_in_text("PH_GLOB", "Authorization", "evil.com")
                 .is_err()
         );
     }
@@ -2202,6 +2356,7 @@ mod tests {
                 real_value: "secret".to_string(),
                 placeholder: "PH_DECEPTIVE".to_string(),
                 allowed_hosts: vec!["api.openai.com".to_string()],
+                header: None,
             },
         );
 
@@ -2210,22 +2365,26 @@ mod tests {
         // Deceptive domains that look similar but shouldn't match
         assert!(
             manager
-                .substitute_secrets_in_text("PH_DECEPTIVE", "api.openai.com.evil.com")
+                .substitute_secrets_in_text(
+                    "PH_DECEPTIVE",
+                    "Authorization",
+                    "api.openai.com.evil.com"
+                )
                 .is_err()
         );
         assert!(
             manager
-                .substitute_secrets_in_text("PH_DECEPTIVE", "api-openai.com")
+                .substitute_secrets_in_text("PH_DECEPTIVE", "Authorization", "api-openai.com")
                 .is_err()
         );
         assert!(
             manager
-                .substitute_secrets_in_text("PH_DECEPTIVE", "evil-api.openai.com")
+                .substitute_secrets_in_text("PH_DECEPTIVE", "Authorization", "evil-api.openai.com")
                 .is_err()
         );
         assert!(
             manager
-                .substitute_secrets_in_text("PH_DECEPTIVE", "xapi.openai.com")
+                .substitute_secrets_in_text("PH_DECEPTIVE", "Authorization", "xapi.openai.com")
                 .is_err()
         );
     }
@@ -2241,6 +2400,7 @@ mod tests {
                 real_value: "secret".to_string(),
                 placeholder: "PH_IP".to_string(),
                 allowed_hosts: vec!["api.openai.com".to_string()],
+                header: None,
             },
         );
 
@@ -2249,12 +2409,12 @@ mod tests {
         // IP address should NOT match hostname restriction
         assert!(
             manager
-                .substitute_secrets_in_text("PH_IP", "104.18.7.192")
+                .substitute_secrets_in_text("PH_IP", "Authorization", "104.18.7.192")
                 .is_err()
         );
         assert!(
             manager
-                .substitute_secrets_in_text("PH_IP", "1.2.3.4")
+                .substitute_secrets_in_text("PH_IP", "Authorization", "1.2.3.4")
                 .is_err()
         );
     }
@@ -2270,6 +2430,7 @@ mod tests {
                 real_value: "secret".to_string(),
                 placeholder: "PH_CASE".to_string(),
                 allowed_hosts: vec!["api.openai.com".to_string()],
+                header: None,
             },
         );
 
@@ -2278,12 +2439,12 @@ mod tests {
         // DNS is case-insensitive, so these should all work
         assert!(
             manager
-                .substitute_secrets_in_text("PH_CASE", "API.OPENAI.COM")
+                .substitute_secrets_in_text("PH_CASE", "Authorization", "API.OPENAI.COM")
                 .is_ok()
         );
         assert!(
             manager
-                .substitute_secrets_in_text("PH_CASE", "Api.OpenAI.Com")
+                .substitute_secrets_in_text("PH_CASE", "Authorization", "Api.OpenAI.Com")
                 .is_ok()
         );
     }
@@ -2299,13 +2460,18 @@ mod tests {
                 real_value: "secret".to_string(),
                 placeholder: "PH_NOOP".to_string(),
                 allowed_hosts: vec!["restricted.com".to_string()],
+                header: None,
             },
         );
 
         let manager = ConnectionManager::new(config, secrets);
 
         // Text without any placeholder should pass through unchanged, for any host
-        let result = manager.substitute_secrets_in_text("Bearer some-other-token", "evil.com");
+        let result = manager.substitute_secrets_in_text(
+            "Bearer some-other-token",
+            "Authorization",
+            "evil.com",
+        );
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), "Bearer some-other-token");
     }
@@ -2355,6 +2521,7 @@ mod tests {
                 real_value: "real-secret-value".to_string(),
                 placeholder: "PLACEHOLDER_LARGE".to_string(),
                 allowed_hosts: vec!["api.example.com".to_string()],
+                header: None,
             },
         );
 
@@ -2418,6 +2585,7 @@ mod tests {
                 real_value: "real-secret-value".to_string(),
                 placeholder: "PLACEHOLDER_SNI".to_string(),
                 allowed_hosts: vec!["api.openai.com".to_string()],
+                header: None,
             },
         );
 
@@ -2459,6 +2627,7 @@ mod tests {
                 real_value: "real-secret-value".to_string(),
                 placeholder: "PLACEHOLDER_BLOCKED".to_string(),
                 allowed_hosts: vec!["api.legitimate.com".to_string()],
+                header: None,
             },
         );
 
@@ -2502,6 +2671,7 @@ mod tests {
                 real_value: "secret".to_string(),
                 placeholder: "PH".to_string(),
                 allowed_hosts: vec![],
+                header: None,
             },
         );
 
@@ -2783,6 +2953,7 @@ mod tests {
                 real_value: "real".to_string(),
                 placeholder: "PH".to_string(),
                 allowed_hosts: vec!["api.example.com".to_string(), "127.0.0.1".to_string()],
+                header: None,
             },
         );
         let mut manager = ConnectionManager::new(

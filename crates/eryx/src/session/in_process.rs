@@ -449,7 +449,7 @@ async fn run_code(
     // Connections don't outlive the call, as with `Sandbox::execute`.
     let net_result = match net_handler {
         Some(mut net_handler) => (&mut net_handler.0).await,
-        None => Ok(()),
+        None => Ok(crate::net::NetTraffic::default()),
     };
 
     // A handler task only fails by panicking (e.g. in a user callback or
@@ -457,7 +457,7 @@ async fn run_code(
     let callback_invocations =
         callback_invocations.map_err(|e| handler_task_failed("callback handler", &e))?;
     let trace_events = trace_events.map_err(|e| handler_task_failed("trace collector", &e))?;
-    net_result.map_err(|e| handler_task_failed("network handler", &e))?;
+    let traffic = net_result.map_err(|e| handler_task_failed("network handler", &e))?;
     output_result.map_err(|e| handler_task_failed("output handler", &e))?;
 
     let duration = start.elapsed();
@@ -487,10 +487,22 @@ async fn run_code(
                     callback_invocations,
                     peak_memory_bytes: Some(output.peak_memory_bytes),
                     fuel_consumed: output.fuel_consumed,
+                    network_bytes_sent: traffic.sent,
+                    network_bytes_received: traffic.received,
                 },
             })
         }
-        Err(error) => Err(sandbox.scrub_error(error)),
+        Err(error) => {
+            let error = match error.stats().cloned() {
+                Some(stats) => error.with_stats(ExecuteStats {
+                    network_bytes_sent: traffic.sent,
+                    network_bytes_received: traffic.received,
+                    ..stats
+                }),
+                None => error,
+            };
+            Err(sandbox.scrub_error(error))
+        }
     }
 }
 

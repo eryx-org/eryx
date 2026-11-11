@@ -428,6 +428,22 @@ sandbox = eryx.Sandbox(network=config)
 # Attempting more than 5 connections will fail
 ```
 
+## Traffic Limits
+
+In Rust, `NetConfig::with_max_bytes` caps the bytes an execution sends and
+receives, in all, across its connections. Reads stop at the cap, and past it
+reads and writes raise `OSError` (`network limit reached`). Either way, the
+result's `stats.network_bytes_sent` and `stats.network_bytes_received` say how
+much it moved, as the code wrote and read it (TLS overhead isn't counted):
+
+```rust,ignore
+let sandbox = Sandbox::embedded()
+    .with_network(NetConfig::default().allow_host("api.example.com").with_max_bytes(16 << 20))
+    .build()?;
+let result = sandbox.execute(code).await?;
+println!("{} bytes in", result.stats.network_bytes_received);
+```
+
 ## Best Practices
 
 1. **Use allowlists in production** - Only allow connections to known, trusted hosts

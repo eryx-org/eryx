@@ -291,12 +291,13 @@ pub async fn run_output_collector(
 ///
 /// Owns a [`ConnectionManager`] and processes TCP/TLS requests received through
 /// the channel. This allows async network operations to work with wasmtime's
-/// synchronous accessor pattern.
+/// synchronous accessor pattern. Returns the bytes sent and received once the
+/// channel closes.
 #[tracing::instrument(skip(net_rx, manager))]
 pub async fn run_net_handler(
     mut net_rx: mpsc::Receiver<NetRequest>,
     mut manager: ConnectionManager,
-) {
+) -> crate::net::NetTraffic {
     while let Some(request) = net_rx.recv().await {
         match request {
             // TCP operations
@@ -370,6 +371,7 @@ pub async fn run_net_handler(
             }
         }
     }
+    manager.traffic()
 }
 
 /// Close all connections managed by a running [`run_net_handler`].
@@ -407,6 +409,7 @@ mod tests {
                 real_value: "real-secret".to_string(),
                 placeholder: "ERYX_SECRET_PLACEHOLDER_abc123".to_string(),
                 allowed_hosts: vec![],
+                header: None,
             },
         );
         secrets
