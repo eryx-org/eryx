@@ -785,6 +785,13 @@ The VFS supports standard Python file operations:
 - `eryx.TimeoutError` - Execution timed out (also a built-in `TimeoutError`)
 - `eryx.CancelledError` - Execution was cancelled
 
+These come from [`eryx-run`](https://pypi.org/project/eryx-run/), the client
+for running sandboxes hosted on [eryx.run](https://eryx.run), which has the
+same API for what both can do. Its exceptions are these same classes, and
+pyeryx's `ExecuteResult` is registered as an `eryx_run.ExecuteResult` (for
+`isinstance`), so code moves between the two by
+changing `import eryx` to `import eryx_run as eryx`.
+
 ## Package Loading
 
 ### Supported Formats

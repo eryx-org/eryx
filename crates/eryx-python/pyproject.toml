@@ -8,6 +8,7 @@ dynamic = ["version"]
 description = "Python sandbox powered by WebAssembly"
 readme = "README.md"
 requires-python = ">=3.10"
+dependencies = ["eryx-run>=0.1"]
 license = { text = "MIT OR Apache-2.0" }
 keywords = ["sandbox", "wasm", "webassembly", "security", "isolation"]
 classifiers = [
@@ -33,6 +34,10 @@ pyeryx = "eryx.__main__:main"
 [project.optional-dependencies]
 dev = ["pytest", "pytest-asyncio", "pytest-xdist", "mypy", "requests", "httpx", "mcp>=2,<2.4"]
 serve = ["mcp>=2,<2.4"]
+
+[tool.uv.sources]
+# Developed together in this repo (sdk/python)
+eryx-run = { path = "../../sdk/python", editable = true }
 
 [tool.maturin]
 features = ["pyo3/extension-module"]

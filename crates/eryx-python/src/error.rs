@@ -4,47 +4,21 @@
 
 use std::sync::{Arc, Mutex};
 
-use pyo3::exceptions::{PyException, PyRuntimeError, PyTimeoutError, PyValueError};
+use pyo3::exceptions::{PyException, PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
-use pyo3::types::{PyBytes, PyDict};
+use pyo3::types::PyBytes;
 use pyo3::{PyErr, create_exception, import_exception};
 
-// Define custom exception types that mirror the Rust error hierarchy
-create_exception!(
-    eryx,
-    EryxError,
-    PyException,
-    "Base exception for all Eryx errors."
-);
-create_exception!(
-    eryx,
-    ExecutionError,
-    EryxError,
-    "Error during Python code execution in the sandbox."
-);
-create_exception!(
-    eryx,
-    PythonExceptionError,
-    ExecutionError,
-    "The sandboxed Python code raised an uncaught exception."
-);
-create_exception!(
-    eryx,
-    InitializationError,
-    EryxError,
-    "Error during sandbox initialization."
-);
-create_exception!(
-    eryx,
-    ResourceLimitError,
-    EryxError,
-    "Resource limit exceeded during execution."
-);
-// `TimeoutError` derives from both the built-in `TimeoutError` and
-// `EryxError`. `create_exception!` only supports a single base, so the class is
-// built in `register_exceptions` and looked up from the module when raised.
-import_exception!(eryx._eryx, TimeoutError);
-create_exception!(eryx, CancelledError, EryxError, "Execution was cancelled.");
+// The exceptions eryx.run's client raises too, from the pure-Python `eryx-run`
+// package, so `except eryx.TimeoutError` catches either's and code moves
+// between local and hosted sandboxes unchanged.
+import_exception!(eryx_run, EryxError);
+import_exception!(eryx_run, ExecutionError);
+import_exception!(eryx_run, PythonExceptionError);
+import_exception!(eryx_run, InitializationError);
+import_exception!(eryx_run, ResourceLimitError);
+import_exception!(eryx_run, TimeoutError);
+import_exception!(eryx_run, CancelledError);
 // Raised by user callbacks (not by eryx), so it derives from Exception rather
 // than EryxError.
 create_exception!(
@@ -214,16 +188,7 @@ pub fn register_exceptions(m: &Bound<'_, PyModule>) -> PyResult<()> {
         "ResourceLimitError",
         m.py().get_type::<ResourceLimitError>(),
     )?;
-    let py = m.py();
-    let namespace = PyDict::new(py);
-    namespace.set_item("__module__", "eryx")?;
-    namespace.set_item("__doc__", "Execution timed out.")?;
-    let timeout_error = py.get_type::<pyo3::types::PyType>().call1((
-        "TimeoutError",
-        (py.get_type::<PyTimeoutError>(), py.get_type::<EryxError>()),
-        namespace,
-    ))?;
-    m.add("TimeoutError", timeout_error)?;
+    m.add("TimeoutError", m.py().get_type::<TimeoutError>())?;
     m.add("CancelledError", m.py().get_type::<CancelledError>())?;
     m.add("SuspendCallback", m.py().get_type::<SuspendCallback>())?;
     m.add("PoolError", m.py().get_type::<PoolError>())?;

@@ -64,6 +64,12 @@ from eryx._eryx import (
     __version__,
 )
 
+# eryx.run's client shares these types: its exceptions are the ones above, and
+# a local result is an `eryx_run.ExecuteResult` too.
+import eryx_run as _eryx_run
+
+_eryx_run.ExecuteResult.register(ExecuteResult)
+
 __all__ = [
     # Classes
     "CallbackRegistry",
