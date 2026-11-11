@@ -149,6 +149,8 @@ pub struct NetConfig {
     ///
     /// Useful for testing with self-signed certificates.
     custom_root_certs: Vec<Vec<u8>>,
+    /// Most bytes the execution may send and receive in all, if limited.
+    max_bytes: Option<u64>,
     /// Substitute secret placeholders on plain TCP connections too.
     ///
     /// By default (`false`) placeholders are only replaced after a TLS
@@ -250,6 +252,7 @@ impl Default for NetConfig {
             internal_hosts: vec![],
             resolver: None,
             custom_root_certs: vec![],
+            max_bytes: None,
             allow_plaintext_secrets: false,
         }
     }
@@ -328,6 +331,21 @@ impl NetConfig {
         self
     }
 
+    /// Limit the bytes the execution may send and receive, in all, across
+    /// every connection. Past it, reads and writes fail with
+    /// [`TcpError::NotPermitted`].
+    #[must_use]
+    pub fn with_max_bytes(mut self, max: u64) -> Self {
+        self.max_bytes = Some(max);
+        self
+    }
+
+    /// The most bytes the execution may send and receive, if limited.
+    #[must_use]
+    pub fn max_bytes(&self) -> Option<u64> {
+        self.max_bytes
+    }
+
     /// Allow connections to localhost (disabled by default).
     #[must_use]
     pub fn allow_localhost(mut self) -> Self {
@@ -361,6 +379,7 @@ impl NetConfig {
             internal_hosts: vec![],
             resolver: None,
             custom_root_certs: vec![],
+            max_bytes: None,
             allow_plaintext_secrets: false,
         }
     }
@@ -775,12 +794,30 @@ pub struct ConnectionManager {
     http_states: HashMap<u32, HttpParsingState>,
     /// Track which host each connection is connected to
     connection_hosts: HashMap<u32, String>,
+    /// Bytes sent and received so far, across all connections
+    traffic: NetTraffic,
     /// Secrets configuration for substitution
     secrets: HashMap<String, crate::secrets::SecretConfig>,
     /// `(real value, placeholder)` of each secret, for masking reads.
     read_masks: Vec<(Vec<u8>, Vec<u8>)>,
     /// Per-connection read buffering for that masking.
     read_states: HashMap<u32, ReadState>,
+}
+
+/// Bytes an execution sent and received over the network, as the guest
+/// wrote and read them (TLS and substitution don't count).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct NetTraffic {
+    /// Bytes the guest wrote to its connections.
+    pub sent: u64,
+    /// Bytes the guest read from its connections.
+    pub received: u64,
+}
+
+impl NetTraffic {
+    fn total(self) -> u64 {
+        self.sent.saturating_add(self.received)
+    }
 }
 
 /// Read data held back from the guest by one connection.
@@ -855,6 +892,47 @@ fn partial_secret_len(data: &[u8], masks: &[(Vec<u8>, Vec<u8>)]) -> usize {
 }
 
 impl ConnectionManager {
+    /// Bytes sent and received so far.
+    #[must_use]
+    pub fn traffic(&self) -> NetTraffic {
+        self.traffic
+    }
+
+    /// How many more bytes the execution may move, if it's limited; `Err`
+    /// once it can't move any.
+    fn remaining(&self) -> Result<Option<u64>, TcpError> {
+        let Some(max) = self.config.max_bytes else {
+            return Ok(None);
+        };
+        match max.saturating_sub(self.traffic.total()) {
+            0 => Err(self.over_limit()),
+            left => Ok(Some(left)),
+        }
+    }
+
+    fn over_limit(&self) -> TcpError {
+        TcpError::NotPermitted(format!(
+            "network limit reached: {} bytes sent and received",
+            self.config.max_bytes.unwrap_or_default()
+        ))
+    }
+
+    /// Refuse a write of `len` bytes that would go over the limit.
+    fn check_write(&self, len: usize) -> Result<(), TcpError> {
+        match self.remaining()? {
+            Some(left) if len as u64 > left => Err(self.over_limit()),
+            _ => Ok(()),
+        }
+    }
+
+    /// `len` capped at what's left of the limit.
+    fn read_len(&self, len: u32) -> Result<u32, TcpError> {
+        Ok(match self.remaining()? {
+            Some(left) => len.min(u32::try_from(left).unwrap_or(u32::MAX)),
+            None => len,
+        })
+    }
+
     /// Create a new connection manager with the given config and secrets.
     #[must_use]
     pub fn new(config: NetConfig, secrets: HashMap<String, crate::secrets::SecretConfig>) -> Self {
@@ -882,6 +960,7 @@ impl ConnectionManager {
             next_handle: 1,
             http_states: HashMap::new(),
             connection_hosts: HashMap::new(),
+            traffic: NetTraffic::default(),
             read_masks: secrets
                 .values()
                 .filter(|s| !s.real_value.is_empty())
@@ -1191,19 +1270,22 @@ impl ConnectionManager {
         timeout_ms: u32,
     ) -> Result<Vec<u8>, TcpError> {
         let io_timeout = Self::effective_timeout(self.config.io_timeout, timeout_ms);
+        let len = self.read_len(len)?;
         let stream = self
             .tcp_connections
             .get_mut(&handle)
             .ok_or(TcpError::InvalidHandle)?;
 
         let state = self.read_states.entry(handle).or_default();
-        read_masked(stream, state, &self.read_masks, len, io_timeout)
+        let data = read_masked(stream, state, &self.read_masks, len, io_timeout)
             .await
             .map_err(|e| match e.kind() {
                 std::io::ErrorKind::ConnectionReset => TcpError::ConnectionReset,
                 std::io::ErrorKind::TimedOut => TcpError::TimedOut,
                 _ => TcpError::IoError(e.to_string()),
-            })
+            })?;
+        self.traffic.received += data.len() as u64;
+        Ok(data)
     }
 
     /// Write to a TCP connection.
@@ -1221,6 +1303,7 @@ impl ConnectionManager {
         if !self.tcp_connections.contains_key(&handle) {
             return Err(TcpError::InvalidHandle);
         }
+        self.check_write(data.len())?;
 
         // Fast path: nothing to substitute = no parsing
         if self.secrets.is_empty() || !self.config.allow_plaintext_secrets {
@@ -1231,6 +1314,7 @@ impl ConnectionManager {
                 self.tcp_write_raw(handle, &bytes, timeout_ms).await?;
             }
         }
+        self.traffic.sent += data.len() as u64;
         // Report what the guest wrote: substitution changes the length on the wire.
         Ok(data.len() as u32)
     }
@@ -1449,19 +1533,22 @@ impl ConnectionManager {
         timeout_ms: u32,
     ) -> Result<Vec<u8>, TlsError> {
         let io_timeout = Self::effective_timeout(self.config.io_timeout, timeout_ms);
+        let len = self.read_len(len).map_err(TlsError::Tcp)?;
         let stream = self
             .tls_connections
             .get_mut(&handle)
             .ok_or(TlsError::InvalidHandle)?;
 
         let state = self.read_states.entry(handle).or_default();
-        read_masked(stream, state, &self.read_masks, len, io_timeout)
+        let data = read_masked(stream, state, &self.read_masks, len, io_timeout)
             .await
             .map_err(|e| match e.kind() {
                 std::io::ErrorKind::ConnectionReset => TlsError::Tcp(TcpError::ConnectionReset),
                 std::io::ErrorKind::TimedOut => TlsError::Tcp(TcpError::TimedOut),
                 _ => TlsError::Tcp(TcpError::IoError(e.to_string())),
-            })
+            })?;
+        self.traffic.received += data.len() as u64;
+        Ok(data)
     }
 
     /// Write to a TLS connection.
@@ -1477,6 +1564,7 @@ impl ConnectionManager {
         if !self.tls_connections.contains_key(&handle) {
             return Err(TlsError::InvalidHandle);
         }
+        self.check_write(data.len()).map_err(TlsError::Tcp)?;
 
         // Fast path: no secrets = no parsing
         if self.secrets.is_empty() {
@@ -1487,6 +1575,7 @@ impl ConnectionManager {
                 self.tls_write_raw(handle, &bytes, timeout_ms).await?;
             }
         }
+        self.traffic.sent += data.len() as u64;
         // Report what the guest wrote: substitution changes the length on the wire.
         Ok(data.len() as u32)
     }

@@ -469,7 +469,7 @@ impl Sandbox {
         // Network handler completes when its channel is dropped (execute_builder dropped)
         let net_result = match net_handler {
             Some(handler) => handler.await,
-            None => Ok(()),
+            None => Ok(crate::net::NetTraffic::default()),
         };
 
         // Output handler completes when its channel is dropped (execute_builder dropped)
@@ -483,7 +483,7 @@ impl Sandbox {
         let callback_invocations =
             callback_invocations.map_err(|e| handler_task_failed("callback handler", &e))?;
         let trace_events = trace_events.map_err(|e| handler_task_failed("trace collector", &e))?;
-        net_result.map_err(|e| handler_task_failed("network handler", &e))?;
+        let traffic = net_result.map_err(|e| handler_task_failed("network handler", &e))?;
         output_result.map_err(|e| handler_task_failed("output handler", &e))?;
 
         let duration = start.elapsed();
@@ -512,6 +512,8 @@ impl Sandbox {
                         callback_invocations,
                         peak_memory_bytes: Some(output.peak_memory_bytes),
                         fuel_consumed: output.fuel_consumed,
+                        network_bytes_sent: traffic.sent,
+                        network_bytes_received: traffic.received,
                     },
                 })
             }
@@ -521,6 +523,8 @@ impl Sandbox {
                     Some(stats) => error.with_stats(ExecuteStats {
                         duration,
                         callback_invocations,
+                        network_bytes_sent: traffic.sent,
+                        network_bytes_received: traffic.received,
                         ..stats
                     }),
                     None => error,
@@ -3094,6 +3098,10 @@ pub struct ExecuteStats {
     /// is always present when the engine has fuel consumption enabled,
     /// regardless of whether a fuel limit was set.
     pub fuel_consumed: Option<u64>,
+    /// Bytes the execution sent over the network, as the guest wrote them.
+    pub network_bytes_sent: u64,
+    /// Bytes the execution received over the network, as the guest read them.
+    pub network_bytes_received: u64,
 }
 
 /// Resource limits for sandbox execution.
@@ -3439,6 +3447,8 @@ mod tests {
                 callback_invocations: 5,
                 peak_memory_bytes: Some(1024),
                 fuel_consumed: Some(50000),
+                network_bytes_sent: 0,
+                network_bytes_received: 0,
             },
         };
 
@@ -3463,6 +3473,8 @@ mod tests {
                 callback_invocations: 2,
                 peak_memory_bytes: Some(2048),
                 fuel_consumed: Some(12345),
+                network_bytes_sent: 0,
+                network_bytes_received: 0,
             },
         };
 
@@ -3483,6 +3495,8 @@ mod tests {
             callback_invocations: 10,
             peak_memory_bytes: Some(1024 * 1024),
             fuel_consumed: Some(100000),
+            network_bytes_sent: 0,
+            network_bytes_received: 0,
         };
 
         let debug = format!("{:?}", stats);
@@ -3498,6 +3512,8 @@ mod tests {
             callback_invocations: 3,
             peak_memory_bytes: None,
             fuel_consumed: Some(5000),
+            network_bytes_sent: 0,
+            network_bytes_received: 0,
         };
 
         let cloned = stats.clone();
@@ -3514,6 +3530,8 @@ mod tests {
             callback_invocations: 0,
             peak_memory_bytes: None,
             fuel_consumed: None,
+            network_bytes_sent: 0,
+            network_bytes_received: 0,
         };
 
         assert!(stats.peak_memory_bytes.is_none());
@@ -3794,6 +3812,8 @@ mod tests {
             callback_invocations: 0,
             peak_memory_bytes: Some(0),
             fuel_consumed: Some(0),
+            network_bytes_sent: 0,
+            network_bytes_received: 0,
         };
 
         assert_eq!(stats.duration, Duration::ZERO);
@@ -3816,6 +3836,8 @@ mod tests {
                 callback_invocations: 0,
                 peak_memory_bytes: None,
                 fuel_consumed: None,
+                network_bytes_sent: 0,
+                network_bytes_received: 0,
             },
         };
 
@@ -3853,6 +3875,8 @@ mod tests {
                 callback_invocations: 1,
                 peak_memory_bytes: Some(1024),
                 fuel_consumed: Some(25000),
+                network_bytes_sent: 0,
+                network_bytes_received: 0,
             },
         };
 

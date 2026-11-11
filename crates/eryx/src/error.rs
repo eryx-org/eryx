@@ -114,6 +114,8 @@ impl Error {
             callback_invocations: 0,
             peak_memory_bytes: Some(peak_memory_bytes),
             fuel_consumed,
+            network_bytes_sent: 0,
+            network_bytes_received: 0,
         })
     }
 }

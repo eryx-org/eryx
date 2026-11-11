@@ -352,3 +352,60 @@ async fn pooled_sandbox_rejects_a_secret_with_no_hosts() {
         .unwrap_err();
     assert!(err.to_string().contains("API_KEY"), "{err}");
 }
+
+/// A server on loopback that answers each connection with `body_len` bytes
+async fn sending_server(body_len: usize) -> u16 {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    tokio::spawn(async move {
+        while let Ok((mut socket, _)) = listener.accept().await {
+            let mut buf = vec![0u8; 1024];
+            let _ = socket.read(&mut buf).await;
+            let _ = socket.write_all(&vec![b'x'; body_len]).await;
+        }
+    });
+    port
+}
+
+/// Stats count the bytes a run sent and received, and `with_max_bytes`
+/// stops it there
+#[tokio::test]
+async fn network_bytes_are_counted_and_limited() {
+    let port = sending_server(10_000).await;
+    let code = format!(
+        r#"
+import socket
+sock = socket.create_connection(("127.0.0.1", {port}))
+sock.send(b"hello")
+got = 0
+try:
+    while chunk := sock.recv(4096):
+        got += len(chunk)
+except OSError as e:
+    print("stopped:", e)
+print(got)
+"#
+    );
+
+    let sandbox = Sandbox::embedded()
+        .with_network(eryx::NetConfig::permissive())
+        .build()
+        .unwrap();
+    let result = sandbox.execute(&code).await.unwrap();
+    assert_eq!(result.stdout_text().trim(), "10000");
+    assert_eq!(result.stats.network_bytes_sent, 5);
+    assert_eq!(result.stats.network_bytes_received, 10_000);
+
+    let limited = Sandbox::embedded()
+        .with_network(eryx::NetConfig::permissive().with_max_bytes(1_000))
+        .build()
+        .unwrap();
+    let result = limited.execute(&code).await.unwrap();
+    let stdout = result.stdout_text();
+    assert!(stdout.contains("network limit reached"), "{stdout}");
+    assert!(stdout.trim_end().ends_with("995"), "{stdout}");
+    assert_eq!(result.stats.network_bytes_sent, 5);
+    assert_eq!(result.stats.network_bytes_received, 995);
+}

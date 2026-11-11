@@ -129,7 +129,8 @@ pub use callback::{
 pub use error::{Error, ErrorKind};
 pub use library::RuntimeLibrary;
 pub use net::{
-    ConnectionManager, DEFAULT_BLOCKED_NETWORKS, IpNet, NetConfig, Resolver, TcpError, TlsError,
+    ConnectionManager, DEFAULT_BLOCKED_NETWORKS, IpNet, NetConfig, NetTraffic, Resolver, TcpError,
+    TlsError,
 };
 pub use package::{ExtractedPackage, PackageFormat};
 pub use pool::{PoolConfig, PoolError, PoolStats, PooledSandbox, SandboxPool};
