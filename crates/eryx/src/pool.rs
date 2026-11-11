@@ -838,12 +838,16 @@ impl PooledSandbox {
     ///
     /// These replace the built ones (by default no network) until the sandbox
     /// is returned to the pool. Each [`SecretConfig`](crate::SecretConfig)
-    /// has its own placeholder, so create new ones for each request.
+    /// has its own placeholder: create new ones for each request, or give
+    /// them the same one with
+    /// [`with_placeholder`](crate::SecretConfig::with_placeholder) where
+    /// state that may hold it is kept between requests (a session).
     ///
     /// # Errors
     ///
     /// Returns [`ErrorKind::Initialization`](crate::ErrorKind::Initialization)
-    /// if `config` is invalid or a secret has no host it could be sent to.
+    /// if `config` is invalid, a secret has no host it could be sent to, or
+    /// placeholders overlap.
     pub fn with_network(
         mut self,
         config: crate::NetConfig,

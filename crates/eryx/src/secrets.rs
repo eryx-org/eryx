@@ -54,6 +54,32 @@ impl SecretConfig {
         self
     }
 
+    /// Use `placeholder` instead of a newly generated one, e.g. to keep the
+    /// same one across executions that share state, such as a session's.
+    ///
+    /// It should be unguessable, like the generated ones, since code that
+    /// knows it can have the secret substituted without reading it.
+    ///
+    /// # Errors
+    ///
+    /// Fails unless `placeholder` is at least 32 ASCII letters, digits and
+    /// underscores, so it can't match ordinary text in headers or output.
+    pub fn with_placeholder(mut self, placeholder: impl Into<String>) -> Result<Self, String> {
+        let placeholder = placeholder.into();
+        if placeholder.len() < MIN_PLACEHOLDER_LEN
+            || !placeholder
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'_')
+        {
+            return Err(format!(
+                "a secret placeholder must be at least {MIN_PLACEHOLDER_LEN} ASCII letters, \
+                 digits and underscores"
+            ));
+        }
+        self.placeholder = placeholder;
+        Ok(self)
+    }
+
     /// The placeholder the sandbox sees in place of the real value.
     #[must_use]
     pub fn placeholder(&self) -> &str {
@@ -175,6 +201,30 @@ impl From<bool> for OutputScrubPolicy {
 /// Format: `ERYX_SECRET_PLACEHOLDER_{random_hex}`
 ///
 /// Placeholders are ephemeral (regenerated on each use) for better security.
+/// The shortest placeholder [`SecretConfig::with_placeholder`] accepts.
+const MIN_PLACEHOLDER_LEN: usize = 32;
+
+/// Fail if one secret's placeholder contains another's, so substituting or
+/// scrubbing one could change the other.
+///
+/// # Errors
+///
+/// Names the first such pair of secrets.
+pub(crate) fn check_placeholders(secrets: &HashMap<String, SecretConfig>) -> Result<(), String> {
+    let mut names: Vec<&String> = secrets.keys().collect();
+    names.sort();
+    for a in &names {
+        for b in &names {
+            if a != b && secrets[*a].placeholder.contains(&secrets[*b].placeholder) {
+                return Err(format!(
+                    "secrets '{a}' and '{b}' have overlapping placeholders"
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 fn random_placeholder() -> String {
     use rand::RngExt;
     let mut rng = rand::rng();
@@ -328,5 +378,46 @@ mod tests {
 
         assert!(matches!(policy_true, OutputScrubPolicy::All));
         assert!(matches!(policy_false, OutputScrubPolicy::None));
+    }
+
+    #[test]
+    fn with_placeholder_needs_a_long_plain_placeholder() {
+        let secret = || SecretConfig::new("real", vec!["api.example.com".into()]);
+        let long = "P".repeat(MIN_PLACEHOLDER_LEN);
+        assert_eq!(
+            secret()
+                .with_placeholder(&long)
+                .map(|s| s.placeholder().to_string()),
+            Ok(long.clone())
+        );
+        assert!(
+            secret()
+                .with_placeholder("P".repeat(MIN_PLACEHOLDER_LEN - 1))
+                .is_err()
+        );
+        assert!(secret().with_placeholder(format!("{long} x")).is_err());
+    }
+
+    #[test]
+    fn overlapping_placeholders_are_refused() {
+        let with = |placeholder: &str| SecretConfig {
+            placeholder: placeholder.to_string(),
+            ..SecretConfig::new("real", vec![])
+        };
+        let base = "P".repeat(MIN_PLACEHOLDER_LEN);
+        let distinct = HashMap::from([
+            ("A".to_string(), with(&format!("{base}_A"))),
+            ("B".to_string(), with(&format!("{base}_B"))),
+        ]);
+        assert!(check_placeholders(&distinct).is_ok());
+
+        let overlapping = HashMap::from([
+            ("A".to_string(), with(&base)),
+            ("B".to_string(), with(&format!("{base}_B"))),
+        ]);
+        let Err(err) = check_placeholders(&overlapping) else {
+            panic!("overlapping placeholders were accepted");
+        };
+        assert!(err.contains("'A'") && err.contains("'B'"), "{err}");
     }
 }

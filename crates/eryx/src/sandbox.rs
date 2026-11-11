@@ -713,8 +713,8 @@ impl Sandbox {
     ///
     /// # Errors
     ///
-    /// Returns [`ErrorKind::Initialization`] if `config` is invalid or a
-    /// secret has no host it could be sent to, as
+    /// Returns [`ErrorKind::Initialization`] if `config` is invalid, a secret
+    /// has no host it could be sent to, or placeholders overlap, as
     /// [`SandboxBuilder::build`] does; the sandbox is left unchanged.
     pub fn set_network(
         &mut self,
@@ -725,6 +725,7 @@ impl Sandbox {
         config
             .check_secret_hosts(&secrets)
             .map_err(ErrorKind::Initialization)?;
+        crate::secrets::check_placeholders(&secrets).map_err(ErrorKind::Initialization)?;
         self.preamble = full_preamble(&secrets, &self.library_preamble);
         self.net_config = Some(config);
         self.secrets = secrets;
@@ -2617,6 +2618,7 @@ impl SandboxBuilder<state::Has, state::Has> {
     )]
     pub fn build(mut self) -> Result<Sandbox, Error> {
         check_duplicate_callback(self.duplicate_callback.take())?;
+        crate::secrets::check_placeholders(&self.secrets).map_err(ErrorKind::Initialization)?;
         if let Some(net) = &self.net_config {
             net.validate().map_err(ErrorKind::Initialization)?;
             net.check_secret_hosts(&self.secrets)

@@ -80,6 +80,13 @@ let sandbox = Sandbox::embedded()
 The header name is compared ignoring case. A request with the placeholder in
 any other header is refused, as for a host the secret isn't allowed for.
 
+Each `SecretConfig` gets a new random placeholder. Where state that may hold
+one outlives a sandbox (e.g. a session restored into a new sandbox for each
+execution), give the secret the same one each time with
+`with_placeholder`, which takes at least 32 ASCII letters, digits and
+underscores. Keep it unguessable: code that knows it can have the secret
+substituted without reading it.
+
 ## Host Binding
 
 The real value is only sent to the host the connection was opened to:
