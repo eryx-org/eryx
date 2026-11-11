@@ -1,0 +1,40 @@
+[build-system]
+requires = ["hatchling>=1.25"]
+build-backend = "hatchling.build"
+
+[project]
+name = "eryx-run"
+version = "0.1.0"
+description = "Run Python in an eryx sandbox on eryx.run, with the same API as pyeryx"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT OR Apache-2.0" }
+keywords = ["sandbox", "wasm", "webassembly", "security", "isolation", "eryx"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Intended Audience :: Developers",
+  "License :: OSI Approved :: MIT License",
+  "License :: OSI Approved :: Apache Software License",
+  "Programming Language :: Python :: 3",
+  "Typing :: Typed",
+]
+dependencies = ["httpx>=0.27", "websockets>=13"]
+
+[project.urls]
+Homepage = "https://eryx.run"
+Documentation = "https://eryx.run/docs"
+Repository = "https://github.com/eryx-org/eryx"
+
+[dependency-groups]
+dev = ["pytest>=8", "pytest-asyncio>=0.24", "mypy>=1.11"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/eryx_run"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+
+[tool.mypy]
+strict = true
+files = ["src", "tests"]

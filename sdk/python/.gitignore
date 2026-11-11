@@ -1,0 +1,11 @@
+# Allowlist: ignore everything here except the package's own files, so
+# virtualenvs, caches, build output and local env files stay out.
+/*
+!/.gitignore
+!/README.md
+!/pyproject.toml
+!/uv.lock
+!/src/
+!/tests/
+__pycache__/
+*.py[cod]
