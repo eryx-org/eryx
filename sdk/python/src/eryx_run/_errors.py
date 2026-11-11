@@ -59,8 +59,8 @@ class APIError(EryxError):
     """The hosted API refused a request.
 
     ``code`` is the API's error code (``"invalid_key"``, ``"session_busy"``,
-    ...) and ``status_code`` the HTTP status, when there was one: errors sent
-    over the stream have neither yet.
+    ...) and ``status_code`` the HTTP status. Errors sent over the stream have
+    no status, and no code from servers older than eryx-run#138.
     """
 
     def __init__(

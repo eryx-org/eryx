@@ -346,3 +346,23 @@ async def test_stream_errors_raise() -> None:
         )
         with pytest.raises(eryx.APIError, match="Too many"):
             await box.execute_async("...")
+
+
+async def test_stream_error_codes_are_typed() -> None:
+    async def serve(ws: websockets.ServerConnection) -> None:
+        await ws.recv()
+        await ws.send(
+            json.dumps({"type": "error", "code": "concurrency_limit", "message": "Too many"})
+        )
+
+    async with websockets.serve(serve, "127.0.0.1", 0) as server:
+        port = server.sockets[0].getsockname()[1]
+        box = eryx.Sandbox(
+            api_key=KEY,
+            base_url=f"http://127.0.0.1:{port}",
+            callbacks=[{"name": "f", "fn": lambda: None}],
+        )
+        with pytest.raises(eryx.RateLimitError) as raised:
+            await box.execute_async("...")
+    assert raised.value.code == "concurrency_limit"
+    assert raised.value.status_code is None

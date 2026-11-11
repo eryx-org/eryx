@@ -90,3 +90,15 @@ def test_session() -> None:
     session.delete()
     with pytest.raises(eryx.NotFoundError):
         eryx.Session(id=session_id).execute("pass")
+
+
+def test_stream_speaks_v1_and_types_errors() -> None:
+    # An unknown environment, over the stream: a typed error with its code
+    sandbox = eryx.Sandbox(environment="no-such-env", callbacks=[{"name": "f", "fn": lambda: 1}])
+    with pytest.raises(eryx.NotFoundError) as raised:
+        sandbox.execute("await f()")
+    assert raised.value.code == "not_found"
+
+
+def test_big_integer_results_are_exact() -> None:
+    assert eryx.Sandbox().execute("result = 2**100").result == 2**100
