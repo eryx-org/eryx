@@ -35,7 +35,7 @@ from ._errors import (
 from ._sandbox import Sandbox, Session
 from ._types import ExecuteResult, ResourceLimits
 
-__version__ = "0.1.0"
+__version__ = "0.1.1"
 
 __all__ = [
     "APIConnectionError",
