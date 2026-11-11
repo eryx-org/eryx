@@ -65,6 +65,11 @@ the connection drops mid-run. All of them are `EryxError`s.
 
 From asyncio, use `await sandbox.execute_async(code)`.
 
+A `Sandbox` or `Session` keeps its connections open between runs (an idle
+stream connection for 15 seconds), so a run after the first is about one
+round trip. `close()` (or `await aclose()`, or using it as a context manager)
+closes them sooner; otherwise they close when the process ends.
+
 ## Sessions
 
 A `Session` keeps variables, imports and files under `/data` between runs:

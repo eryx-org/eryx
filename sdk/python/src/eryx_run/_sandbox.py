@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 import asyncio
-import concurrent.futures
 import threading
 from urllib.parse import quote
 from collections.abc import Coroutine, Sequence
+from types import TracebackType
 from typing import Any, Optional, TypeVar
 
 from ._callbacks import Callbacks, normalize
@@ -15,6 +15,7 @@ from ._errors import ConflictError
 from ._types import ExecuteResult, ResourceLimits
 
 T = TypeVar("T")
+R = TypeVar("R", bound="_Runner")
 
 #: pyeryx arguments the hosted service has another way to do, and which
 _LOCAL_ONLY = {
@@ -31,15 +32,33 @@ _LOCAL_ONLY = {
 }
 
 
+_loop: Optional[asyncio.AbstractEventLoop] = None
+_loop_lock = threading.Lock()
+
+
+def _sync_loop() -> asyncio.AbstractEventLoop:
+    """The event loop sync calls run on: one, in a daemon thread, so they
+    share their connections (which can't move between loops)."""
+    global _loop
+    with _loop_lock:
+        if _loop is None:
+            _loop = asyncio.new_event_loop()
+            threading.Thread(target=_loop.run_forever, name="eryx-run", daemon=True).start()
+        return _loop
+
+
 def _run_sync(coro: Coroutine[Any, Any, T]) -> T:
     """Run ``coro`` to completion from sync code, even inside an event loop
     (where it blocks the loop, as pyeryx's sync methods do)."""
+    loop = _sync_loop()
     try:
-        asyncio.get_running_loop()
+        running = asyncio.get_running_loop()
     except RuntimeError:
-        return asyncio.run(coro)
-    with concurrent.futures.ThreadPoolExecutor(1) as pool:
-        return pool.submit(asyncio.run, coro).result()
+        running = None
+    if running is loop:
+        coro.close()
+        raise RuntimeError("use the *_async methods from an async callback")
+    return asyncio.run_coroutine_threadsafe(coro, loop).result()
 
 
 class _Runner:
@@ -83,6 +102,40 @@ class _Runner:
     def _check_cancel(cancel: object) -> None:
         if cancel is not None:
             raise ValueError("cancelling a hosted run isn't supported yet")
+
+    def close(self) -> None:
+        """Close the connections sync calls kept open for the next run.
+
+        Optional: they close when the process ends. A later run opens new
+        ones.
+        """
+        _run_sync(self._connection.aclose())
+
+    async def aclose(self) -> None:
+        """Close the connections this event loop's runs kept open."""
+        await self._connection.aclose()
+
+    def __enter__(self: R) -> R:
+        return self
+
+    def __exit__(
+        self,
+        exc_type: Optional[type[BaseException]],
+        exc: Optional[BaseException],
+        tb: Optional[TracebackType],
+    ) -> None:
+        self.close()
+
+    async def __aenter__(self: R) -> R:
+        return self
+
+    async def __aexit__(
+        self,
+        exc_type: Optional[type[BaseException]],
+        exc: Optional[BaseException],
+        tb: Optional[TracebackType],
+    ) -> None:
+        await self.aclose()
 
 
 class Sandbox(_Runner):

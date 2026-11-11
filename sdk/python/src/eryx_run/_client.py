@@ -6,14 +6,18 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import time
+from dataclasses import dataclass, field
 from typing import Any, Optional
 
 import httpx
 import websockets
+from websockets.protocol import State
 
 from ._callbacks import CallbackDict, invoke
 from ._errors import (
     APIConnectionError,
+    APIError,
     EryxError,
     ExecutionError,
     PythonExceptionError,
@@ -32,9 +36,43 @@ PROTOCOL = "eryx.v1"
 #: How long to wait for the API to answer, beyond the run's own time
 _HTTP_TIMEOUT = httpx.Timeout(30.0, read=None)
 
+#: How long an idle ``/v1/stream`` connection is kept for the next run. Under
+#: proxies' idle timeouts, so a kept one is still open when it's used.
+IDLE_STREAM_SECS = 15.0
+
+
+@dataclass
+class _Pool:
+    """Connections for one event loop: an HTTP client (which keeps its own
+    connections alive) and the idle ``/v1/stream`` sockets."""
+
+    client: httpx.AsyncClient
+    idle: list[tuple[websockets.ClientConnection, float]] = field(default_factory=list)
+
+    def take(self) -> Optional[websockets.ClientConnection]:
+        """The most recently used idle socket that's still fresh, dropping the
+        rest that aren't."""
+        now = time.monotonic()
+        while self.idle:
+            ws, since = self.idle.pop()
+            if now - since < IDLE_STREAM_SECS and ws.state is State.OPEN:
+                return ws
+            _drop(ws)
+        return None
+
+
+def _drop(ws: websockets.ClientConnection) -> None:
+    """Close a socket without waiting for the server's reply."""
+    ws.transport.abort()
+
 
 class Connection:
-    """Where to send requests, and the key to send with them."""
+    """Where to send requests, and the key to send with them.
+
+    Connections are kept for reuse, per event loop (an ``httpx`` client or a
+    socket can't move between loops): sync calls all run on one loop (see
+    ``_sandbox._run_sync``), so they share them.
+    """
 
     def __init__(self, api_key: Optional[str], base_url: Optional[str]) -> None:
         api_key = api_key or os.environ.get("ERYX_API_KEY")
@@ -45,6 +83,29 @@ class Connection:
             )
         self.api_key = api_key
         self.base_url = (base_url or os.environ.get("ERYX_URL") or DEFAULT_URL).rstrip("/")
+        self._pools: dict[asyncio.AbstractEventLoop, _Pool] = {}
+
+    def _pool(self) -> _Pool:
+        """This event loop's connections."""
+        loop = asyncio.get_running_loop()
+        # A loop that's gone took its connections with it
+        for closed in [other for other in self._pools if other.is_closed()]:
+            del self._pools[closed]
+        pool = self._pools.get(loop)
+        if pool is None:
+            client = httpx.AsyncClient(
+                base_url=self.base_url, headers=self._headers, timeout=_HTTP_TIMEOUT
+            )
+            pool = self._pools[loop] = _Pool(client)
+        return pool
+
+    async def aclose(self) -> None:
+        """Close this event loop's connections."""
+        pool = self._pools.pop(asyncio.get_running_loop(), None)
+        if pool is not None:
+            for ws, _ in pool.idle:
+                _drop(ws)
+            await pool.client.aclose()
 
     @property
     def _headers(self) -> dict[str, str]:
@@ -55,13 +116,8 @@ class Connection:
     ) -> Any:
         """Send a request and return its JSON body, raising ``APIError`` for an
         error response."""
-        # ponytail: a client per request; share one if connection setup shows
-        # up in latency
         try:
-            async with httpx.AsyncClient(
-                base_url=self.base_url, headers=self._headers, timeout=_HTTP_TIMEOUT
-            ) as client:
-                response = await client.request(method, path, json=body)
+            response = await self._pool().client.request(method, path, json=body)
         except httpx.HTTPError as e:
             raise APIConnectionError(f"Couldn't reach {self.base_url}: {e}") from e
         if response.is_success:
@@ -72,7 +128,13 @@ class Connection:
         self, body: dict[str, Any], callbacks: dict[str, CallbackDict]
     ) -> dict[str, Any]:
         """Run ``body`` (an ``execute`` message) over ``/v1/stream``, answering
-        the code's callbacks, and return the ``completed`` message."""
+        the code's callbacks, and return the ``completed`` message.
+
+        A socket goes back to the pool after a run that completed or was
+        refused (the server keeps it open), and is dropped otherwise. A run on
+        a kept socket that fails isn't retried: the server may have started
+        it.
+        """
         url = "ws" + self.base_url.removeprefix("http") + "/v1/stream"
         message = {
             "type": "execute",
@@ -82,21 +144,40 @@ class Connection:
                 for name, cb in callbacks.items()
             ],
         }
+        pool = self._pool()
+        ws = pool.take()
         try:
-            async with websockets.connect(
-                url,
-                additional_headers=self._headers,
-                subprotocols=[websockets.Subprotocol(PROTOCOL)],
-                max_size=None,
-            ) as ws:
-                await ws.send(json.dumps(message))
-                return await _serve(ws, callbacks)
+            if ws is None:
+                ws = await websockets.connect(
+                    url,
+                    additional_headers=self._headers,
+                    subprotocols=[websockets.Subprotocol(PROTOCOL)],
+                    max_size=None,
+                )
+            await ws.send(json.dumps(message))
+            completed = await _serve(ws, callbacks)
+        except APIConnectionError:
+            if ws is not None:
+                _drop(ws)
+            raise
+        except APIError:
+            # Refused before it ran; the socket's still good
+            if ws is not None:
+                pool.idle.append((ws, time.monotonic()))
+            raise
         except websockets.InvalidStatus as e:
             raise _error_response(e.response) from None
         except websockets.ConnectionClosed as e:
             raise APIConnectionError(f"The connection closed before the run completed: {e}") from e
         except (OSError, websockets.InvalidHandshake) as e:
             raise APIConnectionError(f"Couldn't reach {url}: {e}") from e
+        except BaseException:
+            # Mid-run (e.g. cancelled): the server may still be running it
+            if ws is not None:
+                _drop(ws)
+            raise
+        pool.idle.append((ws, time.monotonic()))
+        return completed
 
 
 async def _serve(

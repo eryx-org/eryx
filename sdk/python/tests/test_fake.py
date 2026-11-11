@@ -449,3 +449,113 @@ def test_session_ids_are_escaped(http: Callable[[Handler], list[httpx.Request]])
     requests = http(lambda _: httpx.Response(200, json=SUCCESS))
     eryx.Session(api_key=KEY, base_url="https://api.test", id="a/../b").execute("pass")
     assert requests[0].url.raw_path == b"/v1/sessions/a%2F..%2Fb/execute"
+
+
+# -- Connection reuse ----------------------------------------------------------
+
+
+def test_http_runs_share_one_client(
+    monkeypatch: pytest.MonkeyPatch, http: Callable[[Handler], list[httpx.Request]]
+) -> None:
+    http(lambda _: httpx.Response(200, json=SUCCESS))
+    made = []
+    patched = httpx.AsyncClient
+
+    def counting(**kwargs: Any) -> httpx.AsyncClient:
+        made.append(1)
+        return patched(**kwargs)
+
+    monkeypatch.setattr(httpx, "AsyncClient", counting)
+    box = sandbox()
+    for _ in range(3):
+        box.execute("pass")
+    assert len(made) == 1
+    box.close()
+    box.execute("pass")
+    assert len(made) == 2
+
+
+@pytest.fixture
+async def multi_stream() -> AsyncIterator[dict[str, Any]]:
+    """A fake ``/v1/stream`` that runs any number of executes per connection
+    (calling each listed callback once), refuses code ``"refuse"``, and counts
+    connections."""
+    seen: dict[str, Any] = {"connections": 0}
+
+    async def serve(ws: websockets.ServerConnection) -> None:
+        seen["connections"] += 1
+        async for raw in ws:
+            execute = json.loads(raw)
+            if execute.get("code") == "refuse":
+                await ws.send(json.dumps({"type": "error", "code": "session_busy", "message": "busy"}))
+                continue
+            for i, callback in enumerate(execute["callbacks"]):
+                await ws.send(
+                    json.dumps({"type": "callback", "call_id": str(i), "name": callback["name"], "args": {}})
+                )
+                await ws.recv()
+            await ws.send(json.dumps({"type": "completed", **SUCCESS}))
+
+    async with websockets.serve(serve, "127.0.0.1", 0) as server:
+        port = server.sockets[0].getsockname()[1]
+        seen["url"] = f"http://127.0.0.1:{port}"
+        yield seen
+
+
+def streaming(url: str) -> eryx.Sandbox:
+    return eryx.Sandbox(api_key=KEY, base_url=url, callbacks=[{"name": "f", "fn": lambda: 1}])
+
+
+async def test_stream_runs_reuse_a_connection(multi_stream: dict[str, Any]) -> None:
+    box = streaming(multi_stream["url"])
+    for _ in range(3):
+        await box.execute_async("...")
+    with pytest.raises(eryx.ConflictError):
+        await box.execute_async("refuse")
+    await box.execute_async("...")
+    assert multi_stream["connections"] == 1
+
+    # Concurrent runs need a connection each, and both are kept
+    await asyncio.gather(box.execute_async("..."), box.execute_async("..."))
+    assert multi_stream["connections"] == 2
+    await asyncio.gather(box.execute_async("..."), box.execute_async("..."))
+    assert multi_stream["connections"] == 2
+
+    await box.aclose()
+    await box.execute_async("...")
+    assert multi_stream["connections"] == 3
+
+
+async def test_idle_stream_connections_expire(
+    multi_stream: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(eryx._client, "IDLE_STREAM_SECS", 0.0)
+    box = streaming(multi_stream["url"])
+    await box.execute_async("...")
+    await box.execute_async("...")
+    assert multi_stream["connections"] == 2
+
+
+async def test_sync_stream_runs_reuse_a_connection(multi_stream: dict[str, Any]) -> None:
+    # In a thread, so this loop keeps serving the fake
+    def run() -> None:
+        with streaming(multi_stream["url"]) as box:
+            box.execute("...")
+            box.execute("...")
+
+    await asyncio.to_thread(run)
+    assert multi_stream["connections"] == 1
+
+
+async def test_sync_calls_from_async_callbacks_are_refused(
+    http: Callable[[Handler], list[httpx.Request]],
+) -> None:
+    http(lambda _: httpx.Response(200, json=SUCCESS))
+    inner = sandbox()
+
+    async def call_sync() -> str:
+        return inner.execute("pass").stdout_text
+
+    # The callback runs on the sync loop when the outer run is sync
+    with pytest.raises(RuntimeError, match="_async"):
+        eryx._sandbox._run_sync(call_sync())
