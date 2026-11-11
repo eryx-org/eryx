@@ -868,6 +868,18 @@ impl PooledSandbox {
         self.sandbox_mut().set_vfs_storage(storage);
         self
     }
+
+    /// Mount a volume for this request, such as a
+    /// [`VolumeMount::storage`](crate::VolumeMount::storage).
+    ///
+    /// This will be removed automatically when the sandbox is returned to the
+    /// pool.
+    #[cfg(feature = "unstable-vfs")]
+    #[must_use]
+    pub fn with_volume(mut self, volume: crate::VolumeMount) -> Self {
+        self.sandbox_mut().add_volume(volume);
+        self
+    }
 }
 
 #[cfg(test)]

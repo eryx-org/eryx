@@ -142,7 +142,7 @@ pub struct Sandbox {
     scrub_result: bool,
     /// File scrubbing policy for VFS integration.
     scrub_files: crate::secrets::FileScrubPolicy,
-    /// Host filesystem volume mounts.
+    /// Volume mounts: the built ones, then any added for this request.
     #[cfg(feature = "unstable-vfs")]
     volumes: Vec<crate::session::VolumeMount>,
     /// Per-request VFS storage override (set via pool's `with_vfs_storage`).
@@ -163,6 +163,8 @@ struct PerRequestSettings {
     net_config: Option<NetConfig>,
     secrets: HashMap<String, crate::secrets::SecretConfig>,
     preamble: String,
+    #[cfg(feature = "unstable-vfs")]
+    volumes: Vec<crate::session::VolumeMount>,
 }
 
 impl std::fmt::Debug for Sandbox {
@@ -749,6 +751,25 @@ impl Sandbox {
         self.vfs_storage = Some(storage);
     }
 
+    /// Mount a volume for this request, alongside the ones the sandbox was
+    /// built with, in executions and in an
+    /// [`InProcessSession`](crate::session::InProcessSession) created from the
+    /// sandbox. A pool removes it when the sandbox goes back; on a pooled
+    /// sandbox use `PooledSandbox::with_volume`.
+    ///
+    /// Executions fail with [`ErrorKind::Initialization`] if two mounts share
+    /// a guest path.
+    #[cfg(feature = "unstable-vfs")]
+    pub fn add_volume(&mut self, volume: crate::session::VolumeMount) {
+        self.volumes.push(volume);
+    }
+
+    /// The sandbox's volumes, including any added for this request.
+    #[cfg(feature = "unstable-vfs")]
+    pub(crate) fn volumes(&self) -> &[crate::session::VolumeMount] {
+        &self.volumes
+    }
+
     /// The VFS storage set for this request, if any.
     #[cfg(feature = "unstable-vfs")]
     pub(crate) fn vfs_storage(&self) -> Option<&std::sync::Arc<dyn eryx_vfs::VfsStorage>> {
@@ -770,6 +791,7 @@ impl Sandbox {
         #[cfg(feature = "unstable-vfs")]
         {
             self.vfs_storage = None;
+            self.volumes.clone_from(&self.built.volumes);
         }
     }
 
@@ -2746,6 +2768,8 @@ impl SandboxBuilder<state::Has, state::Has> {
             preamble: full_preamble(&self.secrets, &self.preamble),
             net_config: self.net_config,
             secrets: self.secrets,
+            #[cfg(feature = "unstable-vfs")]
+            volumes: self.volumes.clone(),
         });
         Ok(Sandbox {
             executor: Arc::new(executor),

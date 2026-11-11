@@ -390,13 +390,14 @@ impl<'a> SessionExecuteBuilder<'a> {
     }
 }
 
-/// A host filesystem volume mount.
+/// A volume mount: a host file or directory, or a VFS storage, at a guest
+/// path.
 ///
-/// Maps a host directory into the sandbox at a specified guest path,
-/// using cap-std for capability-based security.
+/// A host volume maps a host directory (or file) into the sandbox, using
+/// cap-std for capability-based security.
 ///
-/// A writable mount must never contain a pre-compiled runtime or factory file
-/// that is (or will be) loaded: the sandbox's writes go to the host file in
+/// A writable host volume must never contain a pre-compiled runtime or factory
+/// file that is (or will be) loaded: the sandbox's writes go to the host file in
 /// place, so they would change native code the host runs, or truncate a
 /// mapped file and crash the process. File permissions don't prevent this,
 /// because the host process itself performs the writes.
@@ -404,18 +405,33 @@ impl<'a> SessionExecuteBuilder<'a> {
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct VolumeMount {
-    /// Absolute path on the host filesystem.
-    pub host_path: std::path::PathBuf,
+    /// What the volume serves.
+    pub source: VolumeSource,
     /// Path visible inside the sandbox (e.g., "/mnt/data").
     pub guest_path: String,
     /// If true, the mount is read-only.
     pub read_only: bool,
     /// Largest size, in bytes, the sandbox may grow any file in a writable
-    /// mount to. Writes or truncations past it fail with `EFBIG`.
+    /// host volume to. Writes or truncations past it fail with `EFBIG`.
     ///
     /// `None` (the default) leaves writes unmetered, so a writable mount can
     /// fill the host disk. The limit is per file, not a total for the mount.
+    /// A storage volume ignores it: the storage enforces its own limits.
     pub max_file_size: Option<u64>,
+}
+
+/// What a [`VolumeMount`] serves.
+#[cfg(feature = "unstable-vfs")]
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub enum VolumeSource {
+    /// A file or directory on the host, by absolute path.
+    Host(std::path::PathBuf),
+    /// A VFS storage, such as an [`InMemoryStorage`](eryx_vfs::InMemoryStorage)
+    /// or one of your own. Files are at their full guest paths in it: the
+    /// mount's directory is `guest_path` and a file in it is
+    /// `{guest_path}/name`, as in the sandbox's own storage.
+    Storage(eryx_vfs::ArcStorage),
 }
 
 #[cfg(feature = "unstable-vfs")]
@@ -424,7 +440,7 @@ impl VolumeMount {
     #[must_use]
     pub fn new(host_path: impl Into<std::path::PathBuf>, guest_path: impl Into<String>) -> Self {
         Self {
-            host_path: host_path.into(),
+            source: VolumeSource::Host(host_path.into()),
             guest_path: guest_path.into(),
             read_only: false,
             max_file_size: None,
@@ -438,10 +454,37 @@ impl VolumeMount {
         guest_path: impl Into<String>,
     ) -> Self {
         Self {
-            host_path: host_path.into(),
+            source: VolumeSource::Host(host_path.into()),
             guest_path: guest_path.into(),
             read_only: true,
             max_file_size: None,
+        }
+    }
+
+    /// Create a read-write volume served from `storage`; see
+    /// [`VolumeSource::Storage`].
+    #[must_use]
+    pub fn storage(
+        guest_path: impl Into<String>,
+        storage: std::sync::Arc<dyn eryx_vfs::VfsStorage>,
+    ) -> Self {
+        Self {
+            source: VolumeSource::Storage(eryx_vfs::ArcStorage::new(storage)),
+            guest_path: guest_path.into(),
+            read_only: false,
+            max_file_size: None,
+        }
+    }
+
+    /// Create a read-only volume served from `storage`.
+    #[must_use]
+    pub fn read_only_storage(
+        guest_path: impl Into<String>,
+        storage: std::sync::Arc<dyn eryx_vfs::VfsStorage>,
+    ) -> Self {
+        Self {
+            read_only: true,
+            ..Self::storage(guest_path, storage)
         }
     }
 
@@ -473,7 +516,7 @@ pub struct VfsConfig {
     pub dir_perms: eryx_vfs::DirPerms,
     /// File permissions for files in the VFS mount.
     pub file_perms: eryx_vfs::FilePerms,
-    /// Host filesystem volume mounts.
+    /// Volume mounts, from the host filesystem or a storage.
     pub volumes: Vec<VolumeMount>,
 }
 
@@ -516,14 +559,14 @@ impl VfsConfig {
         self
     }
 
-    /// Add a host filesystem volume mount.
+    /// Add a volume mount.
     #[must_use]
     pub fn with_volume(mut self, volume: VolumeMount) -> Self {
         self.volumes.push(volume);
         self
     }
 
-    /// Add multiple host filesystem volume mounts.
+    /// Add multiple volume mounts.
     #[must_use]
     pub fn with_volumes(mut self, volumes: impl IntoIterator<Item = VolumeMount>) -> Self {
         self.volumes.extend(volumes);
@@ -671,6 +714,21 @@ pub(crate) fn build_hybrid_vfs_context(
     vfs_config: &VfsConfig,
     max_open_host_files: Option<usize>,
 ) -> std::result::Result<eryx_vfs::HybridVfsCtx<eryx_vfs::ArcStorage>, Error> {
+    // Two mounts at one path would leave the guest choosing between them.
+    // Checked before mounting anything, since mounting a storage can create
+    // its directory.
+    let mount_key = |path: &str| path.trim_end_matches('/').to_string();
+    let mut paths = std::collections::HashSet::from([mount_key(&vfs_config.mount_path)]);
+    for volume in &vfs_config.volumes {
+        if !paths.insert(mount_key(&volume.guest_path)) {
+            return Err(ErrorKind::Initialization(format!(
+                "more than one mount at {}",
+                volume.guest_path
+            ))
+            .into());
+        }
+    }
+
     let mut ctx = eryx_vfs::HybridVfsCtx::new(vfs_storage).with_max_open_host_files(
         max_open_host_files.unwrap_or(eryx_vfs::DEFAULT_MAX_OPEN_HOST_FILES),
     );
@@ -719,23 +777,30 @@ pub(crate) fn build_hybrid_vfs_context(
         })?;
     }
 
-    // Add user-specified host filesystem volume mounts
+    // Add user-specified volume mounts
     for volume in &vfs_config.volumes {
         let (dir_perms, file_perms) = if volume.read_only {
             (DirPerms::READ, FilePerms::READ)
         } else {
             (DirPerms::all(), FilePerms::all())
         };
-        let result = if volume.host_path.is_file() {
+        let host_path = match &volume.source {
+            VolumeSource::Host(path) => path,
+            VolumeSource::Storage(storage) => {
+                ctx.add_storage_preopen(&volume.guest_path, storage.clone(), dir_perms, file_perms);
+                continue;
+            }
+        };
+        let result = if host_path.is_file() {
             ctx.add_real_file_preopen_path(
                 &volume.guest_path,
-                &volume.host_path,
+                host_path,
                 dir_perms,
                 file_perms,
                 volume.max_file_size,
             )
         } else {
-            eryx_vfs::RealDir::open_ambient(&volume.host_path, dir_perms, file_perms).map(|dir| {
+            eryx_vfs::RealDir::open_ambient(host_path, dir_perms, file_perms).map(|dir| {
                 let dir = match volume.max_file_size {
                     Some(bytes) => dir.with_max_file_size(bytes),
                     None => dir,
@@ -746,7 +811,7 @@ pub(crate) fn build_hybrid_vfs_context(
         result.map_err(|e| {
             ErrorKind::WasmEngine(format!(
                 "Failed to mount volume {} -> {}: {e}",
-                volume.host_path.display(),
+                host_path.display(),
                 volume.guest_path,
             ))
         })?;

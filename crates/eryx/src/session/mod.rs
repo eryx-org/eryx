@@ -55,7 +55,7 @@ pub use executor::{
     SessionExecutor, SnapshotMetadata,
 };
 #[cfg(feature = "unstable-vfs")]
-pub use executor::{VfsConfig, VolumeMount};
+pub use executor::{VfsConfig, VolumeMount, VolumeSource};
 pub use in_process::InProcessSession;
 
 /// Keeps [`Session`] from being implemented outside this crate.

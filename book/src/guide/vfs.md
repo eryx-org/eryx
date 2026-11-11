@@ -552,6 +552,39 @@ sandbox = eryx.Sandbox(volumes=[("/home/user/out", "/mnt/out", False, 16 * 1024 
 
 The `eryx` CLI takes `--volume-max-file-size BYTES`, applied to every `--volume`.
 
+## Storage Volumes
+
+A volume can also be served from any `VfsStorage` instead of the host
+filesystem: an `InMemoryStorage` you fill and read back, or your own
+implementation (one backed by object storage, a database, or a remote client).
+Files are at their full guest paths in the storage, so the volume at
+`/mnt/repo` reads `/mnt/repo/src/main.py` from it.
+
+```rust,ignore
+use std::sync::Arc;
+use eryx::VolumeMount;
+use eryx::vfs::InMemoryStorage;
+
+let repo = Arc::new(InMemoryStorage::new());
+let sandbox = Sandbox::embedded()
+    .with_volume(VolumeMount::read_only_storage("/mnt/repo", repo.clone()))
+    .build()?;
+```
+
+The storage's own limits apply, not `max_vfs_bytes` or `max_file_size`, and
+files written to it aren't [scrubbed of secrets](./secrets.md), as with storage
+given to `set_vfs_storage`. A writable volume's directory is created in the
+storage if it's missing; a read-only volume's storage is never changed, so it
+should already contain the directory. Renaming a file between a storage volume
+and another mount fails with `EXDEV`, as a rename between filesystems does
+(Python's `shutil.move` copies instead).
+
+Volumes can also be added for a single request, alongside the built ones: with
+`Sandbox::add_volume`, or `PooledSandbox::with_volume` on a pooled sandbox,
+which removes them when the sandbox goes back to the pool. An
+`InProcessSession` created from the sandbox mounts them too. Two mounts at the
+same guest path (including `/data`) fail the execution.
+
 ## Best Practices
 
 1. **Use shared storage for multi-session workflows** - When sessions need to share data

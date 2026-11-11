@@ -100,7 +100,9 @@ impl<'a> InProcessSession<'a> {
     /// With the `unstable-vfs` feature, a sandbox given storage with
     /// `Sandbox::set_vfs_storage` (or `PooledSandbox::with_vfs_storage`) lends
     /// it to the session, so the caller can restore and snapshot the
-    /// session's files; otherwise the session has its own empty storage.
+    /// session's files; otherwise the session has its own empty storage. The
+    /// sandbox's volumes, including any added for the request, are mounted
+    /// too.
     ///
     /// # Errors
     ///
@@ -120,21 +122,20 @@ impl<'a> InProcessSession<'a> {
         // limits so memory growth is constrained during instantiation, not
         // only execution. Callback limits remain handler-owned below.
         #[cfg(feature = "unstable-vfs")]
-        let executor = if let Some(storage) = sandbox.vfs_storage() {
-            // Storage set for this request, so the caller
-            // can restore and snapshot the session's files.
+        let executor = {
+            // Storage set for this request, so the caller can restore and
+            // snapshot the session's files, else its own.
+            let storage = sandbox.vfs_storage().cloned().unwrap_or_else(|| {
+                let limits = sandbox.resource_limits();
+                Arc::new(eryx_vfs::InMemoryStorage::with_max_bytes(
+                    limits.max_vfs_bytes.unwrap_or(eryx_vfs::DEFAULT_MAX_BYTES),
+                ))
+            });
             SessionExecutor::new_with_vfs_config_and_limits(
                 sandbox.executor().clone(),
                 &callbacks,
-                eryx_vfs::ArcStorage::new(Arc::clone(storage)),
-                super::executor::VfsConfig::default(),
-                sandbox.resource_limits(),
-            )
-            .await?
-        } else {
-            SessionExecutor::new_with_limits(
-                sandbox.executor().clone(),
-                &callbacks,
+                eryx_vfs::ArcStorage::new(storage),
+                super::executor::VfsConfig::default().with_volumes(sandbox.volumes().to_vec()),
                 sandbox.resource_limits(),
             )
             .await?

@@ -151,7 +151,7 @@ pub use session::{
     InProcessSession, PythonStateSnapshot, Session, SessionExecutor, SnapshotMetadata,
 };
 #[cfg(feature = "unstable-vfs")]
-pub use session::{VfsConfig, VolumeMount};
+pub use session::{VfsConfig, VolumeMount, VolumeSource};
 pub use trace::{OutputHandler, TraceEvent, TraceEventKind, TraceHandler};
 
 // Re-export precompilation utilities and internal types
