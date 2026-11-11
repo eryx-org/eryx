@@ -52,6 +52,7 @@ jobs:
       core: ${{ steps.filter.outputs.core }}
       server: ${{ steps.filter.outputs.server }}
       python: ${{ steps.filter.outputs.python }}
+      python-sdk: ${{ steps.filter.outputs.python-sdk }}
       book: ${{ steps.filter.outputs.book }}
       examples: ${{ steps.filter.outputs.examples }}
       js: ${{ steps.filter.outputs.js }}
@@ -86,6 +87,9 @@ jobs:
               - 'crates/eryx-server/**'
             python:
               - 'crates/eryx-python/**'
+            python-sdk:
+              - 'sdk/python/**'
+              - '.github/workflows/ci.yml'
             book:
               - 'book/**'
             examples:
@@ -982,6 +986,45 @@ jobs:
         run: |
           source ../../.venv/bin/activate
           pytest tests/ -v -n auto
+
+  # The hosted client (eryx-run on PyPI): pure Python, tested against fakes of
+  # the eryx.run API, on the oldest and newest Pythons it supports
+  python-sdk:
+    name: Python SDK (${{ matrix.python }})
+    runs-on: ubuntu-latest
+    needs: [changes]
+    if: >-
+      github.event_name == 'push'
+      || needs.changes.outputs.python-sdk == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.10", "3.14"]
+    env:
+      UV_PYTHON: ${{ matrix.python }}
+    defaults:
+      run:
+        working-directory: sdk/python
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          enable-cache: false
+
+      - name: Type check
+        run: uv run --frozen mypy
+
+      - name: Test
+        run: uv run --frozen pytest -v
+
+      # The dependency floors in pyproject.toml are what users may have
+      - name: Test with the lowest dependency versions
+        if: matrix.python == '3.10'
+        run: uv run --isolated --resolution lowest-direct --group dev pytest
 
   # Test book examples
   book-tests:
