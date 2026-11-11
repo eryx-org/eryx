@@ -13,6 +13,7 @@ import websockets
 
 from ._callbacks import CallbackDict, invoke
 from ._errors import (
+    APIConnectionError,
     EryxError,
     ExecutionError,
     PythonExceptionError,
@@ -56,10 +57,13 @@ class Connection:
         error response."""
         # ponytail: a client per request; share one if connection setup shows
         # up in latency
-        async with httpx.AsyncClient(
-            base_url=self.base_url, headers=self._headers, timeout=_HTTP_TIMEOUT
-        ) as client:
-            response = await client.request(method, path, json=body)
+        try:
+            async with httpx.AsyncClient(
+                base_url=self.base_url, headers=self._headers, timeout=_HTTP_TIMEOUT
+            ) as client:
+                response = await client.request(method, path, json=body)
+        except httpx.HTTPError as e:
+            raise APIConnectionError(f"Couldn't reach {self.base_url}: {e}") from e
         if response.is_success:
             return response.json() if response.content else None
         raise _error_response(response)
@@ -89,6 +93,10 @@ class Connection:
                 return await _serve(ws, callbacks)
         except websockets.InvalidStatus as e:
             raise _error_response(e.response) from None
+        except websockets.ConnectionClosed as e:
+            raise APIConnectionError(f"The connection closed before the run completed: {e}") from e
+        except (OSError, websockets.InvalidHandshake) as e:
+            raise APIConnectionError(f"Couldn't reach {url}: {e}") from e
 
 
 async def _serve(
@@ -99,13 +107,18 @@ async def _serve(
     tasks: set[asyncio.Task[None]] = set()
 
     async def answer(call_id: str, name: str, args: dict[str, Any]) -> None:
-        reply: dict[str, Any] = {"type": "callback_response", "call_id": call_id}
+        reply = {"type": "callback_response", "call_id": call_id}
+        # A result JSON can't hold is an error too, so the code isn't left
+        # waiting for an answer
         try:
-            reply["result"] = await invoke(callbacks[name], args)
+            text = json.dumps({**reply, "result": await invoke(callbacks[name], args)})
         except Exception as e:  # the code sees it as a RuntimeError
-            reply["error"] = f"{type(e).__name__}: {e}"
+            text = json.dumps({**reply, "error": f"{type(e).__name__}: {e}"})
         async with lock:
-            await ws.send(json.dumps(reply))
+            try:
+                await ws.send(text)
+            except websockets.ConnectionClosed:
+                pass  # the run is over; `_serve` reports why
 
     try:
         async for raw in ws:
@@ -125,7 +138,7 @@ async def _serve(
     finally:
         for task in tasks:
             task.cancel()
-    raise EryxError("The connection closed before the run completed")
+    raise APIConnectionError("The connection closed before the run completed")
 
 
 def _error_response(response: Any) -> EryxError:
@@ -178,8 +191,9 @@ def finish(response: dict[str, Any]) -> ExecuteResult:
     elif status == "resource_limit":
         exc = ResourceLimitError(error)
     # ponytail: the API says `error` for both an exception in the code and a
-    # failure around it; a traceback tells them apart until it says which
-    elif "Traceback (most recent call last)" in response.get("stderr", ""):
+    # failure around it, whose message is the traceback only for the former;
+    # use a failure kind once the API sends one
+    elif error.startswith("Traceback (most recent call last)"):
         exc = PythonExceptionError(error)
         exc.stdout, exc.stderr = stdout, stderr
     else:

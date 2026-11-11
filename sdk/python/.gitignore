@@ -5,6 +5,8 @@
 !/README.md
 !/pyproject.toml
 !/uv.lock
+!/LICENSE-MIT
+!/LICENSE-APACHE
 !/src/
 !/tests/
 __pycache__/

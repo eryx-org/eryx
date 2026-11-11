@@ -76,6 +76,10 @@ class APIError(EryxError):
         self.status_code = status_code
 
 
+class APIConnectionError(APIError):
+    """eryx.run couldn't be reached, or the connection dropped mid-run."""
+
+
 class AuthenticationError(APIError):
     """The API key is missing, malformed, wrong or revoked."""
 

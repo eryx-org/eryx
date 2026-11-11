@@ -987,7 +987,6 @@ jobs:
           source ../../.venv/bin/activate
           pytest tests/ -v -n auto
 
-  # Test book examples
   # The hosted client (eryx-run on PyPI): pure Python, tested against fakes of
   # the eryx.run API, on the oldest and newest Pythons it supports
   python-sdk:
@@ -1022,6 +1021,12 @@ jobs:
       - name: Test
         run: uv run --frozen pytest -v
 
+      # The dependency floors in pyproject.toml are what users may have
+      - name: Test with the lowest dependency versions
+        if: matrix.python == '3.10'
+        run: uv run --isolated --resolution lowest-direct --group dev pytest
+
+  # Test book examples
   book-tests:
     name: Book Tests
     runs-on: ubuntu-latest

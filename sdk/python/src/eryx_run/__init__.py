@@ -16,6 +16,7 @@ here, in your process.
 from ._callbacks import CallbackDict, CallbackRegistry
 from ._client import DEFAULT_URL, PROTOCOL
 from ._errors import (
+    APIConnectionError,
     APIError,
     AuthenticationError,
     CancelledError,
@@ -37,6 +38,7 @@ from ._types import ExecuteResult, ResourceLimits
 __version__ = "0.1.0"
 
 __all__ = [
+    "APIConnectionError",
     "APIError",
     "AuthenticationError",
     "CallbackDict",

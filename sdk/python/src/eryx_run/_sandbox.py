@@ -4,11 +4,14 @@ from __future__ import annotations
 
 import asyncio
 import concurrent.futures
+import threading
+from urllib.parse import quote
 from collections.abc import Coroutine, Sequence
 from typing import Any, Optional, TypeVar
 
 from ._callbacks import Callbacks, normalize
 from ._client import Connection, finish
+from ._errors import ConflictError
 from ._types import ExecuteResult, ResourceLimits
 
 T = TypeVar("T")
@@ -188,6 +191,7 @@ class Session(_Runner):
         self._ttl_secs = ttl_secs
         self._id = id
         self._execution_count = 0
+        self._creating = threading.Lock()
 
     @property
     def id(self) -> Optional[str]:
@@ -200,7 +204,15 @@ class Session(_Runner):
         return self._execution_count
 
     async def _ensure(self) -> str:
-        if self._id is None:
+        """The session's id, creating it on the first run"""
+        if self._id is not None:
+            return self._id
+        # Runs in a session go one at a time, so a second one while the first
+        # creates it would be refused anyway; refusing it here also keeps it
+        # from creating a second session
+        if not self._creating.acquire(blocking=False):
+            raise ConflictError("Runs in a session go one at a time", code="session_busy")
+        try:
             body: dict[str, Any] = {}
             if "environment" in self._options:
                 body["environment"] = self._options["environment"]
@@ -208,7 +220,9 @@ class Session(_Runner):
                 body["ttl_secs"] = self._ttl_secs
             created = await self._connection.request("POST", "/v1/sessions", body)
             self._id = str(created["id"])
-        return self._id
+            return self._id
+        finally:
+            self._creating.release()
 
     def execute(self, code: str, *, cancel: object = None) -> ExecuteResult:
         """Run ``code`` in the session and return its result. Raises as
@@ -220,15 +234,15 @@ class Session(_Runner):
         self._check_cancel(cancel)
         session_id = await self._ensure()
         body = self._body(code)
-        self._execution_count += 1
         if self._callbacks:
             response = await self._connection.stream(
                 {**body, "session_id": session_id}, self._callbacks
             )
         else:
             response = await self._connection.request(
-                "POST", f"/v1/sessions/{session_id}/execute", body
+                "POST", f"/v1/sessions/{quote(session_id, safe='')}/execute", body
             )
+        self._execution_count += 1
         return finish(response)
 
     def delete(self) -> None:
@@ -238,7 +252,7 @@ class Session(_Runner):
     async def delete_async(self) -> None:
         """Like ``delete``, from asyncio."""
         if self._id is not None:
-            await self._connection.request("DELETE", f"/v1/sessions/{self._id}")
+            await self._connection.request("DELETE", f"/v1/sessions/{quote(self._id, safe='')}")
             self._id = None
 
     def snapshot_state(self) -> Any:

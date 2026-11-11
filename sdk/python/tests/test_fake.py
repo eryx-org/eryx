@@ -366,3 +366,86 @@ async def test_stream_error_codes_are_typed() -> None:
             await box.execute_async("...")
     assert raised.value.code == "concurrency_limit"
     assert raised.value.status_code is None
+
+
+# -- Review regressions --------------------------------------------------------
+
+
+async def test_a_result_json_cant_hold_is_an_error_reply(stream: dict[str, Any]) -> None:
+    box = eryx.Sandbox(
+        api_key=KEY, base_url=stream["url"], callbacks=[{"name": "f", "fn": lambda n: {1, 2}}]
+    )
+    result = await box.execute_async("...")
+    [answer] = result.result.values()
+    assert answer.startswith("TypeError:"), answer
+
+
+def test_an_unreachable_server_is_an_eryx_error() -> None:
+    box = eryx.Sandbox(api_key=KEY, base_url="http://127.0.0.1:9")
+    with pytest.raises(eryx.APIConnectionError):
+        box.execute("pass")
+    streaming = eryx.Sandbox(
+        api_key=KEY, base_url="http://127.0.0.1:9", callbacks=[{"name": "f", "fn": lambda: 1}]
+    )
+    with pytest.raises(eryx.APIConnectionError):
+        streaming.execute("pass")
+
+
+async def test_a_dropped_stream_is_an_eryx_error() -> None:
+    async def serve(ws: websockets.ServerConnection) -> None:
+        await ws.recv()
+        await ws.close(code=1011)
+
+    async with websockets.serve(serve, "127.0.0.1", 0) as server:
+        port = server.sockets[0].getsockname()[1]
+        box = eryx.Sandbox(
+            api_key=KEY, base_url=f"http://127.0.0.1:{port}", callbacks=[{"name": "f", "fn": lambda: 1}]
+        )
+        with pytest.raises(eryx.APIConnectionError):
+            await box.execute_async("...")
+
+
+def test_a_printed_traceback_isnt_a_raised_exception(
+    http: Callable[[Handler], list[httpx.Request]],
+) -> None:
+    http(
+        lambda _: httpx.Response(
+            200,
+            json={"stdout": "", "stderr": TRACEBACK, "status": "error", "error": "Failed to save session state"},
+        )
+    )
+    with pytest.raises(eryx.ExecutionError) as raised:
+        sandbox().execute("...")
+    assert type(raised.value) is eryx.ExecutionError
+
+
+async def test_concurrent_first_runs_dont_create_two_sessions(
+    http: Callable[[Handler], list[httpx.Request]],
+) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/v1/sessions":
+            return httpx.Response(200, json={"id": "s1"})
+        return httpx.Response(200, json=SUCCESS)
+
+    requests = http(handler)
+    session = eryx.Session(api_key=KEY, base_url="https://api.test")
+    real_request = session._connection.request
+
+    async def delayed(method: str, path: str, body: Any = None) -> Any:
+        if path == "/v1/sessions":
+            await asyncio.sleep(0.05)
+        return await real_request(method, path, body)
+
+    session._connection.request = delayed  # type: ignore[method-assign]
+    results = await asyncio.gather(
+        session.execute_async("a"), session.execute_async("b"), return_exceptions=True
+    )
+    assert sum(isinstance(r, eryx.ConflictError) for r in results) == 1
+    assert [r.url.path for r in requests].count("/v1/sessions") == 1
+    assert session.execution_count == 1
+
+
+def test_session_ids_are_escaped(http: Callable[[Handler], list[httpx.Request]]) -> None:
+    requests = http(lambda _: httpx.Response(200, json=SUCCESS))
+    eryx.Session(api_key=KEY, base_url="https://api.test", id="a/../b").execute("pass")
+    assert requests[0].url.raw_path == b"/v1/sessions/a%2F..%2Fb/execute"

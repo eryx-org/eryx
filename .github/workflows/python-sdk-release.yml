@@ -70,7 +70,10 @@ jobs:
     name: Publish to PyPI
     runs-on: ubuntu-latest
     needs: [build]
-    if: github.event_name == 'release' || inputs.publish
+    # By hand, only from main: a published version can't be replaced
+    if: >-
+      github.event_name == 'release' ||
+      (inputs.publish && github.ref == 'refs/heads/main')
     environment: pypi
     permissions:
       id-token: write
