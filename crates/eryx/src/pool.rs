@@ -302,10 +302,10 @@ impl SandboxPool {
     /// instances as needed. The pool will be pre-warmed with `config.min_idle`
     /// instances.
     ///
-    /// Callbacks, handlers and resource limits are per-request: set them on
-    /// each [`PooledSandbox`]. For sandboxes that need anything else (secrets,
-    /// networking, packages, libraries, volumes, ...), use
-    /// [`with_builder`](Self::with_builder).
+    /// Callbacks, handlers, resource limits, networking and secrets are
+    /// per-request: set them on each [`PooledSandbox`]. For sandboxes that
+    /// need anything else (packages, libraries, volumes, ...), or the same
+    /// network on every lease, use [`with_builder`](Self::with_builder).
     ///
     /// # Errors
     ///

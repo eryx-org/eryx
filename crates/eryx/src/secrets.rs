@@ -196,11 +196,6 @@ impl From<bool> for OutputScrubPolicy {
     }
 }
 
-/// Generate a unique placeholder for a secret.
-///
-/// Format: `ERYX_SECRET_PLACEHOLDER_{random_hex}`
-///
-/// Placeholders are ephemeral (regenerated on each use) for better security.
 /// The shortest placeholder [`SecretConfig::with_placeholder`] accepts.
 const MIN_PLACEHOLDER_LEN: usize = 32;
 
@@ -225,6 +220,11 @@ pub(crate) fn check_placeholders(secrets: &HashMap<String, SecretConfig>) -> Res
     Ok(())
 }
 
+/// Generate a unique placeholder for a secret.
+///
+/// Format: `ERYX_SECRET_PLACEHOLDER_{random_hex}`
+///
+/// Placeholders are ephemeral (regenerated on each use) for better security.
 fn random_placeholder() -> String {
     use rand::RngExt;
     let mut rng = rand::rng();
