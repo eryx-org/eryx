@@ -22,6 +22,7 @@ from eryx_run import (
     InitializationError as InitializationError,
     PythonExceptionError as PythonExceptionError,
     ResourceLimitError as ResourceLimitError,
+    ResourceLimits as ResourceLimits,
     TimeoutError as TimeoutError,
 )
 
@@ -628,90 +629,6 @@ class NetConfig:
             cert_der: The certificate in DER format as bytes.
 
         Returns self for method chaining.
-        """
-        ...
-
-
-@final
-class ResourceLimits:
-    """Resource limits for sandbox execution.
-
-    Use this class to configure execution timeouts, memory limits,
-    and callback restrictions for a sandbox.
-
-    Example:
-        limits = ResourceLimits(
-            execution_timeout_ms=5000,  # 5 second timeout
-            max_memory_bytes=100_000_000,  # 100MB memory limit
-        )
-        sandbox = Sandbox(resource_limits=limits)
-    """
-
-    execution_timeout_ms: Optional[int]
-    """Maximum execution time in milliseconds."""
-
-    callback_timeout_ms: Optional[int]
-    """Maximum time for a single callback invocation in milliseconds."""
-
-    max_memory_bytes: Optional[int]
-    """Maximum memory usage in bytes."""
-
-    max_callback_invocations: Optional[int]
-    """Maximum number of callback invocations."""
-
-    max_fuel: Optional[int]
-    """Maximum fuel (WASM instructions) allowed."""
-
-    max_vfs_bytes: Optional[int]
-    """Maximum total bytes the in-memory virtual filesystem may hold.
-
-    VFS files live in host memory, outside `max_memory_bytes`, and the script
-    picks its own write offsets. `None` uses the default (64 MB).
-    """
-
-    max_open_host_files: Optional[int]
-    """Maximum host files (stdlib, site-packages and volume files) a script
-    may hold open at once.
-
-    Opens past it fail with `EDQUOT`. `None` uses the default (256).
-    """
-
-    def __new__(
-        cls,
-        *,
-        execution_timeout_ms: Optional[int] = 30000,
-        callback_timeout_ms: Optional[int] = 10000,
-        max_memory_bytes: Optional[int] = 134217728,
-        max_callback_invocations: Optional[int] = 1000,
-        max_fuel: Optional[int] = None,
-        max_vfs_bytes: Optional[int] = None,
-        max_open_host_files: Optional[int] = None,
-    ) -> ResourceLimits:
-        """Create new resource limits.
-
-        All parameters are optional. If not specified, defaults are used:
-        - execution_timeout_ms: 30000 (30 seconds)
-        - callback_timeout_ms: 10000 (10 seconds)
-        - max_memory_bytes: 134217728 (128 MB)
-        - max_callback_invocations: 1000
-        - max_fuel: None (unlimited)
-        - max_vfs_bytes: None (64 MB)
-        - max_open_host_files: None (256)
-
-        Pass `None` to disable a specific limit. `max_vfs_bytes` and
-        `max_open_host_files` are the exceptions: `None` means the default
-        cap, since both bound host resources.
-        """
-        ...
-
-    @staticmethod
-    def unlimited() -> ResourceLimits:
-        """Create resource limits with no restrictions.
-
-        Warning: Use with caution! Code can run indefinitely and use unlimited memory.
-
-        The virtual filesystem cap still applies (see `max_vfs_bytes`): it bounds
-        *host* memory, so removing it would let a script kill the process.
         """
         ...
 

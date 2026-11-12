@@ -106,13 +106,10 @@ def make_volumes(args: argparse.Namespace) -> list[tuple[str, str, bool, int | N
 
 
 def make_resource_limits(args: argparse.Namespace) -> eryx.ResourceLimits:
-    """Build ResourceLimits from parsed CLI args, starting from the defaults."""
-    limits = eryx.ResourceLimits()
-    if args.timeout is not None:
-        limits.execution_timeout_ms = args.timeout
-    if args.max_memory is not None:
-        limits.max_memory_bytes = args.max_memory
-    return limits
+    """Build ResourceLimits from parsed CLI args; unset flags keep the defaults."""
+    return eryx.ResourceLimits(
+        execution_timeout_ms=args.timeout, max_memory_bytes=args.max_memory
+    )
 
 
 def make_net_config(args: argparse.Namespace) -> eryx.NetConfig | None:

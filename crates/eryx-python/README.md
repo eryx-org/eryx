@@ -244,9 +244,13 @@ sandbox = eryx.Sandbox(result_variable="output")
 
 ### `ResourceLimits`
 
-Configure execution constraints:
+Configure execution constraints. This is `eryx_run.ResourceLimits`, the same
+class eryx.run's client takes, and a frozen dataclass. Fields left `None` get
+the defaults:
 
 ```python
+import dataclasses
+
 limits = eryx.ResourceLimits(
     execution_timeout_ms=30000,        # Max script runtime (default: 30s)
     callback_timeout_ms=10000,         # Max single callback time (default: 10s)
@@ -254,8 +258,10 @@ limits = eryx.ResourceLimits(
     max_callback_invocations=1000,     # Max callbacks (default: 1000)
 )
 
-# Or create unlimited (use with caution!)
+# Or turn off every limit you don't set (use with caution!). The VFS and
+# host-file caps keep their defaults.
 unlimited = eryx.ResourceLimits.unlimited()
+only_timeout = dataclasses.replace(unlimited, execution_timeout_ms=5000)
 ```
 
 ### `NetConfig`

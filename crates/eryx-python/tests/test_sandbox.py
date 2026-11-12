@@ -1,5 +1,6 @@
 """Tests for the eryx Python bindings."""
 
+import dataclasses
 import os
 import stat
 import sys
@@ -74,6 +75,7 @@ print(f"dict: {dct}")
         """Test that sandbox is isolated from host filesystem."""
         sandbox = eryx.Sandbox()
         result = sandbox.execute("""
+import dataclasses
 import os
 try:
     # Try to access host filesystem
@@ -275,13 +277,18 @@ except OSError as e:
 class TestResourceLimits:
     """Tests for ResourceLimits configuration."""
 
+    def test_shared_with_eryx_run(self):
+        """pyeryx and eryx.run's client share one ResourceLimits class."""
+        import eryx_run
+
+        assert eryx.ResourceLimits is eryx_run.ResourceLimits
+
     def test_default_limits(self):
-        """Test default resource limits."""
+        """Unset fields are None, meaning the backend's default."""
         limits = eryx.ResourceLimits()
-        assert limits.execution_timeout_ms == 30000
-        assert limits.callback_timeout_ms == 10000
-        assert limits.max_memory_bytes == 134217728  # 128 MB
-        assert limits.max_callback_invocations == 1000
+        assert limits.execution_timeout_ms is None
+        assert limits.max_memory_bytes is None
+        assert not limits.unlimited_by_default
 
     def test_custom_limits(self):
         """Test custom resource limits."""
@@ -292,13 +299,43 @@ class TestResourceLimits:
         assert limits.execution_timeout_ms == 5000
         assert limits.max_memory_bytes == 50_000_000
 
+    def test_frozen(self):
+        """Limits are immutable; derive new ones with dataclasses.replace."""
+        limits = eryx.ResourceLimits()
+        with pytest.raises(dataclasses.FrozenInstanceError):
+            limits.execution_timeout_ms = 5000
+        assert dataclasses.replace(limits, execution_timeout_ms=5000).execution_timeout_ms == 5000
+
+    def test_unset_fields_take_pyeryx_defaults(self):
+        """None fields get pyeryx's defaults, as before limits were shared."""
+        session = eryx.Session(resource_limits=eryx.ResourceLimits())
+        assert session.execution_timeout_ms == 30000
+        sandbox = eryx.Sandbox(resource_limits=eryx.ResourceLimits())
+        with pytest.raises(eryx.EryxError):
+            sandbox.execute("x = bytearray(200 * 1024 * 1024)")
+
     def test_unlimited(self):
-        """Test unlimited resource limits."""
+        """unlimited() turns off the limits it leaves unset."""
         limits = eryx.ResourceLimits.unlimited()
-        assert limits.execution_timeout_ms is None
-        assert limits.callback_timeout_ms is None
-        assert limits.max_memory_bytes is None
-        assert limits.max_callback_invocations is None
+        assert limits.unlimited_by_default
+        session = eryx.Session(resource_limits=limits)
+        assert session.execution_timeout_ms is None
+        sandbox = eryx.Sandbox(resource_limits=limits)
+        result = sandbox.execute("x = bytearray(200 * 1024 * 1024); print(len(x))")
+        assert result.stdout == b"209715200\n"
+
+    def test_unlimited_keeps_explicit_fields(self):
+        """Fields set on top of unlimited() still apply."""
+        limits = dataclasses.replace(
+            eryx.ResourceLimits.unlimited(), execution_timeout_ms=5000
+        )
+        session = eryx.Session(resource_limits=limits)
+        assert session.execution_timeout_ms == 5000
+
+    def test_rejects_other_types(self):
+        """resource_limits must be a ResourceLimits."""
+        with pytest.raises(TypeError, match="eryx.ResourceLimits"):
+            eryx.Sandbox(resource_limits={"execution_timeout_ms": 5000})
 
     def test_sandbox_with_limits(self):
         """Test creating sandbox with resource limits."""

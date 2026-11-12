@@ -401,13 +401,21 @@ async fn main() -> Result<(), eryx::Error> {
 
 ## Unlimited Resources
 
-For trusted code or development environments, you can disable limits:
+For trusted code or development environments, you can disable limits.
+`eryx.ResourceLimits` is a frozen dataclass whose fields default to `None`,
+meaning the defaults above; `unlimited()` makes `None` mean no limit instead.
+The virtual filesystem and open host file caps keep their defaults, since they
+bound host memory. Fields you set still apply:
 
 ```python
+import dataclasses
 import eryx
 
 # Remove all limits (use with caution!)
 limits = eryx.ResourceLimits.unlimited()
+
+# Or all but one
+timeout_only = dataclasses.replace(limits, execution_timeout_ms=5000)
 
 sandbox = eryx.Sandbox(resource_limits=limits)
 result = sandbox.execute("print('no limits!')")
