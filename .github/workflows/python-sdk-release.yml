@@ -2,7 +2,8 @@
 #
 # Publishes the pure-Python wheel and sdist to PyPI with trusted publishing.
 # Runs on a GitHub Release whose tag is `eryx-run-python-v<version>` (the
-# version in sdk/python/pyproject.toml), or by hand.
+# version in sdk/python/pyproject.toml), which release-please publishes when
+# its release PR is merged (release-please.yml), or by hand.
 
 name: Python SDK Release
 
