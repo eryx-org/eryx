@@ -207,7 +207,6 @@ impl PythonStateSnapshot {
             .as_deref()
             .unwrap_or("")
             .as_bytes();
-        let writer = &writer[..writer.len().min(usize::from(u16::MAX))];
         let mut bytes = Vec::with_capacity(8 + 1 + 2 + writer.len() + 8 + self.data.len());
         bytes.extend_from_slice(SNAPSHOT_MAGIC);
         bytes.push(SNAPSHOT_FORMAT_VERSION);
@@ -233,8 +232,14 @@ impl PythonStateSnapshot {
             None => (None, bytes),
             Some(rest) => {
                 let (&format_version, rest) = rest.split_first().ok_or_else(truncated)?;
-                if format_version != SNAPSHOT_FORMAT_VERSION {
+                if format_version > SNAPSHOT_FORMAT_VERSION {
                     return Err(ErrorKind::IncompatibleSnapshot { format_version }.into());
+                }
+                if format_version != SNAPSHOT_FORMAT_VERSION {
+                    return Err(ErrorKind::Snapshot(format!(
+                        "Invalid snapshot format version {format_version}"
+                    ))
+                    .into());
                 }
                 let (len, rest) = rest.split_first_chunk::<2>().ok_or_else(truncated)?;
                 let (writer, rest) = rest
@@ -2267,6 +2272,23 @@ mod tests {
             err.kind(),
             ErrorKind::IncompatibleSnapshot { format_version } if *format_version == SNAPSHOT_FORMAT_VERSION + 1
         ));
+    }
+
+    #[test]
+    fn test_python_state_snapshot_rejects_corrupt_header() {
+        let good = PythonStateSnapshot::new(vec![1], Vec::new()).to_bytes();
+
+        // A format version below ours isn't from a newer eryx.
+        let mut bytes = good.clone();
+        bytes[SNAPSHOT_MAGIC.len()] = 0;
+        let err = PythonStateSnapshot::from_bytes(&bytes).unwrap_err();
+        assert!(matches!(err.kind(), ErrorKind::Snapshot(_)), "{err}");
+
+        // The writer's first byte isn't valid UTF-8.
+        let mut bytes = good;
+        bytes[SNAPSHOT_MAGIC.len() + 3] = 0xFF;
+        let err = PythonStateSnapshot::from_bytes(&bytes).unwrap_err();
+        assert!(matches!(err.kind(), ErrorKind::Snapshot(_)), "{err}");
     }
 
     #[test]
