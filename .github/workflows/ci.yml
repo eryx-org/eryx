@@ -53,6 +53,7 @@ jobs:
       server: ${{ steps.filter.outputs.server }}
       python: ${{ steps.filter.outputs.python }}
       python-sdk: ${{ steps.filter.outputs.python-sdk }}
+      typescript-sdk: ${{ steps.filter.outputs.typescript-sdk }}
       book: ${{ steps.filter.outputs.book }}
       examples: ${{ steps.filter.outputs.examples }}
       js: ${{ steps.filter.outputs.js }}
@@ -91,6 +92,9 @@ jobs:
               - 'sdk/python/**'
             python-sdk:
               - 'sdk/python/**'
+              - '.github/workflows/ci.yml'
+            typescript-sdk:
+              - 'sdk/typescript/**'
               - '.github/workflows/ci.yml'
             book:
               - 'book/**'
@@ -1033,6 +1037,43 @@ jobs:
       - name: Test with the lowest dependency versions
         if: matrix.python == '3.10'
         run: uv run --isolated --resolution lowest-direct --group dev pytest
+
+  typescript-sdk:
+    name: TypeScript SDK (Node ${{ matrix.node }})
+    runs-on: ubuntu-latest
+    needs: [changes]
+    if: >-
+      github.event_name == 'push'
+      || needs.changes.outputs.typescript-sdk == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        # The tests are TypeScript, run with Node's type stripping (22.18+)
+        node: ["22", "26"]
+    defaults:
+      run:
+        working-directory: sdk/typescript
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: ${{ matrix.node }}
+          package-manager-cache: false
+
+      - name: Install
+        run: npm ci
+
+      - name: Type check
+        run: npm run typecheck
+
+      - name: Test
+        run: npm test
+
+      - name: Build
+        run: npm run build
 
   # Test book examples
   book-tests:

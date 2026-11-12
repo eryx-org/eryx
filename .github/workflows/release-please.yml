@@ -1,11 +1,14 @@
 # Release PRs for packages release-plz can't handle, because they aren't
-# Cargo crates: for now eryx-run, the hosted Python client (sdk/python).
+# Cargo crates: for now eryx-run, the hosted clients (sdk/python and
+# sdk/typescript).
 #
-# On each push to main, release-please opens or updates a PR that bumps the
-# version (pyproject.toml, __init__.py, uv.lock) and changelog from the
-# conventional commits touching sdk/python since the last release. Merging that
-# PR tags `eryx-run-python-v<version>` and publishes a GitHub release, which
-# runs python-sdk-release.yml to publish to PyPI. Config:
+# On each push to main, release-please opens or updates a PR per package that
+# bumps the version (pyproject.toml, __init__.py, uv.lock; package.json,
+# package-lock.json) and changelog from the conventional commits touching it
+# since the last release. Merging that PR tags `eryx-run-python-v<version>`
+# or `eryx-run-typescript-v<version>` and publishes a GitHub release, which
+# runs python-sdk-release.yml to publish to PyPI, or typescript-sdk-release.yml
+# to publish to npm. Config:
 # release-please-config.json and .release-please-manifest.json.
 
 name: Release-please
@@ -27,7 +30,7 @@ jobs:
       cancel-in-progress: false
     steps:
       # The release-plz app's token, not GITHUB_TOKEN: a release published
-      # with GITHUB_TOKEN wouldn't trigger python-sdk-release.yml
+      # with GITHUB_TOKEN wouldn't trigger the *-sdk-release.yml workflows
       - name: Generate GitHub App token
         id: app-token
         uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
