@@ -5,6 +5,7 @@ import sys
 import textwrap
 from unittest.mock import patch
 
+import eryx
 import pytest
 
 from eryx.__main__ import main
@@ -150,8 +151,7 @@ class TestCliResourceLimitsConfig:
 
     def test_defaults(self):
         limits = self._limits([])
-        assert limits.execution_timeout_ms == 30000
-        assert limits.max_memory_bytes == 128 * 1024 * 1024
+        assert limits == eryx.ResourceLimits()
 
     def test_flags_override(self):
         limits = self._limits(["--timeout", "5", "--max-memory", "1000"])

@@ -64,7 +64,11 @@ fn _eryx(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<result::ReplayOutcome>()?;
     m.add_class::<result::SuspendedCallback>()?;
     m.add_class::<result::StateSnapshot>()?;
-    m.add_class::<resource_limits::ResourceLimits>()?;
+    // eryx.run's client's class, so the same limits work locally and hosted.
+    m.add(
+        "ResourceLimits",
+        m.py().import("eryx_run")?.getattr("ResourceLimits")?,
+    )?;
     m.add_class::<net_config::NetConfig>()?;
     m.add_class::<vfs::VfsStorage>()?;
     m.add_class::<callback::CallbackRegistry>()?;
