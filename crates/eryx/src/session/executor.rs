@@ -63,6 +63,17 @@ use crate::wasm::{
 /// The Python runtime enforces the same limit.
 pub const MAX_SNAPSHOT_SIZE: usize = 10 * 1024 * 1024;
 
+/// Prefix of a serialized snapshot. Snapshots from before eryx 0.15.0 start
+/// with their timestamp instead, which this never is: read as a timestamp it
+/// would be millions of years from now.
+const SNAPSHOT_MAGIC: &[u8; 8] = b"ERYXSNAP";
+
+/// The snapshot format [`PythonStateSnapshot::to_bytes`] writes.
+const SNAPSHOT_FORMAT_VERSION: u8 = 1;
+
+/// The writer recorded in new snapshots.
+const SNAPSHOT_WRITER: &str = concat!("eryx ", env!("CARGO_PKG_VERSION"));
+
 /// Time bound for snapshot, restore and clear when the session has no
 /// execution timeout.
 pub const DEFAULT_STATE_OP_TIMEOUT: Duration = Duration::from_secs(30);
@@ -121,6 +132,13 @@ pub struct SnapshotMetadata {
 
     /// Size of the snapshot data in bytes.
     pub size_bytes: usize,
+
+    /// The eryx version that captured the snapshot, e.g. `eryx 0.15.0`.
+    /// `None` for snapshots from before eryx 0.15.0, which don't record it.
+    ///
+    /// Restoring doesn't check it: whether a snapshot restores depends on the
+    /// Python runtime and the state's contents, not only the eryx version.
+    pub eryx_version: Option<String>,
 }
 
 impl PythonStateSnapshot {
@@ -138,6 +156,7 @@ impl PythonStateSnapshot {
             metadata: SnapshotMetadata {
                 timestamp_ms,
                 size_bytes,
+                eryx_version: Some(SNAPSHOT_WRITER.to_string()),
             },
             skipped_globals,
         }
@@ -174,39 +193,68 @@ impl PythonStateSnapshot {
 
     /// Convert the snapshot to bytes for storage or transmission.
     ///
-    /// The format is simple: 8 bytes for timestamp, followed by pickle data.
+    /// The format is `ERYXSNAP`, a format version byte, the writer's eryx
+    /// version (a little-endian `u16` length, then UTF-8), the capture time
+    /// (little-endian `u64` milliseconds), then the pickle data. eryx before
+    /// 0.15.0 can't read it.
     #[must_use]
     pub fn to_bytes(&self) -> Vec<u8> {
-        let mut bytes = Vec::with_capacity(8 + self.data.len());
+        // Empty for a snapshot that predates the version stamp. A version is
+        // either ours or one read back by `from_bytes`, so it fits in a u16.
+        let writer = self
+            .metadata
+            .eryx_version
+            .as_deref()
+            .unwrap_or("")
+            .as_bytes();
+        let writer = &writer[..writer.len().min(usize::from(u16::MAX))];
+        let mut bytes = Vec::with_capacity(8 + 1 + 2 + writer.len() + 8 + self.data.len());
+        bytes.extend_from_slice(SNAPSHOT_MAGIC);
+        bytes.push(SNAPSHOT_FORMAT_VERSION);
+        bytes.extend_from_slice(&(writer.len() as u16).to_le_bytes());
+        bytes.extend_from_slice(writer);
         bytes.extend_from_slice(&self.metadata.timestamp_ms.to_le_bytes());
         bytes.extend_from_slice(&self.data);
         bytes
     }
 
-    /// Restore a snapshot from bytes.
+    /// Restore a snapshot from bytes written by [`to_bytes`](Self::to_bytes),
+    /// in this or any earlier eryx version.
     ///
     /// # Errors
     ///
-    /// Returns an error if the data is too short or corrupted.
+    /// Returns [`ErrorKind::IncompatibleSnapshot`] if a newer eryx wrote the
+    /// snapshot in a format this one doesn't know, and
+    /// [`ErrorKind::Snapshot`] if the data is too short or corrupted.
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, Error> {
-        if bytes.len() < 8 {
-            return Err(ErrorKind::Snapshot("Snapshot data too short".to_string()).into());
-        }
-
-        let timestamp_ms = u64::from_le_bytes(
-            bytes[..8]
-                .try_into()
-                .map_err(|_| ErrorKind::Snapshot("Invalid timestamp".to_string()))?,
-        );
-
-        let data = bytes[8..].to_vec();
+        let truncated = || Error::from(ErrorKind::Snapshot("Snapshot data too short".to_string()));
+        let (eryx_version, rest) = match bytes.strip_prefix(SNAPSHOT_MAGIC) {
+            // Before eryx 0.15.0: the timestamp, then the pickle data.
+            None => (None, bytes),
+            Some(rest) => {
+                let (&format_version, rest) = rest.split_first().ok_or_else(truncated)?;
+                if format_version != SNAPSHOT_FORMAT_VERSION {
+                    return Err(ErrorKind::IncompatibleSnapshot { format_version }.into());
+                }
+                let (len, rest) = rest.split_first_chunk::<2>().ok_or_else(truncated)?;
+                let (writer, rest) = rest
+                    .split_at_checked(usize::from(u16::from_le_bytes(*len)))
+                    .ok_or_else(truncated)?;
+                let writer = String::from_utf8(writer.to_vec())
+                    .map_err(|_| ErrorKind::Snapshot("Invalid eryx version".to_string()))?;
+                (Some(writer).filter(|w| !w.is_empty()), rest)
+            }
+        };
+        let (timestamp, data) = rest.split_first_chunk::<8>().ok_or_else(truncated)?;
+        let data = data.to_vec();
         let size_bytes = data.len();
 
         Ok(Self {
             data,
             metadata: SnapshotMetadata {
-                timestamp_ms,
+                timestamp_ms: u64::from_le_bytes(*timestamp),
                 size_bytes,
+                eryx_version,
             },
             skipped_globals: Vec::new(),
         })
@@ -2176,6 +2224,64 @@ mod tests {
         let bytes = vec![1, 2, 3]; // Less than 8 bytes
         let result = PythonStateSnapshot::from_bytes(&bytes);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_python_state_snapshot_records_eryx_version() {
+        let snapshot = PythonStateSnapshot::new(vec![1, 2, 3], Vec::new());
+        let bytes = snapshot.to_bytes();
+        assert!(bytes.starts_with(SNAPSHOT_MAGIC));
+
+        let restored = PythonStateSnapshot::from_bytes(&bytes).unwrap();
+        assert_eq!(
+            restored.metadata().eryx_version.as_deref(),
+            Some(concat!("eryx ", env!("CARGO_PKG_VERSION")))
+        );
+        assert_eq!(restored.data(), &[1, 2, 3]);
+    }
+
+    #[test]
+    fn test_python_state_snapshot_reads_pre_stamp_format() {
+        // Before eryx 0.15.0: an 8-byte timestamp, then the pickle data.
+        let mut bytes = 1_700_000_000_000u64.to_le_bytes().to_vec();
+        bytes.extend_from_slice(b"pickle");
+
+        let restored = PythonStateSnapshot::from_bytes(&bytes).unwrap();
+        assert_eq!(restored.data(), b"pickle");
+        assert_eq!(restored.metadata().timestamp_ms, 1_700_000_000_000);
+        assert_eq!(restored.metadata().eryx_version, None);
+
+        // Re-serializing doesn't claim it was written by this version.
+        let again = PythonStateSnapshot::from_bytes(&restored.to_bytes()).unwrap();
+        assert_eq!(again.metadata().eryx_version, None);
+        assert_eq!(again.data(), b"pickle");
+    }
+
+    #[test]
+    fn test_python_state_snapshot_rejects_unknown_format_version() {
+        let mut bytes = PythonStateSnapshot::new(vec![1], Vec::new()).to_bytes();
+        bytes[SNAPSHOT_MAGIC.len()] = SNAPSHOT_FORMAT_VERSION + 1;
+
+        let err = PythonStateSnapshot::from_bytes(&bytes).unwrap_err();
+        assert!(matches!(
+            err.kind(),
+            ErrorKind::IncompatibleSnapshot { format_version } if *format_version == SNAPSHOT_FORMAT_VERSION + 1
+        ));
+    }
+
+    #[test]
+    fn test_python_state_snapshot_rejects_truncated_header() {
+        let bytes = PythonStateSnapshot::new(Vec::new(), Vec::new()).to_bytes();
+        // Every cut inside the header, from just the magic to one byte short
+        // of the timestamp.
+        for len in SNAPSHOT_MAGIC.len()..bytes.len() {
+            let err = PythonStateSnapshot::from_bytes(&bytes[..len]).unwrap_err();
+            assert!(
+                matches!(err.kind(), ErrorKind::Snapshot(_)),
+                "len {len}: {err}"
+            );
+        }
+        assert!(PythonStateSnapshot::from_bytes(&bytes).is_ok());
     }
 
     #[test]

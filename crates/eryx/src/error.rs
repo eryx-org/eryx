@@ -290,6 +290,19 @@ pub enum ErrorKind {
     #[error("snapshot error: {0}")]
     Snapshot(String),
 
+    /// A state snapshot was written by a newer eryx, in a format this one
+    /// can't read.
+    #[error(
+        "this snapshot uses format version {format_version}, which eryx {} can't read; \
+         it was written by a newer eryx",
+        env!("CARGO_PKG_VERSION")
+    )]
+    #[non_exhaustive]
+    IncompatibleSnapshot {
+        /// The format version stored in the snapshot.
+        format_version: u8,
+    },
+
     /// Execution was cancelled.
     #[error("execution cancelled")]
     Cancelled,

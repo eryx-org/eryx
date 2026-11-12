@@ -362,6 +362,8 @@ print(f"Snapshot size: {len(snapshot.data)} bytes")
 
 Globals that can't be serialized (open sockets, generators, objects dill rejects) are left out of the snapshot, so they raise `NameError` after a restore. The snapshot names them: `snapshot.skipped_globals()` in Rust, `snapshot.skipped_globals` in Python, `snapshot.skippedGlobals` in JavaScript, and `ExecuteResult.state_skipped_globals` from the gRPC server. The serialized bytes to store are `snapshot.to_bytes()` in Rust and `snapshot.data` in Python and JavaScript. `restore_state()`/`restoreState()` take either the snapshot or those bytes.
 
+The bytes record the eryx version that wrote them: `snapshot.metadata().eryx_version` in Rust, after `PythonStateSnapshot::from_bytes()`. Use it to find stored snapshots that predate a runtime upgrade. Restoring doesn't check it, since whether a snapshot restores depends on the Python runtime and on what the state holds. eryx reads snapshots from any earlier version, but eryx before 0.15.0 can't read snapshots from 0.15.0 or later, and bytes in a format newer than the reader knows fail with `ErrorKind::IncompatibleSnapshot`.
+
 ### Restoring a Snapshot
 
 <!-- langtabs-start -->
