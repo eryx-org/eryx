@@ -137,6 +137,18 @@ describe("plain runs", () => {
     }
   });
 
+  test("an empty ERYX_URL means the default", () => {
+    const saved = process.env.ERYX_URL;
+    process.env.ERYX_URL = "";
+    try {
+      const box = new eryx.Sandbox({ apiKey: KEY }) as unknown as { connection: { baseUrl: string } };
+      assert.equal(box.connection.baseUrl, eryx.DEFAULT_URL);
+    } finally {
+      if (saved === undefined) delete process.env.ERYX_URL;
+      else process.env.ERYX_URL = saved;
+    }
+  });
+
   test("an unreachable server is an APIConnectionError", async () => {
     for (const callbacks of [{}, { f: () => 1 }] as eryx.Callbacks[]) {
       const box = new eryx.Sandbox({ apiKey: KEY, baseUrl: "http://127.0.0.1:9", callbacks });
@@ -241,6 +253,17 @@ describe("sessions", () => {
     const session = new eryx.Session({ apiKey: KEY, baseUrl: url });
     await Promise.all([session.execute("a"), session.execute("b")]);
     assert.equal(requests.filter((r) => r.path === "/v1/sessions").length, 1);
+  });
+
+  test("one run's abort doesn't fail another waiting on the same creation", async () => {
+    const { url } = await fake((req) => (req.path === "/v1/sessions" ? { body: { id: "s1" } } : { body: SUCCESS }));
+    const session = new eryx.Session({ apiKey: KEY, baseUrl: url });
+    const controller = new AbortController();
+    const aborted = session.execute("a", { signal: controller.signal });
+    const other = session.execute("b");
+    controller.abort();
+    await assert.rejects(aborted, { name: "AbortError" });
+    assert.equal((await other).stdout, "4\n");
   });
 
   test("ids are escaped", async () => {
@@ -376,6 +399,7 @@ describe("volumes", () => {
     await writeFile(join(repo, "README.md"), "hello\n");
     await writeFile(join(repo, "src", "big.bin"), Buffer.alloc(70 * 1024, 1));
     await writeFile(join(repo, ".env"), "SECRET=1\n");
+    await writeFile(join(repo, "..data"), "kubernetes\n");
     await writeFile(join(repo, ".git", "config"), "[remote]\n");
     await writeFile(join(root, "outside.txt"), "outside\n");
     await symlink(join(root, "outside.txt"), join(repo, "escape"));
@@ -414,13 +438,14 @@ describe("volumes", () => {
       listed.entries.map((e: Record<string, unknown>) => [e.name, e.is_dir, e.inline ?? false]),
       // .env, and the links to outside and to .env, aren't listed
       [
+        ["..data", false, true],
         [".git", true, false],
         ["README.md", false, true],
         ["src", true, false],
       ],
     );
-    assert.equal(listed.data, 6);
-    assert.equal(inline, "hello\n");
+    assert.equal(listed.data, 17);
+    assert.equal(inline, "kubernetes\nhello\n");
     assert.equal(read.data, 5);
     assert.deepEqual(data, [1, 1, 1, 1, 1]);
     assert.equal(refused.error, "permission_denied");
@@ -433,6 +458,7 @@ describe("volumes", () => {
       (await answer(served, { op_id: "x", op, mount: "/mnt/repo", path, offset: 0, len: 10 }))[0];
 
     assert.equal((await op("README.md")).error, undefined);
+    assert.equal((await op("..data")).error, undefined);
     for (const path of [".env", ".ENV", ".git/config", "escape", "innocent", "missing"]) {
       assert.equal((await op(path)).error, "not_found", path);
     }
@@ -446,6 +472,17 @@ describe("volumes", () => {
 
     const everything = await mounts([{ hostPath: repo, guestPath: "/mnt/repo" }], []);
     assert.equal((await answer(everything, { op_id: "x", op: "stat", mount: "/mnt/repo", path: ".env" }))[0].error, undefined);
+  });
+
+  test("hidden patterns are fnmatch's", async () => {
+    const repo = await tree();
+    for (const name of ["secret1.txt", "secretx.txt", "a]b"]) await writeFile(join(repo, name), "");
+    const served = await mounts([{ hostPath: repo, guestPath: "/mnt/repo" }], ["secret[0-9].txt", "secret[!0-9x]*", "a[]]b"]);
+    const error = async (path: string) => (await answer(served, { op_id: "x", op: "stat", mount: "/mnt/repo", path }))[0].error;
+    assert.equal(await error("secret1.txt"), "not_found");
+    assert.equal(await error("secretx.txt"), undefined);
+    assert.equal(await error("a]b"), "not_found");
+    assert.equal(await error("README.md"), undefined);
   });
 
   test("guest paths are checked", () => {

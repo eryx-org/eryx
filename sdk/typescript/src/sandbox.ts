@@ -176,7 +176,10 @@ export class Session extends Sandbox {
     this.id = undefined;
   }
 
-  /** The session's id, creating it on the first run; runs started meanwhile share the one created */
+  /**
+   * The session's id, creating it on the first run; runs started meanwhile
+   * share the one created, so it doesn't take one caller's signal
+   */
   private ensure(signal?: AbortSignal): Promise<string> {
     this.created ??= this.connection
       .request(
@@ -186,13 +189,18 @@ export class Session extends Sandbox {
           ...(this.environment !== undefined && { environment: this.environment }),
           ...(this.ttlSecs !== undefined && { ttl_secs: this.ttlSecs }),
         },
-        signal,
       )
       .then((created) => String(created!.id))
       .catch((e: unknown) => {
         this.created = undefined;
         throw e;
       });
-    return this.created.then((id) => (this.id = id));
+    const created = this.created.then((id) => (this.id = id));
+    if (!signal) return created;
+    signal.throwIfAborted();
+    return Promise.race([
+      created,
+      new Promise<never>((_, reject) => signal.addEventListener("abort", () => reject(signal.reason), { once: true })),
+    ]);
   }
 }

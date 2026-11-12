@@ -114,7 +114,7 @@ export class Connection {
       throw new TypeError("No API key: pass apiKey or set ERYX_API_KEY (create one at https://app.eryx.run)");
     }
     this.apiKey = apiKey;
-    let baseUrl = options.baseUrl ?? env("ERYX_URL") ?? DEFAULT_URL;
+    let baseUrl = options.baseUrl || env("ERYX_URL") || DEFAULT_URL;
     while (baseUrl.endsWith("/")) baseUrl = baseUrl.slice(0, -1);
     this.baseUrl = baseUrl;
     this.fetch = options.fetch ?? globalThis.fetch.bind(globalThis);
@@ -140,8 +140,13 @@ export class Connection {
       throw new APIConnectionError(`Couldn't reach ${this.baseUrl}: ${e}`, { cause: e });
     }
     if (!response.ok) throw await errorResponse(response);
-    const text = await response.text();
-    return text ? (JSON.parse(text) as Json) : undefined;
+    try {
+      const text = await response.text();
+      return text ? (JSON.parse(text) as Json) : undefined;
+    } catch (e) {
+      if (signal?.aborted) throw signal.reason;
+      throw new APIConnectionError(`${this.baseUrl} sent a response that isn't the API's: ${e}`, { cause: e });
+    }
   }
 
   /**
@@ -160,6 +165,7 @@ export class Connection {
     signal?.throwIfAborted();
     const fs = volumes.length ? await import("./mounts.ts") : undefined;
     const mounts = fs ? await fs.mounts(volumes, hidden) : new Map();
+    signal?.throwIfAborted();
     const message = {
       type: "execute",
       ...body,
@@ -169,7 +175,7 @@ export class Connection {
       })),
       ...(volumes.length ? { mounts: volumes.map((v) => ({ path: v.guestPath })) } : {}),
     };
-    const url = `ws${this.baseUrl.replace(/^http/, "")}/v1/stream`;
+    const url = `${this.baseUrl.replace(/^http/i, "ws")}/v1/stream`;
     const ws = new this.WebSocket(url, { protocols: [PROTOCOL], headers: this.headers });
     ws.binaryType = "arraybuffer";
 
@@ -187,7 +193,11 @@ export class Connection {
       signal?.addEventListener("abort", onAbort);
 
       const send = (data: string | Uint8Array<ArrayBuffer>) => {
-        if (!done) ws.send(data);
+        try {
+          if (!done) ws.send(data);
+        } catch {
+          // The socket's closing; the close ends the run
+        }
       };
 
       const answer = async (call: Json) => {

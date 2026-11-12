@@ -31,8 +31,23 @@ class Refused extends Error {
   }
 }
 
+/** A pattern as Python's `fnmatch` reads it: `*`, `?`, `[seq]` and `[!seq]` */
 function globToRegExp(pattern: string): RegExp {
-  const source = pattern.replace(/[.+^${}()|[\]\\]/g, "\\$&").replace(/\*/g, ".*").replace(/\?/g, ".");
+  let source = "";
+  for (let i = 0; i < pattern.length; i++) {
+    const c = pattern[i]!;
+    // A `]` straight after `[` or `[!` is part of the set
+    const close = c === "[" ? pattern.indexOf("]", i + (pattern[i + 1] === "!" ? 3 : 2)) : -1;
+    if (c === "*") source += ".*";
+    else if (c === "?") source += ".";
+    else if (close !== -1) {
+      let set = pattern.slice(i + 1, close).replace(/[\\\]]/g, "\\$&");
+      if (set.startsWith("!")) set = `^${set.slice(1)}`;
+      else if (set.startsWith("^")) set = `\\${set}`;
+      source += `[${set}]`;
+      i = close;
+    } else source += c.replace(/[.+^${}()|[\]\\]/g, "\\$&");
+  }
   return new RegExp(`^${source}$`, "s");
 }
 
@@ -96,7 +111,7 @@ class Mount {
     if (rel && isHidden(rel, this.patterns, this.nested)) throw new Refused("not_found");
     const real = await realpath(join(this.root, rel));
     const inner = relative(this.root, real);
-    if (inner.startsWith("..") || inner.startsWith(sep) || /^[a-zA-Z]:/.test(inner)) throw new Refused("not_found");
+    if (inner === ".." || inner.startsWith(`..${sep}`) || inner.startsWith(sep) || /^[a-zA-Z]:/.test(inner)) throw new Refused("not_found");
     // A symlink inside the mount mustn't lead to a hidden file either
     if (inner && isHidden(inner.split(sep).join("/"), this.patterns, this.nested)) throw new Refused("not_found");
     return real;
