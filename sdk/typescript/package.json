@@ -1,7 +1,7 @@
 {
   "name": "@eryx-org/eryx-run",
   "version": "0.0.0",
-  "description": "Run Python in an eryx sandbox on eryx.run, with callbacks into your code",
+  "description": "Run Python in an eryx sandbox on eryx.run, from TypeScript and JavaScript",
   "type": "module",
   "license": "MIT OR Apache-2.0",
   "homepage": "https://eryx.run",
