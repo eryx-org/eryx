@@ -642,7 +642,7 @@ pub type PrefixHandler = Arc<
 ///
 /// let tools = PrefixCallback::new("mcp.grafana", "Grafana MCP tools", |name, kwargs, args| {
 ///     Box::pin(async move {
-///         let tool = name.strip_prefix("mcp.grafana.").unwrap_or(&name).to_string();
+///         let tool = name.trim_prefix("mcp.grafana.").to_string();
 ///         Ok(json!({ "tool": tool, "kwargs": kwargs, "positional": args }))
 ///     })
 /// });
@@ -693,7 +693,7 @@ impl PrefixCallback {
     /// The prefix this callback handles, without the trailing `.*`.
     #[must_use]
     pub fn prefix(&self) -> &str {
-        self.name.strip_suffix(".*").unwrap_or(&self.name)
+        self.name.trim_suffix(".*")
     }
 }
 

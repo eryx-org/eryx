@@ -1,6 +1,6 @@
 [tools]
 # Profile "default" includes rustc, rust-std, cargo, rust-docs, rustfmt, and clippy
-rust = { version = "1.99.1", profile = "default" }
+rust = { version = "1.100.0", profile = "default" }
 # Workflow linting (`mise run lint-actions`). actionlint runs shellcheck over
 # every `run:` script when it finds it on PATH, so pin that too.
 actionlint = "1.7.12"

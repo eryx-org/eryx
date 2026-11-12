@@ -266,7 +266,7 @@ fn mise_var(workspace_root: &Path, key: &str) -> String {
         .expect("failed to read mise.toml");
     let prefix = format!("{key} = \"");
     mise.lines()
-        .find_map(|line| line.strip_prefix(&prefix)?.strip_suffix('"'))
+        .find_map(|line| line.strip_circumfix(prefix.as_str(), '"'))
         .unwrap_or_else(|| panic!("mise.toml has no `{key} = \"...\"` in [vars]"))
         .to_string()
 }

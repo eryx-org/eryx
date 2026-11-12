@@ -1730,11 +1730,8 @@ fn strip_port(authority: &str) -> &str {
 /// and IPv6 brackets are ignored.
 fn same_host(a: &str, b: &str) -> bool {
     let norm = |h: &str| {
-        let h = h
-            .strip_prefix('[')
-            .and_then(|h| h.strip_suffix(']'))
-            .unwrap_or(h);
-        h.strip_suffix('.').unwrap_or(h).to_ascii_lowercase()
+        let h = h.strip_circumfix('[', ']').unwrap_or(h);
+        h.trim_suffix('.').to_ascii_lowercase()
     };
     !a.is_empty() && norm(a) == norm(b)
 }
