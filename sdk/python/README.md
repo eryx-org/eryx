@@ -101,9 +101,10 @@ missing). Pass `hidden=()` to serve everything, or your own patterns.
 
 ## What's different from pyeryx
 
-- **Limits:** `ResourceLimits(execution_timeout_ms=..., max_fuel=...)`; `None`
-  (the default) means your org's limit. eryx.run sets memory and callback
-  limits itself.
+- **Limits:** `ResourceLimits(execution_timeout_ms=..., max_fuel=...)` is the
+  same class as `eryx.ResourceLimits`; `None` (the default) means your org's
+  limit, and so does `unlimited()`. eryx.run sets memory and callback limits
+  itself.
 - **Volumes** are read-only, under `/mnt/`, and skip hidden files (`hidden`).
 - **Hosted-only arguments:** `environment` (an environment you uploaded),
   `connections` (MCP servers), `network_policies`, and `api_key` / `base_url`

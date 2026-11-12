@@ -72,13 +72,24 @@ class ExecuteResult(abc.ABC):  # noqa: B024 - an ABC so pyeryx's class can regis
 
 @dataclass(frozen=True)
 class ResourceLimits:
-    """Limits for a run, with the same fields as pyeryx's ``ResourceLimits``.
+    """Limits for a run, shared with pyeryx (``eryx.ResourceLimits`` is this class).
 
-    ``None`` means the backend's default: on eryx.run, your org's limit. A
-    value over your org's limit is capped at it. The hosted API takes
-    ``execution_timeout_ms`` (rounded up to whole seconds) and ``max_fuel``;
-    setting the others raises ``ValueError`` when you run code, since the
-    service uses its own.
+    ``None`` means the backend's default: on eryx.run, your org's limit; in
+    pyeryx, a 30-second execution timeout, 10-second callback timeout, 128 MiB
+    of memory, 1000 callback invocations and no fuel limit. A value over your
+    org's limit is capped at it. The hosted API takes ``execution_timeout_ms``
+    (rounded up to whole seconds) and ``max_fuel``; setting the others raises
+    ``ValueError`` when you run code, since the service uses its own.
+
+    ``unlimited_by_default=True`` (what ``unlimited()`` returns) makes the
+    ``None`` fields mean no limit in pyeryx, except ``max_vfs_bytes`` and
+    ``max_open_host_files``, which keep their default caps since both bound
+    host memory. Fields you set
+    still apply, so ``dataclasses.replace(ResourceLimits.unlimited(),
+    execution_timeout_ms=5000)`` turns off all but the timeout. On eryx.run it
+    means your org's limits.
+
+    The class is frozen: derive new limits with ``dataclasses.replace``.
     """
 
     execution_timeout_ms: Optional[int] = None
@@ -88,11 +99,13 @@ class ResourceLimits:
     max_fuel: Optional[int] = None
     max_vfs_bytes: Optional[int] = None
     max_open_host_files: Optional[int] = None
+    unlimited_by_default: bool = False
 
     @staticmethod
     def unlimited() -> ResourceLimits:
-        """No limits of your own: on eryx.run, your org's."""
-        return ResourceLimits()
+        """No limits of your own: off in pyeryx (but for the VFS and host-file
+        caps), your org's on eryx.run."""
+        return ResourceLimits(unlimited_by_default=True)
 
     def hosted_request(self) -> dict[str, int]:
         """The request fields for these limits, or ``ValueError`` for ones the
