@@ -1066,14 +1066,15 @@ jobs:
       - name: Install
         run: npm ci
 
+      # First: the examples import the package by name, which is dist/
+      - name: Build
+        run: npm run build
+
       - name: Type check
         run: npm run typecheck
 
       - name: Test
         run: npm test
-
-      - name: Build
-        run: npm run build
 
   # Test book examples
   book-tests:

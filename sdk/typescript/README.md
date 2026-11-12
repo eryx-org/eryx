@@ -129,10 +129,21 @@ of the directory, or files matching `hidden` (default `DEFAULT_HIDDEN`:
 `hidden: []` to serve everything, or your own patterns. Volumes need
 `node:fs` (Node.js, Bun or Deno).
 
+## Examples
+
+[`examples/`](examples) has runnable scripts: callbacks an agent's code
+calls, a session used like a notebook, and a volume over a local directory.
+
+```sh
+npm install && npm run build
+ERYX_API_KEY=eryx_... node examples/callbacks.ts
+```
+
 ## Development
 
 ```sh
 npm install
+npm run build                             # the examples type-check against dist/
 npm run typecheck
 npm test                                  # against a fake eryx.run
 ERYX_LIVE_TESTS=1 npm test                # also against $ERYX_URL with $ERYX_API_KEY
