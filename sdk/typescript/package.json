@@ -1,0 +1,47 @@
+{
+  "name": "@eryx-org/eryx-run",
+  "version": "0.0.0",
+  "description": "Run Python in an eryx sandbox on eryx.run, from TypeScript and JavaScript",
+  "type": "module",
+  "license": "MIT OR Apache-2.0",
+  "homepage": "https://eryx.run",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/eryx-org/eryx.git",
+    "directory": "sdk/typescript"
+  },
+  "keywords": [
+    "python",
+    "sandbox",
+    "wasm",
+    "webassembly",
+    "eryx"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE-MIT",
+    "LICENSE-APACHE"
+  ],
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc",
+    "test": "node --test 'test/*.test.ts'",
+    "prepack": "npm run build"
+  },
+  "devDependencies": {
+    "@types/node": "^24.19.2",
+    "@types/ws": "^8.18.2",
+    "typescript": "^7.0.2",
+    "ws": "^8.22.2"
+  }
+}
