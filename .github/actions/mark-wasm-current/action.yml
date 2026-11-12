@@ -36,8 +36,8 @@ runs:
           echo "Prebuilt artifacts changed ($CACHED_PREBUILT_HASH -> $PREBUILT_HASH)"
           echo "Invalidating eryx-runtime OUT_DIR caches..."
           # Remove all cached .so.zst files from eryx-runtime OUT_DIRs
-          # These live in target/*/build/eryx-runtime-*/out/
-          find target -path "*/build/eryx-runtime-*/out/*.so.zst" -delete 2>/dev/null || true
+          # These live in target/*/build/eryx-runtime*/out/
+          find target -path "*/build/eryx-runtime*/out/*.so.zst" -delete 2>/dev/null || true
           # Touch build.rs to force build script to re-run
           touch crates/eryx-runtime/build.rs
           # Touch linker.rs to force recompilation - it contains include_bytes! that
