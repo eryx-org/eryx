@@ -111,6 +111,9 @@ fn kind_to_py(kind: eryx::ErrorKind) -> PyErr {
             "Python stdlib not found. Use Sandbox() which includes embedded runtime.",
         ),
         eryx::ErrorKind::Snapshot(msg) => InitializationError::new_err(msg),
+        err @ eryx::ErrorKind::IncompatibleSnapshot { .. } => {
+            InitializationError::new_err(err.to_string())
+        }
         eryx::ErrorKind::Cancelled => CancelledError::new_err("execution was cancelled"),
         eryx::ErrorKind::Suspended(reason) => {
             ExecutionError::new_err(format!("execution suspended: {reason}"))
