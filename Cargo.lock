@@ -1218,7 +1218,6 @@ dependencies = [
  "sha2 0.11.1",
  "tempfile",
  "tokio",
- "tracing",
  "tracing-subscriber",
  "walkdir",
 ]
@@ -1236,11 +1235,9 @@ dependencies = [
  "pythonize",
  "rmcp",
  "serde_json",
- "tar",
  "tempfile",
  "tokio",
  "walkdir",
- "zstd 0.14.3",
 ]
 
 [[package]]
