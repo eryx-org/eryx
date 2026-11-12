@@ -39,7 +39,7 @@
     "prepack": "npm run build"
   },
   "devDependencies": {
-    "@types/node": "^24.19.2",
+    "@types/node": "^26.0.0",
     "@types/ws": "^8.18.2",
     "typescript": "^7.0.2",
     "ws": "^8.22.2"
