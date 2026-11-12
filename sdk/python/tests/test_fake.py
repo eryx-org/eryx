@@ -7,6 +7,7 @@ HTTP goes to an ``httpx.MockTransport``; ``/v1/stream`` to a local
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import json
 from collections.abc import AsyncIterator, Callable
 from pathlib import Path
@@ -115,6 +116,12 @@ async def test_limits_and_hosted_options_are_sent(
         "connections": ["github"],
         "network_policies": [],
     }
+
+
+def test_unlimited_means_the_orgs_limits() -> None:
+    assert eryx.ResourceLimits.unlimited().hosted_request() == {}
+    limits = dataclasses.replace(eryx.ResourceLimits.unlimited(), max_fuel=7)
+    assert limits.hosted_request() == {"fuel_limit": 7}
 
 
 def test_local_only_arguments_say_what_to_use() -> None:
