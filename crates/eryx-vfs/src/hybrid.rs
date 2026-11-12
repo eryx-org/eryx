@@ -89,15 +89,13 @@ impl RestrictedDir {
         match &self.file_map {
             None => Ok(()),
             Some(map) => {
-                let normalized = guest_rel_path.strip_prefix("./").unwrap_or(guest_rel_path);
-                if map.contains_key(normalized) {
-                    Ok(())
-                } else {
-                    Err(std::io::Error::new(
+                let normalized = guest_rel_path.trim_prefix("./");
+                map.contains_key(normalized).ok_or_else(|| {
+                    std::io::Error::new(
                         std::io::ErrorKind::PermissionDenied,
                         format!("access denied: {guest_rel_path}"),
-                    ))
-                }
+                    )
+                })
             }
         }
     }
@@ -107,7 +105,7 @@ impl RestrictedDir {
         match &self.file_map {
             None => guest_rel_path,
             Some(map) => {
-                let normalized = guest_rel_path.strip_prefix("./").unwrap_or(guest_rel_path);
+                let normalized = guest_rel_path.trim_prefix("./");
                 map.get(normalized)
                     .map(String::as_str)
                     .unwrap_or(guest_rel_path)

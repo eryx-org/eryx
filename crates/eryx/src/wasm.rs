@@ -1101,10 +1101,7 @@ impl ResourceLimiter for MemoryTracker {
         maximum: Option<usize>,
     ) -> wasmtime::Result<bool> {
         // Allow table growth up to the declared maximum
-        if maximum.is_some_and(|max| desired > max) {
-            return Ok(false);
-        }
-        Ok(true)
+        Ok(!maximum.is_some_and(|max| desired > max))
     }
 }
 

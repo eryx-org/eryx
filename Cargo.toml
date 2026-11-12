@@ -8,7 +8,7 @@ members = ["crates/*"]
 [workspace.package]
 version = "0.14.0"
 edition = "2024"
-rust-version = "1.99.1"
+rust-version = "1.100.0"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/eryx-org/eryx"
 authors = ["Ben Sully <ben.sully88@gmail.com>"]
@@ -32,12 +32,9 @@ eryx-runtime = { path = "crates/eryx-runtime", version = "^0.14.0" } #unified
 eryx-vfs = { path = "crates/eryx-vfs", version = "^0.13.0" } #unified
 flate2 = "1.0"
 futures = "0.3"
-futures-concurrency = "7.6"
-futures-lite = "2.6"
 hex = "0.4"
 hmac = "0.13"
 ipnet = "2"
-lending-stream = "1.0"
 metrics = "0.24"
 metrics-exporter-prometheus = { version = "0.18.1", default-features = false, features = ["http-listener"] }
 opentelemetry = "0.33"

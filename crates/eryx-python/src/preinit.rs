@@ -1179,7 +1179,7 @@ fn write_factory_file(
     write: impl FnOnce(&mut std::io::BufWriter<&std::fs::File>) -> std::io::Result<()>,
 ) -> std::io::Result<()> {
     let dir = match path.parent() {
-        Some(dir) if !dir.as_os_str().is_empty() => dir,
+        Some(dir) if !dir.is_empty() => dir,
         _ => std::path::Path::new("."),
     };
     let tmp = tempfile::NamedTempFile::new_in(dir)?;
