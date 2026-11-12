@@ -7,6 +7,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## `eryx-precompile` - [0.15.0](https://github.com/eryx-org/eryx/compare/eryx-precompile-v0.14.0...eryx-precompile-v0.15.0) - 2026-11-12
+
+### Other
+- *(deps)* drop unused tar, zstd and tracing from two crates ([#780](https://github.com/eryx-org/eryx/pull/780))
+
+## `eryx` - [0.15.0](https://github.com/eryx-org/eryx/compare/eryx-v0.14.0...eryx-v0.15.0) - 2026-11-12
+
+### Added
+- *(eryx)* [**breaking**] version-stamp session snapshots ([#791](https://github.com/eryx-org/eryx/pull/791))
+- *(eryx)* [**breaking**] mount any VFS storage as a volume, per request too ([#770](https://github.com/eryx-org/eryx/pull/770))
+- *(eryx)* per-lease network and secrets, header-limited secrets, stable placeholders, traffic limit ([#769](https://github.com/eryx-org/eryx/pull/769))
+- [**breaking**] keep a failed run's stdout and stderr in the error ([#759](https://github.com/eryx-org/eryx/pull/759))
+- *(eryx)* let a built sandbox take VFS storage for its executions ([#763](https://github.com/eryx-org/eryx/pull/763))
+- *(eryx)* mount the VFS at /tmp and let sessions use a pooled sandbox's storage ([#760](https://github.com/eryx-org/eryx/pull/760))
+- *(eryx)* pass positional args to prefix callbacks ([#757](https://github.com/eryx-org/eryx/pull/757))
+- *(eryx)* add prefix callbacks that handle every name under a prefix ([#754](https://github.com/eryx-org/eryx/pull/754))
+
+### Fixed
+- *(runtime)* keep functions in snapshots beside unserializable globals ([#736](https://github.com/eryx-org/eryx/pull/736))
+
+### Other
+- bump Rust to 1.100 and use its new std APIs ([#790](https://github.com/eryx-org/eryx/pull/790))
+
+## `eryx-vfs` - [0.14.0](https://github.com/eryx-org/eryx/compare/eryx-vfs-v0.13.0...eryx-vfs-v0.14.0) - 2026-11-12
+
+### Added
+- *(eryx)* [**breaking**] mount any VFS storage as a volume, per request too ([#770](https://github.com/eryx-org/eryx/pull/770))
+
+### Other
+- bump Rust to 1.100 and use its new std APIs ([#790](https://github.com/eryx-org/eryx/pull/790))
+
+## `eryx-runtime` - [0.15.0](https://github.com/eryx-org/eryx/compare/eryx-runtime-v0.14.0...eryx-runtime-v0.15.0) - 2026-11-12
+
+### Added
+- [**breaking**] keep a failed run's stdout and stderr in the error ([#759](https://github.com/eryx-org/eryx/pull/759))
+- *(eryx)* pass positional args to prefix callbacks ([#757](https://github.com/eryx-org/eryx/pull/757))
+- *(eryx)* add prefix callbacks that handle every name under a prefix ([#754](https://github.com/eryx-org/eryx/pull/754))
+
+### Fixed
+- *(runtime)* keep functions in snapshots beside unserializable globals ([#736](https://github.com/eryx-org/eryx/pull/736))
+
+### Other
+- bump Rust to 1.100 and use its new std APIs ([#790](https://github.com/eryx-org/eryx/pull/790))
+
 ## `eryx-precompile` - [0.14.0](https://github.com/eryx-org/eryx/compare/eryx-precompile-v0.13.0...eryx-precompile-v0.14.0) - 2026-11-02
 
 ### Other
