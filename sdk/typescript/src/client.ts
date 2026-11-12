@@ -243,10 +243,12 @@ export class Connection {
           // Other types are newer additions to the protocol: ignore them
         }
       };
-      ws.onclose = (event: CloseEvent) => {
+      // Node.js 22 fires only `error` when the connection fails, so either ends the run
+      const onFail = (event: Event) => {
         if (done) return;
         if (opened) {
-          end(() => reject(new APIConnectionError(`The connection closed before the run completed (${event.code})`)));
+          const code = "code" in event ? ` (${event.code})` : "";
+          end(() => reject(new APIConnectionError(`The connection closed before the run completed${code}`)));
           return;
         }
         // The upgrade was refused, and WebSocket doesn't say why
@@ -254,6 +256,8 @@ export class Connection {
           this.refusal(signal).then(reject, reject);
         });
       };
+      ws.onerror = onFail;
+      ws.onclose = onFail;
     });
   }
 
