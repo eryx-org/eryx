@@ -276,6 +276,17 @@
     },
 
     // ------------------------------------------------------------------
+    // The TypeScript SDK supports Node >= 22 (`engines`), so its Node types
+    // stay on the oldest supported major: newer @types/node would let
+    // Node-26-only APIs typecheck. Bump this with `engines.node`.
+    // ------------------------------------------------------------------
+    {
+      matchPackageNames: ["@types/node"],
+      matchFileNames: ["sdk/typescript/package.json"],
+      allowedVersions: "<23",
+    },
+
+    // ------------------------------------------------------------------
     // Python test tooling: pytest-asyncio tracks pytest.
     // ------------------------------------------------------------------
     {
