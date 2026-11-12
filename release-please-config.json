@@ -18,7 +18,8 @@
       "release-type": "node",
       "package-name": "@eryx-org/eryx-run",
       "component": "eryx-run-typescript",
-      "changelog-path": "CHANGELOG.md"
+      "changelog-path": "CHANGELOG.md",
+      "initial-version": "0.1.0"
     }
   }
 }
