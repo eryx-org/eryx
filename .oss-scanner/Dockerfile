@@ -47,7 +47,7 @@ RUN rustup toolchain install \
 # 1. Guest runtime: crates/eryx-runtime/runtime.wasm plus late-linking libraries.
 #    Refresh prebuilt/ from this build so it can't lag the guest source.
 RUN BUILD_ERYX_RUNTIME=1 cargo build --locked -p eryx-runtime --release \
-    && OUT_DIR=$(dirname "$(find target/release -path '*/eryx-runtime-*/out/liberyx_runtime.so' -type f | head -1)") \
+    && OUT_DIR=$(dirname "$(find target/release -path '*/eryx-runtime*/out/liberyx_runtime.so' -type f | head -1)") \
     && cp "$OUT_DIR"/liberyx_runtime.so.zst "$OUT_DIR"/liberyx_bindings.so.zst crates/eryx-runtime/prebuilt/ \
     && mkdir -p crates/eryx-wasm-runtime/target \
     && cp "$OUT_DIR"/liberyx_runtime.so crates/eryx-wasm-runtime/target/

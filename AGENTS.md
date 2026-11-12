@@ -121,7 +121,7 @@ This project has multiple layers of caching that can cause confusing "stale buil
 | **Embedded runtime** | `~/.cache/eryx/` (`$XDG_CACHE_HOME/eryx`, else `$TMPDIR/eryx-<uid>`) | Content hash in filename | Old versions accumulate; shouldn't cause staleness |
 | **Python extension** | `_eryx.abi3.so` | `maturin develop` | After changing `eryx-wasm-runtime` Rust code |
 | **WASM artifacts** | `crates/eryx-runtime/runtime.{wasm,cwasm}` | `mise run build-eryx-runtime` | After changing `eryx-wasm-runtime` code |
-| **Late-linking artifacts** | `target/*/build/eryx-runtime-*/out/*.so.zst` | Rebuild eryx-runtime | WIT interface changes (e.g., TCP/TLS) not reflected |
+| **Late-linking artifacts** | `target/*/build/eryx-runtime*/out/*.so.zst` | Rebuild eryx-runtime | WIT interface changes (e.g., TCP/TLS) not reflected |
 
 ### Symptoms of Stale Caches
 

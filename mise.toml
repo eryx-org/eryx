@@ -338,11 +338,11 @@ description = "Check for stale late-linking artifacts in cargo OUT_DIR"
 run = '''
 echo "━━━ Late-Linking Artifacts ━━━"
 
-# Late-linking artifacts are cached in target/*/build/eryx-runtime-*/out/
+# Late-linking artifacts are cached in target/*/build/eryx-runtime*/out/
 # If these are stale (e.g., old WIT interface without TCP/TLS), preinit fails
 # with "type-checking export func" errors
 
-CACHED_ARTIFACTS=$(find target -path "*/build/eryx-runtime-*/out/*.so.zst" 2>/dev/null)
+CACHED_ARTIFACTS=$(find target -path "*/build/eryx-runtime*/out/*.so.zst" 2>/dev/null)
 
 if [[ -z "$CACHED_ARTIFACTS" ]]; then
     echo "✓ No cached late-linking artifacts found"
@@ -381,7 +381,7 @@ echo ""
 description = "Clear stale late-linking artifacts from cargo OUT_DIR"
 run = """
 echo "Removing late-linking artifacts from cargo OUT_DIR..."
-FOUND=$(find target -path "*/build/eryx-runtime-*/out/*.so.zst" 2>/dev/null)
+FOUND=$(find target -path "*/build/eryx-runtime*/out/*.so.zst" 2>/dev/null)
 if [[ -n "$FOUND" ]]; then
     echo "$FOUND" | xargs rm -v
     echo "✓ Late-linking cache cleared"
@@ -410,7 +410,7 @@ echo "Removing system temp extracted resources..."
 rm -rf "${XDG_CACHE_HOME:-$HOME/.cache}/eryx" "${TMPDIR:-/tmp}/eryx-$(id -u)"
 
 echo "Removing late-linking artifacts from cargo OUT_DIR..."
-find target -path "*/build/eryx-runtime-*/out/*.so.zst" -delete 2>/dev/null || true
+find target -path "*/build/eryx-runtime*/out/*.so.zst" -delete 2>/dev/null || true
 
 echo "✓ Artifacts cleaned. Run 'mise run setup' to rebuild."
 """
@@ -438,8 +438,9 @@ depends = ["build-eryx-runtime"]
 run = """
 #!/usr/bin/env bash
 set -euo pipefail
-# The newest OUT_DIR is the one build-eryx-runtime just wrote.
-OUT_DIR=$(dirname "$(ls -t "${CARGO_TARGET_DIR:-target}"/release/build/eryx-runtime-*/out/liberyx_runtime.so | head -1)")
+# The newest OUT_DIR is the one build-eryx-runtime just wrote. Cargo 1.100+
+# lays these out as build/eryx-runtime/<hash>/out, older as build/eryx-runtime-<hash>/out.
+OUT_DIR=$(dirname "$(find "${CARGO_TARGET_DIR:-target}"/release/build -path '*/eryx-runtime*/out/liberyx_runtime.so' -exec ls -t {} + | head -1)")
 PREBUILT=crates/eryx-runtime/prebuilt
 mkdir -p "$PREBUILT"
 if ! cmp -s "$OUT_DIR/guest-sources.hash" "$PREBUILT/guest-sources.hash"; then
@@ -626,7 +627,7 @@ if [[ -f "target/liberyx_runtime.so" ]]; then
     echo "liberyx_runtime.so already exists in target/, skipping copy"
 else
     # Search in both release and debug build directories
-    OUT_DIR=$(find ../../target -path "*/eryx-runtime-*/out/liberyx_runtime.so" -type f 2>/dev/null | head -1)
+    OUT_DIR=$(find ../../target -path "*/eryx-runtime*/out/liberyx_runtime.so" -type f 2>/dev/null | head -1)
     if [[ -z "$OUT_DIR" ]]; then
         echo "Error: liberyx_runtime.so not found in target. Run 'mise run build-eryx-runtime' first."
         exit 1
