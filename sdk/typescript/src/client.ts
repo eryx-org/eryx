@@ -114,7 +114,9 @@ export class Connection {
       throw new TypeError("No API key: pass apiKey or set ERYX_API_KEY (create one at https://app.eryx.run)");
     }
     this.apiKey = apiKey;
-    this.baseUrl = (options.baseUrl ?? env("ERYX_URL") ?? DEFAULT_URL).replace(/\/+$/, "");
+    let baseUrl = options.baseUrl ?? env("ERYX_URL") ?? DEFAULT_URL;
+    while (baseUrl.endsWith("/")) baseUrl = baseUrl.slice(0, -1);
+    this.baseUrl = baseUrl;
     this.fetch = options.fetch ?? globalThis.fetch.bind(globalThis);
     this.WebSocket = options.WebSocket ?? (globalThis.WebSocket as unknown as WebSocketConstructor);
   }
