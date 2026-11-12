@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "eryx-run"
-version = "0.2.0"
+version = "0.3.0"
 description = "Run Python in an eryx sandbox on eryx.run, with the same API as pyeryx"
 readme = "README.md"
 requires-python = ">=3.10"
