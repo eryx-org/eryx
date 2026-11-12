@@ -84,17 +84,33 @@ session.delete()
 `Session(id=...)` uses an existing session, such as one another process
 created (`session.id`).
 
+## Volumes
+
+`volumes` mounts local directories, read-only, at paths under `/mnt/`. They're
+served from your process as the code reads them, so nothing is uploaded first:
+
+```python
+sandbox = eryx.Sandbox(volumes=[("./my-repo", "/mnt/repo", True)])
+sandbox.execute("import os; print(os.listdir('/mnt/repo'))")
+```
+
+The code can ask for any path, so it never gets `..`, symlinks that lead out
+of the directory, or files matching `hidden` (default
+`eryx.DEFAULT_HIDDEN`: `.env`, keys, `.git/config` and the like, which look
+missing). Pass `hidden=()` to serve everything, or your own patterns.
+
 ## What's different from pyeryx
 
 - **Limits:** `ResourceLimits(execution_timeout_ms=..., max_fuel=...)`; `None`
   (the default) means your org's limit. eryx.run sets memory and callback
   limits itself.
+- **Volumes** are read-only, under `/mnt/`, and skip hidden files (`hidden`).
 - **Hosted-only arguments:** `environment` (an environment you uploaded),
   `connections` (MCP servers), `network_policies`, and `api_key` / `base_url`
   (defaults `$ERYX_API_KEY` and `$ERYX_URL`).
 - **Local-only arguments** raise a `ValueError` saying what to use instead:
   `network`, `secrets` and `scrub_*` (use network policies), `mcp` (use
-  connections), `volumes`, `on_stdout` / `on_stderr` and `cancel` (not yet),
+  connections), `on_stdout` / `on_stderr` and `cancel` (not yet),
   and `result_variable` other than `result`. Sessions don't have
   `snapshot_state` / `restore_state`: eryx.run keeps the state.
 

@@ -7,7 +7,9 @@ to have a database.
 
 from __future__ import annotations
 
+import hashlib
 import os
+from pathlib import Path
 
 import pytest
 
@@ -102,3 +104,26 @@ def test_stream_speaks_v1_and_types_errors() -> None:
 
 def test_big_integer_results_are_exact() -> None:
     assert eryx.Sandbox().execute("result = 2**100").result == 2**100
+
+
+def test_volumes(tmp_path: Path) -> None:
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "main.py").write_text("print('hi')\n")
+    (tmp_path / "data.bin").write_bytes(bytes(range(256)) * 4000)  # 1 MB, in blocks
+    (tmp_path / ".env").write_text("TOKEN=not-a-real-token\n")
+    sandbox = eryx.Sandbox(volumes=[(str(tmp_path), "/mnt/repo", True)])
+    result = sandbox.execute(
+        """
+import hashlib, os
+print(sorted(os.listdir('/mnt/repo')))
+print(open('/mnt/repo/src/main.py').read().strip())
+print(hashlib.sha256(open('/mnt/repo/data.bin', 'rb').read()).hexdigest())
+print(os.path.exists('/mnt/repo/.env'))
+try:
+    open('/mnt/repo/new.txt', 'w')
+except PermissionError:
+    print('read-only')
+"""
+    )
+    digest = hashlib.sha256(bytes(range(256)) * 4000).hexdigest()
+    assert result.stdout_text == f"['data.bin', 'src']\nprint('hi')\n{digest}\nFalse\nread-only\n"
