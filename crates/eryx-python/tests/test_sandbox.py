@@ -75,7 +75,6 @@ print(f"dict: {dct}")
         """Test that sandbox is isolated from host filesystem."""
         sandbox = eryx.Sandbox()
         result = sandbox.execute("""
-import dataclasses
 import os
 try:
     # Try to access host filesystem
