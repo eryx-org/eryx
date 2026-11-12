@@ -479,7 +479,7 @@ jobs:
           cache: ${{ !startsWith(github.ref, 'refs/tags/') }}
           mise_toml: |
             [tools]
-            rust = "1.99"
+            rust = "1.100"
 
       - name: Configure Rust cache
         uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3

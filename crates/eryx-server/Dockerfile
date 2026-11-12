@@ -15,7 +15,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 WORKDIR /build
 
 # Copy workspace manifests.
-COPY Cargo.toml Cargo.lock ./
+COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
 
 # Copy all workspace crates that affect precompilation.
 COPY crates/eryx/ crates/eryx/
