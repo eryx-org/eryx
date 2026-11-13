@@ -405,3 +405,26 @@ wc -l < /data/fruit.txt
     let err = session.execute("cat /etc/passwd").run().await.unwrap_err();
     assert!(err.to_string().starts_with("exit status 1"), "{err}");
 }
+
+/// Known limit of batch pipes: a stage's stdin is buffered to EOF before the
+/// child runs, so an endless producer never reaches `head`. Fuel stops it.
+#[tokio::test]
+async fn endless_producer_into_child_exhausts_fuel() {
+    let Some(executor) = shell_executor() else {
+        return;
+    };
+    if !have_commands() {
+        return;
+    }
+    let mut session = SessionExecutor::new(executor, &[]).await.unwrap();
+    let err = session
+        .execute("while true; do echo y; done | head -n 1")
+        .with_fuel_limit(200_000_000)
+        .run()
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(err.kind(), ErrorKind::FuelExhausted { .. }),
+        "expected FuelExhausted, got {err:?}"
+    );
+}
