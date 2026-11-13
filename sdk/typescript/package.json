@@ -1,6 +1,6 @@
 {
   "name": "@eryx-org/eryx-run",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Run Python in an eryx sandbox on eryx.run, from TypeScript and JavaScript",
   "type": "module",
   "license": "MIT OR Apache-2.0",
