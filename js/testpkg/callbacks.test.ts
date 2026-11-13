@@ -1,17 +1,19 @@
 import { describe, expect, it, beforeEach } from "vitest";
-import { execute } from "@bsull/eryx";
+import * as shared from "@eryx-org/eryx-run/shared";
+import {
+  execute,
+  PythonExceptionError,
+  Sandbox,
+  TimeoutError,
+} from "@eryx-org/eryx";
 import {
   getExecutionOptions,
-  setCallbackHandler,
-  setCallbacks,
   setOutputHandler,
   setTraceHandler,
-} from "@bsull/eryx/callbacks";
+} from "@eryx-org/eryx/callbacks";
 
 describe("callbacks", () => {
   beforeEach(() => {
-    setCallbackHandler(null);
-    setCallbacks([]);
     setTraceHandler(null);
   });
 
@@ -29,46 +31,74 @@ describe("callbacks", () => {
     });
   });
 
-  it("invokes a registered callback", async () => {
-    setCallbackHandler((name, argsJson) => {
-      if (name === "get_time") {
-        return JSON.stringify({ timestamp: 1234567890 });
-      }
-      throw new Error(`Unknown callback: ${name}`);
+  it("calls a callback with the code's keyword arguments", async () => {
+    const sandbox = new Sandbox({
+      callbacks: {
+        get_user: async ({ id }) => ({ id, name: "Ada" }),
+        nothing: () => {},
+      },
     });
-
-    setCallbacks([
-      { name: "get_time", description: "Returns current timestamp" },
-    ]);
-
-    const result = await execute(`
-result = await get_time()
-print(result["timestamp"])
+    const result = await sandbox.execute(`
+user = await get_user(id=123)
+print(user["name"], user["id"], await nothing())
 `);
-    expect(result.stdout).toBe("1234567890\n");
+    expect(result.stdout).toBe("Ada 123 None\n");
+    expect(result.callbackInvocations).toBe(2);
   });
 
-  it("lists available callbacks", async () => {
-    setCallbacks([
-      { name: "alpha", description: "First callback" },
-      { name: "beta", description: "Second callback" },
-    ]);
-
-    const result = await execute(`
-callbacks = list_callbacks()
-for cb in callbacks:
+  it("lists callbacks with their descriptions", async () => {
+    const sandbox = new Sandbox({
+      callbacks: {
+        alpha: { description: "First callback", handler: () => 1 },
+        beta: () => 2,
+      },
+    });
+    const result = await sandbox.execute(`
+for cb in list_callbacks():
     print(f"{cb['name']}: {cb['description']}")
 `);
-    expect(result.stdout).toContain("alpha: First callback");
-    expect(result.stdout).toContain("beta: Second callback");
+    expect(result.stdout).toBe("alpha: First callback\nbeta: \n");
   });
 
-  it("returns error when no handler is set", async () => {
-    await expect(
-      execute(`
-result = await invoke("missing", "{}")
-`),
-    ).rejects.toThrow();
+  it("raises in Python when a callback throws, or returns what JSON can't hold", async () => {
+    const sandbox = new Sandbox({
+      callbacks: {
+        broken: () => {
+          throw new RangeError("no such user");
+        },
+        cyclic: () => {
+          const value: Record<string, unknown> = {};
+          value.self = value;
+          return value;
+        },
+        big: () => 12345678901234567890n,
+      },
+    });
+    const result = await sandbox.execute(`
+for name in ["broken", "cyclic"]:
+    try:
+        await globals()[name]()
+    except Exception as e:
+        print(name, "raised")
+print(await big())
+`);
+    expect(result.stdout).toBe("broken raised\ncyclic raised\n12345678901234567890\n");
+  });
+
+  it("refuses the callbacks API it replaced, saying what to use", () => {
+    expect(
+      () => new Sandbox({ callbacks: [{ name: "f", description: "" }] as never }),
+    ).toThrow(/object of functions by name/);
+    expect(
+      () => new Sandbox({ callbackHandler: () => "null" } as never),
+    ).toThrow(/callbackHandler is gone/);
+    expect(() => new Sandbox({ callbacks: { f: "nope" } as never })).toThrow(
+      /isn't a function/,
+    );
+  });
+
+  it("has no callbacks outside a Sandbox's own", async () => {
+    await expect(execute(`await invoke("missing", "{}")`)).rejects.toThrow();
   });
 
   it("does not carry a partial UTF-8 sequence into the next execution", async () => {
@@ -82,9 +112,38 @@ result = await invoke("missing", "{}")
       const first = chunks.join("");
       chunks.length = 0;
       await execute(`print("\\udca9", end="")`);
-      expect([first, chunks.join("")]).toEqual(["\uFFFD", "\uFFFD"]);
+      expect([first, chunks.join("")]).toEqual(["�", "�"]);
     } finally {
       setOutputHandler(null);
     }
+  });
+});
+
+describe("shared with eryx.run's client", () => {
+  it("throws its error classes, so one instanceof handles both", async () => {
+    expect(PythonExceptionError).toBe(shared.PythonExceptionError);
+    expect(TimeoutError).toBe(shared.TimeoutError);
+
+    const error = await new Sandbox()
+      .execute(`print("before")\nraise ValueError("bad input")`)
+      .catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(shared.PythonExceptionError);
+    expect(error).toBeInstanceOf(shared.EryxError);
+    const raised = error as shared.PythonExceptionError;
+    expect(raised.name).toBe("PythonExceptionError");
+    expect(raised.message).toMatch(/^Traceback/);
+    expect(raised.message).toContain("ValueError: bad input");
+    expect(raised.stdout).toBe("before\n");
+    expect(raised.stderr).toContain("ValueError: bad input");
+    expect(raised.durationMs).toBeGreaterThanOrEqual(0);
+  });
+
+  it("returns its ExecuteResult, with the stats a local run has", async () => {
+    const result: shared.ExecuteResult = await new Sandbox().execute("result = 1");
+    expect(result.result).toBe(1);
+    expect(result.durationMs).toBeGreaterThanOrEqual(0);
+    expect(result.callbackInvocations).toBe(0);
+    expect(result.unsavedVariables).toEqual([]);
+    expect(result.fuelConsumed).toBeUndefined();
   });
 });

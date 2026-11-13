@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { createServer } from "node:net";
 import type { AddressInfo } from "node:net";
-import { Sandbox, execute, setNetConfig } from "@bsull/eryx";
+import { Sandbox, execute, setNetConfig } from "@eryx-org/eryx";
 
 describe("separate Sandbox instances", () => {
   it("don't share variables", async () => {
@@ -52,10 +52,14 @@ print(open(path, "rb").read(14) == b"# changed by a")
   it("use their own callback handlers, even when running at once", async () => {
     const make = (tag: string) =>
       new Sandbox({
-        callbacks: [{ name: "whoami", description: "Name this sandbox" }],
-        callbackHandler: async () => {
-          await new Promise((resolve) => setTimeout(resolve, 10));
-          return JSON.stringify(tag);
+        callbacks: {
+          whoami: {
+            description: "Name this sandbox",
+            handler: async () => {
+              await new Promise((resolve) => setTimeout(resolve, 10));
+              return tag;
+            },
+          },
         },
       });
     const code = `
@@ -88,11 +92,14 @@ print(names, await whoami())
     let opened!: () => void;
     const isOpen = new Promise<void>((resolve) => (opened = resolve));
     const a = new Sandbox({
-      callbacks: [{ name: "hold", description: "Wait for the test" }],
-      callbackHandler: async () => {
-        opened();
-        await held;
-        return "null";
+      callbacks: {
+        hold: {
+          description: "Wait for the test",
+          handler: async () => {
+            opened();
+            await held;
+          },
+        },
       },
     });
     try {

@@ -6,13 +6,18 @@
  *
  * Usage:
  *   ```js
- *   import { Sandbox } from '@bsull/eryx';
+ *   import { Sandbox } from '@eryx-org/eryx';
  *   const sandbox = new Sandbox();
  *   const result = await sandbox.execute('print("hello")');
  *   console.log(result.stdout);  // "hello\n"
  *   ```
  */
 
+import {
+  ExecutionError,
+  PythonExceptionError,
+  TimeoutError,
+} from "@eryx-org/eryx-run/shared";
 import { createCallbackHost } from "./shims/callbacks.js";
 import { createNet, setNetConfig as setDefaultNetConfig } from "./shims/net.js";
 import {
@@ -27,14 +32,15 @@ import {
 
 export { _fileTree } from "./instance.js";
 
-/** Rejects a call that ran past its Sandbox's `timeoutMs`. */
-export class TimeoutError extends Error {
-  /** @param {number} timeoutMs */
-  constructor(timeoutMs) {
-    super(`execution timed out after ${timeoutMs} ms`);
-    this.name = "TimeoutError";
-  }
-}
+// The errors a run throws, shared with eryx.run's client (@eryx-org/eryx-run),
+// so one `instanceof` handles both
+export {
+  EryxError,
+  ExecutionError,
+  PythonExceptionError,
+  ResourceLimitError,
+  TimeoutError,
+} from "@eryx-org/eryx-run/shared";
 
 /**
  * Start a sandbox instance in its own Worker and return a proxy with the
@@ -175,8 +181,6 @@ const _workerReaper = new FinalizationRegistry((slot) => {
 
 // Re-export callback configuration
 export {
-  setCallbackHandler,
-  setCallbacks,
   setTraceHandler,
   setOutputHandler,
   SuspendCallback,
@@ -186,22 +190,14 @@ export {
 export { DEFAULT_BLOCKED_HOSTS, DEFAULT_BLOCKED_NETWORKS } from "./shims/net.js";
 
 /**
- * Result from executing Python code in the sandbox.
- * @typedef {Object} ExecuteResult
- * @property {string} stdout - Captured standard output
- * @property {string} stderr - Captured standard error
- * @property {*} [result] - The script's `result` variable, parsed from JSON, or
- *   undefined if it was not set. Integers outside the safe range are parsed as
- *   BigInt to avoid precision loss (so a numeric field may be a number or a
- *   bigint depending on magnitude). See {@link setResultVariable} to change the name.
- * @property {string} [resultJson] - The raw JSON string of the captured result, or
- *   undefined if not set. Use this when you need exact values (e.g. large integers)
- *   and want to parse them yourself.
- * @property {string} [resultError] - Why result capture failed (e.g. the value was
- *   not JSON-serializable), or undefined on success.
- * @property {boolean} stateWasReset - Whether the sandbox lost its Python state
- *   before this run because an earlier call hit `timeoutMs` and its Worker was
- *   replaced. Reported once, by the first successful run after the reset.
+ * Result from executing Python code in the sandbox: eryx.run's
+ * `ExecuteResult`, so code handles results from either the same way. `result`
+ * keeps integers outside the safe range exact by parsing them as BigInt (see
+ * {@link setResultVariable} to capture another variable), `stateWasReset` says
+ * an earlier call hit `timeoutMs` and replaced the Worker (reported once, by
+ * the next successful run), and `fuelConsumed`, `peakMemoryBytes`,
+ * `networkBytes` and `traceId` are undefined.
+ * @typedef {import("@eryx-org/eryx-run/shared").ExecuteResult} ExecuteResult
  */
 
 /**
@@ -247,7 +243,7 @@ function _parseResultJson(json) {
  */
 const _decoder = new TextDecoder("utf-8", { fatal: false, ignoreBOM: true });
 
-function _toResult(output, stateWasReset) {
+function _toResult(output, stateWasReset, stats) {
   return {
     stdout: _decoder.decode(output.stdout),
     stderr: _decoder.decode(output.stderr),
@@ -255,6 +251,8 @@ function _toResult(output, stateWasReset) {
     resultJson: output.resultJson || undefined,
     resultError: output.resultError || undefined,
     stateWasReset,
+    unsavedVariables: [],
+    ...stats,
   };
 }
 
@@ -274,12 +272,14 @@ function _toResult(output, stateWasReset) {
  */
 
 /**
- * Options for a {@link Sandbox}. Each handler option overrides, for this
- * sandbox only, the module-wide default set by the setter of the same name
- * (`setCallbackHandler()` and so on); an omitted option follows that default.
+ * Options for a {@link Sandbox}. `traceHandler` and `outputHandler` override,
+ * for this sandbox only, the module-wide default set by the setter of the
+ * same name; an omitted one follows that default.
  * @typedef {Object} SandboxOptions
- * @property {((name: string, argsJson: string) => string | Promise<string>) | null} [callbackHandler]
- * @property {Array<{name: string, description: string, parametersSchemaJson?: string}>} [callbacks]
+ * @property {import("@eryx-org/eryx-run/shared").Callbacks} [callbacks] -
+ *   Functions the code can `await`, by name, as for eryx.run's client: each a
+ *   function of the code's keyword arguments, or `{ handler, description }`.
+ *   What it returns must be JSON; if it throws, the call fails in Python.
  * @property {((lineno: number, eventJson: string, contextJson: string) => void) | null} [traceHandler]
  * @property {((stream: number, data: string) => void) | null} [outputHandler]
  * @property {import("./shims/net.js").NetConfig | null} [netConfig] - This
@@ -361,6 +361,12 @@ export class Sandbox {
      * @internal For the demo app and advanced integrations.
      */
     this._fileTree = timeoutMs === undefined ? forkTree(_fileTree) : undefined;
+    if ("callbackHandler" in options) {
+      throw new TypeError(
+        "callbackHandler is gone: pass callbacks as an object of functions by name, " +
+          "e.g. { get_user: async ({ id }) => ... }",
+      );
+    }
     this.#host = createCallbackHost(options);
     if (options.netConfig !== undefined) this.#net.setNetConfig(options.netConfig);
     if (timeoutMs !== undefined) _workerReaper.register(this, this.#slot, this.#slot);
@@ -446,7 +452,7 @@ export class Sandbox {
     // Terminating the Worker rejects the call in flight with the TimeoutError,
     // which executeWithJournal() then reports like any other failure.
     const timer = setTimeout(() => {
-      instance.terminate(new TimeoutError(this.#timeoutMs));
+      instance.terminate(new TimeoutError(`execution timed out after ${this.#timeoutMs} ms`));
       this.#stateWasReset = true;
       this.#start();
     }, this.#timeoutMs);
@@ -465,11 +471,17 @@ export class Sandbox {
    * @returns {Promise<ExecuteResult>}
    */
   async #run(instance, code) {
+    const start = performance.now();
+    this.#host.takeInvocations();
+    const stats = () => ({
+      durationMs: performance.now() - start,
+      callbackInvocations: this.#host.takeInvocations(),
+    });
     try {
       // Frame the code with an empty preamble (see the guest's PREAMBLE_HEADER),
       // so a leading header-like line in user code isn't misparsed.
       const output = await instance.execute(`#eryx-preamble:0\n${code}`);
-      const result = _toResult(output, this.#stateWasReset);
+      const result = _toResult(output, this.#stateWasReset, stats());
       this.#stateWasReset = false;
       return result;
     } catch (e) {
@@ -477,10 +489,15 @@ export class Sandbox {
       // traceback as the message, with the output captured before it failed.
       const payload = e?.payload;
       if (payload && typeof payload.message === "string") {
-        throw Object.assign(new Error(payload.message, { cause: e }), {
-          stdout: payload.stdout,
-          stderr: payload.stderr,
-        });
+        // As eryx.run's client tells them apart: an exception in the code has
+        // its traceback as the message
+        const failed = payload.message.startsWith("Traceback (most recent call last)")
+          ? Object.assign(new PythonExceptionError(payload.message, { cause: e }), {
+              stdout: _decoder.decode(payload.stdout),
+              stderr: _decoder.decode(payload.stderr),
+            })
+          : new ExecutionError(payload.message, { cause: e });
+        throw Object.assign(failed, stats());
       }
       throw e;
     } finally {

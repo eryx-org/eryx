@@ -135,10 +135,8 @@ for y in range(-10, 11):
     run();
   }
 
-  async function handleCallback(name: string, argsJson: string): Promise<string> {
+  async function handleCallback(name: string, args: Record<string, unknown>): Promise<unknown> {
     const host = hostFunctions[name];
-    if (!host) throw new Error(`Unknown callback: ${name}`);
-    const args = JSON.parse(argsJson);
     const shown = Object.entries(args)
       .map(([k, v]) => `${k}=${JSON.stringify(v)}`)
       .join(", ");
@@ -146,15 +144,16 @@ for y in range(-10, 11):
     const call = calls[calls.length - 1];
     await new Promise((resolve) => setTimeout(resolve, host.latencyMs));
     call.end = performance.now() - runStart;
-    return JSON.stringify(host.fn(args));
+    return host.fn(args);
   }
 
   onMount(async () => {
-    const { setCallbacks, setCallbackHandler } = await import("@bsull/eryx");
-    setCallbacks(
-      Object.entries(hostFunctions).map(([name, { description }]) => ({ name, description })),
+    const callbacks = Object.fromEntries(
+      Object.entries(hostFunctions).map(([name, { description }]) => [
+        name,
+        { description, handler: (args: Record<string, unknown>) => handleCallback(name, args) },
+      ]),
     );
-    setCallbackHandler(handleCallback);
     // Tell the embedding page (eryx.run) how tall we are, so it can size
     // the iframe instead of making us scroll.
     if (window.parent !== window) {
@@ -162,7 +161,7 @@ for y in range(-10, 11):
         window.parent.postMessage({ eryxEmbedHeight: root.offsetHeight }, "*"),
       ).observe(root);
     }
-    await initSandbox();
+    await initSandbox({ callbacks });
     await run();
   });
 </script>

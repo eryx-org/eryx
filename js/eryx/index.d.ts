@@ -5,8 +5,6 @@
  */
 
 export {
-  setCallbackHandler,
-  setCallbacks,
   setTraceHandler,
   setOutputHandler,
   SuspendCallback,
@@ -15,8 +13,24 @@ export {
 export { DEFAULT_BLOCKED_HOSTS, DEFAULT_BLOCKED_NETWORKS } from "./shims/net.js";
 export type { NetConfig } from "./shims/net.js";
 
-import type { CallbackInfo } from "./shims/callbacks.js";
 import type { NetConfig } from "./shims/net.js";
+import type { Callbacks, ExecuteResult } from "@eryx-org/eryx-run/shared";
+
+/**
+ * The errors a run throws, shared with eryx.run's client
+ * (`@eryx-org/eryx-run`), so one `instanceof` handles both. Code that raises
+ * rejects with a `PythonExceptionError` (its traceback as `message`, the
+ * output before it in `stdout` and `stderr`); a run past `timeoutMs` with a
+ * `TimeoutError`.
+ */
+export {
+  EryxError,
+  ExecutionError,
+  PythonExceptionError,
+  ResourceLimitError,
+  TimeoutError,
+} from "@eryx-org/eryx-run/shared";
+export type { CallbackHandler, Callbacks, ExecuteResult } from "@eryx-org/eryx-run/shared";
 
 /**
  * Set the default network policy, or disable networking again with `null`
@@ -41,43 +55,6 @@ export interface StateSnapshot {
   skippedGlobals: string[];
 }
 
-/**
- * Result from executing Python code in the sandbox.
- */
-export interface ExecuteResult {
-  /** Captured standard output */
-  stdout: string;
-  /** Captured standard error */
-  stderr: string;
-  /**
-   * The script's `result` variable, parsed from JSON into a native value, or
-   * `undefined` if it was not set. The captured variable name defaults to
-   * `result` and can be changed via {@link setResultVariable}.
-   *
-   * Integers outside the IEEE-754 safe range (|n| > 2^53 - 1) are parsed as
-   * `bigint` to avoid precision loss, so a numeric field may be `number` or
-   * `bigint` depending on its magnitude. Use {@link resultJson} if you want the
-   * exact text and to control parsing yourself.
-   */
-  result?: unknown;
-  /**
-   * The raw JSON string of the captured `result`, or `undefined` if it was not
-   * set. Exact (no precision loss); parse it yourself if you need full control.
-   */
-  resultJson?: string;
-  /**
-   * Why result capture failed (e.g. the value was not JSON-serializable), or
-   * `undefined` when capture succeeded or no result variable was set.
-   */
-  resultError?: string;
-  /**
-   * Whether the sandbox lost its Python state before this run: an earlier call
-   * hit `timeoutMs`, so its Worker was replaced and variables from before then
-   * are gone. Reported once, by the first successful run after the reset.
-   * Always `false` for a sandbox without `timeoutMs`.
-   */
-  stateWasReset: boolean;
-}
 
 /** The callback that suspended execution. */
 export interface SuspendedCallback {
@@ -124,17 +101,22 @@ export interface ReplayOutcome {
 /**
  * Options for a {@link Sandbox}.
  *
- * Each handler option overrides, for this sandbox only, the module-wide default
- * set by the setter of the same name (`setCallbackHandler()` and so on). An
- * omitted option follows that default, including later changes to it.
+ * `traceHandler` and `outputHandler` override, for this sandbox only, the
+ * module-wide default set by the setter of the same name. An omitted one
+ * follows that default, including later changes to it.
  */
 export interface SandboxOptions {
-  /** Handler for callbacks invoked by sandbox code. */
-  callbackHandler?:
-    | ((name: string, argsJson: string) => string | Promise<string>)
-    | null;
-  /** Callbacks visible to sandbox code via `list_callbacks()`. */
-  callbacks?: CallbackInfo[];
+  /**
+   * Functions the code can `await`, by name, as for eryx.run's client: each
+   * a function of the code's keyword arguments, or `{ handler, description }`
+   * (the description is what `list_callbacks()` shows). What it returns must
+   * be JSON; if it throws, the call fails in Python. A handler can throw
+   * {@link SuspendCallback} to halt the run.
+   *
+   * @example
+   * new Sandbox({ callbacks: { get_user: async ({ id }) => ({ id, name: "Ada" }) } });
+   */
+  callbacks?: Callbacks;
   /** Handler for trace events from the Python runtime. */
   traceHandler?:
     | ((lineno: number, eventJson: string, contextJson: string) => void)
@@ -167,10 +149,6 @@ export interface SandboxOptions {
   timeoutMs?: number;
 }
 
-/** Rejects a call that ran past its Sandbox's `timeoutMs`. */
-export class TimeoutError extends Error {
-  constructor(timeoutMs: number);
-}
 
 /**
  * A Python sandbox powered by WebAssembly.

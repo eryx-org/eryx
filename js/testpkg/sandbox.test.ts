@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { Sandbox, execute, setResultVariable } from "@bsull/eryx";
+import { Sandbox, execute, setResultVariable } from "@eryx-org/eryx";
 
 describe("Sandbox", () => {
   const sandbox = new Sandbox();

@@ -3,7 +3,7 @@
 [![CI](https://github.com/eryx-org/eryx/actions/workflows/ci.yml/badge.svg)](https://github.com/eryx-org/eryx/actions/workflows/ci.yml)
 [![crates.io](https://img.shields.io/crates/v/eryx.svg)](https://crates.io/crates/eryx)
 [![PyPI](https://img.shields.io/pypi/v/pyeryx.svg)](https://pypi.org/project/pyeryx/)
-[![npm](https://img.shields.io/npm/v/@bsull/eryx.svg)](https://www.npmjs.com/package/@bsull/eryx)
+[![npm](https://img.shields.io/npm/v/@eryx-org/eryx.svg)](https://www.npmjs.com/package/@eryx-org/eryx)
 [![docs](https://img.shields.io/badge/docs-docs.eryx.run-blue)](https://docs.eryx.run)
 
 A WebAssembly sandbox for running **untrusted Python** safely — memory and CPU limits, no filesystem or network access by default, and async host callbacks for the access you _do_ want to allow.
@@ -63,7 +63,7 @@ See the [PyPI package](https://pypi.org/project/pyeryx/) and [`crates/eryx-pytho
 ### JavaScript
 
 ```bash
-npm install @bsull/eryx
+npm install @eryx-org/eryx
 ```
 
 ### Rust

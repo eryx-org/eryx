@@ -46,6 +46,7 @@
         "wit-dylib-ffi",
         "pyeryx",
         "/^@bsull\\//",
+        "/^@eryx-org\\//",
       ],
       enabled: false,
     },

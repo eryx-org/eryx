@@ -5,7 +5,7 @@ describe("plain Node.js", () => {
   // Runs outside vitest's module resolution, as a consumer's `node app.js` would.
   it("imports the package and runs code on the in-memory filesystem", () => {
     const script = `
-      const { execute } = await import("@bsull/eryx");
+      const { execute } = await import("@eryx-org/eryx");
       const { stdout } = await execute("import os; print(sorted(os.listdir('/')))");
       process.stdout.write(stdout);
     `;
@@ -19,7 +19,7 @@ describe("plain Node.js", () => {
 
   it("runs a sandbox with timeoutMs in a Worker and exits when idle", () => {
     const script = `
-      const { Sandbox } = await import("@bsull/eryx");
+      const { Sandbox } = await import("@eryx-org/eryx");
       const sandbox = new Sandbox({ timeoutMs: 1000 });
       process.stdout.write((await sandbox.execute("print(1 + 1)")).stdout);
       const error = await sandbox.execute("while True: pass").catch((e) => e);
@@ -36,7 +36,7 @@ describe("plain Node.js", () => {
   it("stops a timeoutMs sandbox's Worker on close(), even mid-call", () => {
     // Without close() the busy Worker would hold the process for a minute.
     const script = `
-      const { Sandbox } = await import("@bsull/eryx");
+      const { Sandbox } = await import("@eryx-org/eryx");
       const sandbox = new Sandbox({ timeoutMs: 60_000 });
       await sandbox.execute("pass");
       const running = sandbox.execute("while True: pass").catch((e) => e.message);

@@ -93,7 +93,7 @@
     if (fileTree) return;
     const [shimMod, eryxMod] = await Promise.all([
       import("@bytecodealliance/preview2-shim/filesystem"),
-      import("@bsull/eryx"),
+      import("@eryx-org/eryx"),
     ]);
     _setFileData = shimMod._setFileData;
     fileTree = (eryxMod as any)._fileTree;
