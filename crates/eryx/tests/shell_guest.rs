@@ -299,3 +299,109 @@ async fn latency_numbers() {
     }
     eprintln!("session `x=$((x+1))`: {:?}/exec", start.elapsed() / N);
 }
+
+/// Spawn tests need host-registered commands, e.g. conch's uutils build:
+/// `ERYX_SPIKE_COMMANDS=cat=/path/coreutils.wasm,sort=/path/coreutils.wasm,...`
+fn have_commands() -> bool {
+    let set = std::env::var_os("ERYX_SPIKE_COMMANDS").is_some();
+    if !set {
+        eprintln!("skipping: ERYX_SPIKE_COMMANDS not set");
+    }
+    set
+}
+
+#[tokio::test]
+async fn pipelines_spawn_child_components() {
+    let Some(builder) = shell_sandbox() else {
+        return;
+    };
+    if !have_commands() {
+        return;
+    }
+    let sandbox = builder
+        .with_callback(TestCallback::new("add", add))
+        .build()
+        .unwrap();
+
+    let out = sandbox
+        .execute(
+            r#"
+echo -e "pear\napple\nfig" | sort | head -n 2
+echo hello | wc -c
+n=$(add --a 40 --b 2 | cat)
+echo "n=$n"
+"#,
+        )
+        .await
+        .unwrap();
+    assert_eq!(out.stdout_utf8().unwrap(), "apple\nfig\n6\nn=42\n");
+
+    // Child exit codes propagate. (Unknown commands are still 126, not
+    // bash's 127: the brush fork falls through to a PATH search on NotFound.)
+    let err = sandbox.execute("head --no-such-flag").await.unwrap_err();
+    assert!(err.to_string().starts_with("exit status 1"), "{err}");
+}
+
+#[tokio::test]
+async fn spawn_latency_numbers() {
+    let Some(builder) = shell_sandbox() else {
+        return;
+    };
+    if !have_commands() {
+        return;
+    }
+    let sandbox = builder.build().unwrap();
+    const N: u32 = 20;
+
+    let start = Instant::now();
+    sandbox.execute("echo warm | cat").await.unwrap();
+    eprintln!("first spawn (compiles coreutils): {:?}", start.elapsed());
+
+    for script in ["echo hi | cat", "echo hi | cat | cat | cat"] {
+        let start = Instant::now();
+        for _ in 0..N {
+            sandbox.execute(script).await.unwrap();
+        }
+        eprintln!("stateless `{script}`: {:?}/exec", start.elapsed() / N);
+    }
+}
+
+#[cfg(feature = "unstable-vfs")]
+#[tokio::test]
+async fn children_share_the_sessions_vfs() {
+    use eryx::vfs::{ArcStorage, InMemoryStorage};
+    let Some(executor) = shell_executor() else {
+        return;
+    };
+    if !have_commands() {
+        return;
+    }
+    let storage = ArcStorage::new(Arc::new(InMemoryStorage::new()));
+    let mut session = SessionExecutor::new_with_vfs(executor, &[], storage)
+        .await
+        .unwrap();
+
+    let out = session
+        .execute(
+            r#"
+echo -e "pear\napple\nfig" > /data/fruit.txt
+sort /data/fruit.txt > /data/sorted.txt
+mkdir /data/dir && cp /data/sorted.txt /data/dir/copy.txt
+read -r first < /data/dir/copy.txt
+echo "first=$first"
+ls /data/dir
+wc -l < /data/fruit.txt
+"#,
+        )
+        .run()
+        .await
+        .unwrap();
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout),
+        "first=apple\ncopy.txt\n3\n"
+    );
+
+    // Children can't reach past the mounts.
+    let err = session.execute("cat /etc/passwd").run().await.unwrap_err();
+    assert!(err.to_string().starts_with("exit status 1"), "{err}");
+}

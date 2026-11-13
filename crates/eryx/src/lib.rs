@@ -82,6 +82,7 @@ mod library;
 pub mod net;
 pub mod package;
 pub mod pool;
+mod process;
 pub mod replay;
 mod sandbox;
 mod schema;

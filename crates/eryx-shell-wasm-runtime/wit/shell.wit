@@ -1,0 +1,7 @@
+package eryx:shell-guest;
+
+/// The sandbox world plus child processes.
+world shell-sandbox {
+    include eryx:sandbox/sandbox@0.1.0;
+    import eryx:process/process@0.1.0;
+}

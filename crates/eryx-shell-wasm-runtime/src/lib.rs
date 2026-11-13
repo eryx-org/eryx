@@ -1,7 +1,7 @@
 //! SPIKE: a bash-compatible shell (brush) as an eryx guest.
 //!
 //! Exports the same `eryx:sandbox/sandbox` world as the CPython and QuickJS
-//! guests, so it runs through the unmodified eryx host:
+//! guests, plus one extra import, `eryx:process`, for external commands:
 //!
 //! - `execute` runs a script on a persistent brush `Shell`. Output goes to the
 //!   guest's WASI fd 1/2, which the host already captures.
@@ -10,6 +10,8 @@
 //!   stdout, so `$(add --a 2 --b 3 | ...)` composes like any other command.
 //! - A non-zero exit status becomes an `execute-error` ("exit status N").
 //! - `snapshot-state` is brush's own serde form of the `Shell`.
+//! - Anything that isn't a builtin, function or callback is spawned through
+//!   `eryx:process` (host-registered WASI commands, e.g. uutils coreutils).
 
 #![allow(clippy::expect_used)] // single-threaded guest: a broken invariant traps either way
 
@@ -23,8 +25,8 @@ use brush_core::{
 };
 
 wit_bindgen::generate!({
-    path: "../eryx-runtime/wit",
-    world: "eryx:sandbox/sandbox",
+    path: "wit",
+    world: "eryx:shell-guest/shell-sandbox",
     generate_all,
 });
 
@@ -52,6 +54,7 @@ fn register_builtins(shell: &mut Shell) {
 }
 
 fn new_shell() -> Shell {
+    brush_core::sys::process::set_spawn_handler(Box::new(spawn));
     let mut shell = block_on(Shell::builder().build()).expect("failed to create shell");
     register_builtins(&mut shell);
     shell
@@ -147,6 +150,54 @@ impl Guest for Sandbox {
 }
 
 export!(Sandbox);
+
+/// brush's external-command hook: run `cmd` as a host child component.
+fn spawn(
+    cmd: &str,
+    args: &[String],
+    env: Vec<(String, String)>,
+    cwd: &str,
+) -> brush_core::sys::process::SpawnResult {
+    use brush_core::sys::process::SpawnError;
+    use eryx::process::process::{Child, ProcessError};
+    match Child::spawn(cmd, args, &env, cwd) {
+        Ok(child) => Ok(Box::new(ChildHandle(child))),
+        Err(ProcessError::CommandNotFound) => Err(SpawnError::NotFound(cmd.to_owned())),
+        Err(e) => Err(SpawnError::Failed(format!("{e:?}"))),
+    }
+}
+
+struct ChildHandle(eryx::process::process::Child);
+
+fn io_err(e: eryx::process::process::ProcessError) -> std::io::Error {
+    std::io::Error::other(format!("{e:?}"))
+}
+
+impl brush_core::sys::process::ExternalChild for ChildHandle {
+    fn write_stdin(&mut self, data: &[u8]) -> std::io::Result<usize> {
+        self.0.write_stdin(data).map(|n| n as usize).map_err(io_err)
+    }
+
+    fn close_stdin(&mut self) {
+        self.0.close_stdin();
+    }
+
+    fn read_stdout(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let data = self.0.read_stdout(buf.len() as u32).map_err(io_err)?;
+        buf[..data.len()].copy_from_slice(&data);
+        Ok(data.len())
+    }
+
+    fn read_stderr(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let data = self.0.read_stderr(buf.len() as u32).map_err(io_err)?;
+        buf[..data.len()].copy_from_slice(&data);
+        Ok(data.len())
+    }
+
+    fn wait(&mut self) -> std::io::Result<i32> {
+        self.0.wait().map_err(io_err)
+    }
+}
 
 /// Runs a host callback: `<callback> [--key value]... [--json '{..}']`, or
 /// `invoke <callback> [json]`. Prints the JSON result (a bare string unquoted).
