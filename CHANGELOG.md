@@ -7,6 +7,79 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## `eryx-precompile` - [0.15.0](https://github.com/eryx-org/eryx/compare/eryx-precompile-v0.14.0...eryx-precompile-v0.15.0) - 2026-11-12
+
+### Other
+- *(deps)* drop unused tar, zstd and tracing from two crates ([#780](https://github.com/eryx-org/eryx/pull/780))
+
+## `eryx` - [0.15.0](https://github.com/eryx-org/eryx/compare/eryx-v0.14.0...eryx-v0.15.0) - 2026-11-12
+
+A failed run now keeps what the script printed, any VFS storage can be mounted as a volume (per request too), pooled sandboxes take network policy and secrets per lease, `/tmp` works, session snapshots record the eryx version that wrote them, and pyeryx shares its exceptions, `ExecuteResult` and `ResourceLimits` with the eryx.run client. Read **Upgrade notes** before upgrading: passing `None` for a pyeryx `ResourceLimits` field no longer turns that limit off, and eryx before 0.15.0 can't read snapshots written by 0.15.0.
+
+### Upgrade notes
+
+**Session snapshots record the eryx version that wrote them.** Snapshot bytes (`PythonStateSnapshot::to_bytes()`, pyeryx `StateSnapshot.data`, the gRPC server's state) now start with a header naming the eryx version, readable from `SnapshotMetadata::eryx_version` after `PythonStateSnapshot::from_bytes()`. 0.15.0 reads snapshots from every earlier version, but **eryx, pyeryx and eryx-server before 0.15.0 can't read snapshots written by 0.15.0**, so a rollback after storing new snapshots loses that state. A snapshot in a format newer than the reader knows fails with `ErrorKind::IncompatibleSnapshot`. Restoring doesn't compare versions ([#791](https://github.com/eryx-org/eryx/pull/791)).
+
+**Precompiled runtimes and saved factories need rebuilding**, as after every release: the runtime's interface changed for [#759](https://github.com/eryx-org/eryx/pull/759). Use `eryx-precompile upgrade OLD -o NEW`, or `SandboxFactory.load(path, rebuild_if_incompatible=True)` / `python -m eryx factory upgrade OLD NEW` in pyeryx.
+
+**`/tmp` is now writable in every sandbox.** It's served from the sandbox's VFS storage, as a separate tree from `/data` that counts towards the same `max_vfs_bytes` and has the same permissions. `tempfile` works. A volume (or the VFS mount itself) at `/tmp` takes its place ([#760](https://github.com/eryx-org/eryx/pull/760)).
+
+**Rust (`eryx` crate)**
+- `ErrorKind::PythonException(String)` is now a `#[non_exhaustive]` struct variant, `PythonException { traceback, stdout, stderr, .. }`, so match it as `ErrorKind::PythonException { traceback, .. }`. `Error::stdout()` and `Error::stderr()` return what a script that raised had written, and `None` for other errors ([#759](https://github.com/eryx-org/eryx/pull/759)).
+- Behind `unstable-vfs`, which is outside semver ([#770](https://github.com/eryx-org/eryx/pull/770)):
+  - `VolumeMount::host_path` is replaced by `source: VolumeSource::{Host, Storage}`. `VolumeMount::new` and `read_only` are unchanged; `storage` and `read_only_storage` mount a `VfsStorage`.
+  - Renaming between a host directory and the VFS now fails with `EXDEV` instead of `EPERM`, so `shutil.move` copies instead.
+  - Two mounts at one guest path now fail the execution.
+  - `InProcessSession` now mounts the sandbox's volumes, which it used to ignore, and uses storage set with `PooledSandbox::with_vfs_storage` or `Sandbox::set_vfs_storage` ([#760](https://github.com/eryx-org/eryx/pull/760), [#763](https://github.com/eryx-org/eryx/pull/763)).
+- The `os.environ` preamble for secrets now runs before library preambles rather than in the order they were added ([#769](https://github.com/eryx-org/eryx/pull/769)).
+
+**Python (`pyeryx`)**
+- pyeryx now depends on `eryx-run` (the eryx.run client, `>=0.3`), and shares types with it, so code moves between local and hosted sandboxes by changing the import ([#772](https://github.com/eryx-org/eryx/pull/772), [#792](https://github.com/eryx-org/eryx/pull/792)).
+- `eryx.ResourceLimits` is `eryx_run.ResourceLimits`, a frozen dataclass ([#792](https://github.com/eryx-org/eryx/pull/792)):
+  - Assigning a field raises `dataclasses.FrozenInstanceError`. Use `dataclasses.replace(limits, execution_timeout_ms=5000)`.
+  - Fields default to `None`, meaning pyeryx's defaults (30-second execution timeout, 10-second callback timeout, 128 MiB of memory, 1000 callback invocations, no fuel limit), so `ResourceLimits()` gives the same limits as before. Reading an unset field now returns `None` rather than the default value.
+  - **Passing `None` for a field now means the default, not "no limit".** Code like `ResourceLimits(execution_timeout_ms=None)` now gets the 30-second timeout. To turn limits off, start from `ResourceLimits.unlimited()`, which sets the new `unlimited_by_default=True`: unset fields then mean no limit, except the VFS and open host file caps, and fields you set still apply. For example, `dataclasses.replace(ResourceLimits.unlimited(), max_memory_bytes=256 * 2**20)` sets only a memory limit.
+- The exceptions are eryx-run's: `eryx.TimeoutError is eryx_run.TimeoutError`, and likewise `EryxError`, `ExecutionError`, `PythonExceptionError`, `InitializationError`, `ResourceLimitError` and `CancelledError`. Their names and hierarchy are unchanged, but `__module__` is now `eryx_run._errors` ([#772](https://github.com/eryx-org/eryx/pull/772)).
+- `ExecuteResult` is an `eryx_run.ExecuteResult`, and gains the hosted-only attributes `network_bytes` and `trace_id` (both `None`) and `unsaved_variables` (`[]`) ([#772](https://github.com/eryx-org/eryx/pull/772)).
+- `PythonExceptionError` has `.stdout` and `.stderr` (bytes) with what the script wrote before it raised ([#759](https://github.com/eryx-org/eryx/pull/759)).
+
+### Added
+- *(eryx)* [**breaking**] version-stamp session snapshots ([#791](https://github.com/eryx-org/eryx/pull/791))
+- *(eryx)* [**breaking**] mount any VFS storage as a volume, per request too ([#770](https://github.com/eryx-org/eryx/pull/770))
+- *(eryx)* per-lease network and secrets, header-limited secrets, stable placeholders, traffic limit ([#769](https://github.com/eryx-org/eryx/pull/769))
+- [**breaking**] keep a failed run's stdout and stderr in the error ([#759](https://github.com/eryx-org/eryx/pull/759))
+- *(eryx)* let a built sandbox take VFS storage for its executions ([#763](https://github.com/eryx-org/eryx/pull/763))
+- *(eryx)* mount the VFS at /tmp and let sessions use a pooled sandbox's storage ([#760](https://github.com/eryx-org/eryx/pull/760))
+- *(eryx)* pass positional args to prefix callbacks ([#757](https://github.com/eryx-org/eryx/pull/757))
+- *(eryx)* add prefix callbacks that handle every name under a prefix ([#754](https://github.com/eryx-org/eryx/pull/754))
+
+### Fixed
+- *(runtime)* keep functions in snapshots beside unserializable globals ([#736](https://github.com/eryx-org/eryx/pull/736))
+
+### Other
+- bump Rust to 1.100 and use its new std APIs ([#790](https://github.com/eryx-org/eryx/pull/790))
+
+## `eryx-vfs` - [0.14.0](https://github.com/eryx-org/eryx/compare/eryx-vfs-v0.13.0...eryx-vfs-v0.14.0) - 2026-11-12
+
+### Added
+- *(eryx)* [**breaking**] mount any VFS storage as a volume, per request too ([#770](https://github.com/eryx-org/eryx/pull/770))
+
+### Other
+- bump Rust to 1.100 and use its new std APIs ([#790](https://github.com/eryx-org/eryx/pull/790))
+
+## `eryx-runtime` - [0.15.0](https://github.com/eryx-org/eryx/compare/eryx-runtime-v0.14.0...eryx-runtime-v0.15.0) - 2026-11-12
+
+### Added
+- [**breaking**] keep a failed run's stdout and stderr in the error ([#759](https://github.com/eryx-org/eryx/pull/759))
+- *(eryx)* pass positional args to prefix callbacks ([#757](https://github.com/eryx-org/eryx/pull/757))
+- *(eryx)* add prefix callbacks that handle every name under a prefix ([#754](https://github.com/eryx-org/eryx/pull/754))
+
+### Fixed
+- *(runtime)* keep functions in snapshots beside unserializable globals ([#736](https://github.com/eryx-org/eryx/pull/736))
+
+### Other
+- bump Rust to 1.100 and use its new std APIs ([#790](https://github.com/eryx-org/eryx/pull/790))
+
 ## `eryx-precompile` - [0.14.0](https://github.com/eryx-org/eryx/compare/eryx-precompile-v0.13.0...eryx-precompile-v0.14.0) - 2026-11-02
 
 ### Other
