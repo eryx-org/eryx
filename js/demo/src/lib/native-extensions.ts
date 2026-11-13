@@ -257,10 +257,10 @@ async function loadDynamicSandbox(
 
     onProgress("Instantiating WASM...");
 
-    // Load shim modules from the @bsull/eryx package
-    const callbackShims: any = await import("@bsull/eryx/callbacks");
-    const netShims: any = await import(/* @vite-ignore */ "@bsull/eryx/shims/net");
-    const socketShims: any = await import(/* @vite-ignore */ "@bsull/eryx/shims/sockets");
+    // Load shim modules from the @eryx-org/eryx package
+    const callbackShims: any = await import("@eryx-org/eryx/callbacks");
+    const netShims: any = await import(/* @vite-ignore */ "@eryx-org/eryx/shims/net");
+    const socketShims: any = await import(/* @vite-ignore */ "@eryx-org/eryx/shims/sockets");
     const [p2Cli, p2Clocks, p2Filesystem, p2Io, p2Random] =
       await Promise.all([
         import("@bytecodealliance/preview2-shim/cli"),
@@ -384,7 +384,7 @@ async function setupEnvironmentAndFilesystem(): Promise<void> {
 
   // The main eryx module has already been loaded by the initial sandbox,
   // so _fileTree contains the stdlib + site-packages.
-  const eryxMod = await import("@bsull/eryx");
+  const eryxMod = await import("@eryx-org/eryx");
   const fileTree = (eryxMod as any)._fileTree;
   if (!fileTree) {
     throw new Error("eryx _fileTree not available; initial sandbox must load first");

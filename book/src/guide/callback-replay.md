@@ -4,7 +4,7 @@ When an LLM iterates on a Python script that drives expensive [callbacks](./call
 
 **Suspension** is the companion feature: a callback can return [`CallbackError::Suspend`] to halt execution ("I can't answer yet — retry later"). Eryx records what was waiting on, stops the guest immediately, and the recorded journal lets you resume from where you left off once the dependency is ready.
 
-> **Availability.** This guide covers the **Rust library API**, the **Python bindings** (`Sandbox`, `Session` and pooled sandboxes) and the **JavaScript bindings** (`@bsull/eryx`, which implement the same matching, divergence guard and suspension semantics in the JS host). The [gRPC server](./grpc-server.md) also implements both features — including HMAC-signed journals — over its `callback_journal` field and `CALLBACK_OUTCOME_SUSPEND` outcome; see the [gRPC Server](./grpc-server.md#callback-replay) guide for the wire-level details.
+> **Availability.** This guide covers the **Rust library API**, the **Python bindings** (`Sandbox`, `Session` and pooled sandboxes) and the **JavaScript bindings** (`@eryx-org/eryx`, which implement the same matching, divergence guard and suspension semantics in the JS host). The [gRPC server](./grpc-server.md) also implements both features — including HMAC-signed journals — over its `callback_journal` field and `CALLBACK_OUTCOME_SUSPEND` outcome; see the [gRPC Server](./grpc-server.md#callback-replay) guide for the wire-level details.
 
 ## How replay works
 
@@ -93,7 +93,7 @@ print(f"recorded {len(outcome.journal['entries'])} callbacks")
 ### JavaScript
 
 ```javascript
-import { Sandbox } from "@bsull/eryx";
+import { Sandbox } from "@eryx-org/eryx";
 
 const sandbox = new Sandbox();
 
@@ -119,12 +119,13 @@ The [`CallbackJournal`] derives `serde::Serialize`/`Deserialize`, so you can per
 
 In Python, `ReplayOutcome` has `result` (an `ExecuteResult`, or `None` on failure), `error` (the exception `execute()` would have raised, or `None`), `journal` (a dict; treat it as opaque), `replayed_callbacks`, and `suspended` (a `SuspendedCallback` or `None`).
 
-In JavaScript, the outcome has the same fields in camelCase: `result` (an `ExecuteResult`, or `undefined`), `error`, `journal`, `replayedCallbacks` and `suspended` (`{ name, argsJson, reason }`). `journal` is a JSON string in the serde format of [`CallbackJournal`], so journals are portable between hosts. Pass it back unmodified: results are stored as their exact JSON text, which a `JSON.parse`/`JSON.stringify` round trip could alter (`1.0` would become `1`, and large integers would lose precision). A JavaScript handler's outcome is journaled as follows:
+In JavaScript, the outcome has the same fields in camelCase: `result` (an `ExecuteResult`, or `undefined`), `error`, `journal`, `replayedCallbacks` and `suspended` (`{ name, argsJson, reason }`). `journal` is a JSON string in the serde format of [`CallbackJournal`], so journals are portable between hosts. Pass it back unmodified: results are stored as their exact JSON text, which a `JSON.parse`/`JSON.stringify` round trip could alter (`1.0` would become `1`, and large integers would lose precision). A JavaScript callback's outcome is journaled as follows:
 
-- A returned JSON string becomes `{"Ok": value}`, byte-for-byte.
-- A Python-visible error (throwing a non-`Error` value, such as a string) becomes `{"Err": message}` and replays as the same Python exception.
-- A thrown `Error` halts the guest instead of reaching Python. It is recorded as `{"Err": message}` with `"thrown": true`, and replay throws it again, halting at the same point instead of re-running the call. (Remove that entry from the journal to retry the call.)
+- A returned value becomes `{"Ok": value}`, as the JSON Python got: `BigInt`s are exact, and a value wrapped in `JSON.rawJSON` keeps its text (`JSON.rawJSON("1.0")` stays a float).
+- A thrown value becomes `{"Err": message}` (`"RangeError: ..."` for an `Error`) and replays as the same Python exception.
 - Only `SuspendCallback` is not journaled (see [Suspension](#suspension)).
+
+Journals from `@bsull/eryx` may have entries with `"thrown": true`, from a thrown `Error`, which then halted the guest: replay halts at them the same way.
 
 ## Replaying a journal
 
@@ -233,19 +234,20 @@ def request_approval(action: str):
 ### JavaScript
 
 ```javascript
-import { SuspendCallback, setCallbackHandler } from "@bsull/eryx";
+import { Sandbox, SuspendCallback } from "@eryx-org/eryx";
 
 const approved = new Set(); // stand-in for your approval store
 
-setCallbackHandler((name, argsJson) => {
-  if (name === "request_approval") {
-    const { action } = JSON.parse(argsJson);
-    if (!approved.has(action)) {
-      throw new SuspendCallback(`awaiting approval for ${action}`);
-    }
-    return JSON.stringify({ approved: action });
-  }
-  // ... other callbacks ...
+const sandbox = new Sandbox({
+  callbacks: {
+    request_approval: ({ action }) => {
+      if (!approved.has(action)) {
+        throw new SuspendCallback(`awaiting approval for ${action}`);
+      }
+      return { approved: action };
+    },
+    // ... other callbacks ...
+  },
 });
 ```
 

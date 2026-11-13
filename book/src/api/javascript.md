@@ -5,7 +5,7 @@ Eryx provides JavaScript bindings via WebAssembly, allowing you to run sandboxed
 ## Installation
 
 ```bash
-npm install @bsull/eryx
+npm install @eryx-org/eryx
 ```
 
 > **Requirement:** WebAssembly JSPI (JavaScript Promise Integration) support is required. In Node.js 24–25, use `--experimental-wasm-jspi` (on by default in Node.js 26+). In browsers, Chrome 133+ and Edge 133+ are supported.
@@ -15,12 +15,12 @@ npm install @bsull/eryx
 The `Sandbox` class provides an isolated Python environment. Each instance is its own WebAssembly instance, with its own interpreter, filesystem, network connections, callback handlers and journal, and keeps its state across `execute()` calls. The compiled code is shared, but each instance has its own memory (about 20 MB idle on Node.js 24). Call `sandbox.close()` (or declare it with `using`) when you're done: it closes the sandbox's connections, terminates its Worker if it has one, and makes later calls reject. A sandbox that is only dropped is freed whenever the garbage collector gets to it.
 
 ```javascript
-import { Sandbox } from "@bsull/eryx";
+import { Sandbox } from "@eryx-org/eryx";
 
 const sandbox = new Sandbox();
 ```
 
-`new Sandbox(options)` can give the sandbox its own `callbackHandler`, `callbacks`, `traceHandler` and `outputHandler`. Any it omits follow the module-wide defaults set by the [handler functions](#handler-functions).
+`new Sandbox(options)` takes the sandbox's [`callbacks`](#callbacks), and can give it its own `traceHandler` and `outputHandler`. Any it omits follow the module-wide defaults set by the [handler functions](#handler-functions).
 
 `timeoutMs` runs the sandbox in its own Worker (`worker_threads` in Node.js) and terminates it when a call takes longer. The call rejects with a `TimeoutError` (`executeWithJournal()` reports it as `outcome.error`), and the sandbox starts over with fresh Python state. Without it, nothing interrupts a call that never finishes. The Worker costs about 70 MB on top of the sandbox's memory.
 
@@ -65,7 +65,7 @@ capture a different variable name.
 Execute code while journaling callback results, so a later run can replay them instead of re-invoking the callbacks. Pass a previously recorded journal as `options.journal` to replay it. A callback handler can throw `SuspendCallback` to halt execution. See [Callback Replay & Suspension](../guide/callback-replay.md).
 
 ```javascript
-import { Sandbox, SuspendCallback } from "@bsull/eryx";
+import { Sandbox, SuspendCallback } from "@eryx-org/eryx";
 
 const first = await sandbox.executeWithJournal(code);
 // Later, with the same code:
@@ -117,7 +117,7 @@ await sandbox.clearState();
 Execute Python code in a default sandbox, created on first use, whose state persists across calls. It shares nothing with `Sandbox` instances you create. `executeWithJournal()` and `setResultVariable()` also have module-level versions that use the same default sandbox.
 
 ```javascript
-import { execute } from "@bsull/eryx";
+import { execute } from "@eryx-org/eryx";
 
 const result = await execute('print("Hello!")');
 console.log(result.stdout);  // "Hello!\n"
@@ -125,23 +125,23 @@ console.log(result.stdout);  // "Hello!\n"
 
 ## Handler Functions
 
-### `setCallbackHandler(handler)`
+### Callbacks
 
-Register the default callback handler that sandboxed Python code can invoke. It applies to every sandbox not given its own `callbackHandler` option.
+A `Sandbox`'s `callbacks` option is an object of functions by name, which the
+code can `await` with keyword arguments. Each is a function of those
+arguments, or `{ handler, description }` (what `list_callbacks()` shows), and
+returns JSON. If it throws, the code gets a `RuntimeError` with its message.
+It's the same option as eryx.run's client, `@eryx-org/eryx-run`.
 
 ```javascript
-import { setCallbackHandler, setCallbacks, Sandbox } from "@bsull/eryx";
+import { Sandbox } from "@eryx-org/eryx";
 
-setCallbacks([
-  { name: "get_time", description: "Returns current timestamp" },
-]);
-
-setCallbackHandler((name, argsJson) => {
-  if (name === "get_time") {
-    return JSON.stringify({ timestamp: Date.now() });
-  }
-  throw new Error(`Unknown callback: ${name}`);
+const sandbox = new Sandbox({
+  callbacks: {
+    get_time: { description: "Returns current timestamp", handler: () => ({ timestamp: Date.now() }) },
+  },
 });
+await sandbox.execute(`print((await get_time())["timestamp"])`);
 ```
 
 ### `setOutputHandler(handler)`
@@ -149,7 +149,7 @@ setCallbackHandler((name, argsJson) => {
 Set the default handler for streaming stdout/stderr output in real-time.
 
 ```javascript
-import { setOutputHandler } from "@bsull/eryx";
+import { setOutputHandler } from "@eryx-org/eryx";
 
 setOutputHandler((stream, data) => {
   // stream: 0 = stdout, 1 = stderr
@@ -168,7 +168,7 @@ setOutputHandler((stream, data) => {
 Set the default handler for execution trace events.
 
 ```javascript
-import { setTraceHandler } from "@bsull/eryx";
+import { setTraceHandler } from "@eryx-org/eryx";
 
 setTraceHandler((lineno, eventJson, contextJson) => {
   const event = JSON.parse(eventJson);
@@ -184,7 +184,7 @@ In browsers, import the package normally. The WASM binary and Python stdlib are 
 
 ```html
 <script type="module">
-import { Sandbox } from "@bsull/eryx";
+import { Sandbox } from "@eryx-org/eryx";
 
 const sandbox = new Sandbox();
 const result = await sandbox.execute('print("Hello from the browser!")');
@@ -208,7 +208,7 @@ node --experimental-wasm-jspi your-script.mjs
 ```
 
 ```javascript
-import { Sandbox } from "@bsull/eryx";
+import { Sandbox } from "@eryx-org/eryx";
 
 const sandbox = new Sandbox();
 const result = await sandbox.execute(`

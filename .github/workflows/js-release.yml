@@ -1,4 +1,4 @@
-# JavaScript package release workflow for @bsull/eryx
+# JavaScript package release workflow for @eryx-org/eryx (formerly @bsull/eryx)
 #
 # This workflow builds, tests, and publishes the npm package.
 # It runs on:

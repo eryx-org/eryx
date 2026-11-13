@@ -4,14 +4,14 @@ import { createServer as createHttpServer, type Server as HttpServer } from "nod
 import type { AddressInfo } from "node:net";
 import { gzipSync } from "node:zlib";
 import { readFileSync } from "node:fs";
-import { Sandbox, setNetConfig } from "@bsull/eryx";
+import { Sandbox, setNetConfig } from "@eryx-org/eryx";
 // The browser transport, exercised directly: Node has fetch() but no CORS.
 // @ts-expect-error -- untyped internal module
 import { createTransport as createFetchTransport, networkFilter as fetchNetworkFilter } from "../eryx/shims/net-fetch.js";
 // @ts-expect-error -- untyped internal module
 import { createTransport as createNodeTransport, networkFilter as nodeNetworkFilter } from "../eryx/shims/net-node.js";
-import { DEFAULT_BLOCKED_HOSTS, DEFAULT_BLOCKED_NETWORKS } from "@bsull/eryx";
-import { createNet } from "@bsull/eryx/shims/net";
+import { DEFAULT_BLOCKED_HOSTS, DEFAULT_BLOCKED_NETWORKS } from "@eryx-org/eryx";
+import { createNet } from "@eryx-org/eryx/shims/net";
 
 const { tcp: fetchTcp } = createFetchTransport();
 const { tcp: nodeTcp } = createNodeTransport();

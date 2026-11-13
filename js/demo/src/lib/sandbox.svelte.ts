@@ -1,4 +1,4 @@
-import type { Sandbox, ExecuteResult, StateSnapshot } from "@bsull/eryx";
+import type { Sandbox, SandboxOptions, ExecuteResult, StateSnapshot } from "@eryx-org/eryx";
 
 export type SandboxState =
   | { status: "loading" }
@@ -18,7 +18,7 @@ export function setSandboxState(state: SandboxState): void {
   sandboxState = state;
 }
 
-export async function initSandbox(): Promise<void> {
+export async function initSandbox(options: SandboxOptions = {}): Promise<void> {
   if (typeof (WebAssembly as any)?.Suspending !== "function") {
     sandboxState = {
       status: "error",
@@ -30,13 +30,13 @@ export async function initSandbox(): Promise<void> {
 
   const start = performance.now();
   try {
-    const { Sandbox, setNetConfig } = await import("@bsull/eryx");
+    const { Sandbox, setNetConfig } = await import("@eryx-org/eryx");
     // The default blocklists refuse localhost and private addresses, but the
     // browser resolves names itself, so a name pointing at a private address
     // isn't refused; CORS and the browser's local-network rules still apply.
     // An embedder with real data to protect should list allowedHosts instead.
     setNetConfig({ allowAllHosts: true });
-    const sandbox = new Sandbox();
+    const sandbox = new Sandbox(options);
     const loadTime = ((performance.now() - start) / 1000).toFixed(1);
     sandboxState = { status: "ready", sandbox, loadTime };
   } catch (e) {

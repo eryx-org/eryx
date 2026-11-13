@@ -1,35 +1,4 @@
 /**
- * Callback info visible to sandbox code.
- */
-export interface CallbackInfo {
-  /** Unique name for this callback */
-  name: string;
-  /** Human-readable description */
-  description: string;
-  /** JSON Schema for expected arguments */
-  parametersSchemaJson?: string;
-}
-
-/**
- * Set the default callback handler for sandbox code to invoke.
- *
- * The handler receives a callback name and JSON-encoded arguments,
- * and should return a JSON-encoded result (or a Promise of one). Applies to
- * every Sandbox that wasn't given its own `callbackHandler` option.
- */
-export function setCallbackHandler(
-  handler:
-    | ((name: string, argsJson: string) => string | Promise<string>)
-    | null,
-): void;
-
-/**
- * Register the default callbacks visible to sandbox code via list_callbacks(),
- * for every Sandbox that wasn't given its own `callbacks` option.
- */
-export function setCallbacks(callbacks: CallbackInfo[]): void;
-
-/**
  * Set the default handler for trace events from the Python runtime, for every
  * Sandbox that wasn't given its own `traceHandler` option.
  */

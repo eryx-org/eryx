@@ -10,9 +10,9 @@
  * - reportOutput: receive streaming stdout/stderr output from the Python runtime
  *
  * Each sandbox instance gets its own set from createCallbackHost(), with its
- * own replay state and output decoders. Handlers come from that sandbox's
- * options, falling back to the module-wide defaults set by
- * setCallbackHandler(), setCallbacks(), setTraceHandler() and
+ * own replay state and output decoders. Its callbacks come from that
+ * sandbox's `callbacks` option; trace and output handlers from its options,
+ * falling back to the module-wide defaults set by setTraceHandler() and
  * setOutputHandler().
  */
 
@@ -20,47 +20,57 @@ import { parseJson } from "./raw-json.js";
 
 /**
  * Module-wide handlers, used by every sandbox that doesn't set its own.
- * @type {{callbackHandler: ((name: string, argsJson: string) => string | Promise<string>) | null, callbacks: Array<{name: string, description: string, parametersSchemaJson: string}>, traceHandler: ((lineno: number, eventJson: string, contextJson: string) => void) | null, outputHandler: ((stream: number, data: string) => void) | null}}
+ * @type {{traceHandler: ((lineno: number, eventJson: string, contextJson: string) => void) | null, outputHandler: ((stream: number, data: string) => void) | null}}
  */
 const defaults = {
-  callbackHandler: null,
-  callbacks: [],
   traceHandler: null,
   outputHandler: null,
 };
 
-/**
- * Fill in the optional fields of callback infos.
- * @param {Array<{name: string, description: string, parametersSchemaJson?: string}>} callbacks
- */
-function normalizeCallbacks(callbacks) {
-  return callbacks.map((cb) => ({
-    name: cb.name,
-    description: cb.description,
-    parametersSchemaJson: cb.parametersSchemaJson ?? "{}",
-  }));
-}
+/** A JSON.stringify replacer writing BigInts as exact integers */
+const exactBigInts = (_key, value) =>
+  typeof value === "bigint" && JSON.rawJSON ? JSON.rawJSON(value.toString()) : value;
 
 /**
- * Set the default callback handler for sandbox code to invoke.
- *
- * The handler receives a callback name and JSON-encoded arguments,
- * and should return a JSON-encoded result (or a Promise of one). Applies to
- * every sandbox that wasn't given its own `callbackHandler` option.
- *
- * @param {((name: string, argsJson: string) => string | Promise<string>) | null} handler
+ * A sandbox's callbacks, from the `callbacks` option: what `list_callbacks()`
+ * shows the code, and the handler the host calls with each call's name and
+ * arguments JSON, which answers with the result's JSON.
+ * @param {import("@eryx-org/eryx-run/shared").Callbacks} callbacks
  */
-export function setCallbackHandler(handler) {
-  defaults.callbackHandler = handler;
-}
-
-/**
- * Register the default callbacks visible to sandbox code via list_callbacks().
- *
- * @param {Array<{name: string, description: string, parametersSchemaJson?: string}>} callbacks
- */
-export function setCallbacks(callbacks) {
-  defaults.callbacks = normalizeCallbacks(callbacks);
+function fromCallbacks(callbacks) {
+  if (Array.isArray(callbacks) || typeof callbacks !== "object" || callbacks === null) {
+    throw new TypeError(
+      "callbacks is an object of functions by name, e.g. { get_user: async ({ id }) => ... } " +
+        "(the list of {name, description} with a callbackHandler is gone)",
+    );
+  }
+  const handlers = new Map();
+  const infos = [];
+  for (const [name, callback] of Object.entries(callbacks)) {
+    const fn = typeof callback === "function" ? callback : callback?.handler;
+    if (typeof fn !== "function") {
+      throw new TypeError(`callback ${JSON.stringify(name)} isn't a function or { handler }`);
+    }
+    handlers.set(name, fn);
+    const description = typeof callback === "function" ? "" : (callback.description ?? "");
+    infos.push({ name, description, parametersSchemaJson: "{}" });
+  }
+  /** @param {string} name @param {string} argsJson */
+  const handler = async (name, argsJson) => {
+    try {
+      const fn = handlers.get(name);
+      if (!fn) throw new Error(`no callback ${name}`);
+      // undefined isn't JSON. A BigInt is written exactly, and so is what a
+      // handler wraps in JSON.rawJSON (e.g. "1.0", to stay a float)
+      return JSON.stringify((await fn(JSON.parse(argsJson))) ?? null, exactBigInts);
+    } catch (e) {
+      if (e instanceof SuspendCallback) throw e;
+      // What the handler threw, or a result JSON can't hold (a cycle), is an
+      // exception in Python, as on eryx.run: `RuntimeError("RangeError: ...")`
+      return { tag: "err", val: e instanceof Error ? `${e.name}: ${e.message}` : String(e) };
+    }
+  };
+  return { infos, handler };
 }
 
 /**
@@ -303,11 +313,12 @@ const _decoderOpts = { fatal: false, ignoreBOM: true };
  * returned host alone.
  *
  * @internal Used by index.js for each Sandbox.
- * @param {{callbackHandler?: ((name: string, argsJson: string) => string | Promise<string>) | null, callbacks?: Array<{name: string, description: string, parametersSchemaJson?: string}>, traceHandler?: ((lineno: number, eventJson: string, contextJson: string) => void) | null, outputHandler?: ((stream: number, data: string) => void) | null}} [options]
+ * @param {{callbacks?: import("@eryx-org/eryx-run/shared").Callbacks, traceHandler?: ((lineno: number, eventJson: string, contextJson: string) => void) | null, outputHandler?: ((stream: number, data: string) => void) | null}} [options]
  */
 export function createCallbackHost(options = {}) {
-  const callbacks =
-    options.callbacks === undefined ? undefined : normalizeCallbacks(options.callbacks);
+  const { infos: callbacks, handler } = fromCallbacks(options.callbacks ?? {});
+  /** Calls the code made since takeInvocations() last ran */
+  let invocations = 0;
   const pick = (key) => (options[key] === undefined ? defaults[key] : options[key]);
 
   /** @type {ReplayState | null} */
@@ -341,12 +352,7 @@ export function createCallbackHost(options = {}) {
   // import into an `err` result, leaving the guest stuck mid-invoke so the next
   // execute panics ("RefCell already borrowed"). A rejection is handled correctly.
   async function invoke(name, argumentsJson) {
-    const handler = pick("callbackHandler");
-    if (!handler) {
-      throw new Error(
-        `No callback handler registered. Pass callbackHandler to the Sandbox or call setCallbackHandler() before executing code that uses callbacks. Attempted to invoke: ${name}`,
-      );
-    }
+    invocations++;
     const state = replay;
     if (!state) {
       return handler(name, argumentsJson);
@@ -382,7 +388,7 @@ export function createCallbackHost(options = {}) {
        * List all registered callbacks.
        * This is called by the sandbox runtime when Python code calls list_callbacks().
        */
-      listCallbacks: () => callbacks ?? defaults.callbacks,
+      listCallbacks: () => callbacks,
       /**
        * Return execution behavior options for the JavaScript host.
        *
@@ -438,6 +444,13 @@ export function createCallbackHost(options = {}) {
      * next execution's output. Only call it between executions: mid-run it
      * would cut a character the guest is still writing.
      */
+    /** How many callback calls the code made since this was last called. */
+    takeInvocations() {
+      const count = invocations;
+      invocations = 0;
+      return count;
+    },
+
     flushOutput() {
       const handler = outputHandler();
       const stdoutTail = stdoutDecoder.decode();

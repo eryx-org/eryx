@@ -117,7 +117,7 @@ export default defineConfig({
   resolve: {
     alias: [
       // Vite resolves bare imports relative to the importing file. Since
-      // @bsull/eryx is symlinked from ../eryx/ (outside demo/),
+      // @eryx-org/eryx is symlinked from ../eryx/ (outside demo/),
       // Vite can't find preview2-shim from there. Alias it to our copy, along
       // with eryx's own `#preview2/*` package imports of it.
       {
@@ -137,7 +137,7 @@ export default defineConfig({
   optimizeDeps: {
     // Don't pre-bundle eryx during dev - it has top-level await and WASM loads.
     // Don't pre-bundle jco - it loads WASM via import.meta.url.
-    exclude: ["@bsull/eryx", "@bytecodealliance/jco"],
+    exclude: ["@eryx-org/eryx", "@bytecodealliance/jco"],
   },
   assetsInclude: ["**/*.wasm"],
   server: {

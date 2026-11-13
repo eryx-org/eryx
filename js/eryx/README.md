@@ -1,4 +1,4 @@
-# @bsull/eryx
+# @eryx-org/eryx
 
 A Python sandbox powered by WebAssembly, for browser and Node.js.
 
@@ -7,7 +7,7 @@ Eryx runs **CPython 3.14** inside a WASM sandbox with full isolation — no netw
 ## Install
 
 ```bash
-npm install @bsull/eryx
+npm install @eryx-org/eryx
 ```
 
 **Requirements:** Chrome 133+ or Node.js 24+ (requires [JSPI](https://v8.dev/blog/jspi); Node.js 24–25 need `--experimental-wasm-jspi`, Node.js 26+ has it on by default).
@@ -15,7 +15,7 @@ npm install @bsull/eryx
 ## Usage
 
 ```js
-import { Sandbox } from "@bsull/eryx";
+import { Sandbox } from "@eryx-org/eryx";
 
 const sandbox = new Sandbox();
 const result = await sandbox.execute('print("Hello from Python!")');
@@ -64,47 +64,45 @@ console.log(result.stdout); // "[1, 2, 3]"
 
 ### Callbacks
 
-Let Python call back into your JavaScript:
+Sandboxed code can `await` functions you provide, called with its keyword
+arguments. They can be async, and what they return must be JSON:
 
 ```js
-import { Sandbox, setCallbackHandler, setCallbacks } from "@bsull/eryx";
+import { Sandbox } from "@eryx-org/eryx";
 
-setCallbacks([
-  { name: "get_weather", description: "Get current weather for a city" },
-]);
-
-setCallbackHandler((name, argsJson) => {
-  const args = JSON.parse(argsJson);
-  return JSON.stringify({ temp: 72, unit: "F", city: args.city });
+const sandbox = new Sandbox({
+  callbacks: {
+    get_weather: {
+      description: "Get current weather for a city", // shown by list_callbacks()
+      handler: async ({ city }) => ({ temp: 72, unit: "F", city }),
+    },
+    now: () => Date.now(), // no description
+  },
 });
-
-const sandbox = new Sandbox();
 await sandbox.execute(`
-import json
-from eryx_callbacks import invoke
-result = json.loads(invoke("get_weather", json.dumps({"city": "NYC"})))
-print(f"Temperature in {result['city']}: {result['temp']}°{result['unit']}")
+weather = await get_weather(city="NYC")
+print(f"Temperature in {weather['city']}: {weather['temp']}°{weather['unit']}")
 `);
 ```
 
-`setCallbacks()` and `setCallbackHandler()` set the defaults for every sandbox. To
-give one sandbox its own, pass them as options:
+If a callback throws, the code gets a `RuntimeError` with its message
+(`"RangeError: no such city"`). `BigInt`s are returned exactly, and so is a
+value wrapped in `JSON.rawJSON` (`JSON.rawJSON("1.0")` stays a float).
 
-```js
-const sandbox = new Sandbox({
-  callbacks: [{ name: "get_weather", description: "Get current weather for a city" }],
-  callbackHandler: (name, argsJson) => JSON.stringify({ temp: 72 }),
-});
-```
+This is the same `callbacks` option as eryx.run's client,
+[`@eryx-org/eryx-run`](https://www.npmjs.com/package/@eryx-org/eryx-run),
+which runs the code on eryx.run instead. Both share their error classes and
+`ExecuteResult`, so code written against one works with the other.
 
-`traceHandler` and `outputHandler` work the same way.
+`traceHandler` and `outputHandler` can be set per sandbox too, or for every
+sandbox with `setTraceHandler()` and `setOutputHandler()`.
 
 ### Networking
 
 Networking is off by default. Enable it with a host policy (same rules as the Rust crate's `NetConfig`; localhost and private ranges stay blocked unless you override `blockedHosts`, IP addresses are checked against `blockedNetworks`, and in Node.js so are the addresses a name resolves to, with `allowedNetworks` and `internalHosts` as exceptions). At most `maxConnections` (default 10) are open at once, timeouts are capped by `connectTimeoutMs` and `ioTimeoutMs`, and connections are closed when each call into the sandbox finishes. Browsers resolve names themselves, so a name that points at a private address can't be refused there: use `allowedHosts` rather than `allowAllHosts` in browsers.
 
 ```js
-import { Sandbox, setNetConfig } from "@bsull/eryx";
+import { Sandbox, setNetConfig } from "@eryx-org/eryx";
 
 const sandbox = new Sandbox({ netConfig: { allowedHosts: ["api.github.com", "*.example.com"] } });
 await sandbox.execute(`
@@ -126,16 +124,16 @@ In Node.js, sandboxed code gets real TCP and TLS sockets. Browsers can't open so
 Journal callback results so a re-run of the same script replays them instead of calling your handler again, and let a handler suspend execution until it can answer:
 
 ```js
-import { Sandbox, SuspendCallback, setCallbackHandler } from "@bsull/eryx";
+import { Sandbox, SuspendCallback } from "@eryx-org/eryx";
 
-setCallbackHandler((name, argsJson) => {
-  if (name === "approve" && !isApproved()) {
-    throw new SuspendCallback("awaiting approval"); // halts the script
-  }
-  return JSON.stringify(handle(name, JSON.parse(argsJson)));
+const sandbox = new Sandbox({
+  callbacks: {
+    approve: ({ action }) => {
+      if (!isApproved(action)) throw new SuspendCallback("awaiting approval"); // halts the script
+      return true;
+    },
+  },
 });
-
-const sandbox = new Sandbox();
 const first = await sandbox.executeWithJournal(code);
 if (first.suspended) {
   save(first.journal); // a JSON string; store it as-is to resume later
@@ -152,7 +150,7 @@ See the [Callback Replay & Suspension guide](https://docs.eryx.run/latest/guide/
 Get stdout/stderr in real-time instead of waiting for execution to complete:
 
 ```js
-import { Sandbox, setOutputHandler } from "@bsull/eryx";
+import { Sandbox, setOutputHandler } from "@eryx-org/eryx";
 
 setOutputHandler((stream, data) => {
   const prefix = stream === 0 ? "stdout" : "stderr";
@@ -166,12 +164,31 @@ for i in range(5):
 `);
 ```
 
+### Errors
+
+A run that fails rejects with the same errors as eryx.run's client: code that
+raises rejects with a `PythonExceptionError`, whose `message` is the
+traceback and whose `stdout` and `stderr` hold the output before it, and a
+run past `timeoutMs` with a `TimeoutError`. Both are `EryxError`s, and say
+how long the run took (`durationMs`) and how many callback calls it made
+(`callbackInvocations`), as a result does.
+
+```js
+import { PythonExceptionError } from "@eryx-org/eryx";
+
+try {
+  await sandbox.execute("raise ValueError('bad input')");
+} catch (e) {
+  if (e instanceof PythonExceptionError) console.log(e.stderr); // ends with the traceback
+}
+```
+
 ### Timeouts and memory
 
 Timeouts are opt-in in JavaScript. Unlike the Rust crate and the Python bindings, which stop an execution after 30 seconds by default, nothing interrupts a call here unless you ask, so `while True: pass` never returns. Pass `timeoutMs` to run the sandbox in its own Worker (`worker_threads` in Node.js) that is terminated when a call runs too long:
 
 ```js
-import { Sandbox, TimeoutError } from "@bsull/eryx";
+import { Sandbox, TimeoutError } from "@eryx-org/eryx";
 
 const sandbox = new Sandbox({ timeoutMs: 5_000 });
 try {
@@ -211,8 +228,8 @@ export default defineConfig({
 
 | Method | Returns | Description |
 |--------|---------|-------------|
-| `new Sandbox(options?)` | `Sandbox` | Create an isolated sandbox; `options` can set its own `callbackHandler`, `callbacks`, `traceHandler`, `outputHandler`, `netConfig` and `timeoutMs` |
-| `execute(code)` | `Promise<{ stdout, stderr }>` | Run Python code |
+| `new Sandbox(options?)` | `Sandbox` | Create an isolated sandbox; `options` can set its `callbacks`, `traceHandler`, `outputHandler`, `netConfig` and `timeoutMs` |
+| `execute(code)` | `Promise<ExecuteResult>` | Run Python code: `stdout`, `stderr`, `result`, `durationMs`, `callbackInvocations`, ... |
 | `executeWithJournal(code, { journal? })` | `Promise<ReplayOutcome>` | Run with callback journaling/replay |
 | `setResultVariable(name)` | `Promise<void>` | Change the captured result variable |
 | `setNetConfig(config)` | `void` | Replace this sandbox's network policy (`null` disables networking) |
@@ -223,17 +240,34 @@ export default defineConfig({
 
 Each `Sandbox` is its own WebAssembly instance, with its own interpreter, filesystem, network connections, callbacks and journal; code in one can't see another's state. The compiled code is shared, but each instance has its own memory (about 20 MB idle on Node.js 24). Call `sandbox.close()` (or declare it with `using`) when you're done; a sandbox that is only dropped is freed whenever the garbage collector gets to it. The module-level `execute()`, `executeWithJournal()` and `setResultVariable()` use one default sandbox, created on first use.
 
-Calls on one sandbox run one at a time, in call order: a call made while another is running waits for it to finish. So don't await `execute()` on the same sandbox from inside its callback handler, since it would wait on the execution that called the handler. Different sandboxes run independently.
+Calls on one sandbox run one at a time, in call order: a call made while another is running waits for it to finish. So don't await `execute()` on the same sandbox from inside one of its callbacks, since it would wait on the execution that called it. Different sandboxes run independently.
 
-### Callbacks
+### Handlers and errors
 
-| Function | Description |
+| Export | Description |
 |----------|-------------|
-| `setCallbackHandler(fn)` | Register the default `(name, argsJson) => resultJson` handler |
-| `setCallbacks(infos)` | Register the default callbacks visible to Python's `list_callbacks()` |
 | `setTraceHandler(fn)` | Receive line-level execution trace events (default) |
 | `setOutputHandler(fn)` | Receive streaming stdout/stderr (default) |
-| `SuspendCallback` | Throw from a handler to suspend execution |
+| `SuspendCallback` | Throw from a callback to suspend execution |
+| `EryxError`, `PythonExceptionError`, `TimeoutError`, ... | The errors a run rejects with, shared with `@eryx-org/eryx-run` |
+
+## Moving from `@bsull/eryx`
+
+This package was `@bsull/eryx`. Apart from the name:
+
+- `callbacks` is an object of functions by name. `setCallbacks()`,
+  `setCallbackHandler()` and the `callbackHandler` option are gone, and
+  callbacks are per sandbox (the module-level `execute()` has none).
+  Handlers take the arguments as an object and return a value, not JSON
+  text.
+- A callback that throws an `Error` raises in Python, as one that throws
+  anything else did; it no longer halts the run. `SuspendCallback` still
+  does.
+- Code that raises rejects with a `PythonExceptionError` (`stdout` and
+  `stderr` are strings), and `TimeoutError` is `@eryx-org/eryx-run`'s, with
+  `message` rather than a `timeoutMs` constructor argument.
+- Results also have `durationMs`, `callbackInvocations` and
+  `unsavedVariables` (always empty here).
 
 ## How it works
 

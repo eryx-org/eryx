@@ -1,5 +1,5 @@
 {
-  "name": "@bsull/eryx",
+  "name": "@eryx-org/eryx",
   "type": "module",
   "description": "A Python sandbox powered by WebAssembly, for browser and Node.js",
   "version": "0.12.1",
@@ -72,6 +72,7 @@
     "interpreter"
   ],
   "dependencies": {
-    "@bytecodealliance/preview2-shim": "^0.31.0"
+    "@bytecodealliance/preview2-shim": "^0.31.0",
+    "@eryx-org/eryx-run": "^0.2.0"
   }
 }

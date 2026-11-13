@@ -65,7 +65,7 @@ print(result.stdout_text)
 Install from npm:
 
 ```bash
-npm install @bsull/eryx
+npm install @eryx-org/eryx
 ```
 
 > **Note:** JavaScript bindings require WebAssembly JSPI support. In Node.js 24–25, pass `--experimental-wasm-jspi` (on by default in Node.js 26+). In browsers, Chrome 133+ and Edge 133+ are supported.
@@ -77,7 +77,7 @@ node --experimental-wasm-jspi your-script.js   # flag not needed on Node.js 26+
 ```
 
 ```javascript
-import { Sandbox } from "@bsull/eryx";
+import { Sandbox } from "@eryx-org/eryx";
 
 const sandbox = new Sandbox();
 const result = await sandbox.execute('print("Hello from Eryx!")');
@@ -87,7 +87,7 @@ console.log(result.stdout);
 ### Browser
 
 ```javascript
-import { Sandbox } from "@bsull/eryx";
+import { Sandbox } from "@eryx-org/eryx";
 
 const sandbox = new Sandbox();
 const result = await sandbox.execute('print("Hello from the browser!")');

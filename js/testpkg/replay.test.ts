@@ -1,11 +1,5 @@
 import { describe, expect, it, beforeEach } from "vitest";
-import {
-  execute,
-  executeWithJournal,
-  Sandbox,
-  SuspendCallback,
-} from "@bsull/eryx";
-import { setCallbackHandler, setCallbacks } from "@bsull/eryx/callbacks";
+import { Sandbox, SuspendCallback, type ExecuteWithJournalOptions } from "@eryx-org/eryx";
 
 /** Inspect a journal string (lossy number parsing is fine for assertions). */
 const entries = (journal: string) => JSON.parse(journal).entries;
@@ -18,22 +12,29 @@ print(a["v"] + b["v"])
 
 describe("callback replay", () => {
   let calls: string[];
+  /** What both callbacks do; a test can replace it */
+  let handler: (name: string, args: Record<string, any>) => unknown;
+  let sandbox: Sandbox;
+  const execute = (code: string) => sandbox.execute(code);
+  const executeWithJournal = (code: string, options?: ExecuteWithJournalOptions) =>
+    sandbox.executeWithJournal(code, options);
 
   beforeEach(() => {
     calls = [];
-    setCallbacks([
-      { name: "fetch", description: "Fetch a value" },
-      { name: "approve", description: "Await approval" },
-    ]);
-    setCallbackHandler((name, argsJson) => {
-      calls.push(`${name} ${argsJson}`);
-      const args = JSON.parse(argsJson);
-      return JSON.stringify({ v: args.id * 10 });
+    handler = (name, args) => {
+      calls.push(`${name} ${JSON.stringify(args)}`);
+      return { v: args.id * 10 };
+    };
+    sandbox = new Sandbox({
+      callbacks: {
+        fetch: { description: "Fetch a value", handler: (args) => handler("fetch", args) },
+        approve: { description: "Await approval", handler: (args) => handler("approve", args) },
+      },
     });
   });
 
   it("records a journal and replays it without calling the handler", async () => {
-    const first = await new Sandbox().executeWithJournal(CODE);
+    const first = await executeWithJournal(CODE);
     expect(first.error).toBeUndefined();
     expect(first.result?.stdout).toBe("30\n");
     expect(first.replayedCallbacks).toBe(0);
@@ -90,7 +91,7 @@ print([x["v"] for x in xs])
   });
 
   it("journals errors and replays them as Python exceptions", async () => {
-    setCallbackHandler((name) => {
+    handler = ((name) => {
       calls.push(name);
       // A thrown non-Error value is delivered to Python as an exception.
       throw "not found";
@@ -153,9 +154,11 @@ raise ValueError("boom")
   });
 
   it("replays results byte-for-byte, keeping floats and large integers", async () => {
-    setCallbackHandler((name) => {
+    handler = ((name) => {
       calls.push(name);
-      return '{"v": 1.0, "big": 12345678901234567890}';
+      // JSON.rawJSON keeps 1.0 a float; BigInts are written exactly
+      const { rawJSON } = JSON as unknown as { rawJSON(text: string): unknown };
+      return { v: rawJSON("1.0"), big: 12345678901234567890n };
     });
     const code = `
 r = await fetch(id=1)
@@ -194,35 +197,49 @@ print(type(r["v"]).__name__, r["big"])
     );
   });
 
-  it("journals a thrown Error so the call is not re-run", async () => {
-    setCallbackHandler((name) => {
+  it("journals a thrown Error as the exception Python saw, so the call isn't re-run", async () => {
+    handler = ((name) => {
       calls.push(name);
       throw new Error("charge failed after side effects");
     });
-    const code = `await fetch(id=1)`;
+    const code = `
+try:
+    await fetch(id=1)
+except RuntimeError as e:
+    print("caught", e)
+`;
     const first = await executeWithJournal(code);
-    expect(first.error?.message).toBe("charge failed after side effects");
-    expect(entries(first.journal)[0]).toMatchObject({
-      result: { Err: "charge failed after side effects" },
-      thrown: true,
-    });
+    expect(first.result?.stdout).toBe("caught Error: charge failed after side effects\n");
+    expect(entries(first.journal)[0]).toEqual(
+      expect.objectContaining({ result: { Err: "Error: charge failed after side effects" } }),
+    );
+    expect(entries(first.journal)[0].thrown).toBeUndefined();
 
     calls = [];
     const second = await executeWithJournal(code, { journal: first.journal });
-    // Replay halts the guest the same way, without calling the handler.
-    expect(second.error?.message).toBe("charge failed after side effects");
+    expect(second.result?.stdout).toBe(first.result?.stdout);
     expect(second.replayedCallbacks).toBe(1);
+    expect(calls).toEqual([]);
+  });
+
+  it("still halts at a thrown Error recorded by an older journal", async () => {
+    const journal =
+      '{"code":"","entries":[{"index":0,"name":"fetch","args_hash":0,' +
+      '"args_json":"{\\"id\\":1}","result":{"Err":"charge failed"},"thrown":true}]}';
+    const outcome = await executeWithJournal(`await fetch(id=1)`, { journal });
+    expect(outcome.error?.message).toBe("charge failed");
+    expect(outcome.replayedCallbacks).toBe(1);
     expect(calls).toEqual([]);
   });
 
   it("suspends, then resumes from the recorded journal", async () => {
     let approved = false;
-    setCallbackHandler((name, argsJson) => {
+    handler = ((name) => {
       calls.push(name);
       if (name === "approve" && !approved) {
         throw new SuspendCallback("awaiting approval");
       }
-      return name === "approve" ? '"yes"' : JSON.stringify({ v: 10 });
+      return name === "approve" ? "yes" : { v: 10 };
     });
     const code = `
 a = await fetch(id=1)
@@ -253,10 +270,10 @@ print("after", ok)
   });
 
   it("halts the guest so nothing runs after a suspension", async () => {
-    setCallbackHandler((name) => {
+    handler = ((name) => {
       calls.push(name);
       if (name === "approve") throw new SuspendCallback("later");
-      return "{}";
+      return {};
     });
     const outcome = await executeWithJournal(`
 try:
@@ -283,10 +300,10 @@ await fetch(id=1)
   it("queues executions that overlap a journaled run", async () => {
     let release!: () => void;
     const gate = new Promise<void>((resolve) => (release = resolve));
-    setCallbackHandler(async (name, argsJson) => {
-      calls.push(`${name} ${argsJson}`);
+    handler = (async (name, args) => {
+      calls.push(`${name} ${JSON.stringify(args)}`);
       if (calls.length === 1) await gate;
-      return JSON.stringify({ v: JSON.parse(argsJson).id * 10 });
+      return { v: args.id * 10 };
     });
 
     const order: string[] = [];
@@ -318,10 +335,10 @@ await fetch(id=1)
   it("queues a journaled run behind a plain execution", async () => {
     let release!: () => void;
     const gate = new Promise<void>((resolve) => (release = resolve));
-    setCallbackHandler(async (name, argsJson) => {
-      calls.push(`${name} ${argsJson}`);
+    handler = (async (name, args) => {
+      calls.push(`${name} ${JSON.stringify(args)}`);
       if (calls.length === 1) await gate;
-      return JSON.stringify({ v: JSON.parse(argsJson).id * 10 });
+      return { v: args.id * 10 };
     });
 
     const running = execute(`await fetch(id=9)`);

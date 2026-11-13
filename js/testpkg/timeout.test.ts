@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { createServer } from "node:net";
 import type { AddressInfo } from "node:net";
-import { Sandbox, TimeoutError, setNetConfig } from "@bsull/eryx";
+import { Sandbox, TimeoutError, setNetConfig } from "@eryx-org/eryx";
 
 describe("timeoutMs", () => {
   it("rejects a call that runs too long, then starts fresh", async () => {
@@ -26,8 +26,7 @@ describe("timeoutMs", () => {
     const chunks: string[] = [];
     const sandbox = new Sandbox({
       timeoutMs: 10_000,
-      callbacks: [{ name: "double", description: "Double a number" }],
-      callbackHandler: async (_name, argsJson) => JSON.stringify(JSON.parse(argsJson).n * 2),
+      callbacks: { double: { description: "Double a number", handler: async ({ n }) => n * 2 } },
       outputHandler: (_stream, data) => chunks.push(data),
     });
     await sandbox.execute("n = 21");
