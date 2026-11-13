@@ -9,7 +9,7 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "@bytecodealliance/jco": "1.41.0",
+    "@bytecodealliance/jco": "1.42.0",
     "@bytecodealliance/preview2-shim": "^0.31.0",
     "@eryx-org/eryx": "file:../eryx",
     "fzstd": "^0.1.1"
