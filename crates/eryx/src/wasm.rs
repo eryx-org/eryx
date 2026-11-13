@@ -3323,6 +3323,11 @@ impl PythonExecutor {
             .map_err(|e| ErrorKind::WasmEngine(format!("Failed to add sandbox to linker: {e}")))?;
         tracing::debug!("Sandbox bindings added successfully");
 
+        // SPIKE: child processes for the shell guest. Guests that don't import
+        // `eryx:process` (the Python guest) never see it.
+        crate::process::add_to_linker(&mut linker)
+            .map_err(|e| ErrorKind::WasmEngine(format!("Failed to add process to linker: {e}")))?;
+
         // Create pre-instantiated component
         // This validates that all imports are satisfied and prepares for fast instantiation
         let instance_pre = linker

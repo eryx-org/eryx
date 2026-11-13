@@ -1,6 +1,8 @@
 [workspace]
 resolver = "2"
 members = ["crates/*"]
+# SPIKE: its own workspace (brush git dep), built for wasm32-wasip2 only.
+exclude = ["crates/eryx-shell-wasm-runtime"]
 
 # Dev tools (install via cargo or mise):
 # - cargo-nextest: Fast test runner (`cargo nextest run`)

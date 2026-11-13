@@ -1,0 +1,59 @@
+[package]
+name = "eryx-shell-wasm-runtime"
+version = "0.0.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+description = "SPIKE: WASM guest runtime for eryx sandbox - implements the eryx WIT exports with brush (bash)"
+publish = false
+
+# SPIKE: standalone workspace so brush's git dependency stays out of eryx's
+# Cargo.lock and native `cargo clippy --workspace` never builds it. Built
+# straight to a component with `cargo build --target wasm32-wasip2 --release`.
+[workspace]
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+# Same pinned fork as conch (adds the WASI external-command spawn handler).
+brush-core = { git = "https://github.com/sd2k/brush", rev = "94f4a936badaa16223cf736418f7b87c153ea960", default-features = false, features = ["serde"] }
+brush-builtins = { git = "https://github.com/sd2k/brush", rev = "94f4a936badaa16223cf736418f7b87c153ea960", default-features = false, features = [
+    "builtin.echo",
+    "builtin.printf",
+    "builtin.true",
+    "builtin.false",
+    "builtin.test",
+    "builtin.pwd",
+    "builtin.cd",
+    "builtin.export",
+    "builtin.set",
+    "builtin.unset",
+    "builtin.read",
+    "builtin.declare",
+    "builtin.shift",
+    "builtin.return",
+    "builtin.exit",
+    "builtin.break",
+    "builtin.continue",
+    "builtin.colon",
+    "builtin.dot",
+    "builtin.eval",
+    "builtin.exec",
+    "builtin.type",
+    "builtin.command",
+    "builtin.alias",
+    "builtin.unalias",
+    "builtin.let",
+    "builtin.getopts",
+    "builtin.trap",
+    "builtin.shopt",
+] }
+serde_json = "1"
+tokio = { version = "1", features = ["rt", "sync"] }
+wit-bindgen = "0.57"
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+strip = true

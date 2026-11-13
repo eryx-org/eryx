@@ -1,0 +1,37 @@
+package eryx:process@0.1.0;
+
+/// SPIKE: spawn host-registered WASI command components as child processes.
+///
+/// Same shape as conch's `conch:shell/process`, so the brush spawn handler is
+/// unchanged. Children run in batch: stdin is buffered until `wait`, the child
+/// runs to completion inside `wait`, then its output can be read.
+interface process {
+    enum process-error {
+        /// No component is registered under that command name.
+        command-not-found,
+        /// The component could not be instantiated or run.
+        spawn-failed,
+        /// The handle was used out of order (e.g. stdin written after close).
+        io-error,
+    }
+
+    resource child {
+        spawn: static func(
+            cmd: string,
+            args: list<string>,
+            env: list<tuple<string, string>>,
+            cwd: string,
+        ) -> result<child, process-error>;
+        write-stdin: func(data: list<u8>) -> result<u64, process-error>;
+        close-stdin: func();
+        read-stdout: func(max-bytes: u32) -> result<list<u8>, process-error>;
+        read-stderr: func(max-bytes: u32) -> result<list<u8>, process-error>;
+        wait: func() -> result<s32, process-error>;
+    }
+}
+
+/// Host side: links just the process interface next to `eryx:sandbox`.
+world spawner {
+    import process;
+}
+

@@ -435,6 +435,7 @@ impl HybridDescriptor {
 }
 
 /// Configuration for a preopen directory.
+#[derive(Clone)]
 pub enum HybridPreopen {
     /// A VFS-managed preopen (virtual storage).
     Vfs {
@@ -616,6 +617,19 @@ impl<S: VfsStorage + Clone> HybridVfsCtx<S> {
             open_host_files: Vec::new(),
             max_open_host_files: DEFAULT_MAX_OPEN_HOST_FILES,
             process_budget: &PROCESS_HOST_FILES,
+        }
+    }
+
+    /// A context for a child process: the same storages and preopens, so the
+    /// child sees the parent's files, but its own open-host-file count.
+    #[must_use]
+    pub fn fork(&self) -> Self {
+        Self {
+            storages: self.storages.clone(),
+            preopens: self.preopens.clone(),
+            open_host_files: Vec::new(),
+            max_open_host_files: self.max_open_host_files,
+            process_budget: self.process_budget,
         }
     }
 
