@@ -50,10 +50,9 @@ fn assert_memory_limit_error(error: Error) {
 
 /// Assert that a guest write was rejected by a VFS quota.
 ///
-/// [`eryx::vfs`] documents `QuotaExceeded` as guest-visible `ENOSPC`, but the
-/// rejection currently reaches CPython's close path as a generic `OSError`.
-/// This asserts only that the write failed, because the errno classification is
-/// pre-existing behavior unrelated to limit propagation.
+/// `QuotaExceeded` reaches guests as `ENOSPC` for positional writes but as `EIO`
+/// for stream writes (eryx-org/eryx#762), so this asserts only that the write
+/// failed with an `OSError`.
 #[cfg(feature = "unstable-vfs")]
 fn assert_vfs_quota_rejected(error: &Error) {
     assert!(
