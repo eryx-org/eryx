@@ -14,6 +14,7 @@ import { after, describe, test } from "node:test";
 import { type WebSocket, WebSocketServer } from "ws";
 
 import * as eryx from "../src/index.ts";
+import * as shared from "../src/shared.ts";
 import { answer, mounts } from "../src/mounts.ts";
 
 const KEY = "eryx_test_key";
@@ -493,4 +494,16 @@ describe("volumes", () => {
     ];
     assert.throws(() => new eryx.Sandbox({ apiKey: KEY, volumes: twice }), /two volumes/);
   });
+});
+
+test("/shared has the classes runs throw, without the client", async () => {
+  for (const name of ["EryxError", "ExecutionError", "PythonExceptionError", "ResourceLimitError", "TimeoutError"] as const) {
+    assert.equal(shared[name], eryx[name], name);
+  }
+  // What a browser bundle of @eryx-org/eryx pulls in
+  const { readFile } = await import("node:fs/promises");
+  for (const file of ["shared.ts", "errors.ts", "types.ts"]) {
+    const source = await readFile(new URL(`../src/${file}`, import.meta.url), "utf8");
+    assert.doesNotMatch(source, /from "(node:|\.\/(client|mounts|sandbox|volumes))/, file);
+  }
 });

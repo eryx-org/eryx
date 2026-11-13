@@ -139,6 +139,15 @@ npm install && npm run build
 ERYX_API_KEY=eryx_... node examples/callbacks.ts
 ```
 
+## Shared types
+
+`@eryx-org/eryx-run/shared` has the errors runs throw (`PythonExceptionError`,
+`TimeoutError`, ...) and the `ExecuteResult` and `Callbacks` types, without
+the client, so it loads in a browser.
+[`@eryx-org/eryx`](https://www.npmjs.com/package/@eryx-org/eryx), which runs
+sandboxes in your own process, uses them too: code written against them, and
+`instanceof` checks, work with either.
+
 ## Development
 
 ```sh

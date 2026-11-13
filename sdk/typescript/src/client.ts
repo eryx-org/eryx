@@ -16,63 +16,15 @@ import {
   TimeoutError,
   apiError,
 } from "./errors.ts";
+import type { Callbacks, ExecuteResult, Json } from "./types.ts";
 import type { Volume } from "./volumes.ts";
+
+export type { CallbackHandler, Callbacks, ExecuteResult } from "./types.ts";
 
 export const DEFAULT_URL = "https://api.eryx.run";
 
 /** The `/v1/stream` protocol version this client speaks */
 export const PROTOCOL = "eryx.v1";
-
-/**
- * The result of a run, with the same fields as `@bsull/eryx`'s
- * `ExecuteResult` plus the run's stats and a few only eryx.run has
- * (`networkBytes`, `traceId`, `unsavedVariables`).
- */
-export interface ExecuteResult {
-  /** What the code printed to stdout. */
-  stdout: string;
-  /** What the code printed to stderr. */
-  stderr: string;
-  /** The code's `result` variable, parsed from JSON, or `undefined` if it wasn't set. */
-  result?: unknown;
-  /** The JSON of the code's `result` variable, or `undefined` if it wasn't set. */
-  resultJson?: string;
-  /** Why `result` couldn't be captured (e.g. not JSON-serializable). */
-  resultError?: string;
-  /**
-   * Whether a session lost its state before this run. eryx.run sessions never
-   * do: each run restores the saved state into a fresh sandbox.
-   */
-  stateWasReset: boolean;
-  /** How long the run took, in milliseconds. */
-  durationMs: number;
-  /** How many callback calls the code made. */
-  callbackInvocations: number;
-  /** Peak memory the sandbox used, in bytes. */
-  peakMemoryBytes?: number;
-  /** Fuel (WebAssembly instructions) the run used: eryx.run's compute units. */
-  fuelConsumed?: number;
-  /** Bytes the run sent and received over the network. */
-  networkBytes?: number;
-  /** The run's trace, when it was traced (runs over the stream). */
-  traceId?: string;
-  /** Session variables that couldn't be saved. */
-  unsavedVariables: string[];
-}
-
-/**
- * A function sandboxed code can `await`, called with its keyword arguments.
- * It may return a promise; what it returns must be JSON. If it throws, the
- * code gets a `RuntimeError`. (`any`, so a handler can destructure the
- * arguments without declaring their types.)
- */
-export type CallbackHandler = (args: Record<string, any>) => unknown;
-
-/**
- * Callbacks by the name the code calls them by: a function, or one with a
- * description, which the code sees in `list_callbacks()`.
- */
-export type Callbacks = Record<string, CallbackHandler | { handler: CallbackHandler; description?: string }>;
 
 /** A `WebSocket` constructor that takes headers, as Node.js's, Bun's and `ws`'s do. */
 export type WebSocketConstructor = new (
@@ -96,7 +48,6 @@ export interface ConnectionOptions {
   WebSocket?: WebSocketConstructor;
 }
 
-type Json = Record<string, unknown>;
 
 function env(name: string): string | undefined {
   return (globalThis as { process?: { env: Record<string, string | undefined> } }).process?.env[name];
