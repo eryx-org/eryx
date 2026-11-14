@@ -1,0 +1,35 @@
+# Build manifest for the GitHub CLI (`gh`) as a WASI component.
+# Built by `mise run build-cli -- gh`, which needs the wasip3 Go fork
+# (scripts/bootstrap-go-wasip3.sh, or set ERYX_GO_WASIP3_ROOT).
+#
+# The fork targets WASI 0.3.0-rc-2026-03-15, which wasmtime 44 implements but
+# eryx's wasmtime doesn't, so CI smoke-tests gh under a wasmtime 44 CLI and gh
+# can't run inside eryx until the fork moves to a WASI 0.3 release (#829).
+
+name = "gh"
+description = "GitHub CLI"
+lang = "go"
+
+[source]
+repo = "https://github.com/cli/cli.git"
+ref = "v2.87.3"
+# Local working copy the driver builds from; fetched on first build.
+dir = "scratch/gh-cli"
+
+[build]
+# Go package to build, relative to the source dir.
+package = "./cmd/gh"
+# Script applied after `go mod vendor` to stub out wasip3-incompatible code.
+vendor_patch = "clis/patches/patch-gh-vendor.sh"
+
+[component]
+# wasm-tools component world to embed.
+world = "command"
+
+[cwasm]
+# Loaded as a plain component; the host compiles it on demand.
+enabled = false
+
+[output]
+# Where the built component (and optional cwasm) is written.
+dir = "scratch/gh-component"

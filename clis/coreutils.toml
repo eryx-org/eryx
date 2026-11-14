@@ -1,0 +1,48 @@
+# Build manifest for uutils coreutils as a multicall WASI (wasip2) component,
+# via the Rust lane. Built by `mise run build-cli -- coreutils`.
+#
+# The one component is a multicall binary: registered under each util name
+# (head, cat, …), the host sets argv[0]=<name> so it dispatches to that util.
+# A precompiled cwasm matters: loading the .wasm recompiles the ~5MB module on
+# every spawn (~141ms vs ~8ms for the cwasm). The host must treat wasi:cli/exit
+# as a normal exit, since uutils calls exit().
+#
+# `mkdir -p` walks up from `/`, so it fails unless `/` is statable, i.e. some
+# preopen covers it (#832).
+
+name = "coreutils"
+description = "uutils coreutils (Rust, wasip2, multicall)"
+lang = "rust"
+
+[source]
+repo = "https://github.com/uutils/coreutils.git"
+ref = "0.9.0"
+# Local working copy the driver builds from; fetched on first build.
+dir = "scratch/uutils"
+
+[build]
+# Multicall binary; the artifact is coreutils.wasm.
+bin = "coreutils"
+# uucore uses unstable std::os::wasi on wasip2 — add #![feature(wasip2)].
+vendor_patch = "clis/patches/patch-uucore-wasip2.sh"
+# The utils that replace the shell builtins, plus the `sort` gap. Keep the set
+# tight: each util can pull wasi-incompatible deps.
+cargo_flags = [
+    "--no-default-features",
+    "--features",
+    "cat,head,tail,ls,wc,cp,mv,rm,mkdir,touch,sort",
+]
+# Let the pinned stable toolchain use the unstable wasip2 feature.
+[build.env]
+RUSTC_BOOTSTRAP = "1"
+
+[cwasm]
+# Precompile to cwasm: mandatory for acceptable per-spawn cost. The flags match
+# the eryx engine, which enables component-model async. This cwasm comes from
+# the mise-pinned wasmtime CLI and only proves the lane; eryx will load
+# commands precompiled with its own engine config and version stamp (#809).
+enabled = true
+flags = ["-W", "component-model-async"]
+
+[output]
+dir = "scratch/coreutils-component"

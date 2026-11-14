@@ -1183,6 +1183,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "eryx-build"
+version = "0.15.0"
+dependencies = [
+ "anyhow",
+ "serde",
+ "toml",
+]
+
+[[package]]
 name = "eryx-linker-wasm"
 version = "0.15.0"
 dependencies = [
