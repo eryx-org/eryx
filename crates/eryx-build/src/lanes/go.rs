@@ -1,9 +1,8 @@
 //! Go lane: builds a CLI to wasip3 using the experimental Go fork, then
 //! componentizes with `wasm-tools`.
 //!
-//! The fork targets the WASI 0.3.0-rc-2026-03-15 snapshot, which wasmtime 44
-//! implements but eryx's wasmtime does not, so these components can't run
-//! inside eryx until the fork moves to a WASI 0.3 release (#829).
+//! The fork targets WASI 0.3.0, as implemented by the wasmtime version eryx
+//! uses. Its repo and commit are pinned in `scripts/bootstrap-go-wasip3.sh`.
 //!
 //! Toolchain inputs (not per-CLI, so sourced from the environment):
 //! - `ERYX_GO_WASIP3_ROOT` — GOROOT of the wasip3 Go fork
@@ -74,15 +73,18 @@ pub fn build(manifest: &Manifest) -> Result<()> {
         "=== [{}] Step 3: compile to wasm32 (wasip3) ===",
         manifest.name
     );
+    let ldflags = manifest
+        .build
+        .ldflags
+        .replace("{ref}", &manifest.source.git_ref);
+    let mut args = vec!["build", "-mod=vendor", "-o", &out_wasm_s];
+    if !ldflags.is_empty() {
+        args.extend(["-ldflags", &ldflags]);
+    }
+    args.push(&manifest.build.package);
     run(
         &go_bin_s,
-        &[
-            "build",
-            "-mod=vendor",
-            "-o",
-            &out_wasm_s,
-            &manifest.build.package,
-        ],
+        &args,
         &source_dir,
         &[
             ("GOROOT", &goroot_s),

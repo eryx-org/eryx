@@ -2,9 +2,9 @@
 # Built by `mise run build-cli -- gh`, which needs the wasip3 Go fork
 # (scripts/bootstrap-go-wasip3.sh, or set ERYX_GO_WASIP3_ROOT).
 #
-# The fork targets WASI 0.3.0-rc-2026-03-15, which wasmtime 44 implements but
-# eryx's wasmtime doesn't, so CI smoke-tests gh under a wasmtime 44 CLI and gh
-# can't run inside eryx until the fork moves to a WASI 0.3 release (#829).
+# At runtime gh needs a real (non-symlinked) /etc/resolv.conf, a CA bundle
+# (SSL_CERT_FILE or certs under /etc), and the component-model async flags
+# that clis/smoke.sh passes.
 
 name = "gh"
 description = "GitHub CLI"
@@ -23,6 +23,8 @@ dir = "scratch/gh-cli"
 package = "./cmd/gh"
 # Script applied after `go mod vendor` to stub out wasip3-incompatible code.
 vendor_patch = "clis/patches/patch-gh-vendor.sh"
+# Report the pinned release instead of `DEV`.
+ldflags = "-X github.com/cli/cli/v2/internal/build.Version={ref}"
 
 [component]
 # wasm-tools component world to embed.

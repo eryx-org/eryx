@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Bootstrap the pinned wasip3 Go toolchain (our controlled fork of
-# jellevandenhooff/go, ported to the WASI 0.3.0-rc-2026-03-15 snapshot that
-# wasmtime 44.x implements). Clones + builds it from source, then prints the
+# jellevandenhooff/go, ported to WASI 0.3.0 as implemented by the wasmtime
+# version eryx uses). Clones + builds it from source, then prints the
 # resulting GOROOT on the last line so callers can `export ERYX_GO_WASIP3_ROOT`.
 #
 # Building from source takes a few minutes; CI caches the output keyed on this
@@ -13,8 +13,8 @@ set -euo pipefail
 
 # --- Pinned toolchain (bump these together when moving the fork) ---
 GO_WASIP3_REPO="https://github.com/sd2k/go.git"
-GO_WASIP3_REF="wasip3-2026-03-15"
-GO_WASIP3_COMMIT="7c4c157c7add7b25cdb485e87b8246ae9028ff81"
+GO_WASIP3_REF="wasip3-0.3.0"
+GO_WASIP3_COMMIT="88b3f713bdc9a5e3fcb3fc7e7c222e92bf6af17d"
 
 DEST="${1:-scratch/go-wasip3}"
 

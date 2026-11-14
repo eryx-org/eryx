@@ -160,6 +160,10 @@ pub struct Build {
     /// (e.g. `src/curl`); copied to `<output>/component.wasm`.
     #[serde(default)]
     pub artifact: Option<PathBuf>,
+    /// Go lane: `go build -ldflags` value. `{ref}` is replaced with the
+    /// source's pinned ref, e.g. to stamp the version a CLI reports.
+    #[serde(default)]
+    pub ldflags: String,
     /// Rust lane: cargo binary to build (`cargo build --bin <bin>`); the wasm
     /// artifact is `<bin>.wasm`. Required for the Rust lane.
     #[serde(default)]

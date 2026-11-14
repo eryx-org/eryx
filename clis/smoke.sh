@@ -50,10 +50,22 @@ curl)
         -sSI --cacert /certs/ca.crt https://example.com)" " 200"
     ;;
 gh)
-    # The Go fork targets WASI 0.3.0-rc-2026-03-15, which only wasmtime 44
-    # implements (see clis/gh.toml).
-    expect "$(mise exec aqua:bytecodealliance/wasmtime@44.0.3 -- wasmtime run \
-        -S p3 -W component-model-async "$OUT/component.wasm" --version)" "gh version 2.87.3"
+    # gh resolves names itself, so it needs the real resolv.conf (WASI won't
+    # follow the usual symlink) and a CA bundle under /etc.
+    mkdir -p "$WORK/etc" "$WORK/home"
+    cp "$(readlink -f /etc/resolv.conf)" "$WORK/etc/resolv.conf"
+    cp "$(readlink -f /etc/ssl/certs/ca-certificates.crt)" "$WORK/etc/ca-certificates.crt"
+    ghw() {
+        wasmtime run -S p3 -W component-model-async -W component-model-more-async-builtins \
+            -W max-wasm-stack=8388608 -S tcp -S udp -S inherit-network -S allow-ip-name-lookup \
+            --dir "$WORK/etc::/etc" --dir "$WORK/home::/home/gh" \
+            --env HOME=/home/gh --env SSL_CERT_FILE=/etc/ca-certificates.crt \
+            --env GH_NO_UPDATE_NOTIFIER=1 --env TERM=dumb "$@" 2>&1
+    }
+    expect "$(ghw "$OUT/component.wasm" --version)" "gh version 2.87.3"
+    # A placeholder token gets a real 401 from api.github.com: DNS, TCP and TLS
+    # all work, and no secret is needed.
+    expect "$(ghw --env GH_TOKEN=placeholder "$OUT/component.wasm" api /zen)" "HTTP 401"
     ;;
 *)
     echo "no smoke test for '$NAME'" >&2

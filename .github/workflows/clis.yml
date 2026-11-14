@@ -189,7 +189,7 @@ jobs:
       - uses: jdx/mise-action@d5574b52816a478f9d4e6529a3f6ff17a8a36785 # v5.2.8
         with:
           version: 2026.11.5
-          install_args: rust cargo:wasm-tools
+          install_args: rust cargo:wasm-tools aqua:bytecodealliance/wasmtime
           cache: false
       # Building the fork from source takes ~10 minutes; key it on the script,
       # which pins the fork's commit.
