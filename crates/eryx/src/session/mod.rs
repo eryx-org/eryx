@@ -51,12 +51,19 @@ use crate::error::Error;
 use crate::sandbox::ExecuteResult;
 
 pub use executor::{
-    DEFAULT_STATE_OP_TIMEOUT, MIN_STATE_OP_FUEL, MIN_STATE_OP_TIMEOUT, PythonStateSnapshot,
-    SessionExecutor, SnapshotMetadata,
+    DEFAULT_STATE_OP_TIMEOUT, MIN_STATE_OP_FUEL, MIN_STATE_OP_TIMEOUT, SessionExecutor,
+    SnapshotMetadata, StateSnapshot,
 };
 #[cfg(feature = "unstable-vfs")]
 pub use executor::{VfsConfig, VolumeMount, VolumeSource};
 pub use in_process::InProcessSession;
+
+/// Deprecated name for [`StateSnapshot`].
+#[deprecated(
+    since = "0.16.0",
+    note = "renamed to `StateSnapshot` now that eryx runs more than one guest language"
+)]
+pub type PythonStateSnapshot = StateSnapshot;
 
 /// Keeps [`Session`] from being implemented outside this crate.
 pub(crate) mod sealed {

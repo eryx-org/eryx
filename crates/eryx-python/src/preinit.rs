@@ -298,8 +298,8 @@ fn build_component(
         // A factory saved by pyeryx records neither; a bundle from
         // `eryx-precompile compile` may.
         let precompiled = match (&recipe.target, recipe.cpu_features) {
-            (None, None) => eryx::PythonExecutor::precompile(&preinit_bytes),
-            (target, cpu_features) => eryx::PythonExecutor::precompile_with_options(
+            (None, None) => eryx::Executor::precompile(&preinit_bytes),
+            (target, cpu_features) => eryx::Executor::precompile_with_options(
                 &preinit_bytes,
                 target.as_deref(),
                 cpu_features.unwrap_or_default(),
@@ -609,14 +609,14 @@ impl SandboxFactory {
         on_stderr: Option<Py<PyAny>>,
         result_variable: Option<String>,
     ) -> PyResult<Session> {
-        // SAFETY: the bytes were produced by `PythonExecutor::precompile` or
+        // SAFETY: the bytes were produced by `Executor::precompile` or
         // loaded from a factory file created by this same API.
         let mut executor = unsafe { self.precompiled.to_executor() }.map_err(|e| {
             InitializationError::new_err(format!("failed to load factory runtime: {e}"))
         })?;
-        executor = executor.with_python_stdlib(&self.stdlib_path);
+        executor = executor.with_stdlib(&self.stdlib_path);
         if let Some(path) = &self.site_packages_path {
-            executor = executor.with_site_packages(path);
+            executor = executor.with_library_path(path);
         }
         if let Some(name) = result_variable {
             executor = executor.with_result_variable(name);
@@ -714,17 +714,17 @@ impl SandboxFactory {
 
         // Build sandbox from precompiled bytes. Trace collection (sys.settrace)
         // is always off for Python sandboxes; see `Sandbox::new`.
-        // SAFETY: The precompiled bytes were created by PythonExecutor::precompile()
+        // SAFETY: The precompiled bytes were created by Executor::precompile()
         // from a valid WASM component, so they are safe to deserialize.
         let mut builder = unsafe {
             eryx::Sandbox::builder()
                 .with_precompiled_artifact(self.precompiled.clone())
-                .with_python_stdlib(&self.stdlib_path)
+                .with_stdlib(&self.stdlib_path)
                 .with_trace_collection(false)
         };
 
         if let Some(path) = site_packages_path {
-            builder = builder.with_site_packages(path);
+            builder = builder.with_library_path(path);
         }
 
         if let Some(limits) = resource_limits {
@@ -886,16 +886,16 @@ impl SandboxFactory {
         let scrub_files = scrub_files.unwrap_or(has_secrets);
 
         let builder_fn = move || {
-            // SAFETY: the bytes were produced by `PythonExecutor::precompile`
+            // SAFETY: the bytes were produced by `Executor::precompile`
             // or loaded from a factory file created by the same API.
             let mut builder = unsafe {
                 eryx::Sandbox::builder()
                     .with_precompiled_artifact(precompiled.clone())
-                    .with_python_stdlib(&stdlib_path)
+                    .with_stdlib(&stdlib_path)
                     .with_trace_collection(false)
             };
             if let Some(ref path) = site_packages_path {
-                builder = builder.with_site_packages(path);
+                builder = builder.with_library_path(path);
             }
             if let Some(ref net) = network {
                 builder = builder.with_network(net.clone());

@@ -51,6 +51,8 @@ struct ExecuteOutput {
 struct ExecuteError {
     #[component(name = "message")]
     message: String,
+    #[component(name = "exit-code")]
+    exit_code: Option<i32>,
     #[component(name = "stdout")]
     stdout: Vec<u8>,
     #[component(name = "stderr")]
@@ -69,8 +71,8 @@ impl std::fmt::Display for ExecuteError {
 struct StateSnapshot {
     #[component(name = "data")]
     data: Vec<u8>,
-    #[component(name = "skipped-globals")]
-    skipped_globals: Vec<String>,
+    #[component(name = "skipped")]
+    skipped: Vec<String>,
 }
 
 struct State {
@@ -400,7 +402,7 @@ async fn test_instantiate_component() -> Result<(), Box<dyn std::error::Error>> 
          _params: &[Val],
          results: &mut [Val]| {
             results[0] = Val::Record(vec![
-                ("python-tracing".to_string(), Val::Bool(true)),
+                ("tracing".to_string(), Val::Bool(true)),
                 ("reuse-empty-callbacks".to_string(), Val::Bool(false)),
             ]);
             Ok(())
@@ -539,6 +541,7 @@ async fn test_instantiate_component() -> Result<(), Box<dyn std::error::Error>> 
                 error.message.contains("SyntaxError") || error.message.contains("syntax"),
                 "Error should mention syntax: {error}"
             );
+            assert_eq!(error.exit_code, None, "Python failures have no exit code");
         }
     }
 
@@ -667,10 +670,7 @@ async fn test_instantiate_component() -> Result<(), Box<dyn std::error::Error>> 
         Ok(snapshot) => {
             println!("  OK: Snapshot taken, {} bytes", snapshot.data.len());
             assert!(!snapshot.data.is_empty(), "Snapshot should not be empty");
-            assert!(
-                snapshot.skipped_globals.is_empty(),
-                "Nothing should be skipped"
-            );
+            assert!(snapshot.skipped.is_empty(), "Nothing should be skipped");
             snapshot.data
         }
         Err(error) => {

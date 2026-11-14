@@ -65,7 +65,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     for (name, bytes) in &extensions {
         builder = builder.with_native_extension(name.clone(), bytes.clone());
     }
-    let builder = builder.with_site_packages(site_packages);
+    let builder = builder.with_library_path(site_packages);
     // SAFETY: the cache directory was just recreated by this process and
     // FilesystemCache::new checks only this user can write to it.
     let sandbox = unsafe { builder.with_cache_dir(cache_dir)? }.build()?;
@@ -126,7 +126,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         for (name, bytes) in &extensions {
             builder = builder.with_native_extension(name.clone(), bytes.clone());
         }
-        let builder = builder.with_site_packages(site_packages);
+        let builder = builder.with_library_path(site_packages);
         // SAFETY: the cache directory was just recreated by this process and
         // FilesystemCache::new checks only this user can write to it.
         let _sandbox = unsafe { builder.with_cache_dir(cache_dir)? }.build()?;

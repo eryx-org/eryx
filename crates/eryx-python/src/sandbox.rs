@@ -420,10 +420,10 @@ pub(crate) fn run_cancellable(
 ///
 /// Expected format: `{"NAME": {"value": "secret", "allowed_hosts": ["host.com"]}}`
 /// The `allowed_hosts` key is optional and defaults to an empty list.
-pub(crate) fn apply_secrets<R, S>(
-    mut builder: eryx::SandboxBuilder<R, S>,
+pub(crate) fn apply_secrets<R>(
+    mut builder: eryx::SandboxBuilder<R>,
     secrets_dict: &Bound<'_, PyDict>,
-) -> PyResult<eryx::SandboxBuilder<R, S>> {
+) -> PyResult<eryx::SandboxBuilder<R>> {
     for (name, value, allowed_hosts) in extract_secrets(secrets_dict)? {
         builder = builder.with_secret(name, value, allowed_hosts);
     }

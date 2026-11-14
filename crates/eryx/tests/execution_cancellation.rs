@@ -25,7 +25,7 @@ fn runtime_wasm_path() -> PathBuf {
 }
 
 #[cfg(not(feature = "embedded"))]
-fn python_stdlib_path() -> PathBuf {
+fn stdlib_path() -> PathBuf {
     // Check ERYX_PYTHON_STDLIB env var first (used in CI)
     if let Ok(path) = std::env::var("ERYX_PYTHON_STDLIB") {
         let path = PathBuf::from(path);
@@ -45,7 +45,7 @@ fn python_stdlib_path() -> PathBuf {
 }
 
 /// Create a sandbox builder with the appropriate WASM source.
-fn sandbox_builder() -> eryx::SandboxBuilder<eryx::state::Has, eryx::state::Has> {
+fn sandbox_builder() -> eryx::SandboxBuilder<eryx::state::Has> {
     // When embedded feature is available, use it (more reliable)
     #[cfg(feature = "embedded")]
     {
@@ -55,17 +55,16 @@ fn sandbox_builder() -> eryx::SandboxBuilder<eryx::state::Has, eryx::state::Has>
     // Fallback to explicit paths for testing without embedded feature
     #[cfg(not(feature = "embedded"))]
     {
-        let stdlib_path = python_stdlib_path();
+        let stdlib_path = stdlib_path();
         Sandbox::builder()
             .with_wasm_file(runtime_wasm_path())
-            .with_python_stdlib(&stdlib_path)
+            .with_stdlib(&stdlib_path)
     }
 }
 
 /// Create a sandbox builder with a short execution timeout for cancellation tests.
 /// This ensures tests don't hang for 30s if cancellation fails.
-fn sandbox_builder_with_short_timeout() -> eryx::SandboxBuilder<eryx::state::Has, eryx::state::Has>
-{
+fn sandbox_builder_with_short_timeout() -> eryx::SandboxBuilder<eryx::state::Has> {
     sandbox_builder().with_resource_limits(
         ResourceLimits::default().with_execution_timeout(Duration::from_secs(3)),
     )
@@ -299,7 +298,7 @@ async fn test_python_error_not_confused_with_cancellation() {
     assert!(result.is_err(), "Should fail with Python error");
     match result.map_err(Error::into_kind) {
         Err(ErrorKind::Cancelled) => panic!("Should not be Cancelled error"),
-        Err(ErrorKind::PythonException { traceback: msg, .. }) => {
+        Err(ErrorKind::ScriptFailed { message: msg, .. }) => {
             assert!(
                 msg.contains("ValueError") || msg.contains("test error"),
                 "Error should mention ValueError: {}",
@@ -321,7 +320,7 @@ async fn test_syntax_error_not_confused_with_cancellation() {
     assert!(result.is_err(), "Should fail with syntax error");
     match result.map_err(Error::into_kind) {
         Err(ErrorKind::Cancelled) => panic!("Should not be Cancelled error"),
-        Err(ErrorKind::PythonException { .. }) => {} // Expected: syntax error raises in-guest
+        Err(ErrorKind::ScriptFailed { .. }) => {} // Expected: syntax error raises in-guest
         Err(e) => panic!("Unexpected error type: {:?}", e),
         Ok(_) => panic!("Expected error, got success"),
     }
@@ -415,7 +414,7 @@ async fn test_sandbox_timeout_and_exception_report_stats() {
         .await
         .unwrap_err();
     assert!(
-        matches!(raised.kind(), ErrorKind::PythonException { .. }),
+        matches!(raised.kind(), ErrorKind::ScriptFailed { .. }),
         "{raised:?}"
     );
     assert!(

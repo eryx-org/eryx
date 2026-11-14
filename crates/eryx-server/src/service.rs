@@ -11,8 +11,8 @@ use eryx::callback_handler::{run_callback_handler, run_net_handler};
 use eryx::vfs::{ArcStorage, InMemoryStorage, VfsStorage};
 use eryx::{
     Callback, CallbackJournal, CallbackRequest, ConnectionManager, Error, ErrorKind, NetConfig,
-    NetRequest, OutputRequest, PythonStateSnapshot, ReplayState, ResourceLimits, SandboxPool,
-    SecretConfig, SessionExecutor, TraceRequest, VfsConfig, scrub_placeholders,
+    NetRequest, OutputRequest, ReplayState, ResourceLimits, SandboxPool, SecretConfig,
+    SessionExecutor, StateSnapshot, TraceRequest, VfsConfig, scrub_placeholders,
     scrub_placeholders_bytes,
 };
 use futures::FutureExt;
@@ -872,7 +872,7 @@ async fn execute_with_session(
 ) -> ExecuteResult {
     let start = Instant::now();
 
-    // Get the shared PythonExecutor and clone the configured callbacks from the sandbox.
+    // Get the shared Executor and clone the configured callbacks from the sandbox.
     let executor = sandbox.executor();
     let callbacks_ref = sandbox.callbacks();
 
@@ -952,7 +952,7 @@ async fn execute_with_session(
     let mut state_errors = Vec::new();
     if let Some(state_snapshot) = params.state.filter(|s| !s.is_empty()) {
         let restore_start = Instant::now();
-        let restored = match PythonStateSnapshot::from_bytes(state_snapshot) {
+        let restored = match StateSnapshot::from_bytes(state_snapshot) {
             Ok(snapshot) => session.restore_state(&snapshot).await,
             Err(e) => Err(e),
         };
@@ -1200,10 +1200,10 @@ async fn execute_with_session(
                 tracing::info!(
                     snapshot_bytes = bytes.len(),
                     snapshot_ms = snapshot_start.elapsed().as_millis() as u64,
-                    skipped_globals = ?snapshot.skipped_globals(),
+                    skipped_globals = ?snapshot.skipped(),
                     "state snapshot captured"
                 );
-                (bytes, snapshot.skipped_globals().to_vec())
+                (bytes, snapshot.skipped().to_vec())
             }
             Err(e) => {
                 tracing::warn!(
@@ -1295,7 +1295,7 @@ async fn execute_with_session(
             // error string ever interpolates user-derived input. (Secrets reach
             // Python only as placeholders, so this scrubs placeholders, never
             // real values; it is a no-op when no secrets are configured.)
-            let error = if failure_kind == FailureKind::ScriptException {
+            let error = if failure_kind == FailureKind::ScriptFailed {
                 String::new()
             } else {
                 scrub_placeholders(&e.to_string(), &params.secrets)
@@ -1390,15 +1390,15 @@ impl CappedOutput {
 
 /// Classify a library [`Error`] into the proto [`FailureKind`].
 ///
-/// [`ErrorKind::PythonException`] is a *script* failure — its traceback is surfaced
-/// in `stderr` — so it maps to [`FailureKind::ScriptException`].
+/// [`ErrorKind::ScriptFailed`] is a *script* failure — its traceback is surfaced
+/// in `stderr` — so it maps to [`FailureKind::ScriptFailed`].
 /// [`ErrorKind::Suspended`] is an expected control outcome (a callback deferred), not
 /// a failure, so it maps to [`FailureKind::Suspended`]; callers should branch on
 /// the `suspended` flag first. Everything else is a sandbox-level failure whose
 /// message belongs in the `error` field.
 fn classify_failure(error: &Error) -> FailureKind {
     match error.kind() {
-        ErrorKind::PythonException { .. } => FailureKind::ScriptException,
+        ErrorKind::ScriptFailed { .. } => FailureKind::ScriptFailed,
         ErrorKind::Timeout(_) => FailureKind::Timeout,
         ErrorKind::FuelExhausted { .. } => FailureKind::FuelExhausted,
         ErrorKind::Cancelled => FailureKind::Cancelled,

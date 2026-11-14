@@ -17,7 +17,7 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 #![cfg(all(target_arch = "x86_64", any(feature = "embedded", feature = "preinit")))]
 
-use eryx::{CpuFeatureLevel, PythonExecutor};
+use eryx::{CpuFeatureLevel, Executor};
 use wasmtime::{Config, Engine};
 
 /// Every psABI level, i.e. everything except `Native`.
@@ -94,7 +94,7 @@ fn precompiled_output_matches_a_target_pinned_reference() {
     let wasm = tiny_component();
 
     for &level in PINNED_LEVELS {
-        let actual = PythonExecutor::precompile_with_options(&wasm, None, level)
+        let actual = Executor::precompile_with_options(&wasm, None, level)
             .unwrap_or_else(|e| panic!("precompile at {level} failed: {e}"));
         let expected = reference_engine(level)
             .precompile_component(&wasm)
@@ -166,9 +166,9 @@ fn vnni_cannot_reach_a_portable_artifact() {
 fn a_feature_level_constrains_the_build() {
     let wasm = tiny_component();
 
-    let baseline = PythonExecutor::precompile_with_options(&wasm, None, CpuFeatureLevel::X86_64)
+    let baseline = Executor::precompile_with_options(&wasm, None, CpuFeatureLevel::X86_64)
         .expect("baseline precompile should succeed");
-    let native = PythonExecutor::precompile_with_options(&wasm, None, CpuFeatureLevel::Native)
+    let native = Executor::precompile_with_options(&wasm, None, CpuFeatureLevel::Native)
         .expect("native precompile should succeed");
 
     // Any x86-64 CPU new enough to run the test suite has something above SSE2,
@@ -187,7 +187,7 @@ fn a_feature_level_constrains_the_build() {
 fn native_is_not_pinned_to_a_level() {
     let wasm = tiny_component();
 
-    let native = PythonExecutor::precompile_with_options(&wasm, None, CpuFeatureLevel::Native)
+    let native = Executor::precompile_with_options(&wasm, None, CpuFeatureLevel::Native)
         .expect("native precompile should succeed");
 
     for &level in PINNED_LEVELS {
@@ -217,7 +217,7 @@ fn native_is_not_pinned_to_a_level() {
 /// target. That needs Cranelift's non-host backends, hence wasmtime's
 /// `all-arch` feature in dev-dependencies.
 mod aarch64 {
-    use super::{Config, CpuFeatureLevel, Engine, PythonExecutor, tiny_component};
+    use super::{Config, CpuFeatureLevel, Engine, Executor, tiny_component};
 
     const TARGET: &str = "aarch64-unknown-linux-gnu";
 
@@ -255,7 +255,7 @@ mod aarch64 {
         let wasm = tiny_component();
 
         let baseline =
-            PythonExecutor::precompile_with_options(&wasm, Some(TARGET), CpuFeatureLevel::Baseline)
+            Executor::precompile_with_options(&wasm, Some(TARGET), CpuFeatureLevel::Baseline)
                 .expect("aarch64 baseline precompile should succeed");
 
         let mut forced = pinned_config();
@@ -286,7 +286,7 @@ mod aarch64 {
         let wasm = tiny_component();
 
         let baseline =
-            PythonExecutor::precompile_with_options(&wasm, Some(TARGET), CpuFeatureLevel::Baseline)
+            Executor::precompile_with_options(&wasm, Some(TARGET), CpuFeatureLevel::Baseline)
                 .expect("aarch64 baseline precompile should succeed");
 
         let mut with_lse = pinned_config();
@@ -312,9 +312,8 @@ mod aarch64 {
     fn x86_levels_are_rejected_for_aarch64() {
         let wasm = tiny_component();
 
-        let err =
-            PythonExecutor::precompile_with_options(&wasm, Some(TARGET), CpuFeatureLevel::X86_64v2)
-                .expect_err("an x86-64 level should not apply to an aarch64 target");
+        let err = Executor::precompile_with_options(&wasm, Some(TARGET), CpuFeatureLevel::X86_64v2)
+            .expect_err("an x86-64 level should not apply to an aarch64 target");
 
         let msg = err.to_string();
         assert!(

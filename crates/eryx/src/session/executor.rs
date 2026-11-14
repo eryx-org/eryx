@@ -8,10 +8,10 @@
 //!
 //! The `SessionExecutor` wraps a `Store<ExecutorState>` and the instantiated
 //! component, keeping them alive between executions. This is in contrast to
-//! the regular `PythonExecutor` which creates a fresh Store for each execution.
+//! the regular `Executor` which creates a fresh Store for each execution.
 //!
 //! ```text
-//! Regular PythonExecutor:
+//! Regular Executor:
 //!   execute() -> new Store -> new Instance -> run -> drop Store
 //!   execute() -> new Store -> new Instance -> run -> drop Store
 //!   (Each call pays ~1.5ms Python init overhead)
@@ -51,10 +51,11 @@ use wasmtime_wasi::{FsPerms, WasiCtx, WasiCtxBuilder};
 
 use crate::callback::Callback;
 use crate::error::{Error, ErrorKind};
+use crate::language::Language;
 use crate::sandbox::ResourceLimits;
 use crate::wasm::{
-    CallbackRequest, ExecutionOutput, ExecutorState, FdOutput, HostCallbackInfo, MemoryTracker,
-    NetRequest, PythonExecutor, Sandbox as SandboxBindings, StreamBudget, TraceRequest,
+    CallbackRequest, ExecutionOutput, Executor, ExecutorState, FdOutput, HostCallbackInfo,
+    MemoryTracker, NetRequest, Sandbox as SandboxBindings, StreamBudget, TraceRequest,
 };
 
 /// Maximum snapshot size in bytes (10 MB).
@@ -68,8 +69,9 @@ pub const MAX_SNAPSHOT_SIZE: usize = 10 * 1024 * 1024;
 /// would be millions of years from now.
 const SNAPSHOT_MAGIC: &[u8; 8] = b"ERYXSNAP";
 
-/// The snapshot format [`PythonStateSnapshot::to_bytes`] writes.
-const SNAPSHOT_FORMAT_VERSION: u8 = 1;
+/// The snapshot format [`StateSnapshot::to_bytes`] writes. Version 1
+/// (eryx 0.15.0) had no language byte; its snapshots are all Python.
+const SNAPSHOT_FORMAT_VERSION: u8 = 2;
 
 /// The writer recorded in new snapshots.
 const SNAPSHOT_WRITER: &str = concat!("eryx ", env!("CARGO_PKG_VERSION"));
@@ -86,10 +88,11 @@ pub const MIN_STATE_OP_TIMEOUT: Duration = Duration::from_secs(5);
 /// loading the serializer costs.
 pub const MIN_STATE_OP_FUEL: u64 = 20_000_000_000;
 
-/// A snapshot of Python session state.
+/// A snapshot of a session's state.
 ///
-/// This captures all user-defined variables from the Python session,
-/// serialized using pickle. The snapshot can be:
+/// This captures the user-defined variables from the session (for Python,
+/// serialized using pickle), stamped with the guest language that wrote it.
+/// The snapshot can be:
 ///
 /// - Persisted to disk or a database
 /// - Sent over the network to another process
@@ -107,21 +110,28 @@ pub const MIN_STATE_OP_FUEL: u64 = 20_000_000_000;
 /// let bytes = snapshot.to_bytes();
 ///
 /// // Later, restore in a new session
-/// let snapshot = PythonStateSnapshot::from_bytes(&bytes)?;
+/// let snapshot = StateSnapshot::from_bytes(&bytes)?;
 /// new_session.restore_state(&snapshot).await?;
 /// new_session.execute("print(x + y)").run().await?; // prints "3"
 /// ```
 #[derive(Debug, Clone)]
-pub struct PythonStateSnapshot {
-    /// Pickled Python state bytes.
+pub struct StateSnapshot {
+    /// The guest's serialized state (for Python, pickle bytes).
     data: Vec<u8>,
 
     /// Metadata about when the snapshot was captured.
     metadata: SnapshotMetadata,
 
-    /// Globals left out because they could not be serialized.
-    skipped_globals: Vec<String>,
+    /// Variables left out because they could not be serialized.
+    skipped: Vec<String>,
 }
+
+/// Deprecated name for [`StateSnapshot`].
+#[deprecated(
+    since = "0.16.0",
+    note = "renamed to `StateSnapshot` now that eryx runs more than one guest language"
+)]
+pub type PythonStateSnapshot = StateSnapshot;
 
 /// Metadata about a state snapshot.
 #[derive(Debug, Clone)]
@@ -139,11 +149,18 @@ pub struct SnapshotMetadata {
     /// Restoring doesn't check it: whether a snapshot restores depends on the
     /// Python runtime and the state's contents, not only the eryx version.
     pub eryx_version: Option<String>,
+
+    /// The guest language whose session state this is. Snapshots from before
+    /// eryx 0.16.0 don't record it and are all [`Language::Python`].
+    ///
+    /// [`SessionExecutor::restore_state`] refuses a snapshot from another
+    /// language.
+    pub language: Language,
 }
 
-impl PythonStateSnapshot {
-    /// Create a new snapshot from raw pickle data.
-    fn new(data: Vec<u8>, skipped_globals: Vec<String>) -> Self {
+impl StateSnapshot {
+    /// Create a new snapshot of a `language` session's serialized state.
+    fn new(language: Language, data: Vec<u8>, skipped: Vec<String>) -> Self {
         let timestamp_ms = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map(|d| d.as_millis() as u64)
@@ -157,12 +174,13 @@ impl PythonStateSnapshot {
                 timestamp_ms,
                 size_bytes,
                 eryx_version: Some(SNAPSHOT_WRITER.to_string()),
+                language,
             },
-            skipped_globals,
+            skipped,
         }
     }
 
-    /// Get the raw pickle data.
+    /// Get the guest's serialized state (for Python, pickle bytes).
     #[must_use]
     pub fn data(&self) -> &[u8] {
         &self.data
@@ -180,23 +198,36 @@ impl PythonStateSnapshot {
         self.data.len()
     }
 
-    /// Names of the globals left out of the snapshot because they could not
-    /// be serialized (e.g. open sockets, generators). They raise `NameError`
-    /// after a restore.
+    /// The guest language whose session state this is.
+    #[must_use]
+    pub fn language(&self) -> Language {
+        self.metadata.language
+    }
+
+    /// Names of the variables left out of the snapshot because they could
+    /// not be serialized (e.g. open sockets, generators). In Python they
+    /// raise `NameError` after a restore.
     ///
     /// Not part of [`to_bytes`](Self::to_bytes), so always empty for a
     /// snapshot from [`from_bytes`](Self::from_bytes).
     #[must_use]
+    pub fn skipped(&self) -> &[String] {
+        &self.skipped
+    }
+
+    /// Deprecated name for [`skipped`](Self::skipped).
+    #[deprecated(since = "0.16.0", note = "renamed to `skipped`")]
+    #[must_use]
     pub fn skipped_globals(&self) -> &[String] {
-        &self.skipped_globals
+        self.skipped()
     }
 
     /// Convert the snapshot to bytes for storage or transmission.
     ///
-    /// The format is `ERYXSNAP`, a format version byte, the writer's eryx
-    /// version (a little-endian `u16` length, then UTF-8), the capture time
-    /// (little-endian `u64` milliseconds), then the pickle data. eryx before
-    /// 0.15.0 can't read it.
+    /// The format is `ERYXSNAP`, a format version byte, a byte for the guest
+    /// language, the writer's eryx version (a little-endian `u16` length,
+    /// then UTF-8), the capture time (little-endian `u64` milliseconds), then
+    /// the guest's state data. eryx before 0.16.0 can't read it.
     #[must_use]
     pub fn to_bytes(&self) -> Vec<u8> {
         // Empty for a snapshot that predates the version stamp. A version is
@@ -207,9 +238,10 @@ impl PythonStateSnapshot {
             .as_deref()
             .unwrap_or("")
             .as_bytes();
-        let mut bytes = Vec::with_capacity(8 + 1 + 2 + writer.len() + 8 + self.data.len());
+        let mut bytes = Vec::with_capacity(8 + 1 + 1 + 2 + writer.len() + 8 + self.data.len());
         bytes.extend_from_slice(SNAPSHOT_MAGIC);
         bytes.push(SNAPSHOT_FORMAT_VERSION);
+        bytes.push(self.metadata.language.snapshot_tag());
         bytes.extend_from_slice(&(writer.len() as u16).to_le_bytes());
         bytes.extend_from_slice(writer);
         bytes.extend_from_slice(&self.metadata.timestamp_ms.to_le_bytes());
@@ -227,27 +259,38 @@ impl PythonStateSnapshot {
     /// [`ErrorKind::Snapshot`] if the data is too short or corrupted.
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, Error> {
         let truncated = || Error::from(ErrorKind::Snapshot("Snapshot data too short".to_string()));
-        let (eryx_version, rest) = match bytes.strip_prefix(SNAPSHOT_MAGIC) {
+        let (eryx_version, language, rest) = match bytes.strip_prefix(SNAPSHOT_MAGIC) {
             // Before eryx 0.15.0: the timestamp, then the pickle data.
-            None => (None, bytes),
+            None => (None, Language::Python, bytes),
             Some(rest) => {
                 let (&format_version, rest) = rest.split_first().ok_or_else(truncated)?;
                 if format_version > SNAPSHOT_FORMAT_VERSION {
                     return Err(ErrorKind::IncompatibleSnapshot { format_version }.into());
                 }
-                if format_version != SNAPSHOT_FORMAT_VERSION {
-                    return Err(ErrorKind::Snapshot(format!(
-                        "Invalid snapshot format version {format_version}"
-                    ))
-                    .into());
-                }
+                let (language, rest) = match format_version {
+                    // eryx 0.15.0: no language byte, always Python.
+                    1 => (Language::Python, rest),
+                    SNAPSHOT_FORMAT_VERSION => {
+                        let (&tag, rest) = rest.split_first().ok_or_else(truncated)?;
+                        let language = Language::from_snapshot_tag(tag).ok_or_else(|| {
+                            ErrorKind::Snapshot(format!("Unknown snapshot language {tag}"))
+                        })?;
+                        (language, rest)
+                    }
+                    _ => {
+                        return Err(ErrorKind::Snapshot(format!(
+                            "Invalid snapshot format version {format_version}"
+                        ))
+                        .into());
+                    }
+                };
                 let (len, rest) = rest.split_first_chunk::<2>().ok_or_else(truncated)?;
                 let (writer, rest) = rest
                     .split_at_checked(usize::from(u16::from_le_bytes(*len)))
                     .ok_or_else(truncated)?;
                 let writer = String::from_utf8(writer.to_vec())
                     .map_err(|_| ErrorKind::Snapshot("Invalid eryx version".to_string()))?;
-                (Some(writer).filter(|w| !w.is_empty()), rest)
+                (Some(writer).filter(|w| !w.is_empty()), language, rest)
             }
         };
         let (timestamp, data) = rest.split_first_chunk::<8>().ok_or_else(truncated)?;
@@ -260,8 +303,9 @@ impl PythonStateSnapshot {
                 timestamp_ms: u64::from_le_bytes(*timestamp),
                 size_bytes,
                 eryx_version,
+                language,
             },
-            skipped_globals: Vec::new(),
+            skipped: Vec::new(),
         })
     }
 }
@@ -629,7 +673,7 @@ impl VfsConfig {
 
 /// A session-aware executor that keeps WASM instances alive between executions.
 ///
-/// Unlike `PythonExecutor` which creates a fresh instance for each execution,
+/// Unlike `Executor` which creates a fresh instance for each execution,
 /// `SessionExecutor` maintains state between calls, enabling:
 ///
 /// - Faster subsequent executions (no Python init overhead)
@@ -638,7 +682,7 @@ impl VfsConfig {
 /// - State snapshots for persistence and transfer
 pub struct SessionExecutor {
     /// The parent executor (for engine and instance_pre access).
-    executor: Arc<PythonExecutor>,
+    executor: Arc<Executor>,
 
     /// The store containing the WASM instance state.
     /// This is `Option` so we can take ownership during async execution.
@@ -720,14 +764,14 @@ fn build_callback_infos(callbacks: &[Arc<dyn Callback>]) -> Vec<HostCallbackInfo
 }
 
 /// Build WASI context with Python stdlib and site-packages mounts.
-fn build_wasi_context(executor: &PythonExecutor, fd_output: &FdOutput) -> Result<WasiCtx, Error> {
+fn build_wasi_context(executor: &Executor, fd_output: &FdOutput) -> Result<WasiCtx, Error> {
     let mut wasi_builder = WasiCtxBuilder::new();
     fd_output.attach(&mut wasi_builder);
 
     // Build PYTHONPATH from stdlib and all site-packages directories
-    let site_packages_paths = executor.python_site_packages_paths();
+    let site_packages_paths = executor.library_paths();
     let mut pythonpath_parts = Vec::new();
-    if executor.python_stdlib_path().is_some() {
+    if executor.stdlib_path().is_some() {
         pythonpath_parts.push("/python-stdlib".to_string());
     }
     for i in 0..site_packages_paths.len() {
@@ -735,7 +779,7 @@ fn build_wasi_context(executor: &PythonExecutor, fd_output: &FdOutput) -> Result
     }
 
     // Mount Python stdlib if configured (required for eryx-wasm-runtime)
-    if let Some(stdlib_path) = executor.python_stdlib_path() {
+    if let Some(stdlib_path) = executor.stdlib_path() {
         wasi_builder.env("PYTHONHOME", "/python-stdlib");
         if !pythonpath_parts.is_empty() {
             wasi_builder.env("PYTHONPATH", pythonpath_parts.join(":"));
@@ -762,7 +806,7 @@ fn build_wasi_context(executor: &PythonExecutor, fd_output: &FdOutput) -> Result
 /// share one set of mounts and limits.
 #[cfg(feature = "unstable-vfs")]
 pub(crate) fn build_hybrid_vfs_context(
-    executor: &PythonExecutor,
+    executor: &Executor,
     vfs_storage: eryx_vfs::ArcStorage,
     vfs_config: &VfsConfig,
     max_open_host_files: Option<usize>,
@@ -806,7 +850,7 @@ pub(crate) fn build_hybrid_vfs_context(
     }
 
     // Add real filesystem preopens that mirror the WASI preopens
-    if let Some(stdlib_path) = executor.python_stdlib_path() {
+    if let Some(stdlib_path) = executor.stdlib_path() {
         ctx.add_real_preopen_path(
             "/python-stdlib",
             stdlib_path,
@@ -817,7 +861,7 @@ pub(crate) fn build_hybrid_vfs_context(
             ErrorKind::Initialization(format!("Failed to add Python stdlib to VFS: {e}"))
         })?;
     }
-    for (i, site_packages_path) in executor.python_site_packages_paths().iter().enumerate() {
+    for (i, site_packages_path) in executor.library_paths().iter().enumerate() {
         let mount_path = crate::wasm::site_packages_mount_path(i);
         ctx.add_real_preopen_path(
             &mount_path,
@@ -874,7 +918,7 @@ pub(crate) fn build_hybrid_vfs_context(
 }
 
 impl SessionExecutor {
-    /// Create a new session executor from a `PythonExecutor`.
+    /// Create a new session executor from a `Executor`.
     ///
     /// This instantiates the WASM component and keeps it alive for reuse.
     ///
@@ -892,7 +936,7 @@ impl SessionExecutor {
         fields(callbacks = callbacks.len())
     )]
     pub async fn new(
-        executor: Arc<PythonExecutor>,
+        executor: Arc<Executor>,
         callbacks: &[Arc<dyn Callback>],
     ) -> Result<Self, Error> {
         Self::new_with_limits(executor, callbacks, &ResourceLimits::unlimited()).await
@@ -911,7 +955,7 @@ impl SessionExecutor {
     ///
     /// Returns an error if the component cannot be instantiated.
     pub async fn new_with_limits(
-        executor: Arc<PythonExecutor>,
+        executor: Arc<Executor>,
         callbacks: &[Arc<dyn Callback>],
         limits: &ResourceLimits,
     ) -> Result<Self, Error> {
@@ -942,7 +986,7 @@ impl SessionExecutor {
     /// Returns an error if the WASM component cannot be instantiated.
     #[cfg(feature = "unstable-vfs")]
     pub async fn new_with_vfs(
-        executor: Arc<PythonExecutor>,
+        executor: Arc<Executor>,
         callbacks: &[Arc<dyn Callback>],
         vfs_storage: eryx_vfs::ArcStorage,
     ) -> Result<Self, Error> {
@@ -970,7 +1014,7 @@ impl SessionExecutor {
     /// # Example
     ///
     /// ```rust,ignore
-    /// use eryx::{PythonExecutor, SessionExecutor, VfsConfig};
+    /// use eryx::{Executor, SessionExecutor, VfsConfig};
     /// use eryx::vfs::InMemoryStorage;
     /// use std::sync::Arc;
     ///
@@ -989,7 +1033,7 @@ impl SessionExecutor {
     /// Returns an error if the WASM component cannot be instantiated.
     #[cfg(feature = "unstable-vfs")]
     pub async fn new_with_vfs_config(
-        executor: Arc<PythonExecutor>,
+        executor: Arc<Executor>,
         callbacks: &[Arc<dyn Callback>],
         vfs_storage: eryx_vfs::ArcStorage,
         vfs_config: VfsConfig,
@@ -1015,7 +1059,7 @@ impl SessionExecutor {
     /// mount cannot be created.
     #[cfg(feature = "unstable-vfs")]
     pub async fn new_with_vfs_config_and_limits(
-        executor: Arc<PythonExecutor>,
+        executor: Arc<Executor>,
         callbacks: &[Arc<dyn Callback>],
         vfs_storage: eryx_vfs::ArcStorage,
         vfs_config: VfsConfig,
@@ -1034,7 +1078,7 @@ impl SessionExecutor {
     /// Internal constructor with optional VFS storage and config.
     #[cfg(feature = "unstable-vfs")]
     async fn new_internal(
-        executor: Arc<PythonExecutor>,
+        executor: Arc<Executor>,
         callbacks: &[Arc<dyn Callback>],
         vfs_storage: Option<eryx_vfs::ArcStorage>,
         vfs_config: Option<VfsConfig>,
@@ -1134,7 +1178,7 @@ impl SessionExecutor {
     /// Internal constructor without VFS.
     #[cfg(not(feature = "unstable-vfs"))]
     async fn new_internal(
-        executor: Arc<PythonExecutor>,
+        executor: Arc<Executor>,
         callbacks: &[Arc<dyn Callback>],
         limits: &ResourceLimits,
     ) -> Result<Self, Error> {
@@ -1276,8 +1320,8 @@ impl SessionExecutor {
     /// Override the name of the variable captured as the structured result for
     /// this session's current instance.
     ///
-    /// Normally the name is configured on the parent [`PythonExecutor`] via
-    /// [`PythonExecutor::with_result_variable`] and applied at instantiation. This
+    /// Normally the name is configured on the parent [`Executor`] via
+    /// [`Executor::with_result_variable`] and applied at instantiation. This
     /// method sets it on the already-instantiated session instance, e.g. to apply a
     /// per-request override. The override persists across `restore_state` (which
     /// reuses the current instance) but is reset to the executor's configured name
@@ -1545,19 +1589,20 @@ impl SessionExecutor {
         // wasmtime_result is Result<Result<ExecuteOutput, ExecuteError>, wasmtime::Error>
         // The outer Result is from wasmtime, the inner is the WIT-generated result.
         // The inner Err is the guest's logical execution error — for real input
-        // that is always an uncaught Python exception (its traceback).
+        // that is always a script failure (for Python, its traceback).
         let wit_output = wasmtime_result
             .map_err(|e| ErrorKind::Execution(format!("WASM execution error: {e:?}")).into())
             .and_then(|output| {
                 output.map_err(|failure| {
-                    let mut traceback = failure.message;
-                    crate::wasm::append_fd_stderr(&mut traceback, &fd_stderr);
+                    let mut message = failure.message;
+                    crate::wasm::append_fd_stderr(&mut message, &fd_stderr);
                     let mut stdout = failure.stdout;
                     let mut stderr = failure.stderr;
                     stdout.extend(&fd_stdout);
                     stderr.extend(&fd_stderr);
-                    Error::from(ErrorKind::PythonException {
-                        traceback,
+                    Error::from(ErrorKind::ScriptFailed {
+                        message,
+                        exit_code: failure.exit_code,
                         stdout,
                         stderr,
                     })
@@ -1853,7 +1898,7 @@ impl SessionExecutor {
     ///
     /// # Returns
     ///
-    /// A `PythonStateSnapshot` that can be serialized and restored later.
+    /// A `StateSnapshot` that can be serialized and restored later.
     ///
     /// # Errors
     ///
@@ -1873,7 +1918,7 @@ impl SessionExecutor {
     /// let snapshot = session.snapshot_state().await?;
     /// println!("Snapshot size: {} bytes", snapshot.size());
     /// ```
-    pub async fn snapshot_state(&mut self) -> Result<PythonStateSnapshot, Error> {
+    pub async fn snapshot_state(&mut self) -> Result<StateSnapshot, Error> {
         tracing::debug!("SessionExecutor: capturing state snapshot");
 
         let snapshot = self
@@ -1896,14 +1941,18 @@ impl SessionExecutor {
 
         tracing::debug!(
             size_bytes = data.len(),
-            skipped_globals = ?snapshot.skipped_globals,
+            skipped = ?snapshot.skipped,
             "State snapshot captured"
         );
 
-        Ok(PythonStateSnapshot::new(data, snapshot.skipped_globals))
+        Ok(StateSnapshot::new(
+            self.executor.language(),
+            data,
+            snapshot.skipped,
+        ))
     }
 
-    /// Restore Python session state from a previously captured snapshot.
+    /// Restore session state from a previously captured snapshot.
     ///
     /// After restore, subsequent `execute()` calls will have access to all
     /// variables that were present when the snapshot was taken.
@@ -1915,6 +1964,7 @@ impl SessionExecutor {
     /// # Errors
     ///
     /// Returns an error if:
+    /// - The snapshot is from a session of another guest language
     /// - The WASM call fails
     /// - Deserialization fails (e.g., corrupted data)
     /// - It runs past [`state_op_timeout`](Self::state_op_timeout) or the
@@ -1926,17 +1976,26 @@ impl SessionExecutor {
     ///
     /// ```rust,ignore
     /// // Restore from a previously saved snapshot
-    /// let snapshot = PythonStateSnapshot::from_bytes(&saved_bytes)?;
+    /// let snapshot = StateSnapshot::from_bytes(&saved_bytes)?;
     /// session.restore_state(&snapshot).await?;
     ///
     /// // Variables from the snapshot are now available
     /// session.execute("print(x)", &[], None, None).await?;
     /// ```
-    pub async fn restore_state(&mut self, snapshot: &PythonStateSnapshot) -> Result<(), Error> {
+    pub async fn restore_state(&mut self, snapshot: &StateSnapshot) -> Result<(), Error> {
         tracing::debug!(
             size_bytes = snapshot.size(),
             "SessionExecutor: restoring state snapshot"
         );
+
+        let language = self.executor.language();
+        if snapshot.language() != language {
+            return Err(ErrorKind::Snapshot(format!(
+                "cannot restore a {} snapshot into a {language} session",
+                snapshot.language()
+            ))
+            .into());
+        }
 
         let data = snapshot.data().to_vec();
         self.run_state_op("restore", async |accessor, bindings| {
@@ -2207,7 +2266,7 @@ mod tests {
     #[test]
     fn test_python_state_snapshot_roundtrip() {
         let data = vec![1, 2, 3, 4, 5];
-        let snapshot = PythonStateSnapshot::new(data.clone(), Vec::new());
+        let snapshot = StateSnapshot::new(Language::Python, data.clone(), Vec::new());
 
         assert_eq!(snapshot.data(), &data);
         assert_eq!(snapshot.size(), 5);
@@ -2215,7 +2274,7 @@ mod tests {
 
         // Test serialization roundtrip
         let bytes = snapshot.to_bytes();
-        let restored = PythonStateSnapshot::from_bytes(&bytes).expect("from_bytes failed");
+        let restored = StateSnapshot::from_bytes(&bytes).expect("from_bytes failed");
 
         assert_eq!(restored.data(), &data);
         assert_eq!(
@@ -2227,17 +2286,17 @@ mod tests {
     #[test]
     fn test_python_state_snapshot_from_bytes_too_short() {
         let bytes = vec![1, 2, 3]; // Less than 8 bytes
-        let result = PythonStateSnapshot::from_bytes(&bytes);
+        let result = StateSnapshot::from_bytes(&bytes);
         assert!(result.is_err());
     }
 
     #[test]
     fn test_python_state_snapshot_records_eryx_version() {
-        let snapshot = PythonStateSnapshot::new(vec![1, 2, 3], Vec::new());
+        let snapshot = StateSnapshot::new(Language::Python, vec![1, 2, 3], Vec::new());
         let bytes = snapshot.to_bytes();
         assert!(bytes.starts_with(SNAPSHOT_MAGIC));
 
-        let restored = PythonStateSnapshot::from_bytes(&bytes).unwrap();
+        let restored = StateSnapshot::from_bytes(&bytes).unwrap();
         assert_eq!(
             restored.metadata().eryx_version.as_deref(),
             Some(concat!("eryx ", env!("CARGO_PKG_VERSION")))
@@ -2251,23 +2310,53 @@ mod tests {
         let mut bytes = 1_700_000_000_000u64.to_le_bytes().to_vec();
         bytes.extend_from_slice(b"pickle");
 
-        let restored = PythonStateSnapshot::from_bytes(&bytes).unwrap();
+        let restored = StateSnapshot::from_bytes(&bytes).unwrap();
         assert_eq!(restored.data(), b"pickle");
         assert_eq!(restored.metadata().timestamp_ms, 1_700_000_000_000);
         assert_eq!(restored.metadata().eryx_version, None);
+        assert_eq!(restored.language(), Language::Python);
 
         // Re-serializing doesn't claim it was written by this version.
-        let again = PythonStateSnapshot::from_bytes(&restored.to_bytes()).unwrap();
+        let again = StateSnapshot::from_bytes(&restored.to_bytes()).unwrap();
         assert_eq!(again.metadata().eryx_version, None);
         assert_eq!(again.data(), b"pickle");
     }
 
     #[test]
+    fn test_state_snapshot_records_language() {
+        let snapshot = StateSnapshot::new(Language::JavaScript, vec![1, 2, 3], Vec::new());
+        let restored = StateSnapshot::from_bytes(&snapshot.to_bytes()).unwrap();
+        assert_eq!(restored.language(), Language::JavaScript);
+        assert_eq!(restored.data(), &[1, 2, 3]);
+    }
+
+    #[test]
+    fn test_state_snapshot_reads_format_1_as_python() {
+        // eryx 0.15.0: magic, version 1, writer, timestamp, pickle data.
+        let writer = b"eryx 0.15.0";
+        let mut bytes = SNAPSHOT_MAGIC.to_vec();
+        bytes.push(1);
+        bytes.extend_from_slice(&(writer.len() as u16).to_le_bytes());
+        bytes.extend_from_slice(writer);
+        bytes.extend_from_slice(&1_700_000_000_000u64.to_le_bytes());
+        bytes.extend_from_slice(b"pickle");
+
+        let restored = StateSnapshot::from_bytes(&bytes).unwrap();
+        assert_eq!(restored.language(), Language::Python);
+        assert_eq!(
+            restored.metadata().eryx_version.as_deref(),
+            Some("eryx 0.15.0")
+        );
+        assert_eq!(restored.metadata().timestamp_ms, 1_700_000_000_000);
+        assert_eq!(restored.data(), b"pickle");
+    }
+
+    #[test]
     fn test_python_state_snapshot_rejects_unknown_format_version() {
-        let mut bytes = PythonStateSnapshot::new(vec![1], Vec::new()).to_bytes();
+        let mut bytes = StateSnapshot::new(Language::Python, vec![1], Vec::new()).to_bytes();
         bytes[SNAPSHOT_MAGIC.len()] = SNAPSHOT_FORMAT_VERSION + 1;
 
-        let err = PythonStateSnapshot::from_bytes(&bytes).unwrap_err();
+        let err = StateSnapshot::from_bytes(&bytes).unwrap_err();
         assert!(matches!(
             err.kind(),
             ErrorKind::IncompatibleSnapshot { format_version } if *format_version == SNAPSHOT_FORMAT_VERSION + 1
@@ -2276,39 +2365,45 @@ mod tests {
 
     #[test]
     fn test_python_state_snapshot_rejects_corrupt_header() {
-        let good = PythonStateSnapshot::new(vec![1], Vec::new()).to_bytes();
+        let good = StateSnapshot::new(Language::Python, vec![1], Vec::new()).to_bytes();
 
         // A format version below ours isn't from a newer eryx.
         let mut bytes = good.clone();
         bytes[SNAPSHOT_MAGIC.len()] = 0;
-        let err = PythonStateSnapshot::from_bytes(&bytes).unwrap_err();
+        let err = StateSnapshot::from_bytes(&bytes).unwrap_err();
+        assert!(matches!(err.kind(), ErrorKind::Snapshot(_)), "{err}");
+
+        // A language this eryx doesn't know.
+        let mut bytes = good.clone();
+        bytes[SNAPSHOT_MAGIC.len() + 1] = 0xFF;
+        let err = StateSnapshot::from_bytes(&bytes).unwrap_err();
         assert!(matches!(err.kind(), ErrorKind::Snapshot(_)), "{err}");
 
         // The writer's first byte isn't valid UTF-8.
         let mut bytes = good;
-        bytes[SNAPSHOT_MAGIC.len() + 3] = 0xFF;
-        let err = PythonStateSnapshot::from_bytes(&bytes).unwrap_err();
+        bytes[SNAPSHOT_MAGIC.len() + 4] = 0xFF;
+        let err = StateSnapshot::from_bytes(&bytes).unwrap_err();
         assert!(matches!(err.kind(), ErrorKind::Snapshot(_)), "{err}");
     }
 
     #[test]
     fn test_python_state_snapshot_rejects_truncated_header() {
-        let bytes = PythonStateSnapshot::new(Vec::new(), Vec::new()).to_bytes();
+        let bytes = StateSnapshot::new(Language::Python, Vec::new(), Vec::new()).to_bytes();
         // Every cut inside the header, from just the magic to one byte short
         // of the timestamp.
         for len in SNAPSHOT_MAGIC.len()..bytes.len() {
-            let err = PythonStateSnapshot::from_bytes(&bytes[..len]).unwrap_err();
+            let err = StateSnapshot::from_bytes(&bytes[..len]).unwrap_err();
             assert!(
                 matches!(err.kind(), ErrorKind::Snapshot(_)),
                 "len {len}: {err}"
             );
         }
-        assert!(PythonStateSnapshot::from_bytes(&bytes).is_ok());
+        assert!(StateSnapshot::from_bytes(&bytes).is_ok());
     }
 
     #[test]
     fn test_snapshot_metadata() {
-        let snapshot = PythonStateSnapshot::new(vec![0; 100], Vec::new());
+        let snapshot = StateSnapshot::new(Language::Python, vec![0; 100], Vec::new());
         let meta = snapshot.metadata();
 
         assert_eq!(meta.size_bytes, 100);

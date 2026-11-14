@@ -321,7 +321,7 @@ impl SandboxPool {
     /// ).await?;
     /// ```
     pub async fn new(
-        builder: SandboxBuilder<state::Has, state::Has>,
+        builder: SandboxBuilder<state::Has>,
         config: PoolConfig,
     ) -> Result<Self, PoolError> {
         // Validate configuration

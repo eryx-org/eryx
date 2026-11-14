@@ -397,7 +397,7 @@ export function createCallbackHost(options = {}) {
        * handler is registered.
        */
       getExecutionOptions: () => ({
-        pythonTracing: pick("traceHandler") !== null,
+        tracing: pick("traceHandler") !== null,
         reuseEmptyCallbacks: false,
       }),
       /** Report a trace event from the Python runtime's sys.settrace hook. */

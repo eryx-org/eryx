@@ -90,7 +90,7 @@ impl Session {
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn from_executor(
         py: Python<'_>,
-        executor: Arc<eryx::PythonExecutor>,
+        executor: Arc<eryx::Executor>,
         runtime: Arc<tokio::runtime::Runtime>,
         vfs: Option<VfsStorage>,
         vfs_mount_path: Option<String>,
@@ -264,8 +264,8 @@ impl Session {
     ) -> PyResult<Self> {
         let runtime = crate::error::make_runtime()?;
 
-        // Create the PythonExecutor from embedded runtime
-        let mut executor = eryx::PythonExecutor::from_embedded_runtime()
+        // Create the Executor from embedded runtime
+        let mut executor = eryx::Executor::from_embedded_runtime()
             .map_err(|e| InitializationError::new_err(format!("failed to create executor: {e}")))?;
         if let Some(name) = result_variable {
             executor = executor.with_result_variable(name);
@@ -473,7 +473,7 @@ impl Session {
 
         Ok(StateSnapshot {
             data: snapshot.to_bytes(),
-            skipped_globals: snapshot.skipped_globals().to_vec(),
+            skipped_globals: snapshot.skipped().to_vec(),
         })
     }
 
@@ -493,8 +493,8 @@ impl Session {
     ///     result = session.execute('print(x)')  # x was in the snapshot
     fn restore_state(&self, py: Python<'_>, snapshot: &Bound<'_, PyAny>) -> PyResult<()> {
         let snapshot = match snapshot.cast::<StateSnapshot>() {
-            Ok(snapshot) => eryx::PythonStateSnapshot::from_bytes(&snapshot.get().data),
-            Err(_) => eryx::PythonStateSnapshot::from_bytes(snapshot.extract::<&[u8]>()?),
+            Ok(snapshot) => eryx::StateSnapshot::from_bytes(&snapshot.get().data),
+            Err(_) => eryx::StateSnapshot::from_bytes(snapshot.extract::<&[u8]>()?),
         }
         .map_err(eryx_error_to_py)?;
         self.queued(py, async |inner| inner.restore_state(&snapshot).await)

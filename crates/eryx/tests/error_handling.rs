@@ -20,19 +20,19 @@
 use std::path::PathBuf;
 use std::sync::{Arc, OnceLock};
 
-use eryx::{PythonExecutor, SessionExecutor};
+use eryx::{Executor, SessionExecutor};
 
 /// Shared executor to avoid repeated WASM loading across tests.
-static SHARED_EXECUTOR: OnceLock<Arc<PythonExecutor>> = OnceLock::new();
+static SHARED_EXECUTOR: OnceLock<Arc<Executor>> = OnceLock::new();
 
-fn get_shared_executor() -> Arc<PythonExecutor> {
+fn get_shared_executor() -> Arc<Executor> {
     SHARED_EXECUTOR
         .get_or_init(|| Arc::new(create_executor()))
         .clone()
 }
 
-/// Create a PythonExecutor, using embedded resources if available.
-fn create_executor() -> PythonExecutor {
+/// Create a Executor, using embedded resources if available.
+fn create_executor() -> Executor {
     // When embedded feature is enabled, use it for zero-config setup
     #[cfg(feature = "embedded")]
     {
@@ -40,19 +40,19 @@ fn create_executor() -> PythonExecutor {
             eryx::embedded::EmbeddedResources::get().expect("Failed to extract embedded resources");
 
         #[allow(unsafe_code)]
-        unsafe { PythonExecutor::from_precompiled_file(resources.runtime()) }
+        unsafe { Executor::from_precompiled_file(resources.runtime()) }
             .expect("Failed to load embedded runtime")
-            .with_python_stdlib(resources.stdlib())
+            .with_stdlib(resources.stdlib())
     }
 
     // Fall back to file-based loading
     #[cfg(not(feature = "embedded"))]
     {
-        let stdlib_path = python_stdlib_path();
+        let stdlib_path = stdlib_path();
         let path = runtime_wasm_path();
-        PythonExecutor::from_file(&path)
+        Executor::from_file(&path)
             .unwrap_or_else(|e| panic!("Failed to load runtime.wasm from {:?}: {}", path, e))
-            .with_python_stdlib(&stdlib_path)
+            .with_stdlib(&stdlib_path)
     }
 }
 
@@ -67,7 +67,7 @@ fn runtime_wasm_path() -> PathBuf {
 }
 
 #[cfg(not(feature = "embedded"))]
-fn python_stdlib_path() -> PathBuf {
+fn stdlib_path() -> PathBuf {
     // Check ERYX_PYTHON_STDLIB env var first (used in CI)
     if let Ok(path) = std::env::var("ERYX_PYTHON_STDLIB") {
         let path = PathBuf::from(path);
@@ -289,7 +289,7 @@ async fn test_python_value_error() {
 }
 
 /// An uncaught exception surfaces the full Python traceback as a
-/// [`eryx::ErrorKind::PythonException`] — a *script* failure, distinct from
+/// [`eryx::ErrorKind::ScriptFailed`] — a *script* failure, distinct from
 /// sandbox failures.
 ///
 /// Regression guard for a user report that `raise Exception()` "does not return
@@ -308,7 +308,7 @@ async fn test_python_uncaught_exception_returns_traceback() {
         .await
         .expect_err("raise Exception() should be an error");
     assert!(
-        matches!(bare.kind(), eryx::ErrorKind::PythonException { .. }),
+        matches!(bare.kind(), eryx::ErrorKind::ScriptFailed { .. }),
         "a raise should be a PythonException, got: {bare:?}"
     );
     let bare = bare.to_string();
@@ -329,7 +329,7 @@ async fn test_python_uncaught_exception_returns_traceback() {
         .await
         .expect_err(r#"raise ValueError("boom") should be an error"#);
     assert!(
-        matches!(with_msg.kind(), eryx::ErrorKind::PythonException { .. }),
+        matches!(with_msg.kind(), eryx::ErrorKind::ScriptFailed { .. }),
         "a raise should be a PythonException, got: {with_msg:?}"
     );
     let with_msg = with_msg.to_string();
@@ -355,7 +355,7 @@ async fn test_null_bytes_in_code_is_not_python_exception() {
         "NUL bytes should be a sandbox Execution error, not PythonException, got: {err:?}"
     );
     assert!(
-        !matches!(err.kind(), eryx::ErrorKind::PythonException { .. }),
+        !matches!(err.kind(), eryx::ErrorKind::ScriptFailed { .. }),
         "NUL bytes must not be classified as a script exception"
     );
 }

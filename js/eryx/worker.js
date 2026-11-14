@@ -38,7 +38,7 @@ const notify = (target) => (...args) => post({ type: "notify", target, args });
 
 // Set from each call, so the sync imports answer like the host's own would.
 let callbacks = [];
-let options = { pythonTracing: false, reuseEmptyCallbacks: false };
+let options = { tracing: false, reuseEmptyCallbacks: false };
 
 const cb = {
   invoke: forward("invoke"),

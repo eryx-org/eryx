@@ -133,7 +133,7 @@ async fn execute_simple_print() {
 /// stderr) is surfaced as CPython would — over stderr, not as a sandbox error:
 ///   - streamed live as STDERR `OutputEvent`s while the code runs,
 ///   - in the final `ExecuteResult.stderr` field, and
-///   - classified via `failure_kind = SCRIPT_EXCEPTION`, with `error` left empty
+///   - classified via `failure_kind = SCRIPT_FAILED`, with `error` left empty
 ///     (it is reserved for sandbox-level failures) and `success = false`.
 #[tokio::test]
 async fn execute_uncaught_exception_returns_error_not_stderr() {
@@ -189,8 +189,8 @@ async fn execute_uncaught_exception_returns_error_not_stderr() {
                 // Classified as a script exception, not a sandbox failure.
                 assert_eq!(
                     result.failure_kind,
-                    FailureKind::ScriptException as i32,
-                    "uncaught exception should be FAILURE_KIND_SCRIPT_EXCEPTION"
+                    FailureKind::ScriptFailed as i32,
+                    "uncaught exception should be FAILURE_KIND_SCRIPT_FAILED"
                 );
                 // `error` is reserved for sandbox failures, so it stays empty.
                 assert!(
@@ -399,7 +399,7 @@ async fn execute_secret_in_uncaught_exception_is_scrubbed() {
             }
             Some(server_message::Message::ExecuteResult(result)) => {
                 assert!(!result.success);
-                assert_eq!(result.failure_kind, FailureKind::ScriptException as i32);
+                assert_eq!(result.failure_kind, FailureKind::ScriptFailed as i32);
                 // The real secret never reaches Python, so it cannot appear
                 // anywhere, and the placeholder must be scrubbed from stderr.
                 assert!(

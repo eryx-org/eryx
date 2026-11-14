@@ -95,7 +95,7 @@ fn runtime_wasm_path() -> PathBuf {
 }
 
 #[cfg(not(feature = "embedded"))]
-fn python_stdlib_path() -> PathBuf {
+fn stdlib_path() -> PathBuf {
     if let Ok(path) = std::env::var("ERYX_PYTHON_STDLIB") {
         let path = PathBuf::from(path);
         if path.exists() {
@@ -111,17 +111,17 @@ fn python_stdlib_path() -> PathBuf {
         .join("python-stdlib")
 }
 
-fn sandbox_builder() -> eryx::SandboxBuilder<eryx::state::Has, eryx::state::Has> {
+fn sandbox_builder() -> eryx::SandboxBuilder<eryx::state::Has> {
     #[cfg(feature = "embedded")]
     {
         Sandbox::embedded()
     }
     #[cfg(not(feature = "embedded"))]
     {
-        let stdlib_path = python_stdlib_path();
+        let stdlib_path = stdlib_path();
         Sandbox::builder()
             .with_wasm_file(runtime_wasm_path())
-            .with_python_stdlib(&stdlib_path)
+            .with_stdlib(&stdlib_path)
     }
 }
 

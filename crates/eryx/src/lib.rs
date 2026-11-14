@@ -78,6 +78,7 @@ pub mod embedded;
 pub mod embedded_stdlib;
 mod error;
 mod fork_local;
+mod language;
 mod library;
 pub mod net;
 pub mod package;
@@ -127,6 +128,7 @@ pub use callback::{
     PrefixCallback, PrefixHandler, TypedCallback, empty_schema,
 };
 pub use error::{Error, ErrorKind};
+pub use language::Language;
 pub use library::RuntimeLibrary;
 pub use net::{
     ConnectionManager, DEFAULT_BLOCKED_NETWORKS, IpNet, NetConfig, NetTraffic, Resolver, TcpError,
@@ -147,9 +149,7 @@ pub use sandbox::{
 pub use secrets::{
     FileScrubPolicy, OutputScrubPolicy, SecretConfig, scrub_placeholders, scrub_placeholders_bytes,
 };
-pub use session::{
-    InProcessSession, PythonStateSnapshot, Session, SessionExecutor, SnapshotMetadata,
-};
+pub use session::{InProcessSession, Session, SessionExecutor, SnapshotMetadata, StateSnapshot};
 #[cfg(feature = "unstable-vfs")]
 pub use session::{VfsConfig, VolumeMount, VolumeSource};
 pub use trace::{OutputHandler, TraceEvent, TraceEventKind, TraceHandler};
@@ -158,9 +158,23 @@ pub use trace::{OutputHandler, TraceEvent, TraceEventKind, TraceHandler};
 #[cfg(feature = "unstable-internals")]
 pub use wasm::{CallbackHostResult, CallbackRequest, NetRequest, OutputRequest, TraceRequest};
 pub use wasm::{
-    CpuFeatureLevel, ExecutionOutput, InstanceAllocator, PythonExecutor, STREAM_BYTES_LIMIT,
+    CpuFeatureLevel, ExecutionOutput, Executor, InstanceAllocator, STREAM_BYTES_LIMIT,
     SharedEngineConfig, configure_shared_engine,
 };
+
+/// Deprecated name for [`Executor`].
+#[deprecated(
+    since = "0.16.0",
+    note = "renamed to `Executor` now that eryx runs more than one guest language"
+)]
+pub type PythonExecutor = Executor;
+
+/// Deprecated name for [`StateSnapshot`].
+#[deprecated(
+    since = "0.16.0",
+    note = "renamed to `StateSnapshot` now that eryx runs more than one guest language"
+)]
+pub type PythonStateSnapshot = StateSnapshot;
 
 // Re-export schema types at top level for convenience
 pub use schema::{JsonSchema, Schema};

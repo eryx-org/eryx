@@ -7,22 +7,22 @@ use std::pin::Pin;
 use std::sync::{Arc, OnceLock};
 
 use eryx::{
-    CallbackError, Error, ErrorKind, InProcessSession, PythonExecutor, ResourceLimits, Sandbox,
-    Session, SessionExecutor, TypedCallback,
+    CallbackError, Error, ErrorKind, Executor, InProcessSession, ResourceLimits, Sandbox, Session,
+    SessionExecutor, TypedCallback,
 };
 use serde_json::{Value, json};
 
-static EXECUTOR: OnceLock<Arc<PythonExecutor>> = OnceLock::new();
+static EXECUTOR: OnceLock<Arc<Executor>> = OnceLock::new();
 
-fn executor() -> Arc<PythonExecutor> {
+fn executor() -> Arc<Executor> {
     EXECUTOR
         .get_or_init(|| {
             let resources = eryx::embedded::EmbeddedResources::get().unwrap();
             #[allow(unsafe_code)]
             Arc::new(
-                unsafe { PythonExecutor::from_precompiled_file(resources.runtime()) }
+                unsafe { Executor::from_precompiled_file(resources.runtime()) }
                     .unwrap()
-                    .with_python_stdlib(resources.stdlib()),
+                    .with_stdlib(resources.stdlib()),
             )
         })
         .clone()
@@ -57,7 +57,7 @@ fn assert_memory_limit_error(error: Error) {
 #[cfg(feature = "unstable-vfs")]
 fn assert_vfs_quota_rejected(error: &Error) {
     assert!(
-        matches!(error.kind(), ErrorKind::PythonException { .. })
+        matches!(error.kind(), ErrorKind::ScriptFailed { .. })
             && error.to_string().contains("OSError"),
         "expected a guest-visible VFS quota rejection, got {error:?}"
     );

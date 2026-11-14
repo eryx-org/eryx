@@ -15,7 +15,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use eryx::{
-    Callback, CallbackError, InProcessSession, JsonSchema, PythonExecutor, ResourceLimits, Sandbox,
+    Callback, CallbackError, Executor, InProcessSession, JsonSchema, ResourceLimits, Sandbox,
     Session, SessionExecutor, TypedCallback,
 };
 use serde::Deserialize;
@@ -164,9 +164,9 @@ async fn session_executor_callback_handler_finishes_after_run() {
     let resources = eryx::embedded::EmbeddedResources::get().unwrap();
     #[allow(unsafe_code)]
     let executor = Arc::new(
-        unsafe { PythonExecutor::from_precompiled_file(resources.runtime()) }
+        unsafe { Executor::from_precompiled_file(resources.runtime()) }
             .unwrap()
-            .with_python_stdlib(resources.stdlib()),
+            .with_stdlib(resources.stdlib()),
     );
     let callback: Arc<dyn Callback> = Arc::new(Slow);
     let callbacks = vec![Arc::clone(&callback)];

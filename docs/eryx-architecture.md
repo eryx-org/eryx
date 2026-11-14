@@ -44,8 +44,8 @@ Eryx is a Python sandbox built on WebAssembly Component Model. It enables:
 │  Application Code                                                        │
 │    └─> Sandbox::builder()                                               │
 │          ├─ .with_callback("func", callback_impl)                       │
-│          ├─ .with_python_stdlib("/path/to/stdlib")                      │
-│          ├─ .with_site_packages("/path/to/packages")  [for numpy etc]   │
+│          ├─ .with_stdlib("/path/to/stdlib")                             │
+│          ├─ .with_library_path("/path/to/packages")  [for numpy etc]    │
 │          ├─ .with_native_extension("numpy/core/*.so", bytes) [optional] │
 │          └─ .build()                                                     │
 │              │                                                           │
@@ -53,7 +53,7 @@ Eryx is a Python sandbox built on WebAssembly Component Model. It enables:
 │              └─ Else → load pre-built runtime.wasm                      │
 │                                                                          │
 │  ┌────────────────────────────────────────────────────────────────┐    │
-│  │  PythonExecutor (wasmtime host)                                 │    │
+│  │  Executor (wasmtime host)                                 │    │
 │  │    ├─ Engine (async component model support)                    │    │
 │  │    ├─ Store with ExecutorState                                  │    │
 │  │    │    ├─ WASI context (stdio, preopened dirs)                 │    │
@@ -229,7 +229,7 @@ Python code and packages are made available via WASI filesystem mounting (preope
 ### How Mounting Works
 
 ```rust
-// In PythonExecutor::execute()
+// In Executor::execute()
 let mut wasi_ctx = WasiCtxBuilder::new()
     .inherit_stdio()    // stdout/stderr go to host
     .inherit_env();     // Pass through environment
@@ -829,7 +829,7 @@ use eryx::Sandbox;
 
 let sandbox = Sandbox::builder()
     .with_embedded_runtime()
-    .with_python_stdlib("/path/to/stdlib")  // Required for Python init
+    .with_stdlib("/path/to/stdlib")  // Required for Python init
     .build()?;
 
 let result = sandbox.execute("print('Hello, World!')").await?;
@@ -854,7 +854,7 @@ impl Callback for AddCallback {
 
 let sandbox = Sandbox::builder()
     .with_callback(AddCallback)
-    .with_python_stdlib("/path/to/stdlib")
+    .with_stdlib("/path/to/stdlib")
     .build()?;
 
 let result = sandbox.execute(r#"
@@ -877,8 +877,8 @@ for so_file in find_numpy_extensions("/tmp/numpy")? {
 
 // Mount Python files
 let sandbox = builder
-    .with_python_stdlib("/path/to/stdlib")
-    .with_site_packages("/tmp")  // Contains numpy/
+    .with_stdlib("/path/to/stdlib")
+    .with_library_path("/tmp")  // Contains numpy/
     .build()?;
 
 let result = sandbox.execute(r#"
@@ -1161,7 +1161,7 @@ Results:
 
 The sandbox builder now automatically searches for Python stdlib in these locations:
 
-1. `ERYX_PYTHON_STDLIB` environment variable
+1. `ERYX_STDLIB` (or the older `ERYX_PYTHON_STDLIB`) environment variable
 2. `./python-stdlib` (current directory)
 3. `<exe_dir>/python-stdlib` (relative to executable)
 4. `<exe_dir>/../python-stdlib` (parent of executable)
@@ -1216,7 +1216,7 @@ eryx/
 ├── crates/eryx/                     (Host crate)
 │   ├── src/
 │   │   ├── sandbox.rs               (8KB) - Sandbox API
-│   │   ├── wasm.rs                  (12KB) - PythonExecutor
+│   │   ├── wasm.rs                  (12KB) - Executor
 │   │   ├── session/                 - Session management
 │   │   └── lib.rs                   - Public exports
 │   └── examples/

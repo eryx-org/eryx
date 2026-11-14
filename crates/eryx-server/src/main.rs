@@ -348,7 +348,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             unsafe {
                 Sandbox::builder()
                     .with_precompiled_file(cwasm_path)
-                    .with_python_stdlib(stdlib_path)
+                    .with_stdlib(stdlib_path)
             }
         }
         (Some(cwasm_path), None) => {
