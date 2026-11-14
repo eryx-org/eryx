@@ -2852,6 +2852,9 @@ impl<L: GuestLanguage> SandboxBuilder<L, state::Has> {
         if self.stdlib_path.is_some() {
             python_only.push("a stdlib");
         }
+        if self.library_path.is_some() {
+            python_only.push("site-packages");
+        }
         if !self.packages.is_empty() {
             python_only.push("packages");
         }
@@ -4027,6 +4030,21 @@ mod tests {
             .unwrap_err();
         assert!(
             matches!(err.kind(), ErrorKind::Initialization(msg) if msg.contains("javascript")),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn site_packages_do_not_carry_over_to_another_language() {
+        let err = Sandbox::builder()
+            .with_wasm_bytes(vec![])
+            .with_site_packages("/fake/site-packages")
+            .shell()
+            .build()
+            .unwrap_err();
+        assert!(
+            matches!(err.kind(), ErrorKind::Initialization(msg)
+                if msg.contains("site-packages") && msg.contains("shell")),
             "{err}"
         );
     }
