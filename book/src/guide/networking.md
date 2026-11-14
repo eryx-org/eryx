@@ -71,6 +71,7 @@ The default `NetConfig` has sensible security defaults:
 | `allowed_networks` | `[]` | CIDRs exempt from `blocked_networks` |
 | `internal_hosts` | `[]` | Host patterns allowed to resolve into `blocked_networks` |
 | `allow_plaintext_secrets` | `false` | Also substitute [secrets](./secrets.md#plain-http) over plain TCP (sends them unencrypted) |
+| `http_rules` | `[]` | [Method and path rules](#method-and-path-rules) for HTTP requests |
 
 A bare `NetConfig()` allows no hosts: list them in `allowed_hosts`, or pass
 `allow_all_hosts=True` to allow any host that isn't blocked.
@@ -203,6 +204,65 @@ whatever it returns.
 In JavaScript, the same options are `blockedNetworks`, `allowedNetworks` and
 `internalHosts`. They're enforced in Node.js only: browsers don't expose the
 address a request connects to.
+
+## Method and Path Rules
+
+Allowing a host allows every endpoint on it. To narrow that, add HTTP rules:
+a host that any rule matches only accepts requests matching one of its rules.
+Hosts no rule matches are unaffected.
+
+```python
+import eryx
+
+config = eryx.NetConfig(
+    allowed_hosts=["api.github.com"],
+    http_rules=[
+        eryx.HttpRule("api.github.com", methods=["GET", "POST"], paths=["/repos/org/repo"]),
+    ],
+)
+```
+
+From Rust, use `NetConfig::allow_http(HttpRule::new(host).with_methods(..).with_paths(..))`;
+over gRPC, `NetworkConfig.http_rules`.
+
+How requests match:
+
+- **Methods** are compared ignoring case. No methods means any method.
+- **Paths** match whole segments: `/repos/org/repo` matches it and anything
+  under `/repos/org/repo/`, but not `/repos/org/repo-evil`. A path ending in
+  `/` matches anything under it. No paths means any path.
+- The query string is ignored, and percent-escapes are decoded before matching
+  (`/repos/org/%72epo` is `/repos/org/repo`).
+- A path a server could resolve somewhere else never matches: one with a `.`
+  or `..` segment (escaped as `%2e` or not, or with `;` parameters, as in
+  `..;`), an empty segment (`//`), an escaped `/` or `\`, or a malformed
+  escape. So does a target that isn't a path or an absolute URL (`CONNECT`,
+  `OPTIONS *`).
+- A rule's own paths must be normalized absolute paths: no such segments,
+  query or escapes. A rule that breaks this is rejected when the sandbox is
+  built.
+
+A refused request is never sent: the write fails in the sandbox (an `OSError`
+in Python) and the connection's request can't continue.
+
+Once any rule is set, every connection's HTTP/1.1 requests are parsed and
+checked against both the connected host and every host the request names (its
+`Host` header and an absolute-form target), so another allowed host on the
+same server can't be used to reach a ruled one. Requests whose framing a server
+could read differently are refused: bare CR or LF, folded header lines, a
+`Transfer-Encoding` other than `chunked`, both that and `Content-Length`, or
+more than one length. Only HTTP/1.1 may be sent to a host with rules, so
+HTTP/2, WebSockets after the upgrade, and TLS done by the sandboxed code itself
+are refused there.
+
+Data that isn't HTTP is still passed through on connections to hosts without
+rules. If sandboxed code does its own TLS (e.g. with a pure-Python TLS library)
+to another allowed host served by the same server, the host can't see the
+request inside, so rules on that server's other names don't apply to it. Avoid
+allowing other names on a server whose ruled name matters.
+
+The JavaScript package doesn't parse requests, so it refuses `httpRules`
+rather than ignoring them.
 
 ## Permissive Configuration
 

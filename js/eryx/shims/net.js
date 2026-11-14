@@ -117,13 +117,18 @@ function checkTimeout(name, value) {
  * Check `netConfig` and fill in the defaults; null disables networking.
  *
  * Throws a TypeError if a network is not a valid CIDR, maxConnections is
- * not a non-negative integer, or a timeout is not greater than zero.
+ * not a non-negative integer, a timeout is not greater than zero, or
+ * httpRules (the Rust crate's method and path rules) are given.
  *
  * @param {import("./net.js").NetConfig | null} netConfig
  * @returns {Policy | null}
  */
 function toPolicy(netConfig) {
   if (!netConfig) return null;
+  // Requests aren't parsed here, so rules couldn't be enforced.
+  if (netConfig.httpRules?.length) {
+    throw new TypeError("httpRules are not supported by the JavaScript host");
+  }
   // Copies, so changing the caller's arrays later can't change the policy.
   const list = (xs, fallback) => Object.freeze([...(xs ?? fallback)]);
   const next = {
