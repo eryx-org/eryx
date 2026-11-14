@@ -110,6 +110,10 @@ when the value is split across reads: bytes that may be the start of a secret
 are held back for up to 100 ms waiting for the rest. Only verbatim copies are
 replaced; compressed, chunk-split or otherwise encoded copies are passed through
 unchanged.
+The sandbox picks the encoding, too: a secret allowed in `Authorization` can be
+sent base64-wrapped as `Basic` credentials (e.g. `Basic b64("x:PLACEHOLDER")`),
+so an allowed host that echoes request headers returns the base64 of the real
+value, which isn't masked.
 
 ## Plain HTTP
 
