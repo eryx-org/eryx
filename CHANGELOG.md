@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## `eryx-precompile` - [0.15.1](https://github.com/eryx-org/eryx/compare/eryx-precompile-v0.15.0...eryx-precompile-v0.15.1) - 2026-11-14
+
+### Other
+- update Cargo.lock dependencies
+
 ## `eryx-precompile` - [0.15.0](https://github.com/eryx-org/eryx/compare/eryx-precompile-v0.14.0...eryx-precompile-v0.15.0) - 2026-11-12
 
 ### Other
