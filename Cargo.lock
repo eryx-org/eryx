@@ -1187,7 +1187,10 @@ name = "eryx-build"
 version = "0.15.0"
 dependencies = [
  "anyhow",
+ "hex",
  "serde",
+ "serde_json",
+ "sha2 0.11.1",
  "toml",
 ]
 

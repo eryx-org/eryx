@@ -12,6 +12,8 @@
 
 name = "coreutils"
 description = "uutils coreutils (Rust, wasip2, multicall)"
+# SPDX expression for the upstream source, recorded in provenance.json.
+license = "MIT"
 lang = "rust"
 
 [source]

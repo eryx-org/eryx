@@ -45,6 +45,8 @@ pub fn build(manifest: &Manifest) -> Result<()> {
     let mut args: Vec<String> = vec![
         "build".into(),
         "--release".into(),
+        // Build exactly the pinned lockfile (after any vendor_patch updates it).
+        "--locked".into(),
         "--target".into(),
         "wasm32-wasip2".into(),
         "--bin".into(),

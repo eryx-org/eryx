@@ -8,6 +8,8 @@
 
 name = "curl"
 description = "curl (C, CMake; HTTPS via mbedTLS)"
+# SPDX expression for the upstream source, recorded in provenance.json.
+license = "curl"
 lang = "c"
 
 [source]
@@ -21,6 +23,7 @@ dir = "scratch/curl"
 name = "mbedtls"
 url = "https://github.com/Mbed-TLS/mbedtls/releases/download/mbedtls-3.6.6/mbedtls-3.6.6.tar.bz2"
 ref = "3.6.6"
+license = "Apache-2.0 OR GPL-2.0-or-later"
 dir = "scratch/mbedtls"
 system = "cmake"
 include = "include"

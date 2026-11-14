@@ -8,6 +8,8 @@
 
 name = "gh"
 description = "GitHub CLI"
+# SPDX expression for the upstream source, recorded in provenance.json.
+license = "MIT"
 lang = "go"
 
 [source]

@@ -15,7 +15,7 @@ set -euo pipefail
 [ -f Cargo.lock ] || { echo "patch-sd-wasip2: Cargo.lock not found (wrong dir?)" >&2; exit 1; }
 
 # rustix: bump the 0.38.x line (terminal_size's dep) to a wasip2-clean release.
-cargo update -p rustix --precise 0.38.44
+cargo update -p rustix@0.38 --precise 0.38.44
 # tempfile: 3.27.0 builds on wasip2 (and pulls rustix 1.x for its own use).
 cargo update -p tempfile --precise 3.27.0
 

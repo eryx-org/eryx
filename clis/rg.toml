@@ -7,6 +7,8 @@
 
 name = "rg"
 description = "ripgrep (Rust, wasip2)"
+# SPDX expression for the upstream source, recorded in provenance.json.
+license = "Unlicense OR MIT"
 lang = "rust"
 
 [source]

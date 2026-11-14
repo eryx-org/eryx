@@ -8,6 +8,8 @@
 
 name = "sd"
 description = "sd — intuitive find & replace (Rust, wasip2)"
+# SPDX expression for the upstream source, recorded in provenance.json.
+license = "MIT"
 lang = "rust"
 
 [source]

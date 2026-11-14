@@ -9,8 +9,9 @@
 #   the slow one.
 # - Everything weekly, to catch upstream and toolchain bit-rot, and on demand.
 #
-# The built components are uploaded as workflow artifacts for testing only.
-# They are not a release channel.
+# Each component is uploaded as a workflow artifact with its manifest.toml and
+# provenance.json (see crates/eryx-build/src/provenance.rs), for testing and
+# for #809 to consume. Workflow artifacts are not a release channel.
 
 name: CLI components
 
@@ -129,8 +130,10 @@ jobs:
         with:
           name: ${{ matrix.cli }}-component
           path: |
-            scratch/${{ matrix.cli }}-component/*.wasm
+            scratch/${{ matrix.cli }}-component/component.wasm
             scratch/${{ matrix.cli }}-component/*.cwasm
+            scratch/${{ matrix.cli }}-component/manifest.toml
+            scratch/${{ matrix.cli }}-component/provenance.json
           if-no-files-found: error
           retention-days: 14
 
@@ -165,7 +168,11 @@ jobs:
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: ${{ matrix.cli }}-component
-          path: scratch/${{ matrix.cli }}-component/component.wasm
+          path: |
+            scratch/${{ matrix.cli }}-component/component.wasm
+            scratch/${{ matrix.cli }}-component/*.cwasm
+            scratch/${{ matrix.cli }}-component/manifest.toml
+            scratch/${{ matrix.cli }}-component/provenance.json
           if-no-files-found: error
           retention-days: 14
 
@@ -206,6 +213,10 @@ jobs:
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: gh-component
-          path: scratch/gh-component/component.wasm
+          path: |
+            scratch/gh-component/component.wasm
+            scratch/gh-component/*.cwasm
+            scratch/gh-component/manifest.toml
+            scratch/gh-component/provenance.json
           if-no-files-found: error
           retention-days: 14

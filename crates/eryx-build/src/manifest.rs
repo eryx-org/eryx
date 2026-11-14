@@ -18,6 +18,8 @@ pub struct Manifest {
     /// Human-readable description.
     #[serde(default)]
     pub description: String,
+    /// SPDX license expression of the upstream source.
+    pub license: String,
     /// Build lane selecting the toolchain.
     pub lang: Lang,
     /// Upstream source location.
@@ -56,6 +58,8 @@ pub struct Dep {
     /// Pinned version/ref.
     #[serde(rename = "ref", default)]
     pub git_ref: String,
+    /// SPDX license expression of the dependency's source.
+    pub license: String,
     /// Local source dir, relative to the repo root.
     pub dir: PathBuf,
     /// Build system (currently only `cmake` is supported for deps).
@@ -239,6 +243,7 @@ mod tests {
     fn parses_c_lane_manifest() {
         let toml = r#"
             name = "sqlite3"
+            license = "MIT"
             lang = "c"
             [source]
             repo = "https://example.com/sqlite.zip"
@@ -271,6 +276,7 @@ mod tests {
     fn parses_c_cmake_manifest() {
         let toml = r#"
             name = "curl"
+            license = "MIT"
             lang = "c"
             [source]
             repo = "https://github.com/curl/curl.git"
@@ -300,6 +306,7 @@ mod tests {
     fn parses_rust_lane_manifest() {
         let toml = r#"
             name = "rg"
+            license = "MIT"
             lang = "rust"
             [source]
             repo = "https://github.com/BurntSushi/ripgrep.git"
@@ -324,6 +331,7 @@ mod tests {
     fn parses_build_env() {
         let toml = r#"
             name = "coreutils"
+            license = "MIT"
             lang = "rust"
             [source]
             repo = "https://github.com/uutils/coreutils.git"
@@ -349,6 +357,7 @@ mod tests {
     fn parses_deps() {
         let toml = r#"
             name = "curl"
+            license = "MIT"
             lang = "c"
             [source]
             repo = "https://github.com/curl/curl.git"
@@ -360,6 +369,7 @@ mod tests {
             cmake_flags = ["-DMBEDTLS_LIBRARY={dep:mbedtls:build}/library/libmbedtls.a"]
             [[deps]]
             name = "mbedtls"
+            license = "Apache-2.0"
             url = "https://example.com/mbedtls-3.6.6.tar.bz2"
             ref = "3.6.6"
             dir = "scratch/mbedtls"
@@ -383,6 +393,7 @@ mod tests {
         // A manifest without [[deps]] defaults to empty.
         let no_deps = r#"
             name = "sqlite3"
+            license = "MIT"
             lang = "c"
             [source]
             repo = "x"
@@ -403,6 +414,7 @@ mod tests {
     fn go_lane_manifest_leaves_c_fields_empty() {
         let toml = r#"
             name = "gh"
+            license = "MIT"
             lang = "go"
             [source]
             repo = "https://github.com/cli/cli.git"

@@ -15,7 +15,9 @@
 //! ```
 //!
 //! Run from the repo root (the mise `build-cli` task does this). A missing
-//! source or dependency dir is fetched from the manifest's pinned URL first.
+//! source or dependency dir is fetched from the manifest's pinned URL first,
+//! and the output dir gets a provenance record next to the component (see
+//! `provenance`).
 //! Toolchains (`cargo`, `wasm-tools`, `wasmtime`, `git`, `curl`) come from
 //! PATH; the C lane also needs `WASI_SDK_PATH`, and the Go lane the wasip3 Go
 //! fork (see `lanes::go`).
@@ -23,6 +25,7 @@
 mod fetch;
 mod lanes;
 mod manifest;
+mod provenance;
 
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -65,7 +68,8 @@ fn run(args: &[String]) -> Result<()> {
                 manifest.source.git_ref,
             );
             fetch::sources(&manifest)?;
-            lanes::build(&manifest)
+            lanes::build(&manifest)?;
+            provenance::write(&manifest, &path)
         }
     }
 }

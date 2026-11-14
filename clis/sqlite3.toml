@@ -6,6 +6,8 @@
 
 name = "sqlite3"
 description = "SQLite CLI (C, built from the amalgamation)"
+# SPDX expression for the upstream source, recorded in provenance.json.
+license = "blessing"
 lang = "c"
 
 [source]
