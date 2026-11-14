@@ -19,10 +19,21 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::io::Write as _;
 
+use brush_core::extensions::{DefaultErrorFormatter, DefaultTaskSpawner, ProcessLauncher, ShellExtensionsImpl};
+use brush_core::openfiles::OpenFiles;
+use brush_core::processes::{ChildProcess, LaunchRequest};
 use brush_core::{
-    ExecutionContext, ExecutionParameters, ExecutionResult, Shell, ShellExtensions, SourceInfo,
-    builtins, error,
+    ExecutionContext, ExecutionParameters, ExecutionResult, ShellExtensions, SourceInfo, builtins,
+    error,
 };
+
+/// brush with external commands launched as eryx child components.
+type Ext = ShellExtensionsImpl<DefaultErrorFormatter, EryxLauncher, DefaultTaskSpawner>;
+type Shell = brush_core::Shell<Ext>;
+
+/// Where host commands appear to live. Nothing is there: the shell finds them
+/// through its command table, which `register_builtins` seeds.
+const COMMAND_DIR: &str = "/eryx/bin";
 
 wit_bindgen::generate!({
     path: "wit",
@@ -42,20 +53,27 @@ fn block_on<F: Future>(f: F) -> F::Output {
     RUNTIME.with(|rt| rt.block_on(f))
 }
 
-/// Register brush's bash builtins plus one `invoke` builtin per host callback.
+/// Register brush's bash builtins, one `invoke` builtin per host callback, and
+/// the host's commands in the command table.
+// ponytail: commands live only in the hash table, so `hash -r`, `type` and
+// `command -v` don't see them; a read-only /eryx/bin in the VFS fixes that (#809).
 fn register_builtins(shell: &mut Shell) {
     for (name, reg) in brush_builtins::default_builtins(brush_builtins::BuiltinSet::BashMode) {
-        shell.register_builtin(name, reg);
+        shell.builtins_mut().register(name, reg);
     }
-    shell.register_builtin("invoke", builtins::simple_builtin::<InvokeCommand, _>());
+    shell.builtins_mut().register("invoke", builtins::Registration::of::<InvokeCommand>());
     for cb in list_callbacks() {
-        shell.register_builtin(cb.name, builtins::simple_builtin::<InvokeCommand, _>());
+        shell.builtins_mut().register(cb.name, builtins::Registration::of::<InvokeCommand>());
+    }
+    for name in eryx::process::process::list_commands() {
+        let path = std::path::Path::new(COMMAND_DIR).join(&name);
+        shell.program_location_cache_mut().set(name, path);
     }
 }
 
 fn new_shell() -> Shell {
-    brush_core::sys::process::set_spawn_handler(Box::new(spawn));
-    let mut shell = block_on(Shell::builder().build()).expect("failed to create shell");
+    let mut shell = block_on(brush_core::Shell::builder_with_extensions::<Ext>().build())
+        .expect("failed to create shell");
     register_builtins(&mut shell);
     shell
 }
@@ -151,60 +169,99 @@ impl Guest for Sandbox {
 
 export!(Sandbox);
 
-/// brush's external-command hook: run `cmd` as a host child component.
-fn spawn(
-    cmd: &str,
-    args: &[String],
-    env: Vec<(String, String)>,
-    cwd: &str,
-) -> brush_core::sys::process::SpawnResult {
-    use brush_core::sys::process::SpawnError;
-    use eryx::process::process::{Child, ProcessError};
-    match Child::spawn(cmd, args, &env, cwd) {
-        Ok(child) => Ok(Box::new(ChildHandle(child))),
-        Err(ProcessError::CommandNotFound) => Err(SpawnError::NotFound(cmd.to_owned())),
-        Err(e) => Err(SpawnError::Failed(format!("{e:?}"))),
+/// Launches external commands as eryx child components, in batch: the child
+/// gets all of its stdin once the writer is done, then its output is written
+/// to the shell's stdout and stderr.
+#[derive(Clone, Default)]
+struct EryxLauncher;
+
+impl ProcessLauncher for EryxLauncher {
+    fn spawn(&self, request: LaunchRequest) -> std::io::Result<ChildProcess> {
+        use eryx::process::process::{Child, ProcessError};
+        let name = request
+            .program
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or(&request.argv0)
+            .to_owned();
+        let cwd = request.working_dir.to_string_lossy().into_owned();
+        let child = match Child::spawn(&name, &request.args, &request.env, &cwd) {
+            Ok(child) => child,
+            Err(ProcessError::CommandNotFound) => return Err(std::io::ErrorKind::NotFound.into()),
+            Err(e) => return Err(std::io::Error::other(format!("{name}: {e:?}"))),
+        };
+        let mut files = request.open_files;
+        Ok(ChildProcess::from_future(run_child(child, std::mem::take(&mut files))))
     }
 }
-
-struct ChildHandle(eryx::process::process::Child);
 
 fn io_err(e: eryx::process::process::ProcessError) -> std::io::Error {
     std::io::Error::other(format!("{e:?}"))
 }
 
-impl brush_core::sys::process::ExternalChild for ChildHandle {
-    fn write_stdin(&mut self, data: &[u8]) -> std::io::Result<usize> {
-        self.0.write_stdin(data).map(|n| n as usize).map_err(io_err)
+async fn run_child(
+    child: eryx::process::process::Child,
+    mut files: OpenFiles,
+) -> std::io::Result<ExecutionResult> {
+    use std::io::Read as _;
+    // An empty wasm pipe reports WouldBlock while its writer still runs; yield
+    // so that pipeline stage can make progress, and stop at end-of-file.
+    if let Some(mut stdin) = files.remove_fd(OpenFiles::STDIN_FD) {
+        let mut buf = [0; 64 * 1024];
+        loop {
+            match stdin.read(&mut buf) {
+                Ok(0) => break,
+                Ok(n) => {
+                    child.write_stdin(&buf[..n]).map_err(io_err)?;
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    tokio::task::yield_now().await;
+                }
+                Err(e) => return Err(e),
+            }
+        }
     }
-
-    fn close_stdin(&mut self) {
-        self.0.close_stdin();
+    child.close_stdin();
+    let code = child.wait().map_err(io_err)?;
+    for (fd, read) in [
+        (OpenFiles::STDOUT_FD, 0u8),
+        (OpenFiles::STDERR_FD, 1u8),
+    ] {
+        let Some(mut out) = files.remove_fd(fd) else {
+            continue;
+        };
+        loop {
+            let data = if read == 0 {
+                child.read_stdout(64 * 1024)
+            } else {
+                child.read_stderr(64 * 1024)
+            }
+            .map_err(io_err)?;
+            if data.is_empty() {
+                break;
+            }
+            // A reader that went away (`| head`) is not this command's failure.
+            if let Err(e) = out.write_all(&data) {
+                if e.kind() == std::io::ErrorKind::BrokenPipe {
+                    break;
+                }
+                return Err(e);
+            }
+        }
+        let _ = out.flush();
     }
-
-    fn read_stdout(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-        let data = self.0.read_stdout(buf.len() as u32).map_err(io_err)?;
-        buf[..data.len()].copy_from_slice(&data);
-        Ok(data.len())
-    }
-
-    fn read_stderr(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-        let data = self.0.read_stderr(buf.len() as u32).map_err(io_err)?;
-        buf[..data.len()].copy_from_slice(&data);
-        Ok(data.len())
-    }
-
-    fn wait(&mut self) -> std::io::Result<i32> {
-        self.0.wait().map_err(io_err)
-    }
+    Ok(ExecutionResult::new(u8::try_from(code & 0xff).unwrap_or(1)))
 }
 
 /// Runs a host callback: `<callback> [--key value]... [--json '{..}']`, or
 /// `invoke <callback> [json]`. Prints the JSON result (a bare string unquoted).
-struct InvokeCommand;
+struct InvokeCommand {
+    /// The callback name and its arguments.
+    args: Vec<String>,
+}
 
-impl builtins::SimpleCommand for InvokeCommand {
-    fn get_content(
+impl builtins::ParseArgs for InvokeCommand {
+    fn content(
         name: &str,
         content_type: builtins::ContentType,
         _options: &builtins::ContentOptions,
@@ -215,15 +272,24 @@ impl builtins::SimpleCommand for InvokeCommand {
         }
     }
 
-    fn execute<SE: ShellExtensions, I: Iterator<Item = S>, S: AsRef<str>>(
-        context: ExecutionContext<'_, SE>,
-        args: I,
-    ) -> Result<ExecutionResult, brush_core::Error> {
-        let mut args: Vec<String> = args.map(|s| s.as_ref().to_owned()).collect();
-        if args.first().is_some_and(|a| a == "invoke") {
-            args.remove(0);
+    fn parse(invocation: builtins::Invocation<'_>) -> Result<Self, builtins::UsageError> {
+        let name = invocation.name().to_owned();
+        let mut args: Vec<String> = invocation.into_args().iter().map(ToString::to_string).collect();
+        if name != "invoke" {
+            args.insert(0, name);
         }
-        let parsed = match args.split_first() {
+        Ok(Self { args })
+    }
+}
+
+impl<SE: ShellExtensions> builtins::Builtin<SE> for InvokeCommand {
+    type Error = brush_core::Error;
+
+    async fn execute(
+        self,
+        context: ExecutionContext<'_, SE>,
+    ) -> Result<ExecutionResult, Self::Error> {
+        let parsed = match self.args.split_first() {
             None => Err("usage: invoke <callback> [json]".to_owned()),
             Some((name, [json])) if !json.starts_with("--") => Ok((name.clone(), json.clone())),
             Some((name, rest)) => parse_flags(rest).map(|v| (name.clone(), v.to_string())),
@@ -236,7 +302,7 @@ impl builtins::SimpleCommand for InvokeCommand {
             }
         };
         // Sync builtin, async import: park on the call with waitable-set.wait.
-        match wit_bindgen::block_on(invoke(name, json)) {
+        match wit_bindgen::block_on(invoke(name.clone(), json)) {
             Ok(out) => {
                 let text = match serde_json::from_str::<serde_json::Value>(&out) {
                     Ok(serde_json::Value::String(s)) => s,
@@ -246,7 +312,7 @@ impl builtins::SimpleCommand for InvokeCommand {
                 Ok(ExecutionResult::new(0))
             }
             Err(e) => {
-                writeln!(context.stderr(), "{}: {e}", args[0])?;
+                writeln!(context.stderr(), "{name}: {e}")?;
                 Ok(ExecutionResult::new(1))
             }
         }

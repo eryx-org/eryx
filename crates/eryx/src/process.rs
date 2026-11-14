@@ -201,7 +201,13 @@ fn drain(buf: &mut Vec<u8>, max: u32) -> Vec<u8> {
     buf.drain(..n).collect()
 }
 
-impl Host for ExecutorState {}
+impl Host for ExecutorState {
+    async fn list_commands(&mut self) -> Vec<String> {
+        registry()
+            .map(|r| r.commands.keys().cloned().collect())
+            .unwrap_or_default()
+    }
+}
 
 impl HostChild for ExecutorState {
     async fn spawn(

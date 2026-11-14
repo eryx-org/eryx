@@ -15,6 +15,10 @@ interface process {
         io-error,
     }
 
+    /// Names of the commands the host can spawn. The shell seeds its command
+    /// table with these, since they aren't files on its `PATH`.
+    list-commands: func() -> list<string>;
+
     resource child {
         spawn: static func(
             cmd: string,

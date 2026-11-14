@@ -15,9 +15,10 @@ publish = false
 crate-type = ["cdylib"]
 
 [dependencies]
-# Same pinned fork as conch (adds the WASI external-command spawn handler).
-brush-core = { git = "https://github.com/sd2k/brush", rev = "94f4a936badaa16223cf736418f7b87c153ea960", default-features = false, features = ["serde"] }
-brush-builtins = { git = "https://github.com/sd2k/brush", rev = "94f4a936badaa16223cf736418f7b87c153ea960", default-features = false, features = [
+# Upstream main: it now has the host process-launcher hook (#1508), wasm
+# pipelines (#1489) and printf on WASI (#1567), none of them released yet.
+brush-core = { git = "https://github.com/reubeno/brush", rev = "6a688f19", default-features = false, features = ["serde"] }
+brush-builtins = { git = "https://github.com/reubeno/brush", rev = "6a688f19", default-features = false, features = [
     "builtin.echo",
     "builtin.printf",
     "builtin.true",

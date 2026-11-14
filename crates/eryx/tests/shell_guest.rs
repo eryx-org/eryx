@@ -114,7 +114,7 @@ async fn stdout_stderr_and_result_variable() {
 greet() { echo "hello, $1"; }
 greet world
 echo oops >&2
-for i in 1 2 3; do echo -n "$i,"; done; echo
+for i in 1 2 3; do printf '%s,' "$i"; done; echo
 result='{"sum": 3}'
 "#,
         )
@@ -140,10 +140,9 @@ async fn nonzero_exit_is_a_guest_exception_with_output() {
     assert_eq!(traceback, "exit status 3");
     assert_eq!(err.stdout(), Some(&b"before\n"[..]));
 
-    // A missing command is a script failure too. Without a spawn handler
-    // brush reports 126 ("not supported"), not bash's 127.
+    // A missing command is a script failure too, with bash's status.
     let err = sandbox.execute("no-such-command").await.unwrap_err();
-    assert!(err.to_string().contains("exit status 126"), "{err}");
+    assert!(err.to_string().starts_with("exit status 127"), "{err}");
 }
 
 #[tokio::test]
@@ -336,8 +335,7 @@ echo "n=$n"
         .unwrap();
     assert_eq!(out.stdout_utf8().unwrap(), "apple\nfig\n6\nn=42\n");
 
-    // Child exit codes propagate. (Unknown commands are still 126, not
-    // bash's 127: the brush fork falls through to a PATH search on NotFound.)
+    // Child exit codes propagate.
     let err = sandbox.execute("head --no-such-flag").await.unwrap_err();
     assert!(err.to_string().starts_with("exit status 1"), "{err}");
 }
