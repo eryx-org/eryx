@@ -1,9 +1,15 @@
 //! The guest language a sandbox runs.
+//!
+//! [`Language`] names a language at runtime. The marker types [`Python`],
+//! [`JavaScript`] and [`Shell`] name it at compile time, as the `Lang`
+//! parameter of [`SandboxBuilder`](crate::SandboxBuilder), so that
+//! language-specific options are only available for their language.
 
 /// The guest language a sandbox runs.
 ///
 /// Each language is a separate WebAssembly guest runtime behind the same host
-/// API. Select one with [`SandboxBuilder::with_language`](crate::SandboxBuilder::with_language).
+/// API. Select one with [`SandboxBuilder::javascript`](crate::SandboxBuilder::javascript)
+/// or [`SandboxBuilder::shell`](crate::SandboxBuilder::shell); the default is Python.
 ///
 /// Only [`Language::Python`] ships an embedded runtime today. The other
 /// languages need their runtime supplied explicitly (for example with
@@ -50,6 +56,46 @@ impl Language {
         }
     }
 }
+
+/// A guest language marker type, used as the `Lang` parameter of
+/// [`SandboxBuilder`](crate::SandboxBuilder).
+///
+/// Sealed: eryx defines the languages.
+pub trait GuestLanguage: sealed::Sealed + Send + Sync + 'static {
+    /// The language this marker stands for.
+    const LANGUAGE: Language;
+}
+
+mod sealed {
+    pub trait Sealed {}
+}
+
+macro_rules! guest_language {
+    ($(#[$doc:meta])* $marker:ident) => {
+        $(#[$doc])*
+        #[derive(Debug, Clone, Copy, Default)]
+        pub struct $marker;
+
+        impl sealed::Sealed for $marker {}
+
+        impl GuestLanguage for $marker {
+            const LANGUAGE: Language = Language::$marker;
+        }
+    };
+}
+
+guest_language!(
+    /// CPython: [`Language::Python`].
+    Python
+);
+guest_language!(
+    /// JavaScript, via QuickJS: [`Language::JavaScript`].
+    JavaScript
+);
+guest_language!(
+    /// A bash-compatible shell: [`Language::Shell`].
+    Shell
+);
 
 impl std::fmt::Display for Language {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {

@@ -38,7 +38,7 @@ fn create_executor() -> Executor {
         let path = runtime_wasm_path();
         Executor::from_file(&path)
             .unwrap_or_else(|e| panic!("Failed to load runtime.wasm from {:?}: {}", path, e))
-            .with_stdlib(&stdlib_path)
+            .with_python_stdlib(&stdlib_path)
     }
 }
 

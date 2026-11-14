@@ -236,7 +236,7 @@ async fn warm_instances_are_kept_for_a_bounded_number_of_components() {
         // `with_precompiled_file` loads a new component each time.
         #[allow(unsafe_code)]
         let sandbox = unsafe { Sandbox::builder().with_precompiled_file(resources.runtime()) }
-            .with_stdlib(resources.stdlib())
+            .with_python_stdlib(resources.stdlib())
             .build()
             .unwrap();
         sandbox.execute("pass").await.unwrap();
@@ -264,7 +264,7 @@ async fn runtimes_without_preinit_are_not_warmed() {
     let stdlib = eryx::embedded::EmbeddedResources::get().unwrap().stdlib();
     let sandbox = Sandbox::builder()
         .with_wasm_file(wasm)
-        .with_stdlib(stdlib)
+        .with_python_stdlib(stdlib)
         .build()
         .unwrap();
 

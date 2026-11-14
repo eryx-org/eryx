@@ -173,7 +173,8 @@ fn stdlib_path() -> PathBuf {
 }
 
 /// Create a sandbox builder with networking enabled.
-fn sandbox_builder_with_network() -> eryx::SandboxBuilder<eryx::state::Has> {
+fn sandbox_builder_with_network() -> eryx::SandboxBuilder<eryx::language::Python, eryx::state::Has>
+{
     #[cfg(feature = "embedded")]
     {
         Sandbox::embedded()
@@ -184,7 +185,7 @@ fn sandbox_builder_with_network() -> eryx::SandboxBuilder<eryx::state::Has> {
         let stdlib_path = stdlib_path();
         Sandbox::builder()
             .with_wasm_file(runtime_wasm_path())
-            .with_stdlib(&stdlib_path)
+            .with_python_stdlib(&stdlib_path)
     }
 }
 

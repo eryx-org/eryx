@@ -719,12 +719,12 @@ impl SandboxFactory {
         let mut builder = unsafe {
             eryx::Sandbox::builder()
                 .with_precompiled_artifact(self.precompiled.clone())
-                .with_stdlib(&self.stdlib_path)
+                .with_python_stdlib(&self.stdlib_path)
                 .with_trace_collection(false)
         };
 
         if let Some(path) = site_packages_path {
-            builder = builder.with_library_path(path);
+            builder = builder.with_site_packages(path);
         }
 
         if let Some(limits) = resource_limits {
@@ -891,11 +891,11 @@ impl SandboxFactory {
             let mut builder = unsafe {
                 eryx::Sandbox::builder()
                     .with_precompiled_artifact(precompiled.clone())
-                    .with_stdlib(&stdlib_path)
+                    .with_python_stdlib(&stdlib_path)
                     .with_trace_collection(false)
             };
             if let Some(ref path) = site_packages_path {
-                builder = builder.with_library_path(path);
+                builder = builder.with_site_packages(path);
             }
             if let Some(ref net) = network {
                 builder = builder.with_network(net.clone());

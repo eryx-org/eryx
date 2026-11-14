@@ -22,7 +22,7 @@ fn crates_dir() -> PathBuf {
         .to_path_buf()
 }
 
-fn sandbox_builder() -> eryx::SandboxBuilder<eryx::state::Has> {
+fn sandbox_builder() -> eryx::SandboxBuilder<eryx::language::Python, eryx::state::Has> {
     #[cfg(feature = "embedded")]
     {
         Sandbox::embedded()
@@ -36,7 +36,7 @@ fn sandbox_builder() -> eryx::SandboxBuilder<eryx::state::Has> {
         );
         Sandbox::builder()
             .with_wasm_file(crates_dir().join("eryx-runtime/runtime.wasm"))
-            .with_stdlib(&stdlib)
+            .with_python_stdlib(&stdlib)
     }
 }
 

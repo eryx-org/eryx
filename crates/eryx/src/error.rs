@@ -282,11 +282,11 @@ pub enum ErrorKind {
 
     /// The language's stdlib was not found during auto-detection.
     ///
-    /// Use [`SandboxBuilder::with_stdlib()`](crate::SandboxBuilder::with_stdlib)
+    /// Use [`SandboxBuilder::with_python_stdlib()`](crate::SandboxBuilder::with_python_stdlib)
     /// to specify the stdlib path explicitly, or enable the `embedded` feature and use
     /// [`Sandbox::embedded()`](crate::Sandbox::embedded).
     #[error(
-        "{language} stdlib not found. Set ERYX_STDLIB, use with_stdlib(), or use Sandbox::embedded()"
+        "{language} stdlib not found. Set ERYX_STDLIB, use with_python_stdlib(), or use Sandbox::embedded()"
     )]
     #[non_exhaustive]
     MissingStdlib {

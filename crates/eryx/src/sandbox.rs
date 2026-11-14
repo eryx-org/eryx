@@ -123,7 +123,7 @@ use crate::callback_handler::{
     run_callback_handler, run_net_handler, run_output_collector, run_trace_collector,
 };
 use crate::error::{Error, ErrorKind};
-use crate::language::Language;
+use crate::language::{GuestLanguage, JavaScript, Language, Python, Shell};
 use crate::library::RuntimeLibrary;
 use crate::net::{ConnectionManager, NetConfig};
 use crate::trace::{OutputHandler, TraceEvent, TraceHandler};
@@ -220,14 +220,14 @@ impl Sandbox {
     /// ```rust,ignore
     /// let sandbox = Sandbox::builder()
     ///     .with_wasm_file("runtime.wasm")
-    ///     .with_stdlib("/path/to/stdlib")
+    ///     .with_python_stdlib("/path/to/stdlib")
     ///     .build()?;
     /// ```
     ///
     /// Or use [`Sandbox::embedded()`] for zero-config setup when the `embedded`
     /// feature is enabled.
     #[must_use]
-    pub fn builder() -> SandboxBuilder<state::Needs> {
+    pub fn builder() -> SandboxBuilder<Python, state::Needs> {
         SandboxBuilder::new()
     }
 
@@ -245,7 +245,7 @@ impl Sandbox {
     /// ```
     #[cfg(feature = "embedded")]
     #[must_use]
-    pub fn embedded() -> SandboxBuilder<state::Has> {
+    pub fn embedded() -> SandboxBuilder<Python, state::Has> {
         SandboxBuilder::new_embedded()
     }
 
@@ -1457,10 +1457,15 @@ impl std::fmt::Debug for PrecompiledFileSource {
 /// Builder for constructing a [`Sandbox`].
 ///
 /// Type parameters track configuration state at compile time:
+/// - `Lang`: The guest language ([`Python`] by default; switch with
+///   [`javascript()`](SandboxBuilder::javascript) or [`shell()`](SandboxBuilder::shell)).
+///   Language-specific options, such as the Python stdlib, are only available
+///   for their language.
 /// - `Runtime`: Whether WASM runtime is configured ([`state::Needs`] or [`state::Has`])
 ///
-/// The [`build()`](SandboxBuilder::build) method is only available once it is [`state::Has`].
-/// Per-language assets such as the Python stdlib are checked by `build()`.
+/// The [`build()`](SandboxBuilder::build) method is only available once the runtime is
+/// [`state::Has`]. It checks that a Python sandbox has a stdlib and that other
+/// languages have a runtime, and returns a [`Sandbox`] for any language.
 ///
 /// # Examples
 ///
@@ -1473,10 +1478,10 @@ impl std::fmt::Debug for PrecompiledFileSource {
 /// // Without embedded - specify the runtime, and the stdlib unless it can be found
 /// let sandbox = Sandbox::builder()
 ///     .with_wasm_file("runtime.wasm")
-///     .with_stdlib("/path/to/stdlib")
+///     .with_python_stdlib("/path/to/stdlib")
 ///     .build()?;
 /// ```
-pub struct SandboxBuilder<Runtime = state::Needs> {
+pub struct SandboxBuilder<Lang = Python, Runtime = state::Needs> {
     wasm_source: WasmSource,
     callbacks: HashMap<String, Arc<dyn Callback>>,
     /// First callback name registered twice; `build()` fails if set.
@@ -1489,8 +1494,6 @@ pub struct SandboxBuilder<Runtime = state::Needs> {
     resource_limits: ResourceLimits,
     /// Name of the user variable captured as the structured result. Default `result`.
     result_variable: String,
-    /// The guest language to run.
-    language: Language,
     /// Path to the guest's standard library (for Python, the CPython stdlib).
     stdlib_path: Option<std::path::PathBuf>,
     /// Path to a guest library directory (for Python, site-packages).
@@ -1523,17 +1526,17 @@ pub struct SandboxBuilder<Runtime = state::Needs> {
     /// Host filesystem volume mounts.
     #[cfg(feature = "unstable-vfs")]
     volumes: Vec<crate::session::VolumeMount>,
-    /// Phantom data for Runtime type parameter.
-    _runtime: PhantomData<Runtime>,
+    /// Phantom data for the Lang and Runtime type parameters.
+    _state: PhantomData<(Lang, Runtime)>,
 }
 
-impl Default for SandboxBuilder<state::Needs> {
+impl Default for SandboxBuilder<Python, state::Needs> {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl<R> std::fmt::Debug for SandboxBuilder<R> {
+impl<L, R> std::fmt::Debug for SandboxBuilder<L, R> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("SandboxBuilder")
             .field(
@@ -1551,7 +1554,7 @@ impl<R> std::fmt::Debug for SandboxBuilder<R> {
     }
 }
 
-impl SandboxBuilder<state::Needs> {
+impl SandboxBuilder<Python, state::Needs> {
     /// Create a new sandbox builder with default settings.
     ///
     /// You must configure a runtime source before building.
@@ -1569,7 +1572,6 @@ impl SandboxBuilder<state::Needs> {
             output_handler: None,
             resource_limits: ResourceLimits::default(),
             result_variable: "result".to_string(),
-            language: Language::Python,
             stdlib_path: None,
             library_path: None,
             #[cfg(feature = "native-extensions")]
@@ -1587,15 +1589,15 @@ impl SandboxBuilder<state::Needs> {
             scrub_files: crate::secrets::FileScrubPolicy::default(),
             #[cfg(feature = "unstable-vfs")]
             volumes: Vec::new(),
-            _runtime: PhantomData,
+            _state: PhantomData,
         }
     }
 }
 
 /// Create a builder pre-configured with embedded runtime and stdlib.
 #[cfg(feature = "embedded")]
-impl SandboxBuilder<state::Needs> {
-    fn new_embedded() -> SandboxBuilder<state::Has> {
+impl SandboxBuilder<Python, state::Needs> {
+    fn new_embedded() -> SandboxBuilder<Python, state::Has> {
         SandboxBuilder {
             wasm_source: WasmSource::EmbeddedRuntime,
             callbacks: HashMap::new(),
@@ -1607,7 +1609,6 @@ impl SandboxBuilder<state::Needs> {
             output_handler: None,
             resource_limits: ResourceLimits::default(),
             result_variable: "result".to_string(),
-            language: Language::Python,
             stdlib_path: None, // Will use embedded stdlib
             library_path: None,
             #[cfg(feature = "native-extensions")]
@@ -1625,15 +1626,15 @@ impl SandboxBuilder<state::Needs> {
             scrub_files: crate::secrets::FileScrubPolicy::default(),
             #[cfg(feature = "unstable-vfs")]
             volumes: Vec::new(),
-            _runtime: PhantomData,
+            _state: PhantomData,
         }
     }
 }
 
 // Helper for state transitions
-impl<R> SandboxBuilder<R> {
+impl<L, R> SandboxBuilder<L, R> {
     /// Internal: transition to new state while preserving all fields.
-    fn transition<R2>(self) -> SandboxBuilder<R2> {
+    fn transition<L2, R2>(self) -> SandboxBuilder<L2, R2> {
         SandboxBuilder {
             wasm_source: self.wasm_source,
             callbacks: self.callbacks,
@@ -1645,7 +1646,6 @@ impl<R> SandboxBuilder<R> {
             output_handler: self.output_handler,
             resource_limits: self.resource_limits,
             result_variable: self.result_variable,
-            language: self.language,
             stdlib_path: self.stdlib_path,
             library_path: self.library_path,
             #[cfg(feature = "native-extensions")]
@@ -1663,13 +1663,13 @@ impl<R> SandboxBuilder<R> {
             scrub_files: self.scrub_files,
             #[cfg(feature = "unstable-vfs")]
             volumes: self.volumes,
-            _runtime: PhantomData,
+            _state: PhantomData,
         }
     }
 }
 
-// Runtime transitions (Needs -> Has)
-impl SandboxBuilder<state::Needs> {
+// The embedded runtime is Python's
+impl SandboxBuilder<Python, state::Needs> {
     /// Explicitly use the embedded pre-compiled runtime.
     ///
     /// **Note:** You usually don't need to call this. When the `embedded`
@@ -1701,31 +1701,34 @@ impl SandboxBuilder<state::Needs> {
     /// **Note:** Consider using [`Sandbox::embedded()`] instead for cleaner code.
     #[cfg(feature = "embedded")]
     #[must_use]
-    pub fn with_embedded_runtime(mut self) -> SandboxBuilder<state::Has> {
+    pub fn with_embedded_runtime(mut self) -> SandboxBuilder<Python, state::Has> {
         self.wasm_source = WasmSource::EmbeddedRuntime;
         self.transition()
     }
+}
 
+// Runtime transitions (Needs -> Has)
+impl<L> SandboxBuilder<L, state::Needs> {
     /// Set the WASM component from bytes.
     ///
     /// Use this to embed the WASM component in your binary.
-    /// Configure the Python stdlib with [`with_stdlib()`](SandboxBuilder::with_stdlib)
+    /// Configure the Python stdlib with [`with_python_stdlib()`](SandboxBuilder::with_python_stdlib)
     /// unless the embedded or auto-detected one will do.
     #[must_use]
-    pub fn with_wasm_bytes(mut self, bytes: impl Into<Vec<u8>>) -> SandboxBuilder<state::Has> {
+    pub fn with_wasm_bytes(mut self, bytes: impl Into<Vec<u8>>) -> SandboxBuilder<L, state::Has> {
         self.wasm_source = WasmSource::Bytes(bytes.into());
         self.transition()
     }
 
     /// Set the WASM component from a file path.
     ///
-    /// Configure the Python stdlib with [`with_stdlib()`](SandboxBuilder::with_stdlib)
+    /// Configure the Python stdlib with [`with_python_stdlib()`](SandboxBuilder::with_python_stdlib)
     /// unless the embedded or auto-detected one will do.
     #[must_use]
     pub fn with_wasm_file(
         mut self,
         path: impl Into<std::path::PathBuf>,
-    ) -> SandboxBuilder<state::Has> {
+    ) -> SandboxBuilder<L, state::Has> {
         self.wasm_source = WasmSource::File(path.into());
         self.transition()
     }
@@ -1757,7 +1760,7 @@ impl SandboxBuilder<state::Needs> {
     /// let sandbox = unsafe {
     ///     Sandbox::builder()
     ///         .with_precompiled_bytes(precompiled)
-    ///         .with_stdlib("/path/to/stdlib")
+    ///         .with_python_stdlib("/path/to/stdlib")
     ///         .build()?
     /// };
     /// ```
@@ -1767,7 +1770,7 @@ impl SandboxBuilder<state::Needs> {
     pub unsafe fn with_precompiled_bytes(
         mut self,
         bytes: impl Into<Vec<u8>>,
-    ) -> SandboxBuilder<state::Has> {
+    ) -> SandboxBuilder<L, state::Has> {
         self.wasm_source = WasmSource::PrecompiledBytes(bytes.into());
         self.transition()
     }
@@ -1799,7 +1802,7 @@ impl SandboxBuilder<state::Needs> {
     pub unsafe fn with_precompiled_artifact(
         mut self,
         artifact: PrecompiledArtifact,
-    ) -> SandboxBuilder<state::Has> {
+    ) -> SandboxBuilder<L, state::Has> {
         self.wasm_source = WasmSource::PrecompiledArtifact(artifact);
         self.transition()
     }
@@ -1839,7 +1842,7 @@ impl SandboxBuilder<state::Needs> {
     /// let sandbox = unsafe {
     ///     Sandbox::builder()
     ///         .with_precompiled_file("runtime.cwasm")
-    ///         .with_stdlib("/path/to/stdlib")
+    ///         .with_python_stdlib("/path/to/stdlib")
     ///         .build()?
     /// };
     /// ```
@@ -1849,7 +1852,7 @@ impl SandboxBuilder<state::Needs> {
     pub unsafe fn with_precompiled_file(
         mut self,
         path: impl Into<std::path::PathBuf>,
-    ) -> SandboxBuilder<state::Has> {
+    ) -> SandboxBuilder<L, state::Has> {
         self.wasm_source = WasmSource::PrecompiledFile(Arc::new(PrecompiledFileSource {
             path: path.into(),
             artifact: crate::wasm::RetryableOnce::new(),
@@ -1858,39 +1861,20 @@ impl SandboxBuilder<state::Needs> {
     }
 }
 
-// Guest language and per-language assets
-impl<R> SandboxBuilder<R> {
-    /// Select the guest language to run (default [`Language::Python`]).
+// Python-only options
+impl<R> SandboxBuilder<Python, R> {
+    /// Set the path to the Python standard library directory.
     ///
-    /// Only Python has an embedded runtime: for another language, supply
-    /// its runtime with [`with_wasm_file()`](SandboxBuilder::with_wasm_file)
-    /// or a precompiled equivalent, or [`build()`](SandboxBuilder::build)
-    /// fails with [`ErrorKind::MissingRuntime`].
-    #[must_use]
-    pub fn with_language(mut self, language: Language) -> Self {
-        self.language = language;
-        self
-    }
-
-    /// Set the path to the guest's standard library directory.
-    ///
-    /// Only Python takes one. The directory should contain the extracted
-    /// CPython stdlib (e.g., from componentize-py's python-lib.tar.zst); it is
-    /// mounted at `/python-stdlib` inside the WASM sandbox. Without it, the
-    /// embedded stdlib is used if the `embedded` feature is enabled, and
-    /// otherwise one is searched for as by
+    /// The directory should contain the extracted CPython stdlib (e.g., from
+    /// componentize-py's python-lib.tar.zst); it is mounted at
+    /// `/python-stdlib` inside the WASM sandbox. Without it, the embedded
+    /// stdlib is used if the `embedded` feature is enabled, and otherwise one
+    /// is searched for as by
     /// [`with_auto_stdlib()`](SandboxBuilder::with_auto_stdlib).
     #[must_use]
-    pub fn with_stdlib(mut self, path: impl Into<std::path::PathBuf>) -> Self {
+    pub fn with_python_stdlib(mut self, path: impl Into<std::path::PathBuf>) -> Self {
         self.stdlib_path = Some(path.into());
         self
-    }
-
-    /// Deprecated name for [`with_stdlib`](Self::with_stdlib).
-    #[deprecated(since = "0.16.0", note = "renamed to `with_stdlib`")]
-    #[must_use]
-    pub fn with_python_stdlib(self, path: impl Into<std::path::PathBuf>) -> Self {
-        self.with_stdlib(path)
     }
 
     /// Auto-detect the Python stdlib from common locations.
@@ -1917,7 +1901,7 @@ impl<R> SandboxBuilder<R> {
         let path = find_stdlib().ok_or(ErrorKind::MissingStdlib {
             language: Language::Python,
         })?;
-        Ok(self.with_stdlib(path))
+        Ok(self.with_python_stdlib(path))
     }
 
     /// Use the embedded Python standard library.
@@ -1946,12 +1930,8 @@ impl<R> SandboxBuilder<R> {
     #[cfg(feature = "embedded-stdlib")]
     pub fn with_embedded_stdlib(self) -> Result<Self, Error> {
         let stdlib = crate::embedded_stdlib::EmbeddedStdlib::get()?;
-        Ok(self.with_stdlib(stdlib.path()))
+        Ok(self.with_python_stdlib(stdlib.path()))
     }
-}
-
-// Methods available in ANY state
-impl<R> SandboxBuilder<R> {
     /// Add a native Python extension (.so file) to be linked into the component.
     ///
     /// Native extensions allow Python packages with compiled code (like numpy)
@@ -1971,7 +1951,7 @@ impl<R> SandboxBuilder<R> {
     ///
     /// let sandbox = Sandbox::builder()
     ///     .with_native_extension("numpy/core/_multiarray_umath.cpython-314-wasm32-wasi.so", numpy_core)
-    ///     .with_library_path("path/to/site-packages")  // For Python files
+    ///     .with_site_packages("path/to/site-packages")  // For Python files
     ///     .build()?;
     ///
     /// // Now numpy can be imported!
@@ -2103,6 +2083,167 @@ impl<R> SandboxBuilder<R> {
         Ok(self)
     }
 
+    /// Set the path to additional Python packages directory.
+    ///
+    /// The directory will be mounted at `/site-packages` inside the WASM sandbox
+    /// and added to Python's import path.
+    #[must_use]
+    pub fn with_site_packages(mut self, path: impl Into<std::path::PathBuf>) -> Self {
+        self.library_path = Some(path.into());
+        self
+    }
+
+    /// Add a Python package from a wheel (.whl) or tar.gz archive.
+    ///
+    /// The package format is auto-detected from the file extension:
+    /// - `.whl` - Standard Python wheel (zip archive)
+    /// - `.tar.gz`, `.tgz` - Tarball (used by wasi-wheels)
+    /// - Directory - Used directly without extraction
+    ///
+    /// # Pure Python packages
+    ///
+    /// For pure-Python packages (no `.so` files), you can use `with_embedded_runtime()`:
+    ///
+    /// ```rust,ignore
+    /// let sandbox = Sandbox::builder()
+    ///     .with_embedded_runtime()
+    ///     .with_package("/path/to/requests-2.31.0-py3-none-any.whl")?
+    ///     .build()?;
+    /// ```
+    ///
+    /// # Packages with native extensions
+    ///
+    /// For packages containing native extensions (like numpy), the extensions are
+    /// automatically registered for late-linking. A cache is set up automatically
+    /// in the per-user eryx cache directory for fast subsequent sandbox creations:
+    ///
+    /// ```rust,ignore
+    /// let sandbox = Sandbox::builder()
+    ///     .with_package("/path/to/numpy-wasi.tar.gz")?
+    ///     .build()?;  // Caching is automatic!
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - The package format cannot be detected
+    /// - The archive cannot be read or extracted
+    pub fn with_package(mut self, path: impl AsRef<std::path::Path>) -> Result<Self, Error> {
+        let package = crate::package::ExtractedPackage::from_path(path)?;
+
+        tracing::info!(
+            name = %package.name,
+            has_native_extensions = package.has_native_extensions,
+            "Loaded package"
+        );
+
+        // Check for incompatible configuration
+        #[cfg(not(feature = "native-extensions"))]
+        if package.has_native_extensions {
+            return Err(ErrorKind::Initialization(format!(
+                "Package '{}' contains native extensions but the 'native-extensions' feature is not enabled. \
+                 Either use a pure-Python package or enable the 'native-extensions' feature.",
+                package.name
+            )).into());
+        }
+
+        // Store the extracted package - native extensions will be registered at build()
+        // time when we know the mount index for computing dlopen paths
+        self.packages.push(package);
+
+        Ok(self)
+    }
+
+    /// Load a Python package from raw bytes.
+    ///
+    /// This is useful when downloading packages from URLs. The format must be
+    /// specified explicitly since it cannot be detected from bytes alone.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// use eryx::{Sandbox, PackageFormat};
+    ///
+    /// // Download a package (using your preferred HTTP client)
+    /// let bytes = reqwest::get("https://example.com/numpy-wasi.tar.gz")
+    ///     .await?
+    ///     .bytes()
+    ///     .await?;
+    ///
+    /// let sandbox = Sandbox::builder()
+    ///     .with_package_bytes(&bytes, PackageFormat::TarGz, "numpy")?
+    ///     .build()?;
+    /// ```
+    ///
+    /// # Arguments
+    ///
+    /// * `bytes` - The raw package bytes
+    /// * `format` - The package format (Wheel or TarGz)
+    /// * `name_hint` - Package name hint used if detection fails (e.g., "numpy")
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - The format is `Directory` (not supported for bytes)
+    /// - The archive cannot be read or extracted
+    pub fn with_package_bytes(
+        mut self,
+        bytes: &[u8],
+        format: crate::package::PackageFormat,
+        name_hint: impl Into<String>,
+    ) -> Result<Self, Error> {
+        let package = crate::package::ExtractedPackage::from_bytes(bytes, format, name_hint)?;
+
+        tracing::info!(
+            name = %package.name,
+            has_native_extensions = package.has_native_extensions,
+            "Loaded package from bytes"
+        );
+
+        // Check for incompatible configuration
+        #[cfg(not(feature = "native-extensions"))]
+        if package.has_native_extensions {
+            return Err(ErrorKind::Initialization(format!(
+                "Package '{}' contains native extensions but the 'native-extensions' feature is not enabled. \
+                 Either use a pure-Python package or enable the 'native-extensions' feature.",
+                package.name
+            )).into());
+        }
+
+        // Store the extracted package - native extensions will be registered at build()
+        // time when we know the mount index for computing dlopen paths
+        self.packages.push(package);
+
+        Ok(self)
+    }
+}
+
+// Language transitions
+impl<L, R> SandboxBuilder<L, R> {
+    /// Run JavaScript instead.
+    ///
+    /// The language-neutral configuration (runtime source, callbacks, limits,
+    /// network, secrets, ...) carries over. Only Python has an embedded
+    /// runtime, so supply one with
+    /// [`with_wasm_file()`](SandboxBuilder::with_wasm_file) or a precompiled
+    /// equivalent, or [`build()`](SandboxBuilder::build) fails with
+    /// [`ErrorKind::MissingRuntime`]. Python-only options set earlier make
+    /// `build()` fail.
+    #[must_use]
+    pub fn javascript(self) -> SandboxBuilder<JavaScript, R> {
+        self.transition()
+    }
+
+    /// Run the shell instead. See [`javascript()`](SandboxBuilder::javascript)
+    /// for what carries over.
+    #[must_use]
+    pub fn shell(self) -> SandboxBuilder<Shell, R> {
+        self.transition()
+    }
+}
+
+// Methods available in ANY state
+impl<L, R> SandboxBuilder<L, R> {
     /// Add a runtime library (callbacks + preamble + stubs).
     ///
     /// A callback name registered twice makes [`build`](Self::build) fail.
@@ -2423,152 +2564,10 @@ impl<R> SandboxBuilder<R> {
         self.volumes.extend(volumes);
         self
     }
-
-    /// Set the path to a guest library directory (for Python, a
-    /// site-packages directory).
-    ///
-    /// The directory will be mounted at `/site-packages` inside the WASM sandbox
-    /// and added to Python's import path.
-    #[must_use]
-    pub fn with_library_path(mut self, path: impl Into<std::path::PathBuf>) -> Self {
-        self.library_path = Some(path.into());
-        self
-    }
-
-    /// Deprecated name for [`with_library_path`](Self::with_library_path).
-    #[deprecated(since = "0.16.0", note = "renamed to `with_library_path`")]
-    #[must_use]
-    pub fn with_site_packages(self, path: impl Into<std::path::PathBuf>) -> Self {
-        self.with_library_path(path)
-    }
-
-    /// Add a Python package from a wheel (.whl) or tar.gz archive.
-    ///
-    /// The package format is auto-detected from the file extension:
-    /// - `.whl` - Standard Python wheel (zip archive)
-    /// - `.tar.gz`, `.tgz` - Tarball (used by wasi-wheels)
-    /// - Directory - Used directly without extraction
-    ///
-    /// # Pure Python packages
-    ///
-    /// For pure-Python packages (no `.so` files), you can use `with_embedded_runtime()`:
-    ///
-    /// ```rust,ignore
-    /// let sandbox = Sandbox::builder()
-    ///     .with_embedded_runtime()
-    ///     .with_package("/path/to/requests-2.31.0-py3-none-any.whl")?
-    ///     .build()?;
-    /// ```
-    ///
-    /// # Packages with native extensions
-    ///
-    /// For packages containing native extensions (like numpy), the extensions are
-    /// automatically registered for late-linking. A cache is set up automatically
-    /// in the per-user eryx cache directory for fast subsequent sandbox creations:
-    ///
-    /// ```rust,ignore
-    /// let sandbox = Sandbox::builder()
-    ///     .with_package("/path/to/numpy-wasi.tar.gz")?
-    ///     .build()?;  // Caching is automatic!
-    /// ```
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if:
-    /// - The package format cannot be detected
-    /// - The archive cannot be read or extracted
-    pub fn with_package(mut self, path: impl AsRef<std::path::Path>) -> Result<Self, Error> {
-        let package = crate::package::ExtractedPackage::from_path(path)?;
-
-        tracing::info!(
-            name = %package.name,
-            has_native_extensions = package.has_native_extensions,
-            "Loaded package"
-        );
-
-        // Check for incompatible configuration
-        #[cfg(not(feature = "native-extensions"))]
-        if package.has_native_extensions {
-            return Err(ErrorKind::Initialization(format!(
-                "Package '{}' contains native extensions but the 'native-extensions' feature is not enabled. \
-                 Either use a pure-Python package or enable the 'native-extensions' feature.",
-                package.name
-            )).into());
-        }
-
-        // Store the extracted package - native extensions will be registered at build()
-        // time when we know the mount index for computing dlopen paths
-        self.packages.push(package);
-
-        Ok(self)
-    }
-
-    /// Load a Python package from raw bytes.
-    ///
-    /// This is useful when downloading packages from URLs. The format must be
-    /// specified explicitly since it cannot be detected from bytes alone.
-    ///
-    /// # Example
-    ///
-    /// ```rust,ignore
-    /// use eryx::{Sandbox, PackageFormat};
-    ///
-    /// // Download a package (using your preferred HTTP client)
-    /// let bytes = reqwest::get("https://example.com/numpy-wasi.tar.gz")
-    ///     .await?
-    ///     .bytes()
-    ///     .await?;
-    ///
-    /// let sandbox = Sandbox::builder()
-    ///     .with_package_bytes(&bytes, PackageFormat::TarGz, "numpy")?
-    ///     .build()?;
-    /// ```
-    ///
-    /// # Arguments
-    ///
-    /// * `bytes` - The raw package bytes
-    /// * `format` - The package format (Wheel or TarGz)
-    /// * `name_hint` - Package name hint used if detection fails (e.g., "numpy")
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if:
-    /// - The format is `Directory` (not supported for bytes)
-    /// - The archive cannot be read or extracted
-    pub fn with_package_bytes(
-        mut self,
-        bytes: &[u8],
-        format: crate::package::PackageFormat,
-        name_hint: impl Into<String>,
-    ) -> Result<Self, Error> {
-        let package = crate::package::ExtractedPackage::from_bytes(bytes, format, name_hint)?;
-
-        tracing::info!(
-            name = %package.name,
-            has_native_extensions = package.has_native_extensions,
-            "Loaded package from bytes"
-        );
-
-        // Check for incompatible configuration
-        #[cfg(not(feature = "native-extensions"))]
-        if package.has_native_extensions {
-            return Err(ErrorKind::Initialization(format!(
-                "Package '{}' contains native extensions but the 'native-extensions' feature is not enabled. \
-                 Either use a pure-Python package or enable the 'native-extensions' feature.",
-                package.name
-            )).into());
-        }
-
-        // Store the extracted package - native extensions will be registered at build()
-        // time when we know the mount index for computing dlopen paths
-        self.packages.push(package);
-
-        Ok(self)
-    }
 }
 
-// Build only available when BOTH runtime AND stdlib are configured
-impl SandboxBuilder<state::Has> {
+// Build only available once a runtime is configured
+impl<L: GuestLanguage> SandboxBuilder<L, state::Has> {
     /// Convert this builder into a reusable factory closure.
     ///
     /// The factory keeps the wasm source, language, stdlib and library paths,
@@ -2607,7 +2606,6 @@ impl SandboxBuilder<state::Has> {
             }
             source => source,
         };
-        let language = self.language;
         let stdlib_path = self.stdlib_path;
         let library_path = self.library_path;
         let result_variable = self.result_variable;
@@ -2616,12 +2614,11 @@ impl SandboxBuilder<state::Has> {
         Ok(Box::new(move || {
             let mut builder = SandboxBuilder::new();
             builder.wasm_source = wasm_source.clone();
-            builder.language = language;
             builder.stdlib_path = stdlib_path.clone();
             builder.library_path = library_path.clone();
             builder.result_variable = result_variable.clone();
             builder.collect_trace = collect_trace;
-            builder.transition::<state::Has>().build()
+            builder.transition::<L, state::Has>().build()
         }))
     }
 
@@ -2772,7 +2769,7 @@ impl SandboxBuilder<state::Has> {
         // failure to extract the embedded stdlib is an error rather than a
         // reason to go looking for a possibly mismatched one on disk. Only
         // Python has a stdlib.
-        let stdlib_path = match (self.language, self.stdlib_path.clone()) {
+        let stdlib_path = match (L::LANGUAGE, self.stdlib_path.clone()) {
             (Language::Python, None) => Some(default_python_stdlib()?),
             (_, path) => path,
         };
@@ -2786,7 +2783,7 @@ impl SandboxBuilder<state::Has> {
             library_paths.push(package.python_path.clone());
         }
 
-        let executor = executor.with_language(self.language);
+        let executor = executor.with_language(L::LANGUAGE);
         let executor = match stdlib_path {
             Some(stdlib) => executor.with_stdlib(&stdlib),
             None => executor,
@@ -2838,7 +2835,7 @@ impl SandboxBuilder<state::Has> {
 
     /// Check that the selected language can run with this configuration.
     fn check_language(&self) -> Result<(), Error> {
-        let language = self.language;
+        let language = L::LANGUAGE;
         if language == Language::Python {
             return Ok(());
         }
@@ -3739,7 +3736,7 @@ mod tests {
         // We can verify that a fully-configured builder does have build():
         let _builder = SandboxBuilder::new()
             .with_wasm_bytes(vec![])
-            .with_stdlib("/fake/path");
+            .with_python_stdlib("/fake/path");
         // _builder.build() would work here (though fail at runtime due to invalid WASM)
     }
 
@@ -3788,7 +3785,7 @@ mod tests {
         let builder = || {
             SandboxBuilder::new()
                 .with_wasm_bytes(vec![])
-                .with_stdlib("/fake/stdlib")
+                .with_python_stdlib("/fake/stdlib")
         };
         let library = RuntimeLibrary::new().with_callback(TestCallback);
         for result in [
@@ -3850,7 +3847,7 @@ mod tests {
         // that the builder pattern compiles correctly
         let builder = Sandbox::builder()
             .with_wasm_bytes(vec![]) // Invalid, but tests the API
-            .with_stdlib("/fake/stdlib") // Required for typestate
+            .with_python_stdlib("/fake/stdlib") // Required for typestate
             .with_callback(TestCallback)
             .with_resource_limits(ResourceLimits::default().with_max_callback_invocations(100));
 
@@ -3991,7 +3988,7 @@ mod tests {
     fn sandbox_builder_wasm_file_not_found() {
         let result = Sandbox::builder()
             .with_wasm_file("/nonexistent/path/to/runtime.wasm")
-            .with_stdlib("/fake/stdlib")
+            .with_python_stdlib("/fake/stdlib")
             .build();
 
         assert!(result.is_err());
@@ -4008,7 +4005,7 @@ mod tests {
     fn sandbox_builder_invalid_wasm_bytes() {
         let result = Sandbox::builder()
             .with_wasm_bytes(vec![0, 1, 2, 3]) // Invalid WASM magic bytes
-            .with_stdlib("/fake/stdlib")
+            .with_python_stdlib("/fake/stdlib")
             .build();
 
         assert!(result.is_err());
@@ -4021,11 +4018,11 @@ mod tests {
     }
 
     #[test]
-    fn non_python_language_rejects_python_assets() {
+    fn python_options_do_not_carry_over_to_another_language() {
         let err = Sandbox::builder()
             .with_wasm_bytes(vec![])
-            .with_language(Language::JavaScript)
-            .with_stdlib("/fake/stdlib")
+            .with_python_stdlib("/fake/stdlib")
+            .javascript()
             .build()
             .unwrap_err();
         assert!(
@@ -4037,10 +4034,7 @@ mod tests {
     #[cfg(feature = "embedded")]
     #[test]
     fn non_python_language_has_no_embedded_runtime() {
-        let err = Sandbox::embedded()
-            .with_language(Language::Shell)
-            .build()
-            .unwrap_err();
+        let err = Sandbox::embedded().shell().build().unwrap_err();
         assert!(
             matches!(
                 err.kind(),
@@ -4057,7 +4051,7 @@ mod tests {
     fn sandbox_builder_empty_wasm_bytes() {
         let result = Sandbox::builder()
             .with_wasm_bytes(vec![])
-            .with_stdlib("/fake/stdlib")
+            .with_python_stdlib("/fake/stdlib")
             .build();
 
         assert!(result.is_err());
@@ -4112,7 +4106,9 @@ mod tests {
         let builder = builder.with_callback(TestCallback);
 
         // Must configure both to get build()
-        let builder = builder.with_wasm_bytes(vec![1, 2, 3]).with_stdlib("/fake");
+        let builder = builder
+            .with_wasm_bytes(vec![1, 2, 3])
+            .with_python_stdlib("/fake");
 
         // Now build() is available (will fail due to invalid WASM, but that's expected)
         let result = builder.build();

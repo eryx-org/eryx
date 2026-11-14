@@ -350,16 +350,16 @@ async fn run_numpy_benchmark() -> Result<(), Box<dyn std::error::Error>> {
                 unsafe {
                     Sandbox::builder()
                         .with_precompiled_file(cwasm_path)
-                        .with_stdlib(&python_stdlib)
-                        .with_library_path(site_packages)
+                        .with_python_stdlib(&python_stdlib)
+                        .with_site_packages(site_packages)
                         .build()?
                 }
             } else {
                 unsafe {
                     Sandbox::builder()
                         .with_precompiled_bytes(precompiled_bytes.as_ref().unwrap().clone())
-                        .with_stdlib(&python_stdlib)
-                        .with_library_path(site_packages)
+                        .with_python_stdlib(&python_stdlib)
+                        .with_site_packages(site_packages)
                         .build()?
                 }
             };

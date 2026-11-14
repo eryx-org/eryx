@@ -161,8 +161,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let sandbox = unsafe {
         Sandbox::builder()
             .with_precompiled_bytes(precompiled.clone())
-            .with_stdlib(&python_stdlib)
-            .with_library_path(site_packages)
+            .with_python_stdlib(&python_stdlib)
+            .with_site_packages(site_packages)
             .build()?
     };
     println!("  Created in {:?}", start.elapsed());
@@ -194,8 +194,8 @@ print(f"Mean: {a.mean()}")
         let sandbox = unsafe {
             Sandbox::builder()
                 .with_precompiled_bytes(precompiled.clone())
-                .with_stdlib(&python_stdlib)
-                .with_library_path(site_packages)
+                .with_python_stdlib(&python_stdlib)
+                .with_site_packages(site_packages)
                 .build()?
         };
         let elapsed = start.elapsed();

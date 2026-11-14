@@ -174,7 +174,7 @@ fn main() -> anyhow::Result<()> {
         let sandbox = unsafe {
             eryx::Sandbox::builder()
                 .with_precompiled_file(cwasm_path)
-                .with_stdlib(resources.stdlib())
+                .with_python_stdlib(resources.stdlib())
                 .build()?
         };
 
@@ -186,7 +186,7 @@ fn main() -> anyhow::Result<()> {
             let _sandbox = unsafe {
                 eryx::Sandbox::builder()
                     .with_precompiled_file(cwasm_path)
-                    .with_stdlib(resources.stdlib())
+                    .with_python_stdlib(resources.stdlib())
                     .build()?
             };
         }

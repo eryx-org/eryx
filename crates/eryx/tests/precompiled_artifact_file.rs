@@ -25,7 +25,7 @@ async fn run(artifact: &PrecompiledArtifact) -> Vec<u8> {
     let sandbox = unsafe {
         eryx::Sandbox::builder()
             .with_precompiled_artifact(artifact.clone())
-            .with_stdlib(resources.stdlib())
+            .with_python_stdlib(resources.stdlib())
     }
     .build()
     .unwrap();
@@ -128,7 +128,7 @@ async fn precompiled_file_builder_maps_once_for_a_pool() {
     let builder = unsafe {
         eryx::Sandbox::builder()
             .with_precompiled_file(&path)
-            .with_stdlib(resources.stdlib())
+            .with_python_stdlib(resources.stdlib())
     };
     let config = eryx::PoolConfig::default()
         .with_max_size(2)

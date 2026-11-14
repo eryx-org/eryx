@@ -1277,7 +1277,7 @@ async fn verify_cwasm(
     let sandbox = unsafe {
         eryx::Sandbox::builder()
             .with_precompiled_file(cwasm_path)
-            .with_stdlib(stdlib_path)
+            .with_python_stdlib(stdlib_path)
             .build()
             .context("Failed to create sandbox from compiled cwasm")?
     };

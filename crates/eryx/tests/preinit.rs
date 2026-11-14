@@ -158,7 +158,10 @@ fn write_cache_entry(path: &Path, bytes: &[u8]) {
 /// tests build more than one sandbox from the same bytes. So the component is
 /// compiled once per run and the native code is cached on disk next to the
 /// pre-init bytes, keyed by a hash of the component.
-fn sandbox_builder(wasm: &[u8], stdlib: &Path) -> SandboxBuilder<state::Has> {
+fn sandbox_builder(
+    wasm: &[u8],
+    stdlib: &Path,
+) -> SandboxBuilder<eryx::language::Python, state::Has> {
     let mut hasher = DefaultHasher::new();
     wasm.hash(&mut hasher);
     let path = cache_dir().join(format!("{:016x}.cwasm", hasher.finish()));
@@ -172,7 +175,7 @@ fn sandbox_builder(wasm: &[u8], stdlib: &Path) -> SandboxBuilder<state::Has> {
     // SAFETY: the bytes were produced by `Executor::precompile` in this
     // test run, with this build of wasmtime.
     let builder = unsafe { Sandbox::builder().with_precompiled_bytes(precompiled) };
-    builder.with_stdlib(stdlib)
+    builder.with_python_stdlib(stdlib)
 }
 
 // =============================================================================

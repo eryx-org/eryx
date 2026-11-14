@@ -78,7 +78,7 @@ pub mod embedded;
 pub mod embedded_stdlib;
 mod error;
 mod fork_local;
-mod language;
+pub mod language;
 mod library;
 pub mod net;
 pub mod package;

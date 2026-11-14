@@ -57,7 +57,7 @@ fn load(path: &std::path::Path) -> eryx::Error {
     let builder = unsafe {
         eryx::Sandbox::builder()
             .with_precompiled_file(path)
-            .with_stdlib(resources.stdlib())
+            .with_python_stdlib(resources.stdlib())
     };
     match builder.build() {
         Ok(_) => panic!("a forged runtime should not load"),

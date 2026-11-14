@@ -240,7 +240,7 @@ fn bench_stateless_execution_baked_callbacks(c: &mut Criterion) {
 
         // SAFETY: the artifact was produced by `Executor::precompile` just above.
         let sandbox = unsafe { Sandbox::builder().with_precompiled_artifact(artifact) }
-            .with_stdlib(&stdlib)
+            .with_python_stdlib(&stdlib)
             .with_trace_collection(collect_trace())
             .with_callback(NoopCallback)
             .with_callback(EchoCallback)

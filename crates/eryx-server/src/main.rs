@@ -340,34 +340,34 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     })?;
     tracing::info!(%args.metrics_addr, "prometheus metrics endpoint started");
 
+    // The runtime source is language-neutral; the stdlib is Python's.
     let builder = match (&args.runtime_cwasm, &args.stdlib) {
-        (Some(cwasm_path), Some(stdlib_path)) => {
-            // Explicit stdlib path — no embedded feature needed for stdlib
-            // SAFETY: The user is responsible for providing a trusted .cwasm file
-            // that was precompiled with a compatible engine configuration.
-            unsafe {
-                Sandbox::builder()
-                    .with_precompiled_file(cwasm_path)
-                    .with_stdlib(stdlib_path)
-            }
-        }
-        (Some(cwasm_path), None) => {
-            // Custom runtime with embedded stdlib
-            // SAFETY: The user is responsible for providing a trusted .cwasm file
-            // that was precompiled with a compatible engine configuration.
-            unsafe {
-                Sandbox::builder()
-                    .with_precompiled_file(cwasm_path)
-                    .with_embedded_stdlib()?
-            }
-        }
+        // SAFETY: The user is responsible for providing a trusted .cwasm file
+        // that was precompiled with a compatible engine configuration.
+        (Some(cwasm_path), _) => unsafe { Sandbox::builder().with_precompiled_file(cwasm_path) },
         (None, Some(_)) => {
             return Err("--stdlib requires --runtime-cwasm".into());
         }
         (None, None) => Sandbox::embedded(),
     };
 
-    let pool = SandboxPool::new(builder, pool_config).await?;
+    // The server runs Python only until it can select a language (#821).
+    let language = eryx::Language::Python;
+    let pool = match language {
+        eryx::Language::Python => {
+            let builder = match (&args.runtime_cwasm, &args.stdlib) {
+                // Explicit stdlib path — no embedded feature needed for stdlib
+                (Some(_), Some(stdlib_path)) => builder.with_python_stdlib(stdlib_path),
+                // Custom runtime with embedded stdlib
+                (Some(_), None) => builder.with_embedded_stdlib()?,
+                (None, _) => builder,
+            };
+            SandboxPool::new(builder, pool_config).await?
+        }
+        eryx::Language::JavaScript => SandboxPool::new(builder.javascript(), pool_config).await?,
+        eryx::Language::Shell => SandboxPool::new(builder.shell(), pool_config).await?,
+        other => return Err(format!("unsupported language {other}").into()),
+    };
     let pool = Arc::new(pool);
 
     // Evict idle sandboxes and record pool gauge metrics every 5 seconds.

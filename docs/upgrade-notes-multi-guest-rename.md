@@ -11,6 +11,30 @@ minor release.
 
 ## Rust (`eryx` crate)
 
+### The builder's language
+
+`SandboxBuilder` now carries the guest language as a type parameter:
+`SandboxBuilder<Lang = Python, Runtime = state::Needs>`. `Sandbox::builder()`
+and `Sandbox::embedded()` return a Python builder, so code that only chains
+builder methods keeps compiling unchanged.
+
+- `.javascript()` and `.shell()` switch the language, keeping the
+  language-neutral configuration (runtime source, callbacks, handlers, limits,
+  network, secrets, volumes, ...).
+- The Python-only options are methods of `SandboxBuilder<Python, _>` alone,
+  and keep their names: `with_python_stdlib`, `with_auto_stdlib`,
+  `with_embedded_stdlib`, `with_embedded_runtime`, `with_site_packages`,
+  `with_package`, `with_package_bytes`, `with_native_extension`, `with_cache`
+  and `with_cache_dir`.
+- `build()` works for any language and returns the same untyped `Sandbox`.
+  Only Python has an embedded runtime: for JavaScript or the shell, supply the
+  runtime with `with_wasm_file()` or a precompiled equivalent, or `build()`
+  fails with `ErrorKind::MissingRuntime`. Python-only options set before
+  switching languages make `build()` fail with `ErrorKind::Initialization`.
+- The marker types `Python`, `JavaScript` and `Shell` and their sealed
+  `GuestLanguage` trait live in the new `eryx::language` module, next to the
+  runtime `Language` enum (also re-exported as `eryx::Language`).
+
 ### Renamed, with deprecated aliases
 
 Code that uses the old names still compiles, with deprecation warnings.
@@ -19,8 +43,6 @@ Code that uses the old names still compiles, with deprecation warnings.
 |---|---|
 | `PythonExecutor` | `Executor` |
 | `PythonStateSnapshot` (also `eryx::session::PythonStateSnapshot`) | `StateSnapshot` |
-| `SandboxBuilder::with_python_stdlib` | `SandboxBuilder::with_stdlib` |
-| `SandboxBuilder::with_site_packages` | `SandboxBuilder::with_library_path` |
 | `Executor::with_python_stdlib` | `Executor::with_stdlib` |
 | `Executor::with_site_packages` | `Executor::with_library_path` |
 | `Executor::python_stdlib_path` | `Executor::stdlib_path` |
@@ -28,6 +50,28 @@ Code that uses the old names still compiles, with deprecation warnings.
 | `StateSnapshot::skipped_globals` | `StateSnapshot::skipped` |
 
 ### Breaking changes
+
+- **`SandboxBuilder`'s type parameters changed.** It was
+  `SandboxBuilder<Runtime, Stdlib>`. It is now `SandboxBuilder<Lang, Runtime>`,
+  and the stdlib is no longer tracked in the type. Code that names the type,
+  for example a helper that returns a configured builder, changes like this:
+
+  ```rust
+  // Before
+  fn builder() -> SandboxBuilder<state::Has, state::Has> { /* ... */ }
+  // After
+  fn builder() -> SandboxBuilder<eryx::language::Python, state::Has> { /* ... */ }
+  ```
+
+  `SandboxPool::new` is now generic over the language and takes any
+  `SandboxBuilder<L, state::Has>`.
+
+  `build()` is now available as soon as a runtime is configured. When no
+  stdlib is set for Python, `build()` uses the embedded one (with the
+  `embedded` feature), or else searches for one the way `with_auto_stdlib()`
+  does, and fails with `ErrorKind::MissingStdlib` if none is found. Before,
+  leaving out the stdlib was a compile error. `with_auto_stdlib()` and
+  `with_embedded_stdlib()` now return `Result<Self, Error>`.
 
 - **`ErrorKind::PythonException { traceback, stdout, stderr }` is now
   `ErrorKind::ScriptFailed { message, exit_code, stdout, stderr }`.** `message`
@@ -45,25 +89,10 @@ Code that uses the old names still compiles, with deprecation warnings.
 - **`ErrorKind::MissingPythonStdlib` is now `ErrorKind::MissingStdlib { language }`.**
   Match it with `ErrorKind::MissingStdlib { .. }`.
 
-- **`SandboxBuilder` has one type parameter instead of two.** The stdlib is no
-  longer tracked at compile time, because only some languages have one.
-  `SandboxBuilder<state::Has, state::Has>` becomes `SandboxBuilder<state::Has>`
-  (for example in `SandboxPool::with_builder` callers). Code that only chains
-  builder methods is unaffected.
-
-  `build()` is now available as soon as a runtime is configured. When no
-  stdlib is set for Python, `build()` uses the embedded one (with the
-  `embedded` feature), or else searches for one the way `with_auto_stdlib()`
-  does, and fails with `ErrorKind::MissingStdlib` if none is found. Before,
-  this was a compile error.
-
-  `with_auto_stdlib()` and `with_embedded_stdlib()` keep their names and now
-  return `Result<Self, Error>`.
-
 - **New `ErrorKind::MissingRuntime { language }`**, returned when a language
   other than Python is selected without supplying its runtime. Code that
-  matches `ErrorKind` exhaustively already needs a wildcard arm (the enum is
-  `#[non_exhaustive]`).
+  matches `ErrorKind` already needs a wildcard arm, because the enum is
+  `#[non_exhaustive]`.
 
 - **State snapshots use format version 2**, which records the guest language.
   This release reads snapshots from every earlier release (they are all
@@ -74,12 +103,8 @@ Code that uses the old names still compiles, with deprecation warnings.
 
 ### New
 
-- `Language::{Python, JavaScript, Shell}`, `SandboxBuilder::with_language`,
-  `Executor::with_language` and `Executor::language`. Python is the default
-  and the only language with an embedded runtime. Selecting another language
-  without a runtime fails at `build()` with `ErrorKind::MissingRuntime`; a
-  stdlib, packages or native extensions with a non-Python language fail with
-  `ErrorKind::Initialization`.
+- `Language::{Python, JavaScript, Shell}` (with `Display` and `FromStr`),
+  `Executor::with_language` and `Executor::language`.
 - `StateSnapshot::language()` and `SnapshotMetadata::language`.
 - The `ERYX_STDLIB` environment variable, checked before `ERYX_PYTHON_STDLIB`.
   `ERYX_PYTHON_STDLIB` keeps working.

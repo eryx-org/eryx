@@ -44,8 +44,8 @@ Eryx is a Python sandbox built on WebAssembly Component Model. It enables:
 │  Application Code                                                        │
 │    └─> Sandbox::builder()                                               │
 │          ├─ .with_callback("func", callback_impl)                       │
-│          ├─ .with_stdlib("/path/to/stdlib")                             │
-│          ├─ .with_library_path("/path/to/packages")  [for numpy etc]    │
+│          ├─ .with_python_stdlib("/path/to/stdlib")                             │
+│          ├─ .with_site_packages("/path/to/packages")  [for numpy etc]    │
 │          ├─ .with_native_extension("numpy/core/*.so", bytes) [optional] │
 │          └─ .build()                                                     │
 │              │                                                           │
@@ -829,7 +829,7 @@ use eryx::Sandbox;
 
 let sandbox = Sandbox::builder()
     .with_embedded_runtime()
-    .with_stdlib("/path/to/stdlib")  // Required for Python init
+    .with_python_stdlib("/path/to/stdlib")  // Required for Python init
     .build()?;
 
 let result = sandbox.execute("print('Hello, World!')").await?;
@@ -854,7 +854,7 @@ impl Callback for AddCallback {
 
 let sandbox = Sandbox::builder()
     .with_callback(AddCallback)
-    .with_stdlib("/path/to/stdlib")
+    .with_python_stdlib("/path/to/stdlib")
     .build()?;
 
 let result = sandbox.execute(r#"
@@ -877,8 +877,8 @@ for so_file in find_numpy_extensions("/tmp/numpy")? {
 
 // Mount Python files
 let sandbox = builder
-    .with_stdlib("/path/to/stdlib")
-    .with_library_path("/tmp")  // Contains numpy/
+    .with_python_stdlib("/path/to/stdlib")
+    .with_site_packages("/tmp")  // Contains numpy/
     .build()?;
 
 let result = sandbox.execute(r#"
