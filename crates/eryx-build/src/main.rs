@@ -146,6 +146,11 @@ fn check_all_manifests() -> Result<()> {
 /// Parse one manifest and validate cheap, toolchain-free invariants.
 fn check_one(path: &std::path::Path) -> Result<Manifest> {
     let manifest = Manifest::load(path)?;
+    let src = &manifest.source;
+    fetch::pin(&src.repo, src.commit.as_deref(), src.sha256.as_deref())?;
+    for dep in &manifest.deps {
+        fetch::pin(&dep.url, dep.commit.as_deref(), dep.sha256.as_deref())?;
+    }
     // Patches and shims are tracked in-repo, so their existence is checkable.
     // Source dirs live in the gitignored scratch/, so they aren't.
     let tracked = manifest.build.vendor_patch.iter().chain(

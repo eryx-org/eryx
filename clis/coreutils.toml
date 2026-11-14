@@ -19,6 +19,7 @@ lang = "rust"
 [source]
 repo = "https://github.com/uutils/coreutils.git"
 ref = "0.9.0"
+commit = "840c36d3964833e1dc107fcb9ade9c0ad63076c0"
 # Local working copy the driver builds from; fetched on first build.
 dir = "scratch/uutils"
 

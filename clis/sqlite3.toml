@@ -15,6 +15,7 @@ lang = "c"
 # scratch dir below on first build.
 repo = "https://www.sqlite.org/2026/sqlite-amalgamation-3530200.zip"
 ref = "3.53.2"
+sha256 = "8a310d0a16c7a90cacd4c884e70faa51c902afed2a89f63aaa0126ab83558a32"
 dir = "scratch/sqlite"
 
 [build]

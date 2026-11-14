@@ -15,6 +15,7 @@ lang = "rust"
 [source]
 repo = "https://github.com/chmln/sd.git"
 ref = "v1.1.0"
+commit = "4a7b216552d64134c0fa17a59b9d557d89019f0f"
 # Local working copy the driver builds from; fetched on first build.
 dir = "scratch/sd"
 

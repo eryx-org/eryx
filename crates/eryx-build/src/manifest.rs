@@ -58,6 +58,12 @@ pub struct Dep {
     /// Pinned version/ref.
     #[serde(rename = "ref", default)]
     pub git_ref: String,
+    /// Git sources: the commit `ref` points at. The fetch checks it.
+    #[serde(default)]
+    pub commit: Option<String>,
+    /// Archive sources: the sha256 of the download. The fetch checks it.
+    #[serde(default)]
+    pub sha256: Option<String>,
     /// SPDX license expression of the dependency's source.
     pub license: String,
     /// Local source dir, relative to the repo root.
@@ -117,9 +123,16 @@ pub enum CBuildSystem {
 pub struct Source {
     /// Upstream repository URL (for provenance/reproducibility).
     pub repo: String,
-    /// Pinned git ref (tag or commit) the build targets.
+    /// Human-readable label for the pinned version (e.g. a tag). The pin
+    /// itself is `commit` or `sha256`.
     #[serde(rename = "ref")]
     pub git_ref: String,
+    /// Git sources: the commit `ref` points at. The fetch checks it.
+    #[serde(default)]
+    pub commit: Option<String>,
+    /// Archive sources: the sha256 of the download. The fetch checks it.
+    #[serde(default)]
+    pub sha256: Option<String>,
     /// Local working copy the driver builds from, relative to the repo root.
     pub dir: PathBuf,
 }

@@ -15,6 +15,7 @@ lang = "go"
 [source]
 repo = "https://github.com/cli/cli.git"
 ref = "v2.87.3"
+commit = "cf862d65df7f8ff528015e235c8cccd48cea286f"
 # Local working copy the driver builds from; fetched on first build.
 dir = "scratch/gh-cli"
 

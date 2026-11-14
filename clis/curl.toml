@@ -15,6 +15,7 @@ lang = "c"
 [source]
 repo = "https://github.com/curl/curl.git"
 ref = "curl-8_20_0"
+commit = "a05f34973e6c4bb629d018f7cb51487be1c904d8"
 # Local working copy the driver builds from; fetched on first build.
 dir = "scratch/curl"
 
@@ -23,6 +24,7 @@ dir = "scratch/curl"
 name = "mbedtls"
 url = "https://github.com/Mbed-TLS/mbedtls/releases/download/mbedtls-3.6.6/mbedtls-3.6.6.tar.bz2"
 ref = "3.6.6"
+sha256 = "8fb65fae8dcae5840f793c0a334860a411f884cc537ea290ce1c52bb64ca007a"
 license = "Apache-2.0 OR GPL-2.0-or-later"
 dir = "scratch/mbedtls"
 system = "cmake"

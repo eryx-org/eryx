@@ -14,6 +14,7 @@ lang = "rust"
 [source]
 repo = "https://github.com/BurntSushi/ripgrep.git"
 ref = "15.1.0"
+commit = "af60c2de9d85e7f3d81c78601669468cf02dabab"
 # Local working copy the driver builds from; fetched on first build.
 dir = "scratch/ripgrep"
 

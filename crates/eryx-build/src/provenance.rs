@@ -42,8 +42,10 @@ struct Upstream<'a> {
     /// The pinned ref from the manifest.
     #[serde(rename = "ref")]
     git_ref: &'a str,
-    /// The commit `ref` resolved to, for git sources.
-    commit: Option<String>,
+    /// The pinned commit, for git sources.
+    commit: Option<&'a str>,
+    /// The pinned sha256 of the download, for archives.
+    sha256: Option<&'a str>,
     license: &'a str,
 }
 
@@ -93,7 +95,8 @@ pub fn write(manifest: &Manifest, manifest_path: &Path) -> Result<()> {
             name: &manifest.name,
             url: &manifest.source.repo,
             git_ref: &manifest.source.git_ref,
-            commit: commit(&repo_root.join(&manifest.source.dir)),
+            commit: manifest.source.commit.as_deref(),
+            sha256: manifest.source.sha256.as_deref(),
             license: &manifest.license,
         },
         deps: manifest
@@ -103,7 +106,8 @@ pub fn write(manifest: &Manifest, manifest_path: &Path) -> Result<()> {
                 name: &d.name,
                 url: &d.url,
                 git_ref: &d.git_ref,
-                commit: commit(&repo_root.join(&d.dir)),
+                commit: d.commit.as_deref(),
+                sha256: d.sha256.as_deref(),
                 license: &d.license,
             })
             .collect(),
@@ -125,19 +129,4 @@ fn file(base: &Path, rel: &Path) -> Result<File> {
         path: rel.to_string_lossy().into_owned(),
         sha256: hex::encode(Sha256::digest(&bytes)),
     })
-}
-
-/// The checked-out commit of a git source dir, or `None` for archives.
-fn commit(dir: &Path) -> Option<String> {
-    if !dir.join(".git").exists() {
-        return None;
-    }
-    let out = std::process::Command::new("git")
-        .args(["rev-parse", "HEAD"])
-        .current_dir(dir)
-        .output()
-        .ok()?;
-    out.status
-        .success()
-        .then(|| String::from_utf8_lossy(&out.stdout).trim().to_string())
 }
