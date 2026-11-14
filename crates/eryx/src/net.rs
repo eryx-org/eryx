@@ -17,6 +17,8 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
 
+use base64::Engine as _;
+use base64::prelude::BASE64_STANDARD;
 pub use ipnet::IpNet;
 use ipnet::{Ipv4Net, Ipv6Net};
 use rustls::ClientConfig;
@@ -1382,6 +1384,14 @@ impl ConnectionManager {
                 // Substitute secrets in header value
                 let substituted_value =
                     self.substitute_secrets_in_text(value, name, target_host)?;
+                // A placeholder inside `Basic` credentials isn't visible to the
+                // check above.
+                if !names_target && substituted_value != value {
+                    return Err(TcpError::NotPermitted(
+                        "Secret not allowed: request names a different host than the connection"
+                            .into(),
+                    ));
+                }
                 result.push_str(&format!("{name}: {substituted_value}\r\n"));
             } else {
                 result.push_str(line);
@@ -1399,7 +1409,34 @@ impl ConnectionManager {
     /// A secret is only substituted for a host matching
     /// [`NetConfig::secret_hosts`]; a secret with no hosts there is never
     /// substituted. A secret limited to one header is only substituted there.
+    ///
+    /// Placeholders in `Authorization: Basic` credentials, which clients
+    /// base64-encode, are substituted in the decoded `user:password` and the
+    /// result re-encoded.
     fn substitute_secrets_in_text(
+        &self,
+        text: &str,
+        header: &str,
+        target_host: &str,
+    ) -> Result<String, TcpError> {
+        if header.eq_ignore_ascii_case("authorization")
+            && let Some((scheme, token)) = text.split_once(' ')
+            && scheme.eq_ignore_ascii_case("basic")
+            && let Ok(decoded) = BASE64_STANDARD.decode(token.trim())
+            && let Ok(credentials) = String::from_utf8(decoded)
+        {
+            let substituted = self.substitute_placeholders(&credentials, header, target_host)?;
+            if substituted != credentials {
+                return Ok(format!("Basic {}", BASE64_STANDARD.encode(substituted)));
+            }
+        }
+        self.substitute_placeholders(text, header, target_host)
+    }
+
+    /// Substitute secret placeholders appearing verbatim in `text`, the value
+    /// of the header `header`, as described in
+    /// [`substitute_secrets_in_text`](Self::substitute_secrets_in_text).
+    fn substitute_placeholders(
         &self,
         text: &str,
         header: &str,
@@ -2142,6 +2179,52 @@ mod tests {
         assert!(
             manager
                 .substitute_secrets_in_text("Bearer PH_HEADER", "Authorization", "api.example.com")
+                .is_err()
+        );
+    }
+
+    /// Placeholders inside base64 `Basic` credentials are substituted and
+    /// re-encoded, under the same host and header rules.
+    #[test]
+    fn secret_in_basic_credentials() {
+        let basic = |s: &str| format!("Basic {}", BASE64_STANDARD.encode(s));
+        let mut m = framing_manager();
+
+        assert_eq!(
+            m.substitute_secrets_in_text(&basic("git:PH"), "authorization", "api.example.com")
+                .unwrap(),
+            basic("git:real")
+        );
+        assert!(
+            m.substitute_secrets_in_text(&basic("git:PH"), "Authorization", "evil.com")
+                .is_err()
+        );
+        // Other headers and schemes aren't decoded.
+        let encoded = BASE64_STANDARD.encode("git:PH");
+        assert_eq!(
+            m.substitute_secrets_in_text(&format!("Basic {encoded}"), "X-Auth", "api.example.com")
+                .unwrap(),
+            format!("Basic {encoded}")
+        );
+        // Credentials without a placeholder are passed through as written.
+        assert_eq!(
+            m.substitute_secrets_in_text("basic Z2l0OnB3", "Authorization", "api.example.com")
+                .unwrap(),
+            "basic Z2l0OnB3"
+        );
+
+        // A request naming another host is refused.
+        let request = format!(
+            "GET / HTTP/1.1\r\nHost: other.example.com\r\nAuthorization: {}\r\n\r\n",
+            basic("git:PH")
+        );
+        assert!(m.process_write_data(1, request.as_bytes()).is_err());
+        m.http_states.clear();
+
+        // A secret limited to another header isn't sent in Basic credentials.
+        m.secrets.get_mut("KEY").unwrap().header = Some("X-Api-Key".into());
+        assert!(
+            m.substitute_secrets_in_text(&basic("git:PH"), "Authorization", "api.example.com")
                 .is_err()
         );
     }

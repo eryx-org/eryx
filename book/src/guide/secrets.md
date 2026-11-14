@@ -80,6 +80,11 @@ let sandbox = Sandbox::embedded()
 The header name is compared ignoring case. A request with the placeholder in
 any other header is refused, as for a host the secret isn't allowed for.
 
+A placeholder can also be the username or password of `Authorization: Basic`
+credentials (as git and `requests`' `auth=(user, password)` send them): the
+host decodes the base64 `user:password`, substitutes the real value under the
+same host and header rules, and re-encodes it.
+
 Each `SecretConfig` gets a new random placeholder. Where state that may hold
 one outlives a sandbox (e.g. a session restored into a new sandbox for each
 execution), give the secret the same one each time with
