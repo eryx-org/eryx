@@ -407,8 +407,19 @@ impl NetConfig {
     /// connected host and each host the request names (`Host` header or
     /// absolute-form target), and ambiguous request framing is refused.
     /// Bytes that aren't HTTP/1.1 are refused on connections to a host with
-    /// rules. A refused request is never sent. See [`HttpRule`] for how
-    /// methods and paths match.
+    /// rules, as is a request with more than one `Host` header or a `Host`
+    /// that disagrees with its absolute-form target. A refused request is
+    /// never sent. Host names are compared ignoring case, a port, a trailing
+    /// dot and IPv6 brackets. See [`HttpRule`] for how methods and paths
+    /// match.
+    ///
+    /// # Limitations
+    ///
+    /// Rules are enforced on what the host can frame. Bytes that aren't
+    /// HTTP/1.1 are still passed through on connections to hosts without
+    /// rules, so if sandboxed code does its own TLS to another allowed host
+    /// served by the same server as a ruled one, the request inside isn't
+    /// checked. Don't allow other names on a server whose rules matter.
     #[must_use]
     pub fn allow_http(mut self, rule: HttpRule) -> Self {
         self.http_rules.push(rule);
@@ -433,7 +444,7 @@ impl NetConfig {
         let host = normalize_host(host);
         self.http_rules
             .iter()
-            .any(|r| host_matches_pattern(&host, &r.host))
+            .any(|r| host_matches_pattern(&host, &normalize_host(&r.host)))
     }
 
     /// Check a request with `method` and request target `target` (as in the
@@ -448,7 +459,7 @@ impl NetConfig {
         let mut rules = self
             .http_rules
             .iter()
-            .filter(|r| host_matches_pattern(&host, &r.host))
+            .filter(|r| host_matches_pattern(&host, &normalize_host(&r.host)))
             .peekable();
         if rules.peek().is_none() {
             return Ok(());
@@ -1389,6 +1400,17 @@ impl ConnectionManager {
         let malformed = || TcpError::NotPermitted("malformed HTTP request line".into());
         let (method, target) = request_line(&text).ok_or_else(malformed)?;
         let named = request_authorities(&text).ok_or_else(malformed)?;
+        // A server could route by either of two hosts that disagree.
+        let host_headers = named.len() - usize::from(target.contains("://"));
+        if host_headers > 1
+            || !named
+                .windows(2)
+                .all(|w| same_host(strip_port(w[0]), strip_port(w[1])))
+        {
+            return Err(TcpError::NotPermitted(
+                "HTTP request names more than one host".into(),
+            ));
+        }
         for host in std::iter::once(host.as_str()).chain(named.into_iter().map(strip_port)) {
             self.config
                 .check_http_request(host, method, target)
@@ -3599,7 +3621,9 @@ mod tests {
             "//repos/org/repo",
             "/repos/org/repo%2fx",
             "/repos/org/repo%5Cx",
+            "/repos/org/repo\\x",
             "/repos/org/repo/%zz",
+            "/repos/org/repo/%2",
             "/repos/org/repo/%e2",
             "*",
             "api.github.com:443",
@@ -3620,6 +3644,55 @@ mod tests {
                 .check_http_request("API.GitHub.com.", "DELETE", "/x")
                 .is_err()
         );
+    }
+
+    /// Each rule shape allows what it describes and nothing else, and host
+    /// names are compared normalized.
+    #[test]
+    fn http_rule_shapes() {
+        let check = |rule: HttpRule, host, method, target| {
+            NetConfig::permissive()
+                .allow_http(rule)
+                .check_http_request(host, method, target)
+                .is_ok()
+        };
+        let h = "api.example.com";
+        // Any method and path: only the host is restricted.
+        assert!(check(HttpRule::new(h), h, "DELETE", "/x"));
+        assert!(!check(HttpRule::new(h), h, "DELETE", "/../x"));
+        // Methods only.
+        let methods = || HttpRule::new(h).with_methods(["GET"]);
+        assert!(check(methods(), h, "GET", "/anything"));
+        assert!(!check(methods(), h, "PUT", "/anything"));
+        // Paths only.
+        let paths = || HttpRule::new(h).with_paths(["/v1"]);
+        assert!(check(paths(), h, "PUT", "/v1/x"));
+        assert!(!check(paths(), h, "PUT", "/v10"));
+        // Both.
+        let both = || HttpRule::new(h).with_methods(["GET"]).with_paths(["/v1"]);
+        assert!(check(both(), h, "GET", "/v1"));
+        assert!(!check(both(), h, "POST", "/v1"));
+        assert!(!check(both(), h, "GET", "/v2"));
+        // A trailing `/` matches below it but not the bare path.
+        let dir = || HttpRule::new(h).with_paths(["/v1/"]);
+        assert!(check(dir(), h, "GET", "/v1/x"));
+        assert!(!check(dir(), h, "GET", "/v1"));
+        // The root matches every path.
+        assert!(check(HttpRule::new(h).with_paths(["/"]), h, "GET", "/a/b"));
+        // Wildcard hosts.
+        let wild = || HttpRule::new("*.example.com").with_paths(["/v1"]);
+        assert!(!check(wild(), "API.Example.com.", "GET", "/v2"));
+        assert!(check(wild(), "api.example.com", "GET", "/v1/x"));
+        assert!(check(wild(), "example.org", "GET", "/v2"));
+        // IPv6 literals match with or without brackets.
+        for (pattern, host) in [("[::1]", "::1"), ("::1", "[::1]")] {
+            assert!(!check(
+                HttpRule::new(pattern).with_paths(["/v1"]),
+                host,
+                "GET",
+                "/v2"
+            ));
+        }
     }
 
     /// A rule's paths must be ones a request can match.
@@ -3657,6 +3730,20 @@ mod tests {
             assert!(m.process_write_data(handle, request).is_err(), "{request:?}");
             m.http_states.clear();
         }
+        // Hosts named by a request are compared ignoring case, port, a
+        // trailing dot and brackets, and must agree.
+        for (handle, request) in [
+            (2, &b"GET /other HTTP/1.1\r\nHost: API.GitHub.com.:443\r\n\r\n"[..]),
+            (1, b"GET /repos/org/repo HTTP/1.1\r\nHost: api.github.com\r\nHost: api.github.com\r\n\r\n"),
+            (2, b"GET https://www.github.com/ HTTP/1.1\r\nHost: other.github.com\r\n\r\n"),
+        ] {
+            assert!(m.process_write_data(handle, request).is_err(), "{request:?}");
+            m.http_states.clear();
+        }
+        let absolute = b"GET https://api.github.com:443/repos/org/repo HTTP/1.1\r\nHost: API.github.com\r\n\r\n";
+        assert!(m.process_write_data(1, absolute).is_ok());
+        m.http_states.clear();
+
         // A pipelined request is checked too, and nothing is sent.
         let pipelined = b"POST /repos/org/repo HTTP/1.1\r\nContent-Length: 2\r\n\r\nhiDELETE /repos/org/repo HTTP/1.1\r\n\r\n";
         assert!(m.process_write_data(1, pipelined).is_err());

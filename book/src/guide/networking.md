@@ -248,15 +248,18 @@ in Python) and the connection's request can't continue.
 Once any rule is set, every connection's HTTP/1.1 requests are parsed and
 checked against both the connected host and every host the request names (its
 `Host` header and an absolute-form target), so another allowed host on the
-same server can't be used to reach a ruled one. Requests whose framing a server
+same server can't be used to reach a ruled one. Host names are compared
+ignoring case, a port, a trailing dot and IPv6 brackets, and a request with
+more than one `Host` header, or a `Host` that disagrees with its absolute-form
+target, is refused. Requests whose framing a server
 could read differently are refused: bare CR or LF, folded header lines, a
 `Transfer-Encoding` other than `chunked`, both that and `Content-Length`, or
 more than one length. Only HTTP/1.1 may be sent to a host with rules, so
 HTTP/2, WebSockets after the upgrade, and TLS done by the sandboxed code itself
 are refused there.
 
-Data that isn't HTTP is still passed through on connections to hosts without
-rules. If sandboxed code does its own TLS (e.g. with a pure-Python TLS library)
+**Limitation:** rules are enforced on what the host can frame. Data that isn't
+HTTP is still passed through on connections to hosts without rules. If sandboxed code does its own TLS (e.g. with a pure-Python TLS library)
 to another allowed host served by the same server, the host can't see the
 request inside, so rules on that server's other names don't apply to it. Avoid
 allowing other names on a server whose ruled name matters.
