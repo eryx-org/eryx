@@ -120,6 +120,11 @@ export default defineConfig({
       // @eryx-org/eryx is symlinked from ../eryx/ (outside demo/),
       // Vite can't find preview2-shim from there. Alias it to our copy, along
       // with eryx's own `#preview2/*` package imports of it.
+      // `instantiation` has no browser build (jco-transpile imports it).
+      {
+        find: /^@bytecodealliance\/preview2-shim\/instantiation$/,
+        replacement: resolve(shimDir, "../common/instantiation.js"),
+      },
       {
         find: /^(?:@bytecodealliance\/preview2-shim|#preview2)\/(.+)$/,
         replacement: resolve(shimDir, "$1.js"),

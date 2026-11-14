@@ -12,25 +12,25 @@ const fs = require('fs');
 const path = 'eryx/eryx-sandbox.js';
 let code = fs.readFileSync(path, 'utf8');
 
-// webpack tries to bundle the dynamic node:fs/promises import in fetchCompile
+// webpack tries to bundle the dynamic node:fs/promises import in fetchWithNode
 // and fails; mark it webpackIgnore and fall back to fetch when unavailable.
-const fsOriginal = `  if (isNode) {
-    _fs = _fs || await import('node:fs/promises');
-    return WebAssembly.compile(await _fs.readFile(url));
-  }`;
+const fsOriginal = `	if (context.fileCache.node) {
+		context.fileCache.fs = context.fileCache.fs || await import("node:fs/promises");
+		return context.WebAssembly.compile(await context.fileCache.fs.readFile(url));
+	}`;
 
-const fsPatched = `  if (isNode) {
-    if (!_fs) {
-      try {
-        _fs = await import(/* webpackIgnore: true */ 'node:fs/promises');
-      } catch {
-        // Fallback for environments where node:fs/promises is unavailable
-      }
-    }
-    if (_fs) {
-      return WebAssembly.compile(await _fs.readFile(url));
-    }
-  }`;
+const fsPatched = `	if (context.fileCache.node) {
+		if (!context.fileCache.fs) {
+			try {
+				context.fileCache.fs = await import(/* webpackIgnore: true */ "node:fs/promises");
+			} catch {
+				// Fallback for environments where node:fs/promises is unavailable
+			}
+		}
+		if (context.fileCache.fs) {
+			return context.WebAssembly.compile(await context.fileCache.fs.readFile(url));
+		}
+	}`;
 
 if (code.includes(fsOriginal)) {
   fs.writeFileSync(path, code.replace(fsOriginal, fsPatched));
