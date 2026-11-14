@@ -24,7 +24,7 @@ package = "./cmd/gh"
 # Script applied after `go mod vendor` to stub out wasip3-incompatible code.
 vendor_patch = "clis/patches/patch-gh-vendor.sh"
 # Report the pinned release instead of `DEV`.
-ldflags = "-X github.com/cli/cli/v2/internal/build.Version={ref}"
+ldflags = "-X github.com/cli/cli/v2/internal/build.Version={version}"
 
 [component]
 # wasm-tools component world to embed.

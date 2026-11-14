@@ -13,8 +13,8 @@ set -euo pipefail
 
 # --- Pinned toolchain (bump these together when moving the fork) ---
 GO_WASIP3_REPO="https://github.com/sd2k/go.git"
-GO_WASIP3_REF="wasip3-0.3.0"
-GO_WASIP3_COMMIT="88b3f713bdc9a5e3fcb3fc7e7c222e92bf6af17d"
+GO_WASIP3_REF="wasip3-0.3.0-go1.27.4"
+GO_WASIP3_COMMIT="dfb22bf4bbf14406a17de2ec48cc9af3e45649a0"
 
 DEST="${1:-scratch/go-wasip3}"
 

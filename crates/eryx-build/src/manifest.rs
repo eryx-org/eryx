@@ -161,7 +161,8 @@ pub struct Build {
     #[serde(default)]
     pub artifact: Option<PathBuf>,
     /// Go lane: `go build -ldflags` value. `{ref}` is replaced with the
-    /// source's pinned ref, e.g. to stamp the version a CLI reports.
+    /// source's pinned ref and `{version}` with that ref minus a leading `v`,
+    /// e.g. to stamp the version a CLI reports.
     #[serde(default)]
     pub ldflags: String,
     /// Rust lane: cargo binary to build (`cargo build --bin <bin>`); the wasm

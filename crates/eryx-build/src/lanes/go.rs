@@ -76,7 +76,8 @@ pub fn build(manifest: &Manifest) -> Result<()> {
     let ldflags = manifest
         .build
         .ldflags
-        .replace("{ref}", &manifest.source.git_ref);
+        .replace("{ref}", &manifest.source.git_ref)
+        .replace("{version}", manifest.source.git_ref.trim_start_matches('v'));
     let mut args = vec!["build", "-mod=vendor", "-o", &out_wasm_s];
     if !ldflags.is_empty() {
         args.extend(["-ldflags", &ldflags]);
