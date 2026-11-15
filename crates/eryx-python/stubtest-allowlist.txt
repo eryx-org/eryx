@@ -4,6 +4,7 @@
 eryx\._eryx\.CallbackDict
 eryx\._eryx\.SecretDict
 eryx\._eryx\.PathLike
+eryx\._eryx\.Language
 eryx\._eryx\.VolumeSpec
 # PyO3 generates a module __all__.
 eryx\._eryx\.__all__

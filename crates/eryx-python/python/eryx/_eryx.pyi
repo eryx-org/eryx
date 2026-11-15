@@ -28,6 +28,9 @@ from eryx_run import (
 
 PathLike = Union[str, Path]
 
+Language = Literal["python", "javascript", "shell"]
+"""A guest language a Sandbox or Session can run (a plain string at runtime)."""
+
 VolumeSpec = Union[tuple[str, str, bool], tuple[str, str, bool, Optional[int]]]
 """A host volume mount: `(host_path, guest_path, read_only)`, optionally with a
 fourth `max_file_size` in bytes. Writes that would grow any file in the mount
@@ -77,9 +80,6 @@ def configure_shared_engine(
     ...
 
 
-
-Language = Literal["python", "javascript", "shell"]
-"""A guest language a Sandbox or Session can run."""
 
 class SecretDict(TypedDict, total=False):
     """Dictionary format for configuring a secret.
