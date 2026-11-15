@@ -1751,14 +1751,18 @@ jobs:
             RUNTIME_SOURCE=custom
             RUNTIME_CWASM=crates/eryx-server/runtime-python.cwasm
             ERYX_LANGUAGES=python
+          # Push or load, never both: some BuildKit versions refuse the pair
+          # on the default docker driver (docker/build-push-action#727). The
+          # docker job only pushes too.
           push: ${{ github.event_name == 'push' }}
-          load: true
+          load: ${{ github.event_name != 'push' }}
           tags: |
             eryx-server:python-only
             ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
 
       - name: Report image size
+        if: github.event_name != 'push'
         run: |
           size=$(docker image inspect eryx-server:python-only | jq '.[0].Size')
           echo "Python-only image size: $size bytes" | tee -a "$GITHUB_STEP_SUMMARY"
