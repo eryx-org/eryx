@@ -41,7 +41,7 @@ env:
   # Which sd2k/eryx-server variant gets the unsuffixed tags (0.16.0, latest,
   # ...): `all-languages` or `python-only`. The other variant's tags get a
   # suffix: `-python` for the Python-only image, `-all` for the
-  # all-languages one. Pending Ben's decision (#847).
+  # all-languages one. All-languages, decided in #847.
   DOCKER_UNSUFFIXED_VARIANT: all-languages
 
 jobs:

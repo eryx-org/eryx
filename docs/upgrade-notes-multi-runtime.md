@@ -77,6 +77,14 @@ eryx now builds, precompiles and embeds a runtime per guest language: Python
   `sd2k/eryx-server:0.15.0`, of which this change adds 2,832. The
   all-languages image is 193,330,478 bytes (the JavaScript and shell
   runtimes add about 23 MB).
+- **The published image `sd2k/eryx-server` now comes in two variants, and
+  the plain tags are the bigger one.** `latest`, `X.Y.Z`, `X.Y`, `main` and
+  `<sha>` are the all-languages image (about 23 MB larger than before).
+  The Python-only image, the same size as the previous release's, has the
+  same tags with a `-python` suffix: `X.Y.Z-python`, `X.Y-python`,
+  `latest-python`, `main-python`, `<sha>-python`. Deployments that pull
+  `latest` or a version tag get the all-languages image on upgrade; switch
+  to the `-python` tag to keep a Python-only image.
 - `EryxService::with_pool(language, pool)` and
   `with_lazy_pool(language, factory)` add a pool; `EryxService::new` and
   `with_signer` take the Python pool as before.
@@ -85,6 +93,15 @@ eryx now builds, precompiles and embeds a runtime per guest language: Python
 
 - New `language` option, which only accepts `"python"` so far; anything else
   throws a `TypeError`.
+
+## Release assets and packages
+
+- Each `eryx-vX.Y.Z` GitHub release has `runtime-python.wasm`,
+  `runtime-javascript.wasm` and `runtime-shell.wasm`, each with a `.sha256`,
+  for `eryx-precompile setup --language <lang>`.
+- New PyPI packages `pyeryx-runtime-javascript` and `pyeryx-runtime-shell`,
+  released with pyeryx at the same version: one platform wheel per pyeryx
+  platform, holding that platform's precompiled runtime.
 
 ## Python (`pyeryx`)
 
