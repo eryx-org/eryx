@@ -33,8 +33,12 @@ crates/
 ├── eryx-guest-python/     # CPython guest, compiled TO WASM
 │   └── src/lib.rs         # WIT exports, Python FFI
 ├── eryx-guest-js/         # QuickJS guest, built the same way as CPython's
-├── eryx-guest-shell/      # brush (bash) guest: a plain wasip2 component,
-│                          # in its own workspace (not a root workspace member)
+├── eryx-guest-shell/      # brush (bash) guest: a plain wasip2 component.
+│                          # Its own workspace, excluded from the root one: it
+│                          # only builds for wasm32-wasip2 and pins brush from
+│                          # git, which shouldn't enter the root Cargo.lock or
+│                          # host `clippy --workspace` builds. CI lints it in
+│                          # the `shell-guest-lint` job.
 ├── eryx-python/           # Python bindings (PyO3/maturin)
 ├── eryx-precompile/       # CLI tool for AOT compilation
 └── eryx-vfs/              # Virtual filesystem for WASM

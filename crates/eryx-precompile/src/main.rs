@@ -148,6 +148,12 @@ struct CompileArgs {
     #[arg(required = true)]
     input: PathBuf,
 
+    /// The guest language the component runs (python, javascript or shell).
+    /// Stamped into the output, so loading it for another language fails
+    /// with a clear error. `--preinit` and verification are Python only.
+    #[arg(long, value_parser = parse_language)]
+    language: Option<eryx::Language>,
+
     /// Output path (default: input with .cwasm extension, or .wasm for --wasm-only)
     #[arg(short, long)]
     output: Option<PathBuf>,
@@ -614,9 +620,10 @@ async fn setup_runtime(
     // The cache file is named for the host platform only, so compile for
     // exactly that: `precompile` would also honour ERYX_TARGET and friends,
     // and could cache an artifact under a name that does not describe it.
-    let precompiled =
+    let mut precompiled =
         eryx::Executor::precompile_with_options(&wasm_bytes, None, CpuFeatureLevel::Native)
             .with_context(|| format!("Failed to pre-compile {asset} to native code"))?;
+    eryx::Executor::stamp_language(&mut precompiled, language);
 
     let elapsed = start.elapsed();
     println!(
@@ -687,6 +694,11 @@ async fn run_compile(args: CompileArgs) -> Result<()> {
         }
         out
     });
+
+    let python = args.language.is_none_or(|l| l == eryx::Language::Python);
+    if args.preinit && !python {
+        anyhow::bail!("--preinit only works for Python runtimes");
+    }
 
     // Resolve target triple and CPU feature level from the flags.
     let (target_triple, cpu_features) =
@@ -822,12 +834,15 @@ async fn run_compile(args: CompileArgs) -> Result<()> {
         println!("Step 2: AOT compiling to native code...");
         let start = Instant::now();
 
-        let precompiled = eryx::Executor::precompile_with_options(
+        let mut precompiled = eryx::Executor::precompile_with_options(
             &component_bytes,
             target_triple.as_deref(),
             cpu_features,
         )
         .context("Failed to AOT compile")?;
+        if let Some(language) = args.language {
+            eryx::Executor::stamp_language(&mut precompiled, language);
+        }
 
         let elapsed = start.elapsed();
         println!(
@@ -852,7 +867,9 @@ async fn run_compile(args: CompileArgs) -> Result<()> {
         // Verify if requested
         if !args.no_verify {
             println!();
-            if let Some(reason) = unrunnable_reason(target_triple.as_deref(), cpu_features) {
+            if !python {
+                println!("Step 4: Skipping verification: it runs Python code");
+            } else if let Some(reason) = unrunnable_reason(target_triple.as_deref(), cpu_features) {
                 println!("Step 4: Skipping verification: {reason}");
             } else {
                 println!("Step 4: Verifying...");

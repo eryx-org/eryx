@@ -68,8 +68,10 @@ struct Args {
     #[arg(long, default_value = "0.0.0.0:9090", env = "ERYX_METRICS_ADDR")]
     metrics_addr: SocketAddr,
 
-    /// Guest languages to serve, comma-separated. Each gets its own sandbox
-    /// pool, sized by the pool flags. Must include python.
+    /// Guest languages to accept, comma-separated; a request for any other
+    /// is rejected. Each gets its own sandbox pool, sized by the pool flags:
+    /// Python's is created at startup, the others' on their first request.
+    /// Must include python.
     #[arg(
         long,
         env = "ERYX_LANGUAGES",
@@ -356,47 +358,66 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     })?;
     tracing::info!(%args.metrics_addr, "prometheus metrics endpoint started");
 
-    let mut pools = Vec::new();
+    // Python's pool is built and prewarmed up front, as before; the other
+    // languages' on their first request. --runtime-cwasm and --stdlib
+    // configure Python; the other languages run their embedded runtimes.
+    let python_builder = match (&args.runtime_cwasm, &args.stdlib) {
+        // SAFETY: The user is responsible for providing a trusted .cwasm file
+        // that was precompiled with a compatible engine configuration.
+        (Some(cwasm_path), Some(stdlib_path)) => unsafe {
+            // Explicit stdlib path — no embedded feature needed for stdlib
+            Sandbox::builder()
+                .with_precompiled_file(cwasm_path)
+                .with_python_stdlib(stdlib_path)
+        },
+        // SAFETY: as above.
+        (Some(cwasm_path), None) => unsafe {
+            // Custom runtime with embedded stdlib
+            Sandbox::builder()
+                .with_precompiled_file(cwasm_path)
+                .with_embedded_stdlib()?
+        },
+        (None, Some(_)) => {
+            return Err("--stdlib requires --runtime-cwasm".into());
+        }
+        (None, None) => Sandbox::embedded(),
+    };
+    if !args.languages.contains(&eryx::Language::Python) {
+        return Err("--languages must include python".into());
+    }
+    let python_pool = Arc::new(SandboxPool::new(python_builder, pool_config.clone()).await?);
+    // Evict idle sandboxes and record pool gauge metrics every 5 seconds.
+    spawn_pool_maintenance(eryx::Language::Python, Arc::clone(&python_pool));
+
+    let mut lazy_pools = Vec::new();
     for &language in &args.languages {
-        // --runtime-cwasm and --stdlib configure Python; the other languages
-        // run their embedded runtimes.
-        let pool = match language {
-            eryx::Language::Python => {
-                let builder = match (&args.runtime_cwasm, &args.stdlib) {
-                    // SAFETY: The user is responsible for providing a trusted .cwasm file
-                    // that was precompiled with a compatible engine configuration.
-                    (Some(cwasm_path), Some(stdlib_path)) => unsafe {
-                        // Explicit stdlib path — no embedded feature needed for stdlib
-                        Sandbox::builder()
-                            .with_precompiled_file(cwasm_path)
-                            .with_python_stdlib(stdlib_path)
-                    },
-                    // SAFETY: as above.
-                    (Some(cwasm_path), None) => unsafe {
-                        // Custom runtime with embedded stdlib
-                        Sandbox::builder()
-                            .with_precompiled_file(cwasm_path)
-                            .with_embedded_stdlib()?
-                    },
-                    (None, Some(_)) => {
-                        return Err("--stdlib requires --runtime-cwasm".into());
+        if language == eryx::Language::Python {
+            continue;
+        }
+        let config = pool_config.clone();
+        let create: eryx_server::service::PoolFactory = Arc::new(move || {
+            let config = config.clone();
+            Box::pin(async move {
+                tracing::info!(%language, "creating sandbox pool on first request");
+                let pool = match language {
+                    eryx::Language::JavaScript => {
+                        SandboxPool::new(Sandbox::embedded().javascript(), config).await?
                     }
-                    (None, None) => Sandbox::embedded(),
+                    eryx::Language::Shell => {
+                        SandboxPool::new(Sandbox::embedded().shell(), config).await?
+                    }
+                    other => {
+                        return Err(eryx::PoolError::Creation(format!(
+                            "unsupported language {other}"
+                        )));
+                    }
                 };
-                SandboxPool::new(builder, pool_config.clone()).await?
-            }
-            eryx::Language::JavaScript => {
-                SandboxPool::new(Sandbox::embedded().javascript(), pool_config.clone()).await?
-            }
-            eryx::Language::Shell => {
-                SandboxPool::new(Sandbox::embedded().shell(), pool_config.clone()).await?
-            }
-            other => return Err(format!("unsupported language {other}").into()),
-        };
-        let pool = Arc::new(pool);
-        // Evict idle sandboxes and record pool gauge metrics every 5 seconds.
-        spawn_pool_maintenance(language, Arc::clone(&pool));
-        pools.push((language, pool));
+                let pool = Arc::new(pool);
+                spawn_pool_maintenance(language, Arc::clone(&pool));
+                Ok(pool)
+            })
+        });
+        lazy_pools.push((language, create));
     }
 
     let signer = match &args.journal_signing_key {
@@ -440,14 +461,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         journal_ttl_secs = args.journal_ttl_secs,
         "request ceilings"
     );
-    let python_pool = pools
-        .iter()
-        .find(|(language, _)| *language == eryx::Language::Python)
-        .map(|(_, pool)| Arc::clone(pool))
-        .ok_or("--languages must include python")?;
-    let service = pools.into_iter().fold(
+    let service = lazy_pools.into_iter().fold(
         EryxService::with_signer(python_pool, signer),
-        |service, (language, pool)| service.with_pool(language, pool),
+        |service, (language, create)| service.with_lazy_pool(language, create),
     );
     let service = service
         .with_max_message_size(args.max_message_size)

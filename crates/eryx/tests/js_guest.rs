@@ -33,6 +33,48 @@ async fn js_session() -> Option<SessionExecutor> {
     Some(SessionExecutor::new(executor, &[]).await.unwrap())
 }
 
+/// A runtime is stamped with its language: a Python sandbox refuses the
+/// JavaScript one, as a JavaScript sandbox does the Python one.
+#[test]
+fn a_runtime_only_builds_for_its_language() {
+    let js = eryx::embedded::runtime_path(Language::JavaScript)
+        .unwrap()
+        .unwrap();
+    // SAFETY: the embedded runtime, extracted by eryx itself.
+    #[allow(unsafe_code)]
+    let err = unsafe { Sandbox::builder().with_precompiled_file(js) }
+        .build()
+        .unwrap_err();
+    assert!(
+        err.to_string()
+            .contains("this precompiled runtime runs javascript, but the sandbox is for python"),
+        "{err}"
+    );
+
+    // The Python runtime is a preinit bundle, whose layout eryx reads with
+    // the `preinit` feature.
+    #[cfg(feature = "preinit")]
+    {
+        let python = eryx::embedded::runtime_path(Language::Python)
+            .unwrap()
+            .unwrap();
+        // SAFETY: as above.
+        #[allow(unsafe_code)]
+        let err = unsafe {
+            Sandbox::builder()
+                .javascript()
+                .with_precompiled_file(python)
+        }
+        .build()
+        .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("runs python, but the sandbox is for javascript"),
+            "{err}"
+        );
+    }
+}
+
 /// A test callback backed by a closure, optionally delayed and counted.
 struct TestCallback {
     name: &'static str,

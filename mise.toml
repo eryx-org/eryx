@@ -475,6 +475,7 @@ run = """
 # Use ERYX_CPU_FEATURES for portable builds (default: native)
 cargo run -p eryx-precompile --release -- compile \
   crates/eryx-runtime/runtime-javascript.wasm \
+  --language javascript \
   --target "${ERYX_CPU_FEATURES:-native}" \
   --output crates/eryx-runtime/runtime-javascript.cwasm \
   --no-verify
@@ -490,6 +491,7 @@ run = """
 # Use ERYX_CPU_FEATURES for portable builds (default: native)
 cargo run -p eryx-precompile --release -- compile \
   crates/eryx-runtime/runtime-shell.wasm \
+  --language shell \
   --target "${ERYX_CPU_FEATURES:-native}" \
   --output crates/eryx-runtime/runtime-shell.cwasm \
   --no-verify
@@ -563,6 +565,7 @@ run = """
 TARGET="${ERYX_CPU_FEATURES:-native}"
 cargo run -p eryx-precompile --release -- compile \
   crates/eryx-runtime/runtime-python.wasm \
+  --language python \
   --preinit \
   --stdlib crates/eryx-guest-python/tests/python-stdlib \
   --target "$TARGET" \

@@ -373,17 +373,19 @@ jobs:
         if: steps.wasm-cache.outputs.cache-hit != 'true'
         run: |
           mise run build-runtime-javascript
+          # The precompile example (without features: no preinit, no
+          # verification) cross-compiles, as for the Python runtime.
           compile() {
-            cargo run -p eryx-precompile --release -- compile \
-              crates/eryx-runtime/runtime-javascript.wasm --no-verify "$@"
+            ERYX_CPU_FEATURES="$1" cargo run -p eryx --example precompile --release -- "${@:2}"
           }
+          export ERYX_WASM_PATH=crates/eryx-runtime/runtime-javascript.wasm ERYX_LANGUAGE=javascript
           # Portable CPU features, as for the Python runtime.
-          compile --cpu-features x86-64-v2 -o crates/eryx-runtime/runtime-javascript.cwasm
-          compile --target x86_64-pc-windows-msvc --cpu-features x86-64-v2 \
-            -o crates/eryx-runtime/runtime-javascript-windows.cwasm
+          compile x86-64-v2 --output crates/eryx-runtime/runtime-javascript.cwasm
+          compile x86-64-v2 --target x86_64-pc-windows-msvc \
+            --output crates/eryx-runtime/runtime-javascript-windows.cwasm
           # aarch64 has no psABI presets, so "baseline" is the portable setting.
-          compile --target aarch64-apple-darwin --cpu-features baseline \
-            -o crates/eryx-runtime/runtime-javascript-macos.cwasm
+          compile baseline --target aarch64-apple-darwin \
+            --output crates/eryx-runtime/runtime-javascript-macos.cwasm
         env:
           ERYX_PRECOMPILE_BOOTSTRAP: "1"
 
@@ -447,17 +449,19 @@ jobs:
         if: steps.wasm-cache.outputs.cache-hit != 'true'
         run: |
           mise run build-runtime-shell
+          # The precompile example (without features: no preinit, no
+          # verification) cross-compiles, as for the Python runtime.
           compile() {
-            cargo run -p eryx-precompile --release -- compile \
-              crates/eryx-runtime/runtime-shell.wasm --no-verify "$@"
+            ERYX_CPU_FEATURES="$1" cargo run -p eryx --example precompile --release -- "${@:2}"
           }
+          export ERYX_WASM_PATH=crates/eryx-runtime/runtime-shell.wasm ERYX_LANGUAGE=shell
           # Portable CPU features, as for the Python runtime.
-          compile --cpu-features x86-64-v2 -o crates/eryx-runtime/runtime-shell.cwasm
-          compile --target x86_64-pc-windows-msvc --cpu-features x86-64-v2 \
-            -o crates/eryx-runtime/runtime-shell-windows.cwasm
+          compile x86-64-v2 --output crates/eryx-runtime/runtime-shell.cwasm
+          compile x86-64-v2 --target x86_64-pc-windows-msvc \
+            --output crates/eryx-runtime/runtime-shell-windows.cwasm
           # aarch64 has no psABI presets, so "baseline" is the portable setting.
-          compile --target aarch64-apple-darwin --cpu-features baseline \
-            -o crates/eryx-runtime/runtime-shell-macos.cwasm
+          compile baseline --target aarch64-apple-darwin \
+            --output crates/eryx-runtime/runtime-shell-macos.cwasm
         env:
           ERYX_PRECOMPILE_BOOTSTRAP: "1"
 
@@ -467,6 +471,33 @@ jobs:
           name: wasm-runtime-guest-shell
           path: crates/eryx-runtime/runtime-shell*
           retention-days: 1
+
+  # The shell guest is its own workspace (see AGENTS.md), so the workspace
+  # lint jobs don't cover it.
+  shell-guest-lint:
+    name: Shell guest lint
+    runs-on: ubuntu-latest
+    needs: changes
+    if: >-
+      github.event_name == 'push'
+      || needs.changes.outputs.core == 'true'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: ./.github/actions/setup-rust
+
+      - name: Check formatting
+        working-directory: crates/eryx-guest-shell
+        run: cargo fmt --check
+
+      - name: Clippy (with and without eryx:process)
+        working-directory: crates/eryx-guest-shell
+        run: |
+          rustup target add wasm32-wasip2
+          cargo clippy --locked --target wasm32-wasip2 -- -D warnings
+          cargo clippy --locked --target wasm32-wasip2 --features process -- -D warnings
 
   lint:
     name: Lint

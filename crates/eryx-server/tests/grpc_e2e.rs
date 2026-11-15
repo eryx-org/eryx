@@ -158,27 +158,40 @@ async fn execute_in(
     panic!("never received ExecuteResult");
 }
 
-/// A request picks its pool by language; a language without one is rejected.
+/// A request picks its pool by language, created on first use; a language
+/// without one is rejected.
 #[tokio::test]
 async fn execute_selects_the_language_pool() {
     use eryx_server::proto::eryx::v1::Language;
 
-    let javascript = SandboxPool::new(
-        Sandbox::embedded().javascript(),
-        PoolConfig::default().with_max_size(2),
-    )
-    .await
-    .unwrap();
+    // JavaScript's pool is created on its first request.
+    let created = Arc::new(std::sync::atomic::AtomicU32::new(0));
+    let counter = Arc::clone(&created);
+    let create: eryx_server::service::PoolFactory = Arc::new(move || {
+        counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Box::pin(async {
+            let config = PoolConfig::default().with_max_size(2);
+            Ok(Arc::new(
+                SandboxPool::new(Sandbox::embedded().javascript(), config).await?,
+            ))
+        })
+    });
     let channel = start_server_with(4, |pool| {
-        EryxService::new(pool).with_pool(eryx::Language::JavaScript, Arc::new(javascript))
+        EryxService::new(pool).with_lazy_pool(eryx::Language::JavaScript, create)
     })
     .await;
+    assert_eq!(created.load(std::sync::atomic::Ordering::SeqCst), 0);
 
     let result = execute_in(channel.clone(), Language::Javascript, "console.log(6 * 7)")
         .await
         .unwrap();
     assert!(result.success, "execution failed: {}", result.error);
     assert_eq!(result.stdout, b"42\n");
+    // The second request reuses it.
+    execute_in(channel.clone(), Language::Javascript, "1")
+        .await
+        .unwrap();
+    assert_eq!(created.load(std::sync::atomic::Ordering::SeqCst), 1);
 
     // Unspecified is Python.
     let result = execute_in(channel.clone(), Language::Unspecified, "print(6 * 7)")

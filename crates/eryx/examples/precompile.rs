@@ -143,7 +143,14 @@ fn main() -> anyhow::Result<()> {
     // Step 2: Pre-compile to native code
     println!("\n--- Step 2: Pre-compiling to native code ---");
     let start = Instant::now();
-    let precompiled = eryx::Executor::precompile_with_target(&component_bytes, target)?;
+    let mut precompiled = eryx::Executor::precompile_with_target(&component_bytes, target)?;
+    // The guest language to stamp: ERYX_LANGUAGE, default python. Only
+    // Python is pre-initialized, so build other languages without `preinit`.
+    let language: eryx::Language = std::env::var("ERYX_LANGUAGE")
+        .unwrap_or_else(|_| "python".to_string())
+        .parse()
+        .map_err(|e: String| std::io::Error::other(e))?;
+    eryx::Executor::stamp_language(&mut precompiled, language);
     let precompile_time = start.elapsed();
     println!("Pre-compile time: {precompile_time:?}");
     println!(

@@ -21,7 +21,9 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::io::Write as _;
 
-use brush_core::extensions::{DefaultErrorFormatter, DefaultTaskSpawner, ProcessLauncher, ShellExtensionsImpl};
+use brush_core::extensions::{
+    DefaultErrorFormatter, DefaultTaskSpawner, ProcessLauncher, ShellExtensionsImpl,
+};
 #[cfg(feature = "process")]
 use brush_core::openfiles::OpenFiles;
 use brush_core::processes::{ChildProcess, LaunchRequest};
@@ -73,9 +75,13 @@ fn register_builtins(shell: &mut Shell) {
     for (name, reg) in brush_builtins::default_builtins(brush_builtins::BuiltinSet::BashMode) {
         shell.builtins_mut().register(name, reg);
     }
-    shell.builtins_mut().register("invoke", builtins::Registration::of::<InvokeCommand>());
+    shell
+        .builtins_mut()
+        .register("invoke", builtins::Registration::of::<InvokeCommand>());
     for cb in list_callbacks() {
-        shell.builtins_mut().register(cb.name, builtins::Registration::of::<InvokeCommand>());
+        shell
+            .builtins_mut()
+            .register(cb.name, builtins::Registration::of::<InvokeCommand>());
     }
     #[cfg(feature = "process")]
     for name in eryx::process::process::list_commands() {
@@ -232,7 +238,10 @@ impl ProcessLauncher for EryxLauncher {
             Err(e) => return Err(std::io::Error::other(format!("{name}: {e:?}"))),
         };
         let mut files = request.open_files;
-        Ok(ChildProcess::from_future(run_child(child, std::mem::take(&mut files))))
+        Ok(ChildProcess::from_future(run_child(
+            child,
+            std::mem::take(&mut files),
+        )))
     }
 }
 
@@ -266,10 +275,7 @@ async fn run_child(
     }
     child.close_stdin();
     let code = child.wait().map_err(io_err)?;
-    for (fd, read) in [
-        (OpenFiles::STDOUT_FD, 0u8),
-        (OpenFiles::STDERR_FD, 1u8),
-    ] {
+    for (fd, read) in [(OpenFiles::STDOUT_FD, 0u8), (OpenFiles::STDERR_FD, 1u8)] {
         let Some(mut out) = files.remove_fd(fd) else {
             continue;
         };
@@ -317,7 +323,11 @@ impl builtins::ParseArgs for InvokeCommand {
 
     fn parse(invocation: builtins::Invocation<'_>) -> Result<Self, builtins::UsageError> {
         let name = invocation.name().to_owned();
-        let mut args: Vec<String> = invocation.into_args().iter().map(ToString::to_string).collect();
+        let mut args: Vec<String> = invocation
+            .into_args()
+            .iter()
+            .map(ToString::to_string)
+            .collect();
         if name != "invoke" {
             args.insert(0, name);
         }

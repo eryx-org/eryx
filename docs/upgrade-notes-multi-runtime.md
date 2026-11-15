@@ -22,6 +22,13 @@ eryx now builds, precompiles and embeds a runtime per guest language: Python
   `eryx::embedded::{has_runtime, runtime_path}`.
 - `ERYX_RUNTIME_CWASM_JAVASCRIPT` and `ERYX_RUNTIME_CWASM_SHELL` name an
   explicit `.cwasm` to embed, like `ERYX_RUNTIME_CWASM` does for Python.
+- Precompiled runtimes can be stamped with their language
+  (`Executor::stamp_language`, `eryx-precompile compile --language <lang>`).
+  Building a sandbox for another language from a stamped runtime fails with
+  `ErrorKind::Initialization` ("this precompiled runtime runs javascript, but
+  the sandbox is for python"). The runtimes eryx builds and embeds are all
+  stamped; unstamped files, such as custom runtimes from earlier releases,
+  aren't checked.
 
 ### Changed
 
@@ -47,13 +54,21 @@ eryx now builds, precompiles and embeds a runtime per guest language: Python
 
 - New `ExecuteRequest.language` (`LANGUAGE_UNSPECIFIED` is Python). A
   language the server doesn't serve is rejected with `INVALID_ARGUMENT`.
-- New `--languages` flag (`ERYX_LANGUAGES`), default `python,javascript,shell`.
-  Each language gets its own pool, sized by the pool flags, so the default
-  prewarms three pools. Pass `--languages python` to keep a Python-only server.
+- New `--languages` flag (`ERYX_LANGUAGES`), default `python,javascript,shell`:
+  the languages the server accepts. Each gets its own pool, sized by the pool
+  flags. Python's is created and prewarmed at startup, as before; the others
+  on their first request, so a server that only runs Python costs no more
+  than it did. Pass `--languages python` to reject the others.
   `--runtime-cwasm` and `--stdlib` still configure Python only.
 - The pool metrics (`eryx_sandbox_pool_*`) have a `language` label.
-- `EryxService::with_pool(language, pool)` adds a pool; `EryxService::new` and
+- `EryxService::with_pool(language, pool)` and
+  `with_lazy_pool(language, factory)` add a pool; `EryxService::new` and
   `with_signer` take the Python pool as before.
+
+## JavaScript (`@eryx-org/eryx`)
+
+- New `language` option, which only accepts `"python"` so far; anything else
+  throws a `TypeError`.
 
 ## Python (`pyeryx`)
 

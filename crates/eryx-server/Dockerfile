@@ -50,6 +50,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
   ERYX_PRECOMPILE_BOOTSTRAP=1 \
   cargo run --release -p eryx-precompile -- compile \
   crates/eryx-runtime/runtime-python.wasm \
+  --language python \
   --preinit \
   --stdlib crates/eryx-guest-python/tests/python-stdlib \
   --target "${ERYX_CPU_FEATURES}" \
@@ -63,6 +64,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
   ERYX_PRECOMPILE_BOOTSTRAP=1 \
   cargo run --release -p eryx-precompile -- compile \
   "crates/eryx-runtime/runtime-$lang.wasm" \
+  --language "$lang" \
   --target "${ERYX_CPU_FEATURES}" \
   --output "crates/eryx-runtime/runtime-$lang.cwasm" \
   --no-verify || exit 1; \

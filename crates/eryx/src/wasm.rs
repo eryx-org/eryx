@@ -3012,6 +3012,15 @@ impl Executor {
         })
     }
 
+    /// Stamp `precompiled` (output of the `precompile` functions) with the
+    /// guest language it runs, so that building a sandbox for another
+    /// language from it fails with a clear error instead of misbehaving.
+    /// Unstamped runtimes are not checked.
+    pub fn stamp_language(precompiled: &mut Vec<u8>, language: Language) {
+        precompiled.push(language.snapshot_tag());
+        precompiled.extend_from_slice(LANGUAGE_STAMP_MAGIC);
+    }
+
     /// Create a configured wasmtime engine.
     ///
     /// Version identifier for engine configuration.
@@ -3902,6 +3911,24 @@ pub fn parse_trace_event(request: &TraceRequest) -> std::result::Result<TraceEve
     })
 }
 
+/// Ends a precompiled runtime stamped with its guest language, after the
+/// language's snapshot tag. wasmtime ignores bytes after a component, so a
+/// stamped file still loads anywhere a plain one does.
+const LANGUAGE_STAMP_MAGIC: &[u8; 8] = b"ERYXLANG";
+
+/// How many bytes [`Executor::stamp_language`] appends.
+pub(crate) const LANGUAGE_STAMP_LEN: usize = 1 + LANGUAGE_STAMP_MAGIC.len();
+
+/// The language a precompiled runtime ending in `tail` was stamped with by
+/// [`Executor::stamp_language`], or `None` if it wasn't stamped.
+pub(crate) fn language_stamp(tail: &[u8]) -> Option<Language> {
+    let (rest, magic) = tail.split_last_chunk::<8>()?;
+    if magic != LANGUAGE_STAMP_MAGIC {
+        return None;
+    }
+    Language::from_snapshot_tag(*rest.last()?)
+}
+
 /// Map an error from loading a precompiled component, reporting a file built
 /// by another eryx version as [`ErrorKind::IncompatiblePrecompiled`].
 fn deserialize_error(err: wasmtime::Error) -> Error {
@@ -3924,6 +3951,19 @@ fn deserialize_error(err: wasmtime::Error) -> Error {
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
+    #[test]
+    fn language_stamp_round_trips() {
+        for language in [Language::Python, Language::JavaScript, Language::Shell] {
+            let mut bytes = b"component".to_vec();
+            Executor::stamp_language(&mut bytes, language);
+            assert_eq!(language_stamp(&bytes), Some(language));
+        }
+        assert_eq!(language_stamp(b"component"), None);
+        assert_eq!(language_stamp(b""), None);
+        // An unknown tag isn't a language.
+        assert_eq!(language_stamp(b"\x09ERYXLANG"), None);
+    }
+
     use super::*;
 
     #[test]

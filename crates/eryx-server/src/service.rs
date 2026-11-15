@@ -170,13 +170,49 @@ impl ServerLimits {
 /// Default for how long a signed callback journal can be replayed (7 days).
 pub const DEFAULT_JOURNAL_TTL: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 
+/// Creates a language's sandbox pool on its first request.
+pub type PoolFactory = Arc<
+    dyn Fn() -> futures::future::BoxFuture<'static, Result<Arc<SandboxPool>, eryx::PoolError>>
+        + Send
+        + Sync,
+>;
+
+/// A language's sandbox pool, created up front or on first use.
+enum LanguagePool {
+    Ready(Arc<SandboxPool>),
+    Lazy {
+        pool: tokio::sync::OnceCell<Arc<SandboxPool>>,
+        create: PoolFactory,
+    },
+}
+
+impl LanguagePool {
+    /// The pool, created now if this is its first use. A failed creation is
+    /// retried on the next request.
+    async fn get(&self) -> Result<Arc<SandboxPool>, eryx::PoolError> {
+        match self {
+            Self::Ready(pool) => Ok(Arc::clone(pool)),
+            Self::Lazy { pool, create } => pool.get_or_try_init(|| create()).await.cloned(),
+        }
+    }
+}
+
+impl std::fmt::Debug for LanguagePool {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Ready(pool) => f.debug_tuple("Ready").field(pool).finish(),
+            Self::Lazy { pool, .. } => f.debug_struct("Lazy").field("pool", pool).finish(),
+        }
+    }
+}
+
 /// The Eryx gRPC service.
 ///
 /// Holds a shared [`SandboxPool`] per guest language for efficient sandbox
 /// reuse across requests.
 #[derive(Debug)]
 pub struct EryxService {
-    pools: HashMap<eryx::Language, Arc<SandboxPool>>,
+    pools: HashMap<eryx::Language, LanguagePool>,
     journal_signer: crate::replay::JournalSigner,
     max_message_size: usize,
     limits: ServerLimits,
@@ -194,7 +230,7 @@ impl EryxService {
     #[must_use]
     pub fn with_signer(pool: Arc<SandboxPool>, signer: crate::replay::JournalSigner) -> Self {
         Self {
-            pools: HashMap::from([(eryx::Language::Python, pool)]),
+            pools: HashMap::from([(eryx::Language::Python, LanguagePool::Ready(pool))]),
             journal_signer: signer,
             max_message_size: MAX_MESSAGE_SIZE,
             limits: ServerLimits::default(),
@@ -205,7 +241,21 @@ impl EryxService {
     /// Serve `language` from `pool`, replacing any pool it had.
     #[must_use]
     pub fn with_pool(mut self, language: eryx::Language, pool: Arc<SandboxPool>) -> Self {
-        self.pools.insert(language, pool);
+        self.pools.insert(language, LanguagePool::Ready(pool));
+        self
+    }
+
+    /// Serve `language` from a pool that `create` makes on the language's
+    /// first request, so a language nobody uses costs nothing.
+    #[must_use]
+    pub fn with_lazy_pool(mut self, language: eryx::Language, create: PoolFactory) -> Self {
+        self.pools.insert(
+            language,
+            LanguagePool::Lazy {
+                pool: tokio::sync::OnceCell::new(),
+                create,
+            },
+        );
         self
     }
 
@@ -300,9 +350,17 @@ impl crate::proto::eryx::v1::eryx_server::Eryx for EryxService {
                 )));
             }
         };
-        let pool = self.pools.get(&language).cloned().ok_or_else(|| {
-            Status::invalid_argument(format!("this server doesn't serve {language}"))
-        })?;
+        let pool = self
+            .pools
+            .get(&language)
+            .ok_or_else(|| {
+                Status::invalid_argument(format!("this server doesn't serve {language}"))
+            })?
+            .get()
+            .await
+            .map_err(|e| {
+                Status::unavailable(format!("failed to create the {language} pool: {e}"))
+            })?;
         let code = execute_req.code;
         let declarations = execute_req.callbacks;
         let enable_tracing = execute_req.enable_tracing;
