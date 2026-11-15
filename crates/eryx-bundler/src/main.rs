@@ -6,7 +6,7 @@
 //! the package tree and an output directory mounted, and no network.
 //!
 //! ```text
-//! eryx-bundler --cwd <dir> --out <dir> --entry <specifier> [--entry ...]
+//! eryx-bundler --cwd <dir> --out <dir> --entry <specifier> [--entry ...] [--minify]
 //! ```
 //!
 //! `--cwd` holds the `node_modules` tree; each `--entry` is a bare specifier
@@ -17,7 +17,8 @@
 //! {"bundler": "rolldown 1.3.2", "entries": {"zod": "zod.js"}, "warnings": []}
 //! ```
 //!
-//! Bundles are ES modules, unminified (readable stack traces), with shared
+//! Bundles are ES modules, unminified (readable stack traces) unless
+//! `--minify` is given (for checked-in test copies), with shared
 //! code split into chunks, and `process.env.NODE_ENV` defined as
 //! `"production"`. Packages resolve with the conditions `worker`, `browser`,
 //! `import`, `module` and `default`, as for a Worker, and their `browser`
@@ -94,16 +95,18 @@ struct Args {
     cwd: PathBuf,
     out: PathBuf,
     entries: Vec<String>,
+    minify: bool,
 }
 
 fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Args, String> {
-    let (mut cwd, mut out, mut entries) = (None, None, Vec::new());
+    let (mut cwd, mut out, mut entries, mut minify) = (None, None, Vec::new(), false);
     while let Some(arg) = args.next() {
         let mut value = || args.next().ok_or_else(|| format!("{arg} needs a value"));
         match arg.as_str() {
             "--cwd" => cwd = Some(PathBuf::from(value()?)),
             "--out" => out = Some(PathBuf::from(value()?)),
             "--entry" => entries.push(value()?),
+            "--minify" => minify = true,
             other => return Err(format!("unknown argument {other:?}")),
         }
     }
@@ -114,6 +117,7 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Args, String> {
         cwd: cwd.ok_or("--cwd is required")?,
         out: out.ok_or("--out is required")?,
         entries,
+        minify,
     })
 }
 
@@ -189,6 +193,9 @@ async fn bundle(args: &Args) -> Result<(), String> {
         // Production builds of packages that branch on it (React and the
         // like). rolldown would otherwise derive "development" from minify
         // being off; the output stays unminified for readable stack traces.
+        minify: args
+            .minify
+            .then_some(rolldown_common::RawMinifyOptions::Bool(true)),
         define: Some(
             [(
                 "process.env.NODE_ENV".to_string(),
@@ -244,6 +251,10 @@ mod tests {
         ])
         .unwrap_or_else(|e| panic!("{e}"));
         assert_eq!(parsed.entries, ["zod", "a/b"]);
+        assert!(!parsed.minify);
+        let minified = args(&["--cwd", "/s", "--out", "/o", "--entry", "z", "--minify"])
+            .unwrap_or_else(|e| panic!("{e}"));
+        assert!(minified.minify);
         assert!(args(&["--cwd", "/src", "--out", "/out"]).is_err());
         assert!(args(&["--cwd"]).is_err());
         assert!(args(&["--bogus"]).is_err());

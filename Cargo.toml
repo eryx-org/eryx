@@ -101,7 +101,7 @@ wit-dylib-ffi = { path = "crates/wit-dylib-ffi" }
 # The wit-dylib value stack shared by the guest runtimes.
 eryx-guest-call = { path = "crates/eryx-guest-call" }
 # QuickJS (quickjs-ng) bindings for the JavaScript guest.
-rquickjs = { version = "0.14", default-features = false, features = ["std"] }
+rquickjs = { version = "0.14", default-features = false, features = ["std", "loader"] }
 # HTTP/1.1 for the JS guest's `fetch` (#825).
 httparse = "1.10"
 wit-parser = "0.263"

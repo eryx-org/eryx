@@ -41,6 +41,10 @@ mod build;
 #[cfg(feature = "packages")]
 pub use build::{BuildOptions, build};
 
+/// Where a sandbox sees the environment it was given with
+/// `SandboxBuilder::with_environment`, read-only.
+pub const MOUNT_PATH: &str = "/eryx/environment";
+
 /// Why building or loading an environment failed.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]

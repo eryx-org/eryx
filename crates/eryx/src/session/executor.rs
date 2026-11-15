@@ -786,7 +786,8 @@ fn build_callback_infos(callbacks: &[Arc<dyn Callback>]) -> Vec<HostCallbackInfo
         .collect()
 }
 
-/// Build WASI context with Python stdlib and site-packages mounts.
+/// Build WASI context with the Python stdlib, site-packages and environment
+/// mounts (the same as a stateless execution's in `wasm.rs`).
 fn build_wasi_context(executor: &Executor, fd_output: &FdOutput) -> Result<WasiCtx, Error> {
     let mut wasi_builder = WasiCtxBuilder::new();
     fd_output.attach(&mut wasi_builder);
@@ -818,6 +819,13 @@ fn build_wasi_context(executor: &Executor, fd_output: &FdOutput) -> Result<WasiC
         wasi_builder
             .preopened_dir(site_packages_path, &mount_path, FsPerms::ReadOnly)
             .map_err(|e| ErrorKind::WasmEngine(format!("Failed to mount {mount_path}: {e}")))?;
+    }
+
+    #[cfg(feature = "environment")]
+    if let Some(root) = executor.environment() {
+        wasi_builder
+            .preopened_dir(root, crate::environment::MOUNT_PATH, FsPerms::ReadOnly)
+            .map_err(|e| ErrorKind::WasmEngine(format!("Failed to mount the environment: {e}")))?;
     }
 
     Ok(wasi_builder.build())
@@ -894,6 +902,19 @@ pub(crate) fn build_hybrid_vfs_context(
         )
         .map_err(|e| {
             ErrorKind::Initialization(format!("Failed to add {mount_path} to VFS: {e}"))
+        })?;
+    }
+
+    #[cfg(feature = "environment")]
+    if let Some(root) = executor.environment() {
+        ctx.add_real_preopen_path(
+            crate::environment::MOUNT_PATH,
+            root,
+            DirPerms::READ,
+            FilePerms::READ,
+        )
+        .map_err(|e| {
+            ErrorKind::Initialization(format!("Failed to add the environment to VFS: {e}"))
         })?;
     }
 

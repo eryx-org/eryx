@@ -41,6 +41,7 @@
 mod fetch;
 mod fresh;
 mod js;
+mod modules;
 mod url;
 mod wit;
 

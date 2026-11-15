@@ -47,3 +47,7 @@ tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 
 [lints]
 workspace = true
+
+[[example]]
+name = "npm_install"
+required-features = ["npm"]

@@ -80,6 +80,8 @@ thread_local! {
 impl Engine {
     fn new() -> Self {
         let runtime = Runtime::new().expect("failed to create QuickJS runtime");
+        // Imports resolve against the sandbox's environment (src/modules.rs).
+        runtime.set_loader(crate::modules::EnvResolver, crate::modules::EnvLoader);
         let context = Context::full(&runtime).expect("failed to create QuickJS context");
         let hooks = context.with(|ctx| {
             let native = Object::new(ctx.clone())?;
@@ -93,6 +95,7 @@ impl Engine {
             let prelude: Function<'_> = ctx.eval(PRELUDE)?;
             let hooks: Object<'_> = prelude.call((native,))?;
             crate::fetch::install(&ctx)?;
+            crate::modules::install(&ctx)?;
             Ok::<_, rquickjs::Error>(Persistent::save(&ctx, hooks))
         });
         let hooks = hooks.unwrap_or_else(|e| panic!("failed to evaluate prelude: {e}"));
@@ -293,7 +296,9 @@ fn split_preamble(code: &str) -> (&str, &str) {
 pub(crate) fn start_execute(export: ExportFunction, cx: Box<EryxCall>, code: String) -> u32 {
     // The host's JavaScript preamble (the secrets' `process.env`) runs first.
     let (preamble, code) = split_preamble(&code);
-    let (preamble, code) = (preamble.to_string(), code.to_string());
+    // Leading `import` declarations become dynamic imports (src/modules.rs).
+    let (code, _imports) = crate::modules::rewrite_imports(code);
+    let (preamble, code) = (preamble.to_string(), code.into_owned());
     TASK.with(|task| *task.borrow_mut() = Some(Task::new(export, cx)));
     with_ctx(|ctx, hooks| {
         crate::fresh::reseed(ctx).expect("failed to reseed the QuickJS context");
