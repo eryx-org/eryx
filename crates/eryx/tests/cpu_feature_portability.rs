@@ -65,7 +65,7 @@ fn reference_config(level: CpuFeatureLevel) -> Config {
     config.consume_fuel(true);
     config.memory_init_cow(true);
     config.cranelift_opt_level(wasmtime::OptLevel::SpeedAndSize);
-    config.async_stack_size(512 * 1024);
+    config.async_stack_size(1024 * 1024);
     config
         .target(&target_lexicon::Triple::host().to_string())
         .expect("the host triple should be a valid target");
@@ -239,7 +239,7 @@ mod aarch64 {
         config.consume_fuel(true);
         config.memory_init_cow(true);
         config.cranelift_opt_level(wasmtime::OptLevel::SpeedAndSize);
-        config.async_stack_size(512 * 1024);
+        config.async_stack_size(1024 * 1024);
         config
             .target(TARGET)
             .expect("aarch64 should be a valid target");

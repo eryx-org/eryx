@@ -1136,16 +1136,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
 name = "eryx"
-version = "0.15.0"
+version = "0.15.1"
 dependencies = [
  "anyhow",
  "async-trait",
- "base64 0.22.1",
+ "base64 0.23.1",
  "blake3",
  "criterion",
  "crossterm",
@@ -1185,7 +1185,7 @@ dependencies = [
 
 [[package]]
 name = "eryx-build"
-version = "0.15.0"
+version = "0.15.1"
 dependencies = [
  "anyhow",
  "hex",
@@ -1197,14 +1197,14 @@ dependencies = [
 
 [[package]]
 name = "eryx-guest-call"
-version = "0.15.0"
+version = "0.15.1"
 dependencies = [
  "wit-dylib-ffi",
 ]
 
 [[package]]
 name = "eryx-guest-js"
-version = "0.15.0"
+version = "0.15.1"
 dependencies = [
  "eryx-guest-call",
  "httparse",
@@ -1214,7 +1214,7 @@ dependencies = [
 
 [[package]]
 name = "eryx-guest-python"
-version = "0.15.0"
+version = "0.15.1"
 dependencies = [
  "eryx-guest-call",
  "pyo3",
@@ -1230,7 +1230,7 @@ dependencies = [
 
 [[package]]
 name = "eryx-linker-wasm"
-version = "0.15.0"
+version = "0.15.1"
 dependencies = [
  "wasm-bindgen",
  "wit-component 0.263.0",
@@ -1238,7 +1238,7 @@ dependencies = [
 
 [[package]]
 name = "eryx-macros"
-version = "0.15.0"
+version = "0.15.1"
 dependencies = [
  "eryx",
  "proc-macro2",
@@ -1251,7 +1251,7 @@ dependencies = [
 
 [[package]]
 name = "eryx-precompile"
-version = "0.15.0"
+version = "0.15.1"
 dependencies = [
  "anyhow",
  "clap",
@@ -1270,7 +1270,7 @@ dependencies = [
 
 [[package]]
 name = "eryx-python"
-version = "0.15.0"
+version = "0.15.1"
 dependencies = [
  "async-trait",
  "blake3",
@@ -1288,7 +1288,7 @@ dependencies = [
 
 [[package]]
 name = "eryx-runtime"
-version = "0.15.0"
+version = "0.15.1"
 dependencies = [
  "anyhow",
  "futures",
@@ -1306,7 +1306,7 @@ dependencies = [
 
 [[package]]
 name = "eryx-server"
-version = "0.15.0"
+version = "0.15.1"
 dependencies = [
  "clap",
  "dashmap",
@@ -1340,7 +1340,7 @@ dependencies = [
 
 [[package]]
 name = "eryx-vfs"
-version = "0.14.0"
+version = "0.14.1"
 dependencies = [
  "ambient-authority",
  "anyhow",
@@ -2458,6 +2458,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "nix"
+version = "0.32.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "77730ed34f01f4990cb2ea67fec715ecebc6fab9a6396cf83c5529b13f581bdc"
+dependencies = [
+ "bitflags",
+ "cfg-if",
+ "cfg_aliases",
+ "libc",
+]
+
+[[package]]
 name = "nom"
 version = "7.1.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2473,7 +2485,7 @@ version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7957b9740744892f114936ab4a57b3f487491bbeafaf8083688b16841a4240e5"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -2852,7 +2864,7 @@ checksum = "1f21b97672d2dc848e7b25701ab4535618b92f4861c13cc3f7f7bed52ad3c8da"
 dependencies = [
  "futures",
  "indexmap",
- "nix",
+ "nix 0.31.3",
  "tokio",
  "tracing",
  "windows",
@@ -3430,7 +3442,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -3497,7 +3509,7 @@ dependencies = [
  "security-framework",
  "security-framework-sys",
  "webpki-root-certs",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -3905,10 +3917,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.4.3",
+ "getrandom 0.3.4",
  "once_cell",
  "rustix",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -5102,7 +5114,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -5464,7 +5476,7 @@ dependencies = [
 
 [[package]]
 name = "wit-dylib-ffi"
-version = "0.15.0"
+version = "0.15.1"
 
 [[package]]
 name = "wit-parser"
@@ -5679,9 +5691,9 @@ dependencies = [
 
 [[package]]
 name = "zip"
-version = "9.5.1"
+version = "9.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e3476fd497ac8af5b1ec7b51acab7bef380f7e8dd8e0487595bafd839417a302"
+checksum = "80cc68510ea7553c30a69c732de5278e94183f68765af6c642dbccefd6ec777e"
 dependencies = [
  "aes",
  "bzip2",
@@ -5695,7 +5707,7 @@ dependencies = [
  "libc",
  "lzma-rust2",
  "memchr",
- "nix",
+ "nix 0.32.0",
  "pbkdf2",
  "ppmd-rust",
  "sha1",

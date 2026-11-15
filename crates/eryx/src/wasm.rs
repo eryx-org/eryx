@@ -92,6 +92,7 @@ impl<T> RetryableOnce<T> {
     }
 
     /// The value, if it has been initialized.
+    #[cfg(any(feature = "embedded", feature = "preinit"))]
     pub(crate) fn get(&self) -> Option<&T> {
         self.value.get()
     }
@@ -1375,6 +1376,10 @@ pub struct ExecutorState {
     pub(crate) reuse_empty_callbacks: bool,
     /// Remaining trace/output stream bytes for the current execution.
     pub(crate) stream_budget: StreamBudget,
+    /// External commands the guest can spawn through `eryx:process`.
+    pub(crate) commands: crate::process::Commands,
+    /// Host memory the execution's child processes may hold.
+    pub(crate) child_budget: crate::process::ChildBudget,
 }
 
 impl std::fmt::Debug for ExecutorState {
@@ -1420,6 +1425,8 @@ impl ExecutorState {
             suspended: None,
             reuse_empty_callbacks: true,
             stream_budget: StreamBudget::default(),
+            commands: crate::process::Commands::default(),
+            child_budget: crate::process::ChildBudget::default(),
         }
     }
 
@@ -1963,6 +1970,7 @@ pub struct ExecuteBuilder<'a> {
     execution_timeout: Option<Duration>,
     cancellation_token: Option<CancellationToken>,
     fuel_limit: Option<u64>,
+    max_child_host_bytes: Option<u64>,
     #[cfg(feature = "unstable-vfs")]
     vfs_storage: Option<eryx_vfs::ArcStorage>,
     #[cfg(feature = "unstable-vfs")]
@@ -2009,6 +2017,7 @@ impl<'a> ExecuteBuilder<'a> {
             execution_timeout: None,
             cancellation_token: None,
             fuel_limit: None,
+            max_child_host_bytes: None,
             #[cfg(feature = "unstable-vfs")]
             vfs_storage: None,
             #[cfg(feature = "unstable-vfs")]
@@ -2148,6 +2157,14 @@ impl<'a> ExecuteBuilder<'a> {
         self
     }
 
+    /// Limit the host memory child processes may hold (default 64 MiB; see
+    /// [`ResourceLimits::max_child_host_bytes`](crate::ResourceLimits::max_child_host_bytes)).
+    #[must_use]
+    pub fn with_max_child_host_bytes(mut self, bytes: Option<u64>) -> Self {
+        self.max_child_host_bytes = bytes;
+        self
+    }
+
     /// Execute the Python code with the configured options.
     ///
     /// # Errors
@@ -2166,6 +2183,7 @@ impl<'a> ExecuteBuilder<'a> {
                 self.execution_timeout,
                 self.cancellation_token,
                 self.fuel_limit,
+                self.max_child_host_bytes,
                 #[cfg(feature = "unstable-vfs")]
                 self.vfs_storage,
                 #[cfg(feature = "unstable-vfs")]
@@ -2227,6 +2245,8 @@ pub struct Executor {
     /// Held here so their temp directories live as long as the executor,
     /// including when it outlives the `Sandbox` (e.g. in a session).
     packages: Vec<crate::package::ExtractedPackage>,
+    /// External commands its guest can spawn (the shell's, via `eryx:process`).
+    commands: crate::process::Commands,
 }
 
 impl std::fmt::Debug for Executor {
@@ -2372,6 +2392,17 @@ impl Executor {
         self
     }
 
+    /// The external commands its guest can spawn.
+    pub(crate) fn with_commands(mut self, commands: crate::process::Commands) -> Self {
+        self.commands = commands;
+        self
+    }
+
+    /// The external commands its guest can spawn.
+    pub(crate) fn commands(&self) -> &crate::process::Commands {
+        &self.commands
+    }
+
     /// Get or create the global shared wasmtime Engine.
     ///
     /// The Engine is thread-safe and automatically shared across all `Executor`
@@ -2426,6 +2457,7 @@ impl Executor {
             library_paths: Vec::new(),
             language: Language::Python,
             result_variable: "result".to_string(),
+            commands: crate::process::Commands::default(),
             packages: Vec::new(),
         })
     }
@@ -2456,6 +2488,7 @@ impl Executor {
             library_paths: Vec::new(),
             language: Language::Python,
             result_variable: "result".to_string(),
+            commands: crate::process::Commands::default(),
             packages: Vec::new(),
         })
     }
@@ -2505,6 +2538,7 @@ impl Executor {
                 library_paths: Vec::new(),
                 language: Language::Python,
                 result_variable: "result".to_string(),
+                commands: crate::process::Commands::default(),
                 packages: Vec::new(),
             })
         }
@@ -2562,6 +2596,7 @@ impl Executor {
                 library_paths: Vec::new(),
                 language: Language::Python,
                 result_variable: "result".to_string(),
+                commands: crate::process::Commands::default(),
                 packages: Vec::new(),
             });
         }
@@ -2586,6 +2621,7 @@ impl Executor {
             library_paths: Vec::new(),
             language: Language::Python,
             result_variable: "result".to_string(),
+            commands: crate::process::Commands::default(),
             packages: Vec::new(),
         })
     }
@@ -2660,6 +2696,7 @@ impl Executor {
             library_paths: Vec::new(),
             language: Language::Python,
             result_variable: "result".to_string(),
+            commands: crate::process::Commands::default(),
             packages: Vec::new(),
         })
     }
@@ -2710,6 +2747,7 @@ impl Executor {
                 library_paths: Vec::new(),
                 language: Language::Python,
                 result_variable: "result".to_string(),
+                commands: crate::process::Commands::default(),
                 packages: Vec::new(),
             })
         }
@@ -2767,6 +2805,7 @@ impl Executor {
                 library_paths: Vec::new(),
                 language: Language::Python,
                 result_variable: "result".to_string(),
+                commands: crate::process::Commands::default(),
                 packages: Vec::new(),
             });
         }
@@ -2791,6 +2830,7 @@ impl Executor {
             library_paths: Vec::new(),
             language: Language::Python,
             result_variable: "result".to_string(),
+            commands: crate::process::Commands::default(),
             packages: Vec::new(),
         })
     }
@@ -2846,6 +2886,7 @@ impl Executor {
                 library_paths: Vec::new(),
                 language,
                 result_variable: "result".to_string(),
+                commands: crate::process::Commands::default(),
                 packages: Vec::new(),
             });
         }
@@ -2877,6 +2918,7 @@ impl Executor {
             library_paths: Vec::new(),
             language: Language::Python,
             result_variable: "result".to_string(),
+            commands: crate::process::Commands::default(),
             packages: Vec::new(),
         })
     }
@@ -3038,6 +3080,25 @@ impl Executor {
     /// - v4: Store eryx's version in precompiled components
     pub const ENGINE_CONFIG_VERSION: u32 = 4;
 
+    /// Stack the guest's wasm code may use: wasmtime's default.
+    const MAX_WASM_STACK: usize = 512 * 1024;
+
+    /// Size of the async fiber the guest runs on.
+    ///
+    /// Host code called from the guest (WASI, the VFS, callback and net dispatch)
+    /// runs on the same fiber and only gets `ASYNC_STACK_SIZE - MAX_WASM_STACK`
+    /// of it. With no headroom, deep guest recursion overflows the fiber
+    /// before the wasm stack limit can trap, and wasmtime aborts the whole
+    /// process. 512 KiB of headroom was enough for every host path audited.
+    ///
+    /// This is half wasmtime's 2 MiB default because a 2 MiB stack mapping is
+    /// eligible for a transparent huge page: under the on-demand allocator
+    /// with THP enabled that costs about 1.5 MB of RSS per live sandbox.
+    const ASYNC_STACK_SIZE: usize = 1024 * 1024;
+
+    /// Minimum host headroom on the fiber; see [`Self::ASYNC_STACK_SIZE`].
+    const MIN_HOST_STACK: usize = 512 * 1024;
+
     /// The version string eryx stores in every precompiled component, e.g.
     /// `eryx 0.13.0 (wasmtime 50)`.
     ///
@@ -3163,9 +3224,12 @@ impl Executor {
 
     /// The engine options shared by every engine eryx creates.
     ///
-    /// Everything here except the allocation strategy affects the generated
-    /// code, so a change to this function must be paired with a bump of
-    /// [`ENGINE_CONFIG_VERSION`](Self::ENGINE_CONFIG_VERSION).
+    /// Options that affect the generated code (wasm features, fuel, epochs,
+    /// Cranelift settings, the module version) must be paired with a bump of
+    /// [`ENGINE_CONFIG_VERSION`](Self::ENGINE_CONFIG_VERSION) when changed.
+    /// Runtime-only settings, such as the stack sizes, the trap handler and
+    /// the allocation strategy, are not part of a precompiled component and
+    /// need no bump.
     fn base_engine_config() -> std::result::Result<Config, Error> {
         let mut config = Config::new();
         config
@@ -3197,9 +3261,13 @@ impl Executor {
         // This reduces .cwasm file sizes and memory footprint
         config.cranelift_opt_level(wasmtime::OptLevel::SpeedAndSize);
 
-        // Reduce async stack size from default 2 MiB to 512 KiB
-        // Python scripts don't need deep call stacks
-        config.async_stack_size(512 * 1024);
+        // Guest code runs on an async fiber, and host code called from the
+        // guest only gets the part of it above the wasm stack limit. See
+        // `ASYNC_STACK_SIZE` for the rule; `tests/stack_overflow.rs` checks it
+        // end to end.
+        const { assert!(Self::ASYNC_STACK_SIZE >= Self::MAX_WASM_STACK + Self::MIN_HOST_STACK) };
+        config.max_wasm_stack(Self::MAX_WASM_STACK);
+        config.async_stack_size(Self::ASYNC_STACK_SIZE);
 
         // Use Unix signals rather than Mach ports for trap handling on macOS.
         // The Mach port handler thread does not survive `fork()`, so a forked
@@ -3425,6 +3493,11 @@ impl Executor {
             .map_err(|e| ErrorKind::WasmEngine(format!("Failed to add sandbox to linker: {e}")))?;
         tracing::debug!("Sandbox bindings added successfully");
 
+        // External commands; only the shell guest imports this.
+        crate::process::add_to_linker(&mut linker).map_err(|e| {
+            ErrorKind::WasmEngine(format!("Failed to add eryx:process to linker: {e}"))
+        })?;
+
         // Create pre-instantiated component
         // This validates that all imports are satisfied and prepares for fast instantiation
         let instance_pre = linker
@@ -3489,6 +3562,7 @@ impl Executor {
         execution_timeout: Option<Duration>,
         cancellation_token: Option<CancellationToken>,
         fuel_limit: Option<u64>,
+        max_child_host_bytes: Option<u64>,
         #[cfg(feature = "unstable-vfs")] vfs_storage: Option<eryx_vfs::ArcStorage>,
         #[cfg(feature = "unstable-vfs")] volumes: Vec<crate::session::VolumeMount>,
         #[cfg(feature = "unstable-vfs")] max_open_host_files: Option<usize>,
@@ -3591,6 +3665,8 @@ impl Executor {
             suspended: None,
             reuse_empty_callbacks: true,
             stream_budget: StreamBudget::default(),
+            commands: self.commands.clone(),
+            child_budget: crate::process::ChildBudget::new(max_child_host_bytes),
         };
 
         // Set up fuel for tracking/limiting. We use u64::MAX for tracking-only mode
@@ -3953,7 +4029,8 @@ pub(crate) fn language_stamp(tail: &[u8]) -> Option<Language> {
 
 /// Map an error from loading a precompiled component, reporting a file built
 /// by another eryx version as [`ErrorKind::IncompatiblePrecompiled`].
-fn deserialize_error(err: wasmtime::Error) -> Error {
+#[cfg(any(feature = "embedded", feature = "preinit"))]
+pub(crate) fn deserialize_error(err: wasmtime::Error) -> Error {
     // wasmtime only reports the stored version as text. If the wording ever
     // changes, callers just get the raw error again.
     const PREFIX: &str = "Module was compiled with incompatible version '";
@@ -4242,6 +4319,16 @@ mod tests {
         let pooling = settings.pooling_config().unwrap();
         config.allocation_strategy(InstanceAllocationStrategy::Pooling(pooling));
         Engine::new(&config).expect("pooling configuration must be valid");
+    }
+
+    /// The engine keeps the host headroom on the fiber that
+    /// `Executor::ASYNC_STACK_SIZE` requires.
+    #[test]
+    fn engine_leaves_host_stack_headroom() {
+        let engine = Engine::new(&Executor::base_engine_config().unwrap()).unwrap();
+        assert!(
+            engine.get_async_stack_size() >= engine.get_max_wasm_stack() + Executor::MIN_HOST_STACK
+        );
     }
 
     /// Test that all CPU feature level presets use valid Cranelift flags.

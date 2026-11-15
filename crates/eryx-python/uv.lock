@@ -1227,12 +1227,12 @@ provides-extras = ["all", "dev", "javascript", "serve", "shell"]
 
 [[package]]
 name = "pyeryx-runtime-javascript"
-version = "0.15.0"
+version = "0.15.1"
 source = { directory = "runtimes/javascript" }
 
 [[package]]
 name = "pyeryx-runtime-shell"
-version = "0.15.0"
+version = "0.15.1"
 source = { directory = "runtimes/shell" }
 
 [[package]]

@@ -59,7 +59,7 @@ run = "cargo build --workspace"
 
 [tasks.test]
 description = "Run tests with embedded WASM"
-depends = ["precompile-runtime-python", "precompile-runtime-javascript", "precompile-runtime-shell"]
+depends = ["precompile-runtime-python", "precompile-runtime-javascript", "precompile-runtime-shell", "precompile-coreutils"]
 run = "cargo nextest run --workspace --features embedded"
 
 [tasks.test-python]
@@ -69,7 +69,7 @@ run = "mise run test"
 
 [tasks.test-all]
 description = "Run tests with all features"
-depends = ["precompile-runtime-python", "precompile-runtime-javascript", "precompile-runtime-shell"]
+depends = ["precompile-runtime-python", "precompile-runtime-javascript", "precompile-runtime-shell", "precompile-coreutils"]
 run = "cargo nextest run --workspace --all-features"
 
 [tasks.lint]
@@ -510,6 +510,31 @@ cargo run -p eryx-precompile --release -- compile \
 sources = ["crates/eryx-runtime/runtime-shell.wasm"]
 outputs = ["crates/eryx-runtime/runtime-shell.cwasm"]
 
+[tasks.build-coreutils]
+description = "Build uutils coreutils (clis/coreutils.toml) into crates/eryx-runtime/coreutils.wasm"
+run = """
+rustup target add wasm32-wasip2
+cargo run -q -p eryx-build -- coreutils
+cp scratch/coreutils-component/component.wasm crates/eryx-runtime/coreutils.wasm
+"""
+sources = ["clis/coreutils.toml", "clis/patches/patch-uucore-wasip2.sh"]
+outputs = ["crates/eryx-runtime/coreutils.wasm"]
+
+[tasks.precompile-coreutils]
+description = "Pre-compile coreutils.wasm to coreutils.cwasm, the shell's embedded commands"
+depends = ["build-coreutils"]
+env = { ERYX_PRECOMPILE_BOOTSTRAP = "1" }
+run = """
+# No --language: a command, not a runtime. Same version stamp and CPU presets.
+cargo run -p eryx-precompile --release -- compile \
+  crates/eryx-runtime/coreutils.wasm \
+  --target "${ERYX_CPU_FEATURES:-native}" \
+  --output crates/eryx-runtime/coreutils.cwasm \
+  --no-verify
+"""
+sources = ["crates/eryx-runtime/coreutils.wasm"]
+outputs = ["crates/eryx-runtime/coreutils.cwasm"]
+
 [tasks.update-prebuilt]
 description = "Rebuild the committed late-linking artifacts in crates/eryx-runtime/prebuilt/"
 depends = ["build-runtime-python"]
@@ -540,12 +565,12 @@ depends = ["build-runtime-python", "build"]
 
 [tasks.bench]
 description = "Run benchmarks"
-depends = ["precompile-runtime-python", "precompile-runtime-javascript", "precompile-runtime-shell"]
+depends = ["precompile-runtime-python", "precompile-runtime-javascript", "precompile-runtime-shell", "precompile-coreutils"]
 run = "cargo bench --package eryx --all-features"
 
 [tasks.bench-save]
 description = "Run benchmarks and save baseline"
-depends = ["precompile-runtime-python", "precompile-runtime-javascript", "precompile-runtime-shell"]
+depends = ["precompile-runtime-python", "precompile-runtime-javascript", "precompile-runtime-shell", "precompile-coreutils"]
 run = "cargo bench --package eryx --all-features -- --save-baseline main"
 
 [tasks.precompile-runtime-python-no-preinit]
@@ -591,7 +616,7 @@ outputs = ["crates/eryx-runtime/runtime-python.cwasm"]
 
 [tasks.setup]
 description = "Set up development environment (build WASM, precompile, etc.)"
-depends = ["precompile-runtime-python", "precompile-runtime-javascript", "precompile-runtime-shell"]
+depends = ["precompile-runtime-python", "precompile-runtime-javascript", "precompile-runtime-shell", "precompile-coreutils"]
 run = """
 echo "✓ Development environment ready!"
 echo ""

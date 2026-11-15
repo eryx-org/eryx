@@ -6,6 +6,9 @@
 //! - **Pre-compiled runtimes**: Written to disk for mmap-based loading (10x less
 //!   memory). Python's is always embedded; JavaScript's and the shell's with
 //!   the `javascript` and `shell` features.
+//! - **Default shell commands**: with the `coreutils` feature (which `shell`
+//!   turns on), uutils coreutils, registered by `Sandbox::embedded().shell()`
+//!   under each of [`COREUTILS_TOOLS`].
 //!
 //! Both go into a per-user cache directory: `$XDG_CACHE_HOME/eryx`, else the
 //! platform cache directory (`~/.cache/eryx`, `~/Library/Caches/eryx`,
@@ -33,7 +36,6 @@
 //!     .build()?;
 //! ```
 
-use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
@@ -69,6 +71,30 @@ const SHELL_RUNTIME: EmbeddedRuntime = EmbeddedRuntime {
     bytes: include_bytes!(concat!(env!("OUT_DIR"), "/runtime-shell.cwasm")),
     content_hash: env!("ERYX_EMBEDDED_RUNTIME_HASH_SHELL"),
 };
+
+/// The uutils coreutils tools the embedded shell runs as external commands,
+/// with the `coreutils` feature. Must match the `--features` in
+/// `clis/coreutils.toml`, which the embedded multicall binary is built from.
+#[cfg(feature = "coreutils")]
+pub const COREUTILS_TOOLS: [&str; 11] = [
+    "cat", "head", "tail", "ls", "wc", "cp", "mv", "rm", "mkdir", "touch", "sort",
+];
+
+/// The embedded coreutils multicall command, loaded on first use.
+#[cfg(feature = "coreutils")]
+pub(crate) fn coreutils() -> Result<crate::Command, Error> {
+    static COREUTILS: OnceLock<Result<crate::Command, String>> = OnceLock::new();
+    COREUTILS
+        .get_or_init(|| {
+            let bytes = include_bytes!(concat!(env!("OUT_DIR"), "/coreutils.cwasm"));
+            // SAFETY: the build script embeds a coreutils that eryx's precompile
+            // produced, as it does the runtimes.
+            #[allow(unsafe_code)]
+            unsafe { crate::Command::from_precompiled(bytes) }.map_err(|e| e.to_string())
+        })
+        .clone()
+        .map_err(|e| ErrorKind::Initialization(format!("embedded coreutils: {e}")).into())
+}
 
 /// The runtime embedded for `language`, if this build has one.
 fn embedded_runtime(language: Language) -> Option<&'static EmbeddedRuntime> {
@@ -197,13 +223,18 @@ impl EmbeddedRuntime {
             return Ok(runtime_path);
         }
 
-        // Clean up old runtime files with different hashes (same version, stale content)
+        // Clean up old runtime files with different hashes (same version, stale content).
+        // Never our own: another process may have extracted it since the check
+        // above, and removing it breaks that process's loads until we replace it.
         if let Ok(entries) = std::fs::read_dir(temp_dir) {
             let prefix = format!("runtime-{language}-{version}-");
             for entry in entries.flatten() {
                 let name = entry.file_name();
                 let name_str = name.to_string_lossy();
-                if name_str.starts_with(&prefix) && name_str.ends_with(".cwasm") {
+                if name_str.starts_with(&prefix)
+                    && name_str.ends_with(".cwasm")
+                    && entry.path() != runtime_path
+                {
                     tracing::debug!(path = %entry.path().display(), "Removing stale runtime");
                     let _ = std::fs::remove_file(entry.path());
                 }
@@ -211,40 +242,8 @@ impl EmbeddedRuntime {
         }
 
         tracing::info!(path = %runtime_path.display(), "Extracting embedded runtime");
-
-        // Use tempfile to create a unique temp file for writing.
-        // This avoids race conditions when multiple processes extract simultaneously.
-        // We use NamedTempFile so we can persist it after writing.
-        let mut temp_file = tempfile::NamedTempFile::with_prefix_in("runtime-", temp_dir)
-            .map_err(|e| ErrorKind::Initialization(format!("Failed to create temp file: {e}")))?;
-
-        temp_file
-            .write_all(self.bytes)
+        crate::cache::publish_file(&runtime_path, self.bytes)
             .map_err(|e| ErrorKind::Initialization(format!("Failed to write runtime file: {e}")))?;
-
-        temp_file
-            .as_file()
-            .sync_all()
-            .map_err(|e| ErrorKind::Initialization(format!("Failed to sync runtime file: {e}")))?;
-
-        // Try to persist (rename) to the final location.
-        // persist() returns the temp file back on error so we can handle it.
-        match temp_file.persist(&runtime_path) {
-            Ok(_) => {}
-            Err(e) if self.matches(&runtime_path) => {
-                // Another process won the race - that's fine, our temp file is cleaned up
-                tracing::debug!("Runtime extracted by another process");
-                // The PersistError contains the temp file, which will be cleaned up on drop
-                drop(e);
-            }
-            Err(e) => {
-                return Err(ErrorKind::Initialization(format!(
-                    "Failed to persist runtime file: {}",
-                    e.error
-                ))
-                .into());
-            }
-        }
 
         Ok(runtime_path)
     }
@@ -252,33 +251,7 @@ impl EmbeddedRuntime {
     /// Whether `path` is a regular file owned by this user, not writable by
     /// others, and identical to the embedded bytes.
     fn matches(&self, path: &Path) -> bool {
-        use std::io::Read;
-
-        let Ok(mut file) = std::fs::File::open(path) else {
-            return false;
-        };
-        let Ok(meta) = file.metadata() else {
-            return false;
-        };
-        if !meta.is_file()
-            || !crate::cache::is_private(&meta)
-            || meta.len() != self.bytes.len() as u64
-        {
-            return false;
-        }
-        let mut buf = vec![0u8; 1 << 20];
-        let mut expected = self.bytes;
-        while !expected.is_empty() {
-            let n = match file.read(&mut buf) {
-                Ok(0) | Err(_) => return false,
-                Ok(n) => n.min(expected.len()),
-            };
-            if buf[..n] != expected[..n] {
-                return false;
-            }
-            expected = &expected[n..];
-        }
-        true
+        crate::cache::file_matches(path, self.bytes)
     }
 }
 
@@ -300,6 +273,16 @@ mod tests {
         assert!(std::fs::read(&second).unwrap() == PYTHON_RUNTIME.bytes);
     }
 
+    /// Processes starting together against an empty cache (#850): once any of
+    /// them has the runtime, it must stay loadable while the rest extract.
+    #[test]
+    fn concurrent_first_use_keeps_runtime_loadable() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        crate::cache::assert_concurrent_publish_stays_loadable(|| {
+            PYTHON_RUNTIME.extract(temp_dir.path()).unwrap()
+        });
+    }
+
     #[test]
     fn embedded_runtime_is_included() {
         // Just verify the bytes are included
@@ -307,5 +290,28 @@ mod tests {
             PYTHON_RUNTIME.bytes.len() > 1_000_000,
             "Embedded runtime should be > 1MB"
         );
+    }
+}
+
+#[cfg(all(test, feature = "coreutils"))]
+#[allow(clippy::unwrap_used)]
+mod coreutils_tests {
+    /// The tool list matches the features the embedded binary is built with.
+    #[test]
+    fn coreutils_tools_match_the_manifest() {
+        let manifest = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../clis/coreutils.toml"
+        ))
+        .unwrap();
+        let mut lines = manifest.lines().map(str::trim);
+        lines.find(|l| *l == "\"--features\",").unwrap();
+        let built: Vec<&str> = lines
+            .next()
+            .unwrap()
+            .trim_matches(['"', ','])
+            .split(',')
+            .collect();
+        assert_eq!(built, super::COREUTILS_TOOLS);
     }
 }
