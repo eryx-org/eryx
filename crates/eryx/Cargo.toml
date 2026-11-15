@@ -114,6 +114,8 @@ ipnet.workspace = true
 # Secrets support
 rand.workspace = true
 # TLS networking
+# Child proxy (net/proxy.rs): its CA and leaf certificates
+rcgen.workspace = true
 rustls.workspace = true
 schemars.workspace = true
 serde.workspace = true
@@ -124,6 +126,7 @@ tar.workspace = true
 target-lexicon = "0.13"
 tempfile.workspace = true
 thiserror.workspace = true
+time.workspace = true
 tokio = { workspace = true, features = ["sync", "net", "io-util", "time", "rt"] }
 tokio-rustls.workspace = true
 tokio-util.workspace = true
@@ -205,7 +208,6 @@ anyhow.workspace = true
 async-trait.workspace = true
 criterion.workspace = true
 crossterm.workspace = true
-rcgen.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 # `all-arch` pulls in Cranelift's non-host backends so the CPU-feature tests
 # can check aarch64 configuration from an x86 runner (eryx has no ARM test job).
