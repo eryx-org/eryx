@@ -204,7 +204,7 @@ impl Command {
     ///
     /// Returns [`ErrorKind::IncompatiblePrecompiled`] if another eryx version
     /// precompiled it, and an error if it isn't a WASI 0.2 command.
-    #[cfg(any(feature = "embedded", feature = "preinit"))]
+    #[cfg(any(feature = "embedded", feature = "preinit", feature = "packages"))]
     #[allow(unsafe_code)]
     pub unsafe fn from_precompiled(precompiled: &[u8]) -> Result<Self, Error> {
         let engine = crate::Executor::shared_engine()?;
@@ -228,7 +228,7 @@ impl Command {
     /// # Errors
     ///
     /// As for [`from_precompiled`](Self::from_precompiled).
-    #[cfg(any(feature = "embedded", feature = "preinit"))]
+    #[cfg(any(feature = "embedded", feature = "preinit", feature = "packages"))]
     #[allow(unsafe_code)]
     pub unsafe fn from_precompiled_file(path: impl AsRef<Path>) -> Result<Self, Error> {
         let engine = crate::Executor::shared_engine()?;
@@ -246,6 +246,134 @@ impl Command {
             .map_err(ErrorKind::wasm_component)?;
         let pre = CommandPre::new(pre).map_err(ErrorKind::wasm_component)?;
         Ok(Self { pre })
+    }
+}
+
+/// A host directory an isolated command sees, at `guest`.
+#[cfg(feature = "packages")]
+pub(crate) struct Mount<'a> {
+    pub(crate) host: &'a Path,
+    pub(crate) guest: &'a str,
+    pub(crate) writable: bool,
+}
+
+/// What an isolated command may use.
+#[cfg(feature = "packages")]
+pub(crate) struct IsolatedLimits {
+    /// Bytes of linear memory.
+    pub(crate) memory: usize,
+    /// Fuel (roughly, wasm instructions).
+    pub(crate) fuel: u64,
+    /// Wall-clock time.
+    pub(crate) timeout: std::time::Duration,
+    /// Bytes kept of each of stdout and stderr.
+    pub(crate) output: usize,
+}
+
+#[cfg(feature = "packages")]
+impl Command {
+    /// Load a precompiled command to run with
+    /// [`run_isolated`](Self::run_isolated): it's linked with plain WASI, so
+    /// its filesystem is the host directories it's given, never a sandbox's
+    /// VFS (which `unstable-vfs` puts in place of WASI's filesystem for
+    /// children, empty for one without a parent).
+    ///
+    /// # Safety
+    ///
+    /// As for [`from_precompiled`](Self::from_precompiled): only bytes eryx
+    /// precompiled and you trust.
+    #[allow(unsafe_code)]
+    pub(crate) unsafe fn from_precompiled_isolated(precompiled: &[u8]) -> Result<Self, Error> {
+        let engine = crate::Executor::shared_engine()?;
+        // SAFETY: the caller guarantees the bytes are trusted eryx output.
+        let component = unsafe { Component::deserialize(&engine, precompiled) }
+            .map_err(crate::wasm::deserialize_error)?;
+        let pre = isolated_linker(&engine)?
+            .instantiate_pre(&component)
+            .map_err(ErrorKind::wasm_component)?;
+        let pre = CommandPre::new(pre).map_err(ErrorKind::wasm_component)?;
+        Ok(Self { pre })
+    }
+
+    /// Run the command on its own, outside any sandbox, with `argv`, no
+    /// environment variables, empty stdin, no network (no sockets or name
+    /// lookups), and only `mounts` as its filesystem, within `limits`.
+    /// Returns its exit code, stdout and stderr. Load it with
+    /// [`from_precompiled_isolated`](Self::from_precompiled_isolated), or
+    /// with `unstable-vfs` it sees an empty filesystem instead of `mounts`.
+    pub(crate) async fn run_isolated(
+        &self,
+        argv: &[String],
+        mounts: &[Mount<'_>],
+        limits: &IsolatedLimits,
+    ) -> Result<(i32, Vec<u8>, Vec<u8>), Error> {
+        use wasmtime_wasi::p2::pipe::MemoryOutputPipe;
+
+        let fail = |message: String| Error::from(ErrorKind::Execution(message));
+        let stdout = MemoryOutputPipe::new(limits.output);
+        let stderr = MemoryOutputPipe::new(limits.output);
+        let mut wasi = WasiCtxBuilder::new();
+        wasi.args(argv)
+            .stdout(stdout.clone())
+            .stderr(stderr.clone())
+            .allow_tcp(false)
+            .allow_udp(false)
+            .allow_ip_name_lookup(false)
+            .socket_addr_check(|_, _| Box::pin(async { false }));
+        for mount in mounts {
+            let perms = if mount.writable {
+                wasmtime_wasi::FsPerms::ReadWrite
+            } else {
+                wasmtime_wasi::FsPerms::ReadOnly
+            };
+            wasi.preopened_dir(mount.host, mount.guest, perms)
+                .map_err(|e| fail(format!("mounting {}: {e}", mount.host.display())))?;
+        }
+        let engine = self.pre.engine();
+        crate::wasm::ensure_epoch_ticker(engine)?;
+        let mut store = Store::new(
+            engine,
+            ChildState {
+                wasi: wasi.build(),
+                table: ResourceTable::new(),
+                // A pool of its own: an isolated run shares no execution's.
+                limits: ChildMemory {
+                    pool: Arc::new(AtomicUsize::new(0)),
+                    held: 0,
+                    limit: limits.memory,
+                },
+                #[cfg(feature = "unstable-vfs")]
+                vfs: None,
+            },
+        );
+        store.limiter(|s| &mut s.limits);
+        store
+            .set_fuel(limits.fuel)
+            .map_err(|e| fail(format!("setting fuel: {e}")))?;
+        // Yield on every tick, so the timeout below can drop a CPU-bound run.
+        store.set_epoch_deadline(1);
+        store.epoch_deadline_callback(|_| Ok(UpdateDeadline::Yield(1)));
+
+        let run = async {
+            let command = self
+                .pre
+                .instantiate_async(&mut store)
+                .await
+                .map_err(|e| fail(format!("instantiating {}: {e}", argv[0])))?;
+            match command.wasi_cli_run().call_run(&mut store).await {
+                Ok(Ok(())) => Ok(0),
+                Ok(Err(())) => Ok(1),
+                Err(e) => match e.downcast_ref::<wasmtime_wasi::I32Exit>() {
+                    Some(exit) => Ok(exit.0),
+                    None => Err(fail(format!("{} failed: {e}", argv[0]))),
+                },
+            }
+        };
+        let code = tokio::time::timeout(limits.timeout, run)
+            .await
+            .map_err(|_| fail(format!("{} timed out after {:?}", argv[0], limits.timeout)))??;
+        drop(store);
+        Ok((code, stdout.contents().to_vec(), stderr.contents().to_vec()))
     }
 }
 
@@ -287,6 +415,19 @@ fn child_linker(engine: &Engine) -> Result<&'static Linker<ChildState>, Error> {
     Ok(LINKER.get_or_init(|| linker))
 }
 
+/// The linker isolated commands are instantiated with: WASI 0.2 only.
+#[cfg(feature = "packages")]
+fn isolated_linker(engine: &Engine) -> Result<&'static Linker<ChildState>, Error> {
+    static LINKER: OnceLock<Linker<ChildState>> = OnceLock::new();
+    if let Some(linker) = LINKER.get() {
+        return Ok(linker);
+    }
+    let mut linker = Linker::<ChildState>::new(engine);
+    wasmtime_wasi::p2::add_to_linker_async(&mut linker)
+        .map_err(|e| ErrorKind::WasmEngine(e.to_string()))?;
+    Ok(LINKER.get_or_init(|| linker))
+}
+
 /// A child's store data.
 pub(crate) struct ChildState {
     wasi: WasiCtx,
@@ -296,11 +437,12 @@ pub(crate) struct ChildState {
     vfs: Option<eryx_vfs::HybridVfsCtx<eryx_vfs::ArcStorage>>,
 }
 
-/// A child's share of its execution's `CHILD_MEMORY_LIMIT`, given back when
-/// its store is dropped.
+/// A child's share of `pool`, which may grow to `limit` (its execution's
+/// `CHILD_MEMORY_LIMIT`), given back when its store is dropped.
 struct ChildMemory {
     pool: Arc<AtomicUsize>,
     held: usize,
+    limit: usize,
 }
 
 impl ResourceLimiter for ChildMemory {
@@ -314,7 +456,7 @@ impl ResourceLimiter for ChildMemory {
         let reserved = self
             .pool
             .try_update(Ordering::Relaxed, Ordering::Relaxed, |used| {
-                used.checked_add(grow).filter(|&u| u <= CHILD_MEMORY_LIMIT)
+                used.checked_add(grow).filter(|&u| u <= self.limit)
             })
             .is_ok();
         if reserved {
@@ -435,6 +577,7 @@ impl ChildRun {
                 limits: ChildMemory {
                     pool: self.memory,
                     held: 0,
+                    limit: CHILD_MEMORY_LIMIT,
                 },
                 #[cfg(feature = "unstable-vfs")]
                 vfs: self.vfs,

@@ -1527,7 +1527,9 @@ impl SessionExecutor {
             })
             .collect();
 
-        // Update state for this execution and reset memory tracker
+        // Update state for this execution. The memory tracker isn't reset:
+        // linear memory never shrinks, so this store's largest memory so far
+        // is what this execution starts with, and the peak it reports.
         {
             let state = store.data_mut();
             state.set_callback_tx(callback_tx);
@@ -1535,7 +1537,6 @@ impl SessionExecutor {
             state.set_net_tx(net_tx);
             state.set_output_tx(output_tx);
             state.set_callbacks(callback_infos);
-            state.reset_memory_tracker();
             state.stream_budget = StreamBudget::default();
             // A reused store keeps its ExecutorState across runs; clear any stale
             // suspension flag so it does not misclassify this run's trap.
@@ -2385,11 +2386,6 @@ impl ExecutorState {
     /// Get the peak memory usage from the tracker.
     pub(crate) fn peak_memory_bytes(&self) -> u64 {
         self.memory_tracker.peak_memory_bytes()
-    }
-
-    /// Reset the memory tracker for a new execution.
-    pub(crate) fn reset_memory_tracker(&self) {
-        self.memory_tracker.reset();
     }
 }
 

@@ -104,6 +104,7 @@ async-trait.workspace = true
 base64.workspace = true
 blake3 = { workspace = true, optional = true }
 eryx-macros = { workspace = true, optional = true } #unified
+eryx-packages = { workspace = true, optional = true }
 eryx-runtime = { workspace = true, optional = true } #unified
 eryx-vfs = { workspace = true, optional = true } #unified
 flate2.workspace = true
@@ -201,12 +202,18 @@ unstable-vfs = ["dep:eryx-vfs"]
 # code; this is for hosts that drive the executor themselves, like eryx-server.
 # Outside semver, like `unstable-vfs`.
 unstable-internals = []
+# Environments (`eryx::environment`): build package sets ahead of time for
+# sandboxes to mount. Embeds the JavaScript bundler (eryx-bundler.cwasm, from
+# `mise run precompile-bundler`; ERYX_BUNDLER_CWASM names another).
+packages = ["dep:eryx-packages", "dep:blake3"]
 
 
 [dev-dependencies]
 # Enables `unstable-internals` for this crate's own tests and examples, which
 # exercise the executor plumbing directly.
 eryx = { path = ".", features = ["unstable-internals"] }
+# The environment tests build package caches and lockfiles by hand.
+eryx-packages.workspace = true
 anyhow.workspace = true
 async-trait.workspace = true
 criterion.workspace = true
