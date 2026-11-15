@@ -227,8 +227,14 @@ async fn snapshots_import_again_on_restore() {
         "import { chunk, uniq as unique } from 'lodash'\nimport * as dates from 'date-fns'\nimport _ from 'lodash'\nconst n = 5",
     )
     .await;
-    // Reassigned since the import: the new value is kept instead.
+    // Reassigned since the import, in a later execute or the same one: the
+    // new value is kept instead.
     stdout(&mut session, "unique = 42").await;
+    stdout(
+        &mut session,
+        "import { last as final } from 'lodash'\nfinal = 7",
+    )
+    .await;
     let snapshot = session.snapshot_state().await.unwrap();
     // Imported functions and namespaces come back by importing, not as values.
     assert_eq!(snapshot.skipped(), &[] as &[String]);
@@ -238,18 +244,22 @@ async fn snapshots_import_again_on_restore() {
     assert_eq!(
         stdout(
             &mut restored,
-            "console.log(chunk([1, 2, 3], 2).length, typeof dates.format, _.last([1, 2]), unique, n)"
+            "console.log(chunk([1, 2, 3], 2).length, typeof dates.format, _.last([1, 2]), unique, final, n)"
         )
         .await,
-        "2 function 2 42 5\n"
+        "2 function 2 42 7 5\n"
     );
     // ... and a snapshot of the restored session still has them.
     let again = restored.snapshot_state().await.unwrap();
     let mut restored = new_session(&env).await;
     restored.restore_state(&again).await.unwrap();
     assert_eq!(
-        stdout(&mut restored, "console.log(chunk([1], 1).length, unique)").await,
-        "1 42\n"
+        stdout(
+            &mut restored,
+            "console.log(chunk([1], 1).length, unique, final)"
+        )
+        .await,
+        "1 42 7\n"
     );
 }
 

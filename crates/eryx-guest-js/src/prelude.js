@@ -203,6 +203,17 @@
     // a snapshot re-imports these rather than keeping module objects.
     let imports = [];
     const importBound = new Map();
+    // What each import statement bound, as it ran (the rewrite calls
+    // `__eryx_bound({local, ...})` right after it), so a reassignment later
+    // in the same script still counts as one.
+    const pendingBound = new Map();
+    Object.defineProperty(globalThis, '__eryx_bound', {
+        value: (values) => {
+            for (const name of Object.keys(values)) pendingBound.set(name, values[name]);
+        },
+        writable: true,
+        configurable: true,
+    });
     const importLocals = (record) =>
         record.form === 'named' ? record.bindings.map((pair) => pair[1]) : record.bindings;
     // After an execute (or restore) whose imports all ran.
@@ -210,8 +221,11 @@
         for (const record of records) {
             const key = JSON.stringify(record);
             if (!imports.some((r) => JSON.stringify(r) === key)) imports.push(record);
-            for (const local of importLocals(record)) importBound.set(local, globalThis[local]);
+            for (const local of importLocals(record)) {
+                if (pendingBound.has(local)) importBound.set(local, pendingBound.get(local));
+            }
         }
+        pendingBound.clear();
     };
     // [name, kind, value] per variable, kind 'var', 'let' or 'const', then
     // ['', 'imports', records] if anything was imported. An
@@ -304,10 +318,14 @@
                   !INSTANCE_GLOBALS.has(e[0]) &&
                   e[0] !== '__proto__' &&
                   (e[1] === 'var' || (['let', 'const'].includes(e[1]) && binding(e[0])));
-        if (!Array.isArray(entries) || !entries.every(valid)) {
+        if (
+            !Array.isArray(entries) ||
+            !entries.every(valid) ||
+            entries.filter(isImports).length > 1
+        ) {
             throw new TypeError('malformed session state');
         }
-        return entries.filter(isImports).flatMap((e) => e[2]);
+        return entries.find(isImports)?.[2] ?? [];
     };
     const applyEntries = (entries) => {
         for (const [name, kind, value] of entries) {
