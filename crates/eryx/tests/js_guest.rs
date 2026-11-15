@@ -487,6 +487,12 @@ function helper() {}
 class Thing {}
 var pending = new Promise(() => {});
 let nested = { fn: () => 1 };
+var π = 3.14;
+globalThis["my-key"] = 2;
+globalThis[0] = "zero";
+let café = "au lait";
+let constructor = 5;
+globalThis.parseFloat = null;
 "#,
         )
         .run()
@@ -496,7 +502,10 @@ let nested = { fn: () => 1 };
     let snapshot = session.snapshot_state().await.unwrap();
     let mut skipped = snapshot.skipped().to_vec();
     skipped.sort();
-    assert_eq!(skipped, ["Thing", "helper", "nested", "pending"]);
+    assert_eq!(
+        skipped,
+        ["Thing", "helper", "nested", "parseFloat", "pending"]
+    );
 
     let snapshot = eryx::StateSnapshot::from_bytes(&snapshot.to_bytes()).unwrap();
     let Some(mut fresh) = js_session().await else {
@@ -511,12 +520,14 @@ console.log(count, pair[0] === pair[1], pair[0] === shared, cycle.self === cycle
 console.log(shared.n === 1n << 70n, shared.when.getTime(), [...shared.bytes]);
 console.log(table.get("k").has(2), typeof helper, typeof nested);
 try { pair = 1 } catch (e) { console.log(e.name) }
+console.log(π, globalThis["my-key"], globalThis[0], café, constructor, typeof parseFloat);
 "#,
     )
     .await;
     assert_eq!(
         out,
-        "42 true true true\ntrue 0 [1,2]\ntrue undefined undefined\nTypeError\n"
+        "42 true true true\ntrue 0 [1,2]\ntrue undefined undefined\nTypeError\n\
+         3.14 2 zero au lait 5 function\n"
     );
 
     // Restored bindings are snapshotted again, and still can't be redeclared.
@@ -530,6 +541,24 @@ try { pair = 1 } catch (e) { console.log(e.name) }
         "42 1\n"
     );
     assert!(third.execute("let shared = 1").run().await.is_err());
+}
+
+/// A binding a failed script declared but never initialized can't be kept,
+/// so it is named in `skipped` rather than dropped silently.
+#[tokio::test]
+async fn uninitialized_bindings_are_skipped() {
+    let Some(mut session) = js_session().await else {
+        return;
+    };
+    assert!(
+        session
+            .execute("var kept = 1; throw new Error('early'); let late = 2")
+            .run()
+            .await
+            .is_err()
+    );
+    let snapshot = session.snapshot_state().await.unwrap();
+    assert_eq!(snapshot.skipped(), ["late"]);
 }
 
 /// Clearing a session that has run code (the guest frees its whole QuickJS
@@ -585,6 +614,16 @@ async fn snapshots_in_another_state_format_are_refused() {
         runtime.starts_with("eryx-js-state/1 quickjs-ng@"),
         "{runtime}"
     );
+
+    // Data with no format line names no format.
+    let mut unnamed = bytes[..at - FORMAT.len()].to_vec();
+    unnamed.extend_from_slice(b"no format line here");
+    let unnamed = eryx::StateSnapshot::from_bytes(&unnamed).unwrap();
+    let err = fresh.restore_state(&unnamed).await.unwrap_err();
+    let ErrorKind::IncompatibleStateFormat { snapshot, .. } = err.kind() else {
+        panic!("expected IncompatibleStateFormat, got {err:?}");
+    };
+    assert_eq!(snapshot, "");
 }
 
 /// Restoring a damaged snapshot (truncated, or with any byte changed) fails
@@ -606,11 +645,16 @@ async fn damaged_snapshots_fail_cleanly() {
     let data_start = bytes.len() - snapshot.data().len();
     let body_start = data_start + snapshot.data().iter().position(|&b| b == b'\n').unwrap() + 1;
 
+    // QuickJS's encoding starts with a version byte and a checksum, which
+    // would reject nearly every change before the parser sees it; a
+    // checksum of 0xffffffff is accepted for any data.
+    let mut bytes = bytes;
+    bytes[body_start + 1..body_start + 5].fill(0xff);
     let mut damaged = Vec::new();
     for len in body_start..bytes.len() {
         damaged.push(bytes[..len].to_vec());
     }
-    for i in body_start..bytes.len() {
+    for i in (body_start..bytes.len()).filter(|i| !(body_start + 1..body_start + 5).contains(i)) {
         for flip in [0x01, 0x80, 0xff] {
             let mut copy = bytes.clone();
             copy[i] ^= flip;
@@ -647,4 +691,79 @@ async fn oversized_sessions_fail_cleanly() {
     let err = session.snapshot_state().await.unwrap_err();
     assert!(err.to_string().contains("too large"), "{err}");
     assert_eq!(stdout_of(&mut session, "console.log(ok)").await, "1\n");
+}
+
+/// A snapshot whose body is `encoding`, after the format line and envelope of
+/// a real one from this runtime.
+async fn crafted_snapshot(encoding: &[u8]) -> eryx::StateSnapshot {
+    let mut session = js_session().await.unwrap();
+    let snapshot = session.snapshot_state().await.unwrap();
+    let bytes = snapshot.to_bytes();
+    let data_start = bytes.len() - snapshot.data().len();
+    let body_start = data_start + snapshot.data().iter().position(|&b| b == b'\n').unwrap() + 1;
+    let mut crafted = bytes[..body_start].to_vec();
+    crafted.extend_from_slice(encoding);
+    eryx::StateSnapshot::from_bytes(&crafted).unwrap()
+}
+
+/// QuickJS encoding header: version 28, a checksum that is accepted for
+/// any data, and no atoms.
+const HEADER: [u8; 6] = [28, 0xff, 0xff, 0xff, 0xff, 0];
+
+/// Crafted encodings the parser must refuse: functions and modules
+/// (bytecode), SharedArrayBuffers and out-of-range object references.
+#[tokio::test]
+async fn crafted_snapshots_are_refused() {
+    let Some(mut session) = js_session().await else {
+        return;
+    };
+    // Tags: 12 function bytecode, 13 module, 16 SharedArrayBuffer, 20
+    // object reference (here to object 5 of 0); 9 is an array of length 1.
+    for (what, body) in [
+        ("bytecode", &[12, 0, 0, 0, 0][..]),
+        ("module", &[13, 0, 0, 0][..]),
+        ("shared array buffer", &[16, 4, 4, 0, 0, 0, 0][..]),
+        ("object reference", &[9, 1, 20, 5][..]),
+    ] {
+        let mut encoding = HEADER.to_vec();
+        encoding.extend_from_slice(body);
+        let err = session
+            .restore_state(&crafted_snapshot(&encoding).await)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err.kind(), ErrorKind::Snapshot(_)),
+            "{what}: {err:?}"
+        );
+        assert_eq!(
+            stdout_of(&mut session, "console.log(6 * 7)").await,
+            "42\n",
+            "{what}"
+        );
+    }
+}
+
+/// A restore that traps the guest (here, an encoding nested too deep to
+/// read) fails, and the session starts again from a fresh instance.
+#[tokio::test]
+async fn a_restore_that_traps_resets_the_session() {
+    let Some(mut session) = js_session().await else {
+        return;
+    };
+    session.execute("var before = 1").run().await.unwrap();
+    let mut encoding = HEADER.to_vec();
+    for _ in 0..1_000_000 {
+        encoding.extend_from_slice(&[9, 1]);
+    }
+    encoding.push(1);
+    assert!(
+        session
+            .restore_state(&crafted_snapshot(&encoding).await)
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        stdout_of(&mut session, "console.log(typeof before, 6 * 7)").await,
+        "undefined 42\n"
+    );
 }

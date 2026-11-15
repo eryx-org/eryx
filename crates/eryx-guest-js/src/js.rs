@@ -474,8 +474,9 @@ const STATE_LAYOUT: u32 = 1;
 /// Must match the host's `INCOMPATIBLE_STATE_PREFIX`.
 const INCOMPATIBLE_STATE_PREFIX: &str = "eryx:incompatible-state-format:";
 
-/// Largest snapshot the guest writes, as the host's `MAX_SNAPSHOT_SIZE`, so a
-/// big session fails here with a clear error instead of being copied out.
+/// Largest snapshot the guest writes or reads, as the host's
+/// `MAX_SNAPSHOT_SIZE`, so a big session fails here with a clear error
+/// instead of being copied out.
 const MAX_STATE_BYTES: usize = 10 * 1024 * 1024;
 
 /// The format id on a snapshot's first line. `JS_WriteObject`'s encoding is
@@ -567,10 +568,18 @@ pub(crate) fn restore_state(data: &[u8]) -> Result<(), String> {
     let format = state_format();
     let (found, encoded) = match data.iter().position(|&b| b == b'\n') {
         Some(i) => (String::from_utf8_lossy(&data[..i]), &data[i + 1..]),
-        None => (String::from_utf8_lossy(data), &[][..]),
+        // No format line: not a snapshot of any known format.
+        None => (std::borrow::Cow::Borrowed(""), data),
     };
     if found != format {
         return Err(format!("{INCOMPATIBLE_STATE_PREFIX}{found}\t{format}"));
+    }
+    // Never written, so never restored: reading is bounded like writing.
+    if data.len() > MAX_STATE_BYTES {
+        return Err(format!(
+            "Snapshot too large: {} bytes (max {MAX_STATE_BYTES} bytes)",
+            data.len()
+        ));
     }
     clear_state();
     let restored = with_ctx(|ctx, hooks| {

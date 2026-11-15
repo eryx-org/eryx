@@ -151,29 +151,49 @@
     // can't be listed: any identifier in code run so far is a candidate,
     // and one is a binding if indirect eval resolves it but it isn't a
     // property of the global object.
-    const baseline = new Set(Object.getOwnPropertyNames(globalThis));
+    const baseline = new Map(
+        Object.getOwnPropertyNames(globalThis).map((name) => [
+            name,
+            Object.getOwnPropertyDescriptor(globalThis, name).value,
+        ]),
+    );
+    // Stands in for a variable that can't be kept, so it is named in
+    // `skipped`: functions don't serialize.
+    const UNKEPT = () => {};
     const candidates = new Set();
     // Expressions that look like identifiers but aren't bindings.
     const NOT_BINDINGS = new Set(['this', 'true', 'false', 'null']);
+    const IDENTIFIERS = /[\p{ID_Start}$_][\p{ID_Continue}$\u200c\u200d]*/gu;
+    const IDENTIFIER = /^[\p{ID_Start}$_][\p{ID_Continue}$\u200c\u200d]*$/u;
     const noteCode = (code) => {
-        for (const [name] of code.matchAll(/[A-Za-z_$][\w$]*/g)) candidates.add(name);
+        for (const [name] of code.matchAll(IDENTIFIERS)) candidates.add(name);
     };
     // [name, kind, value] per variable, kind 'var', 'let' or 'const'. An
     // accessor property's getter stands in for its value, so it is skipped.
+    // Global properties go by any string key; bindings by identifier.
     const stateEntries = () => {
         const entries = [];
         for (const name of Object.getOwnPropertyNames(globalThis)) {
-            if (baseline.has(name) || installed.includes(name)) continue;
+            if (installed.includes(name)) continue;
             const desc = Object.getOwnPropertyDescriptor(globalThis, name);
-            entries.push([name, 'var', 'value' in desc ? desc.value : desc.get ?? desc.set]);
+            if (baseline.has(name)) {
+                // A replaced builtin isn't restored over the new one.
+                if (!Object.is(desc.value, baseline.get(name))) entries.push([name, 'var', UNKEPT]);
+                continue;
+            }
+            entries.push([name, 'var', 'value' in desc ? desc.value : UNKEPT]);
         }
         for (const name of candidates) {
-            if (NOT_BINDINGS.has(name) || name in globalThis) continue;
+            if (NOT_BINDINGS.has(name) || Object.hasOwn(globalThis, name)) continue;
             let value;
             try {
                 value = (0, eval)(name);
-            } catch {
-                continue; // not declared, or still in its temporal dead zone
+            } catch (e) {
+                // Declared by a script that failed before initializing it.
+                if (String(e?.message).endsWith('is not initialized')) {
+                    entries.push([name, 'let', UNKEPT]);
+                }
+                continue; // otherwise not declared
             }
             let kind = 'let';
             try {
@@ -189,15 +209,18 @@
     // bytes, so their shape is checked before anything is defined.
     const RESTORING = '__eryx_restoring__';
     const restoreEntries = (entries) => {
+        // A binding's name is interpolated into source, so it must be an
+        // identifier; a property's is only ever a key.
         const valid = (e) =>
             Array.isArray(e) &&
             e.length === 3 &&
             typeof e[0] === 'string' &&
-            IDENT.test(e[0]) &&
-            !NOT_BINDINGS.has(e[0]) &&
             !baseline.has(e[0]) &&
             e[0] !== '__proto__' &&
-            ['var', 'let', 'const'].includes(e[1]);
+            (e[1] === 'var' ||
+                (['let', 'const'].includes(e[1]) &&
+                    IDENTIFIER.test(e[0]) &&
+                    !NOT_BINDINGS.has(e[0])));
         if (!Array.isArray(entries) || !entries.every(valid)) {
             throw new TypeError('malformed session state');
         }
