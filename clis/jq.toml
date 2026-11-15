@@ -8,8 +8,12 @@
 
 name = "jq"
 description = "jq (C, autotools; regex via oniguruma)"
-# SPDX expression for the upstream source, recorded in provenance.json.
-license = "MIT"
+# SPDX expression for the upstream source, recorded in provenance.json. jq
+# itself is MIT, and links code under other licences (see COPYING): decNumber
+# (ICU), David M. Gay's dtoa.c and g_fmt.c (dtoa), and Heimdal code in
+# jv_thread.h and jv.c (BSD-2-Clause). COPYING's NetBSD strptime() is only
+# built where libc lacks strptime, and wasi-libc has it.
+license = "MIT AND ICU AND dtoa AND BSD-2-Clause"
 lang = "c"
 
 [source]
