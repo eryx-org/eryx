@@ -27,6 +27,9 @@ cd .. && mise run build-runtime-python
 
 [tasks.wasm-build-guests]
 description = "Build the JavaScript and shell WASM runtimes (delegates to root mise tasks)"
+# After wasm-build, not alongside it: both install the guest toolchain, and two
+# concurrent rustup installs of it collide.
+depends = ["wasm-build"]
 sources = [
   "../crates/eryx-guest-js/src/**/*",
   "../crates/eryx-guest-js/Cargo.toml",
