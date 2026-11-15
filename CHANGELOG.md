@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## `eryx-precompile` - [0.15.1](https://github.com/eryx-org/eryx/compare/eryx-precompile-v0.15.0...eryx-precompile-v0.15.1) - 2026-11-15
+
+### Other
+- update Cargo.lock dependencies
+
+## `eryx` - [0.15.1](https://github.com/eryx-org/eryx/compare/eryx-v0.15.0...eryx-v0.15.1) - 2026-11-15
+
+### Added
+- *(net)* method and path rules for HTTP requests ([#845](https://github.com/eryx-org/eryx/pull/845))
+- *(net)* substitute secrets inside Authorization: Basic credentials ([#840](https://github.com/eryx-org/eryx/pull/840))
+
+### Fixed
+- *(eryx)* keep the embedded runtime loadable while other processes extract it ([#867](https://github.com/eryx-org/eryx/pull/867))
+- *(eryx)* build cleanly with default features and each feature alone ([#859](https://github.com/eryx-org/eryx/pull/859))
+
+### Other
+- Merge commit from fork
+
+## `eryx-vfs` - [0.14.1](https://github.com/eryx-org/eryx/compare/eryx-vfs-v0.14.0...eryx-vfs-v0.14.1) - 2026-11-15
+
+### Other
+- Merge commit from fork
+
 ## `eryx-precompile` - [0.15.0](https://github.com/eryx-org/eryx/compare/eryx-precompile-v0.14.0...eryx-precompile-v0.15.0) - 2026-11-12
 
 ### Other
