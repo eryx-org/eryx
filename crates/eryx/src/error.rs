@@ -325,6 +325,18 @@ pub enum ErrorKind {
         format_version: u8,
     },
 
+    /// The guest can't read a state snapshot's data: its guest-specific state
+    /// format (for the shell, the brush version that serialized it) isn't the
+    /// one this runtime reads.
+    #[error("this snapshot's state is in format {snapshot:?}, but this runtime reads {runtime:?}")]
+    #[non_exhaustive]
+    IncompatibleStateFormat {
+        /// The format the snapshot's state is in (empty if it has none).
+        snapshot: String,
+        /// The format this runtime reads.
+        runtime: String,
+    },
+
     /// Execution was cancelled.
     #[error("execution cancelled")]
     Cancelled,

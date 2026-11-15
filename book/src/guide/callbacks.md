@@ -303,6 +303,59 @@ for name in dir(eryx_callbacks):
     print(f"{name}: {callback.__doc__}")
 ```
 
+## Callbacks in the Shell
+
+In a shell sandbox, every callback is a command. A shell function or builtin of
+the same name wins, as in bash, and `invoke NAME` still reaches the callback. Arguments become the callback's
+JSON arguments, and its result is printed to stdout, so callbacks compose with
+pipes and `$(...)`:
+
+```bash
+weather London --days 3          # positional, then a flag
+weather --city=London --metric   # --key=value, and a bare boolean flag
+weather --json '{"city": "London"}' --days 3
+invoke weather '{"city": "London"}'
+forecast=$(weather London | grep -i rain)
+```
+
+- **Typing:** flag values are typed by the callback's parameters schema. A
+  `string` property keeps the exact text (`--id 007` is `"007"`). `integer`,
+  `number` and `boolean` values are parsed, and an invalid one is a usage error.
+  `object` and `array` values are JSON. A property with no type, or one that
+  isn't in the schema, is JSON if it parses and a string otherwise.
+- **Boolean flags:** a `boolean` property can be given bare (`--metric`), which
+  means `true`, unless the next argument is `true` or `false`.
+- **Positional arguments:** the host binds these to the schema's properties in
+  order, like the Python guest's `weather("London")`. eryx serializes schemas
+  with their properties in alphabetical order. Each one is typed by the property
+  at its position. Too many positionals, or one for a property also given as a
+  flag, fails the call, so the command exits 1.
+- **Repeated keys:** repeating a key collects into a list for an `array`
+  property, and is a usage error otherwise.
+- **`--json`:** gives a base object, and flags override its keys. `--` ends the
+  flags.
+- **`invoke`:** `invoke NAME ...` takes the same arguments. With a single JSON
+  object argument, the object is passed as the arguments as is. `invoke` also
+  reaches names under a prefix callback (`invoke ns.tool --x 1`).
+- **`NAME --help`:** prints the callback's description and its arguments.
+- **stdin:** not read.
+
+The result prints as a line on stdout: a string as raw text, anything else
+other than `null` as compact JSON, and `null` as nothing.
+
+Exit statuses:
+
+| Status | Meaning |
+|---|---|
+| 0 | The callback succeeded. |
+| 1 | The call failed: the callback returned an error, or the host rejected the arguments. That covers too many positionals, or a positional for a property also given as a flag. `NAME: message` goes to stderr. |
+| 2 | A usage error the shell found before calling: a bad flag value, a repeated key, malformed `--json`. `NAME: problem`, then the usage line, go to stderr. |
+| 127 | `invoke` of an unknown name. |
+
+A callback that suspends (see [Replay and Suspension](#replay-and-suspension))
+stops the whole script, whatever surrounds the call: `approve || true` doesn't
+swallow it.
+
 ## Alternative APIs
 
 ### Rust: Manual TypedCallback
