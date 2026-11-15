@@ -779,3 +779,33 @@ async fn a_restore_that_traps_resets_the_session() {
         "undefined 42\n"
     );
 }
+
+/// The `process` the host sets for secrets is never session state; one the
+/// script assigns itself isn't kept either, so it is named in `skipped`.
+#[tokio::test]
+async fn host_process_is_not_session_state() {
+    use eryx::Session as _;
+
+    let Some(builder) = js_sandbox() else {
+        return;
+    };
+    let sandbox = builder
+        .with_secret(
+            "API_TOKEN",
+            "real-secret-value",
+            vec!["api.test".to_string()],
+        )
+        .build()
+        .unwrap();
+    let mut session = eryx::InProcessSession::new(&sandbox).await.unwrap();
+    session
+        .execute("var token = process.env.API_TOKEN.length > 0")
+        .await
+        .unwrap();
+    let snapshot = session.snapshot_state().await.unwrap();
+    assert!(snapshot.skipped().is_empty(), "{:?}", snapshot.skipped());
+
+    session.execute("process = { mine: true }").await.unwrap();
+    let snapshot = session.snapshot_state().await.unwrap();
+    assert_eq!(snapshot.skipped(), ["process"]);
+}
