@@ -99,6 +99,7 @@
     // remove them. Anything else already on globalThis is never shadowed.
     let installed = [];
     const installCallbacks = (list) => {
+        baseline(); // before the first callbacks are installed
         for (const name of installed) Reflect.deleteProperty(globalThis, name);
         installed = [];
         callbacks = list;
@@ -151,12 +152,19 @@
     // can't be listed: any identifier in code run so far is a candidate,
     // and one is a binding if indirect eval resolves it but it isn't a
     // property of the global object.
-    const baseline = new Map(
-        Object.getOwnPropertyNames(globalThis).map((name) => [
-            name,
-            Object.getOwnPropertyDescriptor(globalThis, name).value,
-        ]),
-    );
+    // Taken on first use, after every setup script (this prelude, then
+    // fetch.js) has run, and before any callback or user code.
+    let baselineMap;
+    const baseline = () =>
+        (baselineMap ??= new Map(
+            Object.getOwnPropertyNames(globalThis).map((name) => [
+                name,
+                Object.getOwnPropertyDescriptor(globalThis, name).value,
+            ]),
+        ));
+    // Set by the host's preamble before each execute (secret placeholders),
+    // so never session state.
+    const HOST_GLOBALS = new Set(['process']);
     // Stands in for a variable that can't be kept, so it is named in
     // `skipped`: functions don't serialize.
     const UNKEPT = () => {};
@@ -174,11 +182,11 @@
     const stateEntries = () => {
         const entries = [];
         for (const name of Object.getOwnPropertyNames(globalThis)) {
-            if (installed.includes(name)) continue;
+            if (installed.includes(name) || HOST_GLOBALS.has(name)) continue;
             const desc = Object.getOwnPropertyDescriptor(globalThis, name);
-            if (baseline.has(name)) {
+            if (baseline().has(name)) {
                 // A replaced builtin isn't restored over the new one.
-                if (!Object.is(desc.value, baseline.get(name))) entries.push([name, 'var', UNKEPT]);
+                if (!Object.is(desc.value, baseline().get(name))) entries.push([name, 'var', UNKEPT]);
                 continue;
             }
             entries.push([name, 'var', 'value' in desc ? desc.value : UNKEPT]);
@@ -215,7 +223,8 @@
             Array.isArray(e) &&
             e.length === 3 &&
             typeof e[0] === 'string' &&
-            !baseline.has(e[0]) &&
+            !baseline().has(e[0]) &&
+            !HOST_GLOBALS.has(e[0]) &&
             e[0] !== '__proto__' &&
             (e[1] === 'var' ||
                 (['let', 'const'].includes(e[1]) &&
