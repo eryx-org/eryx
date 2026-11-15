@@ -113,9 +113,16 @@ impl Lockfile {
 
     /// Check install paths are well-formed (`node_modules/<name>` segments
     /// only) and match the names they claim, so a hand-edited lockfile can't
-    /// install outside its tree.
+    /// install outside its tree, and that no two differ only in case, which
+    /// would collide on case-insensitive filesystems.
     pub(crate) fn validate(&self) -> Result<()> {
+        let mut folded = std::collections::HashSet::new();
         for (path, package) in &self.packages {
+            if !folded.insert(path.to_ascii_lowercase()) {
+                return Err(Error::Lockfile(format!(
+                    "{path:?} differs from another package's path only in case"
+                )));
+            }
             let bad = |why: &str| Error::Lockfile(format!("bad package path {path:?}: {why}"));
             let mut rest = path.as_str();
             let mut last = None;
@@ -191,10 +198,24 @@ mod tests {
             ("node_modules/a/b", "b"),
             ("node_modules/@s", "@s"),
             ("node_modules/a", "b"),
-            ("node_modules/A", "A"),
+            ("node_modules/node_modules", "node_modules"),
         ] {
             assert!(lock(&[(path, name)]).validate().is_err(), "{path}");
         }
+    }
+
+    #[test]
+    fn allows_legacy_names_but_not_case_collisions() {
+        lock(&[("node_modules/JSONStream", "JSONStream")])
+            .validate()
+            .unwrap();
+        let err = lock(&[
+            ("node_modules/JSONStream", "JSONStream"),
+            ("node_modules/jsonstream", "jsonstream"),
+        ])
+        .validate()
+        .unwrap_err();
+        assert!(err.to_string().contains("only in case"), "{err}");
     }
 
     #[test]

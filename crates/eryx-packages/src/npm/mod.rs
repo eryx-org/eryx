@@ -26,6 +26,10 @@
 //! - Package counts, download sizes and unpacked sizes are capped
 //!   ([`Limits`]), and archives can't write outside their package directory.
 //! - [`Install::offline`] uses only the lockfile and the cache.
+//!
+//! The tree holds exactly the lockfile's packages, unpacked in path order:
+//! dependencies a tarball bundles under its own `node_modules/`
+//! (`bundleDependencies`) are skipped, since they aren't in the lockfile.
 
 mod lockfile;
 mod packument;
@@ -78,16 +82,29 @@ impl Registry {
     /// Fails unless `url` is an `https` URL with a host.
     pub fn new(url: &str) -> Result<Self> {
         let parsed = reqwest::Url::parse(url).map_err(|_| Error::Fetch {
-            url: url.to_string(),
-            message: "not a valid registry URL".to_string(),
+            url: "registry URL".to_string(),
+            message: "not a valid URL".to_string(),
         })?;
         let host = parsed.host_str().filter(|_| parsed.scheme() == "https");
         let Some(host) = host else {
             return Err(Error::Fetch {
-                url: url.to_string(),
+                url: "registry URL".to_string(),
                 message: "a registry URL must be https".to_string(),
             });
         };
+        // Credentials would end up in lockfiles and error messages, and
+        // there's no registry auth yet; nor does a registry URL take a query
+        // or fragment. The URL itself isn't echoed back, as it may hold a token.
+        if !parsed.username().is_empty()
+            || parsed.password().is_some()
+            || parsed.query().is_some()
+            || parsed.fragment().is_some()
+        {
+            return Err(Error::Fetch {
+                url: format!("https://{host}/"),
+                message: "a registry URL can't have credentials, a query or a fragment".to_string(),
+            });
+        }
         let mut url = parsed.to_string();
         if !url.ends_with('/') {
             url.push('/');
@@ -349,6 +366,9 @@ impl<F: Fetch> Install<F> {
                     max_packages: self.limits.max_packages,
                 };
                 let resolved = resolver.resolve(&specs).await?;
+                // Before writing it: a lockfile that fails validation would
+                // make every later run fail to read it.
+                resolved.lockfile.validate()?;
                 if let Some(path) = &self.lockfile {
                     resolved.lockfile.write(path)?;
                 }
@@ -382,24 +402,26 @@ impl<F: Fetch> Install<F> {
             return Ok(node_modules);
         }
 
-        let blobs = Blobs::new(self.cache_dir.join("blobs"));
-        let tarballs: Vec<_> = futures::stream::iter(&lockfile.packages)
-            .map(|(path, package)| {
-                let blobs = &blobs;
-                async move { (path, self.tarball(fetch, blobs, package).await) }
-            })
-            .buffer_unordered(CONCURRENT_DOWNLOADS)
-            .collect()
-            .await;
-
         std::fs::create_dir_all(&trees)
             .map_err(Error::io(format!("creating {}", trees.display())))?;
         let staging = tempfile::tempdir_in(&trees).map_err(Error::io(format!(
             "creating a directory in {}",
             trees.display()
         )))?;
+
+        // Downloads run concurrently but are unpacked one at a time in
+        // lockfile (path) order as they arrive, so the tree is the same
+        // whatever order they finish in, and at most CONCURRENT_DOWNLOADS
+        // tarballs are held in memory.
+        let blobs = Blobs::new(self.cache_dir.join("blobs"));
+        let mut tarballs = futures::stream::iter(&lockfile.packages)
+            .map(|(path, package)| {
+                let blobs = &blobs;
+                async move { (path, self.tarball(fetch, blobs, package).await) }
+            })
+            .buffered(CONCURRENT_DOWNLOADS);
         let mut total = 0u64;
-        for (path, tarball) in tarballs {
+        while let Some((path, tarball)) = tarballs.next().await {
             let tarball = tarball?;
             let dest = staging.path().join(path);
             std::fs::create_dir_all(&dest)

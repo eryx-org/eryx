@@ -60,6 +60,10 @@ impl HttpFetch {
                 }
             }))
             .user_agent(concat!("eryx-packages/", env!("CARGO_PKG_VERSION")))
+            // A slow or stalled host can't hold an install up forever.
+            .connect_timeout(std::time::Duration::from_secs(30))
+            .read_timeout(std::time::Duration::from_secs(60))
+            .timeout(std::time::Duration::from_secs(10 * 60))
             .build()
             .map_err(|e| Error::Fetch {
                 url: String::new(),

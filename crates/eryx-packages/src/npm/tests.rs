@@ -412,6 +412,49 @@ async fn optional_platform_binaries_skipped_and_peers_installed() {
 }
 
 #[tokio::test]
+async fn dependency_names_from_metadata_are_checked_before_fetching() {
+    let fake = Fake::default();
+    fake.publish("JSONStream", "1.3.5", 30, json!({}))
+        .publish(
+            "ok",
+            "1.0.0",
+            30,
+            json!({
+                "dependencies": { "JSONStream": "^1" },
+                "optionalDependencies": { "..\\..\\evil": "1" },
+            }),
+        )
+        .publish(
+            "bad",
+            "1.0.0",
+            30,
+            json!({ "dependencies": { "../../evil": "1" } }),
+        );
+    let cache = tempfile::tempdir().unwrap();
+
+    let installed = install(&fake, cache.path(), &["ok"]).run().await.unwrap();
+    assert_eq!(
+        versions(&installed),
+        pairs(&[
+            ("node_modules/JSONStream", "1.3.5"),
+            ("node_modules/ok", "1.0.0")
+        ])
+    );
+    assert!(
+        installed.warnings.iter().any(|w| w.contains("evil")),
+        "{:?}",
+        installed.warnings
+    );
+
+    let err = install(&fake, cache.path(), &["bad"])
+        .run()
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains("invalid package name"), "{err}");
+    assert!(fake.requests().iter().all(|r| !r.contains("evil")));
+}
+
+#[tokio::test]
 async fn limits() {
     let fake = Fake::default();
     fake.publish(
@@ -450,6 +493,15 @@ async fn limits() {
 fn registry_urls() {
     assert!(Registry::new("http://registry.test/").is_err());
     assert!(Registry::new("not a url").is_err());
+    for bad in [
+        "https://user:token@mirror.test/",
+        "https://token@mirror.test/",
+        "https://mirror.test/?token=x",
+        "https://mirror.test/#x",
+    ] {
+        let err = Registry::new(bad).unwrap_err().to_string();
+        assert!(!err.contains("token"), "{err}");
+    }
     let registry = Registry::new("https://Mirror.test/npm")
         .unwrap()
         .allow_tarball_host("cdn.test");

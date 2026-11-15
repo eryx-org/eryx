@@ -127,11 +127,12 @@ impl<F: Fetch> Packuments<'_, F> {
         })
     }
 
+    /// Named for a hash of the exact name, so names differing only in case
+    /// get their own files on case-insensitive filesystems.
     fn cache_path(&self, name: &str) -> PathBuf {
         let registry = hex::encode(&Sha256::digest(self.registry.url().as_bytes())[..8]);
-        self.cache_dir
-            .join(registry)
-            .join(format!("{}.json", name.replace('/', "%2f")))
+        let file = hex::encode(&Sha256::digest(name.as_bytes())[..16]);
+        self.cache_dir.join(registry).join(format!("{file}.json"))
     }
 }
 

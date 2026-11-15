@@ -102,7 +102,10 @@ impl<F: Fetch> Resolver<'_, F> {
     async fn fetch_missing(&self, state: &mut State, wave: &[Want]) -> Result<()> {
         let mut names: Vec<(&str, Kind)> = Vec::new();
         for want in wave {
-            if !state.packuments.contains_key(&want.name)
+            // Names come from registry metadata too: check them before they
+            // go into a URL or a cache path. `place` reports invalid ones.
+            if super::spec::check_name(&want.name).is_ok()
+                && !state.packuments.contains_key(&want.name)
                 && !state.unavailable.contains(&want.name)
                 && !names.iter().any(|(n, _)| *n == want.name)
             {
@@ -135,6 +138,13 @@ impl<F: Fetch> Resolver<'_, F> {
 
     fn place(&self, state: &mut State, want: Want, next: &mut Vec<Want>) -> Result<()> {
         let spec = format!("{}@{}", want.name, want.range);
+        if let Err(message) = super::spec::check_name(&want.name) {
+            if want.kind == Kind::Normal {
+                return Err(Error::Resolve { spec, message });
+            }
+            state.warnings.push(format!("skipped {spec}: {message}"));
+            return Ok(());
+        }
         let Some(packument) = state.packuments.get(&want.name).cloned() else {
             return Ok(()); // An optional dependency that couldn't be fetched.
         };

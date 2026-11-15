@@ -64,8 +64,10 @@ impl std::fmt::Display for Spec {
     }
 }
 
-/// npm's package-name rules: at most 214 characters, URL-safe, lowercase,
-/// optionally `@scope/name`, not starting with `.` or `_`.
+/// npm's package-name rules: at most 214 characters, URL- and path-safe,
+/// optionally `@scope/name`, not starting with `.` or `_`, and not
+/// `node_modules`. Uppercase letters are allowed: new packages can't use
+/// them, but older ones still depended on do (`JSONStream`).
 pub(crate) fn check_name(name: &str) -> Result<(), String> {
     let invalid = |why: &str| Err(format!("invalid package name {name:?}: {why}"));
     if name.is_empty() || name.len() > 214 {
@@ -82,11 +84,14 @@ pub(crate) fn check_name(name: &str) -> Result<(), String> {
         if part.is_empty() || part.starts_with(['.', '_']) {
             return invalid("parts can't be empty or start with . or _");
         }
+        if part.eq_ignore_ascii_case("node_modules") {
+            return invalid("node_modules is reserved");
+        }
         if !part
             .bytes()
-            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b"-._~".contains(&b))
+            .all(|b| b.is_ascii_alphanumeric() || b"-._~".contains(&b))
         {
-            return invalid("only lowercase letters, digits and -._~ are allowed");
+            return invalid("only letters, digits and -._~ are allowed");
         }
     }
     Ok(())
@@ -114,13 +119,17 @@ mod tests {
             parse(" date-fns@ >=2 <4 "),
             ("date-fns".into(), ">=2 <4".into())
         );
+        // Legacy names keep their case.
+        assert_eq!(parse("JSONStream@1"), ("JSONStream".into(), "1".into()));
     }
 
     #[test]
     fn refuses_unsupported_and_invalid_specs() {
         for bad in [
             "",
-            "Zod",
+            "node_modules",
+            r"..\..\lodash",
+            "a:b",
             "_private",
             "@scope",
             "a b",
