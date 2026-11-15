@@ -103,7 +103,8 @@ jobs:
           docker run -d --name eryx -p 50051:50051 "eryx-server:$VARIANT"
           trap 'docker logs eryx; docker rm -f eryx' EXIT
           grpcurl() {
-            docker run --rm --network host -v "$PWD/crates/eryx-server/proto:/proto:ro" \
+            # -i: the request comes on stdin (`-d @`).
+            docker run --rm -i --network host -v "$PWD/crates/eryx-server/proto:/proto:ro" \
               fullstorydev/grpcurl:v1.9.3 -plaintext -import-path /proto -proto eryx/v1/eryx.proto "$@"
           }
           # Wait for the server to listen (it builds the Python pool first).
