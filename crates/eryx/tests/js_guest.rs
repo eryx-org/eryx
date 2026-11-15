@@ -311,12 +311,27 @@ async fn positional_callback_arguments_bind_to_the_schema() {
     .param("a", "integer", "first", true)
     .param("b", "integer", "second", true)
     .build();
-    let sandbox = builder.with_callback(add).build().unwrap();
+    // The first parameter (alphabetically) takes an object, so a lone object
+    // is keyword arguments only if its keys are all parameter names.
+    let configure = eryx::DynamicCallback::builder("configure", "Configure", |args| {
+        Box::pin(async move { Ok(args) })
+    })
+    .param("options", "object", "options", false)
+    .param("verbose", "boolean", "verbose", false)
+    .build();
+    let sandbox = builder
+        .with_callback(add)
+        .with_callback(configure)
+        .build()
+        .unwrap();
 
     let out = sandbox
         .execute(
             r#"
 console.log(await add(1, 2), await add({a: 3, b: 4}), await invoke("add", 5, 6));
+console.log(JSON.stringify(await configure({retries: 3})));
+console.log(JSON.stringify(await configure({options: {retries: 3}, verbose: true})));
+console.log(JSON.stringify(await configure({})));
 for (const call of [() => add(1, 2, 3), () => invoke("add", {__eryx_args__: [1]})]) {
     try { await call(); console.log("UNEXPECTED"); } catch (e) { console.log(String(e.message ?? e)); }
 }
@@ -327,6 +342,9 @@ for (const call of [() => add(1, 2, 3), () => invoke("add", {__eryx_args__: [1]}
     assert_eq!(
         out.stdout_utf8().unwrap(),
         "12 34 56\n\
+         {\"options\":{\"retries\":3}}\n\
+         {\"options\":{\"retries\":3},\"verbose\":true}\n\
+         {}\n\
          invalid arguments: add() takes 2 positional arguments but 3 were given\n\
          add() got the keyword argument '__eryx_args__', which is reserved for positional arguments\n"
     );

@@ -32,15 +32,33 @@
     };
 
     // A call's arguments as the JSON object the host takes. A single plain
-    // object is keyword arguments: `add({a: 1, b: 2})`, like Python's
-    // `add(a=1, b=2)`. Anything else is positional, `add(1, 2)`, sent under
-    // POSITIONAL for the host to bind to the callback's schema in order, as
-    // the Python guest does itself (see `POSITIONAL_ARGS_KEY` in eryx).
+    // object whose keys are all parameters of the callback (or of a callback
+    // with no declared parameters) is keyword arguments: `add({a: 1, b: 2})`,
+    // like Python's `add(a=1, b=2)`. Anything else is positional, `add(1, 2)`
+    // or `configure({retries: 3})` for a callback whose first parameter,
+    // `options`, takes an object, sent under POSITIONAL for the host to bind to the
+    // callback's schema in order (see `POSITIONAL_ARGS_KEY` in eryx).
     const POSITIONAL = '__eryx_args__';
     const isPlainObject = (v) =>
         v !== null &&
         typeof v === 'object' &&
         [Object.prototype, null].includes(Object.getPrototypeOf(v));
+    // Parameter names from a callback's schema, parsed on first use.
+    let paramCache = new Map();
+    const paramNames = (name) => {
+        if (!paramCache.has(name)) {
+            const cb = callbacks.find((c) => c.name === name);
+            let names = [];
+            try {
+                const schema = cb?.parameters_schema_json ? JSON.parse(cb.parameters_schema_json) : null;
+                names = Object.keys(schema?.properties ?? {});
+            } catch {
+                // An unparseable schema declares nothing.
+            }
+            paramCache.set(name, names);
+        }
+        return paramCache.get(name);
+    };
     const callArgs = (name, args) => {
         if (args.length === 1 && isPlainObject(args[0])) {
             if (Object.hasOwn(args[0], POSITIONAL)) {
@@ -48,7 +66,10 @@
                     `${name}() got the keyword argument '${POSITIONAL}', which is reserved for positional arguments`,
                 );
             }
-            return args[0];
+            const names = paramNames(name);
+            if (names.length === 0 || Object.keys(args[0]).every((k) => names.includes(k))) {
+                return args[0];
+            }
         }
         return args.length === 0 ? {} : { [POSITIONAL]: args };
     };
@@ -77,6 +98,7 @@
         for (const name of installed) Reflect.deleteProperty(globalThis, name);
         installed = [];
         callbacks = list;
+        paramCache = new Map();
         for (const { name } of callbacks) {
             const parts = name.split('.');
             const root = parts[0];

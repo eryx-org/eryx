@@ -581,10 +581,18 @@ impl Callback for DynamicCallback {
 /// For any other callback the host binds them to its parameters before calling
 /// it, the way a Python function would: in the order of the `properties` of its
 /// [`parameters_schema`](Callback::parameters_schema), as the guest sees it in
-/// `list-callbacks`. More positional arguments than properties, or one that
-/// also arrives by keyword, fail with [`CallbackError::InvalidArguments`]
-/// without calling it. The Python guest binds positional arguments itself, with
-/// the same rules; the JavaScript and shell guests send them here.
+/// `list-callbacks`. That is the order serde_json iterates the schema's
+/// properties in, which is alphabetical today (#860 tracks using declaration
+/// order). More positional arguments than properties, or one that also arrives
+/// by keyword, fail with [`CallbackError::InvalidArguments`] without calling it:
+/// `add() takes 2 positional arguments but 3 were given`, `add() got multiple
+/// values for argument 'a'`.
+///
+/// The Python guest binds positional arguments itself, with the same rules. The
+/// JavaScript and shell guests send them here, as `{"__eryx_args__": [...]}`
+/// plus any keyword arguments. In JavaScript a call with a single plain object
+/// whose keys are all parameter names (or to a callback with no declared
+/// parameters) is keyword arguments; any other call is positional.
 pub const POSITIONAL_ARGS_KEY: &str = "__eryx_args__";
 
 /// Bind the positional arguments in `args` (under [`POSITIONAL_ARGS_KEY`]) to
