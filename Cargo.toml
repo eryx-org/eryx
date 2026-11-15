@@ -1,6 +1,8 @@
 [workspace]
 resolver = "2"
 members = ["crates/*"]
+# The shell guest targets wasm32-wasip2 only and pins brush with its own lock.
+exclude = ["crates/eryx-guest-shell"]
 
 # Dev tools (install via cargo or mise):
 # - cargo-nextest: Fast test runner (`cargo nextest run`)
@@ -88,6 +90,8 @@ wit-component = "0.263"
 wit-dylib = "0.263"
 # wit-dylib FFI for implementing the interpreter interface (inlined from wasm-tools).
 wit-dylib-ffi = { path = "crates/wit-dylib-ffi" }
+# QuickJS (quickjs-ng) bindings for the JavaScript guest.
+rquickjs = { version = "0.14", default-features = false, features = ["std"] }
 wit-parser = "0.263"
 zip = "9.0"
 zstd = "0.14"

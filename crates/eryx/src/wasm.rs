@@ -13,11 +13,11 @@
 //!
 //! ```rust,ignore
 //! // At build time - compile once:
-//! let precompiled = Executor::precompile_file("runtime.wasm")?;
-//! std::fs::write("runtime.cwasm", precompiled)?;
+//! let precompiled = Executor::precompile_file("runtime-python.wasm")?;
+//! std::fs::write("runtime-python.cwasm", precompiled)?;
 //!
 //! // At runtime - load quickly (unsafe, must trust the file):
-//! let executor = unsafe { Executor::from_precompiled_file("runtime.cwasm")? };
+//! let executor = unsafe { Executor::from_precompiled_file("runtime-python.cwasm")? };
 //! ```
 //!
 //! Alternatively, enable the `embedded` feature for a safe API that
@@ -2813,11 +2813,29 @@ impl Executor {
     #[cfg(feature = "embedded")]
     #[tracing::instrument(name = "Executor::from_embedded_runtime")]
     pub fn from_embedded_runtime() -> std::result::Result<Self, Error> {
-        let cache_key = CacheKey::embedded_runtime();
+        Self::from_embedded_runtime_for(Language::Python)
+    }
 
-        // Get embedded resources (extracts stdlib on first call)
-        let resources = crate::embedded::EmbeddedResources::get()?;
-        let stdlib_path = Some(resources.stdlib_path.clone());
+    /// Create an executor from `language`'s embedded runtime, like
+    /// [`Self::from_embedded_runtime`] does for Python.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ErrorKind::MissingRuntime`] if this build doesn't embed a
+    /// runtime for `language`, or an error if it cannot be extracted or loaded.
+    #[cfg(feature = "embedded")]
+    pub fn from_embedded_runtime_for(language: Language) -> std::result::Result<Self, Error> {
+        let cache_key = CacheKey::embedded_runtime_for(language);
+
+        // Get embedded resources (for Python, extracts the stdlib on first call)
+        let (runtime_path, stdlib_path) = if language == Language::Python {
+            let resources = crate::embedded::EmbeddedResources::get()?;
+            (resources.runtime(), Some(resources.stdlib_path.clone()))
+        } else {
+            let path = crate::embedded::runtime_path(language)?
+                .ok_or(ErrorKind::MissingRuntime { language })?;
+            (path, None)
+        };
 
         // Check InstancePreCache first (fast path)
         if let Some(instance_pre) = InstancePreCache::global().get(&cache_key) {
@@ -2826,7 +2844,7 @@ impl Executor {
                 instance_pre,
                 stdlib_path,
                 library_paths: Vec::new(),
-                language: Language::Python,
+                language,
                 result_variable: "result".to_string(),
                 packages: Vec::new(),
             });
@@ -2834,12 +2852,13 @@ impl Executor {
 
         // Cache miss - load from embedded resources
         // SAFETY: The embedded runtime was pre-compiled at build time from our own
-        // trusted runtime.wasm, so we know it's safe to deserialize.
+        // trusted runtime-<language>.wasm, so we know it's safe to deserialize.
         #[allow(unsafe_code)]
         let mut executor =
-            unsafe { Self::from_precompiled_file_with_key(resources.runtime(), cache_key)? };
+            unsafe { Self::from_precompiled_file_with_key(runtime_path, cache_key)? };
 
         executor.stdlib_path = stdlib_path;
+        executor.language = language;
         Ok(executor)
     }
 
@@ -2881,6 +2900,7 @@ impl Executor {
     ///
     /// Returns an error if pre-compilation fails.
     pub fn precompile(wasm_bytes: &[u8]) -> std::result::Result<Vec<u8>, Error> {
+        Self::check_cpu_feature_env()?;
         let engine = Self::create_engine_with_target(None)?;
         engine.precompile_component(wasm_bytes).map_err(|e| {
             ErrorKind::WasmEngine(format!("Failed to precompile component: {e}")).into()
@@ -2932,6 +2952,7 @@ impl Executor {
         wasm_bytes: &[u8],
         target: Option<&str>,
     ) -> std::result::Result<Vec<u8>, Error> {
+        Self::check_cpu_feature_env()?;
         let engine = Self::create_engine_with_target(target)?;
         engine.precompile_component(wasm_bytes).map_err(|e| {
             ErrorKind::WasmEngine(format!("Failed to precompile component: {e}")).into()
@@ -2991,6 +3012,15 @@ impl Executor {
         engine.precompile_component(wasm_bytes).map_err(|e| {
             ErrorKind::WasmEngine(format!("Failed to precompile component: {e}")).into()
         })
+    }
+
+    /// Stamp `precompiled` (output of the `precompile` functions) with the
+    /// guest language it runs, so that building a sandbox for another
+    /// language from it fails with a clear error instead of misbehaving.
+    /// Unstamped runtimes are not checked.
+    pub fn stamp_language(precompiled: &mut Vec<u8>, language: Language) {
+        precompiled.push(language.snapshot_tag());
+        precompiled.extend_from_slice(LANGUAGE_STAMP_MAGIC);
     }
 
     /// Create a configured wasmtime engine.
@@ -3065,6 +3095,24 @@ impl Executor {
     /// For fine-grained control, set `ERYX_CRANELIFT_FLAGS` to a comma-separated
     /// list of `flag=value` pairs. Example:
     /// `ERYX_CRANELIFT_FLAGS=has_avx512f=false,has_avx512bw=false`
+    /// Refuse to precompile when `ERYX_CPU_FEATURES` or `ERYX_CRANELIFT_FLAGS`
+    /// is set but this build can't apply it (it needs the `embedded` or
+    /// `preinit` feature): the output would silently target this machine's
+    /// CPU instead, and fail to load on one with fewer features.
+    fn check_cpu_feature_env() -> std::result::Result<(), Error> {
+        #[cfg(not(any(feature = "embedded", feature = "preinit")))]
+        for var in ["ERYX_CPU_FEATURES", "ERYX_CRANELIFT_FLAGS"] {
+            if std::env::var_os(var).is_some() {
+                return Err(ErrorKind::WasmEngine(format!(
+                    "{var} is set, but this build of eryx can't apply it: enable \
+                     the `embedded` or `preinit` feature"
+                ))
+                .into());
+            }
+        }
+        Ok(())
+    }
+
     fn create_engine_with_target(target: Option<&str>) -> std::result::Result<Engine, Error> {
         let config = Self::engine_config_with_target(target)?;
         Engine::new(&config).map_err(|e| ErrorKind::WasmEngine(e.to_string()).into())
@@ -3481,7 +3529,7 @@ impl Executor {
             pythonpath_parts.push(site_packages_mount_path(i));
         }
 
-        // Mount Python stdlib if configured (required for eryx-wasm-runtime)
+        // Mount Python stdlib if configured (required for eryx-guest-python)
         if let Some(ref stdlib_path) = self.stdlib_path {
             // PYTHONHOME tells Python where to find the standard library
             wasi_builder.env("PYTHONHOME", "/python-stdlib");
@@ -3883,6 +3931,26 @@ pub fn parse_trace_event(request: &TraceRequest) -> std::result::Result<TraceEve
     })
 }
 
+/// Ends a precompiled runtime stamped with its guest language, after the
+/// language's snapshot tag. wasmtime ignores bytes after a component, so a
+/// stamped file still loads anywhere a plain one does.
+const LANGUAGE_STAMP_MAGIC: &[u8; 8] = b"ERYXLANG";
+
+/// How many bytes [`Executor::stamp_language`] appends.
+#[cfg(any(feature = "embedded", feature = "preinit"))]
+pub(crate) const LANGUAGE_STAMP_LEN: usize = 1 + LANGUAGE_STAMP_MAGIC.len();
+
+/// The language a precompiled runtime ending in `tail` was stamped with by
+/// [`Executor::stamp_language`], or `None` if it wasn't stamped.
+#[cfg(any(test, feature = "embedded", feature = "preinit"))]
+pub(crate) fn language_stamp(tail: &[u8]) -> Option<Language> {
+    let (rest, magic) = tail.split_last_chunk::<8>()?;
+    if magic != LANGUAGE_STAMP_MAGIC {
+        return None;
+    }
+    Language::from_snapshot_tag(*rest.last()?)
+}
+
 /// Map an error from loading a precompiled component, reporting a file built
 /// by another eryx version as [`ErrorKind::IncompatiblePrecompiled`].
 fn deserialize_error(err: wasmtime::Error) -> Error {
@@ -3905,6 +3973,19 @@ fn deserialize_error(err: wasmtime::Error) -> Error {
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
+    #[test]
+    fn language_stamp_round_trips() {
+        for language in [Language::Python, Language::JavaScript, Language::Shell] {
+            let mut bytes = b"component".to_vec();
+            Executor::stamp_language(&mut bytes, language);
+            assert_eq!(language_stamp(&bytes), Some(language));
+        }
+        assert_eq!(language_stamp(b"component"), None);
+        assert_eq!(language_stamp(b""), None);
+        // An unknown tag isn't a language.
+        assert_eq!(language_stamp(b"\x09ERYXLANG"), None);
+    }
+
     use super::*;
 
     #[test]

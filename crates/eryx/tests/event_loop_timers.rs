@@ -31,11 +31,11 @@ fn sandbox_builder() -> eryx::SandboxBuilder<eryx::language::Python, eryx::state
     #[cfg(not(feature = "embedded"))]
     {
         let stdlib = std::env::var("ERYX_PYTHON_STDLIB").map_or_else(
-            |_| crates_dir().join("eryx-wasm-runtime/tests/python-stdlib"),
+            |_| crates_dir().join("eryx-guest-python/tests/python-stdlib"),
             PathBuf::from,
         );
         Sandbox::builder()
-            .with_wasm_file(crates_dir().join("eryx-runtime/runtime.wasm"))
+            .with_wasm_file(crates_dir().join("eryx-runtime/runtime-python.wasm"))
             .with_python_stdlib(&stdlib)
     }
 }

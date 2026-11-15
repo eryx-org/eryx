@@ -129,6 +129,137 @@ async fn execute_simple_print() {
     assert!(got_result, "never received ExecuteResult");
 }
 
+/// Run `code` in `language` and return the final result, or the gRPC
+/// status the server rejected the request with.
+async fn execute_in(
+    channel: Channel,
+    language: eryx_server::proto::eryx::v1::Language,
+    code: &str,
+) -> Result<eryx_server::proto::eryx::v1::ExecuteResult, tonic::Status> {
+    execute_request(
+        channel,
+        ExecuteRequest {
+            code: code.to_string(),
+            language: language as i32,
+            ..Default::default()
+        },
+    )
+    .await
+}
+
+/// Send `request` and return the final result, or the gRPC status the server
+/// rejected it with.
+async fn execute_request(
+    channel: Channel,
+    request: ExecuteRequest,
+) -> Result<eryx_server::proto::eryx::v1::ExecuteResult, tonic::Status> {
+    let mut client = EryxClient::new(channel);
+    let (tx, rx) = mpsc::channel(16);
+    tx.send(ClientMessage {
+        message: Some(client_message::Message::ExecuteRequest(Box::new(request))),
+    })
+    .await
+    .unwrap();
+    let mut stream = client.execute(ReceiverStream::new(rx)).await?.into_inner();
+    while let Some(msg) = stream.message().await? {
+        if let Some(server_message::Message::ExecuteResult(result)) = msg.message {
+            return Ok(*result);
+        }
+    }
+    panic!("never received ExecuteResult");
+}
+
+/// A server built without the `javascript` feature rejects JavaScript,
+/// naming the feature.
+#[cfg(not(feature = "javascript"))]
+#[tokio::test]
+async fn a_server_without_javascript_rejects_it() {
+    use eryx_server::proto::eryx::v1::Language;
+
+    let status = execute_in(start_server().await, Language::Javascript, "1")
+        .await
+        .unwrap_err();
+    assert_eq!(status.code(), tonic::Code::InvalidArgument);
+    assert!(
+        status.message().contains("`javascript` cargo feature"),
+        "{status:?}"
+    );
+}
+
+/// A request picks its pool by language, created on first use; a language
+/// without one is rejected.
+#[cfg(feature = "javascript")]
+#[tokio::test]
+async fn execute_selects_the_language_pool() {
+    use eryx_server::proto::eryx::v1::Language;
+
+    // JavaScript's pool is created on its first request.
+    let created = Arc::new(std::sync::atomic::AtomicU32::new(0));
+    let counter = Arc::clone(&created);
+    let create: eryx_server::service::PoolFactory = Arc::new(move || {
+        counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Box::pin(async {
+            let config = PoolConfig::default().with_max_size(2);
+            Ok(Arc::new(
+                SandboxPool::new(Sandbox::embedded().javascript(), config).await?,
+            ))
+        })
+    });
+    let channel = start_server_with(4, |pool| {
+        EryxService::new(pool).with_lazy_pool(eryx::Language::JavaScript, create)
+    })
+    .await;
+    assert_eq!(created.load(std::sync::atomic::Ordering::SeqCst), 0);
+
+    let result = execute_in(channel.clone(), Language::Javascript, "console.log(6 * 7)")
+        .await
+        .unwrap();
+    assert!(result.success, "execution failed: {}", result.error);
+    assert_eq!(result.stdout, b"42\n");
+    // The second request reuses it.
+    execute_in(channel.clone(), Language::Javascript, "1")
+        .await
+        .unwrap();
+    assert_eq!(created.load(std::sync::atomic::Ordering::SeqCst), 1);
+
+    // Secrets need the Python preamble, so they're refused for JavaScript
+    // rather than silently missing.
+    let status = execute_request(
+        channel.clone(),
+        ExecuteRequest {
+            code: "console.log(1)".to_string(),
+            language: Language::Javascript as i32,
+            secrets: vec![eryx_server::proto::eryx::v1::SecretConfig {
+                name: "TOKEN".to_string(),
+                value: "s3cret".to_string(),
+                allowed_hosts: vec![],
+            }],
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(status.code(), tonic::Code::InvalidArgument);
+    assert!(
+        status
+            .message()
+            .contains("secrets are only supported for Python, not javascript"),
+        "{status:?}"
+    );
+
+    // Unspecified is Python.
+    let result = execute_in(channel.clone(), Language::Unspecified, "print(6 * 7)")
+        .await
+        .unwrap();
+    assert_eq!(result.stdout, b"42\n");
+
+    let status = execute_in(channel, Language::Shell, "echo hi")
+        .await
+        .unwrap_err();
+    assert_eq!(status.code(), tonic::Code::InvalidArgument);
+    assert!(status.message().contains("shell"), "{status:?}");
+}
+
 /// An uncaught exception over gRPC. The traceback (which Python writes to
 /// stderr) is surfaced as CPython would — over stderr, not as a sandbox error:
 ///   - streamed live as STDERR `OutputEvent`s while the code runs,

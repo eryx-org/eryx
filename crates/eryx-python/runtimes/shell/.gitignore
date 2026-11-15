@@ -1,0 +1,3 @@
+pyeryx_runtime_shell/*.cwasm
+build/
+*.egg-info/

@@ -170,12 +170,64 @@ impl ServerLimits {
 /// Default for how long a signed callback journal can be replayed (7 days).
 pub const DEFAULT_JOURNAL_TTL: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 
+/// Why a request for `language`, which has no pool, is rejected.
+fn unserved_language(language: eryx::Language) -> String {
+    let feature = match language {
+        eryx::Language::JavaScript if !cfg!(feature = "javascript") => Some("javascript"),
+        eryx::Language::Shell if !cfg!(feature = "shell") => Some("shell"),
+        _ => None,
+    };
+    match feature {
+        Some(feature) => format!(
+            "this server was built without {language} support (the `{feature}` cargo feature)"
+        ),
+        None => format!("this server doesn't serve {language} (see --languages)"),
+    }
+}
+
+/// Creates a language's sandbox pool on its first request.
+pub type PoolFactory = Arc<
+    dyn Fn() -> futures::future::BoxFuture<'static, Result<Arc<SandboxPool>, eryx::PoolError>>
+        + Send
+        + Sync,
+>;
+
+/// A language's sandbox pool, created up front or on first use.
+enum LanguagePool {
+    Ready(Arc<SandboxPool>),
+    Lazy {
+        pool: tokio::sync::OnceCell<Arc<SandboxPool>>,
+        create: PoolFactory,
+    },
+}
+
+impl LanguagePool {
+    /// The pool, created now if this is its first use. A failed creation is
+    /// retried on the next request.
+    async fn get(&self) -> Result<Arc<SandboxPool>, eryx::PoolError> {
+        match self {
+            Self::Ready(pool) => Ok(Arc::clone(pool)),
+            Self::Lazy { pool, create } => pool.get_or_try_init(|| create()).await.cloned(),
+        }
+    }
+}
+
+impl std::fmt::Debug for LanguagePool {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Ready(pool) => f.debug_tuple("Ready").field(pool).finish(),
+            Self::Lazy { pool, .. } => f.debug_struct("Lazy").field("pool", pool).finish(),
+        }
+    }
+}
+
 /// The Eryx gRPC service.
 ///
-/// Holds a shared [`SandboxPool`] for efficient sandbox reuse across requests.
+/// Holds a shared [`SandboxPool`] per guest language for efficient sandbox
+/// reuse across requests.
 #[derive(Debug)]
 pub struct EryxService {
-    pool: Arc<SandboxPool>,
+    pools: HashMap<eryx::Language, LanguagePool>,
     journal_signer: crate::replay::JournalSigner,
     max_message_size: usize,
     limits: ServerLimits,
@@ -183,7 +235,8 @@ pub struct EryxService {
 }
 
 impl EryxService {
-    /// Create a new service instance with the given pool and journal signer.
+    /// Create a new service instance with the given Python pool and journal
+    /// signer. Add pools for other languages with [`Self::with_pool`].
     ///
     /// The `signer` should use a stable key shared across all replicas (see
     /// [`JournalSigner::from_key`](crate::replay::JournalSigner::from_key))
@@ -192,12 +245,33 @@ impl EryxService {
     #[must_use]
     pub fn with_signer(pool: Arc<SandboxPool>, signer: crate::replay::JournalSigner) -> Self {
         Self {
-            pool,
+            pools: HashMap::from([(eryx::Language::Python, LanguagePool::Ready(pool))]),
             journal_signer: signer,
             max_message_size: MAX_MESSAGE_SIZE,
             limits: ServerLimits::default(),
             journal_ttl: DEFAULT_JOURNAL_TTL,
         }
+    }
+
+    /// Serve `language` from `pool`, replacing any pool it had.
+    #[must_use]
+    pub fn with_pool(mut self, language: eryx::Language, pool: Arc<SandboxPool>) -> Self {
+        self.pools.insert(language, LanguagePool::Ready(pool));
+        self
+    }
+
+    /// Serve `language` from a pool that `create` makes on the language's
+    /// first request, so a language nobody uses costs nothing.
+    #[must_use]
+    pub fn with_lazy_pool(mut self, language: eryx::Language, create: PoolFactory) -> Self {
+        self.pools.insert(
+            language,
+            LanguagePool::Lazy {
+                pool: tokio::sync::OnceCell::new(),
+                create,
+            },
+        );
+        self
     }
 
     /// Set the ceilings applied to every request's limits. Defaults to
@@ -277,6 +351,29 @@ impl crate::proto::eryx::v1::eryx_server::Eryx for EryxService {
             }
         };
 
+        let language = match crate::proto::eryx::v1::Language::try_from(execute_req.language) {
+            Ok(
+                crate::proto::eryx::v1::Language::Unspecified
+                | crate::proto::eryx::v1::Language::Python,
+            ) => eryx::Language::Python,
+            Ok(crate::proto::eryx::v1::Language::Javascript) => eryx::Language::JavaScript,
+            Ok(crate::proto::eryx::v1::Language::Shell) => eryx::Language::Shell,
+            Err(_) => {
+                return Err(Status::invalid_argument(format!(
+                    "unknown language {}",
+                    execute_req.language
+                )));
+            }
+        };
+        let pool = self
+            .pools
+            .get(&language)
+            .ok_or_else(|| Status::invalid_argument(unserved_language(language)))?
+            .get()
+            .await
+            .map_err(|e| {
+                Status::unavailable(format!("failed to create the {language} pool: {e}"))
+            })?;
         let code = execute_req.code;
         let declarations = execute_req.callbacks;
         let enable_tracing = execute_req.enable_tracing;
@@ -367,6 +464,14 @@ impl crate::proto::eryx::v1::eryx_server::Eryx for EryxService {
                 Ok(config)
             })
             .transpose()?;
+
+        // The preamble that sets the secrets' placeholders is Python, so the
+        // other languages can't have secrets yet (#822, #808).
+        if language != eryx::Language::Python && !execute_req.secrets.is_empty() {
+            return Err(Status::invalid_argument(format!(
+                "secrets are only supported for Python, not {language}"
+            )));
+        }
 
         // Parse and validate secrets: generate placeholders and build env preamble.
         let (secrets, secrets_preamble) = {
@@ -479,10 +584,10 @@ impl crate::proto::eryx::v1::eryx_server::Eryx for EryxService {
 
         // 5. Acquire sandbox from pool and configure for this request.
         let acquire_start = Instant::now();
-        let mut sandbox = match self.pool.acquire().await {
+        let mut sandbox = match pool.acquire().await {
             Ok(s) => s,
             Err(e) => {
-                let stats = self.pool.stats();
+                let stats = pool.stats();
                 span.in_scope(|| {
                     tracing::warn!(
                         error = %e,
@@ -501,7 +606,7 @@ impl crate::proto::eryx::v1::eryx_server::Eryx for EryxService {
             .with_callbacks(cbs)
             .map_err(|e| Status::invalid_argument(e.to_string()))?
             .with_resource_limits(resource_limits.clone());
-        let pool_stats = self.pool.stats();
+        let pool_stats = pool.stats();
         span.in_scope(|| {
             tracing::info!(
                 acquire_ms = acquire_start.elapsed().as_millis() as u64,
@@ -603,6 +708,7 @@ impl crate::proto::eryx::v1::eryx_server::Eryx for EryxService {
             async move {
                 let params = SessionParams {
                     code: &code,
+                    language,
                     vfs_storage,
                     state: persist_state.then_some(state_snapshot.as_slice()),
                     enable_tracing,
@@ -835,6 +941,8 @@ async fn create_vfs_with_files(
 /// Parameters for a single session execution.
 struct SessionParams<'a> {
     code: &'a str,
+    /// The guest language: only Python gets the (Python) preamble.
+    language: eryx::Language,
     /// VFS pre-populated with the request's supporting files, if any.
     vfs_storage: Option<ArcStorage>,
     state: Option<&'a [u8]>,
@@ -1100,8 +1208,11 @@ async fn execute_with_session(
     // Run builtins injection before the user code so callbacks are accessible
     // from imported modules. Also add sys.path setup when supporting files are
     // present — merged here to avoid a separate WASM execution cycle. As a
-    // preamble, it doesn't shift the user code's line numbers.
-    let preamble = if params.vfs_storage.is_some() {
+    // preamble, it doesn't shift the user code's line numbers. The preamble
+    // is Python, so the other languages get none.
+    let preamble = if params.language != eryx::Language::Python {
+        String::new()
+    } else if params.vfs_storage.is_some() {
         format!(
             "{}{SYS_PATH_INJECT}{BUILTINS_INJECT}",
             params.secrets_preamble

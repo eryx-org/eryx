@@ -1,4 +1,4 @@
-# eryx-wasm-runtime
+# eryx-guest-python
 
 Custom WASM guest runtime for the eryx sandbox.
 

@@ -106,6 +106,8 @@ export interface ReplayOutcome {
  * follows that default, including later changes to it.
  */
 export interface SandboxOptions {
+  /** The guest language. Only `"python"` (the default) is available in this package so far. */
+  language?: "python";
   /**
    * Functions the code can `await`, by name, as for eryx.run's client: each
    * a function of the code's keyword arguments, or `{ handler, description }`

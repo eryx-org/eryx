@@ -1,0 +1,16 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pyeryx-runtime-javascript"
+# Locked to pyeryx's version: a precompiled runtime only loads in the eryx
+# version that built it. Install it with `pip install pyeryx[javascript]`.
+version = "0.15.0"
+description = "The precompiled JavaScript runtime for pyeryx, for one platform"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT OR Apache-2.0"
+
+[tool.setuptools.package-data]
+pyeryx_runtime_javascript = ["runtime-javascript.cwasm"]

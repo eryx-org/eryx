@@ -1,6 +1,6 @@
 # Build image for Anthropic's OSS Scanner (https://github.com/anthropics/oss-scanner).
 #
-# Mirrors the `build-eryx-runtime` and `test` jobs in .github/workflows/ci.yml:
+# Mirrors the `build-runtime-python` and `test` jobs in .github/workflows/ci.yml:
 # build the Python WASM runtime from source, precompile it with preinit, then
 # compile the whole workspace's tests so they can run offline.
 #
@@ -44,25 +44,25 @@ RUN rustup toolchain install \
     && rustup toolchain install nightly --profile minimal --component rust-src \
     && cargo fetch --locked
 
-# 1. Guest runtime: crates/eryx-runtime/runtime.wasm plus late-linking libraries.
+# 1. Guest runtime: crates/eryx-runtime/runtime-python.wasm plus late-linking libraries.
 #    Refresh prebuilt/ from this build so it can't lag the guest source.
 RUN BUILD_ERYX_RUNTIME=1 cargo build --locked -p eryx-runtime --release \
     && OUT_DIR=$(dirname "$(find target/release -path '*/eryx-runtime*/out/liberyx_runtime.so' -type f | head -1)") \
     && cp "$OUT_DIR"/liberyx_runtime.so.zst "$OUT_DIR"/liberyx_bindings.so.zst crates/eryx-runtime/prebuilt/ \
-    && mkdir -p crates/eryx-wasm-runtime/target \
-    && cp "$OUT_DIR"/liberyx_runtime.so crates/eryx-wasm-runtime/target/
+    && mkdir -p crates/eryx-guest-python/target \
+    && cp "$OUT_DIR"/liberyx_runtime.so crates/eryx-guest-python/target/
 
-# 2. Python stdlib for preinit and the eryx-wasm-runtime tests.
-RUN mkdir -p crates/eryx-wasm-runtime/tests/site-packages \
-    && tar -xf crates/eryx/python-stdlib.tar.zst -C crates/eryx-wasm-runtime/tests/
+# 2. Python stdlib for preinit and the eryx-guest-python tests.
+RUN mkdir -p crates/eryx-guest-python/tests/site-packages \
+    && tar -xf crates/eryx/python-stdlib.tar.zst -C crates/eryx-guest-python/tests/
 
-# 3. Precompiled, pre-initialized runtime.cwasm (embedded by the `eryx` crate).
+# 3. Precompiled, pre-initialized runtime-python.cwasm (embedded by the `eryx` crate).
 RUN ERYX_PRECOMPILE_BOOTSTRAP=1 cargo run --locked -p eryx-precompile --release -- compile \
-      crates/eryx-runtime/runtime.wasm \
+      crates/eryx-runtime/runtime-python.wasm \
       --preinit \
-      --stdlib crates/eryx-wasm-runtime/tests/python-stdlib \
+      --stdlib crates/eryx-guest-python/tests/python-stdlib \
       --target x86-64-v2 \
-      --output crates/eryx-runtime/runtime.cwasm \
+      --output crates/eryx-runtime/runtime-python.cwasm \
       --no-verify
 
 # 4. Compile every test binary now: the scan VM is offline and has 2 CPUs.

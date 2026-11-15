@@ -1,4 +1,4 @@
-//! CPython FFI bindings for eryx-wasm-runtime.
+//! CPython FFI bindings for eryx-guest-python.
 //!
 //! This module re-exports pyo3::ffi for CPython C API bindings where available
 //! in the stable ABI (abi3), with manual declarations for functions not exposed there.

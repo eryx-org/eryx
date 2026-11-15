@@ -16,13 +16,13 @@ node = "26"
 [tasks.wasm-build]
 description = "Build eryx WASM runtime (delegates to root mise task)"
 sources = [
-  "../crates/eryx-wasm-runtime/src/**/*.rs",
-  "../crates/eryx-wasm-runtime/Cargo.toml",
+  "../crates/eryx-guest-python/src/**/*.rs",
+  "../crates/eryx-guest-python/Cargo.toml",
   "../crates/eryx-runtime/wit/**/*.wit",
 ]
-outputs = ["../crates/eryx-runtime/runtime.wasm"]
+outputs = ["../crates/eryx-runtime/runtime-python.wasm"]
 run = """
-cd .. && mise run build-eryx-runtime
+cd .. && mise run build-runtime-python
 """
 
 [tasks.extract-stdlib]
@@ -30,12 +30,12 @@ description = "Extract Python stdlib for pre-initialization"
 depends = ["wasm-build"]
 sources = ["../crates/eryx/python-stdlib.tar.zst"]
 outputs = [
-  "../crates/eryx-wasm-runtime/tests/python-stdlib/encodings/__init__.py",
+  "../crates/eryx-guest-python/tests/python-stdlib/encodings/__init__.py",
 ]
 run = """
 #!/usr/bin/env bash
 set -euo pipefail
-cd ../crates/eryx-wasm-runtime
+cd ../crates/eryx-guest-python
 PYTHON_LIB="../eryx/python-stdlib.tar.zst"
 if [[ ! -f "$PYTHON_LIB" ]]; then
     echo "Error: python-stdlib.tar.zst not found at $PYTHON_LIB"
@@ -56,14 +56,14 @@ rm -rf tests/python-stdlib-tmp
 [tasks.preinit]
 description = "Pre-initialize Python in the WASM component (bakes in stdlib)"
 depends = ["wasm-build", "extract-stdlib"]
-sources = ["../crates/eryx-runtime/runtime.wasm"]
+sources = ["../crates/eryx-runtime/runtime-python.wasm"]
 outputs = ["../crates/eryx-runtime/runtime-preinit.wasm"]
 env = { ERYX_PRECOMPILE_BOOTSTRAP = "1" }
 run = """
 cd .. && cargo run -p eryx-precompile --release -- compile \
-  crates/eryx-runtime/runtime.wasm \
+  crates/eryx-runtime/runtime-python.wasm \
   --preinit \
-  --stdlib crates/eryx-wasm-runtime/tests/python-stdlib \
+  --stdlib crates/eryx-guest-python/tests/python-stdlib \
   --wasm-only \
   --output crates/eryx-runtime/runtime-preinit.wasm \
   --no-verify

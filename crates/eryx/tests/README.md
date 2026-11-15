@@ -11,7 +11,7 @@ Integration tests require the embedded runtime to be built. Run:
 mise run setup
 
 # Option 2: Just precompile the runtime
-mise run precompile-eryx-runtime
+mise run precompile-runtime-python-no-preinit
 
 # Option 3: Use the test task (builds if needed)
 mise run test
@@ -82,7 +82,7 @@ This approach is better than mocking because it tests the full path:
 ## Troubleshooting
 
 ### "Pre-compiled runtime not found"
-Run `mise run precompile-eryx-runtime` first, or use `mise run test`.
+Run `mise run precompile-runtime-python-no-preinit` first, or use `mise run test`.
 
 ### Tests hang
 The mock server might not be cleaning up properly. Restart the test.

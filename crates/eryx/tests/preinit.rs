@@ -22,7 +22,7 @@ fn get_stdlib_path() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .unwrap()
-        .join("eryx-wasm-runtime/tests/python-stdlib")
+        .join("eryx-guest-python/tests/python-stdlib")
 }
 
 // =============================================================================

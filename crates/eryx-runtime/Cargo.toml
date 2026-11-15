@@ -10,7 +10,7 @@ description = "Python WASM runtime component for the eryx sandbox"
 readme = "README.md"
 
 # This crate contains the WIT definition and builds the WASM component.
-# The component uses our custom eryx-wasm-runtime (liberyx_runtime.so)
+# The component uses our custom eryx-guest-python (liberyx_runtime.so)
 # instead of componentize-py's runtime.
 
 [features]
@@ -65,5 +65,5 @@ rustdoc-args = ["--cfg", "docsrs"]
 [package.metadata.cargo-all-features]
 # Skip native-extensions feature as it requires the WASM runtime to be built first.
 # The build script embeds liberyx_runtime.so.zst which is only available after
-# running `mise run build-eryx-runtime`.
+# running `mise run build-runtime-python`.
 denylist = ["native-extensions"]

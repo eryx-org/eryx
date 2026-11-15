@@ -34,10 +34,18 @@ pyeryx = "eryx.__main__:main"
 [project.optional-dependencies]
 dev = ["pytest", "pytest-asyncio", "pytest-xdist", "mypy", "requests", "httpx", "mcp>=2,<2.4"]
 serve = ["mcp>=2,<2.4"]
+# The JavaScript and shell runtimes, which the pyeryx wheel doesn't include.
+# The versions must match pyeryx's exactly (tests/test_languages.py checks).
+javascript = ["pyeryx-runtime-javascript==0.15.0"]
+shell = ["pyeryx-runtime-shell==0.15.0"]
+all = ["pyeryx-runtime-javascript==0.15.0", "pyeryx-runtime-shell==0.15.0"]
 
 [tool.uv.sources]
 # Developed together in this repo (sdk/python)
 eryx-run = { path = "../../sdk/python", editable = true }
+# Built from runtimes/ here until they're published (#847).
+pyeryx-runtime-javascript = { path = "runtimes/javascript" }
+pyeryx-runtime-shell = { path = "runtimes/shell" }
 
 [tool.maturin]
 features = ["pyo3/extension-module"]

@@ -276,6 +276,8 @@ function _toResult(output, stateWasReset, stats) {
  * for this sandbox only, the module-wide default set by the setter of the
  * same name; an omitted one follows that default.
  * @typedef {Object} SandboxOptions
+ * @property {"python"} [language] - The guest language. Only `"python"` (the
+ *   default) is available in this package so far.
  * @property {import("@eryx-org/eryx-run/shared").Callbacks} [callbacks] -
  *   Functions the code can `await`, by name, as for eryx.run's client: each a
  *   function of the code's keyword arguments, or `{ handler, description }`.
@@ -349,7 +351,12 @@ export class Sandbox {
    * @param {SandboxOptions} [options]
    */
   constructor(options = {}) {
-    const { timeoutMs } = options;
+    const { timeoutMs, language = "python" } = options;
+    if (language !== "python") {
+      throw new TypeError(
+        `language ${JSON.stringify(language)} isn't available in this package yet; only "python" is`,
+      );
+    }
     if (timeoutMs !== undefined && !(Number.isFinite(timeoutMs) && timeoutMs > 0)) {
       throw new TypeError("timeoutMs must be a positive number of milliseconds");
     }

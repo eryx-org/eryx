@@ -1,4 +1,4 @@
-# Upload runtime.wasm to the main eryx GitHub release.
+# Upload runtime-python.wasm to the main eryx GitHub release.
 # Runs separately from the release workflows to avoid conflicts over the release.
 
 name: Upload Runtime Artifacts
@@ -14,7 +14,7 @@ jobs:
   upload-runtime:
     runs-on: ubuntu-26.04
     # Only the main eryx release gets the runtime asset. Without this the job ran
-    # for all four release-plz releases, rebuilding runtime.wasm each time and
+    # for all four release-plz releases, rebuilding runtime-python.wasm each time and
     # attaching it to releases that have no use for it. See the note in
     # python-release.yml for why the eryx-vfs exclusion is needed.
     if: >-
@@ -36,20 +36,20 @@ jobs:
         with:
           cache: false
 
-      - name: Build runtime.wasm
+      - name: Build runtime-python.wasm
         run: |
           mise trust
-          mise run build-eryx-runtime
+          mise run build-runtime-python
         env:
           BUILD_ERYX_RUNTIME: "1"
 
-      # `eryx-precompile setup` verifies the download against runtime.wasm.sha256.
-      - name: Upload runtime.wasm to release
+      # `eryx-precompile setup` verifies the download against runtime-python.wasm.sha256.
+      - name: Upload runtime-python.wasm to release
         run: |
-          (cd crates/eryx-runtime && sha256sum runtime.wasm > runtime.wasm.sha256)
+          (cd crates/eryx-runtime && sha256sum runtime-python.wasm > runtime-python.wasm.sha256)
           gh release upload "$TAG_NAME" \
-            crates/eryx-runtime/runtime.wasm \
-            crates/eryx-runtime/runtime.wasm.sha256 \
+            crates/eryx-runtime/runtime-python.wasm \
+            crates/eryx-runtime/runtime-python.wasm.sha256 \
             --clobber
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -120,6 +120,22 @@ message ExecuteRequest {
   // FAILED_PRECONDITION before executing the script. An empty, unsigned journal
   // starts a new journaling session and does not require a signature.
   CallbackJournal callback_journal = 14;
+
+  // The guest language `code` is written in. LANGUAGE_UNSPECIFIED is Python.
+  // A language the server doesn't serve (see its --languages flag) is
+  // rejected with INVALID_ARGUMENT.
+  Language language = 15;
+}
+
+// A guest language.
+enum Language {
+  // Python, the default.
+  LANGUAGE_UNSPECIFIED = 0;
+  LANGUAGE_PYTHON = 1;
+  // JavaScript, via QuickJS.
+  LANGUAGE_JAVASCRIPT = 2;
+  // A bash-compatible shell.
+  LANGUAGE_SHELL = 3;
 }
 
 // Kind of supporting file — determines where it's placed in the sandbox.

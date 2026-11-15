@@ -67,7 +67,7 @@ fn main() -> anyhow::Result<()> {
         .position(|a| a == "--output")
         .and_then(|i| args.get(i + 1))
         .map(|s| s.as_str())
-        .unwrap_or("crates/eryx-runtime/runtime.cwasm");
+        .unwrap_or("crates/eryx-runtime/runtime-python.cwasm");
 
     // Parse --target argument (falls back to ERYX_TARGET env var in the library)
     let target = args
@@ -76,8 +76,15 @@ fn main() -> anyhow::Result<()> {
         .and_then(|i| args.get(i + 1))
         .map(|s| s.as_str());
 
+    // The guest language of the component: ERYX_LANGUAGE, default python.
+    // It is stamped into the output, and only Python is pre-initialized.
+    let language: eryx::Language = std::env::var("ERYX_LANGUAGE")
+        .unwrap_or_else(|_| "python".to_string())
+        .parse()
+        .map_err(|e: String| std::io::Error::other(e))?;
+
     let wasm_path = std::env::var("ERYX_WASM_PATH")
-        .unwrap_or_else(|_| "crates/eryx-runtime/runtime.wasm".to_string());
+        .unwrap_or_else(|_| "crates/eryx-runtime/runtime-python.wasm".to_string());
 
     println!("=== Pre-compilation Example ===\n");
     println!("WASM path: {wasm_path}");
@@ -100,7 +107,10 @@ fn main() -> anyhow::Result<()> {
 
     // With preinit: do pre-initialization for faster session creation
     #[cfg(feature = "preinit")]
-    let component_bytes = {
+    let component_bytes = if language != eryx::Language::Python {
+        println!("\n--- Step 1: Skipping pre-initialization (only Python has it) ---");
+        wasm_bytes
+    } else {
         let python_stdlib = find_python_stdlib()?;
         println!("Python stdlib: {}\n", python_stdlib.display());
 
@@ -143,7 +153,8 @@ fn main() -> anyhow::Result<()> {
     // Step 2: Pre-compile to native code
     println!("\n--- Step 2: Pre-compiling to native code ---");
     let start = Instant::now();
-    let precompiled = eryx::Executor::precompile_with_target(&component_bytes, target)?;
+    let mut precompiled = eryx::Executor::precompile_with_target(&component_bytes, target)?;
+    eryx::Executor::stamp_language(&mut precompiled, language);
     let precompile_time = start.elapsed();
     println!("Pre-compile time: {precompile_time:?}");
     println!(
@@ -271,9 +282,9 @@ fn find_python_stdlib() -> anyhow::Result<std::path::PathBuf> {
     // Check common locations
     let candidates = [
         // Relative to workspace root (when running from workspace)
-        "crates/eryx-wasm-runtime/tests/python-stdlib",
+        "crates/eryx-guest-python/tests/python-stdlib",
         // Relative to example directory
-        "../eryx-wasm-runtime/tests/python-stdlib",
+        "../eryx-guest-python/tests/python-stdlib",
     ];
 
     for candidate in &candidates {

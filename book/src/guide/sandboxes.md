@@ -35,6 +35,43 @@ print(result.stdout_text)  # "Hello!"
 ```
 <!-- langtabs-end -->
 
+## Guest Languages
+
+Python is the default guest language. Eryx can also run JavaScript (QuickJS) and
+a bash-compatible shell (brush), through the same API: callbacks, resource
+limits, sessions and snapshots work the same way. In Rust, enable the
+`javascript` and `shell` cargo features to embed their runtimes, then switch
+the builder's language. In Python, the pyeryx wheel only includes the Python
+runtime: install the others with `pip install pyeryx[javascript]`,
+`pyeryx[shell]` or `pyeryx[all]` (or pass `runtime_path=` to a precompiled
+`.cwasm`).
+
+<!-- langtabs-start -->
+```rust,ignore
+let js = Sandbox::embedded().javascript().build()?;
+let result = js.execute("console.log(6 * 7)").await?;
+
+let sh = Sandbox::embedded().shell().build()?;
+let result = sh.execute("echo $((6 * 7))").await?;
+```
+
+```python
+import eryx
+
+js = eryx.Sandbox(language="javascript")
+result = js.execute("console.log(6 * 7)")
+```
+<!-- langtabs-end -->
+
+Python-only options, such as the stdlib, site-packages and packages, are only
+available on a Python builder. Secrets and library preambles are Python-only
+for now too. A shell script fails with its exit status
+(`ErrorKind::ScriptFailed { exit_code: Some(n), .. }`); running external
+commands from the shell isn't supported yet, so they exit 127.
+
+The gRPC server serves every language it has a pool for (`--languages`), and
+each request picks one with `ExecuteRequest.language`.
+
 ## Sandbox Isolation
 
 Each sandbox runs in complete isolation:

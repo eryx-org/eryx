@@ -92,7 +92,7 @@ jobs:
 
       # release-plz runs cargo-semver-checks with its default (all-features)
       # heuristic, which enables the `embedded` feature. That feature's build
-      # script requires a `runtime.cwasm`; without one it panics, the semver
+      # script requires a `runtime-python.cwasm`; without one it panics, the semver
       # check silently no-ops, and API-breaking changes (e.g. new public struct
       # fields) slip through as a patch bump instead of a minor one.
       #
@@ -100,10 +100,14 @@ jobs:
       # is never deserialized or executed, so an empty placeholder is sufficient
       # (identical to how the crate's own build.rs handles docs.rs builds). This
       # avoids building the real WASM runtime here just to satisfy the check.
-      - name: Provide placeholder runtime.cwasm for cargo-semver-checks
+      - name: Provide placeholder cwasms for cargo-semver-checks
         run: |
-          : > "$RUNNER_TEMP/runtime.cwasm"
-          echo "ERYX_RUNTIME_CWASM=$RUNNER_TEMP/runtime.cwasm" >> "$GITHUB_ENV"
+          : > "$RUNNER_TEMP/runtime-python.cwasm"
+          echo "ERYX_RUNTIME_CWASM=$RUNNER_TEMP/runtime-python.cwasm" >> "$GITHUB_ENV"
+          for lang in JAVASCRIPT SHELL; do
+            : > "$RUNNER_TEMP/runtime-$lang.cwasm"
+            echo "ERYX_RUNTIME_CWASM_$lang=$RUNNER_TEMP/runtime-$lang.cwasm" >> "$GITHUB_ENV"
+          done
 
       - name: Run release-plz
         uses: release-plz/action@66b324fd6c72d05d2a08568492ecdd62bfb8a62b # v0.5.148

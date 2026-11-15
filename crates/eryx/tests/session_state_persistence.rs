@@ -84,12 +84,12 @@ fn create_executor() -> Executor {
         let stdlib_path = stdlib_path();
         let path = runtime_wasm_path();
         Executor::from_file(&path)
-            .unwrap_or_else(|e| panic!("Failed to load runtime.wasm from {:?}: {}", path, e))
+            .unwrap_or_else(|e| panic!("Failed to load runtime-python.wasm from {:?}: {}", path, e))
             .with_python_stdlib(&stdlib_path)
     }
 }
 
-/// Get the path to runtime.wasm relative to the workspace root.
+/// Get the path to runtime-python.wasm relative to the workspace root.
 #[cfg(not(feature = "embedded"))]
 fn runtime_wasm_path() -> PathBuf {
     // CARGO_MANIFEST_DIR points to crates/eryx
@@ -98,7 +98,7 @@ fn runtime_wasm_path() -> PathBuf {
         .parent()
         .unwrap_or_else(|| std::path::Path::new("."))
         .join("eryx-runtime")
-        .join("runtime.wasm")
+        .join("runtime-python.wasm")
 }
 
 #[cfg(not(feature = "embedded"))]
@@ -116,7 +116,7 @@ fn stdlib_path() -> PathBuf {
     PathBuf::from(manifest_dir)
         .parent()
         .unwrap_or_else(|| std::path::Path::new("."))
-        .join("eryx-wasm-runtime")
+        .join("eryx-guest-python")
         .join("tests")
         .join("python-stdlib")
 }

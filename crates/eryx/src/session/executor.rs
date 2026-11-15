@@ -778,7 +778,7 @@ fn build_wasi_context(executor: &Executor, fd_output: &FdOutput) -> Result<WasiC
         pythonpath_parts.push(crate::wasm::site_packages_mount_path(i));
     }
 
-    // Mount Python stdlib if configured (required for eryx-wasm-runtime)
+    // Mount Python stdlib if configured (required for eryx-guest-python)
     if let Some(stdlib_path) = executor.stdlib_path() {
         wasi_builder.env("PYTHONHOME", "/python-stdlib");
         if !pythonpath_parts.is_empty() {

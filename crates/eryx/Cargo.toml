@@ -150,22 +150,30 @@ sha2.workspace = true
 rustix = { workspace = true, features = ["process"] } #unified
 
 [features]
-default = []
+default = ["python"]
+# Guest languages. With `embedded`, each enabled language's precompiled
+# runtime is embedded in the binary; without it a language still runs from a
+# runtime supplied with `with_wasm_file()` and friends. `embedded` always
+# includes Python.
+python = []
+javascript = []
+shell = []
 # Proc macro for simplified callback definitions.
 # Provides #[callback] attribute macro.
 macros = ["dep:eryx-macros"]
 # Embed just the Python stdlib (python-stdlib.tar.zst) in the binary.
 # Enables `with_embedded_stdlib()` on SandboxBuilder for use with custom runtimes.
 # Much smaller than `embedded` (~6MB vs ~36MB added to binary).
-embedded-stdlib = ["dep:zstd"]
-# Zero-config sandboxes: pre-compiled runtime + stdlib embedded in binary.
+embedded-stdlib = ["python", "dep:zstd"]
+# Zero-config sandboxes: pre-compiled runtimes (Python, plus JavaScript and
+# the shell when their features are on) and the Python stdlib embedded in the binary.
 # Enables unsafe code paths for wasmtime's pre-compiled component loading.
 # Without this feature, the crate uses `forbid(unsafe_code)`.
-embedded = ["embedded-stdlib", "dep:blake3"]
+embedded = ["python", "embedded-stdlib", "dep:blake3"]
 # Pre-initialization support for capturing Python memory state.
 # Provides ~25x speedup for sandbox creation by snapshotting initialized Python.
 # Works with or without native extensions - can pre-import stdlib modules only.
-preinit = ["dep:eryx-runtime", "eryx-runtime/preinit", "dep:zstd", "dep:blake3"]
+preinit = ["python", "dep:eryx-runtime", "eryx-runtime/preinit", "dep:zstd", "dep:blake3"]
 # Native Python extension support via late-linking.
 # Allows adding extensions like numpy at sandbox creation time.
 # Implies preinit since the linker infrastructure is shared.
@@ -210,7 +218,7 @@ rustdoc-args = ["--cfg", "docsrs"]
 [package.metadata.cargo-all-features]
 # Skip feature combinations that require the WASM runtime to be built first.
 # preinit and native-extensions require liberyx_runtime.so.zst which is only
-# available after running `mise run build-eryx-runtime`.
+# available after running `mise run build-runtime-python`.
 skip_feature_sets = [
     ["preinit"],
     ["native-extensions"],
