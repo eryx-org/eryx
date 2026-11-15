@@ -180,7 +180,9 @@ the way a Python function binds them:
   `await add(1, 2)`. So for a callback whose first parameter, `options`, takes
   an object, `await configure({retries: 3})` passes that object as `options`,
   while `await configure({options: {retries: 3}})` names it.
-  Keyword and positional arguments can't be mixed in one call.
+  Keyword and positional arguments can't be mixed in one call. Trailing
+  `undefined` arguments count as not passed, and an `undefined` before another
+  argument is sent as `null`.
 - The shell guest follows the same rule once #808 lands: `add 1 2` is positional.
 
 More positional arguments than parameters, or one that is also passed by name,

@@ -319,9 +319,16 @@ async fn positional_callback_arguments_bind_to_the_schema() {
     .param("options", "object", "options", false)
     .param("verbose", "boolean", "verbose", false)
     .build();
+    let pair = eryx::DynamicCallback::builder("pair", "Echo a and b", |args| {
+        Box::pin(async move { Ok(args) })
+    })
+    .param("a", "integer", "first", false)
+    .param("b", "integer", "second", false)
+    .build();
     let sandbox = builder
         .with_callback(add)
         .with_callback(configure)
+        .with_callback(pair)
         .build()
         .unwrap();
 
@@ -332,6 +339,15 @@ console.log(await add(1, 2), await add({a: 3, b: 4}), await invoke("add", 5, 6))
 console.log(JSON.stringify(await configure({retries: 3})));
 console.log(JSON.stringify(await configure({options: {retries: 3}, verbose: true})));
 console.log(JSON.stringify(await configure({})));
+// Trailing undefineds are dropped; one before another argument is null.
+for (const call of [
+    () => invoke("pair"),
+    () => invoke("pair", undefined),
+    () => pair(1, undefined),
+    () => pair(undefined, 2),
+]) {
+    console.log(JSON.stringify(await call()));
+}
 for (const call of [() => add(1, 2, 3), () => invoke("add", {__eryx_args__: [1]})]) {
     try { await call(); console.log("UNEXPECTED"); } catch (e) { console.log(String(e.message ?? e)); }
 }
@@ -345,6 +361,10 @@ for (const call of [() => add(1, 2, 3), () => invoke("add", {__eryx_args__: [1]}
          {\"options\":{\"retries\":3}}\n\
          {\"options\":{\"retries\":3},\"verbose\":true}\n\
          {}\n\
+         {}\n\
+         {}\n\
+         {\"a\":1}\n\
+         {\"a\":null,\"b\":2}\n\
          invalid arguments: add() takes 2 positional arguments but 3 were given\n\
          add() got the keyword argument '__eryx_args__', which is reserved for positional arguments\n"
     );

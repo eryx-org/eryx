@@ -59,7 +59,11 @@
         }
         return paramCache.get(name);
     };
+    // Trailing `undefined` arguments are dropped, as if they had not been
+    // passed (`f(1, undefined)` is `f(1)`, `invoke(name, undefined)` is
+    // `invoke(name)`); an `undefined` before another argument is sent as null.
     const callArgs = (name, args) => {
+        while (args.length && args.at(-1) === undefined) args.pop();
         if (args.length === 1 && isPlainObject(args[0])) {
             if (Object.hasOwn(args[0], POSITIONAL)) {
                 throw new TypeError(
