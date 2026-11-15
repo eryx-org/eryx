@@ -34,6 +34,9 @@ if [[ -f "$JS_PKG" ]]; then
   mv "$JS_PKG.tmp" "$JS_PKG"
 fi
 
+# Lock pyeryx's runtime companions to the new version
+"$SCRIPT_DIR/sync-runtime-versions.sh"
+
 echo ""
 echo "Version bumped to $NEW_VERSION"
 echo ""
