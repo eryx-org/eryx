@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { getSandboxState, runCode } from "../lib/sandbox.svelte";
+  import { getSandboxState, runCode, warmSandbox } from "../lib/sandbox.svelte";
   import { JS_EXAMPLES, RUN_EXAMPLES, SHELL_EXAMPLES } from "../lib/examples";
   import CodeEditor from "./CodeEditor.svelte";
   import ExamplePills from "./ExamplePills.svelte";
@@ -35,6 +35,8 @@ print(f"Sum of 0..9 = {result}")`,
       if (prefix === "javascript" || prefix === "shell") {
         language = prefix;
         code = hash.slice(prefix.length + 1);
+        // Only load a language's runtime once it's picked, not for every visitor.
+        warmSandbox(prefix);
       } else {
         code = hash;
       }
@@ -50,6 +52,7 @@ print(f"Sum of 0..9 = {result}")`,
   function selectLanguage(next: Language) {
     if (next === language) return;
     language = next;
+    warmSandbox(next);
     code = Object.values(LANGUAGES[next].examples)[0].code;
     output = null;
     elapsed = null;
