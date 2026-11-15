@@ -67,7 +67,7 @@ struct Cli {
 enum Command {
     /// Download and pre-compile the WASM runtimes for your platform.
     ///
-    /// Downloads runtime-<language>.wasm (Python's by default; see
+    /// Downloads `runtime-<language>.wasm` (Python's by default; see
     /// `--language`) from the matching GitHub Release, pre-compiles it
     /// to native code, and caches it in ~/.cache/eryx/ so that `cargo build`
     /// with `features = ["embedded"]` finds it automatically.
@@ -129,7 +129,7 @@ struct SetupArgs {
     #[arg(long = "language", value_name = "LANGUAGE", default_value = "python", value_parser = parse_language)]
     languages: Vec<eryx::Language>,
 
-    /// Expected SHA-256 of runtime-<language>.wasm, as hex
+    /// Expected SHA-256 of `runtime-<language>.wasm`, as hex
     ///
     /// By default the checksum comes from the release's
     /// `runtime-<language>.wasm.sha256` asset. Pass a hash here to check the

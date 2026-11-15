@@ -41,7 +41,10 @@ Python is the default guest language. Eryx can also run JavaScript (QuickJS) and
 a bash-compatible shell (brush), through the same API: callbacks, resource
 limits, sessions and snapshots work the same way. In Rust, enable the
 `javascript` and `shell` cargo features to embed their runtimes, then switch
-the builder's language:
+the builder's language. In Python, the pyeryx wheel only includes the Python
+runtime: install the others with `pip install pyeryx[javascript]`,
+`pyeryx[shell]` or `pyeryx[all]` (or pass `runtime_path=` to a precompiled
+`.cwasm`).
 
 <!-- langtabs-start -->
 ```rust,ignore

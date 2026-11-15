@@ -759,6 +759,9 @@ run = "mdbook test -L ../target/debug/deps"
 description = "Test Python code blocks in the book"
 depends = ["test-python"]
 dir = "book"
+# The JavaScript example needs the runtime `pip install pyeryx[javascript]`
+# would provide.
+env = { ERYX_RUNTIME_CWASM_JAVASCRIPT = "{{config_root}}/crates/eryx-runtime/runtime-javascript.cwasm" }
 run = "python3 scripts/test_examples.py"
 
 [tasks."book:test-all"]

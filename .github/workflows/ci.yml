@@ -1464,6 +1464,11 @@ jobs:
 
       - name: Test Python code blocks
         working-directory: book
+        env:
+          # Stand in for `pip install pyeryx[javascript]` (the companion
+          # packages aren't published yet, #847): the book's JavaScript
+          # example runs the runtime downloaded from build-runtime-javascript.
+          ERYX_RUNTIME_CWASM_JAVASCRIPT: ${{ github.workspace }}/crates/eryx-runtime/runtime-javascript.cwasm
         run: |
           source ../.venv/bin/activate
           python scripts/test_examples.py
