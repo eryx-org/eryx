@@ -926,6 +926,13 @@ jobs:
           maturin develop --release
           uv export --extra dev --no-dev --no-hashes --no-emit-project --frozen | uv pip install -r -
 
+      # Windows file-sharing rules make concurrent use of the runtime cache
+      # fail where POSIX would work (#850). These tests run nowhere else on
+      # Windows, and share the release build above.
+      - name: Run runtime cache concurrency tests
+        shell: bash
+        run: cargo test --release -p eryx --features embedded --lib -- concurrent
+
       - name: Run Python tests
         shell: bash
         working-directory: crates/eryx-python

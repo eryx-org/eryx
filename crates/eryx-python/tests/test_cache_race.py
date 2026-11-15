@@ -8,9 +8,13 @@ fail ``eryx.Sandbox()`` with ``failed to open file``.
 import os
 import subprocess
 import sys
+import time
 
-PROCESSES = 8
-ROUNDS = 3
+PROCESSES = 16
+ROUNDS = 4
+# Real workers don't start in lockstep: spread the launches so that some
+# processes arrive while others are still extracting.
+LAUNCH_INTERVAL = 0.02
 
 CHILD = "import eryx; eryx.Sandbox().execute('pass')"
 
@@ -18,16 +22,18 @@ CHILD = "import eryx; eryx.Sandbox().execute('pass')"
 def test_concurrent_first_use_of_an_empty_cache(tmp_path):
     for round in range(ROUNDS):
         env = {**os.environ, "XDG_CACHE_HOME": str(tmp_path / f"cache-{round}")}
-        procs = [
-            subprocess.Popen(
-                [sys.executable, "-c", CHILD],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True,
-                env=env,
+        procs = []
+        for _ in range(PROCESSES):
+            procs.append(
+                subprocess.Popen(
+                    [sys.executable, "-c", CHILD],
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                    env=env,
+                )
             )
-            for _ in range(PROCESSES)
-        ]
+            time.sleep(LAUNCH_INTERVAL)
         failures = []
         for proc in procs:
             out, _ = proc.communicate(timeout=300)
