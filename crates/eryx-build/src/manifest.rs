@@ -34,7 +34,8 @@ pub struct Manifest {
     pub cwasm: Cwasm,
     /// External libraries built before the main project (C lane). Each exposes
     /// libs/headers the main build references via `{dep:NAME:src}` /
-    /// `{dep:NAME:build}` placeholders in its `cmake_flags`/`link_flags`.
+    /// `{dep:NAME:build}` placeholders in its `cflags`, `link_flags`,
+    /// `cmake_flags` and `configure_flags`.
     #[serde(default)]
     pub deps: Vec<Dep>,
     /// Where built artifacts are written.
@@ -116,6 +117,9 @@ pub enum CBuildSystem {
     /// Configure + build a CMake project with the wasi-sdk toolchain file
     /// (e.g. curl). Uses `cmake_flags` and `artifact`.
     Cmake,
+    /// Run an autotools `configure` script cross-compiling to wasip2, then
+    /// `make` (e.g. jq). Uses `configure_flags` and `artifact`.
+    Autotools,
 }
 
 /// Where a CLI's source comes from.
@@ -158,19 +162,23 @@ pub struct Build {
     pub sources: Vec<PathBuf>,
     /// C lane: compiler flags — defines, optimization, feature toggles
     /// (e.g. `-O2`, `-DSQLITE_THREADSAFE=0`). For `cmake` builds these are
-    /// passed via `CMAKE_C_FLAGS`.
+    /// passed via `CMAKE_C_FLAGS`, for `autotools` builds via `CFLAGS`.
     #[serde(default)]
     pub cflags: Vec<String>,
     /// C lane: linker flags (e.g. wasi-sdk emulation libs like
     /// `-lwasi-emulated-signal`). For `cmake` builds these go via
-    /// `CMAKE_EXE_LINKER_FLAGS`.
+    /// `CMAKE_EXE_LINKER_FLAGS`, for `autotools` builds via `LDFLAGS`.
     #[serde(default)]
     pub link_flags: Vec<String>,
     /// C lane (`cmake`): extra `-D…` flags for the `cmake` configure step.
     #[serde(default)]
     pub cmake_flags: Vec<String>,
-    /// C lane (`cmake`): built artifact path relative to the CMake build dir
-    /// (e.g. `src/curl`); copied to `<output>/component.wasm`.
+    /// C lane (`autotools`): extra flags for the `configure` step (e.g.
+    /// `--disable-docs`).
+    #[serde(default)]
+    pub configure_flags: Vec<String>,
+    /// C lane (`cmake`, `autotools`): built artifact path relative to the
+    /// build dir (e.g. `src/curl`); copied to `<output>/component.wasm`.
     #[serde(default)]
     pub artifact: Option<PathBuf>,
     /// Go lane: `go build -ldflags` value. `{ref}` is replaced with the
@@ -317,6 +325,31 @@ mod tests {
         );
         // sources is unused in cmake mode and defaults empty.
         assert!(m.build.sources.is_empty());
+    }
+
+    /// An autotools manifest (jq-style) parses `system = "autotools"` plus its
+    /// configure_flags/artifact fields.
+    #[test]
+    fn parses_c_autotools_manifest() {
+        let toml = r#"
+            name = "jq"
+            license = "MIT"
+            lang = "c"
+            [source]
+            repo = "https://example.com/jq-1.7.1.tar.gz"
+            ref = "1.7.1"
+            dir = "scratch/jq"
+            [build]
+            system = "autotools"
+            artifact = "jq"
+            configure_flags = ["--disable-docs"]
+            [output]
+            dir = "scratch/jq-component"
+        "#;
+        let m: Manifest = toml::from_str(toml).expect("autotools manifest should parse");
+        assert_eq!(m.build.system, CBuildSystem::Autotools);
+        assert_eq!(m.build.artifact, Some(PathBuf::from("jq")));
+        assert_eq!(m.build.configure_flags, ["--disable-docs"]);
     }
 
     /// A Rust-lane manifest (ripgrep-style) parses its `bin`/`cargo_flags`.

@@ -2,8 +2,9 @@
 # one under the wasmtime CLI (clis/smoke.sh). Running them inside eryx is #809.
 #
 # Which lanes run when:
-# - Rust (coreutils, rg, sd, jaq) and C (sqlite3, curl): when the driver, this
-#   workflow, mise.toml or one of the lane's manifests, patches or shims change.
+# - Rust (coreutils, rg, sd, jaq) and C (sqlite3, curl, jq): when the driver,
+#   this workflow, mise.toml or one of the lane's manifests, patches or shims
+#   change.
 # - Go (gh): only when its manifest, patch, the Go-fork bootstrap or the Go lane
 #   itself change. It builds the wasip3 Go fork from source (cached), so it is
 #   the slow one.
@@ -77,6 +78,7 @@ jobs:
               - *driver
               - 'clis/curl.toml'
               - 'clis/sqlite3.toml'
+              - 'clis/jq.toml'
               - 'clis/patches/patch-curl.sh'
               - 'clis/patches/patch-mbedtls.sh'
               - 'clis/shims/**'
@@ -147,7 +149,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        cli: [sqlite3, curl]
+        cli: [sqlite3, curl, jq]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

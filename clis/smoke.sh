@@ -43,6 +43,15 @@ jaq)
     wasmtime run --dir "$WORK/data::/data" "$OUT/component.wasm" -c -i '.a = 2' /data/edit.json
     expect "$(cat "$WORK/data/edit.json")" '{"a":2}'
     ;;
+jq)
+    jqw() { wasmtime run "$OUT/component.wasm" "$@"; }
+    expect "$(printf '{"a":1}' | jqw .a)" 1
+    expect "$(jqw --version)" "jq-1.7.1"
+    # Regex filters need oniguruma linked in.
+    expect "$(jqw -n '"baaa" | test("a+")')" true
+    # Upstream jq truncates a fractional index (jaq rejects it).
+    expect "$(jqw -n '[1,2] | .[1.5]')" 2
+    ;;
 sqlite3)
     expect "$(wasmtime run "$OUT/component.wasm" :memory: 'select 6*7;')" 42
     ;;

@@ -4,7 +4,7 @@
 # jaq stands in for conch-shell's jq builtin. Built into the shell guest it
 # would add ~4.4 MB to every shell runtime's cwasm (#808), so it's a command
 # instead, and only sandboxes that register it pay for it (#809). The CLI is
-# called `jaq`; register it as `jq` too if scripts expect that name.
+# called `jaq`. For upstream jq's exact behaviour, use clis/jq.toml (#866).
 
 name = "jaq"
 description = "jaq — a jq clone (Rust, wasip2)"

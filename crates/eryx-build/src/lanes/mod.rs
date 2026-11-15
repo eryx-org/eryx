@@ -1,8 +1,8 @@
 //! Build lanes: language-keyed strategies for producing a WASI component.
 //!
 //! Each lane consumes a [`Manifest`] and emits a component into the manifest's
-//! output dir. The Go lane backs `gh`; the C lane backs `sqlite3` (single)
-//! and `curl` (cmake); the Rust lane backs `coreutils`, `rg` and `sd`.
+//! output dir. The Go lane backs `gh`; the C lane backs `sqlite3` (single),
+//! `curl` (cmake) and `jq` (autotools); the Rust lane backs `coreutils`, `rg` and `sd`.
 
 pub mod c;
 pub mod go;
