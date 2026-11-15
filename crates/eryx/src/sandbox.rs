@@ -2295,6 +2295,16 @@ impl<L, R> SandboxBuilder<L, R> {
 
     /// Run the shell instead. See [`javascript()`](SandboxBuilder::javascript)
     /// for what carries over.
+    ///
+    /// Each callback is a shell command: `weather London --days 3`,
+    /// `weather --json '{"city": "London"}'` or `invoke weather '{...}'`.
+    /// Flag values are typed by the callback's parameters schema, the host
+    /// binds positional arguments to its properties in order, and the result
+    /// goes to stdout.
+    /// The command exits 0 on success, 1 when the callback fails, 2 on a usage
+    /// error, and 127 for `invoke` of an unknown name. A suspending callback
+    /// stops the whole script. The book's "Callbacks in the Shell" section has
+    /// the full rules.
     #[must_use]
     pub fn shell(self) -> SandboxBuilder<Shell, R> {
         self.transition()
