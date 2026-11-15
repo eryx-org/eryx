@@ -402,6 +402,17 @@ async fn embedded_commands_can_be_left_out() {
         .await
         .unwrap();
     assert_eq!(out.stdout_utf8().unwrap(), "HI\ncat=127\n");
+
+    // A pool's sandboxes leave them out too.
+    let builder = shell()
+        .without_embedded_commands()
+        .with_command("upper", test_cmd());
+    let pool = eryx::SandboxPool::new(builder, eryx::PoolConfig::default().with_max_size(1))
+        .await
+        .unwrap();
+    let sandbox = pool.acquire().await.unwrap();
+    let out = sandbox.execute("cat /nope; echo \"cat=$?\"").await.unwrap();
+    assert_eq!(out.stdout_utf8().unwrap(), "cat=127\n");
 }
 
 #[cfg(all(feature = "coreutils", feature = "unstable-vfs"))]

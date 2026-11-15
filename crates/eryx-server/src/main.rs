@@ -283,8 +283,6 @@ fn build_tls_config(args: &Args) -> Result<Option<ServerTlsConfig>, Box<dyn std:
     Ok(Some(tls))
 }
 
-/// Spawn a background task that periodically evicts idle sandboxes and
-/// records pool gauge metrics.
 /// The shell's external commands: the --shell-command ones, and whether to
 /// keep the embedded coreutils.
 #[derive(Clone)]
@@ -325,6 +323,8 @@ async fn create_language_pool(
     }
 }
 
+/// Spawn a background task that periodically evicts idle sandboxes and
+/// records pool gauge metrics.
 fn spawn_pool_maintenance(language: eryx::Language, pool: Arc<SandboxPool>) {
     tokio::spawn(async move {
         let language = language.as_str();
@@ -679,6 +679,52 @@ mod tests {
         .unwrap();
         assert_eq!(args.shell_commands.len(), 2);
         assert!(args.no_shell_coreutils);
+    }
+
+    /// `--shell-command` registers a command (here coreutils' multicall
+    /// binary, as `cat` only) and `--no-shell-coreutils` drops the rest.
+    #[cfg(feature = "shell")]
+    #[tokio::test]
+    async fn shell_command_flags_shape_the_shell_pool() {
+        let coreutils =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../eryx-runtime/coreutils.cwasm");
+        let shell = ShellCommands {
+            commands: load_shell_commands(&[ShellCommand {
+                names: vec!["cat".into()],
+                path: coreutils,
+            }])
+            .unwrap(),
+            coreutils: false,
+        };
+        let pool = create_language_pool(
+            eryx::Language::Shell,
+            PoolConfig::default().with_max_size(1),
+            shell,
+        )
+        .await
+        .unwrap();
+        let sandbox = pool.acquire().await.unwrap();
+        let out = sandbox
+            .execute("echo hi | cat; sort; echo \"sort=$?\"")
+            .await
+            .unwrap();
+        assert_eq!(out.stdout_utf8().unwrap(), "hi\nsort=127\n");
+
+        // With the default flags, the embedded coreutils are all there.
+        let shell = ShellCommands {
+            commands: Vec::new(),
+            coreutils: true,
+        };
+        let pool = create_language_pool(
+            eryx::Language::Shell,
+            PoolConfig::default().with_max_size(1),
+            shell,
+        )
+        .await
+        .unwrap();
+        let sandbox = pool.acquire().await.unwrap();
+        let out = sandbox.execute("printf 'b\\na\\n' | sort").await.unwrap();
+        assert_eq!(out.stdout_utf8().unwrap(), "a\nb\n");
     }
 
     #[test]

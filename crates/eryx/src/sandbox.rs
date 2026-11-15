@@ -2753,6 +2753,7 @@ impl<L: GuestLanguage> SandboxBuilder<L, state::Has> {
         let result_variable = self.result_variable;
         let collect_trace = self.collect_trace;
         let commands = self.commands;
+        let embedded_commands = self.embedded_commands;
 
         Ok(Box::new(move || {
             let mut builder = SandboxBuilder::new();
@@ -2762,6 +2763,7 @@ impl<L: GuestLanguage> SandboxBuilder<L, state::Has> {
             builder.result_variable = result_variable.clone();
             builder.collect_trace = collect_trace;
             builder.commands = commands.clone();
+            builder.embedded_commands = embedded_commands;
             builder.transition::<L, state::Has>().build()
         }))
     }

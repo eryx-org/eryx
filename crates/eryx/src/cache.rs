@@ -431,6 +431,20 @@ pub fn ensure_private_dir(dir: &Path) -> io::Result<PathBuf> {
 /// the embedded runtime's cache.
 #[must_use]
 pub fn setup_runtime(language: crate::Language) -> Option<PathBuf> {
+    setup_file(&format!("runtime-{language}"))
+}
+
+/// The shell's coreutils (`coreutils.cwasm`) that `eryx-precompile setup
+/// --language shell` cached for this platform and eryx version, under the
+/// same checks as [`setup_runtime`].
+#[must_use]
+pub fn setup_coreutils() -> Option<PathBuf> {
+    setup_file("coreutils")
+}
+
+/// `<stem>-v<version>-<arch>-<os>.cwasm` in the setup cache, if it's there
+/// and private.
+fn setup_file(stem: &str) -> Option<PathBuf> {
     let absolute = |name: &str| {
         std::env::var_os(name)
             .map(PathBuf::from)
@@ -448,7 +462,7 @@ pub fn setup_runtime(language: crate::Language) -> Option<PathBuf> {
         return None;
     }
     let path = dir.join(format!(
-        "runtime-{language}-v{}-{}-{}.cwasm",
+        "{stem}-v{}-{}-{}.cwasm",
         env!("CARGO_PKG_VERSION"),
         std::env::consts::ARCH,
         std::env::consts::OS
@@ -913,6 +927,16 @@ mod tests {
         unsafe { std::env::set_var("XDG_CACHE_HOME", root.path()) };
         assert_eq!(setup_runtime(crate::Language::Shell), Some(file.clone()));
         assert_eq!(setup_runtime(crate::Language::JavaScript), None);
+        assert_eq!(setup_coreutils(), None);
+        let coreutils = dir.join(
+            file.file_name()
+                .unwrap()
+                .to_string_lossy()
+                .replace("runtime-shell", "coreutils"),
+        );
+        fs::write(&coreutils, b"cwasm").unwrap();
+        fs::set_permissions(&coreutils, fs::Permissions::from_mode(0o600)).unwrap();
+        assert_eq!(setup_coreutils(), Some(coreutils));
 
         fs::set_permissions(&dir, fs::Permissions::from_mode(0o777)).unwrap();
         assert_eq!(setup_runtime(crate::Language::Shell), None);

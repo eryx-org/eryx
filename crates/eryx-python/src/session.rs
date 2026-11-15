@@ -275,11 +275,12 @@ impl Session {
 
         let language = crate::sandbox::parse_language(language)?;
         // The runtime is checked and loaded the way a Sandbox's is.
-        let mut builder = crate::sandbox::base_builder(py, language, runtime_path)?;
+        let (mut builder, source) = crate::sandbox::base_builder(py, language, runtime_path)?;
         if let Some(name) = result_variable {
             builder = builder.with_result_variable(name);
         }
-        let executor = crate::sandbox::build_for(py, builder, language, commands)?.executor();
+        let executor =
+            crate::sandbox::build_for(py, (builder, source), language, commands)?.executor();
 
         let mut limits = resource_limits.unwrap_or_default();
         if execution_timeout_ms.is_some() {

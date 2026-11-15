@@ -98,3 +98,48 @@ def test_a_bad_command_fails_clearly(tmp_path):
         eryx.Command.from_file(tmp_path / "missing.wasm")
     with pytest.raises(eryx.InitializationError):
         eryx.Command.from_bytes(b"not wasm")
+
+
+def setup_cache(monkeypatch, tmp_path, stems):
+    """An `eryx-precompile setup` cache holding the workspace's builds."""
+    import platform
+    import shutil
+
+    cache = tmp_path / "eryx"
+    cache.mkdir(mode=0o700)
+    arch = {"x86_64": "x86_64", "AMD64": "x86_64", "arm64": "aarch64"}.get(
+        platform.machine(), platform.machine()
+    )
+    target = f"{arch}-{sys.platform.replace('darwin', 'macos').replace('win32', 'windows')}"
+    for stem in stems:
+        path = cache / f"{stem}-v{eryx.__version__}-{target}.cwasm"
+        shutil.copy(built(f"{stem}.cwasm"), path)
+        path.chmod(0o600)
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
+    monkeypatch.delenv("ERYX_RUNTIME_CWASM_SHELL")
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="the cache's private-file checks are Unix")
+def test_a_setup_cache_runtime_gets_the_caches_coreutils(monkeypatch, tmp_path):
+    setup_cache(monkeypatch, tmp_path, ["runtime-shell", "coreutils"])
+    result = eryx.Sandbox(language="shell").execute("printf 'b\\na\\n' | sort")
+    assert result.stdout == b"a\nb\n"
+
+
+def test_another_sources_broken_coreutils_is_ignored(monkeypatch, tmp_path):
+    broken = tmp_path / "coreutils.cwasm"
+    broken.write_bytes(b"not a precompiled command")
+    package = types.ModuleType("pyeryx_runtime_shell")
+    package.coreutils_path = lambda: str(broken)
+    monkeypatch.setitem(sys.modules, "pyeryx_runtime_shell", package)
+
+    # The runtime came from the environment, so the companion's coreutils
+    # aren't its own: one that doesn't load counts as none.
+    assert eryx.Sandbox(language="shell").execute("echo hi").stdout == b"hi\n"
+
+    # The companion's own runtime with a broken coreutils names the file.
+    monkeypatch.delenv("ERYX_RUNTIME_CWASM_SHELL")
+    runtime = built("runtime-shell.cwasm")
+    package.cwasm_path = lambda: runtime
+    with pytest.raises(eryx.InitializationError, match="coreutils.cwasm"):
+        eryx.Sandbox(language="shell")
