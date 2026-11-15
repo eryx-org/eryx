@@ -573,7 +573,7 @@ jobs:
         # A test that needs more features than it is gated on fails to build
         # here, rather than only for whoever runs it with that one feature.
         run: |
-          for features in macros embedded-stdlib embedded preinit native-extensions unstable-vfs unstable-internals; do
+          for features in macros embedded-stdlib embedded preinit native-extensions unstable-vfs unstable-internals javascript shell; do
             echo "::group::--features $features"
             cargo check -p eryx --tests --features "$features"
             echo "::endgroup::"
