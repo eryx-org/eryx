@@ -2900,6 +2900,7 @@ impl Executor {
     ///
     /// Returns an error if pre-compilation fails.
     pub fn precompile(wasm_bytes: &[u8]) -> std::result::Result<Vec<u8>, Error> {
+        Self::check_cpu_feature_env()?;
         let engine = Self::create_engine_with_target(None)?;
         engine.precompile_component(wasm_bytes).map_err(|e| {
             ErrorKind::WasmEngine(format!("Failed to precompile component: {e}")).into()
@@ -2951,6 +2952,7 @@ impl Executor {
         wasm_bytes: &[u8],
         target: Option<&str>,
     ) -> std::result::Result<Vec<u8>, Error> {
+        Self::check_cpu_feature_env()?;
         let engine = Self::create_engine_with_target(target)?;
         engine.precompile_component(wasm_bytes).map_err(|e| {
             ErrorKind::WasmEngine(format!("Failed to precompile component: {e}")).into()
@@ -3093,6 +3095,24 @@ impl Executor {
     /// For fine-grained control, set `ERYX_CRANELIFT_FLAGS` to a comma-separated
     /// list of `flag=value` pairs. Example:
     /// `ERYX_CRANELIFT_FLAGS=has_avx512f=false,has_avx512bw=false`
+    /// Refuse to precompile when `ERYX_CPU_FEATURES` or `ERYX_CRANELIFT_FLAGS`
+    /// is set but this build can't apply it (it needs the `embedded` or
+    /// `preinit` feature): the output would silently target this machine's
+    /// CPU instead, and fail to load on one with fewer features.
+    fn check_cpu_feature_env() -> std::result::Result<(), Error> {
+        #[cfg(not(any(feature = "embedded", feature = "preinit")))]
+        for var in ["ERYX_CPU_FEATURES", "ERYX_CRANELIFT_FLAGS"] {
+            if std::env::var_os(var).is_some() {
+                return Err(ErrorKind::WasmEngine(format!(
+                    "{var} is set, but this build of eryx can't apply it: enable \
+                     the `embedded` or `preinit` feature"
+                ))
+                .into());
+            }
+        }
+        Ok(())
+    }
+
     fn create_engine_with_target(target: Option<&str>) -> std::result::Result<Engine, Error> {
         let config = Self::engine_config_with_target(target)?;
         Engine::new(&config).map_err(|e| ErrorKind::WasmEngine(e.to_string()).into())
@@ -3917,10 +3937,12 @@ pub fn parse_trace_event(request: &TraceRequest) -> std::result::Result<TraceEve
 const LANGUAGE_STAMP_MAGIC: &[u8; 8] = b"ERYXLANG";
 
 /// How many bytes [`Executor::stamp_language`] appends.
+#[cfg(any(feature = "embedded", feature = "preinit"))]
 pub(crate) const LANGUAGE_STAMP_LEN: usize = 1 + LANGUAGE_STAMP_MAGIC.len();
 
 /// The language a precompiled runtime ending in `tail` was stamped with by
 /// [`Executor::stamp_language`], or `None` if it wasn't stamped.
+#[cfg(any(test, feature = "embedded", feature = "preinit"))]
 pub(crate) fn language_stamp(tail: &[u8]) -> Option<Language> {
     let (rest, magic) = tail.split_last_chunk::<8>()?;
     if magic != LANGUAGE_STAMP_MAGIC {

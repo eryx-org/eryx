@@ -354,8 +354,9 @@ jobs:
             crates/eryx-runtime/runtime-javascript-windows.cwasm
             crates/eryx-runtime/runtime-javascript-macos.cwasm
           # As with the Python key, the cwasm's engine and CPU-feature settings
-          # aren't covered: bump the prefix when they change.
-          key: wasm-runtime-javascript-v1-${{ hashFiles('crates/eryx-guest-js/**', 'crates/eryx-guest-python/clock_stubs.c', 'crates/wit-dylib-ffi/**', 'crates/eryx-runtime/build.rs', 'crates/eryx-runtime/wit/**', 'crates/eryx-runtime/libs/*.zst', 'Cargo.lock', 'Cargo.toml', 'mise.toml') }}
+          # aren't covered: bump the prefix when they change. v1 -> v2: v1
+          # cwasms were built without the CPU presets (host features).
+          key: wasm-runtime-javascript-v2-${{ hashFiles('crates/eryx-guest-js/**', 'crates/eryx-guest-python/clock_stubs.c', 'crates/wit-dylib-ffi/**', 'crates/eryx-runtime/build.rs', 'crates/eryx-runtime/wit/**', 'crates/eryx-runtime/libs/*.zst', 'Cargo.lock', 'Cargo.toml', 'mise.toml') }}
 
       - uses: ./.github/actions/setup-rust
         if: steps.wasm-cache.outputs.cache-hit != 'true'
@@ -373,10 +374,11 @@ jobs:
         if: steps.wasm-cache.outputs.cache-hit != 'true'
         run: |
           mise run build-runtime-javascript
-          # The precompile example (without features: no preinit, no
-          # verification) cross-compiles, as for the Python runtime.
+          # The precompile example cross-compiles, as for the Python runtime.
+          # `preinit` is what lets it apply ERYX_CPU_FEATURES; it only
+          # pre-initializes Python.
           compile() {
-            ERYX_CPU_FEATURES="$1" cargo run -p eryx --example precompile --release -- "${@:2}"
+            ERYX_CPU_FEATURES="$1" cargo run -p eryx --example precompile --features preinit --release -- "${@:2}"
           }
           export ERYX_WASM_PATH=crates/eryx-runtime/runtime-javascript.wasm ERYX_LANGUAGE=javascript
           # Portable CPU features, as for the Python runtime.
@@ -430,8 +432,9 @@ jobs:
             crates/eryx-runtime/runtime-shell-windows.cwasm
             crates/eryx-runtime/runtime-shell-macos.cwasm
           # As with the Python key, the cwasm's engine and CPU-feature settings
-          # aren't covered: bump the prefix when they change.
-          key: wasm-runtime-shell-v1-${{ hashFiles('crates/eryx-guest-shell/**', 'crates/eryx-runtime/wit/**', 'Cargo.toml', 'mise.toml') }}
+          # aren't covered: bump the prefix when they change. v1 -> v2: v1
+          # cwasms were built without the CPU presets (host features).
+          key: wasm-runtime-shell-v2-${{ hashFiles('crates/eryx-guest-shell/**', 'crates/eryx-runtime/wit/**', 'Cargo.toml', 'mise.toml') }}
 
       - uses: ./.github/actions/setup-rust
         if: steps.wasm-cache.outputs.cache-hit != 'true'
@@ -449,10 +452,11 @@ jobs:
         if: steps.wasm-cache.outputs.cache-hit != 'true'
         run: |
           mise run build-runtime-shell
-          # The precompile example (without features: no preinit, no
-          # verification) cross-compiles, as for the Python runtime.
+          # The precompile example cross-compiles, as for the Python runtime.
+          # `preinit` is what lets it apply ERYX_CPU_FEATURES; it only
+          # pre-initializes Python.
           compile() {
-            ERYX_CPU_FEATURES="$1" cargo run -p eryx --example precompile --release -- "${@:2}"
+            ERYX_CPU_FEATURES="$1" cargo run -p eryx --example precompile --features preinit --release -- "${@:2}"
           }
           export ERYX_WASM_PATH=crates/eryx-runtime/runtime-shell.wasm ERYX_LANGUAGE=shell
           # Portable CPU features, as for the Python runtime.
