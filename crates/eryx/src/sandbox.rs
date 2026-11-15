@@ -3379,7 +3379,10 @@ pub struct ExecuteStats {
     pub duration: Duration,
     /// Number of callback invocations.
     pub callback_invocations: u32,
-    /// Peak memory usage in bytes (if available).
+    /// Peak memory usage in bytes (if available): the guest instance's
+    /// largest linear memory. In a session, which keeps its instance, that's
+    /// the peak so far, not just this execution's growth: linear memory
+    /// never shrinks, so it never falls between executions.
     pub peak_memory_bytes: Option<u64>,
     /// Fuel consumed during execution (if fuel tracking is enabled).
     ///
@@ -3462,14 +3465,15 @@ pub struct ResourceLimits {
     /// the process also share one total; see
     /// `eryx::vfs::set_process_max_open_host_files`.
     pub max_open_host_files: Option<usize>,
-    /// Maximum host memory an execution's child processes may hold at once:
-    /// their arguments and environment, buffered stdin, and unread output.
+    /// Maximum host memory the arguments and environment of an execution's
+    /// child processes may hold at once.
     ///
     /// Like [`max_vfs_bytes`](Self::max_vfs_bytes), this is *host* memory
-    /// outside [`max_memory_bytes`](Self::max_memory_bytes). A spawn or stdin
-    /// write that would exceed it fails, and the shell reports the command as
-    /// failed, as does a child whose output would not fit. Only applies to shell
-    /// sandboxes with commands. `None` uses the default of 64 MiB.
+    /// outside [`max_memory_bytes`](Self::max_memory_bytes). A spawn that
+    /// would exceed it fails, and the shell reports the command as failed.
+    /// (Each child's stdin, stdout and stderr stream through fixed 64 KiB
+    /// pipes.) Only applies to shell sandboxes with commands. `None` uses the
+    /// default of 64 MiB.
     pub max_child_host_bytes: Option<u64>,
 }
 

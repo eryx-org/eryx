@@ -335,7 +335,7 @@ fn hex_encode(bytes: &[u8]) -> String {
 ///
 /// Returns an error if none of the candidates can be created or passes the
 /// checks.
-#[cfg(feature = "embedded-stdlib")]
+#[cfg(any(feature = "embedded-stdlib", feature = "packages"))]
 pub fn default_cache_root() -> Result<&'static Path, crate::Error> {
     static ROOT: OnceLock<Result<PathBuf, String>> = OnceLock::new();
     ROOT.get_or_init(|| {
@@ -352,7 +352,7 @@ pub fn default_cache_root() -> Result<&'static Path, crate::Error> {
     .map_err(|e| crate::ErrorKind::Initialization(e.clone()).into())
 }
 
-#[cfg(feature = "embedded-stdlib")]
+#[cfg(any(feature = "embedded-stdlib", feature = "packages"))]
 fn cache_root_candidates() -> Vec<PathBuf> {
     let env_dir = |name: &str| {
         std::env::var_os(name)

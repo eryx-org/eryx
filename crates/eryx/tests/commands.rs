@@ -355,6 +355,183 @@ async fn cancelling_stops_a_spinning_child() {
     assert!(matches!(err.kind(), ErrorKind::Cancelled), "{err:?}");
 }
 
+/// Pipeline stages stream into each other: an endless producer stops once
+/// `head` has what it needs, and more output than any buffer passes through.
+#[cfg(feature = "coreutils")]
+#[tokio::test]
+async fn pipelines_stream_between_children() {
+    let sandbox = shell().with_command("tc", test_cmd()).build().unwrap();
+    let out = sandbox
+        .execute("tc yes | head -n 2; tc yes | head -c 20000000 | wc -c")
+        .await
+        .unwrap();
+    assert_eq!(out.stdout_utf8().unwrap(), "y\ny\n20000000\n");
+}
+
+/// A child's output pump waits for the next stage to catch up, so a fast
+/// producer feeding slow stages doesn't fill the shell's memory with
+/// in-guest pipe buffers.
+#[tokio::test]
+async fn a_fast_child_waits_for_slow_stages() {
+    let sandbox = shell().with_command("tc", test_cmd()).build().unwrap();
+    let stages = ["tc alloc 1"; 10].join(" | ");
+    let out = sandbox
+        .execute(&format!("tc yes | {stages} | head -c 3"))
+        .await
+        .unwrap();
+    assert_eq!(out.stdout_utf8().unwrap(), "y\ny");
+    let peak = out.stats.peak_memory_bytes.unwrap();
+    assert!(peak < 16 << 20, "the shell's memory peaked at {peak} bytes");
+}
+
+/// A child writing more than a pipe's high-water mark into a stage that
+/// brush runs as a task of its own (a command substitution, or a compound
+/// stage) doesn't wait forever: the task runs alongside its reader.
+#[tokio::test]
+async fn large_output_reaches_substitutions_and_compound_stages() {
+    let sandbox = shell()
+        .with_command("tc", test_cmd())
+        .with_resource_limits(
+            ResourceLimits::default().with_execution_timeout(Duration::from_secs(10)),
+        )
+        .build()
+        .unwrap();
+    let out = sandbox
+        .execute(
+            r#"
+x=$(printf '%100000s' a | tc); echo ${#x}
+x=$(tc yes | head -c 1000000); echo ${#x}
+{ printf '%100000s' a | tc; } | tc | head -c 3; echo
+for i in 1 2 3; do printf '%100000s' a | tc; done | wc -c
+"#,
+        )
+        .await
+        .unwrap();
+    assert_eq!(out.stdout_utf8().unwrap(), "100000\n999999\n   \n300000\n");
+}
+
+/// Children in a pipeline run at once but share the parent's fuel: two
+/// stages that each fit the limit alone end the execution with
+/// `FuelExhausted` together, having done at most about one epoch tick of
+/// work each past it.
+#[cfg(feature = "unstable-vfs")]
+#[tokio::test]
+async fn concurrent_children_share_the_fuel_limit() {
+    use eryx::vfs::{ArcStorage, InMemoryStorage, VfsStorage};
+    use std::sync::Arc;
+
+    let executor = shell()
+        .with_command("tc", test_cmd())
+        .build()
+        .unwrap()
+        .executor();
+    let storage = ArcStorage::new(Arc::new(InMemoryStorage::new()));
+    let mut session = SessionExecutor::new_with_vfs(executor, &[], storage.clone())
+        .await
+        .unwrap();
+    let fuel = async |session: &mut SessionExecutor, rounds: u32| {
+        let out = session
+            .execute(format!("tc burn /data/c {rounds}"))
+            .run()
+            .await
+            .unwrap();
+        out.fuel_consumed.unwrap()
+    };
+    let base = fuel(&mut session, 0).await;
+    let round = (fuel(&mut session, 10).await - base) / 10;
+
+    // Room for 30 rounds: each stage's 20 fit, both stages' 40 don't.
+    let limit = base * 2 + round * 30;
+    let err = session
+        .execute("tc burn /data/a 20 | tc burn /data/b 20")
+        .with_fuel_limit(limit)
+        .run()
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(err.kind(), ErrorKind::FuelExhausted { .. }),
+        "{err:?}"
+    );
+    let mut done = 0;
+    for path in ["/data/a", "/data/b"] {
+        let rounds = storage.read(path).await.unwrap_or_default();
+        done += String::from_utf8(rounds)
+            .unwrap()
+            .parse::<u64>()
+            .unwrap_or(0);
+    }
+    // A round is longer than an epoch tick, so each stage gets at most one
+    // round past the limit; without sharing, both would finish all 20.
+    assert!(done <= 30 + 2, "{done} rounds done under a 30-round limit");
+    assert!(done >= 20, "{done} rounds done under a 30-round limit");
+}
+
+/// Children whose work has no calls in it, which keep their fuel count in a
+/// register, are charged as they run too: two spinning stages under a fuel
+/// limit take about as long as one.
+#[tokio::test]
+async fn spinning_children_share_the_fuel_limit() {
+    let sandbox = shell()
+        .with_command("tc", test_cmd())
+        .with_resource_limits(ResourceLimits::default().with_max_fuel(2_000_000_000))
+        .build()
+        .unwrap();
+    let time = async |script: &str| {
+        let start = Instant::now();
+        let err = sandbox.execute(script).await.unwrap_err();
+        assert!(
+            matches!(err.kind(), ErrorKind::FuelExhausted { .. }),
+            "{err:?}"
+        );
+        start.elapsed()
+    };
+    let one = time("tc spin").await;
+    let two = time("tc spin | tc spin").await;
+    let four = time("tc spin | tc spin | tc spin | tc spin").await;
+    // Charged only at exit, each stage would burn the whole limit itself.
+    assert!(two < one * 3 / 2, "one: {one:?}, two: {two:?}");
+    assert!(four < one * 3 / 2, "one: {one:?}, four: {four:?}");
+}
+
+/// A child counts against the live-child limit until it finishes, not just
+/// until it's waited on: background jobs that are still running hold their
+/// slots, so the ones past the limit are refused.
+#[tokio::test]
+async fn running_children_count_as_live() {
+    let sandbox = shell().with_command("tc", test_cmd()).build().unwrap();
+    // Each foreground `tc` yields, so every background job's child is waited
+    // on (and was, before, no longer counted) before the next one spawns.
+    let out = sandbox
+        .execute("for i in {1..70}; do tc busy 50 & tc exit 0; done")
+        .await
+        .unwrap();
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("tc: limit-exceeded"),
+        "{out:?}"
+    );
+}
+
+/// Running children share one pool of memory: two that each fit it alone
+/// can't both hold their memory at once.
+#[tokio::test]
+async fn concurrent_children_share_the_memory_pool() {
+    let sandbox = shell().with_command("tc", test_cmd()).build().unwrap();
+    // 160 MiB each fits the 256 MiB pool alone.
+    let out = sandbox.execute("echo hi | tc alloc 160").await.unwrap();
+    assert_eq!(out.stdout_utf8().unwrap(), "hi\n");
+    let out = sandbox
+        .execute("tc yes | tc alloc 160 | tc alloc 160 | head -c 2; true")
+        .await
+        .unwrap();
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("error: OutOfMemory"),
+        "{out:?}"
+    );
+    // Both gave their memory back.
+    let out = sandbox.execute("echo hi | tc alloc 160").await.unwrap();
+    assert_eq!(out.stdout_utf8().unwrap(), "hi\n");
+}
+
 /// The embedded shell runs the embedded uutils coreutils (the `coreutils`
 /// feature), and a registered command of the same name replaces one.
 #[cfg(feature = "coreutils")]
@@ -413,6 +590,84 @@ async fn embedded_commands_can_be_left_out() {
     let sandbox = pool.acquire().await.unwrap();
     let out = sandbox.execute("cat /nope; echo \"cat=$?\"").await.unwrap();
     assert_eq!(out.stdout_utf8().unwrap(), "cat=127\n");
+}
+
+/// The common script tools added in #897 run in the embedded shell.
+#[cfg(feature = "coreutils")]
+#[tokio::test]
+async fn the_embedded_shell_runs_common_script_tools() {
+    assert_script_outputs(&[
+        ("seq 3 | tr '\\n' ' '", "1 2 3 "),
+        ("echo a,b,c | cut -d, -f2", "b\n"),
+        ("echo hello | tr a-z A-Z", "HELLO\n"),
+        (
+            "printf 'a\\na\\nb\\n' | uniq -c | tr -s ' '",
+            " 2 a\n 1 b\n",
+        ),
+        ("basename /x/y.txt .txt; dirname /x/y.txt", "y\n/x\n"),
+        ("sleep 0 && echo slept", "slept\n"),
+        ("printf '1\\n2\\n' | paste -sd+", "1+2\n"),
+        ("date -u -d @0 +%Y", "1970\n"),
+        ("echo hi | base64", "aGkK\n"),
+        // Canonicalizing walks up to `/`, which isn't statable without a
+        // preopen covering it (#832), so only the lexical forms are checked.
+        ("realpath -m /a/../b", "/b\n"),
+        ("readlink -m /a/../b/c", "/b/c\n"),
+    ])
+    .await;
+}
+
+/// The #897 tools that write files, which need the VFS's `/tmp`.
+#[cfg(all(feature = "coreutils", feature = "unstable-vfs"))]
+#[tokio::test]
+async fn the_embedded_shell_runs_common_script_tools_on_files() {
+    assert_script_outputs(&[
+        ("echo hi | tee /tmp/teed; cat /tmp/teed", "hi\nhi\n"),
+        (
+            "printf 'a\\nb\\n' > /tmp/c1; printf 'b\\nc\\n' > /tmp/c2; comm -12 /tmp/c1 /tmp/c2",
+            "b\n",
+        ),
+        ("mkdir /tmp/t && rmdir /tmp/t && echo gone", "gone\n"),
+        ("realpath -s /tmp/../tmp", "/tmp\n"),
+    ])
+    .await;
+}
+
+/// Run each script in a new embedded shell sandbox and check its stdout,
+/// reporting every mismatch at once.
+#[cfg(feature = "coreutils")]
+async fn assert_script_outputs(cases: &[(&str, &str)]) {
+    let sandbox = shell().build().unwrap();
+    let mut failures = Vec::new();
+    for (script, expected) in cases {
+        match sandbox.execute(script).await {
+            Ok(out) if out.stdout_utf8().unwrap() == *expected => {}
+            Ok(out) => failures.push(format!("{script}: got {:?}", out.stdout_utf8().unwrap())),
+            Err(e) => failures.push(format!("{script}: {e}")),
+        }
+    }
+    assert!(failures.is_empty(), "{failures:#?}");
+}
+
+/// `sleep` waits on a host timer rather than spinning, and still stops at the
+/// parent's timeout.
+#[cfg(feature = "coreutils")]
+#[tokio::test]
+async fn a_sleeping_child_stops_at_the_parents_timeout() {
+    let sandbox = shell()
+        .with_resource_limits(
+            ResourceLimits::default().with_execution_timeout(Duration::from_millis(300)),
+        )
+        .build()
+        .unwrap();
+    let start = Instant::now();
+    let err = sandbox.execute("sleep 60").await.unwrap_err();
+    assert!(matches!(err.kind(), ErrorKind::Timeout(_)), "{err:?}");
+    assert!(
+        start.elapsed() < Duration::from_secs(10),
+        "{:?}",
+        start.elapsed()
+    );
 }
 
 #[cfg(all(feature = "coreutils", feature = "unstable-vfs"))]

@@ -561,7 +561,9 @@ message ExecuteStats {
   // Number of callback invocations.
   uint32 callback_invocations = 2;
 
-  // Peak memory usage in bytes (0 if unavailable).
+  // Peak memory usage in bytes (0 if unavailable): the guest instance's
+  // largest linear memory. In a session that's the peak so far, not just
+  // this execution's growth, since memory never shrinks between executions.
   uint64 peak_memory_bytes = 3;
 
   // Fuel consumed (0 if unavailable).

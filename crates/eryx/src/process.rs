@@ -9,29 +9,40 @@
 //! [`CommandPre`], so children get the engine's pooling allocator, fuel
 //! metering and epoch interruption without recompiling.
 //!
-//! Children run in batch: stdin is buffered until `wait`, the child runs to
-//! completion inside `wait`, and then its output can be read. Streaming
-//! between pipeline stages is #815.
+//! A child's stdin, stdout and stderr are component-model streams, piped
+//! through small host buffers to its WASI stdio, so pipeline stages run
+//! concurrently and a full pipe makes its writer wait. The child runs while
+//! the guest awaits its `wait`.
 //!
 //! What a child can reach:
 //! - **Files:** with `unstable-vfs`, a [fork](eryx_vfs::HybridVfsCtx::fork) of
 //!   the parent's hybrid VFS, so the same mounts and permissions and nothing
 //!   else. Without it, no filesystem.
 //! - **Network:** none. Children get no sockets; the proxy is #812.
-//! - **Limits:** a child burns the parent execution's fuel (at most
-//!   `CHILD_FUEL` per child) and stops at its timeout and cancellation.
-//!   Memory is per child: each may grow to `CHILD_MEMORY_LIMIT`, on top of
-//!   the parent's own limit, and the host memory children hold is bounded by
-//!   the execution's `ChildBudget`.
+//! - **Limits:** children burn the parent execution's fuel as they run (at
+//!   most `CHILD_FUEL` each), overshooting it by at most one epoch tick of
+//!   work per running child, and stop at its timeout and cancellation. The
+//!   running children share one `CHILD_MEMORY_LIMIT` of memory, on top of
+//!   the parent's own limit, and the host memory their arguments hold is
+//!   bounded by the execution's `ChildBudget`.
 
 use std::collections::HashMap;
 use std::path::Path;
+use std::pin::Pin;
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock};
+use std::task::{Context, Poll};
 
-use wasmtime::component::{Access, Component, HasSelf, Linker, Resource, ResourceTable};
-use wasmtime::{AsContextMut, Engine, Store, StoreLimits, StoreLimitsBuilder, UpdateDeadline};
+use tokio::io::{AsyncRead, AsyncWrite, DuplexStream, ReadBuf};
+use wasmtime::component::{
+    Access, Accessor, Component, Destination, HasSelf, Linker, Resource, ResourceTable, Source,
+    StreamConsumer, StreamProducer, StreamReader, StreamResult, VecBuffer,
+};
+use wasmtime::{
+    AsContext, AsContextMut, Engine, ResourceLimiter, Store, StoreContextMut, UpdateDeadline,
+};
+use wasmtime_wasi::cli::{AsyncStdinStream, AsyncStdoutStream};
 use wasmtime_wasi::p2::bindings::CommandPre;
-use wasmtime_wasi::p2::pipe::{MemoryInputPipe, MemoryOutputPipe};
 use wasmtime_wasi::{WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView};
 
 use crate::error::{Error, ErrorKind};
@@ -41,42 +52,52 @@ mod bindings {
     wasmtime::component::bindgen!({
         path: "wit",
         world: "eryx:process/spawner",
-        // `wait` gets the parent's store, to charge it the child's fuel.
+        // `spawn` needs the parent's store to pipe the streams, and `wait`
+        // to charge it the child's fuel.
         imports: {
-            "eryx:process/process.[method]child.wait": async | store,
+            "eryx:process/process.[static]child.spawn": store,
             default: async,
         },
         with: { "eryx:process/process.child": super::ChildProcess },
     });
 }
 
-use bindings::eryx::process::process::{Host, HostChild, HostChildWithStore, ProcessError};
+use bindings::eryx::process::process::{
+    Host, HostChild, HostChildWithStore, ProcessError, Spawned,
+};
 
-/// Most bytes buffered for each of a child's stdin, stdout and stderr.
-// ponytail: batch pipes hold whole streams; streaming them is #815.
-const CHILD_OUTPUT_LIMIT: usize = 16 * 1024 * 1024;
+/// Bytes each of a child's stdin, stdout and stderr pipes holds before its
+/// writer has to wait for the reader.
+const PIPE_CAPACITY: usize = 64 * 1024;
 /// Most fuel one child may burn, taken from the parent's.
+///
+/// A running child is charged to the parent each time it yields, once per
+/// epoch tick, so children together overshoot the parent's fuel by at most
+/// one tick of work each, for up to [`MAX_LIVE_CHILDREN`] of them.
 const CHILD_FUEL: u64 = 10_000_000_000;
-/// Memory each child may grow to, on top of the parent's limit.
-// ponytail: per child, not charged to the parent's max_memory_bytes; one
-// child runs at a time, so a script holds at most this much more.
+/// Memory an execution's running children may grow to together, on top of
+/// the parent's own limit.
 const CHILD_MEMORY_LIMIT: usize = 256 * 1024 * 1024;
-/// Children spawned but not yet waited on, at most, per execution.
+/// Children spawned and not yet finished, at most, per execution.
 const MAX_LIVE_CHILDREN: usize = 64;
 /// Bytes of argv and env one spawn may pass, at most (like `ARG_MAX`).
 const MAX_ARGS_BYTES: usize = 2 * 1024 * 1024;
 /// Default for [`ResourceLimits::max_child_host_bytes`](crate::ResourceLimits::max_child_host_bytes).
 pub(crate) const DEFAULT_CHILD_HOST_BYTES: u64 = 64 * 1024 * 1024;
 
-/// Host memory held for an execution's children, outside the guest's memory
-/// limit: their argv and env, buffered stdin, and unread output. The shell
-/// spawns every pipeline stage before running any, so without this a script
-/// could make the host hold many large buffers at once.
+/// Host memory held for an execution's children's argv and env, outside the
+/// guest's memory limit. The shell spawns every pipeline stage before running
+/// any, so without this a script could make the host hold many large
+/// argument lists at once. (Their stdio pipes are `PIPE_CAPACITY` each.)
 #[derive(Debug, Clone)]
 pub(crate) struct ChildBudget {
     limit: u64,
     used: u64,
-    live: usize,
+    /// Children spawned and not yet finished (or dropped), out of
+    /// [`MAX_LIVE_CHILDREN`].
+    live: Arc<AtomicUsize>,
+    /// Linear memory the running children hold, out of `CHILD_MEMORY_LIMIT`.
+    memory: Arc<AtomicUsize>,
 }
 
 impl Default for ChildBudget {
@@ -91,7 +112,8 @@ impl ChildBudget {
         Self {
             limit: limit.unwrap_or(DEFAULT_CHILD_HOST_BYTES),
             used: 0,
-            live: 0,
+            live: Arc::default(),
+            memory: Arc::default(),
         }
     }
 
@@ -113,11 +135,6 @@ impl ChildBudget {
 
     fn release(&mut self, bytes: u64) {
         self.used = self.used.saturating_sub(bytes);
-    }
-
-    /// Bytes left to charge.
-    fn remaining(&self) -> u64 {
-        self.limit - self.used
     }
 }
 
@@ -187,7 +204,7 @@ impl Command {
     ///
     /// Returns [`ErrorKind::IncompatiblePrecompiled`] if another eryx version
     /// precompiled it, and an error if it isn't a WASI 0.2 command.
-    #[cfg(any(feature = "embedded", feature = "preinit"))]
+    #[cfg(any(feature = "embedded", feature = "preinit", feature = "packages"))]
     #[allow(unsafe_code)]
     pub unsafe fn from_precompiled(precompiled: &[u8]) -> Result<Self, Error> {
         let engine = crate::Executor::shared_engine()?;
@@ -211,7 +228,7 @@ impl Command {
     /// # Errors
     ///
     /// As for [`from_precompiled`](Self::from_precompiled).
-    #[cfg(any(feature = "embedded", feature = "preinit"))]
+    #[cfg(any(feature = "embedded", feature = "preinit", feature = "packages"))]
     #[allow(unsafe_code)]
     pub unsafe fn from_precompiled_file(path: impl AsRef<Path>) -> Result<Self, Error> {
         let engine = crate::Executor::shared_engine()?;
@@ -229,6 +246,134 @@ impl Command {
             .map_err(ErrorKind::wasm_component)?;
         let pre = CommandPre::new(pre).map_err(ErrorKind::wasm_component)?;
         Ok(Self { pre })
+    }
+}
+
+/// A host directory an isolated command sees, at `guest`.
+#[cfg(feature = "packages")]
+pub(crate) struct Mount<'a> {
+    pub(crate) host: &'a Path,
+    pub(crate) guest: &'a str,
+    pub(crate) writable: bool,
+}
+
+/// What an isolated command may use.
+#[cfg(feature = "packages")]
+pub(crate) struct IsolatedLimits {
+    /// Bytes of linear memory.
+    pub(crate) memory: usize,
+    /// Fuel (roughly, wasm instructions).
+    pub(crate) fuel: u64,
+    /// Wall-clock time.
+    pub(crate) timeout: std::time::Duration,
+    /// Bytes kept of each of stdout and stderr.
+    pub(crate) output: usize,
+}
+
+#[cfg(feature = "packages")]
+impl Command {
+    /// Load a precompiled command to run with
+    /// [`run_isolated`](Self::run_isolated): it's linked with plain WASI, so
+    /// its filesystem is the host directories it's given, never a sandbox's
+    /// VFS (which `unstable-vfs` puts in place of WASI's filesystem for
+    /// children, empty for one without a parent).
+    ///
+    /// # Safety
+    ///
+    /// As for [`from_precompiled`](Self::from_precompiled): only bytes eryx
+    /// precompiled and you trust.
+    #[allow(unsafe_code)]
+    pub(crate) unsafe fn from_precompiled_isolated(precompiled: &[u8]) -> Result<Self, Error> {
+        let engine = crate::Executor::shared_engine()?;
+        // SAFETY: the caller guarantees the bytes are trusted eryx output.
+        let component = unsafe { Component::deserialize(&engine, precompiled) }
+            .map_err(crate::wasm::deserialize_error)?;
+        let pre = isolated_linker(&engine)?
+            .instantiate_pre(&component)
+            .map_err(ErrorKind::wasm_component)?;
+        let pre = CommandPre::new(pre).map_err(ErrorKind::wasm_component)?;
+        Ok(Self { pre })
+    }
+
+    /// Run the command on its own, outside any sandbox, with `argv`, no
+    /// environment variables, empty stdin, no network (no sockets or name
+    /// lookups), and only `mounts` as its filesystem, within `limits`.
+    /// Returns its exit code, stdout and stderr. Load it with
+    /// [`from_precompiled_isolated`](Self::from_precompiled_isolated), or
+    /// with `unstable-vfs` it sees an empty filesystem instead of `mounts`.
+    pub(crate) async fn run_isolated(
+        &self,
+        argv: &[String],
+        mounts: &[Mount<'_>],
+        limits: &IsolatedLimits,
+    ) -> Result<(i32, Vec<u8>, Vec<u8>), Error> {
+        use wasmtime_wasi::p2::pipe::MemoryOutputPipe;
+
+        let fail = |message: String| Error::from(ErrorKind::Execution(message));
+        let stdout = MemoryOutputPipe::new(limits.output);
+        let stderr = MemoryOutputPipe::new(limits.output);
+        let mut wasi = WasiCtxBuilder::new();
+        wasi.args(argv)
+            .stdout(stdout.clone())
+            .stderr(stderr.clone())
+            .allow_tcp(false)
+            .allow_udp(false)
+            .allow_ip_name_lookup(false)
+            .socket_addr_check(|_, _| Box::pin(async { false }));
+        for mount in mounts {
+            let perms = if mount.writable {
+                wasmtime_wasi::FsPerms::ReadWrite
+            } else {
+                wasmtime_wasi::FsPerms::ReadOnly
+            };
+            wasi.preopened_dir(mount.host, mount.guest, perms)
+                .map_err(|e| fail(format!("mounting {}: {e}", mount.host.display())))?;
+        }
+        let engine = self.pre.engine();
+        crate::wasm::ensure_epoch_ticker(engine)?;
+        let mut store = Store::new(
+            engine,
+            ChildState {
+                wasi: wasi.build(),
+                table: ResourceTable::new(),
+                // A pool of its own: an isolated run shares no execution's.
+                limits: ChildMemory {
+                    pool: Arc::new(AtomicUsize::new(0)),
+                    held: 0,
+                    limit: limits.memory,
+                },
+                #[cfg(feature = "unstable-vfs")]
+                vfs: None,
+            },
+        );
+        store.limiter(|s| &mut s.limits);
+        store
+            .set_fuel(limits.fuel)
+            .map_err(|e| fail(format!("setting fuel: {e}")))?;
+        // Yield on every tick, so the timeout below can drop a CPU-bound run.
+        store.set_epoch_deadline(1);
+        store.epoch_deadline_callback(|_| Ok(UpdateDeadline::Yield(1)));
+
+        let run = async {
+            let command = self
+                .pre
+                .instantiate_async(&mut store)
+                .await
+                .map_err(|e| fail(format!("instantiating {}: {e}", argv[0])))?;
+            match command.wasi_cli_run().call_run(&mut store).await {
+                Ok(Ok(())) => Ok(0),
+                Ok(Err(())) => Ok(1),
+                Err(e) => match e.downcast_ref::<wasmtime_wasi::I32Exit>() {
+                    Some(exit) => Ok(exit.0),
+                    None => Err(fail(format!("{} failed: {e}", argv[0]))),
+                },
+            }
+        };
+        let code = tokio::time::timeout(limits.timeout, run)
+            .await
+            .map_err(|_| fail(format!("{} timed out after {:?}", argv[0], limits.timeout)))??;
+        drop(store);
+        Ok((code, stdout.contents().to_vec(), stderr.contents().to_vec()))
     }
 }
 
@@ -270,13 +415,93 @@ fn child_linker(engine: &Engine) -> Result<&'static Linker<ChildState>, Error> {
     Ok(LINKER.get_or_init(|| linker))
 }
 
+/// The linker isolated commands are instantiated with: WASI 0.2 only.
+#[cfg(feature = "packages")]
+fn isolated_linker(engine: &Engine) -> Result<&'static Linker<ChildState>, Error> {
+    static LINKER: OnceLock<Linker<ChildState>> = OnceLock::new();
+    if let Some(linker) = LINKER.get() {
+        return Ok(linker);
+    }
+    let mut linker = Linker::<ChildState>::new(engine);
+    wasmtime_wasi::p2::add_to_linker_async(&mut linker)
+        .map_err(|e| ErrorKind::WasmEngine(e.to_string()))?;
+    Ok(LINKER.get_or_init(|| linker))
+}
+
 /// A child's store data.
 pub(crate) struct ChildState {
     wasi: WasiCtx,
     table: ResourceTable,
-    limits: StoreLimits,
+    limits: ChildMemory,
     #[cfg(feature = "unstable-vfs")]
     vfs: Option<eryx_vfs::HybridVfsCtx<eryx_vfs::ArcStorage>>,
+}
+
+/// A child's share of `pool`, which may grow to `limit` (its execution's
+/// `CHILD_MEMORY_LIMIT`), given back when its store is dropped.
+struct ChildMemory {
+    pool: Arc<AtomicUsize>,
+    held: usize,
+    limit: usize,
+}
+
+impl ResourceLimiter for ChildMemory {
+    fn memory_growing(
+        &mut self,
+        current: usize,
+        desired: usize,
+        _maximum: Option<usize>,
+    ) -> wasmtime::Result<bool> {
+        let grow = desired.saturating_sub(current);
+        let reserved = self
+            .pool
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |used| {
+                used.checked_add(grow).filter(|&u| u <= self.limit)
+            })
+            .is_ok();
+        if reserved {
+            self.held += grow;
+        }
+        // A refused grow fails `memory.grow`, so the child sees an ordinary
+        // allocation failure.
+        Ok(reserved)
+    }
+
+    fn table_growing(
+        &mut self,
+        _current: usize,
+        _desired: usize,
+        _maximum: Option<usize>,
+    ) -> wasmtime::Result<bool> {
+        Ok(true)
+    }
+}
+
+impl Drop for ChildMemory {
+    fn drop(&mut self) {
+        self.pool.fetch_sub(self.held, Ordering::Relaxed);
+    }
+}
+
+/// A child's place among the execution's [`MAX_LIVE_CHILDREN`], held from
+/// spawn until its run ends or is dropped.
+struct LiveSlot(Arc<AtomicUsize>);
+
+impl LiveSlot {
+    /// Take a slot, or `None` if all are taken.
+    fn take(live: &Arc<AtomicUsize>) -> Option<Self> {
+        live.try_update(Ordering::Relaxed, Ordering::Relaxed, |n| {
+            (n < MAX_LIVE_CHILDREN).then_some(n + 1)
+        })
+        .ok()
+        .map(|_| Self(Arc::clone(live)))
+    }
+}
+
+impl Drop for LiveSlot {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::Relaxed);
+    }
 }
 
 #[cfg(feature = "unstable-vfs")]
@@ -303,21 +528,12 @@ impl WasiView for ChildState {
     }
 }
 
-/// A spawned child: its invocation, buffered stdin, and (after `wait`) its
-/// exit code and unread output.
+/// A spawned child, until `wait` runs it.
 pub struct ChildProcess {
-    command: Command,
-    argv: Vec<String>,
-    env: Vec<(String, String)>,
-    stdin: Vec<u8>,
-    stdin_closed: bool,
-    done: Option<ChildOutput>,
+    /// What `wait` runs, until it does.
+    run: Option<ChildRun>,
     /// What this child holds of the execution's [`ChildBudget`].
     charged: u64,
-    /// Not yet waited on, so it counts as live.
-    live: bool,
-    #[cfg(feature = "unstable-vfs")]
-    vfs: Option<eryx_vfs::HybridVfsCtx<eryx_vfs::ArcStorage>>,
 }
 
 /// What `wait` runs a child with, taken out of its handle.
@@ -325,50 +541,66 @@ struct ChildRun {
     pre: CommandPre<ChildState>,
     argv: Vec<String>,
     env: Vec<(String, String)>,
-    stdin: Vec<u8>,
-    /// Most bytes kept of each of stdout and stderr.
-    output_room: usize,
+    /// The child's ends of its stdio pipes. (Duplex, not simplex: dropping
+    /// one end of a simplex pipe's split halves doesn't end the other.)
+    stdin: DuplexStream,
+    stdout: DuplexStream,
+    stderr: DuplexStream,
     /// Fuel the child may burn.
     fuel: u64,
+    /// Fuel it has burned so far, as of its last epoch tick.
+    fuel_used: Arc<AtomicU64>,
+    /// The execution's pool of child memory.
+    memory: Arc<AtomicUsize>,
+    /// Its live slot, given back when the run ends or is dropped.
+    _live: LiveSlot,
     #[cfg(feature = "unstable-vfs")]
     vfs: Option<eryx_vfs::HybridVfsCtx<eryx_vfs::ArcStorage>>,
 }
 
-/// A child's exit code, stdout and stderr.
-type ChildOutput = (i32, Vec<u8>, Vec<u8>);
-
 impl ChildRun {
-    /// Run the child to completion, returning its output and the fuel it
+    /// Run the child to completion, returning its exit code and the fuel it
     /// burned.
-    async fn run(self) -> (Result<ChildOutput, String>, u64) {
-        let stdout = MemoryOutputPipe::new(self.output_room);
-        let stderr = MemoryOutputPipe::new(self.output_room);
+    async fn run(self) -> (Result<i32, String>, u64) {
         let wasi = WasiCtxBuilder::new()
             .args(&self.argv)
             .envs(&self.env)
-            .stdin(MemoryInputPipe::new(self.stdin))
-            .stdout(stdout.clone())
-            .stderr(stderr.clone())
+            .stdin(AsyncStdinStream::new(self.stdin))
+            .stdout(AsyncStdoutStream::new(PIPE_CAPACITY, self.stdout))
+            .stderr(AsyncStdoutStream::new(PIPE_CAPACITY, self.stderr))
             .build();
         let mut store = Store::new(
             self.pre.engine(),
             ChildState {
                 wasi,
                 table: ResourceTable::new(),
-                limits: StoreLimitsBuilder::new()
-                    .memory_size(CHILD_MEMORY_LIMIT)
-                    .build(),
+                limits: ChildMemory {
+                    pool: self.memory,
+                    held: 0,
+                    limit: CHILD_MEMORY_LIMIT,
+                },
                 #[cfg(feature = "unstable-vfs")]
                 vfs: self.vfs,
             },
         );
         store.limiter(|s| &mut s.limits);
-        // Yield on every epoch tick. The parent's timeout and cancellation
-        // race its whole execution, so yielding lets them drop a CPU-bound
-        // child as they would a guest blocked in `time.sleep`. Without a
-        // timeout or cancellation the epoch clock may not run at all.
+        // Without this, a loop with no calls keeps its fuel count in a
+        // register, and the epoch callback below reads a stale count.
+        if let Err(e) = crate::wasm::sync_fuel_periodically(&mut store) {
+            return (Err(e.to_string()), 0);
+        }
+        // Yield on every epoch tick, publishing the fuel burned so far for
+        // `wait` to charge the parent. The parent's timeout and cancellation
+        // race its whole execution, so yielding also lets them drop a
+        // CPU-bound child as they would a guest blocked in `time.sleep`.
+        let fuel = self.fuel;
+        let fuel_used = self.fuel_used;
         store.set_epoch_deadline(1);
-        store.epoch_deadline_callback(|_| Ok(UpdateDeadline::Yield(1)));
+        store.epoch_deadline_callback(move |store| {
+            let left = store.as_context().get_fuel().unwrap_or(0);
+            fuel_used.store(fuel.saturating_sub(left), Ordering::Relaxed);
+            Ok(UpdateDeadline::Yield(1))
+        });
 
         let code = async {
             store.set_fuel(self.fuel).map_err(|e| e.to_string())?;
@@ -388,21 +620,91 @@ impl ChildRun {
         }
         .await;
         let fuel_used = self.fuel.saturating_sub(store.get_fuel().unwrap_or(0));
+        // Dropping the store closes the child's ends of its pipes, which ends
+        // its output streams.
         drop(store);
-        let output =
-            code.map(|code| (code, stdout.contents().to_vec(), stderr.contents().to_vec()));
-        (output, fuel_used)
+        (code, fuel_used)
+    }
+}
+
+/// Feeds a guest's `stream<u8>` into a child's stdin pipe.
+struct PipeConsumer(Pin<Box<DuplexStream>>);
+
+impl<D> StreamConsumer<D> for PipeConsumer {
+    type Item = u8;
+
+    fn poll_consume(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        store: StoreContextMut<'_, D>,
+        src: Source<'_, Self::Item>,
+        finish: bool,
+    ) -> Poll<wasmtime::Result<StreamResult>> {
+        let mut src = src.as_direct(store);
+        let buf = src.remaining();
+        // A zero-length write asks whether the pipe is writable; say yes.
+        if buf.is_empty() {
+            return Poll::Ready(Ok(StreamResult::Completed));
+        }
+        match self.0.as_mut().poll_write(cx, buf) {
+            Poll::Ready(Ok(n)) if n > 0 => {
+                src.mark_read(n);
+                Poll::Ready(Ok(StreamResult::Completed))
+            }
+            // The child exited or closed its stdin.
+            Poll::Ready(_) => Poll::Ready(Ok(StreamResult::Dropped)),
+            Poll::Pending if finish => Poll::Ready(Ok(StreamResult::Cancelled)),
+            Poll::Pending => Poll::Pending,
+        }
+    }
+}
+
+/// Feeds a child's stdout or stderr pipe into a `stream<u8>` for the guest.
+struct PipeProducer(Pin<Box<DuplexStream>>);
+
+impl<D> StreamProducer<D> for PipeProducer {
+    type Item = u8;
+    type Buffer = VecBuffer<u8>;
+
+    fn poll_produce<'a>(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        mut store: StoreContextMut<'a, D>,
+        dst: Destination<'a, Self::Item, Self::Buffer>,
+        finish: bool,
+    ) -> Poll<wasmtime::Result<StreamResult>> {
+        // A zero-length read asks whether output is ready, which a pipe can't
+        // tell without reading; say yes.
+        if dst.remaining(store.as_context_mut()) == Some(0) {
+            return Poll::Ready(Ok(StreamResult::Completed));
+        }
+        let mut dst = dst.as_direct(store, PIPE_CAPACITY);
+        let mut buf = ReadBuf::new(dst.remaining());
+        match self.0.as_mut().poll_read(cx, &mut buf) {
+            // End of file: the child exited, or closed the stream.
+            Poll::Ready(Ok(())) if buf.filled().is_empty() => {
+                Poll::Ready(Ok(StreamResult::Dropped))
+            }
+            Poll::Ready(Ok(())) => {
+                let n = buf.filled().len();
+                dst.mark_written(n);
+                Poll::Ready(Ok(StreamResult::Completed))
+            }
+            Poll::Ready(Err(_)) => Poll::Ready(Ok(StreamResult::Dropped)),
+            Poll::Pending if finish => Poll::Ready(Ok(StreamResult::Cancelled)),
+            Poll::Pending => Poll::Pending,
+        }
     }
 }
 
 impl ExecutorState {
     /// Start waiting on `child`: what to run it with, given `fuel` left in
-    /// the parent, or its exit code if it has already run.
+    /// the parent.
     fn take_child_run(
         &mut self,
         child: &Resource<ChildProcess>,
         fuel: u64,
-    ) -> Result<Result<ChildRun, i32>, ProcessError> {
+    ) -> Result<ChildRun, ProcessError> {
         if self.suspended.is_some() {
             return Err(ProcessError::SpawnFailed);
         }
@@ -410,62 +712,15 @@ impl ExecutorState {
             .table
             .get_mut(child)
             .map_err(|_| ProcessError::IoError)?;
-        if child.live {
-            child.live = false;
-            self.child_budget.live -= 1;
-        }
-        if let Some((code, ..)) = &child.done {
-            return Ok(Err(*code));
-        }
-        if child.argv.is_empty() {
-            // It already ran, and failed.
-            return Err(ProcessError::SpawnFailed);
-        }
-        // Each output stream gets half of what is left while the argv, env
-        // and stdin are still held. Those move into the run and are freed
-        // with it, even if the parent's timeout drops it midway, so only the
-        // output is charged from here on.
-        let output_room = (self.child_budget.remaining() / 2).min(CHILD_OUTPUT_LIMIT as u64);
+        // Its argv and env move into the run and are freed with it, even if
+        // the parent's timeout drops it midway.
         self.child_budget
             .release(std::mem::take(&mut child.charged));
-        Ok(Ok(ChildRun {
-            pre: child.command.pre.clone(),
-            argv: std::mem::take(&mut child.argv),
-            env: std::mem::take(&mut child.env),
-            stdin: std::mem::take(&mut child.stdin),
-            output_room: output_room as usize,
-            fuel: fuel.min(CHILD_FUEL),
-            #[cfg(feature = "unstable-vfs")]
-            vfs: child.vfs.take(),
-        }))
+        let mut run = child.run.take().ok_or(ProcessError::IoError)?;
+        run.fuel = fuel.min(CHILD_FUEL);
+        run.memory = Arc::clone(&self.child_budget.memory);
+        Ok(run)
     }
-
-    /// Record how `child`'s run ended.
-    fn finish_child(
-        &mut self,
-        child: &Resource<ChildProcess>,
-        output: Result<ChildOutput, String>,
-    ) -> Result<i32, ProcessError> {
-        let child = self
-            .table
-            .get_mut(child)
-            .map_err(|_| ProcessError::IoError)?;
-        let (code, out, err) = output.map_err(|e| {
-            tracing::warn!(error = %e, "child command failed");
-            ProcessError::SpawnFailed
-        })?;
-        // Fits: each stream was capped at half of what was left.
-        let held = (out.len() + err.len()) as u64;
-        self.child_budget.used += held;
-        child.charged += held;
-        child.done = Some((code, out, err));
-        Ok(code)
-    }
-}
-
-fn drain(buf: &mut Vec<u8>, max: u32) -> Vec<u8> {
-    let n = buf.len().min(max as usize);
-    buf.drain(..n).collect()
 }
 
 impl Host for ExecutorState {
@@ -475,17 +730,27 @@ impl Host for ExecutorState {
 }
 
 impl HostChild for ExecutorState {
-    async fn spawn(
-        &mut self,
+    async fn drop(&mut self, child: Resource<ChildProcess>) -> wasmtime::Result<()> {
+        let child = self.table.delete(child)?;
+        self.child_budget.release(child.charged);
+        Ok(())
+    }
+}
+
+impl<T: Send> HostChildWithStore<T> for HasSelf<ExecutorState> {
+    fn spawn(
+        mut host: Access<'_, T, Self>,
         cmd: String,
         args: Vec<String>,
         mut env: Vec<(String, String)>,
         cwd: String,
-    ) -> Result<Resource<ChildProcess>, ProcessError> {
-        if self.suspended.is_some() {
+        stdin: StreamReader<u8>,
+    ) -> Result<Spawned, ProcessError> {
+        let state = host.get();
+        if state.suspended.is_some() {
             return Err(ProcessError::SpawnFailed);
         }
-        let command = self
+        let command = state
             .commands
             .0
             .get(&cmd)
@@ -500,132 +765,117 @@ impl HostChild for ExecutorState {
         argv.extend(args);
         let args_bytes = argv.iter().map(String::len).sum::<usize>()
             + env.iter().map(|(k, v)| k.len() + v.len()).sum::<usize>();
-        if args_bytes > MAX_ARGS_BYTES || self.child_budget.live >= MAX_LIVE_CHILDREN {
+        let live = (args_bytes <= MAX_ARGS_BYTES)
+            .then(|| LiveSlot::take(&state.child_budget.live))
+            .flatten();
+        let Some(live) = live else {
             tracing::warn!(
                 args_bytes,
-                live = self.child_budget.live,
+                live = state.child_budget.live.load(Ordering::Relaxed),
                 "child spawn over the argument or live-child limit"
             );
             return Err(ProcessError::LimitExceeded);
-        }
-        let charged = args_bytes as u64;
-        self.child_budget.charge(charged)?;
-        self.child_budget.live += 1;
-        let child = ChildProcess {
-            command,
-            argv,
-            env,
-            stdin: Vec::new(),
-            stdin_closed: false,
-            done: None,
-            charged,
-            live: true,
-            #[cfg(feature = "unstable-vfs")]
-            vfs: self
-                .hybrid_vfs_ctx
-                .as_ref()
-                .map(eryx_vfs::HybridVfsCtx::fork),
         };
-        self.table.push(child).map_err(|_| {
-            self.child_budget.release(charged);
-            self.child_budget.live -= 1;
-            ProcessError::SpawnFailed
-        })
-    }
+        let charged = args_bytes as u64;
+        state.child_budget.charge(charged)?;
 
-    async fn write_stdin(
-        &mut self,
-        child: Resource<ChildProcess>,
-        data: Vec<u8>,
-    ) -> Result<u64, ProcessError> {
-        let child = self
-            .table
-            .get_mut(&child)
-            .map_err(|_| ProcessError::IoError)?;
-        if child.stdin_closed {
-            return Err(ProcessError::IoError);
+        let (stdin_rx, stdin_tx) = tokio::io::duplex(PIPE_CAPACITY);
+        let (stdout_rx, stdout_tx) = tokio::io::duplex(PIPE_CAPACITY);
+        let (stderr_rx, stderr_tx) = tokio::io::duplex(PIPE_CAPACITY);
+        let child = ChildProcess {
+            run: Some(ChildRun {
+                pre: command.pre,
+                argv,
+                env,
+                stdin: stdin_rx,
+                stdout: stdout_tx,
+                stderr: stderr_tx,
+                fuel: 0,
+                fuel_used: Arc::default(),
+                memory: Arc::default(),
+                _live: live,
+                #[cfg(feature = "unstable-vfs")]
+                vfs: state
+                    .hybrid_vfs_ctx
+                    .as_ref()
+                    .map(eryx_vfs::HybridVfsCtx::fork),
+            }),
+            charged,
+        };
+        let spawned = (|| -> wasmtime::Result<Spawned> {
+            stdin.pipe(&mut host, PipeConsumer(Box::pin(stdin_tx)))?;
+            let stdout = StreamReader::new(&mut host, PipeProducer(Box::pin(stdout_rx)))?;
+            let stderr = StreamReader::new(&mut host, PipeProducer(Box::pin(stderr_rx)))?;
+            let child = host.get().table.push(child)?;
+            Ok(Spawned {
+                child,
+                stdout,
+                stderr,
+            })
+        })();
+        let state = host.get();
+        match spawned {
+            Ok(spawned) => Ok(spawned),
+            Err(e) => {
+                tracing::warn!(error = %e, "connecting a child's stdio failed");
+                state.child_budget.release(charged);
+                Err(ProcessError::SpawnFailed)
+            }
         }
-        // Stdin is buffered until `wait`, so cap it like the output.
-        if child.stdin.len() + data.len() > CHILD_OUTPUT_LIMIT {
-            return Err(ProcessError::LimitExceeded);
-        }
-        self.child_budget.charge(data.len() as u64)?;
-        child.charged += data.len() as u64;
-        child.stdin.extend_from_slice(&data);
-        Ok(data.len() as u64)
     }
 
-    async fn close_stdin(&mut self, child: Resource<ChildProcess>) {
-        if let Ok(child) = self.table.get_mut(&child) {
-            child.stdin_closed = true;
-        }
-    }
-
-    async fn read_stdout(
-        &mut self,
-        child: Resource<ChildProcess>,
-        max_bytes: u32,
-    ) -> Result<Vec<u8>, ProcessError> {
-        let child = self
-            .table
-            .get_mut(&child)
-            .map_err(|_| ProcessError::IoError)?;
-        let out = child
-            .done
-            .as_mut()
-            .map(|(_, out, _)| drain(out, max_bytes))
-            .unwrap_or_default();
-        child.charged -= out.len() as u64;
-        self.child_budget.release(out.len() as u64);
-        Ok(out)
-    }
-
-    async fn read_stderr(
-        &mut self,
-        child: Resource<ChildProcess>,
-        max_bytes: u32,
-    ) -> Result<Vec<u8>, ProcessError> {
-        let child = self
-            .table
-            .get_mut(&child)
-            .map_err(|_| ProcessError::IoError)?;
-        let err = child
-            .done
-            .as_mut()
-            .map(|(_, _, err)| drain(err, max_bytes))
-            .unwrap_or_default();
-        child.charged -= err.len() as u64;
-        self.child_budget.release(err.len() as u64);
-        Ok(err)
-    }
-
-    async fn drop(&mut self, child: Resource<ChildProcess>) -> wasmtime::Result<()> {
-        let child = self.table.delete(child)?;
-        self.child_budget.release(child.charged);
-        if child.live {
-            self.child_budget.live -= 1;
-        }
-        Ok(())
-    }
-}
-
-impl<T: Send> HostChildWithStore<T> for HasSelf<ExecutorState> {
-    /// Run the child, charging the parent the fuel it burns.
+    /// Run the child, charging the parent the fuel it burns as it runs.
+    ///
+    /// If the parent runs out, the child is killed and the parent's fuel left
+    /// at 0, so the guest traps (`FuelExhausted`) as soon as it resumes,
+    /// before it can see this call's result.
     async fn wait(
-        mut host: Access<'_, T, Self>,
+        accessor: &Accessor<T, Self>,
         child: Resource<ChildProcess>,
     ) -> Result<i32, ProcessError> {
-        let fuel = host.as_context_mut().get_fuel().unwrap_or(0);
-        let run = match host.get().take_child_run(&child, fuel)? {
-            Ok(run) => run,
-            Err(code) => return Ok(code),
+        let run = accessor.with(|mut access| {
+            let fuel = access.as_context_mut().get_fuel().unwrap_or(0);
+            access.get().take_child_run(&child, fuel)
+        })?;
+        // The child is charged on its epoch ticks, so they must run even in
+        // an execution with no timeout or cancellation.
+        if let Err(e) = crate::wasm::ensure_epoch_ticker(run.pre.engine()) {
+            tracing::warn!(error = %e, "no epoch ticker; the child is charged only when it exits");
+        }
+        let fuel_used = Arc::clone(&run.fuel_used);
+        let mut charged = 0;
+        // Move what the child has burned since the last charge to the parent;
+        // false once the parent has none left.
+        let mut charge = |used: u64| {
+            let delta = used.saturating_sub(charged);
+            charged = charged.max(used);
+            accessor.with(|mut access| {
+                let mut store = access.as_context_mut();
+                let left = store.get_fuel().unwrap_or(0).saturating_sub(delta);
+                // Fuel is always enabled on the shared engine.
+                let _ = store.set_fuel(left);
+                left > 0
+            })
         };
-        let (output, fuel_used) = run.run().await;
-        let mut store = host.as_context_mut();
-        let left = store.get_fuel().unwrap_or(0).saturating_sub(fuel_used);
-        // Fuel is always enabled on the shared engine.
-        let _ = store.set_fuel(left);
-        host.get().finish_child(&child, output)
+        let mut running = std::pin::pin!(run.run());
+        let finished = std::future::poll_fn(|cx| match running.as_mut().poll(cx) {
+            Poll::Ready(done) => Poll::Ready(Some(done)),
+            // The child yielded (an epoch tick) or is waiting on a pipe.
+            Poll::Pending if charge(fuel_used.load(Ordering::Relaxed)) => Poll::Pending,
+            Poll::Pending => Poll::Ready(None),
+        })
+        .await;
+        let Some((code, used)) = finished else {
+            tracing::warn!("parent ran out of fuel; killed its child");
+            return Err(ProcessError::SpawnFailed);
+        };
+        if !charge(used) {
+            return Err(ProcessError::SpawnFailed);
+        }
+        code.map_err(|e| {
+            tracing::warn!(error = %e, "child command failed");
+            ProcessError::SpawnFailed
+        })
     }
 }
 
@@ -653,85 +903,41 @@ mod tests {
         std::fs::read(target_dir.join("wasm32-wasip2/release/eryx-test-cmd.wasm")).unwrap()
     }
 
-    /// Spawning reuses the command's `CommandPre`: nothing is compiled or
+    /// Running reuses the command's `CommandPre`: nothing is compiled or
     /// linked after `Command::from_bytes`, however many children run.
     #[tokio::test]
-    async fn spawns_reuse_the_compiled_command() {
+    async fn runs_reuse_the_compiled_command() {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
         let command = Command::from_bytes(&test_cmd_wasm()).unwrap();
         let compiled = COMPILED.load(Ordering::SeqCst);
-        let mut commands = Commands::default();
-        commands.insert("upper".into(), command);
-        let mut state = ExecutorState::placeholder();
-        state.commands = commands;
-
         for input in ["one", "two"] {
-            let child = HostChild::spawn(&mut state, "upper".into(), vec![], vec![], "/".into())
-                .await
-                .unwrap();
-            let rep = Resource::new_borrow(child.rep());
-            HostChild::write_stdin(&mut state, Resource::new_borrow(child.rep()), input.into())
-                .await
-                .unwrap();
-            HostChild::close_stdin(&mut state, Resource::new_borrow(child.rep())).await;
-            // `wait`, without the parent store it charges.
-            let Ok(run) = state.take_child_run(&rep, u64::MAX).unwrap() else {
-                panic!("not run yet");
+            let (stdin, mut stdin_tx) = tokio::io::duplex(PIPE_CAPACITY);
+            let (mut stdout_rx, stdout) = tokio::io::duplex(PIPE_CAPACITY);
+            let (_stderr_rx, stderr) = tokio::io::duplex(PIPE_CAPACITY);
+            stdin_tx.write_all(input.as_bytes()).await.unwrap();
+            drop(stdin_tx);
+            let run = ChildRun {
+                pre: command.pre.clone(),
+                argv: vec!["upper".into()],
+                env: vec![],
+                stdin,
+                stdout,
+                stderr,
+                fuel: CHILD_FUEL,
+                fuel_used: Arc::default(),
+                memory: Arc::default(),
+                _live: LiveSlot::take(&Arc::default()).unwrap(),
+                #[cfg(feature = "unstable-vfs")]
+                vfs: None,
             };
-            let (output, fuel_used) = run.run().await;
+            let (code, fuel_used) = run.run().await;
+            assert_eq!(code.unwrap(), 0);
             assert!(fuel_used > 0);
-            assert_eq!(state.finish_child(&rep, output).unwrap(), 0);
-            let out = HostChild::read_stdout(&mut state, Resource::new_borrow(child.rep()), 64)
-                .await
-                .unwrap();
-            assert_eq!(out, input.to_uppercase().into_bytes());
-            HostChild::drop(&mut state, child).await.unwrap();
+            let mut out = String::new();
+            stdout_rx.read_to_string(&mut out).await.unwrap();
+            assert_eq!(out, input.to_uppercase());
         }
         assert_eq!(COMPILED.load(Ordering::SeqCst), compiled);
-        // Dropped children give back everything they held.
-        assert_eq!((state.child_budget.used, state.child_budget.live), (0, 0));
-    }
-
-    /// Output room is sized with the child's own inputs still charged, so
-    /// inputs plus output stay within the budget; starting the run then
-    /// releases the inputs.
-    #[tokio::test]
-    async fn output_room_counts_the_childs_inputs() {
-        let mut commands = Commands::default();
-        commands.insert(
-            "upper".into(),
-            Command::from_bytes(&test_cmd_wasm()).unwrap(),
-        );
-        let mut state = ExecutorState::placeholder();
-        state.commands = commands;
-        state.child_budget = ChildBudget::new(Some(4 << 20));
-
-        let env = vec![("X".to_owned(), "x".repeat(1 << 20))];
-        let child = HostChild::spawn(&mut state, "upper".into(), vec![], env, "/".into())
-            .await
-            .unwrap();
-        let rep = Resource::new_borrow(child.rep());
-        HostChild::write_stdin(
-            &mut state,
-            Resource::new_borrow(child.rep()),
-            vec![0; 1 << 20],
-        )
-        .await
-        .unwrap();
-        let held = state.child_budget.used;
-        assert!(held > 2 << 20);
-        let Ok(run) = state.take_child_run(&rep, u64::MAX).unwrap() else {
-            panic!("not run yet");
-        };
-        assert_eq!(run.output_room as u64, ((4 << 20) - held) / 2);
-        assert_eq!(state.child_budget.used, 0);
-    }
-
-    #[tokio::test]
-    async fn unregistered_names_are_not_found() {
-        let mut state = ExecutorState::placeholder();
-        let err = HostChild::spawn(&mut state, "nope".into(), vec![], vec![], "/".into())
-            .await
-            .err();
-        assert!(matches!(err, Some(ProcessError::CommandNotFound)));
     }
 }

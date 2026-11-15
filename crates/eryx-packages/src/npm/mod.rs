@@ -414,19 +414,29 @@ impl<F: Fetch> Install<F> {
         // whatever order they finish in, and at most CONCURRENT_DOWNLOADS
         // tarballs are held in memory.
         let blobs = Blobs::new(self.cache_dir.join("blobs"));
-        let mut tarballs = futures::stream::iter(&lockfile.packages)
+        // Owned entries, so the install future stays `Send` (see
+        // `Resolver::fetch_missing`).
+        let packages: Vec<(String, LockedPackage)> = lockfile
+            .packages
+            .iter()
+            .map(|(path, package)| (path.clone(), package.clone()))
+            .collect();
+        let mut tarballs = futures::stream::iter(packages)
             .map(|(path, package)| {
                 let blobs = &blobs;
-                async move { (path, self.tarball(fetch, blobs, package).await) }
+                async move {
+                    let tarball = self.tarball(fetch, blobs, &package).await;
+                    (path, tarball)
+                }
             })
             .buffered(CONCURRENT_DOWNLOADS);
         let mut total = 0u64;
         while let Some((path, tarball)) = tarballs.next().await {
             let tarball = tarball?;
-            let dest = staging.path().join(path);
+            let dest = staging.path().join(&path);
             std::fs::create_dir_all(&dest)
                 .map_err(Error::io(format!("creating {}", dest.display())))?;
-            total += unpack_tgz_stripped(path, &tarball, &dest, self.limits.extract)?;
+            total += unpack_tgz_stripped(&path, &tarball, &dest, self.limits.extract)?;
             if total > self.limits.max_total_bytes {
                 return Err(Error::Limit(format!(
                     "the packages unpack to more than {} bytes",

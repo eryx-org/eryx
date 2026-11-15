@@ -1152,6 +1152,7 @@ dependencies = [
  "crossterm",
  "eryx",
  "eryx-macros",
+ "eryx-packages",
  "eryx-runtime",
  "eryx-vfs",
  "flate2",
@@ -1269,6 +1270,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.21",
  "tokio",
+ "toml",
  "webpki-roots",
 ]
 

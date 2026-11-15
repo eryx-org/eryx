@@ -15,10 +15,13 @@ publish = false
 crate-type = ["cdylib"]
 
 [dependencies]
-# Upstream main: it now has the host process-launcher hook (#1508), wasm
-# pipelines (#1489) and printf on WASI (#1567), none of them released yet.
-brush-core = { git = "https://github.com/reubeno/brush", rev = "6a688f19", default-features = false, features = ["serde"] }
-brush-builtins = { git = "https://github.com/reubeno/brush", rev = "6a688f19", default-features = false, features = [
+# Upstream main (6a688f19: the host process-launcher hook #1508, wasm
+# pipelines #1489, printf on WASI #1567, none released yet) plus two draft
+# PRs, on sd2k/brush's wasi-embedding-pin branch until they merge:
+# reubeno/brush#1739 (read/mapfile wait on a pipe that isn't ready) and
+# reubeno/brush#1740 (pipes report unread bytes, for backpressure).
+brush-core = { git = "https://github.com/sd2k/brush", rev = "25210fd6", default-features = false, features = ["serde"] }
+brush-builtins = { git = "https://github.com/sd2k/brush", rev = "25210fd6", default-features = false, features = [
     "builtin.echo",
     "builtin.printf",
     "builtin.true",

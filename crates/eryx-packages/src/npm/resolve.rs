@@ -100,7 +100,10 @@ impl<F: Fetch> Resolver<'_, F> {
 
     /// Fetch, concurrently, the packuments `wave` needs that aren't in yet.
     async fn fetch_missing(&self, state: &mut State, wave: &[Want]) -> Result<()> {
-        let mut names: Vec<(&str, Kind)> = Vec::new();
+        // Owned names: a stream of futures over borrowed `&str`s makes the
+        // whole resolution future non-`Send` (an HRTB quirk), so callers
+        // couldn't spawn it.
+        let mut names: Vec<(String, Kind)> = Vec::new();
         for want in wave {
             // Names come from registry metadata too: check them before they
             // go into a URL or a cache path. `place` reports invalid ones.
@@ -109,26 +112,27 @@ impl<F: Fetch> Resolver<'_, F> {
                 && !state.unavailable.contains(&want.name)
                 && !names.iter().any(|(n, _)| *n == want.name)
             {
-                names.push((&want.name, want.kind));
+                names.push((want.name.clone(), want.kind));
             }
         }
         let fetched: Vec<_> = futures::stream::iter(names)
-            .map(|(name, kind)| async move { (name, kind, self.packuments.get(name).await) })
+            .map(|(name, kind)| async move {
+                let result = self.packuments.get(&name).await;
+                (name, kind, result)
+            })
             .buffer_unordered(CONCURRENT_FETCHES)
             .collect()
             .await;
         for (name, kind, result) in fetched {
             match result {
                 Ok(packument) => {
-                    state
-                        .packuments
-                        .insert(name.to_string(), Arc::new(packument));
+                    state.packuments.insert(name, Arc::new(packument));
                 }
                 Err(e) if kind == Kind::Optional => {
                     state
                         .warnings
                         .push(format!("skipped optional dependency {name}: {e}"));
-                    state.unavailable.insert(name.to_string());
+                    state.unavailable.insert(name);
                 }
                 Err(e) => return Err(e),
             }
