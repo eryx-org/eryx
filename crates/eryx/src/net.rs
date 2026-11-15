@@ -415,11 +415,15 @@ impl NetConfig {
     ///
     /// # Limitations
     ///
-    /// Rules are enforced on what the host can frame. Bytes that aren't
-    /// HTTP/1.1 are still passed through on connections to hosts without
-    /// rules, so if sandboxed code does its own TLS to another allowed host
-    /// served by the same server as a ruled one, the request inside isn't
-    /// checked. Don't allow other names on a server whose rules matter.
+    /// Rules are enforced on what the host can frame. A connection to a host
+    /// without rules whose first bytes aren't an HTTP/1 request line (any
+    /// method token) is passed through unparsed from then on, so if
+    /// sandboxed code does its own TLS to another allowed host served by the
+    /// same server as a ruled one, the requests inside aren't checked. Don't
+    /// allow other names on a server whose rules matter. On any other framed
+    /// connection, bytes that aren't a request (including a leading empty
+    /// line) are refused, and after a refusal every later write on the
+    /// connection is too.
     #[must_use]
     pub fn allow_http(mut self, rule: HttpRule) -> Self {
         self.http_rules.push(rule);
@@ -941,6 +945,14 @@ struct HttpParsingState {
     buffer: Vec<u8>,
     /// How much of the current request's body is still to come.
     body: Body,
+    /// Whether a request has been framed on this connection yet.
+    started: bool,
+    /// Whether this connection's first bytes weren't HTTP, so with HTTP rules
+    /// everything on it is passed through unparsed (see
+    /// [`NetConfig::allow_http`]).
+    raw: bool,
+    /// Whether a write was refused, after which every write is.
+    failed: bool,
 }
 
 /// The body of the request currently being written.
@@ -1259,11 +1271,22 @@ impl ConnectionManager {
     /// still incomplete.
     fn process_write_data(&mut self, handle: u32, data: &[u8]) -> Result<Vec<u8>, TcpError> {
         let mut state = self.http_states.remove(&handle).unwrap_or_default();
-        let result = self.frame_requests(handle, &mut state, data);
-        // After an error the buffered bytes are dropped, not kept growing.
-        if result.is_ok() {
+        if state.failed {
             self.http_states.insert(handle, state);
+            return Err(TcpError::NotPermitted(
+                "an earlier write on this connection was refused".into(),
+            ));
         }
+        let result = self.frame_requests(handle, &mut state, data);
+        // After an error the buffered bytes are dropped, and the connection
+        // refuses further writes: its framing can't be trusted any more.
+        if result.is_err() {
+            state = HttpParsingState {
+                failed: true,
+                ..HttpParsingState::default()
+            };
+        }
+        self.http_states.insert(handle, state);
         result
     }
 
@@ -1280,15 +1303,34 @@ impl ConnectionManager {
         let mut pos = 0;
         loop {
             match &mut state.body {
+                Body::None if state.raw => {
+                    out.extend_from_slice(&input[pos..]);
+                    break;
+                }
                 Body::None => {
                     // Only the new bytes (plus 3 for a split terminator) can
                     // complete the terminator.
                     let searched = state.buffer.len().saturating_sub(3);
                     state.buffer.extend_from_slice(&input[pos..]);
-                    if !could_be_http_request(&state.buffer) {
-                        self.check_not_http(handle)?;
-                        out.append(&mut state.buffer);
-                        break;
+                    let is_request = if self.config.http_rules.is_empty() {
+                        Some(could_be_http_request(&state.buffer))
+                    } else {
+                        self.classify_ruled(handle, state)?
+                    };
+                    match is_request {
+                        Some(true) => {}
+                        Some(false) => {
+                            out.append(&mut state.buffer);
+                            break;
+                        }
+                        None => {
+                            if state.buffer.len() > MAX_HEADER_LEN {
+                                return Err(TcpError::NotPermitted(format!(
+                                    "HTTP request line exceeds {MAX_HEADER_LEN} bytes"
+                                )));
+                            }
+                            break;
+                        }
                     }
                     let Some(header_end) =
                         find_header_end(&state.buffer[searched..]).map(|end| searched + end)
@@ -1305,8 +1347,7 @@ impl ConnectionManager {
                     let headers = std::mem::take(&mut state.buffer);
 
                     // Not HTTP - pass through everything
-                    if !is_http_request(&headers) {
-                        self.check_not_http(handle)?;
+                    if self.config.http_rules.is_empty() && !is_http_request(&headers) {
                         out.extend_from_slice(&headers);
                         out.extend_from_slice(&input);
                         break;
@@ -1320,6 +1361,7 @@ impl ConnectionManager {
                     }
 
                     state.body = request_body(&headers)?;
+                    state.started = true;
                     if !self.config.http_rules.is_empty() {
                         self.check_http_rules(&headers, handle)?;
                     }
@@ -1373,19 +1415,41 @@ impl ConnectionManager {
         !self.config.http_rules.is_empty() || self.substitutes_secrets(handle)
     }
 
-    /// Refuse bytes that aren't an HTTP/1.1 request on a connection to a host
-    /// with HTTP rules, since they couldn't be checked.
-    fn check_not_http(&self, handle: u32) -> Result<(), TcpError> {
+    /// With HTTP rules, whether the buffered bytes start a request (`None`
+    /// until that's known).
+    ///
+    /// Anything a server could take for a request must be framed and
+    /// checked, so other bytes are only passed through if they're a
+    /// connection's first and its host has no rules; the connection then
+    /// stays unparsed. Otherwise they're refused, as is a leading empty line
+    /// (which servers skip before a request).
+    fn classify_ruled(
+        &self,
+        handle: u32,
+        state: &mut HttpParsingState,
+    ) -> Result<Option<bool>, TcpError> {
         let host = self
             .connection_hosts
             .get(&handle)
             .ok_or(TcpError::InvalidHandle)?;
-        if self.config.has_http_rules(host) {
-            return Err(TcpError::NotPermitted(format!(
-                "only HTTP/1.1 requests may be sent to {host}, which has HTTP rules"
-            )));
+        if state.buffer.starts_with(b"\r") || state.buffer.starts_with(b"\n") {
+            return Err(TcpError::NotPermitted(
+                "HTTP request starts with an empty line".into(),
+            ));
         }
-        Ok(())
+        match request_start(&state.buffer) {
+            Some(false) if state.started || self.config.has_http_rules(host) => {
+                Err(TcpError::NotPermitted(format!(
+                    "only HTTP/1.1 requests may be sent on this connection to {host} \
+                     (HTTP rules are set)"
+                )))
+            }
+            Some(false) => {
+                state.raw = true;
+                Ok(Some(false))
+            }
+            other => Ok(other),
+        }
     }
 
     /// Check the request with header block `headers` against the HTTP rules
@@ -2005,6 +2069,25 @@ const HTTP_METHODS: [&[u8]; 9] = [
     b"CONNECT ",
     b"TRACE ",
 ];
+
+/// Whether `data` starts with an HTTP/1 request line (`token SP target SP
+/// HTTP/...`, for any method token), `None` until its first line is complete
+/// or it can no longer be one.
+fn request_start(data: &[u8]) -> Option<bool> {
+    let is_tchar = |b: &u8| b.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(b);
+    let method_len = data.iter().take_while(|b| is_tchar(b)).count();
+    match data.get(method_len) {
+        None => return None,
+        Some(b' ') if method_len > 0 => {}
+        Some(_) => return Some(false),
+    }
+    let line_end = data.iter().position(|&b| b == b'\n')?;
+    let line = data[..line_end]
+        .strip_suffix(b"\r")
+        .unwrap_or(&data[..line_end]);
+    let version = line.rsplit(|&b| b == b' ').next().unwrap_or_default();
+    Some(line.iter().filter(|&&b| b == b' ').count() >= 2 && version.starts_with(b"HTTP/"))
+}
 
 /// Check if data starts with an HTTP request method.
 fn is_http_request(data: &[u8]) -> bool {
@@ -3693,6 +3776,75 @@ mod tests {
                 "/v2"
             ));
         }
+    }
+
+    /// With rules, every request a server could see on a framed connection
+    /// is parsed and checked, whatever its method, and a refusal sticks.
+    #[test]
+    fn http_rules_see_every_request() {
+        let new = || {
+            let mut m = ConnectionManager::new(github_rules(), HashMap::new());
+            m.connection_hosts.insert(1, "api.github.com".into());
+            m.connection_hosts.insert(2, "www.github.com".into());
+            m
+        };
+        for writes in [
+            // A leading empty line, which servers skip.
+            &[&b"\r\nDELETE /other HTTP/1.1\r\nHost: api.github.com\r\n\r\n"[..]][..],
+            &[b"\nGET /other HTTP/1.1\r\nHost: api.github.com\r\n\r\n"],
+            // A second request after an empty line, in the same write.
+            &[b"GET /ok HTTP/1.1\r\nHost: www.github.com\r\n\r\n\r\nDELETE /other HTTP/1.1\r\nHost: api.github.com\r\n\r\n"],
+            // Methods outside the common ones.
+            &[b"PROPFIND /other HTTP/1.1\r\nHost: api.github.com\r\n\r\n"],
+            &[b"PURGE /other HTTP/1.1\r\nHost: api.github.com\r\n\r\n"],
+            &[b"X-CUSTOM", b" /other HTTP/1.1\r\nHost: api.github.com\r\n\r\n"],
+            // Non-HTTP bytes once a request has been framed.
+            &[b"GET /ok HTTP/1.1\r\nHost: www.github.com\r\n\r\n", b"\x16\x03\x01"],
+        ] {
+            let mut m = new();
+            let result: Result<Vec<_>, _> =
+                writes.iter().map(|w| m.process_write_data(2, w)).collect();
+            assert!(result.is_err(), "{writes:?}");
+        }
+
+        // A refused write fails every later write on the connection.
+        let mut m = new();
+        assert!(
+            m.process_write_data(1, b"DELETE /x HTTP/1.1\r\n\r\n")
+                .is_err()
+        );
+        assert!(
+            m.process_write_data(1, b"GET /repos/org/repo HTTP/1.1\r\n\r\n")
+                .is_err()
+        );
+
+        // A connection whose first bytes aren't HTTP to a host without rules
+        // stays unparsed (the documented limitation).
+        let mut m = new();
+        assert_eq!(
+            m.process_write_data(2, b"\x16\x03\x01").unwrap(),
+            b"\x16\x03\x01"
+        );
+        let later = b"DELETE /other HTTP/1.1\r\nHost: api.github.com\r\n\r\n";
+        assert_eq!(m.process_write_data(2, later).unwrap(), later);
+        // Text that isn't a request line counts as not HTTP too.
+        let mut m = new();
+        assert_eq!(
+            m.process_write_data(2, b"SET k v\r\n").unwrap(),
+            b"SET k v\r\n"
+        );
+
+        // A rule can allow any method token.
+        let config = NetConfig::permissive()
+            .allow_http(HttpRule::new("dav.example.com").with_methods(["PROPFIND"]));
+        let mut m = ConnectionManager::new(config, HashMap::new());
+        m.connection_hosts.insert(1, "dav.example.com".into());
+        let propfind = b"PROPFIND /files HTTP/1.1\r\nHost: dav.example.com\r\n\r\n";
+        assert_eq!(m.process_write_data(1, propfind).unwrap(), propfind);
+        assert!(
+            m.process_write_data(1, b"MKCOL /files HTTP/1.1\r\nHost: dav.example.com\r\n\r\n")
+                .is_err()
+        );
     }
 
     /// A rule's paths must be ones a request can match.

@@ -258,11 +258,19 @@ more than one length. Only HTTP/1.1 may be sent to a host with rules, so
 HTTP/2, WebSockets after the upgrade, and TLS done by the sandboxed code itself
 are refused there.
 
-**Limitation:** rules are enforced on what the host can frame. Data that isn't
-HTTP is still passed through on connections to hosts without rules. If sandboxed code does its own TLS (e.g. with a pure-Python TLS library)
-to another allowed host served by the same server, the host can't see the
-request inside, so rules on that server's other names don't apply to it. Avoid
-allowing other names on a server whose ruled name matters.
+Every request is recognised by its request line, for any method token
+(`PROPFIND` and custom methods too), and a request line preceded by an empty
+line is refused, since servers skip those. Bytes that aren't a request are
+refused once a request has been sent on the connection. After any refusal, the
+connection refuses every later write.
+
+**Limitation:** rules are enforced on what the host can frame. A connection to a
+host *without* rules whose first bytes aren't an HTTP/1 request line is passed
+through unparsed from then on (so other protocols keep working). If sandboxed
+code does its own TLS (e.g. with a pure-Python TLS library) to another allowed
+host served by the same server as a ruled one, the host can't see the requests
+inside, so the rules don't apply to them. Avoid allowing other names on a
+server whose ruled name matters.
 
 The JavaScript package doesn't parse requests, so it refuses `httpRules`
 rather than ignoring them.
