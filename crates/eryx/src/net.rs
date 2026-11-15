@@ -20,8 +20,10 @@ use std::time::Duration;
 pub use ipnet::IpNet;
 
 mod policy;
+mod proxy;
 use ipnet::{Ipv4Net, Ipv6Net};
 use policy::{CheckedTcp, NetPolicy, RequestFramer, ResponseMasker};
+pub use proxy::{ChildNetwork, ChildProxy};
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpStream;
 use tokio_rustls::client::TlsStream;

@@ -49,6 +49,9 @@ pub(crate) struct NetPolicy {
     /// `(real value, placeholder)` of each secret, for masking reads.
     read_masks: Vec<(Vec<u8>, Vec<u8>)>,
     tls_config: Arc<ClientConfig>,
+    /// The policy this one narrows (see [`NetPolicy::narrowed`]): every check
+    /// must pass it too.
+    parent: Option<Arc<NetPolicy>>,
 }
 
 impl NetPolicy {
@@ -83,7 +86,72 @@ impl NetPolicy {
                 .collect(),
             secrets,
             tls_config: Arc::new(tls_config),
+            parent: None,
         }
+    }
+
+    /// A policy that allows only what both `self` and `config` allow, e.g. a
+    /// child process's narrower network inside its sandbox's.
+    ///
+    /// Hosts, resolved addresses and HTTP rules are checked against both,
+    /// and the connection limit and timeouts are the smaller of the two.
+    /// Secrets, their hosts, plaintext substitution, the resolver and the
+    /// TLS roots come from `self`, so a narrowed policy can never reach or
+    /// reveal more than `self`.
+    pub(crate) fn narrowed(self: &Arc<Self>, config: NetConfig) -> Self {
+        Self {
+            config,
+            secrets: self.secrets.clone(),
+            read_masks: self.read_masks.clone(),
+            tls_config: Arc::clone(&self.tls_config),
+            parent: Some(Arc::clone(self)),
+        }
+    }
+
+    /// The outermost policy, which owns the secrets' settings.
+    fn root(&self) -> &NetPolicy {
+        self.parent.as_deref().map_or(self, NetPolicy::root)
+    }
+
+    /// This policy and the ones it narrows, innermost first.
+    fn chain(&self) -> impl Iterator<Item = &NetPolicy> {
+        std::iter::successors(Some(self), |p| p.parent.as_deref())
+    }
+
+    /// The most concurrent connections allowed (`0` for no limit): the
+    /// smallest limit in the chain.
+    pub(crate) fn max_connections(&self) -> u32 {
+        self.chain()
+            .map(|p| p.config.max_connections())
+            .filter(|&max| max > 0)
+            .min()
+            .unwrap_or(0)
+    }
+
+    /// The connect timeout: the shortest in the chain.
+    pub(crate) fn connect_timeout(&self) -> Duration {
+        self.chain()
+            .map(|p| p.config.connect_timeout())
+            .min()
+            .unwrap_or_default()
+    }
+
+    /// The I/O timeout: the shortest in the chain.
+    pub(crate) fn io_timeout(&self) -> Duration {
+        self.chain()
+            .map(|p| p.config.io_timeout())
+            .min()
+            .unwrap_or_default()
+    }
+
+    /// Whether any HTTP rule in the chain applies to `host`.
+    pub(crate) fn has_http_rules(&self, host: &str) -> bool {
+        self.chain().any(|p| p.config.has_http_rules(host))
+    }
+
+    /// Whether the chain has any HTTP rules at all.
+    fn any_http_rules(&self) -> bool {
+        self.chain().any(|p| !p.config.http_rules.is_empty())
     }
 
     /// Check `host` against `blocked_hosts`/`allowed_hosts`.
@@ -98,24 +166,24 @@ impl NetPolicy {
             }
         }
 
-        // If allow_all_hosts is set, skip the allowlist check.
-        if self.config.allow_all_hosts {
-            return Ok(());
-        }
-
-        // Otherwise host must match the allowlist.
-        let allowed = self
-            .config
-            .allowed_hosts
-            .iter()
-            .any(|p| host_matches_pattern(host, p));
-        if !allowed {
+        // Unless allow_all_hosts is set, the host must match the allowlist.
+        // Either way the policy this one narrows checks it too.
+        if !self.config.allow_all_hosts
+            && !self
+                .config
+                .allowed_hosts
+                .iter()
+                .any(|p| host_matches_pattern(host, p))
+        {
             return Err(TcpError::NotPermitted(format!(
                 "host '{host}' not in allowed list"
             )));
         }
 
-        Ok(())
+        match &self.parent {
+            Some(parent) => parent.check_host(host),
+            None => Ok(()),
+        }
     }
 
     /// Check a resolved address against `blocked_networks`/`allowed_networks`.
@@ -132,13 +200,26 @@ impl NetPolicy {
         !matches(&self.config.blocked_networks) || matches(&self.config.allowed_networks)
     }
 
+    /// Whether `host` may connect to `ip`: an internal host may reach any
+    /// address, others only allowed ones, in every policy of the chain.
+    fn address_allowed(&self, host: &str, ip: IpAddr) -> bool {
+        self.chain().all(|p| {
+            p.config
+                .internal_hosts
+                .iter()
+                .any(|pattern| host_matches_pattern(host, pattern))
+                || p.is_ip_allowed(ip)
+        })
+    }
+
     /// Resolve `host` and keep the addresses the policy allows.
     ///
     /// Only [`NetPolicy::connect`] calls this, and it dials only the returned
     /// addresses, never re-resolving: the check is only as good as the
     /// address actually used.
     async fn resolve_allowed(&self, host: &str, port: u16) -> Result<Vec<SocketAddr>, TcpError> {
-        let addrs: Vec<SocketAddr> = match &self.config.resolver {
+        // The sandbox's resolver: a narrowed policy can't re-point a host.
+        let addrs: Vec<SocketAddr> = match &self.root().config.resolver {
             Some(resolver) => resolver.resolve(host, port).await,
             None => tokio::net::lookup_host((host, port))
                 .await
@@ -155,17 +236,9 @@ impl NetPolicy {
             return Err(TcpError::HostNotFound);
         }
 
-        let internal = self
-            .config
-            .internal_hosts
-            .iter()
-            .any(|p| host_matches_pattern(host, p));
-        if internal {
-            return Ok(addrs);
-        }
-
-        let (allowed, blocked): (Vec<_>, Vec<_>) =
-            addrs.into_iter().partition(|a| self.is_ip_allowed(a.ip()));
+        let (allowed, blocked): (Vec<_>, Vec<_>) = addrs
+            .into_iter()
+            .partition(|a| self.address_allowed(host, a.ip()));
         if allowed.is_empty() {
             // The address stays in the host's logs: telling the guest would let
             // it map internal DNS names to addresses.
@@ -242,14 +315,14 @@ impl NetPolicy {
     /// `over_tls`, unless [`NetConfig::allow_plaintext_secrets`] is set, and
     /// only if there are secrets.
     fn substitutes_secrets(&self, over_tls: bool) -> bool {
-        !self.secrets.is_empty() && (over_tls || self.config.allow_plaintext_secrets)
+        !self.secrets.is_empty() && (over_tls || self.root().config.allow_plaintext_secrets)
     }
 
     /// Whether a connection (`over_tls` or not) needs a [`RequestFramer`] at
     /// all: with no secrets to substitute and no HTTP rules, its bytes can
     /// be sent as written.
     pub(crate) fn frames_requests(&self, over_tls: bool) -> bool {
-        !self.config.http_rules.is_empty() || self.substitutes_secrets(over_tls)
+        self.any_http_rules() || self.substitutes_secrets(over_tls)
     }
 
     /// A framer for the requests written to a connection to `host`, sent
@@ -259,6 +332,7 @@ impl NetPolicy {
             policy: Arc::clone(self),
             host: host.to_string(),
             substitute: self.substitutes_secrets(over_tls),
+            http_only: false,
             state: HttpParsingState::default(),
         }
     }
@@ -283,6 +357,7 @@ impl NetPolicy {
         &self,
         host: &str,
         state: &mut HttpParsingState,
+        http_only: bool,
     ) -> Result<Option<bool>, TcpError> {
         if state.buffer.starts_with(b"\r") || state.buffer.starts_with(b"\n") {
             return Err(TcpError::NotPermitted(
@@ -290,7 +365,10 @@ impl NetPolicy {
             ));
         }
         match request_start(&state.buffer) {
-            Some(false) if state.started || self.config.has_http_rules(host) => {
+            Some(false) if http_only => Err(TcpError::NotPermitted(format!(
+                "only HTTP/1.1 requests may be sent to {host}"
+            ))),
+            Some(false) if state.started || self.has_http_rules(host) => {
                 Err(TcpError::NotPermitted(format!(
                     "only HTTP/1.1 requests may be sent on this connection to {host} \
                      (HTTP rules are set)"
@@ -310,8 +388,14 @@ impl NetPolicy {
     }
 
     /// Check the request with header block `headers` against the HTTP rules
-    /// for the connected `host` and every host the request names.
-    fn check_http_rules(&self, headers: &[u8], host: &str) -> Result<(), TcpError> {
+    /// for the connected `host` and every host the request names. With
+    /// `http_only`, the request may only name the connected host.
+    fn check_http_rules(
+        &self,
+        headers: &[u8],
+        host: &str,
+        http_only: bool,
+    ) -> Result<(), TcpError> {
         // `request_body` has checked that the headers are UTF-8.
         let text = String::from_utf8_lossy(headers);
         let malformed = || TcpError::NotPermitted("malformed HTTP request line".into());
@@ -328,10 +412,18 @@ impl NetPolicy {
                 "HTTP request names more than one host".into(),
             ));
         }
+        if http_only && !named.iter().all(|a| same_host(strip_port(a), host)) {
+            return Err(TcpError::NotPermitted(format!(
+                "HTTP request names a host other than {host}"
+            )));
+        }
         for host in std::iter::once(host).chain(named.into_iter().map(strip_port)) {
-            self.config
-                .check_http_request(host, method, target)
-                .map_err(TcpError::NotPermitted)?;
+            for policy in self.chain() {
+                policy
+                    .config
+                    .check_http_request(host, method, target)
+                    .map_err(TcpError::NotPermitted)?;
+            }
         }
         Ok(())
     }
@@ -441,7 +533,9 @@ impl NetPolicy {
                 continue;
             }
 
+            // The secret's hosts are the sandbox's (the root policy's).
             let host_allowed = self
+                .root()
                 .config
                 .secret_hosts(secret_config)
                 .iter()
@@ -479,6 +573,11 @@ pub(crate) struct CheckedTcp {
 impl CheckedTcp {
     pub(crate) fn stream(&mut self) -> &mut TcpStream {
         &mut self.stream
+    }
+
+    /// The stream, for a caller done with the checked host.
+    pub(crate) fn into_stream(self) -> TcpStream {
+        self.stream
     }
 
     /// Wrap a stream the policy didn't check, for tests of what holds one.
@@ -519,10 +618,21 @@ pub(crate) struct RequestFramer {
     host: String,
     /// Whether secret placeholders are substituted.
     substitute: bool,
+    /// Whether anything but HTTP/1.1 requests is refused (see
+    /// [`RequestFramer::http_only`]).
+    http_only: bool,
     state: HttpParsingState,
 }
 
 impl RequestFramer {
+    /// Refuse anything but HTTP/1.1 requests, from the first byte, as if
+    /// every host had HTTP rules. For the child proxy, which forwards nothing
+    /// it can't check.
+    pub(crate) fn http_only(mut self) -> Self {
+        self.http_only = true;
+        self
+    }
+
     /// Run bytes written to the connection through request framing, and
     /// return the bytes to send now: empty while a request's headers are
     /// still incomplete.
@@ -554,6 +664,8 @@ impl RequestFramer {
     fn frame_requests(&mut self, data: &[u8]) -> Result<Vec<u8>, TcpError> {
         let policy = &*self.policy;
         let host = self.host.as_str();
+        let http_only = self.http_only;
+        let checked = http_only || policy.any_http_rules();
         let state = &mut self.state;
         let mut out = Vec::new();
         let mut input = data.to_vec();
@@ -569,10 +681,10 @@ impl RequestFramer {
                     // complete the terminator.
                     let searched = state.buffer.len().saturating_sub(3);
                     state.buffer.extend_from_slice(&input[pos..]);
-                    let is_request = if policy.config.http_rules.is_empty() {
-                        Some(could_be_http_request(&state.buffer))
+                    let is_request = if checked {
+                        policy.classify_ruled(host, state, http_only)?
                     } else {
-                        policy.classify_ruled(host, state)?
+                        Some(could_be_http_request(&state.buffer))
                     };
                     match is_request {
                         Some(true) => {}
@@ -604,7 +716,7 @@ impl RequestFramer {
                     let headers = std::mem::take(&mut state.buffer);
 
                     // Not HTTP - pass through everything
-                    if policy.config.http_rules.is_empty() && !is_http_request(&headers) {
+                    if !checked && !is_http_request(&headers) {
                         out.extend_from_slice(&headers);
                         out.extend_from_slice(&input);
                         break;
@@ -619,8 +731,8 @@ impl RequestFramer {
 
                     state.body = request_body(&headers)?;
                     state.started = true;
-                    if !policy.config.http_rules.is_empty() {
-                        policy.check_http_rules(&headers, host)?;
+                    if checked {
+                        policy.check_http_rules(&headers, host, http_only)?;
                     }
                     if self.substitute {
                         out.extend(policy.substitute_http_headers(&headers, host)?);
