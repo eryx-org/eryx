@@ -415,9 +415,15 @@ impl NetConfig {
     ///
     /// # Limitations
     ///
+    /// Setting any rule stops WebSocket traffic after an `Upgrade`, `CONNECT`
+    /// tunnels and HTTP/2 on every connection that starts with an HTTP
+    /// request, to any host: what follows isn't a request the host can check.
+    ///
     /// Rules are enforced on what the host can frame. A connection to a host
-    /// without rules whose first bytes aren't an HTTP/1 request line (any
-    /// method token) is passed through unparsed from then on, so if
+    /// without rules whose first line doesn't look like an HTTP/1 request (a
+    /// method token, then `HTTP/` on the same line) is passed through
+    /// unparsed from then on, as is an HTTP/0.9 request (`GET /path`, with no
+    /// `Host` header, so it only reaches a server's default site). So if
     /// sandboxed code does its own TLS to another allowed host served by the
     /// same server as a ruled one, the requests inside aren't checked. Don't
     /// allow other names on a server whose rules matter. On any other framed
@@ -1356,7 +1362,7 @@ impl ConnectionManager {
                     // Check for HTTP/2 (not supported with secrets)
                     if is_http2(&headers) {
                         return Err(TcpError::NotPermitted(
-                            "HTTP/2 with secrets not supported. Use HTTP/1.1.".into(),
+                            "HTTP/2 is not supported here. Use HTTP/1.1.".into(),
                         ));
                     }
 
@@ -1465,7 +1471,7 @@ impl ConnectionManager {
         let (method, target) = request_line(&text).ok_or_else(malformed)?;
         let named = request_authorities(&text).ok_or_else(malformed)?;
         // A server could route by either of two hosts that disagree.
-        let host_headers = named.len() - usize::from(target.contains("://"));
+        let host_headers = named.len() - usize::from(is_absolute_form(target));
         if host_headers > 1
             || !named
                 .windows(2)
@@ -2070,23 +2076,25 @@ const HTTP_METHODS: [&[u8]; 9] = [
     b"TRACE ",
 ];
 
-/// Whether `data` starts with an HTTP/1 request line (`token SP target SP
-/// HTTP/...`, for any method token), `None` until its first line is complete
-/// or it can no longer be one.
+/// Whether `data` may start an HTTP/1 request: a method token followed by a
+/// first line mentioning `HTTP/` (ignoring case). `None` until its first
+/// line is complete or it can no longer be one.
 fn request_start(data: &[u8]) -> Option<bool> {
     let is_tchar = |b: &u8| b.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(b);
     let method_len = data.iter().take_while(|b| is_tchar(b)).count();
     match data.get(method_len) {
         None => return None,
-        Some(b' ') if method_len > 0 => {}
+        Some(_) if method_len > 0 => {}
         Some(_) => return Some(false),
     }
+    // Loose on purpose: anything a lenient server might take for a request
+    // is framed, and `request_line` then refuses the malformed ones.
     let line_end = data.iter().position(|&b| b == b'\n')?;
-    let line = data[..line_end]
-        .strip_suffix(b"\r")
-        .unwrap_or(&data[..line_end]);
-    let version = line.rsplit(|&b| b == b' ').next().unwrap_or_default();
-    Some(line.iter().filter(|&&b| b == b' ').count() >= 2 && version.starts_with(b"HTTP/"))
+    Some(
+        data[..line_end]
+            .windows(5)
+            .any(|w| w.eq_ignore_ascii_case(b"HTTP/")),
+    )
 }
 
 /// Check if data starts with an HTTP request method.
@@ -2112,7 +2120,10 @@ fn request_authorities(headers: &str) -> Option<Vec<&str>> {
     let (_, target) = request_line(headers)?;
     let lines = headers.lines().skip(1);
     let mut hosts = Vec::new();
-    if let Some((_, rest)) = target.split_once("://") {
+    if let Some((_, rest)) = is_absolute_form(target)
+        .then(|| target.split_once("://"))
+        .flatten()
+    {
         let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
         if authority.is_empty() || authority.contains('@') {
             return None;
@@ -2126,6 +2137,12 @@ fn request_authorities(headers: &str) -> Option<Vec<&str>> {
             .then(|| value.trim())
     }));
     Some(hosts)
+}
+
+/// Whether request target `target` is absolute-form (`scheme://host/...`),
+/// rather than a path that may contain `://` in its query.
+fn is_absolute_form(target: &str) -> bool {
+    !target.starts_with('/') && target.contains("://")
 }
 
 /// The method and target of a request whose request line is exactly
@@ -3798,6 +3815,10 @@ mod tests {
             &[b"PROPFIND /other HTTP/1.1\r\nHost: api.github.com\r\n\r\n"],
             &[b"PURGE /other HTTP/1.1\r\nHost: api.github.com\r\n\r\n"],
             &[b"X-CUSTOM", b" /other HTTP/1.1\r\nHost: api.github.com\r\n\r\n"],
+            // Almost-valid request lines that lenient servers accept.
+            &[b"DELETE /other HTTP/1.1 \r\nHost: api.github.com\r\n\r\n"],
+            &[b"DELETE\t/other HTTP/1.1\r\nHost: api.github.com\r\n\r\n"],
+            &[b"DELETE /other http/1.1\r\nHost: api.github.com\r\n\r\n"],
             // Non-HTTP bytes once a request has been framed.
             &[b"GET /ok HTTP/1.1\r\nHost: www.github.com\r\n\r\n", b"\x16\x03\x01"],
         ] {
@@ -3827,12 +3848,27 @@ mod tests {
         );
         let later = b"DELETE /other HTTP/1.1\r\nHost: api.github.com\r\n\r\n";
         assert_eq!(m.process_write_data(2, later).unwrap(), later);
-        // Text that isn't a request line counts as not HTTP too.
+        // Text that isn't a request line counts as not HTTP too, and so does
+        // an HTTP/0.9 request (which has no Host to route by).
+        for raw in [&b"SET k v\r\n"[..], b"GET /x\r\n"] {
+            let mut m = new();
+            assert_eq!(m.process_write_data(2, raw).unwrap(), raw);
+        }
+
+        // `://` in an origin-form target's query doesn't name a host.
         let mut m = new();
-        assert_eq!(
-            m.process_write_data(2, b"SET k v\r\n").unwrap(),
-            b"SET k v\r\n"
-        );
+        for (handle, request) in [
+            (
+                2,
+                &b"GET /login?next=https://example.com/ HTTP/1.1\r\nHost: www.github.com\r\n\r\n"[..],
+            ),
+            (
+                1,
+                b"GET /repos/org/repo?u=https://evil.com/ HTTP/1.1\r\nHost: api.github.com\r\n\r\n",
+            ),
+        ] {
+            assert_eq!(m.process_write_data(handle, request).unwrap(), request);
+        }
 
         // A rule can allow any method token.
         let config = NetConfig::permissive()
