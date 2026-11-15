@@ -226,6 +226,33 @@ async fn p3_guest_writes_stop_at_the_storage_quota() {
     assert!(size <= 256 * 1024, "{size}");
 }
 
+/// Concurrent writers to one storage can't overshoot its quota together: the
+/// quota is charged inside storage, under its lock, at the moment of each
+/// write, not checked ahead of it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn p3_concurrent_writes_cannot_overshoot_the_quota() {
+    const QUOTA: u64 = 256 * 1024;
+    let storage = storage(Some(QUOTA));
+    let ctx_a = ctx(&storage);
+    let ctx_b = ctx(&storage);
+    let ctx_c = ctx(&storage);
+    // Each fits alone; together they are well over the quota.
+    let ((a, _), (b, _), (c, _)) = tokio::join!(
+        run(ctx_a, &["fill", "/data/a", "163840"]),
+        run(ctx_b, &["fill", "/data/b", "163840"]),
+        run(ctx_c, &["fill", "/data/c", "163840"]),
+    );
+    assert!([a, b, c].contains(&1), "every writer finished: {a} {b} {c}");
+    let mut total = 0;
+    for f in ["/data/a", "/data/b", "/data/c"] {
+        total += storage.stat(f).await.map_or(0, |m| m.size);
+    }
+    assert!(
+        total <= QUOTA,
+        "{total} bytes stored, over the {QUOTA} quota"
+    );
+}
+
 #[tokio::test]
 async fn p3_guest_cannot_write_to_a_read_only_mount() {
     let storage = storage(None);

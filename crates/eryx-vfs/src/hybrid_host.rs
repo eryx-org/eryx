@@ -231,6 +231,19 @@ fn cap_metadata_to_stat(meta: &capfs::Metadata) -> types::DescriptorStat {
 // `*_op` does every descriptor, permission and mount check up front and
 // returns an `Op` that owns what it needs (a storage handle and a path) and
 // borrows nothing. Operations that never wait are plain `*_now` methods.
+//
+// On p3, calls on one store can interleave across an op's await, so an op
+// must not rely on anything checked in prepare that another call could
+// change meanwhile:
+// - The storage quota and entry limit are charged inside `VfsStorage`, under
+//   its lock, by the mutation itself, so concurrent writes can't both pass.
+// - Host files (real preopens) are opened, checked against both open-file
+//   limits and tracked in the same synchronous prepare step, never across an
+//   await; size caps on them are checked synchronously at each write.
+// - An op touches only its cloned storage handle and path. Closing the
+//   descriptor meanwhile drops nothing it needs and revives nothing; the only
+//   table write afterwards is `open_at` inserting a new, self-contained
+//   descriptor.
 
 /// The storage part of an operation, after its checks have passed.
 pub(crate) type Op<T> =
