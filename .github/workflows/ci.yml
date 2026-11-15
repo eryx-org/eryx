@@ -357,7 +357,7 @@ jobs:
           # As with the Python key, the cwasm's engine and CPU-feature settings
           # aren't covered: bump the prefix when they change. v1 -> v2: v1
           # cwasms were built without the CPU presets (host features).
-          key: wasm-runtime-javascript-v2-${{ hashFiles('crates/eryx-guest-js/**', 'crates/eryx-guest-call/**', 'crates/eryx-guest-python/clock_stubs.c', 'crates/wit-dylib-ffi/**', 'crates/eryx-runtime/build.rs', 'crates/eryx-runtime/wit/**', 'crates/eryx-runtime/libs/*.zst', 'Cargo.lock', 'Cargo.toml', 'mise.toml') }}
+          key: wasm-runtime-javascript-v3-${{ hashFiles('crates/eryx-guest-js/**', 'crates/eryx/examples/precompile.rs', 'crates/eryx-runtime/src/preinit.rs', 'crates/eryx-guest-call/**', 'crates/eryx-guest-python/clock_stubs.c', 'crates/wit-dylib-ffi/**', 'crates/eryx-runtime/build.rs', 'crates/eryx-runtime/wit/**', 'crates/eryx-runtime/libs/*.zst', 'Cargo.lock', 'Cargo.toml', 'mise.toml') }}
 
       - uses: ./.github/actions/setup-rust
         if: steps.wasm-cache.outputs.cache-hit != 'true'
@@ -375,9 +375,8 @@ jobs:
         if: steps.wasm-cache.outputs.cache-hit != 'true'
         run: |
           mise run build-runtime-javascript
-          # The precompile example cross-compiles, as for the Python runtime.
-          # `preinit` is what lets it apply ERYX_CPU_FEATURES; it only
-          # pre-initializes Python.
+          # The precompile example cross-compiles and pre-initializes, as for
+          # the Python runtime (`preinit` also lets it apply ERYX_CPU_FEATURES).
           compile() {
             ERYX_CPU_FEATURES="$1" cargo run -p eryx --example precompile --features preinit --release -- "${@:2}"
           }
@@ -454,8 +453,8 @@ jobs:
         run: |
           mise run build-runtime-shell
           # The precompile example cross-compiles, as for the Python runtime.
-          # `preinit` is what lets it apply ERYX_CPU_FEATURES; it only
-          # pre-initializes Python.
+          # `preinit` is what lets it apply ERYX_CPU_FEATURES; it doesn't
+          # pre-initialize the shell.
           compile() {
             ERYX_CPU_FEATURES="$1" cargo run -p eryx --example precompile --features preinit --release -- "${@:2}"
           }

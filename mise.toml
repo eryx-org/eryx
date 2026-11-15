@@ -478,7 +478,7 @@ sources = [
 outputs = ["crates/eryx-runtime/runtime-shell.wasm"]
 
 [tasks.precompile-runtime-javascript]
-description = "Pre-compile runtime-javascript.wasm to runtime-javascript.cwasm"
+description = "Pre-initialize and pre-compile runtime-javascript.wasm to runtime-javascript.cwasm"
 depends = ["build-runtime-javascript"]
 env = { ERYX_PRECOMPILE_BOOTSTRAP = "1" }
 run = """
@@ -486,6 +486,7 @@ run = """
 cargo run -p eryx-precompile --release -- compile \
   crates/eryx-runtime/runtime-javascript.wasm \
   --language javascript \
+  --preinit \
   --target "${ERYX_CPU_FEATURES:-native}" \
   --output crates/eryx-runtime/runtime-javascript.cwasm \
   --no-verify

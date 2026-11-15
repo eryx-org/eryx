@@ -77,7 +77,7 @@ fn main() -> anyhow::Result<()> {
         .map(|s| s.as_str());
 
     // The guest language of the component: ERYX_LANGUAGE, default python.
-    // It is stamped into the output, and only Python is pre-initialized.
+    // It is stamped into the output. Python and JavaScript are pre-initialized.
     let language: eryx::Language = std::env::var("ERYX_LANGUAGE")
         .unwrap_or_else(|_| "python".to_string())
         .parse()
@@ -107,8 +107,15 @@ fn main() -> anyhow::Result<()> {
 
     // With preinit: do pre-initialization for faster session creation
     #[cfg(feature = "preinit")]
-    let component_bytes = if language != eryx::Language::Python {
-        println!("\n--- Step 1: Skipping pre-initialization (only Python has it) ---");
+    let component_bytes = if language == eryx::Language::JavaScript {
+        println!("\n--- Step 1: Pre-initializing JavaScript ---");
+        let start = Instant::now();
+        let rt = tokio::runtime::Runtime::new()?;
+        let preinit_bytes = rt.block_on(eryx::preinit::pre_initialize_javascript(&wasm_bytes))?;
+        println!("Pre-init time: {:?}", start.elapsed());
+        preinit_bytes
+    } else if language != eryx::Language::Python {
+        println!("\n--- Step 1: Skipping pre-initialization (not supported for {language}) ---");
         wasm_bytes
     } else {
         let python_stdlib = find_python_stdlib()?;
