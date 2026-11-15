@@ -26,6 +26,11 @@ tempfile.workspace = true
 tracing-subscriber = { version = "0.3", features = ["env-filter", "registry"] }
 walkdir.workspace = true
 
+[features]
+# `env build`: build environments (embeds the JavaScript bundler; see eryx's
+# `packages` feature). Off by default until releases ship the bundler.
+env = ["eryx/packages"]
+
 [package.metadata.dist]
 dist = true
 

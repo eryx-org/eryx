@@ -18,21 +18,21 @@
 // Build scripts should panic on errors, so expect/unwrap are appropriate here.
 #![allow(clippy::expect_used, clippy::unwrap_used)]
 
-#[cfg(feature = "embedded")]
+#[cfg(any(feature = "embedded", feature = "packages"))]
 #[path = "build/cached_runtime.rs"]
 mod cached_runtime;
 
 fn main() {
     #[cfg(feature = "embedded-stdlib")]
     embedded_stdlib::prepare();
-    #[cfg(feature = "embedded")]
+    #[cfg(any(feature = "embedded", feature = "packages"))]
     embedded_runtime::prepare();
 }
 
 /// First 16 hex characters of SHA-256, used to name the extracted copies of
 /// embedded files. Hashing here instead of at startup saves every process a
 /// hash of the file, which for the runtime takes ~1s in unoptimized builds.
-#[cfg(feature = "embedded-stdlib")]
+#[cfg(any(feature = "embedded-stdlib", feature = "packages"))]
 fn short_sha256(bytes: &[u8]) -> String {
     use sha2::{Digest, Sha256};
 
@@ -52,7 +52,7 @@ mod embedded_stdlib {
     }
 }
 
-#[cfg(feature = "embedded")]
+#[cfg(any(feature = "embedded", feature = "packages"))]
 mod embedded_runtime {
     use std::path::PathBuf;
 
@@ -72,11 +72,14 @@ mod embedded_runtime {
         feature: &'static str,
         /// The env var naming an explicit `.cwasm` to embed.
         path_var: &'static str,
+        /// Only embedded with the `embedded` feature too; the bundler is
+        /// embedded by `packages` alone.
+        with_embedded: bool,
         /// The rustc env var the build script sets to its short hash.
         hash_var: &'static str,
     }
 
-    const RUNTIMES: [Runtime; 4] = [
+    const RUNTIMES: [Runtime; 5] = [
         Runtime {
             language: "python",
             stem: "runtime-python",
@@ -84,6 +87,7 @@ mod embedded_runtime {
             mise_task: "precompile-runtime-python",
             feature: "PYTHON",
             path_var: "ERYX_RUNTIME_CWASM",
+            with_embedded: true,
             hash_var: "ERYX_EMBEDDED_RUNTIME_HASH",
         },
         Runtime {
@@ -93,6 +97,7 @@ mod embedded_runtime {
             mise_task: "precompile-runtime-javascript",
             feature: "JAVASCRIPT",
             path_var: "ERYX_RUNTIME_CWASM_JAVASCRIPT",
+            with_embedded: true,
             hash_var: "ERYX_EMBEDDED_RUNTIME_HASH_JAVASCRIPT",
         },
         Runtime {
@@ -102,6 +107,7 @@ mod embedded_runtime {
             mise_task: "precompile-runtime-shell",
             feature: "SHELL",
             path_var: "ERYX_RUNTIME_CWASM_SHELL",
+            with_embedded: true,
             hash_var: "ERYX_EMBEDDED_RUNTIME_HASH_SHELL",
         },
         // The shell's default external commands (uutils coreutils), which
@@ -113,7 +119,19 @@ mod embedded_runtime {
             mise_task: "precompile-coreutils",
             feature: "COREUTILS",
             path_var: "ERYX_COREUTILS_CWASM",
+            with_embedded: true,
             hash_var: "ERYX_EMBEDDED_COREUTILS_HASH",
+        },
+        // The JavaScript bundler environment builds run (crates/eryx-bundler),
+        // built by `mise run precompile-bundler`.
+        Runtime {
+            language: "bundler",
+            stem: "eryx-bundler",
+            setup: false,
+            feature: "PACKAGES",
+            path_var: "ERYX_BUNDLER_CWASM",
+            with_embedded: false,
+            hash_var: "ERYX_EMBEDDED_BUNDLER_HASH",
         },
     ];
 
@@ -276,8 +294,11 @@ mod embedded_runtime {
         println!("cargo::rerun-if-env-changed=HOME");
         println!("cargo::rerun-if-env-changed=DOCS_RS");
 
+        let embedded = std::env::var_os("CARGO_FEATURE_EMBEDDED").is_some();
         for runtime in &RUNTIMES {
-            if std::env::var_os(format!("CARGO_FEATURE_{}", runtime.feature)).is_some() {
+            if std::env::var_os(format!("CARGO_FEATURE_{}", runtime.feature)).is_some()
+                && (embedded || !runtime.with_embedded)
+            {
                 runtime.prepare(&out_dir);
             }
         }

@@ -93,6 +93,46 @@ enum Command {
     /// the original packages or flags. pyeryx's saved factories are the same
     /// format and can be rebuilt too.
     Upgrade(UpgradeArgs),
+
+    /// Build and manage environments: package sets built ahead of time for
+    /// sandboxes to mount.
+    #[cfg(feature = "env")]
+    #[command(subcommand)]
+    Env(EnvCommand),
+}
+
+#[cfg(feature = "env")]
+#[derive(Subcommand, Debug)]
+enum EnvCommand {
+    /// Build an environment from its definition (a TOML file).
+    ///
+    /// Resolves the packages (reusing the definition's lockfile when it
+    /// matches, otherwise writing it), installs them, and for JavaScript
+    /// bundles them into ES modules, writing the environment to `--out`.
+    Build(EnvBuildArgs),
+}
+
+#[cfg(feature = "env")]
+#[derive(Parser, Debug)]
+struct EnvBuildArgs {
+    /// The environment definition (TOML)
+    definition: PathBuf,
+
+    /// Where to write the environment (replaced if it's one already)
+    #[arg(short, long)]
+    out: PathBuf,
+
+    /// Use only the lockfile and the cache; never touch the network
+    #[arg(long)]
+    offline: bool,
+
+    /// Fail if the lockfile is missing or doesn't match the definition
+    #[arg(long)]
+    frozen: bool,
+
+    /// Cache downloads here instead of the eryx cache directory
+    #[arg(long)]
+    cache_dir: Option<PathBuf>,
 }
 
 #[derive(Parser, Debug)]
@@ -344,7 +384,50 @@ async fn main() -> Result<()> {
         Command::Setup(args) => run_setup(args).await,
         Command::Compile(args) => run_compile(*args).await,
         Command::Upgrade(args) => run_upgrade(args).await,
+        #[cfg(feature = "env")]
+        Command::Env(EnvCommand::Build(args)) => run_env_build(args).await,
     }
+}
+
+#[cfg(feature = "env")]
+async fn run_env_build(args: EnvBuildArgs) -> Result<()> {
+    use eryx::environment::{BuildOptions, EnvironmentDefinition};
+
+    let definition = EnvironmentDefinition::read(&args.definition)?;
+    let base_dir = args
+        .definition
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    let mut options = BuildOptions::new()
+        .out_dir(&args.out)
+        .base_dir(base_dir)
+        .offline(args.offline)
+        .frozen(args.frozen);
+    if let Some(dir) = args.cache_dir {
+        options = options.cache_dir(dir);
+    }
+    println!(
+        "Building {} environment {:?} from {}",
+        definition.language,
+        definition.name,
+        args.definition.display()
+    );
+    let start = Instant::now();
+    let environment = eryx::environment::build(&definition, &options).await?;
+    let manifest = environment.manifest();
+    println!(
+        "  {} files, {} bytes, {} in {:?}",
+        manifest.content.files,
+        manifest.content.bytes,
+        manifest.content.hash,
+        start.elapsed()
+    );
+    for (name, path) in environment.exports() {
+        println!("  {name} -> {path}");
+    }
+    println!("Wrote {}", environment.root().display());
+    Ok(())
 }
 
 /// Determine the cache directory for eryx runtime artifacts.
