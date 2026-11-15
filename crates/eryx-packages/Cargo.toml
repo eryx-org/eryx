@@ -1,0 +1,33 @@
+[package]
+name = "eryx-packages"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Resolve, fetch and cache packages for eryx sandboxes (npm today)"
+publish = false
+
+[dependencies]
+base64.workspace = true
+flate2.workspace = true
+futures.workspace = true
+hex.workspace = true
+nodejs-semver.workspace = true
+reqwest.workspace = true
+rustls.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+tar.workspace = true
+tempfile.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["fs"] }
+webpki-roots.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+
+[lints]
+workspace = true
