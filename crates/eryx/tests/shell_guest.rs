@@ -266,7 +266,6 @@ async fn callback_arguments_follow_the_schema() {
 /// Positional arguments go to the host under `__eryx_args__`, typed by the
 /// property they bind to, and the host binds them like the Python guest does.
 #[tokio::test]
-#[ignore = "needs the host to bind `__eryx_args__` for exact callbacks (#822)"]
 async fn callback_positionals_bind_on_the_host() {
     let Some(builder) = shell_sandbox() else {
         return;
