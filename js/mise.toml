@@ -25,6 +25,30 @@ run = """
 cd .. && mise run build-runtime-python
 """
 
+[tasks.wasm-build-guests]
+description = "Build the JavaScript and shell WASM runtimes (delegates to root mise tasks)"
+# After wasm-build, not alongside it: both install the guest toolchain, and two
+# concurrent rustup installs of it collide.
+depends = ["wasm-build"]
+sources = [
+  "../crates/eryx-guest-js/src/**/*",
+  "../crates/eryx-guest-js/Cargo.toml",
+  "../crates/eryx-guest-python/clock_stubs.c",
+  "../crates/wit-dylib-ffi/src/**/*.rs",
+  "../crates/wit-dylib-ffi/Cargo.toml",
+  "../crates/eryx-guest-shell/src/**/*",
+  "../crates/eryx-guest-shell/Cargo.toml",
+  "../crates/eryx-guest-shell/Cargo.lock",
+  "../crates/eryx-runtime/wit/**/*.wit",
+]
+outputs = [
+  "../crates/eryx-runtime/runtime-javascript.wasm",
+  "../crates/eryx-runtime/runtime-shell.wasm",
+]
+run = """
+cd .. && mise run build-runtime-javascript && mise run build-runtime-shell
+"""
+
 [tasks.extract-stdlib]
 description = "Extract Python stdlib for pre-initialization"
 depends = ["wasm-build"]
@@ -86,11 +110,51 @@ jco transpile \
     'eryx:net/tls@0.1.0#upgrade' 'eryx:net/tls@0.1.0#read' 'eryx:net/tls@0.1.0#write'
 """
 
+[tasks.transpile-guests]
+description = "Transpile the JavaScript and shell WASM components (loaded on first use, so no typings)"
+depends = ["wasm-build-guests"]
+sources = [
+  "../crates/eryx-runtime/runtime-javascript.wasm",
+  "../crates/eryx-runtime/runtime-shell.wasm",
+]
+outputs = ["eryx/eryx-sandbox-javascript.js", "eryx/eryx-sandbox-shell.js"]
+run = """
+#!/usr/bin/env bash
+set -euo pipefail
+# jco writes typings even with --no-typescript, and they would replace the
+# Python component's interfaces/; transpile elsewhere and keep the code only.
+out=$(mktemp -d)
+trap 'rm -rf "$out"' EXIT
+for language in javascript shell; do
+  jco transpile \
+    "../crates/eryx-runtime/runtime-$language.wasm" \
+    --name "eryx-sandbox-$language" \
+    --out-dir "$out" \
+    --quiet \
+    --instantiation async \
+    --async-mode jspi \
+    --async-imports \
+      'eryx:net/tcp@0.1.0#connect' 'eryx:net/tcp@0.1.0#read' 'eryx:net/tcp@0.1.0#write' \
+      'eryx:net/tls@0.1.0#upgrade' 'eryx:net/tls@0.1.0#read' 'eryx:net/tls@0.1.0#write'
+done
+rm -f eryx/eryx-sandbox-*.js eryx/eryx-sandbox-*.wasm
+cp "$out"/eryx-sandbox-*.js "$out"/eryx-sandbox-*.wasm eryx/
+"""
+
 [tasks.patch-js]
 description = "Patch generated JS for webpack compat and jco codegen bugs"
-depends = ["transpile"]
-sources = ["eryx/eryx-sandbox.js", "patch-jco.cjs"]
-outputs = ["eryx/eryx-sandbox.js"]
+depends = ["transpile", "transpile-guests"]
+sources = [
+  "eryx/eryx-sandbox.js",
+  "eryx/eryx-sandbox-javascript.js",
+  "eryx/eryx-sandbox-shell.js",
+  "patch-jco.cjs",
+]
+outputs = [
+  "eryx/eryx-sandbox.js",
+  "eryx/eryx-sandbox-javascript.js",
+  "eryx/eryx-sandbox-shell.js",
+]
 run = "node patch-jco.cjs"
 
 [tasks.build]
@@ -180,7 +244,7 @@ run = "npx vite preview --open"
 [tasks.clean]
 description = "Clean JavaScript build artifacts (generated files only)"
 dir = "eryx"
-run = "rm -rf eryx-sandbox.js eryx-sandbox.d.ts eryx-sandbox.*.wasm interfaces"
+run = "rm -rf eryx-sandbox.js eryx-sandbox.d.ts eryx-sandbox.*.wasm eryx-sandbox-*.js eryx-sandbox-*.wasm interfaces"
 
 [tasks.publish]
 description = "Publish JavaScript package to npm"

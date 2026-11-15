@@ -83,8 +83,20 @@ eryx now builds, precompiles and embeds a runtime per guest language: Python
 
 ## JavaScript (`@eryx-org/eryx`)
 
-- New `language` option, which only accepts `"python"` so far; anything else
-  throws a `TypeError`.
+- New `language` option: `"python"` (the default), `"javascript"` or
+  `"shell"`; anything else throws a `TypeError`. The JavaScript and shell
+  runtimes are separate files, loaded the first time a sandbox uses them, so
+  a Python-only app downloads nothing extra (the npm package grows by about
+  2.4 MB). Their sandboxes start with an empty filesystem, and their script
+  failures reject with `PythonExceptionError`.
+- **Behaviour change:** writes to WASI fds 1 and 2 are now captured per
+  sandbox and appended to the result's `stdout`/`stderr` (and streamed to the
+  output handler once the run ends), as the Rust host does, with the same
+  1 MiB cap per stream. For Python, this means `os.write(1, ...)` and
+  `sys.__stdout__`/`sys.__stderr__` output lands in the result instead of the
+  console.
+- **Fix:** script failures in a `timeoutMs` sandbox now reject with
+  `PythonExceptionError` (with `stdout` and `stderr`), not a bare `Error`.
 
 ## Python (`pyeryx`)
 
