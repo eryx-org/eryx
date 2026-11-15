@@ -181,17 +181,15 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn reopen_flags_never_block_on_a_fifo() {
-        use rustix::fs::{FileType, Mode, OFlags};
+        use rustix::fs::OFlags;
         let dir = tempfile::tempdir().unwrap();
         let fifo = dir.path().join("fifo");
-        rustix::fs::mknodat(
-            rustix::fs::CWD,
-            &fifo,
-            FileType::Fifo,
-            Mode::RUSR | Mode::WUSR,
-            0,
-        )
-        .unwrap();
+        // rustix has no portable mkfifo (`mknodat` is missing on Apple).
+        let made = std::process::Command::new("mkfifo")
+            .arg(&fifo)
+            .status()
+            .unwrap();
+        assert!(made.success());
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
             let result = unix_reopen::options(OFlags::NONBLOCK | OFlags::NOCTTY).open(&fifo);
