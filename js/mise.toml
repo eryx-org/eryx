@@ -213,9 +213,13 @@ echo "Example packages ready:"
 ls -lh examples/
 """
 
+[tasks.linker-wasm]
+description = "Build the demo's linker wasm, which it imports (delegates to root mise task)"
+run = "cd .. && mise run build-linker-wasm"
+
 [tasks.demo]
 description = "Serve the browser demo on localhost with Vite dev server"
-depends = ["build", "copy-examples"]
+depends = ["build", "copy-examples", "linker-wasm"]
 dir = "demo"
 run = """
 #!/usr/bin/env bash
@@ -226,7 +230,7 @@ npx vite --open --host
 
 [tasks.demo-build]
 description = "Build the demo site for production (static output in demo/dist/)"
-depends = ["build", "copy-examples"]
+depends = ["build", "copy-examples", "linker-wasm"]
 dir = "demo"
 run = """
 #!/usr/bin/env bash
