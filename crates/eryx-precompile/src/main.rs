@@ -118,7 +118,9 @@ struct EnvBuildArgs {
     /// The environment definition (TOML)
     definition: PathBuf,
 
-    /// Where to write the environment (replaced if it's one already)
+    /// Where to write the environment: replaced if it's one already, filled
+    /// if it's an empty directory (a volume, say), refused otherwise. Not a
+    /// mount point that already holds an environment: mount its parent
     #[arg(short, long)]
     out: PathBuf,
 

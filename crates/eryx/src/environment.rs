@@ -40,13 +40,14 @@ use std::sync::OnceLock;
 use std::time::Duration;
 
 pub use eryx_packages::environment::{
-    Builder, Content, EnvironmentDefinition, Inputs, LimitsSection, Manifest, NpmSection, Size,
+    Builder, Content, EnvironmentDefinition, Inputs, Language, LimitsSection, Manifest, NpmSection,
+    Size,
 };
 
-use eryx_packages::environment::{Language as EnvLanguage, MANIFEST_FILE, parse_duration};
+use eryx_packages::environment::{MANIFEST_FILE, parse_duration};
 use eryx_packages::npm::{Install, Limits, Registry};
 
-use crate::Language;
+use crate::Language as GuestLanguage;
 use crate::process::{IsolatedLimits, Mount};
 
 /// The directory a JavaScript environment's modules are in.
@@ -103,9 +104,13 @@ impl BuildOptions {
         Self::default()
     }
 
-    /// Build into `dir`, replacing an environment already there. Without
-    /// one, environments go to the eryx cache directory, named by a hash of
-    /// what they're built from.
+    /// Build into `dir`, replacing an environment already there (moved
+    /// aside, then deleted, so `dir` never holds a half-replaced one) or
+    /// filling an empty directory in place. Anything else at `dir` is
+    /// refused. `dir` mustn't be a mount point that already holds an
+    /// environment, which can't be renamed: mount its parent, or an empty
+    /// directory. Without one, environments go to the eryx cache directory,
+    /// named by a hash of what they're built from.
     pub fn out_dir(mut self, dir: impl Into<PathBuf>) -> Self {
         self.out_dir = Some(dir.into());
         self
@@ -143,20 +148,48 @@ impl BuildOptions {
 pub struct Environment {
     root: PathBuf,
     manifest: Manifest,
+    language: GuestLanguage,
 }
 
 impl Environment {
-    /// Load the environment in `dir`, checking its manifest and that its
-    /// content still hashes to what the manifest records.
+    /// Load the environment in `dir`, checking its manifest, that its
+    /// exports exist, and that it still hashes to what the manifest records
+    /// (see [`Manifest::verify`] for what that does and doesn't guarantee).
     ///
     /// # Errors
     ///
-    /// Fails if there's no valid manifest, or the content was changed.
+    /// Fails if there's no valid manifest, the environment was changed, or
+    /// it's for a language this eryx doesn't know.
     pub fn load(dir: impl AsRef<Path>) -> Result<Self, EnvironmentError> {
         let root = dir.as_ref().to_path_buf();
         let manifest = Manifest::read(&root)?;
         manifest.verify(&root)?;
-        Ok(Self { root, manifest })
+        let language = guest_language(manifest.language)?;
+        Ok(Self {
+            root,
+            manifest,
+            language,
+        })
+    }
+
+    /// [`load`](Self::load), and check it's the environment whose
+    /// [`Content::hash`] is `hash`: pin one built in CI, so a sandbox can't
+    /// be handed another environment at the same path.
+    ///
+    /// # Errors
+    ///
+    /// As for [`load`](Self::load), or if it's another environment.
+    pub fn load_expecting(dir: impl AsRef<Path>, hash: &str) -> Result<Self, EnvironmentError> {
+        let environment = Self::load(&dir)?;
+        if environment.manifest.content.hash == hash {
+            Ok(environment)
+        } else {
+            Err(eryx_packages::Error::Integrity {
+                what: format!("the environment at {}", dir.as_ref().display()),
+                expected: hash.to_string(),
+            }
+            .into())
+        }
     }
 
     /// The environment's directory.
@@ -173,8 +206,8 @@ impl Environment {
 
     /// The guest language it's for.
     #[must_use]
-    pub fn language(&self) -> Language {
-        language(self.manifest.language)
+    pub fn language(&self) -> GuestLanguage {
+        self.language
     }
 
     /// What it makes importable, by name, as paths inside [`root`](Self::root).
@@ -184,11 +217,12 @@ impl Environment {
     }
 }
 
-fn language(language: EnvLanguage) -> Language {
+fn guest_language(language: Language) -> Result<GuestLanguage, EnvironmentError> {
     match language {
-        EnvLanguage::JavaScript => Language::JavaScript,
-        EnvLanguage::Shell => Language::Shell,
-        _ => Language::Python,
+        Language::JavaScript => Ok(GuestLanguage::JavaScript),
+        Language::Python => Ok(GuestLanguage::Python),
+        Language::Shell => Ok(GuestLanguage::Shell),
+        other => Err(EnvironmentError::Unsupported(other)),
     }
 }
 
@@ -203,8 +237,8 @@ pub async fn build(
     options: &BuildOptions,
 ) -> Result<Environment, EnvironmentError> {
     match (definition.language, &definition.npm) {
-        (EnvLanguage::JavaScript, Some(npm)) => build_javascript(definition, npm, options).await,
-        (other, _) => Err(EnvironmentError::Unsupported(language(other))),
+        (Language::JavaScript, Some(npm)) => build_javascript(definition, npm, options).await,
+        (other, _) => Err(EnvironmentError::Unsupported(other)),
     }
 }
 
@@ -289,14 +323,8 @@ async fn build_javascript(
         }
     };
 
-    // Build in a staging directory next to the output, then swap it in.
-    let parent = out_dir
-        .parent()
-        .filter(|p| !p.as_os_str().is_empty())
-        .unwrap_or(Path::new("."));
-    std::fs::create_dir_all(parent).map_err(io(format!("creating {}", parent.display())))?;
-    let staging = tempfile::tempdir_in(parent)
-        .map_err(io(format!("creating a directory in {}", parent.display())))?;
+    let cached = options.out_dir.is_none();
+    let staging = staging_dir(&out_dir)?;
     let modules = staging.path().join(MODULES_DIR);
     std::fs::create_dir(&modules).map_err(io("creating the modules directory"))?;
 
@@ -337,30 +365,150 @@ async fn build_javascript(
         .extend(report.warnings.iter().map(|w| format!("bundler: {w}")));
     manifest.write(staging.path())?;
 
-    replace_dir(staging.keep(), &out_dir)?;
-    Ok(Environment {
-        root: out_dir,
-        manifest,
-    })
+    install_environment(staging, &out_dir, cached, &manifest.content.hash)?;
+    Environment::load_expecting(&out_dir, &manifest.content.hash)
 }
 
-/// Move `staging` to `out`, replacing an environment already there (but
-/// nothing else).
-fn replace_dir(staging: PathBuf, out: &Path) -> Result<(), EnvironmentError> {
-    if out.exists() {
+/// Whether `dir` is an existing, empty directory.
+fn is_empty_dir(dir: &Path) -> bool {
+    std::fs::read_dir(dir).is_ok_and(|mut entries| entries.next().is_none())
+}
+
+/// Where to build `out`: inside it if it's an existing empty directory (a
+/// volume mounted there, say), so the result can be moved in on the same
+/// filesystem; otherwise next to it, to be renamed into place. An `out`
+/// that holds anything other than an environment is refused up front.
+fn staging_dir(out: &Path) -> Result<tempfile::TempDir, EnvironmentError> {
+    let staging = |dir: &Path| {
+        tempfile::Builder::new()
+            .prefix(".eryx-staging-")
+            .tempdir_in(dir)
+            .map_err(io(format!("creating a directory in {}", dir.display())))
+    };
+    if is_empty_dir(out) {
+        return staging(out);
+    }
+    if out.exists() && !out.join(MANIFEST_FILE).is_file() {
+        return Err(EnvironmentError::Build(format!(
+            "{} exists and isn't an environment; not replacing it",
+            out.display()
+        )));
+    }
+    let parent = out
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    std::fs::create_dir_all(parent).map_err(io(format!("creating {}", parent.display())))?;
+    staging(parent)
+}
+
+/// Put the environment built in `staging` at `out`.
+///
+/// - `out` was empty (`staging` is inside it): move the contents up, the
+///   manifest last, so it never describes files that aren't there yet.
+/// - `out` doesn't exist: rename `staging` to it.
+/// - `out` holds an environment: if `cached` and it's the one just built
+///   (`hash`), another build got there first, so keep it. Otherwise move it
+///   aside, rename `staging` in, and delete it, so there's never a
+///   half-deleted environment at `out` (only, briefly, none).
+///
+/// `out` must not be a mount point holding an environment, since that can't
+/// be renamed: mount its parent instead, or an empty directory.
+fn install_environment(
+    staging: tempfile::TempDir,
+    out: &Path,
+    cached: bool,
+    hash: &str,
+) -> Result<(), EnvironmentError> {
+    if staging.path().parent() == Some(out) {
+        let mut entries: Vec<PathBuf> = std::fs::read_dir(staging.path())
+            .map_err(io("reading the staging directory"))?
+            .map(|entry| entry.map(|e| e.path()))
+            .collect::<Result<_, _>>()
+            .map_err(io("reading the staging directory"))?;
+        entries.sort_by_key(|p| p.ends_with(MANIFEST_FILE));
+        for entry in entries {
+            let name = entry.file_name().unwrap_or_default();
+            std::fs::rename(&entry, out.join(name))
+                .map_err(io(format!("moving the build into {}", out.display())))?;
+        }
+        return Ok(());
+    }
+
+    let staged = staging.keep();
+    let discard = |staged: &Path| {
+        let _ = std::fs::remove_dir_all(staged);
+    };
+    // A few attempts: a concurrent build can replace `out` in between.
+    for _ in 0..8 {
+        match std::fs::rename(&staged, out) {
+            Ok(()) => return Ok(()),
+            Err(e) if !out.exists() => {
+                if !staged.exists() {
+                    return Err(io(format!("installing {}", out.display()))(e));
+                }
+                continue;
+            }
+            Err(_) => {}
+        }
+        if cached && Environment::load_expecting(out, hash).is_ok() {
+            discard(&staged);
+            return Ok(());
+        }
         if !out.join(MANIFEST_FILE).is_file() {
-            let _ = std::fs::remove_dir_all(&staging);
+            discard(&staged);
             return Err(EnvironmentError::Build(format!(
                 "{} exists and isn't an environment; not replacing it",
                 out.display()
             )));
         }
-        std::fs::remove_dir_all(out).map_err(io(format!("removing {}", out.display())))?;
+        let aside = aside_path(out);
+        match std::fs::rename(out, &aside) {
+            Ok(()) => {}
+            // Another build moved it first; try again.
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(e) => {
+                discard(&staged);
+                return Err(EnvironmentError::Build(format!(
+                    "can't replace the environment at {}: {e}. If it's a mount point, \
+                     mount its parent (or an empty directory) instead",
+                    out.display()
+                )));
+            }
+        }
+        let swapped = std::fs::rename(&staged, out);
+        if swapped.is_err() {
+            // Put the old one back unless another build already replaced it.
+            let _ = std::fs::rename(&aside, out);
+        } else {
+            let _ = std::fs::remove_dir_all(&aside);
+        }
+        match swapped {
+            Ok(()) => return Ok(()),
+            Err(_) if out.exists() => {}
+            Err(e) => {
+                discard(&staged);
+                return Err(io(format!("installing {}", out.display()))(e));
+            }
+        }
     }
-    std::fs::rename(&staging, out).map_err(|e| {
-        let _ = std::fs::remove_dir_all(&staging);
-        io(format!("writing {}", out.display()))(e)
-    })
+    discard(&staged);
+    Err(EnvironmentError::Build(format!(
+        "{} kept changing while installing; is another build replacing it?",
+        out.display()
+    )))
+}
+
+/// A unique name next to `out` to move the environment there aside to.
+fn aside_path(out: &Path) -> PathBuf {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    let name = out.file_name().unwrap_or_default().to_string_lossy();
+    out.with_file_name(format!(
+        ".{name}.old-{}-{}",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    ))
 }
 
 /// `bundle.json`, as the bundler writes it.
@@ -465,9 +613,26 @@ mod tests {
         let out = dir.path().join("out");
         std::fs::create_dir(&out).unwrap();
         std::fs::write(out.join("precious"), "x").unwrap();
-        let staging = dir.path().join("staging");
-        std::fs::create_dir(&staging).unwrap();
-        assert!(replace_dir(staging.clone(), &out).is_err());
-        assert!(out.join("precious").exists() && !staging.exists());
+        assert!(staging_dir(&out).is_err());
+        assert!(out.join("precious").exists());
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn stages_inside_an_empty_out_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().join("volume");
+        std::fs::create_dir(&out).unwrap();
+        let staging = staging_dir(&out).unwrap();
+        assert_eq!(staging.path().parent(), Some(out.as_path()));
+        std::fs::write(staging.path().join(MANIFEST_FILE), "{}").unwrap();
+        std::fs::create_dir(staging.path().join("modules")).unwrap();
+        install_environment(staging, &out, false, "unused").unwrap();
+        let mut names: Vec<_> = std::fs::read_dir(&out)
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        names.sort();
+        assert_eq!(names, ["eryx-environment.json", "modules"]);
     }
 }

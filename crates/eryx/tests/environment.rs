@@ -246,3 +246,104 @@ async fn warnings_are_recorded_in_the_manifest() {
         *warnings
     );
 }
+
+#[tokio::test]
+async fn concurrent_builds_of_one_environment_all_succeed() {
+    let dir = tempfile::tempdir().unwrap();
+    let (cache, _) = prepare(dir.path());
+    let definition = definition();
+
+    // Into the same explicit directory: each build replaces the last.
+    let explicit = dir.path().join("shared");
+    let builds = (0..4).map(|_| {
+        let options = BuildOptions::new()
+            .out_dir(&explicit)
+            .base_dir(dir.path())
+            .cache_dir(&cache)
+            .offline(true)
+            .frozen(true);
+        let definition = definition.clone();
+        tokio::spawn(async move {
+            build(&definition, &options)
+                .await
+                .map(|e| e.manifest().clone())
+        })
+    });
+    let manifests: Vec<_> = futures::future::join_all(builds).await;
+    let hash = manifests[0]
+        .as_ref()
+        .unwrap()
+        .as_ref()
+        .unwrap()
+        .content
+        .hash
+        .clone();
+    for manifest in &manifests {
+        assert_eq!(
+            manifest.as_ref().unwrap().as_ref().unwrap().content.hash,
+            hash
+        );
+    }
+    Environment::load_expecting(&explicit, &hash).unwrap();
+    let leftovers: Vec<_> = std::fs::read_dir(dir.path())
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .filter(|n| n.starts_with('.'))
+        .collect();
+    assert!(leftovers.is_empty(), "{leftovers:?}");
+
+    // Into the cache: one wins, the others use it.
+    let builds = (0..4).map(|_| {
+        let options = BuildOptions::new()
+            .base_dir(dir.path())
+            .cache_dir(&cache)
+            .offline(true)
+            .frozen(true);
+        let definition = definition.clone();
+        tokio::spawn(async move {
+            build(&definition, &options)
+                .await
+                .map(|e| e.root().to_path_buf())
+        })
+    });
+    let roots: Vec<_> = futures::future::join_all(builds)
+        .await
+        .into_iter()
+        .map(|r| r.unwrap().unwrap())
+        .collect();
+    assert!(roots.iter().all(|r| *r == roots[0]));
+    Environment::load_expecting(&roots[0], &hash).unwrap();
+}
+
+#[tokio::test]
+async fn fills_an_existing_empty_directory_in_place() {
+    let dir = tempfile::tempdir().unwrap();
+    let (cache, _) = prepare(dir.path());
+    let volume = dir.path().join("volume");
+    std::fs::create_dir(&volume).unwrap();
+
+    let environment = build(&definition(), &options(dir.path(), &cache, "volume"))
+        .await
+        .unwrap();
+
+    assert_eq!(environment.root(), volume);
+    let mut names: Vec<_> = std::fs::read_dir(&volume)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    names.sort();
+    assert_eq!(names, ["eryx-environment.json", "eryx-npm.lock", "modules"]);
+}
+
+#[tokio::test]
+async fn load_expecting_pins_the_hash() {
+    let dir = tempfile::tempdir().unwrap();
+    let (cache, _) = prepare(dir.path());
+    let environment = build(&definition(), &options(dir.path(), &cache, "env"))
+        .await
+        .unwrap();
+    let hash = &environment.manifest().content.hash;
+    Environment::load_expecting(environment.root(), hash).unwrap();
+    let err = Environment::load_expecting(environment.root(), "sha256-0").unwrap_err();
+    assert!(err.to_string().contains("sha256-0"), "{err}");
+}

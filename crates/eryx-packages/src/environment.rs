@@ -72,7 +72,7 @@ impl std::fmt::Display for Language {
 ///
 /// [limits]
 /// max-packages = 500
-/// max-tarball-bytes = "32MiB"
+/// max-package-bytes = "32MiB"
 /// ```
 ///
 /// Unknown fields, and sections for another language, are refused rather
@@ -375,7 +375,9 @@ pub struct Content {
     pub files: u64,
     /// Bytes in them.
     pub bytes: u64,
-    /// [`content_hash`] of the directory: the environment's identity.
+    /// The environment's identity: a hash over its name, language, content
+    /// dir and exports, and every file in the content dir (see
+    /// [`Manifest::identity_hash`]).
     pub hash: String,
 }
 
@@ -395,7 +397,7 @@ impl Manifest {
         exports: BTreeMap<String, String>,
     ) -> Result<Self> {
         let content = content_hash(&root.join(dir))?;
-        Ok(Self {
+        let mut manifest = Self {
             format: MANIFEST_FORMAT.to_string(),
             format_version: MANIFEST_VERSION,
             name: name.to_string(),
@@ -406,11 +408,58 @@ impl Manifest {
                 dir: dir.to_string(),
                 files: content.files,
                 bytes: content.bytes,
-                hash: content.hash,
+                hash: String::new(),
             },
             exports,
             warnings: Vec::new(),
-        })
+        };
+        manifest.check()?;
+        manifest.check_exports(&content)?;
+        manifest.content.hash = manifest.identity_hash(&content);
+        Ok(manifest)
+    }
+
+    /// The hash [`Content::hash`] records: over the name, language, content
+    /// dir, exports and `content`'s (the content dir's) [`ContentHash`]. So
+    /// it changes if any of what a sandbox relies on changes: the files, or
+    /// what the manifest says they are.
+    #[must_use]
+    pub fn identity_hash(&self, content: &ContentHash) -> String {
+        let mut hasher = Sha256::new();
+        for part in [
+            MANIFEST_FORMAT,
+            &MANIFEST_VERSION.to_string(),
+            &self.name,
+            &self.language.to_string(),
+            &self.content.dir,
+        ] {
+            hasher.update(part.as_bytes());
+            hasher.update([0]);
+        }
+        for (name, path) in &self.exports {
+            hasher.update(name.as_bytes());
+            hasher.update([0]);
+            hasher.update(path.as_bytes());
+            hasher.update([0]);
+        }
+        hasher.update(b"files\0");
+        hasher.update(content.hash.as_bytes());
+        format!("sha256-{}", hex::encode(hasher.finalize()))
+    }
+
+    /// Check every export names a file in the content dir.
+    fn check_exports(&self, content: &ContentHash) -> Result<()> {
+        for (name, path) in &self.exports {
+            let inside = path
+                .strip_prefix(&self.content.dir)
+                .and_then(|p| p.strip_prefix('/'));
+            if !inside.is_some_and(|p| content.paths.iter().any(|f| f == p)) {
+                return Err(Error::Definition(format!(
+                    "export {name:?} names {path:?}, which isn't a file in the environment"
+                )));
+            }
+        }
+        Ok(())
     }
 
     /// Read and check `root/eryx-environment.json`.
@@ -442,14 +491,21 @@ impl Manifest {
         std::fs::write(&path, json).map_err(Error::io(format!("writing {}", path.display())))
     }
 
-    /// Check the content still hashes to what the manifest says.
+    /// Check the environment in `root` is what this manifest describes:
+    /// every export names a file in it, and its files and the manifest's
+    /// identity fields still hash to [`Content::hash`]. This catches
+    /// accidental changes (a partial copy, an edited or corrupted file, a
+    /// hand-edited manifest); it can't stop someone who can write the
+    /// environment from changing both it and the hash, so pin an expected
+    /// hash where that matters.
     ///
     /// # Errors
     ///
-    /// [`Error::Integrity`] if it doesn't, or an I/O error.
+    /// [`Error::Integrity`] if it doesn't match, or an I/O error.
     pub fn verify(&self, root: &Path) -> Result<()> {
         let actual = content_hash(&root.join(&self.content.dir))?;
-        if actual.hash == self.content.hash {
+        self.check_exports(&actual)?;
+        if self.identity_hash(&actual) == self.content.hash {
             Ok(())
         } else {
             Err(Error::Integrity {
@@ -505,6 +561,8 @@ pub struct ContentHash {
     /// `sha256-<hex>` over each file's relative path and contents, in path
     /// order.
     pub hash: String,
+    /// The files' `/`-separated paths, relative to the directory, sorted.
+    pub paths: Vec<String>,
 }
 
 /// Hash a directory's files: their `/`-separated relative paths and
@@ -533,6 +591,7 @@ pub fn content_hash(dir: &Path) -> Result<ContentHash> {
         files: paths.len() as u64,
         bytes,
         hash: format!("sha256-{}", hex::encode(hasher.finalize())),
+        paths: paths.into_iter().map(|(relative, _)| relative).collect(),
     })
 }
 
@@ -682,6 +741,58 @@ mod tests {
             .insert("evil".to_string(), "../x.js".to_string());
         outside.write(root.path()).unwrap();
         assert!(Manifest::read(root.path()).is_err());
+    }
+
+    #[test]
+    fn the_hash_covers_the_manifests_identity_and_exports_exist() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(root.path().join("modules")).unwrap();
+        std::fs::write(root.path().join("modules/a.js"), "a").unwrap();
+        std::fs::write(root.path().join("modules/b.js"), "b").unwrap();
+        let new = |exports: &[(&str, &str)]| {
+            Manifest::new(
+                "env",
+                Language::JavaScript,
+                Inputs::new(vec![]),
+                Builder::new("0.0.0"),
+                root.path(),
+                "modules",
+                exports
+                    .iter()
+                    .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
+                    .collect(),
+            )
+        };
+        let manifest = new(&[("a", "modules/a.js")]).unwrap();
+        manifest.verify(root.path()).unwrap();
+
+        // Exports must name files that are there.
+        assert!(new(&[("x", "modules/missing.js")]).is_err());
+
+        // Changing what the manifest says, not just the files, is caught.
+        let mut edited = vec![manifest.clone(); 4];
+        edited[0].name = "other".to_string();
+        edited[1].language = Language::Shell;
+        edited[2]
+            .exports
+            .insert("a".to_string(), "modules/b.js".to_string());
+        edited[3]
+            .exports
+            .insert("b".to_string(), "modules/b.js".to_string());
+        for changed in &edited {
+            assert!(
+                matches!(changed.verify(root.path()), Err(Error::Integrity { .. })),
+                "{changed:?}"
+            );
+        }
+        let mut dangling = manifest.clone();
+        dangling
+            .exports
+            .insert("gone".to_string(), "modules/gone.js".to_string());
+        assert!(matches!(
+            dangling.verify(root.path()),
+            Err(Error::Definition(_))
+        ));
     }
 
     #[test]
