@@ -41,12 +41,22 @@ A file given through `ERYX_RUNTIME_CWASM` is embedded as is, without those check
 ### Setup Options
 
 ```bash
+# Set up the JavaScript and shell runtimes as well as Python's
+eryx-precompile setup --language python --language javascript --language shell
+
 # Check the download against a known hash instead of the release's checksum file
 eryx-precompile setup --sha256 <hex>
+
+# Download from a mirror, or a local directory served over HTTP, instead of GitHub
+eryx-precompile setup --release-url http://localhost:8000
 
 # Verbose output for debugging
 eryx-precompile setup --verbose
 ```
+
+With `--release-url`, the URL must serve this eryx version's assets: `setup` stamps what it downloads with its own version, so an older release's assets would be cached as current. The `.sha256` files come from the same URL as the downloads, so they catch corruption but not a hostile mirror; use one you trust. `--sha256` pins only the language runtime: with `--language shell`, coreutils is always checked against the mirror's checksum, so it is only as trustworthy as the mirror.
+
+`--language shell` also sets up the shell's embedded commands: it downloads `coreutils.wasm`, checks it against `coreutils.wasm.sha256`, and caches it as `coreutils-v<version>-<arch>-<os>.cwasm`. The `shell` feature turns on `coreutils`, which embeds them, so a build with `features = ["embedded", "shell"]` needs both. `--sha256` only applies to the runtime; coreutils is always checked against its own checksum file.
 
 A precompiled runtime only loads in the eryx version that built it, so `setup` always sets up its own version. To set up another, install the matching binary, for example `cargo binstall eryx-precompile@0.13.0`.
 

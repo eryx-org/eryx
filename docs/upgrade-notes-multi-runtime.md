@@ -41,7 +41,11 @@ eryx now builds, precompiles and embeds a runtime per guest language: Python
 - **`eryx-precompile setup` caches `runtime-<language>-v<version>-<arch>-<os>.cwasm`**
   (it was `runtime-v<version>-...`). Run `eryx-precompile setup` again after
   upgrading, as after every upgrade. `setup --language javascript --language
-  shell` sets up those runtimes too.
+  shell` sets up those runtimes too. `--language shell` also caches the shell's
+  embedded commands as `coreutils-v<version>-<arch>-<os>.cwasm`, which the
+  `shell` feature (through `coreutils`) embeds, so `features = ["embedded",
+  "shell"]` builds without `ERYX_COREUTILS_CWASM`. `setup --release-url <URL>`
+  downloads from a mirror instead of GitHub.
 - The embedded runtime's cached copy is `runtime-<language>-<version>-<hash>.cwasm`
   in the eryx cache directory. Older copies are not cleaned up automatically.
 - Library preambles are Python only, and the shell can't have secrets: a

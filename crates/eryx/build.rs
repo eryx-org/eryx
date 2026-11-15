@@ -64,8 +64,10 @@ mod embedded_runtime {
         language: &'static str,
         /// Its file name without `.cwasm`, e.g. `runtime-python`.
         stem: &'static str,
-        /// `eryx-precompile setup` can download and cache it.
-        setup: bool,
+        /// The `eryx-precompile setup --language` that downloads and caches it.
+        setup_language: &'static str,
+        /// The workspace mise task that builds it.
+        mise_task: &'static str,
         /// The cargo feature that embeds it.
         feature: &'static str,
         /// The env var naming an explicit `.cwasm` to embed.
@@ -78,7 +80,8 @@ mod embedded_runtime {
         Runtime {
             language: "python",
             stem: "runtime-python",
-            setup: true,
+            setup_language: "python",
+            mise_task: "precompile-runtime-python",
             feature: "PYTHON",
             path_var: "ERYX_RUNTIME_CWASM",
             hash_var: "ERYX_EMBEDDED_RUNTIME_HASH",
@@ -86,7 +89,8 @@ mod embedded_runtime {
         Runtime {
             language: "javascript",
             stem: "runtime-javascript",
-            setup: true,
+            setup_language: "javascript",
+            mise_task: "precompile-runtime-javascript",
             feature: "JAVASCRIPT",
             path_var: "ERYX_RUNTIME_CWASM_JAVASCRIPT",
             hash_var: "ERYX_EMBEDDED_RUNTIME_HASH_JAVASCRIPT",
@@ -94,17 +98,19 @@ mod embedded_runtime {
         Runtime {
             language: "shell",
             stem: "runtime-shell",
-            setup: true,
+            setup_language: "shell",
+            mise_task: "precompile-runtime-shell",
             feature: "SHELL",
             path_var: "ERYX_RUNTIME_CWASM_SHELL",
             hash_var: "ERYX_EMBEDDED_RUNTIME_HASH_SHELL",
         },
-        // The shell's default external commands (uutils coreutils), built by
-        // `mise run precompile-coreutils`. `setup` doesn't fetch it yet (#847).
+        // The shell's default external commands (uutils coreutils), which
+        // `setup --language shell` fetches along with the shell runtime.
         Runtime {
             language: "coreutils",
             stem: "coreutils",
-            setup: false,
+            setup_language: "shell",
+            mise_task: "precompile-coreutils",
             feature: "COREUTILS",
             path_var: "ERYX_COREUTILS_CWASM",
             hash_var: "ERYX_EMBEDDED_COREUTILS_HASH",
@@ -169,7 +175,7 @@ mod embedded_runtime {
                     println!(
                         "cargo::warning=Not using the cached {} runtime: {reason}. \
                          Run `eryx-precompile setup --language {}` again to rebuild it.",
-                        self.language, self.language
+                        self.language, self.setup_language
                     );
                     None
                 }
@@ -232,33 +238,16 @@ mod embedded_runtime {
                 None if std::env::var("ERYX_PRECOMPILE_BOOTSTRAP").is_ok() => {
                     self.write(out_dir, b"");
                 }
-                None if !self.setup => panic!(
-                    "\n\
-                    Pre-compiled {language} ({file}) not found; the `{feature}` feature embeds it.\n\
-                    \n\
-                    Set an explicit path:\n\
-                    \n\
-                    $ export {var}=/path/to/{file}\n\
-                    \n\
-                    or build it from the workspace (for eryx developers):\n\
-                    \n\
-                    $ mise run precompile-{language}\n\
-                    ",
-                    language = self.language,
-                    feature = self.feature.to_lowercase(),
-                    file = self.file_name(),
-                    var = self.path_var,
-                ),
                 None => panic!(
                     "\n\
-                    Pre-compiled {language} runtime ({file}) not found.\n\
+                    Pre-compiled {language} ({file}) not found.\n\
                     \n\
-                    The `embedded` feature requires a pre-compiled WASM runtime for your platform.\n\
+                    The `{feature}` feature with `embedded` needs it pre-compiled for your platform.\n\
                     \n\
                     Option 1 — Use eryx-precompile (recommended for crates.io users):\n\
                     \n\
                     $ cargo binstall eryx-precompile\n\
-                    $ eryx-precompile setup --language {language}\n\
+                    $ eryx-precompile setup --language {setup_language}\n\
                     \n\
                     Option 2 — Set an explicit path:\n\
                     \n\
@@ -266,9 +255,12 @@ mod embedded_runtime {
                     \n\
                     Option 3 — Build from the workspace (for eryx developers):\n\
                     \n\
-                    $ mise run precompile-runtime-{language}\n\
+                    $ mise run {mise_task}\n\
                     ",
                     language = self.language,
+                    feature = self.feature.to_lowercase(),
+                    setup_language = self.setup_language,
+                    mise_task = self.mise_task,
                     file = self.file_name(),
                     var = self.path_var,
                 ),
