@@ -182,6 +182,11 @@ impl<S: VfsStorage> VfsStorage for ScrubbingStorage<S> {
         self.inner.set_size(path, size).await
     }
 
+    async fn create_file(&self, path: &str, exclusive: bool) -> VfsResult<bool> {
+        // An empty file has nothing to scrub.
+        self.inner.create_file(path, exclusive).await
+    }
+
     async fn delete(&self, path: &str) -> VfsResult<()> {
         self.inner.delete(path).await
     }
