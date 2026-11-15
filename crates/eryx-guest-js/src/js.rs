@@ -82,6 +82,7 @@ impl Engine {
             native.set("write", Function::new(ctx.clone(), native_write)?)?;
             let prelude: Function<'_> = ctx.eval(PRELUDE)?;
             let hooks: Object<'_> = prelude.call((native,))?;
+            crate::fetch::install(&ctx)?;
             Ok::<_, rquickjs::Error>(Persistent::save(&ctx, hooks))
         });
         let hooks = hooks.unwrap_or_else(|e| panic!("failed to evaluate prelude: {e}"));
@@ -269,14 +270,17 @@ fn split_preamble(code: &str) -> (&str, &str) {
 }
 
 pub(crate) fn start_execute(export: ExportFunction, cx: Box<EryxCall>, code: String) -> u32 {
-    // A preamble is Python code, which the host only sends the Python guest,
-    // so only the user code is run.
-    let (_, code) = split_preamble(&code);
-    let code = code.to_string();
+    // The host's JavaScript preamble (the secrets' `process.env`) runs first.
+    let (preamble, code) = split_preamble(&code);
+    let (preamble, code) = (preamble.to_string(), code.to_string());
     TASK.with(|task| *task.borrow_mut() = Some(Task::new(export, cx)));
     with_ctx(|ctx, hooks| {
         crate::fresh::reseed(ctx).expect("failed to reseed the QuickJS context");
         install_callbacks(ctx, hooks);
+        if let Err(e) = ctx.eval::<(), _>(preamble).catch(ctx) {
+            let msg = format_caught(ctx, hooks, e);
+            return finish(hooks, Err(msg));
+        }
 
         let mut options = EvalOptions::default();
         // Sloppy global code with top-level await: `var`/`let`/`const`/

@@ -64,8 +64,9 @@ result = js.execute("console.log(6 * 7)")
 <!-- langtabs-end -->
 
 Python-only options, such as the stdlib, site-packages and packages, are only
-available on a Python builder. Secrets and library preambles are Python-only
-for now too. A shell script fails with its exit status
+available on a Python builder, as are library preambles. JavaScript has
+[`fetch`](./networking.md#fetch-in-javascript) and reads secrets from
+`process.env`; the shell can't have secrets. A shell script fails with its exit status
 (`ErrorKind::ScriptFailed { exit_code: Some(n), .. }`). Besides bash's builtins,
 the shell has `grep` built in. Patterns are GNU basic regular expressions, as
 in grep (`a\|b`, `\(x\)`), and `-E` and `-F` work as usual. Callbacks are commands (see

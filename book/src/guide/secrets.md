@@ -41,6 +41,21 @@ print(f"Key is: {key}")  # Prints: Key is: [REDACTED]
 
 Each secret dict requires a `"value"` key and accepts an optional `"allowed_hosts"` list (defaults to `[]`).
 
+## JavaScript
+
+JavaScript sandboxes read the placeholders from `process.env`, as Python reads
+`os.environ`, and use them with [`fetch`](./networking.md#fetch-in-javascript):
+
+```javascript
+const res = await fetch("https://api.github.com/user", {
+    headers: { Authorization: `Bearer ${process.env.TOKEN}` },
+});
+console.log(process.env.TOKEN); // Prints: [REDACTED]
+```
+
+`process` only exists when the sandbox has secrets, and only has `env`. The
+shell can't have secrets.
+
 ## Rust API
 
 ```rust,ignore

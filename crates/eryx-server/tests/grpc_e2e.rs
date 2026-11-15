@@ -222,12 +222,13 @@ async fn execute_selects_the_language_pool() {
         .unwrap();
     assert_eq!(created.load(std::sync::atomic::Ordering::SeqCst), 1);
 
-    // Secrets need the Python preamble, so they're refused for JavaScript
-    // rather than silently missing.
-    let status = execute_request(
+    // JavaScript reads a secret's placeholder, never its value, from
+    // `process.env`.
+    let result = execute_request(
         channel.clone(),
         ExecuteRequest {
-            code: "console.log(1)".to_string(),
+            code: "console.log(process.env.TOKEN !== undefined, process.env.TOKEN === 's3cret')"
+                .to_string(),
             language: Language::Javascript as i32,
             secrets: vec![eryx_server::proto::eryx::v1::SecretConfig {
                 name: "TOKEN".to_string(),
@@ -238,14 +239,8 @@ async fn execute_selects_the_language_pool() {
         },
     )
     .await
-    .unwrap_err();
-    assert_eq!(status.code(), tonic::Code::InvalidArgument);
-    assert!(
-        status
-            .message()
-            .contains("secrets are only supported for Python, not javascript"),
-        "{status:?}"
-    );
+    .unwrap();
+    assert_eq!(result.stdout, b"true false\n");
 
     // Unspecified is Python.
     let result = execute_in(channel.clone(), Language::Unspecified, "print(6 * 7)")

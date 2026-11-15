@@ -21,6 +21,7 @@ crate-type = ["staticlib"]
 # bindings for wasm32-wasip1, so no bindgen/libclang is needed.
 rquickjs.workspace = true
 eryx-guest-call.workspace = true
+httparse.workspace = true
 wit-dylib-ffi.workspace = true
 
 [lints]

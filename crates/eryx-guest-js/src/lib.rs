@@ -15,10 +15,13 @@
 //!   executes. Declaring a `let`/`const` again in a later execute throws a
 //!   `SyntaxError`, as in Node's REPL; `var` and plain assignment can repeat.
 //! - The result variable (default `result`) is JSON-serialized and consumed.
+//! - `fetch` and friends over the host's `eryx:net` (`src/fetch.js`,
+//!   `src/fetch.rs`). A fetch blocks the guest until its response is read.
+//! - `process.env`, with secrets' placeholders, when the sandbox has secrets.
 //!
 //! Not implemented yet: `snapshot-state`/`restore-state` (#823), trace events
-//! (#824), networking (#825), and subtask cancellation, which the host does
-//! by interrupting the guest instead.
+//! (#824), and subtask cancellation, which the host does by interrupting the
+//! guest instead.
 
 #![allow(unsafe_code)]
 // Same convention as the CPython guest: a broken invariant in FFI glue is a
@@ -26,8 +29,10 @@
 #![allow(clippy::unwrap_used)]
 #![allow(clippy::expect_used)]
 
+mod fetch;
 mod fresh;
 mod js;
+mod url;
 mod wit;
 
 use wit_dylib_ffi::{ExportFunction, Interpreter, Resource, Wit};

@@ -740,8 +740,9 @@ impl Sandbox {
     /// sandbox was built with.
     ///
     /// Used by the pool to configure per-request networking on a reused
-    /// sandbox. The secrets' placeholders are set in `os.environ` from the
-    /// next execution, as with [`SandboxBuilder::with_secret`].
+    /// sandbox. The secrets' placeholders are set in `os.environ` (or, in
+    /// JavaScript, `process.env`) from the next execution, as with
+    /// [`SandboxBuilder::with_secret`].
     ///
     /// # Errors
     ///
@@ -911,24 +912,26 @@ impl Sandbox {
 /// The preinitialized runtime snapshots `os.environ`, so WASI env vars set per
 /// execution would not show up. JSON string literals are valid Python string
 /// literals, unlike Rust's `{:?}` escapes (`\u{1b}`).
-/// The code the guest runs before each execution: [`full_preamble`], which
-/// is Python. The other guests take no preamble yet, so they can't have
-/// secrets (whose placeholders it sets) or library preambles.
+/// The code the guest runs before each execution: [`full_preamble`] for
+/// Python, [`crate::secrets::javascript_preamble`] for JavaScript. Library preambles are
+/// Python, and the shell takes no preamble, so it can't have secrets either.
 fn language_preamble(
     language: Language,
     secrets: &HashMap<String, crate::secrets::SecretConfig>,
     library_preamble: &str,
 ) -> Result<String, Error> {
-    if language == Language::Python {
-        return Ok(full_preamble(secrets, library_preamble));
+    let unsupported = |message: String| Err(ErrorKind::Initialization(message).into());
+    match language {
+        Language::Python => Ok(full_preamble(secrets, library_preamble)),
+        _ if !library_preamble.is_empty() => unsupported(format!(
+            "library preambles are only supported for Python, not {language}"
+        )),
+        Language::JavaScript => Ok(crate::secrets::javascript_preamble(secrets)),
+        _ if !secrets.is_empty() => unsupported(format!(
+            "secrets are only supported for Python and JavaScript, not {language}"
+        )),
+        _ => Ok(String::new()),
     }
-    if !secrets.is_empty() || !library_preamble.is_empty() {
-        return Err(ErrorKind::Initialization(format!(
-            "secrets and library preambles are only supported for Python, not {language}"
-        ))
-        .into());
-    }
-    Ok(String::new())
 }
 
 fn full_preamble(
@@ -2503,7 +2506,8 @@ impl<L, R> SandboxBuilder<L, R> {
     ///
     /// # Security
     ///
-    /// - Python code only sees a placeholder like `ERYX_SECRET_PLACEHOLDER_abc123`
+    /// - Sandboxed code only sees a placeholder like `ERYX_SECRET_PLACEHOLDER_abc123`,
+    ///   in `os.environ` (Python) or `process.env` (JavaScript)
     /// - Real value is substituted transparently when making HTTPS requests
     /// - Host checks use the TCP connection target; the TLS server name and any
     ///   HTTP `Host` header must name that same host
@@ -4132,18 +4136,42 @@ mod tests {
     }
 
     #[test]
-    fn secrets_are_python_only_for_now() {
+    fn shell_sandboxes_reject_secrets() {
         let err = Sandbox::builder()
             .with_wasm_bytes(vec![])
-            .javascript()
+            .shell()
             .with_secret("TOKEN", "value", vec!["example.com".to_string()])
             .build()
             .unwrap_err();
         assert!(
             matches!(err.kind(), ErrorKind::Initialization(msg)
-                if msg.contains("secrets") && msg.contains("javascript")),
+                if msg.contains("secrets") && msg.contains("shell")),
             "{err}"
         );
+    }
+
+    #[test]
+    fn javascript_preamble_sets_process_env_placeholders() {
+        let secret = crate::secrets::SecretConfig::new("real-value", vec!["a.test".to_string()]);
+        let placeholder = secret.placeholder().to_string();
+        let secrets = HashMap::from([("TOKEN".to_string(), secret)]);
+
+        let preamble = language_preamble(Language::JavaScript, &secrets, "").unwrap();
+        assert_eq!(
+            preamble,
+            format!(
+                "Object.defineProperty(globalThis, 'process', {{ value: {{ env: \
+                 Object.freeze({{\"TOKEN\":\"{placeholder}\"}}) }}, writable: true, \
+                 configurable: true }});\n"
+            )
+        );
+        assert!(!preamble.contains("real-value"));
+        assert_eq!(
+            language_preamble(Language::JavaScript, &HashMap::new(), "").unwrap(),
+            ""
+        );
+        let err = language_preamble(Language::JavaScript, &secrets, "import os").unwrap_err();
+        assert!(err.to_string().contains("library preambles"), "{err}");
     }
 
     #[test]

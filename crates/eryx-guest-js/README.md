@@ -18,6 +18,10 @@ cargo nextest run -p eryx --features embedded,javascript --test js_guest
 The JavaScript the sandboxed code sees (`console`, `invoke`, one function per
 callback, `listCallbacks`, the result variable) is set up by `src/prelude.js`;
 `src/js.rs` drives QuickJS's job queue and parks promises on host subtasks.
+`fetch` is `src/fetch.js` on an HTTP/1.1 client in `src/fetch.rs` (URLs in
+`src/url.rs`), which writes plain requests to the host's `eryx:net` TCP and
+TLS imports (`eryx_guest_call::net`, shared with the CPython guest), so the
+host's network policy and secret substitution apply.
 See the crate docs for the semantics and what isn't implemented yet.
 
 `precompile-runtime-javascript` pre-initializes the runtime

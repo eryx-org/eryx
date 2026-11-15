@@ -437,6 +437,64 @@ config = eryx.NetConfig(allowed_hosts=["internal.example.com"]).with_root_cert(c
 sandbox = eryx.Sandbox(network=config)
 ```
 
+## `fetch` in JavaScript
+
+JavaScript sandboxes have a `fetch` that goes through the same host-side
+networking as Python's sockets: the host does the TLS and applies everything on
+this page (allowed hosts, address filtering, method and path rules, timeouts,
+traffic limits) and [secret substitution](./secrets.md). The guest never sees a
+certificate.
+
+```javascript
+const res = await fetch("https://api.example.com/items?page=2", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ name: "widget" }),
+    signal: AbortSignal.timeout(5000),
+});
+if (!res.ok) throw new Error(`HTTP ${res.status}`);
+const items = await res.json();
+```
+
+> **`fetch` blocks the sandbox.** The host's network calls are synchronous for
+> the guest, so a `fetch` holds up the whole sandbox until its response, after
+> any redirects, has been read in full. Requests never overlap:
+> `Promise.all([fetch(a), fetch(b)])` runs them one after the other, and no
+> other code (callbacks, other promises) runs meanwhile. For the same reason,
+> nothing can call `controller.abort()` while a request is on the wire: an
+> abort takes effect before the request starts. Use `AbortSignal.timeout(ms)`
+> to bound a request, which passes its deadline to every network call.
+
+What's there, and what isn't:
+
+- `fetch(input, init)`, `Request`, `Response` (`status`, `ok`, `statusText`,
+  `headers`, `url`, `redirected`, `text()`, `json()`, `arrayBuffer()`,
+  `bytes()`, `clone()`, `Response.json()`), `Headers`, `AbortController` and
+  `AbortSignal` (`abort()`, `timeout()`, `any()`).
+- HTTP/1.1 only, one connection per request (no keep-alive), and no
+  compression: requests send `accept-encoding: identity` unless the script
+  sets it, and bodies aren't decompressed.
+- Bodies are buffered, not streamed: `response.body` is always `null`, and a
+  request body is a string, `ArrayBuffer` or typed array (no `FormData`,
+  `Blob` or streams). The host's traffic limit caps the total.
+- Redirects follow the fetch standard: `redirect: "follow"` (up to 20),
+  `"error"` or `"manual"` (which returns the 3xx response itself). A
+  301/302 POST or a 303 becomes a GET without its body, and `Authorization`
+  is dropped on a redirect to another origin.
+- Headers the transport owns (`Host`, `Content-Length`, `Connection`,
+  `Transfer-Encoding` and the like) are set by `fetch`; ones the script
+  passes are ignored.
+- Host names must be ASCII: write internationalized names in their punycode
+  (`xn--`) form. URLs with credentials (`https://user:pass@...`) are refused.
+- A network failure or a refusal by the host's policy rejects with
+  `TypeError("fetch failed")`, whose `cause.code` says why: `not-permitted`
+  (a blocked host or address, or a method or path the rules don't allow),
+  `timed-out`, `host-not-found`, `connection-refused`, `certificate-error`,
+  `too-many-redirects`, and so on. An aborted request rejects with the
+  signal's reason, a `DOMException` named `AbortError` or `TimeoutError`.
+- QuickJS has no timers, so an `AbortSignal.timeout()` signal turns aborted
+  when it's next looked at rather than firing its listeners on time.
+
 ## Low-Level Async API
 
 For advanced use cases, Eryx exposes a low-level async networking API via the `_eryx_async` module:

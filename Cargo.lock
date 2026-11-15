@@ -1207,6 +1207,7 @@ name = "eryx-guest-js"
 version = "0.15.0"
 dependencies = [
  "eryx-guest-call",
+ "httparse",
  "rquickjs",
  "wit-dylib-ffi",
 ]

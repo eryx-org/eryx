@@ -278,6 +278,30 @@ pub(crate) fn replace_bytes(haystack: &[u8], needle: &[u8], replacement: &[u8]) 
     result
 }
 
+/// The JavaScript code a sandbox runs before each execution to give scripts
+/// `process.env`, holding each secret's placeholder (keyed by its name), as
+/// `os.environ` does in Python. Empty without secrets. `process` is not
+/// enumerable, like the built-ins, so it isn't taken for session state.
+///
+/// JSON string literals are valid JavaScript string literals.
+#[must_use]
+pub fn javascript_preamble<S: std::hash::BuildHasher>(
+    secrets: &std::collections::HashMap<String, SecretConfig, S>,
+) -> String {
+    if secrets.is_empty() {
+        return String::new();
+    }
+    let env: std::collections::BTreeMap<&str, &str> = secrets
+        .iter()
+        .map(|(name, secret)| (name.as_str(), secret.placeholder()))
+        .collect();
+    let env = serde_json::to_string(&env).unwrap_or_else(|_| "{}".to_string());
+    format!(
+        "Object.defineProperty(globalThis, 'process', \
+         {{ value: {{ env: Object.freeze({env}) }}, writable: true, configurable: true }});\n"
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
