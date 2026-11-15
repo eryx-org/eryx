@@ -160,6 +160,8 @@ pub struct NetConfig {
     /// request over plain TCP (e.g. `http://`) is sent with the placeholder
     /// left in place.
     allow_plaintext_secrets: bool,
+    /// Method and path rules for HTTP requests: see [`NetConfig::allow_http`].
+    http_rules: Vec<HttpRule>,
 }
 
 /// The default [`NetConfig::blocked_networks`]: every range that isn't
@@ -256,6 +258,7 @@ impl Default for NetConfig {
             custom_root_certs: vec![],
             max_bytes: None,
             allow_plaintext_secrets: false,
+            http_rules: vec![],
         }
     }
 }
@@ -383,6 +386,7 @@ impl NetConfig {
             custom_root_certs: vec![],
             max_bytes: None,
             allow_plaintext_secrets: false,
+            http_rules: vec![],
         }
     }
 
@@ -392,6 +396,96 @@ impl NetConfig {
     pub fn allow_plaintext_secrets(mut self, allow: bool) -> Self {
         self.allow_plaintext_secrets = allow;
         self
+    }
+
+    /// Only allow the HTTP requests `rule` describes to hosts matching its
+    /// host pattern.
+    ///
+    /// A host that any rule matches only accepts requests matching one of
+    /// those rules; hosts no rule matches are unaffected. Once any rule is
+    /// set, every connection's requests are parsed and checked, against the
+    /// connected host and each host the request names (`Host` header or
+    /// absolute-form target), and ambiguous request framing is refused.
+    /// Bytes that aren't HTTP/1.1 are refused on connections to a host with
+    /// rules, as is a request with more than one `Host` header or a `Host`
+    /// that disagrees with its absolute-form target. A refused request is
+    /// never sent. Host names are compared ignoring case, a port, a trailing
+    /// dot and IPv6 brackets. See [`HttpRule`] for how methods and paths
+    /// match.
+    ///
+    /// # Limitations
+    ///
+    /// Setting any rule stops WebSocket traffic after an `Upgrade`, `CONNECT`
+    /// tunnels and HTTP/2 on every connection that starts with an HTTP
+    /// request, to any host: what follows isn't a request the host can check.
+    ///
+    /// Rules are enforced on what the host can frame. A first line shaped
+    /// like a request (a method token, then a target starting with `/` or
+    /// `*` or containing `://`, or `HTTP/` anywhere on the line) is parsed
+    /// strictly, and refused unless it's a valid HTTP/1.x request line, so
+    /// HTTP/0.9 is refused. A connection to a host without rules whose first
+    /// line has another shape (e.g. Redis `SET k v`) is passed through
+    /// unparsed from then on; one cost is that an inline command whose first
+    /// argument starts with `/` is refused instead. So if
+    /// sandboxed code does its own TLS to another allowed host served by the
+    /// same server as a ruled one, the requests inside aren't checked. Don't
+    /// allow other names on a server whose rules matter. On any other framed
+    /// connection, bytes that aren't a request (including a leading empty
+    /// line) are refused, and after a refusal every later write on the
+    /// connection is too.
+    #[must_use]
+    pub fn allow_http(mut self, rule: HttpRule) -> Self {
+        self.http_rules.push(rule);
+        self
+    }
+
+    /// Replace the HTTP rules; see [`NetConfig::allow_http`].
+    #[must_use]
+    pub fn with_http_rules(mut self, rules: impl IntoIterator<Item = HttpRule>) -> Self {
+        self.http_rules = rules.into_iter().collect();
+        self
+    }
+
+    /// The HTTP rules; see [`NetConfig::allow_http`].
+    #[must_use]
+    pub fn http_rules(&self) -> &[HttpRule] {
+        &self.http_rules
+    }
+
+    /// Whether any HTTP rule matches `host`.
+    fn has_http_rules(&self, host: &str) -> bool {
+        let host = normalize_host(host);
+        self.http_rules
+            .iter()
+            .any(|r| host_matches_pattern(&host, &normalize_host(&r.host)))
+    }
+
+    /// Check a request with `method` and request target `target` (as in the
+    /// request line: a path, or an absolute URL) against the HTTP rules for
+    /// `host`. A host no rule matches allows any request.
+    ///
+    /// # Errors
+    ///
+    /// Describes the refused request.
+    pub fn check_http_request(&self, host: &str, method: &str, target: &str) -> Result<(), String> {
+        let host = normalize_host(host);
+        let mut rules = self
+            .http_rules
+            .iter()
+            .filter(|r| host_matches_pattern(&host, &normalize_host(&r.host)))
+            .peekable();
+        if rules.peek().is_none() {
+            return Ok(());
+        }
+        let path = request_path(target);
+        if let Some(path) = &path
+            && rules.any(|r| r.allows(method, path))
+        {
+            return Ok(());
+        }
+        Err(format!(
+            "request not allowed by HTTP rules for {host}: {method} {target}"
+        ))
     }
 
     /// Host patterns `secret` may be sent to: its own `allowed_hosts`, or
@@ -438,7 +532,8 @@ impl NetConfig {
     }
 
     /// Fail if a setting can't work: a zero connect or I/O timeout would
-    /// make every connection time out immediately.
+    /// make every connection time out immediately, and an HTTP rule's path
+    /// must be one a request can match.
     ///
     /// [`SandboxBuilder::build`](crate::SandboxBuilder::build) runs this
     /// check when networking is enabled.
@@ -452,6 +547,9 @@ impl NetConfig {
         }
         if self.io_timeout.is_zero() {
             return Err("NetConfig io_timeout must be greater than zero".to_string());
+        }
+        for rule in &self.http_rules {
+            rule.validate()?;
         }
         Ok(())
     }
@@ -611,6 +709,163 @@ impl NetConfig {
     }
 }
 
+/// HTTP requests allowed to the hosts matching a pattern: see
+/// [`NetConfig::allow_http`].
+///
+/// - Methods are compared ignoring case; no methods means any method.
+/// - Paths match whole segments: `/repos/org/repo` matches it and anything
+///   under `/repos/org/repo/`, but not `/repos/org/repo-evil`. A path ending
+///   in `/` matches anything under it. No paths means any path.
+/// - A request's query string is ignored and its percent-escapes decoded
+///   before matching. A path with a `.` or `..` segment (escaped or not, or
+///   with `;` parameters), an empty segment (`//`), an escaped `/` or `\`, or
+///   a malformed escape never matches, nor does a target that isn't a path or
+///   an absolute URL (`CONNECT`, `OPTIONS *`).
+///
+/// ```
+/// use eryx::{HttpRule, NetConfig};
+///
+/// let config = NetConfig::default()
+///     .allow_host("api.github.com")
+///     .allow_http(
+///         HttpRule::new("api.github.com")
+///             .with_methods(["GET", "POST"])
+///             .with_paths(["/repos/org/repo"]),
+///     );
+/// assert!(config.check_http_request("api.github.com", "GET", "/repos/org/repo/issues?page=2").is_ok());
+/// assert!(config.check_http_request("api.github.com", "DELETE", "/repos/org/repo").is_err());
+/// assert!(config.check_http_request("api.github.com", "GET", "/repos/org/repo-evil").is_err());
+/// ```
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HttpRule {
+    host: String,
+    methods: Vec<String>,
+    paths: Vec<String>,
+}
+
+impl HttpRule {
+    /// A rule for hosts matching `host` (same patterns as
+    /// [`NetConfig::allow_host`]), allowing any method and path until
+    /// narrowed.
+    #[must_use]
+    pub fn new(host: impl Into<String>) -> Self {
+        Self {
+            host: host.into(),
+            methods: vec![],
+            paths: vec![],
+        }
+    }
+
+    /// Only allow these methods.
+    #[must_use]
+    pub fn with_methods(mut self, methods: impl IntoIterator<Item = impl Into<String>>) -> Self {
+        self.methods = methods.into_iter().map(Into::into).collect();
+        self
+    }
+
+    /// Only allow paths under these.
+    #[must_use]
+    pub fn with_paths(mut self, paths: impl IntoIterator<Item = impl Into<String>>) -> Self {
+        self.paths = paths.into_iter().map(Into::into).collect();
+        self
+    }
+
+    /// The host pattern.
+    #[must_use]
+    pub fn host(&self) -> &str {
+        &self.host
+    }
+
+    /// The allowed methods; empty allows any.
+    #[must_use]
+    pub fn methods(&self) -> &[String] {
+        &self.methods
+    }
+
+    /// The allowed path prefixes; empty allows any.
+    #[must_use]
+    pub fn paths(&self) -> &[String] {
+        &self.paths
+    }
+
+    fn validate(&self) -> Result<(), String> {
+        for path in &self.paths {
+            if request_path(path).as_deref() != Some(path) || path.contains(['?', '#']) {
+                return Err(format!(
+                    "HTTP rule path {path:?} for {} must be a normalized absolute path",
+                    self.host
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    /// Whether this rule allows `method` on the decoded `path`.
+    fn allows(&self, method: &str, path: &str) -> bool {
+        let method_ok =
+            self.methods.is_empty() || self.methods.iter().any(|m| m.eq_ignore_ascii_case(method));
+        let path_ok = self.paths.is_empty()
+            || self.paths.iter().any(|prefix| {
+                path.strip_prefix(prefix.as_str()).is_some_and(|rest| {
+                    prefix.ends_with('/') || rest.is_empty() || rest.starts_with('/')
+                })
+            });
+        method_ok && path_ok
+    }
+}
+
+/// The decoded path of request target `target` (a path, or an absolute
+/// URL's path), without its query; `None` if it has none or is ambiguous:
+/// see [`HttpRule`].
+fn request_path(target: &str) -> Option<String> {
+    let path = if target.starts_with('/') {
+        target
+    } else {
+        let (_, rest) = target.split_once("://")?;
+        match rest.find(['/', '?', '#']) {
+            Some(i) if rest[i..].starts_with('/') => &rest[i..],
+            _ => "/",
+        }
+    };
+    let path = path.split(['?', '#']).next().unwrap_or_default();
+
+    let mut decoded = Vec::with_capacity(path.len());
+    let mut bytes = path.bytes();
+    while let Some(b) = bytes.next() {
+        match b {
+            b'%' => {
+                let hex = [bytes.next()?, bytes.next()?];
+                let byte = u8::from_str_radix(std::str::from_utf8(&hex).ok()?, 16).ok()?;
+                // An escaped separator would be read as a separator by some
+                // servers and not by others.
+                if matches!(byte, b'/' | b'\\') {
+                    return None;
+                }
+                decoded.push(byte);
+            }
+            b'\\' => return None,
+            _ => decoded.push(b),
+        }
+    }
+    let decoded = String::from_utf8(decoded).ok()?;
+
+    let segments: Vec<&str> = decoded.split('/').skip(1).collect();
+    for (i, segment) in segments.iter().enumerate() {
+        let name = segment.split(';').next().unwrap_or_default();
+        // An empty segment is only allowed last (a trailing `/`).
+        if (segment.is_empty() && i + 1 < segments.len()) || name == "." || name == ".." {
+            return None;
+        }
+    }
+    Some(decoded)
+}
+
+/// `host` lowercased, without a trailing dot or IPv6 brackets.
+fn normalize_host(host: &str) -> String {
+    let host = host.strip_circumfix('[', ']').unwrap_or(host);
+    host.trim_suffix('.').to_ascii_lowercase()
+}
+
 // ============================================================================
 // TCP
 // ============================================================================
@@ -699,6 +954,14 @@ struct HttpParsingState {
     buffer: Vec<u8>,
     /// How much of the current request's body is still to come.
     body: Body,
+    /// Whether a request has been framed on this connection yet.
+    started: bool,
+    /// Whether this connection's first bytes weren't HTTP, so with HTTP rules
+    /// everything on it is passed through unparsed (see
+    /// [`NetConfig::allow_http`]).
+    raw: bool,
+    /// Whether a write was refused, after which every write is.
+    failed: bool,
 }
 
 /// The body of the request currently being written.
@@ -1008,19 +1271,31 @@ impl ConnectionManager {
         handle
     }
 
-    /// Run guest-written bytes through HTTP request framing, substituting
-    /// secret placeholders in each request's headers.
+    /// Run guest-written bytes through HTTP request framing, checking each
+    /// request against the HTTP rules and substituting secret placeholders
+    /// in its headers.
     ///
     /// This is the shared logic used by both `tcp_write()` and `tls_write()`.
     /// Returns the bytes to send now: empty while a request's headers are
     /// still incomplete.
     fn process_write_data(&mut self, handle: u32, data: &[u8]) -> Result<Vec<u8>, TcpError> {
         let mut state = self.http_states.remove(&handle).unwrap_or_default();
-        let result = self.frame_requests(handle, &mut state, data);
-        // After an error the buffered bytes are dropped, not kept growing.
-        if result.is_ok() {
+        if state.failed {
             self.http_states.insert(handle, state);
+            return Err(TcpError::NotPermitted(
+                "an earlier write on this connection was refused".into(),
+            ));
         }
+        let result = self.frame_requests(handle, &mut state, data);
+        // After an error the buffered bytes are dropped, and the connection
+        // refuses further writes: its framing can't be trusted any more.
+        if result.is_err() {
+            state = HttpParsingState {
+                failed: true,
+                ..HttpParsingState::default()
+            };
+        }
+        self.http_states.insert(handle, state);
         result
     }
 
@@ -1037,14 +1312,34 @@ impl ConnectionManager {
         let mut pos = 0;
         loop {
             match &mut state.body {
+                Body::None if state.raw => {
+                    out.extend_from_slice(&input[pos..]);
+                    break;
+                }
                 Body::None => {
                     // Only the new bytes (plus 3 for a split terminator) can
                     // complete the terminator.
                     let searched = state.buffer.len().saturating_sub(3);
                     state.buffer.extend_from_slice(&input[pos..]);
-                    if !could_be_http_request(&state.buffer) {
-                        out.append(&mut state.buffer);
-                        break;
+                    let is_request = if self.config.http_rules.is_empty() {
+                        Some(could_be_http_request(&state.buffer))
+                    } else {
+                        self.classify_ruled(handle, state)?
+                    };
+                    match is_request {
+                        Some(true) => {}
+                        Some(false) => {
+                            out.append(&mut state.buffer);
+                            break;
+                        }
+                        None => {
+                            if state.buffer.len() > MAX_HEADER_LEN {
+                                return Err(TcpError::NotPermitted(format!(
+                                    "HTTP request line exceeds {MAX_HEADER_LEN} bytes"
+                                )));
+                            }
+                            break;
+                        }
                     }
                     let Some(header_end) =
                         find_header_end(&state.buffer[searched..]).map(|end| searched + end)
@@ -1061,7 +1356,7 @@ impl ConnectionManager {
                     let headers = std::mem::take(&mut state.buffer);
 
                     // Not HTTP - pass through everything
-                    if !is_http_request(&headers) {
+                    if self.config.http_rules.is_empty() && !is_http_request(&headers) {
                         out.extend_from_slice(&headers);
                         out.extend_from_slice(&input);
                         break;
@@ -1070,21 +1365,20 @@ impl ConnectionManager {
                     // Check for HTTP/2 (not supported with secrets)
                     if is_http2(&headers) {
                         return Err(TcpError::NotPermitted(
-                            "HTTP/2 with secrets not supported. Use HTTP/1.1.".into(),
+                            "HTTP/2 is not supported here. Use HTTP/1.1.".into(),
                         ));
                     }
 
-                    let substituted = self.substitute_http_headers(&headers, handle)?;
-                    // Chunked framing takes precedence over Content-Length.
-                    state.body = if is_chunked(&substituted) {
-                        Body::Chunked(Chunked::START)
+                    state.body = request_body(&headers)?;
+                    state.started = true;
+                    if !self.config.http_rules.is_empty() {
+                        self.check_http_rules(&headers, handle)?;
+                    }
+                    if self.substitutes_secrets(handle) {
+                        out.extend(self.substitute_http_headers(&headers, handle)?);
                     } else {
-                        match extract_content_length(&substituted) {
-                            Some(len) if len > 0 => Body::Length(len),
-                            _ => Body::None,
-                        }
-                    };
-                    out.extend_from_slice(&substituted);
+                        out.extend_from_slice(&headers);
+                    }
                 }
                 Body::Length(left) => {
                     if pos == input.len() {
@@ -1116,6 +1410,91 @@ impl ConnectionManager {
             }
         }
         Ok(out)
+    }
+
+    /// Whether requests on `handle` get secret placeholders substituted: only
+    /// after a TLS upgrade, unless [`NetConfig::allow_plaintext_secrets`].
+    fn substitutes_secrets(&self, handle: u32) -> bool {
+        !self.secrets.is_empty()
+            && (self.config.allow_plaintext_secrets || self.tls_connections.contains_key(&handle))
+    }
+
+    /// Whether writes on `handle` go through HTTP request framing.
+    fn frames_requests(&self, handle: u32) -> bool {
+        !self.config.http_rules.is_empty() || self.substitutes_secrets(handle)
+    }
+
+    /// With HTTP rules, whether the buffered bytes start a request (`None`
+    /// until that's known).
+    ///
+    /// Anything a server could take for a request must be framed and
+    /// checked, so other bytes are only passed through if they're a
+    /// connection's first and its host has no rules; the connection then
+    /// stays unparsed. Otherwise they're refused, as is a leading empty line
+    /// (which servers skip before a request).
+    fn classify_ruled(
+        &self,
+        handle: u32,
+        state: &mut HttpParsingState,
+    ) -> Result<Option<bool>, TcpError> {
+        let host = self
+            .connection_hosts
+            .get(&handle)
+            .ok_or(TcpError::InvalidHandle)?;
+        if state.buffer.starts_with(b"\r") || state.buffer.starts_with(b"\n") {
+            return Err(TcpError::NotPermitted(
+                "HTTP request starts with an empty line".into(),
+            ));
+        }
+        match request_start(&state.buffer) {
+            Some(false) if state.started || self.config.has_http_rules(host) => {
+                Err(TcpError::NotPermitted(format!(
+                    "only HTTP/1.1 requests may be sent on this connection to {host} \
+                     (HTTP rules are set)"
+                )))
+            }
+            Some(false) => {
+                state.raw = true;
+                Ok(Some(false))
+            }
+            // Refused now, not once the headers end: an HTTP/0.9 request
+            // has no headers.
+            Some(true) if request_line(&String::from_utf8_lossy(&state.buffer)).is_none() => Err(
+                TcpError::NotPermitted("malformed HTTP/1.x request line".into()),
+            ),
+            other => Ok(other),
+        }
+    }
+
+    /// Check the request with header block `headers` against the HTTP rules
+    /// for the connected host and every host the request names.
+    fn check_http_rules(&self, headers: &[u8], handle: u32) -> Result<(), TcpError> {
+        let host = self
+            .connection_hosts
+            .get(&handle)
+            .ok_or(TcpError::InvalidHandle)?;
+        // `request_body` has checked that the headers are UTF-8.
+        let text = String::from_utf8_lossy(headers);
+        let malformed = || TcpError::NotPermitted("malformed HTTP request line".into());
+        let (method, target) = request_line(&text).ok_or_else(malformed)?;
+        let named = request_authorities(&text).ok_or_else(malformed)?;
+        // A server could route by either of two hosts that disagree.
+        let host_headers = named.len() - usize::from(is_absolute_form(target));
+        if host_headers > 1
+            || !named
+                .windows(2)
+                .all(|w| same_host(strip_port(w[0]), strip_port(w[1])))
+        {
+            return Err(TcpError::NotPermitted(
+                "HTTP request names more than one host".into(),
+            ));
+        }
+        for host in std::iter::once(host.as_str()).chain(named.into_iter().map(strip_port)) {
+            self.config
+                .check_http_request(host, method, target)
+                .map_err(TcpError::NotPermitted)?;
+        }
+        Ok(())
     }
 
     /// Check if a host is allowed by the current policy.
@@ -1295,7 +1674,8 @@ impl ConnectionManager {
     /// If secrets are configured and [`NetConfig::allow_plaintext_secrets`] is
     /// set, this method will parse HTTP requests and substitute secret
     /// placeholders in headers before sending. Otherwise bytes are sent as
-    /// written, placeholders included.
+    /// written, placeholders included. With HTTP rules, requests are parsed
+    /// and checked either way; see [`NetConfig::allow_http`].
     pub async fn tcp_write(
         &mut self,
         handle: u32,
@@ -1307,8 +1687,8 @@ impl ConnectionManager {
         }
         self.check_write(data.len())?;
 
-        // Fast path: nothing to substitute = no parsing
-        if self.secrets.is_empty() || !self.config.allow_plaintext_secrets {
+        // Fast path: nothing to substitute or check = no parsing
+        if !self.frames_requests(handle) {
             self.tcp_write_raw(handle, data, timeout_ms).await?;
         } else {
             let bytes = self.process_write_data(handle, data)?;
@@ -1591,7 +1971,8 @@ impl ConnectionManager {
     /// Write to a TLS connection.
     ///
     /// If secrets are configured, this method will parse HTTP requests and
-    /// substitute secret placeholders in headers before sending.
+    /// substitute secret placeholders in headers before sending. With HTTP
+    /// rules, requests are parsed and checked; see [`NetConfig::allow_http`].
     pub async fn tls_write(
         &mut self,
         handle: u32,
@@ -1603,8 +1984,8 @@ impl ConnectionManager {
         }
         self.check_write(data.len()).map_err(TlsError::Tcp)?;
 
-        // Fast path: no secrets = no parsing
-        if self.secrets.is_empty() {
+        // Fast path: nothing to substitute or check = no parsing
+        if !self.frames_requests(handle) {
             self.tls_write_raw(handle, data, timeout_ms).await?;
         } else {
             let bytes = self.process_write_data(handle, data)?;
@@ -1703,6 +2084,44 @@ const HTTP_METHODS: [&[u8]; 9] = [
     b"TRACE ",
 ];
 
+/// Whether `data` may start an HTTP request, by the shape of its first
+/// line: a method token, then whitespace and a target that starts with `/`
+/// or `*` or contains `://`, or `HTTP/` (ignoring case) anywhere on the
+/// line. `None` until its first line is complete or it can no longer be one.
+///
+/// Loose on purpose: anything a lenient server might take for a request
+/// (HTTP/0.9 included) is framed, and `request_line` then refuses the
+/// malformed ones.
+fn request_start(data: &[u8]) -> Option<bool> {
+    let is_tchar = |b: &u8| b.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(b);
+    let method_len = data.iter().take_while(|b| is_tchar(b)).count();
+    match data.get(method_len) {
+        None => return None,
+        Some(_) if method_len > 0 => {}
+        Some(_) => return Some(false),
+    }
+    let line_end = data.iter().position(|&b| b == b'\n')?;
+    let line = &data[..line_end];
+    if line.windows(5).any(|w| w.eq_ignore_ascii_case(b"HTTP/")) {
+        return Some(true);
+    }
+    let is_space = |b: &u8| matches!(b, b' ' | b'\t');
+    let rest = &line[method_len..];
+    if !rest.first().is_some_and(is_space) {
+        return Some(false);
+    }
+    let rest = &rest[rest.iter().take_while(|b| is_space(b)).count()..];
+    let target = &rest[..rest
+        .iter()
+        .position(|b| is_space(b) || *b == b'\r')
+        .unwrap_or(rest.len())];
+    Some(
+        target.starts_with(b"/")
+            || target.starts_with(b"*")
+            || target.windows(3).any(|w| w == b"://"),
+    )
+}
+
 /// Check if data starts with an HTTP request method.
 fn is_http_request(data: &[u8]) -> bool {
     HTTP_METHODS.iter().any(|m| data.starts_with(m))
@@ -1723,19 +2142,13 @@ fn could_be_http_request(data: &[u8]) -> bool {
 /// the target contains whitespace or `\`, or an absolute-form target has an
 /// empty authority or userinfo.
 fn request_authorities(headers: &str) -> Option<Vec<&str>> {
-    let mut lines = headers.lines();
-    let mut parts = lines.next()?.split(' ');
-    let (method, target, version) = (parts.next()?, parts.next()?, parts.next()?);
-    if parts.next().is_some()
-        || method.is_empty()
-        || version.is_empty()
-        || target.is_empty()
-        || target.contains(|c: char| c.is_whitespace() || c == '\\')
-    {
-        return None;
-    }
+    let (_, target) = request_line(headers)?;
+    let lines = headers.lines().skip(1);
     let mut hosts = Vec::new();
-    if let Some((_, rest)) = target.split_once("://") {
+    if let Some((_, rest)) = is_absolute_form(target)
+        .then(|| target.split_once("://"))
+        .flatten()
+    {
         let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
         if authority.is_empty() || authority.contains('@') {
             return None;
@@ -1749,6 +2162,29 @@ fn request_authorities(headers: &str) -> Option<Vec<&str>> {
             .then(|| value.trim())
     }));
     Some(hosts)
+}
+
+/// Whether request target `target` is absolute-form (`scheme://host/...`),
+/// rather than a path that may contain `://` in its query.
+fn is_absolute_form(target: &str) -> bool {
+    !target.starts_with('/') && target.contains("://")
+}
+
+/// The method and target of a request whose request line is exactly
+/// `METHOD SP target SP HTTP/1.x`, and whose target contains no whitespace or
+/// `\`.
+fn request_line(headers: &str) -> Option<(&str, &str)> {
+    let mut parts = headers.lines().next()?.split(' ');
+    let (method, target, version) = (parts.next()?, parts.next()?, parts.next()?);
+    if parts.next().is_some()
+        || method.is_empty()
+        || !matches!(version, "HTTP/1.0" | "HTTP/1.1")
+        || target.is_empty()
+        || target.contains(|c: char| c.is_whitespace() || c == '\\')
+    {
+        return None;
+    }
+    Some((method, target))
 }
 
 /// `authority` without a trailing `:port`.
@@ -1766,11 +2202,7 @@ fn strip_port(authority: &str) -> &str {
 /// Whether two host names refer to the same host: ASCII case, a trailing dot
 /// and IPv6 brackets are ignored.
 fn same_host(a: &str, b: &str) -> bool {
-    let norm = |h: &str| {
-        let h = h.strip_circumfix('[', ']').unwrap_or(h);
-        h.trim_suffix('.').to_ascii_lowercase()
-    };
-    !a.is_empty() && norm(a) == norm(b)
+    !a.is_empty() && normalize_host(a) == normalize_host(b)
 }
 
 /// Check if data is an HTTP/2 connection preface.
@@ -1778,26 +2210,56 @@ fn is_http2(data: &[u8]) -> bool {
     data.starts_with(b"PRI * HTTP/2")
 }
 
-/// Extract Content-Length header value from HTTP headers.
-fn extract_content_length(headers: &[u8]) -> Option<usize> {
-    let text = String::from_utf8_lossy(headers);
-    for line in text.lines() {
-        if line.to_ascii_lowercase().starts_with("content-length:")
-            && let Some(value) = line.split(':').nth(1)
-        {
-            return value.trim().parse().ok();
+/// How the body of the request with header block `headers` (ending in a
+/// blank line) is framed.
+///
+/// Framing a server could read differently from this is refused, so that
+/// every request it sees is one the host checked: a CR or LF outside a
+/// CRLF, a folded or malformed header line, a `Transfer-Encoding` other
+/// than `chunked`, both that and `Content-Length`, or more than one length.
+fn request_body(headers: &[u8]) -> Result<Body, TcpError> {
+    let ambiguous = |what: &str| TcpError::NotPermitted(format!("ambiguous HTTP request: {what}"));
+    let text = std::str::from_utf8(headers).map_err(|_| ambiguous("headers are not UTF-8"))?;
+    let lines = text
+        .strip_suffix("\r\n\r\n")
+        .ok_or_else(|| ambiguous("unterminated headers"))?
+        .split("\r\n");
+    let (mut length, mut chunked) = (None, false);
+    for (i, line) in lines.enumerate() {
+        if line.contains(['\r', '\n']) {
+            return Err(ambiguous("bare CR or LF"));
+        }
+        if i == 0 {
+            continue; // The request line.
+        }
+        let (name, value) = line
+            .split_once(':')
+            .filter(|(name, _)| {
+                !name.is_empty() && !name.contains(|c: char| c.is_ascii_whitespace())
+            })
+            .ok_or_else(|| ambiguous("malformed header line"))?;
+        let value = value.trim_matches([' ', '\t']);
+        if name.eq_ignore_ascii_case("transfer-encoding") {
+            if chunked || !value.eq_ignore_ascii_case("chunked") {
+                return Err(ambiguous("unsupported Transfer-Encoding"));
+            }
+            chunked = true;
+        } else if name.eq_ignore_ascii_case("content-length") {
+            let len = (!value.is_empty() && value.bytes().all(|b| b.is_ascii_digit()))
+                .then(|| value.parse::<usize>().ok())
+                .flatten()
+                .ok_or_else(|| ambiguous("invalid Content-Length"))?;
+            if length.replace(len).is_some() {
+                return Err(ambiguous("more than one Content-Length"));
+            }
         }
     }
-    None
-}
-
-/// Check if Transfer-Encoding is chunked.
-fn is_chunked(headers: &[u8]) -> bool {
-    let text = String::from_utf8_lossy(headers);
-    text.lines().any(|line| {
-        line.to_ascii_lowercase().contains("transfer-encoding")
-            && line.to_ascii_lowercase().contains("chunked")
-    })
+    match (chunked, length) {
+        (true, Some(_)) => Err(ambiguous("both Transfer-Encoding and Content-Length")),
+        (true, None) => Ok(Body::Chunked(Chunked::START)),
+        (false, Some(len)) if len > 0 => Ok(Body::Length(len)),
+        _ => Ok(Body::None),
+    }
 }
 
 /// The IPv4 address an IPv6 address stands for on the wire, if any:
@@ -2098,28 +2560,37 @@ mod tests {
         assert!(!is_http2(b""));
     }
 
+    /// Body framing is read from `Content-Length` or chunked encoding, and
+    /// anything a server could read differently is refused.
     #[test]
-    fn test_extract_content_length() {
-        let headers = b"POST / HTTP/1.1\r\nContent-Length: 42\r\n\r\n";
-        assert_eq!(extract_content_length(headers), Some(42));
-
-        let headers_upper = b"POST / HTTP/1.1\r\nCONTENT-LENGTH: 100\r\n\r\n";
-        assert_eq!(extract_content_length(headers_upper), Some(100));
-
-        let no_cl = b"GET / HTTP/1.1\r\nHost: example.com\r\n\r\n";
-        assert_eq!(extract_content_length(no_cl), None);
-    }
-
-    #[test]
-    fn test_is_chunked() {
-        let chunked = b"POST / HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n";
-        assert!(is_chunked(chunked));
-
-        let chunked_upper = b"POST / HTTP/1.1\r\nTRANSFER-ENCODING: CHUNKED\r\n\r\n";
-        assert!(is_chunked(chunked_upper));
-
-        let not_chunked = b"GET / HTTP/1.1\r\nContent-Length: 0\r\n\r\n";
-        assert!(!is_chunked(not_chunked));
+    fn request_body_framing() {
+        let body = |headers: &str| request_body(headers.as_bytes());
+        assert!(matches!(
+            body("POST / HTTP/1.1\r\nCONTENT-LENGTH: 42\r\n\r\n"),
+            Ok(Body::Length(42))
+        ));
+        assert!(matches!(
+            body("POST / HTTP/1.1\r\nTransfer-Encoding: Chunked\r\n\r\n"),
+            Ok(Body::Chunked(_))
+        ));
+        assert!(matches!(
+            body("GET / HTTP/1.1\r\nX-Transfer-Encoding: chunked\r\nContent-Length: 0\r\n\r\n"),
+            Ok(Body::None)
+        ));
+        for headers in [
+            "POST / HTTP/1.1\r\nTransfer-Encoding: chunked\r\nContent-Length: 5\r\n\r\n",
+            "POST / HTTP/1.1\r\nTransfer-Encoding: gzip, chunked\r\n\r\n",
+            "POST / HTTP/1.1\r\nTransfer-Encoding: chunked\r\nTransfer-Encoding: chunked\r\n\r\n",
+            "POST / HTTP/1.1\r\nContent-Length: 5\r\nContent-Length: 6\r\n\r\n",
+            "POST / HTTP/1.1\r\nContent-Length: +5\r\n\r\n",
+            "POST / HTTP/1.1\r\nContent-Length : 5\r\n\r\n",
+            "POST / HTTP/1.1\r\nX-A: b\r\n Content-Length: 5\r\n\r\n",
+            "GET /a HTTP/1.1\nHost: x\n\nGET /b HTTP/1.1\r\n\r\n",
+            "GET /a HTTP/1.1\r\nX-A: b\rc\r\n\r\n",
+            "GET /a HTTP/1.1\r\nno colon\r\n\r\n",
+        ] {
+            assert!(body(headers).is_err(), "{headers:?}");
+        }
     }
 
     #[test]
@@ -3237,6 +3708,270 @@ mod tests {
             &[b"GET / HTTP/1.1\r\nHost: other.example.com\r\n\r\n"],
         );
         assert!(plain.starts_with("GET / HTTP/1.1"), "{plain}");
+    }
+
+    fn github_rules() -> NetConfig {
+        NetConfig::permissive().allow_http(
+            HttpRule::new("api.github.com")
+                .with_methods(["get", "POST"])
+                .with_paths(["/repos/org/repo", "/user/"]),
+        )
+    }
+
+    /// Paths match on segment boundaries after decoding, and anything a
+    /// server could resolve elsewhere is refused.
+    #[test]
+    fn http_rules_match_methods_and_paths() {
+        let config = github_rules();
+        let check = |method, target| config.check_http_request("api.github.com", method, target);
+        for target in [
+            "/repos/org/repo",
+            "/repos/org/repo/",
+            "/repos/org/repo/issues?state=open",
+            "/repos/org/%72epo/pulls",
+            "/user/keys",
+            "https://api.github.com/repos/org/repo#x",
+        ] {
+            assert!(check("GET", target).is_ok(), "{target}");
+        }
+        for target in [
+            "/repos/org/repo-evil",
+            "/repos/org",
+            "/user",
+            "/repos/org/repo/../../other",
+            "/repos/org/repo/%2e%2E/x",
+            "/repos/org/repo/..;/x",
+            "/repos/org/repo/./x",
+            "/repos/org/repo//x",
+            "//repos/org/repo",
+            "/repos/org/repo%2fx",
+            "/repos/org/repo%5Cx",
+            "/repos/org/repo\\x",
+            "/repos/org/repo/%zz",
+            "/repos/org/repo/%2",
+            "/repos/org/repo/%e2",
+            "*",
+            "api.github.com:443",
+            "https://api.github.com",
+        ] {
+            assert!(check("GET", target).is_err(), "{target}");
+        }
+        assert!(check("post", "/repos/org/repo").is_ok());
+        assert!(check("DELETE", "/repos/org/repo").is_err());
+        // Other hosts are unaffected; host names are normalized.
+        assert!(
+            config
+                .check_http_request("example.com", "DELETE", "/x")
+                .is_ok()
+        );
+        assert!(
+            config
+                .check_http_request("API.GitHub.com.", "DELETE", "/x")
+                .is_err()
+        );
+    }
+
+    /// Each rule shape allows what it describes and nothing else, and host
+    /// names are compared normalized.
+    #[test]
+    fn http_rule_shapes() {
+        let check = |rule: HttpRule, host, method, target| {
+            NetConfig::permissive()
+                .allow_http(rule)
+                .check_http_request(host, method, target)
+                .is_ok()
+        };
+        let h = "api.example.com";
+        // Any method and path: only the host is restricted.
+        assert!(check(HttpRule::new(h), h, "DELETE", "/x"));
+        assert!(!check(HttpRule::new(h), h, "DELETE", "/../x"));
+        // Methods only.
+        let methods = || HttpRule::new(h).with_methods(["GET"]);
+        assert!(check(methods(), h, "GET", "/anything"));
+        assert!(!check(methods(), h, "PUT", "/anything"));
+        // Paths only.
+        let paths = || HttpRule::new(h).with_paths(["/v1"]);
+        assert!(check(paths(), h, "PUT", "/v1/x"));
+        assert!(!check(paths(), h, "PUT", "/v10"));
+        // Both.
+        let both = || HttpRule::new(h).with_methods(["GET"]).with_paths(["/v1"]);
+        assert!(check(both(), h, "GET", "/v1"));
+        assert!(!check(both(), h, "POST", "/v1"));
+        assert!(!check(both(), h, "GET", "/v2"));
+        // A trailing `/` matches below it but not the bare path.
+        let dir = || HttpRule::new(h).with_paths(["/v1/"]);
+        assert!(check(dir(), h, "GET", "/v1/x"));
+        assert!(!check(dir(), h, "GET", "/v1"));
+        // The root matches every path.
+        assert!(check(HttpRule::new(h).with_paths(["/"]), h, "GET", "/a/b"));
+        // Wildcard hosts.
+        let wild = || HttpRule::new("*.example.com").with_paths(["/v1"]);
+        assert!(!check(wild(), "API.Example.com.", "GET", "/v2"));
+        assert!(check(wild(), "api.example.com", "GET", "/v1/x"));
+        assert!(check(wild(), "example.org", "GET", "/v2"));
+        // IPv6 literals match with or without brackets.
+        for (pattern, host) in [("[::1]", "::1"), ("::1", "[::1]")] {
+            assert!(!check(
+                HttpRule::new(pattern).with_paths(["/v1"]),
+                host,
+                "GET",
+                "/v2"
+            ));
+        }
+    }
+
+    /// With rules, every request a server could see on a framed connection
+    /// is parsed and checked, whatever its method, and a refusal sticks.
+    #[test]
+    fn http_rules_see_every_request() {
+        let new = || {
+            let mut m = ConnectionManager::new(github_rules(), HashMap::new());
+            m.connection_hosts.insert(1, "api.github.com".into());
+            m.connection_hosts.insert(2, "www.github.com".into());
+            m
+        };
+        for writes in [
+            // A leading empty line, which servers skip.
+            &[&b"\r\nDELETE /other HTTP/1.1\r\nHost: api.github.com\r\n\r\n"[..]][..],
+            &[b"\nGET /other HTTP/1.1\r\nHost: api.github.com\r\n\r\n"],
+            // A second request after an empty line, in the same write.
+            &[b"GET /ok HTTP/1.1\r\nHost: www.github.com\r\n\r\n\r\nDELETE /other HTTP/1.1\r\nHost: api.github.com\r\n\r\n"],
+            // Methods outside the common ones.
+            &[b"PROPFIND /other HTTP/1.1\r\nHost: api.github.com\r\n\r\n"],
+            &[b"PURGE /other HTTP/1.1\r\nHost: api.github.com\r\n\r\n"],
+            &[b"X-CUSTOM", b" /other HTTP/1.1\r\nHost: api.github.com\r\n\r\n"],
+            // Almost-valid request lines that lenient servers accept.
+            &[b"DELETE /other HTTP/1.1 \r\nHost: api.github.com\r\n\r\n"],
+            &[b"DELETE\t/other HTTP/1.1\r\nHost: api.github.com\r\n\r\n"],
+            &[b"DELETE /other http/1.1\r\nHost: api.github.com\r\n\r\n"],
+            // HTTP/0.9, which servers route by an absolute URL's host (or to
+            // the default site, which may be the ruled host).
+            &[b"GET http://api.github.com/other\r\n"],
+            &[b"GET HTTP://api.github.com/other\r\n"],
+            &[b"GET /admin\r\n"],
+            &[b"GET\t/admin\r\n"],
+            &[b"OPTIONS *\r\n"],
+            // Non-HTTP bytes once a request has been framed.
+            &[b"GET /ok HTTP/1.1\r\nHost: www.github.com\r\n\r\n", b"\x16\x03\x01"],
+        ] {
+            let mut m = new();
+            let result: Result<Vec<_>, _> =
+                writes.iter().map(|w| m.process_write_data(2, w)).collect();
+            assert!(result.is_err(), "{writes:?}");
+        }
+
+        // A refused write fails every later write on the connection.
+        let mut m = new();
+        assert!(
+            m.process_write_data(1, b"DELETE /x HTTP/1.1\r\n\r\n")
+                .is_err()
+        );
+        assert!(
+            m.process_write_data(1, b"GET /repos/org/repo HTTP/1.1\r\n\r\n")
+                .is_err()
+        );
+
+        // A connection whose first bytes aren't HTTP to a host without rules
+        // stays unparsed (the documented limitation).
+        let mut m = new();
+        assert_eq!(
+            m.process_write_data(2, b"\x16\x03\x01").unwrap(),
+            b"\x16\x03\x01"
+        );
+        let later = b"DELETE /other HTTP/1.1\r\nHost: api.github.com\r\n\r\n";
+        assert_eq!(m.process_write_data(2, later).unwrap(), later);
+        // Text that isn't shaped like a request line counts as not HTTP too.
+        for raw in [&b"SET k v\r\n"[..], b"GET key\r\n", b"PING\r\n"] {
+            let mut m = new();
+            assert_eq!(m.process_write_data(2, raw).unwrap(), raw);
+        }
+
+        // `://` in an origin-form target's query doesn't name a host.
+        let mut m = new();
+        for (handle, request) in [
+            (
+                2,
+                &b"GET /login?next=https://example.com/ HTTP/1.1\r\nHost: www.github.com\r\n\r\n"[..],
+            ),
+            (
+                1,
+                b"GET /repos/org/repo?u=https://evil.com/ HTTP/1.1\r\nHost: api.github.com\r\n\r\n",
+            ),
+        ] {
+            assert_eq!(m.process_write_data(handle, request).unwrap(), request);
+        }
+
+        // A rule can allow any method token.
+        let config = NetConfig::permissive()
+            .allow_http(HttpRule::new("dav.example.com").with_methods(["PROPFIND"]));
+        let mut m = ConnectionManager::new(config, HashMap::new());
+        m.connection_hosts.insert(1, "dav.example.com".into());
+        let propfind = b"PROPFIND /files HTTP/1.1\r\nHost: dav.example.com\r\n\r\n";
+        assert_eq!(m.process_write_data(1, propfind).unwrap(), propfind);
+        assert!(
+            m.process_write_data(1, b"MKCOL /files HTTP/1.1\r\nHost: dav.example.com\r\n\r\n")
+                .is_err()
+        );
+    }
+
+    /// A rule's paths must be ones a request can match.
+    #[test]
+    fn http_rule_paths_are_validated() {
+        assert!(github_rules().validate().is_ok());
+        for path in ["repos", "/a/../b", "/a//b", "/a?x", "/a%2fb", "/a%20b"] {
+            let config = NetConfig::default().allow_http(HttpRule::new("h").with_paths([path]));
+            assert!(config.validate().is_err(), "{path}");
+        }
+    }
+
+    /// Requests are checked against the connected host and every host they
+    /// name, and a refused request (or non-HTTP bytes to a ruled host) is
+    /// never sent.
+    #[test]
+    fn http_rules_are_enforced_on_requests() {
+        let mut m = ConnectionManager::new(github_rules(), HashMap::new());
+        m.connection_hosts.insert(1, "api.github.com".into());
+        m.connection_hosts.insert(2, "www.github.com".into());
+
+        let ok = b"GET /repos/org/repo HTTP/1.1\r\nHost: api.github.com\r\n\r\n";
+        assert_eq!(frame(&mut m, &[ok]), String::from_utf8_lossy(ok));
+        for (handle, request) in [
+            (1, &b"DELETE /repos/org/repo HTTP/1.1\r\nHost: api.github.com\r\n\r\n"[..]),
+            (1, b"GET /other HTTP/1.1\r\nHost: api.github.com\r\n\r\n"),
+            // Another host on the same server, naming the ruled one.
+            (2, b"GET /other HTTP/1.1\r\nHost: api.github.com\r\n\r\n"),
+            (2, b"GET https://api.github.com/other HTTP/1.1\r\nHost: www.github.com\r\n\r\n"),
+            // A second request hidden in the first's body by a wrong length.
+            (1, b"POST /repos/org/repo HTTP/1.1\r\nContent-Length: 1\r\nTransfer-Encoding: chunked\r\n\r\n"),
+            (1, b"\x16\x03\x01\x00"),
+            (1, b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n"),
+        ] {
+            assert!(m.process_write_data(handle, request).is_err(), "{request:?}");
+            m.http_states.clear();
+        }
+        // Hosts named by a request are compared ignoring case, port, a
+        // trailing dot and brackets, and must agree.
+        for (handle, request) in [
+            (2, &b"GET /other HTTP/1.1\r\nHost: API.GitHub.com.:443\r\n\r\n"[..]),
+            (1, b"GET /repos/org/repo HTTP/1.1\r\nHost: api.github.com\r\nHost: api.github.com\r\n\r\n"),
+            (2, b"GET https://www.github.com/ HTTP/1.1\r\nHost: other.github.com\r\n\r\n"),
+        ] {
+            assert!(m.process_write_data(handle, request).is_err(), "{request:?}");
+            m.http_states.clear();
+        }
+        let absolute = b"GET https://api.github.com:443/repos/org/repo HTTP/1.1\r\nHost: API.github.com\r\n\r\n";
+        assert!(m.process_write_data(1, absolute).is_ok());
+        m.http_states.clear();
+
+        // A pipelined request is checked too, and nothing is sent.
+        let pipelined = b"POST /repos/org/repo HTTP/1.1\r\nContent-Length: 2\r\n\r\nhiDELETE /repos/org/repo HTTP/1.1\r\n\r\n";
+        assert!(m.process_write_data(1, pipelined).is_err());
+        m.http_states.clear();
+        // Non-HTTP bytes still go through to hosts without rules.
+        assert_eq!(
+            m.process_write_data(2, b"\x16\x03\x01").unwrap(),
+            b"\x16\x03\x01"
+        );
     }
 
     /// Headers are buffered only up to a cap, and bytes that can't start a

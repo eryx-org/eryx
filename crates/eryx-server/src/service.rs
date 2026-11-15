@@ -10,9 +10,9 @@ use eryx::CancellationToken;
 use eryx::callback_handler::{run_callback_handler, run_net_handler};
 use eryx::vfs::{ArcStorage, InMemoryStorage, VfsStorage};
 use eryx::{
-    Callback, CallbackJournal, CallbackRequest, ConnectionManager, Error, ErrorKind, NetConfig,
-    NetRequest, OutputRequest, PythonStateSnapshot, ReplayState, ResourceLimits, SandboxPool,
-    SecretConfig, SessionExecutor, TraceRequest, VfsConfig, scrub_placeholders,
+    Callback, CallbackJournal, CallbackRequest, ConnectionManager, Error, ErrorKind, HttpRule,
+    NetConfig, NetRequest, OutputRequest, PythonStateSnapshot, ReplayState, ResourceLimits,
+    SandboxPool, SecretConfig, SessionExecutor, TraceRequest, VfsConfig, scrub_placeholders,
     scrub_placeholders_bytes,
 };
 use futures::FutureExt;
@@ -346,6 +346,11 @@ impl crate::proto::eryx::v1::eryx_server::Eryx for EryxService {
                         &nc.allowed_networks,
                     )?)
                     .with_internal_hosts(nc.internal_hosts)
+                    .with_http_rules(nc.http_rules.into_iter().map(|r| {
+                        HttpRule::new(r.host)
+                            .with_methods(r.methods)
+                            .with_paths(r.paths)
+                    }))
                     .allow_plaintext_secrets(nc.allow_plaintext_secrets);
                 if !nc.blocked_hosts.is_empty() {
                     config = config.with_blocked_hosts(nc.blocked_hosts);
@@ -356,6 +361,9 @@ impl crate::proto::eryx::v1::eryx_server::Eryx for EryxService {
                         &nc.blocked_networks,
                     )?);
                 }
+                config
+                    .validate()
+                    .map_err(|e| Status::invalid_argument(format!("network_config: {e}")))?;
                 Ok(config)
             })
             .transpose()?;
