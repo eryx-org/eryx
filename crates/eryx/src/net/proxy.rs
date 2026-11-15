@@ -92,10 +92,12 @@ impl ChildProxy {
     /// proxy must not outlive that: start one per execution (or per a
     /// similarly bounded lifetime).
     ///
+    /// Must be called within a Tokio runtime, which runs the proxy.
+    ///
     /// # Errors
     ///
     /// Fails if the CA can't be generated or the listener can't be bound.
-    pub async fn start(
+    pub fn start(
         config: NetConfig,
         secrets: HashMap<String, SecretConfig>,
         network: ChildNetwork,
@@ -108,7 +110,9 @@ impl ChildProxy {
             ChildNetwork::Narrow(config) => Arc::new(sandbox.narrowed(*config)),
         };
         let ca = Ca::new().map_err(std::io::Error::other)?;
-        let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).await?;
+        let listener = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))?;
+        listener.set_nonblocking(true)?;
+        let listener = TcpListener::from_std(listener)?;
         let addr = listener.local_addr()?;
         let ca_pem = ca.pem.clone();
         #[cfg(test)]
@@ -665,9 +669,8 @@ mod tests {
         HashMap::from([("KEY".to_string(), secret)])
     }
 
-    async fn proxy(config: NetConfig, network: ChildNetwork, tunnels: bool) -> ChildProxy {
+    fn proxy(config: NetConfig, network: ChildNetwork, tunnels: bool) -> ChildProxy {
         ChildProxy::start(config, secrets(), network, tunnels)
-            .await
             .unwrap()
             .unwrap()
     }
@@ -720,7 +723,7 @@ mod tests {
     #[tokio::test]
     async fn https_requests_get_secrets_substituted_and_scrubbed() {
         let (port, cert, seen) = upstream(true).await;
-        let proxy = proxy(config(&cert), ChildNetwork::Inherit, false).await;
+        let proxy = proxy(config(&cert), ChildNetwork::Inherit, false);
         let (stream, status) = connect_to(&proxy, &format!("api.test:{port}")).await;
         assert!(status.contains(" 200 "), "{status}");
         let mut tls = tls(&proxy, stream, "api.test").await;
@@ -746,14 +749,14 @@ mod tests {
     #[tokio::test]
     async fn refused_hosts_get_a_403() {
         let (port, cert, _) = upstream(true).await;
-        let proxy = proxy(config(&cert), ChildNetwork::Inherit, false).await;
+        let proxy = proxy(config(&cert), ChildNetwork::Inherit, false);
         let (_, status) = connect_to(&proxy, &format!("evil.test:{port}")).await;
         assert!(status.contains(" 403 "), "{status}");
 
         // Allowed by name, but resolving to a blocked network.
         let mut blocked = config(&cert);
         blocked = blocked.with_internal_hosts(Vec::<String>::new());
-        let proxy = super::tests::proxy(blocked, ChildNetwork::Inherit, false).await;
+        let proxy = super::tests::proxy(blocked, ChildNetwork::Inherit, false);
         let (_, status) = connect_to(&proxy, &format!("api.test:{port}")).await;
         assert!(status.contains(" 403 "), "{status}");
     }
@@ -762,7 +765,7 @@ mod tests {
     #[tokio::test]
     async fn only_http_requests_for_the_connect_host_go_through() {
         let (port, cert, seen) = upstream(true).await;
-        let proxy = proxy(config(&cert), ChildNetwork::Inherit, false).await;
+        let proxy = proxy(config(&cert), ChildNetwork::Inherit, false);
         for request in [
             &b"\x00\x01 not http\r\n\r\n"[..],
             b"GET / HTTP/1.1\r\nHost: other.test\r\nConnection: close\r\n\r\n",
@@ -784,7 +787,7 @@ mod tests {
     #[tokio::test]
     async fn tunnels_are_blind_and_opt_in() {
         let (port, cert, seen) = upstream(false).await;
-        let proxy = proxy(config(&cert), ChildNetwork::Inherit, true).await;
+        let proxy = proxy(config(&cert), ChildNetwork::Inherit, true);
         let (mut stream, status) = connect_to(&proxy, &format!("api.test:{port}")).await;
         assert!(status.contains(" 200 "), "{status}");
         let request = format!("GET / HTTP/1.1\r\nHost: api.test\r\nAuthorization: {PH}\r\n\r\n");
@@ -797,7 +800,7 @@ mod tests {
 
         // A host with HTTP rules can't be tunnelled: the rules couldn't apply.
         let ruled = config(&cert).allow_http(crate::net::HttpRule::new("api.test"));
-        let proxy = super::tests::proxy(ruled, ChildNetwork::Inherit, true).await;
+        let proxy = super::tests::proxy(ruled, ChildNetwork::Inherit, true);
         let (_, status) = connect_to(&proxy, &format!("api.test:{port}")).await;
         assert!(status.contains(" 403 "), "{status}");
     }
@@ -807,7 +810,7 @@ mod tests {
     #[tokio::test]
     async fn plain_http_requests_are_proxied() {
         let (port, cert, seen) = upstream(false).await;
-        let proxy = proxy(config(&cert), ChildNetwork::Inherit, false).await;
+        let proxy = proxy(config(&cert), ChildNetwork::Inherit, false);
         let mut stream = TcpStream::connect(proxy.addr()).await.unwrap();
         let request = format!(
             "GET http://api.test:{port}/ HTTP/1.1\r\nHost: api.test:{port}\r\nAuthorization: {PH}\r\nConnection: close\r\n\r\n"
@@ -825,7 +828,7 @@ mod tests {
             .allow_host("other.test")
             .allow_host("evil.test")
             .allow_internal_host("*.test");
-        let proxy = proxy(config(&cert), ChildNetwork::Narrow(Box::new(narrow)), false).await;
+        let proxy = proxy(config(&cert), ChildNetwork::Narrow(Box::new(narrow)), false);
         for (host, ok) in [
             ("other.test", true),
             ("api.test", false),
@@ -836,7 +839,6 @@ mod tests {
         }
         assert!(
             ChildProxy::start(config(&cert), secrets(), ChildNetwork::None, false)
-                .await
                 .unwrap()
                 .is_none()
         );
@@ -845,7 +847,7 @@ mod tests {
     /// Only the CA's certificate is handed out, never its key.
     #[tokio::test]
     async fn only_the_ca_certificate_reaches_the_child() {
-        let proxy = proxy(config(&[]), ChildNetwork::Inherit, false).await;
+        let proxy = proxy(config(&[]), ChildNetwork::Inherit, false);
         let pem = proxy.ca_pem();
         assert_eq!(
             pem.matches("-----BEGIN CERTIFICATE-----").count(),
@@ -859,7 +861,7 @@ mod tests {
     /// placeholder in what it does repeat is redacted.
     #[tokio::test]
     async fn refusals_never_echo_headers_or_secrets() {
-        let proxy = proxy(config(&[]), ChildNetwork::Inherit, false).await;
+        let proxy = proxy(config(&[]), ChildNetwork::Inherit, false);
         let mut stream = TcpStream::connect(proxy.addr()).await.unwrap();
         let request = format!(
             "CONNECT {PH}:443 HTTP/1.1\r\nHost: {PH}:443\r\nProxy-Authorization: Basic c2VjcmV0\r\n\r\n"
@@ -881,7 +883,7 @@ mod tests {
         // refused, as the sandbox's own policy blocks it.
         let sandbox = config(&cert).with_internal_hosts(Vec::<String>::new());
         let narrow = NetConfig::permissive().allow_internal_host("*.test");
-        let proxy = proxy(sandbox, ChildNetwork::Narrow(Box::new(narrow)), false).await;
+        let proxy = proxy(sandbox, ChildNetwork::Narrow(Box::new(narrow)), false);
         let (_, status) = connect_to(&proxy, &format!("other.test:{port}")).await;
         assert!(status.contains(" 403 "), "{status}");
 
@@ -889,7 +891,7 @@ mod tests {
         // allow, it's refused rather than substituted.
         let narrow = NetConfig::permissive().allow_internal_host("*.test");
         let proxy =
-            super::tests::proxy(config(&cert), ChildNetwork::Narrow(Box::new(narrow)), false).await;
+            super::tests::proxy(config(&cert), ChildNetwork::Narrow(Box::new(narrow)), false);
         let (stream, status) = connect_to(&proxy, &format!("other.test:{port}")).await;
         assert!(status.contains(" 200 "), "{status}");
         let mut tls = tls(&proxy, stream, "other.test").await;
@@ -907,7 +909,7 @@ mod tests {
     async fn permissive_narrow_keeps_the_sandbox_hosts() {
         let (port, cert, _) = upstream(true).await;
         let narrow = NetConfig::permissive().allow_internal_host("*.test");
-        let proxy = proxy(config(&cert), ChildNetwork::Narrow(Box::new(narrow)), false).await;
+        let proxy = proxy(config(&cert), ChildNetwork::Narrow(Box::new(narrow)), false);
         let (_, status) = connect_to(&proxy, &format!("evil.test:{port}")).await;
         assert!(status.contains(" 403 "), "{status}");
     }
@@ -947,8 +949,7 @@ mod tests {
             config(&cert).with_max_connections(1),
             ChildNetwork::Narrow(Box::new(narrow)),
             false,
-        )
-        .await;
+        );
         // Reaches the upstream through the sandbox's resolver.
         let (held, status) = connect_to(&proxy, &format!("api.test:{port}")).await;
         assert!(status.contains(" 200 "), "{status}");
@@ -966,8 +967,7 @@ mod tests {
             config(&cert).with_io_timeout(Duration::from_millis(200)),
             ChildNetwork::Inherit,
             true,
-        )
-        .await;
+        );
         let (mut stream, status) = connect_to(&proxy, &format!("api.test:{port}")).await;
         assert!(status.contains(" 200 "), "{status}");
         let mut buf = [0u8; 16];

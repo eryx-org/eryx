@@ -12,7 +12,10 @@
 //! - `burn PATH N`: N rounds of busy work, writing the rounds done to PATH
 //!   after each (`busy N`: the same, with no calls at all);
 //! - `alloc MIB`: hold MIB MiB of memory while copying stdin to stdout, or
-//!   print `error: OutOfMemory` to stderr and exit 1.
+//!   print `error: OutOfMemory` to stderr and exit 1;
+//! - `connect ADDR`: open a TCP connection to `ADDR` and print `connected`;
+//! - `proxy-get URL`: `GET URL` through `$HTTP_PROXY`, with
+//!   `Authorization: Bearer $TOKEN`, printing the response.
 //!
 //! A failure prints `error: <io::ErrorKind>` and exits 1.
 
@@ -74,6 +77,10 @@ fn main() {
             std::hint::black_box(&held);
             copied.map(|_| String::new())
         }
+        ["connect", addr] => {
+            std::net::TcpStream::connect(addr).map(|_| "connected\n".to_string())
+        }
+        ["proxy-get", url] => proxy_get(url),
         ["spin"] => loop {
             std::hint::spin_loop();
         },
@@ -96,4 +103,24 @@ fn main() {
             std::process::exit(1);
         }
     }
+}
+
+/// `GET url` through the plain-HTTP proxy in `$HTTP_PROXY`.
+fn proxy_get(url: &str) -> std::io::Result<String> {
+    let proxy = std::env::var("HTTP_PROXY").unwrap_or_default();
+    let proxy = proxy.trim_start_matches("http://").trim_end_matches('/');
+    let host = url
+        .trim_start_matches("http://")
+        .split('/')
+        .next()
+        .unwrap_or_default();
+    let token = std::env::var("TOKEN").unwrap_or_default();
+    let mut stream = std::net::TcpStream::connect(proxy)?;
+    write!(
+        stream,
+        "GET {url} HTTP/1.1\r\nHost: {host}\r\nAuthorization: Bearer {token}\r\nConnection: close\r\n\r\n"
+    )?;
+    let mut response = String::new();
+    stream.read_to_string(&mut response)?;
+    Ok(response)
 }
