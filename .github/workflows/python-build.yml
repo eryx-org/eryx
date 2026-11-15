@@ -113,6 +113,7 @@ jobs:
           for lang in javascript shell; do
             cp "cwasm/runtime-$lang-x86_64-unknown-linux-gnu.cwasm" "crates/eryx-runtime/runtime-$lang.cwasm"
           done
+          cp "cwasm/coreutils-x86_64-unknown-linux-gnu.cwasm" crates/eryx-runtime/coreutils.cwasm
 
       - name: Test wheel
         run: |
@@ -200,6 +201,7 @@ jobs:
           for lang in javascript shell; do
             cp "cwasm/runtime-$lang-x86_64-unknown-linux-gnu.cwasm" "crates/eryx-runtime/runtime-$lang.cwasm"
           done
+          cp "cwasm/coreutils-x86_64-unknown-linux-gnu.cwasm" crates/eryx-runtime/coreutils.cwasm
 
       - name: Test wheel
         run: |
@@ -302,6 +304,7 @@ jobs:
           for lang in javascript shell; do
             cp "cwasm/runtime-$lang-aarch64-unknown-linux-gnu.cwasm" "crates/eryx-runtime/runtime-$lang.cwasm"
           done
+          cp "cwasm/coreutils-aarch64-unknown-linux-gnu.cwasm" crates/eryx-runtime/coreutils.cwasm
 
       - name: Test wheel
         run: |
@@ -394,6 +397,7 @@ jobs:
           for lang in javascript shell; do
             cp "cwasm/runtime-$lang-aarch64-unknown-linux-gnu.cwasm" "crates/eryx-runtime/runtime-$lang.cwasm"
           done
+          cp "cwasm/coreutils-aarch64-unknown-linux-gnu.cwasm" crates/eryx-runtime/coreutils.cwasm
 
       - name: Test wheel
         run: |
@@ -500,6 +504,7 @@ jobs:
           for lang in javascript shell; do
             cp "cwasm/runtime-$lang-aarch64-apple-darwin.cwasm" "crates/eryx-runtime/runtime-$lang.cwasm"
           done
+          cp "cwasm/coreutils-aarch64-apple-darwin.cwasm" crates/eryx-runtime/coreutils.cwasm
 
       - name: Test wheel
         run: |
@@ -597,6 +602,7 @@ jobs:
           for lang in javascript shell; do
             cp "cwasm/runtime-$lang-x86_64-apple-darwin.cwasm" "crates/eryx-runtime/runtime-$lang.cwasm"
           done
+          cp "cwasm/coreutils-x86_64-apple-darwin.cwasm" crates/eryx-runtime/coreutils.cwasm
 
       - name: Test wheel
         run: |
@@ -696,6 +702,7 @@ jobs:
           for lang in javascript shell; do
             cp "cwasm/runtime-$lang-x86_64-pc-windows-msvc.cwasm" "crates/eryx-runtime/runtime-$lang.cwasm"
           done
+          cp "cwasm/coreutils-x86_64-pc-windows-msvc.cwasm" crates/eryx-runtime/coreutils.cwasm
 
       - name: Test wheel
         shell: bash
