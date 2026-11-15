@@ -18,4 +18,20 @@ cargo nextest run -p eryx --features embedded,javascript --test js_guest
 The JavaScript the sandboxed code sees (`console`, `invoke`, one function per
 callback, `listCallbacks`, the result variable) is set up by `src/prelude.js`;
 `src/js.rs` drives QuickJS's job queue and parks promises on host subtasks.
+`fetch` is `src/fetch.js` on an HTTP/1.1 client in `src/fetch.rs` (URLs in
+`src/url.rs`), which writes plain requests to the host's `eryx:net` TCP and
+TLS imports (`eryx_guest_call::net`, shared with the CPython guest), so the
+host's network policy and secret substitution apply.
 See the crate docs for the semantics and what isn't implemented yet.
+
+`precompile-runtime-javascript` pre-initializes the runtime
+(`eryx_runtime::preinit::pre_initialize_javascript`): the QuickJS runtime and
+context are created and the prelude evaluated once, at build time, and every
+instance starts from that snapshot (~0.1 ms for a stateless execute instead of
+~0.5 ms). State QuickJS seeds when it creates a context would be frozen into
+the snapshot, so `src/fresh.rs` replaces `Math.random()` (seeded from
+`wasi:random`) and `performance` (a clock starting at the first execute) in
+every context, with or without preinit. QuickJS's internal hash seed can't be
+reseeded: instances from one snapshot share it. It keys `Map` and `Set`
+hashing, so sharing it only weakens hash-flooding resistance of those
+collections, within each sandbox.

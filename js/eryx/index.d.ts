@@ -117,7 +117,8 @@ export interface SandboxOptions {
    * are separate files, downloaded the first time a sandbox uses them, and
    * their sandboxes start with an empty filesystem. A JavaScript exception or
    * a nonzero exit status rejects with a `PythonExceptionError`, as in the
-   * Python SDK. The JavaScript guest can't snapshot its state yet.
+   * Python SDK. A JavaScript snapshot keeps top-level variables whose
+   * values hold no functions; the rest are named in `skippedGlobals`.
    */
   language?: Language;
   /**

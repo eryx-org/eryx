@@ -198,7 +198,8 @@ async fn preinit_basic() {
 
 /// Pre-init provides a writable `/tmp`, but `tempfile` must not keep it
 /// cached, or a restored sandbox ignores `TMPDIR` and writes to a `/tmp` that
-/// may not exist.
+/// may not exist. Mounting the volume needs `unstable-vfs`.
+#[cfg(feature = "unstable-vfs")]
 #[tokio::test]
 async fn preinit_tempfile_honours_runtime_tmpdir() {
     let stdlib = get_stdlib_path();

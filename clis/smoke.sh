@@ -43,6 +43,23 @@ jaq)
     wasmtime run --dir "$WORK/data::/data" "$OUT/component.wasm" -c -i '.a = 2' /data/edit.json
     expect "$(cat "$WORK/data/edit.json")" '{"a":2}'
     ;;
+jq)
+    jqw() { wasmtime run "$OUT/component.wasm" "$@"; }
+    expect "$(printf '{"a":1}' | jqw .a)" 1
+    expect "$(jqw --version)" "jq-1.8.2"
+    # Regex filters need oniguruma linked in.
+    expect "$(jqw -n '"baaa" | test("a+")')" true
+    # ...and it must be the pinned [[deps]] build: when its probe fails, jq's
+    # configure quietly builds the copy it vendors instead.
+    grep -q '^ac_cv_lib_onig_onig_version=yes' "$OUT/build/config.log" \
+        || { echo "::error::jq: configure didn't find the pinned oniguruma"; exit 1; }
+    if [ -e "$OUT/build/vendor/oniguruma" ]; then
+        echo "::error::jq: built its vendored oniguruma instead of the pinned one"
+        exit 1
+    fi
+    # Upstream jq truncates a fractional index (jaq rejects it).
+    expect "$(jqw -n '[1,2] | .[1.5]')" 2
+    ;;
 sqlite3)
     expect "$(wasmtime run "$OUT/component.wasm" :memory: 'select 6*7;')" 42
     ;;

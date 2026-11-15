@@ -150,7 +150,8 @@ struct CompileArgs {
 
     /// The guest language the component runs (python, javascript or shell).
     /// Stamped into the output, so loading it for another language fails
-    /// with a clear error. `--preinit` and verification are Python only.
+    /// with a clear error. `--preinit` works for Python and JavaScript;
+    /// verification is Python only.
     #[arg(long, value_parser = parse_language)]
     language: Option<eryx::Language>,
 
@@ -183,10 +184,11 @@ struct CompileArgs {
     #[arg(short = 'c', long, value_name = "LEVEL")]
     cpu_features: Option<CpuFeatureLevel>,
 
-    /// Pre-initialize Python before compiling
+    /// Pre-initialize the runtime before compiling
     ///
-    /// This runs Python's interpreter initialization and captures the memory state,
-    /// reducing session creation time from ~450ms to ~1-5ms.
+    /// This runs the interpreter's initialization and captures the memory state:
+    /// for Python it cuts session creation from ~450ms to ~1-5ms, for JavaScript
+    /// (`--language javascript`) a stateless execution from ~0.5ms to ~0.12ms.
     #[arg(long)]
     preinit: bool,
 
@@ -696,8 +698,23 @@ async fn run_compile(args: CompileArgs) -> Result<()> {
     });
 
     let python = args.language.is_none_or(|l| l == eryx::Language::Python);
-    if args.preinit && !python {
-        anyhow::bail!("--preinit only works for Python runtimes");
+    let javascript = args.language == Some(eryx::Language::JavaScript);
+    if args.preinit && !python && !javascript {
+        anyhow::bail!("--preinit only works for Python and JavaScript runtimes");
+    }
+    if javascript
+        && (args.site_packages.is_some()
+            || !args.packages.is_empty()
+            || !args.imports.is_empty()
+            || args.setup_code.is_some()
+            || args.setup_file.is_some()
+            || args.callbacks.is_some())
+    {
+        anyhow::bail!(
+            "--site-packages, --package, --import, --setup-code, --setup-file and \
+             --callbacks are Python only: JavaScript pre-initialization only creates \
+             the QuickJS engine"
+        );
     }
 
     // Resolve target triple and CPU feature level from the flags.
@@ -727,7 +744,7 @@ async fn run_compile(args: CompileArgs) -> Result<()> {
         println!("CPU:     {cpu_features}");
     }
     let stdlib = resolve_stdlib(args.stdlib.as_deref())?;
-    if args.preinit {
+    if args.preinit && python {
         println!("Stdlib:  {}", stdlib.display());
     }
     if let Some(ref site_pkg) = args.site_packages {
@@ -801,8 +818,8 @@ async fn run_compile(args: CompileArgs) -> Result<()> {
         .with_target(target_triple.clone())
         .with_cpu_features(Some(cpu_features));
 
-    // Step 1: Pre-initialize Python if requested
-    let packages = if args.preinit {
+    // Step 1: Pre-initialize if requested
+    let packages = if args.preinit && python {
         Some(process_packages(
             args.site_packages.as_ref(),
             &args.packages,
@@ -812,6 +829,15 @@ async fn run_compile(args: CompileArgs) -> Result<()> {
     };
     let component_bytes = if let Some(packages) = &packages {
         preinitialize(&stdlib, packages, &build_inputs).await?
+    } else if args.preinit {
+        println!();
+        println!("Step 1: Pre-initializing JavaScript...");
+        let start = Instant::now();
+        let bytes = eryx::preinit::pre_initialize_javascript(&wasm_bytes)
+            .await
+            .context("Failed to pre-initialize")?;
+        println!("  Done in {:?}", start.elapsed());
+        bytes
     } else {
         println!();
         println!("Step 1: Skipping pre-initialization (use --preinit to enable)");

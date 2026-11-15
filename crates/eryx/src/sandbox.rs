@@ -126,6 +126,7 @@ use crate::error::{Error, ErrorKind};
 use crate::language::{GuestLanguage, JavaScript, Language, Python, Shell};
 use crate::library::RuntimeLibrary;
 use crate::net::{ConnectionManager, NetConfig};
+use crate::process::Command;
 use crate::trace::{OutputHandler, TraceEvent, TraceHandler};
 use crate::wasm::{
     CallbackRequest, ExecutionOutput, Executor, NetRequest, OutputRequest, TraceRequest,
@@ -466,6 +467,8 @@ impl Sandbox {
             execute_builder =
                 execute_builder.with_max_open_host_files(self.resource_limits.max_open_host_files);
         }
+        execute_builder =
+            execute_builder.with_max_child_host_bytes(self.resource_limits.max_child_host_bytes);
 
         // Add memory limit if configured
         if let Some(limit) = self.resource_limits.max_memory_bytes {
@@ -740,8 +743,9 @@ impl Sandbox {
     /// sandbox was built with.
     ///
     /// Used by the pool to configure per-request networking on a reused
-    /// sandbox. The secrets' placeholders are set in `os.environ` from the
-    /// next execution, as with [`SandboxBuilder::with_secret`].
+    /// sandbox. The secrets' placeholders are set in `os.environ` (or, in
+    /// JavaScript, `process.env`) from the next execution, as with
+    /// [`SandboxBuilder::with_secret`].
     ///
     /// # Errors
     ///
@@ -911,24 +915,26 @@ impl Sandbox {
 /// The preinitialized runtime snapshots `os.environ`, so WASI env vars set per
 /// execution would not show up. JSON string literals are valid Python string
 /// literals, unlike Rust's `{:?}` escapes (`\u{1b}`).
-/// The code the guest runs before each execution: [`full_preamble`], which
-/// is Python. The other guests take no preamble yet, so they can't have
-/// secrets (whose placeholders it sets) or library preambles.
+/// The code the guest runs before each execution: [`full_preamble`] for
+/// Python, [`crate::secrets::javascript_preamble`] for JavaScript. Library preambles are
+/// Python, and the shell takes no preamble, so it can't have secrets either.
 fn language_preamble(
     language: Language,
     secrets: &HashMap<String, crate::secrets::SecretConfig>,
     library_preamble: &str,
 ) -> Result<String, Error> {
-    if language == Language::Python {
-        return Ok(full_preamble(secrets, library_preamble));
+    let unsupported = |message: String| Err(ErrorKind::Initialization(message).into());
+    match language {
+        Language::Python => Ok(full_preamble(secrets, library_preamble)),
+        _ if !library_preamble.is_empty() => unsupported(format!(
+            "library preambles are only supported for Python, not {language}"
+        )),
+        Language::JavaScript => Ok(crate::secrets::javascript_preamble(secrets)),
+        _ if !secrets.is_empty() => unsupported(format!(
+            "secrets are only supported for Python and JavaScript, not {language}"
+        )),
+        _ => Ok(String::new()),
     }
-    if !secrets.is_empty() || !library_preamble.is_empty() {
-        return Err(ErrorKind::Initialization(format!(
-            "secrets and library preambles are only supported for Python, not {language}"
-        ))
-        .into());
-    }
-    Ok(String::new())
 }
 
 fn full_preamble(
@@ -1549,6 +1555,8 @@ pub struct SandboxBuilder<Lang = Python, Runtime = state::Needs> {
     resource_limits: ResourceLimits,
     /// Name of the user variable captured as the structured result. Default `result`.
     result_variable: String,
+    /// External commands (shell only).
+    commands: crate::process::Commands,
     /// Path to the guest's standard library (for Python, the CPython stdlib).
     stdlib_path: Option<std::path::PathBuf>,
     /// Path to a guest library directory (for Python, site-packages).
@@ -1627,6 +1635,7 @@ impl SandboxBuilder<Python, state::Needs> {
             output_handler: None,
             resource_limits: ResourceLimits::default(),
             result_variable: "result".to_string(),
+            commands: crate::process::Commands::default(),
             stdlib_path: None,
             library_path: None,
             #[cfg(feature = "native-extensions")]
@@ -1664,6 +1673,7 @@ impl SandboxBuilder<Python, state::Needs> {
             output_handler: None,
             resource_limits: ResourceLimits::default(),
             result_variable: "result".to_string(),
+            commands: crate::process::Commands::default(),
             stdlib_path: None, // Will use embedded stdlib
             library_path: None,
             #[cfg(feature = "native-extensions")]
@@ -1701,6 +1711,7 @@ impl<L, R> SandboxBuilder<L, R> {
             output_handler: self.output_handler,
             resource_limits: self.resource_limits,
             result_variable: self.result_variable,
+            commands: self.commands,
             stdlib_path: self.stdlib_path,
             library_path: self.library_path,
             #[cfg(feature = "native-extensions")]
@@ -2311,6 +2322,49 @@ impl<L, R> SandboxBuilder<L, R> {
     }
 }
 
+/// External commands, for the shell.
+impl<R> SandboxBuilder<Shell, R> {
+    /// Let the shell run `command` as the external command `name`.
+    ///
+    /// The shell finds it after its functions, builtins and callbacks, and
+    /// runs it as a child process with `argv[0]` set to `name`. The child
+    /// sees the sandbox's VFS mounts (with `unstable-vfs`) and nothing else
+    /// of the host, and has no network. Registering a name again replaces it.
+    ///
+    /// ```rust,ignore
+    /// let curl = Command::from_file("curl.wasm")?;
+    /// let sandbox = Sandbox::embedded().shell().with_command("curl", curl).build()?;
+    /// ```
+    #[must_use]
+    pub fn with_command(mut self, name: impl Into<String>, command: Command) -> Self {
+        self.commands.insert(name.into(), command);
+        self
+    }
+
+    /// Register one command under several names, e.g. a multicall binary
+    /// such as uutils coreutils, which picks the tool from `argv[0]`. It is
+    /// compiled once, however many names it gets.
+    ///
+    /// ```rust,ignore
+    /// let coreutils = Command::from_file("coreutils.wasm")?;
+    /// let sandbox = Sandbox::embedded()
+    ///     .shell()
+    ///     .with_commands(["cat", "head", "sort"], coreutils)
+    ///     .build()?;
+    /// ```
+    #[must_use]
+    pub fn with_commands<I, S>(mut self, names: I, command: Command) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        for name in names {
+            self.commands.insert(name.into(), command.clone());
+        }
+        self
+    }
+}
+
 // Methods available in ANY state
 impl<L, R> SandboxBuilder<L, R> {
     /// Add a runtime library (callbacks + preamble + stubs).
@@ -2503,7 +2557,8 @@ impl<L, R> SandboxBuilder<L, R> {
     ///
     /// # Security
     ///
-    /// - Python code only sees a placeholder like `ERYX_SECRET_PLACEHOLDER_abc123`
+    /// - Sandboxed code only sees a placeholder like `ERYX_SECRET_PLACEHOLDER_abc123`,
+    ///   in `os.environ` (Python) or `process.env` (JavaScript)
     /// - Real value is substituted transparently when making HTTPS requests
     /// - Host checks use the TCP connection target; the TLS server name and any
     ///   HTTP `Host` header must name that same host
@@ -2644,7 +2699,7 @@ impl<L: GuestLanguage> SandboxBuilder<L, state::Has> {
     /// Convert this builder into a reusable factory closure.
     ///
     /// The factory keeps the wasm source, language, stdlib and library paths,
-    /// result variable and trace-collection setting, and builds fresh
+    /// result variable, trace-collection setting and shell commands, and builds fresh
     /// sandboxes from them on demand. Anything else would be silently lost
     /// (per-request settings are reset whenever a sandbox returns to the
     /// pool, and the rest is not carried over), so builders that set it are
@@ -2683,6 +2738,7 @@ impl<L: GuestLanguage> SandboxBuilder<L, state::Has> {
         let library_path = self.library_path;
         let result_variable = self.result_variable;
         let collect_trace = self.collect_trace;
+        let commands = self.commands;
 
         Ok(Box::new(move || {
             let mut builder = SandboxBuilder::new();
@@ -2691,6 +2747,7 @@ impl<L: GuestLanguage> SandboxBuilder<L, state::Has> {
             builder.library_path = library_path.clone();
             builder.result_variable = result_variable.clone();
             builder.collect_trace = collect_trace;
+            builder.commands = commands.clone();
             builder.transition::<L, state::Has>().build()
         }))
     }
@@ -2866,10 +2923,29 @@ impl<L: GuestLanguage> SandboxBuilder<L, state::Has> {
             .into_iter()
             .fold(executor, |exec, path| exec.with_library_path(&path));
 
+        // The embedded shell runs the embedded coreutils, except where a
+        // command of the same name was registered.
+        #[cfg(all(feature = "embedded", feature = "coreutils"))]
+        let commands = {
+            let mut commands = self.commands;
+            if L::LANGUAGE == Language::Shell
+                && matches!(self.wasm_source, WasmSource::EmbeddedRuntime)
+            {
+                let coreutils = crate::embedded::coreutils()?;
+                for tool in crate::embedded::COREUTILS_TOOLS {
+                    commands.insert_if_absent(tool, &coreutils);
+                }
+            }
+            commands
+        };
+        #[cfg(not(all(feature = "embedded", feature = "coreutils")))]
+        let commands = self.commands;
+
         // Apply the configured result-capture variable name, and hand the
         // executor the packages whose directories it mounts.
         let executor = executor
             .with_result_variable(self.result_variable)
+            .with_commands(commands)
             .with_packages(self.packages);
 
         let built = Arc::new(PerRequestSettings {
@@ -3369,6 +3445,15 @@ pub struct ResourceLimits {
     /// the process also share one total; see
     /// `eryx::vfs::set_process_max_open_host_files`.
     pub max_open_host_files: Option<usize>,
+    /// Maximum host memory an execution's child processes may hold at once:
+    /// their arguments and environment, buffered stdin, and unread output.
+    ///
+    /// Like [`max_vfs_bytes`](Self::max_vfs_bytes), this is *host* memory
+    /// outside [`max_memory_bytes`](Self::max_memory_bytes). A spawn or stdin
+    /// write that would exceed it fails, and the shell reports the command as
+    /// failed, as does a child whose output would not fit. Only applies to shell
+    /// sandboxes with commands. `None` uses the default of 64 MiB.
+    pub max_child_host_bytes: Option<u64>,
 }
 
 impl Default for ResourceLimits {
@@ -3378,9 +3463,10 @@ impl Default for ResourceLimits {
             callback_timeout: Some(Duration::from_secs(10)),
             max_memory_bytes: Some(128 * 1024 * 1024), // 128 MB
             max_callback_invocations: Some(1000),
-            max_fuel: None,            // Unlimited by default, but still tracked
-            max_vfs_bytes: None,       // eryx-vfs default (64 MiB)
-            max_open_host_files: None, // eryx-vfs default (256)
+            max_fuel: None,             // Unlimited by default, but still tracked
+            max_vfs_bytes: None,        // eryx-vfs default (64 MiB)
+            max_open_host_files: None,  // eryx-vfs default (256)
+            max_child_host_bytes: None, // 64 MiB
         }
     }
 }
@@ -3396,7 +3482,9 @@ impl ResourceLimits {
     /// would let a script abort the process rather than merely outstay its
     /// welcome; raise it explicitly if you need more room.
     /// [`max_open_host_files`](Self::max_open_host_files) likewise stays at its
-    /// default, since host descriptors are shared with the whole process.
+    /// default, since host descriptors are shared with the whole process,
+    /// and [`max_child_host_bytes`](Self::max_child_host_bytes) for the same
+    /// reason as `max_vfs_bytes`.
     #[must_use]
     pub fn unlimited() -> Self {
         Self {
@@ -3407,6 +3495,7 @@ impl ResourceLimits {
             max_fuel: None,
             max_vfs_bytes: None,
             max_open_host_files: None,
+            max_child_host_bytes: None,
         }
     }
 
@@ -3473,6 +3562,16 @@ impl ResourceLimits {
     #[must_use]
     pub fn with_max_open_host_files(mut self, max: impl Into<Option<usize>>) -> Self {
         self.max_open_host_files = max.into();
+        self
+    }
+
+    /// Set how much host memory child processes may hold at once.
+    ///
+    /// Pass `None` to use the default of 64 MiB; see
+    /// [`max_child_host_bytes`](Self::max_child_host_bytes).
+    #[must_use]
+    pub fn with_max_child_host_bytes(mut self, bytes: impl Into<Option<u64>>) -> Self {
+        self.max_child_host_bytes = bytes.into();
         self
     }
 }
@@ -4132,18 +4231,42 @@ mod tests {
     }
 
     #[test]
-    fn secrets_are_python_only_for_now() {
+    fn shell_sandboxes_reject_secrets() {
         let err = Sandbox::builder()
             .with_wasm_bytes(vec![])
-            .javascript()
+            .shell()
             .with_secret("TOKEN", "value", vec!["example.com".to_string()])
             .build()
             .unwrap_err();
         assert!(
             matches!(err.kind(), ErrorKind::Initialization(msg)
-                if msg.contains("secrets") && msg.contains("javascript")),
+                if msg.contains("secrets") && msg.contains("shell")),
             "{err}"
         );
+    }
+
+    #[test]
+    fn javascript_preamble_sets_process_env_placeholders() {
+        let secret = crate::secrets::SecretConfig::new("real-value", vec!["a.test".to_string()]);
+        let placeholder = secret.placeholder().to_string();
+        let secrets = HashMap::from([("TOKEN".to_string(), secret)]);
+
+        let preamble = language_preamble(Language::JavaScript, &secrets, "").unwrap();
+        assert_eq!(
+            preamble,
+            format!(
+                "Object.defineProperty(globalThis, 'process', {{ value: {{ env: \
+                 Object.freeze(JSON.parse(\"{{\\\"TOKEN\\\":\\\"{placeholder}\\\"}}\")) }}, \
+                 writable: true, configurable: true }});\n"
+            )
+        );
+        assert!(!preamble.contains("real-value"));
+        assert_eq!(
+            language_preamble(Language::JavaScript, &HashMap::new(), "").unwrap(),
+            ""
+        );
+        let err = language_preamble(Language::JavaScript, &secrets, "import os").unwrap_err();
+        assert!(err.to_string().contains("library preambles"), "{err}");
     }
 
     #[test]

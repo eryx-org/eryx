@@ -83,6 +83,7 @@ mod library;
 pub mod net;
 pub mod package;
 pub mod pool;
+mod process;
 pub mod replay;
 mod sandbox;
 mod schema;
@@ -103,7 +104,8 @@ mod wasm;
 pub mod preinit {
     pub use eryx_runtime::linker::NativeExtension;
     pub use eryx_runtime::preinit::{
-        CallbackDeclaration, PreInitOptions, pre_initialize, pre_initialize_with_options,
+        CallbackDeclaration, PreInitOptions, pre_initialize, pre_initialize_javascript,
+        pre_initialize_with_options,
     };
 
     /// The declaration the guest sees for `callback`, for
@@ -136,6 +138,7 @@ pub use net::{
 };
 pub use package::{ExtractedPackage, PackageFormat};
 pub use pool::{PoolConfig, PoolError, PoolStats, PooledSandbox, SandboxPool};
+pub use process::Command;
 pub use replay::{
     CallbackJournal, CallbackJournalEntry, CallbackOutcome, ReplayCallback, ReplayState,
     SuspendedCallback,

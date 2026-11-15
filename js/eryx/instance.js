@@ -24,6 +24,7 @@ import { monotonicClock, wallClock } from "#preview2/clocks";
 import { createFilesystem, InMemoryFilesystemAdapter } from "#preview2/filesystem";
 import { error, poll, streams } from "#preview2/io";
 import { insecureSeed, random } from "#preview2/random";
+import * as process from "./shims/process.js";
 import * as sockets from "./shims/sockets.js";
 
 // Import stdlib loader
@@ -213,6 +214,8 @@ export async function instantiateSandbox(language, fileTree, cb, net, getModule 
     "report-output": { default: cb.reportOutput },
     "eryx:net/tcp": net.tcp,
     "eryx:net/tls": net.tls,
+    // Only the shell imports it; see shims/process.js.
+    "eryx:process/process": process,
     "wasi:cli/environment": environment,
     "wasi:cli/exit": exit,
     "wasi:cli/stderr": fd.stderr,

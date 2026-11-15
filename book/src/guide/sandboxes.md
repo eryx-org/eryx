@@ -64,13 +64,54 @@ result = js.execute("console.log(6 * 7)")
 <!-- langtabs-end -->
 
 Python-only options, such as the stdlib, site-packages and packages, are only
-available on a Python builder. Secrets and library preambles are Python-only
-for now too. A shell script fails with its exit status
+available on a Python builder, as are library preambles. JavaScript has
+[`fetch`](./networking.md#fetch-in-javascript) and reads secrets from
+`process.env`; the shell can't have secrets. A shell script fails with its exit status
 (`ErrorKind::ScriptFailed { exit_code: Some(n), .. }`). Besides bash's builtins,
 the shell has `grep` built in. Patterns are GNU basic regular expressions, as
 in grep (`a\|b`, `\(x\)`), and `-E` and `-F` work as usual. Callbacks are commands (see
-[Callbacks in the Shell](./callbacks.md#callbacks-in-the-shell)). Running
-external commands from the shell isn't supported yet, so they exit 127.
+[Callbacks in the Shell](./callbacks.md#callbacks-in-the-shell)).
+
+### External Commands
+
+A shell sandbox can run WASI 0.2 command components (programs built for
+`wasm32-wasip2`, such as uutils coreutils, ripgrep or curl) as external
+commands. Register them by name on a shell builder:
+
+```rust,ignore
+use eryx::{Command, Sandbox};
+
+let coreutils = Command::from_file("coreutils.wasm")?; // compiled once
+let rg = Command::from_file("rg.wasm")?;
+let sandbox = Sandbox::embedded()
+    .shell()
+    .with_commands(["cat", "head", "sort", "wc"], coreutils) // one multicall binary
+    .with_command("rg", rg)
+    .build()?;
+let result = sandbox.execute("printf 'b\na\n' | sort | head -n 1").await?;
+```
+
+- **Lookup:** the shell looks for functions first, then builtins, then
+  callbacks, then registered commands. An unregistered name exits 127.
+- **Running:** each command runs as a child process with `argv[0]` set to the
+  name it was called by, which is how a multicall binary picks its tool. It gets
+  the shell's environment, with `PWD` set to the shell's directory.
+- **Files:** a child sees the session's VFS mounts (with `unstable-vfs`) and
+  nothing else of the host.
+- **Network:** children have none yet.
+- **Limits:** each child has a fixed fuel and memory budget of its own.
+  The host memory children hold (arguments, environment, buffered stdin and
+  unread output) is capped per execution by
+  `ResourceLimits::max_child_host_bytes` (default 64 MiB), with at most 64
+  children spawned but not yet finished and 2 MiB of arguments and
+  environment per spawn. Past a limit the spawn fails and the shell reports
+  `<command>: limit-exceeded`.
+- **Pipes:** children run in batch: a stage's input is buffered before it
+  runs, so an endless producer piped into a command runs out of fuel.
+- **Precompiling:** `Command::from_precompiled{,_file}` loads one precompiled
+  with `Executor::precompile` or `eryx-precompile compile` (without
+  `--language`). It carries the same version stamp as precompiled runtimes, so
+  one from another eryx version fails with `ErrorKind::IncompatiblePrecompiled`.
 
 The gRPC server serves every language it has a pool for (`--languages`), and
 each request picks one with `ExecuteRequest.language`.

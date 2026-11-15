@@ -50,7 +50,9 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
   --output crates/eryx-runtime/runtime-python.cwasm \
   --no-verify
 
-# The JavaScript and shell runtimes have no preinit.
+# The JavaScript and shell runtimes have no preinit. The shell also embeds
+# coreutils (the eryx `coreutils` feature), from crates/eryx-runtime/coreutils.wasm
+# (`mise run build-coreutils`).
 ARG ERYX_LANGUAGES
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
   --mount=type=cache,target=/build/target \
@@ -63,7 +65,15 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
   --cpu-features "${ERYX_CPU_FEATURES}" \
   --output "crates/eryx-runtime/runtime-$lang.cwasm" \
   --no-verify || exit 1; \
-  done
+  done; \
+  case ",$ERYX_LANGUAGES," in *,shell,*) \
+  ERYX_PRECOMPILE_BOOTSTRAP=1 \
+  cargo run --release -p eryx-precompile -- compile \
+  crates/eryx-runtime/coreutils.wasm \
+  --target "${ERYX_CPU_FEATURES}" \
+  --output crates/eryx-runtime/coreutils.cwasm \
+  --no-verify || exit 1;; \
+  esac
 
 # Runtime provider: default (from precompile stage output)
 FROM precompile AS runtime-default
@@ -93,7 +103,7 @@ COPY . .
 
 # Copy the runtimes from the selected runtime stage AFTER the source copy so
 # they aren't overwritten by any that exist in the source tree.
-COPY --from=runtime /build/crates/eryx-runtime/runtime-*.cwasm crates/eryx-runtime/
+COPY --from=runtime /build/crates/eryx-runtime/*.cwasm crates/eryx-runtime/
 
 # Build the server with preinit support using BuildKit cache mounts.
 # - cargo registry cache: avoids re-downloading crates

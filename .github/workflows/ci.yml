@@ -362,7 +362,7 @@ jobs:
           # As with the Python key, the cwasm's engine and CPU-feature settings
           # aren't covered: bump the prefix when they change. v1 -> v2: v1
           # cwasms were built without the CPU presets (host features).
-          key: wasm-runtime-javascript-v2-${{ hashFiles('crates/eryx-guest-js/**', 'crates/eryx-guest-call/**', 'crates/eryx-guest-python/clock_stubs.c', 'crates/wit-dylib-ffi/**', 'crates/eryx-runtime/build.rs', 'crates/eryx-runtime/wit/**', 'crates/eryx-runtime/libs/*.zst', 'Cargo.lock', 'Cargo.toml', 'mise.toml') }}
+          key: wasm-runtime-javascript-v3-${{ hashFiles('crates/eryx-guest-js/**', 'crates/eryx/examples/precompile.rs', 'crates/eryx-runtime/src/preinit.rs', 'crates/eryx-guest-call/**', 'crates/eryx-guest-python/clock_stubs.c', 'crates/wit-dylib-ffi/**', 'crates/eryx-runtime/build.rs', 'crates/eryx-runtime/wit/**', 'crates/eryx-runtime/libs/*.zst', 'Cargo.lock', 'Cargo.toml', 'mise.toml') }}
 
       - uses: ./.github/actions/setup-rust
         if: steps.wasm-cache.outputs.cache-hit != 'true'
@@ -380,9 +380,8 @@ jobs:
         if: steps.wasm-cache.outputs.cache-hit != 'true'
         run: |
           mise run build-runtime-javascript
-          # The precompile example cross-compiles, as for the Python runtime.
-          # `preinit` is what lets it apply ERYX_CPU_FEATURES; it only
-          # pre-initializes Python.
+          # The precompile example cross-compiles and pre-initializes, as for
+          # the Python runtime (`preinit` also lets it apply ERYX_CPU_FEATURES).
           compile() {
             ERYX_CPU_FEATURES="$1" cargo run -p eryx --example precompile --features preinit --release -- "${@:2}"
           }
@@ -437,10 +436,14 @@ jobs:
             crates/eryx-runtime/runtime-shell.cwasm
             crates/eryx-runtime/runtime-shell-windows.cwasm
             crates/eryx-runtime/runtime-shell-macos.cwasm
+            crates/eryx-runtime/coreutils.cwasm
+            crates/eryx-runtime/coreutils-windows.cwasm
+            crates/eryx-runtime/coreutils-macos.cwasm
           # As with the Python key, the cwasm's engine and CPU-feature settings
           # aren't covered: bump the prefix when they change. v1 -> v2: v1
-          # cwasms were built without the CPU presets (host features).
-          key: wasm-runtime-shell-v2-${{ hashFiles('crates/eryx-guest-shell/**', 'crates/eryx-runtime/wit/**', 'Cargo.toml', 'mise.toml') }}
+          # cwasms were built without the CPU presets (host features). v2 -> v3:
+          # the shell's embedded coreutils (#809).
+          key: wasm-runtime-shell-v3-${{ hashFiles('crates/eryx-guest-shell/**', 'crates/eryx-runtime/wit/**', 'clis/coreutils.toml', 'clis/patches/patch-uucore-wasip2.sh', 'crates/eryx-build/**', 'Cargo.toml', 'mise.toml') }}
 
       - uses: ./.github/actions/setup-rust
         if: steps.wasm-cache.outputs.cache-hit != 'true'
@@ -459,8 +462,8 @@ jobs:
         run: |
           mise run build-runtime-shell
           # The precompile example cross-compiles, as for the Python runtime.
-          # `preinit` is what lets it apply ERYX_CPU_FEATURES; it only
-          # pre-initializes Python.
+          # `preinit` is what lets it apply ERYX_CPU_FEATURES; it doesn't
+          # pre-initialize the shell.
           compile() {
             ERYX_CPU_FEATURES="$1" cargo run -p eryx --example precompile --features preinit --release -- "${@:2}"
           }
@@ -472,6 +475,16 @@ jobs:
           # aarch64 has no psABI presets, so "baseline" is the portable setting.
           compile baseline --target aarch64-apple-darwin \
             --output crates/eryx-runtime/runtime-shell-macos.cwasm
+
+          # The shell's embedded commands (the `coreutils` feature): built from
+          # clis/coreutils.toml, precompiled like the runtime but as a command.
+          mise run build-coreutils
+          export ERYX_WASM_PATH=crates/eryx-runtime/coreutils.wasm ERYX_LANGUAGE=command
+          compile x86-64-v2 --output crates/eryx-runtime/coreutils.cwasm
+          compile x86-64-v2 --target x86_64-pc-windows-msvc \
+            --output crates/eryx-runtime/coreutils-windows.cwasm
+          compile baseline --target aarch64-apple-darwin \
+            --output crates/eryx-runtime/coreutils-macos.cwasm
         env:
           ERYX_PRECOMPILE_BOOTSTRAP: "1"
 
@@ -479,7 +492,9 @@ jobs:
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: wasm-runtime-guest-shell
-          path: crates/eryx-runtime/runtime-shell*
+          path: |
+            crates/eryx-runtime/runtime-shell*
+            crates/eryx-runtime/coreutils*.cwasm
           retention-days: 1
 
   # The shell guest is its own workspace (see AGENTS.md), so the workspace
@@ -502,12 +517,18 @@ jobs:
         working-directory: crates/eryx-guest-shell
         run: cargo fmt --check
 
-      - name: Clippy (with and without eryx:process)
+      # The guest is its own workspace, so it keeps copies of the host's WIT.
+      - name: WIT copies match the host's
+        run: |
+          cmp crates/eryx-runtime/wit/runtime.wit crates/eryx-guest-shell/wit/deps/sandbox.wit
+          cmp crates/eryx-runtime/wit/deps/net.wit crates/eryx-guest-shell/wit/deps/net.wit
+          cmp crates/eryx-runtime/wit/deps/process.wit crates/eryx-guest-shell/wit/deps/process.wit
+
+      - name: Clippy
         working-directory: crates/eryx-guest-shell
         run: |
           rustup target add wasm32-wasip2
           cargo clippy --locked --target wasm32-wasip2 -- -D warnings
-          cargo clippy --locked --target wasm32-wasip2 --features process -- -D warnings
 
       # The argument parsing and builtins are plain Rust, so their unit tests
       # run natively.
@@ -568,6 +589,21 @@ jobs:
       - name: Run clippy (eryx, embedded without unstable-vfs)
         # Catches code that is only used under `unstable-vfs` (warnings --all-features hides).
         run: cargo clippy -p eryx --all-targets --features embedded -- -D warnings
+
+      - name: Run clippy (eryx, default features)
+        # Catches code that is only used under some feature, which is dead
+        # with the defaults.
+        run: cargo clippy -p eryx --all-targets -- -D warnings
+
+      - name: Check eryx tests with each feature alone
+        # A test that needs more features than it is gated on fails to build
+        # here, rather than only for whoever runs it with that one feature.
+        run: |
+          for features in macros embedded-stdlib embedded preinit native-extensions unstable-vfs unstable-internals javascript shell; do
+            echo "::group::--features $features"
+            cargo check -p eryx --tests --features "$features"
+            echo "::endgroup::"
+          done
 
   test:
     name: Test
@@ -664,9 +700,11 @@ jobs:
           save-cache: ${{ github.ref == 'refs/heads/main' }}
           pr-comment: false
 
-      # crates/eryx-vfs/tests/p3_filesystem.rs builds a wasm32-wasip3 probe.
-      - name: Install wasm32-wasip3 target
-        run: rustup target add wasm32-wasip3
+      # Tests build small guests of their own: a wasm32-wasip3 probe
+      # (crates/eryx-vfs/tests/p3_filesystem.rs) and a wasm32-wasip2 command
+      # (crates/eryx/tests/commands.rs).
+      - name: Install wasm32-wasip2 and wasm32-wasip3 targets
+        run: rustup target add wasm32-wasip2 wasm32-wasip3
 
       - name: Run tests
         # Use --all-features to test everything. This works because:
@@ -872,6 +910,9 @@ jobs:
             : > "$RUNNER_TEMP/runtime-$lang.cwasm"
             echo "ERYX_RUNTIME_CWASM_$lang=$RUNNER_TEMP/runtime-$lang.cwasm" >> "$GITHUB_ENV"
           done
+          # The shell's embedded coreutils (the `coreutils` feature, #809).
+          : > "$RUNNER_TEMP/coreutils.cwasm"
+          echo "ERYX_COREUTILS_CWASM=$RUNNER_TEMP/coreutils.cwasm" >> "$GITHUB_ENV"
 
       - name: Check public API against the base branch
         run: cargo semver-checks check-release -p eryx --baseline-rev "$BASE_SHA"
@@ -1129,10 +1170,10 @@ jobs:
         run: |
           # Cross-compiled by the build-runtime-* jobs; embedded by the eryx build.
           mv crates/eryx-runtime/runtime-windows.cwasm crates/eryx-runtime/runtime-python.cwasm
-          for lang in javascript shell; do
-            mv "crates/eryx-runtime/runtime-$lang-windows.cwasm" "crates/eryx-runtime/runtime-$lang.cwasm"
+          for name in runtime-javascript runtime-shell coreutils; do
+            mv "crates/eryx-runtime/$name-windows.cwasm" "crates/eryx-runtime/$name.cwasm"
           done
-          touch crates/eryx-runtime/runtime-*.cwasm
+          touch crates/eryx-runtime/*.cwasm
 
       - name: Install Rust
         shell: bash
@@ -1172,6 +1213,14 @@ jobs:
           uv pip install -e ../../sdk/python
           maturin develop --release
           uv export --extra dev --no-dev --no-hashes --no-emit-project --frozen | uv pip install -r -
+
+      # Windows file-sharing rules make concurrent use of the runtime cache
+      # fail where POSIX would work (#850), and these tests run nowhere else on
+      # Windows. The test build has its own features and dev-dependencies, so
+      # it doesn't reuse maturin's build above; rust-cache covers it instead.
+      - name: Run runtime cache concurrency tests
+        shell: bash
+        run: cargo test --release -p eryx --features embedded --lib -- concurrent
 
       - name: Run Python tests
         shell: bash
@@ -1223,10 +1272,10 @@ jobs:
         run: |
           # Cross-compiled by the build-runtime-* jobs; embedded by the eryx build.
           mv crates/eryx-runtime/runtime-macos.cwasm crates/eryx-runtime/runtime-python.cwasm
-          for lang in javascript shell; do
-            mv "crates/eryx-runtime/runtime-$lang-macos.cwasm" "crates/eryx-runtime/runtime-$lang.cwasm"
+          for name in runtime-javascript runtime-shell coreutils; do
+            mv "crates/eryx-runtime/$name-macos.cwasm" "crates/eryx-runtime/$name.cwasm"
           done
-          touch crates/eryx-runtime/runtime-*.cwasm
+          touch crates/eryx-runtime/*.cwasm
 
       - name: Install Rust
         run: |
