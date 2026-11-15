@@ -218,11 +218,13 @@ export const languages = Object.keys(components);
  *   Core-module source, when not this thread's cache
  */
 export async function instantiateSandbox(language, fileTree, cb, net, getModule = getCoreModule) {
+  // A tree forked before the stdlib loaded gets its own view of it, attached
+  // before the guest's first filesystem access (finalizePreinit, below):
+  // instantiation doesn't read the filesystem, so the two overlap.
+  const stdlib =
+    language === "python" && !fileTree.dir["python-stdlib"] ? loadPythonStdlib() : undefined;
+  stdlib?.catch(() => {}); // surfaced by the await below
   const instantiate = await components[language]();
-  // A tree forked before the stdlib loaded gets its own view of it now.
-  if (language === "python") {
-    fileTree.dir["python-stdlib"] ??= forkTree(await loadPythonStdlib());
-  }
   const fd = createFdCapture();
   const fs = createFilesystem({
     adapter: new InMemoryFilesystemAdapter(),
@@ -262,6 +264,7 @@ export async function instantiateSandbox(language, fileTree, cb, net, getModule 
   });
   // The pre-initialized WASM has Python's core state baked in, but
   // finalizePreinit() must still be called to finish setup.
+  if (stdlib) fileTree.dir["python-stdlib"] ??= forkTree(await stdlib);
   if (language === "python") instance.finalizePreinit();
   fd.take(0);
   fd.take(1);

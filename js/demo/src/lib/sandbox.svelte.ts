@@ -37,6 +37,9 @@ export async function initSandbox(options: SandboxOptions = {}): Promise<void> {
     // An embedder with real data to protect should list allowedHosts instead.
     setNetConfig({ allowAllHosts: true });
     const sandbox = new Sandbox(options);
+    // Wait for it to start (and so for the Python stdlib, which the Packages
+    // tab's native extensions read from `_fileTree`).
+    await sandbox.execute("pass");
     const loadTime = ((performance.now() - start) / 1000).toFixed(1);
     sandboxState = { status: "ready", sandbox, loadTime };
   } catch (e) {
@@ -84,10 +87,9 @@ const otherSandboxes = new Map<string, Promise<Sandbox>>();
 
 function sandboxFor(language: "javascript" | "shell"): Promise<Sandbox> {
   if (!otherSandboxes.has(language)) {
-    otherSandboxes.set(
-      language,
-      import("@eryx-org/eryx").then(({ Sandbox }) => new Sandbox({ language })),
-    );
+    const sandbox = import("@eryx-org/eryx").then(({ Sandbox }) => new Sandbox({ language }));
+    sandbox.catch(() => otherSandboxes.delete(language));
+    otherSandboxes.set(language, sandbox);
   }
   return otherSandboxes.get(language)!;
 }
@@ -105,8 +107,17 @@ export async function runCode(
   const start = performance.now();
   try {
     const sandbox = language === "python" ? sandboxState.sandbox : await sandboxFor(language);
-    const result = await sandbox.execute(code);
-    return { ok: true, result, elapsed: performance.now() - start };
+    try {
+      const result = await sandbox.execute(code);
+      return { ok: true, result, elapsed: performance.now() - start };
+    } catch (e) {
+      // Not the script's failure: the sandbox didn't start, so make a new
+      // one next time.
+      if (language !== "python" && (e as Error).name !== "PythonExceptionError") {
+        otherSandboxes.delete(language);
+      }
+      throw e;
+    }
   } catch (e) {
     // A shell script's failure is its exit status: show what it printed first.
     const { exitCode, stdout } = e as { exitCode?: number; stdout?: string };
