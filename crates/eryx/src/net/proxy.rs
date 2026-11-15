@@ -57,6 +57,10 @@ pub enum ChildNetwork {
 /// of now. They only need to outlive one sandbox.
 const CERT_LIFETIME: time::Duration = time::Duration::hours(24);
 
+/// Most hosts whose leaf certificates are kept: CONNECTing to many names
+/// mustn't grow host memory without bound.
+const MAX_CACHED_HOSTS: usize = 256;
+
 /// Size of each read from either side of a proxied connection.
 const BUF_LEN: usize = 16 * 1024;
 
@@ -125,7 +129,8 @@ impl ChildProxy {
         self.addr
     }
 
-    /// The proxy's CA certificate (PEM), which children must trust.
+    /// The proxy's CA certificate (PEM), which children must trust. Its
+    /// private key never leaves the host: there's no way to get it.
     #[must_use]
     pub fn ca_pem(&self) -> &str {
         &self.ca_pem
@@ -189,6 +194,10 @@ impl Ca {
             .map_err(|e| e.to_string())?;
         config.alpn_protocols = vec![b"http/1.1".to_vec()];
         let config = Arc::new(config);
+        // ponytail: drop the whole cache when full; an LRU if re-minting shows up.
+        if hosts.len() >= MAX_CACHED_HOSTS {
+            hosts.clear();
+        }
         hosts.insert(host.to_string(), Arc::clone(&config));
         Ok(config)
     }
@@ -278,8 +287,10 @@ impl From<TlsError> for ProxyError {
 }
 
 impl ProxyError {
-    /// The response telling the child why, if it can still be sent.
-    fn response(&self) -> Option<Vec<u8>> {
+    /// The response telling the child why, if it can still be sent. The
+    /// reason never includes request headers, and any secret placeholder or
+    /// value in it (e.g. from a host name or path) is redacted.
+    fn response(&self, policy: &NetPolicy) -> Option<Vec<u8>> {
         let status = match self {
             Self::BadRequest(_) => "400 Bad Request",
             Self::Refused(_) => "403 Forbidden",
@@ -287,7 +298,11 @@ impl ProxyError {
             Self::Upstream(_) => "502 Bad Gateway",
             Self::Io(_) => return None,
         };
-        let body = format!("eryx proxy: {self}\n");
+        let mut body =
+            crate::secrets::scrub_placeholders(&format!("eryx proxy: {self}\n"), &policy.secrets);
+        for secret in policy.secrets.values().filter(|s| !s.real_value.is_empty()) {
+            body = body.replace(&secret.real_value, "[REDACTED]");
+        }
         Some(
             format!(
                 "HTTP/1.1 {status}\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
@@ -310,7 +325,7 @@ async fn serve(shared: &Shared, mut client: TcpStream) -> Result<(), ProxyError>
         _ => route(shared, &mut client).await,
     };
     if let Err(e) = &result
-        && let Some(response) = e.response()
+        && let Some(response) = e.response(&shared.policy)
     {
         let _ = client.write_all(&response).await;
     }
@@ -330,7 +345,7 @@ async fn route(shared: &Shared, client: &mut TcpStream) -> Result<(), ProxyError
 
     if method == "CONNECT" {
         let (host, port) = split_authority(target)
-            .ok_or_else(|| ProxyError::BadRequest(format!("bad CONNECT target {target:?}")))?;
+            .ok_or_else(|| ProxyError::BadRequest("bad CONNECT target".into()))?;
         if !rest.is_empty() {
             return Err(ProxyError::BadRequest(
                 "data sent before the CONNECT response".into(),
@@ -349,9 +364,7 @@ async fn route(shared: &Shared, client: &mut TcpStream) -> Result<(), ProxyError
         Some(hp) => hp,
         None if !authority.is_empty() && !authority.contains(':') => (authority, 80),
         None => {
-            return Err(ProxyError::BadRequest(format!(
-                "bad request target {target:?}"
-            )));
+            return Err(ProxyError::BadRequest("bad request target".into()));
         }
     };
     let upstream = shared
@@ -456,7 +469,7 @@ where
                 match framer.frame(&buf[..n]) {
                     Ok(out) => up_w.write_all(&out).await?,
                     Err(e) => {
-                        if let Some(response) = ProxyError::from(e).response() {
+                        if let Some(response) = ProxyError::from(e).response(&shared.policy) {
                             let _ = child_w.write_all(&response).await;
                         }
                         let _ = child_w.shutdown().await;
@@ -785,5 +798,64 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
+    }
+
+    /// Only the CA's certificate is handed out, never its key.
+    #[tokio::test]
+    async fn only_the_ca_certificate_reaches_the_child() {
+        let proxy = proxy(config(&[]), ChildNetwork::Inherit, false).await;
+        let pem = proxy.ca_pem();
+        assert_eq!(
+            pem.matches("-----BEGIN CERTIFICATE-----").count(),
+            1,
+            "{pem}"
+        );
+        assert!(!pem.contains("PRIVATE KEY"), "{pem}");
+    }
+
+    /// A refusal's reason never repeats the request's headers, and a
+    /// placeholder in what it does repeat is redacted.
+    #[tokio::test]
+    async fn refusals_never_echo_headers_or_secrets() {
+        let proxy = proxy(config(&[]), ChildNetwork::Inherit, false).await;
+        let mut stream = TcpStream::connect(proxy.addr()).await.unwrap();
+        let request = format!(
+            "CONNECT {PH}:443 HTTP/1.1\r\nHost: {PH}:443\r\nProxy-Authorization: Basic c2VjcmV0\r\n\r\n"
+        );
+        let response = exchange(&mut stream, request.as_bytes()).await;
+        assert!(response.starts_with("HTTP/1.1 403 "), "{response}");
+        assert!(response.contains("[REDACTED]"), "{response}");
+        for leaked in [PH, REAL, "c2VjcmV0", "Proxy-Authorization"] {
+            assert!(!response.contains(leaked), "{leaked}: {response}");
+        }
+    }
+
+    /// A narrowed network can't add a host, a network or a secret's host
+    /// that the sandbox lacks.
+    #[tokio::test]
+    async fn narrow_gains_nothing() {
+        let (port, cert, seen) = upstream(true).await;
+        // A narrow config allowing the blocked loopback network: still
+        // refused, as the sandbox's own policy blocks it.
+        let sandbox = config(&cert).with_internal_hosts(Vec::<String>::new());
+        let narrow = NetConfig::permissive().allow_internal_host("*.test");
+        let proxy = proxy(sandbox, ChildNetwork::Narrow(Box::new(narrow)), false).await;
+        let (_, status) = connect_to(&proxy, &format!("other.test:{port}")).await;
+        assert!(status.contains(" 403 "), "{status}");
+
+        // The secret is for api.test only: sent to other.test, which both
+        // allow, it's refused rather than substituted.
+        let narrow = NetConfig::permissive().allow_internal_host("*.test");
+        let proxy =
+            super::tests::proxy(config(&cert), ChildNetwork::Narrow(Box::new(narrow)), false).await;
+        let (stream, status) = connect_to(&proxy, &format!("other.test:{port}")).await;
+        assert!(status.contains(" 200 "), "{status}");
+        let mut tls = tls(&proxy, stream, "other.test").await;
+        let request = format!(
+            "GET / HTTP/1.1\r\nHost: other.test\r\nAuthorization: {PH}\r\nConnection: close\r\n\r\n"
+        );
+        let response = exchange(&mut tls, request.as_bytes()).await;
+        assert!(response.starts_with("HTTP/1.1 403 "), "{response}");
+        assert!(!received(&seen).contains(REAL));
     }
 }
