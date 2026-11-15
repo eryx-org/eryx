@@ -277,7 +277,7 @@ impl ProcessLauncher for EryxLauncher {
         let child = match Child::spawn(&name, &request.args, &request.env, &cwd) {
             Ok(child) => child,
             Err(ProcessError::CommandNotFound) => return Err(std::io::ErrorKind::NotFound.into()),
-            Err(e) => return Err(std::io::Error::other(format!("{name}: {e:?}"))),
+            Err(e) => return Err(std::io::Error::other(format!("{name}: {}", e.name()))),
         };
         let mut files = request.open_files;
         Ok(ChildProcess::from_future(run_child(
@@ -288,7 +288,7 @@ impl ProcessLauncher for EryxLauncher {
 }
 
 fn io_err(e: eryx::process::process::ProcessError) -> std::io::Error {
-    std::io::Error::other(format!("{e:?}"))
+    std::io::Error::other(e.name())
 }
 
 async fn run_child(

@@ -12,10 +12,10 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use std::path::PathBuf;
-use std::sync::{Arc, OnceLock};
+use std::sync::OnceLock;
 
 use eryx::language::Shell;
-use eryx::{Command, ErrorKind, Sandbox, SandboxBuilder, SessionExecutor, state};
+use eryx::{Command, ErrorKind, Sandbox, SandboxBuilder, state};
 
 /// The test command, built once per test process.
 fn test_cmd() -> Command {
@@ -125,7 +125,9 @@ async fn children_cannot_read_host_files() {
 #[cfg(feature = "unstable-vfs")]
 #[tokio::test]
 async fn children_share_the_sessions_vfs() {
+    use eryx::SessionExecutor;
     use eryx::vfs::{ArcStorage, InMemoryStorage};
+    use std::sync::Arc;
 
     let executor = shell()
         .with_command("tc", test_cmd())
@@ -200,6 +202,58 @@ async fn precompiled_commands_carry_the_version_stamp() {
     );
 }
 
+/// Sets `$BIG` to 1 MiB.
+const BIG: &str = "BIG=x; i=0; while [ $i -lt 20 ]; do BIG=$BIG$BIG; i=$((i + 1)); done";
+
+/// The shell spawns every pipeline stage before running any, and children's
+/// arguments live in host memory, so a long pipeline of large arguments must
+/// hit the child limits and fail the spawn instead of growing the host.
+#[tokio::test]
+async fn a_pipeline_of_large_arguments_fails_the_spawn() {
+    let sandbox = shell()
+        .with_command("upper", test_cmd())
+        .with_resource_limits(eryx::ResourceLimits::default().with_max_memory_bytes(64 << 20))
+        .build()
+        .unwrap();
+
+    let stages = vec![r#"upper "$BIG""#; 300].join(" | ");
+    let script = format!("{BIG}\n{stages}");
+    let err = sandbox.execute(&script).await.unwrap_err();
+    assert!(
+        matches!(err.kind(), ErrorKind::ScriptFailed { .. }),
+        "{err:?}"
+    );
+    assert!(err.to_string().contains("upper: limit-exceeded"), "{err}");
+
+    // The same under a budget smaller than the live-child cap.
+    let sandbox = shell()
+        .with_command("upper", test_cmd())
+        .with_resource_limits(eryx::ResourceLimits::default().with_max_child_host_bytes(4 << 20))
+        .build()
+        .unwrap();
+    let stages = [r#"upper "$BIG""#; 8].join(" | ");
+    let script = format!("{BIG}\n{stages}");
+    let err = sandbox.execute(&script).await.unwrap_err();
+    assert!(err.to_string().contains("upper: limit-exceeded"), "{err}");
+
+    // Within the budget, the same sandbox still runs children.
+    let out = sandbox.execute("echo ok | upper | upper").await.unwrap();
+    assert_eq!(out.stdout_utf8().unwrap(), "OK\n");
+}
+
+/// A pool built from a shell builder keeps its registered commands.
+#[tokio::test]
+async fn pooled_sandboxes_keep_their_commands() {
+    use eryx::{PoolConfig, SandboxPool};
+
+    let builder = shell().with_command("upper", test_cmd());
+    let config = PoolConfig::default().with_max_size(1).with_min_idle(1);
+    let pool = SandboxPool::new(builder, config).await.unwrap();
+    let sandbox = pool.acquire().await.unwrap();
+    let out = sandbox.execute("echo hi | upper").await.unwrap();
+    assert_eq!(out.stdout_utf8().unwrap(), "HI\n");
+}
+
 /// The embedded shell runs the embedded uutils coreutils (the `coreutils`
 /// feature), and a registered command of the same name replaces one.
 #[cfg(feature = "coreutils")]
@@ -236,7 +290,9 @@ async fn the_embedded_shell_runs_coreutils() {
 #[cfg(all(feature = "coreutils", feature = "unstable-vfs"))]
 #[tokio::test]
 async fn coreutils_work_on_the_sessions_vfs() {
+    use eryx::SessionExecutor;
     use eryx::vfs::{ArcStorage, InMemoryStorage};
+    use std::sync::Arc;
 
     let executor = shell().build().unwrap().executor();
     let storage = ArcStorage::new(Arc::new(InMemoryStorage::new()));

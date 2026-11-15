@@ -467,6 +467,8 @@ impl Sandbox {
             execute_builder =
                 execute_builder.with_max_open_host_files(self.resource_limits.max_open_host_files);
         }
+        execute_builder =
+            execute_builder.with_max_child_host_bytes(self.resource_limits.max_child_host_bytes);
 
         // Add memory limit if configured
         if let Some(limit) = self.resource_limits.max_memory_bytes {
@@ -2693,7 +2695,7 @@ impl<L: GuestLanguage> SandboxBuilder<L, state::Has> {
     /// Convert this builder into a reusable factory closure.
     ///
     /// The factory keeps the wasm source, language, stdlib and library paths,
-    /// result variable and trace-collection setting, and builds fresh
+    /// result variable, trace-collection setting and shell commands, and builds fresh
     /// sandboxes from them on demand. Anything else would be silently lost
     /// (per-request settings are reset whenever a sandbox returns to the
     /// pool, and the rest is not carried over), so builders that set it are
@@ -2732,6 +2734,7 @@ impl<L: GuestLanguage> SandboxBuilder<L, state::Has> {
         let library_path = self.library_path;
         let result_variable = self.result_variable;
         let collect_trace = self.collect_trace;
+        let commands = self.commands;
 
         Ok(Box::new(move || {
             let mut builder = SandboxBuilder::new();
@@ -2740,6 +2743,7 @@ impl<L: GuestLanguage> SandboxBuilder<L, state::Has> {
             builder.library_path = library_path.clone();
             builder.result_variable = result_variable.clone();
             builder.collect_trace = collect_trace;
+            builder.commands = commands.clone();
             builder.transition::<L, state::Has>().build()
         }))
     }
@@ -3437,6 +3441,15 @@ pub struct ResourceLimits {
     /// the process also share one total; see
     /// `eryx::vfs::set_process_max_open_host_files`.
     pub max_open_host_files: Option<usize>,
+    /// Maximum host memory an execution's child processes may hold at once:
+    /// their arguments and environment, buffered stdin, and unread output.
+    ///
+    /// Like [`max_vfs_bytes`](Self::max_vfs_bytes), this is *host* memory
+    /// outside [`max_memory_bytes`](Self::max_memory_bytes). A spawn or stdin
+    /// write that would exceed it fails, and the shell reports the command as
+    /// failed, as does a child whose output would not fit. Only applies to shell
+    /// sandboxes with commands. `None` uses the default of 64 MiB.
+    pub max_child_host_bytes: Option<u64>,
 }
 
 impl Default for ResourceLimits {
@@ -3446,9 +3459,10 @@ impl Default for ResourceLimits {
             callback_timeout: Some(Duration::from_secs(10)),
             max_memory_bytes: Some(128 * 1024 * 1024), // 128 MB
             max_callback_invocations: Some(1000),
-            max_fuel: None,            // Unlimited by default, but still tracked
-            max_vfs_bytes: None,       // eryx-vfs default (64 MiB)
-            max_open_host_files: None, // eryx-vfs default (256)
+            max_fuel: None,             // Unlimited by default, but still tracked
+            max_vfs_bytes: None,        // eryx-vfs default (64 MiB)
+            max_open_host_files: None,  // eryx-vfs default (256)
+            max_child_host_bytes: None, // 64 MiB
         }
     }
 }
@@ -3464,7 +3478,9 @@ impl ResourceLimits {
     /// would let a script abort the process rather than merely outstay its
     /// welcome; raise it explicitly if you need more room.
     /// [`max_open_host_files`](Self::max_open_host_files) likewise stays at its
-    /// default, since host descriptors are shared with the whole process.
+    /// default, since host descriptors are shared with the whole process,
+    /// and [`max_child_host_bytes`](Self::max_child_host_bytes) for the same
+    /// reason as `max_vfs_bytes`.
     #[must_use]
     pub fn unlimited() -> Self {
         Self {
@@ -3475,6 +3491,7 @@ impl ResourceLimits {
             max_fuel: None,
             max_vfs_bytes: None,
             max_open_host_files: None,
+            max_child_host_bytes: None,
         }
     }
 
@@ -3541,6 +3558,16 @@ impl ResourceLimits {
     #[must_use]
     pub fn with_max_open_host_files(mut self, max: impl Into<Option<usize>>) -> Self {
         self.max_open_host_files = max.into();
+        self
+    }
+
+    /// Set how much host memory child processes may hold at once.
+    ///
+    /// Pass `None` to use the default of 64 MiB; see
+    /// [`max_child_host_bytes`](Self::max_child_host_bytes).
+    #[must_use]
+    pub fn with_max_child_host_bytes(mut self, bytes: impl Into<Option<u64>>) -> Self {
+        self.max_child_host_bytes = bytes.into();
         self
     }
 }

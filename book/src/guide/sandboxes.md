@@ -99,6 +99,12 @@ let result = sandbox.execute("printf 'b\na\n' | sort | head -n 1").await?;
   nothing else of the host.
 - **Network:** children have none yet.
 - **Limits:** each child has a fixed fuel and memory budget of its own.
+  The host memory children hold (arguments, environment, buffered stdin and
+  unread output) is capped per execution by
+  `ResourceLimits::max_child_host_bytes` (default 64 MiB), with at most 64
+  children spawned but not yet finished and 2 MiB of arguments and
+  environment per spawn. Past a limit the spawn fails and the shell reports
+  `<command>: limit-exceeded`.
 - **Pipes:** children run in batch: a stage's input is buffered before it
   runs, so an endless producer piped into a command runs out of fuel.
 - **Precompiling:** `Command::from_precompiled{,_file}` loads one precompiled

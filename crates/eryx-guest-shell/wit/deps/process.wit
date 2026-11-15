@@ -14,6 +14,9 @@ interface process {
         spawn-failed,
         /// The handle was used out of order (e.g. stdin written after close).
         io-error,
+        /// The host's limits on child processes were reached: too many
+        /// running, arguments too large, or too much buffered data.
+        limit-exceeded,
     }
 
     /// Names of the commands the host can spawn. The shell seeds its command

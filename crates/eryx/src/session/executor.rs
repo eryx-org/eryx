@@ -755,6 +755,9 @@ pub struct SessionExecutor {
     /// Limit on host files the session may hold open, kept for resets.
     #[cfg(feature = "unstable-vfs")]
     max_open_host_files: Option<usize>,
+
+    /// Host memory child processes may hold, kept for resets.
+    max_child_host_bytes: Option<u64>,
 }
 
 impl std::fmt::Debug for SessionExecutor {
@@ -1135,7 +1138,7 @@ impl SessionExecutor {
             MemoryTracker::new(limits.max_memory_bytes),
             hybrid_vfs_ctx,
         )
-        .with_commands(executor.commands().clone());
+        .with_commands(executor.commands().clone(), limits.max_child_host_bytes);
 
         // Create store
         let mut store = Store::new(executor.engine(), state);
@@ -1193,6 +1196,7 @@ impl SessionExecutor {
             vfs_config: Some(vfs_config),
             vfs_max_bytes: limits.max_vfs_bytes,
             max_open_host_files: limits.max_open_host_files,
+            max_child_host_bytes: limits.max_child_host_bytes,
         })
     }
 
@@ -1215,7 +1219,7 @@ impl SessionExecutor {
             callback_infos,
             MemoryTracker::new(limits.max_memory_bytes),
         )
-        .with_commands(executor.commands().clone());
+        .with_commands(executor.commands().clone(), limits.max_child_host_bytes);
 
         // Create store
         let mut store = Store::new(executor.engine(), state);
@@ -1267,6 +1271,7 @@ impl SessionExecutor {
             state_op_cancellation: None,
             memory_limit: limits.max_memory_bytes,
             fd_output,
+            max_child_host_bytes: limits.max_child_host_bytes,
         })
     }
 
@@ -1720,7 +1725,7 @@ impl SessionExecutor {
             callback_infos,
             MemoryTracker::new(self.memory_limit),
         )
-        .with_commands(self.executor.commands().clone());
+        .with_commands(self.executor.commands().clone(), self.max_child_host_bytes);
 
         #[cfg(feature = "unstable-vfs")]
         let state = {
@@ -1750,7 +1755,7 @@ impl SessionExecutor {
                     self.max_open_host_files,
                 )?),
             )
-            .with_commands(self.executor.commands().clone())
+            .with_commands(self.executor.commands().clone(), self.max_child_host_bytes)
         };
 
         // Create new store
@@ -2199,6 +2204,7 @@ impl ExecutorState {
             reuse_empty_callbacks: false,
             stream_budget: StreamBudget::default(),
             commands: crate::process::Commands::default(),
+            child_budget: crate::process::ChildBudget::default(),
         }
     }
 
@@ -2227,12 +2233,19 @@ impl ExecutorState {
             reuse_empty_callbacks: false,
             stream_budget: StreamBudget::default(),
             commands: crate::process::Commands::default(),
+            child_budget: crate::process::ChildBudget::default(),
         }
     }
 
-    /// The external commands the guest can spawn.
-    pub(crate) fn with_commands(mut self, commands: crate::process::Commands) -> Self {
+    /// The external commands the guest can spawn, and the host memory their
+    /// children may hold (see [`ResourceLimits::max_child_host_bytes`]).
+    pub(crate) fn with_commands(
+        mut self,
+        commands: crate::process::Commands,
+        max_child_host_bytes: Option<u64>,
+    ) -> Self {
         self.commands = commands;
+        self.child_budget = crate::process::ChildBudget::new(max_child_host_bytes);
         self
     }
 

@@ -54,6 +54,65 @@ const CHILD_OUTPUT_LIMIT: usize = 16 * 1024 * 1024;
 const CHILD_FUEL: u64 = 10_000_000_000;
 /// Memory each child may grow to (see `CHILD_FUEL`, #810).
 const CHILD_MEMORY_LIMIT: usize = 256 * 1024 * 1024;
+/// Children spawned but not yet waited on, at most, per execution.
+const MAX_LIVE_CHILDREN: usize = 64;
+/// Bytes of argv and env one spawn may pass, at most (like `ARG_MAX`).
+const MAX_ARGS_BYTES: usize = 2 * 1024 * 1024;
+/// Default for [`ResourceLimits::max_child_host_bytes`](crate::ResourceLimits::max_child_host_bytes).
+pub(crate) const DEFAULT_CHILD_HOST_BYTES: u64 = 64 * 1024 * 1024;
+
+/// Host memory held for an execution's children, outside the guest's memory
+/// limit: their argv and env, buffered stdin, and unread output. The shell
+/// spawns every pipeline stage before running any, so without this a script
+/// could make the host hold many large buffers at once.
+#[derive(Debug, Clone)]
+pub(crate) struct ChildBudget {
+    limit: u64,
+    used: u64,
+    live: usize,
+}
+
+impl Default for ChildBudget {
+    fn default() -> Self {
+        Self::new(None)
+    }
+}
+
+impl ChildBudget {
+    /// A budget of `limit` bytes ([`DEFAULT_CHILD_HOST_BYTES`] for `None`).
+    pub(crate) fn new(limit: Option<u64>) -> Self {
+        Self {
+            limit: limit.unwrap_or(DEFAULT_CHILD_HOST_BYTES),
+            used: 0,
+            live: 0,
+        }
+    }
+
+    /// Take `bytes` from the budget, or fail if that would overdraw it.
+    fn charge(&mut self, bytes: u64) -> Result<(), ProcessError> {
+        let used = self.used.saturating_add(bytes);
+        if used > self.limit {
+            tracing::warn!(
+                limit = self.limit,
+                used = self.used,
+                bytes,
+                "child host-memory budget exhausted"
+            );
+            return Err(ProcessError::LimitExceeded);
+        }
+        self.used = used;
+        Ok(())
+    }
+
+    fn release(&mut self, bytes: u64) {
+        self.used = self.used.saturating_sub(bytes);
+    }
+
+    /// Bytes left to charge.
+    fn remaining(&self) -> u64 {
+        self.limit - self.used
+    }
+}
 
 /// Add the `eryx:process` interface to a sandbox linker.
 pub(crate) fn add_to_linker(linker: &mut Linker<ExecutorState>) -> wasmtime::Result<()> {
@@ -246,18 +305,24 @@ pub struct ChildProcess {
     stdin: Vec<u8>,
     stdin_closed: bool,
     done: Option<(i32, Vec<u8>, Vec<u8>)>,
+    /// What this child holds of the execution's [`ChildBudget`].
+    charged: u64,
+    /// Not yet waited on, so it counts as live.
+    live: bool,
     #[cfg(feature = "unstable-vfs")]
     vfs: Option<eryx_vfs::HybridVfsCtx<eryx_vfs::ArcStorage>>,
 }
 
 impl ChildProcess {
-    async fn run(&mut self) -> Result<i32, String> {
+    /// Run the child to completion, keeping at most `output_room` bytes of its
+    /// stdout and stderr each.
+    async fn run(&mut self, output_room: usize) -> Result<i32, String> {
         if let Some((code, ..)) = &self.done {
             return Ok(*code);
         }
         let engine = self.command.pre.engine().clone();
-        let stdout = MemoryOutputPipe::new(CHILD_OUTPUT_LIMIT);
-        let stderr = MemoryOutputPipe::new(CHILD_OUTPUT_LIMIT);
+        let stdout = MemoryOutputPipe::new(output_room);
+        let stderr = MemoryOutputPipe::new(output_room);
         let wasi = WasiCtxBuilder::new()
             .args(&self.argv)
             .envs(&self.env)
@@ -336,6 +401,19 @@ impl HostChild for ExecutorState {
         }
         let mut argv = vec![cmd];
         argv.extend(args);
+        let args_bytes = argv.iter().map(String::len).sum::<usize>()
+            + env.iter().map(|(k, v)| k.len() + v.len()).sum::<usize>();
+        if args_bytes > MAX_ARGS_BYTES || self.child_budget.live >= MAX_LIVE_CHILDREN {
+            tracing::warn!(
+                args_bytes,
+                live = self.child_budget.live,
+                "child spawn over the argument or live-child limit"
+            );
+            return Err(ProcessError::LimitExceeded);
+        }
+        let charged = args_bytes as u64;
+        self.child_budget.charge(charged)?;
+        self.child_budget.live += 1;
         let child = ChildProcess {
             command,
             argv,
@@ -343,15 +421,19 @@ impl HostChild for ExecutorState {
             stdin: Vec::new(),
             stdin_closed: false,
             done: None,
+            charged,
+            live: true,
             #[cfg(feature = "unstable-vfs")]
             vfs: self
                 .hybrid_vfs_ctx
                 .as_ref()
                 .map(eryx_vfs::HybridVfsCtx::fork),
         };
-        self.table
-            .push(child)
-            .map_err(|_| ProcessError::SpawnFailed)
+        self.table.push(child).map_err(|_| {
+            self.child_budget.release(charged);
+            self.child_budget.live -= 1;
+            ProcessError::SpawnFailed
+        })
     }
 
     async fn write_stdin(
@@ -368,8 +450,10 @@ impl HostChild for ExecutorState {
         }
         // Stdin is buffered until `wait`, so cap it like the output.
         if child.stdin.len() + data.len() > CHILD_OUTPUT_LIMIT {
-            return Err(ProcessError::IoError);
+            return Err(ProcessError::LimitExceeded);
         }
+        self.child_budget.charge(data.len() as u64)?;
+        child.charged += data.len() as u64;
         child.stdin.extend_from_slice(&data);
         Ok(data.len() as u64)
     }
@@ -389,11 +473,14 @@ impl HostChild for ExecutorState {
             .table
             .get_mut(&child)
             .map_err(|_| ProcessError::IoError)?;
-        Ok(child
+        let out = child
             .done
             .as_mut()
             .map(|(_, out, _)| drain(out, max_bytes))
-            .unwrap_or_default())
+            .unwrap_or_default();
+        child.charged -= out.len() as u64;
+        self.child_budget.release(out.len() as u64);
+        Ok(out)
     }
 
     async fn read_stderr(
@@ -405,11 +492,14 @@ impl HostChild for ExecutorState {
             .table
             .get_mut(&child)
             .map_err(|_| ProcessError::IoError)?;
-        Ok(child
+        let err = child
             .done
             .as_mut()
             .map(|(_, _, err)| drain(err, max_bytes))
-            .unwrap_or_default())
+            .unwrap_or_default();
+        child.charged -= err.len() as u64;
+        self.child_budget.release(err.len() as u64);
+        Ok(err)
     }
 
     async fn wait(&mut self, child: Resource<ChildProcess>) -> Result<i32, ProcessError> {
@@ -420,14 +510,40 @@ impl HostChild for ExecutorState {
             .table
             .get_mut(&child)
             .map_err(|_| ProcessError::IoError)?;
-        child.run().await.map_err(|e| {
-            tracing::warn!(error = %e, "child command failed");
-            ProcessError::SpawnFailed
-        })
+        if child.live {
+            child.live = false;
+            self.child_budget.live -= 1;
+        }
+        if child.done.is_none() {
+            // Its stdin goes into the child and is freed with it; its output
+            // is charged instead, each stream capped at what is left.
+            let stdin = child.stdin.len() as u64;
+            let room = (self.child_budget.remaining() / 2).min(CHILD_OUTPUT_LIMIT as u64);
+            let result = child.run(room as usize).await;
+            child.charged -= stdin;
+            self.child_budget.release(stdin);
+            let code = result.map_err(|e| {
+                tracing::warn!(error = %e, "child command failed");
+                ProcessError::SpawnFailed
+            })?;
+            let output = child
+                .done
+                .as_ref()
+                .map_or(0, |(_, out, err)| (out.len() + err.len()) as u64);
+            // Fits: each stream was capped at half of what was left.
+            self.child_budget.used += output;
+            child.charged += output;
+            return Ok(code);
+        }
+        Ok(child.done.as_ref().map_or(0, |(code, ..)| *code))
     }
 
     async fn drop(&mut self, child: Resource<ChildProcess>) -> wasmtime::Result<()> {
-        self.table.delete(child)?;
+        let child = self.table.delete(child)?;
+        self.child_budget.release(child.charged);
+        if child.live {
+            self.child_budget.live -= 1;
+        }
         Ok(())
     }
 }
@@ -484,6 +600,8 @@ mod tests {
             HostChild::drop(&mut state, child).await.unwrap();
         }
         assert_eq!(COMPILED.load(Ordering::SeqCst), compiled);
+        // Dropped children give back everything they held.
+        assert_eq!((state.child_budget.used, state.child_budget.live), (0, 0));
     }
 
     #[tokio::test]
