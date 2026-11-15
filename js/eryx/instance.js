@@ -118,14 +118,14 @@ const _coreModules = new Map();
 export function getCoreModule(name) {
   if (!_coreModules.has(name)) {
     const url = new URL(`./${name}`, import.meta.url);
-    _coreModules.set(
-      name,
-      isNode
-        ? import(/* webpackIgnore: true */ "node:fs/promises").then(async (fs) =>
-            WebAssembly.compile(await fs.readFile(url)),
-          )
-        : WebAssembly.compileStreaming(fetch(url)),
-    );
+    const module = isNode
+      ? import(/* webpackIgnore: true */ "node:fs/promises").then(async (fs) =>
+          WebAssembly.compile(await fs.readFile(url)),
+        )
+      : WebAssembly.compileStreaming(fetch(url));
+    // Don't keep a failure (e.g. a dropped download): the next sandbox retries.
+    module.catch(() => _coreModules.delete(name));
+    _coreModules.set(name, module);
   }
   return _coreModules.get(name);
 }

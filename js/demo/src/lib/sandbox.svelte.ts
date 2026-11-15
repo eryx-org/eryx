@@ -85,13 +85,29 @@ export async function replaceSandbox(
 /** Sandboxes for the Run tab's other languages, created on first use. */
 const otherSandboxes = new Map<string, Promise<Sandbox>>();
 
+/** A no-op that makes a new sandbox fetch and compile its runtime. */
+const WARM_UP = { javascript: "", shell: ":" };
+
 function sandboxFor(language: "javascript" | "shell"): Promise<Sandbox> {
   if (!otherSandboxes.has(language)) {
-    const sandbox = import("@eryx-org/eryx").then(({ Sandbox }) => new Sandbox({ language }));
+    const sandbox = import("@eryx-org/eryx").then(async ({ Sandbox }) => {
+      const sandbox = new Sandbox({ language });
+      await sandbox.execute(WARM_UP[language]);
+      return sandbox;
+    });
     sandbox.catch(() => otherSandboxes.delete(language));
     otherSandboxes.set(language, sandbox);
   }
   return otherSandboxes.get(language)!;
+}
+
+/**
+ * Start loading `language`'s sandbox in the background, so its first run
+ * doesn't wait for the runtime. A failure stays quiet here: the sandbox is
+ * dropped, and the next run makes a new one and reports its error.
+ */
+export function warmSandbox(language: "python" | "javascript" | "shell"): void {
+  if (language !== "python") sandboxFor(language).catch(() => {});
 }
 
 export async function runCode(
