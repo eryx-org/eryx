@@ -521,6 +521,8 @@ export class Sandbox {
           ? Object.assign(new PythonExceptionError(payload.message, { cause: e }), {
               stdout: _decoder.decode(payload.stdout),
               stderr: _decoder.decode(payload.stderr),
+              // A shell script's exit status; the other guests have none.
+              ...(payload.exitCode != null && { exitCode: payload.exitCode }),
             })
           : new ExecutionError(payload.message, { cause: e });
         throw Object.assign(failed, stats());
