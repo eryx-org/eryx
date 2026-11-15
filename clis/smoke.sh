@@ -35,6 +35,10 @@ rg)
 sd)
     expect "$(printf 'hello world\n' | wasmtime run "$OUT/component.wasm" world eryx)" "hello eryx"
     ;;
+jaq)
+    expect "$(printf '{"a":1}' | wasmtime run "$OUT/component.wasm" .a)" 1
+    expect "$(printf '[1,2,3]' | wasmtime run "$OUT/component.wasm" -c 'map(. * 2)')" "[2,4,6]"
+    ;;
 sqlite3)
     expect "$(wasmtime run "$OUT/component.wasm" :memory: 'select 6*7;')" 42
     ;;
