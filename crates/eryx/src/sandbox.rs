@@ -2915,11 +2915,29 @@ impl<L: GuestLanguage> SandboxBuilder<L, state::Has> {
             .into_iter()
             .fold(executor, |exec, path| exec.with_library_path(&path));
 
+        // The embedded shell runs the embedded coreutils, except where a
+        // command of the same name was registered.
+        #[cfg(all(feature = "embedded", feature = "coreutils"))]
+        let commands = {
+            let mut commands = self.commands;
+            if L::LANGUAGE == Language::Shell
+                && matches!(self.wasm_source, WasmSource::EmbeddedRuntime)
+            {
+                let coreutils = crate::embedded::coreutils()?;
+                for tool in crate::embedded::COREUTILS_TOOLS {
+                    commands.insert_if_absent(tool, &coreutils);
+                }
+            }
+            commands
+        };
+        #[cfg(not(all(feature = "embedded", feature = "coreutils")))]
+        let commands = self.commands;
+
         // Apply the configured result-capture variable name, and hand the
         // executor the packages whose directories it mounts.
         let executor = executor
             .with_result_variable(self.result_variable)
-            .with_commands(self.commands)
+            .with_commands(commands)
             .with_packages(self.packages);
 
         let built = Arc::new(PerRequestSettings {

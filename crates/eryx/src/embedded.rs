@@ -6,6 +6,9 @@
 //! - **Pre-compiled runtimes**: Written to disk for mmap-based loading (10x less
 //!   memory). Python's is always embedded; JavaScript's and the shell's with
 //!   the `javascript` and `shell` features.
+//! - **Default shell commands**: with the `coreutils` feature (which `shell`
+//!   turns on), uutils coreutils, registered by `Sandbox::embedded().shell()`
+//!   under each of [`COREUTILS_TOOLS`].
 //!
 //! Both go into a per-user cache directory: `$XDG_CACHE_HOME/eryx`, else the
 //! platform cache directory (`~/.cache/eryx`, `~/Library/Caches/eryx`,
@@ -69,6 +72,30 @@ const SHELL_RUNTIME: EmbeddedRuntime = EmbeddedRuntime {
     bytes: include_bytes!(concat!(env!("OUT_DIR"), "/runtime-shell.cwasm")),
     content_hash: env!("ERYX_EMBEDDED_RUNTIME_HASH_SHELL"),
 };
+
+/// The uutils coreutils tools the embedded shell runs as external commands,
+/// with the `coreutils` feature. Must match the `--features` in
+/// `clis/coreutils.toml`, which the embedded multicall binary is built from.
+#[cfg(feature = "coreutils")]
+pub const COREUTILS_TOOLS: [&str; 11] = [
+    "cat", "head", "tail", "ls", "wc", "cp", "mv", "rm", "mkdir", "touch", "sort",
+];
+
+/// The embedded coreutils multicall command, loaded on first use.
+#[cfg(feature = "coreutils")]
+pub(crate) fn coreutils() -> Result<crate::Command, Error> {
+    static COREUTILS: OnceLock<Result<crate::Command, String>> = OnceLock::new();
+    COREUTILS
+        .get_or_init(|| {
+            let bytes = include_bytes!(concat!(env!("OUT_DIR"), "/coreutils.cwasm"));
+            // SAFETY: the build script embeds a coreutils that eryx's precompile
+            // produced, as it does the runtimes.
+            #[allow(unsafe_code)]
+            unsafe { crate::Command::from_precompiled(bytes) }.map_err(|e| e.to_string())
+        })
+        .clone()
+        .map_err(|e| ErrorKind::Initialization(format!("embedded coreutils: {e}")).into())
+}
 
 /// The runtime embedded for `language`, if this build has one.
 fn embedded_runtime(language: Language) -> Option<&'static EmbeddedRuntime> {
@@ -307,5 +334,28 @@ mod tests {
             PYTHON_RUNTIME.bytes.len() > 1_000_000,
             "Embedded runtime should be > 1MB"
         );
+    }
+}
+
+#[cfg(all(test, feature = "coreutils"))]
+#[allow(clippy::unwrap_used)]
+mod coreutils_tests {
+    /// The tool list matches the features the embedded binary is built with.
+    #[test]
+    fn coreutils_tools_match_the_manifest() {
+        let manifest = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../clis/coreutils.toml"
+        ))
+        .unwrap();
+        let mut lines = manifest.lines().map(str::trim);
+        lines.find(|l| *l == "\"--features\",").unwrap();
+        let built: Vec<&str> = lines
+            .next()
+            .unwrap()
+            .trim_matches(['"', ','])
+            .split(',')
+            .collect();
+        assert_eq!(built, super::COREUTILS_TOOLS);
     }
 }

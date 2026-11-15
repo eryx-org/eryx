@@ -199,3 +199,72 @@ async fn precompiled_commands_carry_the_version_stamp() {
         "{err:?}"
     );
 }
+
+/// The embedded shell runs the embedded uutils coreutils (the `coreutils`
+/// feature), and a registered command of the same name replaces one.
+#[cfg(feature = "coreutils")]
+#[tokio::test]
+async fn the_embedded_shell_runs_coreutils() {
+    let sandbox = shell().build().unwrap();
+    let out = sandbox
+        .execute("echo -e 'pear\\napple\\nfig' | sort | head -n 2; echo hello | wc -c")
+        .await
+        .unwrap();
+    assert_eq!(out.stdout_utf8().unwrap(), "apple\nfig\n6\n");
+
+    // Child exit codes propagate.
+    let err = sandbox.execute("head --no-such-flag").await.unwrap_err();
+    assert!(
+        matches!(
+            err.kind(),
+            ErrorKind::ScriptFailed {
+                exit_code: Some(1),
+                ..
+            }
+        ),
+        "{err:?}"
+    );
+
+    let sandbox = shell().with_command("cat", test_cmd()).build().unwrap();
+    let out = sandbox
+        .execute("echo hi | cat; echo b | sort")
+        .await
+        .unwrap();
+    assert_eq!(out.stdout_utf8().unwrap(), "HI\nb\n");
+}
+
+#[cfg(all(feature = "coreutils", feature = "unstable-vfs"))]
+#[tokio::test]
+async fn coreutils_work_on_the_sessions_vfs() {
+    use eryx::vfs::{ArcStorage, InMemoryStorage};
+
+    let executor = shell().build().unwrap().executor();
+    let storage = ArcStorage::new(Arc::new(InMemoryStorage::new()));
+    let mut session = SessionExecutor::new_with_vfs(executor, &[], storage)
+        .await
+        .unwrap();
+
+    let out = session
+        .execute(
+            r#"
+echo -e "pear\napple\nfig" > /data/fruit.txt
+sort /data/fruit.txt > /data/sorted.txt
+mkdir /data/dir && cp /data/sorted.txt /data/dir/copy.txt
+read -r first < /data/dir/copy.txt
+echo "first=$first"
+ls /data/dir
+wc -l < /data/fruit.txt
+"#,
+        )
+        .run()
+        .await
+        .unwrap();
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout),
+        "first=apple\ncopy.txt\n3\n"
+    );
+
+    // Children can't reach past the mounts.
+    let err = session.execute("cat /etc/passwd").run().await.unwrap_err();
+    assert!(err.to_string().starts_with("exit status 1"), "{err}");
+}

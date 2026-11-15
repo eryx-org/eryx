@@ -45,12 +45,14 @@ mod bindings {
 
 use bindings::eryx::process::process::{Host, HostChild, ProcessError};
 
-/// Most bytes kept from each of a child's stdout and stderr.
+/// Most bytes buffered for each of a child's stdin, stdout and stderr.
+// ponytail: batch pipes hold whole streams; streaming them is #815.
 const CHILD_OUTPUT_LIMIT: usize = 16 * 1024 * 1024;
 /// Fuel each child gets.
-// ponytail: fixed per-child budgets; charging the parent execution is #810.
+// ponytail: fixed per-child budgets, not the parent's; charging the parent
+// execution its children's fuel, memory and time is #810.
 const CHILD_FUEL: u64 = 10_000_000_000;
-/// Memory each child may grow to.
+/// Memory each child may grow to (see `CHILD_FUEL`, #810).
 const CHILD_MEMORY_LIMIT: usize = 256 * 1024 * 1024;
 
 /// Add the `eryx:process` interface to a sandbox linker.
@@ -109,8 +111,10 @@ impl Command {
     ///
     /// # Safety
     ///
-    /// wasmtime can't validate precompiled code: only load bytes you
-    /// produced and trust, as with
+    /// This function is unsafe because Wasmtime cannot fully validate
+    /// pre-compiled components for safety. Only use this with pre-compiled
+    /// bytes you control and trust. Using untrusted bytes can lead to arbitrary
+    /// code execution. The same contract as
     /// [`Executor::from_precompiled`](crate::Executor::from_precompiled).
     ///
     /// # Errors
@@ -132,8 +136,11 @@ impl Command {
     ///
     /// # Safety
     ///
-    /// As for [`from_precompiled`](Self::from_precompiled), and the file must
-    /// not change while the command is loaded.
+    /// This function is unsafe because Wasmtime cannot fully validate
+    /// pre-compiled components for safety. Only use this with files you
+    /// control and trust. Using untrusted files can lead to arbitrary code
+    /// execution. The file is memory-mapped, so it must also not be modified
+    /// while the command is loaded.
     ///
     /// # Errors
     ///
@@ -166,6 +173,14 @@ pub(crate) struct Commands(Arc<HashMap<String, Command>>);
 impl Commands {
     pub(crate) fn insert(&mut self, name: String, command: Command) {
         Arc::make_mut(&mut self.0).insert(name, command);
+    }
+
+    /// Register `command` as `name` unless something already is.
+    #[cfg(all(feature = "embedded", feature = "coreutils"))]
+    pub(crate) fn insert_if_absent(&mut self, name: &str, command: &Command) {
+        if !self.0.contains_key(name) {
+            Arc::make_mut(&mut self.0).insert(name.to_owned(), command.clone());
+        }
     }
 }
 
@@ -314,7 +329,8 @@ impl HostChild for ExecutorState {
             .get(&cmd)
             .ok_or(ProcessError::CommandNotFound)?
             .clone();
-        // WASI 0.2 has no working directory; tell the child where it is.
+        // WASI 0.2 has no working directory; tell the child where it is. The
+        // rest of a POSIX-ish environment (HOME, TMPDIR, /dev/null) is #832.
         if !env.iter().any(|(k, _)| k == "PWD") {
             env.push(("PWD".to_owned(), cwd));
         }

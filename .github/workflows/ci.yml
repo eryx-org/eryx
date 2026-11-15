@@ -432,10 +432,14 @@ jobs:
             crates/eryx-runtime/runtime-shell.cwasm
             crates/eryx-runtime/runtime-shell-windows.cwasm
             crates/eryx-runtime/runtime-shell-macos.cwasm
+            crates/eryx-runtime/coreutils.cwasm
+            crates/eryx-runtime/coreutils-windows.cwasm
+            crates/eryx-runtime/coreutils-macos.cwasm
           # As with the Python key, the cwasm's engine and CPU-feature settings
           # aren't covered: bump the prefix when they change. v1 -> v2: v1
-          # cwasms were built without the CPU presets (host features).
-          key: wasm-runtime-shell-v2-${{ hashFiles('crates/eryx-guest-shell/**', 'crates/eryx-runtime/wit/**', 'Cargo.toml', 'mise.toml') }}
+          # cwasms were built without the CPU presets (host features). v2 -> v3:
+          # the shell's embedded coreutils (#809).
+          key: wasm-runtime-shell-v3-${{ hashFiles('crates/eryx-guest-shell/**', 'crates/eryx-runtime/wit/**', 'clis/coreutils.toml', 'clis/patches/patch-uucore-wasip2.sh', 'crates/eryx-build/**', 'Cargo.toml', 'mise.toml') }}
 
       - uses: ./.github/actions/setup-rust
         if: steps.wasm-cache.outputs.cache-hit != 'true'
@@ -467,6 +471,16 @@ jobs:
           # aarch64 has no psABI presets, so "baseline" is the portable setting.
           compile baseline --target aarch64-apple-darwin \
             --output crates/eryx-runtime/runtime-shell-macos.cwasm
+
+          # The shell's embedded commands (the `coreutils` feature): built from
+          # clis/coreutils.toml, precompiled like the runtime but as a command.
+          mise run build-coreutils
+          export ERYX_WASM_PATH=crates/eryx-runtime/coreutils.wasm ERYX_LANGUAGE=command
+          compile x86-64-v2 --output crates/eryx-runtime/coreutils.cwasm
+          compile x86-64-v2 --target x86_64-pc-windows-msvc \
+            --output crates/eryx-runtime/coreutils-windows.cwasm
+          compile baseline --target aarch64-apple-darwin \
+            --output crates/eryx-runtime/coreutils-macos.cwasm
         env:
           ERYX_PRECOMPILE_BOOTSTRAP: "1"
 
@@ -474,7 +488,9 @@ jobs:
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: wasm-runtime-guest-shell
-          path: crates/eryx-runtime/runtime-shell*
+          path: |
+            crates/eryx-runtime/runtime-shell*
+            crates/eryx-runtime/coreutils*.cwasm
           retention-days: 1
 
   # The shell guest is its own workspace (see AGENTS.md), so the workspace
@@ -1132,10 +1148,10 @@ jobs:
         run: |
           # Cross-compiled by the build-runtime-* jobs; embedded by the eryx build.
           mv crates/eryx-runtime/runtime-windows.cwasm crates/eryx-runtime/runtime-python.cwasm
-          for lang in javascript shell; do
-            mv "crates/eryx-runtime/runtime-$lang-windows.cwasm" "crates/eryx-runtime/runtime-$lang.cwasm"
+          for name in runtime-javascript runtime-shell coreutils; do
+            mv "crates/eryx-runtime/$name-windows.cwasm" "crates/eryx-runtime/$name.cwasm"
           done
-          touch crates/eryx-runtime/runtime-*.cwasm
+          touch crates/eryx-runtime/*.cwasm
 
       - name: Install Rust
         shell: bash
@@ -1226,10 +1242,10 @@ jobs:
         run: |
           # Cross-compiled by the build-runtime-* jobs; embedded by the eryx build.
           mv crates/eryx-runtime/runtime-macos.cwasm crates/eryx-runtime/runtime-python.cwasm
-          for lang in javascript shell; do
-            mv "crates/eryx-runtime/runtime-$lang-macos.cwasm" "crates/eryx-runtime/runtime-$lang.cwasm"
+          for name in runtime-javascript runtime-shell coreutils; do
+            mv "crates/eryx-runtime/$name-macos.cwasm" "crates/eryx-runtime/$name.cwasm"
           done
-          touch crates/eryx-runtime/runtime-*.cwasm
+          touch crates/eryx-runtime/*.cwasm
 
       - name: Install Rust
         run: |

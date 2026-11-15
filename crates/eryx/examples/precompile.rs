@@ -78,10 +78,13 @@ fn main() -> anyhow::Result<()> {
 
     // The guest language of the component: ERYX_LANGUAGE, default python.
     // It is stamped into the output, and only Python is pre-initialized.
-    let language: eryx::Language = std::env::var("ERYX_LANGUAGE")
-        .unwrap_or_else(|_| "python".to_string())
-        .parse()
-        .map_err(|e: String| std::io::Error::other(e))?;
+    // `command` precompiles a shell command component (e.g. coreutils), which
+    // gets the version stamp but no language.
+    let language: Option<eryx::Language> = match std::env::var("ERYX_LANGUAGE").as_deref() {
+        Ok("command") => None,
+        Ok(name) => Some(name.parse().map_err(|e: String| std::io::Error::other(e))?),
+        Err(_) => Some(eryx::Language::Python),
+    };
 
     let wasm_path = std::env::var("ERYX_WASM_PATH")
         .unwrap_or_else(|_| "crates/eryx-runtime/runtime-python.wasm".to_string());
@@ -107,7 +110,7 @@ fn main() -> anyhow::Result<()> {
 
     // With preinit: do pre-initialization for faster session creation
     #[cfg(feature = "preinit")]
-    let component_bytes = if language != eryx::Language::Python {
+    let component_bytes = if language != Some(eryx::Language::Python) {
         println!("\n--- Step 1: Skipping pre-initialization (only Python has it) ---");
         wasm_bytes
     } else {
@@ -154,7 +157,9 @@ fn main() -> anyhow::Result<()> {
     println!("\n--- Step 2: Pre-compiling to native code ---");
     let start = Instant::now();
     let mut precompiled = eryx::Executor::precompile_with_target(&component_bytes, target)?;
-    eryx::Executor::stamp_language(&mut precompiled, language);
+    if let Some(language) = language {
+        eryx::Executor::stamp_language(&mut precompiled, language);
+    }
     let precompile_time = start.elapsed();
     println!("Pre-compile time: {precompile_time:?}");
     println!(
