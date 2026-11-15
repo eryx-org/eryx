@@ -19,9 +19,13 @@
 //!   `src/fetch.rs`). A fetch blocks the guest until its response is read.
 //! - `process.env`, with secrets' placeholders, when the sandbox has secrets.
 //!
-//! Not implemented yet: `snapshot-state`/`restore-state` (#823), trace events
-//! (#824), and subtask cancellation, which the host does by interrupting the
-//! guest instead.
+//! - `snapshot-state` serializes the session's top-level variables (global
+//!   properties and `let`/`const` bindings) with QuickJS's `JS_WriteObject`;
+//!   ones it can't serialize (functions, classes, promises) are skipped by
+//!   name. See `js::snapshot_state`.
+//!
+//! Not implemented yet: trace events (#824), and subtask cancellation, which
+//! the host does by interrupting the guest instead.
 
 #![allow(unsafe_code)]
 // Same convention as the CPython guest: a broken invariant in FFI glue is a
@@ -86,18 +90,27 @@ impl Interpreter for JsInterpreter {
                 let code = cx.pop_string().to_string();
                 return js::start_execute(func, cx, code);
             }
-            EXPORT_SNAPSHOT_STATE => {
-                push_err(
-                    &mut cx,
-                    "snapshot-state is not supported by the JS guest yet",
-                );
-            }
+            // snapshot-state() -> result<state-snapshot, string>
+            EXPORT_SNAPSHOT_STATE => match js::snapshot_state() {
+                Ok((data, skipped)) => {
+                    cx.stack.push(Value::Record(vec![
+                        Value::Bytes(data),
+                        Value::GenericList(skipped.into_iter().map(Value::String).collect()),
+                    ]));
+                    cx.stack.push(Value::ResultDiscriminant(true));
+                }
+                Err(msg) => push_err(&mut cx, &msg),
+            },
+            // restore-state(data: list<u8>) -> result<_, string>
             EXPORT_RESTORE_STATE => {
-                let _ = cx.stack.pop();
-                push_err(
-                    &mut cx,
-                    "restore-state is not supported by the JS guest yet",
-                );
+                let data = match cx.stack.pop() {
+                    Some(Value::Bytes(bytes)) => bytes,
+                    other => panic!("expected Bytes for restore-state data, got {other:?}"),
+                };
+                match js::restore_state(&data) {
+                    Ok(()) => cx.stack.push(Value::ResultDiscriminant(true)),
+                    Err(msg) => push_err(&mut cx, &msg),
+                }
             }
             EXPORT_CLEAR_STATE => js::clear_state(),
             EXPORT_SET_RESULT_VARIABLE => js::set_result_variable(cx.pop_string().to_string()),

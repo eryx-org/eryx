@@ -22,7 +22,7 @@ use rquickjs::context::EvalOptions;
 use rquickjs::promise::PromiseState;
 use rquickjs::{
     Array, CatchResultExt, CaughtError, Context, Ctx, Exception, Function, Object, Persistent,
-    Promise, Runtime, Value,
+    Promise, Runtime, Value, qjs,
 };
 use wit_dylib_ffi::ExportFunction;
 
@@ -38,12 +38,13 @@ const EVENT_NONE: u32 = 0;
 const EVENT_SUBTASK: u32 = 1;
 const SUBTASK_RETURNED: u32 = 2;
 
+// Fields drop in order, and each must go before the next: QuickJS asserts
+// that no object is alive when the runtime is freed.
 struct Engine {
-    // Must outlive `context`.
-    _runtime: Runtime,
-    context: Context,
     /// The object returned by `prelude.js`.
     hooks: Persistent<Object<'static>>,
+    context: Context,
+    _runtime: Runtime,
 }
 
 /// An in-flight `execute`.
@@ -80,6 +81,10 @@ impl Engine {
             let native = Object::new(ctx.clone())?;
             native.set("invoke", Function::new(ctx.clone(), native_invoke)?)?;
             native.set("write", Function::new(ctx.clone(), native_write)?)?;
+            native.set(
+                "evalScript",
+                Function::new(ctx.clone(), native_eval_script)?,
+            )?;
             let prelude: Function<'_> = ctx.eval(PRELUDE)?;
             let hooks: Object<'_> = prelude.call((native,))?;
             crate::fetch::install(&ctx)?;
@@ -87,9 +92,9 @@ impl Engine {
         });
         let hooks = hooks.unwrap_or_else(|e| panic!("failed to evaluate prelude: {e}"));
         Self {
-            _runtime: runtime,
-            context,
             hooks,
+            context,
+            _runtime: runtime,
         }
     }
 }
@@ -163,6 +168,12 @@ fn native_write(stream: u32, text: String) {
         };
         buf.extend_from_slice(&bytes);
     });
+}
+
+/// `__eryx.evalScript(source)`: run `source` as global code, whose
+/// `let`/`const` declarations persist (indirect eval's don't).
+fn native_eval_script(ctx: Ctx<'_>, source: String) -> rquickjs::Result<()> {
+    ctx.eval::<(), _>(source)
 }
 
 fn settle<'js>(
@@ -280,6 +291,14 @@ pub(crate) fn start_execute(export: ExportFunction, cx: Box<EryxCall>, code: Str
         if let Err(e) = ctx.eval::<(), _>(preamble).catch(ctx) {
             let msg = format_caught(ctx, hooks, e);
             return finish(hooks, Err(msg));
+        }
+        // After the preamble, which sets `process`: what's there now is the
+        // host's, not session state.
+        if let Err(e) = call_hook::<()>(hooks, "markHostGlobals", ()).catch(ctx) {
+            eprintln!("eryx-js: failed to record the host's globals: {e}");
+        }
+        if let Err(e) = call_hook::<()>(hooks, "noteCode", (code.as_str(),)).catch(ctx) {
+            eprintln!("eryx-js: failed to note the code's names: {e}");
         }
 
         let mut options = EvalOptions::default();
@@ -453,6 +472,151 @@ fn finish(hooks: &Object<'_>, outcome: Result<(), String>) -> u32 {
 
 pub(crate) fn set_result_variable(name: String) {
     RESULT_VARIABLE.with(|slot| *slot.borrow_mut() = name);
+}
+
+/// Version of the snapshot layout below. Bump it whenever the layout or the
+/// prelude's entry shape changes.
+const STATE_LAYOUT: u32 = 1;
+
+/// Start of a `restore-state` error for a snapshot in another state format,
+/// followed by the snapshot's format, a tab, and the one this runtime reads.
+/// Must match the host's `INCOMPATIBLE_STATE_PREFIX`.
+const INCOMPATIBLE_STATE_PREFIX: &str = "eryx:incompatible-state-format:";
+
+/// Largest snapshot the guest writes or reads, as the host's
+/// `MAX_SNAPSHOT_SIZE`, so a big session fails here with a clear error
+/// instead of being copied out.
+const MAX_STATE_BYTES: usize = 10 * 1024 * 1024;
+
+/// The format id on a snapshot's first line. `JS_WriteObject`'s encoding is
+/// only read back by the same QuickJS, so the version is part of it.
+fn state_format() -> String {
+    // SAFETY: a static NUL-terminated version string.
+    let version = unsafe { std::ffi::CStr::from_ptr(qjs::JS_GetVersion()) };
+    format!(
+        "eryx-js-state/{STATE_LAYOUT} quickjs-ng@{}",
+        version.to_string_lossy()
+    )
+}
+
+/// The pending exception's message, for an FFI call that failed.
+fn caught_message<'js>(ctx: &Ctx<'js>, hooks: &Object<'js>) -> String {
+    format_value(ctx, hooks, ctx.catch())
+}
+
+/// `JS_WriteObject` with object references (shared and cyclic objects), and
+/// without bytecode, so any function in the graph fails the write.
+fn write_object<'js>(ctx: &Ctx<'js>, value: &Value<'js>) -> Option<Vec<u8>> {
+    let raw = ctx.as_raw().as_ptr();
+    let mut size: qjs::size_t = 0;
+    // SAFETY: `value` is alive in `ctx`; the buffer is freed below.
+    let ptr = unsafe {
+        qjs::JS_WriteObject(
+            raw,
+            &mut size,
+            value.as_raw(),
+            qjs::JS_WRITE_OBJ_REFERENCE as i32,
+        )
+    };
+    if ptr.is_null() {
+        return None;
+    }
+    // SAFETY: QuickJS returned `size` bytes at `ptr`, allocated in `ctx`.
+    let bytes = unsafe { std::slice::from_raw_parts(ptr, size as usize) }.to_vec();
+    unsafe { qjs::js_free(raw, ptr.cast()) };
+    Some(bytes)
+}
+
+/// Serialize the session's top-level variables: the format id, a newline,
+/// then the `JS_WriteObject` encoding of the `[name, kind, value]` entries
+/// from the prelude's `stateEntries`. Values `JS_WriteObject` can't encode
+/// (functions, classes, promises, and anything holding one) are left out and
+/// named in the returned list.
+pub(crate) fn snapshot_state() -> Result<(Vec<u8>, Vec<String>), String> {
+    with_ctx(|ctx, hooks| {
+        let entries = call_hook::<Vec<Array<'_>>>(hooks, "stateEntries", ())
+            .catch(ctx)
+            .map_err(|e| format!("failed to collect the session's variables: {e}"))?;
+        let kept = Array::new(ctx.clone()).map_err(|e| e.to_string())?;
+        let mut skipped = Vec::new();
+        for entry in entries {
+            let name: String = entry.get(0).map_err(|e| e.to_string())?;
+            let value: Value<'_> = entry.get(2).map_err(|e| e.to_string())?;
+            if write_object(ctx, &value).is_some() {
+                kept.set(kept.len(), entry).map_err(|e| e.to_string())?;
+            } else {
+                // Not a failure of the snapshot: the name is reported instead.
+                let _ = ctx.catch();
+                skipped.push(name);
+            }
+        }
+        let encoded = write_object(ctx, &kept.into_value()).ok_or_else(|| {
+            format!(
+                "failed to serialize the session: {}",
+                caught_message(ctx, hooks)
+            )
+        })?;
+        let mut data = format!("{}\n", state_format()).into_bytes();
+        data.extend_from_slice(&encoded);
+        if data.len() > MAX_STATE_BYTES {
+            return Err(format!(
+                "Snapshot too large: {} bytes (max {MAX_STATE_BYTES} bytes)",
+                data.len()
+            ));
+        }
+        Ok((data, skipped))
+    })
+}
+
+/// Replace the session with one restored from [`snapshot_state`]'s data.
+/// Another format id is refused with [`INCOMPATIBLE_STATE_PREFIX`]. The data
+/// is read without bytecode (or SharedArrayBuffers), so a crafted snapshot
+/// can only produce plain values; the prelude checks their shape. On failure
+/// the session is left empty.
+pub(crate) fn restore_state(data: &[u8]) -> Result<(), String> {
+    let format = state_format();
+    let (found, encoded) = match data.iter().position(|&b| b == b'\n') {
+        Some(i) => (String::from_utf8_lossy(&data[..i]), &data[i + 1..]),
+        // No format line: not a snapshot of any known format.
+        None => (std::borrow::Cow::Borrowed(""), data),
+    };
+    if found != format {
+        return Err(format!("{INCOMPATIBLE_STATE_PREFIX}{found}\t{format}"));
+    }
+    // Never written, so never restored: reading is bounded like writing.
+    if data.len() > MAX_STATE_BYTES {
+        return Err(format!(
+            "Snapshot too large: {} bytes (max {MAX_STATE_BYTES} bytes)",
+            data.len()
+        ));
+    }
+    clear_state();
+    let restored = with_ctx(|ctx, hooks| {
+        // SAFETY: `encoded` outlives the call, which copies what it keeps.
+        let raw = unsafe {
+            qjs::JS_ReadObject(
+                ctx.as_raw().as_ptr(),
+                encoded.as_ptr(),
+                encoded.len() as qjs::size_t,
+                qjs::JS_READ_OBJ_REFERENCE as i32,
+            )
+        };
+        // SAFETY: `raw` is an owned value (or the exception marker) in `ctx`.
+        if unsafe { qjs::JS_IsException(raw) } {
+            return Err(format!(
+                "failed to read the snapshot: {}",
+                caught_message(ctx, hooks)
+            ));
+        }
+        let entries = unsafe { Value::from_raw(ctx.clone(), raw) };
+        call_hook::<()>(hooks, "restoreEntries", (entries,))
+            .catch(ctx)
+            .map_err(|e| format!("failed to restore the snapshot: {e}"))
+    });
+    if restored.is_err() {
+        clear_state();
+    }
+    restored
 }
 
 /// Drop the whole JS context; the next execute starts from a fresh one.
