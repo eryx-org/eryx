@@ -798,13 +798,27 @@ run = "python3 scripts/test_examples.py"
 description = "Test both Rust and Python code blocks in the book"
 depends = ["book:test", "book:test-python"]
 
+[tasks.ensure-wasm32-unknown-target]
+description = "Install the wasm32-unknown-unknown target for the pinned toolchain (eryx-linker-wasm)"
+run = """
+if ! rustup target list --installed | grep -qx wasm32-unknown-unknown; then
+    rustup target add wasm32-unknown-unknown
+fi
+"""
+
 [tasks.build-linker-wasm]
 description = "Build the eryx-linker-wasm crate for browser use (wasm-bindgen)"
+depends = ["ensure-wasm32-unknown-target"]
 run = """
 #!/usr/bin/env bash
 set -euo pipefail
 cargo build --package eryx-linker-wasm --target wasm32-unknown-unknown --release
-wasm-bindgen target/wasm32-unknown-unknown/release/eryx_linker_wasm.wasm \
+# Wherever cargo put it: CARGO_TARGET_DIR or build.target-dir can move it.
+target_dir=$(cargo metadata --format-version 1 --no-deps | jq -r .target_directory)
+# The pinned wasm-bindgen-cli (it must match the `wasm-bindgen` crate exactly),
+# not whichever `wasm-bindgen` comes first on PATH.
+mise exec cargo:wasm-bindgen-cli -- wasm-bindgen \
+  "$target_dir/wasm32-unknown-unknown/release/eryx_linker_wasm.wasm" \
   --target web \
   --out-dir js/demo/src/lib/linker-wasm \
   --out-name linker
