@@ -3,19 +3,20 @@ package eryx:process@0.1.0;
 /// Spawn host-registered WASI command components as child processes.
 ///
 /// Language-neutral: the shell guest uses it for external commands, and other
-/// guests could use it for `subprocess` or `child_process`. Children run in
-/// batch: stdin is buffered until `wait`, the child runs to completion inside
-/// `wait`, then its output can be read.
+/// guests could use it for `subprocess` or `child_process`. A child's stdin,
+/// stdout and stderr are streams, so pipeline stages run concurrently and
+/// apply backpressure to each other. The child runs while `wait` is in
+/// progress, so a caller reading its output must wait concurrently.
 interface process {
     enum process-error {
         /// No component is registered under that command name.
         command-not-found,
         /// The component could not be instantiated or run.
         spawn-failed,
-        /// The handle was used out of order (e.g. stdin written after close).
+        /// The handle was used out of order (e.g. waited on twice).
         io-error,
         /// The host's limits on child processes were reached: too many
-        /// running, arguments too large, or too much buffered data.
+        /// running, or arguments too large.
         limit-exceeded,
     }
 
@@ -23,18 +24,28 @@ interface process {
     /// table with these, since they aren't files on its `PATH`.
     list-commands: func() -> list<string>;
 
+    /// A spawned child and its output streams, which end when it exits.
+    record spawned {
+        child: child,
+        stdout: stream<u8>,
+        stderr: stream<u8>,
+    }
+
     resource child {
+        /// Start `cmd` reading `stdin`. It doesn't run until `wait` is
+        /// called: a caller that never waits never runs its child, and one
+        /// that reads its output must wait concurrently. Dropping the child
+        /// before `wait` finishes kills it.
         spawn: static func(
             cmd: string,
             args: list<string>,
             env: list<tuple<string, string>>,
             cwd: string,
-        ) -> result<child, process-error>;
-        write-stdin: func(data: list<u8>) -> result<u64, process-error>;
-        close-stdin: func();
-        read-stdout: func(max-bytes: u32) -> result<list<u8>, process-error>;
-        read-stderr: func(max-bytes: u32) -> result<list<u8>, process-error>;
-        wait: func() -> result<s32, process-error>;
+            stdin: stream<u8>,
+        ) -> result<spawned, process-error>;
+        /// Run the child to completion, returning its exit code. Its
+        /// output streams end when it exits.
+        wait: async func() -> result<s32, process-error>;
     }
 }
 
@@ -42,4 +53,3 @@ interface process {
 world spawner {
     import process;
 }
-

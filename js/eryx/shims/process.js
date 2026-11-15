@@ -12,16 +12,6 @@ export class Child {
   static spawn() {
     throw { payload: "command-not-found" };
   }
-  writeStdin() {
-    throw { payload: "io-error" };
-  }
-  closeStdin() {}
-  readStdout() {
-    throw { payload: "io-error" };
-  }
-  readStderr() {
-    throw { payload: "io-error" };
-  }
   wait() {
     throw { payload: "io-error" };
   }

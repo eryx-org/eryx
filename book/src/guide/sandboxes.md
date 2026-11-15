@@ -99,19 +99,24 @@ let result = sandbox.execute("printf 'b\na\n' | sort | head -n 1").await?;
 - **Files:** a child sees the session's VFS mounts (with `unstable-vfs`) and
   nothing else of the host.
 - **Network:** children have none yet.
-- **Limits:** children count against the execution's `max_fuel` (each
-  may burn at most 10 billion instructions of it) and stop at its
-  `execution_timeout` and cancellation, even mid-computation. Memory is per
-  child: each may grow to 256 MiB, outside `max_memory_bytes`; children run
-  one at a time.
-  The host memory children hold (arguments, environment, buffered stdin and
-  unread output) is capped per execution by
+- **Limits:** children count against the execution's `max_fuel` as they
+  run (each may burn at most 10 billion instructions of it), and stop at its
+  `execution_timeout` and cancellation, even mid-computation. They're
+  charged once per 10 ms epoch tick, so together they can overshoot
+  `max_fuel` by at most one tick of work per running child (at most 64).
+  The running children share 256 MiB of memory, outside `max_memory_bytes`;
+  a child that can't grow fails like one out of memory.
+  The host memory children's arguments and environment hold is capped per
+  execution by
   `ResourceLimits::max_child_host_bytes` (default 64 MiB), with at most 64
   children spawned but not yet finished and 2 MiB of arguments and
   environment per spawn. Past a limit the spawn fails and the shell reports
   `<command>: limit-exceeded`.
-- **Pipes:** children run in batch: a stage's input is buffered before it
-  runs, so an endless producer piped into a command runs out of fuel.
+- **Pipes:** a child's stdin, stdout and stderr stream through 64 KiB pipes,
+  so pipeline stages run together and a full pipe makes its writer wait:
+  `yes | head -n 1` stops once `head` exits. A loop of builtins writing into
+  a pipe (`while true; do echo y; done | head -n 1`) still runs until its
+  timeout, since the shell has no `SIGPIPE` to stop it.
 - **Precompiling:** `Command::from_precompiled{,_file}` loads one precompiled
   with `Executor::precompile` or `eryx-precompile compile` (without
   `--language`). It carries the same version stamp as precompiled runtimes, so
