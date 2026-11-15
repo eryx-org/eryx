@@ -487,6 +487,7 @@ class HttpRule:
         """
         ...
 
+@final
 class NetConfig:
     """Network configuration for sandbox execution.
 
