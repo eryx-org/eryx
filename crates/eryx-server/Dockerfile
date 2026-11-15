@@ -43,10 +43,17 @@ RUN mkdir -p crates/eryx-wasm-runtime/tests/python-stdlib && \
 # The x86-64-vN levels are x86-64 only; building this image on an arm64
 # host needs --build-arg ERYX_CPU_FEATURES=baseline, which pins the target
 # without enabling optional features (aarch64 has no psABI presets).
+#
+# The target cache mount outlives builds, and COPY keeps the build context's
+# mtimes, so sources can look older than cached artifacts built from other
+# sources; cargo then reuses those (#876). Touching the copied sources makes
+# cargo re-check every workspace crate, as CI does. Each stage gets its own
+# cache id: they build different packages with different features.
 ARG ERYX_CPU_FEATURES=x86-64-v3
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
-  --mount=type=cache,target=/build/target \
-  ERYX_PRECOMPILE_BOOTSTRAP=1 \
+  --mount=type=cache,id=eryx-precompile-target,target=/build/target \
+  find Cargo.toml Cargo.lock crates -type f -exec touch {} + \
+  && ERYX_PRECOMPILE_BOOTSTRAP=1 \
   cargo run --release -p eryx-precompile -- compile \
   crates/eryx-runtime/runtime.wasm \
   --preinit \
@@ -87,9 +94,11 @@ COPY --from=runtime /build/crates/eryx-runtime/runtime.cwasm crates/eryx-runtime
 # - cargo registry cache: avoids re-downloading crates
 # - target dir cache: enables incremental compilation across builds
 # We copy the final binary out of the cache mount since it disappears after RUN.
+# The sources are touched first, as in the precompile stage (#876).
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
-  --mount=type=cache,target=/build/target \
-  cargo build --release -p eryx-server --features eryx/embedded,eryx/preinit \
+  --mount=type=cache,id=eryx-server-target,target=/build/target \
+  find Cargo.toml Cargo.lock crates -type f -exec touch {} + \
+  && cargo build --release -p eryx-server --features eryx/embedded,eryx/preinit \
   && cp target/release/eryx-server /usr/local/bin/eryx-server
 
 # ---------- Stage 3: Runtime image ----------
