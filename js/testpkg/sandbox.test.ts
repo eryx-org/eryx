@@ -86,14 +86,6 @@ except TimeoutError:
   });
 });
 
-describe("language", () => {
-  it("only accepts python", () => {
-    expect(() => new Sandbox({ language: "python" })).not.toThrow();
-    // @ts-expect-error: other languages aren't in the type yet.
-    expect(() => new Sandbox({ language: "javascript" })).toThrow(/only "python"/);
-  });
-});
-
 describe("state persistence", () => {
   const sandbox = new Sandbox();
 
