@@ -48,10 +48,12 @@ RUN mkdir -p crates/eryx-wasm-runtime/tests/python-stdlib && \
 # mtimes, so sources can look older than cached artifacts built from other
 # sources; cargo then reuses those (#876). Touching the copied sources makes
 # cargo re-check every workspace crate, as CI does. Each stage gets its own
-# cache id: they build different packages with different features.
+# cache id: they build different packages with different features. The mount
+# is locked so that concurrent builds (e.g. from other worktrees) can't re-link
+# a binary between cargo building it and this RUN using it.
 ARG ERYX_CPU_FEATURES=x86-64-v3
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
-  --mount=type=cache,id=eryx-precompile-target,target=/build/target \
+  --mount=type=cache,id=eryx-precompile-target,sharing=locked,target=/build/target \
   find Cargo.toml Cargo.lock crates -type f -exec touch {} + \
   && ERYX_PRECOMPILE_BOOTSTRAP=1 \
   cargo run --release -p eryx-precompile -- compile \
@@ -94,9 +96,10 @@ COPY --from=runtime /build/crates/eryx-runtime/runtime.cwasm crates/eryx-runtime
 # - cargo registry cache: avoids re-downloading crates
 # - target dir cache: enables incremental compilation across builds
 # We copy the final binary out of the cache mount since it disappears after RUN.
-# The sources are touched first, as in the precompile stage (#876).
+# The sources are touched first, and the mount locked, as in the precompile
+# stage (#876).
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
-  --mount=type=cache,id=eryx-server-target,target=/build/target \
+  --mount=type=cache,id=eryx-server-target,sharing=locked,target=/build/target \
   find Cargo.toml Cargo.lock crates -type f -exec touch {} + \
   && cargo build --release -p eryx-server --features eryx/embedded,eryx/preinit \
   && cp target/release/eryx-server /usr/local/bin/eryx-server
