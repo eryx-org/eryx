@@ -99,7 +99,11 @@ let result = sandbox.execute("printf 'b\na\n' | sort | head -n 1").await?;
 - **Files:** a child sees the session's VFS mounts (with `unstable-vfs`) and
   nothing else of the host.
 - **Network:** children have none yet.
-- **Limits:** each child has a fixed fuel and memory budget of its own.
+- **Limits:** children count against the execution's `max_fuel` (each
+  may burn at most 10 billion instructions of it) and stop at its
+  `execution_timeout` and cancellation, even mid-computation. Memory is per
+  child: each may grow to 256 MiB, outside `max_memory_bytes`; children run
+  one at a time.
   The host memory children hold (arguments, environment, buffered stdin and
   unread output) is capped per execution by
   `ResourceLimits::max_child_host_bytes` (default 64 MiB), with at most 64

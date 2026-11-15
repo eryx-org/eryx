@@ -13,9 +13,10 @@
 
 use std::path::PathBuf;
 use std::sync::OnceLock;
+use std::time::{Duration, Instant};
 
 use eryx::language::Shell;
-use eryx::{Command, ErrorKind, Sandbox, SandboxBuilder, state};
+use eryx::{Command, ErrorKind, ResourceLimits, Sandbox, SandboxBuilder, SessionExecutor, state};
 
 /// The test command, built once per test process.
 fn test_cmd() -> Command {
@@ -125,7 +126,6 @@ async fn children_cannot_read_host_files() {
 #[cfg(feature = "unstable-vfs")]
 #[tokio::test]
 async fn children_share_the_sessions_vfs() {
-    use eryx::SessionExecutor;
     use eryx::vfs::{ArcStorage, InMemoryStorage};
     use std::sync::Arc;
 
@@ -212,7 +212,7 @@ const BIG: &str = "BIG=x; i=0; while [ $i -lt 20 ]; do BIG=$BIG$BIG; i=$((i + 1)
 async fn a_pipeline_of_large_arguments_fails_the_spawn() {
     let sandbox = shell()
         .with_command("upper", test_cmd())
-        .with_resource_limits(eryx::ResourceLimits::default().with_max_memory_bytes(64 << 20))
+        .with_resource_limits(ResourceLimits::default().with_max_memory_bytes(64 << 20))
         .build()
         .unwrap();
 
@@ -228,7 +228,7 @@ async fn a_pipeline_of_large_arguments_fails_the_spawn() {
     // The same under a budget smaller than the live-child cap.
     let sandbox = shell()
         .with_command("upper", test_cmd())
-        .with_resource_limits(eryx::ResourceLimits::default().with_max_child_host_bytes(4 << 20))
+        .with_resource_limits(ResourceLimits::default().with_max_child_host_bytes(4 << 20))
         .build()
         .unwrap();
     let stages = [r#"upper "$BIG""#; 8].join(" | ");
@@ -252,6 +252,107 @@ async fn pooled_sandboxes_keep_their_commands() {
     let sandbox = pool.acquire().await.unwrap();
     let out = sandbox.execute("echo hi | upper").await.unwrap();
     assert_eq!(out.stdout_utf8().unwrap(), "HI\n");
+}
+
+/// A child burns the parent's fuel, so one that spins exhausts the
+/// execution's limit rather than only its own.
+#[tokio::test]
+async fn children_burn_the_parents_fuel() {
+    let sandbox = shell()
+        .with_command("tc", test_cmd())
+        .with_resource_limits(ResourceLimits::default().with_max_fuel(100_000_000))
+        .build()
+        .unwrap();
+    // The limit is plenty for the shell itself.
+    sandbox.execute("tc argv0").await.unwrap();
+    let err = sandbox.execute("tc spin").await.unwrap_err();
+    assert!(
+        matches!(err.kind(), ErrorKind::FuelExhausted { .. }),
+        "{err:?}"
+    );
+}
+
+/// A CPU-bound child stops at the parent's timeout, not when its own fuel
+/// runs out (seconds later).
+#[tokio::test]
+async fn a_spinning_child_stops_at_the_parents_timeout() {
+    let sandbox = shell()
+        .with_command("tc", test_cmd())
+        .with_resource_limits(
+            ResourceLimits::default().with_execution_timeout(Duration::from_millis(300)),
+        )
+        .build()
+        .unwrap();
+    let start = Instant::now();
+    let err = sandbox.execute("tc spin").await.unwrap_err();
+    assert!(matches!(err.kind(), ErrorKind::Timeout(_)), "{err:?}");
+    assert!(
+        start.elapsed() < Duration::from_secs(3),
+        "{:?}",
+        start.elapsed()
+    );
+}
+
+/// A child the timeout or cancellation drops midway leaves nothing behind
+/// that stops the session running children afterwards, once it has reset
+/// (after a timeout by hand; a cancel resets on the next call).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_session_runs_children_after_one_is_dropped() {
+    let executor = shell()
+        .with_command("tc", test_cmd())
+        .build()
+        .unwrap()
+        .executor();
+    let limits = ResourceLimits::default()
+        .with_execution_timeout(Duration::from_millis(300))
+        .with_max_child_host_bytes(3 << 20);
+    let mut session = SessionExecutor::new_with_limits(executor, &[], &limits)
+        .await
+        .unwrap();
+    let spin = format!("{BIG}\nX=\"$BIG\" tc spin");
+
+    for _ in 0..2 {
+        let err = session.execute(&spin).run().await.unwrap_err();
+        assert!(matches!(err.kind(), ErrorKind::Timeout(_)), "{err:?}");
+        session.reset(&[]).await.unwrap();
+    }
+
+    session.set_execution_timeout(None);
+    let token = eryx::CancellationToken::new();
+    let canceller = token.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        canceller.cancel();
+    });
+    let err = session
+        .execute(&spin)
+        .with_cancellation(token)
+        .run()
+        .await
+        .unwrap_err();
+    assert!(matches!(err.kind(), ErrorKind::Cancelled), "{err:?}");
+
+    let out = session
+        .execute(format!("{BIG}\nX=\"$BIG\" tc argv0; echo hi | tc"))
+        .run()
+        .await
+        .unwrap();
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "tc\nHI\n");
+    assert!(out.state_was_reset);
+}
+
+/// Cancelling the execution stops a CPU-bound child too.
+#[tokio::test(flavor = "multi_thread")]
+async fn cancelling_stops_a_spinning_child() {
+    let sandbox = shell().with_command("tc", test_cmd()).build().unwrap();
+    let handle = sandbox.execute_cancellable("tc spin");
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    handle.cancel();
+    let err = tokio::time::timeout(Duration::from_secs(3), handle.wait())
+        .await
+        .expect("cancellation stops the child")
+        .unwrap_err();
+    assert!(matches!(err.kind(), ErrorKind::Cancelled), "{err:?}");
 }
 
 /// The embedded shell runs the embedded uutils coreutils (the `coreutils`
@@ -290,7 +391,6 @@ async fn the_embedded_shell_runs_coreutils() {
 #[cfg(all(feature = "coreutils", feature = "unstable-vfs"))]
 #[tokio::test]
 async fn coreutils_work_on_the_sessions_vfs() {
-    use eryx::SessionExecutor;
     use eryx::vfs::{ArcStorage, InMemoryStorage};
     use std::sync::Arc;
 

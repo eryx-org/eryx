@@ -18,15 +18,18 @@
 //!   the parent's hybrid VFS, so the same mounts and permissions and nothing
 //!   else. Without it, no filesystem.
 //! - **Network:** none. Children get no sockets; the proxy is #812.
-//! - **Limits:** a fixed fuel and memory budget of its own per child. Charging
-//!   children to the parent execution is #810.
+//! - **Limits:** a child burns the parent execution's fuel (at most
+//!   `CHILD_FUEL` per child) and stops at its timeout and cancellation.
+//!   Memory is per child: each may grow to `CHILD_MEMORY_LIMIT`, on top of
+//!   the parent's own limit, and the host memory children hold is bounded by
+//!   the execution's `ChildBudget`.
 
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::{Arc, OnceLock};
 
-use wasmtime::component::{Component, HasSelf, Linker, Resource, ResourceTable};
-use wasmtime::{Engine, Store, StoreLimits, StoreLimitsBuilder};
+use wasmtime::component::{Access, Component, HasSelf, Linker, Resource, ResourceTable};
+use wasmtime::{AsContextMut, Engine, Store, StoreLimits, StoreLimitsBuilder, UpdateDeadline};
 use wasmtime_wasi::p2::bindings::CommandPre;
 use wasmtime_wasi::p2::pipe::{MemoryInputPipe, MemoryOutputPipe};
 use wasmtime_wasi::{WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView};
@@ -38,21 +41,25 @@ mod bindings {
     wasmtime::component::bindgen!({
         path: "wit",
         world: "eryx:process/spawner",
-        imports: { default: async },
+        // `wait` gets the parent's store, to charge it the child's fuel.
+        imports: {
+            "eryx:process/process.[method]child.wait": async | store,
+            default: async,
+        },
         with: { "eryx:process/process.child": super::ChildProcess },
     });
 }
 
-use bindings::eryx::process::process::{Host, HostChild, ProcessError};
+use bindings::eryx::process::process::{Host, HostChild, HostChildWithStore, ProcessError};
 
 /// Most bytes buffered for each of a child's stdin, stdout and stderr.
 // ponytail: batch pipes hold whole streams; streaming them is #815.
 const CHILD_OUTPUT_LIMIT: usize = 16 * 1024 * 1024;
-/// Fuel each child gets.
-// ponytail: fixed per-child budgets, not the parent's; charging the parent
-// execution its children's fuel, memory and time is #810.
+/// Most fuel one child may burn, taken from the parent's.
 const CHILD_FUEL: u64 = 10_000_000_000;
-/// Memory each child may grow to (see `CHILD_FUEL`, #810).
+/// Memory each child may grow to, on top of the parent's limit.
+// ponytail: per child, not charged to the parent's max_memory_bytes; one
+// child runs at a time, so a script holds at most this much more.
 const CHILD_MEMORY_LIMIT: usize = 256 * 1024 * 1024;
 /// Children spawned but not yet waited on, at most, per execution.
 const MAX_LIVE_CHILDREN: usize = 64;
@@ -304,7 +311,7 @@ pub struct ChildProcess {
     env: Vec<(String, String)>,
     stdin: Vec<u8>,
     stdin_closed: bool,
-    done: Option<(i32, Vec<u8>, Vec<u8>)>,
+    done: Option<ChildOutput>,
     /// What this child holds of the execution's [`ChildBudget`].
     charged: u64,
     /// Not yet waited on, so it counts as live.
@@ -313,25 +320,38 @@ pub struct ChildProcess {
     vfs: Option<eryx_vfs::HybridVfsCtx<eryx_vfs::ArcStorage>>,
 }
 
-impl ChildProcess {
-    /// Run the child to completion, keeping at most `output_room` bytes of its
-    /// stdout and stderr each.
-    async fn run(&mut self, output_room: usize) -> Result<i32, String> {
-        if let Some((code, ..)) = &self.done {
-            return Ok(*code);
-        }
-        let engine = self.command.pre.engine().clone();
-        let stdout = MemoryOutputPipe::new(output_room);
-        let stderr = MemoryOutputPipe::new(output_room);
+/// What `wait` runs a child with, taken out of its handle.
+struct ChildRun {
+    pre: CommandPre<ChildState>,
+    argv: Vec<String>,
+    env: Vec<(String, String)>,
+    stdin: Vec<u8>,
+    /// Most bytes kept of each of stdout and stderr.
+    output_room: usize,
+    /// Fuel the child may burn.
+    fuel: u64,
+    #[cfg(feature = "unstable-vfs")]
+    vfs: Option<eryx_vfs::HybridVfsCtx<eryx_vfs::ArcStorage>>,
+}
+
+/// A child's exit code, stdout and stderr.
+type ChildOutput = (i32, Vec<u8>, Vec<u8>);
+
+impl ChildRun {
+    /// Run the child to completion, returning its output and the fuel it
+    /// burned.
+    async fn run(self) -> (Result<ChildOutput, String>, u64) {
+        let stdout = MemoryOutputPipe::new(self.output_room);
+        let stderr = MemoryOutputPipe::new(self.output_room);
         let wasi = WasiCtxBuilder::new()
             .args(&self.argv)
             .envs(&self.env)
-            .stdin(MemoryInputPipe::new(std::mem::take(&mut self.stdin)))
+            .stdin(MemoryInputPipe::new(self.stdin))
             .stdout(stdout.clone())
             .stderr(stderr.clone())
             .build();
         let mut store = Store::new(
-            &engine,
+            self.pre.engine(),
             ChildState {
                 wasi,
                 table: ResourceTable::new(),
@@ -339,29 +359,106 @@ impl ChildProcess {
                     .memory_size(CHILD_MEMORY_LIMIT)
                     .build(),
                 #[cfg(feature = "unstable-vfs")]
-                vfs: self.vfs.take(),
+                vfs: self.vfs,
             },
         );
         store.limiter(|s| &mut s.limits);
-        store.set_fuel(CHILD_FUEL).map_err(|e| e.to_string())?;
-        store.set_epoch_deadline(u64::MAX / 2);
+        // Yield on every epoch tick. The parent's timeout and cancellation
+        // race its whole execution, so yielding lets them drop a CPU-bound
+        // child as they would a guest blocked in `time.sleep`. Without a
+        // timeout or cancellation the epoch clock may not run at all.
+        store.set_epoch_deadline(1);
+        store.epoch_deadline_callback(|_| Ok(UpdateDeadline::Yield(1)));
 
-        let command = self
-            .command
-            .pre
-            .instantiate_async(&mut store)
-            .await
-            .map_err(|e| format!("instantiate: {e}"))?;
-        let code = match command.wasi_cli_run().call_run(&mut store).await {
-            Ok(Ok(())) => 0,
-            Ok(Err(())) => 1,
-            Err(e) => match e.downcast_ref::<wasmtime_wasi::I32Exit>() {
-                Some(exit) => exit.0,
-                None => return Err(format!("{}: {e}", self.argv[0])),
-            },
-        };
+        let code = async {
+            store.set_fuel(self.fuel).map_err(|e| e.to_string())?;
+            let command = self
+                .pre
+                .instantiate_async(&mut store)
+                .await
+                .map_err(|e| format!("instantiate: {e}"))?;
+            match command.wasi_cli_run().call_run(&mut store).await {
+                Ok(Ok(())) => Ok(0),
+                Ok(Err(())) => Ok(1),
+                Err(e) => match e.downcast_ref::<wasmtime_wasi::I32Exit>() {
+                    Some(exit) => Ok(exit.0),
+                    None => Err(format!("{}: {e}", self.argv[0])),
+                },
+            }
+        }
+        .await;
+        let fuel_used = self.fuel.saturating_sub(store.get_fuel().unwrap_or(0));
         drop(store);
-        self.done = Some((code, stdout.contents().to_vec(), stderr.contents().to_vec()));
+        let output =
+            code.map(|code| (code, stdout.contents().to_vec(), stderr.contents().to_vec()));
+        (output, fuel_used)
+    }
+}
+
+impl ExecutorState {
+    /// Start waiting on `child`: what to run it with, given `fuel` left in
+    /// the parent, or its exit code if it has already run.
+    fn take_child_run(
+        &mut self,
+        child: &Resource<ChildProcess>,
+        fuel: u64,
+    ) -> Result<Result<ChildRun, i32>, ProcessError> {
+        if self.suspended.is_some() {
+            return Err(ProcessError::SpawnFailed);
+        }
+        let child = self
+            .table
+            .get_mut(child)
+            .map_err(|_| ProcessError::IoError)?;
+        if child.live {
+            child.live = false;
+            self.child_budget.live -= 1;
+        }
+        if let Some((code, ..)) = &child.done {
+            return Ok(Err(*code));
+        }
+        if child.argv.is_empty() {
+            // It already ran, and failed.
+            return Err(ProcessError::SpawnFailed);
+        }
+        // Each output stream gets half of what is left while the argv, env
+        // and stdin are still held. Those move into the run and are freed
+        // with it, even if the parent's timeout drops it midway, so only the
+        // output is charged from here on.
+        let output_room = (self.child_budget.remaining() / 2).min(CHILD_OUTPUT_LIMIT as u64);
+        self.child_budget
+            .release(std::mem::take(&mut child.charged));
+        Ok(Ok(ChildRun {
+            pre: child.command.pre.clone(),
+            argv: std::mem::take(&mut child.argv),
+            env: std::mem::take(&mut child.env),
+            stdin: std::mem::take(&mut child.stdin),
+            output_room: output_room as usize,
+            fuel: fuel.min(CHILD_FUEL),
+            #[cfg(feature = "unstable-vfs")]
+            vfs: child.vfs.take(),
+        }))
+    }
+
+    /// Record how `child`'s run ended.
+    fn finish_child(
+        &mut self,
+        child: &Resource<ChildProcess>,
+        output: Result<ChildOutput, String>,
+    ) -> Result<i32, ProcessError> {
+        let child = self
+            .table
+            .get_mut(child)
+            .map_err(|_| ProcessError::IoError)?;
+        let (code, out, err) = output.map_err(|e| {
+            tracing::warn!(error = %e, "child command failed");
+            ProcessError::SpawnFailed
+        })?;
+        // Fits: each stream was capped at half of what was left.
+        let held = (out.len() + err.len()) as u64;
+        self.child_budget.used += held;
+        child.charged += held;
+        child.done = Some((code, out, err));
         Ok(code)
     }
 }
@@ -502,42 +599,6 @@ impl HostChild for ExecutorState {
         Ok(err)
     }
 
-    async fn wait(&mut self, child: Resource<ChildProcess>) -> Result<i32, ProcessError> {
-        if self.suspended.is_some() {
-            return Err(ProcessError::SpawnFailed);
-        }
-        let child = self
-            .table
-            .get_mut(&child)
-            .map_err(|_| ProcessError::IoError)?;
-        if child.live {
-            child.live = false;
-            self.child_budget.live -= 1;
-        }
-        if child.done.is_none() {
-            // Its stdin goes into the child and is freed with it; its output
-            // is charged instead, each stream capped at what is left.
-            let stdin = child.stdin.len() as u64;
-            let room = (self.child_budget.remaining() / 2).min(CHILD_OUTPUT_LIMIT as u64);
-            let result = child.run(room as usize).await;
-            child.charged -= stdin;
-            self.child_budget.release(stdin);
-            let code = result.map_err(|e| {
-                tracing::warn!(error = %e, "child command failed");
-                ProcessError::SpawnFailed
-            })?;
-            let output = child
-                .done
-                .as_ref()
-                .map_or(0, |(_, out, err)| (out.len() + err.len()) as u64);
-            // Fits: each stream was capped at half of what was left.
-            self.child_budget.used += output;
-            child.charged += output;
-            return Ok(code);
-        }
-        Ok(child.done.as_ref().map_or(0, |(code, ..)| *code))
-    }
-
     async fn drop(&mut self, child: Resource<ChildProcess>) -> wasmtime::Result<()> {
         let child = self.table.delete(child)?;
         self.child_budget.release(child.charged);
@@ -545,6 +606,26 @@ impl HostChild for ExecutorState {
             self.child_budget.live -= 1;
         }
         Ok(())
+    }
+}
+
+impl<T: Send> HostChildWithStore<T> for HasSelf<ExecutorState> {
+    /// Run the child, charging the parent the fuel it burns.
+    async fn wait(
+        mut host: Access<'_, T, Self>,
+        child: Resource<ChildProcess>,
+    ) -> Result<i32, ProcessError> {
+        let fuel = host.as_context_mut().get_fuel().unwrap_or(0);
+        let run = match host.get().take_child_run(&child, fuel)? {
+            Ok(run) => run,
+            Err(code) => return Ok(code),
+        };
+        let (output, fuel_used) = run.run().await;
+        let mut store = host.as_context_mut();
+        let left = store.get_fuel().unwrap_or(0).saturating_sub(fuel_used);
+        // Fuel is always enabled on the shared engine.
+        let _ = store.set_fuel(left);
+        host.get().finish_child(&child, output)
     }
 }
 
@@ -592,7 +673,13 @@ mod tests {
                 .await
                 .unwrap();
             HostChild::close_stdin(&mut state, Resource::new_borrow(child.rep())).await;
-            assert_eq!(HostChild::wait(&mut state, rep).await.unwrap(), 0);
+            // `wait`, without the parent store it charges.
+            let Ok(run) = state.take_child_run(&rep, u64::MAX).unwrap() else {
+                panic!("not run yet");
+            };
+            let (output, fuel_used) = run.run().await;
+            assert!(fuel_used > 0);
+            assert_eq!(state.finish_child(&rep, output).unwrap(), 0);
             let out = HostChild::read_stdout(&mut state, Resource::new_borrow(child.rep()), 64)
                 .await
                 .unwrap();
@@ -602,6 +689,41 @@ mod tests {
         assert_eq!(COMPILED.load(Ordering::SeqCst), compiled);
         // Dropped children give back everything they held.
         assert_eq!((state.child_budget.used, state.child_budget.live), (0, 0));
+    }
+
+    /// Output room is sized with the child's own inputs still charged, so
+    /// inputs plus output stay within the budget; starting the run then
+    /// releases the inputs.
+    #[tokio::test]
+    async fn output_room_counts_the_childs_inputs() {
+        let mut commands = Commands::default();
+        commands.insert(
+            "upper".into(),
+            Command::from_bytes(&test_cmd_wasm()).unwrap(),
+        );
+        let mut state = ExecutorState::placeholder();
+        state.commands = commands;
+        state.child_budget = ChildBudget::new(Some(4 << 20));
+
+        let env = vec![("X".to_owned(), "x".repeat(1 << 20))];
+        let child = HostChild::spawn(&mut state, "upper".into(), vec![], env, "/".into())
+            .await
+            .unwrap();
+        let rep = Resource::new_borrow(child.rep());
+        HostChild::write_stdin(
+            &mut state,
+            Resource::new_borrow(child.rep()),
+            vec![0; 1 << 20],
+        )
+        .await
+        .unwrap();
+        let held = state.child_budget.used;
+        assert!(held > 2 << 20);
+        let Ok(run) = state.take_child_run(&rep, u64::MAX).unwrap() else {
+            panic!("not run yet");
+        };
+        assert_eq!(run.output_room as u64, ((4 << 20) - held) / 2);
+        assert_eq!(state.child_budget.used, 0);
     }
 
     #[tokio::test]
