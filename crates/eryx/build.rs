@@ -64,8 +64,9 @@ mod embedded_runtime {
         language: &'static str,
         /// Its file name without `.cwasm`, e.g. `runtime-python`.
         stem: &'static str,
-        /// The `eryx-precompile setup --language` that downloads and caches it.
-        setup_language: &'static str,
+        /// The `eryx-precompile setup --language` that downloads and caches
+        /// it, if any does yet.
+        setup_language: Option<&'static str>,
         /// The workspace mise task that builds it.
         mise_task: &'static str,
         /// The cargo feature that embeds it.
@@ -83,7 +84,7 @@ mod embedded_runtime {
         Runtime {
             language: "python",
             stem: "runtime-python",
-            setup_language: "python",
+            setup_language: Some("python"),
             mise_task: "precompile-runtime-python",
             feature: "PYTHON",
             path_var: "ERYX_RUNTIME_CWASM",
@@ -93,7 +94,7 @@ mod embedded_runtime {
         Runtime {
             language: "javascript",
             stem: "runtime-javascript",
-            setup_language: "javascript",
+            setup_language: Some("javascript"),
             mise_task: "precompile-runtime-javascript",
             feature: "JAVASCRIPT",
             path_var: "ERYX_RUNTIME_CWASM_JAVASCRIPT",
@@ -103,7 +104,7 @@ mod embedded_runtime {
         Runtime {
             language: "shell",
             stem: "runtime-shell",
-            setup_language: "shell",
+            setup_language: Some("shell"),
             mise_task: "precompile-runtime-shell",
             feature: "SHELL",
             path_var: "ERYX_RUNTIME_CWASM_SHELL",
@@ -115,7 +116,7 @@ mod embedded_runtime {
         Runtime {
             language: "coreutils",
             stem: "coreutils",
-            setup_language: "shell",
+            setup_language: Some("shell"),
             mise_task: "precompile-coreutils",
             feature: "COREUTILS",
             path_var: "ERYX_COREUTILS_CWASM",
@@ -127,7 +128,9 @@ mod embedded_runtime {
         Runtime {
             language: "bundler",
             stem: "eryx-bundler",
-            setup: false,
+            // `setup` doesn't fetch the bundler yet (#827 step 4).
+            setup_language: None,
+            mise_task: "precompile-bundler",
             feature: "PACKAGES",
             path_var: "ERYX_BUNDLER_CWASM",
             with_embedded: false,
@@ -193,7 +196,8 @@ mod embedded_runtime {
                     println!(
                         "cargo::warning=Not using the cached {} runtime: {reason}. \
                          Run `eryx-precompile setup --language {}` again to rebuild it.",
-                        self.language, self.setup_language
+                        self.language,
+                        self.setup_language.unwrap_or(self.language)
                     );
                     None
                 }
@@ -256,32 +260,36 @@ mod embedded_runtime {
                 None if std::env::var("ERYX_PRECOMPILE_BOOTSTRAP").is_ok() => {
                     self.write(out_dir, b"");
                 }
-                None => panic!(
-                    "\n\
-                    Pre-compiled {language} ({file}) not found.\n\
-                    \n\
-                    The `{feature}` feature with `embedded` needs it pre-compiled for your platform.\n\
-                    \n\
-                    Option 1 — Use eryx-precompile (recommended for crates.io users):\n\
-                    \n\
-                    $ cargo binstall eryx-precompile\n\
-                    $ eryx-precompile setup --language {setup_language}\n\
-                    \n\
-                    Option 2 — Set an explicit path:\n\
-                    \n\
-                    $ export {var}=/path/to/{file}\n\
-                    \n\
-                    Option 3 — Build from the workspace (for eryx developers):\n\
-                    \n\
-                    $ mise run {mise_task}\n\
-                    ",
-                    language = self.language,
-                    feature = self.feature.to_lowercase(),
-                    setup_language = self.setup_language,
-                    mise_task = self.mise_task,
-                    file = self.file_name(),
-                    var = self.path_var,
-                ),
+                None => {
+                    let setup = self.setup_language.map_or(String::new(), |language| {
+                        format!(
+                            "Use eryx-precompile (recommended for crates.io users):\n\n\
+                             $ cargo binstall eryx-precompile\n\
+                             $ eryx-precompile setup --language {language}\n\n\
+                             Or "
+                        )
+                    });
+                    panic!(
+                        "\n\
+                        Pre-compiled {language} ({file}) not found.\n\
+                        \n\
+                        The `{feature}` feature needs it pre-compiled for your platform.\n\
+                        \n\
+                        {setup}set an explicit path:\n\
+                        \n\
+                        $ export {var}=/path/to/{file}\n\
+                        \n\
+                        Or build it from the workspace (for eryx developers):\n\
+                        \n\
+                        $ mise run {mise_task}\n\
+                        ",
+                        language = self.language,
+                        feature = self.feature.to_lowercase(),
+                        mise_task = self.mise_task,
+                        file = self.file_name(),
+                        var = self.path_var,
+                    )
+                }
             }
         }
     }
