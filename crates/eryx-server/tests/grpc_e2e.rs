@@ -255,6 +255,57 @@ async fn execute_selects_the_language_pool() {
     assert!(status.message().contains("shell"), "{status:?}");
 }
 
+/// A JavaScript session's state survives a snapshot round trip through the
+/// server, and the variables it couldn't keep are named.
+#[cfg(feature = "javascript")]
+#[tokio::test]
+async fn javascript_session_state_round_trips() {
+    use eryx_server::proto::eryx::v1::Language;
+
+    let create: eryx_server::service::PoolFactory = Arc::new(|| {
+        Box::pin(async {
+            let config = PoolConfig::default().with_max_size(2);
+            Ok(Arc::new(
+                SandboxPool::new(Sandbox::embedded().javascript(), config).await?,
+            ))
+        })
+    });
+    let channel = start_server_with(4, |pool| {
+        EryxService::new(pool).with_lazy_pool(eryx::Language::JavaScript, create)
+    })
+    .await;
+
+    let first = execute_request(
+        channel.clone(),
+        ExecuteRequest {
+            code: "var seed = 7; const scale = { by: 6 }; function helper() {}".to_string(),
+            language: Language::Javascript as i32,
+            persist_state: true,
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    assert!(first.success, "first run failed: {}", first.error);
+    assert!(!first.state_snapshot.is_empty(), "no state snapshot");
+    assert_eq!(first.state_skipped_globals, ["helper"]);
+
+    let second = execute_request(
+        channel,
+        ExecuteRequest {
+            code: "result = seed * scale.by".to_string(),
+            language: Language::Javascript as i32,
+            persist_state: true,
+            state_snapshot: first.state_snapshot,
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    assert!(second.success, "second run failed: {}", second.error);
+    assert_eq!(second.result, "42");
+}
+
 /// An uncaught exception over gRPC. The traceback (which Python writes to
 /// stderr) is surfaced as CPython would — over stderr, not as a sandbox error:
 ///   - streamed live as STDERR `OutputEvent`s while the code runs,

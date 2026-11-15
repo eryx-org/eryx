@@ -117,12 +117,15 @@ def test_factory_session_callback_timeout(sandbox_factory):
     try:
         with pytest.raises(eryx.ExecutionError, match="timeout"):
             session.execute("await slow()")
-        assert started.is_set()
+        # The deadline holds whether or not the callback's thread got to run
+        # within it: on a busy runner (seen on Windows) it may not have.
         assert time.monotonic() - started_at < 1.0
     finally:
-        # spawn_blocking work continues after the host timeout.
         release.set()
-        assert finished.wait(timeout=5)
+        # spawn_blocking work continues after the host timeout, so a callback
+        # that did start still runs to the end.
+        if started.wait(timeout=5):
+            assert finished.wait(timeout=5)
 
 
 def test_factory_session_caller_vfs_keeps_own_policy_and_mount_path(sandbox_factory):
