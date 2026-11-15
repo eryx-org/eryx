@@ -187,14 +187,14 @@ impl NetPolicy {
         host: &str,
         port: u16,
         timeout: Duration,
-    ) -> Result<TcpStream, TcpError> {
+    ) -> Result<CheckedTcp, TcpError> {
         self.check_host(host)?;
         let addrs = tokio::time::timeout(timeout, self.resolve_allowed(host, port))
             .await
             .map_err(|_| TcpError::TimedOut)??;
 
         // Tries each checked address in turn, never re-resolving.
-        tokio::time::timeout(timeout, TcpStream::connect(&addrs[..]))
+        let stream = tokio::time::timeout(timeout, TcpStream::connect(&addrs[..]))
             .await
             .map_err(|_| TcpError::TimedOut)?
             .map_err(|e| match e.kind() {
@@ -202,22 +202,25 @@ impl NetPolicy {
                 std::io::ErrorKind::ConnectionReset => TcpError::ConnectionReset,
                 std::io::ErrorKind::TimedOut => TcpError::TimedOut,
                 _ => TcpError::IoError(e.to_string()),
-            })
+            })?;
+        Ok(CheckedTcp {
+            stream,
+            host: host.to_string(),
+        })
     }
 
-    /// Start TLS on `tcp`, a connection [`NetPolicy::connect`] made to
-    /// `connected_host`, verifying the server as `server_name`.
+    /// Start TLS on `tcp`, verifying the server as `server_name`.
     ///
     /// The certificate is checked against `server_name`, and secrets against
-    /// the connected host, so the two must be the same host.
+    /// the host `tcp` was connected to, so the two must be the same host.
     pub(crate) async fn tls_connect(
         &self,
-        tcp: TcpStream,
-        connected_host: &str,
+        tcp: CheckedTcp,
         server_name: &str,
         timeout: Duration,
     ) -> Result<TlsStream<TcpStream>, TlsError> {
-        if !same_host(connected_host, server_name) {
+        let CheckedTcp { stream: tcp, host } = tcp;
+        if !same_host(&host, server_name) {
             return Err(TlsError::Tcp(TcpError::NotPermitted(format!(
                 "TLS hostname '{server_name}' does not match the connected host"
             ))));
@@ -235,25 +238,27 @@ impl NetPolicy {
             .map_err(|e| TlsError::HandshakeFailed(e.to_string()))
     }
 
-    /// Whether a connection whose requests get secrets substituted (or not)
-    /// needs a [`RequestFramer`] at all: with no secrets to substitute and no
-    /// HTTP rules, its bytes can be sent as written.
-    pub(crate) fn frames_requests(&self, substitute_secrets: bool) -> bool {
-        !self.config.http_rules.is_empty() || (substitute_secrets && !self.secrets.is_empty())
+    /// Whether secret placeholders are substituted on a connection: only
+    /// `over_tls`, unless [`NetConfig::allow_plaintext_secrets`] is set, and
+    /// only if there are secrets.
+    fn substitutes_secrets(&self, over_tls: bool) -> bool {
+        !self.secrets.is_empty() && (over_tls || self.config.allow_plaintext_secrets)
     }
 
-    /// A framer for the requests written to a connection to `host`.
-    /// `substitute_secrets` is whether placeholders may be replaced on it
-    /// (e.g. only over TLS, unless plaintext secrets are allowed).
-    pub(crate) fn request_framer(
-        self: &Arc<Self>,
-        host: &str,
-        substitute_secrets: bool,
-    ) -> RequestFramer {
+    /// Whether a connection (`over_tls` or not) needs a [`RequestFramer`] at
+    /// all: with no secrets to substitute and no HTTP rules, its bytes can
+    /// be sent as written.
+    pub(crate) fn frames_requests(&self, over_tls: bool) -> bool {
+        !self.config.http_rules.is_empty() || self.substitutes_secrets(over_tls)
+    }
+
+    /// A framer for the requests written to a connection to `host`, sent
+    /// `over_tls` or in plaintext.
+    pub(crate) fn request_framer(self: &Arc<Self>, host: &str, over_tls: bool) -> RequestFramer {
         RequestFramer {
             policy: Arc::clone(self),
             host: host.to_string(),
-            substitute: substitute_secrets && !self.secrets.is_empty(),
+            substitute: self.substitutes_secrets(over_tls),
             state: HttpParsingState::default(),
         }
     }
@@ -460,6 +465,29 @@ impl NetPolicy {
         }
 
         Ok(result)
+    }
+}
+
+/// A TCP connection [`NetPolicy::connect`] made, with the host it checked,
+/// which [`NetPolicy::tls_connect`] binds the TLS server name to.
+#[derive(Debug)]
+pub(crate) struct CheckedTcp {
+    stream: TcpStream,
+    host: String,
+}
+
+impl CheckedTcp {
+    pub(crate) fn stream(&mut self) -> &mut TcpStream {
+        &mut self.stream
+    }
+
+    /// Wrap a stream the policy didn't check, for tests of what holds one.
+    #[cfg(test)]
+    pub(super) fn unchecked(stream: TcpStream, host: &str) -> Self {
+        Self {
+            stream,
+            host: host.to_string(),
+        }
     }
 }
 

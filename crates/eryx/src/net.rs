@@ -21,7 +21,7 @@ pub use ipnet::IpNet;
 
 mod policy;
 use ipnet::{Ipv4Net, Ipv6Net};
-use policy::{NetPolicy, RequestFramer, ResponseMasker};
+use policy::{CheckedTcp, NetPolicy, RequestFramer, ResponseMasker};
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpStream;
 use tokio_rustls::client::TlsStream;
@@ -1033,7 +1033,7 @@ impl Chunked {
 pub struct ConnectionManager {
     /// The network policy, shared with each connection's framer and masker.
     policy: Arc<NetPolicy>,
-    tcp_connections: HashMap<u32, TcpStream>,
+    tcp_connections: HashMap<u32, CheckedTcp>,
     tls_connections: HashMap<u32, TlsStream<TcpStream>>,
     next_handle: u32,
     /// Request framing per connection handle, created on first write.
@@ -1164,7 +1164,7 @@ impl ConnectionManager {
                 .ok_or(TcpError::InvalidHandle)?;
             let framer = self
                 .policy
-                .request_framer(host, self.substitutes_secrets(handle));
+                .request_framer(host, self.tls_connections.contains_key(&handle));
             self.http_states.insert(handle, framer);
         }
         self.http_states
@@ -1173,16 +1173,10 @@ impl ConnectionManager {
             .frame(data)
     }
 
-    /// Whether requests on `handle` may get secret placeholders substituted:
-    /// only after a TLS upgrade, unless [`NetConfig::allow_plaintext_secrets`].
-    fn substitutes_secrets(&self, handle: u32) -> bool {
-        self.policy.config.allow_plaintext_secrets || self.tls_connections.contains_key(&handle)
-    }
-
     /// Whether writes on `handle` go through HTTP request framing.
     fn frames_requests(&self, handle: u32) -> bool {
         self.policy
-            .frames_requests(self.substitutes_secrets(handle))
+            .frames_requests(self.tls_connections.contains_key(&handle))
     }
 
     // ========================================================================
@@ -1242,7 +1236,8 @@ impl ConnectionManager {
         let stream = self
             .tcp_connections
             .get_mut(&handle)
-            .ok_or(TcpError::InvalidHandle)?;
+            .ok_or(TcpError::InvalidHandle)?
+            .stream();
 
         let masker = self
             .read_states
@@ -1303,7 +1298,8 @@ impl ConnectionManager {
         let stream = self
             .tcp_connections
             .get_mut(&handle)
-            .ok_or(TcpError::InvalidHandle)?;
+            .ok_or(TcpError::InvalidHandle)?
+            .stream();
 
         tokio::time::timeout(io_timeout, stream.write_all(data))
             .await
@@ -1359,12 +1355,7 @@ impl ConnectionManager {
 
         let tls = self
             .policy
-            .tls_connect(
-                tcp,
-                host.as_deref().unwrap_or_default(),
-                hostname,
-                connect_timeout,
-            )
+            .tls_connect(tcp, hostname, connect_timeout)
             .await?;
 
         let handle = self.alloc_handle();
@@ -2750,7 +2741,9 @@ mod tests {
         let (client, _server) = tokio::join!(tokio::net::TcpStream::connect(addr), async {
             listener.accept().await.unwrap().0
         },);
-        manager.tcp_connections.insert(h1, client.unwrap());
+        manager
+            .tcp_connections
+            .insert(h1, CheckedTcp::unchecked(client.unwrap(), "a.example.com"));
 
         let next_before = manager.next_handle;
         assert_eq!(manager.connection_count(), 1);
@@ -2782,7 +2775,10 @@ mod tests {
             listener.accept().await.unwrap().0
         },);
         let handle = manager.alloc_handle();
-        manager.tcp_connections.insert(handle, client.unwrap());
+        manager.tcp_connections.insert(
+            handle,
+            CheckedTcp::unchecked(client.unwrap(), "example.com"),
+        );
         assert_eq!(manager.connection_count(), 1);
 
         manager.close_all_connections();
