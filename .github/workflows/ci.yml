@@ -540,6 +540,11 @@ jobs:
         # Exclude crates that need WASI SDK, Python, or WASM artifacts
         run: cargo check --workspace --exclude eryx-python --exclude eryx-precompile --exclude eryx-wasm-runtime --exclude eryx-server
 
+      # Host-file appends reopen the file in a platform-specific way
+      # (crates/eryx-vfs/src/file_io.rs), so run those tests here too.
+      - name: Test host-file appends
+        run: cargo test -p eryx-vfs --lib -- append reopen
+
   doc:
     name: Documentation
     runs-on: ubuntu-latest
