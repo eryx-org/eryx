@@ -44,8 +44,10 @@ eryx now builds, precompiles and embeds a runtime per guest language: Python
   shell` sets up those runtimes too.
 - The embedded runtime's cached copy is `runtime-<language>-<version>-<hash>.cwasm`
   in the eryx cache directory. Older copies are not cleaned up automatically.
-- A JavaScript or shell sandbox rejects secrets and library preambles
-  (`ErrorKind::Initialization`): the preamble that sets them up is Python.
+- Library preambles are Python only, and the shell can't have secrets: a
+  sandbox with either fails to build (`ErrorKind::Initialization`).
+  JavaScript reads secrets' placeholders from `process.env` and sends them
+  with `fetch`.
 - `Executor::precompile`, `precompile_file` and `precompile_with_target` now
   fail when `ERYX_CPU_FEATURES` or `ERYX_CRANELIFT_FLAGS` is set in a build
   without the `embedded` or `preinit` feature. They used to ignore the
@@ -59,8 +61,7 @@ eryx now builds, precompiles and embeds a runtime per guest language: Python
 
 - New `ExecuteRequest.language` (`LANGUAGE_UNSPECIFIED` is Python). A
   language the server doesn't serve is rejected with `INVALID_ARGUMENT`. So is
-  a JavaScript or shell request with `secrets`: the server sets their
-  placeholders up in a Python preamble, which the other languages don't run.
+  a shell request with `secrets`; JavaScript gets them in `process.env`.
 - New `--languages` flag (`ERYX_LANGUAGES`), default `python,javascript,shell`:
   the languages the server accepts. Each gets its own pool, sized by the pool
   flags. Python's is created and prewarmed at startup, as before; the others

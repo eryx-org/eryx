@@ -480,111 +480,17 @@ fn report_output_callback_wrapper(stream: u32, data: &[u8]) {
 // Network import wrappers (TCP and TLS)
 // =============================================================================
 //
-// These functions call the WIT network interface imports. The host runs them
-// on a fiber, so they complete synchronously from the guest's perspective.
+// The calls themselves are shared with the other guests
+// (`eryx_guest_call::net`); these supply the current execution's `Wit`.
 
-const TCP_INTERFACE: &str = "eryx:net/tcp@0.1.0";
-const TLS_INTERFACE: &str = "eryx:net/tls@0.1.0";
+use eryx_guest_call::net;
+pub use eryx_guest_call::net::NetError;
 
-/// A `tcp-error` or `tls-error` returned by the host.
-#[derive(Debug)]
-pub struct NetError {
-    /// The WIT case name, e.g. `timed-out` or `handshake-failed`. A
-    /// `tls-error::tcp` is flattened to the `tcp-error` case it wraps.
-    pub kind: &'static str,
-    /// The case's payload, for the cases that carry one.
-    pub message: Option<String>,
-}
-
-/// Call a network import and decode its `result<T, tcp-error | tls-error>`.
-///
-/// `push_args` pushes the arguments in reverse declaration order and `pop_ok`
-/// pops the success payload. The outer `Err` is a guest/host protocol failure;
-/// the inner one is a network error reported by the host.
-fn call_net<T>(
-    interface: &str,
-    name: &str,
-    push_args: impl FnOnce(&mut EryxCall),
-    pop_ok: impl FnOnce(Option<Value>) -> Option<T>,
-) -> Result<Result<T, NetError>, String> {
+/// The current execution's `Wit`, for a network call named `name`.
+fn net_wit(name: &str) -> Result<Wit, String> {
     CURRENT_WIT.with(|cell| {
-        let wit = cell.borrow();
-        let wit = wit
-            .as_ref()
-            .ok_or_else(|| format!("{name} called outside of execute context"))?;
-        let import_func = wit.get_import(Some(interface), name).ok_or_else(|| {
-            format!("{interface}.{name} import not found - networking not enabled")
-        })?;
-
-        let mut cx = EryxCall::new();
-        push_args(&mut cx);
-        import_func.call_import_sync(&mut cx);
-
-        match cx.stack.pop() {
-            Some(Value::ResultDiscriminant(true)) => match pop_ok(cx.stack.pop()) {
-                Some(value) => Ok(Ok(value)),
-                None => Err(format!("{name}: unexpected result value")),
-            },
-            Some(Value::ResultDiscriminant(false)) => {
-                pop_net_error(&mut cx, interface == TLS_INTERFACE).map(Err)
-            }
-            other => Err(format!("{name}: unexpected result discriminant: {other:?}")),
-        }
+        (*cell.borrow()).ok_or_else(|| format!("{name} called outside of execute context"))
     })
-}
-
-/// Pop a lifted `tcp-error` (or `tls-error` when `tls`) off the stack.
-///
-/// A lifted variant is its discriminant on top of its payload, if any, so
-/// `tls-error::tcp(e)` is the outer discriminant on top of the lifted `e`.
-fn pop_net_error(cx: &mut EryxCall, tls: bool) -> Result<NetError, String> {
-    let discr = match cx.stack.pop() {
-        Some(Value::U32(d)) => d,
-        other => return Err(format!("unexpected error discriminant: {other:?}")),
-    };
-    let (kind, has_payload) = if tls {
-        match discr {
-            0 => return pop_net_error(cx, false),
-            1 => ("handshake-failed", true),
-            2 => ("certificate-error", true),
-            3 => ("invalid-handle", false),
-            _ => ("unknown-error", false),
-        }
-    } else {
-        match discr {
-            0 => ("connection-refused", false),
-            1 => ("connection-reset", false),
-            2 => ("timed-out", false),
-            3 => ("host-not-found", false),
-            4 => ("io-error", true),
-            5 => ("not-permitted", true),
-            6 => ("invalid-handle", false),
-            _ => ("unknown-error", false),
-        }
-    };
-    let message = if has_payload {
-        match cx.stack.pop() {
-            Some(Value::String(s)) => Some(s),
-            other => return Err(format!("unexpected {kind} payload: {other:?}")),
-        }
-    } else {
-        None
-    };
-    Ok(NetError { kind, message })
-}
-
-fn pop_handle(value: Option<Value>) -> Option<u32> {
-    match value {
-        Some(Value::U32(v)) => Some(v),
-        _ => None,
-    }
-}
-
-fn pop_bytes(value: Option<Value>) -> Option<Vec<u8>> {
-    match value {
-        Some(Value::Bytes(b)) => Some(b),
-        _ => None,
-    }
 }
 
 /// Connect to `host:port` over TCP, returning the connection handle.
@@ -593,17 +499,7 @@ pub fn tcp_connect(
     port: u16,
     timeout_ms: u32,
 ) -> Result<Result<u32, NetError>, String> {
-    call_net(
-        TCP_INTERFACE,
-        "connect",
-        |cx| {
-            // Reverse declaration order (host, port, timeout-ms).
-            cx.push_u32(timeout_ms);
-            cx.push_u16(port);
-            cx.push_string(host.to_string());
-        },
-        pop_handle,
-    )
+    net::tcp_connect(net_wit("connect")?, host, port, timeout_ms)
 }
 
 /// Upgrade a TCP connection to TLS, returning the TLS handle.
@@ -612,17 +508,7 @@ pub fn tls_upgrade(
     hostname: &str,
     timeout_ms: u32,
 ) -> Result<Result<u32, NetError>, String> {
-    call_net(
-        TLS_INTERFACE,
-        "upgrade",
-        |cx| {
-            // Reverse declaration order (tcp, hostname, timeout-ms).
-            cx.push_u32(timeout_ms);
-            cx.push_string(hostname.to_string());
-            cx.push_u32(tcp_handle);
-        },
-        pop_handle,
-    )
+    net::tls_upgrade(net_wit("upgrade")?, tcp_handle, hostname, timeout_ms)
 }
 
 /// Read up to `len` bytes from a TCP (or, with `tls`, TLS) connection.
@@ -632,17 +518,7 @@ pub fn net_read(
     len: u32,
     timeout_ms: u32,
 ) -> Result<Result<Vec<u8>, NetError>, String> {
-    call_net(
-        if tls { TLS_INTERFACE } else { TCP_INTERFACE },
-        "read",
-        |cx| {
-            // Reverse declaration order (handle, len, timeout-ms).
-            cx.push_u32(timeout_ms);
-            cx.push_u32(len);
-            cx.push_u32(handle);
-        },
-        pop_bytes,
-    )
+    net::net_read(net_wit("read")?, tls, handle, len, timeout_ms)
 }
 
 /// Write to a TCP (or, with `tls`, TLS) connection, returning bytes written.
@@ -652,38 +528,14 @@ pub fn net_write(
     data: &[u8],
     timeout_ms: u32,
 ) -> Result<Result<u32, NetError>, String> {
-    call_net(
-        if tls { TLS_INTERFACE } else { TCP_INTERFACE },
-        "write",
-        |cx| {
-            // Reverse declaration order (handle, timeout-ms, data). The `data`
-            // list is the last declared argument so the guest's zero-copy
-            // byte-list lowering (which does not pop the value) leaves nothing
-            // on the stack for a later scalar pop to trip over.
-            cx.stack.push(Value::Bytes(data.to_vec()));
-            cx.push_u32(timeout_ms);
-            cx.push_u32(handle);
-        },
-        pop_handle,
-    )
+    net::net_write(net_wit("write")?, tls, handle, data, timeout_ms)
 }
 
 /// Close a TCP (or, with `tls`, TLS) connection. Does nothing outside an execution.
 pub fn net_close(tls: bool, handle: u32) {
-    CURRENT_WIT.with(|cell| {
-        let wit = cell.borrow();
-        let Some(import_func) = wit.as_ref().and_then(|wit| {
-            wit.get_import(
-                Some(if tls { TLS_INTERFACE } else { TCP_INTERFACE }),
-                "close",
-            )
-        }) else {
-            return;
-        };
-        let mut cx = EryxCall::new();
-        cx.push_u32(handle);
-        import_func.call_import_sync(&mut cx);
-    });
+    if let Ok(wit) = net_wit("close") {
+        net::net_close(wit, tls, handle);
+    }
 }
 
 /// Initialize callbacks in Python.

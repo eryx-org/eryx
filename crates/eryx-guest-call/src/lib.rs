@@ -11,6 +11,8 @@
 //! order. A field of type `option<T>` is an [`Value::OptionDiscriminant`]
 //! followed, when it is `some`, by the payload.
 
+pub mod net;
+
 use std::alloc::Layout;
 use wit_dylib_ffi::{
     Call, Enum, Flags, Future, List, Record, Resource, Stream, Tuple, Type, Variant, WitOption,
