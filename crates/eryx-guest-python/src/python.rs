@@ -1717,12 +1717,13 @@ def _eryx_install_callbacks(callbacks_json):
     _eryx_callbacks = _json.loads(callbacks_json)
 
     async def invoke(_callback_name, *args, **kwargs):
-        """Invoke a host callback by name with keyword arguments (async).
+        """Invoke a host callback by name (async).
 
         Args:
             _callback_name: Name of the callback (e.g., "sleep", "http.get")
-            *args: Positional arguments, for a name under a prefix callback,
-                whose host binds them
+            *args: Positional arguments. The host binds them to the
+                callback's parameters in the order of its schema (a prefix
+                callback gets them unbound)
             **kwargs: Arguments to pass to the callback
 
         Returns:

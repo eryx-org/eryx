@@ -167,6 +167,33 @@ def search_users(
 
 <!-- langtabs-end -->
 
+## Positional Arguments
+
+Sandboxed code can pass a callback's arguments by name or by position. Positional
+arguments bind to the callback's parameters in the order of its schema's
+`properties`, in the order the schema declares them (the order `list_callbacks()` shows),
+the way a Python function binds them:
+
+- In Python, `await add(1, 2)` and `await add(a=1, b=2)` are the same call.
+- In JavaScript, a single plain object whose keys are all parameter names is
+  keyword arguments, `await add({a: 1, b: 2})`, and anything else is positional,
+  `await add(1, 2)`. So for a callback whose first parameter, `options`, takes
+  an object, `await configure({retries: 3})` passes that object as `options`,
+  while `await configure({options: {retries: 3}})` names it.
+  Keyword and positional arguments can't be mixed in one call. Trailing
+  `undefined` arguments count as not passed, and an `undefined` before another
+  argument is sent as `null`.
+- The shell guest follows the same rule once #808 lands: `add 1 2` is positional.
+
+More positional arguments than parameters, or one that is also passed by name,
+fail the call without running the callback: `add() takes 2 positional arguments
+but 3 were given`, `add() got multiple values for argument 'a'`.
+
+The Python guest binds positional arguments itself. The other guests send them
+to the host under the reserved key `__eryx_args__` (`eryx::POSITIONAL_ARGS_KEY`),
+and the host binds them with the same rules. A prefix callback (`a.b.*`) gets
+its positional arguments unbound instead (see `PrefixCallback`).
+
 ## Error Handling
 
 Return errors to indicate failures to the sandbox.
@@ -275,6 +302,59 @@ for name in dir(eryx_callbacks):
     callback = getattr(eryx_callbacks, name)
     print(f"{name}: {callback.__doc__}")
 ```
+
+## Callbacks in the Shell
+
+In a shell sandbox, every callback is a command. A shell function or builtin of
+the same name wins, as in bash, and `invoke NAME` still reaches the callback. Arguments become the callback's
+JSON arguments, and its result is printed to stdout, so callbacks compose with
+pipes and `$(...)`:
+
+```bash
+weather London --days 3          # positional, then a flag
+weather --city=London --metric   # --key=value, and a bare boolean flag
+weather --json '{"city": "London"}' --days 3
+invoke weather '{"city": "London"}'
+forecast=$(weather London | grep -i rain)
+```
+
+- **Typing:** flag values are typed by the callback's parameters schema. A
+  `string` property keeps the exact text (`--id 007` is `"007"`). `integer`,
+  `number` and `boolean` values are parsed, and an invalid one is a usage error.
+  `object` and `array` values are JSON. A property with no type, or one that
+  isn't in the schema, is JSON if it parses and a string otherwise.
+- **Boolean flags:** a `boolean` property can be given bare (`--metric`), which
+  means `true`, unless the next argument is `true` or `false`.
+- **Positional arguments:** the host binds these to the schema's properties in
+  order, like the Python guest's `weather("London")`. eryx serializes schemas
+  with their properties in alphabetical order. Each one is typed by the property
+  at its position. Too many positionals, or one for a property also given as a
+  flag, fails the call, so the command exits 1.
+- **Repeated keys:** repeating a key collects into a list for an `array`
+  property, and is a usage error otherwise.
+- **`--json`:** gives a base object, and flags override its keys. `--` ends the
+  flags.
+- **`invoke`:** `invoke NAME ...` takes the same arguments. With a single JSON
+  object argument, the object is passed as the arguments as is. `invoke` also
+  reaches names under a prefix callback (`invoke ns.tool --x 1`).
+- **`NAME --help`:** prints the callback's description and its arguments.
+- **stdin:** not read.
+
+The result prints as a line on stdout: a string as raw text, anything else
+other than `null` as compact JSON, and `null` as nothing.
+
+Exit statuses:
+
+| Status | Meaning |
+|---|---|
+| 0 | The callback succeeded. |
+| 1 | The call failed: the callback returned an error, or the host rejected the arguments. That covers too many positionals, or a positional for a property also given as a flag. `NAME: message` goes to stderr. |
+| 2 | A usage error the shell found before calling: a bad flag value, a repeated key, malformed `--json`. `NAME: problem`, then the usage line, go to stderr. |
+| 127 | `invoke` of an unknown name. |
+
+A callback that suspends (see [Replay and Suspension](#replay-and-suspension))
+stops the whole script, whatever surrounds the call: `approve || true` doesn't
+swallow it.
 
 ## Alternative APIs
 

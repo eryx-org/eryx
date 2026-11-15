@@ -29,10 +29,12 @@ mod link_order;
 /// Everything the late-linking artifacts are built from, relative to the
 /// workspace root. These only exist in a git checkout, not in the crates.io
 /// package.
-const GUEST_SOURCES: [&str; 6] = [
+const GUEST_SOURCES: [&str; 8] = [
     "crates/eryx-guest-python/src",
     "crates/eryx-guest-python/clock_stubs.c",
     "crates/eryx-guest-python/Cargo.toml",
+    "crates/eryx-guest-call/src",
+    "crates/eryx-guest-call/Cargo.toml",
     "crates/wit-dylib-ffi/src",
     "crates/wit-dylib-ffi/Cargo.toml",
     "crates/eryx-runtime/wit",
@@ -43,8 +45,9 @@ const GUEST_SOURCES: [&str; 6] = [
 const SOURCES_STAMP: &str = "guest-sources.hash";
 
 /// What the JS guest is built from, relative to the workspace root.
-const JS_GUEST_SOURCES: [&str; 4] = [
+const JS_GUEST_SOURCES: [&str; 5] = [
     "crates/eryx-guest-js",
+    "crates/eryx-guest-call",
     "crates/eryx-guest-python/clock_stubs.c",
     "crates/wit-dylib-ffi/src",
     "crates/eryx-runtime/wit",

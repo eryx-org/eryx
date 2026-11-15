@@ -2,7 +2,7 @@
 # one under the wasmtime CLI (clis/smoke.sh). Running them inside eryx is #809.
 #
 # Which lanes run when:
-# - Rust (coreutils, rg, sd) and C (sqlite3, curl): when the driver, this
+# - Rust (coreutils, rg, sd, jaq) and C (sqlite3, curl): when the driver, this
 #   workflow, mise.toml or one of the lane's manifests, patches or shims change.
 # - Go (gh): only when its manifest, patch, the Go-fork bootstrap or the Go lane
 #   itself change. It builds the wasip3 Go fork from source (cached), so it is
@@ -69,8 +69,10 @@ jobs:
               - 'clis/coreutils.toml'
               - 'clis/rg.toml'
               - 'clis/sd.toml'
+              - 'clis/jaq.toml'
               - 'clis/patches/patch-uucore-wasip2.sh'
               - 'clis/patches/patch-sd-wasip2.sh'
+              - 'clis/patches/patch-jaq-wasip2.sh'
             c:
               - *driver
               - 'clis/curl.toml'
@@ -108,7 +110,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        cli: [coreutils, rg, sd]
+        cli: [coreutils, rg, sd, jaq]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

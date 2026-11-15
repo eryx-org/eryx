@@ -54,7 +54,11 @@ brush-builtins = { git = "https://github.com/reubeno/brush", rev = "6a688f19", d
     "builtin.trap",
     "builtin.shopt",
 ] }
-serde_json = "1"
+# `preserve_order`: positional callback arguments are typed by the property
+# at their position, in the order the host serialized the schema.
+serde_json = { version = "1", features = ["preserve_order"] }
+# The `grep` builtin.
+regex-lite = "0.1"
 tokio = { version = "1", features = ["rt", "sync"] }
 wit-bindgen = "0.57"
 

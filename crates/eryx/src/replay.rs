@@ -536,13 +536,14 @@ impl Callback for ReplayCallback {
     }
 
     /// Called directly (outside the sandbox) there is no guest text, so key on
-    /// serde_json's compact serialization. That sorts object keys only while
-    /// serde_json's `preserve_order` feature is off.
+    /// the arguments as compact JSON with object keys sorted, as the Python
+    /// guest emits them and as the key was before serde_json kept insertion
+    /// order.
     fn invoke(
         &self,
         args: serde_json::Value,
     ) -> Pin<Box<dyn Future<Output = Result<serde_json::Value, CallbackError>> + Send + '_>> {
-        self.invoke_with_raw_args(&args.to_string(), args)
+        self.invoke_with_raw_args(&sorted_json(&args), args)
     }
 
     fn invoke_with_raw_args(
@@ -671,9 +672,46 @@ fn fnv1a_64(bytes: &[u8]) -> u64 {
     hash
 }
 
+/// `value` as compact JSON with every object's keys sorted: the canonical
+/// text the host keys journal entries on when it makes the arguments itself
+/// (binding positional arguments, a direct [`ReplayCallback`] call). The
+/// Python guest emits the same form (`json.dumps(..., sort_keys=True)`), and
+/// it is what serde_json wrote before the workspace enabled `preserve_order`
+/// (#860), so those keys didn't change.
+pub(crate) fn sorted_json(value: &serde_json::Value) -> String {
+    fn sorted(value: &serde_json::Value) -> serde_json::Value {
+        match value {
+            serde_json::Value::Object(map) => {
+                let mut entries: Vec<_> = map.iter().collect();
+                entries.sort_unstable_by_key(|(key, _)| *key);
+                serde_json::Value::Object(
+                    entries
+                        .into_iter()
+                        .map(|(key, value)| (key.clone(), sorted(value)))
+                        .collect(),
+                )
+            }
+            serde_json::Value::Array(items) => {
+                serde_json::Value::Array(items.iter().map(sorted).collect())
+            }
+            other => other.clone(),
+        }
+    }
+    sorted(value).to_string()
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
+    #[test]
+    fn sorted_json_sorts_keys_at_every_level() {
+        let value = serde_json::json!({"b": [{"z": 1, "y": 2}], "a": {"d": 1, "c": null}});
+        assert_eq!(
+            sorted_json(&value),
+            r#"{"a":{"c":null,"d":1},"b":[{"y":2,"z":1}]}"#
+        );
+    }
+
     use super::*;
     use serde_json::json;
     use std::sync::atomic::{AtomicU32, Ordering};

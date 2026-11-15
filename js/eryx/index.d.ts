@@ -20,7 +20,8 @@ import type { Callbacks, ExecuteResult } from "@eryx-org/eryx-run/shared";
  * The errors a run throws, shared with eryx.run's client
  * (`@eryx-org/eryx-run`), so one `instanceof` handles both. Code that raises
  * rejects with a `PythonExceptionError` (its traceback as `message`, the
- * output before it in `stdout` and `stderr`); a run past `timeoutMs` with a
+ * output before it in `stdout` and `stderr`), as does a JavaScript exception
+ * or a shell script's nonzero exit status; a run past `timeoutMs` with a
  * `TimeoutError`.
  */
 export {
@@ -98,6 +99,9 @@ export interface ReplayOutcome {
   suspended?: SuspendedCallback;
 }
 
+/** A guest language a {@link Sandbox} can run. */
+export type Language = "python" | "javascript" | "shell";
+
 /**
  * Options for a {@link Sandbox}.
  *
@@ -106,8 +110,16 @@ export interface ReplayOutcome {
  * follows that default, including later changes to it.
  */
 export interface SandboxOptions {
-  /** The guest language. Only `"python"` (the default) is available in this package so far. */
-  language?: "python";
+  /**
+   * The guest language, `"python"` by default. `"javascript"` runs QuickJS,
+   * `"shell"` a bash-compatible shell (brush) whose callbacks are commands
+   * (`add --a 2 --b 3`) and which has no external commands. Their runtimes
+   * are separate files, downloaded the first time a sandbox uses them, and
+   * their sandboxes start with an empty filesystem. A JavaScript exception or
+   * a nonzero exit status rejects with a `PythonExceptionError`, as in the
+   * Python SDK. The JavaScript guest can't snapshot its state yet.
+   */
+  language?: Language;
   /**
    * Functions the code can `await`, by name, as for eryx.run's client: each
    * a function of the code's keyword arguments, or `{ handler, description }`

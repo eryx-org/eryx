@@ -6,6 +6,9 @@
  * traces and networking are forwarded to the creating thread, which keeps the
  * handlers, the journal and the network policy.
  *
+ * The language comes from `workerData.language` (Node.js) or the Worker's
+ * `name` (browsers).
+ *
  * Protocol (all messages are plain objects):
  * - in:  {type: "call", id, method, args, callbacks, options}
  *        {type: "reply", id, value} | {type: "reply", id, error}
@@ -15,10 +18,12 @@
  *        {type: "notify", target, args}       no reply
  */
 
-import { _fileTree, decodeError, encodeError, instantiateSandbox, isNode } from "./instance.js";
+import { decodeError, encodeError, instantiateSandbox, isNode, newFileTree } from "./instance.js";
 import { sleep } from "./shims/callbacks.js";
 
-const port = isNode ? (await import("node:worker_threads")).parentPort : globalThis;
+const threads = isNode ? await import("node:worker_threads") : null;
+const port = isNode ? threads.parentPort : globalThis;
+const language = isNode ? threads.workerData.language : globalThis.name;
 const post = (message) => port.postMessage(message);
 const onMessage = (fn) =>
   isNode ? port.on("message", fn) : port.addEventListener("message", (e) => fn(e.data));
@@ -93,7 +98,9 @@ onMessage(async (message) => {
 try {
   // Core modules are compiled by the creating thread, so workers don't
   // compile them again.
-  instance = await instantiateSandbox(_fileTree, cb, net, (name) => request("module", [name]));
+  instance = await instantiateSandbox(language, newFileTree(language), cb, net, (name) =>
+    request("module", [name]),
+  );
   post({ type: "ready" });
 } catch (e) {
   post({ type: "failed", ...encodeError(e) });

@@ -162,6 +162,33 @@ class TestRebuild:
         assert len(out["warnings"]) == 1
         assert "couldn't cache the rebuilt copy" in out["warnings"][0]
 
+    def test_rebuild_warns_about_baked_callbacks(self, tmp_path, cache_home):
+        # Declarations baked by another version may be in a different key
+        # order than this one sends, which loses the setup fast path (#860).
+        def add(a, b):
+            return a + b
+
+        path = tmp_path / "callbacks.bin"
+        eryx.SandboxFactory(callbacks=[{"name": "add", "fn": add}]).save(str(path))
+        _forge_other_version(path)
+
+        out = _run(
+            f"""
+            import json, warnings
+            import eryx
+
+            with warnings.catch_warnings(record=True) as caught:
+                warnings.simplefilter("always")
+                eryx.SandboxFactory.load({str(path)!r}, rebuild_if_incompatible=True)
+            print(json.dumps([str(w.message) for w in caught]))
+            """,
+            cache_home,
+        )
+
+        assert len(out) == 1
+        assert "1 callback declaration(s)" in out[0]
+        assert "SandboxFactory(callbacks=...)" in out[0]
+
     def test_rebuilt_factory_saves_its_build_inputs(
         self, saved_factory, cache_home, tmp_path
     ):
