@@ -1,0 +1,44 @@
+# Build manifest for the SQLite CLI (`sqlite3`) as a WASI component.
+# Built by `mise run build-cli -- sqlite3`.
+#
+# A real external C CLI compiled to wasip2 via wasi-sdk's
+# `wasm32-wasip2` clang, which links a component directly (no wasm-tools step).
+
+name = "sqlite3"
+description = "SQLite CLI (C, built from the amalgamation)"
+# SPDX expression for the upstream source, recorded in provenance.json.
+license = "blessing"
+lang = "c"
+
+[source]
+# The pinned amalgamation, downloaded and unpacked into the (gitignored)
+# scratch dir below on first build.
+repo = "https://www.sqlite.org/2026/sqlite-amalgamation-3530200.zip"
+ref = "3.53.2"
+sha256 = "8a310d0a16c7a90cacd4c884e70faa51c902afed2a89f63aaa0126ab83558a32"
+dir = "scratch/sqlite"
+
+[build]
+# The amalgamation is just two translation units.
+sources = ["shell.c", "sqlite3.c"]
+# wasip2 build knobs. Each works around something WASI lacks:
+cflags = [
+    "-O2",
+    "-D_WASI_EMULATED_SIGNAL",      # signal() (Ctrl-C handling) via emulation lib
+    "-D_WASI_EMULATED_GETPID",      # getpid() via emulation lib
+    "-D__minux",                    # disable the getrusage-based .timer (WASI lacks getrusage)
+    "-DSQLITE_THREADSAFE=0",        # no pthreads on wasip2
+    "-DSQLITE_OMIT_LOAD_EXTENSION", # no dlopen
+    "-DSQLITE_DISABLE_LFS",
+    "-DSQLITE_OMIT_POPEN",          # no popen()
+    "-DSQLITE_NOHAVE_SYSTEM",       # no system() → drops .shell/.system meta-commands
+]
+# Link the wasi-sdk emulation libs the cflags above opt into.
+link_flags = ["-lwasi-emulated-signal", "-lwasi-emulated-getpid"]
+
+[cwasm]
+# Loaded as a plain component; the host compiles it on demand.
+enabled = false
+
+[output]
+dir = "scratch/sqlite3-component"

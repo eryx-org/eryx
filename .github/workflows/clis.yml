@@ -1,0 +1,222 @@
+# Build the CLI components in clis/*.toml with eryx-build and smoke-test each
+# one under the wasmtime CLI (clis/smoke.sh). Running them inside eryx is #809.
+#
+# Which lanes run when:
+# - Rust (coreutils, rg, sd) and C (sqlite3, curl): when the driver, this
+#   workflow, mise.toml or one of the lane's manifests, patches or shims change.
+# - Go (gh): only when its manifest, patch, the Go-fork bootstrap or the Go lane
+#   itself change. It builds the wasip3 Go fork from source (cached), so it is
+#   the slow one.
+# - Everything weekly, to catch upstream and toolchain bit-rot, and on demand.
+#
+# Each component is uploaded as a workflow artifact with its manifest.toml and
+# provenance.json (see crates/eryx-build/src/provenance.rs), for testing and
+# for #809 to consume. Workflow artifacts are not a release channel.
+
+name: CLI components
+
+on:
+  push:
+    branches: [main, multi-guest]
+    paths: &paths
+      - 'clis/**'
+      - 'crates/eryx-build/**'
+      - 'scripts/bootstrap-go-wasip3.sh'
+      - 'mise.toml'
+      - '.github/workflows/clis.yml'
+  pull_request:
+    branches: [main, multi-guest]
+    paths: *paths
+  schedule:
+    - cron: '23 6 * * 1' # Mondays
+  workflow_dispatch: {}
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  changes:
+    name: Detect Changes
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: read
+    outputs:
+      rust: ${{ steps.filter.outputs.rust }}
+      c: ${{ steps.filter.outputs.c }}
+      go: ${{ steps.filter.outputs.go }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4.0.3
+        id: filter
+        with:
+          filters: |
+            driver: &driver
+              - 'crates/eryx-build/**'
+              - 'clis/smoke.sh'
+              - 'mise.toml'
+              - '.github/workflows/clis.yml'
+            rust:
+              - *driver
+              - 'clis/coreutils.toml'
+              - 'clis/rg.toml'
+              - 'clis/sd.toml'
+              - 'clis/patches/patch-uucore-wasip2.sh'
+              - 'clis/patches/patch-sd-wasip2.sh'
+            c:
+              - *driver
+              - 'clis/curl.toml'
+              - 'clis/sqlite3.toml'
+              - 'clis/patches/patch-curl.sh'
+              - 'clis/patches/patch-mbedtls.sh'
+              - 'clis/shims/**'
+            go:
+              - 'clis/gh.toml'
+              - 'clis/patches/patch-gh-vendor.sh'
+              - 'crates/eryx-build/src/lanes/go.rs'
+              - 'scripts/bootstrap-go-wasip3.sh'
+
+  check:
+    name: Check manifests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-binstall
+      - uses: jdx/mise-action@d5574b52816a478f9d4e6529a3f6ff17a8a36785 # v5.2.8
+        with:
+          version: 2026.11.5
+          install_args: rust
+          cache: false
+      - run: cargo test -p eryx-build
+      - run: cargo run -q -p eryx-build -- --check
+
+  rust:
+    name: Build ${{ matrix.cli }} (Rust lane)
+    needs: changes
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || needs.changes.outputs.rust == 'true'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        cli: [coreutils, rg, sd]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-binstall
+      - uses: jdx/mise-action@d5574b52816a478f9d4e6529a3f6ff17a8a36785 # v5.2.8
+        with:
+          version: 2026.11.5
+          install_args: rust aqua:bytecodealliance/wasmtime
+          cache: false
+      - run: rustup target add wasm32-wasip2
+      - run: mise run build-cli -- "$CLI"
+        env:
+          CLI: ${{ matrix.cli }}
+      - run: clis/smoke.sh "$CLI"
+        env:
+          CLI: ${{ matrix.cli }}
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ${{ matrix.cli }}-component
+          path: |
+            scratch/${{ matrix.cli }}-component/component.wasm
+            scratch/${{ matrix.cli }}-component/*.cwasm
+            scratch/${{ matrix.cli }}-component/manifest.toml
+            scratch/${{ matrix.cli }}-component/provenance.json
+          if-no-files-found: error
+          retention-days: 14
+
+  c:
+    name: Build ${{ matrix.cli }} (C lane)
+    needs: changes
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || needs.changes.outputs.c == 'true'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        cli: [sqlite3, curl]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-binstall
+      - uses: jdx/mise-action@d5574b52816a478f9d4e6529a3f6ff17a8a36785 # v5.2.8
+        with:
+          version: 2026.11.5
+          install_args: rust aqua:bytecodealliance/wasmtime
+          cache: false
+      # The CMake builds use Ninja, which the runner doesn't ship.
+      - run: sudo apt-get update && sudo apt-get install -y ninja-build
+      - run: mise run ensure-wasi-sdk
+      - run: mise run build-cli -- "$CLI"
+        env:
+          CLI: ${{ matrix.cli }}
+      - run: clis/smoke.sh "$CLI"
+        env:
+          CLI: ${{ matrix.cli }}
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ${{ matrix.cli }}-component
+          path: |
+            scratch/${{ matrix.cli }}-component/component.wasm
+            scratch/${{ matrix.cli }}-component/*.cwasm
+            scratch/${{ matrix.cli }}-component/manifest.toml
+            scratch/${{ matrix.cli }}-component/provenance.json
+          if-no-files-found: error
+          retention-days: 14
+
+  go:
+    name: Build gh (Go lane)
+    needs: changes
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || needs.changes.outputs.go == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-binstall
+      - uses: jdx/mise-action@d5574b52816a478f9d4e6529a3f6ff17a8a36785 # v5.2.8
+        with:
+          version: 2026.11.5
+          install_args: rust cargo:wasm-tools aqua:bytecodealliance/wasmtime
+          cache: false
+      # Building the fork from source takes ~10 minutes; key it on the script,
+      # which pins the fork's commit.
+      - name: Cache wasip3 Go toolchain
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: scratch/go-wasip3
+          key: go-wasip3-${{ hashFiles('scripts/bootstrap-go-wasip3.sh') }}
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: '1.26'
+          cache: false
+      - name: Bootstrap wasip3 Go toolchain
+        run: |
+          GOROOT_BOOTSTRAP="$(go env GOROOT)"
+          export GOROOT_BOOTSTRAP
+          GOROOT="$(scripts/bootstrap-go-wasip3.sh scratch/go-wasip3)"
+          echo "ERYX_GO_WASIP3_ROOT=$GOROOT" >> "$GITHUB_ENV"
+      - run: mise run build-cli -- gh
+      - run: clis/smoke.sh gh
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: gh-component
+          path: |
+            scratch/gh-component/component.wasm
+            scratch/gh-component/*.cwasm
+            scratch/gh-component/manifest.toml
+            scratch/gh-component/provenance.json
+          if-no-files-found: error
+          retention-days: 14
