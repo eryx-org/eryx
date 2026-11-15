@@ -225,6 +225,61 @@ mod tests {
         assert!(std::fs::read(&second).unwrap() == EMBEDDED_RUNTIME);
     }
 
+    /// Processes starting together against an empty cache (#850): once any of
+    /// them has the runtime, it must stay loadable while the rest extract.
+    #[test]
+    fn concurrent_first_use_keeps_runtime_loadable() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        const THREADS: usize = 16;
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let start = std::sync::Barrier::new(THREADS);
+        let extracting = AtomicUsize::new(THREADS);
+        std::thread::scope(|s| {
+            let handles: Vec<_> = (0..THREADS)
+                .map(|i| {
+                    let (start, extracting, temp_dir) = (&start, &extracting, &temp_dir);
+                    s.spawn(move || {
+                        start.wait();
+                        // Real processes don't arrive in lockstep.
+                        std::thread::sleep(std::time::Duration::from_micros(300 * i as u64));
+                        let path = EmbeddedResources::extract_runtime(temp_dir.path());
+                        extracting.fetch_sub(1, Ordering::SeqCst);
+                        let path = path.unwrap();
+                        // Keep loading until every thread is done, as later
+                        // sandboxes in an early process would.
+                        loop {
+                            let done = extracting.load(Ordering::SeqCst) == 0;
+                            open_for_mmap(&path)
+                                .unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+                            if done {
+                                break;
+                            }
+                        }
+                    })
+                })
+                .collect();
+            for handle in handles {
+                handle.join().unwrap();
+            }
+        });
+    }
+
+    /// Opens `path` the way wasmtime's `open_file_for_mmap` does: on Windows
+    /// that shares read access only, so it fails while anyone has the file
+    /// open for writing.
+    fn open_for_mmap(path: &Path) -> std::io::Result<std::fs::File> {
+        let mut options = std::fs::OpenOptions::new();
+        options.read(true);
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::OpenOptionsExt;
+            const FILE_SHARE_READ: u32 = 1;
+            options.share_mode(FILE_SHARE_READ);
+        }
+        options.open(path)
+    }
+
     #[test]
     fn embedded_runtime_is_included() {
         // Just verify the bytes are included
