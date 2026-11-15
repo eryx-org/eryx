@@ -493,6 +493,7 @@ globalThis[0] = "zero";
 let café = "au lait";
 let constructor = 5;
 globalThis.parseFloat = null;
+var process = { mine: true };
 "#,
         )
         .run()
@@ -504,7 +505,14 @@ globalThis.parseFloat = null;
     skipped.sort();
     assert_eq!(
         skipped,
-        ["Thing", "helper", "nested", "parseFloat", "pending"]
+        [
+            "Thing",
+            "helper",
+            "nested",
+            "parseFloat",
+            "pending",
+            "process"
+        ]
     );
 
     let snapshot = eryx::StateSnapshot::from_bytes(&snapshot.to_bytes()).unwrap();

@@ -163,8 +163,14 @@
             ]),
         ));
     // Set by the host's preamble before each execute (secret placeholders),
-    // so never session state.
+    // so never session state. `markHostGlobals` records what the host set,
+    // after its preamble runs; anything else under these names is the
+    // user's, and is named in `skipped` since it isn't kept either.
     const HOST_GLOBALS = new Set(['process']);
+    const hostValues = new Map();
+    const markHostGlobals = () => {
+        for (const name of HOST_GLOBALS) hostValues.set(name, globalThis[name]);
+    };
     // Stands in for a variable that can't be kept, so it is named in
     // `skipped`: functions don't serialize.
     const UNKEPT = () => {};
@@ -182,7 +188,13 @@
     const stateEntries = () => {
         const entries = [];
         for (const name of Object.getOwnPropertyNames(globalThis)) {
-            if (installed.includes(name) || HOST_GLOBALS.has(name)) continue;
+            if (installed.includes(name)) continue;
+            if (HOST_GLOBALS.has(name)) {
+                if (!hostValues.has(name) || !Object.is(globalThis[name], hostValues.get(name))) {
+                    entries.push([name, 'var', UNKEPT]);
+                }
+                continue;
+            }
             const desc = Object.getOwnPropertyDescriptor(globalThis, name);
             if (baseline().has(name)) {
                 // A replaced builtin isn't restored over the new one.
@@ -255,6 +267,7 @@
         captureResult,
         discardResult,
         noteCode,
+        markHostGlobals,
         stateEntries,
         restoreEntries,
     };
