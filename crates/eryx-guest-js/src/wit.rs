@@ -1,6 +1,6 @@
 //! Component Model intrinsics and the host imports the JS guest uses.
 //!
-//! Same imports and marshalling as the CPython guest (`eryx-wasm-runtime`),
+//! Same imports and marshalling as the CPython guest (`eryx-guest-python`),
 //! minus tracing and networking, which the spike doesn't expose to JS.
 
 use std::cell::Cell;

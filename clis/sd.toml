@@ -1,0 +1,38 @@
+# Build manifest for sd (`sd`) as a WASI (wasip2) component, via the Rust lane.
+# Built by `mise run build-cli -- sd`.
+#
+# sd is a `sed` replacement: intuitive find & replace over stdin or a file.
+# Pure-Rust (regex crate), reads stdin/file and writes stdout — an ideal
+# pipeline command. Like ripgrep it builds clean on wasm32-wasip2 with no
+# source patches. NOT a drop-in for `sed` syntax.
+
+name = "sd"
+description = "sd — intuitive find & replace (Rust, wasip2)"
+# SPDX expression for the upstream source, recorded in provenance.json.
+license = "MIT"
+lang = "rust"
+
+[source]
+repo = "https://github.com/chmln/sd.git"
+ref = "v1.1.0"
+commit = "4a7b216552d64134c0fa17a59b9d557d89019f0f"
+# Local working copy the driver builds from; fetched on first build.
+dir = "scratch/sd"
+
+[build]
+# cargo binary to build → artifact is sd.wasm.
+bin = "sd"
+# sd's pinned Cargo.lock has tempfile/rustix versions that use unstable
+# std::os::wasi on wasip2 — advance the lockfile to wasip2-clean releases.
+vendor_patch = "clis/patches/patch-sd-wasip2.sh"
+# Let the pinned stable toolchain use the unstable wasip2 feature (rustix needs
+# it), same as the coreutils manifest.
+[build.env]
+RUSTC_BOOTSTRAP = "1"
+
+[cwasm]
+# Loaded as a plain component; the host compiles it on demand.
+enabled = false
+
+[output]
+dir = "scratch/sd-component"

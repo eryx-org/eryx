@@ -1,0 +1,30 @@
+# Build manifest for ripgrep (`rg`) as a WASI (wasip2) component, via the Rust
+# lane. Built by `mise run build-cli -- rg`.
+#
+# ripgrep built and ran clean with no source patches or
+# special flags — cargo's wasm32-wasip2 target emits a component directly. The
+# default (Rust regex) build is pure Rust; mmap auto-falls-back on wasm.
+
+name = "rg"
+description = "ripgrep (Rust, wasip2)"
+# SPDX expression for the upstream source, recorded in provenance.json.
+license = "Unlicense OR MIT"
+lang = "rust"
+
+[source]
+repo = "https://github.com/BurntSushi/ripgrep.git"
+ref = "15.1.0"
+commit = "af60c2de9d85e7f3d81c78601669468cf02dabab"
+# Local working copy the driver builds from; fetched on first build.
+dir = "scratch/ripgrep"
+
+[build]
+# cargo binary to build → artifact is rg.wasm.
+bin = "rg"
+
+[cwasm]
+# Loaded as a plain component; the host compiles it on demand.
+enabled = false
+
+[output]
+dir = "scratch/rg-component"

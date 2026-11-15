@@ -1,6 +1,6 @@
 //! The wit-dylib value stack.
 //!
-//! Copied verbatim from `eryx-wasm-runtime` (the CPython guest). It only
+//! Copied verbatim from `eryx-guest-python` (the CPython guest). It only
 //! marshals WIT values and knows nothing about the embedded language, so a
 //! production JS guest should lift it into a crate shared by both guests.
 

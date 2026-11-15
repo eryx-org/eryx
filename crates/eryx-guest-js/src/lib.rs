@@ -2,7 +2,7 @@
 //!
 //! A second implementation of the eryx `sandbox` world, running JavaScript on
 //! QuickJS (quickjs-ng, via `rquickjs`) instead of CPython. It links into a
-//! component exactly like `eryx-wasm-runtime` does, so the unmodified eryx host
+//! component exactly like `eryx-guest-python` does, so the unmodified eryx host
 //! can run it; see `BUILD_ERYX_JS_RUNTIME` in `eryx-runtime/build.rs`.
 //!
 //! JS surface:

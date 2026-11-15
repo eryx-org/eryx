@@ -22,6 +22,12 @@ version = "1.12.0"
 # rust-toolchain.toml channel races it ("detected conflict: 'bin/cargo'").
 depends = ["rust"]
 
+# wasmtime CLI for eryx-build: precompiles CLI components to cwasm and runs
+# their smoke tests. Keep it on the same version as the `wasmtime` crate in
+# Cargo.lock, since a cwasm only loads in the wasmtime version that built it.
+[tools."aqua:bytecodealliance/wasmtime"]
+version = "50.0.1"
+
 [tools."cargo:mdbook"]
 version = "0.5.4"
 
@@ -668,6 +674,32 @@ if [ ! -f "$WASI_SDK_PATH/bin/clang" ]; then
 fi
 echo "Using WASI SDK at: $WASI_SDK_PATH"
 """
+
+# =============================================================================
+# CLI components (crates/eryx-build, clis/*.toml)
+# =============================================================================
+
+[tasks.build-cli]
+description = "Build a CLI component from clis/<name>.toml. Usage: mise run build-cli -- <name|path.toml>"
+run = """
+#!/usr/bin/env bash
+set -euo pipefail
+NAME="${1:?Usage: mise run build-cli -- <name|path.toml> (e.g. coreutils, curl, gh)}"
+# The C lane needs the WASI SDK. Export it if installed, but don't install it
+# for Rust and Go builds; C manifests point at ensure-wasi-sdk when it's missing.
+if SDK="$(mise where "github:WebAssembly/wasi-sdk@{{vars.wasi_sdk_version}}" 2>/dev/null)"; then
+    export WASI_SDK_PATH="$SDK"
+fi
+cargo run -q -p eryx-build -- "$NAME"
+"""
+
+[tasks.list-clis]
+description = "List the CLI component manifests"
+run = "cargo run -q -p eryx-build -- --list"
+
+[tasks.check-clis]
+description = "Validate the CLI component manifests without building"
+run = "cargo run -q -p eryx-build -- --check"
 
 [tasks.setup-eryx-runtime-tests]
 description = "Extract Python stdlib and copy liberyx_runtime.so for eryx-guest-python tests"
