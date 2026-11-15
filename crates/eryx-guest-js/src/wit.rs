@@ -1,8 +1,6 @@
 //! Component Model intrinsics and the host imports the JS guest uses.
 //!
-//! Same imports and marshalling as the CPython guest (`eryx-guest-python`),
-//! minus tracing and networking, which the JS guest doesn't expose yet (#824,
-//! #825).
+//! Same imports and marshalling as the CPython guest (`eryx-guest-python`).
 
 use std::cell::Cell;
 
@@ -24,6 +22,10 @@ unsafe extern "C" {
     pub(crate) fn context_get() -> u32;
     #[link_name = "[subtask-drop]"]
     pub(crate) fn subtask_drop(task: u32);
+    /// Cancel an in-flight subtask, blocking until the host has stopped it,
+    /// and return its terminal status. It must not be in a waitable set.
+    #[link_name = "[subtask-cancel]"]
+    pub(crate) fn subtask_cancel(task: u32) -> u32;
 }
 
 thread_local! {
@@ -87,6 +89,19 @@ pub(crate) fn report_output(stream: u32, data: &[u8]) {
     // Reverse declaration order; the list must stay last (see the CPython guest).
     cx.stack.push(Value::Bytes(data.to_vec()));
     cx.stack.push(Value::U32(stream));
+    import.call_import_sync(&mut cx);
+}
+
+/// `report-trace: func(lineno: u32, event-json: string, context-json: string)`
+pub(crate) fn report_trace(lineno: u32, event_json: &str, context_json: &str) {
+    let Some(import) = wit().get_import(None, "report-trace") else {
+        return;
+    };
+    let mut cx = EryxCall::new();
+    // Reverse declaration order, as for the CPython guest.
+    cx.stack.push(Value::String(context_json.to_string()));
+    cx.stack.push(Value::String(event_json.to_string()));
+    cx.stack.push(Value::U32(lineno));
     import.call_import_sync(&mut cx);
 }
 

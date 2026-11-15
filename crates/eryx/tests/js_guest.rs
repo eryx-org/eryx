@@ -809,3 +809,53 @@ async fn host_process_is_not_session_state() {
     let snapshot = session.snapshot_state().await.unwrap();
     assert_eq!(snapshot.skipped(), ["process"]);
 }
+
+/// Every callback call reports `callback_start` (its arguments as context)
+/// and `callback_end`, as the CPython guest does; a failed call too. There
+/// are no line-level events.
+#[tokio::test]
+async fn callbacks_report_trace_events() {
+    use eryx::TraceEventKind;
+
+    let Some(builder) = js_sandbox() else { return };
+    let sandbox = builder
+        .with_callback(TestCallback::new("add", add))
+        .with_callback(TestCallback::new("fail", |_| {
+            Err(CallbackError::ExecutionFailed("nope".to_string()))
+        }))
+        .with_trace_collection(true)
+        .build()
+        .unwrap();
+
+    let out = sandbox
+        .execute("await add({ a: 1, b: 2 }); try { await fail() } catch {} await invoke('add', { a: 3 })")
+        .await
+        .unwrap();
+    let events: Vec<_> = out
+        .trace
+        .iter()
+        .map(|e| match &e.event {
+            TraceEventKind::CallbackStart { name, .. } => (e.lineno, format!("start {name}")),
+            TraceEventKind::CallbackEnd { name, .. } => (e.lineno, format!("end {name}")),
+            other => panic!("unexpected trace event {other:?}"),
+        })
+        .collect();
+    let expected = [
+        "start add",
+        "end add",
+        "start fail",
+        "end fail",
+        "start add",
+        "end add",
+    ];
+    assert_eq!(
+        events,
+        expected.map(|e| (0, e.to_string())),
+        "{:?}",
+        out.trace
+    );
+    let contexts: Vec<_> = out.trace.iter().map(|e| e.context.clone()).collect();
+    assert_eq!(contexts[0], Some(json!({ "a": 1, "b": 2 })));
+    assert_eq!(contexts[4], Some(json!({ "a": 3 })));
+    assert_eq!(contexts[1], None);
+}

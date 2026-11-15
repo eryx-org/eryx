@@ -36,7 +36,11 @@ const CALLBACK_EXIT: u32 = 0;
 const CALLBACK_WAIT: u32 = 2;
 const EVENT_NONE: u32 = 0;
 const EVENT_SUBTASK: u32 = 1;
+const EVENT_TASK_CANCELLED: u32 = 6;
 const SUBTASK_RETURNED: u32 = 2;
+
+/// Why a cancelled `execute` failed.
+const CANCELLED: &str = "execution cancelled";
 
 // Fields drop in order, and each must go before the next: QuickJS asserts
 // that no object is alive when the runtime is freed.
@@ -81,6 +85,7 @@ impl Engine {
             let native = Object::new(ctx.clone())?;
             native.set("invoke", Function::new(ctx.clone(), native_invoke)?)?;
             native.set("write", Function::new(ctx.clone(), native_write)?)?;
+            native.set("trace", Function::new(ctx.clone(), native_trace)?)?;
             native.set(
                 "evalScript",
                 Function::new(ctx.clone(), native_eval_script)?,
@@ -168,6 +173,11 @@ fn native_write(stream: u32, text: String) {
         };
         buf.extend_from_slice(&bytes);
     });
+}
+
+/// `__eryx.trace(lineno, eventJson, contextJson)`: a `report-trace` event.
+fn native_trace(lineno: u32, event_json: String, context_json: String) {
+    wit::report_trace(lineno, &event_json, &context_json);
 }
 
 /// `__eryx.evalScript(source)`: run `source` as global code, whose
@@ -326,6 +336,30 @@ pub(crate) fn start_execute(export: ExportFunction, cx: Box<EryxCall>, code: Str
     })
 }
 
+/// What a Component Model event means for the suspended `execute`.
+#[derive(Debug, PartialEq, Eq)]
+enum AsyncEvent {
+    /// A parked `invoke` returned.
+    Returned,
+    /// Nothing to do: no event, or a subtask's STARTING/STARTED progress.
+    Nothing,
+    /// The host cancelled the `execute`.
+    Cancelled,
+    /// Streams and futures, which aren't wired up.
+    Unexpected,
+}
+
+impl AsyncEvent {
+    fn of(event: u32, status: u32) -> Self {
+        match (event, status) {
+            (EVENT_SUBTASK, SUBTASK_RETURNED) => Self::Returned,
+            (EVENT_SUBTASK, _) | (EVENT_NONE, _) => Self::Nothing,
+            (EVENT_TASK_CANCELLED, _) => Self::Cancelled,
+            _ => Self::Unexpected,
+        }
+    }
+}
+
 /// Handle a Component Model event for the suspended `execute`.
 pub(crate) fn resume(event: u32, handle: u32, status: u32) -> u32 {
     let ptr = unsafe { wit::context_get() };
@@ -337,8 +371,8 @@ pub(crate) fn resume(event: u32, handle: u32, status: u32) -> u32 {
     TASK.with(|slot| *slot.borrow_mut() = Some(task));
 
     with_ctx(|ctx, hooks| {
-        match (event, status) {
-            (EVENT_SUBTASK, SUBTASK_RETURNED) => {
+        match AsyncEvent::of(event, status) {
+            AsyncEvent::Returned => {
                 let pending = with_task(|task| task.take(handle)).flatten();
                 if let Some(pending) = pending {
                     let result = wit::invoke_finish(pending.call);
@@ -353,14 +387,47 @@ pub(crate) fn resume(event: u32, handle: u32, status: u32) -> u32 {
                     }
                 }
             }
-            // STARTING/STARTED progress events carry nothing for us.
-            (EVENT_SUBTASK, _) | (EVENT_NONE, _) => {}
-            // Cancellation (and streams/futures) isn't wired up: the host
-            // cancels by epoch-interrupting the guest, which never gets here.
-            (other, _) => eprintln!("eryx-js: ignoring unexpected async event {other}"),
+            AsyncEvent::Nothing => {}
+            AsyncEvent::Cancelled => return cancel(ctx, hooks),
+            AsyncEvent::Unexpected => {
+                eprintln!("eryx-js: ignoring unexpected async event {event}");
+            }
         }
         poll(ctx, hooks)
     })
+}
+
+/// The host cancelled the `execute`: stop every parked `invoke`, reject its
+/// promise (so the script's `catch`/`finally` run, as a cancelled asyncio
+/// task's do), and finish as a script failure.
+fn cancel<'js>(ctx: &Ctx<'js>, hooks: &Object<'js>) -> u32 {
+    let pending: Vec<_> = with_task(|task| {
+        let handles: Vec<u32> = task.pending.keys().copied().collect();
+        handles
+            .into_iter()
+            .filter_map(|handle| task.take(handle))
+            .collect()
+    })
+    .unwrap_or_default();
+    for pending in pending {
+        let handle = pending.call.subtask;
+        // SAFETY: `take` removed it from the waitable set.
+        let status = unsafe { wit::subtask_cancel(handle) };
+        if status == SUBTASK_RETURNED {
+            // The host finished first: lift its result to free it, unused.
+            let _ = wit::invoke_finish(pending.call);
+        }
+        unsafe { wit::subtask_drop(handle) };
+        let rejected = (|| {
+            let reject = pending.reject.restore(ctx)?;
+            reject.call::<_, ()>((Exception::from_message(ctx.clone(), CANCELLED)?,))
+        })();
+        if let Err(e) = rejected {
+            eprintln!("eryx-js: failed to reject a cancelled invoke: {e}");
+        }
+    }
+    while ctx.execute_pending_job() {}
+    finish(hooks, Err(CANCELLED.to_string()))
 }
 
 /// Drain the job queue, then either finish the task or suspend it.
@@ -628,7 +695,19 @@ pub(crate) fn clear_state() {
 
 #[cfg(test)]
 mod tests {
-    use super::split_preamble;
+    use super::{AsyncEvent, split_preamble};
+
+    /// The host can't cancel an export task from outside (the cancel path is
+    /// only reachable through the Component Model's task-cancelled event),
+    /// so this is the event dispatch only.
+    #[test]
+    fn classifies_async_events() {
+        assert_eq!(AsyncEvent::of(1, 2), AsyncEvent::Returned);
+        assert_eq!(AsyncEvent::of(1, 1), AsyncEvent::Nothing);
+        assert_eq!(AsyncEvent::of(0, 0), AsyncEvent::Nothing);
+        assert_eq!(AsyncEvent::of(6, 0), AsyncEvent::Cancelled);
+        assert_eq!(AsyncEvent::of(2, 0), AsyncEvent::Unexpected);
+    }
 
     #[test]
     fn splits_one_framing_header() {

@@ -24,8 +24,13 @@
 //!   ones it can't serialize (functions, classes, promises) are skipped by
 //!   name. See `js::snapshot_state`.
 //!
-//! Not implemented yet: trace events (#824), and subtask cancellation, which
-//! the host does by interrupting the guest instead.
+//! - Trace events: every callback call reports `callback_start` (with its
+//!   arguments as context) and `callback_end` (with `error` if it failed),
+//!   in the CPython guest's shape. There are no line, call, return or
+//!   exception events: QuickJS has no hook for them.
+//! - A cancelled `execute` (the Component Model's task-cancelled event)
+//!   cancels its in-flight callbacks, rejects their promises and fails with
+//!   "execution cancelled".
 
 #![allow(unsafe_code)]
 // Same convention as the CPython guest: a broken invariant in FFI glue is a
