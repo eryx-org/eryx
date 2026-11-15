@@ -413,7 +413,10 @@ impl Command {
             .instantiate_pre(&component)
             .map_err(ErrorKind::wasm_component)?;
         let pre = CommandPre::new(pre).map_err(ErrorKind::wasm_component)?;
-        Ok(Self { pre })
+        Ok(Self {
+            pre,
+            tunnels: false,
+        })
     }
 
     /// Run the command on its own, outside any sandbox, with `argv`, no
