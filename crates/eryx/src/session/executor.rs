@@ -310,6 +310,26 @@ impl StateSnapshot {
     }
 }
 
+/// Start of a guest's `restore-state` error for a snapshot whose state is in
+/// another format: then the snapshot's format, a tab, and the format the
+/// runtime reads. A guest that versions its state format (the shell guest
+/// does) reports a mismatch this way, so it isn't mistaken for corrupt data.
+const INCOMPATIBLE_STATE_PREFIX: &str = "eryx:incompatible-state-format:";
+
+/// Map a guest's `restore-state` error to an [`ErrorKind`].
+fn restore_error(message: String) -> ErrorKind {
+    match message
+        .strip_prefix(INCOMPATIBLE_STATE_PREFIX)
+        .and_then(|rest| rest.split_once('\t'))
+    {
+        Some((snapshot, runtime)) => ErrorKind::IncompatibleStateFormat {
+            snapshot: snapshot.to_owned(),
+            runtime: runtime.to_owned(),
+        },
+        None => ErrorKind::Snapshot(message),
+    }
+}
+
 /// Builder for configuring and executing Python code in a session.
 ///
 /// Created by [`SessionExecutor::execute`]. Use the builder methods to
@@ -2002,7 +2022,7 @@ impl SessionExecutor {
             bindings.call_restore_state(accessor, data).await
         })
         .await?
-        .map_err(ErrorKind::Snapshot)?;
+        .map_err(restore_error)?;
 
         tracing::debug!("State snapshot restored");
 
@@ -2256,6 +2276,24 @@ impl ExecutorState {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn restore_errors_name_a_state_format_mismatch() {
+        let err = restore_error(format!("{INCOMPATIBLE_STATE_PREFIX}old\tnew"));
+        assert!(matches!(
+            err,
+            ErrorKind::IncompatibleStateFormat { ref snapshot, ref runtime }
+                if snapshot == "old" && runtime == "new"
+        ));
+        // Anything else, including a mention of the prefix later on, stays a
+        // plain snapshot error.
+        for message in ["bad data", &format!("x {INCOMPATIBLE_STATE_PREFIX}a\tb")] {
+            assert!(matches!(
+                restore_error(message.to_owned()),
+                ErrorKind::Snapshot(_)
+            ));
+        }
+    }
 
     #[test]
     fn test_session_executor_debug() {

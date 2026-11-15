@@ -7,15 +7,21 @@
 //!
 //! - `execute` runs a script on a persistent brush `Shell`. Output goes to the
 //!   guest's WASI fd 1/2, which the host already captures.
-//! - Host callbacks are shell commands: `get_time`, `add --a 2 --b 3`,
-//!   `add --json '{"a":2}'`, or `invoke add '{"a":2}'`. The JSON result goes to
-//!   stdout, so `$(add --a 2 --b 3 | ...)` composes like any other command.
+//! - Host callbacks are shell commands: `get_time`, `add 2 3`,
+//!   `add --a 2 --b 3`, `add --json '{"a":2}'`, or `invoke add '{"a":2}'`,
+//!   with arguments typed by the callback's schema (see [`call`]). The result
+//!   goes to stdout, so `$(add 2 3 | ...)` composes like any other command.
 //! - A non-zero exit status becomes an `execute-error` ("exit status N").
-//! - `snapshot-state` is brush's own serde form of the `Shell`.
+//! - `snapshot-state` is brush's own serde form of the `Shell`, after a line
+//!   naming that format; restoring refuses any other format.
 //! - Anything that isn't a builtin, function or callback is spawned through
 //!   `eryx:process` (host-registered WASI commands, e.g. uutils coreutils).
 
 #![allow(clippy::expect_used)] // single-threaded guest: a broken invariant traps either way
+
+mod call;
+mod grep;
+mod input;
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -61,6 +67,10 @@ thread_local! {
         .expect("failed to create tokio runtime");
     static SHELL: RefCell<Option<Shell>> = const { RefCell::new(None) };
     static RESULT_VAR: RefCell<String> = RefCell::new("result".into());
+    /// The host's callbacks by name, refreshed every execution.
+    static CALLBACKS: RefCell<HashMap<String, call::CallbackDef>> = RefCell::new(HashMap::new());
+    /// Prefix callbacks (`ns.*`), as `ns.`.
+    static PREFIXES: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
 }
 
 fn block_on<F: Future>(f: F) -> F::Output {
@@ -78,11 +88,32 @@ fn register_builtins(shell: &mut Shell) {
     shell
         .builtins_mut()
         .register("invoke", builtins::Registration::of::<InvokeCommand>());
+    shell
+        .builtins_mut()
+        .register("grep", builtins::Registration::of::<grep::GrepCommand>());
+    let mut defs = HashMap::new();
+    let mut prefixes = Vec::new();
     for cb in list_callbacks() {
+        if let Some(ns) = cb.name.strip_suffix('*') {
+            // A prefix callback has no single command name; `invoke ns.x`
+            // reaches it.
+            prefixes.push(ns.to_owned());
+            continue;
+        }
+        let schema = serde_json::from_str(&cb.parameters_schema_json).ok();
+        defs.insert(
+            cb.name.clone(),
+            call::CallbackDef {
+                description: cb.description,
+                schema,
+            },
+        );
         shell
             .builtins_mut()
             .register(cb.name, builtins::Registration::of::<InvokeCommand>());
     }
+    CALLBACKS.with(|c| *c.borrow_mut() = defs);
+    PREFIXES.with(|p| *p.borrow_mut() = prefixes);
     #[cfg(feature = "process")]
     for name in eryx::process::process::list_commands() {
         let path = std::path::Path::new(COMMAND_DIR).join(&name);
@@ -119,6 +150,16 @@ fn take_result(shell: &mut Shell) -> String {
         serde_json::Value::String(value).to_string()
     }
 }
+
+/// First line of every snapshot: what wrote the serialized `Shell`. Bump the
+/// brush part with the brush pin in Cargo.toml, and the version when the
+/// guest's own state changes.
+const STATE_FORMAT: &str = "eryx-shell-state/1 brush@6a688f19";
+
+/// Start of a `restore-state` error for a snapshot in another state format,
+/// followed by the snapshot's format, a tab, and the one this runtime reads.
+/// Must match the host's `INCOMPATIBLE_STATE_PREFIX`.
+const INCOMPATIBLE_STATE_PREFIX: &str = "eryx:incompatible-state-format:";
 
 /// First line of framed code: `#eryx-preamble:<len>`, then `<len>` bytes of
 /// host preamble, then the user code. The host frames every execution; only
@@ -184,7 +225,8 @@ impl Guest for Sandbox {
     }
 
     async fn snapshot_state() -> Result<StateSnapshot, String> {
-        let data = with_shell(|shell| serde_json::to_vec(shell)).map_err(|e| e.to_string())?;
+        let mut data = format!("{STATE_FORMAT}\n").into_bytes();
+        with_shell(|shell| serde_json::to_writer(&mut data, shell)).map_err(|e| e.to_string())?;
         Ok(StateSnapshot {
             data,
             skipped: vec![],
@@ -192,7 +234,22 @@ impl Guest for Sandbox {
     }
 
     async fn restore_state(data: Vec<u8>) -> Result<(), String> {
-        let mut shell: Shell = serde_json::from_slice(&data).map_err(|e| e.to_string())?;
+        // brush's serde form only reads back into the same brush, so refuse
+        // any other format id. The prefix tells the host it's a mismatch, not
+        // corrupt data.
+        let (format, json) = match data.iter().position(|&b| b == b'\n') {
+            Some(i) => (
+                String::from_utf8_lossy(&data[..i]).into_owned(),
+                &data[i + 1..],
+            ),
+            None => (String::new(), &data[..]),
+        };
+        if format != STATE_FORMAT {
+            return Err(format!(
+                "{INCOMPATIBLE_STATE_PREFIX}{format}\t{STATE_FORMAT}"
+            ));
+        }
+        let mut shell: Shell = serde_json::from_slice(json).map_err(|e| e.to_string())?;
         register_builtins(&mut shell);
         SHELL.with(|s| *s.borrow_mut() = Some(shell));
         Ok(())
@@ -303,11 +360,12 @@ async fn run_child(
     Ok(ExecutionResult::new(u8::try_from(code & 0xff).unwrap_or(1)))
 }
 
-/// Runs a host callback: `<callback> [--key value]... [--json '{..}']`, or
-/// `invoke <callback> [json]`. Prints the JSON result (a bare string unquoted).
+/// Runs a host callback as a command; see [`call`] for the mapping.
 struct InvokeCommand {
     /// The callback name and its arguments.
     args: Vec<String>,
+    /// Whether this ran as `invoke NAME`, rather than as `NAME`.
+    via_invoke: bool,
 }
 
 impl builtins::ParseArgs for InvokeCommand {
@@ -329,10 +387,11 @@ impl builtins::ParseArgs for InvokeCommand {
             .iter()
             .map(ToString::to_string)
             .collect();
-        if name != "invoke" {
+        let via_invoke = name == "invoke";
+        if !via_invoke {
             args.insert(0, name);
         }
-        Ok(Self { args })
+        Ok(Self { args, via_invoke })
     }
 }
 
@@ -343,26 +402,51 @@ impl<SE: ShellExtensions> builtins::Builtin<SE> for InvokeCommand {
         self,
         context: ExecutionContext<'_, SE>,
     ) -> Result<ExecutionResult, Self::Error> {
-        let parsed = match self.args.split_first() {
-            None => Err("usage: invoke <callback> [json]".to_owned()),
-            Some((name, [json])) if !json.starts_with("--") => Ok((name.clone(), json.clone())),
-            Some((name, rest)) => parse_flags(rest).map(|v| (name.clone(), v.to_string())),
+        let Some((name, args)) = self.args.split_first() else {
+            writeln!(context.stderr(), "usage: invoke NAME [ARG]...")?;
+            return Ok(ExecutionResult::new(2));
         };
-        let (name, json) = match parsed {
-            Ok(p) => p,
+        let def = CALLBACKS.with(|c| c.borrow().get(name).cloned());
+        if def.is_none() {
+            let under_prefix =
+                PREFIXES.with(|p| p.borrow().iter().any(|ns| name.starts_with(ns.as_str())));
+            if !under_prefix {
+                writeln!(context.stderr(), "invoke: {name}: no such callback")?;
+                return Ok(ExecutionResult::new(127));
+            }
+        }
+        // `invoke NAME '{...}'`: the object is the arguments, as is.
+        let raw = match args {
+            [json] if self.via_invoke => match serde_json::from_str(json) {
+                Ok(v @ serde_json::Value::Object(_)) => Some(v),
+                _ => None,
+            },
+            _ => None,
+        };
+        let arguments = match raw
+            .map(call::Call::Invoke)
+            .map_or_else(|| call::parse(def.as_ref(), args), Ok)
+        {
+            Ok(call::Call::Invoke(v)) => v,
+            Ok(call::Call::Help) => {
+                write!(context.stdout(), "{}", call::help(name, def.as_ref()))?;
+                return Ok(ExecutionResult::new(0));
+            }
             Err(e) => {
-                writeln!(context.stderr(), "{e}")?;
+                writeln!(context.stderr(), "{name}: {e}")?;
+                writeln!(
+                    context.stderr(),
+                    "usage: {name} [ARG]... [--key value]... [--json '{{...}}']"
+                )?;
                 return Ok(ExecutionResult::new(2));
             }
         };
         // Sync builtin, async import: park on the call with waitable-set.wait.
-        match wit_bindgen::block_on(invoke(name.clone(), json)) {
+        match wit_bindgen::block_on(invoke(name.clone(), arguments.to_string())) {
             Ok(out) => {
-                let text = match serde_json::from_str::<serde_json::Value>(&out) {
-                    Ok(serde_json::Value::String(s)) => s,
-                    _ => out,
-                };
-                writeln!(context.stdout(), "{text}")?;
+                if let Some(text) = call::render(&out) {
+                    writeln!(context.stdout(), "{text}")?;
+                }
                 Ok(ExecutionResult::new(0))
             }
             Err(e) => {
@@ -371,31 +455,4 @@ impl<SE: ShellExtensions> builtins::Builtin<SE> for InvokeCommand {
             }
         }
     }
-}
-
-/// `--key value` pairs (values parsed as JSON, else strings) merged over an
-/// optional `--json '{..}'` object.
-fn parse_flags(args: &[String]) -> Result<serde_json::Value, String> {
-    let mut obj = serde_json::Map::new();
-    let mut extra = HashMap::new();
-    let mut it = args.iter();
-    while let Some(arg) = it.next() {
-        let key = arg
-            .strip_prefix("--")
-            .filter(|k| !k.is_empty())
-            .ok_or_else(|| format!("unexpected argument: {arg}"))?;
-        let value = it.next().ok_or_else(|| format!("--{key} needs a value"))?;
-        if key == "json" {
-            match serde_json::from_str(value) {
-                Ok(serde_json::Value::Object(o)) => obj = o,
-                _ => return Err("--json needs a JSON object".into()),
-            }
-        } else {
-            let v = serde_json::from_str(value)
-                .unwrap_or_else(|_| serde_json::Value::String(value.clone()));
-            extra.insert(key.to_owned(), v);
-        }
-    }
-    obj.extend(extra);
-    Ok(serde_json::Value::Object(obj))
 }

@@ -503,6 +503,12 @@ jobs:
           cargo clippy --locked --target wasm32-wasip2 -- -D warnings
           cargo clippy --locked --target wasm32-wasip2 --features process -- -D warnings
 
+      # The argument parsing and builtins are plain Rust, so their unit tests
+      # run natively.
+      - name: Unit tests
+        working-directory: crates/eryx-guest-shell
+        run: cargo test --locked --lib
+
   lint:
     name: Lint
     runs-on: ubuntu-latest

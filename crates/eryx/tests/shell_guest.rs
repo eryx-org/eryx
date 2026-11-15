@@ -37,6 +37,7 @@ struct TestCallback {
     name: &'static str,
     calls: Arc<AtomicU32>,
     handler: fn(Value) -> Result<Value, CallbackError>,
+    schema: Schema,
 }
 
 impl TestCallback {
@@ -45,7 +46,14 @@ impl TestCallback {
             name,
             calls: Arc::new(AtomicU32::new(0)),
             handler,
+            schema: Schema::empty(),
         }
+    }
+
+    /// Give the callback a parameters schema (`{"type": "object", ...}`).
+    fn with_schema(mut self, schema: Value) -> Self {
+        self.schema = Schema::try_from_value(schema).unwrap();
+        self
     }
 }
 
@@ -57,7 +65,7 @@ impl Callback for TestCallback {
         "test callback"
     }
     fn parameters_schema(&self) -> Schema {
-        Schema::empty()
+        self.schema.clone()
     }
     fn invoke(
         &self,
@@ -73,6 +81,14 @@ fn add(args: Value) -> Result<Value, CallbackError> {
     let a = args["a"].as_i64().unwrap_or(0);
     let b = args["b"].as_i64().unwrap_or(0);
     Ok(json!(a + b))
+}
+
+fn add_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {"a": {"type": "integer"}, "b": {"type": "integer"}},
+        "required": ["a", "b"]
+    })
 }
 
 #[tokio::test]
@@ -136,7 +152,7 @@ async fn callbacks_are_commands() {
         return;
     };
     let sandbox = builder
-        .with_callback(TestCallback::new("add", add))
+        .with_callback(TestCallback::new("add", add).with_schema(add_schema()))
         .with_callback(TestCallback::new("fail", |_| {
             Err(CallbackError::ExecutionFailed("nope".to_string()))
         }))
@@ -149,14 +165,165 @@ async fn callbacks_are_commands() {
 x=$(add --a 2 --b 3)
 y=$(invoke add "{\"a\": $x, \"b\": 10}")
 z=$(add --json '{"a": 1}' --b 1)
-echo "$x $y $z"
+q=$(add --a=4 --b=6)
+echo "$x $y $z $q"
 if ! fail 2>/dev/null; then echo "fail failed"; fi
 "#,
         )
         .await
         .unwrap();
 
-    assert_eq!(out.stdout_utf8().unwrap(), "5 15 2\nfail failed\n");
+    assert_eq!(out.stdout_utf8().unwrap(), "5 15 2 10\nfail failed\n");
+}
+
+/// Exit codes and messages: 1 for a failed callback, 2 for bad usage, 127 for
+/// `invoke` of an unknown name; `--help` describes the arguments.
+#[tokio::test]
+async fn callback_command_errors_and_help() {
+    let Some(builder) = shell_sandbox() else {
+        return;
+    };
+    let sandbox = builder
+        .with_callback(TestCallback::new("add", add).with_schema(add_schema()))
+        .with_callback(TestCallback::new("fail", |_| {
+            Err(CallbackError::ExecutionFailed("nope".to_string()))
+        }))
+        .build()
+        .unwrap();
+
+    let out = sandbox
+        .execute(
+            r#"
+fail; echo "fail=$?"
+add --a 1 --a 2; echo "twice=$?"
+add --a one; echo "typed=$?"
+invoke missing; echo "missing=$?"
+add --help
+"#,
+        )
+        .await
+        .unwrap();
+
+    let stdout = out.stdout_utf8().unwrap();
+    assert!(
+        stdout.starts_with("fail=1\ntwice=2\ntyped=2\nmissing=127\n"),
+        "{stdout}"
+    );
+    assert!(stdout.contains("--a <integer> (required)"), "{stdout}");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    for line in [
+        "fail: ",
+        "add: --a given more than once",
+        "add: --a expects an integer, got 'one'",
+        "invoke: missing: no such callback",
+    ] {
+        assert!(stderr.contains(line), "missing {line:?} in {stderr}");
+    }
+}
+
+/// Flag values are typed by the schema, and the result prints as text: a
+/// string raw, `null` as nothing, anything else as compact JSON.
+#[tokio::test]
+async fn callback_arguments_follow_the_schema() {
+    let Some(builder) = shell_sandbox() else {
+        return;
+    };
+    let echo = TestCallback::new("echo_args", Ok).with_schema(json!({
+        "type": "object",
+        "properties": {
+            "id": {"type": "string"},
+            "tags": {"type": "array", "items": {"type": "string"}},
+            "verbose": {"type": "boolean"}
+        }
+    }));
+    let greet = TestCallback::new("greet", |args| {
+        Ok(json!(format!(
+            "hi {}",
+            args["name"].as_str().unwrap_or("?")
+        )))
+    })
+    .with_schema(json!({"type": "object", "properties": {"name": {"type": "string"}}}));
+    let nothing = TestCallback::new("nothing", |_| Ok(Value::Null));
+    let sandbox = builder
+        .with_callback(echo)
+        .with_callback(greet)
+        .with_callback(nothing)
+        .build()
+        .unwrap();
+
+    let out = sandbox
+        .execute(
+            "echo_args --id 007 --tags a --tags 1 --verbose; greet --name London; nothing; echo end",
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        out.stdout_utf8().unwrap(),
+        "{\"id\":\"007\",\"tags\":[\"a\",\"1\"],\"verbose\":true}\nhi London\nend\n"
+    );
+}
+
+/// Positional arguments go to the host under `__eryx_args__`, typed by the
+/// property they bind to, and the host binds them like the Python guest does.
+#[tokio::test]
+#[ignore = "needs the host to bind `__eryx_args__` for exact callbacks (#822)"]
+async fn callback_positionals_bind_on_the_host() {
+    let Some(builder) = shell_sandbox() else {
+        return;
+    };
+    let echo = TestCallback::new("echo_args", Ok).with_schema(json!({
+        "type": "object",
+        "properties": {"id": {"type": "string"}, "n": {"type": "integer"}}
+    }));
+    let sandbox = builder
+        .with_callback(TestCallback::new("add", add).with_schema(add_schema()))
+        .with_callback(echo)
+        .build()
+        .unwrap();
+
+    let out = sandbox
+        .execute(
+            r#"
+add 4 5
+add 4 --b=6
+echo_args 007 3
+add 1 2 3; echo "extra=$?"
+add 1 --a 2; echo "twice=$?"
+"#,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        out.stdout_utf8().unwrap(),
+        "9\n10\n{\"id\":\"007\",\"n\":3}\nextra=1\ntwice=1\n"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    for line in [
+        "takes 2 positional arguments but 3 were given",
+        "got multiple values for argument 'a'",
+    ] {
+        assert!(stderr.contains(line), "missing {line:?} in {stderr}");
+    }
+}
+
+/// Positionals bind in the order the host sends the schema's properties,
+/// which today is alphabetical: `serde_json` sorts object keys without its
+/// `preserve_order` feature. This pins declaration order, for when #860 is
+/// decided.
+#[tokio::test]
+#[ignore = "tracks #860: the host doesn't keep schema property order"]
+async fn callback_positionals_follow_declaration_order() {
+    let Some(builder) = shell_sandbox() else {
+        return;
+    };
+    let echo = TestCallback::new("echo_args", Ok).with_schema(json!({
+        "type": "object",
+        "properties": {"zeta": {"type": "string"}, "alpha": {"type": "string"}}
+    }));
+    let sandbox = builder.with_callback(echo).build().unwrap();
+
+    let out = sandbox.execute("echo_args first").await.unwrap();
+    assert_eq!(out.stdout_utf8().unwrap(), "{\"zeta\":\"first\"}\n");
 }
 
 #[tokio::test]
@@ -245,4 +412,100 @@ async fn suspending_callback_halts_the_guest() {
         outcome.result.unwrap_err().kind(),
         ErrorKind::Suspended(_)
     ));
+}
+
+#[tokio::test]
+async fn grep_builtin_filters_lines() {
+    let Some(builder) = shell_sandbox() else {
+        return;
+    };
+    let sandbox = builder.build().unwrap();
+
+    let out = sandbox
+        .execute(
+            r#"
+printf 'apple\nbanana\nCherry\n' | grep -n an
+printf 'apple\nbanana\nCherry\n' | grep -ic cherry
+printf 'a\n' | grep -q zzz; echo "none=$?"
+printf 'a.c\nabc\n' | grep -F a.c
+grep x /no/such/file; echo "missing=$?"
+"#,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        out.stdout_utf8().unwrap(),
+        "2:banana\n1\nnone=1\na.c\nmissing=2\n"
+    );
+    assert!(String::from_utf8_lossy(&out.stderr).starts_with("grep: /no/such/file: "));
+}
+
+/// Not an assertion target: numbers for the PR write-up. Run in release:
+/// `cargo test --release -p eryx --features embedded,shell --test shell_guest
+/// -- --ignored --nocapture latency`.
+#[tokio::test]
+#[ignore = "benchmark numbers, not a check"]
+async fn latency_numbers() {
+    const N: u32 = 50;
+    let start = std::time::Instant::now();
+    let sandbox = shell_sandbox().unwrap().build().unwrap();
+    sandbox.execute("echo warm").await.unwrap();
+    eprintln!("first sandbox + execute: {:?}", start.elapsed());
+
+    let start = std::time::Instant::now();
+    for _ in 0..N {
+        sandbox.execute("echo hi").await.unwrap();
+    }
+    eprintln!("stateless `echo hi`: {:?}/exec", start.elapsed() / N);
+
+    let mut session = SessionExecutor::new(shell_executor().unwrap(), &[])
+        .await
+        .unwrap();
+    session.execute("x=0").run().await.unwrap();
+    let start = std::time::Instant::now();
+    for _ in 0..N {
+        session.execute("x=$((x + 1))").run().await.unwrap();
+    }
+    eprintln!("session `x=$((x+1))`: {:?}/exec", start.elapsed() / N);
+}
+
+/// A shell snapshot names its state format, and a runtime refuses one in
+/// another format with a distinct error rather than a parse failure.
+#[tokio::test]
+async fn snapshots_in_another_state_format_are_refused() {
+    let Some(executor) = shell_executor() else {
+        return;
+    };
+    let mut session = SessionExecutor::new(Arc::clone(&executor), &[])
+        .await
+        .unwrap();
+    session.execute("x=1").run().await.unwrap();
+    let bytes = session.snapshot_state().await.unwrap().to_bytes();
+
+    const FORMAT: &[u8] = b"eryx-shell-state/1 brush@";
+    let at = bytes
+        .windows(FORMAT.len())
+        .position(|w| w == FORMAT)
+        .expect("the snapshot names its state format")
+        + FORMAT.len();
+    let mut other = bytes[..at].to_vec();
+    other.extend_from_slice(b"0000000");
+    let rest = &bytes[at..];
+    let newline = rest.iter().position(|&b| b == b'\n').unwrap();
+    other.extend_from_slice(&rest[newline..]);
+    let other = eryx::StateSnapshot::from_bytes(&other).unwrap();
+
+    let mut fresh = SessionExecutor::new(executor, &[]).await.unwrap();
+    let err = fresh.restore_state(&other).await.unwrap_err();
+    let ErrorKind::IncompatibleStateFormat {
+        snapshot, runtime, ..
+    } = err.kind()
+    else {
+        panic!("expected IncompatibleStateFormat, got {err:?}");
+    };
+    assert_eq!(snapshot, "eryx-shell-state/1 brush@0000000");
+    assert!(
+        runtime.starts_with("eryx-shell-state/1 brush@"),
+        "{runtime}"
+    );
 }

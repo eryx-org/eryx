@@ -114,7 +114,8 @@ fn kind_to_py(kind: eryx::ErrorKind) -> PyErr {
             InitializationError::new_err(err.to_string())
         }
         eryx::ErrorKind::Snapshot(msg) => InitializationError::new_err(msg),
-        err @ eryx::ErrorKind::IncompatibleSnapshot { .. } => {
+        err @ (eryx::ErrorKind::IncompatibleSnapshot { .. }
+        | eryx::ErrorKind::IncompatibleStateFormat { .. }) => {
             InitializationError::new_err(err.to_string())
         }
         eryx::ErrorKind::Cancelled => CancelledError::new_err("execution was cancelled"),
