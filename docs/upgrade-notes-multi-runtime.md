@@ -110,8 +110,9 @@ eryx now builds, precompiles and embeds a runtime per guest language: Python
 ## Release assets and packages
 
 - Each `eryx-vX.Y.Z` GitHub release has `runtime-python.wasm`,
-  `runtime-javascript.wasm` and `runtime-shell.wasm`, each with a `.sha256`,
-  for `eryx-precompile setup --language <lang>`.
+  `runtime-javascript.wasm` and `runtime-shell.wasm`, for
+  `eryx-precompile setup --language <lang>`, and `coreutils.wasm`, the shell's
+  embedded commands. Each has a `.sha256`.
 - New PyPI packages `pyeryx-runtime-javascript` and `pyeryx-runtime-shell`,
   released with pyeryx at the same version: one platform wheel per pyeryx
   platform, holding that platform's precompiled runtime.

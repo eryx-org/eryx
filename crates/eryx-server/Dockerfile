@@ -70,7 +70,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
   ERYX_PRECOMPILE_BOOTSTRAP=1 \
   cargo run --release -p eryx-precompile -- compile \
   crates/eryx-runtime/coreutils.wasm \
-  --target "${ERYX_CPU_FEATURES}" \
+  --cpu-features "${ERYX_CPU_FEATURES}" \
   --output crates/eryx-runtime/coreutils.cwasm \
   --no-verify || exit 1;; \
   esac

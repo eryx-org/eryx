@@ -1,5 +1,5 @@
-# Upload runtime-{python,javascript,shell}.wasm to the main eryx GitHub release,
-# for `eryx-precompile setup --language`.
+# Upload runtime-{python,javascript,shell}.wasm and the shell's coreutils.wasm
+# (with their .sha256) to the main eryx GitHub release, for `eryx-precompile setup`.
 # Runs separately from the release workflows to avoid conflicts over the release.
 
 name: Upload Runtime Artifacts
@@ -40,8 +40,8 @@ jobs:
       - name: Upload the runtimes to the release
         working-directory: runtime-assets
         run: |
-          sha256sum --check runtime-*.wasm.sha256
-          gh release upload "$TAG_NAME" runtime-*.wasm runtime-*.wasm.sha256 \
+          sha256sum --check ./*.wasm.sha256
+          gh release upload "$TAG_NAME" ./*.wasm ./*.wasm.sha256 \
             --repo "$GITHUB_REPOSITORY" --clobber
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

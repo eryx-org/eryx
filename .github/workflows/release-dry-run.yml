@@ -2,8 +2,9 @@
 # publish nothing.
 #
 # Runs the same build workflows the releases call:
-# - runtime-build.yml: runtime-{python,javascript,shell}.wasm and .sha256, the
-#   GitHub release assets (kept here as the `runtime-assets` artifact);
+# - runtime-build.yml: runtime-{python,javascript,shell}.wasm, coreutils.wasm
+#   and their .sha256, the GitHub release assets (kept here as the
+#   `runtime-assets` artifact);
 # - python-build.yml: every pyeryx wheel, the sdist and the companion wheels,
 #   smoke-tested on Linux, macOS and Windows;
 # - js-build.yml: the npm package;
