@@ -5,7 +5,8 @@
 //! - `argv0`: print `argv[0]`;
 //! - `env NAME`: print `$NAME`;
 //! - `cat PATH`, `write PATH TEXT`: read or write a file;
-//! - `exit N`: exit with status `N`, after printing `bye` to stderr.
+//! - `exit N`: exit with status `N`, after printing `bye` to stderr;
+//! - `spin`: loop forever.
 //!
 //! A failure prints `error: <io::ErrorKind>` and exits 1.
 
@@ -25,6 +26,9 @@ fn main() {
         ["env", name] => Ok(format!("{}\n", std::env::var(name).unwrap_or_default())),
         ["cat", path] => std::fs::read_to_string(path),
         ["write", path, text] => std::fs::write(path, text).map(|()| String::new()),
+        ["spin"] => loop {
+            std::hint::spin_loop();
+        },
         ["exit", code] => {
             eprintln!("bye");
             std::process::exit(code.parse().unwrap_or(2));
