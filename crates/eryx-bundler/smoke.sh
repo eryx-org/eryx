@@ -30,6 +30,21 @@ grep -q 'node_modules/events/events.js' "$out/uses-builtins.js" || fail "the ins
 # cjs-pkg is shared by esm-pkg and @scope/sub, so it's split into its own chunk.
 [ "$(grep -l 'n \* 2' "$out"/*.js | wc -l)" -eq 1 ] || fail "shared code wasn't split out once"
 
+# `browser` field mappings and nested polyfills beat Node built-ins.
+run --cwd /src --out /out --entry browser-false --entry browser-shim \
+    --entry needs-buffer --entry env-pkg --entry needs-missing
+! grep -q '"fs"' "$out/browser-false.js" || fail "browser: {fs: false} wasn't applied: $(cat "$out/browser-false.js")"
+grep -q '(shim)' "$out/browser-shim.js" || fail "the browser shim for path wasn't bundled"
+! grep -q 'from "path"' "$out/browser-shim.js" || fail "path stayed external despite the browser shim"
+grep -q 'nested buffer polyfill' "$out/needs-buffer.js" || fail "the nested buffer polyfill wasn't bundled"
+! grep -q 'from "buffer"' "$out/needs-buffer.js" || fail "buffer stayed external despite the nested polyfill"
+# process.env.NODE_ENV is "production".
+! grep -q 'process.env' "$out/env-pkg.js" || fail "process.env.NODE_ENV wasn't defined"
+grep -q 'prod build' "$out/env-pkg.js" || fail "the production branch wasn't kept"
+# An unresolvable bare import stays external, with a warning (exit 0).
+grep -q 'from "not-installed"' "$out/needs-missing.js" || fail "the unresolved import isn't external"
+grep -qi 'not-installed' "$out/bundle.json" || fail "no warning names the unresolved import: $(cat "$out/bundle.json")"
+
 # A package that isn't installed fails with status 1 and a diagnostic.
 set +e
 msg="$(run --cwd /src --out /out --entry missing-pkg 2>&1)"

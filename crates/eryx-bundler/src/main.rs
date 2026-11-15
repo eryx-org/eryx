@@ -18,16 +18,20 @@
 //! ```
 //!
 //! Bundles are ES modules, unminified (readable stack traces), with shared
-//! code split into chunks. Packages resolve with the conditions `worker`,
-//! `browser`, `import`, `module` and `default`, as for a Worker. `node:*`
-//! imports, and bare Node built-in names that no installed package provides,
-//! stay external: the guest resolves them at run time.
+//! code split into chunks, and `process.env.NODE_ENV` defined as
+//! `"production"`. Packages resolve with the conditions `worker`, `browser`,
+//! `import`, `module` and `default`, as for a Worker, and their `browser`
+//! field mappings apply. A Node built-in (`node:fs`, `fs`, `path`, ...) that
+//! nothing provides stays external, for the guest to resolve at run time;
+//! one that a `browser` mapping or an installed polyfill (`events`, at any
+//! depth) provides is bundled. Bare specifiers that can't be resolved (a
+//! missing optional peer) stay external too, with a warning.
 //!
 //! Exit status: 0 when bundled, 1 otherwise, with the diagnostics or a usage
 //! message on stderr (`wasi:cli/exit` only carries success or failure).
 
 use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::Arc;
 
@@ -119,15 +123,24 @@ fn entry_name(specifier: &str) -> String {
     specifier.replace('/', "__")
 }
 
-/// Whether `specifier` is a Node built-in to leave to the guest: anything
-/// `node:`, or a bare built-in name (`fs`, `fs/promises`) unless an
-/// installed package of that name (a polyfill such as `events`) provides it.
-fn is_node_builtin(cwd: &Path, specifier: &str) -> bool {
+/// Whether `specifier` names a Node built-in: `node:<anything>`, or a bare
+/// built-in name (`fs`, `fs/promises`).
+fn is_node_builtin(specifier: &str) -> bool {
     if specifier.starts_with("node:") {
         return true;
     }
     let name = specifier.split('/').next().unwrap_or(specifier);
-    NODE_BUILTINS.contains(&name) && !cwd.join("node_modules").join(name).is_dir()
+    NODE_BUILTINS.contains(&name)
+}
+
+/// rolldown's `external` check. It asks before resolving (`resolved` false),
+/// again with the resolved id after resolving, and with the bare specifier
+/// (`resolved` true) when it can't be resolved. Only that last case makes a
+/// built-in external, so resolution runs first: a package's `browser` field
+/// (`"fs": false`, or a shim) and installed polyfills (`events`, at any
+/// depth) win, and only a built-in nothing provides is left to the guest.
+fn is_external(specifier: &str, resolved: bool) -> bool {
+    resolved && is_node_builtin(specifier)
 }
 
 #[tokio::main(flavor = "current_thread")]
@@ -150,10 +163,9 @@ async fn main() -> ExitCode {
 }
 
 async fn bundle(args: &Args) -> Result<(), String> {
-    let cwd = args.cwd.clone();
-    let external = IsExternal::Fn(Some(Arc::new(move |specifier, _importer, _resolved| {
-        let builtin = is_node_builtin(&cwd, specifier);
-        Box::pin(async move { Ok(builtin) })
+    let external = IsExternal::Fn(Some(Arc::new(|specifier, _importer, resolved| {
+        let external = is_external(specifier, resolved);
+        Box::pin(async move { Ok(external) })
     })));
     let mut bundler = Bundler::new(BundlerOptions {
         input: Some(
@@ -174,6 +186,17 @@ async fn bundle(args: &Args) -> Result<(), String> {
             condition_names: Some(CONDITIONS.iter().map(ToString::to_string).collect()),
             ..Default::default()
         }),
+        // Production builds of packages that branch on it (React and the
+        // like). rolldown would otherwise derive "development" from minify
+        // being off; the output stays unminified for readable stack traces.
+        define: Some(
+            [(
+                "process.env.NODE_ENV".to_string(),
+                r#""production""#.to_string(),
+            )]
+            .into_iter()
+            .collect(),
+        ),
         ..Default::default()
     })
     .map_err(|e| format!("eryx-bundler: {e:?}"))?;
@@ -229,15 +252,12 @@ mod tests {
     #[test]
     fn names_and_builtins() {
         assert_eq!(entry_name("@s/p/x"), "@s__p__x");
-        let dir = std::env::temp_dir().join(format!("eryx-bundler-test-{}", std::process::id()));
-        std::fs::create_dir_all(dir.join("node_modules/events")).unwrap_or_else(|e| panic!("{e}"));
-        assert!(is_node_builtin(&dir, "node:events"));
-        assert!(is_node_builtin(&dir, "fs/promises"));
-        assert!(
-            !is_node_builtin(&dir, "events"),
-            "an installed polyfill wins"
-        );
-        assert!(!is_node_builtin(&dir, "zod"));
-        let _ = std::fs::remove_dir_all(&dir);
+        assert!(is_external("node:events", true));
+        assert!(is_external("fs/promises", true));
+        // Before resolution nothing is external, so the `browser` field and
+        // polyfills get their chance; a resolved path is never a built-in.
+        assert!(!is_external("fs", false));
+        assert!(!is_external("/src/node_modules/events/events.js", true));
+        assert!(!is_external("zod", true));
     }
 }
