@@ -310,6 +310,19 @@ fn build_component(
     })
 }
 
+/// Why a rebuilt factory's baked callbacks won't skip callback setup.
+fn baked_callbacks_warning(path: &Path, count: usize) -> String {
+    format!(
+        "{} bakes {count} callback declaration(s) recorded by another eryx version, \
+         whose schema JSON may be in a different key order than this version sends \
+         (eryx keeps schema key order since #860). If so, the rebuilt factory still \
+         works, but its sandboxes set callbacks up on every execution instead of skipping it. Create \
+         the factory again with SandboxFactory(callbacks=...) to bake them in this \
+         version's order",
+        path.display()
+    )
+}
+
 /// Emit a Python `RuntimeWarning`.
 fn warn(py: Python<'_>, message: String) -> PyResult<()> {
     py.import("warnings")?.call_method1(
@@ -993,6 +1006,10 @@ impl SandboxFactory {
         };
         let inputs = stored.read(&stored.build_inputs).map_err(read_err)?;
         let data_files = stored.read(&stored.data_files).map_err(read_err)?;
+        let recipe = eryx::bundle::BuildInputs::from_json(&inputs).map_err(read_err)?;
+        if !recipe.callbacks.is_empty() {
+            warn(py, baked_callbacks_warning(path, recipe.callbacks.len()))?;
+        }
         let callbacks = callbacks.map(Bound::unbind);
         let runtime = crate::error::make_runtime()?;
         let embedded = eryx::embedded::EmbeddedResources::get().map_err(eryx_error_to_py)?;
@@ -1019,7 +1036,6 @@ impl SandboxFactory {
         }
 
         // The data files are the site-packages the factory was created with.
-        let recipe = eryx::bundle::BuildInputs::from_json(&inputs).map_err(read_err)?;
         let (_, extensions, _) = process_packages(data_files_path.as_ref(), None)?;
         let precompiled = build_component(
             py,

@@ -145,7 +145,9 @@ fn create_callback_future(
                 .send(CallbackHostResult::Err(error.to_string()));
             return None;
         }
-        args.to_string()
+        // Sorted like the Python guest's text, so journal keys don't depend
+        // on the order the guest sent its keyword arguments in.
+        crate::replay::sorted_json(&args)
     } else {
         request.arguments_json.clone()
     };

@@ -1027,6 +1027,20 @@ async fn run_upgrade(args: UpgradeArgs) -> Result<()> {
         println!("Imports: {}", inputs.imports.join(", "));
     }
 
+    if !inputs.callbacks.is_empty() {
+        eprintln!(
+            "warning: {} bakes {} callback declaration(s) recorded by another eryx \
+             version, whose schema JSON may be in a different key order than this \
+             version sends (eryx keeps schema key order since #860). If so, the \
+             upgraded runtime still works, but its sandboxes set callbacks up on every \
+             execution instead of skipping it. Rebuild it with `eryx-precompile compile \
+             --callbacks` from the source declarations to bake them in this version's \
+             order.",
+            args.input.display(),
+            inputs.callbacks.len()
+        );
+    }
+
     let site_packages_dir =
         tempfile::tempdir().context("Failed to create site-packages directory")?;
     eryx::bundle::extract_data_files(&data_files, site_packages_dir.path())
