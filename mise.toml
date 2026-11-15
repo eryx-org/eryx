@@ -535,6 +535,48 @@ cargo run -p eryx-precompile --release -- compile \
 sources = ["crates/eryx-runtime/coreutils.wasm"]
 outputs = ["crates/eryx-runtime/coreutils.cwasm"]
 
+[tasks.build-bundler]
+description = "Build the JavaScript bundler (crates/eryx-bundler, rolldown) into crates/eryx-runtime/eryx-bundler.wasm"
+dir = "crates/eryx-bundler"
+run = """
+rustup target add wasm32-wasip2
+CARGO_TARGET_DIR=target cargo build --locked --target wasm32-wasip2 --release
+cp target/wasm32-wasip2/release/eryx-bundler.wasm ../eryx-runtime/eryx-bundler.wasm
+"""
+sources = [
+  "crates/eryx-bundler/src/**/*",
+  "crates/eryx-bundler/vendor/**/*",
+  "crates/eryx-bundler/Cargo.toml",
+  "crates/eryx-bundler/Cargo.lock",
+]
+outputs = ["crates/eryx-runtime/eryx-bundler.wasm"]
+
+[tasks.precompile-bundler]
+description = "Pre-compile eryx-bundler.wasm to eryx-bundler.cwasm"
+depends = ["build-bundler"]
+env = { ERYX_PRECOMPILE_BOOTSTRAP = "1" }
+run = """
+# No --language: a command, like coreutils. Same version stamp and CPU presets.
+cargo run -p eryx-precompile --release -- compile \
+  crates/eryx-runtime/eryx-bundler.wasm \
+  --target "${ERYX_CPU_FEATURES:-native}" \
+  --output crates/eryx-runtime/eryx-bundler.cwasm \
+  --no-verify
+"""
+sources = ["crates/eryx-runtime/eryx-bundler.wasm"]
+outputs = ["crates/eryx-runtime/eryx-bundler.cwasm"]
+
+[tasks.test-bundler]
+description = "Lint and test the bundler: fmt, clippy and unit tests natively, then a smoke test of the wasm under wasmtime"
+depends = ["build-bundler"]
+dir = "crates/eryx-bundler"
+run = """
+cargo fmt --check
+CARGO_TARGET_DIR=target cargo clippy --locked --all-targets -- -D warnings
+CARGO_TARGET_DIR=target cargo test --locked
+./smoke.sh ../eryx-runtime/eryx-bundler.wasm
+"""
+
 [tasks.update-prebuilt]
 description = "Rebuild the committed late-linking artifacts in crates/eryx-runtime/prebuilt/"
 depends = ["build-runtime-python"]
