@@ -32,7 +32,8 @@ crossterm = "0.29"                                          # terminal control
 dashmap = "6"                                               # concurrent maps
 eryx = { path = "crates/eryx", version = "^0.15.1" }
 eryx-macros = { path = "crates/eryx-macros", version = "^0.15.1" }
-eryx-packages = { path = "crates/eryx-packages", version = "^0.15.1" }
+# Without its `npm` client by default: crates that resolve packages enable it.
+eryx-packages = { path = "crates/eryx-packages", version = "^0.15.1", default-features = false }
 eryx-runtime = { path = "crates/eryx-runtime", version = "^0.15.1" } #unified
 eryx-vfs = { path = "crates/eryx-vfs", version = "^0.14.1" } #unified
 flate2 = "1.0"
