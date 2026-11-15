@@ -258,14 +258,7 @@ pub async fn pre_initialize_with_options(options: PreInitOptions) -> Result<Vec<
         .map_err(|e| e.context("Failed to instrument component"))?;
 
     // Phase 2: Instantiate and run the instrumented component.
-    let mut config = Config::new();
-    config.wasm_component_model(true);
-    config.wasm_component_model_async(true);
-    // Must match the runtime engines: trap handling is process-global and
-    // Wasmtime panics if engines in one process disagree on it.
-    config.macos_use_mach_ports(false);
-
-    let engine = Engine::new(&config)?;
+    let engine = preinit_engine()?;
     let component = Component::new(&engine, &instrumented_wasm)?;
 
     // Set up WASI context with Python paths
@@ -1013,6 +1006,67 @@ async fn call_finalize_preinit(store: &mut Store<PreInitCtx>, instance: &Instanc
         .map_err(|e| e.context("Failed to call finalize-preinit"))?;
 
     Ok(())
+}
+
+/// The engine pre-initialization runs components on.
+fn preinit_engine() -> Result<Engine> {
+    let mut config = Config::new();
+    config.wasm_component_model(true);
+    config.wasm_component_model_async(true);
+    // Must match the runtime engines: trap handling is process-global and
+    // Wasmtime panics if engines in one process disagree on it.
+    config.macos_use_mach_ports(false);
+    Ok(Engine::new(&config)?)
+}
+
+/// Pre-initialize a JavaScript guest component (`runtime-javascript.wasm`).
+///
+/// Creates its QuickJS runtime and context and evaluates the prelude, so
+/// instances start with them in memory instead of spending ~0.4 ms on them
+/// per instance. Unlike [`pre_initialize_with_options`] this takes the
+/// component to snapshot: the JS guest needs no linking, stdlib or imports.
+///
+/// # Errors
+///
+/// Returns an error if the component can't be instantiated, its first
+/// `execute` fails, or the snapshot can't be taken.
+pub async fn pre_initialize_javascript(component: &[u8]) -> Result<Vec<u8>> {
+    let wizer = Wizer::new();
+    let (cx, instrumented_wasm) = wizer
+        .instrument_component(component)
+        .map_err(|e| e.context("Failed to instrument component"))?;
+
+    let engine = preinit_engine()?;
+    let component = Component::new(&engine, &instrumented_wasm)?;
+
+    let mut store = Store::new(
+        &engine,
+        PreInitCtx {
+            wasi: WasiCtxBuilder::new().build(),
+            table: ResourceTable::new(),
+            callbacks: Vec::new(),
+        },
+    );
+    let mut linker = Linker::new(&engine);
+    wasmtime_wasi::p2::add_to_linker_async(&mut linker)?;
+    add_sandbox_stubs(&mut linker)?;
+    let instance = linker.instantiate_async(&mut store, &component).await?;
+
+    // The guest creates its engine on the first execute.
+    call_execute_code(&mut store, &instance, "undefined", "engine creation").await?;
+    call_finalize_preinit(&mut store, &instance).await?;
+
+    let snapshot_bytes = wizer
+        .snapshot_component(
+            &cx,
+            &mut WasmtimeWizerComponent {
+                store: &mut store,
+                instance,
+            },
+        )
+        .await
+        .map_err(|e| e.context("Failed to pre-initialize component"))?;
+    restore_initialize_exports(&snapshot_bytes)
 }
 
 #[cfg(test)]

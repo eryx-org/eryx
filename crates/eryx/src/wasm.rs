@@ -92,6 +92,7 @@ impl<T> RetryableOnce<T> {
     }
 
     /// The value, if it has been initialized.
+    #[cfg(any(feature = "embedded", feature = "preinit"))]
     pub(crate) fn get(&self) -> Option<&T> {
         self.value.get()
     }
@@ -3079,6 +3080,25 @@ impl Executor {
     /// - v4: Store eryx's version in precompiled components
     pub const ENGINE_CONFIG_VERSION: u32 = 4;
 
+    /// Stack the guest's wasm code may use: wasmtime's default.
+    const MAX_WASM_STACK: usize = 512 * 1024;
+
+    /// Size of the async fiber the guest runs on.
+    ///
+    /// Host code called from the guest (WASI, the VFS, callback and net dispatch)
+    /// runs on the same fiber and only gets `ASYNC_STACK_SIZE - MAX_WASM_STACK`
+    /// of it. With no headroom, deep guest recursion overflows the fiber
+    /// before the wasm stack limit can trap, and wasmtime aborts the whole
+    /// process. 512 KiB of headroom was enough for every host path audited.
+    ///
+    /// This is half wasmtime's 2 MiB default because a 2 MiB stack mapping is
+    /// eligible for a transparent huge page: under the on-demand allocator
+    /// with THP enabled that costs about 1.5 MB of RSS per live sandbox.
+    const ASYNC_STACK_SIZE: usize = 1024 * 1024;
+
+    /// Minimum host headroom on the fiber; see [`Self::ASYNC_STACK_SIZE`].
+    const MIN_HOST_STACK: usize = 512 * 1024;
+
     /// The version string eryx stores in every precompiled component, e.g.
     /// `eryx 0.13.0 (wasmtime 50)`.
     ///
@@ -3204,9 +3224,12 @@ impl Executor {
 
     /// The engine options shared by every engine eryx creates.
     ///
-    /// Everything here except the allocation strategy affects the generated
-    /// code, so a change to this function must be paired with a bump of
-    /// [`ENGINE_CONFIG_VERSION`](Self::ENGINE_CONFIG_VERSION).
+    /// Options that affect the generated code (wasm features, fuel, epochs,
+    /// Cranelift settings, the module version) must be paired with a bump of
+    /// [`ENGINE_CONFIG_VERSION`](Self::ENGINE_CONFIG_VERSION) when changed.
+    /// Runtime-only settings, such as the stack sizes, the trap handler and
+    /// the allocation strategy, are not part of a precompiled component and
+    /// need no bump.
     fn base_engine_config() -> std::result::Result<Config, Error> {
         let mut config = Config::new();
         config
@@ -3238,9 +3261,13 @@ impl Executor {
         // This reduces .cwasm file sizes and memory footprint
         config.cranelift_opt_level(wasmtime::OptLevel::SpeedAndSize);
 
-        // Reduce async stack size from default 2 MiB to 512 KiB
-        // Python scripts don't need deep call stacks
-        config.async_stack_size(512 * 1024);
+        // Guest code runs on an async fiber, and host code called from the
+        // guest only gets the part of it above the wasm stack limit. See
+        // `ASYNC_STACK_SIZE` for the rule; `tests/stack_overflow.rs` checks it
+        // end to end.
+        const { assert!(Self::ASYNC_STACK_SIZE >= Self::MAX_WASM_STACK + Self::MIN_HOST_STACK) };
+        config.max_wasm_stack(Self::MAX_WASM_STACK);
+        config.async_stack_size(Self::ASYNC_STACK_SIZE);
 
         // Use Unix signals rather than Mach ports for trap handling on macOS.
         // The Mach port handler thread does not survive `fork()`, so a forked
@@ -4002,6 +4029,7 @@ pub(crate) fn language_stamp(tail: &[u8]) -> Option<Language> {
 
 /// Map an error from loading a precompiled component, reporting a file built
 /// by another eryx version as [`ErrorKind::IncompatiblePrecompiled`].
+#[cfg(any(feature = "embedded", feature = "preinit"))]
 pub(crate) fn deserialize_error(err: wasmtime::Error) -> Error {
     // wasmtime only reports the stored version as text. If the wording ever
     // changes, callers just get the raw error again.
@@ -4291,6 +4319,16 @@ mod tests {
         let pooling = settings.pooling_config().unwrap();
         config.allocation_strategy(InstanceAllocationStrategy::Pooling(pooling));
         Engine::new(&config).expect("pooling configuration must be valid");
+    }
+
+    /// The engine keeps the host headroom on the fiber that
+    /// `Executor::ASYNC_STACK_SIZE` requires.
+    #[test]
+    fn engine_leaves_host_stack_headroom() {
+        let engine = Engine::new(&Executor::base_engine_config().unwrap()).unwrap();
+        assert!(
+            engine.get_async_stack_size() >= engine.get_max_wasm_stack() + Executor::MIN_HOST_STACK
+        );
     }
 
     /// Test that all CPU feature level presets use valid Cranelift flags.

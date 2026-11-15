@@ -104,7 +104,8 @@ mod wasm;
 pub mod preinit {
     pub use eryx_runtime::linker::NativeExtension;
     pub use eryx_runtime::preinit::{
-        CallbackDeclaration, PreInitOptions, pre_initialize, pre_initialize_with_options,
+        CallbackDeclaration, PreInitOptions, pre_initialize, pre_initialize_javascript,
+        pre_initialize_with_options,
     };
 
     /// The declaration the guest sees for `callback`, for

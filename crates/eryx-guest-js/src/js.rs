@@ -275,6 +275,7 @@ pub(crate) fn start_execute(export: ExportFunction, cx: Box<EryxCall>, code: Str
     let code = code.to_string();
     TASK.with(|task| *task.borrow_mut() = Some(Task::new(export, cx)));
     with_ctx(|ctx, hooks| {
+        crate::fresh::reseed(ctx).expect("failed to reseed the QuickJS context");
         install_callbacks(ctx, hooks);
 
         let mut options = EvalOptions::default();
@@ -454,6 +455,7 @@ pub(crate) fn set_result_variable(name: String) {
 pub(crate) fn clear_state() {
     INSTALLED_CALLBACKS.with(|installed| *installed.borrow_mut() = None);
     ENGINE.with(|engine| *engine.borrow_mut() = None);
+    crate::fresh::forget();
 }
 
 #[cfg(test)]

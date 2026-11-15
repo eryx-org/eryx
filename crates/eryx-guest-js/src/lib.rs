@@ -17,8 +17,8 @@
 //! - The result variable (default `result`) is JSON-serialized and consumed.
 //!
 //! Not implemented yet: `snapshot-state`/`restore-state` (#823), trace events
-//! (#824), networking (#825), preinit (#826), and subtask cancellation, which
-//! the host does by interrupting the guest instead.
+//! (#824), networking (#825), and subtask cancellation, which the host does
+//! by interrupting the guest instead.
 
 #![allow(unsafe_code)]
 // Same convention as the CPython guest: a broken invariant in FFI glue is a
@@ -26,6 +26,7 @@
 #![allow(clippy::unwrap_used)]
 #![allow(clippy::expect_used)]
 
+mod fresh;
 mod js;
 mod wit;
 
@@ -63,8 +64,7 @@ impl Interpreter for JsInterpreter {
 
     fn export_call(_wit: Wit, func: ExportFunction, _cx: &mut Self::CallCx<'_>) {
         match func.index() {
-            // Nothing to reset: the JS guest isn't preinitialized.
-            EXPORT_FINALIZE_PREINIT => {}
+            EXPORT_FINALIZE_PREINIT => fresh::forget(),
             other => panic!("unexpected sync export {other}"),
         }
     }
