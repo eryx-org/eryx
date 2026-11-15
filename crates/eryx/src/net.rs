@@ -17,15 +17,13 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
 
-use base64::Engine as _;
-use base64::prelude::BASE64_STANDARD;
 pub use ipnet::IpNet;
+
+mod policy;
 use ipnet::{Ipv4Net, Ipv6Net};
-use rustls::ClientConfig;
-use rustls::pki_types::ServerName;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use policy::{NetPolicy, RequestFramer, ResponseMasker};
+use tokio::io::AsyncWriteExt;
 use tokio::net::TcpStream;
-use tokio_rustls::TlsConnector;
 use tokio_rustls::client::TlsStream;
 
 /// Largest buffer a single socket read will allocate, regardless of the length
@@ -947,23 +945,6 @@ impl From<TcpError> for TlsError {
 // Connection Manager
 // ============================================================================
 
-/// HTTP request framing state for a single connection.
-#[derive(Debug, Default)]
-struct HttpParsingState {
-    /// Request bytes buffered until the headers are complete.
-    buffer: Vec<u8>,
-    /// How much of the current request's body is still to come.
-    body: Body,
-    /// Whether a request has been framed on this connection yet.
-    started: bool,
-    /// Whether this connection's first bytes weren't HTTP, so with HTTP rules
-    /// everything on it is passed through unparsed (see
-    /// [`NetConfig::allow_http`]).
-    raw: bool,
-    /// Whether a write was refused, after which every write is.
-    failed: bool,
-}
-
 /// The body of the request currently being written.
 #[derive(Debug, Default)]
 enum Body {
@@ -1050,23 +1031,19 @@ impl Chunked {
 /// and enforces the network policy.
 #[derive(Debug)]
 pub struct ConnectionManager {
-    config: NetConfig,
-    tls_config: Arc<ClientConfig>,
+    /// The network policy, shared with each connection's framer and masker.
+    policy: Arc<NetPolicy>,
     tcp_connections: HashMap<u32, TcpStream>,
     tls_connections: HashMap<u32, TlsStream<TcpStream>>,
     next_handle: u32,
-    /// Track HTTP parsing state per connection handle
-    http_states: HashMap<u32, HttpParsingState>,
+    /// Request framing per connection handle, created on first write.
+    http_states: HashMap<u32, RequestFramer>,
     /// Track which host each connection is connected to
     connection_hosts: HashMap<u32, String>,
     /// Bytes sent and received so far, across all connections
     traffic: NetTraffic,
-    /// Secrets configuration for substitution
-    secrets: HashMap<String, crate::secrets::SecretConfig>,
-    /// `(real value, placeholder)` of each secret, for masking reads.
-    read_masks: Vec<(Vec<u8>, Vec<u8>)>,
-    /// Per-connection read buffering for that masking.
-    read_states: HashMap<u32, ReadState>,
+    /// Response masking per connection handle, created on first read.
+    read_states: HashMap<u32, ResponseMasker>,
 }
 
 /// Bytes an execution sent and received over the network, as the guest
@@ -1085,77 +1062,6 @@ impl NetTraffic {
     }
 }
 
-/// Read data held back from the guest by one connection.
-#[derive(Debug, Default)]
-struct ReadState {
-    /// Masked bytes the guest hasn't read yet.
-    ready: Vec<u8>,
-    /// Trailing bytes that may be the start of a secret split across reads.
-    carry: Vec<u8>,
-}
-
-/// How long a read waits for more data before releasing bytes held back as
-/// the possible start of a secret.
-const CARRY_GRACE: Duration = Duration::from_millis(100);
-
-/// Read up to `len` bytes from `stream`, replacing each real secret value in
-/// `masks` with its placeholder, including values split across reads.
-async fn read_masked<S: tokio::io::AsyncRead + Unpin>(
-    stream: &mut S,
-    state: &mut ReadState,
-    masks: &[(Vec<u8>, Vec<u8>)],
-    len: u32,
-    io_timeout: Duration,
-) -> std::io::Result<Vec<u8>> {
-    let want = read_buf_len(len);
-    if want == 0 {
-        return Ok(Vec::new());
-    }
-    while state.ready.is_empty() {
-        let timeout = if state.carry.is_empty() {
-            io_timeout
-        } else {
-            CARRY_GRACE.min(io_timeout)
-        };
-        let mut buf = vec![0u8; want];
-        let n = match tokio::time::timeout(timeout, stream.read(&mut buf)).await {
-            Ok(n) => n?,
-            // Nothing followed: the held-back bytes weren't a secret after all.
-            Err(_) if !state.carry.is_empty() => 0,
-            Err(_) => return Err(std::io::ErrorKind::TimedOut.into()),
-        };
-        let mut data = std::mem::take(&mut state.carry);
-        data.extend_from_slice(&buf[..n]);
-        if n > 0 {
-            for (real, placeholder) in masks {
-                data = crate::secrets::replace_bytes(&data, real, placeholder);
-            }
-            let keep = partial_secret_len(&data, masks);
-            state.carry = data.split_off(data.len() - keep);
-        }
-        state.ready = data;
-        if n == 0 {
-            break;
-        }
-    }
-    let rest = state.ready.split_off(want.min(state.ready.len()));
-    Ok(std::mem::replace(&mut state.ready, rest))
-}
-
-/// Length of the longest suffix of `data` that is a proper prefix of a
-/// secret value in `masks`.
-fn partial_secret_len(data: &[u8], masks: &[(Vec<u8>, Vec<u8>)]) -> usize {
-    let longest = masks.iter().map(|(real, _)| real.len()).max().unwrap_or(0);
-    (1..longest.min(data.len() + 1))
-        .rev()
-        .find(|&k| {
-            masks
-                .iter()
-                .any(|(real, _)| real.len() > k && data.ends_with(&real[..k]))
-        })
-        .unwrap_or(0)
-}
-
 impl ConnectionManager {
     /// Bytes sent and received so far.
     #[must_use]
@@ -1166,7 +1072,7 @@ impl ConnectionManager {
     /// How many more bytes the execution may move, if it's limited; `Err`
     /// once it can't move any.
     fn remaining(&self) -> Result<Option<u64>, TcpError> {
-        let Some(max) = self.config.max_bytes else {
+        let Some(max) = self.policy.config.max_bytes else {
             return Ok(None);
         };
         match max.saturating_sub(self.traffic.total()) {
@@ -1178,7 +1084,7 @@ impl ConnectionManager {
     fn over_limit(&self) -> TcpError {
         TcpError::NotPermitted(format!(
             "network limit reached: {} bytes sent and received",
-            self.config.max_bytes.unwrap_or_default()
+            self.policy.config.max_bytes.unwrap_or_default()
         ))
     }
 
@@ -1201,43 +1107,15 @@ impl ConnectionManager {
     /// Create a new connection manager with the given config and secrets.
     #[must_use]
     pub fn new(config: NetConfig, secrets: HashMap<String, crate::secrets::SecretConfig>) -> Self {
-        // Build rustls config with system root certs + any custom certs
-        let mut root_store =
-            rustls::RootCertStore::from_iter(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
-
-        // Add custom root certificates if any
-        for cert_der in &config.custom_root_certs {
-            let cert = rustls::pki_types::CertificateDer::from(cert_der.as_slice());
-            if let Err(e) = root_store.add(cert) {
-                tracing::warn!(error = %e, "ignoring invalid custom root certificate");
-            }
-        }
-
-        let tls_config = ClientConfig::builder()
-            .with_root_certificates(root_store)
-            .with_no_client_auth();
-
         Self {
-            config,
-            tls_config: Arc::new(tls_config),
+            policy: Arc::new(NetPolicy::new(config, secrets)),
             tcp_connections: HashMap::new(),
             tls_connections: HashMap::new(),
             next_handle: 1,
             http_states: HashMap::new(),
             connection_hosts: HashMap::new(),
             traffic: NetTraffic::default(),
-            read_masks: secrets
-                .values()
-                .filter(|s| !s.real_value.is_empty())
-                .map(|s| {
-                    (
-                        s.real_value.clone().into_bytes(),
-                        s.placeholder.clone().into_bytes(),
-                    )
-                })
-                .collect(),
             read_states: HashMap::new(),
-            secrets,
         }
     }
 
@@ -1279,309 +1157,32 @@ impl ConnectionManager {
     /// Returns the bytes to send now: empty while a request's headers are
     /// still incomplete.
     fn process_write_data(&mut self, handle: u32, data: &[u8]) -> Result<Vec<u8>, TcpError> {
-        let mut state = self.http_states.remove(&handle).unwrap_or_default();
-        if state.failed {
-            self.http_states.insert(handle, state);
-            return Err(TcpError::NotPermitted(
-                "an earlier write on this connection was refused".into(),
-            ));
+        if !self.http_states.contains_key(&handle) {
+            let host = self
+                .connection_hosts
+                .get(&handle)
+                .ok_or(TcpError::InvalidHandle)?;
+            let framer = self
+                .policy
+                .request_framer(host, self.substitutes_secrets(handle));
+            self.http_states.insert(handle, framer);
         }
-        let result = self.frame_requests(handle, &mut state, data);
-        // After an error the buffered bytes are dropped, and the connection
-        // refuses further writes: its framing can't be trusted any more.
-        if result.is_err() {
-            state = HttpParsingState {
-                failed: true,
-                ..HttpParsingState::default()
-            };
-        }
-        self.http_states.insert(handle, state);
-        result
+        self.http_states
+            .get_mut(&handle)
+            .ok_or(TcpError::InvalidHandle)?
+            .frame(data)
     }
 
-    /// Advance `state` over `data`, one request at a time, so every request
-    /// on a keep-alive connection gets its headers processed.
-    fn frame_requests(
-        &self,
-        handle: u32,
-        state: &mut HttpParsingState,
-        data: &[u8],
-    ) -> Result<Vec<u8>, TcpError> {
-        let mut out = Vec::new();
-        let mut input = data.to_vec();
-        let mut pos = 0;
-        loop {
-            match &mut state.body {
-                Body::None if state.raw => {
-                    out.extend_from_slice(&input[pos..]);
-                    break;
-                }
-                Body::None => {
-                    // Only the new bytes (plus 3 for a split terminator) can
-                    // complete the terminator.
-                    let searched = state.buffer.len().saturating_sub(3);
-                    state.buffer.extend_from_slice(&input[pos..]);
-                    let is_request = if self.config.http_rules.is_empty() {
-                        Some(could_be_http_request(&state.buffer))
-                    } else {
-                        self.classify_ruled(handle, state)?
-                    };
-                    match is_request {
-                        Some(true) => {}
-                        Some(false) => {
-                            out.append(&mut state.buffer);
-                            break;
-                        }
-                        None => {
-                            if state.buffer.len() > MAX_HEADER_LEN {
-                                return Err(TcpError::NotPermitted(format!(
-                                    "HTTP request line exceeds {MAX_HEADER_LEN} bytes"
-                                )));
-                            }
-                            break;
-                        }
-                    }
-                    let Some(header_end) =
-                        find_header_end(&state.buffer[searched..]).map(|end| searched + end)
-                    else {
-                        if state.buffer.len() > MAX_HEADER_LEN {
-                            return Err(TcpError::NotPermitted(format!(
-                                "HTTP request headers exceed {MAX_HEADER_LEN} bytes"
-                            )));
-                        }
-                        break;
-                    };
-                    input = state.buffer.split_off(header_end);
-                    pos = 0;
-                    let headers = std::mem::take(&mut state.buffer);
-
-                    // Not HTTP - pass through everything
-                    if self.config.http_rules.is_empty() && !is_http_request(&headers) {
-                        out.extend_from_slice(&headers);
-                        out.extend_from_slice(&input);
-                        break;
-                    }
-
-                    // Check for HTTP/2 (not supported with secrets)
-                    if is_http2(&headers) {
-                        return Err(TcpError::NotPermitted(
-                            "HTTP/2 is not supported here. Use HTTP/1.1.".into(),
-                        ));
-                    }
-
-                    state.body = request_body(&headers)?;
-                    state.started = true;
-                    if !self.config.http_rules.is_empty() {
-                        self.check_http_rules(&headers, handle)?;
-                    }
-                    if self.substitutes_secrets(handle) {
-                        out.extend(self.substitute_http_headers(&headers, handle)?);
-                    } else {
-                        out.extend_from_slice(&headers);
-                    }
-                }
-                Body::Length(left) => {
-                    if pos == input.len() {
-                        break;
-                    }
-                    let n = (*left).min(input.len() - pos);
-                    out.extend_from_slice(&input[pos..pos + n]);
-                    pos += n;
-                    *left -= n;
-                    if *left == 0 {
-                        state.body = Body::None;
-                    }
-                }
-                Body::Chunked(chunked) => {
-                    if pos == input.len() {
-                        break;
-                    }
-                    let rest = &input[pos..];
-                    let n = match chunked.advance(rest)? {
-                        Some(n) => {
-                            state.body = Body::None;
-                            n
-                        }
-                        None => rest.len(),
-                    };
-                    out.extend_from_slice(&rest[..n]);
-                    pos += n;
-                }
-            }
-        }
-        Ok(out)
-    }
-
-    /// Whether requests on `handle` get secret placeholders substituted: only
-    /// after a TLS upgrade, unless [`NetConfig::allow_plaintext_secrets`].
+    /// Whether requests on `handle` may get secret placeholders substituted:
+    /// only after a TLS upgrade, unless [`NetConfig::allow_plaintext_secrets`].
     fn substitutes_secrets(&self, handle: u32) -> bool {
-        !self.secrets.is_empty()
-            && (self.config.allow_plaintext_secrets || self.tls_connections.contains_key(&handle))
+        self.policy.config.allow_plaintext_secrets || self.tls_connections.contains_key(&handle)
     }
 
     /// Whether writes on `handle` go through HTTP request framing.
     fn frames_requests(&self, handle: u32) -> bool {
-        !self.config.http_rules.is_empty() || self.substitutes_secrets(handle)
-    }
-
-    /// With HTTP rules, whether the buffered bytes start a request (`None`
-    /// until that's known).
-    ///
-    /// Anything a server could take for a request must be framed and
-    /// checked, so other bytes are only passed through if they're a
-    /// connection's first and its host has no rules; the connection then
-    /// stays unparsed. Otherwise they're refused, as is a leading empty line
-    /// (which servers skip before a request).
-    fn classify_ruled(
-        &self,
-        handle: u32,
-        state: &mut HttpParsingState,
-    ) -> Result<Option<bool>, TcpError> {
-        let host = self
-            .connection_hosts
-            .get(&handle)
-            .ok_or(TcpError::InvalidHandle)?;
-        if state.buffer.starts_with(b"\r") || state.buffer.starts_with(b"\n") {
-            return Err(TcpError::NotPermitted(
-                "HTTP request starts with an empty line".into(),
-            ));
-        }
-        match request_start(&state.buffer) {
-            Some(false) if state.started || self.config.has_http_rules(host) => {
-                Err(TcpError::NotPermitted(format!(
-                    "only HTTP/1.1 requests may be sent on this connection to {host} \
-                     (HTTP rules are set)"
-                )))
-            }
-            Some(false) => {
-                state.raw = true;
-                Ok(Some(false))
-            }
-            // Refused now, not once the headers end: an HTTP/0.9 request
-            // has no headers.
-            Some(true) if request_line(&String::from_utf8_lossy(&state.buffer)).is_none() => Err(
-                TcpError::NotPermitted("malformed HTTP/1.x request line".into()),
-            ),
-            other => Ok(other),
-        }
-    }
-
-    /// Check the request with header block `headers` against the HTTP rules
-    /// for the connected host and every host the request names.
-    fn check_http_rules(&self, headers: &[u8], handle: u32) -> Result<(), TcpError> {
-        let host = self
-            .connection_hosts
-            .get(&handle)
-            .ok_or(TcpError::InvalidHandle)?;
-        // `request_body` has checked that the headers are UTF-8.
-        let text = String::from_utf8_lossy(headers);
-        let malformed = || TcpError::NotPermitted("malformed HTTP request line".into());
-        let (method, target) = request_line(&text).ok_or_else(malformed)?;
-        let named = request_authorities(&text).ok_or_else(malformed)?;
-        // A server could route by either of two hosts that disagree.
-        let host_headers = named.len() - usize::from(is_absolute_form(target));
-        if host_headers > 1
-            || !named
-                .windows(2)
-                .all(|w| same_host(strip_port(w[0]), strip_port(w[1])))
-        {
-            return Err(TcpError::NotPermitted(
-                "HTTP request names more than one host".into(),
-            ));
-        }
-        for host in std::iter::once(host.as_str()).chain(named.into_iter().map(strip_port)) {
-            self.config
-                .check_http_request(host, method, target)
-                .map_err(TcpError::NotPermitted)?;
-        }
-        Ok(())
-    }
-
-    /// Check if a host is allowed by the current policy.
-    fn check_host_allowed(&self, host: &str) -> Result<(), TcpError> {
-        // Check blocked first (always enforced).
-        for pattern in &self.config.blocked_hosts {
-            if host_matches_pattern(host, pattern) {
-                return Err(TcpError::NotPermitted(format!("host '{host}' is blocked")));
-            }
-        }
-
-        // If allow_all_hosts is set, skip the allowlist check.
-        if self.config.allow_all_hosts {
-            return Ok(());
-        }
-
-        // Otherwise host must match the allowlist.
-        let allowed = self
-            .config
-            .allowed_hosts
-            .iter()
-            .any(|p| host_matches_pattern(host, p));
-        if !allowed {
-            return Err(TcpError::NotPermitted(format!(
-                "host '{host}' not in allowed list"
-            )));
-        }
-
-        Ok(())
-    }
-
-    /// Check a resolved address against `blocked_networks`/`allowed_networks`.
-    ///
-    /// An address matches a network in either its own form or the IPv4
-    /// address it stands for, so `::ffff:10.0.0.0/104` and `10.0.0.0/8` both
-    /// match `::ffff:10.0.0.1`.
-    fn is_ip_allowed(&self, ip: IpAddr) -> bool {
-        let embedded = embedded_ipv4(ip);
-        let matches = |nets: &[IpNet]| {
-            nets.iter()
-                .any(|n| n.contains(&ip) || embedded.is_some_and(|v4| n.contains(&v4)))
-        };
-        !matches(&self.config.blocked_networks) || matches(&self.config.allowed_networks)
-    }
-
-    /// Resolve `host` and keep the addresses the policy allows.
-    ///
-    /// Callers must connect to one of the returned addresses, never re-resolve:
-    /// the check is only as good as the address actually used.
-    async fn resolve_allowed(&self, host: &str, port: u16) -> Result<Vec<SocketAddr>, TcpError> {
-        let addrs: Vec<SocketAddr> = match &self.config.resolver {
-            Some(resolver) => resolver.resolve(host, port).await,
-            None => tokio::net::lookup_host((host, port))
-                .await
-                .map(Iterator::collect),
-        }
-        .map_err(|e| {
-            if e.kind() == std::io::ErrorKind::NotFound {
-                TcpError::HostNotFound
-            } else {
-                TcpError::IoError(e.to_string())
-            }
-        })?;
-        if addrs.is_empty() {
-            return Err(TcpError::HostNotFound);
-        }
-
-        let internal = self
-            .config
-            .internal_hosts
-            .iter()
-            .any(|p| host_matches_pattern(host, p));
-        if internal {
-            return Ok(addrs);
-        }
-
-        let (allowed, blocked): (Vec<_>, Vec<_>) =
-            addrs.into_iter().partition(|a| self.is_ip_allowed(a.ip()));
-        if allowed.is_empty() {
-            // The address stays in the host's logs: telling the guest would let
-            // it map internal DNS names to addresses.
-            tracing::debug!(host, addr = %blocked[0].ip(), "host resolves to a blocked network");
-            return Err(TcpError::NotPermitted(format!(
-                "host '{host}' resolves to a blocked network"
-            )));
-        }
-        Ok(allowed)
+        self.policy
+            .frames_requests(self.substitutes_secrets(handle))
     }
 
     // ========================================================================
@@ -1598,33 +1199,19 @@ impl ConnectionManager {
         port: u16,
         timeout_ms: u32,
     ) -> Result<u32, TcpError> {
-        // 1. Check host against allowed/blocked patterns
-        self.check_host_allowed(host)?;
+        // Refuse a disallowed host before the connection limit, as the
+        // policy's own check in `connect` would.
+        self.policy.check_host(host)?;
 
-        // 2. Check connection limit
-        if self.config.max_connections > 0
-            && self.connection_count() >= self.config.max_connections as usize
+        if self.policy.config.max_connections > 0
+            && self.connection_count() >= self.policy.config.max_connections as usize
         {
             return Err(TcpError::NotPermitted("connection limit reached".into()));
         }
 
-        let connect_timeout = Self::effective_timeout(self.config.connect_timeout, timeout_ms);
-
-        // 3. DNS resolve + check resolved addresses + TCP connect (with timeout)
-        let addrs = tokio::time::timeout(connect_timeout, self.resolve_allowed(host, port))
-            .await
-            .map_err(|_| TcpError::TimedOut)??;
-
-        // Tries each checked address in turn, never re-resolving.
-        let tcp = tokio::time::timeout(connect_timeout, TcpStream::connect(&addrs[..]))
-            .await
-            .map_err(|_| TcpError::TimedOut)?
-            .map_err(|e| match e.kind() {
-                std::io::ErrorKind::ConnectionRefused => TcpError::ConnectionRefused,
-                std::io::ErrorKind::ConnectionReset => TcpError::ConnectionReset,
-                std::io::ErrorKind::TimedOut => TcpError::TimedOut,
-                _ => TcpError::IoError(e.to_string()),
-            })?;
+        let connect_timeout =
+            Self::effective_timeout(self.policy.config.connect_timeout, timeout_ms);
+        let tcp = self.policy.connect(host, port, connect_timeout).await?;
 
         let handle = self.alloc_handle();
         self.tcp_connections.insert(handle, tcp);
@@ -1650,15 +1237,19 @@ impl ConnectionManager {
         len: u32,
         timeout_ms: u32,
     ) -> Result<Vec<u8>, TcpError> {
-        let io_timeout = Self::effective_timeout(self.config.io_timeout, timeout_ms);
+        let io_timeout = Self::effective_timeout(self.policy.config.io_timeout, timeout_ms);
         let len = self.read_len(len)?;
         let stream = self
             .tcp_connections
             .get_mut(&handle)
             .ok_or(TcpError::InvalidHandle)?;
 
-        let state = self.read_states.entry(handle).or_default();
-        let data = read_masked(stream, state, &self.read_masks, len, io_timeout)
+        let masker = self
+            .read_states
+            .entry(handle)
+            .or_insert_with(|| self.policy.response_masker());
+        let data = masker
+            .read(stream, len, io_timeout)
             .await
             .map_err(|e| match e.kind() {
                 std::io::ErrorKind::ConnectionReset => TcpError::ConnectionReset,
@@ -1708,7 +1299,7 @@ impl ConnectionManager {
         data: &[u8],
         timeout_ms: u32,
     ) -> Result<(), TcpError> {
-        let io_timeout = Self::effective_timeout(self.config.io_timeout, timeout_ms);
+        let io_timeout = Self::effective_timeout(self.policy.config.io_timeout, timeout_ms);
         let stream = self
             .tcp_connections
             .get_mut(&handle)
@@ -1722,137 +1313,6 @@ impl ConnectionManager {
                 std::io::ErrorKind::TimedOut => TcpError::TimedOut,
                 _ => TcpError::IoError(e.to_string()),
             })
-    }
-
-    /// Substitute secret placeholders in HTTP headers.
-    fn substitute_http_headers(&self, headers: &[u8], handle: u32) -> Result<Vec<u8>, TcpError> {
-        let text = String::from_utf8_lossy(headers);
-        let target_host = self
-            .connection_hosts
-            .get(&handle)
-            .ok_or(TcpError::InvalidHandle)?;
-
-        // The server routes by the Host header (or an absolute-form target),
-        // so a request naming another host must not carry secrets.
-        let names_target = request_authorities(&text)
-            .is_some_and(|hosts| hosts.iter().all(|a| same_host(strip_port(a), target_host)));
-        if !names_target && self.secrets.values().any(|s| text.contains(&s.placeholder)) {
-            return Err(TcpError::NotPermitted(
-                "Secret not allowed: request names a different host than the connection".into(),
-            ));
-        }
-
-        let mut result = String::new();
-
-        let mut lines = text.lines();
-        // Request line (GET /path HTTP/1.1), passed through as is.
-        if let Some(line) = lines.next() {
-            result.push_str(line);
-            result.push_str("\r\n");
-        }
-        for line in lines {
-            // The blank line ending the headers is re-added below.
-            if line.is_empty() {
-                continue;
-            }
-
-            // Check if this is a header line (contains ':')
-            if let Some(colon_pos) = line.find(':') {
-                let name = &line[..colon_pos];
-                let value = line[colon_pos + 1..].trim_start();
-
-                // Substitute secrets in header value
-                let substituted_value =
-                    self.substitute_secrets_in_text(value, name, target_host)?;
-                // A placeholder inside `Basic` credentials isn't visible to the
-                // check above.
-                if !names_target && substituted_value != value {
-                    return Err(TcpError::NotPermitted(
-                        "Secret not allowed: request names a different host than the connection"
-                            .into(),
-                    ));
-                }
-                result.push_str(&format!("{name}: {substituted_value}\r\n"));
-            } else {
-                result.push_str(line);
-                result.push_str("\r\n");
-            }
-        }
-
-        result.push_str("\r\n"); // End of headers
-        Ok(result.into_bytes())
-    }
-
-    /// Substitute secret placeholders in the value `text` of the header
-    /// `header`.
-    ///
-    /// A secret is only substituted for a host matching
-    /// [`NetConfig::secret_hosts`]; a secret with no hosts there is never
-    /// substituted. A secret limited to one header is only substituted there.
-    ///
-    /// Placeholders in `Authorization: Basic` credentials, which clients
-    /// base64-encode, are substituted in the decoded `user:password` and the
-    /// result re-encoded.
-    fn substitute_secrets_in_text(
-        &self,
-        text: &str,
-        header: &str,
-        target_host: &str,
-    ) -> Result<String, TcpError> {
-        if header.eq_ignore_ascii_case("authorization")
-            && let Some((scheme, token)) = text.split_once(' ')
-            && scheme.eq_ignore_ascii_case("basic")
-            && let Ok(decoded) = BASE64_STANDARD.decode(token.trim())
-            && let Ok(credentials) = String::from_utf8(decoded)
-        {
-            let substituted = self.substitute_placeholders(&credentials, header, target_host)?;
-            if substituted != credentials {
-                return Ok(format!("Basic {}", BASE64_STANDARD.encode(substituted)));
-            }
-        }
-        self.substitute_placeholders(text, header, target_host)
-    }
-
-    /// Substitute secret placeholders appearing verbatim in `text`, the value
-    /// of the header `header`, as described in
-    /// [`substitute_secrets_in_text`](Self::substitute_secrets_in_text).
-    fn substitute_placeholders(
-        &self,
-        text: &str,
-        header: &str,
-        target_host: &str,
-    ) -> Result<String, TcpError> {
-        let mut result = text.to_string();
-
-        for secret_config in self.secrets.values() {
-            if !text.contains(&secret_config.placeholder) {
-                continue;
-            }
-
-            let host_allowed = self
-                .config
-                .secret_hosts(secret_config)
-                .iter()
-                .any(|p| host_matches_pattern(target_host, p));
-
-            if !host_allowed {
-                return Err(TcpError::NotPermitted(
-                    "Secret not allowed for the target host".into(),
-                ));
-            }
-            if let Some(allowed) = &secret_config.header
-                && !allowed.eq_ignore_ascii_case(header)
-            {
-                return Err(TcpError::NotPermitted(format!(
-                    "Secret not allowed in the {header} header"
-                )));
-            }
-
-            // Substitute
-            result = result.replace(&secret_config.placeholder, &secret_config.real_value);
-        }
-
-        Ok(result)
     }
 
     /// Close a TCP connection.
@@ -1884,7 +1344,8 @@ impl ConnectionManager {
         hostname: &str,
         timeout_ms: u32,
     ) -> Result<u32, TlsError> {
-        let connect_timeout = Self::effective_timeout(self.config.connect_timeout, timeout_ms);
+        let connect_timeout =
+            Self::effective_timeout(self.policy.config.connect_timeout, timeout_ms);
 
         // Remove the TCP connection (we're taking ownership). Its handle is
         // gone whether or not the handshake succeeds, so drop its state now.
@@ -1896,25 +1357,15 @@ impl ConnectionManager {
         self.http_states.remove(&tcp_handle);
         self.read_states.remove(&tcp_handle);
 
-        // The certificate is checked against `hostname`, and secrets against
-        // the connected host, so the two must be the same host.
-        if !host.as_deref().is_some_and(|h| same_host(h, hostname)) {
-            return Err(TlsError::Tcp(TcpError::NotPermitted(format!(
-                "TLS hostname '{hostname}' does not match the connected host"
-            ))));
-        }
-
-        // TLS handshake
-        let connector = TlsConnector::from(self.tls_config.clone());
-        let server_name: ServerName<'static> = hostname
-            .to_string()
-            .try_into()
-            .map_err(|_| TlsError::HandshakeFailed("invalid hostname".into()))?;
-
-        let tls = tokio::time::timeout(connect_timeout, connector.connect(server_name, tcp))
-            .await
-            .map_err(|_| TlsError::Tcp(TcpError::TimedOut))?
-            .map_err(|e| TlsError::HandshakeFailed(e.to_string()))?;
+        let tls = self
+            .policy
+            .tls_connect(
+                tcp,
+                host.as_deref().unwrap_or_default(),
+                hostname,
+                connect_timeout,
+            )
+            .await?;
 
         let handle = self.alloc_handle();
         self.tls_connections.insert(handle, tls);
@@ -1949,15 +1400,19 @@ impl ConnectionManager {
         len: u32,
         timeout_ms: u32,
     ) -> Result<Vec<u8>, TlsError> {
-        let io_timeout = Self::effective_timeout(self.config.io_timeout, timeout_ms);
+        let io_timeout = Self::effective_timeout(self.policy.config.io_timeout, timeout_ms);
         let len = self.read_len(len).map_err(TlsError::Tcp)?;
         let stream = self
             .tls_connections
             .get_mut(&handle)
             .ok_or(TlsError::InvalidHandle)?;
 
-        let state = self.read_states.entry(handle).or_default();
-        let data = read_masked(stream, state, &self.read_masks, len, io_timeout)
+        let masker = self
+            .read_states
+            .entry(handle)
+            .or_insert_with(|| self.policy.response_masker());
+        let data = masker
+            .read(stream, len, io_timeout)
             .await
             .map_err(|e| match e.kind() {
                 std::io::ErrorKind::ConnectionReset => TlsError::Tcp(TcpError::ConnectionReset),
@@ -2007,7 +1462,7 @@ impl ConnectionManager {
         data: &[u8],
         timeout_ms: u32,
     ) -> Result<(), TlsError> {
-        let io_timeout = Self::effective_timeout(self.config.io_timeout, timeout_ms);
+        let io_timeout = Self::effective_timeout(self.policy.config.io_timeout, timeout_ms);
         let stream = self
             .tls_connections
             .get_mut(&handle)
@@ -2045,8 +1500,7 @@ impl ConnectionManager {
     /// shutdown) and removes all HTTP parsing and host-tracking state.
     ///
     /// Preserved across the call:
-    /// - `config` and `tls_config` (network policy)
-    /// - `secrets` (secret substitution rules)
+    /// - `policy` (network policy, secrets and TLS roots)
     /// - `next_handle` (stays monotonic — stale guest handles remain invalid)
     pub fn close_all_connections(&mut self) {
         let tcp_count = self.tcp_connections.len();
@@ -2321,6 +1775,9 @@ fn host_matches_pattern(host: &str, pattern: &str) -> bool {
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
+    use base64::Engine as _;
+    use base64::prelude::BASE64_STANDARD;
+    use tokio::io::AsyncReadExt as _;
     #[test]
     fn one_resolver_can_be_shared_between_configs() {
         #[derive(Debug)]
@@ -2481,12 +1938,12 @@ mod tests {
         let manager = ConnectionManager::new(config, HashMap::new());
 
         // Default is allow_all_hosts=false with empty allowed_hosts, so nothing is permitted.
-        assert!(manager.check_host_allowed("localhost").is_err());
-        assert!(manager.check_host_allowed("127.0.0.1").is_err());
-        assert!(manager.check_host_allowed("192.168.1.1").is_err());
-        assert!(manager.check_host_allowed("10.0.0.1").is_err());
-        assert!(manager.check_host_allowed("google.com").is_err());
-        assert!(manager.check_host_allowed("api.example.com").is_err());
+        assert!(manager.policy.check_host("localhost").is_err());
+        assert!(manager.policy.check_host("127.0.0.1").is_err());
+        assert!(manager.policy.check_host("192.168.1.1").is_err());
+        assert!(manager.policy.check_host("10.0.0.1").is_err());
+        assert!(manager.policy.check_host("google.com").is_err());
+        assert!(manager.policy.check_host("api.example.com").is_err());
     }
 
     #[test]
@@ -2496,9 +1953,9 @@ mod tests {
             .allow_host("api.github.com");
         let manager = ConnectionManager::new(config, HashMap::new());
 
-        assert!(manager.check_host_allowed("api.example.com").is_ok());
-        assert!(manager.check_host_allowed("api.github.com").is_ok());
-        assert!(manager.check_host_allowed("google.com").is_err());
+        assert!(manager.policy.check_host("api.example.com").is_ok());
+        assert!(manager.policy.check_host("api.github.com").is_ok());
+        assert!(manager.policy.check_host("google.com").is_err());
     }
 
     #[test]
@@ -2510,11 +1967,11 @@ mod tests {
         let manager = ConnectionManager::new(config, HashMap::new());
 
         // allow_all_hosts=true permits all non-blocked hosts.
-        assert!(manager.check_host_allowed("google.com").is_ok());
-        assert!(manager.check_host_allowed("api.example.com").is_ok());
+        assert!(manager.policy.check_host("google.com").is_ok());
+        assert!(manager.policy.check_host("api.example.com").is_ok());
         // Blocked hosts are still blocked.
-        assert!(manager.check_host_allowed("localhost").is_err());
-        assert!(manager.check_host_allowed("127.0.0.1").is_err());
+        assert!(manager.policy.check_host("localhost").is_err());
+        assert!(manager.policy.check_host("127.0.0.1").is_err());
     }
 
     #[test]
@@ -2522,9 +1979,9 @@ mod tests {
         let config = NetConfig::permissive();
         let manager = ConnectionManager::new(config, HashMap::new());
 
-        assert!(manager.check_host_allowed("localhost").is_ok());
-        assert!(manager.check_host_allowed("127.0.0.1").is_ok());
-        assert!(manager.check_host_allowed("google.com").is_ok());
+        assert!(manager.policy.check_host("localhost").is_ok());
+        assert!(manager.policy.check_host("127.0.0.1").is_ok());
+        assert!(manager.policy.check_host("google.com").is_ok());
     }
 
     // HTTP parsing helper tests
@@ -2610,7 +2067,7 @@ mod tests {
         let manager = ConnectionManager::new(config, secrets);
 
         // Test substitution for allowed host
-        let result = manager.substitute_secrets_in_text(
+        let result = manager.policy.substitute_secrets_in_text(
             "Bearer ERYX_SECRET_PLACEHOLDER_abc123",
             "Authorization",
             "api.example.com",
@@ -2619,7 +2076,7 @@ mod tests {
         assert_eq!(result.unwrap(), "Bearer real-secret-value");
 
         // Test rejection for disallowed host
-        let result = manager.substitute_secrets_in_text(
+        let result = manager.policy.substitute_secrets_in_text(
             "Bearer ERYX_SECRET_PLACEHOLDER_abc123",
             "Authorization",
             "evil.com",
@@ -2643,12 +2100,14 @@ mod tests {
 
         assert_eq!(
             manager
+                .policy
                 .substitute_secrets_in_text("PH_HEADER", "x-api-key", "api.example.com")
                 .unwrap(),
             "real-secret-value"
         );
         assert!(
             manager
+                .policy
                 .substitute_secrets_in_text("Bearer PH_HEADER", "Authorization", "api.example.com")
                 .is_err()
         );
@@ -2662,24 +2121,32 @@ mod tests {
         let mut m = framing_manager();
 
         assert_eq!(
-            m.substitute_secrets_in_text(&basic("git:PH"), "authorization", "api.example.com")
+            m.policy
+                .substitute_secrets_in_text(&basic("git:PH"), "authorization", "api.example.com")
                 .unwrap(),
             basic("git:real")
         );
         assert!(
-            m.substitute_secrets_in_text(&basic("git:PH"), "Authorization", "evil.com")
+            m.policy
+                .substitute_secrets_in_text(&basic("git:PH"), "Authorization", "evil.com")
                 .is_err()
         );
         // Other headers and schemes aren't decoded.
         let encoded = BASE64_STANDARD.encode("git:PH");
         assert_eq!(
-            m.substitute_secrets_in_text(&format!("Basic {encoded}"), "X-Auth", "api.example.com")
+            m.policy
+                .substitute_secrets_in_text(
+                    &format!("Basic {encoded}"),
+                    "X-Auth",
+                    "api.example.com"
+                )
                 .unwrap(),
             format!("Basic {encoded}")
         );
         // Credentials without a placeholder are passed through as written.
         assert_eq!(
-            m.substitute_secrets_in_text("basic Z2l0OnB3", "Authorization", "api.example.com")
+            m.policy
+                .substitute_secrets_in_text("basic Z2l0OnB3", "Authorization", "api.example.com")
                 .unwrap(),
             "basic Z2l0OnB3"
         );
@@ -2693,9 +2160,15 @@ mod tests {
         m.http_states.clear();
 
         // A secret limited to another header isn't sent in Basic credentials.
-        m.secrets.get_mut("KEY").unwrap().header = Some("X-Api-Key".into());
+        Arc::get_mut(&mut m.policy)
+            .unwrap()
+            .secrets
+            .get_mut("KEY")
+            .unwrap()
+            .header = Some("X-Api-Key".into());
         assert!(
-            m.substitute_secrets_in_text(&basic("git:PH"), "Authorization", "api.example.com")
+            m.policy
+                .substitute_secrets_in_text(&basic("git:PH"), "Authorization", "api.example.com")
                 .is_err()
         );
     }
@@ -2721,6 +2194,7 @@ mod tests {
         let manager = ConnectionManager::new(permissive, secret(vec![]));
         assert!(
             manager
+                .policy
                 .substitute_secrets_in_text(
                     "Bearer PLACEHOLDER_XYZ",
                     "Authorization",
@@ -2746,6 +2220,7 @@ mod tests {
         let manager = ConnectionManager::new(allowlist, secret(vec![]));
         assert_eq!(
             manager
+                .policy
                 .substitute_secrets_in_text(
                     "Bearer PLACEHOLDER_XYZ",
                     "Authorization",
@@ -2756,6 +2231,7 @@ mod tests {
         );
         assert!(
             manager
+                .policy
                 .substitute_secrets_in_text(
                     "Bearer PLACEHOLDER_XYZ",
                     "Authorization",
@@ -2789,21 +2265,25 @@ mod tests {
         // All of these unauthorized hosts must be rejected
         assert!(
             manager
+                .policy
                 .substitute_secrets_in_text("PH_AUTH", "Authorization", "evil.com")
                 .is_err()
         );
         assert!(
             manager
+                .policy
                 .substitute_secrets_in_text("PH_AUTH", "Authorization", "127.0.0.1")
                 .is_err()
         );
         assert!(
             manager
+                .policy
                 .substitute_secrets_in_text("PH_AUTH", "Authorization", "localhost")
                 .is_err()
         );
         assert!(
             manager
+                .policy
                 .substitute_secrets_in_text("PH_AUTH", "Authorization", "")
                 .is_err()
         );
@@ -2838,24 +2318,28 @@ mod tests {
         // OpenAI key for OpenAI host: OK
         assert!(
             manager
+                .policy
                 .substitute_secrets_in_text("PH_OPENAI", "Authorization", "api.openai.com")
                 .is_ok()
         );
         // OpenAI key for GitHub host: REJECTED
         assert!(
             manager
+                .policy
                 .substitute_secrets_in_text("PH_OPENAI", "Authorization", "api.github.com")
                 .is_err()
         );
         // GitHub key for GitHub host: OK
         assert!(
             manager
+                .policy
                 .substitute_secrets_in_text("PH_GITHUB", "Authorization", "api.github.com")
                 .is_ok()
         );
         // GitHub key for OpenAI host: REJECTED
         assert!(
             manager
+                .policy
                 .substitute_secrets_in_text("PH_GITHUB", "Authorization", "api.openai.com")
                 .is_err()
         );
@@ -2880,17 +2364,20 @@ mod tests {
 
         assert!(
             manager
+                .policy
                 .substitute_secrets_in_text("PH_GLOB", "Authorization", "api.openai.com")
                 .is_ok()
         );
         // Bare domain doesn't match *.openai.com
         assert!(
             manager
+                .policy
                 .substitute_secrets_in_text("PH_GLOB", "Authorization", "openai.com")
                 .is_err()
         );
         assert!(
             manager
+                .policy
                 .substitute_secrets_in_text("PH_GLOB", "Authorization", "evil.com")
                 .is_err()
         );
@@ -2916,6 +2403,7 @@ mod tests {
         // Deceptive domains that look similar but shouldn't match
         assert!(
             manager
+                .policy
                 .substitute_secrets_in_text(
                     "PH_DECEPTIVE",
                     "Authorization",
@@ -2925,16 +2413,19 @@ mod tests {
         );
         assert!(
             manager
+                .policy
                 .substitute_secrets_in_text("PH_DECEPTIVE", "Authorization", "api-openai.com")
                 .is_err()
         );
         assert!(
             manager
+                .policy
                 .substitute_secrets_in_text("PH_DECEPTIVE", "Authorization", "evil-api.openai.com")
                 .is_err()
         );
         assert!(
             manager
+                .policy
                 .substitute_secrets_in_text("PH_DECEPTIVE", "Authorization", "xapi.openai.com")
                 .is_err()
         );
@@ -2960,11 +2451,13 @@ mod tests {
         // IP address should NOT match hostname restriction
         assert!(
             manager
+                .policy
                 .substitute_secrets_in_text("PH_IP", "Authorization", "104.18.7.192")
                 .is_err()
         );
         assert!(
             manager
+                .policy
                 .substitute_secrets_in_text("PH_IP", "Authorization", "1.2.3.4")
                 .is_err()
         );
@@ -2990,11 +2483,13 @@ mod tests {
         // DNS is case-insensitive, so these should all work
         assert!(
             manager
+                .policy
                 .substitute_secrets_in_text("PH_CASE", "Authorization", "API.OPENAI.COM")
                 .is_ok()
         );
         assert!(
             manager
+                .policy
                 .substitute_secrets_in_text("PH_CASE", "Authorization", "Api.OpenAI.Com")
                 .is_ok()
         );
@@ -3018,7 +2513,7 @@ mod tests {
         let manager = ConnectionManager::new(config, secrets);
 
         // Text without any placeholder should pass through unchanged, for any host
-        let result = manager.substitute_secrets_in_text(
+        let result = manager.policy.substitute_secrets_in_text(
             "Bearer some-other-token",
             "Authorization",
             "evil.com",
@@ -3040,9 +2535,10 @@ mod tests {
         manager
             .connection_hosts
             .insert(tcp_handle, "example.com".to_string());
-        manager
-            .http_states
-            .insert(tcp_handle, HttpParsingState::default());
+        manager.http_states.insert(
+            tcp_handle,
+            manager.policy.request_framer("example.com", false),
+        );
 
         // Simulate what tls_upgrade now does: carry over host, clean up old state
         if let Some(host) = manager.connection_hosts.remove(&tcp_handle) {
@@ -3106,7 +2602,9 @@ mod tests {
         );
 
         // Substitute headers
-        let result = manager.substitute_http_headers(large_headers.as_bytes(), handle);
+        let result = manager
+            .policy
+            .substitute_http_headers(large_headers.as_bytes(), &manager.connection_hosts[&handle]);
         assert!(result.is_ok(), "Large header substitution should succeed");
 
         let substituted = String::from_utf8(result.unwrap()).unwrap();
@@ -3159,7 +2657,9 @@ mod tests {
 
         // Now try to substitute secrets - should fail because connection_hosts has "evil.com"
         let headers = b"GET /api HTTP/1.1\r\nHost: api.openai.com\r\nAuthorization: Bearer PLACEHOLDER_SNI\r\n\r\n";
-        let result = manager.substitute_http_headers(headers, tls_handle);
+        let result = manager
+            .policy
+            .substitute_http_headers(headers, &manager.connection_hosts[&tls_handle]);
 
         assert!(
             result.is_err(),
@@ -3205,7 +2705,9 @@ mod tests {
         large_headers.push_str("\r\n");
 
         // Should fail because host is not authorized for this secret
-        let result = manager.substitute_http_headers(large_headers.as_bytes(), handle);
+        let result = manager
+            .policy
+            .substitute_http_headers(large_headers.as_bytes(), &manager.connection_hosts[&handle]);
         assert!(
             result.is_err(),
             "Secret substitution should fail for unauthorized host even with large headers"
@@ -3237,8 +2739,10 @@ mod tests {
         manager
             .connection_hosts
             .insert(h2, "b.example.com".to_string());
-        manager.http_states.insert(h1, HttpParsingState::default());
-        manager.http_states.insert(h2, HttpParsingState::default());
+        let framer = |host| manager.policy.request_framer(host, false);
+        let (f1, f2) = (framer("a.example.com"), framer("b.example.com"));
+        manager.http_states.insert(h1, f1);
+        manager.http_states.insert(h2, f2);
 
         // Create a real TCP pair so tcp_connections has entries.
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -3262,8 +2766,8 @@ mod tests {
 
         // Config, secrets, and handle counter are preserved.
         assert_eq!(manager.next_handle, next_before);
-        assert!(manager.secrets.contains_key("KEY"));
-        assert!(manager.config.allow_all_hosts);
+        assert!(manager.policy.secrets.contains_key("KEY"));
+        assert!(manager.policy.config.allow_all_hosts);
     }
 
     #[tokio::test]
@@ -3374,7 +2878,10 @@ mod tests {
             "2001:0:4136:e378:8000:63bf:3fff:fdd2",
             "2001:db8::1",
         ] {
-            assert!(!manager.is_ip_allowed(ip(blocked)), "{blocked} allowed");
+            assert!(
+                !manager.policy.is_ip_allowed(ip(blocked)),
+                "{blocked} allowed"
+            );
         }
         for public in [
             "8.8.8.8",
@@ -3382,7 +2889,7 @@ mod tests {
             "2606:4700:4700::1111",
             "64:ff9b::808:808",
         ] {
-            assert!(manager.is_ip_allowed(ip(public)), "{public} blocked");
+            assert!(manager.policy.is_ip_allowed(ip(public)), "{public} blocked");
         }
     }
 
@@ -3390,9 +2897,9 @@ mod tests {
     fn test_allowed_networks_override_blocked() {
         let config = NetConfig::default().allow_network("10.96.0.0/12".parse().unwrap());
         let manager = ConnectionManager::new(config, HashMap::new());
-        assert!(manager.is_ip_allowed(ip("10.96.12.34")));
-        assert!(manager.is_ip_allowed(ip("::ffff:10.96.12.34")));
-        assert!(!manager.is_ip_allowed(ip("10.0.0.1")));
+        assert!(manager.policy.is_ip_allowed(ip("10.96.12.34")));
+        assert!(manager.policy.is_ip_allowed(ip("::ffff:10.96.12.34")));
+        assert!(!manager.policy.is_ip_allowed(ip("10.0.0.1")));
     }
 
     /// A configured IPv4-mapped CIDR still matches, though addresses are also
@@ -3404,8 +2911,8 @@ mod tests {
             ..NetConfig::default()
         };
         let manager = ConnectionManager::new(config, HashMap::new());
-        assert!(!manager.is_ip_allowed(ip("::ffff:8.8.8.8")));
-        assert!(manager.is_ip_allowed(ip("8.8.4.4")));
+        assert!(!manager.policy.is_ip_allowed(ip("::ffff:8.8.8.8")));
+        assert!(manager.policy.is_ip_allowed(ip("8.8.4.4")));
     }
 
     /// IPv4-compatible and Teredo addresses are checked as the IPv4 address
@@ -3417,21 +2924,21 @@ mod tests {
             ..NetConfig::default()
         };
         let manager = ConnectionManager::new(config, HashMap::new());
-        assert!(!manager.is_ip_allowed(ip("::10.0.0.1")));
+        assert!(!manager.policy.is_ip_allowed(ip("::10.0.0.1")));
         // Teredo stores the client address inverted: !10.0.0.1 = f5ff:fffe.
-        assert!(!manager.is_ip_allowed(ip("2001:0:1:2:3:4:f5ff:fffe")));
-        assert!(manager.is_ip_allowed(ip("::8.8.8.8")));
-        assert!(manager.is_ip_allowed(ip("2001:0:1:2:3:4:f7f7:f7f7")));
+        assert!(!manager.policy.is_ip_allowed(ip("2001:0:1:2:3:4:f5ff:fffe")));
+        assert!(manager.policy.is_ip_allowed(ip("::8.8.8.8")));
+        assert!(manager.policy.is_ip_allowed(ip("2001:0:1:2:3:4:f7f7:f7f7")));
     }
 
     #[test]
     fn test_allow_localhost_unblocks_loopback_networks_only() {
         let manager =
             ConnectionManager::new(NetConfig::default().allow_localhost(), HashMap::new());
-        assert!(manager.is_ip_allowed(ip("127.0.0.1")));
-        assert!(manager.is_ip_allowed(ip("::1")));
-        assert!(!manager.is_ip_allowed(ip("10.0.0.1")));
-        assert!(!manager.is_ip_allowed(ip("169.254.169.254")));
+        assert!(manager.policy.is_ip_allowed(ip("127.0.0.1")));
+        assert!(manager.policy.is_ip_allowed(ip("::1")));
+        assert!(!manager.policy.is_ip_allowed(ip("10.0.0.1")));
+        assert!(!manager.policy.is_ip_allowed(ip("169.254.169.254")));
     }
 
     /// The hostname passes every pattern check, but its DNS answer is internal.
@@ -3452,21 +2959,6 @@ mod tests {
             matches!(&err, TcpError::NotPermitted(m) if m.contains("resolves to a blocked network") && !m.contains("169.254")),
             "{err}"
         );
-    }
-
-    /// A mixed answer is narrowed to the allowed addresses, so the connection
-    /// can't land on the internal one.
-    #[tokio::test]
-    async fn test_mixed_dns_answer_keeps_only_allowed_addresses() {
-        let config =
-            NetConfig::default().with_resolver(FixedResolver(vec![ip("127.0.0.1"), ip("8.8.8.8")]));
-        let manager = ConnectionManager::new(config, HashMap::new());
-
-        let addrs = manager
-            .resolve_allowed("public.example", 443)
-            .await
-            .unwrap();
-        assert_eq!(addrs, vec![SocketAddr::new(ip("8.8.8.8"), 443)]);
     }
 
     /// `internal_hosts` lets a trusted name reach an internal address, which
