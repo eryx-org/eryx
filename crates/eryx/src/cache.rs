@@ -482,10 +482,13 @@ pub(crate) fn publish_file(path: &Path, contents: &[u8]) -> io::Result<()> {
         Ok(()) => Ok(()),
         // Another process published it first; dropping the error removes our temp file.
         Err(_) if file_matches(path, contents) => Ok(()),
-        Err(e) => match e.path.persist(path) {
-            Ok(()) => Ok(()),
+        // `fs::rename` rather than `TempPath::persist`: on Windows it replaces
+        // with POSIX semantics, so a reader holding the old file open doesn't
+        // make it fail. Our temp file is gone afterwards, so dropping the
+        // `TempPath` has nothing left to remove.
+        Err(e) => match fs::rename(&e.path, path) {
             Err(_) if file_matches(path, contents) => Ok(()),
-            Err(e) => Err(e.error),
+            renamed => renamed,
         },
     }
 }
