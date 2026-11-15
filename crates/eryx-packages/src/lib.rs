@@ -5,6 +5,8 @@
 //! here either (no install scripts); packages are only downloaded, checked
 //! against their integrity hashes, and unpacked.
 //!
+//! - [`environment`] has the types of environments: the hand-written
+//!   definition (TOML) and the manifest of a built one.
 //! - [`npm`] resolves npm packages to a [`npm::Lockfile`] and installs them as
 //!   a `node_modules` tree, which a bundler turns into the modules a
 //!   JavaScript sandbox imports.
@@ -14,6 +16,7 @@
 //!   too.
 
 pub mod blobs;
+pub mod environment;
 pub mod extract;
 pub mod fetch;
 pub mod integrity;
@@ -64,6 +67,9 @@ pub enum Error {
     /// A lockfile couldn't be read or written.
     #[error("lockfile: {0}")]
     Lockfile(String),
+    /// An environment definition or manifest is invalid.
+    #[error("environment: {0}")]
+    Definition(String),
     /// A filesystem operation on the cache or an install failed.
     #[error("{context}: {source}")]
     Io {
