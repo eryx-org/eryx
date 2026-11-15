@@ -108,6 +108,9 @@ jobs:
             : > "$RUNNER_TEMP/runtime-$lang.cwasm"
             echo "ERYX_RUNTIME_CWASM_$lang=$RUNNER_TEMP/runtime-$lang.cwasm" >> "$GITHUB_ENV"
           done
+          # The shell's embedded coreutils (the `coreutils` feature, #809).
+          : > "$RUNNER_TEMP/coreutils.cwasm"
+          echo "ERYX_COREUTILS_CWASM=$RUNNER_TEMP/coreutils.cwasm" >> "$GITHUB_ENV"
 
       - name: Run release-plz
         uses: release-plz/action@66b324fd6c72d05d2a08568492ecdd62bfb8a62b # v0.5.148
