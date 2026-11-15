@@ -1060,11 +1060,6 @@ impl MemoryTracker {
         self.peak_memory_bytes.load(Ordering::Relaxed)
     }
 
-    /// Reset the peak memory tracker to zero.
-    pub fn reset(&self) {
-        self.peak_memory_bytes.store(0, Ordering::Relaxed);
-    }
-
     /// Record memory that was already in use before this tracker was installed.
     pub(crate) fn observe(&self, bytes: u64) {
         self.peak_memory_bytes.fetch_max(bytes, Ordering::Relaxed);
