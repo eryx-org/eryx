@@ -11,7 +11,7 @@
 //! The allocator is read when the process-global engine is created, so this
 //! binary holds a single test that sets it before anything touches the engine.
 
-#![cfg(feature = "native-extensions")]
+#![cfg(all(feature = "native-extensions", feature = "embedded"))]
 #![allow(unsafe_code, clippy::expect_used, clippy::unwrap_used)]
 
 use eryx::Sandbox;
