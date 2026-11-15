@@ -34,6 +34,8 @@ vendor_patch = "clis/patches/patch-uucore-wasip2.sh"
 # sha256sum/md5sum (~1.3 MB together) are left out for size; chmod, df, du,
 # env, id, stat, tac, test, timeout, whoami and yes don't build for wasip2,
 # and ln can't work: the VFS refuses links and symlinks.
+# Canonicalizing realpath/readlink -f needs `/` to be statable (#832), so only
+# their -s/-m forms work today.
 # Must match COREUTILS_TOOLS in crates/eryx/src/embedded.rs (a test checks).
 cargo_flags = [
     "--no-default-features",
