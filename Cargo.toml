@@ -40,6 +40,7 @@ hmac = "0.13"
 ipnet = "2"
 metrics = "0.24"
 metrics-exporter-prometheus = { version = "0.18.1", default-features = false, features = ["http-listener"] }
+nodejs-semver = "7.0"  # npm version ranges (eryx-packages)
 opentelemetry = "0.33"
 opentelemetry-otlp = { version = "0.33", features = ["grpc-tonic"] }
 opentelemetry_sdk = "0.33"
