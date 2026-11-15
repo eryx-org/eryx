@@ -11,12 +11,15 @@ use wasmtime::component::Resource;
 use wasmtime_wasi_io::streams::{DynInputStream, DynOutputStream};
 
 use crate::file_io::{read_at, reopen_for_append, write_at};
-use crate::hybrid::{HybridDescriptor, HybridPreopen, HybridVfsState, RealDir, RealFile};
+use crate::hybrid::{
+    HybridDescriptor, HybridVfsCtx, HybridVfsState, RealDir, RealFile, RootEntry, join_guest_path,
+};
 use crate::hybrid_bindings::HybridReaddirIterator;
 use crate::hybrid_bindings::{DirPerms, FilePerms, HybridFsError, HybridFsResult, preopens, types};
 use crate::storage::VfsStorage;
 use crate::streams::{
-    MAX_READ_CHUNK, RealFileInputStream, RealFileOutputStream, VfsInputStream, VfsOutputStream,
+    DeviceInputStream, DiscardOutputStream, MAX_READ_CHUNK, RealFileInputStream,
+    RealFileOutputStream, VfsInputStream, VfsOutputStream, device_read,
 };
 use crate::wasi_impl::VfsDescriptor;
 
@@ -32,26 +35,7 @@ impl<S: VfsStorage + Clone + 'static> preopens::Host for HybridVfsState<'_, S> {
         );
         let mut result = Vec::new();
         for preopen in &self.ctx.preopens {
-            let (descriptor, path) = match preopen {
-                HybridPreopen::Vfs {
-                    guest_path,
-                    dir_perms,
-                    file_perms,
-                    storage,
-                } => {
-                    let mut vfs_desc =
-                        VfsDescriptor::dir(guest_path.clone(), *dir_perms, *file_perms);
-                    vfs_desc.storage = *storage;
-                    (HybridDescriptor::Vfs(vfs_desc), guest_path.clone())
-                }
-                HybridPreopen::Real { guest_path, dir } => {
-                    let hybrid_desc = HybridDescriptor::RealDir {
-                        dir: dir.clone(),
-                        guest_path: guest_path.clone(),
-                    };
-                    (hybrid_desc, guest_path.clone())
-                }
-            };
+            let (descriptor, path) = HybridVfsCtx::<S>::preopen_descriptor(preopen);
             let resource = self.table.push(descriptor)?;
             tracing::debug!(
                 "hybrid VFS preopen: {:?} at path {:?}",
@@ -174,7 +158,9 @@ fn real_metadata(descriptor: &HybridDescriptor) -> Option<capfs::Metadata> {
     match descriptor {
         HybridDescriptor::RealDir { dir, .. } => dir.dir.dir_metadata().ok(),
         HybridDescriptor::RealFile { file, .. } => capfs::Metadata::from_file(&file.file).ok(),
-        HybridDescriptor::Vfs(_) => None,
+        HybridDescriptor::Vfs(_)
+        | HybridDescriptor::Synthetic { .. }
+        | HybridDescriptor::Device(_) => None,
     }
 }
 
@@ -499,7 +485,77 @@ pub(crate) fn link_at_now() -> HybridFsResult<()> {
     Err(crate::VfsError::PermissionDenied("hard links not supported".to_string()).into())
 }
 
+/// The error for changing anything in the read-only root.
+fn read_only(path: &str) -> HybridFsError {
+    crate::VfsError::PermissionDenied(format!("{path}: read-only")).into()
+}
+
+/// The stat of a synthetic (read-only) directory.
+fn synthetic_dir_stat() -> types::DescriptorStat {
+    types::DescriptorStat {
+        type_: types::DescriptorType::Directory,
+        link_count: 1,
+        size: 0,
+        data_access_timestamp: None,
+        data_modification_timestamp: None,
+        status_change_timestamp: None,
+    }
+}
+
+/// The stat of a device under `/dev`.
+fn device_stat() -> types::DescriptorStat {
+    types::DescriptorStat {
+        type_: types::DescriptorType::CharacterDevice,
+        ..synthetic_dir_stat()
+    }
+}
+
+/// A metadata hash for a synthetic directory or device, from its path.
+fn synthetic_hash(path: &str) -> types::MetadataHashValue {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    ("eryx-synthetic", path).hash(&mut hasher);
+    types::MetadataHashValue {
+        lower: hasher.finish(),
+        upper: 0,
+    }
+}
+
 impl<S: VfsStorage + Clone + 'static> HybridVfsState<'_, S> {
+    /// Run `f` on a descriptor for the mount at `index`, held in the table
+    /// only for the call: the root hands paths under a mount to it.
+    fn with_mount<T>(
+        &mut self,
+        index: usize,
+        f: impl FnOnce(&mut Self, &Resource<HybridDescriptor>) -> HybridFsResult<T>,
+    ) -> HybridFsResult<T> {
+        let (descriptor, _) = HybridVfsCtx::<S>::preopen_descriptor(&self.ctx.preopens[index]);
+        let fd = self.table.push(descriptor)?;
+        let result = f(self, &fd);
+        self.table.delete(fd)?;
+        result
+    }
+
+    /// Change `path` under the synthetic directory `dir` with `f`: only
+    /// allowed inside a mount, which `f` is then run on. A missing path is
+    /// `NotFound`, unless the change `creates` it.
+    fn root_mutation<T>(
+        &mut self,
+        dir: &str,
+        path: &str,
+        creates: bool,
+        f: impl FnOnce(&mut Self, &Resource<HybridDescriptor>, String) -> HybridFsResult<T>,
+    ) -> HybridFsResult<T> {
+        let target = join_guest_path(dir, path);
+        match self.ctx.resolve_from_root(&target) {
+            RootEntry::Mount { index, rest } if !rest.is_empty() => {
+                self.with_mount(index, |s, fd| f(s, fd, rest))
+            }
+            RootEntry::NotFound if !creates => Err(crate::VfsError::NotFound(target).into()),
+            _ => Err(read_only(&target)),
+        }
+    }
+
     pub(crate) fn sync_data_now(&mut self, fd: &Resource<HybridDescriptor>) -> HybridFsResult<()> {
         let descriptor = self.table.get(fd)?;
         match descriptor {
@@ -515,6 +571,7 @@ impl<S: VfsStorage + Clone + 'static> HybridVfsState<'_, S> {
                 file.file.sync_data().map_err(HybridFsError::from)?;
                 Ok(())
             }
+            HybridDescriptor::Synthetic { .. } | HybridDescriptor::Device(_) => Ok(()),
         }
     }
 
@@ -550,6 +607,10 @@ impl<S: VfsStorage + Clone + 'static> HybridVfsState<'_, S> {
                     flags |= types::DescriptorFlags::WRITE;
                 }
             }
+            HybridDescriptor::Synthetic { .. } => flags |= types::DescriptorFlags::READ,
+            HybridDescriptor::Device(_) => {
+                flags |= types::DescriptorFlags::READ | types::DescriptorFlags::WRITE;
+            }
         }
 
         Ok(flags)
@@ -568,8 +629,11 @@ impl<S: VfsStorage + Clone + 'static> HybridVfsState<'_, S> {
                     Ok(types::DescriptorType::RegularFile)
                 }
             }
-            HybridDescriptor::RealDir { .. } => Ok(types::DescriptorType::Directory),
+            HybridDescriptor::RealDir { .. } | HybridDescriptor::Synthetic { .. } => {
+                Ok(types::DescriptorType::Directory)
+            }
             HybridDescriptor::RealFile { .. } => Ok(types::DescriptorType::RegularFile),
+            HybridDescriptor::Device(_) => Ok(types::DescriptorType::CharacterDevice),
         }
     }
 
@@ -605,6 +669,11 @@ impl<S: VfsStorage + Clone + 'static> HybridVfsState<'_, S> {
                 file.file.set_len(size)?;
                 Ok(done(()))
             }
+            HybridDescriptor::Synthetic { guest_path } => {
+                Err(crate::VfsError::NotFile(guest_path.clone()).into())
+            }
+            // Truncating a device (`> /dev/null`) is a no-op.
+            HybridDescriptor::Device(_) => Ok(done(())),
         }
     }
 
@@ -648,6 +717,8 @@ impl<S: VfsStorage + Clone + 'static> HybridVfsState<'_, S> {
                 file.file.set_times(file_times(atime, mtime))?;
                 Ok(done(()))
             }
+            HybridDescriptor::Synthetic { guest_path } => Err(read_only(guest_path)),
+            HybridDescriptor::Device(_) => Ok(done(())),
         }
     }
 
@@ -694,6 +765,13 @@ impl<S: VfsStorage + Clone + 'static> HybridVfsState<'_, S> {
                 let eof = bytes_read < len;
                 Ok(done((buf, eof)))
             }
+            HybridDescriptor::Synthetic { guest_path } => {
+                Err(crate::VfsError::NotFile(guest_path.clone()).into())
+            }
+            HybridDescriptor::Device(device) => {
+                let len = usize::try_from(len).unwrap_or(usize::MAX);
+                Ok(done(device_read(*device, len)))
+            }
         }
     }
 
@@ -732,6 +810,10 @@ impl<S: VfsStorage + Clone + 'static> HybridVfsState<'_, S> {
 
                 Ok(done(write_at(&file_arc, &buf, offset)? as u64))
             }
+            HybridDescriptor::Synthetic { guest_path } => {
+                Err(crate::VfsError::NotFile(guest_path.clone()).into())
+            }
+            HybridDescriptor::Device(_) => Ok(done(buf.len() as u64)),
         }
     }
 
@@ -747,6 +829,7 @@ impl<S: VfsStorage + Clone + 'static> HybridVfsState<'_, S> {
                 file.file.sync_all().map_err(HybridFsError::from)?;
                 Ok(())
             }
+            HybridDescriptor::Synthetic { .. } | HybridDescriptor::Device(_) => Ok(()),
         }
     }
 
@@ -781,6 +864,15 @@ impl<S: VfsStorage + Clone + 'static> HybridVfsState<'_, S> {
             HybridDescriptor::RealFile { guest_path, .. } => {
                 Err(crate::VfsError::NotDirectory(guest_path.clone()).into())
             }
+            HybridDescriptor::Synthetic { guest_path } => {
+                let dir = guest_path.clone();
+                self.root_mutation(&dir, &path, true, |s, fd, rest| {
+                    s.create_directory_at_op(fd, rest)
+                })
+            }
+            HybridDescriptor::Device(device) => {
+                Err(crate::VfsError::NotDirectory(device.path().to_owned()).into())
+            }
         }
     }
 
@@ -806,6 +898,8 @@ impl<S: VfsStorage + Clone + 'static> HybridVfsState<'_, S> {
                 let meta = capfs::Metadata::from_file(&file.file)?;
                 Ok(done(cap_metadata_to_stat(&meta)))
             }
+            HybridDescriptor::Synthetic { .. } => Ok(done(synthetic_dir_stat())),
+            HybridDescriptor::Device(_) => Ok(done(device_stat())),
         }
     }
 
@@ -834,6 +928,23 @@ impl<S: VfsStorage + Clone + 'static> HybridVfsState<'_, S> {
             }
             HybridDescriptor::RealFile { guest_path, .. } => {
                 Err(crate::VfsError::NotDirectory(guest_path.clone()).into())
+            }
+            HybridDescriptor::Synthetic { guest_path } => {
+                let target = join_guest_path(guest_path, &path);
+                match self.ctx.resolve_from_root(&target) {
+                    RootEntry::Mount { index, rest } if rest.is_empty() => {
+                        self.with_mount(index, |s, fd| s.stat_op(fd))
+                    }
+                    RootEntry::Mount { index, rest } => {
+                        self.with_mount(index, |s, fd| s.stat_at_op(fd, _path_flags, rest))
+                    }
+                    RootEntry::Directory => Ok(done(synthetic_dir_stat())),
+                    RootEntry::Device(_) => Ok(done(device_stat())),
+                    RootEntry::NotFound => Err(crate::VfsError::NotFound(target).into()),
+                }
+            }
+            HybridDescriptor::Device(device) => {
+                Err(crate::VfsError::NotDirectory(device.path().to_owned()).into())
             }
         }
     }
@@ -874,6 +985,15 @@ impl<S: VfsStorage + Clone + 'static> HybridVfsState<'_, S> {
             }
             HybridDescriptor::RealFile { guest_path, .. } => {
                 Err(crate::VfsError::NotDirectory(guest_path.clone()).into())
+            }
+            HybridDescriptor::Synthetic { guest_path } => {
+                let dir = guest_path.clone();
+                self.root_mutation(&dir, &path, false, |s, fd, rest| {
+                    s.set_times_at_op(fd, path_flags, rest, atim, mtim)
+                })
+            }
+            HybridDescriptor::Device(device) => {
+                Err(crate::VfsError::NotDirectory(device.path().to_owned()).into())
             }
         }
     }
@@ -1063,6 +1183,47 @@ impl<S: VfsStorage + Clone + 'static> HybridVfsState<'_, S> {
             HybridDescriptor::RealFile { guest_path, .. } => {
                 Err(crate::VfsError::NotDirectory(guest_path.clone()).into())
             }
+            HybridDescriptor::Synthetic { guest_path } => {
+                let target = join_guest_path(guest_path, &path);
+                let exclusive = oflags.contains(types::OpenFlags::EXCLUSIVE);
+                let changes = flags.contains(types::DescriptorFlags::WRITE)
+                    || oflags.contains(types::OpenFlags::CREATE)
+                    || oflags.contains(types::OpenFlags::TRUNCATE);
+                match self.ctx.resolve_from_root(&target) {
+                    RootEntry::Mount { index, rest } if rest.is_empty() => {
+                        if exclusive {
+                            return Err(crate::VfsError::AlreadyExists(target).into());
+                        }
+                        let (descriptor, _) =
+                            HybridVfsCtx::<S>::preopen_descriptor(&self.ctx.preopens[index]);
+                        Ok(done(descriptor))
+                    }
+                    RootEntry::Mount { index, rest } => self.with_mount(index, |s, fd| {
+                        s.open_at_op(fd, _path_flags, rest, oflags, flags)
+                    }),
+                    RootEntry::Directory if exclusive => {
+                        Err(crate::VfsError::AlreadyExists(target).into())
+                    }
+                    RootEntry::Directory if changes => Err(read_only(&target)),
+                    RootEntry::Directory => {
+                        Ok(done(HybridDescriptor::Synthetic { guest_path: target }))
+                    }
+                    RootEntry::Device(_) if exclusive => {
+                        Err(crate::VfsError::AlreadyExists(target).into())
+                    }
+                    RootEntry::Device(_) if oflags.contains(types::OpenFlags::DIRECTORY) => {
+                        Err(crate::VfsError::NotDirectory(target).into())
+                    }
+                    RootEntry::Device(device) => Ok(done(HybridDescriptor::Device(device))),
+                    RootEntry::NotFound if oflags.contains(types::OpenFlags::CREATE) => {
+                        Err(read_only(&target))
+                    }
+                    RootEntry::NotFound => Err(crate::VfsError::NotFound(target).into()),
+                }
+            }
+            HybridDescriptor::Device(device) => {
+                Err(crate::VfsError::NotDirectory(device.path().to_owned()).into())
+            }
         }
     }
 
@@ -1082,6 +1243,20 @@ impl<S: VfsStorage + Clone + 'static> HybridVfsState<'_, S> {
             }
             HybridDescriptor::RealFile { guest_path, .. } => {
                 Err(crate::VfsError::NotDirectory(guest_path.clone()).into())
+            }
+            HybridDescriptor::Synthetic { guest_path } => {
+                let target = join_guest_path(guest_path, path);
+                match self.ctx.resolve_from_root(&target) {
+                    RootEntry::Mount { index, rest } if !rest.is_empty() => {
+                        self.with_mount(index, |s, fd| s.readlink_at_now(fd, &rest))
+                    }
+                    RootEntry::NotFound => Err(crate::VfsError::NotFound(target).into()),
+                    // Nothing in the root is a symlink.
+                    _ => Err(crate::VfsError::InvalidPath(target).into()),
+                }
+            }
+            HybridDescriptor::Device(device) => {
+                Err(crate::VfsError::NotDirectory(device.path().to_owned()).into())
             }
         }
     }
@@ -1116,6 +1291,15 @@ impl<S: VfsStorage + Clone + 'static> HybridVfsState<'_, S> {
             }
             HybridDescriptor::RealFile { guest_path, .. } => {
                 Err(crate::VfsError::NotDirectory(guest_path.clone()).into())
+            }
+            HybridDescriptor::Synthetic { guest_path } => {
+                let dir = guest_path.clone();
+                self.root_mutation(&dir, &path, false, |s, fd, rest| {
+                    s.remove_directory_at_op(fd, rest)
+                })
+            }
+            HybridDescriptor::Device(device) => {
+                Err(crate::VfsError::NotDirectory(device.path().to_owned()).into())
             }
         }
     }
@@ -1168,6 +1352,9 @@ impl<S: VfsStorage + Clone + 'static> HybridVfsState<'_, S> {
                 old_dir.dir.rename(&old_path, &new_dir.dir, &new_path)?;
                 Ok(done(()))
             }
+            // Nothing above the mounts can be renamed or replaced.
+            (HybridDescriptor::Synthetic { guest_path }, _)
+            | (_, HybridDescriptor::Synthetic { guest_path }) => Err(read_only(guest_path)),
             _ => {
                 // Cross-filesystem rename not supported
                 Err(crate::VfsError::CrossDevice("rename between filesystems".to_string()).into())
@@ -1189,6 +1376,10 @@ impl<S: VfsStorage + Clone + 'static> HybridVfsState<'_, S> {
             }
             HybridDescriptor::RealFile { guest_path, .. } => {
                 Err(crate::VfsError::NotDirectory(guest_path.clone()).into())
+            }
+            HybridDescriptor::Synthetic { guest_path } => Err(read_only(guest_path)),
+            HybridDescriptor::Device(device) => {
+                Err(crate::VfsError::NotDirectory(device.path().to_owned()).into())
             }
         }
     }
@@ -1224,6 +1415,15 @@ impl<S: VfsStorage + Clone + 'static> HybridVfsState<'_, S> {
             HybridDescriptor::RealFile { guest_path, .. } => {
                 Err(crate::VfsError::NotDirectory(guest_path.clone()).into())
             }
+            HybridDescriptor::Synthetic { guest_path } => {
+                let dir = guest_path.clone();
+                self.root_mutation(&dir, &path, false, |s, fd, rest| {
+                    s.unlink_file_at_op(fd, rest)
+                })
+            }
+            HybridDescriptor::Device(device) => {
+                Err(crate::VfsError::NotDirectory(device.path().to_owned()).into())
+            }
         }
     }
 
@@ -1239,6 +1439,11 @@ impl<S: VfsStorage + Clone + 'static> HybridVfsState<'_, S> {
                 && crate::wasi_impl::vfs_identity(&a.path)
                     == crate::wasi_impl::vfs_identity(&b.path)),
             (HybridDescriptor::Vfs(_), _) | (_, HybridDescriptor::Vfs(_)) => Ok(false),
+            (
+                HybridDescriptor::Synthetic { guest_path: a },
+                HybridDescriptor::Synthetic { guest_path: b },
+            ) => Ok(a == b),
+            (HybridDescriptor::Device(a), HybridDescriptor::Device(b)) => Ok(a == b),
             #[cfg(unix)]
             _ => Ok(match (real_metadata(desc_a), real_metadata(desc_b)) {
                 (Some(a), Some(b)) => {
@@ -1286,6 +1491,8 @@ impl<S: VfsStorage + Clone + 'static> HybridVfsState<'_, S> {
                     upper: 0,
                 }))
             }
+            HybridDescriptor::Synthetic { guest_path } => Ok(done(synthetic_hash(guest_path))),
+            HybridDescriptor::Device(device) => Ok(done(synthetic_hash(device.path()))),
         }
     }
 
@@ -1320,6 +1527,24 @@ impl<S: VfsStorage + Clone + 'static> HybridVfsState<'_, S> {
             }
             HybridDescriptor::RealFile { guest_path, .. } => {
                 Err(crate::VfsError::NotDirectory(guest_path.clone()).into())
+            }
+            HybridDescriptor::Synthetic { guest_path } => {
+                let target = join_guest_path(guest_path, &path);
+                match self.ctx.resolve_from_root(&target) {
+                    RootEntry::Mount { index, rest } if rest.is_empty() => {
+                        self.with_mount(index, |s, fd| s.metadata_hash_op(fd))
+                    }
+                    RootEntry::Mount { index, rest } => {
+                        self.with_mount(index, |s, fd| s.metadata_hash_at_op(fd, _path_flags, rest))
+                    }
+                    RootEntry::Directory | RootEntry::Device(_) => {
+                        Ok(done(synthetic_hash(&target)))
+                    }
+                    RootEntry::NotFound => Err(crate::VfsError::NotFound(target).into()),
+                }
+            }
+            HybridDescriptor::Device(device) => {
+                Err(crate::VfsError::NotDirectory(device.path().to_owned()).into())
             }
         }
     }
@@ -1399,6 +1624,25 @@ impl<S: VfsStorage + Clone + 'static> HybridVfsState<'_, S> {
             HybridDescriptor::RealFile { guest_path, .. } => {
                 Err(crate::VfsError::NotDirectory(guest_path.clone()).into())
             }
+            HybridDescriptor::Synthetic { guest_path } => {
+                let entries = self
+                    .ctx
+                    .synthetic_children(guest_path)
+                    .into_iter()
+                    .map(|(name, is_device)| types::DirectoryEntry {
+                        name,
+                        type_: if is_device {
+                            types::DescriptorType::CharacterDevice
+                        } else {
+                            types::DescriptorType::Directory
+                        },
+                    })
+                    .collect();
+                Ok(Box::pin(std::future::ready(Ok(entries))))
+            }
+            HybridDescriptor::Device(device) => {
+                Err(crate::VfsError::NotDirectory(device.path().to_owned()).into())
+            }
         }
     }
 
@@ -1426,6 +1670,10 @@ impl<S: VfsStorage + Clone + 'static> HybridVfsState<'_, S> {
             HybridDescriptor::RealDir { guest_path, .. } => {
                 Err(crate::VfsError::NotFile(guest_path.clone()).into())
             }
+            HybridDescriptor::Synthetic { guest_path } => {
+                Err(crate::VfsError::NotFile(guest_path.clone()).into())
+            }
+            HybridDescriptor::Device(device) => Ok(Box::new(DeviceInputStream(*device))),
             HybridDescriptor::RealFile { file, .. } => {
                 if !file.readable {
                     return Err(crate::VfsError::PermissionDenied("read".to_string()).into());
@@ -1463,6 +1711,10 @@ impl<S: VfsStorage + Clone + 'static> HybridVfsState<'_, S> {
             HybridDescriptor::RealDir { guest_path, .. } => {
                 Err(crate::VfsError::NotFile(guest_path.clone()).into())
             }
+            HybridDescriptor::Synthetic { guest_path } => {
+                Err(crate::VfsError::NotFile(guest_path.clone()).into())
+            }
+            HybridDescriptor::Device(_) => Ok(Box::new(DiscardOutputStream)),
             HybridDescriptor::RealFile { file, .. } => {
                 if !file.writable {
                     return Err(crate::VfsError::PermissionDenied("write".to_string()).into());
@@ -1554,6 +1806,216 @@ mod tests {
 
     fn storage() -> ArcStorage {
         ArcStorage::new(Arc::new(InMemoryStorage::new()))
+    }
+
+    /// A context with `/tmp` and `/mnt/data` mounts and the root, which is the
+    /// last preopen.
+    fn rooted_ctx() -> HybridVfsCtx<ArcStorage> {
+        let mut ctx = HybridVfsCtx::new(storage());
+        ctx.add_vfs_preopen("/tmp", DirPerms::all(), FilePerms::all());
+        ctx.add_vfs_preopen("/mnt/data", DirPerms::all(), FilePerms::all());
+        ctx.add_root();
+        ctx
+    }
+
+    fn is_err<T>(result: HybridFsResult<T>, pred: impl Fn(&crate::VfsError) -> bool) -> bool {
+        result.map(drop).map_err(vfs_err).is_err_and(|e| pred(&e))
+    }
+
+    #[tokio::test]
+    async fn the_root_lists_and_stats_the_mounts() {
+        let mut ctx = rooted_ctx();
+        let mut table = ResourceTable::new();
+        let mut state = HybridVfsState::new(&mut ctx, &mut table);
+        let dirs = preopens::Host::get_directories(&mut state).unwrap();
+        assert_eq!(dirs.last().unwrap().1, "/");
+        let root = preopen(&mut state, 2);
+
+        let stat = state.stat(borrow(&root)).await.unwrap();
+        assert_eq!(stat.type_, types::DescriptorType::Directory);
+        let listing = state.directory_entries(&root).unwrap().await.unwrap();
+        let names: Vec<_> = listing.iter().map(|e| e.name.as_str()).collect();
+        assert_eq!(names, ["tmp", "mnt", "dev"]);
+
+        for (path, type_) in [
+            ("tmp", types::DescriptorType::Directory),
+            ("mnt", types::DescriptorType::Directory),
+            ("mnt/data", types::DescriptorType::Directory),
+            ("dev", types::DescriptorType::Directory),
+            ("dev/null", types::DescriptorType::CharacterDevice),
+            ("./dev/../tmp", types::DescriptorType::Directory),
+        ] {
+            let stat = state
+                .stat_at(borrow(&root), types::PathFlags::empty(), path.to_string())
+                .await
+                .unwrap();
+            assert_eq!(stat.type_, type_, "{path}");
+        }
+
+        // A file under a mount is reached through the root too.
+        state.ctx.storages[0].write("/tmp/f", b"hi").await.unwrap();
+        let f = open(
+            &mut state,
+            &root,
+            "tmp/f",
+            types::OpenFlags::empty(),
+            types::DescriptorFlags::READ,
+        )
+        .await
+        .unwrap();
+        assert_eq!(state.read(f, 10, 0).await.unwrap().0, b"hi");
+    }
+
+    #[tokio::test]
+    async fn the_root_is_read_only_outside_the_mounts() {
+        let mut ctx = rooted_ctx();
+        let mut table = ResourceTable::new();
+        let mut state = HybridVfsState::new(&mut ctx, &mut table);
+        let root = preopen(&mut state, 2);
+        let denied = |e: &crate::VfsError| matches!(e, crate::VfsError::PermissionDenied(_));
+        let missing = |e: &crate::VfsError| matches!(e, crate::VfsError::NotFound(_));
+
+        // Creating or writing anything above the mounts fails.
+        let create = open(
+            &mut state,
+            &root,
+            "new.txt",
+            types::OpenFlags::CREATE,
+            types::DescriptorFlags::WRITE,
+        )
+        .await;
+        assert!(is_err(create, denied));
+        let write_dir = open(
+            &mut state,
+            &root,
+            "mnt",
+            types::OpenFlags::DIRECTORY,
+            types::DescriptorFlags::WRITE,
+        )
+        .await;
+        assert!(is_err(write_dir, denied));
+        let mkdir = state.create_directory_at(borrow(&root), "etc".into()).await;
+        assert!(is_err(mkdir, denied));
+        let mkdir = state.create_directory_at(borrow(&root), "mnt".into()).await;
+        assert!(is_err(mkdir, denied));
+        let rmdir = state.remove_directory_at(borrow(&root), "tmp".into()).await;
+        assert!(is_err(rmdir, denied));
+        let unlink = state.unlink_file_at(borrow(&root), "dev/null".into()).await;
+        assert!(is_err(unlink, denied));
+        let unlink = state
+            .unlink_file_at(borrow(&root), "etc/passwd".into())
+            .await;
+        assert!(is_err(unlink, missing));
+        let rename = state
+            .rename_at(borrow(&root), "tmp".into(), borrow(&root), "tmp2".into())
+            .await;
+        assert!(is_err(rename, denied));
+        let symlink = state
+            .symlink_at(borrow(&root), "tmp".into(), "link".into())
+            .await;
+        assert!(is_err(symlink, denied));
+
+        // Paths outside every mount don't exist.
+        let passwd = open(
+            &mut state,
+            &root,
+            "etc/passwd",
+            types::OpenFlags::empty(),
+            types::DescriptorFlags::READ,
+        )
+        .await;
+        assert!(is_err(passwd, missing));
+        let stat = state
+            .stat_at(borrow(&root), types::PathFlags::empty(), "etc".into())
+            .await;
+        assert!(is_err(stat, missing));
+
+        // Inside a mount, the root hands changes to it.
+        state
+            .create_directory_at(borrow(&root), "tmp/sub".into())
+            .await
+            .unwrap();
+        assert!(state.ctx.storages[0].exists("/tmp/sub").await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn dev_devices_read_and_discard() {
+        let mut ctx = rooted_ctx();
+        let mut table = ResourceTable::new();
+        let mut state = HybridVfsState::new(&mut ctx, &mut table);
+        let root = preopen(&mut state, 2);
+        let rw = types::DescriptorFlags::READ | types::DescriptorFlags::WRITE;
+        for (path, expect) in [("dev/null", None), ("dev/zero", Some(0u8))] {
+            let fd = open(&mut state, &root, path, types::OpenFlags::TRUNCATE, rw)
+                .await
+                .unwrap();
+            let stat = state.stat(borrow(&fd)).await.unwrap();
+            assert_eq!(stat.type_, types::DescriptorType::CharacterDevice);
+            assert_eq!(
+                state.write(borrow(&fd), b"gone".to_vec(), 0).await.unwrap(),
+                4
+            );
+            let (bytes, eof) = state.read(borrow(&fd), 8, 0).await.unwrap();
+            match expect {
+                None => assert!(bytes.is_empty() && eof, "{path}"),
+                Some(b) => assert_eq!(bytes, [b; 8], "{path}"),
+            }
+        }
+
+        // A huge read is capped, like every other read path.
+        let urandom = open(
+            &mut state,
+            &root,
+            "dev/urandom",
+            types::OpenFlags::empty(),
+            types::DescriptorFlags::READ,
+        )
+        .await
+        .unwrap();
+        let (bytes, eof) = state.read(borrow(&urandom), u64::MAX, 0).await.unwrap();
+        assert_eq!(bytes.len(), MAX_READ_CHUNK);
+        assert!(!eof);
+        assert!(bytes.iter().any(|&b| b != 0));
+        let mut stream = state.input_stream(&urandom, 0).unwrap();
+        assert_eq!(stream.read(usize::MAX).unwrap().len(), MAX_READ_CHUNK);
+
+        // A device can't be created exclusively or opened as a directory.
+        let excl = open(
+            &mut state,
+            &root,
+            "dev/null",
+            types::OpenFlags::CREATE | types::OpenFlags::EXCLUSIVE,
+            rw,
+        )
+        .await;
+        assert!(is_err(excl, |e| matches!(
+            e,
+            crate::VfsError::AlreadyExists(_)
+        )));
+    }
+
+    #[tokio::test]
+    async fn a_mount_at_dev_or_root_wins() {
+        let mut ctx = HybridVfsCtx::new(storage());
+        ctx.add_vfs_preopen("/dev", DirPerms::all(), FilePerms::all());
+        ctx.add_root();
+        let mut table = ResourceTable::new();
+        let mut state = HybridVfsState::new(&mut ctx, &mut table);
+        let root = preopen(&mut state, 1);
+        let null = open(
+            &mut state,
+            &root,
+            "dev/null",
+            types::OpenFlags::empty(),
+            types::DescriptorFlags::READ,
+        )
+        .await;
+        assert!(is_err(null, |e| matches!(e, crate::VfsError::NotFound(_))));
+
+        let mut ctx = HybridVfsCtx::new(storage());
+        ctx.add_vfs_preopen("/", DirPerms::all(), FilePerms::all());
+        ctx.add_root();
+        assert_eq!(ctx.preopens.len(), 1);
     }
 
     #[tokio::test]

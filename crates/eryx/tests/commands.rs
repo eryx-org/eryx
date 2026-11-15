@@ -582,8 +582,8 @@ async fn the_embedded_shell_runs_common_script_tools() {
         ("printf '1\\n2\\n' | paste -sd+", "1+2\n"),
         ("date -u -d @0 +%Y", "1970\n"),
         ("echo hi | base64", "aGkK\n"),
-        // Canonicalizing walks up to `/`, which isn't statable without a
-        // preopen covering it (#832), so only the lexical forms are checked.
+        // Without `unstable-vfs` children have no filesystem until #812, so
+        // only the lexical forms; coreutils_see_the_root_and_dev canonicalizes.
         ("realpath -m /a/../b", "/b\n"),
         ("readlink -m /a/../b/c", "/b/c\n"),
     ])
@@ -601,7 +601,7 @@ async fn the_embedded_shell_runs_common_script_tools_on_files() {
             "b\n",
         ),
         ("mkdir /tmp/t && rmdir /tmp/t && echo gone", "gone\n"),
-        ("realpath -s /tmp/../tmp", "/tmp\n"),
+        ("realpath /tmp/../tmp", "/tmp\n"),
     ])
     .await;
 }
@@ -678,4 +678,36 @@ wc -l < /data/fruit.txt
     // Children can't reach past the mounts.
     let err = session.execute("cat /etc/passwd").run().await.unwrap_err();
     assert!(err.to_string().starts_with("exit status 1"), "{err}");
+}
+
+/// Children see the shell's root and `/dev` too (with `unstable-vfs`; without
+/// it they wait on #812), so tools that walk up to `/` work.
+#[cfg(all(feature = "coreutils", feature = "unstable-vfs"))]
+#[tokio::test]
+async fn coreutils_see_the_root_and_dev() {
+    assert_script_outputs(&[
+        ("ls / | tr '\\n' ' '", "data dev tmp "),
+        (
+            "mkdir -p /tmp/a/b/c && realpath /tmp/a/../a/b && readlink -f /tmp/a/b/c",
+            "/tmp/a/b\n/tmp/a/b/c\n",
+        ),
+        // One big read is served in bounded chunks.
+        ("head -c 50000000 /dev/urandom | wc -c", "50000000\n"),
+        ("head -c 1000 /dev/zero | tr -d '\\000' | wc -c", "0\n"),
+        ("echo gone > /dev/null && cat /dev/null | wc -c", "0\n"),
+    ])
+    .await;
+
+    // Nothing above the mounts can be changed, and outside them is empty.
+    let sandbox = shell().build().unwrap();
+    for (script, message) in [
+        ("mkdir /etc", "mkdir: Permission denied"),
+        ("mv /tmp /tmp2", "mv: Operation not permitted"),
+        ("rm /dev/null", "Permission denied"),
+        ("touch /new", "Permission denied"),
+        ("cat /etc/passwd", "No such file or directory"),
+    ] {
+        let err = sandbox.execute(script).await.unwrap_err();
+        assert!(err.to_string().contains(message), "{script}: {err}");
+    }
 }

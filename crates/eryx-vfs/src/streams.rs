@@ -14,7 +14,7 @@ use wasmtime_wasi_io::streams::{InputStream, OutputStream, StreamError, StreamRe
 
 use crate::error::{VfsError, VfsResult};
 use crate::file_io::{read_at, write_at};
-use crate::hybrid::check_file_size;
+use crate::hybrid::{Device, check_file_size};
 use crate::storage::VfsStorage;
 
 /// Largest buffer a single stream read will allocate, regardless of the length
@@ -199,6 +199,72 @@ impl OutputStream for RealFileOutputStream {
     async fn blocking_write_and_flush(&mut self, bytes: Bytes) -> StreamResult<()> {
         self.write(bytes)?;
         self.flush()
+    }
+}
+
+// ============================================================================
+// Device Streams
+// ============================================================================
+
+/// Read up to `len` bytes from `device`, never more than [`MAX_READ_CHUNK`]
+/// at once: reads may be short, so a guest asking for more just reads again.
+/// Returns the bytes and whether the device is at end of file.
+pub(crate) fn device_read(device: Device, len: usize) -> (Vec<u8>, bool) {
+    let len = len.min(MAX_READ_CHUNK);
+    match device {
+        Device::Null => (Vec::new(), true),
+        Device::Zero => (vec![0; len], false),
+        Device::Urandom => {
+            use rand::Rng as _;
+            let mut buf = vec![0; len];
+            rand::rng().fill_bytes(&mut buf);
+            (buf, false)
+        }
+    }
+}
+
+/// A read stream over a device under `/dev`.
+pub(crate) struct DeviceInputStream(pub(crate) Device);
+
+#[async_trait::async_trait]
+impl Pollable for DeviceInputStream {
+    async fn ready(&mut self) {}
+}
+
+#[async_trait::async_trait]
+impl InputStream for DeviceInputStream {
+    fn read(&mut self, size: usize) -> StreamResult<Bytes> {
+        match device_read(self.0, size) {
+            (_, true) => Err(StreamError::Closed),
+            (bytes, false) => Ok(Bytes::from(bytes)),
+        }
+    }
+
+    async fn blocking_read(&mut self, size: usize) -> StreamResult<Bytes> {
+        self.read(size)
+    }
+}
+
+/// A write stream over a device under `/dev`, which discards what it's given.
+pub(crate) struct DiscardOutputStream;
+
+#[async_trait::async_trait]
+impl Pollable for DiscardOutputStream {
+    async fn ready(&mut self) {}
+}
+
+#[async_trait::async_trait]
+impl OutputStream for DiscardOutputStream {
+    fn write(&mut self, _bytes: Bytes) -> StreamResult<()> {
+        Ok(())
+    }
+
+    fn flush(&mut self) -> StreamResult<()> {
+        Ok(())
+    }
+
+    fn check_write(&mut self) -> StreamResult<usize> {
+        Ok(64 * 1024)
     }
 }
 

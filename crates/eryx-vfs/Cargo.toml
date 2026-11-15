@@ -19,6 +19,8 @@ async-trait.workspace = true
 bitflags = "2"
 bytes = "1"
 cap-primitives = "4"
+# /dev/urandom.
+rand.workspace = true
 serde = { workspace = true, optional = true }
 thiserror.workspace = true
 tokio = { workspace = true, features = ["sync"] }

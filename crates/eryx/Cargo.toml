@@ -160,7 +160,10 @@ default = ["python"]
 # includes Python.
 python = []
 javascript = []
-shell = ["coreutils"]
+# The shell runs on the hybrid VFS (a private /tmp, /dev and a read-only
+# root; #832), so it pulls in eryx-vfs internally. Its public API stays
+# behind `unstable-vfs`.
+shell = ["coreutils", "dep:eryx-vfs"]
 # The shell's default external commands: uutils coreutils (MIT), embedded
 # precompiled and registered by `Sandbox::embedded().shell()` under each tool's
 # name. Adds ~16 MB to the binary. Needs `embedded` to have any effect.

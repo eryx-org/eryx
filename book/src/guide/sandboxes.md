@@ -72,6 +72,37 @@ the shell has `grep` built in. Patterns are GNU basic regular expressions, as
 in grep (`a\|b`, `\(x\)`), and `-E` and `-F` work as usual. Callbacks are commands (see
 [Callbacks in the Shell](./callbacks.md#callbacks-in-the-shell)).
 
+### Shell Environment
+
+A shell sandbox starts with what CLI tools expect of a Unix system:
+
+- **`/`** is a read-only directory holding the mounts, so tools that walk up
+  to it (`mkdir -p`, canonicalizing `realpath`, git's repository discovery)
+  work. Paths under a mount go to the mount; anything else under `/` doesn't
+  exist (`cat /etc/passwd` fails with "No such file or directory"), and
+  nothing can be created, written, renamed or removed there.
+- **`/tmp`** is writable in every shell sandbox. With `unstable-vfs` it's
+  served from the sandbox's VFS storage; without it, from a private in-memory
+  storage. Either way it counts against `ResourceLimits::max_vfs_bytes`
+  (default 64 MiB), and in a session it lasts until the session ends, across
+  resets.
+- **`/dev/null`**, **`/dev/zero`** and **`/dev/urandom`**: writes are
+  discarded; reads are empty, zeros and random bytes. A single read returns at
+  most 1 MiB, however much was asked for. A mount at `/dev` replaces them.
+- **Environment:** `HOME=/tmp`, `PATH=/eryx/bin` (where the shell lists its
+  commands), `TERM=dumb`, `LANG=C.UTF-8`, `LC_ALL=C.UTF-8`, `USER=eryx`,
+  `PWD=/` and `TMPDIR=/tmp`.
+- **Permissions:** WASI has no file modes, owners or exec bit, so what tools
+  report is made up by their libc. uutils `ls -l` shows every directory as
+  `dr-xr-xr-x` and every file (devices included) as `-r-xr-xr-x`, owned by
+  `somebody`/`somegroup`, whatever can actually be written. Tools that compare
+  modes against what they wrote need telling, for example git's
+  `core.fileMode=false`.
+
+Python and JavaScript sandboxes keep their filesystem as it was: no root,
+`/dev` or these variables. The `shell` feature pulls in eryx-vfs to provide
+this, but the VFS API stays behind `unstable-vfs`.
+
 ### External Commands
 
 A shell sandbox can run WASI 0.2 command components (programs built for
@@ -96,8 +127,9 @@ let result = sandbox.execute("printf 'b\na\n' | sort | head -n 1").await?;
 - **Running:** each command runs as a child process with `argv[0]` set to the
   name it was called by, which is how a multicall binary picks its tool. It gets
   the shell's environment, with `PWD` set to the shell's directory.
-- **Files:** a child sees the session's VFS mounts (with `unstable-vfs`) and
-  nothing else of the host.
+- **Files:** with `unstable-vfs`, a child sees the shell's filesystem (below):
+  the session's VFS mounts, `/tmp`, `/dev` and the read-only root, and nothing
+  else of the host. Without it, children have no filesystem yet (#812).
 - **Network:** children have none yet.
 - **Limits:** children count against the execution's `max_fuel` as they
   run (each may burn at most 10 billion instructions of it), and stop at its
