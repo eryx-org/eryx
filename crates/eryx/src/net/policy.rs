@@ -93,10 +93,11 @@ impl NetPolicy {
     /// A policy that allows only what both `self` and `config` allow, e.g. a
     /// child process's narrower network inside its sandbox's.
     ///
-    /// Hosts, resolved addresses and HTTP rules are checked against both.
-    /// Secrets, their hosts, plaintext substitution, the resolver (unless
-    /// `config` sets one) and the TLS roots come from `self`, so a narrowed
-    /// policy can never reach or reveal more than `self`.
+    /// Hosts, resolved addresses and HTTP rules are checked against both,
+    /// and the connection limit and timeouts are the smaller of the two.
+    /// Secrets, their hosts, plaintext substitution, the resolver and the
+    /// TLS roots come from `self`, so a narrowed policy can never reach or
+    /// reveal more than `self`.
     pub(crate) fn narrowed(self: &Arc<Self>, config: NetConfig) -> Self {
         Self {
             config,
@@ -115,6 +116,32 @@ impl NetPolicy {
     /// This policy and the ones it narrows, innermost first.
     fn chain(&self) -> impl Iterator<Item = &NetPolicy> {
         std::iter::successors(Some(self), |p| p.parent.as_deref())
+    }
+
+    /// The most concurrent connections allowed (`0` for no limit): the
+    /// smallest limit in the chain.
+    pub(crate) fn max_connections(&self) -> u32 {
+        self.chain()
+            .map(|p| p.config.max_connections())
+            .filter(|&max| max > 0)
+            .min()
+            .unwrap_or(0)
+    }
+
+    /// The connect timeout: the shortest in the chain.
+    pub(crate) fn connect_timeout(&self) -> Duration {
+        self.chain()
+            .map(|p| p.config.connect_timeout())
+            .min()
+            .unwrap_or_default()
+    }
+
+    /// The I/O timeout: the shortest in the chain.
+    pub(crate) fn io_timeout(&self) -> Duration {
+        self.chain()
+            .map(|p| p.config.io_timeout())
+            .min()
+            .unwrap_or_default()
     }
 
     /// Whether any HTTP rule in the chain applies to `host`.
@@ -139,18 +166,15 @@ impl NetPolicy {
             }
         }
 
-        // If allow_all_hosts is set, skip the allowlist check.
-        if self.config.allow_all_hosts {
-            return Ok(());
-        }
-
-        // Otherwise host must match the allowlist.
-        let allowed = self
-            .config
-            .allowed_hosts
-            .iter()
-            .any(|p| host_matches_pattern(host, p));
-        if !allowed {
+        // Unless allow_all_hosts is set, the host must match the allowlist.
+        // Either way the policy this one narrows checks it too.
+        if !self.config.allow_all_hosts
+            && !self
+                .config
+                .allowed_hosts
+                .iter()
+                .any(|p| host_matches_pattern(host, p))
+        {
             return Err(TcpError::NotPermitted(format!(
                 "host '{host}' not in allowed list"
             )));
@@ -194,8 +218,8 @@ impl NetPolicy {
     /// addresses, never re-resolving: the check is only as good as the
     /// address actually used.
     async fn resolve_allowed(&self, host: &str, port: u16) -> Result<Vec<SocketAddr>, TcpError> {
-        let resolver = self.chain().find_map(|p| p.config.resolver.as_ref());
-        let addrs: Vec<SocketAddr> = match resolver {
+        // The sandbox's resolver: a narrowed policy can't re-point a host.
+        let addrs: Vec<SocketAddr> = match &self.root().config.resolver {
             Some(resolver) => resolver.resolve(host, port).await,
             None => tokio::net::lookup_host((host, port))
                 .await

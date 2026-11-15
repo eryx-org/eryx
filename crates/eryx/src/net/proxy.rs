@@ -49,7 +49,9 @@ pub enum ChildNetwork {
     /// Through the proxy, under the sandbox's own network policy.
     Inherit,
     /// Through the proxy, under only what both the sandbox's policy and this
-    /// one allow: a child never gets more than its sandbox.
+    /// one allow: a child never gets more than its sandbox. The connection
+    /// limit and timeouts are the smaller of the two; secrets, the resolver
+    /// and the TLS roots are the sandbox's.
     Narrow(Box<NetConfig>),
 }
 
@@ -79,8 +81,16 @@ impl ChildProxy {
     /// Start a proxy enforcing `config` (narrowed by `network`) and
     /// substituting `secrets`. `None` for [`ChildNetwork::None`].
     ///
-    /// With `allow_tunnels`, `CONNECT` opens a blind tunnel (see the module
-    /// docs) instead of terminating TLS.
+    /// With `allow_tunnels`, **every** `CONNECT` opens a blind tunnel instead
+    /// of terminating TLS: no secret substitution, no HTTP rules (hosts with
+    /// rules are refused a tunnel), no response scrubbing. Only the
+    /// `CONNECT` host is checked, so a child can reach other virtual hosts
+    /// served from the same address (e.g. behind a CDN). A tunnel closes
+    /// after the I/O timeout with no traffic either way.
+    ///
+    /// The CA is valid for 24 hours either side of its creation, so the
+    /// proxy must not outlive that: start one per execution (or per a
+    /// similarly bounded lifetime).
     ///
     /// # Errors
     ///
@@ -103,10 +113,10 @@ impl ChildProxy {
         let ca_pem = ca.pem.clone();
         #[cfg(test)]
         let ca_der = ca.der.clone();
-        let max = policy.config.max_connections() as usize;
+        let max = policy.max_connections() as usize;
         let shared = Arc::new(Shared {
-            connect_timeout: policy.config.connect_timeout(),
-            io_timeout: policy.config.io_timeout(),
+            connect_timeout: policy.connect_timeout(),
+            io_timeout: policy.io_timeout(),
             policy,
             ca,
             allow_tunnels,
@@ -398,8 +408,7 @@ async fn connect(
         client
             .write_all(b"HTTP/1.1 200 Connection established\r\n\r\n")
             .await?;
-        let mut upstream = upstream.into_stream();
-        let _ = tokio::io::copy_bidirectional(client, &mut upstream).await;
+        splice(client, upstream.into_stream(), shared.io_timeout).await;
         return Ok(());
     }
 
@@ -485,6 +494,39 @@ where
                 }
                 child_w.write_all(&data).await?;
             }
+        }
+    }
+}
+
+/// Copy bytes both ways between `a` and `b` until either side closes or
+/// neither sends anything for `idle`.
+async fn splice<A, B>(a: A, b: B, idle: Duration)
+where
+    A: AsyncRead + AsyncWrite + Unpin,
+    B: AsyncRead + AsyncWrite + Unpin,
+{
+    let (mut a_r, mut a_w) = tokio::io::split(a);
+    let (mut b_r, mut b_w) = tokio::io::split(b);
+    let mut a_buf = vec![0u8; BUF_LEN];
+    let mut b_buf = vec![0u8; BUF_LEN];
+    loop {
+        let step = tokio::time::timeout(idle, async {
+            tokio::select! {
+                n = a_r.read(&mut a_buf) => match n {
+                    Ok(n) if n > 0 => b_w.write_all(&a_buf[..n]).await.is_ok(),
+                    _ => false,
+                },
+                n = b_r.read(&mut b_buf) => match n {
+                    Ok(n) if n > 0 => a_w.write_all(&b_buf[..n]).await.is_ok(),
+                    _ => false,
+                },
+            }
+        })
+        .await;
+        if !matches!(step, Ok(true)) {
+            let _ = a_w.shutdown().await;
+            let _ = b_w.shutdown().await;
+            return;
         }
     }
 }
@@ -857,5 +899,79 @@ mod tests {
         let response = exchange(&mut tls, request.as_bytes()).await;
         assert!(response.starts_with("HTTP/1.1 403 "), "{response}");
         assert!(!received(&seen).contains(REAL));
+    }
+
+    /// A permissive narrow config still can't reach a host the sandbox
+    /// doesn't allow.
+    #[tokio::test]
+    async fn permissive_narrow_keeps_the_sandbox_hosts() {
+        let (port, cert, _) = upstream(true).await;
+        let narrow = NetConfig::permissive().allow_internal_host("*.test");
+        let proxy = proxy(config(&cert), ChildNetwork::Narrow(Box::new(narrow)), false).await;
+        let (_, status) = connect_to(&proxy, &format!("evil.test:{port}")).await;
+        assert!(status.contains(" 403 "), "{status}");
+    }
+
+    /// Points every name at an address nothing listens on.
+    #[derive(Debug)]
+    struct Elsewhere;
+
+    #[async_trait::async_trait]
+    impl Resolver for Elsewhere {
+        async fn resolve(&self, _host: &str, port: u16) -> std::io::Result<Vec<SocketAddr>> {
+            Ok(vec![SocketAddr::from(([10, 255, 255, 1], port))])
+        }
+    }
+
+    /// A narrow config's limits only lower the sandbox's, and its resolver
+    /// is ignored.
+    #[tokio::test]
+    async fn narrow_takes_the_tighter_limits_and_the_sandbox_resolver() {
+        let sandbox = Arc::new(NetPolicy::new(
+            config(&[])
+                .with_max_connections(1)
+                .with_io_timeout(Duration::from_secs(2)),
+            HashMap::new(),
+        ));
+        let narrow =
+            sandbox.narrowed(NetConfig::permissive().with_connect_timeout(Duration::from_secs(1)));
+        assert_eq!(narrow.max_connections(), 1);
+        assert_eq!(narrow.io_timeout(), Duration::from_secs(2));
+        assert_eq!(narrow.connect_timeout(), Duration::from_secs(1));
+
+        let (port, cert, _) = upstream(true).await;
+        let narrow = NetConfig::permissive()
+            .allow_internal_host("*.test")
+            .with_resolver(Elsewhere);
+        let proxy = proxy(
+            config(&cert).with_max_connections(1),
+            ChildNetwork::Narrow(Box::new(narrow)),
+            false,
+        )
+        .await;
+        // Reaches the upstream through the sandbox's resolver.
+        let (held, status) = connect_to(&proxy, &format!("api.test:{port}")).await;
+        assert!(status.contains(" 200 "), "{status}");
+        // The sandbox's one-connection limit applies while that's open.
+        let (_, status) = connect_to(&proxy, &format!("api.test:{port}")).await;
+        assert!(status.contains(" 503 "), "{status}");
+        drop(held);
+    }
+
+    /// An idle tunnel is closed after the I/O timeout.
+    #[tokio::test]
+    async fn idle_tunnels_close() {
+        let (port, cert, _) = upstream(false).await;
+        let proxy = proxy(
+            config(&cert).with_io_timeout(Duration::from_millis(200)),
+            ChildNetwork::Inherit,
+            true,
+        )
+        .await;
+        let (mut stream, status) = connect_to(&proxy, &format!("api.test:{port}")).await;
+        assert!(status.contains(" 200 "), "{status}");
+        let mut buf = [0u8; 16];
+        let read = tokio::time::timeout(Duration::from_secs(5), stream.read(&mut buf)).await;
+        assert!(matches!(read, Ok(Ok(0))), "{read:?}");
     }
 }
