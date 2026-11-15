@@ -21,13 +21,13 @@ import {
 import { createCallbackHost } from "./shims/callbacks.js";
 import { createNet, setNetConfig as setDefaultNetConfig } from "./shims/net.js";
 import {
-  _fileTree,
   decodeError,
   encodeError,
-  forkTree,
   getCoreModule,
   instantiateSandbox,
   isNode,
+  languages,
+  newFileTree,
 } from "./instance.js";
 
 export { _fileTree } from "./instance.js";
@@ -46,10 +46,11 @@ export {
  * Start a sandbox instance in its own Worker and return a proxy with the
  * instance's methods, plus `terminate()`. The handlers, journal and network
  * stay on this thread; the Worker forwards to them (see worker.js).
+ * @param {string} language
  * @param {ReturnType<typeof createCallbackHost>} host
  * @param {ReturnType<typeof createNet>} net - The sandbox's connection table
  */
-async function instantiateInWorker(host, net) {
+async function instantiateInWorker(language, host, net) {
   const url = new URL("./worker.js", import.meta.url);
   const worker = isNode
     ? // Not the parent's execArgv, which can hold `-e`/`--input-type` a Worker
@@ -154,6 +155,7 @@ async function instantiateInWorker(host, net) {
     return new Promise((resolve, reject) => pending.set(id, { resolve, reject }));
   };
 
+  worker.postMessage({ type: "start", language });
   await started;
   return {
     execute: (code) => call("execute", code),
@@ -276,8 +278,10 @@ function _toResult(output, stateWasReset, stats) {
  * for this sandbox only, the module-wide default set by the setter of the
  * same name; an omitted one follows that default.
  * @typedef {Object} SandboxOptions
- * @property {"python"} [language] - The guest language. Only `"python"` (the
- *   default) is available in this package so far.
+ * @property {"python" | "javascript" | "shell"} [language] - The guest
+ *   language, `"python"` by default. The JavaScript and shell runtimes are
+ *   downloaded the first time a sandbox uses them; their sandboxes start with
+ *   an empty filesystem.
  * @property {import("@eryx-org/eryx-run/shared").Callbacks} [callbacks] -
  *   Functions the code can `await`, by name, as for eryx.run's client: each a
  *   function of the code's keyword arguments, or `{ handler, description }`.
@@ -328,6 +332,8 @@ export class Sandbox {
   #host;
   /** @type {ReturnType<typeof createNet>} */
   #net = createNet();
+  /** @type {string} */
+  #language;
   /** @type {number | undefined} */
   #timeoutMs;
   /** @type {Promise<any>} */
@@ -352,11 +358,12 @@ export class Sandbox {
    */
   constructor(options = {}) {
     const { timeoutMs, language = "python" } = options;
-    if (language !== "python") {
+    if (!languages.includes(language)) {
       throw new TypeError(
-        `language ${JSON.stringify(language)} isn't available in this package yet; only "python" is`,
+        `unknown language ${JSON.stringify(language)}; expected one of ${languages.map((l) => JSON.stringify(l)).join(", ")}`,
       );
     }
+    this.#language = language;
     if (timeoutMs !== undefined && !(Number.isFinite(timeoutMs) && timeoutMs > 0)) {
       throw new TypeError("timeoutMs must be a positive number of milliseconds");
     }
@@ -367,7 +374,7 @@ export class Sandbox {
      * Undefined for a sandbox with `timeoutMs`, whose files live in its Worker.
      * @internal For the demo app and advanced integrations.
      */
-    this._fileTree = timeoutMs === undefined ? forkTree(_fileTree) : undefined;
+    this._fileTree = timeoutMs === undefined ? newFileTree(language) : undefined;
     if ("callbackHandler" in options) {
       throw new TypeError(
         "callbackHandler is gone: pass callbacks as an object of functions by name, " +
@@ -382,17 +389,24 @@ export class Sandbox {
 
   #start() {
     if (this.#timeoutMs === undefined) {
-      this.#instance = instantiateSandbox(this._fileTree, this.#host.imports, this.#net);
+      this.#instance = instantiateSandbox(
+        this.#language,
+        this._fileTree,
+        this.#host.imports,
+        this.#net,
+      );
     } else {
       const slot = this.#slot;
       const name = this.#resultVariable;
-      this.#instance = instantiateInWorker(this.#host, this.#net).then(async (worker) => {
-        slot.worker = worker;
-        if (slot.closed) worker.terminate(slot.closed);
-        // A restarted Worker starts with the default result variable.
-        else if (name !== undefined) await worker.setResultVariable(name);
-        return worker;
-      });
+      this.#instance = instantiateInWorker(this.#language, this.#host, this.#net).then(
+        async (worker) => {
+          slot.worker = worker;
+          if (slot.closed) worker.terminate(slot.closed);
+          // A restarted Worker starts with the default result variable.
+          else if (name !== undefined) await worker.setResultVariable(name);
+          return worker;
+        },
+      );
     }
     // Surfaced by the first call instead.
     this.#instance.catch(() => {});
@@ -496,9 +510,12 @@ export class Sandbox {
       // traceback as the message, with the output captured before it failed.
       const payload = e?.payload;
       if (payload && typeof payload.message === "string") {
-        // As eryx.run's client tells them apart: an exception in the code has
-        // its traceback as the message
-        const failed = payload.message.startsWith("Traceback (most recent call last)")
+        // As eryx.run's client tells them apart: an exception in Python code
+        // has its traceback as the message. The other guests report only
+        // script failures (an uncaught exception, a nonzero exit status).
+        const failed =
+          this.#language !== "python" ||
+          payload.message.startsWith("Traceback (most recent call last)")
           ? Object.assign(new PythonExceptionError(payload.message, { cause: e }), {
               stdout: _decoder.decode(payload.stdout),
               stderr: _decoder.decode(payload.stderr),

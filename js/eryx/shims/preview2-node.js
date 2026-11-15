@@ -17,6 +17,7 @@ async function load(name) {
 }
 
 export const {
+  createCli,
   environment,
   exit,
   stderr,
@@ -32,4 +33,4 @@ export const { monotonicClock, wallClock } = await load("clocks");
 export const { preopens, types, _setFileData, createFilesystem, InMemoryFilesystemAdapter } =
   await load("filesystem");
 export const { error, poll, streams } = await load("io");
-export const { random } = await load("random");
+export const { insecureSeed, random } = await load("random");

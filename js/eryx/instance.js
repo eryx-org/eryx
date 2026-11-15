@@ -4,16 +4,16 @@
  * Used by index.js in-thread and by worker.js inside a Worker.
  */
 
-// The jco-generated component, transpiled with `--instantiation async` so each
-// Sandbox gets its own instance and imports.
-import { instantiate } from "./eryx-sandbox.js";
+// The jco-generated Python component, transpiled with `--instantiation async`
+// so each Sandbox gets its own instance and imports. The other guests are
+// imported only when a sandbox uses them (see `components`).
+import { instantiate as instantiatePython } from "./eryx-sandbox.js";
 
 import {
+  createCli,
   environment,
   exit,
-  stderr,
   stdin,
-  stdout,
   terminalInput,
   terminalOutput,
   terminalStderr,
@@ -23,7 +23,7 @@ import {
 import { monotonicClock, wallClock } from "#preview2/clocks";
 import { createFilesystem, InMemoryFilesystemAdapter } from "#preview2/filesystem";
 import { error, poll, streams } from "#preview2/io";
-import { random } from "#preview2/random";
+import { insecureSeed, random } from "#preview2/random";
 import * as sockets from "./shims/sockets.js";
 
 // Import stdlib loader
@@ -73,6 +73,16 @@ export function forkTree(node) {
   };
 }
 
+/**
+ * A new sandbox's own file tree: for Python a copy of {@link _fileTree}, for
+ * the other guests an empty root.
+ * @param {string} language
+ * @returns {Object}
+ */
+export function newFileTree(language) {
+  return language === "python" ? forkTree(_fileTree) : { dir: {} };
+}
+
 export const isNode =
   typeof globalThis.process !== "undefined" &&
   typeof globalThis.process.versions?.node !== "undefined";
@@ -111,15 +121,82 @@ const _sockets = {
 };
 
 /**
- * Instantiate the component with its own filesystem and callback imports, then
- * finish the pre-initialized interpreter's setup.
+ * Most bytes kept per stream per execution from writes to fds 1 and 2, as the
+ * Rust host's `FD_CAPTURE_LIMIT`; the rest is dropped.
+ */
+const FD_CAPTURE_LIMIT = 1024 * 1024;
+
+/**
+ * Collect an instance's writes to WASI fds 1 and 2 (the shell guest's output,
+ * Python's `os.write(1, ...)` and `sys.__stdout__`), as the Rust host does,
+ * instead of printing them to the console.
+ */
+function createFdCapture() {
+  const chunks = [[], []];
+  const sizes = [0, 0];
+  const handler = (stream) => ({
+    write(buf) {
+      const room = FD_CAPTURE_LIMIT - sizes[stream];
+      if (room <= 0) return;
+      // Copied: the buffer is a view of the guest's memory.
+      const kept = buf.slice(0, room);
+      chunks[stream].push(kept);
+      sizes[stream] += kept.byteLength;
+    },
+  });
+  const cli = createCli({ stdout: handler(0), stderr: handler(1) });
+  /** Remove and return what stream `stream` captured since the last take. */
+  const take = (stream) => {
+    const out = new Uint8Array(sizes[stream]);
+    let offset = 0;
+    for (const chunk of chunks[stream]) {
+      out.set(chunk, offset);
+      offset += chunk.byteLength;
+    }
+    chunks[stream] = [];
+    sizes[stream] = 0;
+    return out;
+  };
+  return { stdout: cli.stdout, stderr: cli.stderr, take };
+}
+
+/** `a` followed by `b`. */
+function concat(a, b) {
+  if (b.byteLength === 0) return a;
+  const out = new Uint8Array(a.byteLength + b.byteLength);
+  out.set(a);
+  out.set(b, a.byteLength);
+  return out;
+}
+
+/**
+ * The `instantiate` of each guest's jco-generated component, by language.
+ * JavaScript and shell are separate modules, loaded on first use so a
+ * Python-only app never downloads them.
+ * @type {Record<string, () => Promise<Function>>}
+ */
+const components = {
+  python: async () => instantiatePython,
+  javascript: async () => (await import("./eryx-sandbox-javascript.js")).instantiate,
+  shell: async () => (await import("./eryx-sandbox-shell.js")).instantiate,
+};
+
+/** The guest languages this package runs. */
+export const languages = Object.keys(components);
+
+/**
+ * Instantiate a guest's component with its own filesystem and callback
+ * imports, then (for Python) finish the pre-initialized interpreter's setup.
+ * @param {string} language - One of {@link languages}
  * @param {Object} fileTree - The instance's own file tree
  * @param {ReturnType<typeof import("./shims/callbacks.js").createCallbackHost>["imports"]} cb - Callback imports
  * @param {{tcp: Object, tls: Object}} net - The instance's eryx:net imports
  * @param {(name: string) => WebAssembly.Module | Promise<WebAssembly.Module>} [getModule] -
  *   Core-module source, when not this thread's cache
  */
-export async function instantiateSandbox(fileTree, cb, net, getModule = getCoreModule) {
+export async function instantiateSandbox(language, fileTree, cb, net, getModule = getCoreModule) {
+  const instantiate = await components[language]();
+  const fd = createFdCapture();
   const fs = createFilesystem({
     adapter: new InMemoryFilesystemAdapter(),
     preopens: { "/": fileTree },
@@ -135,9 +212,9 @@ export async function instantiateSandbox(fileTree, cb, net, getModule = getCoreM
     "eryx:net/tls": net.tls,
     "wasi:cli/environment": environment,
     "wasi:cli/exit": exit,
-    "wasi:cli/stderr": stderr,
+    "wasi:cli/stderr": fd.stderr,
     "wasi:cli/stdin": stdin,
-    "wasi:cli/stdout": stdout,
+    "wasi:cli/stdout": fd.stdout,
     "wasi:cli/terminal-input": terminalInput,
     "wasi:cli/terminal-output": terminalOutput,
     "wasi:cli/terminal-stderr": terminalStderr,
@@ -150,19 +227,52 @@ export async function instantiateSandbox(fileTree, cb, net, getModule = getCoreM
     "wasi:io/error": error,
     "wasi:io/poll": poll,
     "wasi:io/streams": streams,
+    "wasi:random/insecure-seed": insecureSeed,
     "wasi:random/random": random,
     ..._sockets,
   });
   // The pre-initialized WASM has Python's core state baked in, but
   // finalizePreinit() must still be called to finish setup.
-  instance.finalizePreinit();
-  return instance;
+  if (language === "python") instance.finalizePreinit();
+  fd.take(0);
+  fd.take(1);
+  /** Append the run's fd 1/2 output to both arms, and stream it once. */
+  const appendFdOutput = (output) => {
+    for (const [stream, key] of [
+      [0, "stdout"],
+      [1, "stderr"],
+    ]) {
+      const data = fd.take(stream);
+      if (data.byteLength === 0) continue;
+      output[key] = concat(output[key], data);
+      cb.reportOutput(stream, data);
+    }
+  };
+  return {
+    ...instance,
+    async execute(code) {
+      let output;
+      try {
+        output = await instance.execute(code);
+      } catch (e) {
+        if (e?.payload) appendFdOutput(e.payload);
+        throw e;
+      }
+      appendFdOutput(output);
+      return output;
+    },
+  };
 }
 
 
-/** Turn a thrown value into something structured clone keeps intact. */
+/**
+ * Turn a thrown value into something structured clone keeps intact, keeping
+ * the `payload` (a failed run's execute-error record) jco attaches.
+ */
 export function encodeError(e) {
-  return e instanceof Error ? { error: { name: e.name, message: e.message } } : { thrown: e };
+  return e instanceof Error
+    ? { error: { name: e.name, message: e.message, payload: e.payload } }
+    : { thrown: e };
 }
 
 /** Rebuild a value thrown on the other side of the channel. */
@@ -170,5 +280,6 @@ export function decodeError(reply) {
   if (!reply.error) return reply.thrown;
   const error = new Error(reply.error.message);
   error.name = reply.error.name;
+  if (reply.error.payload !== undefined) error.payload = reply.error.payload;
   return error;
 }
