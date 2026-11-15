@@ -168,6 +168,32 @@ where
     Ok(())
 }
 
+/// Add the hybrid VFS for WASI 0.3 guests to a linker.
+///
+/// The WASI 0.3 counterpart of [`add_hybrid_vfs_to_linker`]: it shadows
+/// `wasi:filesystem/types@0.3.0` and `wasi:filesystem/preopens@0.3.0` with
+/// the same [`HybridVfsState`]-backed implementation, so p3 guests see the
+/// same mounts, permissions and storage quota as p2 guests. Add
+/// `wasmtime_wasi::p3::add_to_linker` first, then call this on a linker with
+/// `allow_shadowing(true)`. The engine needs component-model async.
+///
+/// As with the p2 function, this only shadows wasmtime-wasi's filesystem
+/// while `wit-p3/deps` carries the `wasi:filesystem` version wasmtime-wasi
+/// ships; see `wit-p3/world.wit`.
+pub fn add_hybrid_vfs_to_linker_p3<T>(linker: &mut Linker<T>) -> anyhow::Result<()>
+where
+    T: HybridVfsView + 'static,
+{
+    crate::hybrid_p3::types::add_to_linker::<T, HybridFilesystem<T::Storage>>(linker, |state| {
+        state.hybrid_vfs()
+    })?;
+    crate::hybrid_p3::preopens::add_to_linker::<T, HybridFilesystem<T::Storage>>(
+        linker,
+        |state| state.hybrid_vfs(),
+    )?;
+    Ok(())
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
@@ -175,7 +201,10 @@ mod tests {
     use wasmtime::component::{Linker, ResourceTable};
     use wasmtime_wasi::{WasiCtx, WasiCtxView, WasiView};
 
-    use super::{HybridVfsView, VfsView, add_hybrid_vfs_to_linker, add_vfs_to_linker};
+    use super::{
+        HybridVfsView, VfsView, add_hybrid_vfs_to_linker, add_hybrid_vfs_to_linker_p3,
+        add_vfs_to_linker,
+    };
     use crate::hybrid::{HybridVfsCtx, HybridVfsState};
     use crate::storage::ArcStorage;
     use crate::wasi_impl::{VfsCtx, VfsState};
@@ -224,6 +253,13 @@ mod tests {
         linker
     }
 
+    fn wasi_p3_linker() -> Linker<TestState> {
+        let engine = Engine::default();
+        let mut linker = Linker::<TestState>::new(&engine);
+        wasmtime_wasi::p3::add_to_linker(&mut linker).unwrap();
+        linker
+    }
+
     /// The VFS bindings must land on exactly the same linker names that
     /// `wasmtime-wasi` registers, because callers rely on `allow_shadowing` to
     /// *replace* the host filesystem rather than sit alongside it.
@@ -253,6 +289,10 @@ mod tests {
             (
                 "add_hybrid_vfs_to_linker",
                 add_hybrid_vfs_to_linker(&mut wasi_linker()),
+            ),
+            (
+                "add_hybrid_vfs_to_linker_p3",
+                add_hybrid_vfs_to_linker_p3(&mut wasi_p3_linker()),
             ),
         ] {
             let err = result.err().unwrap_or_else(|| {

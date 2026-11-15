@@ -2897,6 +2897,84 @@ async fn plaintext_secrets_are_rejected_by_default() {
     assert!(result.success, "{}", result.error);
 }
 
+/// `http_rules` refuse requests they don't allow before anything is sent,
+/// and a rule path that can't match is rejected up front.
+#[tokio::test]
+async fn http_rules_refuse_requests() {
+    use eryx_server::proto::eryx::v1::{HttpRule, NetworkConfig};
+    use tokio::io::AsyncReadExt;
+
+    let network_config = |paths: Vec<String>| NetworkConfig {
+        allow_all_hosts: true,
+        blocked_hosts: vec!["blocked.invalid".to_string()],
+        allowed_networks: vec!["127.0.0.0/8".to_string()],
+        http_rules: vec![HttpRule {
+            host: "127.0.0.1".to_string(),
+            methods: vec!["GET".to_string()],
+            paths,
+        }],
+        ..Default::default()
+    };
+    let mut client = EryxClient::new(start_server().await);
+
+    let err = execute_half_closed(
+        &mut client,
+        ExecuteRequest {
+            code: "pass".to_string(),
+            network_config: Some(network_config(vec!["/a/../b".to_string()])),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(err.code(), tonic::Code::InvalidArgument, "{err}");
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let server = tokio::spawn(async move {
+        let mut received = Vec::new();
+        for _ in 0..2 {
+            let (mut sock, _) = listener.accept().await.unwrap();
+            let mut buf = Vec::new();
+            sock.read_to_end(&mut buf).await.unwrap();
+            received.push(String::from_utf8_lossy(&buf).into_owned());
+        }
+        received
+    });
+    let code = format!(
+        "import socket\n\
+         for path in ('/evil', '/ok/x'):\n\
+         \x20   s = socket.create_connection(('127.0.0.1', {port}))\n\
+         \x20   try:\n\
+         \x20       s.sendall(f'GET {{path}} HTTP/1.1\\r\\nHost: 127.0.0.1\\r\\n\\r\\n'.encode())\n\
+         \x20       print(path, 'sent')\n\
+         \x20   except OSError as e:\n\
+         \x20       print(path, 'refused', e)\n\
+         \x20   s.close()"
+    );
+    let result = execute_half_closed(
+        &mut client,
+        ExecuteRequest {
+            code,
+            network_config: Some(network_config(vec!["/ok".to_string()])),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    assert!(result.success, "{}", result.error);
+    let stdout = String::from_utf8_lossy(&result.stdout);
+    assert!(stdout.contains("/evil refused"), "{stdout}");
+    assert!(stdout.contains("/ok/x sent"), "{stdout}");
+
+    let received = tokio::time::timeout(Duration::from_secs(30), server)
+        .await
+        .expect("the sandbox never connected")
+        .unwrap();
+    assert_eq!(received[0], "", "{received:?}");
+    assert!(received[1].starts_with("GET /ok/x "), "{received:?}");
+}
+
 /// `state_was_reset` is set when restoring the snapshot was interrupted and
 /// the code ran on a fresh interpreter, and is false otherwise.
 #[tokio::test]

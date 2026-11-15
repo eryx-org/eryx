@@ -338,12 +338,9 @@ impl<S: VfsStorage + Clone + 'static> types::HostDescriptor for VfsState<'_, S> 
             return Err(crate::VfsError::AccessDenied(full_path).into());
         }
 
-        // Check if the path exists
-        let exists = self.ctx.storage.exists(&full_path).await?;
-
         if is_directory {
             // Opening a directory
-            if !exists {
+            if !self.ctx.storage.exists(&full_path).await? {
                 return Err(crate::VfsError::NotFound(full_path).into());
             }
             let meta = self.ctx.storage.stat(&full_path).await?;
@@ -359,21 +356,26 @@ impl<S: VfsStorage + Clone + 'static> types::HostDescriptor for VfsState<'_, S> 
             let exclusive = oflags.contains(types::OpenFlags::EXCLUSIVE);
             let truncate = oflags.contains(types::OpenFlags::TRUNCATE);
 
-            if exclusive && exists {
-                return Err(crate::VfsError::AlreadyExists(full_path).into());
-            }
-
-            if !exists {
-                if !create {
-                    return Err(crate::VfsError::NotFound(full_path).into());
+            // Creating checks and creates in one storage step, so concurrent
+            // `CREATE|EXCLUSIVE` opens (lockfiles) can't both succeed.
+            let created = if create && descriptor.dir_perms.contains(DirPerms::MUTATE) {
+                self.ctx.storage.create_file(&full_path, exclusive).await?
+            } else {
+                let exists = self.ctx.storage.exists(&full_path).await?;
+                if exclusive && exists {
+                    return Err(crate::VfsError::AlreadyExists(full_path).into());
                 }
-                // Check mutate permission for creating files
-                if !descriptor.dir_perms.contains(DirPerms::MUTATE) {
+                if !exists {
+                    if !create {
+                        return Err(crate::VfsError::NotFound(full_path).into());
+                    }
+                    // Creating files needs mutate permission.
                     return Err(crate::VfsError::PermissionDenied("mutate".to_string()).into());
                 }
-                // Create the file
-                self.ctx.storage.write(&full_path, &[]).await?;
-            } else {
+                false
+            };
+
+            if !created {
                 // Check it's not a directory
                 let meta = self.ctx.storage.stat(&full_path).await?;
                 if meta.is_dir {

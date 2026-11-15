@@ -70,6 +70,7 @@ fn _eryx(m: &Bound<'_, PyModule>) -> PyResult<()> {
         m.py().import("eryx_run")?.getattr("ResourceLimits")?,
     )?;
     m.add_class::<net_config::NetConfig>()?;
+    m.add_class::<net_config::HttpRule>()?;
     m.add_class::<vfs::VfsStorage>()?;
     m.add_class::<callback::CallbackRegistry>()?;
     m.add_class::<mcp::MCPManager>()?;

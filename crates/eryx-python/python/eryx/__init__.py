@@ -17,6 +17,7 @@ Classes:
     ExecuteResult: Result of sandbox execution with stdout and stats.
     ResourceLimits: Configuration for execution limits (shared with eryx_run).
     NetConfig: Configuration for network access.
+    HttpRule: Method and path rules for NetConfig.
 
 Exceptions:
     EryxError: Base exception for all Eryx errors.
@@ -33,6 +34,7 @@ from eryx._eryx import (
     CallbackRegistry,
     CancelToken,
     ExecuteResult,
+    HttpRule,
     MCPManager,
     NetConfig,
     PooledSandbox,
@@ -75,6 +77,7 @@ __all__ = [
     "CallbackRegistry",
     "CancelToken",
     "ExecuteResult",
+    "HttpRule",
     "MCPManager",
     "NetConfig",
     "PooledSandbox",

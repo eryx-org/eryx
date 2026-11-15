@@ -244,6 +244,27 @@ message NetworkConfig {
   // The server rejects a request that sets it with INVALID_ARGUMENT unless it
   // was started with --allow-plaintext-secrets.
   bool allow_plaintext_secrets = 10;
+  // Method and path rules for HTTP requests. A host matching any rule's host
+  // only accepts requests matching one of its rules; other hosts are
+  // unaffected. With any rule set, every request is parsed and checked
+  // against the connected host and the hosts it names, ambiguous framing is
+  // refused, and only HTTP/1.1 may be sent to a host with rules. See the
+  // eryx crate's `NetConfig::allow_http` for the matching rules.
+  repeated HttpRule http_rules = 11;
+}
+
+// HTTP requests allowed to the hosts matching a pattern.
+message HttpRule {
+  // Host pattern, as in allowed_hosts.
+  string host = 1;
+  // Allowed methods, compared ignoring case. Empty = any method.
+  repeated string methods = 2;
+  // Allowed path prefixes, matched on whole segments ("/repos/org/repo"
+  // matches "/repos/org/repo/issues" but not "/repos/org/repo-evil"; a path
+  // ending in "/" matches anything under it), against the request's
+  // percent-decoded path without its query. Empty = any path. Paths must be
+  // normalized: no "." or ".." segments, "//", query or escapes.
+  repeated string paths = 3;
 }
 
 // A secret to inject into the sandbox environment.

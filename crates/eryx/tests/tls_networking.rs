@@ -11,7 +11,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use eryx::{NetConfig, Sandbox};
+use eryx::{HttpRule, NetConfig, Sandbox};
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
@@ -511,6 +511,56 @@ except Exception as e:
         "Should get 200 OK: {}",
         String::from_utf8_lossy(&output.stdout)
     );
+}
+
+/// HTTP rules are enforced on requests sent over TLS: an allowed request
+/// gets its response, and a refused one fails the write in the sandbox.
+#[tokio::test]
+async fn test_https_http_rules() {
+    let (server, cert_der) = TestServer::start().await;
+    let port = server.port();
+
+    let sandbox = sandbox_builder_with_network()
+        .with_network(
+            NetConfig::permissive().with_root_cert(cert_der).allow_http(
+                HttpRule::new("127.0.0.1")
+                    .with_methods(["GET"])
+                    .with_paths(["/get"]),
+            ),
+        )
+        .build()
+        .expect("Failed to build sandbox");
+
+    let code = format!(
+        r#"
+import _eryx_async
+
+async def request(line):
+    tcp = await _eryx_async.await_tcp_connect("127.0.0.1", {port})
+    tls = await _eryx_async.await_tls_upgrade(tcp, "127.0.0.1")
+    try:
+        await _eryx_async.await_tls_write(tls, line + b"\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n")
+    except Exception as e:
+        _eryx_async.tls_close(tls)
+        return f"refused: {{e}}"
+    response = b""
+    while chunk := await _eryx_async.await_tls_read(tls, 4096):
+        response += chunk
+    _eryx_async.tls_close(tls)
+    return response.split(b"\r\n")[0].decode()
+
+print("allowed:", await request(b"GET /get HTTP/1.1"))
+print("path:", await request(b"GET /post HTTP/1.1"))
+print("method:", await request(b"POST /get HTTP/1.1"))
+"#
+    );
+
+    let result = sandbox.execute(&code).await;
+    server.shutdown().await;
+    let stdout = result.expect("execution failed").stdout_text();
+    assert!(stdout.contains("allowed: HTTP/1.1 200 OK"), "{stdout}");
+    assert!(stdout.contains("path: refused"), "{stdout}");
+    assert!(stdout.contains("method: refused"), "{stdout}");
 }
 
 /// Test HTTP GET request using low-level async TLS API.

@@ -428,6 +428,70 @@ class ReplayOutcome:
 
 
 @final
+class HttpRule:
+    """HTTP requests allowed to the hosts matching a pattern.
+
+    A host matching any rule's pattern only accepts requests that match one
+    of its rules; other hosts are unaffected. Once any rule is set, every
+    request is parsed and checked against the connected host and the hosts
+    it names (``Host`` header or absolute URL), requests with ambiguous
+    framing are refused, and only HTTP/1.1 may be sent to a host with rules.
+    A refused request is never sent, and the write raises ``OSError`` in the
+    sandbox.
+
+    Methods are compared ignoring case. Paths match whole segments:
+    ``/repos/org/repo`` matches it and anything under ``/repos/org/repo/``,
+    but not ``/repos/org/repo-evil``; a path ending in ``/`` matches anything
+    under it. The request's query is ignored and percent-escapes decoded
+    first; a path with ``.``/``..`` or empty segments, or an escaped ``/`` or
+    backslash, never matches.
+
+    Example:
+        net = NetConfig(
+            allowed_hosts=["api.github.com"],
+            http_rules=[
+                HttpRule("api.github.com", methods=["GET", "POST"], paths=["/repos/org/repo"]),
+            ],
+        )
+    """
+
+    @property
+    def host(self) -> str:
+        """The host pattern."""
+        ...
+
+    @property
+    def methods(self) -> list[str]:
+        """The allowed methods; empty allows any."""
+        ...
+
+    @property
+    def paths(self) -> list[str]:
+        """The allowed path prefixes; empty allows any."""
+        ...
+
+    def __new__(
+        cls,
+        host: str,
+        *,
+        methods: Optional[Sequence[str]] = None,
+        paths: Optional[Sequence[str]] = None,
+    ) -> HttpRule:
+        """Create a rule for hosts matching ``host`` (same patterns as allowed_hosts).
+
+        Args:
+            host: Host pattern the rule applies to.
+            methods: Allowed methods; None or empty allows any.
+            paths: Allowed path prefixes; None or empty allows any. Must be
+                normalized absolute paths (no ``.``/``..`` or empty segments,
+                query or escapes).
+
+        Raises:
+            ValueError: If a path can't match any request.
+        """
+        ...
+
+@final
 class NetConfig:
     """Network configuration for sandbox execution.
 
@@ -498,6 +562,9 @@ class NetConfig:
     the network path can read it. Only enable it for trusted local test servers.
     """
 
+    http_rules: list[HttpRule]
+    """Method and path rules for HTTP requests; see HttpRule."""
+
     def __new__(
         cls,
         *,
@@ -511,6 +578,7 @@ class NetConfig:
         allowed_networks: Optional[Sequence[str]] = None,
         internal_hosts: Optional[Sequence[str]] = None,
         allow_plaintext_secrets: bool = False,
+        http_rules: Optional[Sequence[HttpRule]] = None,
     ) -> NetConfig:
         """Create new network configuration.
 
@@ -541,6 +609,8 @@ class NetConfig:
                 TCP (e.g. ``http://``), not only after a TLS upgrade. This sends
                 the real secret value unencrypted; only enable it for trusted
                 local test servers.
+            http_rules: HttpRules limiting the methods and paths requests to
+                their hosts may use.
 
         Raises:
             ValueError: If a network is not a valid CIDR.
@@ -621,6 +691,18 @@ class NetConfig:
 
         Example:
             net = NetConfig(allowed_hosts=["localhost"]).allow_localhost()
+        """
+        ...
+
+    def allow_http(self, rule: HttpRule) -> NetConfig:
+        """Add an HttpRule.
+
+        Returns self for method chaining.
+
+        Example:
+            net = NetConfig(allowed_hosts=["api.github.com"]).allow_http(
+                HttpRule("api.github.com", methods=["GET"], paths=["/repos/org/repo"])
+            )
         """
         ...
 

@@ -383,21 +383,25 @@ impl<S: VfsStorage + Clone + 'static> VfsOutputStream<S> {
         let path = self.path.clone();
         let position = self.position;
         async move {
-            let position = match position {
-                Some(pos) => pos,
-                // Append mode: write at the current end of the file, or at 0
-                // if it doesn't exist yet.
-                None => storage.stat(&path).await.map_or(0, |meta| meta.size),
-            };
-            storage.write_at(&path, position, &bytes).await?;
-            Ok(position + bytes.len() as u64)
+            match position {
+                Some(pos) => {
+                    storage.write_at(&path, pos, &bytes).await?;
+                    Ok(pos + bytes.len() as u64)
+                }
+                // Append mode: storage finds the end and writes there in one
+                // step, so concurrent appenders don't overwrite each other.
+                None => storage.append(&path, &bytes).await,
+            }
         }
     }
 
     /// Record the outcome of a finished write.
     fn finish_write(&mut self, result: VfsResult<u64>) -> StreamResult<()> {
-        // Appends become positional after the first write.
-        self.position = Some(result.map_err(stream_error)?);
+        let end = result.map_err(stream_error)?;
+        // Appends stay appends: every write goes to the end as it is then.
+        if self.position.is_some() {
+            self.position = Some(end);
+        }
         Ok(())
     }
 
@@ -430,7 +434,9 @@ impl<S: VfsStorage + Clone + 'static> Pollable for VfsOutputStream<S> {
             let result = self.start_write(bytes).await;
             self.queued = None;
             match result {
-                Ok(position) => self.position = Some(position),
+                // As in `finish_write`: appends stay appends.
+                Ok(end) if self.position.is_some() => self.position = Some(end),
+                Ok(_) => {}
                 Err(err) => self.error = Some(err),
             }
         }
@@ -639,6 +645,24 @@ mod tests {
 
         let content = storage.read("/test.txt").await.unwrap();
         assert_eq!(&content, b"onetwothree");
+    }
+
+    /// Two append streams open on one file both append; neither turns
+    /// positional after its first write and overwrites the other.
+    #[tokio::test]
+    async fn interleaved_append_streams_do_not_overwrite_each_other() {
+        let storage = ArcStorage::new(Arc::new(InMemoryStorage::new()));
+        let mut streams = [
+            VfsOutputStream::append(storage.clone(), "/log".to_string()),
+            VfsOutputStream::append(storage.clone(), "/log".to_string()),
+        ];
+        for (which, bytes) in [(0, "a1 "), (1, "b1 "), (0, "a2 "), (1, "b2 ")] {
+            streams[which]
+                .blocking_write_and_flush(Bytes::from(bytes))
+                .await
+                .unwrap();
+        }
+        assert_eq!(storage.read("/log").await.unwrap(), b"a1 b1 a2 b2 ");
     }
 
     #[tokio::test]

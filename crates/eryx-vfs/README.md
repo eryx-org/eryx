@@ -48,6 +48,19 @@ let hybrid_ctx = HybridVfsCtx::new()
     }));
 ```
 
+### WASI 0.3 guests
+
+`add_hybrid_vfs_to_linker_p3` shadows `wasi:filesystem@0.3.0` with the same
+`HybridVfsCtx`, so `wasm32-wasip3` components see the same mounts,
+permissions and storage quota as WASI 0.2 guests. Every operation delegates
+to the p2 implementation's checks; only the types and streams differ.
+
+```rust
+wasmtime_wasi::p3::add_to_linker(&mut linker)?;
+linker.allow_shadowing(true);
+add_hybrid_vfs_to_linker_p3(&mut linker)?;
+```
+
 ## Secret Scrubbing
 
 The `ScrubbingStorage` wrapper can automatically scrub secret placeholders from file writes, preventing accidental leakage of sensitive data:
@@ -87,3 +100,6 @@ path to a scrubbed one scrubs it again, and renaming directories is refused.
 ```bash
 cargo test -p eryx-vfs
 ```
+
+`tests/p3_filesystem.rs` builds a small `wasm32-wasip3` probe
+(`tests/fixtures/p3-fs-probe`), which needs `rustup target add wasm32-wasip3`.

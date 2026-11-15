@@ -80,6 +80,8 @@ except OSError as e:
     expect(() => sandbox.setNetConfig({ blockedNetworks: ["10.0.0.0/33"] })).toThrow(TypeError);
     expect(() => sandbox.setNetConfig({ blockedNetworks: ["not-an-ip/8"] })).toThrow();
     expect(() => sandbox.setNetConfig({ maxConnections: -1 })).toThrow(TypeError);
+    // Not enforced by the JavaScript host, so refused rather than ignored.
+    expect(() => sandbox.setNetConfig({ httpRules: [{ host: "x" }] } as never)).toThrow(TypeError);
     expect(() => sandbox.setNetConfig({ maxConnections: NaN })).toThrow(TypeError);
     expect(() => setNetConfig({ maxConnections: -1 })).toThrow(TypeError);
     // Like the Rust NetConfig, a zero ceiling is refused rather than failing every connection.
