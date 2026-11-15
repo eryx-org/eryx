@@ -304,6 +304,10 @@ pub struct Manifest {
     /// names for the shell. Python's site-packages needs none.
     #[serde(default)]
     pub exports: BTreeMap<String, String>,
+    /// What the build warned about: skipped optional dependencies,
+    /// conflicting peers, imports the bundler couldn't resolve.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
 }
 
 /// [`Manifest::inputs`].
@@ -405,6 +409,7 @@ impl Manifest {
                 hash: content.hash,
             },
             exports,
+            warnings: Vec::new(),
         })
     }
 

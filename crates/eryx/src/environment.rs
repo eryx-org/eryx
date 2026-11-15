@@ -304,11 +304,12 @@ async fn build_javascript(
         .node_modules
         .parent()
         .ok_or_else(|| EnvironmentError::Build("installed tree has no root".to_string()))?;
-    let report = run_bundler(tree_root, &modules, &entries).await?;
+    // `modules` is new and empty: the bundler doesn't clear its output dir,
+    // so a fresh staging dir is what keeps stale chunks out of the hash.
+    let mut report = run_bundler(tree_root, &modules, &entries).await?;
     std::fs::remove_file(modules.join("bundle.json")).map_err(io("removing bundle.json"))?;
 
-    let exports = report
-        .entries
+    let exports = std::mem::take(&mut report.entries)
         .into_iter()
         .map(|(specifier, chunk)| (specifier, format!("{MODULES_DIR}/{chunk}")))
         .collect();
@@ -321,7 +322,7 @@ async fn build_javascript(
     inputs.lockfile_hash = Some(installed.lockfile.content_hash());
     let mut builder = Builder::new(env!("CARGO_PKG_VERSION"));
     builder.tools.insert("bundler".to_string(), report.bundler);
-    let manifest = Manifest::new(
+    let mut manifest = Manifest::new(
         &definition.name,
         definition.language,
         inputs,
@@ -330,6 +331,10 @@ async fn build_javascript(
         MODULES_DIR,
         exports,
     )?;
+    manifest.warnings = installed.warnings.clone();
+    manifest
+        .warnings
+        .extend(report.warnings.iter().map(|w| format!("bundler: {w}")));
     manifest.write(staging.path())?;
 
     replace_dir(staging.keep(), &out_dir)?;
@@ -363,6 +368,8 @@ fn replace_dir(staging: PathBuf, out: &Path) -> Result<(), EnvironmentError> {
 struct BundleReport {
     bundler: String,
     entries: BTreeMap<String, String>,
+    #[serde(default)]
+    warnings: Vec<String>,
 }
 
 /// Bundle `entries` from the tree at `tree_root` into `out`.

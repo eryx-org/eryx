@@ -23,11 +23,12 @@ use eryx_packages::blobs::Blobs;
 use eryx_packages::integrity::Integrity;
 use eryx_packages::npm::{LOCKFILE_VERSION, LockedPackage, Lockfile};
 
-const PACKAGES: [&str; 5] = [
+const PACKAGES: [&str; 6] = [
     "@scope/sub",
     "cjs-pkg",
     "esm-pkg",
     "events",
+    "needs-missing",
     "uses-builtins",
 ];
 
@@ -47,8 +48,17 @@ fn tarball(name: &str) -> Vec<u8> {
     gz.finish().unwrap()
 }
 
-/// A cache holding the fixtures' tarballs, and a lockfile pinning them.
+/// A cache holding the fixtures' tarballs, and a lockfile pinning them,
+/// resolved from the specs [`definition`] asks for.
 fn prepare(dir: &Path) -> (PathBuf, PathBuf) {
+    prepare_for(
+        dir,
+        "fixtures",
+        &["@scope/sub@1", "esm-pkg@1", "uses-builtins@1"],
+    )
+}
+
+fn prepare_for(dir: &Path, name: &str, requested: &[&str]) -> (PathBuf, PathBuf) {
     let cache = dir.join("cache");
     let blobs = Blobs::new(cache.join("blobs"));
     let mut packages = BTreeMap::new();
@@ -72,14 +82,10 @@ fn prepare(dir: &Path) -> (PathBuf, PathBuf) {
     let lockfile = Lockfile {
         lockfile_version: LOCKFILE_VERSION,
         registry: "https://registry.npmjs.org/".to_string(),
-        requested: vec![
-            "@scope/sub@1".to_string(),
-            "esm-pkg@1".to_string(),
-            "uses-builtins@1".to_string(),
-        ],
+        requested: requested.iter().map(ToString::to_string).collect(),
         packages,
     };
-    let path = dir.join("fixtures.lock");
+    let path = dir.join(format!("{name}.lock"));
     lockfile.write(&path).unwrap();
     (cache, path)
 }
@@ -206,4 +212,37 @@ async fn offline_without_the_packages_fails_before_bundling() {
         .await
         .unwrap_err();
     assert!(matches!(err, EnvironmentError::Packages(_)), "{err}");
+}
+
+#[tokio::test]
+async fn warnings_are_recorded_in_the_manifest() {
+    let dir = tempfile::tempdir().unwrap();
+    let (cache, _) = prepare_for(dir.path(), "warns", &["needs-missing@1"]);
+    let definition = EnvironmentDefinition::from_toml(
+        r#"
+        name = "warns"
+        language = "javascript"
+
+        [npm]
+        packages = ["needs-missing@1"]
+        "#,
+    )
+    .unwrap();
+
+    let environment = build(&definition, &options(dir.path(), &cache, "env"))
+        .await
+        .unwrap();
+
+    let warnings = &environment.manifest().warnings;
+    assert!(
+        warnings.iter().any(|w| w.contains("not-installed")),
+        "{warnings:?}"
+    );
+    assert_eq!(
+        Environment::load(environment.root())
+            .unwrap()
+            .manifest()
+            .warnings,
+        *warnings
+    );
 }

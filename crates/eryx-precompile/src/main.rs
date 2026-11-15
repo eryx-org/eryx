@@ -426,6 +426,9 @@ async fn run_env_build(args: EnvBuildArgs) -> Result<()> {
     for (name, path) in environment.exports() {
         println!("  {name} -> {path}");
     }
+    for warning in &manifest.warnings {
+        eprintln!("warning: {warning}");
+    }
     println!("Wrote {}", environment.root().display());
     Ok(())
 }
