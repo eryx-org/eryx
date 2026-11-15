@@ -1,0 +1,87 @@
+# Build the guest runtime components every release needs.
+#
+# Called by the release workflows and the release dry run; it publishes
+# nothing. Two artifacts:
+# - `runtime-assets`: runtime-{python,javascript,shell}.wasm, the shell's
+#   embedded commands coreutils.wasm, and their .sha256: the release assets
+#   `eryx-precompile setup` downloads.
+# - `wasm-runtime`: what the pyeryx wheel jobs need to precompile the Python
+#   runtime on each platform (runtime-python.wasm, prebuilt/ and the stdlib).
+#
+# Components are platform-independent; each platform precompiles its own
+# .cwasm, which isn't portable across platforms.
+
+name: Build Runtimes
+
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+# No GitHub Actions caches (see python-release.yml): everything here ships.
+
+jobs:
+  build-runtimes:
+    name: Build runtimes
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: ./.github/actions/setup-rust
+
+      - name: Build the runtimes
+        run: |
+          mise trust
+          mise run build-runtime-python
+          mise run build-runtime-javascript
+          mise run build-runtime-shell
+          # The shell's embedded commands (the eryx `coreutils` feature),
+          # from the pinned clis/coreutils.toml.
+          mise run build-coreutils
+        env:
+          BUILD_ERYX_RUNTIME: "1"
+
+      # `eryx-precompile setup` verifies each download against its .sha256.
+      - name: Hash the runtimes
+        working-directory: crates/eryx-runtime
+        run: |
+          for component in runtime-python runtime-javascript runtime-shell coreutils; do
+            sha256sum "$component.wasm" > "$component.wasm.sha256"
+          done
+          cat ./*.wasm.sha256
+
+      - name: Upload runtime assets
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: runtime-assets
+          path: |
+            crates/eryx-runtime/runtime-*.wasm
+            crates/eryx-runtime/coreutils.wasm
+            crates/eryx-runtime/*.wasm.sha256
+          if-no-files-found: error
+          retention-days: 5
+
+      # Extract the Python stdlib so each platform can pre-initialize Python
+      # when it precompiles.
+      - name: Extract Python stdlib
+        run: mise run setup-eryx-runtime-tests
+
+      - name: Copy prebuilt late-linking artifacts
+        run: mise run update-prebuilt
+
+      - name: Upload Python wheel inputs
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: wasm-runtime
+          path: |
+            crates/eryx-runtime/runtime-python.wasm
+            crates/eryx-runtime/prebuilt/
+            crates/eryx-guest-python/tests/python-stdlib/
+          if-no-files-found: error
+          retention-days: 1

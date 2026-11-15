@@ -113,9 +113,34 @@ jobs:
           echo "ERYX_COREUTILS_CWASM=$RUNNER_TEMP/coreutils.cwasm" >> "$GITHUB_ENV"
 
       - name: Run release-plz
+        id: release-plz
         uses: release-plz/action@66b324fd6c72d05d2a08568492ecdd62bfb8a62b # v0.5.148
         with:
           command: release-pr
           config: release-plz.toml
         env:
           GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}
+
+      # pyeryx's runtime companions (pyeryx-runtime-javascript/-shell) are
+      # released at exactly pyeryx's version, which release-plz doesn't know
+      # about. Lock them to the new version on the release PR's branch, pushing
+      # with the App token so the PR's CI runs on the result. release-plz
+      # regenerates the branch when main moves, and this runs again then.
+      - name: Lock the pyeryx runtime companions to the release version
+        env:
+          RELEASE_PR: ${{ steps.release-plz.outputs.pr }}
+        run: |
+          branch=$(printf '%s' "$RELEASE_PR" | jq -r '.head_branch // empty')
+          if [ -z "$branch" ]; then
+            echo "No release PR opened or updated."
+            exit 0
+          fi
+          git fetch origin "$branch"
+          git switch --detach "origin/$branch"
+          scripts/sync-runtime-versions.sh
+          if git diff --quiet; then
+            exit 0
+          fi
+          git -c user.name="eryx-release-plz[bot]" -c user.email="eryx-release-plz[bot]@users.noreply.github.com" \
+            commit -am "chore: lock pyeryx runtime companions to the release version"
+          git push origin "HEAD:refs/heads/$branch"

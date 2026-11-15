@@ -22,21 +22,10 @@ WORKDIR /build
 # Copy workspace manifests.
 COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
 
-# Copy all workspace crates that affect precompilation.
-COPY crates/eryx/ crates/eryx/
-COPY crates/eryx-precompile/ crates/eryx-precompile/
-COPY crates/eryx-runtime/ crates/eryx-runtime/
-COPY crates/eryx-guest-python/ crates/eryx-guest-python/
-COPY crates/eryx-linker-wasm/ crates/eryx-linker-wasm/
-COPY crates/eryx-macros/ crates/eryx-macros/
-COPY crates/eryx-python/ crates/eryx-python/
-COPY crates/eryx-vfs/ crates/eryx-vfs/
-COPY crates/wit-dylib-ffi/ crates/wit-dylib-ffi/
-
-# Stub for eryx-server (not compiled here, but needed for workspace resolution).
-COPY crates/eryx-server/Cargo.toml crates/eryx-server/Cargo.toml
-COPY crates/eryx-server/proto/ crates/eryx-server/proto/
-RUN mkdir -p crates/eryx-server/src && echo "fn main() {}" > crates/eryx-server/src/main.rs
+# Copy every workspace crate: the workspace's `crates/*` members must all be
+# present for cargo to load it, and listing them by hand broke this stage
+# whenever a crate was added.
+COPY crates/ crates/
 
 # Extract Python stdlib for pre-initialization.
 RUN mkdir -p crates/eryx-guest-python/tests/python-stdlib && \
@@ -57,7 +46,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
   --language python \
   --preinit \
   --stdlib crates/eryx-guest-python/tests/python-stdlib \
-  --target "${ERYX_CPU_FEATURES}" \
+  --cpu-features "${ERYX_CPU_FEATURES}" \
   --output crates/eryx-runtime/runtime-python.cwasm \
   --no-verify
 
@@ -73,7 +62,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
   cargo run --release -p eryx-precompile -- compile \
   "crates/eryx-runtime/runtime-$lang.wasm" \
   --language "$lang" \
-  --target "${ERYX_CPU_FEATURES}" \
+  --cpu-features "${ERYX_CPU_FEATURES}" \
   --output "crates/eryx-runtime/runtime-$lang.cwasm" \
   --no-verify || exit 1; \
   done; \
@@ -81,7 +70,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
   ERYX_PRECOMPILE_BOOTSTRAP=1 \
   cargo run --release -p eryx-precompile -- compile \
   crates/eryx-runtime/coreutils.wasm \
-  --target "${ERYX_CPU_FEATURES}" \
+  --cpu-features "${ERYX_CPU_FEATURES}" \
   --output crates/eryx-runtime/coreutils.cwasm \
   --no-verify || exit 1;; \
   esac
