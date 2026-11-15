@@ -181,6 +181,77 @@ struct Args {
     /// rejected. Requires `--tls-cert`/`--tls-key`.
     #[arg(long, env = "ERYX_TLS_CLIENT_CA", requires = "tls_cert")]
     tls_client_ca: Option<PathBuf>,
+
+    /// An external command for the shell, `NAME=PATH`; repeat for more.
+    /// `NAME1,NAME2=PATH` registers one multicall binary (e.g. busybox-style)
+    /// under several names, compiled once. PATH is a WASI 0.2 command
+    /// component (`.wasm`), or one precompiled by this eryx version's
+    /// `eryx-precompile compile` (`.cwasm`, trusted like --runtime-cwasm). A
+    /// name overrides the embedded coreutils tool of the same name. In the
+    /// environment, separate entries with `;`.
+    #[arg(
+        long = "shell-command",
+        env = "ERYX_SHELL_COMMANDS",
+        value_delimiter = ';',
+        value_parser = parse_shell_command
+    )]
+    shell_commands: Vec<ShellCommand>,
+
+    /// Leave out the shell's embedded coreutils (cat, head, ls, ...), so it
+    /// runs only the --shell-command commands.
+    #[arg(long, env = "ERYX_NO_SHELL_COREUTILS")]
+    no_shell_coreutils: bool,
+}
+
+/// One `--shell-command`: the names to register and the component's path.
+#[derive(Debug, Clone)]
+struct ShellCommand {
+    names: Vec<String>,
+    path: PathBuf,
+}
+
+fn parse_shell_command(value: &str) -> Result<ShellCommand, String> {
+    let (names, path) = value
+        .split_once('=')
+        .ok_or_else(|| format!("expected NAME[,NAME...]=PATH, got {value:?}"))?;
+    let names: Vec<String> = names.split(',').map(|n| n.trim().to_owned()).collect();
+    if names.iter().any(String::is_empty) || path.is_empty() {
+        return Err(format!("expected NAME[,NAME...]=PATH, got {value:?}"));
+    }
+    Ok(ShellCommand {
+        names,
+        path: path.into(),
+    })
+}
+
+/// Load each `--shell-command`, so a bad one fails startup rather than the
+/// first shell request.
+fn load_shell_commands(
+    commands: &[ShellCommand],
+) -> Result<Vec<(Vec<String>, eryx::Command)>, String> {
+    commands
+        .iter()
+        .map(|ShellCommand { names, path }| {
+            let precompiled = path.extension().is_some_and(|ext| ext == "cwasm");
+            let command = if precompiled {
+                // SAFETY: the operator's own file, trusted as --runtime-cwasm is.
+                #[allow(unsafe_code)]
+                unsafe {
+                    eryx::Command::from_precompiled_file(path)
+                }
+            } else {
+                eryx::Command::from_file(path)
+            };
+            let command = command.map_err(|e| {
+                format!(
+                    "--shell-command {}={}: {e}",
+                    names.join(","),
+                    path.display()
+                )
+            })?;
+            Ok((names.clone(), command))
+        })
+        .collect()
 }
 
 /// Build a [`ServerTlsConfig`] from the configured cert/key/CA paths.
@@ -214,11 +285,20 @@ fn build_tls_config(args: &Args) -> Result<Option<ServerTlsConfig>, Box<dyn std:
 
 /// Spawn a background task that periodically evicts idle sandboxes and
 /// records pool gauge metrics.
+/// The shell's external commands: the --shell-command ones, and whether to
+/// keep the embedded coreutils.
+#[derive(Clone)]
+struct ShellCommands {
+    commands: Vec<(Vec<String>, eryx::Command)>,
+    coreutils: bool,
+}
+
 /// Build the sandbox pool for a language other than Python, from its
 /// embedded runtime.
 async fn create_language_pool(
     language: eryx::Language,
     config: PoolConfig,
+    shell: ShellCommands,
 ) -> Result<SandboxPool, eryx::PoolError> {
     match language {
         #[cfg(feature = "javascript")]
@@ -226,9 +306,18 @@ async fn create_language_pool(
             SandboxPool::new(Sandbox::embedded().javascript(), config).await
         }
         #[cfg(feature = "shell")]
-        eryx::Language::Shell => SandboxPool::new(Sandbox::embedded().shell(), config).await,
+        eryx::Language::Shell => {
+            let mut builder = Sandbox::embedded().shell();
+            if !shell.coreutils {
+                builder = builder.without_embedded_commands();
+            }
+            for (names, command) in shell.commands {
+                builder = builder.with_commands(names, command);
+            }
+            SandboxPool::new(builder, config).await
+        }
         other => {
-            let _ = config;
+            let _ = (config, shell);
             Err(eryx::PoolError::Creation(format!(
                 "this server has no {other} runtime"
             )))
@@ -411,6 +500,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Evict idle sandboxes and record pool gauge metrics every 5 seconds.
     spawn_pool_maintenance(eryx::Language::Python, Arc::clone(&python_pool));
 
+    let shell = ShellCommands {
+        commands: load_shell_commands(&args.shell_commands)?,
+        coreutils: !args.no_shell_coreutils,
+    };
+    let shell_configured = !shell.commands.is_empty() || !shell.coreutils;
+    if shell_configured && !cfg!(feature = "shell") {
+        return Err(
+            "--shell-command and --no-shell-coreutils need the `shell` cargo feature".into(),
+        );
+    }
+    if shell_configured && !args.languages.contains(&eryx::Language::Shell) {
+        return Err(
+            "--shell-command and --no-shell-coreutils need the shell in --languages".into(),
+        );
+    }
     let mut lazy_pools = Vec::new();
     for &language in &args.languages {
         let built_in = match language {
@@ -424,11 +528,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             continue;
         }
         let config = pool_config.clone();
+        let shell = shell.clone();
         let create: eryx_server::service::PoolFactory = Arc::new(move || {
             let config = config.clone();
+            let shell = shell.clone();
             Box::pin(async move {
                 tracing::info!(%language, "creating sandbox pool on first request");
-                let pool = create_language_pool(language, config).await?;
+                let pool = create_language_pool(language, config, shell).await?;
                 let pool = Arc::new(pool);
                 spawn_pool_maintenance(language, Arc::clone(&pool));
                 Ok(pool)
@@ -543,4 +649,48 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn shell_command_flags_parse() {
+        let one = parse_shell_command("rg=/opt/rg.wasm").unwrap();
+        assert_eq!(one.names, ["rg"]);
+        assert_eq!(one.path, PathBuf::from("/opt/rg.wasm"));
+        let multi = parse_shell_command("cat,head=/opt/coreutils.cwasm").unwrap();
+        assert_eq!(multi.names, ["cat", "head"]);
+
+        for bad in ["rg", "=/opt/rg.wasm", "rg=", "a,,b=/x.wasm"] {
+            assert!(parse_shell_command(bad).is_err(), "{bad}");
+        }
+
+        let args = Args::try_parse_from([
+            "eryx-server",
+            "--shell-command",
+            "rg=/opt/rg.wasm",
+            "--shell-command",
+            "cat,head=/opt/coreutils.cwasm",
+            "--no-shell-coreutils",
+        ])
+        .unwrap();
+        assert_eq!(args.shell_commands.len(), 2);
+        assert!(args.no_shell_coreutils);
+    }
+
+    #[test]
+    fn a_missing_shell_command_fails_startup_clearly() {
+        let err = load_shell_commands(&[ShellCommand {
+            names: vec!["rg".into()],
+            path: "/nonexistent/rg.wasm".into(),
+        }])
+        .unwrap_err();
+        assert!(
+            err.starts_with("--shell-command rg=/nonexistent/rg.wasm: "),
+            "{err}"
+        );
+    }
 }

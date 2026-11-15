@@ -1397,6 +1397,7 @@ async fn execute_with_session(
                 output_truncated,
                 state_skipped_globals,
                 state_was_reset: exec_output.state_was_reset,
+                exit_code: (params.language == eryx::Language::Shell).then_some(0),
             }
         }
         Err(e) => {
@@ -1452,6 +1453,10 @@ async fn execute_with_session(
                 output_truncated,
                 state_skipped_globals,
                 state_was_reset: false,
+                exit_code: match e.kind() {
+                    ErrorKind::ScriptFailed { exit_code, .. } => *exit_code,
+                    _ => None,
+                },
             }
         }
     }

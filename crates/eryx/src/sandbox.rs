@@ -1557,6 +1557,8 @@ pub struct SandboxBuilder<Lang = Python, Runtime = state::Needs> {
     result_variable: String,
     /// External commands (shell only).
     commands: crate::process::Commands,
+    /// Whether the embedded shell also gets the embedded coreutils.
+    embedded_commands: bool,
     /// Path to the guest's standard library (for Python, the CPython stdlib).
     stdlib_path: Option<std::path::PathBuf>,
     /// Path to a guest library directory (for Python, site-packages).
@@ -1636,6 +1638,7 @@ impl SandboxBuilder<Python, state::Needs> {
             resource_limits: ResourceLimits::default(),
             result_variable: "result".to_string(),
             commands: crate::process::Commands::default(),
+            embedded_commands: true,
             stdlib_path: None,
             library_path: None,
             #[cfg(feature = "native-extensions")]
@@ -1674,6 +1677,7 @@ impl SandboxBuilder<Python, state::Needs> {
             resource_limits: ResourceLimits::default(),
             result_variable: "result".to_string(),
             commands: crate::process::Commands::default(),
+            embedded_commands: true,
             stdlib_path: None, // Will use embedded stdlib
             library_path: None,
             #[cfg(feature = "native-extensions")]
@@ -1712,6 +1716,7 @@ impl<L, R> SandboxBuilder<L, R> {
             resource_limits: self.resource_limits,
             result_variable: self.result_variable,
             commands: self.commands,
+            embedded_commands: self.embedded_commands,
             stdlib_path: self.stdlib_path,
             library_path: self.library_path,
             #[cfg(feature = "native-extensions")]
@@ -2363,6 +2368,15 @@ impl<R> SandboxBuilder<Shell, R> {
         }
         self
     }
+
+    /// Leave out the embedded shell's default commands (uutils coreutils,
+    /// with the `coreutils` feature), so only commands registered with
+    /// [`with_command`](Self::with_command) run.
+    #[must_use]
+    pub fn without_embedded_commands(mut self) -> Self {
+        self.embedded_commands = false;
+        self
+    }
 }
 
 // Methods available in ANY state
@@ -2929,6 +2943,7 @@ impl<L: GuestLanguage> SandboxBuilder<L, state::Has> {
         let commands = {
             let mut commands = self.commands;
             if L::LANGUAGE == Language::Shell
+                && self.embedded_commands
                 && matches!(self.wasm_source, WasmSource::EmbeddedRuntime)
             {
                 let coreutils = crate::embedded::coreutils()?;

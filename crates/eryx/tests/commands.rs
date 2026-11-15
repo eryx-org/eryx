@@ -388,6 +388,22 @@ async fn the_embedded_shell_runs_coreutils() {
     assert_eq!(out.stdout_utf8().unwrap(), "HI\nb\n");
 }
 
+/// `without_embedded_commands` leaves the coreutils out, keeping the
+/// registered commands.
+#[tokio::test]
+async fn embedded_commands_can_be_left_out() {
+    let sandbox = shell()
+        .without_embedded_commands()
+        .with_command("upper", test_cmd())
+        .build()
+        .unwrap();
+    let out = sandbox
+        .execute("echo hi | upper; cat /nope; echo \"cat=$?\"")
+        .await
+        .unwrap();
+    assert_eq!(out.stdout_utf8().unwrap(), "HI\ncat=127\n");
+}
+
 #[cfg(all(feature = "coreutils", feature = "unstable-vfs"))]
 #[tokio::test]
 async fn coreutils_work_on_the_sessions_vfs() {

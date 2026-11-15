@@ -73,9 +73,10 @@ const SHELL_RUNTIME: EmbeddedRuntime = EmbeddedRuntime {
 };
 
 /// The uutils coreutils tools the embedded shell runs as external commands,
-/// with the `coreutils` feature. Must match the `--features` in
-/// `clis/coreutils.toml`, which the embedded multicall binary is built from.
-#[cfg(feature = "coreutils")]
+/// with the `coreutils` feature, and the names to register a `coreutils.cwasm`
+/// from `eryx-precompile setup --language shell` under. Must match the
+/// `--features` in `clis/coreutils.toml`, which the multicall binary is built
+/// from.
 pub const COREUTILS_TOOLS: [&str; 11] = [
     "cat", "head", "tail", "ls", "wc", "cp", "mv", "rm", "mkdir", "touch", "sort",
 ];

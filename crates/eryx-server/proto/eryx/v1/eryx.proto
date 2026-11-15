@@ -491,6 +491,13 @@ message ExecuteResult {
   // (e.g. it hit the execution timeout), which discarded the instance. Also
   // reported in `state_error`. Always false when `success` is false.
   bool state_was_reset = 16;
+
+  // The script's exit status, for LANGUAGE_SHELL only: 0 on success, or the
+  // nonzero status of a script failure (`failure_kind` FAILURE_KIND_SCRIPT_FAILED).
+  // Unset for Python and JavaScript, whose scripts fail by raising, and when
+  // the sandbox itself failed (a timeout, a resource limit) before the script
+  // could exit.
+  optional int32 exit_code = 17;
 }
 
 // Why an execution failed, when success is false.

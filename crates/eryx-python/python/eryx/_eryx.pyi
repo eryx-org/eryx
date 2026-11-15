@@ -720,6 +720,42 @@ class NetConfig:
 
 
 @final
+class Command:
+    """A WASI 0.2 command component a shell sandbox can run as an external command.
+
+    For example uutils coreutils, ripgrep or curl built for ``wasm32-wasip2``.
+    Pass commands by name: ``Sandbox(language="shell", commands={"rg": rg})``.
+    The same `Command` under several names (a multicall binary, which picks the
+    tool from ``argv[0]``) is compiled once. A command sees the sandbox's
+    volumes and nothing else of the host, and has no network.
+    """
+
+    @staticmethod
+    def from_file(path: PathLike) -> Command:
+        """Compile a command component from a ``.wasm`` file.
+
+        Raises:
+            InitializationError: If it can't be read or compiled, or isn't a
+                WASI 0.2 command.
+        """
+        ...
+
+    @staticmethod
+    def from_bytes(wasm: bytes) -> Command:
+        """Compile a command component from its ``.wasm`` bytes."""
+        ...
+
+    @staticmethod
+    def from_precompiled_file(path: PathLike) -> Command:
+        """Load a command precompiled by this pyeryx version's eryx.
+
+        Only load files you trust: a precompiled file is native code that can't
+        be fully validated.
+        """
+        ...
+
+
+@final
 class Sandbox:
     """A Python sandbox powered by WebAssembly.
 
@@ -778,6 +814,7 @@ class Sandbox:
         on_stdout: Optional[Callable[[bytes], None]] = None,
         on_stderr: Optional[Callable[[bytes], None]] = None,
         result_variable: Optional[str] = None,
+        commands: Optional[dict[str, Command]] = None,
     ) -> Sandbox:
         """Create a new sandbox with the embedded Python runtime.
 
@@ -822,9 +859,15 @@ class Sandbox:
                 waiting for execution to complete. Receives the output chunk as bytes.
             result_variable: Name of the variable captured from the script and exposed
                 as ``ExecuteResult.result`` (JSON-serialized). Defaults to ``"result"``.
+            commands: For the shell only: external commands by name, each a
+                `Command`. They replace the uutils coreutils tools (cat, head, ls,
+                sort, ...) of the same name, which the shell gets by default from
+                the ``pyeryx-runtime-shell`` package. A shell script's nonzero exit
+                status raises `PythonExceptionError` with ``exit_code`` set.
 
         Raises:
             InitializationError: If the sandbox fails to initialize.
+            ValueError: If ``commands`` is given for another language.
 
         Example:
             # Default sandbox (stdlib only, no network)
@@ -1431,6 +1474,7 @@ class Session:
         on_stdout: Optional[Callable[[bytes], None]] = None,
         on_stderr: Optional[Callable[[bytes], None]] = None,
         result_variable: Optional[str] = None,
+        commands: Optional[dict[str, Command]] = None,
     ) -> Session:
         """Create a new session with the embedded Python runtime.
 

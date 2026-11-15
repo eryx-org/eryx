@@ -114,6 +114,10 @@ impl Sandbox {
     ///     network: Optional network configuration. If provided, enables networking.
     ///     callbacks: Optional callbacks that sandboxed code can invoke.
     ///         Can be a CallbackRegistry or a list of callback dicts.
+    ///     commands: For the shell only: external commands by name, each an
+    ///         `eryx.Command`. They replace the uutils coreutils tools
+    ///         (cat, head, ls, sort, ...) of the same name, which the shell
+    ///         gets by default from the `pyeryx-runtime-shell` package.
     ///
     /// Returns:
     ///     A new Sandbox instance ready to execute Python code.
@@ -159,7 +163,7 @@ impl Sandbox {
     ///     )
     ///     sandbox = factory.create_sandbox()
     #[new]
-    #[pyo3(signature = (*, language=None, runtime_path=None, resource_limits=None, network=None, callbacks=None, mcp=None, secrets=None, scrub_stdout=None, scrub_stderr=None, scrub_result=None, scrub_files=None, volumes=None, on_stdout=None, on_stderr=None, result_variable=None))]
+    #[pyo3(signature = (*, language=None, runtime_path=None, resource_limits=None, network=None, callbacks=None, mcp=None, secrets=None, scrub_stdout=None, scrub_stderr=None, scrub_result=None, scrub_files=None, volumes=None, on_stdout=None, on_stderr=None, result_variable=None, commands=None))]
     #[allow(clippy::too_many_arguments)]
     fn new(
         py: Python<'_>,
@@ -178,6 +182,7 @@ impl Sandbox {
         on_stdout: Option<Py<PyAny>>,
         on_stderr: Option<Py<PyAny>>,
         result_variable: Option<String>,
+        commands: Option<crate::command::Commands<'_>>,
     ) -> PyResult<Self> {
         let language = parse_language(language)?;
         let runtime = crate::error::make_runtime()?;
@@ -245,7 +250,7 @@ impl Sandbox {
             });
         }
 
-        let inner = build_for(builder, language)?;
+        let inner = build_for(py, builder, language, commands)?;
 
         Ok(Self {
             inner,
@@ -454,15 +459,33 @@ pub(crate) fn base_builder(
 }
 
 /// Finish `builder` (configured as Python, whose language-neutral options
-/// carry over) as a sandbox for `language`.
+/// carry over) as a sandbox for `language`. A shell gets uutils coreutils
+/// from the `pyeryx-runtime-shell` package if it's installed, then
+/// `commands`, which replace coreutils tools of the same name.
 pub(crate) fn build_for(
+    py: Python<'_>,
     builder: eryx::SandboxBuilder<eryx::language::Python, eryx::state::Has>,
     language: eryx::Language,
+    commands: Option<crate::command::Commands<'_>>,
 ) -> PyResult<eryx::Sandbox> {
+    if language != eryx::Language::Shell && commands.as_ref().is_some_and(|c| !c.is_empty()) {
+        return Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "commands= is only for language=\"shell\", not {language}"
+        )));
+    }
     match language {
         eryx::Language::Python => builder.build(),
         eryx::Language::JavaScript => builder.javascript().build(),
-        eryx::Language::Shell => builder.shell().build(),
+        eryx::Language::Shell => {
+            let mut builder = builder.shell();
+            if let Some(coreutils) = crate::command::coreutils(py)? {
+                builder = builder.with_commands(eryx::embedded::COREUTILS_TOOLS, coreutils);
+            }
+            for (name, command) in commands.into_iter().flatten() {
+                builder = builder.with_command(name, command.inner.clone());
+            }
+            builder.build()
+        }
         other => {
             return Err(InitializationError::new_err(format!(
                 "unsupported language {other}"
