@@ -336,8 +336,8 @@ mod tests {
             license = "MIT"
             lang = "c"
             [source]
-            repo = "https://example.com/jq-1.7.1.tar.gz"
-            ref = "1.7.1"
+            repo = "https://example.com/jq-1.8.2.tar.gz"
+            ref = "1.8.2"
             dir = "scratch/jq"
             [build]
             system = "autotools"

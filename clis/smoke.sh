@@ -46,7 +46,7 @@ jaq)
 jq)
     jqw() { wasmtime run "$OUT/component.wasm" "$@"; }
     expect "$(printf '{"a":1}' | jqw .a)" 1
-    expect "$(jqw --version)" "jq-1.7.1"
+    expect "$(jqw --version)" "jq-1.8.2"
     # Regex filters need oniguruma linked in.
     expect "$(jqw -n '"baaa" | test("a+")')" true
     # Upstream jq truncates a fractional index (jaq rejects it).
