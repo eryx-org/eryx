@@ -43,11 +43,15 @@
 //   that need wasmtime's unsafe deserialization APIs
 // - With `preinit` feature: deny unsafe code, needed for cranelift CPU feature flags
 //   during precompilation (e.g., disabling AVX-512 for portable builds)
+// - With `packages` feature: deny unsafe code, to load the embedded bundler
 #![cfg_attr(
-    not(any(feature = "embedded", feature = "preinit")),
+    not(any(feature = "embedded", feature = "preinit", feature = "packages")),
     forbid(unsafe_code)
 )]
-#![cfg_attr(any(feature = "embedded", feature = "preinit"), deny(unsafe_code))]
+#![cfg_attr(
+    any(feature = "embedded", feature = "preinit", feature = "packages"),
+    deny(unsafe_code)
+)]
 #![cfg_attr(docsrs, feature(doc_cfg))]
 
 /// Define a method that is `pub` with the `unstable-internals` feature and
@@ -76,6 +80,8 @@ mod cancel;
 pub mod embedded;
 #[cfg(feature = "embedded-stdlib")]
 pub mod embedded_stdlib;
+#[cfg(feature = "packages")]
+pub mod environment;
 mod error;
 mod fork_local;
 pub mod language;

@@ -18,21 +18,21 @@
 // Build scripts should panic on errors, so expect/unwrap are appropriate here.
 #![allow(clippy::expect_used, clippy::unwrap_used)]
 
-#[cfg(feature = "embedded")]
+#[cfg(any(feature = "embedded", feature = "packages"))]
 #[path = "build/cached_runtime.rs"]
 mod cached_runtime;
 
 fn main() {
     #[cfg(feature = "embedded-stdlib")]
     embedded_stdlib::prepare();
-    #[cfg(feature = "embedded")]
+    #[cfg(any(feature = "embedded", feature = "packages"))]
     embedded_runtime::prepare();
 }
 
 /// First 16 hex characters of SHA-256, used to name the extracted copies of
 /// embedded files. Hashing here instead of at startup saves every process a
 /// hash of the file, which for the runtime takes ~1s in unoptimized builds.
-#[cfg(feature = "embedded-stdlib")]
+#[cfg(any(feature = "embedded-stdlib", feature = "packages"))]
 fn short_sha256(bytes: &[u8]) -> String {
     use sha2::{Digest, Sha256};
 
@@ -52,7 +52,7 @@ mod embedded_stdlib {
     }
 }
 
-#[cfg(feature = "embedded")]
+#[cfg(any(feature = "embedded", feature = "packages"))]
 mod embedded_runtime {
     use std::path::PathBuf;
 
@@ -64,44 +64,51 @@ mod embedded_runtime {
         language: &'static str,
         /// Its file name without `.cwasm`, e.g. `runtime-python`.
         stem: &'static str,
-        /// The `eryx-precompile setup --language` that downloads and caches it.
-        setup_language: &'static str,
+        /// The `eryx-precompile setup --language` that downloads and caches
+        /// it, if any does yet.
+        setup_language: Option<&'static str>,
         /// The workspace mise task that builds it.
         mise_task: &'static str,
         /// The cargo feature that embeds it.
         feature: &'static str,
         /// The env var naming an explicit `.cwasm` to embed.
         path_var: &'static str,
+        /// Only embedded with the `embedded` feature too; the bundler is
+        /// embedded by `packages` alone.
+        with_embedded: bool,
         /// The rustc env var the build script sets to its short hash.
         hash_var: &'static str,
     }
 
-    const RUNTIMES: [Runtime; 4] = [
+    const RUNTIMES: [Runtime; 5] = [
         Runtime {
             language: "python",
             stem: "runtime-python",
-            setup_language: "python",
+            setup_language: Some("python"),
             mise_task: "precompile-runtime-python",
             feature: "PYTHON",
             path_var: "ERYX_RUNTIME_CWASM",
+            with_embedded: true,
             hash_var: "ERYX_EMBEDDED_RUNTIME_HASH",
         },
         Runtime {
             language: "javascript",
             stem: "runtime-javascript",
-            setup_language: "javascript",
+            setup_language: Some("javascript"),
             mise_task: "precompile-runtime-javascript",
             feature: "JAVASCRIPT",
             path_var: "ERYX_RUNTIME_CWASM_JAVASCRIPT",
+            with_embedded: true,
             hash_var: "ERYX_EMBEDDED_RUNTIME_HASH_JAVASCRIPT",
         },
         Runtime {
             language: "shell",
             stem: "runtime-shell",
-            setup_language: "shell",
+            setup_language: Some("shell"),
             mise_task: "precompile-runtime-shell",
             feature: "SHELL",
             path_var: "ERYX_RUNTIME_CWASM_SHELL",
+            with_embedded: true,
             hash_var: "ERYX_EMBEDDED_RUNTIME_HASH_SHELL",
         },
         // The shell's default external commands (uutils coreutils), which
@@ -109,11 +116,25 @@ mod embedded_runtime {
         Runtime {
             language: "coreutils",
             stem: "coreutils",
-            setup_language: "shell",
+            setup_language: Some("shell"),
             mise_task: "precompile-coreutils",
             feature: "COREUTILS",
             path_var: "ERYX_COREUTILS_CWASM",
+            with_embedded: true,
             hash_var: "ERYX_EMBEDDED_COREUTILS_HASH",
+        },
+        // The JavaScript bundler environment builds run (crates/eryx-bundler),
+        // built by `mise run precompile-bundler`.
+        Runtime {
+            language: "bundler",
+            stem: "eryx-bundler",
+            // `setup` doesn't fetch the bundler yet (#827 step 4).
+            setup_language: None,
+            mise_task: "precompile-bundler",
+            feature: "PACKAGES",
+            path_var: "ERYX_BUNDLER_CWASM",
+            with_embedded: false,
+            hash_var: "ERYX_EMBEDDED_BUNDLER_HASH",
         },
     ];
 
@@ -175,7 +196,8 @@ mod embedded_runtime {
                     println!(
                         "cargo::warning=Not using the cached {} runtime: {reason}. \
                          Run `eryx-precompile setup --language {}` again to rebuild it.",
-                        self.language, self.setup_language
+                        self.language,
+                        self.setup_language.unwrap_or(self.language)
                     );
                     None
                 }
@@ -238,32 +260,36 @@ mod embedded_runtime {
                 None if std::env::var("ERYX_PRECOMPILE_BOOTSTRAP").is_ok() => {
                     self.write(out_dir, b"");
                 }
-                None => panic!(
-                    "\n\
-                    Pre-compiled {language} ({file}) not found.\n\
-                    \n\
-                    The `{feature}` feature with `embedded` needs it pre-compiled for your platform.\n\
-                    \n\
-                    Option 1 — Use eryx-precompile (recommended for crates.io users):\n\
-                    \n\
-                    $ cargo binstall eryx-precompile\n\
-                    $ eryx-precompile setup --language {setup_language}\n\
-                    \n\
-                    Option 2 — Set an explicit path:\n\
-                    \n\
-                    $ export {var}=/path/to/{file}\n\
-                    \n\
-                    Option 3 — Build from the workspace (for eryx developers):\n\
-                    \n\
-                    $ mise run {mise_task}\n\
-                    ",
-                    language = self.language,
-                    feature = self.feature.to_lowercase(),
-                    setup_language = self.setup_language,
-                    mise_task = self.mise_task,
-                    file = self.file_name(),
-                    var = self.path_var,
-                ),
+                None => {
+                    let setup = self.setup_language.map_or(String::new(), |language| {
+                        format!(
+                            "Use eryx-precompile (recommended for crates.io users):\n\n\
+                             $ cargo binstall eryx-precompile\n\
+                             $ eryx-precompile setup --language {language}\n\n\
+                             Or "
+                        )
+                    });
+                    panic!(
+                        "\n\
+                        Pre-compiled {language} ({file}) not found.\n\
+                        \n\
+                        The `{feature}` feature needs it pre-compiled for your platform.\n\
+                        \n\
+                        {setup}set an explicit path:\n\
+                        \n\
+                        $ export {var}=/path/to/{file}\n\
+                        \n\
+                        Or build it from the workspace (for eryx developers):\n\
+                        \n\
+                        $ mise run {mise_task}\n\
+                        ",
+                        language = self.language,
+                        feature = self.feature.to_lowercase(),
+                        mise_task = self.mise_task,
+                        file = self.file_name(),
+                        var = self.path_var,
+                    )
+                }
             }
         }
     }
@@ -276,8 +302,11 @@ mod embedded_runtime {
         println!("cargo::rerun-if-env-changed=HOME");
         println!("cargo::rerun-if-env-changed=DOCS_RS");
 
+        let embedded = std::env::var_os("CARGO_FEATURE_EMBEDDED").is_some();
         for runtime in &RUNTIMES {
-            if std::env::var_os(format!("CARGO_FEATURE_{}", runtime.feature)).is_some() {
+            if std::env::var_os(format!("CARGO_FEATURE_{}", runtime.feature)).is_some()
+                && (embedded || !runtime.with_embedded)
+            {
                 runtime.prepare(&out_dir);
             }
         }
