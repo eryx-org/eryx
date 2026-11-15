@@ -384,6 +384,32 @@ async fn a_fast_child_waits_for_slow_stages() {
     assert!(peak < 16 << 20, "the shell's memory peaked at {peak} bytes");
 }
 
+/// A child writing more than a pipe's high-water mark into a stage that
+/// brush runs as a task of its own (a command substitution, or a compound
+/// stage) doesn't wait forever: the task runs alongside its reader.
+#[tokio::test]
+async fn large_output_reaches_substitutions_and_compound_stages() {
+    let sandbox = shell()
+        .with_command("tc", test_cmd())
+        .with_resource_limits(
+            ResourceLimits::default().with_execution_timeout(Duration::from_secs(10)),
+        )
+        .build()
+        .unwrap();
+    let out = sandbox
+        .execute(
+            r#"
+x=$(printf '%100000s' a | tc); echo ${#x}
+x=$(tc yes | head -c 1000000); echo ${#x}
+{ printf '%100000s' a | tc; } | tc | head -c 3; echo
+for i in 1 2 3; do printf '%100000s' a | tc; done | wc -c
+"#,
+        )
+        .await
+        .unwrap();
+    assert_eq!(out.stdout_utf8().unwrap(), "100000\n999999\n   \n300000\n");
+}
+
 /// Children in a pipeline run at once but share the parent's fuel: two
 /// stages that each fit the limit alone end the execution with
 /// `FuelExhausted` together, having done at most about one epoch tick of

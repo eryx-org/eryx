@@ -154,13 +154,12 @@ impl TaskSpawner for LocalSpawner {
         F: Future + Send + 'static,
         F::Output: Send + Sync + 'static,
     {
-        // There are no other threads: run it, and hand back its result.
-        let mut task = self.spawn(future);
-        std::future::poll_fn(move |cx| {
-            std::pin::Pin::new(&mut task)
-                .poll(cx)
-                .map(|result| TaskHandle::from_future(std::future::ready(result)))
-        })
+        // It runs on the LocalSet alongside the caller, so the caller can go
+        // on right away, as it would with a thread of its own. Waiting for it
+        // instead would run a pipeline stage or command substitution to the
+        // end before its reader started, and a child writing more than a pipe
+        // holds into it would wait forever for that reader.
+        std::future::ready(self.spawn(future))
     }
 }
 
