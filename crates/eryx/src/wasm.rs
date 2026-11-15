@@ -1375,6 +1375,8 @@ pub struct ExecutorState {
     pub(crate) reuse_empty_callbacks: bool,
     /// Remaining trace/output stream bytes for the current execution.
     pub(crate) stream_budget: StreamBudget,
+    /// External commands the guest can spawn through `eryx:process`.
+    pub(crate) commands: crate::process::Commands,
 }
 
 impl std::fmt::Debug for ExecutorState {
@@ -1420,6 +1422,7 @@ impl ExecutorState {
             suspended: None,
             reuse_empty_callbacks: true,
             stream_budget: StreamBudget::default(),
+            commands: crate::process::Commands::default(),
         }
     }
 
@@ -2227,6 +2230,8 @@ pub struct Executor {
     /// Held here so their temp directories live as long as the executor,
     /// including when it outlives the `Sandbox` (e.g. in a session).
     packages: Vec<crate::package::ExtractedPackage>,
+    /// External commands its guest can spawn (the shell's, via `eryx:process`).
+    commands: crate::process::Commands,
 }
 
 impl std::fmt::Debug for Executor {
@@ -2372,6 +2377,17 @@ impl Executor {
         self
     }
 
+    /// The external commands its guest can spawn.
+    pub(crate) fn with_commands(mut self, commands: crate::process::Commands) -> Self {
+        self.commands = commands;
+        self
+    }
+
+    /// The external commands its guest can spawn.
+    pub(crate) fn commands(&self) -> &crate::process::Commands {
+        &self.commands
+    }
+
     /// Get or create the global shared wasmtime Engine.
     ///
     /// The Engine is thread-safe and automatically shared across all `Executor`
@@ -2426,6 +2442,7 @@ impl Executor {
             library_paths: Vec::new(),
             language: Language::Python,
             result_variable: "result".to_string(),
+            commands: crate::process::Commands::default(),
             packages: Vec::new(),
         })
     }
@@ -2456,6 +2473,7 @@ impl Executor {
             library_paths: Vec::new(),
             language: Language::Python,
             result_variable: "result".to_string(),
+            commands: crate::process::Commands::default(),
             packages: Vec::new(),
         })
     }
@@ -2505,6 +2523,7 @@ impl Executor {
                 library_paths: Vec::new(),
                 language: Language::Python,
                 result_variable: "result".to_string(),
+                commands: crate::process::Commands::default(),
                 packages: Vec::new(),
             })
         }
@@ -2562,6 +2581,7 @@ impl Executor {
                 library_paths: Vec::new(),
                 language: Language::Python,
                 result_variable: "result".to_string(),
+                commands: crate::process::Commands::default(),
                 packages: Vec::new(),
             });
         }
@@ -2586,6 +2606,7 @@ impl Executor {
             library_paths: Vec::new(),
             language: Language::Python,
             result_variable: "result".to_string(),
+            commands: crate::process::Commands::default(),
             packages: Vec::new(),
         })
     }
@@ -2660,6 +2681,7 @@ impl Executor {
             library_paths: Vec::new(),
             language: Language::Python,
             result_variable: "result".to_string(),
+            commands: crate::process::Commands::default(),
             packages: Vec::new(),
         })
     }
@@ -2710,6 +2732,7 @@ impl Executor {
                 library_paths: Vec::new(),
                 language: Language::Python,
                 result_variable: "result".to_string(),
+                commands: crate::process::Commands::default(),
                 packages: Vec::new(),
             })
         }
@@ -2767,6 +2790,7 @@ impl Executor {
                 library_paths: Vec::new(),
                 language: Language::Python,
                 result_variable: "result".to_string(),
+                commands: crate::process::Commands::default(),
                 packages: Vec::new(),
             });
         }
@@ -2791,6 +2815,7 @@ impl Executor {
             library_paths: Vec::new(),
             language: Language::Python,
             result_variable: "result".to_string(),
+            commands: crate::process::Commands::default(),
             packages: Vec::new(),
         })
     }
@@ -2846,6 +2871,7 @@ impl Executor {
                 library_paths: Vec::new(),
                 language,
                 result_variable: "result".to_string(),
+                commands: crate::process::Commands::default(),
                 packages: Vec::new(),
             });
         }
@@ -2877,6 +2903,7 @@ impl Executor {
             library_paths: Vec::new(),
             language: Language::Python,
             result_variable: "result".to_string(),
+            commands: crate::process::Commands::default(),
             packages: Vec::new(),
         })
     }
@@ -3425,6 +3452,11 @@ impl Executor {
             .map_err(|e| ErrorKind::WasmEngine(format!("Failed to add sandbox to linker: {e}")))?;
         tracing::debug!("Sandbox bindings added successfully");
 
+        // External commands; only the shell guest imports this.
+        crate::process::add_to_linker(&mut linker).map_err(|e| {
+            ErrorKind::WasmEngine(format!("Failed to add eryx:process to linker: {e}"))
+        })?;
+
         // Create pre-instantiated component
         // This validates that all imports are satisfied and prepares for fast instantiation
         let instance_pre = linker
@@ -3591,6 +3623,7 @@ impl Executor {
             suspended: None,
             reuse_empty_callbacks: true,
             stream_budget: StreamBudget::default(),
+            commands: self.commands.clone(),
         };
 
         // Set up fuel for tracking/limiting. We use u64::MAX for tracking-only mode
@@ -3953,7 +3986,7 @@ pub(crate) fn language_stamp(tail: &[u8]) -> Option<Language> {
 
 /// Map an error from loading a precompiled component, reporting a file built
 /// by another eryx version as [`ErrorKind::IncompatiblePrecompiled`].
-fn deserialize_error(err: wasmtime::Error) -> Error {
+pub(crate) fn deserialize_error(err: wasmtime::Error) -> Error {
     // wasmtime only reports the stored version as text. If the wording ever
     // changes, callers just get the raw error again.
     const PREFIX: &str = "Module was compiled with incompatible version '";

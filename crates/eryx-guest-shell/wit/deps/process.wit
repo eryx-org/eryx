@@ -2,9 +2,10 @@ package eryx:process@0.1.0;
 
 /// Spawn host-registered WASI command components as child processes.
 ///
-/// Same shape as conch's `conch:shell/process`, so the brush spawn handler is
-/// unchanged. Children run in batch: stdin is buffered until `wait`, the child
-/// runs to completion inside `wait`, then its output can be read.
+/// Language-neutral: the shell guest uses it for external commands, and other
+/// guests could use it for `subprocess` or `child_process`. Children run in
+/// batch: stdin is buffered until `wait`, the child runs to completion inside
+/// `wait`, then its output can be read.
 interface process {
     enum process-error {
         /// No component is registered under that command name.

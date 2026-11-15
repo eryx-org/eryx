@@ -126,6 +126,7 @@ use crate::error::{Error, ErrorKind};
 use crate::language::{GuestLanguage, JavaScript, Language, Python, Shell};
 use crate::library::RuntimeLibrary;
 use crate::net::{ConnectionManager, NetConfig};
+use crate::process::Command;
 use crate::trace::{OutputHandler, TraceEvent, TraceHandler};
 use crate::wasm::{
     CallbackRequest, ExecutionOutput, Executor, NetRequest, OutputRequest, TraceRequest,
@@ -1549,6 +1550,8 @@ pub struct SandboxBuilder<Lang = Python, Runtime = state::Needs> {
     resource_limits: ResourceLimits,
     /// Name of the user variable captured as the structured result. Default `result`.
     result_variable: String,
+    /// External commands (shell only).
+    commands: crate::process::Commands,
     /// Path to the guest's standard library (for Python, the CPython stdlib).
     stdlib_path: Option<std::path::PathBuf>,
     /// Path to a guest library directory (for Python, site-packages).
@@ -1627,6 +1630,7 @@ impl SandboxBuilder<Python, state::Needs> {
             output_handler: None,
             resource_limits: ResourceLimits::default(),
             result_variable: "result".to_string(),
+            commands: crate::process::Commands::default(),
             stdlib_path: None,
             library_path: None,
             #[cfg(feature = "native-extensions")]
@@ -1664,6 +1668,7 @@ impl SandboxBuilder<Python, state::Needs> {
             output_handler: None,
             resource_limits: ResourceLimits::default(),
             result_variable: "result".to_string(),
+            commands: crate::process::Commands::default(),
             stdlib_path: None, // Will use embedded stdlib
             library_path: None,
             #[cfg(feature = "native-extensions")]
@@ -1701,6 +1706,7 @@ impl<L, R> SandboxBuilder<L, R> {
             output_handler: self.output_handler,
             resource_limits: self.resource_limits,
             result_variable: self.result_variable,
+            commands: self.commands,
             stdlib_path: self.stdlib_path,
             library_path: self.library_path,
             #[cfg(feature = "native-extensions")]
@@ -2311,6 +2317,49 @@ impl<L, R> SandboxBuilder<L, R> {
     }
 }
 
+/// External commands, for the shell.
+impl<R> SandboxBuilder<Shell, R> {
+    /// Let the shell run `command` as the external command `name`.
+    ///
+    /// The shell finds it after its functions, builtins and callbacks, and
+    /// runs it as a child process with `argv[0]` set to `name`. The child
+    /// sees the sandbox's VFS mounts (with `unstable-vfs`) and nothing else
+    /// of the host, and has no network. Registering a name again replaces it.
+    ///
+    /// ```rust,ignore
+    /// let curl = Command::from_file("curl.wasm")?;
+    /// let sandbox = Sandbox::embedded().shell().with_command("curl", curl).build()?;
+    /// ```
+    #[must_use]
+    pub fn with_command(mut self, name: impl Into<String>, command: Command) -> Self {
+        self.commands.insert(name.into(), command);
+        self
+    }
+
+    /// Register one command under several names, e.g. a multicall binary
+    /// such as uutils coreutils, which picks the tool from `argv[0]`. It is
+    /// compiled once, however many names it gets.
+    ///
+    /// ```rust,ignore
+    /// let coreutils = Command::from_file("coreutils.wasm")?;
+    /// let sandbox = Sandbox::embedded()
+    ///     .shell()
+    ///     .with_commands(["cat", "head", "sort"], coreutils)
+    ///     .build()?;
+    /// ```
+    #[must_use]
+    pub fn with_commands<I, S>(mut self, names: I, command: Command) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        for name in names {
+            self.commands.insert(name.into(), command.clone());
+        }
+        self
+    }
+}
+
 // Methods available in ANY state
 impl<L, R> SandboxBuilder<L, R> {
     /// Add a runtime library (callbacks + preamble + stubs).
@@ -2870,6 +2919,7 @@ impl<L: GuestLanguage> SandboxBuilder<L, state::Has> {
         // executor the packages whose directories it mounts.
         let executor = executor
             .with_result_variable(self.result_variable)
+            .with_commands(self.commands)
             .with_packages(self.packages);
 
         let built = Arc::new(PerRequestSettings {

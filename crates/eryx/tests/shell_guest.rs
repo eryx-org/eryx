@@ -1,7 +1,7 @@
 //! End-to-end tests for the brush shell guest (`eryx-guest-shell`), run
 //! through the same host as the CPython guest from the embedded, precompiled
-//! `runtime-shell.cwasm`. External commands need the host's `eryx:process`
-//! (#809), so the runtime is built without them and they exit 127.
+//! `runtime-shell.cwasm`. External commands are in tests/commands.rs; with
+//! none registered, an unknown command exits 127.
 //!
 //! ```sh
 //! mise run precompile-runtime-shell

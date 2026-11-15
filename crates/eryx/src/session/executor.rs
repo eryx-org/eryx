@@ -1134,7 +1134,8 @@ impl SessionExecutor {
             callback_infos,
             MemoryTracker::new(limits.max_memory_bytes),
             hybrid_vfs_ctx,
-        );
+        )
+        .with_commands(executor.commands().clone());
 
         // Create store
         let mut store = Store::new(executor.engine(), state);
@@ -1213,7 +1214,8 @@ impl SessionExecutor {
             None,
             callback_infos,
             MemoryTracker::new(limits.max_memory_bytes),
-        );
+        )
+        .with_commands(executor.commands().clone());
 
         // Create store
         let mut store = Store::new(executor.engine(), state);
@@ -1717,7 +1719,8 @@ impl SessionExecutor {
             None,
             callback_infos,
             MemoryTracker::new(self.memory_limit),
-        );
+        )
+        .with_commands(self.executor.commands().clone());
 
         #[cfg(feature = "unstable-vfs")]
         let state = {
@@ -1747,6 +1750,7 @@ impl SessionExecutor {
                     self.max_open_host_files,
                 )?),
             )
+            .with_commands(self.executor.commands().clone())
         };
 
         // Create new store
@@ -2194,6 +2198,7 @@ impl ExecutorState {
             suspended: None,
             reuse_empty_callbacks: false,
             stream_budget: StreamBudget::default(),
+            commands: crate::process::Commands::default(),
         }
     }
 
@@ -2221,7 +2226,14 @@ impl ExecutorState {
             suspended: None,
             reuse_empty_callbacks: false,
             stream_budget: StreamBudget::default(),
+            commands: crate::process::Commands::default(),
         }
+    }
+
+    /// The external commands the guest can spawn.
+    pub(crate) fn with_commands(mut self, commands: crate::process::Commands) -> Self {
+        self.commands = commands;
+        self
     }
 
     /// Update the callback channel for a new execution.

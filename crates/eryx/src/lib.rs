@@ -83,6 +83,7 @@ mod library;
 pub mod net;
 pub mod package;
 pub mod pool;
+mod process;
 pub mod replay;
 mod sandbox;
 mod schema;
@@ -136,6 +137,7 @@ pub use net::{
 };
 pub use package::{ExtractedPackage, PackageFormat};
 pub use pool::{PoolConfig, PoolError, PoolStats, PooledSandbox, SandboxPool};
+pub use process::Command;
 pub use replay::{
     CallbackJournal, CallbackJournalEntry, CallbackOutcome, ReplayCallback, ReplayState,
     SuspendedCallback,

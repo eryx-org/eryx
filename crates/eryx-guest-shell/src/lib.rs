@@ -1,9 +1,8 @@
 //! A bash-compatible shell (brush) as an eryx guest.
 //!
 //! Exports the same `eryx:sandbox/sandbox` world as the CPython and QuickJS
-//! guests. With the `process` feature it also imports `eryx:process` for
-//! external commands; the host doesn't provide that interface yet (#809), so
-//! the feature is off by default and unknown commands exit 127:
+//! guests, and imports `eryx:process` for external commands (unregistered
+//! ones exit 127):
 //!
 //! - `execute` runs a script on a persistent brush `Shell`. Output goes to the
 //!   guest's WASI fd 1/2, which the host already captures.
@@ -30,7 +29,6 @@ use std::io::Write as _;
 use brush_core::extensions::{
     DefaultErrorFormatter, DefaultTaskSpawner, ProcessLauncher, ShellExtensionsImpl,
 };
-#[cfg(feature = "process")]
 use brush_core::openfiles::OpenFiles;
 use brush_core::processes::{ChildProcess, LaunchRequest};
 use brush_core::{
@@ -44,20 +42,11 @@ type Shell = brush_core::Shell<Ext>;
 
 /// Where host commands appear to live. Nothing is there: the shell finds them
 /// through its command table, which `register_builtins` seeds.
-#[cfg(feature = "process")]
 const COMMAND_DIR: &str = "/eryx/bin";
 
-#[cfg(feature = "process")]
 wit_bindgen::generate!({
     path: "wit",
     world: "eryx:shell-guest/shell-sandbox",
-    generate_all,
-});
-
-#[cfg(not(feature = "process"))]
-wit_bindgen::generate!({
-    path: "wit",
-    world: "eryx:sandbox/sandbox",
     generate_all,
 });
 
@@ -116,7 +105,6 @@ fn register_builtins(shell: &mut Shell) {
     }
     CALLBACKS.with(|c| *c.borrow_mut() = defs);
     PREFIXES.with(|p| *p.borrow_mut() = prefixes);
-    #[cfg(feature = "process")]
     for name in eryx::process::process::list_commands() {
         let path = std::path::Path::new(COMMAND_DIR).join(&name);
         shell.program_location_cache_mut().set(name, path);
@@ -277,12 +265,6 @@ export!(Sandbox);
 struct EryxLauncher;
 
 impl ProcessLauncher for EryxLauncher {
-    #[cfg(not(feature = "process"))]
-    fn spawn(&self, _request: LaunchRequest) -> std::io::Result<ChildProcess> {
-        Err(std::io::ErrorKind::NotFound.into())
-    }
-
-    #[cfg(feature = "process")]
     fn spawn(&self, request: LaunchRequest) -> std::io::Result<ChildProcess> {
         use eryx::process::process::{Child, ProcessError};
         let name = request
@@ -305,12 +287,10 @@ impl ProcessLauncher for EryxLauncher {
     }
 }
 
-#[cfg(feature = "process")]
 fn io_err(e: eryx::process::process::ProcessError) -> std::io::Error {
     std::io::Error::other(format!("{e:?}"))
 }
 
-#[cfg(feature = "process")]
 async fn run_child(
     child: eryx::process::process::Child,
     mut files: OpenFiles,
