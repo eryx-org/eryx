@@ -147,10 +147,16 @@ struct SetupArgs {
     /// mirror, a private registry or a local directory served over HTTP:
     /// `<URL>/<asset>` and `<URL>/<asset>.sha256`.
     ///
+    /// The URL must serve this eryx version's assets: setup stamps whatever it
+    /// downloads with this binary's version, so an older release's assets
+    /// would be cached as current.
+    ///
     /// The checksum comes from the same URL, so it catches a corrupted or
     /// truncated download but not a hostile mirror, which can serve a
-    /// matching checksum for anything. Use only a mirror you trust, or pass
-    /// `--sha256` with a hash from a trusted source.
+    /// matching checksum for anything. Use only a mirror you trust. `--sha256`
+    /// pins the language runtime only: with `--language shell`, the shell's
+    /// coreutils is always checked against the mirror's own checksum, so it is
+    /// only as trustworthy as the mirror.
     #[arg(long, value_name = "URL")]
     release_url: Option<String>,
 

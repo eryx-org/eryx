@@ -54,7 +54,7 @@ eryx-precompile setup --release-url http://localhost:8000
 eryx-precompile setup --verbose
 ```
 
-With `--release-url`, the `.sha256` files come from the same URL as the downloads, so they catch corruption but not a hostile mirror. Use one you trust, or pass `--sha256` with a hash from a trusted source.
+With `--release-url`, the URL must serve this eryx version's assets: `setup` stamps what it downloads with its own version, so an older release's assets would be cached as current. The `.sha256` files come from the same URL as the downloads, so they catch corruption but not a hostile mirror; use one you trust. `--sha256` pins only the language runtime: with `--language shell`, coreutils is always checked against the mirror's checksum, so it is only as trustworthy as the mirror.
 
 `--language shell` also sets up the shell's embedded commands: it downloads `coreutils.wasm`, checks it against `coreutils.wasm.sha256`, and caches it as `coreutils-v<version>-<arch>-<os>.cwasm`. The `shell` feature turns on `coreutils`, which embeds them, so a build with `features = ["embedded", "shell"]` needs both. `--sha256` only applies to the runtime; coreutils is always checked against its own checksum file.
 
