@@ -54,6 +54,8 @@ eryx-precompile setup --release-url http://localhost:8000
 eryx-precompile setup --verbose
 ```
 
+With `--release-url`, the `.sha256` files come from the same URL as the downloads, so they catch corruption but not a hostile mirror. Use one you trust, or pass `--sha256` with a hash from a trusted source.
+
 `--language shell` also sets up the shell's embedded commands: it downloads `coreutils.wasm`, checks it against `coreutils.wasm.sha256`, and caches it as `coreutils-v<version>-<arch>-<os>.cwasm`. The `shell` feature turns on `coreutils`, which embeds them, so a build with `features = ["embedded", "shell"]` needs both. `--sha256` only applies to the runtime; coreutils is always checked against its own checksum file.
 
 A precompiled runtime only loads in the eryx version that built it, so `setup` always sets up its own version. To set up another, install the matching binary, for example `cargo binstall eryx-precompile@0.13.0`.

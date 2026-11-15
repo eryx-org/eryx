@@ -144,8 +144,13 @@ struct SetupArgs {
     sha256: Option<String>,
 
     /// Download the release assets from this URL instead of GitHub, e.g. a
-    /// mirror or a local directory served over HTTP: `<URL>/<asset>` and
-    /// `<URL>/<asset>.sha256`.
+    /// mirror, a private registry or a local directory served over HTTP:
+    /// `<URL>/<asset>` and `<URL>/<asset>.sha256`.
+    ///
+    /// The checksum comes from the same URL, so it catches a corrupted or
+    /// truncated download but not a hostile mirror, which can serve a
+    /// matching checksum for anything. Use only a mirror you trust, or pass
+    /// `--sha256` with a hash from a trusted source.
     #[arg(long, value_name = "URL")]
     release_url: Option<String>,
 
