@@ -62,6 +62,13 @@ result='{"ok": true}'
     expect(error.stdout).toBe("before\n");
   });
 
+  it("appends fd 2 output to a failure's message, like the Rust host", async () => {
+    using sandbox = new Sandbox({ language: "shell" });
+    const error = await sandbox.execute("echo oops >&2; exit 1").catch((e) => e);
+    expect(error.message).toBe("exit status 1oops\n");
+    expect(error.stderr).toBe("oops\n");
+  });
+
   it("snapshots and restores state", async () => {
     using a = new Sandbox({ language: "shell" });
     await a.execute("count=41");

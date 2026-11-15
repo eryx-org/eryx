@@ -58,8 +58,11 @@ async function instantiateInWorker(language, host, net) {
       // so the Worker keeps them.
       new (await import(/* webpackIgnore: true */ "node:worker_threads")).Worker(url, {
         execArgv: [],
+        workerData: { language },
       })
-    : new Worker(url, { type: "module" });
+    : // Not a message: a browser drops one that reaches a module Worker
+      // before its (top-level-await delayed) listener exists.
+      new Worker(url, { type: "module", name: language });
   const targets = {
     module: getCoreModule,
     invoke: host.imports.invoke,
@@ -155,7 +158,6 @@ async function instantiateInWorker(language, host, net) {
     return new Promise((resolve, reject) => pending.set(id, { resolve, reject }));
   };
 
-  worker.postMessage({ type: "start", language });
   await started;
   return {
     execute: (code) => call("execute", code),

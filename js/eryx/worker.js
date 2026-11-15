@@ -6,9 +6,11 @@
  * traces and networking are forwarded to the creating thread, which keeps the
  * handlers, the journal and the network policy.
  *
+ * The language comes from `workerData.language` (Node.js) or the Worker's
+ * `name` (browsers).
+ *
  * Protocol (all messages are plain objects):
- * - in:  {type: "start", language}  first, once
- *        {type: "call", id, method, args, callbacks, options}
+ * - in:  {type: "call", id, method, args, callbacks, options}
  *        {type: "reply", id, value} | {type: "reply", id, error}
  * - out: {type: "ready"} | {type: "failed", error}
  *        {type: "result", id, value} | {type: "result", id, error}
@@ -19,7 +21,9 @@
 import { decodeError, encodeError, instantiateSandbox, isNode, newFileTree } from "./instance.js";
 import { sleep } from "./shims/callbacks.js";
 
-const port = isNode ? (await import("node:worker_threads")).parentPort : globalThis;
+const threads = isNode ? await import("node:worker_threads") : null;
+const port = isNode ? threads.parentPort : globalThis;
+const language = isNode ? threads.workerData.language : globalThis.name;
 const post = (message) => port.postMessage(message);
 const onMessage = (fn) =>
   isNode ? port.on("message", fn) : port.addEventListener("message", (e) => fn(e.data));
@@ -69,9 +73,6 @@ let instance;
 
 onMessage(async (message) => {
   switch (message.type) {
-    case "start":
-      start(message.language);
-      break;
     case "call":
       callbacks = message.callbacks;
       options = message.options;
@@ -92,20 +93,15 @@ onMessage(async (message) => {
   }
 });
 
-/**
- * Instantiate the sandbox; the creating thread waits for "ready" before its
- * first call.
- * @param {string} language
- */
-async function start(language) {
-  try {
-    // Core modules are compiled by the creating thread, so workers don't
-    // compile them again.
-    instance = await instantiateSandbox(language, newFileTree(language), cb, net, (name) =>
-      request("module", [name]),
-    );
-    post({ type: "ready" });
-  } catch (e) {
-    post({ type: "failed", ...encodeError(e) });
-  }
+// Instantiate as soon as the listener is up; the creating thread waits for
+// "ready" before its first call.
+try {
+  // Core modules are compiled by the creating thread, so workers don't
+  // compile them again.
+  instance = await instantiateSandbox(language, newFileTree(language), cb, net, (name) =>
+    request("module", [name]),
+  );
+  post({ type: "ready" });
+} catch (e) {
+  post({ type: "failed", ...encodeError(e) });
 }

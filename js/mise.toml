@@ -33,6 +33,9 @@ depends = ["wasm-build"]
 sources = [
   "../crates/eryx-guest-js/src/**/*",
   "../crates/eryx-guest-js/Cargo.toml",
+  "../crates/eryx-guest-python/clock_stubs.c",
+  "../crates/wit-dylib-ffi/src/**/*.rs",
+  "../crates/wit-dylib-ffi/Cargo.toml",
   "../crates/eryx-guest-shell/src/**/*",
   "../crates/eryx-guest-shell/Cargo.toml",
   "../crates/eryx-guest-shell/Cargo.lock",

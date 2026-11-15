@@ -160,6 +160,9 @@ function createFdCapture() {
   return { stdout: cli.stdout, stderr: cli.stderr, take };
 }
 
+/** Decodes fd 2 bytes for a failure's message, replacing invalid UTF-8 (as `from_utf8_lossy`). */
+const fdDecoder = new TextDecoder();
+
 /** `a` followed by `b`. */
 function concat(a, b) {
   if (b.byteLength === 0) return a;
@@ -236,8 +239,11 @@ export async function instantiateSandbox(language, fileTree, cb, net, getModule 
   if (language === "python") instance.finalizePreinit();
   fd.take(0);
   fd.take(1);
-  /** Append the run's fd 1/2 output to both arms, and stream it once. */
-  const appendFdOutput = (output) => {
+  /**
+   * Append the run's fd 1/2 output to both arms, and stream it once. As the
+   * Rust host's `append_fd_stderr`, a failure's message also gets fd 2.
+   */
+  const appendFdOutput = (output, failed = false) => {
     for (const [stream, key] of [
       [0, "stdout"],
       [1, "stderr"],
@@ -245,6 +251,7 @@ export async function instantiateSandbox(language, fileTree, cb, net, getModule 
       const data = fd.take(stream);
       if (data.byteLength === 0) continue;
       output[key] = concat(output[key], data);
+      if (failed && stream === 1) output.message += fdDecoder.decode(data);
       cb.reportOutput(stream, data);
     }
   };
@@ -255,7 +262,7 @@ export async function instantiateSandbox(language, fileTree, cb, net, getModule 
       try {
         output = await instance.execute(code);
       } catch (e) {
-        if (e?.payload) appendFdOutput(e.payload);
+        if (e?.payload) appendFdOutput(e.payload, true);
         throw e;
       }
       appendFdOutput(output);

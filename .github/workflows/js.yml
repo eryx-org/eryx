@@ -116,3 +116,13 @@ jobs:
       - name: Build and test JavaScript bindings
         working-directory: js
         run: mise run test
+
+      # Workers behave differently in browsers (a message sent before the
+      # Worker's listener exists is dropped), so run the timeoutMs sandboxes
+      # in headless Chromium too.
+      - name: Test in Chromium
+        working-directory: js/demo
+        run: |
+          npm ci
+          npx playwright install --with-deps chromium-headless-shell
+          npx vitest run test/browser.test.ts

@@ -1,0 +1,25 @@
+<!doctype html>
+<!-- Loaded by browser.test.ts: one timeoutMs sandbox per language. -->
+<meta charset="utf-8" />
+<title>timeoutMs smoke test</title>
+<script type="module">
+  import { Sandbox } from "@eryx-org/eryx";
+
+  const code = {
+    python: 'print("ok")',
+    javascript: 'console.log("ok")',
+    shell: "echo ok",
+  };
+  const results = {};
+  for (const [language, source] of Object.entries(code)) {
+    const sandbox = new Sandbox({ language, timeoutMs: 60000 });
+    try {
+      results[language] = (await sandbox.execute(source)).stdout;
+    } catch (e) {
+      results[language] = `error: ${e}`;
+    } finally {
+      sandbox.close();
+    }
+  }
+  window.results = results;
+</script>
