@@ -63,6 +63,7 @@ jobs:
       examples: ${{ steps.filter.outputs.examples }}
       js: ${{ steps.filter.outputs.js }}
       demo: ${{ steps.filter.outputs.demo }}
+      bundler: ${{ steps.filter.outputs.bundler }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -112,6 +113,10 @@ jobs:
               - 'js/**'
             demo:
               - 'demo/**'
+            bundler:
+              - 'crates/eryx-bundler/**'
+              - 'mise.toml'
+              - '.github/workflows/ci.yml'
 
   # Fast check for dependency drift - runs in parallel with build
   unify-check:
@@ -535,6 +540,67 @@ jobs:
       - name: Unit tests
         working-directory: crates/eryx-guest-shell
         run: cargo test --locked --lib
+
+  # The JavaScript bundler (rolldown as a WASI command), its own workspace.
+  # Nothing embeds it yet: this lints, tests and builds it, and keeps the
+  # precompiled commands as an artifact.
+  build-bundler:
+    name: Build bundler
+    runs-on: ubuntu-latest
+    needs: changes
+    if: >-
+      github.event_name == 'push'
+      || needs.changes.outputs.bundler == 'true'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Cache bundler
+        id: wasm-cache
+        # See the Python runtime's cache step for the tag-build caveats.
+        if: ${{ !startsWith(github.ref, 'refs/tags/') }} # zizmor: ignore[cache-poisoning]
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            crates/eryx-runtime/eryx-bundler.wasm
+            crates/eryx-runtime/eryx-bundler.cwasm
+            crates/eryx-runtime/eryx-bundler-windows.cwasm
+            crates/eryx-runtime/eryx-bundler-macos.cwasm
+          # As for the runtimes, the cwasm's engine and CPU-feature settings
+          # aren't covered: bump the prefix when they change.
+          key: wasm-bundler-v1-${{ hashFiles('crates/eryx-bundler/src/**', 'crates/eryx-bundler/vendor/**', 'crates/eryx-bundler/tests/**', 'crates/eryx-bundler/Cargo.*', 'crates/eryx-bundler/smoke.sh', 'Cargo.lock', 'Cargo.toml', 'mise.toml') }}
+
+      - uses: ./.github/actions/setup-rust
+        if: steps.wasm-cache.outputs.cache-hit != 'true'
+
+      - name: Lint, test and smoke-test
+        if: steps.wasm-cache.outputs.cache-hit != 'true'
+        run: mise run test-bundler
+
+      - name: Precompile
+        if: steps.wasm-cache.outputs.cache-hit != 'true'
+        run: |
+          compile() {
+            ERYX_CPU_FEATURES="$1" cargo run -p eryx --example precompile --features preinit --release -- "${@:2}"
+          }
+          # A command, like coreutils: portable CPU features, as for the runtimes.
+          export ERYX_WASM_PATH=crates/eryx-runtime/eryx-bundler.wasm ERYX_LANGUAGE=command
+          compile x86-64-v2 --output crates/eryx-runtime/eryx-bundler.cwasm
+          compile x86-64-v2 --target x86_64-pc-windows-msvc \
+            --output crates/eryx-runtime/eryx-bundler-windows.cwasm
+          # aarch64 has no psABI presets, so "baseline" is the portable setting.
+          compile baseline --target aarch64-apple-darwin \
+            --output crates/eryx-runtime/eryx-bundler-macos.cwasm
+        env:
+          ERYX_PRECOMPILE_BOOTSTRAP: "1"
+
+      - name: Upload bundler
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: eryx-bundler
+          path: crates/eryx-runtime/eryx-bundler*
+          retention-days: 1
 
   lint:
     name: Lint

@@ -1,8 +1,9 @@
 [workspace]
 resolver = "2"
 members = ["crates/*"]
-# The shell guest targets wasm32-wasip2 only and pins brush with its own lock.
-exclude = ["crates/eryx-guest-shell"]
+# The shell guest and the bundler target wasm32-wasip2 only and pin their
+# dependencies (brush, rolldown) with their own locks.
+exclude = ["crates/eryx-guest-shell", "crates/eryx-bundler"]
 
 # Dev tools (install via cargo or mise):
 # - cargo-nextest: Fast test runner (`cargo nextest run`)
