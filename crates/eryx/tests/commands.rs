@@ -565,6 +565,84 @@ async fn the_embedded_shell_runs_coreutils() {
     assert_eq!(out.stdout_utf8().unwrap(), "HI\nb\n");
 }
 
+/// The common script tools added in #897 run in the embedded shell.
+#[cfg(feature = "coreutils")]
+#[tokio::test]
+async fn the_embedded_shell_runs_common_script_tools() {
+    assert_script_outputs(&[
+        ("seq 3 | tr '\\n' ' '", "1 2 3 "),
+        ("echo a,b,c | cut -d, -f2", "b\n"),
+        ("echo hello | tr a-z A-Z", "HELLO\n"),
+        (
+            "printf 'a\\na\\nb\\n' | uniq -c | tr -s ' '",
+            " 2 a\n 1 b\n",
+        ),
+        ("basename /x/y.txt .txt; dirname /x/y.txt", "y\n/x\n"),
+        ("sleep 0 && echo slept", "slept\n"),
+        ("printf '1\\n2\\n' | paste -sd+", "1+2\n"),
+        ("date -u -d @0 +%Y", "1970\n"),
+        ("echo hi | base64", "aGkK\n"),
+        // Canonicalizing walks up to `/`, which isn't statable without a
+        // preopen covering it (#832), so only the lexical forms are checked.
+        ("realpath -m /a/../b", "/b\n"),
+        ("readlink -m /a/../b/c", "/b/c\n"),
+    ])
+    .await;
+}
+
+/// The #897 tools that write files, which need the VFS's `/tmp`.
+#[cfg(all(feature = "coreutils", feature = "unstable-vfs"))]
+#[tokio::test]
+async fn the_embedded_shell_runs_common_script_tools_on_files() {
+    assert_script_outputs(&[
+        ("echo hi | tee /tmp/teed; cat /tmp/teed", "hi\nhi\n"),
+        (
+            "printf 'a\\nb\\n' > /tmp/c1; printf 'b\\nc\\n' > /tmp/c2; comm -12 /tmp/c1 /tmp/c2",
+            "b\n",
+        ),
+        ("mkdir /tmp/t && rmdir /tmp/t && echo gone", "gone\n"),
+        ("realpath -s /tmp/../tmp", "/tmp\n"),
+    ])
+    .await;
+}
+
+/// Run each script in a new embedded shell sandbox and check its stdout,
+/// reporting every mismatch at once.
+#[cfg(feature = "coreutils")]
+async fn assert_script_outputs(cases: &[(&str, &str)]) {
+    let sandbox = shell().build().unwrap();
+    let mut failures = Vec::new();
+    for (script, expected) in cases {
+        match sandbox.execute(script).await {
+            Ok(out) if out.stdout_utf8().unwrap() == *expected => {}
+            Ok(out) => failures.push(format!("{script}: got {:?}", out.stdout_utf8().unwrap())),
+            Err(e) => failures.push(format!("{script}: {e}")),
+        }
+    }
+    assert!(failures.is_empty(), "{failures:#?}");
+}
+
+/// `sleep` waits on a host timer rather than spinning, and still stops at the
+/// parent's timeout.
+#[cfg(feature = "coreutils")]
+#[tokio::test]
+async fn a_sleeping_child_stops_at_the_parents_timeout() {
+    let sandbox = shell()
+        .with_resource_limits(
+            ResourceLimits::default().with_execution_timeout(Duration::from_millis(300)),
+        )
+        .build()
+        .unwrap();
+    let start = Instant::now();
+    let err = sandbox.execute("sleep 60").await.unwrap_err();
+    assert!(matches!(err.kind(), ErrorKind::Timeout(_)), "{err:?}");
+    assert!(
+        start.elapsed() < Duration::from_secs(10),
+        "{:?}",
+        start.elapsed()
+    );
+}
+
 #[cfg(all(feature = "coreutils", feature = "unstable-vfs"))]
 #[tokio::test]
 async fn coreutils_work_on_the_sessions_vfs() {

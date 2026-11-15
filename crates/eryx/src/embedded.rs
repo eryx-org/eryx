@@ -76,8 +76,10 @@ const SHELL_RUNTIME: EmbeddedRuntime = EmbeddedRuntime {
 /// with the `coreutils` feature. Must match the `--features` in
 /// `clis/coreutils.toml`, which the embedded multicall binary is built from.
 #[cfg(feature = "coreutils")]
-pub const COREUTILS_TOOLS: [&str; 11] = [
-    "cat", "head", "tail", "ls", "wc", "cp", "mv", "rm", "mkdir", "touch", "sort",
+pub const COREUTILS_TOOLS: [&str; 26] = [
+    "cat", "head", "tail", "ls", "wc", "cp", "mv", "rm", "mkdir", "touch", "sort", "seq", "cut",
+    "tr", "uniq", "basename", "dirname", "tee", "sleep", "paste", "comm", "date", "base64",
+    "realpath", "readlink", "rmdir",
 ];
 
 /// The embedded coreutils multicall command, loaded on first use.
