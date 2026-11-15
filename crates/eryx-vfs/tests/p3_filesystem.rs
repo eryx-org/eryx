@@ -253,6 +253,28 @@ async fn p3_concurrent_writes_cannot_overshoot_the_quota() {
     );
 }
 
+/// `O_CREAT|O_EXCL` from concurrent guests admits exactly one, as lockfiles
+/// (e.g. git's `index.lock`) rely on.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn p3_exclusive_create_admits_exactly_one_guest() {
+    let storage = storage(None);
+    let runs: Vec<_> = (0..6)
+        .map(|_| {
+            let vfs = ctx(&storage);
+            tokio::spawn(async move { run(vfs, &["excl", "/data/index.lock"]).await })
+        })
+        .collect();
+    let mut won = 0;
+    for r in runs {
+        match r.await.unwrap() {
+            (0, _) => won += 1,
+            (1, out) => assert_eq!(out, "error: AlreadyExists"),
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+    assert_eq!(won, 1);
+}
+
 #[tokio::test]
 async fn p3_guest_cannot_write_to_a_read_only_mount() {
     let storage = storage(None);

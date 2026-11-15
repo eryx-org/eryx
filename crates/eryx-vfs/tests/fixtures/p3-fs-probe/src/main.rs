@@ -5,6 +5,7 @@
 //! - `ls PATH`: print the sorted entry names, one per line.
 //! - `mkdir PATH`, `rm PATH`, `rename FROM TO`: print `ok`.
 //! - `fill PATH BYTES`: write BYTES bytes in 64 KiB chunks, then print `ok`.
+//! - `excl PATH`: create PATH with `O_CREAT|O_EXCL`, then print `ok`.
 //!
 //! A failure prints `error: <io::ErrorKind>` and exits 1.
 
@@ -31,6 +32,11 @@ fn main() {
         ["mkdir", path] => std::fs::create_dir(path).map(|()| "ok".to_string()),
         ["rm", path] => std::fs::remove_file(path).map(|()| "ok".to_string()),
         ["rename", from, to] => std::fs::rename(from, to).map(|()| "ok".to_string()),
+        ["excl", path] => std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(path)
+            .map(|_| "ok".to_string()),
         ["fill", path, bytes] => fill(path, bytes.parse().unwrap_or(0)),
         _ => {
             eprintln!("usage: see src/main.rs");

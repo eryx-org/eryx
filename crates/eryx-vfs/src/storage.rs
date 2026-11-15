@@ -81,6 +81,27 @@ pub trait VfsStorage: Send + Sync {
     /// Write at a specific offset, extending the file if necessary.
     async fn write_at(&self, path: &str, offset: u64, data: &[u8]) -> VfsResult<()>;
 
+    /// Create `path` as an empty file unless something already exists there,
+    /// returning whether it was created.
+    ///
+    /// With `exclusive`, an existing entry is an
+    /// [`AlreadyExists`](VfsError::AlreadyExists) error instead: this is
+    /// `O_CREAT|O_EXCL`, which lockfile-based tools rely on for mutual
+    /// exclusion, so implementations must make the check and the create one
+    /// atomic step. The default implementation is a separate
+    /// [`exists`](Self::exists) and [`write`](Self::write), which two callers
+    /// can race; every storage in this crate overrides it.
+    async fn create_file(&self, path: &str, exclusive: bool) -> VfsResult<bool> {
+        if self.exists(path).await? {
+            if exclusive {
+                return Err(VfsError::AlreadyExists(path.to_string()));
+            }
+            return Ok(false);
+        }
+        self.write(path, &[]).await?;
+        Ok(true)
+    }
+
     /// Truncate or extend file to the given size.
     async fn set_size(&self, path: &str, size: u64) -> VfsResult<()>;
 
@@ -185,6 +206,10 @@ impl VfsStorage for ArcStorage {
 
     async fn write_at(&self, path: &str, offset: u64, data: &[u8]) -> VfsResult<()> {
         self.0.write_at(path, offset, data).await
+    }
+
+    async fn create_file(&self, path: &str, exclusive: bool) -> VfsResult<bool> {
+        self.0.create_file(path, exclusive).await
     }
 
     async fn set_size(&self, path: &str, size: u64) -> VfsResult<()> {
@@ -594,6 +619,31 @@ impl InMemoryStorage {
             .saturating_add(file_cost(path, new_len));
     }
 
+    /// [`VfsStorage::write`], with the storage lock already held.
+    fn write_locked(&self, state: &mut StorageState, path: String, data: &[u8]) -> VfsResult<()> {
+        Self::check_parent_exists_with_state(state, &path)?;
+
+        // Check it's not a directory
+        if state.directories.contains(&path) {
+            return Err(VfsError::NotFile(path));
+        }
+
+        self.check_budget(state, &path, data.len().try_into().unwrap_or(u64::MAX))?;
+
+        let old_len = state.files.get(&path).map(|f| f.content.len());
+        Self::charge_file(state, &path, old_len, data.len());
+        let now = SystemTime::now();
+        let file_data = state.files.entry(path).or_insert_with(|| FileData {
+            content: Vec::new(),
+            created: now,
+            modified: now,
+            accessed: now,
+        });
+        file_data.content = data.to_vec();
+        file_data.modified = now;
+        Ok(())
+    }
+
     /// Hold the storage lock, so tests can exercise contention.
     #[cfg(test)]
     pub(crate) async fn hold_lock(&self) -> impl Drop + '_ {
@@ -668,30 +718,23 @@ impl VfsStorage for InMemoryStorage {
     async fn write(&self, path: &str, data: &[u8]) -> VfsResult<()> {
         let path = Self::normalize_path(path)?;
         let mut state = self.state.write().await;
-
-        Self::check_parent_exists_with_state(&state, &path)?;
-
-        // Check it's not a directory
-        if state.directories.contains(&path) {
-            return Err(VfsError::NotFile(path));
-        }
-
-        self.check_budget(&state, &path, data.len().try_into().unwrap_or(u64::MAX))?;
-
-        let old_len = state.files.get(&path).map(|f| f.content.len());
-        Self::charge_file(&mut state, &path, old_len, data.len());
-        let now = SystemTime::now();
-        let file_data = state.files.entry(path).or_insert_with(|| FileData {
-            content: Vec::new(),
-            created: now,
-            modified: now,
-            accessed: now,
-        });
-        file_data.content = data.to_vec();
-        file_data.modified = now;
-        Ok(())
+        self.write_locked(&mut state, path, data)
     }
 
+    async fn create_file(&self, path: &str, exclusive: bool) -> VfsResult<bool> {
+        let path = Self::normalize_path(path)?;
+        // One write lock covers the check and the create, so two callers
+        // can't both see the path free.
+        let mut state = self.state.write().await;
+        if state.files.contains_key(&path) || state.directories.contains(&path) {
+            if exclusive {
+                return Err(VfsError::AlreadyExists(path));
+            }
+            return Ok(false);
+        }
+        self.write_locked(&mut state, path, &[])?;
+        Ok(true)
+    }
     async fn write_at(&self, path: &str, offset: u64, data: &[u8]) -> VfsResult<()> {
         let path = Self::normalize_path(path)?;
         let mut state = self.state.write().await;
@@ -1154,6 +1197,36 @@ impl VfsStorage for InMemoryStorage {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+
+    /// `create_file(.., exclusive)` is `O_CREAT|O_EXCL`: of many callers
+    /// racing on one path, exactly one creates it. The callers queue behind a
+    /// held lock first, so a check-then-create implementation (whose existence
+    /// checks share a read lock) would let all of them through.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn exclusive_create_admits_exactly_one_caller() {
+        let storage = Arc::new(InMemoryStorage::new());
+        let guard = storage.hold_lock().await;
+        let tasks: Vec<_> = (0..16)
+            .map(|_| {
+                let storage = Arc::clone(&storage);
+                tokio::spawn(async move { storage.create_file("/lock", true).await })
+            })
+            .collect();
+        tokio::task::yield_now().await;
+        drop(guard);
+        let mut created = 0;
+        for task in tasks {
+            match task.await.unwrap() {
+                Ok(true) => created += 1,
+                Err(VfsError::AlreadyExists(_)) => {}
+                other => panic!("unexpected {other:?}"),
+            }
+        }
+        assert_eq!(created, 1);
+        // Without `exclusive`, an existing file is opened, not an error.
+        assert!(!storage.create_file("/lock", false).await.unwrap());
+        assert!(storage.create_file("/other", false).await.unwrap());
+    }
 
     /// Every offset here used to turn a one-byte write into a multi-gigabyte
     /// host allocation: 2^31 and 2^32 succeeded (2 GiB and 4 GiB of zeroes),
