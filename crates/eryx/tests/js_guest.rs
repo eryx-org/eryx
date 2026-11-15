@@ -859,3 +859,69 @@ async fn callbacks_report_trace_events() {
     assert_eq!(contexts[4], Some(json!({ "a": 3 })));
     assert_eq!(contexts[1], None);
 }
+
+/// An `invoke` still in flight when the script ends (here never awaited) is
+/// cancelled and released by the guest: the execute returns, the session's
+/// next execute (and callback) works, and, as in the CPython guest, the host
+/// still runs the callback to the end, exactly once, and journals it, so a
+/// replay serves it from the journal.
+#[tokio::test]
+async fn abandoned_invokes_are_released() {
+    use eryx::Session as _;
+
+    const NEVER_AWAITED: &str = "slow(); console.log('script end')";
+    const HANG: Duration = Duration::from_secs(8);
+    let slow = || {
+        let mut slow = TestCallback::new("slow", |_| Ok(json!("slept")));
+        slow.delay_ms = 300;
+        slow
+    };
+
+    let Some(builder) = js_sandbox() else { return };
+    let sandbox = builder.with_callback(slow()).build().unwrap();
+    let mut session = eryx::InProcessSession::new(&sandbox).await.unwrap();
+    for _ in 0..3 {
+        let out = tokio::time::timeout(HANG, session.execute(NEVER_AWAITED))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(out.stdout, b"script end\n");
+        let out = tokio::time::timeout(HANG, session.execute("console.log(await slow())"))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(out.stdout, b"slept\n");
+    }
+
+    let callback = slow();
+    let calls = Arc::clone(&callback.calls);
+    let sandbox = js_sandbox()
+        .unwrap()
+        .with_callback(callback)
+        .build()
+        .unwrap();
+    let first = tokio::time::timeout(HANG, sandbox.execute_with_journal(NEVER_AWAITED, None))
+        .await
+        .unwrap();
+    first.result.unwrap();
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        first.journal.entries.len(),
+        1,
+        "{:?}",
+        first.journal.entries
+    );
+    let second = tokio::time::timeout(
+        HANG,
+        sandbox.execute_with_journal(NEVER_AWAITED, Some(first.journal)),
+    )
+    .await
+    .unwrap();
+    second.result.unwrap();
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        1,
+        "the replay re-ran the callback"
+    );
+    assert_eq!(second.replayed_callbacks, 1);
+}
