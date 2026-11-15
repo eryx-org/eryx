@@ -365,6 +365,21 @@ jobs:
         # Catches code that is only used under `unstable-vfs` (warnings --all-features hides).
         run: cargo clippy -p eryx --all-targets --features embedded -- -D warnings
 
+      - name: Run clippy (eryx, default features)
+        # Catches code that is only used under some feature, which is dead
+        # with the defaults.
+        run: cargo clippy -p eryx --all-targets -- -D warnings
+
+      - name: Check eryx tests with each feature alone
+        # A test that needs more features than it is gated on fails to build
+        # here, rather than only for whoever runs it with that one feature.
+        run: |
+          for features in macros embedded-stdlib embedded preinit native-extensions unstable-vfs unstable-internals; do
+            echo "::group::--features $features"
+            cargo check -p eryx --tests --features "$features"
+            echo "::endgroup::"
+          done
+
   test:
     name: Test
     runs-on: ubuntu-latest

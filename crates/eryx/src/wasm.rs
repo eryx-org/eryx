@@ -91,6 +91,7 @@ impl<T> RetryableOnce<T> {
     }
 
     /// The value, if it has been initialized.
+    #[cfg(any(feature = "embedded", feature = "preinit"))]
     pub(crate) fn get(&self) -> Option<&T> {
         self.value.get()
     }
@@ -3829,6 +3830,7 @@ pub fn parse_trace_event(request: &TraceRequest) -> std::result::Result<TraceEve
 
 /// Map an error from loading a precompiled component, reporting a file built
 /// by another eryx version as [`ErrorKind::IncompatiblePrecompiled`].
+#[cfg(any(feature = "embedded", feature = "preinit"))]
 fn deserialize_error(err: wasmtime::Error) -> Error {
     // wasmtime only reports the stored version as text. If the wording ever
     // changes, callers just get the raw error again.
