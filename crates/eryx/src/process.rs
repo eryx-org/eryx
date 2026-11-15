@@ -406,7 +406,6 @@ impl ExecutorState {
         if self.suspended.is_some() {
             return Err(ProcessError::SpawnFailed);
         }
-        let output_room = (self.child_budget.remaining() / 2).min(CHILD_OUTPUT_LIMIT as u64);
         let child = self
             .table
             .get_mut(child)
@@ -422,16 +421,17 @@ impl ExecutorState {
             // It already ran, and failed.
             return Err(ProcessError::SpawnFailed);
         }
-        // Its stdin goes into the child and is freed with it; its output is
-        // charged instead, each stream capped at half of what is left.
-        let stdin = std::mem::take(&mut child.stdin);
-        child.charged -= stdin.len() as u64;
-        self.child_budget.release(stdin.len() as u64);
+        // Its argv, env and stdin move into the run and are freed with it,
+        // even if the parent's timeout drops it midway; only its output is
+        // charged from here on, each stream capped at half of what is left.
+        self.child_budget
+            .release(std::mem::take(&mut child.charged));
+        let output_room = (self.child_budget.remaining() / 2).min(CHILD_OUTPUT_LIMIT as u64);
         Ok(Ok(ChildRun {
             pre: child.command.pre.clone(),
             argv: std::mem::take(&mut child.argv),
             env: std::mem::take(&mut child.env),
-            stdin,
+            stdin: std::mem::take(&mut child.stdin),
             output_room: output_room as usize,
             fuel: fuel.min(CHILD_FUEL),
             #[cfg(feature = "unstable-vfs")]
