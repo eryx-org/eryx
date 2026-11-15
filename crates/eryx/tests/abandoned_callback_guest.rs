@@ -88,7 +88,7 @@ const HANG: Duration = Duration::from_secs(8);
 
 fn assert_gather_failure(r: Result<eryx::ExecuteResult, Error>) {
     match r.map_err(Error::into_kind) {
-        Err(ErrorKind::PythonException { traceback: tb, .. }) => {
+        Err(ErrorKind::ScriptFailed { message: tb, .. }) => {
             assert!(tb.contains("fast failure"), "{tb}")
         }
         other => panic!("expected the script's ValueError, got {other:?}"),

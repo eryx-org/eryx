@@ -277,9 +277,9 @@ fn link_environment_hash() -> [u8; 32] {
             hasher.update((lib.len() as u64).to_le_bytes());
             hasher.update(lib);
         }
-        hasher.update(crate::wasm::PythonExecutor::ENGINE_CONFIG_VERSION.to_le_bytes());
+        hasher.update(crate::wasm::Executor::ENGINE_CONFIG_VERSION.to_le_bytes());
         // If the engine can't be created, building the sandbox fails anyway.
-        if let Ok(engine) = crate::wasm::PythonExecutor::shared_engine() {
+        if let Ok(engine) = crate::wasm::Executor::shared_engine() {
             let mut engine_hasher = std::hash::DefaultHasher::new();
             engine
                 .precompile_compatibility_hash()
@@ -621,7 +621,7 @@ impl ComponentCache for NoCache {
 ///
 /// # Usage
 ///
-/// This cache is used automatically by [`PythonExecutor`](crate::wasm::PythonExecutor)
+/// This cache is used automatically by [`Executor`](crate::wasm::Executor)
 /// when creating executors from precompiled files or the embedded runtime.
 /// You typically don't need to interact with it directly.
 ///
@@ -964,7 +964,7 @@ mod tests {
     #[cfg(feature = "embedded")]
     #[test]
     fn instance_pre_cache_evicts_least_recently_used() {
-        let pre = crate::wasm::PythonExecutor::from_embedded_runtime()
+        let pre = crate::wasm::Executor::from_embedded_runtime()
             .unwrap()
             .instance_pre()
             .clone();

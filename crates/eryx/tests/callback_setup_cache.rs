@@ -16,23 +16,23 @@ use std::sync::{Arc, OnceLock};
 
 use eryx::callback_handler::run_callback_handler;
 use eryx::{
-    Callback, CallbackError, JsonSchema, PythonExecutor, ResourceLimits, Sandbox, SessionExecutor,
+    Callback, CallbackError, Executor, JsonSchema, ResourceLimits, Sandbox, SessionExecutor,
     TypedCallback,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-static EXECUTOR: OnceLock<Arc<PythonExecutor>> = OnceLock::new();
+static EXECUTOR: OnceLock<Arc<Executor>> = OnceLock::new();
 
-fn executor() -> Arc<PythonExecutor> {
+fn executor() -> Arc<Executor> {
     EXECUTOR
         .get_or_init(|| {
             let resources = eryx::embedded::EmbeddedResources::get().unwrap();
             #[allow(unsafe_code)]
             Arc::new(
-                unsafe { PythonExecutor::from_precompiled_file(resources.runtime()) }
+                unsafe { Executor::from_precompiled_file(resources.runtime()) }
                     .unwrap()
-                    .with_python_stdlib(resources.stdlib()),
+                    .with_stdlib(resources.stdlib()),
             )
         })
         .clone()

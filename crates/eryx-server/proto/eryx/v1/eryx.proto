@@ -384,9 +384,9 @@ message ExecuteResult {
 
   // Human-readable message for a *sandbox* failure (timeout, fuel exhaustion,
   // WASM trap, invalid input, etc.). Empty when execution succeeded AND empty
-  // for an uncaught Python exception — in that case the traceback is in
-  // `stderr` (as CPython would print it) and `failure_kind` is
-  // FAILURE_KIND_SCRIPT_EXCEPTION. Use `failure_kind` to branch, not this string.
+  // for a script failure — in that case the traceback is in `stderr` (as
+  // CPython would print it) and `failure_kind` is FAILURE_KIND_SCRIPT_FAILED.
+  // Use `failure_kind` to branch, not this string.
   string error = 4;
 
   // Execution statistics.
@@ -406,8 +406,8 @@ message ExecuteResult {
   string result_error = 8;
 
   // Why execution failed. FAILURE_KIND_UNSPECIFIED when success is true.
-  // Distinguishes a script-level failure (an uncaught Python exception, with
-  // its traceback in `stderr`) from sandbox-level failures (timeout, fuel
+  // Distinguishes a script-level failure (an uncaught exception, with its
+  // traceback in `stderr`) from sandbox-level failures (timeout, fuel
   // exhaustion, traps, invalid input), so callers can branch without parsing
   // the `error` string.
   FailureKind failure_kind = 9;
@@ -457,11 +457,14 @@ message ExecuteResult {
 
 // Why an execution failed, when success is false.
 enum FailureKind {
+  option allow_alias = true;
   // Execution succeeded; no failure.
   FAILURE_KIND_UNSPECIFIED = 0;
-  // The script raised an uncaught Python exception. The traceback is in
+  // The script failed: it raised an uncaught exception. The traceback is in
   // `stderr` and `error` is empty.
-  FAILURE_KIND_SCRIPT_EXCEPTION = 1;
+  FAILURE_KIND_SCRIPT_FAILED = 1;
+  // Former name of FAILURE_KIND_SCRIPT_FAILED, kept as an alias.
+  FAILURE_KIND_SCRIPT_EXCEPTION = 1 [deprecated = true];
   // Execution exceeded the configured wall-clock timeout.
   FAILURE_KIND_TIMEOUT = 2;
   // Execution exceeded the configured fuel (instruction) limit.

@@ -143,7 +143,7 @@ fn main() -> anyhow::Result<()> {
     // Step 2: Pre-compile to native code
     println!("\n--- Step 2: Pre-compiling to native code ---");
     let start = Instant::now();
-    let precompiled = eryx::PythonExecutor::precompile_with_target(&component_bytes, target)?;
+    let precompiled = eryx::Executor::precompile_with_target(&component_bytes, target)?;
     let precompile_time = start.elapsed();
     println!("Pre-compile time: {precompile_time:?}");
     println!(
@@ -169,7 +169,7 @@ fn main() -> anyhow::Result<()> {
         let rt = tokio::runtime::Runtime::new()?;
 
         // Load the precompiled file we just created
-        // SAFETY: We just created this file from PythonExecutor::precompile()
+        // SAFETY: We just created this file from Executor::precompile()
         #[allow(unsafe_code)]
         let sandbox = unsafe {
             eryx::Sandbox::builder()

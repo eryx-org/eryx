@@ -60,6 +60,7 @@ use tokio::time::timeout_at;
 
 use crate::Error;
 use crate::callback::Callback;
+use crate::language::GuestLanguage;
 use crate::sandbox::{ResourceLimits, Sandbox, SandboxBuilder, state};
 use crate::trace::{OutputHandler, TraceHandler};
 
@@ -297,7 +298,7 @@ impl std::fmt::Debug for SandboxPool {
 impl SandboxPool {
     /// Create a new sandbox pool with the given builder and configuration.
     ///
-    /// The builder's runtime source, stdlib and site-packages paths, result
+    /// The builder's language, runtime source, stdlib and site-packages paths, result
     /// variable and trace-collection setting are used to create new sandbox
     /// instances as needed. The pool will be pre-warmed with `config.min_idle`
     /// instances.
@@ -320,8 +321,8 @@ impl SandboxPool {
     ///     PoolConfig::default(),
     /// ).await?;
     /// ```
-    pub async fn new(
-        builder: SandboxBuilder<state::Has, state::Has>,
+    pub async fn new<L: GuestLanguage>(
+        builder: SandboxBuilder<L, state::Has>,
         config: PoolConfig,
     ) -> Result<Self, PoolError> {
         // Validate configuration

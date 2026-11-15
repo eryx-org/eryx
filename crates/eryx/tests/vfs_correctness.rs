@@ -5,21 +5,21 @@
 
 use std::sync::{Arc, OnceLock};
 
-use eryx::PythonExecutor;
+use eryx::Executor;
 use eryx::SessionExecutor;
 use eryx::vfs::{ArcStorage, InMemoryStorage};
 
-static EXECUTOR: OnceLock<Arc<PythonExecutor>> = OnceLock::new();
+static EXECUTOR: OnceLock<Arc<Executor>> = OnceLock::new();
 
-fn executor() -> Arc<PythonExecutor> {
+fn executor() -> Arc<Executor> {
     EXECUTOR
         .get_or_init(|| {
             let resources = eryx::embedded::EmbeddedResources::get().unwrap();
             #[allow(unsafe_code)]
             Arc::new(
-                unsafe { PythonExecutor::from_precompiled_file(resources.runtime()) }
+                unsafe { Executor::from_precompiled_file(resources.runtime()) }
                     .unwrap()
-                    .with_python_stdlib(resources.stdlib()),
+                    .with_stdlib(resources.stdlib()),
             )
         })
         .clone()

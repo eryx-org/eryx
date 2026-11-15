@@ -133,7 +133,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("\nStep 2: Pre-compiling component...");
     let start = Instant::now();
 
-    let precompiled = eryx::PythonExecutor::precompile(&preinit_component)?;
+    let precompiled = eryx::Executor::precompile(&preinit_component)?;
     println!(
         "  Pre-compiled in {:?} ({:.1} MB)",
         start.elapsed(),
