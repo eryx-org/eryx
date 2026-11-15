@@ -4161,8 +4161,8 @@ mod tests {
             preamble,
             format!(
                 "Object.defineProperty(globalThis, 'process', {{ value: {{ env: \
-                 Object.freeze({{\"TOKEN\":\"{placeholder}\"}}) }}, writable: true, \
-                 configurable: true }});\n"
+                 Object.freeze(JSON.parse(\"{{\\\"TOKEN\\\":\\\"{placeholder}\\\"}}\")) }}, \
+                 writable: true, configurable: true }});\n"
             )
         );
         assert!(!preamble.contains("real-value"));

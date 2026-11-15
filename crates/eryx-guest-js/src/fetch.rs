@@ -122,7 +122,7 @@ pub(crate) fn fetch(connector: &mut impl Connector, request: Request) -> Result<
         redirect,
         deadline,
     } = request;
-    method = method.to_ascii_uppercase();
+    method = request_method(&method)?;
     let mut url = Url::parse(&url)?;
     let mut headers = request_headers(headers)?;
     let mut redirected = false;
@@ -177,11 +177,35 @@ pub(crate) fn fetch(connector: &mut impl Connector, request: Request) -> Result<
     ))
 }
 
+/// Whether `b` may appear in an HTTP token (a method or header name).
+fn is_tchar(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&b)
+}
+
+/// Validate the method, uppercased. Checked here, not just in `fetch.js`,
+/// whose checks a script can monkeypatch: the method goes into the request
+/// line as is.
+fn request_method(method: &str) -> Result<String, Error> {
+    if method.is_empty() || !method.bytes().all(is_tchar) {
+        return Err(Error::new(
+            "invalid-method",
+            format!("invalid method {method:?}"),
+        ));
+    }
+    let method = method.to_ascii_uppercase();
+    if matches!(method.as_str(), "CONNECT" | "TRACE" | "TRACK") {
+        return Err(Error::new(
+            "invalid-method",
+            format!("method {method} is not allowed"),
+        ));
+    }
+    Ok(method)
+}
+
 /// Validate the script's headers, lowercasing names and trimming values.
 fn request_headers(headers: Vec<(String, String)>) -> Result<Vec<(String, String)>, Error> {
     let mut out = Vec::with_capacity(headers.len());
     for (name, value) in headers {
-        let is_tchar = |b: u8| b.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&b);
         if name.is_empty() || !name.bytes().all(is_tchar) {
             return Err(Error::new(
                 "invalid-header",
@@ -841,6 +865,17 @@ mod tests {
                 fetch(&mut fake(&[]), request("GET", url)).unwrap_err().code,
                 code
             );
+        }
+        for method in [
+            "GET /x HTTP/1.1\r\nX:",
+            "",
+            "G T",
+            "connect",
+            "TRACE",
+            "track",
+        ] {
+            let err = fetch(&mut fake(&[]), request(method, "http://a.test/")).unwrap_err();
+            assert_eq!(err.code, "invalid-method", "{method:?}");
         }
         for (name, value) in [("x", "a\r\nInjected: 1"), ("bad name", "v"), ("", "v")] {
             let mut req = request("GET", "http://a.test/");

@@ -438,7 +438,7 @@
 
     // Errors in the request itself, reported as `TypeError(message)`; anything
     // else is a network error, `TypeError('fetch failed', { cause })`.
-    const REQUEST_ERRORS = ['invalid-url', 'unsupported-scheme', 'invalid-header'];
+    const REQUEST_ERRORS = ['invalid-url', 'unsupported-scheme', 'invalid-header', 'invalid-method'];
 
     async function fetch(input, init) {
         const request = new Request(input, init);

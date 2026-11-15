@@ -295,10 +295,13 @@ pub fn javascript_preamble<S: std::hash::BuildHasher>(
         .iter()
         .map(|(name, secret)| (name.as_str(), secret.placeholder()))
         .collect();
+    // Parsed rather than written as an object literal, where a secret named
+    // `__proto__` would set the prototype instead of a property.
     let env = serde_json::to_string(&env).unwrap_or_else(|_| "{}".to_string());
+    let env = serde_json::to_string(&env).unwrap_or_else(|_| "\"{}\"".to_string());
     format!(
         "Object.defineProperty(globalThis, 'process', \
-         {{ value: {{ env: Object.freeze({env}) }}, writable: true, configurable: true }});\n"
+         {{ value: {{ env: Object.freeze(JSON.parse({env})) }}, writable: true, configurable: true }});\n"
     )
 }
 

@@ -238,6 +238,7 @@ async fn secret_placeholder_substituted_in_authorization() {
     let sandbox = server
         .sandbox(server.net())
         .with_secret("API_TOKEN", SECRET, vec![HOST.to_string()])
+        .with_secret("__proto__", "other-secret-value", vec![HOST.to_string()])
         .build()
         .unwrap();
     let out = run(
@@ -245,6 +246,7 @@ async fn secret_placeholder_substituted_in_authorization() {
         r"
         const token = process.env.API_TOKEN;
         console.log(Object.keys(globalThis).includes('process'), token === 'real-secret-value-12345');
+        console.log(Object.hasOwn(process.env, '__proto__'), Object.getPrototypeOf(process.env) === Object.prototype);
         const res = await fetch('https://api.test/echo', {
             headers: { Authorization: `Bearer ${token}` },
         });
@@ -254,7 +256,7 @@ async fn secret_placeholder_substituted_in_authorization() {
         ",
     )
     .await;
-    assert_eq!(out, "false false\ntrue false\n[REDACTED]\n");
+    assert_eq!(out, "false false\ntrue true\ntrue false\n[REDACTED]\n");
     assert!(!out.contains(SECRET));
 
     let requests = server.requests();
@@ -289,6 +291,9 @@ async fn http_rules_and_blocked_hosts_reject_with_not_permitted() {
         console.log(await fail('https://elsewhere.test/'));
         console.log(await fail('ftp://api.test/'));
         console.log(await fail('https://api.test/', { headers: { 'X-Bad': 'a\nb' } }));
+        // JS-side checks can be patched away; the Rust side checks again.
+        RegExp.prototype.test = () => true;
+        console.log(await fail('https://api.test/json', { method: 'GET /json HTTP/1.1\r\nX-A: 1\r\n\r\nDELETE' }));
         ",
     )
     .await;
@@ -298,7 +303,8 @@ async fn http_rules_and_blocked_hosts_reject_with_not_permitted() {
          TypeError: fetch failed (not-permitted)\n\
          TypeError: fetch failed (not-permitted)\n\
          TypeError: fetch only supports http and https, not ftp: (undefined)\n\
-         TypeError: Invalid header value (undefined)\n"
+         TypeError: Invalid header value (undefined)\n\
+         TypeError: invalid method \"GET /json HTTP/1.1\\r\\nX-A: 1\\r\\n\\r\\nDELETE\" (undefined)\n"
     );
     // The DELETE never reached the server.
     assert!(server.requests().iter().all(|r| !r.starts_with("DELETE")));
