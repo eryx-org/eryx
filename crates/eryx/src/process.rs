@@ -306,7 +306,9 @@ impl Command {
         argv: &[String],
         mounts: &[Mount<'_>],
         limits: &IsolatedLimits,
-    ) -> Result<ChildOutput, Error> {
+    ) -> Result<(i32, Vec<u8>, Vec<u8>), Error> {
+        use wasmtime_wasi::p2::pipe::MemoryOutputPipe;
+
         let fail = |message: String| Error::from(ErrorKind::Execution(message));
         let stdout = MemoryOutputPipe::new(limits.output);
         let stderr = MemoryOutputPipe::new(limits.output);
@@ -334,7 +336,12 @@ impl Command {
             ChildState {
                 wasi: wasi.build(),
                 table: ResourceTable::new(),
-                limits: StoreLimitsBuilder::new().memory_size(limits.memory).build(),
+                // A pool of its own: an isolated run shares no execution's.
+                limits: ChildMemory {
+                    pool: Arc::new(AtomicUsize::new(0)),
+                    held: 0,
+                    limit: limits.memory,
+                },
                 #[cfg(feature = "unstable-vfs")]
                 vfs: None,
             },
@@ -430,11 +437,12 @@ pub(crate) struct ChildState {
     vfs: Option<eryx_vfs::HybridVfsCtx<eryx_vfs::ArcStorage>>,
 }
 
-/// A child's share of its execution's `CHILD_MEMORY_LIMIT`, given back when
-/// its store is dropped.
+/// A child's share of `pool`, which may grow to `limit` (its execution's
+/// `CHILD_MEMORY_LIMIT`), given back when its store is dropped.
 struct ChildMemory {
     pool: Arc<AtomicUsize>,
     held: usize,
+    limit: usize,
 }
 
 impl ResourceLimiter for ChildMemory {
@@ -448,7 +456,7 @@ impl ResourceLimiter for ChildMemory {
         let reserved = self
             .pool
             .try_update(Ordering::Relaxed, Ordering::Relaxed, |used| {
-                used.checked_add(grow).filter(|&u| u <= CHILD_MEMORY_LIMIT)
+                used.checked_add(grow).filter(|&u| u <= self.limit)
             })
             .is_ok();
         if reserved {
@@ -569,6 +577,7 @@ impl ChildRun {
                 limits: ChildMemory {
                     pool: self.memory,
                     held: 0,
+                    limit: CHILD_MEMORY_LIMIT,
                 },
                 #[cfg(feature = "unstable-vfs")]
                 vfs: self.vfs,

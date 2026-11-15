@@ -482,7 +482,8 @@ pub struct ExecutionOutput {
     pub stdout: Vec<u8>,
     /// Captured stderr from the Python execution (raw bytes).
     pub stderr: Vec<u8>,
-    /// Peak memory usage in bytes during execution.
+    /// Peak memory usage in bytes: the instance's largest linear memory
+    /// (in a session, so far; see [`crate::ExecuteStats::peak_memory_bytes`]).
     pub peak_memory_bytes: u64,
     /// Execution duration.
     pub duration: Duration,
@@ -1058,11 +1059,6 @@ impl MemoryTracker {
     #[must_use]
     pub fn peak_memory_bytes(&self) -> u64 {
         self.peak_memory_bytes.load(Ordering::Relaxed)
-    }
-
-    /// Reset the peak memory tracker to zero.
-    pub fn reset(&self) {
-        self.peak_memory_bytes.store(0, Ordering::Relaxed);
     }
 
     /// Record memory that was already in use before this tracker was installed.
