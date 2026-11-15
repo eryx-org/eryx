@@ -21,6 +21,13 @@ tag-namespace = "eryx-precompile"
 # enable features that require build-time artifacts we don't have
 precise-builds = true
 
+# GitHub retired the macos-14 runner image, dist's default for
+# aarch64-apple-darwin, and jobs on it are cancelled ("The configuration
+# 'macos-14-arm64-us-default' is not supported"), which skipped every release
+# from 0.15.0 (#877). macos-15 matches the x86_64 build's macos-15-intel.
+[dist.github-custom-runners]
+aarch64-apple-darwin = "macos-15"
+
 # Pin the actions in the generated release workflow to commit SHAs (the tag
 # each one corresponds to is noted alongside). dist's templates reference
 # mutable tags (actions/checkout@v4), which a compromised upstream could move.
