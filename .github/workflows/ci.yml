@@ -453,6 +453,10 @@ jobs:
           save-cache: ${{ github.ref == 'refs/heads/main' }}
           pr-comment: false
 
+      # crates/eryx-vfs/tests/p3_filesystem.rs builds a wasm32-wasip3 probe.
+      - name: Install wasm32-wasip3 target
+        run: rustup target add wasm32-wasip3
+
       - name: Run tests
         # Use --all-features to test everything. This works because:
         # - runtime.wasm and runtime.cwasm are provided by artifacts
