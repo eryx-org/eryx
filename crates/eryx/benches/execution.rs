@@ -224,7 +224,7 @@ fn bench_stateless_execution_baked_callbacks(c: &mut Criterion) {
 
         let rt = tokio::runtime::Runtime::new().unwrap();
         let stdlib = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../eryx-wasm-runtime/tests/python-stdlib");
+            .join("../eryx-guest-python/tests/python-stdlib");
         let callbacks: [&dyn eryx::Callback; 3] = [&NoopCallback, &EchoCallback, &WorkCallback];
         let declarations = callbacks
             .iter()

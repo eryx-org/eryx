@@ -3,7 +3,7 @@
 
 //! Test to verify wit-dylib linking works with our runtime.
 //!
-//! Run with: cargo test --package eryx-wasm-runtime --test link_test
+//! Run with: cargo test --package eryx-guest-python --test link_test
 //!
 //! This test links all required libraries (libc, libc++, libpython, WASI emulation libs)
 //! together with our runtime to produce a valid WASM component.

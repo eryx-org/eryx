@@ -46,7 +46,7 @@ fn forged_runtime(forged: &str) -> (tempfile::TempDir, std::path::PathBuf) {
     bytes[offsets[0]..offsets[0] + needle.len()].copy_from_slice(&replacement);
 
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("runtime.cwasm");
+    let path = dir.path().join("runtime-python.cwasm");
     std::fs::write(&path, bytes).unwrap();
     (dir, path)
 }

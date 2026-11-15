@@ -172,10 +172,11 @@ pub const DEFAULT_JOURNAL_TTL: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 
 /// The Eryx gRPC service.
 ///
-/// Holds a shared [`SandboxPool`] for efficient sandbox reuse across requests.
+/// Holds a shared [`SandboxPool`] per guest language for efficient sandbox
+/// reuse across requests.
 #[derive(Debug)]
 pub struct EryxService {
-    pool: Arc<SandboxPool>,
+    pools: HashMap<eryx::Language, Arc<SandboxPool>>,
     journal_signer: crate::replay::JournalSigner,
     max_message_size: usize,
     limits: ServerLimits,
@@ -183,7 +184,8 @@ pub struct EryxService {
 }
 
 impl EryxService {
-    /// Create a new service instance with the given pool and journal signer.
+    /// Create a new service instance with the given Python pool and journal
+    /// signer. Add pools for other languages with [`Self::with_pool`].
     ///
     /// The `signer` should use a stable key shared across all replicas (see
     /// [`JournalSigner::from_key`](crate::replay::JournalSigner::from_key))
@@ -192,12 +194,19 @@ impl EryxService {
     #[must_use]
     pub fn with_signer(pool: Arc<SandboxPool>, signer: crate::replay::JournalSigner) -> Self {
         Self {
-            pool,
+            pools: HashMap::from([(eryx::Language::Python, pool)]),
             journal_signer: signer,
             max_message_size: MAX_MESSAGE_SIZE,
             limits: ServerLimits::default(),
             journal_ttl: DEFAULT_JOURNAL_TTL,
         }
+    }
+
+    /// Serve `language` from `pool`, replacing any pool it had.
+    #[must_use]
+    pub fn with_pool(mut self, language: eryx::Language, pool: Arc<SandboxPool>) -> Self {
+        self.pools.insert(language, pool);
+        self
     }
 
     /// Set the ceilings applied to every request's limits. Defaults to
@@ -277,6 +286,23 @@ impl crate::proto::eryx::v1::eryx_server::Eryx for EryxService {
             }
         };
 
+        let language = match crate::proto::eryx::v1::Language::try_from(execute_req.language) {
+            Ok(
+                crate::proto::eryx::v1::Language::Unspecified
+                | crate::proto::eryx::v1::Language::Python,
+            ) => eryx::Language::Python,
+            Ok(crate::proto::eryx::v1::Language::Javascript) => eryx::Language::JavaScript,
+            Ok(crate::proto::eryx::v1::Language::Shell) => eryx::Language::Shell,
+            Err(_) => {
+                return Err(Status::invalid_argument(format!(
+                    "unknown language {}",
+                    execute_req.language
+                )));
+            }
+        };
+        let pool = self.pools.get(&language).cloned().ok_or_else(|| {
+            Status::invalid_argument(format!("this server doesn't serve {language}"))
+        })?;
         let code = execute_req.code;
         let declarations = execute_req.callbacks;
         let enable_tracing = execute_req.enable_tracing;
@@ -471,10 +497,10 @@ impl crate::proto::eryx::v1::eryx_server::Eryx for EryxService {
 
         // 5. Acquire sandbox from pool and configure for this request.
         let acquire_start = Instant::now();
-        let mut sandbox = match self.pool.acquire().await {
+        let mut sandbox = match pool.acquire().await {
             Ok(s) => s,
             Err(e) => {
-                let stats = self.pool.stats();
+                let stats = pool.stats();
                 span.in_scope(|| {
                     tracing::warn!(
                         error = %e,
@@ -493,7 +519,7 @@ impl crate::proto::eryx::v1::eryx_server::Eryx for EryxService {
             .with_callbacks(cbs)
             .map_err(|e| Status::invalid_argument(e.to_string()))?
             .with_resource_limits(resource_limits.clone());
-        let pool_stats = self.pool.stats();
+        let pool_stats = pool.stats();
         span.in_scope(|| {
             tracing::info!(
                 acquire_ms = acquire_start.elapsed().as_millis() as u64,

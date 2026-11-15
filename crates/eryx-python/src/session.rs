@@ -209,6 +209,8 @@ impl Session {
     /// unlike `Sandbox` which runs each execution in isolation.
     ///
     /// Args:
+    ///     language: The guest language to run: "python" (the default),
+    ///         "javascript" or "shell".
     ///     vfs: Optional VfsStorage for persistent file storage.
     ///         Files written to `/data/*` will persist across executions.
     ///     vfs_mount_path: Custom mount path for VFS (default: "/data").
@@ -245,10 +247,11 @@ impl Session {
     ///         {"name": "get_time", "fn": get_time, "description": "Returns current time"}
     ///     ])
     #[new]
-    #[pyo3(signature = (*, vfs=None, vfs_mount_path=None, resource_limits=None, execution_timeout_ms=None, max_fuel=None, network=None, callbacks=None, mcp=None, volumes=None, on_stdout=None, on_stderr=None, result_variable=None))]
+    #[pyo3(signature = (*, language=None, vfs=None, vfs_mount_path=None, resource_limits=None, execution_timeout_ms=None, max_fuel=None, network=None, callbacks=None, mcp=None, volumes=None, on_stdout=None, on_stderr=None, result_variable=None))]
     #[allow(clippy::too_many_arguments)]
     fn new(
         py: Python<'_>,
+        language: Option<&str>,
         vfs: Option<VfsStorage>,
         vfs_mount_path: Option<String>,
         resource_limits: Option<ResourceLimits>,
@@ -264,8 +267,9 @@ impl Session {
     ) -> PyResult<Self> {
         let runtime = crate::error::make_runtime()?;
 
+        let language = crate::sandbox::parse_language(language)?;
         // Create the Executor from embedded runtime
-        let mut executor = eryx::Executor::from_embedded_runtime()
+        let mut executor = eryx::Executor::from_embedded_runtime_for(language)
             .map_err(|e| InitializationError::new_err(format!("failed to create executor: {e}")))?;
         if let Some(name) = result_variable {
             executor = executor.with_result_variable(name);

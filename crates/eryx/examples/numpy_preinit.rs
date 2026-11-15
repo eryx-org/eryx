@@ -79,7 +79,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let python_stdlib = std::path::PathBuf::from(&manifest_dir)
         .parent()
         .ok_or("Cannot find parent directory")?
-        .join("eryx-wasm-runtime")
+        .join("eryx-guest-python")
         .join("tests")
         .join("python-stdlib");
 

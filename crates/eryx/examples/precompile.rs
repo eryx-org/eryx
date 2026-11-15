@@ -67,7 +67,7 @@ fn main() -> anyhow::Result<()> {
         .position(|a| a == "--output")
         .and_then(|i| args.get(i + 1))
         .map(|s| s.as_str())
-        .unwrap_or("crates/eryx-runtime/runtime.cwasm");
+        .unwrap_or("crates/eryx-runtime/runtime-python.cwasm");
 
     // Parse --target argument (falls back to ERYX_TARGET env var in the library)
     let target = args
@@ -77,7 +77,7 @@ fn main() -> anyhow::Result<()> {
         .map(|s| s.as_str());
 
     let wasm_path = std::env::var("ERYX_WASM_PATH")
-        .unwrap_or_else(|_| "crates/eryx-runtime/runtime.wasm".to_string());
+        .unwrap_or_else(|_| "crates/eryx-runtime/runtime-python.wasm".to_string());
 
     println!("=== Pre-compilation Example ===\n");
     println!("WASM path: {wasm_path}");
@@ -271,9 +271,9 @@ fn find_python_stdlib() -> anyhow::Result<std::path::PathBuf> {
     // Check common locations
     let candidates = [
         // Relative to workspace root (when running from workspace)
-        "crates/eryx-wasm-runtime/tests/python-stdlib",
+        "crates/eryx-guest-python/tests/python-stdlib",
         // Relative to example directory
-        "../eryx-wasm-runtime/tests/python-stdlib",
+        "../eryx-guest-python/tests/python-stdlib",
     ];
 
     for candidate in &candidates {

@@ -129,6 +129,70 @@ async fn execute_simple_print() {
     assert!(got_result, "never received ExecuteResult");
 }
 
+/// Run `code` in `language` and return the final result, or the gRPC
+/// status the server rejected the request with.
+async fn execute_in(
+    channel: Channel,
+    language: eryx_server::proto::eryx::v1::Language,
+    code: &str,
+) -> Result<eryx_server::proto::eryx::v1::ExecuteResult, tonic::Status> {
+    let mut client = EryxClient::new(channel);
+    let (tx, rx) = mpsc::channel(16);
+    tx.send(ClientMessage {
+        message: Some(client_message::Message::ExecuteRequest(Box::new(
+            ExecuteRequest {
+                code: code.to_string(),
+                language: language as i32,
+                ..Default::default()
+            },
+        ))),
+    })
+    .await
+    .unwrap();
+    let mut stream = client.execute(ReceiverStream::new(rx)).await?.into_inner();
+    while let Some(msg) = stream.message().await? {
+        if let Some(server_message::Message::ExecuteResult(result)) = msg.message {
+            return Ok(*result);
+        }
+    }
+    panic!("never received ExecuteResult");
+}
+
+/// A request picks its pool by language; a language without one is rejected.
+#[tokio::test]
+async fn execute_selects_the_language_pool() {
+    use eryx_server::proto::eryx::v1::Language;
+
+    let javascript = SandboxPool::new(
+        Sandbox::embedded().javascript(),
+        PoolConfig::default().with_max_size(2),
+    )
+    .await
+    .unwrap();
+    let channel = start_server_with(4, |pool| {
+        EryxService::new(pool).with_pool(eryx::Language::JavaScript, Arc::new(javascript))
+    })
+    .await;
+
+    let result = execute_in(channel.clone(), Language::Javascript, "console.log(6 * 7)")
+        .await
+        .unwrap();
+    assert!(result.success, "execution failed: {}", result.error);
+    assert_eq!(result.stdout, b"42\n");
+
+    // Unspecified is Python.
+    let result = execute_in(channel.clone(), Language::Unspecified, "print(6 * 7)")
+        .await
+        .unwrap();
+    assert_eq!(result.stdout, b"42\n");
+
+    let status = execute_in(channel, Language::Shell, "echo hi")
+        .await
+        .unwrap_err();
+    assert_eq!(status.code(), tonic::Code::InvalidArgument);
+    assert!(status.message().contains("shell"), "{status:?}");
+}
+
 /// An uncaught exception over gRPC. The traceback (which Python writes to
 /// stderr) is surfaced as CPython would — over stderr, not as a sandbox error:
 ///   - streamed live as STDERR `OutputEvent`s while the code runs,

@@ -20,13 +20,13 @@ for the full investigation.
 
 The `wasi_snapshot_preview1` adapter (`wasi_snapshot_preview1.reactor.wasm`) is a separate,
 much more stable artifact from componentize-py's `adapters/` directory (bridges
-`eryx-wasm-runtime`'s own `wasm32-wasip1` build into the component) and doesn't need to be
+`eryx-guest-python`'s own `wasm32-wasip1` build into the component) and doesn't need to be
 re-vendored in lockstep with the CPython/libc bundle above.
 
 ## Overview
 
-This crate builds the runtime.wasm component by linking together:
-- `eryx-wasm-runtime` - Rust crate that provides the Python execution engine
+This crate builds the runtime-python.wasm component by linking together:
+- `eryx-guest-python` - Rust crate that provides the Python execution engine
 - `libpython3.14.so` - WASI-compiled CPython 3.14
 - WASI support libraries (libc, libc++, etc.)
 
@@ -35,8 +35,8 @@ The build process uses `wit-dylib` and `wit-component` to create a fully linked 
 ## Files
 
 - `runtime.wit` - WIT interface definition (source of truth)
-- `runtime.wasm` - Compiled WASM component (generated)
-- `runtime.cwasm` - Pre-compiled WASM for faster loading (generated)
+- `runtime-python.wasm` - Compiled WASM component (generated)
+- `runtime-python.cwasm` - Pre-compiled WASM for faster loading (generated)
 - `libs/` - Compressed WASI libraries required for linking
 - `build.rs` - Build script that orchestrates the linking process
 
@@ -46,27 +46,27 @@ The WASM component is built automatically when needed:
 
 ```bash
 # Build with mise
-mise run build-eryx-runtime
+mise run build-runtime-python
 
 # Or directly with cargo (requires BUILD_ERYX_RUNTIME=1)
 BUILD_ERYX_RUNTIME=1 cargo build --package eryx-runtime
 ```
 
 The build script will:
-1. Compile `eryx-wasm-runtime` for wasm32-wasip1
+1. Compile `eryx-guest-python` for wasm32-wasip1
 2. Link it with libpython and WASI libraries
 3. Generate WIT bindings with `wit-dylib`
-4. Produce the final `runtime.wasm` component
+4. Produce the final `runtime-python.wasm` component
 
 ## Pre-compilation
 
 For faster sandbox creation (~50x speedup), pre-compile the WASM:
 
 ```bash
-mise run precompile-eryx-runtime
+mise run precompile-runtime-python-no-preinit
 ```
 
-This produces `runtime.cwasm` which can be used with `Sandbox::builder().with_precompiled_file()`.
+This produces `runtime-python.cwasm` which can be used with `Sandbox::builder().with_precompiled_file()`.
 
 ## WIT Interface
 
@@ -90,11 +90,11 @@ The runtime exposes the `eryx:sandbox` world with:
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│                     runtime.wasm                             │
+│                     runtime-python.wasm                             │
 ├─────────────────────────────────────────────────────────────┤
 │  liberyx_bindings.so (wit-dylib generated)                  │
 │    ↓ calls                                                  │
-│  liberyx_runtime.so (eryx-wasm-runtime crate)               │
+│  liberyx_runtime.so (eryx-guest-python crate)               │
 │    ↓ FFI                                                    │
 │  libpython3.14.so (CPython for WASI)                        │
 │    ↓ uses                                                   │

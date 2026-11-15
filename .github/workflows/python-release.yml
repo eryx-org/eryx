@@ -63,7 +63,7 @@ jobs:
           cache: false
 
       - name: Build eryx-runtime
-        run: mise run build-eryx-runtime
+        run: mise run build-runtime-python
 
       # Extract Python stdlib for pre-initialization
       # This is needed so each platform can pre-initialize Python when precompiling
@@ -82,9 +82,9 @@ jobs:
         with:
           name: wasm-runtime
           path: |
-            crates/eryx-runtime/runtime.wasm
+            crates/eryx-runtime/runtime-python.wasm
             crates/eryx-runtime/prebuilt/
-            crates/eryx-wasm-runtime/tests/python-stdlib/
+            crates/eryx-guest-python/tests/python-stdlib/
           retention-days: 1
 
   # Build wheels for Linux x86_64 (native build with precompile)
@@ -110,12 +110,12 @@ jobs:
           ls -la crates/eryx-runtime/prebuilt/ || echo "prebuilt dir missing!"
 
           # Verify required files exist
-          test -f crates/eryx-runtime/runtime.wasm || (echo "runtime.wasm missing!" && exit 1)
+          test -f crates/eryx-runtime/runtime-python.wasm || (echo "runtime-python.wasm missing!" && exit 1)
           test -f crates/eryx-runtime/prebuilt/liberyx_runtime.so.zst || (echo "liberyx_runtime.so.zst missing!" && exit 1)
           test -f crates/eryx-runtime/prebuilt/liberyx_bindings.so.zst || (echo "liberyx_bindings.so.zst missing!" && exit 1)
 
           # Touch to mark as up-to-date
-          touch crates/eryx-runtime/runtime.wasm
+          touch crates/eryx-runtime/runtime-python.wasm
           touch crates/eryx-runtime/prebuilt/*
 
           echo "=== All artifacts verified ==="
@@ -129,13 +129,13 @@ jobs:
         run: |
           echo "Pre-compiling WASM for Linux x86_64 with Python pre-initialization..."
           cargo run -p eryx --example precompile --features preinit --release
-          ls -la crates/eryx-runtime/runtime.cwasm
+          ls -la crates/eryx-runtime/runtime-python.cwasm
         env:
           ERYX_PRECOMPILE_BOOTSTRAP: "1"
           ERYX_CPU_FEATURES: "x86-64-v2"
 
       - name: Mark cwasm as up-to-date
-        run: touch crates/eryx-runtime/runtime.cwasm
+        run: touch crates/eryx-runtime/runtime-python.cwasm
 
       - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
         with:
@@ -187,12 +187,12 @@ jobs:
           ls -la crates/eryx-runtime/prebuilt/ || echo "prebuilt dir missing!"
 
           # Verify required files exist
-          test -f crates/eryx-runtime/runtime.wasm || (echo "runtime.wasm missing!" && exit 1)
+          test -f crates/eryx-runtime/runtime-python.wasm || (echo "runtime-python.wasm missing!" && exit 1)
           test -f crates/eryx-runtime/prebuilt/liberyx_runtime.so.zst || (echo "liberyx_runtime.so.zst missing!" && exit 1)
           test -f crates/eryx-runtime/prebuilt/liberyx_bindings.so.zst || (echo "liberyx_bindings.so.zst missing!" && exit 1)
 
           # Touch to mark as up-to-date
-          touch crates/eryx-runtime/runtime.wasm
+          touch crates/eryx-runtime/runtime-python.wasm
           touch crates/eryx-runtime/prebuilt/*
 
           echo "=== All artifacts verified ==="
@@ -206,13 +206,13 @@ jobs:
         run: |
           echo "Pre-compiling WASM for Linux x86_64 with Python pre-initialization..."
           cargo run -p eryx --example precompile --features preinit --release
-          ls -la crates/eryx-runtime/runtime.cwasm
+          ls -la crates/eryx-runtime/runtime-python.cwasm
         env:
           ERYX_PRECOMPILE_BOOTSTRAP: "1"
           ERYX_CPU_FEATURES: "x86-64-v2"
 
       - name: Mark cwasm as up-to-date
-        run: touch crates/eryx-runtime/runtime.cwasm
+        run: touch crates/eryx-runtime/runtime-python.cwasm
 
       - name: Build wheels
         uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b # v1.51.0
@@ -260,12 +260,12 @@ jobs:
           ls -la crates/eryx-runtime/prebuilt/ || echo "prebuilt dir missing!"
 
           # Verify required files exist
-          test -f crates/eryx-runtime/runtime.wasm || (echo "runtime.wasm missing!" && exit 1)
+          test -f crates/eryx-runtime/runtime-python.wasm || (echo "runtime-python.wasm missing!" && exit 1)
           test -f crates/eryx-runtime/prebuilt/liberyx_runtime.so.zst || (echo "liberyx_runtime.so.zst missing!" && exit 1)
           test -f crates/eryx-runtime/prebuilt/liberyx_bindings.so.zst || (echo "liberyx_bindings.so.zst missing!" && exit 1)
 
           # Touch to mark as up-to-date
-          touch crates/eryx-runtime/runtime.wasm
+          touch crates/eryx-runtime/runtime-python.wasm
           touch crates/eryx-runtime/prebuilt/*
 
           echo "=== All artifacts verified ==="
@@ -279,7 +279,7 @@ jobs:
         run: |
           echo "Pre-compiling WASM for Linux aarch64 with Python pre-initialization..."
           cargo run -p eryx --example precompile --features preinit --release
-          ls -la crates/eryx-runtime/runtime.cwasm
+          ls -la crates/eryx-runtime/runtime-python.cwasm
         env:
           ERYX_PRECOMPILE_BOOTSTRAP: "1"
           # aarch64 has no Cranelift psABI presets, so "baseline" (pin the
@@ -290,7 +290,7 @@ jobs:
           ERYX_CPU_FEATURES: "baseline"
 
       - name: Mark cwasm as up-to-date
-        run: touch crates/eryx-runtime/runtime.cwasm
+        run: touch crates/eryx-runtime/runtime-python.cwasm
 
       - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
         with:
@@ -342,12 +342,12 @@ jobs:
           ls -la crates/eryx-runtime/prebuilt/ || echo "prebuilt dir missing!"
 
           # Verify required files exist
-          test -f crates/eryx-runtime/runtime.wasm || (echo "runtime.wasm missing!" && exit 1)
+          test -f crates/eryx-runtime/runtime-python.wasm || (echo "runtime-python.wasm missing!" && exit 1)
           test -f crates/eryx-runtime/prebuilt/liberyx_runtime.so.zst || (echo "liberyx_runtime.so.zst missing!" && exit 1)
           test -f crates/eryx-runtime/prebuilt/liberyx_bindings.so.zst || (echo "liberyx_bindings.so.zst missing!" && exit 1)
 
           # Touch to mark as up-to-date
-          touch crates/eryx-runtime/runtime.wasm
+          touch crates/eryx-runtime/runtime-python.wasm
           touch crates/eryx-runtime/prebuilt/*
 
           echo "=== All artifacts verified ==="
@@ -361,7 +361,7 @@ jobs:
         run: |
           echo "Pre-compiling WASM for Linux aarch64 with Python pre-initialization..."
           cargo run -p eryx --example precompile --features preinit --release
-          ls -la crates/eryx-runtime/runtime.cwasm
+          ls -la crates/eryx-runtime/runtime-python.cwasm
         env:
           ERYX_PRECOMPILE_BOOTSTRAP: "1"
           # aarch64 has no Cranelift psABI presets, so "baseline" (pin the
@@ -372,7 +372,7 @@ jobs:
           ERYX_CPU_FEATURES: "baseline"
 
       - name: Mark cwasm as up-to-date
-        run: touch crates/eryx-runtime/runtime.cwasm
+        run: touch crates/eryx-runtime/runtime-python.cwasm
 
       - name: Build wheels
         uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b # v1.51.0
@@ -420,12 +420,12 @@ jobs:
           ls -la crates/eryx-runtime/prebuilt/ || echo "prebuilt dir missing!"
 
           # Verify required files exist
-          test -f crates/eryx-runtime/runtime.wasm || (echo "runtime.wasm missing!" && exit 1)
+          test -f crates/eryx-runtime/runtime-python.wasm || (echo "runtime-python.wasm missing!" && exit 1)
           test -f crates/eryx-runtime/prebuilt/liberyx_runtime.so.zst || (echo "liberyx_runtime.so.zst missing!" && exit 1)
           test -f crates/eryx-runtime/prebuilt/liberyx_bindings.so.zst || (echo "liberyx_bindings.so.zst missing!" && exit 1)
 
           # Touch to mark as up-to-date
-          touch crates/eryx-runtime/runtime.wasm
+          touch crates/eryx-runtime/runtime-python.wasm
           touch crates/eryx-runtime/prebuilt/*
 
           echo "=== All artifacts verified ==="
@@ -439,7 +439,7 @@ jobs:
         run: |
           echo "Pre-compiling WASM for macOS aarch64 with Python pre-initialization..."
           cargo run -p eryx --example precompile --features preinit --release
-          ls -la crates/eryx-runtime/runtime.cwasm
+          ls -la crates/eryx-runtime/runtime-python.cwasm
         env:
           ERYX_PRECOMPILE_BOOTSTRAP: "1"
           # aarch64 has no Cranelift psABI presets, so "baseline" (pin the
@@ -450,7 +450,7 @@ jobs:
           ERYX_CPU_FEATURES: "baseline"
 
       - name: Mark cwasm as up-to-date
-        run: touch crates/eryx-runtime/runtime.cwasm
+        run: touch crates/eryx-runtime/runtime-python.cwasm
 
       - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
         with:
@@ -506,12 +506,12 @@ jobs:
           ls -la crates/eryx-runtime/prebuilt/ || echo "prebuilt dir missing!"
 
           # Verify required files exist
-          test -f crates/eryx-runtime/runtime.wasm || (echo "runtime.wasm missing!" && exit 1)
+          test -f crates/eryx-runtime/runtime-python.wasm || (echo "runtime-python.wasm missing!" && exit 1)
           test -f crates/eryx-runtime/prebuilt/liberyx_runtime.so.zst || (echo "liberyx_runtime.so.zst missing!" && exit 1)
           test -f crates/eryx-runtime/prebuilt/liberyx_bindings.so.zst || (echo "liberyx_bindings.so.zst missing!" && exit 1)
 
           # Touch to mark as up-to-date
-          touch crates/eryx-runtime/runtime.wasm
+          touch crates/eryx-runtime/runtime-python.wasm
           touch crates/eryx-runtime/prebuilt/*
 
           echo "=== All artifacts verified ==="
@@ -525,13 +525,13 @@ jobs:
         run: |
           echo "Pre-compiling WASM for macOS x86_64 with Python pre-initialization..."
           cargo run -p eryx --example precompile --features preinit --release
-          ls -la crates/eryx-runtime/runtime.cwasm
+          ls -la crates/eryx-runtime/runtime-python.cwasm
         env:
           ERYX_PRECOMPILE_BOOTSTRAP: "1"
           ERYX_CPU_FEATURES: "x86-64-v2"
 
       - name: Mark cwasm as up-to-date
-        run: touch crates/eryx-runtime/runtime.cwasm
+        run: touch crates/eryx-runtime/runtime-python.cwasm
 
       # Use uv to manage Python - more reliable than setup-python on some runners
       - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
@@ -594,12 +594,12 @@ jobs:
           ls -la crates/eryx-runtime/prebuilt/ || echo "prebuilt dir missing!"
 
           # Verify required files exist
-          test -f crates/eryx-runtime/runtime.wasm || (echo "runtime.wasm missing!" && exit 1)
+          test -f crates/eryx-runtime/runtime-python.wasm || (echo "runtime-python.wasm missing!" && exit 1)
           test -f crates/eryx-runtime/prebuilt/liberyx_runtime.so.zst || (echo "liberyx_runtime.so.zst missing!" && exit 1)
           test -f crates/eryx-runtime/prebuilt/liberyx_bindings.so.zst || (echo "liberyx_bindings.so.zst missing!" && exit 1)
 
           # Touch to mark as up-to-date
-          touch crates/eryx-runtime/runtime.wasm
+          touch crates/eryx-runtime/runtime-python.wasm
           touch crates/eryx-runtime/prebuilt/*
 
           echo "=== All artifacts verified ==="
@@ -614,14 +614,14 @@ jobs:
         run: |
           echo "Pre-compiling WASM for Windows x64 with Python pre-initialization..."
           cargo run -p eryx --example precompile --features preinit --release
-          ls -la crates/eryx-runtime/runtime.cwasm
+          ls -la crates/eryx-runtime/runtime-python.cwasm
         env:
           ERYX_PRECOMPILE_BOOTSTRAP: "1"
           ERYX_CPU_FEATURES: "x86-64-v2"
 
       - name: Mark cwasm as up-to-date
         shell: bash
-        run: touch crates/eryx-runtime/runtime.cwasm
+        run: touch crates/eryx-runtime/runtime-python.cwasm
 
       - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
         with:

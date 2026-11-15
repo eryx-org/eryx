@@ -8,7 +8,7 @@
 //! Before running tests, you need to extract the Python stdlib from componentize-py:
 //!
 //! ```bash
-//! # From the eryx-wasm-runtime crate directory:
+//! # From the eryx-guest-python crate directory:
 //! mkdir -p tests/python-stdlib tests/site-packages
 //! tar -xf ../eryx-runtime/.venv/lib/python3.12/site-packages/componentize_py/python-lib.tar.zst \
 //!     -C tests/python-stdlib
@@ -17,7 +17,7 @@
 //! # Running
 //!
 //! ```bash
-//! cargo test --package eryx-wasm-runtime --test runtime_test
+//! cargo test --package eryx-guest-python --test runtime_test
 //! ```
 
 use std::io::Cursor;

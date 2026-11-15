@@ -9,7 +9,7 @@
 //!
 //! Run with: `cargo run --example session_reuse`
 //!
-//! Note: Requires the runtime.wasm to be built first.
+//! Note: Requires the runtime-python.wasm to be built first.
 //! See crates/eryx-runtime/README.md for instructions.
 
 use std::sync::Arc;

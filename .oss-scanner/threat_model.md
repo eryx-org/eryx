@@ -33,7 +33,7 @@ Untrusted input reaches the host through:
 
 Trusted, and therefore not attacker-controlled: the embedding application, its
 `Sandbox`/`SandboxBuilder` configuration, callbacks it registers, packages and
-wheels it chooses to load, the precompiled `runtime.cwasm` and everything in
+wheels it chooses to load, the precompiled `runtime-python.cwasm` and everything in
 `crates/eryx-runtime/libs/` and `prebuilt/`.
 
 ## Components that matter most / least
@@ -59,7 +59,7 @@ bindings in `js/`, where they handle guest-produced data.
 
 Out of scope:
 
-- Code that only runs inside the guest (`crates/eryx-wasm-runtime/`, CPython)
+- Code that only runs inside the guest (`crates/eryx-guest-python/`, CPython)
   misbehaving *within* the sandbox. The guest is already assumed hostile, so a
   guest crash or a guest Python bug is not a vulnerability unless it changes
   host behaviour.

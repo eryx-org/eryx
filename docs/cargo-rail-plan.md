@@ -105,7 +105,7 @@ Add two complementary tools:
    
    [tasks.test-all-features]
    description = "Test all feature combinations"
-   depends = ["build-eryx-runtime"]
+   depends = ["build-runtime-python"]
    run = "cargo all-features test"
    ```
 

@@ -3,17 +3,19 @@
 
 //! Build script for eryx-runtime.
 //!
-//! This builds:
-//! 1. The eryx-wasm-runtime shared library (liberyx_runtime.so) that implements
-//!    the wit-dylib interpreter interface for Python execution.
-//! 2. The final WASM component (runtime.wasm) by linking all libraries together.
+//! This builds the guest runtimes whose interpreter is a wit-dylib shared
+//! library: CPython (`eryx-guest-python`, on `BUILD_ERYX_RUNTIME`) and
+//! QuickJS (`eryx-guest-js`, on `BUILD_ERYX_JS_RUNTIME`). For each:
 //!
-//! The build process:
-//! 1. Compile eryx-wasm-runtime staticlib with PIC for wasm32-wasip1
+//! 1. Compile the guest crate as a PIC staticlib for wasm32-wasip1
 //! 2. Compile clock_stubs.c with WASI SDK clang
-//! 3. Link into liberyx_runtime.so
-//! 4. Generate wit-dylib bindings
-//! 5. Link all libraries into final runtime.wasm component
+//! 3. Link both into the interpreter shared library
+//! 4. Generate wit-dylib bindings for the `sandbox` world
+//! 5. Link everything into `runtime-<language>.wasm`
+//!
+//! For Python it also writes the late-linking artifacts (the interpreter and
+//! bindings, zstd-compressed) used by preinit and native extensions. The
+//! shell guest is a plain wasip2 component and isn't built here.
 
 use std::env;
 use std::path::{Path, PathBuf};
@@ -28,9 +30,9 @@ mod link_order;
 /// workspace root. These only exist in a git checkout, not in the crates.io
 /// package.
 const GUEST_SOURCES: [&str; 6] = [
-    "crates/eryx-wasm-runtime/src",
-    "crates/eryx-wasm-runtime/clock_stubs.c",
-    "crates/eryx-wasm-runtime/Cargo.toml",
+    "crates/eryx-guest-python/src",
+    "crates/eryx-guest-python/clock_stubs.c",
+    "crates/eryx-guest-python/Cargo.toml",
     "crates/wit-dylib-ffi/src",
     "crates/wit-dylib-ffi/Cargo.toml",
     "crates/eryx-runtime/wit",
@@ -40,10 +42,18 @@ const GUEST_SOURCES: [&str; 6] = [
 /// next to the artifacts in `prebuilt/` and in OUT_DIR. See [`guest_sources_hash`].
 const SOURCES_STAMP: &str = "guest-sources.hash";
 
+/// What the JS guest is built from, relative to the workspace root.
+const JS_GUEST_SOURCES: [&str; 4] = [
+    "crates/eryx-guest-js",
+    "crates/eryx-guest-python/clock_stubs.c",
+    "crates/wit-dylib-ffi/src",
+    "crates/eryx-runtime/wit",
+];
+
 fn main() {
     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
     let workspace_root = manifest_dir.parent().unwrap().parent().unwrap();
-    let wasm_runtime_dir = workspace_root.join("crates/eryx-wasm-runtime");
+    let wasm_runtime_dir = workspace_root.join("crates/eryx-guest-python");
     let out_dir = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR not set"));
 
     let sources_hash = guest_sources_hash(workspace_root);
@@ -70,7 +80,7 @@ fn main() {
         manifest_dir.join("prebuilt").display()
     );
     // Rerun if the vendored CPython/libc blobs are re-vendored. Without this a
-    // warm cargo cache keeps the previously linked runtime.wasm, so a lib swap
+    // warm cargo cache keeps the previously linked runtime-python.wasm, so a lib swap
     // silently tests the old component.
     println!(
         "cargo::rerun-if-changed={}",
@@ -78,6 +88,18 @@ fn main() {
     );
     // Rerun if docs.rs env changes
     println!("cargo::rerun-if-env-changed=DOCS_RS");
+    // The JS guest is only built on request, so only watched then: changing it
+    // must not re-run the Python build.
+    println!("cargo::rerun-if-env-changed=BUILD_ERYX_JS_RUNTIME");
+    let build_js = env::var("BUILD_ERYX_JS_RUNTIME").is_ok();
+    if build_js {
+        for source in JS_GUEST_SOURCES {
+            println!(
+                "cargo::rerun-if-changed={}",
+                workspace_root.join(source).display()
+            );
+        }
+    }
 
     // docs.rs sandbox: no WASM build tools available, write empty placeholders
     if env::var("DOCS_RS").is_ok() {
@@ -130,6 +152,10 @@ fn main() {
         println!("cargo::warning={msg}");
     }
 
+    if build_js {
+        build_js_runtime(&manifest_dir, workspace_root);
+    }
+
     if build_requested {
         // Full build requested - build everything from scratch
         build_late_linking(&manifest_dir, &wasm_runtime_dir, sources_hash.as_deref());
@@ -140,7 +166,7 @@ fn main() {
         // The Rust cache may contain stale OUT_DIR artifacts from a previous build
         // (e.g., from main branch) that don't match the current branch's WIT.
         // CI overwrites prebuilt/ with the output of the same run's
-        // build-eryx-runtime job, so there it always matches the current branch.
+        // build-runtime-python job, so there it always matches the current branch.
         if has_prebuilt {
             eprintln!("Using pre-built late-linking artifacts from prebuilt/");
             std::fs::copy(&prebuilt_runtime, &out_runtime_zst)
@@ -186,11 +212,11 @@ fn main() {
     }
 }
 
-/// Build the late-linking artifacts and runtime.wasm, and stamp OUT_DIR with
+/// Build the late-linking artifacts and runtime-python.wasm, and stamp OUT_DIR with
 /// the hash of the guest sources they were built from.
 fn build_late_linking(manifest_dir: &Path, wasm_runtime_dir: &Path, sources_hash: Option<&str>) {
-    let runtime_so = build_wasm_runtime(wasm_runtime_dir);
-    build_component(manifest_dir, &runtime_so);
+    let runtime_so = build_python_runtime(wasm_runtime_dir);
+    build_python_component(manifest_dir, &runtime_so);
     if let Some(hash) = sources_hash {
         let out_dir = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR not set"));
         std::fs::write(out_dir.join(SOURCES_STAMP), hash).expect("failed to write sources stamp");
@@ -271,17 +297,66 @@ fn mise_var(workspace_root: &Path, key: &str) -> String {
         .to_string()
 }
 
-/// Build the eryx-wasm-runtime shared library.
-/// Returns the path to the built liberyx_runtime.so.
-fn build_wasm_runtime(wasm_runtime_dir: &Path) -> PathBuf {
+/// Build the eryx-guest-python shared library, and its compressed copy for
+/// late linking. Returns the path to the built liberyx_runtime.so.
+fn build_python_runtime(wasm_runtime_dir: &Path) -> PathBuf {
+    let out_dir = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR not set"));
+    let workspace_root = wasm_runtime_dir.parent().unwrap().parent().unwrap();
+    let runtime_so = build_guest_library(
+        workspace_root,
+        &GuestLibrary {
+            crate_dir: wasm_runtime_dir,
+            staticlib: "liberyx_guest_python.a",
+            library: "liberyx_runtime.so",
+            target_dir: "wasm-runtime-target",
+            build_c_deps: false,
+        },
+    );
+
+    // Also copy to a stable location in the guest crate
+    let stable_location = wasm_runtime_dir.join("target/liberyx_runtime.so");
+    std::fs::create_dir_all(wasm_runtime_dir.join("target")).ok();
+    std::fs::copy(&runtime_so, &stable_location).expect("failed to copy runtime.so");
+    eprintln!("Copied to: {}", stable_location.display());
+
+    // Also compress for late-linking support
+    let runtime_bytes = std::fs::read(&runtime_so).expect("failed to read runtime.so");
+    let compressed = zstd::encode_all(runtime_bytes.as_slice(), 19).expect("compress failed");
+    let compressed_path = out_dir.join("liberyx_runtime.so.zst");
+    std::fs::write(&compressed_path, &compressed).expect("failed to write compressed runtime");
+    eprintln!(
+        "Compressed runtime: {} bytes -> {} bytes",
+        runtime_bytes.len(),
+        compressed.len()
+    );
+
+    runtime_so
+}
+
+/// A guest crate built into a wit-dylib interpreter shared library.
+struct GuestLibrary<'a> {
+    /// The guest crate's directory.
+    crate_dir: &'a Path,
+    /// The staticlib cargo produces for it.
+    staticlib: &'a str,
+    /// The shared library to link it into.
+    library: &'a str,
+    /// The nested cargo target directory, under OUT_DIR.
+    target_dir: &'a str,
+    /// Whether the crate compiles C dependencies with the cc crate (QuickJS),
+    /// which then need the WASI SDK and -fPIC.
+    build_c_deps: bool,
+}
+
+/// Build a guest crate into its interpreter shared library, in OUT_DIR.
+fn build_guest_library(workspace_root: &Path, guest: &GuestLibrary<'_>) -> PathBuf {
     // Use a separate target directory inside OUT_DIR to avoid cargo lock contention
     // This is the key insight from componentize-py - nested cargo must use different target
     let out_dir = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR not set"));
-    let nested_target_dir = out_dir.join("wasm-runtime-target");
+    let nested_target_dir = out_dir.join(guest.target_dir);
 
     std::fs::create_dir_all(&out_dir).expect("failed to create output directory");
 
-    let workspace_root = wasm_runtime_dir.parent().unwrap().parent().unwrap();
     let toolchain = mise_var(workspace_root, "guest_rust_toolchain");
     let wasi_sdk_version = mise_var(workspace_root, "wasi_sdk_version");
 
@@ -295,13 +370,13 @@ fn build_wasm_runtime(wasm_runtime_dir: &Path) -> PathBuf {
     let clang = wasi_sdk.join("bin/clang");
     let sysroot = wasi_sdk.join("share/wasi-sysroot");
 
-    eprintln!("Building eryx-wasm-runtime...");
+    eprintln!("Building {}...", guest.crate_dir.display());
     eprintln!("  WASI SDK: {}", wasi_sdk.display());
 
-    // Build eryx-wasm-runtime staticlib with PIC for wasm32-wasip1, with the
-    // nightly pinned in mise.toml (build-std needs nightly).
+    // Build the staticlib with PIC for wasm32-wasip1, with the nightly pinned
+    // in mise.toml (build-std needs nightly).
     let mut cmd = Command::new("rustup");
-    cmd.current_dir(wasm_runtime_dir)
+    cmd.current_dir(guest.crate_dir)
         .arg("run")
         .arg(&toolchain)
         .arg("cargo")
@@ -329,15 +404,28 @@ fn build_wasm_runtime(wasm_runtime_dir: &Path) -> PathBuf {
     // IMPORTANT: Use separate target dir to avoid cargo lock contention
     cmd.env("RUSTFLAGS", "-C relocation-model=pic");
     cmd.env("CARGO_TARGET_DIR", &nested_target_dir);
+    if guest.build_c_deps {
+        // rquickjs-sys compiles quickjs-ng with `$WASI_SDK/bin/clang` and would
+        // otherwise download its own WASI SDK. It overwrites `CFLAGS`, but the
+        // cc crate prefers the target-specific variable, which also lets us add
+        // -fPIC so the C objects can go into a shared library.
+        cmd.env("WASI_SDK", &wasi_sdk);
+        cmd.env(
+            "CFLAGS_wasm32_wasip1",
+            format!("--sysroot={} -fPIC", sysroot.display()),
+        );
+    }
 
     let status = cmd
         .status()
-        .expect("failed to run cargo build for eryx-wasm-runtime");
+        .unwrap_or_else(|e| panic!("failed to run cargo build for {}: {e}", guest.staticlib));
     if !status.success() {
-        panic!("cargo build for eryx-wasm-runtime failed");
+        panic!("cargo build for {} failed", guest.staticlib);
     }
 
-    let staticlib = nested_target_dir.join("wasm32-wasip1/release/liberyx_wasm_runtime.a");
+    let staticlib = nested_target_dir
+        .join("wasm32-wasip1/release")
+        .join(guest.staticlib);
     if !staticlib.exists() {
         panic!("staticlib not found at {}", staticlib.display());
     }
@@ -345,13 +433,13 @@ fn build_wasm_runtime(wasm_runtime_dir: &Path) -> PathBuf {
     eprintln!("Compiling clock stubs...");
 
     // Compile clock_stubs.c
-    let clock_stubs_o = out_dir.join("clock_stubs.o");
+    let clock_stubs_o = out_dir.join(format!("{}-clock_stubs.o", guest.target_dir));
     let status = Command::new(&clang)
         .arg("--target=wasm32-wasip1")
         .arg(format!("--sysroot={}", sysroot.display()))
         .arg("-fPIC")
         .arg("-c")
-        .arg(wasm_runtime_dir.join("clock_stubs.c"))
+        .arg(workspace_root.join("crates/eryx-guest-python/clock_stubs.c"))
         .arg("-o")
         .arg(&clock_stubs_o)
         .status()
@@ -363,7 +451,7 @@ fn build_wasm_runtime(wasm_runtime_dir: &Path) -> PathBuf {
     eprintln!("Linking shared library...");
 
     // Link shared library
-    let runtime_so = out_dir.join("liberyx_runtime.so");
+    let runtime_so = out_dir.join(guest.library);
     let status = Command::new(&clang)
         .arg("--target=wasm32-wasip1")
         .arg(format!("--sysroot={}", sysroot.display()))
@@ -378,56 +466,25 @@ fn build_wasm_runtime(wasm_runtime_dir: &Path) -> PathBuf {
         .status()
         .expect("failed to link shared library");
     if !status.success() {
-        panic!("clang failed to link shared library");
+        panic!("clang failed to link {}", guest.library);
     }
 
-    // Also copy to a stable location in the wasm-runtime crate
-    let stable_location = wasm_runtime_dir.join("target/liberyx_runtime.so");
-    std::fs::create_dir_all(wasm_runtime_dir.join("target")).ok();
-    std::fs::copy(&runtime_so, &stable_location).expect("failed to copy runtime.so");
-
     eprintln!("Built: {}", runtime_so.display());
-    eprintln!("Copied to: {}", stable_location.display());
-
-    // Also compress for late-linking support
-    let runtime_bytes = std::fs::read(&runtime_so).expect("failed to read runtime.so");
-    let compressed = zstd::encode_all(runtime_bytes.as_slice(), 19).expect("compress failed");
-    let compressed_path = out_dir.join("liberyx_runtime.so.zst");
-    std::fs::write(&compressed_path, &compressed).expect("failed to write compressed runtime");
-    eprintln!(
-        "Compressed runtime: {} bytes -> {} bytes",
-        runtime_bytes.len(),
-        compressed.len()
-    );
-
     runtime_so
 }
 
-/// Build the WASM component by linking all libraries together.
-fn build_component(manifest_dir: &Path, runtime_so: &Path) {
-    eprintln!("Building WASM component...");
+/// Read a vendored library from `libs/`, decompressing it in memory.
+fn read_lib(manifest_dir: &Path, file: &str) -> Vec<u8> {
+    let path = manifest_dir.join("libs").join(format!("{file}.zst"));
+    let compressed =
+        std::fs::read(&path).unwrap_or_else(|e| panic!("failed to read {}: {e}", path.display()));
+    zstd::decode_all(compressed.as_slice())
+        .unwrap_or_else(|e| panic!("failed to decompress {}: {e}", path.display()))
+}
 
-    // Load the vendored libraries, decompressing them in memory.
-    let read_lib = |file: &str| {
-        let path = manifest_dir.join("libs").join(format!("{file}.zst"));
-        let compressed = std::fs::read(&path)
-            .unwrap_or_else(|e| panic!("failed to read {}: {e}", path.display()));
-        zstd::decode_all(compressed.as_slice())
-            .unwrap_or_else(|e| panic!("failed to decompress {}: {e}", path.display()))
-    };
-    let libc = read_lib("libc.so");
-    let libcxx = read_lib("libc++.so");
-    let libcxxabi = read_lib("libc++abi.so");
-    let wasi_clocks = read_lib("libwasi-emulated-process-clocks.so");
-    let wasi_signal = read_lib("libwasi-emulated-signal.so");
-    let wasi_mman = read_lib("libwasi-emulated-mman.so");
-    let wasi_getpid = read_lib("libwasi-emulated-getpid.so");
-    let libpython = read_lib("libpython3.14.so");
-    let adapter = read_lib("wasi_snapshot_preview1.reactor.wasm");
-
-    // Load our runtime
-    let runtime = std::fs::read(runtime_so).expect("failed to read liberyx_runtime.so");
-
+/// Generate the wit-dylib bindings for the `sandbox` world, with `interpreter`
+/// as the shared library that implements it.
+fn sandbox_bindings(manifest_dir: &Path, interpreter: &str) -> Vec<u8> {
     // Parse WIT directory (includes deps/)
     let wit_dir = manifest_dir.join("wit");
     let mut resolve = wit_parser::Resolve::default();
@@ -439,9 +496,8 @@ fn build_component(manifest_dir: &Path, runtime_so: &Path) {
         .select_world(&[pkg_id], Some("sandbox"))
         .expect("failed to select world");
 
-    // Generate bindings pointing to our runtime
     let mut opts = wit_dylib::DylibOpts {
-        interpreter: Some("liberyx_runtime.so".to_string()),
+        interpreter: Some(interpreter.to_string()),
         async_: wit_dylib::AsyncFilterSet::default(),
         stack_pointer: wit_dylib::StackPointer::Global,
     };
@@ -456,6 +512,60 @@ fn build_component(manifest_dir: &Path, runtime_so: &Path) {
         false,
     )
     .expect("failed to embed component metadata");
+    bindings
+}
+
+/// Link `libs`, in link order, into a component with the WASI adapter, and
+/// write it to `crates/eryx-runtime/<file>`.
+fn encode_component(manifest_dir: &Path, libs: &[(&str, &[u8])], file: &str) {
+    // wit-component 0.257 turned `Linker` into a `&mut self` builder and moved
+    // `validate`/`adapter` onto the inner `ComponentEncoder`.
+    let mut linker = wit_component::Linker::default();
+    linker.use_built_in_libdl(true);
+    linker.encoder().validate(true);
+    for (name, bytes) in libs {
+        linker
+            .library(name, bytes, false)
+            .unwrap_or_else(|e| panic!("failed to add {name}: {e}"));
+    }
+
+    // WASI adapter
+    linker
+        .encoder()
+        .adapter(
+            "wasi_snapshot_preview1",
+            &read_lib(manifest_dir, "wasi_snapshot_preview1.reactor.wasm"),
+        )
+        .expect("failed to add WASI adapter");
+
+    let component = linker.encode().expect("failed to encode component");
+
+    let component_path = manifest_dir.join(file);
+    std::fs::write(&component_path, &component)
+        .unwrap_or_else(|e| panic!("failed to write {file}: {e}"));
+
+    eprintln!(
+        "Built component: {} ({} bytes)",
+        component_path.display(),
+        component.len()
+    );
+}
+
+/// Build runtime-python.wasm, and the compressed bindings for late linking.
+fn build_python_component(manifest_dir: &Path, runtime_so: &Path) {
+    eprintln!("Building Python component...");
+
+    let read = |file| read_lib(manifest_dir, file);
+    let libc = read("libc.so");
+    let libcxx = read("libc++.so");
+    let libcxxabi = read("libc++abi.so");
+    let wasi_clocks = read("libwasi-emulated-process-clocks.so");
+    let wasi_signal = read("libwasi-emulated-signal.so");
+    let wasi_mman = read("libwasi-emulated-mman.so");
+    let wasi_getpid = read("libwasi-emulated-getpid.so");
+    let libpython = read("libpython3.14.so");
+    let runtime = std::fs::read(runtime_so).expect("failed to read liberyx_runtime.so");
+    let bindings = sandbox_bindings(manifest_dir, "liberyx_runtime.so");
 
     // Also compress bindings for late-linking support
     let out_dir = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR not set"));
@@ -468,12 +578,6 @@ fn build_component(manifest_dir: &Path, runtime_so: &Path) {
         bindings_compressed.len()
     );
 
-    // Link all libraries together
-    // wit-component 0.257 turned `Linker` into a `&mut self` builder and moved
-    // `validate`/`adapter` onto the inner `ComponentEncoder`.
-    let mut linker = wit_component::Linker::default();
-    linker.use_built_in_libdl(true);
-    linker.encoder().validate(true);
     let libs = link_order::BaseLibraries {
         wasi_clocks: &wasi_clocks,
         wasi_signal: &wasi_signal,
@@ -486,29 +590,41 @@ fn build_component(manifest_dir: &Path, runtime_so: &Path) {
         runtime: &runtime,
         bindings: &bindings,
     };
-    for (name, bytes) in libs.in_link_order() {
-        linker
-            .library(name, bytes, false)
-            .unwrap_or_else(|e| panic!("failed to add {name}: {e}"));
-    }
+    encode_component(manifest_dir, &libs.in_link_order(), "runtime-python.wasm");
+}
 
-    // WASI adapter
-    linker
-        .encoder()
-        .adapter("wasi_snapshot_preview1", &adapter)
-        .expect("failed to add WASI adapter");
-
-    let component = linker.encode().expect("failed to encode component");
-
-    // Write the component to runtime.wasm in the crate directory
-    let component_path = manifest_dir.join("runtime.wasm");
-    std::fs::write(&component_path, &component).expect("failed to write runtime.wasm");
-
-    eprintln!(
-        "Built component: {} ({} bytes)",
-        component_path.display(),
-        component.len()
+/// Build the QuickJS guest into runtime-javascript.wasm: the same pipeline as
+/// CPython, against the same vendored libc, minus libpython and libc++.
+fn build_js_runtime(manifest_dir: &Path, workspace_root: &Path) {
+    let runtime_so = build_guest_library(
+        workspace_root,
+        &GuestLibrary {
+            crate_dir: &workspace_root.join("crates/eryx-guest-js"),
+            staticlib: "liberyx_guest_js.a",
+            library: "liberyx_js_runtime.so",
+            target_dir: "wasm-js-runtime-target",
+            build_c_deps: true,
+        },
     );
+    eprintln!("Building JavaScript component...");
+    let read = |file| read_lib(manifest_dir, file);
+    let wasi_clocks = read("libwasi-emulated-process-clocks.so");
+    let wasi_signal = read("libwasi-emulated-signal.so");
+    let wasi_mman = read("libwasi-emulated-mman.so");
+    let wasi_getpid = read("libwasi-emulated-getpid.so");
+    let libc = read("libc.so");
+    let runtime = std::fs::read(&runtime_so).expect("failed to read liberyx_js_runtime.so");
+    let bindings = sandbox_bindings(manifest_dir, "liberyx_js_runtime.so");
+    let libs: [(&str, &[u8]); 7] = [
+        ("libwasi-emulated-process-clocks.so", &wasi_clocks),
+        ("libwasi-emulated-signal.so", &wasi_signal),
+        ("libwasi-emulated-mman.so", &wasi_mman),
+        ("libwasi-emulated-getpid.so", &wasi_getpid),
+        ("libc.so", &libc),
+        ("liberyx_js_runtime.so", &runtime),
+        ("liberyx_bindings.so", &bindings),
+    ];
+    encode_component(manifest_dir, &libs, "runtime-javascript.wasm");
 }
 
 /// Find the WASI SDK: `WASI_SDK_PATH` if set, else the mise-managed install of

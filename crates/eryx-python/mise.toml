@@ -23,19 +23,19 @@ uv = "latest"
 [tasks.wasm-build]
 description = "Build eryx WASM runtime (delegates to root mise task)"
 sources = [
-  "../eryx-wasm-runtime/src/**/*.rs",
-  "../eryx-wasm-runtime/Cargo.toml",
+  "../eryx-guest-python/src/**/*.rs",
+  "../eryx-guest-python/Cargo.toml",
   "../eryx-runtime/wit/**/*.wit",
 ]
-outputs = ["../eryx-runtime/runtime.wasm"]
-run = "cd ../.. && mise run build-eryx-runtime"
+outputs = ["../eryx-runtime/runtime-python.wasm"]
+run = "cd ../.. && mise run build-runtime-python"
 
 [tasks.precompile]
 description = "Precompile WASM with Python pre-init (delegates to root mise task)"
 depends = ["wasm-build"]
-sources = ["../eryx-runtime/runtime.wasm"]
-outputs = ["../eryx-runtime/runtime.cwasm"]
-run = "cd ../.. && mise run precompile-eryx-runtime-preinit"
+sources = ["../eryx-runtime/runtime-python.wasm"]
+outputs = ["../eryx-runtime/runtime-python.cwasm"]
+run = "cd ../.. && mise run precompile-runtime-python"
 
 # =============================================================================
 # Python environment
@@ -59,7 +59,7 @@ sources = [
   "Cargo.toml",
   "pyproject.toml",
   "python/**/*.py",
-  "../eryx-runtime/runtime.cwasm",
+  "../eryx-runtime/runtime-python.cwasm",
   "../eryx-runtime/prebuilt/*.so.zst",
 ]
 outputs = [".venv/lib/**/eryx/_eryx.abi3.so"]

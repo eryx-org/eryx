@@ -21,7 +21,7 @@ fn runtime_wasm_path() -> PathBuf {
         .parent()
         .unwrap_or_else(|| std::path::Path::new("."))
         .join("eryx-runtime")
-        .join("runtime.wasm")
+        .join("runtime-python.wasm")
 }
 
 #[cfg(not(feature = "embedded"))]
@@ -39,7 +39,7 @@ fn stdlib_path() -> PathBuf {
     PathBuf::from(manifest_dir)
         .parent()
         .unwrap_or_else(|| std::path::Path::new("."))
-        .join("eryx-wasm-runtime")
+        .join("eryx-guest-python")
         .join("tests")
         .join("python-stdlib")
 }

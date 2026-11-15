@@ -219,7 +219,7 @@ impl Sandbox {
     ///
     /// ```rust,ignore
     /// let sandbox = Sandbox::builder()
-    ///     .with_wasm_file("runtime.wasm")
+    ///     .with_wasm_file("runtime-python.wasm")
     ///     .with_python_stdlib("/path/to/stdlib")
     ///     .build()?;
     /// ```
@@ -758,7 +758,8 @@ impl Sandbox {
             .check_secret_hosts(&secrets)
             .map_err(ErrorKind::Initialization)?;
         crate::secrets::check_placeholders(&secrets).map_err(ErrorKind::Initialization)?;
-        self.preamble = full_preamble(&secrets, &self.library_preamble);
+        self.preamble =
+            language_preamble(self.executor.language(), &secrets, &self.library_preamble)?;
         self.net_config = Some(config);
         self.secrets = secrets;
         Ok(())
@@ -910,6 +911,26 @@ impl Sandbox {
 /// The preinitialized runtime snapshots `os.environ`, so WASI env vars set per
 /// execution would not show up. JSON string literals are valid Python string
 /// literals, unlike Rust's `{:?}` escapes (`\u{1b}`).
+/// The code the guest runs before each execution: [`full_preamble`], which
+/// is Python. The other guests take no preamble yet, so they can't have
+/// secrets (whose placeholders it sets) or library preambles.
+fn language_preamble(
+    language: Language,
+    secrets: &HashMap<String, crate::secrets::SecretConfig>,
+    library_preamble: &str,
+) -> Result<String, Error> {
+    if language == Language::Python {
+        return Ok(full_preamble(secrets, library_preamble));
+    }
+    if !secrets.is_empty() || !library_preamble.is_empty() {
+        return Err(ErrorKind::Initialization(format!(
+            "secrets and library preambles are only supported for Python, not {language}"
+        ))
+        .into());
+    }
+    Ok(String::new())
+}
+
 fn full_preamble(
     secrets: &HashMap<String, crate::secrets::SecretConfig>,
     library_preamble: &str,
@@ -1477,7 +1498,7 @@ impl std::fmt::Debug for PrecompiledFileSource {
 ///
 /// // Without embedded - specify the runtime, and the stdlib unless it can be found
 /// let sandbox = Sandbox::builder()
-///     .with_wasm_file("runtime.wasm")
+///     .with_wasm_file("runtime-python.wasm")
 ///     .with_python_stdlib("/path/to/stdlib")
 ///     .build()?;
 /// ```
@@ -1668,8 +1689,8 @@ impl<L, R> SandboxBuilder<L, R> {
     }
 }
 
-// The embedded runtime is Python's
-impl SandboxBuilder<Python, state::Needs> {
+// The embedded runtime
+impl<L> SandboxBuilder<L, state::Needs> {
     /// Explicitly use the embedded pre-compiled runtime.
     ///
     /// **Note:** You usually don't need to call this. When the `embedded`
@@ -1694,14 +1715,18 @@ impl SandboxBuilder<Python, state::Needs> {
     ///     .with_package("/path/to/numpy-wasi.tar.gz")?  // Has .so files
     ///     .build()?;  // Uses late-linking, not embedded runtime
     /// ```
-    /// Explicitly use the embedded pre-compiled runtime and stdlib.
+    /// Explicitly use the embedded pre-compiled runtime of the builder's
+    /// language (and, for Python, the embedded stdlib). Python's runtime is
+    /// always embedded; JavaScript's and the shell's with the `javascript` and
+    /// `shell` features, or [`build()`](SandboxBuilder::build) fails with
+    /// [`ErrorKind::MissingRuntime`].
     ///
     /// This transitions the builder to a fully-configured state, ready to build.
     ///
     /// **Note:** Consider using [`Sandbox::embedded()`] instead for cleaner code.
     #[cfg(feature = "embedded")]
     #[must_use]
-    pub fn with_embedded_runtime(mut self) -> SandboxBuilder<Python, state::Has> {
+    pub fn with_embedded_runtime(mut self) -> SandboxBuilder<L, state::Has> {
         self.wasm_source = WasmSource::EmbeddedRuntime;
         self.transition()
     }
@@ -1754,7 +1779,7 @@ impl<L> SandboxBuilder<L, state::Needs> {
     ///
     /// ```rust,ignore
     /// // Pre-compile once (safe operation)
-    /// let precompiled = Executor::precompile_file("runtime.wasm")?;
+    /// let precompiled = Executor::precompile_file("runtime-python.wasm")?;
     ///
     /// // Load from pre-compiled (unsafe - you must trust the bytes)
     /// let sandbox = unsafe {
@@ -1835,13 +1860,13 @@ impl<L> SandboxBuilder<L, state::Needs> {
     ///
     /// ```rust,ignore
     /// // Pre-compile once and save to disk
-    /// let precompiled = Executor::precompile_file("runtime.wasm")?;
-    /// std::fs::write("runtime.cwasm", &precompiled)?;
+    /// let precompiled = Executor::precompile_file("runtime-python.wasm")?;
+    /// std::fs::write("runtime-python.cwasm", &precompiled)?;
     ///
     /// // Load from pre-compiled file (unsafe - you must trust the file)
     /// let sandbox = unsafe {
     ///     Sandbox::builder()
-    ///         .with_precompiled_file("runtime.cwasm")
+    ///         .with_precompiled_file("runtime-python.cwasm")
     ///         .with_python_stdlib("/path/to/stdlib")
     ///         .build()?
     /// };
@@ -1893,7 +1918,7 @@ impl<R> SandboxBuilder<Python, R> {
     ///
     /// ```rust,ignore
     /// let sandbox = Sandbox::builder()
-    ///     .with_wasm_file("runtime.wasm")
+    ///     .with_wasm_file("runtime-python.wasm")
     ///     .with_auto_stdlib()?  // Explicit fallible auto-detection
     ///     .build()?;
     /// ```
@@ -2696,6 +2721,7 @@ impl<L: GuestLanguage> SandboxBuilder<L, state::Has> {
     pub fn build(mut self) -> Result<Sandbox, Error> {
         check_duplicate_callback(self.duplicate_callback.take())?;
         self.check_language()?;
+        let preamble = language_preamble(L::LANGUAGE, &self.secrets, &self.preamble)?;
         crate::secrets::check_placeholders(&self.secrets).map_err(ErrorKind::Initialization)?;
         if let Some(net) = &self.net_config {
             net.validate().map_err(ErrorKind::Initialization)?;
@@ -2803,7 +2829,7 @@ impl<L: GuestLanguage> SandboxBuilder<L, state::Has> {
             trace_handler: self.trace_handler,
             output_handler: self.output_handler,
             resource_limits: self.resource_limits,
-            preamble: full_preamble(&self.secrets, &self.preamble),
+            preamble,
             net_config: self.net_config,
             secrets: self.secrets,
             #[cfg(feature = "unstable-vfs")]
@@ -2845,7 +2871,11 @@ impl<L: GuestLanguage> SandboxBuilder<L, state::Has> {
             WasmSource::EmbeddedRuntime => true,
             _ => false,
         };
-        if uses_embedded {
+        #[cfg(feature = "embedded")]
+        let embedded = crate::embedded::has_runtime(language);
+        #[cfg(not(feature = "embedded"))]
+        let embedded = false;
+        if uses_embedded && !embedded {
             return Err(ErrorKind::MissingRuntime { language }.into());
         }
         let mut python_only = Vec::new();
@@ -2914,7 +2944,7 @@ impl<L: GuestLanguage> SandboxBuilder<L, state::Has> {
             #[cfg(feature = "embedded")]
             WasmSource::EmbeddedRuntime => {
                 // Use the optimized path that leverages InstancePreCache
-                Executor::from_embedded_runtime()?
+                Executor::from_embedded_runtime_for(L::LANGUAGE)?
             }
 
             WasmSource::None => {
@@ -2923,7 +2953,7 @@ impl<L: GuestLanguage> SandboxBuilder<L, state::Has> {
                 {
                     tracing::debug!("No WASM source specified, using embedded runtime");
                     // Use the optimized path that leverages InstancePreCache
-                    Executor::from_embedded_runtime()?
+                    Executor::from_embedded_runtime_for(L::LANGUAGE)?
                 }
 
                 #[cfg(not(feature = "embedded"))]
@@ -3990,7 +4020,7 @@ mod tests {
     #[test]
     fn sandbox_builder_wasm_file_not_found() {
         let result = Sandbox::builder()
-            .with_wasm_file("/nonexistent/path/to/runtime.wasm")
+            .with_wasm_file("/nonexistent/path/to/runtime-python.wasm")
             .with_python_stdlib("/fake/stdlib")
             .build();
 
@@ -4035,6 +4065,21 @@ mod tests {
     }
 
     #[test]
+    fn secrets_are_python_only_for_now() {
+        let err = Sandbox::builder()
+            .with_wasm_bytes(vec![])
+            .javascript()
+            .with_secret("TOKEN", "value", vec!["example.com".to_string()])
+            .build()
+            .unwrap_err();
+        assert!(
+            matches!(err.kind(), ErrorKind::Initialization(msg)
+                if msg.contains("secrets") && msg.contains("javascript")),
+            "{err}"
+        );
+    }
+
+    #[test]
     fn site_packages_do_not_carry_over_to_another_language() {
         let err = Sandbox::builder()
             .with_wasm_bytes(vec![])
@@ -4049,7 +4094,7 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "embedded")]
+    #[cfg(all(feature = "embedded", not(feature = "shell")))]
     #[test]
     fn non_python_language_has_no_embedded_runtime() {
         let err = Sandbox::embedded().shell().build().unwrap_err();

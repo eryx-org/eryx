@@ -31,7 +31,7 @@
 /criterion/
 
 # WebAssembly build artifacts
-crates/eryx-runtime/runtime.wasm
+crates/eryx-runtime/runtime-python.wasm
 crates/eryx-runtime/guest_bindings/
 crates/eryx-runtime/__pycache__/
 
@@ -48,14 +48,14 @@ runtime-*.wasm
 # WASI SDK (downloaded, not committed)
 .wasi-sdk/
 
-# eryx-wasm-runtime build artifacts
-crates/eryx-wasm-runtime/target/
-crates/eryx-wasm-runtime/async_intrinsics.wasm
-crates/eryx-wasm-runtime/async_intrinsics.wat
+# eryx-guest-python build artifacts
+crates/eryx-guest-python/target/
+crates/eryx-guest-python/async_intrinsics.wasm
+crates/eryx-guest-python/async_intrinsics.wat
 
-# eryx-wasm-runtime test artifacts (extracted from componentize-py)
-crates/eryx-wasm-runtime/tests/python-stdlib/
-crates/eryx-wasm-runtime/tests/site-packages/
+# eryx-guest-python test artifacts (extracted from componentize-py)
+crates/eryx-guest-python/tests/python-stdlib/
+crates/eryx-guest-python/tests/site-packages/
 
 # Decompressed library files (regenerated from .zst)
 crates/eryx-runtime/libs/decompressed/
@@ -85,7 +85,7 @@ js/testpkg/node_modules/
 
 # Server custom runtime packages (populated by mise download-server-packages)
 crates/eryx-server/packages/
-crates/eryx-server/runtime.cwasm
+crates/eryx-server/runtime-python.cwasm
 
 # Demo example packages (populated at build time by mise copy-examples)
 js/demo/public/examples/

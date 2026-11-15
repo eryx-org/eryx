@@ -13,11 +13,11 @@
 //!
 //! ```rust,ignore
 //! // At build time - compile once:
-//! let precompiled = Executor::precompile_file("runtime.wasm")?;
-//! std::fs::write("runtime.cwasm", precompiled)?;
+//! let precompiled = Executor::precompile_file("runtime-python.wasm")?;
+//! std::fs::write("runtime-python.cwasm", precompiled)?;
 //!
 //! // At runtime - load quickly (unsafe, must trust the file):
-//! let executor = unsafe { Executor::from_precompiled_file("runtime.cwasm")? };
+//! let executor = unsafe { Executor::from_precompiled_file("runtime-python.cwasm")? };
 //! ```
 //!
 //! Alternatively, enable the `embedded` feature for a safe API that
@@ -2813,11 +2813,29 @@ impl Executor {
     #[cfg(feature = "embedded")]
     #[tracing::instrument(name = "Executor::from_embedded_runtime")]
     pub fn from_embedded_runtime() -> std::result::Result<Self, Error> {
-        let cache_key = CacheKey::embedded_runtime();
+        Self::from_embedded_runtime_for(Language::Python)
+    }
 
-        // Get embedded resources (extracts stdlib on first call)
-        let resources = crate::embedded::EmbeddedResources::get()?;
-        let stdlib_path = Some(resources.stdlib_path.clone());
+    /// Create an executor from `language`'s embedded runtime, like
+    /// [`Self::from_embedded_runtime`] does for Python.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ErrorKind::MissingRuntime`] if this build doesn't embed a
+    /// runtime for `language`, or an error if it cannot be extracted or loaded.
+    #[cfg(feature = "embedded")]
+    pub fn from_embedded_runtime_for(language: Language) -> std::result::Result<Self, Error> {
+        let cache_key = CacheKey::embedded_runtime_for(language);
+
+        // Get embedded resources (for Python, extracts the stdlib on first call)
+        let (runtime_path, stdlib_path) = if language == Language::Python {
+            let resources = crate::embedded::EmbeddedResources::get()?;
+            (resources.runtime(), Some(resources.stdlib_path.clone()))
+        } else {
+            let path = crate::embedded::runtime_path(language)?
+                .ok_or(ErrorKind::MissingRuntime { language })?;
+            (path, None)
+        };
 
         // Check InstancePreCache first (fast path)
         if let Some(instance_pre) = InstancePreCache::global().get(&cache_key) {
@@ -2826,7 +2844,7 @@ impl Executor {
                 instance_pre,
                 stdlib_path,
                 library_paths: Vec::new(),
-                language: Language::Python,
+                language,
                 result_variable: "result".to_string(),
                 packages: Vec::new(),
             });
@@ -2834,12 +2852,13 @@ impl Executor {
 
         // Cache miss - load from embedded resources
         // SAFETY: The embedded runtime was pre-compiled at build time from our own
-        // trusted runtime.wasm, so we know it's safe to deserialize.
+        // trusted runtime-<language>.wasm, so we know it's safe to deserialize.
         #[allow(unsafe_code)]
         let mut executor =
-            unsafe { Self::from_precompiled_file_with_key(resources.runtime(), cache_key)? };
+            unsafe { Self::from_precompiled_file_with_key(runtime_path, cache_key)? };
 
         executor.stdlib_path = stdlib_path;
+        executor.language = language;
         Ok(executor)
     }
 
@@ -3481,7 +3500,7 @@ impl Executor {
             pythonpath_parts.push(site_packages_mount_path(i));
         }
 
-        // Mount Python stdlib if configured (required for eryx-wasm-runtime)
+        // Mount Python stdlib if configured (required for eryx-guest-python)
         if let Some(ref stdlib_path) = self.stdlib_path {
             // PYTHONHOME tells Python where to find the standard library
             wasi_builder.env("PYTHONHOME", "/python-stdlib");

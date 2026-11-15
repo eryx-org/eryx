@@ -1,0 +1,65 @@
+[package]
+name = "eryx-guest-shell"
+version = "0.0.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+description = "WASM guest runtime for eryx sandbox - implements the eryx WIT exports with brush (bash)"
+publish = false
+
+# A standalone workspace, so brush's git dependency stays out of eryx's
+# Cargo.lock and native `cargo clippy --workspace` never builds it. Built
+# straight to a component with `mise run build-runtime-shell`.
+[workspace]
+
+[features]
+# Import `eryx:process` to run external commands. The host doesn't provide it
+# yet (#809), so a component built with this feature doesn't instantiate.
+process = []
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+# Upstream main: it now has the host process-launcher hook (#1508), wasm
+# pipelines (#1489) and printf on WASI (#1567), none of them released yet.
+brush-core = { git = "https://github.com/reubeno/brush", rev = "6a688f19", default-features = false, features = ["serde"] }
+brush-builtins = { git = "https://github.com/reubeno/brush", rev = "6a688f19", default-features = false, features = [
+    "builtin.echo",
+    "builtin.printf",
+    "builtin.true",
+    "builtin.false",
+    "builtin.test",
+    "builtin.pwd",
+    "builtin.cd",
+    "builtin.export",
+    "builtin.set",
+    "builtin.unset",
+    "builtin.read",
+    "builtin.declare",
+    "builtin.shift",
+    "builtin.return",
+    "builtin.exit",
+    "builtin.break",
+    "builtin.continue",
+    "builtin.colon",
+    "builtin.dot",
+    "builtin.eval",
+    "builtin.exec",
+    "builtin.type",
+    "builtin.command",
+    "builtin.alias",
+    "builtin.unalias",
+    "builtin.let",
+    "builtin.getopts",
+    "builtin.trap",
+    "builtin.shopt",
+] }
+serde_json = "1"
+tokio = { version = "1", features = ["rt", "sync"] }
+wit-bindgen = "0.57"
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+strip = true

@@ -12,7 +12,7 @@ runs:
         # with checkout timestamps, causing mise to consider sources as
         # equal-or-newer and trigger a full wasm-build from source.
         FUTURE=$(date -d "+5 minutes" +%Y%m%d%H%M.%S)
-        touch -t "$FUTURE" crates/eryx-runtime/runtime.wasm crates/eryx-runtime/runtime.cwasm
+        touch -t "$FUTURE" crates/eryx-runtime/runtime-*.wasm crates/eryx-runtime/runtime-*.cwasm
 
         # Touch prebuilt artifacts if they exist
         if [ -d crates/eryx-runtime/prebuilt ]; then
@@ -51,7 +51,7 @@ runs:
 
         # Check if cwasm changed by comparing checksums
         # This invalidates cached binaries that have old cwasm embedded
-        CWASM_HASH=$(sha256sum crates/eryx-runtime/runtime.cwasm | cut -d' ' -f1)
+        CWASM_HASH=$(sha256sum crates/eryx-runtime/runtime-*.cwasm | sha256sum | cut -d' ' -f1)
         CACHED_HASH=""
         if [ -f target/.cwasm-hash ]; then
           CACHED_HASH=$(cat target/.cwasm-hash)

@@ -37,7 +37,7 @@ jobs:
             js:
               - 'crates/eryx-core/**'
               - 'crates/eryx/**'
-              - 'crates/eryx-wasm-runtime/**'
+              - 'crates/eryx-guest-python/**'
               - 'crates/eryx-runtime/**'
               - 'js/**'
               - 'Cargo.lock'
@@ -66,14 +66,14 @@ jobs:
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
-            crates/eryx-runtime/runtime.wasm
-          key: wasm-runtime-v3-${{ hashFiles('crates/eryx-wasm-runtime/src/**', 'crates/eryx-wasm-runtime/clock_stubs.c', 'crates/eryx-wasm-runtime/Cargo.toml', 'crates/wit-dylib-ffi/**', 'crates/eryx-runtime/build.rs', 'crates/eryx-runtime/src/**', 'crates/eryx-runtime/wit/**', 'crates/eryx-runtime/libs/*.zst', 'Cargo.lock', 'Cargo.toml', 'mise.toml') }}
+            crates/eryx-runtime/runtime-python.wasm
+          key: wasm-runtime-v3-${{ hashFiles('crates/eryx-guest-python/src/**', 'crates/eryx-guest-python/clock_stubs.c', 'crates/eryx-guest-python/Cargo.toml', 'crates/wit-dylib-ffi/**', 'crates/eryx-runtime/build.rs', 'crates/eryx-runtime/src/**', 'crates/eryx-runtime/wit/**', 'crates/eryx-runtime/libs/*.zst', 'Cargo.lock', 'Cargo.toml', 'mise.toml') }}
 
       - name: Touch cached WASM
         if: steps.wasm-cache.outputs.cache-hit == 'true'
         run: |
-          # Touch runtime.wasm so mise considers wasm-build task current
-          touch crates/eryx-runtime/runtime.wasm
+          # Touch runtime-python.wasm so mise considers wasm-build task current
+          touch crates/eryx-runtime/runtime-python.wasm
 
       - name: Configure Rust cache
         uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
@@ -85,7 +85,7 @@ jobs:
       - name: Force rebuild (cache may have stale timestamps)
         if: steps.wasm-cache.outputs.cache-hit != 'true'
         run: |
-          find crates/eryx-wasm-runtime/src -name "*.rs" -exec touch {} +
+          find crates/eryx-guest-python/src -name "*.rs" -exec touch {} +
           find crates/eryx-runtime/wit -name "*.wit" -exec touch {} +
 
       - name: Build and test JavaScript bindings

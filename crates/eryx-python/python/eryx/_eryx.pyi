@@ -77,6 +77,10 @@ def configure_shared_engine(
     ...
 
 
+
+Language = Literal["python", "javascript", "shell"]
+"""A guest language a Sandbox or Session can run."""
+
 class SecretDict(TypedDict, total=False):
     """Dictionary format for configuring a secret.
 
@@ -677,6 +681,7 @@ class Sandbox:
     def __new__(
         cls,
         *,
+        language: Optional[Language] = None,
         resource_limits: Optional[ResourceLimits] = None,
         network: Optional[NetConfig] = None,
         callbacks: Optional[Union[CallbackRegistry, Sequence[CallbackDict]]] = None,
@@ -694,6 +699,8 @@ class Sandbox:
         """Create a new sandbox with the embedded Python runtime.
 
         Args:
+            language: The guest language to run: "python" (the default),
+                "javascript" or "shell".
             resource_limits: Optional resource limits for execution.
             network: Optional network configuration. If provided, enables networking.
             callbacks: Optional callbacks that sandboxed code can invoke.
@@ -1320,6 +1327,7 @@ class Session:
     def __new__(
         cls,
         *,
+        language: Optional[Language] = None,
         vfs: Optional[VfsStorage] = None,
         vfs_mount_path: Optional[str] = None,
         resource_limits: Optional[ResourceLimits] = None,
@@ -1339,6 +1347,8 @@ class Session:
         unlike `Sandbox` which runs each execution in isolation.
 
         Args:
+            language: The guest language to run: "python" (the default),
+                "javascript" or "shell".
             vfs: Optional VfsStorage for persistent file storage.
                 Files written to `/data/*` will persist across executions.
             vfs_mount_path: Custom mount path for VFS (default: "/data").

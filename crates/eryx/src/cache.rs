@@ -144,8 +144,15 @@ impl CacheKey {
     /// embedded runtime when no native extensions are present.
     #[must_use]
     pub fn embedded_runtime() -> Self {
+        Self::embedded_runtime_for(crate::Language::Python)
+    }
+
+    /// Cache key for `language`'s embedded runtime. Python's is all zeros (no
+    /// extensions); the others fill the hash with their snapshot tag, which a
+    /// real extensions hash won't produce.
+    pub(crate) fn embedded_runtime_for(language: crate::Language) -> Self {
         Self {
-            extensions_hash: [0u8; 32], // All zeros = no extensions
+            extensions_hash: [language.snapshot_tag(); 32],
             eryx_version: env!("CARGO_PKG_VERSION"),
             wasmtime_version: wasmtime_version(),
         }

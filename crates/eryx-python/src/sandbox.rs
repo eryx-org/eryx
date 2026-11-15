@@ -100,6 +100,8 @@ impl Sandbox {
     /// no per-line tracing overhead.
     ///
     /// Args:
+    ///     language: The guest language to run: "python" (the default),
+    ///         "javascript" or "shell".
     ///     resource_limits: Optional resource limits for execution.
     ///     network: Optional network configuration. If provided, enables networking.
     ///     callbacks: Optional callbacks that sandboxed code can invoke.
@@ -149,10 +151,11 @@ impl Sandbox {
     ///     )
     ///     sandbox = factory.create_sandbox()
     #[new]
-    #[pyo3(signature = (*, resource_limits=None, network=None, callbacks=None, mcp=None, secrets=None, scrub_stdout=None, scrub_stderr=None, scrub_result=None, scrub_files=None, volumes=None, on_stdout=None, on_stderr=None, result_variable=None))]
+    #[pyo3(signature = (*, language=None, resource_limits=None, network=None, callbacks=None, mcp=None, secrets=None, scrub_stdout=None, scrub_stderr=None, scrub_result=None, scrub_files=None, volumes=None, on_stdout=None, on_stderr=None, result_variable=None))]
     #[allow(clippy::too_many_arguments)]
     fn new(
         py: Python<'_>,
+        language: Option<&str>,
         resource_limits: Option<ResourceLimits>,
         network: Option<NetConfig>,
         callbacks: Option<Bound<'_, PyAny>>,
@@ -167,6 +170,7 @@ impl Sandbox {
         on_stderr: Option<Py<PyAny>>,
         result_variable: Option<String>,
     ) -> PyResult<Self> {
+        let language = parse_language(language)?;
         let runtime = crate::error::make_runtime()?;
 
         // Build the eryx sandbox with embedded runtime. Trace collection
@@ -232,9 +236,8 @@ impl Sandbox {
             });
         }
 
-        // pyeryx runs Python only until it can select a language (#821). The
-        // configuration above is language-neutral and carries over.
-        let inner = match eryx::Language::Python {
+        // The configuration above is language-neutral and carries over.
+        let inner = match language {
             eryx::Language::Python => builder.build(),
             eryx::Language::JavaScript => builder.javascript().build(),
             eryx::Language::Shell => builder.shell().build(),
@@ -432,6 +435,14 @@ pub(crate) fn run_cancellable(
 ///
 /// Expected format: `{"NAME": {"value": "secret", "allowed_hosts": ["host.com"]}}`
 /// The `allowed_hosts` key is optional and defaults to an empty list.
+/// Parse the `language` argument; `None` is Python.
+pub(crate) fn parse_language(language: Option<&str>) -> PyResult<eryx::Language> {
+    language.map_or(Ok(eryx::Language::Python), |name| {
+        name.parse()
+            .map_err(pyo3::exceptions::PyValueError::new_err)
+    })
+}
+
 pub(crate) fn apply_secrets<L, R>(
     mut builder: eryx::SandboxBuilder<L, R>,
     secrets_dict: &Bound<'_, PyDict>,

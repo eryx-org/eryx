@@ -144,7 +144,7 @@ async fn pool_rejects_builder_settings_it_would_drop() {
 async fn pool_accepts_precompiled_bytes() {
     let cwasm = std::fs::read(concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/../eryx-runtime/runtime.cwasm"
+        "/../eryx-runtime/runtime-python.cwasm"
     ))
     .unwrap();
     // SAFETY: the workspace's own precompiled runtime.

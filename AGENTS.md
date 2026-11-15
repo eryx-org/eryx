@@ -26,12 +26,15 @@ crates/
 │   ├── examples/          # Usage examples
 │   └── benches/           # Criterion benchmarks
 ├── eryx-runtime/          # WASM runtime packaging
-│   ├── runtime.wasm       # Built WASM component (~47MB)
-│   ├── runtime.cwasm      # Pre-compiled native code (~52MB)
-│   ├── runtime.wit        # WIT interface definition
+│   ├── runtime-<language>.wasm   # Built WASM components (python, javascript, shell)
+│   ├── runtime-<language>.cwasm  # Pre-compiled native code
+│   ├── wit/runtime.wit    # WIT interface definition
 │   └── libs/              # WASI libraries (zstd compressed)
-├── eryx-wasm-runtime/     # Rust code compiled TO WASM (guest side)
+├── eryx-guest-python/     # CPython guest, compiled TO WASM
 │   └── src/lib.rs         # WIT exports, Python FFI
+├── eryx-guest-js/         # QuickJS guest, built the same way as CPython's
+├── eryx-guest-shell/      # brush (bash) guest: a plain wasip2 component,
+│                          # in its own workspace (not a root workspace member)
 ├── eryx-python/           # Python bindings (PyO3/maturin)
 ├── eryx-precompile/       # CLI tool for AOT compilation
 └── eryx-vfs/              # Virtual filesystem for WASM
@@ -57,34 +60,43 @@ mise run test          # Run tests with embedded WASM (~0.1s)
 mise run lint          # cargo clippy with all warnings
 mise run lint-fix      # Auto-fix clippy warnings
 mise run fmt           # cargo fmt
-mise run build-eryx-runtime  # Build Python WASM component
-mise run precompile-eryx-runtime-preinit # Pre-compile with preinit snapshot
+mise run build-runtime-python  # Build Python WASM component
+mise run precompile-runtime-python # Pre-compile with preinit snapshot
+mise run precompile-runtime-javascript  # Build + pre-compile the JS runtime
+mise run precompile-runtime-shell       # Build + pre-compile the shell runtime
 ```
 
 See `mise.toml` for all available tasks.
 
 ## WASM Runtime Build Pipeline
 
-Eryx embeds a Python WASM runtime for fast startup. Understanding this pipeline is essential:
+Eryx embeds a WASM runtime per guest language for fast startup: Python's
+always, JavaScript's and the shell's with the `javascript` and `shell` cargo
+features. Each runtime has its own `build-runtime-<language>` and
+`precompile-runtime-<language>` mise tasks, and changing one guest doesn't
+rebuild the others. The stages below are Python's; JavaScript goes through the
+same wit-dylib linking (`BUILD_ERYX_JS_RUNTIME`) without preinit or late
+linking, and the shell is a plain `cargo build --target wasm32-wasip2`.
+Understanding this pipeline is essential:
 
 ### Build Stages
 
-1. **Build WASM** (`mise run build-eryx-runtime`)
-   - Compiles `eryx-wasm-runtime` to WebAssembly
-   - Outputs: `crates/eryx-runtime/runtime.wasm`
+1. **Build WASM** (`mise run build-runtime-python`)
+   - Compiles `eryx-guest-python` to WebAssembly
+   - Outputs: `crates/eryx-runtime/runtime-python.wasm`
 
 2. **Build Late-Linking Artifacts** (`mise run build-preinit`)
    - Builds native shared libraries for host functions (networking, etc.)
    - Outputs: `liberyx_runtime.so.zst` and related artifacts
    - Required for preinit to link against host capabilities
 
-3. **Precompile with Preinit** (`mise run precompile-eryx-runtime-preinit`)
+3. **Precompile with Preinit** (`mise run precompile-runtime-python`)
    - AOT compiles WASM to native code
    - Creates a preinitialized snapshot (Python interpreter already started)
-   - Outputs: `crates/eryx-runtime/runtime.cwasm`
+   - Outputs: `crates/eryx-runtime/runtime-python.cwasm`
 
 4. **Embed at Compile Time**
-   - `runtime.cwasm` is included via `include_bytes!()` in Rust code
+   - `runtime-python.cwasm` is included via `include_bytes!()` in Rust code
    - Tests and binaries load this precompiled + preinitialized runtime
    - Result: ~0.1s startup vs ~5s without precompilation
 
@@ -119,8 +131,8 @@ This project has multiple layers of caching that can cause confusing "stale buil
 | **Cargo target/** | `target/` | Automatic (mtime) | After `git checkout`, cache restore, or clock skew |
 | **mise task cache** | Internal | mtime of sources vs outputs | When cargo cache has newer timestamps than sources |
 | **Embedded runtime** | `~/.cache/eryx/` (`$XDG_CACHE_HOME/eryx`, else `$TMPDIR/eryx-<uid>`) | Content hash in filename | Old versions accumulate; shouldn't cause staleness |
-| **Python extension** | `_eryx.abi3.so` | `maturin develop` | After changing `eryx-wasm-runtime` Rust code |
-| **WASM artifacts** | `crates/eryx-runtime/runtime.{wasm,cwasm}` | `mise run build-eryx-runtime` | After changing `eryx-wasm-runtime` code |
+| **Python extension** | `_eryx.abi3.so` | `maturin develop` | After changing `eryx-guest-python` Rust code |
+| **WASM artifacts** | `crates/eryx-runtime/runtime-<language>.{wasm,cwasm}` | `mise run precompile-runtime-<language>` | After changing that language's `eryx-guest-*` code |
 | **Late-linking artifacts** | `target/*/build/eryx-runtime*/out/*.so.zst` | Rebuild eryx-runtime | WIT interface changes (e.g., TCP/TLS) not reflected |
 
 ### Symptoms of Stale Caches
@@ -128,7 +140,7 @@ This project has multiple layers of caching that can cause confusing "stale buil
 - **"Old code still running"** - You changed Rust code but behavior didn't change
 - **`SandboxFactory` behaves differently than `Sandbox`** - Factory uses preinit snapshot with old bytecode
 - **Tests pass locally but fail in CI** (or vice versa) - Different cache states
-- **`ModuleNotFoundError` for shim modules** - ssl/socket shims not in runtime.wasm
+- **`ModuleNotFoundError` for shim modules** - ssl/socket shims not in runtime-python.wasm
 - **`type-checking export func` errors in preinit** - Late-linking artifacts have old WIT interface
 
 ### Diagnosing Cache Issues
