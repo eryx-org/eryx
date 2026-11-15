@@ -167,6 +167,9 @@
     // after its preamble runs; anything else under these names is the
     // user's, and is named in `skipped` since it isn't kept either.
     const HOST_GLOBALS = new Set(['process']);
+    // Replaced by the guest itself on each instance's first execute (see
+    // fresh.rs), so never session state either.
+    const INSTANCE_GLOBALS = new Set(['performance']);
     const hostValues = new Map();
     const markHostGlobals = () => {
         for (const name of HOST_GLOBALS) hostValues.set(name, globalThis[name]);
@@ -188,7 +191,7 @@
     const stateEntries = () => {
         const entries = [];
         for (const name of Object.getOwnPropertyNames(globalThis)) {
-            if (installed.includes(name)) continue;
+            if (installed.includes(name) || INSTANCE_GLOBALS.has(name)) continue;
             if (HOST_GLOBALS.has(name)) {
                 if (!hostValues.has(name) || !Object.is(globalThis[name], hostValues.get(name))) {
                     entries.push([name, 'var', UNKEPT]);
@@ -237,6 +240,7 @@
             typeof e[0] === 'string' &&
             !baseline().has(e[0]) &&
             !HOST_GLOBALS.has(e[0]) &&
+            !INSTANCE_GLOBALS.has(e[0]) &&
             e[0] !== '__proto__' &&
             (e[1] === 'var' ||
                 (['let', 'const'].includes(e[1]) &&

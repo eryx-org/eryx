@@ -540,6 +540,7 @@ console.log(π, globalThis["my-key"], globalThis[0], café, constructor, typeof 
 
     // Restored bindings are snapshotted again, and still can't be redeclared.
     let again = fresh.snapshot_state().await.unwrap();
+    assert!(again.skipped().is_empty(), "{:?}", again.skipped());
     let Some(mut third) = js_session().await else {
         return;
     };
@@ -764,11 +765,14 @@ async fn a_restore_that_traps_resets_the_session() {
         encoding.extend_from_slice(&[9, 1]);
     }
     encoding.push(1);
+    let err = session
+        .restore_state(&crafted_snapshot(&encoding).await)
+        .await
+        .unwrap_err();
+    // A trap, not the guest's own error, which keeps the instance.
     assert!(
-        session
-            .restore_state(&crafted_snapshot(&encoding).await)
-            .await
-            .is_err()
+        matches!(err.kind(), ErrorKind::WasmEngine(m) if m.contains("wasm backtrace")),
+        "{err:?}"
     );
     assert_eq!(
         stdout_of(&mut session, "console.log(typeof before, 6 * 7)").await,
