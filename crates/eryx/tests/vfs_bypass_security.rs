@@ -114,7 +114,7 @@ async fn create_executor() -> Arc<Executor> {
         let stdlib_path = stdlib_path();
         let executor = Executor::from_file(runtime_wasm_path())
             .expect("Failed to load runtime")
-            .with_python_stdlib(&stdlib_path);
+            .with_stdlib(&stdlib_path);
         Arc::new(executor)
     }
 }
