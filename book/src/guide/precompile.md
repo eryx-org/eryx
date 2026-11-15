@@ -76,6 +76,13 @@ eryx-precompile compile runtime-python.wasm -o runtime-preinit.wasm \
   --preinit --stdlib ./python-stdlib --wasm-only
 ```
 
+The JavaScript runtime pre-initializes too: it creates the QuickJS runtime and context and evaluates the eryx prelude, cutting a stateless execution from ~0.5ms to ~0.1ms. The embedded `runtime-javascript.cwasm` is built this way. It takes no stdlib, packages, imports, setup code or callbacks:
+
+```bash
+eryx-precompile compile runtime-javascript.wasm -o runtime-javascript.cwasm \
+  --language javascript --preinit
+```
+
 ### CPU Target Selection
 
 Control which CPU features the compiled runtime uses:
