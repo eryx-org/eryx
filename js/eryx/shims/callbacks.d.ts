@@ -10,7 +10,7 @@ export function setTraceHandler(
 
 /** Host-controlled behavior for a single execution. */
 export interface ExecutionOptions {
-  pythonTracing: boolean;
+  tracing: boolean;
   reuseEmptyCallbacks: boolean;
 }
 

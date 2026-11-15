@@ -9,7 +9,7 @@
 #![cfg(feature = "preinit")]
 
 use eryx::preinit::pre_initialize;
-use eryx::{PythonExecutor, Sandbox, SandboxBuilder, state};
+use eryx::{Executor, Sandbox, SandboxBuilder, state};
 use std::collections::HashMap;
 use std::future::Future;
 use std::hash::{DefaultHasher, Hash, Hasher};
@@ -158,18 +158,21 @@ fn write_cache_entry(path: &Path, bytes: &[u8]) {
 /// tests build more than one sandbox from the same bytes. So the component is
 /// compiled once per run and the native code is cached on disk next to the
 /// pre-init bytes, keyed by a hash of the component.
-fn sandbox_builder(wasm: &[u8], stdlib: &Path) -> SandboxBuilder<state::Has, state::Has> {
+fn sandbox_builder(
+    wasm: &[u8],
+    stdlib: &Path,
+) -> SandboxBuilder<eryx::language::Python, state::Has> {
     let mut hasher = DefaultHasher::new();
     wasm.hash(&mut hasher);
     let path = cache_dir().join(format!("{:016x}.cwasm", hasher.finish()));
 
     let precompiled = std::fs::read(&path).unwrap_or_else(|_| {
-        let bytes = PythonExecutor::precompile(wasm).expect("precompilation should succeed");
+        let bytes = Executor::precompile(wasm).expect("precompilation should succeed");
         write_cache_entry(&path, &bytes);
         bytes
     });
 
-    // SAFETY: the bytes were produced by `PythonExecutor::precompile` in this
+    // SAFETY: the bytes were produced by `Executor::precompile` in this
     // test run, with this build of wasmtime.
     let builder = unsafe { Sandbox::builder().with_precompiled_bytes(precompiled) };
     builder.with_python_stdlib(stdlib)

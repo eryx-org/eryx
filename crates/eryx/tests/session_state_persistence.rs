@@ -26,7 +26,7 @@ use std::sync::{Arc, OnceLock};
 
 use eryx::callback_handler::run_callback_handler;
 use eryx::{
-    Callback, CallbackError, PythonExecutor, PythonStateSnapshot, ResourceLimits, SessionExecutor,
+    Callback, CallbackError, Executor, ResourceLimits, SessionExecutor, StateSnapshot,
     TypedCallback,
 };
 use serde_json::{Value, json};
@@ -54,16 +54,16 @@ impl TypedCallback for SessionCallback {
 
 /// Shared executor to avoid repeated WASM loading across tests.
 /// With precompiled WASM (the default), loading takes ~50ms.
-static SHARED_EXECUTOR: OnceLock<Arc<PythonExecutor>> = OnceLock::new();
+static SHARED_EXECUTOR: OnceLock<Arc<Executor>> = OnceLock::new();
 
-fn get_shared_executor() -> Arc<PythonExecutor> {
+fn get_shared_executor() -> Arc<Executor> {
     SHARED_EXECUTOR
         .get_or_init(|| Arc::new(create_executor()))
         .clone()
 }
 
-/// Create a PythonExecutor, using embedded resources if available.
-fn create_executor() -> PythonExecutor {
+/// Create a Executor, using embedded resources if available.
+fn create_executor() -> Executor {
     // When embedded feature is available, use it (more reliable)
     #[cfg(feature = "embedded")]
     {
@@ -72,18 +72,18 @@ fn create_executor() -> PythonExecutor {
         // SAFETY: We trust the embedded precompiled runtime
         #[allow(unsafe_code)]
         return unsafe {
-            PythonExecutor::from_precompiled_file(&resources.runtime_path)
+            Executor::from_precompiled_file(&resources.runtime_path)
                 .expect("Failed to load embedded runtime")
-                .with_python_stdlib(&resources.stdlib_path)
+                .with_stdlib(&resources.stdlib_path)
         };
     }
 
     // Fallback for when embedded feature is not available
     #[cfg(not(feature = "embedded"))]
     {
-        let stdlib_path = python_stdlib_path();
+        let stdlib_path = stdlib_path();
         let path = runtime_wasm_path();
-        PythonExecutor::from_file(&path)
+        Executor::from_file(&path)
             .unwrap_or_else(|e| panic!("Failed to load runtime.wasm from {:?}: {}", path, e))
             .with_python_stdlib(&stdlib_path)
     }
@@ -102,7 +102,7 @@ fn runtime_wasm_path() -> PathBuf {
 }
 
 #[cfg(not(feature = "embedded"))]
-fn python_stdlib_path() -> PathBuf {
+fn stdlib_path() -> PathBuf {
     // Check ERYX_PYTHON_STDLIB env var first (used in CI)
     if let Ok(path) = std::env::var("ERYX_PYTHON_STDLIB") {
         let path = PathBuf::from(path);
@@ -122,7 +122,7 @@ fn python_stdlib_path() -> PathBuf {
 }
 
 /// Helper to create a session executor for tests.
-/// Uses a shared PythonExecutor to avoid repeated WASM compilation.
+/// Uses a shared Executor to avoid repeated WASM compilation.
 async fn create_session() -> SessionExecutor {
     let executor = get_shared_executor();
 
@@ -534,11 +534,36 @@ async fn test_snapshot_reports_skipped_globals() {
         .snapshot_state()
         .await
         .unwrap_or_else(|e| panic!("Failed to snapshot: {}", e));
-    assert_eq!(snapshot.skipped_globals(), ["gen"]);
+    assert_eq!(snapshot.skipped(), ["gen"]);
 
     // Not serialized with the snapshot bytes.
-    let restored = PythonStateSnapshot::from_bytes(&snapshot.to_bytes()).unwrap();
-    assert!(restored.skipped_globals().is_empty());
+    let restored = StateSnapshot::from_bytes(&snapshot.to_bytes()).unwrap();
+    assert!(restored.skipped().is_empty());
+}
+
+/// A snapshot is stamped with its language and only restores into a session
+/// of the same language.
+#[tokio::test]
+async fn test_snapshot_from_another_language_is_refused() {
+    let mut session = create_session().await;
+    session.execute("x = 1").run().await.unwrap();
+    let snapshot = session.snapshot_state().await.unwrap();
+    assert_eq!(snapshot.language(), eryx::Language::Python);
+
+    // Restamp it as JavaScript: the language byte follows the magic and
+    // the format version.
+    let mut bytes = snapshot.to_bytes();
+    bytes[b"ERYXSNAP".len() + 1] = 1;
+    let foreign = StateSnapshot::from_bytes(&bytes).unwrap();
+    assert_eq!(foreign.language(), eryx::Language::JavaScript);
+
+    let err = session.restore_state(&foreign).await.unwrap_err();
+    assert!(
+        err.to_string()
+            .contains("cannot restore a javascript snapshot into a python session"),
+        "{err}"
+    );
+    session.restore_state(&snapshot).await.unwrap();
 }
 
 /// Test snapshot serialization roundtrip.
@@ -567,7 +592,7 @@ async fn test_snapshot_serialization() {
     );
 
     // Deserialize
-    let restored_snapshot = PythonStateSnapshot::from_bytes(&bytes)
+    let restored_snapshot = StateSnapshot::from_bytes(&bytes)
         .unwrap_or_else(|e| panic!("Failed to deserialize: {}", e));
 
     assert_eq!(restored_snapshot.size(), snapshot.size());
@@ -887,7 +912,7 @@ async fn test_snapshot_keeps_functions_beside_unserializable_globals() {
             .snapshot_state()
             .await
             .unwrap_or_else(|e| panic!("Failed to snapshot: {}", e));
-        assert_eq!(snapshot.skipped_globals(), ["gen"], "{code:?}");
+        assert_eq!(snapshot.skipped(), ["gen"], "{code:?}");
 
         let mut restored = create_session().await;
         restored

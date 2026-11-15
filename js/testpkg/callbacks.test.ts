@@ -17,16 +17,16 @@ describe("callbacks", () => {
     setTraceHandler(null);
   });
 
-  it("enables Python tracing only while a trace handler is registered", () => {
+  it("enables tracing only while a trace handler is registered", () => {
     expect(getExecutionOptions()).toEqual({
-      pythonTracing: false,
+      tracing: false,
       reuseEmptyCallbacks: false,
     });
 
     setTraceHandler(() => {});
 
     expect(getExecutionOptions()).toEqual({
-      pythonTracing: true,
+      tracing: true,
       reuseEmptyCallbacks: false,
     });
   });

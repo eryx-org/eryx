@@ -224,29 +224,33 @@ pub enum ErrorKind {
         expected: String,
     },
 
-    /// Error during Python execution machinery (e.g. a WASM trap, the store or
+    /// Error during execution machinery (e.g. a WASM trap, the store or
     /// bindings being unavailable, or invalid input). This is a *sandbox* failure
-    /// — the runtime could not faithfully execute the script. An uncaught
-    /// exception raised *by* the script is [`ErrorKind::PythonException`] instead.
+    /// — the runtime could not faithfully execute the script. A failure of the
+    /// script itself is [`ErrorKind::ScriptFailed`] instead.
     #[error("execution failed: {0}")]
     Execution(String),
 
-    /// The script raised an uncaught Python exception. `traceback` is the
-    /// traceback exactly as CPython would have written it to stderr. This is
-    /// a *script* failure, not a sandbox failure: the runtime ran the code
+    /// The script failed: it raised an uncaught exception (Python,
+    /// JavaScript) or exited with a failure status (a shell). This is a
+    /// *script* failure, not a sandbox failure: the runtime ran the code
     /// faithfully and the code itself errored.
     ///
-    /// The output the script wrote before it raised is kept in `stdout` and
+    /// The output the script wrote before it failed is kept in `stdout` and
     /// `stderr` (also via [`Error::stdout`] and [`Error::stderr`]); `stderr`
     /// includes the traceback, as for a successful run.
-    #[error("{traceback}")]
+    #[error("{message}")]
     #[non_exhaustive]
-    PythonException {
-        /// The traceback, as CPython would have written it to stderr.
-        traceback: String,
-        /// Raw stdout captured before the exception.
+    ScriptFailed {
+        /// What the guest reported: for Python, the traceback exactly as
+        /// CPython would have written it to stderr.
+        message: String,
+        /// The script's exit status, for guests that have one (a shell).
+        /// `None` for Python and JavaScript, whose scripts fail by raising.
+        exit_code: Option<i32>,
+        /// Raw stdout captured before the failure.
         stdout: Vec<u8>,
-        /// Raw stderr captured up to the exception, including the traceback.
+        /// Raw stderr captured up to the failure, including any traceback.
         stderr: Vec<u8>,
     },
 
@@ -276,15 +280,33 @@ pub enum ErrorKind {
     #[error("serialization error: {0}")]
     Serialization(String),
 
-    /// Python stdlib not found during auto-detection.
+    /// The language's stdlib was not found during auto-detection.
     ///
     /// Use [`SandboxBuilder::with_python_stdlib()`](crate::SandboxBuilder::with_python_stdlib)
     /// to specify the stdlib path explicitly, or enable the `embedded` feature and use
     /// [`Sandbox::embedded()`](crate::Sandbox::embedded).
     #[error(
-        "Python stdlib not found. Set ERYX_PYTHON_STDLIB, use with_python_stdlib(), or use Sandbox::embedded()"
+        "{language} stdlib not found. Set ERYX_STDLIB, use with_python_stdlib(), or use Sandbox::embedded()"
     )]
-    MissingPythonStdlib,
+    #[non_exhaustive]
+    MissingStdlib {
+        /// The language whose stdlib is missing.
+        language: crate::Language,
+    },
+
+    /// No runtime was supplied for the selected language, and this build
+    /// embeds none for it (only Python has an embedded runtime).
+    ///
+    /// Supply one with [`SandboxBuilder::with_wasm_file()`](crate::SandboxBuilder::with_wasm_file)
+    /// or a precompiled equivalent.
+    #[error(
+        "no {language} runtime is embedded in this build of eryx; supply one with with_wasm_file() or with_precompiled_file()"
+    )]
+    #[non_exhaustive]
+    MissingRuntime {
+        /// The language that has no runtime.
+        language: crate::Language,
+    },
 
     /// State snapshot error.
     #[error("snapshot error: {0}")]
@@ -325,23 +347,23 @@ pub enum ErrorKind {
 }
 
 impl Error {
-    /// The stdout the script wrote before it raised, or `None` if the guest
+    /// The stdout the script wrote before it failed, or `None` if the guest
     /// did not get as far as running it (and for a timeout, fuel limit or
     /// cancellation, which stop the guest before it can report its output).
     #[must_use]
     pub fn stdout(&self) -> Option<&[u8]> {
         match &self.kind {
-            ErrorKind::PythonException { stdout, .. } => Some(stdout),
+            ErrorKind::ScriptFailed { stdout, .. } => Some(stdout),
             _ => None,
         }
     }
 
-    /// The stderr captured up to the exception, including the traceback;
+    /// The stderr captured up to the failure, including any traceback;
     /// `None` in the same cases as [`Error::stdout`].
     #[must_use]
     pub fn stderr(&self) -> Option<&[u8]> {
         match &self.kind {
-            ErrorKind::PythonException { stderr, .. } => Some(stderr),
+            ErrorKind::ScriptFailed { stderr, .. } => Some(stderr),
             _ => None,
         }
     }
@@ -370,8 +392,8 @@ impl From<serde_json::Error> for ErrorKind {
 /// Currently this rejects embedded NUL bytes: the code is handed to the guest
 /// as a C string, so a NUL would be caught there and surface as an opaque guest
 /// error. Validating host-side keeps it classified as a sandbox/input failure
-/// ([`ErrorKind::Execution`]) rather than being mistaken for an uncaught Python
-/// exception ([`ErrorKind::PythonException`]).
+/// ([`ErrorKind::Execution`]) rather than being mistaken for a script failure
+/// ([`ErrorKind::ScriptFailed`]).
 pub(crate) fn validate_user_code(code: &str) -> Result<(), Error> {
     if code.contains('\0') {
         return Err(ErrorKind::Execution(

@@ -150,7 +150,7 @@ Rather than parsing the `error` string, branch on `failure_kind`:
 | `FailureKind` | Meaning |
 |---------------|---------|
 | `FAILURE_KIND_UNSPECIFIED` | Success — no failure. |
-| `FAILURE_KIND_SCRIPT_EXCEPTION` | The script raised an uncaught Python exception. The **traceback is in `stderr`** (CPython-style) and `error` is empty. |
+| `FAILURE_KIND_SCRIPT_FAILED` | The script failed: it raised an uncaught exception (`FAILURE_KIND_SCRIPT_EXCEPTION` is a deprecated alias with the same number). The **traceback is in `stderr`** (CPython-style) and `error` is empty. |
 | `FAILURE_KIND_TIMEOUT` | Exceeded the configured wall-clock timeout. |
 | `FAILURE_KIND_FUEL_EXHAUSTED` | Exceeded the configured fuel (instruction) limit. |
 | `FAILURE_KIND_SANDBOX_ERROR` | Infrastructure failure: WASM trap, invalid input (e.g. NUL bytes in the code), session creation failure. Details in `error`. |

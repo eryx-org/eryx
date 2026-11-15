@@ -70,7 +70,7 @@ metadata.
 
 The pool is only used on a multi-threaded Tokio runtime, where the background
 work actually runs in parallel. On a current-thread runtime it would only add to
-the next request's latency, so it stays off. `PythonExecutor::warm_instances_ready()`
+the next request's latency, so it stays off. `Executor::warm_instances_ready()`
 reports how many instances are waiting for that executor's runtime.
 
 ## Instance allocation

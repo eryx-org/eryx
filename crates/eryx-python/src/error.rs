@@ -85,13 +85,13 @@ fn kind_to_py(kind: eryx::ErrorKind) -> PyErr {
         // A subclass of ExecutionError, so callers can tell a script error from
         // a sandbox failure while `except ExecutionError` still catches both.
         // `stdout` and `stderr` carry what the script wrote before it raised.
-        eryx::ErrorKind::PythonException {
-            traceback,
+        eryx::ErrorKind::ScriptFailed {
+            message,
             stdout,
             stderr,
             ..
         } => {
-            let err = PythonExceptionError::new_err(traceback);
+            let err = PythonExceptionError::new_err(message);
             Python::attach(|py| {
                 let value = err.value(py);
                 // Setting an attribute on a fresh exception instance cannot
@@ -107,9 +107,12 @@ fn kind_to_py(kind: eryx::ErrorKind) -> PyErr {
             TimeoutError::new_err(format!("execution timed out after {duration:?}"))
         }
         eryx::ErrorKind::Serialization(msg) => PyValueError::new_err(msg),
-        eryx::ErrorKind::MissingPythonStdlib => InitializationError::new_err(
+        eryx::ErrorKind::MissingStdlib { .. } => InitializationError::new_err(
             "Python stdlib not found. Use Sandbox() which includes embedded runtime.",
         ),
+        err @ eryx::ErrorKind::MissingRuntime { .. } => {
+            InitializationError::new_err(err.to_string())
+        }
         eryx::ErrorKind::Snapshot(msg) => InitializationError::new_err(msg),
         err @ eryx::ErrorKind::IncompatibleSnapshot { .. } => {
             InitializationError::new_err(err.to_string())

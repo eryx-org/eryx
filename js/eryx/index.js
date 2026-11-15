@@ -587,7 +587,10 @@ export class Sandbox {
    * @throws {Error} If serialization fails
    */
   async snapshotState() {
-    return this.#serialized((instance) => instance.snapshotState());
+    const { data, skipped } = await this.#serialized((instance) =>
+      instance.snapshotState(),
+    );
+    return { data, skippedGlobals: skipped };
   }
 
   /**

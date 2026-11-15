@@ -22,7 +22,7 @@ fn crates_dir() -> PathBuf {
         .to_path_buf()
 }
 
-fn sandbox_builder() -> eryx::SandboxBuilder<eryx::state::Has, eryx::state::Has> {
+fn sandbox_builder() -> eryx::SandboxBuilder<eryx::language::Python, eryx::state::Has> {
     #[cfg(feature = "embedded")]
     {
         Sandbox::embedded()

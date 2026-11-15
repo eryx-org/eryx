@@ -561,7 +561,7 @@ async fn run_setup(args: SetupArgs) -> Result<()> {
     // exactly that: `precompile` would also honour ERYX_TARGET and friends,
     // and could cache an artifact under a name that does not describe it.
     let precompiled =
-        eryx::PythonExecutor::precompile_with_options(&wasm_bytes, None, CpuFeatureLevel::Native)
+        eryx::Executor::precompile_with_options(&wasm_bytes, None, CpuFeatureLevel::Native)
             .context("Failed to pre-compile runtime.wasm to native code")?;
 
     let elapsed = start.elapsed();
@@ -776,7 +776,7 @@ async fn run_compile(args: CompileArgs) -> Result<()> {
         println!("Step 2: AOT compiling to native code...");
         let start = Instant::now();
 
-        let precompiled = eryx::PythonExecutor::precompile_with_options(
+        let precompiled = eryx::Executor::precompile_with_options(
             &component_bytes,
             target_triple.as_deref(),
             cpu_features,
@@ -977,7 +977,7 @@ async fn run_upgrade(args: UpgradeArgs) -> Result<()> {
     println!();
     println!("Step 2: AOT compiling to native code...");
     let start = Instant::now();
-    let precompiled = eryx::PythonExecutor::precompile_with_options(
+    let precompiled = eryx::Executor::precompile_with_options(
         &preinit_bytes,
         target_triple.as_deref(),
         cpu_features,
@@ -1272,7 +1272,7 @@ async fn verify_cwasm(
     verify_code: Option<&str>,
 ) -> Result<()> {
     // Create a sandbox using the compiled cwasm
-    // SAFETY: We just created this file from PythonExecutor::precompile()
+    // SAFETY: We just created this file from Executor::precompile()
     #[allow(unsafe_code)]
     let sandbox = unsafe {
         eryx::Sandbox::builder()

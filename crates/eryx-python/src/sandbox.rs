@@ -12,7 +12,7 @@ use pyo3::types::PyDict;
 use eryx::{CancellationToken, OutputHandler};
 
 use crate::callback::extract_callbacks;
-use crate::error::eryx_error_to_py;
+use crate::error::{InitializationError, eryx_error_to_py};
 use crate::execution::{CancelToken, call_token, run_async, run_blocking};
 use crate::net_config::NetConfig;
 use crate::resource_limits::ResourceLimits;
@@ -232,7 +232,19 @@ impl Sandbox {
             });
         }
 
-        let inner = builder.build().map_err(eryx_error_to_py)?;
+        // pyeryx runs Python only until it can select a language (#821). The
+        // configuration above is language-neutral and carries over.
+        let inner = match eryx::Language::Python {
+            eryx::Language::Python => builder.build(),
+            eryx::Language::JavaScript => builder.javascript().build(),
+            eryx::Language::Shell => builder.shell().build(),
+            other => {
+                return Err(InitializationError::new_err(format!(
+                    "unsupported language {other}"
+                )));
+            }
+        }
+        .map_err(eryx_error_to_py)?;
 
         Ok(Self {
             inner,
@@ -420,10 +432,10 @@ pub(crate) fn run_cancellable(
 ///
 /// Expected format: `{"NAME": {"value": "secret", "allowed_hosts": ["host.com"]}}`
 /// The `allowed_hosts` key is optional and defaults to an empty list.
-pub(crate) fn apply_secrets<R, S>(
-    mut builder: eryx::SandboxBuilder<R, S>,
+pub(crate) fn apply_secrets<L, R>(
+    mut builder: eryx::SandboxBuilder<L, R>,
     secrets_dict: &Bound<'_, PyDict>,
-) -> PyResult<eryx::SandboxBuilder<R, S>> {
+) -> PyResult<eryx::SandboxBuilder<L, R>> {
     for (name, value, allowed_hosts) in extract_secrets(secrets_dict)? {
         builder = builder.with_secret(name, value, allowed_hosts);
     }

@@ -722,7 +722,7 @@ fn add_sandbox_stubs(linker: &mut Linker<PreInitCtx>) -> Result<()> {
          _params: &[Val],
          results: &mut [Val]| {
             results[0] = Val::Record(vec![
-                ("python-tracing".to_string(), Val::Bool(false)),
+                ("tracing".to_string(), Val::Bool(false)),
                 ("reuse-empty-callbacks".to_string(), Val::Bool(false)),
             ]);
             Ok(())

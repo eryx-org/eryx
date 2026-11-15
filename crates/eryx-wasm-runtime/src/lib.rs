@@ -768,13 +768,11 @@ pub(crate) fn call_sleep_async(duration_ns: u64) -> Result<Option<u32>, String> 
 
 #[derive(Clone, Copy)]
 struct ExecutionOptions {
-    python_tracing: bool,
+    tracing: bool,
 }
 
 impl ExecutionOptions {
-    const CONSERVATIVE: Self = Self {
-        python_tracing: true,
-    };
+    const CONSERVATIVE: Self = Self { tracing: true };
 }
 
 /// Read host-controlled behavior for this execution.
@@ -796,9 +794,7 @@ fn call_get_execution_options(wit: Wit) -> ExecutionOptions {
             // The second field, `reuse-empty-callbacks`, is kept in the WIT
             // for compatibility; the guest now tracks installed callbacks itself.
             match (fields.next(), fields.next()) {
-                (Some(Value::Bool(python_tracing)), Some(Value::Bool(_))) => {
-                    ExecutionOptions { python_tracing }
-                }
+                (Some(Value::Bool(tracing)), Some(Value::Bool(_))) => ExecutionOptions { tracing },
                 _ => {
                     eprintln!("call_get_execution_options: unexpected record fields");
                     ExecutionOptions::CONSERVATIVE
@@ -1201,10 +1197,12 @@ enum HandleExportResult {
 }
 
 /// Push `result<_, execute-error>`'s error case:
-/// `execute-error { message, stdout, stderr }`.
+/// `execute-error { message, exit-code, stdout, stderr }`.
 fn push_execute_error(cx: &mut EryxCall, failure: python::ExecuteFailure) {
     cx.stack.push(Value::Record(vec![
         Value::String(failure.message),
+        // `exit-code: none`: a Python script fails by raising, not with a status.
+        Value::OptionDiscriminant(false),
         Value::Bytes(failure.stdout),
         Value::Bytes(failure.stderr),
     ]));
@@ -1225,9 +1223,7 @@ fn handle_export(wit: Wit, func_index: usize, cx: &mut EryxCall) -> HandleExport
             // Without its callbacks the script would fail confusingly (a
             // NameError at the first call), so fail the execution up front.
             let result = match initialize_callbacks(wit) {
-                Ok(()) => with_wit(wit, || {
-                    python::execute_python(&code, options.python_tracing)
-                }),
+                Ok(()) => with_wit(wit, || python::execute_python(&code, options.tracing)),
                 Err(e) => python::ExecuteResult::Error(e.into()),
             };
 

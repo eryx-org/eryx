@@ -9,8 +9,8 @@ use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use eryx::{
-    Callback, CallbackError, Error, ErrorKind, InProcessSession, NetConfig, PythonExecutor,
-    Sandbox, Session, SessionExecutor, TypedCallback,
+    Callback, CallbackError, Error, ErrorKind, Executor, InProcessSession, NetConfig, Sandbox,
+    Session, SessionExecutor, TypedCallback,
 };
 use serde_json::{Value, json};
 use tokio::net::TcpListener;
@@ -32,7 +32,7 @@ fn network_sandbox(connect_timeout: Duration, io_timeout: Duration) -> Sandbox {
 
 fn assert_script_error(result: Result<eryx::ExecuteResult, Error>, needle: &str) {
     match result {
-        Err(e) if matches!(e.kind(), ErrorKind::PythonException { .. }) => {
+        Err(e) if matches!(e.kind(), ErrorKind::ScriptFailed { .. }) => {
             assert!(e.to_string().contains(needle), "{needle:?} not in: {e}");
         }
         other => panic!("expected a script exception containing {needle:?}, got {other:?}"),
@@ -217,16 +217,16 @@ impl TypedCallback for Ping {
     }
 }
 
-fn executor() -> Arc<PythonExecutor> {
-    static EXECUTOR: OnceLock<Arc<PythonExecutor>> = OnceLock::new();
+fn executor() -> Arc<Executor> {
+    static EXECUTOR: OnceLock<Arc<Executor>> = OnceLock::new();
     EXECUTOR
         .get_or_init(|| {
             let resources = eryx::embedded::EmbeddedResources::get().unwrap();
             #[allow(unsafe_code)]
             Arc::new(
-                unsafe { PythonExecutor::from_precompiled_file(resources.runtime()) }
+                unsafe { Executor::from_precompiled_file(resources.runtime()) }
                     .unwrap()
-                    .with_python_stdlib(resources.stdlib()),
+                    .with_stdlib(resources.stdlib()),
             )
         })
         .clone()
