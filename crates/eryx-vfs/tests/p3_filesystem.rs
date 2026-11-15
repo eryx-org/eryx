@@ -253,6 +253,35 @@ async fn p3_concurrent_writes_cannot_overshoot_the_quota() {
     );
 }
 
+/// Concurrent appending guests (e.g. git children writing one reflog) keep
+/// every record intact instead of overwriting each other.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn p3_concurrent_appenders_keep_every_record() {
+    const GUESTS: usize = 4;
+    const RECORDS: usize = 40;
+    let storage = storage(None);
+    let runs: Vec<_> = (0..GUESTS)
+        .map(|g| {
+            let vfs = ctx(&storage);
+            tokio::spawn(async move {
+                let (tag, n) = (format!("g{g}"), RECORDS.to_string());
+                run(vfs, &["appendn", "/data/log", &tag, &n]).await
+            })
+        })
+        .collect();
+    for r in runs {
+        assert_eq!(r.await.unwrap(), (0, "ok".into()));
+    }
+    let log = String::from_utf8(storage.read("/data/log").await.unwrap()).unwrap();
+    let mut lines: Vec<&str> = log.lines().collect();
+    lines.sort_unstable();
+    let mut expected: Vec<String> = (0..GUESTS)
+        .flat_map(|g| (0..RECORDS).map(move |i| format!("g{g}-{i:03}")))
+        .collect();
+    expected.sort_unstable();
+    assert_eq!(lines, expected);
+}
+
 /// `O_CREAT|O_EXCL` from concurrent guests admits exactly one, as lockfiles
 /// (e.g. git's `index.lock`) rely on.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
