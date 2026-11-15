@@ -28,12 +28,17 @@ dir = "scratch/uutils"
 bin = "coreutils"
 # uucore uses unstable std::os::wasi on wasip2 — add #![feature(wasip2)].
 vendor_patch = "clis/patches/patch-uucore-wasip2.sh"
-# The utils that replace the shell builtins, plus the `sort` gap. Keep the set
-# tight: each util can pull wasi-incompatible deps.
+# The utils that replace the shell builtins, plus common script tools (#897).
+# Keep the set tight: each util can pull wasi-incompatible deps, and every
+# one grows the embedded cwasm. nl and expr (regex, ~2.8 and ~1.4 MB) and
+# sha256sum/md5sum (~1.3 MB together) are left out for size; chmod, df, du,
+# env, id, stat, tac, test, timeout, whoami and yes don't build for wasip2,
+# and ln can't work: the VFS refuses links and symlinks.
+# Must match COREUTILS_TOOLS in crates/eryx/src/embedded.rs (a test checks).
 cargo_flags = [
     "--no-default-features",
     "--features",
-    "cat,head,tail,ls,wc,cp,mv,rm,mkdir,touch,sort",
+    "cat,head,tail,ls,wc,cp,mv,rm,mkdir,touch,sort,seq,cut,tr,uniq,basename,dirname,tee,sleep,paste,comm,date,base64,realpath,readlink,rmdir",
 ]
 # Let the pinned stable toolchain use the unstable wasip2 feature.
 [build.env]

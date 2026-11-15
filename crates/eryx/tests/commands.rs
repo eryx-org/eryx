@@ -388,6 +388,48 @@ async fn the_embedded_shell_runs_coreutils() {
     assert_eq!(out.stdout_utf8().unwrap(), "HI\nb\n");
 }
 
+/// The common script tools added in #897 run in the embedded shell.
+#[cfg(feature = "coreutils")]
+#[tokio::test]
+async fn the_embedded_shell_runs_common_script_tools() {
+    let sandbox = shell().build().unwrap();
+    let cases = [
+        ("seq 3 | tr '\\n' ' '", "1 2 3 "),
+        ("echo a,b,c | cut -d, -f2", "b\n"),
+        ("echo hello | tr a-z A-Z", "HELLO\n"),
+        (
+            "printf 'a\\na\\nb\\n' | uniq -c | tr -s ' '",
+            " 2 a\n 1 b\n",
+        ),
+        ("basename /x/y.txt .txt; dirname /x/y.txt", "y\n/x\n"),
+        ("echo hi | tee /tmp/teed; cat /tmp/teed", "hi\nhi\n"),
+        ("sleep 0 && echo slept", "slept\n"),
+        ("printf '1\\n2\\n' | paste -sd+", "1+2\n"),
+        (
+            "printf 'a\\nb\\n' > /tmp/c1; printf 'b\\nc\\n' > /tmp/c2; comm -12 /tmp/c1 /tmp/c2",
+            "b\n",
+        ),
+        ("date -u -d @0 +%Y", "1970\n"),
+        ("echo hi | base64", "aGkK\n"),
+        // Canonicalizing walks up to `/`, which isn't statable without a
+        // preopen covering it (#832), so only the lexical forms are checked.
+        ("realpath -s /tmp/../tmp", "/tmp\n"),
+        (
+            "readlink -m /tmp/../tmp/x; mkdir /tmp/t && rmdir /tmp/t && echo gone",
+            "/tmp/x\ngone\n",
+        ),
+    ];
+    let mut failures = Vec::new();
+    for (script, expected) in cases {
+        match sandbox.execute(script).await {
+            Ok(out) if out.stdout_utf8().unwrap() == expected => {}
+            Ok(out) => failures.push(format!("{script}: got {:?}", out.stdout_utf8().unwrap())),
+            Err(e) => failures.push(format!("{script}: {e}")),
+        }
+    }
+    assert!(failures.is_empty(), "{failures:#?}");
+}
+
 #[cfg(all(feature = "coreutils", feature = "unstable-vfs"))]
 #[tokio::test]
 async fn coreutils_work_on_the_sessions_vfs() {
