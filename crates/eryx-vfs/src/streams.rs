@@ -117,6 +117,9 @@ impl RealFileOutputStream {
     }
 
     /// Create a new file output stream for appending.
+    ///
+    /// `file` must be opened for appending (`O_APPEND`), e.g. by
+    /// `reopen_for_append`, so the OS picks the end at each write.
     pub fn append(file: Arc<std::fs::File>, max_size: Option<u64>) -> Self {
         Self {
             file,
@@ -153,12 +156,15 @@ impl OutputStream for RealFileOutputStream {
         }
 
         let result = if self.append {
-            // For append mode, get the file length and write there
-            // since there's no direct append_at method
-            match self.file.metadata() {
-                Ok(meta) => self.write_checked(&bytes, meta.len()),
-                Err(e) => Err(e),
-            }
+            // The handle appends, so the OS picks the end at the write itself.
+            // The size cap is checked against the length just before; another
+            // writer growing the file in between can push it past the cap by
+            // at most that one write.
+            self.file.metadata().and_then(|meta| {
+                check_file_size(self.max_size, meta.len().saturating_add(bytes.len() as u64))?;
+                std::io::Write::write_all(&mut &*self.file, &bytes)?;
+                Ok(bytes.len())
+            })
         } else {
             self.write_checked(&bytes, self.position)
         };
@@ -493,14 +499,71 @@ mod tests {
     use super::*;
     use crate::storage::{ArcStorage, InMemoryStorage};
 
+    /// A host file with a path, which `reopen_for_append` needs.
+    fn named_file() -> (tempfile::NamedTempFile, Arc<std::fs::File>) {
+        let named = tempfile::NamedTempFile::new().unwrap();
+        let file = Arc::new(named.as_file().try_clone().unwrap());
+        (named, file)
+    }
+
+    fn appender(file: &std::fs::File) -> Arc<std::fs::File> {
+        Arc::new(crate::file_io::reopen_for_append(file).unwrap())
+    }
+
+    /// Appenders on separate handles to one host file, plus a plain host
+    /// writer appending to it, all land every record intact: the OS picks
+    /// the end at each write, so none overwrites another.
+    #[test]
+    fn real_appenders_on_separate_handles_keep_every_record() {
+        const RECORDS: usize = 200;
+        let named = tempfile::NamedTempFile::new().unwrap();
+        let mut writers: Vec<std::thread::JoinHandle<()>> = (0..2)
+            .map(|w| {
+                // Each guest-side appender gets its own open of the file, as
+                // two sandboxes sharing a mount would.
+                let file = std::fs::OpenOptions::new()
+                    .write(true)
+                    .open(named.path())
+                    .unwrap();
+                let mut stream = RealFileOutputStream::append(appender(&file), None);
+                std::thread::spawn(move || {
+                    for r in 0..RECORDS {
+                        let record = format!("s{w}-{r:03}\n");
+                        stream.write(Bytes::from(record)).unwrap();
+                    }
+                })
+            })
+            .collect();
+        let path = named.path().to_path_buf();
+        writers.push(std::thread::spawn(move || {
+            use std::io::Write;
+            let mut host = std::fs::OpenOptions::new().append(true).open(path).unwrap();
+            for r in 0..RECORDS {
+                host.write_all(format!("host-{r:03}\n").as_bytes()).unwrap();
+            }
+        }));
+        for w in writers {
+            w.join().unwrap();
+        }
+        let log = std::fs::read_to_string(named.path()).unwrap();
+        let mut lines: Vec<&str> = log.lines().collect();
+        lines.sort_unstable();
+        let mut expected: Vec<String> = ["s0", "s1", "host"]
+            .iter()
+            .flat_map(|tag| (0..RECORDS).map(move |r| format!("{tag}-{r:03}")))
+            .collect();
+        expected.sort_unstable();
+        assert_eq!(lines, expected);
+    }
+
     #[test]
     fn test_real_streams_independent_offsets_and_append() {
-        let file = Arc::new(tempfile::tempfile().unwrap());
+        let (_named, file) = named_file();
         write_at(&file, b"hello world", 0).unwrap();
         let mut first = RealFileInputStream::new(Arc::clone(&file), 0);
         let mut second = RealFileInputStream::new(Arc::clone(&file), 6);
         let mut output = RealFileOutputStream::write_at(Arc::clone(&file), 6, None);
-        let mut append = RealFileOutputStream::append(Arc::clone(&file), None);
+        let mut append = RealFileOutputStream::append(appender(&file), None);
 
         assert_eq!(&*first.read(5).unwrap(), b"hello");
         output.write(Bytes::from_static(b"Rust")).unwrap();
@@ -513,11 +576,11 @@ mod tests {
 
     #[test]
     fn real_output_stream_respects_max_size() {
-        let file = Arc::new(tempfile::tempfile().unwrap());
+        let (_named, file) = named_file();
         let mut output = RealFileOutputStream::write_at(Arc::clone(&file), 0, Some(4));
         output.write(Bytes::from_static(b"1234")).unwrap();
         assert!(output.write(Bytes::from_static(b"5")).is_err());
-        let mut append = RealFileOutputStream::append(Arc::clone(&file), Some(4));
+        let mut append = RealFileOutputStream::append(appender(&file), Some(4));
         assert!(append.write(Bytes::from_static(b"5")).is_err());
         assert_eq!(file.metadata().unwrap().len(), 4);
     }
