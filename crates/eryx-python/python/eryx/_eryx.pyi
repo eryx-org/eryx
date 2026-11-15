@@ -292,7 +292,12 @@ class ExecuteResult:
 
     @property
     def peak_memory_bytes(self) -> Optional[int]:
-        """Peak memory usage in bytes (if available)."""
+        """Peak memory usage in bytes (if available).
+
+        The guest instance's largest linear memory. In a session that's the
+        peak so far, not just this execution's growth, since memory never
+        shrinks between executions.
+        """
         ...
 
     @property

@@ -482,7 +482,8 @@ pub struct ExecutionOutput {
     pub stdout: Vec<u8>,
     /// Captured stderr from the Python execution (raw bytes).
     pub stderr: Vec<u8>,
-    /// Peak memory usage in bytes during execution.
+    /// Peak memory usage in bytes: the instance's largest linear memory
+    /// (in a session, so far; see [`crate::ExecuteStats::peak_memory_bytes`]).
     pub peak_memory_bytes: u64,
     /// Execution duration.
     pub duration: Duration,

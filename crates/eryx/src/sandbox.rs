@@ -3362,7 +3362,10 @@ pub struct ExecuteStats {
     pub duration: Duration,
     /// Number of callback invocations.
     pub callback_invocations: u32,
-    /// Peak memory usage in bytes (if available).
+    /// Peak memory usage in bytes (if available): the guest instance's
+    /// largest linear memory. In a session, which keeps its instance, that's
+    /// the peak so far, not just this execution's growth: linear memory
+    /// never shrinks, so it never falls between executions.
     pub peak_memory_bytes: Option<u64>,
     /// Fuel consumed during execution (if fuel tracking is enabled).
     ///
