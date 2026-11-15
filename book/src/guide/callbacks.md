@@ -320,8 +320,8 @@ Exit statuses:
 | Status | Meaning |
 |---|---|
 | 0 | The callback succeeded. |
-| 1 | The callback failed. `NAME: message` goes to stderr. |
-| 2 | Usage error: `NAME: problem`, then the usage line, go to stderr. |
+| 1 | The call failed: the callback returned an error, or the host rejected the arguments. That covers too many positionals, or a positional for a property also given as a flag. `NAME: message` goes to stderr. |
+| 2 | A usage error the shell found before calling: a bad flag value, a repeated key, malformed `--json`. `NAME: problem`, then the usage line, go to stderr. |
 | 127 | `invoke` of an unknown name. |
 
 A callback that suspends (see [Replay and Suspension](#replay-and-suspension))
