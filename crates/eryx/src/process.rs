@@ -255,10 +255,35 @@ pub(crate) struct IsolatedLimits {
 
 #[cfg(feature = "packages")]
 impl Command {
+    /// Load a precompiled command to run with
+    /// [`run_isolated`](Self::run_isolated): it's linked with plain WASI, so
+    /// its filesystem is the host directories it's given, never a sandbox's
+    /// VFS (which `unstable-vfs` puts in place of WASI's filesystem for
+    /// children, empty for one without a parent).
+    ///
+    /// # Safety
+    ///
+    /// As for [`from_precompiled`](Self::from_precompiled): only bytes eryx
+    /// precompiled and you trust.
+    #[allow(unsafe_code)]
+    pub(crate) unsafe fn from_precompiled_isolated(precompiled: &[u8]) -> Result<Self, Error> {
+        let engine = crate::Executor::shared_engine()?;
+        // SAFETY: the caller guarantees the bytes are trusted eryx output.
+        let component = unsafe { Component::deserialize(&engine, precompiled) }
+            .map_err(crate::wasm::deserialize_error)?;
+        let pre = isolated_linker(&engine)?
+            .instantiate_pre(&component)
+            .map_err(ErrorKind::wasm_component)?;
+        let pre = CommandPre::new(pre).map_err(ErrorKind::wasm_component)?;
+        Ok(Self { pre })
+    }
+
     /// Run the command on its own, outside any sandbox, with `argv`, no
     /// environment variables, empty stdin, no network (no sockets or name
     /// lookups), and only `mounts` as its filesystem, within `limits`.
-    /// Returns its exit code, stdout and stderr.
+    /// Returns its exit code, stdout and stderr. Load it with
+    /// [`from_precompiled_isolated`](Self::from_precompiled_isolated), or
+    /// with `unstable-vfs` it sees an empty filesystem instead of `mounts`.
     pub(crate) async fn run_isolated(
         &self,
         argv: &[String],
@@ -363,6 +388,19 @@ fn child_linker(engine: &Engine) -> Result<&'static Linker<ChildState>, Error> {
             .map_err(|e| ErrorKind::WasmEngine(e.to_string()))?;
         linker.allow_shadowing(false);
     }
+    Ok(LINKER.get_or_init(|| linker))
+}
+
+/// The linker isolated commands are instantiated with: WASI 0.2 only.
+#[cfg(feature = "packages")]
+fn isolated_linker(engine: &Engine) -> Result<&'static Linker<ChildState>, Error> {
+    static LINKER: OnceLock<Linker<ChildState>> = OnceLock::new();
+    if let Some(linker) = LINKER.get() {
+        return Ok(linker);
+    }
+    let mut linker = Linker::<ChildState>::new(engine);
+    wasmtime_wasi::p2::add_to_linker_async(&mut linker)
+        .map_err(|e| ErrorKind::WasmEngine(e.to_string()))?;
     Ok(LINKER.get_or_init(|| linker))
 }
 

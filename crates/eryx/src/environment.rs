@@ -433,7 +433,7 @@ fn bundler() -> Result<crate::Command, EnvironmentError> {
             // SAFETY: the build script embeds a bundler that eryx's precompile
             // produced, as it does the runtimes.
             #[allow(unsafe_code)]
-            unsafe { crate::Command::from_precompiled(bytes) }.map_err(|e| e.to_string())
+            unsafe { crate::Command::from_precompiled_isolated(bytes) }.map_err(|e| e.to_string())
         })
         .clone()
         .map_err(|e| EnvironmentError::Build(format!("the embedded bundler: {e}")))
