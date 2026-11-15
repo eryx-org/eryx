@@ -23,7 +23,7 @@ use std::rc::Rc;
 use rquickjs::loader::{ImportAttributes, Loader, Resolver};
 use rquickjs::module::Declared;
 use rquickjs::promise::PromiseState;
-use rquickjs::{Ctx, Error, Function, Module, Object, Result, Value};
+use rquickjs::{Ctx, Error, Function, IntoJs, Module, Object, Result, Value};
 
 /// Where the host mounts the environment (`eryx::environment::MOUNT_PATH`).
 const MOUNT: &str = "/eryx/environment";
@@ -290,24 +290,178 @@ fn require_sync<'js>(ctx: Ctx<'js>, name: String) -> Result<Value<'js>> {
 // The import rewrite.
 // -----------------------------------------------------------------------------
 
+/// What an `import` declaration binds, kept so a session snapshot can
+/// re-import it on restore (see `restore_state` in js.rs).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ImportRecord {
+    pub(crate) specifier: String,
+    pub(crate) form: ImportForm,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ImportForm {
+    /// `import { a, b as c }` (and `import x, { ... }`, as `default as x`):
+    /// `(imported, local)` pairs. Empty for `import "m"`.
+    Named(Vec<(String, String)>),
+    /// `import x`.
+    Default(String),
+    /// `import * as ns`.
+    Namespace(String),
+}
+
+impl ImportRecord {
+    /// The statement that performs this import in global code.
+    pub(crate) fn statement(&self) -> String {
+        let import = format!("await import({})", quote(&self.specifier));
+        match &self.form {
+            ImportForm::Named(bindings) => {
+                let bindings: Vec<String> = bindings
+                    .iter()
+                    .map(|(imported, local)| {
+                        if imported == local {
+                            local.clone()
+                        } else if is_identifier(imported) {
+                            format!("{imported}: {local}")
+                        } else {
+                            format!("{}: {local}", quote(imported))
+                        }
+                    })
+                    .collect();
+                format!("var {{{}}} = __eryx_import({import});", bindings.join(", "))
+            }
+            ImportForm::Default(local) => format!("var {local} = __eryx_import({import}).default;"),
+            ImportForm::Namespace(local) => format!("var {local} = {import};"),
+        }
+    }
+
+    /// As `{specifier, form, bindings}`, the prelude's session-state shape:
+    /// `bindings` is `[[imported, local], ...]` for `named`, `[local]`
+    /// otherwise.
+    pub(crate) fn to_js<'js>(&self, ctx: &Ctx<'js>) -> Result<Object<'js>> {
+        let object = Object::new(ctx.clone())?;
+        object.set("specifier", self.specifier.as_str())?;
+        let (form, bindings): (&str, Vec<Vec<String>>) = match &self.form {
+            ImportForm::Named(pairs) => (
+                "named",
+                pairs
+                    .iter()
+                    .map(|(i, l)| vec![i.clone(), l.clone()])
+                    .collect(),
+            ),
+            ImportForm::Default(local) => ("default", vec![vec![local.clone()]]),
+            ImportForm::Namespace(local) => ("namespace", vec![vec![local.clone()]]),
+        };
+        object.set("form", form)?;
+        let bindings: Vec<Value<'js>> = bindings
+            .into_iter()
+            .map(|b| match <[String; 1]>::try_from(b) {
+                Ok([local]) => local.into_js(ctx),
+                Err(pair) => pair.into_js(ctx),
+            })
+            .collect::<Result<_>>()?;
+        object.set("bindings", bindings)?;
+        Ok(object)
+    }
+
+    /// The reverse of [`to_js`](Self::to_js), for records the prelude has
+    /// already validated.
+    pub(crate) fn from_js(object: &Object<'_>) -> Result<Self> {
+        let specifier: String = object.get("specifier")?;
+        let form: String = object.get("form")?;
+        let form = match form.as_str() {
+            "named" => ImportForm::Named(
+                object
+                    .get::<_, Vec<Vec<String>>>("bindings")?
+                    .into_iter()
+                    .filter_map(|pair| <[String; 2]>::try_from(pair).ok())
+                    .map(|[imported, local]| (imported, local))
+                    .collect(),
+            ),
+            "default" | "namespace" => {
+                let [local]: [String; 1] = object
+                    .get::<_, Vec<String>>("bindings")?
+                    .try_into()
+                    .map_err(|_| Error::new_from_js("bindings", "one local name"))?;
+                if form == "default" {
+                    ImportForm::Default(local)
+                } else {
+                    ImportForm::Namespace(local)
+                }
+            }
+            _ => return Err(Error::new_from_js("form", "an import form")),
+        };
+        Ok(Self { specifier, form })
+    }
+}
+
+/// An ASCII identifier.
+fn is_identifier(name: &str) -> bool {
+    !name.is_empty()
+        && !name.as_bytes()[0].is_ascii_digit()
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'$')
+}
+
+/// Run an import statement (from [`ImportRecord::statement`]) as global
+/// code and settle it, as `require` does: the loader reads from the mount,
+/// so nothing waits on the host.
+pub(crate) fn run_import(ctx: &Ctx<'_>, statement: &str) -> std::result::Result<(), String> {
+    let mut options = rquickjs::context::EvalOptions::default();
+    options.strict = false;
+    options.promise = true;
+    options.filename = Some("<eryx>".to_string());
+    let promise: rquickjs::Promise<'_> = ctx
+        .eval_with_options(statement, options)
+        .map_err(|e| caught(ctx, e))?;
+    loop {
+        match promise.state() {
+            PromiseState::Resolved => return Ok(()),
+            PromiseState::Rejected => {
+                return Err(match promise.result::<Value<'_>>() {
+                    Some(Err(e)) => caught(ctx, e),
+                    _ => "the import failed".to_string(),
+                });
+            }
+            PromiseState::Pending => {
+                if !ctx.execute_pending_job() {
+                    return Err("the import uses top-level await, so it can't be restored".into());
+                }
+            }
+        }
+    }
+}
+
+fn caught(ctx: &Ctx<'_>, error: Error) -> String {
+    match error {
+        Error::Exception => {
+            let value = ctx.catch();
+            value
+                .as_exception()
+                .and_then(rquickjs::Exception::message)
+                .or_else(|| value.as_string().and_then(|s| s.to_string().ok()))
+                .unwrap_or_else(|| "an exception".to_string())
+        }
+        other => other.to_string(),
+    }
+}
+
 /// Rewrite a script's leading `import` declarations into dynamic imports,
-/// which global code allows, keeping every line where it was:
+/// which global code allows, keeping every line where it was (see
+/// [`ImportRecord::statement`] for each form's rewrite):
 ///
-/// - `import x from "m"` → `var x = __eryx_import(await import("m")).default;`
-/// - `import { a, b as c } from "m"` → `var {a, b: c} = __eryx_import(await import("m"));`
-/// - `import x, { a } from "m"` → `var {default: x, a} = __eryx_import(...);`
-/// - `import * as ns from "m"` → `var ns = await import("m");`
-/// - `import x, * as ns from "m"` → `var ns = await import("m"); var x = __eryx_import(ns).default;`
-/// - `import "m"` → `await import("m");`
+/// - `import x from "m"`, `import { a, b as c } from "m"`,
+///   `import x, { a } from "m"`, `import * as ns from "m"`,
+///   `import x, * as ns from "m"` and `import "m"`.
 ///
 /// Returns the code unchanged unless it starts (after comments and
 /// whitespace) with imports this understands completely: anything else
 /// (import attributes, string export names, escapes in the specifier,
 /// non-ASCII names) is left for QuickJS to report as a syntax error, rather
-/// than rewritten wrongly. Also returns the rewritten statements, in order.
-pub(crate) fn rewrite_imports(code: &str) -> (std::borrow::Cow<'_, str>, Vec<String>) {
+/// than rewritten wrongly. Also returns what the imports bind, in order.
+pub(crate) fn rewrite_imports(code: &str) -> (std::borrow::Cow<'_, str>, Vec<ImportRecord>) {
     let mut out = String::new();
-    let mut statements = Vec::new();
+    let mut records = Vec::new();
     let mut scanner = Scanner { code, pos: 0 };
     let mut copied = 0;
     loop {
@@ -316,22 +470,23 @@ pub(crate) fn rewrite_imports(code: &str) -> (std::borrow::Cow<'_, str>, Vec<Str
         if !scanner.at_import_declaration() {
             break;
         }
-        let Some(statement) = scanner.import_declaration() else {
+        let Some(declared) = scanner.import_declaration() else {
             return (std::borrow::Cow::Borrowed(code), Vec::new());
         };
         out.push_str(&code[copied..start]);
-        out.push_str(&statement);
+        let statements: Vec<String> = declared.iter().map(ImportRecord::statement).collect();
+        out.push_str(&statements.join(" "));
         // Keep the lines the declaration took.
         let newlines = code[start..scanner.pos].matches('\n').count();
         out.push_str(&"\n".repeat(newlines));
         copied = scanner.pos;
-        statements.push(statement);
+        records.extend(declared);
     }
-    if statements.is_empty() {
-        return (std::borrow::Cow::Borrowed(code), statements);
+    if records.is_empty() {
+        return (std::borrow::Cow::Borrowed(code), records);
     }
     out.push_str(&code[copied..]);
-    (std::borrow::Cow::Owned(out), statements)
+    (std::borrow::Cow::Owned(out), records)
 }
 
 struct Scanner<'a> {
@@ -392,12 +547,8 @@ impl<'a> Scanner<'a> {
             .bytes()
             .take_while(|b| b.is_ascii_alphanumeric() || *b == b'_' || *b == b'$')
             .count();
-        if len == 0 || rest.as_bytes()[0].is_ascii_digit() {
-            return None;
-        }
         let name = &rest[..len];
-        // Followed by a non-ASCII identifier character: not ours to handle.
-        if rest[len..].chars().next().is_some_and(|c| !c.is_ascii()) {
+        if !is_identifier(name) || rest[len..].chars().next().is_some_and(|c| !c.is_ascii()) {
             return None;
         }
         self.pos += len;
@@ -419,26 +570,25 @@ impl<'a> Scanner<'a> {
         Some(specifier.to_string())
     }
 
-    /// `{ a, b as c, }` as destructuring entries (`a`, `b: c`).
-    fn named(&mut self) -> Option<Vec<String>> {
+    /// `{ a, b as c, }` as `(imported, local)` pairs.
+    fn named(&mut self) -> Option<Vec<(String, String)>> {
         if !self.eat("{") {
             return None;
         }
-        let mut entries = Vec::new();
+        let mut pairs = Vec::new();
         loop {
             if self.eat("}") {
-                return Some(entries);
+                return Some(pairs);
             }
             let imported = self.identifier()?;
-            let entry = if self.keyword("as") {
-                let local = self.identifier()?;
-                format!("{imported}: {local}")
+            let local = if self.keyword("as") {
+                self.identifier()?
             } else {
-                imported
+                imported.clone()
             };
-            entries.push(entry);
+            pairs.push((imported, local));
             if !self.eat(",") {
-                return self.eat("}").then_some(entries);
+                return self.eat("}").then_some(pairs);
             }
         }
     }
@@ -458,35 +608,32 @@ impl<'a> Scanner<'a> {
         }
     }
 
-    /// Parse one declaration after `import`, returning its rewrite.
-    fn import_declaration(&mut self) -> Option<String> {
+    /// `from "m"`.
+    fn after_from(&mut self) -> Option<String> {
+        self.keyword("from").then_some(())?;
+        self.specifier()
+    }
+
+    /// Parse one declaration after `import`, returning what it binds.
+    fn import_declaration(&mut self) -> Option<Vec<ImportRecord>> {
         self.pos += "import".len();
         self.skip_trivia();
-        let import = |m: &str| format!("await import({})", quote(m));
-        let statement = if self.rest().starts_with(['"', '\'']) {
+        let record = |specifier: &str, form| ImportRecord {
+            specifier: specifier.to_string(),
+            form,
+        };
+        let records = if self.rest().starts_with(['"', '\'']) {
             let module = self.specifier()?;
-            format!("{};", import(&module))
+            vec![record(&module, ImportForm::Named(Vec::new()))]
         } else if self.eat("*") {
-            if !self.keyword("as") {
-                return None;
-            }
+            self.keyword("as").then_some(())?;
             let ns = self.identifier()?;
-            if !self.keyword("from") {
-                return None;
-            }
-            let module = self.specifier()?;
-            format!("var {ns} = {};", import(&module))
+            let module = self.after_from()?;
+            vec![record(&module, ImportForm::Namespace(ns))]
         } else if self.rest().starts_with('{') {
             let named = self.named()?;
-            if !self.keyword("from") {
-                return None;
-            }
-            let module = self.specifier()?;
-            format!(
-                "var {{{}}} = __eryx_import({});",
-                named.join(", "),
-                import(&module)
-            )
+            let module = self.after_from()?;
+            vec![record(&module, ImportForm::Named(named))]
         } else {
             let default = self.identifier()?;
             if default == "type" {
@@ -495,40 +642,22 @@ impl<'a> Scanner<'a> {
             if self.eat(",") {
                 self.skip_trivia();
                 if self.eat("*") {
-                    if !self.keyword("as") {
-                        return None;
-                    }
+                    self.keyword("as").then_some(())?;
                     let ns = self.identifier()?;
-                    if !self.keyword("from") {
-                        return None;
-                    }
-                    let module = self.specifier()?;
-                    format!(
-                        "var {ns} = {}; var {default} = __eryx_import({ns}).default;",
-                        import(&module)
-                    )
+                    let module = self.after_from()?;
+                    vec![
+                        record(&module, ImportForm::Namespace(ns)),
+                        record(&module, ImportForm::Default(default)),
+                    ]
                 } else {
                     let mut named = self.named()?;
-                    if !self.keyword("from") {
-                        return None;
-                    }
-                    let module = self.specifier()?;
-                    named.insert(0, format!("default: {default}"));
-                    format!(
-                        "var {{{}}} = __eryx_import({});",
-                        named.join(", "),
-                        import(&module)
-                    )
+                    let module = self.after_from()?;
+                    named.insert(0, ("default".to_string(), default));
+                    vec![record(&module, ImportForm::Named(named))]
                 }
             } else {
-                if !self.keyword("from") {
-                    return None;
-                }
-                let module = self.specifier()?;
-                format!(
-                    "var {default} = __eryx_import({}).default;",
-                    import(&module)
-                )
+                let module = self.after_from()?;
+                vec![record(&module, ImportForm::Default(default))]
             }
         };
         // `with { ... }` attributes, or anything else before the end of the
@@ -549,7 +678,7 @@ impl<'a> Scanner<'a> {
         } else {
             return None;
         }
-        Some(statement)
+        Some(records)
     }
 
     fn skip_horizontal(&mut self) {
@@ -588,9 +717,12 @@ mod tests {
             ),
             (
                 r#"import x, * as ns from "m";"#,
-                r#"var ns = await import("m"); var x = __eryx_import(ns).default;"#,
+                r#"var ns = await import("m"); var x = __eryx_import(await import("m")).default;"#,
             ),
-            (r#"import "m";"#, r#"await import("m");"#),
+            (
+                r#"import "m";"#,
+                r#"var {} = __eryx_import(await import("m"));"#,
+            ),
             (
                 r#"import {} from "m";"#,
                 r#"var {} = __eryx_import(await import("m"));"#,

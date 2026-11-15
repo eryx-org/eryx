@@ -62,6 +62,9 @@ struct Task {
     waitable_set: Option<u32>,
     stdout: Vec<u8>,
     stderr: Vec<u8>,
+    /// What the script's `import` declarations bind, kept for snapshots
+    /// once it succeeds.
+    imports: Vec<crate::modules::ImportRecord>,
 }
 
 struct PendingInvoke {
@@ -214,6 +217,7 @@ impl Task {
             waitable_set: None,
             stdout: Vec::new(),
             stderr: Vec::new(),
+            imports: Vec::new(),
         }
     }
 
@@ -297,9 +301,11 @@ pub(crate) fn start_execute(export: ExportFunction, cx: Box<EryxCall>, code: Str
     // The host's JavaScript preamble (the secrets' `process.env`) runs first.
     let (preamble, code) = split_preamble(&code);
     // Leading `import` declarations become dynamic imports (src/modules.rs).
-    let (code, _imports) = crate::modules::rewrite_imports(code);
+    let (code, imports) = crate::modules::rewrite_imports(code);
     let (preamble, code) = (preamble.to_string(), code.into_owned());
-    TASK.with(|task| *task.borrow_mut() = Some(Task::new(export, cx)));
+    let mut task = Task::new(export, cx);
+    task.imports = imports;
+    TASK.with(|slot| *slot.borrow_mut() = Some(task));
     with_ctx(|ctx, hooks| {
         crate::fresh::reseed(ctx).expect("failed to reseed the QuickJS context");
         install_callbacks(ctx, hooks);
@@ -497,12 +503,16 @@ fn finish(hooks: &Object<'_>, outcome: Result<(), String>) -> u32 {
         waitable_set,
         stdout,
         stderr,
+        imports,
         ..
     } = task;
     let result_variable = RESULT_VARIABLE.with(|name| name.borrow().clone());
 
     match outcome {
         Ok(()) => {
+            if let Err(e) = commit_imports(hooks, &imports) {
+                eprintln!("eryx-js: failed to record the script's imports: {e}");
+            }
             // `captureResult` returns `[json, error]`.
             let (result, result_error) =
                 match call_hook::<Vec<String>>(hooks, "captureResult", (result_variable,)) {
@@ -551,13 +561,31 @@ fn finish(hooks: &Object<'_>, outcome: Result<(), String>) -> u32 {
     CALLBACK_EXIT
 }
 
+/// Record imports that ran, for [`snapshot_state`].
+fn commit_imports(
+    hooks: &Object<'_>,
+    imports: &[crate::modules::ImportRecord],
+) -> rquickjs::Result<()> {
+    if imports.is_empty() {
+        return Ok(());
+    }
+    let ctx = hooks.ctx();
+    let records = imports
+        .iter()
+        .map(|record| record.to_js(ctx))
+        .collect::<rquickjs::Result<Vec<_>>>()?;
+    call_hook::<()>(hooks, "commitImports", (records,))
+}
+
 pub(crate) fn set_result_variable(name: String) {
     RESULT_VARIABLE.with(|slot| *slot.borrow_mut() = name);
 }
 
 /// Version of the snapshot layout below. Bump it whenever the layout or the
-/// prelude's entry shape changes.
-const STATE_LAYOUT: u32 = 1;
+/// prelude's entry shape changes. Layout 2 added the imports entry; layout
+/// 1 snapshots (the same entries without it) still restore.
+const STATE_LAYOUT: u32 = 2;
+const OLDEST_STATE_LAYOUT: u32 = 1;
 
 /// Start of a `restore-state` error for a snapshot in another state format,
 /// followed by the snapshot's format, a tab, and the one this runtime reads.
@@ -572,10 +600,14 @@ const MAX_STATE_BYTES: usize = 10 * 1024 * 1024;
 /// The format id on a snapshot's first line. `JS_WriteObject`'s encoding is
 /// only read back by the same QuickJS, so the version is part of it.
 fn state_format() -> String {
+    state_format_for(STATE_LAYOUT)
+}
+
+fn state_format_for(layout: u32) -> String {
     // SAFETY: a static NUL-terminated version string.
     let version = unsafe { std::ffi::CStr::from_ptr(qjs::JS_GetVersion()) };
     format!(
-        "eryx-js-state/{STATE_LAYOUT} quickjs-ng@{}",
+        "eryx-js-state/{layout} quickjs-ng@{}",
         version.to_string_lossy()
     )
 }
@@ -652,8 +684,10 @@ pub(crate) fn snapshot_state() -> Result<(Vec<u8>, Vec<String>), String> {
 /// Replace the session with one restored from [`snapshot_state`]'s data.
 /// Another format id is refused with [`INCOMPATIBLE_STATE_PREFIX`]. The data
 /// is read without bytecode (or SharedArrayBuffers), so a crafted snapshot
-/// can only produce plain values; the prelude checks their shape. On failure
-/// the session is left empty.
+/// can only produce plain values; the prelude checks their shape. The
+/// session's imports run again (from the environment) before its variables
+/// are defined, so a reassigned import keeps its new value. On failure,
+/// including a failed import, the session is left empty.
 pub(crate) fn restore_state(data: &[u8]) -> Result<(), String> {
     let format = state_format();
     let (found, encoded) = match data.iter().position(|&b| b == b'\n') {
@@ -661,7 +695,7 @@ pub(crate) fn restore_state(data: &[u8]) -> Result<(), String> {
         // No format line: not a snapshot of any known format.
         None => (std::borrow::Cow::Borrowed(""), data),
     };
-    if found != format {
+    if !(OLDEST_STATE_LAYOUT..=STATE_LAYOUT).any(|layout| found == state_format_for(layout)) {
         return Err(format!("{INCOMPATIBLE_STATE_PREFIX}{found}\t{format}"));
     }
     // Never written, so never restored: reading is bounded like writing.
@@ -690,9 +724,27 @@ pub(crate) fn restore_state(data: &[u8]) -> Result<(), String> {
             ));
         }
         let entries = unsafe { Value::from_raw(ctx.clone(), raw) };
-        call_hook::<()>(hooks, "restoreEntries", (entries,))
+        let failed = |e: rquickjs::CaughtError<'_>| format!("failed to restore the snapshot: {e}");
+        let records = call_hook::<Vec<Object<'_>>>(hooks, "validateEntries", (entries.clone(),))
             .catch(ctx)
-            .map_err(|e| format!("failed to restore the snapshot: {e}"))
+            .map_err(failed)?;
+        let mut imports = Vec::with_capacity(records.len());
+        for record in &records {
+            let record = crate::modules::ImportRecord::from_js(record)
+                .catch(ctx)
+                .map_err(failed)?;
+            crate::modules::run_import(ctx, &record.statement()).map_err(|e| {
+                format!(
+                    "failed to restore the snapshot: import from {:?}: {e}",
+                    record.specifier
+                )
+            })?;
+            imports.push(record);
+        }
+        commit_imports(hooks, &imports).catch(ctx).map_err(failed)?;
+        call_hook::<()>(hooks, "applyEntries", (entries,))
+            .catch(ctx)
+            .map_err(failed)
     });
     if restored.is_err() {
         clear_state();

@@ -595,7 +595,7 @@ async fn snapshots_in_another_state_format_are_refused() {
     session.execute("var x = 1").run().await.unwrap();
     let bytes = session.snapshot_state().await.unwrap().to_bytes();
 
-    const FORMAT: &[u8] = b"eryx-js-state/1 quickjs-ng@";
+    const FORMAT: &[u8] = b"eryx-js-state/2 quickjs-ng@";
     let at = bytes
         .windows(FORMAT.len())
         .position(|w| w == FORMAT)
@@ -618,9 +618,9 @@ async fn snapshots_in_another_state_format_are_refused() {
     else {
         panic!("expected IncompatibleStateFormat, got {err:?}");
     };
-    assert_eq!(snapshot, "eryx-js-state/1 quickjs-ng@0.0.0");
+    assert_eq!(snapshot, "eryx-js-state/2 quickjs-ng@0.0.0");
     assert!(
-        runtime.starts_with("eryx-js-state/1 quickjs-ng@"),
+        runtime.starts_with("eryx-js-state/2 quickjs-ng@"),
         "{runtime}"
     );
 
