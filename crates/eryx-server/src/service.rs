@@ -465,11 +465,11 @@ impl crate::proto::eryx::v1::eryx_server::Eryx for EryxService {
             })
             .transpose()?;
 
-        // The preamble that sets the secrets' placeholders is Python, so the
-        // other languages can't have secrets yet (#822, #808).
-        if language != eryx::Language::Python && !execute_req.secrets.is_empty() {
+        // Python and JavaScript get the secrets' placeholders from a preamble
+        // (`os.environ`, `process.env`); the shell takes none.
+        if language == eryx::Language::Shell && !execute_req.secrets.is_empty() {
             return Err(Status::invalid_argument(format!(
-                "secrets are only supported for Python, not {language}"
+                "secrets are only supported for Python and JavaScript, not {language}"
             )));
         }
 
@@ -1209,8 +1209,10 @@ async fn execute_with_session(
     // from imported modules. Also add sys.path setup when supporting files are
     // present — merged here to avoid a separate WASM execution cycle. As a
     // preamble, it doesn't shift the user code's line numbers. The preamble
-    // is Python, so the other languages get none.
-    let preamble = if params.language != eryx::Language::Python {
+    // is Python; JavaScript only gets the secrets' `process.env`.
+    let preamble = if params.language == eryx::Language::JavaScript {
+        eryx::secrets::javascript_preamble(&params.secrets)
+    } else if params.language != eryx::Language::Python {
         String::new()
     } else if params.vfs_storage.is_some() {
         format!(

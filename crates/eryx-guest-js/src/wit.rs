@@ -34,7 +34,7 @@ pub(crate) fn set_wit(wit: Wit) {
     WIT.with(|cell| cell.set(Some(wit)));
 }
 
-fn wit() -> Wit {
+pub(crate) fn wit() -> Wit {
     WIT.with(Cell::get).expect("wit-dylib not initialized")
 }
 

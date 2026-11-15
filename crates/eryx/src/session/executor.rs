@@ -2080,8 +2080,8 @@ impl SessionExecutor {
     /// [state-op cancellation token](Self::set_state_op_cancellation).
     ///
     /// These exports run guest code (e.g. `__reduce__`), so they need a
-    /// bound. If it runs out the instance is discarded and the next call
-    /// resets the session.
+    /// bound. If it runs out, or the guest traps, the instance is discarded
+    /// and the next call resets the session.
     async fn run_state_op<R>(
         &mut self,
         what: &str,
@@ -2163,6 +2163,13 @@ impl SessionExecutor {
                 limit: fuel,
             }
             .into());
+        }
+        if let Err(e) = &result
+            && e.downcast_ref::<wasmtime::Trap>().is_some()
+        {
+            // Any other trap also leaves the instance unusable ("cannot enter
+            // component instance"): drop it too, so the session resets.
+            return Err(ErrorKind::WasmEngine(format!("WASM {what} error: {e}")).into());
         }
 
         // Restore store and bindings

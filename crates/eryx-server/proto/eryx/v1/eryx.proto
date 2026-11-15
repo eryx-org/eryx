@@ -272,7 +272,8 @@ message HttpRule {
 // used instead. The real value is substituted transparently in HTTP headers
 // when making requests to allowed_hosts.
 message SecretConfig {
-  // Secret name (becomes the environment variable name in Python).
+  // Secret name: the key of its placeholder in `os.environ` (Python) or
+  // `process.env` (JavaScript). Not supported for the shell.
   string name = 1;
   // The real secret value. Transmitted in plaintext over the gRPC connection —
   // callers must ensure the transport is secure (e.g. localhost, mTLS, or TLS).
