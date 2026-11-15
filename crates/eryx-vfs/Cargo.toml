@@ -28,7 +28,7 @@ wasmtime-wasi.workspace = true
 wasmtime-wasi-io.workspace = true
 
 [target.'cfg(unix)'.dependencies]
-rustix = { workspace = true, features = ["process"] } #unified
+rustix = { workspace = true, features = ["fs", "process"] } #unified
 
 [features]
 ## Derive serde `Serialize`/`Deserialize` on the snapshot types, enabling

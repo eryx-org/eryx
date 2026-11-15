@@ -10,7 +10,7 @@ use cap_primitives::fs as capfs;
 use wasmtime::component::Resource;
 use wasmtime_wasi_io::streams::{DynInputStream, DynOutputStream};
 
-use crate::file_io::{read_at, write_at};
+use crate::file_io::{read_at, reopen_for_append, write_at};
 use crate::hybrid::{HybridDescriptor, HybridPreopen, HybridVfsState, RealDir, RealFile};
 use crate::hybrid_bindings::HybridReaddirIterator;
 use crate::hybrid_bindings::{DirPerms, FilePerms, HybridFsError, HybridFsResult, preopens, types};
@@ -1440,7 +1440,7 @@ impl<S: VfsStorage + Clone + 'static> HybridVfsState<'_, S> {
     /// A write stream over the file `fd`, at `offset` or appending when it is
     /// `None`, after its permission checks.
     pub(crate) fn output_stream(
-        &self,
+        &mut self,
         fd: &Resource<HybridDescriptor>,
         offset: Option<types::Filesize>,
     ) -> HybridFsResult<DynOutputStream> {
@@ -1467,11 +1467,23 @@ impl<S: VfsStorage + Clone + 'static> HybridVfsState<'_, S> {
                 if !file.writable {
                     return Err(crate::VfsError::PermissionDenied("write".to_string()).into());
                 }
-                let handle = Arc::clone(&file.file);
-                Ok(Box::new(match offset {
-                    Some(offset) => RealFileOutputStream::write_at(handle, offset, file.max_size),
-                    None => RealFileOutputStream::append(handle, file.max_size),
-                }))
+                let max_size = file.max_size;
+                match offset {
+                    Some(offset) => Ok(Box::new(RealFileOutputStream::write_at(
+                        Arc::clone(&file.file),
+                        offset,
+                        max_size,
+                    ))),
+                    None => {
+                        // A handle of its own, opened for appending, so the
+                        // OS appends atomically even with other writers on
+                        // the host file. It counts as an open host file.
+                        self.ctx.check_open_host_files()?;
+                        let appender = Arc::new(reopen_for_append(&file.file)?);
+                        self.ctx.track_open_host_file(&appender)?;
+                        Ok(Box::new(RealFileOutputStream::append(appender, max_size)))
+                    }
+                }
             }
         }
     }
@@ -1814,6 +1826,39 @@ mod tests {
         state.table.delete(stream).unwrap();
         open(&mut state, &mnt, "f", none, read).await.unwrap();
         HostDescriptor::drop(&mut state, dir).unwrap();
+    }
+
+    /// An append stream on a host file holds its own append-mode handle,
+    /// which counts against the open-file limit like any other.
+    #[tokio::test]
+    async fn host_append_streams_count_as_open_files() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::write(temp.path().join("f"), b"").unwrap();
+        let mut ctx = real_ctx(temp.path(), |d| d).with_max_open_host_files(2);
+        let mut table = ResourceTable::new();
+        let mut state = HybridVfsState::new(&mut ctx, &mut table);
+        let mnt = preopen(&mut state, 0);
+        let write = types::DescriptorFlags::WRITE;
+        let file = open(&mut state, &mnt, "f", types::OpenFlags::empty(), write)
+            .await
+            .unwrap();
+
+        let stream = state.append_via_stream(borrow(&file)).unwrap();
+        assert!(matches!(
+            state.append_via_stream(borrow(&file)).map_err(vfs_err),
+            Err(crate::VfsError::TooManyOpenFiles(_))
+        ));
+        let mut out = state.table.delete(stream).unwrap();
+        out.blocking_write_and_flush(bytes::Bytes::from_static(b"ab"))
+            .await
+            .unwrap();
+        drop(out);
+        let stream = state.append_via_stream(borrow(&file)).unwrap();
+        let mut out = state.table.delete(stream).unwrap();
+        out.blocking_write_and_flush(bytes::Bytes::from_static(b"cd"))
+            .await
+            .unwrap();
+        assert_eq!(std::fs::read(temp.path().join("f")).unwrap(), b"abcd");
     }
 
     #[tokio::test]
