@@ -269,7 +269,8 @@ fn split_preamble(code: &str) -> (&str, &str) {
 }
 
 pub(crate) fn start_execute(export: ExportFunction, cx: Box<EryxCall>, code: String) -> u32 {
-    // The host sends JavaScript no preamble, so only the user code is left.
+    // A preamble is Python code, which the host only sends the Python guest,
+    // so only the user code is run.
     let (_, code) = split_preamble(&code);
     let code = code.to_string();
     TASK.with(|task| *task.borrow_mut() = Some(Task::new(export, cx)));

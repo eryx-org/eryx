@@ -141,7 +141,8 @@ struct Sandbox;
 
 impl Guest for Sandbox {
     async fn execute(code: String) -> Result<ExecuteOutput, ExecuteError> {
-        // The host sends the shell no preamble, so only the user code is left.
+        // A preamble is Python code, which the host only sends the Python
+        // guest, so only the user code is run.
         let (_, code) = split_preamble(&code);
         let code = code.to_string();
         let (status, result_json) = with_shell(|shell| {

@@ -425,18 +425,28 @@ pub fn ensure_private_dir(dir: &Path) -> io::Result<PathBuf> {
 /// --language <language>` cached for this platform and eryx version, in
 /// `$XDG_CACHE_HOME/eryx` or `~/.cache/eryx`, if it exists.
 ///
-/// It is loaded as native code, so a file that isn't [private](is_private) to
-/// the current user is ignored.
+/// It is loaded as native code, so it is ignored unless both the file and
+/// its directory are [private](is_private) to the current user (and not
+/// symlinks). Relative `XDG_CACHE_HOME` and `HOME` values are ignored, as for
+/// the embedded runtime's cache.
 #[must_use]
 pub fn setup_runtime(language: crate::Language) -> Option<PathBuf> {
-    let dir = match std::env::var_os("XDG_CACHE_HOME") {
-        Some(xdg) => PathBuf::from(xdg).join("eryx"),
-        None => {
-            PathBuf::from(std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"))?)
-                .join(".cache")
-                .join("eryx")
-        }
+    let absolute = |name: &str| {
+        std::env::var_os(name)
+            .map(PathBuf::from)
+            .filter(|path| path.is_absolute())
     };
+    let dir = match absolute("XDG_CACHE_HOME") {
+        Some(xdg) => xdg.join("eryx"),
+        None => absolute("HOME")
+            .or_else(|| absolute("USERPROFILE"))?
+            .join(".cache")
+            .join("eryx"),
+    };
+    let dir_meta = fs::symlink_metadata(&dir).ok()?;
+    if !dir_meta.is_dir() || !is_private(&dir_meta) {
+        return None;
+    }
     let path = dir.join(format!(
         "runtime-{language}-v{}-{}-{}.cwasm",
         env!("CARGO_PKG_VERSION"),
@@ -789,6 +799,48 @@ impl std::fmt::Debug for InstancePreCache {
 #[allow(clippy::expect_used, clippy::unwrap_used)]
 mod tests {
     use super::*;
+
+    /// The cached setup runtime is only used from a private directory, and a
+    /// relative XDG_CACHE_HOME is ignored.
+    // Setting env vars is unsafe, which only these features allow.
+    #[cfg(all(unix, any(feature = "embedded", feature = "preinit")))]
+    #[allow(unsafe_code)]
+    #[test]
+    fn setup_runtime_requires_a_private_file_and_directory() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = tempfile::TempDir::new().unwrap();
+        let dir = root.path().join("eryx");
+        fs::create_dir(&dir).unwrap();
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o700)).unwrap();
+        let file = dir.join(format!(
+            "runtime-shell-v{}-{}-{}.cwasm",
+            env!("CARGO_PKG_VERSION"),
+            std::env::consts::ARCH,
+            std::env::consts::OS
+        ));
+        fs::write(&file, b"cwasm").unwrap();
+        fs::set_permissions(&file, fs::Permissions::from_mode(0o600)).unwrap();
+
+        // SAFETY: nextest runs each test in its own process, so nothing else
+        // reads the environment concurrently.
+        unsafe { std::env::set_var("XDG_CACHE_HOME", root.path()) };
+        assert_eq!(setup_runtime(crate::Language::Shell), Some(file.clone()));
+        assert_eq!(setup_runtime(crate::Language::JavaScript), None);
+
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o777)).unwrap();
+        assert_eq!(setup_runtime(crate::Language::Shell), None);
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o700)).unwrap();
+        fs::set_permissions(&file, fs::Permissions::from_mode(0o666)).unwrap();
+        assert_eq!(setup_runtime(crate::Language::Shell), None);
+
+        // SAFETY: as above.
+        unsafe {
+            std::env::set_var("XDG_CACHE_HOME", "relative/cache");
+            std::env::set_var("HOME", root.path().join("nowhere"));
+        }
+        assert_eq!(setup_runtime(crate::Language::Shell), None);
+    }
 
     #[cfg(feature = "embedded")]
     #[test]

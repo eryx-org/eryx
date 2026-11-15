@@ -59,7 +59,7 @@ run = "cargo build --workspace"
 
 [tasks.test]
 description = "Run tests with embedded WASM"
-depends = ["precompile-runtime-python"]
+depends = ["precompile-runtime-python", "precompile-runtime-javascript", "precompile-runtime-shell"]
 run = "cargo nextest run --workspace --features embedded"
 
 [tasks.test-python]
@@ -69,7 +69,7 @@ run = "mise run test"
 
 [tasks.test-all]
 description = "Run tests with all features"
-depends = ["precompile-runtime-python"]
+depends = ["precompile-runtime-python", "precompile-runtime-javascript", "precompile-runtime-shell"]
 run = "cargo nextest run --workspace --all-features"
 
 [tasks.lint]
@@ -535,12 +535,12 @@ depends = ["build-runtime-python", "build"]
 
 [tasks.bench]
 description = "Run benchmarks"
-depends = ["precompile-runtime-python"]
+depends = ["precompile-runtime-python", "precompile-runtime-javascript", "precompile-runtime-shell"]
 run = "cargo bench --package eryx --all-features"
 
 [tasks.bench-save]
 description = "Run benchmarks and save baseline"
-depends = ["precompile-runtime-python"]
+depends = ["precompile-runtime-python", "precompile-runtime-javascript", "precompile-runtime-shell"]
 run = "cargo bench --package eryx --all-features -- --save-baseline main"
 
 [tasks.precompile-runtime-python-no-preinit]
@@ -586,7 +586,7 @@ outputs = ["crates/eryx-runtime/runtime-python.cwasm"]
 
 [tasks.setup]
 description = "Set up development environment (build WASM, precompile, etc.)"
-depends = ["precompile-runtime-python"]
+depends = ["precompile-runtime-python", "precompile-runtime-javascript", "precompile-runtime-shell"]
 run = """
 echo "✓ Development environment ready!"
 echo ""

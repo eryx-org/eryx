@@ -60,6 +60,17 @@ def test_runtime_from_companion_package(monkeypatch):
     assert session.execute("console.log(x * 7)").stdout == b"42\n"
 
 
+def test_companion_package_without_its_runtime_is_skipped(monkeypatch):
+    def missing():
+        raise FileNotFoundError("built without its runtime")
+
+    package = types.ModuleType("pyeryx_runtime_javascript")
+    package.cwasm_path = missing
+    monkeypatch.setitem(sys.modules, "pyeryx_runtime_javascript", package)
+    with pytest.raises(eryx.InitializationError, match=r"pip install pyeryx\[javascript\]"):
+        eryx.Sandbox(language="javascript")
+
+
 def test_missing_runtime_says_how_to_get_it():
     with pytest.raises(eryx.InitializationError, match=r"pip install pyeryx\[javascript\]"):
         eryx.Sandbox(language="javascript")

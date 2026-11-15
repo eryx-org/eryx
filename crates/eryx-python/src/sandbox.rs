@@ -490,10 +490,17 @@ fn find_runtime(
     if let Some(path) = std::env::var_os(&var) {
         return Ok(path.into());
     }
+    // A companion package without its runtime (a source checkout's
+    // skeleton) counts as not installed.
     let module = format!("pyeryx_runtime_{language}");
-    match py.import(module.as_str()) {
-        Ok(module) => return module.call_method0("cwasm_path")?.extract(),
-        Err(e) if e.is_instance_of::<pyo3::exceptions::PyModuleNotFoundError>(py) => {}
+    match py
+        .import(module.as_str())
+        .and_then(|module| module.call_method0("cwasm_path"))
+    {
+        Ok(path) => return path.extract(),
+        Err(e)
+            if e.is_instance_of::<pyo3::exceptions::PyModuleNotFoundError>(py)
+                || e.is_instance_of::<pyo3::exceptions::PyFileNotFoundError>(py) => {}
         Err(e) => return Err(e),
     }
     if let Some(path) = eryx::cache::setup_runtime(language) {

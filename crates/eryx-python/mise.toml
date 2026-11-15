@@ -45,7 +45,9 @@ run = "cd ../.. && mise run precompile-runtime-python"
 description = "Create venv and install dev dependencies with uv"
 sources = ["pyproject.toml", "uv.lock"]
 outputs = [".venv/pyvenv.cfg"]
-run = "uv sync --frozen --all-extras"
+# Not --all-extras: the runtime extras would install the empty companion
+# package skeletons from runtimes/.
+run = "uv sync --frozen --extra dev --extra serve"
 
 # =============================================================================
 # Build

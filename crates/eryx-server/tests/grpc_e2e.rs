@@ -136,16 +136,27 @@ async fn execute_in(
     language: eryx_server::proto::eryx::v1::Language,
     code: &str,
 ) -> Result<eryx_server::proto::eryx::v1::ExecuteResult, tonic::Status> {
+    execute_request(
+        channel,
+        ExecuteRequest {
+            code: code.to_string(),
+            language: language as i32,
+            ..Default::default()
+        },
+    )
+    .await
+}
+
+/// Send `request` and return the final result, or the gRPC status the server
+/// rejected it with.
+async fn execute_request(
+    channel: Channel,
+    request: ExecuteRequest,
+) -> Result<eryx_server::proto::eryx::v1::ExecuteResult, tonic::Status> {
     let mut client = EryxClient::new(channel);
     let (tx, rx) = mpsc::channel(16);
     tx.send(ClientMessage {
-        message: Some(client_message::Message::ExecuteRequest(Box::new(
-            ExecuteRequest {
-                code: code.to_string(),
-                language: language as i32,
-                ..Default::default()
-            },
-        ))),
+        message: Some(client_message::Message::ExecuteRequest(Box::new(request))),
     })
     .await
     .unwrap();
@@ -210,6 +221,31 @@ async fn execute_selects_the_language_pool() {
         .await
         .unwrap();
     assert_eq!(created.load(std::sync::atomic::Ordering::SeqCst), 1);
+
+    // Secrets need the Python preamble, so they're refused for JavaScript
+    // rather than silently missing.
+    let status = execute_request(
+        channel.clone(),
+        ExecuteRequest {
+            code: "console.log(1)".to_string(),
+            language: Language::Javascript as i32,
+            secrets: vec![eryx_server::proto::eryx::v1::SecretConfig {
+                name: "TOKEN".to_string(),
+                value: "s3cret".to_string(),
+                allowed_hosts: vec![],
+            }],
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(status.code(), tonic::Code::InvalidArgument);
+    assert!(
+        status
+            .message()
+            .contains("secrets are only supported for Python, not javascript"),
+        "{status:?}"
+    );
 
     // Unspecified is Python.
     let result = execute_in(channel.clone(), Language::Unspecified, "print(6 * 7)")

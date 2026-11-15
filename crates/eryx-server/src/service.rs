@@ -465,6 +465,14 @@ impl crate::proto::eryx::v1::eryx_server::Eryx for EryxService {
             })
             .transpose()?;
 
+        // The preamble that sets the secrets' placeholders is Python, so the
+        // other languages can't have secrets yet (#822, #808).
+        if language != eryx::Language::Python && !execute_req.secrets.is_empty() {
+            return Err(Status::invalid_argument(format!(
+                "secrets are only supported for Python, not {language}"
+            )));
+        }
+
         // Parse and validate secrets: generate placeholders and build env preamble.
         let (secrets, secrets_preamble) = {
             let mut map = HashMap::new();
@@ -700,6 +708,7 @@ impl crate::proto::eryx::v1::eryx_server::Eryx for EryxService {
             async move {
                 let params = SessionParams {
                     code: &code,
+                    language,
                     vfs_storage,
                     state: persist_state.then_some(state_snapshot.as_slice()),
                     enable_tracing,
@@ -932,6 +941,8 @@ async fn create_vfs_with_files(
 /// Parameters for a single session execution.
 struct SessionParams<'a> {
     code: &'a str,
+    /// The guest language: only Python gets the (Python) preamble.
+    language: eryx::Language,
     /// VFS pre-populated with the request's supporting files, if any.
     vfs_storage: Option<ArcStorage>,
     state: Option<&'a [u8]>,
@@ -1197,8 +1208,11 @@ async fn execute_with_session(
     // Run builtins injection before the user code so callbacks are accessible
     // from imported modules. Also add sys.path setup when supporting files are
     // present — merged here to avoid a separate WASM execution cycle. As a
-    // preamble, it doesn't shift the user code's line numbers.
-    let preamble = if params.vfs_storage.is_some() {
+    // preamble, it doesn't shift the user code's line numbers. The preamble
+    // is Python, so the other languages get none.
+    let preamble = if params.language != eryx::Language::Python {
+        String::new()
+    } else if params.vfs_storage.is_some() {
         format!(
             "{}{SYS_PATH_INJECT}{BUILTINS_INJECT}",
             params.secrets_preamble
