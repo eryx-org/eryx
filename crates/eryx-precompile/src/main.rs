@@ -9,7 +9,8 @@
 //! # One-time setup for crates.io users (downloads + compiles for your platform)
 //! eryx-precompile setup
 //!
-//! # The same for the JavaScript and shell runtimes too
+//! # The same for the JavaScript and shell runtimes too (the shell's brings
+//! # its embedded coreutils commands)
 //! eryx-precompile setup --language python --language javascript --language shell
 //!
 //! # Pre-init + compile for Fly.io (x86-64-v3, no AVX-512)
@@ -48,7 +49,8 @@ use clap::{Parser, Subcommand};
 use eryx::{CpuFeatureLevel, Session}; // For execute() method and CPU features
 use sha2::{Digest, Sha256};
 
-/// Largest `runtime-python.wasm` that `setup` will download (the real one is ~50 MB).
+/// Largest component (e.g. `runtime-python.wasm`) that `setup` will download
+/// (the real Python runtime is ~50 MB).
 const MAX_RUNTIME_WASM_BYTES: u64 = 256 * 1024 * 1024;
 
 /// Largest `runtime-python.wasm.sha256` that `setup` will download.
@@ -70,7 +72,8 @@ enum Command {
     /// Downloads `runtime-<language>.wasm` (Python's by default; see
     /// `--language`) from the matching GitHub Release, pre-compiles it
     /// to native code, and caches it in ~/.cache/eryx/ so that `cargo build`
-    /// with `features = ["embedded"]` finds it automatically.
+    /// with `features = ["embedded"]` finds it automatically. The shell's
+    /// also brings `coreutils.wasm`, the commands the `shell` feature embeds.
     ///
     /// For cross-compilation, custom CPU targets, or pre-initialization with
     /// packages, use the `compile` subcommand instead.
@@ -125,7 +128,8 @@ struct SetupArgs {
     version: Option<String>,
 
     /// Guest language whose runtime to set up: python, javascript or shell.
-    /// Repeat to set up several.
+    /// Repeat to set up several. `shell` also sets up the shell's embedded
+    /// commands (`coreutils.wasm`), which eryx's `shell` feature embeds.
     #[arg(long = "language", value_name = "LANGUAGE", default_value = "python", value_parser = parse_language)]
     languages: Vec<eryx::Language>,
 
@@ -133,9 +137,17 @@ struct SetupArgs {
     ///
     /// By default the checksum comes from the release's
     /// `runtime-<language>.wasm.sha256` asset. Pass a hash here to check the
-    /// download against it instead (with a single `--language` only).
+    /// download against it instead (with a single `--language` only). It
+    /// applies to the runtime: the shell's coreutils is always checked against
+    /// its own `.sha256` asset.
     #[arg(long, value_name = "HEX")]
     sha256: Option<String>,
+
+    /// Download the release assets from this URL instead of GitHub, e.g. a
+    /// mirror or a local directory served over HTTP: `<URL>/<asset>` and
+    /// `<URL>/<asset>.sha256`.
+    #[arg(long, value_name = "URL")]
+    release_url: Option<String>,
 
     /// Verbose output
     #[arg(short, long)]
@@ -348,19 +360,21 @@ fn parse_language(s: &str) -> Result<eryx::Language, String> {
     s.parse()
 }
 
-/// Try to download `asset` (a `runtime-<language>.wasm`) from a GitHub
-/// Release and verify its SHA-256.
+/// Try to download `asset` (e.g. `runtime-python.wasm`) from a GitHub
+/// Release, or from `release_url` if given, and verify its SHA-256.
 ///
-/// Tries multiple tag patterns since the naming convention has changed over time:
+/// On GitHub, tries multiple tag patterns since the naming convention has
+/// changed over time:
 /// - `v{version}` (cargo-dist releases, used for v0.3.0 and earlier)
 /// - `eryx-v{version}` (release-plz releases, used from v0.4.0+)
 /// - `eryx-precompile-v{version}` (upload-runtime attaches to whichever release triggers it)
 ///
 /// The expected hash is `expected_sha256` if given, otherwise the
 /// `<asset>.sha256` asset next to it in the same release.
-async fn download_runtime_wasm(
+async fn download_asset(
     client: &reqwest::Client,
     version: &str,
+    release_url: Option<&str>,
     asset: &str,
     expected_sha256: Option<&str>,
 ) -> Result<Vec<u8>> {
@@ -369,15 +383,22 @@ async fn download_runtime_wasm(
         format!("eryx-precompile-v{version}"),
         format!("v{version}"),
     ];
+    let release_urls: Vec<String> = match release_url {
+        Some(url) => vec![url.trim_end_matches('/').to_owned()],
+        None => tag_patterns
+            .iter()
+            .map(|tag| format!("https://github.com/eryx-org/eryx/releases/download/{tag}"))
+            .collect(),
+    };
 
     let mut last_error = None;
-    for tag in &tag_patterns {
-        let url = format!("https://github.com/eryx-org/eryx/releases/download/{tag}/{asset}");
+    for release in &release_urls {
+        let url = format!("{release}/{asset}");
         println!("  Trying {url}");
 
         match client.get(&url).send().await {
             Ok(resp) if resp.status().is_success() => {
-                println!("  Found {asset} in release {tag}");
+                println!("  Found {asset} in {release}");
                 let expected = match expected_sha256 {
                     Some(hex) => parse_sha256(hex)?,
                     None => fetch_sha256(client, &format!("{url}.sha256")).await?,
@@ -398,7 +419,11 @@ async fn download_runtime_wasm(
         }
     }
 
-    Err(last_error.unwrap_or_else(|| anyhow::anyhow!("No tag patterns to try"))).context(format!(
+    let last_error = last_error.unwrap_or_else(|| anyhow::anyhow!("No release URLs to try"));
+    if let Some(url) = release_url {
+        return Err(last_error).context(format!("Could not download {asset} from {url}"));
+    }
+    Err(last_error).context(format!(
         "Could not find {asset} in any GitHub Release for version {version}.\n\
              Tried tags: {}.\n\
              Check https://github.com/eryx-org/eryx/releases for available versions.",
@@ -552,15 +577,23 @@ async fn run_setup(args: SetupArgs) -> Result<()> {
         .context("Failed to create HTTP client")?;
 
     for &language in &args.languages {
-        setup_runtime(
-            &client,
-            &version,
-            &target,
-            &cache,
-            language,
-            args.sha256.as_deref(),
-        )
-        .await?;
+        let mut components = vec![(Component::Runtime(language), args.sha256.as_deref())];
+        // The `shell` feature turns on `coreutils`, which embeds these.
+        if language == eryx::Language::Shell {
+            components.push((Component::Coreutils, None));
+        }
+        for (component, sha256) in components {
+            setup_component(
+                &client,
+                &version,
+                &target,
+                &cache,
+                args.release_url.as_deref(),
+                component,
+                sha256,
+            )
+            .await?;
+        }
     }
 
     println!(
@@ -574,18 +607,59 @@ async fn run_setup(args: SetupArgs) -> Result<()> {
     Ok(())
 }
 
-/// Download, precompile and cache one language's runtime.
-async fn setup_runtime(
+/// A component `setup` downloads, precompiles and caches.
+#[derive(Clone, Copy)]
+enum Component {
+    /// A guest language's runtime, `runtime-<language>.wasm`.
+    Runtime(eryx::Language),
+    /// The shell's embedded commands, `coreutils.wasm` (eryx's `coreutils`
+    /// feature).
+    Coreutils,
+}
+
+impl Component {
+    /// The file name, without `.wasm` or `.cwasm`. eryx's build.rs looks for
+    /// `<stem>-v<version>-<arch>-<os>.cwasm` in the cache.
+    fn stem(self) -> String {
+        match self {
+            Self::Runtime(language) => format!("runtime-{language}"),
+            Self::Coreutils => "coreutils".to_owned(),
+        }
+    }
+}
+
+impl std::fmt::Display for Component {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Runtime(language) => write!(f, "{language} runtime"),
+            Self::Coreutils => f.write_str("shell commands (coreutils)"),
+        }
+    }
+}
+
+/// The cache path of `component` for eryx `version` on `target`.
+fn cached_component_path(
+    cache: &Path,
+    component: Component,
+    version: &str,
+    target: &str,
+) -> PathBuf {
+    cache.join(format!("{}-v{version}-{target}.cwasm", component.stem()))
+}
+
+/// Download, precompile and cache one component.
+async fn setup_component(
     client: &reqwest::Client,
     version: &str,
     target: &str,
     cache: &Path,
-    language: eryx::Language,
+    release_url: Option<&str>,
+    component: Component,
     sha256: Option<&str>,
 ) -> Result<()> {
-    let asset = format!("runtime-{language}.wasm");
-    let cwasm_path = cache.join(format!("runtime-{language}-v{version}-{target}.cwasm"));
-    println!("Runtime: {language}");
+    let asset = format!("{}.wasm", component.stem());
+    let cwasm_path = cached_component_path(cache, component, version, target);
+    println!("Component: {component}");
 
     // Check if already cached. A file another user could have written, or one
     // without a matching checksum (from an interrupted run or an older version
@@ -604,9 +678,9 @@ async fn setup_runtime(
         return Ok(());
     }
 
-    // Step 1: Download runtime-<language>.wasm
-    println!("Step 1: Downloading {asset} from GitHub Release...");
-    let wasm_bytes = download_runtime_wasm(client, version, &asset, sha256).await?;
+    // Step 1: Download the component
+    println!("Step 1: Downloading {asset}...");
+    let wasm_bytes = download_asset(client, version, release_url, &asset, sha256).await?;
 
     println!(
         "  Downloaded {} bytes ({:.1} MB)",
@@ -625,7 +699,10 @@ async fn setup_runtime(
     let mut precompiled =
         eryx::Executor::precompile_with_options(&wasm_bytes, None, CpuFeatureLevel::Native)
             .with_context(|| format!("Failed to pre-compile {asset} to native code"))?;
-    eryx::Executor::stamp_language(&mut precompiled, language);
+    // Commands aren't runtimes, so coreutils carries no language stamp.
+    if let Component::Runtime(language) = component {
+        eryx::Executor::stamp_language(&mut precompiled, language);
+    }
 
     let elapsed = start.elapsed();
     println!(
@@ -1486,6 +1563,111 @@ mod tests {
         let resp = client.get(serve_chunked_body(101).await?).send().await?;
         assert!(read_capped(resp, 100).await.is_err());
         Ok(())
+    }
+
+    /// Serve `files` (path → body) over HTTP until the test ends, and return
+    /// the base URL. Other paths get a 404.
+    async fn serve_files(files: Vec<(&'static str, Vec<u8>)>) -> Result<String> {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let addr = listener.local_addr()?;
+        let files = std::sync::Arc::new(files);
+        tokio::spawn(async move {
+            while let Ok((mut stream, _)) = listener.accept().await {
+                let files = files.clone();
+                tokio::spawn(async move {
+                    let mut request = [0u8; 1024];
+                    let n = stream.read(&mut request).await?;
+                    let request = String::from_utf8_lossy(&request[..n]);
+                    let path = request.split_whitespace().nth(1).unwrap_or_default();
+                    let response = match files.iter().find(|(p, _)| *p == path) {
+                        Some((_, body)) => {
+                            let mut r = format!(
+                                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                                body.len()
+                            )
+                            .into_bytes();
+                            r.extend_from_slice(body);
+                            r
+                        }
+                        None => b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                            .to_vec(),
+                    };
+                    stream.write_all(&response).await?;
+                    stream.shutdown().await
+                });
+            }
+        });
+        Ok(format!("http://{addr}"))
+    }
+
+    #[tokio::test]
+    async fn release_url_downloads_and_verifies_an_asset() -> Result<()> {
+        let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+        let client = reqwest::Client::new();
+        let body = b"coreutils component".to_vec();
+        let good = format!("{}  coreutils.wasm\n", hex::encode(Sha256::digest(&body)));
+        let url = serve_files(vec![
+            ("/good/coreutils.wasm", body.clone()),
+            ("/good/coreutils.wasm.sha256", good.into_bytes()),
+            ("/bad/coreutils.wasm", body.clone()),
+            ("/bad/coreutils.wasm.sha256", "00".repeat(32).into_bytes()),
+        ])
+        .await?;
+
+        let got = download_asset(
+            &client,
+            "0.0.0",
+            Some(&format!("{url}/good/")),
+            "coreutils.wasm",
+            None,
+        )
+        .await?;
+        assert_eq!(got, body);
+        let Err(err) = download_asset(
+            &client,
+            "0.0.0",
+            Some(&format!("{url}/bad")),
+            "coreutils.wasm",
+            None,
+        )
+        .await
+        else {
+            anyhow::bail!("the download should fail");
+        };
+        assert!(format!("{err:#}").contains("SHA-256 mismatch"), "{err:#}");
+        let Err(err) = download_asset(
+            &client,
+            "0.0.0",
+            Some(&format!("{url}/missing")),
+            "coreutils.wasm",
+            None,
+        )
+        .await
+        else {
+            anyhow::bail!("the download should fail");
+        };
+        assert!(format!("{err:#}").contains("404"), "{err:#}");
+        Ok(())
+    }
+
+    /// eryx's build.rs looks for `<stem>-v<version>-<arch>-<os>.cwasm`.
+    #[test]
+    fn cache_names_match_the_build_script() {
+        let cache = Path::new("/cache");
+        assert_eq!(
+            cached_component_path(cache, Component::Coreutils, "0.15.1", "x86_64-linux"),
+            Path::new("/cache/coreutils-v0.15.1-x86_64-linux.cwasm")
+        );
+        assert_eq!(
+            cached_component_path(
+                cache,
+                Component::Runtime(eryx::Language::Shell),
+                "0.15.1",
+                "x86_64-linux"
+            ),
+            Path::new("/cache/runtime-shell-v0.15.1-x86_64-linux.cwasm")
+        );
     }
 
     #[test]
