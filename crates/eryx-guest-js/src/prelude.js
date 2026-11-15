@@ -1,6 +1,7 @@
 // Evaluated once when the QuickJS context is created. Receives the native
-// intrinsics object (`invoke`, `write`, `evalScript`) and returns the hooks
-// the Rust side calls per execution. Everything user-visible is installed on globalThis.
+// intrinsics object (`invoke`, `write`, `trace`, `evalScript`) and returns
+// the hooks the Rust side calls per execution. Everything user-visible is
+// installed on globalThis.
 (native) => {
     const inspect = (v) => {
         if (typeof v === 'string') return v;
@@ -81,9 +82,21 @@
     // `await invoke("name", {arg: 1})` (or `invoke("name", 1, 2)`) — the JS
     // analog of Python's `await invoke("name", arg=1)`. Resolves to the parsed
     // JSON result.
+    // Each call reports callback_start/callback_end trace events in the
+    // CPython guest's shape, the arguments as callback_start's context.
     globalThis.invoke = async (name, ...args) => {
-        const payload = JSON.stringify(callArgs(String(name), args));
-        const json = await native.invoke(String(name), payload);
+        name = String(name);
+        const payload = JSON.stringify(callArgs(name, args));
+        native.trace(0, JSON.stringify({ type: 'callback_start', name }), payload);
+        let json;
+        try {
+            json = await native.invoke(name, payload);
+        } catch (e) {
+            const error = e instanceof Error ? e.message : String(e);
+            native.trace(0, JSON.stringify({ type: 'callback_end', name, error }), '');
+            throw e;
+        }
+        native.trace(0, JSON.stringify({ type: 'callback_end', name }), '');
         return json === '' ? null : JSON.parse(json);
     };
 
