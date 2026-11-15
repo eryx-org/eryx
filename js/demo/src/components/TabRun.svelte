@@ -1,6 +1,6 @@
 <script lang="ts">
   import { getSandboxState, runCode } from "../lib/sandbox.svelte";
-  import { RUN_EXAMPLES } from "../lib/examples";
+  import { JS_EXAMPLES, RUN_EXAMPLES, SHELL_EXAMPLES } from "../lib/examples";
   import CodeEditor from "./CodeEditor.svelte";
   import ExamplePills from "./ExamplePills.svelte";
   import OutputBox from "./OutputBox.svelte";
@@ -8,6 +8,14 @@
   let state = $derived(getSandboxState());
   let ready = $derived(state.status === "ready");
 
+  type Language = "python" | "javascript" | "shell";
+  const LANGUAGES: Record<Language, { label: string; examples: typeof RUN_EXAMPLES }> = {
+    python: { label: "Python", examples: RUN_EXAMPLES },
+    javascript: { label: "JavaScript", examples: JS_EXAMPLES },
+    shell: { label: "Shell", examples: SHELL_EXAMPLES },
+  };
+
+  let language: Language = $state("python");
   let code = $state(
     `print("Hello from eryx!")
 result = sum(range(10))
@@ -18,17 +26,34 @@ print(f"Sum of 0..9 = {result}")`,
   let isError = $state(false);
   let elapsed: number | null = $state(null);
 
-  // Restore code from URL hash
+  // Restore code (and its language, `#<language>:<code>`, Python when
+  // there's no prefix) from the URL hash
   if (window.location.hash) {
     try {
-      code = decodeURIComponent(window.location.hash.slice(1));
+      const hash = decodeURIComponent(window.location.hash.slice(1));
+      const prefix = hash.slice(0, hash.indexOf(":"));
+      if (prefix === "javascript" || prefix === "shell") {
+        language = prefix;
+        code = hash.slice(prefix.length + 1);
+      } else {
+        code = hash;
+      }
     } catch {}
   }
 
   // Save code to URL hash on change
   $effect(() => {
-    history.replaceState(null, "", "#" + encodeURIComponent(code));
+    const hash = language === "python" ? code : `${language}:${code}`;
+    history.replaceState(null, "", "#" + encodeURIComponent(hash));
   });
+
+  function selectLanguage(next: Language) {
+    if (next === language) return;
+    language = next;
+    code = Object.values(LANGUAGES[next].examples)[0].code;
+    output = null;
+    elapsed = null;
+  }
 
   async function run() {
     const trimmed = code.trim();
@@ -36,7 +61,7 @@ print(f"Sum of 0..9 = {result}")`,
 
     running = true;
     output = "";
-    const result = await runCode(trimmed);
+    const result = await runCode(trimmed, language);
     running = false;
 
     if (result.ok) {
@@ -58,8 +83,20 @@ print(f"Sum of 0..9 = {result}")`,
 
 <p class="share-hint">Code is saved in the URL for sharing.</p>
 
+<div class="pill-row languages" role="radiogroup" aria-label="Language">
+  {#each Object.entries(LANGUAGES) as [key, lang]}
+    <button
+      class="pill"
+      class:active={language === key}
+      role="radio"
+      aria-checked={language === key}
+      onclick={() => selectLanguage(key as Language)}>{lang.label}</button
+    >
+  {/each}
+</div>
+
 <ExamplePills
-  examples={RUN_EXAMPLES}
+  examples={LANGUAGES[language].examples}
   onselect={(c) => (code = c)}
 />
 
@@ -85,6 +122,13 @@ print(f"Sum of 0..9 = {result}")`,
 {/if}
 
 <style>
+  .languages {
+    margin-bottom: 12px;
+  }
+  .languages .pill.active {
+    background: var(--accent);
+    color: var(--bg);
+  }
   .share-hint {
     color: var(--text-muted);
     margin-top: 0;

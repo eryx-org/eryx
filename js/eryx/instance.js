@@ -30,21 +30,40 @@ import * as sockets from "./shims/sockets.js";
 // Import stdlib loader
 import { loadStdlib } from "./stdlib-loader.js";
 
-// Load the Python stdlib once; every Sandbox gets its own copy-on-access view of it.
-const stdlibTree = await loadStdlib();
-
-// The stdlib tar extracts to python-stdlib/*, but the WASM expects
-// files at the root of the preopen (mounted as /python-stdlib).
-const stdlibDir = stdlibTree.dir?.["python-stdlib"] || stdlibTree;
-
 /**
- * The template file tree each new Sandbox copies: the stdlib and an empty
+ * The template file tree each new Python sandbox copies: the stdlib (added
+ * once it has loaded, see {@link loadPythonStdlib}) and an empty
  * site-packages directory. Files added here are visible to sandboxes created
  * afterwards; use a Sandbox's own `_fileTree` to change one that exists.
  */
-export const _fileTree = {
-  dir: { "python-stdlib": stdlibDir, "site-packages": { dir: {} } },
-};
+export const _fileTree = { dir: { "site-packages": { dir: {} } } };
+
+/** @type {Promise<Object> | undefined} */
+let stdlibLoad;
+
+/**
+ * Load the Python stdlib once, when the first Python sandbox starts, so an app
+ * that runs only the other guests never downloads it. Every Sandbox gets its
+ * own copy-on-access view of it.
+ * @returns {Promise<Object>} The stdlib's directory node
+ */
+function loadPythonStdlib() {
+  stdlibLoad ??= loadStdlib().then(
+    (tree) => {
+      // The stdlib tar extracts to python-stdlib/*, but the WASM expects
+      // files at the root of the preopen (mounted as /python-stdlib).
+      const dir = tree.dir?.["python-stdlib"] || tree;
+      _fileTree.dir["python-stdlib"] = dir;
+      return dir;
+    },
+    (e) => {
+      // Let a later sandbox try again.
+      stdlibLoad = undefined;
+      throw e;
+    },
+  );
+  return stdlibLoad;
+}
 
 /**
  * Copy a file tree for one instance. Directories are copied up front; a file's
@@ -200,6 +219,10 @@ export const languages = Object.keys(components);
  */
 export async function instantiateSandbox(language, fileTree, cb, net, getModule = getCoreModule) {
   const instantiate = await components[language]();
+  // A tree forked before the stdlib loaded gets its own view of it now.
+  if (language === "python") {
+    fileTree.dir["python-stdlib"] ??= forkTree(await loadPythonStdlib());
+  }
   const fd = createFdCapture();
   const fs = createFilesystem({
     adapter: new InMemoryFilesystemAdapter(),

@@ -38,6 +38,7 @@ result = { ok: true };
     expect(error).toBeInstanceOf(PythonExceptionError);
     expect(error.message).toMatch(/Error: boom/);
     expect(error.stdout).toBe("before\n");
+    expect(error.exitCode).toBeUndefined();
   });
 });
 
@@ -69,6 +70,7 @@ result='{"ok": true}'
     const error = await sandbox.execute("echo before; exit 3").catch((e) => e);
     expect(error).toBeInstanceOf(PythonExceptionError);
     expect(error.message).toBe("exit status 3");
+    expect(error.exitCode).toBe(3);
     expect(error.stdout).toBe("before\n");
   });
 

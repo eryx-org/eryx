@@ -21,8 +21,8 @@ import type { Callbacks, ExecuteResult } from "@eryx-org/eryx-run/shared";
  * (`@eryx-org/eryx-run`), so one `instanceof` handles both. Code that raises
  * rejects with a `PythonExceptionError` (its traceback as `message`, the
  * output before it in `stdout` and `stderr`), as does a JavaScript exception
- * or a shell script's nonzero exit status; a run past `timeoutMs` with a
- * `TimeoutError`.
+ * or a shell script's nonzero exit status (then also in `exitCode`); a run
+ * past `timeoutMs` with a `TimeoutError`.
  */
 export {
   EryxError,
@@ -32,6 +32,17 @@ export {
   TimeoutError,
 } from "@eryx-org/eryx-run/shared";
 export type { CallbackHandler, Callbacks, ExecuteResult } from "@eryx-org/eryx-run/shared";
+
+declare module "@eryx-org/eryx-run/shared" {
+  interface PythonExceptionError {
+    /**
+     * A shell script's nonzero exit status (`language: "shell"`), as in the
+     * Rust crate's `ScriptFailed { exit_code }`. Undefined for Python and
+     * JavaScript, whose scripts fail by raising.
+     */
+    exitCode?: number;
+  }
+}
 
 /**
  * Set the default network policy, or disable networking again with `null`
@@ -335,7 +346,8 @@ export function executeWithJournal(
 export function setResultVariable(name: string): Promise<void>;
 
 /**
- * The template file tree each new Sandbox copies: `python-stdlib` and an empty
+ * The template file tree each new Python Sandbox copies: `python-stdlib`
+ * (present once the first Python sandbox has loaded it) and an empty
  * `site-packages` directory. Files added here are visible to sandboxes created
  * afterwards; change {@link Sandbox._fileTree} to reach one that exists.
  *
