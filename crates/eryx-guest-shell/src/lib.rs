@@ -108,9 +108,11 @@ fn register_builtins(shell: &mut Shell) {
                 schema,
             },
         );
+        // Builtins (registered above) win over a callback of the same name,
+        // as functions win over both; `invoke NAME` still reaches it.
         shell
             .builtins_mut()
-            .register(cb.name, builtins::Registration::of::<InvokeCommand>());
+            .register_if_absent(cb.name, builtins::Registration::of::<InvokeCommand>());
     }
     CALLBACKS.with(|c| *c.borrow_mut() = defs);
     PREFIXES.with(|p| *p.borrow_mut() = prefixes);

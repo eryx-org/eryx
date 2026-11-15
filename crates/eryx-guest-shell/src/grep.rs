@@ -4,12 +4,15 @@
 //! grep [-vinclLHhqsEFwx] [-m NUM] [-e PATTERN]... [PATTERN] [FILE]...
 //! ```
 //!
-//! Patterns are `regex-lite` syntax (close to ERE, so `-E` changes nothing);
-//! `-F` takes them literally. With no file, or `-`, it reads stdin. Exit
+//! Patterns are GNU basic regular expressions by default, as in grep: `\|`,
+//! `\+`, `\?`, `\(..\)` and `\{n,m\}` are operators, and plain `| + ? ( ) { }`
+//! are literal. `-E` takes extended (regex-lite) syntax instead, and `-F` takes
+//! patterns literally. Lines are matched even if they aren't valid UTF-8 and
+//! are printed as they are. With no file, or `-`, it reads stdin. Exit
 //! status: 0 if a line matched, 1 if none did, 2 on an error (unless `-q`
 //! already found a match).
 
-use std::io::{BufRead as _, Write as _};
+use std::io::Write as _;
 
 use brush_core::{ExecutionContext, ExecutionResult, ShellExtensions, builtins, error};
 
@@ -120,9 +123,8 @@ fn search<SE: ShellExtensions>(
 ) -> Result<bool, brush_core::Error> {
     let mut out = context.stdout();
     let mut count = 0usize;
-    for (number, line) in data.lines().enumerate() {
-        let Ok(line) = line else { continue };
-        if regex.is_match(&line) == opts.invert {
+    for (number, line) in lines(data).enumerate() {
+        if regex.is_match(&String::from_utf8_lossy(line)) == opts.invert {
             continue;
         }
         count += 1;
@@ -136,7 +138,9 @@ fn search<SE: ShellExtensions>(
             if opts.line_number {
                 write!(out, "{}:", number + 1)?;
             }
-            writeln!(out, "{line}")?;
+            // The line as it was, invalid UTF-8 included.
+            out.write_all(line)?;
+            out.write_all(b"\n")?;
         }
         if opts.max_count.is_some_and(|max| count >= max) {
             break;
@@ -153,6 +157,16 @@ fn search<SE: ShellExtensions>(
         _ => {}
     }
     Ok(count > 0)
+}
+
+/// The lines of `data`, without their `\n`. Bytes that aren't UTF-8 stay in
+/// their line rather than dropping it.
+fn lines(data: &[u8]) -> impl Iterator<Item = &[u8]> {
+    let body = data.strip_suffix(b"\n").unwrap_or(data);
+    (!data.is_empty())
+        .then(|| body.split(|&b| b == b'\n'))
+        .into_iter()
+        .flatten()
 }
 
 fn name_or_stdin(name: Option<&str>) -> &str {
@@ -174,6 +188,8 @@ struct Opts {
     quiet: bool,
     no_messages: bool,
     fixed: bool,
+    /// `-E`: the patterns are already ERE; otherwise they're GNU BRE.
+    extended: bool,
     word: bool,
     line: bool,
     max_count: Option<usize>,
@@ -211,7 +227,7 @@ impl Opts {
                     "no-filename" => opts.with_filename = Some(false),
                     "quiet" | "silent" => opts.quiet = true,
                     "no-messages" => opts.no_messages = true,
-                    "extended-regexp" => {}
+                    "extended-regexp" => opts.extended = true,
                     "fixed-strings" => opts.fixed = true,
                     "word-regexp" => opts.word = true,
                     "line-regexp" => opts.line = true,
@@ -248,7 +264,7 @@ impl Opts {
                     'h' => opts.with_filename = Some(false),
                     'q' => opts.quiet = true,
                     's' => opts.no_messages = true,
-                    'E' => {}
+                    'E' => opts.extended = true,
                     'F' => opts.fixed = true,
                     'w' => opts.word = true,
                     'x' => opts.line = true,
@@ -284,8 +300,10 @@ impl Opts {
             .map(|p| {
                 if self.fixed {
                     regex_lite::escape(p)
-                } else {
+                } else if self.extended {
                     p.to_owned()
+                } else {
+                    bre_to_ere(p)
                 }
             })
             .map(|p| format!("(?:{p})"))
@@ -301,6 +319,58 @@ impl Opts {
             .case_insensitive(self.ignore_case)
             .build()
     }
+}
+
+/// Translate a GNU basic regular expression (grep's default) to the extended
+/// syntax regex-lite reads: `\|`, `\+`, `\?`, `\(`, `\)`, `\{` and `\}`
+/// are operators, while plain `| + ? ( ) { }` are literal. A leading `*` is
+/// literal too. Bracket expressions are copied as they are.
+fn bre_to_ere(pattern: &str) -> String {
+    let mut out = String::with_capacity(pattern.len());
+    let mut chars = pattern.chars().peekable();
+    let mut at_start = true;
+    while let Some(c) = chars.next() {
+        match c {
+            '\\' => match chars.next() {
+                Some(op @ ('|' | '+' | '?' | '(' | ')' | '{' | '}')) => out.push(op),
+                Some(other) => {
+                    out.push('\\');
+                    out.push(other);
+                }
+                None => out.push_str("\\\\"),
+            },
+            '|' | '+' | '?' | '(' | ')' | '{' | '}' => {
+                out.push('\\');
+                out.push(c);
+            }
+            '*' if at_start => out.push_str("\\*"),
+            '[' => {
+                // `[`, an optional `^`, then `]` as the first member is literal.
+                out.push('[');
+                if chars.peek() == Some(&'^') {
+                    out.push(chars.next().unwrap_or('^'));
+                }
+                if chars.peek() == Some(&']') {
+                    out.push_str("\\]");
+                    chars.next();
+                }
+                for c in chars.by_ref() {
+                    if c == '\\' {
+                        // A backslash is literal inside a bracket expression.
+                        out.push_str("\\\\");
+                        continue;
+                    }
+                    out.push(c);
+                    if c == ']' {
+                        break;
+                    }
+                }
+            }
+            _ => out.push(c),
+        }
+        at_start = c == '^' && out.len() == 1;
+    }
+    out
 }
 
 fn parse_count(text: &str) -> Result<usize, String> {
@@ -330,6 +400,43 @@ mod tests {
         assert_eq!(o.files, ["f"]);
         assert!(Opts::parse(&["-Z".to_owned(), "x".to_owned()]).is_err());
         assert!(Opts::parse(&[]).is_err());
+    }
+
+    #[test]
+    fn lines_keep_invalid_utf8_and_drop_the_final_newline() {
+        let data = b"good\nba\xffd\nlast\n";
+        let got: Vec<&[u8]> = lines(data).collect();
+        assert_eq!(got, [&b"good"[..], b"ba\xffd", b"last"]);
+        assert_eq!(lines(b"").count(), 0);
+        assert_eq!(lines(b"\n").collect::<Vec<_>>(), [&b""[..]]);
+        assert_eq!(lines(b"a").count(), 1);
+        // A line with invalid UTF-8 still matches on its valid parts.
+        let re = opts(&["d"]).regex().unwrap();
+        let hits: Vec<_> = lines(data)
+            .filter(|l| re.is_match(&String::from_utf8_lossy(l)))
+            .collect();
+        assert_eq!(hits, [&b"good"[..], b"ba\xffd"]);
+    }
+
+    #[test]
+    fn basic_regexps_are_translated_unless_extended() {
+        let m = |args: &[&str], line: &str| opts(args).regex().unwrap().is_match(line);
+        // BRE (the default): escaped operators, literal plain ones.
+        assert!(m(&["a\\|b"], "b"));
+        assert!(m(&["ab\\+c"], "abbc"));
+        assert!(m(&["^\\(ab\\)\\{2\\}$"], "abab"));
+        assert!(m(&["a|b"], "a|b"));
+        assert!(!m(&["a|b"], "a"));
+        assert!(m(&["(x)"], "(x)"));
+        assert!(m(&["a+"], "a+"));
+        assert!(m(&["*x"], "*x"));
+        assert!(m(&["[|+]"], "+"));
+        assert!(m(&["[]a]"], "]"));
+        assert!(m(&["a\\.b"], "a.b") && !m(&["a\\.b"], "axb"));
+        // ERE with -E: as written.
+        assert!(m(&["-E", "a|b"], "b"));
+        assert!(m(&["-E", "ab+c"], "abbc"));
+        assert!(m(&["-E", "a\\|b"], "a|b") && !m(&["-E", "a\\|b"], "b"));
     }
 
     #[test]

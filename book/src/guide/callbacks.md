@@ -278,7 +278,8 @@ for name in dir(eryx_callbacks):
 
 ## Callbacks in the Shell
 
-In a shell sandbox, every callback is a command. Arguments become the callback's
+In a shell sandbox, every callback is a command. A shell function or builtin of
+the same name wins, as in bash, and `invoke NAME` still reaches the callback. Arguments become the callback's
 JSON arguments, and its result is printed to stdout, so callbacks compose with
 pipes and `$(...)`:
 

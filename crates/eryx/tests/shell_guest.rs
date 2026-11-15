@@ -414,6 +414,22 @@ async fn suspending_callback_halts_the_guest() {
     ));
 }
 
+/// A callback can't replace a builtin of the same name (functions, then
+/// builtins, then callbacks), but `invoke NAME` still reaches it.
+#[tokio::test]
+async fn builtins_win_over_callbacks_of_the_same_name() {
+    let Some(builder) = shell_sandbox() else {
+        return;
+    };
+    let echo = TestCallback::new("echo", |_| Ok(json!("from the callback")));
+    let calls = Arc::clone(&echo.calls);
+    let sandbox = builder.with_callback(echo).build().unwrap();
+
+    let out = sandbox.execute("echo plain; invoke echo").await.unwrap();
+    assert_eq!(out.stdout_utf8().unwrap(), "plain\nfrom the callback\n");
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+}
+
 #[tokio::test]
 async fn grep_builtin_filters_lines() {
     let Some(builder) = shell_sandbox() else {
@@ -428,6 +444,9 @@ printf 'apple\nbanana\nCherry\n' | grep -n an
 printf 'apple\nbanana\nCherry\n' | grep -ic cherry
 printf 'a\n' | grep -q zzz; echo "none=$?"
 printf 'a.c\nabc\n' | grep -F a.c
+printf 'x\nab\nb\n' | grep -c 'a\|b'
+printf 'a|b\nb\n' | grep -cE 'a|b'
+printf 'good\nba\377d\nlast\n' | grep -c d
 grep x /no/such/file; echo "missing=$?"
 "#,
         )
@@ -435,7 +454,7 @@ grep x /no/such/file; echo "missing=$?"
         .unwrap();
     assert_eq!(
         out.stdout_utf8().unwrap(),
-        "2:banana\n1\nnone=1\na.c\nmissing=2\n"
+        "2:banana\n1\nnone=1\na.c\n2\n2\n2\nmissing=2\n"
     );
     assert!(String::from_utf8_lossy(&out.stderr).starts_with("grep: /no/such/file: "));
 }
