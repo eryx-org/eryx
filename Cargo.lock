@@ -1196,9 +1196,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "eryx-guest-call"
+version = "0.15.0"
+dependencies = [
+ "wit-dylib-ffi",
+]
+
+[[package]]
 name = "eryx-guest-js"
 version = "0.15.0"
 dependencies = [
+ "eryx-guest-call",
  "rquickjs",
  "wit-dylib-ffi",
 ]
@@ -1207,6 +1215,7 @@ dependencies = [
 name = "eryx-guest-python"
 version = "0.15.0"
 dependencies = [
+ "eryx-guest-call",
  "pyo3",
  "tokio",
  "wasmtime",

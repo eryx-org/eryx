@@ -117,7 +117,7 @@ fn create_callback_future(
     };
 
     // Parse arguments - report errors explicitly rather than silently falling back
-    let args: serde_json::Value = match serde_json::from_str(&request.arguments_json) {
+    let mut args: serde_json::Value = match serde_json::from_str(&request.arguments_json) {
         Ok(v) => v,
         Err(e) => {
             let _ = request.response_tx.send(CallbackHostResult::Err(format!(
@@ -127,26 +127,34 @@ fn create_callback_future(
         }
     };
 
-    // Only a prefix callback (`a.b.*`) takes positional args: the guest binds
-    // an exact callback's from its schema, so this key means a confused guest.
-    // Checked before `invoke_named`, which replay uses to consume the journal.
-    if !callback.name().ends_with(".*") && args.get(crate::callback::POSITIONAL_ARGS_KEY).is_some()
+    // A prefix callback (`a.b.*`) takes positional args as they are. Any other
+    // callback gets them bound to its schema's parameters, so a guest that
+    // doesn't bind them itself (JavaScript, the shell) can send them. Done
+    // before `invoke_named`, which replay uses to consume the journal, and the
+    // raw args are re-serialized so the callback sees what it is called with.
+    let raw_args = if !callback.name().ends_with(".*")
+        && args.get(crate::callback::POSITIONAL_ARGS_KEY).is_some()
     {
-        let error = CallbackError::InvalidArguments(format!(
-            "{}() takes keyword arguments only",
-            request.name
-        ));
-        let _ = request
-            .response_tx
-            .send(CallbackHostResult::Err(error.to_string()));
-        return None;
-    }
+        if let Err(error) = crate::callback::bind_positional(
+            &request.name,
+            &callback.parameters_schema(),
+            &mut args,
+        ) {
+            let _ = request
+                .response_tx
+                .send(CallbackHostResult::Err(error.to_string()));
+            return None;
+        }
+        args.to_string()
+    } else {
+        request.arguments_json.clone()
+    };
 
     // Create the future
     let timeout = resource_limits.callback_timeout;
     let secrets = Arc::clone(secrets);
     let fut = async move {
-        let invoke_future = callback.invoke_named(&request.name, &request.arguments_json, args);
+        let invoke_future = callback.invoke_named(&request.name, &raw_args, args);
 
         let callback_result = if let Some(timeout) = timeout {
             tokio::time::timeout(timeout, invoke_future)

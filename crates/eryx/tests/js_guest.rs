@@ -296,6 +296,111 @@ async fn session_state_persists_across_executes() {
     assert_eq!(out.result, None);
 }
 
+/// Positional arguments bind to the callback's schema parameters, as in
+/// Python; a single plain object is keyword arguments.
+#[tokio::test]
+async fn positional_callback_arguments_bind_to_the_schema() {
+    let Some(builder) = js_sandbox() else { return };
+    let add = eryx::DynamicCallback::builder("add", "Add two numbers", |args| {
+        Box::pin(async move {
+            Ok(json!(
+                args["a"].as_i64().unwrap() * 10 + args["b"].as_i64().unwrap()
+            ))
+        })
+    })
+    .param("a", "integer", "first", true)
+    .param("b", "integer", "second", true)
+    .build();
+    // The first parameter (alphabetically) takes an object, so a lone object
+    // is keyword arguments only if its keys are all parameter names.
+    let configure = eryx::DynamicCallback::builder("configure", "Configure", |args| {
+        Box::pin(async move { Ok(args) })
+    })
+    .param("options", "object", "options", false)
+    .param("verbose", "boolean", "verbose", false)
+    .build();
+    let pair = eryx::DynamicCallback::builder("pair", "Echo a and b", |args| {
+        Box::pin(async move { Ok(args) })
+    })
+    .param("a", "integer", "first", false)
+    .param("b", "integer", "second", false)
+    .build();
+    let sandbox = builder
+        .with_callback(add)
+        .with_callback(configure)
+        .with_callback(pair)
+        .build()
+        .unwrap();
+
+    let out = sandbox
+        .execute(
+            r#"
+console.log(await add(1, 2), await add({a: 3, b: 4}), await invoke("add", 5, 6));
+console.log(JSON.stringify(await configure({retries: 3})));
+console.log(JSON.stringify(await configure({options: {retries: 3}, verbose: true})));
+console.log(JSON.stringify(await configure({})));
+// Trailing undefineds are dropped; one before another argument is null.
+for (const call of [
+    () => invoke("pair"),
+    () => invoke("pair", undefined),
+    () => pair(1, undefined),
+    () => pair(undefined, 2),
+]) {
+    console.log(JSON.stringify(await call()));
+}
+for (const call of [() => add(1, 2, 3), () => invoke("add", {__eryx_args__: [1]})]) {
+    try { await call(); console.log("UNEXPECTED"); } catch (e) { console.log(String(e.message ?? e)); }
+}
+"#,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        out.stdout_utf8().unwrap(),
+        "12 34 56\n\
+         {\"options\":{\"retries\":3}}\n\
+         {\"options\":{\"retries\":3},\"verbose\":true}\n\
+         {}\n\
+         {}\n\
+         {}\n\
+         {\"a\":1}\n\
+         {\"a\":null,\"b\":2}\n\
+         invalid arguments: add() takes 2 positional arguments but 3 were given\n\
+         add() got the keyword argument '__eryx_args__', which is reserved for positional arguments\n"
+    );
+}
+
+/// Top-level `let`/`const` bindings live for the session, so declaring one
+/// again in a later execute throws, as in Node's REPL. `var`, function
+/// declarations and plain assignment can be repeated.
+#[tokio::test]
+async fn redeclaring_a_let_across_executes_throws() {
+    let Some(mut session) = js_session().await else {
+        return;
+    };
+
+    session
+        .execute("let x = 1; const y = 2; var z = 3")
+        .run()
+        .await
+        .unwrap();
+    for code in ["let x = 2", "const y = 3", "let y = 3"] {
+        let err = session.execute(code).run().await.unwrap_err();
+        let ErrorKind::ScriptFailed { message, .. } = err.kind() else {
+            panic!("{code}: expected a script failure, got {err:?}");
+        };
+        assert!(message.contains("SyntaxError"), "{code}: {message}");
+    }
+
+    // The failed executes changed nothing, and these are fine.
+    let out = session
+        .execute("var z = 4; function f() { return 1 } x = 5; console.log(x, y, z)")
+        .run()
+        .await
+        .unwrap();
+    assert_eq!(out.stdout, b"5 2 4\n");
+}
+
 #[tokio::test]
 async fn fuel_limit_stops_an_infinite_loop() {
     let Some(mut session) = js_session().await else {
@@ -350,7 +455,7 @@ async fn trivial_execute_fuel_cost() {
         .unwrap();
 
     let out = sandbox.execute("1").await.unwrap();
-    // Not an assertion target, just a number for the spike write-up.
+    // Not an assertion target: the number, for comparing runs.
     eprintln!("JS trivial execute fuel: {:?}", out.stats.fuel_consumed);
     assert!(out.stats.fuel_consumed.is_some());
 }

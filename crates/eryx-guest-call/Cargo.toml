@@ -1,0 +1,16 @@
+[package]
+name = "eryx-guest-call"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "The wit-dylib value stack shared by the eryx guest runtimes"
+publish = false
+
+[dependencies]
+wit-dylib-ffi.workspace = true
+
+[lints]
+workspace = true

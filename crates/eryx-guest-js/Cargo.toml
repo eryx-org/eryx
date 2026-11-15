@@ -7,6 +7,7 @@ license.workspace = true
 repository.workspace = true
 authors.workspace = true
 description = "WASM guest runtime for eryx sandbox - implements the eryx WIT exports via QuickJS"
+readme = "README.md"
 publish = false
 
 # Built as a PIC staticlib for wasm32-wasip1 and linked into a shared library
@@ -19,6 +20,7 @@ crate-type = ["staticlib"]
 # rquickjs vendors quickjs-ng (not Bellard's QuickJS) and ships pregenerated
 # bindings for wasm32-wasip1, so no bindgen/libclang is needed.
 rquickjs.workspace = true
+eryx-guest-call.workspace = true
 wit-dylib-ffi.workspace = true
 
 [lints]

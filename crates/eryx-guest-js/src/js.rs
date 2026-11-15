@@ -26,8 +26,8 @@ use rquickjs::{
 };
 use wit_dylib_ffi::ExportFunction;
 
-use crate::call::{EryxCall, Value as WitValue};
 use crate::wit::{self, CallbackInfo, InvokeStart, PendingInvokeCall};
+use eryx_guest_call::{EryxCall, Value as WitValue};
 
 const PRELUDE: &str = include_str!("prelude.js");
 
@@ -331,7 +331,7 @@ pub(crate) fn resume(event: u32, handle: u32, status: u32) -> u32 {
             }
             // STARTING/STARTED progress events carry nothing for us.
             (EVENT_SUBTASK, _) | (EVENT_NONE, _) => {}
-            // Spike: cancellation (and streams/futures) isn't wired up. The host
+            // Cancellation (and streams/futures) isn't wired up: the host
             // cancels by epoch-interrupting the guest, which never gets here.
             (other, _) => eprintln!("eryx-js: ignoring unexpected async event {other}"),
         }
