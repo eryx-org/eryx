@@ -268,11 +268,16 @@ Setting any rule therefore stops WebSocket traffic after an `Upgrade`, `CONNECT`
 tunnels and HTTP/2 to **every** host, not only ruled ones, on connections that
 start with an HTTP request: what follows isn't a request the host can check.
 
+A first line shaped like a request (a method token, then a target starting
+with `/` or `*` or containing `://`, or `HTTP/` anywhere on the line) is parsed
+strictly and refused unless it's a valid HTTP/1.x request line, so HTTP/0.9
+requests are refused too.
+
 **Limitation:** rules are enforced on what the host can frame. A connection to a
-host *without* rules whose first line doesn't look like an HTTP/1 request (a
-method token, then `HTTP/` on the same line) is passed through unparsed from
-then on, so other protocols keep working. So is an HTTP/0.9 request (`GET
-/path`, with no `Host` header, so it only reaches a server's default site). If sandboxed
+host *without* rules whose first line has another shape (e.g. a Redis `SET k v`)
+is passed through unparsed from then on, so other protocols keep working. One
+cost of the shape rule: an inline command like that whose first argument
+starts with `/` is refused instead. If sandboxed
 code does its own TLS (e.g. with a pure-Python TLS library) to another allowed
 host served by the same server as a ruled one, the host can't see the requests
 inside, so the rules don't apply to them. Avoid allowing other names on a

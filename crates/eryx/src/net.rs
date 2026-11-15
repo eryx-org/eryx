@@ -419,11 +419,14 @@ impl NetConfig {
     /// tunnels and HTTP/2 on every connection that starts with an HTTP
     /// request, to any host: what follows isn't a request the host can check.
     ///
-    /// Rules are enforced on what the host can frame. A connection to a host
-    /// without rules whose first line doesn't look like an HTTP/1 request (a
-    /// method token, then `HTTP/` on the same line) is passed through
-    /// unparsed from then on, as is an HTTP/0.9 request (`GET /path`, with no
-    /// `Host` header, so it only reaches a server's default site). So if
+    /// Rules are enforced on what the host can frame. A first line shaped
+    /// like a request (a method token, then a target starting with `/` or
+    /// `*` or containing `://`, or `HTTP/` anywhere on the line) is parsed
+    /// strictly, and refused unless it's a valid HTTP/1.x request line, so
+    /// HTTP/0.9 is refused. A connection to a host without rules whose first
+    /// line has another shape (e.g. Redis `SET k v`) is passed through
+    /// unparsed from then on; one cost is that an inline command whose first
+    /// argument starts with `/` is refused instead. So if
     /// sandboxed code does its own TLS to another allowed host served by the
     /// same server as a ruled one, the requests inside aren't checked. Don't
     /// allow other names on a server whose rules matter. On any other framed
@@ -1454,6 +1457,11 @@ impl ConnectionManager {
                 state.raw = true;
                 Ok(Some(false))
             }
+            // Refused now, not once the headers end: an HTTP/0.9 request
+            // has no headers.
+            Some(true) if request_line(&String::from_utf8_lossy(&state.buffer)).is_none() => Err(
+                TcpError::NotPermitted("malformed HTTP/1.x request line".into()),
+            ),
             other => Ok(other),
         }
     }
@@ -2076,9 +2084,14 @@ const HTTP_METHODS: [&[u8]; 9] = [
     b"TRACE ",
 ];
 
-/// Whether `data` may start an HTTP/1 request: a method token followed by a
-/// first line mentioning `HTTP/` (ignoring case). `None` until its first
-/// line is complete or it can no longer be one.
+/// Whether `data` may start an HTTP request, by the shape of its first
+/// line: a method token, then whitespace and a target that starts with `/`
+/// or `*` or contains `://`, or `HTTP/` (ignoring case) anywhere on the
+/// line. `None` until its first line is complete or it can no longer be one.
+///
+/// Loose on purpose: anything a lenient server might take for a request
+/// (HTTP/0.9 included) is framed, and `request_line` then refuses the
+/// malformed ones.
 fn request_start(data: &[u8]) -> Option<bool> {
     let is_tchar = |b: &u8| b.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(b);
     let method_len = data.iter().take_while(|b| is_tchar(b)).count();
@@ -2087,13 +2100,25 @@ fn request_start(data: &[u8]) -> Option<bool> {
         Some(_) if method_len > 0 => {}
         Some(_) => return Some(false),
     }
-    // Loose on purpose: anything a lenient server might take for a request
-    // is framed, and `request_line` then refuses the malformed ones.
     let line_end = data.iter().position(|&b| b == b'\n')?;
+    let line = &data[..line_end];
+    if line.windows(5).any(|w| w.eq_ignore_ascii_case(b"HTTP/")) {
+        return Some(true);
+    }
+    let is_space = |b: &u8| matches!(b, b' ' | b'\t');
+    let rest = &line[method_len..];
+    if !rest.first().is_some_and(is_space) {
+        return Some(false);
+    }
+    let rest = &rest[rest.iter().take_while(|b| is_space(b)).count()..];
+    let target = &rest[..rest
+        .iter()
+        .position(|b| is_space(b) || *b == b'\r')
+        .unwrap_or(rest.len())];
     Some(
-        data[..line_end]
-            .windows(5)
-            .any(|w| w.eq_ignore_ascii_case(b"HTTP/")),
+        target.starts_with(b"/")
+            || target.starts_with(b"*")
+            || target.windows(3).any(|w| w == b"://"),
     )
 }
 
@@ -2146,14 +2171,14 @@ fn is_absolute_form(target: &str) -> bool {
 }
 
 /// The method and target of a request whose request line is exactly
-/// `METHOD SP target SP version`, and whose target contains no whitespace or
+/// `METHOD SP target SP HTTP/1.x`, and whose target contains no whitespace or
 /// `\`.
 fn request_line(headers: &str) -> Option<(&str, &str)> {
     let mut parts = headers.lines().next()?.split(' ');
     let (method, target, version) = (parts.next()?, parts.next()?, parts.next()?);
     if parts.next().is_some()
         || method.is_empty()
-        || version.is_empty()
+        || !matches!(version, "HTTP/1.0" | "HTTP/1.1")
         || target.is_empty()
         || target.contains(|c: char| c.is_whitespace() || c == '\\')
     {
@@ -3819,6 +3844,13 @@ mod tests {
             &[b"DELETE /other HTTP/1.1 \r\nHost: api.github.com\r\n\r\n"],
             &[b"DELETE\t/other HTTP/1.1\r\nHost: api.github.com\r\n\r\n"],
             &[b"DELETE /other http/1.1\r\nHost: api.github.com\r\n\r\n"],
+            // HTTP/0.9, which servers route by an absolute URL's host (or to
+            // the default site, which may be the ruled host).
+            &[b"GET http://api.github.com/other\r\n"],
+            &[b"GET HTTP://api.github.com/other\r\n"],
+            &[b"GET /admin\r\n"],
+            &[b"GET\t/admin\r\n"],
+            &[b"OPTIONS *\r\n"],
             // Non-HTTP bytes once a request has been framed.
             &[b"GET /ok HTTP/1.1\r\nHost: www.github.com\r\n\r\n", b"\x16\x03\x01"],
         ] {
@@ -3848,9 +3880,8 @@ mod tests {
         );
         let later = b"DELETE /other HTTP/1.1\r\nHost: api.github.com\r\n\r\n";
         assert_eq!(m.process_write_data(2, later).unwrap(), later);
-        // Text that isn't a request line counts as not HTTP too, and so does
-        // an HTTP/0.9 request (which has no Host to route by).
-        for raw in [&b"SET k v\r\n"[..], b"GET /x\r\n"] {
+        // Text that isn't shaped like a request line counts as not HTTP too.
+        for raw in [&b"SET k v\r\n"[..], b"GET key\r\n", b"PING\r\n"] {
             let mut m = new();
             assert_eq!(m.process_write_data(2, raw).unwrap(), raw);
         }
