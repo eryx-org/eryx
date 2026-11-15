@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## `eryx-precompile` - [0.15.1](https://github.com/eryx-org/eryx/compare/eryx-precompile-v0.15.0...eryx-precompile-v0.15.1) - 2026-11-15
+
+### Other
+- update Cargo.lock dependencies
+
+## `eryx` - [0.15.1](https://github.com/eryx-org/eryx/compare/eryx-v0.15.0...eryx-v0.15.1) - 2026-11-15
+
+### Security
+- **Upgrade recommended for anyone running untrusted Python.** Deep recursion in a script could overflow the host's async fiber stack, and wasmtime then aborted the whole host process instead of failing the execution. A single line of Python was enough, for example parsing, printing or freeing a deeply nested list, and no configuration prevented it. In `eryx-server`, one request killed every concurrent execution. The cause was a 512 KiB fiber stack (set in 0.4.0) that left no room above the 512 KiB wasm stack limit; the fiber is now 1 MiB, leaving 512 KiB of host headroom, and that headroom is checked at build time. Deep recursion now fails the execution with `call stack exhausted`, and the sandbox stays usable. Tracked in [GHSA-56h7-4vqp-xrv3](https://github.com/eryx-org/eryx/security/advisories/GHSA-56h7-4vqp-xrv3); affected are `eryx` 0.4.0 to 0.15.0, every `pyeryx` release up to 0.15.0, and every `sd2k/eryx-server` image built before 0.15.1 (including the floating and commit-SHA tags). `@eryx-org/eryx` (npm) isn't affected.
+
+### Added
+- *(net)* method and path rules for HTTP requests ([#845](https://github.com/eryx-org/eryx/pull/845))
+- *(net)* substitute secrets inside Authorization: Basic credentials ([#840](https://github.com/eryx-org/eryx/pull/840))
+
+### Fixed
+- *(eryx)* keep the embedded runtime loadable while other processes extract it ([#867](https://github.com/eryx-org/eryx/pull/867))
+- *(eryx)* build cleanly with default features and each feature alone ([#859](https://github.com/eryx-org/eryx/pull/859))
+
+## `eryx-vfs` - [0.14.1](https://github.com/eryx-org/eryx/compare/eryx-vfs-v0.14.0...eryx-vfs-v0.14.1) - 2026-11-15
+
+### Other
+- document that `VfsStorage` operations run on the sandbox's async fiber with about 512 KiB of host stack, so implementations must not recurse deeply or use large stack buffers (see GHSA-56h7-4vqp-xrv3)
+
 ## `eryx-precompile` - [0.15.0](https://github.com/eryx-org/eryx/compare/eryx-precompile-v0.14.0...eryx-precompile-v0.15.0) - 2026-11-12
 
 ### Other
