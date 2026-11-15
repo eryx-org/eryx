@@ -1,11 +1,11 @@
 //! Child processes' network (#812): commands reach it only through the
 //! sandbox's child proxy, under its network policy and secrets.
 //!
-//! Most tests use the test command (tests/fixtures/test-cmd, which needs
-//! `rustup target add wasm32-wasip2`) over the proxy's plain-HTTP path. The
-//! HTTPS test runs curl, built with `mise run build-cli -- curl`, from
-//! `$ERYX_TEST_CURL` (or `scratch/curl-component/component.wasm`), and is
-//! skipped, saying so, when it isn't there.
+//! The children are small fixtures built by the tests (they need
+//! `rustup target add wasm32-wasip2`): tests/fixtures/test-cmd over the
+//! proxy's plain-HTTP path, and tests/fixtures/https-get, a rustls client
+//! using only the proxy's env vars, over HTTPS. (curl from
+//! `mise run build-cli -- curl` works the same way; see #812.)
 //!
 //! ```sh
 //! mise run precompile-runtime-shell
@@ -25,23 +25,35 @@ use tokio::net::TcpListener;
 
 const REAL: &str = "real-child-secret-0123456789";
 
+/// Build the wasip2 fixture `name` (tests/fixtures/<name>), whose binary is
+/// `bin`.
+fn fixture(name: &str, bin: &str) -> Vec<u8> {
+    let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures")
+        .join(name)
+        .join("Cargo.toml");
+    let target_dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(name);
+    let status = std::process::Command::new(env!("CARGO"))
+        .args(["build", "--quiet", "--release", "--locked"])
+        .args(["--target", "wasm32-wasip2", "--manifest-path"])
+        .arg(&manifest)
+        .env("CARGO_TARGET_DIR", &target_dir)
+        .status()
+        .expect("running cargo");
+    assert!(status.success(), "building the {name} fixture failed");
+    std::fs::read(target_dir.join(format!("wasm32-wasip2/release/{bin}.wasm"))).unwrap()
+}
+
 fn test_cmd() -> Command {
     static WASM: OnceLock<Vec<u8>> = OnceLock::new();
-    let wasm = WASM.get_or_init(|| {
-        let manifest =
-            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/test-cmd/Cargo.toml");
-        let target_dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("test-cmd");
-        let status = std::process::Command::new(env!("CARGO"))
-            .args(["build", "--quiet", "--release", "--locked"])
-            .args(["--target", "wasm32-wasip2", "--manifest-path"])
-            .arg(&manifest)
-            .env("CARGO_TARGET_DIR", &target_dir)
-            .status()
-            .expect("running cargo");
-        assert!(status.success(), "building the test command failed");
-        std::fs::read(target_dir.join("wasm32-wasip2/release/eryx-test-cmd.wasm")).unwrap()
-    });
-    Command::from_bytes(wasm).unwrap()
+    Command::from_bytes(WASM.get_or_init(|| fixture("test-cmd", "eryx-test-cmd"))).unwrap()
+}
+
+/// A rustls HTTPS client going through `$HTTPS_PROXY` and trusting
+/// `$SSL_CERT_FILE` (tests/fixtures/https-get).
+fn https_get() -> Command {
+    static WASM: OnceLock<Vec<u8>> = OnceLock::new();
+    Command::from_bytes(WASM.get_or_init(|| fixture("https-get", "eryx-test-https-get"))).unwrap()
 }
 
 /// Resolves every name to 127.0.0.1, where the test upstreams listen.
@@ -262,23 +274,11 @@ async fn refused_hosts_get_a_proxy_error() {
     assert_eq!(seen.lock().unwrap().as_str(), "");
 }
 
-/// curl from a child reaches an HTTPS host the policy allows, trusting the
-/// proxy's CA with no `--cacert`, and the secret reaches only the upstream.
+/// An HTTPS client in a child reaches a host the policy allows, trusting
+/// the proxy's CA from `$SSL_CERT_FILE` alone (the env vars are enough), and
+/// the secret reaches only the upstream.
 #[tokio::test]
-async fn curl_reaches_allowed_hosts_over_https() {
-    let curl = std::env::var_os("ERYX_TEST_CURL")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| {
-            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-                .join("../../scratch/curl-component/component.wasm")
-        });
-    if !curl.exists() {
-        eprintln!(
-            "SKIPPED: no curl component at {} (mise run build-cli -- curl, or set ERYX_TEST_CURL)",
-            curl.display()
-        );
-        return;
-    }
+async fn https_clients_reach_allowed_hosts_with_only_the_env() {
     let cert = rcgen::generate_simple_self_signed(vec!["api.test".to_string()]).unwrap();
     let key = rustls::pki_types::PrivateKeyDer::Pkcs8(rustls::pki_types::PrivatePkcs8KeyDer::from(
         cert.signing_key.serialize_der(),
@@ -289,22 +289,23 @@ async fn curl_reaches_allowed_hosts_over_https() {
         .unwrap();
     let (port, seen) = upstream(Some(tls)).await;
     let sandbox = shell(network().with_root_cert(cert.cert.der().to_vec()))
-        .with_command("curl", Command::from_file(&curl).unwrap())
+        .with_command("https-get", https_get())
         .build()
         .unwrap();
     let out = run(
         &sandbox,
-        &format!("curl -sS -w '\\nstatus=%{{http_code}}\\n' -H \"Authorization: Bearer $TOKEN\" https://api.test:{port}/x"),
+        &format!("https-get https://api.test:{port}/x \"Authorization: Bearer $TOKEN\""),
     )
     .await;
-    assert!(
-        out.contains("status=200") && out.contains("GET /x"),
-        "{out}"
-    );
+    assert!(out.contains(" 200 OK") && out.contains("GET /x"), "{out}");
     let got = seen.lock().unwrap().clone();
     assert!(
         got.contains(&format!("Bearer {REAL}")),
         "upstream got {got:?}; child saw {out}"
     );
     assert!(!out.contains(REAL), "{out}");
+
+    // A host the policy refuses gets the proxy's 403 to its CONNECT.
+    let out = run(&sandbox, &format!("https-get https://evil.test:{port}/")).await;
+    assert!(out.contains(" 403 "), "{out}");
 }

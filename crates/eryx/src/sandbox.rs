@@ -948,9 +948,9 @@ fn language_preamble(
     }
 }
 
-/// `export NAME='placeholder'` for each secret, in name order. Placeholders
-/// are letters, digits and underscores, so single quotes need no escaping;
-/// a name that isn't a shell variable name is refused.
+/// `export NAME='placeholder'` for each secret, in name order, with any `'`
+/// in the placeholder escaped. A name that isn't a shell variable name is
+/// refused.
 fn shell_preamble(
     secrets: &HashMap<String, crate::secrets::SecretConfig>,
 ) -> Result<String, Error> {
@@ -963,13 +963,13 @@ fn shell_preamble(
             .next()
             .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
             && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
-        let placeholder = secrets[name].placeholder();
-        if !valid || placeholder.contains('\'') {
+        if !valid {
             return Err(ErrorKind::Initialization(format!(
                 "secret {name:?} can't be exported to the shell: not a shell variable name"
             ))
             .into());
         }
+        let placeholder = secrets[name].placeholder().replace('\'', "'\\''");
         preamble.push_str(&format!("export {name}='{placeholder}'\n"));
     }
     Ok(preamble)
@@ -4322,6 +4322,19 @@ mod tests {
             language_preamble(Language::Shell, &HashMap::new(), "").unwrap(),
             ""
         );
+
+        // Quotes in a placeholder can't end the quoting.
+        let quoted = crate::secrets::SecretConfig {
+            placeholder: "it's".to_string(),
+            ..secret.clone()
+        };
+        let preamble = language_preamble(
+            Language::Shell,
+            &HashMap::from([("Q".to_string(), quoted)]),
+            "",
+        )
+        .unwrap();
+        assert_eq!(preamble, "export Q='it'\\''s'\n");
 
         let bad = HashMap::from([("NOT-A-NAME".to_string(), secret)]);
         assert!(language_preamble(Language::Shell, &bad, "").is_err());
