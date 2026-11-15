@@ -175,7 +175,7 @@ eryx-precompile compile runtime-python.wasm -o runtime-python.cwasm \
   --callbacks callbacks.json
 ```
 
-`parameters` defaults to `{}` when omitted. Setup code cannot invoke the callbacks: there is no host to answer them during pre-initialization. In Rust, pass `PreInitOptions::callbacks` (build the declarations with `eryx::preinit::callback_declaration`); in Python, pass `callbacks=` to `SandboxFactory`.
+`parameters` defaults to `{}` when omitted. The schemas are compared as text, so list each schema's keys (`properties` included) in the same order as the schema the host registers: that order is also the order positional arguments bind in. Setup code cannot invoke the callbacks: there is no host to answer them during pre-initialization. In Rust, pass `PreInitOptions::callbacks` (build the declarations with `eryx::preinit::callback_declaration`); in Python, pass `callbacks=` to `SandboxFactory`.
 
 ### Verification
 
