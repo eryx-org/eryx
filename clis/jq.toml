@@ -1,0 +1,71 @@
+# Build manifest for jq (`jq`) as a WASI (wasip2) component, via the C lane's
+# autotools build system, with regex support from a wasm-built oniguruma.
+# Built by `mise run build-cli -- jq`.
+#
+# This is upstream jq, alongside the `jaq` clone (clis/jaq.toml): jaq differs
+# from jq in ways scripts can hit (#866), so sandboxes that want jq's exact
+# behaviour register this one as `jq`. Neither source needs patching.
+
+name = "jq"
+description = "jq (C, autotools; regex via oniguruma)"
+# SPDX expression for the upstream source, recorded in provenance.json. jq
+# itself is MIT, and links code under other licences (see COPYING): decNumber
+# (ICU), David M. Gay's dtoa.c and g_fmt.c (dtoa), and Heimdal code in
+# jv_thread.h and jv.c (BSD-2-Clause). COPYING's NetBSD strptime() is only
+# built where libc lacks strptime, and wasi-libc has it.
+license = "MIT AND ICU AND dtoa AND BSD-2-Clause"
+lang = "c"
+
+[source]
+# The release tarball ships the generated parser, lexer and configure script.
+# sha256 matches the release's sha256sum.txt.
+repo = "https://github.com/jqlang/jq/releases/download/jq-1.8.2/jq-1.8.2.tar.gz"
+ref = "1.8.2"
+sha256 = "71b8d6e8f5fe81f6c6d0d110e3892251f6ce76ed095abd315e26e6e1193af3af"
+dir = "scratch/jq"
+
+# --- Regex: oniguruma, built to a wasip2 static lib before jq ---
+[[deps]]
+name = "onig"
+# sha256 matches the release's .sha256 file.
+url = "https://github.com/kkos/oniguruma/releases/download/v6.9.10/onig-6.9.10.tar.gz"
+ref = "6.9.10"
+sha256 = "2a5cfc5ae259e4e97f86b68dfffc152cdaffe94e2060b770cb827238d769fc05"
+license = "BSD-2-Clause"
+dir = "scratch/onig"
+system = "cmake"
+cmake_flags = [
+    "-DCMAKE_BUILD_TYPE=Release",
+    "-DBUILD_SHARED_LIBS=OFF",
+    "-DBUILD_TEST=OFF",
+    "-DENABLE_POSIX_API=OFF",
+]
+
+[build]
+system = "autotools"
+# Built tool, relative to the build dir → copied to component.wasm.
+artifact = "jq"
+cflags = [
+    "-O2",
+    "-D_WASI_EMULATED_SIGNAL", # signal.h via the wasi-sdk emulation lib
+    "-I{dep:onig:src}/src",    # oniguruma.h, for configure's probe and the build
+]
+link_flags = [
+    "-L{dep:onig:build}",
+    "-lwasi-emulated-signal",
+]
+configure_flags = [
+    "--with-oniguruma=yes", # find it via CFLAGS/LDFLAGS above
+    "--disable-shared",
+    "--enable-all-static",
+    "--disable-docs",
+    "--disable-maintainer-mode",
+    "--disable-valgrind",
+]
+
+[cwasm]
+# Loaded as a plain component; the host compiles it on demand.
+enabled = false
+
+[output]
+dir = "scratch/jq-component"

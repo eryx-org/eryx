@@ -11,6 +11,9 @@
 //!   style, e.g. sqlite3).
 //! - `cmake` — configure + build a CMake project with the wasi-sdk toolchain
 //!   file, then copy `[build] artifact` out of the build dir (e.g. curl).
+//! - `autotools` — run the project's `configure` cross-compiling to wasip2
+//!   with wasi-sdk's clang, then `make`, and copy `[build] artifact` out of
+//!   the build dir (e.g. jq).
 //!
 //! Dependencies: `[[deps]]` libraries (e.g. mbedTLS for curl's TLS) are built
 //! first into `<dep.dir>/build`; their `shims` are compiled and linked into the
@@ -82,6 +85,17 @@ pub fn build(manifest: &Manifest) -> Result<()> {
             build_cmake(
                 manifest,
                 &toolchain,
+                &source_dir,
+                &output_dir,
+                &component,
+                &repo_root,
+                &shim_objs,
+            )?;
+        }
+        CBuildSystem::Autotools => {
+            build_autotools(
+                manifest,
+                &sdk,
                 &source_dir,
                 &output_dir,
                 &component,
@@ -302,14 +316,82 @@ fn build_cmake(
     eprintln!("=== [{}] cmake build ===", manifest.name);
     run("cmake", &["--build", &build_dir_s], source_dir, &[])?;
 
-    let artifact = build_dir.join(artifact_rel);
+    copy_artifact(&build_dir.join(artifact_rel), component)
+}
+
+/// `autotools` mode: run the project's `configure` out of tree in
+/// `<output>/build`, cross-compiling to wasip2 with wasi-sdk's clang, then
+/// `make` and copy the built artifact to `component.wasm`. `cflags` and
+/// `link_flags` (with `{dep:…}`/`{repo}` substituted, plus dependency shims)
+/// become `CFLAGS` and `LDFLAGS`, so `configure`'s feature probes see them.
+fn build_autotools(
+    manifest: &Manifest,
+    sdk: &Path,
+    source_dir: &Path,
+    output_dir: &Path,
+    component: &Path,
+    repo_root: &Path,
+    shim_objs: &[String],
+) -> Result<()> {
+    let artifact_rel = manifest.build.artifact.as_ref().ok_or_else(|| {
+        anyhow::anyhow!(
+            "the C lane (system=autotools) needs `[build] artifact = \"...\"` for '{}'",
+            manifest.name
+        )
+    })?;
+    let subst = |flags: &[String]| -> Result<Vec<String>> {
+        flags
+            .iter()
+            .map(|f| substitute(f, &manifest.deps, repo_root))
+            .collect()
+    };
+    let cflags = subst(&manifest.build.cflags)?.join(" ");
+    let mut ldflags = subst(&manifest.build.link_flags)?;
+    ldflags.extend(shim_objs.iter().cloned());
+    let ldflags = ldflags.join(" ");
+    let configure_flags = subst(&manifest.build.configure_flags)?;
+
+    let build_dir = output_dir.join("build");
+    std::fs::create_dir_all(&build_dir)
+        .with_context(|| format!("creating build dir {}", build_dir.display()))?;
+    let bin = |tool: &str| path_str(&sdk.join("bin").join(tool));
+    let cc = format!("{} --target=wasm32-wasip2", bin("clang")?);
+    let (ar, ranlib) = (bin("llvm-ar")?, bin("llvm-ranlib")?);
+    let env = [
+        ("CC", cc.as_str()),
+        ("AR", ar.as_str()),
+        ("RANLIB", ranlib.as_str()),
+        ("CFLAGS", cflags.as_str()),
+        ("LDFLAGS", ldflags.as_str()),
+    ];
+
+    eprintln!("=== [{}] configure ===", manifest.name);
+    let configure = path_str(&source_dir.join("configure"))?;
+    // autotools' config.sub knows `wasm32-wasi`, not `wasm32-wasip2`; the
+    // target clang builds for comes from `CC`.
+    let mut args = vec!["--host=wasm32-wasi"];
+    args.extend(configure_flags.iter().map(String::as_str));
+    run(&configure, &args, &build_dir, &env)?;
+
+    eprintln!("=== [{}] make ===", manifest.name);
+    let jobs = format!(
+        "-j{}",
+        std::thread::available_parallelism().map_or(1, std::num::NonZero::get)
+    );
+    run("make", &[&jobs], &build_dir, &[])?;
+
+    copy_artifact(&build_dir.join(artifact_rel), component)
+}
+
+/// Copy a built executable (already a component) to `component.wasm`.
+fn copy_artifact(artifact: &Path, component: &Path) -> Result<()> {
     if !artifact.exists() {
         bail!(
-            "expected CMake artifact {} not found after build",
+            "expected build artifact {} not found after build",
             artifact.display()
         );
     }
-    std::fs::copy(&artifact, component)
+    std::fs::copy(artifact, component)
         .with_context(|| format!("copying {} → {}", artifact.display(), component.display()))?;
     eprintln!("  {} → {}", artifact.display(), component.display());
     Ok(())
