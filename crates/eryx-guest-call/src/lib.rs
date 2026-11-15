@@ -67,9 +67,9 @@ pub enum Value {
     GenericList(Vec<Value>),
     /// A tuple with its elements collected in definition order.
     Tuple(Vec<Value>),
-    /// For result<T, E>: true = ok, false = err
+    /// For `result<T, E>`: true = ok, false = err
     ResultDiscriminant(bool),
-    /// For option<T>: true = some, false = none
+    /// For `option<T>`: true = some, false = none
     OptionDiscriminant(bool),
 }
 
