@@ -6,6 +6,8 @@
 //! - `mkdir PATH`, `rm PATH`, `rename FROM TO`: print `ok`.
 //! - `fill PATH BYTES`: write BYTES bytes in 64 KiB chunks, then print `ok`.
 //! - `excl PATH`: create PATH with `O_CREAT|O_EXCL`, then print `ok`.
+//! - `appendn PATH TAG N`: append N lines `TAG-<i>`, one write each, then
+//!   print `ok`.
 //!
 //! A failure prints `error: <io::ErrorKind>` and exits 1.
 
@@ -37,6 +39,16 @@ fn main() {
             .create_new(true)
             .open(path)
             .map(|_| "ok".to_string()),
+        ["appendn", path, tag, n] => std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+            .and_then(|mut f| {
+                for i in 0..n.parse::<usize>().unwrap_or(0) {
+                    f.write_all(format!("{tag}-{i:03}\n").as_bytes())?;
+                }
+                Ok("ok".to_string())
+            }),
         ["fill", path, bytes] => fill(path, bytes.parse().unwrap_or(0)),
         _ => {
             eprintln!("usage: see src/main.rs");

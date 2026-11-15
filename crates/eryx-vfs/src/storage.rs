@@ -81,6 +81,24 @@ pub trait VfsStorage: Send + Sync {
     /// Write at a specific offset, extending the file if necessary.
     async fn write_at(&self, path: &str, offset: u64, data: &[u8]) -> VfsResult<()>;
 
+    /// Append `data` to the end of `path`, creating the file if it doesn't
+    /// exist, and return the file's new size.
+    ///
+    /// Implementations must find the end and write there as one atomic step,
+    /// so concurrent appenders each land intact after one another instead of
+    /// overwriting each other. The default implementation is a separate
+    /// [`stat`](Self::stat) and [`write_at`](Self::write_at), which two
+    /// callers can race; every storage in this crate overrides it.
+    async fn append(&self, path: &str, data: &[u8]) -> VfsResult<u64> {
+        let end = match self.stat(path).await {
+            Ok(meta) => meta.size,
+            Err(VfsError::NotFound(_)) => 0,
+            Err(e) => return Err(e),
+        };
+        self.write_at(path, end, data).await?;
+        Ok(end + data.len() as u64)
+    }
+
     /// Create `path` as an empty file unless something already exists there,
     /// returning whether it was created.
     ///
@@ -210,6 +228,10 @@ impl VfsStorage for ArcStorage {
 
     async fn create_file(&self, path: &str, exclusive: bool) -> VfsResult<bool> {
         self.0.create_file(path, exclusive).await
+    }
+
+    async fn append(&self, path: &str, data: &[u8]) -> VfsResult<u64> {
+        self.0.append(path, data).await
     }
 
     async fn set_size(&self, path: &str, size: u64) -> VfsResult<()> {
@@ -619,6 +641,54 @@ impl InMemoryStorage {
             .saturating_add(file_cost(path, new_len));
     }
 
+    /// [`VfsStorage::write_at`], with the storage lock already held.
+    fn write_at_locked(
+        &self,
+        state: &mut StorageState,
+        path: String,
+        offset: u64,
+        data: &[u8],
+    ) -> VfsResult<()> {
+        Self::check_parent_exists_with_state(state, &path)?;
+
+        // Check it's not a directory
+        if state.directories.contains(&path) {
+            return Err(VfsError::NotFile(path));
+        }
+
+        // The guest picks the offset, so a one-byte write can ask the host to
+        // materialize gigabytes of zeroes. Compute the end in u64 and check it
+        // against the budget before allocating anything; an offset that
+        // overflows u64 is over the limit by definition.
+        let data_len: u64 = data.len().try_into().unwrap_or(u64::MAX);
+        let end = offset.checked_add(data_len).ok_or_else(|| {
+            VfsError::QuotaExceeded(format!(
+                "{path}: write of {data_len} bytes at offset {offset} overflows the address space"
+            ))
+        })?;
+        let needed_len = self.check_budget(state, &path, end)?;
+
+        let old_len = state.files.get(&path).map(|f| f.content.len());
+        let new_len = old_len.unwrap_or(0).max(needed_len);
+        Self::charge_file(state, &path, old_len, new_len);
+        let now = SystemTime::now();
+        let file_data = state.files.entry(path).or_insert_with(|| FileData {
+            content: Vec::new(),
+            created: now,
+            modified: now,
+            accessed: now,
+        });
+
+        // Extend file if necessary
+        if file_data.content.len() < needed_len {
+            file_data.content.resize(needed_len, 0);
+        }
+        let start = needed_len - data.len();
+        file_data.content[start..needed_len].copy_from_slice(data);
+        file_data.modified = now;
+        Ok(())
+    }
+
     /// [`VfsStorage::write`], with the storage lock already held.
     fn write_locked(&self, state: &mut StorageState, path: String, data: &[u8]) -> VfsResult<()> {
         Self::check_parent_exists_with_state(state, &path)?;
@@ -738,45 +808,17 @@ impl VfsStorage for InMemoryStorage {
     async fn write_at(&self, path: &str, offset: u64, data: &[u8]) -> VfsResult<()> {
         let path = Self::normalize_path(path)?;
         let mut state = self.state.write().await;
+        self.write_at_locked(&mut state, path, offset, data)
+    }
 
-        Self::check_parent_exists_with_state(&state, &path)?;
-
-        // Check it's not a directory
-        if state.directories.contains(&path) {
-            return Err(VfsError::NotFile(path));
-        }
-
-        // The guest picks the offset, so a one-byte write can ask the host to
-        // materialize gigabytes of zeroes. Compute the end in u64 and check it
-        // against the budget before allocating anything; an offset that
-        // overflows u64 is over the limit by definition.
-        let data_len: u64 = data.len().try_into().unwrap_or(u64::MAX);
-        let end = offset.checked_add(data_len).ok_or_else(|| {
-            VfsError::QuotaExceeded(format!(
-                "{path}: write of {data_len} bytes at offset {offset} overflows the address space"
-            ))
-        })?;
-        let needed_len = self.check_budget(&state, &path, end)?;
-
-        let old_len = state.files.get(&path).map(|f| f.content.len());
-        let new_len = old_len.unwrap_or(0).max(needed_len);
-        Self::charge_file(&mut state, &path, old_len, new_len);
-        let now = SystemTime::now();
-        let file_data = state.files.entry(path).or_insert_with(|| FileData {
-            content: Vec::new(),
-            created: now,
-            modified: now,
-            accessed: now,
-        });
-
-        // Extend file if necessary
-        if file_data.content.len() < needed_len {
-            file_data.content.resize(needed_len, 0);
-        }
-        let start = needed_len - data.len();
-        file_data.content[start..needed_len].copy_from_slice(data);
-        file_data.modified = now;
-        Ok(())
+    async fn append(&self, path: &str, data: &[u8]) -> VfsResult<u64> {
+        let path = Self::normalize_path(path)?;
+        // One write lock covers finding the end and writing there, so
+        // concurrent appends can't land on top of each other.
+        let mut state = self.state.write().await;
+        let end = state.files.get(&path).map_or(0, |f| f.content.len() as u64);
+        self.write_at_locked(&mut state, path, end, data)?;
+        Ok(end + data.len() as u64)
     }
 
     async fn set_size(&self, path: &str, size: u64) -> VfsResult<()> {
@@ -1197,6 +1239,52 @@ impl VfsStorage for InMemoryStorage {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+
+    /// Concurrent appenders each land every record intact at the end, rather
+    /// than finding the same end and overwriting each other. The first round
+    /// queues behind a held lock, where a stat-then-write implementation
+    /// (whose stats share a read lock) would see one end for all of them.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_appends_keep_every_record() {
+        const WRITERS: usize = 8;
+        const RECORDS: usize = 50;
+        let storage = Arc::new(InMemoryStorage::new());
+        let guard = storage.hold_lock().await;
+        let tasks: Vec<_> = (0..WRITERS)
+            .map(|w| {
+                let storage = Arc::clone(&storage);
+                tokio::spawn(async move {
+                    for r in 0..RECORDS {
+                        let record = format!("w{w:02}-r{r:03}\n");
+                        storage.append("/log", record.as_bytes()).await.unwrap();
+                    }
+                })
+            })
+            .collect();
+        tokio::task::yield_now().await;
+        drop(guard);
+        for task in tasks {
+            task.await.unwrap();
+        }
+        let log = String::from_utf8(storage.read("/log").await.unwrap()).unwrap();
+        let mut lines: Vec<&str> = log.lines().collect();
+        lines.sort_unstable();
+        let mut expected: Vec<String> = (0..WRITERS)
+            .flat_map(|w| (0..RECORDS).map(move |r| format!("w{w:02}-r{r:03}")))
+            .collect();
+        expected.sort_unstable();
+        assert_eq!(lines, expected);
+    }
+
+    #[tokio::test]
+    async fn append_respects_the_quota() {
+        let storage = InMemoryStorage::with_max_bytes(1024);
+        storage.append("/f", &[b'x'; 512]).await.unwrap();
+        let err = storage.append("/f", &[b'y'; 1024]).await.unwrap_err();
+        assert!(matches!(err, VfsError::QuotaExceeded(_)), "{err:?}");
+        assert_eq!(storage.stat("/f").await.unwrap().size, 512);
+        assert_eq!(storage.append("/f", b"z").await.unwrap(), 513);
+    }
 
     /// `create_file(.., exclusive)` is `O_CREAT|O_EXCL`: of many callers
     /// racing on one path, exactly one creates it. The callers queue behind a

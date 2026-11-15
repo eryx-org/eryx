@@ -182,6 +182,11 @@ impl<S: VfsStorage> VfsStorage for ScrubbingStorage<S> {
         self.inner.set_size(path, size).await
     }
 
+    async fn append(&self, path: &str, data: &[u8]) -> VfsResult<u64> {
+        let scrubbed = self.scrub_if_needed(path, data, true);
+        self.inner.append(path, &scrubbed).await
+    }
+
     async fn create_file(&self, path: &str, exclusive: bool) -> VfsResult<bool> {
         // An empty file has nothing to scrub.
         self.inner.create_file(path, exclusive).await
