@@ -83,6 +83,7 @@ jobs:
               - 'crates/eryx-runtime/**'
               - 'crates/wit-dylib-ffi/**'
               - 'crates/eryx-precompile/**'
+              - 'crates/eryx-packages/**'
               - 'Cargo.lock'
               - 'Cargo.toml'
               - '.github/workflows/ci.yml'
@@ -541,15 +542,22 @@ jobs:
         working-directory: crates/eryx-guest-shell
         run: cargo test --locked --lib
 
-  # The JavaScript bundler (rolldown as a WASI command), its own workspace.
-  # Nothing embeds it yet: this lints, tests and builds it, and keeps the
-  # precompiled commands as an artifact.
+  # The JavaScript bundler (rolldown as a WASI command), its own workspace,
+  # embedded by eryx's `packages` feature: builds with --all-features need
+  # its cwasm, so this runs whenever the runtimes do.
   build-bundler:
     name: Build bundler
     runs-on: ubuntu-latest
     needs: changes
     if: >-
       github.event_name == 'push'
+      || needs.changes.outputs.core == 'true'
+      || needs.changes.outputs.python == 'true'
+      || needs.changes.outputs.book == 'true'
+      || needs.changes.outputs.examples == 'true'
+      || needs.changes.outputs.server == 'true'
+      || needs.changes.outputs.js == 'true'
+      || needs.changes.outputs.demo == 'true'
       || needs.changes.outputs.bundler == 'true'
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -595,17 +603,18 @@ jobs:
         env:
           ERYX_PRECOMPILE_BOOTSTRAP: "1"
 
+      # Named like the guest runtimes, so the jobs that download those get it.
       - name: Upload bundler
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: eryx-bundler
+          name: wasm-runtime-guest-bundler
           path: crates/eryx-runtime/eryx-bundler*
           retention-days: 1
 
   lint:
     name: Lint
     runs-on: ubuntu-latest
-    needs: [changes, build-runtime-python, build-runtime-javascript, build-runtime-shell]
+    needs: [changes, build-runtime-python, build-runtime-javascript, build-runtime-shell, build-bundler]
     if: >-
       github.event_name == 'push'
       || needs.changes.outputs.core == 'true'
@@ -674,7 +683,7 @@ jobs:
   test:
     name: Test
     runs-on: ubuntu-latest
-    needs: [changes, build-runtime-python, build-runtime-javascript, build-runtime-shell]
+    needs: [changes, build-runtime-python, build-runtime-javascript, build-runtime-shell, build-bundler]
     if: >-
       github.event_name == 'push'
       || needs.changes.outputs.core == 'true'
@@ -863,7 +872,7 @@ jobs:
   doc:
     name: Documentation
     runs-on: ubuntu-latest
-    needs: [changes, build-runtime-python, build-runtime-javascript, build-runtime-shell]
+    needs: [changes, build-runtime-python, build-runtime-javascript, build-runtime-shell, build-bundler]
     if: >-
       github.event_name == 'push'
       || needs.changes.outputs.core == 'true'
@@ -979,6 +988,9 @@ jobs:
           # The shell's embedded coreutils (the `coreutils` feature, #809).
           : > "$RUNNER_TEMP/coreutils.cwasm"
           echo "ERYX_COREUTILS_CWASM=$RUNNER_TEMP/coreutils.cwasm" >> "$GITHUB_ENV"
+          # The bundler environment builds run (the `packages` feature, #827).
+          : > "$RUNNER_TEMP/eryx-bundler.cwasm"
+          echo "ERYX_BUNDLER_CWASM=$RUNNER_TEMP/eryx-bundler.cwasm" >> "$GITHUB_ENV"
 
       - name: Check public API against the base branch
         run: cargo semver-checks check-release -p eryx --baseline-rev "$BASE_SHA"
@@ -989,7 +1001,7 @@ jobs:
   check-features:
     name: Check Feature Combinations
     runs-on: ubuntu-latest
-    needs: [changes, build-runtime-python, build-runtime-javascript, build-runtime-shell]
+    needs: [changes, build-runtime-python, build-runtime-javascript, build-runtime-shell, build-bundler]
     if: >-
       github.event_name == 'push'
       || needs.changes.outputs.core == 'true'
@@ -1042,7 +1054,7 @@ jobs:
   examples:
     name: Examples
     runs-on: ubuntu-latest
-    needs: [changes, build-runtime-python, build-runtime-javascript, build-runtime-shell]
+    needs: [changes, build-runtime-python, build-runtime-javascript, build-runtime-shell, build-bundler]
     if: >-
       github.event_name == 'push'
       || needs.changes.outputs.core == 'true'
@@ -1109,7 +1121,7 @@ jobs:
   python-bindings:
     name: Python Bindings
     runs-on: ubuntu-latest
-    needs: [changes, build-runtime-python, build-runtime-javascript, build-runtime-shell]
+    needs: [changes, build-runtime-python, build-runtime-javascript, build-runtime-shell, build-bundler]
     if: >-
       github.event_name == 'push'
       || needs.changes.outputs.core == 'true'
@@ -1197,7 +1209,7 @@ jobs:
   python-bindings-windows:
     name: Python Bindings (Windows)
     runs-on: windows-latest
-    needs: [changes, build-runtime-python, build-runtime-javascript, build-runtime-shell]
+    needs: [changes, build-runtime-python, build-runtime-javascript, build-runtime-shell, build-bundler]
     if: >-
       github.event_name == 'push'
       || needs.changes.outputs.core == 'true'
@@ -1301,7 +1313,7 @@ jobs:
   python-bindings-macos:
     name: Python Bindings (macOS)
     runs-on: macos-latest
-    needs: [changes, build-runtime-python, build-runtime-javascript, build-runtime-shell]
+    needs: [changes, build-runtime-python, build-runtime-javascript, build-runtime-shell, build-bundler]
     if: >-
       github.event_name == 'push'
       || needs.changes.outputs.core == 'true'
@@ -1467,7 +1479,7 @@ jobs:
   book-tests:
     name: Book Tests
     runs-on: ubuntu-latest
-    needs: [changes, build-runtime-python, build-runtime-javascript, build-runtime-shell]
+    needs: [changes, build-runtime-python, build-runtime-javascript, build-runtime-shell, build-bundler]
     if: >-
       github.event_name == 'push'
       || needs.changes.outputs.core == 'true'
@@ -1687,7 +1699,7 @@ jobs:
   deploy-demo:
     name: Deploy Demo (Cloudflare)
     runs-on: ubuntu-latest
-    needs: [changes, build-runtime-python, build-runtime-javascript, build-runtime-shell]
+    needs: [changes, build-runtime-python, build-runtime-javascript, build-runtime-shell, build-bundler]
     if: >-
       github.event.pull_request.head.repo.fork != true
       && github.actor != 'dependabot[bot]'
@@ -1885,7 +1897,7 @@ jobs:
   docker:
     name: Docker
     runs-on: ubuntu-latest
-    needs: [changes, build-runtime-python, build-runtime-javascript, build-runtime-shell]
+    needs: [changes, build-runtime-python, build-runtime-javascript, build-runtime-shell, build-bundler]
     if: >-
       github.event.pull_request.head.repo.fork != true
       && (github.event_name == 'push'

@@ -221,7 +221,7 @@ Returned by `sandbox.execute()` with execution results:
   JSON-serializable), or `None` on success
 - `duration_ms: float` - Execution time in milliseconds
 - `callback_invocations: int` - Number of callback invocations
-- `peak_memory_bytes: Optional[int]` - Peak memory usage (if available)
+- `peak_memory_bytes: Optional[int]` - Peak memory usage (if available); in a session, the peak so far across executions
 - `fuel_consumed: Optional[int]` - Fuel (WASM instructions) consumed (if available)
 
 #### Returning a structured result
