@@ -150,7 +150,7 @@ print(r['hit'], r['args'])
 }
 
 #[tokio::test]
-async fn reserved_positional_key_is_rejected() {
+async fn reserved_positional_key_is_rejected_and_the_host_binds_positional_args() {
     let sandbox = Sandbox::embedded()
         .with_callback(tagged_prefix("mcp.grafana", "g"))
         .with_callback(exact("plain"))
@@ -171,13 +171,18 @@ for call in [
         print("UNEXPECTED")
     except TypeError as e:
         print(e)
-# A positional arg sent to an exact callback, bypassing its wrapper, is
-# rejected by the host without calling it
-try:
-    await invoke("plain", 1)
-    print("UNEXPECTED")
-except Exception as e:
-    print(e)
+# Positional args sent to an exact callback, bypassing its wrapper, are bound
+# by the host to its schema, with Python's rules
+print((await invoke("plain", 1))["args"])
+for call in [
+    lambda: invoke("plain", 1, 2),
+    lambda: invoke("plain", 1, q=2),
+]:
+    try:
+        await call()
+        print("UNEXPECTED")
+    except Exception as e:
+        print(e)
 "#,
     )
     .await;
@@ -190,7 +195,9 @@ except Exception as e:
              mcp.grafana.user_info() {reserved}\n\
              plain() {reserved}\n\
              plain() {reserved}\n\
-             invalid arguments: plain() takes keyword arguments only"
+             {{'q': 1}}\n\
+             invalid arguments: plain() takes 1 positional argument but 2 were given\n\
+             invalid arguments: plain() got multiple values for argument 'q'"
         )
     );
 }

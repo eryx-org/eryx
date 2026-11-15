@@ -1,0 +1,35 @@
+# Build manifest for jaq (`jaq`), a jq clone, as a WASI (wasip2) component, via
+# the Rust lane. Built by `mise run build-cli -- jaq`.
+#
+# jaq stands in for conch-shell's jq builtin. Built into the shell guest it
+# would add ~4.4 MB to every shell runtime's cwasm (#808), so it's a command
+# instead, and only sandboxes that register it pay for it (#809). The CLI is
+# called `jaq`; register it as `jq` too if scripts expect that name.
+
+name = "jaq"
+description = "jaq — a jq clone (Rust, wasip2)"
+# SPDX expression for the upstream source, recorded in provenance.json.
+license = "MIT"
+lang = "rust"
+
+[source]
+repo = "https://github.com/01mf02/jaq.git"
+ref = "v3.1.2"
+commit = "f7fea9219d8d5364c91c6a0278765eaa0e6fa95e"
+# Local working copy the driver builds from; fetched on first build.
+dir = "scratch/jaq"
+
+[build]
+# cargo binary to build → artifact is jaq.wasm.
+bin = "jaq"
+# Drop rustyline (and the `repl` filter), which has no WASI backend.
+vendor_patch = "clis/patches/patch-jaq-wasip2.sh"
+# `mimalloc` (the default feature) is a C allocator; use Rust's.
+cargo_flags = ["--no-default-features"]
+
+[cwasm]
+# Loaded as a plain component; the host compiles it on demand.
+enabled = false
+
+[output]
+dir = "scratch/jaq-component"

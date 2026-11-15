@@ -17,6 +17,7 @@ crate-type = ["staticlib"]
 
 [dependencies]
 pyo3 = { workspace = true } #unified
+eryx-guest-call.workspace = true
 wit-dylib-ffi.workspace = true
 
 [dev-dependencies]

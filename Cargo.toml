@@ -90,6 +90,8 @@ wit-component = "0.263"
 wit-dylib = "0.263"
 # wit-dylib FFI for implementing the interpreter interface (inlined from wasm-tools).
 wit-dylib-ffi = { path = "crates/wit-dylib-ffi" }
+# The wit-dylib value stack shared by the guest runtimes.
+eryx-guest-call = { path = "crates/eryx-guest-call" }
 # QuickJS (quickjs-ng) bindings for the JavaScript guest.
 rquickjs = { version = "0.14", default-features = false, features = ["std"] }
 wit-parser = "0.263"

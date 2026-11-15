@@ -2315,6 +2315,10 @@ impl<L, R> SandboxBuilder<L, R> {
 impl<L, R> SandboxBuilder<L, R> {
     /// Add a runtime library (callbacks + preamble + stubs).
     ///
+    /// A library's callbacks work in every guest language. Its preamble and
+    /// type stubs are Python: for another language, [`build`](Self::build)
+    /// fails if the library has a preamble, and the stubs are unused.
+    ///
     /// A callback name registered twice makes [`build`](Self::build) fail.
     #[must_use]
     pub fn with_library(mut self, library: RuntimeLibrary) -> Self {
