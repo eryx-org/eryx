@@ -78,7 +78,7 @@ const CHILD_FUEL: u64 = 10_000_000_000;
 /// Memory an execution's running children may grow to together, on top of
 /// the parent's own limit.
 const CHILD_MEMORY_LIMIT: usize = 256 * 1024 * 1024;
-/// Children spawned but not yet waited on, at most, per execution.
+/// Children spawned and not yet finished, at most, per execution.
 const MAX_LIVE_CHILDREN: usize = 64;
 /// Bytes of argv and env one spawn may pass, at most (like `ARG_MAX`).
 const MAX_ARGS_BYTES: usize = 2 * 1024 * 1024;
@@ -93,7 +93,9 @@ pub(crate) const DEFAULT_CHILD_HOST_BYTES: u64 = 64 * 1024 * 1024;
 pub(crate) struct ChildBudget {
     limit: u64,
     used: u64,
-    live: usize,
+    /// Children spawned and not yet finished (or dropped), out of
+    /// [`MAX_LIVE_CHILDREN`].
+    live: Arc<AtomicUsize>,
     /// Linear memory the running children hold, out of `CHILD_MEMORY_LIMIT`.
     memory: Arc<AtomicUsize>,
 }
@@ -110,7 +112,7 @@ impl ChildBudget {
         Self {
             limit: limit.unwrap_or(DEFAULT_CHILD_HOST_BYTES),
             used: 0,
-            live: 0,
+            live: Arc::default(),
             memory: Arc::default(),
         }
     }
@@ -339,6 +341,27 @@ impl Drop for ChildMemory {
     }
 }
 
+/// A child's place among the execution's [`MAX_LIVE_CHILDREN`], held from
+/// spawn until its run ends or is dropped.
+struct LiveSlot(Arc<AtomicUsize>);
+
+impl LiveSlot {
+    /// Take a slot, or `None` if all are taken.
+    fn take(live: &Arc<AtomicUsize>) -> Option<Self> {
+        live.try_update(Ordering::Relaxed, Ordering::Relaxed, |n| {
+            (n < MAX_LIVE_CHILDREN).then_some(n + 1)
+        })
+        .ok()
+        .map(|_| Self(Arc::clone(live)))
+    }
+}
+
+impl Drop for LiveSlot {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
 #[cfg(feature = "unstable-vfs")]
 impl eryx_vfs::HybridVfsView for ChildState {
     type Storage = eryx_vfs::ArcStorage;
@@ -369,8 +392,6 @@ pub struct ChildProcess {
     run: Option<ChildRun>,
     /// What this child holds of the execution's [`ChildBudget`].
     charged: u64,
-    /// Not yet waited on, so it counts as live.
-    live: bool,
 }
 
 /// What `wait` runs a child with, taken out of its handle.
@@ -389,6 +410,8 @@ struct ChildRun {
     fuel_used: Arc<AtomicU64>,
     /// The execution's pool of child memory.
     memory: Arc<AtomicUsize>,
+    /// Its live slot, given back when the run ends or is dropped.
+    _live: LiveSlot,
     #[cfg(feature = "unstable-vfs")]
     vfs: Option<eryx_vfs::HybridVfsCtx<eryx_vfs::ArcStorage>>,
 }
@@ -418,6 +441,11 @@ impl ChildRun {
             },
         );
         store.limiter(|s| &mut s.limits);
+        // Without this, a loop with no calls keeps its fuel count in a
+        // register, and the epoch callback below reads a stale count.
+        if let Err(e) = crate::wasm::sync_fuel_periodically(&mut store) {
+            return (Err(e.to_string()), 0);
+        }
         // Yield on every epoch tick, publishing the fuel burned so far for
         // `wait` to charge the parent. The parent's timeout and cancellation
         // race its whole execution, so yielding also lets them drop a
@@ -541,10 +569,6 @@ impl ExecutorState {
             .table
             .get_mut(child)
             .map_err(|_| ProcessError::IoError)?;
-        if child.live {
-            child.live = false;
-            self.child_budget.live -= 1;
-        }
         // Its argv and env move into the run and are freed with it, even if
         // the parent's timeout drops it midway.
         self.child_budget
@@ -566,9 +590,6 @@ impl HostChild for ExecutorState {
     async fn drop(&mut self, child: Resource<ChildProcess>) -> wasmtime::Result<()> {
         let child = self.table.delete(child)?;
         self.child_budget.release(child.charged);
-        if child.live {
-            self.child_budget.live -= 1;
-        }
         Ok(())
     }
 }
@@ -601,14 +622,17 @@ impl<T: Send> HostChildWithStore<T> for HasSelf<ExecutorState> {
         argv.extend(args);
         let args_bytes = argv.iter().map(String::len).sum::<usize>()
             + env.iter().map(|(k, v)| k.len() + v.len()).sum::<usize>();
-        if args_bytes > MAX_ARGS_BYTES || state.child_budget.live >= MAX_LIVE_CHILDREN {
+        let live = (args_bytes <= MAX_ARGS_BYTES)
+            .then(|| LiveSlot::take(&state.child_budget.live))
+            .flatten();
+        let Some(live) = live else {
             tracing::warn!(
                 args_bytes,
-                live = state.child_budget.live,
+                live = state.child_budget.live.load(Ordering::Relaxed),
                 "child spawn over the argument or live-child limit"
             );
             return Err(ProcessError::LimitExceeded);
-        }
+        };
         let charged = args_bytes as u64;
         state.child_budget.charge(charged)?;
 
@@ -626,6 +650,7 @@ impl<T: Send> HostChildWithStore<T> for HasSelf<ExecutorState> {
                 fuel: 0,
                 fuel_used: Arc::default(),
                 memory: Arc::default(),
+                _live: live,
                 #[cfg(feature = "unstable-vfs")]
                 vfs: state
                     .hybrid_vfs_ctx
@@ -633,7 +658,6 @@ impl<T: Send> HostChildWithStore<T> for HasSelf<ExecutorState> {
                     .map(eryx_vfs::HybridVfsCtx::fork),
             }),
             charged,
-            live: true,
         };
         let spawned = (|| -> wasmtime::Result<Spawned> {
             stdin.pipe(&mut host, PipeConsumer(Box::pin(stdin_tx)))?;
@@ -648,10 +672,7 @@ impl<T: Send> HostChildWithStore<T> for HasSelf<ExecutorState> {
         })();
         let state = host.get();
         match spawned {
-            Ok(spawned) => {
-                state.child_budget.live += 1;
-                Ok(spawned)
-            }
+            Ok(spawned) => Ok(spawned),
             Err(e) => {
                 tracing::warn!(error = %e, "connecting a child's stdio failed");
                 state.child_budget.release(charged);
@@ -763,6 +784,7 @@ mod tests {
                 fuel: CHILD_FUEL,
                 fuel_used: Arc::default(),
                 memory: Arc::default(),
+                _live: LiveSlot::take(&Arc::default()).unwrap(),
                 #[cfg(feature = "unstable-vfs")]
                 vfs: None,
             };

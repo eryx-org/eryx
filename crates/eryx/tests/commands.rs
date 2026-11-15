@@ -424,6 +424,51 @@ async fn concurrent_children_share_the_fuel_limit() {
     assert!(done >= 20, "{done} rounds done under a 30-round limit");
 }
 
+/// Children whose work has no calls in it, which keep their fuel count in a
+/// register, are charged as they run too: two spinning stages under a fuel
+/// limit take about as long as one.
+#[tokio::test]
+async fn spinning_children_share_the_fuel_limit() {
+    let sandbox = shell()
+        .with_command("tc", test_cmd())
+        .with_resource_limits(ResourceLimits::default().with_max_fuel(2_000_000_000))
+        .build()
+        .unwrap();
+    let time = async |script: &str| {
+        let start = Instant::now();
+        let err = sandbox.execute(script).await.unwrap_err();
+        assert!(
+            matches!(err.kind(), ErrorKind::FuelExhausted { .. }),
+            "{err:?}"
+        );
+        start.elapsed()
+    };
+    let one = time("tc spin").await;
+    let two = time("tc spin | tc spin").await;
+    let four = time("tc spin | tc spin | tc spin | tc spin").await;
+    // Charged only at exit, each stage would burn the whole limit itself.
+    assert!(two < one * 3 / 2, "one: {one:?}, two: {two:?}");
+    assert!(four < one * 3 / 2, "one: {one:?}, four: {four:?}");
+}
+
+/// A child counts against the live-child limit until it finishes, not just
+/// until it's waited on: background jobs that are still running hold their
+/// slots, so the ones past the limit are refused.
+#[tokio::test]
+async fn running_children_count_as_live() {
+    let sandbox = shell().with_command("tc", test_cmd()).build().unwrap();
+    // Each foreground `tc` yields, so every background job's child is waited
+    // on (and was, before, no longer counted) before the next one spawns.
+    let out = sandbox
+        .execute("for i in {1..70}; do tc busy 50 & tc exit 0; done")
+        .await
+        .unwrap();
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("tc: limit-exceeded"),
+        "{out:?}"
+    );
+}
+
 /// Running children share one pool of memory: two that each fit it alone
 /// can't both hold their memory at once.
 #[tokio::test]
