@@ -985,10 +985,13 @@ sock.connect(("127.0.0.1", 19110))
 # (obs-fold in HTTP/1.1: LWS on next line continues the header)
 mid = len(key) // 2
 request = f"GET /test HTTP/1.1\r\nHost: 127.0.0.1\r\nX-Key: {key[:mid]}\r\n {key[mid:]}\r\n\r\n"
-sock.send(request.encode())
-response = sock.recv(4096)
+# Folded headers are refused outright as ambiguous framing.
+try:
+    sock.send(request.encode())
+    print("HEADER_CONT: sent")
+except PermissionError:
+    print("HEADER_CONT: refused")
 sock.close()
-print("HEADER_CONT: sent")
 "#,
         )
         .await
@@ -1000,6 +1003,8 @@ print("HEADER_CONT: sent")
         !server.received_contains(REAL_SECRET.as_bytes()).await,
         "Real secret must NOT leak via header continuation smuggling"
     );
+    let stdout = String::from_utf8_lossy(&result.stdout);
+    assert!(stdout.contains("HEADER_CONT: refused"), "{stdout}");
 }
 
 // =============================================================================

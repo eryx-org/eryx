@@ -72,8 +72,98 @@ pub struct NetConfig {
     #[pyo3(get, set)]
     pub allow_plaintext_secrets: bool,
 
+    /// Method and path rules for HTTP requests (see `http_rules`).
+    http_rules: Vec<eryx::HttpRule>,
+
     /// Custom root certificates (DER-encoded bytes).
     custom_root_certs: Vec<Vec<u8>>,
+}
+
+/// HTTP requests allowed to the hosts matching a pattern.
+///
+/// A host matching any rule's pattern only accepts requests that match one
+/// of its rules; other hosts are unaffected. Once any rule is set, every
+/// request is parsed and checked against the connected host and the hosts
+/// it names (`Host` header or absolute URL), requests with ambiguous framing
+/// are refused, and only HTTP/1.1 may be sent to a host with rules. A
+/// refused request is never sent, and the write raises `OSError` in the
+/// sandbox.
+///
+/// Methods are compared ignoring case. Paths match whole segments:
+/// `/repos/org/repo` matches it and anything under `/repos/org/repo/`, but
+/// not `/repos/org/repo-evil`; a path ending in `/` matches anything under
+/// it. The request's query is ignored and percent-escapes decoded first; a
+/// path with `.`/`..` or empty segments, or an escaped `/` or `\`, never
+/// matches.
+///
+/// Example:
+///     net = NetConfig(
+///         allowed_hosts=["api.github.com"],
+///         http_rules=[
+///             HttpRule("api.github.com", methods=["GET", "POST"], paths=["/repos/org/repo"]),
+///         ],
+///     )
+#[pyclass(module = "eryx", frozen, from_py_object)]
+#[derive(Debug, Clone)]
+pub struct HttpRule(eryx::HttpRule);
+
+#[pymethods]
+impl HttpRule {
+    /// Create a rule for hosts matching `host` (same patterns as
+    /// `allowed_hosts`).
+    ///
+    /// Args:
+    ///     host: Host pattern the rule applies to.
+    ///     methods: Allowed methods; None or empty allows any.
+    ///     paths: Allowed path prefixes; None or empty allows any. Must be
+    ///         normalized absolute paths (no `.`/`..` or empty segments, query
+    ///         or escapes).
+    ///
+    /// Raises:
+    ///     ValueError: If a path can't match any request.
+    #[new]
+    #[pyo3(signature = (host, *, methods=None, paths=None))]
+    fn new(
+        host: String,
+        methods: Option<Vec<String>>,
+        paths: Option<Vec<String>>,
+    ) -> PyResult<Self> {
+        let rule = eryx::HttpRule::new(host)
+            .with_methods(methods.unwrap_or_default())
+            .with_paths(paths.unwrap_or_default());
+        eryx::NetConfig::default()
+            .allow_http(rule.clone())
+            .validate()
+            .map_err(PyValueError::new_err)?;
+        Ok(Self(rule))
+    }
+
+    /// The host pattern.
+    #[getter]
+    fn host(&self) -> &str {
+        self.0.host()
+    }
+
+    /// The allowed methods; empty allows any.
+    #[getter]
+    fn methods(&self) -> Vec<String> {
+        self.0.methods().to_vec()
+    }
+
+    /// The allowed path prefixes; empty allows any.
+    #[getter]
+    fn paths(&self) -> Vec<String> {
+        self.0.paths().to_vec()
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "HttpRule({:?}, methods={:?}, paths={:?})",
+            self.0.host(),
+            self.0.methods(),
+            self.0.paths()
+        )
+    }
 }
 
 #[pymethods]
@@ -108,6 +198,8 @@ impl NetConfig {
     ///         TCP (e.g. `http://`), not only after a TLS upgrade. This sends the
     ///         real secret value unencrypted, where anyone on the network path
     ///         can read it; only enable it for trusted local test servers.
+    ///     http_rules: `HttpRule`s limiting the methods and paths requests to
+    ///         their hosts may use.
     ///
     /// Raises:
     ///     ValueError: If a network is not a valid CIDR.
@@ -119,7 +211,7 @@ impl NetConfig {
     ///     # Any public host, with the default blocks
     ///     net = NetConfig(allow_all_hosts=True)
     #[new]
-    #[pyo3(signature = (*, max_connections=10, connect_timeout_ms=30000, io_timeout_ms=60000, allow_all_hosts=false, allowed_hosts=None, blocked_hosts=None, blocked_networks=None, allowed_networks=None, internal_hosts=None, allow_plaintext_secrets=false))]
+    #[pyo3(signature = (*, max_connections=10, connect_timeout_ms=30000, io_timeout_ms=60000, allow_all_hosts=false, allowed_hosts=None, blocked_hosts=None, blocked_networks=None, allowed_networks=None, internal_hosts=None, allow_plaintext_secrets=false, http_rules=None))]
     #[allow(clippy::too_many_arguments)]
     fn new(
         max_connections: u32,
@@ -132,6 +224,7 @@ impl NetConfig {
         allowed_networks: Option<Vec<String>>,
         internal_hosts: Option<Vec<String>>,
         allow_plaintext_secrets: bool,
+        http_rules: Option<Vec<HttpRule>>,
     ) -> PyResult<Self> {
         Ok(Self {
             max_connections,
@@ -147,6 +240,7 @@ impl NetConfig {
             allowed_networks: parse_networks(&allowed_networks.unwrap_or_default())?,
             internal_hosts: internal_hosts.unwrap_or_default(),
             allow_plaintext_secrets,
+            http_rules: http_rules.into_iter().flatten().map(|r| r.0).collect(),
             custom_root_certs: vec![],
         })
     }
@@ -171,6 +265,7 @@ impl NetConfig {
             allowed_networks: vec![],
             internal_hosts: vec![],
             allow_plaintext_secrets: false,
+            http_rules: vec![],
             custom_root_certs: vec![],
         }
     }
@@ -194,6 +289,30 @@ impl NetConfig {
     fn set_blocked_networks(&mut self, cidrs: Vec<String>) -> PyResult<()> {
         self.blocked_networks = parse_networks(&cidrs)?;
         Ok(())
+    }
+
+    /// Method and path rules for HTTP requests; see `HttpRule`.
+    #[getter]
+    fn http_rules(&self) -> Vec<HttpRule> {
+        self.http_rules.iter().cloned().map(HttpRule).collect()
+    }
+
+    #[setter]
+    fn set_http_rules(&mut self, rules: Vec<HttpRule>) {
+        self.http_rules = rules.into_iter().map(|r| r.0).collect();
+    }
+
+    /// Add an `HttpRule`.
+    ///
+    /// Returns self for method chaining.
+    ///
+    /// Example:
+    ///     net = NetConfig(allowed_hosts=["api.github.com"]).allow_http(
+    ///         HttpRule("api.github.com", methods=["GET"], paths=["/repos/org/repo"])
+    ///     )
+    fn allow_http(&mut self, rule: HttpRule) -> Self {
+        self.http_rules.push(rule.0);
+        self.clone()
     }
 
     /// CIDRs exempt from `blocked_networks`.
@@ -297,7 +416,7 @@ impl NetConfig {
 
     fn __repr__(&self) -> String {
         format!(
-            "NetConfig(max_connections={}, connect_timeout_ms={}, io_timeout_ms={}, allow_all_hosts={}, allowed_hosts={:?}, blocked_hosts=[{} patterns], blocked_networks=[{} networks], allowed_networks={:?}, internal_hosts={:?}, allow_plaintext_secrets={})",
+            "NetConfig(max_connections={}, connect_timeout_ms={}, io_timeout_ms={}, allow_all_hosts={}, allowed_hosts={:?}, blocked_hosts=[{} patterns], blocked_networks=[{} networks], allowed_networks={:?}, internal_hosts={:?}, allow_plaintext_secrets={}, http_rules=[{} rules])",
             self.max_connections,
             self.connect_timeout_ms,
             self.io_timeout_ms,
@@ -308,6 +427,7 @@ impl NetConfig {
             self.allowed_networks(),
             self.internal_hosts,
             self.allow_plaintext_secrets,
+            self.http_rules.len(),
         )
     }
 }
@@ -364,6 +484,7 @@ impl From<&NetConfig> for eryx::NetConfig {
             .with_blocked_networks(config.blocked_networks.clone())
             .with_allowed_networks(config.allowed_networks.clone())
             .with_internal_hosts(config.internal_hosts.clone())
+            .with_http_rules(config.http_rules.clone())
             .allow_plaintext_secrets(config.allow_plaintext_secrets);
         config
             .custom_root_certs
