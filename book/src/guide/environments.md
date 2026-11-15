@@ -88,7 +88,9 @@ when it was loaded, as pools and factories do for every sandbox they make.
   Running the same import again in a session is fine. A session snapshot
   records these imports rather than the modules, and restoring it imports
   them again (so the restoring sandbox needs the same environment); a
-  variable reassigned since its import keeps its new value.
+  variable reassigned since its import keeps its new value. Only imports
+  from executes that succeeded are recorded: if an execute throws after its
+  imports ran, run those imports again after a restore.
 - **`await import("…")`** works anywhere.
 - **`require("…")`** imports synchronously, for CommonJS-style code. A module
   that can't finish without awaiting (top-level await on something
