@@ -38,6 +38,11 @@ env:
   # commit are those building from the checkout: Build eryx-runtime on a cache
   # miss, and the MSRV and platform checks on every core change.
   ERYX_REQUIRE_FRESH_PREBUILT: "1"
+  # Which sd2k/eryx-server variant gets the unsuffixed tags (0.16.0, latest,
+  # ...): `all-languages` or `python-only`. The other variant's tags get a
+  # suffix: `-python` for the Python-only image, `-all` for the
+  # all-languages one. Pending Ben's decision (#847).
+  DOCKER_UNSUFFIXED_VARIANT: all-languages
 
 jobs:
   # Detect which paths changed to skip unnecessary jobs.
@@ -1707,7 +1712,30 @@ jobs:
       - name: Prepare runtime-python.cwasm for Docker build context
         run: cp crates/eryx-runtime/runtime-python.cwasm crates/eryx-server/runtime-python.cwasm
 
-      - name: Build
+      - name: Log in to Docker Hub
+        if: github.event_name == 'push'
+        uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
+        with:
+          username: sd2k
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      # The same tags as the all-languages image (see the docker job), with
+      # this variant's suffix unless it gets the unsuffixed tags.
+      - name: Docker meta
+        id: meta
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
+        with:
+          images: sd2k/eryx-server
+          flavor: |
+            suffix=${{ env.DOCKER_UNSUFFIXED_VARIANT != 'python-only' && '-python' || '' }},onlatest=true
+          tags: |
+            type=sha,prefix=
+            type=ref,event=branch
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=match,pattern=\d+.\d+.\d+,group=0
+            type=match,pattern=\d+.\d+,group=0
+
+      - name: Build and push
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
@@ -1716,9 +1744,12 @@ jobs:
             RUNTIME_SOURCE=custom
             RUNTIME_CWASM=crates/eryx-server/runtime-python.cwasm
             ERYX_LANGUAGES=python
-          push: false
+          push: ${{ github.event_name == 'push' }}
           load: true
-          tags: eryx-server:python-only
+          tags: |
+            eryx-server:python-only
+            ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
 
       - name: Report image size
         run: |
@@ -1769,6 +1800,9 @@ jobs:
         uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
         with:
           images: sd2k/eryx-server
+          # The suffix, if any, is DOCKER_UNSUFFIXED_VARIANT's (see env).
+          flavor: |
+            suffix=${{ env.DOCKER_UNSUFFIXED_VARIANT != 'all-languages' && '-all' || '' }},onlatest=true
           # On main: sha + branch + latest. On a release tag (eryx-v0.5.0):
           # the version tags 0.5.0 and 0.5 (type=match strips the eryx-v prefix).
           # latest stays tied to main and is not moved by tag builds.
