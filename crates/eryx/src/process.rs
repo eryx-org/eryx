@@ -421,12 +421,13 @@ impl ExecutorState {
             // It already ran, and failed.
             return Err(ProcessError::SpawnFailed);
         }
-        // Its argv, env and stdin move into the run and are freed with it,
-        // even if the parent's timeout drops it midway; only its output is
-        // charged from here on, each stream capped at half of what is left.
+        // Each output stream gets half of what is left while the argv, env
+        // and stdin are still held. Those move into the run and are freed
+        // with it, even if the parent's timeout drops it midway, so only the
+        // output is charged from here on.
+        let output_room = (self.child_budget.remaining() / 2).min(CHILD_OUTPUT_LIMIT as u64);
         self.child_budget
             .release(std::mem::take(&mut child.charged));
-        let output_room = (self.child_budget.remaining() / 2).min(CHILD_OUTPUT_LIMIT as u64);
         Ok(Ok(ChildRun {
             pre: child.command.pre.clone(),
             argv: std::mem::take(&mut child.argv),
@@ -688,6 +689,41 @@ mod tests {
         assert_eq!(COMPILED.load(Ordering::SeqCst), compiled);
         // Dropped children give back everything they held.
         assert_eq!((state.child_budget.used, state.child_budget.live), (0, 0));
+    }
+
+    /// Output room is sized with the child's own inputs still charged, so
+    /// inputs plus output stay within the budget; starting the run then
+    /// releases the inputs.
+    #[tokio::test]
+    async fn output_room_counts_the_childs_inputs() {
+        let mut commands = Commands::default();
+        commands.insert(
+            "upper".into(),
+            Command::from_bytes(&test_cmd_wasm()).unwrap(),
+        );
+        let mut state = ExecutorState::placeholder();
+        state.commands = commands;
+        state.child_budget = ChildBudget::new(Some(4 << 20));
+
+        let env = vec![("X".to_owned(), "x".repeat(1 << 20))];
+        let child = HostChild::spawn(&mut state, "upper".into(), vec![], env, "/".into())
+            .await
+            .unwrap();
+        let rep = Resource::new_borrow(child.rep());
+        HostChild::write_stdin(
+            &mut state,
+            Resource::new_borrow(child.rep()),
+            vec![0; 1 << 20],
+        )
+        .await
+        .unwrap();
+        let held = state.child_budget.used;
+        assert!(held > 2 << 20);
+        let Ok(run) = state.take_child_run(&rep, u64::MAX).unwrap() else {
+            panic!("not run yet");
+        };
+        assert_eq!(run.output_room as u64, ((4 << 20) - held) / 2);
+        assert_eq!(state.child_budget.used, 0);
     }
 
     #[tokio::test]
