@@ -355,6 +355,96 @@ async fn cancelling_stops_a_spinning_child() {
     assert!(matches!(err.kind(), ErrorKind::Cancelled), "{err:?}");
 }
 
+/// Pipeline stages stream into each other: an endless producer stops once
+/// `head` has what it needs, and more output than any buffer passes through.
+#[cfg(feature = "coreutils")]
+#[tokio::test]
+async fn pipelines_stream_between_children() {
+    let sandbox = shell().with_command("tc", test_cmd()).build().unwrap();
+    let out = sandbox
+        .execute("tc yes | head -n 2; tc yes | head -c 20000000 | wc -c")
+        .await
+        .unwrap();
+    assert_eq!(out.stdout_utf8().unwrap(), "y\ny\n20000000\n");
+}
+
+/// Children in a pipeline run at once but share the parent's fuel: two
+/// stages that each fit the limit alone end the execution with
+/// `FuelExhausted` together, having done at most about one epoch tick of
+/// work each past it.
+#[cfg(feature = "unstable-vfs")]
+#[tokio::test]
+async fn concurrent_children_share_the_fuel_limit() {
+    use eryx::vfs::{ArcStorage, InMemoryStorage, VfsStorage};
+    use std::sync::Arc;
+
+    let executor = shell()
+        .with_command("tc", test_cmd())
+        .build()
+        .unwrap()
+        .executor();
+    let storage = ArcStorage::new(Arc::new(InMemoryStorage::new()));
+    let mut session = SessionExecutor::new_with_vfs(executor, &[], storage.clone())
+        .await
+        .unwrap();
+    let fuel = async |session: &mut SessionExecutor, rounds: u32| {
+        let out = session
+            .execute(format!("tc burn /data/c {rounds}"))
+            .run()
+            .await
+            .unwrap();
+        out.fuel_consumed.unwrap()
+    };
+    let base = fuel(&mut session, 0).await;
+    let round = (fuel(&mut session, 10).await - base) / 10;
+
+    // Room for 30 rounds: each stage's 20 fit, both stages' 40 don't.
+    let limit = base * 2 + round * 30;
+    let err = session
+        .execute("tc burn /data/a 20 | tc burn /data/b 20")
+        .with_fuel_limit(limit)
+        .run()
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(err.kind(), ErrorKind::FuelExhausted { .. }),
+        "{err:?}"
+    );
+    let mut done = 0;
+    for path in ["/data/a", "/data/b"] {
+        let rounds = storage.read(path).await.unwrap_or_default();
+        done += String::from_utf8(rounds)
+            .unwrap()
+            .parse::<u64>()
+            .unwrap_or(0);
+    }
+    // A round is longer than an epoch tick, so each stage gets at most one
+    // round past the limit; without sharing, both would finish all 20.
+    assert!(done <= 30 + 2, "{done} rounds done under a 30-round limit");
+    assert!(done >= 20, "{done} rounds done under a 30-round limit");
+}
+
+/// Running children share one pool of memory: two that each fit it alone
+/// can't both hold their memory at once.
+#[tokio::test]
+async fn concurrent_children_share_the_memory_pool() {
+    let sandbox = shell().with_command("tc", test_cmd()).build().unwrap();
+    // 160 MiB each fits the 256 MiB pool alone.
+    let out = sandbox.execute("echo hi | tc alloc 160").await.unwrap();
+    assert_eq!(out.stdout_utf8().unwrap(), "hi\n");
+    let out = sandbox
+        .execute("tc yes | tc alloc 160 | tc alloc 160 | head -c 2; true")
+        .await
+        .unwrap();
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("error: OutOfMemory"),
+        "{out:?}"
+    );
+    // Both gave their memory back.
+    let out = sandbox.execute("echo hi | tc alloc 160").await.unwrap();
+    assert_eq!(out.stdout_utf8().unwrap(), "hi\n");
+}
+
 /// The embedded shell runs the embedded uutils coreutils (the `coreutils`
 /// feature), and a registered command of the same name replaces one.
 #[cfg(feature = "coreutils")]
