@@ -77,7 +77,9 @@ fn kind_to_py(kind: eryx::ErrorKind) -> PyErr {
         eryx::ErrorKind::Initialization(msg) => InitializationError::new_err(msg),
         eryx::ErrorKind::WasmEngine(msg) => InitializationError::new_err(msg),
         eryx::ErrorKind::EpochTicker(msg) => ExecutionError::new_err(msg),
-        eryx::ErrorKind::WasmComponent(e) => InitializationError::new_err(e.to_string()),
+        // `{:#}` keeps the whole chain: wasmtime's outer context alone can be as
+        // bare as "failed to open file", without the OS error behind it.
+        eryx::ErrorKind::WasmComponent(e) => InitializationError::new_err(format!("{e:#}")),
         err @ eryx::ErrorKind::IncompatiblePrecompiled { .. } => {
             InitializationError::new_err(err.to_string())
         }

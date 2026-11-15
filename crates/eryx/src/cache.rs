@@ -430,13 +430,69 @@ pub fn is_private(meta: &fs::Metadata) -> bool {
     }
 }
 
-/// Create a new file readable and writable only by the current user.
-fn create_private_file(path: &Path) -> io::Result<fs::File> {
-    let mut options = fs::OpenOptions::new();
-    options.write(true).create_new(true);
-    #[cfg(unix)]
-    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
-    options.open(path)
+/// Whether `path` is a regular file owned by this user, not writable by
+/// others, and holding exactly `expected`.
+pub(crate) fn file_matches(path: &Path, expected: &[u8]) -> bool {
+    use std::io::Read;
+
+    let Ok(mut file) = fs::File::open(path) else {
+        return false;
+    };
+    let Ok(meta) = file.metadata() else {
+        return false;
+    };
+    if !meta.is_file() || !is_private(&meta) || meta.len() != expected.len() as u64 {
+        return false;
+    }
+    let mut buf = vec![0u8; 1 << 20];
+    let mut expected = expected;
+    while !expected.is_empty() {
+        let n = match file.read(&mut buf) {
+            Ok(0) | Err(_) => return false,
+            Ok(n) => n.min(expected.len()),
+        };
+        if buf[..n] != expected[..n] {
+            return false;
+        }
+        expected = &expected[n..];
+    }
+    true
+}
+
+/// Atomically publish `contents` at `path`, a content-addressed file that
+/// other processes may be loading at the same time (#850).
+///
+/// The contents go to a private temp file next to `path`, which is synced
+/// and closed before being renamed into place: on Windows wasmtime opens a
+/// file to map it sharing read access only, so that open fails while anyone
+/// holds the file open for writing. The rename never replaces a file that
+/// already holds `contents`, since another process may be mapping it, and on
+/// Windows replacing or removing a file in use fails or breaks that load. Any
+/// other file at `path` (stale or tampered) is replaced.
+pub(crate) fn publish_file(path: &Path, contents: &[u8]) -> io::Result<()> {
+    let dir = path
+        .parent()
+        .ok_or_else(|| io::Error::other(format!("{} has no parent", path.display())))?;
+    let mut temp = tempfile::NamedTempFile::new_in(dir)?;
+    temp.write_all(contents)?;
+    temp.as_file().sync_all()?;
+    let temp = temp.into_temp_path();
+
+    match temp.persist_noclobber(path) {
+        Ok(()) => Ok(()),
+        // Another process published it first; dropping the error removes our temp file.
+        Err(_) if file_matches(path, contents) => Ok(()),
+        // `fs::rename` rather than `TempPath::persist`: on Windows it replaces
+        // with POSIX semantics, so readers that share delete access (like
+        // `file_matches`) don't make it fail. A process that has the old file
+        // mapped doesn't share delete, so replacing it then still fails, and
+        // falls through to the check below. Our temp file is gone after a
+        // rename, so dropping the `TempPath` has nothing left to remove.
+        Err(e) => match fs::rename(&e.path, path) {
+            Err(_) if file_matches(path, contents) => Ok(()),
+            renamed => renamed,
+        },
+    }
 }
 
 /// Filesystem-based component cache.
@@ -506,27 +562,7 @@ impl ComponentCache for FilesystemCache {
     }
 
     fn put(&self, key: &CacheKey, precompiled: Vec<u8>) -> Result<(), CacheError> {
-        let path = self.cache_path(key);
-
-        // Write to a temp file first, then rename for atomicity. The temp name
-        // is unique per writer so processes caching the same key concurrently
-        // never write into the same file, and the data is synced before the
-        // rename so a crash can't leave a truncated entry under the real name.
-        let temp_path = path.with_extension(format!(
-            "cwasm.{}-{:016x}.tmp",
-            std::process::id(),
-            rand::random::<u64>()
-        ));
-        let written = create_private_file(&temp_path).and_then(|mut file| {
-            file.write_all(&precompiled)?;
-            file.sync_all()?;
-            fs::rename(&temp_path, &path)
-        });
-        if written.is_err() {
-            let _ = fs::remove_file(&temp_path);
-        }
-        written?;
-
+        publish_file(&self.cache_path(key), &precompiled)?;
         Ok(())
     }
 }
@@ -750,6 +786,56 @@ impl std::fmt::Debug for InstancePreCache {
             .field("entries", &self.len())
             .finish()
     }
+}
+
+/// Run `publish` on many threads at once, then have each keep opening the
+/// path it returned, the way wasmtime does to map it, until all are done:
+/// once any of them has published, the file must stay loadable (#850).
+#[cfg(test)]
+pub(crate) fn assert_concurrent_publish_stays_loadable(publish: impl Fn() -> PathBuf + Sync) {
+    use std::sync::atomic::AtomicUsize;
+
+    const THREADS: usize = 16;
+    let start = std::sync::Barrier::new(THREADS);
+    let publishing = AtomicUsize::new(THREADS);
+    std::thread::scope(|s| {
+        for i in 0..THREADS {
+            let (start, publishing, publish) = (&start, &publishing, &publish);
+            s.spawn(move || {
+                start.wait();
+                // Real processes don't arrive in lockstep.
+                std::thread::sleep(std::time::Duration::from_micros(300 * i as u64));
+                let path = std::panic::catch_unwind(std::panic::AssertUnwindSafe(publish));
+                publishing.fetch_sub(1, Ordering::SeqCst);
+                let path = path.unwrap_or_else(|e| std::panic::resume_unwind(e));
+                loop {
+                    let done = publishing.load(Ordering::SeqCst) == 0;
+                    if let Err(e) = open_for_mmap(&path) {
+                        panic!("{}: {e}", path.display());
+                    }
+                    if done {
+                        break;
+                    }
+                }
+            });
+        }
+    });
+}
+
+/// Open `path` the way wasmtime's `open_file_for_mmap` does: on Windows that
+/// shares read access only, so it fails while anyone has the file open for
+/// writing or deleting.
+#[cfg(test)]
+fn open_for_mmap(path: &Path) -> io::Result<fs::File> {
+    let mut options = fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        const FILE_SHARE_READ: u32 = 1;
+        options.share_mode(FILE_SHARE_READ);
+    }
+    options.open(path)
 }
 
 #[cfg(test)]
@@ -1017,6 +1103,23 @@ mod tests {
         assert!(stored.iter().all(|&b| b == stored[0]), "torn cache entry");
         let leftovers = std::fs::read_dir(temp_dir.path()).unwrap().count();
         assert_eq!(leftovers, 1, "temp files left behind");
+    }
+
+    #[test]
+    fn filesystem_cache_concurrent_puts_of_the_same_entry_stay_loadable() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let cache = FilesystemCache::new(temp_dir.path()).unwrap();
+        let key = CacheKey {
+            extensions_hash: [5u8; 32],
+            eryx_version: "0.1.0",
+            wasmtime_version: "39.0.0",
+        };
+        let entry = vec![7u8; 16 << 20];
+        assert_concurrent_publish_stays_loadable(|| {
+            cache.put(&key, entry.clone()).unwrap();
+            cache.get_path(&key).unwrap()
+        });
+        assert!(file_matches(&cache.cache_path(&key), &entry));
     }
 
     #[test]

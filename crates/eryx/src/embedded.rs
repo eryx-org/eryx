@@ -31,7 +31,6 @@
 //!     .build()?;
 //! ```
 
-use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
@@ -110,13 +109,18 @@ impl EmbeddedResources {
             return Ok(runtime_path);
         }
 
-        // Clean up old runtime files with different hashes (same version, stale content)
+        // Clean up old runtime files with different hashes (same version, stale content).
+        // Never our own: another process may have extracted it since the check
+        // above, and removing it breaks that process's loads until we replace it.
         if let Ok(entries) = std::fs::read_dir(temp_dir) {
             let prefix = format!("runtime-{version}-");
             for entry in entries.flatten() {
                 let name = entry.file_name();
                 let name_str = name.to_string_lossy();
-                if name_str.starts_with(&prefix) && name_str.ends_with(".cwasm") {
+                if name_str.starts_with(&prefix)
+                    && name_str.ends_with(".cwasm")
+                    && entry.path() != runtime_path
+                {
                     tracing::debug!(path = %entry.path().display(), "Removing stale runtime");
                     let _ = std::fs::remove_file(entry.path());
                 }
@@ -124,40 +128,8 @@ impl EmbeddedResources {
         }
 
         tracing::info!(path = %runtime_path.display(), "Extracting embedded runtime");
-
-        // Use tempfile to create a unique temp file for writing.
-        // This avoids race conditions when multiple processes extract simultaneously.
-        // We use NamedTempFile so we can persist it after writing.
-        let mut temp_file = tempfile::NamedTempFile::with_prefix_in("runtime-", temp_dir)
-            .map_err(|e| ErrorKind::Initialization(format!("Failed to create temp file: {e}")))?;
-
-        temp_file
-            .write_all(EMBEDDED_RUNTIME)
+        crate::cache::publish_file(&runtime_path, EMBEDDED_RUNTIME)
             .map_err(|e| ErrorKind::Initialization(format!("Failed to write runtime file: {e}")))?;
-
-        temp_file
-            .as_file()
-            .sync_all()
-            .map_err(|e| ErrorKind::Initialization(format!("Failed to sync runtime file: {e}")))?;
-
-        // Try to persist (rename) to the final location.
-        // persist() returns the temp file back on error so we can handle it.
-        match temp_file.persist(&runtime_path) {
-            Ok(_) => {}
-            Err(e) if matches_embedded_runtime(&runtime_path) => {
-                // Another process won the race - that's fine, our temp file is cleaned up
-                tracing::debug!("Runtime extracted by another process");
-                // The PersistError contains the temp file, which will be cleaned up on drop
-                drop(e);
-            }
-            Err(e) => {
-                return Err(ErrorKind::Initialization(format!(
-                    "Failed to persist runtime file: {}",
-                    e.error
-                ))
-                .into());
-            }
-        }
 
         Ok(runtime_path)
     }
@@ -175,36 +147,9 @@ impl EmbeddedResources {
     }
 }
 
-/// Whether `path` is a regular file owned by this user, not writable by
-/// others, and identical to [`EMBEDDED_RUNTIME`].
+/// Whether `path` is a private copy identical to [`EMBEDDED_RUNTIME`].
 fn matches_embedded_runtime(path: &Path) -> bool {
-    use std::io::Read;
-
-    let Ok(mut file) = std::fs::File::open(path) else {
-        return false;
-    };
-    let Ok(meta) = file.metadata() else {
-        return false;
-    };
-    if !meta.is_file()
-        || !crate::cache::is_private(&meta)
-        || meta.len() != EMBEDDED_RUNTIME.len() as u64
-    {
-        return false;
-    }
-    let mut buf = vec![0u8; 1 << 20];
-    let mut expected = EMBEDDED_RUNTIME;
-    while !expected.is_empty() {
-        let n = match file.read(&mut buf) {
-            Ok(0) | Err(_) => return false,
-            Ok(n) => n.min(expected.len()),
-        };
-        if buf[..n] != expected[..n] {
-            return false;
-        }
-        expected = &expected[n..];
-    }
-    true
+    crate::cache::file_matches(path, EMBEDDED_RUNTIME)
 }
 
 #[cfg(test)]
@@ -223,6 +168,16 @@ mod tests {
         let second = EmbeddedResources::extract_runtime(temp_dir.path()).unwrap();
         assert_eq!(first, second);
         assert!(std::fs::read(&second).unwrap() == EMBEDDED_RUNTIME);
+    }
+
+    /// Processes starting together against an empty cache (#850): once any of
+    /// them has the runtime, it must stay loadable while the rest extract.
+    #[test]
+    fn concurrent_first_use_keeps_runtime_loadable() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        crate::cache::assert_concurrent_publish_stays_loadable(|| {
+            EmbeddedResources::extract_runtime(temp_dir.path()).unwrap()
+        });
     }
 
     #[test]
