@@ -581,9 +581,8 @@ impl Callback for DynamicCallback {
 /// For any other callback the host binds them to its parameters before calling
 /// it, the way a Python function would: in the order of the `properties` of its
 /// [`parameters_schema`](Callback::parameters_schema), as the guest sees it in
-/// `list-callbacks`. That is the order serde_json iterates the schema's
-/// properties in, which is alphabetical today (#860 tracks using declaration
-/// order). More positional arguments than properties, or one that also arrives
+/// `list-callbacks`, which is the order the schema declares them in (#860).
+/// More positional arguments than properties, or one that also arrives
 /// by keyword, fail with [`CallbackError::InvalidArguments`] without calling it:
 /// `add() takes 2 positional arguments but 3 were given`, `add() got multiple
 /// values for argument 'a'`.

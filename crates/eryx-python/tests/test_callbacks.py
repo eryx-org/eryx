@@ -676,6 +676,24 @@ print(f"none: {n}")
 class TestCallbackSchemaInference:
     """Tests for automatic schema inference from function signatures."""
 
+    def test_positional_args_bind_in_declaration_order(self):
+        """Positional args bind to parameters as declared, not alphabetically (#860)."""
+        registry = eryx.CallbackRegistry()
+
+        @registry.callback()
+        def place(zip: str, city: str):
+            return {"zip": zip, "city": city}
+
+        schema = list(registry)[0]["schema"]
+        assert list(schema["properties"]) == ["zip", "city"]
+
+        sandbox = eryx.Sandbox(callbacks=registry)
+        result = sandbox.execute(
+            'r = await place("10001", "NYC")\nprint(r["zip"], r["city"])\n'
+            'print(list(list_callbacks()[0]["parameters_schema"]["properties"]))'
+        )
+        assert result.stdout == b"10001 NYC\n['zip', 'city']\n"
+
     def test_schema_inferred_from_type_hints(self):
         """Test that schema is inferred from type hints."""
         registry = eryx.CallbackRegistry()

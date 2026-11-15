@@ -171,7 +171,7 @@ def search_users(
 
 Sandboxed code can pass a callback's arguments by name or by position. Positional
 arguments bind to the callback's parameters in the order of its schema's
-`properties` (the order `list_callbacks()` shows, which is alphabetical for now: #860),
+`properties`, in the order the schema declares them (the order `list_callbacks()` shows),
 the way a Python function binds them:
 
 - In Python, `await add(1, 2)` and `await add(a=1, b=2)` are the same call.
