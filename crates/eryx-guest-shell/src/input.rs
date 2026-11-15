@@ -16,7 +16,10 @@ pub async fn read_stdin<SE: ShellExtensions>(
     loop {
         match stdin.read(&mut buf) {
             Ok(0) => return Ok(data),
-            Ok(n) => data.extend_from_slice(&buf[..n]),
+            Ok(n) => {
+                crate::note_read();
+                data.extend_from_slice(&buf[..n]);
+            }
             Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => crate::wait_for_input().await,
             Err(e) => return Err(e),
         }

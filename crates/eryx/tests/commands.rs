@@ -368,6 +368,22 @@ async fn pipelines_stream_between_children() {
     assert_eq!(out.stdout_utf8().unwrap(), "y\ny\n20000000\n");
 }
 
+/// A child's output pump waits for the next stage to catch up, so a fast
+/// producer feeding slow stages doesn't fill the shell's memory with
+/// in-guest pipe buffers.
+#[tokio::test]
+async fn a_fast_child_waits_for_slow_stages() {
+    let sandbox = shell().with_command("tc", test_cmd()).build().unwrap();
+    let stages = ["tc alloc 1"; 10].join(" | ");
+    let out = sandbox
+        .execute(&format!("tc yes | {stages} | head -c 3"))
+        .await
+        .unwrap();
+    assert_eq!(out.stdout_utf8().unwrap(), "y\ny");
+    let peak = out.stats.peak_memory_bytes.unwrap();
+    assert!(peak < 16 << 20, "the shell's memory peaked at {peak} bytes");
+}
+
 /// Children in a pipeline run at once but share the parent's fuel: two
 /// stages that each fit the limit alone end the execution with
 /// `FuelExhausted` together, having done at most about one epoch tick of

@@ -67,6 +67,34 @@ thread_local! {
     /// writes; see [`wait_for_input`].
     static PUMPS: Cell<usize> = const { Cell::new(0) };
     static PUMPED: Arc<tokio::sync::Notify> = Arc::new(tokio::sync::Notify::new());
+    /// A signal each time an input pump or builtin reads from a pipe; see
+    /// [`drain`].
+    static READ: Arc<tokio::sync::Notify> = Arc::new(tokio::sync::Notify::new());
+}
+
+/// Most bytes a child's output pump leaves unread in an in-guest pipe before
+/// it waits for the reader. brush's wasm pipes are unbounded, so without this
+/// a fast child would fill the guest's memory; with it, the child waits on its
+/// host pipe instead.
+const PIPE_HIGH_WATER: usize = 64 * 1024;
+
+/// Note that a pipe was read from, for a pump waiting in [`drain`].
+pub(crate) fn note_read() {
+    READ.with(|r| r.notify_waiters());
+}
+
+/// Wait for `signal`, or 1 ms, whichever comes first.
+async fn signalled_or_soon(signal: &tokio::sync::Notify) {
+    let mut notified = std::pin::pin!(signal.notified());
+    let mut timer = std::pin::pin!(sleep(1_000_000));
+    std::future::poll_fn(|cx| {
+        if notified.as_mut().poll(cx).is_ready() || timer.as_mut().poll(cx).is_ready() {
+            std::task::Poll::Ready(())
+        } else {
+            std::task::Poll::Pending
+        }
+    })
+    .await;
 }
 
 /// Wait until an empty in-guest pipe may have data.
@@ -82,17 +110,7 @@ pub(crate) async fn wait_for_input() {
         tokio::task::yield_now().await;
         return;
     }
-    let pumped = PUMPED.with(Arc::clone);
-    let mut notified = std::pin::pin!(pumped.notified());
-    let mut timer = std::pin::pin!(sleep(1_000_000));
-    std::future::poll_fn(|cx| {
-        if notified.as_mut().poll(cx).is_ready() || timer.as_mut().poll(cx).is_ready() {
-            std::task::Poll::Ready(())
-        } else {
-            std::task::Poll::Pending
-        }
-    })
-    .await;
+    signalled_or_soon(&PUMPED.with(Arc::clone)).await;
 }
 
 fn block_on<F: Future>(f: F) -> F::Output {
@@ -224,7 +242,7 @@ fn take_result(shell: &mut Shell) -> String {
 /// First line of every snapshot: what wrote the serialized `Shell`. Bump the
 /// brush part with the brush pin in Cargo.toml, and the version when the
 /// guest's own state changes.
-const STATE_FORMAT: &str = "eryx-shell-state/1 brush@6a688f19";
+const STATE_FORMAT: &str = "eryx-shell-state/1 brush@25210fd6";
 
 /// Start of a `restore-state` error for a snapshot in another state format,
 /// followed by the snapshot's format, a tab, and the one this runtime reads.
@@ -405,6 +423,7 @@ async fn feed(
         match file.read(&mut buf) {
             Ok(0) => return,
             Ok(n) => {
+                note_read();
                 // Leftovers mean the child stopped reading.
                 if !stdin.write_all(buf[..n].to_vec()).await.is_empty() {
                     return;
@@ -444,6 +463,16 @@ async fn drain(
                 // failure: drop the stream, so the child sees a broken pipe.
                 Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => return Ok(()),
                 Err(e) => return Err(e),
+            }
+            // Let the reader catch up before reading more from the child. A
+            // builtin reader doesn't signal, so check again every 1 ms.
+            let read = READ.with(Arc::clone);
+            while out.pending_bytes().is_some_and(|n| n > PIPE_HIGH_WATER) {
+                // An empty write fails once every reader is gone.
+                if out.write(&[]).is_err() {
+                    return Ok(());
+                }
+                signalled_or_soon(&read).await;
             }
         }
         if !matches!(result, wit_bindgen::StreamResult::Complete(_)) {
