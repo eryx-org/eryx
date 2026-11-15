@@ -409,17 +409,11 @@ fn cancel<'js>(ctx: &Ctx<'js>, hooks: &Object<'js>) -> u32 {
             .collect()
     })
     .unwrap_or_default();
-    for pending in pending {
-        let handle = pending.call.subtask;
-        // SAFETY: `take` removed it from the waitable set.
-        let status = unsafe { wit::subtask_cancel(handle) };
-        if status == SUBTASK_RETURNED {
-            // The host finished first: lift its result to free it, unused.
-            let _ = wit::invoke_finish(pending.call);
-        }
-        unsafe { wit::subtask_drop(handle) };
+    for PendingInvoke { call, reject, .. } in pending {
+        // `take` removed it from the waitable set.
+        cancel_subtask(call);
         let rejected = (|| {
-            let reject = pending.reject.restore(ctx)?;
+            let reject = reject.restore(ctx)?;
             reject.call::<_, ()>((Exception::from_message(ctx.clone(), CANCELLED)?,))
         })();
         if let Err(e) = rejected {
@@ -428,6 +422,20 @@ fn cancel<'js>(ctx: &Ctx<'js>, hooks: &Object<'js>) -> u32 {
     }
     while ctx.execute_pending_job() {}
     finish(hooks, Err(CANCELLED.to_string()))
+}
+
+/// Cancel an in-flight `invoke`, which must not be in a waitable set, and
+/// drop its subtask, as the CPython guest's `_cancel_subtask` does. The
+/// guest stops waiting; the host still runs the callback to the end.
+fn cancel_subtask(call: PendingInvokeCall) {
+    let handle = call.subtask;
+    // SAFETY: a live subtask handle of this task, out of any waitable set.
+    let status = unsafe { wit::subtask_cancel(handle) };
+    if status == SUBTASK_RETURNED {
+        // The host finished first: lift its result to free it, unused.
+        let _ = wit::invoke_finish(call);
+    }
+    unsafe { wit::subtask_drop(handle) };
 }
 
 /// Drain the job queue, then either finish the task or suspend it.
@@ -523,15 +531,16 @@ fn finish(hooks: &Object<'_>, outcome: Result<(), String>) -> u32 {
         }
     }
 
-    // Invokes that were started but never awaited (fire-and-forget) are
-    // abandoned with the task.
+    // Invokes still in flight (never awaited, or started while a cancelled
+    // execute unwound) are cancelled and released with the task, so their
+    // handles don't outlive it.
+    for (handle, pending) in pending {
+        unsafe { wit::waitable_join(handle, 0) };
+        cancel_subtask(pending.call);
+    }
     if let Some(set) = waitable_set {
-        for handle in pending.keys() {
-            unsafe { wit::waitable_join(*handle, 0) };
-        }
         unsafe { wit::waitable_set_drop(set) };
     }
-    drop(pending);
 
     export.call_task_return(&mut *cx);
     CALLBACK_EXIT
