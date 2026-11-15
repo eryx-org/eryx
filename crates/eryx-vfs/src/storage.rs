@@ -57,6 +57,10 @@ pub struct DirEntry {
 /// later from the start. A dropped operation must therefore leave no partial
 /// effect that the rerun would duplicate (for example an append applied
 /// twice), and must not keep holding any resource such as a lock.
+///
+/// Operations run on the sandbox's async fiber, which leaves host code about
+/// 512 KiB of stack. Implementations must not recurse deeply or put large
+/// buffers on the stack: overflowing the fiber aborts the whole process.
 #[async_trait]
 pub trait VfsStorage: Send + Sync {
     /// Downcasting hook for storage-specific operations (e.g. capturing an
