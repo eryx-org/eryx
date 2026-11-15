@@ -682,6 +682,7 @@ class Sandbox:
         cls,
         *,
         language: Optional[Language] = None,
+        runtime_path: Optional[PathLike] = None,
         resource_limits: Optional[ResourceLimits] = None,
         network: Optional[NetConfig] = None,
         callbacks: Optional[Union[CallbackRegistry, Sequence[CallbackDict]]] = None,
@@ -700,7 +701,14 @@ class Sandbox:
 
         Args:
             language: The guest language to run: "python" (the default),
-                "javascript" or "shell".
+                "javascript" or "shell". The JavaScript and shell runtimes aren't
+                in the pyeryx wheel; see `runtime_path`.
+            runtime_path: A precompiled runtime (.cwasm) to run instead of the
+                built-in one. For JavaScript and the shell it is otherwise looked
+                up in `ERYX_RUNTIME_CWASM_<LANGUAGE>`, then the
+                `pyeryx-runtime-<language>` package (`pip install
+                pyeryx[javascript]`), then the cache `eryx-precompile setup
+                --language <language>` writes.
             resource_limits: Optional resource limits for execution.
             network: Optional network configuration. If provided, enables networking.
             callbacks: Optional callbacks that sandboxed code can invoke.
@@ -1328,6 +1336,7 @@ class Session:
         cls,
         *,
         language: Optional[Language] = None,
+        runtime_path: Optional[PathLike] = None,
         vfs: Optional[VfsStorage] = None,
         vfs_mount_path: Optional[str] = None,
         resource_limits: Optional[ResourceLimits] = None,
@@ -1348,7 +1357,8 @@ class Session:
 
         Args:
             language: The guest language to run: "python" (the default),
-                "javascript" or "shell".
+                "javascript" or "shell", as for `Sandbox`.
+            runtime_path: A precompiled runtime (.cwasm), as for `Sandbox`.
             vfs: Optional VfsStorage for persistent file storage.
                 Files written to `/data/*` will persist across executions.
             vfs_mount_path: Custom mount path for VFS (default: "/data").

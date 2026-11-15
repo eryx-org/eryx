@@ -83,7 +83,16 @@ eryx now builds, precompiles and embeds a runtime per guest language: Python
 
 - `Sandbox(language="javascript")` and `Session(language="shell")`; the
   default is `"python"`. An unknown language raises `ValueError`.
-- The wheel embeds the JavaScript and shell runtimes too, so it is larger.
+- The pyeryx wheel still only includes the Python runtime, and is the same
+  size. The JavaScript and shell runtimes come from, in order: a
+  `runtime_path=` argument, `ERYX_RUNTIME_CWASM_JAVASCRIPT` /
+  `ERYX_RUNTIME_CWASM_SHELL`, the companion packages `pyeryx-runtime-javascript`
+  and `pyeryx-runtime-shell` (`pip install pyeryx[javascript]`, `pyeryx[shell]`
+  or `pyeryx[all]`), then the cache `eryx-precompile setup --language <lang>`
+  writes. Without one, the sandbox raises `InitializationError` saying how to
+  get it. A runtime from another eryx version or for another language fails
+  with `InitializationError` too.
+- `runtime_path=` also works for Python, to run a custom precompiled runtime.
 
 ## For eryx developers
 

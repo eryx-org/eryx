@@ -421,6 +421,32 @@ pub fn ensure_private_dir(dir: &Path) -> io::Result<PathBuf> {
     Ok(dir)
 }
 
+/// The precompiled runtime for `language` that `eryx-precompile setup
+/// --language <language>` cached for this platform and eryx version, in
+/// `$XDG_CACHE_HOME/eryx` or `~/.cache/eryx`, if it exists.
+///
+/// It is loaded as native code, so a file that isn't [private](is_private) to
+/// the current user is ignored.
+#[must_use]
+pub fn setup_runtime(language: crate::Language) -> Option<PathBuf> {
+    let dir = match std::env::var_os("XDG_CACHE_HOME") {
+        Some(xdg) => PathBuf::from(xdg).join("eryx"),
+        None => {
+            PathBuf::from(std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"))?)
+                .join(".cache")
+                .join("eryx")
+        }
+    };
+    let path = dir.join(format!(
+        "runtime-{language}-v{}-{}-{}.cwasm",
+        env!("CARGO_PKG_VERSION"),
+        std::env::consts::ARCH,
+        std::env::consts::OS
+    ));
+    let meta = fs::symlink_metadata(&path).ok()?;
+    (meta.is_file() && is_private(&meta)).then_some(path)
+}
+
 /// Whether a file or directory is owned by the current user and not group- or
 /// world-writable. Always true on platforms without Unix permissions.
 #[must_use]
