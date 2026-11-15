@@ -8,7 +8,7 @@ exclude = ["crates/eryx-guest-shell"]
 # - cargo-nextest: Fast test runner (`cargo nextest run`)
 
 [workspace.package]
-version = "0.15.0"
+version = "0.15.1"
 edition = "2024"
 rust-version = "1.100.0"
 license = "MIT OR Apache-2.0"
@@ -23,16 +23,16 @@ authors = ["Ben Sully <ben.sully88@gmail.com>"]
 # Self-explanatory crates are left unannotated.
 anyhow = "1.0"
 async-trait = "0.1"
-base64 = "0.22"
+base64 = "0.23"
 blake3 = "1.8"
 clap = { version = "^4.6.6", features = ["derive", "env"] } #unified
 criterion = { version = "0.8", features = ["async_tokio"] } # benchmarking
 crossterm = "0.29"                                          # terminal control
 dashmap = "6"                                               # concurrent maps
-eryx = { path = "crates/eryx", version = "^0.15.0" }
-eryx-macros = { path = "crates/eryx-macros", version = "^0.15.0" }
-eryx-runtime = { path = "crates/eryx-runtime", version = "^0.15.0" } #unified
-eryx-vfs = { path = "crates/eryx-vfs", version = "^0.14.0" } #unified
+eryx = { path = "crates/eryx", version = "^0.15.1" }
+eryx-macros = { path = "crates/eryx-macros", version = "^0.15.1" }
+eryx-runtime = { path = "crates/eryx-runtime", version = "^0.15.1" } #unified
+eryx-vfs = { path = "crates/eryx-vfs", version = "^0.14.1" } #unified
 flate2 = "1.0"
 futures = "0.3"
 hex = "0.4"

@@ -564,6 +564,21 @@ jobs:
         # Catches code that is only used under `unstable-vfs` (warnings --all-features hides).
         run: cargo clippy -p eryx --all-targets --features embedded -- -D warnings
 
+      - name: Run clippy (eryx, default features)
+        # Catches code that is only used under some feature, which is dead
+        # with the defaults.
+        run: cargo clippy -p eryx --all-targets -- -D warnings
+
+      - name: Check eryx tests with each feature alone
+        # A test that needs more features than it is gated on fails to build
+        # here, rather than only for whoever runs it with that one feature.
+        run: |
+          for features in macros embedded-stdlib embedded preinit native-extensions unstable-vfs unstable-internals; do
+            echo "::group::--features $features"
+            cargo check -p eryx --tests --features "$features"
+            echo "::endgroup::"
+          done
+
   test:
     name: Test
     runs-on: ubuntu-latest
@@ -1167,6 +1182,14 @@ jobs:
           uv pip install -e ../../sdk/python
           maturin develop --release
           uv export --extra dev --no-dev --no-hashes --no-emit-project --frozen | uv pip install -r -
+
+      # Windows file-sharing rules make concurrent use of the runtime cache
+      # fail where POSIX would work (#850), and these tests run nowhere else on
+      # Windows. The test build has its own features and dev-dependencies, so
+      # it doesn't reuse maturin's build above; rust-cache covers it instead.
+      - name: Run runtime cache concurrency tests
+        shell: bash
+        run: cargo test --release -p eryx --features embedded --lib -- concurrent
 
       - name: Run Python tests
         shell: bash
