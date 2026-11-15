@@ -34,7 +34,7 @@ const sh = new Sandbox({ language: "shell", callbacks: { add: ({ a, b }) => a + 
 await sh.execute('echo "sum $(add --a 2 --b 3)"'); // stdout "sum 5\n"
 ```
 
-Their runtimes are separate files (about 3 MB of WebAssembly each), loaded the first time a sandbox uses them, so an app that only runs Python never downloads them. Their sandboxes start with an empty filesystem. An uncaught JavaScript exception or a nonzero exit status rejects with a `PythonExceptionError`, as in the Python SDK. The JavaScript guest can't snapshot its state yet, and the shell has no external commands (`ls`, `grep`, ...), only builtins and callbacks.
+Their runtimes are separate files (about 3 MB of WebAssembly each), loaded the first time a sandbox uses them, so an app that only runs Python never downloads them. Their sandboxes start with an empty filesystem. An uncaught JavaScript exception or a nonzero exit status rejects with a `PythonExceptionError`, as in the Python SDK. A JavaScript snapshot keeps top-level variables (`var`, `let`, `const`) whose values hold no functions, with shared and circular objects intact; functions, classes and promises are named in `skippedGlobals`. The shell has no external commands (`ls`, `grep`, ...), only builtins and callbacks.
 
 ### Returning a structured result
 

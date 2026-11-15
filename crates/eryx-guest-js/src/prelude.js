@@ -1,6 +1,6 @@
 // Evaluated once when the QuickJS context is created. Receives the native
-// intrinsics object (`invoke`, `write`) and returns the hooks the Rust side
-// calls per execution. Everything user-visible is installed on globalThis.
+// intrinsics object (`invoke`, `write`, `evalScript`) and returns the hooks
+// the Rust side calls per execution. Everything user-visible is installed on globalThis.
 (native) => {
     const inspect = (v) => {
         if (typeof v === 'string') return v;
@@ -144,5 +144,86 @@
         }
     };
 
-    return { formatError, installCallbacks, captureResult, discardResult };
+    // Session state for snapshot-state/restore-state. Top-level variables
+    // are the global object's own properties (`var`, `function`, bare
+    // assignment) added after this prelude, minus installed callbacks, and
+    // the global `let`/`const`/`class` bindings, which aren't properties and
+    // can't be listed: any identifier in code run so far is a candidate,
+    // and one is a binding if indirect eval resolves it but it isn't a
+    // property of the global object.
+    const baseline = new Set(Object.getOwnPropertyNames(globalThis));
+    const candidates = new Set();
+    // Expressions that look like identifiers but aren't bindings.
+    const NOT_BINDINGS = new Set(['this', 'true', 'false', 'null']);
+    const noteCode = (code) => {
+        for (const [name] of code.matchAll(/[A-Za-z_$][\w$]*/g)) candidates.add(name);
+    };
+    // [name, kind, value] per variable, kind 'var', 'let' or 'const'. An
+    // accessor property's getter stands in for its value, so it is skipped.
+    const stateEntries = () => {
+        const entries = [];
+        for (const name of Object.getOwnPropertyNames(globalThis)) {
+            if (baseline.has(name) || installed.includes(name)) continue;
+            const desc = Object.getOwnPropertyDescriptor(globalThis, name);
+            entries.push([name, 'var', 'value' in desc ? desc.value : desc.get ?? desc.set]);
+        }
+        for (const name of candidates) {
+            if (NOT_BINDINGS.has(name) || name in globalThis) continue;
+            let value;
+            try {
+                value = (0, eval)(name);
+            } catch {
+                continue; // not declared, or still in its temporal dead zone
+            }
+            let kind = 'let';
+            try {
+                (0, eval)(`${name} = ${name}`);
+            } catch {
+                kind = 'const';
+            }
+            entries.push([name, kind, value]);
+        }
+        return entries;
+    };
+    // The reverse, into a fresh context. The entries come from untrusted
+    // bytes, so their shape is checked before anything is defined.
+    const RESTORING = '__eryx_restoring__';
+    const restoreEntries = (entries) => {
+        const valid = (e) =>
+            Array.isArray(e) &&
+            e.length === 3 &&
+            typeof e[0] === 'string' &&
+            IDENT.test(e[0]) &&
+            !NOT_BINDINGS.has(e[0]) &&
+            !baseline.has(e[0]) &&
+            e[0] !== '__proto__' &&
+            ['var', 'let', 'const'].includes(e[1]);
+        if (!Array.isArray(entries) || !entries.every(valid)) {
+            throw new TypeError('malformed session state');
+        }
+        for (const [name, kind, value] of entries) {
+            if (kind === 'var') {
+                globalThis[name] = value;
+                continue;
+            }
+            globalThis[RESTORING] = value;
+            try {
+                // A global script, not eval: eval's let/const don't outlive it.
+                native.evalScript(`${kind} ${name} = globalThis.${RESTORING};`);
+            } finally {
+                delete globalThis[RESTORING];
+            }
+            candidates.add(name);
+        }
+    };
+
+    return {
+        formatError,
+        installCallbacks,
+        captureResult,
+        discardResult,
+        noteCode,
+        stateEntries,
+        restoreEntries,
+    };
 };

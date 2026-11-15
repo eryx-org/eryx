@@ -459,3 +459,192 @@ async fn trivial_execute_fuel_cost() {
     eprintln!("JS trivial execute fuel: {:?}", out.stats.fuel_consumed);
     assert!(out.stats.fuel_consumed.is_some());
 }
+
+/// Run `code` and return its stdout as text.
+async fn stdout_of(session: &mut SessionExecutor, code: &str) -> String {
+    let out = session.execute(code).run().await.unwrap();
+    String::from_utf8(out.stdout).unwrap()
+}
+
+/// A snapshot keeps the session's top-level variables, `var` and `let`/
+/// `const` alike, with shared and cyclic objects intact, and names the
+/// ones it can't serialize.
+#[tokio::test]
+async fn snapshot_round_trips_session_state() {
+    let Some(mut session) = js_session().await else {
+        return;
+    };
+    session
+        .execute(
+            r#"
+var count = 41;
+let shared = { n: 1n << 70n, when: new Date(0), bytes: new Uint8Array([1, 2]) };
+const pair = [shared, shared];
+globalThis.cycle = { name: "loop" };
+cycle.self = cycle;
+let table = new Map([["k", new Set([1, 2])]]);
+function helper() {}
+class Thing {}
+var pending = new Promise(() => {});
+let nested = { fn: () => 1 };
+"#,
+        )
+        .run()
+        .await
+        .unwrap();
+
+    let snapshot = session.snapshot_state().await.unwrap();
+    let mut skipped = snapshot.skipped().to_vec();
+    skipped.sort();
+    assert_eq!(skipped, ["Thing", "helper", "nested", "pending"]);
+
+    let snapshot = eryx::StateSnapshot::from_bytes(&snapshot.to_bytes()).unwrap();
+    let Some(mut fresh) = js_session().await else {
+        return;
+    };
+    fresh.restore_state(&snapshot).await.unwrap();
+    let out = stdout_of(
+        &mut fresh,
+        r#"
+count += 1;
+console.log(count, pair[0] === pair[1], pair[0] === shared, cycle.self === cycle);
+console.log(shared.n === 1n << 70n, shared.when.getTime(), [...shared.bytes]);
+console.log(table.get("k").has(2), typeof helper, typeof nested);
+try { pair = 1 } catch (e) { console.log(e.name) }
+"#,
+    )
+    .await;
+    assert_eq!(
+        out,
+        "42 true true true\ntrue 0 [1,2]\ntrue undefined undefined\nTypeError\n"
+    );
+
+    // Restored bindings are snapshotted again, and still can't be redeclared.
+    let again = fresh.snapshot_state().await.unwrap();
+    let Some(mut third) = js_session().await else {
+        return;
+    };
+    third.restore_state(&again).await.unwrap();
+    assert_eq!(
+        stdout_of(&mut third, "console.log(count, table.size)").await,
+        "42 1\n"
+    );
+    assert!(third.execute("let shared = 1").run().await.is_err());
+}
+
+/// Clearing a session that has run code (the guest frees its whole QuickJS
+/// runtime) leaves it working.
+#[tokio::test]
+async fn clear_state_resets_the_session() {
+    let Some(mut session) = js_session().await else {
+        return;
+    };
+    session.execute("var x = 1; let y = 2").run().await.unwrap();
+    session.clear_state().await.unwrap();
+    assert_eq!(
+        stdout_of(&mut session, "console.log(typeof x, typeof y)").await,
+        "undefined undefined\n"
+    );
+}
+
+/// A JavaScript snapshot names its state format, and a runtime refuses one
+/// in another format with a distinct error rather than a parse failure.
+#[tokio::test]
+async fn snapshots_in_another_state_format_are_refused() {
+    let Some(mut session) = js_session().await else {
+        return;
+    };
+    session.execute("var x = 1").run().await.unwrap();
+    let bytes = session.snapshot_state().await.unwrap().to_bytes();
+
+    const FORMAT: &[u8] = b"eryx-js-state/1 quickjs-ng@";
+    let at = bytes
+        .windows(FORMAT.len())
+        .position(|w| w == FORMAT)
+        .expect("the snapshot names its state format")
+        + FORMAT.len();
+    let mut other = bytes[..at].to_vec();
+    other.extend_from_slice(b"0.0.0");
+    let rest = &bytes[at..];
+    let newline = rest.iter().position(|&b| b == b'\n').unwrap();
+    other.extend_from_slice(&rest[newline..]);
+    let other = eryx::StateSnapshot::from_bytes(&other).unwrap();
+
+    let Some(mut fresh) = js_session().await else {
+        return;
+    };
+    let err = fresh.restore_state(&other).await.unwrap_err();
+    let ErrorKind::IncompatibleStateFormat {
+        snapshot, runtime, ..
+    } = err.kind()
+    else {
+        panic!("expected IncompatibleStateFormat, got {err:?}");
+    };
+    assert_eq!(snapshot, "eryx-js-state/1 quickjs-ng@0.0.0");
+    assert!(
+        runtime.starts_with("eryx-js-state/1 quickjs-ng@"),
+        "{runtime}"
+    );
+}
+
+/// Restoring a damaged snapshot (truncated, or with any byte changed) fails
+/// with an error or restores plain values; it never traps the guest, which
+/// keeps running.
+#[tokio::test]
+async fn damaged_snapshots_fail_cleanly() {
+    let Some(mut session) = js_session().await else {
+        return;
+    };
+    session
+        .execute(r#"var a = [1, "two", { three: 3n }]; let m = new Map([[/x+/g, new Date(5)]]);"#)
+        .run()
+        .await
+        .unwrap();
+    let snapshot = session.snapshot_state().await.unwrap();
+    let bytes = snapshot.to_bytes();
+    // The guest's data is the end of the envelope; leave the format line be.
+    let data_start = bytes.len() - snapshot.data().len();
+    let body_start = data_start + snapshot.data().iter().position(|&b| b == b'\n').unwrap() + 1;
+
+    let mut damaged = Vec::new();
+    for len in body_start..bytes.len() {
+        damaged.push(bytes[..len].to_vec());
+    }
+    for i in body_start..bytes.len() {
+        for flip in [0x01, 0x80, 0xff] {
+            let mut copy = bytes.clone();
+            copy[i] ^= flip;
+            damaged.push(copy);
+        }
+    }
+    let Some(mut fresh) = js_session().await else {
+        return;
+    };
+    let mut failures = 0;
+    for copy in &damaged {
+        let copy = eryx::StateSnapshot::from_bytes(copy).unwrap();
+        match fresh.restore_state(&copy).await {
+            Ok(()) => {}
+            Err(e) if matches!(e.kind(), ErrorKind::Snapshot(_)) => failures += 1,
+            Err(e) => panic!("restoring {:?} failed in the guest: {e:?}", copy.data()),
+        }
+        assert_eq!(stdout_of(&mut fresh, "console.log(6 * 7)").await, "42\n");
+    }
+    assert!(failures > 0);
+}
+
+/// A session too big for a snapshot fails with an error and keeps running.
+#[tokio::test]
+async fn oversized_sessions_fail_cleanly() {
+    let Some(mut session) = js_session().await else {
+        return;
+    };
+    session
+        .execute("var ok = 1; var big = 'x'.repeat(11 * 1024 * 1024)")
+        .run()
+        .await
+        .unwrap();
+    let err = session.snapshot_state().await.unwrap_err();
+    assert!(err.to_string().contains("too large"), "{err}");
+    assert_eq!(stdout_of(&mut session, "console.log(ok)").await, "1\n");
+}

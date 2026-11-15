@@ -20,6 +20,16 @@ result = { ok: true };
     expect((await sandbox.execute("console.log(x + 1)")).stdout).toBe("42\n");
   });
 
+  it("snapshots and restores state", async () => {
+    using a = new Sandbox({ language: "javascript" });
+    await a.execute("var count = 41; const pair = [1, 2]; function helper() {}");
+    const snapshot = await a.snapshotState();
+    expect(snapshot.skippedGlobals).toEqual(["helper"]);
+    using b = new Sandbox({ language: "javascript" });
+    await b.restoreState(snapshot);
+    expect((await b.execute("console.log(count + 1, pair.length)")).stdout).toBe("42 2\n");
+  });
+
   it.each([undefined, 30000])("rejects an uncaught exception (timeoutMs %s)", async (timeoutMs) => {
     using sandbox = new Sandbox({ language: "javascript", timeoutMs });
     const error = await sandbox
