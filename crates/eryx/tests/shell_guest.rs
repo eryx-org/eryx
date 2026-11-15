@@ -305,12 +305,9 @@ add 1 --a 2; echo "twice=$?"
     }
 }
 
-/// Positionals bind in the order the host sends the schema's properties,
-/// which today is alphabetical: `serde_json` sorts object keys without its
-/// `preserve_order` feature. This pins declaration order, for when #860 is
-/// decided.
+/// Positionals bind in the order the schema declares its properties (#860),
+/// not alphabetically.
 #[tokio::test]
-#[ignore = "tracks #860: the host doesn't keep schema property order"]
 async fn callback_positionals_follow_declaration_order() {
     let Some(builder) = shell_sandbox() else {
         return;
