@@ -240,6 +240,24 @@ except OSError as e:
         with pytest.raises(ValueError, match="invalid CIDR"):
             config.allowed_networks = ["not-a-cidr"]
 
+    def test_http_rules(self):
+        """Test HttpRule fields round-trip and invalid paths are rejected."""
+        rule = eryx.HttpRule("api.github.com", methods=["GET"], paths=["/repos/org/repo"])
+        assert (rule.host, rule.methods, rule.paths) == (
+            "api.github.com",
+            ["GET"],
+            ["/repos/org/repo"],
+        )
+        assert eryx.NetConfig().http_rules == []
+        config = eryx.NetConfig(http_rules=[rule]).allow_http(eryx.HttpRule("example.com"))
+        assert [r.host for r in config.http_rules] == ["api.github.com", "example.com"]
+        config.http_rules = []
+        assert config.http_rules == []
+
+        for path in ["repos", "/a/../b", "/a//b", "/a?x"]:
+            with pytest.raises(ValueError, match="HTTP rule path"):
+                eryx.HttpRule("h", paths=[path])
+
     def test_with_root_cert(self):
         """Test with_root_cert method."""
         config = eryx.NetConfig()
@@ -964,6 +982,29 @@ else:
     print("All hosts failed")
 """)
         assert b"SUCCESS" in result.stdout, f"Test failed: {result.stdout}"
+
+    def test_http_rules_refuse_requests(self, http_server):
+        """A request the HTTP rules don't allow is refused in the sandbox."""
+        host, port = http_server
+        config = eryx.NetConfig.permissive().allow_http(
+            eryx.HttpRule(host, methods=["GET"], paths=["/allowed"])
+        )
+        sandbox = eryx.Sandbox(network=config)
+        result = sandbox.execute(f"""
+import socket
+
+for method, path in [("GET", "/allowed/x"), ("GET", "/other"), ("POST", "/allowed")]:
+    sock = socket.create_connection(("{host}", {port}))
+    try:
+        sock.sendall(f"{{method}} {{path}} HTTP/1.1\\r\\nHost: {host}\\r\\nConnection: close\\r\\n\\r\\n".encode())
+        print(method, path, "sent", sock.recv(12))
+    except OSError as e:
+        print(method, path, "refused")
+    sock.close()
+""")
+        assert b"GET /allowed/x sent b'HTTP/1." in result.stdout, result.stdout
+        assert b"GET /other refused" in result.stdout, result.stdout
+        assert b"POST /allowed refused" in result.stdout, result.stdout
 
     def test_network_blocked_host(self):
         """Test that blocked hosts are rejected."""
