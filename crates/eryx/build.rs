@@ -2,7 +2,10 @@
 //!
 //! When the `embedded` feature is enabled, this embeds the pre-compiled
 //! runtime of every enabled guest language (the `python`, `javascript` and
-//! `shell` features) into the binary for fast sandbox creation.
+//! `shell` features) into the binary for fast sandbox creation, and with the
+//! `coreutils` feature, the shell's default commands (`coreutils.cwasm`,
+//! located the same way through `ERYX_COREUTILS_CWASM`, the cache as
+//! `coreutils-v<version>-<arch>-<os>.cwasm`, then `../eryx-runtime/`).
 //!
 //! Each `runtime-<language>.cwasm` file is located by checking (in order):
 //! 1. An env var with an explicit path, embedded as is: `ERYX_RUNTIME_CWASM`
@@ -55,10 +58,14 @@ mod embedded_runtime {
 
     use crate::cached_runtime;
 
-    /// A guest runtime this build may embed.
+    /// A guest runtime (or embedded command) this build may embed.
     struct Runtime {
-        /// The language's name, as in `runtime-<language>.cwasm`.
+        /// What it is, for messages: the language, or `coreutils`.
         language: &'static str,
+        /// Its file name without `.cwasm`, e.g. `runtime-python`.
+        stem: &'static str,
+        /// `eryx-precompile setup` can download and cache it.
+        setup: bool,
         /// The cargo feature that embeds it.
         feature: &'static str,
         /// The env var naming an explicit `.cwasm` to embed.
@@ -67,30 +74,46 @@ mod embedded_runtime {
         hash_var: &'static str,
     }
 
-    const RUNTIMES: [Runtime; 3] = [
+    const RUNTIMES: [Runtime; 4] = [
         Runtime {
             language: "python",
+            stem: "runtime-python",
+            setup: true,
             feature: "PYTHON",
             path_var: "ERYX_RUNTIME_CWASM",
             hash_var: "ERYX_EMBEDDED_RUNTIME_HASH",
         },
         Runtime {
             language: "javascript",
+            stem: "runtime-javascript",
+            setup: true,
             feature: "JAVASCRIPT",
             path_var: "ERYX_RUNTIME_CWASM_JAVASCRIPT",
             hash_var: "ERYX_EMBEDDED_RUNTIME_HASH_JAVASCRIPT",
         },
         Runtime {
             language: "shell",
+            stem: "runtime-shell",
+            setup: true,
             feature: "SHELL",
             path_var: "ERYX_RUNTIME_CWASM_SHELL",
             hash_var: "ERYX_EMBEDDED_RUNTIME_HASH_SHELL",
+        },
+        // The shell's default external commands (uutils coreutils), built by
+        // `mise run precompile-coreutils`. `setup` doesn't fetch it yet (#847).
+        Runtime {
+            language: "coreutils",
+            stem: "coreutils",
+            setup: false,
+            feature: "COREUTILS",
+            path_var: "ERYX_COREUTILS_CWASM",
+            hash_var: "ERYX_EMBEDDED_COREUTILS_HASH",
         },
     ];
 
     impl Runtime {
         fn file_name(&self) -> String {
-            format!("runtime-{}.cwasm", self.language)
+            format!("{}.cwasm", self.stem)
         }
 
         /// Write the runtime to embed and export its [`crate::short_sha256`].
@@ -124,10 +147,7 @@ mod embedded_runtime {
 
             let arch = std::env::var("CARGO_CFG_TARGET_ARCH").ok()?;
             let os = std::env::var("CARGO_CFG_TARGET_OS").ok()?;
-            let path = cache_dir.join(format!(
-                "runtime-{}-v{version}-{arch}-{os}.cwasm",
-                self.language
-            ));
+            let path = cache_dir.join(format!("{}-v{version}-{arch}-{os}.cwasm", self.stem));
             if std::fs::symlink_metadata(&path).is_err() {
                 return None;
             }
@@ -212,6 +232,23 @@ mod embedded_runtime {
                 None if std::env::var("ERYX_PRECOMPILE_BOOTSTRAP").is_ok() => {
                     self.write(out_dir, b"");
                 }
+                None if !self.setup => panic!(
+                    "\n\
+                    Pre-compiled {language} ({file}) not found; the `{feature}` feature embeds it.\n\
+                    \n\
+                    Set an explicit path:\n\
+                    \n\
+                    $ export {var}=/path/to/{file}\n\
+                    \n\
+                    or build it from the workspace (for eryx developers):\n\
+                    \n\
+                    $ mise run precompile-{language}\n\
+                    ",
+                    language = self.language,
+                    feature = self.feature.to_lowercase(),
+                    file = self.file_name(),
+                    var = self.path_var,
+                ),
                 None => panic!(
                     "\n\
                     Pre-compiled {language} runtime ({file}) not found.\n\

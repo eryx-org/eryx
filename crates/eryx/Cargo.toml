@@ -157,7 +157,11 @@ default = ["python"]
 # includes Python.
 python = []
 javascript = []
-shell = []
+shell = ["coreutils"]
+# The shell's default external commands: uutils coreutils (MIT), embedded
+# precompiled and registered by `Sandbox::embedded().shell()` under each tool's
+# name. Adds ~14 MB to the binary. Needs `embedded` to have any effect.
+coreutils = []
 # Proc macro for simplified callback definitions.
 # Provides #[callback] attribute macro.
 macros = ["dep:eryx-macros"]

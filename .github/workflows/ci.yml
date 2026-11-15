@@ -431,10 +431,14 @@ jobs:
             crates/eryx-runtime/runtime-shell.cwasm
             crates/eryx-runtime/runtime-shell-windows.cwasm
             crates/eryx-runtime/runtime-shell-macos.cwasm
+            crates/eryx-runtime/coreutils.cwasm
+            crates/eryx-runtime/coreutils-windows.cwasm
+            crates/eryx-runtime/coreutils-macos.cwasm
           # As with the Python key, the cwasm's engine and CPU-feature settings
           # aren't covered: bump the prefix when they change. v1 -> v2: v1
-          # cwasms were built without the CPU presets (host features).
-          key: wasm-runtime-shell-v2-${{ hashFiles('crates/eryx-guest-shell/**', 'crates/eryx-runtime/wit/**', 'Cargo.toml', 'mise.toml') }}
+          # cwasms were built without the CPU presets (host features). v2 -> v3:
+          # the shell's embedded coreutils (#809).
+          key: wasm-runtime-shell-v3-${{ hashFiles('crates/eryx-guest-shell/**', 'crates/eryx-runtime/wit/**', 'clis/coreutils.toml', 'clis/patches/patch-uucore-wasip2.sh', 'crates/eryx-build/**', 'Cargo.toml', 'mise.toml') }}
 
       - uses: ./.github/actions/setup-rust
         if: steps.wasm-cache.outputs.cache-hit != 'true'
@@ -466,6 +470,16 @@ jobs:
           # aarch64 has no psABI presets, so "baseline" is the portable setting.
           compile baseline --target aarch64-apple-darwin \
             --output crates/eryx-runtime/runtime-shell-macos.cwasm
+
+          # The shell's embedded commands (the `coreutils` feature): built from
+          # clis/coreutils.toml, precompiled like the runtime but as a command.
+          mise run build-coreutils
+          export ERYX_WASM_PATH=crates/eryx-runtime/coreutils.wasm ERYX_LANGUAGE=command
+          compile x86-64-v2 --output crates/eryx-runtime/coreutils.cwasm
+          compile x86-64-v2 --target x86_64-pc-windows-msvc \
+            --output crates/eryx-runtime/coreutils-windows.cwasm
+          compile baseline --target aarch64-apple-darwin \
+            --output crates/eryx-runtime/coreutils-macos.cwasm
         env:
           ERYX_PRECOMPILE_BOOTSTRAP: "1"
 
@@ -473,7 +487,9 @@ jobs:
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: wasm-runtime-guest-shell
-          path: crates/eryx-runtime/runtime-shell*
+          path: |
+            crates/eryx-runtime/runtime-shell*
+            crates/eryx-runtime/coreutils*.cwasm
           retention-days: 1
 
   # The shell guest is its own workspace (see AGENTS.md), so the workspace
@@ -496,12 +512,18 @@ jobs:
         working-directory: crates/eryx-guest-shell
         run: cargo fmt --check
 
-      - name: Clippy (with and without eryx:process)
+      # The guest is its own workspace, so it keeps copies of the host's WIT.
+      - name: WIT copies match the host's
+        run: |
+          cmp crates/eryx-runtime/wit/runtime.wit crates/eryx-guest-shell/wit/deps/sandbox.wit
+          cmp crates/eryx-runtime/wit/deps/net.wit crates/eryx-guest-shell/wit/deps/net.wit
+          cmp crates/eryx-runtime/wit/deps/process.wit crates/eryx-guest-shell/wit/deps/process.wit
+
+      - name: Clippy
         working-directory: crates/eryx-guest-shell
         run: |
           rustup target add wasm32-wasip2
           cargo clippy --locked --target wasm32-wasip2 -- -D warnings
-          cargo clippy --locked --target wasm32-wasip2 --features process -- -D warnings
 
       # The argument parsing and builtins are plain Rust, so their unit tests
       # run natively.
@@ -673,9 +695,11 @@ jobs:
           save-cache: ${{ github.ref == 'refs/heads/main' }}
           pr-comment: false
 
-      # crates/eryx-vfs/tests/p3_filesystem.rs builds a wasm32-wasip3 probe.
-      - name: Install wasm32-wasip3 target
-        run: rustup target add wasm32-wasip3
+      # Tests build small guests of their own: a wasm32-wasip3 probe
+      # (crates/eryx-vfs/tests/p3_filesystem.rs) and a wasm32-wasip2 command
+      # (crates/eryx/tests/commands.rs).
+      - name: Install wasm32-wasip2 and wasm32-wasip3 targets
+        run: rustup target add wasm32-wasip2 wasm32-wasip3
 
       - name: Run tests
         # Use --all-features to test everything. This works because:
@@ -881,6 +905,9 @@ jobs:
             : > "$RUNNER_TEMP/runtime-$lang.cwasm"
             echo "ERYX_RUNTIME_CWASM_$lang=$RUNNER_TEMP/runtime-$lang.cwasm" >> "$GITHUB_ENV"
           done
+          # The shell's embedded coreutils (the `coreutils` feature, #809).
+          : > "$RUNNER_TEMP/coreutils.cwasm"
+          echo "ERYX_COREUTILS_CWASM=$RUNNER_TEMP/coreutils.cwasm" >> "$GITHUB_ENV"
 
       - name: Check public API against the base branch
         run: cargo semver-checks check-release -p eryx --baseline-rev "$BASE_SHA"
@@ -1138,10 +1165,10 @@ jobs:
         run: |
           # Cross-compiled by the build-runtime-* jobs; embedded by the eryx build.
           mv crates/eryx-runtime/runtime-windows.cwasm crates/eryx-runtime/runtime-python.cwasm
-          for lang in javascript shell; do
-            mv "crates/eryx-runtime/runtime-$lang-windows.cwasm" "crates/eryx-runtime/runtime-$lang.cwasm"
+          for name in runtime-javascript runtime-shell coreutils; do
+            mv "crates/eryx-runtime/$name-windows.cwasm" "crates/eryx-runtime/$name.cwasm"
           done
-          touch crates/eryx-runtime/runtime-*.cwasm
+          touch crates/eryx-runtime/*.cwasm
 
       - name: Install Rust
         shell: bash
@@ -1240,10 +1267,10 @@ jobs:
         run: |
           # Cross-compiled by the build-runtime-* jobs; embedded by the eryx build.
           mv crates/eryx-runtime/runtime-macos.cwasm crates/eryx-runtime/runtime-python.cwasm
-          for lang in javascript shell; do
-            mv "crates/eryx-runtime/runtime-$lang-macos.cwasm" "crates/eryx-runtime/runtime-$lang.cwasm"
+          for name in runtime-javascript runtime-shell coreutils; do
+            mv "crates/eryx-runtime/$name-macos.cwasm" "crates/eryx-runtime/$name.cwasm"
           done
-          touch crates/eryx-runtime/runtime-*.cwasm
+          touch crates/eryx-runtime/*.cwasm
 
       - name: Install Rust
         run: |

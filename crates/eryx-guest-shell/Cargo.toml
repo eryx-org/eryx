@@ -11,11 +11,6 @@ publish = false
 # straight to a component with `mise run build-runtime-shell`.
 [workspace]
 
-[features]
-# Import `eryx:process` to run external commands. The host doesn't provide it
-# yet (#809), so a component built with this feature doesn't instantiate.
-process = []
-
 [lib]
 crate-type = ["cdylib"]
 

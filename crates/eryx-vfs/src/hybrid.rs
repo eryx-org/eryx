@@ -435,6 +435,7 @@ impl HybridDescriptor {
 }
 
 /// Configuration for a preopen directory.
+#[derive(Clone)]
 pub enum HybridPreopen {
     /// A VFS-managed preopen (virtual storage).
     Vfs {
@@ -616,6 +617,20 @@ impl<S: VfsStorage + Clone> HybridVfsCtx<S> {
             open_host_files: Vec::new(),
             max_open_host_files: DEFAULT_MAX_OPEN_HOST_FILES,
             process_budget: &PROCESS_HOST_FILES,
+        }
+    }
+
+    /// A context for a child process: the same storages and preopens, so the
+    /// child sees the parent's files and nothing else, but its own count of
+    /// open host files (under the same limit and process-wide budget).
+    #[must_use]
+    pub fn fork(&self) -> Self {
+        Self {
+            storages: self.storages.clone(),
+            preopens: self.preopens.clone(),
+            open_host_files: Vec::new(),
+            max_open_host_files: self.max_open_host_files,
+            process_budget: self.process_budget,
         }
     }
 
@@ -853,6 +868,23 @@ impl<'a, S: VfsStorage + Clone> HybridVfsState<'a, S> {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn a_fork_shares_files_and_mounts_but_not_open_host_files() {
+        let storage = crate::ArcStorage::new(std::sync::Arc::new(crate::InMemoryStorage::new()));
+        let mut parent = HybridVfsCtx::new(storage).with_max_open_host_files(3);
+        parent.add_vfs_preopen("/data", DirPerms::all(), FilePerms::all());
+        let file = std::sync::Arc::new(tempfile::tempfile().unwrap());
+        parent.track_open_host_file(&file).unwrap();
+
+        let child = parent.fork();
+        assert_eq!(child.preopens.len(), 1);
+        assert_eq!(child.max_open_host_files, 3);
+        assert!(child.open_host_files.is_empty());
+        // Same storage: the child's writes are the parent's files.
+        child.storages[0].write("/data/f", b"x").await.unwrap();
+        assert_eq!(parent.storages[0].read("/data/f").await.unwrap(), b"x");
+    }
 
     #[test]
     fn single_file_mount_exposes_only_the_file() {

@@ -1,0 +1,9 @@
+# A tiny WASI 0.2 command for tests/commands.rs, built by the test itself.
+[package]
+name = "eryx-test-cmd"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+# Not part of the eryx workspace: it only builds for wasm32-wasip2.
+[workspace]
